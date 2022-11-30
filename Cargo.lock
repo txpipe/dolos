@@ -339,7 +339,6 @@ dependencies = [
 [[package]]
 name = "gasket"
 version = "0.1.0"
-source = "git+https://github.com/construkts/gasket-rs.git#c5ab98eb4060b0effa0911215b65c2dd19d3e002"
 dependencies = [
  "crossbeam",
  "log",

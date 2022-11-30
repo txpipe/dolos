@@ -1,8 +1,8 @@
 use gasket::error::AsWorkError;
 use pallas::ledger::traverse::MultiEraHeader;
+use pallas::network::miniprotocols::chainsync;
 use pallas::network::miniprotocols::chainsync::{HeaderContent, N2NClient, NextResponse};
-use pallas::network::miniprotocols::{chainsync, handshake};
-use pallas::network::multiplexer::{self, StdChannel};
+use pallas::network::multiplexer;
 
 use crate::prelude::*;
 
@@ -15,66 +15,61 @@ fn to_traverse<'b>(header: &'b chainsync::HeaderContent) -> Result<MultiEraHeade
     out.map_err(Error::parse)
 }
 
-type OuroborosClient = N2NClient<StdChannel>;
+type MuxerPort = gasket::messaging::OutputPort<(u16, multiplexer::Payload)>;
+type DemuxerPort = gasket::messaging::InputPort<multiplexer::Payload>;
 
-type OutputPort = gasket::messaging::OutputPort<ChainSyncEvent>;
+type DownstreamPort = gasket::messaging::OutputPort<ChainSyncEvent>;
+
+pub struct GasketChannel(u16, MuxerPort, DemuxerPort);
+
+impl multiplexer::agents::Channel for GasketChannel {
+    fn enqueue_chunk(
+        &mut self,
+        payload: multiplexer::Payload,
+    ) -> Result<(), multiplexer::agents::ChannelError> {
+        match self
+            .1
+            .send(gasket::messaging::Message::from((self.0, payload)))
+        {
+            Ok(_) => Ok(()),
+            Err(err) => Err(multiplexer::agents::ChannelError::NotConnected(None)),
+        }
+    }
+
+    fn dequeue_chunk(&mut self) -> Result<multiplexer::Payload, multiplexer::agents::ChannelError> {
+        match self.2.recv() {
+            Ok(msg) => Ok(msg.payload),
+            Err(_) => Err(multiplexer::agents::ChannelError::NotConnected(None)),
+        }
+    }
+}
+
+type OuroborosClient = N2NClient<GasketChannel>;
 
 pub struct Worker {
-    peer_address: String,
-    network_magic: u64,
     chain_cursor: Cursor,
-    ouroboros_client: Option<OuroborosClient>,
-    output: OutputPort,
+    client: OuroborosClient,
+    downstream: DownstreamPort,
     block_count: gasket::metrics::Counter,
     chain_tip: gasket::metrics::Gauge,
 }
 
 impl Worker {
     pub fn new(
-        peer_address: String,
-        network_magic: u64,
         chain_cursor: Cursor,
-        output: OutputPort,
+        muxer: MuxerPort,
+        demuxer: DemuxerPort,
+        downstream: DownstreamPort,
     ) -> Self {
+        let channel = GasketChannel(5, muxer, demuxer);
+        let client = OuroborosClient::new(channel);
+
         Self {
-            peer_address,
-            network_magic,
             chain_cursor,
-            output,
-            ouroboros_client: None,
+            client,
+            downstream,
             block_count: Default::default(),
             chain_tip: Default::default(),
-        }
-    }
-
-    pub fn connect(&self) -> Result<OuroborosClient, Error> {
-        log::debug!("connecting muxer");
-
-        let bearer = multiplexer::bearers::Bearer::connect_unix(&self.peer_address)
-            .map_err(Error::client)?;
-        let mut plexer = multiplexer::StdPlexer::new(bearer);
-
-        let channel0 = plexer.use_channel(0);
-        let channel5 = plexer.use_channel(5);
-
-        plexer.muxer.spawn();
-        plexer.demuxer.spawn();
-
-        log::debug!("doing handshake");
-
-        let versions = handshake::n2n::VersionTable::v7_and_above(self.network_magic);
-        let mut client = handshake::Client::new(channel0);
-
-        let output = client.handshake(versions).map_err(Error::client)?;
-
-        log::info!("handshake output: {:?}", output);
-
-        match output {
-            handshake::Confirmation::Accepted(version, _) => {
-                log::info!("connected to upstream peer using version {}", version);
-                Ok(OuroborosClient::new(channel5))
-            }
-            _ => Err(Error::client("couldn't agree on handshake version")),
         }
     }
 
@@ -85,13 +80,13 @@ impl Worker {
         match next {
             chainsync::NextResponse::RollForward(h, t) => {
                 let h = to_traverse(&h).or_panic()?;
-                self.output
+                self.downstream
                     .send(ChainSyncEvent::RollForward(h.slot(), h.hash()).into())?;
                 self.chain_tip.set(t.1 as i64);
                 Ok(())
             }
             chainsync::NextResponse::RollBackward(p, t) => {
-                self.output.send(ChainSyncEvent::Rollback(p).into())?;
+                self.downstream.send(ChainSyncEvent::Rollback(p).into())?;
                 self.chain_tip.set(t.1 as i64);
                 Ok(())
             }
@@ -104,27 +99,13 @@ impl Worker {
 
     fn request_next(&mut self) -> Result<(), gasket::error::Error> {
         log::info!("requesting next block");
-
-        let next = self
-            .ouroboros_client
-            .as_mut()
-            .unwrap()
-            .request_next()
-            .or_restart()?;
-
+        let next = self.client.request_next().or_restart()?;
         self.process_next(next)
     }
 
     fn await_next(&mut self) -> Result<(), gasket::error::Error> {
         log::info!("awaiting next block (blocking)");
-
-        let next = self
-            .ouroboros_client
-            .as_mut()
-            .unwrap()
-            .recv_while_must_reply()
-            .or_restart()?;
-
+        let next = self.client.recv_while_must_reply().or_restart()?;
         self.process_next(next)
     }
 }
@@ -138,25 +119,23 @@ impl gasket::runtime::Worker for Worker {
     }
 
     fn bootstrap(&mut self) -> Result<(), gasket::error::Error> {
-        let mut client = self.connect().or_retry()?;
-
         let point = self.chain_cursor.last_point().or_panic()?;
 
         log::info!("intersecting chain at point: {:?}", point);
 
-        let (point, _) = client
+        let (point, _) = self
+            .client
             .find_intersect(vec![point])
             .map_err(Error::client)
             .or_restart()?;
 
         log::info!("chain-sync intersection is {:?}", point);
 
-        self.ouroboros_client = Some(client);
         Ok(())
     }
 
     fn work(&mut self) -> gasket::runtime::WorkResult {
-        match self.ouroboros_client.as_ref().unwrap().has_agency() {
+        match self.client.has_agency() {
             true => self.request_next()?,
             false => self.await_next()?,
         };
