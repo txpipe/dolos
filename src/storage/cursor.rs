@@ -2,10 +2,14 @@ use pallas::network::miniprotocols::Point;
 
 use crate::prelude::*;
 
-pub struct Cursor {}
+pub enum Cursor {
+    StaticCursor(Vec<Point>),
+}
 
 impl Cursor {
-    pub fn last_point(&mut self) -> Result<Point, Error> {
-        todo!();
+    pub fn intersections(&self) -> Result<Vec<Point>, Error> {
+        match self {
+            Cursor::StaticCursor(x) => Ok(x.clone()),
+        }
     }
 }
