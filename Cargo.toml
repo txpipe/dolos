@@ -14,7 +14,6 @@ authors = ["Santiago Carmuega <santiago@carmuega.me>"]
 [dependencies]
 # pallas = "0.14.0"
 pallas = { path = "../pallas/pallas" }
-# pallas = { git = "https://github.com/txpipe/pallas.git" }
 hex = "0.4.3"
 net2 = "0.2.37"
 bech32 = "0.8.1"
@@ -35,3 +34,5 @@ thiserror = "1.0.30"
 lazy_static = "1.4.0"
 rayon = "1.5.3"
 rocksdb = "0.19.0"
+tracing = "0.1.37"
+tracing-subscriber = "0.3.16"

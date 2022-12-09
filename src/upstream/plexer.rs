@@ -5,11 +5,11 @@ use pallas::network::multiplexer::bearers::Bearer;
 use pallas::network::multiplexer::demux::{Demuxer, Egress};
 use pallas::network::multiplexer::mux::{Ingress, Muxer};
 use pallas::network::multiplexer::sync::SyncPlexer;
+use tracing::{debug, error, info, warn};
 
-type InputPort = gasket::messaging::InputPort<(u16, multiplexer::Payload)>;
-type OutputPort = gasket::messaging::OutputPort<multiplexer::Payload>;
+use super::prelude::*;
 
-struct GasketEgress(OutputPort);
+struct GasketEgress(DemuxOutputPort);
 
 impl Egress for GasketEgress {
     fn send(
@@ -22,7 +22,7 @@ impl Egress for GasketEgress {
     }
 }
 
-struct GasketIngress(InputPort);
+struct GasketIngress(MuxInputPort);
 
 impl Ingress for GasketIngress {
     fn recv_timeout(
@@ -39,44 +39,46 @@ impl Ingress for GasketIngress {
     }
 }
 
-struct Session {
-    demuxer: Demuxer<GasketEgress>,
-    muxer: Muxer<GasketIngress>,
-}
-
 type IsBusy = bool;
 
-impl Session {
-    fn demux_tick(&mut self) -> Result<IsBusy, gasket::error::Error> {
-        match self.demuxer.tick() {
-            Ok(x) => match x {
-                multiplexer::demux::TickOutcome::Busy => Ok(true),
-                multiplexer::demux::TickOutcome::Idle => Ok(false),
-            },
-            Err(err) => match err {
-                multiplexer::demux::DemuxError::BearerError(err) => {
-                    Err(gasket::error::Error::ShouldRestart(err.to_string()))
-                }
-                multiplexer::demux::DemuxError::EgressDisconnected(x, _) => Err(
-                    gasket::error::Error::WorkPanic(format!("egress disconnected {}", x)),
-                ),
-                multiplexer::demux::DemuxError::EgressUnknown(x, _) => Err(
-                    gasket::error::Error::WorkPanic(format!("unknown egress {}", x)),
-                ),
-            },
-        }
-    }
-
-    fn mux_tick(&mut self) -> Result<IsBusy, gasket::error::Error> {
-        match self.muxer.tick() {
-            multiplexer::mux::TickOutcome::Busy => Ok(true),
-            multiplexer::mux::TickOutcome::Idle => Ok(false),
-            multiplexer::mux::TickOutcome::BearerError(err) => {
-                Err(gasket::error::Error::ShouldRestart(err.to_string()))
+fn handle_demux_outcome(
+    outcome: Result<multiplexer::demux::TickOutcome, multiplexer::demux::DemuxError>,
+) -> Result<IsBusy, gasket::error::Error> {
+    match outcome {
+        Ok(x) => match x {
+            multiplexer::demux::TickOutcome::Busy => Ok(true),
+            multiplexer::demux::TickOutcome::Idle => Ok(false),
+        },
+        Err(err) => match err {
+            multiplexer::demux::DemuxError::BearerError(err) => {
+                error!("{}", err.kind());
+                Err(gasket::error::Error::ShouldRestart)
             }
-            multiplexer::mux::TickOutcome::IngressDisconnected => Err(
-                gasket::error::Error::WorkPanic("ingress disconnected".into()),
-            ),
+            multiplexer::demux::DemuxError::EgressDisconnected(x, _) => {
+                error!(protocol = x, "egress disconnected");
+                Err(gasket::error::Error::WorkPanic)
+            }
+            multiplexer::demux::DemuxError::EgressUnknown(x, _) => {
+                error!(protocol = x, "unknown egress");
+                Err(gasket::error::Error::WorkPanic)
+            }
+        },
+    }
+}
+
+fn handle_mux_outcome(
+    outcome: multiplexer::mux::TickOutcome,
+) -> Result<IsBusy, gasket::error::Error> {
+    match outcome {
+        multiplexer::mux::TickOutcome::Busy => Ok(true),
+        multiplexer::mux::TickOutcome::Idle => Ok(false),
+        multiplexer::mux::TickOutcome::BearerError(err) => {
+            warn!(%err);
+            Err(gasket::error::Error::ShouldRestart)
+        }
+        multiplexer::mux::TickOutcome::IngressDisconnected => {
+            error!("ingress disconnected");
+            Err(gasket::error::Error::WorkPanic)
         }
     }
 }
@@ -84,63 +86,51 @@ impl Session {
 pub struct Worker {
     peer_address: String,
     network_magic: u64,
-    input: InputPort,
-    channel5_out: OutputPort,
-    session: Option<Session>,
+    input: MuxInputPort,
+    channel2_out: DemuxOutputPort,
+    demuxer: Option<Demuxer<GasketEgress>>,
+    muxer: Option<Muxer<GasketIngress>>,
 }
 
 impl Worker {
     pub fn new(
         peer_address: String,
         network_magic: u64,
-        input: InputPort,
-        channel5_out: OutputPort,
+        input: MuxInputPort,
+        channel2_out: DemuxOutputPort,
     ) -> Self {
         Self {
             peer_address,
             network_magic,
             input,
-            channel5_out,
-            session: None,
+            channel2_out,
+            demuxer: None,
+            muxer: None,
         }
     }
 
     fn handshake(&self, bearer: Bearer) -> Result<Bearer, gasket::error::Error> {
-        log::debug!("doing handshake");
+        info!("excuting handshake");
 
         let plexer = SyncPlexer::new(bearer, 0);
         let versions = handshake::n2n::VersionTable::v7_and_above(self.network_magic);
         let mut client = handshake::Client::new(plexer);
 
         let output = client.handshake(versions).or_panic()?;
-        log::info!("handshake output: {:?}", output);
+        debug!("handshake output: {:?}", output);
 
         let bearer = client.unwrap().unwrap();
 
         match output {
             handshake::Confirmation::Accepted(version, _) => {
-                log::info!("connected to upstream peer using version {}", version);
+                info!(version, "connected to upstream peer");
                 Ok(bearer)
             }
-            _ => Err(gasket::error::Error::WorkPanic(
-                "couldn't agree on handshake version".into(),
-            )),
+            _ => {
+                error!("couldn't agree on handshake version");
+                Err(gasket::error::Error::WorkPanic)
+            }
         }
-    }
-
-    fn connect(&self) -> Result<Session, gasket::error::Error> {
-        log::debug!("connecting muxer");
-
-        let bearer = multiplexer::bearers::Bearer::connect_tcp(&self.peer_address).or_restart()?;
-
-        let bearer = self.handshake(bearer)?;
-
-        let mut demuxer = Demuxer::new(bearer.clone());
-        demuxer.register(5, GasketEgress(self.channel5_out.clone()));
-
-        let muxer = Muxer::new(bearer, GasketIngress(self.input.clone()));
-
-        Ok(Session { demuxer, muxer })
     }
 }
 
@@ -151,17 +141,48 @@ impl gasket::runtime::Worker for Worker {
     }
 
     fn bootstrap(&mut self) -> Result<(), gasket::error::Error> {
-        let session = self.connect()?;
-        self.session = Some(session);
+        debug!("connecting muxer");
+
+        let bearer = multiplexer::bearers::Bearer::connect_tcp(&self.peer_address).or_restart()?;
+
+        let bearer = self.handshake(bearer)?;
+
+        let mut demuxer = Demuxer::new(bearer.clone());
+        demuxer.register(2, GasketEgress(self.channel2_out.clone()));
+        self.demuxer = Some(demuxer);
+
+        let muxer = Muxer::new(bearer, GasketIngress(self.input.clone()));
+        self.muxer = Some(muxer);
 
         Ok(())
     }
 
     fn work(&mut self) -> gasket::runtime::WorkResult {
-        let session = self.session.as_mut().unwrap();
+        let muxer = self.muxer.as_mut().unwrap();
+        let demuxer = self.demuxer.as_mut().unwrap();
 
-        session.demux_tick()?;
-        session.mux_tick()?;
+        let span = tracing::span::Span::current();
+
+        let mut mux_res = None;
+        let mut demux_res = None;
+
+        rayon::scope(|s| {
+            s.spawn(|_| {
+                let _guard = span.enter();
+                info!("mux ticking");
+                let outcome = muxer.tick();
+                mux_res = Some(handle_mux_outcome(outcome));
+            });
+            s.spawn(|_| {
+                let _guard = span.enter();
+                info!("demux ticking");
+                let outcome = demuxer.tick();
+                demux_res = Some(handle_demux_outcome(outcome));
+            });
+        });
+
+        mux_res.unwrap()?;
+        demux_res.unwrap()?;
 
         Ok(gasket::runtime::WorkOutcome::Partial)
     }
