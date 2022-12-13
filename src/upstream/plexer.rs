@@ -87,7 +87,8 @@ pub struct Worker {
     peer_address: String,
     network_magic: u64,
     input: MuxInputPort,
-    channel2_out: DemuxOutputPort,
+    channel2_out: Option<DemuxOutputPort>,
+    channel3_out: Option<DemuxOutputPort>,
     demuxer: Option<Demuxer<GasketEgress>>,
     muxer: Option<Muxer<GasketIngress>>,
 }
@@ -97,13 +98,15 @@ impl Worker {
         peer_address: String,
         network_magic: u64,
         input: MuxInputPort,
-        channel2_out: DemuxOutputPort,
+        channel2_out: Option<DemuxOutputPort>,
+        channel3_out: Option<DemuxOutputPort>,
     ) -> Self {
         Self {
             peer_address,
             network_magic,
             input,
             channel2_out,
+            channel3_out,
             demuxer: None,
             muxer: None,
         }
@@ -148,7 +151,15 @@ impl gasket::runtime::Worker for Worker {
         let bearer = self.handshake(bearer)?;
 
         let mut demuxer = Demuxer::new(bearer.clone());
-        demuxer.register(2, GasketEgress(self.channel2_out.clone()));
+
+        if let Some(c2) = &self.channel2_out {
+            demuxer.register(2, GasketEgress(c2.clone()));
+        }
+
+        if let Some(c3) = &self.channel3_out {
+            demuxer.register(3, GasketEgress(c3.clone()));
+        }
+
         self.demuxer = Some(demuxer);
 
         let muxer = Muxer::new(bearer, GasketIngress(self.input.clone()));

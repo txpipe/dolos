@@ -1,6 +1,7 @@
 use pallas::network::miniprotocols::Point;
 use tracing::info;
 
+use crate::upstream::chainsync;
 use crate::upstream::plexer;
 use crate::upstream::prelude::*;
 
@@ -27,12 +28,13 @@ fn connect_to_real_relay() {
         "preview-node.world.dev.cardano.org:30002".into(),
         2,
         input,
-        output,
+        Some(output),
+        None,
     );
 
     let tether = gasket::runtime::spawn_stage(worker, gasket::runtime::Policy::default(), None);
 
-    let mut client = OuroborosClient::new(client_channel);
+    let mut client = chainsync::OuroborosClient::new(client_channel);
     let (point, _) = client.find_intersect(vec![known_point.clone()]).unwrap();
 
     assert_eq!(point.unwrap(), known_point);

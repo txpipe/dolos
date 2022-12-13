@@ -39,8 +39,6 @@ impl multiplexer::agents::Channel for ProtocolChannel {
     }
 }
 
-pub type OuroborosClient = pallas::network::miniprotocols::chainsync::N2NClient<ProtocolChannel>;
-
 pub fn protocol_channel(
     id: u16,
     plexer_input: &mut MuxInputPort,
