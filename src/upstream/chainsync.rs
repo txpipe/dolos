@@ -2,7 +2,7 @@ use gasket::error::AsWorkError;
 use pallas::ledger::traverse::MultiEraHeader;
 use pallas::network::miniprotocols::chainsync;
 use pallas::network::miniprotocols::chainsync::{HeaderContent, NextResponse};
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::prelude::*;
 
@@ -16,6 +16,8 @@ fn to_traverse<'b>(header: &'b chainsync::HeaderContent) -> Result<MultiEraHeade
 }
 
 pub type DownstreamPort = gasket::messaging::OutputPort<ChainSyncEvent>;
+
+pub type OuroborosClient = pallas::network::miniprotocols::chainsync::N2NClient<ProtocolChannel>;
 
 pub struct Worker {
     chain_cursor: Cursor,
@@ -47,6 +49,8 @@ impl Worker {
                 let h = to_traverse(&h).or_panic()?;
                 self.downstream
                     .send(ChainSyncEvent::RollForward(h.slot(), h.hash()).into())?;
+
+                debug!(slot = h.slot(), hash = %h.hash(), "chain sync roll forward");
                 self.chain_tip.set(t.1 as i64);
                 Ok(())
             }

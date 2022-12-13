@@ -24,7 +24,8 @@ fn connect_to_real_relay() {
         "preview-node.world.dev.cardano.org:30002".into(),
         2,
         input,
-        output,
+        Some(output),
+        None,
     );
 
     let mut downstream = chainsync::DownstreamPort::default();
