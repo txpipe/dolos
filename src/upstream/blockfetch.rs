@@ -68,7 +68,7 @@ impl gasket::runtime::Worker for Worker {
         let msg = match msg.payload {
             ChainSyncEvent::RollForward(s, h) => {
                 let body = self.fetch_block(s, h)?;
-                BlockFetchEvent::RollForward(body)
+                BlockFetchEvent::RollForward(s, h, body)
             }
             ChainSyncEvent::Rollback(x) => BlockFetchEvent::Rollback(x),
         };

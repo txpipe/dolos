@@ -12,6 +12,6 @@ pub enum ChainSyncEvent {
 
 #[derive(Debug, Clone)]
 pub enum BlockFetchEvent {
-    RollForward(RawBlock),
+    RollForward(BlockSlot, BlockHash, RawBlock),
     Rollback(Point),
 }
