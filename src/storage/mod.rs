@@ -1,4 +1,3 @@
-pub mod blocks;
 pub mod chain;
 mod cursor;
 
