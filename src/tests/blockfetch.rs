@@ -5,10 +5,7 @@ use std::time::Duration;
 use pallas::crypto::hash::Hash;
 use tracing::info;
 
-use crate::prelude::Cursor;
-use crate::upstream;
 use crate::upstream::blockfetch;
-use crate::upstream::chainsync;
 use crate::upstream::plexer;
 use crate::upstream::prelude::*;
 
@@ -70,11 +67,11 @@ fn connect_to_real_relay() {
 
     for res in results {
         match res.payload {
-            crate::prelude::BlockFetchEvent::RollForward(x) => {
-                info!(block_size = x.len(), "roll forward received")
+            crate::prelude::BlockFetchEvent::RollForward(slot, hash, _) => {
+                info!(slot, %hash, "roll forward received");
             }
             crate::prelude::BlockFetchEvent::Rollback(_) => {
-                panic!("rollback not expected for known point")
+                panic!("rollback not expected for known point");
             }
         }
     }
