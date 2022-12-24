@@ -28,9 +28,14 @@ impl Worker {
             BlockFetchEvent::RollForward(slot, hash, body) => {
                 self.db.roll_forward(slot, hash, body).or_panic()?;
             }
-            BlockFetchEvent::Rollback(point) => {
-                self.db.roll_back(slot);
-            }
+            BlockFetchEvent::Rollback(point) => match point {
+                pallas::network::miniprotocols::Point::Specific(slot, _) => {
+                    self.db.roll_back(slot).or_panic()?;
+                }
+                pallas::network::miniprotocols::Point::Origin => {
+                    todo!();
+                }
+            },
         }
 
         //self.db.compact();

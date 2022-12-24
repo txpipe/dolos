@@ -1,4 +1,3 @@
-pub mod chain;
 mod cursor;
 
 pub use cursor::*;
