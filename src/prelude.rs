@@ -2,11 +2,11 @@ pub use super::model::*;
 pub use super::storage::Cursor;
 pub use super::upstream::prelude::*;
 
+use miette::Diagnostic;
 use std::fmt::Display;
-
 use thiserror::Error;
 
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Diagnostic)]
 pub enum Error {
     #[error("configuration error: {0}")]
     ConfigError(String),

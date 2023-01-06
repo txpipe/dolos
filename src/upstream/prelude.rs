@@ -9,7 +9,8 @@ pub type DemuxInputPort = gasket::messaging::InputPort<multiplexer::Payload>;
 pub type MuxInputPort = gasket::messaging::InputPort<(u16, multiplexer::Payload)>;
 pub type DemuxOutputPort = gasket::messaging::OutputPort<multiplexer::Payload>;
 
-pub struct ProtocolChannel(u16, MuxOutputPort, DemuxInputPort);
+#[derive(Debug)]
+pub struct ProtocolChannel(pub u16, pub MuxOutputPort, pub DemuxInputPort);
 
 impl multiplexer::agents::Channel for ProtocolChannel {
     fn enqueue_chunk(
@@ -44,11 +45,11 @@ pub fn protocol_channel(
     plexer_input: &mut MuxInputPort,
     plexer_output: &mut DemuxOutputPort,
 ) -> ProtocolChannel {
-    let mut muxer = MuxOutputPort::default();
-    let mut demuxed = DemuxInputPort::default();
+    let mut agent_output = MuxOutputPort::default();
+    let mut agent_input = DemuxInputPort::default();
 
-    gasket::messaging::connect_ports(&mut muxer, plexer_input, 1000);
-    gasket::messaging::connect_ports(plexer_output, &mut demuxed, 1000);
+    gasket::messaging::connect_ports(&mut agent_output, plexer_input, 1000);
+    gasket::messaging::connect_ports(plexer_output, &mut agent_input, 1000);
 
-    ProtocolChannel(id, muxer, demuxed)
+    ProtocolChannel(id, agent_output, agent_input)
 }
