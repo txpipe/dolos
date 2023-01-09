@@ -40,6 +40,7 @@ impl multiplexer::agents::Channel for ProtocolChannel {
     }
 }
 
+// TODO: deprecate since it breaks when funneling several ports
 pub fn protocol_channel(
     id: u16,
     plexer_input: &mut MuxInputPort,
