@@ -13,7 +13,14 @@ pub fn run(config: &super::Config, _args: &Args) -> Result<(), Error> {
     )
     .unwrap();
 
-    let db = RollDB::open(config.rolldb.path.as_deref().unwrap_or(Path::new("/db"))).unwrap();
+    let db = RollDB::open(
+        config
+            .rolldb
+            .path
+            .as_deref()
+            .unwrap_or_else(|| Path::new("/db")),
+    )
+    .unwrap();
 
     for item in db.crawl_wal() {
         dbg!(item.unwrap());

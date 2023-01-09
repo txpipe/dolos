@@ -87,7 +87,14 @@ pub fn run(config: &super::Config, _args: &Args) -> Result<(), Error> {
         Some("blockfetch"),
     );
 
-    let db = RollDB::open(config.rolldb.path.as_deref().unwrap_or(Path::new("/db"))).unwrap();
+    let db = RollDB::open(
+        config
+            .rolldb
+            .path
+            .as_deref()
+            .unwrap_or_else(|| Path::new("/db")),
+    )
+    .unwrap();
 
     let reducer = gasket::runtime::spawn_stage(
         reducer::Worker::new(reducer_upstream, db),
