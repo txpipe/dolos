@@ -2,22 +2,13 @@ use std::ops::DerefMut;
 use std::str::FromStr;
 use std::time::Duration;
 
-use pallas::crypto::hash::Hash;
-use tracing::info;
-
 use crate::upstream::blockfetch;
 use crate::upstream::plexer;
 use crate::upstream::prelude::*;
+use pallas::crypto::hash::Hash;
 
 #[test]
 fn connect_to_real_relay() {
-    tracing::subscriber::set_global_default(
-        tracing_subscriber::FmtSubscriber::builder()
-            .with_max_level(tracing::Level::DEBUG)
-            .finish(),
-    )
-    .unwrap();
-
     let mut input = MuxInputPort::default();
     let mut output = DemuxOutputPort::default();
 
@@ -67,12 +58,10 @@ fn connect_to_real_relay() {
 
     for res in results {
         match res.payload {
-            crate::prelude::BlockFetchEvent::RollForward(slot, hash, _) => {
-                info!(slot, %hash, "roll forward received");
-            }
             crate::prelude::BlockFetchEvent::Rollback(_) => {
                 panic!("rollback not expected for known point");
             }
+            _ => (),
         }
     }
 

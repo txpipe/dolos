@@ -1,6 +1,8 @@
 use std::ops::DerefMut;
 use std::time::Duration;
 
+use pallas::network::miniprotocols::Point;
+
 use crate::prelude::Cursor;
 use crate::upstream::chainsync;
 use crate::upstream::plexer;
@@ -8,13 +10,6 @@ use crate::upstream::prelude::*;
 
 #[test]
 fn connect_to_real_relay() {
-    tracing::subscriber::set_global_default(
-        tracing_subscriber::FmtSubscriber::builder()
-            .with_max_level(tracing::Level::TRACE)
-            .finish(),
-    )
-    .unwrap();
-
     let mut input = MuxInputPort::default();
     let mut output = DemuxOutputPort::default();
 
@@ -45,4 +40,16 @@ fn connect_to_real_relay() {
     );
 
     let results = sink.drain_at_least::<20>(Duration::from_secs(60)).unwrap();
+
+    for res in results {
+        match res.payload {
+            crate::prelude::ChainSyncEvent::Rollback(x) => {
+                assert!(matches!(x, Point::Origin));
+            }
+            _ => (),
+        }
+    }
+
+    plexer.dismiss_stage().unwrap();
+    chainsync.dismiss_stage().unwrap();
 }
