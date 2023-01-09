@@ -1,19 +1,11 @@
-use std::thread::sleep;
+use std::path::Path;
 
-use dolos::{
-    prelude::*,
-    rolldb::RollDB,
-    upstream::{blockfetch, chainsync, plexer, reducer},
-};
+use dolos::{prelude::*, rolldb::RollDB};
 
-#[derive(clap::Args)]
-pub struct Args {
-    #[clap(long, value_parser)]
-    //#[clap(description = "config file to load by the daemon")]
-    config: Option<std::path::PathBuf>,
-}
+#[derive(Debug, clap::Args)]
+pub struct Args {}
 
-pub fn run(args: &Args) -> Result<(), Error> {
+pub fn run(config: &super::Config, _args: &Args) -> Result<(), Error> {
     tracing::subscriber::set_global_default(
         tracing_subscriber::FmtSubscriber::builder()
             .with_max_level(tracing::Level::DEBUG)
@@ -21,7 +13,7 @@ pub fn run(args: &Args) -> Result<(), Error> {
     )
     .unwrap();
 
-    let db = RollDB::open("./tmp").unwrap();
+    let db = RollDB::open(config.rolldb.path.as_deref().unwrap_or(Path::new("/db"))).unwrap();
 
     for item in db.crawl_wal() {
         dbg!(item.unwrap());

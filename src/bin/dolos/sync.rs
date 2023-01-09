@@ -1,4 +1,4 @@
-use std::thread::sleep;
+use std::path::Path;
 
 use dolos::{
     prelude::*,
@@ -6,20 +6,34 @@ use dolos::{
     upstream::{blockfetch, chainsync, plexer, reducer},
 };
 
-#[derive(clap::Args)]
-pub struct Args {
-    #[clap(long, value_parser)]
-    //#[clap(description = "config file to load by the daemon")]
-    config: Option<std::path::PathBuf>,
-}
+#[derive(Debug, clap::Args)]
+pub struct Args {}
 
-pub fn run(args: &Args) -> Result<(), Error> {
+pub fn run(config: &super::Config, _args: &Args) -> Result<(), Error> {
     tracing::subscriber::set_global_default(
         tracing_subscriber::FmtSubscriber::builder()
             .with_max_level(tracing::Level::DEBUG)
             .finish(),
     )
     .unwrap();
+
+    /*
+    TODO: this is how we envision the setup of complex pipelines leveraging Rust macros:
+
+    pipeline!(
+        plexer = plexer::Worker::new(xx),
+        chainsync = chainsync::Worker::new(yy),
+        blockfetch = blockfetch::Worker::new(yy),
+        reducer = reducer::Worker::new(yy),
+        plexer.demux2 => chainsync.demux2,
+        plexer.demux3 => blockfetch.demux3,
+        chainsync.mux2 + blockfetch.mux3 => plexer.mux,
+        chainsync.downstream => blockfetch.upstream,
+        blockfetch.downstream => reducer.upstream,
+    );
+
+    The above snippet would replace the rest of the code in this function, which is just a more verbose, manual way of saying the same thing.
+    */
 
     let mut mux_input = MuxInputPort::default();
 
@@ -47,8 +61,8 @@ pub fn run(args: &Args) -> Result<(), Error> {
 
     let plexer = gasket::runtime::spawn_stage(
         plexer::Worker::new(
-            "preview-node.world.dev.cardano.org:30002".into(),
-            2,
+            config.upstream.peer_address.clone(),
+            config.upstream.network_magic,
             mux_input,
             Some(demux2_out),
             Some(demux3_out),
@@ -73,7 +87,7 @@ pub fn run(args: &Args) -> Result<(), Error> {
         Some("blockfetch"),
     );
 
-    let db = RollDB::open("./tmp").unwrap();
+    let db = RollDB::open(config.rolldb.path.as_deref().unwrap_or(Path::new("/db"))).unwrap();
 
     let reducer = gasket::runtime::spawn_stage(
         reducer::Worker::new(reducer_upstream, db),
