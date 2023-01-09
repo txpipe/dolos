@@ -37,7 +37,7 @@ impl RollDB {
         let db = DB::open_cf(&opts, path, [blocks::CF_NAME, CHAIN_CF, wal::CF_NAME])
             .map_err(|_| Error::IO)?;
 
-        let wal_seq = wal::find_lastest_seq(&db)?.into();
+        let wal_seq = wal::find_latest_seq(&db)?.into();
 
         Ok(Self { db, wal_seq })
     }
