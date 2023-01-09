@@ -107,8 +107,11 @@ impl<'a> Iterator for CrawlIterator<'a> {
 
     fn next(&mut self) -> Option<Result<Value, super::Error>> {
         match self.0.next() {
-            Some(Ok((key, value))) => Some(Value::try_from(value)),
-            Some(Err(err)) => Some(Err(super::Error::IO)),
+            Some(Ok((_, value))) => Some(Value::try_from(value)),
+            Some(Err(err)) => {
+                tracing::error!(?err);
+                Some(Err(super::Error::IO))
+            }
             None => None,
         }
     }
@@ -126,13 +129,16 @@ pub fn crawl_backwards(db: &DB) -> CrawlIterator {
     CrawlIterator(inner)
 }
 
-pub fn find_lastest_seq(db: &DB) -> Result<Key, super::Error> {
+pub fn find_latest_seq(db: &DB) -> Result<Key, super::Error> {
     let cf = wal_cf(db);
     let mut iter = db.iterator_cf(cf, IteratorMode::End);
 
     match iter.next() {
         Some(Ok((key, _))) => Ok(Key::try_from(key)?),
-        Some(Err(err)) => Err(super::Error::IO),
+        Some(Err(err)) => {
+            tracing::error!(?err);
+            Err(super::Error::IO)
+        }
         None => Ok(Key(0)),
     }
 }
