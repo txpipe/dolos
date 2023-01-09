@@ -6,7 +6,7 @@ use tracing::{debug, info};
 
 use crate::prelude::*;
 
-fn to_traverse<'b>(header: &'b chainsync::HeaderContent) -> Result<MultiEraHeader<'b>, Error> {
+fn to_traverse(header: &chainsync::HeaderContent) -> Result<MultiEraHeader<'_>, Error> {
     let out = match header.byron_prefix {
         Some((subtag, _)) => MultiEraHeader::decode(header.variant, Some(subtag), &header.cbor),
         None => MultiEraHeader::decode(header.variant, None, &header.cbor),
