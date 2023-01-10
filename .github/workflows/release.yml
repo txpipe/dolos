@@ -48,7 +48,7 @@ jobs:
       - name: Prev Build | Get Dependencies [Ubuntu]
         if: matrix.os == 'ubuntu-latest'
         run: |
-          sudo apt-get install llvm-dev libclang-dev clang pkg-config libssl-dev
+          sudo apt-get install llvm-dev libclang-dev clang-6.0 pkg-config libssl-dev
 
       - name: Prev Build | Get Dependencies [MacOS]
         if: matrix.os == 'macOS-latest'
