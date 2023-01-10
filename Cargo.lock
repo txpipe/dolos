@@ -614,7 +614,6 @@ dependencies = [
  "glob",
  "libc",
  "libz-sys",
- "zstd-sys",
 ]
 
 [[package]]
@@ -1648,13 +1647,3 @@ name = "windows_x86_64_msvc"
 version = "0.42.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f40009d85759725a34da6d89a94e63d7bdc50a862acf0dbc7c8e488f1edcb6f5"
-
-[[package]]
-name = "zstd-sys"
-version = "2.0.2+zstd.1.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "24faa29d97c8ddca9b37b680e3bd2d5439d864a9cac3a0640d086b71c908bb83"
-dependencies = [
- "cc",
- "libc",
-]
