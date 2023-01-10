@@ -16,6 +16,9 @@ ENV CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER=arm-linux-gnueabihf-gcc \
 
 FROM --platform=linux/amd64 rust:1-buster as builder-amd64
 
+RUN apt update && apt upgrade -y
+RUN apt install -y clang pkg-config libssl-dev
+
 ENV RUST_TARGET=x86_64-unknown-linux-gnu
 
 
@@ -32,7 +35,7 @@ RUN cp /code/target/${RUST_TARGET}/release/dolos /dolos
 
 FROM debian:buster-slim
 
-RUN apt-get update && apt-get install -y ca-certificates libclang-dev && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /dolos /usr/local/bin/dolos
 
