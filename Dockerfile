@@ -32,7 +32,7 @@ RUN cp /code/target/${RUST_TARGET}/release/dolos /dolos
 
 FROM debian:buster-slim
 
-RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y ca-certificates libclang-dev && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /dolos /usr/local/bin/dolos
 
