@@ -48,15 +48,8 @@ jobs:
       - name: Prev Build | Get Dependencies [Ubuntu]
         if: matrix.os == 'ubuntu-latest'
         run: |
-          sudo apt-get install libclang-dev pkg-config libssl-dev
+          sudo apt-get install llvm-dev libclang-dev clang pkg-config libssl-dev
       
-      - name: Prev Build | clang + llvm [Ubuntu]
-        if: matrix.os == 'ubuntu-latest'
-        uses: egor-tensin/setup-clang@v1
-        with:
-          version: latest
-          platform: x64
-
       - name: Prev Build | Get Dependencies [MacOS]
         if: matrix.os == 'macOS-latest'
         run: |
@@ -87,7 +80,7 @@ jobs:
         with:
           command: build
           args: --release --locked --all-features --target ${{ matrix.target }}
-          use-cross: ${{ matrix.os == 'ubuntu-latest' }}
+          #use-cross: ${{ matrix.os == 'ubuntu-latest' }}
 
       - name: Post Build | Prepare artifacts [Windows]
         if: matrix.os == 'windows-latest'
