@@ -1,0 +1,245 @@
+<!DOCTYPE HTML>
+<html lang="en" class="sidebar-visible no-js light">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Oura</title>
+        <meta name="robots" content="noindex" />
+
+
+        <!-- Custom HTML head -->
+        
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff" />
+
+        <link rel="icon" href="favicon.svg">
+        <link rel="shortcut icon" href="favicon.png">
+        <link rel="stylesheet" href="css/variables.css">
+        <link rel="stylesheet" href="css/general.css">
+        <link rel="stylesheet" href="css/chrome.css">
+        <link rel="stylesheet" href="css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" href="highlight.css">
+        <link rel="stylesheet" href="tomorrow-night.css">
+        <link rel="stylesheet" href="ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+
+    </head>
+    <body>
+        <!-- Provide site root to javascript -->
+        <script>
+            var path_to_root = "";
+            var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "light";
+        </script>
+
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                var theme = localStorage.getItem('mdbook-theme');
+                var sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            var theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            var html = document.querySelector('html');
+            html.classList.remove('no-js')
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add('js');
+        </script>
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            var html = document.querySelector('html');
+            var sidebar = 'hidden';
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            }
+            html.classList.remove('sidebar-visible');
+            html.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <div class="sidebar-scrollbox">
+                <ol class="chapter"><li class="chapter-item expanded "><a href="introduction.html"><strong aria-hidden="true">1.</strong> Introduction</a></li></ol>
+            </div>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle"></div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky bordered">
+                    <div class="left-buttons">
+                        <button id="sidebar-toggle" class="icon-button" type="button" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </button>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">Oura</h1>
+
+                    <div class="right-buttons">
+                        <a href="print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="dolos"><a class="header" href="#dolos">Dolos</a></h1>
+<p>Dolos is a new type of Cardano node, fine-tuned to solve a very narrow scope: keeping an updated copy of the ledger and replying to queries from trusted clients, while requiring a small fraction of the resources</p>
+<h1 id="motivation"><a class="header" href="#motivation">Motivation</a></h1>
+<p>Cardano nodes can assume one of two roles:</p>
+<ul>
+<li>block producer: in charge of minting blocks</li>
+<li>relay node: in charge relaying blocks from / to peers.</li>
+</ul>
+<p>Each of these roles has concrete responsibilities and runtime requirements. Criteria such as network topology, resource allocation, backup procedures, etc vary by role.</p>
+<p>We argue that there’s a 3rd role that should be treated independently with the goal of optimizing its workload: nodes that are used with the sole purpose of resolving local state queries or serving as data source for downstream tools that require ledger data.</p>
+<p>There are many potential optimizations for nodes performing this type of workload that are not currently possible with the Cardano node:</p>
+<ul>
+<li>drastically limiting the amount of memory required to execute the node</li>
+<li>switching to storage solutions with different trade-offs (eg: S3, NFS, etc)</li>
+<li>providing alternative wire protocols more friendly for data queries (eg: REST, gRPC)</li>
+<li>providing an auth layer in front of the API endpoints</li>
+</ul>
+<p>The goal of this project is to provide a very limited and focused version of the Cardano node that can be used by DevOps as a cost-effective, performant option to deploy <strong>data nodes</strong> side-by-side with the producer / relay nodes.</p>
+<p>This new role would be useful in the following scenarios:</p>
+<ul>
+<li>As data source for well-known tools such as DB-sync, Ogmios, CARP, Oura, etc.</li>
+<li>As a fast, low resource node for syncing other producer / relay nodes.</li>
+<li>As a ledger data source that scales dynamically according to query load.</li>
+<li>As a node that leverages network / cloud storage technology instead of mounted drives.</li>
+<li>As a node that scales horizontally, allowing high-availability topologies.</li>
+<li>As a low resource local node for resolving local state queries.</li>
+</ul>
+<h1 id="detailed-design"><a class="header" href="#detailed-design">Detailed design</a></h1>
+<p>Data nodes will share some of the features with the mainstream Cardano node:</p>
+<ul>
+<li>Node-to-Node and Node-to-Client Chain-Sync mini-protocol</li>
+<li>Node-to-Node Block-Fetch mini-protocol</li>
+<li>Node-to-Client Local-State-Query mini-protocol</li>
+</ul>
+<p>This new type of node will also provide features not currently available in the mainstream Cardano node:</p>
+<ul>
+<li>HTTP/JSON endpoint for common local state queries</li>
+<li>gRPC endpoint for local state queries and chain-sync procedure</li>
+<li>Different storage options including NFS, S3 &amp; GCP Buckets</li>
+<li>Low memory consumption (allowed by the trade-offs in scope) </li>
+</ul>
+<h1 id="drawbacks"><a class="header" href="#drawbacks">Drawbacks</a></h1>
+<ul>
+<li>Although the scope is very narrow compared to a real, full-blown node, this tool has a large LoE.</li>
+<li>There's overlap with some TxPipe tools such as Oura and Scrolls. The mitigation plan is to hoist individual components into Pallas to achieve DRY.</li>
+<li>Some components, such as the gRPC interface, might be useful even in environment running the full-blown Cardano node. To mitigate this we will architect the system in such a way that different entry-points (aka: binaries) can perform different roles. The gRPC bridge would be one of this.</li>
+</ul>
+<h1 id="alternatives"><a class="header" href="#alternatives">Alternatives</a></h1>
+<ul>
+<li>Use the full-blown Cardano node even for the scenarios described in this RFC.</li>
+<li>Split the project into sub-components that can be orchestrated to achieve the same result.</li>
+</ul>
+<h1 id="unresolved-questions"><a class="header" href="#unresolved-questions">Unresolved questions</a></h1>
+<ul>
+<li>Performance gains and resource allocation optimizations are theoretical, these were extrapolated from our experience implementing Cardano data processing pipelines using components written in Rust. We won’t have a strict, quantifiable measurement until we develop a PoC of this project. To mitigate this issue, our development process will include performance benchmarks execution at each development milestone. Reports will be included as part of each release.</li>
+<li>There’s some documentation lacking regarding local state queries wire-format which will need some reverse engineering from the mainstream Cardano node. We have experience with this approach but the level-of-effort associated with the task is hard to anticipate. To try mitigate this issue, we'll reach out to IOG for advise and documentation in case it's available.</li>
+</ul>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="elasticlunr.min.js"></script>
+        <script src="mark.min.js"></script>
+        <script src="searcher.js"></script>
+
+        <script src="clipboard.min.js"></script>
+        <script src="highlight.js"></script>
+        <script src="book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+        <script>
+        window.addEventListener('load', function() {
+            window.setTimeout(window.print, 100);
+        });
+        </script>
+
+    </body>
+</html>
