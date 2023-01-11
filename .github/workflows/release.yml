@@ -86,7 +86,7 @@ jobs:
         with:
           command: build
           args: --release --locked --all-features --target ${{ matrix.target }}
-          use-cross: matrix.use_cross
+          use-cross: ${{ matrix.use_cross }}
 
       - name: Post Build | Prepare artifacts [Windows]
         if: matrix.os == 'windows-latest'
