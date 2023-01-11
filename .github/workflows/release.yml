@@ -21,26 +21,32 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             name: dolos-x86_64-unknown-linux-gnu.tar.gz
+            use_cross: false
 
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             name: dolos-x86_64-unknown-linux-musl.tar.gz
+            use_cross: true
 
           - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
             name: dolos-aarch64-unknown-linux-musl.tar.gz
+            use_cross: true
 
           - target: x86_64-apple-darwin
             os: macOS-latest
             name: dolos-x86_64-apple-darwin.tar.gz
+            use_cross: false
 
           - target: aarch64-apple-darwin
             os: macOS-latest
             name: dolos-aarch64-apple-darwin.tar.gz
+            use_cross: false
 
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             name: dolos-x86_64-pc-windows-msvc.zip
+            use_cross: false
 
     runs-on: ${{ matrix.os }}
     continue-on-error: true
@@ -80,7 +86,7 @@ jobs:
         with:
           command: build
           args: --release --locked --all-features --target ${{ matrix.target }}
-          #use-cross: ${{ matrix.os == 'ubuntu-latest' }}
+          use-cross: matrix.use_cross
 
       - name: Post Build | Prepare artifacts [Windows]
         if: matrix.os == 'windows-latest'
