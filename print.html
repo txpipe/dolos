@@ -81,7 +81,7 @@
 
         <nav id="sidebar" class="sidebar" aria-label="Table of contents">
             <div class="sidebar-scrollbox">
-                <ol class="chapter"><li class="chapter-item expanded "><a href="introduction.html"><strong aria-hidden="true">1.</strong> Introduction</a></li></ol>
+                <ol class="chapter"><li class="chapter-item expanded "><a href="introduction.html"><strong aria-hidden="true">1.</strong> Introduction</a></li><li class="chapter-item expanded "><a href="installation/index.html"><strong aria-hidden="true">2.</strong> Installation</a></li><li><ol class="section"><li class="chapter-item expanded "><a href="installation/binary_release.html"><strong aria-hidden="true">2.1.</strong> Binary Release</a></li><li class="chapter-item expanded "><a href="installation/from_source.html"><strong aria-hidden="true">2.2.</strong> From Source</a></li><li class="chapter-item expanded "><a href="installation/docker.html"><strong aria-hidden="true">2.3.</strong> Docker</a></li><li class="chapter-item expanded "><a href="installation/kubernetes.html"><strong aria-hidden="true">2.4.</strong> Kubernetes</a></li></ol></li></ol>
             </div>
             <div id="sidebar-resize-handle" class="sidebar-resize-handle"></div>
         </nav>
@@ -199,6 +199,108 @@
 <li>Performance gains and resource allocation optimizations are theoretical, these were extrapolated from our experience implementing Cardano data processing pipelines using components written in Rust. We won’t have a strict, quantifiable measurement until we develop a PoC of this project. To mitigate this issue, our development process will include performance benchmarks execution at each development milestone. Reports will be included as part of each release.</li>
 <li>There’s some documentation lacking regarding local state queries wire-format which will need some reverse engineering from the mainstream Cardano node. We have experience with this approach but the level-of-effort associated with the task is hard to anticipate. To try mitigate this issue, we'll reach out to IOG for advise and documentation in case it's available.</li>
 </ul>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="installation"><a class="header" href="#installation">Installation</a></h1>
+<p>Depending on your needs, <em>Dolos</em> provides different installation options:</p>
+<ul>
+<li><a href="installation/binary_release.html">Binary Release</a>: to use one of our pre-compiled binary releases for the supported platforms.</li>
+<li><a href="installation/from_source.html">From Source</a>: to compile a binary from source code using Rust's toolchain</li>
+<li><a href="installation/docker.html">Docker</a>: to run the tool from a pre-built docker image</li>
+<li><a href="installation/kubernetes.html">Kubernetes</a>: to deploy <em>Dolos</em> as a resource within a Kubernetes cluster</li>
+</ul>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="binary-releases"><a class="header" href="#binary-releases">Binary Releases</a></h1>
+<p><em>Dolos</em> can be run as a standalone executable. Follow the instructions for your particular OS / Platform to install a local copy from our Github pre-built releases.</p>
+<h2 id="macos"><a class="header" href="#macos">MacOS</a></h2>
+<p>Use the following command to download and install <em>Dolos'</em> binary release for MacOS:</p>
+<pre><code class="language-sh">curl --silent --location https://git.io/JD2iH | \
+    tar xz -C /tmp &amp;&amp; mv /tmp/dolos /usr/local/bin
+</code></pre>
+<h2 id="gnulinux"><a class="header" href="#gnulinux">GNU/Linux</a></h2>
+<p>Use the following command to download and install <em>Dolos'</em> binary release for GNU/Linux:</p>
+<pre><code class="language-sh">curl --silent --location https://git.io/JD2ix | \
+    tar xz -C /tmp &amp;&amp; mv /tmp/dolos /usr/local/bin
+</code></pre>
+<p>Check the <a href="https://github.com/txpipe/dolos/releases/latest">latest release</a> for more binary download options.</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="from-source"><a class="header" href="#from-source">From Source</a></h1>
+<p>The following instructions show how to build and install <em>Dolos</em> from source code.</p>
+<h2 id="pre-requisites"><a class="header" href="#pre-requisites">Pre-requisites</a></h2>
+<ul>
+<li>Rust toolchain</li>
+</ul>
+<h2 id="procedure"><a class="header" href="#procedure">Procedure</a></h2>
+<pre><code>git clone git@github.com:txpipe/dolos.git
+cd dolos
+cargo install --all-features --path .
+</code></pre>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="docker"><a class="header" href="#docker">Docker</a></h1>
+<p><em>Dolos</em> provides already built public Docker images through Github Packages. To execute <em>Dolos</em> via Docker, use the following command:</p>
+<pre><code class="language-sh">docker run ghcr.io/txpipe/dolos:latest
+</code></pre>
+<p>The result of the above command should show <em>Dolos'</em> command-line help message.</p>
+<h2 id="entry-point"><a class="header" href="#entry-point">Entry Point</a></h2>
+<p>The entry-point of the image points to <em>Dolos</em> executable. You can pass the same command-line arguments that you would pass to the binary release running bare-metal. For example:</p>
+<pre><code>docker run -it ghcr.io/txpipe/dolos:latest \
+    --config my-custom-config.toml
+</code></pre>
+<p>For more information on available command-line arguments, check the <a href="installation/../usage/index.html">usage</a> section.</p>
+<h2 id="using-a-configuration-file"><a class="header" href="#using-a-configuration-file">Using a Configuration File</a></h2>
+<p>The default daemon configuration file for <em>Dolos</em> is located in <code>/etc/dolos/daemon.toml</code>. To run <em>Dolos</em> in daemon mode with a custom configuration file, you need to mount it in the correct location. The following example runs a docker container in background using a configuration file named <code>daemon.toml</code> located in the current folder:</p>
+<pre><code>docker run -d -v $(pwd)/daemon.toml:/etc/dolos/daemon.toml \
+    ghcr.io/txpipe/dolos:latest daemon
+</code></pre>
+<h2 id="versioned-images"><a class="header" href="#versioned-images">Versioned Images</a></h2>
+<p>Images are also tagged with the corresponding version number. It is highly recommended to use a fixed image version in production environments to avoid the effects of new features being included in each release (please remember dolos hasn't reached v1 stability guarantees).</p>
+<p>To use a versioned image, replace the <code>latest</code> tag by the desired version with the <code>v</code> prefix. For example, to use version <code>1.0.0</code>, use the following image:</p>
+<pre><code>ghcr.io/txpipe/dolos:v1.0.0
+</code></pre>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="kubernetes"><a class="header" href="#kubernetes">Kubernetes</a></h1>
+<p><em>Dolos</em> can be implemented as a standalone Kubernetes <code>StatefulSet</code> resource. </p>
+<p>Please note that the amount of replicas is set to <code>1</code>. <em>Dolos</em> doesn't have any kind of &quot;coordination&quot; between instances. Adding more than one replica will just create extra pipelines duplicating the same work.</p>
+<pre><code class="language-yaml">apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dolos
+data:
+  daemon.toml: |-
+    [upstream]
+    # REDACTED: here goes your `upstream` configuration options
+
+    [rolldb]
+    # REDACTED: here goes your `rolldb` configuration options
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: dolos
+spec:
+  template:
+    spec:
+      containers:
+        - name: main
+          image: ghcr.io/txpipe/dolos:latest
+
+          # we mount the same volume that the main container uses as the source
+          # for the Cardano node unix socket.
+          volumeMounts:
+            - mountPath: /var/dolos/db
+              name: db
+            - mountPath: /etc/dolos
+              name: config
+          resources:
+            requests:
+              memory: 1Gi
+              cpu: 1
+            limits:
+              memory: 1Gi
+      volumes:
+        # an empty-dir to store your data. In a real scenario, this should be a PVC
+        - name: db
+          emptyDir: {}
+
+        # a config map resource with Dolos' config, particular for your requirements
+        - name: config
+          configMap:
+            name: config
+</code></pre>
 
                     </main>
 
