@@ -1,10 +1,7 @@
 use std::path::Path;
 
-use dolos::{
-    prelude::*,
-    rolldb::RollDB,
-    upstream::{blockfetch, chainsync, plexer, reducer},
-};
+use dolos::{prelude::*, upstream::cursor::Cursor};
+use gasket::messaging::{RecvPort, SendPort};
 
 #[derive(Debug, clap::Args)]
 pub struct Args {}
@@ -17,92 +14,33 @@ pub fn run(config: &super::Config, _args: &Args) -> Result<(), Error> {
     )
     .unwrap();
 
-    /*
-    TODO: this is how we envision the setup of complex pipelines leveraging Rust macros:
+    let cursor = Cursor::new(dolos::upstream::cursor::Intersection::Origin);
 
-    pipeline!(
-        plexer = plexer::Worker::new(xx),
-        chainsync = chainsync::Worker::new(yy),
-        blockfetch = blockfetch::Worker::new(yy),
-        reducer = reducer::Worker::new(yy),
-        plexer.demux2 => chainsync.demux2,
-        plexer.demux3 => blockfetch.demux3,
-        chainsync.mux2 + blockfetch.mux3 => plexer.mux,
-        chainsync.downstream => blockfetch.upstream,
-        blockfetch.downstream => reducer.upstream,
+    let (to_reducer, from_chainsync) = gasket::messaging::tokio::channel(50);
+
+    let mut chainsync = dolos::upstream::chainsync::Stage::new(
+        config.upstream.peer_address.clone(),
+        config.upstream.network_magic,
+        cursor,
     );
 
-    The above snippet would replace the rest of the code in this function, which is just a more verbose, manual way of saying the same thing.
-    */
+    chainsync.downstream.connect(to_reducer);
 
-    let mut mux_input = MuxInputPort::default();
+    let rolldb_path = config
+        .rolldb
+        .path
+        .as_deref()
+        .unwrap_or_else(|| Path::new("/db"));
 
-    let mut demux2_out = DemuxOutputPort::default();
-    let mut demux2_in = DemuxInputPort::default();
-    gasket::messaging::connect_ports(&mut demux2_out, &mut demux2_in, 1000);
+    let mut reducer = dolos::upstream::reducer::Stage::new(rolldb_path);
 
-    let mut demux3_out = DemuxOutputPort::default();
-    let mut demux3_in = DemuxInputPort::default();
-    gasket::messaging::connect_ports(&mut demux3_out, &mut demux3_in, 1000);
+    reducer.upstream.connect(from_chainsync);
 
-    let mut mux2_out = MuxOutputPort::default();
-    let mut mux3_out = MuxOutputPort::default();
-    gasket::messaging::funnel_ports(vec![&mut mux2_out, &mut mux3_out], &mut mux_input, 1000);
+    let chainsync = gasket::runtime::spawn_stage(chainsync, gasket::runtime::Policy::default());
 
-    let mut chainsync_downstream = chainsync::DownstreamPort::default();
-    let mut blockfetch_upstream = blockfetch::UpstreamPort::default();
-    gasket::messaging::connect_ports(&mut chainsync_downstream, &mut blockfetch_upstream, 20);
+    let reducer = gasket::runtime::spawn_stage(reducer, gasket::runtime::Policy::default());
 
-    let mut blockfetch_downstream = blockfetch::DownstreamPort::default();
-    let mut reducer_upstream = reducer::UpstreamPort::default();
-    gasket::messaging::connect_ports(&mut blockfetch_downstream, &mut reducer_upstream, 20);
-
-    let cursor = Cursor::StaticCursor(vec![]);
-
-    let plexer = gasket::runtime::spawn_stage(
-        plexer::Worker::new(
-            config.upstream.peer_address.clone(),
-            config.upstream.network_magic,
-            mux_input,
-            Some(demux2_out),
-            Some(demux3_out),
-        ),
-        gasket::runtime::Policy::default(),
-        Some("plexer"),
-    );
-
-    let channel2 = ProtocolChannel(2, mux2_out, demux2_in);
-
-    let chainsync = gasket::runtime::spawn_stage(
-        chainsync::Worker::new(cursor, channel2, chainsync_downstream),
-        gasket::runtime::Policy::default(),
-        Some("chainsync"),
-    );
-
-    let channel3 = ProtocolChannel(3, mux3_out, demux3_in);
-
-    let blockfetch = gasket::runtime::spawn_stage(
-        blockfetch::Worker::new(channel3, blockfetch_upstream, blockfetch_downstream),
-        gasket::runtime::Policy::default(),
-        Some("blockfetch"),
-    );
-
-    let db = RollDB::open(
-        config
-            .rolldb
-            .path
-            .as_deref()
-            .unwrap_or_else(|| Path::new("/db")),
-    )
-    .unwrap();
-
-    let reducer = gasket::runtime::spawn_stage(
-        reducer::Worker::new(reducer_upstream, db),
-        gasket::runtime::Policy::default(),
-        Some("reducer"),
-    );
-
-    gasket::daemon::Daemon(vec![plexer, chainsync, blockfetch, reducer]).block();
+    gasket::daemon::Daemon(vec![chainsync, reducer]).block();
 
     Ok(())
 }

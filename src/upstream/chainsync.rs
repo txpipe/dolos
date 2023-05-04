@@ -1,62 +1,99 @@
-use gasket::error::AsWorkError;
-use pallas::ledger::traverse::MultiEraHeader;
-use pallas::network::miniprotocols::chainsync;
-use pallas::network::miniprotocols::chainsync::{HeaderContent, NextResponse};
+use gasket::framework::*;
+use gasket::messaging::*;
 use tracing::{debug, info};
 
+use pallas::ledger::traverse::MultiEraHeader;
+use pallas::network::facades::PeerClient;
+use pallas::network::miniprotocols::chainsync::{self, HeaderContent, NextResponse};
+use pallas::network::miniprotocols::Point;
+
+use super::cursor::{Cursor, Intersection};
 use crate::prelude::*;
 
-fn to_traverse(header: &chainsync::HeaderContent) -> Result<MultiEraHeader<'_>, Error> {
+fn to_traverse(header: &HeaderContent) -> Result<MultiEraHeader<'_>, WorkerError> {
     let out = match header.byron_prefix {
         Some((subtag, _)) => MultiEraHeader::decode(header.variant, Some(subtag), &header.cbor),
         None => MultiEraHeader::decode(header.variant, None, &header.cbor),
     };
 
-    out.map_err(Error::parse)
+    out.or_panic()
 }
 
-pub type DownstreamPort = gasket::messaging::OutputPort<ChainSyncEvent>;
+pub type DownstreamPort = gasket::messaging::tokio::OutputPort<UpstreamEvent>;
 
-pub type OuroborosClient = pallas::network::miniprotocols::chainsync::N2NClient<ProtocolChannel>;
+async fn intersect(peer: &mut PeerClient, intersection: Intersection) -> Result<(), WorkerError> {
+    let chainsync = peer.chainsync();
+
+    let intersect = match intersection {
+        Intersection::Origin => {
+            info!("intersecting origin");
+            chainsync.intersect_origin().await.or_restart()?.into()
+        }
+        Intersection::Tip => {
+            info!("intersecting tip");
+            chainsync.intersect_tip().await.or_restart()?.into()
+        }
+        Intersection::Breadcrumbs(points) => {
+            info!("intersecting breadcrumbs");
+            let (point, _) = chainsync.find_intersect(points.into()).await.or_restart()?;
+            point
+        }
+    };
+
+    info!(?intersect, "intersected");
+
+    Ok(())
+}
 
 pub struct Worker {
-    chain_cursor: Cursor,
-    client: OuroborosClient,
-    downstream: DownstreamPort,
-    block_count: gasket::metrics::Counter,
-    chain_tip: gasket::metrics::Gauge,
+    peer_session: PeerClient,
 }
 
 impl Worker {
-    pub fn new(chain_cursor: Cursor, plexer: ProtocolChannel, downstream: DownstreamPort) -> Self {
-        let client = OuroborosClient::new(plexer);
-
-        Self {
-            chain_cursor,
-            client,
-            downstream,
-            block_count: Default::default(),
-            chain_tip: Default::default(),
-        }
-    }
-
-    fn process_next(
+    async fn process_next(
         &mut self,
-        next: NextResponse<HeaderContent>,
-    ) -> Result<(), gasket::error::Error> {
+        stage: &mut Stage,
+        next: &NextResponse<HeaderContent>,
+    ) -> Result<(), WorkerError> {
         match next {
-            chainsync::NextResponse::RollForward(h, t) => {
-                let h = to_traverse(&h).or_panic()?;
-                self.downstream
-                    .send(ChainSyncEvent::RollForward(h.slot(), h.hash()).into())?;
+            NextResponse::RollForward(header, tip) => {
+                let header = to_traverse(header).or_panic()?;
+                let slot = header.slot();
+                let hash = header.hash();
 
-                debug!(slot = h.slot(), hash = %h.hash(), "chain sync roll forward");
-                self.chain_tip.set(t.1 as i64);
+                debug!(slot, %hash, "chain sync roll forward");
+
+                let block = self
+                    .peer_session
+                    .blockfetch()
+                    .fetch_single(Point::Specific(slot, hash.to_vec()))
+                    .await
+                    .or_retry()?;
+
+                stage
+                    .downstream
+                    .send(UpstreamEvent::RollForward(slot, hash, block).into())
+                    .await
+                    .or_panic()?;
+
+                stage.chain_tip.set(tip.0.slot_or_default() as i64);
+
                 Ok(())
             }
-            chainsync::NextResponse::RollBackward(p, t) => {
-                self.downstream.send(ChainSyncEvent::Rollback(p).into())?;
-                self.chain_tip.set(t.1 as i64);
+            chainsync::NextResponse::RollBackward(point, tip) => {
+                match &point {
+                    Point::Origin => debug!("rollback to origin"),
+                    Point::Specific(slot, _) => debug!(slot, "rollback"),
+                };
+
+                stage
+                    .downstream
+                    .send(UpstreamEvent::Rollback(point.clone()).into())
+                    .await
+                    .or_panic()?;
+
+                stage.chain_tip.set(tip.0.slot_or_default() as i64);
+
                 Ok(())
             }
             chainsync::NextResponse::Await => {
@@ -65,50 +102,90 @@ impl Worker {
             }
         }
     }
-
-    fn request_next(&mut self) -> Result<(), gasket::error::Error> {
-        info!("requesting next block");
-        let next = self.client.request_next().or_restart()?;
-        self.process_next(next)
-    }
-
-    fn await_next(&mut self) -> Result<(), gasket::error::Error> {
-        info!("awaiting next block (blocking)");
-        let next = self.client.recv_while_must_reply().or_restart()?;
-        self.process_next(next)
-    }
 }
 
-impl gasket::runtime::Worker for Worker {
-    fn metrics(&self) -> gasket::metrics::Registry {
-        gasket::metrics::Builder::new()
-            .with_counter("received_blocks", &self.block_count)
-            .with_gauge("chain_tip", &self.chain_tip)
-            .build()
+#[async_trait::async_trait(?Send)]
+impl gasket::framework::Worker<Stage> for Worker {
+    async fn bootstrap(stage: &Stage) -> Result<Self, WorkerError> {
+        debug!("connecting");
+
+        let intersection = stage.chain_cursor.intersection();
+
+        let mut peer_session = PeerClient::connect(&stage.peer_address, stage.network_magic)
+            .await
+            .or_retry()?;
+
+        intersect(&mut peer_session, intersection).await?;
+
+        let worker = Self { peer_session };
+
+        Ok(worker)
     }
 
-    fn bootstrap(&mut self) -> Result<(), gasket::error::Error> {
-        let intersects = self.chain_cursor.intersections().or_panic()?;
+    async fn schedule(
+        &mut self,
+        _stage: &mut Stage,
+    ) -> Result<WorkSchedule<NextResponse<HeaderContent>>, WorkerError> {
+        let client = self.peer_session.chainsync();
 
-        info!("intersecting chain at points: {:?}", intersects);
+        let next = match client.has_agency() {
+            true => {
+                info!("requesting next block");
+                client.request_next().await.or_restart()?
+            }
+            false => {
+                info!("awaiting next block (blocking)");
+                client.recv_while_must_reply().await.or_restart()?
+            }
+        };
 
-        let (point, _) = self
-            .client
-            .find_intersect(intersects)
-            .map_err(Error::client)
-            .or_restart()?;
+        Ok(WorkSchedule::Unit(next))
+    }
 
-        info!(?point, "chain-sync intersected");
+    async fn execute(
+        &mut self,
+        unit: &NextResponse<HeaderContent>,
+        stage: &mut Stage,
+    ) -> Result<(), WorkerError> {
+        self.process_next(stage, unit).await
+    }
+
+    async fn teardown(&mut self) -> Result<(), WorkerError> {
+        self.peer_session.abort();
 
         Ok(())
     }
+}
 
-    fn work(&mut self) -> gasket::runtime::WorkResult {
-        match self.client.has_agency() {
-            true => self.request_next()?,
-            false => self.await_next()?,
-        };
+#[derive(Stage)]
+#[stage(
+    name = "chainsync",
+    unit = "NextResponse<HeaderContent>",
+    worker = "Worker"
+)]
+pub struct Stage {
+    peer_address: String,
+    network_magic: u64,
+    chain_cursor: Cursor,
 
-        Ok(gasket::runtime::WorkOutcome::Partial)
+    pub downstream: DownstreamPort,
+
+    #[metric]
+    block_count: gasket::metrics::Counter,
+
+    #[metric]
+    chain_tip: gasket::metrics::Gauge,
+}
+
+impl Stage {
+    pub fn new(peer_address: String, network_magic: u64, chain_cursor: Cursor) -> Self {
+        Self {
+            peer_address,
+            network_magic,
+            chain_cursor,
+            downstream: Default::default(),
+            block_count: Default::default(),
+            chain_tip: Default::default(),
+        }
     }
 }
