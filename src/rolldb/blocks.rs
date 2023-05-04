@@ -34,6 +34,7 @@ impl TryFrom<super::RawKV> for Entry {
         Ok(Entry(k, v))
     }
 }
+
 pub fn stage_upsert(
     db: &DB,
     hash: super::BlockHash,

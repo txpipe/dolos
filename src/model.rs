@@ -5,13 +5,7 @@ pub type BlockHash = Hash<32>;
 pub type RawBlock = Vec<u8>;
 
 #[derive(Debug, Clone)]
-pub enum ChainSyncEvent {
-    RollForward(BlockSlot, BlockHash),
-    Rollback(Point),
-}
-
-#[derive(Debug, Clone)]
-pub enum BlockFetchEvent {
+pub enum UpstreamEvent {
     RollForward(BlockSlot, BlockHash, RawBlock),
     Rollback(Point),
 }
