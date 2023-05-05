@@ -2162,73 +2162,32 @@ dependencies = [
 
 [[package]]
 name = "utxorpc"
-version = "0.1.0"
-dependencies = [
- "utxorpc-spec-build",
- "utxorpc-spec-cardano",
- "utxorpc-spec-submit",
- "utxorpc-spec-sync",
- "utxorpc-spec-watch",
-]
-
-[[package]]
-name = "utxorpc-spec-build"
 version = "1.0.0-alpha.0"
-source = "git+https://github.com/utxorpc/spec.git#91ac88263afb46486ee15b52fbc8a2fea01a2109"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "932369ddbcd5e4cd5d09fae031186de514b5e59ae2bd59f695307e753253605b"
 dependencies = [
- "bytes",
- "pbjson",
- "pbjson-types",
- "prost",
- "serde",
- "tonic",
  "utxorpc-spec-cardano",
+ "utxorpc-spec-sync",
 ]
 
 [[package]]
 name = "utxorpc-spec-cardano"
 version = "1.0.0-alpha.0"
-source = "git+https://github.com/utxorpc/spec.git#91ac88263afb46486ee15b52fbc8a2fea01a2109"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0cc662f8175a4dbb0c7f7f8bbc6843d8a1b1476246203ad208c89b6f2901a8e3"
 dependencies = [
  "bytes",
  "pbjson",
  "pbjson-types",
  "prost",
  "serde",
-]
-
-[[package]]
-name = "utxorpc-spec-submit"
-version = "1.0.0-alpha.0"
-source = "git+https://github.com/utxorpc/spec.git#91ac88263afb46486ee15b52fbc8a2fea01a2109"
-dependencies = [
- "bytes",
- "pbjson",
- "pbjson-types",
- "prost",
- "serde",
- "tonic",
- "utxorpc-spec-cardano",
 ]
 
 [[package]]
 name = "utxorpc-spec-sync"
 version = "1.0.0-alpha.0"
-source = "git+https://github.com/utxorpc/spec.git#91ac88263afb46486ee15b52fbc8a2fea01a2109"
-dependencies = [
- "bytes",
- "pbjson",
- "pbjson-types",
- "prost",
- "serde",
- "tonic",
- "utxorpc-spec-cardano",
-]
-
-[[package]]
-name = "utxorpc-spec-watch"
-version = "1.0.0-alpha.0"
-source = "git+https://github.com/utxorpc/spec.git#91ac88263afb46486ee15b52fbc8a2fea01a2109"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d0f1f1af3b85b2c63f57f75bd240c3685731d7ac66f6992e781e2b347ff3f294"
 dependencies = [
  "bytes",
  "pbjson",
