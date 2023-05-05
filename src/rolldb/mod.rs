@@ -1,10 +1,12 @@
-mod blocks;
-mod wal;
 use pallas::crypto::hash::Hash;
 use std::path::Path;
 use thiserror::Error;
 
 use rocksdb::{Options, WriteBatch, DB};
+
+mod macros;
+mod types;
+mod wal;
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -15,18 +17,20 @@ pub enum Error {
     Serde,
 }
 
-const CHAIN_CF: &str = "chain";
-
 type BlockSlot = u64;
 type BlockHash = Hash<32>;
 type BlockBody = Vec<u8>;
-
-type RawKV = (Box<[u8]>, Box<[u8]>);
 
 pub struct RollDB {
     db: DB,
     wal_seq: u64,
 }
+
+// block hash => block content
+crate::kv_table!(pub BlockKV: types::DBHash => types::DBBytes);
+
+// slot => block hash
+crate::kv_table!(pub ChainKV: types::DBInt => types::DBHash);
 
 impl RollDB {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, Error> {
@@ -34,16 +38,21 @@ impl RollDB {
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
 
-        let db = DB::open_cf(&opts, path, [blocks::CF_NAME, CHAIN_CF, wal::CF_NAME])
-            .map_err(|_| Error::IO)?;
+        let db = DB::open_cf(
+            &opts,
+            path,
+            [BlockKV::CF_NAME, ChainKV::CF_NAME, wal::WalKV::CF_NAME],
+        )
+        .map_err(|_| Error::IO)?;
 
-        let wal_seq = wal::find_latest_seq(&db)?.into();
+        let wal_seq = wal::WalKV::last_key(&db)?.map(|x| x.0).unwrap_or_default();
 
         Ok(Self { db, wal_seq })
     }
 
-    pub fn get_block(&mut self, hash: Hash<32>) -> Result<Option<BlockBody>, Error> {
-        blocks::get_body(&self.db, hash)
+    pub fn get_block(&self, hash: Hash<32>) -> Result<Option<BlockBody>, Error> {
+        let dbval = BlockKV::get_by_key(&self.db, types::DBHash(hash))?;
+        Ok(dbval.map(|x| x.0))
     }
 
     pub fn roll_forward(
@@ -55,10 +64,16 @@ impl RollDB {
         let mut batch = WriteBatch::default();
 
         // keep track of the new block body
-        blocks::stage_upsert(&self.db, hash, body, &mut batch)?;
+        BlockKV::stage_upsert(
+            &self.db,
+            types::DBHash(hash),
+            types::DBBytes(body),
+            &mut batch,
+        )?;
 
         // advance the WAL to the new point
-        let new_seq = wal::stage_roll_forward(&self.db, self.wal_seq, slot, hash, &mut batch)?;
+        let new_seq =
+            wal::WalKV::stage_roll_forward(&self.db, self.wal_seq, slot, hash, &mut batch)?;
 
         self.db.write(batch).map_err(|_| Error::IO)?;
         self.wal_seq = new_seq;
@@ -69,7 +84,7 @@ impl RollDB {
     pub fn roll_back(&mut self, until: BlockSlot) -> Result<(), Error> {
         let mut batch = WriteBatch::default();
 
-        let new_seq = wal::stage_roll_back(&self.db, self.wal_seq, until, &mut batch)?;
+        let new_seq = wal::WalKV::stage_roll_back(&self.db, self.wal_seq, until, &mut batch)?;
 
         self.db.write(batch).map_err(|_| Error::IO)?;
         self.wal_seq = new_seq;
@@ -79,12 +94,14 @@ impl RollDB {
 
     pub fn find_tip(&self) -> Result<Option<(BlockSlot, BlockHash)>, Error> {
         // TODO: tip might be either on chain or WAL, we need to query both
-        wal::find_tip(&self.db)
+        wal::WalKV::find_tip(&self.db)
     }
 
-    pub fn crawl_wal(&self) -> wal::CrawlIterator {
-        wal::crawl_forward(&self.db)
+    pub fn crawl_wal<'a>(&'a self) -> impl Iterator<Item = Result<wal::Value, Error>> + 'a {
+        wal::WalKV::iter_values(&self.db, rocksdb::IteratorMode::Start).map(|v| v.map(|x| x.0))
     }
+
+    //pub fn compact(&self) -> Result<(), Error> {}
 
     pub fn destroy(path: impl AsRef<Path>) -> Result<(), Error> {
         DB::destroy(&Options::default(), path).map_err(|_| Error::IO)
