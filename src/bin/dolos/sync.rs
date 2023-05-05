@@ -14,7 +14,7 @@ pub fn run(config: &super::Config, _args: &Args) -> Result<(), Error> {
     )
     .unwrap();
 
-    let cursor = Cursor::new(dolos::upstream::cursor::Intersection::Origin);
+    let cursor = Cursor::new(dolos::upstream::cursor::Intersection::Tip);
 
     let (to_reducer, from_chainsync) = gasket::messaging::tokio::channel(50);
 
