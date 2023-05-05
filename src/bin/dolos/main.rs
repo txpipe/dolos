@@ -1,13 +1,16 @@
 use clap::{Parser, Subcommand};
 use miette::{IntoDiagnostic, Result};
 use serde::Deserialize;
+
 mod read;
+mod serve;
 mod sync;
 
 #[derive(Debug, Subcommand)]
 enum Command {
     Sync(sync::Args),
     Read(read::Args),
+    Serve(serve::Args),
 }
 
 #[derive(Debug, Parser)]
@@ -67,6 +70,7 @@ fn main() -> Result<()> {
     match args.command {
         Command::Sync(x) => sync::run(&config, &x).into_diagnostic()?,
         Command::Read(x) => read::run(&config, &x).into_diagnostic()?,
+        Command::Serve(x) => serve::run(&config, &x).into_diagnostic()?,
     };
 
     Ok(())

@@ -29,8 +29,8 @@ pub enum Error {
 }
 
 impl Error {
-    pub fn config(text: impl Into<String>) -> Error {
-        Error::ConfigError(text.into())
+    pub fn config(text: impl Display) -> Error {
+        Error::ConfigError(text.to_string())
     }
 
     pub fn client(error: impl Display) -> Error {
