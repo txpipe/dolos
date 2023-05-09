@@ -2,12 +2,14 @@ use clap::{Parser, Subcommand};
 use miette::{IntoDiagnostic, Result};
 use serde::Deserialize;
 
+mod daemon;
 mod read;
 mod serve;
 mod sync;
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    Daemon(daemon::Args),
     Sync(sync::Args),
     Read(read::Args),
     Serve(serve::Args),
@@ -25,12 +27,6 @@ struct Cli {
 }
 
 #[derive(Deserialize)]
-pub struct UpstreamConfig {
-    peer_address: String,
-    network_magic: u64,
-}
-
-#[derive(Deserialize)]
 pub struct RolldbConfig {
     path: Option<std::path::PathBuf>,
     k_param: Option<u64>,
@@ -38,7 +34,7 @@ pub struct RolldbConfig {
 
 #[derive(Deserialize)]
 pub struct Config {
-    upstream: UpstreamConfig,
+    upstream: dolos::upstream::Config,
     rolldb: RolldbConfig,
 }
 
@@ -69,6 +65,7 @@ fn main() -> Result<()> {
     let config = Config::new(&args.config).into_diagnostic()?;
 
     match args.command {
+        Command::Daemon(x) => daemon::run(&config, &x).into_diagnostic()?,
         Command::Sync(x) => sync::run(&config, &x).into_diagnostic()?,
         Command::Read(x) => read::run(&config, &x).into_diagnostic()?,
         Command::Serve(x) => serve::run(&config, &x).into_diagnostic()?,

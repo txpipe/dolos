@@ -19,6 +19,7 @@ pub fn run(config: &super::Config, _args: &Args) -> Result<(), Error> {
             .path
             .as_deref()
             .unwrap_or_else(|| Path::new("/db")),
+        config.rolldb.k_param.unwrap_or(1000),
     )
     .unwrap();
 

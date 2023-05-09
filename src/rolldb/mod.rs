@@ -1,5 +1,5 @@
 use pallas::crypto::hash::Hash;
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 use thiserror::Error;
 
 use rocksdb::{Options, WriteBatch, DB};
@@ -23,9 +23,11 @@ type BlockSlot = u64;
 type BlockHash = Hash<32>;
 type BlockBody = Vec<u8>;
 
+#[derive(Clone)]
 pub struct RollDB {
-    db: DB,
+    db: Arc<DB>,
     wal_seq: u64,
+    k_param: u64,
 }
 
 // block hash => block content
@@ -35,7 +37,7 @@ crate::kv_table!(pub BlockKV: types::DBHash => types::DBBytes);
 crate::kv_table!(pub ChainKV: types::DBInt => types::DBHash);
 
 impl RollDB {
-    pub fn open(path: impl AsRef<Path>) -> Result<Self, Error> {
+    pub fn open(path: impl AsRef<Path>, k_param: u64) -> Result<Self, Error> {
         let mut opts = Options::default();
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
@@ -49,7 +51,11 @@ impl RollDB {
 
         let wal_seq = wal::WalKV::last_key(&db)?.map(|x| x.0).unwrap_or_default();
 
-        Ok(Self { db, wal_seq })
+        Ok(Self {
+            db: Arc::new(db),
+            wal_seq,
+            k_param,
+        })
     }
 
     pub fn get_block(&self, hash: Hash<32>) -> Result<Option<BlockBody>, Error> {
@@ -120,7 +126,7 @@ impl RollDB {
             .take(len)
     }
 
-    pub fn compact(&self, k_param: u64) -> Result<(), Error> {
+    pub fn compact(&self) -> Result<(), Error> {
         let tip = WalKV::find_tip(&self.db)?
             .map(|(slot, _)| slot)
             .unwrap_or_default();
@@ -130,7 +136,7 @@ impl RollDB {
         while let Some(Ok((wal_key, value))) = iter.next() {
             let slot_delta = tip - value.slot();
 
-            if slot_delta <= k_param {
+            if slot_delta <= self.k_param {
                 break;
             }
 
@@ -166,7 +172,7 @@ mod tests {
 
     fn with_tmp_db(op: fn(db: RollDB) -> ()) {
         let path = tempfile::tempdir().unwrap().into_path();
-        let db = RollDB::open(path.clone()).unwrap();
+        let db = RollDB::open(path.clone(), 30).unwrap();
 
         op(db);
 
@@ -219,7 +225,7 @@ mod tests {
                 db.roll_forward(slot, hash, body).unwrap();
             }
 
-            db.compact(30).unwrap();
+            db.compact().unwrap();
 
             let mut chain = db.crawl_chain();
 
@@ -251,7 +257,7 @@ mod tests {
 
             db.roll_back(800).unwrap();
 
-            db.compact(30).unwrap();
+            db.compact().unwrap();
 
             let mut chain = db.crawl_chain();
 
@@ -292,7 +298,7 @@ mod tests {
                 db.roll_forward(slot, hash, body).unwrap();
             }
 
-            db.compact(30).unwrap();
+            db.compact().unwrap();
 
             let mut chain = db.read_chain_page(200, 15);
 

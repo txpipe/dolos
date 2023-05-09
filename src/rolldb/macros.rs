@@ -105,7 +105,7 @@ macro_rules! kv_table {
                 let cf = Self::cf(db);
                 let raw_key = Box::<[u8]>::try_from(k).map_err(|_| $crate::rolldb::Error::Serde)?;
                 let raw_value = db
-                    .get_cf(cf, raw_key)
+                    .get_cf(&cf, raw_key)
                     .map_err(|_| $crate::rolldb::Error::IO)?
                     .map(|x| Box::from(x.as_slice()));
 
@@ -130,7 +130,7 @@ macro_rules! kv_table {
                 let k_raw = Box::<[u8]>::from(k);
                 let v_raw = Box::<[u8]>::from(v);
 
-                batch.put_cf(cf, k_raw, v_raw);
+                batch.put_cf(&cf, k_raw, v_raw);
             }
 
             pub fn iter_keys<'a>(
@@ -138,7 +138,7 @@ macro_rules! kv_table {
                 mode: rocksdb::IteratorMode,
             ) -> crate::rolldb::macros::KeyIterator<'a, $key_type> {
                 let cf = Self::cf(db);
-                let inner = db.iterator_cf(cf, mode);
+                let inner = db.iterator_cf(&cf, mode);
                 crate::rolldb::macros::KeyIterator::new(inner)
             }
 
@@ -147,7 +147,7 @@ macro_rules! kv_table {
                 mode: rocksdb::IteratorMode,
             ) -> crate::rolldb::macros::ValueIterator<'a, $value_type> {
                 let cf = Self::cf(db);
-                let inner = db.iterator_cf(cf, mode);
+                let inner = db.iterator_cf(&cf, mode);
                 crate::rolldb::macros::ValueIterator::new(inner)
             }
 
@@ -156,7 +156,7 @@ macro_rules! kv_table {
                 mode: rocksdb::IteratorMode,
             ) -> crate::rolldb::macros::EntryIterator<'a, $key_type, $value_type> {
                 let cf = Self::cf(db);
-                let inner = db.iterator_cf(cf, mode);
+                let inner = db.iterator_cf(&cf, mode);
                 crate::rolldb::macros::EntryIterator::new(inner)
             }
 
@@ -166,7 +166,7 @@ macro_rules! kv_table {
             ) -> crate::rolldb::macros::EntryIterator<'a, $key_type, $value_type> {
                 let cf = Self::cf(db);
                 let from_raw = Box::<[u8]>::from(from);
-                let inner = db.iterator_cf(cf, rocksdb::IteratorMode::From(&from_raw, rocksdb::Direction::Forward));
+                let inner = db.iterator_cf(&cf, rocksdb::IteratorMode::From(&from_raw, rocksdb::Direction::Forward));
                 crate::rolldb::macros::EntryIterator::new(inner)
             }
 
@@ -191,7 +191,7 @@ macro_rules! kv_table {
             pub fn stage_delete(db: &DB, key: $key_type, batch: &mut WriteBatch) {
                 let cf = Self::cf(db);
                 let k_raw = Box::<[u8]>::from(key);
-                batch.delete_cf(cf, k_raw);
+                batch.delete_cf(&cf, k_raw);
             }
         }
     };

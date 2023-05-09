@@ -10,9 +10,7 @@ pub type UpstreamPort = gasket::messaging::tokio::InputPort<UpstreamEvent>;
 #[derive(Stage)]
 #[stage(name = "reducer", unit = "UpstreamEvent", worker = "Worker")]
 pub struct Stage {
-    path: PathBuf,
-
-    k_param: u64,
+    rolldb: RollDB,
 
     pub upstream: UpstreamPort,
 
@@ -24,10 +22,9 @@ pub struct Stage {
 }
 
 impl Stage {
-    pub fn new(path: &Path, k_param: u64) -> Self {
+    pub fn new(rolldb: RollDB) -> Self {
         Self {
-            path: PathBuf::from(path),
-            k_param,
+            rolldb,
             upstream: Default::default(),
             block_count: Default::default(),
             wal_count: Default::default(),
@@ -35,16 +32,12 @@ impl Stage {
     }
 }
 
-pub struct Worker {
-    db: RollDB,
-}
+pub struct Worker;
 
 #[async_trait::async_trait(?Send)]
 impl gasket::framework::Worker<Stage> for Worker {
     async fn bootstrap(stage: &Stage) -> Result<Self, WorkerError> {
-        Ok(Self {
-            db: RollDB::open(&stage.path).or_panic()?,
-        })
+        Ok(Self)
     }
 
     async fn schedule(
@@ -63,13 +56,14 @@ impl gasket::framework::Worker<Stage> for Worker {
     ) -> Result<(), WorkerError> {
         match unit {
             UpstreamEvent::RollForward(slot, hash, body) => {
-                self.db
+                stage
+                    .rolldb
                     .roll_forward(*slot, hash.clone(), body.clone())
                     .or_panic()?;
             }
             UpstreamEvent::Rollback(point) => match point {
                 pallas::network::miniprotocols::Point::Specific(slot, _) => {
-                    self.db.roll_back(*slot).or_panic()?;
+                    stage.rolldb.roll_back(*slot).or_panic()?;
                 }
                 pallas::network::miniprotocols::Point::Origin => {
                     //todo!();
@@ -78,7 +72,7 @@ impl gasket::framework::Worker<Stage> for Worker {
         }
 
         // TODO: don't do this while doing full sync
-        self.db.compact(stage.k_param).or_panic()?;
+        stage.rolldb.compact().or_panic()?;
 
         Ok(())
     }
