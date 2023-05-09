@@ -1,6 +1,5 @@
 use rocksdb::{IteratorMode, WriteBatch, DB};
 use serde::{Deserialize, Serialize};
-use std::convert::{TryFrom, TryInto};
 
 #[derive(Debug, Copy, Clone, Serialize, Deserialize)]
 pub enum WalAction {
@@ -79,7 +78,7 @@ impl WalKV {
             super::types::DBInt(new_seq),
             super::types::DBSerde(value),
             batch,
-        )?;
+        );
 
         Ok(new_seq)
     }

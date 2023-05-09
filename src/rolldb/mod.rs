@@ -71,7 +71,7 @@ impl RollDB {
             types::DBHash(hash),
             types::DBBytes(body),
             &mut batch,
-        )?;
+        );
 
         // advance the WAL to the new point
         let new_seq =
@@ -110,6 +110,16 @@ impl RollDB {
             .map(|res| res.map(|(x, y)| (x.0, y.0)))
     }
 
+    pub fn read_chain_page<'a>(
+        &'a self,
+        from: BlockSlot,
+        len: usize,
+    ) -> impl Iterator<Item = Result<(BlockSlot, BlockHash), Error>> + 'a {
+        ChainKV::iter_entries_from(&self.db, types::DBInt(from))
+            .map(|res| res.map(|(x, y)| (x.0, y.0)))
+            .take(len)
+    }
+
     pub fn compact(&self, k_param: u64) -> Result<(), Error> {
         let tip = WalKV::find_tip(&self.db)?
             .map(|(slot, _)| slot)
@@ -130,13 +140,13 @@ impl RollDB {
             match value.action() {
                 wal::WalAction::Apply | wal::WalAction::Mark => {
                     let hash_value = types::DBHash(value.hash().clone());
-                    ChainKV::stage_upsert(&self.db, slot_key, hash_value, &mut batch)?;
-                    WalKV::stage_delete(&self.db, wal_key, &mut batch)?;
+                    ChainKV::stage_upsert(&self.db, slot_key, hash_value, &mut batch);
+                    WalKV::stage_delete(&self.db, wal_key, &mut batch);
                     self.db.write(batch).map_err(|_| Error::IO)?;
                 }
                 wal::WalAction::Undo => {
-                    ChainKV::stage_delete(&self.db, slot_key, &mut batch)?;
-                    WalKV::stage_delete(&self.db, wal_key, &mut batch)?;
+                    ChainKV::stage_delete(&self.db, slot_key, &mut batch);
+                    WalKV::stage_delete(&self.db, wal_key, &mut batch);
                     self.db.write(batch).map_err(|_| Error::IO)?;
                 }
             }
@@ -271,6 +281,27 @@ mod tests {
             assert_eq!(entry.slot(), 800);
 
             assert!(wal.next().is_none());
+        });
+    }
+
+    #[test]
+    fn test_chain_page() {
+        with_tmp_db(|mut db| {
+            for i in 0..100 {
+                let (slot, hash, body) = dummy_block(i * 10);
+                db.roll_forward(slot, hash, body).unwrap();
+            }
+
+            db.compact(30).unwrap();
+
+            let mut chain = db.read_chain_page(200, 15);
+
+            for i in 0..15 {
+                let (slot, _) = chain.next().unwrap().unwrap();
+                assert_eq!(200 + (i * 10), slot)
+            }
+
+            assert!(chain.next().is_none());
         });
     }
 }
