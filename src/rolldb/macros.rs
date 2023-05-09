@@ -54,6 +54,44 @@ where
     }
 }
 
+pub struct EntryIterator<'a, K, V>(RocksIterator<'a>, PhantomData<(K, V)>);
+
+impl<'a, K, V> EntryIterator<'a, K, V> {
+    pub fn new(inner: RocksIterator<'a>) -> Self {
+        Self(inner, Default::default())
+    }
+}
+
+impl<'a, K, V> Iterator for EntryIterator<'a, K, V>
+where
+    K: TryFrom<Box<[u8]>, Error = super::Error>,
+    V: TryFrom<Box<[u8]>, Error = super::Error>,
+{
+    type Item = Result<(K, V), super::Error>;
+
+    fn next(&mut self) -> Option<Result<(K, V), super::Error>> {
+        match self.0.next() {
+            Some(Ok((key, value))) => {
+                let key_out = K::try_from(key);
+                let value_out = V::try_from(value);
+
+                let out = match (key_out, value_out) {
+                    (Ok(k), Ok(v)) => Ok((k, v)),
+                    (Err(e), _) => Err(e),
+                    (_, Err(e)) => Err(e),
+                };
+
+                Some(out)
+            }
+            Some(Err(err)) => {
+                tracing::error!(?err);
+                Some(Err(super::Error::IO))
+            }
+            None => None,
+        }
+    }
+}
+
 #[macro_export]
 macro_rules! kv_table {
     ($vis:vis $name:ident : $key_type:ty => $value_type:ty) => {
@@ -121,6 +159,15 @@ macro_rules! kv_table {
                 crate::rolldb::macros::ValueIterator::new(inner)
             }
 
+            pub fn iter_entries<'a>(
+                db: &'a rocksdb::DB,
+                mode: rocksdb::IteratorMode,
+            ) -> crate::rolldb::macros::EntryIterator<'a, $key_type, $value_type> {
+                let cf = Self::cf(db);
+                let inner = db.iterator_cf(cf, mode);
+                crate::rolldb::macros::EntryIterator::new(inner)
+            }
+
             pub fn last_key(db: &DB) -> Result<Option<$key_type>, $crate::rolldb::Error> {
                 let mut iter = Self::iter_keys(db, rocksdb::IteratorMode::End);
 
@@ -137,6 +184,16 @@ macro_rules! kv_table {
                     None => Ok(None),
                     Some(x) => Ok(Some(x?)),
                 }
+            }
+
+            pub fn stage_delete(db: &DB, key: $key_type, batch: &mut WriteBatch) -> Result<(), $crate::rolldb::Error> {
+                let cf = Self::cf(db);
+
+                let k_raw = Box::<[u8]>::try_from(key).map_err(|_| $crate::rolldb::Error::Serde)?;
+
+                batch.delete_cf(cf, k_raw);
+
+                Ok(())
             }
         }
     };

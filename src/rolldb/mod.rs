@@ -4,6 +4,8 @@ use thiserror::Error;
 
 use rocksdb::{Options, WriteBatch, DB};
 
+use crate::rolldb::wal::WalKV;
+
 mod macros;
 mod types;
 mod wal;
@@ -101,7 +103,47 @@ impl RollDB {
         wal::WalKV::iter_values(&self.db, rocksdb::IteratorMode::Start).map(|v| v.map(|x| x.0))
     }
 
-    //pub fn compact(&self) -> Result<(), Error> {}
+    pub fn crawl_chain<'a>(
+        &'a self,
+    ) -> impl Iterator<Item = Result<(BlockSlot, BlockHash), Error>> + 'a {
+        ChainKV::iter_entries(&self.db, rocksdb::IteratorMode::Start)
+            .map(|res| res.map(|(x, y)| (x.0, y.0)))
+    }
+
+    pub fn compact(&self, k_param: u64) -> Result<(), Error> {
+        let tip = WalKV::find_tip(&self.db)?
+            .map(|(slot, _)| slot)
+            .unwrap_or_default();
+
+        let mut iter = wal::WalKV::iter_entries(&self.db, rocksdb::IteratorMode::Start);
+
+        while let Some(Ok((wal_key, value))) = iter.next() {
+            let slot_delta = tip - value.slot();
+
+            if slot_delta <= k_param {
+                break;
+            }
+
+            let mut batch = WriteBatch::default();
+            let slot_key = types::DBInt(value.slot());
+
+            match value.action() {
+                wal::WalAction::Apply | wal::WalAction::Mark => {
+                    let hash_value = types::DBHash(value.hash().clone());
+                    ChainKV::stage_upsert(&self.db, slot_key, hash_value, &mut batch)?;
+                    WalKV::stage_delete(&self.db, wal_key, &mut batch)?;
+                    self.db.write(batch).map_err(|_| Error::IO)?;
+                }
+                wal::WalAction::Undo => {
+                    ChainKV::stage_delete(&self.db, slot_key, &mut batch)?;
+                    WalKV::stage_delete(&self.db, wal_key, &mut batch)?;
+                    self.db.write(batch).map_err(|_| Error::IO)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
 
     pub fn destroy(path: impl AsRef<Path>) -> Result<(), Error> {
         DB::destroy(&Options::default(), path).map_err(|_| Error::IO)
@@ -158,4 +200,77 @@ mod tests {
 
     //TODO: test rollback beyond K
     //TODO: test rollback with unknown slot
+
+    #[test]
+    fn test_compact_linear() {
+        with_tmp_db(|mut db| {
+            for i in 0..100 {
+                let (slot, hash, body) = dummy_block(i * 10);
+                db.roll_forward(slot, hash, body).unwrap();
+            }
+
+            db.compact(30).unwrap();
+
+            let mut chain = db.crawl_chain();
+
+            for i in 0..96 {
+                let (slot, _) = chain.next().unwrap().unwrap();
+                assert_eq!(i * 10, slot)
+            }
+
+            assert!(chain.next().is_none());
+
+            let mut wal = db.crawl_wal();
+
+            for i in 96..100 {
+                let entry = wal.next().unwrap().unwrap();
+                assert_eq!(entry.slot(), i * 10);
+            }
+
+            assert!(wal.next().is_none());
+        });
+    }
+
+    #[test]
+    fn test_compact_with_rollback() {
+        with_tmp_db(|mut db| {
+            for i in 0..100 {
+                let (slot, hash, body) = dummy_block(i * 10);
+                db.roll_forward(slot, hash, body).unwrap();
+            }
+
+            db.roll_back(800).unwrap();
+
+            db.compact(30).unwrap();
+
+            let mut chain = db.crawl_chain();
+
+            for i in 0..77 {
+                let (slot, _) = chain.next().unwrap().unwrap();
+                assert_eq!(i * 10, slot)
+            }
+
+            assert!(chain.next().is_none());
+
+            let mut wal = db.crawl_wal();
+
+            for i in 77..100 {
+                let entry = wal.next().unwrap().unwrap();
+                assert!(entry.is_apply());
+                assert_eq!(entry.slot(), i * 10);
+            }
+
+            for i in (81..100).rev() {
+                let entry = wal.next().unwrap().unwrap();
+                assert!(entry.is_undo());
+                assert_eq!(entry.slot(), i * 10);
+            }
+
+            let entry = wal.next().unwrap().unwrap();
+            assert!(entry.is_mark());
+            assert_eq!(entry.slot(), 800);
+
+            assert!(wal.next().is_none());
+        });
+    }
 }
