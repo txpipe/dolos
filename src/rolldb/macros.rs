@@ -12,13 +12,13 @@ impl<'a, V> ValueIterator<'a, V> {
 
 impl<'a, V> Iterator for ValueIterator<'a, V>
 where
-    V: TryFrom<Box<[u8]>, Error = super::Error>,
+    V: From<Box<[u8]>>,
 {
     type Item = Result<V, super::Error>;
 
     fn next(&mut self) -> Option<Result<V, super::Error>> {
         match self.0.next() {
-            Some(Ok((_, value))) => Some(V::try_from(value)),
+            Some(Ok((_, value))) => Some(Ok(V::from(value))),
             Some(Err(err)) => {
                 tracing::error!(?err);
                 Some(Err(super::Error::IO))
@@ -38,13 +38,13 @@ impl<'a, K> KeyIterator<'a, K> {
 
 impl<'a, K> Iterator for KeyIterator<'a, K>
 where
-    K: TryFrom<Box<[u8]>, Error = super::Error>,
+    K: From<Box<[u8]>>,
 {
     type Item = Result<K, super::Error>;
 
     fn next(&mut self) -> Option<Result<K, super::Error>> {
         match self.0.next() {
-            Some(Ok((key, _))) => Some(K::try_from(key)),
+            Some(Ok((key, _))) => Some(Ok(K::from(key))),
             Some(Err(err)) => {
                 tracing::error!(?err);
                 Some(Err(super::Error::IO))
@@ -64,24 +64,18 @@ impl<'a, K, V> EntryIterator<'a, K, V> {
 
 impl<'a, K, V> Iterator for EntryIterator<'a, K, V>
 where
-    K: TryFrom<Box<[u8]>, Error = super::Error>,
-    V: TryFrom<Box<[u8]>, Error = super::Error>,
+    K: From<Box<[u8]>>,
+    V: From<Box<[u8]>>,
 {
     type Item = Result<(K, V), super::Error>;
 
     fn next(&mut self) -> Option<Result<(K, V), super::Error>> {
         match self.0.next() {
             Some(Ok((key, value))) => {
-                let key_out = K::try_from(key);
-                let value_out = V::try_from(value);
+                let key_out = K::from(key);
+                let value_out = V::from(value);
 
-                let out = match (key_out, value_out) {
-                    (Ok(k), Ok(v)) => Ok((k, v)),
-                    (Err(e), _) => Err(e),
-                    (_, Err(e)) => Err(e),
-                };
-
-                Some(out)
+                Some(Ok((key_out, value_out)))
             }
             Some(Err(err)) => {
                 tracing::error!(?err);
@@ -130,15 +124,13 @@ macro_rules! kv_table {
                 k: $key_type,
                 v: $value_type,
                 batch: &mut rocksdb::WriteBatch,
-            ) -> Result<(), $crate::rolldb::Error> {
+            ) {
                 let cf = Self::cf(db);
 
-                let k_raw = Box::<[u8]>::try_from(k).map_err(|_| $crate::rolldb::Error::Serde)?;
-                let v_raw = Box::<[u8]>::try_from(v).map_err(|_| $crate::rolldb::Error::Serde)?;
+                let k_raw = Box::<[u8]>::from(k);
+                let v_raw = Box::<[u8]>::from(v);
 
                 batch.put_cf(cf, k_raw, v_raw);
-
-                Ok(())
             }
 
             pub fn iter_keys<'a>(
@@ -168,6 +160,16 @@ macro_rules! kv_table {
                 crate::rolldb::macros::EntryIterator::new(inner)
             }
 
+            pub fn iter_entries_from<'a>(
+                db: &'a rocksdb::DB,
+                from: $key_type,
+            ) -> crate::rolldb::macros::EntryIterator<'a, $key_type, $value_type> {
+                let cf = Self::cf(db);
+                let from_raw = Box::<[u8]>::from(from);
+                let inner = db.iterator_cf(cf, rocksdb::IteratorMode::From(&from_raw, rocksdb::Direction::Forward));
+                crate::rolldb::macros::EntryIterator::new(inner)
+            }
+
             pub fn last_key(db: &DB) -> Result<Option<$key_type>, $crate::rolldb::Error> {
                 let mut iter = Self::iter_keys(db, rocksdb::IteratorMode::End);
 
@@ -186,14 +188,10 @@ macro_rules! kv_table {
                 }
             }
 
-            pub fn stage_delete(db: &DB, key: $key_type, batch: &mut WriteBatch) -> Result<(), $crate::rolldb::Error> {
+            pub fn stage_delete(db: &DB, key: $key_type, batch: &mut WriteBatch) {
                 let cf = Self::cf(db);
-
-                let k_raw = Box::<[u8]>::try_from(key).map_err(|_| $crate::rolldb::Error::Serde)?;
-
+                let k_raw = Box::<[u8]>::from(key);
                 batch.delete_cf(cf, k_raw);
-
-                Ok(())
             }
         }
     };
