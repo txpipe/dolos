@@ -1,8 +1,6 @@
 use std::path::Path;
-use std::sync::Arc;
 
-use dolos::prelude::*;
-use dolos::rolldb::RollDB;
+use dolos::{prelude::*, rolldb::RollDB};
 
 #[derive(Debug, clap::Args)]
 pub struct Args {}
@@ -22,10 +20,15 @@ pub async fn run(config: &super::Config, _args: &Args) -> Result<(), Error> {
         .as_deref()
         .unwrap_or_else(|| Path::new("/db"));
 
-    let db =
-        RollDB::open(rolldb_path, config.rolldb.k_param.unwrap_or(1000)).map_err(Error::config)?;
+    let rolldb = RollDB::open(&rolldb_path, config.rolldb.k_param.unwrap_or(1000))
+        .map_err(|err| Error::storage(err))?;
 
-    dolos::downstream::grpc::serve(db).await?;
+    let db_copy = rolldb.clone();
+    let server = tokio::spawn(dolos::downstream::grpc::serve(db_copy));
+
+    dolos::upstream::pipeline(&config.upstream, rolldb).block();
+
+    server.abort();
 
     Ok(())
 }
