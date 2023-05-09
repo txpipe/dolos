@@ -2,8 +2,8 @@ use rocksdb::{IteratorMode, WriteBatch, DB};
 use serde::{Deserialize, Serialize};
 use std::convert::{TryFrom, TryInto};
 
-#[derive(Debug, Serialize, Deserialize)]
-enum WalAction {
+#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
+pub enum WalAction {
     Apply,
     Undo,
     Mark,
@@ -13,8 +13,16 @@ enum WalAction {
 pub struct Value(WalAction, super::BlockSlot, super::BlockHash);
 
 impl Value {
+    pub fn action(&self) -> WalAction {
+        self.0
+    }
+
     pub fn slot(&self) -> super::BlockSlot {
         self.1
+    }
+
+    pub fn hash(&self) -> &super::BlockHash {
+        &self.2
     }
 
     pub fn into_undo(self) -> Option<Self> {
@@ -30,6 +38,27 @@ impl Value {
             WalAction::Apply => Some(Self(WalAction::Mark, self.1, self.2)),
             WalAction::Undo => None,
             WalAction::Mark => None,
+        }
+    }
+
+    pub fn is_apply(&self) -> bool {
+        match self.0 {
+            WalAction::Apply => true,
+            _ => false,
+        }
+    }
+
+    pub fn is_mark(&self) -> bool {
+        match self.0 {
+            WalAction::Mark => true,
+            _ => false,
+        }
+    }
+
+    pub fn is_undo(&self) -> bool {
+        match self.0 {
+            WalAction::Undo => true,
+            _ => false,
         }
     }
 }
