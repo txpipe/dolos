@@ -32,7 +32,9 @@ pub fn run(config: &super::Config, _args: &Args) -> Result<(), Error> {
         .as_deref()
         .unwrap_or_else(|| Path::new("/db"));
 
-    let mut reducer = dolos::upstream::reducer::Stage::new(rolldb_path);
+    let k_param = config.rolldb.k_param.unwrap_or(1000);
+
+    let mut reducer = dolos::upstream::reducer::Stage::new(rolldb_path, k_param);
 
     reducer.upstream.connect(from_chainsync);
 
