@@ -12,6 +12,8 @@ pub type UpstreamPort = gasket::messaging::tokio::InputPort<UpstreamEvent>;
 pub struct Stage {
     path: PathBuf,
 
+    k_param: u64,
+
     pub upstream: UpstreamPort,
 
     #[metric]
@@ -22,9 +24,10 @@ pub struct Stage {
 }
 
 impl Stage {
-    pub fn new(path: &Path) -> Self {
+    pub fn new(path: &Path, k_param: u64) -> Self {
         Self {
             path: PathBuf::from(path),
+            k_param,
             upstream: Default::default(),
             block_count: Default::default(),
             wal_count: Default::default(),
@@ -56,7 +59,7 @@ impl gasket::framework::Worker<Stage> for Worker {
     async fn execute(
         &mut self,
         unit: &UpstreamEvent,
-        _stage: &mut Stage,
+        stage: &mut Stage,
     ) -> Result<(), WorkerError> {
         match unit {
             UpstreamEvent::RollForward(slot, hash, body) => {
@@ -74,7 +77,8 @@ impl gasket::framework::Worker<Stage> for Worker {
             },
         }
 
-        //self.db.compact();
+        // TODO: don't do this while doing full sync
+        self.db.compact(stage.k_param).or_panic()?;
 
         Ok(())
     }

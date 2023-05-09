@@ -150,7 +150,44 @@ impl chain_sync_service_server::ChainSyncService for ChainSyncServiceImpl {
         &self,
         request: Request<DumpHistoryRequest>,
     ) -> Result<Response<DumpHistoryResponse>, Status> {
-        todo!()
+        let msg = request.into_inner();
+        let from = msg.start_token.map(|r| r.index).unwrap_or_default();
+        let len = msg.max_items as usize + 1;
+
+        let mut page: Vec<_> = self
+            .0
+            .read_chain_page(from, len)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|err| Status::internal("can't query history"))?;
+
+        let next_token = if page.len() == len {
+            let (next_slot, next_hash) = page.remove(len - 1);
+            Some(BlockRef {
+                index: next_slot,
+                hash: next_hash.to_vec().into(),
+            })
+        } else {
+            None
+        };
+
+        let blocks = page
+            .into_iter()
+            .map(|(_, hash)| self.0.get_block(hash))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|err| Status::internal("can't query history"))?
+            .into_iter()
+            .map(|x| x.ok_or(Status::internal("can't query history")))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(|raw| raw_to_anychain(&raw))
+            .collect();
+
+        let response = DumpHistoryResponse {
+            block: blocks,
+            next_token,
+        };
+
+        Ok(Response::new(response))
     }
 
     async fn follow_tip(

@@ -33,6 +33,7 @@ pub struct UpstreamConfig {
 #[derive(Deserialize)]
 pub struct RolldbConfig {
     path: Option<std::path::PathBuf>,
+    k_param: Option<u64>,
 }
 
 #[derive(Deserialize)]
