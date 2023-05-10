@@ -22,7 +22,7 @@ pub fn run(config: &super::Config, _args: &Args) -> Result<(), Error> {
     let rolldb = RollDB::open(&rolldb_path, config.rolldb.k_param.unwrap_or(1000))
         .map_err(|err| Error::storage(err))?;
 
-    dolos::upstream::pipeline(&config.upstream, rolldb).block();
+    dolos::sync::pipeline(&config.upstream, rolldb).block();
 
     Ok(())
 }

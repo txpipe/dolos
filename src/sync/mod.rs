@@ -3,8 +3,8 @@ use serde::Deserialize;
 
 use crate::rolldb::RollDB;
 
-pub mod chainsync;
 pub mod reducer;
+pub mod upstream;
 
 #[derive(Deserialize)]
 pub struct Config {
@@ -15,7 +15,7 @@ pub struct Config {
 pub fn pipeline(config: &Config, rolldb: RollDB) -> gasket::daemon::Daemon {
     let (to_reducer, from_chainsync) = gasket::messaging::tokio::channel(50);
 
-    let mut chainsync = chainsync::Stage::new(
+    let mut chainsync = upstream::Stage::new(
         config.peer_address.clone(),
         config.network_magic,
         rolldb.clone(),
