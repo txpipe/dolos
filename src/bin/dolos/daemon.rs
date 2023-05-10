@@ -24,9 +24,9 @@ pub async fn run(config: &super::Config, _args: &Args) -> Result<(), Error> {
         .map_err(|err| Error::storage(err))?;
 
     let db_copy = rolldb.clone();
-    let server = tokio::spawn(dolos::downstream::grpc::serve(db_copy));
+    let server = tokio::spawn(dolos::serve::grpc::serve(db_copy));
 
-    dolos::upstream::pipeline(&config.upstream, rolldb).block();
+    dolos::sync::pipeline(&config.upstream, rolldb).block();
 
     server.abort();
 

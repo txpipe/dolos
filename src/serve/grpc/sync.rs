@@ -16,10 +16,10 @@ fn bytes_to_hash(raw: &[u8]) -> Hash<32> {
     Hash::<32>::new(array)
 }
 
-fn raw_to_anychain2(raw: &[u8]) -> AnyChainBlock {
-    let block = any_chain_block::Chain::Raw(Bytes::copy_from_slice(raw));
-    AnyChainBlock { chain: Some(block) }
-}
+// fn raw_to_anychain2(raw: &[u8]) -> AnyChainBlock {
+//     let block = any_chain_block::Chain::Raw(Bytes::copy_from_slice(raw));
+//     AnyChainBlock { chain: Some(block) }
+// }
 
 fn raw_to_anychain(raw: &[u8]) -> AnyChainBlock {
     let block = trv::MultiEraBlock::decode(raw).unwrap();
@@ -135,7 +135,7 @@ impl chain_sync_service_server::ChainSyncService for ChainSyncServiceImpl {
             .collect();
 
         let out: Vec<_> = blocks
-            .map_err(|err| Status::internal("can't query block"))?
+            .map_err(|_err| Status::internal("can't query block"))?
             .iter()
             .flatten()
             .map(|b| raw_to_anychain(b))
@@ -158,7 +158,7 @@ impl chain_sync_service_server::ChainSyncService for ChainSyncServiceImpl {
             .0
             .read_chain_page(from, len)
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|err| Status::internal("can't query history"))?;
+            .map_err(|_err| Status::internal("can't query history"))?;
 
         let next_token = if page.len() == len {
             let (next_slot, next_hash) = page.remove(len - 1);
@@ -174,7 +174,7 @@ impl chain_sync_service_server::ChainSyncService for ChainSyncServiceImpl {
             .into_iter()
             .map(|(_, hash)| self.0.get_block(hash))
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|err| Status::internal("can't query history"))?
+            .map_err(|_err| Status::internal("can't query history"))?
             .into_iter()
             .map(|x| x.ok_or(Status::internal("can't query history")))
             .collect::<Result<Vec<_>, _>>()?

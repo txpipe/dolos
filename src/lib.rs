@@ -1,9 +1,5 @@
-pub mod crosscut;
-pub mod downstream;
 pub mod model;
 pub mod prelude;
 pub mod rolldb;
-pub mod upstream;
-
-#[cfg(test)]
-mod tests;
+pub mod serve;
+pub mod sync;

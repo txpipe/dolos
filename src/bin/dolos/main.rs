@@ -34,7 +34,7 @@ pub struct RolldbConfig {
 
 #[derive(Deserialize)]
 pub struct Config {
-    upstream: dolos::upstream::Config,
+    upstream: dolos::sync::Config,
     rolldb: RolldbConfig,
 }
 
