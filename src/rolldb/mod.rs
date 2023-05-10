@@ -105,6 +105,39 @@ impl RollDB {
         wal::WalKV::find_tip(&self.db)
     }
 
+    pub fn intersect_options(
+        &self,
+        max_items: usize,
+    ) -> Result<Vec<(BlockSlot, BlockHash)>, Error> {
+        let mut iter = wal::WalKV::iter_values(&self.db, rocksdb::IteratorMode::End)
+            .filter_map(|res| res.ok())
+            .filter(|v| !v.is_undo());
+
+        let mut out = Vec::with_capacity(max_items);
+
+        // crawl the wal exponentially
+        while let Some(val) = iter.next() {
+            out.push((val.slot(), val.hash().clone()));
+
+            if out.len() >= max_items {
+                break;
+            }
+
+            // skip exponentially
+            let skip = 2usize.pow(out.len() as u32) - 1;
+            for _ in 0..skip {
+                iter.next();
+            }
+        }
+
+        // add one extra item from the inmutable chain just in case
+        if let Some((types::DBInt(slot), types::DBHash(hash))) = ChainKV::last_entry(&self.db)? {
+            out.push((slot, hash));
+        }
+
+        Ok(out)
+    }
+
     pub fn crawl_wal<'a>(&'a self) -> impl Iterator<Item = Result<wal::Value, Error>> + 'a {
         wal::WalKV::iter_values(&self.db, rocksdb::IteratorMode::Start).map(|v| v.map(|x| x.0))
     }
@@ -170,9 +203,9 @@ impl RollDB {
 mod tests {
     use super::{BlockBody, BlockHash, BlockSlot, RollDB};
 
-    fn with_tmp_db(op: fn(db: RollDB) -> ()) {
+    fn with_tmp_db(k_param: u64, op: fn(db: RollDB) -> ()) {
         let path = tempfile::tempdir().unwrap().into_path();
-        let db = RollDB::open(path.clone(), 30).unwrap();
+        let db = RollDB::open(path.clone(), k_param).unwrap();
 
         op(db);
 
@@ -186,7 +219,7 @@ mod tests {
 
     #[test]
     fn test_roll_forward_blackbox() {
-        with_tmp_db(|mut db| {
+        with_tmp_db(30, |mut db| {
             let (slot, hash, body) = dummy_block(11);
             db.roll_forward(slot, hash, body.clone()).unwrap();
 
@@ -201,7 +234,7 @@ mod tests {
 
     #[test]
     fn test_roll_back_blackbox() {
-        with_tmp_db(|mut db| {
+        with_tmp_db(30, |mut db| {
             for i in 0..5 {
                 let (slot, hash, body) = dummy_block(i * 10);
                 db.roll_forward(slot, hash, body).unwrap();
@@ -219,7 +252,7 @@ mod tests {
 
     #[test]
     fn test_compact_linear() {
-        with_tmp_db(|mut db| {
+        with_tmp_db(30, |mut db| {
             for i in 0..100 {
                 let (slot, hash, body) = dummy_block(i * 10);
                 db.roll_forward(slot, hash, body).unwrap();
@@ -249,7 +282,7 @@ mod tests {
 
     #[test]
     fn test_compact_with_rollback() {
-        with_tmp_db(|mut db| {
+        with_tmp_db(30, |mut db| {
             for i in 0..100 {
                 let (slot, hash, body) = dummy_block(i * 10);
                 db.roll_forward(slot, hash, body).unwrap();
@@ -292,7 +325,7 @@ mod tests {
 
     #[test]
     fn test_chain_page() {
-        with_tmp_db(|mut db| {
+        with_tmp_db(30, |mut db| {
             for i in 0..100 {
                 let (slot, hash, body) = dummy_block(i * 10);
                 db.roll_forward(slot, hash, body).unwrap();
@@ -308,6 +341,26 @@ mod tests {
             }
 
             assert!(chain.next().is_none());
+        });
+    }
+
+    #[test]
+    fn test_intersect_options() {
+        with_tmp_db(1000, |mut db| {
+            for i in 0..200 {
+                let (slot, hash, body) = dummy_block(i * 10);
+                db.roll_forward(slot, hash, body).unwrap();
+            }
+
+            db.compact().unwrap();
+
+            let intersect = db.intersect_options(10).unwrap();
+
+            let expected = vec![1990, 1970, 1930, 1850, 1690, 1370, 980];
+
+            for (out, exp) in intersect.iter().zip(expected) {
+                assert_eq!(out.0, exp);
+            }
         });
     }
 }

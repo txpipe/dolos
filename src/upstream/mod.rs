@@ -4,7 +4,6 @@ use serde::Deserialize;
 use crate::rolldb::RollDB;
 
 pub mod chainsync;
-pub mod cursor;
 pub mod reducer;
 
 #[derive(Deserialize)]
@@ -14,12 +13,13 @@ pub struct Config {
 }
 
 pub fn pipeline(config: &Config, rolldb: RollDB) -> gasket::daemon::Daemon {
-    let cursor = cursor::Cursor::new(cursor::Intersection::Tip);
-
     let (to_reducer, from_chainsync) = gasket::messaging::tokio::channel(50);
 
-    let mut chainsync =
-        chainsync::Stage::new(config.peer_address.clone(), config.network_magic, cursor);
+    let mut chainsync = chainsync::Stage::new(
+        config.peer_address.clone(),
+        config.network_magic,
+        rolldb.clone(),
+    );
 
     chainsync.downstream.connect(to_reducer);
 

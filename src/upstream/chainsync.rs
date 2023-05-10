@@ -1,14 +1,36 @@
 use gasket::framework::*;
-use gasket::messaging::*;
 use tracing::{debug, info};
 
+use pallas::crypto::hash::Hash;
 use pallas::ledger::traverse::MultiEraHeader;
 use pallas::network::facades::PeerClient;
 use pallas::network::miniprotocols::chainsync::{self, HeaderContent, NextResponse};
 use pallas::network::miniprotocols::Point;
 
-use super::cursor::{Cursor, Intersection};
 use crate::prelude::*;
+use crate::rolldb::RollDB;
+
+#[derive(Clone)]
+pub enum Intersection {
+    Tip,
+    Origin,
+    Breadcrumbs(Vec<Point>),
+}
+
+impl FromIterator<(u64, Hash<32>)> for Intersection {
+    fn from_iter<T: IntoIterator<Item = (u64, Hash<32>)>>(iter: T) -> Self {
+        let points: Vec<_> = iter
+            .into_iter()
+            .map(|(slot, hash)| Point::Specific(slot, hash.to_vec()))
+            .collect();
+
+        if points.is_empty() {
+            Intersection::Origin
+        } else {
+            Intersection::Breadcrumbs(points)
+        }
+    }
+}
 
 fn to_traverse(header: &HeaderContent) -> Result<MultiEraHeader<'_>, WorkerError> {
     let out = match header.byron_prefix {
@@ -109,7 +131,12 @@ impl gasket::framework::Worker<Stage> for Worker {
     async fn bootstrap(stage: &Stage) -> Result<Self, WorkerError> {
         debug!("connecting");
 
-        let intersection = stage.chain_cursor.intersection();
+        let intersection = stage
+            .rolldb
+            .intersect_options(5)
+            .or_panic()?
+            .into_iter()
+            .collect();
 
         let mut peer_session = PeerClient::connect(&stage.peer_address, stage.network_magic)
             .await
@@ -166,7 +193,7 @@ impl gasket::framework::Worker<Stage> for Worker {
 pub struct Stage {
     peer_address: String,
     network_magic: u64,
-    chain_cursor: Cursor,
+    rolldb: RollDB,
 
     pub downstream: DownstreamPort,
 
@@ -178,11 +205,11 @@ pub struct Stage {
 }
 
 impl Stage {
-    pub fn new(peer_address: String, network_magic: u64, chain_cursor: Cursor) -> Self {
+    pub fn new(peer_address: String, network_magic: u64, rolldb: RollDB) -> Self {
         Self {
             peer_address,
             network_magic,
-            chain_cursor,
+            rolldb,
             downstream: Default::default(),
             block_count: Default::default(),
             chain_tip: Default::default(),

@@ -188,6 +188,15 @@ macro_rules! kv_table {
                 }
             }
 
+            pub fn last_entry(db: &DB) -> Result<Option<($key_type, $value_type)>, $crate::rolldb::Error> {
+                let mut iter = Self::iter_entries(db, rocksdb::IteratorMode::End);
+
+                match iter.next() {
+                    None => Ok(None),
+                    Some(x) => Ok(Some(x?)),
+                }
+            }
+
             pub fn stage_delete(db: &DB, key: $key_type, batch: &mut WriteBatch) {
                 let cf = Self::cf(db);
                 let k_raw = Box::<[u8]>::from(key);
