@@ -6,7 +6,7 @@ use dolos::{prelude::*, rolldb::RollDB};
 pub struct Args {}
 
 #[tokio::main]
-pub async fn run(config: &super::Config, _args: &Args) -> Result<(), Error> {
+pub async fn run(config: super::Config, _args: &Args) -> Result<(), Error> {
     tracing::subscriber::set_global_default(
         tracing_subscriber::FmtSubscriber::builder()
             .with_max_level(tracing::Level::DEBUG)
@@ -24,7 +24,7 @@ pub async fn run(config: &super::Config, _args: &Args) -> Result<(), Error> {
         .map_err(|err| Error::storage(err))?;
 
     let db_copy = rolldb.clone();
-    let server = tokio::spawn(dolos::serve::grpc::serve(db_copy));
+    let server = tokio::spawn(dolos::serve::grpc::serve(config.serve.grpc, db_copy));
 
     dolos::sync::pipeline(&config.upstream, rolldb).block();
 

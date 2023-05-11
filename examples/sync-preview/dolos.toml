@@ -5,3 +5,6 @@ network_magic = 2
 [rolldb]
 path = "./rolldb"
 k_param = 1000
+
+[serve.grpc]
+listen_address = "0.0.0.0:50051"

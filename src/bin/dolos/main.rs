@@ -34,8 +34,9 @@ pub struct RolldbConfig {
 
 #[derive(Deserialize)]
 pub struct Config {
-    upstream: dolos::sync::Config,
-    rolldb: RolldbConfig,
+    pub rolldb: RolldbConfig,
+    pub upstream: dolos::sync::Config,
+    pub serve: dolos::serve::Config,
 }
 
 impl Config {
@@ -65,10 +66,10 @@ fn main() -> Result<()> {
     let config = Config::new(&args.config).into_diagnostic()?;
 
     match args.command {
-        Command::Daemon(x) => daemon::run(&config, &x).into_diagnostic()?,
+        Command::Daemon(x) => daemon::run(config, &x).into_diagnostic()?,
         Command::Sync(x) => sync::run(&config, &x).into_diagnostic()?,
         Command::Read(x) => read::run(&config, &x).into_diagnostic()?,
-        Command::Serve(x) => serve::run(&config, &x).into_diagnostic()?,
+        Command::Serve(x) => serve::run(config, &x).into_diagnostic()?,
     };
 
     Ok(())
