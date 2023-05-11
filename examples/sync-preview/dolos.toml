@@ -3,7 +3,7 @@ peer_address = "preview-node.world.dev.cardano.org:30002"
 network_magic = 2
 
 [rolldb]
-path = "./rolldb"
+path = "./tmp"
 k_param = 1000
 
 [serve.grpc]
