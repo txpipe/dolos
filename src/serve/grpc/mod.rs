@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use tonic::transport::Server;
 
 use crate::prelude::*;
@@ -5,8 +6,13 @@ use crate::rolldb::RollDB;
 
 mod sync;
 
-pub async fn serve(db: RollDB) -> Result<(), Error> {
-    let addr = "127.0.0.1:50051".parse().unwrap();
+#[derive(Serialize, Deserialize, Clone)]
+pub struct Config {
+    listen_address: String,
+}
+
+pub async fn serve(config: Config, db: RollDB) -> Result<(), Error> {
+    let addr = config.listen_address.parse().unwrap();
     let service = sync::ChainSyncServiceImpl::new(db);
 
     Server::builder()

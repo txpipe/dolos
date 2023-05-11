@@ -6,7 +6,7 @@ use std::path::Path;
 pub struct Args {}
 
 #[tokio::main]
-pub async fn run(config: &super::Config, _args: &Args) -> Result<(), Error> {
+pub async fn run(config: super::Config, _args: &Args) -> Result<(), Error> {
     tracing::subscriber::set_global_default(
         tracing_subscriber::FmtSubscriber::builder()
             .with_max_level(tracing::Level::DEBUG)
@@ -23,7 +23,7 @@ pub async fn run(config: &super::Config, _args: &Args) -> Result<(), Error> {
     let db =
         RollDB::open(rolldb_path, config.rolldb.k_param.unwrap_or(1000)).map_err(Error::config)?;
 
-    dolos::serve::grpc::serve(db).await?;
+    dolos::serve::grpc::serve(config.serve.grpc, db).await?;
 
     Ok(())
 }
