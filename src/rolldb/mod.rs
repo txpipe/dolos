@@ -6,7 +6,9 @@ use rocksdb::{Options, WriteBatch, DB};
 
 use crate::rolldb::wal::WalKV;
 
-mod macros;
+use self::kvtable::KVTable;
+
+mod kvtable;
 mod types;
 mod wal;
 
@@ -30,11 +32,18 @@ pub struct RollDB {
     k_param: u64,
 }
 
-// block hash => block content
-crate::kv_table!(pub BlockKV: types::DBHash => types::DBBytes);
+pub struct BlockKV;
+
+impl KVTable<types::DBHash, types::DBBytes> for BlockKV {
+    const CF_NAME: &'static str = "BlockKV";
+}
 
 // slot => block hash
-crate::kv_table!(pub ChainKV: types::DBInt => types::DBHash);
+pub struct ChainKV;
+
+impl KVTable<types::DBInt, types::DBHash> for ChainKV {
+    const CF_NAME: &'static str = "ChainKV";
+}
 
 impl RollDB {
     pub fn open(path: impl AsRef<Path>, k_param: u64) -> Result<Self, Error> {

@@ -1,6 +1,8 @@
 use rocksdb::{IteratorMode, WriteBatch, DB};
 use serde::{Deserialize, Serialize};
 
+use super::kvtable::KVTable;
+
 #[derive(Debug, Copy, Clone, Serialize, Deserialize)]
 pub enum WalAction {
     Apply,
@@ -62,7 +64,12 @@ impl Value {
     }
 }
 
-crate::kv_table!(pub WalKV: super::types::DBInt => super::types::DBSerde<Value>);
+// slot => block hash
+pub struct WalKV;
+
+impl KVTable<super::types::DBInt, super::types::DBSerde<Value>> for WalKV {
+    const CF_NAME: &'static str = "WalKV";
+}
 
 impl WalKV {
     fn stage_append(
