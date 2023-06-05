@@ -37,7 +37,7 @@ minicbor = "0.14.1"
 prometheus_exporter = { version = "0.8.4", default-features = false }
 thiserror = "1.0.30"
 lazy_static = "1.4.0"
-rayon = "1.5.3"
+rayon = "1.7.0"
 rocksdb = { version = "0.21.0", default-features = false, features = [
     "multi-threaded-cf",
 ] }
