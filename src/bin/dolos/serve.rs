@@ -1,5 +1,5 @@
 use dolos::prelude::*;
-use dolos::rolldb::RollDB;
+use dolos::storage::rolldb::RollDB;
 use std::path::Path;
 
 #[derive(Debug, clap::Args)]

@@ -1,7 +1,7 @@
 use rocksdb::{IteratorMode, WriteBatch, DB};
 use serde::{Deserialize, Serialize};
 
-use super::kvtable::KVTable;
+use crate::storage::kvtable::*;
 
 #[derive(Debug, Copy, Clone, Serialize, Deserialize)]
 pub enum WalAction {
@@ -67,7 +67,7 @@ impl Value {
 // slot => block hash
 pub struct WalKV;
 
-impl KVTable<super::types::DBInt, super::types::DBSerde<Value>> for WalKV {
+impl KVTable<DBInt, DBSerde<Value>> for WalKV {
     const CF_NAME: &'static str = "WalKV";
 }
 
@@ -80,12 +80,7 @@ impl WalKV {
     ) -> Result<u64, super::Error> {
         let new_seq = last_seq + 1;
 
-        Self::stage_upsert(
-            db,
-            super::types::DBInt(new_seq),
-            super::types::DBSerde(value),
-            batch,
-        );
+        Self::stage_upsert(db, DBInt(new_seq), DBSerde(value), batch);
 
         Ok(new_seq)
     }

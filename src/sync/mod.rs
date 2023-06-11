@@ -1,7 +1,7 @@
 use gasket::messaging::{RecvPort, SendPort};
 use serde::Deserialize;
 
-use crate::rolldb::RollDB;
+use crate::storage::rolldb::RollDB;
 
 pub mod reducer;
 pub mod upstream;

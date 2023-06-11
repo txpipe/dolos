@@ -4,22 +4,9 @@ use thiserror::Error;
 
 use rocksdb::{Options, WriteBatch, DB};
 
-use crate::rolldb::wal::WalKV;
+use super::kvtable::*;
 
-use self::kvtable::KVTable;
-
-mod kvtable;
-mod types;
 mod wal;
-
-#[derive(Error, Debug)]
-pub enum Error {
-    #[error("IO error")]
-    IO,
-
-    #[error("serde error")]
-    Serde,
-}
 
 type BlockSlot = u64;
 type BlockHash = Hash<32>;
@@ -34,14 +21,14 @@ pub struct RollDB {
 
 pub struct BlockKV;
 
-impl KVTable<types::DBHash, types::DBBytes> for BlockKV {
+impl KVTable<DBHash, DBBytes> for BlockKV {
     const CF_NAME: &'static str = "BlockKV";
 }
 
 // slot => block hash
 pub struct ChainKV;
 
-impl KVTable<types::DBInt, types::DBHash> for ChainKV {
+impl KVTable<DBInt, DBHash> for ChainKV {
     const CF_NAME: &'static str = "ChainKV";
 }
 
@@ -68,7 +55,7 @@ impl RollDB {
     }
 
     pub fn get_block(&self, hash: Hash<32>) -> Result<Option<BlockBody>, Error> {
-        let dbval = BlockKV::get_by_key(&self.db, types::DBHash(hash))?;
+        let dbval = BlockKV::get_by_key(&self.db, DBHash(hash))?;
         Ok(dbval.map(|x| x.0))
     }
 
@@ -81,12 +68,7 @@ impl RollDB {
         let mut batch = WriteBatch::default();
 
         // keep track of the new block body
-        BlockKV::stage_upsert(
-            &self.db,
-            types::DBHash(hash),
-            types::DBBytes(body),
-            &mut batch,
-        );
+        BlockKV::stage_upsert(&self.db, DBHash(hash), DBBytes(body), &mut batch);
 
         // advance the WAL to the new point
         let new_seq =
@@ -140,7 +122,7 @@ impl RollDB {
         }
 
         // add one extra item from the inmutable chain just in case
-        if let Some((types::DBInt(slot), types::DBHash(hash))) = ChainKV::last_entry(&self.db)? {
+        if let Some((DBInt(slot), DBHash(hash))) = ChainKV::last_entry(&self.db)? {
             out.push((slot, hash));
         }
 
@@ -163,13 +145,13 @@ impl RollDB {
         from: BlockSlot,
         len: usize,
     ) -> impl Iterator<Item = Result<(BlockSlot, BlockHash), Error>> + 'a {
-        ChainKV::iter_entries_from(&self.db, types::DBInt(from))
+        ChainKV::iter_entries_from(&self.db, DBInt(from))
             .map(|res| res.map(|(x, y)| (x.0, y.0)))
             .take(len)
     }
 
     pub fn compact(&self) -> Result<(), Error> {
-        let tip = WalKV::find_tip(&self.db)?
+        let tip = wal::WalKV::find_tip(&self.db)?
             .map(|(slot, _)| slot)
             .unwrap_or_default();
 
@@ -183,18 +165,18 @@ impl RollDB {
             }
 
             let mut batch = WriteBatch::default();
-            let slot_key = types::DBInt(value.slot());
+            let slot_key = DBInt(value.slot());
 
             match value.action() {
                 wal::WalAction::Apply | wal::WalAction::Mark => {
-                    let hash_value = types::DBHash(value.hash().clone());
+                    let hash_value = DBHash(value.hash().clone());
                     ChainKV::stage_upsert(&self.db, slot_key, hash_value, &mut batch);
-                    WalKV::stage_delete(&self.db, wal_key, &mut batch);
+                    wal::WalKV::stage_delete(&self.db, wal_key, &mut batch);
                     self.db.write(batch).map_err(|_| Error::IO)?;
                 }
                 wal::WalAction::Undo => {
                     ChainKV::stage_delete(&self.db, slot_key, &mut batch);
-                    WalKV::stage_delete(&self.db, wal_key, &mut batch);
+                    wal::WalKV::stage_delete(&self.db, wal_key, &mut batch);
                     self.db.write(batch).map_err(|_| Error::IO)?;
                 }
             }

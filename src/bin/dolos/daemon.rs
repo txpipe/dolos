@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use dolos::{prelude::*, rolldb::RollDB};
+use dolos::{prelude::*, storage::rolldb::RollDB};
 
 #[derive(Debug, clap::Args)]
 pub struct Args {}
