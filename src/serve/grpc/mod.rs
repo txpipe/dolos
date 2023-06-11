@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use tonic::transport::Server;
 
 use crate::prelude::*;
-use crate::rolldb::RollDB;
+use crate::storage::rolldb::RollDB;
 
 mod sync;
 

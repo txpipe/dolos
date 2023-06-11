@@ -8,7 +8,7 @@ use pallas::network::miniprotocols::chainsync::{self, HeaderContent, NextRespons
 use pallas::network::miniprotocols::Point;
 
 use crate::prelude::*;
-use crate::rolldb::RollDB;
+use crate::storage::rolldb::RollDB;
 
 #[derive(Clone)]
 pub enum Intersection {

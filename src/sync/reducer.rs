@@ -1,9 +1,7 @@
-use std::path::{Path, PathBuf};
-
 use gasket::framework::*;
 
 use crate::prelude::*;
-use crate::rolldb::RollDB;
+use crate::storage::rolldb::RollDB;
 
 pub type UpstreamPort = gasket::messaging::tokio::InputPort<UpstreamEvent>;
 

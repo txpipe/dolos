@@ -1,4 +1,95 @@
+use pallas::crypto::hash::Hash;
+use serde::{de::DeserializeOwned, Serialize};
 use std::marker::PhantomData;
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum Error {
+    #[error("IO error")]
+    IO,
+
+    #[error("serde error")]
+    Serde,
+}
+
+pub struct DBHash(pub Hash<32>);
+
+impl From<Box<[u8]>> for DBHash {
+    fn from(value: Box<[u8]>) -> Self {
+        let inner: [u8; 32] = value[0..32].try_into().unwrap();
+        let inner = Hash::<32>::from(inner);
+        Self(inner)
+    }
+}
+
+impl From<DBHash> for Box<[u8]> {
+    fn from(value: DBHash) -> Self {
+        let b = value.0.to_vec();
+        b.into()
+    }
+}
+
+pub struct DBInt(pub u64);
+
+impl From<DBInt> for Box<[u8]> {
+    fn from(value: DBInt) -> Self {
+        let b = value.0.to_be_bytes();
+        Box::new(b)
+    }
+}
+
+impl From<Box<[u8]>> for DBInt {
+    fn from(value: Box<[u8]>) -> Self {
+        let inner: [u8; 8] = value[0..8].try_into().unwrap();
+        let inner = u64::from_be_bytes(inner);
+        Self(inner)
+    }
+}
+
+pub struct DBBytes(pub Vec<u8>);
+
+impl From<DBBytes> for Box<[u8]> {
+    fn from(value: DBBytes) -> Self {
+        value.0.into()
+    }
+}
+
+impl From<Box<[u8]>> for DBBytes {
+    fn from(value: Box<[u8]>) -> Self {
+        Self(value.into())
+    }
+}
+
+pub struct DBSerde<V>(pub V);
+
+impl<V> std::ops::Deref for DBSerde<V> {
+    type Target = V;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<V> From<DBSerde<V>> for Box<[u8]>
+where
+    V: Serialize,
+{
+    fn from(v: DBSerde<V>) -> Self {
+        bincode::serialize(&v.0)
+            .map(|x| x.into_boxed_slice())
+            .unwrap()
+    }
+}
+
+impl<V> From<Box<[u8]>> for DBSerde<V>
+where
+    V: DeserializeOwned,
+{
+    fn from(value: Box<[u8]>) -> Self {
+        let inner = bincode::deserialize(&value).unwrap();
+        DBSerde(inner)
+    }
+}
 
 type RocksIterator<'a> = rocksdb::DBIteratorWithThreadMode<'a, rocksdb::DB>;
 
@@ -14,14 +105,14 @@ impl<'a, V> Iterator for ValueIterator<'a, V>
 where
     V: From<Box<[u8]>>,
 {
-    type Item = Result<V, super::Error>;
+    type Item = Result<V, Error>;
 
-    fn next(&mut self) -> Option<Result<V, super::Error>> {
+    fn next(&mut self) -> Option<Result<V, Error>> {
         match self.0.next() {
             Some(Ok((_, value))) => Some(Ok(V::from(value))),
             Some(Err(err)) => {
                 tracing::error!(?err);
-                Some(Err(super::Error::IO))
+                Some(Err(Error::IO))
             }
             None => None,
         }
@@ -40,14 +131,14 @@ impl<'a, K> Iterator for KeyIterator<'a, K>
 where
     K: From<Box<[u8]>>,
 {
-    type Item = Result<K, super::Error>;
+    type Item = Result<K, Error>;
 
-    fn next(&mut self) -> Option<Result<K, super::Error>> {
+    fn next(&mut self) -> Option<Result<K, Error>> {
         match self.0.next() {
             Some(Ok((key, _))) => Some(Ok(K::from(key))),
             Some(Err(err)) => {
                 tracing::error!(?err);
-                Some(Err(super::Error::IO))
+                Some(Err(Error::IO))
             }
             None => None,
         }
@@ -67,9 +158,9 @@ where
     K: From<Box<[u8]>>,
     V: From<Box<[u8]>>,
 {
-    type Item = Result<(K, V), super::Error>;
+    type Item = Result<(K, V), Error>;
 
-    fn next(&mut self) -> Option<Result<(K, V), super::Error>> {
+    fn next(&mut self) -> Option<Result<(K, V), Error>> {
         match self.0.next() {
             Some(Ok((key, value))) => {
                 let key_out = K::from(key);
@@ -79,7 +170,7 @@ where
             }
             Some(Err(err)) => {
                 tracing::error!(?err);
-                Some(Err(super::Error::IO))
+                Some(Err(Error::IO))
             }
             None => None,
         }
@@ -99,12 +190,12 @@ where
         db.cf_handle(Self::CF_NAME).unwrap()
     }
 
-    fn get_by_key(db: &rocksdb::DB, k: K) -> Result<Option<V>, crate::rolldb::Error> {
+    fn get_by_key(db: &rocksdb::DB, k: K) -> Result<Option<V>, Error> {
         let cf = Self::cf(db);
         let raw_key = Box::<[u8]>::from(k);
         let raw_value = db
             .get_cf(&cf, raw_key)
-            .map_err(|_| crate::rolldb::Error::IO)?
+            .map_err(|_| Error::IO)?
             .map(|x| Box::from(x.as_slice()));
 
         match raw_value {
@@ -125,47 +216,38 @@ where
         batch.put_cf(&cf, k_raw, v_raw);
     }
 
-    fn iter_keys<'a>(
-        db: &'a rocksdb::DB,
-        mode: rocksdb::IteratorMode,
-    ) -> crate::rolldb::kvtable::KeyIterator<'a, K> {
+    fn iter_keys<'a>(db: &'a rocksdb::DB, mode: rocksdb::IteratorMode) -> KeyIterator<'a, K> {
         let cf = Self::cf(db);
         let inner = db.iterator_cf(&cf, mode);
-        crate::rolldb::kvtable::KeyIterator::new(inner)
+        KeyIterator::new(inner)
     }
 
-    fn iter_values<'a>(
-        db: &'a rocksdb::DB,
-        mode: rocksdb::IteratorMode,
-    ) -> crate::rolldb::kvtable::ValueIterator<'a, V> {
+    fn iter_values<'a>(db: &'a rocksdb::DB, mode: rocksdb::IteratorMode) -> ValueIterator<'a, V> {
         let cf = Self::cf(db);
         let inner = db.iterator_cf(&cf, mode);
-        crate::rolldb::kvtable::ValueIterator::new(inner)
+        ValueIterator::new(inner)
     }
 
     fn iter_entries<'a>(
         db: &'a rocksdb::DB,
         mode: rocksdb::IteratorMode,
-    ) -> crate::rolldb::kvtable::EntryIterator<'a, K, V> {
+    ) -> EntryIterator<'a, K, V> {
         let cf = Self::cf(db);
         let inner = db.iterator_cf(&cf, mode);
-        crate::rolldb::kvtable::EntryIterator::new(inner)
+        EntryIterator::new(inner)
     }
 
-    fn iter_entries_from<'a>(
-        db: &'a rocksdb::DB,
-        from: K,
-    ) -> crate::rolldb::kvtable::EntryIterator<'a, K, V> {
+    fn iter_entries_from<'a>(db: &'a rocksdb::DB, from: K) -> EntryIterator<'a, K, V> {
         let cf = Self::cf(db);
         let from_raw = Box::<[u8]>::from(from);
         let inner = db.iterator_cf(
             &cf,
             rocksdb::IteratorMode::From(&from_raw, rocksdb::Direction::Forward),
         );
-        crate::rolldb::kvtable::EntryIterator::new(inner)
+        EntryIterator::new(inner)
     }
 
-    fn last_key(db: &rocksdb::DB) -> Result<Option<K>, crate::rolldb::Error> {
+    fn last_key(db: &rocksdb::DB) -> Result<Option<K>, Error> {
         let mut iter = Self::iter_keys(db, rocksdb::IteratorMode::End);
 
         match iter.next() {
@@ -174,7 +256,7 @@ where
         }
     }
 
-    fn last_value(db: &rocksdb::DB) -> Result<Option<V>, crate::rolldb::Error> {
+    fn last_value(db: &rocksdb::DB) -> Result<Option<V>, Error> {
         let mut iter = Self::iter_values(db, rocksdb::IteratorMode::End);
 
         match iter.next() {
@@ -183,7 +265,7 @@ where
         }
     }
 
-    fn last_entry(db: &rocksdb::DB) -> Result<Option<(K, V)>, crate::rolldb::Error> {
+    fn last_entry(db: &rocksdb::DB) -> Result<Option<(K, V)>, Error> {
         let mut iter = Self::iter_entries(db, rocksdb::IteratorMode::End);
 
         match iter.next() {
