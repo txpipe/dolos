@@ -1,15 +1,10 @@
-use std::{pin::Pin, sync::Arc};
-
-use bytes::Bytes;
 use futures_core::Stream;
 use pallas::crypto::hash::Hash;
+use std::pin::Pin;
 use tonic::{Request, Response, Status};
 use utxorpc::proto::sync::v1::*;
 
-use pallas::ledger::traverse as trv;
-use utxorpc::proto::cardano::v1 as u5c;
-
-use crate::rolldb::RollDB;
+use crate::storage::rolldb::RollDB;
 
 fn bytes_to_hash(raw: &[u8]) -> Hash<32> {
     let array: [u8; 32] = raw.try_into().unwrap();
@@ -22,22 +17,11 @@ fn bytes_to_hash(raw: &[u8]) -> Hash<32> {
 // }
 
 fn raw_to_anychain(raw: &[u8]) -> AnyChainBlock {
-    let block = trv::MultiEraBlock::decode(raw).unwrap();
+    let block = pallas::interop::utxorpc::map_block_cbor(raw);
 
-    let block = u5c::Block {
-        header: u5c::BlockHeader {
-            slot: block.slot(),
-            hash: block.hash().to_vec().into(),
-        }
-        .into(),
-        body: u5c::BlockBody {
-            tx: block.txs().iter().map(|tx| from_traverse_tx(tx)).collect(),
-        }
-        .into(),
-    };
-
-    let block = any_chain_block::Chain::Cardano(block);
-    AnyChainBlock { chain: Some(block) }
+    AnyChainBlock {
+        chain: utxorpc::proto::sync::v1::any_chain_block::Chain::Cardano(block).into(),
+    }
 }
 
 pub struct ChainSyncServiceImpl(RollDB);
@@ -45,74 +29,6 @@ pub struct ChainSyncServiceImpl(RollDB);
 impl ChainSyncServiceImpl {
     pub fn new(db: RollDB) -> Self {
         Self(db)
-    }
-}
-
-fn from_traverse_tx(tx: &trv::MultiEraTx) -> u5c::Tx {
-    u5c::Tx {
-        inputs: tx
-            .inputs()
-            .iter()
-            .map(|i| u5c::TxInput {
-                tx_hash: i.hash().to_vec().into(),
-                output_index: i.index() as u32,
-                as_output: None,
-            })
-            .collect(),
-        outputs: tx
-            .outputs()
-            .iter()
-            .map(|o| u5c::TxOutput {
-                address: o.address().map(|a| a.to_vec()).unwrap_or_default().into(),
-                coin: o.lovelace_amount(),
-                // TODO: this is wrong, we're crating a new item for each asset even if they share
-                // the same policy id. We need to adjust Pallas' interface to make this mapping more
-                // ergonomic.
-                assets: o
-                    .non_ada_assets()
-                    .iter()
-                    .map(|a| u5c::Multiasset {
-                        policy_id: a.policy().map(|x| x.to_vec()).unwrap_or_default().into(),
-                        assets: vec![u5c::Asset {
-                            name: a.name().map(|x| x.to_vec()).unwrap_or_default().into(),
-                            quantity: a.coin() as u64,
-                        }],
-                    })
-                    .collect(),
-                datum: None,
-                datum_hash: Default::default(),
-                script: None,
-                redeemer: None,
-            })
-            .collect(),
-        certificates: vec![],
-        withdrawals: vec![],
-        mint: vec![],
-        reference_inputs: vec![],
-        witnesses: u5c::WitnessSet {
-            vkeywitness: vec![],
-            script: vec![],
-            plutus_datums: vec![],
-        }
-        .into(),
-        collateral: u5c::Collateral {
-            collateral: vec![],
-            collateral_return: None,
-            total_collateral: Default::default(),
-        }
-        .into(),
-        fee: tx.fee().unwrap_or_default(),
-        validity: u5c::TxValidity {
-            start: tx.validity_start().unwrap_or_default(),
-            ttl: tx.ttl().unwrap_or_default(),
-        }
-        .into(),
-        successful: tx.is_valid(),
-        auxiliary: u5c::AuxData {
-            metadata: vec![],
-            scripts: vec![],
-        }
-        .into(),
     }
 }
 
