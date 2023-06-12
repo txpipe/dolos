@@ -12,13 +12,13 @@ authors = ["Santiago Carmuega <santiago@carmuega.me>"]
 
 
 [dependencies]
-pallas = "0.19.0-alpha.0"
+pallas = "0.19.0-alpha.1"
 # pallas = { path = "../pallas/pallas" }
 
 gasket = { version = "^0.4", features = ["derive"] }
 # gasket = { path = "../../construkts/gasket-rs" }
 
-utxorpc = { version = "1.0.0-alpha.0" }
+utxorpc = { version = "1.0.0-alpha.1" }
 # utxorpc = { path = "../../utxorpc/rust-sdk" }
 
 hex = "0.4.3"
