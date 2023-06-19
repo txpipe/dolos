@@ -1,10 +1,12 @@
 use gasket::messaging::{RecvPort, SendPort};
 use serde::Deserialize;
 
-use crate::storage::rolldb::RollDB;
+use crate::prelude::*;
+use crate::storage::{rolldb::RollDB, statedb::StateDB};
 
-pub mod reducer;
-pub mod upstream;
+pub mod apply;
+pub mod pull;
+pub mod roll;
 
 #[derive(Deserialize)]
 pub struct Config {
@@ -12,24 +14,40 @@ pub struct Config {
     network_magic: u64,
 }
 
-pub fn pipeline(config: &Config, rolldb: RollDB) -> gasket::daemon::Daemon {
-    let (to_reducer, from_chainsync) = gasket::messaging::tokio::channel(50);
+pub fn pipeline(
+    config: &Config,
+    rolldb: RollDB,
+    statedb: StateDB,
+) -> Result<gasket::daemon::Daemon, Error> {
+    let pull_cursor = rolldb
+        .intersect_options(5)
+        .map_err(Error::storage)?
+        .into_iter()
+        .collect();
 
-    let mut chainsync = upstream::Stage::new(
+    let mut pull = pull::Stage::new(
         config.peer_address.clone(),
         config.network_magic,
-        rolldb.clone(),
+        pull_cursor,
     );
 
-    chainsync.downstream.connect(to_reducer);
+    let roll_cursor = statedb.cursor().map_err(Error::storage)?;
 
-    let mut reducer = reducer::Stage::new(rolldb);
+    let mut roll = roll::Stage::new(rolldb, roll_cursor);
 
-    reducer.upstream.connect(from_chainsync);
+    let mut apply = apply::Stage::new(statedb);
 
-    let chainsync = gasket::runtime::spawn_stage(chainsync, gasket::runtime::Policy::default());
+    let (to_roll, from_pull) = gasket::messaging::tokio::channel(50);
+    pull.downstream.connect(to_roll);
+    roll.upstream.connect(from_pull);
 
-    let reducer = gasket::runtime::spawn_stage(reducer, gasket::runtime::Policy::default());
+    let (to_apply, from_roll) = gasket::messaging::tokio::channel(50);
+    roll.downstream.connect(to_apply);
+    apply.upstream.connect(from_roll);
 
-    gasket::daemon::Daemon(vec![chainsync, reducer])
+    let pull = gasket::runtime::spawn_stage(pull, gasket::runtime::Policy::default());
+    let roll = gasket::runtime::spawn_stage(roll, gasket::runtime::Policy::default());
+    let apply = gasket::runtime::spawn_stage(apply, gasket::runtime::Policy::default());
+
+    Ok(gasket::daemon::Daemon(vec![pull, roll]))
 }
