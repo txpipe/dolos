@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use tonic::transport::Server;
 
+use utxorpc::proto::sync::v1::chain_sync_service_server::ChainSyncServiceServer;
+
 use crate::prelude::*;
 use crate::storage::rolldb::RollDB;
 
@@ -14,13 +16,12 @@ pub struct Config {
 pub async fn serve(config: Config, db: RollDB) -> Result<(), Error> {
     let addr = config.listen_address.parse().unwrap();
     let service = sync::ChainSyncServiceImpl::new(db);
+    let server = ChainSyncServiceServer::new(service);
 
     Server::builder()
-        .add_service(
-            utxorpc::proto::sync::v1::chain_sync_service_server::ChainSyncServiceServer::new(
-                service,
-            ),
-        )
+        .accept_http1(true)
+        // GrpcWeb is over http1 so we must enable it.
+        .add_service(tonic_web::enable(server))
         .serve(addr)
         .await
         .map_err(Error::server)?;
