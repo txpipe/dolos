@@ -138,6 +138,15 @@ where
     }
 }
 
+impl<V> Clone for DBSerde<V>
+where
+    V: Clone,
+{
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
 pub struct WithDBIntPrefix<T>(pub u64, pub T);
 
 impl<T> From<WithDBIntPrefix<T>> for Box<[u8]>

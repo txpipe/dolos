@@ -11,16 +11,22 @@ use super::kvtable::*;
 type TxHash = Hash<32>;
 type OutputIndex = u64;
 type UtxoBody = Vec<u8>;
-type WalSeq = u64;
 type BlockSlot = u64;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 struct UtxoRef(TxHash, OutputIndex);
 
 pub struct UtxoKV;
 
 impl KVTable<DBSerde<UtxoRef>, DBBytes> for UtxoKV {
     const CF_NAME: &'static str = "UtxoKV";
+}
+
+// Spent transaction inputs
+pub struct StxiKV;
+
+impl KVTable<DBSerde<UtxoRef>, DBBytes> for StxiKV {
+    const CF_NAME: &'static str = "StxiKV";
 }
 
 pub struct SlotKV;
@@ -35,52 +41,61 @@ impl KVTable<DBInt, DBSerde<SlotData>> for SlotKV {
     const CF_NAME: &'static str = "SlotKV";
 }
 
-pub struct ApplyBlockWriteBatch(StateDB, BlockSlot, SlotData, WriteBatch);
+pub struct BlockWriteBatch<'a>(&'a rocksdb::DB, BlockSlot, SlotData, WriteBatch);
 
-impl ApplyBlockWriteBatch {
+impl<'a> BlockWriteBatch<'a> {
     pub fn insert_utxo(&mut self, tx: TxHash, output: OutputIndex, body: UtxoBody) {
         UtxoKV::stage_upsert(
-            &self.0.db,
+            self.0,
             DBSerde(UtxoRef(tx, output)),
             DBBytes(body),
             &mut self.3,
         )
     }
 
-    pub fn consume_utxo(&mut self, tx: TxHash, output: OutputIndex) {
-        self.2.tombstones.push(UtxoRef(tx, output));
+    pub fn spend_utxo(&mut self, tx: TxHash, output: OutputIndex) -> Result<(), Error> {
+        let k = DBSerde(UtxoRef(tx, output));
+        let v = UtxoKV::get_by_key(self.0, k.clone())?.ok_or(Error::NotFound)?;
+        StxiKV::stage_upsert(self.0, k.clone(), v, &mut self.3);
+        UtxoKV::stage_delete(self.0, k, &mut self.3);
+
+        Ok(())
+    }
+
+    pub fn unspend_stxi(&mut self, tx: TxHash, output: OutputIndex) -> Result<(), Error> {
+        let k = DBSerde(UtxoRef(tx, output));
+        let v = StxiKV::get_by_key(self.0, k.clone())?.ok_or(Error::NotFound)?;
+        UtxoKV::stage_upsert(self.0, k.clone(), v, &mut self.3);
+        StxiKV::stage_delete(self.0, k, &mut self.3);
+
+        Ok(())
     }
 
     pub fn delete_utxo(&mut self, tx: TxHash, output: OutputIndex) {
         let k = DBSerde(UtxoRef(tx, output));
-        UtxoKV::stage_delete(&self.0.db, k, &mut self.3);
-    }
-
-    fn insert_slot(&mut self) {
-        let k = DBInt(self.1);
-        let v = DBSerde(self.2);
-        SlotKV::stage_upsert(&self.0.db, k, v, &mut self.3);
+        UtxoKV::stage_delete(self.0, k, &mut self.3);
     }
 
     pub fn delete_slot(&mut self) {
         let k = DBInt(self.1);
-        SlotKV::stage_delete(&self.0.db, k, &mut self.3);
+        SlotKV::stage_delete(self.0, k, &mut self.3);
     }
 
     // TODO: change_params
-    // TODO: change_tip
+}
 
-    pub fn commit(mut self) -> Result<StateDB, Error> {
+impl<'a> From<BlockWriteBatch<'a>> for WriteBatch {
+    fn from(value: BlockWriteBatch<'a>) -> Self {
+        let mut out = value.3;
+
         // we do this now assuming that all of the consumed utxos has been specified already via `consume_utxo`;
-        self.insert_slot();
+        {
+            let k = DBInt(value.1);
+            let v = DBSerde(value.2);
+            SlotKV::stage_upsert(value.0, k, v, &mut out);
+        }
 
-        self.0.db.write(self.3).map_err(|_| Error::IO)?;
-
-        Ok(self.0)
-    }
-
-    pub fn abort(self) -> StateDB {
-        self.0
+        out
     }
 }
 
@@ -95,8 +110,12 @@ impl StateDB {
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
 
-        let db = DB::open_cf(&opts, path, [UtxoKV::CF_NAME, AnyTable::CF_NAME])
-            .map_err(|_| Error::IO)?;
+        let db = DB::open_cf(
+            &opts,
+            path,
+            [UtxoKV::CF_NAME, StxiKV::CF_NAME, SlotKV::CF_NAME],
+        )
+        .map_err(|_| Error::IO)?;
 
         Ok(Self { db: Arc::new(db) })
     }
@@ -127,9 +146,9 @@ impl StateDB {
         Ok(dbval.map(|x| x.0))
     }
 
-    pub fn block_apply(self, slot: BlockSlot, hash: BlockHash) -> ApplyBlockWriteBatch {
-        ApplyBlockWriteBatch(
-            self,
+    pub fn start_block(&self, slot: BlockSlot, hash: BlockHash) -> BlockWriteBatch {
+        BlockWriteBatch(
+            &self.db,
             slot,
             SlotData {
                 hash,
@@ -137,6 +156,13 @@ impl StateDB {
             },
             WriteBatch::default(),
         )
+    }
+
+    pub fn commit_block(&self, batch: BlockWriteBatch) -> Result<(), Error> {
+        let batch = WriteBatch::from(batch);
+        self.db.write(batch).map_err(|_| Error::IO)?;
+
+        Ok(())
     }
 
     pub fn compact(&self, max_slot: u64) -> Result<(), Error> {
@@ -173,9 +199,9 @@ mod tests {
             let slot = 22;
             let hash = pallas::crypto::hash::Hasher::<256>::hash(44u32.to_be_bytes().as_slice());
 
-            let mut apply = db.block_apply(slot, hash);
+            let apply = db.start_block(slot, hash);
 
-            let db = apply.commit().unwrap();
+            db.commit_block(apply).unwrap();
 
             let (out_slot, out_data) = db.get_last_slot().unwrap().unwrap();
             assert_eq!(out_slot, slot);
@@ -189,55 +215,70 @@ mod tests {
             let slot = 22;
             let hash = pallas::crypto::hash::Hasher::<256>::hash(44u32.to_be_bytes().as_slice());
 
-            let mut apply = db.block_apply(slot, hash);
+            let mut batch = db.start_block(slot, hash);
 
-            let (tx1, idx, body1) = dummy_utxo(0, 0);
-            apply.insert_utxo(tx1, idx, body1.clone());
+            let (tx1, idx1, body1) = dummy_utxo(0, 0);
+            let (tx2, idx2, body2) = dummy_utxo(0, 1);
+            let (tx3, idx3, body3) = dummy_utxo(1, 0);
 
-            let (tx2, idx, body2) = dummy_utxo(0, 1);
-            apply.insert_utxo(tx2, idx, body2.clone());
+            batch.insert_utxo(tx1, idx1, body1.clone());
+            batch.insert_utxo(tx2, idx2, body2.clone());
+            batch.insert_utxo(tx3, idx3, body3.clone());
 
-            let (tx3, idx, body3) = dummy_utxo(1, 0);
-            apply.insert_utxo(tx3, idx, body3.clone());
+            db.commit_block(batch).unwrap();
 
-            let db = apply.commit().unwrap();
-
-            let persisted = db.get_utxo(tx1, 0).unwrap().unwrap();
+            let persisted = db.get_utxo(tx1, idx1).unwrap().unwrap();
             assert_eq!(persisted, body1);
 
-            let persisted = db.get_utxo(tx2, 1).unwrap().unwrap();
+            let persisted = db.get_utxo(tx2, idx2).unwrap().unwrap();
             assert_eq!(persisted, body2);
 
-            let persisted = db.get_utxo(tx3, 0).unwrap().unwrap();
+            let persisted = db.get_utxo(tx3, idx3).unwrap().unwrap();
             assert_eq!(persisted, body3);
         });
     }
 
     #[test]
-    fn test_consume_utxos() {
+    fn test_spend_utxos() {
         with_tmp_db(|db| {
-            let (tx1, idx1, _) = dummy_utxo(0, 0);
-            let (tx2, idx2, _) = dummy_utxo(0, 1);
-            let (tx3, idx3, _) = dummy_utxo(1, 0);
+            let (tx1, idx1, body1) = dummy_utxo(0, 0);
+            let (tx2, idx2, body2) = dummy_utxo(0, 1);
+            let (tx3, idx3, body3) = dummy_utxo(1, 0);
 
+            // producer blocker
             let slot = 22;
             let hash = pallas::crypto::hash::Hasher::<256>::hash(44u32.to_be_bytes().as_slice());
-            let mut apply = db.block_apply(slot, hash);
+            let mut batch = db.start_block(slot, hash);
 
-            apply.consume_utxo(tx1, idx1);
-            apply.consume_utxo(tx2, idx2);
-            apply.consume_utxo(tx3, idx3);
+            batch.insert_utxo(tx1, idx1, body1.clone());
+            batch.insert_utxo(tx2, idx2, body2.clone());
+            batch.insert_utxo(tx3, idx3, body3.clone());
 
-            let db = apply.commit().unwrap();
+            db.commit_block(batch).unwrap();
 
-            let data = db.get_slot_data(22).unwrap().unwrap();
+            // spender block
+            let slot = 23;
+            let hash = pallas::crypto::hash::Hasher::<256>::hash(45u32.to_be_bytes().as_slice());
+            let mut batch = db.start_block(slot, hash);
 
-            let ts_expected = vec![UtxoRef(tx1, idx1), UtxoRef(tx2, idx2), UtxoRef(tx3, idx3)];
+            batch.spend_utxo(tx1, idx1).unwrap();
+            batch.spend_utxo(tx3, idx3).unwrap();
+
+            db.commit_block(batch).unwrap();
+
+            // assert tombstone are there
+            let data = db.get_slot_data(23).unwrap().unwrap();
+            let ts_expected = vec![UtxoRef(tx1, idx1), UtxoRef(tx3, idx3)];
 
             for (should, expect) in data.tombstones.iter().zip(ts_expected) {
                 assert_eq!(should.0, expect.0);
                 assert_eq!(should.1, expect.1);
             }
+
+            // assert utxo are missing
+            assert!(db.get_utxo(tx1, idx1).unwrap().is_none());
+            assert!(db.get_utxo(tx2, idx2).unwrap().is_some());
+            assert!(db.get_utxo(tx3, idx3).unwrap().is_none());
         });
     }
 }

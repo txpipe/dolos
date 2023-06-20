@@ -1,4 +1,5 @@
 use gasket::framework::*;
+use tracing::{info, instrument, warn};
 
 use crate::prelude::*;
 use crate::storage::statedb::StateDB;
@@ -34,14 +35,28 @@ impl Stage {
 }
 
 impl Stage {
+    #[instrument(skip_all)]
     fn apply_block(&mut self, cbor: &[u8]) -> Result<(), WorkerError> {
         let block = pallas::ledger::traverse::MultiEraBlock::decode(&cbor).or_panic()?;
+        let slot = block.slot();
+        let hash = block.hash();
 
-        let mut batch = self.statedb.block_apply(block.slot(), block.hash());
+        let mut batch = self.statedb.start_block(slot, hash);
 
         for tx in block.txs() {
             for consumed in tx.consumes() {
-                batch.consume_utxo(consumed.hash().clone(), consumed.index());
+                batch
+                    .spend_utxo(consumed.hash().clone(), consumed.index())
+                    // TODO: since we don't have genesis utxos, it's reasonable to get missed hits.
+                    // This needs to go away once the genesis block processing is implemented.
+                    .or_else(|x| match x {
+                        crate::storage::kvtable::Error::NotFound => {
+                            warn!("skipping missing utxo");
+                            Ok(())
+                        }
+                        x => Err(x),
+                    })
+                    .or_panic()?;
             }
 
             for (idx, produced) in tx.produces() {
@@ -50,26 +65,33 @@ impl Stage {
             }
         }
 
-        batch.commit().or_panic()?;
+        self.statedb.commit_block(batch).or_panic()?;
+        info!(slot, ?hash, "applied block");
 
         Ok(())
     }
 
+    #[instrument(skip_all)]
     fn undo_block(&mut self, cbor: &[u8]) -> Result<(), WorkerError> {
         let block = pallas::ledger::traverse::MultiEraBlock::decode(&cbor).or_panic()?;
 
-        let mut batch = self.statedb.block_apply(block.slot(), block.hash());
-
-        batch.delete_slot();
+        let mut batch = self.statedb.start_block(block.slot(), block.hash());
 
         for tx in block.txs() {
-            for (idx, produced) in tx.produces() {
-                let body = produced.encode();
+            for consumed in tx.consumes() {
+                batch
+                    .unspend_stxi(consumed.hash().clone(), consumed.index())
+                    .or_panic()?;
+            }
+
+            for (idx, _) in tx.produces() {
                 batch.delete_utxo(tx.hash(), idx as u64);
             }
         }
 
-        batch.commit().or_panic()?;
+        batch.delete_slot();
+
+        self.statedb.commit_block(batch).or_panic()?;
 
         Ok(())
     }
@@ -94,8 +116,8 @@ impl gasket::framework::Worker<Stage> for Worker {
 
     async fn execute(&mut self, unit: &RollEvent, stage: &mut Stage) -> Result<(), WorkerError> {
         match unit {
-            RollEvent::Apply(_, _, cbor) => stage.apply_block(cbor),
-            RollEvent::Undo(_, _, cbor) => stage.undo_block(cbor),
+            RollEvent::Apply(_, _, cbor) => stage.apply_block(cbor)?,
+            RollEvent::Undo(_, _, cbor) => stage.undo_block(cbor)?,
             RollEvent::Reset(_) => todo!(),
         };
 
