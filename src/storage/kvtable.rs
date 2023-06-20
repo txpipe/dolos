@@ -1,5 +1,5 @@
 use pallas::crypto::hash::Hash;
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::marker::PhantomData;
 use thiserror::Error;
 
@@ -10,6 +10,9 @@ pub enum Error {
 
     #[error("serde error")]
     Serde,
+
+    #[error("not found")]
+    NotFound,
 }
 
 pub struct DBHash(pub Hash<32>);
@@ -26,6 +29,18 @@ impl From<DBHash> for Box<[u8]> {
     fn from(value: DBHash) -> Self {
         let b = value.0.to_vec();
         b.into()
+    }
+}
+
+impl From<Hash<32>> for DBHash {
+    fn from(value: Hash<32>) -> Self {
+        DBHash(value)
+    }
+}
+
+impl From<DBHash> for Hash<32> {
+    fn from(value: DBHash) -> Self {
+        value.0
     }
 }
 
@@ -46,6 +61,18 @@ impl From<Box<[u8]>> for DBInt {
     }
 }
 
+impl From<u64> for DBInt {
+    fn from(value: u64) -> Self {
+        DBInt(value)
+    }
+}
+
+impl From<DBInt> for u64 {
+    fn from(value: DBInt) -> Self {
+        value.0
+    }
+}
+
 pub struct DBBytes(pub Vec<u8>);
 
 impl From<DBBytes> for Box<[u8]> {
@@ -57,6 +84,16 @@ impl From<DBBytes> for Box<[u8]> {
 impl From<Box<[u8]>> for DBBytes {
     fn from(value: Box<[u8]>) -> Self {
         Self(value.into())
+    }
+}
+
+impl<V> From<DBSerde<V>> for DBBytes
+where
+    V: Serialize,
+{
+    fn from(value: DBSerde<V>) -> Self {
+        let inner = bincode::serialize(&value.0).unwrap();
+        DBBytes(inner)
     }
 }
 
@@ -88,6 +125,45 @@ where
     fn from(value: Box<[u8]>) -> Self {
         let inner = bincode::deserialize(&value).unwrap();
         DBSerde(inner)
+    }
+}
+
+impl<V> From<DBBytes> for DBSerde<V>
+where
+    V: DeserializeOwned,
+{
+    fn from(value: DBBytes) -> Self {
+        let inner = bincode::deserialize(&value.0).unwrap();
+        DBSerde(inner)
+    }
+}
+
+impl<V> Clone for DBSerde<V>
+where
+    V: Clone,
+{
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+pub struct WithDBIntPrefix<T>(pub u64, pub T);
+
+impl<T> From<WithDBIntPrefix<T>> for Box<[u8]>
+where
+    Box<[u8]>: From<T>,
+{
+    fn from(value: WithDBIntPrefix<T>) -> Self {
+        let prefix: Box<[u8]> = DBInt(value.0).into();
+        let after: Box<[u8]> = value.1.into();
+
+        [prefix, after].concat().into()
+    }
+}
+
+impl<T> From<Box<[u8]>> for WithDBIntPrefix<T> {
+    fn from(value: Box<[u8]>) -> Self {
+        todo!()
     }
 }
 
@@ -222,10 +298,32 @@ where
         KeyIterator::new(inner)
     }
 
+    fn iter_keys_start<'a>(db: &'a rocksdb::DB) -> KeyIterator<'a, K> {
+        Self::iter_keys(db, rocksdb::IteratorMode::Start)
+    }
+
+    fn iter_keys_from<'a>(db: &'a rocksdb::DB, from: K) -> KeyIterator<'a, K> {
+        let from_raw = Box::<[u8]>::from(from);
+        let mode = rocksdb::IteratorMode::From(&from_raw, rocksdb::Direction::Forward);
+
+        Self::iter_keys(db, mode)
+    }
+
     fn iter_values<'a>(db: &'a rocksdb::DB, mode: rocksdb::IteratorMode) -> ValueIterator<'a, V> {
         let cf = Self::cf(db);
         let inner = db.iterator_cf(&cf, mode);
         ValueIterator::new(inner)
+    }
+
+    fn iter_values_start<'a>(db: &'a rocksdb::DB) -> ValueIterator<'a, V> {
+        Self::iter_values(db, rocksdb::IteratorMode::Start)
+    }
+
+    fn iter_values_from<'a>(db: &'a rocksdb::DB, from: K) -> ValueIterator<'a, V> {
+        let from_raw = Box::<[u8]>::from(from);
+        let mode = rocksdb::IteratorMode::From(&from_raw, rocksdb::Direction::Forward);
+
+        Self::iter_values(db, mode)
     }
 
     fn iter_entries<'a>(
@@ -237,14 +335,15 @@ where
         EntryIterator::new(inner)
     }
 
+    fn iter_entries_start<'a>(db: &'a rocksdb::DB) -> EntryIterator<'a, K, V> {
+        Self::iter_entries(db, rocksdb::IteratorMode::Start)
+    }
+
     fn iter_entries_from<'a>(db: &'a rocksdb::DB, from: K) -> EntryIterator<'a, K, V> {
-        let cf = Self::cf(db);
         let from_raw = Box::<[u8]>::from(from);
-        let inner = db.iterator_cf(
-            &cf,
-            rocksdb::IteratorMode::From(&from_raw, rocksdb::Direction::Forward),
-        );
-        EntryIterator::new(inner)
+        let mode = rocksdb::IteratorMode::From(&from_raw, rocksdb::Direction::Forward);
+
+        Self::iter_entries(db, mode)
     }
 
     fn last_key(db: &rocksdb::DB) -> Result<Option<K>, Error> {
@@ -274,9 +373,55 @@ where
         }
     }
 
+    fn scan_until<F>(
+        db: &rocksdb::DB,
+        mode: rocksdb::IteratorMode,
+        predicate: F,
+    ) -> Result<Option<K>, Error>
+    where
+        F: Fn(&V) -> bool,
+    {
+        for entry in Self::iter_entries(db, mode) {
+            if let Ok((k, v)) = entry {
+                if predicate(&v) {
+                    return Ok(Some(k));
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
     fn stage_delete(db: &rocksdb::DB, key: K, batch: &mut rocksdb::WriteBatch) {
         let cf = Self::cf(db);
         let k_raw = Box::<[u8]>::from(key);
         batch.delete_cf(&cf, k_raw);
+    }
+}
+
+pub struct AnyTable;
+
+pub trait AnyValue: Serialize + DeserializeOwned {
+    fn type_key() -> DBInt;
+}
+
+impl KVTable<DBInt, DBBytes> for AnyTable {
+    const CF_NAME: &'static str = "AnyKV";
+}
+
+impl AnyTable {
+    pub fn stage_upsert_any<T: AnyValue>(db: &rocksdb::DB, v: T, batch: &mut rocksdb::WriteBatch) {
+        let k = T::type_key();
+        let v = DBSerde(v).into();
+        Self::stage_upsert(db, k, v, batch)
+    }
+
+    pub fn get<T: AnyValue>(db: &rocksdb::DB) -> Result<Option<T>, Error> {
+        let k = T::type_key();
+        let v: Option<T> = AnyTable::get_by_key(db, k)?
+            .map(DBSerde::<T>::from)
+            .map(|x| x.0);
+
+        Ok(v)
     }
 }

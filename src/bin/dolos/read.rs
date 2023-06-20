@@ -18,12 +18,12 @@ pub fn run(config: &super::Config, _args: &Args) -> Result<(), Error> {
             .rolldb
             .path
             .as_deref()
-            .unwrap_or_else(|| Path::new("/db")),
+            .unwrap_or_else(|| Path::new("/rolldb")),
         config.rolldb.k_param.unwrap_or(1000),
     )
     .unwrap();
 
-    for item in db.crawl_wal() {
+    for item in db.crawl_from_origin() {
         dbg!(item.unwrap());
     }
 

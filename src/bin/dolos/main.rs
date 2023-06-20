@@ -33,8 +33,14 @@ pub struct RolldbConfig {
 }
 
 #[derive(Deserialize)]
+pub struct ApplydbConfig {
+    path: Option<std::path::PathBuf>,
+}
+
+#[derive(Deserialize)]
 pub struct Config {
     pub rolldb: RolldbConfig,
+    pub applydb: ApplydbConfig,
     pub upstream: dolos::sync::Config,
     pub serve: dolos::serve::Config,
 }

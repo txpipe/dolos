@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::storage::kvtable::*;
 
+pub type Seq = u64;
+
 #[derive(Debug, Copy, Clone, Serialize, Deserialize)]
 pub enum WalAction {
     Apply,
@@ -14,6 +16,13 @@ pub enum WalAction {
 pub struct Value(WalAction, super::BlockSlot, super::BlockHash);
 
 impl Value {
+    pub fn into_apply(
+        slot: impl Into<super::BlockSlot>,
+        hash: impl Into<super::BlockHash>,
+    ) -> Self {
+        Self(WalAction::Apply, slot.into(), hash.into())
+    }
+
     pub fn action(&self) -> WalAction {
         self.0
     }
@@ -37,8 +46,8 @@ impl Value {
     pub fn into_mark(self) -> Option<Self> {
         match self.0 {
             WalAction::Apply => Some(Self(WalAction::Mark, self.1, self.2)),
+            WalAction::Mark => Some(Self(WalAction::Mark, self.1, self.2)),
             WalAction::Undo => None,
-            WalAction::Mark => None,
         }
     }
 
@@ -74,7 +83,7 @@ impl KVTable<DBInt, DBSerde<Value>> for WalKV {
 impl WalKV {
     fn stage_append(
         db: &DB,
-        last_seq: u64,
+        last_seq: Seq,
         value: Value,
         batch: &mut WriteBatch,
     ) -> Result<u64, super::Error> {
@@ -87,7 +96,7 @@ impl WalKV {
 
     pub fn stage_roll_back(
         db: &DB,
-        mut last_seq: u64,
+        mut last_seq: Seq,
         until: super::BlockSlot,
         batch: &mut WriteBatch,
     ) -> Result<u64, super::Error> {

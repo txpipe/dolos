@@ -1,12 +1,14 @@
 use pallas::crypto::hash::Hash;
 use std::{path::Path, sync::Arc};
-use thiserror::Error;
 
 use rocksdb::{Options, WriteBatch, DB};
 
+use self::wal::WalKV;
+
 use super::kvtable::*;
 
-mod wal;
+pub mod iter;
+pub mod wal;
 
 type BlockSlot = u64;
 type BlockHash = Hash<32>;
@@ -129,8 +131,50 @@ impl RollDB {
         Ok(out)
     }
 
-    pub fn crawl_wal<'a>(&'a self) -> impl Iterator<Item = Result<wal::Value, Error>> + 'a {
-        wal::WalKV::iter_values(&self.db, rocksdb::IteratorMode::Start).map(|v| v.map(|x| x.0))
+    pub fn crawl<'a>(
+        &'a self,
+        slot: BlockSlot,
+        hash: &BlockHash,
+    ) -> Result<iter::RollIterator<'a>, Error> {
+        let last_chain_slot = ChainKV::last_key(&self.db)?;
+
+        if let Some(last_chain_slot) = last_chain_slot {
+            if slot < last_chain_slot.0 {
+                return Ok(iter::RollIterator::from_chain(&self.db, slot));
+            }
+        }
+
+        let found = WalKV::scan_until(&self.db, rocksdb::IteratorMode::End, |v| {
+            v.slot() == slot && v.hash().eq(hash)
+        })?;
+
+        match found {
+            Some(seq) => Ok(iter::RollIterator::from_wal(&self.db, seq.into())),
+            None => Err(Error::NotFound),
+        }
+    }
+
+    pub fn crawl_from_origin<'a>(&'a self) -> iter::RollIterator<'a> {
+        iter::RollIterator::from_origin(&self.db)
+    }
+
+    pub fn crawl_wal<'a>(
+        &'a self,
+        start_seq: Option<u64>,
+    ) -> impl Iterator<Item = Result<wal::Value, Error>> + 'a {
+        let iter = match start_seq {
+            Some(start_seq) => {
+                let start_seq = Box::<[u8]>::from(DBInt(start_seq));
+                let from = rocksdb::IteratorMode::From(&start_seq, rocksdb::Direction::Forward);
+                wal::WalKV::iter_values(&self.db, from)
+            }
+            None => {
+                let from = rocksdb::IteratorMode::Start;
+                wal::WalKV::iter_values(&self.db, from)
+            }
+        };
+
+        iter.map(|v| v.map(|x| x.0))
     }
 
     pub fn crawl_chain<'a>(
@@ -260,7 +304,7 @@ mod tests {
 
             assert!(chain.next().is_none());
 
-            let mut wal = db.crawl_wal();
+            let mut wal = db.crawl_wal(None);
 
             for i in 96..100 {
                 let entry = wal.next().unwrap().unwrap();
@@ -292,7 +336,7 @@ mod tests {
 
             assert!(chain.next().is_none());
 
-            let mut wal = db.crawl_wal();
+            let mut wal = db.crawl_wal(None);
 
             for i in 77..100 {
                 let entry = wal.next().unwrap().unwrap();
@@ -311,6 +355,28 @@ mod tests {
             assert_eq!(entry.slot(), 800);
 
             assert!(wal.next().is_none());
+        });
+    }
+
+    #[test]
+    fn test_crawl_boundary() {
+        with_tmp_db(30, |mut db| {
+            for i in 0..100 {
+                let (slot, hash, body) = dummy_block(i * 10);
+                db.roll_forward(slot, hash, body).unwrap();
+            }
+
+            db.compact().unwrap();
+
+            let mut crawler = db.crawl_from_origin();
+
+            for i in 0..100 {
+                let evt = crawler.next().unwrap().unwrap();
+                assert!(evt.is_apply());
+                assert_eq!(evt.slot(), i * 10);
+            }
+
+            assert!(crawler.next().is_none());
         });
     }
 
