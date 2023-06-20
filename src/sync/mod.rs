@@ -2,7 +2,7 @@ use gasket::messaging::{RecvPort, SendPort};
 use serde::Deserialize;
 
 use crate::prelude::*;
-use crate::storage::{rolldb::RollDB, statedb::StateDB};
+use crate::storage::{applydb::ApplyDB, rolldb::RollDB};
 
 pub mod apply;
 pub mod pull;
@@ -17,7 +17,7 @@ pub struct Config {
 pub fn pipeline(
     config: &Config,
     rolldb: RollDB,
-    statedb: StateDB,
+    applydb: ApplyDB,
 ) -> Result<gasket::daemon::Daemon, Error> {
     let pull_cursor = rolldb
         .intersect_options(5)
@@ -31,11 +31,11 @@ pub fn pipeline(
         pull_cursor,
     );
 
-    let roll_cursor = statedb.cursor().map_err(Error::storage)?;
+    let roll_cursor = applydb.cursor().map_err(Error::storage)?;
 
     let mut roll = roll::Stage::new(rolldb, roll_cursor);
 
-    let mut apply = apply::Stage::new(statedb);
+    let mut apply = apply::Stage::new(applydb);
 
     let (to_roll, from_pull) = gasket::messaging::tokio::channel(50);
     pull.downstream.connect(to_roll);

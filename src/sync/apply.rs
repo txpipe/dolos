@@ -2,7 +2,7 @@ use gasket::framework::*;
 use tracing::{info, instrument, warn};
 
 use crate::prelude::*;
-use crate::storage::statedb::StateDB;
+use crate::storage::applydb::{ApplyDB, UtxoRef};
 
 pub type UpstreamPort = gasket::messaging::tokio::InputPort<RollEvent>;
 //pub type DownstreamPort = gasket::messaging::tokio::OutputPort<???>;
@@ -10,7 +10,7 @@ pub type UpstreamPort = gasket::messaging::tokio::InputPort<RollEvent>;
 #[derive(Stage)]
 #[stage(name = "reducer", unit = "RollEvent", worker = "Worker")]
 pub struct Stage {
-    statedb: StateDB,
+    applydb: ApplyDB,
 
     pub upstream: UpstreamPort,
 
@@ -24,9 +24,9 @@ pub struct Stage {
 }
 
 impl Stage {
-    pub fn new(statedb: StateDB) -> Self {
+    pub fn new(applydb: ApplyDB) -> Self {
         Self {
-            statedb,
+            applydb,
             upstream: Default::default(),
             block_count: Default::default(),
             wal_count: Default::default(),
@@ -41,7 +41,7 @@ impl Stage {
         let slot = block.slot();
         let hash = block.hash();
 
-        let mut batch = self.statedb.start_block(slot, hash);
+        let mut batch = self.applydb.start_block(slot);
 
         for tx in block.txs() {
             for consumed in tx.consumes() {
@@ -65,7 +65,17 @@ impl Stage {
             }
         }
 
-        self.statedb.commit_block(batch).or_panic()?;
+        let tombstones = block
+            .txs()
+            .iter()
+            .flat_map(|x| x.consumes())
+            .map(|x| UtxoRef(x.hash().clone(), x.index()))
+            .collect();
+
+        batch.insert_slot(block.hash(), tombstones);
+
+        self.applydb.commit_block(batch).or_panic()?;
+
         info!(slot, ?hash, "applied block");
 
         Ok(())
@@ -75,7 +85,7 @@ impl Stage {
     fn undo_block(&mut self, cbor: &[u8]) -> Result<(), WorkerError> {
         let block = pallas::ledger::traverse::MultiEraBlock::decode(&cbor).or_panic()?;
 
-        let mut batch = self.statedb.start_block(block.slot(), block.hash());
+        let mut batch = self.applydb.start_block(block.slot());
 
         for tx in block.txs() {
             for consumed in tx.consumes() {
@@ -91,7 +101,7 @@ impl Stage {
 
         batch.delete_slot();
 
-        self.statedb.commit_block(batch).or_panic()?;
+        self.applydb.commit_block(batch).or_panic()?;
 
         Ok(())
     }

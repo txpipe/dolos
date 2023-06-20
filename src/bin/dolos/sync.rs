@@ -2,7 +2,7 @@ use std::path::Path;
 
 use dolos::{
     prelude::*,
-    storage::{rolldb::RollDB, statedb::StateDB},
+    storage::{applydb::ApplyDB, rolldb::RollDB},
 };
 
 #[derive(Debug, clap::Args)]
@@ -31,7 +31,7 @@ pub fn run(config: &super::Config, _args: &Args) -> Result<(), Error> {
         .as_deref()
         .unwrap_or_else(|| Path::new("/applydb"));
 
-    let applydb = StateDB::open(&applydb_path).map_err(|err| Error::storage(err))?;
+    let applydb = ApplyDB::open(&applydb_path).map_err(|err| Error::storage(err))?;
 
     dolos::sync::pipeline(&config.upstream, rolldb, applydb)
         .unwrap()

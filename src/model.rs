@@ -5,7 +5,6 @@ pub type BlockHash = Hash<32>;
 pub type RawBlock = Vec<u8>;
 pub type TxHash = Hash<32>;
 pub type OutputIdx = u64;
-pub type UtxoRef = (TxHash, OutputIdx);
 pub type UtxoBody = (Era, Vec<u8>);
 
 // #[derive(Debug, Clone)]
