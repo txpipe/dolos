@@ -11,10 +11,7 @@ enum Cursor<'a> {
 
 impl<'a> Cursor<'a> {
     fn is_chain(&self) -> bool {
-        match self {
-            Cursor::Chain(_) => true,
-            _ => false,
-        }
+        matches!(self, Cursor::Chain(_))
     }
 
     fn next(&mut self) -> Option<Item> {
@@ -73,7 +70,7 @@ impl<'a> Iterator for RollIterator<'a> {
 
         if next.is_none() && self.cursor.is_chain() {
             let from = rocksdb::IteratorMode::Start;
-            let iter = super::wal::WalKV::iter_values(&self.db, from);
+            let iter = super::wal::WalKV::iter_values(self.db, from);
             self.cursor = Cursor::Wal(iter);
 
             next = self.cursor.next();

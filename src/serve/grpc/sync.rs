@@ -108,7 +108,7 @@ impl chain_sync_service_server::ChainSyncService for ChainSyncServiceImpl {
 
     async fn follow_tip(
         &self,
-        request: Request<FollowTipRequest>,
+        _request: Request<FollowTipRequest>,
     ) -> Result<Response<Self::FollowTipStream>, tonic::Status> {
         todo!()
     }

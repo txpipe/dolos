@@ -154,7 +154,7 @@ impl ApplyDB {
         Ok(())
     }
 
-    pub fn compact(&self, max_slot: u64) -> Result<(), Error> {
+    pub fn compact(&self, _max_slot: u64) -> Result<(), Error> {
         // TODO: iterate by slot from start until max slot and delete utxos + tombstone
         todo!()
     }

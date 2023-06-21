@@ -110,7 +110,7 @@ impl RollDB {
 
         // crawl the wal exponentially
         while let Some(val) = iter.next() {
-            out.push((val.slot(), val.hash().clone()));
+            out.push((val.slot(), *val.hash()));
 
             if out.len() >= max_items {
                 break;
@@ -154,14 +154,14 @@ impl RollDB {
         }
     }
 
-    pub fn crawl_from_origin<'a>(&'a self) -> iter::RollIterator<'a> {
+    pub fn crawl_from_origin(&self) -> iter::RollIterator<'_> {
         iter::RollIterator::from_origin(&self.db)
     }
 
-    pub fn crawl_wal<'a>(
-        &'a self,
+    pub fn crawl_wal(
+        &self,
         start_seq: Option<u64>,
-    ) -> impl Iterator<Item = Result<wal::Value, Error>> + 'a {
+    ) -> impl Iterator<Item = Result<wal::Value, Error>> + '_ {
         let iter = match start_seq {
             Some(start_seq) => {
                 let start_seq = Box::<[u8]>::from(DBInt(start_seq));
@@ -177,18 +177,16 @@ impl RollDB {
         iter.map(|v| v.map(|x| x.0))
     }
 
-    pub fn crawl_chain<'a>(
-        &'a self,
-    ) -> impl Iterator<Item = Result<(BlockSlot, BlockHash), Error>> + 'a {
+    pub fn crawl_chain(&self) -> impl Iterator<Item = Result<(BlockSlot, BlockHash), Error>> + '_ {
         ChainKV::iter_entries(&self.db, rocksdb::IteratorMode::Start)
             .map(|res| res.map(|(x, y)| (x.0, y.0)))
     }
 
-    pub fn read_chain_page<'a>(
-        &'a self,
+    pub fn read_chain_page(
+        &self,
         from: BlockSlot,
         len: usize,
-    ) -> impl Iterator<Item = Result<(BlockSlot, BlockHash), Error>> + 'a {
+    ) -> impl Iterator<Item = Result<(BlockSlot, BlockHash), Error>> + '_ {
         ChainKV::iter_entries_from(&self.db, DBInt(from))
             .map(|res| res.map(|(x, y)| (x.0, y.0)))
             .take(len)
@@ -213,7 +211,7 @@ impl RollDB {
 
             match value.action() {
                 wal::WalAction::Apply | wal::WalAction::Mark => {
-                    let hash_value = DBHash(value.hash().clone());
+                    let hash_value = DBHash(*value.hash());
                     ChainKV::stage_upsert(&self.db, slot_key, hash_value, &mut batch);
                     wal::WalKV::stage_delete(&self.db, wal_key, &mut batch);
                     self.db.write(batch).map_err(|_| Error::IO)?;

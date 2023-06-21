@@ -49,5 +49,5 @@ pub fn pipeline(
     let roll = gasket::runtime::spawn_stage(roll, gasket::runtime::Policy::default());
     let apply = gasket::runtime::spawn_stage(apply, gasket::runtime::Policy::default());
 
-    Ok(gasket::daemon::Daemon(vec![pull, roll]))
+    Ok(gasket::daemon::Daemon(vec![pull, roll, apply]))
 }

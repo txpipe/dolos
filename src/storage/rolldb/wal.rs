@@ -52,24 +52,15 @@ impl Value {
     }
 
     pub fn is_apply(&self) -> bool {
-        match self.0 {
-            WalAction::Apply => true,
-            _ => false,
-        }
+        matches!(self.0, WalAction::Apply)
     }
 
     pub fn is_mark(&self) -> bool {
-        match self.0 {
-            WalAction::Mark => true,
-            _ => false,
-        }
+        matches!(self.0, WalAction::Mark)
     }
 
     pub fn is_undo(&self) -> bool {
-        match self.0 {
-            WalAction::Undo => true,
-            _ => false,
-        }
+        matches!(self.0, WalAction::Undo)
     }
 }
 
@@ -138,11 +129,8 @@ impl WalKV {
         let iter = WalKV::iter_values(db, IteratorMode::End);
 
         for value in iter {
-            match value?.0 {
-                Value(WalAction::Apply | WalAction::Mark, slot, hash) => {
-                    return Ok(Some((slot, hash)))
-                }
-                _ => (),
+            if let Value(WalAction::Apply | WalAction::Mark, slot, hash) = value?.0 {
+                return Ok(Some((slot, hash)));
             }
         }
 
