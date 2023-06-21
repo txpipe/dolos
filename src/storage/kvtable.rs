@@ -1,5 +1,5 @@
 use pallas::crypto::hash::Hash;
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Serialize};
 use std::marker::PhantomData;
 use thiserror::Error;
 
@@ -162,7 +162,7 @@ where
 }
 
 impl<T> From<Box<[u8]>> for WithDBIntPrefix<T> {
-    fn from(value: Box<[u8]>) -> Self {
+    fn from(_value: Box<[u8]>) -> Self {
         todo!()
     }
 }
@@ -298,11 +298,11 @@ where
         KeyIterator::new(inner)
     }
 
-    fn iter_keys_start<'a>(db: &'a rocksdb::DB) -> KeyIterator<'a, K> {
+    fn iter_keys_start(db: &rocksdb::DB) -> KeyIterator<'_, K> {
         Self::iter_keys(db, rocksdb::IteratorMode::Start)
     }
 
-    fn iter_keys_from<'a>(db: &'a rocksdb::DB, from: K) -> KeyIterator<'a, K> {
+    fn iter_keys_from(db: &rocksdb::DB, from: K) -> KeyIterator<'_, K> {
         let from_raw = Box::<[u8]>::from(from);
         let mode = rocksdb::IteratorMode::From(&from_raw, rocksdb::Direction::Forward);
 
@@ -315,11 +315,11 @@ where
         ValueIterator::new(inner)
     }
 
-    fn iter_values_start<'a>(db: &'a rocksdb::DB) -> ValueIterator<'a, V> {
+    fn iter_values_start(db: &rocksdb::DB) -> ValueIterator<'_, V> {
         Self::iter_values(db, rocksdb::IteratorMode::Start)
     }
 
-    fn iter_values_from<'a>(db: &'a rocksdb::DB, from: K) -> ValueIterator<'a, V> {
+    fn iter_values_from(db: &rocksdb::DB, from: K) -> ValueIterator<'_, V> {
         let from_raw = Box::<[u8]>::from(from);
         let mode = rocksdb::IteratorMode::From(&from_raw, rocksdb::Direction::Forward);
 
@@ -335,11 +335,11 @@ where
         EntryIterator::new(inner)
     }
 
-    fn iter_entries_start<'a>(db: &'a rocksdb::DB) -> EntryIterator<'a, K, V> {
+    fn iter_entries_start(db: &rocksdb::DB) -> EntryIterator<'_, K, V> {
         Self::iter_entries(db, rocksdb::IteratorMode::Start)
     }
 
-    fn iter_entries_from<'a>(db: &'a rocksdb::DB, from: K) -> EntryIterator<'a, K, V> {
+    fn iter_entries_from(db: &rocksdb::DB, from: K) -> EntryIterator<'_, K, V> {
         let from_raw = Box::<[u8]>::from(from);
         let mode = rocksdb::IteratorMode::From(&from_raw, rocksdb::Direction::Forward);
 
@@ -381,11 +381,9 @@ where
     where
         F: Fn(&V) -> bool,
     {
-        for entry in Self::iter_entries(db, mode) {
-            if let Ok((k, v)) = entry {
-                if predicate(&v) {
-                    return Ok(Some(k));
-                }
+        for (k, v) in Self::iter_entries(db, mode).flatten() {
+            if predicate(&v) {
+                return Ok(Some(k));
             }
         }
 

@@ -22,8 +22,8 @@ pub fn run(config: &super::Config, _args: &Args) -> Result<(), Error> {
         .as_deref()
         .unwrap_or_else(|| Path::new("/rolldb"));
 
-    let rolldb = RollDB::open(&rolldb_path, config.rolldb.k_param.unwrap_or(1000))
-        .map_err(|err| Error::storage(err))?;
+    let rolldb =
+        RollDB::open(rolldb_path, config.rolldb.k_param.unwrap_or(1000)).map_err(Error::storage)?;
 
     let applydb_path = config
         .applydb
@@ -31,7 +31,7 @@ pub fn run(config: &super::Config, _args: &Args) -> Result<(), Error> {
         .as_deref()
         .unwrap_or_else(|| Path::new("/applydb"));
 
-    let applydb = ApplyDB::open(&applydb_path).map_err(|err| Error::storage(err))?;
+    let applydb = ApplyDB::open(applydb_path).map_err(Error::storage)?;
 
     dolos::sync::pipeline(&config.upstream, rolldb, applydb)
         .unwrap()

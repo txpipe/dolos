@@ -48,18 +48,14 @@ impl Stage {
         for wal in iter {
             let wal = wal.or_panic()?;
 
-            let cbor = self
-                .rolldb
-                .get_block(wal.hash().clone())
-                .or_panic()?
-                .unwrap();
+            let cbor = self.rolldb.get_block(*wal.hash()).or_panic()?.unwrap();
 
             let evt = match wal.action() {
                 crate::storage::rolldb::wal::WalAction::Apply => {
-                    RollEvent::Apply(wal.slot(), wal.hash().clone(), cbor)
+                    RollEvent::Apply(wal.slot(), *wal.hash(), cbor)
                 }
                 crate::storage::rolldb::wal::WalAction::Undo => {
-                    RollEvent::Undo(wal.slot(), wal.hash().clone(), cbor)
+                    RollEvent::Undo(wal.slot(), *wal.hash(), cbor)
                 }
                 crate::storage::rolldb::wal::WalAction::Mark => {
                     // TODO: do we really need mark events?
@@ -69,7 +65,7 @@ impl Stage {
             };
 
             self.downstream.send(evt.into()).await.or_panic()?;
-            self.cursor = Some((wal.slot(), wal.hash().clone()));
+            self.cursor = Some((wal.slot(), *wal.hash()));
         }
 
         Ok(())
@@ -80,7 +76,7 @@ pub struct Worker;
 
 #[async_trait::async_trait(?Send)]
 impl gasket::framework::Worker<Stage> for Worker {
-    async fn bootstrap(stage: &Stage) -> Result<Self, WorkerError> {
+    async fn bootstrap(_stage: &Stage) -> Result<Self, WorkerError> {
         Ok(Self)
     }
 
@@ -98,7 +94,7 @@ impl gasket::framework::Worker<Stage> for Worker {
             PullEvent::RollForward(slot, hash, body) => {
                 stage
                     .rolldb
-                    .roll_forward(*slot, hash.clone(), body.clone())
+                    .roll_forward(*slot, *hash, body.clone())
                     .or_panic()?;
             }
             PullEvent::Rollback(point) => match point {

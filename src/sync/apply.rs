@@ -37,7 +37,7 @@ impl Stage {
 impl Stage {
     #[instrument(skip_all)]
     fn apply_block(&mut self, cbor: &[u8]) -> Result<(), WorkerError> {
-        let block = pallas::ledger::traverse::MultiEraBlock::decode(&cbor).or_panic()?;
+        let block = pallas::ledger::traverse::MultiEraBlock::decode(cbor).or_panic()?;
         let slot = block.slot();
         let hash = block.hash();
 
@@ -46,7 +46,7 @@ impl Stage {
         for tx in block.txs() {
             for consumed in tx.consumes() {
                 batch
-                    .spend_utxo(consumed.hash().clone(), consumed.index())
+                    .spend_utxo(*consumed.hash(), consumed.index())
                     // TODO: since we don't have genesis utxos, it's reasonable to get missed hits.
                     // This needs to go away once the genesis block processing is implemented.
                     .or_else(|x| match x {
@@ -69,7 +69,7 @@ impl Stage {
             .txs()
             .iter()
             .flat_map(|x| x.consumes())
-            .map(|x| UtxoRef(x.hash().clone(), x.index()))
+            .map(|x| UtxoRef(*x.hash(), x.index()))
             .collect();
 
         batch.insert_slot(block.hash(), tombstones);
@@ -83,14 +83,14 @@ impl Stage {
 
     #[instrument(skip_all)]
     fn undo_block(&mut self, cbor: &[u8]) -> Result<(), WorkerError> {
-        let block = pallas::ledger::traverse::MultiEraBlock::decode(&cbor).or_panic()?;
+        let block = pallas::ledger::traverse::MultiEraBlock::decode(cbor).or_panic()?;
 
         let mut batch = self.applydb.start_block(block.slot());
 
         for tx in block.txs() {
             for consumed in tx.consumes() {
                 batch
-                    .unspend_stxi(consumed.hash().clone(), consumed.index())
+                    .unspend_stxi(*consumed.hash(), consumed.index())
                     .or_panic()?;
             }
 
@@ -111,7 +111,7 @@ pub struct Worker;
 
 #[async_trait::async_trait(?Send)]
 impl gasket::framework::Worker<Stage> for Worker {
-    async fn bootstrap(stage: &Stage) -> Result<Self, WorkerError> {
+    async fn bootstrap(_stage: &Stage) -> Result<Self, WorkerError> {
         Ok(Self)
     }
 
