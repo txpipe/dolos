@@ -8,3 +8,5 @@
   - [Kubernetes](./installation/kubernetes.md)
 - [Usage](./usage/README.md)
   - [Client Endpoint](./usage/client_endpoint.md)
+- [Benchmarks](./benchmarks/README.md)
+  - [Long-running operation](./benchmarks/long_running.md)
