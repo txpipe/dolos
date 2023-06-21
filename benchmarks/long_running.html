@@ -3,8 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Dolos</title>
-        <meta name="robots" content="noindex" />
+        <title>Long-running operation - Dolos</title>
 
 
         <!-- Custom HTML head -->
@@ -13,21 +12,21 @@
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <meta name="theme-color" content="#ffffff" />
 
-        <link rel="icon" href="favicon.svg">
-        <link rel="shortcut icon" href="favicon.png">
-        <link rel="stylesheet" href="css/variables.css">
-        <link rel="stylesheet" href="css/general.css">
-        <link rel="stylesheet" href="css/chrome.css">
-        <link rel="stylesheet" href="css/print.css" media="print">
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
 
         <!-- Fonts -->
-        <link rel="stylesheet" href="FontAwesome/css/font-awesome.css">
-        <link rel="stylesheet" href="fonts/fonts.css">
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
 
         <!-- Highlight.js Stylesheets -->
-        <link rel="stylesheet" href="highlight.css">
-        <link rel="stylesheet" href="tomorrow-night.css">
-        <link rel="stylesheet" href="ayu-highlight.css">
+        <link rel="stylesheet" href="../highlight.css">
+        <link rel="stylesheet" href="../tomorrow-night.css">
+        <link rel="stylesheet" href="../ayu-highlight.css">
 
         <!-- Custom theme stylesheets -->
 
@@ -36,7 +35,7 @@
     <div id="body-container">
         <!-- Provide site root to javascript -->
         <script>
-            var path_to_root = "";
+            var path_to_root = "../";
             var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "light";
         </script>
 
@@ -84,7 +83,7 @@
 
         <nav id="sidebar" class="sidebar" aria-label="Table of contents">
             <div class="sidebar-scrollbox">
-                <ol class="chapter"><li class="chapter-item expanded "><a href="introduction.html"><strong aria-hidden="true">1.</strong> Introduction</a></li><li class="chapter-item expanded "><a href="installation/index.html"><strong aria-hidden="true">2.</strong> Installation</a></li><li><ol class="section"><li class="chapter-item expanded "><a href="installation/binary_release.html"><strong aria-hidden="true">2.1.</strong> Binary Release</a></li><li class="chapter-item expanded "><a href="installation/from_source.html"><strong aria-hidden="true">2.2.</strong> From Source</a></li><li class="chapter-item expanded "><a href="installation/docker.html"><strong aria-hidden="true">2.3.</strong> Docker</a></li><li class="chapter-item expanded "><a href="installation/kubernetes.html"><strong aria-hidden="true">2.4.</strong> Kubernetes</a></li></ol></li><li class="chapter-item expanded "><a href="usage/index.html"><strong aria-hidden="true">3.</strong> Usage</a></li><li><ol class="section"><li class="chapter-item expanded "><a href="usage/client_endpoint.html"><strong aria-hidden="true">3.1.</strong> Client Endpoint</a></li></ol></li><li class="chapter-item expanded "><a href="benchmarks/index.html"><strong aria-hidden="true">4.</strong> Benchmarks</a></li><li><ol class="section"><li class="chapter-item expanded "><a href="benchmarks/long_running.html"><strong aria-hidden="true">4.1.</strong> Long-running operation</a></li></ol></li></ol>
+                <ol class="chapter"><li class="chapter-item expanded "><a href="../introduction.html"><strong aria-hidden="true">1.</strong> Introduction</a></li><li class="chapter-item expanded "><a href="../installation/index.html"><strong aria-hidden="true">2.</strong> Installation</a></li><li><ol class="section"><li class="chapter-item expanded "><a href="../installation/binary_release.html"><strong aria-hidden="true">2.1.</strong> Binary Release</a></li><li class="chapter-item expanded "><a href="../installation/from_source.html"><strong aria-hidden="true">2.2.</strong> From Source</a></li><li class="chapter-item expanded "><a href="../installation/docker.html"><strong aria-hidden="true">2.3.</strong> Docker</a></li><li class="chapter-item expanded "><a href="../installation/kubernetes.html"><strong aria-hidden="true">2.4.</strong> Kubernetes</a></li></ol></li><li class="chapter-item expanded "><a href="../usage/index.html"><strong aria-hidden="true">3.</strong> Usage</a></li><li><ol class="section"><li class="chapter-item expanded "><a href="../usage/client_endpoint.html"><strong aria-hidden="true">3.1.</strong> Client Endpoint</a></li></ol></li><li class="chapter-item expanded "><a href="../benchmarks/index.html"><strong aria-hidden="true">4.</strong> Benchmarks</a></li><li><ol class="section"><li class="chapter-item expanded "><a href="../benchmarks/long_running.html" class="active"><strong aria-hidden="true">4.1.</strong> Long-running operation</a></li></ol></li></ol>
             </div>
             <div id="sidebar-resize-handle" class="sidebar-resize-handle"></div>
         </nav>
@@ -116,7 +115,7 @@
                     <h1 class="menu-title">Dolos</h1>
 
                     <div class="right-buttons">
-                        <a href="print.html" title="Print this book" aria-label="Print this book">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
                             <i id="print-button" class="fa fa-print"></i>
                         </a>
 
@@ -145,205 +144,7 @@
 
                 <div id="content" class="content">
                     <main>
-                        <h1 id="dolos"><a class="header" href="#dolos">Dolos</a></h1>
-<p>Dolos is a new type of Cardano node, fine-tuned to solve a very narrow scope: keeping an updated copy of the ledger and replying to queries from trusted clients, while requiring a small fraction of the resources</p>
-<h1 id="motivation"><a class="header" href="#motivation">Motivation</a></h1>
-<p>Cardano nodes can assume one of two roles:</p>
-<ul>
-<li>block producer: in charge of minting blocks</li>
-<li>relay node: in charge relaying blocks from / to peers.</li>
-</ul>
-<p>Each of these roles has concrete responsibilities and runtime requirements. Criteria such as network topology, resource allocation, backup procedures, etc vary by role.</p>
-<p>We argue that there’s a 3rd role that should be treated independently with the goal of optimizing its workload: nodes that are used with the sole purpose of resolving local state queries or serving as data source for downstream tools that require ledger data.</p>
-<p>There are many potential optimizations for nodes performing this type of workload that are not currently possible with the Cardano node:</p>
-<ul>
-<li>drastically limiting the amount of memory required to execute the node</li>
-<li>switching to storage solutions with different trade-offs (eg: S3, NFS, etc)</li>
-<li>providing alternative wire protocols more friendly for data queries (eg: REST, gRPC)</li>
-<li>providing an auth layer in front of the API endpoints</li>
-</ul>
-<p>The goal of this project is to provide a very limited and focused version of the Cardano node that can be used by DevOps as a cost-effective, performant option to deploy <strong>data nodes</strong> side-by-side with the producer / relay nodes.</p>
-<p>This new role would be useful in the following scenarios:</p>
-<ul>
-<li>As data source for well-known tools such as DB-sync, Ogmios, CARP, Oura, etc.</li>
-<li>As a fast, low resource node for syncing other producer / relay nodes.</li>
-<li>As a ledger data source that scales dynamically according to query load.</li>
-<li>As a node that leverages network / cloud storage technology instead of mounted drives.</li>
-<li>As a node that scales horizontally, allowing high-availability topologies.</li>
-<li>As a low resource local node for resolving local state queries.</li>
-</ul>
-<h1 id="detailed-design"><a class="header" href="#detailed-design">Detailed design</a></h1>
-<p>Data nodes will share some of the features with the mainstream Cardano node:</p>
-<ul>
-<li>Node-to-Node and Node-to-Client Chain-Sync mini-protocol</li>
-<li>Node-to-Node Block-Fetch mini-protocol</li>
-<li>Node-to-Client Local-State-Query mini-protocol</li>
-</ul>
-<p>This new type of node will also provide features not currently available in the mainstream Cardano node:</p>
-<ul>
-<li>HTTP/JSON endpoint for common local state queries</li>
-<li>gRPC endpoint for local state queries and chain-sync procedure</li>
-<li>Different storage options including NFS, S3 &amp; GCP Buckets</li>
-<li>Low memory consumption (allowed by the trade-offs in scope) </li>
-</ul>
-<h1 id="drawbacks"><a class="header" href="#drawbacks">Drawbacks</a></h1>
-<ul>
-<li>Although the scope is very narrow compared to a real, full-blown node, this tool has a large LoE.</li>
-<li>There's overlap with some TxPipe tools such as Oura and Scrolls. The mitigation plan is to hoist individual components into Pallas to achieve DRY.</li>
-<li>Some components, such as the gRPC interface, might be useful even in environment running the full-blown Cardano node. To mitigate this we will architect the system in such a way that different entry-points (aka: binaries) can perform different roles. The gRPC bridge would be one of this.</li>
-</ul>
-<h1 id="alternatives"><a class="header" href="#alternatives">Alternatives</a></h1>
-<ul>
-<li>Use the full-blown Cardano node even for the scenarios described in this RFC.</li>
-<li>Split the project into sub-components that can be orchestrated to achieve the same result.</li>
-</ul>
-<h1 id="unresolved-questions"><a class="header" href="#unresolved-questions">Unresolved questions</a></h1>
-<ul>
-<li>Performance gains and resource allocation optimizations are theoretical, these were extrapolated from our experience implementing Cardano data processing pipelines using components written in Rust. We won’t have a strict, quantifiable measurement until we develop a PoC of this project. To mitigate this issue, our development process will include performance benchmarks execution at each development milestone. Reports will be included as part of each release.</li>
-<li>There’s some documentation lacking regarding local state queries wire-format which will need some reverse engineering from the mainstream Cardano node. We have experience with this approach but the level-of-effort associated with the task is hard to anticipate. To try mitigate this issue, we'll reach out to IOG for advise and documentation in case it's available.</li>
-</ul>
-<div style="break-before: page; page-break-before: always;"></div><h1 id="installation"><a class="header" href="#installation">Installation</a></h1>
-<p>Depending on your needs, <em>Dolos</em> provides different installation options:</p>
-<ul>
-<li><a href="installation/binary_release.html">Binary Release</a>: to use one of our pre-compiled binary releases for the supported platforms.</li>
-<li><a href="installation/from_source.html">From Source</a>: to compile a binary from source code using Rust's toolchain</li>
-<li><a href="installation/docker.html">Docker</a>: to run the tool from a pre-built docker image</li>
-<li><a href="installation/kubernetes.html">Kubernetes</a>: to deploy <em>Dolos</em> as a resource within a Kubernetes cluster</li>
-</ul>
-<div style="break-before: page; page-break-before: always;"></div><h1 id="binary-releases"><a class="header" href="#binary-releases">Binary Releases</a></h1>
-<p><em>Dolos</em> can be run as a standalone executable. Follow the instructions for your particular OS / Platform to install a local copy from our Github pre-built releases.</p>
-<h2 id="macos"><a class="header" href="#macos">MacOS</a></h2>
-<p>Use the following command to download and install <em>Dolos'</em> binary release for MacOS:</p>
-<pre><code class="language-sh">curl --silent --location https://git.io/JD2iH | \
-    tar xz -C /tmp &amp;&amp; mv /tmp/dolos /usr/local/bin
-</code></pre>
-<h2 id="gnulinux"><a class="header" href="#gnulinux">GNU/Linux</a></h2>
-<p>Use the following command to download and install <em>Dolos'</em> binary release for GNU/Linux:</p>
-<pre><code class="language-sh">curl --silent --location https://git.io/JD2ix | \
-    tar xz -C /tmp &amp;&amp; mv /tmp/dolos /usr/local/bin
-</code></pre>
-<p>Check the <a href="https://github.com/txpipe/dolos/releases/latest">latest release</a> for more binary download options.</p>
-<div style="break-before: page; page-break-before: always;"></div><h1 id="from-source"><a class="header" href="#from-source">From Source</a></h1>
-<p>The following instructions show how to build and install <em>Dolos</em> from source code.</p>
-<h2 id="pre-requisites"><a class="header" href="#pre-requisites">Pre-requisites</a></h2>
-<ul>
-<li>Rust toolchain</li>
-</ul>
-<h2 id="procedure"><a class="header" href="#procedure">Procedure</a></h2>
-<pre><code>git clone git@github.com:txpipe/dolos.git
-cd dolos
-cargo install --all-features --path .
-</code></pre>
-<div style="break-before: page; page-break-before: always;"></div><h1 id="docker"><a class="header" href="#docker">Docker</a></h1>
-<p><em>Dolos</em> provides already built public Docker images through Github Packages. To execute <em>Dolos</em> via Docker, use the following command:</p>
-<pre><code class="language-sh">docker run ghcr.io/txpipe/dolos:latest
-</code></pre>
-<p>The result of the above command should show <em>Dolos'</em> command-line help message.</p>
-<h2 id="entry-point"><a class="header" href="#entry-point">Entry Point</a></h2>
-<p>The entry-point of the image points to <em>Dolos</em> executable. You can pass the same command-line arguments that you would pass to the binary release running bare-metal. For example:</p>
-<pre><code>docker run -it ghcr.io/txpipe/dolos:latest \
-    --config my-custom-config.toml
-</code></pre>
-<p>For more information on available command-line arguments, check the <a href="installation/../usage/index.html">usage</a> section.</p>
-<h2 id="using-a-configuration-file"><a class="header" href="#using-a-configuration-file">Using a Configuration File</a></h2>
-<p>The default daemon configuration file for <em>Dolos</em> is located in <code>/etc/dolos/daemon.toml</code>. To run <em>Dolos</em> in daemon mode with a custom configuration file, you need to mount it in the correct location. The following example runs a docker container in background using a configuration file named <code>daemon.toml</code> located in the current folder:</p>
-<pre><code>docker run -d -v $(pwd)/daemon.toml:/etc/dolos/daemon.toml \
-    ghcr.io/txpipe/dolos:latest daemon
-</code></pre>
-<h2 id="versioned-images"><a class="header" href="#versioned-images">Versioned Images</a></h2>
-<p>Images are also tagged with the corresponding version number. It is highly recommended to use a fixed image version in production environments to avoid the effects of new features being included in each release (please remember dolos hasn't reached v1 stability guarantees).</p>
-<p>To use a versioned image, replace the <code>latest</code> tag by the desired version with the <code>v</code> prefix. For example, to use version <code>1.0.0</code>, use the following image:</p>
-<pre><code>ghcr.io/txpipe/dolos:v1.0.0
-</code></pre>
-<div style="break-before: page; page-break-before: always;"></div><h1 id="kubernetes"><a class="header" href="#kubernetes">Kubernetes</a></h1>
-<p><em>Dolos</em> can be implemented as a standalone Kubernetes <code>StatefulSet</code> resource. </p>
-<p>Please note that the amount of replicas is set to <code>1</code>. <em>Dolos</em> doesn't have any kind of &quot;coordination&quot; between instances. Adding more than one replica will just create extra pipelines duplicating the same work.</p>
-<pre><code class="language-yaml">apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: dolos
-data:
-  daemon.toml: |-
-    [upstream]
-    # REDACTED: here goes your `upstream` configuration options
-
-    [rolldb]
-    # REDACTED: here goes your `rolldb` configuration options
----
-apiVersion: apps/v1
-kind: StatefulSet
-metadata:
-  name: dolos
-spec:
-  template:
-    spec:
-      containers:
-        - name: main
-          image: ghcr.io/txpipe/dolos:latest
-
-          # we mount the same volume that the main container uses as the source
-          # for the Cardano node unix socket.
-          volumeMounts:
-            - mountPath: /var/dolos/db
-              name: db
-            - mountPath: /etc/dolos
-              name: config
-          resources:
-            requests:
-              memory: 1Gi
-              cpu: 1
-            limits:
-              memory: 1Gi
-      volumes:
-        # an empty-dir to store your data. In a real scenario, this should be a PVC
-        - name: db
-          emptyDir: {}
-
-        # a config map resource with Dolos' config, particular for your requirements
-        - name: config
-          configMap:
-            name: config
-</code></pre>
-<div style="break-before: page; page-break-before: always;"></div><h1 id="usage"><a class="header" href="#usage">Usage</a></h1>
-<p>This section provides information on how to use Dolos.</p>
-<div style="break-before: page; page-break-before: always;"></div><h1 id="client-endpoint"><a class="header" href="#client-endpoint">Client Endpoint</a></h1>
-<h2 id="introduction"><a class="header" href="#introduction">Introduction</a></h2>
-<ul>
-<li>Dolos exposes a gRPC endpoint allowing clients to query data</li>
-<li>The endpoint adheres to the UTxO RPC interface definition found in https://utxorpc.org</li>
-<li>The current implemented module is the <code>Sync</code> module that allows clients to sync with the state of the chain stored by Dolos</li>
-<li>Dolos endpoint also supports gRPC-web, a variant of gRPC that can be used directly from browsers</li>
-</ul>
-<h2 id="starting-the-server"><a class="header" href="#starting-the-server">Starting the server</a></h2>
-<ul>
-<li>There are 2 ways to start the server that provides access to the endpoints: the <code>serve</code> command and the <code>daemon</code> command</li>
-</ul>
-<h3 id="serve-mode"><a class="header" href="#serve-mode"><code>serve</code> mode</a></h3>
-<p>The <code>serve</code> command starts Dolos just with the purpose of exposing the client endpoint, no other functions are executed</p>
-<p>To start Dolos in <code>serve</code> mode run the following command from the terminal:</p>
-<pre><code>dolos serve
-</code></pre>
-<h3 id="daemon-mode"><a class="header" href="#daemon-mode"><code>daemon</code> mode</a></h3>
-<p>The <code>daemon</code> command starts Dolos with all of its main functions enabled (syncing from upstream, updating the ledger, etc) which includes the client endpoint server</p>
-<p>To start Dolos in <code>serve</code> mode run the following command from the terminal:</p>
-<pre><code>dolos serve
-</code></pre>
-<h2 id="connecting-to-the-server"><a class="header" href="#connecting-to-the-server">Connecting to the server</a></h2>
-<ul>
-<li>Once started, the server exposes TCP port</li>
-<li>The default port number is <code>50051</code>, but can be changed via configuration</li>
-<li>This port accepts http/2 connections following the standard gRPC mechanism</li>
-<li>The port also accepts http/1.1 connections following the gRPC-web protocol</li>
-<li>Developers can make use of <a href="https://utxorpc.org">UTxO-RPC</a> SDK libraries to interact with the endpoint programmatically</li>
-</ul>
-<h3 id="authentication-mechanism"><a class="header" href="#authentication-mechanism">Authentication Mechanism</a></h3>
-<ul>
-<li>Dolos has a built-in mechanism for authenticating clients using TLS</li>
-<li>By specifying a specific CA authority, Dolos can allows clients that provide a matching certificate</li>
-<li>The CA authority is specified by pointing to the corresponding <code>.pem</code> file through configuration</li>
-</ul>
-<div style="break-before: page; page-break-before: always;"></div><h1 id="benchmarks"><a class="header" href="#benchmarks">Benchmarks</a></h1>
-<div style="break-before: page; page-break-before: always;"></div><h1 id="long-running-operation"><a class="header" href="#long-running-operation">Long-running operation</a></h1>
+                        <h1 id="long-running-operation"><a class="header" href="#long-running-operation">Long-running operation</a></h1>
 <p>A &quot;long-running&quot; test refers to a type of test that is designed to evaluate the system's behavior under sustained use over a long period of time. These tests can be used to identify problems that might not be apparent in short-term testing scenarios.</p>
 <p>Among other things, long-running tests are often used to identify memory leaks, resource leaks, or degradation in system performance over time. If a system runs perfectly for an hour but starts having issues after several hours or days, a long-running test would help identify such problems.</p>
 <p>In particular, we want to measure CPU and memory usages of Dolos compared to the Haskell node. The main goal of Dolos is to provide a lightweight alternative (with substantially reduced features) for data access use-cases. To perform the comparison, both implementations were hosted under the equivalent conditions:</p>
@@ -560,6 +361,9 @@ spec:
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../benchmarks/index.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
 
 
                         <div style="clear: both"></div>
@@ -568,6 +372,9 @@ spec:
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../benchmarks/index.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
 
             </nav>
 
@@ -581,21 +388,16 @@ spec:
         </script>
 
 
-        <script src="elasticlunr.min.js"></script>
-        <script src="mark.min.js"></script>
-        <script src="searcher.js"></script>
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
 
-        <script src="clipboard.min.js"></script>
-        <script src="highlight.js"></script>
-        <script src="book.js"></script>
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
 
         <!-- Custom JS scripts -->
 
-        <script>
-        window.addEventListener('load', function() {
-            window.setTimeout(window.print, 100);
-        });
-        </script>
 
     </div>
     </body>
