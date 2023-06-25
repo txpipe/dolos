@@ -23,7 +23,10 @@ pub async fn run(config: super::Config, _args: &Args) -> Result<(), Error> {
     let db =
         RollDB::open(rolldb_path, config.rolldb.k_param.unwrap_or(1000)).map_err(Error::config)?;
 
-    dolos::serve::grpc::serve(config.serve.grpc, db).await?;
+    // placeholder while we make follow-tip optional
+    let (_, from_sync) = gasket::messaging::tokio::broadcast_channel(100);
+
+    dolos::serve::grpc::serve(config.serve.grpc, db, from_sync.try_into().unwrap()).await?;
 
     Ok(())
 }

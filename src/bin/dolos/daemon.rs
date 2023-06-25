@@ -34,10 +34,17 @@ pub async fn run(config: super::Config, _args: &Args) -> Result<(), Error> {
 
     let applydb = ApplyDB::open(applydb_path).map_err(Error::storage)?;
 
-    let rolldb_copy = rolldb.clone();
-    let server = tokio::spawn(dolos::serve::grpc::serve(config.serve.grpc, rolldb_copy));
+    // channel that connects output from sync pipeline to gRPC server
+    let (to_serve, from_sync) = gasket::messaging::tokio::broadcast_channel(100);
 
-    dolos::sync::pipeline(&config.upstream, rolldb, applydb)
+    let rolldb_copy = rolldb.clone();
+    let server = tokio::spawn(dolos::serve::grpc::serve(
+        config.serve.grpc,
+        rolldb_copy,
+        from_sync.try_into().unwrap(),
+    ));
+
+    dolos::sync::pipeline(&config.upstream, rolldb, applydb, to_serve)
         .unwrap()
         .block();
 

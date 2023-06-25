@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+use tokio::sync::broadcast::Receiver;
 use tonic::transport::{Certificate, Server, ServerTlsConfig};
 
 use utxorpc::proto::sync::v1::chain_sync_service_server::ChainSyncServiceServer;
@@ -16,9 +17,13 @@ pub struct Config {
     tls_client_ca_root: Option<PathBuf>,
 }
 
-pub async fn serve(config: Config, db: RollDB) -> Result<(), Error> {
+pub async fn serve(
+    config: Config,
+    db: RollDB,
+    sync_events: Receiver<gasket::messaging::Message<RollEvent>>,
+) -> Result<(), Error> {
     let addr = config.listen_address.parse().unwrap();
-    let service = sync::ChainSyncServiceImpl::new(db);
+    let service = sync::ChainSyncServiceImpl::new(db, sync_events);
     let service = ChainSyncServiceServer::new(service);
 
     let mut server = Server::builder().accept_http1(true);

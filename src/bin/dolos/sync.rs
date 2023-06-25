@@ -33,7 +33,10 @@ pub fn run(config: &super::Config, _args: &Args) -> Result<(), Error> {
 
     let applydb = ApplyDB::open(applydb_path).map_err(Error::storage)?;
 
-    dolos::sync::pipeline(&config.upstream, rolldb, applydb)
+    // placeholder while we implement monitoring sink
+    let (to_monitor, _) = gasket::messaging::tokio::broadcast_channel(100);
+
+    dolos::sync::pipeline(&config.upstream, rolldb, applydb, to_monitor)
         .unwrap()
         .block();
 

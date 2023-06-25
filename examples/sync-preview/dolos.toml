@@ -10,4 +10,4 @@ k_param = 1000
 path = "./tmp/applydb"
 
 [serve.grpc]
-listen_address = "0.0.0.0:50051"
+listen_address = "[::]:50051"
