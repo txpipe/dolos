@@ -18,6 +18,7 @@ pub fn pipeline(
     config: &Config,
     rolldb: RollDB,
     applydb: ApplyDB,
+    output: gasket::messaging::tokio::ChannelSendAdapter<RollEvent>,
 ) -> Result<gasket::daemon::Daemon, Error> {
     let pull_cursor = rolldb
         .intersect_options(5)
@@ -37,13 +38,16 @@ pub fn pipeline(
 
     let mut apply = apply::Stage::new(applydb);
 
-    let (to_roll, from_pull) = gasket::messaging::tokio::channel(50);
+    let (to_roll, from_pull) = gasket::messaging::tokio::mpsc_channel(50);
     pull.downstream.connect(to_roll);
     roll.upstream.connect(from_pull);
 
-    let (to_apply, from_roll) = gasket::messaging::tokio::channel(50);
+    let (to_apply, from_roll) = gasket::messaging::tokio::mpsc_channel(50);
     roll.downstream.connect(to_apply);
     apply.upstream.connect(from_roll);
+
+    // output to outside of out pipeline
+    apply.downstream.connect(output);
 
     let pull = gasket::runtime::spawn_stage(pull, gasket::runtime::Policy::default());
     let roll = gasket::runtime::spawn_stage(roll, gasket::runtime::Policy::default());

@@ -1,10 +1,13 @@
 use futures_core::Stream;
+use gasket::messaging::Message;
 use pallas::crypto::hash::Hash;
 use std::pin::Pin;
+use tokio::sync::broadcast::Receiver;
+use tokio_stream::StreamExt;
 use tonic::{Request, Response, Status};
 use utxorpc::proto::sync::v1::*;
 
-use crate::storage::rolldb::RollDB;
+use crate::{prelude::RollEvent, storage::rolldb::RollDB};
 
 fn bytes_to_hash(raw: &[u8]) -> Hash<32> {
     let array: [u8; 32] = raw.try_into().unwrap();
@@ -24,11 +27,11 @@ fn raw_to_anychain(raw: &[u8]) -> AnyChainBlock {
     }
 }
 
-pub struct ChainSyncServiceImpl(RollDB);
+pub struct ChainSyncServiceImpl(RollDB, Receiver<Message<RollEvent>>);
 
 impl ChainSyncServiceImpl {
-    pub fn new(db: RollDB) -> Self {
-        Self(db)
+    pub fn new(db: RollDB, sync_events: Receiver<Message<RollEvent>>) -> Self {
+        Self(db, sync_events)
     }
 }
 
@@ -105,11 +108,31 @@ impl chain_sync_service_server::ChainSyncService for ChainSyncServiceImpl {
 
         Ok(Response::new(response))
     }
-
     async fn follow_tip(
         &self,
         _request: Request<FollowTipRequest>,
     ) -> Result<Response<Self::FollowTipStream>, tonic::Status> {
-        todo!()
+        let rx = self.1.resubscribe();
+
+        let stream = tokio_stream::wrappers::BroadcastStream::new(rx).map(|res| match res {
+            Ok(val) => {
+                let r = utxorpc::proto::sync::v1::FollowTipResponse {
+                    action: match val.payload {
+                        RollEvent::Apply(_, _, raw) => {
+                            Some(follow_tip_response::Action::Apply(raw_to_anychain(&raw)))
+                        }
+                        RollEvent::Undo(_, _, raw) => {
+                            Some(follow_tip_response::Action::Undo(raw_to_anychain(&raw)))
+                        }
+                        RollEvent::Reset(x) => todo!(),
+                    },
+                };
+
+                Ok(r)
+            }
+            Err(err) => Err(Status::internal("internal error")),
+        });
+
+        Ok(Response::new(Box::pin(stream)))
     }
 }

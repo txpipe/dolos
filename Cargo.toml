@@ -15,8 +15,8 @@ authors = ["Santiago Carmuega <santiago@carmuega.me>"]
 pallas = "0.19.0-alpha.1"
 # pallas = { path = "../pallas/pallas" }
 
-gasket = { version = "^0.4", features = ["derive"] }
-# gasket = { path = "../../construkts/gasket-rs" }
+gasket = { version = "^0.5", features = ["derive"] }
+# gasket = { path = "../../construkts/gasket-rs/gasket", features = ["derive"] }
 
 utxorpc = { version = "1.0.0-alpha.1" }
 # utxorpc = { path = "../../utxorpc/rust-sdk" }
@@ -51,6 +51,7 @@ tonic = { version = "0.9.2", features = ["tls"] }
 bytes = "1.4.0"
 futures-core = "0.3.28"
 tonic-web = "0.9.2"
+tokio-stream = { version = "0.1.14", features = ["sync"] }
 
 [dev-dependencies]
 tempfile = "3.3.0"
