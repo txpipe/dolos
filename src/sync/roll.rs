@@ -46,7 +46,7 @@ impl Stage {
         };
 
         for wal in iter {
-            let wal = wal.or_panic()?;
+            let (wal, _) = wal.or_panic()?;
 
             let cbor = self.rolldb.get_block(*wal.hash()).or_panic()?.unwrap();
 

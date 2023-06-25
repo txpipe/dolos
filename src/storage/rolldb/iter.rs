@@ -2,11 +2,11 @@ use crate::storage::kvtable::*;
 
 type Error = crate::storage::kvtable::Error;
 
-type Item = Result<super::wal::Value, Error>;
+type Item = Result<(super::wal::Value, Option<super::wal::Seq>), Error>;
 
 enum Cursor<'a> {
     Chain(EntryIterator<'a, DBInt, DBHash>),
-    Wal(ValueIterator<'a, DBSerde<super::wal::Value>>),
+    Wal(EntryIterator<'a, DBInt, DBSerde<super::wal::Value>>),
 }
 
 impl<'a> Cursor<'a> {
@@ -19,14 +19,16 @@ impl<'a> Cursor<'a> {
             Cursor::Chain(iter) => {
                 let next = iter.next()?;
 
-                let next = next.map(|(slot, hash)| super::wal::Value::into_apply(slot, hash));
+                let next = next
+                    .map(|(slot, hash)| super::wal::Value::into_apply(slot, hash))
+                    .map(|x| (x, None));
 
                 Some(next)
             }
             Cursor::Wal(iter) => {
                 let next = iter.next()?;
 
-                let next = next.map(|val| val.0);
+                let next = next.map(|(seq, val)| (val.0, Some(seq.0)));
 
                 Some(next)
             }
@@ -57,7 +59,7 @@ impl<'a> RollIterator<'a> {
     pub fn from_wal(db: &'a rocksdb::DB, seq: super::wal::Seq) -> Self {
         Self {
             db,
-            cursor: Cursor::Wal(super::wal::WalKV::iter_values_from(db, seq.into())),
+            cursor: Cursor::Wal(super::WalKV::iter_entries_from(db, seq.into())),
         }
     }
 }
@@ -70,7 +72,7 @@ impl<'a> Iterator for RollIterator<'a> {
 
         if next.is_none() && self.cursor.is_chain() {
             let from = rocksdb::IteratorMode::Start;
-            let iter = super::wal::WalKV::iter_values(self.db, from);
+            let iter = super::wal::WalKV::iter_entries(self.db, from);
             self.cursor = Cursor::Wal(iter);
 
             next = self.cursor.next();

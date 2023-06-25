@@ -1,3 +1,4 @@
+use futures_core::Stream;
 use pallas::crypto::hash::Hash;
 use std::{path::Path, sync::Arc};
 
@@ -17,6 +18,7 @@ type BlockBody = Vec<u8>;
 #[derive(Clone)]
 pub struct RollDB {
     db: Arc<DB>,
+    tip_change: Arc<tokio::sync::Notify>,
     wal_seq: u64,
     k_param: u64,
 }
@@ -51,6 +53,7 @@ impl RollDB {
 
         Ok(Self {
             db: Arc::new(db),
+            tip_change: Arc::new(tokio::sync::Notify::new()),
             wal_seq,
             k_param,
         })
@@ -78,6 +81,8 @@ impl RollDB {
 
         self.db.write(batch).map_err(|_| Error::IO)?;
         self.wal_seq = new_seq;
+        self.tip_change.notify_waiters();
+        println!("notified waiters");
 
         Ok(())
     }
@@ -89,6 +94,7 @@ impl RollDB {
 
         self.db.write(batch).map_err(|_| Error::IO)?;
         self.wal_seq = new_seq;
+        self.tip_change.notify_waiters();
 
         Ok(())
     }
@@ -158,23 +164,49 @@ impl RollDB {
         iter::RollIterator::from_origin(&self.db)
     }
 
+    pub fn stream_from_origin<'a>(&'a self) -> impl Stream<Item = wal::Value> + 'a {
+        async_stream::stream! {
+            let iter = self.crawl_from_origin();
+            let mut last_seq = None;
+
+            for x in iter {
+                if let Ok((val, seq)) = x {
+                    yield val;
+                    last_seq = seq;
+                }
+            }
+
+            loop {
+                self.tip_change.notified().await;
+                let iter = self.crawl_wal(last_seq).skip(1);
+
+                for x in iter {
+                    if let Ok((seq, val)) = x {
+                        yield val;
+                        last_seq = Some(seq);
+                    }
+                }
+            }
+        }
+    }
+
     pub fn crawl_wal(
         &self,
         start_seq: Option<u64>,
-    ) -> impl Iterator<Item = Result<wal::Value, Error>> + '_ {
+    ) -> impl Iterator<Item = Result<(wal::Seq, wal::Value), Error>> + '_ {
         let iter = match start_seq {
             Some(start_seq) => {
                 let start_seq = Box::<[u8]>::from(DBInt(start_seq));
                 let from = rocksdb::IteratorMode::From(&start_seq, rocksdb::Direction::Forward);
-                wal::WalKV::iter_values(&self.db, from)
+                wal::WalKV::iter_entries(&self.db, from)
             }
             None => {
                 let from = rocksdb::IteratorMode::Start;
-                wal::WalKV::iter_values(&self.db, from)
+                wal::WalKV::iter_entries(&self.db, from)
             }
         };
 
-        iter.map(|v| v.map(|x| x.0))
+        iter.map(|v| v.map(|(seq, val)| (seq.0, val.0)))
     }
 
     pub fn crawl_chain(&self) -> impl Iterator<Item = Result<(BlockSlot, BlockHash), Error>> + '_ {
@@ -234,9 +266,11 @@ impl RollDB {
 
 #[cfg(test)]
 mod tests {
+    use futures_util::{pin_mut, StreamExt};
+
     use super::{BlockBody, BlockHash, BlockSlot, RollDB};
 
-    fn with_tmp_db(k_param: u64, op: fn(db: RollDB) -> ()) {
+    fn with_tmp_db<T>(k_param: u64, op: fn(db: RollDB) -> T) {
         let path = tempfile::tempdir().unwrap().into_path();
         let db = RollDB::open(path.clone(), k_param).unwrap();
 
@@ -305,8 +339,8 @@ mod tests {
             let mut wal = db.crawl_wal(None);
 
             for i in 96..100 {
-                let entry = wal.next().unwrap().unwrap();
-                assert_eq!(entry.slot(), i * 10);
+                let (_, val) = wal.next().unwrap().unwrap();
+                assert_eq!(val.slot(), i * 10);
             }
 
             assert!(wal.next().is_none());
@@ -337,20 +371,20 @@ mod tests {
             let mut wal = db.crawl_wal(None);
 
             for i in 77..100 {
-                let entry = wal.next().unwrap().unwrap();
-                assert!(entry.is_apply());
-                assert_eq!(entry.slot(), i * 10);
+                let (_, val) = wal.next().unwrap().unwrap();
+                assert!(val.is_apply());
+                assert_eq!(val.slot(), i * 10);
             }
 
             for i in (81..100).rev() {
-                let entry = wal.next().unwrap().unwrap();
-                assert!(entry.is_undo());
-                assert_eq!(entry.slot(), i * 10);
+                let (_, val) = wal.next().unwrap().unwrap();
+                assert!(val.is_undo());
+                assert_eq!(val.slot(), i * 10);
             }
 
-            let entry = wal.next().unwrap().unwrap();
-            assert!(entry.is_mark());
-            assert_eq!(entry.slot(), 800);
+            let (_, val) = wal.next().unwrap().unwrap();
+            assert!(val.is_mark());
+            assert_eq!(val.slot(), 800);
 
             assert!(wal.next().is_none());
         });
@@ -369,7 +403,7 @@ mod tests {
             let mut crawler = db.crawl_from_origin();
 
             for i in 0..100 {
-                let evt = crawler.next().unwrap().unwrap();
+                let (evt, _) = crawler.next().unwrap().unwrap();
                 assert!(evt.is_apply());
                 assert_eq!(evt.slot(), i * 10);
             }
@@ -417,5 +451,68 @@ mod tests {
                 assert_eq!(out.0, exp);
             }
         });
+    }
+
+    #[test]
+    fn test_stream_no_waiting() {
+        with_tmp_db(30, |mut db| {
+            for i in 0..100 {
+                let (slot, hash, body) = dummy_block(i * 10);
+                db.roll_forward(slot, hash, body).unwrap();
+            }
+
+            db.compact().unwrap();
+
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                let s = db.stream_from_origin();
+                pin_mut!(s);
+
+                for i in 0..100 {
+                    let evt = s.next().await;
+                    let evt = evt.unwrap();
+                    assert!(evt.is_apply());
+                    assert_eq!(evt.slot(), i * 10);
+                    println!("{}", evt.slot());
+                }
+            });
+        });
+    }
+
+    #[tokio::test]
+    async fn test_stream_waiting() {
+        let path = tempfile::tempdir().unwrap().into_path();
+        let mut db = RollDB::open(path.clone(), 30).unwrap();
+
+        for i in 0..100 {
+            let (slot, hash, body) = dummy_block(i * 10);
+            db.roll_forward(slot, hash, body).unwrap();
+        }
+
+        db.compact().unwrap();
+
+        let mut db2 = db.clone();
+        tokio::spawn(async move {
+            println!("starting new push");
+            for i in 100..200 {
+                let (slot, hash, body) = dummy_block(i * 10);
+                println!("new one {slot}");
+                db2.roll_forward(slot, hash, body).unwrap();
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            }
+        });
+
+        let s = db.stream_from_origin();
+        pin_mut!(s);
+
+        for i in 0..200 {
+            println!("waiting for new one...");
+            let evt = s.next().await;
+            let evt = evt.unwrap();
+            assert!(evt.is_apply());
+            assert_eq!(evt.slot(), i * 10);
+            println!("found {}", evt.slot());
+        }
+
+        RollDB::destroy(path).unwrap();
     }
 }
