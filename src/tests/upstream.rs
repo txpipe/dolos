@@ -54,7 +54,7 @@ fn test_mainnet_upstream() {
 
     let intersection = rolldb.intersect_options(5).unwrap().into_iter().collect();
 
-    let (send, receive) = gasket::messaging::tokio::channel(200);
+    let (send, receive) = gasket::messaging::tokio::mpsc_channel(200);
 
     let mut upstream = crate::sync::pull::Stage::new(
         "relays-new.cardano-mainnet.iohk.io:3001".into(),
