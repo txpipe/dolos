@@ -7,7 +7,10 @@ use tokio_stream::StreamExt;
 use tonic::{Request, Response, Status};
 use utxorpc::proto::sync::v1::*;
 
-use crate::{prelude::RollEvent, storage::rolldb::RollDB};
+use crate::{
+    prelude::RollEvent,
+    storage::rolldb::{wal::WalAction, RollDB},
+};
 
 fn bytes_to_hash(raw: &[u8]) -> Hash<32> {
     let array: [u8; 32] = raw.try_into().unwrap();
@@ -24,6 +27,19 @@ fn raw_to_anychain(raw: &[u8]) -> AnyChainBlock {
 
     AnyChainBlock {
         chain: utxorpc::proto::sync::v1::any_chain_block::Chain::Cardano(block).into(),
+    }
+}
+
+fn roll_to_tip_response(
+    evt: crate::storage::rolldb::wal::Value,
+    block: &[u8],
+) -> FollowTipResponse {
+    utxorpc::proto::sync::v1::FollowTipResponse {
+        action: match evt.action() {
+            WalAction::Apply => follow_tip_response::Action::Apply(raw_to_anychain(block)).into(),
+            WalAction::Undo => follow_tip_response::Action::Undo(raw_to_anychain(block)).into(),
+            WalAction::Mark => None,
+        },
     }
 }
 
@@ -108,31 +124,53 @@ impl chain_sync_service_server::ChainSyncService for ChainSyncServiceImpl {
 
         Ok(Response::new(response))
     }
+
+    // async fn follow_tip(
+    //     &self,
+    //     _request: Request<FollowTipRequest>,
+    // ) -> Result<Response<Self::FollowTipStream>, tonic::Status> {
+    //     let (tx, rx) = tokio::sync::mpsc::channel(1);
+
+    //     let db2 = self.0.clone();
+
+    //     tokio::spawn(async move {
+    //         let iter = db2.crawl_from_origin();
+    //         let mut last_seq = None;
+
+    //         for x in iter {
+    //             if let Ok((val, seq)) = x {
+    //                 let val = roll_to_tip_response(val, &db2);
+    //                 tx.send(val).await.unwrap();
+    //                 last_seq = seq;
+    //             }
+    //         }
+
+    //         loop {
+    //             db2.tip_change.notified().await;
+    //             let iter = db2.crawl_wal(last_seq).skip(1);
+
+    //             for x in iter {
+    //                 if let Ok((seq, val)) = x {
+    //                     let val = roll_to_tip_response(val, &db2);
+    //                     tx.send(val).await.unwrap();
+    //                     last_seq = Some(seq);
+    //                 }
+    //             }
+    //         }
+    //     });
+
+    //     let rx = tokio_stream::wrappers::ReceiverStream::new(rx);
+
+    //     Ok(Response::new(Box::pin(rx)))
+    // }
+
     async fn follow_tip(
         &self,
         _request: Request<FollowTipRequest>,
     ) -> Result<Response<Self::FollowTipStream>, tonic::Status> {
-        let rx = self.1.resubscribe();
+        let s = crate::storage::rolldb::stream::RollStream::start_with_block(self.0.clone(), None)
+            .map(|(evt, block)| Ok(roll_to_tip_response(evt, &block)));
 
-        let stream = tokio_stream::wrappers::BroadcastStream::new(rx).map(|res| match res {
-            Ok(val) => {
-                let r = utxorpc::proto::sync::v1::FollowTipResponse {
-                    action: match val.payload {
-                        RollEvent::Apply(_, _, raw) => {
-                            Some(follow_tip_response::Action::Apply(raw_to_anychain(&raw)))
-                        }
-                        RollEvent::Undo(_, _, raw) => {
-                            Some(follow_tip_response::Action::Undo(raw_to_anychain(&raw)))
-                        }
-                        RollEvent::Reset(x) => todo!(),
-                    },
-                };
-
-                Ok(r)
-            }
-            Err(err) => Err(Status::internal("internal error")),
-        });
-
-        Ok(Response::new(Box::pin(stream)))
+        Ok(Response::new(Box::pin(s)))
     }
 }

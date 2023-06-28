@@ -179,7 +179,7 @@ mod tests {
 
     fn dummy_utxo(tx: u64, idx: OutputIndex) -> (TxHash, OutputIndex, UtxoBody) {
         let hash = pallas::crypto::hash::Hasher::<256>::hash(tx.to_be_bytes().as_slice());
-        (hash, idx, (tx + idx as u64).to_be_bytes().to_vec())
+        (hash, idx, (tx + idx).to_be_bytes().to_vec())
     }
 
     #[test]
@@ -248,9 +248,9 @@ mod tests {
             let hash = pallas::crypto::hash::Hasher::<256>::hash(44u32.to_be_bytes().as_slice());
             let mut batch = db.start_block(slot);
 
-            batch.insert_utxo(tx1, idx1, body1.clone());
-            batch.insert_utxo(tx2, idx2, body2.clone());
-            batch.insert_utxo(tx3, idx3, body3.clone());
+            batch.insert_utxo(tx1, idx1, body1);
+            batch.insert_utxo(tx2, idx2, body2);
+            batch.insert_utxo(tx3, idx3, body3);
 
             batch.insert_slot(hash, Default::default());
 

@@ -1,4 +1,3 @@
-use futures_core::Stream;
 use pallas::crypto::hash::Hash;
 use std::{path::Path, sync::Arc};
 
@@ -9,6 +8,7 @@ use self::wal::WalKV;
 use super::kvtable::*;
 
 pub mod iter;
+pub mod stream;
 pub mod wal;
 
 type BlockSlot = u64;
@@ -18,7 +18,7 @@ type BlockBody = Vec<u8>;
 #[derive(Clone)]
 pub struct RollDB {
     db: Arc<DB>,
-    tip_change: Arc<tokio::sync::Notify>,
+    pub tip_change: Arc<tokio::sync::Notify>,
     wal_seq: u64,
     k_param: u64,
 }
@@ -82,7 +82,6 @@ impl RollDB {
         self.db.write(batch).map_err(|_| Error::IO)?;
         self.wal_seq = new_seq;
         self.tip_change.notify_waiters();
-        println!("notified waiters");
 
         Ok(())
     }
@@ -164,32 +163,6 @@ impl RollDB {
         iter::RollIterator::from_origin(&self.db)
     }
 
-    pub fn stream_from_origin<'a>(&'a self) -> impl Stream<Item = wal::Value> + 'a {
-        async_stream::stream! {
-            let iter = self.crawl_from_origin();
-            let mut last_seq = None;
-
-            for x in iter {
-                if let Ok((val, seq)) = x {
-                    yield val;
-                    last_seq = seq;
-                }
-            }
-
-            loop {
-                self.tip_change.notified().await;
-                let iter = self.crawl_wal(last_seq).skip(1);
-
-                for x in iter {
-                    if let Ok((seq, val)) = x {
-                        yield val;
-                        last_seq = Some(seq);
-                    }
-                }
-            }
-        }
-    }
-
     pub fn crawl_wal(
         &self,
         start_seq: Option<u64>,
@@ -266,8 +239,6 @@ impl RollDB {
 
 #[cfg(test)]
 mod tests {
-    use futures_util::{pin_mut, StreamExt};
-
     use super::{BlockBody, BlockHash, BlockSlot, RollDB};
 
     fn with_tmp_db<T>(k_param: u64, op: fn(db: RollDB) -> T) {
@@ -451,68 +422,5 @@ mod tests {
                 assert_eq!(out.0, exp);
             }
         });
-    }
-
-    #[test]
-    fn test_stream_no_waiting() {
-        with_tmp_db(30, |mut db| {
-            for i in 0..100 {
-                let (slot, hash, body) = dummy_block(i * 10);
-                db.roll_forward(slot, hash, body).unwrap();
-            }
-
-            db.compact().unwrap();
-
-            tokio::runtime::Runtime::new().unwrap().block_on(async {
-                let s = db.stream_from_origin();
-                pin_mut!(s);
-
-                for i in 0..100 {
-                    let evt = s.next().await;
-                    let evt = evt.unwrap();
-                    assert!(evt.is_apply());
-                    assert_eq!(evt.slot(), i * 10);
-                    println!("{}", evt.slot());
-                }
-            });
-        });
-    }
-
-    #[tokio::test]
-    async fn test_stream_waiting() {
-        let path = tempfile::tempdir().unwrap().into_path();
-        let mut db = RollDB::open(path.clone(), 30).unwrap();
-
-        for i in 0..100 {
-            let (slot, hash, body) = dummy_block(i * 10);
-            db.roll_forward(slot, hash, body).unwrap();
-        }
-
-        db.compact().unwrap();
-
-        let mut db2 = db.clone();
-        tokio::spawn(async move {
-            println!("starting new push");
-            for i in 100..200 {
-                let (slot, hash, body) = dummy_block(i * 10);
-                println!("new one {slot}");
-                db2.roll_forward(slot, hash, body).unwrap();
-                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-            }
-        });
-
-        let s = db.stream_from_origin();
-        pin_mut!(s);
-
-        for i in 0..200 {
-            println!("waiting for new one...");
-            let evt = s.next().await;
-            let evt = evt.unwrap();
-            assert!(evt.is_apply());
-            assert_eq!(evt.slot(), i * 10);
-            println!("found {}", evt.slot());
-        }
-
-        RollDB::destroy(path).unwrap();
     }
 }
