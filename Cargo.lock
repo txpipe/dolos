@@ -1236,9 +1236,9 @@ checksum = "c1b04fb49957986fdce4d6ee7a65027d55d4b6d2265e5848bbb507b58ccfdb6f"
 
 [[package]]
 name = "pallas"
-version = "0.19.0-alpha.1"
+version = "0.19.0-alpha.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8bb2c006bf185e098ccc586835265d9ed59749bf9d4df0f70e93a7fa54b00617"
+checksum = "5dfebda14c2b09996d7f9cf159f140ded6effb476b523d7aa61409b1e3369481"
 dependencies = [
  "pallas-addresses",
  "pallas-codec",
