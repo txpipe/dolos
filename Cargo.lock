@@ -530,7 +530,7 @@ dependencies = [
  "lazy_static",
  "log",
  "miette",
- "minicbor 0.14.2",
+ "minicbor",
  "net2",
  "pallas",
  "prometheus_exporter",
@@ -1089,12 +1089,6 @@ checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
 
 [[package]]
 name = "minicbor"
-version = "0.14.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5ef3a5eb0af5d357a7e44287d7ddd094f47de68cda7086c4917578f62e4294df"
-
-[[package]]
-name = "minicbor"
 version = "0.19.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d7005aaf257a59ff4de471a9d5538ec868a21586534fff7f85dd97d4043a6139"
@@ -1270,7 +1264,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e61ff35ab362b1b8ff7575f795808ed158363d531c728111814813e8d26ed9b7"
 dependencies = [
  "hex",
- "minicbor 0.19.1",
+ "minicbor",
  "serde",
 ]
 
