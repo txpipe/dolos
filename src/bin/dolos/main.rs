@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use clap::{Parser, Subcommand};
 use miette::{IntoDiagnostic, Result};
 use serde::Deserialize;
@@ -43,6 +45,7 @@ pub struct Config {
     pub applydb: ApplydbConfig,
     pub upstream: dolos::sync::Config,
     pub serve: dolos::serve::Config,
+    pub retries: Option<gasket::retries::Policy>,
 }
 
 impl Config {
@@ -67,13 +70,32 @@ impl Config {
     }
 }
 
+fn define_gasket_policy(config: Option<&gasket::retries::Policy>) -> gasket::runtime::Policy {
+    let default_policy = gasket::retries::Policy {
+        max_retries: 20,
+        backoff_unit: Duration::from_secs(1),
+        backoff_factor: 2,
+        max_backoff: Duration::from_secs(60),
+        dismissible: false,
+    };
+
+    gasket::runtime::Policy {
+        tick_timeout: std::time::Duration::from_secs(120).into(),
+        bootstrap_retry: config.cloned().unwrap_or(default_policy.clone()),
+        work_retry: config.cloned().unwrap_or(default_policy.clone()),
+        teardown_retry: config.cloned().unwrap_or(default_policy.clone()),
+    }
+}
+
 fn main() -> Result<()> {
     let args = Cli::parse();
     let config = Config::new(&args.config).into_diagnostic()?;
 
+    let retries = define_gasket_policy(config.retries.as_ref());
+
     match args.command {
-        Command::Daemon(x) => daemon::run(config, &x).into_diagnostic()?,
-        Command::Sync(x) => sync::run(&config, &x).into_diagnostic()?,
+        Command::Daemon(x) => daemon::run(config, &retries, &x).into_diagnostic()?,
+        Command::Sync(x) => sync::run(&config, &retries, &x).into_diagnostic()?,
         Command::Read(x) => read::run(&config, &x).into_diagnostic()?,
         Command::Serve(x) => serve::run(config, &x).into_diagnostic()?,
     };
