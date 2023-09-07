@@ -140,10 +140,12 @@ impl RollDB {
         let tip = WalKV::find_tip(&self.db)?;
 
         if let Some((tip_slot, _)) = tip {
-            // -1 as we don't want to include the block on the boundary if it exists
+            // fetch first entry in ChainKV with slot lower than (tip slot - k param)
             let immutable_before = Box::<[u8]>::from(DBInt(tip_slot - self.k_param - 1));
+
             let before =
                 rocksdb::IteratorMode::From(&immutable_before, rocksdb::Direction::Reverse);
+
             if let Some((DBInt(slot), DBHash(hash))) =
                 ChainKV::iter_entries(&self.db, before).next().transpose()?
             {
@@ -231,9 +233,7 @@ impl RollDB {
             }
         }
 
-        if !batch.is_empty() {
-            self.db.write(batch).map_err(|_| Error::IO)?;
-        }
+        self.db.write(batch).map_err(|_| Error::IO)?;
 
         Ok(())
     }
