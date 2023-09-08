@@ -1,4 +1,3 @@
-use log::info;
 use pallas::network::facades::PeerServer;
 use pallas::network::miniprotocols::blockfetch::BlockRequest;
 use pallas::network::miniprotocols::Point;
@@ -6,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio::sync::broadcast::Receiver;
 
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 
 use crate::prelude::*;
 use crate::storage::rolldb::RollDB;
@@ -15,7 +14,7 @@ use crate::storage::rolldb::RollDB;
 pub struct Config {
     listen_path: Option<String>,
     listen_address: Option<String>,
-    allow_n2c_over_tcp: bool,
+    allow_n2c_over_tcp: Option<bool>,
     magic: u64,
 }
 
