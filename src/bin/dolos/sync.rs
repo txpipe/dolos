@@ -8,7 +8,11 @@ use dolos::{
 #[derive(Debug, clap::Args)]
 pub struct Args {}
 
-pub fn run(config: &super::Config, _args: &Args) -> Result<(), Error> {
+pub fn run(
+    config: &super::Config,
+    policy: &gasket::runtime::Policy,
+    _args: &Args,
+) -> Result<(), Error> {
     tracing::subscriber::set_global_default(
         tracing_subscriber::FmtSubscriber::builder()
             .with_max_level(tracing::Level::DEBUG)
@@ -36,7 +40,7 @@ pub fn run(config: &super::Config, _args: &Args) -> Result<(), Error> {
     // placeholder while we implement monitoring sink
     let (to_monitor, _) = gasket::messaging::tokio::broadcast_channel(100);
 
-    dolos::sync::pipeline(&config.upstream, rolldb, applydb, to_monitor)
+    dolos::sync::pipeline(&config.upstream, rolldb, applydb, to_monitor, policy)
         .unwrap()
         .block();
 

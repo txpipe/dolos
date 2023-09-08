@@ -95,12 +95,17 @@ async fn handle_blockfetch(db: RollDB, mut peer: PeerServer) -> Result<(), Error
                             .await
                             .map_err(Error::server)?;
                     }
+
+                    blockfetch.send_batch_done().await.map_err(Error::server)?;
                 } else {
                     return blockfetch.send_no_blocks().await.map_err(Error::server);
                 }
             }
             Ok(None) => info!("peer ended blockfetch protocol"),
-            Err(e) => warn!("error receiving blockfetch message: {:?}", e),
+            Err(e) => {
+                warn!("error receiving blockfetch message: {:?}", e);
+                return Err(Error::client(e));
+            }
         }
     }
 }

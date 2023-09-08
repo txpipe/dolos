@@ -8,7 +8,7 @@ pub type UpstreamPort = gasket::messaging::tokio::InputPort<PullEvent>;
 pub type DownstreamPort = gasket::messaging::tokio::OutputPort<RollEvent>;
 
 #[derive(Stage)]
-#[stage(name = "reducer", unit = "PullEvent", worker = "Worker")]
+#[stage(name = "roll", unit = "PullEvent", worker = "Worker")]
 pub struct Stage {
     rolldb: RollDB,
 

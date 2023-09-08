@@ -10,7 +10,11 @@ use tracing::warn;
 pub struct Args {}
 
 #[tokio::main]
-pub async fn run(config: super::Config, _args: &Args) -> Result<(), Error> {
+pub async fn run(
+    config: super::Config,
+    policy: &gasket::runtime::Policy,
+    _args: &Args,
+) -> Result<(), Error> {
     tracing::subscriber::set_global_default(
         tracing_subscriber::FmtSubscriber::builder()
             .with_max_level(tracing::Level::DEBUG)
@@ -47,7 +51,7 @@ pub async fn run(config: super::Config, _args: &Args) -> Result<(), Error> {
             from_sync.try_into().unwrap(),
         ));
 
-        dolos::sync::pipeline(&config.upstream, rolldb, applydb, to_serve)
+        dolos::sync::pipeline(&config.upstream, rolldb, applydb, to_serve, policy)
             .unwrap()
             .block();
 
