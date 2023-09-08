@@ -11,7 +11,7 @@ pub struct Args {}
 pub async fn run(config: super::Config, _args: &Args) -> Result<(), Error> {
     tracing::subscriber::set_global_default(
         tracing_subscriber::FmtSubscriber::builder()
-            .with_max_level(tracing::Level::DEBUG)
+            .with_max_level(tracing::Level::INFO)
             .finish(),
     )
     .unwrap();
