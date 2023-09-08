@@ -25,6 +25,8 @@ pub async fn serve(
     _sync_events: Receiver<gasket::messaging::Message<RollEvent>>,
 ) -> Result<(), Error> {
     if let Some(addr) = config.listen_address {
+        info!("serving via N2N Ouroboros on address: {addr}");
+
         let listener = TcpListener::bind(addr).await.unwrap();
 
         loop {

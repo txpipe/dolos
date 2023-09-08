@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::Receiver;
 use tonic::transport::{Certificate, Server, ServerTlsConfig};
 
+use tracing::info;
 use utxorpc::proto::sync::v1::chain_sync_service_server::ChainSyncServiceServer;
 
 use crate::prelude::*;
@@ -37,6 +38,8 @@ pub async fn serve(
 
         server = server.tls_config(tls).map_err(Error::config)?;
     }
+
+    info!("serving via gRPC on address: {}", config.listen_address);
 
     server
         // GrpcWeb is over http1 so we must enable it.
