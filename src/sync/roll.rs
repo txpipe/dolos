@@ -108,7 +108,7 @@ impl gasket::framework::Worker<Stage> for Worker {
         stage.catchup().await?;
 
         // TODO: don't do this while doing full sync
-        stage.rolldb.prune().or_panic()?;
+        stage.rolldb.prune_wal().or_panic()?;
 
         Ok(())
     }
