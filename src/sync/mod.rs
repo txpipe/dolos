@@ -18,7 +18,6 @@ pub fn pipeline(
     config: &Config,
     rolldb: RollDB,
     applydb: ApplyDB,
-    _output: gasket::messaging::tokio::ChannelSendAdapter<RollEvent>,
     policy: &gasket::runtime::Policy,
 ) -> Result<gasket::daemon::Daemon, Error> {
     let pull_cursor = rolldb

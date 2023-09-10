@@ -39,19 +39,12 @@ pub async fn run(
 
     let applydb = ApplyDB::open(applydb_path).map_err(Error::storage)?;
 
-    // channel that connects output from sync pipeline to gRPC server
-    let (to_serve, from_sync) = gasket::messaging::tokio::broadcast_channel(100);
-
     let rolldb_copy = rolldb.clone();
 
     if let Some(grpc_config) = config.serve.grpc {
-        let server = tokio::spawn(dolos::serve::grpc::serve(
-            grpc_config,
-            rolldb_copy,
-            from_sync.try_into().unwrap(),
-        ));
+        let server = tokio::spawn(dolos::serve::grpc::serve(grpc_config, rolldb_copy));
 
-        dolos::sync::pipeline(&config.upstream, rolldb, applydb, to_serve, policy)
+        dolos::sync::pipeline(&config.upstream, rolldb, applydb, policy)
             .unwrap()
             .block();
 

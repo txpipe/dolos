@@ -34,7 +34,6 @@ pub async fn run(config: super::Config, _args: &Args) -> Result<(), Error> {
         tasks.push(tokio::spawn(dolos::serve::grpc::serve(
             grpc_config,
             db.clone(),
-            from_sync.clone().try_into().unwrap(),
         )));
     } else {
         info!("no gRPC config found, not serving over gRPC")
