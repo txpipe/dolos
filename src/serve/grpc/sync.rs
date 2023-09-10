@@ -1,16 +1,11 @@
 use futures_core::Stream;
-use gasket::messaging::Message;
 use pallas::crypto::hash::Hash;
 use std::pin::Pin;
-use tokio::sync::broadcast::Receiver;
 use tokio_stream::StreamExt;
 use tonic::{Request, Response, Status};
 use utxorpc::proto::sync::v1::*;
 
-use crate::{
-    prelude::RollEvent,
-    storage::rolldb::{wal::WalAction, RollDB},
-};
+use crate::storage::rolldb::{wal::WalAction, RollDB};
 
 fn bytes_to_hash(raw: &[u8]) -> Hash<32> {
     let array: [u8; 32] = raw.try_into().unwrap();
@@ -43,11 +38,11 @@ fn roll_to_tip_response(
     }
 }
 
-pub struct ChainSyncServiceImpl(RollDB, Receiver<Message<RollEvent>>);
+pub struct ChainSyncServiceImpl(RollDB);
 
 impl ChainSyncServiceImpl {
-    pub fn new(db: RollDB, sync_events: Receiver<Message<RollEvent>>) -> Self {
-        Self(db, sync_events)
+    pub fn new(db: RollDB) -> Self {
+        Self(db)
     }
 }
 
@@ -124,45 +119,6 @@ impl chain_sync_service_server::ChainSyncService for ChainSyncServiceImpl {
 
         Ok(Response::new(response))
     }
-
-    // async fn follow_tip(
-    //     &self,
-    //     _request: Request<FollowTipRequest>,
-    // ) -> Result<Response<Self::FollowTipStream>, tonic::Status> {
-    //     let (tx, rx) = tokio::sync::mpsc::channel(1);
-
-    //     let db2 = self.0.clone();
-
-    //     tokio::spawn(async move {
-    //         let iter = db2.crawl_from_origin();
-    //         let mut last_seq = None;
-
-    //         for x in iter {
-    //             if let Ok((val, seq)) = x {
-    //                 let val = roll_to_tip_response(val, &db2);
-    //                 tx.send(val).await.unwrap();
-    //                 last_seq = seq;
-    //             }
-    //         }
-
-    //         loop {
-    //             db2.tip_change.notified().await;
-    //             let iter = db2.crawl_wal(last_seq).skip(1);
-
-    //             for x in iter {
-    //                 if let Ok((seq, val)) = x {
-    //                     let val = roll_to_tip_response(val, &db2);
-    //                     tx.send(val).await.unwrap();
-    //                     last_seq = Some(seq);
-    //                 }
-    //             }
-    //         }
-    //     });
-
-    //     let rx = tokio_stream::wrappers::ReceiverStream::new(rx);
-
-    //     Ok(Response::new(Box::pin(rx)))
-    // }
 
     async fn follow_tip(
         &self,

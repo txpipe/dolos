@@ -1,7 +1,7 @@
 use rocksdb::{IteratorMode, WriteBatch, DB};
 use serde::{Deserialize, Serialize};
 
-use crate::{prelude::BlockSlot, storage::kvtable::*};
+use crate::storage::kvtable::*;
 
 pub type Seq = u64;
 
