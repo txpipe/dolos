@@ -18,7 +18,7 @@ pub fn pipeline(
     config: &Config,
     rolldb: RollDB,
     applydb: ApplyDB,
-    output: gasket::messaging::tokio::ChannelSendAdapter<RollEvent>,
+    _output: gasket::messaging::tokio::ChannelSendAdapter<RollEvent>,
     policy: &gasket::runtime::Policy,
 ) -> Result<gasket::daemon::Daemon, Error> {
     let pull_cursor = rolldb
@@ -48,7 +48,7 @@ pub fn pipeline(
     apply.upstream.connect(from_roll);
 
     // output to outside of out pipeline
-    apply.downstream.connect(output);
+    // apply.downstream.connect(output);
 
     let pull = gasket::runtime::spawn_stage(pull, policy.clone());
     let roll = gasket::runtime::spawn_stage(roll, policy.clone());

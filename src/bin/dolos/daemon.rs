@@ -4,6 +4,7 @@ use dolos::{
     prelude::*,
     storage::{applydb::ApplyDB, rolldb::RollDB},
 };
+use tracing::warn;
 
 #[derive(Debug, clap::Args)]
 pub struct Args {}
@@ -42,17 +43,22 @@ pub async fn run(
     let (to_serve, from_sync) = gasket::messaging::tokio::broadcast_channel(100);
 
     let rolldb_copy = rolldb.clone();
-    let server = tokio::spawn(dolos::serve::grpc::serve(
-        config.serve.grpc,
-        rolldb_copy,
-        from_sync.try_into().unwrap(),
-    ));
 
-    dolos::sync::pipeline(&config.upstream, rolldb, applydb, to_serve, policy)
-        .unwrap()
-        .block();
+    if let Some(grpc_config) = config.serve.grpc {
+        let server = tokio::spawn(dolos::serve::grpc::serve(
+            grpc_config,
+            rolldb_copy,
+            from_sync.try_into().unwrap(),
+        ));
 
-    server.abort();
+        dolos::sync::pipeline(&config.upstream, rolldb, applydb, to_serve, policy)
+            .unwrap()
+            .block();
+
+        server.abort();
+    } else {
+        warn!("no gRPC config found")
+    }
 
     Ok(())
 }

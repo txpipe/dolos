@@ -5,15 +5,15 @@ use crate::prelude::*;
 use crate::storage::applydb::{ApplyDB, UtxoRef};
 
 pub type UpstreamPort = gasket::messaging::tokio::InputPort<RollEvent>;
-pub type DownstreamPort = gasket::messaging::tokio::OutputPort<RollEvent>; // gasket::messaging::tokio::OutputPort<RollEvent>;
+// pub type DownstreamPort = gasket::messaging::tokio::OutputPort<RollEvent>; // gasket::messaging::tokio::OutputPort<RollEvent>;
 
 #[derive(Stage)]
-#[stage(name = "reducer", unit = "RollEvent", worker = "Worker")]
+#[stage(name = "apply", unit = "RollEvent", worker = "Worker")]
 pub struct Stage {
     applydb: ApplyDB,
 
     pub upstream: UpstreamPort,
-    pub downstream: DownstreamPort,
+    // pub downstream: DownstreamPort,
 
     // placeholder
     //pub downstream: DownstreamPort,
@@ -29,7 +29,7 @@ impl Stage {
         Self {
             applydb,
             upstream: Default::default(),
-            downstream: Default::default(),
+            // downstream: Default::default(),
             block_count: Default::default(),
             wal_count: Default::default(),
         }
@@ -133,11 +133,11 @@ impl gasket::framework::Worker<Stage> for Worker {
             RollEvent::Reset(_) => todo!(),
         };
 
-        stage
-            .downstream
-            .send(unit.clone().into())
-            .await
-            .or_panic()?;
+        // stage
+        //     .downstream
+        //     .send(unit.clone().into())
+        //     .await
+        //     .or_panic()?;
 
         Ok(())
     }

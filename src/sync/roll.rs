@@ -8,7 +8,7 @@ pub type UpstreamPort = gasket::messaging::tokio::InputPort<PullEvent>;
 pub type DownstreamPort = gasket::messaging::tokio::OutputPort<RollEvent>;
 
 #[derive(Stage)]
-#[stage(name = "reducer", unit = "PullEvent", worker = "Worker")]
+#[stage(name = "roll", unit = "PullEvent", worker = "Worker")]
 pub struct Stage {
     rolldb: RollDB,
 
@@ -38,15 +38,12 @@ impl Stage {
 
     /// Catch-up output with current persisted state
     ///
-    /// Reads from rolldb using the latest known cursor and outputs the corresponding downstream events
+    /// Reads from Wal using the latest known cursor and outputs the corresponding downstream events
     async fn catchup(&mut self) -> Result<(), WorkerError> {
-        let iter = match &self.cursor {
-            Some((slot, hash)) => self.rolldb.crawl(*slot, hash).or_panic()?,
-            None => self.rolldb.crawl_from_origin(),
-        };
+        let iter = self.rolldb.crawl_wal_from_cursor(self.cursor).or_panic()?;
 
         for wal in iter {
-            let (wal, _) = wal.or_panic()?;
+            let (_, wal) = wal.or_panic()?;
 
             let cbor = self.rolldb.get_block(*wal.hash()).or_panic()?.unwrap();
 
@@ -111,7 +108,7 @@ impl gasket::framework::Worker<Stage> for Worker {
         stage.catchup().await?;
 
         // TODO: don't do this while doing full sync
-        stage.rolldb.compact().or_panic()?;
+        stage.rolldb.prune_wal().or_panic()?;
 
         Ok(())
     }

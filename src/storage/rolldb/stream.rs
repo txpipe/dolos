@@ -116,6 +116,6 @@ mod tests {
         }
 
         background.abort();
-        super::RollDB::destroy(path); //.unwrap();
+        let _ = super::RollDB::destroy(path); //.unwrap();
     }
 }

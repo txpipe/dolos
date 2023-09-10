@@ -23,7 +23,7 @@ pub fn run(config: &super::Config, _args: &Args) -> Result<(), Error> {
     )
     .unwrap();
 
-    for item in db.crawl_from_origin() {
+    for item in db.crawl_chain() {
         dbg!(item.unwrap());
     }
 

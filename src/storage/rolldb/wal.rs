@@ -1,7 +1,7 @@
 use rocksdb::{IteratorMode, WriteBatch, DB};
 use serde::{Deserialize, Serialize};
 
-use crate::storage::kvtable::*;
+use crate::{prelude::BlockSlot, storage::kvtable::*};
 
 pub type Seq = u64;
 
@@ -90,8 +90,9 @@ impl WalKV {
         mut last_seq: Seq,
         until: super::BlockSlot,
         batch: &mut WriteBatch,
-    ) -> Result<u64, super::Error> {
+    ) -> Result<(u64, Vec<BlockSlot>), super::Error> {
         let iter = WalKV::iter_values(db, IteratorMode::End);
+        let mut removed_blocks = vec![];
 
         for step in iter {
             let value = step.map_err(|_| super::Error::IO)?.0;
@@ -103,13 +104,14 @@ impl WalKV {
 
             match value.into_undo() {
                 Some(undo) => {
+                    removed_blocks.push(undo.slot());
                     last_seq = Self::stage_append(db, last_seq, undo, batch)?;
                 }
                 None => continue,
             };
         }
 
-        Ok(last_seq)
+        Ok((last_seq, removed_blocks))
     }
 
     pub fn stage_roll_forward(

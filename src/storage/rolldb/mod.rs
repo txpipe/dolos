@@ -1,13 +1,12 @@
 use pallas::crypto::hash::Hash;
 use std::{path::Path, sync::Arc};
-
-use rocksdb::{Options, WriteBatch, DB};
+use tracing::warn;
 
 use self::wal::WalKV;
+use rocksdb::{Options, WriteBatch, DB};
 
 use super::kvtable::*;
 
-pub mod iter;
 pub mod stream;
 pub mod wal;
 
@@ -75,6 +74,9 @@ impl RollDB {
         // keep track of the new block body
         BlockKV::stage_upsert(&self.db, DBHash(hash), DBBytes(body), &mut batch);
 
+        // add new block to ChainKV
+        ChainKV::stage_upsert(&self.db, DBInt(slot), DBHash(hash), &mut batch);
+
         // advance the WAL to the new point
         let new_seq =
             wal::WalKV::stage_roll_forward(&self.db, self.wal_seq, slot, hash, &mut batch)?;
@@ -89,7 +91,13 @@ impl RollDB {
     pub fn roll_back(&mut self, until: BlockSlot) -> Result<(), Error> {
         let mut batch = WriteBatch::default();
 
-        let new_seq = wal::WalKV::stage_roll_back(&self.db, self.wal_seq, until, &mut batch)?;
+        let (new_seq, removed_blocks) =
+            wal::WalKV::stage_roll_back(&self.db, self.wal_seq, until, &mut batch)?;
+
+        // remove rollbacked blocks from ChainKV
+        for slot in removed_blocks {
+            ChainKV::stage_delete(&self.db, DBInt(slot), &mut batch);
+        }
 
         self.db.write(batch).map_err(|_| Error::IO)?;
         self.wal_seq = new_seq;
@@ -128,39 +136,26 @@ impl RollDB {
             }
         }
 
-        // add one extra item from the inmutable chain just in case
-        if let Some((DBInt(slot), DBHash(hash))) = ChainKV::last_entry(&self.db)? {
-            out.push((slot, hash));
-        }
+        // add one extra item from the immutable chain just in case
+        let tip = WalKV::find_tip(&self.db)?;
 
-        Ok(out)
-    }
+        if let Some((tip_slot, _)) = tip {
+            if tip_slot > self.k_param {
+                // fetch first entry in ChainKV with slot lower than (tip slot - k param)
+                let immutable_before = Box::<[u8]>::from(DBInt(tip_slot - self.k_param - 1));
 
-    pub fn crawl<'a>(
-        &'a self,
-        slot: BlockSlot,
-        hash: &BlockHash,
-    ) -> Result<iter::RollIterator<'a>, Error> {
-        let last_chain_slot = ChainKV::last_key(&self.db)?;
+                let before =
+                    rocksdb::IteratorMode::From(&immutable_before, rocksdb::Direction::Reverse);
 
-        if let Some(last_chain_slot) = last_chain_slot {
-            if slot < last_chain_slot.0 {
-                return Ok(iter::RollIterator::from_chain(&self.db, slot));
+                if let Some((DBInt(slot), DBHash(hash))) =
+                    ChainKV::iter_entries(&self.db, before).next().transpose()?
+                {
+                    out.push((slot, hash))
+                }
             }
         }
 
-        let found = WalKV::scan_until(&self.db, rocksdb::IteratorMode::End, |v| {
-            v.slot() == slot && v.hash().eq(hash)
-        })?;
-
-        match found {
-            Some(seq) => Ok(iter::RollIterator::from_wal(&self.db, seq.into())),
-            None => Err(Error::NotFound),
-        }
-    }
-
-    pub fn crawl_from_origin(&self) -> iter::RollIterator<'_> {
-        iter::RollIterator::from_origin(&self.db)
+        Ok(out)
     }
 
     pub fn crawl_wal(
@@ -182,6 +177,29 @@ impl RollDB {
         iter.map(|v| v.map(|(seq, val)| (seq.0, val.0)))
     }
 
+    pub fn crawl_wal_from_cursor(
+        &self,
+        start_after: Option<(BlockSlot, BlockHash)>,
+    ) -> Result<impl Iterator<Item = Result<(wal::Seq, wal::Value), Error>> + '_, Error> {
+        if let Some((slot, hash)) = start_after {
+            // TODO: Not sure this is 100% accurate:
+            // i.e Apply(X), Apply(cursor), Undo(cursor), Mark(x)
+            // We want to start at Apply(cursor) or Mark(cursor), but even then,
+            // what if we have more than one Apply(cursor), how do we know
+            // which is correct?
+            let found = WalKV::scan_until(&self.db, rocksdb::IteratorMode::End, |v| {
+                v.slot() == slot && v.hash().eq(&hash)
+            })?;
+
+            match found {
+                Some(DBInt(seq)) => Ok(self.crawl_wal(Some(seq))),
+                None => Err(Error::NotFound),
+            }
+        } else {
+            Ok(self.crawl_wal(None))
+        }
+    }
+
     pub fn crawl_chain(&self) -> impl Iterator<Item = Result<(BlockSlot, BlockHash), Error>> + '_ {
         ChainKV::iter_entries(&self.db, rocksdb::IteratorMode::Start)
             .map(|res| res.map(|(x, y)| (x.0, y.0)))
@@ -197,39 +215,131 @@ impl RollDB {
             .take(len)
     }
 
-    pub fn compact(&self) -> Result<(), Error> {
-        let tip = wal::WalKV::find_tip(&self.db)?
-            .map(|(slot, _)| slot)
-            .unwrap_or_default();
+    /// Iterator over chain between two points (inclusive)
+    ///
+    /// To use Origin as start point set `from` to None.
+    ///
+    /// Returns None if either point in range don't exist or `to` point is earlier in chain than `from`.
+    pub fn read_chain_range(
+        &self,
+        from: Option<(BlockSlot, BlockHash)>,
+        to: (BlockSlot, BlockHash),
+    ) -> Result<Option<impl Iterator<Item = Result<(BlockSlot, BlockHash), Error>> + '_>, Error>
+    {
+        // TODO: We want to use a snapshot here to avoid race condition where
+        // point is checked to be in the ChainKV but it is rolled-back before we
+        // create the iterator. Problem is `ChainKV` etc must take `DB`, not
+        // `Snapshot<DB>`, so maybe we need a new way of creating something like
+        // a "KVTableSnapshot" in addition to the current "KVTable" type, which
+        // has methods on snapshots, but here I was having issues as there is
+        // no `cf` method on Snapshot but it is used is KVTable.
 
-        let mut iter = wal::WalKV::iter_entries(&self.db, rocksdb::IteratorMode::Start);
+        // let snapshot = self.db.snapshot();
 
-        while let Some(Ok((wal_key, value))) = iter.next() {
-            let slot_delta = tip - value.slot();
-
-            if slot_delta <= self.k_param {
-                break;
+        // check p2 not before p1
+        let p1_slot = if let Some((slot, _)) = from {
+            if to.0 < slot {
+                warn!("chain range end slot before start slot");
+                return Ok(None);
+            } else {
+                slot
             }
+        } else {
+            0 // Use 0 as slot for Origin
+        };
 
-            let mut batch = WriteBatch::default();
-            let slot_key = DBInt(value.slot());
-
-            match value.action() {
-                wal::WalAction::Apply | wal::WalAction::Mark => {
-                    let hash_value = DBHash(*value.hash());
-                    ChainKV::stage_upsert(&self.db, slot_key, hash_value, &mut batch);
-                    wal::WalKV::stage_delete(&self.db, wal_key, &mut batch);
-                    self.db.write(batch).map_err(|_| Error::IO)?;
+        // check p1 exists in ChainKV if provided
+        if let Some((slot, hash)) = from {
+            match ChainKV::get_by_key(&self.db, DBInt(slot))? {
+                Some(DBHash(found_hash)) => {
+                    if hash != found_hash {
+                        warn!("chain range start hash mismatch");
+                        return Ok(None);
+                    }
                 }
-                wal::WalAction::Undo => {
-                    ChainKV::stage_delete(&self.db, slot_key, &mut batch);
-                    wal::WalKV::stage_delete(&self.db, wal_key, &mut batch);
-                    self.db.write(batch).map_err(|_| Error::IO)?;
+                None => {
+                    warn!("chain range start slot not found");
+                    return Ok(None);
                 }
             }
         }
 
+        // check p2 exists in ChainKV
+        match ChainKV::get_by_key(&self.db, DBInt(to.0))? {
+            Some(DBHash(found_hash)) => {
+                if to.1 != found_hash {
+                    warn!("chain range end hash mismatch");
+                    return Ok(None);
+                }
+            }
+            None => {
+                warn!("chain range end slot not found");
+                return Ok(None);
+            }
+        };
+
+        // return iterator between p1 and p2 inclusive
+        Ok(Some(
+            ChainKV::iter_entries_from(&self.db, DBInt(p1_slot))
+                .map(|res| res.map(|(x, y)| (x.0, y.0)))
+                .take_while(move |x| {
+                    if let Ok((slot, _)) = x {
+                        // iter returns None once point is after `to` slot
+                        *slot <= to.0
+                    } else {
+                        false
+                    }
+                }),
+        ))
+    }
+
+    /// Prune the WAL of entries with slot values over `k_param` from the tip
+    pub fn prune_wal(&self) -> Result<(), Error> {
+        let tip = wal::WalKV::find_tip(&self.db)?
+            .map(|(slot, _)| slot)
+            .unwrap_or_default();
+
+        // iterate through all values in Wal from start
+        let mut iter = wal::WalKV::iter_entries(&self.db, rocksdb::IteratorMode::Start);
+
+        let mut batch = WriteBatch::default();
+
+        while let Some(Ok((wal_key, value))) = iter.next() {
+            // get the number of slots that have passed since the wal point
+            let slot_delta = tip - value.slot();
+
+            if slot_delta <= self.k_param {
+                break;
+            } else {
+                wal::WalKV::stage_delete(&self.db, wal_key, &mut batch);
+            }
+        }
+
+        self.db.write(batch).map_err(|_| Error::IO)?;
+
         Ok(())
+    }
+
+    /// Check if a point (pair of slot and block hash) exists in the ChainKV
+    pub fn chain_contains(&self, slot: BlockSlot, hash: &BlockHash) -> Result<bool, Error> {
+        if let Some(DBHash(found)) = ChainKV::get_by_key(&self.db, DBInt(slot))? {
+            if found == *hash {
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
+    }
+
+    /// Check if a point (pair of slot and block hash) exists in the WalKV
+    pub fn wal_contains(&self, slot: BlockSlot, hash: &BlockHash) -> Result<bool, Error> {
+        if let Some(_) = WalKV::scan_until(&self.db, rocksdb::IteratorMode::End, |v| {
+            v.slot() == slot && v.hash().eq(hash)
+        })? {
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     pub fn destroy(path: impl AsRef<Path>) -> Result<(), Error> {
@@ -289,18 +399,18 @@ mod tests {
     //TODO: test rollback with unknown slot
 
     #[test]
-    fn test_compact_linear() {
+    fn test_prune_linear() {
         with_tmp_db(30, |mut db| {
             for i in 0..100 {
                 let (slot, hash, body) = dummy_block(i * 10);
                 db.roll_forward(slot, hash, body).unwrap();
             }
 
-            db.compact().unwrap();
+            db.prune_wal().unwrap();
 
             let mut chain = db.crawl_chain();
 
-            for i in 0..96 {
+            for i in 0..100 {
                 let (slot, _) = chain.next().unwrap().unwrap();
                 assert_eq!(i * 10, slot)
             }
@@ -319,7 +429,7 @@ mod tests {
     }
 
     #[test]
-    fn test_compact_with_rollback() {
+    fn test_prune_with_rollback() {
         with_tmp_db(30, |mut db| {
             for i in 0..100 {
                 let (slot, hash, body) = dummy_block(i * 10);
@@ -328,11 +438,13 @@ mod tests {
 
             db.roll_back(800).unwrap();
 
-            db.compact().unwrap();
+            // tip is 800 (Mark)
+
+            db.prune_wal().unwrap();
 
             let mut chain = db.crawl_chain();
 
-            for i in 0..77 {
+            for i in 0..=80 {
                 let (slot, _) = chain.next().unwrap().unwrap();
                 assert_eq!(i * 10, slot)
             }
@@ -362,28 +474,6 @@ mod tests {
     }
 
     #[test]
-    fn test_crawl_boundary() {
-        with_tmp_db(30, |mut db| {
-            for i in 0..100 {
-                let (slot, hash, body) = dummy_block(i * 10);
-                db.roll_forward(slot, hash, body).unwrap();
-            }
-
-            db.compact().unwrap();
-
-            let mut crawler = db.crawl_from_origin();
-
-            for i in 0..100 {
-                let (evt, _) = crawler.next().unwrap().unwrap();
-                assert!(evt.is_apply());
-                assert_eq!(evt.slot(), i * 10);
-            }
-
-            assert!(crawler.next().is_none());
-        });
-    }
-
-    #[test]
     fn test_chain_page() {
         with_tmp_db(30, |mut db| {
             for i in 0..100 {
@@ -391,7 +481,7 @@ mod tests {
                 db.roll_forward(slot, hash, body).unwrap();
             }
 
-            db.compact().unwrap();
+            db.prune_wal().unwrap();
 
             let mut chain = db.read_chain_page(200, 15);
 
@@ -412,7 +502,7 @@ mod tests {
                 db.roll_forward(slot, hash, body).unwrap();
             }
 
-            db.compact().unwrap();
+            db.prune_wal().unwrap();
 
             let intersect = db.intersect_options(10).unwrap();
 
