@@ -3,7 +3,6 @@ use pallas::network::miniprotocols::blockfetch::BlockRequest;
 use pallas::network::miniprotocols::Point;
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
-use tokio::sync::broadcast::Receiver;
 
 use tracing::{error, info, warn};
 
@@ -18,11 +17,7 @@ pub struct Config {
     magic: u64,
 }
 
-pub async fn serve(
-    config: Config,
-    db: RollDB,
-    _sync_events: Receiver<gasket::messaging::Message<RollEvent>>,
-) -> Result<(), Error> {
+pub async fn serve(config: Config, db: RollDB) -> Result<(), Error> {
     if let Some(addr) = config.listen_address {
         info!("serving via N2N Ouroboros on address: {addr}");
 
