@@ -91,12 +91,13 @@ impl RollDB {
     pub fn roll_back(&mut self, until: BlockSlot) -> Result<(), Error> {
         let mut batch = WriteBatch::default();
 
-        let (new_seq, removed_blocks) =
-            wal::WalKV::stage_roll_back(&self.db, self.wal_seq, until, &mut batch)?;
+        let new_seq = wal::WalKV::stage_roll_back(&self.db, self.wal_seq, until, &mut batch)?;
 
-        // remove rollbacked blocks from ChainKV
-        for slot in removed_blocks {
-            ChainKV::stage_delete(&self.db, DBInt(slot), &mut batch);
+        // remove rollback-ed blocks from ChainKV
+        let to_remove = ChainKV::iter_keys_from(&self.db, DBInt(until)).skip(1);
+
+        for key in to_remove {
+            ChainKV::stage_delete(&self.db, key?, &mut batch);
         }
 
         self.db.write(batch).map_err(|_| Error::IO)?;
@@ -371,27 +372,46 @@ mod tests {
             let (slot, hash, body) = dummy_block(11);
             db.roll_forward(slot, hash, body.clone()).unwrap();
 
+            // ensure block body is persisted
             let persisted = db.get_block(hash).unwrap().unwrap();
             assert_eq!(persisted, body);
 
+            // ensure tip matches
             let (tip_slot, tip_hash) = db.find_tip().unwrap().unwrap();
             assert_eq!(tip_slot, slot);
             assert_eq!(tip_hash, hash);
+
+            // ensure chain has item
+            let (chain_slot, chain_hash) = db.crawl_chain().next().unwrap().unwrap();
+            assert_eq!(chain_slot, slot);
+            assert_eq!(chain_hash, hash);
         });
     }
 
     #[test]
     fn test_roll_back_blackbox() {
         with_tmp_db(30, |mut db| {
-            for i in 0..5 {
+            for i in 0..=5 {
                 let (slot, hash, body) = dummy_block(i * 10);
                 db.roll_forward(slot, hash, body).unwrap();
             }
 
             db.roll_back(20).unwrap();
 
+            // ensure tip show rollback point
             let (tip_slot, _) = db.find_tip().unwrap().unwrap();
             assert_eq!(tip_slot, 20);
+
+            // ensure chain has items not rolled back
+            let mut chain = db.crawl_chain();
+
+            for i in 0..=2 {
+                let (slot, _) = chain.next().unwrap().unwrap();
+                assert_eq!(slot, i * 10);
+            }
+
+            // ensure chain stops here
+            assert!(chain.next().is_none());
         });
     }
 
