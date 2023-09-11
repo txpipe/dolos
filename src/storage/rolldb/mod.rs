@@ -35,6 +35,16 @@ impl KVTable<DBInt, DBHash> for ChainKV {
     const CF_NAME: &'static str = "ChainKV";
 }
 
+pub struct ChainEntryIterator<'a>(EntryIterator<'a, DBInt, DBHash>);
+
+impl<'a> Iterator for ChainEntryIterator<'a> {
+    type Item = Result<(BlockSlot, BlockHash), Error>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next().map(|v| v.map(|(seq, val)| (seq.0, val.0)))
+    }
+}
+
 impl RollDB {
     pub fn open(path: impl AsRef<Path>, k_param: u64) -> Result<Self, Error> {
         let mut opts = Options::default();
@@ -204,6 +214,16 @@ impl RollDB {
     pub fn crawl_chain(&self) -> impl Iterator<Item = Result<(BlockSlot, BlockHash), Error>> + '_ {
         ChainKV::iter_entries(&self.db, rocksdb::IteratorMode::Start)
             .map(|res| res.map(|(x, y)| (x.0, y.0)))
+    }
+
+    pub fn crawl_chain_from(
+        &self,
+        from: Option<BlockSlot>,
+    ) -> impl Iterator<Item = Result<(BlockSlot, BlockHash), Error>> + '_ {
+        match from {
+            Some(x) => ChainEntryIterator(ChainKV::iter_entries_from(&self.db, DBInt(x))),
+            None => ChainEntryIterator(ChainKV::iter_entries_start(&self.db)),
+        }
     }
 
     pub fn read_chain_page(
