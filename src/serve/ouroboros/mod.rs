@@ -13,6 +13,9 @@ use tracing::{debug, error, info, instrument, warn};
 use crate::prelude::*;
 use crate::storage::rolldb::RollDB;
 
+#[cfg(test)]
+mod tests;
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Config {
     listen_address: String,

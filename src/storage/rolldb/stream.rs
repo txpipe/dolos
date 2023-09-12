@@ -115,7 +115,7 @@ mod tests {
             assert_eq!(evt.slot(), i * 10);
         }
 
-        background.abort();
-        let _ = super::RollDB::destroy(path); //.unwrap();
+        background.await.unwrap();
+        db.destroy().unwrap();
     }
 }

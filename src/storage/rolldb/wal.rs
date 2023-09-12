@@ -94,7 +94,7 @@ impl WalKV {
         let iter = WalKV::iter_values(db, IteratorMode::End);
 
         for step in iter {
-            let value = step.map_err(|_| super::Error::IO)?.0;
+            let value = step?.0;
 
             if value.slot() <= until {
                 last_seq = Self::stage_append(db, last_seq, value.into_mark().unwrap(), batch)?;

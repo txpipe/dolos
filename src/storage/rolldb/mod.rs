@@ -56,7 +56,7 @@ impl RollDB {
             path,
             [BlockKV::CF_NAME, ChainKV::CF_NAME, wal::WalKV::CF_NAME],
         )
-        .map_err(|_| Error::IO)?;
+        .map_err(Error::IO)?;
 
         let wal_seq = wal::WalKV::last_key(&db)?.map(|x| x.0).unwrap_or_default();
 
@@ -66,6 +66,13 @@ impl RollDB {
             wal_seq,
             k_param,
         })
+    }
+
+    #[cfg(test)]
+    pub fn open_tmp(k_param: u64) -> Result<Self, Error> {
+        let path = tempfile::tempdir().unwrap().into_path();
+
+        RollDB::open(path.clone(), k_param)
     }
 
     pub fn get_block(&self, hash: Hash<32>) -> Result<Option<BlockBody>, Error> {
@@ -91,7 +98,7 @@ impl RollDB {
         let new_seq =
             wal::WalKV::stage_roll_forward(&self.db, self.wal_seq, slot, hash, &mut batch)?;
 
-        self.db.write(batch).map_err(|_| Error::IO)?;
+        self.db.write(batch).map_err(Error::IO)?;
         self.wal_seq = new_seq;
         self.tip_change.notify_waiters();
 
@@ -110,7 +117,7 @@ impl RollDB {
             ChainKV::stage_delete(&self.db, key?, &mut batch);
         }
 
-        self.db.write(batch).map_err(|_| Error::IO)?;
+        self.db.write(batch).map_err(Error::IO)?;
         self.wal_seq = new_seq;
         self.tip_change.notify_waiters();
 
@@ -336,7 +343,7 @@ impl RollDB {
             }
         }
 
-        self.db.write(batch).map_err(|_| Error::IO)?;
+        self.db.write(batch).map_err(Error::IO)?;
 
         Ok(())
     }
@@ -363,8 +370,10 @@ impl RollDB {
         }
     }
 
-    pub fn destroy(path: impl AsRef<Path>) -> Result<(), Error> {
-        DB::destroy(&Options::default(), path).map_err(|_| Error::IO)
+    pub fn destroy(self) -> Result<(), Error> {
+        let path = self.db.path().to_owned();
+        drop(self);
+        DB::destroy(&Options::default(), &path).map_err(Error::IO)
     }
 }
 
@@ -372,23 +381,22 @@ impl RollDB {
 mod tests {
     use super::{BlockBody, BlockHash, BlockSlot, RollDB};
 
-    fn with_tmp_db<T>(k_param: u64, op: fn(db: RollDB) -> T) {
-        let path = tempfile::tempdir().unwrap().into_path();
-        let db = RollDB::open(path.clone(), k_param).unwrap();
+    pub fn with_tmp_db<T>(k_param: u64, op: fn(db: &mut RollDB) -> T) {
+        let mut db = RollDB::open_tmp(k_param).unwrap();
 
-        op(db);
+        op(&mut db);
 
-        RollDB::destroy(path).unwrap();
+        db.destroy().unwrap();
     }
 
-    fn dummy_block(slot: u64) -> (BlockSlot, BlockHash, BlockBody) {
+    pub fn dummy_block(slot: u64) -> (BlockSlot, BlockHash, BlockBody) {
         let hash = pallas::crypto::hash::Hasher::<256>::hash(slot.to_be_bytes().as_slice());
         (slot, hash, slot.to_be_bytes().to_vec())
     }
 
     #[test]
     fn test_roll_forward_blackbox() {
-        with_tmp_db(30, |mut db| {
+        with_tmp_db(30, |db| {
             let (slot, hash, body) = dummy_block(11);
             db.roll_forward(slot, hash, body.clone()).unwrap();
 
@@ -410,7 +418,7 @@ mod tests {
 
     #[test]
     fn test_roll_back_blackbox() {
-        with_tmp_db(30, |mut db| {
+        with_tmp_db(30, |db| {
             for i in 0..=5 {
                 let (slot, hash, body) = dummy_block(i * 10);
                 db.roll_forward(slot, hash, body).unwrap();
@@ -440,7 +448,7 @@ mod tests {
 
     #[test]
     fn test_prune_linear() {
-        with_tmp_db(30, |mut db| {
+        with_tmp_db(30, |db| {
             for i in 0..100 {
                 let (slot, hash, body) = dummy_block(i * 10);
                 db.roll_forward(slot, hash, body).unwrap();
@@ -470,7 +478,7 @@ mod tests {
 
     #[test]
     fn test_prune_with_rollback() {
-        with_tmp_db(30, |mut db| {
+        with_tmp_db(30, |db| {
             for i in 0..100 {
                 let (slot, hash, body) = dummy_block(i * 10);
                 db.roll_forward(slot, hash, body).unwrap();
@@ -515,7 +523,7 @@ mod tests {
 
     #[test]
     fn test_chain_page() {
-        with_tmp_db(30, |mut db| {
+        with_tmp_db(30, |db| {
             for i in 0..100 {
                 let (slot, hash, body) = dummy_block(i * 10);
                 db.roll_forward(slot, hash, body).unwrap();
@@ -536,7 +544,7 @@ mod tests {
 
     #[test]
     fn test_intersect_options() {
-        with_tmp_db(1000, |mut db| {
+        with_tmp_db(1000, |db| {
             for i in 0..200 {
                 let (slot, hash, body) = dummy_block(i * 10);
                 db.roll_forward(slot, hash, body).unwrap();
