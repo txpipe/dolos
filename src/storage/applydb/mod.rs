@@ -112,7 +112,7 @@ impl ApplyDB {
             path,
             [UtxoKV::CF_NAME, StxiKV::CF_NAME, SlotKV::CF_NAME],
         )
-        .map_err(|_| Error::IO)?;
+        .map_err(Error::IO)?;
 
         Ok(Self { db: Arc::new(db) })
     }
@@ -149,7 +149,7 @@ impl ApplyDB {
 
     pub fn commit_block(&self, batch: BlockWriteBatch) -> Result<(), Error> {
         let batch = WriteBatch::from(batch);
-        self.db.write(batch).map_err(|_| Error::IO)?;
+        self.db.write(batch).map_err(Error::IO)?;
 
         Ok(())
     }
@@ -160,7 +160,7 @@ impl ApplyDB {
     }
 
     pub fn destroy(path: impl AsRef<Path>) -> Result<(), Error> {
-        DB::destroy(&Options::default(), path).map_err(|_| Error::IO)
+        DB::destroy(&Options::default(), path).map_err(Error::IO)
     }
 }
 

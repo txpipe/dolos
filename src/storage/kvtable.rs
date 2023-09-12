@@ -6,7 +6,7 @@ use thiserror::Error;
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("IO error")]
-    IO,
+    IO(rocksdb::Error),
 
     #[error("serde error")]
     Serde,
@@ -188,7 +188,7 @@ where
             Some(Ok((_, value))) => Some(Ok(V::from(value))),
             Some(Err(err)) => {
                 tracing::error!(?err);
-                Some(Err(Error::IO))
+                Some(Err(Error::IO(err)))
             }
             None => None,
         }
@@ -214,7 +214,7 @@ where
             Some(Ok((key, _))) => Some(Ok(K::from(key))),
             Some(Err(err)) => {
                 tracing::error!(?err);
-                Some(Err(Error::IO))
+                Some(Err(Error::IO(err)))
             }
             None => None,
         }
@@ -246,7 +246,7 @@ where
             }
             Some(Err(err)) => {
                 tracing::error!(?err);
-                Some(Err(Error::IO))
+                Some(Err(Error::IO(err)))
             }
             None => None,
         }
@@ -271,7 +271,7 @@ where
         let raw_key = Box::<[u8]>::from(k);
         let raw_value = db
             .get_cf(&cf, raw_key)
-            .map_err(|_| Error::IO)?
+            .map_err(Error::IO)?
             .map(|x| Box::from(x.as_slice()));
 
         match raw_value {
