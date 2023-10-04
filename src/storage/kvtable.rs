@@ -292,6 +292,14 @@ where
         batch.put_cf(&cf, k_raw, v_raw);
     }
 
+    fn is_empty(db: &rocksdb::DB) -> bool {
+        // HACK: can't find an easy way to size the num of keys, so we'll start an
+        // iterator and see if we have at least one value. If someone know a better way
+        // to accomplish this, please refactor.
+        let mut iter = Self::iter_keys(db, rocksdb::IteratorMode::Start);
+        iter.next().is_some()
+    }
+
     fn iter_keys<'a>(db: &'a rocksdb::DB, mode: rocksdb::IteratorMode) -> KeyIterator<'a, K> {
         let cf = Self::cf(db);
         let inner = db.iterator_cf(&cf, mode);
