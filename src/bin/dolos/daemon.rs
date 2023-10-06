@@ -1,4 +1,5 @@
 use std::path::Path;
+use tracing::info;
 
 use dolos::{
     prelude::*,
@@ -41,15 +42,9 @@ pub async fn run(
 
     let applydb = ApplyDB::open(applydb_path).map_err(Error::storage)?;
 
-    if applydb.is_empty() {
-        applydb
-            .insert_genesis_utxos(&byron_genesis)
-            .map_err(Error::storage)?;
-    }
-
     let server = tokio::spawn(dolos::serve::serve(config.serve, rolldb.clone()));
 
-    dolos::sync::pipeline(&config.upstream, rolldb, applydb, policy)
+    dolos::sync::pipeline(&config.upstream, rolldb, applydb, byron_genesis, policy)
         .unwrap()
         .block();
 

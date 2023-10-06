@@ -266,6 +266,15 @@ where
         db.cf_handle(Self::CF_NAME).unwrap()
     }
 
+    fn reset(db: &rocksdb::DB) -> Result<(), Error> {
+        db.drop_cf(Self::CF_NAME).map_err(|_| Error::IO)?;
+
+        db.create_cf(Self::CF_NAME, &rocksdb::Options::default())
+            .map_err(|_| Error::IO)?;
+
+        Ok(())
+    }
+
     fn get_by_key(db: &rocksdb::DB, k: K) -> Result<Option<V>, Error> {
         let cf = Self::cf(db);
         let raw_key = Box::<[u8]>::from(k);
@@ -297,7 +306,7 @@ where
         // iterator and see if we have at least one value. If someone know a better way
         // to accomplish this, please refactor.
         let mut iter = Self::iter_keys(db, rocksdb::IteratorMode::Start);
-        iter.next().is_some()
+        iter.next().is_none()
     }
 
     fn iter_keys<'a>(db: &'a rocksdb::DB, mode: rocksdb::IteratorMode) -> KeyIterator<'a, K> {

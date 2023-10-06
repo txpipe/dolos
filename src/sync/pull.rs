@@ -212,11 +212,7 @@ impl gasket::framework::Worker<Stage> for Worker {
 }
 
 #[derive(Stage)]
-#[stage(
-    name = "chainsync",
-    unit = "NextResponse<HeaderContent>",
-    worker = "Worker"
-)]
+#[stage(name = "pull", unit = "NextResponse<HeaderContent>", worker = "Worker")]
 pub struct Stage {
     peer_address: String,
     network_magic: u64,

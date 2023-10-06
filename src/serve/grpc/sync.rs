@@ -33,6 +33,8 @@ fn roll_to_tip_response(
         action: match evt.action() {
             WalAction::Apply => follow_tip_response::Action::Apply(raw_to_anychain(block)).into(),
             WalAction::Undo => follow_tip_response::Action::Undo(raw_to_anychain(block)).into(),
+            // TODO: shouldn't we have a u5c event for origin?
+            WalAction::Origin => None,
             WalAction::Mark => None,
         },
     }
@@ -124,7 +126,7 @@ impl chain_sync_service_server::ChainSyncService for ChainSyncServiceImpl {
         &self,
         _request: Request<FollowTipRequest>,
     ) -> Result<Response<Self::FollowTipStream>, tonic::Status> {
-        let s = crate::storage::rolldb::stream::RollStream::start_with_block(self.0.clone(), None)
+        let s = crate::storage::rolldb::stream::RollStream::start_after_block(self.0.clone(), None)
             .map(|(evt, block)| Ok(roll_to_tip_response(evt, &block)));
 
         Ok(Response::new(Box::pin(s)))

@@ -10,12 +10,17 @@ pub enum WalAction {
     Apply,
     Undo,
     Mark,
+    Origin,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Value(WalAction, super::BlockSlot, super::BlockHash);
 
 impl Value {
+    pub fn origin() -> Self {
+        Self(WalAction::Origin, 0, super::BlockHash::new([0; 32]))
+    }
+
     pub fn into_apply(
         slot: impl Into<super::BlockSlot>,
         hash: impl Into<super::BlockHash>,
@@ -40,6 +45,7 @@ impl Value {
             WalAction::Apply => Some(Self(WalAction::Undo, self.1, self.2)),
             WalAction::Undo => None,
             WalAction::Mark => None,
+            WalAction::Origin => None,
         }
     }
 
@@ -47,6 +53,7 @@ impl Value {
         match self.0 {
             WalAction::Apply => Some(Self(WalAction::Mark, self.1, self.2)),
             WalAction::Mark => Some(Self(WalAction::Mark, self.1, self.2)),
+            WalAction::Origin => Some(Self(WalAction::Origin, self.1, self.2)),
             WalAction::Undo => None,
         }
     }
@@ -62,6 +69,10 @@ impl Value {
     pub fn is_undo(&self) -> bool {
         matches!(self.0, WalAction::Undo)
     }
+
+    pub fn is_origin(&self) -> bool {
+        matches!(self.0, WalAction::Origin)
+    }
 }
 
 // slot => block hash
@@ -72,6 +83,25 @@ impl KVTable<DBInt, DBSerde<Value>> for WalKV {
 }
 
 impl WalKV {
+    pub fn initialize(db: &DB) -> Result<Seq, Error> {
+        if Self::is_empty(db) {
+            Self::write_seed(db)?;
+            Ok(0)
+        } else {
+            let last = Self::last_key(&db)?.map(|x| x.0);
+            Ok(last.unwrap())
+        }
+    }
+
+    fn write_seed(db: &DB) -> Result<(), Error> {
+        let mut batch = WriteBatch::default();
+        let k = DBInt(0);
+        let v = DBSerde(Value::origin());
+        Self::stage_upsert(&db, k, v, &mut batch);
+
+        db.write(batch).map_err(|_| Error::IO)
+    }
+
     fn stage_append(
         db: &DB,
         last_seq: Seq,
@@ -98,6 +128,31 @@ impl WalKV {
 
             if value.slot() <= until {
                 last_seq = Self::stage_append(db, last_seq, value.into_mark().unwrap(), batch)?;
+                break;
+            }
+
+            match value.into_undo() {
+                Some(undo) => {
+                    last_seq = Self::stage_append(db, last_seq, undo, batch)?;
+                }
+                None => continue,
+            };
+        }
+
+        Ok(last_seq)
+    }
+
+    pub fn stage_roll_back_origin(
+        db: &DB,
+        mut last_seq: Seq,
+        batch: &mut WriteBatch,
+    ) -> Result<u64, super::Error> {
+        let iter = WalKV::iter_values(db, IteratorMode::End);
+
+        for step in iter {
+            let value = step.map_err(|_| super::Error::IO)?.0;
+
+            if value.is_origin() {
                 break;
             }
 

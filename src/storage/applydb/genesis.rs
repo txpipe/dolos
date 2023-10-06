@@ -2,6 +2,7 @@ use pallas::ledger::addresses::ByronAddress;
 use pallas::ledger::configs::byron::GenesisUtxo;
 use pallas::ledger::primitives::byron::TxOut;
 use rocksdb::WriteBatch;
+use tracing::info;
 
 use crate::{
     prelude::*,
@@ -43,6 +44,7 @@ impl ApplyDB {
             .collect::<Result<Vec<_>, _>>()?
             .into_iter()
             .fold(WriteBatch::default(), |mut batch, (k, v)| {
+                info!(tx = %k.0 .0, "inserting genesis utxo");
                 UtxoKV::stage_upsert(&self.db, k, v, &mut batch);
                 batch
             });
@@ -84,11 +86,12 @@ mod tests {
     }
 
     #[test]
-    fn test_genesis_utxos() {
+    fn test_mainnet_genesis_utxos() {
         with_tmp_db(|db| {
             let path = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap())
-                .join("test_data")
-                .join("mainnet-byron-genesis.json");
+                .join("examples")
+                .join("sync-mainnet")
+                .join("byron.json");
 
             let byron = pallas::ledger::configs::byron::from_file(&path).unwrap();
             db.insert_genesis_utxos(&byron).unwrap();
@@ -99,6 +102,26 @@ mod tests {
                 "Ae2tdPwUPEZKQuZh2UndEoTKEakMYHGNjJVYmNZgJk2qqgHouxDsA5oT83n",
                 2_463_071_701_000_000,
             )
+        });
+    }
+
+    #[test]
+    fn test_preview_genesis_utxos() {
+        with_tmp_db(|db| {
+            let path = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap())
+                .join("examples")
+                .join("sync-preview")
+                .join("byron.json");
+
+            let byron = pallas::ledger::configs::byron::from_file(&path).unwrap();
+            db.insert_genesis_utxos(&byron).unwrap();
+
+            assert_genesis_utxo_exists(
+                &db,
+                "4843cf2e582b2f9ce37600e5ab4cc678991f988f8780fed05407f9537f7712bd",
+                "FHnt4NL7yPXvDWHa8bVs73UEUdJd64VxWXSFNqetECtYfTd9TtJguJ14Lu3feth",
+                30_000_000_000_000_000,
+            );
         });
     }
 }
