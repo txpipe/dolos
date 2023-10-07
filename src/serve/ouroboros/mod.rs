@@ -70,10 +70,10 @@ async fn handle_blockfetch(db: RollDB, mut peer: PeerServer) -> Result<(), Error
                     }
                 };
 
-                if let Some(mut iter) = db.read_chain_range(from, to).map_err(Error::storage)? {
+                if let Some(iter) = db.read_chain_range(from, to).map_err(Error::storage)? {
                     blockfetch.send_start_batch().await.map_err(Error::server)?;
 
-                    while let Some(point) = iter.next() {
+                    for point in iter {
                         let (_, hash) = point.map_err(Error::storage)?;
 
                         let block_bytes = match db.get_block(hash).map_err(Error::storage)? {

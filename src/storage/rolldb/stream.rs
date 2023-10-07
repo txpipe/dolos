@@ -10,7 +10,7 @@ type ItemWithBlock = (super::wal::Value, RawBlock);
 pub struct RollStream;
 
 impl RollStream {
-    pub fn start_after_seq(db: RollDB, seq: Option<super::wal::Seq>) -> impl Stream<Item = Item> {
+    pub fn start_after(db: RollDB, seq: Option<super::wal::Seq>) -> impl Stream<Item = Item> {
         async_stream::stream! {
             let mut last_seq = seq;
 
@@ -33,7 +33,7 @@ impl RollStream {
         }
     }
 
-    pub fn start_after_block(
+    pub fn start_after_with_block(
         db: RollDB,
         seq: Option<super::wal::Seq>,
     ) -> impl Stream<Item = ItemWithBlock> {
@@ -104,7 +104,7 @@ mod tests {
             }
         });
 
-        let s = super::RollStream::start_after_seq(db.clone(), None);
+        let s = super::RollStream::start_after(db.clone(), None);
 
         pin_mut!(s);
 

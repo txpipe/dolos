@@ -126,8 +126,11 @@ impl chain_sync_service_server::ChainSyncService for ChainSyncServiceImpl {
         &self,
         _request: Request<FollowTipRequest>,
     ) -> Result<Response<Self::FollowTipStream>, tonic::Status> {
-        let s = crate::storage::rolldb::stream::RollStream::start_after_block(self.0.clone(), None)
-            .map(|(evt, block)| Ok(roll_to_tip_response(evt, &block)));
+        let s = crate::storage::rolldb::stream::RollStream::start_after_with_block(
+            self.0.clone(),
+            None,
+        )
+        .map(|(evt, block)| Ok(roll_to_tip_response(evt, &block)));
 
         Ok(Response::new(Box::pin(s)))
     }

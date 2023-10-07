@@ -38,7 +38,7 @@ impl ApplyDB {
         &self,
         byron: &pallas::ledger::configs::byron::GenesisFile,
     ) -> Result<(), Error> {
-        let batch = pallas::ledger::configs::byron::genesis_utxos(&byron)
+        let batch = pallas::ledger::configs::byron::genesis_utxos(byron)
             .into_iter()
             .map(genesis_utxo_to_kv)
             .collect::<Result<Vec<_>, _>>()?

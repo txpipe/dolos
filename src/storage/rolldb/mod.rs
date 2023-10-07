@@ -175,23 +175,21 @@ impl RollDB {
         Ok(out)
     }
 
-    pub fn crawl_wal_after(
-        &self,
-        seq: Option<u64>,
-    ) -> impl Iterator<Item = Result<(wal::Seq, wal::Value), Error>> + '_ {
-        let iter = match seq {
-            Some(seq) => {
-                let seq = Box::<[u8]>::from(DBInt(seq));
-                let from = rocksdb::IteratorMode::From(&seq, rocksdb::Direction::Forward);
-                wal::WalKV::iter_entries(&self.db, from).skip(1)
-            }
-            None => {
-                let from = rocksdb::IteratorMode::Start;
-                wal::WalKV::iter_entries(&self.db, from).skip(0)
-            }
-        };
+    pub fn crawl_wal_after(&self, seq: Option<u64>) -> wal::WalIterator {
+        if let Some(seq) = seq {
+            let seq = Box::<[u8]>::from(DBInt(seq));
+            let from = rocksdb::IteratorMode::From(&seq, rocksdb::Direction::Forward);
+            let mut iter = wal::WalKV::iter_entries(&self.db, from);
 
-        iter.map(|v| v.map(|(seq, val)| (seq.0, val.0)))
+            // skip current
+            iter.next();
+
+            wal::WalIterator(iter)
+        } else {
+            let from = rocksdb::IteratorMode::Start;
+            let iter = wal::WalKV::iter_entries(&self.db, from);
+            wal::WalIterator(iter)
+        }
     }
 
     pub fn find_wal_seq(&self, block: Option<(BlockSlot, BlockHash)>) -> Result<wal::Seq, Error> {
@@ -346,17 +344,6 @@ impl RollDB {
         }
 
         Ok(false)
-    }
-
-    /// Check if a point (pair of slot and block hash) exists in the WalKV
-    pub fn wal_contains(&self, slot: BlockSlot, hash: &BlockHash) -> Result<bool, Error> {
-        if let Some(_) = WalKV::scan_until(&self.db, rocksdb::IteratorMode::End, |v| {
-            v.slot() == slot && v.hash().eq(hash)
-        })? {
-            Ok(true)
-        } else {
-            Ok(false)
-        }
     }
 
     pub fn destroy(path: impl AsRef<Path>) -> Result<(), Error> {

@@ -1,5 +1,4 @@
 use std::path::Path;
-use tracing::info;
 
 use dolos::{
     prelude::*,

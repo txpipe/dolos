@@ -82,13 +82,23 @@ impl KVTable<DBInt, DBSerde<Value>> for WalKV {
     const CF_NAME: &'static str = "WalKV";
 }
 
+pub struct WalIterator<'a>(pub EntryIterator<'a, DBInt, DBSerde<Value>>);
+
+impl Iterator for WalIterator<'_> {
+    type Item = Result<(u64, Value), Error>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next().map(|v| v.map(|(seq, val)| (seq.0, val.0)))
+    }
+}
+
 impl WalKV {
     pub fn initialize(db: &DB) -> Result<Seq, Error> {
         if Self::is_empty(db) {
             Self::write_seed(db)?;
             Ok(0)
         } else {
-            let last = Self::last_key(&db)?.map(|x| x.0);
+            let last = Self::last_key(db)?.map(|x| x.0);
             Ok(last.unwrap())
         }
     }
@@ -97,7 +107,7 @@ impl WalKV {
         let mut batch = WriteBatch::default();
         let k = DBInt(0);
         let v = DBSerde(Value::origin());
-        Self::stage_upsert(&db, k, v, &mut batch);
+        Self::stage_upsert(db, k, v, &mut batch);
 
         db.write(batch).map_err(|_| Error::IO)
     }

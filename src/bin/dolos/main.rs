@@ -42,7 +42,8 @@ pub struct ApplydbConfig {
 #[derive(Deserialize)]
 pub struct GenesisFileRef {
     path: PathBuf,
-    hash: String,
+    // TODO: add hash of genesis for runtime verification
+    // hash: String,
 }
 
 #[derive(Deserialize)]
