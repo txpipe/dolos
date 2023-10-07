@@ -1,6 +1,6 @@
 [upstream]
-peer_address = "preview-node.world.dev.cardano.org:30002"
-network_magic = 2
+peer_address = "relays-new.cardano-mainnet.iohk.io:3001"
+network_magic = 764824073
 
 [rolldb]
 path = "./tmp/rolldb"

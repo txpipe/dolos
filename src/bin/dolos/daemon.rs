@@ -36,11 +36,14 @@ pub async fn run(
         .as_deref()
         .unwrap_or_else(|| Path::new("/applydb"));
 
+    let byron_genesis =
+        pallas::ledger::configs::byron::from_file(&config.byron.path).map_err(Error::config)?;
+
     let applydb = ApplyDB::open(applydb_path).map_err(Error::storage)?;
 
     let server = tokio::spawn(dolos::serve::serve(config.serve, rolldb.clone()));
 
-    dolos::sync::pipeline(&config.upstream, rolldb, applydb, policy)
+    dolos::sync::pipeline(&config.upstream, rolldb, applydb, byron_genesis, policy)
         .unwrap()
         .block();
 

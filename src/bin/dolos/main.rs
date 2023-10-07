@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{path::PathBuf, time::Duration};
 
 use clap::{Parser, Subcommand};
 use miette::{IntoDiagnostic, Result};
@@ -40,12 +40,20 @@ pub struct ApplydbConfig {
 }
 
 #[derive(Deserialize)]
+pub struct GenesisFileRef {
+    path: PathBuf,
+    // TODO: add hash of genesis for runtime verification
+    // hash: String,
+}
+
+#[derive(Deserialize)]
 pub struct Config {
     pub rolldb: RolldbConfig,
     pub applydb: ApplydbConfig,
     pub upstream: dolos::sync::Config,
     pub serve: dolos::serve::Config,
     pub retries: Option<gasket::retries::Policy>,
+    pub byron: GenesisFileRef,
 }
 
 impl Config {

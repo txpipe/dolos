@@ -26,4 +26,5 @@ pub enum RollEvent {
     Apply(BlockSlot, BlockHash, RawBlock),
     Undo(BlockSlot, BlockHash, RawBlock),
     Reset(Point),
+    Origin,
 }

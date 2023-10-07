@@ -29,6 +29,9 @@ pub fn run(
     let rolldb =
         RollDB::open(rolldb_path, config.rolldb.k_param.unwrap_or(1000)).map_err(Error::storage)?;
 
+    let byron_genesis =
+        pallas::ledger::configs::byron::from_file(&config.byron.path).map_err(Error::config)?;
+
     let applydb_path = config
         .applydb
         .path
@@ -37,7 +40,7 @@ pub fn run(
 
     let applydb = ApplyDB::open(applydb_path).map_err(Error::storage)?;
 
-    dolos::sync::pipeline(&config.upstream, rolldb, applydb, policy)
+    dolos::sync::pipeline(&config.upstream, rolldb, applydb, byron_genesis, policy)
         .unwrap()
         .block();
 

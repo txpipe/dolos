@@ -10,11 +10,11 @@ type ItemWithBlock = (super::wal::Value, RawBlock);
 pub struct RollStream;
 
 impl RollStream {
-    pub fn start(db: RollDB, seq: Option<super::wal::Seq>) -> impl Stream<Item = Item> {
+    pub fn start_after(db: RollDB, seq: Option<super::wal::Seq>) -> impl Stream<Item = Item> {
         async_stream::stream! {
             let mut last_seq = seq;
 
-            let iter = db.crawl_wal(last_seq);
+            let iter = db.crawl_wal_after(last_seq);
 
             for (seq, val) in iter.flatten() {
                 yield val;
@@ -23,7 +23,7 @@ impl RollStream {
 
             loop {
                 db.tip_change.notified().await;
-                let iter = db.crawl_wal(last_seq).skip(1);
+                let iter = db.crawl_wal_after(last_seq);
 
                 for (seq, val) in iter.flatten() {
                     yield val;
@@ -33,14 +33,14 @@ impl RollStream {
         }
     }
 
-    pub fn start_with_block(
+    pub fn start_after_with_block(
         db: RollDB,
         seq: Option<super::wal::Seq>,
     ) -> impl Stream<Item = ItemWithBlock> {
         async_stream::stream! {
             let mut last_seq = seq;
 
-            let iter = db.crawl_wal(last_seq);
+            let iter = db.crawl_wal_after(last_seq);
 
             for x in iter {
                 let x = x.and_then(|(s,v)| {
@@ -56,7 +56,7 @@ impl RollStream {
 
             loop {
                 db.tip_change.notified().await;
-                let iter = db.crawl_wal(last_seq).skip(1);
+                let iter = db.crawl_wal_after(last_seq);
 
                 for x in iter {
                     let x = x.and_then(|(s,v)| {
@@ -90,25 +90,30 @@ mod tests {
         let path = tempfile::tempdir().unwrap().into_path();
         let mut db = super::RollDB::open(path.clone(), 30).unwrap();
 
-        for i in 0..100 {
+        for i in 0..=100 {
             let (slot, hash, body) = dummy_block(i * 10);
             db.roll_forward(slot, hash, body).unwrap();
         }
 
         let mut db2 = db.clone();
         let background = tokio::spawn(async move {
-            for i in 100..200 {
+            for i in 101..=200 {
                 let (slot, hash, body) = dummy_block(i * 10);
                 db2.roll_forward(slot, hash, body).unwrap();
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
             }
         });
 
-        let s = super::RollStream::start(db.clone(), None);
+        let s = super::RollStream::start_after(db.clone(), None);
 
         pin_mut!(s);
 
-        for i in 0..200 {
+        let evt = s.next().await;
+        let evt = evt.unwrap();
+        assert!(evt.is_origin());
+        assert_eq!(evt.slot(), 0);
+
+        for i in 0..=200 {
             let evt = s.next().await;
             let evt = evt.unwrap();
             assert!(evt.is_apply());

@@ -48,14 +48,16 @@ impl RollDB {
         )
         .map_err(|_| Error::IO)?;
 
-        let wal_seq = wal::WalKV::last_key(&db)?.map(|x| x.0).unwrap_or_default();
+        let wal_seq = wal::WalKV::initialize(&db)?;
 
-        Ok(Self {
+        let out = Self {
             db: Arc::new(db),
             tip_change: Arc::new(tokio::sync::Notify::new()),
             wal_seq,
             k_param,
-        })
+        };
+
+        Ok(out)
     }
 
     pub fn get_block(&self, hash: Hash<32>) -> Result<Option<BlockBody>, Error> {
@@ -99,6 +101,20 @@ impl RollDB {
         for key in to_remove {
             ChainKV::stage_delete(&self.db, key?, &mut batch);
         }
+
+        self.db.write(batch).map_err(|_| Error::IO)?;
+        self.wal_seq = new_seq;
+        self.tip_change.notify_waiters();
+
+        Ok(())
+    }
+
+    pub fn roll_back_origin(&mut self) -> Result<(), Error> {
+        let mut batch = WriteBatch::default();
+
+        let new_seq = wal::WalKV::stage_roll_back_origin(&self.db, self.wal_seq, &mut batch)?;
+
+        ChainKV::reset(&self.db)?;
 
         self.db.write(batch).map_err(|_| Error::IO)?;
         self.wal_seq = new_seq;
@@ -159,45 +175,42 @@ impl RollDB {
         Ok(out)
     }
 
-    pub fn crawl_wal(
-        &self,
-        start_seq: Option<u64>,
-    ) -> impl Iterator<Item = Result<(wal::Seq, wal::Value), Error>> + '_ {
-        let iter = match start_seq {
-            Some(start_seq) => {
-                let start_seq = Box::<[u8]>::from(DBInt(start_seq));
-                let from = rocksdb::IteratorMode::From(&start_seq, rocksdb::Direction::Forward);
-                wal::WalKV::iter_entries(&self.db, from)
-            }
-            None => {
-                let from = rocksdb::IteratorMode::Start;
-                wal::WalKV::iter_entries(&self.db, from)
-            }
-        };
+    pub fn crawl_wal_after(&self, seq: Option<u64>) -> wal::WalIterator {
+        if let Some(seq) = seq {
+            let seq = Box::<[u8]>::from(DBInt(seq));
+            let from = rocksdb::IteratorMode::From(&seq, rocksdb::Direction::Forward);
+            let mut iter = wal::WalKV::iter_entries(&self.db, from);
 
-        iter.map(|v| v.map(|(seq, val)| (seq.0, val.0)))
+            // skip current
+            iter.next();
+
+            wal::WalIterator(iter)
+        } else {
+            let from = rocksdb::IteratorMode::Start;
+            let iter = wal::WalKV::iter_entries(&self.db, from);
+            wal::WalIterator(iter)
+        }
     }
 
-    pub fn crawl_wal_from_cursor(
-        &self,
-        start_after: Option<(BlockSlot, BlockHash)>,
-    ) -> Result<impl Iterator<Item = Result<(wal::Seq, wal::Value), Error>> + '_, Error> {
-        if let Some((slot, hash)) = start_after {
-            // TODO: Not sure this is 100% accurate:
-            // i.e Apply(X), Apply(cursor), Undo(cursor), Mark(x)
-            // We want to start at Apply(cursor) or Mark(cursor), but even then,
-            // what if we have more than one Apply(cursor), how do we know
-            // which is correct?
-            let found = WalKV::scan_until(&self.db, rocksdb::IteratorMode::End, |v| {
-                v.slot() == slot && v.hash().eq(&hash)
-            })?;
+    pub fn find_wal_seq(&self, block: Option<(BlockSlot, BlockHash)>) -> Result<wal::Seq, Error> {
+        if block.is_none() {
+            return Ok(0);
+        }
 
-            match found {
-                Some(DBInt(seq)) => Ok(self.crawl_wal(Some(seq))),
-                None => Err(Error::NotFound),
-            }
-        } else {
-            Ok(self.crawl_wal(None))
+        let (slot, hash) = block.unwrap();
+
+        // TODO: Not sure this is 100% accurate:
+        // i.e Apply(X), Apply(cursor), Undo(cursor), Mark(x)
+        // We want to start at Apply(cursor) or Mark(cursor), but even then,
+        // what if we have more than one Apply(cursor), how do we know
+        // which is correct?
+        let found = WalKV::scan_until(&self.db, rocksdb::IteratorMode::End, |v| {
+            v.slot() == slot && v.hash().eq(&hash) && v.is_apply()
+        })?;
+
+        match found {
+            Some(DBInt(seq)) => Ok(seq),
+            None => Err(Error::NotFound),
         }
     }
 
@@ -220,7 +233,8 @@ impl RollDB {
     ///
     /// To use Origin as start point set `from` to None.
     ///
-    /// Returns None if either point in range don't exist or `to` point is earlier in chain than `from`.
+    /// Returns None if either point in range don't exist or `to` point is
+    /// earlier in chain than `from`.
     pub fn read_chain_range(
         &self,
         from: Option<(BlockSlot, BlockHash)>,
@@ -332,17 +346,6 @@ impl RollDB {
         Ok(false)
     }
 
-    /// Check if a point (pair of slot and block hash) exists in the WalKV
-    pub fn wal_contains(&self, slot: BlockSlot, hash: &BlockHash) -> Result<bool, Error> {
-        if let Some(_) = WalKV::scan_until(&self.db, rocksdb::IteratorMode::End, |v| {
-            v.slot() == slot && v.hash().eq(hash)
-        })? {
-            Ok(true)
-        } else {
-            Ok(false)
-        }
-    }
-
     pub fn destroy(path: impl AsRef<Path>) -> Result<(), Error> {
         DB::destroy(&Options::default(), path).map_err(|_| Error::IO)
     }
@@ -364,6 +367,23 @@ mod tests {
     fn dummy_block(slot: u64) -> (BlockSlot, BlockHash, BlockBody) {
         let hash = pallas::crypto::hash::Hasher::<256>::hash(slot.to_be_bytes().as_slice());
         (slot, hash, slot.to_be_bytes().to_vec())
+    }
+
+    #[test]
+    fn test_origin_event() {
+        with_tmp_db(30, |db| {
+            let mut iter = db.crawl_wal_after(None);
+
+            let origin = iter.next();
+            assert!(origin.is_some());
+
+            let origin = origin.unwrap();
+            assert!(origin.is_ok());
+
+            let (seq, value) = origin.unwrap();
+            assert_eq!(seq, 0);
+            assert!(value.is_origin());
+        });
     }
 
     #[test]
@@ -437,7 +457,7 @@ mod tests {
 
             assert!(chain.next().is_none());
 
-            let mut wal = db.crawl_wal(None);
+            let mut wal = db.crawl_wal_after(None);
 
             for i in 96..100 {
                 let (_, val) = wal.next().unwrap().unwrap();
@@ -471,7 +491,7 @@ mod tests {
 
             assert!(chain.next().is_none());
 
-            let mut wal = db.crawl_wal(None);
+            let mut wal = db.crawl_wal_after(None);
 
             for i in 77..100 {
                 let (_, val) = wal.next().unwrap().unwrap();
