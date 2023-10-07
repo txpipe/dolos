@@ -23,7 +23,7 @@ utxorpc = { version = "1.0.0-alpha.1" }
 # utxorpc = { path = "../../utxorpc/rust-sdk" }
 
 hex = "0.4.3"
-bech32 = "0.8.1"
+bech32 = "0.9.1"
 clap = { version = "4.3.0", features = ["derive"] }
 log = "0.4.18"
 config = { version = "0.13.3", default-features = false, features = ["toml", "json"] }
