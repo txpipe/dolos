@@ -23,19 +23,14 @@ utxorpc = { version = "1.0.0-alpha.1" }
 # utxorpc = { path = "../../utxorpc/rust-sdk" }
 
 hex = "0.4.3"
-net2 = "0.2.37"
 bech32 = "0.8.1"
 clap = { version = "4.3.0", features = ["derive"] }
 log = "0.4.18"
-env_logger = "0.9.0"
 config = { version = "0.13.3", default-features = false, features = ["toml", "json"] }
 serde = { version = "1.0.136", features = ["derive"] }
 serde_json = "1.0.79"
-minicbor = "0.14.1"
-prometheus_exporter = { version = "0.8.4", default-features = false }
 thiserror = "1.0.30"
 lazy_static = "1.4.0"
-rayon = "1.5.3"
 rocksdb = { version = "0.21.0", default-features = false, features = ["multi-threaded-cf"] }
 tracing = "0.1.37"
 tracing-subscriber = "0.3.17"
