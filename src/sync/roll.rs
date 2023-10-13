@@ -1,8 +1,8 @@
 use gasket::framework::*;
+use pallas::storage::rolldb::wal;
 use tracing::info;
 
 use crate::prelude::*;
-use crate::storage::rolldb::RollDB;
 
 pub type Cursor = (BlockSlot, BlockHash);
 pub type UpstreamPort = gasket::messaging::tokio::InputPort<PullEvent>;
@@ -11,7 +11,7 @@ pub type DownstreamPort = gasket::messaging::tokio::OutputPort<RollEvent>;
 #[derive(Stage)]
 #[stage(name = "roll", unit = "PullEvent", worker = "Worker")]
 pub struct Stage {
-    rolldb: RollDB,
+    store: wal::Store,
 
     cursor: Option<Cursor>,
 
@@ -26,9 +26,9 @@ pub struct Stage {
 }
 
 impl Stage {
-    pub fn new(rolldb: RollDB, cursor: Option<Cursor>) -> Self {
+    pub fn new(store: wal::Store, cursor: Option<Cursor>) -> Self {
         Self {
-            rolldb,
+            store,
             cursor,
             upstream: Default::default(),
             downstream: Default::default(),
@@ -43,32 +43,40 @@ pub struct Worker {
 }
 
 impl Worker {
+    fn update_store(&self, unit: &PullEvent, store: &mut wal::Store) -> Result<(), WorkerError> {
+        match unit {
+            PullEvent::RollForward(slot, hash, body) => {
+                store.roll_forward(*slot, *hash, body.clone()).or_panic()?;
+            }
+            PullEvent::Rollback(point) => match point {
+                pallas::network::miniprotocols::Point::Specific(slot, _) => {
+                    store.roll_back(*slot).or_panic()?;
+                }
+                pallas::network::miniprotocols::Point::Origin => {
+                    store.roll_back_origin().or_panic()?;
+                }
+            },
+        }
+
+        Ok(())
+    }
+
     /// Catch-up output with current persisted state
     ///
     /// Reads from Wal using the latest known cursor and outputs the
     /// corresponding downstream events
-    async fn catchup(&mut self, stage: &mut Stage) -> Result<(), WorkerError> {
-        let iter = stage.rolldb.crawl_wal_after(self.last_seq);
+    async fn catchup_dowstream(&mut self, stage: &mut Stage) -> Result<(), WorkerError> {
+        let iter = stage.store.crawl_after(self.last_seq);
 
         for wal in iter {
             let (seq, wal) = wal.or_panic()?;
             info!(seq, "processing wal entry");
 
-            let evt = match wal.action() {
-                crate::storage::rolldb::wal::WalAction::Apply => {
-                    let cbor = stage.rolldb.get_block(*wal.hash()).or_panic()?.unwrap();
-                    RollEvent::Apply(wal.slot(), *wal.hash(), cbor)
-                }
-                crate::storage::rolldb::wal::WalAction::Undo => {
-                    let cbor = stage.rolldb.get_block(*wal.hash()).or_panic()?.unwrap();
-                    RollEvent::Undo(wal.slot(), *wal.hash(), cbor)
-                }
-                crate::storage::rolldb::wal::WalAction::Origin => RollEvent::Origin,
-                crate::storage::rolldb::wal::WalAction::Mark => {
-                    // TODO: do we really need mark events?
-                    // for now we bail
-                    continue;
-                }
+            let evt = match wal {
+                wal::Log::Apply(slot, hash, body) => RollEvent::Apply(slot, hash, body),
+                wal::Log::Undo(slot, hash, body) => RollEvent::Undo(slot, hash, body),
+                wal::Log::Origin => RollEvent::Origin,
+                wal::Log::Mark(..) => continue,
             };
 
             stage.downstream.send(evt.into()).await.or_panic()?;
@@ -84,7 +92,7 @@ impl gasket::framework::Worker<Stage> for Worker {
     async fn bootstrap(stage: &Stage) -> Result<Self, WorkerError> {
         let last_seq = match stage.cursor {
             Some(cursor) => {
-                let last_seq = stage.rolldb.find_wal_seq(Some(cursor)).or_panic()?;
+                let last_seq = stage.store.find_wal_seq(Some(cursor)).or_panic()?;
                 Some(last_seq)
             }
             None => None,
@@ -103,29 +111,12 @@ impl gasket::framework::Worker<Stage> for Worker {
     }
 
     async fn execute(&mut self, unit: &PullEvent, stage: &mut Stage) -> Result<(), WorkerError> {
-        match unit {
-            PullEvent::RollForward(slot, hash, body) => {
-                stage
-                    .rolldb
-                    .roll_forward(*slot, *hash, body.clone())
-                    .or_panic()?;
-            }
-            PullEvent::Rollback(point) => match point {
-                pallas::network::miniprotocols::Point::Specific(slot, _) => {
-                    stage.rolldb.roll_back(*slot).or_panic()?;
-                }
-                pallas::network::miniprotocols::Point::Origin => {
-                    stage.rolldb.roll_back_origin().or_panic()?;
-                }
-            },
-        }
+        self.update_store(unit, &mut stage.store)?;
 
-        // TODO: if we have a wel seq in memory, we should avoid scanning for a
-        // particular slot/hash
-        self.catchup(stage).await?;
+        self.catchup_dowstream(stage).await?;
 
         // TODO: don't do this while doing full sync
-        stage.rolldb.prune_wal().or_panic()?;
+        stage.store.prune_wal().or_panic()?;
 
         Ok(())
     }
