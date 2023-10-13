@@ -34,7 +34,7 @@ fn genesis_utxo_to_kv(utxo: GenesisUtxo) -> Result<(DBSerde<UtxoRef>, DBBytes), 
 }
 
 impl ApplyDB {
-    pub fn insert_genesis_utxos(
+    pub fn apply_origin(
         &self,
         byron: &pallas::ledger::configs::byron::GenesisFile,
     ) -> Result<(), Error> {
@@ -94,7 +94,7 @@ mod tests {
                 .join("byron.json");
 
             let byron = pallas::ledger::configs::byron::from_file(&path).unwrap();
-            db.insert_genesis_utxos(&byron).unwrap();
+            db.apply_origin(&byron).unwrap();
 
             assert_genesis_utxo_exists(
                 &db,
@@ -114,7 +114,7 @@ mod tests {
                 .join("byron.json");
 
             let byron = pallas::ledger::configs::byron::from_file(&path).unwrap();
-            db.insert_genesis_utxos(&byron).unwrap();
+            db.apply_origin(&byron).unwrap();
 
             assert_genesis_utxo_exists(
                 &db,

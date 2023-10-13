@@ -158,13 +158,71 @@ impl ApplyDB {
         Ok(dbval.map(|x| x.0))
     }
 
-    pub fn start_block(&self, slot: BlockSlot) -> BlockWriteBatch {
+    fn start_block(&self, slot: BlockSlot) -> BlockWriteBatch {
         BlockWriteBatch(&self.db, slot, WriteBatch::default())
     }
 
-    pub fn commit_block(&self, batch: BlockWriteBatch) -> Result<(), Error> {
+    fn commit_block(&self, batch: BlockWriteBatch) -> Result<(), Error> {
         let batch = WriteBatch::from(batch);
         self.db.write(batch).map_err(|_| Error::IO)?;
+
+        Ok(())
+    }
+
+    pub fn apply_block(&mut self, cbor: &[u8]) -> Result<(), Error> {
+        let block =
+            pallas::ledger::traverse::MultiEraBlock::decode(cbor).map_err(|_| Error::Cbor)?;
+        let slot = block.slot();
+        let hash = block.hash();
+
+        let mut batch = self.start_block(slot);
+
+        for tx in block.txs() {
+            for consumed in tx.consumes() {
+                batch.spend_utxo(*consumed.hash(), consumed.index())?;
+            }
+
+            for (idx, produced) in tx.produces() {
+                let body = produced.encode();
+                batch.insert_utxo(tx.hash(), idx as u64, body);
+            }
+        }
+
+        let tombstones = block
+            .txs()
+            .iter()
+            .flat_map(|x| x.consumes())
+            .map(|x| UtxoRef(*x.hash(), x.index()))
+            .collect();
+
+        batch.insert_slot(block.hash(), tombstones);
+
+        self.commit_block(batch)?;
+
+        info!(slot, ?hash, "applied block");
+
+        Ok(())
+    }
+
+    pub fn undo_block(&mut self, cbor: &[u8]) -> Result<(), Error> {
+        let block =
+            pallas::ledger::traverse::MultiEraBlock::decode(cbor).map_err(|_| Error::Cbor)?;
+
+        let mut batch = self.start_block(block.slot());
+
+        for tx in block.txs() {
+            for consumed in tx.consumes() {
+                batch.unspend_stxi(*consumed.hash(), consumed.index());
+            }
+
+            for (idx, _) in tx.produces() {
+                batch.delete_utxo(tx.hash(), idx as u64);
+            }
+        }
+
+        batch.delete_slot();
+
+        self.commit_block(batch)?;
 
         Ok(())
     }

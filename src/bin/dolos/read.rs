@@ -1,6 +1,7 @@
 use std::path::Path;
 
-use dolos::{prelude::*, storage::rolldb::RollDB};
+use dolos::prelude::*;
+use pallas::storage::rolldb::chain;
 
 #[derive(Debug, clap::Args)]
 pub struct Args {}
@@ -13,17 +14,17 @@ pub fn run(config: &super::Config, _args: &Args) -> Result<(), Error> {
     )
     .unwrap();
 
-    let db = RollDB::open(
+    let chain = chain::Store::open(
         config
             .rolldb
             .path
             .as_deref()
-            .unwrap_or_else(|| Path::new("/rolldb")),
-        config.rolldb.k_param.unwrap_or(1000),
+            .unwrap_or_else(|| Path::new("/rolldb"))
+            .join("chain"),
     )
     .unwrap();
 
-    for item in db.crawl_chain() {
+    for item in chain.crawl() {
         dbg!(item.unwrap());
     }
 

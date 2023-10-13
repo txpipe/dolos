@@ -1,13 +1,12 @@
-use pallas::network::facades::PeerServer;
 use pallas::network::miniprotocols::blockfetch::BlockRequest;
 use pallas::network::miniprotocols::Point;
+use pallas::{network::facades::PeerServer, storage::rolldb::chain};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 
 use tracing::{error, info, warn};
 
 use crate::prelude::*;
-use crate::storage::rolldb::RollDB;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Config {
@@ -17,7 +16,7 @@ pub struct Config {
     magic: u64,
 }
 
-pub async fn serve(config: Config, db: RollDB) -> Result<(), Error> {
+pub async fn serve(config: Config, store: chain::Store) -> Result<(), Error> {
     if let Some(addr) = config.listen_address {
         info!("serving via N2N Ouroboros on address: {addr}");
 
@@ -28,7 +27,7 @@ pub async fn serve(config: Config, db: RollDB) -> Result<(), Error> {
                 n2n_conn = PeerServer::accept(&listener, config.magic) => {
                     info!("accepted incoming peer connection");
 
-                    let db = db.clone();
+                    let db = store.clone();
                     let conn = n2n_conn.unwrap();
 
                     tokio::spawn(async move {handle_blockfetch(db.clone(), conn).await});
@@ -41,7 +40,7 @@ pub async fn serve(config: Config, db: RollDB) -> Result<(), Error> {
     Ok(())
 }
 
-async fn handle_blockfetch(db: RollDB, mut peer: PeerServer) -> Result<(), Error> {
+async fn handle_blockfetch(store: chain::Store, mut peer: PeerServer) -> Result<(), Error> {
     let blockfetch = peer.blockfetch();
     loop {
         match blockfetch.recv_while_idle().await {
@@ -70,13 +69,13 @@ async fn handle_blockfetch(db: RollDB, mut peer: PeerServer) -> Result<(), Error
                     }
                 };
 
-                if let Some(iter) = db.read_chain_range(from, to).map_err(Error::storage)? {
+                if let Some(iter) = store.read_chain_range(from, to).map_err(Error::storage)? {
                     blockfetch.send_start_batch().await.map_err(Error::server)?;
 
                     for point in iter {
                         let (_, hash) = point.map_err(Error::storage)?;
 
-                        let block_bytes = match db.get_block(hash).map_err(Error::storage)? {
+                        let block_bytes = match store.get_block(hash).map_err(Error::storage)? {
                             Some(b) => b,
                             None => {
                                 error!("could not find block bytes for {hash}");
