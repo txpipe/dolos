@@ -13,6 +13,9 @@ pub enum Error {
 
     #[error("not found")]
     NotFound,
+
+    #[error("cbor decoding")]
+    Cbor,
 }
 
 pub struct DBHash(pub Hash<32>);

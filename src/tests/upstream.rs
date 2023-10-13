@@ -1,7 +1,7 @@
 use gasket::{framework::*, messaging::*, runtime::Policy};
 use tracing::{error, info};
 
-use crate::{model::PullEvent, storage::rolldb::RollDB};
+use crate::model::PullEvent;
 
 struct WitnessStage {
     input: gasket::messaging::tokio::InputPort<PullEvent>,
@@ -50,7 +50,7 @@ fn test_mainnet_upstream() {
     )
     .unwrap();
 
-    let rolldb = RollDB::open("tmp", 10, 0).unwrap();
+    let rolldb = pallas::storage::rolldb::wal::Store::open("tmp", 10).unwrap();
 
     let intersection = rolldb.intersect_options(5).unwrap().into_iter().collect();
 

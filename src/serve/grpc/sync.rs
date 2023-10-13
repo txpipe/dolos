@@ -1,11 +1,12 @@
 use futures_core::Stream;
-use pallas::crypto::hash::Hash;
+use pallas::{
+    crypto::hash::Hash,
+    storage::rolldb::{chain, wal},
+};
 use std::pin::Pin;
 use tokio_stream::StreamExt;
 use tonic::{Request, Response, Status};
 use utxorpc::proto::sync::v1::*;
-
-use crate::storage::rolldb::{wal::WalAction, RollDB};
 
 fn bytes_to_hash(raw: &[u8]) -> Hash<32> {
     let array: [u8; 32] = raw.try_into().unwrap();
@@ -25,26 +26,30 @@ fn raw_to_anychain(raw: &[u8]) -> AnyChainBlock {
     }
 }
 
-fn roll_to_tip_response(
-    evt: crate::storage::rolldb::wal::Value,
-    block: &[u8],
-) -> FollowTipResponse {
+fn roll_to_tip_response(log: wal::Log) -> FollowTipResponse {
     utxorpc::proto::sync::v1::FollowTipResponse {
-        action: match evt.action() {
-            WalAction::Apply => follow_tip_response::Action::Apply(raw_to_anychain(block)).into(),
-            WalAction::Undo => follow_tip_response::Action::Undo(raw_to_anychain(block)).into(),
+        action: match log {
+            wal::Log::Apply(_, _, block) => {
+                follow_tip_response::Action::Apply(raw_to_anychain(&block)).into()
+            }
+            wal::Log::Undo(_, _, block) => {
+                follow_tip_response::Action::Undo(raw_to_anychain(&block)).into()
+            }
             // TODO: shouldn't we have a u5c event for origin?
-            WalAction::Origin => None,
-            WalAction::Mark => None,
+            wal::Log::Origin => None,
+            wal::Log::Mark(..) => None,
         },
     }
 }
 
-pub struct ChainSyncServiceImpl(RollDB);
+pub struct ChainSyncServiceImpl {
+    wal: wal::Store,
+    chain: chain::Store,
+}
 
 impl ChainSyncServiceImpl {
-    pub fn new(db: RollDB) -> Self {
-        Self(db)
+    pub fn new(wal: wal::Store, chain: chain::Store) -> Self {
+        Self { wal, chain }
     }
 }
 
@@ -63,7 +68,7 @@ impl chain_sync_service_server::ChainSyncService for ChainSyncServiceImpl {
             .r#ref
             .iter()
             .map(|r| bytes_to_hash(&r.hash))
-            .map(|hash| self.0.get_block(hash))
+            .map(|hash| self.chain.get_block(hash))
             .collect();
 
         let out: Vec<_> = blocks
@@ -87,7 +92,7 @@ impl chain_sync_service_server::ChainSyncService for ChainSyncServiceImpl {
         let len = msg.max_items as usize + 1;
 
         let mut page: Vec<_> = self
-            .0
+            .chain
             .read_chain_page(from, len)
             .collect::<Result<Vec<_>, _>>()
             .map_err(|_err| Status::internal("can't query history"))?;
@@ -104,7 +109,7 @@ impl chain_sync_service_server::ChainSyncService for ChainSyncServiceImpl {
 
         let blocks = page
             .into_iter()
-            .map(|(_, hash)| self.0.get_block(hash))
+            .map(|(_, hash)| self.chain.get_block(hash))
             .collect::<Result<Vec<_>, _>>()
             .map_err(|_err| Status::internal("can't query history"))?
             .into_iter()
@@ -126,11 +131,8 @@ impl chain_sync_service_server::ChainSyncService for ChainSyncServiceImpl {
         &self,
         _request: Request<FollowTipRequest>,
     ) -> Result<Response<Self::FollowTipStream>, tonic::Status> {
-        let s = crate::storage::rolldb::stream::RollStream::start_after_with_block(
-            self.0.clone(),
-            None,
-        )
-        .map(|(evt, block)| Ok(roll_to_tip_response(evt, &block)));
+        let s = wal::RollStream::start_after(self.wal.clone(), None)
+            .map(|log| Ok(roll_to_tip_response(log)));
 
         Ok(Response::new(Box::pin(s)))
     }

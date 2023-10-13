@@ -1,15 +1,13 @@
-use std::time::Duration;
-
 use pallas::network::facades::PeerServer;
 use pallas::network::miniprotocols::keepalive;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use tokio::join;
 use tokio::net::TcpListener;
 
 use tracing::{info, instrument};
 
 use crate::prelude::*;
-use crate::storage::rolldb::RollDB;
 
 use self::blockfetch::handle_blockfetch;
 use self::chainsync::N2NChainSyncHandler;

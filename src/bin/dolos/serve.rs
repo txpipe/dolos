@@ -1,5 +1,5 @@
 use dolos::prelude::*;
-use dolos::storage::rolldb::RollDB;
+use pallas::storage::rolldb::{chain, wal};
 use std::path::Path;
 
 #[derive(Debug, clap::Args)]
@@ -20,14 +20,15 @@ pub async fn run(config: super::Config, _args: &Args) -> Result<(), Error> {
         .as_deref()
         .unwrap_or_else(|| Path::new("/rolldb"));
 
-    let db = RollDB::open(
-        rolldb_path,
+    let wal = wal::Store::open(
+        rolldb_path.join("wal"),
         config.rolldb.k_param.unwrap_or(1000),
-        config.rolldb.k_param_buffer.unwrap_or_default(),
     )
     .map_err(Error::config)?;
 
-    dolos::serve::serve(config.serve, db).await?;
+    let chain = chain::Store::open(rolldb_path.join("chain")).map_err(Error::config)?;
+
+    dolos::serve::serve(config.serve, wal, chain).await?;
 
     Ok(())
 }

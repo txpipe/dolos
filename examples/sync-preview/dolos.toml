@@ -6,9 +6,6 @@ network_magic = 2
 path = "./tmp/rolldb"
 k_param = 10000
 
-[applydb]
-path = "./tmp/applydb"
-
 [serve.grpc]
 listen_address = "[::]:50051"
 
