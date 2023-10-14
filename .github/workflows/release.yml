@@ -49,17 +49,17 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - name: install deps [ubuntu]
-        if: matrix.os == 'ubuntu-latest'
+      - name: get dependencies [Ubuntu]
+        if: matrix.release_for == 'Linux-GNU-x86_64'
         run: |
-          sudo apt update
-          sudo apt install pkg-config libssl-dev
+          sudo apt-get install libssl-dev
 
-      - name: install clang llvm [ubuntu]
-        if: matrix.os == 'ubuntu-latest'
-        uses: KyleMayes/install-llvm-action@v1
-        with:
-          version: "15.0"
+      - name: get dependencies [Ubuntu/ARM]
+        if: matrix.release_for == 'Linux-GNU-armv7'
+        run: |
+          sudo dpkg --add-architecture armhf
+          sudo apt-get update
+          sudo apt-get install libssl-dev:armhf gcc-arm-linux-gnueabihf
 
       - name: install deps [MacOS]
         if: matrix.os == 'macOS-latest'
