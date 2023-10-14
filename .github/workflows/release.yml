@@ -59,7 +59,7 @@ jobs:
         run: |
           sudo dpkg --add-architecture armhf
           sudo apt-get update
-          sudo apt-get install libssl-dev:armhf gcc-arm-linux-gnueabihf
+          sudo apt-get install gcc-arm-linux-gnueabihf
 
       - name: install deps [MacOS]
         if: matrix.os == 'macOS-latest'
@@ -74,7 +74,7 @@ jobs:
       - name: build binary
         uses: houseabsolute/actions-rust-cross@v0
         with:
-          command: both
+          command: build
           target: ${{ matrix.target }}
           args: ${{ matrix.args }}
           strip: true
