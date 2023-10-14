@@ -1,0 +1,8 @@
+[target.armv7-unknown-linux-gnueabihf]
+image = "ghcr.io/cross-rs/armv7-unknown-linux-gnueabihf:edge"
+pre-build = [
+    "dpkg --add-architecture $CROSS_DEB_ARCH",
+    "apt-get update",
+    "apt-get install --assume-yes libssl-dev:$CROSS_DEB_ARCH",
+    "apt-get install --assume-yes --no-install-recommends libclang-10-dev clang-10",
+]
