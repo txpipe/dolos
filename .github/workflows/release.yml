@@ -49,11 +49,17 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - name: install deps [Ubuntu]
+      - name: install deps [ubuntu]
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt update
-          sudo apt install make llvm-dev libclang-dev clang pkg-config libssl-dev
+          sudo apt install pkg-config libssl-dev
+
+      - name: install clang llvm [ubuntu]
+        if: matrix.os == 'ubuntu-latest'
+        uses: KyleMayes/install-llvm-action@v1
+        with:
+          version: "15.0"
 
       - name: install deps [MacOS]
         if: matrix.os == 'macOS-latest'
