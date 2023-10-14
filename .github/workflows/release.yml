@@ -14,35 +14,30 @@ jobs:
           - release_for: Linux-GNU-amd64
             os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            arch: amd64
             args: "--locked --release"
             bin: dolos
 
-          - release_for: Linux-GNU-armv7
+          - release_for: Linux-GNU-arm64
             os: ubuntu-latest
             target: "armv7-unknown-linux-gnueabihf"
-            arch: arm64
             args: "--locked --release"
             bin: dolos
 
           - release_for: Windows-x86_64
             os: windows-latest
             target: x86_64-pc-windows-msvc
-            arch: amd64
             args: "--locked --release"
             bin: dolos.exe
 
           - release_for: macOS-x86_64
             os: macOS-latest
             target: x86_64-apple-darwin
-            arch: amd64
             args: "--locked --release"
             bin: dolos
 
           - release_for: macOS-aarch64
             os: macOS-latest
             target: aarch64-apple-darwin
-            arch: arm64
             args: "--locked --release"
             bin: dolos
 
