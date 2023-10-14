@@ -4,122 +4,85 @@ on:
     tags:
       - "v*"
 
-env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
-
 jobs:
-  # Compiles binaries using a bulder matrix
-  binary_build:
-    name: Build release binaries
+  build:
+    continue-on-error: true
+
     strategy:
-      fail-fast: false
       matrix:
         include:
-          - target: x86_64-unknown-linux-gnu
+          - release_for: Linux-GNU-amd64
             os: ubuntu-latest
-            name: dolos-x86_64-unknown-linux-gnu.tar.gz
-            use_cross: false
+            target: x86_64-unknown-linux-gnu
+            args: "--locked --release"
+            bin: dolos
 
-          - target: x86_64-unknown-linux-musl
+          - release_for: Linux-GNU-arm64
             os: ubuntu-latest
-            name: dolos-x86_64-unknown-linux-musl.tar.gz
-            use_cross: true
+            target: "armv7-unknown-linux-gnueabihf"
+            args: "--locked --release"
+            bin: dolos
 
-          - target: aarch64-unknown-linux-musl
-            os: ubuntu-latest
-            name: dolos-aarch64-unknown-linux-musl.tar.gz
-            use_cross: true
-
-          - target: x86_64-apple-darwin
-            os: macOS-latest
-            name: dolos-x86_64-apple-darwin.tar.gz
-            use_cross: false
-
-          - target: aarch64-apple-darwin
-            os: macOS-latest
-            name: dolos-aarch64-apple-darwin.tar.gz
-            use_cross: false
-
-          - target: x86_64-pc-windows-msvc
+          - release_for: Windows-x86_64
             os: windows-latest
-            name: dolos-x86_64-pc-windows-msvc.zip
-            use_cross: false
+            target: x86_64-pc-windows-msvc
+            args: "--locked --release"
+            bin: dolos.exe
+
+          - release_for: macOS-x86_64
+            os: macOS-latest
+            target: x86_64-apple-darwin
+            args: "--locked --release"
+            bin: dolos
+
+          - release_for: macOS-aarch64
+            os: macOS-latest
+            target: aarch64-apple-darwin
+            args: "--locked --release"
+            bin: dolos
 
     runs-on: ${{ matrix.os }}
-    continue-on-error: true
+
     steps:
-      - name: Prev Build | Get Dependencies [Ubuntu]
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          sudo apt-get install llvm-dev libclang-dev clang pkg-config libssl-dev
-      
-      - name: Prev Build | Get Dependencies [MacOS]
+      - name: install deps [MacOS]
         if: matrix.os == 'macOS-latest'
         run: |
           brew install openssl@1.1
 
-      - name: Setup | Checkout
+      - name: checkout repository
         uses: actions/checkout@v3
 
-      # Cache files between builds
-      - name: Setup | Cache Cargo
-        uses: actions/cache@v3.3.1
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - uses: Swatinem/rust-cache@v2
 
-      - name: Setup | Rust
-        uses: actions-rs/toolchain@v1.0.7
-        with:
-          toolchain: stable
-          override: true
-          profile: minimal
-          target: ${{ matrix.target }}
-
-      - name: Build | Build
-        uses: actions-rs/cargo@v1.0.3
+      - name: build binary
+        uses: houseabsolute/actions-rust-cross@v0
         with:
           command: build
-          args: --release --locked --all-features --target ${{ matrix.target }}
-          use-cross: ${{ matrix.use_cross }}
+          target: ${{ matrix.target }}
+          args: ${{ matrix.args }}
+          strip: true
 
-      - name: Post Build | Prepare artifacts [Windows]
-        if: matrix.os == 'windows-latest'
+      - name: rename binaries
         run: |
-          cd target/${{ matrix.target }}/release
-          strip dolos.exe
-          7z a ../../../${{ matrix.name }} dolos.exe
-          cd -
+          mv target/${{ matrix.target }}/release/${{ matrix.bin }} ${{ matrix.release_for }}-${{ matrix.bin }}
 
-      - name: Post Build | Prepare artifacts [-nix]
-        if: matrix.os != 'windows-latest'
-        run: |
-          cd target/${{ matrix.target }}/release
-          # TODO: investigate better cross platform stripping
-          strip dolos || true
-          tar czvf ../../../${{ matrix.name }} dolos
-          cd -
-
-      - name: Deploy | Upload artifacts
+      - name: upload artifacts
         uses: actions/upload-artifact@v3
         with:
-          name: ${{ matrix.name }}
-          path: ${{ matrix.name }}
+          name: dolos-${{ matrix.release_for }}
+          path: ${{ matrix.release_for }}-${{ matrix.bin }}
 
-  # Creates a GitHub Container package using multi-arch docker builds
-  container_build:
+  docker:
     runs-on: ubuntu-latest
+    needs: [build]
 
     permissions:
       contents: read
       packages: write
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v3
+      - name: Checkout repository
+        uses: actions/checkout@v2
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v2
@@ -128,56 +91,61 @@ jobs:
         id: meta
         uses: docker/metadata-action@v4
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ghcr.io/txpipe/dolos
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern=v{{major}}
+            type=semver,pattern=v{{major}}.{{minor}}
+            type=semver,pattern=v{{version}}
 
       - name: Login to DockerHub
         uses: docker/login-action@v2
         with:
-          registry: ${{ env.REGISTRY }}
+          registry: ghcr.io/txpipe
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v3
 
       - name: Build and push
         uses: docker/build-push-action@v4
         with:
           context: .
-          # temporarly removing arm platform until we resolve the ca-certificates issue
-          #platforms: linux/arm64,linux/amd64
-          platforms: linux/amd64
+          file: .github/Dockerfile
+          platforms: linux/arm64,linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
-  # Create GitHub release with Rust build targets and release notes
-  github_release:
-    name: Create GitHub Release
-    needs: [binary_build, container_build]
+  release:
+    needs: [build, docker]
+
     runs-on: ubuntu-latest
+
     steps:
-      - name: Setup | Checkout
+      - name: checkout
         uses: actions/checkout@v3
         with:
           fetch-depth: 0
 
-      - name: Setup | Go
+      - name: setup go
         uses: actions/setup-go@v4
         with:
           go-version: "1.16"
 
-      - name: Setup | Artifacts
+      - name: download artifacts
+        id: "download"
         uses: actions/download-artifact@v3
 
-      - name: Setup | Checksums
-        run: for file in dolos-*/dolos-*; do openssl dgst -sha256 -r "$file" | awk '{print $1}' > "${file}.sha256"; done
-
-      - name: Setup | Release notes
+      - name: set release notes
         run: |
           go install github.com/git-chglog/git-chglog/cmd/git-chglog@v0.15.0
           git-chglog -c .github/chglog/release.yml $(git describe --tags) > RELEASE.md
 
-      - name: Build | Publish
+      - name: create release
         uses: softprops/action-gh-release@v1
         with:
-          files: dolos-*/dolos-*
+          files: dolos-*/*
           body_path: RELEASE.md
           draft: true
