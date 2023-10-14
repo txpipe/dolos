@@ -49,25 +49,6 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - name: get dependencies [Ubuntu]
-        if: matrix.release_for == 'Linux-GNU-x86_64'
-        run: |
-          sudo apt update
-          sudo apt install libssl-dev
-
-      - name: get dependencies [Ubuntu/ARM]
-        if: matrix.release_for == 'Linux-GNU-armv7'
-        run: |
-          sudo apt update
-          sudo apt install gcc-arm-linux-gnueabihf g++-multilib
-
-      - name: "get cross-compile deps"
-        uses: ryankurte/action-apt@v0.4.0
-        if: matrix.release_for == 'Linux-GNU-armv7'
-        with:
-          arch: armhf
-          packages: "libssl-dev:armhf"
-
       - name: install deps [MacOS]
         if: matrix.os == 'macOS-latest'
         run: |
