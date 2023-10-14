@@ -3,5 +3,5 @@ pre-build = [
     "dpkg --add-architecture $CROSS_DEB_ARCH",
     "apt-get update",
     "apt-get install --assume-yes libssl-dev:$CROSS_DEB_ARCH",
-    "apt-get install --assume-yes --no-install-recommends libclang-10-dev clang-10",
+    "apt-get install --assume-yes --no-install-recommends libclang-5-dev clang-5",
 ]
