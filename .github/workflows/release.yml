@@ -52,14 +52,14 @@ jobs:
       - name: get dependencies [Ubuntu]
         if: matrix.release_for == 'Linux-GNU-x86_64'
         run: |
-          sudo apt-get install libssl-dev
+          sudo apt update
+          sudo apt install libssl-dev
 
       - name: get dependencies [Ubuntu/ARM]
         if: matrix.release_for == 'Linux-GNU-armv7'
         run: |
-          sudo dpkg --add-architecture armhf
-          sudo apt-get update
-          sudo apt-get install gcc-arm-linux-gnueabihf
+          sudo apt update
+          sudo apt install gcc-arm-linux-gnueabihf
 
       - name: install deps [MacOS]
         if: matrix.os == 'macOS-latest'
