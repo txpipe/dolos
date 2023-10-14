@@ -212,7 +212,7 @@ impl ApplyDB {
 
         for tx in block.txs() {
             for consumed in tx.consumes() {
-                batch.unspend_stxi(*consumed.hash(), consumed.index());
+                batch.unspend_stxi(*consumed.hash(), consumed.index())?;
             }
 
             for (idx, _) in tx.produces() {
