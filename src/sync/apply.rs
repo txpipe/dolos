@@ -1,10 +1,9 @@
 use gasket::framework::*;
 use pallas::ledger::configs::byron::GenesisFile;
 use pallas::storage::rolldb::chain;
-use tracing::{info, instrument, warn};
 
 use crate::prelude::*;
-use crate::storage::applydb::{ApplyDB, UtxoRef};
+use crate::storage::applydb::ApplyDB;
 
 pub type UpstreamPort = gasket::messaging::tokio::InputPort<RollEvent>;
 
