@@ -69,7 +69,7 @@ jobs:
       - name: upload artifacts
         uses: actions/upload-artifact@v3
         with:
-          name: dolos-${{ matrix.release_for }}
+          name: binaries
           path: ${{ matrix.release_for }}-${{ matrix.bin }}
 
   docker:
@@ -146,6 +146,6 @@ jobs:
       - name: create release
         uses: softprops/action-gh-release@v1
         with:
-          files: dolos-*/*
+          files: binaries/*
           body_path: RELEASE.md
           draft: true
