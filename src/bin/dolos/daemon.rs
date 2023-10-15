@@ -1,7 +1,4 @@
-use pallas::storage::rolldb::{chain, wal};
-use std::path::Path;
-
-use dolos::{prelude::*, storage::applydb::ApplyDB};
+use dolos::prelude::*;
 
 #[derive(Debug, clap::Args)]
 pub struct Args {}
@@ -19,21 +16,7 @@ pub async fn run(
     )
     .unwrap();
 
-    let rolldb_path = config
-        .rolldb
-        .path
-        .as_deref()
-        .unwrap_or_else(|| Path::new("/rolldb"));
-
-    let wal = wal::Store::open(
-        rolldb_path.join("wal"),
-        config.rolldb.k_param.unwrap_or(1000),
-    )
-    .map_err(Error::storage)?;
-
-    let chain = chain::Store::open(rolldb_path.join("chain")).map_err(Error::storage)?;
-
-    let ledger = ApplyDB::open(rolldb_path.join("ledger")).map_err(Error::storage)?;
+    let (wal, chain, ledger) = crate::common::open_data_stores(&config)?;
 
     let byron_genesis =
         pallas::ledger::configs::byron::from_file(&config.byron.path).map_err(Error::config)?;
