@@ -1,5 +1,6 @@
 use gasket::framework::*;
 use pallas::ledger::configs::byron::GenesisFile;
+use tracing::info;
 
 use crate::prelude::*;
 use crate::storage::applydb::ApplyDB;
@@ -55,13 +56,18 @@ impl gasket::framework::Worker<Stage> for Worker {
 
     async fn execute(&mut self, unit: &RollEvent, stage: &mut Stage) -> Result<(), WorkerError> {
         match unit {
-            RollEvent::Apply(_, _, cbor) => {
+            RollEvent::Apply(slot, _, cbor) => {
+                info!(slot, "applying block");
                 stage.ledger.apply_block(cbor).or_panic()?;
             }
-            RollEvent::Undo(_, _, cbor) => {
+            RollEvent::Undo(slot, _, cbor) => {
+                info!(slot, "undoing block");
                 stage.ledger.undo_block(cbor).or_panic()?;
             }
-            RollEvent::Origin => stage.ledger.apply_origin(&stage.genesis).or_panic()?,
+            RollEvent::Origin => {
+                info!("applying origin");
+                stage.ledger.apply_origin(&stage.genesis).or_panic()?;
+            }
         };
 
         Ok(())
