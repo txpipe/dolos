@@ -4,8 +4,9 @@ use clap::{Parser, Subcommand};
 use miette::{IntoDiagnostic, Result};
 use serde::Deserialize;
 
+mod common;
 mod daemon;
-mod read;
+mod data;
 mod serve;
 mod sync;
 
@@ -13,7 +14,7 @@ mod sync;
 enum Command {
     Daemon(daemon::Args),
     Sync(sync::Args),
-    Read(read::Args),
+    Data(data::Args),
     Serve(serve::Args),
 }
 
@@ -99,7 +100,7 @@ fn main() -> Result<()> {
     match args.command {
         Command::Daemon(x) => daemon::run(config, &retries, &x).into_diagnostic()?,
         Command::Sync(x) => sync::run(&config, &retries, &x).into_diagnostic()?,
-        Command::Read(x) => read::run(&config, &x).into_diagnostic()?,
+        Command::Data(x) => data::run(&config, &x).into_diagnostic()?,
         Command::Serve(x) => serve::run(config, &x).into_diagnostic()?,
     };
 
