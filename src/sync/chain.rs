@@ -54,20 +54,20 @@ impl gasket::framework::Worker<Stage> for Worker {
     async fn execute(&mut self, unit: &RollEvent, stage: &mut Stage) -> Result<(), WorkerError> {
         match unit {
             RollEvent::Apply(slot, hash, cbor) => {
+                info!(slot, "extending chain");
+
                 stage
                     .chain
                     .roll_forward(*slot, *hash, cbor.clone())
                     .or_panic()?;
-
-                info!(slot, "roll forward");
             }
             RollEvent::Undo(slot, _, _) => {
+                info!(slot, "rolling back chain");
                 stage.chain.roll_back(*slot).or_panic()?;
-                info!(slot, "rollback");
             }
             RollEvent::Origin => {
+                info!("rolling back to origin");
                 stage.chain.roll_back_origin().or_panic()?;
-                info!("rollback to origin");
             }
         };
 
