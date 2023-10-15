@@ -1,18 +1,15 @@
 use gasket::framework::*;
-use pallas::ledger::configs::byron::GenesisFile;
 use pallas::storage::rolldb::chain;
+use tracing::info;
 
 use crate::prelude::*;
-use crate::storage::applydb::ApplyDB;
 
 pub type UpstreamPort = gasket::messaging::tokio::InputPort<RollEvent>;
 
 #[derive(Stage)]
-#[stage(name = "apply", unit = "RollEvent", worker = "Worker")]
+#[stage(name = "chain", unit = "RollEvent", worker = "Worker")]
 pub struct Stage {
-    ledger: ApplyDB,
     chain: chain::Store,
-    genesis: GenesisFile,
 
     pub upstream: UpstreamPort,
 
@@ -24,11 +21,9 @@ pub struct Stage {
 }
 
 impl Stage {
-    pub fn new(ledger: ApplyDB, chain: chain::Store, genesis: GenesisFile) -> Self {
+    pub fn new(chain: chain::Store) -> Self {
         Self {
-            ledger,
             chain,
-            genesis,
             upstream: Default::default(),
             // downstream: Default::default(),
             block_count: Default::default(),
@@ -64,17 +59,16 @@ impl gasket::framework::Worker<Stage> for Worker {
                     .roll_forward(*slot, *hash, cbor.clone())
                     .or_panic()?;
 
-                stage.ledger.apply_block(cbor).or_panic()?;
+                info!(slot, "roll forward");
             }
-            RollEvent::Undo(slot, _, cbor) => {
+            RollEvent::Undo(slot, _, _) => {
                 stage.chain.roll_back(*slot).or_panic()?;
-                stage.ledger.undo_block(cbor).or_panic()?;
+                info!(slot, "rollback");
             }
             RollEvent::Origin => {
                 stage.chain.roll_back_origin().or_panic()?;
-                stage.ledger.apply_origin(&stage.genesis).or_panic()?
+                info!("rollback to origin");
             }
-            RollEvent::Reset(_) => todo!(),
         };
 
         Ok(())
