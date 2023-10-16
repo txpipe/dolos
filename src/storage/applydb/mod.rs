@@ -1,8 +1,13 @@
 pub mod genesis;
 
-use pallas::crypto::hash::Hash;
+use pallas::{crypto::hash::Hash, ledger::traverse::MultiEraBlock};
 use serde::{Deserialize, Serialize};
-use std::{path::Path, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+    sync::Arc,
+};
+use thiserror::Error;
 use tracing::{error, info};
 
 use rocksdb::{Options, WriteBatch, DB};
@@ -16,7 +21,28 @@ type OutputIndex = u64;
 type UtxoBody = Vec<u8>;
 type BlockSlot = u64;
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Error, Debug)]
+pub enum Error {
+    #[error("data error")]
+    Data(super::kvtable::Error),
+
+    #[error("missing utxo {0}#{1}")]
+    MissingUtxo(TxHash, OutputIndex),
+
+    #[error("missing stxi {0}#{1}")]
+    MissingStxi(TxHash, OutputIndex),
+
+    #[error("cbor decoding")]
+    Cbor,
+}
+
+impl From<super::kvtable::Error> for Error {
+    fn from(value: super::kvtable::Error) -> Self {
+        Error::Data(value)
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Hash)]
 pub struct UtxoRef(pub TxHash, pub OutputIndex);
 
 pub struct UtxoKV;
@@ -37,6 +63,7 @@ pub struct SlotKV;
 #[derive(Serialize, Deserialize)]
 pub struct SlotData {
     hash: BlockHash,
+    #[deprecated]
     tombstones: Vec<UtxoRef>,
 }
 
@@ -44,66 +71,160 @@ impl KVTable<DBInt, DBSerde<SlotData>> for SlotKV {
     const CF_NAME: &'static str = "SlotKV";
 }
 
-pub struct BlockWriteBatch<'a>(&'a rocksdb::DB, BlockSlot, WriteBatch);
+pub struct ApplyBatch<'a> {
+    db: &'a rocksdb::DB,
+    block_slot: BlockSlot,
+    block_hash: BlockHash,
+    utxo_inserts: HashMap<UtxoRef, UtxoBody>,
+    stxi_inserts: HashMap<UtxoRef, UtxoBody>,
+    utxo_deletes: Vec<UtxoRef>,
+}
 
-impl<'a> BlockWriteBatch<'a> {
-    pub fn insert_utxo(&mut self, tx: TxHash, output: OutputIndex, body: UtxoBody) {
-        UtxoKV::stage_upsert(
-            self.0,
-            DBSerde(UtxoRef(tx, output)),
-            DBBytes(body),
-            &mut self.2,
-        )
+impl<'a> ApplyBatch<'a> {
+    pub fn new(db: &'a rocksdb::DB, block_slot: BlockSlot, block_hash: BlockHash) -> Self {
+        Self {
+            db,
+            block_slot,
+            block_hash,
+            utxo_inserts: HashMap::new(),
+            stxi_inserts: HashMap::new(),
+            utxo_deletes: Vec::new(),
+        }
     }
 
-    pub fn spend_utxo(&mut self, tx: TxHash, idx: OutputIndex) -> Result<(), Error> {
-        let k = DBSerde(UtxoRef(tx, idx));
-        //let v = UtxoKV::get_by_key(self.0, k.clone())?.ok_or(Error::NotFound)?;
+    pub fn contains_utxo(&self, tx: TxHash, output: OutputIndex) -> bool {
+        self.utxo_inserts.contains_key(&UtxoRef(tx, output))
+    }
 
-        let v = UtxoKV::get_by_key(self.0, k.clone())?.ok_or_else(|| {
-            error!(%tx, idx, "utxo not found");
-            Error::NotFound
-        })?;
+    pub fn insert_utxo(&mut self, tx: TxHash, output: OutputIndex, body: UtxoBody) {
+        self.utxo_inserts.insert(UtxoRef(tx, output), body);
+    }
 
-        StxiKV::stage_upsert(self.0, k.clone(), v, &mut self.2);
-        UtxoKV::stage_delete(self.0, k, &mut self.2);
-
+    pub fn spend_utxo(&mut self, tx: TxHash, idx: OutputIndex, body: UtxoBody) {
         info!(%tx, idx, "spending utxo");
+
+        let k = UtxoRef(tx, idx);
+
+        self.stxi_inserts.insert(k.clone(), body);
+        self.utxo_deletes.push(k);
+    }
+
+    pub fn spend_utxo_same_block(&mut self, tx: TxHash, idx: OutputIndex) {
+        info!(%tx, idx, "spending utxo same block");
+
+        let k = UtxoRef(tx, idx);
+
+        let body = self.utxo_inserts.remove(&k).unwrap();
+
+        self.stxi_inserts.insert(k.clone(), body);
+        self.utxo_deletes.push(k)
+    }
+}
+
+impl<'a> From<ApplyBatch<'a>> for WriteBatch {
+    fn from(from: ApplyBatch<'a>) -> Self {
+        let mut batch = WriteBatch::default();
+
+        for (key, value) in from.utxo_inserts {
+            UtxoKV::stage_upsert(from.db, DBSerde(key), DBBytes(value), &mut batch);
+        }
+
+        for key in from.utxo_deletes {
+            UtxoKV::stage_delete(from.db, DBSerde(key), &mut batch);
+        }
+
+        for (key, value) in from.stxi_inserts {
+            StxiKV::stage_upsert(from.db, DBSerde(key), DBBytes(value), &mut batch);
+        }
+
+        let k = DBInt(from.block_slot);
+        let v = DBSerde(SlotData {
+            hash: from.block_hash,
+            tombstones: vec![],
+        });
+
+        SlotKV::stage_upsert(from.db, k, v, &mut batch);
+
+        batch
+    }
+}
+
+pub struct UndoBatch<'a> {
+    db: &'a rocksdb::DB,
+    block_slot: BlockSlot,
+    utxo_recovery: HashMap<UtxoRef, UtxoBody>,
+    stxi_deletes: Vec<UtxoRef>,
+    utxo_deletes: HashSet<UtxoRef>,
+}
+
+impl<'a> UndoBatch<'a> {
+    pub fn new(db: &'a rocksdb::DB, block_slot: BlockSlot) -> Self {
+        Self {
+            db,
+            block_slot,
+            utxo_recovery: HashMap::new(),
+            stxi_deletes: Vec::new(),
+            utxo_deletes: HashSet::new(),
+        }
+    }
+
+    pub fn would_delete_utxo(&self, tx: TxHash, output: OutputIndex) -> bool {
+        self.utxo_deletes.contains(&UtxoRef(tx, output))
+    }
+
+    pub fn unspend_stxi(
+        &mut self,
+        tx: TxHash,
+        output: OutputIndex,
+        body: UtxoBody,
+    ) -> Result<(), Error> {
+        let k = UtxoRef(tx, output);
+
+        self.utxo_recovery.insert(k.clone(), body);
+        self.stxi_deletes.push(k);
 
         Ok(())
     }
 
-    pub fn unspend_stxi(&mut self, tx: TxHash, output: OutputIndex) -> Result<(), Error> {
-        let k = DBSerde(UtxoRef(tx, output));
-        let v = StxiKV::get_by_key(self.0, k.clone())?.ok_or(Error::NotFound)?;
-        UtxoKV::stage_upsert(self.0, k.clone(), v, &mut self.2);
-        StxiKV::stage_delete(self.0, k, &mut self.2);
+    pub fn unspend_stxi_same_block(
+        &mut self,
+        tx: TxHash,
+        output: OutputIndex,
+    ) -> Result<(), Error> {
+        let k = UtxoRef(tx, output);
+
+        self.utxo_deletes.remove(&k);
+        self.stxi_deletes.push(k);
 
         Ok(())
     }
 
     pub fn delete_utxo(&mut self, tx: TxHash, output: OutputIndex) {
-        let k = DBSerde(UtxoRef(tx, output));
-        UtxoKV::stage_delete(self.0, k, &mut self.2);
+        let k = UtxoRef(tx, output);
+        self.utxo_deletes.insert(k);
     }
-
-    pub fn insert_slot(&mut self, hash: BlockHash, tombstones: Vec<UtxoRef>) {
-        let k = DBInt(self.1);
-        let v = DBSerde(SlotData { hash, tombstones });
-        SlotKV::stage_upsert(self.0, k, v, &mut self.2);
-    }
-
-    pub fn delete_slot(&mut self) {
-        let k = DBInt(self.1);
-        SlotKV::stage_delete(self.0, k, &mut self.2);
-    }
-
-    // TODO: change_params
 }
 
-impl<'a> From<BlockWriteBatch<'a>> for WriteBatch {
-    fn from(value: BlockWriteBatch<'a>) -> Self {
-        value.2
+impl<'a> From<UndoBatch<'a>> for WriteBatch {
+    fn from(from: UndoBatch<'a>) -> Self {
+        let mut batch = WriteBatch::default();
+
+        for (key, value) in from.utxo_recovery {
+            UtxoKV::stage_upsert(from.db, DBSerde(key), DBBytes(value), &mut batch);
+        }
+
+        for key in from.utxo_deletes {
+            UtxoKV::stage_delete(from.db, DBSerde(key), &mut batch);
+        }
+
+        for key in from.stxi_deletes {
+            StxiKV::stage_delete(from.db, DBSerde(key), &mut batch);
+        }
+
+        let k = DBInt(from.block_slot);
+        SlotKV::stage_delete(from.db, k, &mut batch);
+
+        batch
     }
 }
 
@@ -123,7 +244,7 @@ impl ApplyDB {
             path,
             [UtxoKV::CF_NAME, StxiKV::CF_NAME, SlotKV::CF_NAME],
         )
-        .map_err(|_| Error::IO)?;
+        .map_err(|_| super::kvtable::Error::IO)?;
 
         Ok(Self { db: Arc::new(db) })
     }
@@ -132,23 +253,9 @@ impl ApplyDB {
         SlotKV::is_empty(&self.db)
     }
 
-    pub fn get_slot_data(&self, slot: BlockSlot) -> Result<Option<SlotData>, Error> {
-        let v = SlotKV::get_by_key(&self.db, DBInt(slot))?;
-        let out = v.map(|d| d.0);
-
-        Ok(out)
-    }
-
     pub fn cursor(&self) -> Result<Option<(BlockSlot, BlockHash)>, Error> {
-        let entry = self.get_last_slot()?;
-        let out = entry.map(|(s, d)| (s, d.hash));
-
-        Ok(out)
-    }
-
-    pub fn get_last_slot(&self) -> Result<Option<(BlockSlot, SlotData)>, Error> {
         let v = SlotKV::last_entry(&self.db)?;
-        let out = v.map(|(s, d)| (s.0, d.0));
+        let out = v.map(|(s, d)| (s.0, d.0.hash));
 
         Ok(out)
     }
@@ -158,46 +265,49 @@ impl ApplyDB {
         Ok(dbval.map(|x| x.0))
     }
 
-    fn start_block(&self, slot: BlockSlot) -> BlockWriteBatch {
-        BlockWriteBatch(&self.db, slot, WriteBatch::default())
-    }
-
-    fn commit_block(&self, batch: BlockWriteBatch) -> Result<(), Error> {
-        let batch = WriteBatch::from(batch);
-        self.db.write(batch).map_err(|_| Error::IO)?;
-
-        Ok(())
+    pub fn get_stxi(&self, tx: TxHash, output: OutputIndex) -> Result<Option<UtxoBody>, Error> {
+        let dbval = StxiKV::get_by_key(&self.db, DBSerde(UtxoRef(tx, output)))?;
+        Ok(dbval.map(|x| x.0))
     }
 
     pub fn apply_block(&mut self, cbor: &[u8]) -> Result<(), Error> {
-        let block =
-            pallas::ledger::traverse::MultiEraBlock::decode(cbor).map_err(|_| Error::Cbor)?;
+        let block = MultiEraBlock::decode(cbor).map_err(|_| Error::Cbor)?;
         let slot = block.slot();
         let hash = block.hash();
 
-        let mut batch = self.start_block(slot);
+        let mut batch = ApplyBatch::new(&self.db, slot, hash);
 
-        for tx in block.txs() {
-            for consumed in tx.consumes() {
-                batch.spend_utxo(*consumed.hash(), consumed.index())?;
-            }
+        let txs = block.txs();
 
+        for tx in txs.iter() {
             for (idx, produced) in tx.produces() {
                 let body = produced.encode();
                 batch.insert_utxo(tx.hash(), idx as u64, body);
             }
         }
 
-        let tombstones = block
-            .txs()
-            .iter()
-            .flat_map(|x| x.consumes())
-            .map(|x| UtxoRef(*x.hash(), x.index()))
-            .collect();
+        for tx in txs.iter() {
+            for consumed in tx.consumes() {
+                let hash = *consumed.hash();
+                let idx = consumed.index();
 
-        batch.insert_slot(block.hash(), tombstones);
+                if batch.contains_utxo(hash.clone(), idx) {
+                    batch.spend_utxo_same_block(hash, idx);
+                } else {
+                    let utxo = self
+                        .get_utxo(hash, idx)?
+                        .ok_or(Error::MissingUtxo(hash, idx))?;
 
-        self.commit_block(batch)?;
+                    batch.spend_utxo(hash, idx, utxo);
+                };
+            }
+        }
+
+        let batch = WriteBatch::from(batch);
+
+        self.db
+            .write(batch)
+            .map_err(|_| super::kvtable::Error::IO)?;
 
         info!(slot, ?hash, "applied block");
 
@@ -205,24 +315,41 @@ impl ApplyDB {
     }
 
     pub fn undo_block(&mut self, cbor: &[u8]) -> Result<(), Error> {
-        let block =
-            pallas::ledger::traverse::MultiEraBlock::decode(cbor).map_err(|_| Error::Cbor)?;
+        let block = MultiEraBlock::decode(cbor).map_err(|_| Error::Cbor)?;
+        let slot = block.slot();
 
-        let mut batch = self.start_block(block.slot());
+        let mut batch = UndoBatch::new(&self.db, slot);
 
         for tx in block.txs() {
-            for consumed in tx.consumes() {
-                batch.unspend_stxi(*consumed.hash(), consumed.index())?;
-            }
-
             for (idx, _) in tx.produces() {
                 batch.delete_utxo(tx.hash(), idx as u64);
             }
         }
 
-        batch.delete_slot();
+        for tx in block.txs() {
+            for consumed in tx.consumes() {
+                let hash = consumed.hash();
+                let idx = consumed.index();
 
-        self.commit_block(batch)?;
+                if batch.would_delete_utxo(*hash, idx) {
+                    batch.unspend_stxi_same_block(*hash, idx)?;
+                } else {
+                    let body = self
+                        .get_stxi(*hash, idx)?
+                        .ok_or(Error::MissingStxi(*hash, idx))?;
+
+                    batch.unspend_stxi(*hash, idx, body)?;
+                }
+            }
+        }
+
+        let batch = WriteBatch::from(batch);
+
+        self.db
+            .write(batch)
+            .map_err(|_| super::kvtable::Error::IO)?;
+
+        info!(slot, "deleted block");
 
         Ok(())
     }
@@ -233,7 +360,37 @@ impl ApplyDB {
     }
 
     pub fn destroy(path: impl AsRef<Path>) -> Result<(), Error> {
-        DB::destroy(&Options::default(), path).map_err(|_| Error::IO)
+        DB::destroy(&Options::default(), path).map_err(|_| super::kvtable::Error::IO)?;
+
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn insert_dummy_utxo(&mut self, hash: TxHash, index: OutputIndex) {
+        let mut batch = WriteBatch::default();
+
+        UtxoKV::stage_upsert(
+            &self.db,
+            DBSerde(UtxoRef(hash, index)),
+            DBBytes(vec![]),
+            &mut batch,
+        );
+
+        self.db.write(batch).unwrap();
+    }
+
+    #[cfg(test)]
+    pub fn insert_dummy_stxi(&mut self, hash: TxHash, index: OutputIndex) {
+        let mut batch = WriteBatch::default();
+
+        StxiKV::stage_upsert(
+            &self.db,
+            DBSerde(UtxoRef(hash, index)),
+            DBBytes(vec![]),
+            &mut batch,
+        );
+
+        self.db.write(batch).unwrap();
     }
 }
 
@@ -250,120 +407,106 @@ mod tests {
         ApplyDB::destroy(path).unwrap();
     }
 
-    fn dummy_utxo(tx: u64, idx: OutputIndex) -> (TxHash, OutputIndex, UtxoBody) {
-        let hash = pallas::crypto::hash::Hasher::<256>::hash(tx.to_be_bytes().as_slice());
-        (hash, idx, (tx + idx).to_be_bytes().to_vec())
+    fn load_test_block(name: &str) -> Vec<u8> {
+        let path = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap())
+            .join("test_data")
+            .join(name);
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        hex::decode(content).unwrap()
     }
 
     #[test]
-    fn test_insert_slot_consistency() {
-        with_tmp_db(|db| {
-            let (tx1, idx1, _) = dummy_utxo(0, 0);
-            let (tx2, idx2, _) = dummy_utxo(0, 1);
+    fn test_apply_block() {
+        with_tmp_db(|mut db| {
+            // nice block with several txs, it includes chaining edge case
+            let cbor = load_test_block("alonzo27.block");
 
-            let slot = 22;
-            let hash = pallas::crypto::hash::Hasher::<256>::hash(44u32.to_be_bytes().as_slice());
-            let tombstones = vec![UtxoRef(tx1, idx1), UtxoRef(tx2, idx2)];
+            let block = MultiEraBlock::decode(&cbor).unwrap();
 
-            let mut apply = db.start_block(slot);
+            let block_txs: Vec<_> = block.txs().iter().map(|tx| tx.hash()).collect();
 
-            apply.insert_slot(hash, tombstones.clone());
+            for tx in block.txs() {
+                for input in tx.consumes() {
+                    // skip inserting dummy utxo if it's part of the current block
+                    if block_txs.contains(input.hash()) {
+                        continue;
+                    }
 
-            db.commit_block(apply).unwrap();
+                    db.insert_dummy_utxo(*input.hash(), input.index());
+                }
+            }
 
-            let (out_slot, out_data) = db.get_last_slot().unwrap().unwrap();
-            assert_eq!(out_slot, slot);
-            assert_eq!(out_data.hash, hash);
+            db.apply_block(&cbor).unwrap();
 
-            // assert tombstone are there
-            for (should, expect) in out_data.tombstones.iter().zip(tombstones) {
-                assert_eq!(should.0, expect.0);
-                assert_eq!(should.1, expect.1);
+            for tx in block.txs() {
+                for input in tx.consumes() {
+                    // assert that consumed utxos are no longer in the unspent set
+                    let utxo = db.get_utxo(*input.hash(), input.index()).unwrap();
+                    assert!(utxo.is_none());
+
+                    // assert that consumed utxos moved to the spent set
+                    let stxi = db.get_stxi(*input.hash(), input.index()).unwrap();
+                    assert!(stxi.is_some());
+                }
+
+                for (idx, _) in tx.produces() {
+                    let utxo = db.get_utxo(tx.hash(), idx as u64).unwrap();
+                    let stxi = db.get_stxi(tx.hash(), idx as u64).unwrap();
+
+                    // assert that produced utxos were added to either unspent or spent set
+                    assert_ne!(utxo.is_some(), stxi.is_some());
+                }
             }
         });
     }
 
     #[test]
-    fn test_insert_utxos_consitency() {
-        with_tmp_db(|db| {
-            let mut batch = db.start_block(22);
+    fn test_undo_block() {
+        with_tmp_db(|mut db| {
+            // nice block with several txs, it includes chaining edge case
+            let cbor = load_test_block("alonzo27.block");
 
-            let (tx1, idx1, body1) = dummy_utxo(0, 0);
-            let (tx2, idx2, body2) = dummy_utxo(0, 1);
-            let (tx3, idx3, body3) = dummy_utxo(1, 0);
+            let block = MultiEraBlock::decode(&cbor).unwrap();
 
-            batch.insert_utxo(tx1, idx1, body1.clone());
-            batch.insert_utxo(tx2, idx2, body2.clone());
-            batch.insert_utxo(tx3, idx3, body3.clone());
+            let block_txs: Vec<_> = block.txs().iter().map(|tx| tx.hash()).collect();
 
-            db.commit_block(batch).unwrap();
+            for tx in block.txs() {
+                for input in tx.consumes() {
+                    // skip inserting dummy stxi if it's part of the current block
+                    if block_txs.contains(input.hash()) {
+                        continue;
+                    }
 
-            let persisted = db.get_utxo(tx1, idx1).unwrap().unwrap();
-            assert_eq!(persisted, body1);
+                    db.insert_dummy_stxi(*input.hash(), input.index());
+                }
+            }
 
-            let persisted = db.get_utxo(tx2, idx2).unwrap().unwrap();
-            assert_eq!(persisted, body2);
+            db.undo_block(&cbor).unwrap();
 
-            let persisted = db.get_utxo(tx3, idx3).unwrap().unwrap();
-            assert_eq!(persisted, body3);
-        });
-    }
+            for tx in block.txs() {
+                for input in tx.consumes() {
+                    // assert that consumed utxos go back to the unspent set, unless they are from
+                    // the same block
+                    let utxo = db.get_utxo(*input.hash(), input.index()).unwrap();
 
-    #[test]
-    fn test_spend_unspend_utxos() {
-        with_tmp_db(|db| {
-            let (tx1, idx1, body1) = dummy_utxo(0, 0);
-            let (tx2, idx2, body2) = dummy_utxo(0, 1);
-            let (tx3, idx3, body3) = dummy_utxo(1, 0);
+                    if block_txs.contains(input.hash()) {
+                        assert!(utxo.is_none());
+                    } else {
+                        assert!(utxo.is_some());
+                    }
 
-            // producer blocker
-            let slot = 22;
-            let hash = pallas::crypto::hash::Hasher::<256>::hash(44u32.to_be_bytes().as_slice());
-            let mut batch = db.start_block(slot);
+                    // assert that consumed utxos are no longer in the spent set
+                    let stxi = db.get_stxi(*input.hash(), input.index()).unwrap();
+                    assert!(stxi.is_none());
+                }
 
-            batch.insert_utxo(tx1, idx1, body1);
-            batch.insert_utxo(tx2, idx2, body2);
-            batch.insert_utxo(tx3, idx3, body3);
-
-            batch.insert_slot(hash, Default::default());
-
-            db.commit_block(batch).unwrap();
-
-            // spender block
-            let slot = 23;
-            let hash = pallas::crypto::hash::Hasher::<256>::hash(45u32.to_be_bytes().as_slice());
-            let mut batch = db.start_block(slot);
-
-            batch.spend_utxo(tx1, idx1).unwrap();
-            batch.spend_utxo(tx3, idx3).unwrap();
-
-            batch.insert_slot(hash, vec![UtxoRef(tx1, idx1), UtxoRef(tx3, idx3)]);
-
-            db.commit_block(batch).unwrap();
-
-            // assert some utxo are missing
-            assert!(db.get_utxo(tx1, idx1).unwrap().is_none());
-            assert!(db.get_utxo(tx2, idx2).unwrap().is_some());
-            assert!(db.get_utxo(tx3, idx3).unwrap().is_none());
-
-            // undo spender block
-            let slot = 23;
-            let mut batch = db.start_block(slot);
-
-            batch.unspend_stxi(tx1, idx1).unwrap();
-            batch.unspend_stxi(tx3, idx3).unwrap();
-
-            batch.delete_slot();
-
-            db.commit_block(batch).unwrap();
-
-            // assert all utxo are back
-            assert!(db.get_utxo(tx1, idx1).unwrap().is_some());
-            assert!(db.get_utxo(tx2, idx2).unwrap().is_some());
-            assert!(db.get_utxo(tx3, idx3).unwrap().is_some());
-
-            // assert slot is missing
-            assert!(db.get_slot_data(23).unwrap().is_none());
+                for (idx, _) in tx.produces() {
+                    // assert that produced utxos are no longer in the unspent set
+                    let utxo = db.get_utxo(tx.hash(), idx as u64).unwrap();
+                    assert!(utxo.is_none());
+                }
+            }
         });
     }
 }
