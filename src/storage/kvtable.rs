@@ -18,6 +18,7 @@ pub enum Error {
     Cbor,
 }
 
+#[derive(PartialEq, Eq)]
 pub struct DBHash(pub Hash<32>);
 
 impl From<Box<[u8]>> for DBHash {
@@ -47,7 +48,7 @@ impl From<DBHash> for Hash<32> {
     }
 }
 
-#[derive(Debug)]
+#[derive(PartialEq, Eq)]
 pub struct DBInt(pub u64);
 
 impl From<DBInt> for Box<[u8]> {
@@ -77,6 +78,7 @@ impl From<DBInt> for u64 {
     }
 }
 
+#[derive(PartialEq, Eq)]
 pub struct DBBytes(pub Vec<u8>);
 
 impl From<DBBytes> for Box<[u8]> {
