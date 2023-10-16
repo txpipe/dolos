@@ -138,6 +138,8 @@ impl<'a> From<ApplyBatch<'a>> for WriteBatch {
         }
 
         let k = DBInt(from.block_slot);
+
+        #[allow(deprecated)]
         let v = DBSerde(SlotData {
             hash: from.block_hash,
             tombstones: vec![],
@@ -291,7 +293,7 @@ impl ApplyDB {
                 let hash = *consumed.hash();
                 let idx = consumed.index();
 
-                if batch.contains_utxo(hash.clone(), idx) {
+                if batch.contains_utxo(hash, idx) {
                     batch.spend_utxo_same_block(hash, idx);
                 } else {
                     let utxo = self
