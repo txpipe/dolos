@@ -14,19 +14,19 @@ jobs:
           # don't change `Linux` or `x86_64` to avoid breaking the
           # install script because it relies on the `uname` outputs
           - release_for: Linux-x86_64
-            os: ubuntu-latest
+            build_on: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             args: "--locked --release"
 
           # don't change `Linux` or `arm64` to avoid breaking the
           # install script because it relies on the `uname` outputs
           - release_for: Linux-arm64
-            os: ubuntu-latest
+            build_on: ubuntu-latest
             target: "armv7-unknown-linux-gnueabihf"
             args: "--locked --release"
 
           - release_for: Windows-x86_64
-            os: windows-latest
+            build_on: windows-latest
             target: x86_64-pc-windows-msvc
             args: "--locked --release"
             ext: .exe
@@ -34,14 +34,14 @@ jobs:
           # don't change `Darwin` or `x86_64` to avoid breaking the
           # install script because it relies on the `uname` outputs
           - release_for: Darwin-x86_64
-            os: macOS-latest
+            build_on: macOS-latest
             target: x86_64-apple-darwin
             args: "--locked --release"
 
           # don't change `Darwin` or `arm64` to avoid breaking the
           # install script because it relies on the `uname` outputs
           - release_for: Darwin-arm64
-            os: macOS-latest
+            build_on: macOS-latest
             target: aarch64-apple-darwin
             args: "--locked --release"
 
@@ -70,7 +70,7 @@ jobs:
 
       - name: rename binaries
         run: |
-          mv target/${{ matrix.target }}/release/${{ matrix.bin }} dolos-${{ matrix.release_for }}${{ matrix.ext }}
+          mv target/${{ matrix.target }}/release/dolos${{ matrix.ext }} dolos-${{ matrix.release_for }}${{ matrix.ext }}
 
       - name: upload artifacts
         uses: actions/upload-artifact@v3
