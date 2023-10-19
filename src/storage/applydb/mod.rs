@@ -311,8 +311,6 @@ impl ApplyDB {
             .write(batch)
             .map_err(|_| super::kvtable::Error::IO)?;
 
-        info!(slot, ?hash, "applied block");
-
         Ok(())
     }
 
@@ -414,7 +412,7 @@ mod tests {
             .join("test_data")
             .join(name);
 
-        let content = std::fs::read_to_string(&path).unwrap();
+        let content = std::fs::read_to_string(path).unwrap();
         hex::decode(content).unwrap()
     }
 
