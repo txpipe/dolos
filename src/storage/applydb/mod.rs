@@ -311,8 +311,6 @@ impl ApplyDB {
             .write(batch)
             .map_err(|_| super::kvtable::Error::IO)?;
 
-        info!(slot, ?hash, "applied block");
-
         Ok(())
     }
 

@@ -1,8 +1,9 @@
 use std::{path::PathBuf, time::Duration};
 
 use clap::{Parser, Subcommand};
-use miette::{IntoDiagnostic, Result};
+use miette::{Context, IntoDiagnostic, Result};
 use serde::Deserialize;
+use serde_with::{serde_as, DisplayFromStr};
 
 mod common;
 mod daemon;
@@ -42,6 +43,19 @@ pub struct GenesisFileRef {
     // hash: String,
 }
 
+#[serde_as]
+#[derive(Deserialize, Default, Debug)]
+pub struct LoggingConfig {
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    max_level: Option<tracing::Level>,
+
+    #[serde(default)]
+    include_pallas: bool,
+
+    #[serde(default)]
+    include_grpc: bool,
+}
+
 #[derive(Deserialize)]
 pub struct Config {
     pub rolldb: RolldbConfig,
@@ -49,6 +63,8 @@ pub struct Config {
     pub serve: dolos::serve::Config,
     pub retries: Option<gasket::retries::Policy>,
     pub byron: GenesisFileRef,
+    #[serde(default)]
+    pub logging: LoggingConfig,
 }
 
 impl Config {
@@ -92,12 +108,14 @@ fn define_gasket_policy(config: Option<&gasket::retries::Policy>) -> gasket::run
 
 fn main() -> Result<()> {
     let args = Cli::parse();
-    let config = Config::new(&args.config).into_diagnostic()?;
+    let config = Config::new(&args.config)
+        .into_diagnostic()
+        .context("parsing configuration")?;
 
     let retries = define_gasket_policy(config.retries.as_ref());
 
     match args.command {
-        Command::Daemon(x) => daemon::run(config, &retries, &x).into_diagnostic()?,
+        Command::Daemon(x) => daemon::run(config, &retries, &x)?,
         Command::Sync(x) => sync::run(&config, &retries, &x).into_diagnostic()?,
         Command::Data(x) => data::run(&config, &x).into_diagnostic()?,
         Command::Serve(x) => serve::run(config, &x).into_diagnostic()?,

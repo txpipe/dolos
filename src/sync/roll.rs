@@ -1,6 +1,6 @@
 use gasket::framework::*;
 use pallas::storage::rolldb::wal;
-use tracing::info;
+use tracing::{debug, trace};
 
 use crate::prelude::*;
 
@@ -21,7 +21,7 @@ async fn catchup_downstream(
 
     for wal in iter {
         let (seq, wal) = wal.or_panic()?;
-        info!(seq, "processing wal entry");
+        trace!(seq, "processing wal entry");
 
         let evt = match wal {
             wal::Log::Apply(slot, hash, body) => RollEvent::Apply(slot, hash, body),
@@ -41,13 +41,16 @@ fn update_store(unit: &PullEvent, store: &mut wal::Store) -> Result<(), WorkerEr
     match unit {
         PullEvent::RollForward(slot, hash, body) => {
             store.roll_forward(*slot, *hash, body.clone()).or_panic()?;
+            debug!(slot, %hash, "wal extended");
         }
         PullEvent::Rollback(point) => match point {
             pallas::network::miniprotocols::Point::Specific(slot, _) => {
                 store.roll_back(*slot).or_panic()?;
+                debug!(slot, "wal rollback");
             }
             pallas::network::miniprotocols::Point::Origin => {
                 store.roll_back_origin().or_panic()?;
+                debug!("wal rollback to origin");
             }
         },
     }

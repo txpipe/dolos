@@ -1,4 +1,5 @@
 use dolos::prelude::*;
+use miette::{Context, IntoDiagnostic};
 
 #[derive(Debug, clap::Args)]
 pub struct Args {}
@@ -8,18 +9,14 @@ pub async fn run(
     config: super::Config,
     policy: &gasket::runtime::Policy,
     _args: &Args,
-) -> Result<(), Error> {
-    tracing::subscriber::set_global_default(
-        tracing_subscriber::FmtSubscriber::builder()
-            .with_max_level(tracing::Level::INFO)
-            .finish(),
-    )
-    .unwrap();
+) -> miette::Result<()> {
+    crate::common::setup_tracing(&config.logging)?;
 
     let (wal, chain, ledger) = crate::common::open_data_stores(&config)?;
 
-    let byron_genesis =
-        pallas::ledger::configs::byron::from_file(&config.byron.path).map_err(Error::config)?;
+    let byron_genesis = pallas::ledger::configs::byron::from_file(&config.byron.path)
+        .into_diagnostic()
+        .context("loading byron genesis config")?;
 
     let server = tokio::spawn(dolos::serve::serve(
         config.serve,
