@@ -4,11 +4,7 @@ use miette::{Context, IntoDiagnostic};
 pub struct Args {}
 
 #[tokio::main]
-pub async fn run(
-    config: super::Config,
-    policy: &gasket::runtime::Policy,
-    _args: &Args,
-) -> miette::Result<()> {
+pub async fn run(config: super::Config, _args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging)?;
 
     let (wal, chain, ledger) = crate::common::open_data_stores(&config)?;
@@ -23,9 +19,17 @@ pub async fn run(
         chain.clone(),
     ));
 
-    dolos::sync::pipeline(&config.upstream, wal, chain, ledger, byron_genesis, policy)
-        .unwrap()
-        .block();
+    dolos::sync::pipeline(
+        &config.upstream,
+        wal,
+        chain,
+        ledger,
+        byron_genesis,
+        &config.retries,
+    )
+    .into_diagnostic()
+    .context("bootstrapping sync pipeline")?
+    .block();
 
     server.abort();
 
