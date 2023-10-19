@@ -618,7 +618,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-stream",
- "tonic",
+ "tonic 0.9.2",
  "tonic-web",
  "tracing",
  "tracing-subscriber",
@@ -2209,19 +2209,38 @@ dependencies = [
 ]
 
 [[package]]
-name = "tonic-web"
-version = "0.9.2"
+name = "tonic"
+version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "21b00ec4842256d1fe0a46176e2ef5bc357664c66e7d91aff5a7d43d83a65f47"
+checksum = "d560933a0de61cf715926b9cac824d4c883c2c43142f787595e48280c40a1d0e"
 dependencies = [
  "base64 0.21.4",
  "bytes",
- "futures-core",
+ "http",
+ "http-body",
+ "percent-encoding",
+ "pin-project",
+ "tokio",
+ "tokio-stream",
+ "tower-layer",
+ "tower-service",
+ "tracing",
+]
+
+[[package]]
+name = "tonic-web"
+version = "0.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0fddb2a37b247e6adcb9f239f4e5cefdcc5ed526141a416b943929f13aea2cce"
+dependencies = [
+ "base64 0.21.4",
+ "bytes",
  "http",
  "http-body",
  "hyper",
  "pin-project",
- "tonic",
+ "tokio-stream",
+ "tonic 0.10.2",
  "tower-http",
  "tower-layer",
  "tower-service",
@@ -2412,7 +2431,7 @@ dependencies = [
  "pbjson-types",
  "prost",
  "serde",
- "tonic",
+ "tonic 0.9.2",
  "utxorpc-spec-cardano",
 ]
 
