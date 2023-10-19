@@ -1,4 +1,5 @@
-# Client Endpoint
+# gRPC
+
 
 ## Introduction
 
@@ -6,30 +7,6 @@
 - The endpoint adheres to the UTxO RPC interface definition found in https://utxorpc.org
 - The current implemented module is the `Sync` module that allows clients to sync with the state of the chain stored by Dolos
 - Dolos endpoint also supports gRPC-web, a variant of gRPC that can be used directly from browsers
-
-## Starting the server
-
-- There are 2 ways to start the server that provides access to the endpoints: the `serve` command and the `daemon` command
-
-### `serve` mode
-
-The `serve` command starts Dolos just with the purpose of exposing the client endpoint, no other functions are executed
-
-To start Dolos in `serve` mode run the following command from the terminal:
-
-```
-dolos serve
-```
-
-### `daemon` mode
-
-The `daemon` command starts Dolos with all of its main functions enabled (syncing from upstream, updating the ledger, etc) which includes the client endpoint server
-
-To start Dolos in `daemon` mode run the following command from the terminal:
-
-```
-dolos daemon
-```
 
 ## Connecting to the server
 
