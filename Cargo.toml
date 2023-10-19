@@ -1,6 +1,6 @@
 [package]
 name = "dolos"
-description = "Cardano Dolos"
+description = "A Cardano data-node built in Rust"
 version = "0.6.0"
 edition = "2021"
 repository = "https://github.com/txpipe/dolos"
