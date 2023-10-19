@@ -1,9 +1,8 @@
-use std::{path::PathBuf, time::Duration};
-
 use clap::{Parser, Subcommand};
 use miette::{Context, IntoDiagnostic, Result};
 use serde::Deserialize;
 use serde_with::{serde_as, DisplayFromStr};
+use std::path::PathBuf;
 
 mod common;
 mod daemon;

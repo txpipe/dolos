@@ -15,4 +15,3 @@ magic = 0
 
 [byron]
 path = "./byron.json"
-hash = "xxx"
