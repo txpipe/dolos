@@ -1,15 +1,8 @@
-use dolos::prelude::*;
-
 #[derive(Debug, clap::Args)]
 pub struct Args {}
 
-pub fn run(config: &super::Config, _args: &Args) -> Result<(), Error> {
-    tracing::subscriber::set_global_default(
-        tracing_subscriber::FmtSubscriber::builder()
-            .with_max_level(tracing::Level::INFO)
-            .finish(),
-    )
-    .unwrap();
+pub fn run(config: &super::Config, _args: &Args) -> miette::Result<()> {
+    crate::common::setup_tracing(&config.logging)?;
 
     let (wal, chain, ledger) = crate::common::open_data_stores(config)?;
 

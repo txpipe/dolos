@@ -169,6 +169,12 @@ impl gasket::framework::Worker<Stage> for Worker {
             .await
             .or_retry()?;
 
+        info!(
+            address = stage.peer_address,
+            magic = stage.network_magic,
+            "connected to upstream node"
+        );
+
         intersect(&mut peer_session, &stage.intersection).await?;
 
         let worker = Self { peer_session };
@@ -184,11 +190,11 @@ impl gasket::framework::Worker<Stage> for Worker {
 
         let next = match client.has_agency() {
             true => {
-                info!("requesting next block");
+                debug!("requesting next block");
                 client.request_next().await.or_restart()?
             }
             false => {
-                info!("awaiting next block (blocking)");
+                debug!("awaiting next block (blocking)");
                 client.recv_while_must_reply().await.or_restart()?
             }
         };
