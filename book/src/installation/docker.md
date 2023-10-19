@@ -34,8 +34,14 @@ docker run -d -v $(pwd)/daemon.toml:/etc/dolos/daemon.toml \
 
 Images are also tagged with the corresponding version number. It is highly recommended to use a fixed image version in production environments to avoid the effects of new features being included in each release (please remember dolos hasn't reached v1 stability guarantees).
 
-To use a versioned image, replace the `latest` tag by the desired version with the `v` prefix. For example, to use version `1.0.0`, use the following image:
+To use a versioned image, replace the `latest` tag by the desired version with the `v` prefix. For example, to use version `0.6.0`, use the following image:
 
 ```
-ghcr.io/txpipe/dolos:v1.0.0
+ghcr.io/txpipe/dolos:v0.6.0
 ```
+
+## Multiple Architectures
+
+_Dolos_ docker image is multi-arch, meaning that it can be used from different CPU architectures. We currently support `amd64` (aka `x86_64`) and `arm64`.
+
+The Docker daemon will detect your architecture and use the correct manifest to run the image. The usage procedures are the same regardless of the architecture.

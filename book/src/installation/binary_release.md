@@ -1,23 +1,10 @@
 # Binary Releases
 
-_Dolos_ can be run as a standalone executable. Follow the instructions for your particular OS / Platform to install a local copy from our Github pre-built releases.
+_Dolos_ can be run as a standalone executable. The [Github release](https://github.com/txpipe/dolos/releases/latest/) page includes the binaries for different OS and architectures. It's a self-contained, single-file binary that can be downloaded directly.
 
-## MacOS
-
-Use the following command to download and install _Dolos'_ binary release for MacOS:
+For simplicity, we also provide an install script that can be executed from your terminal to automate the installation process. This install script will only work for MacOS and Linux for either x86_64 and arm64 architecture. You can execute the install by running the following command from your terminal. You'll need curl and sudo access.
 
 ```sh
-curl --silent --location https://git.io/JD2iH | \
-    tar xz -C /tmp && mv /tmp/dolos /usr/local/bin
+curl -fsSL https://github.com/txpipe/dolos/raw/main/.github/public/install.sh -o get-dolos.sh
+sudo sh ./get-dolos.sh
 ```
-
-## GNU/Linux
-
-Use the following command to download and install _Dolos'_ binary release for GNU/Linux:
-
-```sh
-curl --silent --location https://git.io/JD2ix | \
-    tar xz -C /tmp && mv /tmp/dolos /usr/local/bin
-```
-
-Check the [latest release](https://github.com/txpipe/dolos/releases/latest) for more binary download options.
