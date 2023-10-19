@@ -11,41 +11,45 @@ jobs:
     strategy:
       matrix:
         include:
-          - release_for: Linux-GNU-amd64
+          # don't change `Linux` or `x86_64` to avoid breaking the
+          # install script because it relies on the `uname` outputs
+          - release_for: Linux-x86_64
             os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             args: "--locked --release"
-            bin: dolos
 
-          - release_for: Linux-GNU-arm64
+          # don't change `Linux` or `arm64` to avoid breaking the
+          # install script because it relies on the `uname` outputs
+          - release_for: Linux-arm64
             os: ubuntu-latest
             target: "armv7-unknown-linux-gnueabihf"
             args: "--locked --release"
-            bin: dolos
 
           - release_for: Windows-x86_64
             os: windows-latest
             target: x86_64-pc-windows-msvc
             args: "--locked --release"
-            bin: dolos.exe
+            ext: .exe
 
-          - release_for: macOS-x86_64
+          # don't change `Darwin` or `x86_64` to avoid breaking the
+          # install script because it relies on the `uname` outputs
+          - release_for: Darwin-x86_64
             os: macOS-latest
             target: x86_64-apple-darwin
             args: "--locked --release"
-            bin: dolos
 
-          - release_for: macOS-aarch64
+          # don't change `Darwin` or `arm64` to avoid breaking the
+          # install script because it relies on the `uname` outputs
+          - release_for: Darwin-arm64
             os: macOS-latest
             target: aarch64-apple-darwin
             args: "--locked --release"
-            bin: dolos
 
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.build_on }}
 
     steps:
       - name: install deps [MacOS]
-        if: matrix.os == 'macOS-latest'
+        if: matrix.build_on == 'macOS-latest'
         run: |
           brew install openssl@1.1
 
@@ -66,13 +70,13 @@ jobs:
 
       - name: rename binaries
         run: |
-          mv target/${{ matrix.target }}/release/${{ matrix.bin }} ${{ matrix.release_for }}-${{ matrix.bin }}
+          mv target/${{ matrix.target }}/release/${{ matrix.bin }} dolos-${{ matrix.release_for }}${{ matrix.ext }}
 
       - name: upload artifacts
         uses: actions/upload-artifact@v3
         with:
           name: binaries
-          path: ${{ matrix.release_for }}-${{ matrix.bin }}
+          path: dolos-${{ matrix.release_for }}${{ matrix.ext }}
 
   docker:
     runs-on: ubuntu-latest
@@ -112,6 +116,13 @@ jobs:
         with:
           name: binaries
           path: .github/image/bin
+
+      # we need to rename the artifact so that the name matches
+      # the value that Docker uses for TARGET_ARCH to keep the
+      # Dockerfile simple
+      - name: Rename artifacts
+        run: |+
+          mv .github/image/bin/dolos-Linux-x86_64 .github/image/bin/dolos-Linux-amd64
 
       - name: Build and push
         uses: docker/build-push-action@v4
