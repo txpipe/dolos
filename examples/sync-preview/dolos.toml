@@ -15,7 +15,6 @@ magic = 2
 
 [byron]
 path = "./byron.json"
-hash = "xxx"
 
 [logging]
 max_level = "debug"

@@ -604,7 +604,7 @@ dependencies = [
 
 [[package]]
 name = "dolos"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-recursion",
  "async-stream",
