@@ -1,4 +1,3 @@
-use dolos::prelude::*;
 use miette::{Context, IntoDiagnostic};
 
 #[derive(Debug, clap::Args)]

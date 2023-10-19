@@ -116,9 +116,9 @@ fn main() -> Result<()> {
 
     match args.command {
         Command::Daemon(x) => daemon::run(config, &retries, &x)?,
-        Command::Sync(x) => sync::run(&config, &retries, &x).into_diagnostic()?,
-        Command::Data(x) => data::run(&config, &x).into_diagnostic()?,
-        Command::Serve(x) => serve::run(config, &x).into_diagnostic()?,
+        Command::Sync(x) => sync::run(&config, &retries, &x)?,
+        Command::Data(x) => data::run(&config, &x)?,
+        Command::Serve(x) => serve::run(config, &x)?,
     };
 
     Ok(())
