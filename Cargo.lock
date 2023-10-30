@@ -314,6 +314,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "cbor_event"
+version = "2.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "089a0261d1bc59e54e8e11860031efd88593f0e61b921172c474f1f38c2f2d3c"
+
+[[package]]
 name = "cc"
 version = "1.0.83"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -529,6 +535,12 @@ dependencies = [
  "generic-array",
  "typenum",
 ]
+
+[[package]]
+name = "cryptoxide"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e35f15e1a0699dd988fed910dd78fdc6407f44654cd12589c91fa44ea67d9159"
 
 [[package]]
 name = "cryptoxide"
@@ -1272,7 +1284,7 @@ checksum = "c1b04fb49957986fdce4d6ee7a65027d55d4b6d2265e5848bbb507b58ccfdb6f"
 [[package]]
 name = "pallas"
 version = "0.19.1"
-source = "git+https://github.com/txpipe/pallas.git#919529eaa0432af9547aad4f6089755b68cff89d"
+source = "git+https://github.com/txpipe/pallas.git?branch=dev/byron-phase-1-validations#a9a1f305bf2335c5a7424e4d3f6a82cd25b87787"
 dependencies = [
  "pallas-addresses",
  "pallas-applying",
@@ -1289,7 +1301,7 @@ dependencies = [
 [[package]]
 name = "pallas-addresses"
 version = "0.19.1"
-source = "git+https://github.com/txpipe/pallas.git#919529eaa0432af9547aad4f6089755b68cff89d"
+source = "git+https://github.com/txpipe/pallas.git?branch=dev/byron-phase-1-validations#a9a1f305bf2335c5a7424e4d3f6a82cd25b87787"
 dependencies = [
  "base58",
  "bech32 0.9.1",
@@ -1304,8 +1316,11 @@ dependencies = [
 [[package]]
 name = "pallas-applying"
 version = "0.19.1"
-source = "git+https://github.com/txpipe/pallas.git#919529eaa0432af9547aad4f6089755b68cff89d"
+source = "git+https://github.com/txpipe/pallas.git?branch=dev/byron-phase-1-validations#a9a1f305bf2335c5a7424e4d3f6a82cd25b87787"
 dependencies = [
+ "cbor_event",
+ "cryptoxide 0.1.3",
+ "pallas-addresses",
  "pallas-codec",
  "pallas-crypto",
  "pallas-primitives",
@@ -1316,7 +1331,7 @@ dependencies = [
 [[package]]
 name = "pallas-codec"
 version = "0.19.1"
-source = "git+https://github.com/txpipe/pallas.git#919529eaa0432af9547aad4f6089755b68cff89d"
+source = "git+https://github.com/txpipe/pallas.git?branch=dev/byron-phase-1-validations#a9a1f305bf2335c5a7424e4d3f6a82cd25b87787"
 dependencies = [
  "hex",
  "minicbor",
@@ -1327,7 +1342,7 @@ dependencies = [
 [[package]]
 name = "pallas-configs"
 version = "0.19.1"
-source = "git+https://github.com/txpipe/pallas.git#919529eaa0432af9547aad4f6089755b68cff89d"
+source = "git+https://github.com/txpipe/pallas.git?branch=dev/byron-phase-1-validations#a9a1f305bf2335c5a7424e4d3f6a82cd25b87787"
 dependencies = [
  "base64 0.21.4",
  "hex",
@@ -1341,9 +1356,9 @@ dependencies = [
 [[package]]
 name = "pallas-crypto"
 version = "0.19.1"
-source = "git+https://github.com/txpipe/pallas.git#919529eaa0432af9547aad4f6089755b68cff89d"
+source = "git+https://github.com/txpipe/pallas.git?branch=dev/byron-phase-1-validations#a9a1f305bf2335c5a7424e4d3f6a82cd25b87787"
 dependencies = [
- "cryptoxide",
+ "cryptoxide 0.4.4",
  "hex",
  "pallas-codec",
  "rand_core",
@@ -1354,7 +1369,7 @@ dependencies = [
 [[package]]
 name = "pallas-network"
 version = "0.19.1"
-source = "git+https://github.com/txpipe/pallas.git#919529eaa0432af9547aad4f6089755b68cff89d"
+source = "git+https://github.com/txpipe/pallas.git?branch=dev/byron-phase-1-validations#a9a1f305bf2335c5a7424e4d3f6a82cd25b87787"
 dependencies = [
  "byteorder",
  "hex",
@@ -1369,7 +1384,7 @@ dependencies = [
 [[package]]
 name = "pallas-primitives"
 version = "0.19.1"
-source = "git+https://github.com/txpipe/pallas.git#919529eaa0432af9547aad4f6089755b68cff89d"
+source = "git+https://github.com/txpipe/pallas.git?branch=dev/byron-phase-1-validations#a9a1f305bf2335c5a7424e4d3f6a82cd25b87787"
 dependencies = [
  "base58",
  "bech32 0.9.1",
@@ -1384,7 +1399,7 @@ dependencies = [
 [[package]]
 name = "pallas-rolldb"
 version = "0.19.1"
-source = "git+https://github.com/txpipe/pallas.git#919529eaa0432af9547aad4f6089755b68cff89d"
+source = "git+https://github.com/txpipe/pallas.git?branch=dev/byron-phase-1-validations#a9a1f305bf2335c5a7424e4d3f6a82cd25b87787"
 dependencies = [
  "async-stream",
  "bincode",
@@ -1401,7 +1416,7 @@ dependencies = [
 [[package]]
 name = "pallas-traverse"
 version = "0.19.1"
-source = "git+https://github.com/txpipe/pallas.git#919529eaa0432af9547aad4f6089755b68cff89d"
+source = "git+https://github.com/txpipe/pallas.git?branch=dev/byron-phase-1-validations#a9a1f305bf2335c5a7424e4d3f6a82cd25b87787"
 dependencies = [
  "hex",
  "pallas-addresses",
@@ -1415,7 +1430,7 @@ dependencies = [
 [[package]]
 name = "pallas-utxorpc"
 version = "0.19.1"
-source = "git+https://github.com/txpipe/pallas.git#919529eaa0432af9547aad4f6089755b68cff89d"
+source = "git+https://github.com/txpipe/pallas.git?branch=dev/byron-phase-1-validations#a9a1f305bf2335c5a7424e4d3f6a82cd25b87787"
 dependencies = [
  "pallas-codec",
  "pallas-primitives",
