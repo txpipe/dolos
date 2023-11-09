@@ -1,8 +1,5 @@
 use gasket::framework::*;
-use pallas::{
-    applying::types::{ByronProtParams, Environment, MultiEraProtParams},
-    ledger::configs::byron::GenesisFile,
-};
+use pallas::ledger::configs::byron::GenesisFile;
 use tracing::info;
 
 use crate::prelude::*;
@@ -15,7 +12,7 @@ pub type UpstreamPort = gasket::messaging::tokio::InputPort<RollEvent>;
 pub struct Stage {
     ledger: ApplyDB,
     genesis: GenesisFile,
-    environment: Environment,
+    prot_magic: u32,
 
     pub upstream: UpstreamPort,
 
@@ -28,32 +25,10 @@ pub struct Stage {
 
 impl Stage {
     pub fn new(ledger: ApplyDB, genesis: GenesisFile, prot_magic: u64) -> Self {
-        let env: Environment = Environment {
-            prot_params: MultiEraProtParams::Byron(ByronProtParams {
-                min_fees_const: genesis
-                    .block_version_data
-                    .tx_fee_policy
-                    .summand
-                    .parse::<u64>()
-                    .unwrap_or_else(|err| panic!("{:?}", err)),
-                min_fees_factor: genesis
-                    .block_version_data
-                    .tx_fee_policy
-                    .multiplier
-                    .parse::<u64>()
-                    .unwrap_or_else(|err| panic!("{:?}", err)),
-                max_tx_size: genesis
-                    .block_version_data
-                    .max_tx_size
-                    .parse::<u64>()
-                    .unwrap_or_else(|err| panic!("{:?}", err)),
-            }),
-            prot_magic: prot_magic as u32,
-        };
         Self {
             ledger,
             genesis,
-            environment: env,
+            prot_magic: prot_magic as u32,
             upstream: Default::default(),
             // downstream: Default::default(),
             block_count: Default::default(),
@@ -85,7 +60,7 @@ impl gasket::framework::Worker<Stage> for Worker {
                 info!(slot, "applying block");
                 stage
                     .ledger
-                    .apply_block(cbor, Some(&stage.environment))
+                    .apply_block(cbor, &stage.prot_magic)
                     .or_panic()?;
             }
             RollEvent::Undo(slot, _, cbor) => {
