@@ -1,0 +1,427 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Byron Phase-1 Sync Footprint - Dolos</title>
+
+
+        <!-- Custom HTML head -->
+        
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" href="../highlight.css">
+        <link rel="stylesheet" href="../tomorrow-night.css">
+        <link rel="stylesheet" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+
+    </head>
+    <body class="sidebar-visible no-js">
+    <div id="body-container">
+        <!-- Provide site root to javascript -->
+        <script>
+            var path_to_root = "../";
+            var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "light";
+        </script>
+
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                var theme = localStorage.getItem('mdbook-theme');
+                var sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            var theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            var html = document.querySelector('html');
+            html.classList.remove('light')
+            html.classList.add(theme);
+            var body = document.querySelector('body');
+            body.classList.remove('no-js')
+            body.classList.add('js');
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            var body = document.querySelector('body');
+            var sidebar = null;
+            var sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            body.classList.remove('sidebar-visible');
+            body.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <div class="sidebar-scrollbox">
+                <ol class="chapter"><li class="chapter-item expanded "><a href="../introduction.html"><strong aria-hidden="true">1.</strong> Introduction</a></li><li class="chapter-item expanded "><a href="../installation/index.html"><strong aria-hidden="true">2.</strong> Installation</a></li><li><ol class="section"><li class="chapter-item expanded "><a href="../installation/binary_release.html"><strong aria-hidden="true">2.1.</strong> Binary Release</a></li><li class="chapter-item expanded "><a href="../installation/from_source.html"><strong aria-hidden="true">2.2.</strong> From Source</a></li><li class="chapter-item expanded "><a href="../installation/docker.html"><strong aria-hidden="true">2.3.</strong> Docker</a></li><li class="chapter-item expanded "><a href="../installation/kubernetes.html"><strong aria-hidden="true">2.4.</strong> Kubernetes</a></li></ol></li><li class="chapter-item expanded "><a href="../configuration/index.html"><strong aria-hidden="true">3.</strong> Configuration</a></li><li><ol class="section"><li class="chapter-item expanded "><a href="../configuration/upstream.html"><strong aria-hidden="true">3.1.</strong> Upstream</a></li><li class="chapter-item expanded "><a href="../configuration/rolldb.html"><strong aria-hidden="true">3.2.</strong> RollDB</a></li><li class="chapter-item expanded "><a href="../configuration/serve.html"><strong aria-hidden="true">3.3.</strong> Serve</a></li><li class="chapter-item expanded "><a href="../configuration/byron.html"><strong aria-hidden="true">3.4.</strong> Byron</a></li><li class="chapter-item expanded "><a href="../configuration/logging.html"><strong aria-hidden="true">3.5.</strong> Logging</a></li><li class="chapter-item expanded "><a href="../configuration/examples.html"><strong aria-hidden="true">3.6.</strong> Examples</a></li></ol></li><li class="chapter-item expanded "><a href="../running/index.html"><strong aria-hidden="true">4.</strong> Running</a></li><li><ol class="section"><li class="chapter-item expanded "><a href="../running/sync.html"><strong aria-hidden="true">4.1.</strong> Sync</a></li><li class="chapter-item expanded "><a href="../running/serve.html"><strong aria-hidden="true">4.2.</strong> Serve</a></li><li class="chapter-item expanded "><a href="../running/daemon.html"><strong aria-hidden="true">4.3.</strong> Daemon</a></li></ol></li><li class="chapter-item expanded "><a href="../api/index.html"><strong aria-hidden="true">5.</strong> API</a></li><li><ol class="section"><li class="chapter-item expanded "><a href="../api/grpc.html"><strong aria-hidden="true">5.1.</strong> gRPC</a></li><li class="chapter-item expanded "><a href="../api/ouroboros.html"><strong aria-hidden="true">5.2.</strong> Ouroboros</a></li></ol></li><li class="chapter-item expanded "><a href="../benchmarks/index.html"><strong aria-hidden="true">6.</strong> Benchmarks</a></li><li><ol class="section"><li class="chapter-item expanded "><a href="../benchmarks/long_running_june.html"><strong aria-hidden="true">6.1.</strong> Long-running operation - Jun/23</a></li><li class="chapter-item expanded "><a href="../benchmarks/long_running_october.html"><strong aria-hidden="true">6.2.</strong> Long-running operation - Oct/23</a></li><li class="chapter-item expanded "><a href="../benchmarks/byron_phase1_sync.html" class="active"><strong aria-hidden="true">6.3.</strong> Byron Phase-1 Sync Footprint</a></li></ol></li></ol>
+            </div>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle"></div>
+        </nav>
+
+        <!-- Track and set sidebar scroll position -->
+        <script>
+            var sidebarScrollbox = document.querySelector('#sidebar .sidebar-scrollbox');
+            sidebarScrollbox.addEventListener('click', function(e) {
+                if (e.target.tagName === 'A') {
+                    sessionStorage.setItem('sidebar-scroll', sidebarScrollbox.scrollTop);
+                }
+            }, { passive: true });
+            var sidebarScrollTop = sessionStorage.getItem('sidebar-scroll');
+            sessionStorage.removeItem('sidebar-scroll');
+            if (sidebarScrollTop) {
+                // preserve sidebar scroll position when navigating via links within sidebar
+                sidebarScrollbox.scrollTop = sidebarScrollTop;
+            } else {
+                // scroll sidebar to current active section when navigating via "next/previous chapter" buttons
+                var activeSection = document.querySelector('#sidebar .active');
+                if (activeSection) {
+                    activeSection.scrollIntoView({ block: 'center' });
+                }
+            }
+        </script>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">Dolos</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="byron-phase-1-sync---resource-footprint-test"><a class="header" href="#byron-phase-1-sync---resource-footprint-test">Byron Phase-1 Sync - Resource Footprint Test</a></h1>
+<p>A &quot;resource footprint&quot; test refers to a type of test designed to evaluate the amount of resources, usually memory and CPU, that a software component requires to perform a particular action.</p>
+<p>Among other things, these tests are often used to ensure that theoretical estimations of resource consumption match reality. These test are also useful as reference profiles that allow system operators to anticipate resource requirements.</p>
+<p>The goal of this particular test instance is to understand the impact of Byron Phase-1 validations on Dolos resource footprint. </p>
+<p>The data presented was gathered during a chain sync process against a single upstream Haskell node while executing Byron Phase-1 validations. The Dolos version used for this test matches the code in branch <a href="https://github.com/txpipe/dolos/tree/feat/byron-phase-1-validations">feat/byron-phase-1-validations</a></p>
+<h2 id="cpu-usage"><a class="header" href="#cpu-usage">CPU Usage</a></h2>
+<p>In this analysis we track CPU usage. It is expressed as shares of a vCPU (~core). 1 share represents 1/1000 of a vCPU. Each bucket represent the average of shares utilized by each process in a 15-minute period. The information was gathered after continuous operations throughout a 1-day period.</p>
+<div class="table-wrapper"><table><thead><tr><th>Time</th><th>CPU</th></tr></thead><tbody>
+<tr><td>2023-11-11 12:00:00</td><td>28501</td></tr>
+<tr><td>2023-11-11 12:15:00</td><td>20686</td></tr>
+<tr><td>2023-11-11 12:30:00</td><td>26710</td></tr>
+<tr><td>2023-11-11 12:45:00</td><td>31660</td></tr>
+<tr><td>2023-11-11 13:00:00</td><td>36823</td></tr>
+<tr><td>2023-11-11 13:15:00</td><td>39627</td></tr>
+<tr><td>2023-11-11 13:30:00</td><td>47347</td></tr>
+<tr><td>2023-11-11 13:45:00</td><td>45836</td></tr>
+<tr><td>2023-11-11 14:00:00</td><td>33164</td></tr>
+<tr><td>2023-11-11 14:15:00</td><td>38352</td></tr>
+<tr><td>2023-11-11 14:30:00</td><td>41195</td></tr>
+<tr><td>2023-11-11 14:45:00</td><td>48371</td></tr>
+<tr><td>2023-11-11 15:00:00</td><td>49461</td></tr>
+<tr><td>2023-11-11 15:15:00</td><td>49989</td></tr>
+<tr><td>2023-11-11 15:30:00</td><td>38401</td></tr>
+<tr><td>2023-11-11 15:45:00</td><td>8230</td></tr>
+<tr><td>2023-11-11 16:00:00</td><td>13949</td></tr>
+<tr><td>2023-11-11 16:15:00</td><td>19537</td></tr>
+<tr><td>2023-11-11 16:30:00</td><td>24954</td></tr>
+<tr><td>2023-11-11 16:45:00</td><td>28684</td></tr>
+<tr><td>2023-11-11 17:00:00</td><td>35054</td></tr>
+<tr><td>2023-11-11 17:15:00</td><td>24448</td></tr>
+<tr><td>2023-11-11 17:30:00</td><td>23852</td></tr>
+<tr><td>2023-11-11 17:45:00</td><td>29125</td></tr>
+<tr><td>2023-11-11 18:00:00</td><td>32382</td></tr>
+<tr><td>2023-11-11 18:15:00</td><td>39469</td></tr>
+<tr><td>2023-11-11 18:30:00</td><td>44484</td></tr>
+<tr><td>2023-11-11 18:45:00</td><td>48805</td></tr>
+<tr><td>2023-11-11 19:00:00</td><td>40635</td></tr>
+<tr><td>2023-11-11 19:15:00</td><td>33528</td></tr>
+<tr><td>2023-11-11 19:30:00</td><td>40810</td></tr>
+<tr><td>2023-11-11 19:45:00</td><td>46095</td></tr>
+<tr><td>2023-11-11 20:00:00</td><td>49791</td></tr>
+<tr><td>2023-11-11 20:15:00</td><td>49991</td></tr>
+<tr><td>2023-11-11 20:30:00</td><td>48287</td></tr>
+<tr><td>2023-11-11 20:45:00</td><td>49300</td></tr>
+<tr><td>2023-11-11 21:00:00</td><td>15964</td></tr>
+<tr><td>2023-11-11 21:15:00</td><td>10406</td></tr>
+<tr><td>2023-11-11 21:30:00</td><td>15918</td></tr>
+<tr><td>2023-11-11 21:45:00</td><td>19983</td></tr>
+<tr><td>2023-11-11 22:00:00</td><td>26377</td></tr>
+<tr><td>2023-11-11 22:15:00</td><td>31566</td></tr>
+<tr><td>2023-11-11 22:30:00</td><td>37046</td></tr>
+<tr><td>2023-11-11 22:45:00</td><td>29951</td></tr>
+<tr><td>2023-11-11 23:00:00</td><td>22406</td></tr>
+<tr><td>2023-11-11 23:15:00</td><td>27450</td></tr>
+<tr><td>2023-11-11 23:30:00</td><td>33162</td></tr>
+<tr><td>2023-11-11 23:45:00</td><td>38081</td></tr>
+<tr><td>2023-11-12 00:00:00</td><td>40905</td></tr>
+<tr><td>2023-11-12 00:15:00</td><td>48397</td></tr>
+<tr><td>2023-11-12 00:30:00</td><td>49994</td></tr>
+<tr><td>2023-11-12 00:45:00</td><td>37848</td></tr>
+<tr><td>2023-11-12 01:00:00</td><td>38645</td></tr>
+<tr><td>2023-11-12 01:15:00</td><td>40736</td></tr>
+<tr><td>2023-11-12 01:30:00</td><td>48010</td></tr>
+<tr><td>2023-11-12 01:45:00</td><td>49992</td></tr>
+<tr><td>2023-11-12 02:00:00</td><td>49993</td></tr>
+<tr><td>2023-11-12 02:15:00</td><td>49997</td></tr>
+<tr><td>2023-11-12 02:30:00</td><td>48944</td></tr>
+<tr><td>2023-11-12 02:45:00</td><td>43698</td></tr>
+<tr><td>2023-11-12 03:00:00</td><td>6808</td></tr>
+<tr><td>2023-11-12 03:15:00</td><td>12400</td></tr>
+<tr><td>2023-11-12 03:30:00</td><td>18093</td></tr>
+<tr><td>2023-11-12 03:45:00</td><td>21877</td></tr>
+<tr><td>2023-11-12 04:00:00</td><td>28027</td></tr>
+<tr><td>2023-11-12 04:15:00</td><td>33505</td></tr>
+<tr><td>2023-11-12 04:30:00</td><td>38642</td></tr>
+<tr><td>2023-11-12 04:45:00</td><td>26414</td></tr>
+<tr><td>2023-11-12 05:00:00</td><td>23685</td></tr>
+<tr><td>2023-11-12 05:15:00</td><td>28791</td></tr>
+<tr><td>2023-11-12 05:30:00</td><td>34754</td></tr>
+<tr><td>2023-11-12 05:45:00</td><td>40414</td></tr>
+<tr><td>2023-11-12 06:00:00</td><td>41367</td></tr>
+<tr><td>2023-11-12 06:15:00</td><td>48390</td></tr>
+<tr><td>2023-11-12 06:30:00</td><td>49436</td></tr>
+<tr><td>2023-11-12 06:45:00</td><td>38004</td></tr>
+<tr><td>2023-11-12 07:00:00</td><td>38935</td></tr>
+<tr><td>2023-11-12 07:15:00</td><td>41382</td></tr>
+<tr><td>2023-11-12 07:30:00</td><td>48339</td></tr>
+<tr><td>2023-11-12 07:45:00</td><td>49987</td></tr>
+<tr><td>2023-11-12 08:00:00</td><td>48812</td></tr>
+<tr><td>2023-11-12 08:15:00</td><td>49991</td></tr>
+<tr><td>2023-11-12 08:30:00</td><td>46078</td></tr>
+<tr><td>2023-11-12 08:45:00</td><td>6153</td></tr>
+<tr><td>2023-11-12 09:00:00</td><td>11884</td></tr>
+<tr><td>2023-11-12 09:15:00</td><td>16960</td></tr>
+<tr><td>2023-11-12 09:30:00</td><td>22209</td></tr>
+<tr><td>2023-11-12 09:45:00</td><td>25535</td></tr>
+<tr><td>2023-11-12 10:00:00</td><td>32311</td></tr>
+<tr><td>2023-11-12 10:15:00</td><td>37827</td></tr>
+<tr><td>2023-11-12 10:30:00</td><td>26411</td></tr>
+<tr><td>2023-11-12 10:45:00</td><td>23260</td></tr>
+<tr><td>2023-11-12 11:00:00</td><td>26849</td></tr>
+<tr><td>2023-11-12 11:15:00</td><td>33426</td></tr>
+<tr><td>2023-11-12 11:30:00</td><td>38271</td></tr>
+<tr><td>2023-11-12 11:45:00</td><td>43852</td></tr>
+<tr><td>2023-11-12 12:00:00</td><td>47924</td></tr>
+</tbody></table>
+</div>
+<h2 id="memory-usage"><a class="header" href="#memory-usage">Memory Usage</a></h2>
+<p>In this analysis we track memory usage. It is expressed as total amount of data (KB, MB, GB). Each bucket represent the average of memory utilized by each process in a 15-minute period. The information was gathered after continuous operations throughout a 1-day period.</p>
+<div class="table-wrapper"><table><thead><tr><th>Time</th><th>Memory</th></tr></thead><tbody>
+<tr><td>2023-11-11 12:00:00</td><td>446 MB</td></tr>
+<tr><td>2023-11-11 12:15:00</td><td>448 MB</td></tr>
+<tr><td>2023-11-11 12:30:00</td><td>452 MB</td></tr>
+<tr><td>2023-11-11 12:45:00</td><td>453 MB</td></tr>
+<tr><td>2023-11-11 13:00:00</td><td>453 MB</td></tr>
+<tr><td>2023-11-11 13:15:00</td><td>454 MB</td></tr>
+<tr><td>2023-11-11 13:30:00</td><td>433 MB</td></tr>
+<tr><td>2023-11-11 13:45:00</td><td>428 MB</td></tr>
+<tr><td>2023-11-11 14:00:00</td><td>431 MB</td></tr>
+<tr><td>2023-11-11 14:15:00</td><td>436 MB</td></tr>
+<tr><td>2023-11-11 14:30:00</td><td>442 MB</td></tr>
+<tr><td>2023-11-11 14:45:00</td><td>444 MB</td></tr>
+<tr><td>2023-11-11 15:00:00</td><td>446 MB</td></tr>
+<tr><td>2023-11-11 15:15:00</td><td>454 MB</td></tr>
+<tr><td>2023-11-11 15:30:00</td><td>460 MB</td></tr>
+<tr><td>2023-11-11 15:45:00</td><td>462 MB</td></tr>
+<tr><td>2023-11-11 16:00:00</td><td>464 MB</td></tr>
+<tr><td>2023-11-11 16:15:00</td><td>447 MB</td></tr>
+<tr><td>2023-11-11 16:30:00</td><td>452 MB</td></tr>
+<tr><td>2023-11-11 16:45:00</td><td>455 MB</td></tr>
+<tr><td>2023-11-11 17:00:00</td><td>457 MB</td></tr>
+<tr><td>2023-11-11 17:15:00</td><td>446 MB</td></tr>
+<tr><td>2023-11-11 17:30:00</td><td>447 MB</td></tr>
+<tr><td>2023-11-11 17:45:00</td><td>449 MB</td></tr>
+<tr><td>2023-11-11 18:00:00</td><td>449 MB</td></tr>
+<tr><td>2023-11-11 18:15:00</td><td>434 MB</td></tr>
+<tr><td>2023-11-11 18:30:00</td><td>434 MB</td></tr>
+<tr><td>2023-11-11 18:45:00</td><td>443 MB</td></tr>
+<tr><td>2023-11-11 19:00:00</td><td>442 MB</td></tr>
+<tr><td>2023-11-11 19:15:00</td><td>447 MB</td></tr>
+<tr><td>2023-11-11 19:30:00</td><td>453 MB</td></tr>
+<tr><td>2023-11-11 19:45:00</td><td>456 MB</td></tr>
+<tr><td>2023-11-11 20:00:00</td><td>457 MB</td></tr>
+<tr><td>2023-11-11 20:15:00</td><td>459 MB</td></tr>
+<tr><td>2023-11-11 20:30:00</td><td>460 MB</td></tr>
+<tr><td>2023-11-11 20:45:00</td><td>460 MB</td></tr>
+<tr><td>2023-11-11 21:00:00</td><td>458 MB</td></tr>
+<tr><td>2023-11-11 21:15:00</td><td>458 MB</td></tr>
+<tr><td>2023-11-11 21:30:00</td><td>460 MB</td></tr>
+<tr><td>2023-11-11 21:45:00</td><td>461 MB</td></tr>
+<tr><td>2023-11-11 22:00:00</td><td>461 MB</td></tr>
+<tr><td>2023-11-11 22:15:00</td><td>462 MB</td></tr>
+<tr><td>2023-11-11 22:30:00</td><td>431 MB</td></tr>
+<tr><td>2023-11-11 22:45:00</td><td>421 MB</td></tr>
+<tr><td>2023-11-11 23:00:00</td><td>422 MB</td></tr>
+<tr><td>2023-11-11 23:15:00</td><td>422 MB</td></tr>
+<tr><td>2023-11-11 23:30:00</td><td>423 MB</td></tr>
+<tr><td>2023-11-11 23:45:00</td><td>427 MB</td></tr>
+<tr><td>2023-11-12 00:00:00</td><td>430 MB</td></tr>
+<tr><td>2023-11-12 00:15:00</td><td>433 MB</td></tr>
+<tr><td>2023-11-12 00:30:00</td><td>442 MB</td></tr>
+<tr><td>2023-11-12 00:45:00</td><td>445 MB</td></tr>
+<tr><td>2023-11-12 01:00:00</td><td>446 MB</td></tr>
+<tr><td>2023-11-12 01:15:00</td><td>446 MB</td></tr>
+<tr><td>2023-11-12 01:30:00</td><td>448 MB</td></tr>
+<tr><td>2023-11-12 01:45:00</td><td>449 MB</td></tr>
+<tr><td>2023-11-12 02:00:00</td><td>449 MB</td></tr>
+<tr><td>2023-11-12 02:15:00</td><td>450 MB</td></tr>
+<tr><td>2023-11-12 02:30:00</td><td>450 MB</td></tr>
+<tr><td>2023-11-12 02:45:00</td><td>433 MB</td></tr>
+<tr><td>2023-11-12 03:00:00</td><td>435 MB</td></tr>
+<tr><td>2023-11-12 03:15:00</td><td>436 MB</td></tr>
+<tr><td>2023-11-12 03:30:00</td><td>436 MB</td></tr>
+<tr><td>2023-11-12 03:45:00</td><td>437 MB</td></tr>
+<tr><td>2023-11-12 04:00:00</td><td>439 MB</td></tr>
+<tr><td>2023-11-12 04:15:00</td><td>443 MB</td></tr>
+<tr><td>2023-11-12 04:30:00</td><td>454 MB</td></tr>
+<tr><td>2023-11-12 04:45:00</td><td>449 MB</td></tr>
+<tr><td>2023-11-12 05:00:00</td><td>451 MB</td></tr>
+<tr><td>2023-11-12 05:15:00</td><td>452 MB</td></tr>
+<tr><td>2023-11-12 05:30:00</td><td>453 MB</td></tr>
+<tr><td>2023-11-12 05:45:00</td><td>455 MB</td></tr>
+<tr><td>2023-11-12 06:00:00</td><td>456 MB</td></tr>
+<tr><td>2023-11-12 06:15:00</td><td>429 MB</td></tr>
+<tr><td>2023-11-12 06:30:00</td><td>437 MB</td></tr>
+<tr><td>2023-11-12 06:45:00</td><td>441 MB</td></tr>
+<tr><td>2023-11-12 07:00:00</td><td>442 MB</td></tr>
+<tr><td>2023-11-12 07:15:00</td><td>443 MB</td></tr>
+<tr><td>2023-11-12 07:30:00</td><td>444 MB</td></tr>
+<tr><td>2023-11-12 07:45:00</td><td>444 MB</td></tr>
+<tr><td>2023-11-12 08:00:00</td><td>444 MB</td></tr>
+<tr><td>2023-11-12 08:15:00</td><td>461 MB</td></tr>
+<tr><td>2023-11-12 08:30:00</td><td>458 MB</td></tr>
+<tr><td>2023-11-12 08:45:00</td><td>460 MB</td></tr>
+<tr><td>2023-11-12 09:00:00</td><td>461 MB</td></tr>
+<tr><td>2023-11-12 09:15:00</td><td>460 MB</td></tr>
+<tr><td>2023-11-12 09:30:00</td><td>461 MB</td></tr>
+<tr><td>2023-11-12 09:45:00</td><td>461 MB</td></tr>
+<tr><td>2023-11-12 10:00:00</td><td>462 MB</td></tr>
+<tr><td>2023-11-12 10:15:00</td><td>462 MB</td></tr>
+<tr><td>2023-11-12 10:30:00</td><td>448 MB</td></tr>
+<tr><td>2023-11-12 10:45:00</td><td>450 MB</td></tr>
+<tr><td>2023-11-12 11:00:00</td><td>450 MB</td></tr>
+<tr><td>2023-11-12 11:15:00</td><td>450 MB</td></tr>
+<tr><td>2023-11-12 11:30:00</td><td>450 MB</td></tr>
+<tr><td>2023-11-12 11:45:00</td><td>450 MB</td></tr>
+<tr><td>2023-11-12 12:00:00</td><td>457 MB</td></tr>
+</tbody></table>
+</div>
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../benchmarks/long_running_october.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../benchmarks/long_running_october.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+    </div>
+    </body>
+</html>
