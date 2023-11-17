@@ -1,6 +1,6 @@
 # Byron Phase-1 Sync - Resource Footprint Test
 
-A "resource footprint" test refers to a type of test that designed to evaluate the amount of resources, usually memory and CPU, that a software component requires to perform a particular action.
+A "resource footprint" test refers to a type of test designed to evaluate the amount of resources, usually memory and CPU, that a software component requires to perform a particular action.
 
 Among other things, these tests are often used to ensure that theoretical estimations of resource consumption match reality. These test are also useful as reference profiles that allow system operators to anticipate resource requirements.
 
