@@ -60,7 +60,7 @@ impl gasket::framework::Worker<Stage> for Worker {
                 info!(slot, "applying block");
                 stage
                     .ledger
-                    .apply_block(cbor, &stage.prot_magic)
+                    .apply_block(cbor, stage.prot_magic)
                     .or_panic()?;
             }
             RollEvent::Undo(slot, _, cbor) => {
