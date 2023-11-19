@@ -76,9 +76,9 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
     let resolved = resolve_inputs(&tx, &ledger)?;
 
     for (input, output) in resolved.iter() {
-        let key = MultiEraInput::from_byron(&input);
+        let key = MultiEraInput::from_byron(input);
 
-        let value = MultiEraOutput::decode(Era::Byron, &output)
+        let value = MultiEraOutput::decode(Era::Byron, output)
             .into_diagnostic()
             .context("decoding utxo cbor")?;
 
