@@ -70,7 +70,7 @@ pub fn pipeline(
     let mut roll = roll::Stage::new(wal, cursor_chain, cursor_ledger);
 
     let mut chain = chain::Stage::new(chain);
-    let mut ledger = ledger::Stage::new(ledger, genesis);
+    let mut ledger = ledger::Stage::new(ledger, genesis, config.network_magic);
 
     let (to_roll, from_pull) = gasket::messaging::tokio::mpsc_channel(50);
     pull.downstream.connect(to_roll);

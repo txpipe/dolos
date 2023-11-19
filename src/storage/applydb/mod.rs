@@ -1,6 +1,17 @@
 pub mod genesis;
 
-use pallas::{crypto::hash::Hash, ledger::traverse::MultiEraBlock};
+use pallas::{
+    applying::{
+        types::{ByronProtParams, Environment, MultiEraProtParams, UTxOs},
+        validate,
+    },
+    codec::utils::CborWrap,
+    crypto::hash::Hash,
+    ledger::{
+        primitives::byron::{Tx, TxIn, TxOut},
+        traverse::{Era, MultiEraBlock, MultiEraInput, MultiEraOutput, MultiEraTx},
+    },
+};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
@@ -8,7 +19,7 @@ use std::{
     sync::Arc,
 };
 use thiserror::Error;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use rocksdb::{Options, WriteBatch, DB};
 
@@ -34,6 +45,9 @@ pub enum Error {
 
     #[error("cbor decoding")]
     Cbor,
+
+    #[error("unimplemented validation for this era")]
+    UnimplementedEra,
 }
 
 impl From<super::kvtable::Error> for Error {
@@ -77,7 +91,7 @@ pub struct ApplyBatch<'a> {
     block_hash: BlockHash,
     utxo_inserts: HashMap<UtxoRef, UtxoBody>,
     stxi_inserts: HashMap<UtxoRef, UtxoBody>,
-    utxo_deletes: Vec<UtxoRef>,
+    utxo_deletes: HashMap<UtxoRef, UtxoBody>,
 }
 
 impl<'a> ApplyBatch<'a> {
@@ -88,12 +102,25 @@ impl<'a> ApplyBatch<'a> {
             block_hash,
             utxo_inserts: HashMap::new(),
             stxi_inserts: HashMap::new(),
-            utxo_deletes: Vec::new(),
+            utxo_deletes: HashMap::new(),
         }
     }
 
     pub fn contains_utxo(&self, tx: TxHash, output: OutputIndex) -> bool {
         self.utxo_inserts.contains_key(&UtxoRef(tx, output))
+    }
+
+    // Meant to be used to get the UTxO associated with a transaction input, assuming the current
+    // block has already been traversed, appropriately filling utxo_inserts and utxo_deletes.
+    pub fn get_same_block_utxo(&self, tx_hash: TxHash, ind: OutputIndex) -> Option<UtxoBody> {
+        // utxo_inserts contains the UTxOs produced in the current block which haven't been spent.
+        self.utxo_inserts
+            .get(&UtxoRef(tx_hash, ind))
+            // utxo_deletes contains UTxOs previously stored in the DB, which we don't care
+            // about, and UTxOs produced (and spent) by transactions in the current block,
+            // which we care about.
+            .or(self.utxo_deletes.get(&UtxoRef(tx_hash, ind)))
+            .map(Vec::<u8>::clone)
     }
 
     pub fn insert_utxo(&mut self, tx: TxHash, output: OutputIndex, body: UtxoBody) {
@@ -105,8 +132,8 @@ impl<'a> ApplyBatch<'a> {
 
         let k = UtxoRef(tx, idx);
 
-        self.stxi_inserts.insert(k.clone(), body);
-        self.utxo_deletes.push(k);
+        self.stxi_inserts.insert(k.clone(), body.clone());
+        self.utxo_deletes.insert(k.clone(), body);
     }
 
     pub fn spend_utxo_same_block(&mut self, tx: TxHash, idx: OutputIndex) {
@@ -116,8 +143,8 @@ impl<'a> ApplyBatch<'a> {
 
         let body = self.utxo_inserts.remove(&k).unwrap();
 
-        self.stxi_inserts.insert(k.clone(), body);
-        self.utxo_deletes.push(k)
+        self.stxi_inserts.insert(k.clone(), body.clone());
+        self.utxo_deletes.insert(k.clone(), body);
     }
 }
 
@@ -129,7 +156,7 @@ impl<'a> From<ApplyBatch<'a>> for WriteBatch {
             UtxoKV::stage_upsert(from.db, DBSerde(key), DBBytes(value), &mut batch);
         }
 
-        for key in from.utxo_deletes {
+        for (key, _) in from.utxo_deletes {
             UtxoKV::stage_delete(from.db, DBSerde(key), &mut batch);
         }
 
@@ -272,7 +299,7 @@ impl ApplyDB {
         Ok(dbval.map(|x| x.0))
     }
 
-    pub fn apply_block(&mut self, cbor: &[u8]) -> Result<(), Error> {
+    pub fn apply_block(&mut self, cbor: &[u8], prot_magic: &u32) -> Result<(), Error> {
         let block = MultiEraBlock::decode(cbor).map_err(|_| Error::Cbor)?;
         let slot = block.slot();
         let hash = block.hash();
@@ -305,6 +332,22 @@ impl ApplyDB {
             }
         }
 
+        for tx in txs.iter() {
+            if tx.era() == Era::Byron {
+                match self.get_inputs(tx, &batch) {
+                    Ok(inputs) => {
+                        let utxos: UTxOs = Self::mk_utxo(&inputs);
+                        let env: Environment = Self::mk_environment(&block, prot_magic)?;
+                        match validate(tx, &utxos, &env) {
+                            Ok(()) => (),
+                            Err(err) => warn!("Transaction validation failed ({:?})", err),
+                        }
+                    }
+                    Err(err) => warn!("Skipping validation ({:?})", err),
+                }
+            }
+        }
+
         let batch = WriteBatch::from(batch);
 
         self.db
@@ -312,6 +355,90 @@ impl ApplyDB {
             .map_err(|_| super::kvtable::Error::IO)?;
 
         Ok(())
+    }
+
+    fn get_inputs(
+        &self,
+        metx: &MultiEraTx,
+        batch: &ApplyBatch,
+    ) -> Result<Vec<(TxIn, TxOut)>, Error> {
+        let mut res: Vec<(TxIn, TxOut)> = Vec::new();
+        if let MultiEraTx::Byron(mtxp) = &metx {
+            let tx: &Tx = &mtxp.transaction;
+            let inputs: &Vec<TxIn> = &tx.inputs;
+            for input in inputs {
+                if let TxIn::Variant0(CborWrap((tx_hash, output_index))) = &input {
+                    let hash: TxHash = *tx_hash;
+                    let idx: OutputIndex = *output_index as u64;
+                    // The input UTxO may be in the database or in the same block.
+                    let utxo: UtxoBody = self.get_utxo(hash, idx)?.map_or(
+                        batch
+                            .get_same_block_utxo(hash, idx)
+                            .ok_or(Error::MissingUtxo(hash, idx)),
+                        Ok,
+                    )?;
+                    match MultiEraOutput::decode(Era::Byron, &utxo) {
+                        Ok(tx_out) => res.push((
+                            TxIn::Variant0(CborWrap((hash, idx as u32))),
+                            tx_out.as_byron().ok_or(Error::UnimplementedEra)?.clone(),
+                        )),
+                        Err(_) => unreachable!(),
+                    }
+                }
+            }
+        }
+        Ok(res)
+    }
+
+    fn mk_utxo<'a>(entries: &'a [(TxIn, TxOut)]) -> UTxOs<'a> {
+        let mut utxos: UTxOs<'a> = UTxOs::new();
+        for (input, output) in entries.iter() {
+            let multi_era_input: MultiEraInput = MultiEraInput::from_byron(input);
+            let multi_era_output: MultiEraOutput = MultiEraOutput::from_byron(output);
+            utxos.insert(multi_era_input, multi_era_output);
+        }
+        utxos
+    }
+
+    fn mk_environment(block: &MultiEraBlock, prot_magic: &u32) -> Result<Environment, Error> {
+        if block.era() == Era::Byron {
+            let slot: u64 = block.header().slot();
+            if slot <= 322876 {
+                // These are the genesis values.
+                Ok(Environment {
+                    prot_params: MultiEraProtParams::Byron(ByronProtParams {
+                        min_fees_const: 155381,
+                        min_fees_factor: 44,
+                        max_tx_size: 4096,
+                    }),
+                    prot_magic: *prot_magic,
+                })
+            } else if slot > 322876 && slot <= 1784895 {
+                // Block hash were the update proposal was submitted:
+                // 850805044e0df6c13ced2190db7b11489672b0225d478a35a6db71fbfb33afc0
+                Ok(Environment {
+                    prot_params: MultiEraProtParams::Byron(ByronProtParams {
+                        min_fees_const: 155381,
+                        min_fees_factor: 44,
+                        max_tx_size: 65536,
+                    }),
+                    prot_magic: *prot_magic,
+                })
+            } else {
+                // Block hash were the update proposal was submitted:
+                // d798a8d617b25fc6456ffe2d90895a2c15a7271b671dab2d18d46f3d0e4ef495
+                Ok(Environment {
+                    prot_params: MultiEraProtParams::Byron(ByronProtParams {
+                        min_fees_const: 155381,
+                        min_fees_factor: 44,
+                        max_tx_size: 8192,
+                    }),
+                    prot_magic: *prot_magic,
+                })
+            }
+        } else {
+            Err(Error::UnimplementedEra)
+        }
     }
 
     pub fn undo_block(&mut self, cbor: &[u8]) -> Result<(), Error> {
@@ -437,7 +564,7 @@ mod tests {
                 }
             }
 
-            db.apply_block(&cbor).unwrap();
+            db.apply_block(&cbor, &764824073).unwrap(); // This is mainnet's protocol magic number.
 
             for tx in block.txs() {
                 for input in tx.consumes() {

@@ -12,6 +12,7 @@ pub type UpstreamPort = gasket::messaging::tokio::InputPort<RollEvent>;
 pub struct Stage {
     ledger: ApplyDB,
     genesis: GenesisFile,
+    prot_magic: u32,
 
     pub upstream: UpstreamPort,
 
@@ -23,10 +24,11 @@ pub struct Stage {
 }
 
 impl Stage {
-    pub fn new(ledger: ApplyDB, genesis: GenesisFile) -> Self {
+    pub fn new(ledger: ApplyDB, genesis: GenesisFile, prot_magic: u64) -> Self {
         Self {
             ledger,
             genesis,
+            prot_magic: prot_magic as u32,
             upstream: Default::default(),
             // downstream: Default::default(),
             block_count: Default::default(),
@@ -34,8 +36,6 @@ impl Stage {
         }
     }
 }
-
-impl Stage {}
 
 pub struct Worker;
 
@@ -58,7 +58,10 @@ impl gasket::framework::Worker<Stage> for Worker {
         match unit {
             RollEvent::Apply(slot, _, cbor) => {
                 info!(slot, "applying block");
-                stage.ledger.apply_block(cbor).or_panic()?;
+                stage
+                    .ledger
+                    .apply_block(cbor, &stage.prot_magic)
+                    .or_panic()?;
             }
             RollEvent::Undo(slot, _, cbor) => {
                 info!(slot, "undoing block");
