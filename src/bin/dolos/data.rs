@@ -2,11 +2,9 @@ use std::path::Path;
 
 use miette::IntoDiagnostic;
 
-use pallas::{
-    ledger::traverse::{tx, MultiEraBlock},
-    storage::rolldb::chain,
-};
+use pallas::{ledger::traverse::MultiEraBlock, storage::rolldb::chain};
 
+#[allow(dead_code)]
 fn dump_txs(chain: &chain::Store) -> miette::Result<()> {
     for header in chain.crawl() {
         let (slot, hash) = header.into_diagnostic()?;
