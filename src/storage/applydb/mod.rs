@@ -2,7 +2,7 @@ pub mod genesis;
 
 use pallas::{
     applying::{
-        types::{ByronProtParams, Environment, MultiEraProtParams, UTxOs},
+        types::{ByronProtParams, Environment, FeePolicy, MultiEraProtParams, UTxOs},
         validate,
     },
     codec::utils::CborWrap,
@@ -299,7 +299,12 @@ impl ApplyDB {
         Ok(dbval.map(|x| x.0))
     }
 
-    pub fn apply_block(&mut self, cbor: &[u8], prot_magic: &u32) -> Result<(), Error> {
+    pub fn apply_block(
+        &mut self,
+        cbor: &[u8],
+        prot_magic: &u32,
+        network_id: &u8,
+    ) -> Result<(), Error> {
         let block = MultiEraBlock::decode(cbor).map_err(|_| Error::Cbor)?;
         let slot = block.slot();
         let hash = block.hash();
@@ -333,18 +338,22 @@ impl ApplyDB {
         }
 
         for tx in txs.iter() {
-            if tx.era() == Era::Byron {
-                match self.get_inputs(tx, &batch) {
-                    Ok(inputs) => {
-                        let utxos: UTxOs = Self::mk_utxo(&inputs);
-                        let env: Environment = Self::mk_environment(&block, prot_magic)?;
-                        match validate(tx, &utxos, &env) {
-                            Ok(()) => (),
-                            Err(err) => warn!("Transaction validation failed ({:?})", err),
+            match tx.era() {
+                Era::Byron | Era::Shelley | Era::Allegra | Era::Mary => {
+                    match self.get_inputs(tx, &batch) {
+                        Ok(inputs) => {
+                            let utxos: UTxOs = Self::mk_utxo(&inputs);
+                            let env: Environment =
+                                Self::mk_environment(&block, prot_magic, network_id)?;
+                            match validate(tx, &utxos, &env) {
+                                Ok(()) => (),
+                                Err(err) => warn!("Transaction validation failed ({:?})", err),
+                            }
                         }
+                        Err(err) => warn!("Skipping validation ({:?})", err),
                     }
-                    Err(err) => warn!("Skipping validation ({:?})", err),
                 }
+                _ => (),
             }
         }
 
@@ -400,40 +409,56 @@ impl ApplyDB {
         utxos
     }
 
-    fn mk_environment(block: &MultiEraBlock, prot_magic: &u32) -> Result<Environment, Error> {
+    fn mk_environment(
+        block: &MultiEraBlock,
+        prot_magic: &u32,
+        network_id: &u8,
+    ) -> Result<Environment, Error> {
         if block.era() == Era::Byron {
             let slot: u64 = block.header().slot();
             if slot <= 322876 {
                 // These are the genesis values.
                 Ok(Environment {
                     prot_params: MultiEraProtParams::Byron(ByronProtParams {
-                        min_fees_const: 155381,
-                        min_fees_factor: 44,
+                        fee_policy: FeePolicy {
+                            summand: 155381,
+                            multiplier: 44,
+                        },
                         max_tx_size: 4096,
                     }),
                     prot_magic: *prot_magic,
+                    block_slot: slot,
+                    network_id: *network_id,
                 })
             } else if slot > 322876 && slot <= 1784895 {
                 // Block hash were the update proposal was submitted:
                 // 850805044e0df6c13ced2190db7b11489672b0225d478a35a6db71fbfb33afc0
                 Ok(Environment {
                     prot_params: MultiEraProtParams::Byron(ByronProtParams {
-                        min_fees_const: 155381,
-                        min_fees_factor: 44,
+                        fee_policy: FeePolicy {
+                            summand: 155381,
+                            multiplier: 44,
+                        },
                         max_tx_size: 65536,
                     }),
                     prot_magic: *prot_magic,
+                    block_slot: slot,
+                    network_id: *network_id,
                 })
             } else {
                 // Block hash were the update proposal was submitted:
                 // d798a8d617b25fc6456ffe2d90895a2c15a7271b671dab2d18d46f3d0e4ef495
                 Ok(Environment {
                     prot_params: MultiEraProtParams::Byron(ByronProtParams {
-                        min_fees_const: 155381,
-                        min_fees_factor: 44,
+                        fee_policy: FeePolicy {
+                            summand: 155381,
+                            multiplier: 44,
+                        },
                         max_tx_size: 8192,
                     }),
                     prot_magic: *prot_magic,
+                    block_slot: slot,
+                    network_id: *network_id,
                 })
             }
         } else {
@@ -564,7 +589,9 @@ mod tests {
                 }
             }
 
-            db.apply_block(&cbor, &764824073).unwrap(); // This is mainnet's protocol magic number.
+            db.apply_block(&cbor, &764824073, &1).unwrap();
+            //                                 ^ mainnet network ID
+            //                     ^ mainnet protocol magic number
 
             for tx in block.txs() {
                 for input in tx.consumes() {

@@ -13,6 +13,7 @@ pub struct Stage {
     ledger: ApplyDB,
     genesis: GenesisFile,
     prot_magic: u32,
+    network_id: u8,
 
     pub upstream: UpstreamPort,
 
@@ -24,13 +25,13 @@ pub struct Stage {
 }
 
 impl Stage {
-    pub fn new(ledger: ApplyDB, genesis: GenesisFile, prot_magic: u64) -> Self {
+    pub fn new(ledger: ApplyDB, genesis: GenesisFile, prot_magic: u64, network_id: u8) -> Self {
         Self {
             ledger,
             genesis,
             prot_magic: prot_magic as u32,
+            network_id,
             upstream: Default::default(),
-            // downstream: Default::default(),
             block_count: Default::default(),
             wal_count: Default::default(),
         }
@@ -60,7 +61,7 @@ impl gasket::framework::Worker<Stage> for Worker {
                 info!(slot, "applying block");
                 stage
                     .ledger
-                    .apply_block(cbor, &stage.prot_magic)
+                    .apply_block(cbor, &stage.prot_magic, &stage.network_id)
                     .or_panic()?;
             }
             RollEvent::Undo(slot, _, cbor) => {
