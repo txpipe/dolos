@@ -4,6 +4,7 @@ use serde::Deserialize;
 use serde_with::{serde_as, DisplayFromStr};
 use std::path::PathBuf;
 
+mod bootstrap;
 mod common;
 mod daemon;
 mod data;
@@ -14,6 +15,7 @@ mod sync;
 enum Command {
     Daemon(daemon::Args),
     Sync(sync::Args),
+    Bootstrap(bootstrap::Args),
     Data(data::Args),
     Serve(serve::Args),
 }
@@ -98,6 +100,7 @@ fn main() -> Result<()> {
     match args.command {
         Command::Daemon(x) => daemon::run(config, &x)?,
         Command::Sync(x) => sync::run(&config, &x)?,
+        Command::Bootstrap(x) => bootstrap::run(&config, &x)?,
         Command::Data(x) => data::run(&config, &x)?,
         Command::Serve(x) => serve::run(config, &x)?,
     };

@@ -33,6 +33,16 @@ pub fn open_data_stores(config: &crate::Config) -> Result<Stores, Error> {
     Ok((wal, chain, ledger))
 }
 
+pub fn destroy_data_stores(config: &crate::Config) -> Result<(), Error> {
+    let rolldb_path = define_rolldb_path(config);
+
+    wal::Store::destroy(rolldb_path.join("wal")).map_err(Error::storage)?;
+    chain::Store::destroy(rolldb_path.join("chain")).map_err(Error::storage)?;
+    ApplyDB::destroy(rolldb_path.join("ledger")).map_err(Error::storage)?;
+
+    Ok(())
+}
+
 pub fn setup_tracing(config: &LoggingConfig) -> miette::Result<()> {
     let level = config.max_level.unwrap_or(Level::INFO);
 
