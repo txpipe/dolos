@@ -210,7 +210,10 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
 
     if !args.retain_snapshot {
         info!("deleting downloaded snapshot");
-        std::fs::remove_dir_all(Path::new(&args.download_dir));
+
+        std::fs::remove_dir_all(Path::new(&args.download_dir))
+            .into_diagnostic()
+            .context("removing downloaded snapshot")?;
     }
 
     Ok(())
