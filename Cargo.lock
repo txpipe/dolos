@@ -234,6 +234,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d86b93f97252c47b41663388e6d155714a9d0c398b99f1005cbc5f978b29f445"
 
 [[package]]
+name = "binary-layout"
+version = "3.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aa4c433028853a658404bdc739b91a0017133e65967fc3ecfdce71f6bdaea83e"
+dependencies = [
+ "doc-comment",
+ "paste",
+]
+
+[[package]]
 name = "bincode"
 version = "1.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -262,6 +272,24 @@ dependencies = [
  "shlex",
  "syn 2.0.39",
 ]
+
+[[package]]
+name = "bip39"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "93f2635620bf0b9d4576eb7bb9a38a55df78bd1205d26fa994b25911a69f212f"
+dependencies = [
+ "bitcoin_hashes",
+ "rand_core",
+ "serde",
+ "unicode-normalization",
+]
+
+[[package]]
+name = "bitcoin_hashes"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "90064b8dee6815a6470d60bad07bbbaee885c0e12d04177138fa3291a01b7bc4"
 
 [[package]]
 name = "bitflags"
@@ -592,6 +620,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "doc-comment"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fea41bba32d969b513997752735605054bc0dfa92b4c56bf1189f2e174be7a10"
+
+[[package]]
 name = "dolos"
 version = "0.6.0"
 dependencies = [
@@ -623,6 +657,15 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "utxorpc",
+]
+
+[[package]]
+name = "ed25519-bip32"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cb588f93c0d91b2f668849fd6d030cddb0b2e31f105963be189da5acdf492a21"
+dependencies = [
+ "cryptoxide",
 ]
 
 [[package]]
@@ -1272,24 +1315,27 @@ checksum = "c1b04fb49957986fdce4d6ee7a65027d55d4b6d2265e5848bbb507b58ccfdb6f"
 [[package]]
 name = "pallas"
 version = "0.20.0"
-source = "git+https://github.com/txpipe/pallas.git?branch=dev/shelleyMA-phase-1-validations#10f8679b0033890d948f6d42af15ff9beb605416"
+source = "git+https://github.com/txpipe/pallas.git#49238890e0c0e998475ac4189b55fbfbb1237556"
 dependencies = [
  "pallas-addresses",
  "pallas-applying",
  "pallas-codec",
  "pallas-configs",
  "pallas-crypto",
+ "pallas-hardano",
  "pallas-network",
  "pallas-primitives",
  "pallas-rolldb",
  "pallas-traverse",
+ "pallas-txbuilder",
  "pallas-utxorpc",
+ "pallas-wallet",
 ]
 
 [[package]]
 name = "pallas-addresses"
 version = "0.20.0"
-source = "git+https://github.com/txpipe/pallas.git?branch=dev/shelleyMA-phase-1-validations#10f8679b0033890d948f6d42af15ff9beb605416"
+source = "git+https://github.com/txpipe/pallas.git#49238890e0c0e998475ac4189b55fbfbb1237556"
 dependencies = [
  "base58",
  "bech32 0.9.1",
@@ -1304,7 +1350,7 @@ dependencies = [
 [[package]]
 name = "pallas-applying"
 version = "0.20.0"
-source = "git+https://github.com/txpipe/pallas.git?branch=dev/shelleyMA-phase-1-validations#10f8679b0033890d948f6d42af15ff9beb605416"
+source = "git+https://github.com/txpipe/pallas.git#49238890e0c0e998475ac4189b55fbfbb1237556"
 dependencies = [
  "pallas-addresses",
  "pallas-codec",
@@ -1317,7 +1363,7 @@ dependencies = [
 [[package]]
 name = "pallas-codec"
 version = "0.20.0"
-source = "git+https://github.com/txpipe/pallas.git?branch=dev/shelleyMA-phase-1-validations#10f8679b0033890d948f6d42af15ff9beb605416"
+source = "git+https://github.com/txpipe/pallas.git#49238890e0c0e998475ac4189b55fbfbb1237556"
 dependencies = [
  "hex",
  "minicbor",
@@ -1328,7 +1374,7 @@ dependencies = [
 [[package]]
 name = "pallas-configs"
 version = "0.20.0"
-source = "git+https://github.com/txpipe/pallas.git?branch=dev/shelleyMA-phase-1-validations#10f8679b0033890d948f6d42af15ff9beb605416"
+source = "git+https://github.com/txpipe/pallas.git#49238890e0c0e998475ac4189b55fbfbb1237556"
 dependencies = [
  "base64 0.21.5",
  "hex",
@@ -1342,7 +1388,7 @@ dependencies = [
 [[package]]
 name = "pallas-crypto"
 version = "0.20.0"
-source = "git+https://github.com/txpipe/pallas.git?branch=dev/shelleyMA-phase-1-validations#10f8679b0033890d948f6d42af15ff9beb605416"
+source = "git+https://github.com/txpipe/pallas.git#49238890e0c0e998475ac4189b55fbfbb1237556"
 dependencies = [
  "cryptoxide",
  "hex",
@@ -1353,9 +1399,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "pallas-hardano"
+version = "0.20.0"
+source = "git+https://github.com/txpipe/pallas.git#49238890e0c0e998475ac4189b55fbfbb1237556"
+dependencies = [
+ "binary-layout",
+ "tap",
+ "tracing",
+]
+
+[[package]]
 name = "pallas-network"
 version = "0.20.0"
-source = "git+https://github.com/txpipe/pallas.git?branch=dev/shelleyMA-phase-1-validations#10f8679b0033890d948f6d42af15ff9beb605416"
+source = "git+https://github.com/txpipe/pallas.git#49238890e0c0e998475ac4189b55fbfbb1237556"
 dependencies = [
  "byteorder",
  "hex",
@@ -1370,7 +1426,7 @@ dependencies = [
 [[package]]
 name = "pallas-primitives"
 version = "0.20.0"
-source = "git+https://github.com/txpipe/pallas.git?branch=dev/shelleyMA-phase-1-validations#10f8679b0033890d948f6d42af15ff9beb605416"
+source = "git+https://github.com/txpipe/pallas.git#49238890e0c0e998475ac4189b55fbfbb1237556"
 dependencies = [
  "base58",
  "bech32 0.9.1",
@@ -1385,7 +1441,7 @@ dependencies = [
 [[package]]
 name = "pallas-rolldb"
 version = "0.20.0"
-source = "git+https://github.com/txpipe/pallas.git?branch=dev/shelleyMA-phase-1-validations#10f8679b0033890d948f6d42af15ff9beb605416"
+source = "git+https://github.com/txpipe/pallas.git#49238890e0c0e998475ac4189b55fbfbb1237556"
 dependencies = [
  "async-stream",
  "bincode",
@@ -1402,7 +1458,7 @@ dependencies = [
 [[package]]
 name = "pallas-traverse"
 version = "0.20.0"
-source = "git+https://github.com/txpipe/pallas.git?branch=dev/shelleyMA-phase-1-validations#10f8679b0033890d948f6d42af15ff9beb605416"
+source = "git+https://github.com/txpipe/pallas.git#49238890e0c0e998475ac4189b55fbfbb1237556"
 dependencies = [
  "hex",
  "pallas-addresses",
@@ -1414,15 +1470,50 @@ dependencies = [
 ]
 
 [[package]]
+name = "pallas-txbuilder"
+version = "0.20.0"
+source = "git+https://github.com/txpipe/pallas.git#49238890e0c0e998475ac4189b55fbfbb1237556"
+dependencies = [
+ "hex",
+ "pallas-addresses",
+ "pallas-codec",
+ "pallas-crypto",
+ "pallas-primitives",
+ "pallas-traverse",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "pallas-utxorpc"
 version = "0.20.0"
-source = "git+https://github.com/txpipe/pallas.git?branch=dev/shelleyMA-phase-1-validations#10f8679b0033890d948f6d42af15ff9beb605416"
+source = "git+https://github.com/txpipe/pallas.git#49238890e0c0e998475ac4189b55fbfbb1237556"
 dependencies = [
  "pallas-codec",
  "pallas-primitives",
  "pallas-traverse",
  "utxorpc",
 ]
+
+[[package]]
+name = "pallas-wallet"
+version = "0.20.0"
+source = "git+https://github.com/txpipe/pallas.git#49238890e0c0e998475ac4189b55fbfbb1237556"
+dependencies = [
+ "bech32 0.9.1",
+ "bip39",
+ "cryptoxide",
+ "ed25519-bip32",
+ "pallas-crypto",
+ "thiserror",
+]
+
+[[package]]
+name = "paste"
+version = "1.0.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "de3145af08024dea9fa9914f381a17b8fc6034dfb00f3a84013f7ff43f29ed4c"
 
 [[package]]
 name = "pathdiff"
@@ -2002,6 +2093,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2047c6ded9c721764247e62cd3b03c09ffc529b2ba5b10ec482ae507a4a70160"
 
 [[package]]
+name = "tap"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "55937e1799185b12863d447f42597ed69d9928686b8d88a1df17376a097d8369"
+
+[[package]]
 name = "tempfile"
 version = "3.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2093,6 +2190,21 @@ checksum = "4ad70d68dba9e1f8aceda7aa6711965dfec1cac869f311a51bd08b3a2ccbce20"
 dependencies = [
  "time-core",
 ]
+
+[[package]]
+name = "tinyvec"
+version = "1.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "87cc5ceb3875bb20c2890005a4e226a4651264a5c75edb2421b52861a0a0cb50"
+dependencies = [
+ "tinyvec_macros",
+]
+
+[[package]]
+name = "tinyvec_macros"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tokio"
@@ -2358,6 +2470,15 @@ name = "unicode-linebreak"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3b09c83c3c29d37506a3e260c08c03743a6bb66a9cd432c6934ab501a190571f"
+
+[[package]]
+name = "unicode-normalization"
+version = "0.1.22"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c5713f0fc4b5db668a2ac63cdb7bb4469d8c9fed047b1d0292cc7b0ce2ba921"
+dependencies = [
+ "tinyvec",
+]
 
 [[package]]
 name = "unicode-width"
