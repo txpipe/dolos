@@ -12,7 +12,7 @@ authors = ["Santiago Carmuega <santiago@carmuega.me>"]
 
 
 [dependencies]
-pallas = { git = "https://github.com/txpipe/pallas.git", branch = "dev/shelleyMA-phase-1-validations", features = ["unstable"] }
+pallas = { git = "https://github.com/txpipe/pallas.git", branch = "feat/shelleyMA-phase-1-validations", features = ["unstable"] }
 
 gasket = { version = "^0.5", features = ["derive"] }
 # gasket = { path = "../../construkts/gasket-rs/gasket", features = ["derive"] }
