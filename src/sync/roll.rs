@@ -128,6 +128,7 @@ impl gasket::framework::Worker<Stage> for Worker {
     async fn execute(&mut self, unit: &PullEvent, stage: &mut Stage) -> Result<(), WorkerError> {
         update_store(unit, &mut stage.store)?;
 
+        debug!(start = self.last_seq_chain, "catching up chain downstream");
         self.last_seq_chain = catchup_downstream(
             &stage.store,
             self.last_seq_chain,
@@ -136,6 +137,7 @@ impl gasket::framework::Worker<Stage> for Worker {
         .await
         .or_panic()?;
 
+        debug!(start = self.last_seq_chain, "catching up ledger downstream");
         self.last_seq_ledger = catchup_downstream(
             &stage.store,
             self.last_seq_ledger,
@@ -145,7 +147,7 @@ impl gasket::framework::Worker<Stage> for Worker {
         .or_panic()?;
 
         // TODO: don't do this while doing full sync
-        stage.store.prune_wal().or_panic()?;
+        //stage.store.prune_wal().or_panic()?;
 
         Ok(())
     }
