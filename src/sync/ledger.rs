@@ -1,9 +1,53 @@
+use std::borrow::Cow;
+use std::collections::HashMap;
+
 use gasket::framework::*;
+use pallas::applying::{validate, UTxOs};
 use pallas::ledger::configs::byron::GenesisFile;
-use tracing::info;
+use pallas::ledger::traverse::{Era, MultiEraBlock, MultiEraInput, MultiEraOutput};
+use tracing::{info, warn};
 
 use crate::prelude::*;
 use crate::storage::applydb::ApplyDB;
+
+pub fn execute_phase1_validation(
+    ledger: &ApplyDB,
+    block: &MultiEraBlock<'_>,
+) -> Result<(), WorkerError> {
+    let mut utxos = HashMap::new();
+    ledger
+        .resolve_inputs_for_block(&block, &mut utxos)
+        .or_panic()?;
+
+    let mut utxos2 = UTxOs::new();
+
+    for (ref_, output) in utxos.iter() {
+        let txin = pallas::ledger::primitives::byron::TxIn::Variant0(
+            pallas::codec::utils::CborWrap((ref_.0.clone(), ref_.1 as u32)),
+        );
+
+        let key = MultiEraInput::Byron(
+            <Box<Cow<'_, pallas::ledger::primitives::byron::TxIn>>>::from(Cow::Owned(txin)),
+        );
+
+        let era = Era::try_from(output.0).or_panic()?;
+        let value = MultiEraOutput::decode(era, &output.1).or_panic()?;
+
+        utxos2.insert(key, value);
+    }
+
+    let env = ledger.get_active_pparams(block.slot()).or_panic()?;
+
+    for tx in block.txs().iter() {
+        let res = validate(&tx, &utxos2, &env);
+
+        if let Err(err) = res {
+            warn!(?err, "validation error");
+        }
+    }
+
+    Ok(())
+}
 
 pub type UpstreamPort = gasket::messaging::tokio::InputPort<RollEvent>;
 
@@ -28,14 +72,11 @@ impl Stage {
             ledger,
             genesis,
             upstream: Default::default(),
-            // downstream: Default::default(),
             block_count: Default::default(),
             wal_count: Default::default(),
         }
     }
 }
-
-impl Stage {}
 
 pub struct Worker;
 
@@ -58,7 +99,12 @@ impl gasket::framework::Worker<Stage> for Worker {
         match unit {
             RollEvent::Apply(slot, _, cbor) => {
                 info!(slot, "applying block");
-                stage.ledger.apply_block(cbor).or_panic()?;
+
+                let block = MultiEraBlock::decode(cbor).or_panic()?;
+
+                execute_phase1_validation(&stage.ledger, &block)?;
+
+                stage.ledger.apply_block(&block).or_panic()?;
             }
             RollEvent::Undo(slot, _, cbor) => {
                 info!(slot, "undoing block");

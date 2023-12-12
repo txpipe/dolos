@@ -17,6 +17,7 @@
   - [Sync](./running/sync.md)
   - [Serve](./running/serve.md)
   - [Daemon](./running/daemon.md)
+  - [Eval](./running/eval.md)
 - [API](./api/README.md)
   - [gRPC](./api/grpc.md)
   - [Ouroboros](./api/ouroboros.md)
