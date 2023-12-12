@@ -262,10 +262,14 @@ impl<'a> From<UndoBatch<'a>> for WriteBatch {
 #[derive(Clone)]
 pub struct ApplyDB {
     db: Arc<DB>,
+
+    // TODO: should be extracted from genesis config data
+    prot_magic: u32,
+    network_id: u8,
 }
 
 impl ApplyDB {
-    pub fn open(path: impl AsRef<Path>) -> Result<Self, Error> {
+    pub fn open(path: impl AsRef<Path>, prot_magic: u32, network_id: u8) -> Result<Self, Error> {
         let mut opts = Options::default();
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
@@ -277,7 +281,11 @@ impl ApplyDB {
         )
         .map_err(|_| super::kvtable::Error::IO)?;
 
-        Ok(Self { db: Arc::new(db) })
+        Ok(Self {
+            db: Arc::new(db),
+            prot_magic,
+            network_id,
+        })
     }
 
     pub fn is_empty(&self) -> bool {
@@ -301,13 +309,51 @@ impl ApplyDB {
         Ok(dbval.map(|x| x.0))
     }
 
-    pub fn apply_block(
-        &mut self,
-        cbor: &[u8],
-        prot_magic: &u32,
-        network_id: &u8,
+    pub fn resolve_inputs_for_tx(
+        &self,
+        tx: &MultiEraTx<'_>,
+        utxos: &mut HashMap<UtxoRef, UtxoBody>,
     ) -> Result<(), Error> {
-        let block = MultiEraBlock::decode(cbor).map_err(|_| Error::Cbor)?;
+        for consumed in tx.consumes() {
+            let hash = *consumed.hash();
+            let idx = consumed.index();
+
+            let utxo_ref = UtxoRef(hash, idx);
+
+            if !utxos.contains_key(&utxo_ref) {
+                let utxo = self
+                    .get_utxo(hash, idx)?
+                    .ok_or(Error::MissingUtxo(hash, idx))?;
+
+                utxos.insert(utxo_ref, utxo);
+            };
+        }
+
+        Ok(())
+    }
+
+    pub fn resolve_inputs_for_block(
+        &self,
+        block: &MultiEraBlock<'_>,
+        utxos: &mut HashMap<UtxoRef, Vec<u8>>,
+    ) -> Result<(), Error> {
+        let txs = block.txs();
+
+        for tx in txs.iter() {
+            for (idx, produced) in tx.produces() {
+                let body = produced.encode();
+                utxos.insert(UtxoRef(tx.hash(), idx as u64), body);
+            }
+        }
+
+        for tx in txs.iter() {
+            self.resolve_inputs_for_tx(tx, utxos)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn apply_block(&mut self, block: &MultiEraBlock<'_>) -> Result<(), Error> {
         let slot = block.slot();
         let hash = block.hash();
 
@@ -336,23 +382,6 @@ impl ApplyDB {
 
                     batch.spend_utxo(hash, idx, utxo);
                 };
-            }
-        }
-
-        // TODO: move out of storage
-        for tx in txs.iter() {
-            if tx.era() == Era::Byron {
-                match self.get_inputs(tx, &batch) {
-                    Ok(inputs) => {
-                        let utxos: UTxOs = Self::mk_utxo(&inputs);
-                        let env: Environment = Self::mk_environment(block.slot(), prot_magic)?;
-                        match validate(tx, &utxos, &env) {
-                            Ok(()) => (),
-                            Err(err) => warn!("Transaction validation failed ({:?})", err),
-                        }
-                    }
-                    Err(err) => warn!("Skipping validation ({:?})", err),
-                }
             }
         }
 
@@ -408,58 +437,51 @@ impl ApplyDB {
         utxos
     }
 
-    fn mk_environment(
-        block: &MultiEraBlock,
-        prot_magic: &u32,
-        network_id: &u8,
-    ) -> Result<Environment, Error> {
-        if block.era() == Era::Byron {
-            let slot: u64 = block.header().slot();
-            if slot <= 322876 {
-                // These are the genesis values.
-                Ok(Environment {
-                    prot_params: MultiEraProtParams::Byron(ByronProtParams {
-                        fee_policy: FeePolicy {
-                            summand: 155381,
-                            multiplier: 44,
-                        },
-                        max_tx_size: 4096,
-                    }),
-                    prot_magic: *prot_magic,
-                    block_slot: slot,
-                    network_id: *network_id,
-                })
-            } else if slot > 322876 && slot <= 1784895 {
-                // Block hash were the update proposal was submitted:
-                // 850805044e0df6c13ced2190db7b11489672b0225d478a35a6db71fbfb33afc0
-                Ok(Environment {
-                    prot_params: MultiEraProtParams::Byron(ByronProtParams {
-                        fee_policy: FeePolicy {
-                            summand: 155381,
-                            multiplier: 44,
-                        },
-                        max_tx_size: 65536,
-                    }),
-                    prot_magic: *prot_magic,
-                    block_slot: slot,
-                    network_id: *network_id,
-                })
-            } else {
-                // Block hash were the update proposal was submitted:
-                // d798a8d617b25fc6456ffe2d90895a2c15a7271b671dab2d18d46f3d0e4ef495
-                Ok(Environment {
-                    prot_params: MultiEraProtParams::Byron(ByronProtParams {
-                        fee_policy: FeePolicy {
-                            summand: 155381,
-                            multiplier: 44,
-                        },
-                        max_tx_size: 8192,
-                    }),
-                    prot_magic: *prot_magic,
-                    block_slot: slot,
-                    network_id: *network_id,
-                })
-            }
+    pub fn get_active_pparams(&self, block_slot: u64) -> Result<Environment, Error> {
+        if block_slot <= 322876 {
+            // These are the genesis values.
+            Ok(Environment {
+                prot_params: MultiEraProtParams::Byron(ByronProtParams {
+                    fee_policy: FeePolicy {
+                        summand: 155381,
+                        multiplier: 44,
+                    },
+                    max_tx_size: 4096,
+                }),
+                block_slot,
+                prot_magic: self.prot_magic,
+                network_id: self.network_id,
+            })
+        } else if block_slot > 322876 && block_slot <= 1784895 {
+            // Block hash were the update proposal was submitted:
+            // 850805044e0df6c13ced2190db7b11489672b0225d478a35a6db71fbfb33afc0
+            Ok(Environment {
+                prot_params: MultiEraProtParams::Byron(ByronProtParams {
+                    fee_policy: FeePolicy {
+                        summand: 155381,
+                        multiplier: 44,
+                    },
+                    max_tx_size: 65536,
+                }),
+                block_slot,
+                prot_magic: self.prot_magic,
+                network_id: self.network_id,
+            })
+        } else if block_slot < 4492800 {
+            // Block hash were the update proposal was submitted:
+            // d798a8d617b25fc6456ffe2d90895a2c15a7271b671dab2d18d46f3d0e4ef495
+            Ok(Environment {
+                prot_params: MultiEraProtParams::Byron(ByronProtParams {
+                    fee_policy: FeePolicy {
+                        summand: 155381,
+                        multiplier: 44,
+                    },
+                    max_tx_size: 8192,
+                }),
+                block_slot,
+                prot_magic: self.prot_magic,
+                network_id: self.network_id,
+            })
         } else {
             Err(Error::UnimplementedEra)
         }
@@ -551,7 +573,7 @@ mod tests {
 
     pub fn with_tmp_db(op: fn(db: ApplyDB) -> ()) {
         let path = tempfile::tempdir().unwrap().into_path();
-        let db = ApplyDB::open(path.clone()).unwrap();
+        let db = ApplyDB::open(path.clone(), 764824073, 1).unwrap();
 
         op(db);
 
@@ -588,9 +610,7 @@ mod tests {
                 }
             }
 
-            db.apply_block(&cbor, &764824073, &1).unwrap();
-            //                                 ^ mainnet network ID
-            //                     ^ mainnet protocol magic number
+            db.apply_block(&block).unwrap();
 
             for tx in block.txs() {
                 for input in tx.consumes() {

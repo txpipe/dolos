@@ -19,9 +19,6 @@ pub struct Args {
     era: u16,
 
     #[arg(long, short)]
-    magic: u32,
-
-    #[arg(long, short)]
     slot: u64,
 }
 
@@ -85,7 +82,8 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
         utxos.insert(key, value);
     }
 
-    let env: Environment = ApplyDB::mk_environment(args.slot, args.magic)
+    let env: Environment = ledger
+        .get_active_pparams(args.slot)
         .into_diagnostic()
         .context("resolving pparams")?;
 

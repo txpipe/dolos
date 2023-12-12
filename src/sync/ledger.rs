@@ -1,9 +1,47 @@
+use std::borrow::Cow;
+use std::collections::HashMap;
+
 use gasket::framework::*;
+use pallas::applying::{validate, UTxOs};
 use pallas::ledger::configs::byron::GenesisFile;
-use tracing::info;
+use pallas::ledger::traverse::{MultiEraBlock, MultiEraInput, MultiEraOutput};
+use tracing::{info, warn};
 
 use crate::prelude::*;
-use crate::storage::applydb::ApplyDB;
+use crate::storage::applydb::{ApplyDB, UtxoRef};
+
+pub fn execute_phase1_validation(
+    config: &super::Config,
+    ledger: &ApplyDB,
+    block: &MultiEraBlock<'_>,
+    utxos: &HashMap<UtxoRef, UtxoBody>,
+) -> Result<(), WorkerError> {
+    let mut utxos2 = UTxOs::new();
+
+    for (ref_, output) in utxos.iter() {
+        let txin = pallas::ledger::primitives::byron::TxIn::Variant0(
+            pallas::codec::utils::CborWrap((ref_.0.clone(), ref_.1 as u32)),
+        );
+
+        let key = MultiEraInput::Byron(
+            <Box<Cow<'_, pallas::ledger::primitives::byron::TxIn>>>::from(Cow::Owned(txin)),
+        );
+        let value = MultiEraOutput::decode(output.0, &output.1).or_panic()?;
+
+        utxos2.insert(key, value);
+    }
+
+    let env = ledger.get_active_pparams(block.slot()).or_panic()?;
+
+    for tx in block.txs().iter() {
+        let res = validate(&tx, &utxos2, &env);
+        if let Err(err) = res {
+            warn!(?err, "validation error");
+        }
+    }
+
+    Ok(())
+}
 
 pub type UpstreamPort = gasket::messaging::tokio::InputPort<RollEvent>;
 
@@ -12,8 +50,6 @@ pub type UpstreamPort = gasket::messaging::tokio::InputPort<RollEvent>;
 pub struct Stage {
     ledger: ApplyDB,
     genesis: GenesisFile,
-    prot_magic: u32,
-    network_id: u8,
 
     pub upstream: UpstreamPort,
 
@@ -25,12 +61,10 @@ pub struct Stage {
 }
 
 impl Stage {
-    pub fn new(ledger: ApplyDB, genesis: GenesisFile, prot_magic: u64, network_id: u8) -> Self {
+    pub fn new(ledger: ApplyDB, genesis: GenesisFile) -> Self {
         Self {
             ledger,
             genesis,
-            prot_magic: prot_magic as u32,
-            network_id,
             upstream: Default::default(),
             block_count: Default::default(),
             wal_count: Default::default(),
@@ -59,10 +93,15 @@ impl gasket::framework::Worker<Stage> for Worker {
         match unit {
             RollEvent::Apply(slot, _, cbor) => {
                 info!(slot, "applying block");
+
+                let block = MultiEraBlock::decode(cbor).or_panic()?;
+
+                let mut resolved_inputs = HashMap::new();
                 stage
                     .ledger
-                    .apply_block(cbor, &stage.prot_magic, &stage.network_id)
-                    .or_panic()?;
+                    .resolve_inputs_for_block(&block, &mut resolved_inputs);
+
+                stage.ledger.apply_block(&block).or_panic()?;
             }
             RollEvent::Undo(slot, _, cbor) => {
                 info!(slot, "undoing block");
