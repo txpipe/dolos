@@ -179,7 +179,7 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
             .context("adding chain entry")?;
 
         ledger
-            .apply_block(&block)
+            .apply_block(&blockd)
             .into_diagnostic()
             .context("applyting ledger block")?;
     }

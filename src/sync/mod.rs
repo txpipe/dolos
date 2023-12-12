@@ -17,8 +17,9 @@ pub mod roll;
 
 #[derive(Deserialize)]
 pub struct Config {
-    peer_address: String,
-    network_magic: u64,
+    pub peer_address: String,
+    pub network_magic: u64,
+    pub network_id: u8,
 }
 
 fn define_gasket_policy(config: &Option<gasket::retries::Policy>) -> gasket::runtime::Policy {
@@ -70,7 +71,7 @@ pub fn pipeline(
     let mut roll = roll::Stage::new(wal, cursor_chain, cursor_ledger);
 
     let mut chain = chain::Stage::new(chain);
-    let mut ledger = ledger::Stage::new(ledger, genesis, config.network_magic);
+    let mut ledger = ledger::Stage::new(ledger, genesis);
 
     let (to_roll, from_pull) = gasket::messaging::tokio::mpsc_channel(50);
     pull.downstream.connect(to_roll);

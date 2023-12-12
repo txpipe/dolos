@@ -1,14 +1,9 @@
 use miette::{Context, IntoDiagnostic};
 use pallas::{
     applying::{validate, Environment, UTxOs},
-    ledger::{
-        primitives::byron::TxIn,
-        traverse::{Era, MultiEraInput, MultiEraOutput, MultiEraTx},
-    },
+    ledger::traverse::{Era, MultiEraInput, MultiEraOutput},
 };
-use std::path::PathBuf;
-
-use dolos::storage::applydb::ApplyDB;
+use std::{borrow::Cow, collections::HashMap, path::PathBuf};
 
 #[derive(Debug, clap::Args)]
 pub struct Args {
@@ -19,38 +14,7 @@ pub struct Args {
     era: u16,
 
     #[arg(long, short)]
-    magic: u32,
-
-    #[arg(long, short)]
     slot: u64,
-}
-
-type ResolveInputs = Vec<(TxIn, Vec<u8>)>;
-
-pub fn resolve_inputs(tx: &MultiEraTx<'_>, ledger: &ApplyDB) -> miette::Result<ResolveInputs> {
-    let mut set = vec![];
-
-    for input in tx.inputs() {
-        let hash = input.hash();
-        let idx = input.index();
-
-        let bytes = ledger
-            .get_utxo(*hash, idx)
-            .into_diagnostic()
-            .context("fetching utxo from ledger")?
-            .ok_or(miette::miette!("utxo not found"))?;
-
-        //TODO: allow to pass extra utxos manually, to mimic what happens when
-        // consuming utxos from the same block;
-
-        let txin = pallas::ledger::primitives::byron::TxIn::Variant0(
-            pallas::codec::utils::CborWrap((*hash, idx as u32)),
-        );
-
-        set.push((txin, bytes));
-    }
-
-    Ok(set)
 }
 
 pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
@@ -72,24 +36,40 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
         .into_diagnostic()
         .context("decoding tx cbor")?;
 
-    let mut utxos: UTxOs = UTxOs::new();
-    let resolved = resolve_inputs(&tx, &ledger)?;
+    let mut utxos = HashMap::new();
+    ledger
+        .resolve_inputs_for_tx(&tx, &mut utxos)
+        .into_diagnostic()
+        .context("resolving tx inputs")?;
 
-    for (input, output) in resolved.iter() {
-        let key = MultiEraInput::from_byron(input);
+    let mut utxos2 = UTxOs::new();
 
-        let value = MultiEraOutput::decode(Era::Byron, output)
+    for (ref_, output) in utxos.iter() {
+        let txin = pallas::ledger::primitives::byron::TxIn::Variant0(
+            pallas::codec::utils::CborWrap((ref_.0.clone(), ref_.1 as u32)),
+        );
+
+        let key = MultiEraInput::Byron(
+            <Box<Cow<'_, pallas::ledger::primitives::byron::TxIn>>>::from(Cow::Owned(txin)),
+        );
+
+        let era = Era::try_from(output.0)
             .into_diagnostic()
-            .context("decoding utxo cbor")?;
+            .context("parsing era")?;
 
-        utxos.insert(key, value);
+        let value = MultiEraOutput::decode(era, &output.1)
+            .into_diagnostic()
+            .context("decoding utxo")?;
+
+        utxos2.insert(key, value);
     }
 
-    let env: Environment = ApplyDB::mk_environment(args.slot, args.magic)
+    let env: Environment = ledger
+        .get_active_pparams(args.slot)
         .into_diagnostic()
         .context("resolving pparams")?;
 
-    validate(&tx, &utxos, &env).unwrap();
+    validate(&tx, &utxos2, &env).unwrap();
 
     Ok(())
 }
