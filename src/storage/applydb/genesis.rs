@@ -6,7 +6,7 @@ use tracing::info;
 
 use crate::{
     prelude::*,
-    storage::kvtable::{DBBytes, DBSerde, KVTable},
+    storage::kvtable::{DBSerde, KVTable},
 };
 
 use super::{ApplyDB, UtxoKV, UtxoRef};
@@ -21,14 +21,14 @@ fn build_byron_txout(addr: ByronAddress, amount: u64) -> TxOut {
     }
 }
 
-fn genesis_utxo_to_kv(utxo: GenesisUtxo) -> Result<(DBSerde<UtxoRef>, DBBytes), Error> {
+fn genesis_utxo_to_kv(utxo: GenesisUtxo) -> Result<(DBSerde<UtxoRef>, DBSerde<UtxoBody>), Error> {
     let (tx, addr, amount) = utxo;
 
     let key = DBSerde(UtxoRef(tx, 0));
 
     let txout = build_byron_txout(addr, amount);
     let txout = pallas::codec::minicbor::to_vec(txout).map_err(Error::config)?;
-    let value = DBBytes(txout);
+    let value = DBSerde((0u16, txout));
 
     Ok((key, value))
 }
@@ -64,10 +64,12 @@ mod tests {
     fn assert_genesis_utxo_exists(db: &ApplyDB, tx_hex: &str, addr_base58: &str, amount: u64) {
         let tx = Hash::<32>::from_str(tx_hex).unwrap();
 
-        let cbor = db.get_utxo(tx, 0).unwrap();
+        let utxo_body = db.get_utxo(tx, 0).unwrap();
 
-        assert!(cbor.is_some(), "utxo not found");
-        let cbor = cbor.unwrap();
+        assert!(utxo_body.is_some(), "utxo not found");
+        let (era, cbor) = utxo_body.unwrap();
+
+        assert_eq!(era, 0);
 
         let txout: Result<pallas::ledger::primitives::byron::TxOut, _> =
             pallas::codec::minicbor::decode(&cbor);

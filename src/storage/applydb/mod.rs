@@ -1,16 +1,9 @@
 pub mod genesis;
 
 use pallas::{
-    applying::{
-        types::{ByronProtParams, Environment, FeePolicy, MultiEraProtParams, UTxOs},
-        validate,
-    },
-    codec::utils::CborWrap,
+    applying::types::{ByronProtParams, Environment, FeePolicy, MultiEraProtParams},
     crypto::hash::Hash,
-    ledger::{
-        primitives::byron::{Tx, TxIn, TxOut},
-        traverse::{Era, MultiEraBlock, MultiEraInput, MultiEraOutput, MultiEraTx},
-    },
+    ledger::traverse::{MultiEraBlock, MultiEraTx},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -19,7 +12,7 @@ use std::{
     sync::Arc,
 };
 use thiserror::Error;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 use rocksdb::{Options, WriteBatch, DB};
 
@@ -29,7 +22,7 @@ use super::kvtable::*;
 
 type TxHash = Hash<32>;
 type OutputIndex = u64;
-type UtxoBody = Vec<u8>;
+type UtxoBody = (u16, Vec<u8>);
 type BlockSlot = u64;
 
 #[derive(Error, Debug)]
@@ -61,14 +54,14 @@ pub struct UtxoRef(pub TxHash, pub OutputIndex);
 
 pub struct UtxoKV;
 
-impl KVTable<DBSerde<UtxoRef>, DBBytes> for UtxoKV {
+impl KVTable<DBSerde<UtxoRef>, DBSerde<UtxoBody>> for UtxoKV {
     const CF_NAME: &'static str = "UtxoKV";
 }
 
 // Spent transaction inputs
 pub struct StxiKV;
 
-impl KVTable<DBSerde<UtxoRef>, DBBytes> for StxiKV {
+impl KVTable<DBSerde<UtxoRef>, DBSerde<UtxoBody>> for StxiKV {
     const CF_NAME: &'static str = "StxiKV";
 }
 
@@ -122,7 +115,7 @@ impl<'a> ApplyBatch<'a> {
             // about, and UTxOs produced (and spent) by transactions in the current block,
             // which we care about.
             .or(self.utxo_deletes.get(&UtxoRef(tx_hash, ind)))
-            .map(Vec::<u8>::clone)
+            .map(Clone::clone)
     }
 
     pub fn insert_utxo(&mut self, tx: TxHash, output: OutputIndex, body: UtxoBody) {
@@ -155,7 +148,7 @@ impl<'a> From<ApplyBatch<'a>> for WriteBatch {
         let mut batch = WriteBatch::default();
 
         for (key, value) in from.utxo_inserts {
-            UtxoKV::stage_upsert(from.db, DBSerde(key), DBBytes(value), &mut batch);
+            UtxoKV::stage_upsert(from.db, DBSerde(key), DBSerde(value), &mut batch);
         }
 
         for (key, _) in from.utxo_deletes {
@@ -163,7 +156,7 @@ impl<'a> From<ApplyBatch<'a>> for WriteBatch {
         }
 
         for (key, value) in from.stxi_inserts {
-            StxiKV::stage_upsert(from.db, DBSerde(key), DBBytes(value), &mut batch);
+            StxiKV::stage_upsert(from.db, DBSerde(key), DBSerde(value), &mut batch);
         }
 
         let k = DBInt(from.block_slot);
@@ -241,7 +234,7 @@ impl<'a> From<UndoBatch<'a>> for WriteBatch {
         let mut batch = WriteBatch::default();
 
         for (key, value) in from.utxo_recovery {
-            UtxoKV::stage_upsert(from.db, DBSerde(key), DBBytes(value), &mut batch);
+            UtxoKV::stage_upsert(from.db, DBSerde(key), DBSerde(value), &mut batch);
         }
 
         for key in from.utxo_deletes {
@@ -335,14 +328,15 @@ impl ApplyDB {
     pub fn resolve_inputs_for_block(
         &self,
         block: &MultiEraBlock<'_>,
-        utxos: &mut HashMap<UtxoRef, Vec<u8>>,
+        utxos: &mut HashMap<UtxoRef, UtxoBody>,
     ) -> Result<(), Error> {
         let txs = block.txs();
 
         for tx in txs.iter() {
             for (idx, produced) in tx.produces() {
                 let body = produced.encode();
-                utxos.insert(UtxoRef(tx.hash(), idx as u64), body);
+                let era = tx.era().into();
+                utxos.insert(UtxoRef(tx.hash(), idx as u64), (era, body));
             }
         }
 
@@ -364,7 +358,8 @@ impl ApplyDB {
         for tx in txs.iter() {
             for (idx, produced) in tx.produces() {
                 let body = produced.encode();
-                batch.insert_utxo(tx.hash(), idx as u64, body);
+                let era = tx.era().into();
+                batch.insert_utxo(tx.hash(), idx as u64, (era, body));
             }
         }
 
@@ -392,49 +387,6 @@ impl ApplyDB {
             .map_err(|_| super::kvtable::Error::IO)?;
 
         Ok(())
-    }
-
-    fn get_inputs(
-        &self,
-        metx: &MultiEraTx,
-        batch: &ApplyBatch,
-    ) -> Result<Vec<(TxIn, TxOut)>, Error> {
-        let mut res: Vec<(TxIn, TxOut)> = Vec::new();
-        if let MultiEraTx::Byron(mtxp) = &metx {
-            let tx: &Tx = &mtxp.transaction;
-            let inputs: &Vec<TxIn> = &tx.inputs;
-            for input in inputs {
-                if let TxIn::Variant0(CborWrap((tx_hash, output_index))) = &input {
-                    let hash: TxHash = *tx_hash;
-                    let idx: OutputIndex = *output_index as u64;
-                    // The input UTxO may be in the database or in the same block.
-                    let utxo: UtxoBody = self.get_utxo(hash, idx)?.map_or(
-                        batch
-                            .get_same_block_utxo(hash, idx)
-                            .ok_or(Error::MissingUtxo(hash, idx)),
-                        Ok,
-                    )?;
-                    match MultiEraOutput::decode(Era::Byron, &utxo) {
-                        Ok(tx_out) => res.push((
-                            TxIn::Variant0(CborWrap((hash, idx as u32))),
-                            tx_out.as_byron().ok_or(Error::UnimplementedEra)?.clone(),
-                        )),
-                        Err(_) => unreachable!(),
-                    }
-                }
-            }
-        }
-        Ok(res)
-    }
-
-    fn mk_utxo<'a>(entries: &'a [(TxIn, TxOut)]) -> UTxOs<'a> {
-        let mut utxos: UTxOs<'a> = UTxOs::new();
-        for (input, output) in entries.iter() {
-            let multi_era_input: MultiEraInput = MultiEraInput::from_byron(input);
-            let multi_era_output: MultiEraOutput = MultiEraOutput::from_byron(output);
-            utxos.insert(multi_era_input, multi_era_output);
-        }
-        utxos
     }
 
     pub fn get_active_pparams(&self, block_slot: u64) -> Result<Environment, Error> {
@@ -545,7 +497,7 @@ impl ApplyDB {
         UtxoKV::stage_upsert(
             &self.db,
             DBSerde(UtxoRef(hash, index)),
-            DBBytes(vec![]),
+            DBSerde((1, vec![])),
             &mut batch,
         );
 
@@ -559,7 +511,7 @@ impl ApplyDB {
         StxiKV::stage_upsert(
             &self.db,
             DBSerde(UtxoRef(hash, index)),
-            DBBytes(vec![]),
+            DBSerde((1, vec![])),
             &mut batch,
         );
 

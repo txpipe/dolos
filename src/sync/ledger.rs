@@ -4,18 +4,21 @@ use std::collections::HashMap;
 use gasket::framework::*;
 use pallas::applying::{validate, UTxOs};
 use pallas::ledger::configs::byron::GenesisFile;
-use pallas::ledger::traverse::{MultiEraBlock, MultiEraInput, MultiEraOutput};
+use pallas::ledger::traverse::{Era, MultiEraBlock, MultiEraInput, MultiEraOutput};
 use tracing::{info, warn};
 
 use crate::prelude::*;
-use crate::storage::applydb::{ApplyDB, UtxoRef};
+use crate::storage::applydb::ApplyDB;
 
 pub fn execute_phase1_validation(
-    config: &super::Config,
     ledger: &ApplyDB,
     block: &MultiEraBlock<'_>,
-    utxos: &HashMap<UtxoRef, UtxoBody>,
 ) -> Result<(), WorkerError> {
+    let mut utxos = HashMap::new();
+    ledger
+        .resolve_inputs_for_block(&block, &mut utxos)
+        .or_panic()?;
+
     let mut utxos2 = UTxOs::new();
 
     for (ref_, output) in utxos.iter() {
@@ -26,7 +29,9 @@ pub fn execute_phase1_validation(
         let key = MultiEraInput::Byron(
             <Box<Cow<'_, pallas::ledger::primitives::byron::TxIn>>>::from(Cow::Owned(txin)),
         );
-        let value = MultiEraOutput::decode(output.0, &output.1).or_panic()?;
+
+        let era = Era::try_from(output.0).or_panic()?;
+        let value = MultiEraOutput::decode(era, &output.1).or_panic()?;
 
         utxos2.insert(key, value);
     }
@@ -35,6 +40,7 @@ pub fn execute_phase1_validation(
 
     for tx in block.txs().iter() {
         let res = validate(&tx, &utxos2, &env);
+
         if let Err(err) = res {
             warn!(?err, "validation error");
         }
@@ -96,10 +102,7 @@ impl gasket::framework::Worker<Stage> for Worker {
 
                 let block = MultiEraBlock::decode(cbor).or_panic()?;
 
-                let mut resolved_inputs = HashMap::new();
-                stage
-                    .ledger
-                    .resolve_inputs_for_block(&block, &mut resolved_inputs);
+                execute_phase1_validation(&stage.ledger, &block)?;
 
                 stage.ledger.apply_block(&block).or_panic()?;
             }
