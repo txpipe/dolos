@@ -17,8 +17,9 @@ pub mod roll;
 
 #[derive(Deserialize)]
 pub struct Config {
-    peer_address: String,
-    network_magic: u64,
+    pub peer_address: String,
+    pub network_magic: u64,
+    pub network_id: u8,
 }
 
 fn define_gasket_policy(config: &Option<gasket::retries::Policy>) -> gasket::runtime::Policy {

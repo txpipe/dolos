@@ -1,6 +1,10 @@
 pub mod genesis;
 
-use pallas::{crypto::hash::Hash, ledger::traverse::MultiEraBlock};
+use pallas::{
+    applying::types::{ByronProtParams, Environment, FeePolicy, MultiEraProtParams},
+    crypto::hash::Hash,
+    ledger::traverse::{MultiEraBlock, MultiEraTx},
+};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
@@ -18,7 +22,7 @@ use super::kvtable::*;
 
 type TxHash = Hash<32>;
 type OutputIndex = u64;
-type UtxoBody = Vec<u8>;
+type UtxoBody = (u16, Vec<u8>);
 type BlockSlot = u64;
 
 #[derive(Error, Debug)]
@@ -34,6 +38,9 @@ pub enum Error {
 
     #[error("cbor decoding")]
     Cbor,
+
+    #[error("unimplemented validation for this era")]
+    UnimplementedEra,
 }
 
 impl From<super::kvtable::Error> for Error {
@@ -47,14 +54,14 @@ pub struct UtxoRef(pub TxHash, pub OutputIndex);
 
 pub struct UtxoKV;
 
-impl KVTable<DBSerde<UtxoRef>, DBBytes> for UtxoKV {
+impl KVTable<DBSerde<UtxoRef>, DBSerde<UtxoBody>> for UtxoKV {
     const CF_NAME: &'static str = "UtxoKV";
 }
 
 // Spent transaction inputs
 pub struct StxiKV;
 
-impl KVTable<DBSerde<UtxoRef>, DBBytes> for StxiKV {
+impl KVTable<DBSerde<UtxoRef>, DBSerde<UtxoBody>> for StxiKV {
     const CF_NAME: &'static str = "StxiKV";
 }
 
@@ -77,7 +84,7 @@ pub struct ApplyBatch<'a> {
     block_hash: BlockHash,
     utxo_inserts: HashMap<UtxoRef, UtxoBody>,
     stxi_inserts: HashMap<UtxoRef, UtxoBody>,
-    utxo_deletes: Vec<UtxoRef>,
+    utxo_deletes: HashMap<UtxoRef, UtxoBody>,
 }
 
 impl<'a> ApplyBatch<'a> {
@@ -88,12 +95,27 @@ impl<'a> ApplyBatch<'a> {
             block_hash,
             utxo_inserts: HashMap::new(),
             stxi_inserts: HashMap::new(),
-            utxo_deletes: Vec::new(),
+            utxo_deletes: HashMap::new(),
         }
     }
 
     pub fn contains_utxo(&self, tx: TxHash, output: OutputIndex) -> bool {
         self.utxo_inserts.contains_key(&UtxoRef(tx, output))
+    }
+
+    // Meant to be used to get the UTxO associated with a transaction input,
+    // assuming the current block has already been traversed, appropriately
+    // filling utxo_inserts and utxo_deletes.
+    pub fn get_same_block_utxo(&self, tx_hash: TxHash, ind: OutputIndex) -> Option<UtxoBody> {
+        // utxo_inserts contains the UTxOs produced in the current block which haven't
+        // been spent.
+        self.utxo_inserts
+            .get(&UtxoRef(tx_hash, ind))
+            // utxo_deletes contains UTxOs previously stored in the DB, which we don't care
+            // about, and UTxOs produced (and spent) by transactions in the current block,
+            // which we care about.
+            .or(self.utxo_deletes.get(&UtxoRef(tx_hash, ind)))
+            .map(Clone::clone)
     }
 
     pub fn insert_utxo(&mut self, tx: TxHash, output: OutputIndex, body: UtxoBody) {
@@ -105,8 +127,8 @@ impl<'a> ApplyBatch<'a> {
 
         let k = UtxoRef(tx, idx);
 
-        self.stxi_inserts.insert(k.clone(), body);
-        self.utxo_deletes.push(k);
+        self.stxi_inserts.insert(k.clone(), body.clone());
+        self.utxo_deletes.insert(k.clone(), body);
     }
 
     pub fn spend_utxo_same_block(&mut self, tx: TxHash, idx: OutputIndex) {
@@ -116,8 +138,8 @@ impl<'a> ApplyBatch<'a> {
 
         let body = self.utxo_inserts.remove(&k).unwrap();
 
-        self.stxi_inserts.insert(k.clone(), body);
-        self.utxo_deletes.push(k)
+        self.stxi_inserts.insert(k.clone(), body.clone());
+        self.utxo_deletes.insert(k.clone(), body);
     }
 }
 
@@ -126,15 +148,15 @@ impl<'a> From<ApplyBatch<'a>> for WriteBatch {
         let mut batch = WriteBatch::default();
 
         for (key, value) in from.utxo_inserts {
-            UtxoKV::stage_upsert(from.db, DBSerde(key), DBBytes(value), &mut batch);
+            UtxoKV::stage_upsert(from.db, DBSerde(key), DBSerde(value), &mut batch);
         }
 
-        for key in from.utxo_deletes {
+        for (key, _) in from.utxo_deletes {
             UtxoKV::stage_delete(from.db, DBSerde(key), &mut batch);
         }
 
         for (key, value) in from.stxi_inserts {
-            StxiKV::stage_upsert(from.db, DBSerde(key), DBBytes(value), &mut batch);
+            StxiKV::stage_upsert(from.db, DBSerde(key), DBSerde(value), &mut batch);
         }
 
         let k = DBInt(from.block_slot);
@@ -212,7 +234,7 @@ impl<'a> From<UndoBatch<'a>> for WriteBatch {
         let mut batch = WriteBatch::default();
 
         for (key, value) in from.utxo_recovery {
-            UtxoKV::stage_upsert(from.db, DBSerde(key), DBBytes(value), &mut batch);
+            UtxoKV::stage_upsert(from.db, DBSerde(key), DBSerde(value), &mut batch);
         }
 
         for key in from.utxo_deletes {
@@ -233,10 +255,14 @@ impl<'a> From<UndoBatch<'a>> for WriteBatch {
 #[derive(Clone)]
 pub struct ApplyDB {
     db: Arc<DB>,
+
+    // TODO: should be extracted from genesis config data
+    prot_magic: u32,
+    network_id: u8,
 }
 
 impl ApplyDB {
-    pub fn open(path: impl AsRef<Path>) -> Result<Self, Error> {
+    pub fn open(path: impl AsRef<Path>, prot_magic: u32, network_id: u8) -> Result<Self, Error> {
         let mut opts = Options::default();
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
@@ -248,7 +274,11 @@ impl ApplyDB {
         )
         .map_err(|_| super::kvtable::Error::IO)?;
 
-        Ok(Self { db: Arc::new(db) })
+        Ok(Self {
+            db: Arc::new(db),
+            prot_magic,
+            network_id,
+        })
     }
 
     pub fn is_empty(&self) -> bool {
@@ -272,8 +302,52 @@ impl ApplyDB {
         Ok(dbval.map(|x| x.0))
     }
 
-    pub fn apply_block(&mut self, cbor: &[u8]) -> Result<(), Error> {
-        let block = MultiEraBlock::decode(cbor).map_err(|_| Error::Cbor)?;
+    pub fn resolve_inputs_for_tx(
+        &self,
+        tx: &MultiEraTx<'_>,
+        utxos: &mut HashMap<UtxoRef, UtxoBody>,
+    ) -> Result<(), Error> {
+        for consumed in tx.consumes() {
+            let hash = *consumed.hash();
+            let idx = consumed.index();
+
+            let utxo_ref = UtxoRef(hash, idx);
+
+            if !utxos.contains_key(&utxo_ref) {
+                let utxo = self
+                    .get_utxo(hash, idx)?
+                    .ok_or(Error::MissingUtxo(hash, idx))?;
+
+                utxos.insert(utxo_ref, utxo);
+            };
+        }
+
+        Ok(())
+    }
+
+    pub fn resolve_inputs_for_block(
+        &self,
+        block: &MultiEraBlock<'_>,
+        utxos: &mut HashMap<UtxoRef, UtxoBody>,
+    ) -> Result<(), Error> {
+        let txs = block.txs();
+
+        for tx in txs.iter() {
+            for (idx, produced) in tx.produces() {
+                let body = produced.encode();
+                let era = tx.era().into();
+                utxos.insert(UtxoRef(tx.hash(), idx as u64), (era, body));
+            }
+        }
+
+        for tx in txs.iter() {
+            self.resolve_inputs_for_tx(tx, utxos)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn apply_block(&mut self, block: &MultiEraBlock<'_>) -> Result<(), Error> {
         let slot = block.slot();
         let hash = block.hash();
 
@@ -284,7 +358,8 @@ impl ApplyDB {
         for tx in txs.iter() {
             for (idx, produced) in tx.produces() {
                 let body = produced.encode();
-                batch.insert_utxo(tx.hash(), idx as u64, body);
+                let era = tx.era().into();
+                batch.insert_utxo(tx.hash(), idx as u64, (era, body));
             }
         }
 
@@ -312,6 +387,56 @@ impl ApplyDB {
             .map_err(|_| super::kvtable::Error::IO)?;
 
         Ok(())
+    }
+
+    pub fn get_active_pparams(&self, block_slot: u64) -> Result<Environment, Error> {
+        if block_slot <= 322876 {
+            // These are the genesis values.
+            Ok(Environment {
+                prot_params: MultiEraProtParams::Byron(ByronProtParams {
+                    fee_policy: FeePolicy {
+                        summand: 155381,
+                        multiplier: 44,
+                    },
+                    max_tx_size: 4096,
+                }),
+                block_slot,
+                prot_magic: self.prot_magic,
+                network_id: self.network_id,
+            })
+        } else if block_slot > 322876 && block_slot <= 1784895 {
+            // Block hash were the update proposal was submitted:
+            // 850805044e0df6c13ced2190db7b11489672b0225d478a35a6db71fbfb33afc0
+            Ok(Environment {
+                prot_params: MultiEraProtParams::Byron(ByronProtParams {
+                    fee_policy: FeePolicy {
+                        summand: 155381,
+                        multiplier: 44,
+                    },
+                    max_tx_size: 65536,
+                }),
+                block_slot,
+                prot_magic: self.prot_magic,
+                network_id: self.network_id,
+            })
+        } else if block_slot < 4492800 {
+            // Block hash were the update proposal was submitted:
+            // d798a8d617b25fc6456ffe2d90895a2c15a7271b671dab2d18d46f3d0e4ef495
+            Ok(Environment {
+                prot_params: MultiEraProtParams::Byron(ByronProtParams {
+                    fee_policy: FeePolicy {
+                        summand: 155381,
+                        multiplier: 44,
+                    },
+                    max_tx_size: 8192,
+                }),
+                block_slot,
+                prot_magic: self.prot_magic,
+                network_id: self.network_id,
+            })
+        } else {
+            Err(Error::UnimplementedEra)
+        }
     }
 
     pub fn undo_block(&mut self, cbor: &[u8]) -> Result<(), Error> {
@@ -372,7 +497,7 @@ impl ApplyDB {
         UtxoKV::stage_upsert(
             &self.db,
             DBSerde(UtxoRef(hash, index)),
-            DBBytes(vec![]),
+            DBSerde((1, vec![])),
             &mut batch,
         );
 
@@ -386,7 +511,7 @@ impl ApplyDB {
         StxiKV::stage_upsert(
             &self.db,
             DBSerde(UtxoRef(hash, index)),
-            DBBytes(vec![]),
+            DBSerde((1, vec![])),
             &mut batch,
         );
 
@@ -400,7 +525,7 @@ mod tests {
 
     pub fn with_tmp_db(op: fn(db: ApplyDB) -> ()) {
         let path = tempfile::tempdir().unwrap().into_path();
-        let db = ApplyDB::open(path.clone()).unwrap();
+        let db = ApplyDB::open(path.clone(), 764824073, 1).unwrap();
 
         op(db);
 
@@ -437,7 +562,7 @@ mod tests {
                 }
             }
 
-            db.apply_block(&cbor).unwrap();
+            db.apply_block(&block).unwrap();
 
             for tx in block.txs() {
                 for input in tx.consumes() {

@@ -8,6 +8,7 @@ mod bootstrap;
 mod common;
 mod daemon;
 mod data;
+mod eval;
 mod serve;
 mod sync;
 
@@ -18,6 +19,7 @@ enum Command {
     Bootstrap(bootstrap::Args),
     Data(data::Args),
     Serve(serve::Args),
+    Eval(eval::Args),
 }
 
 #[derive(Debug, Parser)]
@@ -102,6 +104,7 @@ fn main() -> Result<()> {
         Command::Bootstrap(x) => bootstrap::run(&config, &x)?,
         Command::Data(x) => data::run(&config, &x)?,
         Command::Serve(x) => serve::run(config, &x)?,
+        Command::Eval(x) => eval::run(&config, &x)?,
     };
 
     Ok(())
