@@ -110,10 +110,12 @@ impl<'a> ApplyBatch<'a> {
         self.utxo_inserts.contains_key(&UtxoRef(tx, output))
     }
 
-    // Meant to be used to get the UTxO associated with a transaction input, assuming the current
-    // block has already been traversed, appropriately filling utxo_inserts and utxo_deletes.
+    // Meant to be used to get the UTxO associated with a transaction input,
+    // assuming the current block has already been traversed, appropriately
+    // filling utxo_inserts and utxo_deletes.
     pub fn get_same_block_utxo(&self, tx_hash: TxHash, ind: OutputIndex) -> Option<UtxoBody> {
-        // utxo_inserts contains the UTxOs produced in the current block which haven't been spent.
+        // utxo_inserts contains the UTxOs produced in the current block which haven't
+        // been spent.
         self.utxo_inserts
             .get(&UtxoRef(tx_hash, ind))
             // utxo_deletes contains UTxOs previously stored in the DB, which we don't care
@@ -337,23 +339,20 @@ impl ApplyDB {
             }
         }
 
+        // TODO: move out of storage
         for tx in txs.iter() {
-            match tx.era() {
-                Era::Byron | Era::Shelley | Era::Allegra | Era::Mary => {
-                    match self.get_inputs(tx, &batch) {
-                        Ok(inputs) => {
-                            let utxos: UTxOs = Self::mk_utxo(&inputs);
-                            let env: Environment =
-                                Self::mk_environment(&block, prot_magic, network_id)?;
-                            match validate(tx, &utxos, &env) {
-                                Ok(()) => (),
-                                Err(err) => warn!("Transaction validation failed ({:?})", err),
-                            }
+            if tx.era() == Era::Byron {
+                match self.get_inputs(tx, &batch) {
+                    Ok(inputs) => {
+                        let utxos: UTxOs = Self::mk_utxo(&inputs);
+                        let env: Environment = Self::mk_environment(block.slot(), prot_magic)?;
+                        match validate(tx, &utxos, &env) {
+                            Ok(()) => (),
+                            Err(err) => warn!("Transaction validation failed ({:?})", err),
                         }
-                        Err(err) => warn!("Skipping validation ({:?})", err),
                     }
+                    Err(err) => warn!("Skipping validation ({:?})", err),
                 }
-                _ => (),
             }
         }
 
