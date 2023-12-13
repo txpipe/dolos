@@ -313,12 +313,11 @@ impl ApplyDB {
 
             let utxo_ref = UtxoRef(hash, idx);
 
-            if !utxos.contains_key(&utxo_ref) {
+            if let std::collections::hash_map::Entry::Vacant(e) = utxos.entry(utxo_ref) {
                 let utxo = self
                     .get_utxo(hash, idx)?
                     .ok_or(Error::MissingUtxo(hash, idx))?;
-
-                utxos.insert(utxo_ref, utxo);
+                e.insert(utxo);
             };
         }
 
@@ -434,7 +433,8 @@ impl ApplyDB {
                 prot_magic: self.prot_magic,
                 network_id: self.network_id,
             })
-        } else if block_slot >= 4492800 && block_slot < 40348902 {
+        } else if (4492800..39916974).contains(&block_slot) {
+            // The ShelleyMA era spans from block slot 4492800 to 39916974
             Ok(Environment {
                 prot_params: MultiEraProtParams::Byron(ByronProtParams {
                     fee_policy: FeePolicy {

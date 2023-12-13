@@ -16,14 +16,14 @@ pub fn execute_phase1_validation(
 ) -> Result<(), WorkerError> {
     let mut utxos = HashMap::new();
     ledger
-        .resolve_inputs_for_block(&block, &mut utxos)
+        .resolve_inputs_for_block(block, &mut utxos)
         .or_panic()?;
 
     let mut utxos2 = UTxOs::new();
 
     for (ref_, output) in utxos.iter() {
         let txin = pallas::ledger::primitives::byron::TxIn::Variant0(
-            pallas::codec::utils::CborWrap((ref_.0.clone(), ref_.1 as u32)),
+            pallas::codec::utils::CborWrap((ref_.0, ref_.1 as u32)),
         );
 
         let key = MultiEraInput::Byron(
@@ -39,7 +39,7 @@ pub fn execute_phase1_validation(
     let env = ledger.get_active_pparams(block.slot()).or_panic()?;
 
     for tx in block.txs().iter() {
-        let res = validate(&tx, &utxos2, &env);
+        let res = validate(tx, &utxos2, &env);
 
         if let Err(err) = res {
             warn!(?err, "validation error");
