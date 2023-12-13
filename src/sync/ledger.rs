@@ -10,6 +10,45 @@ use tracing::{debug, info, warn};
 use crate::prelude::*;
 use crate::storage::applydb::ApplyDB;
 
+pub fn execute_phase1_validation(
+    ledger: &ApplyDB,
+    block: &MultiEraBlock<'_>,
+) -> Result<(), WorkerError> {
+    let mut utxos = HashMap::new();
+    ledger
+        .resolve_inputs_for_block(block, &mut utxos)
+        .or_panic()?;
+
+    let mut utxos2 = UTxOs::new();
+
+    for (ref_, output) in utxos.iter() {
+        let txin = pallas::ledger::primitives::byron::TxIn::Variant0(
+            pallas::codec::utils::CborWrap((ref_.0, ref_.1 as u32)),
+        );
+
+        let key = MultiEraInput::Byron(
+            <Box<Cow<'_, pallas::ledger::primitives::byron::TxIn>>>::from(Cow::Owned(txin)),
+        );
+
+        let era = Era::try_from(output.0).or_panic()?;
+        let value = MultiEraOutput::decode(era, &output.1).or_panic()?;
+
+        utxos2.insert(key, value);
+    }
+
+    let env = ledger.get_active_pparams(block.slot()).or_panic()?;
+
+    for tx in block.txs().iter() {
+        let res = validate(tx, &utxos2, &env);
+
+        if let Err(err) = res {
+            warn!(?err, "validation error");
+        }
+    }
+
+    Ok(())
+}
+
 pub type UpstreamPort = gasket::messaging::tokio::InputPort<RollEvent>;
 
 #[derive(Stage)]
