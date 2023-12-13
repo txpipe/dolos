@@ -434,6 +434,19 @@ impl ApplyDB {
                 prot_magic: self.prot_magic,
                 network_id: self.network_id,
             })
+        } else if block_slot >= 4492800 && block_slot < 40348902 {
+            Ok(Environment {
+                prot_params: MultiEraProtParams::Byron(ByronProtParams {
+                    fee_policy: FeePolicy {
+                        summand: 155381,
+                        multiplier: 44,
+                    },
+                    max_tx_size: 16384,
+                }),
+                block_slot,
+                prot_magic: self.prot_magic,
+                network_id: self.network_id,
+            })
         } else {
             Err(Error::UnimplementedEra)
         }
