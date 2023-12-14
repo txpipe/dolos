@@ -1,7 +1,4 @@
-pub mod genesis;
-
 use pallas::{
-    applying::types::{ByronProtParams, Environment, FeePolicy, MultiEraProtParams},
     crypto::hash::Hash,
     ledger::traverse::{MultiEraBlock, MultiEraTx},
 };
@@ -20,10 +17,15 @@ use crate::prelude::BlockHash;
 
 use super::kvtable::*;
 
+pub mod genesis;
+
+type Epoch = u64;
+type Era = u16;
 type TxHash = Hash<32>;
 type OutputIndex = u64;
-type UtxoBody = (u16, Vec<u8>);
+type UtxoBody = (Era, Vec<u8>);
 type BlockSlot = u64;
+type UpdateBody = (Era, BlockHash, Vec<u8>);
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -35,6 +37,9 @@ pub enum Error {
 
     #[error("missing stxi {0}#{1}")]
     MissingStxi(TxHash, OutputIndex),
+
+    #[error("missing pparams")]
+    MissingPParams,
 
     #[error("cbor decoding")]
     Cbor,
@@ -78,6 +83,13 @@ impl KVTable<DBInt, DBSerde<SlotData>> for SlotKV {
     const CF_NAME: &'static str = "SlotKV";
 }
 
+// Spent transaction inputs
+pub struct PParamsKV;
+
+impl KVTable<DBInt, DBSerde<UpdateBody>> for PParamsKV {
+    const CF_NAME: &'static str = "PParamsKV";
+}
+
 pub struct ApplyBatch<'a> {
     db: &'a rocksdb::DB,
     block_slot: BlockSlot,
@@ -85,6 +97,7 @@ pub struct ApplyBatch<'a> {
     utxo_inserts: HashMap<UtxoRef, UtxoBody>,
     stxi_inserts: HashMap<UtxoRef, UtxoBody>,
     utxo_deletes: HashMap<UtxoRef, UtxoBody>,
+    pparams_update: Option<(Epoch, UpdateBody)>,
 }
 
 impl<'a> ApplyBatch<'a> {
@@ -96,6 +109,7 @@ impl<'a> ApplyBatch<'a> {
             utxo_inserts: HashMap::new(),
             stxi_inserts: HashMap::new(),
             utxo_deletes: HashMap::new(),
+            pparams_update: None,
         }
     }
 
@@ -141,6 +155,10 @@ impl<'a> ApplyBatch<'a> {
         self.stxi_inserts.insert(k.clone(), body.clone());
         self.utxo_deletes.insert(k.clone(), body);
     }
+
+    pub fn update_pparams(&mut self, epoch: Epoch, era: Era, block: BlockHash, content: Vec<u8>) {
+        self.pparams_update = Some((epoch, (era, block, content)));
+    }
 }
 
 impl<'a> From<ApplyBatch<'a>> for WriteBatch {
@@ -168,6 +186,10 @@ impl<'a> From<ApplyBatch<'a>> for WriteBatch {
         });
 
         SlotKV::stage_upsert(from.db, k, v, &mut batch);
+
+        if let Some((key, value)) = from.pparams_update {
+            PParamsKV::stage_upsert(from.db, DBInt(key), DBSerde(value), &mut batch);
+        }
 
         batch
     }
@@ -255,14 +277,10 @@ impl<'a> From<UndoBatch<'a>> for WriteBatch {
 #[derive(Clone)]
 pub struct ApplyDB {
     db: Arc<DB>,
-
-    // TODO: should be extracted from genesis config data
-    prot_magic: u32,
-    network_id: u8,
 }
 
 impl ApplyDB {
-    pub fn open(path: impl AsRef<Path>, prot_magic: u32, network_id: u8) -> Result<Self, Error> {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, Error> {
         let mut opts = Options::default();
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
@@ -270,15 +288,16 @@ impl ApplyDB {
         let db = DB::open_cf(
             &opts,
             path,
-            [UtxoKV::CF_NAME, StxiKV::CF_NAME, SlotKV::CF_NAME],
+            [
+                UtxoKV::CF_NAME,
+                StxiKV::CF_NAME,
+                SlotKV::CF_NAME,
+                PParamsKV::CF_NAME,
+            ],
         )
         .map_err(|_| super::kvtable::Error::IO)?;
 
-        Ok(Self {
-            db: Arc::new(db),
-            prot_magic,
-            network_id,
-        })
+        Ok(Self { db: Arc::new(db) })
     }
 
     pub fn is_empty(&self) -> bool {
@@ -378,6 +397,25 @@ impl ApplyDB {
                     batch.spend_utxo(hash, idx, utxo);
                 };
             }
+
+            if let Some(update) = tx.update() {
+                batch.update_pparams(
+                    update.epoch(),
+                    block.era().into(),
+                    block.hash(),
+                    update.encode(),
+                );
+            }
+        }
+
+        // check block-level updates (because of f#!@#@ byron)
+        if let Some(update) = block.update() {
+            batch.update_pparams(
+                update.epoch(),
+                block.era().into(),
+                block.hash(),
+                update.encode(),
+            );
         }
 
         let batch = WriteBatch::from(batch);
@@ -389,54 +427,17 @@ impl ApplyDB {
         Ok(())
     }
 
-    pub fn get_active_pparams(&self, block_slot: u64) -> Result<Environment, Error> {
-        if block_slot <= 322876 {
-            // These are the genesis values.
-            Ok(Environment {
-                prot_params: MultiEraProtParams::Byron(ByronProtParams {
-                    fee_policy: FeePolicy {
-                        summand: 155381,
-                        multiplier: 44,
-                    },
-                    max_tx_size: 4096,
-                }),
-                block_slot,
-                prot_magic: self.prot_magic,
-                network_id: self.network_id,
-            })
-        } else if block_slot > 322876 && block_slot <= 1784895 {
-            // Block hash were the update proposal was submitted:
-            // 850805044e0df6c13ced2190db7b11489672b0225d478a35a6db71fbfb33afc0
-            Ok(Environment {
-                prot_params: MultiEraProtParams::Byron(ByronProtParams {
-                    fee_policy: FeePolicy {
-                        summand: 155381,
-                        multiplier: 44,
-                    },
-                    max_tx_size: 65536,
-                }),
-                block_slot,
-                prot_magic: self.prot_magic,
-                network_id: self.network_id,
-            })
-        } else if block_slot < 4492800 {
-            // Block hash were the update proposal was submitted:
-            // d798a8d617b25fc6456ffe2d90895a2c15a7271b671dab2d18d46f3d0e4ef495
-            Ok(Environment {
-                prot_params: MultiEraProtParams::Byron(ByronProtParams {
-                    fee_policy: FeePolicy {
-                        summand: 155381,
-                        multiplier: 44,
-                    },
-                    max_tx_size: 8192,
-                }),
-                block_slot,
-                prot_magic: self.prot_magic,
-                network_id: self.network_id,
-            })
-        } else {
-            Err(Error::UnimplementedEra)
-        }
+    pub fn get_pparams_updates(&self, until: Epoch) -> Result<Vec<UpdateBody>, Error> {
+        let matches = PParamsKV::iter_entries_start(&self.db)
+            .map(|x| x.map(|(k, v)| (k.0, v.unwrap())))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Error::Data)?
+            .into_iter()
+            .filter(|(x, _)| *x <= until)
+            .map(|(_, v)| v)
+            .collect();
+
+        Ok(matches)
     }
 
     pub fn undo_block(&mut self, cbor: &[u8]) -> Result<(), Error> {
@@ -525,7 +526,7 @@ mod tests {
 
     pub fn with_tmp_db(op: fn(db: ApplyDB) -> ()) {
         let path = tempfile::tempdir().unwrap().into_path();
-        let db = ApplyDB::open(path.clone(), 764824073, 1).unwrap();
+        let db = ApplyDB::open(path.clone()).unwrap();
 
         op(db);
 
