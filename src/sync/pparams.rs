@@ -61,8 +61,8 @@ fn apply_era_hardfork(
     new_protocol: u64,
 ) -> Result<MultiEraProtParams, WorkerError> {
     match new_protocol {
-        1 => pparams_from_byron_genesis(&genesis.byron),
-        2 | 3 | 4 => pparams_from_shelley_genesis(&genesis.shelley),
+        1 => pparams_from_byron_genesis(genesis.byron),
+        2..=4 => pparams_from_shelley_genesis(genesis.shelley),
         x => {
             unimplemented!("don't know how to handle hardfork for protocol {x}");
         }

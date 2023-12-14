@@ -4,7 +4,7 @@ use pallas::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{hash_map::Entry, HashMap, HashSet},
     path::Path,
     sync::Arc,
 };
@@ -332,12 +332,12 @@ impl ApplyDB {
 
             let utxo_ref = UtxoRef(hash, idx);
 
-            if !utxos.contains_key(&utxo_ref) {
+            if let Entry::Vacant(e) = utxos.entry(utxo_ref) {
                 let utxo = self
                     .get_utxo(hash, idx)?
                     .ok_or(Error::MissingUtxo(hash, idx))?;
 
-                utxos.insert(utxo_ref, utxo);
+                e.insert(utxo);
             };
         }
 

@@ -78,14 +78,14 @@ impl Stage {
     pub fn execute_phase1_validation(&self, block: &MultiEraBlock<'_>) -> Result<(), WorkerError> {
         let mut utxos = HashMap::new();
         self.ledger
-            .resolve_inputs_for_block(&block, &mut utxos)
+            .resolve_inputs_for_block(block, &mut utxos)
             .or_panic()?;
 
         let mut utxos2 = UTxOs::new();
 
         for (ref_, output) in utxos.iter() {
             let txin = pallas::ledger::primitives::byron::TxIn::Variant0(
-                pallas::codec::utils::CborWrap((ref_.0.clone(), ref_.1 as u32)),
+                pallas::codec::utils::CborWrap((ref_.0, ref_.1 as u32)),
             );
 
             let key = MultiEraInput::Byron(
@@ -106,7 +106,7 @@ impl Stage {
             .or_panic()?;
 
         for tx in block.txs().iter() {
-            let res = validate(&tx, &utxos2, &pparams);
+            let res = validate(tx, &utxos2, pparams);
 
             if let Err(err) = res {
                 warn!(?err, "validation error");

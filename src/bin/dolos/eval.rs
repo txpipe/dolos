@@ -57,7 +57,7 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
 
     for (ref_, output) in utxos.iter() {
         let txin = pallas::ledger::primitives::byron::TxIn::Variant0(
-            pallas::codec::utils::CborWrap((ref_.0.clone(), ref_.1 as u32)),
+            pallas::codec::utils::CborWrap((ref_.0, ref_.1 as u32)),
         );
 
         let key = MultiEraInput::Byron(
