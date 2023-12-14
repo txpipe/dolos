@@ -21,6 +21,7 @@ pub struct Config {
     pub peer_address: String,
     pub network_magic: u64,
     pub network_id: u8,
+    pub phase1_validation_enabled: bool,
 }
 
 fn define_gasket_policy(config: &Option<gasket::retries::Policy>) -> gasket::runtime::Policy {
@@ -73,7 +74,7 @@ pub fn pipeline(
     let mut roll = roll::Stage::new(wal, cursor_chain, cursor_ledger);
 
     let mut chain = chain::Stage::new(chain);
-    let mut ledger = ledger::Stage::new(ledger, byron, shelley);
+    let mut ledger = ledger::Stage::new(ledger, byron, shelley, config.phase1_validation_enabled);
 
     let (to_roll, from_pull) = gasket::messaging::tokio::mpsc_channel(50);
     pull.downstream.connect(to_roll);
