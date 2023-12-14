@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use gasket::messaging::{RecvPort, SendPort};
-use pallas::ledger::configs::byron::GenesisFile;
+use pallas::ledger::configs::{byron, shelley};
 use pallas::storage::rolldb::chain::Store as ChainStore;
 use pallas::storage::rolldb::wal::Store as WalStore;
 use serde::Deserialize;
@@ -12,6 +12,7 @@ use crate::storage::applydb::ApplyDB;
 
 pub mod chain;
 pub mod ledger;
+pub mod pparams;
 pub mod pull;
 pub mod roll;
 
@@ -47,7 +48,8 @@ pub fn pipeline(
     wal: WalStore,
     chain: ChainStore,
     ledger: ApplyDB,
-    genesis: GenesisFile,
+    byron: byron::GenesisFile,
+    shelley: shelley::GenesisFile,
     retries: &Option<gasket::retries::Policy>,
 ) -> Result<gasket::daemon::Daemon, Error> {
     let pull_cursor = wal
@@ -71,7 +73,7 @@ pub fn pipeline(
     let mut roll = roll::Stage::new(wal, cursor_chain, cursor_ledger);
 
     let mut chain = chain::Stage::new(chain);
-    let mut ledger = ledger::Stage::new(ledger, genesis);
+    let mut ledger = ledger::Stage::new(ledger, byron, shelley);
 
     let (to_roll, from_pull) = gasket::messaging::tokio::mpsc_channel(50);
     pull.downstream.connect(to_roll);
