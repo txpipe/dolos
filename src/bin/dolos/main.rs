@@ -67,6 +67,7 @@ pub struct Config {
     pub serve: dolos::serve::Config,
     pub retries: Option<gasket::retries::Policy>,
     pub byron: GenesisFileRef,
+    pub shelley: GenesisFileRef,
     #[serde(default)]
     pub logging: LoggingConfig,
 }

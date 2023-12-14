@@ -13,6 +13,7 @@ authors = ["Santiago Carmuega <santiago@carmuega.me>"]
 
 [dependencies]
 pallas = { git = "https://github.com/txpipe/pallas.git", features = ["unstable"] }
+# pallas = { path = "../pallas/pallas", features = ["unstable"] }
 
 gasket = { version = "^0.5", features = ["derive"] }
 # gasket = { path = "../../construkts/gasket-rs/gasket", features = ["derive"] }

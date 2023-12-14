@@ -1,6 +1,6 @@
 use miette::{Context, IntoDiagnostic};
 use pallas::{
-    applying::{validate, Environment, UTxOs},
+    applying::{validate, UTxOs},
     ledger::traverse::{Era, MultiEraInput, MultiEraOutput},
 };
 use std::{borrow::Cow, collections::HashMap, path::PathBuf};
@@ -14,7 +14,10 @@ pub struct Args {
     era: u16,
 
     #[arg(long, short)]
-    slot: u64,
+    epoch: u64,
+
+    #[arg(long, short)]
+    network_id: u8,
 }
 
 pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
@@ -42,11 +45,19 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
         .into_diagnostic()
         .context("resolving tx inputs")?;
 
+    let byron_genesis = pallas::ledger::configs::byron::from_file(&config.byron.path)
+        .into_diagnostic()
+        .context("loading byron genesis")?;
+
+    let shelley_genesis = pallas::ledger::configs::shelley::from_file(&config.shelley.path)
+        .into_diagnostic()
+        .context("loading shelley genesis")?;
+
     let mut utxos2 = UTxOs::new();
 
     for (ref_, output) in utxos.iter() {
         let txin = pallas::ledger::primitives::byron::TxIn::Variant0(
-            pallas::codec::utils::CborWrap((ref_.0.clone(), ref_.1 as u32)),
+            pallas::codec::utils::CborWrap((ref_.0, ref_.1 as u32)),
         );
 
         let key = MultiEraInput::Byron(
@@ -64,12 +75,18 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
         utxos2.insert(key, value);
     }
 
-    let env: Environment = ledger
-        .get_active_pparams(args.slot)
-        .into_diagnostic()
-        .context("resolving pparams")?;
+    let pparams = dolos::sync::pparams::compute_pparams(
+        dolos::sync::pparams::Genesis {
+            byron: &byron_genesis,
+            shelley: &shelley_genesis,
+        },
+        &ledger,
+        args.epoch,
+    )
+    .into_diagnostic()
+    .context("computing protocol params")?;
 
-    validate(&tx, &utxos2, &env).unwrap();
+    validate(&tx, &utxos2, &pparams).unwrap();
 
     Ok(())
 }

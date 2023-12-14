@@ -17,5 +17,8 @@ magic = 2
 [byron]
 path = "./byron.json"
 
+[shelley]
+path = "./shelley.json"
+
 [logging]
 max_level = "debug"

@@ -153,6 +153,12 @@ where
     }
 }
 
+impl<T> DBSerde<T> {
+    pub fn unwrap(self) -> T {
+        self.0
+    }
+}
+
 pub struct WithDBIntPrefix<T>(pub u64, pub T);
 
 impl<T> From<WithDBIntPrefix<T>> for Box<[u8]>
@@ -345,6 +351,13 @@ where
     fn iter_values_from(db: &rocksdb::DB, from: K) -> ValueIterator<'_, V> {
         let from_raw = Box::<[u8]>::from(from);
         let mode = rocksdb::IteratorMode::From(&from_raw, rocksdb::Direction::Forward);
+
+        Self::iter_values(db, mode)
+    }
+
+    fn iter_values_from_reverse(db: &rocksdb::DB, from: K) -> ValueIterator<'_, V> {
+        let from_raw = Box::<[u8]>::from(from);
+        let mode = rocksdb::IteratorMode::From(&from_raw, rocksdb::Direction::Reverse);
 
         Self::iter_values(db, mode)
     }

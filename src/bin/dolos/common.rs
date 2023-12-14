@@ -28,12 +28,7 @@ pub fn open_data_stores(config: &crate::Config) -> Result<Stores, Error> {
 
     let chain = chain::Store::open(rolldb_path.join("chain")).map_err(Error::storage)?;
 
-    let ledger = ApplyDB::open(
-        rolldb_path.join("ledger"),
-        config.upstream.network_magic as u32,
-        config.upstream.network_id,
-    )
-    .map_err(Error::storage)?;
+    let ledger = ApplyDB::open(rolldb_path.join("ledger")).map_err(Error::storage)?;
 
     Ok((wal, chain, ledger))
 }

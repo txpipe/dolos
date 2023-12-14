@@ -12,12 +12,16 @@ pub fn run(config: &super::Config, _args: &Args) -> miette::Result<()> {
     let byron_genesis =
         pallas::ledger::configs::byron::from_file(&config.byron.path).map_err(Error::config)?;
 
+    let shelley_genesis =
+        pallas::ledger::configs::shelley::from_file(&config.shelley.path).map_err(Error::config)?;
+
     dolos::sync::pipeline(
         &config.upstream,
         wal,
         chain,
         ledger,
         byron_genesis,
+        shelley_genesis,
         &config.retries,
     )
     .into_diagnostic()
