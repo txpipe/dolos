@@ -2,6 +2,7 @@
 peer_address = "preview-node.world.dev.cardano.org:30002"
 network_magic = 2
 network_id = 0
+phase1_validation_enabled = false
 
 [rolldb]
 path = "./tmp/rolldb"

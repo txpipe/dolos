@@ -5,7 +5,7 @@ use pallas::ledger::traverse::wellknown::GenesisValues;
 use pallas::ledger::traverse::{Era, MultiEraBlock, MultiEraInput, MultiEraOutput};
 use std::borrow::Cow;
 use std::collections::HashMap;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::prelude::*;
 use crate::storage::applydb::ApplyDB;
@@ -24,6 +24,8 @@ pub struct Stage {
     // HACK: until multi-era genesis
     genesis_values: GenesisValues,
 
+    phase1_validation_enabled: bool,
+
     pub upstream: UpstreamPort,
 
     #[metric]
@@ -34,7 +36,12 @@ pub struct Stage {
 }
 
 impl Stage {
-    pub fn new(ledger: ApplyDB, byron: byron::GenesisFile, shelley: shelley::GenesisFile) -> Self {
+    pub fn new(
+        ledger: ApplyDB,
+        byron: byron::GenesisFile,
+        shelley: shelley::GenesisFile,
+        phase1_validation_enabled: bool,
+    ) -> Self {
         Self {
             ledger,
             genesis_values: pallas::ledger::traverse::wellknown::GenesisValues::from_magic(
@@ -44,6 +51,7 @@ impl Stage {
             byron,
             shelley,
             current_pparams: None,
+            phase1_validation_enabled,
             upstream: Default::default(),
             block_count: Default::default(),
             wal_count: Default::default(),
@@ -140,10 +148,13 @@ impl gasket::framework::Worker<Stage> for Worker {
                 info!(slot, "applying block");
 
                 let block = MultiEraBlock::decode(cbor).or_panic()?;
-                let (epoch, _) = block.epoch(&stage.genesis_values);
-                stage.ensure_pparams(epoch)?;
 
-                stage.execute_phase1_validation(&block)?;
+                if stage.phase1_validation_enabled {
+                    debug!("performing phase-1 validations");
+                    let (epoch, _) = block.epoch(&stage.genesis_values);
+                    stage.ensure_pparams(epoch)?;
+                    stage.execute_phase1_validation(&block)?;
+                }
 
                 stage.ledger.apply_block(&block).or_panic()?;
             }
