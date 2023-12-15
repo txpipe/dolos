@@ -146,8 +146,12 @@ impl gasket::framework::Worker<Stage> for Worker {
         .await
         .or_panic()?;
 
-        // TODO: don't do this while doing full sync
-        //stage.store.prune_wal().or_panic()?;
+        // TODO: define a better strategy for pruning schedule
+        if let Some(x) = &self.last_seq_chain {
+            if x % 100 == 0 {
+                stage.store.prune_wal().or_panic()?;
+            }
+        }
 
         Ok(())
     }
