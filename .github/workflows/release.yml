@@ -22,7 +22,7 @@ jobs:
           # install script because it relies on the `uname` outputs
           - release_for: Linux-arm64
             build_on: ubuntu-latest
-            target: "armv7-unknown-linux-gnueabihf"
+            target: "aarch64-unknown-linux-gnu"
             args: "--locked --release"
 
           - release_for: Windows-x86_64
