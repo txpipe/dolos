@@ -23,7 +23,8 @@ jobs:
           - release_for: Linux-arm64
             build_on: ubuntu-latest
             target: "aarch64-unknown-linux-gnu"
-            args: "--locked --release"
+            # we skip mithril because of no support for cross compile
+            args: "--locked --release --no-default-features"
 
           - release_for: Windows-x86_64
             build_on: windows-latest
@@ -43,7 +44,8 @@ jobs:
           - release_for: Darwin-arm64
             build_on: macOS-latest
             target: aarch64-apple-darwin
-            args: "--locked --release"
+            # we skip mithril because of no support for cross compile
+            args: "--locked --release --no-default-features"
 
     runs-on: ${{ matrix.build_on }}
 
