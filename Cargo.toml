@@ -45,7 +45,11 @@ tokio-stream = { version = "0.1.14", features = ["sync"] }
 futures-util = "0.3.28"
 async-stream = "0.3.5"
 serde_with = "3.4.0"
-mithril-client = "0.5.7"
+mithril-client = { version = "0.5.7", optional = true }
 
 [dev-dependencies]
 tempfile = "3.3.0"
+
+[features]
+mithril = ["mithril-client"]
+default = ["mithril"]

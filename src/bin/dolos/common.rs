@@ -33,6 +33,7 @@ pub fn open_data_stores(config: &crate::Config) -> Result<Stores, Error> {
     Ok((wal, chain, ledger))
 }
 
+#[allow(dead_code)]
 pub fn destroy_data_stores(config: &crate::Config) -> Result<(), Error> {
     let rolldb_path = define_rolldb_path(config);
 
