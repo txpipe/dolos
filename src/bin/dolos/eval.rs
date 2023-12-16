@@ -29,7 +29,7 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
         .into_diagnostic()
         .context("reading tx from file")?;
 
-    let cbor = hex::decode(&cbor)
+    let cbor = hex::decode(cbor)
         .into_diagnostic()
         .context("decoding hex content from file")?;
 
