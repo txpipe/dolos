@@ -14,12 +14,8 @@ pub async fn run(
     policy: &gasket::runtime::Policy,
     _args: &Args,
 ) -> Result<(), Error> {
-    tracing::subscriber::set_global_default(
-        tracing_subscriber::FmtSubscriber::builder()
-            .with_max_level(tracing::Level::INFO)
-            .finish(),
-    )
-    .unwrap();
+    tracing::subscriber::set_global_default(tracing_subscriber::FmtSubscriber::builder().finish())
+        .unwrap();
 
     let rolldb_path = config
         .rolldb

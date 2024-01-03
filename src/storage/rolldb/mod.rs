@@ -337,7 +337,8 @@ impl RollDB {
             // get the number of slots that have passed since the wal point
             let slot_delta = tip - value.slot();
 
-            if slot_delta <= self.k_param {
+            // + 100 is so we have some overlap between WAL and chain
+            if slot_delta <= self.k_param + 100 {
                 break;
             } else {
                 wal::WalKV::stage_delete(&self.db, wal_key, &mut batch);

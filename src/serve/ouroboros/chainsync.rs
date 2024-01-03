@@ -132,9 +132,14 @@ impl N2NChainSyncHandler {
 
         // --- keep sending blocks while we receive RequestNexts
 
+        // if we intersected with crawler with a point then skip that point
+        if matches!(self.intersect.as_ref(), Some(Point::Specific(_, _))) {
+            crawler.next();
+        }
+
         loop {
             if let Some(next) = crawler.next() {
-                debug!(?next, "next chainkv point");
+                info!(?next, "next chainkv point");
                 let (slot, hash) = next.map_err(Error::server)?;
 
                 let tip = self
@@ -144,75 +149,77 @@ impl N2NChainSyncHandler {
                     .map(db_tip_to_protocol)
                     .unwrap_or(Tip(Point::Origin, 0));
 
-                // --- if we have an intersect and this is the first response
-                // (no cursor) then our first response is a rollback to the intersect
-                if self.intersect.is_some() && self.cursor.is_none() {
-                    info!("sending initial rollbackwards message");
-                    self.protocol
-                        .send_roll_backward(Point::Specific(slot, hash.to_vec()), tip)
-                        .await
-                        .map_err(Error::server)?;
+                // --- if we have reached mutable part of chainKV snapshot,
+                // check if we can swap to the WAL, otherwise take new snapshot
 
-                    self.cursor = Some((slot, hash));
-                } else {
-                    // --- if we have reached mutable part of chainKV snapshot,
-                    // check if we can swap to the WAL, otherwise take new snapshot
-
-                    if slot >= mutable_slot {
-                        if let Some((slot, hash)) = self.cursor {
-                            if let Some(seq) = self
-                                .roll_db
-                                .apply_position_in_wal(slot, &hash)
-                                .map_err(Error::server)?
-                            {
-                                info!(?self.cursor, "cursor found on WAL, switching to WAL crawling");
-                                drop(crawler);
-                                return self.crawl_with_wal(Some(seq)).await;
-                            } else {
-                                info!(?self.cursor, "mutable but no WAL intersect, refreshing chainKV crawler");
-
-                                // take new chainKV snapshot
-                                crawler = self.roll_db.crawl_chain_from(self.cursor.map(|x| x.0));
-
-                                // skip cursor (iterator starts at cursor)
-                                crawler.next();
-
-                                continue;
-                            }
-                        } else {
-                            // if we are immediately mutable (have no cursor),
-                            // skip chainKV and crawl WAL from beginning
-
-                            info!(?self.cursor, "mutable without cursor, switching to WAL crawling");
-
+                if slot >= mutable_slot {
+                    if let Some((slot, hash)) = self.cursor {
+                        if let Some(seq) = self
+                            .roll_db
+                            .apply_position_in_wal(slot, &hash)
+                            .map_err(Error::server)?
+                        {
+                            info!(?self.cursor, "cursor found on WAL, switching to WAL crawling");
                             drop(crawler);
+                            return self.crawl_with_wal(Some(seq)).await;
+                        } else {
+                            info!(?self.cursor, "mutable but no WAL intersect, refreshing chainKV crawler");
+
+                            // take new chainKV snapshot
+                            crawler = self.roll_db.crawl_chain_from(self.cursor.map(|x| x.0));
+
+                            // skip cursor (iterator starts at cursor)
+                            crawler.next();
+
+                            continue;
+                        }
+                    } else {
+                        // if we are immediately mutable (have no cursor),
+                        // skip chainKV and crawl WAL from beginning
+
+                        info!(?self.cursor, "mutable without cursor, switching to WAL crawling");
+
+                        drop(crawler);
+
+                        if let Some(Point::Specific(i_slot, i_hash)) = self.intersect.as_ref() {
+                            let i_hash: [u8; 32] = i_hash.clone().try_into().unwrap();
+
+                            let seq = self
+                                .roll_db
+                                .apply_position_in_wal(*i_slot, &(i_hash.into()))
+                                .map_err(Error::server)?
+                                .ok_or(Error::server("intersect in chainkv but not WAL despite being immediately mutable"))?;
+
+                            return self.crawl_with_wal(Some(seq)).await;
+                        } else {
                             return self.crawl_with_wal(None).await;
                         }
                     }
-
-                    // --- send block to client
-
-                    let block = self
-                        .roll_db
-                        .get_block(hash)
-                        .map_err(Error::server)?
-                        .expect("block content not found");
-
-                    let block = MultiEraBlock::decode(&block).expect("invalid block cbor");
-
-                    let content = HeaderContent {
-                        variant: 1, // TODO
-                        byron_prefix: None,
-                        cbor: block.header().cbor().to_vec(),
-                    };
-
-                    self.protocol
-                        .send_roll_forward(content, tip)
-                        .await
-                        .map_err(Error::server)?;
-
-                    self.cursor = Some((slot, hash));
                 }
+
+                // --- send block to client
+
+                let block = self
+                    .roll_db
+                    .get_block(hash)
+                    .map_err(Error::server)?
+                    .expect("block content not found");
+
+                let block = MultiEraBlock::decode(&block).expect("invalid block cbor");
+
+                let content = HeaderContent {
+                    variant: block.era() as u8,
+                    byron_prefix: None,
+                    cbor: block.header().cbor().to_vec(),
+                };
+
+                self.protocol
+                    .send_roll_forward(content, tip)
+                    .await
+                    .map_err(Error::server)?;
+
+                // info!("AA");
+                self.cursor = Some((slot, hash));
 
                 // ---
 
@@ -222,13 +229,13 @@ impl N2NChainSyncHandler {
                     .await
                     .map_err(Error::server)?
                 {
-                    Some(ClientRequest::RequestNext) => debug!("client request next"),
+                    Some(ClientRequest::RequestNext) => info!("client request next"),
                     Some(ClientRequest::Intersect(points)) => {
                         drop(crawler);
                         return self.handle_intersect(points).await;
                     }
                     None => {
-                        debug!("client ended protocol");
+                        warn!("client ended protocol");
                         return Ok(());
                     }
                 }
@@ -246,17 +253,21 @@ impl N2NChainSyncHandler {
 
         let mut last_seq = None;
 
+        let intersected = from.is_some();
+
         // TODO: race condition between checking wal contains point and creating iterator
         let mut crawler = self.roll_db.crawl_wal(from.map(|x| x.into()));
 
         // skip the WAL intersect
-        crawler.next();
+        if intersected {
+            crawler.next();
+        }
 
         // --- keep iterating WAL while we receive RequestNexts
 
         loop {
             if let Some(next) = crawler.next() {
-                debug!(?next, "next WAL entry");
+                info!(?next, "next WAL entry");
                 let (seq, wal_value) = next.map_err(Error::server)?;
 
                 last_seq = Some(seq);
@@ -284,7 +295,7 @@ impl N2NChainSyncHandler {
                         let block = MultiEraBlock::decode(&block).expect("invalid block cbor");
 
                         let content = HeaderContent {
-                            variant: 1, // TODO
+                            variant: block.era() as u8,
                             byron_prefix: None,
                             cbor: block.header().cbor().to_vec(),
                         };
@@ -320,6 +331,8 @@ impl N2NChainSyncHandler {
                 drop(crawler);
                 crawler = self.roll_db.crawl_wal(last_seq);
                 crawler.next();
+
+                continue;
             }
 
             // ---
@@ -330,13 +343,13 @@ impl N2NChainSyncHandler {
                 .await
                 .map_err(Error::server)?
             {
-                Some(ClientRequest::RequestNext) => debug!("client request next"),
+                Some(ClientRequest::RequestNext) => info!("client request next"),
                 Some(ClientRequest::Intersect(points)) => {
                     drop(crawler);
                     return self.handle_intersect(points).await;
                 }
                 None => {
-                    debug!("client ended protocol");
+                    warn!("client ended protocol");
                     return Ok(());
                 }
             }
