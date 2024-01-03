@@ -44,6 +44,7 @@ impl From<DBHash> for Hash<32> {
     }
 }
 
+#[derive(Debug)]
 pub struct DBInt(pub u64);
 
 impl From<DBInt> for Box<[u8]> {

@@ -360,15 +360,16 @@ impl RollDB {
         Ok(false)
     }
 
-    /// Check if a point (pair of slot and block hash) exists in the WalKV
-    pub fn wal_contains(&self, slot: BlockSlot, hash: &BlockHash) -> Result<bool, Error> {
-        if let Some(_) = WalKV::scan_until(&self.db, rocksdb::IteratorMode::End, |v| {
-            v.slot() == slot && v.hash().eq(hash)
-        })? {
-            Ok(true)
-        } else {
-            Ok(false)
-        }
+    /// Return the WAL sequence number for the most recent occurence of an apply
+    /// action for the specified point, should it exist
+    pub fn apply_position_in_wal(
+        &self,
+        slot: BlockSlot,
+        hash: &BlockHash,
+    ) -> Result<Option<DBInt>, Error> {
+        WalKV::scan_until(&self.db, rocksdb::IteratorMode::End, |v| {
+            v.slot() == slot && v.hash().eq(hash) && !v.is_undo()
+        })
     }
 
     pub fn destroy(self) -> Result<(), Error> {

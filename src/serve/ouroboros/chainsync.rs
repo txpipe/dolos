@@ -10,8 +10,11 @@ use pallas::{
 use tracing::{debug, info, instrument, warn};
 
 use crate::{
-    prelude::{BlockHash, BlockSlot, Error},
-    storage::rolldb::{wal::WalAction, RollDB},
+    prelude::Error,
+    storage::{
+        kvtable::DBInt,
+        rolldb::{wal::WalAction, RollDB},
+    },
 };
 
 pub struct N2NChainSyncHandler {
@@ -157,14 +160,14 @@ impl N2NChainSyncHandler {
 
                     if slot >= mutable_slot {
                         if let Some((slot, hash)) = self.cursor {
-                            if self
+                            if let Some(seq) = self
                                 .roll_db
-                                .wal_contains(slot, &hash)
+                                .apply_position_in_wal(slot, &hash)
                                 .map_err(Error::server)?
                             {
                                 info!(?self.cursor, "cursor found on WAL, switching to WAL crawling");
                                 drop(crawler);
-                                return self.crawl_with_wal(self.cursor).await;
+                                return self.crawl_with_wal(Some(seq)).await;
                             } else {
                                 info!(?self.cursor, "mutable but no WAL intersect, refreshing chainKV crawler");
 
@@ -238,15 +241,13 @@ impl N2NChainSyncHandler {
     }
 
     #[instrument(skip_all)]
-    async fn crawl_with_wal(&mut self, from: Option<(BlockSlot, BlockHash)>) -> Result<(), Error> {
+    async fn crawl_with_wal(&mut self, from: Option<DBInt>) -> Result<(), Error> {
         info!(?from, "entering WAL crawling mode");
 
+        let mut last_seq = None;
+
         // TODO: race condition between checking wal contains point and creating iterator
-        let mut crawler = self
-            .roll_db
-            .crawl_wal_from_cursor(from)
-            .map_err(Error::server)?
-            .ok_or(Error::server("point not found in wal"))?;
+        let mut crawler = self.roll_db.crawl_wal(from.map(|x| x.into()));
 
         // skip the WAL intersect
         crawler.next();
@@ -256,7 +257,9 @@ impl N2NChainSyncHandler {
         loop {
             if let Some(next) = crawler.next() {
                 debug!(?next, "next WAL entry");
-                let (_, wal_value) = next.map_err(Error::server)?;
+                let (seq, wal_value) = next.map_err(Error::server)?;
+
+                last_seq = Some(seq);
 
                 let tip = self
                     .roll_db
@@ -312,7 +315,11 @@ impl N2NChainSyncHandler {
                     .await
                     .map_err(Error::server)?;
 
-                // TODO wait for new WAL entries
+                self.roll_db.tip_change.notified().await;
+                info!(?last_seq, "tip change notified, refreshing WAL crawler");
+                drop(crawler);
+                crawler = self.roll_db.crawl_wal(last_seq);
+                crawler.next();
             }
 
             // ---
