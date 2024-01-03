@@ -218,7 +218,6 @@ impl N2NChainSyncHandler {
                     .await
                     .map_err(Error::server)?;
 
-                // info!("AA");
                 self.cursor = Some((slot, hash));
 
                 // ---
