@@ -1,5 +1,3 @@
-mod protocols;
-
 use pallas::network::facades::PeerServer;
 use serde::{Deserialize, Serialize};
 use tokio::join;
@@ -10,10 +8,14 @@ use tracing::{info, instrument};
 use crate::prelude::*;
 use crate::storage::rolldb::RollDB;
 
-use protocols::{handle_blockfetch, handle_n2n_chainsync};
+use self::blockfetch::handle_blockfetch;
+use self::chainsync::N2NChainSyncHandler;
 
 #[cfg(test)]
 mod tests;
+
+mod blockfetch;
+mod chainsync;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Config {
@@ -30,7 +32,9 @@ async fn peer_session(db: RollDB, peer: PeerServer) -> Result<(), Error> {
         ..
     } = peer;
 
-    let l1 = handle_n2n_chainsync(db.clone(), chainsync);
+    let mut n2n_chainsync_handler = N2NChainSyncHandler::new(db.clone(), chainsync)?;
+
+    let l1 = n2n_chainsync_handler.begin();
     let l2 = handle_blockfetch(db.clone(), blockfetch);
 
     let _ = join!(l1, l2);

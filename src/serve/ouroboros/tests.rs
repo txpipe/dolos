@@ -64,6 +64,13 @@ async fn setup_server_client_pair(port: u32) -> (ServerHandle, PeerClient) {
 
 #[tokio::test]
 async fn test_blockfetch() {
+    tracing::subscriber::set_global_default(
+        tracing_subscriber::FmtSubscriber::builder()
+            .with_max_level(tracing::Level::DEBUG)
+            .finish(),
+    )
+    .unwrap();
+
     // use servers in different ports until we implement some sort of test harness
     let (server, mut client) = setup_server_client_pair(30031).await;
 
@@ -93,7 +100,14 @@ async fn test_blockfetch() {
 }
 
 #[tokio::test]
-async fn do_chainsync() {
+async fn test_chainsync() {
+    tracing::subscriber::set_global_default(
+        tracing_subscriber::FmtSubscriber::builder()
+            .with_max_level(tracing::Level::DEBUG)
+            .finish(),
+    )
+    .unwrap();
+
     // use servers in different ports until we implement some sort of test harness
     let (server, mut client) = setup_server_client_pair(30032).await;
 

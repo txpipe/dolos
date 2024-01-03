@@ -68,6 +68,10 @@ impl RollDB {
         })
     }
 
+    pub fn k_param(&self) -> u64 {
+        self.k_param
+    }
+
     #[cfg(test)]
     pub fn open_tmp(k_param: u64) -> Result<Self, Error> {
         let path = tempfile::tempdir().unwrap().into_path();
@@ -198,23 +202,20 @@ impl RollDB {
     pub fn crawl_wal_from_cursor(
         &self,
         start_after: Option<(BlockSlot, BlockHash)>,
-    ) -> Result<impl Iterator<Item = Result<(wal::Seq, wal::Value), Error>> + '_, Error> {
+    ) -> Result<Option<impl Iterator<Item = Result<(wal::Seq, wal::Value), Error>> + '_>, Error>
+    {
         if let Some((slot, hash)) = start_after {
-            // TODO: Not sure this is 100% accurate:
-            // i.e Apply(X), Apply(cursor), Undo(cursor), Mark(x)
-            // We want to start at Apply(cursor) or Mark(cursor), but even then,
-            // what if we have more than one Apply(cursor), how do we know
-            // which is correct?
+            // try find most recent Apply(cursor) or Mark(cursor) in the WAL
             let found = WalKV::scan_until(&self.db, rocksdb::IteratorMode::End, |v| {
-                v.slot() == slot && v.hash().eq(&hash)
+                !v.is_undo() && v.slot() == slot && v.hash().eq(&hash)
             })?;
 
             match found {
-                Some(DBInt(seq)) => Ok(self.crawl_wal(Some(seq))),
-                None => Err(Error::NotFound),
+                Some(DBInt(seq)) => Ok(Some(self.crawl_wal(Some(seq)))),
+                None => Ok(None),
             }
         } else {
-            Ok(self.crawl_wal(None))
+            Ok(Some(self.crawl_wal(None)))
         }
     }
 

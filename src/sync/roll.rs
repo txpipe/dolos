@@ -40,7 +40,12 @@ impl Stage {
     ///
     /// Reads from Wal using the latest known cursor and outputs the corresponding downstream events
     async fn catchup(&mut self) -> Result<(), WorkerError> {
-        let iter = self.rolldb.crawl_wal_from_cursor(self.cursor).or_panic()?;
+        let iter = self
+            .rolldb
+            .crawl_wal_from_cursor(self.cursor)
+            .or_panic()?
+            .ok_or(Error::server("could not find cursor on WAL for catchup"))
+            .or_panic()?;
 
         for wal in iter {
             let (_, wal) = wal.or_panic()?;
