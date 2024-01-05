@@ -32,6 +32,7 @@ struct Cli {
 pub struct RolldbConfig {
     path: Option<std::path::PathBuf>,
     k_param: Option<u64>,
+    k_param_buffer: Option<u64>,
 }
 
 #[derive(Deserialize)]

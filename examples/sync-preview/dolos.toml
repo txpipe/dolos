@@ -4,7 +4,7 @@ network_magic = 2
 
 [rolldb]
 path = "./tmp/rolldb"
-k_param = 1000
+k_param = 10000
 
 [applydb]
 path = "./tmp/applydb"

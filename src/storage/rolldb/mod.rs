@@ -20,6 +20,8 @@ pub struct RollDB {
     pub tip_change: Arc<tokio::sync::Notify>,
     wal_seq: u64,
     k_param: u64,
+    // overlap immutable part of chainkv and WAL by k_param_buffer slots
+    k_param_buffer: u64,
 }
 
 pub struct BlockKV;
@@ -46,7 +48,7 @@ impl<'a> Iterator for ChainEntryIterator<'a> {
 }
 
 impl RollDB {
-    pub fn open(path: impl AsRef<Path>, k_param: u64) -> Result<Self, Error> {
+    pub fn open(path: impl AsRef<Path>, k_param: u64, k_param_buffer: u64) -> Result<Self, Error> {
         let mut opts = Options::default();
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
@@ -65,6 +67,7 @@ impl RollDB {
             tip_change: Arc::new(tokio::sync::Notify::new()),
             wal_seq,
             k_param,
+            k_param_buffer,
         })
     }
 
@@ -73,10 +76,10 @@ impl RollDB {
     }
 
     #[cfg(test)]
-    pub fn open_tmp(k_param: u64) -> Result<Self, Error> {
+    pub fn open_tmp(k_param: u64, k_param_buffer: u64) -> Result<Self, Error> {
         let path = tempfile::tempdir().unwrap().into_path();
 
-        RollDB::open(path.clone(), k_param)
+        RollDB::open(path.clone(), k_param, k_param_buffer)
     }
 
     pub fn get_block(&self, hash: Hash<32>) -> Result<Option<BlockBody>, Error> {
@@ -337,8 +340,9 @@ impl RollDB {
             // get the number of slots that have passed since the wal point
             let slot_delta = tip - value.slot();
 
-            // + 100 is so we have some overlap between WAL and chain
-            if slot_delta <= self.k_param + 100 {
+            // k_param_buffer is so we have can have some overlap between WAL
+            // and immutable chainKV
+            if slot_delta <= self.k_param + self.k_param_buffer {
                 break;
             } else {
                 wal::WalKV::stage_delete(&self.db, wal_key, &mut batch);
@@ -385,7 +389,7 @@ mod tests {
     use super::{BlockBody, BlockHash, BlockSlot, RollDB};
 
     pub fn with_tmp_db<T>(k_param: u64, op: fn(db: &mut RollDB) -> T) {
-        let mut db = RollDB::open_tmp(k_param).unwrap();
+        let mut db = RollDB::open_tmp(k_param, 0).unwrap();
 
         op(&mut db);
 

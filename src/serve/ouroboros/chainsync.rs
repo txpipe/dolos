@@ -116,14 +116,14 @@ impl N2NChainSyncHandler {
 
         let mut crawler = self.roll_db.crawl_chain_from(from);
 
-        let tip = self
+        let mut tip = self
             .roll_db
             .find_tip()
             .map_err(Error::server)?
             .map(db_tip_to_protocol)
             .unwrap_or(Tip(Point::Origin, 0));
 
-        let mutable_slot = tip
+        let mut mutable_slot = tip
             .0
             .slot_or_default()
             .saturating_sub(self.roll_db.k_param());
@@ -142,7 +142,7 @@ impl N2NChainSyncHandler {
                 info!(?next, "next chainkv point");
                 let (slot, hash) = next.map_err(Error::server)?;
 
-                let tip = self
+                tip = self
                     .roll_db
                     .find_tip()
                     .map_err(Error::server)?
@@ -164,9 +164,24 @@ impl N2NChainSyncHandler {
                             return self.crawl_with_wal(Some(seq)).await;
                         } else {
                             info!(?self.cursor, "mutable but no WAL intersect, refreshing chainKV crawler");
+                            let oldest = self.roll_db.crawl_wal(None).next().unwrap();
 
                             // take new chainKV snapshot
                             crawler = self.roll_db.crawl_chain_from(self.cursor.map(|x| x.0));
+
+                            // update mutable point for new snapshot
+
+                            tip = self
+                                .roll_db
+                                .find_tip()
+                                .map_err(Error::server)?
+                                .map(db_tip_to_protocol)
+                                .unwrap_or(Tip(Point::Origin, 0));
+
+                            mutable_slot = tip
+                                .0
+                                .slot_or_default()
+                                .saturating_sub(self.roll_db.k_param());
 
                             // skip cursor (iterator starts at cursor)
                             crawler.next();

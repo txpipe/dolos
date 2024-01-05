@@ -1,4 +1,7 @@
+use std::time::Duration;
+
 use pallas::network::facades::PeerServer;
+use pallas::network::miniprotocols::keepalive;
 use serde::{Deserialize, Serialize};
 use tokio::join;
 use tokio::net::TcpListener;
@@ -26,9 +29,10 @@ pub struct Config {
 #[instrument(skip_all)]
 async fn peer_session(db: RollDB, peer: PeerServer) -> Result<(), Error> {
     let PeerServer {
-        blockfetch,
+        plexer,
         chainsync,
-        plexer_handle,
+        blockfetch,
+        keepalive,
         ..
     } = peer;
 
@@ -36,10 +40,11 @@ async fn peer_session(db: RollDB, peer: PeerServer) -> Result<(), Error> {
 
     let l1 = n2n_chainsync_handler.begin();
     let l2 = handle_blockfetch(db.clone(), blockfetch);
+    let l3 = handle_keepalive(keepalive);
 
-    let _ = join!(l1, l2);
+    let _ = join!(l1, l2, l3);
 
-    plexer_handle.abort();
+    plexer.abort().await;
 
     Ok(())
 }
@@ -63,4 +68,17 @@ pub async fn serve(config: Config, db: RollDB) -> Result<(), Error> {
 
         let _handle = tokio::spawn(async move { peer_session(db, peer).await });
     }
+}
+
+async fn handle_keepalive(mut keepalive: keepalive::Server) -> Result<(), Error> {
+    while keepalive
+        .keepalive_receive_and_respond()
+        .await
+        .map_err(Error::server)?
+        .is_some()
+    {
+        tokio::time::sleep(Duration::from_secs(15)).await
+    }
+
+    Ok(())
 }
