@@ -209,13 +209,6 @@ impl gasket::framework::Worker<Stage> for Worker {
     ) -> Result<(), WorkerError> {
         self.process_next(stage, unit).await
     }
-
-    async fn teardown(&mut self) -> Result<(), WorkerError> {
-        // TODO: doesn't work because teardown takes mutable ref but abort takes
-        // self.peer_session.abort();
-
-        Ok(())
-    }
 }
 
 #[derive(Stage)]
