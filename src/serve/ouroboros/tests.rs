@@ -7,7 +7,6 @@ use pallas::{
         miniprotocols::{Point, MAINNET_MAGIC},
     },
 };
-use tracing::info;
 
 const DUMMY_BLOCKS: [(u64, &str); 5] = [
     (

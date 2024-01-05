@@ -164,7 +164,6 @@ impl N2NChainSyncHandler {
                             return self.crawl_with_wal(Some(seq)).await;
                         } else {
                             info!(?self.cursor, "mutable but no WAL intersect, refreshing chainKV crawler");
-                            let oldest = self.roll_db.crawl_wal(None).next().unwrap();
 
                             // take new chainKV snapshot
                             crawler = self.roll_db.crawl_chain_from(self.cursor.map(|x| x.0));
