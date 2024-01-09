@@ -22,6 +22,13 @@ pub async fn serve(config: Config, wal: wal::Store, chain: chain::Store) -> Resu
     let service = sync::ChainSyncServiceImpl::new(wal, chain);
     let service = ChainSyncServiceServer::new(service);
 
+    let reflection = tonic_reflection::server::Builder::configure()
+        .register_encoded_file_descriptor_set(utxorpc::proto::cardano::v1::FILE_DESCRIPTOR_SET)
+        .register_encoded_file_descriptor_set(utxorpc::proto::sync::v1::FILE_DESCRIPTOR_SET)
+        .register_encoded_file_descriptor_set(protoc_wkt::google::protobuf::FILE_DESCRIPTOR_SET)
+        .build()
+        .unwrap();
+
     let mut server = Server::builder().accept_http1(true);
 
     if let Some(pem) = config.tls_client_ca_root {
@@ -39,6 +46,7 @@ pub async fn serve(config: Config, wal: wal::Store, chain: chain::Store) -> Resu
     server
         // GrpcWeb is over http1 so we must enable it.
         .add_service(tonic_web::enable(service))
+        .add_service(reflection)
         .serve(addr)
         .await
         .map_err(Error::server)?;
