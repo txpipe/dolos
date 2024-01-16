@@ -12,14 +12,15 @@ authors = ["Santiago Carmuega <santiago@carmuega.me>"]
 
 
 [dependencies]
-pallas = { git = "https://github.com/txpipe/pallas.git", features = ["unstable"] }
-# pallas = { path = "../pallas/pallas", features = ["unstable"] }
+# pallas = { git = "https://github.com/txpipe/pallas.git", features = ["unstable"] }
+pallas = { path = "../pallas/pallas", features = ["unstable"] }
 
 gasket = { version = "^0.5", features = ["derive"] }
 # gasket = { path = "../../construkts/gasket-rs/gasket", features = ["derive"] }
 
-utxorpc = { version = "1.0.0-alpha.1" }
+# utxorpc = { version = "1.0.0-alpha.1" }
 # utxorpc = { path = "../../utxorpc/rust-sdk" }
+utxorpc = { path = "../rust-sdk" }
 
 hex = "0.4.3"
 bech32 = "0.8.1"

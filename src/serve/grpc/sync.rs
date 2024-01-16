@@ -9,7 +9,7 @@ use tonic::{Request, Response, Status};
 use utxorpc::proto::sync::v1::*;
 
 fn bytes_to_hash(raw: &[u8]) -> Hash<32> {
-    let array: [u8; 32] = raw.try_into().unwrap();
+    let array: [u8; 32] = raw.try_into().unwrap(); // TODO ?
     Hash::<32>::new(array)
 }
 
