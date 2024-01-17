@@ -4,32 +4,66 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use futures_util::future::join;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tonic::transport::{Certificate, Server, ServerTlsConfig};
 
-use pallas::{crypto::hash::Hash, network::facades::PeerClient};
+use pallas::{
+    crypto::hash::Hash,
+    network::{
+        facades::PeerClient,
+        miniprotocols::{
+            chainsync::Tip,
+            txsubmission::{EraTxBody, EraTxId, TxIdAndSize},
+        },
+    },
+};
 use tracing::info;
 use utxorpc::proto::submit::v1::submit_service_server::SubmitServiceServer;
 
-use crate::prelude::*;
+use crate::{prelude::*, submit::grpc::submit::SubmitPeerHandler};
 
 mod submit;
 
+#[derive(Clone, Debug)]
 pub struct Transaction {
     hash: Hash<32>,
+    era: u16,
     bytes: Vec<u8>,
 }
 
+impl Into<TxIdAndSize<EraTxId>> for Transaction {
+    fn into(self) -> TxIdAndSize<EraTxId> {
+        TxIdAndSize(
+            EraTxId(self.era, self.hash.to_vec()),
+            self.bytes.len() as u32,
+        )
+    }
+}
+
+impl Into<EraTxBody> for Transaction {
+    fn into(self) -> EraTxBody {
+        EraTxBody(self.era, self.bytes)
+    }
+}
+
+pub struct InclusionPoint {
+    slot: u64,
+    height: u64,
+}
+
 pub struct Mempool {
+    pub tip: Option<Tip>,
     pub to_send: VecDeque<Transaction>,
     pub unacked: VecDeque<Transaction>,
-    pub acked: Vec<Transaction>,
+    pub acked: Vec<(Transaction, Option<InclusionPoint>)>,
 }
 
 impl Mempool {
     fn new() -> Self {
         Self {
+            tip: None,
             to_send: VecDeque::new(),
             unacked: VecDeque::new(),
             acked: Vec::new(),
@@ -58,22 +92,15 @@ pub async fn serve(config: Config) -> Result<(), Error> {
 
     // gRPC sends new transactions through `tx`
     // propagator receives transactions through `rx`
-    let (send_channel, mut _receive_channel) = mpsc::channel(32);
+    let (send_channel, receive_channel) = mpsc::channel(64);
 
     // propagator progresses txs through mempool -> unacked -> acked -> (pruned)
     let mempool = Arc::new(Mutex::new(Mempool::new()));
 
     // gRPC service
+
     let service = submit::SubmitServiceImpl::new(send_channel, mempool.clone());
     let service = SubmitServiceServer::new(service);
-
-    // handle propagating txs to peer and watching new blocks
-    let _conn = PeerClient::connect(config.peer_address, config.peer_magic)
-        .await
-        .map_err(|_| Error::config("could not connect to peer"));
-
-    // TODO
-    let _peer_handler = ();
 
     let reflection = tonic_reflection::server::Builder::configure()
         .register_encoded_file_descriptor_set(utxorpc::proto::cardano::v1::FILE_DESCRIPTOR_SET)
@@ -96,13 +123,23 @@ pub async fn serve(config: Config) -> Result<(), Error> {
 
     info!("serving via gRPC on address: {}", config.listen_address);
 
-    server
+    let grpc_server = server
         // GrpcWeb is over http1 so we must enable it.
         .add_service(tonic_web::enable(service))
         .add_service(reflection)
-        .serve(addr)
+        .serve(addr);
+
+    // handle propagating txs to peer and watching new blocks
+
+    let peer = PeerClient::connect(config.peer_address, config.peer_magic)
         .await
-        .map_err(Error::server)?;
+        .map_err(|_| Error::config("could not connect to peer"))?;
+
+    let mut peer_handler = SubmitPeerHandler::new(peer, receive_channel, mempool);
+
+    // ---
+
+    let _ = join(peer_handler.begin(), grpc_server);
 
     Ok(())
 }
