@@ -1913,7 +1913,7 @@ checksum = "c1b04fb49957986fdce4d6ee7a65027d55d4b6d2265e5848bbb507b58ccfdb6f"
 [[package]]
 name = "pallas"
 version = "0.21.0"
-source = "git+https://github.com/txpipe/pallas.git#ca27aa91acf2bc579f3f1e4e8885cf2284fa90df"
+source = "git+https://github.com/txpipe/pallas.git?branch=feat/alonzo-phase-1-validations#47f085c73b48ca64308cf29449b51a04fea47882"
 dependencies = [
  "pallas-addresses",
  "pallas-applying",
@@ -1933,7 +1933,7 @@ dependencies = [
 [[package]]
 name = "pallas-addresses"
 version = "0.21.0"
-source = "git+https://github.com/txpipe/pallas.git#ca27aa91acf2bc579f3f1e4e8885cf2284fa90df"
+source = "git+https://github.com/txpipe/pallas.git?branch=feat/alonzo-phase-1-validations#47f085c73b48ca64308cf29449b51a04fea47882"
 dependencies = [
  "base58",
  "bech32 0.9.1",
@@ -1948,8 +1948,9 @@ dependencies = [
 [[package]]
 name = "pallas-applying"
 version = "0.21.0"
-source = "git+https://github.com/txpipe/pallas.git#ca27aa91acf2bc579f3f1e4e8885cf2284fa90df"
+source = "git+https://github.com/txpipe/pallas.git?branch=feat/alonzo-phase-1-validations#47f085c73b48ca64308cf29449b51a04fea47882"
 dependencies = [
+ "hex",
  "pallas-addresses",
  "pallas-codec 0.21.0",
  "pallas-crypto 0.21.0",
@@ -1973,7 +1974,7 @@ dependencies = [
 [[package]]
 name = "pallas-codec"
 version = "0.21.0"
-source = "git+https://github.com/txpipe/pallas.git#ca27aa91acf2bc579f3f1e4e8885cf2284fa90df"
+source = "git+https://github.com/txpipe/pallas.git?branch=feat/alonzo-phase-1-validations#47f085c73b48ca64308cf29449b51a04fea47882"
 dependencies = [
  "hex",
  "minicbor 0.20.0",
@@ -1984,7 +1985,7 @@ dependencies = [
 [[package]]
 name = "pallas-configs"
 version = "0.21.0"
-source = "git+https://github.com/txpipe/pallas.git#ca27aa91acf2bc579f3f1e4e8885cf2284fa90df"
+source = "git+https://github.com/txpipe/pallas.git?branch=feat/alonzo-phase-1-validations#47f085c73b48ca64308cf29449b51a04fea47882"
 dependencies = [
  "base64 0.21.5",
  "hex",
@@ -2012,7 +2013,7 @@ dependencies = [
 [[package]]
 name = "pallas-crypto"
 version = "0.21.0"
-source = "git+https://github.com/txpipe/pallas.git#ca27aa91acf2bc579f3f1e4e8885cf2284fa90df"
+source = "git+https://github.com/txpipe/pallas.git?branch=feat/alonzo-phase-1-validations#47f085c73b48ca64308cf29449b51a04fea47882"
 dependencies = [
  "cryptoxide",
  "hex",
@@ -2025,7 +2026,7 @@ dependencies = [
 [[package]]
 name = "pallas-hardano"
 version = "0.21.0"
-source = "git+https://github.com/txpipe/pallas.git#ca27aa91acf2bc579f3f1e4e8885cf2284fa90df"
+source = "git+https://github.com/txpipe/pallas.git?branch=feat/alonzo-phase-1-validations#47f085c73b48ca64308cf29449b51a04fea47882"
 dependencies = [
  "binary-layout",
  "pallas-network 0.21.0",
@@ -2054,7 +2055,7 @@ dependencies = [
 [[package]]
 name = "pallas-network"
 version = "0.21.0"
-source = "git+https://github.com/txpipe/pallas.git#ca27aa91acf2bc579f3f1e4e8885cf2284fa90df"
+source = "git+https://github.com/txpipe/pallas.git?branch=feat/alonzo-phase-1-validations#47f085c73b48ca64308cf29449b51a04fea47882"
 dependencies = [
  "byteorder",
  "hex",
@@ -2071,7 +2072,7 @@ dependencies = [
 [[package]]
 name = "pallas-primitives"
 version = "0.21.0"
-source = "git+https://github.com/txpipe/pallas.git#ca27aa91acf2bc579f3f1e4e8885cf2284fa90df"
+source = "git+https://github.com/txpipe/pallas.git?branch=feat/alonzo-phase-1-validations#47f085c73b48ca64308cf29449b51a04fea47882"
 dependencies = [
  "base58",
  "bech32 0.9.1",
@@ -2086,7 +2087,7 @@ dependencies = [
 [[package]]
 name = "pallas-rolldb"
 version = "0.21.0"
-source = "git+https://github.com/txpipe/pallas.git#ca27aa91acf2bc579f3f1e4e8885cf2284fa90df"
+source = "git+https://github.com/txpipe/pallas.git?branch=feat/alonzo-phase-1-validations#47f085c73b48ca64308cf29449b51a04fea47882"
 dependencies = [
  "async-stream",
  "bincode",
@@ -2103,7 +2104,7 @@ dependencies = [
 [[package]]
 name = "pallas-traverse"
 version = "0.21.0"
-source = "git+https://github.com/txpipe/pallas.git#ca27aa91acf2bc579f3f1e4e8885cf2284fa90df"
+source = "git+https://github.com/txpipe/pallas.git?branch=feat/alonzo-phase-1-validations#47f085c73b48ca64308cf29449b51a04fea47882"
 dependencies = [
  "hex",
  "pallas-addresses",
@@ -2118,7 +2119,7 @@ dependencies = [
 [[package]]
 name = "pallas-txbuilder"
 version = "0.21.0"
-source = "git+https://github.com/txpipe/pallas.git#ca27aa91acf2bc579f3f1e4e8885cf2284fa90df"
+source = "git+https://github.com/txpipe/pallas.git?branch=feat/alonzo-phase-1-validations#47f085c73b48ca64308cf29449b51a04fea47882"
 dependencies = [
  "hex",
  "pallas-addresses",
@@ -2135,7 +2136,7 @@ dependencies = [
 [[package]]
 name = "pallas-utxorpc"
 version = "0.21.0"
-source = "git+https://github.com/txpipe/pallas.git#ca27aa91acf2bc579f3f1e4e8885cf2284fa90df"
+source = "git+https://github.com/txpipe/pallas.git?branch=feat/alonzo-phase-1-validations#47f085c73b48ca64308cf29449b51a04fea47882"
 dependencies = [
  "pallas-codec 0.21.0",
  "pallas-primitives",
@@ -2146,7 +2147,7 @@ dependencies = [
 [[package]]
 name = "pallas-wallet"
 version = "0.21.0"
-source = "git+https://github.com/txpipe/pallas.git#ca27aa91acf2bc579f3f1e4e8885cf2284fa90df"
+source = "git+https://github.com/txpipe/pallas.git?branch=feat/alonzo-phase-1-validations#47f085c73b48ca64308cf29449b51a04fea47882"
 dependencies = [
  "bech32 0.9.1",
  "bip39",
