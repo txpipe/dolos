@@ -7,7 +7,7 @@ use tonic::transport::{Certificate, Server, ServerTlsConfig};
 use tracing::info;
 use utxorpc::proto::sync::v1::chain_sync_service_server::ChainSyncServiceServer;
 
-use crate::prelude::*;
+use crate::{prelude::*, storage::applydb::ApplyDB};
 
 mod sync;
 
@@ -17,9 +17,14 @@ pub struct Config {
     tls_client_ca_root: Option<PathBuf>,
 }
 
-pub async fn serve(config: Config, wal: wal::Store, chain: chain::Store) -> Result<(), Error> {
+pub async fn serve(
+    config: Config,
+    wal: wal::Store,
+    chain: chain::Store,
+    ledger: ApplyDB,
+) -> Result<(), Error> {
     let addr = config.listen_address.parse().unwrap();
-    let service = sync::ChainSyncServiceImpl::new(wal, chain);
+    let service = sync::ChainSyncServiceImpl::new(wal, chain, ledger);
     let service = ChainSyncServiceServer::new(service);
 
     let reflection = tonic_reflection::server::Builder::configure()

@@ -21,6 +21,7 @@ pub async fn run(config: super::Config, _args: &Args) -> miette::Result<()> {
         config.serve,
         wal.clone(),
         chain.clone(),
+        ledger.clone(),
     ));
 
     dolos::sync::pipeline(

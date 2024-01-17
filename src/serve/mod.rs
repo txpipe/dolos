@@ -3,7 +3,7 @@ use pallas::storage::rolldb::{chain, wal};
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
-use crate::prelude::*;
+use crate::{prelude::*, storage::applydb::ApplyDB};
 
 pub mod grpc;
 pub mod ouroboros;
@@ -18,12 +18,22 @@ pub struct Config {
 ///
 /// Uses specified config to start listening for network connections on either
 /// gRPC, Ouroboros or both protocols.
-pub async fn serve(config: Config, wal: wal::Store, chain: chain::Store) -> Result<(), Error> {
+pub async fn serve(
+    config: Config,
+    wal: wal::Store,
+    chain: chain::Store,
+    ledger: ApplyDB,
+) -> Result<(), Error> {
     let mut tasks = vec![];
 
     if let Some(cfg) = config.grpc {
         info!("found gRPC config");
-        tasks.push(tokio::spawn(grpc::serve(cfg, wal.clone(), chain.clone())));
+        tasks.push(tokio::spawn(grpc::serve(
+            cfg,
+            wal.clone(),
+            chain.clone(),
+            ledger,
+        )));
     }
 
     if let Some(cfg) = config.ouroboros {
