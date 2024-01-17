@@ -110,7 +110,6 @@ pub struct SubmitPeerHandler {
     chainsync: chainsync::Client<HeaderContent>,
     blockfetch: blockfetch::Client,
     txsubmission: txsubmission::Client,
-    keepalive: keepalive::Client, // TODO
     receive_channel: Receiver<Vec<Transaction>>,
     mempool: Arc<Mutex<Mempool>>,
 }
@@ -125,15 +124,24 @@ impl SubmitPeerHandler {
             chainsync,
             blockfetch,
             txsubmission,
-            keepalive,
+            mut keepalive,
             ..
         } = peer;
+
+        tokio::spawn(async move {
+            loop {
+                keepalive
+                    .send_keepalive()
+                    .await
+                    .expect("couldn't send keepalive");
+                tokio::time::sleep(Duration::from_secs(15)).await;
+            }
+        });
 
         Self {
             chainsync,
             blockfetch,
             txsubmission,
-            keepalive,
             receive_channel,
             mempool,
         }
