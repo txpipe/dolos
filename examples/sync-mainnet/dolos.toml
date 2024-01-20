@@ -2,6 +2,7 @@
 peer_address = "relays-new.cardano-mainnet.iohk.io:3001"
 network_magic = 764824073
 network_id = 1
+phase1_validation_enabled = false
 
 [rolldb]
 path = "./tmp/rolldb"

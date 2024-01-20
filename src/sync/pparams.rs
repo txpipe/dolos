@@ -1,6 +1,9 @@
 use gasket::framework::{AsWorkError, WorkerError};
 use pallas::{
-    applying::{Environment, MultiEraProtParams},
+    applying::utils::{
+        AlonzoProtParams, ByronProtParams, Environment, FeePolicy, MultiEraProtParams,
+        ShelleyProtParams,
+    },
     ledger::{
         configs::{byron, shelley},
         traverse::{Era, MultiEraUpdate},
@@ -18,24 +21,23 @@ pub struct Genesis<'a> {
 fn pparams_from_byron_genesis(
     byron: &byron::GenesisFile,
 ) -> Result<MultiEraProtParams, WorkerError> {
-    let out =
-        pallas::applying::MultiEraProtParams::Byron(pallas::applying::types::ByronProtParams {
-            fee_policy: pallas::applying::types::FeePolicy {
-                summand: byron
-                    .block_version_data
-                    .tx_fee_policy
-                    .summand
-                    .parse()
-                    .or_panic()?,
-                multiplier: byron
-                    .block_version_data
-                    .tx_fee_policy
-                    .multiplier
-                    .parse()
-                    .or_panic()?,
-            },
-            max_tx_size: byron.block_version_data.max_tx_size.parse().or_panic()?,
-        });
+    let out = pallas::applying::MultiEraProtParams::Byron(ByronProtParams {
+        fee_policy: FeePolicy {
+            summand: byron
+                .block_version_data
+                .tx_fee_policy
+                .summand
+                .parse()
+                .or_panic()?,
+            multiplier: byron
+                .block_version_data
+                .tx_fee_policy
+                .multiplier
+                .parse()
+                .or_panic()?,
+        },
+        max_tx_size: byron.block_version_data.max_tx_size.parse().or_panic()?,
+    });
 
     Ok(out)
 }
@@ -43,15 +45,14 @@ fn pparams_from_byron_genesis(
 fn pparams_from_shelley_genesis(
     shelley: &shelley::GenesisFile,
 ) -> Result<MultiEraProtParams, WorkerError> {
-    let out =
-        pallas::applying::MultiEraProtParams::Shelley(pallas::applying::types::ShelleyProtParams {
-            fee_policy: pallas::applying::types::FeePolicy {
-                summand: shelley.protocol_params.min_fee_a,
-                multiplier: shelley.protocol_params.min_fee_b,
-            },
-            max_tx_size: shelley.protocol_params.max_tx_size,
-            min_lovelace: shelley.protocol_params.min_u_tx_o_value,
-        });
+    let out = pallas::applying::MultiEraProtParams::Shelley(ShelleyProtParams {
+        fee_policy: FeePolicy {
+            summand: shelley.protocol_params.min_fee_a,
+            multiplier: shelley.protocol_params.min_fee_b,
+        },
+        max_tx_size: shelley.protocol_params.max_tx_size,
+        min_lovelace: shelley.protocol_params.min_u_tx_o_value,
+    });
 
     Ok(out)
 }
@@ -90,7 +91,7 @@ fn apply_param_update(
                 warn!("found new byron fee policy update proposal");
 
                 let new = new.unwrap();
-                pparams.fee_policy = pallas::applying::types::FeePolicy {
+                pparams.fee_policy = FeePolicy {
                     summand: new.0 as u64,
                     multiplier: new.1 as u64,
                 };
@@ -135,30 +136,75 @@ fn apply_param_update(
     }
 }
 
+// TODO: perform proper protocol parameters update for the Alonzo era.
 pub fn compute_pparams(
     genesis: Genesis,
     ledger: &ApplyDB,
     epoch: u64,
 ) -> Result<Environment, WorkerError> {
-    let mut out = Environment {
-        block_slot: 0,
-        prot_magic: genesis.byron.protocol_consts.protocol_magic,
-        network_id: match genesis.shelley.network_id.as_deref() {
-            Some("Mainnet") => 0,
-            _ => 1,
-        },
-        prot_params: apply_era_hardfork(&genesis, 1)?,
-    };
+    if (290..=364).contains(&epoch) {
+        // Alonzo era
+        let max_tx_ex_mem: u32 = if (..306).contains(&epoch) {
+            10000000
+        } else if (306..319).contains(&epoch) {
+            11250000
+        } else {
+            14000000
+        };
+        let max_block_ex_mem: u64 = if (290..321).contains(&epoch) {
+            50000000
+        } else if (321..328).contains(&epoch) {
+            56000000
+        } else {
+            62000000
+        };
+        let prot_pps: AlonzoProtParams = AlonzoProtParams {
+            fee_policy: FeePolicy {
+                summand: 155381,
+                multiplier: 44,
+            },
+            max_tx_size: 16384,
+            max_block_ex_mem,
+            max_block_ex_steps: 40000000000,
+            max_tx_ex_mem,
+            max_tx_ex_steps: 10000000000,
+            max_val_size: 5000,
+            collateral_percent: 150,
+            max_collateral_inputs: 3,
+            coins_per_utxo_word: 34482,
+        };
+        let res: Environment = Environment {
+            block_slot: 0,
+            prot_magic: genesis.byron.protocol_consts.protocol_magic,
+            network_id: match genesis.shelley.network_id.as_deref() {
+                Some("Mainnet") => 0,
+                _ => 1,
+            },
+            prot_params: MultiEraProtParams::Alonzo(prot_pps),
+        };
+        Ok(res)
+    } else {
+        // Eras other than Alonzo
+        let mut out = Environment {
+            block_slot: 0,
+            prot_magic: genesis.byron.protocol_consts.protocol_magic,
+            network_id: match genesis.shelley.network_id.as_deref() {
+                Some("Mainnet") => 0,
+                _ => 1,
+            },
+            prot_params: apply_era_hardfork(&genesis, 1)?,
+        };
 
-    let updates = ledger.get_pparams_updates(epoch).or_panic()?;
+        let updates = ledger.get_pparams_updates(epoch).or_panic()?;
 
-    info!(epoch, updates = updates.len(), "computing pparams");
+        info!(epoch, updates = updates.len(), "computing pparams");
 
-    for (era, _, cbor) in updates {
-        let era = Era::try_from(era).or_panic()?;
-        let update = MultiEraUpdate::decode_for_era(era, &cbor).or_panic()?;
-        out.prot_params = apply_param_update(&genesis, era, out.prot_params, update)?;
+        for (era, _, cbor) in updates {
+            let era = Era::try_from(era).or_panic()?;
+            let update = MultiEraUpdate::decode_for_era(era, &cbor).or_panic()?;
+            out.prot_params = apply_param_update(&genesis, era, out.prot_params, update)?;
+        }
+
+        Ok(out)
     }
-
-    Ok(out)
 }
