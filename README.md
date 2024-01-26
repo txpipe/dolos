@@ -56,3 +56,14 @@ This new type of node will also provide features not currently available in the 
 # Unresolved questions
 - Performance gains and resource allocation optimizations are theoretical, these were extrapolated from our experience implementing Cardano data processing pipelines using components written in Rust. We won’t have a strict, quantifiable measurement until we develop a PoC of this project. To mitigate this issue, our development process will include performance benchmarks execution at each development milestone. Reports will be included as part of each release.
 - There’s some documentation lacking regarding local state queries wire-format which will need some reverse engineering from the mainstream Cardano node. We have experience with this approach but the level-of-effort associated with the task is hard to anticipate. To try mitigate this issue, we'll reach out to IOG for advise and documentation in case it's available.
+
+# Installation, Configuration and Operation
+There are multiple options for installation available - check out the latest [releases](https://github.com/txpipe/dolos/releases) and [installation guide](book/src/installation). 
+Quickest option: 
+
+```sh
+curl -fsSL https://github.com/txpipe/dolos/raw/main/.github/public/install.sh -o get-dolos.sh
+sudo sh ./get-dolos.sh
+```
+
+After installation, follow this [configuration guide](book/src/configuration). Guide on running dolos [here](book/src/running).
