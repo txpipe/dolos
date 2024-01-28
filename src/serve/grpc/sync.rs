@@ -88,7 +88,7 @@ impl chain_sync_service_server::ChainSyncService for ChainSyncServiceImpl {
         request: Request<DumpHistoryRequest>,
     ) -> Result<Response<DumpHistoryResponse>, Status> {
         let msg = request.into_inner();
-        let from = msg.start_token.map(|r| r.index).unwrap_or_default();
+        let from = msg.start_token.map(|r| r.slot).unwrap_or_default();
         let len = msg.max_items as usize + 1;
 
         let mut page: Vec<_> = self
@@ -100,7 +100,8 @@ impl chain_sync_service_server::ChainSyncService for ChainSyncServiceImpl {
         let next_token = if page.len() == len {
             let (next_slot, next_hash) = page.remove(len - 1);
             Some(BlockRef {
-                index: next_slot,
+                slot: next_slot,
+                height: 0,
                 hash: next_hash.to_vec().into(),
             })
         } else {
