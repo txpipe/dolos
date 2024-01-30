@@ -1,6 +1,9 @@
 use gasket::framework::{AsWorkError, WorkerError};
 use pallas::{
-    applying::{Environment, MultiEraProtParams},
+    applying::{
+        utils::{ByronProtParams, FeePolicy, ShelleyProtParams},
+        Environment, MultiEraProtParams,
+    },
     ledger::{
         configs::{byron, shelley},
         traverse::{Era, MultiEraUpdate},
@@ -18,24 +21,23 @@ pub struct Genesis<'a> {
 fn pparams_from_byron_genesis(
     byron: &byron::GenesisFile,
 ) -> Result<MultiEraProtParams, WorkerError> {
-    let out =
-        pallas::applying::MultiEraProtParams::Byron(pallas::applying::types::ByronProtParams {
-            fee_policy: pallas::applying::types::FeePolicy {
-                summand: byron
-                    .block_version_data
-                    .tx_fee_policy
-                    .summand
-                    .parse()
-                    .or_panic()?,
-                multiplier: byron
-                    .block_version_data
-                    .tx_fee_policy
-                    .multiplier
-                    .parse()
-                    .or_panic()?,
-            },
-            max_tx_size: byron.block_version_data.max_tx_size.parse().or_panic()?,
-        });
+    let out = pallas::applying::MultiEraProtParams::Byron(ByronProtParams {
+        fee_policy: FeePolicy {
+            summand: byron
+                .block_version_data
+                .tx_fee_policy
+                .summand
+                .parse()
+                .or_panic()?,
+            multiplier: byron
+                .block_version_data
+                .tx_fee_policy
+                .multiplier
+                .parse()
+                .or_panic()?,
+        },
+        max_tx_size: byron.block_version_data.max_tx_size.parse().or_panic()?,
+    });
 
     Ok(out)
 }
@@ -43,15 +45,14 @@ fn pparams_from_byron_genesis(
 fn pparams_from_shelley_genesis(
     shelley: &shelley::GenesisFile,
 ) -> Result<MultiEraProtParams, WorkerError> {
-    let out =
-        pallas::applying::MultiEraProtParams::Shelley(pallas::applying::types::ShelleyProtParams {
-            fee_policy: pallas::applying::types::FeePolicy {
-                summand: shelley.protocol_params.min_fee_a,
-                multiplier: shelley.protocol_params.min_fee_b,
-            },
-            max_tx_size: shelley.protocol_params.max_tx_size,
-            min_lovelace: shelley.protocol_params.min_u_tx_o_value,
-        });
+    let out = pallas::applying::MultiEraProtParams::Shelley(ShelleyProtParams {
+        fee_policy: FeePolicy {
+            summand: shelley.protocol_params.min_fee_a,
+            multiplier: shelley.protocol_params.min_fee_b,
+        },
+        max_tx_size: shelley.protocol_params.max_tx_size,
+        min_lovelace: shelley.protocol_params.min_u_tx_o_value,
+    });
 
     Ok(out)
 }
@@ -90,7 +91,7 @@ fn apply_param_update(
                 warn!("found new byron fee policy update proposal");
 
                 let new = new.unwrap();
-                pparams.fee_policy = pallas::applying::types::FeePolicy {
+                pparams.fee_policy = FeePolicy {
                     summand: new.0 as u64,
                     multiplier: new.1 as u64,
                 };

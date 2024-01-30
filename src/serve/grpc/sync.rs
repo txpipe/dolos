@@ -1,11 +1,11 @@
 use futures_core::Stream;
 use pallas::{
     crypto::hash::Hash,
-    storage::rolldb::{chain, wal},
+    storage::rolldb::{chain, wal, Error},
 };
 use std::pin::Pin;
 use tokio_stream::StreamExt;
-use tonic::{Request, Response, Status};
+use tonic::{Code, Request, Response, Status};
 use utxorpc::proto::sync::v1::*;
 
 fn bytes_to_hash(raw: &[u8]) -> Hash<32> {
@@ -135,23 +135,33 @@ impl chain_sync_service_server::ChainSyncService for ChainSyncServiceImpl {
 
         let has_intersect = !request.intersect.is_empty();
 
-        for intersect_attempt in request.intersect {
-            let slot = intersect_attempt.index;
-            let hash: [u8; 32] = intersect_attempt.hash.to_vec().try_into().unwrap();
+        for intersect in request.intersect {
+            let slot = intersect.index;
+            let hash: [u8; 32] = intersect.hash.to_vec().try_into().unwrap();
 
-            let wal_seq = match self.wal.find_wal_seq(Some((slot, hash.into()))) {
-                Ok(x) => x,
-                Err(_) => continue, // TODO, not found is an error, error type (kvtable) not public. pallas find_wal_seq should not accept option.
-            };
+            // start a RollStream where the first entry is the intersect point (if found)
+            let s = wal::RollStream::start_from_point(self.wal.clone(), (slot, hash.into())).map(
+                |res| {
+                    res.map(|log| roll_to_tip_response(log))
+                        .map_err(|e| match e {
+                            Error::NotFound => Status::not_found("intersect not found"),
+                            e => Status::internal(format!("kvtable error: {e:?}")),
+                        })
+                },
+            );
 
-            if let Some(x) = wal_seq {
-                // TODO: race cond? WAL may have pruned our entry (and the
-                // following which we want) since we found the seq above
-                // TODO: combine find_wal_seq/rollstream functionality
-                let s = wal::RollStream::start_after(self.wal.clone(), Some(x))
-                    .map(|log| Ok(roll_to_tip_response(log)));
+            let mut s = Box::pin(s);
 
-                return Ok(Response::new(Box::pin(s)));
+            // check the first entry so see if intersect was successful
+            match s.next().await {
+                // successfully intersected, return iter after intersect
+                Some(Ok(_)) => return Ok(Response::new(s)),
+                // try next intersect if intersect not found
+                Some(Err(s)) if s.code() == Code::NotFound => continue,
+                // return error encountered while trying to create iterator
+                Some(Err(s)) => return Err(Status::internal(format!("FT2 {s:?}"))),
+                // unreachable?
+                None => return Err(Status::internal("FT3")),
             }
         }
 
