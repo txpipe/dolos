@@ -18,7 +18,7 @@ pallas = { git = "https://github.com/txpipe/pallas.git", features = ["unstable"]
 gasket = { version = "^0.5", features = ["derive"] }
 # gasket = { path = "../../construkts/gasket-rs/gasket", features = ["derive"] }
 
-utxorpc = { git = "https://github.com/Mercurial/rust-sdk.git",branch = "feat/update-dependency-spec-0.3.0" }
+utxorpc-spec = "0.3.0"
 # utxorpc = { path = "../../utxorpc/rust-sdk" }
 
 hex = "0.4.3"
