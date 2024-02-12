@@ -6,7 +6,11 @@ use pallas::{
 use std::pin::Pin;
 use tokio_stream::StreamExt;
 use tonic::{Request, Response, Status};
-use utxorpc::proto::sync::v1::*;
+use utxorpc::proto::v1alpha::sync::{
+    chain_sync_service_server, follow_tip_response, AnyChainBlock, BlockRef, DumpHistoryRequest,
+    DumpHistoryResponse, FetchBlockRequest, FetchBlockResponse, FollowTipRequest,
+    FollowTipResponse,
+};
 
 fn bytes_to_hash(raw: &[u8]) -> Hash<32> {
     let array: [u8; 32] = raw.try_into().unwrap();
@@ -22,12 +26,12 @@ fn raw_to_anychain(raw: &[u8]) -> AnyChainBlock {
     let block = pallas::interop::utxorpc::map_block_cbor(raw);
 
     AnyChainBlock {
-        chain: utxorpc::proto::sync::v1::any_chain_block::Chain::Cardano(block).into(),
+        chain: utxorpc::proto::v1alpha::sync::any_chain_block::Chain::Cardano(block).into(),
     }
 }
 
 fn roll_to_tip_response(log: wal::Log) -> FollowTipResponse {
-    utxorpc::proto::sync::v1::FollowTipResponse {
+    utxorpc::proto::v1alpha::sync::FollowTipResponse {
         action: match log {
             wal::Log::Apply(_, _, block) => {
                 follow_tip_response::Action::Apply(raw_to_anychain(&block)).into()

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use tonic::transport::{Certificate, Server, ServerTlsConfig};
 
 use tracing::info;
-use utxorpc::proto::sync::v1::chain_sync_service_server::ChainSyncServiceServer;
+use utxorpc::proto::v1alpha::sync::chain_sync_service_server::ChainSyncServiceServer;
 
 use crate::prelude::*;
 
@@ -23,8 +23,8 @@ pub async fn serve(config: Config, wal: wal::Store, chain: chain::Store) -> Resu
     let service = ChainSyncServiceServer::new(service);
 
     let reflection = tonic_reflection::server::Builder::configure()
-        .register_encoded_file_descriptor_set(utxorpc::proto::cardano::v1::FILE_DESCRIPTOR_SET)
-        .register_encoded_file_descriptor_set(utxorpc::proto::sync::v1::FILE_DESCRIPTOR_SET)
+        .register_encoded_file_descriptor_set(utxorpc::proto::v1alpha::cardano::FILE_DESCRIPTOR_SET)
+        .register_encoded_file_descriptor_set(utxorpc::proto::v1alpha::sync::FILE_DESCRIPTOR_SET)
         .register_encoded_file_descriptor_set(protoc_wkt::google::protobuf::FILE_DESCRIPTOR_SET)
         .build()
         .unwrap();

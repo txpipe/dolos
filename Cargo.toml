@@ -18,7 +18,7 @@ pallas = { git = "https://github.com/txpipe/pallas.git", features = ["unstable"]
 gasket = { version = "^0.5", features = ["derive"] }
 # gasket = { path = "../../construkts/gasket-rs/gasket", features = ["derive"] }
 
-utxorpc = { version = "1.0.0-alpha.1" }
+utxorpc = { git = "https://github.com/Mercurial/rust-sdk.git",branch = "feat/update-dependency-spec-0.3.0" }
 # utxorpc = { path = "../../utxorpc/rust-sdk" }
 
 hex = "0.4.3"
@@ -46,7 +46,7 @@ tokio-stream = { version = "0.1.14", features = ["sync"] }
 futures-util = "0.3.28"
 async-stream = "0.3.5"
 serde_with = "3.4.0"
-mithril-client = { version = "0.5.7", optional = true }
+mithril-client = { version = "0.5.7", optional = true, features = ["fs"]}
 protoc-wkt = "1.0.0"
 
 [dev-dependencies]
