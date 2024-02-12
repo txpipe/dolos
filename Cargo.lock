@@ -303,7 +303,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "93f2635620bf0b9d4576eb7bb9a38a55df78bd1205d26fa994b25911a69f212f"
 dependencies = [
  "bitcoin_hashes",
- "rand_core 0.6.4",
+ "rand_core 0.5.1",
  "serde",
  "unicode-normalization",
 ]
@@ -1689,7 +1689,7 @@ dependencies = [
  "kes-summed-ed25519",
  "mithril-stm",
  "nom",
- "pallas-network 0.21.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "pallas-network 0.21.0",
  "rand_chacha",
  "rand_core 0.6.4",
  "rayon",
@@ -2004,7 +2004,7 @@ checksum = "65e3d525729ed4dbf7a41387e15daea2bba582837d4139b8a3b578aad099f67f"
 dependencies = [
  "cryptoxide",
  "hex",
- "pallas-codec 0.21.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "pallas-codec 0.21.0",
  "rand_core 0.6.4",
  "serde",
  "thiserror",
@@ -2045,8 +2045,8 @@ dependencies = [
  "byteorder",
  "hex",
  "itertools 0.10.5",
- "pallas-codec 0.20.0",
- "pallas-crypto 0.20.0",
+ "pallas-codec 0.21.0",
+ "pallas-crypto 0.21.0",
  "rand",
  "socket2 0.5.5",
  "thiserror",
