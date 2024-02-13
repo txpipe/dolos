@@ -1,8 +1,8 @@
 use gasket::framework::{AsWorkError, WorkerError};
 use pallas::{
-    applying::{
-        utils::{ByronProtParams, FeePolicy, ShelleyProtParams},
-        Environment, MultiEraProtParams,
+    applying::utils::{
+        AlonzoProtParams, ByronProtParams, Environment, FeePolicy, MultiEraProtParams,
+        ShelleyProtParams,
     },
     ledger::{
         configs::{byron, shelley},
@@ -136,30 +136,75 @@ fn apply_param_update(
     }
 }
 
+// TODO: perform proper protocol parameters update for the Alonzo era.
 pub fn compute_pparams(
     genesis: Genesis,
     ledger: &ApplyDB,
     epoch: u64,
 ) -> Result<Environment, WorkerError> {
-    let mut out = Environment {
-        block_slot: 0,
-        prot_magic: genesis.byron.protocol_consts.protocol_magic,
-        network_id: match genesis.shelley.network_id.as_deref() {
-            Some("Mainnet") => 0,
-            _ => 1,
-        },
-        prot_params: apply_era_hardfork(&genesis, 1)?,
-    };
+    if (290..=364).contains(&epoch) {
+        // Alonzo era
+        let max_tx_ex_mem: u32 = if (..306).contains(&epoch) {
+            10000000
+        } else if (306..319).contains(&epoch) {
+            11250000
+        } else {
+            14000000
+        };
+        let max_block_ex_mem: u64 = if (290..321).contains(&epoch) {
+            50000000
+        } else if (321..328).contains(&epoch) {
+            56000000
+        } else {
+            62000000
+        };
+        let prot_pps: AlonzoProtParams = AlonzoProtParams {
+            fee_policy: FeePolicy {
+                summand: 155381,
+                multiplier: 44,
+            },
+            max_tx_size: 16384,
+            max_block_ex_mem,
+            max_block_ex_steps: 40000000000,
+            max_tx_ex_mem,
+            max_tx_ex_steps: 10000000000,
+            max_val_size: 5000,
+            collateral_percent: 150,
+            max_collateral_inputs: 3,
+            coins_per_utxo_word: 34482,
+        };
+        let res: Environment = Environment {
+            block_slot: 0,
+            prot_magic: genesis.byron.protocol_consts.protocol_magic,
+            network_id: match genesis.shelley.network_id.as_deref() {
+                Some("Mainnet") => 0,
+                _ => 1,
+            },
+            prot_params: MultiEraProtParams::Alonzo(prot_pps),
+        };
+        Ok(res)
+    } else {
+        // Eras other than Alonzo
+        let mut out = Environment {
+            block_slot: 0,
+            prot_magic: genesis.byron.protocol_consts.protocol_magic,
+            network_id: match genesis.shelley.network_id.as_deref() {
+                Some("Mainnet") => 0,
+                _ => 1,
+            },
+            prot_params: apply_era_hardfork(&genesis, 1)?,
+        };
 
-    let updates = ledger.get_pparams_updates(epoch).or_panic()?;
+        let updates = ledger.get_pparams_updates(epoch).or_panic()?;
 
-    info!(epoch, updates = updates.len(), "computing pparams");
+        info!(epoch, updates = updates.len(), "computing pparams");
 
-    for (era, _, cbor) in updates {
-        let era = Era::try_from(era).or_panic()?;
-        let update = MultiEraUpdate::decode_for_era(era, &cbor).or_panic()?;
-        out.prot_params = apply_param_update(&genesis, era, out.prot_params, update)?;
+        for (era, _, cbor) in updates {
+            let era = Era::try_from(era).or_panic()?;
+            let update = MultiEraUpdate::decode_for_era(era, &cbor).or_panic()?;
+            out.prot_params = apply_param_update(&genesis, era, out.prot_params, update)?;
+        }
+
+        Ok(out)
     }
-
-    Ok(out)
 }
