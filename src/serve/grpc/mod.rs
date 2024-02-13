@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use tonic::transport::{Certificate, Server, ServerTlsConfig};
 
 use tracing::info;
-use utxorpc::proto::sync::v1::chain_sync_service_server::ChainSyncServiceServer;
+use utxorpc_spec::utxorpc::v1alpha as u5c;
 
 use crate::prelude::*;
 
@@ -20,11 +20,11 @@ pub struct Config {
 pub async fn serve(config: Config, wal: wal::Store, chain: chain::Store) -> Result<(), Error> {
     let addr = config.listen_address.parse().unwrap();
     let service = sync::ChainSyncServiceImpl::new(wal, chain);
-    let service = ChainSyncServiceServer::new(service);
+    let service = u5c::sync::chain_sync_service_server::ChainSyncServiceServer::new(service);
 
     let reflection = tonic_reflection::server::Builder::configure()
-        .register_encoded_file_descriptor_set(utxorpc::proto::cardano::v1::FILE_DESCRIPTOR_SET)
-        .register_encoded_file_descriptor_set(utxorpc::proto::sync::v1::FILE_DESCRIPTOR_SET)
+        .register_encoded_file_descriptor_set(u5c::cardano::FILE_DESCRIPTOR_SET)
+        .register_encoded_file_descriptor_set(u5c::sync::FILE_DESCRIPTOR_SET)
         .register_encoded_file_descriptor_set(protoc_wkt::google::protobuf::FILE_DESCRIPTOR_SET)
         .build()
         .unwrap();
