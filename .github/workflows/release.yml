@@ -127,7 +127,7 @@ jobs:
           mv .github/image/bin/dolos-Linux-x86_64 .github/image/bin/dolos-Linux-amd64
 
       - name: Build and push
-        uses: docker/build-push-action@v4
+        uses: docker/build-push-action@v5
         with:
           context: .github/image
           platforms: linux/arm64,linux/amd64
