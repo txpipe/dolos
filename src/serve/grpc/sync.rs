@@ -3,7 +3,7 @@ use pallas::{
     crypto::hash::Hash,
     storage::rolldb::{chain, wal, Error},
 };
-use std::pin::Pin;
+use std::{ops::Deref, pin::Pin};
 use tokio_stream::StreamExt;
 use tonic::{Code, Request, Response, Status};
 use utxorpc::proto::sync::v1::*;
@@ -133,44 +133,13 @@ impl chain_sync_service_server::ChainSyncService for ChainSyncServiceImpl {
     ) -> Result<Response<Self::FollowTipStream>, tonic::Status> {
         let request = request.into_inner();
 
-        let has_intersect = !request.intersect.is_empty();
+        let intersect: Vec<_> = request
+            .intersect
+            .iter()
+            .map(|x| (x.index, bytes_to_hash(&x.hash)))
+            .collect();
 
-        for intersect in request.intersect {
-            let slot = intersect.index;
-            let hash: [u8; 32] = intersect.hash.to_vec().try_into().unwrap();
-
-            // start a RollStream where the first entry is the intersect point (if found)
-            let s = wal::RollStream::start_from_point(self.wal.clone(), (slot, hash.into())).map(
-                |res| {
-                    res.map(|log| roll_to_tip_response(log))
-                        .map_err(|e| match e {
-                            Error::NotFound => Status::not_found("intersect not found"),
-                            e => Status::internal(format!("kvtable error: {e:?}")),
-                        })
-                },
-            );
-
-            let mut s = Box::pin(s);
-
-            // check the first entry so see if intersect was successful
-            match s.next().await {
-                // successfully intersected, return iter after intersect
-                Some(Ok(_)) => return Ok(Response::new(s)),
-                // try next intersect if intersect not found
-                Some(Err(s)) if s.code() == Code::NotFound => continue,
-                // return error encountered while trying to create iterator
-                Some(Err(s)) => return Err(Status::internal(format!("FT2 {s:?}"))),
-                // unreachable?
-                None => return Err(Status::internal("FT3")),
-            }
-        }
-
-        // intersects were provided but we couldn't intersect WAL using them
-        if has_intersect {
-            return Err(Status::not_found("could not find intersect"));
-        }
-
-        let s = wal::RollStream::start_after(self.wal.clone(), None)
+        let s = wal::RollStream::intersect(self.wal.clone(), intersect)
             .map(|log| Ok(roll_to_tip_response(log)));
 
         Ok(Response::new(Box::pin(s)))

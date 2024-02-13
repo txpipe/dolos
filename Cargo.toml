@@ -12,8 +12,8 @@ authors = ["Santiago Carmuega <santiago@carmuega.me>"]
 
 
 [dependencies]
-pallas = { git = "https://github.com/txpipe/pallas.git", rev = "691b6059e25b08bbe54cf8122d812bf37dd492e1" , features = ["unstable"] }
-# pallas = { path = "../pallas/pallas", features = ["unstable"] }
+# pallas = { version = "^0.23", features = ["unstable"] }
+pallas = { path = "../pallas/pallas", features = ["unstable"] }
 
 gasket = { version = "^0.5", features = ["derive"] }
 # gasket = { path = "../../construkts/gasket-rs/gasket", features = ["derive"] }
