@@ -93,6 +93,10 @@ async fn fetch_and_validate_snapshot(args: &Args) -> Result<(), mithril_client::
         .download_unpack(&snapshot, target_directory)
         .await?;
 
+    if let Err(e) = client.snapshot().add_statistics(&snapshot).await {
+        warn!("failed incrementing snapshot download statistics: {:?}", e);
+    }
+
     let message = MessageBuilder::new()
         .compute_snapshot_message(&certificate, target_directory)
         .await?;

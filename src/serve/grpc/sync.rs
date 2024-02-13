@@ -1,12 +1,12 @@
 use futures_core::Stream;
 use pallas::{
     crypto::hash::Hash,
-    storage::rolldb::{chain, wal, Error},
+    storage::rolldb::{chain, wal},
 };
-use std::{ops::Deref, pin::Pin};
+use std::pin::Pin;
 use tokio_stream::StreamExt;
-use tonic::{Code, Request, Response, Status};
-use utxorpc::proto::sync::v1::*;
+use tonic::{Request, Response, Status};
+use utxorpc_spec::utxorpc::v1alpha as u5c;
 
 fn bytes_to_hash(raw: &[u8]) -> Hash<32> {
     let array: [u8; 32] = raw.try_into().unwrap();
@@ -18,22 +18,22 @@ fn bytes_to_hash(raw: &[u8]) -> Hash<32> {
 //     AnyChainBlock { chain: Some(block) }
 // }
 
-fn raw_to_anychain(raw: &[u8]) -> AnyChainBlock {
+fn raw_to_anychain(raw: &[u8]) -> u5c::sync::AnyChainBlock {
     let block = pallas::interop::utxorpc::map_block_cbor(raw);
 
-    AnyChainBlock {
-        chain: utxorpc::proto::sync::v1::any_chain_block::Chain::Cardano(block).into(),
+    u5c::sync::AnyChainBlock {
+        chain: u5c::sync::any_chain_block::Chain::Cardano(block).into(),
     }
 }
 
-fn roll_to_tip_response(log: wal::Log) -> FollowTipResponse {
-    utxorpc::proto::sync::v1::FollowTipResponse {
+fn roll_to_tip_response(log: wal::Log) -> u5c::sync::FollowTipResponse {
+    u5c::sync::FollowTipResponse {
         action: match log {
             wal::Log::Apply(_, _, block) => {
-                follow_tip_response::Action::Apply(raw_to_anychain(&block)).into()
+                u5c::sync::follow_tip_response::Action::Apply(raw_to_anychain(&block)).into()
             }
             wal::Log::Undo(_, _, block) => {
-                follow_tip_response::Action::Undo(raw_to_anychain(&block)).into()
+                u5c::sync::follow_tip_response::Action::Undo(raw_to_anychain(&block)).into()
             }
             // TODO: shouldn't we have a u5c event for origin?
             wal::Log::Origin => None,
@@ -54,14 +54,14 @@ impl ChainSyncServiceImpl {
 }
 
 #[async_trait::async_trait]
-impl chain_sync_service_server::ChainSyncService for ChainSyncServiceImpl {
+impl u5c::sync::chain_sync_service_server::ChainSyncService for ChainSyncServiceImpl {
     type FollowTipStream =
-        Pin<Box<dyn Stream<Item = Result<FollowTipResponse, Status>> + Send + 'static>>;
+        Pin<Box<dyn Stream<Item = Result<u5c::sync::FollowTipResponse, Status>> + Send + 'static>>;
 
     async fn fetch_block(
         &self,
-        request: Request<FetchBlockRequest>,
-    ) -> Result<Response<FetchBlockResponse>, Status> {
+        request: Request<u5c::sync::FetchBlockRequest>,
+    ) -> Result<Response<u5c::sync::FetchBlockResponse>, Status> {
         let message = request.into_inner();
 
         let blocks: Result<Vec<_>, _> = message
@@ -78,15 +78,15 @@ impl chain_sync_service_server::ChainSyncService for ChainSyncServiceImpl {
             .map(|b| raw_to_anychain(b))
             .collect();
 
-        let response = FetchBlockResponse { block: out };
+        let response = u5c::sync::FetchBlockResponse { block: out };
 
         Ok(Response::new(response))
     }
 
     async fn dump_history(
         &self,
-        request: Request<DumpHistoryRequest>,
-    ) -> Result<Response<DumpHistoryResponse>, Status> {
+        request: Request<u5c::sync::DumpHistoryRequest>,
+    ) -> Result<Response<u5c::sync::DumpHistoryResponse>, Status> {
         let msg = request.into_inner();
         let from = msg.start_token.map(|r| r.index).unwrap_or_default();
         let len = msg.max_items as usize + 1;
@@ -99,7 +99,7 @@ impl chain_sync_service_server::ChainSyncService for ChainSyncServiceImpl {
 
         let next_token = if page.len() == len {
             let (next_slot, next_hash) = page.remove(len - 1);
-            Some(BlockRef {
+            Some(u5c::sync::BlockRef {
                 index: next_slot,
                 hash: next_hash.to_vec().into(),
             })
@@ -119,7 +119,7 @@ impl chain_sync_service_server::ChainSyncService for ChainSyncServiceImpl {
             .map(|raw| raw_to_anychain(&raw))
             .collect();
 
-        let response = DumpHistoryResponse {
+        let response = u5c::sync::DumpHistoryResponse {
             block: blocks,
             next_token,
         };
@@ -129,7 +129,7 @@ impl chain_sync_service_server::ChainSyncService for ChainSyncServiceImpl {
 
     async fn follow_tip(
         &self,
-        request: Request<FollowTipRequest>,
+        request: Request<u5c::sync::FollowTipRequest>,
     ) -> Result<Response<Self::FollowTipStream>, tonic::Status> {
         let request = request.into_inner();
 
