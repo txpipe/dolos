@@ -129,9 +129,17 @@ impl u5c::sync::chain_sync_service_server::ChainSyncService for ChainSyncService
 
     async fn follow_tip(
         &self,
-        _request: Request<u5c::sync::FollowTipRequest>,
+        request: Request<u5c::sync::FollowTipRequest>,
     ) -> Result<Response<Self::FollowTipStream>, tonic::Status> {
-        let s = wal::RollStream::start_after(self.wal.clone(), None)
+        let request = request.into_inner();
+
+        let intersect: Vec<_> = request
+            .intersect
+            .iter()
+            .map(|x| (x.index, bytes_to_hash(&x.hash)))
+            .collect();
+
+        let s = wal::RollStream::intersect(self.wal.clone(), intersect)
             .map(|log| Ok(roll_to_tip_response(log)));
 
         Ok(Response::new(Box::pin(s)))
