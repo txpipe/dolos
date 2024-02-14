@@ -1,5 +1,6 @@
 [grpc]
 listen_address = "[::]:50052"
 prune_after_slots = 10000
-peer_addresses = ["127.0.0.1:30014"]
+#peer_addresses = ["127.0.0.1:30014"]
+peer_addresses = ["relays-new.cardano-mainnet.iohk.io:3001"]
 peer_magic = 764824073
