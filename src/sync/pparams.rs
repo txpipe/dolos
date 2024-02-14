@@ -1,8 +1,8 @@
 use gasket::framework::{AsWorkError, WorkerError};
 use pallas::{
     applying::utils::{
-        AlonzoProtParams, ByronProtParams, Environment, FeePolicy, MultiEraProtParams,
-        ShelleyProtParams,
+        AlonzoProtParams, BabbageProtParams, ByronProtParams, Environment, FeePolicy,
+        MultiEraProtParams, ShelleyProtParams,
     },
     ledger::{
         configs::{byron, shelley},
@@ -173,7 +173,7 @@ pub fn compute_pparams(
             max_collateral_inputs: 3,
             coins_per_utxo_word: 34482,
         };
-        let res: Environment = Environment {
+        Ok(Environment {
             block_slot: 0,
             prot_magic: genesis.byron.protocol_consts.protocol_magic,
             network_id: match genesis.shelley.network_id.as_deref() {
@@ -181,10 +181,40 @@ pub fn compute_pparams(
                 _ => 1,
             },
             prot_params: MultiEraProtParams::Alonzo(prot_pps),
+        })
+    } else if epoch >= 365 {
+        // Babbage era
+        let max_block_ex_steps: u64 = if (365..=393).contains(&epoch) {
+            40000000000
+        } else {
+            20000000000
         };
-        Ok(res)
+        let prot_pps: BabbageProtParams = BabbageProtParams {
+            fee_policy: FeePolicy {
+                summand: 155381,
+                multiplier: 44,
+            },
+            max_tx_size: 16384,
+            max_block_ex_mem: 62000000,
+            max_block_ex_steps,
+            max_tx_ex_mem: 14000000,
+            max_tx_ex_steps: 10000000000,
+            max_val_size: 5000,
+            collateral_percent: 150,
+            max_collateral_inputs: 3,
+            coins_per_utxo_word: 4310,
+        };
+        Ok(Environment {
+            block_slot: 0,
+            prot_magic: genesis.byron.protocol_consts.protocol_magic,
+            network_id: match genesis.shelley.network_id.as_deref() {
+                Some("Mainnet") => 0,
+                _ => 1,
+            },
+            prot_params: MultiEraProtParams::Babbage(prot_pps),
+        })
     } else {
-        // Eras other than Alonzo
+        // Eras prior to Alonzo and Babbage
         let mut out = Environment {
             block_slot: 0,
             prot_magic: genesis.byron.protocol_consts.protocol_magic,
