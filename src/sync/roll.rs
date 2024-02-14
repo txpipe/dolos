@@ -107,8 +107,29 @@ impl Worker {}
 #[async_trait::async_trait(?Send)]
 impl gasket::framework::Worker<Stage> for Worker {
     async fn bootstrap(stage: &Stage) -> Result<Self, WorkerError> {
-        let last_seq_chain = stage.store.find_wal_seq(stage.cursor_chain).or_panic()?;
-        let last_seq_ledger = stage.store.find_wal_seq(stage.cursor_ledger).or_panic()?;
+        let last_seq_chain = if let Some(cursor) = stage.cursor_chain {
+            stage
+                .store
+                .find_wal_seq(&[cursor])
+                .or_panic()?
+                .ok_or(Error::server("could not find chain cursor on WAL"))
+                .or_panic()?
+                .into()
+        } else {
+            None
+        };
+
+        let last_seq_ledger = if let Some(cursor) = stage.cursor_ledger {
+            stage
+                .store
+                .find_wal_seq(&[cursor])
+                .or_panic()?
+                .ok_or(Error::server("could not find chain cursor on WAL"))
+                .or_panic()?
+                .into()
+        } else {
+            None
+        };
 
         Ok(Self {
             last_seq_chain,
