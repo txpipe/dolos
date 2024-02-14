@@ -1,30 +1,32 @@
-use std::{
-    collections::VecDeque,
-    path::PathBuf,
-    sync::{Arc, Mutex},
-};
+use std::{path::PathBuf, sync::Arc};
 
-use futures_util::future::join;
+use gasket::{
+    messaging::{RecvPort, SendPort},
+    runtime::Policy,
+};
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
-use tonic::transport::{Certificate, Server, ServerTlsConfig};
+use tokio::sync::{Notify, RwLock};
 
 use pallas::{
     crypto::hash::Hash,
-    network::{
-        facades::PeerClient,
-        miniprotocols::{
-            chainsync::Tip,
-            txsubmission::{EraTxBody, EraTxId, TxIdAndSize},
-        },
-    },
+    network::miniprotocols::txsubmission::{EraTxBody, EraTxId, TxIdAndSize},
 };
-use tracing::info;
-use utxorpc::proto::submit::v1::submit_service_server::SubmitServiceServer;
 
-use crate::{prelude::*, submit::grpc::submit::SubmitPeerHandler};
+use crate::prelude::*;
 
-mod submit;
+/*
+    create notifier, mempool stage controls notifier, grpc clones receiver into each endpoint
+    create mpsc, gRPC stage clones sender into each endpoint, mempool stage receives new txs
+    create RwLock of propagated vec, used to instantiate mempool stage, cloned into each grpc endpoint for reads
+
+    gRPC stage clones a mpsc sender into each endpoint task, which sends newTxs to mempool stage
+    gRPC stage clones a RwLock of the mempool stage propagated field
+    gRPC stage clones a notifier receiver into each endpoint task (WaitForStreams), wait for tip change then .read the propagated field
+*/
+
+mod endpoints;
+mod mempool;
+mod propagator;
 
 #[derive(Clone, Debug)]
 pub struct Transaction {
@@ -48,98 +50,65 @@ impl Into<EraTxBody> for Transaction {
     }
 }
 
-pub struct InclusionPoint {
-    slot: u64,
-    height: u64,
-}
-
-pub struct Mempool {
-    pub tip: Option<Tip>,
-    pub to_send: VecDeque<Transaction>,
-    pub unacked: VecDeque<Transaction>,
-    pub acked: Vec<(Transaction, Option<InclusionPoint>)>,
-}
-
-impl Mempool {
-    fn new() -> Self {
-        Self {
-            tip: None,
-            to_send: VecDeque::new(),
-            unacked: VecDeque::new(),
-            acked: Vec::new(),
-        }
-    }
-
-    fn add_txs(&mut self, txs: Vec<Transaction>) {
-        self.to_send.extend(txs)
-    }
-}
-
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Config {
-    listen_address: String,
-    peer_address: String,
-    peer_magic: u64,
+    pub listen_address: String,
     tls_client_ca_root: Option<PathBuf>,
+    prune_after_slots: u64,
+    peer_addresses: Vec<String>,
+    peer_magic: u64,
 }
 
-// we need to watch new blocks from the peer to detect acknowledged txs in new blocks OR
-// we need to take txs from a mempool and propagate them to the peer
-// we need to receive txs from gRPC and add them to a mempool
+pub fn pipeline(config: Config) -> Result<gasket::daemon::Daemon, Error> {
+    let mempool_txs = Arc::new(RwLock::new(Vec::new()));
+    let change_notifier = Arc::new(Notify::new());
 
-pub async fn serve(config: Config) -> Result<(), Error> {
-    let addr = config.listen_address.parse().unwrap();
+    let (grpc_send_txs_channel, grpc_receive_txs_channel) =
+        gasket::messaging::tokio::mpsc_channel(64);
 
-    // gRPC sends new transactions through `tx`
-    // propagator receives transactions through `rx`
-    let (send_channel, receive_channel) = mpsc::channel(64);
+    let endpoints_stage = endpoints::Stage::new(
+        config.listen_address,
+        config.tls_client_ca_root,
+        grpc_send_txs_channel,
+        mempool_txs.clone(),
+        change_notifier.clone(),
+    );
 
-    // propagator progresses txs through mempool -> unacked -> acked -> (pruned)
-    let mempool = Arc::new(Mutex::new(Mempool::new()));
+    let mut mempool_stage = mempool::Stage::new(
+        mempool_txs.clone(),
+        change_notifier.clone(),
+        config.prune_after_slots,
+    );
 
-    // gRPC service
+    // connect mempool stage to gRPC service
+    // mempool stage (sc) has a single consumer receiving messages (txs to add
+    // to mempool) from many different gRPC tasks (mp)
+    mempool_stage
+        .upstream_submit_endpoint
+        .connect(grpc_receive_txs_channel);
 
-    let service = submit::SubmitServiceImpl::new(send_channel, mempool.clone());
-    let service = SubmitServiceServer::new(service);
+    // mempool_stage.upstream_block_monitor.connect();
 
-    let reflection = tonic_reflection::server::Builder::configure()
-        .register_encoded_file_descriptor_set(utxorpc::proto::cardano::v1::FILE_DESCRIPTOR_SET)
-        .register_encoded_file_descriptor_set(utxorpc::proto::submit::v1::FILE_DESCRIPTOR_SET)
-        .register_encoded_file_descriptor_set(protoc_wkt::google::protobuf::FILE_DESCRIPTOR_SET)
-        .build()
-        .unwrap();
+    let mut propagator_stage = propagator::Stage::new(config.peer_addresses, config.peer_magic);
 
-    let mut server = Server::builder().accept_http1(true);
+    // connect mempool and propagator stages
 
-    if let Some(pem) = config.tls_client_ca_root {
-        let pem = std::env::current_dir().unwrap().join(pem);
-        let pem = std::fs::read_to_string(pem).map_err(Error::config)?;
-        let pem = Certificate::from_pem(pem);
+    let (mempool_to_propagator_send, mempool_to_propagator_recv) =
+        gasket::messaging::tokio::mpsc_channel(64);
 
-        let tls = ServerTlsConfig::new().client_ca_root(pem);
+    mempool_stage
+        .downstream_propagator
+        .connect(mempool_to_propagator_send);
 
-        server = server.tls_config(tls).map_err(Error::config)?;
-    }
+    propagator_stage
+        .upstream_mempool
+        .connect(mempool_to_propagator_recv);
 
-    info!("serving via gRPC on address: {}", config.listen_address);
+    // spawn stages
 
-    let grpc_server = server
-        // GrpcWeb is over http1 so we must enable it.
-        .add_service(tonic_web::enable(service))
-        .add_service(reflection)
-        .serve(addr);
+    let endpoints = gasket::runtime::spawn_stage(endpoints_stage, Policy::default());
+    let mempool = gasket::runtime::spawn_stage(mempool_stage, Policy::default());
+    let propagator = gasket::runtime::spawn_stage(propagator_stage, Policy::default());
 
-    // handle propagating txs to peer and watching new blocks
-
-    let peer = PeerClient::connect(config.peer_address, config.peer_magic)
-        .await
-        .map_err(|_| Error::config("could not connect to peer"))?;
-
-    let mut peer_handler = SubmitPeerHandler::new(peer, receive_channel, mempool);
-
-    // ---
-
-    let _ = join(peer_handler.begin(), grpc_server);
-
-    Ok(())
+    Ok(gasket::daemon::Daemon(vec![endpoints, mempool, propagator]))
 }
