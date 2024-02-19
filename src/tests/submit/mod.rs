@@ -35,17 +35,21 @@ mod tests {
 
         let config: crate::submit::Config = s.build().unwrap().try_deserialize().unwrap();
 
-        let daemon = crate::submit::grpc::pipeline(config.grpc).unwrap();
+        let wal = pallas::storage::rolldb::wal::Store::open("tmp", 10).unwrap();
 
-        let cbor = load_test_block("alonzo27.block");
+        let daemon = crate::submit::grpc::pipeline(config.grpc, wal, true).unwrap();
 
-        let block = MultiEraBlock::decode(&cbor).unwrap();
-        let txs = block.txs();
-        let tx = txs[0].encode();
+        // let cbor = load_test_block("alonzo27.block");
+
+        // let block = MultiEraBlock::decode(&cbor).unwrap();
+        // let txs = block.txs();
+        // let tx = txs[0].encode();
+
+        let tx = "84a30081825820af9f7a12bcc0825957a4fd909c8275866755e8a9178b51582d4ee938fb51cdee000181a200581d60b6a03720b0c3dae80b0e38b08f904eadb5372486f56a8e7a04af7c10011b0000000241fc7a40021a000f4240a100818258207dc72470db3c452fafdce8910a5da38fa763c2893c524f4a3b3610049fc34e1458406299bf7fd991d02af9822fdd72d71d7eede3f8d88545961a4ff714e4bdc8802fc94a8076c8407b7c8a6b9c49a785a29553f8e045ca3096394f7ba1d2090ee801f5f6";
 
         let request = SubmitTxRequest {
             tx: vec![AnyChainTx {
-                r#type: Some(Type::Raw(tx.into())),
+                r#type: Some(Type::Raw(hex::decode(tx).unwrap().into())),
             }],
         };
 
@@ -55,13 +59,9 @@ mod tests {
             .await
             .unwrap();
 
-        info!("submitting tx...");
-
         tokio::time::sleep(Duration::from_secs(2)).await;
 
-        submit_client.submit_tx(request.clone()).await.unwrap();
-
-        tokio::time::sleep(Duration::from_secs(30)).await;
+        info!("submitting tx...");
 
         submit_client.submit_tx(request.clone()).await.unwrap();
 

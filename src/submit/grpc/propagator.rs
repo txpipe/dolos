@@ -242,7 +242,6 @@ pub struct Stage {
     pub peer_addresses: Vec<String>,
     pub peer_magic: u64,
     pub broadcast: (Sender<Vec<Transaction>>, Receiver<Vec<Transaction>>),
-    // pub broadcast_send: Sender<Vec<Transaction>>,
     pub upstream_mempool: MempoolReceiver,
     // #[metric]
     // received_txs: gasket::metrics::Counter,
@@ -261,9 +260,7 @@ impl Stage {
     }
 }
 
-pub struct Worker {}
-
-impl Worker {}
+pub struct Worker;
 
 #[async_trait::async_trait(?Send)]
 impl gasket::framework::Worker<Stage> for Worker {
@@ -293,7 +290,7 @@ impl gasket::framework::Worker<Stage> for Worker {
             });
         }
 
-        Ok(Self {})
+        Ok(Self)
     }
 
     /// Receive transactions from the global mempool

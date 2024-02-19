@@ -1,3 +1,4 @@
+use pallas::storage::rolldb::wal;
 use serde::{Deserialize, Serialize};
 
 use crate::prelude::*;
@@ -10,8 +11,10 @@ pub struct Config {
 }
 
 /// Serve remote requests
-pub async fn serve(config: Config) -> Result<(), Error> {
-    grpc::pipeline(config.grpc).map_err(Error::server)?.block();
+pub async fn serve(config: Config, wal: wal::Store, sync: bool) -> Result<(), Error> {
+    grpc::pipeline(config.grpc, wal, sync)
+        .map_err(Error::server)?
+        .block();
 
     Ok(())
 }

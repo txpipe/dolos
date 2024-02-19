@@ -5,7 +5,9 @@ pub struct Args {}
 pub async fn run(config: super::Config, _args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging)?;
 
-    dolos::submit::serve(config.submit).await?;
+    let (wal, _, _) = crate::common::open_data_stores(&config)?;
+
+    dolos::submit::serve(config.submit, wal, true).await?;
 
     Ok(())
 }

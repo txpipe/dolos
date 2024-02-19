@@ -10,9 +10,13 @@ use tokio::sync::{Notify, RwLock};
 use pallas::{
     crypto::hash::Hash,
     network::miniprotocols::txsubmission::{EraTxBody, EraTxId, TxIdAndSize},
+    storage::rolldb::wal,
 };
 
-use crate::prelude::*;
+use crate::{
+    prelude::*,
+    sync::{self, roll},
+};
 
 /*
     create notifier, mempool stage controls notifier, grpc clones receiver into each endpoint
@@ -26,6 +30,7 @@ use crate::prelude::*;
 
 mod endpoints;
 mod mempool;
+mod monitor;
 mod propagator;
 
 #[derive(Clone, Debug)]
@@ -59,12 +64,47 @@ pub struct Config {
     peer_magic: u64,
 }
 
-pub fn pipeline(config: Config) -> Result<gasket::daemon::Daemon, Error> {
+pub fn pipeline(
+    config: Config,
+    wal: wal::Store,
+    sync: bool,
+) -> Result<gasket::daemon::Daemon, Error> {
     let mempool_txs = Arc::new(RwLock::new(Vec::new()));
     let change_notifier = Arc::new(Notify::new());
 
     let (grpc_send_txs_channel, grpc_receive_txs_channel) =
         gasket::messaging::tokio::mpsc_channel(64);
+
+    let cursor = wal.find_tip().map_err(Error::storage)?;
+
+    let last_wal_seq = if let Some(c) = cursor {
+        wal.find_wal_seq(c).unwrap_or_default()
+    } else {
+        0
+    };
+
+    // create stages
+
+    let mut tethers = vec![];
+
+    // spawn pull/roll stage if we need to handle syncing the wal (not being run
+    // in conjunction with sync stage)
+    if sync {
+        let mut pull = sync::pull::Stage::new(
+            config.peer_addresses[0].clone(),
+            config.peer_magic,
+            sync::pull::Intersection::Tip,
+        );
+
+        let mut roll = sync::roll::Stage::new(wal.clone(), cursor, cursor);
+
+        let (pull_to_roll_send, pull_to_roll_recv) = gasket::messaging::tokio::mpsc_channel(64);
+        pull.downstream.connect(pull_to_roll_send);
+        roll.upstream.connect(pull_to_roll_recv);
+
+        tethers.push(gasket::runtime::spawn_stage(pull, Policy::default()));
+        tethers.push(gasket::runtime::spawn_stage(roll, Policy::default()));
+    }
 
     let endpoints_stage = endpoints::Stage::new(
         config.listen_address,
@@ -80,6 +120,10 @@ pub fn pipeline(config: Config) -> Result<gasket::daemon::Daemon, Error> {
         config.prune_after_slots,
     );
 
+    let mut propagator_stage = propagator::Stage::new(config.peer_addresses, config.peer_magic);
+
+    let mut monitor_stage = monitor::Stage::new(wal, last_wal_seq);
+
     // connect mempool stage to gRPC service
     // mempool stage (sc) has a single consumer receiving messages (txs to add
     // to mempool) from many different gRPC tasks (mp)
@@ -87,11 +131,7 @@ pub fn pipeline(config: Config) -> Result<gasket::daemon::Daemon, Error> {
         .upstream_submit_endpoint
         .connect(grpc_receive_txs_channel);
 
-    // mempool_stage.upstream_block_monitor.connect();
-
-    let mut propagator_stage = propagator::Stage::new(config.peer_addresses, config.peer_magic);
-
-    // connect mempool and propagator stages
+    // connect mempool and propagator stage
 
     let (mempool_to_propagator_send, mempool_to_propagator_recv) =
         gasket::messaging::tokio::mpsc_channel(64);
@@ -104,11 +144,35 @@ pub fn pipeline(config: Config) -> Result<gasket::daemon::Daemon, Error> {
         .upstream_mempool
         .connect(mempool_to_propagator_recv);
 
-    // spawn stages
+    // connect mempool stage and monitor stage
 
-    let endpoints = gasket::runtime::spawn_stage(endpoints_stage, Policy::default());
-    let mempool = gasket::runtime::spawn_stage(mempool_stage, Policy::default());
-    let propagator = gasket::runtime::spawn_stage(propagator_stage, Policy::default());
+    let (monitor_to_mempool_send, monitor_to_mempool_recv) =
+        gasket::messaging::tokio::mpsc_channel(64);
 
-    Ok(gasket::daemon::Daemon(vec![endpoints, mempool, propagator]))
+    monitor_stage
+        .downstream_mempool
+        .connect(monitor_to_mempool_send);
+
+    mempool_stage
+        .upstream_block_monitor
+        .connect(monitor_to_mempool_recv);
+
+    tethers.push(gasket::runtime::spawn_stage(
+        endpoints_stage,
+        Policy::default(),
+    ));
+    tethers.push(gasket::runtime::spawn_stage(
+        mempool_stage,
+        Policy::default(),
+    ));
+    tethers.push(gasket::runtime::spawn_stage(
+        propagator_stage,
+        Policy::default(),
+    ));
+    tethers.push(gasket::runtime::spawn_stage(
+        monitor_stage,
+        Policy::default(),
+    ));
+
+    Ok(gasket::daemon::Daemon(tethers))
 }
