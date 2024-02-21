@@ -13,27 +13,16 @@ use pallas::{
     storage::rolldb::wal,
 };
 
-use crate::{
-    prelude::*,
-    sync::{self, roll},
-};
+use crate::{prelude::*, sync};
 
-/*
-    create notifier, mempool stage controls notifier, grpc clones receiver into each endpoint
-    create mpsc, gRPC stage clones sender into each endpoint, mempool stage receives new txs
-    create RwLock of propagated vec, used to instantiate mempool stage, cloned into each grpc endpoint for reads
-
-    gRPC stage clones a mpsc sender into each endpoint task, which sends newTxs to mempool stage
-    gRPC stage clones a RwLock of the mempool stage propagated field
-    gRPC stage clones a notifier receiver into each endpoint task (WaitForStreams), wait for tip change then .read the propagated field
-*/
+use self::mempool::Monitor;
 
 mod endpoints;
 mod mempool;
 mod monitor;
 mod propagator;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Transaction {
     hash: Hash<32>,
     era: u16,
@@ -59,7 +48,7 @@ impl Into<EraTxBody> for Transaction {
 pub struct Config {
     pub listen_address: String,
     tls_client_ca_root: Option<PathBuf>,
-    prune_after_slots: u64,
+    prune_after_confirmations: u64,
     peer_addresses: Vec<String>,
     peer_magic: u64,
 }
@@ -69,7 +58,7 @@ pub fn pipeline(
     wal: wal::Store,
     sync: bool,
 ) -> Result<gasket::daemon::Daemon, Error> {
-    let mempool_txs = Arc::new(RwLock::new(Vec::new()));
+    let mempool_monitor = Arc::new(RwLock::new(Monitor::new()));
     let change_notifier = Arc::new(Notify::new());
 
     let (grpc_send_txs_channel, grpc_receive_txs_channel) =
@@ -110,14 +99,14 @@ pub fn pipeline(
         config.listen_address,
         config.tls_client_ca_root,
         grpc_send_txs_channel,
-        mempool_txs.clone(),
+        mempool_monitor.clone(),
         change_notifier.clone(),
     );
 
     let mut mempool_stage = mempool::Stage::new(
-        mempool_txs.clone(),
+        mempool_monitor.clone(),
         change_notifier.clone(),
-        config.prune_after_slots,
+        config.prune_after_confirmations,
     );
 
     let mut propagator_stage = propagator::Stage::new(config.peer_addresses, config.peer_magic);

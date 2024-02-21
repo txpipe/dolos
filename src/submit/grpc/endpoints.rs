@@ -1,7 +1,10 @@
 use futures_core::Stream;
 use gasket::framework::*;
 use gasket::messaging::{tokio::ChannelSendAdapter, SendAdapter};
+use pallas::crypto::hash::Hash;
 use pallas::ledger::traverse::MultiEraTx;
+use std::collections::HashMap;
+use std::ops::Deref;
 use std::path::PathBuf;
 use std::{pin::Pin, sync::Arc};
 use tokio::sync::{Notify, RwLock};
@@ -9,28 +12,29 @@ use tonic::transport::{Certificate, Server, ServerTlsConfig};
 use tonic::{Request, Response, Status};
 use tracing::info;
 use utxorpc::proto::submit::v1::submit_service_server::SubmitServiceServer;
-use utxorpc::proto::submit::v1::*;
+use utxorpc::proto::submit::v1::{Stage as SubmitStage, WaitForTxResponse, *};
 
 use crate::prelude::Error;
 
-use super::{mempool::InclusionPoint, Transaction};
+use super::mempool::Monitor;
+use super::Transaction;
 
 pub struct SubmitServiceImpl {
     channel: ChannelSendAdapter<Vec<Transaction>>,
-    _mempool_view: Arc<RwLock<Vec<(Transaction, Option<InclusionPoint>)>>>,
-    _change_notify: Arc<Notify>,
+    mempool_view: Arc<RwLock<Monitor>>,
+    change_notify: Arc<Notify>,
 }
 
 impl SubmitServiceImpl {
     pub fn new(
         channel: ChannelSendAdapter<Vec<Transaction>>,
-        mempool_view: Arc<RwLock<Vec<(Transaction, Option<InclusionPoint>)>>>,
+        mempool_view: Arc<RwLock<Monitor>>,
         change_notify: Arc<Notify>,
     ) -> Self {
         Self {
             channel,
-            _mempool_view: mempool_view,
-            _change_notify: change_notify,
+            mempool_view: mempool_view,
+            change_notify: change_notify,
         }
     }
 }
@@ -53,7 +57,6 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
 
         let mut received = vec![];
 
-        // TODO: why is message.tx[0].r#type an Option?
         for (idx, tx_bytes) in message.tx.into_iter().flat_map(|x| x.r#type).enumerate() {
             match tx_bytes {
                 any_chain_tx::Type::Raw(bytes) => {
@@ -95,9 +98,70 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
 
     async fn wait_for_tx(
         &self,
-        _request: Request<WaitForTxRequest>,
+        request: Request<WaitForTxRequest>,
     ) -> Result<Response<Self::WaitForTxStream>, Status> {
-        todo!()
+        let mempool_view_rwlock = self.mempool_view.clone();
+        let change_notifier = self.change_notify.clone();
+
+        Ok(Response::new(Box::pin(async_stream::stream! {
+            let tx_refs = request.into_inner().r#ref;
+
+            let mut last_update: HashMap<&[u8; 32], Option<SubmitStage>> = HashMap::new();
+
+            let mut tx_hashes = vec![];
+
+            for tx_ref in tx_refs {
+                let tx_hash: [u8; 32] = tx_ref
+                    .deref()
+                    .try_into()
+                    .map_err(|_| Status::invalid_argument("tx hash malformed"))?;
+
+                tx_hashes.push(tx_hash)
+            }
+
+            last_update.extend(tx_hashes.iter().map(|x| (x, None)));
+
+            info!("starting wait_for_tx async stream for tx hashes: {:?}", tx_hashes.iter().map(|x| Hash::new(*x)).collect::<Vec<_>>());
+
+            loop {
+                change_notifier.notified().await;
+
+                for hash in tx_hashes.iter() {
+                    let mempool_view = mempool_view_rwlock.read().await;
+
+                    let stage = if let Some(maybe_inclusion) = mempool_view.txs.get(&(*hash).into()) {
+                        if let Some(inclusion) = maybe_inclusion {
+                            // TODO: spec does not have way to detail number of confirmations
+                            let _confirmations = mempool_view.tip_height - inclusion;
+
+                            // tx is included on chain
+                            SubmitStage::Confirmed
+                        } else {
+                            // tx has been propagated but not included on chain
+                            SubmitStage::Mempool
+                        }
+                    } else {
+                        // tx hash provided has not been passed to propagators
+                        SubmitStage::Unspecified // TODO: what stage should be used here?
+                    };
+
+                    // if stage changed since we last informed user, send user update
+                    match last_update.get(&hash).unwrap() {
+                        Some(last_stage) if (*last_stage == stage) => (),
+                        _ => {
+                            let response = WaitForTxResponse {
+                                r#ref: hash.to_vec().into(),
+                                stage: stage.into()
+                            };
+
+                            yield Ok(response);
+
+                            last_update.insert(hash, Some(stage));
+                        }
+                    }
+                }
+            }
+        })))
     }
 
     async fn read_mempool(
@@ -121,7 +185,7 @@ pub struct Stage {
     listen_address: String,
     tls_client_ca_root: Option<PathBuf>,
     send_channel: ChannelSendAdapter<Vec<Transaction>>,
-    mempool_view: Arc<RwLock<Vec<(Transaction, Option<InclusionPoint>)>>>,
+    mempool_view: Arc<RwLock<Monitor>>,
     change_notify: Arc<Notify>,
     // #[metric]
     // received_txs: gasket::metrics::Counter,
@@ -132,7 +196,7 @@ impl Stage {
         listen_address: String,
         tls_client_ca_root: Option<PathBuf>,
         send_channel: ChannelSendAdapter<Vec<Transaction>>,
-        mempool_view: Arc<RwLock<Vec<(Transaction, Option<InclusionPoint>)>>>,
+        mempool_view: Arc<RwLock<Monitor>>,
         change_notify: Arc<Notify>,
     ) -> Self {
         Self {

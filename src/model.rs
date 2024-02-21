@@ -1,6 +1,7 @@
 use pallas::{crypto::hash::Hash, network::miniprotocols::Point};
 
 pub type BlockSlot = u64;
+pub type BlockHeight = u64;
 pub type BlockHash = Hash<32>;
 pub type RawBlock = Vec<u8>;
 pub type TxHash = Hash<32>;

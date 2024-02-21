@@ -7,14 +7,14 @@ use pallas::{
 };
 use tracing::info;
 
-use super::{BlockHash, BlockSlot, TxHash};
+use super::{BlockHeight, TxHash};
 
 pub type MempoolSender = gasket::messaging::tokio::OutputPort<BlockMonitorMessage>;
 
 #[derive(Clone, Debug)]
 pub enum BlockMonitorMessage {
-    NewBlock(BlockSlot, BlockHash, Vec<TxHash>),
-    Rollback(BlockSlot),
+    NewBlock(BlockHeight, Vec<TxHash>),
+    Rollback(BlockHeight),
 }
 
 #[derive(Stage)]
@@ -59,14 +59,21 @@ impl gasket::framework::Worker<Stage> for Worker {
             let (seq, log) = entry.or_restart()?;
 
             match log {
-                Log::Apply(slot, hash, body) => {
+                Log::Apply(_, _, body) => {
                     let block = MultiEraBlock::decode(&body).or_panic()?;
 
+                    let height = block.number();
                     let txs = block.txs().iter().map(|x| x.hash()).collect::<Vec<_>>();
 
-                    updates.push(BlockMonitorMessage::NewBlock(slot, hash, txs))
+                    updates.push(BlockMonitorMessage::NewBlock(height, txs))
                 }
-                Log::Mark(slot, _hash, _body) => updates.push(BlockMonitorMessage::Rollback(slot)),
+                Log::Mark(_, _, body) => {
+                    let block = MultiEraBlock::decode(&body).or_panic()?;
+
+                    let height = block.number();
+
+                    updates.push(BlockMonitorMessage::Rollback(height))
+                }
                 Log::Undo(_, _, _) => (),
                 Log::Origin => (),
             }
