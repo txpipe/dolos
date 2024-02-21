@@ -2,6 +2,7 @@
 peer_address = "preprod-node.world.dev.cardano.org:30000"
 network_magic = 1
 network_id = 0
+phase1_validation_enabled = false
 
 [rolldb]
 path = "./tmp/rolldb"
@@ -22,3 +23,9 @@ path = "./shelley.json"
 
 [logging]
 max_level = "debug"
+
+[submit.grpc]
+listen_address = "[::]:50052"
+prune_after_confirmations = 10000
+peer_addresses = ["preprod-node.world.dev.cardano.org:30000"]
+peer_magic = 1
