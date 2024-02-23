@@ -375,36 +375,36 @@ impl ApplyDB {
         let txs = block.txs();
 
         for tx in txs.iter() {
-            for (idx, produced) in tx.produces() {
-                let body = produced.encode();
-                let era = tx.era().into();
-                batch.insert_utxo(tx.hash(), idx as u64, (era, body));
-            }
-        }
+            // Update the database UTxO only if the transaction is valid.
+            if tx.is_valid() {
+                for (idx, produced) in tx.produces() {
+                    let body = produced.encode();
+                    let era = tx.era().into();
+                    batch.insert_utxo(tx.hash(), idx as u64, (era, body));
+                }
+                for consumed in tx.consumes() {
+                    let hash = *consumed.hash();
+                    let idx = consumed.index();
 
-        for tx in txs.iter() {
-            for consumed in tx.consumes() {
-                let hash = *consumed.hash();
-                let idx = consumed.index();
+                    if batch.contains_utxo(hash, idx) {
+                        batch.spend_utxo_same_block(hash, idx);
+                    } else {
+                        let utxo = self
+                            .get_utxo(hash, idx)?
+                            .ok_or(Error::MissingUtxo(hash, idx))?;
 
-                if batch.contains_utxo(hash, idx) {
-                    batch.spend_utxo_same_block(hash, idx);
-                } else {
-                    let utxo = self
-                        .get_utxo(hash, idx)?
-                        .ok_or(Error::MissingUtxo(hash, idx))?;
+                        batch.spend_utxo(hash, idx, utxo);
+                    };
+                }
 
-                    batch.spend_utxo(hash, idx, utxo);
-                };
-            }
-
-            if let Some(update) = tx.update() {
-                batch.update_pparams(
-                    update.epoch(),
-                    block.era().into(),
-                    block.hash(),
-                    update.encode(),
-                );
+                if let Some(update) = tx.update() {
+                    batch.update_pparams(
+                        update.epoch(),
+                        block.era().into(),
+                        block.hash(),
+                        update.encode(),
+                    );
+                }
             }
         }
 

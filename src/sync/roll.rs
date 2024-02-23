@@ -108,25 +108,25 @@ impl Worker {}
 impl gasket::framework::Worker<Stage> for Worker {
     async fn bootstrap(stage: &Stage) -> Result<Self, WorkerError> {
         let last_seq_chain = if let Some(cursor) = stage.cursor_chain {
-            Some(
-                stage
-                    .store
-                    .find_wal_seq(cursor)
-                    .ok_or(Error::server("could not find chain cursor on WAL"))
-                    .or_panic()?,
-            )
+            stage
+                .store
+                .find_wal_seq(&[cursor])
+                .or_panic()?
+                .ok_or(Error::server("could not find chain cursor on WAL"))
+                .or_panic()?
+                .into()
         } else {
             None
         };
 
         let last_seq_ledger = if let Some(cursor) = stage.cursor_ledger {
-            Some(
-                stage
-                    .store
-                    .find_wal_seq(cursor)
-                    .ok_or(Error::server("could not find ledger cursor on WAL"))
-                    .or_panic()?,
-            )
+            stage
+                .store
+                .find_wal_seq(&[cursor])
+                .or_panic()?
+                .ok_or(Error::server("could not find chain cursor on WAL"))
+                .or_panic()?
+                .into()
         } else {
             None
         };

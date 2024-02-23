@@ -11,8 +11,9 @@ use tokio::sync::{Notify, RwLock};
 use tonic::transport::{Certificate, Server, ServerTlsConfig};
 use tonic::{Request, Response, Status};
 use tracing::info;
-use utxorpc::proto::submit::v1::submit_service_server::SubmitServiceServer;
-use utxorpc::proto::submit::v1::{Stage as SubmitStage, WaitForTxResponse, *};
+use utxorpc_spec::utxorpc;
+use utxorpc_spec::utxorpc::v1alpha::submit::submit_service_server::SubmitServiceServer;
+use utxorpc_spec::utxorpc::v1alpha::submit::{Stage as SubmitStage, WaitForTxResponse, *};
 
 use crate::prelude::Error;
 
@@ -234,8 +235,8 @@ impl gasket::framework::Worker<Stage> for Worker {
         let service = SubmitServiceServer::new(service);
 
         let reflection = tonic_reflection::server::Builder::configure()
-            .register_encoded_file_descriptor_set(utxorpc::proto::cardano::v1::FILE_DESCRIPTOR_SET)
-            .register_encoded_file_descriptor_set(utxorpc::proto::submit::v1::FILE_DESCRIPTOR_SET)
+            .register_encoded_file_descriptor_set(utxorpc::v1alpha::cardano::FILE_DESCRIPTOR_SET)
+            .register_encoded_file_descriptor_set(utxorpc::v1alpha::submit::FILE_DESCRIPTOR_SET)
             .register_encoded_file_descriptor_set(protoc_wkt::google::protobuf::FILE_DESCRIPTOR_SET)
             .build()
             .unwrap();

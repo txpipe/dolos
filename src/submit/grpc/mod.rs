@@ -67,7 +67,9 @@ pub fn pipeline(
     let cursor = wal.find_tip().map_err(Error::storage)?;
 
     let last_wal_seq = if let Some(c) = cursor {
-        wal.find_wal_seq(c).unwrap_or_default()
+        wal.find_wal_seq(&[c])
+            .map_err(Error::storage)?
+            .unwrap_or_default()
     } else {
         0
     };

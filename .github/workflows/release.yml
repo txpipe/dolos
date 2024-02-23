@@ -56,7 +56,7 @@ jobs:
           brew install openssl@1.1
 
       - name: checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -90,14 +90,14 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
+        uses: docker/setup-buildx-action@v3
 
       - name: Extract metadata (tags, labels) for Docker
         id: meta
-        uses: docker/metadata-action@v4
+        uses: docker/metadata-action@v5
         with:
           images: ghcr.io/txpipe/dolos
           tags: |
@@ -107,7 +107,7 @@ jobs:
             type=semver,pattern=v{{version}}
 
       - name: Login to DockerHub
-        uses: docker/login-action@v2
+        uses: docker/login-action@v3
         with:
           registry: ghcr.io/txpipe
           username: ${{ github.actor }}
@@ -127,7 +127,7 @@ jobs:
           mv .github/image/bin/dolos-Linux-x86_64 .github/image/bin/dolos-Linux-amd64
 
       - name: Build and push
-        uses: docker/build-push-action@v4
+        uses: docker/build-push-action@v5
         with:
           context: .github/image
           platforms: linux/arm64,linux/amd64
@@ -142,7 +142,7 @@ jobs:
 
     steps:
       - name: checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
