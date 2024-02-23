@@ -9,7 +9,7 @@ use tonic::{Request, Response, Status};
 use utxorpc_spec::utxorpc::v1alpha as u5c;
 
 fn bytes_to_hash(raw: &[u8]) -> Hash<32> {
-    let array: [u8; 32] = raw.try_into().unwrap(); // TODO ?
+    let array: [u8; 32] = raw.try_into().unwrap();
     Hash::<32>::new(array)
 }
 

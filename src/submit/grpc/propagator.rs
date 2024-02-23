@@ -1,7 +1,7 @@
 use std::{collections::VecDeque, time::Duration};
 
 use gasket::framework::*;
-use log::warn;
+use log::{warn, error};
 use pallas::network::{
     facades::PeerClient,
     miniprotocols::txsubmission::{self as txsub, EraTxId},
@@ -52,10 +52,12 @@ impl SubmitPeerHandler {
 
         tokio::spawn(async move {
             loop {
-                keepalive
+                if let Err(e) = keepalive
                     .send_keepalive()
-                    .await
-                    .expect("couldn't send keepalive");
+                    .await {
+                        error!("error sending keep alive: {e:?}")
+                    };
+
                 tokio::time::sleep(Duration::from_secs(15)).await;
             }
         });
@@ -79,12 +81,7 @@ impl SubmitPeerHandler {
         self.txsubmission.send_init().await.map_err(Error::server)?;
 
         loop {
-            // info!("{} to_send: {:?}", self.address, self.mempool.to_send.iter().map(|x| x.hash));
-            // info!("{} unacked: {:?}", self.address, self.mempool.unacked.iter().map(|x| x.hash));
-            // info!("{} acked: {}", self.address, self.mempool.acked);
-
             // see if we can receive any transactions from the tx broadcaster
-            // TODO: loop until broadcast channel empty?
             self.try_recv_transactions();
 
             if self.broadcast_recv.is_none() && self.mempool.is_empty() {

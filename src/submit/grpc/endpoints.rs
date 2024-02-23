@@ -79,7 +79,7 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
 
                     received.push(Transaction {
                         hash,
-                        era: 5, // TODO: tx decoding as conway, then era is invalid for mainnet
+                        era: 5, // TODO: should use era from Tx, but era conversion not working
                         bytes: bytes.into(),
                     })
                 }
@@ -143,7 +143,7 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
                         }
                     } else {
                         // tx hash provided has not been passed to propagators
-                        SubmitStage::Unspecified // TODO: what stage should be used here?
+                        SubmitStage::Unspecified
                     };
 
                     // if stage changed since we last informed user, send user update
