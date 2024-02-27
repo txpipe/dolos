@@ -1,7 +1,7 @@
 use std::{collections::VecDeque, time::Duration};
 
 use gasket::framework::*;
-use log::{warn, error};
+use log::{error, warn};
 use pallas::network::{
     facades::PeerClient,
     miniprotocols::txsubmission::{self as txsub, EraTxId},
@@ -52,11 +52,9 @@ impl SubmitPeerHandler {
 
         tokio::spawn(async move {
             loop {
-                if let Err(e) = keepalive
-                    .send_keepalive()
-                    .await {
-                        error!("error sending keep alive: {e:?}")
-                    };
+                if let Err(e) = keepalive.send_keepalive().await {
+                    error!("error sending keep alive: {e:?}")
+                };
 
                 tokio::time::sleep(Duration::from_secs(15)).await;
             }

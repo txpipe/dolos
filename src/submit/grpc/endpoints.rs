@@ -79,7 +79,7 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
 
                     received.push(Transaction {
                         hash,
-                        era: 5, // TODO: should use era from Tx, but era conversion not working
+                        era: u16::from(decoded.era()) - 1, // TODO: pallas Era is 1-indexed so maybe that is the reason this works
                         bytes: bytes.into(),
                     })
                 }
