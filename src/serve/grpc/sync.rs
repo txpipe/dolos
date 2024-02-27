@@ -1,12 +1,16 @@
 use futures_core::Stream;
 use pallas::{
     crypto::hash::Hash,
-    storage::rolldb::{chain, wal},
+    storage::rolldb::{
+        chain,
+        wal::{self, RollStream},
+    },
 };
 use std::pin::Pin;
 use tokio_stream::StreamExt;
 use tonic::{Request, Response, Status};
-use utxorpc_spec::utxorpc::v1alpha as u5c;
+use tracing::error;
+use utxorpc_spec::utxorpc::v1alpha::{self as u5c, sync::BlockRef};
 
 fn bytes_to_hash(raw: &[u8]) -> Hash<32> {
     let array: [u8; 32] = raw.try_into().unwrap();
@@ -35,9 +39,15 @@ fn roll_to_tip_response(log: wal::Log) -> u5c::sync::FollowTipResponse {
             wal::Log::Undo(_, _, block) => {
                 u5c::sync::follow_tip_response::Action::Undo(raw_to_anychain(&block)).into()
             }
+            wal::Log::Mark(slot, hash, _) => {
+                u5c::sync::follow_tip_response::Action::Reset(BlockRef {
+                    index: slot,
+                    hash: hash.to_vec().into(),
+                })
+                .into()
+            }
             // TODO: shouldn't we have a u5c event for origin?
             wal::Log::Origin => None,
-            wal::Log::Mark(..) => None,
         },
     }
 }
@@ -133,15 +143,49 @@ impl u5c::sync::chain_sync_service_server::ChainSyncService for ChainSyncService
     ) -> Result<Response<Self::FollowTipStream>, tonic::Status> {
         let request = request.into_inner();
 
-        let intersect: Vec<_> = request
+        let intersects: Vec<_> = request
             .intersect
             .iter()
             .map(|x| (x.index, bytes_to_hash(&x.hash)))
             .collect();
 
-        let s = wal::RollStream::intersect(self.wal.clone(), intersect)
-            .map(|log| Ok(roll_to_tip_response(log)));
+        // if no intersect provided, stream WAL from start
+        if intersects.is_empty() {
+            let stream = RollStream::stream_wal(self.wal.clone(), None).map(|x| match x {
+                Ok(log) => Ok(roll_to_tip_response(log)),
+                Err(e) => {
+                    error!("rollstream error: {e}");
+                    Err(Status::internal("rollstream error"))
+                }
+            });
 
-        Ok(Response::new(Box::pin(s)))
+            return Ok(Response::new(Box::pin(stream)));
+        }
+
+        // else try intersect with the provided intersects
+        for intersect in intersects {
+            let maybe_wal_seq = self
+                .wal
+                .find_wal_seq(&[intersect])
+                .map_err(|_| Status::internal("kvtable error"))?;
+
+            if let Some(wal_seq) = maybe_wal_seq {
+                let stream =
+                    RollStream::stream_wal(self.wal.clone(), Some(wal_seq)).map(|x| match x {
+                        Ok(log) => Ok(roll_to_tip_response(log)),
+                        Err(e) => {
+                            error!("rollstream error: {e}");
+                            Err(Status::internal("rollstream error"))
+                        }
+                    });
+
+                return Ok(Response::new(Box::pin(stream)));
+            }
+        }
+
+        // error if we found no intersect
+        Err(Status::not_found(
+            "no intersect found in mutable part of chain",
+        ))
     }
 }
