@@ -74,7 +74,14 @@ pub fn pipeline(
     let mut roll = roll::Stage::new(wal, cursor_chain, cursor_ledger);
 
     let mut chain = chain::Stage::new(chain);
-    let mut ledger = ledger::Stage::new(ledger, byron, shelley, config.phase1_validation_enabled);
+    let mut ledger = ledger::Stage::new(
+        ledger,
+        byron,
+        shelley,
+        config.phase1_validation_enabled,
+        config.network_magic,
+        config.network_id,
+    );
 
     let (to_roll, from_pull) = gasket::messaging::tokio::mpsc_channel(50);
     pull.downstream.connect(to_roll);

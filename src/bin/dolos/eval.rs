@@ -17,6 +17,9 @@ pub struct Args {
     epoch: u64,
 
     #[arg(long, short)]
+    block_slot: u64,
+
+    #[arg(long, short)]
     network_id: u8,
 }
 
@@ -82,6 +85,9 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
         },
         &ledger,
         args.epoch,
+        args.block_slot,
+        config.upstream.network_magic as u32,
+        config.upstream.network_id,
     )
     .into_diagnostic()
     .context("computing protocol params")?;

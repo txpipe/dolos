@@ -143,6 +143,9 @@ pub fn compute_pparams(
     genesis: Genesis,
     ledger: &ApplyDB,
     epoch: u64,
+    block_slot: u64,
+    prot_magic: u32,
+    network_id: u8,
 ) -> Result<Environment, WorkerError> {
     if (290..=364).contains(&epoch) {
         // Alonzo era
