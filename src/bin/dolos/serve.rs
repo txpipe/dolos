@@ -20,8 +20,12 @@ pub async fn run(config: super::Config, _args: &Args) -> Result<(), Error> {
         .as_deref()
         .unwrap_or_else(|| Path::new("/rolldb"));
 
-    let db =
-        RollDB::open(rolldb_path, config.rolldb.k_param.unwrap_or(1000)).map_err(Error::config)?;
+    let db = RollDB::open(
+        rolldb_path,
+        config.rolldb.k_param.unwrap_or(1000),
+        config.rolldb.k_param_buffer.unwrap_or_default(),
+    )
+    .map_err(Error::config)?;
 
     dolos::serve::serve(config.serve, db).await?;
 

@@ -26,8 +26,12 @@ pub fn run(
         .as_deref()
         .unwrap_or_else(|| Path::new("/rolldb"));
 
-    let rolldb =
-        RollDB::open(rolldb_path, config.rolldb.k_param.unwrap_or(1000)).map_err(Error::storage)?;
+    let rolldb = RollDB::open(
+        rolldb_path,
+        config.rolldb.k_param.unwrap_or(1000),
+        config.rolldb.k_param_buffer.unwrap_or_default(),
+    )
+    .map_err(Error::storage)?;
 
     let applydb_path = config
         .applydb

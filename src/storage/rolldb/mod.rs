@@ -20,6 +20,8 @@ pub struct RollDB {
     pub tip_change: Arc<tokio::sync::Notify>,
     wal_seq: u64,
     k_param: u64,
+    // overlap immutable part of chainkv and WAL by k_param_buffer slots
+    k_param_buffer: u64,
 }
 
 pub struct BlockKV;
@@ -46,7 +48,7 @@ impl<'a> Iterator for ChainEntryIterator<'a> {
 }
 
 impl RollDB {
-    pub fn open(path: impl AsRef<Path>, k_param: u64) -> Result<Self, Error> {
+    pub fn open(path: impl AsRef<Path>, k_param: u64, k_param_buffer: u64) -> Result<Self, Error> {
         let mut opts = Options::default();
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
@@ -65,14 +67,19 @@ impl RollDB {
             tip_change: Arc::new(tokio::sync::Notify::new()),
             wal_seq,
             k_param,
+            k_param_buffer,
         })
     }
 
+    pub fn k_param(&self) -> u64 {
+        self.k_param
+    }
+
     #[cfg(test)]
-    pub fn open_tmp(k_param: u64) -> Result<Self, Error> {
+    pub fn open_tmp(k_param: u64, k_param_buffer: u64) -> Result<Self, Error> {
         let path = tempfile::tempdir().unwrap().into_path();
 
-        RollDB::open(path.clone(), k_param)
+        RollDB::open(path.clone(), k_param, k_param_buffer)
     }
 
     pub fn get_block(&self, hash: Hash<32>) -> Result<Option<BlockBody>, Error> {
@@ -198,23 +205,20 @@ impl RollDB {
     pub fn crawl_wal_from_cursor(
         &self,
         start_after: Option<(BlockSlot, BlockHash)>,
-    ) -> Result<impl Iterator<Item = Result<(wal::Seq, wal::Value), Error>> + '_, Error> {
+    ) -> Result<Option<impl Iterator<Item = Result<(wal::Seq, wal::Value), Error>> + '_>, Error>
+    {
         if let Some((slot, hash)) = start_after {
-            // TODO: Not sure this is 100% accurate:
-            // i.e Apply(X), Apply(cursor), Undo(cursor), Mark(x)
-            // We want to start at Apply(cursor) or Mark(cursor), but even then,
-            // what if we have more than one Apply(cursor), how do we know
-            // which is correct?
+            // try find most recent Apply(cursor) or Mark(cursor) in the WAL
             let found = WalKV::scan_until(&self.db, rocksdb::IteratorMode::End, |v| {
-                v.slot() == slot && v.hash().eq(&hash)
+                !v.is_undo() && v.slot() == slot && v.hash().eq(&hash)
             })?;
 
             match found {
-                Some(DBInt(seq)) => Ok(self.crawl_wal(Some(seq))),
-                None => Err(Error::NotFound),
+                Some(DBInt(seq)) => Ok(Some(self.crawl_wal(Some(seq)))),
+                None => Ok(None),
             }
         } else {
-            Ok(self.crawl_wal(None))
+            Ok(Some(self.crawl_wal(None)))
         }
     }
 
@@ -336,7 +340,9 @@ impl RollDB {
             // get the number of slots that have passed since the wal point
             let slot_delta = tip - value.slot();
 
-            if slot_delta <= self.k_param {
+            // k_param_buffer is so we have can have some overlap between WAL
+            // and immutable chainKV
+            if slot_delta <= self.k_param + self.k_param_buffer {
                 break;
             } else {
                 wal::WalKV::stage_delete(&self.db, wal_key, &mut batch);
@@ -359,15 +365,16 @@ impl RollDB {
         Ok(false)
     }
 
-    /// Check if a point (pair of slot and block hash) exists in the WalKV
-    pub fn wal_contains(&self, slot: BlockSlot, hash: &BlockHash) -> Result<bool, Error> {
-        if let Some(_) = WalKV::scan_until(&self.db, rocksdb::IteratorMode::End, |v| {
-            v.slot() == slot && v.hash().eq(hash)
-        })? {
-            Ok(true)
-        } else {
-            Ok(false)
-        }
+    /// Return the WAL sequence number for the most recent occurence of an apply
+    /// action for the specified point, should it exist
+    pub fn apply_position_in_wal(
+        &self,
+        slot: BlockSlot,
+        hash: &BlockHash,
+    ) -> Result<Option<DBInt>, Error> {
+        WalKV::scan_until(&self.db, rocksdb::IteratorMode::End, |v| {
+            v.slot() == slot && v.hash().eq(hash) && !v.is_undo()
+        })
     }
 
     pub fn destroy(self) -> Result<(), Error> {
@@ -382,7 +389,7 @@ mod tests {
     use super::{BlockBody, BlockHash, BlockSlot, RollDB};
 
     pub fn with_tmp_db<T>(k_param: u64, op: fn(db: &mut RollDB) -> T) {
-        let mut db = RollDB::open_tmp(k_param).unwrap();
+        let mut db = RollDB::open_tmp(k_param, 0).unwrap();
 
         op(&mut db);
 

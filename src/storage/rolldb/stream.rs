@@ -88,7 +88,7 @@ mod tests {
     #[tokio::test]
     async fn test_stream_waiting() {
         let path = tempfile::tempdir().unwrap().into_path();
-        let mut db = super::RollDB::open(path.clone(), 30).unwrap();
+        let mut db = super::RollDB::open(path.clone(), 30, 0).unwrap();
 
         for i in 0..100 {
             let (slot, hash, body) = dummy_block(i * 10);

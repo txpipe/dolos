@@ -12,7 +12,8 @@ authors = ["Santiago Carmuega <santiago@carmuega.me>"]
 
 
 [dependencies]
-pallas = "=0.19.1"
+# pallas = "=0.21.0"
+pallas = { git = "https://github.com/txpipe/pallas", rev = "00575b4c550cf042e354922699be23d420c8a813" }
 # pallas = { path = "../pallas/pallas" }
 
 gasket = { version = "^0.5", features = ["derive"] }
@@ -49,6 +50,7 @@ tonic-web = "0.9.2"
 tokio-stream = { version = "0.1.14", features = ["sync"] }
 futures-util = "0.3.28"
 async-stream = "0.3.5"
+async-recursion = "1.0.5"
 
 [dev-dependencies]
 tempfile = "3.3.0"
