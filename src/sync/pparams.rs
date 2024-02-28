@@ -1,8 +1,10 @@
 use gasket::framework::{AsWorkError, WorkerError};
 use pallas::{
-    applying::utils::{
-        AlonzoProtParams, BabbageProtParams, ByronProtParams, Environment, FeePolicy,
-        MultiEraProtParams, ShelleyProtParams,
+    applying::{
+        utils::{
+            AlonzoProtParams, BabbageProtParams, ByronProtParams, FeePolicy, ShelleyProtParams,
+        },
+        Environment, MultiEraProtParams,
     },
     ledger::{
         configs::{byron, shelley},

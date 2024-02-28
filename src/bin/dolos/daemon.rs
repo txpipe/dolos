@@ -23,6 +23,8 @@ pub async fn run(config: super::Config, _args: &Args) -> miette::Result<()> {
         chain.clone(),
     ));
 
+    let submitter = tokio::spawn(dolos::submit::serve(config.submit, wal.clone(), false));
+
     dolos::sync::pipeline(
         &config.upstream,
         wal,
@@ -37,6 +39,7 @@ pub async fn run(config: super::Config, _args: &Args) -> miette::Result<()> {
     .block();
 
     server.abort();
+    submitter.abort();
 
     Ok(())
 }
