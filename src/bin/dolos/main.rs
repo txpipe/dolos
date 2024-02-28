@@ -9,6 +9,7 @@ mod daemon;
 mod data;
 mod eval;
 mod serve;
+mod submit;
 mod sync;
 
 #[cfg(feature = "mithril")]
@@ -21,6 +22,7 @@ enum Command {
     Data(data::Args),
     Serve(serve::Args),
     Eval(eval::Args),
+    Submit(submit::Args),
 
     #[cfg(feature = "mithril")]
     Bootstrap(bootstrap::Args),
@@ -69,6 +71,7 @@ pub struct Config {
     pub rolldb: RolldbConfig,
     pub upstream: dolos::sync::Config,
     pub serve: dolos::serve::Config,
+    pub submit: dolos::submit::Config,
     pub retries: Option<gasket::retries::Policy>,
     pub byron: GenesisFileRef,
     pub shelley: GenesisFileRef,
@@ -110,6 +113,7 @@ fn main() -> Result<()> {
         Command::Data(x) => data::run(&config, &x)?,
         Command::Serve(x) => serve::run(config, &x)?,
         Command::Eval(x) => eval::run(&config, &x)?,
+        Command::Submit(x) => submit::run(config, &x)?,
 
         #[cfg(feature = "mithril")]
         Command::Bootstrap(x) => bootstrap::run(&config, &x)?,

@@ -68,8 +68,8 @@ pub struct Stage {
 
     pub upstream: UpstreamPort,
 
-    pub downstream_chain: DownstreamPort,
-    pub downstream_ledger: DownstreamPort,
+    pub downstream_chain: Option<DownstreamPort>,
+    pub downstream_ledger: Option<DownstreamPort>,
 
     #[metric]
     block_count: gasket::metrics::Counter,
@@ -149,23 +149,19 @@ impl gasket::framework::Worker<Stage> for Worker {
     async fn execute(&mut self, unit: &PullEvent, stage: &mut Stage) -> Result<(), WorkerError> {
         update_store(unit, &mut stage.store)?;
 
-        debug!(start = self.last_seq_chain, "catching up chain downstream");
-        self.last_seq_chain = catchup_downstream(
-            &stage.store,
-            self.last_seq_chain,
-            &mut stage.downstream_chain,
-        )
-        .await
-        .or_panic()?;
+        if let Some(output) = stage.downstream_chain.as_mut() {
+            debug!(start = self.last_seq_chain, "catching up chain downstream");
+            self.last_seq_chain = catchup_downstream(&stage.store, self.last_seq_chain, output)
+                .await
+                .or_panic()?;
+        }
 
-        debug!(start = self.last_seq_chain, "catching up ledger downstream");
-        self.last_seq_ledger = catchup_downstream(
-            &stage.store,
-            self.last_seq_ledger,
-            &mut stage.downstream_ledger,
-        )
-        .await
-        .or_panic()?;
+        if let Some(output) = stage.downstream_ledger.as_mut() {
+            debug!(start = self.last_seq_chain, "catching up ledger downstream");
+            self.last_seq_ledger = catchup_downstream(&stage.store, self.last_seq_ledger, output)
+                .await
+                .or_panic()?;
+        }
 
         // TODO: define a better strategy for pruning schedule
         if let Some(x) = &self.last_seq_chain {
