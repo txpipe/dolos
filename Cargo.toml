@@ -12,7 +12,7 @@ authors = ["Santiago Carmuega <santiago@carmuega.me>"]
 
 
 [dependencies]
-pallas = { git = "https://github.com/txpipe/pallas.git", features = ["unstable"], rev = "2a80211b54dfeb14a62a4935238a4df4c5e0cac6" }
+pallas = { git = "https://github.com/txpipe/pallas.git", features = ["unstable"], rev = "9679a9c0e4445df2457dcc61b1ae45c5d0fb29e8" }
 # pallas = { version = "^0.23", features = ["unstable"] }
 # pallas = { path = "../pallas/pallas", features = ["unstable"] }
 

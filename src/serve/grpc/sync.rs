@@ -2,14 +2,13 @@ use futures_core::Stream;
 use pallas::{
     crypto::hash::Hash,
     storage::rolldb::{
-        chain,
+        self, chain,
         wal::{self, RollStream},
     },
 };
 use std::pin::Pin;
 use tokio_stream::StreamExt;
 use tonic::{Request, Response, Status};
-use tracing::error;
 use utxorpc_spec::utxorpc::v1alpha::{self as u5c, sync::BlockRef};
 
 fn bytes_to_hash(raw: &[u8]) -> Hash<32> {
@@ -149,43 +148,18 @@ impl u5c::sync::chain_sync_service_server::ChainSyncService for ChainSyncService
             .map(|x| (x.index, bytes_to_hash(&x.hash)))
             .collect();
 
-        // if no intersect provided, stream WAL from start
-        if intersects.is_empty() {
-            let stream = RollStream::stream_wal(self.wal.clone(), None).map(|x| match x {
-                Ok(log) => Ok(roll_to_tip_response(log)),
-                Err(e) => {
-                    error!("rollstream error: {e}");
-                    Err(Status::internal("rollstream error"))
-                }
-            });
-
-            return Ok(Response::new(Box::pin(stream)));
-        }
-
-        // else try intersect with the provided intersects
-        for intersect in intersects {
-            let maybe_wal_seq = self
-                .wal
-                .find_wal_seq(&[intersect])
-                .map_err(|_| Status::internal("kvtable error"))?;
-
-            if let Some(wal_seq) = maybe_wal_seq {
-                let stream =
-                    RollStream::stream_wal(self.wal.clone(), Some(wal_seq)).map(|x| match x {
-                        Ok(log) => Ok(roll_to_tip_response(log)),
-                        Err(e) => {
-                            error!("rollstream error: {e}");
-                            Err(Status::internal("rollstream error"))
-                        }
-                    });
-
-                return Ok(Response::new(Box::pin(stream)));
+        let stream = RollStream::intersect(self.wal.clone(), intersects).map_err(|e| match e {
+            rolldb::Error::NotFound => {
+                Status::not_found("no intersect found in mutable part of chain")
             }
-        }
+            e => Status::internal(format!("error when intersecting rollstream: {e:?}")),
+        })?;
 
-        // error if we found no intersect
-        Err(Status::not_found(
-            "no intersect found in mutable part of chain",
-        ))
+        let stream = stream.map(|x| match x {
+            Ok(log) => Ok(roll_to_tip_response(log)),
+            Err(e) => Err(Status::internal(format!("roll stream error: {e:?}"))),
+        });
+
+        return Ok(Response::new(Box::pin(stream)));
     }
 }
