@@ -147,99 +147,229 @@ pub fn compute_pparams(
     prot_magic: u32,
     network_id: u8,
 ) -> Result<Environment, WorkerError> {
-    if (290..=364).contains(&epoch) {
-        // Alonzo era
-        let max_tx_ex_mem: u32 = if (..306).contains(&epoch) {
-            10000000
-        } else if (306..319).contains(&epoch) {
-            11250000
+    if prot_magic == 1 && network_id == 0 {
+        // Preprod
+        if (7..=11).contains(&epoch) {
+            // Alonzo era
+            Ok(Environment {
+                block_slot,
+                prot_magic,
+                network_id,
+                prot_params: MultiEraProtParams::Alonzo(AlonzoProtParams {
+                    fee_policy: FeePolicy {
+                        summand: 155381,
+                        multiplier: 44,
+                    },
+                    max_tx_size: 16384,
+                    max_block_ex_mem: 50000000,
+                    max_block_ex_steps: 40000000000,
+                    max_tx_ex_mem: 10000000,
+                    max_tx_ex_steps: 10000000000,
+                    max_val_size: 5000,
+                    collateral_percent: 150,
+                    max_collateral_inputs: 3,
+                    coins_per_utxo_word: 34482,
+                }),
+            })
+        } else if 12 >= epoch {
+            // Babbage era
+            Ok(Environment {
+                block_slot,
+                prot_magic,
+                network_id,
+                prot_params: MultiEraProtParams::Babbage(BabbageProtParams {
+                    fee_policy: FeePolicy {
+                        summand: 155381,
+                        multiplier: 44,
+                    },
+                    max_tx_size: 16384,
+                    max_block_ex_mem: if (12..=27).contains(&epoch) {
+                        50000000
+                    } else {
+                        62000000
+                    },
+                    max_block_ex_steps: if (12..=50).contains(&epoch) {
+                        40000000000
+                    } else {
+                        20000000000
+                    },
+                    max_tx_ex_mem: if (12..=27).contains(&epoch) {
+                        10000000
+                    } else {
+                        14000000
+                    },
+                    max_tx_ex_steps: 10000000000,
+                    max_val_size: 5000,
+                    collateral_percent: 150,
+                    max_collateral_inputs: 3,
+                    coins_per_utxo_word: 4310,
+                }),
+            })
         } else {
-            14000000
-        };
-        let max_block_ex_mem: u64 = if (290..321).contains(&epoch) {
-            50000000
-        } else if (321..328).contains(&epoch) {
-            56000000
-        } else {
-            62000000
-        };
-        let prot_pps: AlonzoProtParams = AlonzoProtParams {
-            fee_policy: FeePolicy {
-                summand: 155381,
-                multiplier: 44,
-            },
-            max_tx_size: 16384,
-            max_block_ex_mem,
-            max_block_ex_steps: 40000000000,
-            max_tx_ex_mem,
-            max_tx_ex_steps: 10000000000,
-            max_val_size: 5000,
-            collateral_percent: 150,
-            max_collateral_inputs: 3,
-            coins_per_utxo_word: 34482,
-        };
-        Ok(Environment {
-            block_slot: 0,
-            prot_magic: genesis.byron.protocol_consts.protocol_magic,
-            network_id: match genesis.shelley.network_id.as_deref() {
-                Some("Mainnet") => 0,
-                _ => 1,
-            },
-            prot_params: MultiEraProtParams::Alonzo(prot_pps),
-        })
-    } else if epoch >= 365 {
-        // Babbage era
-        let max_block_ex_steps: u64 = if (365..=393).contains(&epoch) {
-            40000000000
-        } else {
-            20000000000
-        };
-        let prot_pps: BabbageProtParams = BabbageProtParams {
-            fee_policy: FeePolicy {
-                summand: 155381,
-                multiplier: 44,
-            },
-            max_tx_size: 16384,
-            max_block_ex_mem: 62000000,
-            max_block_ex_steps,
-            max_tx_ex_mem: 14000000,
-            max_tx_ex_steps: 10000000000,
-            max_val_size: 5000,
-            collateral_percent: 150,
-            max_collateral_inputs: 3,
-            coins_per_utxo_word: 4310,
-        };
-        Ok(Environment {
-            block_slot: 0,
-            prot_magic: genesis.byron.protocol_consts.protocol_magic,
-            network_id: match genesis.shelley.network_id.as_deref() {
-                Some("Mainnet") => 0,
-                _ => 1,
-            },
-            prot_params: MultiEraProtParams::Babbage(prot_pps),
-        })
-    } else {
-        // Eras prior to Alonzo and Babbage
-        let mut out = Environment {
-            block_slot: 0,
-            prot_magic: genesis.byron.protocol_consts.protocol_magic,
-            network_id: match genesis.shelley.network_id.as_deref() {
-                Some("Mainnet") => 0,
-                _ => 1,
-            },
-            prot_params: apply_era_hardfork(&genesis, 1)?,
-        };
+            // Eras prior to Alonzo and Babbage (Byron and ShelleyMA)
+            let mut out = Environment {
+                block_slot,
+                prot_magic,
+                network_id,
+                prot_params: apply_era_hardfork(&genesis, 1)?,
+            };
 
-        let updates = ledger.get_pparams_updates(epoch).or_panic()?;
+            let updates = ledger.get_pparams_updates(epoch).or_panic()?;
 
-        info!(epoch, updates = updates.len(), "computing pparams");
+            info!(epoch, updates = updates.len(), "computing pparams");
 
-        for (era, _, cbor) in updates {
-            let era = Era::try_from(era).or_panic()?;
-            let update = MultiEraUpdate::decode_for_era(era, &cbor).or_panic()?;
-            out.prot_params = apply_param_update(&genesis, era, out.prot_params, update)?;
+            for (era, _, cbor) in updates {
+                let era = Era::try_from(era).or_panic()?;
+                let update = MultiEraUpdate::decode_for_era(era, &cbor).or_panic()?;
+                out.prot_params = apply_param_update(&genesis, era, out.prot_params, update)?;
+            }
+
+            Ok(out)
         }
+    } else if prot_magic == 2 && network_id == 0 {
+        // Preview
+        if (1..=2).contains(&epoch) {
+            // Alonzo era
+            Ok(Environment {
+                block_slot,
+                prot_magic,
+                network_id,
+                prot_params: MultiEraProtParams::Alonzo(AlonzoProtParams {
+                    fee_policy: FeePolicy {
+                        summand: 155381,
+                        multiplier: 44,
+                    },
+                    max_tx_size: 16384,
+                    max_block_ex_mem: 50000000,
+                    max_block_ex_steps: 40000000000,
+                    max_tx_ex_mem: 10000000,
+                    max_tx_ex_steps: 10000000000,
+                    max_val_size: 5000,
+                    collateral_percent: 150,
+                    max_collateral_inputs: 3,
+                    coins_per_utxo_word: 34482,
+                }),
+            })
+        } else if 3 >= epoch {
+            // Babbage era
+            Ok(Environment {
+                block_slot,
+                prot_magic,
+                network_id,
+                prot_params: MultiEraProtParams::Babbage(BabbageProtParams {
+                    fee_policy: FeePolicy {
+                        summand: 155381,
+                        multiplier: 44,
+                    },
+                    max_tx_size: 16384,
+                    max_block_ex_mem: if (3..=8).contains(&epoch) {
+                        50000000
+                    } else {
+                        62000000
+                    },
+                    max_block_ex_steps: if (3..=106).contains(&epoch) {
+                        40000000000
+                    } else {
+                        20000000000
+                    },
+                    max_tx_ex_mem: if (3..=8).contains(&epoch) {
+                        10000000
+                    } else {
+                        14000000
+                    },
+                    max_tx_ex_steps: 10000000000,
+                    max_val_size: 5000,
+                    collateral_percent: 150,
+                    max_collateral_inputs: 3,
+                    coins_per_utxo_word: 4310,
+                }),
+            })
+        } else {
+            // Preview networks do not have Byron nor ShelleyMA
+            Err(WorkerError::Panic)
+        }
+    } else {
+        // All other cases are assumed to require a mainnet environment
+        if (290..=364).contains(&epoch) {
+            // Alonzo era
+            Ok(Environment {
+                block_slot,
+                prot_magic,
+                network_id,
+                prot_params: MultiEraProtParams::Alonzo(AlonzoProtParams {
+                    fee_policy: FeePolicy {
+                        summand: 155381,
+                        multiplier: 44,
+                    },
+                    max_tx_size: 16384,
+                    max_block_ex_mem: if (290..=321).contains(&epoch) {
+                        50000000
+                    } else if (321..328).contains(&epoch) {
+                        56000000
+                    } else {
+                        62000000
+                    },
+                    max_block_ex_steps: 40000000000,
+                    max_tx_ex_mem: if (..=306).contains(&epoch) {
+                        10000000
+                    } else if (306..319).contains(&epoch) {
+                        11250000
+                    } else {
+                        14000000
+                    },
+                    max_tx_ex_steps: 10000000000,
+                    max_val_size: 5000,
+                    collateral_percent: 150,
+                    max_collateral_inputs: 3,
+                    coins_per_utxo_word: 34482,
+                }),
+            })
+        } else if epoch >= 365 {
+            // Babbage era
+            Ok(Environment {
+                block_slot,
+                prot_magic,
+                network_id,
+                prot_params: MultiEraProtParams::Babbage(BabbageProtParams {
+                    fee_policy: FeePolicy {
+                        summand: 155381,
+                        multiplier: 44,
+                    },
+                    max_tx_size: 16384,
+                    max_block_ex_mem: 62000000,
+                    max_block_ex_steps: if (365..=393).contains(&epoch) {
+                        40000000000
+                    } else {
+                        20000000000
+                    },
+                    max_tx_ex_mem: 14000000,
+                    max_tx_ex_steps: 10000000000,
+                    max_val_size: 5000,
+                    collateral_percent: 150,
+                    max_collateral_inputs: 3,
+                    coins_per_utxo_word: 4310,
+                }),
+            })
+        } else {
+            // Eras prior to Alonzo and Babbage (Byron and ShelleyMA)
+            let mut out = Environment {
+                block_slot,
+                prot_magic,
+                network_id,
+                prot_params: apply_era_hardfork(&genesis, 1)?,
+            };
 
-        Ok(out)
+            let updates = ledger.get_pparams_updates(epoch).or_panic()?;
+
+            info!(epoch, updates = updates.len(), "computing pparams");
+
+            for (era, _, cbor) in updates {
+                let era = Era::try_from(era).or_panic()?;
+                let update = MultiEraUpdate::decode_for_era(era, &cbor).or_panic()?;
+                out.prot_params = apply_param_update(&genesis, era, out.prot_params, update)?;
+            }
+
+            Ok(out)
+        }
     }
 }
