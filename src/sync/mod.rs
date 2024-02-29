@@ -81,11 +81,13 @@ pub fn pipeline(
     roll.upstream.connect(from_pull);
 
     let (to_chain, from_roll) = gasket::messaging::tokio::mpsc_channel(50);
-    roll.downstream_chain.connect(to_chain);
+    roll.downstream_chain = Some(Default::default());
+    roll.downstream_chain.as_mut().unwrap().connect(to_chain);
     chain.upstream.connect(from_roll);
 
     let (to_ledger, from_roll) = gasket::messaging::tokio::mpsc_channel(50);
-    roll.downstream_ledger.connect(to_ledger);
+    roll.downstream_ledger = Some(Default::default());
+    roll.downstream_ledger.as_mut().unwrap().connect(to_ledger);
     ledger.upstream.connect(from_roll);
 
     // output to outside of out pipeline
