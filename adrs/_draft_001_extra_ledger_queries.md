@@ -1,8 +1,10 @@
-### Rationale
+# ADR 001 (Draft) - Extra Ledger Queries
+
+## Rationale
 
 There are ledger queries that are strictly required for validation and consensus of the chain, we consider these "core queries". There's another group of queries that are not strictly required for validation (at least in the current state of affairs) but are useful for dApps using Dolos as data-source, we consider these "extra queries".
 
-### Use cases
+## Use cases
 These are what we _assume_ as potential use-cases that we want to support:
 
 - get chain tip (last block) for defining validity periods
@@ -13,7 +15,7 @@ These are what we _assume_ as potential use-cases that we want to support:
 - get block by hash for traceability purposes
 - get utxo by beacon (nft) for distributed app tx building
 
-### Use cases that need refinement:
+## Use cases that need refinement:
 These are some other use-cases that might be useful but need further discussion.
 
 - get utxo that hold a particular datum?
@@ -21,12 +23,14 @@ These are some other use-cases that might be useful but need further discussion.
 - get script by hash?
 - get epoch info?
 
-### Out-of-scope
+## Out-of-scope
 We won't include queries for the following areas of the ledger since we don't consider them a priority at this stage.
 
 - Staking
 - Rewards / Withdrawals
 - Pool info
+
+## Model
 
 ```mermaid
 erDiagram
