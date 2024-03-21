@@ -1,20 +1,110 @@
-use crate::querydb::prelude::StoreError;
-use pallas::crypto::hash::Hash;
-use pallas::ledger::traverse::MultiEraOutput;
-use redb::Database;
-use std::path::Path;
+use crate::querydb::prelude::*;
+use pallas::{
+    crypto::hash::Hash,
+    ledger::traverse::{MultiEraBlock, MultiEraOutput, MultiEraPolicyAssets, MultiEraTx},
+};
+use redb::{Database, MultimapTable, ReadableTable, Table, WriteTransaction};
+use std::{ops::Deref, path::Path};
 
 pub struct Store {
-    _inner_store: Database,
+    inner_store: Database,
 }
 
 impl Store {
     pub fn new(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         Ok(Store {
-            _inner_store: Database::create(path).map_err(StoreError::DatabaseInitilization)?,
+            inner_store: Database::create(path)
+                .map_err(|e| StoreError::ReDBError(ReDBError::DatabaseInitilization(e)))?,
         })
     }
-    pub fn apply_block(&self, _block_cbor: &[u8]) {}
+    pub fn apply_block(&self, block_cbor: &[u8]) -> Result<(), StoreError> {
+        let write_tx: WriteTransaction = self
+            .inner_store
+            .begin_write()
+            .map_err(|e| StoreError::ReDBError(ReDBError::TransactionError(e)))?;
+        let block: MultiEraBlock = Self::store_block(&write_tx, block_cbor)?;
+        Self::store_txs(&write_tx, &block)?;
+        write_tx
+            .commit()
+            .map_err(|e| StoreError::ReDBError(ReDBError::CommitError(e)))?;
+        Ok(())
+    }
+
+    fn store_block<'a>(
+        write_tx: &'a WriteTransaction,
+        block_cbor: &'a [u8],
+    ) -> Result<MultiEraBlock<'a>, StoreError> {
+        let block: MultiEraBlock =
+            MultiEraBlock::decode(block_cbor).map_err(StoreError::BlockDecoding)?;
+        let mut block_table: Table<BlockKeyType, BlockValueType> = write_tx
+            .open_table(BLOCK_TABLE)
+            .map_err(|e| StoreError::ReDBError(ReDBError::TableError(e)))?;
+        let _ = block_table.insert(block.hash().deref(), block_cbor);
+        let mut chain_tip_table: Table<ChainTipKeyType, ChainTipValueType> = write_tx
+            .open_table(CHAIN_TIP_TABLE)
+            .map_err(|e| StoreError::ReDBError(ReDBError::TableError(e)))?;
+        let _ = chain_tip_table.insert(
+            chain_tip_table
+                .len()
+                .map_err(|e| StoreError::ReDBError(ReDBError::InsertError(e)))?
+                + 1,
+            block.hash().deref(),
+        );
+        Ok(block)
+    }
+
+    fn store_txs(write_tx: &WriteTransaction, block: &MultiEraBlock) -> Result<(), StoreError> {
+        let mut tx_table: Table<TxTableKeyType, TxTableValueType> =
+            write_tx
+                .open_table(TX_TABLE)
+                .map_err(|e| StoreError::ReDBError(ReDBError::TableError(e)))?;
+        for tx in block.txs() {
+            tx_table
+                .insert(tx.hash().deref(), tx.encode().as_slice())
+                .map_err(|e| StoreError::ReDBError(ReDBError::InsertError(e)))?;
+            Self::store_utxos(write_tx, &tx)?;
+        }
+        Ok(())
+    }
+
+    fn store_utxos(write_tx: &WriteTransaction, tx: &MultiEraTx) -> Result<(), StoreError> {
+        let mut utxo_table: Table<UTxOKeyType, UTxOValueType> = write_tx
+            .open_table(UTXO_TABLE)
+            .map_err(|e| StoreError::ReDBError(ReDBError::TableError(e)))?;
+        let mut utxo_by_addr_table: MultimapTable<UTxOByAddrKeyType, UTxOByAddrValueType> =
+            write_tx
+                .open_multimap_table(UTXO_BY_ADDR_TABLE)
+                .map_err(|e| StoreError::ReDBError(ReDBError::TableError(e)))?;
+        let mut utxo_by_beacon_table: MultimapTable<UTxOByBeaconKeyType, UTxOByBeaconValueType> =
+            write_tx
+                .open_multimap_table(UTXO_BY_BEACON_TABLE)
+                .map_err(|e| StoreError::ReDBError(ReDBError::TableError(e)))?;
+        for (index, output) in tx.outputs().iter().enumerate() {
+            utxo_table
+                .insert(
+                    (tx.hash().deref().as_slice(), index as u8),
+                    output.encode().as_slice(),
+                )
+                .map_err(|e| StoreError::ReDBError(ReDBError::InsertError(e)))?;
+            let addr: Vec<u8> = output
+                .address()
+                .map_err(StoreError::AddressDecoding)?
+                .to_vec();
+            utxo_by_addr_table
+                .insert(addr.as_slice(), (tx.hash().deref().as_slice(), index as u8))
+                .map_err(|e| StoreError::ReDBError(ReDBError::InsertError(e)))?;
+            for policy in output
+                .non_ada_assets()
+                .iter()
+                .map(MultiEraPolicyAssets::policy)
+            {
+                utxo_by_beacon_table
+                    .insert(policy.deref(), (tx.hash().deref().as_slice(), index as u8))
+                    .map_err(|e| StoreError::ReDBError(ReDBError::InsertError(e)))?;
+            }
+        }
+        Ok(())
+    }
 
     pub fn get_chain_tip(&self) -> &[u8] {
         unimplemented!()
