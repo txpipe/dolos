@@ -3,7 +3,9 @@ use pallas::{
     crypto::hash::Hash,
     ledger::traverse::{MultiEraBlock, MultiEraOutput, MultiEraPolicyAssets, MultiEraTx},
 };
-use redb::{Database, MultimapTable, ReadableTable, Table, WriteTransaction};
+use redb::{
+    Database, MultimapTable, ReadOnlyTable, ReadTransaction, ReadableTable, Table, WriteTransaction,
+};
 use std::{ops::Deref, path::Path};
 
 pub struct Store {
@@ -106,8 +108,20 @@ impl Store {
         Ok(())
     }
 
-    pub fn get_chain_tip(&self) -> &[u8] {
-        unimplemented!()
+    pub fn get_chain_tip(&self) -> Result<Vec<u8>, ReadError> {
+        let read_tx: ReadTransaction = self
+            .inner_store
+            .begin_read()
+            .map_err(ReadError::TransactionError)?;
+        let chain_tip_table: ReadOnlyTable<ChainTipKeyType, ChainTipValueType> = read_tx
+            .open_table(CHAIN_TIP_TABLE)
+            .map_err(ReadError::TableError)?;
+        let res = chain_tip_table
+            .last()
+            .map_err(ReadError::StorageError)?
+            .ok_or(ReadError::ChainTipNotFound)
+            .map(|entry| Vec::from(entry.1.value()));
+        res
     }
 
     pub fn get_chain_parameters(&self) {

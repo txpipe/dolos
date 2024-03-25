@@ -1,5 +1,5 @@
 use pallas;
-use redb::{MultimapTableDefinition, TableDefinition};
+use redb::{MultimapTableDefinition, StorageError, TableDefinition, TableError, TransactionError};
 
 // Given a block, table "block" maps its hash to its CBOR representation
 pub type BlockKeyType<'a> = &'a [u8; 32];
@@ -55,4 +55,11 @@ pub enum ReDBError {
     InsertError(redb::StorageError),
     TableError(redb::TableError),
     TransactionError(redb::TransactionError),
+}
+
+pub enum ReadError {
+    ChainTipNotFound,
+    TransactionError(TransactionError),
+    TableError(TableError),
+    StorageError(StorageError),
 }
