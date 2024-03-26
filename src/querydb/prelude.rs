@@ -9,6 +9,7 @@ pub const BLOCK_TABLE: TableDefinition<BlockKeyType, BlockValueType> =
 // "chain_tip" stores the hash of the last applied block
 pub type ChainTipKeyType = u64;
 pub type ChainTipValueType<'a> = &'a [u8; 32];
+pub type ChainTipResultType = Vec<u8>;
 pub const CHAIN_TIP_TABLE: TableDefinition<ChainTipKeyType, ChainTipValueType> =
     TableDefinition::new("chain_tip");
 // Given a transaction, table "tx" maps its hash to an encoding representation
@@ -31,6 +32,7 @@ pub const UTXO_TABLE: TableDefinition<UTxOKeyType, UTxOValueType> = TableDefinit
 // address)
 pub type UTxOByAddrKeyType<'a> = &'a [u8];
 pub type UTxOByAddrValueType<'a> = (&'a [u8], u8);
+pub type UTxOByAddrResultType = (Vec<u8>, u8);
 pub const UTXO_BY_ADDR_TABLE: MultimapTableDefinition<UTxOByAddrKeyType, UTxOByAddrValueType> =
     MultimapTableDefinition::new("utxo_by_addr");
 // Given a minting policy, table "utxo_by_beacon" maps it to a list of pairs of
