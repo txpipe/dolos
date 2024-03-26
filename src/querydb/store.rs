@@ -57,10 +57,9 @@ impl Store {
     }
 
     fn store_txs(write_tx: &WriteTransaction, block: &MultiEraBlock) -> Result<(), StoreError> {
-        let mut tx_table: Table<TxTableKeyType, TxTableValueType> =
-            write_tx
-                .open_table(TX_TABLE)
-                .map_err(|e| StoreError::ReDBError(ReDBError::TableError(e)))?;
+        let mut tx_table: Table<TxKeyType, TxValueType> = write_tx
+            .open_table(TX_TABLE)
+            .map_err(|e| StoreError::ReDBError(ReDBError::TableError(e)))?;
         for tx in block.txs() {
             tx_table
                 .insert(tx.hash().deref(), tx.encode().as_slice())
@@ -170,10 +169,9 @@ impl Store {
         res
     }
 
-    pub fn get_tx_from_hash(&self, tx_hash: Hash<32>) -> Option<TxTableResultType> {
+    pub fn get_tx_from_hash(&self, tx_hash: &Hash<32>) -> Option<TxResultType> {
         let read_tx: ReadTransaction = self.inner_store.begin_read().ok()?;
-        let tx_table: ReadOnlyTable<TxTableKeyType, TxTableValueType> =
-            read_tx.open_table(TX_TABLE).ok()?;
+        let tx_table: ReadOnlyTable<TxKeyType, TxValueType> = read_tx.open_table(TX_TABLE).ok()?;
         let res = tx_table
             .get(tx_hash.deref())
             .ok()?
@@ -181,8 +179,15 @@ impl Store {
         res
     }
 
-    pub fn get_block_from_hash(&self, _block_hash: Hash<32>) -> Option<&[u8]> {
-        unimplemented!()
+    pub fn get_block_from_hash(&self, block_hash: &Hash<32>) -> Option<BlockResultType> {
+        let read_tx: ReadTransaction = self.inner_store.begin_read().ok()?;
+        let tx_table: ReadOnlyTable<BlockKeyType, BlockValueType> =
+            read_tx.open_table(BLOCK_TABLE).ok()?;
+        let res = tx_table
+            .get(block_hash.deref())
+            .ok()?
+            .map(|val| Vec::from(val.value()));
+        res
     }
 
     pub fn get_utxos_from_beacon<'a, T>(&self, _beacon_policy_id: Hash<28>) -> std::boxed::Box<T>
