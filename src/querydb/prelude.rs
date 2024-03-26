@@ -4,6 +4,7 @@ use redb::{MultimapTableDefinition, StorageError, TableDefinition, TableError, T
 // Given a block, table "block" maps its hash to its CBOR representation
 pub type BlockKeyType<'a> = &'a [u8; 32];
 pub type BlockValueType<'a> = &'a [u8];
+pub type BlockResultType = Vec<u8>;
 pub const BLOCK_TABLE: TableDefinition<BlockKeyType, BlockValueType> =
     TableDefinition::new("block");
 // "chain_tip" stores the hash of the last applied block
@@ -16,10 +17,10 @@ pub const CHAIN_TIP_TABLE: TableDefinition<ChainTipKeyType, ChainTipValueType> =
 // of it
 // NOTE: transactions don't have a precise CBOR representation, so we use
 // a library encoded representation instead
-pub type TxTableKeyType<'a> = &'a [u8; 32];
-pub type TxTableValueType<'a> = &'a [u8];
-pub type TxTableResultType = Vec<u8>;
-pub const TX_TABLE: TableDefinition<TxTableKeyType, TxTableValueType> = TableDefinition::new("tx");
+pub type TxKeyType<'a> = &'a [u8; 32];
+pub type TxValueType<'a> = &'a [u8];
+pub type TxResultType = Vec<u8>;
+pub const TX_TABLE: TableDefinition<TxKeyType, TxValueType> = TableDefinition::new("tx");
 // Given a UTxO, table "utxo" maps its output reference (a pair composed of the
 // hash of the transaction that produced the UTxO and the index in the list of
 // transaction outputs corresponding to it) to the result of encoding said UTxO
