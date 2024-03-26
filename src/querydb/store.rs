@@ -155,8 +155,15 @@ impl Store {
         res
     }
 
-    pub fn get_utxo_from_reference(&self) -> Option<&[u8]> {
-        unimplemented!()
+    pub fn get_utxo_from_reference(&self, tx_hash: &Hash<32>, tx_index: u8) -> Option<Vec<u8>> {
+        let read_tx: ReadTransaction = self.inner_store.begin_read().ok()?;
+        let utxo_table: ReadOnlyTable<UTxOKeyType, UTxOValueType> =
+            read_tx.open_table(UTXO_TABLE).ok()?;
+        let res = utxo_table
+            .get((tx_hash.as_ref(), tx_index))
+            .ok()?
+            .map(|val| Vec::from(val.value()));
+        res
     }
 
     pub fn get_tx_from_hash(&self, _tx_hash: Hash<32>) -> Option<&[u8]> {
