@@ -4,7 +4,8 @@ use pallas::{
     ledger::traverse::{MultiEraBlock, MultiEraOutput, MultiEraPolicyAssets, MultiEraTx},
 };
 use redb::{
-    Database, MultimapTable, ReadOnlyTable, ReadTransaction, ReadableTable, Table, WriteTransaction,
+    Database, MultimapTable, ReadOnlyMultimapTable, ReadOnlyTable, ReadTransaction,
+    ReadableMultimapTable, ReadableTable, Table, WriteTransaction,
 };
 use std::{ops::Deref, path::Path};
 
@@ -108,7 +109,7 @@ impl Store {
         Ok(())
     }
 
-    pub fn get_chain_tip(&self) -> Result<Vec<u8>, ReadError> {
+    pub fn get_chain_tip(&self) -> Result<ChainTipResultType, ReadError> {
         let read_tx: ReadTransaction = self
             .inner_store
             .begin_read()
@@ -128,11 +129,30 @@ impl Store {
         unimplemented!()
     }
 
-    pub fn get_utxos_from_address<'a, T>(&self) -> Box<T>
-    where
-        T: Iterator<Item = MultiEraOutput<'a>>,
-    {
-        unimplemented!()
+    pub fn get_utxos_from_address<T>(
+        &self,
+        addr: UTxOByAddrKeyType,
+    ) -> Result<Box<impl Iterator<Item = UTxOByAddrResultType>>, ReadError> {
+        let read_tx: ReadTransaction = self
+            .inner_store
+            .begin_read()
+            .map_err(ReadError::TransactionError)?;
+        let utxo_by_addr_table: ReadOnlyMultimapTable<UTxOByAddrKeyType, UTxOByAddrValueType> =
+            read_tx
+                .open_multimap_table(UTXO_BY_ADDR_TABLE)
+                .map_err(ReadError::TableError)?;
+        let res = match utxo_by_addr_table.get(addr) {
+            Ok(database_results) => {
+                let mut res = vec![];
+                for val in database_results.flatten() {
+                    let (tx_hash, tx_index) = val.value();
+                    res.push((Vec::from(tx_hash), tx_index))
+                }
+                Ok(Box::new(res.into_iter()))
+            }
+            Err(err) => Err(ReadError::StorageError(err)),
+        };
+        res
     }
 
     pub fn get_utxo_from_reference(&self) -> Option<&[u8]> {
