@@ -26,6 +26,7 @@ pub const TX_TABLE: TableDefinition<TxTableKeyType, TxTableValueType> = TableDef
 // representation.
 pub type UTxOKeyType<'a> = (&'a [u8], u8);
 pub type UTxOValueType<'a> = &'a [u8];
+pub type UTxOResultType<'a> = Vec<u8>;
 pub const UTXO_TABLE: TableDefinition<UTxOKeyType, UTxOValueType> = TableDefinition::new("utxo");
 // Given an address, table "utxo_by_addr" maps it to a list of pairs of a tx
 // hash and an (output) index (each one representing a UTxO sitting at that
