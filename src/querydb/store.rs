@@ -1,7 +1,7 @@
 use crate::querydb::prelude::*;
 use pallas::{
     crypto::hash::Hash,
-    ledger::traverse::{MultiEraBlock, MultiEraOutput, MultiEraPolicyAssets, MultiEraTx},
+    ledger::traverse::{MultiEraBlock, MultiEraPolicyAssets, MultiEraTx},
 };
 use redb::{
     Database, MultimapTable, ReadOnlyMultimapTable, ReadOnlyTable, ReadTransaction,
@@ -190,10 +190,31 @@ impl Store {
         res
     }
 
-    pub fn get_utxos_from_beacon<'a, T>(&self, _beacon_policy_id: Hash<28>) -> std::boxed::Box<T>
-    where
-        T: Iterator<Item = MultiEraOutput<'a>>,
-    {
-        unimplemented!()
+    pub fn get_utxos_from_beacon(
+        &self,
+        beacon_policy_id: &Hash<28>,
+    ) -> Result<Box<impl Iterator<Item = UTxOByBeaconResultType>>, ReadError> {
+        let read_tx: ReadTransaction = self
+            .inner_store
+            .begin_read()
+            .map_err(ReadError::TransactionError)?;
+        let utxo_by_beacon_table: ReadOnlyMultimapTable<
+            UTxOByBeaconKeyType,
+            UTxOByBeaconValueType,
+        > = read_tx
+            .open_multimap_table(UTXO_BY_BEACON_TABLE)
+            .map_err(ReadError::TableError)?;
+        let res = match utxo_by_beacon_table.get(beacon_policy_id.deref()) {
+            Ok(database_results) => {
+                let mut res = vec![];
+                for val in database_results.flatten() {
+                    let (tx_hash, tx_index) = val.value();
+                    res.push((Vec::from(tx_hash), tx_index))
+                }
+                Ok(Box::new(res.into_iter()))
+            }
+            Err(err) => Err(ReadError::StorageError(err)),
+        };
+        res
     }
 }

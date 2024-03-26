@@ -43,6 +43,7 @@ pub const UTXO_BY_ADDR_TABLE: MultimapTableDefinition<UTxOByAddrKeyType, UTxOByA
 // token of that policy)
 pub type UTxOByBeaconKeyType<'a> = &'a [u8; 28];
 pub type UTxOByBeaconValueType<'a> = (&'a [u8], u8);
+pub type UTxOByBeaconResultType = (Vec<u8>, u8);
 pub const UTXO_BY_BEACON_TABLE: MultimapTableDefinition<
     UTxOByBeaconKeyType,
     UTxOByBeaconValueType,
