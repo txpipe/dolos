@@ -118,7 +118,7 @@ impl Worker {
                     .blockfetch()
                     .fetch_single(Point::Specific(slot, hash.to_vec()))
                     .await
-                    .or_retry()?;
+                    .or_restart()?;
 
                 stage
                     .downstream
