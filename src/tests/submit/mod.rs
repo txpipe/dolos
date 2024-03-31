@@ -27,7 +27,7 @@ mod tests {
 
         let config: crate::submit::Config = s.build().unwrap().try_deserialize().unwrap();
 
-        let wal = pallas::storage::rolldb::wal::Store::open("tmp", 10000).unwrap();
+        let wal = pallas::storage::rolldb::wal::Store::open("tmp", 10000, None).unwrap();
 
         let daemon = crate::submit::grpc::pipeline(config.grpc, wal, true).unwrap();
 
