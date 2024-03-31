@@ -50,7 +50,7 @@ fn test_mainnet_upstream() {
     )
     .unwrap();
 
-    let rolldb = pallas::storage::rolldb::wal::Store::open("tmp", 10).unwrap();
+    let rolldb = pallas::storage::rolldb::wal::Store::open("tmp", 10, None).unwrap();
 
     let intersection = rolldb.intersect_options(5).unwrap().into_iter().collect();
 
@@ -59,6 +59,7 @@ fn test_mainnet_upstream() {
     let mut upstream = crate::sync::pull::Stage::new(
         "relays-new.cardano-mainnet.iohk.io:3001".into(),
         764824073,
+        20,
         intersection,
     );
 
