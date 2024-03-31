@@ -1,0 +1,61 @@
+{
+  "systemStart": "2024-02-20T22:09:21+00:00",
+  "networkMagic": 1177,
+  "networkId": "Testnet",
+  "activeSlotsCoeff": 0.5,
+  "securityParam": 100,
+  "epochLength": 86400,
+  "slotsPerKESPeriod": 129600,
+  "maxKESEvolutions": 60,
+  "slotLength": 1,
+  "updateQuorum": 2,
+  "maxLovelaceSupply": 100000000000000000,
+  "protocolParams": {
+    "minFeeA": 44,
+    "minFeeB": 155381,
+    "maxBlockBodySize": 65536,
+    "maxTxSize": 16384,
+    "maxBlockHeaderSize": 1100,
+    "keyDeposit": 0,
+    "poolDeposit": 0,
+    "eMax": 18,
+    "nOpt": 100,
+    "a0": 0,
+    "rho": 0.1,
+    "tau": 0.1,
+    "minPoolCost": 0,
+    "decentralisationParam": 1,
+    "extraEntropy": {
+      "tag": "NeutralNonce"
+    },
+    "protocolVersion": {
+      "major": 7,
+      "minor": 0
+    },
+    "minUTxOValue": 1000000
+  },
+  "genDelegs": {
+    "2079f4182ed7caf4dac73fb241dc6fb8d144c4c6ab7952f689c2b8f8": {
+      "delegate": "80c1556ad0d02588bd0e0c948cfd33a00e28874bdd6bb35b5b9c2efe",
+      "vrf": "551efd2bec23baffa16fe71da93c8b6390fea245dcfd7a78a4b02ddb3e9723ca"
+    },
+    "9745b7dd83e42dcc6a946d9451e13f9ead7ca2643f370e47896a359a": {
+      "delegate": "a244214441288de3e481e1e0a037bf87c75168872bef7caa24b0d8d5",
+      "vrf": "a5dff866c2a3d8152e022498f0c0b9cde5982595c524451f893ca865ef2800c9"
+    },
+    "ddf59c64251020c86a4f26812db84186371c78f20e31eba191bc85d0": {
+      "delegate": "8f6e571202cf26d0848b0eeb03124cd9ffab69f160c0e18dfa1faba0",
+      "vrf": "b96a3b1a22eebaf01902346fe264791dd179a5ca92312bfb9695bf056906c738"
+    }
+  },
+  "initialFunds": {},
+  "staking": {
+    "pools": {},
+    "stake": {
+      "20001c4d06cb3f90f0d1dacc7895abc0092de7104a85319691f5abd1": "a6fcc289a30696b64a47df65f9d664de669f9c9eaf24966aad382ad0",
+      "ef7641ccf2ef572d7cfed3995b3394de6ee9d61caabe4bf275a12dd1": "89364f5daac40ff302adc376c9ba53c54ecdd1d5c5569aeb229ace26",
+      "7f20d4905fdbf195de1e42fe06660af4cf3d0751314fde5767d66345": "dfcc023413bb9e99c6a63411a97a60505031dea09943f2e9e76dece9",
+      "f6b1c21116f7c2512220318f082854c5bf578c6aaae85488c0dfb88a": "736d15b63ccd21edbbccad27edcdbeefb2db24bd1ae27bc029a1a521"
+    }
+  }
+}
