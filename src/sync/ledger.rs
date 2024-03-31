@@ -1,7 +1,6 @@
 use gasket::framework::*;
 use pallas::applying::{validate, Environment, UTxOs};
 use pallas::ledger::configs::{byron, shelley};
-use pallas::ledger::traverse::wellknown::GenesisValues;
 use pallas::ledger::traverse::{Era, MultiEraBlock, MultiEraInput, MultiEraOutput};
 use std::borrow::Cow;
 use std::collections::HashMap;
