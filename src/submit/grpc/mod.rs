@@ -84,6 +84,7 @@ pub fn pipeline(
         let mut pull = sync::pull::Stage::new(
             config.peer_addresses[0].clone(),
             config.peer_magic,
+            50,
             sync::pull::Intersection::Tip,
         );
 

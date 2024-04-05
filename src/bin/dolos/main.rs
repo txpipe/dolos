@@ -43,6 +43,7 @@ struct Cli {
 pub struct RolldbConfig {
     path: Option<std::path::PathBuf>,
     k_param: Option<u64>,
+    immutable_overlap: Option<u64>,
 }
 
 #[derive(Deserialize)]

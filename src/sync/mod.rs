@@ -20,6 +20,7 @@ pub mod roll;
 pub struct Config {
     pub peer_address: String,
     pub network_magic: u64,
+    pub block_fetch_batch_size: Option<usize>,
     pub network_id: u8,
     pub phase1_validation_enabled: bool,
 }
@@ -62,6 +63,7 @@ pub fn pipeline(
     let mut pull = pull::Stage::new(
         config.peer_address.clone(),
         config.network_magic,
+        config.block_fetch_batch_size.unwrap_or(50),
         pull_cursor,
     );
 
@@ -72,7 +74,6 @@ pub fn pipeline(
     info!(?cursor_ledger, "ledger cursor found");
 
     let mut roll = roll::Stage::new(wal, cursor_chain, cursor_ledger);
-
     let mut chain = chain::Stage::new(chain);
     let mut ledger = ledger::Stage::new(
         ledger,

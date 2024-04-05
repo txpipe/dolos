@@ -4,9 +4,11 @@ use gasket::framework::*;
 use tracing::{debug, info};
 
 use pallas::crypto::hash::Hash;
-use pallas::ledger::traverse::MultiEraHeader;
+use pallas::ledger::traverse::{MultiEraBlock, MultiEraHeader};
 use pallas::network::facades::PeerClient;
-use pallas::network::miniprotocols::chainsync::{self, HeaderContent, NextResponse};
+use pallas::network::miniprotocols::chainsync::{
+    HeaderContent, NextResponse, RollbackBuffer, RollbackEffect, Tip,
+};
 use pallas::network::miniprotocols::Point;
 
 use crate::prelude::*;
@@ -95,68 +97,51 @@ async fn intersect(peer: &mut PeerClient, intersection: &Intersection) -> Result
     Ok(())
 }
 
+enum PullBatch {
+    BlockRange(Point, Point),
+    OutOfScopeRollback(Point),
+    Empty,
+}
+
+pub enum WorkUnit {
+    Pull,
+    Await,
+}
+
 pub struct Worker {
     peer_session: PeerClient,
 }
 
 impl Worker {
-    async fn process_next(
-        &mut self,
-        stage: &mut Stage,
-        next: &NextResponse<HeaderContent>,
-    ) -> Result<(), WorkerError> {
-        match next {
-            NextResponse::RollForward(header, tip) => {
-                let header = to_traverse(header).or_panic()?;
-                let slot = header.slot();
-                let hash = header.hash();
+    async fn define_pull_batch(&mut self, stage: &mut Stage) -> Result<PullBatch, WorkerError> {
+        let client = self.peer_session.chainsync();
+        let mut buffer = RollbackBuffer::new();
 
-                debug!(slot, %hash, "chain sync roll forward");
+        while buffer.size() < stage.block_fetch_batch_size {
+            let next = client.request_next().await.or_restart()?;
 
-                let block = self
-                    .peer_session
-                    .blockfetch()
-                    .fetch_single(Point::Specific(slot, hash.to_vec()))
-                    .await
-                    .or_retry()?;
+            match next {
+                NextResponse::RollForward(header, tip) => {
+                    let header = to_traverse(&header).or_panic()?;
+                    let point = Point::Specific(header.slot(), header.hash().to_vec());
+                    buffer.roll_forward(point);
 
-                stage
-                    .downstream
-                    .send(PullEvent::RollForward(slot, hash, block).into())
-                    .await
-                    .or_panic()?;
-
-                stage.intersection.add_breadcrumb(slot, hash.as_ref());
-
-                stage.chain_tip.set(tip.0.slot_or_default() as i64);
-
-                Ok(())
-            }
-            chainsync::NextResponse::RollBackward(point, tip) => {
-                match &point {
-                    Point::Origin => debug!("rollback to origin"),
-                    Point::Specific(slot, _) => debug!(slot, "rollback"),
-                };
-
-                stage
-                    .downstream
-                    .send(PullEvent::Rollback(point.clone()).into())
-                    .await
-                    .or_panic()?;
-
-                if let Point::Specific(slot, hash) = &point {
-                    stage.intersection.add_breadcrumb(*slot, hash);
+                    stage.track_tip(&tip);
                 }
-
-                stage.chain_tip.set(tip.0.slot_or_default() as i64);
-
-                Ok(())
-            }
-            chainsync::NextResponse::Await => {
-                info!("chain-sync reached the tip of the chain");
-                Ok(())
+                NextResponse::RollBackward(point, _) => match buffer.roll_back(&point) {
+                    RollbackEffect::OutOfScope => return Ok(PullBatch::OutOfScopeRollback(point)),
+                    RollbackEffect::Handled => (),
+                },
+                NextResponse::Await => break,
             }
         }
+
+        let range = match (buffer.oldest(), buffer.latest()) {
+            (Some(a), Some(b)) => PullBatch::BlockRange(a.clone(), b.clone()),
+            _ => PullBatch::Empty,
+        };
+
+        Ok(range)
     }
 }
 
@@ -185,37 +170,82 @@ impl gasket::framework::Worker<Stage> for Worker {
     async fn schedule(
         &mut self,
         _stage: &mut Stage,
-    ) -> Result<WorkSchedule<NextResponse<HeaderContent>>, WorkerError> {
+    ) -> Result<WorkSchedule<WorkUnit>, WorkerError> {
         let client = self.peer_session.chainsync();
 
-        let next = match client.has_agency() {
-            true => {
-                debug!("requesting next block");
-                client.request_next().await.or_restart()?
-            }
-            false => {
-                debug!("awaiting next block (blocking)");
-                client.recv_while_must_reply().await.or_restart()?
-            }
-        };
-
-        Ok(WorkSchedule::Unit(next))
+        if client.has_agency() {
+            debug!("should request next batch of blocks");
+            Ok(WorkSchedule::Unit(WorkUnit::Pull))
+        } else {
+            debug!("should await next block");
+            Ok(WorkSchedule::Unit(WorkUnit::Await))
+        }
     }
 
-    async fn execute(
-        &mut self,
-        unit: &NextResponse<HeaderContent>,
-        stage: &mut Stage,
-    ) -> Result<(), WorkerError> {
-        self.process_next(stage, unit).await
+    async fn execute(&mut self, unit: &WorkUnit, stage: &mut Stage) -> Result<(), WorkerError> {
+        match unit {
+            WorkUnit::Pull => {
+                let batch = self.define_pull_batch(stage).await?;
+
+                match batch {
+                    PullBatch::BlockRange(start, end) => {
+                        let blocks = self
+                            .peer_session
+                            .blockfetch()
+                            .fetch_range((start, end))
+                            .await
+                            .or_restart()?;
+
+                        stage.flush_blocks(blocks).await?;
+                    }
+                    PullBatch::OutOfScopeRollback(point) => {
+                        stage.flush_rollback(point).await?;
+                    }
+                    PullBatch::Empty => (),
+                };
+            }
+            WorkUnit::Await => {
+                let next = self
+                    .peer_session
+                    .chainsync()
+                    .recv_while_must_reply()
+                    .await
+                    .or_restart()?;
+
+                match next {
+                    NextResponse::RollForward(header, tip) => {
+                        let header = to_traverse(&header).or_panic()?;
+                        let point = Point::Specific(header.slot(), header.hash().to_vec());
+
+                        let block = self
+                            .peer_session
+                            .blockfetch()
+                            .fetch_single(point)
+                            .await
+                            .or_restart()?;
+
+                        stage.flush_blocks(vec![block]).await?;
+                        stage.track_tip(&tip);
+                    }
+                    NextResponse::RollBackward(point, tip) => {
+                        stage.flush_rollback(point).await?;
+                        stage.track_tip(&tip);
+                    }
+                    NextResponse::Await => (),
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 
 #[derive(Stage)]
-#[stage(name = "pull", unit = "NextResponse<HeaderContent>", worker = "Worker")]
+#[stage(name = "pull", unit = "WorkUnit", worker = "Worker")]
 pub struct Stage {
     peer_address: String,
     network_magic: u64,
+    block_fetch_batch_size: usize,
     intersection: Intersection,
 
     pub downstream: DownstreamPort,
@@ -228,14 +258,60 @@ pub struct Stage {
 }
 
 impl Stage {
-    pub fn new(peer_address: String, network_magic: u64, intersection: Intersection) -> Self {
+    pub fn new(
+        peer_address: String,
+        network_magic: u64,
+        block_fetch_batch_size: usize,
+        intersection: Intersection,
+    ) -> Self {
         Self {
             peer_address,
             network_magic,
             intersection,
+            block_fetch_batch_size,
             downstream: Default::default(),
             block_count: Default::default(),
             chain_tip: Default::default(),
         }
+    }
+
+    async fn flush_blocks(&mut self, blocks: Vec<RawBlock>) -> Result<(), WorkerError> {
+        for cbor in blocks {
+            // TODO: can we avoid decoding in this stage?
+            let block = MultiEraBlock::decode(&cbor).or_panic()?;
+            let slot = block.slot();
+            let hash = block.hash();
+
+            self.downstream
+                .send(PullEvent::RollForward(slot, hash, cbor).into())
+                .await
+                .or_panic()?;
+
+            self.intersection.add_breadcrumb(slot, hash.as_ref());
+        }
+
+        Ok(())
+    }
+
+    async fn flush_rollback(&mut self, point: Point) -> Result<(), WorkerError> {
+        match &point {
+            Point::Origin => debug!("rollback to origin"),
+            Point::Specific(slot, _) => debug!(slot, "rollback"),
+        };
+
+        self.downstream
+            .send(PullEvent::Rollback(point.clone()).into())
+            .await
+            .or_panic()?;
+
+        if let Point::Specific(slot, hash) = &point {
+            self.intersection.add_breadcrumb(*slot, hash);
+        }
+
+        Ok(())
+    }
+
+    fn track_tip(&self, tip: &Tip) {
+        self.chain_tip.set(tip.0.slot_or_default() as i64);
     }
 }

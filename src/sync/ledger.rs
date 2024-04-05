@@ -1,7 +1,6 @@
 use gasket::framework::*;
 use pallas::applying::{validate, Environment, UTxOs};
 use pallas::ledger::configs::{byron, shelley};
-use pallas::ledger::traverse::wellknown::GenesisValues;
 use pallas::ledger::traverse::{Era, MultiEraBlock, MultiEraInput, MultiEraOutput};
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -22,9 +21,6 @@ pub struct Stage {
     network_id: u8,
 
     current_pparams: Option<(u64, Environment)>,
-
-    // HACK: until multi-era genesis
-    genesis_values: GenesisValues,
 
     phase1_validation_enabled: bool,
 
@@ -48,10 +44,6 @@ impl Stage {
     ) -> Self {
         Self {
             ledger,
-            genesis_values: pallas::ledger::traverse::wellknown::GenesisValues::from_magic(
-                byron.protocol_consts.protocol_magic as u64,
-            )
-            .unwrap(),
             byron,
             shelley,
             network_magic,
@@ -64,7 +56,24 @@ impl Stage {
         }
     }
 
-    fn ensure_pparams(&mut self, epoch: u64, block_slot: u64) -> Result<(), WorkerError> {
+    // Temporal workaround while we fix the GenesisValues mess we have in Pallas.
+    fn compute_epoch(&mut self, block: &MultiEraBlock) -> u64 {
+        let slot_length = self
+            .shelley
+            .slot_length
+            .expect("shelley genesis didn't provide a slot length");
+
+        let epoch_length = self
+            .shelley
+            .epoch_length
+            .expect("shelley genesis didn't provide an epoch lenght");
+
+        (block.slot() * slot_length as u64) / epoch_length as u64
+    }
+
+    fn ensure_pparams(&mut self, block: &MultiEraBlock) -> Result<(), WorkerError> {
+        let epoch = self.compute_epoch(block);
+
         if self
             .current_pparams
             .as_ref()
@@ -160,8 +169,7 @@ impl gasket::framework::Worker<Stage> for Worker {
 
                 if stage.phase1_validation_enabled {
                     debug!("performing phase-1 validations");
-                    let (epoch, _) = block.epoch(&stage.genesis_values);
-                    stage.ensure_pparams(epoch, block.slot())?;
+                    stage.ensure_pparams(&block)?;
                     stage.execute_phase1_validation(&block)?;
                 }
 
