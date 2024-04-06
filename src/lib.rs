@@ -1,4 +1,5 @@
 pub mod model;
+pub mod pparams;
 pub mod prelude;
 pub mod serve;
 pub mod storage;

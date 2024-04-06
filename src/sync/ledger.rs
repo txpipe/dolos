@@ -1,5 +1,5 @@
 use gasket::framework::*;
-use pallas::applying::{validate, Environment, UTxOs};
+use pallas::applying::{validate, Environment as ValidationContext, UTxOs};
 use pallas::ledger::configs::{byron, shelley};
 use pallas::ledger::traverse::{Era, MultiEraBlock, MultiEraInput, MultiEraOutput};
 use std::borrow::Cow;
@@ -20,7 +20,7 @@ pub struct Stage {
     network_magic: u64,
     network_id: u8,
 
-    current_pparams: Option<(u64, Environment)>,
+    current_pparams: Option<(u64, ValidationContext)>,
 
     phase1_validation_enabled: bool,
 
@@ -82,21 +82,25 @@ impl Stage {
             return Ok(());
         }
 
-        let pparams = super::pparams::compute_pparams(
-            super::pparams::Genesis {
+        let pparams = crate::pparams::compute_pparams(
+            crate::pparams::Genesis {
                 byron: &self.byron,
                 shelley: &self.shelley,
             },
             &self.ledger,
             epoch,
-            block_slot,
-            self.network_magic as u32,
-            self.network_id,
         )?;
 
         warn!(?pparams, "pparams for new epoch");
 
-        self.current_pparams = Some((epoch, pparams));
+        let context = ValidationContext {
+            block_slot: block.slot(),
+            prot_magic: self.network_magic as u32,
+            network_id: self.network_id,
+            prot_params: pparams,
+        };
+
+        self.current_pparams = Some((epoch, context));
 
         Ok(())
     }
@@ -124,7 +128,7 @@ impl Stage {
             utxos2.insert(key, value);
         }
 
-        let pparams = self
+        let context = self
             .current_pparams
             .as_ref()
             .map(|(_, x)| x)
@@ -132,7 +136,7 @@ impl Stage {
             .or_panic()?;
 
         for tx in block.txs().iter() {
-            let res = validate(tx, &utxos2, pparams);
+            let res = validate(tx, &utxos2, &context);
 
             if let Err(err) = res {
                 warn!(?err, "validation error");

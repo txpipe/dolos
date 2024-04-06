@@ -12,7 +12,6 @@ use crate::storage::applydb::ApplyDB;
 
 pub mod chain;
 pub mod ledger;
-pub mod pparams;
 pub mod pull;
 pub mod roll;
 
