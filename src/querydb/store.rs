@@ -16,20 +16,19 @@ pub struct Store {
 impl Store {
     pub fn new(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         Ok(Store {
-            inner_store: Database::create(path)
-                .map_err(|e| StoreError::ReDBError(ReDBError::DatabaseInitilization(e)))?,
+            inner_store: Database::create(path).map_err(|e| StoreError::ReDBError(Box::new(e)))?,
         })
     }
     pub fn apply_block(&self, block_cbor: &[u8]) -> Result<(), StoreError> {
         let write_tx: WriteTransaction = self
             .inner_store
             .begin_write()
-            .map_err(|e| StoreError::ReDBError(ReDBError::TransactionError(e)))?;
+            .map_err(|e| StoreError::ReDBError(Box::new(e)))?;
         let block: MultiEraBlock = Self::store_block(&write_tx, block_cbor)?;
         Self::store_txs(&write_tx, &block)?;
         write_tx
             .commit()
-            .map_err(|e| StoreError::ReDBError(ReDBError::CommitError(e)))?;
+            .map_err(|e| StoreError::ReDBError(Box::new(e)))?;
         Ok(())
     }
 
@@ -41,15 +40,15 @@ impl Store {
             MultiEraBlock::decode(block_cbor).map_err(StoreError::BlockDecoding)?;
         let mut block_table: Table<BlockKeyType, BlockValueType> = write_tx
             .open_table(BLOCK_TABLE)
-            .map_err(|e| StoreError::ReDBError(ReDBError::TableError(e)))?;
+            .map_err(|e| StoreError::ReDBError(Box::new(e)))?;
         let _ = block_table.insert(block.hash().deref(), block_cbor);
         let mut chain_tip_table: Table<ChainTipKeyType, ChainTipValueType> = write_tx
             .open_table(CHAIN_TIP_TABLE)
-            .map_err(|e| StoreError::ReDBError(ReDBError::TableError(e)))?;
+            .map_err(|e| StoreError::ReDBError(Box::new(e)))?;
         let _ = chain_tip_table.insert(
             chain_tip_table
                 .len()
-                .map_err(|e| StoreError::ReDBError(ReDBError::InsertError(e)))?
+                .map_err(|e| StoreError::ReDBError(Box::new(e)))?
                 + 1,
             block.hash().deref(),
         );
@@ -59,11 +58,11 @@ impl Store {
     fn store_txs(write_tx: &WriteTransaction, block: &MultiEraBlock) -> Result<(), StoreError> {
         let mut tx_table: Table<TxKeyType, TxValueType> = write_tx
             .open_table(TX_TABLE)
-            .map_err(|e| StoreError::ReDBError(ReDBError::TableError(e)))?;
+            .map_err(|e| StoreError::ReDBError(Box::new(e)))?;
         for tx in block.txs() {
             tx_table
                 .insert(tx.hash().deref(), tx.encode().as_slice())
-                .map_err(|e| StoreError::ReDBError(ReDBError::InsertError(e)))?;
+                .map_err(|e| StoreError::ReDBError(Box::new(e)))?;
             Self::store_utxos(write_tx, &tx)?;
         }
         Ok(())
@@ -72,29 +71,29 @@ impl Store {
     fn store_utxos(write_tx: &WriteTransaction, tx: &MultiEraTx) -> Result<(), StoreError> {
         let mut utxo_table: Table<UTxOKeyType, UTxOValueType> = write_tx
             .open_table(UTXO_TABLE)
-            .map_err(|e| StoreError::ReDBError(ReDBError::TableError(e)))?;
+            .map_err(|e| StoreError::ReDBError(Box::new(e)))?;
         let mut utxo_by_addr_table: MultimapTable<UTxOByAddrKeyType, UTxOByAddrValueType> =
             write_tx
                 .open_multimap_table(UTXO_BY_ADDR_TABLE)
-                .map_err(|e| StoreError::ReDBError(ReDBError::TableError(e)))?;
+                .map_err(|e| StoreError::ReDBError(Box::new(e)))?;
         let mut utxo_by_beacon_table: MultimapTable<UTxOByBeaconKeyType, UTxOByBeaconValueType> =
             write_tx
                 .open_multimap_table(UTXO_BY_BEACON_TABLE)
-                .map_err(|e| StoreError::ReDBError(ReDBError::TableError(e)))?;
+                .map_err(|e| StoreError::ReDBError(Box::new(e)))?;
         for (index, output) in tx.outputs().iter().enumerate() {
             utxo_table
                 .insert(
                     (tx.hash().deref().as_slice(), index as u8),
                     output.encode().as_slice(),
                 )
-                .map_err(|e| StoreError::ReDBError(ReDBError::InsertError(e)))?;
+                .map_err(|e| StoreError::ReDBError(Box::new(e)))?;
             let addr: Vec<u8> = output
                 .address()
                 .map_err(StoreError::AddressDecoding)?
                 .to_vec();
             utxo_by_addr_table
                 .insert(addr.as_slice(), (tx.hash().deref().as_slice(), index as u8))
-                .map_err(|e| StoreError::ReDBError(ReDBError::InsertError(e)))?;
+                .map_err(|e| StoreError::ReDBError(Box::new(e)))?;
             for policy in output
                 .non_ada_assets()
                 .iter()
@@ -102,7 +101,7 @@ impl Store {
             {
                 utxo_by_beacon_table
                     .insert(policy.deref(), (tx.hash().deref().as_slice(), index as u8))
-                    .map_err(|e| StoreError::ReDBError(ReDBError::InsertError(e)))?;
+                    .map_err(|e| StoreError::ReDBError(Box::new(e)))?;
             }
         }
         Ok(())
