@@ -80,7 +80,7 @@ impl Store {
             write_tx
                 .open_multimap_table(UTXO_BY_BEACON_TABLE)
                 .map_err(|e| StoreError::ReDBError(Box::new(e)))?;
-        for (index, output) in tx.outputs().iter().enumerate() {
+        for (index, output) in tx.produces() {
             utxo_table
                 .insert(
                     (tx.hash().deref().as_slice(), index as u8),
