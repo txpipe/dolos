@@ -83,7 +83,7 @@ impl Store {
         for (index, output) in tx.produces() {
             utxo_table
                 .insert(
-                    (tx.hash().deref().as_slice(), index as u8),
+                    (tx.hash().as_slice(), index as u8),
                     output.encode().as_slice(),
                 )
                 .map_err(|e| StoreError::ReDBError(Box::new(e)))?;
@@ -92,7 +92,7 @@ impl Store {
                 .map_err(StoreError::AddressDecoding)?
                 .to_vec();
             utxo_by_addr_table
-                .insert(addr.as_slice(), (tx.hash().deref().as_slice(), index as u8))
+                .insert(addr.as_slice(), (tx.hash().as_slice(), index as u8))
                 .map_err(|e| StoreError::ReDBError(Box::new(e)))?;
             for policy in output
                 .non_ada_assets()
@@ -100,9 +100,17 @@ impl Store {
                 .map(MultiEraPolicyAssets::policy)
             {
                 utxo_by_beacon_table
-                    .insert(policy.deref(), (tx.hash().deref().as_slice(), index as u8))
+                    .insert(policy.deref(), (tx.hash().as_slice(), index as u8))
                     .map_err(|e| StoreError::ReDBError(Box::new(e)))?;
             }
+        }
+        for multi_era_input in tx.consumes() {
+            utxo_table
+                .remove((
+                    multi_era_input.hash().as_slice(),
+                    multi_era_input.index() as u8,
+                ))
+                .map_err(|e| StoreError::ReDBError(Box::new(e)))?;
         }
         Ok(())
     }
