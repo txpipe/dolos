@@ -1,5 +1,5 @@
 use pallas;
-use redb::{MultimapTableDefinition, StorageError, TableDefinition, TableError, TransactionError};
+use redb::{MultimapTableDefinition, TableDefinition};
 // use std::error::Error;
 
 // Given a block, table "block" maps its hash to its CBOR representation
@@ -62,8 +62,6 @@ pub enum StoreError {
 }
 
 pub enum ReadError {
-    ChainTipNotFound,
-    TransactionError(TransactionError),
-    TableError(TableError),
-    StorageError(StorageError),
+    KeyNotFound,
+    ReDBError(Box<dyn std::error::Error>),
 }

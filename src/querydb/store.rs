@@ -24,8 +24,8 @@ impl Store {
             .inner_store
             .begin_write()
             .map_err(|e| StoreError::ReDBError(Box::new(e)))?;
-        let block: MultiEraBlock = Self::store_block(&write_tx, block_cbor)?;
-        Self::store_txs(&write_tx, &block)?;
+        let block: MultiEraBlock = self.store_block(&write_tx, block_cbor)?;
+        self.store_txs(&write_tx, &block)?;
         write_tx
             .commit()
             .map_err(|e| StoreError::ReDBError(Box::new(e)))?;
@@ -33,6 +33,7 @@ impl Store {
     }
 
     fn store_block<'a>(
+        &self,
         write_tx: &'a WriteTransaction,
         block_cbor: &'a [u8],
     ) -> Result<MultiEraBlock<'a>, StoreError> {
@@ -55,7 +56,11 @@ impl Store {
         Ok(block)
     }
 
-    fn store_txs(write_tx: &WriteTransaction, block: &MultiEraBlock) -> Result<(), StoreError> {
+    fn store_txs(
+        &self,
+        write_tx: &WriteTransaction,
+        block: &MultiEraBlock,
+    ) -> Result<(), StoreError> {
         let mut tx_table: Table<TxKeyType, TxValueType> = write_tx
             .open_table(TX_TABLE)
             .map_err(|e| StoreError::ReDBError(Box::new(e)))?;
@@ -63,12 +68,12 @@ impl Store {
             tx_table
                 .insert(tx.hash().deref(), tx.encode().as_slice())
                 .map_err(|e| StoreError::ReDBError(Box::new(e)))?;
-            Self::store_utxos(write_tx, &tx)?;
+            self.store_utxos(write_tx, &tx)?;
         }
         Ok(())
     }
 
-    fn store_utxos(write_tx: &WriteTransaction, tx: &MultiEraTx) -> Result<(), StoreError> {
+    fn store_utxos(&self, write_tx: &WriteTransaction, tx: &MultiEraTx) -> Result<(), StoreError> {
         let mut utxo_table: Table<UTxOKeyType, UTxOValueType> = write_tx
             .open_table(UTXO_TABLE)
             .map_err(|e| StoreError::ReDBError(Box::new(e)))?;
@@ -119,14 +124,14 @@ impl Store {
         let read_tx: ReadTransaction = self
             .inner_store
             .begin_read()
-            .map_err(ReadError::TransactionError)?;
+            .map_err(|e| ReadError::ReDBError(Box::new(e)))?;
         let chain_tip_table: ReadOnlyTable<ChainTipKeyType, ChainTipValueType> = read_tx
             .open_table(CHAIN_TIP_TABLE)
-            .map_err(ReadError::TableError)?;
+            .map_err(|e| ReadError::ReDBError(Box::new(e)))?;
         let res = chain_tip_table
             .last()
-            .map_err(ReadError::StorageError)?
-            .ok_or(ReadError::ChainTipNotFound)
+            .map_err(|e| ReadError::ReDBError(Box::new(e)))?
+            .ok_or(ReadError::KeyNotFound)
             .map(|entry| Vec::from(entry.1.value()));
         res
     }
@@ -142,11 +147,11 @@ impl Store {
         let read_tx: ReadTransaction = self
             .inner_store
             .begin_read()
-            .map_err(ReadError::TransactionError)?;
+            .map_err(|e| ReadError::ReDBError(Box::new(e)))?;
         let utxo_by_addr_table: ReadOnlyMultimapTable<UTxOByAddrKeyType, UTxOByAddrValueType> =
             read_tx
                 .open_multimap_table(UTXO_BY_ADDR_TABLE)
-                .map_err(ReadError::TableError)?;
+                .map_err(|e| ReadError::ReDBError(Box::new(e)))?;
         let res = match utxo_by_addr_table.get(addr) {
             Ok(database_results) => {
                 let mut res = vec![];
@@ -156,7 +161,7 @@ impl Store {
                 }
                 Ok(Box::new(res.into_iter()))
             }
-            Err(err) => Err(ReadError::StorageError(err)),
+            Err(err) => Err(ReadError::ReDBError(Box::new(err))),
         };
         res
     }
@@ -204,13 +209,13 @@ impl Store {
         let read_tx: ReadTransaction = self
             .inner_store
             .begin_read()
-            .map_err(ReadError::TransactionError)?;
+            .map_err(|e| ReadError::ReDBError(Box::new(e)))?;
         let utxo_by_beacon_table: ReadOnlyMultimapTable<
             UTxOByBeaconKeyType,
             UTxOByBeaconValueType,
         > = read_tx
             .open_multimap_table(UTXO_BY_BEACON_TABLE)
-            .map_err(ReadError::TableError)?;
+            .map_err(|e| ReadError::ReDBError(Box::new(e)))?;
         let res = match utxo_by_beacon_table.get(beacon_policy_id.deref()) {
             Ok(database_results) => {
                 let mut res = vec![];
@@ -220,7 +225,7 @@ impl Store {
                 }
                 Ok(Box::new(res.into_iter()))
             }
-            Err(err) => Err(ReadError::StorageError(err)),
+            Err(err) => Err(ReadError::ReDBError(Box::new(err))),
         };
         res
     }
