@@ -2,19 +2,18 @@ use pallas;
 use redb::{MultimapTableDefinition, TableDefinition};
 // use std::error::Error;
 
-// Given a block, table "block" maps its hash to its CBOR representation
-pub type BlockKeyType<'a> = &'a [u8; 32];
+// Given a block, table "block" maps its slot to its CBOR representation
+pub type BlockKeyType<'a> = u64;
 pub type BlockValueType<'a> = &'a [u8];
 pub type BlockResultType = Vec<u8>;
 pub const BLOCK_TABLE: TableDefinition<BlockKeyType, BlockValueType> =
     TableDefinition::new("block");
 
-// "chain_tip" stores the hash of the last applied block
-pub type ChainTipKeyType = u64;
-pub type ChainTipValueType<'a> = &'a [u8; 32];
-pub type ChainTipResultType = Vec<u8>;
-pub const CHAIN_TIP_TABLE: TableDefinition<ChainTipKeyType, ChainTipValueType> =
-    TableDefinition::new("chain_tip");
+// Given a block, table "block_by_hash" maps its hash to its slot.
+pub type BlockByHashKeyType<'a> = &'a [u8; 32];
+pub type BlockByHashValueType<'a> = u64;
+pub const BLOCK_BY_HASH_TABLE: TableDefinition<BlockByHashKeyType, BlockByHashValueType> =
+    TableDefinition::new("block_by_hash");
 
 // Given a transaction, table "tx" maps its hash to an encoding representation
 // of it
@@ -55,7 +54,7 @@ pub const UTXO_BY_BEACON_TABLE: MultimapTableDefinition<
     UTxOByBeaconValueType,
 > = MultimapTableDefinition::new("utxo_by_beacon");
 
-// Table "prot_params" stores ONLY the latest protocol parameters.
+// Table "prot_params" stores only the latest protocol parameters.
 pub type ProtParamsKeyType = ();
 pub type ProtParamsValueType<'a> = &'a [u8];
 pub type ProtParamsResultType = Vec<u8>;

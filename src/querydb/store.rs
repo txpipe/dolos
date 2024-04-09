@@ -1,8 +1,5 @@
 use crate::querydb::prelude::*;
-use pallas::{
-    crypto::hash::Hash,
-    ledger::traverse::{MultiEraBlock, MultiEraPolicyAssets, MultiEraTx},
-};
+use pallas::ledger::traverse::{MultiEraBlock, MultiEraPolicyAssets, MultiEraTx};
 use redb::{
     Database, MultimapTable, ReadOnlyMultimapTable, ReadOnlyTable, ReadTransaction,
     ReadableMultimapTable, ReadableTable, Table, WriteTransaction,
@@ -19,7 +16,7 @@ impl Store {
             inner_store: Database::create(path).map_err(|e| StoreError::ReDBError(Box::new(e)))?,
         })
     }
-    pub fn apply_block(&self, block_cbor: &[u8]) -> Result<(), StoreError> {
+    pub fn apply_block(&self, block_cbor: BlockValueType) -> Result<(), StoreError> {
         let write_tx: WriteTransaction = self
             .inner_store
             .begin_write()
@@ -42,17 +39,11 @@ impl Store {
         let mut block_table: Table<BlockKeyType, BlockValueType> = write_tx
             .open_table(BLOCK_TABLE)
             .map_err(|e| StoreError::ReDBError(Box::new(e)))?;
-        let _ = block_table.insert(block.hash().deref(), block_cbor);
-        let mut chain_tip_table: Table<ChainTipKeyType, ChainTipValueType> = write_tx
-            .open_table(CHAIN_TIP_TABLE)
+        let _ = block_table.insert(block.slot(), block_cbor);
+        let mut block_by_hash_table: Table<BlockByHashKeyType, BlockByHashValueType> = write_tx
+            .open_table(BLOCK_BY_HASH_TABLE)
             .map_err(|e| StoreError::ReDBError(Box::new(e)))?;
-        let _ = chain_tip_table.insert(
-            chain_tip_table
-                .len()
-                .map_err(|e| StoreError::ReDBError(Box::new(e)))?
-                + 1,
-            block.hash().deref(),
-        );
+        let _ = block_by_hash_table.insert(block.hash().deref(), block.slot());
         Ok(block)
     }
 
@@ -120,7 +111,10 @@ impl Store {
         Ok(())
     }
 
-    pub fn update_protocol_parameters(&self, prot_params: &[u8]) -> Result<(), StoreError> {
+    pub fn update_protocol_parameters(
+        &self,
+        prot_params: ProtParamsValueType,
+    ) -> Result<(), StoreError> {
         let write_tx: WriteTransaction = self
             .inner_store
             .begin_write()
@@ -136,15 +130,15 @@ impl Store {
         Ok(())
     }
 
-    pub fn get_chain_tip(&self) -> Result<ChainTipResultType, ReadError> {
+    pub fn get_blockchain_tip(&self) -> Result<BlockResultType, ReadError> {
         let read_tx: ReadTransaction = self
             .inner_store
             .begin_read()
             .map_err(|e| ReadError::ReDBError(Box::new(e)))?;
-        let chain_tip_table: ReadOnlyTable<ChainTipKeyType, ChainTipValueType> = read_tx
-            .open_table(CHAIN_TIP_TABLE)
+        let blockchain_table: ReadOnlyTable<BlockKeyType, BlockValueType> = read_tx
+            .open_table(BLOCK_TABLE)
             .map_err(|e| ReadError::ReDBError(Box::new(e)))?;
-        let res = chain_tip_table
+        let res = blockchain_table
             .last()
             .map_err(|e| ReadError::ReDBError(Box::new(e)))?
             .ok_or(ReadError::KeyNotFound)
@@ -170,7 +164,7 @@ impl Store {
 
     pub fn get_utxos_from_address<T>(
         &self,
-        addr: UTxOByAddrKeyType,
+        addr: &UTxOByAddrKeyType,
     ) -> Result<Box<impl Iterator<Item = UTxOByAddrResultType>>, ReadError> {
         let read_tx: ReadTransaction = self
             .inner_store
@@ -194,37 +188,33 @@ impl Store {
         res
     }
 
-    pub fn get_utxo_from_reference(
-        &self,
-        tx_hash: &Hash<32>,
-        tx_index: u8,
-    ) -> Option<UTxOResultType> {
+    pub fn get_utxo_from_reference(&self, utxo_ref: &UTxOKeyType) -> Option<UTxOResultType> {
         let read_tx: ReadTransaction = self.inner_store.begin_read().ok()?;
         let utxo_table: ReadOnlyTable<UTxOKeyType, UTxOValueType> =
             read_tx.open_table(UTXO_TABLE).ok()?;
         let res = utxo_table
-            .get((tx_hash.as_ref(), tx_index))
+            .get(utxo_ref)
             .ok()?
             .map(|val| Vec::from(val.value()));
         res
     }
 
-    pub fn get_tx_from_hash(&self, tx_hash: &Hash<32>) -> Option<TxResultType> {
+    pub fn get_tx_from_hash(&self, tx_hash: &TxKeyType) -> Option<TxResultType> {
         let read_tx: ReadTransaction = self.inner_store.begin_read().ok()?;
         let tx_table: ReadOnlyTable<TxKeyType, TxValueType> = read_tx.open_table(TX_TABLE).ok()?;
         let res = tx_table
-            .get(tx_hash.deref())
+            .get(tx_hash)
             .ok()?
             .map(|val| Vec::from(val.value()));
         res
     }
 
-    pub fn get_block_from_hash(&self, block_hash: &Hash<32>) -> Option<BlockResultType> {
+    pub fn get_block_from_hash(&self, block_hash: &BlockKeyType) -> Option<BlockResultType> {
         let read_tx: ReadTransaction = self.inner_store.begin_read().ok()?;
         let tx_table: ReadOnlyTable<BlockKeyType, BlockValueType> =
             read_tx.open_table(BLOCK_TABLE).ok()?;
         let res = tx_table
-            .get(block_hash.deref())
+            .get(block_hash)
             .ok()?
             .map(|val| Vec::from(val.value()));
         res
@@ -232,7 +222,7 @@ impl Store {
 
     pub fn get_utxos_from_beacon(
         &self,
-        beacon_policy_id: &Hash<28>,
+        beacon_policy_id: &UTxOByBeaconKeyType,
     ) -> Result<Box<impl Iterator<Item = UTxOByBeaconResultType>>, ReadError> {
         let read_tx: ReadTransaction = self
             .inner_store
@@ -244,7 +234,7 @@ impl Store {
         > = read_tx
             .open_multimap_table(UTXO_BY_BEACON_TABLE)
             .map_err(|e| ReadError::ReDBError(Box::new(e)))?;
-        let res = match utxo_by_beacon_table.get(beacon_policy_id.deref()) {
+        let res = match utxo_by_beacon_table.get(beacon_policy_id) {
             Ok(database_results) => {
                 let mut res = vec![];
                 for val in database_results.flatten() {
