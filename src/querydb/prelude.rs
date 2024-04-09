@@ -55,6 +55,13 @@ pub const UTXO_BY_BEACON_TABLE: MultimapTableDefinition<
     UTxOByBeaconValueType,
 > = MultimapTableDefinition::new("utxo_by_beacon");
 
+// Table "prot_params" stores ONLY the latest protocol parameters.
+pub type ProtParamsKeyType = ();
+pub type ProtParamsValueType<'a> = &'a [u8];
+pub type ProtParamsResultType = Vec<u8>;
+pub const PROT_PARAMS_TABLE: TableDefinition<ProtParamsKeyType, ProtParamsValueType> =
+    TableDefinition::new("prot_params");
+
 pub enum StoreError {
     AddressDecoding(pallas::ledger::addresses::Error),
     BlockDecoding(pallas::ledger::traverse::Error),

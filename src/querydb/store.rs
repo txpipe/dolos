@@ -120,6 +120,22 @@ impl Store {
         Ok(())
     }
 
+    pub fn update_protocol_parameters(&self, prot_params: &[u8]) -> Result<(), StoreError> {
+        let write_tx: WriteTransaction = self
+            .inner_store
+            .begin_write()
+            .map_err(|e| StoreError::ReDBError(Box::new(e)))?;
+        let mut prot_params_table: Table<ProtParamsKeyType, ProtParamsValueType> = write_tx
+            .open_table(PROT_PARAMS_TABLE)
+            .map_err(|e| StoreError::ReDBError(Box::new(e)))?;
+        let _ = prot_params_table.insert((), prot_params);
+        drop(prot_params_table);
+        write_tx
+            .commit()
+            .map_err(|e| StoreError::ReDBError(Box::new(e)))?;
+        Ok(())
+    }
+
     pub fn get_chain_tip(&self) -> Result<ChainTipResultType, ReadError> {
         let read_tx: ReadTransaction = self
             .inner_store
@@ -136,8 +152,20 @@ impl Store {
         res
     }
 
-    pub fn get_chain_parameters(&self) {
-        unimplemented!()
+    pub fn get_protocol_parameters(&self) -> Result<ProtParamsResultType, ReadError> {
+        let read_tx: ReadTransaction = self
+            .inner_store
+            .begin_read()
+            .map_err(|e| ReadError::ReDBError(Box::new(e)))?;
+        let prot_params_table: ReadOnlyTable<ProtParamsKeyType, ProtParamsValueType> = read_tx
+            .open_table(PROT_PARAMS_TABLE)
+            .map_err(|e| ReadError::ReDBError(Box::new(e)))?;
+        let res = prot_params_table
+            .get(())
+            .map_err(|e| ReadError::ReDBError(Box::new(e)))?
+            .ok_or(ReadError::KeyNotFound)
+            .map(|entry| Vec::from(entry.value()));
+        res
     }
 
     pub fn get_utxos_from_address<T>(
