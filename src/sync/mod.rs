@@ -43,6 +43,7 @@ fn define_gasket_policy(config: &Option<gasket::retries::Policy>) -> gasket::run
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn pipeline(
     config: &Config,
     upstream: &UpstreamConfig,

@@ -22,18 +22,18 @@ pub struct Transaction {
     pub bytes: Vec<u8>,
 }
 
-impl Into<TxIdAndSize<EraTxId>> for Transaction {
-    fn into(self) -> TxIdAndSize<EraTxId> {
+impl From<Transaction> for TxIdAndSize<EraTxId> {
+    fn from(value: Transaction) -> Self {
         TxIdAndSize(
-            EraTxId(self.era, self.hash.to_vec()),
-            self.bytes.len() as u32,
+            EraTxId(value.era, value.hash.to_vec()),
+            value.bytes.len() as u32,
         )
     }
 }
 
-impl Into<EraTxBody> for Transaction {
-    fn into(self) -> EraTxBody {
-        EraTxBody(self.era, self.bytes)
+impl From<Transaction> for EraTxBody {
+    fn from(value: Transaction) -> Self {
+        EraTxBody(value.era, value.bytes)
     }
 }
 
@@ -55,7 +55,7 @@ fn define_gasket_policy(config: &Option<gasket::retries::Policy>) -> gasket::run
 
     gasket::runtime::Policy {
         //be generous with tick timeout to avoid timeout during block awaits
-        tick_timeout: std::time::Duration::from_secs(600).into(),
+        tick_timeout: std::time::Duration::from_secs(30).into(),
         bootstrap_retry: retries.clone(),
         work_retry: retries.clone(),
         teardown_retry: retries.clone(),

@@ -64,35 +64,26 @@ impl gasket::framework::Worker<Stage> for Worker {
     async fn bootstrap(_stage: &Stage) -> Result<Self, WorkerError> {
         Ok(Self {})
     }
-    /*
-       async fn schedule(
-           &mut self,
-           stage: &mut Stage,
-       ) -> Result<WorkSchedule<MempoolEvent>, WorkerError> {
-           tokio::select! {
-               txs_msg = stage.upstream_submit_endpoint.recv() => {
-                   let txs_msg = txs_msg.or_panic()?;
-
-                   info!("received txs message: {:?}", txs_msg);
-
-                   Ok(WorkSchedule::Unit(MempoolEvent::AddTxs(txs_msg.payload)))
-               }
-               monitor_msg = stage.upstream_block_monitor.recv() => {
-                   let monitor_msg = monitor_msg.or_panic()?;
-
-                   info!("received monitor message: {:?}", monitor_msg);
-
-                   Ok(WorkSchedule::Unit(MempoolEvent::ChainUpdate(monitor_msg.payload)))
-               }
-           }
-       }
-    */
 
     async fn schedule(
         &mut self,
         stage: &mut Stage,
     ) -> Result<WorkSchedule<MempoolEvent>, WorkerError> {
-        Ok(WorkSchedule::Idle)
+        tokio::select! {
+            txs_msg = stage.upstream_submit_endpoint.recv() => {
+                let txs_msg = txs_msg.or_panic()?;
+                info!("received txs message: {:?}", txs_msg);
+                Ok(WorkSchedule::Unit(MempoolEvent::AddTxs(txs_msg.payload)))
+            }
+            monitor_msg = stage.upstream_block_monitor.recv() => {
+                let monitor_msg = monitor_msg.or_panic()?;
+                info!("received monitor message: {:?}", monitor_msg);
+                Ok(WorkSchedule::Unit(MempoolEvent::ChainUpdate(monitor_msg.payload)))
+            }
+            _ = tokio::time::sleep(Duration::from_secs(20)) => {
+                Ok(WorkSchedule::Idle)
+            }
+        }
     }
 
     async fn execute(&mut self, unit: &MempoolEvent, stage: &mut Stage) -> Result<(), WorkerError> {
@@ -124,7 +115,7 @@ impl gasket::framework::Worker<Stage> for Worker {
 
                         // set inclusion point for txs found in new block
                         for (tx_hash, inclusion) in monitor.txs.iter_mut() {
-                            if block_txs.contains(&tx_hash) {
+                            if block_txs.contains(tx_hash) {
                                 info!("setting inclusion point for {}: {height}", tx_hash);
                                 *inclusion = Some(*height)
                             }

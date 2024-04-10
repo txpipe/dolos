@@ -209,9 +209,9 @@ impl SubmitPeerHandler {
                     self.mempool.to_send.push_front(tx)
                 }
 
-                return Err(Error::server(format!(
+                Err(Error::server(format!(
                     "error when sending ReplyTxIds: {e:?}"
-                )));
+                )))
             }
         }
     }

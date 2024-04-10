@@ -23,7 +23,7 @@ pub fn open_data_stores(config: &crate::Config) -> Result<Stores, Error> {
     let wal = wal::Store::open(
         rolldb_path.join("wal"),
         config.rolldb.k_param.unwrap_or(1000),
-        config.rolldb.immutable_overlap.clone(),
+        config.rolldb.immutable_overlap,
     )
     .map_err(Error::storage)?;
 
