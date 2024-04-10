@@ -18,8 +18,6 @@ pub mod roll;
 
 #[derive(Deserialize)]
 pub struct Config {
-    pub peer_address: String,
-    pub network_magic: u64,
     pub block_fetch_batch_size: Option<usize>,
     pub network_id: u8,
     pub phase1_validation_enabled: bool,
@@ -45,15 +43,17 @@ fn define_gasket_policy(config: &Option<gasket::retries::Policy>) -> gasket::run
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn pipeline(
     config: &Config,
+    upstream: &UpstreamConfig,
     wal: WalStore,
     chain: ChainStore,
     ledger: ApplyDB,
     byron: byron::GenesisFile,
     shelley: shelley::GenesisFile,
     retries: &Option<gasket::retries::Policy>,
-) -> Result<gasket::daemon::Daemon, Error> {
+) -> Result<Vec<gasket::runtime::Tether>, Error> {
     let pull_cursor = wal
         .intersect_options(5)
         .map_err(Error::storage)?
@@ -61,8 +61,8 @@ pub fn pipeline(
         .collect();
 
     let mut pull = pull::Stage::new(
-        config.peer_address.clone(),
-        config.network_magic,
+        upstream.peer_address.clone(),
+        upstream.network_magic,
         config.block_fetch_batch_size.unwrap_or(50),
         pull_cursor,
     );
@@ -101,5 +101,5 @@ pub fn pipeline(
     let chain = gasket::runtime::spawn_stage(chain, policy.clone());
     let ledger = gasket::runtime::spawn_stage(ledger, policy.clone());
 
-    Ok(gasket::daemon::Daemon(vec![pull, roll, chain, ledger]))
+    Ok(vec![pull, roll, chain, ledger])
 }

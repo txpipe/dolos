@@ -129,7 +129,7 @@ impl<'a> ApplyBatch<'a> {
             // about, and UTxOs produced (and spent) by transactions in the current block,
             // which we care about.
             .or(self.utxo_deletes.get(&UtxoRef(tx_hash, ind)))
-            .map(Clone::clone)
+            .cloned()
     }
 
     pub fn insert_utxo(&mut self, tx: TxHash, output: OutputIndex, body: UtxoBody) {

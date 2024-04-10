@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use miette::{Context, IntoDiagnostic};
 
 #[derive(Debug, clap::Args)]
@@ -17,17 +19,22 @@ pub async fn run(config: super::Config, _args: &Args) -> miette::Result<()> {
         .into_diagnostic()
         .context("loading shelley genesis config")?;
 
+    let (txs_out, txs_in) = gasket::messaging::tokio::mpsc_channel(64);
+
+    let mempool = Arc::new(dolos::submit::MempoolState::default());
+
     let server = tokio::spawn(dolos::serve::serve(
         config.serve,
         wal.clone(),
         chain.clone(),
+        mempool.clone(),
+        txs_out,
     ));
 
-    let submitter = tokio::spawn(dolos::submit::serve(config.submit, wal.clone(), false));
-
-    dolos::sync::pipeline(
+    let sync = dolos::sync::pipeline(
+        &config.sync,
         &config.upstream,
-        wal,
+        wal.clone(),
         chain,
         ledger,
         byron_genesis,
@@ -35,11 +42,22 @@ pub async fn run(config: super::Config, _args: &Args) -> miette::Result<()> {
         &config.retries,
     )
     .into_diagnostic()
-    .context("bootstrapping sync pipeline")?
-    .block();
+    .context("bootstrapping sync pipeline")?;
+
+    let submit = dolos::submit::pipeline(
+        &config.submit,
+        &config.upstream,
+        wal,
+        mempool.clone(),
+        txs_in,
+        &config.retries,
+    )
+    .into_diagnostic()
+    .context("bootstrapping submit pipeline")?;
+
+    gasket::daemon::Daemon(sync.into_iter().chain(submit).collect()).block();
 
     server.abort();
-    submitter.abort();
 
     Ok(())
 }
