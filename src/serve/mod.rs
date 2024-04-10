@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use futures_util::future::join_all;
 use pallas::storage::rolldb::{chain, wal};
 use serde::{Deserialize, Serialize};
@@ -18,12 +20,24 @@ pub struct Config {
 ///
 /// Uses specified config to start listening for network connections on either
 /// gRPC, Ouroboros or both protocols.
-pub async fn serve(config: Config, wal: wal::Store, chain: chain::Store) -> Result<(), Error> {
+pub async fn serve(
+    config: Config,
+    wal: wal::Store,
+    chain: chain::Store,
+    mempool: Arc<crate::submit::MempoolState>,
+    txs_out: gasket::messaging::tokio::ChannelSendAdapter<Vec<crate::submit::Transaction>>,
+) -> Result<(), Error> {
     let mut tasks = vec![];
 
     if let Some(cfg) = config.grpc {
         info!("found gRPC config");
-        tasks.push(tokio::spawn(grpc::serve(cfg, wal.clone(), chain.clone())));
+        tasks.push(tokio::spawn(grpc::serve(
+            cfg,
+            wal.clone(),
+            chain.clone(),
+            mempool,
+            txs_out,
+        )));
     }
 
     if let Some(cfg) = config.ouroboros {

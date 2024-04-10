@@ -8,8 +8,6 @@ mod common;
 mod daemon;
 mod data;
 mod eval;
-mod serve;
-mod submit;
 mod sync;
 
 #[cfg(feature = "mithril")]
@@ -20,9 +18,7 @@ enum Command {
     Daemon(daemon::Args),
     Sync(sync::Args),
     Data(data::Args),
-    Serve(serve::Args),
     Eval(eval::Args),
-    Submit(submit::Args),
 
     #[cfg(feature = "mithril")]
     Bootstrap(bootstrap::Args),
@@ -69,7 +65,8 @@ pub struct LoggingConfig {
 #[derive(Deserialize)]
 pub struct Config {
     pub rolldb: RolldbConfig,
-    pub upstream: dolos::sync::Config,
+    pub upstream: dolos::model::UpstreamConfig,
+    pub sync: dolos::sync::Config,
     pub serve: dolos::serve::Config,
     pub submit: dolos::submit::Config,
     pub retries: Option<gasket::retries::Policy>,
@@ -111,9 +108,7 @@ fn main() -> Result<()> {
         Command::Daemon(x) => daemon::run(config, &x)?,
         Command::Sync(x) => sync::run(&config, &x)?,
         Command::Data(x) => data::run(&config, &x)?,
-        Command::Serve(x) => serve::run(config, &x)?,
         Command::Eval(x) => eval::run(&config, &x)?,
-        Command::Submit(x) => submit::run(config, &x)?,
 
         #[cfg(feature = "mithril")]
         Command::Bootstrap(x) => bootstrap::run(&config, &x)?,

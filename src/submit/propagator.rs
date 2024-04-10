@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::{collections::VecDeque, time::Duration};
 
 use gasket::framework::*;
 use log::warn;
@@ -209,9 +209,9 @@ impl SubmitPeerHandler {
                     self.mempool.to_send.push_front(tx)
                 }
 
-                return Err(Error::server(format!(
+                Err(Error::server(format!(
                     "error when sending ReplyTxIds: {e:?}"
-                )));
+                )))
             }
         }
     }
@@ -279,9 +279,15 @@ impl gasket::framework::Worker<Stage> for Worker {
         &mut self,
         stage: &mut Stage,
     ) -> Result<WorkSchedule<Vec<Transaction>>, WorkerError> {
-        let msg = stage.upstream_mempool.recv().await.or_panic()?;
-
-        Ok(WorkSchedule::Unit(msg.payload))
+        tokio::select! {
+            msg = stage.upstream_mempool.recv() => {
+                let msg = msg.or_panic()?;
+                Ok(WorkSchedule::Unit(msg.payload))
+            },
+            _ = tokio::time::sleep(Duration::from_secs(20)) => {
+                Ok(WorkSchedule::Idle)
+            }
+        }
     }
 
     /// Broadcast transactions from the global mempool to every peer handler
