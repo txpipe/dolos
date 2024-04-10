@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use gasket::framework::*;
 use pallas::crypto::hash::Hash;
@@ -20,25 +20,19 @@ pub enum MempoolEvent {
     ChainUpdate(BlockMonitorMessage),
 }
 
+#[derive(Default)]
+pub struct MempoolState(pub RwLock<Monitor>, pub tokio::sync::Notify);
+
+#[derive(Default)]
 pub struct Monitor {
     pub tip_height: BlockHeight,
     pub txs: HashMap<Hash<32>, Option<InclusionPoint>>,
 }
 
-impl Monitor {
-    pub fn new() -> Self {
-        Monitor {
-            tip_height: 0,
-            txs: HashMap::new(),
-        }
-    }
-}
-
 #[derive(Stage)]
 #[stage(name = "mempool", unit = "MempoolEvent", worker = "Worker")]
 pub struct Stage {
-    pub monitor: Arc<RwLock<Monitor>>,
-    pub change_notifier: Arc<tokio::sync::Notify>,
+    pub state: Arc<MempoolState>,
 
     pub prune_after_confirmations: u64,
     // TODO: prune txs even if they never land on chain?
@@ -50,14 +44,9 @@ pub struct Stage {
 }
 
 impl Stage {
-    pub fn new(
-        monitor: Arc<RwLock<Monitor>>,
-        change_notifier: Arc<tokio::sync::Notify>,
-        prune_after_confirmations: u64,
-    ) -> Self {
+    pub fn new(state: Arc<MempoolState>, prune_after_confirmations: u64) -> Self {
         Self {
-            monitor,
-            change_notifier,
+            state,
             prune_after_confirmations,
             upstream_submit_endpoint: Default::default(),
             upstream_block_monitor: Default::default(),
@@ -75,27 +64,35 @@ impl gasket::framework::Worker<Stage> for Worker {
     async fn bootstrap(_stage: &Stage) -> Result<Self, WorkerError> {
         Ok(Self {})
     }
+    /*
+       async fn schedule(
+           &mut self,
+           stage: &mut Stage,
+       ) -> Result<WorkSchedule<MempoolEvent>, WorkerError> {
+           tokio::select! {
+               txs_msg = stage.upstream_submit_endpoint.recv() => {
+                   let txs_msg = txs_msg.or_panic()?;
+
+                   info!("received txs message: {:?}", txs_msg);
+
+                   Ok(WorkSchedule::Unit(MempoolEvent::AddTxs(txs_msg.payload)))
+               }
+               monitor_msg = stage.upstream_block_monitor.recv() => {
+                   let monitor_msg = monitor_msg.or_panic()?;
+
+                   info!("received monitor message: {:?}", monitor_msg);
+
+                   Ok(WorkSchedule::Unit(MempoolEvent::ChainUpdate(monitor_msg.payload)))
+               }
+           }
+       }
+    */
 
     async fn schedule(
         &mut self,
         stage: &mut Stage,
     ) -> Result<WorkSchedule<MempoolEvent>, WorkerError> {
-        tokio::select! {
-            txs_msg = stage.upstream_submit_endpoint.recv() => {
-                let txs_msg = txs_msg.or_panic()?;
-
-                info!("received txs message: {:?}", txs_msg);
-
-                Ok(WorkSchedule::Unit(MempoolEvent::AddTxs(txs_msg.payload)))
-            }
-            monitor_msg = stage.upstream_block_monitor.recv() => {
-                let monitor_msg = monitor_msg.or_panic()?;
-
-                info!("received monitor message: {:?}", monitor_msg);
-
-                Ok(WorkSchedule::Unit(MempoolEvent::ChainUpdate(monitor_msg.payload)))
-            }
-        }
+        Ok(WorkSchedule::Idle)
     }
 
     async fn execute(&mut self, unit: &MempoolEvent, stage: &mut Stage) -> Result<(), WorkerError> {
@@ -110,7 +107,7 @@ impl gasket::framework::Worker<Stage> for Worker {
                     .await
                     .or_panic()?;
 
-                let mut monitor = stage.monitor.write().await;
+                let mut monitor = stage.state.0.write().await;
 
                 // do not overwrite in the tx monitor map
                 txs.retain(|x| !monitor.txs.contains_key(&x.hash));
@@ -123,7 +120,7 @@ impl gasket::framework::Worker<Stage> for Worker {
             MempoolEvent::ChainUpdate(monitor_msg) => {
                 match monitor_msg {
                     BlockMonitorMessage::NewBlock(height, block_txs) => {
-                        let mut monitor = stage.monitor.write().await;
+                        let mut monitor = stage.state.0.write().await;
 
                         // set inclusion point for txs found in new block
                         for (tx_hash, inclusion) in monitor.txs.iter_mut() {
@@ -145,7 +142,7 @@ impl gasket::framework::Worker<Stage> for Worker {
                         monitor.tip_height = *height;
                     }
                     BlockMonitorMessage::Rollback(rb_height) => {
-                        let mut monitor = stage.monitor.write().await;
+                        let mut monitor = stage.state.0.write().await;
 
                         // remove inclusion points later than rollback slot
                         for (tx_hash, inclusion) in monitor.txs.iter_mut() {
@@ -165,7 +162,7 @@ impl gasket::framework::Worker<Stage> for Worker {
                     }
                 }
 
-                stage.change_notifier.notify_waiters()
+                stage.state.1.notify_waiters()
             }
         }
 

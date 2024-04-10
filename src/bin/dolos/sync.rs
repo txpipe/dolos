@@ -15,7 +15,8 @@ pub fn run(config: &super::Config, _args: &Args) -> miette::Result<()> {
     let shelley_genesis =
         pallas::ledger::configs::shelley::from_file(&config.shelley.path).map_err(Error::config)?;
 
-    dolos::sync::pipeline(
+    let sync = dolos::sync::pipeline(
+        &config.sync,
         &config.upstream,
         wal,
         chain,
@@ -25,8 +26,9 @@ pub fn run(config: &super::Config, _args: &Args) -> miette::Result<()> {
         &config.retries,
     )
     .into_diagnostic()
-    .context("bootstrapping sync pipeline")?
-    .block();
+    .context("bootstrapping sync pipeline")?;
+
+    gasket::daemon::Daemon(sync).block();
 
     Ok(())
 }

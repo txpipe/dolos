@@ -21,15 +21,19 @@ pub struct Args {
     download_dir: String,
 
     /// Skip the bootstrap if there's already data in the stores
-    #[arg(long, short, action)]
+    #[arg(long, action)]
     skip_if_not_empty: bool,
 
     /// Delete any existing data and continue with bootstrap
     #[arg(long, short, action)]
     force: bool,
 
+    /// Assume the snapshot is already available in the download dir
+    #[arg(long, action)]
+    skip_download: bool,
+
     /// Retain downloaded snapshot instead of deleting it
-    #[arg(long, short, action)]
+    #[arg(long, action)]
     retain_snapshot: bool,
 }
 
@@ -139,11 +143,15 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
         bail!("data stores must be empty to execute bootstrap");
     }
 
-    tokio::runtime::Runtime::new()
-        .unwrap()
-        .block_on(fetch_and_validate_snapshot(args))
-        .map_err(|err| miette::miette!(err.to_string()))
-        .context("fetching and validating mithril snapshot")?;
+    if !args.skip_download {
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(fetch_and_validate_snapshot(args))
+            .map_err(|err| miette::miette!(err.to_string()))
+            .context("fetching and validating mithril snapshot")?;
+    } else {
+        warn!("skipping download, assuming download dir has snapshot and it's validated")
+    }
 
     let byron_genesis =
         pallas::ledger::configs::byron::from_file(&config.byron.path).map_err(Error::config)?;
