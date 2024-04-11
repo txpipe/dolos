@@ -61,13 +61,11 @@ pub type ProtParamsResultType = Vec<u8>;
 pub const PROT_PARAMS_TABLE: TableDefinition<ProtParamsKeyType, ProtParamsValueType> =
     TableDefinition::new("prot_params");
 
-pub enum StoreError {
+pub enum Error {
     AddressDecoding(pallas::ledger::addresses::Error),
     BlockDecoding(pallas::ledger::traverse::Error),
-    ReDBError(Box<dyn std::error::Error>),
-}
-
-pub enum ReadError {
     KeyNotFound,
+    OutputDecoding(pallas::codec::minicbor::decode::Error),
+    UTxOTableInvariantBroken,
     ReDBError(Box<dyn std::error::Error>),
 }
