@@ -792,6 +792,7 @@ dependencies = [
  "mithril-client",
  "pallas",
  "protoc-wkt",
+ "redb",
  "rocksdb",
  "serde",
  "serde_json",
@@ -2452,6 +2453,15 @@ checksum = "1465873a3dfdaa8ae7cb14b4383657caab0b3e8a0aa9ae8e04b044854c8dfce2"
 dependencies = [
  "crossbeam-deque",
  "crossbeam-utils",
+]
+
+[[package]]
+name = "redb"
+version = "1.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fd7f82ecd6ba647a39dd1a7172b8a1cd9453c0adee6da20cb553d83a9a460fa5"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
