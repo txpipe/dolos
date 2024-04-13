@@ -150,7 +150,7 @@ jobs:
       - name: setup go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.16"
+          go-version: "1.21"
 
       - name: download artifacts
         id: "download"
@@ -158,7 +158,7 @@ jobs:
 
       - name: set release notes
         run: |
-          go install github.com/git-chglog/git-chglog/cmd/git-chglog@v0.15.0
+          go install github.com/git-chglog/git-chglog/cmd/git-chglog@v0.15.4
           git-chglog -c .github/chglog/release.yml $(git describe --tags) > RELEASE.md
 
       - name: create release
