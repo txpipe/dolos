@@ -1,10 +1,8 @@
 use gasket::framework::{AsWorkError, WorkerError};
 use pallas::{
     applying::{
-        utils::{
-            AlonzoProtParams, BabbageProtParams, ByronProtParams, FeePolicy, ShelleyProtParams,
-        },
-        Environment, MultiEraProtParams,
+        utils::{ByronProtParams, FeePolicy, ShelleyProtParams},
+        MultiEraProtParams,
     },
     ledger::{
         configs::{byron, shelley},
@@ -14,6 +12,8 @@ use pallas::{
 use tracing::{info, warn};
 
 use crate::{ledger::LedgerView, storage::applydb::ApplyDB};
+
+mod test_data;
 
 pub struct Genesis<'a> {
     pub byron: &'a byron::GenesisFile,
@@ -143,98 +143,18 @@ pub fn compute_pparams(
     genesis: Genesis,
     ledger: impl LedgerView,
     epoch: u64,
-) -> Result<Environment, WorkerError> {
-    if (290..=364).contains(&epoch) {
-        // Alonzo era
-        let max_tx_ex_mem: u32 = if (..306).contains(&epoch) {
-            10000000
-        } else if (306..319).contains(&epoch) {
-            11250000
-        } else {
-            14000000
-        };
-        let max_block_ex_mem: u64 = if (290..321).contains(&epoch) {
-            50000000
-        } else if (321..328).contains(&epoch) {
-            56000000
-        } else {
-            62000000
-        };
-        let prot_pps: AlonzoProtParams = AlonzoProtParams {
-            fee_policy: FeePolicy {
-                summand: 155381,
-                multiplier: 44,
-            },
-            max_tx_size: 16384,
-            max_block_ex_mem,
-            max_block_ex_steps: 40000000000,
-            max_tx_ex_mem,
-            max_tx_ex_steps: 10000000000,
-            max_val_size: 5000,
-            collateral_percent: 150,
-            max_collateral_inputs: 3,
-            coins_per_utxo_word: 34482,
-        };
-        Ok(Environment {
-            block_slot: 0,
-            prot_magic: genesis.byron.protocol_consts.protocol_magic,
-            network_id: match genesis.shelley.network_id.as_deref() {
-                Some("Mainnet") => 0,
-                _ => 1,
-            },
-            prot_params: MultiEraProtParams::Alonzo(prot_pps),
-        })
-    } else if epoch >= 365 {
-        // Babbage era
-        let max_block_ex_steps: u64 = if (365..=393).contains(&epoch) {
-            40000000000
-        } else {
-            20000000000
-        };
-        let prot_pps: BabbageProtParams = BabbageProtParams {
-            fee_policy: FeePolicy {
-                summand: 155381,
-                multiplier: 44,
-            },
-            max_tx_size: 16384,
-            max_block_ex_mem: 62000000,
-            max_block_ex_steps,
-            max_tx_ex_mem: 14000000,
-            max_tx_ex_steps: 10000000000,
-            max_val_size: 5000,
-            collateral_percent: 150,
-            max_collateral_inputs: 3,
-            coins_per_utxo_word: 4310,
-        };
-        Ok(Environment {
-            block_slot: 0,
-            prot_magic: genesis.byron.protocol_consts.protocol_magic,
-            network_id: match genesis.shelley.network_id.as_deref() {
-                Some("Mainnet") => 0,
-                _ => 1,
-            },
-            prot_params: MultiEraProtParams::Babbage(prot_pps),
-        })
-    } else {
-        // Eras prior to Alonzo and Babbage
-        let mut out = Environment {
-            block_slot: 0,
-            prot_magic: genesis.byron.protocol_consts.protocol_magic,
-            network_id: match genesis.shelley.network_id.as_deref() {
-                Some("Mainnet") => 0,
-                _ => 1,
-            },
-            prot_params: apply_era_hardfork(&genesis, 1)?,
-        };
+) -> Result<MultiEraProtParams, WorkerError> {
+    let mut prot_params = apply_era_hardfork(&genesis, 1)?;
 
-        info!(epoch, "computing pparams");
+    let updates = ledger.get_pparams_updates(epoch).or_panic()?;
 
-        for update in ledger.all_pparams().or_panic()? {
-            let era = Era::try_from(era).or_panic()?;
-            let update = MultiEraUpdate::decode_for_era(era, &cbor).or_panic()?;
-            out.prot_params = apply_param_update(&genesis, era, out.prot_params, update)?;
-        }
+    info!(epoch, updates = updates.len(), "computing pparams");
 
-        Ok(out)
+    for (era, _, cbor) in updates {
+        let era = Era::try_from(era).or_panic()?;
+        let update = MultiEraUpdate::decode_for_era(era, &cbor).or_panic()?;
+        prot_params = apply_param_update(&genesis, era, prot_params, update)?;
     }
+
+    Ok(prot_params)
 }

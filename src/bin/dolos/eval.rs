@@ -1,6 +1,6 @@
 use miette::{Context, IntoDiagnostic};
 use pallas::{
-    applying::{validate, UTxOs},
+    applying::{validate, Environment as ValidationContext, UTxOs},
     ledger::traverse::{Era, MultiEraInput, MultiEraOutput},
 };
 use std::{borrow::Cow, collections::HashMap, path::PathBuf};
@@ -15,6 +15,9 @@ pub struct Args {
 
     #[arg(long, short)]
     epoch: u64,
+
+    #[arg(long, short)]
+    block_slot: u64,
 
     #[arg(long, short)]
     network_id: u8,
@@ -75,8 +78,8 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
         utxos2.insert(key, value);
     }
 
-    let pparams = dolos::sync::pparams::compute_pparams(
-        dolos::sync::pparams::Genesis {
+    let pparams = dolos::pparams::compute_pparams(
+        dolos::pparams::Genesis {
             byron: &byron_genesis,
             shelley: &shelley_genesis,
         },
@@ -86,7 +89,14 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
     .into_diagnostic()
     .context("computing protocol params")?;
 
-    validate(&tx, &utxos2, &pparams).unwrap();
+    let context = ValidationContext {
+        block_slot: args.block_slot,
+        prot_magic: config.upstream.network_magic as u32,
+        network_id: config.upstream.network_id,
+        prot_params: pparams,
+    };
+
+    validate(&tx, &utxos2, &context).unwrap();
 
     Ok(())
 }
