@@ -1,3 +1,4 @@
+pub mod ledger;
 pub mod model;
 pub mod prelude;
 pub mod querydb;

@@ -13,7 +13,7 @@ use pallas::{
 };
 use tracing::{info, warn};
 
-use crate::storage::applydb::ApplyDB;
+use crate::{ledger::LedgerView, storage::applydb::ApplyDB};
 
 pub struct Genesis<'a> {
     pub byron: &'a byron::GenesisFile,
@@ -141,7 +141,7 @@ fn apply_param_update(
 // TODO: perform proper protocol parameters update for the Alonzo era.
 pub fn compute_pparams(
     genesis: Genesis,
-    ledger: &ApplyDB,
+    ledger: impl LedgerView,
     epoch: u64,
 ) -> Result<Environment, WorkerError> {
     if (290..=364).contains(&epoch) {
@@ -227,11 +227,9 @@ pub fn compute_pparams(
             prot_params: apply_era_hardfork(&genesis, 1)?,
         };
 
-        let updates = ledger.get_pparams_updates(epoch).or_panic()?;
+        info!(epoch, "computing pparams");
 
-        info!(epoch, updates = updates.len(), "computing pparams");
-
-        for (era, _, cbor) in updates {
+        for update in ledger.all_pparams().or_panic()? {
             let era = Era::try_from(era).or_panic()?;
             let update = MultiEraUpdate::decode_for_era(era, &cbor).or_panic()?;
             out.prot_params = apply_param_update(&genesis, era, out.prot_params, update)?;

@@ -7,14 +7,13 @@ use std::collections::HashMap;
 use tracing::{debug, info, warn};
 
 use crate::prelude::*;
-use crate::storage::applydb::ApplyDB;
 
 pub type UpstreamPort = gasket::messaging::tokio::InputPort<RollEvent>;
 
 #[derive(Stage)]
 #[stage(name = "ledger", unit = "RollEvent", worker = "Worker")]
 pub struct Stage {
-    ledger: ApplyDB,
+    ledger: crate::ledger::store::LedgerStore,
     byron: byron::GenesisFile,
     shelley: shelley::GenesisFile,
 
@@ -33,7 +32,7 @@ pub struct Stage {
 
 impl Stage {
     pub fn new(
-        ledger: ApplyDB,
+        ledger: crate::ledger::store::LedgerStore,
         byron: byron::GenesisFile,
         shelley: shelley::GenesisFile,
         phase1_validation_enabled: bool,
@@ -164,15 +163,22 @@ impl gasket::framework::Worker<Stage> for Worker {
                     stage.execute_phase1_validation(&block)?;
                 }
 
-                stage.ledger.apply_block(&block).or_panic()?;
+                let delta = crate::ledger::compute_delta(&block);
+                stage.ledger.apply(delta).or_panic()?;
             }
             RollEvent::Undo(slot, _, cbor) => {
                 info!(slot, "undoing block");
-                stage.ledger.undo_block(cbor).or_panic()?;
+
+                let block = MultiEraBlock::decode(cbor).or_panic()?;
+
+                let delta = crate::ledger::compute_undo_delta(&block);
+                stage.ledger.apply(delta).or_panic()?;
             }
             RollEvent::Origin => {
                 info!("applying origin");
-                stage.ledger.apply_origin(&stage.byron).or_panic()?;
+
+                let delta = crate::ledger::compute_origin_delta(&stage.byron);
+                stage.ledger.apply(delta).or_panic()?;
             }
         };
 
