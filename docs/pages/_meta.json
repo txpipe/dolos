@@ -6,5 +6,11 @@
     "theme": {
       "layout": "full"
     }
-  }
+  },
+  "introduction": "Introduction",
+  "installation": "Installation",
+  "configuration": "Configuration",
+  "running": "Running",
+  "benchmarks": "Benchmarks",
+  "apis": "APIs"
 }
