@@ -25,11 +25,11 @@ export default {
         description: "A Cardano data node in Rust",
         images: [
           {
-            url: "https://dolos.txpipe.io/logo.webp",
-            width: 732,
-            height: 287,
+            url: "https://dolos.txpipe.io/logo.png",
+            width: 209,
+            height: 209,
             alt: "Dolos",
-            type: "image/webp",
+            type: "image/png",
           },
         ],
       },
