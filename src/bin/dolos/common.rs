@@ -3,7 +3,7 @@ use std::path::Path;
 use tracing::Level;
 use tracing_subscriber::{filter::Targets, prelude::*};
 
-use dolos::{prelude::*, storage::applydb::ApplyDB};
+use dolos::{ledger::store::LedgerStore, prelude::*};
 
 use crate::LoggingConfig;
 
@@ -15,7 +15,7 @@ fn define_rolldb_path(config: &crate::Config) -> &Path {
         .unwrap_or_else(|| Path::new("/rolldb"))
 }
 
-pub type Stores = (wal::Store, chain::Store, ApplyDB);
+pub type Stores = (wal::Store, chain::Store, LedgerStore);
 
 pub fn open_data_stores(config: &crate::Config) -> Result<Stores, Error> {
     let rolldb_path = define_rolldb_path(config);
@@ -29,7 +29,7 @@ pub fn open_data_stores(config: &crate::Config) -> Result<Stores, Error> {
 
     let chain = chain::Store::open(rolldb_path.join("chain")).map_err(Error::storage)?;
 
-    let ledger = ApplyDB::open(rolldb_path.join("ledger")).map_err(Error::storage)?;
+    let ledger = LedgerStore::open(rolldb_path.join("ledger")).map_err(Error::storage)?;
 
     Ok((wal, chain, ledger))
 }
@@ -40,7 +40,7 @@ pub fn destroy_data_stores(config: &crate::Config) -> Result<(), Error> {
 
     wal::Store::destroy(rolldb_path.join("wal")).map_err(Error::storage)?;
     chain::Store::destroy(rolldb_path.join("chain")).map_err(Error::storage)?;
-    ApplyDB::destroy(rolldb_path.join("ledger")).map_err(Error::storage)?;
+    //LedgerStore::destroy(rolldb_path.join("ledger")).map_err(Error::storage)?;
 
     Ok(())
 }

@@ -165,18 +165,22 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
     let (mut wal, mut chain, mut ledger) = empty_stores.unwrap();
 
     ledger
-        .apply_origin(&byron_genesis)
+        .apply(&[dolos::ledger::compute_origin_delta(&byron_genesis)])
         .into_diagnostic()
         .context("applying origin utxos")?;
 
     for block in iter {
         let block = match block {
-            Ok(x) => x,
+            Ok(x) if x.len() == 0 => {
+                warn!("can't continue reading from immutable db");
+                break;
+            }
             Err(err) => {
                 dbg!(err);
                 warn!("can't continue reading from immutable db");
                 break;
             }
+            Ok(x) => x,
         };
 
         let blockd = MultiEraBlock::decode(&block)
@@ -191,7 +195,7 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
             .context("adding chain entry")?;
 
         ledger
-            .apply_block(&blockd)
+            .apply(&[dolos::ledger::compute_delta(&blockd)])
             .into_diagnostic()
             .context("applyting ledger block")?;
     }
