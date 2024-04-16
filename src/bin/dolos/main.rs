@@ -72,6 +72,7 @@ pub struct Config {
     pub retries: Option<gasket::retries::Policy>,
     pub byron: GenesisFileRef,
     pub shelley: GenesisFileRef,
+    pub alonzo: GenesisFileRef,
     #[serde(default)]
     pub logging: LoggingConfig,
 }
@@ -109,7 +110,6 @@ fn main() -> Result<()> {
         Command::Sync(x) => sync::run(&config, &x)?,
         Command::Data(x) => data::run(&config, &x)?,
         Command::Eval(x) => eval::run(&config, &x)?,
-
         #[cfg(feature = "mithril")]
         Command::Bootstrap(x) => bootstrap::run(&config, &x)?,
     };

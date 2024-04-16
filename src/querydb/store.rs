@@ -6,7 +6,7 @@ use pallas::{
     },
 };
 use redb::{
-    Database, ReadOnlyTable, ReadTransaction, ReadableMultimapTable, ReadableTable, Table,
+    Database, ReadOnlyTable, ReadTransaction, ReadableMultimapTable, ReadableTable,
     WriteTransaction,
 };
 use std::{ops::Deref, path::Path};
