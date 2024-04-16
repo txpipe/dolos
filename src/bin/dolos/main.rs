@@ -7,6 +7,7 @@ use std::path::PathBuf;
 mod common;
 mod daemon;
 mod data;
+mod doctor;
 mod eval;
 mod sync;
 
@@ -19,6 +20,7 @@ enum Command {
     Sync(sync::Args),
     Data(data::Args),
     Eval(eval::Args),
+    Doctor(doctor::Args),
 
     #[cfg(feature = "mithril")]
     Bootstrap(bootstrap::Args),
@@ -110,6 +112,8 @@ fn main() -> Result<()> {
         Command::Sync(x) => sync::run(&config, &x)?,
         Command::Data(x) => data::run(&config, &x)?,
         Command::Eval(x) => eval::run(&config, &x)?,
+        Command::Doctor(x) => doctor::run(&config, &x)?,
+
         #[cfg(feature = "mithril")]
         Command::Bootstrap(x) => bootstrap::run(&config, &x)?,
     };
