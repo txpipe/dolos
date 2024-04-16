@@ -215,10 +215,7 @@ fn advance_hardfork(
 ) -> MultiEraProtocolParameters {
     match current {
         MultiEraProtocolParameters::Byron(current) if next_protocol == 2 => {
-            MultiEraProtocolParameters::Shelley(bootstrap_shelley_pparams(
-                current,
-                &genesis.shelley,
-            ))
+            MultiEraProtocolParameters::Shelley(bootstrap_shelley_pparams(current, genesis.shelley))
         }
         MultiEraProtocolParameters::Shelley(current) if next_protocol == 3 => {
             MultiEraProtocolParameters::Shelley(current)
@@ -227,7 +224,7 @@ fn advance_hardfork(
             MultiEraProtocolParameters::Shelley(current)
         }
         MultiEraProtocolParameters::Shelley(current) if next_protocol == 5 => {
-            MultiEraProtocolParameters::Alonzo(bootstrap_alonzo_pparams(current, &genesis.alonzo))
+            MultiEraProtocolParameters::Alonzo(bootstrap_alonzo_pparams(current, genesis.alonzo))
         }
         MultiEraProtocolParameters::Alonzo(current) if next_protocol == 6 => {
             MultiEraProtocolParameters::Babbage(bootstrap_babbage_pparams(current))
@@ -242,7 +239,7 @@ pub fn fold_pparams(
     updates: Vec<MultiEraUpdate>,
     for_epoch: u64,
 ) -> MultiEraProtocolParameters {
-    let mut pparams = MultiEraProtocolParameters::Byron(bootstrap_byron_pparams(&genesis.byron));
+    let mut pparams = MultiEraProtocolParameters::Byron(bootstrap_byron_pparams(genesis.byron));
     let mut last_protocol = 1;
 
     for epoch in 0..for_epoch {

@@ -1,9 +1,11 @@
+use dolos::ledger::{PParamsBody, TxoRef};
+use itertools::*;
 use miette::{Context, IntoDiagnostic};
 use pallas::{
     applying::{validate, Environment as ValidationContext, UTxOs},
-    ledger::traverse::{Era, MultiEraInput, MultiEraOutput},
+    ledger::traverse::{Era, MultiEraInput, MultiEraOutput, MultiEraUpdate},
 };
-use std::{borrow::Cow, collections::HashMap, path::PathBuf};
+use std::{borrow::Cow, path::PathBuf};
 
 #[derive(Debug, clap::Args)]
 pub struct Args {
@@ -42,11 +44,16 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
         .into_diagnostic()
         .context("decoding tx cbor")?;
 
-    let mut utxos = HashMap::new();
-    ledger
-        .resolve_inputs_for_tx(&tx, &mut utxos)
+    let refs = tx
+        .consumes()
+        .iter()
+        .map(|utxo| TxoRef(*utxo.hash(), utxo.index() as u32))
+        .collect_vec();
+
+    let resolved = ledger
+        .get_utxos(refs)
         .into_diagnostic()
-        .context("resolving tx inputs")?;
+        .context("resolving utxo")?;
 
     let byron_genesis = pallas::ledger::configs::byron::from_file(&config.byron.path)
         .into_diagnostic()
@@ -56,43 +63,59 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
         .into_diagnostic()
         .context("loading shelley genesis")?;
 
+    let alonzo_genesis = pallas::ledger::configs::alonzo::from_file(&config.alonzo.path)
+        .into_diagnostic()
+        .context("loading alonzo genesis")?;
+
     let mut utxos2 = UTxOs::new();
 
-    for (ref_, output) in utxos.iter() {
+    for (ref_, body) in resolved.iter() {
         let txin = pallas::ledger::primitives::byron::TxIn::Variant0(
-            pallas::codec::utils::CborWrap((ref_.0, ref_.1 as u32)),
+            pallas::codec::utils::CborWrap((ref_.0, ref_.1)),
         );
 
         let key = MultiEraInput::Byron(
             <Box<Cow<'_, pallas::ledger::primitives::byron::TxIn>>>::from(Cow::Owned(txin)),
         );
 
-        let era = Era::try_from(output.0)
+        let era = Era::try_from(body.0)
             .into_diagnostic()
             .context("parsing era")?;
 
-        let value = MultiEraOutput::decode(era, &output.1)
+        let value = MultiEraOutput::decode(era, &body.1)
             .into_diagnostic()
             .context("decoding utxo")?;
 
         utxos2.insert(key, value);
     }
 
-    let pparams = dolos::pparams::compute_pparams(
-        dolos::pparams::Genesis {
+    let updates = ledger
+        .get_pparams(args.epoch)
+        .into_diagnostic()
+        .context("retrieving pparams")?;
+
+    let updates = updates
+        .iter()
+        .map(|PParamsBody(era, cbor)| -> miette::Result<MultiEraUpdate> {
+            let era = Era::try_from(*era).into_diagnostic()?;
+            MultiEraUpdate::decode_for_era(era, cbor).into_diagnostic()
+        })
+        .try_collect()?;
+
+    let pparams = dolos::ledger::pparams::fold_pparams(
+        dolos::ledger::pparams::Genesis {
             byron: &byron_genesis,
             shelley: &shelley_genesis,
+            alonzo: &alonzo_genesis,
         },
-        &ledger,
+        updates,
         args.epoch,
-    )
-    .into_diagnostic()
-    .context("computing protocol params")?;
+    );
 
     let context = ValidationContext {
         block_slot: args.block_slot,
         prot_magic: config.upstream.network_magic as u32,
-        network_id: config.upstream.network_id,
+        network_id: args.network_id,
         prot_params: pparams,
     };
 

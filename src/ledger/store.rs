@@ -15,7 +15,7 @@ impl LedgerTable for BlocksTable {
         let mut table = wx.open_table(BLOCKS)?;
 
         if let Some(ChainPoint(slot, hash)) = delta.new_position.as_ref() {
-            let v: &[u8; 32] = &hash;
+            let v: &[u8; 32] = hash;
             table.insert(slot, v)?;
         }
 
@@ -27,7 +27,11 @@ impl LedgerTable for BlocksTable {
     }
 }
 
-const UTXOS: TableDefinition<(&[u8; 32], u32), (Era, &[u8])> = TableDefinition::new("utxos");
+type UtxosKey<'a> = (&'a [u8; 32], u32);
+type UtxosValue<'a> = (Era, &'a [u8]);
+
+const UTXOS: TableDefinition<UtxosKey, UtxosValue> = TableDefinition::new("utxos");
+
 struct UtxosTable;
 
 impl LedgerTable for UtxosTable {
@@ -124,12 +128,12 @@ impl LedgerStore {
         wx.set_durability(redb::Durability::Eventual);
 
         for delta in deltas {
-            UtxosTable::apply(&wx, &delta)?;
-            PParamsTable::apply(&wx, &delta)?;
-            TombstonesTable::apply(&wx, &delta)?;
+            UtxosTable::apply(&wx, delta)?;
+            PParamsTable::apply(&wx, delta)?;
+            TombstonesTable::apply(&wx, delta)?;
 
             // indexes?
-            BlocksTable::apply(&wx, &delta)?;
+            BlocksTable::apply(&wx, delta)?;
         }
 
         wx.commit()?;

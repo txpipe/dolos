@@ -171,7 +171,7 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
 
     for block in iter {
         let block = match block {
-            Ok(x) if x.len() == 0 => {
+            Ok(x) if x.is_empty() => {
                 warn!("can't continue reading from immutable db");
                 break;
             }

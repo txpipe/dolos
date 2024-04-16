@@ -14,10 +14,10 @@ pub type BlockHash = Hash<32>;
 pub type TxOrder = usize;
 
 #[derive(Debug)]
-pub struct UtxoBody(Era, Vec<u8>);
+pub struct UtxoBody(pub Era, pub Vec<u8>);
 
 #[derive(Debug, Eq, PartialEq, Hash)]
-pub struct TxoRef(TxHash, TxoIdx);
+pub struct TxoRef(pub TxHash, pub TxoIdx);
 
 #[derive(Debug, Eq, PartialEq, Hash)]
 pub struct ChainPoint(pub BlockSlot, pub BlockHash);
@@ -61,9 +61,10 @@ pub struct LedgerDelta {
 /// process of computing the delta, but it own't provide a comprehensive
 /// validation of the ledger rules.
 pub fn compute_delta(block: &MultiEraBlock) -> LedgerDelta {
-    let mut delta = LedgerDelta::default();
-
-    delta.new_position = Some(ChainPoint(block.slot(), block.hash()));
+    let mut delta = LedgerDelta {
+        new_position: Some(ChainPoint(block.slot(), block.hash())),
+        ..Default::default()
+    };
 
     let txs = block.txs();
 
@@ -98,9 +99,10 @@ pub fn compute_delta(block: &MultiEraBlock) -> LedgerDelta {
 }
 
 pub fn compute_undo_delta(block: &MultiEraBlock) -> LedgerDelta {
-    let mut delta = LedgerDelta::default();
-
-    delta.undone_position = Some(ChainPoint(block.slot(), block.hash()));
+    let mut delta = LedgerDelta {
+        undone_position: Some(ChainPoint(block.slot(), block.hash())),
+        ..Default::default()
+    };
 
     for tx in block.txs() {
         for (idx, _) in tx.produces() {
@@ -246,8 +248,8 @@ mod tests {
                 match utxo {
                     Some(UtxoBody(era, cbor)) => {
                         assert_eq!(
-                            tx.era() as u16,
-                            *era,
+                            tx.era(),
+                            pallas::ledger::traverse::Era::try_from(*era).unwrap(),
                             "expected produced utxo era doesn't match"
                         );
 
