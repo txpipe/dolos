@@ -51,7 +51,7 @@ pub fn pipeline(
     chain: ChainStore,
     ledger: LedgerStore,
     byron: byron::GenesisFile,
-    shelley: shelley::GenesisFile,
+    _shelley: shelley::GenesisFile,
     retries: &Option<gasket::retries::Policy>,
 ) -> Result<Vec<gasket::runtime::Tether>, Error> {
     let pull_cursor = wal
