@@ -53,8 +53,8 @@ impl Error {
         Error::Message(text.into())
     }
 
-    pub fn custom(error: Box<dyn std::error::Error>) -> Error {
-        Error::Custom(format!("{error}"))
+    pub fn custom(error: impl Display) -> Error {
+        Error::Custom(error.to_string())
     }
 }
 
