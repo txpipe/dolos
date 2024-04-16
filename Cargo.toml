@@ -12,8 +12,8 @@ authors = ["Santiago Carmuega <santiago@carmuega.me>"]
 
 
 [dependencies]
-# pallas = { git = "https://github.com/txpipe/pallas.git", features = ["unstable"] }
-pallas = { version = "^0.25", features = ["unstable"] }
+pallas = { git = "https://github.com/txpipe/pallas.git", features = ["unstable"] }
+# pallas = { version = "^0.25", features = ["unstable"] }
 # pallas = { path = "../pallas/pallas", features = ["unstable"] }
 
 gasket = { version = "^0.5", features = ["derive"] }
@@ -49,6 +49,7 @@ async-stream = "0.3.5"
 serde_with = "3.4.0"
 mithril-client = { version = "0.5.17", optional = true, features = ["fs"] }
 protoc-wkt = "1.0.0"
+itertools = "0.12.1"
 
 [dev-dependencies]
 tempfile = "3.3.0"

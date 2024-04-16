@@ -7,8 +7,9 @@ use pallas::storage::rolldb::wal::Store as WalStore;
 use serde::Deserialize;
 use tracing::info;
 
+use crate::ledger::store::LedgerStore;
+use crate::ledger::ChainPoint;
 use crate::prelude::*;
-use crate::storage::applydb::ApplyDB;
 
 pub mod chain;
 pub mod ledger;
@@ -48,9 +49,9 @@ pub fn pipeline(
     upstream: &UpstreamConfig,
     wal: WalStore,
     chain: ChainStore,
-    ledger: ApplyDB,
+    ledger: LedgerStore,
     byron: byron::GenesisFile,
-    shelley: shelley::GenesisFile,
+    _shelley: shelley::GenesisFile,
     retries: &Option<gasket::retries::Policy>,
 ) -> Result<Vec<gasket::runtime::Tether>, Error> {
     let pull_cursor = wal
@@ -69,19 +70,16 @@ pub fn pipeline(
     let cursor_chain = chain.find_tip().map_err(Error::storage)?;
     info!(?cursor_chain, "chain cursor found");
 
-    let cursor_ledger = ledger.cursor().map_err(Error::storage)?;
+    let cursor_ledger = ledger
+        .cursor()
+        .map_err(Error::storage)?
+        .map(|ChainPoint(a, b)| (a, b));
+
     info!(?cursor_ledger, "ledger cursor found");
 
     let mut roll = roll::Stage::new(wal, cursor_chain, cursor_ledger);
     let mut chain = chain::Stage::new(chain);
-    let mut ledger = ledger::Stage::new(
-        ledger,
-        byron,
-        shelley,
-        config.phase1_validation_enabled,
-        config.network_magic,
-        config.network_id,
-    );
+    let mut ledger = ledger::Stage::new(ledger, byron);
 
     let (to_roll, from_pull) = gasket::messaging::tokio::mpsc_channel(50);
     pull.downstream.connect(to_roll);
