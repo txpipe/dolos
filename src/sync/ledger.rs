@@ -57,16 +57,20 @@ impl gasket::framework::Worker<Stage> for Worker {
                 info!(slot, "applying block");
 
                 let block = MultiEraBlock::decode(cbor).or_panic()?;
+                let context =
+                    crate::ledger::load_slice_for_block(&block, &stage.ledger).or_panic()?;
 
-                let delta = crate::ledger::compute_delta(&block);
+                let delta = crate::ledger::compute_delta(&block, context).or_panic()?;
                 stage.ledger.apply(&[delta]).or_panic()?;
             }
             RollEvent::Undo(slot, _, cbor) => {
                 info!(slot, "undoing block");
 
                 let block = MultiEraBlock::decode(cbor).or_panic()?;
+                let context =
+                    crate::ledger::load_slice_for_block(&block, &stage.ledger).or_panic()?;
 
-                let delta = crate::ledger::compute_undo_delta(&block);
+                let delta = crate::ledger::compute_undo_delta(&block, context).or_panic()?;
                 stage.ledger.apply(&[delta]).or_panic()?;
             }
             RollEvent::Origin => {

@@ -1,4 +1,5 @@
 use futures_core::Stream;
+use pallas::interop::utxorpc::spec as u5c;
 use pallas::{
     crypto::hash::Hash,
     storage::rolldb::{chain, wal},
@@ -6,7 +7,6 @@ use pallas::{
 use std::pin::Pin;
 use tokio_stream::StreamExt;
 use tonic::{Request, Response, Status};
-use utxorpc_spec::utxorpc::v1alpha as u5c;
 
 fn bytes_to_hash(raw: &[u8]) -> Hash<32> {
     let array: [u8; 32] = raw.try_into().unwrap();
