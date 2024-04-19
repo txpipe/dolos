@@ -61,33 +61,47 @@ pub fn run(config: &super::Config, _args: &Args) -> miette::Result<()> {
         println!("chain is empty");
     }
 
+    // println!("---");
+
+    // let byron =
+    // pallas::ledger::configs::byron::from_file(&config.byron.path).unwrap();
+    // let shelley =
+    // pallas::ledger::configs::shelley::from_file(&config.shelley.path).unwrap();
+    // let alonzo =
+    // pallas::ledger::configs::alonzo::from_file(&config.alonzo.path).unwrap();
+
+    // let data: Vec<_> = ledger.get_pparams(46153027).into_diagnostic()?;
+
+    // let updates = data
+    //     .iter()
+    //     .map(|PParamsBody(era, cbor)| -> miette::Result<MultiEraUpdate> {
+    //         let era = Era::try_from(*era).into_diagnostic()?;
+    //         MultiEraUpdate::decode_for_era(era, cbor).into_diagnostic()
+    //     })
+    //     .try_collect()?;
+
+    // let merged = dolos::ledger::pparams::fold_pparams(
+    //     Genesis {
+    //         byron: &byron,
+    //         shelley: &shelley,
+    //         alonzo: &alonzo,
+    //     },
+    //     updates,
+    //     500,
+    // );
+
+    //dbg!(merged);
+
     println!("---");
 
-    let byron = pallas::ledger::configs::byron::from_file(&config.byron.path).unwrap();
-    let shelley = pallas::ledger::configs::shelley::from_file(&config.shelley.path).unwrap();
-    let alonzo = pallas::ledger::configs::alonzo::from_file(&config.alonzo.path).unwrap();
-
-    let data: Vec<_> = ledger.get_pparams(46153027).into_diagnostic()?;
-
-    let updates = data
-        .iter()
-        .map(|PParamsBody(era, cbor)| -> miette::Result<MultiEraUpdate> {
-            let era = Era::try_from(*era).into_diagnostic()?;
-            MultiEraUpdate::decode_for_era(era, cbor).into_diagnostic()
-        })
-        .try_collect()?;
-
-    let merged = dolos::ledger::pparams::fold_pparams(
-        Genesis {
-            byron: &byron,
-            shelley: &shelley,
-            alonzo: &alonzo,
-        },
-        updates,
-        500,
-    );
-
-    dbg!(merged);
+    for utxo in ledger
+        .get_utxo_by_address_set(
+            &hex::decode("6059184749e2d67a7ea2ca31ef48fc0befb3c3fad5a88af7264531ae07").unwrap(),
+        )
+        .into_diagnostic()?
+    {
+        println!("{}:{}", hex::encode(utxo.0), utxo.1)
+    }
 
     // WIP utility to dump tx data for debugging purposes. Should be implemented as
     // a subcommand.

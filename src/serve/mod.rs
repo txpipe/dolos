@@ -5,7 +5,7 @@ use pallas::storage::rolldb::{chain, wal};
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
-use crate::prelude::*;
+use crate::{ledger::store::LedgerStore, prelude::*};
 
 pub mod grpc;
 pub mod ouroboros;
@@ -24,6 +24,7 @@ pub async fn serve(
     config: Config,
     wal: wal::Store,
     chain: chain::Store,
+    ledger: LedgerStore,
     mempool: Arc<crate::submit::MempoolState>,
     txs_out: gasket::messaging::tokio::ChannelSendAdapter<Vec<crate::submit::Transaction>>,
 ) -> Result<(), Error> {
@@ -35,6 +36,7 @@ pub async fn serve(
             cfg,
             wal.clone(),
             chain.clone(),
+            ledger,
             mempool,
             txs_out,
         )));

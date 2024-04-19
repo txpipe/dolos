@@ -1,22 +1,39 @@
-use pallas::crypto::hash::Hash;
-use pallas::ledger::traverse::MultiEraBlock;
+use itertools::Itertools;
+use pallas::ledger::traverse::{Era, MultiEraBlock, MultiEraTx};
+use pallas::{crypto::hash::Hash, ledger::traverse::MultiEraOutput};
 use std::collections::{HashMap, HashSet};
+use thiserror::Error;
 
 pub mod pparams;
 pub mod store;
 //pub mod validate;
 
-pub type Era = u16;
 pub type TxHash = Hash<32>;
 pub type TxoIdx = u32;
 pub type BlockSlot = u64;
 pub type BlockHash = Hash<32>;
 pub type TxOrder = usize;
 
-#[derive(Debug)]
-pub struct UtxoBody(pub Era, pub Vec<u8>);
+#[derive(Debug, Eq, PartialEq, Clone)]
+pub struct EraCbor(pub Era, pub Vec<u8>);
 
-#[derive(Debug, Eq, PartialEq, Hash)]
+impl<'a> From<MultiEraOutput<'a>> for EraCbor {
+    fn from(value: MultiEraOutput) -> Self {
+        EraCbor(value.era(), value.encode())
+    }
+}
+
+impl<'a> TryFrom<&'a EraCbor> for MultiEraOutput<'a> {
+    type Error = pallas::codec::minicbor::decode::Error;
+
+    fn try_from(value: &'a EraCbor) -> Result<Self, Self::Error> {
+        MultiEraOutput::decode(value.0, &value.1)
+    }
+}
+
+pub type UtxoBody<'a> = MultiEraOutput<'a>;
+
+#[derive(Debug, Eq, PartialEq, Hash, Clone)]
 pub struct TxoRef(pub TxHash, pub TxoIdx);
 
 #[derive(Debug, Eq, PartialEq, Hash)]
@@ -25,24 +42,71 @@ pub struct ChainPoint(pub BlockSlot, pub BlockHash);
 #[derive(Debug)]
 pub struct PParamsBody(pub Era, pub Vec<u8>);
 
+#[derive(Debug, Error)]
 pub enum BrokenInvariant {
+    #[error("missing utxo {0:?}")]
     MissingUtxo(TxoRef),
 }
 
-pub trait LedgerSlice<'a> {
-    fn get_tip(&'a self) -> ChainPoint;
-    fn get_utxo(&'a self, txo_ref: &TxoRef) -> Option<&'a UtxoBody>;
-    fn pparams(&'a self, until: BlockSlot) -> Vec<PParamsBody>;
+/// A persistent store for ledger state
+pub trait LedgerStore {
+    fn get_utxos(&self, refs: Vec<TxoRef>) -> Result<HashMap<TxoRef, EraCbor>, redb::Error>;
+}
+
+/// A slice of the ledger relevant for a specific task
+///
+/// A ledger slice represents a partial view of the ledger which is optimized
+/// for a particular task, such tx validation. In essence, it is a subset of all
+/// the UTxO which are being consumed or referenced by a block or tx.
+#[derive(Clone)]
+pub struct LedgerSlice {
+    pub resolved_inputs: HashMap<TxoRef, EraCbor>,
+}
+
+pub fn load_slice_for_block<S>(block: &MultiEraBlock, store: &S) -> Result<LedgerSlice, redb::Error>
+where
+    S: LedgerStore,
+{
+    let txs = block.txs();
+
+    // TODO: turn this into "referenced utxos" intead of just consumed.
+    let consumed: HashSet<_> = txs
+        .iter()
+        .flat_map(MultiEraTx::consumes)
+        .map(|utxo| TxoRef(*utxo.hash(), utxo.index() as u32))
+        .collect();
+
+    let consumed_same_block: HashMap<_, _> = txs
+        .iter()
+        .flat_map(|tx| {
+            tx.produces()
+                .into_iter()
+                .map(|(idx, utxo)| (TxoRef(tx.hash(), idx as u32), utxo.into()))
+        })
+        .filter(|(x, _)| consumed.contains(x))
+        .collect();
+
+    let to_fetch = consumed
+        .into_iter()
+        .filter(|x| !consumed_same_block.contains_key(x))
+        .collect_vec();
+
+    let mut resolved_inputs = store.get_utxos(to_fetch)?;
+    resolved_inputs.extend(consumed_same_block.into_iter());
+
+    // TODO: include reference scripts and collateral
+
+    Ok(LedgerSlice { resolved_inputs })
 }
 
 #[derive(Default, Debug)]
 pub struct LedgerDelta {
     pub new_position: Option<ChainPoint>,
     pub undone_position: Option<ChainPoint>,
-    pub produced_utxo: HashMap<TxoRef, UtxoBody>,
-    pub consumed_utxo: HashSet<TxoRef>,
-    pub recovered_stxi: HashSet<TxoRef>,
-    pub undone_utxo: HashSet<TxoRef>,
+    pub produced_utxo: HashMap<TxoRef, EraCbor>,
+    pub consumed_utxo: HashMap<TxoRef, EraCbor>,
+    pub recovered_stxi: HashMap<TxoRef, EraCbor>,
+    pub undone_utxo: HashMap<TxoRef, EraCbor>,
     pub new_pparams: Vec<PParamsBody>,
 }
 
@@ -60,7 +124,10 @@ pub struct LedgerDelta {
 /// return an error if any of the assumed invariant have been broken in the
 /// process of computing the delta, but it own't provide a comprehensive
 /// validation of the ledger rules.
-pub fn compute_delta(block: &MultiEraBlock) -> LedgerDelta {
+pub fn compute_delta(
+    block: &MultiEraBlock,
+    mut context: LedgerSlice,
+) -> Result<LedgerDelta, BrokenInvariant> {
     let mut delta = LedgerDelta {
         new_position: Some(ChainPoint(block.slot(), block.hash())),
         ..Default::default()
@@ -71,14 +138,19 @@ pub fn compute_delta(block: &MultiEraBlock) -> LedgerDelta {
     for tx in txs.iter() {
         for (idx, produced) in tx.produces() {
             let uxto_ref = TxoRef(tx.hash(), idx as u32);
-            let utxo_body = UtxoBody(tx.era().into(), produced.encode());
 
-            delta.produced_utxo.insert(uxto_ref, utxo_body);
+            delta.produced_utxo.insert(uxto_ref, produced.into());
         }
 
         for consumed in tx.consumes() {
             let stxi_ref = TxoRef(*consumed.hash(), consumed.index() as u32);
-            delta.consumed_utxo.insert(stxi_ref);
+
+            let stxi_body = context
+                .resolved_inputs
+                .remove(&stxi_ref)
+                .ok_or_else(|| BrokenInvariant::MissingUtxo(stxi_ref.clone()))?;
+
+            delta.consumed_utxo.insert(stxi_ref, stxi_body);
         }
 
         if let Some(update) = tx.update() {
@@ -95,30 +167,39 @@ pub fn compute_delta(block: &MultiEraBlock) -> LedgerDelta {
             .push(PParamsBody(block.era().into(), update.encode()));
     }
 
-    delta
+    Ok(delta)
 }
 
-pub fn compute_undo_delta(block: &MultiEraBlock) -> LedgerDelta {
+pub fn compute_undo_delta<'a>(
+    block: &'a MultiEraBlock,
+    mut context: LedgerSlice,
+) -> Result<LedgerDelta, BrokenInvariant> {
     let mut delta = LedgerDelta {
         undone_position: Some(ChainPoint(block.slot(), block.hash())),
         ..Default::default()
     };
 
     for tx in block.txs() {
-        for (idx, _) in tx.produces() {
+        for (idx, body) in tx.produces() {
             let utxo_ref = TxoRef(tx.hash(), idx as u32);
-            delta.undone_utxo.insert(utxo_ref);
+            delta.undone_utxo.insert(utxo_ref, body.into());
         }
     }
 
     for tx in block.txs() {
         for consumed in tx.consumes() {
             let stxi_ref = TxoRef(*consumed.hash(), consumed.index() as u32);
-            delta.recovered_stxi.insert(stxi_ref);
+
+            let stxi_body = context
+                .resolved_inputs
+                .remove(&stxi_ref)
+                .ok_or_else(|| BrokenInvariant::MissingUtxo(stxi_ref.clone()))?;
+
+            delta.recovered_stxi.insert(stxi_ref, stxi_body);
         }
     }
 
-    delta
+    Ok(delta)
 }
 
 pub fn compute_origin_delta(byron: &pallas::ledger::configs::byron::GenesisFile) -> LedgerDelta {
@@ -136,10 +217,8 @@ pub fn compute_origin_delta(byron: &pallas::ledger::configs::byron::GenesisFile)
             amount,
         };
 
-        let utxo_body = pallas::codec::minicbor::to_vec(utxo_body).unwrap();
-        let utxo_body = UtxoBody(0, utxo_body);
-
-        delta.produced_utxo.insert(utxo_ref, utxo_body);
+        let utxo_body = MultiEraOutput::from_byron(&utxo_body).to_owned();
+        delta.produced_utxo.insert(utxo_ref, utxo_body.into());
     }
 
     delta
@@ -147,10 +226,24 @@ pub fn compute_origin_delta(byron: &pallas::ledger::configs::byron::GenesisFile)
 
 #[cfg(test)]
 mod tests {
-    use pallas::crypto::hash::Hash;
+    use pallas::{crypto::hash::Hash, ledger::addresses::Address};
     use std::str::FromStr;
 
     use super::*;
+
+    struct MockStore;
+
+    impl LedgerStore for MockStore {
+        fn get_utxos(&self, refs: Vec<TxoRef>) -> Result<HashMap<TxoRef, EraCbor>, redb::Error> {
+            let mut out = HashMap::new();
+
+            for i in refs {
+                out.insert(i, EraCbor(Era::Alonzo, vec![]));
+            }
+
+            Ok(out)
+        }
+    }
 
     fn assert_genesis_utxo_exists(db: &LedgerDelta, tx_hex: &str, addr_base58: &str, amount: u64) {
         let tx = Hash::<32>::from_str(tx_hex).unwrap();
@@ -158,24 +251,22 @@ mod tests {
         let utxo_body = db.produced_utxo.get(&TxoRef(tx, 0));
 
         assert!(utxo_body.is_some(), "utxo not found");
-        let UtxoBody(era, cbor) = utxo_body.unwrap();
+        let utxo_body = MultiEraOutput::try_from(utxo_body.unwrap()).unwrap();
 
-        assert_eq!(*era, 0);
+        assert_eq!(utxo_body.era(), Era::Byron);
 
-        let txout: Result<pallas::ledger::primitives::byron::TxOut, _> =
-            pallas::codec::minicbor::decode(&cbor);
-
-        assert!(txout.is_ok(), "can't parse utxo cbor");
-        let txout = txout.unwrap();
-
-        assert_eq!(txout.amount, amount, "utxo amount doesn't match");
-
-        let addr = pallas::ledger::addresses::ByronAddress::new(
-            txout.address.payload.as_ref(),
-            txout.address.crc,
+        assert_eq!(
+            utxo_body.lovelace_amount(),
+            amount,
+            "utxo amount doesn't match"
         );
 
-        assert_eq!(addr.to_base58(), addr_base58);
+        let addr = match utxo_body.address() {
+            Ok(Address::Byron(x)) => x.to_base58(),
+            _ => panic!(),
+        };
+
+        assert_eq!(addr, addr_base58);
     }
 
     #[test]
@@ -230,38 +321,24 @@ mod tests {
 
         let block = MultiEraBlock::decode(&cbor).unwrap();
 
-        let delta = super::compute_delta(&block);
+        let store = MockStore;
+        let context = super::load_slice_for_block(&block, &store).unwrap();
+        let delta = super::compute_delta(&block, context).unwrap();
 
         for tx in block.txs() {
             for input in tx.consumes() {
-                // assert that consumed utxos are no longer in the unspent set
                 let consumed = delta
                     .consumed_utxo
-                    .contains(&TxoRef(*input.hash(), input.index() as u32));
+                    .get(&TxoRef(*input.hash(), input.index() as u32))
+                    .is_some();
 
                 assert!(consumed);
             }
 
             for (idx, expected) in tx.produces() {
                 let utxo = delta.produced_utxo.get(&TxoRef(tx.hash(), idx as u32));
-
-                match utxo {
-                    Some(UtxoBody(era, cbor)) => {
-                        assert_eq!(
-                            tx.era(),
-                            pallas::ledger::traverse::Era::try_from(*era).unwrap(),
-                            "expected produced utxo era doesn't match"
-                        );
-
-                        let expected_cbor = expected.encode();
-
-                        assert_eq!(
-                            &expected_cbor, cbor,
-                            "expected produced utxo cbor doesn't match"
-                        );
-                    }
-                    None => panic!("expected produced utxo is not in not in delta"),
-                }
+                let utxo = MultiEraOutput::try_from(utxo.unwrap()).unwrap();
+                assert_eq!(utxo, expected);
             }
         }
     }
@@ -273,15 +350,18 @@ mod tests {
 
         let block = MultiEraBlock::decode(&cbor).unwrap();
 
-        let apply = super::compute_delta(&block);
-        let undo = super::compute_undo_delta(&block);
+        let store = MockStore;
+        let context = super::load_slice_for_block(&block, &store).unwrap();
+
+        let apply = super::compute_delta(&block, context.clone()).unwrap();
+        let undo = super::compute_undo_delta(&block, context).unwrap();
 
         for (produced, _) in apply.produced_utxo.iter() {
-            assert!(undo.undone_utxo.contains(produced));
+            assert!(undo.undone_utxo.get(produced).is_some());
         }
 
-        for consumed in apply.consumed_utxo.iter() {
-            assert!(undo.recovered_stxi.contains(consumed));
+        for (consumed, _) in apply.consumed_utxo.iter() {
+            assert!(undo.recovered_stxi.get(consumed).is_some());
         }
 
         assert_eq!(apply.new_position, undo.undone_position);

@@ -2,13 +2,13 @@ use crate::submit::{MempoolState, Transaction};
 use futures_core::Stream;
 use gasket::messaging::{tokio::ChannelSendAdapter, SendAdapter};
 use pallas::crypto::hash::Hash;
+use pallas::interop::utxorpc::spec::submit::{Stage as SubmitStage, WaitForTxResponse, *};
 use pallas::ledger::traverse::MultiEraTx;
 use std::collections::HashMap;
 use std::ops::Deref;
 use std::{pin::Pin, sync::Arc};
 use tonic::{Request, Response, Status};
 use tracing::info;
-use utxorpc_spec::utxorpc::v1alpha::submit::{Stage as SubmitStage, WaitForTxResponse, *};
 
 pub struct SubmitServiceImpl {
     channel: ChannelSendAdapter<Vec<Transaction>>,
