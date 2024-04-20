@@ -5,8 +5,6 @@ use mithril_client::{ClientBuilder, MessageBuilder};
 use pallas::ledger::traverse::MultiEraBlock;
 use tracing::{debug, info, trace, warn};
 
-use dolos::prelude::*;
-
 use crate::common::Stores;
 
 #[derive(Debug, clap::Args)]
@@ -153,8 +151,7 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
         warn!("skipping download, assuming download dir has snapshot and it's validated")
     }
 
-    let byron_genesis =
-        pallas::ledger::configs::byron::from_file(&config.byron.path).map_err(Error::config)?;
+    let (byron, _, _) = crate::common::open_genesis_files(&config.genesis)?;
 
     let immutable_path = Path::new(&args.download_dir).join("immutable");
 
@@ -165,7 +162,7 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
     let (mut wal, mut chain, mut ledger) = empty_stores.unwrap();
 
     ledger
-        .apply(&[dolos::ledger::compute_origin_delta(&byron_genesis)])
+        .apply(&[dolos::ledger::compute_origin_delta(&byron)])
         .into_diagnostic()
         .context("applying origin utxos")?;
 

@@ -34,7 +34,7 @@ pub struct Monitor {
 pub struct Stage {
     pub state: Arc<MempoolState>,
 
-    pub prune_after_confirmations: u64,
+    pub prune_height: u64,
     // TODO: prune txs even if they never land on chain?
     pub upstream_submit_endpoint: SubmitEndpointReceiver,
     pub upstream_block_monitor: BlockMonitorReceiver,
@@ -44,10 +44,10 @@ pub struct Stage {
 }
 
 impl Stage {
-    pub fn new(state: Arc<MempoolState>, prune_after_confirmations: u64) -> Self {
+    pub fn new(state: Arc<MempoolState>, prune_height: u64) -> Self {
         Self {
             state,
-            prune_after_confirmations,
+            prune_height,
             upstream_submit_endpoint: Default::default(),
             upstream_block_monitor: Default::default(),
             downstream_propagator: Default::default(),
@@ -124,7 +124,7 @@ impl gasket::framework::Worker<Stage> for Worker {
                         // prune txs which have sufficient confirmations
                         monitor.txs.retain(|_, inclusion| {
                             if let Some(inclusion_height) = inclusion {
-                                height - *inclusion_height <= stage.prune_after_confirmations
+                                height - *inclusion_height <= stage.prune_height
                             } else {
                                 true
                             }

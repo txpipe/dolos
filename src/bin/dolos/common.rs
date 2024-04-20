@@ -1,3 +1,7 @@
+use miette::{Context as _, IntoDiagnostic};
+use pallas::ledger::configs::alonzo::GenesisFile as AlonzoFile;
+use pallas::ledger::configs::byron::GenesisFile as ByronFile;
+use pallas::ledger::configs::shelley::GenesisFile as ShelleyFile;
 use pallas::storage::rolldb::{chain, wal};
 use std::path::Path;
 use tracing::Level;
@@ -5,11 +9,11 @@ use tracing_subscriber::{filter::Targets, prelude::*};
 
 use dolos::{ledger::store::LedgerStore, prelude::*};
 
-use crate::LoggingConfig;
+use crate::{GenesisConfig, LoggingConfig};
 
 fn define_rolldb_path(config: &crate::Config) -> &Path {
     config
-        .rolldb
+        .storage
         .path
         .as_deref()
         .unwrap_or_else(|| Path::new("/rolldb"))
@@ -22,8 +26,8 @@ pub fn open_data_stores(config: &crate::Config) -> Result<Stores, Error> {
 
     let wal = wal::Store::open(
         rolldb_path.join("wal"),
-        config.rolldb.k_param.unwrap_or(1000),
-        config.rolldb.immutable_overlap,
+        config.storage.wal_size.unwrap_or(1000),
+        config.storage.immutable_overlap,
     )
     .map_err(Error::storage)?;
 
@@ -67,4 +71,22 @@ pub fn setup_tracing(config: &LoggingConfig) -> miette::Result<()> {
         .init();
 
     Ok(())
+}
+
+pub type GenesisFiles = (ByronFile, ShelleyFile, AlonzoFile);
+
+pub fn open_genesis_files(config: &GenesisConfig) -> miette::Result<GenesisFiles> {
+    let byron_genesis = pallas::ledger::configs::byron::from_file(&config.byron_path)
+        .into_diagnostic()
+        .context("loading byron genesis config")?;
+
+    let shelley_genesis = pallas::ledger::configs::shelley::from_file(&config.shelley_path)
+        .into_diagnostic()
+        .context("loading shelley genesis config")?;
+
+    let alonzo_genesis = pallas::ledger::configs::alonzo::from_file(&config.alonzo_path)
+        .into_diagnostic()
+        .context("loading alonzo genesis config")?;
+
+    Ok((byron_genesis, shelley_genesis, alonzo_genesis))
 }

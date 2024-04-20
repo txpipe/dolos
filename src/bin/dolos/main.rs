@@ -34,19 +34,22 @@ struct Cli {
     #[command(subcommand)]
     command: Command,
 
+    #[arg(global = true)]
     config: Option<std::path::PathBuf>,
 }
 
 #[derive(Deserialize)]
-pub struct RolldbConfig {
+pub struct StorageConfig {
     path: Option<std::path::PathBuf>,
-    k_param: Option<u64>,
+    wal_size: Option<u64>,
     immutable_overlap: Option<u64>,
 }
 
 #[derive(Deserialize)]
-pub struct GenesisFileRef {
-    path: PathBuf,
+pub struct GenesisConfig {
+    byron_path: PathBuf,
+    shelley_path: PathBuf,
+    alonzo_path: PathBuf,
     // TODO: add hash of genesis for runtime verification
     // hash: String,
 }
@@ -66,15 +69,13 @@ pub struct LoggingConfig {
 
 #[derive(Deserialize)]
 pub struct Config {
-    pub rolldb: RolldbConfig,
     pub upstream: dolos::model::UpstreamConfig,
+    pub storage: StorageConfig,
+    pub genesis: GenesisConfig,
     pub sync: dolos::sync::Config,
     pub serve: dolos::serve::Config,
     pub submit: dolos::submit::Config,
     pub retries: Option<gasket::retries::Policy>,
-    pub byron: GenesisFileRef,
-    pub shelley: GenesisFileRef,
-    pub alonzo: GenesisFileRef,
     #[serde(default)]
     pub logging: LoggingConfig,
 }

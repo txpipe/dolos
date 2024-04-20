@@ -39,7 +39,9 @@ impl From<Transaction> for EraTxBody {
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Config {
-    prune_after_confirmations: u64,
+    prune_height: u64,
+    //validate_phase_1: bool,
+    //validate_phase_2: bool,
 }
 
 fn define_gasket_policy(config: &Option<gasket::retries::Policy>) -> gasket::runtime::Policy {
@@ -80,7 +82,7 @@ pub fn pipeline(
         0
     };
 
-    let mut mempool = mempool::Stage::new(mempool, config.prune_after_confirmations);
+    let mut mempool = mempool::Stage::new(mempool, config.prune_height);
 
     let mut propagator =
         propagator::Stage::new(vec![upstream.peer_address.clone()], upstream.network_magic);

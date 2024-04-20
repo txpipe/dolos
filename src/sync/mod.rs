@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use gasket::messaging::{RecvPort, SendPort};
-use pallas::ledger::configs::{byron, shelley};
+use pallas::ledger::configs::byron;
 use pallas::storage::rolldb::chain::Store as ChainStore;
 use pallas::storage::rolldb::wal::Store as WalStore;
 use serde::Deserialize;
@@ -18,9 +18,7 @@ pub mod roll;
 
 #[derive(Deserialize)]
 pub struct Config {
-    pub block_fetch_batch_size: Option<usize>,
-    pub network_id: u8,
-    pub phase1_validation_enabled: bool,
+    pub pull_batch_size: Option<usize>,
 }
 
 fn define_gasket_policy(config: &Option<gasket::retries::Policy>) -> gasket::runtime::Policy {
@@ -51,7 +49,6 @@ pub fn pipeline(
     chain: ChainStore,
     ledger: LedgerStore,
     byron: byron::GenesisFile,
-    _shelley: shelley::GenesisFile,
     retries: &Option<gasket::retries::Policy>,
 ) -> Result<Vec<gasket::runtime::Tether>, Error> {
     let pull_cursor = wal
@@ -63,7 +60,7 @@ pub fn pipeline(
     let mut pull = pull::Stage::new(
         upstream.peer_address.clone(),
         upstream.network_magic,
-        config.block_fetch_batch_size.unwrap_or(50),
+        config.pull_batch_size.unwrap_or(50),
         pull_cursor,
     );
 

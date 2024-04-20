@@ -1,12 +1,6 @@
-use itertools::Itertools;
 use miette::{Context, IntoDiagnostic};
 use pallas::ledger::traverse::MultiEraBlock;
 use tracing::debug;
-
-use dolos::{
-    ledger::{ChainPoint, LedgerDelta},
-    prelude::*,
-};
 
 use crate::common::open_data_stores;
 
@@ -19,10 +13,9 @@ pub fn run(config: &crate::Config, _args: &Args) -> miette::Result<()> {
     if ledger.is_empty() {
         debug!("importing genesis");
 
-        let byron_genesis =
-            pallas::ledger::configs::byron::from_file(&config.byron.path).map_err(Error::config)?;
+        let (byron, _, _) = crate::common::open_genesis_files(&config.genesis)?;
 
-        let delta = dolos::ledger::compute_origin_delta(&byron_genesis);
+        let delta = dolos::ledger::compute_origin_delta(&byron);
 
         ledger
             .apply(&[delta])
