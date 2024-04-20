@@ -68,11 +68,7 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
             <Box<Cow<'_, pallas::ledger::primitives::byron::TxIn>>>::from(Cow::Owned(txin)),
         );
 
-        let era = Era::try_from(body.0)
-            .into_diagnostic()
-            .context("parsing era")?;
-
-        let value = MultiEraOutput::decode(era, &body.1)
+        let value = MultiEraOutput::decode(body.0, &body.1)
             .into_diagnostic()
             .context("decoding utxo")?;
 
@@ -87,8 +83,7 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
     let updates = updates
         .iter()
         .map(|PParamsBody(era, cbor)| -> miette::Result<MultiEraUpdate> {
-            let era = Era::try_from(*era).into_diagnostic()?;
-            MultiEraUpdate::decode_for_era(era, cbor).into_diagnostic()
+            MultiEraUpdate::decode_for_era(*era, cbor).into_diagnostic()
         })
         .try_collect()?;
 
