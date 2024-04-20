@@ -92,7 +92,7 @@ where
         .collect_vec();
 
     let mut resolved_inputs = store.get_utxos(to_fetch)?;
-    resolved_inputs.extend(consumed_same_block.into_iter());
+    resolved_inputs.extend(consumed_same_block);
 
     // TODO: include reference scripts and collateral
 
@@ -156,7 +156,7 @@ pub fn compute_delta(
         if let Some(update) = tx.update() {
             delta
                 .new_pparams
-                .push(PParamsBody(tx.era().into(), update.encode()));
+                .push(PParamsBody(tx.era(), update.encode()));
         }
     }
 
@@ -164,14 +164,14 @@ pub fn compute_delta(
     if let Some(update) = block.update() {
         delta
             .new_pparams
-            .push(PParamsBody(block.era().into(), update.encode()));
+            .push(PParamsBody(block.era(), update.encode()));
     }
 
     Ok(delta)
 }
 
-pub fn compute_undo_delta<'a>(
-    block: &'a MultiEraBlock,
+pub fn compute_undo_delta(
+    block: &MultiEraBlock,
     mut context: LedgerSlice,
 ) -> Result<LedgerDelta, BrokenInvariant> {
     let mut delta = LedgerDelta {

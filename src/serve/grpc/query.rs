@@ -73,14 +73,11 @@ impl u5c::query::query_service_server::QueryService for QueryServiceImpl {
         &self,
         request: Request<u5c::query::ReadParamsRequest>,
     ) -> Result<Response<u5c::query::ReadParamsResponse>, Status> {
-        let message = request.into_inner();
+        let _message = request.into_inner();
 
         info!("received new grpc query");
 
-        Ok(Response::new(u5c::query::ReadParamsResponse {
-            values: todo!(),
-            ledger_tip: todo!(),
-        }))
+        todo!()
     }
 
     async fn read_utxos(
@@ -94,7 +91,7 @@ impl u5c::query::query_service_server::QueryService for QueryServiceImpl {
         let keys = message
             .keys
             .into_iter()
-            .map(|x| TxoRef(bytes_to_hash(&x.hash), x.index as u32));
+            .map(|x| TxoRef(bytes_to_hash(&x.hash), x.index));
 
         let utxos = self
             .ledger
@@ -114,7 +111,6 @@ impl u5c::query::query_service_server::QueryService for QueryServiceImpl {
             .map(|p| u5c::query::ChainPoint {
                 slot: p.0,
                 hash: p.1.to_vec().into(),
-                ..Default::default()
             });
 
         Ok(Response::new(u5c::query::ReadUtxosResponse {
@@ -163,7 +159,6 @@ impl u5c::query::query_service_server::QueryService for QueryServiceImpl {
             .map(|p| u5c::query::ChainPoint {
                 slot: p.0,
                 hash: p.1.to_vec().into(),
-                ..Default::default()
             });
 
         Ok(Response::new(u5c::query::SearchUtxosResponse {
@@ -173,7 +168,7 @@ impl u5c::query::query_service_server::QueryService for QueryServiceImpl {
     }
     async fn stream_utxos(
         &self,
-        request: Request<u5c::query::ReadUtxosRequest>,
+        _request: Request<u5c::query::ReadUtxosRequest>,
     ) -> Result<Response<Self::StreamUtxosStream>, Status> {
         todo!()
     }

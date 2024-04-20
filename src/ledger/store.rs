@@ -113,7 +113,7 @@ impl LedgerTable for ByAddressIndex {
             // TODO: decoding here is very inefficient
             let body = MultiEraOutput::try_from(body).unwrap();
 
-            if let Some(address) = body.address().ok() {
+            if let Ok(address) = body.address() {
                 let k = address.to_vec();
                 let v: (&[u8; 32], u32) = (&utxo.0, utxo.1);
                 table.insert(k.as_slice(), v)?;
@@ -124,7 +124,7 @@ impl LedgerTable for ByAddressIndex {
             // TODO: decoding here is very inefficient
             let body = MultiEraOutput::try_from(body).unwrap();
 
-            if let Some(address) = body.address().ok() {
+            if let Ok(address) = body.address() {
                 let k = address.to_vec();
                 let v: (&[u8; 32], u32) = (&stxi.0, stxi.1);
                 table.remove(k.as_slice(), v)?;
@@ -135,7 +135,7 @@ impl LedgerTable for ByAddressIndex {
             // TODO: decoding here is very inefficient
             let body = MultiEraOutput::try_from(body).unwrap();
 
-            if let Some(address) = body.address().ok() {
+            if let Ok(address) = body.address() {
                 let k = address.to_vec();
                 let v: (&[u8; 32], u32) = (&stxi.0, stxi.1);
                 table.remove(k.as_slice(), v)?;
@@ -248,7 +248,7 @@ impl LedgerStore {
         for item in table.get(address)? {
             let item = item?;
             let (hash, idx) = item.value();
-            out.insert(TxoRef(hash.clone().into(), idx));
+            out.insert(TxoRef((*hash).into(), idx));
         }
 
         Ok(out)
