@@ -34,4 +34,7 @@ pub enum RollEvent {
 pub struct UpstreamConfig {
     pub peer_address: String,
     pub network_magic: u64,
+
+    #[serde(default)]
+    pub is_testnet: bool,
 }

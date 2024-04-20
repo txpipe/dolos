@@ -55,17 +55,7 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
         .into_diagnostic()
         .context("resolving utxo")?;
 
-    let byron_genesis = pallas::ledger::configs::byron::from_file(&config.byron.path)
-        .into_diagnostic()
-        .context("loading byron genesis")?;
-
-    let shelley_genesis = pallas::ledger::configs::shelley::from_file(&config.shelley.path)
-        .into_diagnostic()
-        .context("loading shelley genesis")?;
-
-    let alonzo_genesis = pallas::ledger::configs::alonzo::from_file(&config.alonzo.path)
-        .into_diagnostic()
-        .context("loading alonzo genesis")?;
+    let (byron, shelley, alonzo) = crate::common::open_genesis_files(&config.genesis)?;
 
     let mut utxos2 = UTxOs::new();
 
@@ -104,9 +94,9 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
 
     let pparams = dolos::ledger::pparams::fold_pparams(
         dolos::ledger::pparams::Genesis {
-            byron: &byron_genesis,
-            shelley: &shelley_genesis,
-            alonzo: &alonzo_genesis,
+            byron: &byron,
+            shelley: &shelley,
+            alonzo: &alonzo,
         },
         updates,
         args.epoch,

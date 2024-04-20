@@ -1,23 +1,22 @@
 [upstream]
 peer_address = "preview-node.world.dev.cardano.org:30002"
 network_magic = 2
+is_testnet = true
 
-[rolldb]
+[storage]
 path = "./tmp/rolldb"
 k_param = 1000
 
 [sync]
-network_id = 0
-phase1_validation_enabled = false
+validate_phase1 = false
 
 [submit]
-prune_after_confirmations = false
+prune_height = false
 
-[byron]
-path = "./byron.json"
-
-[shelley]
-path = "./shelley.json"
+[genesis]
+byron_path = "./byron.json"
+shelley_path = "./shelley.json"
+alonzo_path = "./alonzo.json"
 
 [serve.grpc]
 listen_address = "[::]:50051"

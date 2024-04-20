@@ -1,15 +1,11 @@
 use crate::ledger::{store::LedgerStore, EraCbor, TxoRef};
 use futures_core::Stream;
 use itertools::Itertools;
-use itertools::*;
 use pallas::crypto::hash::Hash;
 use pallas::interop::utxorpc::spec as u5c;
 use pallas::ledger::traverse::MultiEraOutput;
-use std::{
-    collections::{HashMap, HashSet},
-    pin::Pin,
-};
-use tonic::{body, Request, Response, Status};
+use std::{collections::HashSet, pin::Pin};
+use tonic::{Request, Response, Status};
 use tracing::info;
 
 pub struct QueryServiceImpl {
