@@ -5,13 +5,13 @@ is_testnet = true
 
 [storage]
 path = "./tmp/rolldb"
-k_param = 1000
+wal_size = 1000
 
 [sync]
-validate_phase1 = false
+pull_batch_size = 200
 
 [submit]
-prune_height = false
+prune_height = 10000
 
 [genesis]
 byron_path = "./byron.json"
