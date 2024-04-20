@@ -5,8 +5,8 @@ export function Hero() {
         <div className="flex justify-center">
           <img src="/logo.png" alt="Dolos logo" className="mb-4" />
         </div>
-        <h1 className="flex flex-col flex-wrap font-bold text-4xl md:text-6xl lg:text-7xl dark:text-gray-200">
-          Cardano node in Rust
+        <h1 className="flex flex-col flex-wrap font-bold text-4xl md:text-5xl lg:text-6xl dark:text-gray-200">
+          Dolos: A Cardano Data Node
         </h1>
       </div>
 
