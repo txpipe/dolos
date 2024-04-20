@@ -10,14 +10,7 @@ pub async fn run(config: super::Config, _args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging)?;
 
     let (wal, chain, ledger) = crate::common::open_data_stores(&config)?;
-
-    let byron_genesis = pallas::ledger::configs::byron::from_file(&config.byron.path)
-        .into_diagnostic()
-        .context("loading byron genesis config")?;
-
-    let shelley_genesis = pallas::ledger::configs::shelley::from_file(&config.shelley.path)
-        .into_diagnostic()
-        .context("loading shelley genesis config")?;
+    let (byron, _, _) = crate::common::open_genesis_files(&config.genesis)?;
 
     let (txs_out, txs_in) = gasket::messaging::tokio::mpsc_channel(64);
 
@@ -38,8 +31,7 @@ pub async fn run(config: super::Config, _args: &Args) -> miette::Result<()> {
         wal.clone(),
         chain,
         ledger,
-        byron_genesis,
-        shelley_genesis,
+        byron,
         &config.retries,
     )
     .into_diagnostic()

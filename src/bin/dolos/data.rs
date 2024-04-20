@@ -1,13 +1,8 @@
+use miette::IntoDiagnostic;
+use pallas::{ledger::traverse::MultiEraBlock, storage::rolldb::chain};
 use std::path::Path;
 
-use dolos::ledger::{pparams::Genesis, ChainPoint, PParamsBody};
-use itertools::Itertools;
-use miette::IntoDiagnostic;
-
-use pallas::{
-    ledger::traverse::{Era, MultiEraBlock, MultiEraUpdate},
-    storage::rolldb::chain,
-};
+use dolos::ledger::ChainPoint;
 
 #[allow(dead_code)]
 fn dump_txs(chain: &chain::Store) -> miette::Result<()> {
