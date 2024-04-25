@@ -141,6 +141,17 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
         bail!("data stores must be empty to execute bootstrap");
     }
 
+    let target_directory = Path::new(&args.download_dir);
+
+    if !target_directory.exists() {
+        std::fs::create_dir_all(target_directory)
+            .map_err(|err| miette::miette!(err.to_string()))
+            .context(format!(
+                "Failed to create directory: {}",
+                target_directory.display()
+            ))?;
+    }
+
     if !args.skip_download {
         tokio::runtime::Runtime::new()
             .unwrap()
