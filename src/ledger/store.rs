@@ -156,6 +156,20 @@ impl LedgerStore {
         Ok(Self(Arc::new(inner)))
     }
 
+    pub fn close(self) -> Result<(), redb::Error> {
+        // Check if there are any ongoing write transactions that need to be handled
+        let wx = match self.0.begin_write() {
+            Ok(wx) => wx,
+            Err(e) => return Err(e.into()),
+        };
+
+        wx.commit()?;
+
+        drop(self.0);
+
+        Ok(())
+    }
+
     pub fn is_empty(&self) -> bool {
         match self.cursor() {
             Ok(x) => x.is_none(),

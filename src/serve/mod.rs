@@ -3,7 +3,8 @@ use std::sync::Arc;
 use futures_util::future::join_all;
 use pallas::storage::rolldb::{chain, wal};
 use serde::{Deserialize, Serialize};
-use tracing::info;
+use tokio_util::sync::CancellationToken;
+use tracing::{error, info, warn};
 
 use crate::{ledger::store::LedgerStore, prelude::*};
 
@@ -27,24 +28,46 @@ pub async fn serve(
     ledger: LedgerStore,
     mempool: Arc<crate::submit::MempoolState>,
     txs_out: gasket::messaging::tokio::ChannelSendAdapter<Vec<crate::submit::Transaction>>,
+    cancellation_token: CancellationToken,
 ) -> Result<(), Error> {
     let mut tasks = vec![];
 
     if let Some(cfg) = config.grpc {
         info!("found gRPC config");
-        tasks.push(tokio::spawn(grpc::serve(
-            cfg,
-            wal.clone(),
-            chain.clone(),
-            ledger,
-            mempool,
-            txs_out,
-        )));
+
+        let token_clone = cancellation_token.clone();
+        let chain_clone = chain.clone();
+
+        tasks.push(tokio::spawn(async move {
+            token_clone.cancelled().await;
+            warn!("gRPC service cancelled");
+        }));
+
+        tasks.push(tokio::spawn(async move {
+            if let Err(e) =
+                grpc::serve(cfg, wal.clone(), chain_clone, ledger, mempool, txs_out).await
+            {
+                error!("gRPC service failed: {:?}", e);
+            }
+        }));
     }
 
     if let Some(cfg) = config.ouroboros {
         info!("found Ouroboros config");
-        tasks.push(tokio::spawn(ouroboros::serve(cfg, chain.clone())));
+
+        let token_clone = cancellation_token.clone();
+        let chain_clone = chain.clone();
+
+        tasks.push(tokio::spawn(async move {
+            token_clone.cancelled().await;
+            warn!("Ouroboros service cancelled");
+        }));
+
+        tasks.push(tokio::spawn(async move {
+            if let Err(e) = ouroboros::serve(cfg, chain_clone).await {
+                error!("Ouroboros service failed: {:?}", e);
+            }
+        }));
     }
 
     // TODO: we should stop if any of the tasks breaks
