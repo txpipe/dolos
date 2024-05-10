@@ -9,7 +9,7 @@ use pallas::{
         traverse::MultiEraUpdate,
     },
 };
-use tracing::warn;
+use tracing::{trace, warn};
 
 //mod test_data;
 
@@ -250,6 +250,7 @@ pub fn fold_pparams(
         }
 
         for update in updates.iter().filter(|e| e.epoch() == epoch) {
+            trace!(epoch, "Applying update");
             pparams = apply_param_update(pparams, update);
         }
     }
