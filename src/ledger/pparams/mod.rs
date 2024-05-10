@@ -11,8 +11,6 @@ use pallas::{
 };
 use tracing::{trace, warn};
 
-//mod test_data;
-
 pub struct Genesis<'a> {
     pub byron: &'a byron::GenesisFile,
     pub shelley: &'a shelley::GenesisFile,
@@ -21,7 +19,7 @@ pub struct Genesis<'a> {
 
 fn bootstrap_byron_pparams(byron: &byron::GenesisFile) -> ByronProtParams {
     ByronProtParams {
-        block_version: (1, 0, 0),
+        block_version: (0, 0, 0),
         summand: byron.block_version_data.tx_fee_policy.summand,
         multiplier: byron.block_version_data.tx_fee_policy.multiplier,
         max_tx_size: byron.block_version_data.max_tx_size,
@@ -214,13 +212,13 @@ fn advance_hardfork(
     next_protocol: usize,
 ) -> MultiEraProtocolParameters {
     match current {
+        MultiEraProtocolParameters::Byron(current) if next_protocol < 2 => {
+            MultiEraProtocolParameters::Byron(current)
+        }
         MultiEraProtocolParameters::Byron(current) if next_protocol == 2 => {
             MultiEraProtocolParameters::Shelley(bootstrap_shelley_pparams(current, genesis.shelley))
         }
-        MultiEraProtocolParameters::Shelley(current) if next_protocol == 3 => {
-            MultiEraProtocolParameters::Shelley(current)
-        }
-        MultiEraProtocolParameters::Shelley(current) if next_protocol == 4 => {
+        MultiEraProtocolParameters::Shelley(current) if next_protocol < 5 => {
             MultiEraProtocolParameters::Shelley(current)
         }
         MultiEraProtocolParameters::Shelley(current) if next_protocol == 5 => {
@@ -240,7 +238,7 @@ pub fn fold_pparams(
     for_epoch: u64,
 ) -> MultiEraProtocolParameters {
     let mut pparams = MultiEraProtocolParameters::Byron(bootstrap_byron_pparams(genesis.byron));
-    let mut last_protocol = 1;
+    let mut last_protocol = 0;
 
     for epoch in 0..for_epoch {
         for next_protocol in last_protocol + 1..=pparams.protocol_version() {
