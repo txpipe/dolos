@@ -212,22 +212,46 @@ fn advance_hardfork(
     next_protocol: usize,
 ) -> MultiEraProtocolParameters {
     match current {
-        MultiEraProtocolParameters::Byron(current) if next_protocol < 2 => {
+        // Source: https://github.com/cardano-foundation/CIPs/blob/master/CIP-0059/feature-table.md
+        // NOTE: part of the confusion here is that there are two versioning schemes that can be easily conflated:
+        // - The protocol version, negotiated in the networking layer
+        // - The protocol version broadcast in the block header
+        // Generally, these refer to the latter; the update proposals jump from 2 to 5, because the node team
+        // decided it would be helpful to have these in sync.
+
+        // Protocol starts at version 0;
+        // There was one intra-era "hard fork" in byron (even though they weren't called that yet)
+        MultiEraProtocolParameters::Byron(current) if next_protocol == 1 => {
             MultiEraProtocolParameters::Byron(current)
         }
+        // Protocol version 2 transitions from Byron to Shelley
         MultiEraProtocolParameters::Byron(current) if next_protocol == 2 => {
             MultiEraProtocolParameters::Shelley(bootstrap_shelley_pparams(current, genesis.shelley))
         }
+        // Two intra-era hard forks, named Allegra (3) and Mary (4); we don't have separate types for these eras
         MultiEraProtocolParameters::Shelley(current) if next_protocol < 5 => {
             MultiEraProtocolParameters::Shelley(current)
         }
+        // Protocol version 5 transitions from Shelley (Mary, technically) to Alonzo
         MultiEraProtocolParameters::Shelley(current) if next_protocol == 5 => {
             MultiEraProtocolParameters::Alonzo(bootstrap_alonzo_pparams(current, genesis.alonzo))
         }
+        // One intra-era hard-fork in alonzo at protocol version 6
         MultiEraProtocolParameters::Alonzo(current) if next_protocol == 6 => {
+            MultiEraProtocolParameters::Alonzo(current)
+        }
+        // Protocol version 7 transitions from Alonzo to Babbage
+        MultiEraProtocolParameters::Alonzo(current) if next_protocol == 7 => {
             MultiEraProtocolParameters::Babbage(bootstrap_babbage_pparams(current))
         }
-        MultiEraProtocolParameters::Babbage(_) => todo!("conway pparams handling pending"),
+        // One intra-era hard-fork in babbage at protocol version 8
+        MultiEraProtocolParameters::Babbage(current) if next_protocol == 8 => {
+            MultiEraProtocolParameters::Babbage(current)
+        }
+        // Protocol version 9 will transition from Babbage to Conway; not yet implemented
+        MultiEraProtocolParameters::Babbage(_) => {
+            todo!("conway pparams handling pending {}", next_protocol)
+        }
         _ => unimplemented!("don't know how to handle hardfork"),
     }
 }
