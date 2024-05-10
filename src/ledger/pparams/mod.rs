@@ -279,3 +279,88 @@ pub fn fold_pparams(
 
     pparams
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{io::Read, path::Path};
+
+    use itertools::Itertools;
+    use pallas::ledger::traverse::{MultiEraBlock, MultiEraTx};
+
+    use super::*;
+
+    fn load_json<T, P: AsRef<Path>>(path: P) -> T
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        let file = std::fs::File::open(path).unwrap();
+        serde_json::from_reader(file).unwrap()
+    }
+
+    fn test_env_fold(env: &str) {
+        let test_data = format!("src/ledger/pparams/test_data/{env}");
+
+        // Load each genesis file
+        let genesis = Genesis {
+            byron: &load_json(format!("{test_data}/genesis/byron_genesis.json")),
+            shelley: &load_json(format!("{test_data}/genesis/shelley_genesis.json")),
+            alonzo: &load_json(format!("{test_data}/genesis/alonzo_genesis.json")),
+        };
+
+        // Then load each mainnet example update proposal as buffers
+        let files: Vec<_> = std::fs::read_dir(format!("{test_data}/update_proposal_blocks/"))
+            .unwrap()
+            .map(|x| std::fs::File::open(x.unwrap().path()).unwrap())
+            .map(|mut x| {
+                let mut buf = vec![];
+                x.read_to_end(&mut buf).unwrap();
+                buf
+            })
+            .collect();
+
+        // Decode those buffers as blocks, and sort them by slot, so we can process them in order
+        let blocks: Vec<_> = files
+            .iter()
+            .map(|x| MultiEraBlock::decode(&x).unwrap())
+            .sorted_by_key(|b| b.slot())
+            .collect();
+
+        let block_data: Vec<_> = blocks.iter().map(|b| (b.update(), b.txs())).collect();
+
+        let update_pairs: Vec<_> = block_data
+            .iter()
+            .map(|(b, txs)| (b, txs.iter().filter_map(MultiEraTx::update)))
+            .collect();
+
+        let chained_updates: Vec<_> = update_pairs
+            .into_iter()
+            .flat_map(|(b, txs)| {
+                let b = b.iter().cloned();
+                txs.chain(b)
+            })
+            .collect();
+
+        // Now, for each epoch we've recorded protocol parameters for,
+        // test if we get the right value when folding
+        for file in std::fs::read_dir(format!("{test_data}/expected_params/")).unwrap() {
+            let filename = file.unwrap().path();
+            println!("Comparing to {:?}", filename);
+            let epoch = filename
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap();
+            // TODO: implement serialize/deserialize, and get full protocol param json files
+            let expected = load_json::<usize, _>(filename);
+            let actual = fold_pparams(&genesis, &chained_updates, epoch);
+            assert_eq!(expected, actual.protocol_version())
+
+            //assert_eq!(expected, actual)
+        }
+    }
+
+    #[test]
+    fn test_mainnet_fold() {
+        test_env_fold("mainnet")
+    }
+}
