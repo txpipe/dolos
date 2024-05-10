@@ -88,12 +88,12 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
         .try_collect()?;
 
     let pparams = dolos::ledger::pparams::fold_pparams(
-        dolos::ledger::pparams::Genesis {
+        &dolos::ledger::pparams::Genesis {
             byron: &byron,
             shelley: &shelley,
             alonzo: &alonzo,
         },
-        updates,
+        &updates,
         args.epoch,
     );
 

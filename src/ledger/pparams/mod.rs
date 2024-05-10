@@ -235,8 +235,8 @@ fn advance_hardfork(
 }
 
 pub fn fold_pparams(
-    genesis: Genesis,
-    updates: Vec<MultiEraUpdate>,
+    genesis: &Genesis,
+    updates: &Vec<MultiEraUpdate>,
     for_epoch: u64,
 ) -> MultiEraProtocolParameters {
     let mut pparams = MultiEraProtocolParameters::Byron(bootstrap_byron_pparams(genesis.byron));
