@@ -54,6 +54,12 @@ pub struct GenesisConfig {
     // hash: String,
 }
 
+#[derive(Deserialize)]
+pub struct MithrilConfig {
+    aggregator: String,
+    genesis_key: String,
+}
+
 #[serde_as]
 #[derive(Deserialize, Default, Debug)]
 pub struct LoggingConfig {
@@ -76,6 +82,7 @@ pub struct Config {
     pub serve: dolos::serve::Config,
     pub submit: dolos::submit::Config,
     pub retries: Option<gasket::retries::Policy>,
+    pub mithril: Option<MithrilConfig>,
     #[serde(default)]
     pub logging: LoggingConfig,
 }
