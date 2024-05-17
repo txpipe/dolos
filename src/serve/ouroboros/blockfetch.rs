@@ -39,7 +39,7 @@ pub async fn handle_blockfetch(
                 if let Some(mut iter) = chain.read_chain_range(from, to).map_err(Error::storage)? {
                     protocol.send_start_batch().await.map_err(Error::server)?;
 
-                    while let Some(point) = iter.next() {
+                    for point in iter.by_ref() {
                         let (_, hash) = point.map_err(Error::storage)?;
 
                         let block_bytes = match chain.get_block(hash).map_err(Error::storage)? {

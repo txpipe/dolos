@@ -114,15 +114,14 @@ impl N2NChainSyncHandler {
             .await
             .map_err(Error::server)?
         {
-            Some(ClientRequest::Intersect(points)) => return self.handle_intersect(points).await,
+            Some(ClientRequest::Intersect(points)) => self.handle_intersect(points).await,
             Some(ClientRequest::RequestNext) => {
-                return self
-                    .handle_crawling(self.intersect.as_ref().map(|x| x.slot_or_default()))
+                self.handle_crawling(self.intersect.as_ref().map(|x| x.slot_or_default()))
                     .await
             }
             None => {
                 debug!("client ended protocol");
-                return Ok(());
+                Ok(())
             }
         }
     }

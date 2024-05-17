@@ -18,8 +18,8 @@ fn slot_to_hash(slot: u64) -> pallas::crypto::hash::Hash<32> {
 
 fn setup_dummy_db() -> (chain::Store, wal::Store) {
     let path = tempfile::tempdir().unwrap().into_path();
-    let mut chain = chain::Store::open(&path.join("chain")).unwrap();
-    let mut wal = wal::Store::open(&path.join("wal"), 100, Some(20)).unwrap();
+    let mut chain = chain::Store::open(path.join("chain")).unwrap();
+    let mut wal = wal::Store::open(path.join("wal"), 100, Some(20)).unwrap();
 
     for slot in 0..300 {
         let hash = slot_to_hash(slot);
