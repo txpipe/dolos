@@ -1,4 +1,5 @@
 use gasket::messaging::{RecvPort, SendPort};
+use pallas::ledger::configs::byron::GenesisFile;
 use serde::Deserialize;
 
 use crate::prelude::*;
@@ -18,6 +19,7 @@ pub fn pipeline(
     config: &Config,
     rolldb: RollDB,
     applydb: ApplyDB,
+    genesis: GenesisFile,
     policy: &gasket::runtime::Policy,
 ) -> Result<gasket::daemon::Daemon, Error> {
     let pull_cursor = rolldb
@@ -36,7 +38,7 @@ pub fn pipeline(
 
     let mut roll = roll::Stage::new(rolldb, roll_cursor);
 
-    let mut apply = apply::Stage::new(applydb);
+    let mut apply = apply::Stage::new(applydb, genesis);
 
     let (to_roll, from_pull) = gasket::messaging::tokio::mpsc_channel(50);
     pull.downstream.connect(to_roll);

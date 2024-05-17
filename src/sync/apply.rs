@@ -1,4 +1,5 @@
 use gasket::framework::*;
+use pallas::ledger::configs::byron::GenesisFile;
 use tracing::{info, instrument, warn};
 
 use crate::prelude::*;
@@ -10,6 +11,7 @@ pub type UpstreamPort = gasket::messaging::tokio::InputPort<RollEvent>;
 #[stage(name = "apply", unit = "RollEvent", worker = "Worker")]
 pub struct Stage {
     applydb: ApplyDB,
+    genesis: GenesisFile,
 
     pub upstream: UpstreamPort,
 
@@ -21,9 +23,10 @@ pub struct Stage {
 }
 
 impl Stage {
-    pub fn new(applydb: ApplyDB) -> Self {
+    pub fn new(applydb: ApplyDB, genesis: GenesisFile) -> Self {
         Self {
             applydb,
+            genesis,
             upstream: Default::default(),
             // downstream: Default::default(),
             block_count: Default::default(),
@@ -33,6 +36,17 @@ impl Stage {
 }
 
 impl Stage {
+    #[instrument(skip_all)]
+    fn apply_origin(&mut self) -> Result<(), WorkerError> {
+        info!("inserting genesis UTxOs");
+
+        self.applydb
+            .insert_genesis_utxos(&self.genesis)
+            .or_panic()?;
+
+        Ok(())
+    }
+
     #[instrument(skip_all)]
     fn apply_block(&mut self, cbor: &[u8]) -> Result<(), WorkerError> {
         let block = pallas::ledger::traverse::MultiEraBlock::decode(cbor).or_panic()?;
@@ -45,15 +59,6 @@ impl Stage {
             for consumed in tx.consumes() {
                 batch
                     .spend_utxo(*consumed.hash(), consumed.index())
-                    // TODO: since we don't have genesis utxos, it's reasonable to get missed hits.
-                    // This needs to go away once the genesis block processing is implemented.
-                    .or_else(|x| match x {
-                        crate::storage::kvtable::Error::NotFound => {
-                            warn!("skipping missing utxo");
-                            Ok(())
-                        }
-                        x => Err(x),
-                    })
                     .or_panic()?;
             }
 
@@ -126,6 +131,7 @@ impl gasket::framework::Worker<Stage> for Worker {
         match unit {
             RollEvent::Apply(_, _, cbor) => stage.apply_block(cbor)?,
             RollEvent::Undo(_, _, cbor) => stage.undo_block(cbor)?,
+            RollEvent::Origin => stage.apply_origin()?,
             RollEvent::Reset(_) => todo!(),
         };
 

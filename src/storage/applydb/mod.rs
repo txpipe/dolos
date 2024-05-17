@@ -1,6 +1,9 @@
+pub mod genesis;
+
 use pallas::crypto::hash::Hash;
 use serde::{Deserialize, Serialize};
 use std::{path::Path, sync::Arc};
+use tracing::{error, info};
 
 use rocksdb::{Options, WriteBatch, DB};
 
@@ -53,11 +56,19 @@ impl<'a> BlockWriteBatch<'a> {
         )
     }
 
-    pub fn spend_utxo(&mut self, tx: TxHash, output: OutputIndex) -> Result<(), Error> {
-        let k = DBSerde(UtxoRef(tx, output));
-        let v = UtxoKV::get_by_key(self.0, k.clone())?.ok_or(Error::NotFound)?;
+    pub fn spend_utxo(&mut self, tx: TxHash, idx: OutputIndex) -> Result<(), Error> {
+        let k = DBSerde(UtxoRef(tx, idx));
+        //let v = UtxoKV::get_by_key(self.0, k.clone())?.ok_or(Error::NotFound)?;
+
+        let v = UtxoKV::get_by_key(self.0, k.clone())?.ok_or_else(|| {
+            error!(%tx, idx, "utxo not found");
+            Error::NotFound
+        })?;
+
         StxiKV::stage_upsert(self.0, k.clone(), v, &mut self.2);
         UtxoKV::stage_delete(self.0, k, &mut self.2);
+
+        info!(%tx, idx, "spending utxo");
 
         Ok(())
     }
@@ -117,6 +128,10 @@ impl ApplyDB {
         Ok(Self { db: Arc::new(db) })
     }
 
+    pub fn is_empty(&self) -> bool {
+        SlotKV::is_empty(&self.db)
+    }
+
     pub fn get_slot_data(&self, slot: BlockSlot) -> Result<Option<SlotData>, Error> {
         let v = SlotKV::get_by_key(&self.db, DBInt(slot))?;
         let out = v.map(|d| d.0);
@@ -168,7 +183,7 @@ impl ApplyDB {
 mod tests {
     use super::*;
 
-    fn with_tmp_db(op: fn(db: ApplyDB) -> ()) {
+    pub fn with_tmp_db(op: fn(db: ApplyDB) -> ()) {
         let path = tempfile::tempdir().unwrap().into_path();
         let db = ApplyDB::open(path.clone()).unwrap();
 
