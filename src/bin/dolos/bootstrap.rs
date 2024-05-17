@@ -1,26 +1,27 @@
-use std::{path::Path, sync::Arc};
-
+use futures_util::TryFutureExt;
+use indicatif::{MultiProgress, ProgressBar, ProgressState, ProgressStyle};
 use miette::{bail, Context, IntoDiagnostic};
-use mithril_client::{ClientBuilder, MessageBuilder};
+use mithril_client::{
+    ClientBuilder, MessageBuilder, MithrilCertificate, MithrilError, MithrilResult,
+};
 use pallas::ledger::traverse::MultiEraBlock;
-use tracing::{debug, info, trace, warn};
+use std::{fmt::Write, path::Path, sync::Arc};
+use tracing::{debug, info, warn};
 
-use crate::common::Stores;
+use crate::{common::Stores, MithrilConfig};
 
 #[derive(Debug, clap::Args)]
 pub struct Args {
-    #[arg(long)]
-    mithril_aggregator: String,
-
-    #[arg(long)]
-    mithril_genesis_key: String,
-
-    #[arg(long)]
+    #[arg(long, default_value = "./snapshot")]
     download_dir: String,
 
     /// Skip the bootstrap if there's already data in the stores
     #[arg(long, action)]
     skip_if_not_empty: bool,
+
+    /// Skip the Mithril certificate validation
+    #[arg(long, action)]
+    skip_validation: bool,
 
     /// Delete any existing data and continue with bootstrap
     #[arg(long, short, action)]
@@ -35,25 +36,57 @@ pub struct Args {
     retain_snapshot: bool,
 }
 
-struct Feedback {}
+struct Feedback {
+    multi: MultiProgress,
+    global_pb: ProgressBar,
+    download_pb: ProgressBar,
+}
+
+impl Default for Feedback {
+    fn default() -> Self {
+        let multi = MultiProgress::new();
+
+        let global_pb = ProgressBar::new_spinner();
+        let global_pb = multi.add(global_pb);
+        global_pb.set_style(
+            ProgressStyle::with_template("{prefix:.bold.dim} {spinner} {wide_msg}")
+                .unwrap()
+                .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈ "),
+        );
+
+        let download_pb = ProgressBar::new(100);
+        let download_pb = multi.add(download_pb);
+        download_pb.set_style(ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({eta})")
+            .unwrap()
+            .with_key("eta", |state: &ProgressState, w: &mut dyn Write| write!(w, "{:.1}s", state.eta().as_secs_f64()).unwrap())
+            .progress_chars("#>-"));
+
+        Self {
+            multi,
+            global_pb,
+            download_pb,
+        }
+    }
+}
 
 #[async_trait::async_trait]
 impl mithril_client::feedback::FeedbackReceiver for Feedback {
     async fn handle_event(&self, event: mithril_client::feedback::MithrilEvent) {
         match event {
             mithril_client::feedback::MithrilEvent::SnapshotDownloadStarted { .. } => {
-                info!("snapshot download started")
+                self.global_pb.set_message("snapshot download started")
             }
             mithril_client::feedback::MithrilEvent::SnapshotDownloadProgress {
                 downloaded_bytes,
                 size,
                 ..
             } => {
-                let percent = downloaded_bytes as f64 / size as f64;
-                debug!(percent, "snapshot download progress");
+                self.download_pb.set_length(size);
+                self.download_pb.set_position(downloaded_bytes);
+                self.global_pb.set_message("snapshot download progress");
             }
             mithril_client::feedback::MithrilEvent::SnapshotDownloadCompleted { .. } => {
-                trace!("snapshot download completed");
+                self.global_pb.set_message("snapshot download completed");
             }
             mithril_client::feedback::MithrilEvent::CertificateChainValidationStarted {
                 ..
@@ -62,7 +95,8 @@ impl mithril_client::feedback::FeedbackReceiver for Feedback {
                 certificate_chain_validation_id: id,
                 certificate_hash: hash,
             } => {
-                info!(id, hash, "certificate validated")
+                self.global_pb
+                    .set_message(format!("certificate validated {id}: {hash}"));
             }
             mithril_client::feedback::MithrilEvent::CertificateChainValidated { .. } => {
                 info!("certificate chain validated")
@@ -71,22 +105,28 @@ impl mithril_client::feedback::FeedbackReceiver for Feedback {
     }
 }
 
-async fn fetch_and_validate_snapshot(args: &Args) -> Result<(), mithril_client::MithrilError> {
-    let feedback = Arc::new(Feedback {});
-
-    let client = ClientBuilder::aggregator(&args.mithril_aggregator, &args.mithril_genesis_key)
-        .add_feedback_receiver(feedback.clone())
+async fn fetch_snapshot(
+    args: &Args,
+    config: &MithrilConfig,
+    feedback: Arc<Feedback>,
+) -> MithrilResult<()> {
+    let client = ClientBuilder::aggregator(&config.aggregator, &config.genesis_key)
+        .add_feedback_receiver(feedback)
         .build()?;
 
     let snapshots = client.snapshot().list().await?;
 
-    let last_digest = snapshots.first().unwrap().digest.as_ref();
-    let snapshot = client.snapshot().get(last_digest).await?.unwrap();
+    let last_digest = snapshots
+        .first()
+        .ok_or(MithrilError::msg("no snapshot available"))?
+        .digest
+        .as_ref();
 
-    let certificate = client
-        .certificate()
-        .verify_chain(&snapshot.certificate_hash)
-        .await?;
+    let snapshot = client
+        .snapshot()
+        .get(last_digest)
+        .await?
+        .ok_or(MithrilError::msg("no snapshot available"))?;
 
     let target_directory = Path::new(&args.download_dir);
 
@@ -98,6 +138,19 @@ async fn fetch_and_validate_snapshot(args: &Args) -> Result<(), mithril_client::
     if let Err(e) = client.snapshot().add_statistics(&snapshot).await {
         warn!("failed incrementing snapshot download statistics: {:?}", e);
     }
+
+    let certificate = if args.skip_validation {
+        client
+            .certificate()
+            .get(&snapshot.certificate_hash)
+            .await?
+            .ok_or(MithrilError::msg("certificate for snapshot not found"))?
+    } else {
+        client
+            .certificate()
+            .verify_chain(&snapshot.certificate_hash)
+            .await?
+    };
 
     let message = MessageBuilder::new()
         .compute_snapshot_message(&certificate, target_directory)
@@ -129,7 +182,13 @@ fn open_empty_stores(config: &super::Config, force: bool) -> miette::Result<Opti
 }
 
 pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
-    crate::common::setup_tracing(&config.logging)?;
+    //crate::common::setup_tracing(&config.logging)?;
+    let feedback = Arc::new(Feedback::default());
+
+    let mithril = config
+        .mithril
+        .as_ref()
+        .ok_or(miette::miette!("missing mithril config"))?;
 
     let empty_stores =
         open_empty_stores(config, args.force).context("opening empty data stored")?;
@@ -155,7 +214,7 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
     if !args.skip_download {
         tokio::runtime::Runtime::new()
             .unwrap()
-            .block_on(fetch_and_validate_snapshot(args))
+            .block_on(fetch_snapshot(args, mithril, feedback.clone()))
             .map_err(|err| miette::miette!(err.to_string()))
             .context("fetching and validating mithril snapshot")?;
     } else {
@@ -178,24 +237,18 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
         .context("applying origin utxos")?;
 
     for block in iter {
-        let block = match block {
-            Ok(x) if x.is_empty() => {
-                warn!("can't continue reading from immutable db");
-                break;
-            }
-            Err(err) => {
-                dbg!(err);
-                warn!("can't continue reading from immutable db");
-                break;
-            }
-            Ok(x) => x,
-        };
+        let block = block.into_diagnostic().context("reading block")?;
+        feedback.global_pb.inc(1);
 
         let blockd = MultiEraBlock::decode(&block)
             .into_diagnostic()
             .context("decoding block cbor")?;
 
         debug!(slot = blockd.slot(), "importing block");
+
+        feedback
+            .global_pb
+            .set_message(format!("importing block {}", blockd.header().number()));
 
         chain
             .roll_forward(blockd.slot(), blockd.hash(), block.clone())
