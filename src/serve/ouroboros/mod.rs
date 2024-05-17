@@ -1,106 +1,78 @@
-use pallas::network::miniprotocols::blockfetch::BlockRequest;
-use pallas::network::miniprotocols::Point;
-use pallas::{network::facades::PeerServer, storage::rolldb::chain};
+use pallas::network::facades::PeerServer;
+use pallas::network::miniprotocols::keepalive;
+use pallas::storage::rolldb::{chain, wal};
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use tokio::net::TcpListener;
 
-use tracing::{error, info, warn};
+use tracing::{info, instrument};
 
 use crate::prelude::*;
 
+use self::blockfetch::handle_blockfetch;
+use self::chainsync::N2NChainSyncHandler;
+
+#[cfg(test)]
+mod tests;
+
+mod blockfetch;
+mod chainsync;
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Config {
-    listen_path: Option<String>,
-    listen_address: Option<String>,
-    allow_n2c_over_tcp: Option<bool>,
+    listen_address: String,
     magic: u64,
 }
 
-pub async fn serve(config: Config, store: chain::Store) -> Result<(), Error> {
-    if let Some(addr) = config.listen_address {
-        info!("serving via N2N Ouroboros on address: {addr}");
+#[instrument(skip_all)]
+async fn peer_session(chain: chain::Store, wal: wal::Store, peer: PeerServer) -> Result<(), Error> {
+    let PeerServer {
+        plexer,
+        chainsync,
+        blockfetch,
+        keepalive,
+        ..
+    } = peer;
 
-        let listener = TcpListener::bind(addr).await.unwrap();
+    let mut n2n_chainsync_handler =
+        N2NChainSyncHandler::new(chain.clone(), wal.clone(), chainsync)?;
 
-        loop {
-            tokio::select! {
-                n2n_conn = PeerServer::accept(&listener, config.magic) => {
-                    info!("accepted incoming peer connection");
+    let l1 = n2n_chainsync_handler.begin();
+    let l2 = handle_blockfetch(chain.clone(), blockfetch);
+    let l3 = handle_keepalive(keepalive);
 
-                    let db = store.clone();
-                    let conn = n2n_conn.unwrap();
+    let _ = tokio::try_join!(l1, l2, l3);
 
-                    tokio::spawn(async move {handle_blockfetch(db.clone(), conn).await});
-                }
-                // n2c_conn = NodeServer::accept(&listener, config.magic) => {}
-            }
-        }
-    }
+    plexer.abort().await;
 
     Ok(())
 }
 
-async fn handle_blockfetch(store: chain::Store, mut peer: PeerServer) -> Result<(), Error> {
-    let blockfetch = peer.blockfetch();
+#[instrument(skip_all)]
+pub async fn serve(config: Config, chain: chain::Store, wal: wal::Store) -> Result<(), Error> {
+    let listener = TcpListener::bind(&config.listen_address)
+        .await
+        .map_err(Error::server)?;
+
+    info!(addr = &config.listen_address, "ouroboros listening");
+
     loop {
-        match blockfetch.recv_while_idle().await {
-            Ok(Some(BlockRequest((p1, p2)))) => {
-                let from = match p1 {
-                    Point::Origin => None,
-                    Point::Specific(slot, hash) => {
-                        let parsed_hash = TryInto::<[u8; 32]>::try_into(hash)
-                            .map_err(|_| Error::client("malformed hash"))?
-                            .into();
+        let peer = PeerServer::accept(&listener, config.magic)
+            .await
+            .map_err(Error::server)?;
 
-                        Some((slot, parsed_hash))
-                    }
-                };
+        info!("accepted incoming connection");
 
-                let to = match p2 {
-                    Point::Origin => {
-                        return blockfetch.send_no_blocks().await.map_err(Error::server)
-                    }
-                    Point::Specific(slot, hash) => {
-                        let parsed_hash = TryInto::<[u8; 32]>::try_into(hash)
-                            .map_err(|_| Error::client("malformed hash"))?
-                            .into();
+        let _handle = tokio::spawn(peer_session(chain.clone(), wal.clone(), peer));
+    }
+}
 
-                        (slot, parsed_hash)
-                    }
-                };
-
-                if let Some(iter) = store.read_chain_range(from, to).map_err(Error::storage)? {
-                    blockfetch.send_start_batch().await.map_err(Error::server)?;
-
-                    for point in iter {
-                        let (_, hash) = point.map_err(Error::storage)?;
-
-                        let block_bytes = match store.get_block(hash).map_err(Error::storage)? {
-                            Some(b) => b,
-                            None => {
-                                error!("could not find block bytes for {hash}");
-                                return Err(Error::server(
-                                    "could not find block bytes for block in chainkv",
-                                ));
-                            }
-                        };
-
-                        blockfetch
-                            .send_block(block_bytes)
-                            .await
-                            .map_err(Error::server)?;
-                    }
-
-                    blockfetch.send_batch_done().await.map_err(Error::server)?;
-                } else {
-                    return blockfetch.send_no_blocks().await.map_err(Error::server);
-                }
-            }
-            Ok(None) => info!("peer ended blockfetch protocol"),
-            Err(e) => {
-                warn!("error receiving blockfetch message: {:?}", e);
-                return Err(Error::client(e));
-            }
-        }
+async fn handle_keepalive(mut keepalive: keepalive::Server) -> Result<(), Error> {
+    loop {
+        keepalive
+            .keepalive_roundtrip()
+            .await
+            .map_err(Error::server)?;
+        tokio::time::sleep(Duration::from_secs(15)).await
     }
 }

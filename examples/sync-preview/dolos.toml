@@ -27,7 +27,7 @@ listen_address = "[::]:50051"
 
 [serve.ouroboros]
 listen_address = "localhost:30013"
-magic = 0
+magic = 2
 
 [logging]
 max_level = "debug"
