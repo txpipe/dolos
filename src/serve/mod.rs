@@ -44,7 +44,11 @@ pub async fn serve(
 
     if let Some(cfg) = config.ouroboros {
         info!("found Ouroboros config");
-        tasks.push(tokio::spawn(ouroboros::serve(cfg, chain.clone())));
+        tasks.push(tokio::spawn(ouroboros::serve(
+            cfg,
+            chain.clone(),
+            wal.clone(),
+        )));
     }
 
     // TODO: we should stop if any of the tasks breaks

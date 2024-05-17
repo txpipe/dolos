@@ -6,32 +6,51 @@ use pallas::{
         chainsync::{self, ClientRequest, HeaderContent, Tip},
         Point,
     },
+    storage::rolldb::{chain, wal},
 };
 use tracing::{debug, info, instrument, warn};
 
-use crate::{
-    prelude::Error,
-    storage::{
-        kvtable::DBInt,
-        rolldb::{wal::WalAction, RollDB},
-    },
-};
+use crate::prelude::Error;
 
 pub struct N2NChainSyncHandler {
-    roll_db: RollDB,
+    chain: chain::Store,
+    wal: wal::Store,
     protocol: chainsync::N2NServer,
     intersect: Option<Point>,
     cursor: Option<(u64, Hash<32>)>,
 }
 
 impl N2NChainSyncHandler {
-    pub fn new(roll_db: RollDB, protocol: chainsync::N2NServer) -> Result<Self, Error> {
+    pub fn new(
+        chain: chain::Store,
+        wal: wal::Store,
+        protocol: chainsync::N2NServer,
+    ) -> Result<Self, Error> {
         Ok(Self {
-            roll_db,
+            chain,
+            wal,
             protocol,
             intersect: None,
             cursor: None,
         })
+    }
+
+    async fn find_tip(&self) -> Result<(Tip, u64), Error> {
+        let tip = self
+            .wal
+            .find_tip()
+            .map_err(Error::server)?
+            .map(db_tip_to_protocol)
+            .unwrap_or(Tip(Point::Origin, 0));
+
+        // HACK: 200 is a magic number to use as security margin to avoid trying to jump
+        // from chain to wal right at the boundary which might cause race conditions.
+        // TODO: rather that using a magic number, lets switch to reading what's the 1st
+        // WAL entry that we have available, but only if we're at a reasonable proximity
+        // to the WAL.
+        let mutable_boundary = tip.0.slot_or_default().saturating_sub(200);
+
+        Ok((tip, mutable_boundary))
     }
 
     #[instrument(skip_all)]
@@ -59,7 +78,7 @@ impl N2NChainSyncHandler {
         info!(?points, "handling intersect request");
 
         let tip = self
-            .roll_db
+            .wal
             .find_tip()
             .map_err(Error::server)?
             .map(db_tip_to_protocol)
@@ -114,21 +133,11 @@ impl N2NChainSyncHandler {
 
         // --- initialise new crawler
 
-        let mut crawler = self.roll_db.crawl_chain_from(from);
+        let mut crawler = self.chain.crawl_after(from);
 
-        let mut tip = self
-            .roll_db
-            .find_tip()
-            .map_err(Error::server)?
-            .map(db_tip_to_protocol)
-            .unwrap_or(Tip(Point::Origin, 0));
+        let mut tip = self.find_tip().await?;
 
-        let mut mutable_slot = tip
-            .0
-            .slot_or_default()
-            .saturating_sub(self.roll_db.k_param());
-
-        info!(?tip, ?mutable_slot, "fetched tip from db");
+        info!(tip=?tip.0, mutable_slot=tip.1, "fetched tip from db");
 
         // --- keep sending blocks while we receive RequestNexts
 
@@ -142,21 +151,16 @@ impl N2NChainSyncHandler {
                 info!(?next, "next chainkv point");
                 let (slot, hash) = next.map_err(Error::server)?;
 
-                tip = self
-                    .roll_db
-                    .find_tip()
-                    .map_err(Error::server)?
-                    .map(db_tip_to_protocol)
-                    .unwrap_or(Tip(Point::Origin, 0));
+                tip = self.find_tip().await?;
 
                 // --- if we have reached mutable part of chainKV snapshot,
                 // check if we can swap to the WAL, otherwise take new snapshot
 
-                if slot >= mutable_slot {
+                if slot >= tip.1 {
                     if let Some((slot, hash)) = self.cursor {
                         if let Some(seq) = self
-                            .roll_db
-                            .apply_position_in_wal(slot, &hash)
+                            .wal
+                            .find_wal_seq(&[(slot, hash)])
                             .map_err(Error::server)?
                         {
                             info!(?self.cursor, "cursor found on WAL, switching to WAL crawling");
@@ -166,21 +170,7 @@ impl N2NChainSyncHandler {
                             info!(?self.cursor, "mutable but no WAL intersect, refreshing chainKV crawler");
 
                             // take new chainKV snapshot
-                            crawler = self.roll_db.crawl_chain_from(self.cursor.map(|x| x.0));
-
-                            // update mutable point for new snapshot
-
-                            tip = self
-                                .roll_db
-                                .find_tip()
-                                .map_err(Error::server)?
-                                .map(db_tip_to_protocol)
-                                .unwrap_or(Tip(Point::Origin, 0));
-
-                            mutable_slot = tip
-                                .0
-                                .slot_or_default()
-                                .saturating_sub(self.roll_db.k_param());
+                            crawler = self.chain.crawl_after(self.cursor.map(|x| x.0));
 
                             // skip cursor (iterator starts at cursor)
                             crawler.next();
@@ -199,8 +189,8 @@ impl N2NChainSyncHandler {
                             let i_hash: [u8; 32] = i_hash.clone().try_into().unwrap();
 
                             let seq = self
-                                .roll_db
-                                .apply_position_in_wal(*i_slot, &(i_hash.into()))
+                                .wal
+                                .find_wal_seq(&[(*i_slot, i_hash.into())])
                                 .map_err(Error::server)?
                                 .ok_or(Error::server("intersect in chainkv but not WAL despite being immediately mutable"))?;
 
@@ -214,7 +204,7 @@ impl N2NChainSyncHandler {
                 // --- send block to client
 
                 let block = self
-                    .roll_db
+                    .chain
                     .get_block(hash)
                     .map_err(Error::server)?
                     .expect("block content not found");
@@ -223,12 +213,15 @@ impl N2NChainSyncHandler {
 
                 let content = HeaderContent {
                     variant: block.era() as u8,
-                    byron_prefix: None,
+                    byron_prefix: match block.era() {
+                        pallas::ledger::traverse::Era::Byron => Some((1, 0)),
+                        _ => None,
+                    },
                     cbor: block.header().cbor().to_vec(),
                 };
 
                 self.protocol
-                    .send_roll_forward(content, tip)
+                    .send_roll_forward(content, tip.0)
                     .await
                     .map_err(Error::server)?;
 
@@ -261,15 +254,16 @@ impl N2NChainSyncHandler {
     }
 
     #[instrument(skip_all)]
-    async fn crawl_with_wal(&mut self, from: Option<DBInt>) -> Result<(), Error> {
+    async fn crawl_with_wal(&mut self, from: Option<u64>) -> Result<(), Error> {
         info!(?from, "entering WAL crawling mode");
 
         let mut last_seq = None;
 
         let intersected = from.is_some();
 
-        // TODO: race condition between checking wal contains point and creating iterator
-        let mut crawler = self.roll_db.crawl_wal(from.map(|x| x.into()));
+        // TODO: race condition between checking wal contains point and creating
+        // iterator
+        let mut crawler = self.wal.crawl_after(from);
 
         // skip the WAL intersect
         if intersected {
@@ -280,13 +274,13 @@ impl N2NChainSyncHandler {
 
         loop {
             if let Some(next) = crawler.next() {
-                info!(?next, "next WAL entry");
                 let (seq, wal_value) = next.map_err(Error::server)?;
+                info!(seq, "next WAL entry");
 
                 last_seq = Some(seq);
 
                 let tip = self
-                    .roll_db
+                    .wal
                     .find_tip()
                     .map_err(Error::server)?
                     .map(db_tip_to_protocol)
@@ -294,17 +288,8 @@ impl N2NChainSyncHandler {
 
                 // ---
 
-                let slot = wal_value.slot();
-                let hash = *wal_value.hash();
-
-                match wal_value.action() {
-                    WalAction::Apply => {
-                        let block = self
-                            .roll_db
-                            .get_block(hash)
-                            .map_err(Error::server)?
-                            .expect("block content not found");
-
+                match wal_value {
+                    wal::Log::Apply(slot, hash, block) => {
                         let block = MultiEraBlock::decode(&block).expect("invalid block cbor");
 
                         let content = HeaderContent {
@@ -320,7 +305,7 @@ impl N2NChainSyncHandler {
 
                         self.cursor = Some((slot, hash));
                     }
-                    WalAction::Mark => {
+                    wal::Log::Mark(slot, hash, _) => {
                         self.protocol
                             .send_roll_backward(Point::Specific(slot, hash.to_vec()), tip)
                             .await
@@ -329,7 +314,9 @@ impl N2NChainSyncHandler {
                         self.cursor = Some((slot, hash));
                     }
                     // skip this wal action without trying to receive a new message
-                    WalAction::Undo => continue,
+                    wal::Log::Undo(..) => continue,
+                    // skip this wal action without trying to receive a new message
+                    wal::Log::Origin => continue,
                 };
             } else {
                 info!(?self.cursor, "sending await reply");
@@ -339,10 +326,10 @@ impl N2NChainSyncHandler {
                     .await
                     .map_err(Error::server)?;
 
-                self.roll_db.tip_change.notified().await;
+                self.wal.tip_change.notified().await;
                 info!(?last_seq, "tip change notified, refreshing WAL crawler");
                 drop(crawler);
-                crawler = self.roll_db.crawl_wal(last_seq);
+                crawler = self.wal.crawl_after(last_seq);
                 crawler.next();
 
                 continue;
@@ -377,7 +364,7 @@ impl N2NChainSyncHandler {
                     let hash: [u8; 32] = hash[0..32].try_into().unwrap();
                     let hash = Hash::<32>::from(hash);
 
-                    if self.roll_db.chain_contains(*slot, &hash).unwrap() {
+                    if self.chain.chain_contains(*slot, &hash).unwrap() {
                         return Some(point.clone());
                     }
                 }

@@ -2,11 +2,15 @@ use pallas::network::miniprotocols::{
     blockfetch::{self, BlockRequest},
     Point,
 };
+use pallas::storage::rolldb::chain;
 use tracing::{error, info, warn};
 
-use crate::{prelude::Error, storage::rolldb::RollDB};
+use crate::prelude::Error;
 
-pub async fn handle_blockfetch(db: RollDB, mut protocol: blockfetch::Server) -> Result<(), Error> {
+pub async fn handle_blockfetch(
+    chain: chain::Store,
+    mut protocol: blockfetch::Server,
+) -> Result<(), Error> {
     loop {
         match protocol.recv_while_idle().await {
             Ok(Some(BlockRequest((p1, p2)))) => {
@@ -32,13 +36,13 @@ pub async fn handle_blockfetch(db: RollDB, mut protocol: blockfetch::Server) -> 
                     }
                 };
 
-                if let Some(mut iter) = db.read_chain_range(from, to).map_err(Error::storage)? {
+                if let Some(mut iter) = chain.read_chain_range(from, to).map_err(Error::storage)? {
                     protocol.send_start_batch().await.map_err(Error::server)?;
 
                     while let Some(point) = iter.next() {
                         let (_, hash) = point.map_err(Error::storage)?;
 
-                        let block_bytes = match db.get_block(hash).map_err(Error::storage)? {
+                        let block_bytes = match chain.get_block(hash).map_err(Error::storage)? {
                             Some(b) => b,
                             None => {
                                 error!("could not find block bytes for {hash}");
