@@ -48,7 +48,7 @@ pub async fn run(config: super::Config, _args: &Args) -> miette::Result<()> {
     .into_diagnostic()
     .context("bootstrapping submit pipeline")?;
 
-    gasket::daemon::Daemon(sync.into_iter().chain(submit).collect()).block();
+    gasket::daemon::Daemon::new(sync.into_iter().chain(submit).collect()).block();
 
     server.abort();
 

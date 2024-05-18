@@ -22,7 +22,7 @@ pub fn run(config: &super::Config, _args: &Args) -> miette::Result<()> {
     .into_diagnostic()
     .context("bootstrapping sync pipeline")?;
 
-    gasket::daemon::Daemon(sync).block();
+    gasket::daemon::Daemon::new(sync).block();
 
     Ok(())
 }

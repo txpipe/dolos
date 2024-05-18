@@ -11,7 +11,7 @@ use tracing::debug;
 
 use super::{BlockHeight, TxHash};
 
-pub type MempoolSender = gasket::messaging::tokio::OutputPort<BlockMonitorMessage>;
+pub type MempoolSender = gasket::messaging::OutputPort<BlockMonitorMessage>;
 
 #[derive(Clone, Debug)]
 pub enum BlockMonitorMessage {

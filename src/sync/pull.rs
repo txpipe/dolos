@@ -68,7 +68,7 @@ fn to_traverse(header: &HeaderContent) -> Result<MultiEraHeader<'_>, WorkerError
     out.or_panic()
 }
 
-pub type DownstreamPort = gasket::messaging::tokio::OutputPort<PullEvent>;
+pub type DownstreamPort = gasket::messaging::OutputPort<PullEvent>;
 
 async fn intersect(peer: &mut PeerClient, intersection: &Intersection) -> Result<(), WorkerError> {
     let chainsync = peer.chainsync();
