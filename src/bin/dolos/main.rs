@@ -9,6 +9,7 @@ mod daemon;
 mod data;
 mod doctor;
 mod eval;
+mod serve;
 mod sync;
 
 #[cfg(feature = "mithril")]
@@ -18,6 +19,7 @@ mod bootstrap;
 enum Command {
     Daemon(daemon::Args),
     Sync(sync::Args),
+    Serve(serve::Args),
     Data(data::Args),
     Eval(eval::Args),
     Doctor(doctor::Args),
@@ -119,6 +121,7 @@ fn main() -> Result<()> {
         Command::Daemon(x) => daemon::run(config, &x)?,
         Command::Sync(x) => sync::run(&config, &x)?,
         Command::Data(x) => data::run(&config, &x)?,
+        Command::Serve(x) => serve::run(config, &x)?,
         Command::Eval(x) => eval::run(&config, &x)?,
         Command::Doctor(x) => doctor::run(&config, &x)?,
 
