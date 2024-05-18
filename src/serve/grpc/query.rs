@@ -10,11 +10,15 @@ use tracing::info;
 
 pub struct QueryServiceImpl {
     ledger: LedgerStore,
+    mapper: pallas::interop::utxorpc::Mapper<super::Context>,
 }
 
 impl QueryServiceImpl {
     pub fn new(ledger: LedgerStore) -> Self {
-        Self { ledger }
+        Self {
+            ledger,
+            mapper: Default::default(),
+        }
     }
 }
 
@@ -45,9 +49,10 @@ fn find_matching_set(
 fn into_u5c_utxo(
     txo: &TxoRef,
     body: &EraCbor,
+    mapper: &pallas::interop::utxorpc::Mapper<super::Context>,
 ) -> Result<u5c::query::AnyUtxoData, pallas::codec::minicbor::decode::Error> {
     let parsed = MultiEraOutput::try_from(body)?;
-    let parsed = pallas::interop::utxorpc::map_tx_output(&parsed);
+    let parsed = mapper.map_tx_output(&parsed);
 
     Ok(u5c::query::AnyUtxoData {
         txo_ref: Some(u5c::query::TxoRef {
@@ -100,7 +105,7 @@ impl u5c::query::query_service_server::QueryService for QueryServiceImpl {
 
         let items: Vec<_> = utxos
             .iter()
-            .map(|(k, v)| into_u5c_utxo(k, v))
+            .map(|(k, v)| into_u5c_utxo(k, v, &self.mapper))
             .try_collect()
             .map_err(|e| Status::internal(e.to_string()))?;
 
@@ -148,7 +153,7 @@ impl u5c::query::query_service_server::QueryService for QueryServiceImpl {
 
         let items: Vec<_> = utxos
             .iter()
-            .map(|(k, v)| into_u5c_utxo(k, v))
+            .map(|(k, v)| into_u5c_utxo(k, v, &self.mapper))
             .try_collect()
             .map_err(|e| Status::internal(e.to_string()))?;
 

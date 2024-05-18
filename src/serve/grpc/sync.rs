@@ -1,5 +1,5 @@
 use futures_core::Stream;
-use pallas::interop::utxorpc::spec as u5c;
+use pallas::interop::utxorpc::{spec as u5c, Mapper};
 use pallas::{
     crypto::hash::Hash,
     storage::rolldb::{chain, wal},
@@ -18,22 +18,26 @@ fn bytes_to_hash(raw: &[u8]) -> Hash<32> {
 //     AnyChainBlock { chain: Some(block) }
 // }
 
-fn raw_to_anychain(raw: &[u8]) -> u5c::sync::AnyChainBlock {
-    let block = pallas::interop::utxorpc::map_block_cbor(raw);
+fn raw_to_anychain(mapper: &Mapper<super::Context>, raw: &[u8]) -> u5c::sync::AnyChainBlock {
+    let block = mapper.map_block_cbor(raw);
 
     u5c::sync::AnyChainBlock {
         chain: u5c::sync::any_chain_block::Chain::Cardano(block).into(),
     }
 }
 
-fn roll_to_tip_response(log: wal::Log) -> u5c::sync::FollowTipResponse {
+fn roll_to_tip_response(
+    mapper: &Mapper<super::Context>,
+    log: wal::Log,
+) -> u5c::sync::FollowTipResponse {
     u5c::sync::FollowTipResponse {
         action: match log {
             wal::Log::Apply(_, _, block) => {
-                u5c::sync::follow_tip_response::Action::Apply(raw_to_anychain(&block)).into()
+                u5c::sync::follow_tip_response::Action::Apply(raw_to_anychain(mapper, &block))
+                    .into()
             }
             wal::Log::Undo(_, _, block) => {
-                u5c::sync::follow_tip_response::Action::Undo(raw_to_anychain(&block)).into()
+                u5c::sync::follow_tip_response::Action::Undo(raw_to_anychain(mapper, &block)).into()
             }
             // TODO: shouldn't we have a u5c event for origin?
             wal::Log::Origin => None,
@@ -45,11 +49,16 @@ fn roll_to_tip_response(log: wal::Log) -> u5c::sync::FollowTipResponse {
 pub struct ChainSyncServiceImpl {
     wal: wal::Store,
     chain: chain::Store,
+    mapper: pallas::interop::utxorpc::Mapper<super::Context>,
 }
 
 impl ChainSyncServiceImpl {
     pub fn new(wal: wal::Store, chain: chain::Store) -> Self {
-        Self { wal, chain }
+        Self {
+            wal,
+            chain,
+            mapper: pallas::interop::utxorpc::Mapper::default(),
+        }
     }
 }
 
@@ -75,7 +84,7 @@ impl u5c::sync::chain_sync_service_server::ChainSyncService for ChainSyncService
             .map_err(|_err| Status::internal("can't query block"))?
             .iter()
             .flatten()
-            .map(|b| raw_to_anychain(b))
+            .map(|b| raw_to_anychain(&self.mapper, b))
             .collect();
 
         let response = u5c::sync::FetchBlockResponse { block: out };
@@ -116,7 +125,7 @@ impl u5c::sync::chain_sync_service_server::ChainSyncService for ChainSyncService
             .map(|x| x.ok_or(Status::internal("can't query history")))
             .collect::<Result<Vec<_>, _>>()?
             .into_iter()
-            .map(|raw| raw_to_anychain(&raw))
+            .map(|raw| raw_to_anychain(&self.mapper, &raw))
             .collect();
 
         let response = u5c::sync::DumpHistoryResponse {
@@ -139,8 +148,9 @@ impl u5c::sync::chain_sync_service_server::ChainSyncService for ChainSyncService
             .map(|x| (x.index, bytes_to_hash(&x.hash)))
             .collect();
 
+        let mapper = self.mapper.clone();
         let s = wal::RollStream::intersect(self.wal.clone(), intersect)
-            .map(|log| Ok(roll_to_tip_response(log)));
+            .map(move |log| Ok(roll_to_tip_response(&mapper, log)));
 
         Ok(Response::new(Box::pin(s)))
     }

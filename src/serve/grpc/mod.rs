@@ -1,3 +1,4 @@
+use pallas::crypto::hash::Hash;
 use pallas::interop::utxorpc::spec as u5c;
 use pallas::storage::rolldb::{chain, wal};
 use serde::{Deserialize, Serialize};
@@ -73,4 +74,17 @@ pub async fn serve(
         .map_err(Error::server)?;
 
     Ok(())
+}
+
+#[derive(Default, Clone)]
+struct Context;
+
+impl pallas::interop::utxorpc::Context for Context {
+    fn get_txo<'a>(
+        &self,
+        tx_hash: Hash<32>,
+        txo_index: u32,
+    ) -> Option<pallas::ledger::traverse::MultiEraOutput<'a>> {
+        None
+    }
 }
