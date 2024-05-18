@@ -329,8 +329,7 @@ mod tests {
             for input in tx.consumes() {
                 let consumed = delta
                     .consumed_utxo
-                    .get(&TxoRef(*input.hash(), input.index() as u32))
-                    .is_some();
+                    .contains_key(&TxoRef(*input.hash(), input.index() as u32));
 
                 assert!(consumed);
             }
@@ -357,11 +356,11 @@ mod tests {
         let undo = super::compute_undo_delta(&block, context).unwrap();
 
         for (produced, _) in apply.produced_utxo.iter() {
-            assert!(undo.undone_utxo.get(produced).is_some());
+            assert!(undo.undone_utxo.contains_key(produced));
         }
 
         for (consumed, _) in apply.consumed_utxo.iter() {
-            assert!(undo.recovered_stxi.get(consumed).is_some());
+            assert!(undo.recovered_stxi.contains_key(consumed));
         }
 
         assert_eq!(apply.new_position, undo.undone_position);

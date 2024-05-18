@@ -1,10 +1,10 @@
-use gasket::{framework::*, messaging::*, runtime::Policy};
+use gasket::{framework::*, runtime::Policy};
 use tracing::{error, info};
 
 use crate::model::PullEvent;
 
 struct WitnessStage {
-    input: gasket::messaging::tokio::InputPort<PullEvent>,
+    input: gasket::messaging::InputPort<PullEvent>,
 }
 
 impl gasket::framework::Stage for WitnessStage {
@@ -74,7 +74,7 @@ fn test_mainnet_upstream() {
     let upstream = gasket::runtime::spawn_stage(upstream, Policy::default());
     let witness = gasket::runtime::spawn_stage(witness, Policy::default());
 
-    let daemon = gasket::daemon::Daemon(vec![upstream, witness]);
+    let daemon = gasket::daemon::Daemon::new(vec![upstream, witness]);
 
     daemon.block();
 }

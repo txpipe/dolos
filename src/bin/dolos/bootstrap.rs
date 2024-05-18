@@ -1,9 +1,6 @@
-use futures_util::TryFutureExt;
 use indicatif::{MultiProgress, ProgressBar, ProgressState, ProgressStyle};
 use miette::{bail, Context, IntoDiagnostic};
-use mithril_client::{
-    ClientBuilder, MessageBuilder, MithrilCertificate, MithrilError, MithrilResult,
-};
+use mithril_client::{ClientBuilder, MessageBuilder, MithrilError, MithrilResult};
 use pallas::ledger::traverse::MultiEraBlock;
 use std::{fmt::Write, path::Path, sync::Arc};
 use tracing::{debug, info, warn};
@@ -37,7 +34,7 @@ pub struct Args {
 }
 
 struct Feedback {
-    multi: MultiProgress,
+    _multi: MultiProgress,
     global_pb: ProgressBar,
     download_pb: ProgressBar,
 }
@@ -62,7 +59,7 @@ impl Default for Feedback {
             .progress_chars("#>-"));
 
         Self {
-            multi,
+            _multi: multi,
             global_pb,
             download_pb,
         }

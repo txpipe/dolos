@@ -66,7 +66,7 @@ impl LedgerTable for PParamsTable {
 
         if let Some(ChainPoint(slot, _)) = delta.new_position {
             for PParamsBody(era, body) in delta.new_pparams.iter() {
-                let v: (u16, &[u8]) = (u16::from(*era), &body);
+                let v: (u16, &[u8]) = (u16::from(*era), body);
                 table.insert(slot, v)?;
             }
         }

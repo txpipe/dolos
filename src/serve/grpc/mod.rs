@@ -82,8 +82,8 @@ struct Context;
 impl pallas::interop::utxorpc::Context for Context {
     fn get_txo<'a>(
         &self,
-        tx_hash: Hash<32>,
-        txo_index: u32,
+        _tx_hash: Hash<32>,
+        _txo_index: u32,
     ) -> Option<pallas::ledger::traverse::MultiEraOutput<'a>> {
         None
     }
