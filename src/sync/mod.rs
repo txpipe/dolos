@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use gasket::messaging::{RecvPort, SendPort};
+use gasket::messaging::{RecvAdapter, SendAdapter};
 use pallas::ledger::configs::byron;
 use pallas::storage::rolldb::chain::Store as ChainStore;
 use pallas::storage::rolldb::wal::Store as WalStore;

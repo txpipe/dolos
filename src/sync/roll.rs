@@ -5,8 +5,8 @@ use tracing::{debug, trace};
 use crate::prelude::*;
 
 pub type Cursor = (BlockSlot, BlockHash);
-pub type UpstreamPort = gasket::messaging::tokio::InputPort<PullEvent>;
-pub type DownstreamPort = gasket::messaging::tokio::OutputPort<RollEvent>;
+pub type UpstreamPort = gasket::messaging::InputPort<PullEvent>;
+pub type DownstreamPort = gasket::messaging::OutputPort<RollEvent>;
 
 /// Catch-up output with current persisted state
 ///

@@ -1,4 +1,4 @@
-use gasket::messaging::{tokio::ChannelRecvAdapter, RecvPort, SendPort};
+use gasket::messaging::{tokio::ChannelRecvAdapter, RecvAdapter, SendAdapter};
 use pallas::{
     crypto::hash::Hash,
     network::miniprotocols::txsubmission::{EraTxBody, EraTxId, TxIdAndSize},

@@ -7,10 +7,10 @@ use tracing::info;
 
 use super::{monitor::BlockMonitorMessage, BlockHeight, Transaction};
 
-pub type SubmitEndpointReceiver = gasket::messaging::tokio::InputPort<Vec<Transaction>>;
-pub type BlockMonitorReceiver = gasket::messaging::tokio::InputPort<BlockMonitorMessage>;
+pub type SubmitEndpointReceiver = gasket::messaging::InputPort<Vec<Transaction>>;
+pub type BlockMonitorReceiver = gasket::messaging::InputPort<BlockMonitorMessage>;
 
-pub type PropagatorSender = gasket::messaging::tokio::OutputPort<Vec<Transaction>>;
+pub type PropagatorSender = gasket::messaging::OutputPort<Vec<Transaction>>;
 
 type InclusionPoint = BlockHeight;
 

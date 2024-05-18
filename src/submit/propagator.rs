@@ -15,7 +15,7 @@ use tracing::info;
 
 use super::{Error, Transaction};
 
-pub type MempoolReceiver = gasket::messaging::tokio::InputPort<Vec<Transaction>>;
+pub type MempoolReceiver = gasket::messaging::InputPort<Vec<Transaction>>;
 
 // Peer Mempool
 pub struct Mempool {

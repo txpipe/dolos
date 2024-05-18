@@ -5,7 +5,7 @@ use tracing::info;
 
 use crate::prelude::*;
 
-pub type UpstreamPort = gasket::messaging::tokio::InputPort<RollEvent>;
+pub type UpstreamPort = gasket::messaging::InputPort<RollEvent>;
 
 #[derive(Stage)]
 #[stage(name = "ledger", unit = "RollEvent", worker = "Worker")]
