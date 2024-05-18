@@ -17,13 +17,25 @@ mod bootstrap;
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Run the node in all its glory
     Daemon(daemon::Args),
+
+    /// Just sync from upstream peer
     Sync(sync::Args),
+
+    /// Just serve data through apis
     Serve(serve::Args),
+
+    /// Commands to interact with data
     Data(data::Args),
+
+    /// Evaluate txs using current ledger
     Eval(eval::Args),
+
+    /// Commands to fix problems
     Doctor(doctor::Args),
 
+    /// Bootstrap the node using Mithril
     #[cfg(feature = "mithril")]
     Bootstrap(bootstrap::Args),
 }
@@ -36,7 +48,7 @@ struct Cli {
     #[command(subcommand)]
     command: Command,
 
-    #[arg(global = true)]
+    #[arg(short, long, global = true)]
     config: Option<std::path::PathBuf>,
 }
 
