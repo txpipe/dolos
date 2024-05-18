@@ -3,6 +3,7 @@ use redb::{
     WriteTransaction,
 };
 use std::{collections::HashSet, path::Path, sync::Arc};
+use tracing::warn;
 
 use super::*;
 
@@ -151,7 +152,11 @@ pub struct LedgerStore(Arc<redb::Database>);
 
 impl LedgerStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, redb::Error> {
-        let inner = redb::Database::create(path)?;
+        let inner = redb::Database::builder()
+            .set_repair_callback(|x| {
+                warn!(progress = x.progress() * 100f64, "ledger db is repairing")
+            })
+            .create(path)?;
 
         Ok(Self(Arc::new(inner)))
     }
