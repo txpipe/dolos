@@ -85,3 +85,6 @@ install-updater = false
 [workspace.metadata.release]
 push = false
 publish = false
+
+[workspace.metadata.dist.github-custom-runners]
+aarch64-apple-darwin = "macos-14"
