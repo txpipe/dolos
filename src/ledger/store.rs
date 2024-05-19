@@ -266,21 +266,18 @@ impl LedgerStore {
         wx.set_durability(redb::Durability::Eventual);
 
         let tss: Vec<_> = {
-            let ts = wx.open_multimap_table(TOMBSTONES)?;
-            let out = ts
+            wx.open_multimap_table(TOMBSTONES)?
                 .range(..until)?
                 .map_ok(|(k, v)| {
                     let values: Vec<_> = v
                         .into_iter()
-                        .map_ok(|x| (x.value().0.clone(), x.value().1))
+                        .map_ok(|x| (*x.value().0, x.value().1))
                         .map_ok(|(hash, idx)| TxoRef(hash.into(), idx))
                         .try_collect()?;
 
                     Result::<_, redb::Error>::Ok((k.value(), values))
                 })
-                .try_collect()?;
-
-            out
+                .try_collect()?
         };
 
         for ts in tss {
