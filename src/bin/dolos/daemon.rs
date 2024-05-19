@@ -10,7 +10,7 @@ pub async fn run(config: super::Config, _args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging)?;
 
     let (wal, chain, ledger) = crate::common::open_data_stores(&config)?;
-    let (byron, _, _) = crate::common::open_genesis_files(&config.genesis)?;
+    let (byron, shelley, _) = crate::common::open_genesis_files(&config.genesis)?;
 
     let (txs_out, txs_in) = gasket::messaging::tokio::mpsc_channel(64);
 
@@ -32,6 +32,7 @@ pub async fn run(config: super::Config, _args: &Args) -> miette::Result<()> {
         chain,
         ledger,
         byron,
+        shelley,
         &config.retries,
     )
     .into_diagnostic()

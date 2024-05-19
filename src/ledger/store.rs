@@ -9,6 +9,11 @@ use super::*;
 
 trait LedgerTable {
     fn apply(wx: &WriteTransaction, delta: &LedgerDelta) -> Result<(), redb::Error>;
+    fn compact(
+        wx: &WriteTransaction,
+        slot: BlockSlot,
+        tombstone: &[TxoRef],
+    ) -> Result<(), redb::Error>;
 }
 
 const BLOCKS: TableDefinition<u64, &[u8; 32]> = TableDefinition::new("blocks");
@@ -29,13 +34,21 @@ impl LedgerTable for BlocksTable {
 
         Ok(())
     }
+
+    fn compact(
+        _wx: &WriteTransaction,
+        _slot: BlockSlot,
+        _tombstone: &[TxoRef],
+    ) -> Result<(), redb::Error> {
+        // do nothing
+        Ok(())
+    }
 }
 
 type UtxosKey<'a> = (&'a [u8; 32], u32);
 type UtxosValue<'a> = (u16, &'a [u8]);
 
 const UTXOS: TableDefinition<UtxosKey, UtxosValue> = TableDefinition::new("utxos");
-
 struct UtxosTable;
 
 impl LedgerTable for UtxosTable {
@@ -50,6 +63,21 @@ impl LedgerTable for UtxosTable {
 
         for (k, _) in delta.undone_utxo.iter() {
             let k: (&[u8; 32], u32) = (&k.0, k.1);
+            table.remove(k)?;
+        }
+
+        Ok(())
+    }
+
+    fn compact(
+        wx: &WriteTransaction,
+        _slot: BlockSlot,
+        tombstone: &[TxoRef],
+    ) -> Result<(), redb::Error> {
+        let mut table = wx.open_table(UTXOS)?;
+
+        for txo in tombstone {
+            let k: (&[u8; 32], u32) = (&txo.0, txo.1);
             table.remove(k)?;
         }
 
@@ -77,6 +105,15 @@ impl LedgerTable for PParamsTable {
 
         Ok(())
     }
+
+    fn compact(
+        _wx: &WriteTransaction,
+        _slot: BlockSlot,
+        _tombstone: &[TxoRef],
+    ) -> Result<(), redb::Error> {
+        // do nothing
+        Ok(())
+    }
 }
 
 pub const TOMBSTONES: MultimapTableDefinition<BlockSlot, (&[u8; 32], TxoIdx)> =
@@ -97,6 +134,18 @@ impl LedgerTable for TombstonesTable {
         if let Some(ChainPoint(slot, _)) = delta.undone_position.as_ref() {
             table.remove_all(slot)?;
         }
+
+        Ok(())
+    }
+
+    fn compact(
+        wx: &WriteTransaction,
+        slot: BlockSlot,
+        _tombstone: &[TxoRef],
+    ) -> Result<(), redb::Error> {
+        let mut table = wx.open_multimap_table(TOMBSTONES)?;
+
+        table.remove_all(slot)?;
 
         Ok(())
     }
@@ -145,6 +194,15 @@ impl LedgerTable for ByAddressIndex {
 
         Ok(())
     }
+
+    fn compact(
+        _wx: &WriteTransaction,
+        _slot: BlockSlot,
+        _tombstone: &[TxoRef],
+    ) -> Result<(), redb::Error> {
+        // do nothing
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
@@ -156,6 +214,7 @@ impl LedgerStore {
             .set_repair_callback(|x| {
                 warn!(progress = x.progress() * 100f64, "ledger db is repairing")
             })
+            //.create_with_backend(redb::backends::InMemoryBackend::new())?;
             .create(path)?;
 
         Ok(Self(Arc::new(inner)))
@@ -191,10 +250,45 @@ impl LedgerStore {
             UtxosTable::apply(&wx, delta)?;
             PParamsTable::apply(&wx, delta)?;
             TombstonesTable::apply(&wx, delta)?;
+            BlocksTable::apply(&wx, delta)?;
 
             // indexes?
-            BlocksTable::apply(&wx, delta)?;
-            ByAddressIndex::apply(&wx, delta)?;
+            //ByAddressIndex::apply(&wx, delta)?;
+        }
+
+        wx.commit()?;
+
+        Ok(())
+    }
+
+    pub fn compact(&mut self, until: BlockSlot) -> Result<(), redb::Error> {
+        let mut wx = self.0.begin_write()?;
+        wx.set_durability(redb::Durability::Eventual);
+
+        let tss: Vec<_> = {
+            let ts = wx.open_multimap_table(TOMBSTONES)?;
+            let out = ts
+                .range(..until)?
+                .map_ok(|(k, v)| {
+                    let values: Vec<_> = v
+                        .into_iter()
+                        .map_ok(|x| (x.value().0.clone(), x.value().1))
+                        .map_ok(|(hash, idx)| TxoRef(hash.into(), idx))
+                        .try_collect()?;
+
+                    Result::<_, redb::Error>::Ok((k.value(), values))
+                })
+                .try_collect()?;
+
+            out
+        };
+
+        for ts in tss {
+            let (slot, txos) = ts?;
+            UtxosTable::compact(&wx, slot, &txos)?;
+            PParamsTable::compact(&wx, slot, &txos)?;
+            BlocksTable::compact(&wx, slot, &txos)?;
+            TombstonesTable::compact(&wx, slot, &txos)?;
         }
 
         wx.commit()?;
