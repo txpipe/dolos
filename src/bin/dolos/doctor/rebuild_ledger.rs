@@ -44,7 +44,7 @@ pub fn run(config: &crate::Config, _args: &Args) -> miette::Result<()> {
             .into_diagnostic()
             .context("decoding block cbor")?;
 
-        let context = dolos::ledger::load_slice_for_block(&blockd, &ledger)
+        let context = dolos::ledger::load_slice_for_block(&blockd, &ledger, &[])
             .into_diagnostic()
             .context("loading block context")?;
 

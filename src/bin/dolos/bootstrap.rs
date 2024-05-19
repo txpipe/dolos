@@ -252,7 +252,7 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
             .into_diagnostic()
             .context("adding chain entry")?;
 
-        let context = dolos::ledger::load_slice_for_block(&blockd, &ledger)
+        let context = dolos::ledger::load_slice_for_block(&blockd, &ledger, &[])
             .into_diagnostic()
             .context("loading context for block")?;
 

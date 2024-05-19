@@ -63,36 +63,49 @@ pub struct LedgerSlice {
     pub resolved_inputs: HashMap<TxoRef, EraCbor>,
 }
 
-pub fn load_slice_for_block<S>(block: &MultiEraBlock, store: &S) -> Result<LedgerSlice, redb::Error>
+pub fn load_slice_for_block<S>(
+    block: &MultiEraBlock,
+    store: &S,
+    unapplied_deltas: &[LedgerDelta],
+) -> Result<LedgerSlice, redb::Error>
 where
     S: LedgerStore,
 {
-    let txs = block.txs();
+    let txs: HashMap<_, _> = block.txs().into_iter().map(|tx| (tx.hash(), tx)).collect();
 
     // TODO: turn this into "referenced utxos" intead of just consumed.
     let consumed: HashSet<_> = txs
-        .iter()
+        .values()
         .flat_map(MultiEraTx::consumes)
         .map(|utxo| TxoRef(*utxo.hash(), utxo.index() as u32))
         .collect();
 
     let consumed_same_block: HashMap<_, _> = txs
         .iter()
-        .flat_map(|tx| {
+        .flat_map(|(tx_hash, tx)| {
             tx.produces()
                 .into_iter()
-                .map(|(idx, utxo)| (TxoRef(tx.hash(), idx as u32), utxo.into()))
+                .map(|(idx, utxo)| (TxoRef(*tx_hash, idx as u32), utxo.into()))
         })
         .filter(|(x, _)| consumed.contains(x))
+        .collect();
+
+    let consumed_unapplied_deltas: HashMap<_, _> = unapplied_deltas
+        .iter()
+        .flat_map(|d| d.produced_utxo.iter().chain(d.recovered_stxi.iter()))
+        .filter(|(x, _)| consumed.contains(x))
+        .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
     let to_fetch = consumed
         .into_iter()
         .filter(|x| !consumed_same_block.contains_key(x))
+        .filter(|x| !consumed_unapplied_deltas.contains_key(x))
         .collect_vec();
 
     let mut resolved_inputs = store.get_utxos(to_fetch)?;
     resolved_inputs.extend(consumed_same_block);
+    resolved_inputs.extend(consumed_unapplied_deltas);
 
     // TODO: include reference scripts and collateral
 
@@ -133,11 +146,11 @@ pub fn compute_delta(
         ..Default::default()
     };
 
-    let txs = block.txs();
+    let txs: HashMap<_, _> = block.txs().into_iter().map(|tx| (tx.hash(), tx)).collect();
 
-    for tx in txs.iter() {
+    for (tx_hash, tx) in txs.iter() {
         for (idx, produced) in tx.produces() {
-            let uxto_ref = TxoRef(tx.hash(), idx as u32);
+            let uxto_ref = TxoRef(*tx_hash, idx as u32);
 
             delta.produced_utxo.insert(uxto_ref, produced.into());
         }
@@ -179,14 +192,16 @@ pub fn compute_undo_delta(
         ..Default::default()
     };
 
-    for tx in block.txs() {
+    let txs: HashMap<_, _> = block.txs().into_iter().map(|tx| (tx.hash(), tx)).collect();
+
+    for (tx_hash, tx) in txs.iter() {
         for (idx, body) in tx.produces() {
-            let utxo_ref = TxoRef(tx.hash(), idx as u32);
+            let utxo_ref = TxoRef(*tx_hash, idx as u32);
             delta.undone_utxo.insert(utxo_ref, body.into());
         }
     }
 
-    for tx in block.txs() {
+    for (_, tx) in txs.iter() {
         for consumed in tx.consumes() {
             let stxi_ref = TxoRef(*consumed.hash(), consumed.index() as u32);
 
@@ -322,7 +337,7 @@ mod tests {
         let block = MultiEraBlock::decode(&cbor).unwrap();
 
         let store = MockStore;
-        let context = super::load_slice_for_block(&block, &store).unwrap();
+        let context = super::load_slice_for_block(&block, &store, &[]).unwrap();
         let delta = super::compute_delta(&block, context).unwrap();
 
         for tx in block.txs() {
@@ -350,7 +365,7 @@ mod tests {
         let block = MultiEraBlock::decode(&cbor).unwrap();
 
         let store = MockStore;
-        let context = super::load_slice_for_block(&block, &store).unwrap();
+        let context = super::load_slice_for_block(&block, &store, &[]).unwrap();
 
         let apply = super::compute_delta(&block, context.clone()).unwrap();
         let undo = super::compute_undo_delta(&block, context).unwrap();
