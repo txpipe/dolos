@@ -1,4 +1,4 @@
-use pallas::ledger::configs::byron;
+use pallas::ledger::configs::{byron, shelley};
 use pallas::storage::rolldb::chain::Store as ChainStore;
 use pallas::storage::rolldb::wal::Store as WalStore;
 use serde::Deserialize;
@@ -47,6 +47,7 @@ pub fn pipeline(
     chain: ChainStore,
     ledger: LedgerStore,
     byron: byron::GenesisFile,
+    shelley: shelley::GenesisFile,
     retries: &Option<gasket::retries::Policy>,
 ) -> Result<Vec<gasket::runtime::Tether>, Error> {
     let pull_cursor = wal
@@ -74,7 +75,7 @@ pub fn pipeline(
 
     let mut roll = roll::Stage::new(wal, cursor_chain, cursor_ledger);
     let mut chain = chain::Stage::new(chain);
-    let mut ledger = ledger::Stage::new(ledger, byron);
+    let mut ledger = ledger::Stage::new(ledger, byron, shelley);
 
     let (to_roll, from_pull) = gasket::messaging::tokio::mpsc_channel(50);
     pull.downstream.connect(to_roll);

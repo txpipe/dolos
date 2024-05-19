@@ -1,5 +1,5 @@
 use gasket::framework::*;
-use pallas::ledger::configs::byron;
+use pallas::ledger::configs::{byron, shelley};
 use pallas::ledger::traverse::MultiEraBlock;
 use tracing::info;
 
@@ -12,6 +12,7 @@ pub type UpstreamPort = gasket::messaging::InputPort<RollEvent>;
 pub struct Stage {
     ledger: crate::ledger::store::LedgerStore,
     byron: byron::GenesisFile,
+    shelley: shelley::GenesisFile,
 
     pub upstream: UpstreamPort,
 
@@ -23,15 +24,31 @@ pub struct Stage {
 }
 
 impl Stage {
-    pub fn new(ledger: crate::ledger::store::LedgerStore, byron: byron::GenesisFile) -> Self {
+    pub fn new(
+        ledger: crate::ledger::store::LedgerStore,
+        byron: byron::GenesisFile,
+        shelley: shelley::GenesisFile,
+    ) -> Self {
         Self {
             ledger,
             byron,
+            shelley,
             upstream: Default::default(),
             block_count: Default::default(),
             wal_count: Default::default(),
         }
     }
+}
+
+fn last_immutable_block(
+    tip: BlockSlot,
+    byron: &byron::GenesisFile,
+    shelley: &shelley::GenesisFile,
+) -> BlockSlot {
+    let security_window =
+        (3.0 * byron.protocol_consts.k as f32) / (shelley.active_slots_coeff.unwrap());
+
+    tip.saturating_sub(security_window.ceil() as u64)
 }
 
 pub struct Worker;
@@ -62,6 +79,12 @@ impl gasket::framework::Worker<Stage> for Worker {
 
                 let delta = crate::ledger::compute_delta(&block, context).or_panic()?;
                 stage.ledger.apply(&[delta]).or_panic()?;
+
+                // Since we're moving forward, there's a chance that we have blocks that moved
+                // outside of the volatility window. We'll compact everything up until that
+                // point.
+                let to_compact = last_immutable_block(*slot, &stage.byron, &stage.shelley);
+                stage.ledger.compact(to_compact).or_panic()?;
             }
             RollEvent::Undo(slot, _, cbor) => {
                 info!(slot, "undoing block");
