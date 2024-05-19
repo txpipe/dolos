@@ -58,7 +58,7 @@ impl gasket::framework::Worker<Stage> for Worker {
 
                 let block = MultiEraBlock::decode(cbor).or_panic()?;
                 let context =
-                    crate::ledger::load_slice_for_block(&block, &stage.ledger).or_panic()?;
+                    crate::ledger::load_slice_for_block(&block, &stage.ledger, &[]).or_panic()?;
 
                 let delta = crate::ledger::compute_delta(&block, context).or_panic()?;
                 stage.ledger.apply(&[delta]).or_panic()?;
@@ -68,7 +68,7 @@ impl gasket::framework::Worker<Stage> for Worker {
 
                 let block = MultiEraBlock::decode(cbor).or_panic()?;
                 let context =
-                    crate::ledger::load_slice_for_block(&block, &stage.ledger).or_panic()?;
+                    crate::ledger::load_slice_for_block(&block, &stage.ledger, &[]).or_panic()?;
 
                 let delta = crate::ledger::compute_undo_delta(&block, context).or_panic()?;
                 stage.ledger.apply(&[delta]).or_panic()?;
