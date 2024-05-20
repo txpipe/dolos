@@ -40,17 +40,6 @@ impl Stage {
     }
 }
 
-fn last_immutable_block(
-    tip: BlockSlot,
-    byron: &byron::GenesisFile,
-    shelley: &shelley::GenesisFile,
-) -> BlockSlot {
-    let security_window =
-        (3.0 * byron.protocol_consts.k as f32) / (shelley.active_slots_coeff.unwrap());
-
-    tip.saturating_sub(security_window.ceil() as u64)
-}
-
 pub struct Worker;
 
 #[async_trait::async_trait(?Send)]
@@ -74,17 +63,14 @@ impl gasket::framework::Worker<Stage> for Worker {
                 info!(slot, "applying block");
 
                 let block = MultiEraBlock::decode(cbor).or_panic()?;
-                let context =
-                    crate::ledger::load_slice_for_block(&block, &stage.ledger, &[]).or_panic()?;
 
-                let delta = crate::ledger::compute_delta(&block, context).or_panic()?;
-                stage.ledger.apply(&[delta]).or_panic()?;
-
-                // Since we're moving forward, there's a chance that we have blocks that moved
-                // outside of the volatility window. We'll compact everything up until that
-                // point.
-                let to_compact = last_immutable_block(*slot, &stage.byron, &stage.shelley);
-                stage.ledger.compact(to_compact).or_panic()?;
+                crate::ledger::import_block_batch(
+                    &[block],
+                    &mut stage.ledger,
+                    &stage.byron,
+                    &stage.shelley,
+                )
+                .or_panic()?;
             }
             RollEvent::Undo(slot, _, cbor) => {
                 info!(slot, "undoing block");

@@ -1,8 +1,16 @@
+use dolos::ledger;
 use indicatif::{MultiProgress, ProgressBar, ProgressState, ProgressStyle};
+use itertools::Itertools;
 use miette::{bail, Context, IntoDiagnostic};
 use mithril_client::{ClientBuilder, MessageBuilder, MithrilError, MithrilResult};
-use pallas::ledger::traverse::MultiEraBlock;
-use std::{fmt::Write, path::Path, sync::Arc};
+use pallas::{
+    ledger::{
+        configs::{byron, shelley},
+        traverse::MultiEraBlock,
+    },
+    storage::rolldb::{chain, wal},
+};
+use std::{path::Path, sync::Arc};
 use tracing::{debug, info, warn};
 
 use crate::{common::Stores, MithrilConfig};
@@ -34,34 +42,65 @@ pub struct Args {
 }
 
 struct Feedback {
-    _multi: MultiProgress,
-    global_pb: ProgressBar,
+    multi: MultiProgress,
     download_pb: ProgressBar,
+    validate_pb: ProgressBar,
+    wal_pb: ProgressBar,
+    ledger_pb: ProgressBar,
+    chain_pb: ProgressBar,
+}
+
+impl Feedback {
+    fn indeterminate_progress_bar(owner: &mut MultiProgress) -> ProgressBar {
+        let pb = ProgressBar::new_spinner();
+
+        pb.set_style(
+            ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] {msg}").unwrap(),
+        );
+
+        owner.add(pb)
+    }
+
+    fn slot_progress_bar(owner: &mut MultiProgress) -> ProgressBar {
+        let pb = ProgressBar::new_spinner();
+
+        pb.set_style(
+            ProgressStyle::with_template(
+                "{spinner:.green} [{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} slots (eta: {eta}) {msg}",
+            )
+            .unwrap()
+            .progress_chars("#>-"),
+        );
+
+        owner.add(pb)
+    }
+
+    fn bytes_progress_bar(owner: &mut MultiProgress) -> ProgressBar {
+        let pb = ProgressBar::new_spinner();
+
+        pb.set_style(
+            ProgressStyle::with_template(
+                "{spinner:.green} [{elapsed_precise}] {bar:40.cyan/blue} {bytes}/{total_bytes} (eta: {eta}) {msg}",
+            )
+            .unwrap()
+            .progress_chars("#>-"),
+        );
+
+        owner.add(pb)
+    }
 }
 
 impl Default for Feedback {
     fn default() -> Self {
-        let multi = MultiProgress::new();
-
-        let global_pb = ProgressBar::new_spinner();
-        let global_pb = multi.add(global_pb);
-        global_pb.set_style(
-            ProgressStyle::with_template("{prefix:.bold.dim} {spinner} {wide_msg}")
-                .unwrap()
-                .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈ "),
-        );
-
-        let download_pb = ProgressBar::new(100);
-        let download_pb = multi.add(download_pb);
-        download_pb.set_style(ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({eta})")
-            .unwrap()
-            .with_key("eta", |state: &ProgressState, w: &mut dyn Write| write!(w, "{:.1}s", state.eta().as_secs_f64()).unwrap())
-            .progress_chars("#>-"));
+        let mut multi = MultiProgress::new();
 
         Self {
-            _multi: multi,
-            global_pb,
-            download_pb,
+            download_pb: Self::bytes_progress_bar(&mut multi),
+            validate_pb: Self::indeterminate_progress_bar(&mut multi),
+            wal_pb: Self::slot_progress_bar(&mut multi),
+            ledger_pb: Self::slot_progress_bar(&mut multi),
+            chain_pb: Self::slot_progress_bar(&mut multi),
+            multi,
         }
     }
 }
@@ -71,7 +110,7 @@ impl mithril_client::feedback::FeedbackReceiver for Feedback {
     async fn handle_event(&self, event: mithril_client::feedback::MithrilEvent) {
         match event {
             mithril_client::feedback::MithrilEvent::SnapshotDownloadStarted { .. } => {
-                self.global_pb.set_message("snapshot download started")
+                self.download_pb.set_message("snapshot download started")
             }
             mithril_client::feedback::MithrilEvent::SnapshotDownloadProgress {
                 downloaded_bytes,
@@ -80,10 +119,10 @@ impl mithril_client::feedback::FeedbackReceiver for Feedback {
             } => {
                 self.download_pb.set_length(size);
                 self.download_pb.set_position(downloaded_bytes);
-                self.global_pb.set_message("snapshot download progress");
+                self.download_pb.set_message("downloading Mithril snapshot");
             }
             mithril_client::feedback::MithrilEvent::SnapshotDownloadCompleted { .. } => {
-                self.global_pb.set_message("snapshot download completed");
+                self.validate_pb.set_message("snapshot download completed");
             }
             mithril_client::feedback::MithrilEvent::CertificateChainValidationStarted {
                 ..
@@ -92,7 +131,7 @@ impl mithril_client::feedback::FeedbackReceiver for Feedback {
                 certificate_chain_validation_id: id,
                 certificate_hash: hash,
             } => {
-                self.global_pb
+                self.validate_pb
                     .set_message(format!("certificate validated {id}: {hash}"));
             }
             mithril_client::feedback::MithrilEvent::CertificateChainValidated { .. } => {
@@ -178,6 +217,134 @@ fn open_empty_stores(config: &super::Config, force: bool) -> miette::Result<Opti
     }
 }
 
+fn import_hardano_into_wal(
+    immutable_path: &Path,
+    feedback: &Feedback,
+    wal: &mut pallas::storage::rolldb::wal::Store,
+) -> Result<(), miette::Error> {
+    let iter = pallas::storage::hardano::immutable::read_blocks(&immutable_path)
+        .into_diagnostic()
+        .context("reading immutable db")?;
+
+    let tip = pallas::storage::hardano::immutable::get_tip(&immutable_path)
+        .map_err(|err| miette::miette!(err.to_string()))
+        .context("reading immutable db tip")?
+        .ok_or(miette::miette!("immutable db has no tip"))?;
+
+    feedback.wal_pb.set_message("importing WAL");
+    feedback.wal_pb.set_length(tip.slot_or_default());
+
+    for block in iter {
+        let block = block.into_diagnostic().context("reading block")?;
+
+        let blockd = MultiEraBlock::decode(&block)
+            .into_diagnostic()
+            .context("decoding block cbor")?;
+
+        debug!(slot = blockd.slot(), "importing block");
+
+        wal.roll_forward(blockd.slot(), blockd.hash(), block.clone())
+            .into_diagnostic()
+            .context("adding chain entry")?;
+
+        feedback.wal_pb.set_position(blockd.slot());
+    }
+
+    Ok(())
+}
+
+fn rebuild_ledger_from_wal(
+    feedback: &Feedback,
+    wal: &wal::Store,
+    ledger: &mut impl ledger::LedgerStore,
+    byron: &byron::GenesisFile,
+    shelley: &shelley::GenesisFile,
+) -> miette::Result<()> {
+    let delta = dolos::ledger::compute_origin_delta(&byron);
+
+    ledger
+        .apply(&[delta])
+        .into_diagnostic()
+        .context("applying origin utxos")?;
+
+    let tip = wal
+        .find_tip()
+        .into_diagnostic()
+        .context("finding WAL tip")?
+        .ok_or(miette::miette!("no WAL tip found"))?;
+
+    feedback.wal_pb.set_message("re-building ledger");
+    feedback.ledger_pb.set_length(tip.0);
+
+    let remaining = wal.crawl_after(None);
+
+    for chunk in remaining.chunks(100).into_iter() {
+        let blocks: Vec<_> = chunk
+            .map_ok(|b| b.1)
+            .filter_map_ok(|l| match l {
+                pallas::storage::rolldb::wal::Log::Apply(_, _, body) => Some(body),
+                _ => None,
+            })
+            .try_collect()
+            .into_diagnostic()
+            .context("fetching blocks")?;
+
+        let blocks: Vec<_> = blocks
+            .iter()
+            .map(|body| MultiEraBlock::decode(body))
+            .try_collect()
+            .into_diagnostic()
+            .context("decoding blocks")?;
+
+        dolos::ledger::import_block_batch(&blocks, ledger, &byron, &shelley)
+            .into_diagnostic()
+            .context("importing blocks to ledger store")?;
+
+        blocks
+            .last()
+            .inspect(|b| feedback.ledger_pb.set_position(b.slot()));
+    }
+
+    Ok(())
+}
+
+fn rebuild_chain_from_wal(
+    feedback: &Feedback,
+    wal: &wal::Store,
+    chain: &mut chain::Store,
+) -> miette::Result<()> {
+    let (tip, _) = wal
+        .find_tip()
+        .into_diagnostic()
+        .context("finding wal tip")?
+        .ok_or(miette::miette!("wal is empty"))?;
+
+    feedback.chain_pb.set_message("rebuilding chain from wal");
+    feedback.chain_pb.set_length(tip);
+
+    let remaining = wal.crawl_after(None);
+
+    for block in remaining {
+        let (slot, log) = block.into_diagnostic()?;
+
+        debug!(slot, "filling up chain");
+
+        match log {
+            pallas::storage::rolldb::wal::Log::Apply(slot, hash, body) => {
+                chain
+                    .roll_forward(slot, hash, body)
+                    .into_diagnostic()
+                    .context("rolling chain forward")?;
+
+                feedback.chain_pb.set_position(slot);
+            }
+            _ => (),
+        };
+    }
+
+    Ok(())
+}
+
 pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
     //crate::common::setup_tracing(&config.logging)?;
     let feedback = Arc::new(Feedback::default());
@@ -218,77 +385,17 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
         warn!("skipping download, assuming download dir has snapshot and it's validated")
     }
 
-    let (byron, _, _) = crate::common::open_genesis_files(&config.genesis)?;
-
     let immutable_path = Path::new(&args.download_dir).join("immutable");
-
-    let iter = pallas::storage::hardano::immutable::read_blocks(&immutable_path)
-        .into_diagnostic()
-        .context("reading immutable db")?;
 
     let (mut wal, mut chain, mut ledger) = empty_stores.unwrap();
 
-    ledger
-        .apply(&[dolos::ledger::compute_origin_delta(&byron)])
-        .into_diagnostic()
-        .context("applying origin utxos")?;
+    let (byron, shelley, _) = crate::common::open_genesis_files(&config.genesis)?;
 
-    for block in iter {
-        let block = block.into_diagnostic().context("reading block")?;
-        feedback.global_pb.inc(1);
+    import_hardano_into_wal(&immutable_path, &feedback, &mut wal)?;
 
-        let blockd = MultiEraBlock::decode(&block)
-            .into_diagnostic()
-            .context("decoding block cbor")?;
+    rebuild_ledger_from_wal(&feedback, &wal, &mut ledger, &byron, &shelley)?;
 
-        debug!(slot = blockd.slot(), "importing block");
-
-        feedback
-            .global_pb
-            .set_message(format!("importing block {}", blockd.header().number()));
-
-        chain
-            .roll_forward(blockd.slot(), blockd.hash(), block.clone())
-            .into_diagnostic()
-            .context("adding chain entry")?;
-
-        let context = dolos::ledger::load_slice_for_block(&blockd, &ledger, &[])
-            .into_diagnostic()
-            .context("loading context for block")?;
-
-        let delta = dolos::ledger::compute_delta(&blockd, context)
-            .into_diagnostic()
-            .context("computing ledger delta")?;
-
-        ledger
-            .apply(&[delta])
-            .into_diagnostic()
-            .context("applyting ledger block")?;
-    }
-
-    let (tip, _) = chain
-        .find_tip()
-        .into_diagnostic()
-        .context("reading chain tip")?
-        .ok_or(miette::miette!("no tip found after bootstrap"))?;
-
-    // TODO: apply real formula for volatile safe margin
-    let volatile_start = tip - 1000;
-
-    let volatile = chain.crawl_after(Some(volatile_start));
-
-    for block in volatile {
-        let (slot, hash) = block.into_diagnostic()?;
-
-        debug!(slot, "filling up wal");
-
-        let body = chain
-            .get_block(hash)
-            .into_diagnostic()?
-            .ok_or(miette::miette!("block not found"))?;
-
-        wal.roll_forward(slot, hash, body).into_diagnostic()?;
-    }
+    rebuild_chain_from_wal(&feedback, &wal, &mut chain)?;
 
     if !args.retain_snapshot {
         info!("deleting downloaded snapshot");
@@ -297,6 +404,8 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
             .into_diagnostic()
             .context("removing downloaded snapshot")?;
     }
+
+    println!("bootstrap complete, run `dolos daemon` to start the node");
 
     Ok(())
 }
