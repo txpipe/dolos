@@ -8,6 +8,7 @@ use tracing::warn;
 use super::*;
 
 trait LedgerTable {
+    fn create(wx: &WriteTransaction) -> Result<(), redb::Error>;
     fn apply(wx: &WriteTransaction, delta: &LedgerDelta) -> Result<(), redb::Error>;
     fn compact(
         wx: &WriteTransaction,
@@ -20,6 +21,11 @@ const BLOCKS: TableDefinition<u64, &[u8; 32]> = TableDefinition::new("blocks");
 struct BlocksTable;
 
 impl LedgerTable for BlocksTable {
+    fn create(wx: &WriteTransaction) -> Result<(), redb::Error> {
+        wx.open_table(BLOCKS)?;
+        Ok(())
+    }
+
     fn apply(wx: &WriteTransaction, delta: &LedgerDelta) -> Result<(), redb::Error> {
         let mut table = wx.open_table(BLOCKS)?;
 
@@ -52,6 +58,11 @@ const UTXOS: TableDefinition<UtxosKey, UtxosValue> = TableDefinition::new("utxos
 struct UtxosTable;
 
 impl LedgerTable for UtxosTable {
+    fn create(wx: &WriteTransaction) -> Result<(), redb::Error> {
+        wx.open_table(UTXOS)?;
+        Ok(())
+    }
+
     fn apply(wx: &WriteTransaction, delta: &LedgerDelta) -> Result<(), redb::Error> {
         let mut table = wx.open_table(UTXOS)?;
 
@@ -89,6 +100,11 @@ const PPARAMS: TableDefinition<u64, (u16, &[u8])> = TableDefinition::new("pparam
 struct PParamsTable;
 
 impl LedgerTable for PParamsTable {
+    fn create(wx: &WriteTransaction) -> Result<(), redb::Error> {
+        wx.open_table(PPARAMS)?;
+        Ok(())
+    }
+
     fn apply(wx: &WriteTransaction, delta: &LedgerDelta) -> Result<(), redb::Error> {
         let mut table = wx.open_table(PPARAMS)?;
 
@@ -121,6 +137,11 @@ pub const TOMBSTONES: MultimapTableDefinition<BlockSlot, (&[u8; 32], TxoIdx)> =
 struct TombstonesTable;
 
 impl LedgerTable for TombstonesTable {
+    fn create(wx: &WriteTransaction) -> Result<(), redb::Error> {
+        wx.open_multimap_table(TOMBSTONES)?;
+        Ok(())
+    }
+
     fn apply(wx: &WriteTransaction, delta: &LedgerDelta) -> Result<(), redb::Error> {
         let mut table = wx.open_multimap_table(TOMBSTONES)?;
 
@@ -156,6 +177,11 @@ pub const BY_ADDRESS_INDEX: MultimapTableDefinition<&[u8], UtxosKey> =
 struct ByAddressIndex;
 
 impl LedgerTable for ByAddressIndex {
+    fn create(wx: &WriteTransaction) -> Result<(), redb::Error> {
+        wx.open_multimap_table(BY_ADDRESS_INDEX)?;
+        Ok(())
+    }
+
     fn apply(wx: &WriteTransaction, delta: &LedgerDelta) -> Result<(), redb::Error> {
         let mut table = wx.open_multimap_table(BY_ADDRESS_INDEX)?;
 
@@ -217,6 +243,13 @@ impl LedgerStore {
             //.create_with_backend(redb::backends::InMemoryBackend::new())?;
             .create(path)?;
 
+        let wx = inner.begin_write()?;
+        UtxosTable::create(&wx)?;
+        PParamsTable::create(&wx)?;
+        TombstonesTable::create(&wx)?;
+        BlocksTable::create(&wx)?;
+        wx.commit()?;
+
         Ok(Self(Arc::new(inner)))
     }
 
@@ -261,7 +294,7 @@ impl LedgerStore {
         Ok(())
     }
 
-    pub fn compact(&mut self, until: BlockSlot) -> Result<(), redb::Error> {
+    pub fn finalize(&mut self, until: BlockSlot) -> Result<(), redb::Error> {
         let mut wx = self.0.begin_write()?;
         wx.set_durability(redb::Durability::Eventual);
 
@@ -352,7 +385,15 @@ impl LedgerStore {
 }
 
 impl super::LedgerStore for LedgerStore {
-    fn get_utxos(&self, refs: Vec<TxoRef>) -> Result<HashMap<TxoRef, EraCbor>, redb::Error> {
-        self.get_utxos(refs)
+    fn get_utxos(&self, refs: Vec<TxoRef>) -> Result<HashMap<TxoRef, EraCbor>, LedgerError> {
+        LedgerStore::get_utxos(self, refs).map_err(super::LedgerError::StorageError)
+    }
+
+    fn apply(&mut self, deltas: &[LedgerDelta]) -> Result<(), LedgerError> {
+        LedgerStore::apply(self, deltas).map_err(super::LedgerError::StorageError)
+    }
+
+    fn finalize(&mut self, until: BlockSlot) -> Result<(), LedgerError> {
+        LedgerStore::finalize(self, until).map_err(super::LedgerError::StorageError)
     }
 }

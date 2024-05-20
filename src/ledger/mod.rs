@@ -1,4 +1,5 @@
 use itertools::Itertools;
+use pallas::ledger::configs::{byron, shelley};
 use pallas::ledger::traverse::{Era, MultiEraBlock, MultiEraTx};
 use pallas::{crypto::hash::Hash, ledger::traverse::MultiEraOutput};
 use std::collections::{HashMap, HashSet};
@@ -48,9 +49,20 @@ pub enum BrokenInvariant {
     MissingUtxo(TxoRef),
 }
 
+#[derive(Debug, Error)]
+pub enum LedgerError {
+    #[error("broken invariant")]
+    BrokenInvariant(#[source] BrokenInvariant),
+
+    #[error("storage error")]
+    StorageError(#[source] redb::Error),
+}
+
 /// A persistent store for ledger state
 pub trait LedgerStore {
-    fn get_utxos(&self, refs: Vec<TxoRef>) -> Result<HashMap<TxoRef, EraCbor>, redb::Error>;
+    fn get_utxos(&self, refs: Vec<TxoRef>) -> Result<HashMap<TxoRef, EraCbor>, LedgerError>;
+    fn apply(&mut self, deltas: &[LedgerDelta]) -> Result<(), LedgerError>;
+    fn finalize(&mut self, until: BlockSlot) -> Result<(), LedgerError>;
 }
 
 /// A slice of the ledger relevant for a specific task
@@ -67,7 +79,7 @@ pub fn load_slice_for_block<S>(
     block: &MultiEraBlock,
     store: &S,
     unapplied_deltas: &[LedgerDelta],
-) -> Result<LedgerSlice, redb::Error>
+) -> Result<LedgerSlice, LedgerError>
 where
     S: LedgerStore,
 {
@@ -239,6 +251,52 @@ pub fn compute_origin_delta(byron: &pallas::ledger::configs::byron::GenesisFile)
     delta
 }
 
+/// Computes the latest immutable slot
+///
+/// Takes the latest known tip, reads the relevant genesis config values and
+/// uses the security window guarantee formula from consensus to calculate the
+/// latest slot that can be considered immutable. This is used mainly to define
+/// which slots can be finalized in the ledger store (aka: compaction).
+pub fn lastest_immutable_slot(
+    tip: BlockSlot,
+    byron: &byron::GenesisFile,
+    shelley: &shelley::GenesisFile,
+) -> BlockSlot {
+    let security_window =
+        (3.0 * byron.protocol_consts.k as f32) / (shelley.active_slots_coeff.unwrap());
+
+    tip.saturating_sub(security_window.ceil() as u64)
+}
+
+pub fn import_block_batch<S: LedgerStore>(
+    blocks: &[MultiEraBlock],
+    store: &mut S,
+    byron: &byron::GenesisFile,
+    shelley: &shelley::GenesisFile,
+) -> Result<(), LedgerError> {
+    let mut deltas: Vec<LedgerDelta> = vec![];
+
+    for block in blocks {
+        let context = load_slice_for_block(block, store, &deltas)?;
+        let delta = compute_delta(block, context).map_err(LedgerError::BrokenInvariant)?;
+
+        deltas.push(delta);
+    }
+
+    store.apply(&deltas)?;
+
+    let tip = deltas
+        .last()
+        .and_then(|x| x.new_position.as_ref())
+        .map(|x| x.0)
+        .unwrap();
+
+    let to_finalize = lastest_immutable_slot(tip, byron, shelley);
+    store.finalize(to_finalize)?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use pallas::{crypto::hash::Hash, ledger::addresses::Address};
@@ -249,7 +307,7 @@ mod tests {
     struct MockStore;
 
     impl LedgerStore for MockStore {
-        fn get_utxos(&self, refs: Vec<TxoRef>) -> Result<HashMap<TxoRef, EraCbor>, redb::Error> {
+        fn get_utxos(&self, refs: Vec<TxoRef>) -> Result<HashMap<TxoRef, EraCbor>, LedgerError> {
             let mut out = HashMap::new();
 
             for i in refs {
@@ -257,6 +315,14 @@ mod tests {
             }
 
             Ok(out)
+        }
+
+        fn apply(&mut self, _deltas: &[LedgerDelta]) -> Result<(), LedgerError> {
+            todo!()
+        }
+
+        fn finalize(&mut self, until: BlockSlot) -> Result<(), LedgerError> {
+            todo!()
         }
     }
 
