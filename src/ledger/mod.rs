@@ -277,8 +277,8 @@ pub fn import_block_batch<S: LedgerStore>(
     let mut deltas: Vec<LedgerDelta> = vec![];
 
     for block in blocks {
-        let context = load_slice_for_block(&block, store, &deltas)?;
-        let delta = compute_delta(&block, context).map_err(LedgerError::BrokenInvariant)?;
+        let context = load_slice_for_block(block, store, &deltas)?;
+        let delta = compute_delta(block, context).map_err(LedgerError::BrokenInvariant)?;
 
         deltas.push(delta);
     }

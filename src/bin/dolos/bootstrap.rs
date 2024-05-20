@@ -1,5 +1,5 @@
 use dolos::ledger;
-use indicatif::{MultiProgress, ProgressBar, ProgressState, ProgressStyle};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use itertools::Itertools;
 use miette::{bail, Context, IntoDiagnostic};
 use mithril_client::{ClientBuilder, MessageBuilder, MithrilError, MithrilResult};
@@ -42,7 +42,7 @@ pub struct Args {
 }
 
 struct Feedback {
-    multi: MultiProgress,
+    _multi: MultiProgress,
     download_pb: ProgressBar,
     validate_pb: ProgressBar,
     wal_pb: ProgressBar,
@@ -100,7 +100,7 @@ impl Default for Feedback {
             wal_pb: Self::slot_progress_bar(&mut multi),
             ledger_pb: Self::slot_progress_bar(&mut multi),
             chain_pb: Self::slot_progress_bar(&mut multi),
-            multi,
+            _multi: multi,
         }
     }
 }
@@ -222,11 +222,11 @@ fn import_hardano_into_wal(
     feedback: &Feedback,
     wal: &mut pallas::storage::rolldb::wal::Store,
 ) -> Result<(), miette::Error> {
-    let iter = pallas::storage::hardano::immutable::read_blocks(&immutable_path)
+    let iter = pallas::storage::hardano::immutable::read_blocks(immutable_path)
         .into_diagnostic()
         .context("reading immutable db")?;
 
-    let tip = pallas::storage::hardano::immutable::get_tip(&immutable_path)
+    let tip = pallas::storage::hardano::immutable::get_tip(immutable_path)
         .map_err(|err| miette::miette!(err.to_string()))
         .context("reading immutable db tip")?
         .ok_or(miette::miette!("immutable db has no tip"))?;
@@ -260,7 +260,7 @@ fn rebuild_ledger_from_wal(
     byron: &byron::GenesisFile,
     shelley: &shelley::GenesisFile,
 ) -> miette::Result<()> {
-    let delta = dolos::ledger::compute_origin_delta(&byron);
+    let delta = dolos::ledger::compute_origin_delta(byron);
 
     ledger
         .apply(&[delta])
@@ -296,7 +296,7 @@ fn rebuild_ledger_from_wal(
             .into_diagnostic()
             .context("decoding blocks")?;
 
-        dolos::ledger::import_block_batch(&blocks, ledger, &byron, &shelley)
+        dolos::ledger::import_block_batch(&blocks, ledger, byron, shelley)
             .into_diagnostic()
             .context("importing blocks to ledger store")?;
 
@@ -329,16 +329,13 @@ fn rebuild_chain_from_wal(
 
         debug!(slot, "filling up chain");
 
-        match log {
-            pallas::storage::rolldb::wal::Log::Apply(slot, hash, body) => {
-                chain
-                    .roll_forward(slot, hash, body)
-                    .into_diagnostic()
-                    .context("rolling chain forward")?;
+        if let pallas::storage::rolldb::wal::Log::Apply(slot, hash, body) = log {
+            chain
+                .roll_forward(slot, hash, body)
+                .into_diagnostic()
+                .context("rolling chain forward")?;
 
-                feedback.chain_pb.set_position(slot);
-            }
-            _ => (),
+            feedback.chain_pb.set_position(slot);
         };
     }
 

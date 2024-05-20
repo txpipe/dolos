@@ -1,5 +1,5 @@
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use miette::{bail, Context, IntoDiagnostic};
+use miette::{Context, IntoDiagnostic};
 use tracing::debug;
 
 use crate::common::open_data_stores;
@@ -53,16 +53,13 @@ pub fn run(config: &crate::Config, _args: &Args) -> miette::Result<()> {
 
         debug!(slot, "filling up chain");
 
-        match log {
-            pallas::storage::rolldb::wal::Log::Apply(slot, hash, body) => {
-                chain
-                    .roll_forward(slot, hash, body)
-                    .into_diagnostic()
-                    .context("rolling chain forward")?;
+        if let pallas::storage::rolldb::wal::Log::Apply(slot, hash, body) = log {
+            chain
+                .roll_forward(slot, hash, body)
+                .into_diagnostic()
+                .context("rolling chain forward")?;
 
-                feedback.global_pb.set_position(slot);
-            }
-            _ => (),
+            feedback.global_pb.set_position(slot);
         };
     }
 
