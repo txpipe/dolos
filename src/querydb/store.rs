@@ -1,3 +1,4 @@
+use pallas;
 use pallas::{
     codec::minicbor::decode::Error as DecodingError,
     ledger::{
@@ -6,13 +7,10 @@ use pallas::{
     },
 };
 use redb::{
-    Database, ReadOnlyTable, ReadTransaction, ReadableMultimapTable, ReadableTable,
-    WriteTransaction,
+    Database, MultimapTableDefinition, ReadOnlyTable, ReadTransaction, ReadableTable,
+    TableDefinition, WriteTransaction,
 };
 use std::{ops::Deref, path::Path};
-
-use pallas;
-use redb::{MultimapTableDefinition, TableDefinition};
 use thiserror::Error;
 
 // use std::error::Error;
@@ -333,7 +331,7 @@ impl Store {
             .open_multimap_table(UTXO_BY_POLICY_INDEX)
             .map_err(Error::redb)?;
 
-        let res = match utxo_by_beacon_table.get(beacon_policy_id) {
+        match utxo_by_beacon_table.get(beacon_policy_id) {
             Ok(database_results) => {
                 let mut res = vec![];
                 for val in database_results.flatten() {
@@ -343,8 +341,7 @@ impl Store {
                 Ok(Box::new(res.into_iter()))
             }
             Err(err) => Err(Error::redb(err)),
-        };
-        res
+        }
     }
 }
 

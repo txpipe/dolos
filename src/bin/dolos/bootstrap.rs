@@ -47,7 +47,6 @@ struct Feedback {
     validate_pb: ProgressBar,
     wal_pb: ProgressBar,
     ledger_pb: ProgressBar,
-    chain_pb: ProgressBar,
 }
 
 impl Feedback {
@@ -99,7 +98,6 @@ impl Default for Feedback {
             validate_pb: Self::indeterminate_progress_bar(&mut multi),
             wal_pb: Self::slot_progress_bar(&mut multi),
             ledger_pb: Self::slot_progress_bar(&mut multi),
-            chain_pb: Self::slot_progress_bar(&mut multi),
             _multi: multi,
         }
     }
@@ -128,7 +126,7 @@ impl mithril_client::feedback::FeedbackReceiver for Feedback {
                 ..
             } => {
                 self.validate_pb
-                    .set_message(format!("certificate chain validation started"));
+                    .set_message("certificate chain validation started");
             }
             mithril_client::feedback::MithrilEvent::CertificateValidated {
                 certificate_hash: hash,
@@ -138,8 +136,7 @@ impl mithril_client::feedback::FeedbackReceiver for Feedback {
                     .set_message(format!("validating cert: {hash}"));
             }
             mithril_client::feedback::MithrilEvent::CertificateChainValidated { .. } => {
-                self.validate_pb
-                    .set_message(format!("certificate chain validated"));
+                self.validate_pb.set_message("certificate chain validated");
             }
         }
     }
@@ -254,7 +251,7 @@ fn import_hardano_into_wal(
         let blocks: Vec<_> = bodies
             .iter()
             .map(|b| {
-                let blockd = MultiEraBlock::decode(&b)
+                let blockd = MultiEraBlock::decode(b)
                     .into_diagnostic()
                     .context("decoding block cbor")?;
 
@@ -309,7 +306,7 @@ fn rebuild_ledger_from_wal(
         .into_diagnostic()
         .context("crawling wal")?
         .filter_forward()
-        .as_blocks()
+        .into_blocks()
         .flatten();
 
     for chunk in remaining.chunks(100).into_iter() {
@@ -317,7 +314,7 @@ fn rebuild_ledger_from_wal(
 
         let blocks: Vec<_> = bodies
             .iter()
-            .map(|b| MultiEraBlock::decode(&b))
+            .map(|b| MultiEraBlock::decode(b))
             .try_collect()
             .into_diagnostic()
             .context("decoding blocks")?;

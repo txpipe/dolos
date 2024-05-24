@@ -1,9 +1,9 @@
 use gasket::framework::*;
 use pallas::ledger::configs::{byron, shelley};
 use pallas::ledger::traverse::MultiEraBlock;
-use tracing::{debug, info, trace};
+use tracing::{debug, info};
 
-use crate::wal::{self, LogValue, WalReader};
+use crate::wal::{self, LogValue, WalReader as _};
 use crate::{ledger, prelude::*};
 
 pub type UpstreamPort = gasket::messaging::InputPort<RollEvent>;
@@ -57,7 +57,7 @@ impl Stage {
 
         info!(slot, "undoing block");
 
-        let block = MultiEraBlock::decode(&body).or_panic()?;
+        let block = MultiEraBlock::decode(body).or_panic()?;
         let context = crate::ledger::load_slice_for_block(&block, &self.ledger, &[]).or_panic()?;
 
         let delta = crate::ledger::compute_undo_delta(&block, context).or_panic()?;
@@ -71,7 +71,7 @@ impl Stage {
 
         info!(slot, "applying block");
 
-        let block = MultiEraBlock::decode(&body).or_panic()?;
+        let block = MultiEraBlock::decode(body).or_panic()?;
 
         crate::ledger::import_block_batch(&[block], &mut self.ledger, &self.byron, &self.shelley)
             .or_panic()?;

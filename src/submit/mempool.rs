@@ -5,7 +5,7 @@ use pallas::crypto::hash::Hash;
 use tokio::sync::RwLock;
 use tracing::info;
 
-use super::{monitor::BlockMonitorMessage, BlockHeight, Transaction};
+use super::{monitor::BlockMonitorMessage, BlockHeight, BlockSlot, Transaction};
 
 pub type SubmitEndpointReceiver = gasket::messaging::InputPort<Vec<Transaction>>;
 pub type BlockMonitorReceiver = gasket::messaging::InputPort<BlockMonitorMessage>;
@@ -25,7 +25,7 @@ pub struct MempoolState(pub RwLock<Monitor>, pub tokio::sync::Notify);
 
 #[derive(Default)]
 pub struct Monitor {
-    pub tip_height: BlockHeight,
+    pub tip_slot: BlockSlot,
     pub txs: HashMap<Hash<32>, Option<InclusionPoint>>,
 }
 
@@ -110,38 +110,38 @@ impl gasket::framework::Worker<Stage> for Worker {
             }
             MempoolEvent::ChainUpdate(monitor_msg) => {
                 match monitor_msg {
-                    BlockMonitorMessage::NewBlock(height, block_txs) => {
+                    BlockMonitorMessage::NewBlock(slot, block_txs) => {
                         let mut monitor = stage.state.0.write().await;
 
                         // set inclusion point for txs found in new block
                         for (tx_hash, inclusion) in monitor.txs.iter_mut() {
                             if block_txs.contains(tx_hash) {
-                                info!("setting inclusion point for {}: {height}", tx_hash);
-                                *inclusion = Some(*height)
+                                info!("setting inclusion point for {}: {slot}", tx_hash);
+                                *inclusion = Some(*slot)
                             }
                         }
 
                         // prune txs which have sufficient confirmations
                         monitor.txs.retain(|_, inclusion| {
-                            if let Some(inclusion_height) = inclusion {
-                                height - *inclusion_height <= stage.prune_height
+                            if let Some(inclusion_slot) = inclusion {
+                                slot - *inclusion_slot <= stage.prune_height
                             } else {
                                 true
                             }
                         });
 
-                        monitor.tip_height = *height;
+                        monitor.tip_slot = *slot;
                     }
-                    BlockMonitorMessage::Rollback(rb_height) => {
+                    BlockMonitorMessage::Rollback(rb_slot) => {
                         let mut monitor = stage.state.0.write().await;
 
                         // remove inclusion points later than rollback slot
                         for (tx_hash, inclusion) in monitor.txs.iter_mut() {
-                            if let Some(height) = inclusion {
-                                if *height > *rb_height {
+                            if let Some(slot) = inclusion {
+                                if *slot > *rb_slot {
                                     info!(
                                         "removing inclusion point for {} due to rollback ({} > {})",
-                                        tx_hash, height, rb_height
+                                        tx_hash, slot, rb_slot
                                     );
 
                                     *inclusion = None
@@ -149,7 +149,7 @@ impl gasket::framework::Worker<Stage> for Worker {
                             }
                         }
 
-                        monitor.tip_height = *rb_height;
+                        monitor.tip_slot = *rb_slot;
                     }
                 }
 

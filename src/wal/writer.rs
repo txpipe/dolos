@@ -17,7 +17,7 @@ pub trait WalWriter: WalReader {
             .crawl_from(Some(seq))?
             .rev()
             .filter_apply()
-            .as_blocks()
+            .into_blocks()
             .flatten()
             .collect();
 

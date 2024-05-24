@@ -1,5 +1,4 @@
 use bincode;
-use pallas::storage::rolldb::chain::BlockSlot;
 use redb::{Range, ReadableTable, TableDefinition};
 use std::{path::Path, sync::Arc};
 use tracing::warn;
@@ -139,7 +138,7 @@ impl super::WalReader for WalStore {
     }
 
     fn crawl_range<'a>(
-        &'a self,
+        &self,
         start: LogSeq,
         end: LogSeq,
     ) -> Result<Self::LogIterator<'a>, WalError> {
@@ -194,7 +193,7 @@ impl super::WalWriter for WalStore {
                 let pos_key = match &log {
                     LogValue::Apply(RawBlock { slot, .. }) => *slot as i128,
                     LogValue::Undo(RawBlock { slot, .. }) => *slot as i128,
-                    LogValue::Mark(x) => point_to_augmented_slot(&x),
+                    LogValue::Mark(x) => point_to_augmented_slot(x),
                 };
 
                 pos.insert(pos_key, next_seq)?;

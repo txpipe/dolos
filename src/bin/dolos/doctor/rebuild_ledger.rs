@@ -83,7 +83,7 @@ pub fn run(config: &crate::Config, _args: &Args) -> miette::Result<()> {
         .into_diagnostic()
         .context("crawling wal")?
         .filter_forward()
-        .as_blocks()
+        .into_blocks()
         .flatten();
 
     for chunk in remaining.chunks(100).into_iter() {
@@ -91,7 +91,7 @@ pub fn run(config: &crate::Config, _args: &Args) -> miette::Result<()> {
 
         let blocks: Vec<_> = bodies
             .iter()
-            .map(|b| MultiEraBlock::decode(&b))
+            .map(|b| MultiEraBlock::decode(b))
             .try_collect()
             .into_diagnostic()
             .context("decoding blocks")?;

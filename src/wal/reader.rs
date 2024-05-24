@@ -3,7 +3,7 @@ use super::*;
 pub trait ReadUtils<'a> {
     fn filter_apply(self) -> impl Iterator<Item = LogEntry>;
     fn filter_forward(self) -> impl Iterator<Item = LogEntry>;
-    fn as_blocks(self) -> impl Iterator<Item = Option<RawBlock>>;
+    fn into_blocks(self) -> impl Iterator<Item = Option<RawBlock>>;
 }
 
 impl<'a, T> ReadUtils<'a> for T
@@ -11,20 +11,14 @@ where
     T: Iterator<Item = LogEntry> + Sized,
 {
     fn filter_apply(self) -> impl Iterator<Item = LogEntry> {
-        self.filter(|(_, x)| match x {
-            LogValue::Apply(..) => true,
-            _ => false,
-        })
+        self.filter(|(_, x)| matches!(x, LogValue::Apply(..)))
     }
 
     fn filter_forward(self) -> impl Iterator<Item = LogEntry> {
-        self.filter(|(_, x)| match x {
-            LogValue::Apply(..) | LogValue::Mark(..) => true,
-            _ => false,
-        })
+        self.filter(|(_, x)| matches!(x, LogValue::Apply(..) | LogValue::Mark(..)))
     }
 
-    fn as_blocks(self) -> impl Iterator<Item = Option<RawBlock>> {
+    fn into_blocks(self) -> impl Iterator<Item = Option<RawBlock>> {
         self.map(|(_, x)| match x {
             LogValue::Apply(x) => Some(x.clone()),
             LogValue::Undo(x) => Some(x.clone()),
@@ -33,14 +27,14 @@ where
     }
 }
 
-#[trait_variant::make(WalReader: Send)]
-pub trait LocalWalReader: Clone {
+#[trait_variant::make(Send)]
+pub trait WalReader: Clone {
     type LogIterator<'a>: DoubleEndedIterator<Item = LogEntry> + Sized + Sync + Send;
 
     async fn tip_change(&self) -> Result<(), WalError>;
 
     fn crawl_range<'a>(
-        &'a self,
+        &self,
         start: LogSeq,
         end: LogSeq,
     ) -> Result<Self::LogIterator<'a>, WalError>;
@@ -93,7 +87,7 @@ pub trait LocalWalReader: Clone {
         Ok(out)
     }
 
-    fn find_intersect<'a>(
+    fn find_intersect(
         &self,
         intersect: &[ChainPoint],
     ) -> Result<Option<(LogSeq, ChainPoint)>, WalError> {
@@ -117,7 +111,7 @@ pub trait LocalWalReader: Clone {
         let iter = self
             .crawl_range(from, to)?
             .filter_apply()
-            .as_blocks()
+            .into_blocks()
             .flatten();
 
         Ok(iter)
@@ -127,13 +121,13 @@ pub trait LocalWalReader: Clone {
         &self,
         from: Option<&ChainPoint>,
         limit: usize,
-    ) -> Result<impl Iterator<Item = RawBlock>, WalError> {
+    ) -> Result<impl Iterator<Item = RawBlock> + '_, WalError> {
         let from = from.map(|p| self.assert_point(p)).transpose()?;
 
         let iter = self
             .crawl_from(from)?
             .filter_apply()
-            .as_blocks()
+            .into_blocks()
             .flatten()
             .take(limit);
 
@@ -146,7 +140,7 @@ pub trait LocalWalReader: Clone {
         let block = self
             .crawl_from(Some(seq))?
             .filter_apply()
-            .as_blocks()
+            .into_blocks()
             .flatten()
             .next()
             .ok_or(WalError::PointNotFound(point.clone()))?;

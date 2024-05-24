@@ -16,7 +16,7 @@ async fn send_batch(
         .crawl_range(s1, s2)
         .map_err(Error::server)?
         .filter_apply()
-        .as_blocks()
+        .into_blocks()
         .flatten();
 
     prot.send_start_batch().await.map_err(Error::server)?;

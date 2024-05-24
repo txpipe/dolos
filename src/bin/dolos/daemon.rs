@@ -41,21 +41,18 @@ pub async fn run(config: super::Config, _args: &Args) -> miette::Result<()> {
     .into_diagnostic()
     .context("bootstrapping sync pipeline")?;
 
-    // let submit = dolos::submit::pipeline(
-    //     &config.submit,
-    //     &config.upstream,
-    //     wal,
-    //     mempool.clone(),
-    //     txs_in,
-    //     &config.retries,
-    // )
-    // .into_diagnostic()
-    // .context("bootstrapping submit pipeline")?;
+    let submit = dolos::submit::pipeline(
+        &config.submit,
+        &config.upstream,
+        wal,
+        mempool.clone(),
+        txs_in,
+        &config.retries,
+    )
+    .into_diagnostic()
+    .context("bootstrapping submit pipeline")?;
 
-    //gasket::daemon::Daemon::new(sync.into_iter().chain(submit).collect()).
-    // block();
-
-    gasket::daemon::Daemon::new(sync.into_iter().collect()).block();
+    gasket::daemon::Daemon::new(sync.into_iter().chain(submit).collect()).block();
 
     server.abort();
 

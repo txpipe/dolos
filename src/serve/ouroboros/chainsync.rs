@@ -1,10 +1,7 @@
 use itertools::*;
-use pallas::{
-    crypto::hash::Hash,
-    network::miniprotocols::{
-        chainsync::{ClientRequest, N2NServer, Tip},
-        Point,
-    },
+use pallas::network::miniprotocols::{
+    chainsync::{ClientRequest, N2NServer, Tip},
+    Point,
 };
 use tracing::{debug, info, instrument};
 
@@ -19,11 +16,6 @@ pub struct State<'a> {
     connection: N2NServer,
 }
 
-fn db_tip_to_protocol(tip: (u64, Hash<32>)) -> Tip {
-    // TODO: get block height from db
-    Tip(Point::Specific(tip.0, tip.1.to_vec()), 0)
-}
-
 #[instrument(skip_all)]
 async fn handle_next_request(state: &mut State<'_>) -> Result<(), Error> {
     info!("handling next request");
@@ -33,7 +25,7 @@ async fn handle_next_request(state: &mut State<'_>) -> Result<(), Error> {
         .as_mut()
         .ok_or(Error::custom("requesting next without intersection"))?
         .filter_forward()
-        .as_blocks()
+        .into_blocks()
         .flatten()
         .next();
 
@@ -58,7 +50,7 @@ async fn handle_next_request(state: &mut State<'_>) -> Result<(), Error> {
             .map_err(Error::server)?;
 
         debug!("waiting for tip change notification");
-        state.wal.tip_change().await;
+        state.wal.tip_change().await.map_err(Error::server)?;
 
         todo!("tip chainsync not implemented yet");
     }

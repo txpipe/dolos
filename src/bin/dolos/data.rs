@@ -2,10 +2,7 @@ use miette::IntoDiagnostic;
 use pallas::{ledger::traverse::MultiEraBlock, storage::rolldb::chain};
 use std::path::Path;
 
-use dolos::{
-    ledger::ChainPoint,
-    wal::{self, WalReader as _},
-};
+use dolos::{ledger::ChainPoint, wal::WalReader as _};
 
 #[allow(dead_code)]
 fn dump_txs(chain: &chain::Store) -> miette::Result<()> {

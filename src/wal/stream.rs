@@ -5,7 +5,7 @@ use super::*;
 pub struct WalStream;
 
 impl WalStream {
-    pub fn start<'a, R>(wal: R, from: super::LogSeq) -> impl Stream<Item = LogEntry>
+    pub fn start<R>(wal: R, from: super::LogSeq) -> impl Stream<Item = LogEntry>
     where
         R: WalReader,
     {

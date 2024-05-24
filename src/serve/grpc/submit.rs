@@ -113,7 +113,7 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
                     let stage = if let Some(maybe_inclusion) = mempool_view.txs.get(&(*hash).into()) {
                         if let Some(inclusion) = maybe_inclusion {
                             // TODO: spec does not have way to detail number of confirmations
-                            let _confirmations = mempool_view.tip_height - inclusion;
+                            let _confirmations = mempool_view.tip_slot - inclusion;
 
                             // tx is included on chain
                             SubmitStage::Confirmed
