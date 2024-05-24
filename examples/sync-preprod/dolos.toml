@@ -4,7 +4,7 @@ network_magic = 1
 is_testnet = true
 
 [storage]
-path = "./tmp/rolldb"
+path = "./data"
 wal_size = 1000
 
 [sync]
@@ -30,6 +30,6 @@ listen_address = "[::]:30013"
 magic = 1
 
 [logging]
-max_level = "info"
-# include_pallas = true
+max_level = "debug"
+include_pallas = true
 # include_tonic = true

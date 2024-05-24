@@ -1,73 +1,61 @@
-use pallas::network::miniprotocols::{
-    blockfetch::{self, BlockRequest},
-    Point,
+use pallas::network::miniprotocols::blockfetch;
+use tracing::{debug, info};
+
+use crate::{
+    prelude::Error,
+    wal::{redb::WalStore, LogSeq, ReadUtils, WalReader},
 };
-use pallas::storage::rolldb::chain;
-use tracing::{error, info, warn};
 
-use crate::prelude::Error;
-
-pub async fn handle_blockfetch(
-    chain: chain::Store,
-    mut protocol: blockfetch::Server,
+async fn send_batch(
+    wal: &WalStore,
+    s1: LogSeq,
+    s2: LogSeq,
+    prot: &mut blockfetch::Server,
 ) -> Result<(), Error> {
-    loop {
-        match protocol.recv_while_idle().await {
-            Ok(Some(BlockRequest((p1, p2)))) => {
-                let from = match p1 {
-                    Point::Origin => None,
-                    Point::Specific(slot, hash) => {
-                        let parsed_hash = TryInto::<[u8; 32]>::try_into(hash)
-                            .map_err(|_| Error::client("malformed hash"))?
-                            .into();
+    let iter = wal
+        .crawl_range(s1, s2)
+        .map_err(Error::server)?
+        .filter_apply()
+        .into_blocks()
+        .flatten();
 
-                        Some((slot, parsed_hash))
-                    }
-                };
+    prot.send_start_batch().await.map_err(Error::server)?;
 
-                let to = match p2 {
-                    Point::Origin => return protocol.send_no_blocks().await.map_err(Error::server),
-                    Point::Specific(slot, hash) => {
-                        let parsed_hash = TryInto::<[u8; 32]>::try_into(hash)
-                            .map_err(|_| Error::client("malformed hash"))?
-                            .into();
-
-                        (slot, parsed_hash)
-                    }
-                };
-
-                if let Some(mut iter) = chain.read_chain_range(from, to).map_err(Error::storage)? {
-                    protocol.send_start_batch().await.map_err(Error::server)?;
-
-                    for point in iter.by_ref() {
-                        let (_, hash) = point.map_err(Error::storage)?;
-
-                        let block_bytes = match chain.get_block(hash).map_err(Error::storage)? {
-                            Some(b) => b,
-                            None => {
-                                error!("could not find block bytes for {hash}");
-                                return Err(Error::server(
-                                    "could not find block bytes for block in chainkv",
-                                ));
-                            }
-                        };
-
-                        protocol
-                            .send_block(block_bytes)
-                            .await
-                            .map_err(Error::server)?;
-                    }
-
-                    protocol.send_batch_done().await.map_err(Error::server)?;
-                } else {
-                    return protocol.send_no_blocks().await.map_err(Error::server);
-                }
-            }
-            Ok(None) => info!("peer ended blockfetch protocol"),
-            Err(e) => {
-                warn!("error receiving blockfetch message: {:?}", e);
-                return Err(Error::client(e));
-            }
-        }
+    for crate::wal::RawBlock { body, .. } in iter {
+        prot.send_block(body.to_vec())
+            .await
+            .map_err(Error::server)?;
     }
+
+    prot.send_batch_done().await.map_err(Error::server)?;
+
+    Ok(())
+}
+
+async fn process_request(
+    wal: &WalStore,
+    req: blockfetch::BlockRequest,
+    prot: &mut blockfetch::Server,
+) -> Result<(), Error> {
+    let (p1, p2) = req.0;
+
+    debug!(?p1, ?p2, "processing equest");
+
+    let s1 = wal.locate_point(&p1.into()).map_err(Error::server)?;
+    let s2 = wal.locate_point(&p2.into()).map_err(Error::server)?;
+
+    match (s1, s2) {
+        (Some(s1), Some(s2)) if s1 <= s2 => send_batch(wal, s1, s2, prot).await,
+        _ => prot.send_no_blocks().await.map_err(Error::server),
+    }
+}
+
+pub async fn handle_blockfetch(wal: WalStore, mut prot: blockfetch::Server) -> Result<(), Error> {
+    while let Some(req) = prot.recv_while_idle().await.map_err(Error::server)? {
+        process_request(&wal, req, &mut prot).await?;
+    }
+
+    info!("peer ended blockfetch protocol");
+
+    Ok(())
 }

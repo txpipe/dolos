@@ -2,7 +2,7 @@ use miette::IntoDiagnostic;
 use pallas::{ledger::traverse::MultiEraBlock, storage::rolldb::chain};
 use std::path::Path;
 
-use dolos::ledger::ChainPoint;
+use dolos::{ledger::ChainPoint, wal::WalReader as _};
 
 #[allow(dead_code)]
 fn dump_txs(chain: &chain::Store) -> miette::Result<()> {
@@ -29,22 +29,20 @@ pub struct Args {}
 pub fn run(config: &super::Config, _args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging)?;
 
-    let (wal, chain, ledger) = crate::common::open_data_stores(config)?;
+    let (wal, ledger) = crate::common::open_data_stores(config)?;
 
-    if let Some((slot, hash)) = wal.find_tip().unwrap() {
-        println!("found WAL tip");
-        println!("slot: {slot}, hash: {hash}");
+    if let Some((seq, point)) = wal.crawl_from(None).unwrap().next() {
+        println!("found WAL start");
+        println!("seq: {seq}, point: {point:?}");
     } else {
         println!("WAL is empty");
     }
 
-    println!("---");
-
-    if let Some((slot, hash)) = chain.find_tip().unwrap() {
-        println!("found chain tip");
-        println!("slot: {slot}, hash: {hash}");
+    if let Some((seq, point)) = wal.find_tip().unwrap() {
+        println!("found WAL tip");
+        println!("seq: {seq}, point: {point:?}");
     } else {
-        println!("chain is empty");
+        println!("WAL is empty");
     }
 
     println!("---");
@@ -53,7 +51,7 @@ pub fn run(config: &super::Config, _args: &Args) -> miette::Result<()> {
         println!("found ledger tip");
         println!("slot: {slot}, hash: {hash}");
     } else {
-        println!("chain is empty");
+        println!("ledger is empty");
     }
 
     // println!("---");

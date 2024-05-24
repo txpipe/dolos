@@ -1,16 +1,14 @@
 use futures_core::Stream;
+use futures_util::StreamExt;
+use itertools::Itertools;
 use pallas::interop::utxorpc::{spec as u5c, Mapper};
-use pallas::{
-    crypto::hash::Hash,
-    storage::rolldb::{chain, wal},
-};
 use std::pin::Pin;
-use tokio_stream::StreamExt;
 use tonic::{Request, Response, Status};
 
-fn bytes_to_hash(raw: &[u8]) -> Hash<32> {
-    let array: [u8; 32] = raw.try_into().unwrap();
-    Hash::<32>::new(array)
+use crate::wal::{self, RawBlock};
+
+fn u5c_to_chain_point(block_ref: u5c::sync::BlockRef) -> wal::ChainPoint {
+    wal::ChainPoint::Specific(block_ref.index, block_ref.hash.as_ref().into())
 }
 
 // fn raw_to_anychain2(raw: &[u8]) -> AnyChainBlock {
@@ -18,8 +16,13 @@ fn bytes_to_hash(raw: &[u8]) -> Hash<32> {
 //     AnyChainBlock { chain: Some(block) }
 // }
 
-fn raw_to_anychain(mapper: &Mapper<super::Context>, raw: &[u8]) -> u5c::sync::AnyChainBlock {
-    let block = mapper.map_block_cbor(raw);
+fn raw_to_anychain(
+    mapper: &Mapper<super::Context>,
+    raw: &wal::RawBlock,
+) -> u5c::sync::AnyChainBlock {
+    let RawBlock { body, .. } = raw;
+
+    let block = mapper.map_block_cbor(body);
 
     u5c::sync::AnyChainBlock {
         chain: u5c::sync::any_chain_block::Chain::Cardano(block).into(),
@@ -28,42 +31,41 @@ fn raw_to_anychain(mapper: &Mapper<super::Context>, raw: &[u8]) -> u5c::sync::An
 
 fn roll_to_tip_response(
     mapper: &Mapper<super::Context>,
-    log: wal::Log,
+    log: &wal::LogValue,
 ) -> u5c::sync::FollowTipResponse {
     u5c::sync::FollowTipResponse {
         action: match log {
-            wal::Log::Apply(_, _, block) => {
-                u5c::sync::follow_tip_response::Action::Apply(raw_to_anychain(mapper, &block))
-                    .into()
+            wal::LogValue::Apply(x) => {
+                u5c::sync::follow_tip_response::Action::Apply(raw_to_anychain(mapper, x)).into()
             }
-            wal::Log::Undo(_, _, block) => {
-                u5c::sync::follow_tip_response::Action::Undo(raw_to_anychain(mapper, &block)).into()
+            wal::LogValue::Undo(x) => {
+                u5c::sync::follow_tip_response::Action::Undo(raw_to_anychain(mapper, x)).into()
             }
             // TODO: shouldn't we have a u5c event for origin?
-            wal::Log::Origin => None,
-            wal::Log::Mark(..) => None,
+            wal::LogValue::Mark(..) => None,
         },
     }
 }
 
-pub struct ChainSyncServiceImpl {
-    wal: wal::Store,
-    chain: chain::Store,
+pub struct ChainSyncServiceImpl<W: wal::WalReader> {
+    wal: W,
     mapper: pallas::interop::utxorpc::Mapper<super::Context>,
 }
 
-impl ChainSyncServiceImpl {
-    pub fn new(wal: wal::Store, chain: chain::Store) -> Self {
+impl<W: wal::WalReader> ChainSyncServiceImpl<W> {
+    pub fn new(wal: W) -> Self {
         Self {
             wal,
-            chain,
             mapper: pallas::interop::utxorpc::Mapper::default(),
         }
     }
 }
 
 #[async_trait::async_trait]
-impl u5c::sync::chain_sync_service_server::ChainSyncService for ChainSyncServiceImpl {
+impl<W> u5c::sync::chain_sync_service_server::ChainSyncService for ChainSyncServiceImpl<W>
+where
+    W: wal::WalReader + Send + Sync + 'static,
+{
     type FollowTipStream =
         Pin<Box<dyn Stream<Item = Result<u5c::sync::FollowTipResponse, Status>> + Send + 'static>>;
 
@@ -73,18 +75,14 @@ impl u5c::sync::chain_sync_service_server::ChainSyncService for ChainSyncService
     ) -> Result<Response<u5c::sync::FetchBlockResponse>, Status> {
         let message = request.into_inner();
 
-        let blocks: Result<Vec<_>, _> = message
-            .r#ref
-            .iter()
-            .map(|r| bytes_to_hash(&r.hash))
-            .map(|hash| self.chain.get_block(hash))
-            .collect();
+        let points: Vec<_> = message.r#ref.into_iter().map(u5c_to_chain_point).collect();
 
-        let out: Vec<_> = blocks
+        let out = self
+            .wal
+            .read_sparse_blocks(&points)
             .map_err(|_err| Status::internal("can't query block"))?
-            .iter()
-            .flatten()
-            .map(|b| raw_to_anychain(&self.mapper, b))
+            .into_iter()
+            .map(|x| raw_to_anychain(&self.mapper, &x))
             .collect();
 
         let response = u5c::sync::FetchBlockResponse { block: out };
@@ -97,20 +95,23 @@ impl u5c::sync::chain_sync_service_server::ChainSyncService for ChainSyncService
         request: Request<u5c::sync::DumpHistoryRequest>,
     ) -> Result<Response<u5c::sync::DumpHistoryResponse>, Status> {
         let msg = request.into_inner();
-        let from = msg.start_token.map(|r| r.index).unwrap_or_default();
+
+        let from = msg.start_token.map(u5c_to_chain_point);
+
         let len = msg.max_items as usize + 1;
 
-        let mut page: Vec<_> = self
-            .chain
-            .read_chain_page(from, len)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_err| Status::internal("can't query history"))?;
+        let mut page = self
+            .wal
+            .read_block_page(from.as_ref(), len)
+            .map_err(|_err| Status::internal("can't query block"))?
+            .collect_vec();
 
         let next_token = if page.len() == len {
-            let (next_slot, next_hash) = page.remove(len - 1);
+            let RawBlock { slot, hash, .. } = page.remove(len - 1);
+
             Some(u5c::sync::BlockRef {
-                index: next_slot,
-                hash: next_hash.to_vec().into(),
+                index: slot,
+                hash: hash.to_vec().into(),
             })
         } else {
             None
@@ -118,14 +119,7 @@ impl u5c::sync::chain_sync_service_server::ChainSyncService for ChainSyncService
 
         let blocks = page
             .into_iter()
-            .map(|(_, hash)| self.chain.get_block(hash))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_err| Status::internal("can't query history"))?
-            .into_iter()
-            .map(|x| x.ok_or(Status::internal("can't query history")))
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .map(|raw| raw_to_anychain(&self.mapper, &raw))
+            .map(|x| raw_to_anychain(&self.mapper, &x))
             .collect();
 
         let response = u5c::sync::DumpHistoryResponse {
@@ -144,14 +138,21 @@ impl u5c::sync::chain_sync_service_server::ChainSyncService for ChainSyncService
 
         let intersect: Vec<_> = request
             .intersect
-            .iter()
-            .map(|x| (x.index, bytes_to_hash(&x.hash)))
+            .into_iter()
+            .map(u5c_to_chain_point)
             .collect();
 
-        let mapper = self.mapper.clone();
-        let s = wal::RollStream::intersect(self.wal.clone(), intersect)
-            .map(move |log| Ok(roll_to_tip_response(&mapper, log)));
+        let (from_seq, _) = self
+            .wal
+            .find_intersect(&intersect)
+            .map_err(|_err| Status::internal("can't read WAL"))?
+            .ok_or(Status::internal("can't find WAL sequence"))?;
 
-        Ok(Response::new(Box::pin(s)))
+        let mapper = self.mapper.clone();
+
+        let stream = wal::WalStream::start(self.wal.clone(), from_seq)
+            .map(move |(_, log)| Ok(roll_to_tip_response(&mapper, &log)));
+
+        Ok(Response::new(Box::pin(stream)))
     }
 }

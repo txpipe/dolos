@@ -55,8 +55,8 @@ struct Cli {
 #[derive(Deserialize)]
 pub struct StorageConfig {
     path: Option<std::path::PathBuf>,
+    #[allow(dead_code)]
     wal_size: Option<u64>,
-    immutable_overlap: Option<u64>,
 }
 
 #[derive(Deserialize)]

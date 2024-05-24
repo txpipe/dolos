@@ -1,11 +1,11 @@
-use std::sync::Arc;
-
 use futures_util::future::join_all;
-use pallas::storage::rolldb::{chain, wal};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use tracing::info;
 
-use crate::{ledger::store::LedgerStore, prelude::*};
+use crate::ledger::store::LedgerStore;
+use crate::prelude::*;
+use crate::wal::redb::WalStore;
 
 pub mod grpc;
 pub mod ouroboros;
@@ -22,8 +22,7 @@ pub struct Config {
 /// gRPC, Ouroboros or both protocols.
 pub async fn serve(
     config: Config,
-    wal: wal::Store,
-    chain: chain::Store,
+    wal: WalStore,
     ledger: LedgerStore,
     mempool: Arc<crate::submit::MempoolState>,
     txs_out: gasket::messaging::tokio::ChannelSendAdapter<Vec<crate::submit::Transaction>>,
@@ -35,7 +34,6 @@ pub async fn serve(
         tasks.push(tokio::spawn(grpc::serve(
             cfg,
             wal.clone(),
-            chain.clone(),
             ledger,
             mempool,
             txs_out,
@@ -44,11 +42,7 @@ pub async fn serve(
 
     if let Some(cfg) = config.ouroboros {
         info!("found Ouroboros config");
-        tasks.push(tokio::spawn(ouroboros::serve(
-            cfg,
-            chain.clone(),
-            wal.clone(),
-        )));
+        tasks.push(tokio::spawn(ouroboros::serve(cfg, wal.clone())));
     }
 
     // TODO: we should stop if any of the tasks breaks

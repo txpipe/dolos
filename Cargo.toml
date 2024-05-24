@@ -19,7 +19,7 @@ pallas = { git = "https://github.com/txpipe/pallas.git", features = ["unstable"]
 gasket = { version = "^0.8", features = ["derive"] }
 # gasket = { path = "../../construkts/gasket-rs/gasket", features = ["derive"] }
 
-redb = { version = "1.5.1" }
+redb = { version = "^2" }
 hex = "0.4.3"
 bech32 = "0.8.1"
 clap = { version = "4.3.0", features = ["derive"] }
@@ -50,6 +50,7 @@ mithril-client = { version = "^0.8", optional = true, features = ["fs"] }
 protoc-wkt = "1.0.0"
 itertools = "0.12.1"
 indicatif = "0.17.8"
+trait-variant = "0.1.2"
 
 [dev-dependencies]
 tempfile = "3.3.0"

@@ -3,27 +3,25 @@
 use std::time::Duration;
 
 use gasket::framework::*;
-use pallas::{
-    ledger::traverse::MultiEraBlock,
-    storage::rolldb::wal::{self, Log},
-};
+use pallas::ledger::traverse::MultiEraBlock;
 use tracing::debug;
 
-use super::{BlockHeight, TxHash};
+use super::{BlockSlot, TxHash};
+
+use crate::wal::{self, WalReader};
 
 pub type MempoolSender = gasket::messaging::OutputPort<BlockMonitorMessage>;
 
 #[derive(Clone, Debug)]
 pub enum BlockMonitorMessage {
-    NewBlock(BlockHeight, Vec<TxHash>),
-    Rollback(BlockHeight),
+    NewBlock(BlockSlot, Vec<TxHash>),
+    Rollback(BlockSlot),
 }
 
 #[derive(Stage)]
 #[stage(name = "monitor", unit = "()", worker = "Worker")]
 pub struct Stage {
-    wal: wal::Store,
-    last_wal_seq: u64,
+    wal: wal::redb::WalStore,
 
     pub downstream_mempool: MempoolSender,
     // #[metric]
@@ -31,27 +29,28 @@ pub struct Stage {
 }
 
 impl Stage {
-    pub fn new(wal: wal::Store, last_wal_seq: u64) -> Self {
+    pub fn new(wal: wal::redb::WalStore) -> Self {
         Self {
             wal,
-            last_wal_seq,
             downstream_mempool: Default::default(),
         }
     }
 }
 
-pub struct Worker;
+pub struct Worker(Option<wal::LogSeq>);
 
 #[async_trait::async_trait(?Send)]
 impl gasket::framework::Worker<Stage> for Worker {
-    async fn bootstrap(_stage: &Stage) -> Result<Self, WorkerError> {
-        Ok(Self)
+    async fn bootstrap(stage: &Stage) -> Result<Self, WorkerError> {
+        let cursor = stage.wal.find_tip().or_panic()?.map(|(seq, _)| seq);
+
+        Ok(Self(cursor))
     }
 
     /// Wait until WAL tip changes
     async fn schedule(&mut self, stage: &mut Stage) -> Result<WorkSchedule<()>, WorkerError> {
         tokio::select! {
-            _ = stage.wal.tip_change.notified() => {
+            _ = stage.wal.tip_change() => {
                 debug!("tip changed");
                 Ok(WorkSchedule::Unit(()))
             }
@@ -62,41 +61,39 @@ impl gasket::framework::Worker<Stage> for Worker {
     }
 
     async fn execute(&mut self, _: &(), stage: &mut Stage) -> Result<(), WorkerError> {
-        for entry in stage.wal.crawl_after(Some(stage.last_wal_seq)) {
-            let (seq, log) = entry.or_restart()?;
+        let iter = stage.wal.crawl_from(self.0).or_panic()?.skip(1);
 
+        for (seq, log) in iter {
             match log {
-                Log::Apply(_, _, body) => {
+                wal::LogValue::Apply(wal::RawBlock { slot, body, .. }) => {
                     let block = MultiEraBlock::decode(&body).or_panic()?;
 
-                    let height = block.number();
                     let txs = block.txs().iter().map(|x| x.hash()).collect::<Vec<_>>();
 
                     debug!("sending chain update to mempool");
 
                     stage
                         .downstream_mempool
-                        .send(BlockMonitorMessage::NewBlock(height, txs).into())
+                        .send(BlockMonitorMessage::NewBlock(slot, txs).into())
                         .await
                         .or_panic()?;
                 }
-                Log::Mark(_, _, body) => {
-                    let block = MultiEraBlock::decode(&body).or_panic()?;
-                    let height = block.number();
-
+                wal::LogValue::Mark(wal::ChainPoint::Specific(slot, _)) => {
                     debug!("sending chain update to mempool");
 
                     stage
                         .downstream_mempool
-                        .send(BlockMonitorMessage::Rollback(height).into())
+                        .send(BlockMonitorMessage::Rollback(slot).into())
                         .await
                         .or_panic()?;
                 }
-                Log::Undo(_, _, _) => (),
-                Log::Origin => (),
+                wal::LogValue::Undo(..) => {
+                    // TODO: this should re-instate txs
+                }
+                _ => (),
             }
 
-            stage.last_wal_seq = seq;
+            self.0 = Some(seq);
         }
 
         Ok(())
