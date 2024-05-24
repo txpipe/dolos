@@ -1,12 +1,12 @@
 use pallas::crypto::hash::Hash;
 use pallas::interop::utxorpc::spec as u5c;
-use pallas::storage::rolldb::{chain, wal};
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc};
 use tonic::transport::{Certificate, Server, ServerTlsConfig};
 use tracing::info;
 
 use crate::ledger::store::LedgerStore;
+use crate::wal::redb::WalStore;
 use crate::{prelude::*, submit::Transaction};
 
 mod query;
@@ -21,15 +21,14 @@ pub struct Config {
 
 pub async fn serve(
     config: Config,
-    wal: wal::Store,
-    chain: chain::Store,
+    wal: WalStore,
     ledger: LedgerStore,
     mempool: Arc<crate::submit::MempoolState>,
     txs_out: gasket::messaging::tokio::ChannelSendAdapter<Vec<Transaction>>,
 ) -> Result<(), Error> {
     let addr = config.listen_address.parse().unwrap();
 
-    let sync_service = sync::ChainSyncServiceImpl::new(wal, chain);
+    let sync_service = sync::ChainSyncServiceImpl::new(wal);
     let sync_service =
         u5c::sync::chain_sync_service_server::ChainSyncServiceServer::new(sync_service);
 

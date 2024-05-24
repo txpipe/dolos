@@ -1,3 +1,7 @@
+use dolos::{
+    ledger,
+    wal::{self, RawBlock, ReadUtils, WalReader as _},
+};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use itertools::Itertools;
 use miette::{Context, IntoDiagnostic};
@@ -40,7 +44,7 @@ pub fn run(config: &crate::Config, _args: &Args) -> miette::Result<()> {
 
     let (byron, shelley, _) = crate::common::open_genesis_files(&config.genesis)?;
 
-    let (wal, _, mut ledger) =
+    let (wal, mut ledger) =
         crate::common::open_data_stores(config).context("opening data stores")?;
 
     if ledger.is_empty() {
@@ -54,43 +58,40 @@ pub fn run(config: &crate::Config, _args: &Args) -> miette::Result<()> {
             .context("applying origin utxos")?;
     }
 
-    let tip = wal
+    let (_, tip) = wal
         .find_tip()
         .into_diagnostic()
         .context("finding WAL tip")?
         .ok_or(miette::miette!("no WAL tip found"))?;
 
-    feedback.global_pb.set_length(tip.0);
+    match tip {
+        wal::ChainPoint::Origin => feedback.global_pb.set_length(0),
+        wal::ChainPoint::Specific(slot, _) => feedback.global_pb.set_length(slot),
+    }
 
-    let intersection: Vec<_> = ledger
+    let wal_seq = ledger
         .cursor()
         .into_diagnostic()
         .context("finding ledger cursor")?
-        .map(|p| (p.0, p.1))
-        .into_iter()
-        .collect();
-
-    let wal_seq = wal
-        .find_wal_seq(&intersection)
+        .map(|ledger::ChainPoint(s, h)| wal.assert_point(&wal::ChainPoint::Specific(s, h)))
+        .transpose()
         .into_diagnostic()
-        .context("finding WAL sequence")?;
+        .context("locating wal sequence")?;
 
-    let remaining = wal.crawl_after(wal_seq);
+    let remaining = wal
+        .crawl_from(wal_seq)
+        .into_diagnostic()
+        .context("crawling wal")?
+        .filter_forward()
+        .as_blocks()
+        .flatten();
 
     for chunk in remaining.chunks(100).into_iter() {
-        let blocks: Vec<_> = chunk
-            .map_ok(|b| b.1)
-            .filter_map_ok(|l| match l {
-                pallas::storage::rolldb::wal::Log::Apply(_, _, body) => Some(body),
-                _ => None,
-            })
-            .try_collect()
-            .into_diagnostic()
-            .context("fetching blocks")?;
+        let bodies = chunk.map(|RawBlock { body, .. }| body).collect_vec();
 
-        let blocks: Vec<_> = blocks
+        let blocks: Vec<_> = bodies
             .iter()
-            .map(|body| MultiEraBlock::decode(body))
+            .map(|b| MultiEraBlock::decode(&b))
             .try_collect()
             .into_diagnostic()
             .context("decoding blocks")?;

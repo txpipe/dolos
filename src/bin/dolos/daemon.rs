@@ -9,7 +9,12 @@ pub struct Args {}
 pub async fn run(config: super::Config, _args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging)?;
 
-    let (wal, chain, ledger) = crate::common::open_data_stores(&config)?;
+    let (mut wal, ledger) = crate::common::open_data_stores(&config)?;
+
+    wal.initialize()
+        .into_diagnostic()
+        .context("initializing WAL")?;
+
     let (byron, shelley, _) = crate::common::open_genesis_files(&config.genesis)?;
 
     let (txs_out, txs_in) = gasket::messaging::tokio::mpsc_channel(64);
@@ -19,7 +24,6 @@ pub async fn run(config: super::Config, _args: &Args) -> miette::Result<()> {
     let server = tokio::spawn(dolos::serve::serve(
         config.serve,
         wal.clone(),
-        chain.clone(),
         ledger.clone(),
         mempool.clone(),
         txs_out,
@@ -29,7 +33,6 @@ pub async fn run(config: super::Config, _args: &Args) -> miette::Result<()> {
         &config.sync,
         &config.upstream,
         wal.clone(),
-        chain,
         ledger,
         byron,
         shelley,
@@ -38,18 +41,21 @@ pub async fn run(config: super::Config, _args: &Args) -> miette::Result<()> {
     .into_diagnostic()
     .context("bootstrapping sync pipeline")?;
 
-    let submit = dolos::submit::pipeline(
-        &config.submit,
-        &config.upstream,
-        wal,
-        mempool.clone(),
-        txs_in,
-        &config.retries,
-    )
-    .into_diagnostic()
-    .context("bootstrapping submit pipeline")?;
+    // let submit = dolos::submit::pipeline(
+    //     &config.submit,
+    //     &config.upstream,
+    //     wal,
+    //     mempool.clone(),
+    //     txs_in,
+    //     &config.retries,
+    // )
+    // .into_diagnostic()
+    // .context("bootstrapping submit pipeline")?;
 
-    gasket::daemon::Daemon::new(sync.into_iter().chain(submit).collect()).block();
+    //gasket::daemon::Daemon::new(sync.into_iter().chain(submit).collect()).
+    // block();
+
+    gasket::daemon::Daemon::new(sync.into_iter().collect()).block();
 
     server.abort();
 

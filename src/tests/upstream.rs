@@ -1,7 +1,7 @@
 use gasket::{framework::*, runtime::Policy};
 use tracing::{error, info};
 
-use crate::model::PullEvent;
+use crate::{model::PullEvent, wal::redb::WalStore};
 
 struct WitnessStage {
     input: gasket::messaging::InputPort<PullEvent>,
@@ -50,9 +50,7 @@ fn test_mainnet_upstream() {
     )
     .unwrap();
 
-    let rolldb = pallas::storage::rolldb::wal::Store::open("tmp", 10, None).unwrap();
-
-    let intersection = rolldb.intersect_options(5).unwrap().into_iter().collect();
+    let wal = WalStore::memory().unwrap();
 
     let (send, receive) = gasket::messaging::tokio::mpsc_channel(200);
 
@@ -60,7 +58,7 @@ fn test_mainnet_upstream() {
         "relays-new.cardano-mainnet.iohk.io:3001".into(),
         764824073,
         20,
-        intersection,
+        wal,
     );
 
     upstream.downstream.connect(send);

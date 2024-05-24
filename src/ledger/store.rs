@@ -341,7 +341,7 @@ impl LedgerStore {
             let body = table.get(&(&key.0 as &[u8; 32], key.1))?;
 
             // TODO: return invariant broken error
-            let body = body.unwrap();
+            let body = body.expect("missing utxo");
 
             let (era, cbor) = body.value();
             let era = Era::try_from(era).unwrap();

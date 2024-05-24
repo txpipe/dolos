@@ -1,14 +1,14 @@
-use dolos::ledger;
+use dolos::{
+    ledger,
+    wal::{self, ReadUtils, WalReader as _, WalWriter},
+};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use itertools::Itertools;
 use miette::{bail, Context, IntoDiagnostic};
 use mithril_client::{ClientBuilder, MessageBuilder, MithrilError, MithrilResult};
-use pallas::{
-    ledger::{
-        configs::{byron, shelley},
-        traverse::MultiEraBlock,
-    },
-    storage::rolldb::{chain, wal},
+use pallas::ledger::{
+    configs::{byron, shelley},
+    traverse::MultiEraBlock,
 };
 use std::{path::Path, sync::Arc};
 use tracing::{debug, info, warn};
@@ -122,20 +122,24 @@ impl mithril_client::feedback::FeedbackReceiver for Feedback {
                 self.download_pb.set_message("downloading Mithril snapshot");
             }
             mithril_client::feedback::MithrilEvent::SnapshotDownloadCompleted { .. } => {
-                self.validate_pb.set_message("snapshot download completed");
+                self.download_pb.set_message("snapshot download completed");
             }
             mithril_client::feedback::MithrilEvent::CertificateChainValidationStarted {
                 ..
-            } => info!("certificate chain validation started"),
-            mithril_client::feedback::MithrilEvent::CertificateValidated {
-                certificate_chain_validation_id: id,
-                certificate_hash: hash,
             } => {
                 self.validate_pb
-                    .set_message(format!("certificate validated {id}: {hash}"));
+                    .set_message(format!("certificate chain validation started"));
+            }
+            mithril_client::feedback::MithrilEvent::CertificateValidated {
+                certificate_hash: hash,
+                ..
+            } => {
+                self.validate_pb
+                    .set_message(format!("validating cert: {hash}"));
             }
             mithril_client::feedback::MithrilEvent::CertificateChainValidated { .. } => {
-                info!("certificate chain validated")
+                self.validate_pb
+                    .set_message(format!("certificate chain validated"));
             }
         }
     }
@@ -200,7 +204,12 @@ async fn fetch_snapshot(
 fn open_empty_stores(config: &super::Config, force: bool) -> miette::Result<Option<Stores>> {
     let mut stores = crate::common::open_data_stores(config)?;
 
-    let empty = stores.0.is_empty() && stores.1.is_empty() && stores.2.is_empty();
+    let empty = stores
+        .0
+        .is_empty()
+        .into_diagnostic()
+        .context("opening wal")?
+        && stores.1.is_empty();
 
     match (empty, force) {
         (true, _) => Ok(Some(stores)),
@@ -208,7 +217,7 @@ fn open_empty_stores(config: &super::Config, force: bool) -> miette::Result<Opti
             drop(stores);
 
             crate::common::destroy_data_stores(config)
-                .context("destroying existing data stored")?;
+                .context("destroying existing data stores")?;
 
             stores = crate::common::open_data_stores(config)?;
             Ok(Some(stores))
@@ -220,7 +229,7 @@ fn open_empty_stores(config: &super::Config, force: bool) -> miette::Result<Opti
 fn import_hardano_into_wal(
     immutable_path: &Path,
     feedback: &Feedback,
-    wal: &mut pallas::storage::rolldb::wal::Store,
+    wal: &mut wal::redb::WalStore,
 ) -> Result<(), miette::Error> {
     let iter = pallas::storage::hardano::immutable::read_blocks(immutable_path)
         .into_diagnostic()
@@ -231,23 +240,39 @@ fn import_hardano_into_wal(
         .context("reading immutable db tip")?
         .ok_or(miette::miette!("immutable db has no tip"))?;
 
-    feedback.wal_pb.set_message("importing WAL");
+    feedback
+        .wal_pb
+        .set_message("importing immutable db from Haskell into WAL");
     feedback.wal_pb.set_length(tip.slot_or_default());
 
-    for block in iter {
-        let block = block.into_diagnostic().context("reading block")?;
-
-        let blockd = MultiEraBlock::decode(&block)
+    for chunk in iter.chunks(100).into_iter() {
+        let bodies: Vec<_> = chunk
+            .try_collect()
             .into_diagnostic()
-            .context("decoding block cbor")?;
+            .context("reading block data")?;
 
-        debug!(slot = blockd.slot(), "importing block");
+        let blocks: Vec<_> = bodies
+            .iter()
+            .map(|b| {
+                let blockd = MultiEraBlock::decode(&b)
+                    .into_diagnostic()
+                    .context("decoding block cbor")?;
 
-        wal.roll_forward(blockd.slot(), blockd.hash(), block.clone())
+                feedback.wal_pb.set_position(blockd.slot());
+                debug!(slot = blockd.slot(), "importing block");
+
+                miette::Result::Ok(wal::RawBlock {
+                    slot: blockd.slot(),
+                    hash: blockd.hash(),
+                    era: blockd.era(),
+                    body: b.clone(),
+                })
+            })
+            .try_collect::<_, _, miette::Report>()?;
+
+        wal.roll_forward(blocks.into_iter())
             .into_diagnostic()
-            .context("adding chain entry")?;
-
-        feedback.wal_pb.set_position(blockd.slot());
+            .context("adding wal entries")?;
     }
 
     Ok(())
@@ -255,7 +280,7 @@ fn import_hardano_into_wal(
 
 fn rebuild_ledger_from_wal(
     feedback: &Feedback,
-    wal: &wal::Store,
+    wal: &wal::redb::WalStore,
     ledger: &mut impl ledger::LedgerStore,
     byron: &byron::GenesisFile,
     shelley: &shelley::GenesisFile,
@@ -267,31 +292,32 @@ fn rebuild_ledger_from_wal(
         .into_diagnostic()
         .context("applying origin utxos")?;
 
-    let tip = wal
+    let (_, tip) = wal
         .find_tip()
         .into_diagnostic()
         .context("finding WAL tip")?
         .ok_or(miette::miette!("no WAL tip found"))?;
 
-    feedback.wal_pb.set_message("re-building ledger");
-    feedback.ledger_pb.set_length(tip.0);
+    feedback.ledger_pb.set_message("re-building ledger");
+    match tip {
+        wal::ChainPoint::Origin => feedback.ledger_pb.set_length(0),
+        wal::ChainPoint::Specific(tip, _) => feedback.ledger_pb.set_length(tip),
+    };
 
-    let remaining = wal.crawl_after(None);
+    let remaining = wal
+        .crawl_from(None)
+        .into_diagnostic()
+        .context("crawling wal")?
+        .filter_forward()
+        .as_blocks()
+        .flatten();
 
     for chunk in remaining.chunks(100).into_iter() {
-        let blocks: Vec<_> = chunk
-            .map_ok(|b| b.1)
-            .filter_map_ok(|l| match l {
-                pallas::storage::rolldb::wal::Log::Apply(_, _, body) => Some(body),
-                _ => None,
-            })
-            .try_collect()
-            .into_diagnostic()
-            .context("fetching blocks")?;
+        let bodies = chunk.map(|wal::RawBlock { body, .. }| body).collect_vec();
 
-        let blocks: Vec<_> = blocks
+        let blocks: Vec<_> = bodies
             .iter()
-            .map(|body| MultiEraBlock::decode(body))
+            .map(|b| MultiEraBlock::decode(&b))
             .try_collect()
             .into_diagnostic()
             .context("decoding blocks")?;
@@ -308,40 +334,6 @@ fn rebuild_ledger_from_wal(
     Ok(())
 }
 
-fn rebuild_chain_from_wal(
-    feedback: &Feedback,
-    wal: &wal::Store,
-    chain: &mut chain::Store,
-) -> miette::Result<()> {
-    let (tip, _) = wal
-        .find_tip()
-        .into_diagnostic()
-        .context("finding wal tip")?
-        .ok_or(miette::miette!("wal is empty"))?;
-
-    feedback.chain_pb.set_message("rebuilding chain from wal");
-    feedback.chain_pb.set_length(tip);
-
-    let remaining = wal.crawl_after(None);
-
-    for block in remaining {
-        let (slot, log) = block.into_diagnostic()?;
-
-        debug!(slot, "filling up chain");
-
-        if let pallas::storage::rolldb::wal::Log::Apply(slot, hash, body) = log {
-            chain
-                .roll_forward(slot, hash, body)
-                .into_diagnostic()
-                .context("rolling chain forward")?;
-
-            feedback.chain_pb.set_position(slot);
-        };
-    }
-
-    Ok(())
-}
-
 pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
     //crate::common::setup_tracing(&config.logging)?;
     let feedback = Arc::new(Feedback::default());
@@ -352,7 +344,7 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
         .ok_or(miette::miette!("missing mithril config"))?;
 
     let empty_stores =
-        open_empty_stores(config, args.force).context("opening empty data stored")?;
+        open_empty_stores(config, args.force).context("opening empty data stores")?;
 
     if empty_stores.is_none() && args.skip_if_not_empty {
         warn!("data stores are not empty, skipping bootstrap");
@@ -384,15 +376,13 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
 
     let immutable_path = Path::new(&args.download_dir).join("immutable");
 
-    let (mut wal, mut chain, mut ledger) = empty_stores.unwrap();
+    let (mut wal, mut ledger) = empty_stores.unwrap();
 
     let (byron, shelley, _) = crate::common::open_genesis_files(&config.genesis)?;
 
     import_hardano_into_wal(&immutable_path, &feedback, &mut wal)?;
 
     rebuild_ledger_from_wal(&feedback, &wal, &mut ledger, &byron, &shelley)?;
-
-    rebuild_chain_from_wal(&feedback, &wal, &mut chain)?;
 
     if !args.retain_snapshot {
         info!("deleting downloaded snapshot");

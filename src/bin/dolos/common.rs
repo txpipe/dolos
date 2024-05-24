@@ -1,8 +1,8 @@
+use dolos::wal::redb::WalStore;
 use miette::{Context as _, IntoDiagnostic};
 use pallas::ledger::configs::alonzo::GenesisFile as AlonzoFile;
 use pallas::ledger::configs::byron::GenesisFile as ByronFile;
 use pallas::ledger::configs::shelley::GenesisFile as ShelleyFile;
-use pallas::storage::rolldb::{chain, wal};
 use std::path::Path;
 use tracing::Level;
 use tracing_subscriber::{filter::Targets, prelude::*};
@@ -16,35 +16,28 @@ fn define_rolldb_path(config: &crate::Config) -> &Path {
         .storage
         .path
         .as_deref()
-        .unwrap_or_else(|| Path::new("/rolldb"))
+        .unwrap_or_else(|| Path::new("./data"))
 }
 
-pub type Stores = (wal::Store, chain::Store, LedgerStore);
+pub type Stores = (WalStore, LedgerStore);
 
 pub fn open_data_stores(config: &crate::Config) -> Result<Stores, Error> {
     let rolldb_path = define_rolldb_path(config);
 
-    let wal = wal::Store::open(
-        rolldb_path.join("wal"),
-        config.storage.wal_size.unwrap_or(1000),
-        config.storage.immutable_overlap,
-    )
-    .map_err(Error::storage)?;
+    std::fs::create_dir_all(rolldb_path).map_err(Error::storage)?;
 
-    let chain = chain::Store::open(rolldb_path.join("chain")).map_err(Error::storage)?;
-
+    let wal = WalStore::open(rolldb_path.join("wal")).map_err(Error::storage)?;
     let ledger = LedgerStore::open(rolldb_path.join("ledger")).map_err(Error::storage)?;
 
-    Ok((wal, chain, ledger))
+    Ok((wal, ledger))
 }
 
 #[allow(dead_code)]
 pub fn destroy_data_stores(config: &crate::Config) -> Result<(), Error> {
     let rolldb_path = define_rolldb_path(config);
 
-    wal::Store::destroy(rolldb_path.join("wal")).map_err(Error::storage)?;
-    chain::Store::destroy(rolldb_path.join("chain")).map_err(Error::storage)?;
-    //LedgerStore::destroy(rolldb_path.join("ledger")).map_err(Error::storage)?;
+    std::fs::remove_file(rolldb_path.join("wal")).map_err(Error::storage)?;
+    std::fs::remove_file(rolldb_path.join("ledger")).map_err(Error::storage)?;
 
     Ok(())
 }

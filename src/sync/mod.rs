@@ -1,15 +1,10 @@
+use crate::ledger::store::LedgerStore;
+use crate::prelude::*;
+use crate::wal::redb::WalStore;
 use pallas::ledger::configs::{byron, shelley};
-use pallas::storage::rolldb::chain::Store as ChainStore;
-use pallas::storage::rolldb::wal::Store as WalStore;
 use serde::Deserialize;
 use std::time::Duration;
-use tracing::info;
 
-use crate::ledger::store::LedgerStore;
-use crate::ledger::ChainPoint;
-use crate::prelude::*;
-
-pub mod chain;
 pub mod ledger;
 pub mod pull;
 pub mod roll;
@@ -44,51 +39,28 @@ pub fn pipeline(
     config: &Config,
     upstream: &UpstreamConfig,
     wal: WalStore,
-    chain: ChainStore,
     ledger: LedgerStore,
     byron: byron::GenesisFile,
     shelley: shelley::GenesisFile,
     retries: &Option<gasket::retries::Policy>,
 ) -> Result<Vec<gasket::runtime::Tether>, Error> {
-    let pull_cursor = wal
-        .intersect_options(5)
-        .map_err(Error::storage)?
-        .into_iter()
-        .collect();
-
     let mut pull = pull::Stage::new(
         upstream.peer_address.clone(),
         upstream.network_magic,
         config.pull_batch_size.unwrap_or(50),
-        pull_cursor,
+        wal.clone(),
     );
 
-    let cursor_chain = chain.find_tip().map_err(Error::storage)?;
-    info!(?cursor_chain, "chain cursor found");
+    let mut roll = roll::Stage::new(wal.clone());
 
-    let cursor_ledger = ledger
-        .cursor()
-        .map_err(Error::storage)?
-        .map(|ChainPoint(a, b)| (a, b));
-
-    info!(?cursor_ledger, "ledger cursor found");
-
-    let mut roll = roll::Stage::new(wal, cursor_chain, cursor_ledger);
-    let mut chain = chain::Stage::new(chain);
-    let mut ledger = ledger::Stage::new(ledger, byron, shelley);
+    let mut ledger = ledger::Stage::new(wal.clone(), ledger, byron, shelley);
 
     let (to_roll, from_pull) = gasket::messaging::tokio::mpsc_channel(50);
     pull.downstream.connect(to_roll);
     roll.upstream.connect(from_pull);
 
-    let (to_chain, from_roll) = gasket::messaging::tokio::mpsc_channel(50);
-    roll.downstream_chain = Some(Default::default());
-    roll.downstream_chain.as_mut().unwrap().connect(to_chain);
-    chain.upstream.connect(from_roll);
-
     let (to_ledger, from_roll) = gasket::messaging::tokio::mpsc_channel(50);
-    roll.downstream_ledger = Some(Default::default());
-    roll.downstream_ledger.as_mut().unwrap().connect(to_ledger);
+    roll.downstream.connect(to_ledger);
     ledger.upstream.connect(from_roll);
 
     // output to outside of out pipeline
@@ -98,8 +70,7 @@ pub fn pipeline(
 
     let pull = gasket::runtime::spawn_stage(pull, policy.clone());
     let roll = gasket::runtime::spawn_stage(roll, policy.clone());
-    let chain = gasket::runtime::spawn_stage(chain, policy.clone());
     let ledger = gasket::runtime::spawn_stage(ledger, policy.clone());
 
-    Ok(vec![pull, roll, chain, ledger])
+    Ok(vec![pull, roll, ledger])
 }
