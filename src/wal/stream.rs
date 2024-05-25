@@ -54,8 +54,6 @@ mod tests {
     async fn test_stream_waiting() {
         let mut db = WalStore::memory().unwrap();
 
-        db.initialize().unwrap();
-
         let blocks = (0..=100).map(|i| dummy_block(i * 10));
         db.roll_forward(blocks).unwrap();
 
