@@ -1,7 +1,8 @@
 use bincode;
+use itertools::Itertools;
 use log::info;
 use redb::{Range, ReadableTable, TableDefinition};
-use std::{path::Path, sync::Arc};
+use std::{ops::RangeBounds, path::Path, sync::Arc};
 use tracing::warn;
 
 use super::{ChainPoint, LogEntry, LogSeq, LogValue, RawBlock, WalError, WalReader, WalWriter};
@@ -135,6 +136,43 @@ impl WalStore {
         out.initialize()?;
 
         Ok(out)
+    }
+
+    // TODO: see how to expose this method through the official write interface
+    // TODO: improve performance, this approach is immensely inefficient
+    pub fn remove_range(
+        &mut self,
+        from: Option<LogSeq>,
+        to: Option<LogSeq>,
+    ) -> Result<(), WalError> {
+        let wx = self.db.begin_write()?;
+        {
+            let mut wal = wx.open_table(WAL)?;
+
+            wal.extract_if(|seq, _| match (from, to) {
+                (None, None) => true,
+                (Some(a), Some(b)) => seq >= a && seq <= b,
+                (None, Some(x)) => seq <= x,
+                (Some(x), None) => seq >= x,
+            })?
+            .collect_vec();
+        }
+
+        {
+            let mut pos = wx.open_table(POS)?;
+
+            pos.extract_if(|_, seq| match (from, to) {
+                (None, None) => true,
+                (Some(a), Some(b)) => seq >= a && seq <= b,
+                (None, Some(x)) => seq <= x,
+                (Some(x), None) => seq >= x,
+            })?
+            .collect_vec();
+        }
+
+        wx.commit()?;
+
+        Ok(())
     }
 }
 
