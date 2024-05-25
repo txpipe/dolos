@@ -51,13 +51,15 @@ protoc-wkt = "1.0.0"
 itertools = "0.12.1"
 indicatif = "0.17.8"
 trait-variant = "0.1.2"
+comfy-table = { version = "7.1.1", optional = true }
 
 [dev-dependencies]
 tempfile = "3.3.0"
 
 [features]
 mithril = ["mithril-client"]
-default = ["mithril"]
+utils = ["comfy-table"]
+default = ["mithril", "utils"]
 
 # The profile that 'cargo dist' will build with
 [profile.dist]

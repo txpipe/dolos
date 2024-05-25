@@ -27,6 +27,7 @@ enum Command {
     Serve(serve::Args),
 
     /// Commands to interact with data
+    #[cfg(feature = "utils")]
     Data(data::Args),
 
     /// Evaluate txs using current ledger
