@@ -1,5 +1,5 @@
 use gasket::framework::*;
-use tracing::debug;
+use tracing::info;
 
 use crate::{
     prelude::*,
@@ -46,7 +46,7 @@ impl Stage {
                     body: block.body.clone(),
                 };
 
-                debug!(block.slot, %block.hash, "extending wal");
+                info!(block.slot, %block.hash, "extending wal");
 
                 self.store.roll_forward(std::iter::once(block)).or_panic()?;
             }
@@ -58,7 +58,7 @@ impl Stage {
                     }
                 };
 
-                debug!(?point, "rolling back wal");
+                info!(?point, "rolling back wal");
 
                 self.store.roll_back(&point).or_panic()?;
             }

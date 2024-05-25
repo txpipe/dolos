@@ -22,7 +22,6 @@ pub struct Config {
     magic: u64,
 }
 
-#[instrument(skip_all)]
 async fn peer_session(wal: WalStore, peer: PeerServer) -> Result<(), Error> {
     let PeerServer {
         plexer,

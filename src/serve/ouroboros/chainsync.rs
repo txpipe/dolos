@@ -3,7 +3,7 @@ use pallas::network::miniprotocols::{
     chainsync::{ClientRequest, N2NServer, Tip},
     Point,
 };
-use tracing::{debug, info, instrument};
+use tracing::{debug, info};
 
 use crate::{
     prelude::Error,
@@ -150,7 +150,6 @@ impl<'a> Session<'a> {
         }
     }
 
-    #[instrument(skip_all)]
     async fn handle_next_request(&mut self) -> Result<(), Error> {
         info!("handling next request");
 
@@ -174,7 +173,6 @@ impl<'a> Session<'a> {
         Ok(())
     }
 
-    #[instrument(skip_all)]
     async fn handle_intersect(&mut self, mut points: Vec<Point>) -> Result<(), Error> {
         info!(?points, "handling intersect request");
 
@@ -225,7 +223,6 @@ impl<'a> Session<'a> {
     }
 }
 
-#[instrument(skip_all)]
 pub async fn handle_session(wal: WalStore, connection: N2NServer) -> Result<(), Error> {
     let mut session = Session {
         wal,
