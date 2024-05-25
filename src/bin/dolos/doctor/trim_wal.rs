@@ -1,7 +1,5 @@
-use dolos::wal::{self, LogSeq, RawBlock, ReadUtils, WalReader as _};
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use dolos::wal::LogSeq;
 use miette::{Context, IntoDiagnostic};
-use pallas::ledger::traverse::MultiEraBlock;
 
 #[derive(Debug, clap::Args)]
 pub struct Args {
