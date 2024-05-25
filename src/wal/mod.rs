@@ -7,9 +7,6 @@ mod reader;
 mod stream;
 mod writer;
 
-#[cfg(test)]
-mod tests;
-
 pub type BlockSlot = u64;
 pub type BlockHash = pallas::crypto::hash::Hash<32>;
 pub type BlockEra = pallas::ledger::traverse::Era;
@@ -18,10 +15,20 @@ pub type BlockBody = Vec<u8>;
 pub type BlockHeader = Vec<u8>;
 pub type LogSeq = u64;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ChainPoint {
     Origin,
     Specific(BlockSlot, BlockHash),
+}
+
+impl PartialEq for ChainPoint {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Specific(l0, l1), Self::Specific(r0, r1)) => l0 == r0 && l1 == r1,
+            (Self::Origin, Self::Origin) => true,
+            _ => false,
+        }
+    }
 }
 
 impl From<PallasPoint> for ChainPoint {
@@ -67,11 +74,22 @@ impl From<&RawBlock> for ChainPoint {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum LogValue {
     Apply(RawBlock),
     Undo(RawBlock),
     Mark(ChainPoint),
+}
+
+impl PartialEq for LogValue {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Apply(l0), Self::Apply(r0)) => l0 == r0,
+            (Self::Undo(l0), Self::Undo(r0)) => l0 == r0,
+            (Self::Mark(l0), Self::Mark(r0)) => l0 == r0,
+            _ => false,
+        }
+    }
 }
 
 pub type LogEntry = (LogSeq, LogValue);
@@ -90,3 +108,39 @@ pub use stream::WalStream;
 pub use writer::WalWriter;
 
 pub mod redb;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn slot_to_hash(slot: u64) -> BlockHash {
+        let mut hasher = pallas::crypto::hash::Hasher::<256>::new();
+        hasher.input(&(slot as i32).to_le_bytes());
+        hasher.finalize()
+    }
+
+    #[test]
+    fn chainpoint_partial_eq() {
+        assert_eq!(ChainPoint::Origin, ChainPoint::Origin);
+
+        assert_eq!(
+            ChainPoint::Specific(20, slot_to_hash(20)),
+            ChainPoint::Specific(20, slot_to_hash(20))
+        );
+
+        assert_ne!(
+            ChainPoint::Origin,
+            ChainPoint::Specific(20, slot_to_hash(20))
+        );
+
+        assert_ne!(
+            ChainPoint::Specific(20, slot_to_hash(20)),
+            ChainPoint::Specific(50, slot_to_hash(50)),
+        );
+
+        assert_ne!(
+            ChainPoint::Specific(50, slot_to_hash(20)),
+            ChainPoint::Specific(50, slot_to_hash(50)),
+        );
+    }
+}
