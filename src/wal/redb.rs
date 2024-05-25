@@ -1,4 +1,5 @@
 use bincode;
+use log::info;
 use redb::{Range, ReadableTable, TableDefinition};
 use std::{path::Path, sync::Arc};
 use tracing::warn;
@@ -84,27 +85,6 @@ pub struct WalStore {
 }
 
 impl WalStore {
-    pub fn memory() -> Result<Self, redb::Error> {
-        let db =
-            redb::Database::builder().create_with_backend(redb::backends::InMemoryBackend::new())?;
-
-        Ok(Self {
-            db: Arc::new(db),
-            tip_change: Arc::new(tokio::sync::Notify::new()),
-        })
-    }
-
-    pub fn open(path: impl AsRef<Path>) -> Result<Self, redb::Error> {
-        let inner = redb::Database::builder()
-            .set_repair_callback(|x| warn!(progress = x.progress() * 100f64, "wal db is repairing"))
-            .create(path)?;
-
-        Ok(Self {
-            db: Arc::new(inner),
-            tip_change: Arc::new(tokio::sync::Notify::new()),
-        })
-    }
-
     pub fn is_empty(&self) -> Result<bool, WalError> {
         let wr = self.db.begin_read()?;
 
@@ -119,12 +99,42 @@ impl WalStore {
         Ok(false)
     }
 
-    pub fn initialize(&mut self) -> Result<(), WalError> {
+    fn initialize(&mut self) -> Result<(), WalError> {
         if self.is_empty()? {
+            info!("initializing wal");
             self.append_entries(std::iter::once(LogValue::Mark(ChainPoint::Origin)))?;
         }
 
         Ok(())
+    }
+
+    pub fn memory() -> Result<Self, WalError> {
+        let db =
+            redb::Database::builder().create_with_backend(redb::backends::InMemoryBackend::new())?;
+
+        let mut out = Self {
+            db: Arc::new(db),
+            tip_change: Arc::new(tokio::sync::Notify::new()),
+        };
+
+        out.initialize()?;
+
+        Ok(out)
+    }
+
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, WalError> {
+        let inner = redb::Database::builder()
+            .set_repair_callback(|x| warn!(progress = x.progress() * 100f64, "wal db is repairing"))
+            .create(path)?;
+
+        let mut out = Self {
+            db: Arc::new(inner),
+            tip_change: Arc::new(tokio::sync::Notify::new()),
+        };
+
+        out.initialize()?;
+
+        Ok(out)
     }
 }
 
