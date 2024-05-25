@@ -2,7 +2,7 @@ use bincode;
 use itertools::Itertools;
 use log::info;
 use redb::{Range, ReadableTable, TableDefinition};
-use std::{ops::RangeBounds, path::Path, sync::Arc};
+use std::{path::Path, sync::Arc};
 use tracing::warn;
 
 use super::{ChainPoint, LogEntry, LogSeq, LogValue, RawBlock, WalError, WalReader, WalWriter};

@@ -1,44 +1,13 @@
 use pallas::network::{
     facades::PeerClient,
-    miniprotocols::{Point, MAINNET_MAGIC},
+    miniprotocols::{chainsync::NextResponse, Point, MAINNET_MAGIC},
 };
 
-use crate::wal::{self, WalWriter};
-
-const DUMMY_BLOCK_BYTES: &str = "820183851a2d964a09582089d9b5a5b8ddc8d7e5a6795e9774d97faf1efea59b2caf7eaf9f8c5b32059df484830058200e5751c026e543b2e8ab2eb06099daa1d1e5df47778f7787faab45cdf12fe3a85820afc0da64183bf2664f3d4eec7238d524ba607faeeab24fc100eb861dba69971b8300582025777aca9e4a73d48fc73b4f961d345b06d4a6f349cb7916570d35537d53479f5820d36a2619a672494604e11bb447cbcf5231e9f2ba25c2169177edc941bd50ad6c5820afc0da64183bf2664f3d4eec7238d524ba607faeeab24fc100eb861dba69971b58204e66280cd94d591072349bec0a3090a53aa945562efb6d08d56e53654b0e40988482000058401bc97a2fe02c297880ce8ecfd997fe4c1ec09ee10feeee9f686760166b05281d6283468ffd93becb0c956ccddd642df9b1244c915911185fa49355f6f22bfab98101820282840058401bc97a2fe02c297880ce8ecfd997fe4c1ec09ee10feeee9f686760166b05281d6283468ffd93becb0c956ccddd642df9b1244c915911185fa49355f6f22bfab9584061261a95b7613ee6bf2067dad77b70349729b0c50d57bc1cf30de0db4a1e73a885d0054af7c23fc6c37919dba41c602a57e2d0f9329a7954b867338d6fb2c9455840e03e62f083df5576360e60a32e22bbb07b3c8df4fcab8079f1d6f61af3954d242ba8a06516c395939f24096f3df14e103a7d9c2b80a68a9363cf1f27c7a4e307584044f18ef23db7d2813415cb1b62e8f3ead497f238edf46bb7a97fd8e9105ed9775e8421d18d47e05a2f602b700d932c181e8007bbfb231d6f1a050da4ebeeba048483000000826a63617264616e6f2d736c00a058204ba92aa320c60acc9ad7b9a64f2eda55c4d2ec28e604faf186708b4f0c4e8edf849fff8300d9010280d90102809fff82809fff81a0";
+use crate::wal::{self, redb::WalStore, WalWriter};
 
 type ServerHandle = tokio::task::JoinHandle<Result<(), crate::prelude::Error>>;
 
-fn slot_to_hash(slot: u64) -> wal::BlockHash {
-    let mut hasher = pallas::crypto::hash::Hasher::<256>::new();
-    hasher.input(&(slot as i32).to_le_bytes());
-    hasher.finalize()
-}
-
-fn slot_to_block(slot: u64) -> wal::RawBlock {
-    let bytes = &hex::decode(DUMMY_BLOCK_BYTES).unwrap();
-    let block = pallas::ledger::traverse::MultiEraBlock::decode(&bytes).unwrap();
-
-    wal::RawBlock {
-        slot,
-        hash: block.hash(),
-        era: block.era(),
-        body: hex::decode(DUMMY_BLOCK_BYTES).unwrap(),
-    }
-}
-
-fn setup_dummy_db() -> wal::redb::WalStore {
-    let mut wal = wal::redb::WalStore::memory().unwrap();
-
-    let blocks = (0..300).map(slot_to_block);
-    wal.roll_forward(blocks).unwrap();
-
-    wal
-}
-
-async fn setup_server_client_pair(port: u32) -> (ServerHandle, PeerClient) {
-    let wal = setup_dummy_db();
-
+async fn setup_server_client_pair(port: u32, wal: WalStore) -> (ServerHandle, PeerClient) {
     let server = tokio::spawn(super::serve(
         super::Config {
             listen_address: format!("[::]:{port}"),
@@ -55,19 +24,21 @@ async fn setup_server_client_pair(port: u32) -> (ServerHandle, PeerClient) {
 }
 
 #[tokio::test]
-async fn test_blockfetch() {
+async fn test_blockfetch_happy_path() {
     // let _ = tracing::subscriber::set_global_default(
     //     tracing_subscriber::FmtSubscriber::builder()
     //         .with_max_level(tracing::Level::DEBUG)
     //         .finish(),
     // );
 
+    let wal = wal::testing::db_with_dummy_blocks(300);
+
     // use servers in different ports until we implement some sort of test harness
-    let (server, mut client) = setup_server_client_pair(30031).await;
+    let (server, mut client) = setup_server_client_pair(30031, wal.clone()).await;
 
     let range = (
-        Point::Specific(20, slot_to_hash(20).to_vec()),
-        Point::Specific(60, slot_to_hash(60).to_vec()),
+        Point::Specific(20, wal::testing::slot_to_hash(20).to_vec()),
+        Point::Specific(60, wal::testing::slot_to_hash(60).to_vec()),
     );
 
     let blocks = client.blockfetch().fetch_range(range).await.unwrap();
@@ -83,17 +54,19 @@ async fn test_blockfetch() {
 }
 
 #[tokio::test]
-async fn test_chainsync() {
+async fn test_chainsync_happy_path() {
     // let _ = tracing::subscriber::set_global_default(
     //     tracing_subscriber::FmtSubscriber::builder()
     //         .with_max_level(tracing::Level::DEBUG)
     //         .finish(),
     // );
 
-    // use servers in different ports until we implement some sort of test harness
-    let (server, mut client) = setup_server_client_pair(30032).await;
+    let mut wal = wal::testing::db_with_dummy_blocks(300);
 
-    let known_points = vec![Point::Specific(20, slot_to_hash(20).to_vec())];
+    // use servers in different ports until we implement some sort of test harness
+    let (server, mut client) = setup_server_client_pair(30032, wal.clone()).await;
+
+    let known_points = vec![Point::Specific(20, wal::testing::slot_to_hash(20).to_vec())];
 
     let (point, _) = client
         .chainsync()
@@ -103,8 +76,60 @@ async fn test_chainsync() {
 
     assert_eq!(point.unwrap(), known_points[0]);
 
-    // hangs here on receiving next block, even though server sends it
-    let _next = client.chainsync().request_next().await.unwrap();
+    let next = client.chainsync().request_next().await.unwrap();
+
+    match next {
+        NextResponse::RollBackward(Point::Specific(slot, _), _) => assert_eq!(slot, 20),
+        _ => panic!("expected rollback to point"),
+    }
+
+    for _ in 21..300 {
+        let next = client.chainsync().request_next().await.unwrap();
+
+        match next {
+            NextResponse::RollForward(_, _) => (),
+            _ => panic!("expected rollforward"),
+        }
+    }
+
+    let next = client.chainsync().request_next().await.unwrap();
+
+    match next {
+        NextResponse::Await => (),
+        _ => panic!("expected await"),
+    }
+
+    for slot in 301..320 {
+        wal.roll_forward(std::iter::once(wal::testing::dummy_block_from_slot(slot)))
+            .unwrap();
+
+        let next = client.chainsync().recv_while_must_reply().await.unwrap();
+
+        match next {
+            NextResponse::RollForward(_, _) => (),
+            _ => panic!("expected rollforward"),
+        }
+
+        let next = client.chainsync().request_next().await.unwrap();
+
+        match next {
+            NextResponse::Await => (),
+            _ => panic!("expected await"),
+        }
+    }
+
+    wal.roll_back(&wal::ChainPoint::Specific(
+        310,
+        wal::testing::slot_to_hash(310),
+    ))
+    .unwrap();
+
+    let next = client.chainsync().recv_while_must_reply().await.unwrap();
+
+    match next {
+        NextResponse::RollBackward(Point::Specific(slot, _), _) => assert_eq!(slot, 310),
+        _ => panic!("expected rollback to point"),
+    }
 
     server.abort();
 }
