@@ -7,6 +7,9 @@ mod reader;
 mod stream;
 mod writer;
 
+#[cfg(test)]
+mod tests;
+
 pub type BlockSlot = u64;
 pub type BlockHash = pallas::crypto::hash::Hash<32>;
 pub type BlockEra = pallas::ledger::traverse::Era;
@@ -49,7 +52,7 @@ impl From<&LogValue> for ChainPoint {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RawBlock {
     pub slot: BlockSlot,
     pub hash: BlockHash,
@@ -64,9 +67,8 @@ impl From<&RawBlock> for ChainPoint {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum LogValue {
-    //Origin,
     Apply(RawBlock),
     Undo(RawBlock),
     Mark(ChainPoint),
