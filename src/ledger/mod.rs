@@ -321,7 +321,7 @@ mod tests {
             todo!()
         }
 
-        fn finalize(&mut self, until: BlockSlot) -> Result<(), LedgerError> {
+        fn finalize(&mut self, _until: BlockSlot) -> Result<(), LedgerError> {
             todo!()
         }
     }
