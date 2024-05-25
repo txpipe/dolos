@@ -7,6 +7,7 @@ mod wal_integrity;
 pub enum Command {
     /// rebuilds the whole ledger from chain data
     RebuildLedger(rebuild_ledger::Args),
+    /// checks the integrity of the WAL records
     WalIntegrity(wal_integrity::Args),
 }
 
