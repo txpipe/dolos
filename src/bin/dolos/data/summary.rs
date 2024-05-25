@@ -26,7 +26,7 @@ fn dump_txs(chain: &chain::Store) -> miette::Result<()> {
 #[derive(Debug, clap::Args)]
 pub struct Args {}
 
-pub fn run(config: &super::Config, _args: &Args) -> miette::Result<()> {
+pub fn run(config: &crate::Config, _args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging)?;
 
     let (wal, ledger) = crate::common::open_data_stores(config)?;
