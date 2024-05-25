@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use gasket::framework::*;
 use pallas::crypto::hash::Hash;
 use tokio::sync::RwLock;
-use tracing::info;
+use tracing::debug;
 
 use super::{monitor::BlockMonitorMessage, BlockHeight, BlockSlot, Transaction};
 
@@ -72,12 +72,12 @@ impl gasket::framework::Worker<Stage> for Worker {
         tokio::select! {
             txs_msg = stage.upstream_submit_endpoint.recv() => {
                 let txs_msg = txs_msg.or_panic()?;
-                info!("received txs message: {:?}", txs_msg);
+                debug!("received txs message: {:?}", txs_msg);
                 Ok(WorkSchedule::Unit(MempoolEvent::AddTxs(txs_msg.payload)))
             }
             monitor_msg = stage.upstream_block_monitor.recv() => {
                 let monitor_msg = monitor_msg.or_panic()?;
-                info!("received monitor message: {:?}", monitor_msg);
+                debug!("received monitor message: {:?}", monitor_msg);
                 Ok(WorkSchedule::Unit(MempoolEvent::ChainUpdate(monitor_msg.payload)))
             }
             _ = tokio::time::sleep(Duration::from_secs(20)) => {
@@ -116,7 +116,7 @@ impl gasket::framework::Worker<Stage> for Worker {
                         // set inclusion point for txs found in new block
                         for (tx_hash, inclusion) in monitor.txs.iter_mut() {
                             if block_txs.contains(tx_hash) {
-                                info!("setting inclusion point for {}: {slot}", tx_hash);
+                                debug!("setting inclusion point for {}: {slot}", tx_hash);
                                 *inclusion = Some(*slot)
                             }
                         }
@@ -139,7 +139,7 @@ impl gasket::framework::Worker<Stage> for Worker {
                         for (tx_hash, inclusion) in monitor.txs.iter_mut() {
                             if let Some(slot) = inclusion {
                                 if *slot > *rb_slot {
-                                    info!(
+                                    debug!(
                                         "removing inclusion point for {} due to rollback ({} > {})",
                                         tx_hash, slot, rb_slot
                                     );
