@@ -7,6 +7,12 @@ mod reader;
 mod stream;
 mod writer;
 
+// A concrete implementation of the WAL using Redb
+pub mod redb;
+
+#[cfg(test)]
+pub mod testing;
+
 pub type BlockSlot = u64;
 pub type BlockHash = pallas::crypto::hash::Hash<32>;
 pub type BlockEra = pallas::ledger::traverse::Era;
@@ -49,11 +55,18 @@ impl From<ChainPoint> for PallasPoint {
     }
 }
 
+impl From<&RawBlock> for ChainPoint {
+    fn from(value: &RawBlock) -> Self {
+        let RawBlock { slot, hash, .. } = value;
+        ChainPoint::Specific(*slot, *hash)
+    }
+}
+
 impl From<&LogValue> for ChainPoint {
     fn from(value: &LogValue) -> Self {
         match value {
-            LogValue::Apply(RawBlock { slot, hash, .. }) => ChainPoint::Specific(*slot, *hash),
-            LogValue::Undo(RawBlock { slot, hash, .. }) => ChainPoint::Specific(*slot, *hash),
+            LogValue::Apply(x) => ChainPoint::from(x),
+            LogValue::Undo(x) => ChainPoint::from(x),
             LogValue::Mark(x) => x.clone(),
         }
     }
@@ -65,13 +78,6 @@ pub struct RawBlock {
     pub hash: BlockHash,
     pub era: BlockEra,
     pub body: BlockBody,
-}
-
-impl From<&RawBlock> for ChainPoint {
-    fn from(value: &RawBlock) -> Self {
-        let RawBlock { slot, hash, .. } = value;
-        ChainPoint::Specific(*slot, *hash)
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -106,8 +112,6 @@ pub enum WalError {
 pub use reader::{ReadUtils, WalReader};
 pub use stream::WalStream;
 pub use writer::WalWriter;
-
-pub mod redb;
 
 #[cfg(test)]
 mod tests {
