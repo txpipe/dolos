@@ -107,24 +107,3 @@ async fn test_chainsync_happy_path() {
 
     server.abort();
 }
-
-#[tokio::test]
-async fn test_peer_creds() {
-    let wal = wal::testing::empty_db();
-
-    let server = tokio::spawn(super::serve(
-        super::Config {
-            listen_path: format!("creds.socket").into(),
-            magic: MAINNET_MAGIC,
-        },
-        wal,
-    ));
-
-    tokio::time::sleep(Duration::from_secs(3)).await;
-
-    let client = NodeClient::connect(Path::new(&format!("creds.socket")), MAINNET_MAGIC)
-        .await
-        .unwrap();
-
-    panic!();
-}
