@@ -7,13 +7,18 @@ use crate::ledger::store::LedgerStore;
 use crate::prelude::*;
 use crate::wal::redb::WalStore;
 
-pub mod grpc;
-pub mod ouroboros;
+mod grpc;
+
+/// Short for Ouroboros
+#[cfg(unix)]
+mod o7s;
 
 #[derive(Deserialize, Serialize, Clone)]
 pub struct Config {
     pub grpc: Option<grpc::Config>,
-    pub ouroboros: Option<ouroboros::Config>,
+
+    #[cfg(unix)]
+    pub ouroboros: Option<o7s::Config>,
 }
 
 /// Serve remote requests
@@ -40,9 +45,10 @@ pub async fn serve(
         )));
     }
 
+    #[cfg(unix)]
     if let Some(cfg) = config.ouroboros {
         info!("found Ouroboros config");
-        tasks.push(tokio::spawn(ouroboros::serve(cfg, wal.clone())));
+        tasks.push(tokio::spawn(o7s::serve(cfg, wal.clone())));
     }
 
     // TODO: we should stop if any of the tasks breaks

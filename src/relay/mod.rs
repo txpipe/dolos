@@ -9,12 +9,12 @@ use tracing::{info, instrument};
 use crate::prelude::*;
 use crate::wal::redb::WalStore;
 
-#[cfg(test)]
-mod tests;
-
 mod blockfetch;
 mod chainsync;
 mod convert;
+
+#[cfg(test)]
+mod tests;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Config {
@@ -31,8 +31,8 @@ async fn peer_session(wal: WalStore, peer: PeerServer) -> Result<(), Error> {
         ..
     } = peer;
 
-    let l1 = self::chainsync::handle_session(wal.clone(), chainsync);
-    let l2 = self::blockfetch::handle_blockfetch(wal.clone(), blockfetch);
+    let l1 = chainsync::handle_session(wal.clone(), chainsync);
+    let l2 = blockfetch::handle_blockfetch(wal.clone(), blockfetch);
     let l3 = handle_keepalive(keepalive);
 
     let _ = tokio::try_join!(l1, l2, l3);
