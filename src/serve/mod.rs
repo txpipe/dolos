@@ -10,11 +10,14 @@ use crate::wal::redb::WalStore;
 mod grpc;
 
 /// Short for Ouroboros
+#[cfg(unix)]
 mod o7s;
 
 #[derive(Deserialize, Serialize, Clone)]
 pub struct Config {
     pub grpc: Option<grpc::Config>,
+
+    #[cfg(unix)]
     pub ouroboros: Option<o7s::Config>,
 }
 
@@ -42,6 +45,7 @@ pub async fn serve(
         )));
     }
 
+    #[cfg(unix)]
     if let Some(cfg) = config.ouroboros {
         info!("found Ouroboros config");
         tasks.push(tokio::spawn(o7s::serve(cfg, wal.clone())));

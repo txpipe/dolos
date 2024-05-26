@@ -32,7 +32,6 @@ async fn client_session(wal: WalStore, server: NodeServer) -> Result<(), Error> 
     Ok(())
 }
 
-#[cfg(unix)]
 #[instrument(skip_all)]
 pub async fn serve(config: Config, wal: WalStore) -> Result<(), Error> {
     let listener = UnixListener::bind(&config.listen_path).map_err(Error::server)?;
@@ -48,10 +47,4 @@ pub async fn serve(config: Config, wal: WalStore) -> Result<(), Error> {
 
         let _handle = tokio::spawn(client_session(wal.clone(), server));
     }
-}
-
-#[cfg(windows)]
-#[instrument(skip_all)]
-pub async fn serve(config: Config, wal: WalStore) -> Result<(), Error> {
-    tracing::warn!("Ouroboros server in windows not currently supported");
 }
