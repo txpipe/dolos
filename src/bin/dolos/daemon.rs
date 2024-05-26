@@ -36,6 +36,8 @@ pub async fn run(config: super::Config, _args: &Args) -> miette::Result<()> {
     .into_diagnostic()
     .context("bootstrapping sync pipeline")?;
 
+    let relay = tokio::spawn(dolos::relay::serve(config.relay, wal.clone()));
+
     let submit = dolos::submit::pipeline(
         &config.submit,
         &config.upstream,
@@ -49,6 +51,7 @@ pub async fn run(config: super::Config, _args: &Args) -> miette::Result<()> {
 
     gasket::daemon::Daemon::new(sync.into_iter().chain(submit).collect()).block();
 
+    relay.abort();
     server.abort();
 
     Ok(())

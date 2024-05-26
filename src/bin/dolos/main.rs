@@ -95,6 +95,7 @@ pub struct Config {
     pub genesis: GenesisConfig,
     pub sync: dolos::sync::Config,
     pub serve: dolos::serve::Config,
+    pub relay: dolos::relay::Config,
     pub submit: dolos::submit::Config,
     pub retries: Option<gasket::retries::Policy>,
     pub mithril: Option<MithrilConfig>,

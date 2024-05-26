@@ -1,38 +1,31 @@
 use pallas::network::facades::NodeServer;
-use pallas::network::miniprotocols::keepalive;
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
-use tokio::net::{TcpListener, UnixListener};
-
+use std::path::PathBuf;
+use tokio::net::UnixListener;
 use tracing::{info, instrument};
 
 use crate::prelude::*;
 use crate::wal::redb::WalStore;
 
 mod chainsync;
-mod convert;
 
 #[cfg(test)]
 mod tests;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Config {
-    listen_address: String,
+    listen_path: PathBuf,
     magic: u64,
 }
 
 async fn client_session(wal: WalStore, server: NodeServer) -> Result<(), Error> {
     let NodeServer {
-        plexer,
-        chainsync,
-        keepalive,
-        ..
+        plexer, chainsync, ..
     } = server;
 
     let l1 = chainsync::handle_session(wal.clone(), chainsync);
-    let l2 = handle_keepalive(keepalive);
 
-    let _ = tokio::try_join!(l1, l2);
+    let _ = tokio::try_join!(l1); // leaving this here since there's more threads to come
 
     plexer.abort().await;
 
@@ -41,9 +34,9 @@ async fn client_session(wal: WalStore, server: NodeServer) -> Result<(), Error> 
 
 #[instrument(skip_all)]
 pub async fn serve(config: Config, wal: WalStore) -> Result<(), Error> {
-    let listener = UnixListener::bind(&config.listen_address).map_err(Error::server)?;
+    let listener = UnixListener::bind(&config.listen_path).map_err(Error::server)?;
 
-    info!(addr = &config.listen_address, "o7s listening");
+    info!(addr = %config.listen_path.to_string_lossy(), "o7s listening");
 
     loop {
         let server = NodeServer::accept(&listener, config.magic)
@@ -53,16 +46,5 @@ pub async fn serve(config: Config, wal: WalStore) -> Result<(), Error> {
         info!("accepted incoming connection");
 
         let _handle = tokio::spawn(client_session(wal.clone(), server));
-    }
-}
-
-async fn handle_keepalive(mut keepalive: keepalive::Server) -> Result<(), Error> {
-    loop {
-        keepalive
-            .keepalive_roundtrip()
-            .await
-            .map_err(Error::server)?;
-
-        tokio::time::sleep(Duration::from_secs(15)).await
     }
 }
