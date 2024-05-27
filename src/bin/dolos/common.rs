@@ -3,7 +3,6 @@ use miette::{Context as _, IntoDiagnostic};
 use pallas::ledger::configs::alonzo::GenesisFile as AlonzoFile;
 use pallas::ledger::configs::byron::GenesisFile as ByronFile;
 use pallas::ledger::configs::shelley::GenesisFile as ShelleyFile;
-use tracing::Level;
 use tracing_subscriber::{filter::Targets, prelude::*};
 
 use dolos::{ledger::store::LedgerStore, prelude::*};

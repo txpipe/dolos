@@ -10,6 +10,8 @@ use std::{
 mod include;
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
+#[allow(clippy::enum_variant_names)]
 pub enum KnownNetwork {
     CardanoMainnet,
     CardanoPreProd,
@@ -158,7 +160,7 @@ impl ConfigEditor {
 
     fn apply_remote_peer(mut self, value: Option<&String>) -> Self {
         if let Some(remote_peer) = value {
-            self.0.upstream.peer_address = remote_peer.to_owned();
+            remote_peer.clone_into(&mut self.0.upstream.peer_address)
         }
 
         self
@@ -215,9 +217,9 @@ impl ConfigEditor {
     fn fill_values_from_args(self, args: &Args) -> Self {
         self.apply_known_network(args.known_network.as_ref())
             .apply_remote_peer(args.remote_peer.as_ref())
-            .apply_serve_grpc(args.serve_grpc.clone())
-            .apply_serve_ouroboros(args.serve_ouroboros.clone())
-            .apply_enable_relay(args.enable_relay.clone())
+            .apply_serve_grpc(args.serve_grpc)
+            .apply_serve_ouroboros(args.serve_ouroboros)
+            .apply_enable_relay(args.enable_relay)
     }
 
     fn prompt_known_network(self) -> miette::Result<Self> {
@@ -240,7 +242,7 @@ impl ConfigEditor {
                 .into_diagnostic()
                 .context("asking for including genesis")?;
 
-            self.1 = value.then(|| network);
+            self.1 = value.then_some(network);
         }
 
         Ok(self)
