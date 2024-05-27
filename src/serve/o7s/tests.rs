@@ -4,18 +4,22 @@ use pallas::network::{
     facades::NodeClient,
     miniprotocols::{chainsync::NextResponse, Point, MAINNET_MAGIC},
 };
+use tokio_util::sync::CancellationToken;
 
 use crate::wal::{self, redb::WalStore, WalWriter};
 
 type ServerHandle = tokio::task::JoinHandle<Result<(), crate::prelude::Error>>;
 
 async fn setup_server_client_pair(port: u32, wal: WalStore) -> (ServerHandle, NodeClient) {
+    let cancel = CancellationToken::new();
+
     let server = tokio::spawn(super::serve(
         super::Config {
             listen_path: format!("dolos{port}.socket").into(),
             magic: MAINNET_MAGIC,
         },
         wal,
+        cancel,
     ));
 
     tokio::time::sleep(Duration::from_secs(3)).await;
