@@ -1,6 +1,6 @@
-use std::sync::Arc;
-
 use miette::{Context, IntoDiagnostic};
+use std::sync::Arc;
+use tracing::warn;
 
 #[derive(Debug, clap::Args)]
 pub struct Args {}
@@ -13,6 +13,7 @@ pub async fn run(config: super::Config, _args: &Args) -> miette::Result<()> {
     let (byron, shelley, _) = crate::common::open_genesis_files(&config.genesis)?;
     let (txs_out, txs_in) = gasket::messaging::tokio::mpsc_channel(64);
     let mempool = Arc::new(dolos::submit::MempoolState::default());
+    let exit = crate::common::hook_exit_token();
 
     let sync = dolos::sync::pipeline(
         &config.sync,
@@ -45,6 +46,7 @@ pub async fn run(config: super::Config, _args: &Args) -> miette::Result<()> {
         ledger.clone(),
         mempool.clone(),
         txs_out,
+        exit,
     ));
 
     let relay = config
@@ -54,6 +56,8 @@ pub async fn run(config: super::Config, _args: &Args) -> miette::Result<()> {
     pipelines.block();
     relay.inspect(|x| x.abort());
     serve.abort();
+
+    warn!("shutdown complete");
 
     Ok(())
 }

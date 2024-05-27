@@ -1,10 +1,11 @@
-use futures_util::future::join_all;
+use futures_util::future::try_join;
+use miette::{Context, IntoDiagnostic};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use crate::ledger::store::LedgerStore;
-use crate::prelude::*;
 use crate::wal::redb::WalStore;
 
 pub mod grpc;
@@ -31,28 +32,36 @@ pub async fn serve(
     ledger: LedgerStore,
     mempool: Arc<crate::submit::MempoolState>,
     txs_out: gasket::messaging::tokio::ChannelSendAdapter<Vec<crate::submit::Transaction>>,
-) -> Result<(), Error> {
-    let mut tasks = vec![];
+    exit: CancellationToken,
+) -> miette::Result<()> {
+    let grpc = async {
+        if let Some(cfg) = config.grpc {
+            info!("found gRPC config");
 
-    if let Some(cfg) = config.grpc {
-        info!("found gRPC config");
-        tasks.push(tokio::spawn(grpc::serve(
-            cfg,
-            wal.clone(),
-            ledger,
-            mempool,
-            txs_out,
-        )));
-    }
+            grpc::serve(cfg, wal.clone(), ledger, mempool, txs_out, exit.clone())
+                .await
+                .into_diagnostic()
+                .context("serving gRPC")
+        } else {
+            Ok(())
+        }
+    };
 
     #[cfg(unix)]
-    if let Some(cfg) = config.ouroboros {
-        info!("found Ouroboros config");
-        tasks.push(tokio::spawn(o7s::serve(cfg, wal.clone())));
-    }
+    let o7s = async {
+        if let Some(cfg) = config.ouroboros {
+            info!("found Ouroboros config");
 
-    // TODO: we should stop if any of the tasks breaks
-    join_all(tasks).await;
+            o7s::serve(cfg, wal.clone(), exit.clone())
+                .await
+                .into_diagnostic()
+                .context("serving Ouroboros")
+        } else {
+            Ok(())
+        }
+    };
+
+    try_join(grpc, o7s).await?;
 
     Ok(())
 }

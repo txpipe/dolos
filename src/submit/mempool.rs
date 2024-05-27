@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc};
 
 use gasket::framework::*;
 use pallas::crypto::hash::Hash;
@@ -79,9 +79,6 @@ impl gasket::framework::Worker<Stage> for Worker {
                 let monitor_msg = monitor_msg.or_panic()?;
                 debug!("received monitor message: {:?}", monitor_msg);
                 Ok(WorkSchedule::Unit(MempoolEvent::ChainUpdate(monitor_msg.payload)))
-            }
-            _ = tokio::time::sleep(Duration::from_secs(20)) => {
-                Ok(WorkSchedule::Idle)
             }
         }
     }

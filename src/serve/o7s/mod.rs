@@ -1,7 +1,10 @@
+use log::{debug, warn};
 use pallas::network::facades::NodeServer;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tokio::net::UnixListener;
+use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 use tracing::{info, instrument};
 
 use crate::prelude::*;
@@ -18,33 +21,80 @@ pub struct Config {
     pub magic: u64,
 }
 
-async fn client_session(wal: WalStore, server: NodeServer) -> Result<(), Error> {
+async fn handle_session(
+    wal: WalStore,
+    connection: NodeServer,
+    cancel: CancellationToken,
+) -> Result<(), Error> {
     let NodeServer {
         plexer, chainsync, ..
-    } = server;
+    } = connection;
 
-    let l1 = chainsync::handle_session(wal.clone(), chainsync);
+    // leaving this here since there's more threads to come
+    let l1 = tokio::spawn(chainsync::handle_session(wal.clone(), chainsync, cancel));
 
-    let _ = tokio::try_join!(l1); // leaving this here since there's more threads to come
+    let (l1,) = tokio::try_join!(l1).map_err(Error::server)?;
+
+    l1?;
 
     plexer.abort().await;
 
     Ok(())
 }
 
-#[instrument(skip_all)]
-pub async fn serve(config: Config, wal: WalStore) -> Result<(), Error> {
+async fn accept_client_connections(
+    wal: WalStore,
+    config: &Config,
+    tasks: &mut TaskTracker,
+    cancel: CancellationToken,
+) -> Result<(), Error> {
     let listener = UnixListener::bind(&config.listen_path).map_err(Error::server)?;
-
-    info!(addr = %config.listen_path.to_string_lossy(), "o7s listening");
+    info!(addr = %config.listen_path.to_string_lossy(), "Ouroboros socket is listenting");
 
     loop {
-        let server = NodeServer::accept(&listener, config.magic)
+        let connection = NodeServer::accept(&listener, config.magic)
             .await
             .map_err(Error::server)?;
 
-        info!("accepted incoming connection");
+        info!(
+            from = ?connection.accepted_address(),
+            handshake = ?connection.accepted_version(),
+            "accepting incoming connection"
+        );
 
-        let _handle = tokio::spawn(client_session(wal.clone(), server));
+        tasks.spawn(handle_session(wal.clone(), connection, cancel.clone()));
+
+        info!(connections = tasks.len(), "active connections changed");
     }
+}
+
+#[instrument(skip_all)]
+pub async fn serve(config: Config, wal: WalStore, cancel: CancellationToken) -> Result<(), Error> {
+    let mut tasks = TaskTracker::new();
+
+    tokio::select! {
+        res = accept_client_connections(wal.clone(), &config, &mut tasks, cancel.clone()) => {
+            res?;
+        },
+        _ = cancel.cancelled() => {
+            warn!("exit requested");
+        }
+    }
+
+    // removing socket file so that it's free for next run
+    debug!("removing socket file");
+    std::fs::remove_file(config.listen_path).map_err(Error::server)?;
+
+    // notify the tracker that we're done receiving new tasks. Without this explicit
+    // close, the wait will block forever.
+    debug!("closing task manger");
+    tasks.close();
+
+    // now we wait until all nested tasks exit
+    debug!("waiting for tasks to finish");
+    tasks.wait().await;
+
+    info!("graceful shutdown finished");
+
+    Ok(())
 }

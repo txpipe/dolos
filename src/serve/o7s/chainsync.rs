@@ -3,6 +3,7 @@ use pallas::network::miniprotocols::{
     chainsync::{BlockContent, ClientRequest, N2CServer, Tip},
     Point,
 };
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
 use crate::{
@@ -223,7 +224,11 @@ impl<'a> Session<'a> {
     }
 }
 
-pub async fn handle_session(wal: WalStore, connection: N2CServer) -> Result<(), Error> {
+pub async fn handle_session(
+    wal: WalStore,
+    connection: N2CServer,
+    cancel: CancellationToken,
+) -> Result<(), Error> {
     let mut session = Session {
         wal,
         connection,
@@ -232,9 +237,14 @@ pub async fn handle_session(wal: WalStore, connection: N2CServer) -> Result<(), 
         is_new_intersection: false,
     };
 
-    session.process_requests().await?;
-
-    info!("client ended protocol");
+    tokio::select! {
+        _ = session.process_requests() => {
+            info!("client ended protocol");
+        },
+        _ = cancel.cancelled() => {
+            info!("protocol was cancelled");
+        }
+    }
 
     Ok(())
 }
