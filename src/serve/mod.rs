@@ -7,13 +7,13 @@ use crate::ledger::store::LedgerStore;
 use crate::prelude::*;
 use crate::wal::redb::WalStore;
 
-mod grpc;
+pub mod grpc;
 
 /// Short for Ouroboros
 #[cfg(unix)]
-mod o7s;
+pub mod o7s;
 
-#[derive(Deserialize, Serialize, Clone)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 pub struct Config {
     pub grpc: Option<grpc::Config>,
 

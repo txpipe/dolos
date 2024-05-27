@@ -29,7 +29,7 @@ pub enum RollEvent {
     TipChanged,
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct UpstreamConfig {
     pub peer_address: String,
     pub network_magic: u64,

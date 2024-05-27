@@ -14,8 +14,8 @@ mod tests;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Config {
-    listen_path: PathBuf,
-    magic: u64,
+    pub listen_path: PathBuf,
+    pub magic: u64,
 }
 
 async fn client_session(wal: WalStore, server: NodeServer) -> Result<(), Error> {

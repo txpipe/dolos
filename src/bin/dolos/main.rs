@@ -1,22 +1,31 @@
 use clap::{Parser, Subcommand};
 use miette::{Context, IntoDiagnostic, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 use std::path::PathBuf;
 
 mod common;
 mod daemon;
-mod data;
 mod doctor;
 mod eval;
 mod serve;
 mod sync;
+
+#[cfg(feature = "utils")]
+mod init;
+
+#[cfg(feature = "utils")]
+mod data;
 
 #[cfg(feature = "mithril")]
 mod bootstrap;
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Initialize the node configuration
+    #[cfg(feature = "utils")]
+    Init(init::Args),
+
     /// Run the node in all its glory
     Daemon(daemon::Args),
 
@@ -53,14 +62,23 @@ struct Cli {
     config: Option<std::path::PathBuf>,
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct StorageConfig {
-    path: Option<std::path::PathBuf>,
+    path: std::path::PathBuf,
     #[allow(dead_code)]
     wal_size: Option<u64>,
 }
 
-#[derive(Deserialize)]
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            path: PathBuf::from("data"),
+            wal_size: None,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
 pub struct GenesisConfig {
     byron_path: PathBuf,
     shelley_path: PathBuf,
@@ -69,17 +87,27 @@ pub struct GenesisConfig {
     // hash: String,
 }
 
-#[derive(Deserialize)]
+impl Default for GenesisConfig {
+    fn default() -> Self {
+        Self {
+            byron_path: PathBuf::from("byron.json"),
+            shelley_path: PathBuf::from("shelley.json"),
+            alonzo_path: PathBuf::from("alonzo.json"),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
 pub struct MithrilConfig {
     aggregator: String,
     genesis_key: String,
 }
 
 #[serde_as]
-#[derive(Deserialize, Default, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct LoggingConfig {
-    #[serde_as(as = "Option<DisplayFromStr>")]
-    max_level: Option<tracing::Level>,
+    #[serde_as(as = "DisplayFromStr")]
+    max_level: tracing::Level,
 
     #[serde(default)]
     include_pallas: bool,
@@ -88,17 +116,28 @@ pub struct LoggingConfig {
     include_grpc: bool,
 }
 
-#[derive(Deserialize)]
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            max_level: tracing::Level::INFO,
+            include_pallas: Default::default(),
+            include_grpc: Default::default(),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
 pub struct Config {
     pub upstream: dolos::model::UpstreamConfig,
     pub storage: StorageConfig,
     pub genesis: GenesisConfig,
     pub sync: dolos::sync::Config,
-    pub serve: dolos::serve::Config,
-    pub relay: dolos::relay::Config,
     pub submit: dolos::submit::Config,
+    pub serve: dolos::serve::Config,
+    pub relay: Option<dolos::relay::Config>,
     pub retries: Option<gasket::retries::Policy>,
     pub mithril: Option<MithrilConfig>,
+
     #[serde(default)]
     pub logging: LoggingConfig,
 }
@@ -129,18 +168,28 @@ fn main() -> Result<()> {
     let args = Cli::parse();
     let config = Config::new(&args.config)
         .into_diagnostic()
-        .context("parsing configuration")?;
+        .context("parsing configuration");
 
-    match args.command {
-        Command::Daemon(x) => daemon::run(config, &x)?,
-        Command::Sync(x) => sync::run(&config, &x)?,
-        Command::Data(x) => data::run(&config, &x)?,
-        Command::Serve(x) => serve::run(config, &x)?,
-        Command::Eval(x) => eval::run(&config, &x)?,
-        Command::Doctor(x) => doctor::run(&config, &x)?,
+    match (config, args.command) {
+        (Ok(config), Command::Daemon(args)) => daemon::run(config, &args)?,
+        (Ok(config), Command::Sync(args)) => sync::run(&config, &args)?,
+        (Ok(config), Command::Serve(args)) => serve::run(config, &args)?,
+        (Ok(config), Command::Eval(args)) => eval::run(&config, &args)?,
+        (Ok(config), Command::Doctor(args)) => doctor::run(&config, &args)?,
+
+        // the init command is special because it knows how to execute with or without a valid
+        // configuration, that is why we pass the whole result and let the command logic decide what
+        // to do with it.
+        #[cfg(feature = "utils")]
+        (config, Command::Init(args)) => init::run(config, &args)?,
+
+        #[cfg(feature = "utils")]
+        (Ok(config), Command::Data(args)) => data::run(&config, &args)?,
 
         #[cfg(feature = "mithril")]
-        Command::Bootstrap(x) => bootstrap::run(&config, &x)?,
+        (Ok(config), Command::Bootstrap(args)) => bootstrap::run(&config, &args)?,
+
+        (Err(x), _) => print!("{x}"),
     };
 
     Ok(())
