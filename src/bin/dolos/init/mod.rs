@@ -343,6 +343,11 @@ pub fn run(config: miette::Result<super::Config>, args: &Args) -> miette::Result
         .confirm_values()?
         .include_genesis_files()?
         .save(&PathBuf::from("dolos.toml"))?;
+    println!("config saved to dolos.toml");
+
+    println!("\nDolos is ready!");
+    println!("- run `dolos daemon` to start the node");
+    println!("- run `dolos bootstrap` to load a Mithril snapshot");
 
     Ok(())
 }
