@@ -1,4 +1,5 @@
 use futures_util::future::try_join;
+use log::warn;
 use miette::{Context, IntoDiagnostic};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -11,7 +12,6 @@ use crate::wal::redb::WalStore;
 pub mod grpc;
 
 /// Short for Ouroboros
-#[cfg(unix)]
 pub mod o7s;
 
 #[derive(Deserialize, Serialize, Clone, Default)]
@@ -47,7 +47,6 @@ pub async fn serve(
         }
     };
 
-    #[cfg(unix)]
     let o7s = async {
         if let Some(cfg) = config.ouroboros {
             info!("found Ouroboros config");

@@ -68,6 +68,7 @@ async fn accept_client_connections(
     }
 }
 
+#[cfg(unix)]
 #[instrument(skip_all)]
 pub async fn serve(config: Config, wal: WalStore, cancel: CancellationToken) -> Result<(), Error> {
     let mut tasks = TaskTracker::new();
@@ -95,6 +96,13 @@ pub async fn serve(config: Config, wal: WalStore, cancel: CancellationToken) -> 
     tasks.wait().await;
 
     info!("graceful shutdown finished");
+
+    Ok(())
+}
+
+#[cfg(windows)]
+pub async fn serve(_: Config, _: WalStore, _: CancellationToken) -> Result<(), Error> {
+    tracing::error!("ouroboros client socket not supported on windows");
 
     Ok(())
 }
