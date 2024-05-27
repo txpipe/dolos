@@ -27,12 +27,22 @@ pub fn open_data_stores(config: &crate::Config) -> Result<Stores, Error> {
     Ok((wal, ledger))
 }
 
-#[allow(dead_code)]
+pub fn data_stores_exist(config: &crate::Config) -> bool {
+    let root = &config.storage.path;
+
+    root.join("wal").is_file() || root.join("ledger").is_file()
+}
+
 pub fn destroy_data_stores(config: &crate::Config) -> Result<(), Error> {
     let root = &config.storage.path;
 
-    std::fs::remove_file(root.join("wal")).map_err(Error::storage)?;
-    std::fs::remove_file(root.join("ledger")).map_err(Error::storage)?;
+    if root.join("wal").is_file() {
+        std::fs::remove_file(root.join("wal")).map_err(Error::storage)?;
+    }
+
+    if root.join("ledger").is_file() {
+        std::fs::remove_file(root.join("ledger")).map_err(Error::storage)?;
+    }
 
     Ok(())
 }

@@ -28,10 +28,6 @@ pub struct Args {
     #[arg(long, action)]
     skip_validation: bool,
 
-    /// Delete any existing data and continue with bootstrap
-    #[arg(long, short, action)]
-    force: bool,
-
     /// Assume the snapshot is already available in the download dir
     #[arg(long, action)]
     skip_download: bool,
@@ -198,29 +194,26 @@ async fn fetch_snapshot(
     Ok(())
 }
 
-fn open_empty_stores(config: &super::Config, force: bool) -> miette::Result<Option<Stores>> {
-    let mut stores = crate::common::open_data_stores(config)?;
+fn open_empty_stores(config: &super::Config) -> miette::Result<Stores> {
+    let not_empty = crate::common::data_stores_exist(config);
 
-    let empty = stores
-        .0
-        .is_empty()
-        .into_diagnostic()
-        .context("opening wal")?
-        && stores.1.is_empty();
+    let delete = not_empty && {
+        inquire::Confirm::new("do you want to delete existing data?")
+            .with_default(false)
+            .prompt()
+            .into_diagnostic()
+            .context("confirming delete")?
+    };
 
-    match (empty, force) {
-        (true, _) => Ok(Some(stores)),
-        (false, true) => {
-            drop(stores);
-
-            crate::common::destroy_data_stores(config)
-                .context("destroying existing data stores")?;
-
-            stores = crate::common::open_data_stores(config)?;
-            Ok(Some(stores))
-        }
-        (false, false) => Ok(None),
+    if not_empty && delete {
+        crate::common::destroy_data_stores(config).context("destroying existing data stores")?;
+    } else if not_empty {
+        bail!("can't continue with data already available");
     }
+
+    crate::common::open_data_stores(config)
+        .into_diagnostic()
+        .context("opening store")
 }
 
 fn import_hardano_into_wal(
@@ -340,15 +333,7 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
         .as_ref()
         .ok_or(miette::miette!("missing mithril config"))?;
 
-    let empty_stores =
-        open_empty_stores(config, args.force).context("opening empty data stores")?;
-
-    if empty_stores.is_none() && args.skip_if_not_empty {
-        warn!("data stores are not empty, skipping bootstrap");
-        return Ok(());
-    } else if empty_stores.is_none() {
-        bail!("data stores must be empty to execute bootstrap");
-    }
+    let (mut wal, mut ledger) = open_empty_stores(config).context("opening empty data stores")?;
 
     let target_directory = Path::new(&args.download_dir);
 
@@ -372,8 +357,6 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
     }
 
     let immutable_path = Path::new(&args.download_dir).join("immutable");
-
-    let (mut wal, mut ledger) = empty_stores.unwrap();
 
     let (byron, shelley, _) = crate::common::open_genesis_files(&config.genesis)?;
 
