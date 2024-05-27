@@ -25,8 +25,6 @@ pub use o7s_win as o7s;
 #[derive(Deserialize, Serialize, Clone, Default)]
 pub struct Config {
     pub grpc: Option<grpc::Config>,
-
-    #[cfg(unix)]
     pub ouroboros: Option<o7s::Config>,
 }
 
