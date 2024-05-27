@@ -1,5 +1,4 @@
 use futures_util::future::try_join;
-use log::warn;
 use miette::{Context, IntoDiagnostic};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -11,8 +10,17 @@ use crate::wal::redb::WalStore;
 
 pub mod grpc;
 
-/// Short for Ouroboros
-pub mod o7s;
+#[cfg(unix)]
+pub mod o7s_unix;
+
+#[cfg(unix)]
+pub use o7s_unix as o7s;
+
+#[cfg(windows)]
+pub mod o7s_win;
+
+#[cfg(windows)]
+pub use o7s_win as o7s;
 
 #[derive(Deserialize, Serialize, Clone, Default)]
 pub struct Config {
