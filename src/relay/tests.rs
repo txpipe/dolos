@@ -2,6 +2,7 @@ use pallas::network::{
     facades::PeerClient,
     miniprotocols::{chainsync::NextResponse, Point, MAINNET_MAGIC},
 };
+use tokio_util::sync::CancellationToken;
 
 use crate::wal::{self, redb::WalStore, WalWriter};
 
@@ -9,11 +10,12 @@ type ServerHandle = tokio::task::JoinHandle<Result<(), crate::prelude::Error>>;
 
 async fn setup_server_client_pair(port: u32, wal: WalStore) -> (ServerHandle, PeerClient) {
     let server = tokio::spawn(super::serve(
-        super::Config {
+        Some(super::Config {
             listen_address: format!("[::]:{port}"),
             magic: MAINNET_MAGIC,
-        },
+        }),
         wal,
+        CancellationToken::new(),
     ));
 
     let client = PeerClient::connect(&format!("localhost:{port}"), MAINNET_MAGIC)

@@ -1,8 +1,13 @@
+use std::time::Duration;
+
 use dolos::wal::redb::WalStore;
 use miette::{Context as _, IntoDiagnostic};
 use pallas::ledger::configs::alonzo::GenesisFile as AlonzoFile;
 use pallas::ledger::configs::byron::GenesisFile as ByronFile;
 use pallas::ledger::configs::shelley::GenesisFile as ShelleyFile;
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, warn};
 use tracing_subscriber::{filter::Targets, prelude::*};
 
 use dolos::{ledger::store::LedgerStore, prelude::*};
@@ -72,4 +77,41 @@ pub fn open_genesis_files(config: &GenesisConfig) -> miette::Result<GenesisFiles
         .context("loading alonzo genesis config")?;
 
     Ok((byron_genesis, shelley_genesis, alonzo_genesis))
+}
+
+pub fn hook_exit_token() -> CancellationToken {
+    let cancel = CancellationToken::new();
+
+    let cancel2 = cancel.clone();
+    tokio::spawn(async move {
+        tokio::signal::ctrl_c().await.unwrap();
+        warn!("exit signal detected");
+        debug!("notifying exit");
+        cancel2.cancel();
+    });
+
+    cancel
+}
+
+pub async fn run_pipeline(pipeline: gasket::daemon::Daemon, exit: CancellationToken) {
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(5000)) => {
+                if pipeline.should_stop() {
+                    break;
+                }
+            }
+            _ = exit.cancelled() => {
+                debug!("exit requested");
+                break;
+            }
+        }
+    }
+
+    debug!("shutting down pipeline");
+    pipeline.teardown();
+}
+
+pub fn spawn_pipeline(pipeline: gasket::daemon::Daemon, exit: CancellationToken) -> JoinHandle<()> {
+    tokio::spawn(run_pipeline(pipeline, exit))
 }

@@ -2,6 +2,7 @@ use pallas::crypto::hash::Hash;
 use pallas::interop::utxorpc::spec as u5c;
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc};
+use tokio_util::sync::CancellationToken;
 use tonic::transport::{Certificate, Server, ServerTlsConfig};
 use tracing::info;
 
@@ -25,6 +26,7 @@ pub async fn serve(
     ledger: LedgerStore,
     mempool: Arc<crate::submit::MempoolState>,
     txs_out: gasket::messaging::tokio::ChannelSendAdapter<Vec<Transaction>>,
+    exit: CancellationToken,
 ) -> Result<(), Error> {
     let addr = config.listen_address.parse().unwrap();
 
@@ -68,7 +70,7 @@ pub async fn serve(
         .add_service(tonic_web::enable(query_service))
         .add_service(tonic_web::enable(submit_service))
         .add_service(reflection)
-        .serve(addr)
+        .serve_with_shutdown(addr, exit.cancelled())
         .await
         .map_err(Error::server)?;
 
