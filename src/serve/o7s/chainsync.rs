@@ -152,7 +152,7 @@ impl<'a> Session<'a> {
     }
 
     async fn handle_next_request(&mut self) -> Result<(), Error> {
-        info!("handling next request");
+        debug!("handling next request");
 
         let next = self.read_next_wal()?;
 
@@ -175,14 +175,14 @@ impl<'a> Session<'a> {
     }
 
     async fn handle_intersect(&mut self, mut points: Vec<Point>) -> Result<(), Error> {
-        info!(?points, "handling intersect request");
+        debug!(?points, "handling intersect request");
 
         let tip = self.prepare_tip()?;
 
         // TODO: if points are empty it means that client wants to start sync from
         // origin?.
         if points.is_empty() {
-            info!("intersect candidates empty, using origin");
+            debug!("intersect candidates empty, using origin");
             points.push(Point::Origin);
         }
 
@@ -191,10 +191,10 @@ impl<'a> Session<'a> {
         let seq = self.wal.find_intersect(&points).map_err(Error::server)?;
 
         if let Some((seq, point)) = seq {
-            info!(?point, "found intersect point");
+            debug!(?point, "found intersect point");
             self.send_intersect_found(seq, point).await
         } else {
-            info!("could not intersect");
+            debug!("could not intersect");
 
             self.current_iterator = None;
 

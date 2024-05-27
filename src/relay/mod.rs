@@ -1,10 +1,10 @@
 use pallas::network::facades::PeerServer;
-use pallas::network::miniprotocols::keepalive;
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
 use tokio::net::TcpListener;
+use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
-use tracing::{info, instrument};
+use tracing::{debug, info, instrument, warn};
 
 use crate::prelude::*;
 use crate::wal::redb::WalStore;
@@ -12,6 +12,7 @@ use crate::wal::redb::WalStore;
 mod blockfetch;
 mod chainsync;
 mod convert;
+mod hanshake;
 
 #[cfg(test)]
 mod tests;
@@ -22,7 +23,11 @@ pub struct Config {
     pub magic: u64,
 }
 
-async fn peer_session(wal: WalStore, peer: PeerServer) -> Result<(), Error> {
+async fn handle_session(
+    wal: WalStore,
+    peer: PeerServer,
+    cancel: CancellationToken,
+) -> Result<(), Error> {
     let PeerServer {
         plexer,
         chainsync,
@@ -31,9 +36,9 @@ async fn peer_session(wal: WalStore, peer: PeerServer) -> Result<(), Error> {
         ..
     } = peer;
 
-    let l1 = chainsync::handle_session(wal.clone(), chainsync);
-    let l2 = blockfetch::handle_blockfetch(wal.clone(), blockfetch);
-    let l3 = handle_keepalive(keepalive);
+    let l1 = chainsync::handle_session(wal.clone(), chainsync, cancel.clone());
+    let l2 = blockfetch::handle_session(wal.clone(), blockfetch, cancel.clone());
+    let l3 = hanshake::handle_session(keepalive, cancel.clone());
 
     let _ = tokio::try_join!(l1, l2, l3);
 
@@ -42,8 +47,12 @@ async fn peer_session(wal: WalStore, peer: PeerServer) -> Result<(), Error> {
     Ok(())
 }
 
-#[instrument(skip_all)]
-pub async fn serve(config: Config, wal: WalStore) -> Result<(), Error> {
+async fn accept_peer_connections(
+    wal: WalStore,
+    config: &Config,
+    tasks: &mut TaskTracker,
+    cancel: CancellationToken,
+) -> Result<(), Error> {
     let listener = TcpListener::bind(&config.listen_address)
         .await
         .map_err(Error::server)?;
@@ -55,19 +64,53 @@ pub async fn serve(config: Config, wal: WalStore) -> Result<(), Error> {
             .await
             .map_err(Error::server)?;
 
-        info!("accepted incoming connection");
+        info!(
+            from = ?peer.accepted_address(),
+            handshake = ?peer.accepted_version(),
+            "accepting incoming connection"
+        );
 
-        let _handle = tokio::spawn(peer_session(wal.clone(), peer));
+        tasks.spawn(handle_session(wal.clone(), peer, cancel.clone()));
+
+        info!(active = tasks.len(), "relay peers changed");
     }
 }
 
-async fn handle_keepalive(mut keepalive: keepalive::Server) -> Result<(), Error> {
-    loop {
-        keepalive
-            .keepalive_roundtrip()
-            .await
-            .map_err(Error::server)?;
+#[instrument(skip_all)]
+pub async fn serve(
+    config: Option<Config>,
+    wal: WalStore,
+    cancel: CancellationToken,
+) -> Result<(), Error> {
+    let config = match config {
+        Some(x) => x,
+        None => {
+            warn!("relay not enabled, skipping serve");
+            return Ok(());
+        }
+    };
 
-        tokio::time::sleep(Duration::from_secs(15)).await
+    let mut tasks = TaskTracker::new();
+
+    tokio::select! {
+        res = accept_peer_connections(wal.clone(), &config, &mut tasks, cancel.clone()) => {
+            res?;
+        },
+        _ = cancel.cancelled() => {
+            warn!("exit requested");
+        }
     }
+
+    // notify the tracker that we're done receiving new tasks. Without this explicit
+    // close, the wait will block forever.
+    debug!("closing task manger");
+    tasks.close();
+
+    // now we wait until all nested tasks exit
+    debug!("waiting for tasks to finish");
+    tasks.wait().await;
+
+    info!("graceful shutdown finished");
+
+    Ok(())
 }

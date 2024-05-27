@@ -1,4 +1,5 @@
 use pallas::network::miniprotocols::blockfetch;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
 use crate::{
@@ -50,12 +51,27 @@ async fn process_request(
     }
 }
 
-pub async fn handle_blockfetch(wal: WalStore, mut prot: blockfetch::Server) -> Result<(), Error> {
+pub async fn process_requests(wal: WalStore, mut prot: blockfetch::Server) -> Result<(), Error> {
     while let Some(req) = prot.recv_while_idle().await.map_err(Error::server)? {
         process_request(&wal, req, &mut prot).await?;
     }
 
-    info!("peer ended blockfetch protocol");
+    Ok(())
+}
+
+pub async fn handle_session(
+    wal: WalStore,
+    connection: blockfetch::Server,
+    cancel: CancellationToken,
+) -> Result<(), Error> {
+    tokio::select! {
+        _ = process_requests(wal, connection) => {
+            info!("peer ended protocol");
+        },
+        _ = cancel.cancelled() => {
+            info!("protocol was cancelled");
+        }
+    }
 
     Ok(())
 }
