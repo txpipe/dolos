@@ -182,6 +182,7 @@ impl ConfigEditor {
         self
     }
 
+    #[cfg(unix)]
     fn apply_serve_ouroboros(mut self, value: Option<bool>) -> Self {
         if let Some(value) = value {
             if value {
@@ -195,6 +196,12 @@ impl ConfigEditor {
             }
         }
 
+        self
+    }
+
+    #[cfg(windows)]
+    fn apply_serve_ouroboros(self, _: Option<bool>) -> Self {
+        // skip for windows
         self
     }
 
@@ -268,6 +275,7 @@ impl ConfigEditor {
         Ok(self.apply_serve_grpc(Some(value)))
     }
 
+    #[cfg(unix)]
     fn prompt_serve_ouroboros(self) -> miette::Result<Self> {
         let value = Confirm::new("Do you want to serve clients via Ouroboros (aka: node socket)?")
             .with_default(self.0.serve.ouroboros.is_some())
@@ -276,6 +284,12 @@ impl ConfigEditor {
             .context("asking for serve ouroboros")?;
 
         Ok(self.apply_serve_ouroboros(Some(value)))
+    }
+
+    #[cfg(windows)]
+    fn prompt_serve_ouroboros(self) -> miette::Result<Self> {
+        // skip for windows
+        Ok(self)
     }
 
     fn prompt_enable_relay(self) -> miette::Result<Self> {
