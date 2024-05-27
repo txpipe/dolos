@@ -2,16 +2,24 @@ use crate::ledger::store::LedgerStore;
 use crate::prelude::*;
 use crate::wal::redb::WalStore;
 use pallas::ledger::configs::{byron, shelley};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 pub mod ledger;
 pub mod pull;
 pub mod roll;
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct Config {
     pub pull_batch_size: Option<usize>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            pull_batch_size: Some(100),
+        }
+    }
 }
 
 fn define_gasket_policy(config: &Option<gasket::retries::Policy>) -> gasket::runtime::Policy {

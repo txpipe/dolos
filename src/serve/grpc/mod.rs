@@ -15,8 +15,8 @@ mod sync;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Config {
-    listen_address: String,
-    tls_client_ca_root: Option<PathBuf>,
+    pub listen_address: String,
+    pub tls_client_ca_root: Option<PathBuf>,
 }
 
 pub async fn serve(

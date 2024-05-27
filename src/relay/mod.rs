@@ -18,8 +18,8 @@ mod tests;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Config {
-    listen_address: String,
-    magic: u64,
+    pub listen_address: String,
+    pub magic: u64,
 }
 
 async fn peer_session(wal: WalStore, peer: PeerServer) -> Result<(), Error> {

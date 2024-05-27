@@ -11,24 +11,14 @@ pub async fn run(config: super::Config, _args: &Args) -> miette::Result<()> {
 
     let (wal, ledger) = crate::common::open_data_stores(&config)?;
     let (byron, shelley, _) = crate::common::open_genesis_files(&config.genesis)?;
-
     let (txs_out, txs_in) = gasket::messaging::tokio::mpsc_channel(64);
-
     let mempool = Arc::new(dolos::submit::MempoolState::default());
-
-    let server = tokio::spawn(dolos::serve::serve(
-        config.serve,
-        wal.clone(),
-        ledger.clone(),
-        mempool.clone(),
-        txs_out,
-    ));
 
     let sync = dolos::sync::pipeline(
         &config.sync,
         &config.upstream,
         wal.clone(),
-        ledger,
+        ledger.clone(),
         byron,
         shelley,
         &config.retries,
@@ -36,12 +26,10 @@ pub async fn run(config: super::Config, _args: &Args) -> miette::Result<()> {
     .into_diagnostic()
     .context("bootstrapping sync pipeline")?;
 
-    let relay = tokio::spawn(dolos::relay::serve(config.relay, wal.clone()));
-
     let submit = dolos::submit::pipeline(
         &config.submit,
         &config.upstream,
-        wal,
+        wal.clone(),
         mempool.clone(),
         txs_in,
         &config.retries,
@@ -49,10 +37,23 @@ pub async fn run(config: super::Config, _args: &Args) -> miette::Result<()> {
     .into_diagnostic()
     .context("bootstrapping submit pipeline")?;
 
-    gasket::daemon::Daemon::new(sync.into_iter().chain(submit).collect()).block();
+    let pipelines = gasket::daemon::Daemon::new(sync.into_iter().chain(submit).collect());
 
-    relay.abort();
-    server.abort();
+    let serve = tokio::spawn(dolos::serve::serve(
+        config.serve,
+        wal.clone(),
+        ledger.clone(),
+        mempool.clone(),
+        txs_out,
+    ));
+
+    let relay = config
+        .relay
+        .map(|relay| tokio::spawn(dolos::relay::serve(relay, wal.clone())));
+
+    pipelines.block();
+    relay.inspect(|x| x.abort());
+    serve.abort();
 
     Ok(())
 }

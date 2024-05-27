@@ -3,7 +3,6 @@ use miette::{Context as _, IntoDiagnostic};
 use pallas::ledger::configs::alonzo::GenesisFile as AlonzoFile;
 use pallas::ledger::configs::byron::GenesisFile as ByronFile;
 use pallas::ledger::configs::shelley::GenesisFile as ShelleyFile;
-use std::path::Path;
 use tracing::Level;
 use tracing_subscriber::{filter::Targets, prelude::*};
 
@@ -11,39 +10,31 @@ use dolos::{ledger::store::LedgerStore, prelude::*};
 
 use crate::{GenesisConfig, LoggingConfig};
 
-fn define_rolldb_path(config: &crate::Config) -> &Path {
-    config
-        .storage
-        .path
-        .as_deref()
-        .unwrap_or_else(|| Path::new("./data"))
-}
-
 pub type Stores = (WalStore, LedgerStore);
 
 pub fn open_data_stores(config: &crate::Config) -> Result<Stores, Error> {
-    let rolldb_path = define_rolldb_path(config);
+    let root = &config.storage.path;
 
-    std::fs::create_dir_all(rolldb_path).map_err(Error::storage)?;
+    std::fs::create_dir_all(root).map_err(Error::storage)?;
 
-    let wal = WalStore::open(rolldb_path.join("wal")).map_err(Error::storage)?;
-    let ledger = LedgerStore::open(rolldb_path.join("ledger")).map_err(Error::storage)?;
+    let wal = WalStore::open(root.join("wal")).map_err(Error::storage)?;
+    let ledger = LedgerStore::open(root.join("ledger")).map_err(Error::storage)?;
 
     Ok((wal, ledger))
 }
 
 #[allow(dead_code)]
 pub fn destroy_data_stores(config: &crate::Config) -> Result<(), Error> {
-    let rolldb_path = define_rolldb_path(config);
+    let root = &config.storage.path;
 
-    std::fs::remove_file(rolldb_path.join("wal")).map_err(Error::storage)?;
-    std::fs::remove_file(rolldb_path.join("ledger")).map_err(Error::storage)?;
+    std::fs::remove_file(root.join("wal")).map_err(Error::storage)?;
+    std::fs::remove_file(root.join("ledger")).map_err(Error::storage)?;
 
     Ok(())
 }
 
 pub fn setup_tracing(config: &LoggingConfig) -> miette::Result<()> {
-    let level = config.max_level.unwrap_or(Level::INFO);
+    let level = config.max_level;
 
     let mut filter = Targets::new()
         .with_target("dolos", level)

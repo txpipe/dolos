@@ -43,6 +43,12 @@ pub struct Config {
     //validate_phase_2: bool,
 }
 
+impl Default for Config {
+    fn default() -> Self {
+        Self { prune_height: 200 }
+    }
+}
+
 fn define_gasket_policy(config: &Option<gasket::retries::Policy>) -> gasket::runtime::Policy {
     let default_retries = gasket::retries::Policy {
         max_retries: 20,
