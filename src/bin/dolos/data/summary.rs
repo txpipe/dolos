@@ -1,17 +1,27 @@
 use miette::IntoDiagnostic;
-use pallas::{ledger::traverse::MultiEraBlock, storage::rolldb::chain};
+use pallas::ledger::traverse::MultiEraBlock;
 use std::path::Path;
 
-use dolos::{ledger::ChainPoint, wal::WalReader as _};
+use dolos::{
+    ledger::ChainPoint,
+    wal::{redb::WalStore, RawBlock, ReadUtils, WalReader as _},
+};
 
 #[allow(dead_code)]
-fn dump_txs(chain: &chain::Store) -> miette::Result<()> {
-    for header in chain.crawl() {
-        let (slot, hash) = header.into_diagnostic()?;
+fn dump_txs(chain: &WalStore) -> miette::Result<()> {
+    let blocks = chain
+        .crawl_from(None)
+        .into_diagnostic()?
+        .filter_forward()
+        .into_blocks()
+        .flatten();
+
+    for block in blocks {
+        let RawBlock { slot, body, .. } = block;
+
         println!("dumping {slot}");
 
-        let block = chain.get_block(hash).into_diagnostic()?.unwrap();
-        let block = MultiEraBlock::decode(&block).into_diagnostic()?;
+        let block = MultiEraBlock::decode(&body).into_diagnostic()?;
 
         for tx in block.txs() {
             let cbor = hex::encode(tx.encode());
