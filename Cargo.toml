@@ -1,7 +1,7 @@
 [package]
 name = "dolos"
 description = "A Cardano data-node built in Rust"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2021"
 repository = "https://github.com/txpipe/dolos"
 homepage = "https://github.com/txpipe/dolos"
@@ -81,9 +81,9 @@ tap = "txpipe/homebrew-tap"
 # Target platforms to build apps for (Rust target-triple syntax)
 targets = [
     "aarch64-apple-darwin",
+    "aarch64-unknown-linux-gnu",
     "x86_64-apple-darwin",
     "x86_64-unknown-linux-gnu",
-    "aarch64-unknown-linux-gnu",
     "x86_64-pc-windows-msvc",
 ]
 # Publish jobs to run in CI
@@ -92,6 +92,8 @@ publish-jobs = ["homebrew"]
 pr-run-mode = "plan"
 # Whether to install an updater program
 install-updater = false
+# The preferred Rust toolchain to use in CI (rustup toolchain syntax)
+rust-toolchain-version = "1.78.0"
 
 [workspace.metadata.release]
 push = false

@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [unreleased]
+## [0.9.0] - 2024-05-28
 
 ### 🚀 Features
 
@@ -36,6 +36,8 @@ All notable changes to this project will be documented in this file.
 ### 🔧 Continuous Integration
 
 - Enable linux aarch64 builds (#231)
+- Restore docker builds (#255)
+- Fix docker arm build (#256)
 
 ### 🧪 Testing
 
@@ -45,6 +47,11 @@ All notable changes to this project will be documented in this file.
 
 - Fix lint warnings (#246)
 - Tidy up info-level tracing (#247)
+- Migrate to git-cliff for changelog updates (#253)
+- Remove legacy ci files (#254)
+- Exclude heavy features from Pallas (#257)
+- Move release config to cargo toml (#258)
+- Update example config files (#259)
 
 ## [0.8.0] - 2024-05-18
 
