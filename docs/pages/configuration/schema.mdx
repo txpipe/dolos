@@ -98,7 +98,7 @@ The `sync` section controls how Dolos synchronizes the chain from upstream peers
 - `pull_batch_szie`: the number of blocks that are fetched per batch.
 - `keep_history`: flag to indicate wether the block history should be kept.
 
-### `submit` section
+## `submit` section
 
 The `submit` section controls how Dolos submit transactions to the network. This involves maintaining a mempool of txs and sharing them with the upstream node.
 
@@ -108,7 +108,7 @@ The `submit` section controls how Dolos submit transactions to the network. This
 
 - `prune_height`: the number of stacked blocks since the tx to be considered safe for pruning.
 
-### `serve.grpc` section
+## `serve.grpc` section
 
 The `serve.grpc` section controls the options for the gRPC endpoint that can be used by clients.
 
@@ -118,7 +118,7 @@ The `serve.grpc` section controls the options for the gRPC endpoint that can be 
 
 - `listen_address`: the local address (`IP:PORT`) to listen for incoming gRPC connections (`[::]` represents any IP address).
 
-### `serve.ouroboros` section
+## `serve.ouroboros` section
 
 The `serve.ouroboros` section controls the options for the Ouroboros mini-protocols endpoint that can be used by clients.
 
@@ -128,7 +128,7 @@ The `serve.ouroboros` section controls the options for the Ouroboros mini-protoc
 
 - `listen_path`: the file path for the unix socket that will listen for Ouroboros node-to-client mini-protocols.
 
-### `relay` section
+## `relay` section
 
 The `relay` section controls the options for handling inbound connection from other peers through Ouroboros node-to-node miniprotocols.
 
@@ -138,7 +138,7 @@ The `relay` section controls the options for handling inbound connection from ot
 
 - `listen_address`: the local address (`IP:PORT`) to listen for incoming Ouroboros connections (`[::]` represents any IP address).
 
-### `logging` section
+## `logging` section
 
 The `logging` section controls the logging options to define the level of details to output.
 
