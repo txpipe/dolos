@@ -19,9 +19,9 @@ export function Hero() {
       <div className="flex justify-center">
         <a
           className="bg-gradient-to-tl from-emerald-600 to-cyan-600 border border-transparent text-white text-sm rounded-md focus:outline-none focus:ring-2 focus:ring-blue-600 focus:ring-offset-2 focus:ring-offset-white py-3 px-4 dark:focus:ring-offset-gray-800"
-          href="/introduction"
+          href="/quickstart"
         >
-          Documentation
+          Quickstart
         </a>
       </div>
     </div>

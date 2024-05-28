@@ -7,10 +7,11 @@
       "layout": "full"
     }
   },
-  "introduction": "Introduction",
+  "quickstart": "Quickstart",
   "installation": "Installation",
   "configuration": "Configuration",
   "bootstrap": "Bootstrap",
   "running": "Running",
-  "apis": "APIs"
+  "apis": "APIs",
+  "advanced": "Advanced"
 }
