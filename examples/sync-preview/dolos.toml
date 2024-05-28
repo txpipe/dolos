@@ -26,8 +26,11 @@ genesis_key = "5b3132372c37332c3132342c3136312c362c3133372c3133312c3231332c32303
 listen_address = "[::]:50051"
 
 [serve.ouroboros]
-listen_address = "localhost:30013"
+listen_path = "dolos.socket"
 magic = 2
 
+[relay]
+listen_address = "[::]:30013"
+
 [logging]
-max_level = "debug"
+max_level = "info"
