@@ -96,6 +96,7 @@ install-updater = false
 [workspace.metadata.release]
 push = false
 publish = false
+pre-release-hook = ["git", "cliff", "-o", "CHANGELOG.md", "--tag", "{{version}}"]
 
 [workspace.metadata.dist.github-custom-runners]
 aarch64-apple-darwin = "macos-14"
