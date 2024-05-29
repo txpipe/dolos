@@ -13,5 +13,9 @@
   "bootstrap": "Bootstrap",
   "running": "Running",
   "apis": "APIs",
-  "advanced": "Advanced"
+  "-- Extras --": {
+    "type": "separator",
+    "title": "Extras"
+  },
+  "rationale": "Dolos Rationale"
 }
