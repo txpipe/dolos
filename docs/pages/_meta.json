@@ -1,0 +1,21 @@
+{
+  "index": {
+    "title": "Home",
+    "type": "page",
+    "display": "hidden",
+    "theme": {
+      "layout": "full"
+    }
+  },
+  "quickstart": "Quickstart",
+  "installation": "Installation",
+  "configuration": "Configuration",
+  "bootstrap": "Bootstrap",
+  "running": "Running",
+  "apis": "APIs",
+  "-- Extras --": {
+    "type": "separator",
+    "title": "Extras"
+  },
+  "rationale": "Dolos Rationale"
+}

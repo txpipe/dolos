@@ -1,0 +1,83 @@
+import { Steps, Tabs, Tab, Cards, Card } from "nextra/components"
+
+# Quickstart
+
+In this guide we're going to learn how to go from zero to a running Dolos instance with the least amount of effort.
+
+<Steps>
+### Installation
+ 
+<Tabs items={['mac', 'linux', 'windows', 'docker']}>
+  <Tabs.Tab>  
+    You can use Homebrew to install the latest version of Dolos in Mac (both x86 / ARM64)
+
+    ```sh
+    brew install txpipe/tap/dolos
+    ```
+  </Tabs.Tab>
+  <Tabs.Tab>
+    You can install Dolos on linux system using the following command:
+
+    ```sh
+    curl --proto '=https' --tlsv1.2 -LsSf https://github.com/txpipe/dolos/releases/latest/download/dolos-installer.sh | sh
+    ```
+  </Tabs.Tab>
+  <Tabs.Tab>
+    You can use Powershell to install Dolos on Windows systems:
+
+    ```sh
+    powershell -c "irm https://github.com/txpipe/dolos/releases/latest/download/dolos-installer.ps1 | iex"
+    ```
+  </Tabs.Tab>
+  <Tabs.Tab>
+    _Dolos_ provides public Docker images through Github Packages. To execute _Dolos_ via Docker, use the following command:
+
+    ```sh
+    docker run ghcr.io/txpipe/dolos:latest
+    ```
+  </Tabs.Tab>
+</Tabs>
+
+For more detailed information on how to install Dolos, check the [installation section](./installation)
+
+### Configuration
+ 
+To configure _Dolos_, run the following command that will guide you through a set of questions to automatically configure your instance:
+
+```sh
+dolos init
+```
+
+For more detailed information on how to configure Dolos, check the [configuration section](./configuration)
+
+### Bootstrap
+ 
+To bootstrap _Dolos_ (aka: sync the history of the chain), run the following command to import a Mithril snapshot:
+
+```sh
+dolos bootstrap
+```
+
+For more detailed information on how to bootstrap Dolos, check the [bootstrap section](./bootstrap)
+
+### Running
+
+Run the following command to start Dolos in `daemon` mode. This will keep runnig forever while syncing the chain from the upstream node and serving data through the APIs. 
+
+```sh
+dolos daemon
+```
+
+For more detailed information on different ways to run _Dolos_, check the [running section](./bootstrap)
+
+{/* 
+### That's it!
+
+You should now have a working Dolos instance. So, what's next?
+
+<Cards>
+<Card title="Discover APIs" href="aa"/>
+<Card title="Discover Middleware" href="aa"/>
+</Cards>
+ */}
+</Steps>

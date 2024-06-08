@@ -1,0 +1,31 @@
+# From Source
+
+The following instructions show how to build and install _Dolos_ from source code.
+
+## Pre-requisites
+
+You'll need to have the following components already available in your system.
+
+- [Rust toolchain](https://www.rust-lang.org/learn/get-started)
+
+## Clone the Repository
+
+Use `git` to clone Dolos source-code from our Github repository:
+
+```sh
+git clone https://github.com/txpipe/dolos.git
+```
+
+## Installation
+
+Use `cargo` to compile and install the generated binary for your user profile:
+
+```sh
+cargo install --all-features --path .
+```
+
+Once you completed the above steps, you should be able to call Dolos directly from the command line:
+
+```sh
+dolos --help
+```

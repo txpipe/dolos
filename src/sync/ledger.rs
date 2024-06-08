@@ -1,30 +1,20 @@
 use gasket::framework::*;
-use pallas::applying::{validate, Environment, UTxOs};
 use pallas::ledger::configs::{byron, shelley};
-use pallas::ledger::traverse::wellknown::GenesisValues;
-use pallas::ledger::traverse::{Era, MultiEraBlock, MultiEraInput, MultiEraOutput};
-use std::borrow::Cow;
-use std::collections::HashMap;
-use tracing::{debug, info, warn};
+use pallas::ledger::traverse::MultiEraBlock;
+use tracing::{debug, info};
 
-use crate::prelude::*;
-use crate::storage::applydb::ApplyDB;
+use crate::wal::{self, LogValue, WalReader as _};
+use crate::{ledger, prelude::*};
 
-pub type UpstreamPort = gasket::messaging::tokio::InputPort<RollEvent>;
+pub type UpstreamPort = gasket::messaging::InputPort<RollEvent>;
 
 #[derive(Stage)]
 #[stage(name = "ledger", unit = "RollEvent", worker = "Worker")]
 pub struct Stage {
-    ledger: ApplyDB,
+    wal: crate::wal::redb::WalStore,
+    ledger: crate::ledger::store::LedgerStore,
     byron: byron::GenesisFile,
     shelley: shelley::GenesisFile,
-
-    current_pparams: Option<(u64, Environment)>,
-
-    // HACK: until multi-era genesis
-    genesis_values: GenesisValues,
-
-    phase1_validation_enabled: bool,
 
     pub upstream: UpstreamPort,
 
@@ -37,100 +27,88 @@ pub struct Stage {
 
 impl Stage {
     pub fn new(
-        ledger: ApplyDB,
+        wal: crate::wal::redb::WalStore,
+        ledger: crate::ledger::store::LedgerStore,
         byron: byron::GenesisFile,
         shelley: shelley::GenesisFile,
-        phase1_validation_enabled: bool,
     ) -> Self {
         Self {
+            wal,
             ledger,
-            genesis_values: pallas::ledger::traverse::wellknown::GenesisValues::from_magic(
-                byron.protocol_consts.protocol_magic as u64,
-            )
-            .unwrap(),
             byron,
             shelley,
-            current_pparams: None,
-            phase1_validation_enabled,
             upstream: Default::default(),
             block_count: Default::default(),
             wal_count: Default::default(),
         }
     }
 
-    fn ensure_pparams(&mut self, epoch: u64) -> Result<(), WorkerError> {
-        if self
-            .current_pparams
-            .as_ref()
-            .is_some_and(|(current, _)| *current == epoch)
-        {
-            return Ok(());
-        }
+    fn process_origin(&mut self) -> Result<(), WorkerError> {
+        info!("applying origin");
 
-        let pparams = super::pparams::compute_pparams(
-            super::pparams::Genesis {
-                byron: &self.byron,
-                shelley: &self.shelley,
-            },
-            &self.ledger,
-            epoch,
-        )?;
-
-        warn!(?pparams, "pparams for new epoch");
-
-        self.current_pparams = Some((epoch, pparams));
+        let delta = crate::ledger::compute_origin_delta(&self.byron);
+        self.ledger.apply(&[delta]).or_panic()?;
 
         Ok(())
     }
 
-    pub fn execute_phase1_validation(&self, block: &MultiEraBlock<'_>) -> Result<(), WorkerError> {
-        let mut utxos = HashMap::new();
-        self.ledger
-            .resolve_inputs_for_block(block, &mut utxos)
-            .or_panic()?;
+    fn process_undo(&mut self, block: &wal::RawBlock) -> Result<(), WorkerError> {
+        let wal::RawBlock { slot, body, .. } = block;
 
-        let mut utxos2 = UTxOs::new();
+        info!(slot, "undoing block");
 
-        for (ref_, output) in utxos.iter() {
-            let txin = pallas::ledger::primitives::byron::TxIn::Variant0(
-                pallas::codec::utils::CborWrap((ref_.0, ref_.1 as u32)),
-            );
+        let block = MultiEraBlock::decode(body).or_panic()?;
+        let context = crate::ledger::load_slice_for_block(&block, &self.ledger, &[]).or_panic()?;
 
-            let key = MultiEraInput::Byron(
-                <Box<Cow<'_, pallas::ledger::primitives::byron::TxIn>>>::from(Cow::Owned(txin)),
-            );
-
-            let era = Era::try_from(output.0).or_panic()?;
-            let value = MultiEraOutput::decode(era, &output.1).or_panic()?;
-
-            utxos2.insert(key, value);
-        }
-
-        let pparams = self
-            .current_pparams
-            .as_ref()
-            .map(|(_, x)| x)
-            .ok_or("no pparams available")
-            .or_panic()?;
-
-        for tx in block.txs().iter() {
-            let res = validate(tx, &utxos2, pparams);
-
-            if let Err(err) = res {
-                warn!(?err, "validation error");
-            }
-        }
+        let delta = crate::ledger::compute_undo_delta(&block, context).or_panic()?;
+        self.ledger.apply(&[delta]).or_panic()?;
 
         Ok(())
+    }
+
+    fn process_apply(&mut self, block: &wal::RawBlock) -> Result<(), WorkerError> {
+        let wal::RawBlock { slot, body, .. } = block;
+
+        info!(slot, "applying block");
+
+        let block = MultiEraBlock::decode(body).or_panic()?;
+
+        crate::ledger::import_block_batch(&[block], &mut self.ledger, &self.byron, &self.shelley)
+            .or_panic()?;
+
+        Ok(())
+    }
+
+    fn process_wal(&mut self, log: wal::LogValue) -> Result<(), WorkerError> {
+        match log {
+            LogValue::Mark(wal::ChainPoint::Origin) => self.process_origin(),
+            LogValue::Apply(x) => self.process_apply(&x),
+            LogValue::Undo(x) => self.process_undo(&x),
+            // we can skip marks since we know they have been already applied
+            LogValue::Mark(..) => Ok(()),
+        }
     }
 }
 
-pub struct Worker;
+pub struct Worker(wal::LogSeq);
 
 #[async_trait::async_trait(?Send)]
 impl gasket::framework::Worker<Stage> for Worker {
-    async fn bootstrap(_stage: &Stage) -> Result<Self, WorkerError> {
-        Ok(Self)
+    async fn bootstrap(stage: &Stage) -> Result<Self, WorkerError> {
+        let cursor = stage.ledger.cursor().or_panic()?;
+
+        info!(?cursor, "cursor found");
+
+        let point = match cursor {
+            Some(ledger::ChainPoint(s, h)) => wal::ChainPoint::Specific(s, h),
+            None => wal::ChainPoint::Origin,
+        };
+
+        let seq = stage.wal.assert_point(&point).or_panic()?;
+
+        info!(seq, "wal sequence found");
+
+        Ok(Self(seq))
     }
 
     async fn schedule(
@@ -142,31 +120,21 @@ impl gasket::framework::Worker<Stage> for Worker {
         Ok(WorkSchedule::Unit(msg.payload))
     }
 
-    async fn execute(&mut self, unit: &RollEvent, stage: &mut Stage) -> Result<(), WorkerError> {
-        match unit {
-            RollEvent::Apply(slot, _, cbor) => {
-                info!(slot, "applying block");
+    /// Catch-up ledger with latest state of WAL
+    ///
+    /// Reads from WAL using the latest known cursor and applies the
+    /// corresponding downstream changes to the ledger
+    async fn execute(&mut self, _: &RollEvent, stage: &mut Stage) -> Result<(), WorkerError> {
+        let iter = stage.wal.crawl_from(Some(self.0)).or_panic()?.skip(1);
 
-                let block = MultiEraBlock::decode(cbor).or_panic()?;
+        // TODO: analyze scenario where we're too far behind and this for loop takes
+        // longer that the allocated policy timeout.
 
-                if stage.phase1_validation_enabled {
-                    debug!("performing phase-1 validations");
-                    let (epoch, _) = block.epoch(&stage.genesis_values);
-                    stage.ensure_pparams(epoch)?;
-                    stage.execute_phase1_validation(&block)?;
-                }
-
-                stage.ledger.apply_block(&block).or_panic()?;
-            }
-            RollEvent::Undo(slot, _, cbor) => {
-                info!(slot, "undoing block");
-                stage.ledger.undo_block(cbor).or_panic()?;
-            }
-            RollEvent::Origin => {
-                info!("applying origin");
-                stage.ledger.apply_origin(&stage.byron).or_panic()?;
-            }
-        };
+        for (seq, log) in iter {
+            debug!(seq, "processing wal entry");
+            stage.process_wal(log)?;
+            self.0 = seq;
+        }
 
         Ok(())
     }

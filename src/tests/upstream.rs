@@ -1,10 +1,10 @@
-use gasket::{framework::*, messaging::*, runtime::Policy};
+use gasket::{framework::*, runtime::Policy};
 use tracing::{error, info};
 
-use crate::model::PullEvent;
+use crate::{model::PullEvent, wal::redb::WalStore};
 
 struct WitnessStage {
-    input: gasket::messaging::tokio::InputPort<PullEvent>,
+    input: gasket::messaging::InputPort<PullEvent>,
 }
 
 impl gasket::framework::Stage for WitnessStage {
@@ -50,16 +50,15 @@ fn test_mainnet_upstream() {
     )
     .unwrap();
 
-    let rolldb = pallas::storage::rolldb::wal::Store::open("tmp", 10).unwrap();
-
-    let intersection = rolldb.intersect_options(5).unwrap().into_iter().collect();
+    let wal = WalStore::memory().unwrap();
 
     let (send, receive) = gasket::messaging::tokio::mpsc_channel(200);
 
     let mut upstream = crate::sync::pull::Stage::new(
         "relays-new.cardano-mainnet.iohk.io:3001".into(),
         764824073,
-        intersection,
+        20,
+        wal,
     );
 
     upstream.downstream.connect(send);
@@ -73,7 +72,7 @@ fn test_mainnet_upstream() {
     let upstream = gasket::runtime::spawn_stage(upstream, Policy::default());
     let witness = gasket::runtime::spawn_stage(witness, Policy::default());
 
-    let daemon = gasket::daemon::Daemon(vec![upstream, witness]);
+    let daemon = gasket::daemon::Daemon::new(vec![upstream, witness]);
 
     daemon.block();
 }
