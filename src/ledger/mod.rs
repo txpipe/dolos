@@ -18,6 +18,18 @@ pub type TxOrder = usize;
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub struct EraCbor(pub Era, pub Vec<u8>);
 
+impl From<(Era, Vec<u8>)> for EraCbor {
+    fn from(value: (Era, Vec<u8>)) -> Self {
+        Self(value.0, value.1)
+    }
+}
+
+impl From<EraCbor> for (Era, Vec<u8>) {
+    fn from(value: EraCbor) -> Self {
+        (value.0, value.1)
+    }
+}
+
 impl<'a> From<MultiEraOutput<'a>> for EraCbor {
     fn from(value: MultiEraOutput) -> Self {
         EraCbor(value.era(), value.encode())
@@ -37,11 +49,25 @@ pub type UtxoBody<'a> = MultiEraOutput<'a>;
 #[derive(Debug, Eq, PartialEq, Hash, Clone)]
 pub struct TxoRef(pub TxHash, pub TxoIdx);
 
+impl From<(TxHash, TxoIdx)> for TxoRef {
+    fn from(value: (TxHash, TxoIdx)) -> Self {
+        Self(value.0, value.1)
+    }
+}
+
+impl From<TxoRef> for (TxHash, TxoIdx) {
+    fn from(value: TxoRef) -> Self {
+        (value.0, value.1)
+    }
+}
+
 #[derive(Debug, Eq, PartialEq, Hash)]
 pub struct ChainPoint(pub BlockSlot, pub BlockHash);
 
 #[derive(Debug)]
 pub struct PParamsBody(pub Era, pub Vec<u8>);
+
+pub type UtxoMap = HashMap<TxoRef, EraCbor>;
 
 #[derive(Debug, Error)]
 pub enum BrokenInvariant {
@@ -60,7 +86,7 @@ pub enum LedgerError {
 
 /// A persistent store for ledger state
 pub trait LedgerStore {
-    fn get_utxos(&self, refs: Vec<TxoRef>) -> Result<HashMap<TxoRef, EraCbor>, LedgerError>;
+    fn get_utxos(&self, refs: Vec<TxoRef>) -> Result<UtxoMap, LedgerError>;
     fn apply(&mut self, deltas: &[LedgerDelta]) -> Result<(), LedgerError>;
     fn finalize(&mut self, until: BlockSlot) -> Result<(), LedgerError>;
 }
@@ -307,7 +333,7 @@ mod tests {
     struct MockStore;
 
     impl LedgerStore for MockStore {
-        fn get_utxos(&self, refs: Vec<TxoRef>) -> Result<HashMap<TxoRef, EraCbor>, LedgerError> {
+        fn get_utxos(&self, refs: Vec<TxoRef>) -> Result<UtxoMap, LedgerError> {
             let mut out = HashMap::new();
 
             for i in refs {
