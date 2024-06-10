@@ -23,7 +23,7 @@ fn raw_to_anychain(
     raw: &wal::RawBlock,
 ) -> u5c::sync::AnyChainBlock {
     let wal::RawBlock { body, .. } = raw;
-    let block = mapper.map_block_cbor(&body);
+    let block = mapper.map_block_cbor(body);
 
     u5c::sync::AnyChainBlock {
         chain: u5c::sync::any_chain_block::Chain::Cardano(block).into(),

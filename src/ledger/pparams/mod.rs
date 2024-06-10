@@ -213,11 +213,12 @@ fn advance_hardfork(
 ) -> MultiEraProtocolParameters {
     match current {
         // Source: https://github.com/cardano-foundation/CIPs/blob/master/CIP-0059/feature-table.md
-        // NOTE: part of the confusion here is that there are two versioning schemes that can be easily conflated:
+        // NOTE: part of the confusion here is that there are two versioning schemes that can be
+        // easily conflated:
         // - The protocol version, negotiated in the networking layer
         // - The protocol version broadcast in the block header
-        // Generally, these refer to the latter; the update proposals jump from 2 to 5, because the node team
-        // decided it would be helpful to have these in sync.
+        // Generally, these refer to the latter; the update proposals jump from 2 to 5, because the
+        // node team decided it would be helpful to have these in sync.
 
         // Protocol starts at version 0;
         // There was one intra-era "hard fork" in byron (even though they weren't called that yet)
@@ -228,7 +229,8 @@ fn advance_hardfork(
         MultiEraProtocolParameters::Byron(current) if next_protocol == 2 => {
             MultiEraProtocolParameters::Shelley(bootstrap_shelley_pparams(current, genesis.shelley))
         }
-        // Two intra-era hard forks, named Allegra (3) and Mary (4); we don't have separate types for these eras
+        // Two intra-era hard forks, named Allegra (3) and Mary (4); we don't have separate types
+        // for these eras
         MultiEraProtocolParameters::Shelley(current) if next_protocol < 5 => {
             MultiEraProtocolParameters::Shelley(current)
         }
@@ -258,7 +260,7 @@ fn advance_hardfork(
 
 pub fn fold_pparams(
     genesis: &Genesis,
-    updates: &Vec<MultiEraUpdate>,
+    updates: &[MultiEraUpdate],
     for_epoch: u64,
 ) -> MultiEraProtocolParameters {
     let mut pparams = MultiEraProtocolParameters::Byron(bootstrap_byron_pparams(genesis.byron));
@@ -267,7 +269,7 @@ pub fn fold_pparams(
     for epoch in 0..for_epoch {
         for next_protocol in last_protocol + 1..=pparams.protocol_version() {
             warn!(next_protocol, "advancing hardfork");
-            pparams = advance_hardfork(pparams, &genesis, next_protocol);
+            pparams = advance_hardfork(pparams, genesis, next_protocol);
             last_protocol = next_protocol;
         }
 
@@ -318,7 +320,8 @@ mod tests {
             })
             .collect();
 
-        // Decode those buffers as blocks, and sort them by slot, so we can process them in order
+        // Decode those buffers as blocks, and sort them by slot, so we can process them
+        // in order
         let blocks: Vec<_> = files
             .iter()
             .map(|x| MultiEraBlock::decode(&x).unwrap())

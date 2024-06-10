@@ -400,7 +400,7 @@ impl super::LedgerStore for LedgerStore {
 
 impl interop::LedgerContext for LedgerStore {
     fn get_utxos<'a>(&self, refs: &[interop::TxoRef]) -> Option<interop::UtxoMap> {
-        let refs: Vec<_> = refs.into_iter().map(|x| TxoRef::from(*x)).collect();
+        let refs: Vec<_> = refs.iter().map(|x| TxoRef::from(*x)).collect();
 
         let some = self
             .get_utxos(refs)
