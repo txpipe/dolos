@@ -1,11 +1,13 @@
 use futures_core::Stream;
 use futures_util::StreamExt;
 use itertools::Itertools;
+use pallas::interop::utxorpc as interop;
 use pallas::interop::utxorpc::{spec as u5c, Mapper};
 use std::pin::Pin;
 use tonic::{Request, Response, Status};
 
-use crate::wal::{self, RawBlock};
+use crate::ledger;
+use crate::wal::{self, RawBlock, WalReader as _};
 
 fn u5c_to_chain_point(block_ref: u5c::sync::BlockRef) -> wal::ChainPoint {
     wal::ChainPoint::Specific(block_ref.index, block_ref.hash.as_ref().into())
@@ -17,11 +19,10 @@ fn u5c_to_chain_point(block_ref: u5c::sync::BlockRef) -> wal::ChainPoint {
 // }
 
 fn raw_to_anychain(
-    mapper: &Mapper<super::Context>,
+    mapper: &Mapper<ledger::store::LedgerStore>,
     raw: &wal::RawBlock,
 ) -> u5c::sync::AnyChainBlock {
-    let RawBlock { body, .. } = raw;
-
+    let wal::RawBlock { body, .. } = raw;
     let block = mapper.map_block_cbor(body);
 
     u5c::sync::AnyChainBlock {
@@ -30,7 +31,7 @@ fn raw_to_anychain(
 }
 
 fn roll_to_tip_response(
-    mapper: &Mapper<super::Context>,
+    mapper: &Mapper<ledger::store::LedgerStore>,
     log: &wal::LogValue,
 ) -> u5c::sync::FollowTipResponse {
     u5c::sync::FollowTipResponse {
@@ -47,25 +48,22 @@ fn roll_to_tip_response(
     }
 }
 
-pub struct ChainSyncServiceImpl<W: wal::WalReader> {
-    wal: W,
-    mapper: pallas::interop::utxorpc::Mapper<super::Context>,
+pub struct ChainSyncServiceImpl {
+    wal: wal::redb::WalStore,
+    mapper: interop::Mapper<ledger::store::LedgerStore>,
 }
 
-impl<W: wal::WalReader> ChainSyncServiceImpl<W> {
-    pub fn new(wal: W) -> Self {
+impl ChainSyncServiceImpl {
+    pub fn new(wal: wal::redb::WalStore, ledger: ledger::store::LedgerStore) -> Self {
         Self {
             wal,
-            mapper: pallas::interop::utxorpc::Mapper::default(),
+            mapper: Mapper::new(ledger),
         }
     }
 }
 
 #[async_trait::async_trait]
-impl<W> u5c::sync::chain_sync_service_server::ChainSyncService for ChainSyncServiceImpl<W>
-where
-    W: wal::WalReader + Send + Sync + 'static,
-{
+impl u5c::sync::chain_sync_service_server::ChainSyncService for ChainSyncServiceImpl {
     type FollowTipStream =
         Pin<Box<dyn Stream<Item = Result<u5c::sync::FollowTipResponse, Status>> + Send + 'static>>;
 
@@ -136,17 +134,25 @@ where
     ) -> Result<Response<Self::FollowTipStream>, tonic::Status> {
         let request = request.into_inner();
 
-        let intersect: Vec<_> = request
-            .intersect
-            .into_iter()
-            .map(u5c_to_chain_point)
-            .collect();
+        let from_seq = if request.intersect.is_empty() {
+            self.wal
+                .find_tip()
+                .map_err(|_err| Status::internal("can't read WAL"))?
+                .map(|(x, _)| x)
+                .unwrap_or_default()
+        } else {
+            let intersect: Vec<_> = request
+                .intersect
+                .into_iter()
+                .map(u5c_to_chain_point)
+                .collect();
 
-        let (from_seq, _) = self
-            .wal
-            .find_intersect(&intersect)
-            .map_err(|_err| Status::internal("can't read WAL"))?
-            .ok_or(Status::internal("can't find WAL sequence"))?;
+            self.wal
+                .find_intersect(&intersect)
+                .map_err(|_err| Status::internal("can't read WAL"))?
+                .map(|(x, _)| x)
+                .ok_or(Status::internal("can't find WAL sequence"))?
+        };
 
         let mapper = self.mapper.clone();
 

@@ -1,4 +1,3 @@
-use pallas::crypto::hash::Hash;
 use pallas::interop::utxorpc::spec as u5c;
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc};
@@ -30,7 +29,7 @@ pub async fn serve(
 ) -> Result<(), Error> {
     let addr = config.listen_address.parse().unwrap();
 
-    let sync_service = sync::ChainSyncServiceImpl::new(wal);
+    let sync_service = sync::ChainSyncServiceImpl::new(wal, ledger.clone());
     let sync_service =
         u5c::sync::chain_sync_service_server::ChainSyncServiceServer::new(sync_service);
 
@@ -75,17 +74,4 @@ pub async fn serve(
         .map_err(Error::server)?;
 
     Ok(())
-}
-
-#[derive(Default, Clone)]
-struct Context;
-
-impl pallas::interop::utxorpc::Context for Context {
-    fn get_txo<'a>(
-        &self,
-        _tx_hash: Hash<32>,
-        _txo_index: u32,
-    ) -> Option<pallas::ledger::traverse::MultiEraOutput<'a>> {
-        None
-    }
 }

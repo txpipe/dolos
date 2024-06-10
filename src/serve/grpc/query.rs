@@ -2,6 +2,7 @@ use crate::ledger::{store::LedgerStore, EraCbor, TxoRef};
 use futures_core::Stream;
 use itertools::Itertools;
 use pallas::crypto::hash::Hash;
+use pallas::interop::utxorpc as interop;
 use pallas::interop::utxorpc::spec as u5c;
 use pallas::ledger::traverse::MultiEraOutput;
 use std::{collections::HashSet, pin::Pin};
@@ -10,14 +11,14 @@ use tracing::info;
 
 pub struct QueryServiceImpl {
     ledger: LedgerStore,
-    mapper: pallas::interop::utxorpc::Mapper<super::Context>,
+    mapper: interop::Mapper<LedgerStore>,
 }
 
 impl QueryServiceImpl {
     pub fn new(ledger: LedgerStore) -> Self {
         Self {
-            ledger,
-            mapper: Default::default(),
+            ledger: ledger.clone(),
+            mapper: interop::Mapper::new(ledger),
         }
     }
 }
@@ -49,7 +50,7 @@ fn find_matching_set(
 fn into_u5c_utxo(
     txo: &TxoRef,
     body: &EraCbor,
-    mapper: &pallas::interop::utxorpc::Mapper<super::Context>,
+    mapper: &interop::Mapper<LedgerStore>,
 ) -> Result<u5c::query::AnyUtxoData, pallas::codec::minicbor::decode::Error> {
     let parsed = MultiEraOutput::try_from(body)?;
     let parsed = mapper.map_tx_output(&parsed);

@@ -1,3 +1,4 @@
+use pallas::interop::utxorpc as interop;
 use redb::{
     MultimapTableDefinition, ReadableMultimapTable, ReadableTable, TableDefinition, TableError,
     WriteTransaction,
@@ -326,7 +327,7 @@ impl LedgerStore {
         Ok(())
     }
 
-    pub fn get_utxos(&self, refs: Vec<TxoRef>) -> Result<HashMap<TxoRef, EraCbor>, redb::Error> {
+    pub fn get_utxos(&self, refs: Vec<TxoRef>) -> Result<UtxoMap, redb::Error> {
         // exit early before opening a read tx in case there's nothing to fetch
         if refs.is_empty() {
             return Ok(Default::default());
@@ -338,15 +339,14 @@ impl LedgerStore {
         let mut out = HashMap::new();
 
         for key in refs {
-            let body = table.get(&(&key.0 as &[u8; 32], key.1))?;
+            if let Some(body) = table.get(&(&key.0 as &[u8; 32], key.1))? {
+                let (era, cbor) = body.value();
+                let era = Era::try_from(era).unwrap();
+                let cbor = cbor.to_owned();
+                let value = EraCbor(era, cbor);
 
-            // TODO: return invariant broken error
-            let body = body.expect("missing utxo");
-
-            let (era, cbor) = body.value();
-            let era = Era::try_from(era).unwrap();
-            let cbor = cbor.to_owned();
-            out.insert(key, EraCbor(era, cbor));
+                out.insert(key, value);
+            }
         }
 
         Ok(out)
@@ -385,7 +385,7 @@ impl LedgerStore {
 }
 
 impl super::LedgerStore for LedgerStore {
-    fn get_utxos(&self, refs: Vec<TxoRef>) -> Result<HashMap<TxoRef, EraCbor>, LedgerError> {
+    fn get_utxos(&self, refs: Vec<TxoRef>) -> Result<UtxoMap, LedgerError> {
         LedgerStore::get_utxos(self, refs).map_err(super::LedgerError::StorageError)
     }
 
@@ -395,5 +395,20 @@ impl super::LedgerStore for LedgerStore {
 
     fn finalize(&mut self, until: BlockSlot) -> Result<(), LedgerError> {
         LedgerStore::finalize(self, until).map_err(super::LedgerError::StorageError)
+    }
+}
+
+impl interop::LedgerContext for LedgerStore {
+    fn get_utxos<'a>(&self, refs: &[interop::TxoRef]) -> Option<interop::UtxoMap> {
+        let refs: Vec<_> = refs.iter().map(|x| TxoRef::from(*x)).collect();
+
+        let some = self
+            .get_utxos(refs)
+            .ok()?
+            .into_iter()
+            .map(|(k, v)| (k.into(), v.into()))
+            .collect();
+
+        Some(some)
     }
 }
