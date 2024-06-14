@@ -1,17 +1,14 @@
 use crate::{
-    ledger::{self, EraCbor, TxoRef},
+    ledger,
     wal::{self, WalReader as _},
 };
 use futures_core::Stream;
 use futures_util::StreamExt;
-use itertools::Itertools;
 use pallas::interop::utxorpc as interop;
 use pallas::interop::utxorpc::spec as u5c;
-use pallas::ledger::traverse::MultiEraOutput;
-use pallas::{crypto::hash::Hash, ledger::traverse::MultiEraBlock};
-use std::{collections::HashSet, future, pin::Pin};
+use pallas::ledger::traverse::MultiEraBlock;
+use std::pin::Pin;
 use tonic::{Request, Response, Status};
-use tracing::info;
 
 fn block_to_txs(
     block: &wal::RawBlock,
@@ -75,7 +72,7 @@ impl u5c::watch::watch_service_server::WatchService for WatchServiceImpl {
         &self,
         request: Request<u5c::watch::WatchTxRequest>,
     ) -> Result<Response<Self::WatchTxStream>, Status> {
-        let request = request.into_inner();
+        let _ = request.into_inner();
 
         let from_seq = self
             .wal
@@ -88,7 +85,7 @@ impl u5c::watch::watch_service_server::WatchService for WatchServiceImpl {
 
         let stream = wal::WalStream::start(self.wal.clone(), from_seq)
             .flat_map(move |(_, log)| roll_to_watch_response(&mapper, &log))
-            .map(|x| Ok(x));
+            .map(Ok);
 
         Ok(Response::new(Box::pin(stream)))
     }
