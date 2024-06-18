@@ -94,8 +94,18 @@ pub fn hook_exit_token() -> CancellationToken {
 
     let cancel2 = cancel.clone();
     tokio::spawn(async move {
-        tokio::signal::ctrl_c().await.unwrap();
-        warn!("exit signal detected");
+        let mut sigterm =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
+
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                warn!("SIGINT detected");
+            }
+            _ = sigterm.recv() => {
+                warn!("SIGTERM detected");
+            }
+        };
+
         debug!("notifying exit");
         cancel2.cancel();
     });
