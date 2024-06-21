@@ -9,6 +9,7 @@ use crate::ledger::store::LedgerStore;
 use crate::wal::redb::WalStore;
 use crate::{prelude::*, submit::Transaction};
 
+mod convert;
 mod query;
 mod submit;
 mod sync;

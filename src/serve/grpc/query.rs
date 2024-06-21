@@ -1,6 +1,6 @@
 use crate::ledger::{store::LedgerStore, EraCbor, TxoRef};
 use futures_core::Stream;
-use itertools::Itertools;
+use itertools::Itertools as _;
 use pallas::crypto::hash::Hash;
 use pallas::interop::utxorpc as interop;
 use pallas::interop::utxorpc::spec as u5c;
@@ -23,11 +23,6 @@ impl QueryServiceImpl {
     }
 }
 
-fn bytes_to_hash(raw: &[u8]) -> Hash<32> {
-    let array: [u8; 32] = raw.try_into().unwrap();
-    Hash::<32>::new(array)
-}
-
 fn find_matching_set(
     ledger: &LedgerStore,
     query: u5c::cardano::TxOutputPattern,
@@ -45,6 +40,11 @@ fn find_matching_set(
     }
 
     Ok(set)
+}
+
+fn from_u5c_txoref(txo: u5c::query::TxoRef) -> Result<TxoRef, Status> {
+    let hash = super::convert::bytes_to_hash32(&txo.hash)?;
+    Ok(TxoRef(hash, txo.index))
 }
 
 fn into_u5c_utxo(
@@ -94,14 +94,15 @@ impl u5c::query::query_service_server::QueryService for QueryServiceImpl {
 
         info!("received new grpc query");
 
-        let keys = message
+        let keys: Vec<_> = message
             .keys
             .into_iter()
-            .map(|x| TxoRef(bytes_to_hash(&x.hash), x.index));
+            .map(from_u5c_txoref)
+            .try_collect()?;
 
         let utxos = self
             .ledger
-            .get_utxos(keys.collect_vec())
+            .get_utxos(keys)
             .map_err(|e| Status::internal(e.to_string()))?;
 
         let items: Vec<_> = utxos

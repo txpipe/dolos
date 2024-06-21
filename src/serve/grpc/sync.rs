@@ -9,8 +9,11 @@ use tonic::{Request, Response, Status};
 use crate::ledger;
 use crate::wal::{self, RawBlock, WalReader as _};
 
-fn u5c_to_chain_point(block_ref: u5c::sync::BlockRef) -> wal::ChainPoint {
-    wal::ChainPoint::Specific(block_ref.index, block_ref.hash.as_ref().into())
+fn u5c_to_chain_point(block_ref: u5c::sync::BlockRef) -> Result<wal::ChainPoint, Status> {
+    Ok(wal::ChainPoint::Specific(
+        block_ref.index,
+        super::convert::bytes_to_hash32(&block_ref.hash)?,
+    ))
 }
 
 // fn raw_to_anychain2(raw: &[u8]) -> AnyChainBlock {
@@ -73,7 +76,11 @@ impl u5c::sync::chain_sync_service_server::ChainSyncService for ChainSyncService
     ) -> Result<Response<u5c::sync::FetchBlockResponse>, Status> {
         let message = request.into_inner();
 
-        let points: Vec<_> = message.r#ref.into_iter().map(u5c_to_chain_point).collect();
+        let points: Vec<_> = message
+            .r#ref
+            .into_iter()
+            .map(u5c_to_chain_point)
+            .try_collect()?;
 
         let out = self
             .wal
@@ -94,7 +101,7 @@ impl u5c::sync::chain_sync_service_server::ChainSyncService for ChainSyncService
     ) -> Result<Response<u5c::sync::DumpHistoryResponse>, Status> {
         let msg = request.into_inner();
 
-        let from = msg.start_token.map(u5c_to_chain_point);
+        let from = msg.start_token.map(u5c_to_chain_point).transpose()?;
 
         let len = msg.max_items as usize + 1;
 
@@ -145,7 +152,7 @@ impl u5c::sync::chain_sync_service_server::ChainSyncService for ChainSyncService
                 .intersect
                 .into_iter()
                 .map(u5c_to_chain_point)
-                .collect();
+                .try_collect()?;
 
             self.wal
                 .find_intersect(&intersect)
