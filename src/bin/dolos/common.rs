@@ -54,6 +54,12 @@ pub fn setup_tracing(config: &LoggingConfig) -> miette::Result<()> {
         .with_target("dolos", level)
         .with_target("gasket", level);
 
+    if config.include_tokio {
+        filter = filter
+            .with_target("tokio", level)
+            .with_target("runtime", level);
+    }
+
     if config.include_pallas {
         filter = filter.with_target("pallas", level);
     }
@@ -62,11 +68,22 @@ pub fn setup_tracing(config: &LoggingConfig) -> miette::Result<()> {
         filter = filter.with_target("tonic", level);
     }
 
-    tracing_subscriber::FmtSubscriber::builder()
-        .with_max_level(level)
-        .finish()
-        .with(filter)
-        .init();
+    #[cfg(not(feature = "debug"))]
+    {
+        tracing_subscriber::registry()
+            .with(tracing_subscriber::fmt::layer())
+            .with(filter)
+            .init();
+    }
+
+    #[cfg(feature = "debug")]
+    {
+        tracing_subscriber::registry()
+            .with(tracing_subscriber::fmt::layer())
+            .with(console_subscriber::spawn())
+            .with(filter)
+            .init();
+    }
 
     Ok(())
 }

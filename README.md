@@ -67,3 +67,25 @@ sudo sh ./get-dolos.sh
 ```
 
 After installation, follow this [configuration guide](book/src/configuration). Guide on running dolos [here](book/src/running).
+
+
+# Debug
+
+## Running Tokio Console
+
+Make sure you have enable tokio traces in dolos.toml:
+```toml
+[logging]
+max_level=trace
+include_tokio=true
+```
+
+Start Dolos using:
+```
+RUSTFLAGS="--cfg tokio_unstable" cargo --features debug run
+```
+
+Then start tokio console:
+```
+tokio-console
+```
