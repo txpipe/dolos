@@ -1,7 +1,6 @@
 use crate::ledger::{store::LedgerStore, EraCbor, TxoRef};
 use futures_core::Stream;
 use itertools::Itertools as _;
-use pallas::crypto::hash::Hash;
 use pallas::interop::utxorpc as interop;
 use pallas::interop::utxorpc::spec as u5c;
 use pallas::ledger::traverse::MultiEraOutput;
