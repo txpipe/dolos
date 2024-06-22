@@ -110,6 +110,9 @@ pub struct LoggingConfig {
     max_level: tracing::Level,
 
     #[serde(default)]
+    include_tokio: bool,
+
+    #[serde(default)]
     include_pallas: bool,
 
     #[serde(default)]
@@ -120,6 +123,7 @@ impl Default for LoggingConfig {
     fn default() -> Self {
         Self {
             max_level: tracing::Level::INFO,
+            include_tokio: Default::default(),
             include_pallas: Default::default(),
             include_grpc: Default::default(),
         }
