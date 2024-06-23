@@ -1,4 +1,5 @@
 use itertools::Itertools;
+use pallas::interop::utxorpc as interop;
 use pallas::ledger::configs::{byron, shelley};
 use pallas::ledger::traverse::{Era, MultiEraBlock, MultiEraTx};
 use pallas::{crypto::hash::Hash, ledger::traverse::MultiEraOutput};
@@ -148,6 +149,18 @@ where
     // TODO: include reference scripts and collateral
 
     Ok(LedgerSlice { resolved_inputs })
+}
+
+impl interop::LedgerContext for LedgerSlice {
+    fn get_utxos(&self, refs: &[interop::TxoRef]) -> Option<interop::UtxoMap> {
+        let some = self
+            .resolved_inputs
+            .iter()
+            .map(|(k, v)| (k.clone().into(), v.clone().into()))
+            .collect();
+
+        Some(some)
+    }
 }
 
 #[derive(Default, Debug)]
