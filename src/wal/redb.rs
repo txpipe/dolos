@@ -78,6 +78,8 @@ where
     }
 }
 
+const DEFAULT_CACHE_SIZE_MB: usize = 50;
+
 /// Concrete implementation of WalStore using Redb
 #[derive(Clone)]
 pub struct WalStore {
@@ -123,9 +125,10 @@ impl WalStore {
         Ok(out)
     }
 
-    pub fn open(path: impl AsRef<Path>) -> Result<Self, WalError> {
+    pub fn open(path: impl AsRef<Path>, cache_size: Option<usize>) -> Result<Self, WalError> {
         let inner = redb::Database::builder()
             .set_repair_callback(|x| warn!(progress = x.progress() * 100f64, "wal db is repairing"))
+            .set_cache_size(1024 * 1024 * cache_size.unwrap_or(DEFAULT_CACHE_SIZE_MB))
             .create(path)?;
 
         let mut out = Self {

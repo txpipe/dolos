@@ -21,8 +21,10 @@ pub fn open_data_stores(config: &crate::Config) -> Result<Stores, Error> {
 
     std::fs::create_dir_all(root).map_err(Error::storage)?;
 
-    let wal = WalStore::open(root.join("wal")).map_err(Error::storage)?;
-    let ledger = LedgerStore::open(root.join("ledger")).map_err(Error::storage)?;
+    let wal = WalStore::open(root.join("wal"), config.storage.wal_cache).map_err(Error::storage)?;
+
+    let ledger = LedgerStore::open(root.join("ledger"), config.storage.ledger_cache)
+        .map_err(Error::storage)?;
 
     Ok((wal, ledger))
 }

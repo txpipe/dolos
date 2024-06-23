@@ -65,6 +65,13 @@ struct Cli {
 #[derive(Serialize, Deserialize)]
 pub struct StorageConfig {
     path: std::path::PathBuf,
+
+    /// Size (in Mb) of memory allocated for WAL caching
+    wal_cache: Option<usize>,
+
+    /// Size (in Mb) of memory allocated for ledger caching
+    ledger_cache: Option<usize>,
+
     #[allow(dead_code)]
     wal_size: Option<u64>,
 }
@@ -73,6 +80,8 @@ impl Default for StorageConfig {
     fn default() -> Self {
         Self {
             path: PathBuf::from("data"),
+            wal_cache: None,
+            ledger_cache: None,
             wal_size: None,
         }
     }
