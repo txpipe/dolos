@@ -232,15 +232,18 @@ impl LedgerTable for ByAddressIndex {
     }
 }
 
+const DEFAULT_CACHE_SIZE_MB: usize = 500;
+
 #[derive(Clone)]
 pub struct LedgerStore(Arc<redb::Database>);
 
 impl LedgerStore {
-    pub fn open(path: impl AsRef<Path>) -> Result<Self, redb::Error> {
+    pub fn open(path: impl AsRef<Path>, cache_size: Option<usize>) -> Result<Self, redb::Error> {
         let inner = redb::Database::builder()
             .set_repair_callback(|x| {
                 warn!(progress = x.progress() * 100f64, "ledger db is repairing")
             })
+            .set_cache_size(1024 * 1024 * cache_size.unwrap_or(DEFAULT_CACHE_SIZE_MB))
             //.create_with_backend(redb::backends::InMemoryBackend::new())?;
             .create(path)?;
 
