@@ -1,6 +1,6 @@
 use futures_core::Stream;
 use futures_util::StreamExt;
-use itertools::Itertools;
+use itertools::{Either, Itertools};
 use pallas::interop::utxorpc as interop;
 use pallas::interop::utxorpc::{spec as u5c, Mapper};
 use std::pin::Pin;
@@ -30,6 +30,15 @@ fn raw_to_anychain(
 
     u5c::sync::AnyChainBlock {
         chain: u5c::sync::any_chain_block::Chain::Cardano(block).into(),
+    }
+}
+
+fn raw_to_blockref(raw: &wal::RawBlock) -> u5c::sync::BlockRef {
+    let RawBlock { slot, hash, .. } = raw;
+
+    u5c::sync::BlockRef {
+        index: *slot,
+        hash: hash.to_vec().into(),
     }
 }
 
@@ -105,31 +114,23 @@ impl u5c::sync::chain_sync_service_server::ChainSyncService for ChainSyncService
 
         let len = msg.max_items as usize + 1;
 
-        let mut page = self
+        let page = self
             .wal
             .read_block_page(from.as_ref(), len)
-            .map_err(|_err| Status::internal("can't query block"))?
-            .collect_vec();
+            .map_err(|_err| Status::internal("can't query block"))?;
 
-        let next_token = if page.len() == len {
-            let RawBlock { slot, hash, .. } = page.remove(len - 1);
-
-            Some(u5c::sync::BlockRef {
-                index: slot,
-                hash: hash.to_vec().into(),
-            })
-        } else {
-            None
-        };
-
-        let blocks = page
-            .into_iter()
-            .map(|x| raw_to_anychain(&self.mapper, &x))
-            .collect();
+        let (items, next_token): (_, Vec<_>) =
+            page.into_iter().enumerate().partition_map(|(idx, x)| {
+                if idx < len - 1 {
+                    Either::Left(raw_to_anychain(&self.mapper, &x))
+                } else {
+                    Either::Right(raw_to_blockref(&x))
+                }
+            });
 
         let response = u5c::sync::DumpHistoryResponse {
-            block: blocks,
-            next_token,
+            block: items,
+            next_token: next_token.into_iter().next(),
         };
 
         Ok(Response::new(response))
