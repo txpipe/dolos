@@ -38,18 +38,21 @@ The configuration section within the `dolos.toml` file that controls the logging
 | property       | type   | example                                       |
 | -------------- | ------ | --------------------------------------------- |
 | max_level      | option | `error` / `warn` / `info` / `debug` / `trace` |
+| include_tokio  | option | `true` / `false`                              |
 | include_pallas | option | `true` / `false`                              |
 | include_tonic  | option | `true` / `false`                              |
 
 - `max_level`: the maximum severity level of events to include in the output. By selecting a specific level, you're effectively including that level and every other levels of higher severity.
-- `include_pallas`: a flag that indicate if the output should include logs from the Pallas sub-component.
-- `include_tonic`: a flag that indicate if the output should include logs from the Tonic sub-component.
+- `include_tokio`: a flag that indicate if the output should include logs from the Tokio library.
+- `include_pallas`: a flag that indicate if the output should include logs from the Pallas library.
+- `include_tonic`: a flag that indicate if the output should include logs from the Tonic library.
 
 The following is an example of a logging configuration:
 
 ```toml
 [logging]
 max_level = "INFO"
+include_tokio = true
 include_pallas = true
 include_tonic = true
 ```

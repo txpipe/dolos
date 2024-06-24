@@ -39,6 +39,7 @@ genesis_key = "5b3...45d" # redacted
 
 [logging]
 max_level = "INFO"
+include_tokio = false
 include_pallas = false
 include_grpc = false
 ```
@@ -63,12 +64,16 @@ The `upstream` section defines how to connect to the Ouroboros network to synchr
 
 The `storage` section controls how Dolos stores data in the local file system. This includes immutable chain blocks, the write ahead log and the ledger state.
 
-| property | type    | example  |
-| -------- | ------- | -------- |
-| path     | string  | "./data" |
-| wal_size | integer | 1000     |
+| property     | type    | example  |
+| ------------ | ------- | -------- |
+| path         | string  | "./data" |
+| wal_cache    | integer | 50       |
+| ledger_cache | integer | 500      |
+| wal_size     | integer | 1000     |
 
 - `path`: is the root directory where all data will be stored.
+- `wal_cache`: the size (in Mb) of the memory cache for the wal db.
+- `ledger_cache`: the size (in Mb) of the memory cache for the ledger db.
 - `wal_size`: is the max number entries (chain events) to keep in the write-ahead-log.
 
 ## `genesis` section
