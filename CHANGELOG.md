@@ -2,6 +2,46 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.0] - 2024-06-24
+
+### 🚀 Features
+
+- Implement input resolver for gRPC endpoint (#149)
+- Implement utxorpc watch module (#270)
+- Integrate tokio traces & debug console (#275)
+- *(storage)* Allow configurable cache size (#277)
+
+### 🐛 Bug Fixes
+
+- Handle SIGTERM for graceful shutdown (#273)
+- *(grpc)* Avoid panic in hash value parsing (#274)
+
+### 🚜 Refactor
+
+- *(grpc)* Improve sync mapping (#276)
+
+### 📚 Documentation
+
+- Improve configuration docs (#260)
+- Add bootstrap instructions (#261)
+- Add quickstart guide (#262)
+- Improve running instructions (#263)
+- Improve API documentation (#264)
+- Document latest config changes (#279)
+
+### 🔧 Continuous Integration
+
+- Remove mdbook workflow (#203)
+
+### 🧪 Testing
+
+- Implement pparams testing (#217)
+
+### ⚙️ Miscellaneous Tasks
+
+- Update Pallas to v0.27 (#265)
+- Reset example configs (#269)
+
 ## [0.9.0] - 2024-05-28
 
 ### 🚀 Features
@@ -52,6 +92,7 @@ All notable changes to this project will be documented in this file.
 - Exclude heavy features from Pallas (#257)
 - Move release config to cargo toml (#258)
 - Update example config files (#259)
+- Release dolos version 0.9.0
 
 ## [0.8.0] - 2024-05-18
 
