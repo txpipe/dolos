@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.1] - 2024-07-05
+
+### 🐛 Bug Fixes
+
+- Change Mithril dep to use rustls (#284)
+
+### 📚 Documentation
+
+- Simplify readme (#281)
+
 ## [0.10.0] - 2024-06-24
 
 ### 🚀 Features
@@ -41,6 +51,7 @@ All notable changes to this project will be documented in this file.
 
 - Update Pallas to v0.27 (#265)
 - Reset example configs (#269)
+- Release dolos version 0.10.0
 
 ## [0.9.0] - 2024-05-28
 
