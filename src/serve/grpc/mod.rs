@@ -31,9 +31,8 @@ pub async fn serve(
 ) -> Result<(), Error> {
     let addr = config.listen_address.parse().unwrap();
 
-    let sync_service = sync::ChainSyncServiceImpl::new(wal.clone(), ledger.clone());
-    let sync_service =
-        u5c::sync::chain_sync_service_server::ChainSyncServiceServer::new(sync_service);
+    let sync_service = sync::SyncServiceImpl::new(wal.clone(), ledger.clone());
+    let sync_service = u5c::sync::sync_service_server::SyncServiceServer::new(sync_service);
 
     let query_service = query::QueryServiceImpl::new(ledger.clone());
     let query_service = u5c::query::query_service_server::QueryServiceServer::new(query_service);

@@ -57,12 +57,12 @@ fn roll_to_tip_response(
     }
 }
 
-pub struct ChainSyncServiceImpl {
+pub struct SyncServiceImpl {
     wal: wal::redb::WalStore,
     mapper: interop::Mapper<LedgerStore>,
 }
 
-impl ChainSyncServiceImpl {
+impl SyncServiceImpl {
     pub fn new(wal: wal::redb::WalStore, ledger: LedgerStore) -> Self {
         Self {
             wal,
@@ -72,7 +72,7 @@ impl ChainSyncServiceImpl {
 }
 
 #[async_trait::async_trait]
-impl u5c::sync::chain_sync_service_server::ChainSyncService for ChainSyncServiceImpl {
+impl u5c::sync::sync_service_server::SyncService for SyncServiceImpl {
     type FollowTipStream =
         Pin<Box<dyn Stream<Item = Result<u5c::sync::FollowTipResponse, Status>> + Send + 'static>>;
 

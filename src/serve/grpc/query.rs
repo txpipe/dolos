@@ -68,18 +68,21 @@ fn into_u5c_utxo(
 
 #[async_trait::async_trait]
 impl u5c::query::query_service_server::QueryService for QueryServiceImpl {
-    type StreamUtxosStream = std::pin::Pin<
-        Box<
-            dyn futures_core::Stream<Item = Result<u5c::query::ReadUtxosResponse, tonic::Status>>
-                + Send
-                + 'static,
-        >,
-    >;
-
     async fn read_params(
         &self,
         request: Request<u5c::query::ReadParamsRequest>,
     ) -> Result<Response<u5c::query::ReadParamsResponse>, Status> {
+        let _message = request.into_inner();
+
+        info!("received new grpc query");
+
+        todo!()
+    }
+
+    async fn read_data(
+        &self,
+        request: Request<u5c::query::ReadDataRequest>,
+    ) -> Result<Response<u5c::query::ReadDataResponse>, Status> {
         let _message = request.into_inner();
 
         info!("received new grpc query");
@@ -173,12 +176,5 @@ impl u5c::query::query_service_server::QueryService for QueryServiceImpl {
             items,
             ledger_tip: cursor,
         }))
-    }
-
-    async fn stream_utxos(
-        &self,
-        _request: Request<u5c::query::ReadUtxosRequest>,
-    ) -> Result<Response<Self::StreamUtxosStream>, Status> {
-        todo!()
     }
 }

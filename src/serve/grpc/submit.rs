@@ -158,4 +158,11 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
     ) -> Result<tonic::Response<Self::WatchMempoolStream>, tonic::Status> {
         todo!()
     }
+
+    async fn eval_tx(
+        &self,
+        _request: tonic::Request<EvalTxRequest>,
+    ) -> Result<tonic::Response<EvalTxResponse>, tonic::Status> {
+        todo!()
+    }
 }
