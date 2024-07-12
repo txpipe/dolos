@@ -1,10 +1,12 @@
-use crate::ledger::{store::LedgerStore, EraCbor, TxoRef};
-use futures_core::Stream;
+use crate::{
+    ledger::{EraCbor, TxoRef},
+    state::LedgerStore,
+};
 use itertools::Itertools as _;
 use pallas::interop::utxorpc as interop;
 use pallas::interop::utxorpc::spec as u5c;
 use pallas::ledger::traverse::MultiEraOutput;
-use std::{collections::HashSet, pin::Pin};
+use std::collections::HashSet;
 use tonic::{Request, Response, Status};
 use tracing::info;
 
@@ -66,9 +68,9 @@ fn into_u5c_utxo(
 
 #[async_trait::async_trait]
 impl u5c::query::query_service_server::QueryService for QueryServiceImpl {
-    type StreamUtxosStream = Pin<
+    type StreamUtxosStream = std::pin::Pin<
         Box<
-            dyn Stream<Item = Result<u5c::query::ReadUtxosResponse, tonic::Status>>
+            dyn futures_core::Stream<Item = Result<u5c::query::ReadUtxosResponse, tonic::Status>>
                 + Send
                 + 'static,
         >,
@@ -172,6 +174,7 @@ impl u5c::query::query_service_server::QueryService for QueryServiceImpl {
             ledger_tip: cursor,
         }))
     }
+
     async fn stream_utxos(
         &self,
         _request: Request<u5c::query::ReadUtxosRequest>,

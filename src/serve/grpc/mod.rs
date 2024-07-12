@@ -5,7 +5,7 @@ use tokio_util::sync::CancellationToken;
 use tonic::transport::{Certificate, Server, ServerTlsConfig};
 use tracing::info;
 
-use crate::ledger::store::LedgerStore;
+use crate::state::LedgerStore;
 use crate::wal::redb::WalStore;
 use crate::{prelude::*, submit::Transaction};
 

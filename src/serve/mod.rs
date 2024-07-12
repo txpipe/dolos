@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-use crate::ledger::store::LedgerStore;
+use crate::state::LedgerStore;
 use crate::wal::redb::WalStore;
 
 pub mod grpc;

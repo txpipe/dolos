@@ -96,7 +96,7 @@ pub fn run(config: &crate::Config, _args: &Args) -> miette::Result<()> {
             .into_diagnostic()
             .context("decoding blocks")?;
 
-        dolos::ledger::import_block_batch(&blocks, &mut ledger, &byron, &shelley)
+        dolos::state::import_block_batch(&blocks, &mut ledger, &byron, &shelley)
             .into_diagnostic()
             .context("importing blocks to ledger store")?;
 

@@ -1,33 +1,29 @@
-use pallas::interop::utxorpc as interop;
-use redb::{
-    MultimapTableDefinition, ReadableMultimapTable, ReadableTable, TableDefinition, TableError,
-    WriteTransaction,
+use ::redb::{
+    Database, Durability, Error, MultimapTableDefinition, ReadableMultimapTable, ReadableTable,
+    TableDefinition, TableError, WriteTransaction,
 };
-use std::{collections::HashSet, path::Path, sync::Arc};
-use tracing::warn;
+use itertools::Itertools as _;
+use pallas::{
+    crypto::hash::Hash,
+    ledger::traverse::{Era, MultiEraOutput},
+};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
-use super::*;
+use crate::ledger::*;
 
 trait LedgerTable {
-    fn create(wx: &WriteTransaction) -> Result<(), redb::Error>;
-    fn apply(wx: &WriteTransaction, delta: &LedgerDelta) -> Result<(), redb::Error>;
-    fn compact(
-        wx: &WriteTransaction,
-        slot: BlockSlot,
-        tombstone: &[TxoRef],
-    ) -> Result<(), redb::Error>;
+    fn apply(wx: &WriteTransaction, delta: &LedgerDelta) -> Result<(), Error>;
+    fn compact(wx: &WriteTransaction, slot: BlockSlot, tombstone: &[TxoRef]) -> Result<(), Error>;
 }
 
 const BLOCKS: TableDefinition<u64, &[u8; 32]> = TableDefinition::new("blocks");
 struct BlocksTable;
 
 impl LedgerTable for BlocksTable {
-    fn create(wx: &WriteTransaction) -> Result<(), redb::Error> {
-        wx.open_table(BLOCKS)?;
-        Ok(())
-    }
-
-    fn apply(wx: &WriteTransaction, delta: &LedgerDelta) -> Result<(), redb::Error> {
+    fn apply(wx: &WriteTransaction, delta: &LedgerDelta) -> Result<(), Error> {
         let mut table = wx.open_table(BLOCKS)?;
 
         if let Some(ChainPoint(slot, hash)) = delta.new_position.as_ref() {
@@ -46,7 +42,7 @@ impl LedgerTable for BlocksTable {
         _wx: &WriteTransaction,
         _slot: BlockSlot,
         _tombstone: &[TxoRef],
-    ) -> Result<(), redb::Error> {
+    ) -> Result<(), Error> {
         // do nothing
         Ok(())
     }
@@ -59,12 +55,7 @@ const UTXOS: TableDefinition<UtxosKey, UtxosValue> = TableDefinition::new("utxos
 struct UtxosTable;
 
 impl LedgerTable for UtxosTable {
-    fn create(wx: &WriteTransaction) -> Result<(), redb::Error> {
-        wx.open_table(UTXOS)?;
-        Ok(())
-    }
-
-    fn apply(wx: &WriteTransaction, delta: &LedgerDelta) -> Result<(), redb::Error> {
+    fn apply(wx: &WriteTransaction, delta: &LedgerDelta) -> Result<(), Error> {
         let mut table = wx.open_table(UTXOS)?;
 
         for (k, v) in delta.produced_utxo.iter() {
@@ -81,11 +72,7 @@ impl LedgerTable for UtxosTable {
         Ok(())
     }
 
-    fn compact(
-        wx: &WriteTransaction,
-        _slot: BlockSlot,
-        tombstone: &[TxoRef],
-    ) -> Result<(), redb::Error> {
+    fn compact(wx: &WriteTransaction, _slot: BlockSlot, tombstone: &[TxoRef]) -> Result<(), Error> {
         let mut table = wx.open_table(UTXOS)?;
 
         for txo in tombstone {
@@ -101,12 +88,7 @@ const PPARAMS: TableDefinition<u64, (u16, &[u8])> = TableDefinition::new("pparam
 struct PParamsTable;
 
 impl LedgerTable for PParamsTable {
-    fn create(wx: &WriteTransaction) -> Result<(), redb::Error> {
-        wx.open_table(PPARAMS)?;
-        Ok(())
-    }
-
-    fn apply(wx: &WriteTransaction, delta: &LedgerDelta) -> Result<(), redb::Error> {
+    fn apply(wx: &WriteTransaction, delta: &LedgerDelta) -> Result<(), Error> {
         let mut table = wx.open_table(PPARAMS)?;
 
         if let Some(ChainPoint(slot, _)) = delta.new_position {
@@ -127,7 +109,7 @@ impl LedgerTable for PParamsTable {
         _wx: &WriteTransaction,
         _slot: BlockSlot,
         _tombstone: &[TxoRef],
-    ) -> Result<(), redb::Error> {
+    ) -> Result<(), Error> {
         // do nothing
         Ok(())
     }
@@ -138,12 +120,7 @@ pub const TOMBSTONES: MultimapTableDefinition<BlockSlot, (&[u8; 32], TxoIdx)> =
 struct TombstonesTable;
 
 impl LedgerTable for TombstonesTable {
-    fn create(wx: &WriteTransaction) -> Result<(), redb::Error> {
-        wx.open_multimap_table(TOMBSTONES)?;
-        Ok(())
-    }
-
-    fn apply(wx: &WriteTransaction, delta: &LedgerDelta) -> Result<(), redb::Error> {
+    fn apply(wx: &WriteTransaction, delta: &LedgerDelta) -> Result<(), Error> {
         let mut table = wx.open_multimap_table(TOMBSTONES)?;
 
         if let Some(ChainPoint(slot, _)) = delta.new_position.as_ref() {
@@ -160,11 +137,7 @@ impl LedgerTable for TombstonesTable {
         Ok(())
     }
 
-    fn compact(
-        wx: &WriteTransaction,
-        slot: BlockSlot,
-        _tombstone: &[TxoRef],
-    ) -> Result<(), redb::Error> {
+    fn compact(wx: &WriteTransaction, slot: BlockSlot, _tombstone: &[TxoRef]) -> Result<(), Error> {
         let mut table = wx.open_multimap_table(TOMBSTONES)?;
 
         table.remove_all(slot)?;
@@ -178,12 +151,7 @@ pub const BY_ADDRESS_INDEX: MultimapTableDefinition<&[u8], UtxosKey> =
 struct ByAddressIndex;
 
 impl LedgerTable for ByAddressIndex {
-    fn create(wx: &WriteTransaction) -> Result<(), redb::Error> {
-        wx.open_multimap_table(BY_ADDRESS_INDEX)?;
-        Ok(())
-    }
-
-    fn apply(wx: &WriteTransaction, delta: &LedgerDelta) -> Result<(), redb::Error> {
+    fn apply(wx: &WriteTransaction, delta: &LedgerDelta) -> Result<(), Error> {
         let mut table = wx.open_multimap_table(BY_ADDRESS_INDEX)?;
 
         for (utxo, body) in delta.produced_utxo.iter() {
@@ -226,37 +194,16 @@ impl LedgerTable for ByAddressIndex {
         _wx: &WriteTransaction,
         _slot: BlockSlot,
         _tombstone: &[TxoRef],
-    ) -> Result<(), redb::Error> {
+    ) -> Result<(), Error> {
         // do nothing
         Ok(())
     }
 }
 
-const DEFAULT_CACHE_SIZE_MB: usize = 500;
-
 #[derive(Clone)]
-pub struct LedgerStore(Arc<redb::Database>);
+pub struct LedgerStore(pub Arc<Database>);
 
 impl LedgerStore {
-    pub fn open(path: impl AsRef<Path>, cache_size: Option<usize>) -> Result<Self, redb::Error> {
-        let inner = redb::Database::builder()
-            .set_repair_callback(|x| {
-                warn!(progress = x.progress() * 100f64, "ledger db is repairing")
-            })
-            .set_cache_size(1024 * 1024 * cache_size.unwrap_or(DEFAULT_CACHE_SIZE_MB))
-            //.create_with_backend(redb::backends::InMemoryBackend::new())?;
-            .create(path)?;
-
-        let wx = inner.begin_write()?;
-        UtxosTable::create(&wx)?;
-        PParamsTable::create(&wx)?;
-        TombstonesTable::create(&wx)?;
-        BlocksTable::create(&wx)?;
-        wx.commit()?;
-
-        Ok(Self(Arc::new(inner)))
-    }
-
     pub fn is_empty(&self) -> bool {
         match self.cursor() {
             Ok(x) => x.is_none(),
@@ -264,7 +211,7 @@ impl LedgerStore {
         }
     }
 
-    pub fn cursor(&self) -> Result<Option<ChainPoint>, redb::Error> {
+    pub fn cursor(&self) -> Result<Option<ChainPoint>, Error> {
         let rx = self.0.begin_read()?;
 
         let table = match rx.open_table(BLOCKS) {
@@ -279,9 +226,9 @@ impl LedgerStore {
         Ok(last)
     }
 
-    pub fn apply(&mut self, deltas: &[LedgerDelta]) -> Result<(), redb::Error> {
+    pub fn apply(&mut self, deltas: &[LedgerDelta]) -> Result<(), Error> {
         let mut wx = self.0.begin_write()?;
-        wx.set_durability(redb::Durability::Eventual);
+        wx.set_durability(Durability::Eventual);
 
         for delta in deltas {
             UtxosTable::apply(&wx, delta)?;
@@ -298,9 +245,9 @@ impl LedgerStore {
         Ok(())
     }
 
-    pub fn finalize(&mut self, until: BlockSlot) -> Result<(), redb::Error> {
+    pub fn finalize(&mut self, until: BlockSlot) -> Result<(), Error> {
         let mut wx = self.0.begin_write()?;
-        wx.set_durability(redb::Durability::Eventual);
+        wx.set_durability(Durability::Eventual);
 
         let tss: Vec<_> = {
             wx.open_multimap_table(TOMBSTONES)?
@@ -312,7 +259,7 @@ impl LedgerStore {
                         .map_ok(|(hash, idx)| TxoRef(hash.into(), idx))
                         .try_collect()?;
 
-                    Result::<_, redb::Error>::Ok((k.value(), values))
+                    Result::<_, Error>::Ok((k.value(), values))
                 })
                 .try_collect()?
         };
@@ -330,7 +277,7 @@ impl LedgerStore {
         Ok(())
     }
 
-    pub fn get_utxos(&self, refs: Vec<TxoRef>) -> Result<UtxoMap, redb::Error> {
+    pub fn get_utxos(&self, refs: Vec<TxoRef>) -> Result<UtxoMap, Error> {
         // exit early before opening a read tx in case there's nothing to fetch
         if refs.is_empty() {
             return Ok(Default::default());
@@ -355,7 +302,7 @@ impl LedgerStore {
         Ok(out)
     }
 
-    pub fn get_pparams(&self, until: BlockSlot) -> Result<Vec<PParamsBody>, redb::Error> {
+    pub fn get_pparams(&self, until: BlockSlot) -> Result<Vec<PParamsBody>, Error> {
         let rx = self.0.begin_read()?;
         let table = rx.open_table(PPARAMS)?;
 
@@ -371,7 +318,7 @@ impl LedgerStore {
         Ok(out)
     }
 
-    pub fn get_utxo_by_address_set(&self, address: &[u8]) -> Result<HashSet<TxoRef>, redb::Error> {
+    pub fn get_utxo_by_address_set(&self, address: &[u8]) -> Result<HashSet<TxoRef>, Error> {
         let rx = self.0.begin_read()?;
         let table = rx.open_multimap_table(BY_ADDRESS_INDEX)?;
 
@@ -384,34 +331,5 @@ impl LedgerStore {
         }
 
         Ok(out)
-    }
-}
-
-impl super::LedgerStore for LedgerStore {
-    fn get_utxos(&self, refs: Vec<TxoRef>) -> Result<UtxoMap, LedgerError> {
-        LedgerStore::get_utxos(self, refs).map_err(super::LedgerError::StorageError)
-    }
-
-    fn apply(&mut self, deltas: &[LedgerDelta]) -> Result<(), LedgerError> {
-        LedgerStore::apply(self, deltas).map_err(super::LedgerError::StorageError)
-    }
-
-    fn finalize(&mut self, until: BlockSlot) -> Result<(), LedgerError> {
-        LedgerStore::finalize(self, until).map_err(super::LedgerError::StorageError)
-    }
-}
-
-impl interop::LedgerContext for LedgerStore {
-    fn get_utxos<'a>(&self, refs: &[interop::TxoRef]) -> Option<interop::UtxoMap> {
-        let refs: Vec<_> = refs.iter().map(|x| TxoRef::from(*x)).collect();
-
-        let some = self
-            .get_utxos(refs)
-            .ok()?
-            .into_iter()
-            .map(|(k, v)| (k.into(), v.into()))
-            .collect();
-
-        Some(some)
     }
 }

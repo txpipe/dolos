@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use dolos::wal::redb::WalStore;
+use dolos::{state, wal};
 use miette::{Context as _, IntoDiagnostic};
 use pallas::ledger::configs::alonzo::GenesisFile as AlonzoFile;
 use pallas::ledger::configs::byron::GenesisFile as ByronFile;
@@ -10,21 +10,23 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 use tracing_subscriber::{filter::Targets, prelude::*};
 
-use dolos::{ledger::store::LedgerStore, prelude::*};
+use dolos::prelude::*;
 
 use crate::{GenesisConfig, LoggingConfig};
 
-pub type Stores = (WalStore, LedgerStore);
+pub type Stores = (wal::redb::WalStore, state::LedgerStore);
 
 pub fn open_data_stores(config: &crate::Config) -> Result<Stores, Error> {
     let root = &config.storage.path;
 
     std::fs::create_dir_all(root).map_err(Error::storage)?;
 
-    let wal = WalStore::open(root.join("wal"), config.storage.wal_cache).map_err(Error::storage)?;
-
-    let ledger = LedgerStore::open(root.join("ledger"), config.storage.ledger_cache)
+    let wal = wal::redb::WalStore::open(root.join("wal"), config.storage.wal_cache)
         .map_err(Error::storage)?;
+
+    let ledger = state::redb::LedgerStore::open(root.join("ledger"), config.storage.ledger_cache)
+        .map_err(Error::storage)?
+        .into();
 
     Ok((wal, ledger))
 }

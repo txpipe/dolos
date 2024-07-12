@@ -1,12 +1,10 @@
-use itertools::Itertools;
 use pallas::ledger::configs::{byron, shelley};
-use pallas::ledger::traverse::{Era, MultiEraBlock, MultiEraTx};
+use pallas::ledger::traverse::{Era, MultiEraBlock};
 use pallas::{crypto::hash::Hash, ledger::traverse::MultiEraOutput};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use thiserror::Error;
 
 pub mod pparams;
-pub mod store;
 //pub mod validate;
 
 pub type TxHash = Hash<32>;
@@ -81,14 +79,10 @@ pub enum LedgerError {
     BrokenInvariant(#[source] BrokenInvariant),
 
     #[error("storage error")]
-    StorageError(#[source] redb::Error),
-}
+    StorageError(#[source] ::redb::Error),
 
-/// A persistent store for ledger state
-pub trait LedgerStore {
-    fn get_utxos(&self, refs: Vec<TxoRef>) -> Result<UtxoMap, LedgerError>;
-    fn apply(&mut self, deltas: &[LedgerDelta]) -> Result<(), LedgerError>;
-    fn finalize(&mut self, until: BlockSlot) -> Result<(), LedgerError>;
+    #[error("query not supported")]
+    QueryNotSupported,
 }
 
 /// A slice of the ledger relevant for a specific task
@@ -99,55 +93,6 @@ pub trait LedgerStore {
 #[derive(Clone)]
 pub struct LedgerSlice {
     pub resolved_inputs: HashMap<TxoRef, EraCbor>,
-}
-
-pub fn load_slice_for_block<S>(
-    block: &MultiEraBlock,
-    store: &S,
-    unapplied_deltas: &[LedgerDelta],
-) -> Result<LedgerSlice, LedgerError>
-where
-    S: LedgerStore,
-{
-    let txs: HashMap<_, _> = block.txs().into_iter().map(|tx| (tx.hash(), tx)).collect();
-
-    // TODO: turn this into "referenced utxos" intead of just consumed.
-    let consumed: HashSet<_> = txs
-        .values()
-        .flat_map(MultiEraTx::consumes)
-        .map(|utxo| TxoRef(*utxo.hash(), utxo.index() as u32))
-        .collect();
-
-    let consumed_same_block: HashMap<_, _> = txs
-        .iter()
-        .flat_map(|(tx_hash, tx)| {
-            tx.produces()
-                .into_iter()
-                .map(|(idx, utxo)| (TxoRef(*tx_hash, idx as u32), utxo.into()))
-        })
-        .filter(|(x, _)| consumed.contains(x))
-        .collect();
-
-    let consumed_unapplied_deltas: HashMap<_, _> = unapplied_deltas
-        .iter()
-        .flat_map(|d| d.produced_utxo.iter().chain(d.recovered_stxi.iter()))
-        .filter(|(x, _)| consumed.contains(x))
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
-
-    let to_fetch = consumed
-        .into_iter()
-        .filter(|x| !consumed_same_block.contains_key(x))
-        .filter(|x| !consumed_unapplied_deltas.contains_key(x))
-        .collect_vec();
-
-    let mut resolved_inputs = store.get_utxos(to_fetch)?;
-    resolved_inputs.extend(consumed_same_block);
-    resolved_inputs.extend(consumed_unapplied_deltas);
-
-    // TODO: include reference scripts and collateral
-
-    Ok(LedgerSlice { resolved_inputs })
 }
 
 #[derive(Default, Debug)]
@@ -294,61 +239,27 @@ pub fn lastest_immutable_slot(
     tip.saturating_sub(security_window.ceil() as u64)
 }
 
-pub fn import_block_batch<S: LedgerStore>(
-    blocks: &[MultiEraBlock],
-    store: &mut S,
-    byron: &byron::GenesisFile,
-    shelley: &shelley::GenesisFile,
-) -> Result<(), LedgerError> {
-    let mut deltas: Vec<LedgerDelta> = vec![];
-
-    for block in blocks {
-        let context = load_slice_for_block(block, store, &deltas)?;
-        let delta = compute_delta(block, context).map_err(LedgerError::BrokenInvariant)?;
-
-        deltas.push(delta);
-    }
-
-    store.apply(&deltas)?;
-
-    let tip = deltas
-        .last()
-        .and_then(|x| x.new_position.as_ref())
-        .map(|x| x.0)
-        .unwrap();
-
-    let to_finalize = lastest_immutable_slot(tip, byron, shelley);
-    store.finalize(to_finalize)?;
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
-    use pallas::{crypto::hash::Hash, ledger::addresses::Address};
+    use pallas::{
+        crypto::hash::Hash,
+        ledger::{addresses::Address, traverse::MultiEraTx},
+    };
     use std::str::FromStr;
 
     use super::*;
 
-    struct MockStore;
+    fn fake_slice_for_block(block: &MultiEraBlock) -> LedgerSlice {
+        let consumed: HashMap<_, _> = block
+            .txs()
+            .iter()
+            .flat_map(MultiEraTx::consumes)
+            .map(|utxo| TxoRef(*utxo.hash(), utxo.index() as u32))
+            .map(|key| (key, EraCbor(block.era(), vec![])))
+            .collect();
 
-    impl LedgerStore for MockStore {
-        fn get_utxos(&self, refs: Vec<TxoRef>) -> Result<UtxoMap, LedgerError> {
-            let mut out = HashMap::new();
-
-            for i in refs {
-                out.insert(i, EraCbor(Era::Alonzo, vec![]));
-            }
-
-            Ok(out)
-        }
-
-        fn apply(&mut self, _deltas: &[LedgerDelta]) -> Result<(), LedgerError> {
-            todo!()
-        }
-
-        fn finalize(&mut self, _until: BlockSlot) -> Result<(), LedgerError> {
-            todo!()
+        LedgerSlice {
+            resolved_inputs: consumed,
         }
     }
 
@@ -425,11 +336,9 @@ mod tests {
     fn test_apply_delta() {
         // nice block with several txs, it includes chaining edge case
         let cbor = load_test_block("alonzo27.block");
-
         let block = MultiEraBlock::decode(&cbor).unwrap();
+        let context = fake_slice_for_block(&block);
 
-        let store = MockStore;
-        let context = super::load_slice_for_block(&block, &store, &[]).unwrap();
         let delta = super::compute_delta(&block, context).unwrap();
 
         for tx in block.txs() {
@@ -453,11 +362,8 @@ mod tests {
     fn test_undo_block() {
         // nice block with several txs, it includes chaining edge case
         let cbor = load_test_block("alonzo27.block");
-
         let block = MultiEraBlock::decode(&cbor).unwrap();
-
-        let store = MockStore;
-        let context = super::load_slice_for_block(&block, &store, &[]).unwrap();
+        let context = fake_slice_for_block(&block);
 
         let apply = super::compute_delta(&block, context.clone()).unwrap();
         let undo = super::compute_undo_delta(&block, context).unwrap();
