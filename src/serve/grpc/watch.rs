@@ -1,5 +1,5 @@
 use crate::{
-    ledger,
+    state::LedgerStore,
     wal::{self, WalReader as _},
 };
 use futures_core::Stream;
@@ -12,7 +12,7 @@ use tonic::{Request, Response, Status};
 
 fn block_to_txs(
     block: &wal::RawBlock,
-    mapper: &interop::Mapper<ledger::store::LedgerStore>,
+    mapper: &interop::Mapper<LedgerStore>,
 ) -> Vec<u5c::watch::AnyChainTx> {
     let wal::RawBlock { body, .. } = block;
     let block = MultiEraBlock::decode(body).unwrap();
@@ -27,7 +27,7 @@ fn block_to_txs(
 }
 
 fn roll_to_watch_response(
-    mapper: &interop::Mapper<ledger::store::LedgerStore>,
+    mapper: &interop::Mapper<LedgerStore>,
     log: &wal::LogValue,
 ) -> impl Stream<Item = u5c::watch::WatchTxResponse> {
     let txs: Vec<_> = match log {
@@ -50,11 +50,11 @@ fn roll_to_watch_response(
 
 pub struct WatchServiceImpl {
     wal: wal::redb::WalStore,
-    mapper: interop::Mapper<ledger::store::LedgerStore>,
+    mapper: interop::Mapper<LedgerStore>,
 }
 
 impl WatchServiceImpl {
-    pub fn new(wal: wal::redb::WalStore, ledger: ledger::store::LedgerStore) -> Self {
+    pub fn new(wal: wal::redb::WalStore, ledger: LedgerStore) -> Self {
         Self {
             wal,
             mapper: interop::Mapper::new(ledger),

@@ -6,7 +6,7 @@ use pallas::interop::utxorpc::{spec as u5c, Mapper};
 use std::pin::Pin;
 use tonic::{Request, Response, Status};
 
-use crate::ledger;
+use crate::state::LedgerStore;
 use crate::wal::{self, RawBlock, WalReader as _};
 
 fn u5c_to_chain_point(block_ref: u5c::sync::BlockRef) -> Result<wal::ChainPoint, Status> {
@@ -21,10 +21,7 @@ fn u5c_to_chain_point(block_ref: u5c::sync::BlockRef) -> Result<wal::ChainPoint,
 //     AnyChainBlock { chain: Some(block) }
 // }
 
-fn raw_to_anychain(
-    mapper: &Mapper<ledger::store::LedgerStore>,
-    raw: &wal::RawBlock,
-) -> u5c::sync::AnyChainBlock {
+fn raw_to_anychain(mapper: &Mapper<LedgerStore>, raw: &wal::RawBlock) -> u5c::sync::AnyChainBlock {
     let wal::RawBlock { body, .. } = raw;
     let block = mapper.map_block_cbor(body);
 
@@ -43,7 +40,7 @@ fn raw_to_blockref(raw: &wal::RawBlock) -> u5c::sync::BlockRef {
 }
 
 fn roll_to_tip_response(
-    mapper: &Mapper<ledger::store::LedgerStore>,
+    mapper: &Mapper<LedgerStore>,
     log: &wal::LogValue,
 ) -> u5c::sync::FollowTipResponse {
     u5c::sync::FollowTipResponse {
@@ -62,11 +59,11 @@ fn roll_to_tip_response(
 
 pub struct ChainSyncServiceImpl {
     wal: wal::redb::WalStore,
-    mapper: interop::Mapper<ledger::store::LedgerStore>,
+    mapper: interop::Mapper<LedgerStore>,
 }
 
 impl ChainSyncServiceImpl {
-    pub fn new(wal: wal::redb::WalStore, ledger: ledger::store::LedgerStore) -> Self {
+    pub fn new(wal: wal::redb::WalStore, ledger: LedgerStore) -> Self {
         Self {
             wal,
             mapper: Mapper::new(ledger),

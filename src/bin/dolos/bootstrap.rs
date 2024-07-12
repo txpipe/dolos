@@ -1,5 +1,5 @@
 use dolos::{
-    ledger,
+    state,
     wal::{self, ReadUtils, WalReader as _, WalWriter},
 };
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
@@ -271,7 +271,7 @@ fn import_hardano_into_wal(
 fn rebuild_ledger_from_wal(
     feedback: &Feedback,
     wal: &wal::redb::WalStore,
-    ledger: &mut impl ledger::LedgerStore,
+    ledger: &mut state::LedgerStore,
     byron: &byron::GenesisFile,
     shelley: &shelley::GenesisFile,
 ) -> miette::Result<()> {
@@ -312,7 +312,7 @@ fn rebuild_ledger_from_wal(
             .into_diagnostic()
             .context("decoding blocks")?;
 
-        dolos::ledger::import_block_batch(&blocks, ledger, byron, shelley)
+        dolos::state::import_block_batch(&blocks, ledger, byron, shelley)
             .into_diagnostic()
             .context("importing blocks to ledger store")?;
 

@@ -1,5 +1,5 @@
-use crate::ledger::store::LedgerStore;
 use crate::prelude::*;
+use crate::state::LedgerStore;
 use crate::wal::redb::WalStore;
 use pallas::ledger::configs::{byron, shelley};
 use serde::{Deserialize, Serialize};
