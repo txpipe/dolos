@@ -62,6 +62,12 @@ impl LedgerStore {
     }
 }
 
+impl From<redb::LedgerStore> for LedgerStore {
+    fn from(value: redb::LedgerStore) -> Self {
+        Self::Redb(value)
+    }
+}
+
 impl interop::LedgerContext for LedgerStore {
     fn get_utxos<'a>(&self, refs: &[interop::TxoRef]) -> Option<interop::UtxoMap> {
         let refs: Vec<_> = refs.iter().map(|x| TxoRef::from(*x)).collect();
