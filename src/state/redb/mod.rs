@@ -1,6 +1,3 @@
-mod tables;
-mod v1;
-
 use ::redb::Database;
 use itertools::Itertools as _;
 use redb::TableHandle as _;
@@ -9,9 +6,14 @@ use std::{
     hash::{Hash as _, Hasher as _},
     path::Path,
 };
+
 use tracing::warn;
 
 use crate::ledger::*;
+
+mod tables;
+mod v1;
+mod v2;
 
 const DEFAULT_CACHE_SIZE_MB: usize = 500;
 
@@ -56,6 +58,7 @@ fn open_db(path: impl AsRef<Path>, cache_size: Option<usize>) -> Result<Database
 #[derive(Clone)]
 pub enum LedgerStore {
     SchemaV1(v1::LedgerStore),
+    SchemaV2(v2::LedgerStore),
 }
 
 impl LedgerStore {
@@ -64,7 +67,7 @@ impl LedgerStore {
         let hash = compute_schema_hash(&db)?;
 
         let schema = match hash {
-            // use latest schema if no hash
+            // use stable schema if no hash
             None => v1::LedgerStore::from(db).into(),
             // v1 hash
             Some(13844724490616556453) => v1::LedgerStore::from(db).into(),
@@ -77,42 +80,49 @@ impl LedgerStore {
     pub fn cursor(&self) -> Result<Option<ChainPoint>, LedgerError> {
         match self {
             LedgerStore::SchemaV1(x) => x.cursor().map_err(LedgerError::StorageError),
+            LedgerStore::SchemaV2(x) => x.cursor().map_err(LedgerError::StorageError),
         }
     }
 
     pub fn is_empty(&self) -> bool {
         match self {
             LedgerStore::SchemaV1(x) => x.is_empty(),
+            LedgerStore::SchemaV2(x) => x.is_empty(),
         }
     }
 
     pub fn get_pparams(&self, until: BlockSlot) -> Result<Vec<PParamsBody>, LedgerError> {
         match self {
             LedgerStore::SchemaV1(x) => x.get_pparams(until).map_err(LedgerError::StorageError),
+            LedgerStore::SchemaV2(x) => x.get_pparams(until).map_err(LedgerError::StorageError),
         }
     }
 
     pub fn get_utxos(&self, refs: Vec<TxoRef>) -> Result<UtxoMap, LedgerError> {
         match self {
             LedgerStore::SchemaV1(x) => x.get_utxos(refs).map_err(LedgerError::StorageError),
+            LedgerStore::SchemaV2(x) => x.get_utxos(refs).map_err(LedgerError::StorageError),
         }
     }
 
     pub fn get_utxo_by_address_set(&self, _address: &[u8]) -> Result<HashSet<TxoRef>, LedgerError> {
         match self {
             LedgerStore::SchemaV1(_) => Err(LedgerError::QueryNotSupported),
+            LedgerStore::SchemaV2(x) => x.get_utxos_by_address(),
         }
     }
 
     pub fn apply(&mut self, deltas: &[LedgerDelta]) -> Result<(), LedgerError> {
         match self {
             LedgerStore::SchemaV1(x) => x.apply(deltas).map_err(LedgerError::StorageError),
+            LedgerStore::SchemaV2(x) => x.apply(deltas).map_err(LedgerError::StorageError),
         }
     }
 
     pub fn finalize(&mut self, until: BlockSlot) -> Result<(), LedgerError> {
         match self {
             LedgerStore::SchemaV1(x) => x.finalize(until).map_err(LedgerError::StorageError),
+            LedgerStore::SchemaV2(x) => x.finalize(until).map_err(LedgerError::StorageError),
         }
     }
 }
@@ -120,5 +130,11 @@ impl LedgerStore {
 impl From<v1::LedgerStore> for LedgerStore {
     fn from(value: v1::LedgerStore) -> Self {
         Self::SchemaV1(value)
+    }
+}
+
+impl From<v2::LedgerStore> for LedgerStore {
+    fn from(value: v2::LedgerStore) -> Self {
+        Self::SchemaV2(value)
     }
 }

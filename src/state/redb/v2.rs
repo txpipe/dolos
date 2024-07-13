@@ -18,7 +18,7 @@ impl LedgerStore {
 
     pub fn cursor(&self) -> Result<Option<ChainPoint>, Error> {
         let rx = self.0.begin_read()?;
-        tables::BlocksTable::last(&rx)
+        tables::TombstonesV2Table::last(&rx)
     }
 
     pub fn apply(&mut self, deltas: &[LedgerDelta]) -> Result<(), Error> {
@@ -28,8 +28,7 @@ impl LedgerStore {
         for delta in deltas {
             tables::UtxosTable::apply(&wx, delta)?;
             tables::PParamsTable::apply(&wx, delta)?;
-            tables::TombstonesV1Table::apply(&wx, delta)?;
-            tables::BlocksTable::apply(&wx, delta)?;
+            tables::TombstonesV2Table::apply(&wx, delta)?;
         }
 
         wx.commit()?;
@@ -39,7 +38,7 @@ impl LedgerStore {
 
     pub fn finalize(&mut self, until: BlockSlot) -> Result<(), Error> {
         let rx = self.0.begin_read()?;
-        let tss = tables::TombstonesV1Table::get_range(&rx, until)?;
+        let tss = tables::TombstonesV2Table::get_range(&rx, until)?;
 
         let mut wx = self.0.begin_write()?;
         wx.set_durability(Durability::Eventual);
@@ -47,7 +46,7 @@ impl LedgerStore {
         for ts in tss {
             let (slot, txos) = ts;
             tables::UtxosTable::compact(&wx, slot, &txos)?;
-            tables::TombstonesV1Table::compact(&wx, slot, &txos)?;
+            tables::TombstonesV2Table::compact(&wx, slot)?;
         }
 
         wx.commit()?;

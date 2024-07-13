@@ -143,9 +143,9 @@ impl PParamsTable {
     }
 }
 
-pub struct TombstonesTable;
+pub struct TombstonesV1Table;
 
-impl TombstonesTable {
+impl TombstonesV1Table {
     pub const DEF: MultimapTableDefinition<'static, BlockSlot, (&'static [u8; 32], TxoIdx)> =
         MultimapTableDefinition::new("tombstones");
 
@@ -199,6 +199,80 @@ impl TombstonesTable {
         table.remove_all(slot)?;
 
         Ok(())
+    }
+}
+
+pub struct TombstonesV2Table;
+
+impl TombstonesV2Table {
+    pub const DEF: TableDefinition<'static, BlockSlot, Vec<(&'static [u8; 32], TxoIdx)>> =
+        TableDefinition::new("tombstones");
+
+    pub fn get_range(
+        rx: &ReadTransaction,
+        until: BlockSlot,
+    ) -> Result<Vec<(BlockSlot, Vec<TxoRef>)>, Error> {
+        let table = rx.open_table(Self::DEF)?;
+
+        let mut out = vec![];
+
+        for entry in table.range(..until)? {
+            let (slot, txos) = entry?;
+
+            let txos = txos
+                .value()
+                .into_iter()
+                .map(|(hash, idx)| TxoRef((*hash).into(), idx))
+                .collect_vec();
+
+            out.push((slot.value(), txos));
+        }
+
+        Ok(out)
+    }
+
+    pub fn apply(wx: &WriteTransaction, delta: &LedgerDelta) -> Result<(), Error> {
+        let mut table = wx.open_table(Self::DEF)?;
+
+        if let Some(ChainPoint(slot, _)) = delta.new_position.as_ref() {
+            let stxis = delta
+                .consumed_utxo
+                .iter()
+                .map(|(txo, _)| {
+                    let stxi: (&[u8; 32], u32) = (&txo.0, txo.1);
+                    stxi
+                })
+                .collect_vec();
+
+            table.insert(slot, stxis)?;
+        }
+
+        if let Some(ChainPoint(slot, _)) = delta.undone_position.as_ref() {
+            table.remove(slot)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn compact(wx: &WriteTransaction, slot: BlockSlot) -> Result<(), Error> {
+        let mut table = wx.open_table(Self::DEF)?;
+
+        table.remove(slot)?;
+
+        Ok(())
+    }
+
+    pub fn last(rx: &ReadTransaction) -> Result<Option<ChainPoint>, Error> {
+        let table = match rx.open_table(Self::DEF) {
+            Ok(x) => x,
+            Err(TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(x) => return Err(x.into()),
+        };
+
+        let last = table.last()?;
+        let last = last.map(|(k, v)| ChainPoint(k.value(), Hash::new(*v.value())));
+
+        Ok(last)
     }
 }
 
