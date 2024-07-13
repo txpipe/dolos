@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.0] - 2024-07-13
+
+### 🚜 Refactor
+
+- Split ledger into state and transition (#288)
+- Support side-by-side state schemas (#290)
+
+### ⚙️ Miscellaneous Tasks
+
+- Update u5c spec to v0.6 (#289)
+- Update Pallas with redeemer interop fix (#291)
+
 ## [0.10.1] - 2024-07-05
 
 ### 🐛 Bug Fixes
@@ -11,6 +23,10 @@ All notable changes to this project will be documented in this file.
 ### 📚 Documentation
 
 - Simplify readme (#281)
+
+### ⚙️ Miscellaneous Tasks
+
+- Release dolos version 0.10.1
 
 ## [0.10.0] - 2024-06-24
 
