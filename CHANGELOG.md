@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.1] - 2024-07-14
+
+### 🐛 Bug Fixes
+
+- *(serve)* Don't break socket listening loop on connect error (#297)
+
+### ⚙️ Miscellaneous Tasks
+
+- Update Pallas with input ordering interop fix (#296)
+
 ## [0.11.0] - 2024-07-13
 
 ### 🚜 Refactor
@@ -13,6 +23,7 @@ All notable changes to this project will be documented in this file.
 
 - Update u5c spec to v0.6 (#289)
 - Update Pallas with redeemer interop fix (#291)
+- Release dolos version 0.11.0
 
 ## [0.10.1] - 2024-07-05
 
