@@ -11,11 +11,11 @@ use tokio::sync::broadcast::{
     error::{RecvError, TryRecvError},
     Receiver, Sender,
 };
-use tracing::info;
+use tracing::debug;
 
 use super::{Error, Transaction};
 
-pub type MempoolReceiver = gasket::messaging::tokio::InputPort<Vec<Transaction>>;
+pub type MempoolReceiver = gasket::messaging::InputPort<Vec<Transaction>>;
 
 // Peer Mempool
 pub struct Mempool {
@@ -61,7 +61,7 @@ impl SubmitPeerHandler {
     }
 
     pub async fn begin(&mut self) -> Result<(), Error> {
-        info!("starting peer handler for {}", self.address);
+        debug!("starting peer handler for {}", self.address);
         self.txsubmission.send_init().await.map_err(Error::server)?;
 
         loop {
@@ -73,7 +73,7 @@ impl SubmitPeerHandler {
                 break;
             }
 
-            info!("requested next txsub message");
+            debug!("requested next txsub message");
 
             let msg = self
                 .txsubmission
@@ -93,7 +93,7 @@ impl SubmitPeerHandler {
 
     /// Try to immediately receive new transactions from the broadcast channel
     fn try_recv_transactions(&mut self) {
-        info!("trying to receive new transaction from broadcast channel");
+        debug!("trying to receive new transaction from broadcast channel");
 
         if let Some(tx_receiver) = self.broadcast_recv.as_mut() {
             match tx_receiver.try_recv() {
@@ -110,7 +110,7 @@ impl SubmitPeerHandler {
 
     /// Wait until a new transaction is received from the broadcast channel
     async fn await_recv_transactions(&mut self) -> Result<(), Error> {
-        info!("awaiting new transaction from broadcast channel");
+        debug!("awaiting new transaction from broadcast channel");
 
         loop {
             if let Some(tx_receiver) = self.broadcast_recv.as_mut() {
@@ -139,7 +139,7 @@ impl SubmitPeerHandler {
                 self.respond_tx_ids(req, ack, false).await
             }
             txsub::Request::Txs(ids) => {
-                info!("responding to txs msg");
+                debug!("responding to txs msg");
 
                 // find the txs for the requested ids in the mempool
                 let mut txs = vec![];
@@ -168,7 +168,7 @@ impl SubmitPeerHandler {
     }
 
     async fn respond_tx_ids(&mut self, req: u16, ack: u16, blocking: bool) -> Result<(), Error> {
-        info!("responding to tx ids msg");
+        debug!("responding to tx ids msg");
 
         // assert that peer request makes sense
         if ack as usize > self.mempool.unacked.len() {
@@ -180,7 +180,7 @@ impl SubmitPeerHandler {
         self.mempool.acked += ack as usize;
 
         // we must wait until we have a tx to send as the request is blocking
-        info!("checking blocking and mempool empty");
+        debug!("checking blocking and mempool empty");
         if blocking && self.mempool.to_send.is_empty() {
             self.await_recv_transactions().await?;
         }
@@ -193,7 +193,7 @@ impl SubmitPeerHandler {
 
         let resp_txs_ids = resp_txs.clone().into_iter().map(|x| x.into()).collect();
 
-        info!("responding with tx ids: {:?}", resp_txs_ids);
+        debug!("responding with tx ids: {:?}", resp_txs_ids);
 
         // respond to peer with requested tx ids
         match self.txsubmission.reply_tx_ids(resp_txs_ids).await {
@@ -253,7 +253,7 @@ impl gasket::framework::Worker<Stage> for Worker {
 
             let peer_client = match peer_client {
                 Ok(c) => {
-                    info!("connected to {address}");
+                    debug!("connected to {address}");
                     c
                 }
                 Err(e) => {
@@ -296,7 +296,7 @@ impl gasket::framework::Worker<Stage> for Worker {
         unit: &Vec<Transaction>,
         stage: &mut Stage,
     ) -> Result<(), WorkerError> {
-        info!(
+        debug!(
             "broadcasting new transactions to peer handlers: {:?}",
             unit.iter().map(|x| x.hash)
         );

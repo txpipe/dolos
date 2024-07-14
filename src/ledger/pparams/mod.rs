@@ -9,9 +9,7 @@ use pallas::{
         traverse::MultiEraUpdate,
     },
 };
-use tracing::warn;
-
-//mod test_data;
+use tracing::{trace, warn};
 
 pub struct Genesis<'a> {
     pub byron: &'a byron::GenesisFile,
@@ -21,7 +19,7 @@ pub struct Genesis<'a> {
 
 fn bootstrap_byron_pparams(byron: &byron::GenesisFile) -> ByronProtParams {
     ByronProtParams {
-        block_version: (1, 0, 0),
+        block_version: (0, 0, 0),
         summand: byron.block_version_data.tx_fee_policy.summand,
         multiplier: byron.block_version_data.tx_fee_policy.multiplier,
         max_tx_size: byron.block_version_data.max_tx_size,
@@ -214,45 +212,158 @@ fn advance_hardfork(
     next_protocol: usize,
 ) -> MultiEraProtocolParameters {
     match current {
+        // Source: https://github.com/cardano-foundation/CIPs/blob/master/CIP-0059/feature-table.md
+        // NOTE: part of the confusion here is that there are two versioning schemes that can be
+        // easily conflated:
+        // - The protocol version, negotiated in the networking layer
+        // - The protocol version broadcast in the block header
+        // Generally, these refer to the latter; the update proposals jump from 2 to 5, because the
+        // node team decided it would be helpful to have these in sync.
+
+        // Protocol starts at version 0;
+        // There was one intra-era "hard fork" in byron (even though they weren't called that yet)
+        MultiEraProtocolParameters::Byron(current) if next_protocol == 1 => {
+            MultiEraProtocolParameters::Byron(current)
+        }
+        // Protocol version 2 transitions from Byron to Shelley
         MultiEraProtocolParameters::Byron(current) if next_protocol == 2 => {
             MultiEraProtocolParameters::Shelley(bootstrap_shelley_pparams(current, genesis.shelley))
         }
-        MultiEraProtocolParameters::Shelley(current) if next_protocol == 3 => {
+        // Two intra-era hard forks, named Allegra (3) and Mary (4); we don't have separate types
+        // for these eras
+        MultiEraProtocolParameters::Shelley(current) if next_protocol < 5 => {
             MultiEraProtocolParameters::Shelley(current)
         }
-        MultiEraProtocolParameters::Shelley(current) if next_protocol == 4 => {
-            MultiEraProtocolParameters::Shelley(current)
-        }
+        // Protocol version 5 transitions from Shelley (Mary, technically) to Alonzo
         MultiEraProtocolParameters::Shelley(current) if next_protocol == 5 => {
             MultiEraProtocolParameters::Alonzo(bootstrap_alonzo_pparams(current, genesis.alonzo))
         }
+        // One intra-era hard-fork in alonzo at protocol version 6
         MultiEraProtocolParameters::Alonzo(current) if next_protocol == 6 => {
+            MultiEraProtocolParameters::Alonzo(current)
+        }
+        // Protocol version 7 transitions from Alonzo to Babbage
+        MultiEraProtocolParameters::Alonzo(current) if next_protocol == 7 => {
             MultiEraProtocolParameters::Babbage(bootstrap_babbage_pparams(current))
         }
-        MultiEraProtocolParameters::Babbage(_) => todo!("conway pparams handling pending"),
+        // One intra-era hard-fork in babbage at protocol version 8
+        MultiEraProtocolParameters::Babbage(current) if next_protocol == 8 => {
+            MultiEraProtocolParameters::Babbage(current)
+        }
+        // Protocol version 9 will transition from Babbage to Conway; not yet implemented
+        MultiEraProtocolParameters::Babbage(_) => {
+            todo!("conway pparams handling pending {}", next_protocol)
+        }
         _ => unimplemented!("don't know how to handle hardfork"),
     }
 }
 
 pub fn fold_pparams(
-    genesis: Genesis,
-    updates: Vec<MultiEraUpdate>,
+    genesis: &Genesis,
+    updates: &[MultiEraUpdate],
     for_epoch: u64,
 ) -> MultiEraProtocolParameters {
     let mut pparams = MultiEraProtocolParameters::Byron(bootstrap_byron_pparams(genesis.byron));
-    let mut last_protocol = 1;
+    let mut last_protocol = 0;
 
     for epoch in 0..for_epoch {
         for next_protocol in last_protocol + 1..=pparams.protocol_version() {
             warn!(next_protocol, "advancing hardfork");
-            pparams = advance_hardfork(pparams, &genesis, next_protocol);
+            pparams = advance_hardfork(pparams, genesis, next_protocol);
             last_protocol = next_protocol;
         }
 
         for update in updates.iter().filter(|e| e.epoch() == epoch) {
+            trace!(epoch, "Applying update");
             pparams = apply_param_update(pparams, update);
         }
     }
 
     pparams
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{io::Read, path::Path};
+
+    use itertools::Itertools;
+    use pallas::ledger::traverse::{MultiEraBlock, MultiEraTx};
+
+    use super::*;
+
+    fn load_json<T, P: AsRef<Path>>(path: P) -> T
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        let file = std::fs::File::open(path).unwrap();
+        serde_json::from_reader(file).unwrap()
+    }
+
+    fn test_env_fold(env: &str) {
+        let test_data = format!("src/ledger/pparams/test_data/{env}");
+
+        // Load each genesis file
+        let genesis = Genesis {
+            byron: &load_json(format!("{test_data}/genesis/byron_genesis.json")),
+            shelley: &load_json(format!("{test_data}/genesis/shelley_genesis.json")),
+            alonzo: &load_json(format!("{test_data}/genesis/alonzo_genesis.json")),
+        };
+
+        // Then load each mainnet example update proposal as buffers
+        let files: Vec<_> = std::fs::read_dir(format!("{test_data}/update_proposal_blocks/"))
+            .unwrap()
+            .map(|x| std::fs::File::open(x.unwrap().path()).unwrap())
+            .map(|mut x| {
+                let mut buf = vec![];
+                x.read_to_end(&mut buf).unwrap();
+                buf
+            })
+            .collect();
+
+        // Decode those buffers as blocks, and sort them by slot, so we can process them
+        // in order
+        let blocks: Vec<_> = files
+            .iter()
+            .map(|x| MultiEraBlock::decode(&x).unwrap())
+            .sorted_by_key(|b| b.slot())
+            .collect();
+
+        let block_data: Vec<_> = blocks.iter().map(|b| (b.update(), b.txs())).collect();
+
+        let update_pairs: Vec<_> = block_data
+            .iter()
+            .map(|(b, txs)| (b, txs.iter().filter_map(MultiEraTx::update)))
+            .collect();
+
+        let chained_updates: Vec<_> = update_pairs
+            .into_iter()
+            .flat_map(|(b, txs)| {
+                let b = b.iter().cloned();
+                txs.chain(b)
+            })
+            .collect();
+
+        // Now, for each epoch we've recorded protocol parameters for,
+        // test if we get the right value when folding
+        for file in std::fs::read_dir(format!("{test_data}/expected_params/")).unwrap() {
+            let filename = file.unwrap().path();
+            println!("Comparing to {:?}", filename);
+            let epoch = filename
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap();
+            // TODO: implement serialize/deserialize, and get full protocol param json files
+            let expected = load_json::<usize, _>(filename);
+            let actual = fold_pparams(&genesis, &chained_updates, epoch);
+            assert_eq!(expected, actual.protocol_version())
+
+            //assert_eq!(expected, actual)
+        }
+    }
+
+    #[test]
+    fn test_mainnet_fold() {
+        test_env_fold("mainnet")
+    }
 }

@@ -1,16 +1,16 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc};
 
 use gasket::framework::*;
 use pallas::crypto::hash::Hash;
 use tokio::sync::RwLock;
-use tracing::info;
+use tracing::debug;
 
-use super::{monitor::BlockMonitorMessage, BlockHeight, Transaction};
+use super::{monitor::BlockMonitorMessage, BlockHeight, BlockSlot, Transaction};
 
-pub type SubmitEndpointReceiver = gasket::messaging::tokio::InputPort<Vec<Transaction>>;
-pub type BlockMonitorReceiver = gasket::messaging::tokio::InputPort<BlockMonitorMessage>;
+pub type SubmitEndpointReceiver = gasket::messaging::InputPort<Vec<Transaction>>;
+pub type BlockMonitorReceiver = gasket::messaging::InputPort<BlockMonitorMessage>;
 
-pub type PropagatorSender = gasket::messaging::tokio::OutputPort<Vec<Transaction>>;
+pub type PropagatorSender = gasket::messaging::OutputPort<Vec<Transaction>>;
 
 type InclusionPoint = BlockHeight;
 
@@ -25,7 +25,7 @@ pub struct MempoolState(pub RwLock<Monitor>, pub tokio::sync::Notify);
 
 #[derive(Default)]
 pub struct Monitor {
-    pub tip_height: BlockHeight,
+    pub tip_slot: BlockSlot,
     pub txs: HashMap<Hash<32>, Option<InclusionPoint>>,
 }
 
@@ -72,16 +72,13 @@ impl gasket::framework::Worker<Stage> for Worker {
         tokio::select! {
             txs_msg = stage.upstream_submit_endpoint.recv() => {
                 let txs_msg = txs_msg.or_panic()?;
-                info!("received txs message: {:?}", txs_msg);
+                debug!("received txs message: {:?}", txs_msg);
                 Ok(WorkSchedule::Unit(MempoolEvent::AddTxs(txs_msg.payload)))
             }
             monitor_msg = stage.upstream_block_monitor.recv() => {
                 let monitor_msg = monitor_msg.or_panic()?;
-                info!("received monitor message: {:?}", monitor_msg);
+                debug!("received monitor message: {:?}", monitor_msg);
                 Ok(WorkSchedule::Unit(MempoolEvent::ChainUpdate(monitor_msg.payload)))
-            }
-            _ = tokio::time::sleep(Duration::from_secs(20)) => {
-                Ok(WorkSchedule::Idle)
             }
         }
     }
@@ -110,38 +107,38 @@ impl gasket::framework::Worker<Stage> for Worker {
             }
             MempoolEvent::ChainUpdate(monitor_msg) => {
                 match monitor_msg {
-                    BlockMonitorMessage::NewBlock(height, block_txs) => {
+                    BlockMonitorMessage::NewBlock(slot, block_txs) => {
                         let mut monitor = stage.state.0.write().await;
 
                         // set inclusion point for txs found in new block
                         for (tx_hash, inclusion) in monitor.txs.iter_mut() {
                             if block_txs.contains(tx_hash) {
-                                info!("setting inclusion point for {}: {height}", tx_hash);
-                                *inclusion = Some(*height)
+                                debug!("setting inclusion point for {}: {slot}", tx_hash);
+                                *inclusion = Some(*slot)
                             }
                         }
 
                         // prune txs which have sufficient confirmations
                         monitor.txs.retain(|_, inclusion| {
-                            if let Some(inclusion_height) = inclusion {
-                                height - *inclusion_height <= stage.prune_height
+                            if let Some(inclusion_slot) = inclusion {
+                                slot - *inclusion_slot <= stage.prune_height
                             } else {
                                 true
                             }
                         });
 
-                        monitor.tip_height = *height;
+                        monitor.tip_slot = *slot;
                     }
-                    BlockMonitorMessage::Rollback(rb_height) => {
+                    BlockMonitorMessage::Rollback(rb_slot) => {
                         let mut monitor = stage.state.0.write().await;
 
                         // remove inclusion points later than rollback slot
                         for (tx_hash, inclusion) in monitor.txs.iter_mut() {
-                            if let Some(height) = inclusion {
-                                if *height > *rb_height {
-                                    info!(
+                            if let Some(slot) = inclusion {
+                                if *slot > *rb_slot {
+                                    debug!(
                                         "removing inclusion point for {} due to rollback ({} > {})",
-                                        tx_hash, height, rb_height
+                                        tx_hash, slot, rb_slot
                                     );
 
                                     *inclusion = None
@@ -149,7 +146,7 @@ impl gasket::framework::Worker<Stage> for Worker {
                             }
                         }
 
-                        monitor.tip_height = *rb_height;
+                        monitor.tip_slot = *rb_slot;
                     }
                 }
 

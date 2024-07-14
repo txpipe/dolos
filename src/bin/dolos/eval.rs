@@ -28,7 +28,7 @@ pub struct Args {
 pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging)?;
 
-    let (_, _, ledger) = crate::common::open_data_stores(config)?;
+    let (_, ledger) = crate::common::open_data_stores(config)?;
 
     let cbor = std::fs::read_to_string(&args.file)
         .into_diagnostic()
@@ -80,7 +80,7 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
         .into_diagnostic()
         .context("retrieving pparams")?;
 
-    let updates = updates
+    let updates: Vec<_> = updates
         .iter()
         .map(|PParamsBody(era, cbor)| -> miette::Result<MultiEraUpdate> {
             MultiEraUpdate::decode_for_era(*era, cbor).into_diagnostic()
@@ -88,12 +88,12 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
         .try_collect()?;
 
     let pparams = dolos::ledger::pparams::fold_pparams(
-        dolos::ledger::pparams::Genesis {
+        &dolos::ledger::pparams::Genesis {
             byron: &byron,
             shelley: &shelley,
             alonzo: &alonzo,
         },
-        updates,
+        &updates,
         args.epoch,
     );
 

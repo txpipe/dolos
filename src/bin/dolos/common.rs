@@ -1,60 +1,68 @@
+use std::time::Duration;
+
+use dolos::{state, wal};
 use miette::{Context as _, IntoDiagnostic};
 use pallas::ledger::configs::alonzo::GenesisFile as AlonzoFile;
 use pallas::ledger::configs::byron::GenesisFile as ByronFile;
 use pallas::ledger::configs::shelley::GenesisFile as ShelleyFile;
-use pallas::storage::rolldb::{chain, wal};
-use std::path::Path;
-use tracing::Level;
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, warn};
 use tracing_subscriber::{filter::Targets, prelude::*};
 
-use dolos::{ledger::store::LedgerStore, prelude::*};
+use dolos::prelude::*;
 
 use crate::{GenesisConfig, LoggingConfig};
 
-fn define_rolldb_path(config: &crate::Config) -> &Path {
-    config
-        .storage
-        .path
-        .as_deref()
-        .unwrap_or_else(|| Path::new("/rolldb"))
-}
-
-pub type Stores = (wal::Store, chain::Store, LedgerStore);
+pub type Stores = (wal::redb::WalStore, state::LedgerStore);
 
 pub fn open_data_stores(config: &crate::Config) -> Result<Stores, Error> {
-    let rolldb_path = define_rolldb_path(config);
+    let root = &config.storage.path;
 
-    let wal = wal::Store::open(
-        rolldb_path.join("wal"),
-        config.storage.wal_size.unwrap_or(1000),
-        config.storage.immutable_overlap,
-    )
-    .map_err(Error::storage)?;
+    std::fs::create_dir_all(root).map_err(Error::storage)?;
 
-    let chain = chain::Store::open(rolldb_path.join("chain")).map_err(Error::storage)?;
+    let wal = wal::redb::WalStore::open(root.join("wal"), config.storage.wal_cache)
+        .map_err(Error::storage)?;
 
-    let ledger = LedgerStore::open(rolldb_path.join("ledger")).map_err(Error::storage)?;
+    let ledger = state::redb::LedgerStore::open(root.join("ledger"), config.storage.ledger_cache)
+        .map_err(Error::storage)?
+        .into();
 
-    Ok((wal, chain, ledger))
+    Ok((wal, ledger))
 }
 
-#[allow(dead_code)]
-pub fn destroy_data_stores(config: &crate::Config) -> Result<(), Error> {
-    let rolldb_path = define_rolldb_path(config);
+pub fn data_stores_exist(config: &crate::Config) -> bool {
+    let root = &config.storage.path;
 
-    wal::Store::destroy(rolldb_path.join("wal")).map_err(Error::storage)?;
-    chain::Store::destroy(rolldb_path.join("chain")).map_err(Error::storage)?;
-    //LedgerStore::destroy(rolldb_path.join("ledger")).map_err(Error::storage)?;
+    root.join("wal").is_file() || root.join("ledger").is_file()
+}
+
+pub fn destroy_data_stores(config: &crate::Config) -> Result<(), Error> {
+    let root = &config.storage.path;
+
+    if root.join("wal").is_file() {
+        std::fs::remove_file(root.join("wal")).map_err(Error::storage)?;
+    }
+
+    if root.join("ledger").is_file() {
+        std::fs::remove_file(root.join("ledger")).map_err(Error::storage)?;
+    }
 
     Ok(())
 }
 
 pub fn setup_tracing(config: &LoggingConfig) -> miette::Result<()> {
-    let level = config.max_level.unwrap_or(Level::INFO);
+    let level = config.max_level;
 
     let mut filter = Targets::new()
         .with_target("dolos", level)
         .with_target("gasket", level);
+
+    if config.include_tokio {
+        filter = filter
+            .with_target("tokio", level)
+            .with_target("runtime", level);
+    }
 
     if config.include_pallas {
         filter = filter.with_target("pallas", level);
@@ -64,11 +72,22 @@ pub fn setup_tracing(config: &LoggingConfig) -> miette::Result<()> {
         filter = filter.with_target("tonic", level);
     }
 
-    tracing_subscriber::FmtSubscriber::builder()
-        .with_max_level(level)
-        .finish()
-        .with(filter)
-        .init();
+    #[cfg(not(feature = "debug"))]
+    {
+        tracing_subscriber::registry()
+            .with(tracing_subscriber::fmt::layer())
+            .with(filter)
+            .init();
+    }
+
+    #[cfg(feature = "debug")]
+    {
+        tracing_subscriber::registry()
+            .with(tracing_subscriber::fmt::layer())
+            .with(console_subscriber::spawn())
+            .with(filter)
+            .init();
+    }
 
     Ok(())
 }
@@ -89,4 +108,62 @@ pub fn open_genesis_files(config: &GenesisConfig) -> miette::Result<GenesisFiles
         .context("loading alonzo genesis config")?;
 
     Ok((byron_genesis, shelley_genesis, alonzo_genesis))
+}
+
+#[inline]
+#[cfg(unix)]
+async fn wait_for_exit_signal() {
+    let mut sigterm =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
+
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {
+            warn!("SIGINT detected");
+        }
+        _ = sigterm.recv() => {
+            warn!("SIGTERM detected");
+        }
+    };
+}
+
+#[inline]
+#[cfg(windows)]
+async fn wait_for_exit_signal() {
+    tokio::signal::ctrl_c().await.unwrap()
+}
+
+pub fn hook_exit_token() -> CancellationToken {
+    let cancel = CancellationToken::new();
+
+    let cancel2 = cancel.clone();
+    tokio::spawn(async move {
+        wait_for_exit_signal().await;
+        debug!("notifying exit");
+        cancel2.cancel();
+    });
+
+    cancel
+}
+
+pub async fn run_pipeline(pipeline: gasket::daemon::Daemon, exit: CancellationToken) {
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(5000)) => {
+                if pipeline.should_stop() {
+                    break;
+                }
+            }
+            _ = exit.cancelled() => {
+                debug!("exit requested");
+                break;
+            }
+        }
+    }
+
+    debug!("shutting down pipeline");
+    pipeline.teardown();
+}
+
+pub fn spawn_pipeline(pipeline: gasket::daemon::Daemon, exit: CancellationToken) -> JoinHandle<()> {
+    tokio::spawn(run_pipeline(pipeline, exit))
 }

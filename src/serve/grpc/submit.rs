@@ -113,7 +113,7 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
                     let stage = if let Some(maybe_inclusion) = mempool_view.txs.get(&(*hash).into()) {
                         if let Some(inclusion) = maybe_inclusion {
                             // TODO: spec does not have way to detail number of confirmations
-                            let _confirmations = mempool_view.tip_height - inclusion;
+                            let _confirmations = mempool_view.tip_slot - inclusion;
 
                             // tx is included on chain
                             SubmitStage::Confirmed
@@ -156,6 +156,13 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
         &self,
         _request: tonic::Request<WatchMempoolRequest>,
     ) -> Result<tonic::Response<Self::WatchMempoolStream>, tonic::Status> {
+        todo!()
+    }
+
+    async fn eval_tx(
+        &self,
+        _request: tonic::Request<EvalTxRequest>,
+    ) -> Result<tonic::Response<EvalTxResponse>, tonic::Status> {
         todo!()
     }
 }

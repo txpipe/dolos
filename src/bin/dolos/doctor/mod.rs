@@ -1,14 +1,17 @@
 use clap::{Parser, Subcommand};
 
 mod rebuild_ledger;
-mod rebuild_wal;
+mod trim_wal;
+mod wal_integrity;
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// rebuilds the whole ledger from chain data
     RebuildLedger(rebuild_ledger::Args),
-    /// rebuilds a segment of the wal from chain data
-    RebuildWal(rebuild_wal::Args),
+    /// checks the integrity of the WAL records
+    WalIntegrity(wal_integrity::Args),
+    /// remove parts of the WAL
+    TrimWal(trim_wal::Args),
 }
 
 #[derive(Debug, Parser)]
@@ -18,11 +21,10 @@ pub struct Args {
 }
 
 pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
-    crate::common::setup_tracing(&config.logging)?;
-
     match &args.command {
         Command::RebuildLedger(x) => rebuild_ledger::run(config, x)?,
-        Command::RebuildWal(x) => rebuild_wal::run(config, x)?,
+        Command::WalIntegrity(x) => wal_integrity::run(config, x)?,
+        Command::TrimWal(x) => trim_wal::run(config, x)?,
     }
 
     Ok(())

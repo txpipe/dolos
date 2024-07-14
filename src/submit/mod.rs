@@ -1,13 +1,12 @@
-use gasket::messaging::{tokio::ChannelRecvAdapter, RecvPort, SendPort};
+use gasket::messaging::tokio::ChannelRecvAdapter;
 use pallas::{
     crypto::hash::Hash,
     network::miniprotocols::txsubmission::{EraTxBody, EraTxId, TxIdAndSize},
-    storage::rolldb::wal,
 };
 use serde::{Deserialize, Serialize};
 use std::{sync::Arc, time::Duration};
 
-use crate::prelude::*;
+use crate::{prelude::*, wal::redb::WalStore};
 
 mod mempool;
 mod monitor;
@@ -44,6 +43,12 @@ pub struct Config {
     //validate_phase_2: bool,
 }
 
+impl Default for Config {
+    fn default() -> Self {
+        Self { prune_height: 200 }
+    }
+}
+
 fn define_gasket_policy(config: &Option<gasket::retries::Policy>) -> gasket::runtime::Policy {
     let default_retries = gasket::retries::Policy {
         max_retries: 20,
@@ -67,27 +72,17 @@ fn define_gasket_policy(config: &Option<gasket::retries::Policy>) -> gasket::run
 pub fn pipeline(
     config: &Config,
     upstream: &UpstreamConfig,
-    wal: wal::Store,
+    wal: WalStore,
     mempool: Arc<mempool::MempoolState>,
     txs_in: ChannelRecvAdapter<Vec<Transaction>>,
     retries: &Option<gasket::retries::Policy>,
 ) -> Result<Vec<gasket::runtime::Tether>, Error> {
-    let cursor = wal.find_tip().map_err(Error::storage)?;
-
-    let last_wal_seq = if let Some(c) = cursor {
-        wal.find_wal_seq(&[c])
-            .map_err(Error::storage)?
-            .unwrap_or_default()
-    } else {
-        0
-    };
-
     let mut mempool = mempool::Stage::new(mempool, config.prune_height);
 
     let mut propagator =
         propagator::Stage::new(vec![upstream.peer_address.clone()], upstream.network_magic);
 
-    let mut monitor = monitor::Stage::new(wal, last_wal_seq);
+    let mut monitor = monitor::Stage::new(wal);
 
     // connect mempool stage to gRPC service
     // mempool stage (sc) has a single consumer receiving messages (txs to add

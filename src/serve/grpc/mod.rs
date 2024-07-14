@@ -1,39 +1,44 @@
 use pallas::interop::utxorpc::spec as u5c;
-use pallas::storage::rolldb::{chain, wal};
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc};
+use tokio_util::sync::CancellationToken;
 use tonic::transport::{Certificate, Server, ServerTlsConfig};
 use tracing::info;
 
-use crate::ledger::store::LedgerStore;
+use crate::state::LedgerStore;
+use crate::wal::redb::WalStore;
 use crate::{prelude::*, submit::Transaction};
 
+mod convert;
 mod query;
 mod submit;
 mod sync;
+mod watch;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Config {
-    listen_address: String,
-    tls_client_ca_root: Option<PathBuf>,
+    pub listen_address: String,
+    pub tls_client_ca_root: Option<PathBuf>,
 }
 
 pub async fn serve(
     config: Config,
-    wal: wal::Store,
-    chain: chain::Store,
+    wal: WalStore,
     ledger: LedgerStore,
     mempool: Arc<crate::submit::MempoolState>,
     txs_out: gasket::messaging::tokio::ChannelSendAdapter<Vec<Transaction>>,
+    exit: CancellationToken,
 ) -> Result<(), Error> {
     let addr = config.listen_address.parse().unwrap();
 
-    let sync_service = sync::ChainSyncServiceImpl::new(wal, chain);
-    let sync_service =
-        u5c::sync::chain_sync_service_server::ChainSyncServiceServer::new(sync_service);
+    let sync_service = sync::SyncServiceImpl::new(wal.clone(), ledger.clone());
+    let sync_service = u5c::sync::sync_service_server::SyncServiceServer::new(sync_service);
 
-    let query_service = query::QueryServiceImpl::new(ledger);
+    let query_service = query::QueryServiceImpl::new(ledger.clone());
     let query_service = u5c::query::query_service_server::QueryServiceServer::new(query_service);
+
+    let watch_service = watch::WatchServiceImpl::new(wal.clone(), ledger.clone());
+    let watch_service = u5c::watch::watch_service_server::WatchServiceServer::new(watch_service);
 
     let submit_service = submit::SubmitServiceImpl::new(txs_out, mempool);
     let submit_service =
@@ -44,6 +49,7 @@ pub async fn serve(
         .register_encoded_file_descriptor_set(u5c::sync::FILE_DESCRIPTOR_SET)
         .register_encoded_file_descriptor_set(u5c::query::FILE_DESCRIPTOR_SET)
         .register_encoded_file_descriptor_set(u5c::submit::FILE_DESCRIPTOR_SET)
+        .register_encoded_file_descriptor_set(u5c::watch::FILE_DESCRIPTOR_SET)
         .register_encoded_file_descriptor_set(protoc_wkt::google::protobuf::FILE_DESCRIPTOR_SET)
         .build()
         .unwrap();
@@ -67,8 +73,9 @@ pub async fn serve(
         .add_service(tonic_web::enable(sync_service))
         .add_service(tonic_web::enable(query_service))
         .add_service(tonic_web::enable(submit_service))
+        .add_service(tonic_web::enable(watch_service))
         .add_service(reflection)
-        .serve(addr)
+        .serve_with_shutdown(addr, exit.cancelled())
         .await
         .map_err(Error::server)?;
 

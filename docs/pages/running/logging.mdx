@@ -1,0 +1,60 @@
+# Logging
+
+Dolos outputs a LOT of logs through stdout. Internally, it uses a tracing mechanism that groups logs into hierarchical blocks called _spans_ that holds data describing the context where the event (aka: log) ocurred.
+
+Depending on your use-case, the amount and detail of this logs might be overwhelming. _Dolos_ provides a set of configuration values that allows you to opt-in into different levels of detail.
+
+## Log Levels
+
+Dolos follow a very common convention around log levels. These levels describe discrete categories of decreasing severity (broadly speaking).
+
+The following table describes the available options and what they are used within our context:
+
+| level   | description                                                                  |
+| ------- | ---------------------------------------------------------------------------- |
+| `error` | unexpected errors, stuff that shouldn't occur                                |
+| `warn`  | warning about things that are expected but require attention                 |
+| `info`  | normal operation events that are relevant for day-to-day operations          |
+| `debug` | normal operation events with a level of detail useful for debugging problems |
+| `trace` | extreme level of detail, usually including data being processed              |
+
+## Sub-components
+
+There are some sub-components within _Dolos_ that are more verbose than others. Depending on your use-case or debugging needs, you might one to mute some components and not others.
+
+We have identified a few components that make sense to isolate from the rest of the logs to provide extra flexibility. These components are:
+
+| component | description                                                                                           |
+| --------- | ----------------------------------------------------------------------------------------------------- |
+| Pallas    | The library that deals with low-level Ouroboros interactions (eg: mini-protocols, cbor decoding, etc) |
+| Tonic     | The library that deals with gRPC communication                                                        |
+
+## Configuration
+
+Now that we understand the different dimensions involved in the logging process, we can describe the relevant configuration.
+
+The configuration section within the `dolos.toml` file that controls the logging options is called `logging` (I know, impossible to guess). The schema for the configuration values is the following:
+
+| property       | type   | example                                       |
+| -------------- | ------ | --------------------------------------------- |
+| max_level      | option | `error` / `warn` / `info` / `debug` / `trace` |
+| include_tokio  | option | `true` / `false`                              |
+| include_pallas | option | `true` / `false`                              |
+| include_tonic  | option | `true` / `false`                              |
+
+- `max_level`: the maximum severity level of events to include in the output. By selecting a specific level, you're effectively including that level and every other levels of higher severity.
+- `include_tokio`: a flag that indicate if the output should include logs from the Tokio library.
+- `include_pallas`: a flag that indicate if the output should include logs from the Pallas library.
+- `include_tonic`: a flag that indicate if the output should include logs from the Tonic library.
+
+The following is an example of a logging configuration:
+
+```toml
+[logging]
+max_level = "INFO"
+include_tokio = true
+include_pallas = true
+include_tonic = true
+```
+
+You can find more detailed info about configuration in the [configuration schema section](../configuration/schema)

@@ -1,63 +1,16 @@
-use std::collections::VecDeque;
-
 use gasket::framework::*;
-use tracing::{debug, info};
-
-use pallas::crypto::hash::Hash;
+use itertools::Itertools;
 use pallas::ledger::traverse::{MultiEraBlock, MultiEraHeader};
 use pallas::network::facades::PeerClient;
 use pallas::network::miniprotocols::chainsync::{
     HeaderContent, NextResponse, RollbackBuffer, RollbackEffect, Tip,
 };
 use pallas::network::miniprotocols::Point;
+use tracing::{debug, info};
 
 use crate::prelude::*;
-
-const HARDCODED_BREADCRUMBS: usize = 20;
-
-#[derive(Clone)]
-pub enum Intersection {
-    Tip,
-    Origin,
-    Breadcrumbs(VecDeque<Point>),
-}
-
-impl Intersection {
-    pub fn add_breadcrumb(&mut self, slot: u64, hash: &[u8]) {
-        let point = Point::Specific(slot, Vec::from(hash));
-
-        match self {
-            Intersection::Tip => {
-                *self = Intersection::Breadcrumbs(VecDeque::from(vec![point]));
-            }
-            Intersection::Origin => {
-                *self = Intersection::Breadcrumbs(VecDeque::from(vec![point]));
-            }
-            Intersection::Breadcrumbs(x) => {
-                x.push_front(point);
-
-                if x.len() > HARDCODED_BREADCRUMBS {
-                    x.pop_back();
-                }
-            }
-        }
-    }
-}
-
-impl FromIterator<(u64, Hash<32>)> for Intersection {
-    fn from_iter<T: IntoIterator<Item = (u64, Hash<32>)>>(iter: T) -> Self {
-        let points: VecDeque<_> = iter
-            .into_iter()
-            .map(|(slot, hash)| Point::Specific(slot, hash.to_vec()))
-            .collect();
-
-        if points.is_empty() {
-            Intersection::Origin
-        } else {
-            Intersection::Breadcrumbs(points)
-        }
-    }
-}
+use crate::wal::redb::WalStore;
+use crate::wal::WalReader;
 
 fn to_traverse(header: &HeaderContent) -> Result<MultiEraHeader<'_>, WorkerError> {
     let out = match header.byron_prefix {
@@ -68,34 +21,7 @@ fn to_traverse(header: &HeaderContent) -> Result<MultiEraHeader<'_>, WorkerError
     out.or_panic()
 }
 
-pub type DownstreamPort = gasket::messaging::tokio::OutputPort<PullEvent>;
-
-async fn intersect(peer: &mut PeerClient, intersection: &Intersection) -> Result<(), WorkerError> {
-    let chainsync = peer.chainsync();
-
-    let intersect = match intersection {
-        Intersection::Origin => {
-            info!("intersecting origin");
-            chainsync.intersect_origin().await.or_restart()?.into()
-        }
-        Intersection::Tip => {
-            info!("intersecting tip");
-            chainsync.intersect_tip().await.or_restart()?.into()
-        }
-        Intersection::Breadcrumbs(points) => {
-            info!("intersecting breadcrumbs");
-            let (point, _) = chainsync
-                .find_intersect(points.clone().into())
-                .await
-                .or_restart()?;
-            point
-        }
-    };
-
-    info!(?intersect, "intersected");
-
-    Ok(())
-}
+pub type DownstreamPort = gasket::messaging::OutputPort<PullEvent>;
 
 enum PullBatch {
     BlockRange(Point, Point),
@@ -113,7 +39,7 @@ pub struct Worker {
 }
 
 impl Worker {
-    async fn define_pull_batch(&mut self, stage: &mut Stage) -> Result<PullBatch, WorkerError> {
+    async fn gather_pull_batch(&mut self, stage: &mut Stage) -> Result<PullBatch, WorkerError> {
         let client = self.peer_session.chainsync();
         let mut buffer = RollbackBuffer::new();
 
@@ -148,7 +74,17 @@ impl Worker {
 #[async_trait::async_trait(?Send)]
 impl gasket::framework::Worker<Stage> for Worker {
     async fn bootstrap(stage: &Stage) -> Result<Self, WorkerError> {
-        debug!("connecting");
+        debug!("finding intersection candidates");
+
+        let candidates = stage
+            .wal
+            .intersect_candidates(5)
+            .or_panic()?
+            .into_iter()
+            .map(From::from)
+            .collect_vec();
+
+        debug!("connecting to peer");
 
         let mut peer_session = PeerClient::connect(&stage.peer_address, stage.network_magic)
             .await
@@ -157,10 +93,22 @@ impl gasket::framework::Worker<Stage> for Worker {
         info!(
             address = stage.peer_address,
             magic = stage.network_magic,
-            "connected to upstream node"
+            "connected to peer"
         );
 
-        intersect(&mut peer_session, &stage.intersection).await?;
+        debug!("finding intersect");
+
+        let (point, _) = peer_session
+            .chainsync()
+            .find_intersect(candidates)
+            .await
+            .or_restart()?;
+
+        let intersection = point
+            .ok_or(Error::message("couldn't find intersect"))
+            .or_panic()?;
+
+        info!(?intersection, "found intersection");
 
         let worker = Self { peer_session };
 
@@ -185,7 +133,8 @@ impl gasket::framework::Worker<Stage> for Worker {
     async fn execute(&mut self, unit: &WorkUnit, stage: &mut Stage) -> Result<(), WorkerError> {
         match unit {
             WorkUnit::Pull => {
-                let batch = self.define_pull_batch(stage).await?;
+                info!("pulling block batch from upstream peer");
+                let batch = self.gather_pull_batch(stage).await?;
 
                 match batch {
                     PullBatch::BlockRange(start, end) => {
@@ -196,6 +145,8 @@ impl gasket::framework::Worker<Stage> for Worker {
                             .await
                             .or_restart()?;
 
+                        info!(len = blocks.len(), "block batch pulled from peer");
+
                         stage.flush_blocks(blocks).await?;
                     }
                     PullBatch::OutOfScopeRollback(point) => {
@@ -205,6 +156,8 @@ impl gasket::framework::Worker<Stage> for Worker {
                 };
             }
             WorkUnit::Await => {
+                info!("reached tip, waiting for new block");
+
                 let next = self
                     .peer_session
                     .chainsync()
@@ -217,6 +170,8 @@ impl gasket::framework::Worker<Stage> for Worker {
                         let header = to_traverse(&header).or_panic()?;
                         let point = Point::Specific(header.slot(), header.hash().to_vec());
 
+                        info!(?point, "new block sent by upstream peer");
+
                         let block = self
                             .peer_session
                             .blockfetch()
@@ -228,6 +183,8 @@ impl gasket::framework::Worker<Stage> for Worker {
                         stage.track_tip(&tip);
                     }
                     NextResponse::RollBackward(point, tip) => {
+                        info!(?point, "rollback sent by upstream peer");
+
                         stage.flush_rollback(point).await?;
                         stage.track_tip(&tip);
                     }
@@ -246,7 +203,7 @@ pub struct Stage {
     peer_address: String,
     network_magic: u64,
     block_fetch_batch_size: usize,
-    intersection: Intersection,
+    wal: WalStore,
 
     pub downstream: DownstreamPort,
 
@@ -262,12 +219,12 @@ impl Stage {
         peer_address: String,
         network_magic: u64,
         block_fetch_batch_size: usize,
-        intersection: Intersection,
+        wal: WalStore,
     ) -> Self {
         Self {
             peer_address,
             network_magic,
-            intersection,
+            wal,
             block_fetch_batch_size,
             downstream: Default::default(),
             block_count: Default::default(),
@@ -275,19 +232,25 @@ impl Stage {
         }
     }
 
-    async fn flush_blocks(&mut self, blocks: Vec<RawBlock>) -> Result<(), WorkerError> {
+    async fn flush_blocks(&mut self, blocks: Vec<BlockBody>) -> Result<(), WorkerError> {
         for cbor in blocks {
             // TODO: can we avoid decoding in this stage?
-            let block = MultiEraBlock::decode(&cbor).or_panic()?;
-            let slot = block.slot();
-            let hash = block.hash();
+
+            let payload = {
+                let decoded = MultiEraBlock::decode(&cbor).or_panic()?;
+
+                RawBlock {
+                    slot: decoded.slot(),
+                    hash: decoded.hash(),
+                    era: decoded.era(),
+                    body: cbor,
+                }
+            };
 
             self.downstream
-                .send(PullEvent::RollForward(slot, hash, cbor).into())
+                .send(PullEvent::RollForward(payload).into())
                 .await
                 .or_panic()?;
-
-            self.intersection.add_breadcrumb(slot, hash.as_ref());
         }
 
         Ok(())
@@ -303,10 +266,6 @@ impl Stage {
             .send(PullEvent::Rollback(point.clone()).into())
             .await
             .or_panic()?;
-
-        if let Point::Specific(slot, hash) = &point {
-            self.intersection.add_breadcrumb(*slot, hash);
-        }
 
         Ok(())
     }

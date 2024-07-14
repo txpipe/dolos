@@ -1,30 +1,32 @@
-use std::{path::Path, sync::Arc};
-
+use dolos::{
+    state,
+    wal::{self, ReadUtils, WalReader as _, WalWriter},
+};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use itertools::Itertools;
 use miette::{bail, Context, IntoDiagnostic};
-use mithril_client::{ClientBuilder, MessageBuilder};
-use pallas::ledger::traverse::MultiEraBlock;
-use tracing::{debug, info, trace, warn};
+use mithril_client::{ClientBuilder, MessageBuilder, MithrilError, MithrilResult};
+use pallas::ledger::{
+    configs::{byron, shelley},
+    traverse::MultiEraBlock,
+};
+use std::{path::Path, sync::Arc};
+use tracing::{debug, info, warn};
 
-use crate::common::Stores;
+use crate::{common::Stores, MithrilConfig};
 
 #[derive(Debug, clap::Args)]
 pub struct Args {
-    #[arg(long)]
-    mithril_aggregator: String,
-
-    #[arg(long)]
-    mithril_genesis_key: String,
-
-    #[arg(long)]
+    #[arg(long, default_value = "./snapshot")]
     download_dir: String,
 
     /// Skip the bootstrap if there's already data in the stores
     #[arg(long, action)]
     skip_if_not_empty: bool,
 
-    /// Delete any existing data and continue with bootstrap
-    #[arg(long, short, action)]
-    force: bool,
+    /// Skip the Mithril certificate validation
+    #[arg(long, action)]
+    skip_validation: bool,
 
     /// Assume the snapshot is already available in the download dir
     #[arg(long, action)]
@@ -35,58 +37,129 @@ pub struct Args {
     retain_snapshot: bool,
 }
 
-struct Feedback {}
+struct Feedback {
+    _multi: MultiProgress,
+    download_pb: ProgressBar,
+    validate_pb: ProgressBar,
+    wal_pb: ProgressBar,
+    ledger_pb: ProgressBar,
+}
+
+impl Feedback {
+    fn indeterminate_progress_bar(owner: &mut MultiProgress) -> ProgressBar {
+        let pb = ProgressBar::new_spinner();
+
+        pb.set_style(
+            ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] {msg}").unwrap(),
+        );
+
+        owner.add(pb)
+    }
+
+    fn slot_progress_bar(owner: &mut MultiProgress) -> ProgressBar {
+        let pb = ProgressBar::new_spinner();
+
+        pb.set_style(
+            ProgressStyle::with_template(
+                "{spinner:.green} [{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} slots (eta: {eta}) {msg}",
+            )
+            .unwrap()
+            .progress_chars("#>-"),
+        );
+
+        owner.add(pb)
+    }
+
+    fn bytes_progress_bar(owner: &mut MultiProgress) -> ProgressBar {
+        let pb = ProgressBar::new_spinner();
+
+        pb.set_style(
+            ProgressStyle::with_template(
+                "{spinner:.green} [{elapsed_precise}] {bar:40.cyan/blue} {bytes}/{total_bytes} (eta: {eta}) {msg}",
+            )
+            .unwrap()
+            .progress_chars("#>-"),
+        );
+
+        owner.add(pb)
+    }
+}
+
+impl Default for Feedback {
+    fn default() -> Self {
+        let mut multi = MultiProgress::new();
+
+        Self {
+            download_pb: Self::bytes_progress_bar(&mut multi),
+            validate_pb: Self::indeterminate_progress_bar(&mut multi),
+            wal_pb: Self::slot_progress_bar(&mut multi),
+            ledger_pb: Self::slot_progress_bar(&mut multi),
+            _multi: multi,
+        }
+    }
+}
 
 #[async_trait::async_trait]
 impl mithril_client::feedback::FeedbackReceiver for Feedback {
     async fn handle_event(&self, event: mithril_client::feedback::MithrilEvent) {
         match event {
             mithril_client::feedback::MithrilEvent::SnapshotDownloadStarted { .. } => {
-                info!("snapshot download started")
+                self.download_pb.set_message("snapshot download started")
             }
             mithril_client::feedback::MithrilEvent::SnapshotDownloadProgress {
                 downloaded_bytes,
                 size,
                 ..
             } => {
-                let percent = downloaded_bytes as f64 / size as f64;
-                debug!(percent, "snapshot download progress");
+                self.download_pb.set_length(size);
+                self.download_pb.set_position(downloaded_bytes);
+                self.download_pb.set_message("downloading Mithril snapshot");
             }
             mithril_client::feedback::MithrilEvent::SnapshotDownloadCompleted { .. } => {
-                trace!("snapshot download completed");
+                self.download_pb.set_message("snapshot download completed");
             }
             mithril_client::feedback::MithrilEvent::CertificateChainValidationStarted {
                 ..
-            } => info!("certificate chain validation started"),
-            mithril_client::feedback::MithrilEvent::CertificateValidated {
-                certificate_chain_validation_id: id,
-                certificate_hash: hash,
             } => {
-                info!(id, hash, "certificate validated")
+                self.validate_pb
+                    .set_message("certificate chain validation started");
+            }
+            mithril_client::feedback::MithrilEvent::CertificateValidated {
+                certificate_hash: hash,
+                ..
+            } => {
+                self.validate_pb
+                    .set_message(format!("validating cert: {hash}"));
             }
             mithril_client::feedback::MithrilEvent::CertificateChainValidated { .. } => {
-                info!("certificate chain validated")
+                self.validate_pb.set_message("certificate chain validated");
             }
         }
     }
 }
 
-async fn fetch_and_validate_snapshot(args: &Args) -> Result<(), mithril_client::MithrilError> {
-    let feedback = Arc::new(Feedback {});
-
-    let client = ClientBuilder::aggregator(&args.mithril_aggregator, &args.mithril_genesis_key)
-        .add_feedback_receiver(feedback.clone())
+async fn fetch_snapshot(
+    args: &Args,
+    config: &MithrilConfig,
+    feedback: Arc<Feedback>,
+) -> MithrilResult<()> {
+    let client = ClientBuilder::aggregator(&config.aggregator, &config.genesis_key)
+        .add_feedback_receiver(feedback)
         .build()?;
 
     let snapshots = client.snapshot().list().await?;
 
-    let last_digest = snapshots.first().unwrap().digest.as_ref();
-    let snapshot = client.snapshot().get(last_digest).await?.unwrap();
+    let last_digest = snapshots
+        .first()
+        .ok_or(MithrilError::msg("no snapshot available"))?
+        .digest
+        .as_ref();
 
-    let certificate = client
-        .certificate()
-        .verify_chain(&snapshot.certificate_hash)
-        .await?;
+    let snapshot = client
+        .snapshot()
+        .get(last_digest)
+        .await?
+        .ok_or(MithrilError::msg("no snapshot available"))?;
 
     let target_directory = Path::new(&args.download_dir);
 
@@ -99,6 +172,19 @@ async fn fetch_and_validate_snapshot(args: &Args) -> Result<(), mithril_client::
         warn!("failed incrementing snapshot download statistics: {:?}", e);
     }
 
+    let certificate = if args.skip_validation {
+        client
+            .certificate()
+            .get(&snapshot.certificate_hash)
+            .await?
+            .ok_or(MithrilError::msg("certificate for snapshot not found"))?
+    } else {
+        client
+            .certificate()
+            .verify_chain(&snapshot.certificate_hash)
+            .await?
+    };
+
     let message = MessageBuilder::new()
         .compute_snapshot_message(&certificate, target_directory)
         .await?;
@@ -108,38 +194,146 @@ async fn fetch_and_validate_snapshot(args: &Args) -> Result<(), mithril_client::
     Ok(())
 }
 
-fn open_empty_stores(config: &super::Config, force: bool) -> miette::Result<Option<Stores>> {
-    let mut stores = crate::common::open_data_stores(config)?;
+fn open_empty_stores(config: &super::Config) -> miette::Result<Stores> {
+    let not_empty = crate::common::data_stores_exist(config);
 
-    let empty = stores.0.is_empty() && stores.1.is_empty() && stores.2.is_empty();
+    let delete = not_empty && {
+        inquire::Confirm::new("do you want to delete existing data?")
+            .with_default(false)
+            .prompt()
+            .into_diagnostic()
+            .context("confirming delete")?
+    };
 
-    match (empty, force) {
-        (true, _) => Ok(Some(stores)),
-        (false, true) => {
-            drop(stores);
-
-            crate::common::destroy_data_stores(config)
-                .context("destroying existing data stored")?;
-
-            stores = crate::common::open_data_stores(config)?;
-            Ok(Some(stores))
-        }
-        (false, false) => Ok(None),
+    if not_empty && delete {
+        crate::common::destroy_data_stores(config).context("destroying existing data stores")?;
+    } else if not_empty {
+        bail!("can't continue with data already available");
     }
+
+    crate::common::open_data_stores(config)
+        .into_diagnostic()
+        .context("opening store")
+}
+
+fn import_hardano_into_wal(
+    immutable_path: &Path,
+    feedback: &Feedback,
+    wal: &mut wal::redb::WalStore,
+) -> Result<(), miette::Error> {
+    let iter = pallas::storage::hardano::immutable::read_blocks(immutable_path)
+        .into_diagnostic()
+        .context("reading immutable db")?;
+
+    let tip = pallas::storage::hardano::immutable::get_tip(immutable_path)
+        .map_err(|err| miette::miette!(err.to_string()))
+        .context("reading immutable db tip")?
+        .ok_or(miette::miette!("immutable db has no tip"))?;
+
+    feedback
+        .wal_pb
+        .set_message("importing immutable db from Haskell into WAL");
+    feedback.wal_pb.set_length(tip.slot_or_default());
+
+    for chunk in iter.chunks(100).into_iter() {
+        let bodies: Vec<_> = chunk
+            .try_collect()
+            .into_diagnostic()
+            .context("reading block data")?;
+
+        let blocks: Vec<_> = bodies
+            .iter()
+            .map(|b| {
+                let blockd = MultiEraBlock::decode(b)
+                    .into_diagnostic()
+                    .context("decoding block cbor")?;
+
+                feedback.wal_pb.set_position(blockd.slot());
+                debug!(slot = blockd.slot(), "importing block");
+
+                miette::Result::Ok(wal::RawBlock {
+                    slot: blockd.slot(),
+                    hash: blockd.hash(),
+                    era: blockd.era(),
+                    body: b.clone(),
+                })
+            })
+            .try_collect::<_, _, miette::Report>()?;
+
+        wal.roll_forward(blocks.into_iter())
+            .into_diagnostic()
+            .context("adding wal entries")?;
+    }
+
+    Ok(())
+}
+
+fn rebuild_ledger_from_wal(
+    feedback: &Feedback,
+    wal: &wal::redb::WalStore,
+    ledger: &mut state::LedgerStore,
+    byron: &byron::GenesisFile,
+    shelley: &shelley::GenesisFile,
+) -> miette::Result<()> {
+    let delta = dolos::ledger::compute_origin_delta(byron);
+
+    ledger
+        .apply(&[delta])
+        .into_diagnostic()
+        .context("applying origin utxos")?;
+
+    let (_, tip) = wal
+        .find_tip()
+        .into_diagnostic()
+        .context("finding WAL tip")?
+        .ok_or(miette::miette!("no WAL tip found"))?;
+
+    feedback.ledger_pb.set_message("re-building ledger");
+    match tip {
+        wal::ChainPoint::Origin => feedback.ledger_pb.set_length(0),
+        wal::ChainPoint::Specific(tip, _) => feedback.ledger_pb.set_length(tip),
+    };
+
+    let remaining = wal
+        .crawl_from(None)
+        .into_diagnostic()
+        .context("crawling wal")?
+        .filter_forward()
+        .into_blocks()
+        .flatten();
+
+    for chunk in remaining.chunks(100).into_iter() {
+        let bodies = chunk.map(|wal::RawBlock { body, .. }| body).collect_vec();
+
+        let blocks: Vec<_> = bodies
+            .iter()
+            .map(|b| MultiEraBlock::decode(b))
+            .try_collect()
+            .into_diagnostic()
+            .context("decoding blocks")?;
+
+        dolos::state::import_block_batch(&blocks, ledger, byron, shelley)
+            .into_diagnostic()
+            .context("importing blocks to ledger store")?;
+
+        blocks
+            .last()
+            .inspect(|b| feedback.ledger_pb.set_position(b.slot()));
+    }
+
+    Ok(())
 }
 
 pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
-    crate::common::setup_tracing(&config.logging)?;
+    //crate::common::setup_tracing(&config.logging)?;
+    let feedback = Arc::new(Feedback::default());
 
-    let empty_stores =
-        open_empty_stores(config, args.force).context("opening empty data stored")?;
+    let mithril = config
+        .mithril
+        .as_ref()
+        .ok_or(miette::miette!("missing mithril config"))?;
 
-    if empty_stores.is_none() && args.skip_if_not_empty {
-        warn!("data stores are not empty, skipping bootstrap");
-        return Ok(());
-    } else if empty_stores.is_none() {
-        bail!("data stores must be empty to execute bootstrap");
-    }
+    let (mut wal, mut ledger) = open_empty_stores(config).context("opening empty data stores")?;
 
     let target_directory = Path::new(&args.download_dir);
 
@@ -155,90 +349,20 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
     if !args.skip_download {
         tokio::runtime::Runtime::new()
             .unwrap()
-            .block_on(fetch_and_validate_snapshot(args))
+            .block_on(fetch_snapshot(args, mithril, feedback.clone()))
             .map_err(|err| miette::miette!(err.to_string()))
             .context("fetching and validating mithril snapshot")?;
     } else {
         warn!("skipping download, assuming download dir has snapshot and it's validated")
     }
 
-    let (byron, _, _) = crate::common::open_genesis_files(&config.genesis)?;
-
     let immutable_path = Path::new(&args.download_dir).join("immutable");
 
-    let iter = pallas::storage::hardano::immutable::read_blocks(&immutable_path)
-        .into_diagnostic()
-        .context("reading immutable db")?;
+    let (byron, shelley, _) = crate::common::open_genesis_files(&config.genesis)?;
 
-    let (mut wal, mut chain, mut ledger) = empty_stores.unwrap();
+    import_hardano_into_wal(&immutable_path, &feedback, &mut wal)?;
 
-    ledger
-        .apply(&[dolos::ledger::compute_origin_delta(&byron)])
-        .into_diagnostic()
-        .context("applying origin utxos")?;
-
-    for block in iter {
-        let block = match block {
-            Ok(x) if x.is_empty() => {
-                warn!("can't continue reading from immutable db");
-                break;
-            }
-            Err(err) => {
-                dbg!(err);
-                warn!("can't continue reading from immutable db");
-                break;
-            }
-            Ok(x) => x,
-        };
-
-        let blockd = MultiEraBlock::decode(&block)
-            .into_diagnostic()
-            .context("decoding block cbor")?;
-
-        debug!(slot = blockd.slot(), "importing block");
-
-        chain
-            .roll_forward(blockd.slot(), blockd.hash(), block.clone())
-            .into_diagnostic()
-            .context("adding chain entry")?;
-
-        let context = dolos::ledger::load_slice_for_block(&blockd, &ledger)
-            .into_diagnostic()
-            .context("loading context for block")?;
-
-        let delta = dolos::ledger::compute_delta(&blockd, context)
-            .into_diagnostic()
-            .context("computing ledger delta")?;
-
-        ledger
-            .apply(&[delta])
-            .into_diagnostic()
-            .context("applyting ledger block")?;
-    }
-
-    let (tip, _) = chain
-        .find_tip()
-        .into_diagnostic()
-        .context("reading chain tip")?
-        .ok_or(miette::miette!("no tip found after bootstrap"))?;
-
-    // TODO: apply real formula for volatile safe margin
-    let volatile_start = tip - 1000;
-
-    let volatile = chain.crawl_after(Some(volatile_start));
-
-    for block in volatile {
-        let (slot, hash) = block.into_diagnostic()?;
-
-        debug!(slot, "filling up wal");
-
-        let body = chain
-            .get_block(hash)
-            .into_diagnostic()?
-            .ok_or(miette::miette!("block not found"))?;
-
-        wal.roll_forward(slot, hash, body).into_diagnostic()?;
-    }
+    rebuild_ledger_from_wal(&feedback, &wal, &mut ledger, &byron, &shelley)?;
 
     if !args.retain_snapshot {
         info!("deleting downloaded snapshot");
@@ -247,6 +371,8 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
             .into_diagnostic()
             .context("removing downloaded snapshot")?;
     }
+
+    println!("bootstrap complete, run `dolos daemon` to start the node");
 
     Ok(())
 }
