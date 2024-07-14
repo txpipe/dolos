@@ -9,11 +9,8 @@ use super::tables;
 pub struct LedgerStore(pub Arc<Database>);
 
 impl LedgerStore {
-    pub fn is_empty(&self) -> bool {
-        match self.cursor() {
-            Ok(x) => x.is_none(),
-            Err(_) => false,
-        }
+    pub fn is_empty(&self) -> Result<bool, Error> {
+        Ok(self.cursor()?.is_none())
     }
 
     pub fn cursor(&self) -> Result<Option<ChainPoint>, Error> {
@@ -28,7 +25,7 @@ impl LedgerStore {
         for delta in deltas {
             tables::UtxosTable::apply(&wx, delta)?;
             tables::PParamsTable::apply(&wx, delta)?;
-            tables::TombstonesV1Table::apply(&wx, delta)?;
+            tables::TombstonesTable::apply(&wx, delta)?;
             tables::BlocksTable::apply(&wx, delta)?;
         }
 
@@ -39,7 +36,7 @@ impl LedgerStore {
 
     pub fn finalize(&mut self, until: BlockSlot) -> Result<(), Error> {
         let rx = self.0.begin_read()?;
-        let tss = tables::TombstonesV1Table::get_range(&rx, until)?;
+        let tss = tables::TombstonesTable::get_range(&rx, until)?;
 
         let mut wx = self.0.begin_write()?;
         wx.set_durability(Durability::Eventual);
@@ -47,7 +44,7 @@ impl LedgerStore {
         for ts in tss {
             let (slot, txos) = ts;
             tables::UtxosTable::compact(&wx, slot, &txos)?;
-            tables::TombstonesV1Table::compact(&wx, slot, &txos)?;
+            tables::TombstonesTable::compact(&wx, slot, &txos)?;
         }
 
         wx.commit()?;

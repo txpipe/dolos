@@ -4,6 +4,7 @@ use ::redb::{Error, MultimapTableDefinition, TableDefinition, WriteTransaction};
 use itertools::Itertools as _;
 use pallas::{crypto::hash::Hash, ledger::traverse::MultiEraOutput};
 use redb::{ReadTransaction, ReadableTable as _, TableError};
+use serde::{Deserialize, Serialize};
 
 use crate::ledger::*;
 
@@ -143,9 +144,9 @@ impl PParamsTable {
     }
 }
 
-pub struct TombstonesV1Table;
+pub struct TombstonesTable;
 
-impl TombstonesV1Table {
+impl TombstonesTable {
     pub const DEF: MultimapTableDefinition<'static, BlockSlot, (&'static [u8; 32], TxoIdx)> =
         MultimapTableDefinition::new("tombstones");
 
@@ -202,30 +203,40 @@ impl TombstonesV1Table {
     }
 }
 
-pub struct TombstonesV2Table;
+pub struct CursorTable;
 
-impl TombstonesV2Table {
-    pub const DEF: TableDefinition<'static, BlockSlot, Vec<(&'static [u8; 32], TxoIdx)>> =
-        TableDefinition::new("tombstones");
+#[derive(Serialize, Deserialize)]
+pub struct CursorValue {
+    pub hash: Hash<32>,
+    pub tombstones: Vec<TxoRef>,
+}
+
+impl CursorTable {
+    pub const DEF: TableDefinition<'static, BlockSlot, &'static [u8]> =
+        TableDefinition::new("cursor");
+
+    /// Checks if the table exists in the DB
+    pub fn exists(rx: &ReadTransaction) -> Result<bool, Error> {
+        match rx.open_table(Self::DEF) {
+            Ok(x) => Ok(true),
+            Err(TableError::TableDoesNotExist(_)) => return Ok(false),
+            Err(x) => return Err(x.into()),
+        }
+    }
 
     pub fn get_range(
         rx: &ReadTransaction,
         until: BlockSlot,
-    ) -> Result<Vec<(BlockSlot, Vec<TxoRef>)>, Error> {
+    ) -> Result<Vec<(BlockSlot, CursorValue)>, Error> {
         let table = rx.open_table(Self::DEF)?;
 
         let mut out = vec![];
 
         for entry in table.range(..until)? {
-            let (slot, txos) = entry?;
+            let (slot, value) = entry?;
+            let value = bincode::deserialize(value.value()).unwrap();
 
-            let txos = txos
-                .value()
-                .into_iter()
-                .map(|(hash, idx)| TxoRef((*hash).into(), idx))
-                .collect_vec();
-
-            out.push((slot.value(), txos));
+            out.push((slot.value(), value));
         }
 
         Ok(out)
@@ -234,17 +245,19 @@ impl TombstonesV2Table {
     pub fn apply(wx: &WriteTransaction, delta: &LedgerDelta) -> Result<(), Error> {
         let mut table = wx.open_table(Self::DEF)?;
 
-        if let Some(ChainPoint(slot, _)) = delta.new_position.as_ref() {
-            let stxis = delta
-                .consumed_utxo
-                .iter()
-                .map(|(txo, _)| {
-                    let stxi: (&[u8; 32], u32) = (&txo.0, txo.1);
-                    stxi
-                })
-                .collect_vec();
+        if let Some(ChainPoint(slot, hash)) = delta.new_position.as_ref() {
+            let value = CursorValue {
+                hash: *hash,
+                tombstones: delta
+                    .consumed_utxo
+                    .iter()
+                    .map(|(txo, _)| txo.clone())
+                    .collect_vec(),
+            };
 
-            table.insert(slot, stxis)?;
+            let value = bincode::serialize(&value).unwrap();
+
+            table.insert(slot, value.as_slice())?;
         }
 
         if let Some(ChainPoint(slot, _)) = delta.undone_position.as_ref() {
@@ -262,17 +275,19 @@ impl TombstonesV2Table {
         Ok(())
     }
 
-    pub fn last(rx: &ReadTransaction) -> Result<Option<ChainPoint>, Error> {
-        let table = match rx.open_table(Self::DEF) {
-            Ok(x) => x,
-            Err(TableError::TableDoesNotExist(_)) => return Ok(None),
-            Err(x) => return Err(x.into()),
-        };
+    pub fn last(rx: &ReadTransaction) -> Result<Option<(BlockSlot, CursorValue)>, Error> {
+        let table = rx.open_table(Self::DEF)?;
 
         let last = table.last()?;
-        let last = last.map(|(k, v)| ChainPoint(k.value(), Hash::new(*v.value())));
 
-        Ok(last)
+        if let Some((slot, value)) = last {
+            let slot = slot.value();
+            let value = bincode::deserialize(value.value()).unwrap();
+
+            Ok(Some((slot, value)))
+        } else {
+            Ok(None)
+        }
     }
 }
 
@@ -282,10 +297,7 @@ impl ByAddressIndex {
     pub const DEF: MultimapTableDefinition<'static, &'static [u8], UtxosKey> =
         MultimapTableDefinition::new("byaddress");
 
-    pub fn get_utxo_by_address_set(
-        rx: &ReadTransaction,
-        address: &[u8],
-    ) -> Result<HashSet<TxoRef>, Error> {
+    pub fn get_by_key(rx: &ReadTransaction, address: &[u8]) -> Result<HashSet<TxoRef>, Error> {
         let table = rx.open_multimap_table(Self::DEF)?;
 
         let mut out = HashSet::new();
@@ -299,7 +311,7 @@ impl ByAddressIndex {
         Ok(out)
     }
 
-    fn apply(wx: &WriteTransaction, delta: &LedgerDelta) -> Result<(), Error> {
+    pub fn apply(wx: &WriteTransaction, delta: &LedgerDelta) -> Result<(), Error> {
         let mut table = wx.open_multimap_table(Self::DEF)?;
 
         for (utxo, body) in delta.produced_utxo.iter() {

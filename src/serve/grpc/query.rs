@@ -33,7 +33,7 @@ fn find_matching_set(
     if let Some(query) = query.address {
         if !query.exact_address.is_empty() {
             let subset = ledger
-                .get_utxo_by_address_set(&query.exact_address)
+                .get_utxo_by_address(&query.exact_address)
                 .map_err(|e| Status::internal(e.to_string()))?;
             //set = set.intersection(&subset).cloned().collect();
             set = subset;

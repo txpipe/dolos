@@ -1,8 +1,8 @@
 use ::redb::Database;
 use itertools::Itertools as _;
+use log::info;
 use redb::TableHandle as _;
 use std::{
-    collections::HashSet,
     hash::{Hash as _, Hasher as _},
     path::Path,
 };
@@ -68,9 +68,16 @@ impl LedgerStore {
 
         let schema = match hash {
             // use stable schema if no hash
-            None => v1::LedgerStore::from(db).into(),
+            None => v2::LedgerStore::from(db).into(),
             // v1 hash
-            Some(13844724490616556453) => v1::LedgerStore::from(db).into(),
+            Some(13844724490616556453) => {
+                info!("detected state db schema v1");
+                v1::LedgerStore::from(db).into()
+            }
+            Some(2127148026530778024) => {
+                info!("detected state db schema v2");
+                v2::LedgerStore::from(db).into()
+            }
             Some(x) => panic!("can't recognize db hash {}", x),
         };
 
@@ -84,10 +91,10 @@ impl LedgerStore {
         }
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> Result<bool, LedgerError> {
         match self {
-            LedgerStore::SchemaV1(x) => x.is_empty(),
-            LedgerStore::SchemaV2(x) => x.is_empty(),
+            LedgerStore::SchemaV1(x) => x.is_empty().map_err(LedgerError::StorageError),
+            LedgerStore::SchemaV2(x) => x.is_empty().map_err(LedgerError::StorageError),
         }
     }
 
@@ -105,10 +112,12 @@ impl LedgerStore {
         }
     }
 
-    pub fn get_utxo_by_address_set(&self, _address: &[u8]) -> Result<HashSet<TxoRef>, LedgerError> {
+    pub fn get_utxo_by_address(&self, address: &[u8]) -> Result<UtxoSet, LedgerError> {
         match self {
             LedgerStore::SchemaV1(_) => Err(LedgerError::QueryNotSupported),
-            LedgerStore::SchemaV2(x) => x.get_utxos_by_address(),
+            LedgerStore::SchemaV2(x) => x
+                .get_utxos_by_address(address)
+                .map_err(LedgerError::StorageError),
         }
     }
 

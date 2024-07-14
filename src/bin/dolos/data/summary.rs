@@ -98,7 +98,7 @@ pub fn run(config: &crate::Config, _args: &Args) -> miette::Result<()> {
     println!("---");
 
     for utxo in ledger
-        .get_utxo_by_address_set(
+        .get_utxo_by_address(
             &hex::decode("6059184749e2d67a7ea2ca31ef48fc0befb3c3fad5a88af7264531ae07").unwrap(),
         )
         .into_diagnostic()?

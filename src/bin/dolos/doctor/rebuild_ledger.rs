@@ -47,7 +47,11 @@ pub fn run(config: &crate::Config, _args: &Args) -> miette::Result<()> {
     let (wal, mut ledger) =
         crate::common::open_data_stores(config).context("opening data stores")?;
 
-    if ledger.is_empty() {
+    if ledger
+        .is_empty()
+        .into_diagnostic()
+        .context("checking empty state")?
+    {
         debug!("importing genesis");
 
         let delta = dolos::ledger::compute_origin_delta(&byron);
