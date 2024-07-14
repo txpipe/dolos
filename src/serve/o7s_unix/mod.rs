@@ -1,11 +1,10 @@
-use log::{debug, warn};
 use pallas::network::facades::NodeServer;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tokio::net::UnixListener;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
-use tracing::{info, instrument};
+use tracing::{debug, info, instrument, warn};
 
 use crate::prelude::*;
 use crate::wal::redb::WalStore;
@@ -49,22 +48,26 @@ async fn accept_client_connections(
     cancel: CancellationToken,
 ) -> Result<(), Error> {
     let listener = UnixListener::bind(&config.listen_path).map_err(Error::server)?;
-    info!(addr = %config.listen_path.to_string_lossy(), "Ouroboros socket is listenting");
+    info!(addr = %config.listen_path.to_string_lossy(), "Ouroboros socket is listening for clients");
 
     loop {
-        let connection = NodeServer::accept(&listener, config.magic)
-            .await
-            .map_err(Error::server)?;
+        let connection = NodeServer::accept(&listener, config.magic).await;
 
-        info!(
-            from = ?connection.accepted_address(),
-            handshake = ?connection.accepted_version(),
-            "accepting incoming connection"
-        );
+        match connection {
+            Ok(connection) => {
+                info!(
+                    from = ?connection.accepted_address(),
+                    handshake = ?connection.accepted_version(),
+                    "accepting incoming connection"
+                );
 
-        tasks.spawn(handle_session(wal.clone(), connection, cancel.clone()));
-
-        info!(connections = tasks.len(), "active connections changed");
+                tasks.spawn(handle_session(wal.clone(), connection, cancel.clone()));
+                info!(connections = tasks.len(), "active connections changed");
+            }
+            Err(error) => {
+                warn!(%error, "error on incoming connection");
+            }
+        }
     }
 }
 
