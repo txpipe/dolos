@@ -49,6 +49,30 @@ impl LedgerStore {
         }
     }
 
+    pub fn get_utxo_by_payment(&self, payment: &[u8]) -> Result<UtxoSet, LedgerError> {
+        match self {
+            LedgerStore::Redb(x) => x.get_utxo_by_payment(payment),
+        }
+    }
+
+    pub fn get_utxo_by_stake(&self, stake: &[u8]) -> Result<UtxoSet, LedgerError> {
+        match self {
+            LedgerStore::Redb(x) => x.get_utxo_by_stake(stake),
+        }
+    }
+
+    pub fn get_utxo_by_policy(&self, policy: &[u8]) -> Result<UtxoSet, LedgerError> {
+        match self {
+            LedgerStore::Redb(x) => x.get_utxo_by_policy(policy),
+        }
+    }
+
+    pub fn get_utxo_by_asset(&self, policy: &[u8]) -> Result<UtxoSet, LedgerError> {
+        match self {
+            LedgerStore::Redb(x) => x.get_utxo_by_asset(policy),
+        }
+    }
+
     pub fn apply(&mut self, deltas: &[LedgerDelta]) -> Result<(), LedgerError> {
         match self {
             LedgerStore::Redb(x) => x.apply(deltas),

@@ -1,9 +1,12 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    io::Read,
+};
 
 use ::redb::{Error, MultimapTableDefinition, TableDefinition, WriteTransaction};
 use itertools::Itertools as _;
 use pallas::{crypto::hash::Hash, ledger::traverse::MultiEraOutput};
-use redb::{ReadTransaction, ReadableTable as _, TableError};
+use redb::{ReadOnlyMultimapTable, ReadTransaction, ReadableTable as _, TableError};
 use serde::{Deserialize, Serialize};
 
 use crate::ledger::*;
@@ -291,18 +294,34 @@ impl CursorTable {
     }
 }
 
-pub struct ByAddressIndex;
+pub struct FilterIndexes;
 
-impl ByAddressIndex {
-    pub const DEF: MultimapTableDefinition<'static, &'static [u8], UtxosKey> =
+impl FilterIndexes {
+    pub const BY_ADDRESS: MultimapTableDefinition<'static, &'static [u8], UtxosKey> =
         MultimapTableDefinition::new("byaddress");
 
-    pub fn get_by_key(rx: &ReadTransaction, address: &[u8]) -> Result<HashSet<TxoRef>, Error> {
-        let table = rx.open_multimap_table(Self::DEF)?;
+    pub const BY_PAYMENT: MultimapTableDefinition<'static, &'static [u8], UtxosKey> =
+        MultimapTableDefinition::new("bypayment");
+
+    pub const BY_STAKE: MultimapTableDefinition<'static, &'static [u8], UtxosKey> =
+        MultimapTableDefinition::new("bystake");
+
+    pub const BY_POLICY: MultimapTableDefinition<'static, &'static [u8], UtxosKey> =
+        MultimapTableDefinition::new("bypolicy");
+
+    pub const BY_ASSET: MultimapTableDefinition<'static, &'static [u8], UtxosKey> =
+        MultimapTableDefinition::new("byasset");
+
+    fn get_by_key(
+        rx: &ReadTransaction,
+        table_def: MultimapTableDefinition<&[u8], UtxosKey>,
+        key: &[u8],
+    ) -> Result<HashSet<TxoRef>, Error> {
+        let table = rx.open_multimap_table(table_def)?;
 
         let mut out = HashSet::new();
 
-        for item in table.get(address)? {
+        for item in table.get(key)? {
             let item = item?;
             let (hash, idx) = item.value();
             out.insert(TxoRef((*hash).into(), idx));
@@ -311,39 +330,130 @@ impl ByAddressIndex {
         Ok(out)
     }
 
+    pub fn get_by_address(
+        rx: &ReadTransaction,
+        exact_address: &[u8],
+    ) -> Result<HashSet<TxoRef>, Error> {
+        Self::get_by_key(rx, Self::BY_ADDRESS, exact_address)
+    }
+
+    pub fn get_by_payment(
+        rx: &ReadTransaction,
+        payment_part: &[u8],
+    ) -> Result<HashSet<TxoRef>, Error> {
+        Self::get_by_key(rx, Self::BY_PAYMENT, payment_part)
+    }
+
+    pub fn get_by_stake(rx: &ReadTransaction, stake_part: &[u8]) -> Result<HashSet<TxoRef>, Error> {
+        Self::get_by_key(rx, Self::BY_STAKE, stake_part)
+    }
+
+    pub fn get_by_policy(rx: &ReadTransaction, policy: &[u8]) -> Result<HashSet<TxoRef>, Error> {
+        Self::get_by_key(rx, Self::BY_POLICY, policy)
+    }
+
+    pub fn get_by_asset(rx: &ReadTransaction, asset: &[u8]) -> Result<HashSet<TxoRef>, Error> {
+        Self::get_by_key(rx, Self::BY_ASSET, asset)
+    }
+
+    fn split_address(utxo: &MultiEraOutput) -> (Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>) {
+        use pallas::ledger::addresses::Address;
+
+        match utxo.address() {
+            Ok(address) => match &address {
+                Address::Shelley(x) => {
+                    let a = x.to_vec();
+                    let b = x.payment().to_vec();
+                    let c = x.delegation().to_vec();
+                    (Some(a), Some(b), Some(c))
+                }
+                Address::Stake(x) => {
+                    let a = x.to_vec();
+                    let c = x.to_vec();
+                    (Some(a), None, Some(c))
+                }
+                Address::Byron(x) => {
+                    let a = x.to_vec();
+                    (Some(a), None, None)
+                }
+            },
+            Err(_) => todo!(),
+        }
+    }
+
     pub fn apply(wx: &WriteTransaction, delta: &LedgerDelta) -> Result<(), Error> {
-        let mut table = wx.open_multimap_table(Self::DEF)?;
+        let mut address_table = wx.open_multimap_table(Self::BY_ADDRESS)?;
+        let mut payment_table = wx.open_multimap_table(Self::BY_PAYMENT)?;
+        let mut stake_table = wx.open_multimap_table(Self::BY_STAKE)?;
+        let mut policy_table = wx.open_multimap_table(Self::BY_POLICY)?;
+        let mut asset_table = wx.open_multimap_table(Self::BY_ASSET)?;
 
         for (utxo, body) in delta.produced_utxo.iter() {
+            let v: (&[u8; 32], u32) = (&utxo.0, utxo.1);
+
             // TODO: decoding here is very inefficient
             let body = MultiEraOutput::try_from(body).unwrap();
+            let (addr, pay, stake) = Self::split_address(&body);
 
-            if let Ok(address) = body.address() {
-                let k = address.to_vec();
-                let v: (&[u8; 32], u32) = (&utxo.0, utxo.1);
-                table.insert(k.as_slice(), v)?;
+            if let Some(k) = addr {
+                address_table.insert(k.as_slice(), v)?;
+            }
+
+            if let Some(k) = pay {
+                payment_table.insert(k.as_slice(), v)?;
+            }
+
+            if let Some(k) = stake {
+                stake_table.insert(k.as_slice(), v)?;
+            }
+
+            let assets = body.non_ada_assets();
+
+            for batch in assets {
+                policy_table.insert(batch.policy().as_slice(), v)?;
+
+                for asset in batch.assets() {
+                    let mut subject = asset.policy().to_vec();
+                    subject.extend(asset.name());
+
+                    asset_table.insert(subject.as_slice(), v)?;
+                }
             }
         }
 
-        for (stxi, body) in delta.consumed_utxo.iter() {
+        let forgettable = delta.consumed_utxo.iter().chain(delta.undone_utxo.iter());
+
+        for (stxi, body) in forgettable {
+            let v: (&[u8; 32], u32) = (&stxi.0, stxi.1);
+
             // TODO: decoding here is very inefficient
             let body = MultiEraOutput::try_from(body).unwrap();
 
-            if let Ok(address) = body.address() {
-                let k = address.to_vec();
-                let v: (&[u8; 32], u32) = (&stxi.0, stxi.1);
-                table.remove(k.as_slice(), v)?;
+            let (addr, pay, stake) = Self::split_address(&body);
+
+            if let Some(k) = addr {
+                address_table.remove(k.as_slice(), v)?;
             }
-        }
 
-        for (stxi, body) in delta.undone_utxo.iter() {
-            // TODO: decoding here is very inefficient
-            let body = MultiEraOutput::try_from(body).unwrap();
+            if let Some(k) = pay {
+                payment_table.remove(k.as_slice(), v)?;
+            }
 
-            if let Ok(address) = body.address() {
-                let k = address.to_vec();
-                let v: (&[u8; 32], u32) = (&stxi.0, stxi.1);
-                table.remove(k.as_slice(), v)?;
+            if let Some(k) = stake {
+                stake_table.remove(k.as_slice(), v)?;
+            }
+
+            let assets = body.non_ada_assets();
+
+            for batch in assets {
+                policy_table.remove(batch.policy().as_slice(), v)?;
+
+                for asset in batch.assets() {
+                    let mut subject = asset.policy().to_vec();
+                    subject.extend(asset.name());
+
+                    asset_table.remove(subject.as_slice(), v)?;
+                }
             }
         }
 

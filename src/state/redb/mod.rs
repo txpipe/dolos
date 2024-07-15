@@ -121,6 +121,42 @@ impl LedgerStore {
         }
     }
 
+    pub fn get_utxo_by_payment(&self, payment: &[u8]) -> Result<UtxoSet, LedgerError> {
+        match self {
+            LedgerStore::SchemaV1(_) => Err(LedgerError::QueryNotSupported),
+            LedgerStore::SchemaV2(x) => x
+                .get_utxos_by_payment(payment)
+                .map_err(LedgerError::StorageError),
+        }
+    }
+
+    pub fn get_utxo_by_stake(&self, stake: &[u8]) -> Result<UtxoSet, LedgerError> {
+        match self {
+            LedgerStore::SchemaV1(_) => Err(LedgerError::QueryNotSupported),
+            LedgerStore::SchemaV2(x) => x
+                .get_utxos_by_stake(stake)
+                .map_err(LedgerError::StorageError),
+        }
+    }
+
+    pub fn get_utxo_by_policy(&self, policy: &[u8]) -> Result<UtxoSet, LedgerError> {
+        match self {
+            LedgerStore::SchemaV1(_) => Err(LedgerError::QueryNotSupported),
+            LedgerStore::SchemaV2(x) => x
+                .get_utxos_by_policy(policy)
+                .map_err(LedgerError::StorageError),
+        }
+    }
+
+    pub fn get_utxo_by_asset(&self, asset: &[u8]) -> Result<UtxoSet, LedgerError> {
+        match self {
+            LedgerStore::SchemaV1(_) => Err(LedgerError::QueryNotSupported),
+            LedgerStore::SchemaV2(x) => x
+                .get_utxos_by_policy(asset)
+                .map_err(LedgerError::StorageError),
+        }
+    }
+
     pub fn apply(&mut self, deltas: &[LedgerDelta]) -> Result<(), LedgerError> {
         match self {
             LedgerStore::SchemaV1(x) => x.apply(deltas).map_err(LedgerError::StorageError),

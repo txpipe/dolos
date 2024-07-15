@@ -34,7 +34,7 @@ impl LedgerStore {
             tables::CursorTable::apply(&wx, delta)?;
             tables::UtxosTable::apply(&wx, delta)?;
             tables::PParamsTable::apply(&wx, delta)?;
-            tables::ByAddressIndex::apply(&wx, delta)?;
+            tables::FilterIndexes::apply(&wx, delta)?;
         }
 
         wx.commit()?;
@@ -76,7 +76,27 @@ impl LedgerStore {
 
     pub fn get_utxos_by_address(&self, address: &[u8]) -> Result<UtxoSet, Error> {
         let rx = self.0.begin_read()?;
-        tables::ByAddressIndex::get_by_key(&rx, address)
+        tables::FilterIndexes::get_by_address(&rx, address)
+    }
+
+    pub fn get_utxos_by_payment(&self, payment: &[u8]) -> Result<UtxoSet, Error> {
+        let rx = self.0.begin_read()?;
+        tables::FilterIndexes::get_by_payment(&rx, payment)
+    }
+
+    pub fn get_utxos_by_stake(&self, stake: &[u8]) -> Result<UtxoSet, Error> {
+        let rx = self.0.begin_read()?;
+        tables::FilterIndexes::get_by_stake(&rx, stake)
+    }
+
+    pub fn get_utxos_by_policy(&self, policy: &[u8]) -> Result<UtxoSet, Error> {
+        let rx = self.0.begin_read()?;
+        tables::FilterIndexes::get_by_policy(&rx, policy)
+    }
+
+    pub fn get_utxos_by_asset(&self, asset: &[u8]) -> Result<UtxoSet, Error> {
+        let rx = self.0.begin_read()?;
+        tables::FilterIndexes::get_by_asset(&rx, asset)
     }
 }
 
