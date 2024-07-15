@@ -25,7 +25,7 @@ impl LedgerStore {
         }
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> Result<bool, LedgerError> {
         match self {
             LedgerStore::Redb(x) => x.is_empty(),
         }
@@ -43,9 +43,33 @@ impl LedgerStore {
         }
     }
 
-    pub fn get_utxo_by_address_set(&self, address: &[u8]) -> Result<HashSet<TxoRef>, LedgerError> {
+    pub fn get_utxo_by_address(&self, address: &[u8]) -> Result<UtxoSet, LedgerError> {
         match self {
-            LedgerStore::Redb(x) => x.get_utxo_by_address_set(address),
+            LedgerStore::Redb(x) => x.get_utxo_by_address(address),
+        }
+    }
+
+    pub fn get_utxo_by_payment(&self, payment: &[u8]) -> Result<UtxoSet, LedgerError> {
+        match self {
+            LedgerStore::Redb(x) => x.get_utxo_by_payment(payment),
+        }
+    }
+
+    pub fn get_utxo_by_stake(&self, stake: &[u8]) -> Result<UtxoSet, LedgerError> {
+        match self {
+            LedgerStore::Redb(x) => x.get_utxo_by_stake(stake),
+        }
+    }
+
+    pub fn get_utxo_by_policy(&self, policy: &[u8]) -> Result<UtxoSet, LedgerError> {
+        match self {
+            LedgerStore::Redb(x) => x.get_utxo_by_policy(policy),
+        }
+    }
+
+    pub fn get_utxo_by_asset(&self, policy: &[u8]) -> Result<UtxoSet, LedgerError> {
+        match self {
+            LedgerStore::Redb(x) => x.get_utxo_by_asset(policy),
         }
     }
 

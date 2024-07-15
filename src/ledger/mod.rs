@@ -1,7 +1,8 @@
 use pallas::ledger::configs::{byron, shelley};
 use pallas::ledger::traverse::{Era, MultiEraBlock};
 use pallas::{crypto::hash::Hash, ledger::traverse::MultiEraOutput};
-use std::collections::HashMap;
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use thiserror::Error;
 
 pub mod pparams;
@@ -44,7 +45,7 @@ impl<'a> TryFrom<&'a EraCbor> for MultiEraOutput<'a> {
 
 pub type UtxoBody<'a> = MultiEraOutput<'a>;
 
-#[derive(Debug, Eq, PartialEq, Hash, Clone)]
+#[derive(Debug, Eq, PartialEq, Hash, Clone, Serialize, Deserialize)]
 pub struct TxoRef(pub TxHash, pub TxoIdx);
 
 impl From<(TxHash, TxoIdx)> for TxoRef {
@@ -66,6 +67,8 @@ pub struct ChainPoint(pub BlockSlot, pub BlockHash);
 pub struct PParamsBody(pub Era, pub Vec<u8>);
 
 pub type UtxoMap = HashMap<TxoRef, EraCbor>;
+
+pub type UtxoSet = HashSet<TxoRef>;
 
 #[derive(Debug, Error)]
 pub enum BrokenInvariant {

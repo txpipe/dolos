@@ -13,10 +13,10 @@ impl LedgerStore {
         let mut wx = db.begin_write()?;
         wx.set_durability(Durability::Immediate);
 
+        tables::CursorTable::initialize(&wx)?;
         tables::UtxosTable::initialize(&wx)?;
         tables::PParamsTable::initialize(&wx)?;
-        tables::TombstonesTable::initialize(&wx)?;
-        tables::BlocksTable::initialize(&wx)?;
+        tables::FilterIndexes::initialize(&wx)?;
 
         wx.commit()?;
 
@@ -24,12 +24,20 @@ impl LedgerStore {
     }
 
     pub fn is_empty(&self) -> Result<bool, Error> {
-        Ok(self.cursor()?.is_none())
+        let rx = self.0.begin_read()?;
+        tables::CursorTable::exists(&rx).map(core::ops::Not::not)
     }
 
     pub fn cursor(&self) -> Result<Option<ChainPoint>, Error> {
         let rx = self.0.begin_read()?;
-        tables::BlocksTable::last(&rx)
+
+        if !tables::CursorTable::exists(&rx)? {
+            return Ok(None);
+        }
+
+        let last = tables::CursorTable::last(&rx)?.map(|(k, v)| ChainPoint(k, v.hash));
+
+        Ok(last)
     }
 
     pub fn apply(&mut self, deltas: &[LedgerDelta]) -> Result<(), Error> {
@@ -37,10 +45,10 @@ impl LedgerStore {
         wx.set_durability(Durability::Eventual);
 
         for delta in deltas {
+            tables::CursorTable::apply(&wx, delta)?;
             tables::UtxosTable::apply(&wx, delta)?;
             tables::PParamsTable::apply(&wx, delta)?;
-            tables::TombstonesTable::apply(&wx, delta)?;
-            tables::BlocksTable::apply(&wx, delta)?;
+            tables::FilterIndexes::apply(&wx, delta)?;
         }
 
         wx.commit()?;
@@ -50,15 +58,14 @@ impl LedgerStore {
 
     pub fn finalize(&mut self, until: BlockSlot) -> Result<(), Error> {
         let rx = self.0.begin_read()?;
-        let tss = tables::TombstonesTable::get_range(&rx, until)?;
+        let cursors = tables::CursorTable::get_range(&rx, until)?;
 
         let mut wx = self.0.begin_write()?;
         wx.set_durability(Durability::Eventual);
 
-        for ts in tss {
-            let (slot, txos) = ts;
-            tables::UtxosTable::compact(&wx, slot, &txos)?;
-            tables::TombstonesTable::compact(&wx, slot, &txos)?;
+        for (slot, value) in cursors {
+            tables::CursorTable::compact(&wx, slot)?;
+            tables::UtxosTable::compact(&wx, slot, &value.tombstones)?;
         }
 
         wx.commit()?;
@@ -79,6 +86,31 @@ impl LedgerStore {
     pub fn get_pparams(&self, until: BlockSlot) -> Result<Vec<PParamsBody>, Error> {
         let rx = self.0.begin_read()?;
         tables::PParamsTable::get_range(&rx, until)
+    }
+
+    pub fn get_utxos_by_address(&self, address: &[u8]) -> Result<UtxoSet, Error> {
+        let rx = self.0.begin_read()?;
+        tables::FilterIndexes::get_by_address(&rx, address)
+    }
+
+    pub fn get_utxos_by_payment(&self, payment: &[u8]) -> Result<UtxoSet, Error> {
+        let rx = self.0.begin_read()?;
+        tables::FilterIndexes::get_by_payment(&rx, payment)
+    }
+
+    pub fn get_utxos_by_stake(&self, stake: &[u8]) -> Result<UtxoSet, Error> {
+        let rx = self.0.begin_read()?;
+        tables::FilterIndexes::get_by_stake(&rx, stake)
+    }
+
+    pub fn get_utxos_by_policy(&self, policy: &[u8]) -> Result<UtxoSet, Error> {
+        let rx = self.0.begin_read()?;
+        tables::FilterIndexes::get_by_policy(&rx, policy)
+    }
+
+    pub fn get_utxos_by_asset(&self, asset: &[u8]) -> Result<UtxoSet, Error> {
+        let rx = self.0.begin_read()?;
+        tables::FilterIndexes::get_by_asset(&rx, asset)
     }
 }
 
