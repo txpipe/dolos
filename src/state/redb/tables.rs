@@ -13,6 +13,12 @@ impl BlocksTable {
     pub const DEF: TableDefinition<'static, u64, &'static [u8; 32]> =
         TableDefinition::new("blocks");
 
+    pub fn initialize(wx: &WriteTransaction) -> Result<(), Error> {
+        wx.open_table(Self::DEF)?;
+
+        Ok(())
+    }
+
     pub fn last(rx: &ReadTransaction) -> Result<Option<ChainPoint>, Error> {
         let table = match rx.open_table(Self::DEF) {
             Ok(x) => x,
@@ -49,6 +55,12 @@ pub struct UtxosTable;
 
 impl UtxosTable {
     pub const DEF: TableDefinition<'static, UtxosKey, UtxosValue> = TableDefinition::new("utxos");
+
+    pub fn initialize(wx: &WriteTransaction) -> Result<(), Error> {
+        wx.open_table(Self::DEF)?;
+
+        Ok(())
+    }
 
     pub fn get_sparse(
         rx: &ReadTransaction,
@@ -110,6 +122,12 @@ impl PParamsTable {
     pub const DEF: TableDefinition<'static, u64, (u16, &'static [u8])> =
         TableDefinition::new("pparams");
 
+    pub fn initialize(wx: &WriteTransaction) -> Result<(), Error> {
+        wx.open_table(Self::DEF)?;
+
+        Ok(())
+    }
+
     pub fn get_range(rx: &ReadTransaction, until: BlockSlot) -> Result<Vec<PParamsBody>, Error> {
         let table = rx.open_table(Self::DEF)?;
 
@@ -148,6 +166,12 @@ pub struct TombstonesTable;
 impl TombstonesTable {
     pub const DEF: MultimapTableDefinition<'static, BlockSlot, (&'static [u8; 32], TxoIdx)> =
         MultimapTableDefinition::new("tombstones");
+
+    pub fn initialize(wx: &WriteTransaction) -> Result<(), Error> {
+        wx.open_multimap_table(Self::DEF)?;
+
+        Ok(())
+    }
 
     pub fn get_range(
         rx: &ReadTransaction,
@@ -313,6 +337,16 @@ impl FilterIndexes {
 
     pub const BY_ASSET: MultimapTableDefinition<'static, &'static [u8], UtxosKey> =
         MultimapTableDefinition::new("byasset");
+
+    pub fn initialize(wx: &WriteTransaction) -> Result<(), Error> {
+        wx.open_multimap_table(Self::BY_ADDRESS)?;
+        wx.open_multimap_table(Self::BY_PAYMENT)?;
+        wx.open_multimap_table(Self::BY_STAKE)?;
+        wx.open_multimap_table(Self::BY_POLICY)?;
+        wx.open_multimap_table(Self::BY_ASSET)?;
+
+        Ok(())
+    }
 
     fn get_by_key(
         rx: &ReadTransaction,

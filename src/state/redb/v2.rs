@@ -14,9 +14,11 @@ impl LedgerStore {
         wx.set_durability(Durability::Immediate);
 
         tables::CursorTable::initialize(&wx)?;
-        //tables::UtxosTable::initialize(&wx)?;
-        //tables::PParamsTable::initialize(&wx)?;
-        //tables::FilterIndexes::initialize(&wx)?;
+        tables::UtxosTable::initialize(&wx)?;
+        tables::PParamsTable::initialize(&wx)?;
+        tables::FilterIndexes::initialize(&wx)?;
+
+        wx.commit()?;
 
         Ok(db.into())
     }

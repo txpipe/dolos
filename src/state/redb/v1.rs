@@ -9,6 +9,20 @@ use super::tables;
 pub struct LedgerStore(pub Arc<Database>);
 
 impl LedgerStore {
+    pub fn initialize(db: Database) -> Result<Self, Error> {
+        let mut wx = db.begin_write()?;
+        wx.set_durability(Durability::Immediate);
+
+        tables::UtxosTable::initialize(&wx)?;
+        tables::PParamsTable::initialize(&wx)?;
+        tables::TombstonesTable::initialize(&wx)?;
+        tables::BlocksTable::initialize(&wx)?;
+
+        wx.commit()?;
+
+        Ok(db.into())
+    }
+
     pub fn is_empty(&self) -> Result<bool, Error> {
         Ok(self.cursor()?.is_none())
     }

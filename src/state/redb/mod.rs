@@ -2,12 +2,9 @@ use ::redb::Database;
 use itertools::Itertools;
 use log::info;
 use redb::{MultimapTableHandle as _, TableHandle as _};
-use std::{
-    hash::{Hash as _, Hasher as _},
-    path::Path,
-};
+use std::path::Path;
 
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::ledger::*;
 
@@ -17,8 +14,8 @@ mod v2;
 
 const DEFAULT_CACHE_SIZE_MB: usize = 500;
 
-fn compute_schema_hash(db: &Database) -> Result<Option<u64>, LedgerError> {
-    let mut hasher = std::hash::DefaultHasher::new();
+fn compute_schema_hash(db: &Database) -> Result<Option<String>, LedgerError> {
+    let mut hasher = pallas::crypto::hash::Hasher::<160>::new();
 
     let rx = db
         .begin_read()
@@ -36,6 +33,8 @@ fn compute_schema_hash(db: &Database) -> Result<Option<u64>, LedgerError> {
 
     let mut names = names_1.chain(names_2).collect_vec();
 
+    debug!(tables = ?names, "tables names used to compute hash");
+
     if names.is_empty() {
         // this db hasn't been initialized, we can't compute hash
         return Ok(None);
@@ -45,11 +44,11 @@ fn compute_schema_hash(db: &Database) -> Result<Option<u64>, LedgerError> {
     // of the tables.
     names.sort();
 
-    names.into_iter().for_each(|n| n.hash(&mut hasher));
+    names.into_iter().for_each(|n| hasher.input(n.as_bytes()));
 
-    let hash = hasher.finish();
+    let hash = hasher.finalize();
 
-    Ok(Some(hash))
+    Ok(Some(hash.to_string()))
 }
 
 fn open_db(path: impl AsRef<Path>, cache_size: Option<usize>) -> Result<Database, LedgerError> {
@@ -69,6 +68,9 @@ impl From<::redb::Error> for LedgerError {
     }
 }
 
+const V1_HASH: &str = "067c3397778523b67202fa0ea720ef4d2c091e30";
+const V2_HASH: &str = "eff59f15f18250d950120494c8bcb9b13575057a";
+
 #[derive(Clone)]
 pub enum LedgerStore {
     SchemaV1(v1::LedgerStore),
@@ -80,18 +82,17 @@ impl LedgerStore {
         let db = open_db(path, cache_size)?;
         let hash = compute_schema_hash(&db)?;
 
-        let schema = match hash {
+        let schema = match hash.as_deref() {
             // use stable schema if no hash
             None => {
                 info!("no state db schema, initializing as v2");
                 v2::LedgerStore::initialize(db)?.into()
             }
-            // v1 hash
-            Some(13844724490616556453) => {
+            Some(V1_HASH) => {
                 info!("detected state db schema v1");
                 v1::LedgerStore::from(db).into()
             }
-            Some(14189588706721191778) => {
+            Some(V2_HASH) => {
                 info!("detected state db schema v2");
                 v2::LedgerStore::from(db).into()
             }
@@ -188,5 +189,34 @@ impl From<v1::LedgerStore> for LedgerStore {
 impl From<v2::LedgerStore> for LedgerStore {
     fn from(value: v2::LedgerStore) -> Self {
         Self::SchemaV2(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn schema_hash_computation() {
+        let db = ::redb::Database::builder()
+            .create_with_backend(::redb::backends::InMemoryBackend::new())
+            .unwrap();
+
+        let hash = compute_schema_hash(&db).unwrap();
+        assert!(hash.is_none());
+
+        let store = v1::LedgerStore::initialize(db).unwrap();
+
+        let hash = compute_schema_hash(&store.0).unwrap();
+        assert_eq!(hash.unwrap(), V1_HASH);
+
+        let db = ::redb::Database::builder()
+            .create_with_backend(::redb::backends::InMemoryBackend::new())
+            .unwrap();
+
+        let store = v2::LedgerStore::initialize(db).unwrap();
+
+        let hash = compute_schema_hash(&store.0).unwrap();
+        assert_eq!(hash.unwrap(), V2_HASH);
     }
 }
