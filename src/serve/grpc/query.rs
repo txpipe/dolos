@@ -168,13 +168,10 @@ impl IntoSet for u5c::cardano::AssetPattern {
 
 impl IntoSet for u5c::cardano::TxOutputPattern {
     fn into_set(self, ledger: &LedgerStore) -> Result<HashSet<TxoRef>, Status> {
-        let by_address = self.address.map(|x| x.into_set(ledger)).transpose()?;
-        let by_asset = self.asset.map(|x| x.into_set(ledger)).transpose()?;
-
-        match (by_address, by_asset) {
-            (None, Some(x)) => Ok(x),
-            (Some(x), None) => Ok(x),
-            (Some(a), Some(b)) => Ok(a.union(&b).cloned().collect()),
+        match (self.address, self.asset) {
+            (None, Some(x)) => x.into_set(ledger),
+            (Some(x), None) => x.into_set(ledger),
+            (Some(a), Some(b)) => intersect(ledger, a, b),
             (None, None) => Ok(HashSet::default()),
         }
     }
@@ -283,8 +280,6 @@ impl u5c::query::query_service_server::QueryService for QueryServiceImpl {
         let message = request.into_inner();
 
         info!("received new grpc query");
-
-        dbg!(&message);
 
         let set = match message.predicate {
             Some(x) => match x.r#match {

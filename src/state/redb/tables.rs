@@ -1,13 +1,9 @@
-use std::{
-    collections::{HashMap, HashSet},
-    io::Read,
-};
-
 use ::redb::{Error, MultimapTableDefinition, TableDefinition, WriteTransaction};
 use itertools::Itertools as _;
 use pallas::{crypto::hash::Hash, ledger::traverse::MultiEraOutput};
-use redb::{ReadOnlyMultimapTable, ReadTransaction, ReadableTable as _, TableError};
+use redb::{ReadTransaction, ReadableTable as _, TableError};
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 
 use crate::ledger::*;
 
@@ -218,10 +214,16 @@ impl CursorTable {
     pub const DEF: TableDefinition<'static, BlockSlot, &'static [u8]> =
         TableDefinition::new("cursor");
 
+    pub fn initialize(wx: &WriteTransaction) -> Result<(), Error> {
+        wx.open_table(Self::DEF)?;
+
+        Ok(())
+    }
+
     /// Checks if the table exists in the DB
     pub fn exists(rx: &ReadTransaction) -> Result<bool, Error> {
         match rx.open_table(Self::DEF) {
-            Ok(x) => Ok(true),
+            Ok(_) => Ok(true),
             Err(TableError::TableDoesNotExist(_)) => return Ok(false),
             Err(x) => return Err(x.into()),
         }
