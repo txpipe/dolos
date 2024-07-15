@@ -26,6 +26,7 @@ fn raw_to_anychain(mapper: &Mapper<LedgerStore>, raw: &wal::RawBlock) -> u5c::sy
     let block = mapper.map_block_cbor(body);
 
     u5c::sync::AnyChainBlock {
+        native_bytes: body.to_vec().into(),
         chain: u5c::sync::any_chain_block::Chain::Cardano(block).into(),
     }
 }
