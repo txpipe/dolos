@@ -248,8 +248,8 @@ impl CursorTable {
     pub fn exists(rx: &ReadTransaction) -> Result<bool, Error> {
         match rx.open_table(Self::DEF) {
             Ok(_) => Ok(true),
-            Err(TableError::TableDoesNotExist(_)) => return Ok(false),
-            Err(x) => return Err(x.into()),
+            Err(TableError::TableDoesNotExist(_)) => Ok(false),
+            Err(x) => Err(x.into()),
         }
     }
 
@@ -277,11 +277,7 @@ impl CursorTable {
         if let Some(ChainPoint(slot, hash)) = delta.new_position.as_ref() {
             let value = CursorValue {
                 hash: *hash,
-                tombstones: delta
-                    .consumed_utxo
-                    .iter()
-                    .map(|(txo, _)| txo.clone())
-                    .collect_vec(),
+                tombstones: delta.consumed_utxo.keys().cloned().collect_vec(),
             };
 
             let value = bincode::serialize(&value).unwrap();
@@ -321,6 +317,8 @@ impl CursorTable {
 }
 
 pub struct FilterIndexes;
+
+struct SplitAddressResult(Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>);
 
 impl FilterIndexes {
     pub const BY_ADDRESS: MultimapTableDefinition<'static, &'static [u8], UtxosKey> =
@@ -392,7 +390,7 @@ impl FilterIndexes {
         Self::get_by_key(rx, Self::BY_ASSET, asset)
     }
 
-    fn split_address(utxo: &MultiEraOutput) -> (Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>) {
+    fn split_address(utxo: &MultiEraOutput) -> SplitAddressResult {
         use pallas::ledger::addresses::Address;
 
         match utxo.address() {
@@ -401,16 +399,16 @@ impl FilterIndexes {
                     let a = x.to_vec();
                     let b = x.payment().to_vec();
                     let c = x.delegation().to_vec();
-                    (Some(a), Some(b), Some(c))
+                    SplitAddressResult(Some(a), Some(b), Some(c))
                 }
                 Address::Stake(x) => {
                     let a = x.to_vec();
                     let c = x.to_vec();
-                    (Some(a), None, Some(c))
+                    SplitAddressResult(Some(a), None, Some(c))
                 }
                 Address::Byron(x) => {
                     let a = x.to_vec();
-                    (Some(a), None, None)
+                    SplitAddressResult(Some(a), None, None)
                 }
             },
             Err(_) => todo!(),
@@ -429,7 +427,7 @@ impl FilterIndexes {
 
             // TODO: decoding here is very inefficient
             let body = MultiEraOutput::try_from(body).unwrap();
-            let (addr, pay, stake) = Self::split_address(&body);
+            let SplitAddressResult(addr, pay, stake) = Self::split_address(&body);
 
             if let Some(k) = addr {
                 address_table.insert(k.as_slice(), v)?;
@@ -465,7 +463,7 @@ impl FilterIndexes {
             // TODO: decoding here is very inefficient
             let body = MultiEraOutput::try_from(body).unwrap();
 
-            let (addr, pay, stake) = Self::split_address(&body);
+            let SplitAddressResult(addr, pay, stake) = Self::split_address(&body);
 
             if let Some(k) = addr {
                 address_table.remove(k.as_slice(), v)?;
