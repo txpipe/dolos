@@ -24,16 +24,11 @@ impl LedgerStore {
     }
 
     pub fn is_empty(&self) -> Result<bool, Error> {
-        let rx = self.0.begin_read()?;
-        tables::CursorTable::exists(&rx).map(core::ops::Not::not)
+        self.cursor().map(|x| x.is_none())
     }
 
     pub fn cursor(&self) -> Result<Option<ChainPoint>, Error> {
         let rx = self.0.begin_read()?;
-
-        if !tables::CursorTable::exists(&rx)? {
-            return Ok(None);
-        }
 
         let last = tables::CursorTable::last(&rx)?.map(|(k, v)| ChainPoint(k, v.hash));
 
@@ -117,5 +112,38 @@ impl LedgerStore {
 impl From<Database> for LedgerStore {
     fn from(value: Database) -> Self {
         Self(Arc::new(value))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use pallas::crypto::hash::Hash;
+
+    use super::*;
+
+    #[test]
+    fn empty_until_cursor() {
+        let db = ::redb::Database::builder()
+            .create_with_backend(::redb::backends::InMemoryBackend::new())
+            .unwrap();
+
+        let mut store = LedgerStore::initialize(db).unwrap();
+        assert!(store.is_empty().unwrap());
+
+        let delta = LedgerDelta {
+            new_position: Some(ChainPoint(
+                1,
+                Hash::new(b"01010101010101010101010101010101".to_owned()),
+            )),
+            undone_position: Default::default(),
+            produced_utxo: Default::default(),
+            consumed_utxo: Default::default(),
+            recovered_stxi: Default::default(),
+            undone_utxo: Default::default(),
+            new_pparams: Default::default(),
+        };
+
+        store.apply(&[delta]).unwrap();
+        assert!(!store.is_empty().unwrap());
     }
 }
