@@ -244,15 +244,6 @@ impl CursorTable {
         Ok(())
     }
 
-    /// Checks if the table exists in the DB
-    pub fn exists(rx: &ReadTransaction) -> Result<bool, Error> {
-        match rx.open_table(Self::DEF) {
-            Ok(_) => Ok(true),
-            Err(TableError::TableDoesNotExist(_)) => Ok(false),
-            Err(x) => Err(x.into()),
-        }
-    }
-
     pub fn get_range(
         rx: &ReadTransaction,
         until: BlockSlot,
