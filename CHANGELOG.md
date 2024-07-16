@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.12.0] - 2024-07-16
+
+### 🚀 Features
+
+- *(serve)* Include raw-bytes in follow-tip method (#299)
+- Implement state storage v2 (#295)
+
+### ⚙️ Miscellaneous Tasks
+
+- Update Pallas with u5c spec v0.7.0 (#300)
+- Update Pallas to v0.29 (#301)
+
 ## [0.11.1] - 2024-07-14
 
 ### 🐛 Bug Fixes
@@ -11,6 +23,7 @@ All notable changes to this project will be documented in this file.
 ### ⚙️ Miscellaneous Tasks
 
 - Update Pallas with input ordering interop fix (#296)
+- Release dolos version 0.11.1
 
 ## [0.11.0] - 2024-07-13
 
