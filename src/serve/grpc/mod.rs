@@ -9,6 +9,8 @@ use crate::state::LedgerStore;
 use crate::wal::redb::WalStore;
 use crate::{prelude::*, submit::Transaction};
 
+use super::GenesisFiles;
+
 mod convert;
 mod query;
 mod submit;
@@ -23,6 +25,7 @@ pub struct Config {
 
 pub async fn serve(
     config: Config,
+    genesis_files: GenesisFiles,
     wal: WalStore,
     ledger: LedgerStore,
     mempool: Arc<crate::submit::MempoolState>,
@@ -34,7 +37,7 @@ pub async fn serve(
     let sync_service = sync::SyncServiceImpl::new(wal.clone(), ledger.clone());
     let sync_service = u5c::sync::sync_service_server::SyncServiceServer::new(sync_service);
 
-    let query_service = query::QueryServiceImpl::new(ledger.clone());
+    let query_service = query::QueryServiceImpl::new(ledger.clone(), genesis_files);
     let query_service = u5c::query::query_service_server::QueryServiceServer::new(query_service);
 
     let watch_service = watch::WatchServiceImpl::new(wal.clone(), ledger.clone());

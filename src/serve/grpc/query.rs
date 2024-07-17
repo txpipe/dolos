@@ -1,11 +1,18 @@
 use crate::{
-    ledger::{EraCbor, LedgerError, TxoRef},
+    ledger::{
+        pparams::{self, Genesis},
+        EraCbor, LedgerError, PParamsBody, TxoRef,
+    },
+    serve::GenesisFiles,
     state::LedgerStore,
 };
 use itertools::Itertools as _;
-use pallas::interop::utxorpc::spec as u5c;
 use pallas::interop::utxorpc::{self as interop, spec::query::any_utxo_pattern::UtxoPattern};
-use pallas::ledger::traverse::MultiEraOutput;
+use pallas::ledger::{
+    configs::{alonzo, byron, shelley},
+    traverse::{MultiEraOutput, MultiEraUpdate},
+};
+use pallas::{applying::MultiEraProtocolParameters, interop::utxorpc::spec as u5c};
 use std::collections::HashSet;
 use tonic::{Request, Response, Status};
 use tracing::info;
@@ -13,12 +20,18 @@ use tracing::info;
 pub struct QueryServiceImpl {
     ledger: LedgerStore,
     mapper: interop::Mapper<LedgerStore>,
+    alonzo_genesis_file: alonzo::GenesisFile,
+    byron_genesis_file: byron::GenesisFile,
+    shelley_genesis_file: shelley::GenesisFile,
 }
 
 impl QueryServiceImpl {
-    pub fn new(ledger: LedgerStore) -> Self {
+    pub fn new(ledger: LedgerStore, genesis_files: GenesisFiles) -> Self {
         Self {
             ledger: ledger.clone(),
+            alonzo_genesis_file: genesis_files.0,
+            byron_genesis_file: genesis_files.1,
+            shelley_genesis_file: genesis_files.2,
             mapper: interop::Mapper::new(ledger),
         }
     }
@@ -209,6 +222,36 @@ fn into_u5c_utxo(
     })
 }
 
+fn map_pparams(pparams: MultiEraProtocolParameters) -> interop::spec::cardano::PParams {
+    match pparams {
+        MultiEraProtocolParameters::Byron(params) => interop::spec::cardano::PParams {
+            coins_per_utxo_byte: Default::default(),
+            max_tx_size: params.max_tx_size,
+            min_fee_coefficient: Default::default(),
+            min_fee_constant: Default::default(),
+            max_block_body_size: params.max_block_size,
+            max_block_header_size: params.max_header_size,
+            stake_key_deposit: Default::default(),
+            pool_deposit: Default::default(),
+            pool_retirement_epoch_bound: Default::default(),
+            desired_number_of_pools: Default::default(),
+            pool_influence: Default::default(),
+            monetary_expansion: Default::default(),
+            treasury_expansion: Default::default(),
+            min_pool_cost: Default::default(),
+            protocol_version: Default::default(),
+            max_value_size: Default::default(),
+            collateral_percentage: Default::default(),
+            max_collateral_inputs: Default::default(),
+            cost_models: Default::default(),
+            prices: Default::default(),
+            max_execution_units_per_transaction: Default::default(),
+            max_execution_units_per_block: Default::default(),
+        },
+        _ => todo!(),
+    }
+}
+
 #[async_trait::async_trait]
 impl u5c::query::query_service_server::QueryService for QueryServiceImpl {
     async fn read_params(
@@ -219,7 +262,39 @@ impl u5c::query::query_service_server::QueryService for QueryServiceImpl {
 
         info!("received new grpc query");
 
-        todo!()
+        let curr_point = match self.ledger.cursor()? {
+            Some(point) => point,
+            None => todo!("Handle uninitialized ledger"),
+        };
+
+        let updates = self.ledger.get_pparams(curr_point.0)?;
+
+        let updates: Vec<_> = updates
+            .iter()
+            .map(|PParamsBody(era, cbor)| -> Result<MultiEraUpdate, Status> {
+                MultiEraUpdate::decode_for_era(*era, cbor)
+                    .map_err(|e| Status::internal(e.to_string()))
+            })
+            .try_collect()?;
+
+        let genesis = Genesis {
+            alonzo: &self.alonzo_genesis_file,
+            byron: &self.byron_genesis_file,
+            shelley: &self.shelley_genesis_file,
+        };
+        let pparams = pparams::fold_pparams(&genesis, &updates, curr_point.0);
+
+        Ok(Response::new(u5c::query::ReadParamsResponse {
+            values: Some(u5c::query::AnyChainParams {
+                params: Some(u5c::query::any_chain_params::Params::Cardano(map_pparams(
+                    pparams,
+                ))),
+            }),
+            ledger_tip: Some(u5c::query::ChainPoint {
+                slot: curr_point.0,
+                hash: curr_point.1.to_vec().into(),
+            }),
+        }))
     }
 
     async fn read_data(

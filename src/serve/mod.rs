@@ -1,5 +1,6 @@
 use futures_util::future::try_join;
 use miette::{Context, IntoDiagnostic};
+use pallas::ledger::configs::{alonzo, byron, shelley};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -28,12 +29,19 @@ pub struct Config {
     pub ouroboros: Option<o7s::Config>,
 }
 
+pub type GenesisFiles = (
+    alonzo::GenesisFile,
+    byron::GenesisFile,
+    shelley::GenesisFile,
+);
+
 /// Serve remote requests
 ///
 /// Uses specified config to start listening for network connections on either
 /// gRPC, Ouroboros or both protocols.
 pub async fn serve(
     config: Config,
+    genesis_files: GenesisFiles,
     wal: WalStore,
     ledger: LedgerStore,
     mempool: Arc<crate::submit::MempoolState>,
@@ -44,10 +52,18 @@ pub async fn serve(
         if let Some(cfg) = config.grpc {
             info!("found gRPC config");
 
-            grpc::serve(cfg, wal.clone(), ledger, mempool, txs_out, exit.clone())
-                .await
-                .into_diagnostic()
-                .context("serving gRPC")
+            grpc::serve(
+                cfg,
+                genesis_files,
+                wal.clone(),
+                ledger,
+                mempool,
+                txs_out,
+                exit.clone(),
+            )
+            .await
+            .into_diagnostic()
+            .context("serving gRPC")
         } else {
             Ok(())
         }
