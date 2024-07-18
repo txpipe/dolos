@@ -23,17 +23,21 @@ impl LedgerStore {
         Ok(db.into())
     }
 
+    pub(crate) fn db(&self) -> &Database {
+        &self.0
+    }
+
     pub fn is_empty(&self) -> Result<bool, Error> {
         Ok(self.cursor()?.is_none())
     }
 
     pub fn cursor(&self) -> Result<Option<ChainPoint>, Error> {
-        let rx = self.0.begin_read()?;
+        let rx = self.db().begin_read()?;
         tables::BlocksTable::last(&rx)
     }
 
     pub fn apply(&mut self, deltas: &[LedgerDelta]) -> Result<(), Error> {
-        let mut wx = self.0.begin_write()?;
+        let mut wx = self.db().begin_write()?;
         wx.set_durability(Durability::Eventual);
 
         for delta in deltas {
@@ -49,10 +53,10 @@ impl LedgerStore {
     }
 
     pub fn finalize(&mut self, until: BlockSlot) -> Result<(), Error> {
-        let rx = self.0.begin_read()?;
+        let rx = self.db().begin_read()?;
         let tss = tables::TombstonesTable::get_range(&rx, until)?;
 
-        let mut wx = self.0.begin_write()?;
+        let mut wx = self.db().begin_write()?;
         wx.set_durability(Durability::Eventual);
 
         for ts in tss {
@@ -72,12 +76,12 @@ impl LedgerStore {
             return Ok(Default::default());
         }
 
-        let rx = self.0.begin_read()?;
+        let rx = self.db().begin_read()?;
         tables::UtxosTable::get_sparse(&rx, refs)
     }
 
     pub fn get_pparams(&self, until: BlockSlot) -> Result<Vec<PParamsBody>, Error> {
-        let rx = self.0.begin_read()?;
+        let rx = self.db().begin_read()?;
         tables::PParamsTable::get_range(&rx, until)
     }
 }

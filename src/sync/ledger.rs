@@ -73,7 +73,7 @@ impl Stage {
 
         let block = MultiEraBlock::decode(body).or_panic()?;
 
-        crate::state::import_block_batch(&[block], &mut self.ledger, &self.byron, &self.shelley)
+        crate::state::apply_block_batch(&[block], &mut self.ledger, &self.byron, &self.shelley)
             .or_panic()?;
 
         Ok(())

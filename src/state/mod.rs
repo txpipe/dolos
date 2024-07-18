@@ -14,6 +14,7 @@ pub mod redb;
 
 /// A persistent store for ledger state
 #[derive(Clone)]
+#[non_exhaustive]
 pub enum LedgerStore {
     Redb(redb::LedgerStore),
 }
@@ -82,6 +83,18 @@ impl LedgerStore {
     pub fn finalize(&mut self, until: BlockSlot) -> Result<(), LedgerError> {
         match self {
             LedgerStore::Redb(x) => x.finalize(until),
+        }
+    }
+
+    pub fn upgrade(self) -> Result<Self, LedgerError> {
+        match self {
+            LedgerStore::Redb(x) => Ok(LedgerStore::Redb(x.upgrade()?)),
+        }
+    }
+
+    pub fn copy(&self, target: &Self) -> Result<(), LedgerError> {
+        match (self, target) {
+            (Self::Redb(x), Self::Redb(target)) => x.copy(target),
         }
     }
 }
@@ -153,7 +166,7 @@ pub fn load_slice_for_block(
     Ok(LedgerSlice { resolved_inputs })
 }
 
-pub fn import_block_batch(
+pub fn apply_block_batch(
     blocks: &[MultiEraBlock],
     store: &mut LedgerStore,
     byron: &byron::GenesisFile,

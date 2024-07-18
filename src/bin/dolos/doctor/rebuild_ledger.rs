@@ -2,50 +2,31 @@ use dolos::{
     ledger,
     wal::{self, RawBlock, ReadUtils, WalReader as _},
 };
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use itertools::Itertools;
 use miette::{Context, IntoDiagnostic};
 use pallas::ledger::traverse::MultiEraBlock;
 use tracing::debug;
 
-struct Feedback {
-    _multi: MultiProgress,
-    global_pb: ProgressBar,
-}
-
-impl Default for Feedback {
-    fn default() -> Self {
-        let multi = MultiProgress::new();
-
-        let global_pb = ProgressBar::new_spinner();
-        let global_pb = multi.add(global_pb);
-        global_pb.set_style(
-            ProgressStyle::with_template(
-                "{spinner:.green} [{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} (eta: {eta}) {msg}",
-            )
-            .unwrap()
-            .progress_chars("#>-"),
-        );
-
-        Self {
-            _multi: multi,
-            global_pb,
-        }
-    }
-}
+use crate::feedback::Feedback;
 
 #[derive(Debug, clap::Args)]
-pub struct Args {}
+pub struct Args;
 
-pub fn run(config: &crate::Config, _args: &Args) -> miette::Result<()> {
+pub fn run(config: &crate::Config, _args: &Args, feedback: &Feedback) -> miette::Result<()> {
     //crate::common::setup_tracing(&config.logging)?;
 
-    let feedback = Feedback::default();
+    let progress = feedback.slot_progress_bar();
+    progress.set_message("rebuilding ledger");
 
     let (byron, shelley, _) = crate::common::open_genesis_files(&config.genesis)?;
 
-    let (wal, mut ledger) =
-        crate::common::open_data_stores(config).context("opening data stores")?;
+    let wal = crate::common::open_wal(config).context("opening WAL store")?;
+
+    let ledger = dolos::state::redb::LedgerStore::in_memory_v2_light()
+        .into_diagnostic()
+        .context("creating in-memory state store")?;
+
+    let mut ledger = dolos::state::LedgerStore::Redb(ledger);
 
     if ledger
         .is_empty()
@@ -69,8 +50,8 @@ pub fn run(config: &crate::Config, _args: &Args) -> miette::Result<()> {
         .ok_or(miette::miette!("no WAL tip found"))?;
 
     match tip {
-        wal::ChainPoint::Origin => feedback.global_pb.set_length(0),
-        wal::ChainPoint::Specific(slot, _) => feedback.global_pb.set_length(slot),
+        wal::ChainPoint::Origin => progress.set_length(0),
+        wal::ChainPoint::Specific(slot, _) => progress.set_length(slot),
     }
 
     let wal_seq = ledger
@@ -100,13 +81,34 @@ pub fn run(config: &crate::Config, _args: &Args) -> miette::Result<()> {
             .into_diagnostic()
             .context("decoding blocks")?;
 
-        dolos::state::import_block_batch(&blocks, &mut ledger, &byron, &shelley)
+        dolos::state::apply_block_batch(&blocks, &mut ledger, &byron, &shelley)
             .into_diagnostic()
             .context("importing blocks to ledger store")?;
 
-        blocks
-            .last()
-            .inspect(|b| feedback.global_pb.set_position(b.slot()));
+        blocks.last().inspect(|b| progress.set_position(b.slot()));
+    }
+
+    let upgraded = {
+        let pb = feedback.indeterminate_progress_bar();
+        pb.set_message("creating indexes");
+        let out = ledger.upgrade().unwrap();
+        pb.abandon_with_message("indexes created");
+
+        out
+    };
+
+    let disc_ledger = crate::common::open_ledger(&config).context("opening ledger")?;
+
+    {
+        let pb = feedback.indeterminate_progress_bar();
+        pb.set_message("copying memory ledger into disc");
+
+        upgraded
+            .copy(&disc_ledger)
+            .into_diagnostic()
+            .context("copying from memory db into disc")?;
+
+        pb.abandon_with_message("ledger copy to disk finished");
     }
 
     Ok(())
