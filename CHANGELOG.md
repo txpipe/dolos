@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.13.0] - 2024-07-18
+
+### 🚀 Features
+
+- Bootstrap in-memory and with defered indexes (#308)
+
+### 🐛 Bug Fixes
+
+- *(state)* Use cursor value to decide if db is empty (#302)
+
 ## [0.12.0] - 2024-07-16
 
 ### 🚀 Features
@@ -13,6 +23,7 @@ All notable changes to this project will be documented in this file.
 
 - Update Pallas with u5c spec v0.7.0 (#300)
 - Update Pallas to v0.29 (#301)
+- Release dolos version 0.12.0
 
 ## [0.11.1] - 2024-07-14
 
