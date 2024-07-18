@@ -494,8 +494,8 @@ impl u5c::query::query_service_server::QueryService for QueryServiceImpl {
             shelley: &self.shelley_genesis_file,
         };
 
+        // TODO: Check compute_epoch_from_slot
         let epoch = compute_epoch_from_slot(&self.shelley_genesis_file, curr_point.0)?;
-        println!("epoch: {}", epoch);
         let pparams = pparams::fold_pparams(&genesis, &updates, epoch);
 
         Ok(Response::new(u5c::query::ReadParamsResponse {
