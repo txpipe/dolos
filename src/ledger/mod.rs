@@ -30,7 +30,7 @@ impl From<EraCbor> for (Era, Vec<u8>) {
 }
 
 impl<'a> From<MultiEraOutput<'a>> for EraCbor {
-    fn from(value: MultiEraOutput) -> Self {
+    fn from(value: MultiEraOutput<'a>) -> Self {
         EraCbor(value.era(), value.encode())
     }
 }
@@ -86,6 +86,9 @@ pub enum LedgerError {
 
     #[error("query not supported")]
     QueryNotSupported,
+
+    #[error("invalid store version")]
+    InvalidStoreVersion,
 }
 
 /// A slice of the ledger relevant for a specific task
