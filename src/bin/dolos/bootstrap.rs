@@ -225,7 +225,7 @@ pub fn run(config: &super::Config, args: &Args, feedback: &Feedback) -> miette::
     if !args.skip_download {
         tokio::runtime::Runtime::new()
             .unwrap()
-            .block_on(fetch_snapshot(args, mithril, &feedback))
+            .block_on(fetch_snapshot(args, mithril, feedback))
             .map_err(|err| miette::miette!(err.to_string()))
             .context("fetching and validating mithril snapshot")?;
     } else {
@@ -234,9 +234,9 @@ pub fn run(config: &super::Config, args: &Args, feedback: &Feedback) -> miette::
 
     let immutable_path = Path::new(&args.download_dir).join("immutable");
 
-    import_hardano_into_wal(config, &immutable_path, &feedback)?;
+    import_hardano_into_wal(config, &immutable_path, feedback)?;
 
-    crate::doctor::run_rebuild_ledger(config, &feedback).context("rebuilding ledger")?;
+    crate::doctor::run_rebuild_ledger(config, feedback).context("rebuilding ledger")?;
 
     if !args.retain_snapshot {
         info!("deleting downloaded snapshot");

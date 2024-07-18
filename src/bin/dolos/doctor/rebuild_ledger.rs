@@ -97,7 +97,7 @@ pub fn run(config: &crate::Config, _args: &Args, feedback: &Feedback) -> miette:
         out
     };
 
-    let disc_ledger = crate::common::open_ledger(&config).context("opening ledger")?;
+    let disc_ledger = crate::common::open_ledger(config).context("opening ledger")?;
 
     {
         let pb = feedback.indeterminate_progress_bar();
