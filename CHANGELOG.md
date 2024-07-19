@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.13.1] - 2024-07-19
+
+### 🐛 Bug Fixes
+
+- *(bootstrap)* Save ledger to disk before attempting upgrade (#310)
+
+### 🚜 Refactor
+
+- *(state)* Treat address parsing as a fallible operation (#309)
+
+### ⚙️ Miscellaneous Tasks
+
+- Use Pallas edge with long address fix (#311)
+
 ## [0.13.0] - 2024-07-18
 
 ### 🚀 Features
@@ -11,6 +25,10 @@ All notable changes to this project will be documented in this file.
 ### 🐛 Bug Fixes
 
 - *(state)* Use cursor value to decide if db is empty (#302)
+
+### ⚙️ Miscellaneous Tasks
+
+- Release dolos version 0.13.0
 
 ## [0.12.0] - 2024-07-16
 
