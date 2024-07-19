@@ -76,6 +76,19 @@ impl LedgerStore {
         Ok(())
     }
 
+    pub fn copy(&self, target: &Self) -> Result<(), Error> {
+        let rx = self.db().begin_read()?;
+        let wx = target.db().begin_write()?;
+
+        tables::CursorTable::copy(&rx, &wx)?;
+        tables::UtxosTable::copy(&rx, &wx)?;
+        tables::PParamsTable::copy(&rx, &wx)?;
+
+        wx.commit()?;
+
+        Ok(())
+    }
+
     pub fn get_utxos(&self, refs: Vec<TxoRef>) -> Result<UtxoMap, Error> {
         // exit early before opening a read tx in case there's nothing to fetch
         if refs.is_empty() {

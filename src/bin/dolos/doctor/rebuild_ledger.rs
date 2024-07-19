@@ -22,13 +22,13 @@ pub fn run(config: &crate::Config, _args: &Args, feedback: &Feedback) -> miette:
 
     let wal = crate::common::open_wal(config).context("opening WAL store")?;
 
-    let ledger = dolos::state::redb::LedgerStore::in_memory_v2_light()
+    let light = dolos::state::redb::LedgerStore::in_memory_v2_light()
         .into_diagnostic()
         .context("creating in-memory state store")?;
 
-    let mut ledger = dolos::state::LedgerStore::Redb(ledger);
+    let mut light = dolos::state::LedgerStore::Redb(light);
 
-    if ledger
+    if light
         .is_empty()
         .into_diagnostic()
         .context("checking empty state")?
@@ -37,7 +37,7 @@ pub fn run(config: &crate::Config, _args: &Args, feedback: &Feedback) -> miette:
 
         let delta = dolos::ledger::compute_origin_delta(&byron);
 
-        ledger
+        light
             .apply(&[delta])
             .into_diagnostic()
             .context("applying origin utxos")?;
@@ -54,7 +54,7 @@ pub fn run(config: &crate::Config, _args: &Args, feedback: &Feedback) -> miette:
         wal::ChainPoint::Specific(slot, _) => progress.set_length(slot),
     }
 
-    let wal_seq = ledger
+    let wal_seq = light
         .cursor()
         .into_diagnostic()
         .context("finding ledger cursor")?
@@ -81,35 +81,39 @@ pub fn run(config: &crate::Config, _args: &Args, feedback: &Feedback) -> miette:
             .into_diagnostic()
             .context("decoding blocks")?;
 
-        dolos::state::apply_block_batch(&blocks, &mut ledger, &byron, &shelley)
+        dolos::state::apply_block_batch(&blocks, &mut light, &byron, &shelley)
             .into_diagnostic()
             .context("importing blocks to ledger store")?;
 
         blocks.last().inspect(|b| progress.set_position(b.slot()));
     }
 
-    let upgraded = {
-        let pb = feedback.indeterminate_progress_bar();
-        pb.set_message("creating indexes");
-        let out = ledger.upgrade().unwrap();
-        pb.abandon_with_message("indexes created");
+    let ledger_path = crate::common::define_ledger_path(config).context("finding ledger path")?;
 
-        out
-    };
+    let disk = dolos::state::redb::LedgerStore::open_v2_light(ledger_path, None)
+        .into_diagnostic()
+        .context("opening ledger db")?;
 
-    let disc_ledger = crate::common::open_ledger(config).context("opening ledger")?;
+    let disk = dolos::state::LedgerStore::Redb(disk);
 
-    {
-        let pb = feedback.indeterminate_progress_bar();
-        pb.set_message("copying memory ledger into disc");
+    let pb = feedback.indeterminate_progress_bar();
+    pb.set_message("copying memory ledger into disc");
 
-        upgraded
-            .copy(&disc_ledger)
-            .into_diagnostic()
-            .context("copying from memory db into disc")?;
+    light
+        .copy(&disk)
+        .into_diagnostic()
+        .context("copying from memory db into disc")?;
 
-        pb.abandon_with_message("ledger copy to disk finished");
-    }
+    pb.abandon_with_message("ledger copy to disk finished");
+
+    let pb = feedback.indeterminate_progress_bar();
+    pb.set_message("creating indexes");
+
+    disk.upgrade()
+        .into_diagnostic()
+        .context("creating indexes")?;
+
+    pb.abandon_with_message("indexes created");
 
     Ok(())
 }
