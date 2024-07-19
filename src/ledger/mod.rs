@@ -76,21 +76,6 @@ pub enum BrokenInvariant {
     MissingUtxo(TxoRef),
 }
 
-#[derive(Debug, Error)]
-pub enum LedgerError {
-    #[error("broken invariant")]
-    BrokenInvariant(#[source] BrokenInvariant),
-
-    #[error("storage error")]
-    StorageError(#[source] ::redb::Error),
-
-    #[error("query not supported")]
-    QueryNotSupported,
-
-    #[error("invalid store version")]
-    InvalidStoreVersion,
-}
-
 /// A slice of the ledger relevant for a specific task
 ///
 /// A ledger slice represents a partial view of the ledger which is optimized
