@@ -107,6 +107,28 @@ impl LedgerStore {
         Ok(schema)
     }
 
+    pub fn open_v2_light(
+        path: impl AsRef<Path>,
+        cache_size: Option<usize>,
+    ) -> Result<Self, LedgerError> {
+        let db = open_db(path, cache_size)?;
+        let hash = compute_schema_hash(&db)?;
+
+        let schema = match hash.as_deref() {
+            None => {
+                info!("no state db schema, initializing as v2-light");
+                v2light::LedgerStore::initialize(db)?.into()
+            }
+            Some(V2_LIGHT_HASH) => {
+                info!("detected state db schema v2-light");
+                v2light::LedgerStore::new(db).into()
+            }
+            _ => return Err(LedgerError::InvalidStoreVersion),
+        };
+
+        Ok(schema)
+    }
+
     pub fn in_memory_v1() -> Result<Self, LedgerError> {
         let db = ::redb::Database::builder()
             .create_with_backend(::redb::backends::InMemoryBackend::new())
@@ -239,6 +261,9 @@ impl LedgerStore {
     pub fn copy(&self, target: &Self) -> Result<(), LedgerError> {
         match (self, target) {
             (LedgerStore::SchemaV2(x), LedgerStore::SchemaV2(target)) => Ok(x.copy(target)?),
+            (LedgerStore::SchemaV2Light(x), LedgerStore::SchemaV2Light(target)) => {
+                Ok(x.copy(target)?)
+            }
             _ => Err(LedgerError::InvalidStoreVersion),
         }
     }

@@ -3,7 +3,7 @@ use miette::{Context as _, IntoDiagnostic};
 use pallas::ledger::configs::alonzo::GenesisFile as AlonzoFile;
 use pallas::ledger::configs::byron::GenesisFile as ByronFile;
 use pallas::ledger::configs::shelley::GenesisFile as ShelleyFile;
-use std::time::Duration;
+use std::{path::PathBuf, time::Duration};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
@@ -26,14 +26,11 @@ pub fn open_wal(config: &crate::Config) -> Result<wal::redb::WalStore, Error> {
     Ok(wal)
 }
 
-pub fn open_ledger(config: &crate::Config) -> Result<state::LedgerStore, Error> {
+pub fn define_ledger_path(config: &crate::Config) -> Result<PathBuf, Error> {
     let root = &config.storage.path;
-
     std::fs::create_dir_all(root).map_err(Error::storage)?;
 
-    let ledger = state::redb::LedgerStore::open(root.join("ledger"), config.storage.ledger_cache)
-        .map_err(Error::storage)?
-        .into();
+    let ledger = root.join("ledger");
 
     Ok(ledger)
 }
