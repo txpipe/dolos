@@ -1,6 +1,6 @@
 use crate::{
-    ledger::{EraCbor, LedgerError, TxoRef},
-    state::LedgerStore,
+    ledger::{EraCbor, TxoRef},
+    state::{LedgerError, LedgerStore},
 };
 use itertools::Itertools as _;
 use pallas::interop::utxorpc::spec as u5c;

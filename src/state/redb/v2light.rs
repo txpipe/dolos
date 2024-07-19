@@ -1,8 +1,9 @@
-use ::redb::{Database, Durability, Error};
+use ::redb::{Database, Durability};
 use itertools::Itertools;
 use std::sync::Arc;
 
-use crate::ledger::*;
+use crate::state::*;
+type Error = crate::state::LedgerError;
 
 use super::tables;
 

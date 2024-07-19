@@ -1,12 +1,11 @@
-use ::redb::Database;
+use ::redb::{Database, MultimapTableHandle as _, TableHandle as _};
 use itertools::Itertools;
 use log::info;
-use redb::{MultimapTableHandle as _, TableHandle as _};
 use std::path::Path;
 
 use tracing::{debug, warn};
 
-use crate::ledger::*;
+use super::*;
 
 mod tables;
 pub mod v1;

@@ -1,11 +1,13 @@
-use ::redb::{Error, MultimapTableDefinition, TableDefinition, WriteTransaction};
+use ::redb::{MultimapTableDefinition, TableDefinition, WriteTransaction};
+use ::redb::{Range, ReadTransaction, ReadableTable as _, TableError};
 use itertools::Itertools as _;
 use pallas::{crypto::hash::Hash, ledger::traverse::MultiEraOutput};
-use redb::{Range, ReadTransaction, ReadableTable as _, TableError};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
-use crate::ledger::*;
+use crate::state::*;
+
+type Error = crate::state::LedgerError;
 
 pub struct BlocksTable;
 
@@ -447,7 +449,7 @@ impl FilterIndexes {
         Self::get_by_key(rx, Self::BY_ASSET, asset)
     }
 
-    fn split_address(utxo: &MultiEraOutput) -> SplitAddressResult {
+    fn split_address(utxo: &MultiEraOutput) -> Result<SplitAddressResult, Error> {
         use pallas::ledger::addresses::Address;
 
         match utxo.address() {
@@ -456,19 +458,19 @@ impl FilterIndexes {
                     let a = x.to_vec();
                     let b = x.payment().to_vec();
                     let c = x.delegation().to_vec();
-                    SplitAddressResult(Some(a), Some(b), Some(c))
+                    Ok(SplitAddressResult(Some(a), Some(b), Some(c)))
                 }
                 Address::Stake(x) => {
                     let a = x.to_vec();
                     let c = x.to_vec();
-                    SplitAddressResult(Some(a), None, Some(c))
+                    Ok(SplitAddressResult(Some(a), None, Some(c)))
                 }
                 Address::Byron(x) => {
                     let a = x.to_vec();
-                    SplitAddressResult(Some(a), None, None)
+                    Ok(SplitAddressResult(Some(a), None, None))
                 }
             },
-            Err(_) => todo!(),
+            Err(err) => Err(err.into()),
         }
     }
 
@@ -489,7 +491,7 @@ impl FilterIndexes {
 
             // TODO: decoding here is very inefficient
             let body = MultiEraOutput::try_from(body).unwrap();
-            let SplitAddressResult(addr, pay, stake) = Self::split_address(&body);
+            let SplitAddressResult(addr, pay, stake) = Self::split_address(&body)?;
 
             if let Some(k) = addr {
                 address_table.insert(k.as_slice(), v)?;
@@ -525,7 +527,7 @@ impl FilterIndexes {
             // TODO: decoding here is very inefficient
             let body = MultiEraOutput::try_from(body).unwrap();
 
-            let SplitAddressResult(addr, pay, stake) = Self::split_address(&body);
+            let SplitAddressResult(addr, pay, stake) = Self::split_address(&body)?;
 
             if let Some(k) = addr {
                 address_table.remove(k.as_slice(), v)?;
@@ -556,7 +558,7 @@ impl FilterIndexes {
         Ok(())
     }
 
-    fn copy_table<K: redb::Key, V: redb::Key + redb::Value>(
+    fn copy_table<K: ::redb::Key, V: ::redb::Key + ::redb::Value>(
         rx: &ReadTransaction,
         wx: &WriteTransaction,
         def: MultimapTableDefinition<K, V>,
