@@ -7,12 +7,15 @@ use crate::{
     state::{LedgerError, LedgerStore},
 };
 use itertools::Itertools as _;
-use pallas::interop::utxorpc::{self as interop, spec::query::any_utxo_pattern::UtxoPattern};
 use pallas::ledger::{
     configs::{alonzo, byron, shelley},
     traverse::{MultiEraOutput, MultiEraUpdate},
 };
 use pallas::{applying::MultiEraProtocolParameters, interop::utxorpc::spec as u5c};
+use pallas::{
+    interop::utxorpc::{self as interop, spec::query::any_utxo_pattern::UtxoPattern},
+    ledger::traverse::wellknown::GenesisValues,
+};
 use std::collections::HashSet;
 use tonic::{Request, Response, Status};
 use tracing::info;
@@ -222,18 +225,17 @@ fn into_u5c_utxo(
     })
 }
 
-fn compute_epoch_from_slot(genesis: &shelley::GenesisFile, slot: u64) -> Result<u64, Status> {
-    let slot_length: u64 = match genesis.slot_length {
-        Some(slot_lenght) => slot_lenght.into(),
-        None => return Err(Status::internal("slot_length missing in shelley genesis.")),
-    };
-
-    let epoch_length: u64 = match genesis.epoch_length {
-        Some(epoch_length) => epoch_length.into(),
-        None => return Err(Status::internal("epoch_length missing in shelley genesis.")),
-    };
-
-    Ok((slot * slot_length) / epoch_length)
+fn compute_epoch_from_slot(genesis_values: &GenesisValues, slot: u64) -> u64 {
+    if slot < genesis_values.shelley_known_slot {
+        (slot * genesis_values.byron_slot_length as u64) / genesis_values.byron_epoch_length as u64
+    } else {
+        let slots_before_shelley = (genesis_values.shelley_known_slot
+            * genesis_values.byron_slot_length as u64)
+            / genesis_values.byron_epoch_length as u64;
+        ((slot - genesis_values.shelley_known_slot) * genesis_values.shelley_slot_length as u64)
+            / genesis_values.shelley_epoch_length as u64
+            + slots_before_shelley
+    }
 }
 
 fn map_pparams(
@@ -316,9 +318,7 @@ fn map_pparams(
             // cost_models: params.cost_models_for_script_languages,
             cost_models: None,
 
-            // TODO: Replace this with ..Default::default().
-            pool_retirement_epoch_bound: Default::default(),
-            prices: Default::default(),
+            ..Default::default()
         }),
         MultiEraProtocolParameters::Shelley(params) => Ok(interop::spec::cardano::PParams {
             max_tx_size: params.max_transaction_size.into(),
@@ -494,8 +494,17 @@ impl u5c::query::query_service_server::QueryService for QueryServiceImpl {
             shelley: &self.shelley_genesis_file,
         };
 
-        // TODO: Check compute_epoch_from_slot
-        let epoch = compute_epoch_from_slot(&self.shelley_genesis_file, curr_point.0)?;
+        let network_magic = match self.shelley_genesis_file.network_magic {
+            Some(magic) => magic.into(),
+            None => return Err(Status::internal("networkMagic missing in shelley genesis.")),
+        };
+
+        let genesis_values = match GenesisValues::from_magic(network_magic) {
+            Some(genesis_values) => genesis_values,
+            None => return Err(Status::internal("Invalid networdMagic.")),
+        };
+
+        let epoch = compute_epoch_from_slot(&genesis_values, curr_point.0);
         let pparams = pparams::fold_pparams(&genesis, &updates, epoch);
 
         Ok(Response::new(u5c::query::ReadParamsResponse {
@@ -615,25 +624,47 @@ impl u5c::query::query_service_server::QueryService for QueryServiceImpl {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-
     use super::*;
-
-    fn load_json<T, P: AsRef<Path>>(path: P) -> T
-    where
-        T: serde::de::DeserializeOwned,
-    {
-        let file = std::fs::File::open(path).unwrap();
-        serde_json::from_reader(file).unwrap()
-    }
 
     #[test]
     fn test_compute_epoch_from_slot() {
-        let test_data = format!("src/ledger/pparams/test_data/mainnet");
+        // Mainnet
+        assert_eq!(
+            498,
+            compute_epoch_from_slot(&GenesisValues::mainnet(), 130199162)
+        );
+        assert_eq!(
+            208,
+            compute_epoch_from_slot(
+                &GenesisValues::mainnet(),
+                GenesisValues::mainnet().shelley_known_slot
+            )
+        );
 
-        let shelley: &shelley::GenesisFile =
-            &load_json(format!("{test_data}/genesis/shelley_genesis.json"));
+        // Preprod
+        assert_eq!(
+            156,
+            compute_epoch_from_slot(&GenesisValues::preprod(), 66081907)
+        );
+        assert_eq!(
+            4,
+            compute_epoch_from_slot(
+                &GenesisValues::preprod(),
+                GenesisValues::preprod().shelley_known_slot
+            )
+        );
 
-        assert_eq!(498, compute_epoch_from_slot(shelley, 129775487).unwrap());
+        // Preview
+        assert_eq!(
+            637,
+            compute_epoch_from_slot(&GenesisValues::preview(), 55108950)
+        );
+        assert_eq!(
+            0,
+            compute_epoch_from_slot(
+                &GenesisValues::preview(),
+                GenesisValues::preview().shelley_known_slot
+            )
+        );
     }
 }

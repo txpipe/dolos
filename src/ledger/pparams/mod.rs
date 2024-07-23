@@ -139,11 +139,29 @@ fn apply_param_update(
 ) -> MultiEraProtocolParameters {
     match current {
         MultiEraProtocolParameters::Byron(mut pparams) => {
-            if let Some(new) = update.byron_proposed_block_version() {
-                warn!(?new, "found new block version");
-                pparams.block_version = new;
+            match update {
+                MultiEraUpdate::Byron(_, _) => {
+                    if let Some(new) = update.byron_proposed_block_version() {
+                        warn!(?new, "found new block version");
+                        pparams.block_version = new;
+                    }
+                }
+                _ => {
+                    // Hack to forcefully update protocol parameters for preview, which starts on
+                    // shelley directly.
+                    if let Some((major, _)) = update.first_proposed_protocol_version() {
+                        // This forces pparams.protocol_version() to return the new major and
+                        // run advance_hardfork.
+                        pparams.block_version = (
+                            major
+                                .try_into()
+                                .expect("Major version should always fit in u16"),
+                            0,
+                            0,
+                        );
+                    }
+                }
             }
-
             if let Some(pallas::ledger::primitives::byron::TxFeePol::Variant0(new)) =
                 update.byron_proposed_fee_policy()
             {
