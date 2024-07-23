@@ -95,8 +95,12 @@ impl WalStore {
             return Ok(true);
         }
 
-        if self.crawl_from(None)?.next().is_none() {
-            return Ok(true);
+        let start = self.find_tip()?;
+
+        if let Some((start, _)) = start {
+            if start == 0 {
+                return Ok(true);
+            }
         }
 
         Ok(false)

@@ -2,52 +2,33 @@ use dolos::{
     ledger,
     wal::{self, RawBlock, ReadUtils, WalReader as _},
 };
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use itertools::Itertools;
 use miette::{Context, IntoDiagnostic};
 use pallas::ledger::traverse::MultiEraBlock;
 use tracing::debug;
 
-struct Feedback {
-    _multi: MultiProgress,
-    global_pb: ProgressBar,
-}
-
-impl Default for Feedback {
-    fn default() -> Self {
-        let multi = MultiProgress::new();
-
-        let global_pb = ProgressBar::new_spinner();
-        let global_pb = multi.add(global_pb);
-        global_pb.set_style(
-            ProgressStyle::with_template(
-                "{spinner:.green} [{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} (eta: {eta}) {msg}",
-            )
-            .unwrap()
-            .progress_chars("#>-"),
-        );
-
-        Self {
-            _multi: multi,
-            global_pb,
-        }
-    }
-}
+use crate::feedback::Feedback;
 
 #[derive(Debug, clap::Args)]
-pub struct Args {}
+pub struct Args;
 
-pub fn run(config: &crate::Config, _args: &Args) -> miette::Result<()> {
+pub fn run(config: &crate::Config, _args: &Args, feedback: &Feedback) -> miette::Result<()> {
     //crate::common::setup_tracing(&config.logging)?;
 
-    let feedback = Feedback::default();
+    let progress = feedback.slot_progress_bar();
+    progress.set_message("rebuilding ledger");
 
     let (byron, shelley, _) = crate::common::open_genesis_files(&config.genesis)?;
 
-    let (wal, mut ledger) =
-        crate::common::open_data_stores(config).context("opening data stores")?;
+    let wal = crate::common::open_wal(config).context("opening WAL store")?;
 
-    if ledger
+    let light = dolos::state::redb::LedgerStore::in_memory_v2_light()
+        .into_diagnostic()
+        .context("creating in-memory state store")?;
+
+    let mut light = dolos::state::LedgerStore::Redb(light);
+
+    if light
         .is_empty()
         .into_diagnostic()
         .context("checking empty state")?
@@ -56,7 +37,7 @@ pub fn run(config: &crate::Config, _args: &Args) -> miette::Result<()> {
 
         let delta = dolos::ledger::compute_origin_delta(&byron);
 
-        ledger
+        light
             .apply(&[delta])
             .into_diagnostic()
             .context("applying origin utxos")?;
@@ -69,11 +50,11 @@ pub fn run(config: &crate::Config, _args: &Args) -> miette::Result<()> {
         .ok_or(miette::miette!("no WAL tip found"))?;
 
     match tip {
-        wal::ChainPoint::Origin => feedback.global_pb.set_length(0),
-        wal::ChainPoint::Specific(slot, _) => feedback.global_pb.set_length(slot),
+        wal::ChainPoint::Origin => progress.set_length(0),
+        wal::ChainPoint::Specific(slot, _) => progress.set_length(slot),
     }
 
-    let wal_seq = ledger
+    let wal_seq = light
         .cursor()
         .into_diagnostic()
         .context("finding ledger cursor")?
@@ -100,14 +81,39 @@ pub fn run(config: &crate::Config, _args: &Args) -> miette::Result<()> {
             .into_diagnostic()
             .context("decoding blocks")?;
 
-        dolos::state::import_block_batch(&blocks, &mut ledger, &byron, &shelley)
+        dolos::state::apply_block_batch(&blocks, &mut light, &byron, &shelley)
             .into_diagnostic()
             .context("importing blocks to ledger store")?;
 
-        blocks
-            .last()
-            .inspect(|b| feedback.global_pb.set_position(b.slot()));
+        blocks.last().inspect(|b| progress.set_position(b.slot()));
     }
+
+    let ledger_path = crate::common::define_ledger_path(config).context("finding ledger path")?;
+
+    let disk = dolos::state::redb::LedgerStore::open_v2_light(ledger_path, None)
+        .into_diagnostic()
+        .context("opening ledger db")?;
+
+    let disk = dolos::state::LedgerStore::Redb(disk);
+
+    let pb = feedback.indeterminate_progress_bar();
+    pb.set_message("copying memory ledger into disc");
+
+    light
+        .copy(&disk)
+        .into_diagnostic()
+        .context("copying from memory db into disc")?;
+
+    pb.abandon_with_message("ledger copy to disk finished");
+
+    let pb = feedback.indeterminate_progress_bar();
+    pb.set_message("creating indexes");
+
+    disk.upgrade()
+        .into_diagnostic()
+        .context("creating indexes")?;
+
+    pb.abandon_with_message("indexes created");
 
     Ok(())
 }

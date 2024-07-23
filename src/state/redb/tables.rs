@@ -1,11 +1,13 @@
-use ::redb::{Error, MultimapTableDefinition, TableDefinition, WriteTransaction};
+use ::redb::{MultimapTableDefinition, TableDefinition, WriteTransaction};
+use ::redb::{Range, ReadTransaction, ReadableTable as _, TableError};
 use itertools::Itertools as _;
 use pallas::{crypto::hash::Hash, ledger::traverse::MultiEraOutput};
-use redb::{ReadTransaction, ReadableTable as _, TableError};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
-use crate::ledger::*;
+use crate::state::*;
+
+type Error = crate::state::LedgerError;
 
 pub struct BlocksTable;
 
@@ -51,6 +53,30 @@ impl BlocksTable {
 type UtxosKey = (&'static [u8; 32], u32);
 type UtxosValue = (u16, &'static [u8]);
 
+pub struct UtxosIterator(Range<'static, UtxosKey, UtxosValue>);
+
+impl Iterator for UtxosIterator {
+    type Item = Result<(TxoRef, EraCbor), ::redb::StorageError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let x = self.0.next()?;
+
+        let x = x.map(|(k, v)| {
+            let (hash, idx) = k.value();
+            let k = TxoRef((*hash).into(), idx);
+
+            let (era, cbor) = v.value();
+            let era = pallas::ledger::traverse::Era::try_from(era).unwrap();
+            let cbor = cbor.to_owned();
+            let v = EraCbor(era, cbor);
+
+            (k, v)
+        });
+
+        Some(x)
+    }
+}
+
 pub struct UtxosTable;
 
 impl UtxosTable {
@@ -60,6 +86,12 @@ impl UtxosTable {
         wx.open_table(Self::DEF)?;
 
         Ok(())
+    }
+
+    pub fn iter(rx: &ReadTransaction) -> Result<UtxosIterator, Error> {
+        let table = rx.open_table(UtxosTable::DEF)?;
+        let range = table.range::<UtxosKey>(..)?;
+        Ok(UtxosIterator(range))
     }
 
     pub fn get_sparse(
@@ -114,6 +146,18 @@ impl UtxosTable {
 
         Ok(())
     }
+
+    pub fn copy(rx: &ReadTransaction, wx: &WriteTransaction) -> Result<(), Error> {
+        let source = rx.open_table(Self::DEF)?;
+        let mut target = wx.open_table(Self::DEF)?;
+
+        for entry in source.iter()? {
+            let (k, v) = entry?;
+            target.insert(k.value(), v.value())?;
+        }
+
+        Ok(())
+    }
 }
 
 pub struct PParamsTable;
@@ -155,6 +199,18 @@ impl PParamsTable {
 
         if let Some(ChainPoint(slot, _)) = delta.undone_position {
             table.remove(slot)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn copy(rx: &ReadTransaction, wx: &WriteTransaction) -> Result<(), Error> {
+        let source = rx.open_table(Self::DEF)?;
+        let mut target = wx.open_table(Self::DEF)?;
+
+        for entry in source.iter()? {
+            let (k, v) = entry?;
+            target.insert(k.value(), v.value())?;
         }
 
         Ok(())
@@ -291,6 +347,18 @@ impl CursorTable {
         Ok(())
     }
 
+    pub fn copy(rx: &ReadTransaction, wx: &WriteTransaction) -> Result<(), Error> {
+        let source = rx.open_table(Self::DEF)?;
+        let mut target = wx.open_table(Self::DEF)?;
+
+        for entry in source.iter()? {
+            let (k, v) = entry?;
+            target.insert(k.value(), v.value())?;
+        }
+
+        Ok(())
+    }
+
     pub fn last(rx: &ReadTransaction) -> Result<Option<(BlockSlot, CursorValue)>, Error> {
         let table = rx.open_table(Self::DEF)?;
 
@@ -381,7 +449,7 @@ impl FilterIndexes {
         Self::get_by_key(rx, Self::BY_ASSET, asset)
     }
 
-    fn split_address(utxo: &MultiEraOutput) -> SplitAddressResult {
+    fn split_address(utxo: &MultiEraOutput) -> Result<SplitAddressResult, Error> {
         use pallas::ledger::addresses::Address;
 
         match utxo.address() {
@@ -390,19 +458,19 @@ impl FilterIndexes {
                     let a = x.to_vec();
                     let b = x.payment().to_vec();
                     let c = x.delegation().to_vec();
-                    SplitAddressResult(Some(a), Some(b), Some(c))
+                    Ok(SplitAddressResult(Some(a), Some(b), Some(c)))
                 }
                 Address::Stake(x) => {
                     let a = x.to_vec();
                     let c = x.to_vec();
-                    SplitAddressResult(Some(a), None, Some(c))
+                    Ok(SplitAddressResult(Some(a), None, Some(c)))
                 }
                 Address::Byron(x) => {
                     let a = x.to_vec();
-                    SplitAddressResult(Some(a), None, None)
+                    Ok(SplitAddressResult(Some(a), None, None))
                 }
             },
-            Err(_) => todo!(),
+            Err(err) => Err(err.into()),
         }
     }
 
@@ -413,12 +481,17 @@ impl FilterIndexes {
         let mut policy_table = wx.open_multimap_table(Self::BY_POLICY)?;
         let mut asset_table = wx.open_multimap_table(Self::BY_ASSET)?;
 
-        for (utxo, body) in delta.produced_utxo.iter() {
+        let trackable = delta
+            .produced_utxo
+            .iter()
+            .chain(delta.recovered_stxi.iter());
+
+        for (utxo, body) in trackable {
             let v: (&[u8; 32], u32) = (&utxo.0, utxo.1);
 
             // TODO: decoding here is very inefficient
             let body = MultiEraOutput::try_from(body).unwrap();
-            let SplitAddressResult(addr, pay, stake) = Self::split_address(&body);
+            let SplitAddressResult(addr, pay, stake) = Self::split_address(&body)?;
 
             if let Some(k) = addr {
                 address_table.insert(k.as_slice(), v)?;
@@ -454,7 +527,7 @@ impl FilterIndexes {
             // TODO: decoding here is very inefficient
             let body = MultiEraOutput::try_from(body).unwrap();
 
-            let SplitAddressResult(addr, pay, stake) = Self::split_address(&body);
+            let SplitAddressResult(addr, pay, stake) = Self::split_address(&body)?;
 
             if let Some(k) = addr {
                 address_table.remove(k.as_slice(), v)?;
@@ -481,6 +554,37 @@ impl FilterIndexes {
                 }
             }
         }
+
+        Ok(())
+    }
+
+    fn copy_table<K: ::redb::Key, V: ::redb::Key + ::redb::Value>(
+        rx: &ReadTransaction,
+        wx: &WriteTransaction,
+        def: MultimapTableDefinition<K, V>,
+    ) -> Result<(), Error> {
+        let source = rx.open_multimap_table(def)?;
+        let mut target = wx.open_multimap_table(def)?;
+
+        let all = source.range::<K::SelfType<'static>>(..)?;
+
+        for entry in all {
+            let (key, values) = entry?;
+            for value in values {
+                let value = value?;
+                target.insert(key.value(), value.value())?;
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn copy(rx: &ReadTransaction, wx: &WriteTransaction) -> Result<(), Error> {
+        Self::copy_table(rx, wx, Self::BY_ADDRESS)?;
+        Self::copy_table(rx, wx, Self::BY_PAYMENT)?;
+        Self::copy_table(rx, wx, Self::BY_STAKE)?;
+        Self::copy_table(rx, wx, Self::BY_POLICY)?;
+        Self::copy_table(rx, wx, Self::BY_ASSET)?;
 
         Ok(())
     }

@@ -1,10 +1,10 @@
 use crate::{
     ledger::{
         pparams::{self, Genesis},
-        EraCbor, LedgerError, PParamsBody, TxoRef,
+        EraCbor, PParamsBody, TxoRef,
     },
     serve::GenesisFiles,
-    state::LedgerStore,
+    state::{LedgerError, LedgerStore},
 };
 use itertools::Itertools as _;
 use pallas::interop::utxorpc::{self as interop, spec::query::any_utxo_pattern::UtxoPattern};

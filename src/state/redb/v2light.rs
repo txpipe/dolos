@@ -1,4 +1,5 @@
 use ::redb::{Database, Durability};
+use itertools::Itertools;
 use std::sync::Arc;
 
 use crate::state::*;
@@ -25,7 +26,6 @@ impl LedgerStore {
         tables::CursorTable::initialize(&wx)?;
         tables::UtxosTable::initialize(&wx)?;
         tables::PParamsTable::initialize(&wx)?;
-        tables::FilterIndexes::initialize(&wx)?;
 
         wx.commit()?;
 
@@ -52,7 +52,6 @@ impl LedgerStore {
             tables::CursorTable::apply(&wx, delta)?;
             tables::UtxosTable::apply(&wx, delta)?;
             tables::PParamsTable::apply(&wx, delta)?;
-            tables::FilterIndexes::apply(&wx, delta)?;
         }
 
         wx.commit()?;
@@ -84,7 +83,6 @@ impl LedgerStore {
         tables::CursorTable::copy(&rx, &wx)?;
         tables::UtxosTable::copy(&rx, &wx)?;
         tables::PParamsTable::copy(&rx, &wx)?;
-        tables::FilterIndexes::copy(&rx, &wx)?;
 
         wx.commit()?;
 
@@ -106,28 +104,40 @@ impl LedgerStore {
         tables::PParamsTable::get_range(&rx, until)
     }
 
-    pub fn get_utxos_by_address(&self, address: &[u8]) -> Result<UtxoSet, Error> {
-        let rx = self.db().begin_read()?;
-        tables::FilterIndexes::get_by_address(&rx, address)
-    }
+    /// Upgrades a v2-light store to v2 by adding indexes
+    ///
+    /// This method will fail if the store has been cloned and those instances
+    /// are still active.
+    pub fn upgrade(self) -> Result<Database, Error> {
+        let db = Arc::try_unwrap(self.0).unwrap();
 
-    pub fn get_utxos_by_payment(&self, payment: &[u8]) -> Result<UtxoSet, Error> {
-        let rx = self.db().begin_read()?;
-        tables::FilterIndexes::get_by_payment(&rx, payment)
-    }
+        let mut wx = db.begin_write()?;
+        wx.set_durability(Durability::Eventual);
 
-    pub fn get_utxos_by_stake(&self, stake: &[u8]) -> Result<UtxoSet, Error> {
-        let rx = self.db().begin_read()?;
-        tables::FilterIndexes::get_by_stake(&rx, stake)
-    }
+        tables::FilterIndexes::initialize(&wx)?;
 
-    pub fn get_utxos_by_policy(&self, policy: &[u8]) -> Result<UtxoSet, Error> {
-        let rx = self.db().begin_read()?;
-        tables::FilterIndexes::get_by_policy(&rx, policy)
-    }
+        let rx = db.begin_read()?;
 
-    pub fn get_utxos_by_asset(&self, asset: &[u8]) -> Result<UtxoSet, Error> {
-        let rx = self.db().begin_read()?;
-        tables::FilterIndexes::get_by_asset(&rx, asset)
+        let utxo_chunks = tables::UtxosTable::iter(&rx)?.chunks(1000);
+
+        for chunk in utxo_chunks.into_iter() {
+            let chunk: Vec<_> = chunk.try_collect()?;
+
+            let delta = LedgerDelta {
+                produced_utxo: chunk.into_iter().collect(),
+                new_position: Default::default(),
+                undone_position: Default::default(),
+                consumed_utxo: Default::default(),
+                recovered_stxi: Default::default(),
+                undone_utxo: Default::default(),
+                new_pparams: Default::default(),
+            };
+
+            tables::FilterIndexes::apply(&wx, &delta)?;
+        }
+
+        wx.commit()?;
+
+        Ok(db)
     }
 }

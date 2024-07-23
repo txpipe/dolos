@@ -1,7 +1,7 @@
 [package]
 name = "dolos"
 description = "A Cardano data-node built in Rust"
-version = "0.12.0"
+version = "0.13.1"
 edition = "2021"
 repository = "https://github.com/txpipe/dolos"
 homepage = "https://github.com/txpipe/dolos"
@@ -12,8 +12,8 @@ authors = ["Santiago Carmuega <santiago@carmuega.me>"]
 
 
 [dependencies]
-# pallas = { git = "https://github.com/txpipe/pallas.git", features = ["hardano", "applying"] }
-pallas = { version = "^0.29", features = ["hardano", "applying"] }
+pallas = { git = "https://github.com/txpipe/pallas.git", features = ["hardano", "applying"] }
+# pallas = { version = "^0.29", features = ["hardano", "applying"] }
 # pallas = { path = "../pallas/pallas", features = ["hardano", "applying"] }
 
 gasket = { git = "https://github.com/construkts/gasket-rs.git", features = ["derive"] }

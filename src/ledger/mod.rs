@@ -30,7 +30,7 @@ impl From<EraCbor> for (Era, Vec<u8>) {
 }
 
 impl<'a> From<MultiEraOutput<'a>> for EraCbor {
-    fn from(value: MultiEraOutput) -> Self {
+    fn from(value: MultiEraOutput<'a>) -> Self {
         EraCbor(value.era(), value.encode())
     }
 }
@@ -74,18 +74,6 @@ pub type UtxoSet = HashSet<TxoRef>;
 pub enum BrokenInvariant {
     #[error("missing utxo {0:?}")]
     MissingUtxo(TxoRef),
-}
-
-#[derive(Debug, Error)]
-pub enum LedgerError {
-    #[error("broken invariant")]
-    BrokenInvariant(#[source] BrokenInvariant),
-
-    #[error("storage error")]
-    StorageError(#[source] ::redb::Error),
-
-    #[error("query not supported")]
-    QueryNotSupported,
 }
 
 /// A slice of the ledger relevant for a specific task

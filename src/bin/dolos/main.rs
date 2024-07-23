@@ -8,6 +8,7 @@ mod common;
 mod daemon;
 mod doctor;
 mod eval;
+mod feedback;
 mod serve;
 mod sync;
 
@@ -183,12 +184,14 @@ fn main() -> Result<()> {
         .into_diagnostic()
         .context("parsing configuration");
 
+    let feedback = crate::feedback::Feedback::default();
+
     match (config, args.command) {
         (Ok(config), Command::Daemon(args)) => daemon::run(config, &args),
         (Ok(config), Command::Sync(args)) => sync::run(&config, &args),
         (Ok(config), Command::Serve(args)) => serve::run(config, &args),
         (Ok(config), Command::Eval(args)) => eval::run(&config, &args),
-        (Ok(config), Command::Doctor(args)) => doctor::run(&config, &args),
+        (Ok(config), Command::Doctor(args)) => doctor::run(&config, &args, &feedback),
 
         // the init command is special because it knows how to execute with or without a valid
         // configuration, that is why we pass the whole result and let the command logic decide what
@@ -200,7 +203,7 @@ fn main() -> Result<()> {
         (Ok(config), Command::Data(args)) => data::run(&config, &args),
 
         #[cfg(feature = "mithril")]
-        (Ok(config), Command::Bootstrap(args)) => bootstrap::run(&config, &args),
+        (Ok(config), Command::Bootstrap(args)) => bootstrap::run(&config, &args, &feedback),
 
         (Err(x), _) => Err(x),
     }

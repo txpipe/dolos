@@ -1,19 +1,12 @@
-use dolos::{
-    state,
-    wal::{self, ReadUtils, WalReader as _, WalWriter},
-};
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use dolos::wal::{self, WalWriter};
 use itertools::Itertools;
 use miette::{bail, Context, IntoDiagnostic};
 use mithril_client::{ClientBuilder, MessageBuilder, MithrilError, MithrilResult};
-use pallas::ledger::{
-    configs::{byron, shelley},
-    traverse::MultiEraBlock,
-};
+use pallas::ledger::traverse::MultiEraBlock;
 use std::{path::Path, sync::Arc};
 use tracing::{debug, info, warn};
 
-use crate::{common::Stores, MithrilConfig};
+use crate::{feedback::Feedback, MithrilConfig};
 
 #[derive(Debug, clap::Args)]
 pub struct Args {
@@ -37,70 +30,13 @@ pub struct Args {
     retain_snapshot: bool,
 }
 
-struct Feedback {
-    _multi: MultiProgress,
-    download_pb: ProgressBar,
-    validate_pb: ProgressBar,
-    wal_pb: ProgressBar,
-    ledger_pb: ProgressBar,
-}
-
-impl Feedback {
-    fn indeterminate_progress_bar(owner: &mut MultiProgress) -> ProgressBar {
-        let pb = ProgressBar::new_spinner();
-
-        pb.set_style(
-            ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] {msg}").unwrap(),
-        );
-
-        owner.add(pb)
-    }
-
-    fn slot_progress_bar(owner: &mut MultiProgress) -> ProgressBar {
-        let pb = ProgressBar::new_spinner();
-
-        pb.set_style(
-            ProgressStyle::with_template(
-                "{spinner:.green} [{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} slots (eta: {eta}) {msg}",
-            )
-            .unwrap()
-            .progress_chars("#>-"),
-        );
-
-        owner.add(pb)
-    }
-
-    fn bytes_progress_bar(owner: &mut MultiProgress) -> ProgressBar {
-        let pb = ProgressBar::new_spinner();
-
-        pb.set_style(
-            ProgressStyle::with_template(
-                "{spinner:.green} [{elapsed_precise}] {bar:40.cyan/blue} {bytes}/{total_bytes} (eta: {eta}) {msg}",
-            )
-            .unwrap()
-            .progress_chars("#>-"),
-        );
-
-        owner.add(pb)
-    }
-}
-
-impl Default for Feedback {
-    fn default() -> Self {
-        let mut multi = MultiProgress::new();
-
-        Self {
-            download_pb: Self::bytes_progress_bar(&mut multi),
-            validate_pb: Self::indeterminate_progress_bar(&mut multi),
-            wal_pb: Self::slot_progress_bar(&mut multi),
-            ledger_pb: Self::slot_progress_bar(&mut multi),
-            _multi: multi,
-        }
-    }
+struct MithrilFeedback {
+    download_pb: indicatif::ProgressBar,
+    validate_pb: indicatif::ProgressBar,
 }
 
 #[async_trait::async_trait]
-impl mithril_client::feedback::FeedbackReceiver for Feedback {
+impl mithril_client::feedback::FeedbackReceiver for MithrilFeedback {
     async fn handle_event(&self, event: mithril_client::feedback::MithrilEvent) {
         match event {
             mithril_client::feedback::MithrilEvent::SnapshotDownloadStarted { .. } => {
@@ -141,10 +77,15 @@ impl mithril_client::feedback::FeedbackReceiver for Feedback {
 async fn fetch_snapshot(
     args: &Args,
     config: &MithrilConfig,
-    feedback: Arc<Feedback>,
+    feedback: &Feedback,
 ) -> MithrilResult<()> {
+    let feedback = MithrilFeedback {
+        download_pb: feedback.bytes_progress_bar(),
+        validate_pb: feedback.indeterminate_progress_bar(),
+    };
+
     let client = ClientBuilder::aggregator(&config.aggregator, &config.genesis_key)
-        .add_feedback_receiver(feedback)
+        .add_feedback_receiver(Arc::new(feedback))
         .build()?;
 
     let snapshots = client.snapshot().list().await?;
@@ -194,32 +135,22 @@ async fn fetch_snapshot(
     Ok(())
 }
 
-fn open_empty_stores(config: &super::Config) -> miette::Result<Stores> {
-    let not_empty = crate::common::data_stores_exist(config);
+fn open_empty_wal(config: &super::Config) -> miette::Result<wal::redb::WalStore> {
+    let wal = crate::common::open_wal(config)?;
 
-    let delete = not_empty && {
-        inquire::Confirm::new("do you want to delete existing data?")
-            .with_default(false)
-            .prompt()
-            .into_diagnostic()
-            .context("confirming delete")?
-    };
+    let is_empty = wal.is_empty().into_diagnostic()?;
 
-    if not_empty && delete {
-        crate::common::destroy_data_stores(config).context("destroying existing data stores")?;
-    } else if not_empty {
+    if !is_empty {
         bail!("can't continue with data already available");
     }
 
-    crate::common::open_data_stores(config)
-        .into_diagnostic()
-        .context("opening store")
+    Ok(wal)
 }
 
 fn import_hardano_into_wal(
+    config: &super::Config,
     immutable_path: &Path,
     feedback: &Feedback,
-    wal: &mut wal::redb::WalStore,
 ) -> Result<(), miette::Error> {
     let iter = pallas::storage::hardano::immutable::read_blocks(immutable_path)
         .into_diagnostic()
@@ -230,10 +161,12 @@ fn import_hardano_into_wal(
         .context("reading immutable db tip")?
         .ok_or(miette::miette!("immutable db has no tip"))?;
 
-    feedback
-        .wal_pb
-        .set_message("importing immutable db from Haskell into WAL");
-    feedback.wal_pb.set_length(tip.slot_or_default());
+    let mut wal = open_empty_wal(config).context("opening WAL")?;
+
+    let progress = feedback.slot_progress_bar();
+
+    progress.set_message("importing immutable db from Haskell into WAL");
+    progress.set_length(tip.slot_or_default());
 
     for chunk in iter.chunks(100).into_iter() {
         let bodies: Vec<_> = chunk
@@ -248,7 +181,7 @@ fn import_hardano_into_wal(
                     .into_diagnostic()
                     .context("decoding block cbor")?;
 
-                feedback.wal_pb.set_position(blockd.slot());
+                progress.set_position(blockd.slot());
                 debug!(slot = blockd.slot(), "importing block");
 
                 miette::Result::Ok(wal::RawBlock {
@@ -265,75 +198,18 @@ fn import_hardano_into_wal(
             .context("adding wal entries")?;
     }
 
-    Ok(())
-}
-
-fn rebuild_ledger_from_wal(
-    feedback: &Feedback,
-    wal: &wal::redb::WalStore,
-    ledger: &mut state::LedgerStore,
-    byron: &byron::GenesisFile,
-    shelley: &shelley::GenesisFile,
-) -> miette::Result<()> {
-    let delta = dolos::ledger::compute_origin_delta(byron);
-
-    ledger
-        .apply(&[delta])
-        .into_diagnostic()
-        .context("applying origin utxos")?;
-
-    let (_, tip) = wal
-        .find_tip()
-        .into_diagnostic()
-        .context("finding WAL tip")?
-        .ok_or(miette::miette!("no WAL tip found"))?;
-
-    feedback.ledger_pb.set_message("re-building ledger");
-    match tip {
-        wal::ChainPoint::Origin => feedback.ledger_pb.set_length(0),
-        wal::ChainPoint::Specific(tip, _) => feedback.ledger_pb.set_length(tip),
-    };
-
-    let remaining = wal
-        .crawl_from(None)
-        .into_diagnostic()
-        .context("crawling wal")?
-        .filter_forward()
-        .into_blocks()
-        .flatten();
-
-    for chunk in remaining.chunks(100).into_iter() {
-        let bodies = chunk.map(|wal::RawBlock { body, .. }| body).collect_vec();
-
-        let blocks: Vec<_> = bodies
-            .iter()
-            .map(|b| MultiEraBlock::decode(b))
-            .try_collect()
-            .into_diagnostic()
-            .context("decoding blocks")?;
-
-        dolos::state::import_block_batch(&blocks, ledger, byron, shelley)
-            .into_diagnostic()
-            .context("importing blocks to ledger store")?;
-
-        blocks
-            .last()
-            .inspect(|b| feedback.ledger_pb.set_position(b.slot()));
-    }
+    progress.abandon_with_message("WAL import complete");
 
     Ok(())
 }
 
-pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
+pub fn run(config: &super::Config, args: &Args, feedback: &Feedback) -> miette::Result<()> {
     //crate::common::setup_tracing(&config.logging)?;
-    let feedback = Arc::new(Feedback::default());
 
     let mithril = config
         .mithril
         .as_ref()
         .ok_or(miette::miette!("missing mithril config"))?;
-
-    let (mut wal, mut ledger) = open_empty_stores(config).context("opening empty data stores")?;
 
     let target_directory = Path::new(&args.download_dir);
 
@@ -349,7 +225,7 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
     if !args.skip_download {
         tokio::runtime::Runtime::new()
             .unwrap()
-            .block_on(fetch_snapshot(args, mithril, feedback.clone()))
+            .block_on(fetch_snapshot(args, mithril, feedback))
             .map_err(|err| miette::miette!(err.to_string()))
             .context("fetching and validating mithril snapshot")?;
     } else {
@@ -358,11 +234,9 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
 
     let immutable_path = Path::new(&args.download_dir).join("immutable");
 
-    let (byron, shelley, _) = crate::common::open_genesis_files(&config.genesis)?;
+    import_hardano_into_wal(config, &immutable_path, feedback)?;
 
-    import_hardano_into_wal(&immutable_path, &feedback, &mut wal)?;
-
-    rebuild_ledger_from_wal(&feedback, &wal, &mut ledger, &byron, &shelley)?;
+    crate::doctor::run_rebuild_ledger(config, feedback).context("rebuilding ledger")?;
 
     if !args.retain_snapshot {
         info!("deleting downloaded snapshot");

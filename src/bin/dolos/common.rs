@@ -1,10 +1,9 @@
-use std::time::Duration;
-
 use dolos::{state, wal};
 use miette::{Context as _, IntoDiagnostic};
 use pallas::ledger::configs::alonzo::GenesisFile as AlonzoFile;
 use pallas::ledger::configs::byron::GenesisFile as ByronFile;
 use pallas::ledger::configs::shelley::GenesisFile as ShelleyFile;
+use std::{path::PathBuf, time::Duration};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
@@ -15,6 +14,26 @@ use dolos::prelude::*;
 use crate::{GenesisConfig, LoggingConfig};
 
 pub type Stores = (wal::redb::WalStore, state::LedgerStore);
+
+pub fn open_wal(config: &crate::Config) -> Result<wal::redb::WalStore, Error> {
+    let root = &config.storage.path;
+
+    std::fs::create_dir_all(root).map_err(Error::storage)?;
+
+    let wal = wal::redb::WalStore::open(root.join("wal"), config.storage.wal_cache)
+        .map_err(Error::storage)?;
+
+    Ok(wal)
+}
+
+pub fn define_ledger_path(config: &crate::Config) -> Result<PathBuf, Error> {
+    let root = &config.storage.path;
+    std::fs::create_dir_all(root).map_err(Error::storage)?;
+
+    let ledger = root.join("ledger");
+
+    Ok(ledger)
+}
 
 pub fn open_data_stores(config: &crate::Config) -> Result<Stores, Error> {
     let root = &config.storage.path;
@@ -29,26 +48,6 @@ pub fn open_data_stores(config: &crate::Config) -> Result<Stores, Error> {
         .into();
 
     Ok((wal, ledger))
-}
-
-pub fn data_stores_exist(config: &crate::Config) -> bool {
-    let root = &config.storage.path;
-
-    root.join("wal").is_file() || root.join("ledger").is_file()
-}
-
-pub fn destroy_data_stores(config: &crate::Config) -> Result<(), Error> {
-    let root = &config.storage.path;
-
-    if root.join("wal").is_file() {
-        std::fs::remove_file(root.join("wal")).map_err(Error::storage)?;
-    }
-
-    if root.join("ledger").is_file() {
-        std::fs::remove_file(root.join("ledger")).map_err(Error::storage)?;
-    }
-
-    Ok(())
 }
 
 pub fn setup_tracing(config: &LoggingConfig) -> miette::Result<()> {
