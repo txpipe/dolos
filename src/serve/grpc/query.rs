@@ -225,19 +225,6 @@ fn into_u5c_utxo(
     })
 }
 
-fn compute_epoch_from_slot(genesis_values: &GenesisValues, slot: u64) -> u64 {
-    if slot < genesis_values.shelley_known_slot {
-        (slot * genesis_values.byron_slot_length as u64) / genesis_values.byron_epoch_length as u64
-    } else {
-        let slots_before_shelley = (genesis_values.shelley_known_slot
-            * genesis_values.byron_slot_length as u64)
-            / genesis_values.byron_epoch_length as u64;
-        ((slot - genesis_values.shelley_known_slot) * genesis_values.shelley_slot_length as u64)
-            / genesis_values.shelley_epoch_length as u64
-            + slots_before_shelley
-    }
-}
-
 fn map_pparams(
     pparams: MultiEraProtocolParameters,
 ) -> Result<interop::spec::cardano::PParams, Status> {
@@ -504,7 +491,7 @@ impl u5c::query::query_service_server::QueryService for QueryServiceImpl {
             None => return Err(Status::internal("Invalid networdMagic.")),
         };
 
-        let epoch = compute_epoch_from_slot(&genesis_values, curr_point.0);
+        let (epoch, _) = genesis_values.absolute_slot_to_relative(curr_point.0);
         let pparams = pparams::fold_pparams(&genesis, &updates, epoch);
 
         Ok(Response::new(u5c::query::ReadParamsResponse {
@@ -619,52 +606,5 @@ impl u5c::query::query_service_server::QueryService for QueryServiceImpl {
             items,
             ledger_tip: cursor,
         }))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_compute_epoch_from_slot() {
-        // Mainnet
-        assert_eq!(
-            498,
-            compute_epoch_from_slot(&GenesisValues::mainnet(), 130199162)
-        );
-        assert_eq!(
-            208,
-            compute_epoch_from_slot(
-                &GenesisValues::mainnet(),
-                GenesisValues::mainnet().shelley_known_slot
-            )
-        );
-
-        // Preprod
-        assert_eq!(
-            156,
-            compute_epoch_from_slot(&GenesisValues::preprod(), 66081907)
-        );
-        assert_eq!(
-            4,
-            compute_epoch_from_slot(
-                &GenesisValues::preprod(),
-                GenesisValues::preprod().shelley_known_slot
-            )
-        );
-
-        // Preview
-        assert_eq!(
-            637,
-            compute_epoch_from_slot(&GenesisValues::preview(), 55108950)
-        );
-        assert_eq!(
-            0,
-            compute_epoch_from_slot(
-                &GenesisValues::preview(),
-                GenesisValues::preview().shelley_known_slot
-            )
-        );
     }
 }
