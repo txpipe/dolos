@@ -227,7 +227,6 @@ fn into_u5c_utxo(
 
 fn map_pparams(
     pparams: MultiEraProtocolParameters,
-    paths: Option<Vec<String>>,
 ) -> Result<interop::spec::cardano::PParams, Status> {
     let parse_error = Status::internal("Failed to parse protocol params");
     match pparams {
@@ -458,7 +457,7 @@ impl u5c::query::query_service_server::QueryService for QueryServiceImpl {
         &self,
         request: Request<u5c::query::ReadParamsRequest>,
     ) -> Result<Response<u5c::query::ReadParamsResponse>, Status> {
-        let message = request.into_inner();
+        let _message = request.into_inner();
 
         info!("received new grpc query");
 
@@ -499,7 +498,6 @@ impl u5c::query::query_service_server::QueryService for QueryServiceImpl {
             values: Some(u5c::query::AnyChainParams {
                 params: Some(u5c::query::any_chain_params::Params::Cardano(map_pparams(
                     pparams,
-                    message.field_mask.map(|mask| mask.paths),
                 )?)),
             }),
             ledger_tip: Some(u5c::query::ChainPoint {
