@@ -117,9 +117,9 @@ impl LedgerStore {
         }
     }
 
-    pub fn get_utxo_by_asset(&self, policy: &[u8]) -> Result<UtxoSet, LedgerError> {
+    pub fn get_utxo_by_asset(&self, asset: &[u8]) -> Result<UtxoSet, LedgerError> {
         match self {
-            LedgerStore::Redb(x) => x.get_utxo_by_asset(policy),
+            LedgerStore::Redb(x) => x.get_utxo_by_asset(asset),
         }
     }
 

@@ -226,7 +226,7 @@ impl LedgerStore {
 
     pub fn get_utxo_by_asset(&self, asset: &[u8]) -> Result<UtxoSet, LedgerError> {
         match self {
-            LedgerStore::SchemaV2(x) => Ok(x.get_utxos_by_policy(asset)?),
+            LedgerStore::SchemaV2(x) => Ok(x.get_utxos_by_asset(asset)?),
             _ => Err(LedgerError::QueryNotSupported),
         }
     }
