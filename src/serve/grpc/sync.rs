@@ -162,7 +162,16 @@ impl u5c::sync::sync_service_server::SyncService for SyncServiceImpl {
 
         let mapper = self.mapper.clone();
 
+        // Find the intersect, skip 1 block, then convert each to a tip response
+        // We skip 1 block to mimic the ouroboros chainsync miniprotocol convention
+        // We both agree that the intersection point is in our past, so it doesn't
+        // make sense to broadcast this.
+        // TODO: In theory, we might also want to send a `Reset` message, so that
+        // the consumer knows what intersection was found and can reset their state
+        // This would also mimic ouroboros giving a `Rollback` as the first message
+        // But, this requires more deliberation, so is left off for now
         let stream = wal::WalStream::start(self.wal.clone(), from_seq)
+            .skip(1)
             .map(move |(_, log)| Ok(roll_to_tip_response(&mapper, &log)));
 
         Ok(Response::new(Box::pin(stream)))
