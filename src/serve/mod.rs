@@ -10,6 +10,7 @@ use crate::state::LedgerStore;
 use crate::wal::redb::WalStore;
 
 pub mod grpc;
+pub mod utils;
 
 #[cfg(unix)]
 pub mod o7s_unix;

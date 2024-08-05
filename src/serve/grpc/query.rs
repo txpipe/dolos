@@ -3,7 +3,7 @@ use crate::{
         pparams::{self, Genesis},
         EraCbor, PParamsBody, TxoRef,
     },
-    serve::GenesisFiles,
+    serve::{utils::apply_mask, GenesisFiles},
     state::{LedgerError, LedgerStore},
 };
 use itertools::Itertools as _;
@@ -300,10 +300,15 @@ fn map_pparams(
                 memory: params.max_block_ex_units.mem,
                 steps: params.max_block_ex_units.steps,
             }),
-
-            // TODO: How to parse cost models.
-            // cost_models: params.cost_models_for_script_languages,
-            cost_models: None,
+            cost_models: Some(interop::spec::cardano::CostModels {
+                // Only plutusv1.
+                plutus_v1: params
+                    .cost_models_for_script_languages
+                    .first()
+                    .map(|(_, data)| data.to_vec())
+                    .unwrap_or(Default::default()),
+                ..Default::default()
+            }),
 
             ..Default::default()
         }),
@@ -437,7 +442,16 @@ fn map_pparams(
                 memory: params.max_block_ex_units.mem,
                 steps: params.max_block_ex_units.steps,
             }),
-
+            cost_models: Some(interop::spec::cardano::CostModels {
+                plutus_v1: params
+                    .cost_models_for_script_languages
+                    .plutus_v1
+                    .unwrap_or(Default::default()),
+                plutus_v2: params
+                    .cost_models_for_script_languages
+                    .plutus_v2
+                    .unwrap_or(Default::default()),
+            }),
             ..Default::default()
         }),
         MultiEraProtocolParameters::Byron(params) => Ok(interop::spec::cardano::PParams {
@@ -457,7 +471,7 @@ impl u5c::query::query_service_server::QueryService for QueryServiceImpl {
         &self,
         request: Request<u5c::query::ReadParamsRequest>,
     ) -> Result<Response<u5c::query::ReadParamsResponse>, Status> {
-        let _message = request.into_inner();
+        let message = request.into_inner();
 
         info!("received new grpc query");
 
@@ -493,8 +507,7 @@ impl u5c::query::query_service_server::QueryService for QueryServiceImpl {
 
         let (epoch, _) = genesis_values.absolute_slot_to_relative(curr_point.0);
         let pparams = pparams::fold_pparams(&genesis, &updates, epoch);
-
-        Ok(Response::new(u5c::query::ReadParamsResponse {
+        let mut response = u5c::query::ReadParamsResponse {
             values: Some(u5c::query::AnyChainParams {
                 params: Some(u5c::query::any_chain_params::Params::Cardano(map_pparams(
                     pparams,
@@ -504,7 +517,14 @@ impl u5c::query::query_service_server::QueryService for QueryServiceImpl {
                 slot: curr_point.0,
                 hash: curr_point.1.to_vec().into(),
             }),
-        }))
+        };
+
+        if let Some(mask) = message.field_mask {
+            response = apply_mask(response, mask.paths)
+                .map_err(|_| Status::internal("Failed to apply field mask"))?
+        }
+
+        Ok(Response::new(response))
     }
 
     async fn read_data(
