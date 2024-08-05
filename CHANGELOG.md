@@ -2,6 +2,29 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.14.1] - 2024-08-03
+
+### 🐛 Bug Fixes
+
+- Don't panic on Conway certs (#319)
+
+## [0.14.0] - 2024-08-02
+
+### 🚀 Features
+
+- Add find WAL sequence utility (#317)
+
+### 🐛 Bug Fixes
+
+- *(serve)* Use correct function to filter utxos by asset (#313)
+- *(serve)* Skip the first block in the follow-tip grpc API (#298)
+- *(serve)* Send reset event on follow-tip intersect (#318)
+
+### ⚙️ Miscellaneous Tasks
+
+- Upgrade Pallas to use u5c v0.8 (#315)
+- Release dolos version 0.14.0
+
 ## [0.13.1] - 2024-07-19
 
 ### 🐛 Bug Fixes
@@ -15,6 +38,7 @@ All notable changes to this project will be documented in this file.
 ### ⚙️ Miscellaneous Tasks
 
 - Use Pallas edge with long address fix (#311)
+- Release dolos version 0.13.1
 
 ## [0.13.0] - 2024-07-18
 

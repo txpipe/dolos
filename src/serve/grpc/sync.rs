@@ -1,13 +1,15 @@
 use futures_core::Stream;
+use futures_util::stream::once;
 use futures_util::StreamExt;
 use itertools::{Either, Itertools};
 use pallas::interop::utxorpc as interop;
+use pallas::interop::utxorpc::spec::sync::BlockRef;
 use pallas::interop::utxorpc::{spec as u5c, Mapper};
 use std::pin::Pin;
 use tonic::{Request, Response, Status};
 
 use crate::state::LedgerStore;
-use crate::wal::{self, RawBlock, WalReader as _};
+use crate::wal::{self, ChainPoint, RawBlock, WalReader as _};
 
 fn u5c_to_chain_point(block_ref: u5c::sync::BlockRef) -> Result<wal::ChainPoint, Status> {
     Ok(wal::ChainPoint::Specific(
@@ -40,7 +42,7 @@ fn raw_to_blockref(raw: &wal::RawBlock) -> u5c::sync::BlockRef {
     }
 }
 
-fn roll_to_tip_response(
+fn wal_log_to_tip_response(
     mapper: &Mapper<LedgerStore>,
     log: &wal::LogValue,
 ) -> u5c::sync::FollowTipResponse {
@@ -54,6 +56,25 @@ fn roll_to_tip_response(
             }
             // TODO: shouldn't we have a u5c event for origin?
             wal::LogValue::Mark(..) => None,
+        },
+    }
+}
+
+fn point_to_reset_tip_response(point: ChainPoint) -> u5c::sync::FollowTipResponse {
+    match point {
+        ChainPoint::Origin => u5c::sync::FollowTipResponse {
+            action: u5c::sync::follow_tip_response::Action::Reset(BlockRef {
+                hash: vec![].into(),
+                index: 0,
+            })
+            .into(),
+        },
+        ChainPoint::Specific(slot, hash) => u5c::sync::FollowTipResponse {
+            action: u5c::sync::follow_tip_response::Action::Reset(BlockRef {
+                hash: hash.to_vec().into(),
+                index: slot,
+            })
+            .into(),
         },
     }
 }
@@ -140,12 +161,11 @@ impl u5c::sync::sync_service_server::SyncService for SyncServiceImpl {
     ) -> Result<Response<Self::FollowTipStream>, tonic::Status> {
         let request = request.into_inner();
 
-        let from_seq = if request.intersect.is_empty() {
+        let (from_seq, point) = if request.intersect.is_empty() {
             self.wal
                 .find_tip()
                 .map_err(|_err| Status::internal("can't read WAL"))?
-                .map(|(x, _)| x)
-                .unwrap_or_default()
+                .ok_or(Status::internal("WAL has no data"))?
         } else {
             let intersect: Vec<_> = request
                 .intersect
@@ -156,14 +176,25 @@ impl u5c::sync::sync_service_server::SyncService for SyncServiceImpl {
             self.wal
                 .find_intersect(&intersect)
                 .map_err(|_err| Status::internal("can't read WAL"))?
-                .map(|(x, _)| x)
                 .ok_or(Status::internal("can't find WAL sequence"))?
         };
 
         let mapper = self.mapper.clone();
 
-        let stream = wal::WalStream::start(self.wal.clone(), from_seq)
-            .map(move |(_, log)| Ok(roll_to_tip_response(&mapper, &log)));
+        // Find the intersect, skip 1 block, then convert each to a tip response
+        // We skip 1 block to mimic the ouroboros chainsync miniprotocol convention
+        // We both agree that the intersection point is in our past, so it doesn't
+        // make sense to broadcast this. We send a `Reset` message, so that
+        // the consumer knows what intersection was found and can reset their state
+        // This would also mimic ouroboros giving a `Rollback` as the first message.
+
+        let reset = once(async { Ok(point_to_reset_tip_response(point)) });
+
+        let forward = wal::WalStream::start(self.wal.clone(), from_seq)
+            .skip(1)
+            .map(move |(_, log)| Ok(wal_log_to_tip_response(&mapper, &log)));
+
+        let stream = reset.chain(forward);
 
         Ok(Response::new(Box::pin(stream)))
     }
