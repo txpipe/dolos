@@ -32,8 +32,11 @@ pub async fn run(config: super::Config, _args: &Args) -> miette::Result<()> {
     // TODO: spawn submit pipeline. Skipping for now since it's giving more trouble
     // that benefits
 
+    // We need new file handled for the separate process.
+    let (byron, shelley, alonzo) = crate::common::open_genesis_files(&config.genesis)?;
     let serve = tokio::spawn(dolos::serve::serve(
         config.serve,
+        (alonzo, byron, shelley),
         wal.clone(),
         ledger.clone(),
         mempool.clone(),
