@@ -1,11 +1,21 @@
 use crate::{
-    ledger::{EraCbor, TxoRef},
+    ledger::{
+        pparams::{self, Genesis},
+        EraCbor, PParamsBody, TxoRef,
+    },
+    serve::{utils::apply_mask, GenesisFiles},
     state::{LedgerError, LedgerStore},
 };
 use itertools::Itertools as _;
-use pallas::interop::utxorpc::spec as u5c;
-use pallas::interop::utxorpc::{self as interop, spec::query::any_utxo_pattern::UtxoPattern};
-use pallas::ledger::traverse::MultiEraOutput;
+use pallas::ledger::{
+    configs::{alonzo, byron, shelley},
+    traverse::{MultiEraOutput, MultiEraUpdate},
+};
+use pallas::{applying::MultiEraProtocolParameters, interop::utxorpc::spec as u5c};
+use pallas::{
+    interop::utxorpc::{self as interop, spec::query::any_utxo_pattern::UtxoPattern},
+    ledger::traverse::wellknown::GenesisValues,
+};
 use std::collections::HashSet;
 use tonic::{Request, Response, Status};
 use tracing::info;
@@ -13,12 +23,18 @@ use tracing::info;
 pub struct QueryServiceImpl {
     ledger: LedgerStore,
     mapper: interop::Mapper<LedgerStore>,
+    alonzo_genesis_file: alonzo::GenesisFile,
+    byron_genesis_file: byron::GenesisFile,
+    shelley_genesis_file: shelley::GenesisFile,
 }
 
 impl QueryServiceImpl {
-    pub fn new(ledger: LedgerStore) -> Self {
+    pub fn new(ledger: LedgerStore, genesis_files: GenesisFiles) -> Self {
         Self {
             ledger: ledger.clone(),
+            alonzo_genesis_file: genesis_files.0,
+            byron_genesis_file: genesis_files.1,
+            shelley_genesis_file: genesis_files.2,
             mapper: interop::Mapper::new(ledger),
         }
     }
@@ -209,17 +225,306 @@ fn into_u5c_utxo(
     })
 }
 
+fn map_pparams(
+    pparams: MultiEraProtocolParameters,
+) -> Result<interop::spec::cardano::PParams, Status> {
+    let parse_error = Status::internal("Failed to parse protocol params");
+    match pparams {
+        MultiEraProtocolParameters::Alonzo(params) => Ok(interop::spec::cardano::PParams {
+            max_tx_size: params.max_transaction_size.into(),
+            max_block_body_size: params.max_block_body_size.into(),
+            max_block_header_size: params.max_block_header_size.into(),
+            min_fee_coefficient: params.minfee_a.into(),
+            min_fee_constant: params.minfee_b.into(),
+            coins_per_utxo_byte: params.ada_per_utxo_byte,
+            stake_key_deposit: params.key_deposit,
+            pool_deposit: params.pool_deposit,
+            desired_number_of_pools: params.desired_number_of_stake_pools.into(),
+            pool_influence: Some(interop::spec::cardano::RationalNumber {
+                numerator: params
+                    .pool_pledge_influence
+                    .numerator
+                    .try_into()
+                    .map_err(|_| parse_error.clone())?,
+                denominator: params
+                    .pool_pledge_influence
+                    .denominator
+                    .try_into()
+                    .map_err(|_| parse_error.clone())?,
+            }),
+            monetary_expansion: Some(interop::spec::cardano::RationalNumber {
+                numerator: params
+                    .expansion_rate
+                    .numerator
+                    .try_into()
+                    .map_err(|_| parse_error.clone())?,
+                denominator: params
+                    .expansion_rate
+                    .denominator
+                    .try_into()
+                    .map_err(|_| parse_error.clone())?,
+            }),
+            treasury_expansion: Some(interop::spec::cardano::RationalNumber {
+                numerator: params
+                    .treasury_growth_rate
+                    .numerator
+                    .try_into()
+                    .map_err(|_| parse_error.clone())?,
+                denominator: params
+                    .treasury_growth_rate
+                    .denominator
+                    .try_into()
+                    .map_err(|_| parse_error.clone())?,
+            }),
+            min_pool_cost: params.min_pool_cost,
+            protocol_version: Some(interop::spec::cardano::ProtocolVersion {
+                major: params
+                    .protocol_version
+                    .0
+                    .try_into()
+                    .map_err(|_| parse_error.clone())?,
+                minor: params
+                    .protocol_version
+                    .1
+                    .try_into()
+                    .map_err(|_| parse_error.clone())?,
+            }),
+            max_value_size: params.max_value_size.into(),
+            collateral_percentage: params.collateral_percentage.into(),
+            max_collateral_inputs: params.max_collateral_inputs.into(),
+            max_execution_units_per_transaction: Some(interop::spec::cardano::ExUnits {
+                memory: params.max_tx_ex_units.mem,
+                steps: params.max_tx_ex_units.steps,
+            }),
+            max_execution_units_per_block: Some(interop::spec::cardano::ExUnits {
+                memory: params.max_block_ex_units.mem,
+                steps: params.max_block_ex_units.steps,
+            }),
+            cost_models: Some(interop::spec::cardano::CostModels {
+                // Only plutusv1.
+                plutus_v1: params
+                    .cost_models_for_script_languages
+                    .first()
+                    .map(|(_, data)| data.to_vec())
+                    .unwrap_or(Default::default()),
+                ..Default::default()
+            }),
+
+            ..Default::default()
+        }),
+        MultiEraProtocolParameters::Shelley(params) => Ok(interop::spec::cardano::PParams {
+            max_tx_size: params.max_transaction_size.into(),
+            max_block_body_size: params.max_block_body_size.into(),
+            max_block_header_size: params.max_block_header_size.into(),
+            min_fee_coefficient: params.minfee_a.into(),
+            min_fee_constant: params.minfee_b.into(),
+            stake_key_deposit: params.key_deposit,
+            pool_deposit: params.pool_deposit,
+            desired_number_of_pools: params.desired_number_of_stake_pools.into(),
+            pool_influence: Some(interop::spec::cardano::RationalNumber {
+                numerator: params
+                    .pool_pledge_influence
+                    .numerator
+                    .try_into()
+                    .map_err(|_| parse_error.clone())?,
+                denominator: params
+                    .pool_pledge_influence
+                    .denominator
+                    .try_into()
+                    .map_err(|_| parse_error.clone())?,
+            }),
+            monetary_expansion: Some(interop::spec::cardano::RationalNumber {
+                numerator: params
+                    .expansion_rate
+                    .numerator
+                    .try_into()
+                    .map_err(|_| parse_error.clone())?,
+                denominator: params
+                    .expansion_rate
+                    .denominator
+                    .try_into()
+                    .map_err(|_| parse_error.clone())?,
+            }),
+            treasury_expansion: Some(interop::spec::cardano::RationalNumber {
+                numerator: params
+                    .treasury_growth_rate
+                    .numerator
+                    .try_into()
+                    .map_err(|_| parse_error.clone())?,
+                denominator: params
+                    .treasury_growth_rate
+                    .denominator
+                    .try_into()
+                    .map_err(|_| parse_error.clone())?,
+            }),
+            min_pool_cost: params.min_pool_cost,
+            protocol_version: Some(interop::spec::cardano::ProtocolVersion {
+                major: params
+                    .protocol_version
+                    .0
+                    .try_into()
+                    .map_err(|_| parse_error.clone())?,
+                minor: params
+                    .protocol_version
+                    .1
+                    .try_into()
+                    .map_err(|_| parse_error.clone())?,
+            }),
+            ..Default::default()
+        }),
+        MultiEraProtocolParameters::Babbage(params) => Ok(interop::spec::cardano::PParams {
+            max_tx_size: params.max_transaction_size.into(),
+            max_block_body_size: params.max_block_body_size.into(),
+            max_block_header_size: params.max_block_header_size.into(),
+            min_fee_coefficient: params.minfee_a.into(),
+            min_fee_constant: params.minfee_b.into(),
+            coins_per_utxo_byte: params.ada_per_utxo_byte,
+            stake_key_deposit: params.key_deposit,
+            pool_deposit: params.pool_deposit,
+            desired_number_of_pools: params.desired_number_of_stake_pools.into(),
+            pool_influence: Some(interop::spec::cardano::RationalNumber {
+                numerator: params
+                    .pool_pledge_influence
+                    .numerator
+                    .try_into()
+                    .map_err(|_| parse_error.clone())?,
+                denominator: params
+                    .pool_pledge_influence
+                    .denominator
+                    .try_into()
+                    .map_err(|_| parse_error.clone())?,
+            }),
+            monetary_expansion: Some(interop::spec::cardano::RationalNumber {
+                numerator: params
+                    .expansion_rate
+                    .numerator
+                    .try_into()
+                    .map_err(|_| parse_error.clone())?,
+                denominator: params
+                    .expansion_rate
+                    .denominator
+                    .try_into()
+                    .map_err(|_| parse_error.clone())?,
+            }),
+            treasury_expansion: Some(interop::spec::cardano::RationalNumber {
+                numerator: params
+                    .treasury_growth_rate
+                    .numerator
+                    .try_into()
+                    .map_err(|_| parse_error.clone())?,
+                denominator: params
+                    .treasury_growth_rate
+                    .denominator
+                    .try_into()
+                    .map_err(|_| parse_error.clone())?,
+            }),
+            min_pool_cost: params.min_pool_cost,
+            protocol_version: Some(interop::spec::cardano::ProtocolVersion {
+                major: params
+                    .protocol_version
+                    .0
+                    .try_into()
+                    .map_err(|_| parse_error.clone())?,
+                minor: params
+                    .protocol_version
+                    .1
+                    .try_into()
+                    .map_err(|_| parse_error.clone())?,
+            }),
+            max_value_size: params.max_value_size.into(),
+            collateral_percentage: params.collateral_percentage.into(),
+            max_collateral_inputs: params.max_collateral_inputs.into(),
+            max_execution_units_per_transaction: Some(interop::spec::cardano::ExUnits {
+                memory: params.max_tx_ex_units.mem,
+                steps: params.max_tx_ex_units.steps,
+            }),
+            max_execution_units_per_block: Some(interop::spec::cardano::ExUnits {
+                memory: params.max_block_ex_units.mem,
+                steps: params.max_block_ex_units.steps,
+            }),
+            cost_models: Some(interop::spec::cardano::CostModels {
+                plutus_v1: params
+                    .cost_models_for_script_languages
+                    .plutus_v1
+                    .unwrap_or(Default::default()),
+                plutus_v2: params
+                    .cost_models_for_script_languages
+                    .plutus_v2
+                    .unwrap_or(Default::default()),
+            }),
+            ..Default::default()
+        }),
+        MultiEraProtocolParameters::Byron(params) => Ok(interop::spec::cardano::PParams {
+            max_tx_size: params.max_tx_size,
+            max_block_body_size: params.max_block_size - params.max_header_size,
+            max_block_header_size: params.max_header_size,
+            ..Default::default()
+        }),
+
+        _ => unimplemented!(),
+    }
+}
+
 #[async_trait::async_trait]
 impl u5c::query::query_service_server::QueryService for QueryServiceImpl {
     async fn read_params(
         &self,
         request: Request<u5c::query::ReadParamsRequest>,
     ) -> Result<Response<u5c::query::ReadParamsResponse>, Status> {
-        let _message = request.into_inner();
+        let message = request.into_inner();
 
         info!("received new grpc query");
 
-        todo!()
+        let curr_point = match self.ledger.cursor()? {
+            Some(point) => point,
+            None => return Err(Status::internal("Uninitialized ledger.")),
+        };
+
+        let updates = self.ledger.get_pparams(curr_point.0)?;
+        let updates: Vec<_> = updates
+            .iter()
+            .map(|PParamsBody(era, cbor)| -> Result<MultiEraUpdate, Status> {
+                MultiEraUpdate::decode_for_era(*era, cbor)
+                    .map_err(|e| Status::internal(e.to_string()))
+            })
+            .try_collect()?;
+
+        let genesis = Genesis {
+            alonzo: &self.alonzo_genesis_file,
+            byron: &self.byron_genesis_file,
+            shelley: &self.shelley_genesis_file,
+        };
+
+        let network_magic = match self.shelley_genesis_file.network_magic {
+            Some(magic) => magic.into(),
+            None => return Err(Status::internal("networkMagic missing in shelley genesis.")),
+        };
+
+        let genesis_values = match GenesisValues::from_magic(network_magic) {
+            Some(genesis_values) => genesis_values,
+            None => return Err(Status::internal("Invalid networdMagic.")),
+        };
+
+        let (epoch, _) = genesis_values.absolute_slot_to_relative(curr_point.0);
+        let pparams = pparams::fold_pparams(&genesis, &updates, epoch);
+        let mut response = u5c::query::ReadParamsResponse {
+            values: Some(u5c::query::AnyChainParams {
+                params: Some(u5c::query::any_chain_params::Params::Cardano(map_pparams(
+                    pparams,
+                )?)),
+            }),
+            ledger_tip: Some(u5c::query::ChainPoint {
+                slot: curr_point.0,
+                hash: curr_point.1.to_vec().into(),
+            }),
+        };
+
+        if let Some(mask) = message.field_mask {
+            response = apply_mask(response, mask.paths)
+                .map_err(|_| Status::internal("Failed to apply field mask"))?
+        }
+
+        Ok(Response::new(response))
     }
 
     async fn read_data(

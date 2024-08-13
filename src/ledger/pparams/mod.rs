@@ -38,10 +38,7 @@ fn bootstrap_byron_pparams(byron: &byron::GenesisFile) -> ByronProtParams {
     }
 }
 
-fn bootstrap_shelley_pparams(
-    _previous: ByronProtParams,
-    shelley: &shelley::GenesisFile,
-) -> ShelleyProtParams {
+fn bootstrap_shelley_pparams(shelley: &shelley::GenesisFile) -> ShelleyProtParams {
     ShelleyProtParams {
         protocol_version: shelley.protocol_params.protocol_version.clone().into(),
         max_block_body_size: shelley.protocol_params.max_block_body_size,
@@ -226,8 +223,8 @@ fn advance_hardfork(
             MultiEraProtocolParameters::Byron(current)
         }
         // Protocol version 2 transitions from Byron to Shelley
-        MultiEraProtocolParameters::Byron(current) if next_protocol == 2 => {
-            MultiEraProtocolParameters::Shelley(bootstrap_shelley_pparams(current, genesis.shelley))
+        MultiEraProtocolParameters::Byron(_) if next_protocol == 2 => {
+            MultiEraProtocolParameters::Shelley(bootstrap_shelley_pparams(genesis.shelley))
         }
         // Two intra-era hard forks, named Allegra (3) and Mary (4); we don't have separate types
         // for these eras
@@ -263,7 +260,13 @@ pub fn fold_pparams(
     updates: &[MultiEraUpdate],
     for_epoch: u64,
 ) -> MultiEraProtocolParameters {
-    let mut pparams = MultiEraProtocolParameters::Byron(bootstrap_byron_pparams(genesis.byron));
+    let mut pparams = match &updates[0] {
+        MultiEraUpdate::Byron(_, _) => {
+            MultiEraProtocolParameters::Byron(bootstrap_byron_pparams(genesis.byron))
+        }
+        // Preview beggins directly on Shelley.
+        _ => MultiEraProtocolParameters::Shelley(bootstrap_shelley_pparams(genesis.shelley)),
+    };
     let mut last_protocol = 0;
 
     for epoch in 0..for_epoch {
