@@ -21,6 +21,9 @@ pub enum Error {
     #[error("storage error: {0}")]
     StorageError(String),
 
+    #[error("offchain error: {0}")]
+    OffchainError(String),
+
     #[error("{0}")]
     Message(String),
 

@@ -8,5 +8,8 @@ pub mod submit;
 pub mod sync;
 pub mod wal;
 
+#[cfg(feature = "offchain")]
+pub mod balius;
+
 #[cfg(test)]
 mod tests;

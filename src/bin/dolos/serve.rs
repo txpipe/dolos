@@ -12,9 +12,10 @@ pub async fn run(config: super::Config, _args: &Args) -> miette::Result<()> {
     let (wal, ledger) = crate::common::open_data_stores(&config)?;
     let (txs_out, _txs_in) = gasket::messaging::tokio::mpsc_channel(64);
     let mempool = Arc::new(dolos::submit::MempoolState::default());
+    let offchain = crate::common::load_offchain_runtime(&config)?;
     let exit = crate::common::hook_exit_token();
 
-    dolos::serve::serve(config.serve, wal, ledger, mempool, txs_out, exit)
+    dolos::serve::serve(config.serve, wal, ledger, mempool, txs_out, offchain, exit)
         .await
         .context("serving clients")?;
 

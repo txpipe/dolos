@@ -140,6 +140,9 @@ impl Default for LoggingConfig {
     }
 }
 
+#[derive(Deserialize, Serialize, Clone, Default)]
+pub struct OffchainConfig {}
+
 #[derive(Serialize, Deserialize)]
 pub struct Config {
     pub upstream: dolos::model::UpstreamConfig,
@@ -151,6 +154,7 @@ pub struct Config {
     pub relay: Option<dolos::relay::Config>,
     pub retries: Option<gasket::retries::Policy>,
     pub mithril: Option<MithrilConfig>,
+    pub offchain: Option<OffchainConfig>,
 
     #[serde(default)]
     pub logging: LoggingConfig,

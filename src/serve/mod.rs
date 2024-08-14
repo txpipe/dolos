@@ -1,10 +1,11 @@
-use futures_util::future::try_join;
+use futures_util::future::{try_join, try_join3};
 use miette::{Context, IntoDiagnostic};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
+use crate::balius::Runtime;
 use crate::state::LedgerStore;
 use crate::wal::redb::WalStore;
 
@@ -22,10 +23,14 @@ pub mod o7s_win;
 #[cfg(windows)]
 pub use o7s_win as o7s;
 
+#[cfg(feature = "offchain")]
+pub mod offchain;
+
 #[derive(Deserialize, Serialize, Clone, Default)]
 pub struct Config {
     pub grpc: Option<grpc::Config>,
     pub ouroboros: Option<o7s::Config>,
+    pub offchain: Option<offchain::Config>,
 }
 
 /// Serve remote requests
@@ -38,6 +43,7 @@ pub async fn serve(
     ledger: LedgerStore,
     mempool: Arc<crate::submit::MempoolState>,
     txs_out: gasket::messaging::tokio::ChannelSendAdapter<Vec<crate::submit::Transaction>>,
+    offchain: Runtime,
     exit: CancellationToken,
 ) -> miette::Result<()> {
     let grpc = async {
@@ -66,7 +72,20 @@ pub async fn serve(
         }
     };
 
-    try_join(grpc, o7s).await?;
+    let offchain = async {
+        if let Some(cfg) = config.offchain {
+            info!("found offchain config");
+
+            offchain::serve(cfg, offchain, exit.clone())
+                .await
+                .into_diagnostic()
+                .context("serving offchain")
+        } else {
+            Ok(())
+        }
+    };
+
+    try_join3(grpc, o7s, offchain).await?;
 
     Ok(())
 }

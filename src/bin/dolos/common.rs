@@ -50,6 +50,25 @@ pub fn open_data_stores(config: &crate::Config) -> Result<Stores, Error> {
     Ok((wal, ledger))
 }
 
+pub fn load_offchain_runtime(config: &crate::Config) -> miette::Result<dolos::balius::Runtime> {
+    let root = &config.storage.path;
+
+    std::fs::create_dir_all(root).map_err(Error::storage)?;
+
+    let store = wal::redb::WalStore::open(root.join("offchain"), config.storage.wal_cache)
+        .map_err(Error::storage)?;
+
+    let mut runtime = dolos::balius::Runtime::new(store)
+        .into_diagnostic()
+        .context("loading offchain runtime")?;
+
+    runtime
+        .register_worker("hello-world", "./hello-world.wasm")
+        .unwrap();
+
+    Ok(runtime)
+}
+
 pub fn setup_tracing(config: &LoggingConfig) -> miette::Result<()> {
     let level = config.max_level;
 

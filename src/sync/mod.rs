@@ -1,11 +1,12 @@
-use crate::prelude::*;
 use crate::state::LedgerStore;
 use crate::wal::redb::WalStore;
+use crate::{balius::Runtime, prelude::*};
 use pallas::ledger::configs::{byron, shelley};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 pub mod ledger;
+pub mod offchain;
 pub mod pull;
 pub mod roll;
 
@@ -48,6 +49,7 @@ pub fn pipeline(
     upstream: &UpstreamConfig,
     wal: WalStore,
     ledger: LedgerStore,
+    offchain: Runtime,
     byron: byron::GenesisFile,
     shelley: shelley::GenesisFile,
     retries: &Option<gasket::retries::Policy>,
@@ -63,13 +65,16 @@ pub fn pipeline(
 
     let mut ledger = ledger::Stage::new(wal.clone(), ledger, byron, shelley);
 
+    let mut offchain = offchain::Stage::new(wal.clone(), offchain);
+
     let (to_roll, from_pull) = gasket::messaging::tokio::mpsc_channel(50);
     pull.downstream.connect(to_roll);
     roll.upstream.connect(from_pull);
 
-    let (to_ledger, from_roll) = gasket::messaging::tokio::mpsc_channel(50);
+    let (to_ledger, from_roll) = gasket::messaging::tokio::broadcast_channel(50);
     roll.downstream.connect(to_ledger);
-    ledger.upstream.connect(from_roll);
+    ledger.upstream.connect(from_roll.clone());
+    offchain.upstream.connect(from_roll.clone());
 
     // output to outside of out pipeline
     // apply.downstream.connect(output);
@@ -79,6 +84,7 @@ pub fn pipeline(
     let pull = gasket::runtime::spawn_stage(pull, policy.clone());
     let roll = gasket::runtime::spawn_stage(roll, policy.clone());
     let ledger = gasket::runtime::spawn_stage(ledger, policy.clone());
+    let offchain = gasket::runtime::spawn_stage(offchain, policy.clone());
 
-    Ok(vec![pull, roll, ledger])
+    Ok(vec![pull, roll, ledger, offchain])
 }
