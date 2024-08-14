@@ -302,11 +302,14 @@ fn map_pparams(
             }),
             cost_models: Some(interop::spec::cardano::CostModels {
                 // Only plutusv1.
-                plutus_v1: params
-                    .cost_models_for_script_languages
-                    .first()
-                    .map(|(_, data)| data.to_vec())
-                    .unwrap_or(Default::default()),
+                plutus_v1: interop::spec::cardano::CostModel {
+                    values: params
+                        .cost_models_for_script_languages
+                        .first()
+                        .map(|(_, data)| data.to_vec())
+                        .unwrap_or(Default::default()),
+                }
+                .into(),
                 ..Default::default()
             }),
 
@@ -443,14 +446,21 @@ fn map_pparams(
                 steps: params.max_block_ex_units.steps,
             }),
             cost_models: Some(interop::spec::cardano::CostModels {
-                plutus_v1: params
-                    .cost_models_for_script_languages
-                    .plutus_v1
-                    .unwrap_or(Default::default()),
-                plutus_v2: params
-                    .cost_models_for_script_languages
-                    .plutus_v2
-                    .unwrap_or(Default::default()),
+                plutus_v1: interop::spec::cardano::CostModel {
+                    values: params
+                        .cost_models_for_script_languages
+                        .plutus_v1
+                        .unwrap_or(Default::default()),
+                }
+                .into(),
+                plutus_v2: interop::spec::cardano::CostModel {
+                    values: params
+                        .cost_models_for_script_languages
+                        .plutus_v2
+                        .unwrap_or(Default::default()),
+                }
+                .into(),
+                ..Default::default()
             }),
             ..Default::default()
         }),
