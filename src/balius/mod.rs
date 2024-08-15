@@ -1,3 +1,4 @@
+use balius::odk::driver::Event;
 use pallas::ledger::traverse::MultiEraBlock;
 use serde_json::json;
 use std::{collections::HashSet, path::Path};
@@ -35,6 +36,9 @@ pub enum Error {
 
     #[error("more than one target available to solve request")]
     AmbiguousTarget,
+
+    #[error("address in block failed to parse")]
+    BadAddress,
 }
 
 impl From<wasmtime::Error> for Error {
@@ -70,6 +74,12 @@ impl From<redb::TableError> for Error {
 impl From<redb::StorageError> for Error {
     fn from(value: redb::StorageError) -> Self {
         Self::Store(value.into())
+    }
+}
+
+impl From<pallas::ledger::addresses::Error> for Error {
+    fn from(value: pallas::ledger::addresses::Error) -> Self {
+        Self::BadAddress(value.into())
     }
 }
 
@@ -139,10 +149,18 @@ impl Runtime {
     }
 
     pub fn apply_block(&self, block: &MultiEraBlock, wal_seq: LogSeq) -> Result<(), Error> {
+        for tx in block.txs() {
+            for utxo in tx.outputs() {
+                let targets = self.router.find_utxo_targets(&utxo)?;
+                let event = Event::Utxo(utxo.encode()?);
+
+                self.loader.dispatch_event(worker, channel, &event)
+            }
+        }
         Ok(())
     }
 
-    pub fn undo_block(&self, block: &MultiEraBlock) -> Result<(), Error> {
+    pub fn undo_block(&self, block: &MultiEraBlock, wal_seq: LogSeq) -> Result<(), Error> {
         Ok(())
     }
 

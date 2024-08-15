@@ -3,15 +3,19 @@ use std::{
     sync::{Arc, RwLock},
 };
 
+use pallas::ledger::traverse::{MultiEraBlock, MultiEraOutput};
+
 use super::balius::odk::driver::EventPattern;
 
 type WorkerId = String;
 type ChannelId = u32;
 type Method = String;
+type AddressBytes = Vec<u8>;
 
 #[derive(Hash, PartialEq, Eq)]
 enum MatchKey {
     RequestMethod(WorkerId, Method),
+    UtxoAddress(AddressBytes),
 }
 
 #[derive(PartialEq, Eq, Hash, Clone)]
@@ -56,6 +60,22 @@ impl Router {
                 channel,
             });
         }
+    }
+
+    pub fn find_utxo_targets(&self, utxo: &MultiEraOutput) -> Result<Vec<Target>, super::Error> {
+        let routes = self.routes.read().unwrap();
+
+        let key = MatchKey::UtxoAddress(utxo.address()?.to_vec());
+        let targets = routes
+            .get(&key)
+            .iter()
+            .flat_map(|x| x.iter())
+            .cloned()
+            .collect();
+
+        // TODO: match by policy / asset
+
+        Ok(targets)
     }
 
     pub fn find_request_target(&self, worker: &str, method: &str) -> Result<Target, super::Error> {
