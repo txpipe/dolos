@@ -1,23 +1,22 @@
-use crate::submit::{MempoolState, Transaction};
 use futures_core::Stream;
-use gasket::messaging::{tokio::ChannelSendAdapter, SendAdapter};
 use pallas::crypto::hash::Hash;
 use pallas::interop::utxorpc::spec::submit::{Stage as SubmitStage, WaitForTxResponse, *};
 use pallas::ledger::traverse::MultiEraTx;
 use std::collections::HashMap;
 use std::ops::Deref;
-use std::{pin::Pin, sync::Arc};
+use std::pin::Pin;
 use tonic::{Request, Response, Status};
 use tracing::info;
 
+use crate::mempool::{Mempool, Tx};
+
 pub struct SubmitServiceImpl {
-    channel: ChannelSendAdapter<Vec<Transaction>>,
-    mempool: Arc<MempoolState>,
+    mempool: Mempool,
 }
 
 impl SubmitServiceImpl {
-    pub fn new(channel: ChannelSendAdapter<Vec<Transaction>>, mempool: Arc<MempoolState>) -> Self {
-        Self { channel, mempool }
+    pub fn new(mempool: Mempool) -> Self {
+        Self { mempool }
     }
 }
 
@@ -58,10 +57,12 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
                         ));
                     }
 
-                    received.push(Transaction {
-                        hash,
-                        era: u16::from(decoded.era()) - 1, // TODO: pallas Era is 1-indexed so maybe that is the reason this works
+                    received.push(Tx {
+                        hash: hash.to_vec(),
+                        era: u16::from(decoded.era()) - 1,
                         bytes: bytes.into(),
+                        propagated: todo!(),
+                        confirmations: todo!(),
                     })
                 }
             }

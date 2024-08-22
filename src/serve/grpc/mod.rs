@@ -5,9 +5,10 @@ use tokio_util::sync::CancellationToken;
 use tonic::transport::{Certificate, Server, ServerTlsConfig};
 use tracing::info;
 
+use crate::mempool::Mempool;
+use crate::prelude::*;
 use crate::state::LedgerStore;
 use crate::wal::redb::WalStore;
-use crate::{prelude::*, submit::Transaction};
 
 use super::GenesisFiles;
 
@@ -28,8 +29,7 @@ pub async fn serve(
     genesis_files: GenesisFiles,
     wal: WalStore,
     ledger: LedgerStore,
-    mempool: Arc<crate::submit::MempoolState>,
-    txs_out: gasket::messaging::tokio::ChannelSendAdapter<Vec<Transaction>>,
+    mempool: Mempool,
     exit: CancellationToken,
 ) -> Result<(), Error> {
     let addr = config.listen_address.parse().unwrap();
@@ -43,7 +43,7 @@ pub async fn serve(
     let watch_service = watch::WatchServiceImpl::new(wal.clone(), ledger.clone());
     let watch_service = u5c::watch::watch_service_server::WatchServiceServer::new(watch_service);
 
-    let submit_service = submit::SubmitServiceImpl::new(txs_out, mempool);
+    let submit_service = submit::SubmitServiceImpl::new(mempool);
     let submit_service =
         u5c::submit::submit_service_server::SubmitServiceServer::new(submit_service);
 

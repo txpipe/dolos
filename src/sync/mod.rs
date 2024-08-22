@@ -1,13 +1,14 @@
-use crate::prelude::*;
 use crate::state::LedgerStore;
 use crate::wal::redb::WalStore;
+use crate::{mempool::Mempool, prelude::*};
 use pallas::ledger::configs::{byron, shelley};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-pub mod ledger;
+pub mod apply;
 pub mod pull;
 pub mod roll;
+pub mod submit;
 
 #[derive(Serialize, Deserialize)]
 pub struct Config {
@@ -50,6 +51,7 @@ pub fn pipeline(
     ledger: LedgerStore,
     byron: byron::GenesisFile,
     shelley: shelley::GenesisFile,
+    mempool: Mempool,
     retries: &Option<gasket::retries::Policy>,
 ) -> Result<Vec<gasket::runtime::Tether>, Error> {
     let mut pull = pull::Stage::new(
@@ -61,7 +63,13 @@ pub fn pipeline(
 
     let mut roll = roll::Stage::new(wal.clone());
 
-    let mut ledger = ledger::Stage::new(wal.clone(), ledger, byron, shelley);
+    let mut apply = apply::Stage::new(wal.clone(), ledger, byron, shelley);
+
+    let submit = submit::Stage::new(
+        upstream.peer_address.clone(),
+        upstream.network_magic,
+        mempool,
+    );
 
     let (to_roll, from_pull) = gasket::messaging::tokio::mpsc_channel(50);
     pull.downstream.connect(to_roll);
@@ -69,7 +77,7 @@ pub fn pipeline(
 
     let (to_ledger, from_roll) = gasket::messaging::tokio::mpsc_channel(50);
     roll.downstream.connect(to_ledger);
-    ledger.upstream.connect(from_roll);
+    apply.upstream.connect(from_roll);
 
     // output to outside of out pipeline
     // apply.downstream.connect(output);
@@ -78,7 +86,8 @@ pub fn pipeline(
 
     let pull = gasket::runtime::spawn_stage(pull, policy.clone());
     let roll = gasket::runtime::spawn_stage(roll, policy.clone());
-    let ledger = gasket::runtime::spawn_stage(ledger, policy.clone());
+    let apply = gasket::runtime::spawn_stage(apply, policy.clone());
+    let submit = gasket::runtime::spawn_stage(submit, policy.clone());
 
-    Ok(vec![pull, roll, ledger])
+    Ok(vec![pull, roll, apply, submit])
 }
