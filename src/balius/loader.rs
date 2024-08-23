@@ -10,7 +10,6 @@ use super::{
     adapter::Adapter,
     balius::odk::driver::{Event, Response},
     router::Router,
-    Worker,
 };
 
 struct LoadedWorker {

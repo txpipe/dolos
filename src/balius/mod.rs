@@ -1,4 +1,3 @@
-use balius::odk::driver::Event;
 use pallas::ledger::traverse::MultiEraBlock;
 use serde_json::json;
 use std::{collections::HashSet, path::Path};
@@ -11,9 +10,9 @@ mod loader;
 mod router;
 mod store;
 
-use loader::Loader;
-use router::Router;
-use store::Store;
+pub use loader::Loader;
+pub use router::Router;
+pub use store::Store;
 
 pub type WorkerId = String;
 
@@ -38,7 +37,7 @@ pub enum Error {
     AmbiguousTarget,
 
     #[error("address in block failed to parse")]
-    BadAddress,
+    BadAddress(pallas::ledger::addresses::Error),
 }
 
 impl From<wasmtime::Error> for Error {
@@ -122,7 +121,7 @@ impl Runtime {
     }
 
     fn fire_and_forget(
-        &mut self,
+        &self,
         event: &Event,
         targets: HashSet<router::Target>,
     ) -> Result<(), Error> {
@@ -152,11 +151,12 @@ impl Runtime {
         for tx in block.txs() {
             for utxo in tx.outputs() {
                 let targets = self.router.find_utxo_targets(&utxo)?;
-                let event = Event::Utxo(utxo.encode()?);
+                let event = Event::Utxo(utxo.encode());
 
-                self.loader.dispatch_event(worker, channel, &event)
+                self.fire_and_forget(&event, targets)?;
             }
         }
+
         Ok(())
     }
 

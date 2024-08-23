@@ -3,7 +3,7 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use pallas::ledger::traverse::{MultiEraBlock, MultiEraOutput};
+use pallas::ledger::traverse::MultiEraOutput;
 
 use super::balius::odk::driver::EventPattern;
 
@@ -62,11 +62,14 @@ impl Router {
         }
     }
 
-    pub fn find_utxo_targets(&self, utxo: &MultiEraOutput) -> Result<Vec<Target>, super::Error> {
+    pub fn find_utxo_targets(
+        &self,
+        utxo: &MultiEraOutput,
+    ) -> Result<HashSet<Target>, super::Error> {
         let routes = self.routes.read().unwrap();
 
         let key = MatchKey::UtxoAddress(utxo.address()?.to_vec());
-        let targets = routes
+        let targets: HashSet<_> = routes
             .get(&key)
             .iter()
             .flat_map(|x| x.iter())

@@ -1,10 +1,9 @@
 use gasket::framework::*;
-use pallas::ledger::configs::{byron, shelley};
 use pallas::ledger::traverse::MultiEraBlock;
 use tracing::{debug, info};
 
+use crate::prelude::*;
 use crate::wal::{self, LogValue, WalReader as _};
-use crate::{ledger, prelude::*};
 
 pub type UpstreamPort = gasket::messaging::InputPort<RollEvent>;
 
@@ -34,35 +33,39 @@ impl Stage {
         Ok(())
     }
 
-    fn process_undo(&mut self, block: &wal::RawBlock) -> Result<(), WorkerError> {
+    fn process_undo(&mut self, block: &wal::RawBlock, seq: wal::LogSeq) -> Result<(), WorkerError> {
         let wal::RawBlock { slot, body, .. } = block;
 
         info!(slot, "undoing block");
 
         let block = MultiEraBlock::decode(body).or_panic()?;
 
-        self.runtime.undo_block(&block).or_panic()?;
+        self.runtime.undo_block(&block, seq).or_panic()?;
 
         Ok(())
     }
 
-    fn process_apply(&mut self, block: &wal::RawBlock) -> Result<(), WorkerError> {
+    fn process_apply(
+        &mut self,
+        block: &wal::RawBlock,
+        seq: wal::LogSeq,
+    ) -> Result<(), WorkerError> {
         let wal::RawBlock { slot, body, .. } = block;
 
         info!(slot, "applying block");
 
         let block = MultiEraBlock::decode(body).or_panic()?;
 
-        self.runtime.apply_block(&block).or_panic()?;
+        self.runtime.apply_block(&block, seq).or_panic()?;
 
         Ok(())
     }
 
-    fn process_wal(&mut self, log: wal::LogValue) -> Result<(), WorkerError> {
+    fn process_wal(&mut self, seq: wal::LogSeq, log: wal::LogValue) -> Result<(), WorkerError> {
         match log {
             LogValue::Mark(wal::ChainPoint::Origin) => self.process_origin(),
-            LogValue::Apply(x) => self.process_apply(&x),
-            LogValue::Undo(x) => self.process_undo(&x),
+            LogValue::Apply(x) => self.process_apply(&x, seq),
+            LogValue::Undo(x) => self.process_undo(&x, seq),
             // we can skip marks since we know they have been already applied
             LogValue::Mark(..) => Ok(()),
         }
@@ -78,12 +81,7 @@ impl gasket::framework::Worker<Stage> for Worker {
 
         info!(?cursor, "cursor found");
 
-        let point = match cursor {
-            Some(crate::balius::ChainPoint(s, h)) => wal::ChainPoint::Specific(s, h),
-            None => wal::ChainPoint::Origin,
-        };
-
-        let seq = stage.wal.assert_point(&point).or_panic()?;
+        let seq = cursor.unwrap_or_default();
 
         info!(seq, "wal sequence found");
 
@@ -111,7 +109,7 @@ impl gasket::framework::Worker<Stage> for Worker {
 
         for (seq, log) in iter {
             debug!(seq, "processing wal entry");
-            stage.process_wal(log)?;
+            stage.process_wal(seq, log)?;
             self.0 = seq;
         }
 

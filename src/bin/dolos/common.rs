@@ -55,8 +55,7 @@ pub fn load_offchain_runtime(config: &crate::Config) -> miette::Result<dolos::ba
 
     std::fs::create_dir_all(root).map_err(Error::storage)?;
 
-    let store = wal::redb::WalStore::open(root.join("offchain"), config.storage.wal_cache)
-        .map_err(Error::storage)?;
+    let store = dolos::balius::Store::open(root.join("offchain"), None).map_err(Error::storage)?;
 
     let mut runtime = dolos::balius::Runtime::new(store)
         .into_diagnostic()

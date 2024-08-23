@@ -1,9 +1,5 @@
-use std::{
-    net::SocketAddr,
-    sync::{Arc, Mutex},
-};
-
 use serde::{Deserialize, Serialize};
+use std::net::SocketAddr;
 use tokio_util::sync::CancellationToken;
 use warp::Filter as _;
 
