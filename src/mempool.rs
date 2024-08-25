@@ -1,6 +1,11 @@
-use std::collections::HashMap;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, RwLock},
+};
 
-type TxHash = Vec<u8>;
+use pallas::crypto::hash::Hash;
+
+type TxHash = Hash<32>;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Tx {
@@ -11,29 +16,48 @@ pub struct Tx {
     pub confirmations: usize,
 }
 
+#[derive(Default)]
+struct MempoolState {
+    pending: HashMap<TxHash, Tx>,
+    acknowledged: HashMap<TxHash, Tx>,
+}
+
+#[derive(Clone)]
 pub struct Mempool {
-    pending: Vec<Tx>,
-    confirmed: HashMap<TxHash, Tx>,
+    mempool: Arc<RwLock<MempoolState>>,
 }
 
 impl Mempool {
-    pub fn receive(&mut self, tx: Tx) {
-        self.pending.push(tx);
+    pub fn new() -> Self {
+        Self {
+            mempool: Arc::new(RwLock::new(MempoolState::default())),
+        }
     }
 
-    pub fn acknowledge(&mut self, count: usize) {
-        let txs = self.pending.drain(..count);
+    pub fn receive(&self, tx: Tx) {
+        let mut state = self.mempool.write().unwrap();
+        state.pending.insert(tx.hash, tx);
+    }
+
+    pub fn acknowledge(&self, txs: HashSet<TxHash>) {
+        let mut state = self.mempool.write().unwrap();
 
         for tx in txs {
-            self.confirmed.insert(tx.hash.clone(), tx);
+            let tx = state.pending.remove(&tx);
+
+            if let Some(tx) = tx {
+                state.acknowledged.insert(tx.hash.clone(), tx);
+            }
         }
     }
 
     pub fn peek(&self, count: usize) -> Vec<Tx> {
-        self.pending.iter().take(count).cloned().collect()
+        let state = self.mempool.read().unwrap();
+        state.pending.values().take(count).cloned().collect()
     }
 
     pub fn pending_total(&self) -> usize {
-        self.pending.len()
+        let state = self.mempool.read().unwrap();
+        state.pending.len()
     }
 }

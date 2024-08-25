@@ -11,8 +11,7 @@ pub async fn run(config: super::Config, _args: &Args) -> miette::Result<()> {
 
     let (wal, ledger) = crate::common::open_data_stores(&config)?;
     let (byron, shelley, _) = crate::common::open_genesis_files(&config.genesis)?;
-    let (txs_out, _) = gasket::messaging::tokio::mpsc_channel(64);
-    let mempool = Arc::new(dolos::submit::MempoolState::default());
+    let mempool = dolos::mempool::Mempool::new();
     let exit = crate::common::hook_exit_token();
 
     let sync = dolos::sync::pipeline(
@@ -22,6 +21,7 @@ pub async fn run(config: super::Config, _args: &Args) -> miette::Result<()> {
         ledger.clone(),
         byron,
         shelley,
+        mempool.clone(),
         &config.retries,
     )
     .into_diagnostic()
@@ -40,7 +40,6 @@ pub async fn run(config: super::Config, _args: &Args) -> miette::Result<()> {
         wal.clone(),
         ledger.clone(),
         mempool.clone(),
-        txs_out,
         exit.clone(),
     ));
 

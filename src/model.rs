@@ -37,3 +37,8 @@ pub struct UpstreamConfig {
     #[serde(default)]
     pub is_testnet: bool,
 }
+
+#[derive(Serialize, Deserialize, Default)]
+pub struct SubmitConfig {
+    pub prune_height: Option<u64>,
+}

@@ -36,7 +36,7 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
 
         info!("received new grpc submit tx request: {:?}", message);
 
-        let mut received = vec![];
+        let mut hashes = vec![];
 
         for (idx, tx_bytes) in message.tx.into_iter().flat_map(|x| x.r#type).enumerate() {
             match tx_bytes {
@@ -57,24 +57,19 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
                         ));
                     }
 
-                    received.push(Tx {
-                        hash: hash.to_vec(),
+                    let tx = Tx {
+                        hash,
                         era: u16::from(decoded.era()) - 1,
                         bytes: bytes.into(),
-                        propagated: todo!(),
-                        confirmations: todo!(),
-                    })
+                        propagated: false,
+                        confirmations: 0,
+                    };
+
+                    hashes.push(tx.hash.to_vec().into());
+                    self.mempool.receive(tx);
                 }
             }
         }
-
-        let hashes = received.iter().map(|x| x.hash.to_vec().into()).collect();
-
-        self.channel
-            .clone()
-            .send(received.into())
-            .await
-            .map_err(|_| Status::internal("couldn't add txs to mempool"))?;
 
         Ok(Response::new(SubmitTxResponse { r#ref: hashes }))
     }
@@ -83,67 +78,7 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
         &self,
         request: Request<WaitForTxRequest>,
     ) -> Result<Response<Self::WaitForTxStream>, Status> {
-        let mempool = self.mempool.clone();
-
-        Ok(Response::new(Box::pin(async_stream::stream! {
-            let tx_refs = request.into_inner().r#ref;
-
-            let mut last_update: HashMap<&[u8; 32], Option<SubmitStage>> = HashMap::new();
-
-            let mut tx_hashes = vec![];
-
-            for tx_ref in tx_refs {
-                let tx_hash: [u8; 32] = tx_ref
-                    .deref()
-                    .try_into()
-                    .map_err(|_| Status::invalid_argument("tx hash malformed"))?;
-
-                tx_hashes.push(tx_hash)
-            }
-
-            last_update.extend(tx_hashes.iter().map(|x| (x, None)));
-
-            info!("starting wait_for_tx async stream for tx hashes: {:?}", tx_hashes.iter().map(|x| Hash::new(*x)).collect::<Vec<_>>());
-
-            loop {
-                mempool.1.notified().await;
-
-                for hash in tx_hashes.iter() {
-                    let mempool_view = mempool.0.read().await;
-
-                    let stage = if let Some(maybe_inclusion) = mempool_view.txs.get(&(*hash).into()) {
-                        if let Some(inclusion) = maybe_inclusion {
-                            // TODO: spec does not have way to detail number of confirmations
-                            let _confirmations = mempool_view.tip_slot - inclusion;
-
-                            // tx is included on chain
-                            SubmitStage::Confirmed
-                        } else {
-                            // tx has been propagated but not included on chain
-                            SubmitStage::Mempool
-                        }
-                    } else {
-                        // tx hash provided has not been passed to propagators
-                        SubmitStage::Unspecified
-                    };
-
-                    // if stage changed since we last informed user, send user update
-                    match last_update.get(&hash).unwrap() {
-                        Some(last_stage) if (*last_stage == stage) => (),
-                        _ => {
-                            let response = WaitForTxResponse {
-                                r#ref: hash.to_vec().into(),
-                                stage: stage.into()
-                            };
-
-                            yield Ok(response);
-
-                            last_update.insert(hash, Some(stage));
-                        }
-                    }
-                }
-            }
-        })))
+        todo!()
     }
 
     async fn read_mempool(
