@@ -3,7 +3,9 @@ use std::{
     sync::{Arc, RwLock},
 };
 
+use itertools::Itertools;
 use pallas::crypto::hash::Hash;
+use tracing::debug;
 
 type TxHash = Hash<32>;
 
@@ -18,10 +20,12 @@ pub struct Tx {
 
 #[derive(Default)]
 struct MempoolState {
-    pending: HashMap<TxHash, Tx>,
+    pending: Vec<Tx>,
+    inflight: Vec<Tx>,
     acknowledged: HashMap<TxHash, Tx>,
 }
 
+/// A basic, single consumer mempool
 #[derive(Clone)]
 pub struct Mempool {
     mempool: Arc<RwLock<MempoolState>>,
@@ -36,24 +40,63 @@ impl Mempool {
 
     pub fn receive(&self, tx: Tx) {
         let mut state = self.mempool.write().unwrap();
-        state.pending.insert(tx.hash, tx);
+
+        state.pending.push(tx);
+
+        debug!(
+            pending = state.pending.len(),
+            inflight = state.inflight.len(),
+            acknowledged = state.acknowledged.len(),
+            "mempool state changed"
+        );
     }
 
-    pub fn acknowledge(&self, txs: HashSet<TxHash>) {
+    pub fn request(&self, desired: usize) -> Vec<Tx> {
+        let available = self.pending_total();
+        self.request_exact(std::cmp::min(desired, available))
+    }
+
+    pub fn request_exact(&self, count: usize) -> Vec<Tx> {
         let mut state = self.mempool.write().unwrap();
 
-        for tx in txs {
-            let tx = state.pending.remove(&tx);
+        let selected = state.pending.drain(..count).collect_vec();
 
-            if let Some(tx) = tx {
-                state.acknowledged.insert(tx.hash.clone(), tx);
-            }
+        for tx in selected.iter() {
+            state.inflight.push(tx.clone());
         }
+
+        debug!(
+            pending = state.pending.len(),
+            inflight = state.inflight.len(),
+            acknowledged = state.acknowledged.len(),
+            "mempool state changed"
+        );
+
+        selected
     }
 
-    pub fn peek(&self, count: usize) -> Vec<Tx> {
+    pub fn acknowledge(&self, count: usize) {
+        debug!(n = count, "acknowledging txs");
+
+        let mut state = self.mempool.write().unwrap();
+
+        let selected = state.inflight.drain(..count).collect_vec();
+
+        for tx in selected {
+            state.acknowledged.insert(tx.hash.clone(), tx);
+        }
+
+        debug!(
+            pending = state.pending.len(),
+            inflight = state.inflight.len(),
+            acknowledged = state.acknowledged.len(),
+            "mempool state changed"
+        );
+    }
+
+    pub fn find_inflight(&self, tx_hash: TxHash) -> Option<Tx> {
         let state = self.mempool.read().unwrap();
-        state.pending.values().take(count).cloned().collect()
+        state.inflight.iter().find(|x| x.hash == tx_hash).cloned()
     }
 
     pub fn pending_total(&self) -> usize {

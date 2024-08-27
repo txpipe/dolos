@@ -1,10 +1,11 @@
+use bincode::de;
 use gasket::framework::*;
 use itertools::Itertools as _;
 use pallas::crypto::hash::Hash;
 use pallas::network::facades::PeerClient;
 use pallas::network::miniprotocols::txsubmission::{EraTxBody, EraTxId, Request, TxIdAndSize};
 use std::time::Duration;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::mempool::Mempool;
 
@@ -13,39 +14,13 @@ type TxHash = Hash<32>;
 pub struct Worker {
     peer_session: PeerClient,
     unfulfilled_request: Option<usize>,
-    inflight_txs: Vec<TxHash>,
 }
 
 impl Worker {
-    fn acknowledge_count(&mut self, mempool: &Mempool, count: usize) {
-        let acks = self.inflight_txs.drain(..count).collect();
-        mempool.acknowledge(acks);
-    }
+    async fn propagate_txs(&mut self, txs: Vec<crate::mempool::Tx>) -> Result<(), WorkerError> {
+        debug!(n = txs.len(), "propagating tx ids");
 
-    async fn propagate_at_least(
-        &mut self,
-        mempool: &Mempool,
-        requested: usize,
-    ) -> Result<(), WorkerError> {
-        let available = mempool.pending_total();
-
-        if available >= requested {
-            self.propagate_quantity(mempool, requested).await
-        } else {
-            debug!(requested, available, "not enough txs to fulfill request");
-            self.unfulfilled_request = Some(requested);
-            Ok(())
-        }
-    }
-
-    async fn propagate_quantity(
-        &mut self,
-        mempool: &Mempool,
-        quantity: usize,
-    ) -> Result<(), WorkerError> {
-        let to_send = mempool.peek(quantity);
-
-        let payload = to_send
+        let payload = txs
             .iter()
             .map(|x| TxIdAndSize(EraTxId(x.era, x.hash.to_vec()), x.bytes.len() as u32))
             .collect_vec();
@@ -54,10 +29,8 @@ impl Worker {
             .txsubmission()
             .reply_tx_ids(payload)
             .await
+            .inspect_err(|err| warn!(error=%err, "error replying with tx ids"))
             .or_restart()?;
-
-        let mut ids = to_send.into_iter().map(|tx| tx.hash).collect_vec();
-        self.inflight_txs.append(&mut ids);
 
         Ok(())
     }
@@ -131,7 +104,6 @@ impl gasket::framework::Worker<Stage> for Worker {
         let worker = Self {
             peer_session,
             unfulfilled_request: Default::default(),
-            inflight_txs: Default::default(),
         };
 
         Ok(worker)
@@ -155,36 +127,54 @@ impl gasket::framework::Worker<Stage> for Worker {
     ) -> Result<(), WorkerError> {
         match unit {
             Request::TxIds(ack, req) => {
+                let ack = *ack as usize;
+                let req = *req as usize;
+
                 info!(req, ack, "blocking tx ids request");
 
-                self.acknowledge_count(&stage.mempool, *ack as usize);
-                self.propagate_at_least(&stage.mempool, *req as usize)
-                    .await?;
+                stage.mempool.acknowledge(ack);
+
+                let available = stage.mempool.pending_total();
+
+                if available >= req {
+                    let txs = stage.mempool.request_exact(req);
+                    self.propagate_txs(txs).await?;
+                } else {
+                    debug!(req, available, "not enough txs to fulfill request");
+                    self.unfulfilled_request = Some(req);
+                }
             }
             Request::TxIdsNonBlocking(ack, req) => {
                 info!(req, ack, "non-blocking tx ids request");
 
-                self.acknowledge_count(&stage.mempool, *ack as usize);
-                self.propagate_quantity(&stage.mempool, *req as usize)
-                    .await?;
+                stage.mempool.acknowledge(*ack as usize);
+
+                let txs = stage.mempool.request(*req as usize);
+                self.propagate_txs(txs).await?;
             }
             Request::Txs(ids) => {
                 info!("tx batch request");
 
-                let to_send = stage
-                    .mempool
-                    .peek(ids.len())
-                    .into_iter()
+                let to_send = ids
+                    .iter()
+                    .map(|x| {
+                        stage
+                            .mempool
+                            .find_inflight(Hash::try_from(x.1.as_slice()).unwrap())
+                    })
+                    // we omit any missing tx, we assume that this would be considered a protocol
+                    // violation and rejected by the upstream.
+                    .flatten()
                     .map(|x| EraTxBody(x.era, x.bytes.clone()))
                     .collect_vec();
 
-                // TODO: enforce that IDs match the top N txs.
+                let result = self.peer_session.txsubmission().reply_txs(to_send).await;
 
-                self.peer_session
-                    .txsubmission()
-                    .reply_txs(to_send)
-                    .await
-                    .or_restart()?;
+                if let Err(err) = &result {
+                    warn!(err=%err, "error sending txs upstream")
+                }
+
+                result.or_restart()?;
             }
         };
 
