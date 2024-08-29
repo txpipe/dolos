@@ -1,10 +1,9 @@
 use futures_core::Stream;
-use pallas::crypto::hash::Hash;
+use futures_util::{StreamExt as _, TryStreamExt as _};
 use pallas::interop::utxorpc::spec::submit::{Stage as SubmitStage, WaitForTxResponse, *};
 use pallas::ledger::traverse::MultiEraTx;
-use std::collections::HashMap;
-use std::ops::Deref;
 use std::pin::Pin;
+use tokio_stream::wrappers::BroadcastStream;
 use tonic::{Request, Response, Status};
 use tracing::info;
 
@@ -61,8 +60,7 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
                         hash,
                         era: u16::from(decoded.era()) - 1,
                         bytes: bytes.into(),
-                        propagated: false,
-                        confirmations: 0,
+                        confirmed: false,
                     };
 
                     hashes.push(tx.hash.to_vec().into());
@@ -78,7 +76,17 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
         &self,
         request: Request<WaitForTxRequest>,
     ) -> Result<Response<Self::WaitForTxStream>, Status> {
-        todo!()
+        let updates = self.mempool.subscribe();
+
+        let stream = BroadcastStream::new(updates)
+            .map_ok(|tx| WaitForTxResponse {
+                r#ref: tx.hash.to_vec().into(),
+                stage: SubmitStage::Confirmed as i32,
+            })
+            .map_err(|e| Status::internal(e.to_string()))
+            .boxed();
+
+        Ok(Response::new(stream))
     }
 
     async fn read_mempool(

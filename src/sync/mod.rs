@@ -63,7 +63,7 @@ pub fn pipeline(
 
     let mut roll = roll::Stage::new(wal.clone());
 
-    let mut apply = apply::Stage::new(wal.clone(), ledger, byron, shelley);
+    let mut apply = apply::Stage::new(wal.clone(), ledger, mempool.clone(), byron, shelley);
 
     let submit = submit::Stage::new(
         upstream.peer_address.clone(),

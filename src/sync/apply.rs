@@ -15,6 +15,7 @@ pub struct Stage {
     ledger: crate::state::LedgerStore,
     byron: byron::GenesisFile,
     shelley: shelley::GenesisFile,
+    mempool: crate::mempool::Mempool, // Add this line
 
     pub upstream: UpstreamPort,
 
@@ -29,12 +30,14 @@ impl Stage {
     pub fn new(
         wal: crate::wal::redb::WalStore,
         ledger: crate::state::LedgerStore,
+        mempool: crate::mempool::Mempool,
         byron: byron::GenesisFile,
         shelley: shelley::GenesisFile,
     ) -> Self {
         Self {
             wal,
             ledger,
+            mempool,
             byron,
             shelley,
             upstream: Default::default(),
@@ -63,6 +66,8 @@ impl Stage {
         let delta = crate::ledger::compute_undo_delta(&block, context).or_panic()?;
         self.ledger.apply(&[delta]).or_panic()?;
 
+        self.mempool.undo_block(&block);
+
         Ok(())
     }
 
@@ -73,8 +78,10 @@ impl Stage {
 
         let block = MultiEraBlock::decode(body).or_panic()?;
 
-        crate::state::apply_block_batch(&[block], &mut self.ledger, &self.byron, &self.shelley)
+        crate::state::apply_block_batch([&block], &mut self.ledger, &self.byron, &self.shelley)
             .or_panic()?;
+
+        self.mempool.apply_block(&block);
 
         Ok(())
     }

@@ -42,7 +42,7 @@ impl Worker {
     ) -> Result<WorkSchedule<Request<EraTxId>>, WorkerError> {
         let available = stage.mempool.pending_total();
 
-        if available >= request {
+        if available > 0 {
             debug!(request, available, "found enough txs to fulfill request");
 
             // we have all the tx we need to we process the work unit as a new one. We don't
@@ -136,8 +136,8 @@ impl gasket::framework::Worker<Stage> for Worker {
 
                 let available = stage.mempool.pending_total();
 
-                if available >= req {
-                    let txs = stage.mempool.request_exact(req);
+                if available > 0 {
+                    let txs = stage.mempool.request(req);
                     self.propagate_txs(txs).await?;
                 } else {
                     debug!(req, available, "not enough txs to fulfill request");
