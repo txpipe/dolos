@@ -146,7 +146,7 @@ pub struct Config {
     pub storage: StorageConfig,
     pub genesis: GenesisConfig,
     pub sync: dolos::sync::Config,
-    pub submit: dolos::submit::Config,
+    pub submit: dolos::model::SubmitConfig,
     pub serve: dolos::serve::Config,
     pub relay: Option<dolos::relay::Config>,
     pub retries: Option<gasket::retries::Policy>,
