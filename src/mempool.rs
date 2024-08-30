@@ -3,12 +3,36 @@ use std::{
     sync::{Arc, RwLock},
 };
 
+use futures_util::StreamExt;
 use itertools::Itertools;
-use pallas::{crypto::hash::Hash, ledger::traverse::MultiEraBlock};
+use pallas::{
+    crypto::hash::Hash,
+    ledger::traverse::{MultiEraBlock, MultiEraTx},
+};
+use thiserror::Error;
 use tokio::sync::broadcast;
+use tokio_stream::wrappers::BroadcastStream;
 use tracing::debug;
 
 type TxHash = Hash<32>;
+
+#[derive(Debug, Error)]
+pub enum MempoolError {
+    #[error("decode error: {0}")]
+    DecodeError(pallas::ledger::traverse::Error),
+
+    #[error("plutus scripts not supported")]
+    PlutusNotSupported,
+
+    #[error("invalid tx: {0}")]
+    InvalidTx(String),
+}
+
+impl From<pallas::ledger::traverse::Error> for MempoolError {
+    fn from(value: pallas::ledger::traverse::Error) -> Self {
+        Self::DecodeError(value)
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Tx {
@@ -17,6 +41,20 @@ pub struct Tx {
     pub bytes: Vec<u8>,
     // TODO: we'll improve this to track number of confirmations in further iterations.
     pub confirmed: bool,
+}
+
+#[derive(Clone)]
+pub enum EventKind {
+    Pending,
+    Inflight,
+    Acknowledged,
+    Confirmed,
+}
+
+#[derive(Clone)]
+pub struct Event {
+    pub kind: EventKind,
+    pub tx: Tx,
 }
 
 #[derive(Default)]
@@ -30,7 +68,7 @@ struct MempoolState {
 #[derive(Clone)]
 pub struct Mempool {
     mempool: Arc<RwLock<MempoolState>>,
-    updates: broadcast::Sender<Tx>,
+    updates: broadcast::Sender<Event>,
 }
 
 impl Mempool {
@@ -41,20 +79,21 @@ impl Mempool {
         Self { mempool, updates }
     }
 
-    pub fn subscribe(&self) -> broadcast::Receiver<Tx> {
+    pub fn subscribe(&self) -> broadcast::Receiver<Event> {
         self.updates.subscribe()
     }
 
-    pub fn notify(&self, tx: Tx) {
-        if let Err(_) = self.updates.send(tx) {
+    pub fn notify(&self, kind: EventKind, tx: Tx) {
+        if let Err(_) = self.updates.send(Event { kind, tx }) {
             debug!("no mempool update receivers");
         }
     }
 
-    pub fn receive(&self, tx: Tx) {
+    fn receive(&self, tx: Tx) {
         let mut state = self.mempool.write().unwrap();
 
-        state.pending.push(tx);
+        state.pending.push(tx.clone());
+        self.notify(EventKind::Pending, tx);
 
         debug!(
             pending = state.pending.len(),
@@ -62,6 +101,29 @@ impl Mempool {
             acknowledged = state.acknowledged.len(),
             "mempool state changed"
         );
+    }
+
+    pub fn receive_raw(&self, bytes: &[u8]) -> Result<TxHash, MempoolError> {
+        let decoded = MultiEraTx::decode(&bytes)?;
+
+        let hash = decoded.hash();
+
+        // TODO: we don't phase-2 validate txs before propagating so we could
+        // propagate p2 invalid transactions resulting in collateral loss
+        if !decoded.redeemers().is_empty() {
+            return Err(MempoolError::PlutusNotSupported);
+        }
+
+        let tx = Tx {
+            hash,
+            era: u16::from(decoded.era()) - 1,
+            bytes: bytes.into(),
+            confirmed: false,
+        };
+
+        self.receive(tx);
+
+        Ok(hash)
     }
 
     pub fn request(&self, desired: usize) -> Vec<Tx> {
@@ -76,6 +138,7 @@ impl Mempool {
 
         for tx in selected.iter() {
             state.inflight.push(tx.clone());
+            self.notify(EventKind::Inflight, tx.clone());
         }
 
         debug!(
@@ -97,7 +160,7 @@ impl Mempool {
 
         for tx in selected {
             state.acknowledged.insert(tx.hash.clone(), tx.clone());
-            self.notify(tx);
+            self.notify(EventKind::Acknowledged, tx.clone());
         }
 
         debug!(
@@ -130,7 +193,7 @@ impl Mempool {
 
             if let Some(acknowledged_tx) = state.acknowledged.get_mut(&tx_hash) {
                 acknowledged_tx.confirmed = true;
-                self.notify(acknowledged_tx.clone());
+                self.notify(EventKind::Confirmed, acknowledged_tx.clone());
                 debug!(%tx_hash, "confirming tx");
             }
         }
@@ -150,6 +213,46 @@ impl Mempool {
                 acknowledged_tx.confirmed = false;
                 debug!(%tx_hash, "un-confirming tx");
             }
+        }
+    }
+}
+
+pub struct UpdateFilter {
+    inner: BroadcastStream<Event>,
+    subjects: HashSet<TxHash>,
+}
+
+impl UpdateFilter {
+    pub fn new(updates: broadcast::Receiver<Event>, subjects: HashSet<TxHash>) -> Self {
+        Self {
+            inner: BroadcastStream::new(updates),
+            subjects,
+        }
+    }
+}
+
+impl futures_core::Stream for UpdateFilter {
+    type Item = Event;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        let x = self.inner.poll_next_unpin(cx);
+
+        match x {
+            std::task::Poll::Ready(None) => std::task::Poll::Ready(None),
+            std::task::Poll::Ready(Some(x)) => match x {
+                Ok(x) => {
+                    if self.subjects.contains(&x.tx.hash) {
+                        std::task::Poll::Ready(Some(x))
+                    } else {
+                        std::task::Poll::Pending
+                    }
+                }
+                Err(_) => std::task::Poll::Ready(None),
+            },
+            std::task::Poll::Pending => std::task::Poll::Pending,
         }
     }
 }

@@ -1,5 +1,7 @@
 use futures_core::Stream;
-use futures_util::{StreamExt as _, TryStreamExt as _};
+use futures_util::{stream, StreamExt as _, TryStreamExt as _};
+use itertools::Itertools;
+use pallas::crypto::hash::Hash;
 use pallas::interop::utxorpc::spec::submit::{Stage as SubmitStage, WaitForTxResponse, *};
 use pallas::ledger::traverse::MultiEraTx;
 use std::pin::Pin;
@@ -7,7 +9,7 @@ use tokio_stream::wrappers::BroadcastStream;
 use tonic::{Request, Response, Status};
 use tracing::info;
 
-use crate::mempool::{Mempool, Tx};
+use crate::mempool::{Event, Mempool, Tx, UpdateFilter};
 
 pub struct SubmitServiceImpl {
     mempool: Mempool,
@@ -16,6 +18,39 @@ pub struct SubmitServiceImpl {
 impl SubmitServiceImpl {
     pub fn new(mempool: Mempool) -> Self {
         Self { mempool }
+    }
+}
+
+fn event_kind_to_stage(kind: crate::mempool::EventKind) -> i32 {
+    match kind {
+        crate::mempool::EventKind::Pending => Stage::Mempool as i32,
+        crate::mempool::EventKind::Inflight => Stage::Network as i32,
+        crate::mempool::EventKind::Acknowledged => Stage::Acknowledged as i32,
+        crate::mempool::EventKind::Confirmed => Stage::Confirmed as i32,
+    }
+}
+
+fn event_to_wait_for_tx_response(event: Event) -> WaitForTxResponse {
+    WaitForTxResponse {
+        stage: event_kind_to_stage(event.kind),
+        r#ref: event.tx.hash.to_vec().into(),
+    }
+}
+
+fn event_to_watch_mempool_response(event: Event) -> WatchMempoolResponse {
+    WatchMempoolResponse {
+        tx: TxInMempool {
+            tx: AnyChainTx {
+                r#type: Some(
+                    pallas::interop::utxorpc::spec::submit::any_chain_tx::Type::Raw(
+                        event.tx.bytes.into(),
+                    ),
+                ),
+            }
+            .into(),
+            stage: event_kind_to_stage(event.kind),
+        }
+        .into(),
     }
 }
 
@@ -40,31 +75,13 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
         for (idx, tx_bytes) in message.tx.into_iter().flat_map(|x| x.r#type).enumerate() {
             match tx_bytes {
                 any_chain_tx::Type::Raw(bytes) => {
-                    let decoded = MultiEraTx::decode(&bytes).map_err(|e| {
+                    let hash = self.mempool.receive_raw(bytes.as_ref()).map_err(|e| {
                         Status::invalid_argument(
-                            format! {"could not decode tx at index {idx}: {e}"},
+                            format! {"could not process tx at index {idx}: {e}"},
                         )
                     })?;
 
-                    let hash = decoded.hash();
-
-                    // TODO: we don't phase-2 validate txs before propagating so we could
-                    // propagate p2 invalid transactions resulting in collateral loss
-                    if !decoded.redeemers().is_empty() {
-                        return Err(Status::invalid_argument(
-                            "txs interacting with plutus scripts not yet supported",
-                        ));
-                    }
-
-                    let tx = Tx {
-                        hash,
-                        era: u16::from(decoded.era()) - 1,
-                        bytes: bytes.into(),
-                        confirmed: false,
-                    };
-
-                    hashes.push(tx.hash.to_vec().into());
-                    self.mempool.receive(tx);
+                    hashes.push(hash.to_vec().into());
                 }
             }
         }
@@ -76,14 +93,18 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
         &self,
         request: Request<WaitForTxRequest>,
     ) -> Result<Response<Self::WaitForTxStream>, Status> {
+        let subjects = request
+            .into_inner()
+            .r#ref
+            .into_iter()
+            .map(|x| Hash::try_from(x.as_ref()))
+            .try_collect()
+            .map_err(|_| Status::internal("invalid tx hash"))?;
+
         let updates = self.mempool.subscribe();
 
-        let stream = BroadcastStream::new(updates)
-            .map_ok(|tx| WaitForTxResponse {
-                r#ref: tx.hash.to_vec().into(),
-                stage: SubmitStage::Confirmed as i32,
-            })
-            .map_err(|e| Status::internal(e.to_string()))
+        let stream = UpdateFilter::new(updates, subjects)
+            .map(|x| Ok(event_to_wait_for_tx_response(x)))
             .boxed();
 
         Ok(Response::new(stream))
@@ -100,7 +121,14 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
         &self,
         _request: tonic::Request<WatchMempoolRequest>,
     ) -> Result<tonic::Response<Self::WatchMempoolStream>, tonic::Status> {
-        todo!()
+        let updates = self.mempool.subscribe();
+
+        let stream = BroadcastStream::new(updates)
+            .map_ok(|event| event_to_watch_mempool_response(event))
+            .map_err(|e| Status::internal(e.to_string()))
+            .boxed();
+
+        Ok(Response::new(stream))
     }
 
     async fn eval_tx(
