@@ -71,6 +71,12 @@ pub struct Mempool {
     updates: broadcast::Sender<Event>,
 }
 
+impl Default for Mempool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Mempool {
     pub fn new() -> Self {
         let mempool = Arc::new(RwLock::new(MempoolState::default()));
@@ -84,7 +90,7 @@ impl Mempool {
     }
 
     pub fn notify(&self, kind: EventKind, tx: Tx) {
-        if let Err(_) = self.updates.send(Event { kind, tx }) {
+        if self.updates.send(Event { kind, tx }).is_err() {
             debug!("no mempool update receivers");
         }
     }
@@ -103,8 +109,8 @@ impl Mempool {
         );
     }
 
-    pub fn receive_raw(&self, bytes: &[u8]) -> Result<TxHash, MempoolError> {
-        let decoded = MultiEraTx::decode(&bytes)?;
+    pub fn receive_raw(&self, cbor: &[u8]) -> Result<TxHash, MempoolError> {
+        let decoded = MultiEraTx::decode(cbor)?;
 
         let hash = decoded.hash();
 
@@ -117,7 +123,7 @@ impl Mempool {
         let tx = Tx {
             hash,
             era: u16::from(decoded.era()) - 1,
-            bytes: bytes.into(),
+            bytes: cbor.into(),
             confirmed: false,
         };
 
@@ -159,7 +165,7 @@ impl Mempool {
         let selected = state.inflight.drain(..count).collect_vec();
 
         for tx in selected {
-            state.acknowledged.insert(tx.hash.clone(), tx.clone());
+            state.acknowledged.insert(tx.hash, tx.clone());
             self.notify(EventKind::Acknowledged, tx.clone());
         }
 

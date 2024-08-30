@@ -1,15 +1,13 @@
 use futures_core::Stream;
-use futures_util::{stream, StreamExt as _, TryStreamExt as _};
-use itertools::Itertools;
+use futures_util::{StreamExt as _, TryStreamExt as _};
 use pallas::crypto::hash::Hash;
-use pallas::interop::utxorpc::spec::submit::{Stage as SubmitStage, WaitForTxResponse, *};
-use pallas::ledger::traverse::MultiEraTx;
+use pallas::interop::utxorpc::spec::submit::{WaitForTxResponse, *};
 use std::pin::Pin;
 use tokio_stream::wrappers::BroadcastStream;
 use tonic::{Request, Response, Status};
 use tracing::info;
 
-use crate::mempool::{Event, Mempool, Tx, UpdateFilter};
+use crate::mempool::{Event, Mempool, UpdateFilter};
 
 pub struct SubmitServiceImpl {
     mempool: Mempool,
@@ -97,9 +95,8 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
             .into_inner()
             .r#ref
             .into_iter()
-            .map(|x| Hash::try_from(x.as_ref()))
-            .try_collect()
-            .map_err(|_| Status::internal("invalid tx hash"))?;
+            .map(|x| Hash::from(x.as_ref()))
+            .collect();
 
         let updates = self.mempool.subscribe();
 
@@ -124,7 +121,7 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
         let updates = self.mempool.subscribe();
 
         let stream = BroadcastStream::new(updates)
-            .map_ok(|event| event_to_watch_mempool_response(event))
+            .map_ok(event_to_watch_mempool_response)
             .map_err(|e| Status::internal(e.to_string()))
             .boxed();
 

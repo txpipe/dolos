@@ -1,6 +1,5 @@
 use log::warn;
 use miette::Context;
-use std::sync::Arc;
 
 #[derive(Debug, clap::Args)]
 pub struct Args {}

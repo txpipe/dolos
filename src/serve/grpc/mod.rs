@@ -1,6 +1,6 @@
 use pallas::interop::utxorpc::spec as u5c;
 use serde::{Deserialize, Serialize};
-use std::{path::PathBuf, sync::Arc};
+use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
 use tonic::transport::{Certificate, Server, ServerTlsConfig};
 use tracing::info;

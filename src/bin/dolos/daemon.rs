@@ -1,5 +1,4 @@
 use miette::{Context, IntoDiagnostic};
-use std::sync::Arc;
 use tracing::warn;
 
 #[derive(Debug, clap::Args)]

@@ -1,4 +1,3 @@
-use bincode::de;
 use gasket::framework::*;
 use itertools::Itertools as _;
 use pallas::crypto::hash::Hash;
@@ -8,8 +7,6 @@ use std::time::Duration;
 use tracing::{debug, info, warn};
 
 use crate::mempool::Mempool;
-
-type TxHash = Hash<32>;
 
 pub struct Worker {
     peer_session: PeerClient,
@@ -157,14 +154,9 @@ impl gasket::framework::Worker<Stage> for Worker {
 
                 let to_send = ids
                     .iter()
-                    .map(|x| {
-                        stage
-                            .mempool
-                            .find_inflight(Hash::try_from(x.1.as_slice()).unwrap())
-                    })
                     // we omit any missing tx, we assume that this would be considered a protocol
                     // violation and rejected by the upstream.
-                    .flatten()
+                    .filter_map(|x| stage.mempool.find_inflight(Hash::from(x.1.as_slice())))
                     .map(|x| EraTxBody(x.era, x.bytes.clone()))
                     .collect_vec();
 
