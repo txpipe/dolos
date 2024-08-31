@@ -156,7 +156,7 @@ impl gasket::framework::Worker<Stage> for Worker {
                     .iter()
                     // we omit any missing tx, we assume that this would be considered a protocol
                     // violation and rejected by the upstream.
-                    .filter_map(|x| stage.mempool.find_inflight(Hash::from(x.1.as_slice())))
+                    .filter_map(|x| stage.mempool.find_inflight(&Hash::from(x.1.as_slice())))
                     .map(|x| EraTxBody(x.era, x.bytes.clone()))
                     .collect_vec();
 
