@@ -196,7 +196,7 @@ impl Mempool {
     pub fn check_stage(&self, tx_hash: &TxHash) -> TxStage {
         let state = self.mempool.read().unwrap();
 
-        if let Some(tx) = state.acknowledged.get(&tx_hash) {
+        if let Some(tx) = state.acknowledged.get(tx_hash) {
             if tx.confirmed {
                 TxStage::Confirmed
             } else {
