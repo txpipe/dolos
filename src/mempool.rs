@@ -44,16 +44,17 @@ pub struct Tx {
 }
 
 #[derive(Clone)]
-pub enum EventKind {
+pub enum TxStage {
     Pending,
     Inflight,
     Acknowledged,
     Confirmed,
+    Unknown,
 }
 
 #[derive(Clone)]
 pub struct Event {
-    pub kind: EventKind,
+    pub new_stage: TxStage,
     pub tx: Tx,
 }
 
@@ -89,8 +90,8 @@ impl Mempool {
         self.updates.subscribe()
     }
 
-    pub fn notify(&self, kind: EventKind, tx: Tx) {
-        if self.updates.send(Event { kind, tx }).is_err() {
+    pub fn notify(&self, new_stage: TxStage, tx: Tx) {
+        if self.updates.send(Event { new_stage, tx }).is_err() {
             debug!("no mempool update receivers");
         }
     }
@@ -99,7 +100,7 @@ impl Mempool {
         let mut state = self.mempool.write().unwrap();
 
         state.pending.push(tx.clone());
-        self.notify(EventKind::Pending, tx);
+        self.notify(TxStage::Pending, tx);
 
         debug!(
             pending = state.pending.len(),
@@ -144,7 +145,7 @@ impl Mempool {
 
         for tx in selected.iter() {
             state.inflight.push(tx.clone());
-            self.notify(EventKind::Inflight, tx.clone());
+            self.notify(TxStage::Inflight, tx.clone());
         }
 
         debug!(
@@ -166,7 +167,7 @@ impl Mempool {
 
         for tx in selected {
             state.acknowledged.insert(tx.hash, tx.clone());
-            self.notify(EventKind::Acknowledged, tx.clone());
+            self.notify(TxStage::Acknowledged, tx.clone());
         }
 
         debug!(
@@ -177,14 +178,37 @@ impl Mempool {
         );
     }
 
-    pub fn find_inflight(&self, tx_hash: TxHash) -> Option<Tx> {
+    pub fn find_inflight(&self, tx_hash: &TxHash) -> Option<Tx> {
         let state = self.mempool.read().unwrap();
-        state.inflight.iter().find(|x| x.hash == tx_hash).cloned()
+        state.inflight.iter().find(|x| x.hash.eq(tx_hash)).cloned()
+    }
+
+    pub fn find_pending(&self, tx_hash: &TxHash) -> Option<Tx> {
+        let state = self.mempool.read().unwrap();
+        state.pending.iter().find(|x| x.hash.eq(tx_hash)).cloned()
     }
 
     pub fn pending_total(&self) -> usize {
         let state = self.mempool.read().unwrap();
         state.pending.len()
+    }
+
+    pub fn check_stage(&self, tx_hash: &TxHash) -> TxStage {
+        let state = self.mempool.read().unwrap();
+
+        if let Some(tx) = state.acknowledged.get(&tx_hash) {
+            if tx.confirmed {
+                TxStage::Confirmed
+            } else {
+                TxStage::Acknowledged
+            }
+        } else if self.find_inflight(tx_hash).is_some() {
+            TxStage::Inflight
+        } else if self.find_pending(tx_hash).is_some() {
+            TxStage::Pending
+        } else {
+            TxStage::Unknown
+        }
     }
 
     pub fn apply_block(&mut self, block: &MultiEraBlock) {
@@ -199,7 +223,7 @@ impl Mempool {
 
             if let Some(acknowledged_tx) = state.acknowledged.get_mut(&tx_hash) {
                 acknowledged_tx.confirmed = true;
-                self.notify(EventKind::Confirmed, acknowledged_tx.clone());
+                self.notify(TxStage::Confirmed, acknowledged_tx.clone());
                 debug!(%tx_hash, "confirming tx");
             }
         }
