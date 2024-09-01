@@ -1,15 +1,17 @@
 use futures_util::future::try_join3;
 use miette::{Context, IntoDiagnostic};
+use pallas::ledger::configs::{alonzo, byron, shelley};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use crate::balius::Runtime;
+use crate::mempool::Mempool;
 use crate::state::LedgerStore;
 use crate::wal::redb::WalStore;
 
 pub mod grpc;
+pub mod utils;
 
 #[cfg(unix)]
 pub mod o7s_unix;
@@ -33,16 +35,22 @@ pub struct Config {
     pub offchain: Option<offchain::Config>,
 }
 
+pub type GenesisFiles = (
+    alonzo::GenesisFile,
+    byron::GenesisFile,
+    shelley::GenesisFile,
+);
+
 /// Serve remote requests
 ///
 /// Uses specified config to start listening for network connections on either
 /// gRPC, Ouroboros or both protocols.
 pub async fn serve(
     config: Config,
+    genesis_files: GenesisFiles,
     wal: WalStore,
     ledger: LedgerStore,
-    mempool: Arc<crate::submit::MempoolState>,
-    txs_out: gasket::messaging::tokio::ChannelSendAdapter<Vec<crate::submit::Transaction>>,
+    mempool: Mempool,
     offchain: Runtime,
     exit: CancellationToken,
 ) -> miette::Result<()> {
@@ -50,10 +58,17 @@ pub async fn serve(
         if let Some(cfg) = config.grpc {
             info!("found gRPC config");
 
-            grpc::serve(cfg, wal.clone(), ledger, mempool, txs_out, exit.clone())
-                .await
-                .into_diagnostic()
-                .context("serving gRPC")
+            grpc::serve(
+                cfg,
+                genesis_files,
+                wal.clone(),
+                ledger,
+                mempool,
+                exit.clone(),
+            )
+            .await
+            .into_diagnostic()
+            .context("serving gRPC")
         } else {
             Ok(())
         }

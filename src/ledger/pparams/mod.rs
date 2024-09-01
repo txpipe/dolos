@@ -1,7 +1,7 @@
 use pallas::{
     applying::utils::{
-        AlonzoProtParams, BabbageProtParams, ByronProtParams, MultiEraProtocolParameters,
-        ShelleyProtParams,
+        AlonzoProtParams, BabbageProtParams, ByronProtParams, ConwayProtParams,
+        MultiEraProtocolParameters, ShelleyProtParams,
     },
     ledger::{
         configs::{alonzo, byron, shelley},
@@ -38,10 +38,7 @@ fn bootstrap_byron_pparams(byron: &byron::GenesisFile) -> ByronProtParams {
     }
 }
 
-fn bootstrap_shelley_pparams(
-    _previous: ByronProtParams,
-    shelley: &shelley::GenesisFile,
-) -> ShelleyProtParams {
+fn bootstrap_shelley_pparams(shelley: &shelley::GenesisFile) -> ShelleyProtParams {
     ShelleyProtParams {
         protocol_version: shelley.protocol_params.protocol_version.clone().into(),
         max_block_body_size: shelley.protocol_params.max_block_body_size,
@@ -133,6 +130,112 @@ fn bootstrap_babbage_pparams(previous: AlonzoProtParams) -> BabbageProtParams {
     }
 }
 
+fn bootstrap_conway_pparams(previous: BabbageProtParams) -> ConwayProtParams {
+    ConwayProtParams {
+        minfee_a: previous.minfee_a,
+        minfee_b: previous.minfee_b,
+        max_block_body_size: previous.max_block_body_size,
+        max_transaction_size: previous.max_transaction_size,
+        max_block_header_size: previous.max_block_header_size,
+        key_deposit: previous.key_deposit,
+        pool_deposit: previous.pool_deposit,
+        protocol_version: previous.protocol_version,
+        min_pool_cost: previous.min_pool_cost,
+        desired_number_of_stake_pools: previous.desired_number_of_stake_pools,
+        ada_per_utxo_byte: previous.ada_per_utxo_byte,
+        execution_costs: previous.execution_costs,
+        max_tx_ex_units: previous.max_tx_ex_units,
+        max_block_ex_units: previous.max_block_ex_units,
+        max_value_size: previous.max_value_size,
+        collateral_percentage: previous.collateral_percentage,
+        max_collateral_inputs: previous.max_collateral_inputs,
+        expansion_rate: previous.expansion_rate,
+        treasury_growth_rate: previous.treasury_growth_rate,
+        maximum_epoch: previous.maximum_epoch,
+        pool_pledge_influence: previous.pool_pledge_influence,
+        cost_models_for_script_languages: pallas::ledger::primitives::conway::CostMdls {
+            plutus_v1: previous.cost_models_for_script_languages.plutus_v1,
+            plutus_v2: previous.cost_models_for_script_languages.plutus_v2,
+            plutus_v3: None,
+        },
+        // TODO: load these values from genesis config
+        pool_voting_thresholds: pallas::ledger::primitives::conway::PoolVotingThresholds {
+            motion_no_confidence: pallas::ledger::primitives::conway::RationalNumber {
+                numerator: 0,
+                denominator: 1,
+            },
+            committee_normal: pallas::ledger::primitives::conway::RationalNumber {
+                numerator: 0,
+                denominator: 1,
+            },
+            committee_no_confidence: pallas::ledger::primitives::conway::RationalNumber {
+                numerator: 0,
+                denominator: 1,
+            },
+            hard_fork_initiation: pallas::ledger::primitives::conway::RationalNumber {
+                numerator: 0,
+                denominator: 1,
+            },
+            security_voting_threshold: pallas::ledger::primitives::conway::RationalNumber {
+                numerator: 0,
+                denominator: 1,
+            },
+        },
+        drep_voting_thresholds: pallas::ledger::primitives::conway::DRepVotingThresholds {
+            motion_no_confidence: pallas::ledger::primitives::conway::RationalNumber {
+                numerator: 0,
+                denominator: 1,
+            },
+            committee_normal: pallas::ledger::primitives::conway::RationalNumber {
+                numerator: 0,
+                denominator: 1,
+            },
+            committee_no_confidence: pallas::ledger::primitives::conway::RationalNumber {
+                numerator: 0,
+                denominator: 1,
+            },
+            update_constitution: pallas::ledger::primitives::conway::RationalNumber {
+                numerator: 0,
+                denominator: 1,
+            },
+            hard_fork_initiation: pallas::ledger::primitives::conway::RationalNumber {
+                numerator: 0,
+                denominator: 1,
+            },
+            pp_network_group: pallas::ledger::primitives::conway::RationalNumber {
+                numerator: 0,
+                denominator: 1,
+            },
+            pp_economic_group: pallas::ledger::primitives::conway::RationalNumber {
+                numerator: 0,
+                denominator: 1,
+            },
+            pp_technical_group: pallas::ledger::primitives::conway::RationalNumber {
+                numerator: 0,
+                denominator: 1,
+            },
+            pp_governance_group: pallas::ledger::primitives::conway::RationalNumber {
+                numerator: 0,
+                denominator: 1,
+            },
+            treasury_withdrawal: pallas::ledger::primitives::conway::RationalNumber {
+                numerator: 0,
+                denominator: 1,
+            },
+        },
+        min_committee_size: Default::default(),
+        committee_term_limit: Default::default(),
+        governance_action_validity_period: Default::default(),
+        governance_action_deposit: Default::default(),
+        drep_deposit: Default::default(),
+        drep_inactivity_period: Default::default(),
+        minfee_refscript_cost_per_byte: pallas::ledger::primitives::conway::RationalNumber {
+            numerator: 0,
+            denominator: 1,
+        },
+    }
+}
+
 fn apply_param_update(
     current: MultiEraProtocolParameters,
     update: &MultiEraUpdate,
@@ -202,6 +305,14 @@ fn apply_param_update(
 
             MultiEraProtocolParameters::Babbage(pparams)
         }
+        MultiEraProtocolParameters::Conway(mut pparams) => {
+            if let Some(new) = update.first_proposed_protocol_version() {
+                warn!(?new, "found new protocol version");
+                pparams.protocol_version = new;
+            }
+
+            MultiEraProtocolParameters::Conway(pparams)
+        }
         _ => unimplemented!(),
     }
 }
@@ -226,8 +337,8 @@ fn advance_hardfork(
             MultiEraProtocolParameters::Byron(current)
         }
         // Protocol version 2 transitions from Byron to Shelley
-        MultiEraProtocolParameters::Byron(current) if next_protocol == 2 => {
-            MultiEraProtocolParameters::Shelley(bootstrap_shelley_pparams(current, genesis.shelley))
+        MultiEraProtocolParameters::Byron(_) if next_protocol == 2 => {
+            MultiEraProtocolParameters::Shelley(bootstrap_shelley_pparams(genesis.shelley))
         }
         // Two intra-era hard forks, named Allegra (3) and Mary (4); we don't have separate types
         // for these eras
@@ -251,8 +362,8 @@ fn advance_hardfork(
             MultiEraProtocolParameters::Babbage(current)
         }
         // Protocol version 9 will transition from Babbage to Conway; not yet implemented
-        MultiEraProtocolParameters::Babbage(_) => {
-            todo!("conway pparams handling pending {}", next_protocol)
+        MultiEraProtocolParameters::Babbage(current) if next_protocol == 9 => {
+            MultiEraProtocolParameters::Conway(bootstrap_conway_pparams(current))
         }
         _ => unimplemented!("don't know how to handle hardfork"),
     }
@@ -263,7 +374,13 @@ pub fn fold_pparams(
     updates: &[MultiEraUpdate],
     for_epoch: u64,
 ) -> MultiEraProtocolParameters {
-    let mut pparams = MultiEraProtocolParameters::Byron(bootstrap_byron_pparams(genesis.byron));
+    let mut pparams = match &updates[0] {
+        MultiEraUpdate::Byron(_, _) => {
+            MultiEraProtocolParameters::Byron(bootstrap_byron_pparams(genesis.byron))
+        }
+        // Preview beggins directly on Shelley.
+        _ => MultiEraProtocolParameters::Shelley(bootstrap_shelley_pparams(genesis.shelley)),
+    };
     let mut last_protocol = 0;
 
     for epoch in 0..for_epoch {

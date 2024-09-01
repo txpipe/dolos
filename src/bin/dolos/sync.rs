@@ -7,7 +7,10 @@ pub fn run(config: &super::Config, _args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging)?;
 
     let (wal, ledger) = crate::common::open_data_stores(config)?;
+
     let (byron, shelley, _) = crate::common::open_genesis_files(&config.genesis)?;
+
+    let mempool = dolos::mempool::Mempool::new();
     let offchain = crate::common::load_offchain_runtime(config)?;
 
     let sync = dolos::sync::pipeline(
@@ -18,6 +21,7 @@ pub fn run(config: &super::Config, _args: &Args) -> miette::Result<()> {
         offchain,
         byron,
         shelley,
+        mempool,
         &config.retries,
     )
     .into_diagnostic()

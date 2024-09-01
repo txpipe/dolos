@@ -1,11 +1,21 @@
 use crate::{
-    ledger::{EraCbor, TxoRef},
+    ledger::{
+        pparams::{self, Genesis},
+        EraCbor, PParamsBody, TxoRef,
+    },
+    serve::{utils::apply_mask, GenesisFiles},
     state::{LedgerError, LedgerStore},
 };
 use itertools::Itertools as _;
 use pallas::interop::utxorpc::spec as u5c;
-use pallas::interop::utxorpc::{self as interop, spec::query::any_utxo_pattern::UtxoPattern};
-use pallas::ledger::traverse::MultiEraOutput;
+use pallas::ledger::{
+    configs::{alonzo, byron, shelley},
+    traverse::{MultiEraOutput, MultiEraUpdate},
+};
+use pallas::{
+    interop::utxorpc::{self as interop, spec::query::any_utxo_pattern::UtxoPattern},
+    ledger::traverse::wellknown::GenesisValues,
+};
 use std::collections::HashSet;
 use tonic::{Request, Response, Status};
 use tracing::info;
@@ -13,12 +23,18 @@ use tracing::info;
 pub struct QueryServiceImpl {
     ledger: LedgerStore,
     mapper: interop::Mapper<LedgerStore>,
+    alonzo_genesis_file: alonzo::GenesisFile,
+    byron_genesis_file: byron::GenesisFile,
+    shelley_genesis_file: shelley::GenesisFile,
 }
 
 impl QueryServiceImpl {
-    pub fn new(ledger: LedgerStore) -> Self {
+    pub fn new(ledger: LedgerStore, genesis_files: GenesisFiles) -> Self {
         Self {
             ledger: ledger.clone(),
+            alonzo_genesis_file: genesis_files.0,
+            byron_genesis_file: genesis_files.1,
+            shelley_genesis_file: genesis_files.2,
             mapper: interop::Mapper::new(ledger),
         }
     }
@@ -215,11 +231,62 @@ impl u5c::query::query_service_server::QueryService for QueryServiceImpl {
         &self,
         request: Request<u5c::query::ReadParamsRequest>,
     ) -> Result<Response<u5c::query::ReadParamsResponse>, Status> {
-        let _message = request.into_inner();
+        let message = request.into_inner();
 
         info!("received new grpc query");
 
-        todo!()
+        let curr_point = match self.ledger.cursor()? {
+            Some(point) => point,
+            None => return Err(Status::internal("Uninitialized ledger.")),
+        };
+
+        let updates = self.ledger.get_pparams(curr_point.0)?;
+        let updates: Vec<_> = updates
+            .iter()
+            .map(|PParamsBody(era, cbor)| -> Result<MultiEraUpdate, Status> {
+                MultiEraUpdate::decode_for_era(*era, cbor)
+                    .map_err(|e| Status::internal(e.to_string()))
+            })
+            .try_collect()?;
+
+        let genesis = Genesis {
+            alonzo: &self.alonzo_genesis_file,
+            byron: &self.byron_genesis_file,
+            shelley: &self.shelley_genesis_file,
+        };
+
+        let network_magic = match self.shelley_genesis_file.network_magic {
+            Some(magic) => magic.into(),
+            None => return Err(Status::internal("networkMagic missing in shelley genesis.")),
+        };
+
+        let genesis_values = match GenesisValues::from_magic(network_magic) {
+            Some(genesis_values) => genesis_values,
+            None => return Err(Status::internal("Invalid networdMagic.")),
+        };
+
+        let (epoch, _) = genesis_values.absolute_slot_to_relative(curr_point.0);
+        let pparams = pparams::fold_pparams(&genesis, &updates, epoch);
+
+        let mut response = u5c::query::ReadParamsResponse {
+            values: Some(u5c::query::AnyChainParams {
+                params: u5c::query::any_chain_params::Params::Cardano(
+                    self.mapper.map_pparams(pparams),
+                )
+                .into(),
+            }),
+            ledger_tip: Some(u5c::query::ChainPoint {
+                slot: curr_point.0,
+                hash: curr_point.1.to_vec().into(),
+            }),
+        };
+
+        if let Some(mask) = message.field_mask {
+            response = apply_mask(response, mask.paths)
+                .map_err(|_| Status::internal("Failed to apply field mask"))?
+        }
+
+        Ok(Response::new(response))
     }
 
     async fn read_data(
