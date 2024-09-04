@@ -50,6 +50,7 @@ mithril-client = { git = "https://github.com/input-output-hk/mithril.git", optio
     "fs",
     "rustls-tls",
     "rustls-tls-webpki-roots",
+    "num-integer-backend"
 ], default-features = false }
 protoc-wkt = "1.0.0"
 itertools = "0.12.1"
