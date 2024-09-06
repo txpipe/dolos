@@ -2,11 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.15.0] - 2024-09-06
+
+### 🐛 Bug Fixes
+
+- Provide initial mempool tx stage when asked (#330)
+
+### 🚜 Refactor
+
+- Move pparams mapping to Pallas (#324)
+- Simplify tx submit pipeline (#327)
+
+### ⚙️ Miscellaneous Tasks
+
+- *(serve)* Implement ReadParams method in u5c server (#304)
+- Update Pallas to v0.30.1 (#328)
+
 ## [0.14.1] - 2024-08-03
 
 ### 🐛 Bug Fixes
 
 - Don't panic on Conway certs (#319)
+
+### ⚙️ Miscellaneous Tasks
+
+- Release dolos version 0.14.1
 
 ## [0.14.0] - 2024-08-02
 
