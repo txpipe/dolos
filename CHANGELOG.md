@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.15.1] - 2024-09-07
+
+### 🐛 Bug Fixes
+
+- Use u5c mapping that supports Conway (#333)
+- Use CF backbone as default relay (#335)
+
+### 📚 Documentation
+
+- Add Blaze example (#334)
+
 ## [0.15.0] - 2024-09-06
 
 ### 🐛 Bug Fixes
@@ -17,6 +28,7 @@ All notable changes to this project will be documented in this file.
 
 - *(serve)* Implement ReadParams method in u5c server (#304)
 - Update Pallas to v0.30.1 (#328)
+- Release dolos version 0.15.0
 
 ## [0.14.1] - 2024-08-03
 
