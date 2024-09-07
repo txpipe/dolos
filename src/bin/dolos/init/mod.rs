@@ -57,7 +57,7 @@ impl From<&KnownNetwork> for dolos::model::UpstreamConfig {
     fn from(value: &KnownNetwork) -> Self {
         match value {
             KnownNetwork::CardanoMainnet => dolos::model::UpstreamConfig {
-                peer_address: "relays-new.cardano-mainnet.iohk.io:3001".into(),
+                peer_address: "backbone.mainnet.cardanofoundation.org:3001".into(),
                 network_magic: 764824073,
                 is_testnet: false,
             },
