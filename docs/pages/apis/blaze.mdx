@@ -1,0 +1,39 @@
+import { Callout } from "nextra/components";
+
+
+# Blaze
+
+Blaze is a NodeJS library for creating Cardano transactions and off-chain code for your Aiken contracts in JavaScript. You can learn more about Blaze [in their documentation site](https://blaze.butane.dev/).
+
+Blaze supports multiple backend providers for interacting with the Cardano network. One of those providers is `U5C` (short for UtxoRPC) which is one of the APIs suppored by Dolos. You can learn more about U5C in the [U5C documentation](./grpc.mdx).
+
+## Example
+
+The following example demonstrates how to use the Blaze SDK to query UTXOs for a given address using a local Dolos instance.
+
+```ts
+// Import Blaze SDK and U5C provider
+import { Core, U5C } from "@blaze-cardano/sdk";
+
+// Create a new U5C provider pointing to the local Dolos instance
+const provider = new U5C({
+  url: "http://localhost:50051",
+});
+
+// Query Utxos for the given address (the address in the example is a preview address randomly chosen from an explorer, use your own address)
+const utxos = await provider.getUnspentOutputs(
+  Core.Address.fromBech32(
+    "addr_test1vpetczxy5uc9tkkqhrxgj6t0sggthyg8dd0qp22fte6wdtgvau4rn"
+  )
+);
+
+// Log the UTXOs to the console
+utxos.map((utxo) => {
+  console.log(utxo.toCbor());
+});
+```
+
+
+<Callout type="info">
+Check the [Blaze client example](https://github.com/txpipe/dolos/tree/main/examples/blaze-client) in the Dolos repository for a working version of the above snippet.
+</Callout>
