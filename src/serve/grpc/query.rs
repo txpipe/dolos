@@ -387,6 +387,7 @@ impl u5c::query::query_service_server::QueryService for QueryServiceImpl {
         Ok(Response::new(u5c::query::SearchUtxosResponse {
             items,
             ledger_tip: cursor,
+            next_token: String::default(),
         }))
     }
 }
