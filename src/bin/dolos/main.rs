@@ -113,6 +113,11 @@ pub struct MithrilConfig {
     genesis_key: String,
 }
 
+#[derive(Serialize, Deserialize)]
+pub struct SnapshotConfig {
+    download_url: String,
+}
+
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
 pub struct LoggingConfig {
@@ -151,6 +156,7 @@ pub struct Config {
     pub relay: Option<dolos::relay::Config>,
     pub retries: Option<gasket::retries::Policy>,
     pub mithril: Option<MithrilConfig>,
+    pub snapshot: Option<SnapshotConfig>,
 
     #[serde(default)]
     pub logging: LoggingConfig,

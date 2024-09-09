@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 
 mod dump_wal;
+mod export;
 mod find_seq;
 mod summary;
 
@@ -12,6 +13,8 @@ pub enum Command {
     DumpWal(dump_wal::Args),
     /// finds the WAL seq for a block
     FindSeq(find_seq::Args),
+    /// exports a snapshot from the current data
+    Export(export::Args),
 }
 
 #[derive(Debug, Parser)]
@@ -25,6 +28,7 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
         Command::Summary(x) => summary::run(config, x)?,
         Command::DumpWal(x) => dump_wal::run(config, x)?,
         Command::FindSeq(x) => find_seq::run(config, x)?,
+        Command::Export(x) => export::run(config, x)?,
     }
 
     Ok(())
