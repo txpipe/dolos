@@ -11,36 +11,55 @@ pub struct Args {
     /// the path to export to
     #[arg(short, long)]
     output: PathBuf,
-
-    /// exclude wal data
-    #[arg(long)]
-    exclude_wal: bool,
-
-    /// exclude ledger data
-    #[arg(long)]
-    exclude_ledger: bool,
 }
 
-pub fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
+fn prepare_ledger(
+    ledger: dolos::state::LedgerStore,
+    pb: &crate::feedback::ProgressBar,
+) -> miette::Result<()> {
+    let mut ledger = match ledger {
+        dolos::state::LedgerStore::Redb(x) => x,
+        _ => miette::bail!("Only redb is supported for export"),
+    };
+
+    let db = ledger.db_mut().unwrap();
+    pb.set_message("compacting ledger");
+    db.compact().into_diagnostic()?;
+
+    pb.set_message("checking ledger integrity");
+    db.check_integrity().into_diagnostic()?;
+
+    Ok(())
+}
+
+pub fn run(
+    config: &crate::Config,
+    args: &Args,
+    feedback: &crate::feedback::Feedback,
+) -> miette::Result<()> {
+    let pb = feedback.indeterminate_progress_bar();
+
     let export_file = File::create(&args.output).into_diagnostic()?;
     let encoder = GzEncoder::new(export_file, Compression::default());
     let mut archive = Builder::new(encoder);
 
-    let files = match (args.exclude_wal, args.exclude_ledger) {
-        (true, false) => vec!["ledger"],
-        (false, true) => vec!["wal"],
-        (false, false) => vec!["wal", "ledger"],
-        (true, true) => miette::bail!("Cannot exclude both wal and ledger"),
-    };
+    let (wal, ledger) = crate::common::open_data_stores(&config)?;
 
-    for file in files.iter() {
-        let file_path = config.storage.path.join(file);
+    let path = config.storage.path.join("wal");
 
-        archive
-            .append_path_with_name(&file_path, file)
-            .into_diagnostic()?;
-    }
+    archive
+        .append_path_with_name(&path, "wal")
+        .into_diagnostic()?;
 
+    prepare_ledger(ledger, &pb)?;
+
+    let path = config.storage.path.join("ledger");
+
+    archive
+        .append_path_with_name(&path, "ledger")
+        .into_diagnostic()?;
+
+    pb.set_message("creating archive");
     archive.finish().into_diagnostic()?;
 
     Ok(())

@@ -163,6 +163,10 @@ fn import_hardano_into_wal(
 
     let mut wal = open_empty_wal(config).context("opening WAL")?;
 
+    wal.initialize_from_origin()
+        .into_diagnostic()
+        .context("initializing WAL")?;
+
     let progress = feedback.slot_progress_bar();
 
     progress.set_message("importing immutable db from Haskell into WAL");

@@ -4,10 +4,12 @@ use miette::IntoDiagnostic;
 use crate::feedback::Feedback;
 
 mod mithril;
+mod relay;
 mod snapshot;
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    Relay(relay::Args),
     Mithril(mithril::Args),
     Snapshot(snapshot::Args),
 }
@@ -15,8 +17,9 @@ pub enum Command {
 impl std::fmt::Display for Command {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Command::Mithril(_) => write!(f, "Secure Mithril snapshot (slow but secure)"),
-            Command::Snapshot(_) => write!(f, "Fast Dolos snapshot (trust me bro)"),
+            Command::Snapshot(_) => write!(f, "Dolos snapshot (a few mins, trust me bro)"),
+            Command::Mithril(_) => write!(f, "Mithril snapshot (a few hours, trust Mithril SPOs)"),
+            Command::Relay(_) => write!(f, "Relay chain-sync (several days, trust your relay)"),
         }
     }
 }
@@ -31,8 +34,9 @@ fn inquire_command() -> miette::Result<Command> {
     inquire::Select::new(
         "which bootstrap method would you like to use?",
         vec![
-            Command::Mithril(mithril::Args::default()),
             Command::Snapshot(snapshot::Args::default()),
+            Command::Mithril(mithril::Args::default()),
+            Command::Relay(relay::Args::default()),
         ],
     )
     .prompt()
@@ -47,6 +51,7 @@ pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::
     };
 
     match command {
+        Command::Relay(args) => relay::run(config, &args, feedback),
         Command::Mithril(args) => mithril::run(config, &args, feedback),
         Command::Snapshot(args) => snapshot::run(config, &args, feedback),
     }

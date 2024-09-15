@@ -206,7 +206,7 @@ fn main() -> Result<()> {
         (config, Command::Init(args)) => init::run(config, &args),
 
         #[cfg(feature = "utils")]
-        (Ok(config), Command::Data(args)) => data::run(&config, &args),
+        (Ok(config), Command::Data(args)) => data::run(&config, &args, &feedback),
 
         #[cfg(feature = "mithril")]
         (Ok(config), Command::Bootstrap(args)) => bootstrap::run(&config, &args, &feedback),

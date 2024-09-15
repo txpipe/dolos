@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand};
 
+mod copy_wal;
 mod dump_wal;
 mod export;
 mod find_seq;
@@ -15,6 +16,8 @@ pub enum Command {
     FindSeq(find_seq::Args),
     /// exports a snapshot from the current data
     Export(export::Args),
+    /// copies a range of slots from the WAL into a new db
+    CopyWal(copy_wal::Args),
 }
 
 #[derive(Debug, Parser)]
@@ -23,12 +26,17 @@ pub struct Args {
     command: Command,
 }
 
-pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
+pub fn run(
+    config: &super::Config,
+    args: &Args,
+    feedback: &super::feedback::Feedback,
+) -> miette::Result<()> {
     match &args.command {
         Command::Summary(x) => summary::run(config, x)?,
         Command::DumpWal(x) => dump_wal::run(config, x)?,
         Command::FindSeq(x) => find_seq::run(config, x)?,
-        Command::Export(x) => export::run(config, x)?,
+        Command::Export(x) => export::run(config, x, feedback)?,
+        Command::CopyWal(x) => copy_wal::run(config, x)?,
     }
 
     Ok(())

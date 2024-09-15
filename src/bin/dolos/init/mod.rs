@@ -104,15 +104,18 @@ impl From<&KnownNetwork> for crate::SnapshotConfig {
         match value {
             KnownNetwork::CardanoMainnet => crate::SnapshotConfig {
                 download_url:
-                    "https://dolos-snapshots.s3.amazonaws.com/cardano-mainnet-latest.tar.gz".into(),
+                    "https://dolos-snapshots.s3.amazonaws.com/v0-cardano-mainnet-latest.tar.gz"
+                        .into(),
             },
             KnownNetwork::CardanoPreProd => crate::SnapshotConfig {
                 download_url:
-                    "https://dolos-snapshots.s3.amazonaws.com/cardano-preprod-latest.tar.gz".into(),
+                    "https://dolos-snapshots.s3.amazonaws.com/v0-cardano-preprod-latest.tar.gz"
+                        .into(),
             },
             KnownNetwork::CardanoPreview => crate::SnapshotConfig {
                 download_url:
-                    "https://dolos-snapshots.s3.amazonaws.com/cardano-preview-latest.tar.gz".into(),
+                    "https://dolos-snapshots.s3.amazonaws.com/v0-cardano-preview-latest.tar.gz"
+                        .into(),
             },
         }
     }

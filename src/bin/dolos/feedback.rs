@@ -1,4 +1,4 @@
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+pub use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
 pub struct ProgressReader<R> {
     inner: R,

@@ -8,7 +8,7 @@ use crate::feedback::{Feedback, ProgressReader};
 #[derive(Debug, clap::Args, Default)]
 pub struct Args {}
 
-pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::Result<()> {
+fn fetch_snapshot(config: &crate::Config, feedback: &Feedback) -> miette::Result<()> {
     let snapshot_url = config
         .snapshot
         .as_ref()
@@ -45,6 +45,12 @@ pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::
         .unpack(&config.storage.path)
         .into_diagnostic()
         .context("Failed to extract snapshot")?;
+
+    Ok(())
+}
+
+pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::Result<()> {
+    fetch_snapshot(config, feedback)?;
 
     Ok(())
 }
