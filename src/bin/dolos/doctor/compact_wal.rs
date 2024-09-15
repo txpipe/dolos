@@ -1,4 +1,4 @@
-use dolos::wal::{BlockSlot, ChainPoint, LogSeq, WalReader as _};
+use dolos::wal::{ChainPoint, WalReader as _};
 use miette::{Context, IntoDiagnostic};
 
 #[derive(Debug, clap::Args)]

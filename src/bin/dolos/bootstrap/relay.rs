@@ -1,10 +1,7 @@
 use dolos::wal::redb::WalStore;
-use flate2::read::GzDecoder;
 use miette::{bail, Context, IntoDiagnostic};
-use reqwest;
-use tar::Archive;
 
-use crate::feedback::{Feedback, ProgressReader};
+use crate::feedback::Feedback;
 
 #[derive(Debug, clap::Args, Default)]
 pub struct Args {}
@@ -21,7 +18,7 @@ fn open_empty_wal(config: &crate::Config) -> miette::Result<WalStore> {
     Ok(wal)
 }
 
-pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::Result<()> {
+pub fn run(config: &crate::Config, _args: &Args, _feedback: &Feedback) -> miette::Result<()> {
     let mut wal = open_empty_wal(config).context("opening WAL")?;
 
     wal.initialize_from_origin()

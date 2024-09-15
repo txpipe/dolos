@@ -13,6 +13,21 @@ pub struct Args {
     output: PathBuf,
 }
 
+fn prepare_wal(
+    mut wal: dolos::wal::redb::WalStore,
+    pb: &crate::feedback::ProgressBar,
+) -> miette::Result<()> {
+    let db = wal.db_mut().unwrap();
+
+    pb.set_message("compacting wal");
+    db.compact().into_diagnostic()?;
+
+    pb.set_message("checking wal integrity");
+    db.check_integrity().into_diagnostic()?;
+
+    Ok(())
+}
+
 fn prepare_ledger(
     ledger: dolos::state::LedgerStore,
     pb: &crate::feedback::ProgressBar,
@@ -43,7 +58,9 @@ pub fn run(
     let encoder = GzEncoder::new(export_file, Compression::default());
     let mut archive = Builder::new(encoder);
 
-    let (wal, ledger) = crate::common::open_data_stores(&config)?;
+    let (wal, ledger) = crate::common::open_data_stores(config)?;
+
+    prepare_wal(wal, &pb)?;
 
     let path = config.storage.path.join("wal");
 

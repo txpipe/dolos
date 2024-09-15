@@ -2,7 +2,7 @@ use itertools::Itertools;
 use miette::{Context, IntoDiagnostic};
 use std::path::PathBuf;
 
-use dolos::wal::{BlockSlot, LogSeq, WalReader, WalWriter};
+use dolos::wal::{BlockSlot, WalReader, WalWriter};
 
 #[derive(Debug, clap::Args)]
 pub struct Args {

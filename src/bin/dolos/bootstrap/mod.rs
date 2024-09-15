@@ -51,8 +51,8 @@ pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::
     };
 
     match command {
-        Command::Relay(args) => relay::run(config, &args, feedback),
-        Command::Mithril(args) => mithril::run(config, &args, feedback),
-        Command::Snapshot(args) => snapshot::run(config, &args, feedback),
+        Command::Relay(args) => relay::run(config, args, feedback),
+        Command::Mithril(args) => mithril::run(config, args, feedback),
+        Command::Snapshot(args) => snapshot::run(config, args, feedback),
     }
 }

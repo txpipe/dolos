@@ -1,6 +1,5 @@
 use flate2::read::GzDecoder;
 use miette::{Context, IntoDiagnostic};
-use reqwest;
 use tar::Archive;
 
 use crate::feedback::{Feedback, ProgressReader};
@@ -49,7 +48,7 @@ fn fetch_snapshot(config: &crate::Config, feedback: &Feedback) -> miette::Result
     Ok(())
 }
 
-pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::Result<()> {
+pub fn run(config: &crate::Config, _args: &Args, feedback: &Feedback) -> miette::Result<()> {
     fetch_snapshot(config, feedback)?;
 
     Ok(())
