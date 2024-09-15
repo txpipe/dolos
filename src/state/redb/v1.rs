@@ -28,6 +28,10 @@ impl LedgerStore {
         &self.0
     }
 
+    pub(crate) fn db_mut(&mut self) -> Option<&mut Database> {
+        Arc::get_mut(&mut self.0)
+    }
+
     pub fn is_empty(&self) -> Result<bool, Error> {
         Ok(self.cursor()?.is_none())
     }

@@ -99,6 +99,28 @@ impl From<&KnownNetwork> for crate::MithrilConfig {
     }
 }
 
+impl From<&KnownNetwork> for crate::SnapshotConfig {
+    fn from(value: &KnownNetwork) -> Self {
+        match value {
+            KnownNetwork::CardanoMainnet => crate::SnapshotConfig {
+                download_url:
+                    "https://dolos-snapshots.s3.amazonaws.com/v0-cardano-mainnet-latest.tar.gz"
+                        .into(),
+            },
+            KnownNetwork::CardanoPreProd => crate::SnapshotConfig {
+                download_url:
+                    "https://dolos-snapshots.s3.amazonaws.com/v0-cardano-preprod-latest.tar.gz"
+                        .into(),
+            },
+            KnownNetwork::CardanoPreview => crate::SnapshotConfig {
+                download_url:
+                    "https://dolos-snapshots.s3.amazonaws.com/v0-cardano-preview-latest.tar.gz"
+                        .into(),
+            },
+        }
+    }
+}
+
 #[derive(Debug, Parser)]
 pub struct Args {
     /// Use one of the well-known networks
@@ -132,6 +154,7 @@ impl Default for ConfigEditor {
             crate::Config {
                 upstream: From::from(&KnownNetwork::CardanoMainnet),
                 mithril: Some(From::from(&KnownNetwork::CardanoMainnet)),
+                snapshot: Some(From::from(&KnownNetwork::CardanoMainnet)),
                 storage: Default::default(),
                 genesis: Default::default(),
                 sync: Default::default(),
@@ -152,6 +175,7 @@ impl ConfigEditor {
             self.0.genesis = Default::default();
             self.0.upstream = network.into();
             self.0.mithril = Some(network.into());
+            self.0.snapshot = Some(network.into());
             self.1 = Some(network.clone());
         }
 

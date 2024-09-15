@@ -102,8 +102,14 @@ pub type LogEntry = (LogSeq, LogValue);
 
 #[derive(Debug, Error)]
 pub enum WalError {
+    #[error("wal is not empty")]
+    NotEmpty,
+
     #[error("point not found in chain {0:?}")]
     PointNotFound(ChainPoint),
+
+    #[error("slot not found in chain {0}")]
+    SlotNotFound(BlockSlot),
 
     #[error("IO error")]
     IO(#[source] Box<dyn std::error::Error + Send + Sync>),

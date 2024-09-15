@@ -21,7 +21,11 @@ pub fn dummy_block_from_slot(slot: u64) -> RawBlock {
 }
 
 pub fn empty_db() -> redb::WalStore {
-    super::redb::WalStore::memory().unwrap()
+    let mut wal = super::redb::WalStore::memory().unwrap();
+
+    wal.initialize_from_origin().unwrap();
+
+    wal
 }
 
 pub fn db_with_dummy_blocks(quantity: usize) -> redb::WalStore {
