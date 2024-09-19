@@ -19,6 +19,10 @@ impl LedgerStore {
         &self.0
     }
 
+    pub(crate) fn db_mut(&mut self) -> Option<&mut Database> {
+        Arc::get_mut(&mut self.0)
+    }
+
     pub fn initialize(db: Database) -> Result<Self, Error> {
         let mut wx = db.begin_write()?;
         wx.set_durability(Durability::Immediate);

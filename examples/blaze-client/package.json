@@ -1,0 +1,17 @@
+{
+  "name": "blaze-client",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "example": "esrun index.ts"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@blaze-cardano/sdk": "^0.1.24"
+  },
+  "devDependencies": {
+    "esrun": "^3.2.26"
+  }
+}

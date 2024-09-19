@@ -164,6 +164,14 @@ impl LedgerStore {
         }
     }
 
+    pub fn db_mut(&mut self) -> Option<&mut Database> {
+        match self {
+            LedgerStore::SchemaV1(x) => x.db_mut(),
+            LedgerStore::SchemaV2(x) => x.db_mut(),
+            LedgerStore::SchemaV2Light(x) => x.db_mut(),
+        }
+    }
+
     pub fn cursor(&self) -> Result<Option<ChainPoint>, LedgerError> {
         match self {
             LedgerStore::SchemaV1(x) => Ok(x.cursor()?),

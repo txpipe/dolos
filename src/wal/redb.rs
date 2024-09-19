@@ -3,9 +3,11 @@ use itertools::Itertools;
 use log::info;
 use redb::{Range, ReadableTable, TableDefinition};
 use std::{path::Path, sync::Arc};
-use tracing::warn;
+use tracing::{debug, warn};
 
-use super::{ChainPoint, LogEntry, LogSeq, LogValue, RawBlock, WalError, WalReader, WalWriter};
+use super::{
+    BlockSlot, ChainPoint, LogEntry, LogSeq, LogValue, RawBlock, WalError, WalReader, WalWriter,
+};
 
 impl redb::Value for LogValue {
     type SelfType<'a> = Self;
@@ -106,11 +108,13 @@ impl WalStore {
         Ok(false)
     }
 
-    fn initialize(&mut self) -> Result<(), WalError> {
-        if self.is_empty()? {
-            info!("initializing wal");
-            self.append_entries(std::iter::once(LogValue::Mark(ChainPoint::Origin)))?;
+    pub fn initialize_from_origin(&mut self) -> Result<(), WalError> {
+        if !self.is_empty()? {
+            return Err(WalError::NotEmpty);
         }
+
+        info!("initializing wal");
+        self.append_entries(std::iter::once(LogValue::Mark(ChainPoint::Origin)))?;
 
         Ok(())
     }
@@ -119,12 +123,10 @@ impl WalStore {
         let db =
             redb::Database::builder().create_with_backend(redb::backends::InMemoryBackend::new())?;
 
-        let mut out = Self {
+        let out = Self {
             db: Arc::new(db),
             tip_change: Arc::new(tokio::sync::Notify::new()),
         };
-
-        out.initialize()?;
 
         Ok(out)
     }
@@ -135,14 +137,16 @@ impl WalStore {
             .set_cache_size(1024 * 1024 * cache_size.unwrap_or(DEFAULT_CACHE_SIZE_MB))
             .create(path)?;
 
-        let mut out = Self {
+        let out = Self {
             db: Arc::new(inner),
             tip_change: Arc::new(tokio::sync::Notify::new()),
         };
 
-        out.initialize()?;
-
         Ok(out)
+    }
+
+    pub fn db_mut(&mut self) -> Option<&mut redb::Database> {
+        Arc::get_mut(&mut self.db)
     }
 
     // TODO: see how to expose this method through the official write interface
@@ -175,6 +179,109 @@ impl WalStore {
                 (Some(x), None) => seq >= x,
             })?
             .collect_vec();
+        }
+
+        wx.commit()?;
+
+        Ok(())
+    }
+
+    /// Approximates the LogSeq for a given BlockSlot within a specified delta
+    /// range.
+    ///
+    /// This function searches for the closest LogSeq entry to the target
+    /// BlockSlot within the range [target - max_delta, target + max_delta].
+    ///
+    /// # Arguments
+    ///
+    /// * `target` - The target BlockSlot to approximate.
+    /// * `max_delta` - The maximum allowed difference between the target and
+    ///   the found BlockSlot.
+    ///
+    /// # Returns
+    ///
+    /// Returns a Result containing an Option<LogSeq>. If a suitable entry is
+    /// found within the specified range, it returns Some(LogSeq), otherwise
+    /// None. Returns an error if there's an issue accessing the database.
+    ///
+    /// # Errors
+    ///
+    /// This function will return an error if there's an issue with database
+    /// operations.
+    pub fn approximate_slot(
+        &self,
+        target: BlockSlot,
+        max_delta: BlockSlot,
+    ) -> Result<Option<LogSeq>, WalError> {
+        let min_slot = (target - max_delta) as i128;
+        let max_slot = (target + max_delta) as i128;
+
+        let rx = self.db.begin_read()?;
+        let table = rx.open_table(POS)?;
+
+        let range = table.range(min_slot..max_slot)?;
+
+        let deltas: Vec<_> = range
+            .map_ok(|(k, v)| (target as i128 - k.value(), v.value()))
+            .try_collect()?;
+
+        let seq = deltas.into_iter().min_by_key(|(x, _)| *x).map(|(_, v)| v);
+
+        Ok(seq)
+    }
+
+    /// Removes all entries from the WAL before the specified slot.
+    ///
+    /// This function is used to trim the WAL by removing all entries that are
+    /// older than the given slot. It uses the `approximate_slot` function
+    /// to find a suitable starting point for the deletion process.
+    ///
+    /// # Arguments
+    ///
+    /// * `slot` - The BlockSlot before which all entries should be removed.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` if the operation is successful, or a `WalError` if
+    /// there's an issue.
+    ///
+    /// # Errors
+    ///
+    /// This function will return an error if:
+    /// - There's an issue with database operations.
+    /// - The specified slot cannot be found or approximated in the WAL.
+    ///
+    /// # Note
+    ///
+    /// This operation is irreversible and should be used with caution. Make
+    /// sure you have backups or are certain about trimming the WAL before
+    /// calling this function.
+    pub fn remove_before(&mut self, slot: BlockSlot) -> Result<(), WalError> {
+        let wx = self.db.begin_write()?;
+
+        {
+            let last_seq = self
+                .approximate_slot(slot, 40)?
+                .ok_or(WalError::SlotNotFound(slot))?;
+
+            debug!(last_seq, "found max sequence to remove");
+
+            let mut wal = wx.open_table(WAL)?;
+
+            let mut to_remove = wal.extract_from_if(..last_seq, |_, _| true)?;
+
+            while let Some(Ok((seq, _))) = to_remove.next() {
+                debug!(seq = seq.value(), "removing log entry");
+            }
+        }
+
+        {
+            let mut pos = wx.open_table(POS)?;
+            let mut to_remove = pos.extract_from_if(..(slot as i128), |_, _| true)?;
+
+            while let Some(Ok((slot, _))) = to_remove.next() {
+                debug!(slot = slot.value(), "removing log entry");
+            }
         }
 
         wx.commit()?;

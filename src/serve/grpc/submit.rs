@@ -1,6 +1,7 @@
 use futures_core::Stream;
 use futures_util::{StreamExt as _, TryStreamExt as _};
 use pallas::crypto::hash::Hash;
+use pallas::interop::utxorpc as interop;
 use pallas::interop::utxorpc::spec::submit::{WaitForTxResponse, *};
 use std::collections::HashSet;
 use std::pin::Pin;
@@ -9,14 +10,19 @@ use tonic::{Request, Response, Status};
 use tracing::info;
 
 use crate::mempool::{Event, Mempool, UpdateFilter};
+use crate::state::LedgerStore;
 
 pub struct SubmitServiceImpl {
     mempool: Mempool,
+    _mapper: interop::Mapper<LedgerStore>,
 }
 
 impl SubmitServiceImpl {
-    pub fn new(mempool: Mempool) -> Self {
-        Self { mempool }
+    pub fn new(mempool: Mempool, ledger: LedgerStore) -> Self {
+        Self {
+            mempool,
+            _mapper: interop::Mapper::new(ledger),
+        }
     }
 }
 
@@ -30,27 +36,22 @@ fn tx_stage_to_u5c(stage: crate::mempool::TxStage) -> i32 {
     }
 }
 
+fn event_to_watch_mempool_response(event: Event) -> WatchMempoolResponse {
+    WatchMempoolResponse {
+        tx: TxInMempool {
+            r#ref: event.tx.hash.to_vec().into(),
+            native_bytes: event.tx.bytes.to_vec().into(),
+            stage: tx_stage_to_u5c(event.new_stage),
+            parsed_state: None, // TODO
+        }
+        .into(),
+    }
+}
+
 fn event_to_wait_for_tx_response(event: Event) -> WaitForTxResponse {
     WaitForTxResponse {
         stage: tx_stage_to_u5c(event.new_stage),
         r#ref: event.tx.hash.to_vec().into(),
-    }
-}
-
-fn event_to_watch_mempool_response(event: Event) -> WatchMempoolResponse {
-    WatchMempoolResponse {
-        tx: TxInMempool {
-            tx: AnyChainTx {
-                r#type: Some(
-                    pallas::interop::utxorpc::spec::submit::any_chain_tx::Type::Raw(
-                        event.tx.bytes.into(),
-                    ),
-                ),
-            }
-            .into(),
-            stage: tx_stage_to_u5c(event.new_stage),
-        }
-        .into(),
     }
 }
 
