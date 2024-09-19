@@ -11,14 +11,9 @@ import { U5C } from "@utxorpc/blaze-provider";
 async function main() {
   // Step #2
   // Create a new U5C provider
-  // In this example we use Demeter hosted UTXO provider
-  // but you can run a local Dolos https://github.com/txpipe/dolos instance and connect to its UTxO endpoint
-  // If this is the case then you can remove the headers field
+  // In this example we are using our local Dolos https://github.com/txpipe/dolos instance and connect to its UTxO endpoint
   const provider = new U5C({
-    url: "https://preview.utxorpc-v0.demeter.run",
-    headers: {
-      "dmtr-api-key": "dmtr_utxorpc19r0r7x8stkzejplyyra8n6d70gw276un",
-    },
+    url: "http://localhost:50051"
   });
 
   // Step #3
