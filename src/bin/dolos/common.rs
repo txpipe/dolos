@@ -61,9 +61,13 @@ pub fn load_offchain_runtime(config: &crate::Config) -> miette::Result<dolos::ba
         .into_diagnostic()
         .context("loading offchain runtime")?;
 
-    runtime
-        .register_worker("hello-world", "./hello-world.wasm")
-        .unwrap();
+    if let Some(offchain) = &config.offchain {
+        for worker in offchain.workers.iter() {
+            runtime
+                .register_worker(&worker.name, &worker.module)
+                .unwrap();
+        }
+    }
 
     Ok(runtime)
 }

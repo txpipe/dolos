@@ -146,7 +146,17 @@ impl Default for LoggingConfig {
 }
 
 #[derive(Deserialize, Serialize, Clone, Default)]
-pub struct OffchainConfig {}
+pub struct OffchainWorker {
+    pub name: String,
+    pub module: PathBuf,
+    pub since_slot: Option<u64>,
+    pub until_slot: Option<u64>,
+}
+
+#[derive(Deserialize, Serialize, Clone, Default)]
+pub struct OffchainConfig {
+    pub workers: Vec<OffchainWorker>,
+}
 
 #[derive(Serialize, Deserialize)]
 pub struct Config {
