@@ -196,6 +196,7 @@ impl ConfigEditor {
                 self.0.serve.grpc = dolos::serve::grpc::Config {
                     listen_address: "[::]:50051".into(),
                     tls_client_ca_root: None,
+                    cors_enabled: true,
                 }
                 .into();
             } else {
