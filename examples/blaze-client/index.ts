@@ -1,19 +1,61 @@
+// Step #1
 // Import Blaze SDK and U5C provider
-import { Core, U5C } from "@blaze-cardano/sdk";
+import {
+  Bip32PrivateKey,
+  mnemonicToEntropy,
+  wordlist,
+} from "@blaze-cardano/core";
+import { HotWallet, Core, Blaze } from "@blaze-cardano/sdk";
+import { U5C } from "@utxorpc/blaze-provider";
 
-// Create a new U5C provider pointing to the local Dolos instance
-const provider = new U5C({
-  url: "http://localhost:50051",
-});
+async function main() {
+  // Step #2
+  // Create a new U5C provider
+  // In this example we are using our local Dolos https://github.com/txpipe/dolos instance and connect to its UTxO endpoint
+  const provider = new U5C({
+    url: "http://localhost:50051"
+  });
 
-// Query Utxos for the given address (the address in the example is a preview address randomly chosen from an explorer, use your own address)
-const utxos = await provider.getUnspentOutputs(
-  Core.Address.fromBech32(
-    "addr_test1vpetczxy5uc9tkkqhrxgj6t0sggthyg8dd0qp22fte6wdtgvau4rn"
-  )
-);
+  // Step #3
+  // Create a new wallet from a mnemonic
+  const mnemonic =
+    "end link visit estate sock hurt crucial forum eagle earn idle laptop wheat rookie when hard suffer duty kingdom clerk glide mechanic debris jar";
+  const entropy = mnemonicToEntropy(mnemonic, wordlist);
+  const masterkey = Bip32PrivateKey.fromBip39Entropy(Buffer.from(entropy), "");
+  const wallet = await HotWallet.fromMasterkey(masterkey.hex(), provider);
 
-// Log the UTXOs to the console
-utxos.map((utxo) => {
-  console.log(utxo.toCbor());
-});
+  // Step #4
+  // Create a Blaze instance from the wallet and provider
+  const blaze = await Blaze.from(provider, wallet);
+
+  // Optional: Print the wallet address
+  console.log("Wallet address", wallet.address.toBech32());
+
+  // Optional: Print the wallet balance
+  console.log("Wallet balance", (await wallet.getBalance()).toCore());
+
+  // Step #5
+  // Create a example transaction that sends 5 ADA to an address
+  const tx = await blaze
+    .newTransaction()
+    .payLovelace(
+      Core.Address.fromBech32(
+        "addr_test1qrnrqg4s73skqfyyj69mzr7clpe8s7ux9t8z6l55x2f2xuqra34p9pswlrq86nq63hna7p4vkrcrxznqslkta9eqs2nsmlqvnk",
+      ),
+      5_000_000n,
+    )
+    .complete();
+
+  // Step #6
+  // Sign the transaction
+  const signexTx = await blaze.signTransaction(tx);
+
+  // Step #7
+  // Submit the transaction to the blockchain network
+  const txId = await blaze.provider.postTransactionToChain(signexTx);
+
+  // Optional: Print the transaction ID
+  console.log("Transaction ID", txId);
+}
+
+main().catch(console.error);

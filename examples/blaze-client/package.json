@@ -4,14 +4,16 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "example": "esrun index.ts"
+    "example": "tsx index.ts"
   },
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@blaze-cardano/sdk": "^0.1.24"
+    "@blaze-cardano/sdk": "^0.1.24",
+    "@utxorpc/blaze-provider": "^0.2.0"
   },
   "devDependencies": {
-    "esrun": "^3.2.26"
+    "esrun": "^3.2.26",
+    "tsx": "^4.19.0"
   }
 }
