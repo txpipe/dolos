@@ -267,7 +267,7 @@ impl ConfigEditor {
 
     fn prompt_include_genesis(mut self) -> miette::Result<Self> {
         if let Some(network) = self.1 {
-            let value = Confirm::new("Do you to use included genesis files?")
+            let value = Confirm::new("Do you want to use included genesis files?")
                 .with_default(true)
                 .prompt()
                 .into_diagnostic()
