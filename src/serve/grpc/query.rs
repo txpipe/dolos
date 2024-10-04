@@ -249,6 +249,14 @@ impl u5c::query::query_service_server::QueryService for QueryServiceImpl {
             })
             .try_collect()?;
 
+        let debug_output: String = updates
+            .iter()
+            .map(|update| format!("{:?}", update))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+
+        std::fs::write("/tmp/updates.txt", debug_output).expect("Unable to write updates to file");
+
         let genesis = Genesis {
             alonzo: &self.alonzo_genesis_file,
             byron: &self.byron_genesis_file,

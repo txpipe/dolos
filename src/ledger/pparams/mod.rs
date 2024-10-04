@@ -9,7 +9,7 @@ use pallas::{
         traverse::MultiEraUpdate,
     },
 };
-use tracing::{trace, warn};
+use tracing::{warn, debug};
 
 pub struct Genesis<'a> {
     pub byron: &'a byron::GenesisFile,
@@ -264,22 +264,22 @@ fn apply_param_update(
             MultiEraProtocolParameters::Byron(pparams)
         }
         MultiEraProtocolParameters::Shelley(mut pparams) => {
-            if let Some(new) = update.first_proposed_protocol_version() {
+            if let Some(new) = update.first_proposed_protocol_version_alonzocompatible_babbage() {
                 warn!(?new, "found new protocol version");
                 pparams.protocol_version = new;
             }
 
-            if let Some(x) = update.first_proposed_minfee_a() {
+            if let Some(x) = update.first_proposed_minfee_a_alonzocompatible_babbage() {
                 warn!(x, "found new minfee a update proposal");
                 pparams.minfee_a = x;
             }
 
-            if let Some(x) = update.first_proposed_minfee_b() {
+            if let Some(x) = update.first_proposed_minfee_b_alonzocompatible_babbage() {
                 warn!(x, "found new minfee b update proposal");
                 pparams.minfee_b = x;
             }
 
-            if let Some(x) = update.first_proposed_max_transaction_size() {
+            if let Some(x) = update.first_proposed_max_transaction_size_alonzocompatible_babbage() {
                 warn!(x, "found new max tx size update proposal");
                 pparams.max_transaction_size = x;
             }
@@ -290,25 +290,40 @@ fn apply_param_update(
             MultiEraProtocolParameters::Shelley(pparams)
         }
         MultiEraProtocolParameters::Alonzo(mut pparams) => {
-            if let Some(new) = update.first_proposed_protocol_version() {
+            if let Some(new) = update.first_proposed_protocol_version_alonzocompatible_babbage() {
                 warn!(?new, "found new protocol version");
                 pparams.protocol_version = new;
+            }
+
+            if let Some(new) = update.first_proposed_cost_models_for_script_languages_alonzocompatible() {
+                warn!("found new cost models for script languages update proposal");
+                pparams.cost_models_for_script_languages = new;
             }
 
             MultiEraProtocolParameters::Alonzo(pparams)
         }
         MultiEraProtocolParameters::Babbage(mut pparams) => {
-            if let Some(new) = update.first_proposed_protocol_version() {
+            if let Some(new) = update.first_proposed_protocol_version_alonzocompatible_babbage() {
                 warn!(?new, "found new protocol version");
                 pparams.protocol_version = new;
+            }
+
+            if let Some(new) = update.first_proposed_cost_models_for_script_languages_babbage() {
+                warn!("found new cost models for script languages update proposal");
+                pparams.cost_models_for_script_languages = new;
             }
 
             MultiEraProtocolParameters::Babbage(pparams)
         }
         MultiEraProtocolParameters::Conway(mut pparams) => {
-            if let Some(new) = update.first_proposed_protocol_version() {
+            if let Some(new) = update.first_proposed_protocol_version_alonzocompatible_babbage() {
                 warn!(?new, "found new protocol version");
                 pparams.protocol_version = new;
+            }
+
+            if let Some(new) = update.first_proposed_cost_models_for_script_languages_conway() {
+                warn!("found new cost models for script languages update proposal");
+                pparams.cost_models_for_script_languages = new;
             }
 
             MultiEraProtocolParameters::Conway(pparams)
@@ -374,29 +389,50 @@ pub fn fold_pparams(
     updates: &[MultiEraUpdate],
     for_epoch: u64,
 ) -> MultiEraProtocolParameters {
+    debug!("Starting fold_pparams with {} updates for epoch {}", updates.len(), for_epoch);
+    
     let mut pparams = match &updates[0] {
         MultiEraUpdate::Byron(_, _) => {
+            debug!("Initializing with Byron parameters");
             MultiEraProtocolParameters::Byron(bootstrap_byron_pparams(genesis.byron))
         }
-        // Preview beggins directly on Shelley.
-        _ => MultiEraProtocolParameters::Shelley(bootstrap_shelley_pparams(genesis.shelley)),
+        _ => {
+            debug!("Initializing with Shelley parameters");
+            MultiEraProtocolParameters::Shelley(bootstrap_shelley_pparams(genesis.shelley))
+        }
     };
     let mut last_protocol = 0;
 
     for epoch in 0..for_epoch {
+        debug!("Processing epoch {}", epoch);
+        
         for next_protocol in last_protocol + 1..=pparams.protocol_version() {
-            warn!(next_protocol, "advancing hardfork");
+            debug!("advancing hardfork {:?}", next_protocol);
+            let old_pparams = pparams.clone(); // Assuming Clone is implemented
             pparams = advance_hardfork(pparams, genesis, next_protocol);
+            debug!("Hardfork changes: {:?}", diff_pparams(&old_pparams, &pparams));
             last_protocol = next_protocol;
         }
 
-        for update in updates.iter().filter(|e| e.epoch() == epoch) {
-            trace!(epoch, "Applying update");
+        let epoch_updates: Vec<_> = updates.iter().filter(|e| e.epoch() == epoch).collect();
+        debug!("Found {} updates for epoch {}", epoch_updates.len(), epoch);
+
+        for update in epoch_updates {
+            debug!("Applying update: {:?}", update);
+            let old_pparams = pparams.clone(); // Assuming Clone is implemented
             pparams = apply_param_update(pparams, update);
+            debug!("Update changes: {:?}", diff_pparams(&old_pparams, &pparams));
         }
     }
 
+    debug!("Final protocol parameters: {:?}", pparams);
     pparams
+}
+
+fn diff_pparams(old: &MultiEraProtocolParameters, new: &MultiEraProtocolParameters) -> String {
+    // Implement a diff between old and new parameters
+    // This is a placeholder implementation
+    format!("Old: {:?}, ============================================================================================ New: {:?}", old, new)
 }
 
 #[cfg(test)]
