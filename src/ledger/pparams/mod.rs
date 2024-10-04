@@ -9,7 +9,7 @@ use pallas::{
         traverse::MultiEraUpdate,
     },
 };
-use tracing::{warn, debug};
+use tracing::{debug, warn};
 
 pub struct Genesis<'a> {
     pub byron: &'a byron::GenesisFile,
@@ -240,6 +240,17 @@ fn apply_param_update(
     current: MultiEraProtocolParameters,
     update: &MultiEraUpdate,
 ) -> MultiEraProtocolParameters {
+    macro_rules! update_param {
+        ($pparams:expr, $param:ident, $warn_msg:expr, $($variant:tt)*) => {
+            paste::paste! {
+                if let Some(new) = update.[<first_proposed_ $param _ $($variant:lower)_*>]() {
+                    warn!(?new, $warn_msg);
+                    $pparams.$param = new;
+                }
+            }
+        };
+    }
+
     match current {
         MultiEraProtocolParameters::Byron(mut pparams) => {
             if let Some(new) = update.byron_proposed_block_version() {
@@ -264,25 +275,30 @@ fn apply_param_update(
             MultiEraProtocolParameters::Byron(pparams)
         }
         MultiEraProtocolParameters::Shelley(mut pparams) => {
-            if let Some(new) = update.first_proposed_protocol_version_alonzocompatible_babbage() {
-                warn!(?new, "found new protocol version");
-                pparams.protocol_version = new;
-            }
-
-            if let Some(x) = update.first_proposed_minfee_a_alonzocompatible_babbage() {
-                warn!(x, "found new minfee a update proposal");
-                pparams.minfee_a = x;
-            }
-
-            if let Some(x) = update.first_proposed_minfee_b_alonzocompatible_babbage() {
-                warn!(x, "found new minfee b update proposal");
-                pparams.minfee_b = x;
-            }
-
-            if let Some(x) = update.first_proposed_max_transaction_size_alonzocompatible_babbage() {
-                warn!(x, "found new max tx size update proposal");
-                pparams.max_transaction_size = x;
-            }
+            update_param!(
+                pparams,
+                protocol_version,
+                "found new protocol version",
+                AlonzoCompatible Babbage
+            );
+            update_param!(
+                pparams,
+                minfee_a,
+                "found new minfee a update proposal",
+                AlonzoCompatible Babbage
+            );
+            update_param!(
+                pparams,
+                minfee_b,
+                "found new minfee b update proposal",
+                AlonzoCompatible Babbage
+            );
+            update_param!(
+                pparams,
+                max_transaction_size,
+                "found new max tx size update proposal",
+                AlonzoCompatible Babbage
+            );
 
             // TODO: where's the min utxo value in the network primitives for shelley? do we
             // have them wrong in Pallas?
@@ -290,41 +306,50 @@ fn apply_param_update(
             MultiEraProtocolParameters::Shelley(pparams)
         }
         MultiEraProtocolParameters::Alonzo(mut pparams) => {
-            if let Some(new) = update.first_proposed_protocol_version_alonzocompatible_babbage() {
-                warn!(?new, "found new protocol version");
-                pparams.protocol_version = new;
-            }
-
-            if let Some(new) = update.first_proposed_cost_models_for_script_languages_alonzocompatible() {
-                warn!("found new cost models for script languages update proposal");
-                pparams.cost_models_for_script_languages = new;
-            }
+            update_param!(
+                pparams,
+                protocol_version,
+                "found new protocol version",
+                AlonzoCompatible Babbage
+            );
+            update_param!(
+                pparams,
+                cost_models_for_script_languages,
+                "found new cost models for script languages update proposal",
+                AlonzoCompatible
+            );
 
             MultiEraProtocolParameters::Alonzo(pparams)
         }
         MultiEraProtocolParameters::Babbage(mut pparams) => {
-            if let Some(new) = update.first_proposed_protocol_version_alonzocompatible_babbage() {
-                warn!(?new, "found new protocol version");
-                pparams.protocol_version = new;
-            }
-
-            if let Some(new) = update.first_proposed_cost_models_for_script_languages_babbage() {
-                warn!("found new cost models for script languages update proposal");
-                pparams.cost_models_for_script_languages = new;
-            }
+            update_param!(
+                pparams,
+                protocol_version,
+                "found new protocol version",
+                AlonzoCompatible Babbage
+            );
+            update_param!(
+                pparams,
+                cost_models_for_script_languages,
+                "found new cost models for script languages update proposal",
+                Babbage
+            );
 
             MultiEraProtocolParameters::Babbage(pparams)
         }
         MultiEraProtocolParameters::Conway(mut pparams) => {
-            if let Some(new) = update.first_proposed_protocol_version_alonzocompatible_babbage() {
-                warn!(?new, "found new protocol version");
-                pparams.protocol_version = new;
-            }
-
-            if let Some(new) = update.first_proposed_cost_models_for_script_languages_conway() {
-                warn!("found new cost models for script languages update proposal");
-                pparams.cost_models_for_script_languages = new;
-            }
+            update_param!(
+                pparams,
+                protocol_version,
+                "found new protocol version",
+                AlonzoCompatible Babbage
+            );
+            update_param!(
+                pparams,
+                cost_models_for_script_languages,
+                "found new cost models for script languages update proposal",
+                Conway
+            );
 
             MultiEraProtocolParameters::Conway(pparams)
         }
@@ -389,8 +414,12 @@ pub fn fold_pparams(
     updates: &[MultiEraUpdate],
     for_epoch: u64,
 ) -> MultiEraProtocolParameters {
-    debug!("Starting fold_pparams with {} updates for epoch {}", updates.len(), for_epoch);
-    
+    debug!(
+        "Starting fold_pparams with {} updates for epoch {}",
+        updates.len(),
+        for_epoch
+    );
+
     let mut pparams = match &updates[0] {
         MultiEraUpdate::Byron(_, _) => {
             debug!("Initializing with Byron parameters");
@@ -405,12 +434,15 @@ pub fn fold_pparams(
 
     for epoch in 0..for_epoch {
         debug!("Processing epoch {}", epoch);
-        
+
         for next_protocol in last_protocol + 1..=pparams.protocol_version() {
             debug!("advancing hardfork {:?}", next_protocol);
             let old_pparams = pparams.clone(); // Assuming Clone is implemented
             pparams = advance_hardfork(pparams, genesis, next_protocol);
-            debug!("Hardfork changes: {:?}", diff_pparams(&old_pparams, &pparams));
+            debug!(
+                "Hardfork changes: {:?}",
+                diff_pparams(&old_pparams, &pparams)
+            );
             last_protocol = next_protocol;
         }
 
