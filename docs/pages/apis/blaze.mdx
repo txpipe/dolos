@@ -3,37 +3,110 @@ import { Callout } from "nextra/components";
 
 # Blaze
 
-Blaze is a NodeJS library for creating Cardano transactions and off-chain code for your Aiken contracts in JavaScript. You can learn more about Blaze [in their documentation site](https://blaze.butane.dev/).
+Blaze is a NodeJS library for creating Cardano transactions and off-chain code for your Cardano Smart Contracts in JavaScript. You can learn more about Blaze [in their documentation site](https://blaze.butane.dev/).
 
-Blaze supports multiple backend providers for interacting with the Cardano network. One of those providers is `U5C` (short for UtxoRPC) which is one of the APIs suppored by Dolos. You can learn more about U5C in the [U5C documentation](./grpc.mdx).
+Blaze supports multiple backend providers for interacting with the Cardano network. One of those providers is `U5C` (short for UTxORPC) which is one of the APIs supported by Dolos. You can learn more about U5C in the [U5C documentation](./grpc.mdx).
 
-## Example
+## Installation
 
-The following example demonstrates how to use the Blaze SDK to query UTXOs for a given address using a local Dolos instance.
+To install the UTxORPC provider for blaze, use npm:
 
-```ts
-// Import Blaze SDK and U5C provider
-import { Core, U5C } from "@blaze-cardano/sdk";
+```bash
+npm install @utxorpc/blaze-provider
+```
 
-// Create a new U5C provider pointing to the local Dolos instance
+You also need to install the **Blaze SDK**:
+
+```bash
+npm install @blaze-cardano/sdk
+```
+
+## Sample Usage
+
+### Step 1: Import Blaze SDK and the UTxORPC Provider for Blaze
+
+```javascript
+import {
+    Bip32PrivateKey,
+    mnemonicToEntropy,
+    wordlist,
+} from "@blaze-cardano/core";
+import {
+    HotWallet,
+    Core,
+    Blaze,
+} from "@blaze-cardano/sdk";
+import { U5C } from "@utxorpc/blaze-provider";
+```
+
+### Step 2: Create a New U5C Provider with Dolos
+Now this is where we can utilize our local Dolos node and use it for our UTxORPC provider. We can initiliaze our node through this [link](/quickstart).
+
+Here's how to create the U5C Provider:
+```javascript
 const provider = new U5C({
-  url: "http://localhost:50051",
-});
-
-// Query Utxos for the given address (the address in the example is a preview address randomly chosen from an explorer, use your own address)
-const utxos = await provider.getUnspentOutputs(
-  Core.Address.fromBech32(
-    "addr_test1vpetczxy5uc9tkkqhrxgj6t0sggthyg8dd0qp22fte6wdtgvau4rn"
-  )
-);
-
-// Log the UTXOs to the console
-utxos.map((utxo) => {
-  console.log(utxo.toCbor());
+    url: "http://localhost:50051",
 });
 ```
 
+### Step 3: Create a New Wallet from a Mnemonic
+
+```javascript
+const mnemonic = "your 24-word mnemonic here";
+const entropy = mnemonicToEntropy(mnemonic, wordlist);
+const masterkey = Bip32PrivateKey.fromBip39Entropy(Buffer.from(entropy), "");
+const wallet = await HotWallet.fromMasterkey(masterkey.hex(), provider);
+```
+
+### Step 4: Create a Blaze Instance from the Wallet and Provider
+
+```javascript
+const blaze = await Blaze.from(provider, wallet);
+```
+
+Optional: Print the wallet address
+
+```javascript
+console.log("Wallet address", wallet.address.toBech32());
+```
+
+Optional: Print the wallet balance
+
+```javascript
+console.log("Wallet balance", (await wallet.getBalance()).toCore());
+```
+
+### Step 5: Create an Example Transaction
+
+```javascript
+const tx = await blaze
+    .newTransaction()
+    .payLovelace(
+        Core.Address.fromBech32(
+            "addr_test1qrnrqg4s73skqfyyj69mzr7clpe8s7ux9t8z6l55x2f2xuqra34p9pswlrq86nq63hna7p4vkrcrxznqslkta9eqs2nsmlqvnk",
+        ),
+        5_000_000n,
+    )
+    .complete();
+```
+
+### Step 6: Sign the Transaction
+
+```javascript
+const signedTx = await blaze.signTransaction(tx);
+```
+
+### Step 7: Submit the Transaction to the Blockchain Network
+
+```javascript
+const txId = await blaze.provider.postTransactionToChain(signedTx);
+```
+
+## Conclusion
+
+This showcases a use-case for Dolos which is through The **UTxORPC (u5c)** provider for [Blaze](https://github.com/butaneprotocol/blaze-cardano). For further customization and advanced usage, refer to the documentation for [Blaze](https://github.com/butaneprotocol/blaze-cardano). By understanding and utilizing these tools, you can develop robust applications that interact with Cardano efficiently.
 
 <Callout type="info">
 Check the [Blaze client example](https://github.com/txpipe/dolos/tree/main/examples/blaze-client) in the Dolos repository for a working version of the above snippet.
 </Callout>
+
