@@ -39,12 +39,3 @@ genesis_key = "5b3132372c37332c3132342c3136312c362c3133372c3133312c3231332c32303
 max_level = "DEBUG"
 include_pallas = false
 include_grpc = false
-
-[offchain]
-
-
-[[offchain.workers]]
-name = "hello-world"
-module = "hello-world.wasm"
-since_slot = 2222222
-until_slot = 3333333
