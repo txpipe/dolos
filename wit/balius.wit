@@ -1,0 +1,89 @@
+package balius:odk;
+
+interface kv {
+    type payload = list<u8>;
+    type kv-error = u32;
+  
+    get-value: func(key: string) -> result<payload, kv-error>;
+    set-value: func(key: string, value: payload) -> result<_, kv-error>;
+    list-values: func(prefix: string) -> result<list<string>, kv-error>;
+}
+
+interface submit {
+    type cbor = list<u8>;
+    type submit-error = u32;
+    
+    submit-tx: func(tx: cbor) -> result<_, submit-error>;
+}
+
+interface broadcast {
+    type msg = list<u8>;
+    type broadcast-error = u32;
+
+    publish-msg: func(topic: string, payload: msg) -> result<_, broadcast-error>;
+}
+
+interface driver {
+    type handle-error = u32;
+    type cbor = list<u8>;
+    type json = list<u8>;
+    type timestamp = u64;
+    type params = json;
+
+    variant event {
+        utxo(cbor),
+        utxo-undo(cbor),
+        timer(timestamp),
+        request(params),
+        message(json),
+    }
+
+    type address = list<u8>;
+
+    record token-pattern {
+        policy: list<u8>,
+        name: option<list<u8>>,
+    }
+
+    record utxo-pattern {
+        address: option<address>,
+        token: option<token-pattern>,
+    }
+
+    type timer-interval = string;
+
+    type method = string;
+
+    type topic = string;
+
+    variant event-pattern {
+        utxo(utxo-pattern),
+        utxo-undo(utxo-pattern),
+        timer(timer-interval),
+        request(method),
+        message(topic),
+    }
+
+    variant response {
+        acknowledge,
+        json(json),
+        cbor(cbor),
+        partial-tx(cbor)
+    }
+
+    register-channel: func(id: u32, pattern: event-pattern);
+}
+
+world worker {
+    import kv;
+    import broadcast;
+    import submit;
+    
+    use driver.{event, handle-error, response};
+
+    type env = list<u8>;
+
+    export init: func(env: env); 
+
+    export handle: func(channel: u32, evt: event) -> result<response, handle-error>;
+}

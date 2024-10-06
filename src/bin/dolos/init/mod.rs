@@ -163,6 +163,7 @@ impl Default for ConfigEditor {
                 relay: Default::default(),
                 retries: Default::default(),
                 logging: Default::default(),
+                offchain: Default::default(),
             },
             None,
         )

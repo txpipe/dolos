@@ -1,11 +1,12 @@
 use crate::state::LedgerStore;
 use crate::wal::redb::WalStore;
-use crate::{mempool::Mempool, prelude::*};
+use crate::{balius::Runtime, mempool::Mempool, prelude::*};
 use pallas::ledger::configs::{byron, shelley};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 pub mod apply;
+pub mod offchain;
 pub mod pull;
 pub mod roll;
 pub mod submit;
@@ -49,6 +50,7 @@ pub fn pipeline(
     upstream: &UpstreamConfig,
     wal: WalStore,
     ledger: LedgerStore,
+    offchain: Runtime,
     byron: byron::GenesisFile,
     shelley: shelley::GenesisFile,
     mempool: Mempool,
@@ -71,6 +73,8 @@ pub fn pipeline(
         mempool,
     );
 
+    let mut offchain = offchain::Stage::new(wal.clone(), offchain);
+
     let (to_roll, from_pull) = gasket::messaging::tokio::mpsc_channel(50);
     pull.downstream.connect(to_roll);
     roll.upstream.connect(from_pull);
@@ -78,9 +82,6 @@ pub fn pipeline(
     let (to_ledger, from_roll) = gasket::messaging::tokio::mpsc_channel(50);
     roll.downstream.connect(to_ledger);
     apply.upstream.connect(from_roll);
-
-    // output to outside of out pipeline
-    // apply.downstream.connect(output);
 
     let policy = define_gasket_policy(retries);
 

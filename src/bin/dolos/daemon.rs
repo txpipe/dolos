@@ -11,6 +11,7 @@ pub async fn run(config: super::Config, _args: &Args) -> miette::Result<()> {
     let (wal, ledger) = crate::common::open_data_stores(&config)?;
     let (byron, shelley, _) = crate::common::open_genesis_files(&config.genesis)?;
     let mempool = dolos::mempool::Mempool::new();
+    let offchain = crate::common::load_offchain_runtime(&config)?;
     let exit = crate::common::hook_exit_token();
 
     let sync = dolos::sync::pipeline(
@@ -18,6 +19,7 @@ pub async fn run(config: super::Config, _args: &Args) -> miette::Result<()> {
         &config.upstream,
         wal.clone(),
         ledger.clone(),
+        offchain.clone(),
         byron,
         shelley,
         mempool.clone(),
@@ -39,6 +41,7 @@ pub async fn run(config: super::Config, _args: &Args) -> miette::Result<()> {
         wal.clone(),
         ledger.clone(),
         mempool.clone(),
+        offchain.clone(),
         exit.clone(),
     ));
 

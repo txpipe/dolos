@@ -145,6 +145,19 @@ impl Default for LoggingConfig {
     }
 }
 
+#[derive(Deserialize, Serialize, Clone, Default)]
+pub struct OffchainWorker {
+    pub name: String,
+    pub module: PathBuf,
+    pub since_slot: Option<u64>,
+    pub until_slot: Option<u64>,
+}
+
+#[derive(Deserialize, Serialize, Clone, Default)]
+pub struct OffchainConfig {
+    pub workers: Vec<OffchainWorker>,
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct Config {
     pub upstream: dolos::model::UpstreamConfig,
@@ -156,6 +169,7 @@ pub struct Config {
     pub relay: Option<dolos::relay::Config>,
     pub retries: Option<gasket::retries::Policy>,
     pub mithril: Option<MithrilConfig>,
+    pub offchain: Option<OffchainConfig>,
     pub snapshot: Option<SnapshotConfig>,
 
     #[serde(default)]

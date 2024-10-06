@@ -24,6 +24,9 @@ listen_address = "[::]:50051"
 listen_path = "dolos.socket"
 magic = 2
 
+[serve.offchain]
+listen_address = "[::]:8090"
+
 [relay]
 listen_address = "[::]:30031"
 magic = 2
