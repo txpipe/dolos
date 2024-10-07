@@ -10,7 +10,7 @@ pub fn run(config: &super::Config, _args: &Args) -> miette::Result<()> {
 
     let mempool = dolos::mempool::Mempool::new();
 
-    let (byron, shelley, _) = crate::common::open_genesis_files(&config.genesis)?;
+    let (byron, shelley, _, _) = crate::common::open_genesis_files(&config.genesis)?;
 
     let sync = dolos::sync::pipeline(
         &config.sync,

@@ -9,7 +9,7 @@ pub async fn run(config: super::Config, _args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging)?;
 
     let (wal, ledger) = crate::common::open_data_stores(&config)?;
-    let (byron, shelley, _) = crate::common::open_genesis_files(&config.genesis)?;
+    let (byron, shelley, _, _) = crate::common::open_genesis_files(&config.genesis)?;
     let mempool = dolos::mempool::Mempool::new();
     let exit = crate::common::hook_exit_token();
 
@@ -32,10 +32,10 @@ pub async fn run(config: super::Config, _args: &Args) -> miette::Result<()> {
     // that benefits
 
     // We need new file handled for the separate process.
-    let (byron, shelley, alonzo) = crate::common::open_genesis_files(&config.genesis)?;
+    let (byron, shelley, alonzo, conway) = crate::common::open_genesis_files(&config.genesis)?;
     let serve = tokio::spawn(dolos::serve::serve(
         config.serve,
-        (alonzo, byron, shelley),
+        (alonzo, byron, shelley, conway),
         wal.clone(),
         ledger.clone(),
         mempool.clone(),

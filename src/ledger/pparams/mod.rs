@@ -4,7 +4,7 @@ use pallas::{
         MultiEraProtocolParameters, ShelleyProtParams,
     },
     ledger::{
-        configs::{alonzo, byron, shelley},
+        configs::{alonzo, byron, conway, shelley},
         primitives::alonzo::Language,
         traverse::MultiEraUpdate,
     },
@@ -15,6 +15,7 @@ pub struct Genesis<'a> {
     pub byron: &'a byron::GenesisFile,
     pub shelley: &'a shelley::GenesisFile,
     pub alonzo: &'a alonzo::GenesisFile,
+    pub conway: &'a conway::GenesisFile,
 }
 
 fn bootstrap_byron_pparams(byron: &byron::GenesisFile) -> ByronProtParams {
@@ -460,6 +461,7 @@ mod tests {
             byron: &load_json(format!("{test_data}/genesis/byron_genesis.json")),
             shelley: &load_json(format!("{test_data}/genesis/shelley_genesis.json")),
             alonzo: &load_json(format!("{test_data}/genesis/alonzo_genesis.json")),
+            conway: &load_json(format!("{test_data}/genesis/conway_genesis.json")),
         };
 
         // Then load each mainnet example update proposal as buffers

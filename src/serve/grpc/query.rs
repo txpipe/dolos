@@ -7,7 +7,7 @@ use crate::{
     state::{LedgerError, LedgerStore},
 };
 use itertools::Itertools as _;
-use pallas::interop::utxorpc::spec as u5c;
+use pallas::{interop::utxorpc::spec as u5c, ledger::configs::conway};
 use pallas::ledger::{
     configs::{alonzo, byron, shelley},
     traverse::{MultiEraOutput, MultiEraUpdate},
@@ -26,6 +26,7 @@ pub struct QueryServiceImpl {
     alonzo_genesis_file: alonzo::GenesisFile,
     byron_genesis_file: byron::GenesisFile,
     shelley_genesis_file: shelley::GenesisFile,
+    conway_genesis_file: conway::GenesisFile,
 }
 
 impl QueryServiceImpl {
@@ -35,6 +36,7 @@ impl QueryServiceImpl {
             alonzo_genesis_file: genesis_files.0,
             byron_genesis_file: genesis_files.1,
             shelley_genesis_file: genesis_files.2,
+            conway_genesis_file: genesis_files.3,
             mapper: interop::Mapper::new(ledger),
         }
     }
@@ -261,6 +263,7 @@ impl u5c::query::query_service_server::QueryService for QueryServiceImpl {
             alonzo: &self.alonzo_genesis_file,
             byron: &self.byron_genesis_file,
             shelley: &self.shelley_genesis_file,
+            conway: &self.conway_genesis_file,
         };
 
         let network_magic = match self.shelley_genesis_file.network_magic {

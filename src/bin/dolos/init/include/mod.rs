@@ -18,16 +18,19 @@ pub fn save_genesis_configs(root: &Path, network: &super::KnownNetwork) -> miett
             save_one(root, "byron.json", mainnet::BYRON)?;
             save_one(root, "shelley.json", mainnet::SHELLEY)?;
             save_one(root, "alonzo.json", mainnet::ALONZO)?;
+            save_one(root, "conway.json", mainnet::CONWAY)?;
         }
         super::KnownNetwork::CardanoPreProd => {
             save_one(root, "byron.json", preprod::BYRON)?;
             save_one(root, "shelley.json", preprod::SHELLEY)?;
             save_one(root, "alonzo.json", preprod::ALONZO)?;
+            save_one(root, "conway.json", preprod::CONWAY)?;
         }
         super::KnownNetwork::CardanoPreview => {
             save_one(root, "byron.json", preview::BYRON)?;
             save_one(root, "shelley.json", preview::SHELLEY)?;
             save_one(root, "alonzo.json", preview::ALONZO)?;
+            save_one(root, "conway.json", preview::CONWAY)?;
         }
     }
 

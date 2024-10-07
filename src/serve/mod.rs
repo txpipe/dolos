@@ -1,6 +1,6 @@
 use futures_util::future::try_join;
 use miette::{Context, IntoDiagnostic};
-use pallas::ledger::configs::{alonzo, byron, shelley};
+use pallas::ledger::configs::{alonzo, byron, conway, shelley};
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
@@ -34,6 +34,7 @@ pub type GenesisFiles = (
     alonzo::GenesisFile,
     byron::GenesisFile,
     shelley::GenesisFile,
+    conway::GenesisFile,
 );
 
 /// Serve remote requests

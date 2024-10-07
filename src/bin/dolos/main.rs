@@ -93,6 +93,7 @@ pub struct GenesisConfig {
     byron_path: PathBuf,
     shelley_path: PathBuf,
     alonzo_path: PathBuf,
+    conway_path: PathBuf,
     // TODO: add hash of genesis for runtime verification
     // hash: String,
 }
@@ -103,6 +104,7 @@ impl Default for GenesisConfig {
             byron_path: PathBuf::from("byron.json"),
             shelley_path: PathBuf::from("shelley.json"),
             alonzo_path: PathBuf::from("alonzo.json"),
+            conway_path: PathBuf::from("conway.json"),
         }
     }
 }
