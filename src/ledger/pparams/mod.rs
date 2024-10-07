@@ -5,7 +5,7 @@ use pallas::{
     },
     ledger::{
         configs::{alonzo, byron, conway, shelley},
-        primitives::alonzo::Language,
+        primitives::alonzo::Language as AlonzoLanguage,
         traverse::MultiEraUpdate,
     },
 };
@@ -123,7 +123,7 @@ fn bootstrap_babbage_pparams(previous: AlonzoProtParams) -> BabbageProtParams {
             plutus_v1: previous
                 .cost_models_for_script_languages
                 .iter()
-                .filter(|(k, _)| k == &Language::PlutusV1)
+                .filter(|(k, _)| k == &AlonzoLanguage::PlutusV1)
                 .map(|(_, v)| v.clone())
                 .next(),
             plutus_v2: None,
@@ -131,7 +131,10 @@ fn bootstrap_babbage_pparams(previous: AlonzoProtParams) -> BabbageProtParams {
     }
 }
 
-fn bootstrap_conway_pparams(previous: BabbageProtParams) -> ConwayProtParams {
+fn bootstrap_conway_pparams(
+    previous: BabbageProtParams,
+    genesis: &conway::GenesisFile,
+) -> ConwayProtParams {
     ConwayProtParams {
         minfee_a: previous.minfee_a,
         minfee_b: previous.minfee_b,
@@ -157,7 +160,7 @@ fn bootstrap_conway_pparams(previous: BabbageProtParams) -> ConwayProtParams {
         cost_models_for_script_languages: pallas::ledger::primitives::conway::CostMdls {
             plutus_v1: previous.cost_models_for_script_languages.plutus_v1,
             plutus_v2: previous.cost_models_for_script_languages.plutus_v2,
-            plutus_v3: None,
+            plutus_v3: Some(genesis.plutus_v3_cost_model.clone()),
         },
         // TODO: load these values from genesis config
         pool_voting_thresholds: pallas::ledger::primitives::conway::PoolVotingThresholds {
@@ -224,12 +227,12 @@ fn bootstrap_conway_pparams(previous: BabbageProtParams) -> ConwayProtParams {
                 denominator: 1,
             },
         },
-        min_committee_size: Default::default(),
-        committee_term_limit: Default::default(),
-        governance_action_validity_period: Default::default(),
-        governance_action_deposit: Default::default(),
-        drep_deposit: Default::default(),
-        drep_inactivity_period: Default::default(),
+        min_committee_size: genesis.committee_min_size,
+        committee_term_limit: genesis.committee_max_term_length,
+        governance_action_validity_period: genesis.gov_action_lifetime,
+        governance_action_deposit: genesis.gov_action_deposit,
+        drep_deposit: genesis.d_rep_deposit,
+        drep_inactivity_period: genesis.d_rep_activity,
         minfee_refscript_cost_per_byte: pallas::ledger::primitives::conway::RationalNumber {
             numerator: 0,
             denominator: 1,
