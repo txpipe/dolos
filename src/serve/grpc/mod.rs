@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
 use tonic::transport::{Certificate, Server, ServerTlsConfig};
+use tower_http::cors::CorsLayer;
 use tracing::info;
 
 use crate::mempool::Mempool;
@@ -22,6 +23,7 @@ mod watch;
 pub struct Config {
     pub listen_address: String,
     pub tls_client_ca_root: Option<PathBuf>,
+    pub cors_enabled: bool,
 }
 
 pub async fn serve(
@@ -57,7 +59,12 @@ pub async fn serve(
         .build()
         .unwrap();
 
-    let mut server = Server::builder().accept_http1(true);
+    let cors_layer = if config.cors_enabled {
+        CorsLayer::permissive()
+    } else {
+        CorsLayer::new()
+    };
+    let mut server = Server::builder().accept_http1(true).layer(cors_layer);
 
     if let Some(pem) = config.tls_client_ca_root {
         let pem = std::env::current_dir().unwrap().join(pem);
