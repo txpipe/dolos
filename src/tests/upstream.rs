@@ -50,7 +50,9 @@ fn test_mainnet_upstream() {
     )
     .unwrap();
 
-    let wal = WalStore::memory().unwrap();
+    let mut wal = WalStore::memory().unwrap();
+
+    wal.initialize_from_origin().unwrap();
 
     let (send, receive) = gasket::messaging::tokio::mpsc_channel(200);
 

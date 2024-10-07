@@ -2,10 +2,10 @@ use futures_util::future::try_join;
 use miette::{Context, IntoDiagnostic};
 use pallas::ledger::configs::{alonzo, byron, shelley};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
+use crate::mempool::Mempool;
 use crate::state::LedgerStore;
 use crate::wal::redb::WalStore;
 
@@ -45,8 +45,7 @@ pub async fn serve(
     genesis_files: GenesisFiles,
     wal: WalStore,
     ledger: LedgerStore,
-    mempool: Arc<crate::submit::MempoolState>,
-    txs_out: gasket::messaging::tokio::ChannelSendAdapter<Vec<crate::submit::Transaction>>,
+    mempool: Mempool,
     exit: CancellationToken,
 ) -> miette::Result<()> {
     let grpc = async {
@@ -59,7 +58,6 @@ pub async fn serve(
                 wal.clone(),
                 ledger,
                 mempool,
-                txs_out,
                 exit.clone(),
             )
             .await

@@ -1,13 +1,15 @@
 use pallas::interop::utxorpc::spec as u5c;
 use serde::{Deserialize, Serialize};
-use std::{path::PathBuf, sync::Arc};
+use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
 use tonic::transport::{Certificate, Server, ServerTlsConfig};
+use tower_http::cors::CorsLayer;
 use tracing::info;
 
+use crate::mempool::Mempool;
+use crate::prelude::*;
 use crate::state::LedgerStore;
 use crate::wal::redb::WalStore;
-use crate::{prelude::*, submit::Transaction};
 
 use super::GenesisFiles;
 
@@ -21,6 +23,7 @@ mod watch;
 pub struct Config {
     pub listen_address: String,
     pub tls_client_ca_root: Option<PathBuf>,
+    pub cors_enabled: bool,
 }
 
 pub async fn serve(
@@ -28,8 +31,7 @@ pub async fn serve(
     genesis_files: GenesisFiles,
     wal: WalStore,
     ledger: LedgerStore,
-    mempool: Arc<crate::submit::MempoolState>,
-    txs_out: gasket::messaging::tokio::ChannelSendAdapter<Vec<Transaction>>,
+    mempool: Mempool,
     exit: CancellationToken,
 ) -> Result<(), Error> {
     let addr = config.listen_address.parse().unwrap();
@@ -43,7 +45,7 @@ pub async fn serve(
     let watch_service = watch::WatchServiceImpl::new(wal.clone(), ledger.clone());
     let watch_service = u5c::watch::watch_service_server::WatchServiceServer::new(watch_service);
 
-    let submit_service = submit::SubmitServiceImpl::new(txs_out, mempool);
+    let submit_service = submit::SubmitServiceImpl::new(mempool, ledger.clone());
     let submit_service =
         u5c::submit::submit_service_server::SubmitServiceServer::new(submit_service);
 
@@ -57,7 +59,12 @@ pub async fn serve(
         .build()
         .unwrap();
 
-    let mut server = Server::builder().accept_http1(true);
+    let cors_layer = if config.cors_enabled {
+        CorsLayer::permissive()
+    } else {
+        CorsLayer::new()
+    };
+    let mut server = Server::builder().accept_http1(true).layer(cors_layer);
 
     if let Some(pem) = config.tls_client_ca_root {
         let pem = std::env::current_dir().unwrap().join(pem);

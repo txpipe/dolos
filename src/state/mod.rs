@@ -215,8 +215,8 @@ pub fn load_slice_for_block(
     Ok(LedgerSlice { resolved_inputs })
 }
 
-pub fn apply_block_batch(
-    blocks: &[MultiEraBlock],
+pub fn apply_block_batch<'a>(
+    blocks: impl IntoIterator<Item = &'a MultiEraBlock<'a>>,
     store: &mut LedgerStore,
     byron: &byron::GenesisFile,
     shelley: &shelley::GenesisFile,

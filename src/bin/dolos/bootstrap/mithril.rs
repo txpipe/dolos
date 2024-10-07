@@ -8,7 +8,7 @@ use tracing::{debug, info, warn};
 
 use crate::{feedback::Feedback, MithrilConfig};
 
-#[derive(Debug, clap::Args)]
+#[derive(Debug, clap::Args, Default)]
 pub struct Args {
     #[arg(long, default_value = "./snapshot")]
     download_dir: String,
@@ -135,7 +135,7 @@ async fn fetch_snapshot(
     Ok(())
 }
 
-fn open_empty_wal(config: &super::Config) -> miette::Result<wal::redb::WalStore> {
+fn open_empty_wal(config: &crate::Config) -> miette::Result<wal::redb::WalStore> {
     let wal = crate::common::open_wal(config)?;
 
     let is_empty = wal.is_empty().into_diagnostic()?;
@@ -148,7 +148,7 @@ fn open_empty_wal(config: &super::Config) -> miette::Result<wal::redb::WalStore>
 }
 
 fn import_hardano_into_wal(
-    config: &super::Config,
+    config: &crate::Config,
     immutable_path: &Path,
     feedback: &Feedback,
 ) -> Result<(), miette::Error> {
@@ -162,6 +162,10 @@ fn import_hardano_into_wal(
         .ok_or(miette::miette!("immutable db has no tip"))?;
 
     let mut wal = open_empty_wal(config).context("opening WAL")?;
+
+    wal.initialize_from_origin()
+        .into_diagnostic()
+        .context("initializing WAL")?;
 
     let progress = feedback.slot_progress_bar();
 
@@ -203,7 +207,7 @@ fn import_hardano_into_wal(
     Ok(())
 }
 
-pub fn run(config: &super::Config, args: &Args, feedback: &Feedback) -> miette::Result<()> {
+pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::Result<()> {
     //crate::common::setup_tracing(&config.logging)?;
 
     if args.skip_if_not_empty & crate::common::open_wal(config).is_ok() {

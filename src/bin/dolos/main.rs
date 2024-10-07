@@ -113,6 +113,11 @@ pub struct MithrilConfig {
     genesis_key: String,
 }
 
+#[derive(Serialize, Deserialize)]
+pub struct SnapshotConfig {
+    download_url: String,
+}
+
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
 pub struct LoggingConfig {
@@ -146,11 +151,12 @@ pub struct Config {
     pub storage: StorageConfig,
     pub genesis: GenesisConfig,
     pub sync: dolos::sync::Config,
-    pub submit: dolos::submit::Config,
+    pub submit: dolos::model::SubmitConfig,
     pub serve: dolos::serve::Config,
     pub relay: Option<dolos::relay::Config>,
     pub retries: Option<gasket::retries::Policy>,
     pub mithril: Option<MithrilConfig>,
+    pub snapshot: Option<SnapshotConfig>,
 
     #[serde(default)]
     pub logging: LoggingConfig,
@@ -200,7 +206,7 @@ fn main() -> Result<()> {
         (config, Command::Init(args)) => init::run(config, &args),
 
         #[cfg(feature = "utils")]
-        (Ok(config), Command::Data(args)) => data::run(&config, &args),
+        (Ok(config), Command::Data(args)) => data::run(&config, &args, &feedback),
 
         #[cfg(feature = "mithril")]
         (Ok(config), Command::Bootstrap(args)) => bootstrap::run(&config, &args, &feedback),

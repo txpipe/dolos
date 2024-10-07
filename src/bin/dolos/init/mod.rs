@@ -57,7 +57,7 @@ impl From<&KnownNetwork> for dolos::model::UpstreamConfig {
     fn from(value: &KnownNetwork) -> Self {
         match value {
             KnownNetwork::CardanoMainnet => dolos::model::UpstreamConfig {
-                peer_address: "relays-new.cardano-mainnet.iohk.io:3001".into(),
+                peer_address: "backbone.mainnet.cardanofoundation.org:3001".into(),
                 network_magic: 764824073,
                 is_testnet: false,
             },
@@ -99,6 +99,28 @@ impl From<&KnownNetwork> for crate::MithrilConfig {
     }
 }
 
+impl From<&KnownNetwork> for crate::SnapshotConfig {
+    fn from(value: &KnownNetwork) -> Self {
+        match value {
+            KnownNetwork::CardanoMainnet => crate::SnapshotConfig {
+                download_url:
+                    "https://dolos-snapshots.s3.amazonaws.com/v0-cardano-mainnet-latest.tar.gz"
+                        .into(),
+            },
+            KnownNetwork::CardanoPreProd => crate::SnapshotConfig {
+                download_url:
+                    "https://dolos-snapshots.s3.amazonaws.com/v0-cardano-preprod-latest.tar.gz"
+                        .into(),
+            },
+            KnownNetwork::CardanoPreview => crate::SnapshotConfig {
+                download_url:
+                    "https://dolos-snapshots.s3.amazonaws.com/v0-cardano-preview-latest.tar.gz"
+                        .into(),
+            },
+        }
+    }
+}
+
 #[derive(Debug, Parser)]
 pub struct Args {
     /// Use one of the well-known networks
@@ -132,6 +154,7 @@ impl Default for ConfigEditor {
             crate::Config {
                 upstream: From::from(&KnownNetwork::CardanoMainnet),
                 mithril: Some(From::from(&KnownNetwork::CardanoMainnet)),
+                snapshot: Some(From::from(&KnownNetwork::CardanoMainnet)),
                 storage: Default::default(),
                 genesis: Default::default(),
                 sync: Default::default(),
@@ -152,6 +175,7 @@ impl ConfigEditor {
             self.0.genesis = Default::default();
             self.0.upstream = network.into();
             self.0.mithril = Some(network.into());
+            self.0.snapshot = Some(network.into());
             self.1 = Some(network.clone());
         }
 
@@ -172,6 +196,7 @@ impl ConfigEditor {
                 self.0.serve.grpc = dolos::serve::grpc::Config {
                     listen_address: "[::]:50051".into(),
                     tls_client_ca_root: None,
+                    cors_enabled: true,
                 }
                 .into();
             } else {
@@ -243,7 +268,7 @@ impl ConfigEditor {
 
     fn prompt_include_genesis(mut self) -> miette::Result<Self> {
         if let Some(network) = self.1 {
-            let value = Confirm::new("Do you to use included genesis files?")
+            let value = Confirm::new("Do you want to use included genesis files?")
                 .with_default(true)
                 .prompt()
                 .into_diagnostic()
