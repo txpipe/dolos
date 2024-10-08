@@ -210,9 +210,12 @@ fn import_hardano_into_wal(
 pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::Result<()> {
     //crate::common::setup_tracing(&config.logging)?;
 
-    if args.skip_if_not_empty & crate::common::open_wal(config).is_ok() {
-        info!("Skipping bootstrap, data already present.");
-        return Ok(());
+    if args.skip_if_not_empty {
+        // Open WAL in closure to ensure it is dropped before continuing.
+        let should_skip = crate::common::open_wal(config).is_ok();
+        if should_skip {
+            return Ok(());
+        }
     }
 
     let mithril = config

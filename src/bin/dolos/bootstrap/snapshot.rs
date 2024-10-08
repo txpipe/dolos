@@ -1,18 +1,31 @@
 use flate2::read::GzDecoder;
 use miette::{Context, IntoDiagnostic};
 use tar::Archive;
+use tracing::info;
 
 use crate::feedback::{Feedback, ProgressReader};
 
 #[derive(Debug, clap::Args, Default)]
-pub struct Args {}
+pub struct Args {
+    /// Skip the bootstrap if there's already data in the stores
+    #[arg(long, action)]
+    skip_if_not_empty: bool,
+}
 
-fn fetch_snapshot(config: &crate::Config, feedback: &Feedback) -> miette::Result<()> {
+fn fetch_snapshot(config: &crate::Config, feedback: &Feedback, args: &Args) -> miette::Result<()> {
     let snapshot_url = config
         .snapshot
         .as_ref()
         .map(|x| &x.download_url)
         .ok_or_else(|| miette::miette!("Snapshot URL not specified in config"))?;
+
+    // Check if exists and is not empty.
+    if let Ok(mut entries) = std::fs::read_dir(&config.storage.path) {
+        if entries.next().is_some() && args.skip_if_not_empty {
+            info!("Skipping bootstrap, data already present.");
+            return Ok(());
+        }
+    }
 
     std::fs::create_dir_all(&config.storage.path)
         .into_diagnostic()
@@ -48,8 +61,8 @@ fn fetch_snapshot(config: &crate::Config, feedback: &Feedback) -> miette::Result
     Ok(())
 }
 
-pub fn run(config: &crate::Config, _args: &Args, feedback: &Feedback) -> miette::Result<()> {
-    fetch_snapshot(config, feedback)?;
+pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::Result<()> {
+    fetch_snapshot(config, feedback, args)?;
 
     Ok(())
 }
