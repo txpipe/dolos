@@ -6,7 +6,7 @@ use pallas::ledger::traverse::MultiEraBlock;
 use std::{path::Path, sync::Arc};
 use tracing::{debug, info, warn};
 
-use crate::{feedback::Feedback, MithrilConfig};
+use crate::{common::storage_is_empty, feedback::Feedback, MithrilConfig};
 
 #[derive(Debug, clap::Args, Default)]
 pub struct Args {
@@ -209,6 +209,11 @@ fn import_hardano_into_wal(
 
 pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::Result<()> {
     //crate::common::setup_tracing(&config.logging)?;
+
+    if args.skip_if_not_empty && !storage_is_empty(config) {
+        info!("Skipping bootstrap because storage is not empty.");
+        return Ok(());
+    }
 
     let mithril = config
         .mithril

@@ -15,6 +15,15 @@ use crate::{GenesisConfig, LoggingConfig};
 
 pub type Stores = (wal::redb::WalStore, state::LedgerStore);
 
+pub fn storage_is_empty(config: &crate::Config) -> bool {
+    // Check if exists and is not empty.
+    if let Ok(mut entries) = std::fs::read_dir(&config.storage.path) {
+        entries.next().is_none()
+    } else {
+        true
+    }
+}
+
 pub fn open_wal(config: &crate::Config) -> Result<wal::redb::WalStore, Error> {
     let root = &config.storage.path;
 
