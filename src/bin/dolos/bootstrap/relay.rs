@@ -2,7 +2,7 @@ use dolos::wal::redb::WalStore;
 use miette::{bail, Context, IntoDiagnostic};
 use tracing::info;
 
-use crate::feedback::Feedback;
+use crate::{common::storage_is_empty, feedback::Feedback};
 
 #[derive(Debug, clap::Args, Default)]
 pub struct Args {
@@ -11,34 +11,29 @@ pub struct Args {
     skip_if_not_empty: bool,
 }
 
-fn open_empty_wal(config: &crate::Config, args: &Args) -> miette::Result<Option<WalStore>> {
+fn open_empty_wal(config: &crate::Config) -> miette::Result<WalStore> {
     let wal = crate::common::open_wal(config)?;
 
     let is_empty = wal.is_empty().into_diagnostic()?;
 
     if !is_empty {
-        if args.skip_if_not_empty {
-            return Ok(None);
-        } else {
-            bail!("can't continue with data already available");
-        }
+        bail!("can't continue with data already available");
     }
 
-    Ok(Some(wal))
+    Ok(wal)
 }
 
 pub fn run(config: &crate::Config, args: &Args, _feedback: &Feedback) -> miette::Result<()> {
-    match open_empty_wal(config, args).context("opening WAL")? {
-        Some(mut wal) => {
-            wal.initialize_from_origin()
-                .into_diagnostic()
-                .context("initializing WAL")?;
-
-            Ok(())
-        }
-        None => {
-            info!("Skipping bootstrap, data already present.");
-            Ok(())
-        }
+    if args.skip_if_not_empty && !storage_is_empty(config) {
+        info!("Skipping bootstrap because storage is not empty.");
+        return Ok(());
     }
+
+    let mut wal = open_empty_wal(config).context("opening WAL")?;
+
+    wal.initialize_from_origin()
+        .into_diagnostic()
+        .context("initializing WAL")?;
+
+    Ok(())
 }

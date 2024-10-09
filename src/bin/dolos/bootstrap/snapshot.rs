@@ -3,7 +3,10 @@ use miette::{Context, IntoDiagnostic};
 use tar::Archive;
 use tracing::info;
 
-use crate::feedback::{Feedback, ProgressReader};
+use crate::{
+    common::storage_is_empty,
+    feedback::{Feedback, ProgressReader},
+};
 
 #[derive(Debug, clap::Args, Default)]
 pub struct Args {
@@ -20,11 +23,9 @@ fn fetch_snapshot(config: &crate::Config, feedback: &Feedback, args: &Args) -> m
         .ok_or_else(|| miette::miette!("Snapshot URL not specified in config"))?;
 
     // Check if exists and is not empty.
-    if let Ok(mut entries) = std::fs::read_dir(&config.storage.path) {
-        if entries.next().is_some() && args.skip_if_not_empty {
-            info!("Skipping bootstrap, data already present.");
-            return Ok(());
-        }
+    if args.skip_if_not_empty && !storage_is_empty(config) {
+        info!("Skipping bootstrap because storage is not empty.");
+        return Ok(());
     }
 
     std::fs::create_dir_all(&config.storage.path)
