@@ -11,7 +11,10 @@ use super::{
 
 impl redb::Value for LogValue {
     type SelfType<'a> = Self;
-    type AsBytes<'a> = Vec<u8> where Self: 'a;
+    type AsBytes<'a>
+        = Vec<u8>
+    where
+        Self: 'a;
 
     fn fixed_width() -> Option<usize> {
         None
@@ -211,10 +214,19 @@ impl WalStore {
     pub fn approximate_slot(
         &self,
         target: BlockSlot,
-        max_delta: BlockSlot,
+        search_range: impl std::ops::RangeBounds<BlockSlot>,
     ) -> Result<Option<LogSeq>, WalError> {
-        let min_slot = (target - max_delta) as i128;
-        let max_slot = (target + max_delta) as i128;
+        let min_slot = match search_range.start_bound() {
+            std::ops::Bound::Included(x) => *x as i128,
+            std::ops::Bound::Excluded(x) => *x as i128 + 1,
+            std::ops::Bound::Unbounded => i128::MIN,
+        };
+
+        let max_slot = match search_range.end_bound() {
+            std::ops::Bound::Included(x) => *x as i128,
+            std::ops::Bound::Excluded(x) => *x as i128 - 1,
+            std::ops::Bound::Unbounded => i128::MAX,
+        };
 
         let rx = self.db.begin_read()?;
         let table = rx.open_table(POS)?;
@@ -228,6 +240,27 @@ impl WalStore {
         let seq = deltas.into_iter().min_by_key(|(x, _)| *x).map(|(_, v)| v);
 
         Ok(seq)
+    }
+
+    pub fn approximate_slot_with_retry<F, R>(
+        &self,
+        target: BlockSlot,
+        search_range: F,
+    ) -> Result<Option<LogSeq>, WalError>
+    where
+        F: Fn(usize) -> R,
+        R: std::ops::RangeBounds<BlockSlot>,
+    {
+        for i in 1..10 {
+            let search_range = search_range(i);
+            let seq = self.approximate_slot(target, search_range)?;
+
+            if let Some(seq) = seq {
+                return Ok(Some(seq));
+            }
+        }
+
+        Ok(None)
     }
 
     /// Removes all entries from the WAL before the specified slot.
@@ -261,7 +294,10 @@ impl WalStore {
 
         {
             let last_seq = self
-                .approximate_slot(slot, 40)?
+                .approximate_slot_with_retry(slot, |attempt| {
+                    let start = slot - (20 * attempt as u64);
+                    start..=slot
+                })?
                 .ok_or(WalError::SlotNotFound(slot))?;
 
             debug!(last_seq, "found max sequence to remove");
