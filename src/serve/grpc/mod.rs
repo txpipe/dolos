@@ -54,7 +54,7 @@ pub async fn serve(
         .register_encoded_file_descriptor_set(u5c::submit::FILE_DESCRIPTOR_SET)
         .register_encoded_file_descriptor_set(u5c::watch::FILE_DESCRIPTOR_SET)
         .register_encoded_file_descriptor_set(protoc_wkt::google::protobuf::FILE_DESCRIPTOR_SET)
-        .build()
+        .build_v1()
         .unwrap();
 
     let mut server = Server::builder().accept_http1(true);
