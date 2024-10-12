@@ -24,7 +24,7 @@ pub fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
 
     let (source, _) = crate::common::open_data_stores(config).context("opening data stores")?;
 
-    let mut target = dolos::wal::redb::WalStore::open(&args.output, None)
+    let mut target = dolos::wal::redb::WalStore::open(&args.output, None, None)
         .into_diagnostic()
         .context("opening target WAL")?;
 

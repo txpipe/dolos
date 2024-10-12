@@ -1,9 +1,8 @@
 use bincode;
 use itertools::Itertools;
-use log::info;
 use redb::{Range, ReadableTable, TableDefinition};
 use std::{path::Path, sync::Arc};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use super::{
     BlockSlot, ChainPoint, LogEntry, LogSeq, LogValue, RawBlock, WalError, WalReader, WalWriter,
@@ -89,6 +88,7 @@ const DEFAULT_CACHE_SIZE_MB: usize = 50;
 #[derive(Clone)]
 pub struct WalStore {
     db: Arc<redb::Database>,
+    max_slots: Option<u64>,
     tip_change: Arc<tokio::sync::Notify>,
 }
 
@@ -122,19 +122,24 @@ impl WalStore {
         Ok(())
     }
 
-    pub fn memory() -> Result<Self, WalError> {
+    pub fn memory(max_slots: Option<u64>) -> Result<Self, WalError> {
         let db =
             redb::Database::builder().create_with_backend(redb::backends::InMemoryBackend::new())?;
 
         let out = Self {
             db: Arc::new(db),
             tip_change: Arc::new(tokio::sync::Notify::new()),
+            max_slots,
         };
 
         Ok(out)
     }
 
-    pub fn open(path: impl AsRef<Path>, cache_size: Option<usize>) -> Result<Self, WalError> {
+    pub fn open(
+        path: impl AsRef<Path>,
+        cache_size: Option<usize>,
+        max_slots: Option<u64>,
+    ) -> Result<Self, WalError> {
         let inner = redb::Database::builder()
             .set_repair_callback(|x| warn!(progress = x.progress() * 100f64, "wal db is repairing"))
             .set_cache_size(1024 * 1024 * cache_size.unwrap_or(DEFAULT_CACHE_SIZE_MB))
@@ -143,6 +148,7 @@ impl WalStore {
         let out = Self {
             db: Arc::new(inner),
             tip_change: Arc::new(tokio::sync::Notify::new()),
+            max_slots,
         };
 
         Ok(out)
@@ -185,6 +191,84 @@ impl WalStore {
         }
 
         wx.commit()?;
+
+        Ok(())
+    }
+
+    const MAX_PRUNE_SLOTS_PER_PASS: u64 = 10_000;
+
+    /// Prunes the WAL history to maintain a maximum number of slots.
+    ///
+    /// This method attempts to remove older entries from the WAL to keep the
+    /// total number of slots within the specified `max_slots` limit. It
+    /// operates as follows:
+    ///
+    /// 1. Determines the start and last slots in the WAL.
+    /// 2. Calculates the number of slots that exceed the `max_slots` limit.
+    /// 3. If pruning is necessary, it removes entries older than a calculated
+    ///    cutoff slot.
+    /// 4. Pruning is limited to a maximum of `MAX_PRUNE_SLOTS_PER_PASS` slots
+    ///    per invocation to avoid long-running operations.
+    ///
+    /// # Arguments
+    ///
+    /// * `max_slots` - The maximum number of slots to retain in the WAL.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` if the operation was successful, or a `WalError` if an
+    /// error occurred.
+    ///
+    /// # Notes
+    ///
+    /// - If the WAL doesn't exceed the `max_slots` limit, no pruning occurs.
+    /// - This method is typically called periodically as part of housekeeping
+    ///   operations.
+    /// - The actual number of slots pruned may be less than the calculated
+    ///   excess to avoid long-running operations.
+    pub fn prune_history(&mut self, max_slots: u64) -> Result<(), WalError> {
+        let start_slot = match self.find_start()? {
+            Some((_, ChainPoint::Origin)) => 0,
+            Some((_, ChainPoint::Specific(slot, _))) => slot,
+            _ => {
+                debug!("no start point found, skipping housekeeping");
+                return Ok(());
+            }
+        };
+
+        let last_slot = match self.find_tip()? {
+            Some((_, ChainPoint::Specific(slot, _))) => slot,
+            _ => {
+                debug!("no tip found, skipping housekeeping");
+                return Ok(());
+            }
+        };
+
+        let delta = last_slot - start_slot - max_slots;
+
+        debug!(delta, last_slot, start_slot, "wal history delta computed");
+
+        if delta <= max_slots {
+            debug!(delta, max_slots, "no pruning necessary");
+            return Ok(());
+        }
+
+        let max_prune = core::cmp::min(delta, Self::MAX_PRUNE_SLOTS_PER_PASS);
+
+        let prune_before = start_slot + max_prune;
+
+        info!(cutoff_slot = prune_before, "pruning wal for excess history");
+
+        self.remove_before(prune_before)?;
+
+        Ok(())
+    }
+
+    pub fn housekeeping(&mut self) -> Result<(), WalError> {
+        if let Some(max_slots) = self.max_slots {
+            info!(max_slots, "pruning wal for excess history");
+            self.prune_history(max_slots)?;
+        }
 
         Ok(())
     }
@@ -242,6 +326,40 @@ impl WalStore {
         Ok(seq)
     }
 
+    /// Attempts to find an approximate LogSeq for a given BlockSlot with
+    /// retries.
+    ///
+    /// This function repeatedly calls `approximate_slot` with an expanding
+    /// search range until a suitable LogSeq is found or the maximum number
+    /// of retries is reached.
+    ///
+    /// # Arguments
+    ///
+    /// * `target` - The target BlockSlot to approximate.
+    /// * `search_range` - A closure that takes the current retry count and
+    ///   returns a range of BlockSlots to search within. This allows for
+    ///   dynamic expansion of the search range.
+    ///
+    /// # Returns
+    ///
+    /// Returns a Result containing an Option<LogSeq>. If a suitable entry is
+    /// found within any of the attempted search ranges, it returns
+    /// Some(LogSeq), otherwise None. Returns an error if there's an issue
+    /// accessing the database.
+    ///
+    /// # Errors
+    ///
+    /// This function will return an error if there's an issue with database
+    /// operations during any of the approximation attempts.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let result = wal.approximate_slot_with_retry(
+    ///     slot,
+    ///     |retry| slot - 100 * retry..=slot + 100 * retry
+    /// )?;
+    /// ```
     pub fn approximate_slot_with_retry<F, R>(
         &self,
         target: BlockSlot,

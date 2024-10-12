@@ -1,14 +1,16 @@
 use gasket::framework::*;
-use tracing::{debug, info, warn};
+use tracing::info;
 
 use crate::{
     prelude::*,
-    wal::{self, redb::WalStore, ChainPoint, WalWriter},
+    wal::{self, redb::WalStore, WalWriter},
 };
 
 pub type Cursor = (BlockSlot, BlockHash);
 pub type UpstreamPort = gasket::messaging::InputPort<PullEvent>;
 pub type DownstreamPort = gasket::messaging::OutputPort<RollEvent>;
+
+const HOUSEKEEPING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
 pub enum WorkUnit {
     PullEvent(PullEvent),
@@ -19,8 +21,6 @@ pub enum WorkUnit {
 #[stage(name = "roll", unit = "WorkUnit", worker = "Worker")]
 pub struct Stage {
     store: WalStore,
-
-    max_history_slots: Option<u64>,
 
     pub upstream: UpstreamPort,
     pub downstream: DownstreamPort,
@@ -40,7 +40,6 @@ impl Stage {
             downstream: Default::default(),
             block_count: Default::default(),
             roll_count: Default::default(),
-            max_history_slots: Some(500_000),
         }
     }
 
@@ -79,54 +78,6 @@ impl Stage {
 
         Ok(())
     }
-
-    async fn housekeeping(&mut self) -> Result<(), WorkerError> {
-        let max_slots = match self.max_history_slots {
-            Some(s) => s,
-            None => {
-                debug!("wal pruning is disabled");
-                return Ok(());
-            }
-        };
-
-        use crate::wal::WalReader;
-
-        let start_slot = match self.store.find_start().or_panic()? {
-            Some((_, ChainPoint::Origin)) => 0,
-            Some((_, ChainPoint::Specific(slot, _))) => slot,
-            _ => {
-                debug!("no start point found, skipping housekeeping");
-                return Ok(());
-            }
-        };
-
-        let last_slot = match self.store.find_tip().or_panic()? {
-            Some((_, ChainPoint::Specific(slot, _))) => slot,
-            _ => {
-                debug!("no tip found, skipping housekeeping");
-                return Ok(());
-            }
-        };
-
-        let delta = last_slot - start_slot - max_slots;
-
-        debug!(delta, last_slot, start_slot, "wal history delta computed");
-
-        if delta <= max_slots {
-            debug!(delta, max_slots, "no pruning necessary");
-            return Ok(());
-        }
-
-        let max_prune = core::cmp::min(delta, 1000);
-
-        let prune_before = start_slot + max_prune;
-
-        info!(cutoff_slot = prune_before, "pruning wal for excess history");
-
-        self.store.remove_before(prune_before).or_panic()?;
-
-        Ok(())
-    }
 }
 
 pub struct Worker {
@@ -140,7 +91,7 @@ impl gasket::framework::Worker<Stage> for Worker {
     async fn bootstrap(_stage: &Stage) -> Result<Self, WorkerError> {
         Ok(Worker {
             // TODO: make this interval user-configurable
-            housekeeping_timer: tokio::time::interval(std::time::Duration::from_secs(6)),
+            housekeeping_timer: tokio::time::interval(HOUSEKEEPING_INTERVAL),
         })
     }
 
@@ -159,7 +110,7 @@ impl gasket::framework::Worker<Stage> for Worker {
     async fn execute(&mut self, unit: &WorkUnit, stage: &mut Stage) -> Result<(), WorkerError> {
         match unit {
             WorkUnit::PullEvent(pull) => stage.process_pull_event(pull).await?,
-            WorkUnit::Housekeeping => stage.housekeeping().await?,
+            WorkUnit::Housekeeping => stage.store.housekeeping().or_panic()?,
         }
 
         Ok(())
