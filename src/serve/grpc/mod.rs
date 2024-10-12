@@ -23,7 +23,7 @@ mod watch;
 pub struct Config {
     pub listen_address: String,
     pub tls_client_ca_root: Option<PathBuf>,
-    pub cors_enabled: bool,
+    pub permissive_cors: Option<bool>,
 }
 
 pub async fn serve(
@@ -59,11 +59,12 @@ pub async fn serve(
         .build_v1()
         .unwrap();
 
-    let cors_layer = if config.cors_enabled {
+    let cors_layer = if config.permissive_cors.unwrap_or_default() {
         CorsLayer::permissive()
     } else {
         CorsLayer::new()
     };
+
     let mut server = Server::builder().accept_http1(true).layer(cors_layer);
 
     if let Some(pem) = config.tls_client_ca_root {
