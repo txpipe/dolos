@@ -73,8 +73,8 @@ pub struct StorageConfig {
     /// Size (in Mb) of memory allocated for ledger caching
     ledger_cache: Option<usize>,
 
-    #[allow(dead_code)]
-    wal_size: Option<u64>,
+    /// Maximum number of slots (not blocks) to keep in the WAL
+    max_wal_history: Option<u64>,
 }
 
 impl Default for StorageConfig {
@@ -83,7 +83,7 @@ impl Default for StorageConfig {
             path: PathBuf::from("data"),
             wal_cache: None,
             ledger_cache: None,
-            wal_size: None,
+            max_wal_history: None,
         }
     }
 }

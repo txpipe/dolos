@@ -10,8 +10,15 @@ pub type Cursor = (BlockSlot, BlockHash);
 pub type UpstreamPort = gasket::messaging::InputPort<PullEvent>;
 pub type DownstreamPort = gasket::messaging::OutputPort<RollEvent>;
 
+const HOUSEKEEPING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+pub enum WorkUnit {
+    PullEvent(PullEvent),
+    Housekeeping,
+}
+
 #[derive(Stage)]
-#[stage(name = "roll", unit = "PullEvent", worker = "Worker")]
+#[stage(name = "roll", unit = "WorkUnit", worker = "Worker")]
 pub struct Stage {
     store: WalStore,
 
@@ -36,7 +43,7 @@ impl Stage {
         }
     }
 
-    fn process_pull_event(&mut self, unit: &PullEvent) -> Result<(), WorkerError> {
+    async fn process_pull_event(&mut self, unit: &PullEvent) -> Result<(), WorkerError> {
         match unit {
             PullEvent::RollForward(block) => {
                 let block = wal::RawBlock {
@@ -64,39 +71,47 @@ impl Stage {
             }
         }
 
+        self.downstream
+            .send(RollEvent::TipChanged.into())
+            .await
+            .or_panic()?;
+
         Ok(())
     }
 }
 
-pub struct Worker;
+pub struct Worker {
+    housekeeping_timer: tokio::time::Interval,
+}
 
 impl Worker {}
 
 #[async_trait::async_trait(?Send)]
 impl gasket::framework::Worker<Stage> for Worker {
     async fn bootstrap(_stage: &Stage) -> Result<Self, WorkerError> {
-        Ok(Worker)
+        Ok(Worker {
+            // TODO: make this interval user-configurable
+            housekeeping_timer: tokio::time::interval(HOUSEKEEPING_INTERVAL),
+        })
     }
 
-    async fn schedule(
-        &mut self,
-        stage: &mut Stage,
-    ) -> Result<WorkSchedule<PullEvent>, WorkerError> {
-        // TODO: define a pruning strategy for the WAL here
-
-        let msg = stage.upstream.recv().await.or_panic()?;
-
-        Ok(WorkSchedule::Unit(msg.payload))
+    async fn schedule(&mut self, stage: &mut Stage) -> Result<WorkSchedule<WorkUnit>, WorkerError> {
+        tokio::select! {
+            msg = stage.upstream.recv() => {
+                let msg = msg.or_panic()?;
+                Ok(WorkSchedule::Unit(WorkUnit::PullEvent(msg.payload)))
+            }
+            _ = self.housekeeping_timer.tick() => {
+                Ok(WorkSchedule::Unit(WorkUnit::Housekeeping))
+            }
+        }
     }
 
-    async fn execute(&mut self, unit: &PullEvent, stage: &mut Stage) -> Result<(), WorkerError> {
-        stage.process_pull_event(unit)?;
-
-        stage
-            .downstream
-            .send(RollEvent::TipChanged.into())
-            .await
-            .or_panic()?;
+    async fn execute(&mut self, unit: &WorkUnit, stage: &mut Stage) -> Result<(), WorkerError> {
+        match unit {
+            WorkUnit::PullEvent(pull) => stage.process_pull_event(pull).await?,
+            WorkUnit::Housekeeping => stage.store.housekeeping().or_panic()?,
+        }
 
         Ok(())
     }
