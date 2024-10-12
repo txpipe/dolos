@@ -215,8 +215,9 @@ impl WalStore {
     ///
     /// # Returns
     ///
-    /// Returns `Ok(())` if the operation was successful, or a `WalError` if an
-    /// error occurred.
+    /// Returns `Ok` if the operation was successful, or a `WalError` if an
+    /// error occurred. If the target slot is not found, it logs a warning and
+    /// returns `Ok`.
     ///
     /// # Notes
     ///
@@ -248,27 +249,39 @@ impl WalStore {
             }
         };
 
-        let delta = last_slot - start_slot - max_slots;
+        let delta = last_slot - start_slot;
+        let excess = delta - max_slots;
 
-        debug!(delta, last_slot, start_slot, "wal history delta computed");
+        debug!(
+            delta,
+            excess, last_slot, start_slot, "wal history delta computed"
+        );
 
-        if delta <= max_slots {
-            debug!(delta, max_slots, "no pruning necessary");
+        if excess <= 0 {
+            debug!(delta, max_slots, excess, "no pruning necessary");
             return Ok(());
         }
 
         let max_prune = match max_prune {
-            Some(max) => core::cmp::min(delta, max),
-            None => delta,
+            Some(max) => core::cmp::min(excess, max),
+            None => excess,
         };
 
         let prune_before = start_slot + max_prune;
 
-        info!(cutoff_slot = prune_before, "pruning wal for excess history");
+        info!(
+            cutoff_slot = prune_before,
+            start_slot, excess, "pruning wal for excess history"
+        );
 
-        self.remove_before(prune_before)?;
-
-        Ok(())
+        match self.remove_before(prune_before) {
+            Err(WalError::SlotNotFound(_)) => {
+                warn!("pruning target slot not found, skipping");
+                Ok(())
+            }
+            Err(e) => Err(e),
+            Ok(_) => Ok(()),
+        }
     }
 
     const MAX_PRUNE_SLOTS_PER_HOUSEKEEPING: u64 = 10_000;
@@ -363,7 +376,7 @@ impl WalStore {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```ignore
     /// let result = wal.approximate_slot_with_retry(
     ///     slot,
     ///     |retry| slot - 100 * retry..=slot + 100 * retry
