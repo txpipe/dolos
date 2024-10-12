@@ -2,7 +2,7 @@ use bincode;
 use itertools::Itertools;
 use redb::{Range, ReadableTable, TableDefinition};
 use std::{path::Path, sync::Arc};
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 
 use super::{
     BlockSlot, ChainPoint, LogEntry, LogSeq, LogValue, RawBlock, WalError, WalReader, WalWriter,
@@ -195,8 +195,6 @@ impl WalStore {
         Ok(())
     }
 
-    const MAX_PRUNE_SLOTS_PER_PASS: u64 = 10_000;
-
     /// Prunes the WAL history to maintain a maximum number of slots.
     ///
     /// This method attempts to remove older entries from the WAL to keep the
@@ -207,12 +205,13 @@ impl WalStore {
     /// 2. Calculates the number of slots that exceed the `max_slots` limit.
     /// 3. If pruning is necessary, it removes entries older than a calculated
     ///    cutoff slot.
-    /// 4. Pruning is limited to a maximum of `MAX_PRUNE_SLOTS_PER_PASS` slots
-    ///    per invocation to avoid long-running operations.
+    /// 4. Optionally limits the number of slots pruned per invocation.
     ///
     /// # Arguments
     ///
     /// * `max_slots` - The maximum number of slots to retain in the WAL.
+    /// * `max_prune` - Optional limit on the number of slots to prune in a
+    ///   single operation.
     ///
     /// # Returns
     ///
@@ -224,9 +223,14 @@ impl WalStore {
     /// - If the WAL doesn't exceed the `max_slots` limit, no pruning occurs.
     /// - This method is typically called periodically as part of housekeeping
     ///   operations.
-    /// - The actual number of slots pruned may be less than the calculated
-    ///   excess to avoid long-running operations.
-    pub fn prune_history(&mut self, max_slots: u64) -> Result<(), WalError> {
+    /// - If `max_prune` is specified, it limits the number of slots pruned in a
+    ///   single operation, which can help avoid long-running operations.
+    /// - If `max_prune` is not specified, all excess slots will be pruned.
+    pub fn prune_history(
+        &mut self,
+        max_slots: u64,
+        max_prune: Option<u64>,
+    ) -> Result<(), WalError> {
         let start_slot = match self.find_start()? {
             Some((_, ChainPoint::Origin)) => 0,
             Some((_, ChainPoint::Specific(slot, _))) => slot,
@@ -253,7 +257,10 @@ impl WalStore {
             return Ok(());
         }
 
-        let max_prune = core::cmp::min(delta, Self::MAX_PRUNE_SLOTS_PER_PASS);
+        let max_prune = match max_prune {
+            Some(max) => core::cmp::min(delta, max),
+            None => delta,
+        };
 
         let prune_before = start_slot + max_prune;
 
@@ -264,10 +271,12 @@ impl WalStore {
         Ok(())
     }
 
+    const MAX_PRUNE_SLOTS_PER_HOUSEKEEPING: u64 = 10_000;
+
     pub fn housekeeping(&mut self) -> Result<(), WalError> {
         if let Some(max_slots) = self.max_slots {
             info!(max_slots, "pruning wal for excess history");
-            self.prune_history(max_slots)?;
+            self.prune_history(max_slots, Some(Self::MAX_PRUNE_SLOTS_PER_HOUSEKEEPING))?;
         }
 
         Ok(())
@@ -425,7 +434,7 @@ impl WalStore {
             let mut to_remove = wal.extract_from_if(..last_seq, |_, _| true)?;
 
             while let Some(Ok((seq, _))) = to_remove.next() {
-                debug!(seq = seq.value(), "removing log entry");
+                trace!(seq = seq.value(), "removing log entry");
             }
         }
 
@@ -434,7 +443,7 @@ impl WalStore {
             let mut to_remove = pos.extract_from_if(..(slot as i128), |_, _| true)?;
 
             while let Some(Ok((slot, _))) = to_remove.next() {
-                debug!(slot = slot.value(), "removing log entry");
+                trace!(slot = slot.value(), "removing log entry");
             }
         }
 
