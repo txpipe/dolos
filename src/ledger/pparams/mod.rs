@@ -441,7 +441,7 @@ mod tests {
         // in order
         let blocks: Vec<_> = files
             .iter()
-            .map(|x| MultiEraBlock::decode(&x).unwrap())
+            .map(|x| MultiEraBlock::decode(x).unwrap())
             .sorted_by_key(|b| b.slot())
             .collect();
 
