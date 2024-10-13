@@ -257,7 +257,7 @@ impl WalStore {
             excess, last_slot, start_slot, "wal history delta computed"
         );
 
-        if excess <= 0 {
+        if excess == 0 {
             debug!(delta, max_slots, excess, "no pruning necessary");
             return Ok(());
         }
