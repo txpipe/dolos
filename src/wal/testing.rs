@@ -10,7 +10,7 @@ pub fn slot_to_hash(slot: u64) -> BlockHash {
 
 pub fn dummy_block_from_slot(slot: u64) -> RawBlock {
     let bytes = &hex::decode(DUMMY_BLOCK_BYTES).unwrap();
-    let block = pallas::ledger::traverse::MultiEraBlock::decode(&bytes).unwrap();
+    let block = pallas::ledger::traverse::MultiEraBlock::decode(bytes).unwrap();
 
     RawBlock {
         slot,

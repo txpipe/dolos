@@ -433,7 +433,7 @@ pub fn run(
         .into_diagnostic()
         .context("parsing configuration")?;
 
-    super::bootstrap::run(&config, &super::bootstrap::Args::default(), &feedback)?;
+    super::bootstrap::run(&config, &super::bootstrap::Args::default(), feedback)?;
 
     println!("\nDolos is ready!");
     println!("- run `dolos daemon` to start the node");
