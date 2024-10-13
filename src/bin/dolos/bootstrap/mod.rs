@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use inquire::list_option::ListOption;
 use miette::IntoDiagnostic;
 
 use crate::feedback::Feedback;
@@ -14,12 +15,24 @@ pub enum Command {
     Snapshot(snapshot::Args),
 }
 
-impl std::fmt::Display for Command {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Command::Snapshot(_) => write!(f, "Dolos snapshot (a few mins, trust me bro)"),
-            Command::Mithril(_) => write!(f, "Mithril snapshot (a few hours, trust Mithril SPOs)"),
-            Command::Relay(_) => write!(f, "Relay chain-sync (several days, trust your relay)"),
+impl Command {
+    pub fn inquire() -> miette::Result<Self> {
+        let cmd = inquire::Select::new(
+            "which bootstrap method would you like to use?",
+            vec![
+                ListOption::new(0, "Dolos snapshot (a few mins, trust me bro)"),
+                ListOption::new(1, "Mithril snapshot (a few hours, trust Mithril SPOs)"),
+                ListOption::new(2, "Relay chain-sync (several days, trust your relay)"),
+            ],
+        )
+        .prompt()
+        .into_diagnostic()?;
+
+        match cmd.index {
+            0 => Ok(Command::Snapshot(snapshot::Args::inquire()?)),
+            1 => Ok(Command::Mithril(mithril::Args::default())),
+            2 => Ok(Command::Relay(relay::Args::default())),
+            _ => unreachable!(),
         }
     }
 }
@@ -30,24 +43,10 @@ pub struct Args {
     command: Option<Command>,
 }
 
-fn inquire_command() -> miette::Result<Command> {
-    inquire::Select::new(
-        "which bootstrap method would you like to use?",
-        vec![
-            Command::Snapshot(snapshot::Args::default()),
-            Command::Mithril(mithril::Args::default()),
-            Command::Relay(relay::Args::default()),
-        ],
-    )
-    .prompt()
-    .into_diagnostic()
-}
-
 pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::Result<()> {
-    let command = if let Some(command) = &args.command {
-        command
-    } else {
-        &inquire_command()?
+    let command = match &args.command {
+        Some(x) => x,
+        None => &Command::inquire()?,
     };
 
     match command {
