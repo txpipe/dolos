@@ -249,8 +249,8 @@ impl WalStore {
             }
         };
 
-        let delta = last_slot - start_slot;
-        let excess = delta - max_slots;
+        let delta = last_slot.saturating_sub(start_slot);
+        let excess = delta.saturating_sub(max_slots);
 
         debug!(
             delta,
