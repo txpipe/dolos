@@ -203,7 +203,7 @@ fn main() -> Result<()> {
         // configuration, that is why we pass the whole result and let the command logic decide what
         // to do with it.
         #[cfg(feature = "utils")]
-        (config, Command::Init(args)) => init::run(config, &args),
+        (config, Command::Init(args)) => init::run(config, &args, &feedback),
 
         #[cfg(feature = "utils")]
         (Ok(config), Command::Data(args)) => data::run(&config, &args, &feedback),

@@ -25,8 +25,7 @@ pub fn run(config: &crate::Config, _args: &Args, _feedback: &Feedback) -> miette
         .into_diagnostic()
         .context("initializing WAL")?;
 
-    println!("WAL initialized");
-    println!("run `dolos daemon` to start the node and sync the chain from origin");
+    println!("Data initialized to sync from origin");
 
     Ok(())
 }

@@ -37,7 +37,7 @@ impl Command {
     }
 }
 
-#[derive(Debug, Parser)]
+#[derive(Debug, Parser, Default)]
 pub struct Args {
     #[command(subcommand)]
     command: Option<Command>,
