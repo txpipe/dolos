@@ -8,7 +8,7 @@ use tracing::{debug, info, warn};
 
 use crate::{feedback::Feedback, MithrilConfig};
 
-#[derive(Debug, clap::Args)]
+#[derive(Debug, clap::Args, Clone)]
 pub struct Args {
     #[arg(long, default_value = "./snapshot")]
     download_dir: String,

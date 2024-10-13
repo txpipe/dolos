@@ -8,7 +8,7 @@ mod mithril;
 mod relay;
 mod snapshot;
 
-#[derive(Debug, Subcommand)]
+#[derive(Debug, Subcommand, Clone)]
 pub enum Command {
     Relay(relay::Args),
     Mithril(mithril::Args),
@@ -44,14 +44,14 @@ pub struct Args {
 }
 
 pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::Result<()> {
-    let command = match &args.command {
+    let command = match args.command.clone() {
         Some(x) => x,
-        None => &Command::inquire()?,
+        None => Command::inquire()?,
     };
 
     match command {
-        Command::Relay(args) => relay::run(config, args, feedback),
-        Command::Mithril(args) => mithril::run(config, args, feedback),
-        Command::Snapshot(args) => snapshot::run(config, args, feedback),
+        Command::Relay(args) => relay::run(config, &args, feedback),
+        Command::Mithril(args) => mithril::run(config, &args, feedback),
+        Command::Snapshot(args) => snapshot::run(config, &args, feedback),
     }
 }

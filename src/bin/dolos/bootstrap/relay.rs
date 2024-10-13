@@ -3,7 +3,7 @@ use miette::{bail, Context, IntoDiagnostic};
 
 use crate::feedback::Feedback;
 
-#[derive(Debug, clap::Args, Default)]
+#[derive(Debug, clap::Args, Default, Clone)]
 pub struct Args {}
 
 fn open_empty_wal(config: &crate::Config) -> miette::Result<WalStore> {

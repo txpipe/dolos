@@ -5,7 +5,7 @@ use tar::Archive;
 
 use crate::feedback::{Feedback, ProgressReader};
 
-#[derive(Debug, clap::Args, Default)]
+#[derive(Debug, clap::Args, Default, Clone)]
 pub struct Args {
     /// The variant of the snapshot to download (full, ledger).
     #[arg(long)]
