@@ -7,6 +7,8 @@ use std::{
     str::FromStr,
 };
 
+use crate::feedback::Feedback;
+
 mod include;
 
 #[derive(Debug, Clone)]
@@ -412,7 +414,11 @@ impl ConfigEditor {
     }
 }
 
-pub fn run(config: miette::Result<super::Config>, args: &Args) -> miette::Result<()> {
+pub fn run(
+    config: miette::Result<super::Config>,
+    args: &Args,
+    feedback: &Feedback,
+) -> miette::Result<()> {
     config
         .map(|x| ConfigEditor(x, None))
         .unwrap_or_default()
@@ -423,9 +429,14 @@ pub fn run(config: miette::Result<super::Config>, args: &Args) -> miette::Result
 
     println!("config saved to dolos.toml");
 
+    let config = super::Config::new(&None)
+        .into_diagnostic()
+        .context("parsing configuration")?;
+
+    super::bootstrap::run(&config, &super::bootstrap::Args::default(), &feedback)?;
+
     println!("\nDolos is ready!");
     println!("- run `dolos daemon` to start the node");
-    println!("- run `dolos bootstrap` to load a Mithril snapshot");
 
     Ok(())
 }
