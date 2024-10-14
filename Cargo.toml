@@ -41,7 +41,7 @@ tonic = { version = "0.12.3", features = ["tls"] }
 tonic-web = "0.12.3"
 tonic-reflection = "0.12.3"
 bytes = "1.4.0"
-futures-core = "0.3.28"
+futures-core = "0.3.31"
 tokio-stream = { version = "0.1.14", features = ["sync"] }
 futures-util = "0.3.28"
 async-stream = "0.3.5"
