@@ -502,34 +502,18 @@ pub fn fold_pparams(
 
         for next_protocol in last_protocol + 1..=pparams.protocol_version() {
             debug!("advancing hardfork {:?}", next_protocol);
-            let old_pparams = pparams.clone(); // Assuming Clone is implemented
             pparams = advance_hardfork(pparams, genesis, next_protocol);
-            debug!(
-                "Hardfork changes: {:?}",
-                diff_pparams(&old_pparams, &pparams)
-            );
             last_protocol = next_protocol;
         }
 
         let epoch_updates: Vec<_> = updates.iter().filter(|e| e.epoch() == epoch).collect();
         debug!("Found {} updates for epoch {}", epoch_updates.len(), epoch);
-
         for update in epoch_updates {
-            debug!("Applying update: {:?}", update);
-            let old_pparams = pparams.clone(); // Assuming Clone is implemented
             pparams = apply_param_update(pparams, update);
-            debug!("Update changes: {:?}", diff_pparams(&old_pparams, &pparams));
         }
     }
 
-    debug!("Final protocol parameters: {:?}", pparams);
     pparams
-}
-
-fn diff_pparams(old: &MultiEraProtocolParameters, new: &MultiEraProtocolParameters) -> String {
-    // Implement a diff between old and new parameters
-    // This is a placeholder implementation
-    format!("Old: {:?}, ============================================================================================ New: {:?}", old, new)
 }
 
 #[cfg(test)]
