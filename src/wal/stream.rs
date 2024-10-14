@@ -52,7 +52,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stream_waiting() {
-        let mut db = WalStore::memory().unwrap();
+        let mut db = WalStore::memory(None).unwrap();
 
         db.initialize_from_origin().unwrap();
 

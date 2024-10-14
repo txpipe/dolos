@@ -265,7 +265,7 @@ mod tests {
         assert_eq!(utxo_body.era(), Era::Byron);
 
         assert_eq!(
-            utxo_body.lovelace_amount(),
+            utxo_body.value().coin(),
             amount,
             "utxo amount doesn't match"
         );

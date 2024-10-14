@@ -3,7 +3,7 @@ use miette::{bail, Context, IntoDiagnostic};
 
 use crate::feedback::Feedback;
 
-#[derive(Debug, clap::Args, Default)]
+#[derive(Debug, clap::Args, Default, Clone)]
 pub struct Args {}
 
 fn open_empty_wal(config: &crate::Config) -> miette::Result<WalStore> {
@@ -24,6 +24,8 @@ pub fn run(config: &crate::Config, _args: &Args, _feedback: &Feedback) -> miette
     wal.initialize_from_origin()
         .into_diagnostic()
         .context("initializing WAL")?;
+
+    println!("Data initialized to sync from origin");
 
     Ok(())
 }

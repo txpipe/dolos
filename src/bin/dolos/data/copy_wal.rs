@@ -24,13 +24,13 @@ pub fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
 
     let (source, _) = crate::common::open_data_stores(config).context("opening data stores")?;
 
-    let mut target = dolos::wal::redb::WalStore::open(&args.output, None)
+    let mut target = dolos::wal::redb::WalStore::open(&args.output, None, None)
         .into_diagnostic()
         .context("opening target WAL")?;
 
     let since = match args.since {
         Some(slot) => source
-            .approximate_slot(slot, 100)
+            .approximate_slot(slot, slot..slot + 200)
             .into_diagnostic()
             .context("finding initial slot")?,
         None => None,
@@ -38,7 +38,7 @@ pub fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
 
     let until = match args.until {
         Some(slot) => source
-            .approximate_slot(slot, 100)
+            .approximate_slot(slot, slot - 200..=slot)
             .into_diagnostic()
             .context("finding final slot")?,
         None => None,

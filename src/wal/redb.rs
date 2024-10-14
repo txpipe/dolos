@@ -1,9 +1,8 @@
 use bincode;
 use itertools::Itertools;
-use log::info;
 use redb::{Range, ReadableTable, TableDefinition};
 use std::{path::Path, sync::Arc};
-use tracing::{debug, warn};
+use tracing::{debug, info, trace, warn};
 
 use super::{
     BlockSlot, ChainPoint, LogEntry, LogSeq, LogValue, RawBlock, WalError, WalReader, WalWriter,
@@ -11,7 +10,10 @@ use super::{
 
 impl redb::Value for LogValue {
     type SelfType<'a> = Self;
-    type AsBytes<'a> = Vec<u8> where Self: 'a;
+    type AsBytes<'a>
+        = Vec<u8>
+    where
+        Self: 'a;
 
     fn fixed_width() -> Option<usize> {
         None
@@ -86,6 +88,7 @@ const DEFAULT_CACHE_SIZE_MB: usize = 50;
 #[derive(Clone)]
 pub struct WalStore {
     db: Arc<redb::Database>,
+    max_slots: Option<u64>,
     tip_change: Arc<tokio::sync::Notify>,
 }
 
@@ -119,19 +122,24 @@ impl WalStore {
         Ok(())
     }
 
-    pub fn memory() -> Result<Self, WalError> {
+    pub fn memory(max_slots: Option<u64>) -> Result<Self, WalError> {
         let db =
             redb::Database::builder().create_with_backend(redb::backends::InMemoryBackend::new())?;
 
         let out = Self {
             db: Arc::new(db),
             tip_change: Arc::new(tokio::sync::Notify::new()),
+            max_slots,
         };
 
         Ok(out)
     }
 
-    pub fn open(path: impl AsRef<Path>, cache_size: Option<usize>) -> Result<Self, WalError> {
+    pub fn open(
+        path: impl AsRef<Path>,
+        cache_size: Option<usize>,
+        max_slots: Option<u64>,
+    ) -> Result<Self, WalError> {
         let inner = redb::Database::builder()
             .set_repair_callback(|x| warn!(progress = x.progress() * 100f64, "wal db is repairing"))
             .set_cache_size(1024 * 1024 * cache_size.unwrap_or(DEFAULT_CACHE_SIZE_MB))
@@ -140,6 +148,7 @@ impl WalStore {
         let out = Self {
             db: Arc::new(inner),
             tip_change: Arc::new(tokio::sync::Notify::new()),
+            max_slots,
         };
 
         Ok(out)
@@ -186,6 +195,106 @@ impl WalStore {
         Ok(())
     }
 
+    /// Prunes the WAL history to maintain a maximum number of slots.
+    ///
+    /// This method attempts to remove older entries from the WAL to keep the
+    /// total number of slots within the specified `max_slots` limit. It
+    /// operates as follows:
+    ///
+    /// 1. Determines the start and last slots in the WAL.
+    /// 2. Calculates the number of slots that exceed the `max_slots` limit.
+    /// 3. If pruning is necessary, it removes entries older than a calculated
+    ///    cutoff slot.
+    /// 4. Optionally limits the number of slots pruned per invocation.
+    ///
+    /// # Arguments
+    ///
+    /// * `max_slots` - The maximum number of slots to retain in the WAL.
+    /// * `max_prune` - Optional limit on the number of slots to prune in a
+    ///   single operation.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok` if the operation was successful, or a `WalError` if an
+    /// error occurred. If the target slot is not found, it logs a warning and
+    /// returns `Ok`.
+    ///
+    /// # Notes
+    ///
+    /// - If the WAL doesn't exceed the `max_slots` limit, no pruning occurs.
+    /// - This method is typically called periodically as part of housekeeping
+    ///   operations.
+    /// - If `max_prune` is specified, it limits the number of slots pruned in a
+    ///   single operation, which can help avoid long-running operations.
+    /// - If `max_prune` is not specified, all excess slots will be pruned.
+    pub fn prune_history(
+        &mut self,
+        max_slots: u64,
+        max_prune: Option<u64>,
+    ) -> Result<(), WalError> {
+        let start_slot = match self.find_start()? {
+            Some((_, ChainPoint::Origin)) => 0,
+            Some((_, ChainPoint::Specific(slot, _))) => slot,
+            _ => {
+                debug!("no start point found, skipping housekeeping");
+                return Ok(());
+            }
+        };
+
+        let last_slot = match self.find_tip()? {
+            Some((_, ChainPoint::Specific(slot, _))) => slot,
+            _ => {
+                debug!("no tip found, skipping housekeeping");
+                return Ok(());
+            }
+        };
+
+        let delta = last_slot.saturating_sub(start_slot);
+        let excess = delta.saturating_sub(max_slots);
+
+        debug!(
+            delta,
+            excess, last_slot, start_slot, "wal history delta computed"
+        );
+
+        if excess == 0 {
+            debug!(delta, max_slots, excess, "no pruning necessary");
+            return Ok(());
+        }
+
+        let max_prune = match max_prune {
+            Some(max) => core::cmp::min(excess, max),
+            None => excess,
+        };
+
+        let prune_before = start_slot + max_prune;
+
+        info!(
+            cutoff_slot = prune_before,
+            start_slot, excess, "pruning wal for excess history"
+        );
+
+        match self.remove_before(prune_before) {
+            Err(WalError::SlotNotFound(_)) => {
+                warn!("pruning target slot not found, skipping");
+                Ok(())
+            }
+            Err(e) => Err(e),
+            Ok(_) => Ok(()),
+        }
+    }
+
+    const MAX_PRUNE_SLOTS_PER_HOUSEKEEPING: u64 = 10_000;
+
+    pub fn housekeeping(&mut self) -> Result<(), WalError> {
+        if let Some(max_slots) = self.max_slots {
+            info!(max_slots, "pruning wal for excess history");
+            self.prune_history(max_slots, Some(Self::MAX_PRUNE_SLOTS_PER_HOUSEKEEPING))?;
+        }
+
+        Ok(())
+    }
+
     /// Approximates the LogSeq for a given BlockSlot within a specified delta
     /// range.
     ///
@@ -211,10 +320,19 @@ impl WalStore {
     pub fn approximate_slot(
         &self,
         target: BlockSlot,
-        max_delta: BlockSlot,
+        search_range: impl std::ops::RangeBounds<BlockSlot>,
     ) -> Result<Option<LogSeq>, WalError> {
-        let min_slot = (target - max_delta) as i128;
-        let max_slot = (target + max_delta) as i128;
+        let min_slot = match search_range.start_bound() {
+            std::ops::Bound::Included(x) => *x as i128,
+            std::ops::Bound::Excluded(x) => *x as i128 + 1,
+            std::ops::Bound::Unbounded => i128::MIN,
+        };
+
+        let max_slot = match search_range.end_bound() {
+            std::ops::Bound::Included(x) => *x as i128,
+            std::ops::Bound::Excluded(x) => *x as i128 - 1,
+            std::ops::Bound::Unbounded => i128::MAX,
+        };
 
         let rx = self.db.begin_read()?;
         let table = rx.open_table(POS)?;
@@ -228,6 +346,61 @@ impl WalStore {
         let seq = deltas.into_iter().min_by_key(|(x, _)| *x).map(|(_, v)| v);
 
         Ok(seq)
+    }
+
+    /// Attempts to find an approximate LogSeq for a given BlockSlot with
+    /// retries.
+    ///
+    /// This function repeatedly calls `approximate_slot` with an expanding
+    /// search range until a suitable LogSeq is found or the maximum number
+    /// of retries is reached.
+    ///
+    /// # Arguments
+    ///
+    /// * `target` - The target BlockSlot to approximate.
+    /// * `search_range` - A closure that takes the current retry count and
+    ///   returns a range of BlockSlots to search within. This allows for
+    ///   dynamic expansion of the search range.
+    ///
+    /// # Returns
+    ///
+    /// Returns a Result containing an Option<LogSeq>. If a suitable entry is
+    /// found within any of the attempted search ranges, it returns
+    /// Some(LogSeq), otherwise None. Returns an error if there's an issue
+    /// accessing the database.
+    ///
+    /// # Errors
+    ///
+    /// This function will return an error if there's an issue with database
+    /// operations during any of the approximation attempts.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let result = wal.approximate_slot_with_retry(
+    ///     slot,
+    ///     |retry| slot - 100 * retry..=slot + 100 * retry
+    /// )?;
+    /// ```
+    pub fn approximate_slot_with_retry<F, R>(
+        &self,
+        target: BlockSlot,
+        search_range: F,
+    ) -> Result<Option<LogSeq>, WalError>
+    where
+        F: Fn(usize) -> R,
+        R: std::ops::RangeBounds<BlockSlot>,
+    {
+        for i in 1..10 {
+            let search_range = search_range(i);
+            let seq = self.approximate_slot(target, search_range)?;
+
+            if let Some(seq) = seq {
+                return Ok(Some(seq));
+            }
+        }
+
+        Ok(None)
     }
 
     /// Removes all entries from the WAL before the specified slot.
@@ -261,7 +434,10 @@ impl WalStore {
 
         {
             let last_seq = self
-                .approximate_slot(slot, 40)?
+                .approximate_slot_with_retry(slot, |attempt| {
+                    let start = slot - (20 * attempt as u64);
+                    start..=slot
+                })?
                 .ok_or(WalError::SlotNotFound(slot))?;
 
             debug!(last_seq, "found max sequence to remove");
@@ -271,7 +447,7 @@ impl WalStore {
             let mut to_remove = wal.extract_from_if(..last_seq, |_, _| true)?;
 
             while let Some(Ok((seq, _))) = to_remove.next() {
-                debug!(seq = seq.value(), "removing log entry");
+                trace!(seq = seq.value(), "removing log entry");
             }
         }
 
@@ -280,7 +456,7 @@ impl WalStore {
             let mut to_remove = pos.extract_from_if(..(slot as i128), |_, _| true)?;
 
             while let Some(Ok((slot, _))) = to_remove.next() {
-                debug!(slot = slot.value(), "removing log entry");
+                trace!(slot = slot.value(), "removing log entry");
             }
         }
 

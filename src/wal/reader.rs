@@ -53,6 +53,16 @@ pub trait WalReader: Clone {
             .ok_or(WalError::PointNotFound(point.clone()))
     }
 
+    fn find_start(&self) -> Result<Option<(LogSeq, ChainPoint)>, WalError> {
+        let start = self
+            .crawl_from(None)?
+            .filter_forward()
+            .map(|(seq, log)| (seq, (&log).into()))
+            .next();
+
+        Ok(start)
+    }
+
     fn find_tip(&self) -> Result<Option<(LogSeq, ChainPoint)>, WalError> {
         let tip = self
             .crawl_from(None)?
