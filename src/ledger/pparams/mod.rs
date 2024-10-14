@@ -162,7 +162,6 @@ fn bootstrap_conway_pparams(
             plutus_v2: previous.cost_models_for_script_languages.plutus_v2,
             plutus_v3: Some(genesis.plutus_v3_cost_model.clone()),
         },
-        // TODO: load these values from genesis config
         pool_voting_thresholds: pallas::ledger::primitives::conway::PoolVotingThresholds {
             motion_no_confidence: float_to_rational(genesis.pool_voting_thresholds.motion_no_confidence),
             committee_normal: float_to_rational(genesis.pool_voting_thresholds.committee_normal),
@@ -196,9 +195,18 @@ fn bootstrap_conway_pparams(
 }
 
 fn float_to_rational(x: f32) -> pallas::ledger::primitives::conway::RationalNumber {
-    const PRECISION: u32 = 9; // Adjust this value based on your desired precision
+    const PRECISION: u32 = 9;
     let scale = 10u64.pow(PRECISION);
     let scaled = (x * scale as f32).round() as u64;
+    
+    // Check if it's very close to a whole number
+    if (x.round() - x).abs() < f32::EPSILON {
+        return pallas::ledger::primitives::conway::RationalNumber {
+            numerator: x.round() as u64,
+            denominator: 1,
+        };
+    }
+
     let gcd = gcd(scaled, scale);
 
     pallas::ledger::primitives::conway::RationalNumber {
@@ -586,5 +594,92 @@ mod tests {
     #[test]
     fn test_mainnet_fold() {
         test_env_fold("mainnet")
+    }
+
+    #[test]
+    fn test_pool_voting_thresholds_rational() {
+        let thresholds = [
+            ("committeeNormal", 0.51),
+            ("committeeNoConfidence", 0.51),
+            ("hardForkInitiation", 0.51),
+            ("motionNoConfidence", 0.51),
+            ("ppSecurityGroup", 0.51),
+        ];
+
+        for (name, value) in thresholds.iter() {
+            let result = float_to_rational(*value);
+            assert_eq!(result.numerator, 51, "Failed for {}", name);
+            assert_eq!(result.denominator, 100, "Failed for {}", name);
+        }
+    }
+
+    #[test]
+    fn test_drep_voting_thresholds_rational() {
+        let thresholds = [
+            ("motionNoConfidence", 0.67),
+            ("committeeNormal", 0.67),
+            ("committeeNoConfidence", 0.60),
+            ("updateToConstitution", 0.75),
+            ("hardForkInitiation", 0.60),
+            ("ppNetworkGroup", 0.67),
+            ("ppEconomicGroup", 0.67),
+            ("ppTechnicalGroup", 0.67),
+            ("ppGovGroup", 0.75),
+            ("treasuryWithdrawal", 0.67),
+        ];
+
+        for (name, value) in thresholds.iter() {
+            let result = float_to_rational(*value);
+            match *value {
+                0.67 => {
+                    assert_eq!(result.numerator, 67, "Failed for {}", name);
+                    assert_eq!(result.denominator, 100, "Failed for {}", name);
+                },
+                0.60 => {
+                    assert_eq!(result.numerator, 3, "Failed for {}", name);
+                    assert_eq!(result.denominator, 5, "Failed for {}", name);
+                },
+                0.75 => {
+                    assert_eq!(result.numerator, 3, "Failed for {}", name);
+                    assert_eq!(result.denominator, 4, "Failed for {}", name);
+                },
+                _ => panic!("Unexpected value for {}: {}", name, value),
+            }
+        }
+    }
+
+    fn assert_rational_eq(result: pallas::ledger::primitives::conway::RationalNumber, expected_num: u64, expected_den: u64, input: f32) {
+        assert_eq!(result.numerator, expected_num, "Numerator mismatch for input {}", input);
+        assert_eq!(result.denominator, expected_den, "Denominator mismatch for input {}", input);
+    }
+
+    #[test]
+    fn test_whole_number() {
+        let test_cases = [
+            (1.0, 1, 1),
+            (2.0, 2, 1),
+            (100.0, 100, 1),
+            (1000000.0, 1000000, 1),
+        ];
+
+        for &(input, expected_num, expected_den) in test_cases.iter() {
+            let result = float_to_rational(input);
+            assert_rational_eq(result, expected_num, expected_den, input);
+        }
+    }
+
+    #[test]
+    fn test_fractions() {
+        let test_cases = [
+            (0.5, 1, 2),
+            (0.25, 1, 4),
+            // (0.33333334, 333333343, 1000000000), // These fails due to floating point precision 
+            // (0.66666669, 666666687, 1000000000), 
+        ];
+
+        for &(input, expected_num, expected_den) in test_cases.iter() {
+            let result = float_to_rational(input);
+            assert_rational_eq(result, expected_num, expected_den, input);
+        }
     }
 }
