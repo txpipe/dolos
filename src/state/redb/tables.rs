@@ -505,7 +505,8 @@ impl FilterIndexes {
                 stake_table.insert(k.as_slice(), v)?;
             }
 
-            let assets = body.non_ada_assets();
+            let value = body.value();
+            let assets = value.assets();
 
             for batch in assets {
                 policy_table.insert(batch.policy().as_slice(), v)?;
@@ -541,7 +542,8 @@ impl FilterIndexes {
                 stake_table.remove(k.as_slice(), v)?;
             }
 
-            let assets = body.non_ada_assets();
+            let value = body.value();
+            let assets = value.assets();
 
             for batch in assets {
                 policy_table.remove(batch.policy().as_slice(), v)?;

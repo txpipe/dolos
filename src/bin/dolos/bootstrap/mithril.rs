@@ -8,7 +8,7 @@ use tracing::{debug, info, warn};
 
 use crate::{feedback::Feedback, MithrilConfig};
 
-#[derive(Debug, clap::Args, Default)]
+#[derive(Debug, clap::Args, Clone)]
 pub struct Args {
     #[arg(long, default_value = "./snapshot")]
     download_dir: String,
@@ -28,6 +28,18 @@ pub struct Args {
     /// Retain downloaded snapshot instead of deleting it
     #[arg(long, action)]
     retain_snapshot: bool,
+}
+
+impl Default for Args {
+    fn default() -> Self {
+        Self {
+            download_dir: "./snapshot".to_string(),
+            skip_if_not_empty: Default::default(),
+            skip_validation: Default::default(),
+            skip_download: Default::default(),
+            retain_snapshot: Default::default(),
+        }
+    }
 }
 
 struct MithrilFeedback {

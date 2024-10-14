@@ -4,6 +4,7 @@ mod copy_wal;
 mod dump_wal;
 mod export;
 mod find_seq;
+mod prune_wal;
 mod summary;
 
 #[derive(Debug, Subcommand)]
@@ -18,6 +19,8 @@ pub enum Command {
     Export(export::Args),
     /// copies a range of slots from the WAL into a new db
     CopyWal(copy_wal::Args),
+    /// removes blocks from the WAL before a given slot
+    PruneWal(prune_wal::Args),
 }
 
 #[derive(Debug, Parser)]
@@ -37,6 +40,7 @@ pub fn run(
         Command::FindSeq(x) => find_seq::run(config, x)?,
         Command::Export(x) => export::run(config, x, feedback)?,
         Command::CopyWal(x) => copy_wal::run(config, x)?,
+        Command::PruneWal(x) => prune_wal::run(config, x)?,
     }
 
     Ok(())

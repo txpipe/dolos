@@ -5,6 +5,7 @@ is_testnet = true
 
 [storage]
 path = "data"
+max_wal_history = 10000
 
 [genesis]
 byron_path = "byron.json"

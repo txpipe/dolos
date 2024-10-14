@@ -2,7 +2,6 @@ use clap::{Parser, Subcommand};
 
 use crate::feedback::Feedback;
 
-mod compact_wal;
 mod rebuild_ledger;
 mod wal_integrity;
 
@@ -12,8 +11,6 @@ pub enum Command {
     RebuildLedger(rebuild_ledger::Args),
     /// checks the integrity of the WAL records
     WalIntegrity(wal_integrity::Args),
-    /// remove parts of the WAL
-    CompactWal(compact_wal::Args),
 }
 
 #[derive(Debug, Parser)]
@@ -26,7 +23,6 @@ pub fn run(config: &super::Config, args: &Args, feedback: &Feedback) -> miette::
     match &args.command {
         Command::RebuildLedger(x) => rebuild_ledger::run(config, x, feedback)?,
         Command::WalIntegrity(x) => wal_integrity::run(config, x)?,
-        Command::CompactWal(x) => compact_wal::run(config, x)?,
     }
 
     Ok(())

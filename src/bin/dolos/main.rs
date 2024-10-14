@@ -73,8 +73,8 @@ pub struct StorageConfig {
     /// Size (in Mb) of memory allocated for ledger caching
     ledger_cache: Option<usize>,
 
-    #[allow(dead_code)]
-    wal_size: Option<u64>,
+    /// Maximum number of slots (not blocks) to keep in the WAL
+    max_wal_history: Option<u64>,
 }
 
 impl Default for StorageConfig {
@@ -83,7 +83,7 @@ impl Default for StorageConfig {
             path: PathBuf::from("data"),
             wal_cache: None,
             ledger_cache: None,
-            wal_size: None,
+            max_wal_history: None,
         }
     }
 }
@@ -205,7 +205,7 @@ fn main() -> Result<()> {
         // configuration, that is why we pass the whole result and let the command logic decide what
         // to do with it.
         #[cfg(feature = "utils")]
-        (config, Command::Init(args)) => init::run(config, &args),
+        (config, Command::Init(args)) => init::run(config, &args, &feedback),
 
         #[cfg(feature = "utils")]
         (Ok(config), Command::Data(args)) => data::run(&config, &args, &feedback),

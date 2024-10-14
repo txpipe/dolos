@@ -10,6 +10,7 @@ is_testnet = true
 
 [storage]
 path = "data"
+max_wal_history = 10000
 
 [genesis]
 byron_path = "byron.json"
@@ -64,17 +65,17 @@ The `upstream` section defines how to connect to the Ouroboros network to synchr
 
 The `storage` section controls how Dolos stores data in the local file system. This includes immutable chain blocks, the write ahead log and the ledger state.
 
-| property     | type    | example  |
-| ------------ | ------- | -------- |
-| path         | string  | "./data" |
-| wal_cache    | integer | 50       |
-| ledger_cache | integer | 500      |
-| wal_size     | integer | 1000     |
+| property        | type    | example  |
+| --------------- | ------- | -------- |
+| path            | string  | "./data" |
+| wal_cache       | integer | 50       |
+| ledger_cache    | integer | 500      |
+| max_wal_history | integer | 10000    |
 
 - `path`: is the root directory where all data will be stored.
 - `wal_cache`: the size (in Mb) of the memory cache for the wal db.
 - `ledger_cache`: the size (in Mb) of the memory cache for the ledger db.
-- `wal_size`: is the max number entries (chain events) to keep in the write-ahead-log.
+- `max_wal_history`: the max number of slots to keep in the WAL.
 
 ## `genesis` section
 
@@ -98,10 +99,8 @@ The `sync` section controls how Dolos synchronizes the chain from upstream peers
 | property        | type    | example |
 | --------------- | ------- | ------- |
 | pull_batch_size | integer | 200     |
-| keep_history    | boolean | true    |
 
 - `pull_batch_szie`: the number of blocks that are fetched per batch.
-- `keep_history`: flag to indicate wether the block history should be kept.
 
 ## `submit` section
 

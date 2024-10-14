@@ -7,6 +7,8 @@ use std::{
     str::FromStr,
 };
 
+use crate::feedback::Feedback;
+
 mod include;
 
 #[derive(Debug, Clone)]
@@ -99,24 +101,53 @@ impl From<&KnownNetwork> for crate::MithrilConfig {
     }
 }
 
-impl From<&KnownNetwork> for crate::SnapshotConfig {
-    fn from(value: &KnownNetwork) -> Self {
+#[derive(Debug, Clone)]
+pub enum HistoryPrunningOptions {
+    Keep1Day,
+    Keep1Week,
+    Keep1Month,
+    KeepEverything,
+    Custom(u64),
+}
+
+impl HistoryPrunningOptions {
+    const VARIANTS: &'static [Self] = &[
+        Self::Keep1Day,
+        Self::Keep1Week,
+        Self::Keep1Month,
+        Self::KeepEverything,
+    ];
+}
+
+impl Display for HistoryPrunningOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Keep1Day => f.write_str("1 day"),
+            Self::Keep1Week => f.write_str("1 week"),
+            Self::Keep1Month => f.write_str("1 month"),
+            Self::KeepEverything => f.write_str("keep everything"),
+            Self::Custom(x) => write!(f, "{} slots", x),
+        }
+    }
+}
+
+impl From<HistoryPrunningOptions> for Option<u64> {
+    fn from(value: HistoryPrunningOptions) -> Self {
         match value {
-            KnownNetwork::CardanoMainnet => crate::SnapshotConfig {
-                download_url:
-                    "https://dolos-snapshots.s3.amazonaws.com/v0-cardano-mainnet-latest.tar.gz"
-                        .into(),
-            },
-            KnownNetwork::CardanoPreProd => crate::SnapshotConfig {
-                download_url:
-                    "https://dolos-snapshots.s3.amazonaws.com/v0-cardano-preprod-latest.tar.gz"
-                        .into(),
-            },
-            KnownNetwork::CardanoPreview => crate::SnapshotConfig {
-                download_url:
-                    "https://dolos-snapshots.s3.amazonaws.com/v0-cardano-preview-latest.tar.gz"
-                        .into(),
-            },
+            HistoryPrunningOptions::KeepEverything => None,
+            HistoryPrunningOptions::Keep1Day => Some(24 * 60 * 60),
+            HistoryPrunningOptions::Keep1Week => Some(7 * 24 * 60 * 60),
+            HistoryPrunningOptions::Keep1Month => Some(30 * 24 * 60 * 60),
+            HistoryPrunningOptions::Custom(x) => Some(x),
+        }
+    }
+}
+
+impl From<Option<u64>> for HistoryPrunningOptions {
+    fn from(value: Option<u64>) -> Self {
+        match value {
+            None => Self::KeepEverything,
+            Some(x) => Self::Custom(x),
         }
     }
 }
@@ -130,6 +161,10 @@ pub struct Args {
     /// Remote peer to use as source
     #[arg(long)]
     remote_peer: Option<String>,
+
+    /// How much history of the chain to keep in disk
+    #[arg(long)]
+    max_wal_history: Option<u64>,
 
     /// Serve clients via gRPC
     #[arg(long)]
@@ -154,7 +189,7 @@ impl Default for ConfigEditor {
             crate::Config {
                 upstream: From::from(&KnownNetwork::CardanoMainnet),
                 mithril: Some(From::from(&KnownNetwork::CardanoMainnet)),
-                snapshot: Some(From::from(&KnownNetwork::CardanoMainnet)),
+                snapshot: Default::default(),
                 storage: Default::default(),
                 genesis: Default::default(),
                 sync: Default::default(),
@@ -175,7 +210,6 @@ impl ConfigEditor {
             self.0.genesis = Default::default();
             self.0.upstream = network.into();
             self.0.mithril = Some(network.into());
-            self.0.snapshot = Some(network.into());
             self.1 = Some(network.clone());
         }
 
@@ -190,12 +224,19 @@ impl ConfigEditor {
         self
     }
 
+    fn apply_history_pruning(mut self, value: HistoryPrunningOptions) -> Self {
+        self.0.storage.max_wal_history = value.into();
+
+        self
+    }
+
     fn apply_serve_grpc(mut self, value: Option<bool>) -> Self {
         if let Some(value) = value {
             if value {
                 self.0.serve.grpc = dolos::serve::grpc::Config {
                     listen_address: "[::]:50051".into(),
                     tls_client_ca_root: None,
+                    permissive_cors: Some(true),
                 }
                 .into();
             } else {
@@ -248,6 +289,7 @@ impl ConfigEditor {
     fn fill_values_from_args(self, args: &Args) -> Self {
         self.apply_known_network(args.known_network.as_ref())
             .apply_remote_peer(args.remote_peer.as_ref())
+            .apply_history_pruning(args.max_wal_history.into())
             .apply_serve_grpc(args.serve_grpc)
             .apply_serve_ouroboros(args.serve_ouroboros)
             .apply_enable_relay(args.enable_relay)
@@ -326,11 +368,24 @@ impl ConfigEditor {
         Ok(self.apply_enable_relay(Some(value)))
     }
 
+    fn prompt_history_pruning(self) -> miette::Result<Self> {
+        let value = Select::new(
+            "How much history of the chain do you want to keep in disk?",
+            HistoryPrunningOptions::VARIANTS.to_vec(),
+        )
+        .prompt()
+        .into_diagnostic()
+        .context("asking for history pruning")?;
+
+        Ok(self.apply_history_pruning(value))
+    }
+
     fn confirm_values(mut self) -> miette::Result<ConfigEditor> {
         self = self
             .prompt_known_network()?
             .prompt_include_genesis()?
             .prompt_remote_peer()?
+            .prompt_history_pruning()?
             .prompt_serve_grpc()?
             .prompt_serve_ouroboros()?
             .prompt_enable_relay()?;
@@ -359,7 +414,11 @@ impl ConfigEditor {
     }
 }
 
-pub fn run(config: miette::Result<super::Config>, args: &Args) -> miette::Result<()> {
+pub fn run(
+    config: miette::Result<super::Config>,
+    args: &Args,
+    feedback: &Feedback,
+) -> miette::Result<()> {
     config
         .map(|x| ConfigEditor(x, None))
         .unwrap_or_default()
@@ -367,11 +426,17 @@ pub fn run(config: miette::Result<super::Config>, args: &Args) -> miette::Result
         .confirm_values()?
         .include_genesis_files()?
         .save(&PathBuf::from("dolos.toml"))?;
+
     println!("config saved to dolos.toml");
+
+    let config = super::Config::new(&None)
+        .into_diagnostic()
+        .context("parsing configuration")?;
+
+    super::bootstrap::run(&config, &super::bootstrap::Args::default(), feedback)?;
 
     println!("\nDolos is ready!");
     println!("- run `dolos daemon` to start the node");
-    println!("- run `dolos bootstrap` to load a Mithril snapshot");
 
     Ok(())
 }
