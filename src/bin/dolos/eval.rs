@@ -1,11 +1,4 @@
-use dolos::ledger::{PParamsBody, TxoRef};
-use itertools::*;
-use miette::{Context, IntoDiagnostic};
-use pallas::{
-    applying::{validate_tx, Environment as ValidationContext, UTxOs},
-    ledger::traverse::{Era, MultiEraInput, MultiEraOutput, MultiEraUpdate},
-};
-use std::{borrow::Cow, path::PathBuf};
+use std::path::PathBuf;
 
 #[derive(Debug, clap::Args)]
 pub struct Args {

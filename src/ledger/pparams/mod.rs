@@ -9,8 +9,8 @@ use pallas::{
         traverse::MultiEraUpdate,
     },
 };
+use paste::paste;
 use tracing::{debug, warn};
-
 pub struct Genesis<'a> {
     pub byron: &'a byron::GenesisFile,
     pub shelley: &'a shelley::GenesisFile,
@@ -164,97 +164,189 @@ fn bootstrap_conway_pparams(
         },
         // TODO: load these values from genesis config
         pool_voting_thresholds: pallas::ledger::primitives::conway::PoolVotingThresholds {
-            motion_no_confidence: pallas::ledger::primitives::conway::RationalNumber {
-                numerator: 0,
-                denominator: 1,
-            },
-            committee_normal: pallas::ledger::primitives::conway::RationalNumber {
-                numerator: 0,
-                denominator: 1,
-            },
-            committee_no_confidence: pallas::ledger::primitives::conway::RationalNumber {
-                numerator: 0,
-                denominator: 1,
-            },
-            hard_fork_initiation: pallas::ledger::primitives::conway::RationalNumber {
-                numerator: 0,
-                denominator: 1,
-            },
-            security_voting_threshold: pallas::ledger::primitives::conway::RationalNumber {
-                numerator: 0,
-                denominator: 1,
-            },
+            motion_no_confidence: float_to_rational(genesis.pool_voting_thresholds.motion_no_confidence),
+            committee_normal: float_to_rational(genesis.pool_voting_thresholds.committee_normal),
+            committee_no_confidence: float_to_rational(genesis.pool_voting_thresholds.committee_no_confidence),
+            hard_fork_initiation: float_to_rational(genesis.pool_voting_thresholds.hard_fork_initiation),
+            security_voting_threshold: float_to_rational(genesis.pool_voting_thresholds.pp_security_group),
         },
         drep_voting_thresholds: pallas::ledger::primitives::conway::DRepVotingThresholds {
-            motion_no_confidence: pallas::ledger::primitives::conway::RationalNumber {
-                numerator: 0,
-                denominator: 1,
-            },
-            committee_normal: pallas::ledger::primitives::conway::RationalNumber {
-                numerator: 0,
-                denominator: 1,
-            },
-            committee_no_confidence: pallas::ledger::primitives::conway::RationalNumber {
-                numerator: 0,
-                denominator: 1,
-            },
-            update_constitution: pallas::ledger::primitives::conway::RationalNumber {
-                numerator: 0,
-                denominator: 1,
-            },
-            hard_fork_initiation: pallas::ledger::primitives::conway::RationalNumber {
-                numerator: 0,
-                denominator: 1,
-            },
-            pp_network_group: pallas::ledger::primitives::conway::RationalNumber {
-                numerator: 0,
-                denominator: 1,
-            },
-            pp_economic_group: pallas::ledger::primitives::conway::RationalNumber {
-                numerator: 0,
-                denominator: 1,
-            },
-            pp_technical_group: pallas::ledger::primitives::conway::RationalNumber {
-                numerator: 0,
-                denominator: 1,
-            },
-            pp_governance_group: pallas::ledger::primitives::conway::RationalNumber {
-                numerator: 0,
-                denominator: 1,
-            },
-            treasury_withdrawal: pallas::ledger::primitives::conway::RationalNumber {
-                numerator: 0,
-                denominator: 1,
-            },
+            motion_no_confidence: float_to_rational(genesis.d_rep_voting_thresholds.motion_no_confidence),
+            committee_normal: float_to_rational(genesis.d_rep_voting_thresholds.committee_normal),
+            committee_no_confidence: float_to_rational(genesis.d_rep_voting_thresholds.committee_no_confidence),
+            update_constitution: float_to_rational(genesis.d_rep_voting_thresholds.update_to_constitution),
+            hard_fork_initiation: float_to_rational(genesis.d_rep_voting_thresholds.hard_fork_initiation),
+            pp_network_group: float_to_rational(genesis.d_rep_voting_thresholds.pp_network_group),
+            pp_economic_group: float_to_rational(genesis.d_rep_voting_thresholds.pp_economic_group),
+            pp_technical_group: float_to_rational(genesis.d_rep_voting_thresholds.pp_technical_group),
+            pp_governance_group: float_to_rational(genesis.d_rep_voting_thresholds.pp_gov_group),
+            treasury_withdrawal: float_to_rational(genesis.d_rep_voting_thresholds.treasury_withdrawal),
         },
         min_committee_size: genesis.committee_min_size,
-        committee_term_limit: genesis.committee_max_term_length,
-        governance_action_validity_period: genesis.gov_action_lifetime,
+        committee_term_limit: genesis.committee_max_term_length.into(),
+        governance_action_validity_period: genesis.gov_action_lifetime.into(),
         governance_action_deposit: genesis.gov_action_deposit,
         drep_deposit: genesis.d_rep_deposit,
-        drep_inactivity_period: genesis.d_rep_activity,
+        drep_inactivity_period: genesis.d_rep_activity.into(),
         minfee_refscript_cost_per_byte: pallas::ledger::primitives::conway::RationalNumber {
-            numerator: 0,
+            numerator: genesis.min_fee_ref_script_cost_per_byte,
             denominator: 1,
         },
     }
+}
+
+fn float_to_rational(x: f32) -> pallas::ledger::primitives::conway::RationalNumber {
+    const PRECISION: u32 = 9; // Adjust this value based on your desired precision
+    let scale = 10u64.pow(PRECISION);
+    let scaled = (x * scale as f32).round() as u64;
+    let gcd = gcd(scaled, scale);
+
+    pallas::ledger::primitives::conway::RationalNumber {
+        numerator: scaled / gcd,
+        denominator: scale / gcd,
+    }
+}
+
+// Helper function to calculate the Greatest Common Divisor
+fn gcd(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 {
+        let temp = b;
+        b = a % b;
+        a = temp;
+    }
+    a
 }
 
 fn apply_param_update(
     current: MultiEraProtocolParameters,
     update: &MultiEraUpdate,
 ) -> MultiEraProtocolParameters {
-    macro_rules! update_param {
-        ($pparams:expr, $param:ident, $warn_msg:expr, $($variant:tt)*) => {
-            paste::paste! {
-                if let Some(new) = update.[<first_proposed_ $param _ $($variant:lower)_*>]() {
-                    warn!(?new, $warn_msg);
-                    $pparams.$param = new;
-                }
+    macro_rules! generate_era_update {
+        ($fn_name:ident, $era:ident, $($param:ident, $variant:ident $($extra_variant:ident)*),*) => {
+            fn $fn_name(pparams: &mut $era, update: &MultiEraUpdate) {
+                $(
+                    paste! {
+                        if let Some(new) = update.[<first_proposed_ $param _ $variant:lower $(_ $extra_variant:lower)*>]() {
+                            warn!(?new, "found new {} update proposal", stringify!($param));
+                            pparams.$param = new;
+                        }
+                    }
+                )*
             }
         };
     }
 
+    generate_era_update!(
+        update_shelley_pparams, ShelleyProtParams,
+        minfee_a,AlonzoCompatible Babbage,
+        minfee_b,AlonzoCompatible Babbage,
+        max_block_body_size,AlonzoCompatible Babbage,
+        max_transaction_size,AlonzoCompatible Babbage,
+        max_block_header_size,AlonzoCompatible Babbage,
+        key_deposit,AlonzoCompatible Babbage,
+        pool_deposit,AlonzoCompatible Babbage,
+        desired_number_of_stake_pools,AlonzoCompatible Babbage,
+        protocol_version,AlonzoCompatible Babbage,
+        // min_utxo_value,AlonzoCompatible Babbage,
+        min_pool_cost,AlonzoCompatible Babbage,
+        expansion_rate,AlonzoCompatible Babbage,
+        treasury_growth_rate,AlonzoCompatible Babbage,
+        maximum_epoch,AlonzoCompatible Babbage,
+        pool_pledge_influence,AlonzoCompatible Babbage,
+        decentralization_constant,AlonzoCompatible,
+        extra_entropy,AlonzoCompatible
+    );
+
+    generate_era_update!(
+        update_alonzo_pparams, AlonzoProtParams,
+        minfee_a,AlonzoCompatible Babbage,
+        minfee_b,AlonzoCompatible Babbage,
+        max_block_body_size,AlonzoCompatible Babbage,
+        max_transaction_size,AlonzoCompatible Babbage,
+        max_block_header_size,AlonzoCompatible Babbage,
+        key_deposit,AlonzoCompatible Babbage,
+        pool_deposit,AlonzoCompatible Babbage,
+        desired_number_of_stake_pools,AlonzoCompatible Babbage,
+        protocol_version,AlonzoCompatible Babbage,
+        min_pool_cost,AlonzoCompatible Babbage,
+        ada_per_utxo_byte,AlonzoCompatible Babbage,
+        cost_models_for_script_languages,AlonzoCompatible,
+        execution_costs,AlonzoCompatible Babbage,
+        max_tx_ex_units,AlonzoCompatible Babbage,
+        max_block_ex_units,AlonzoCompatible Babbage,
+        max_value_size,AlonzoCompatible Babbage,
+        collateral_percentage,AlonzoCompatible Babbage,
+        max_collateral_inputs,AlonzoCompatible Babbage,
+        expansion_rate,AlonzoCompatible Babbage,
+        treasury_growth_rate,AlonzoCompatible Babbage,
+        maximum_epoch,AlonzoCompatible Babbage,
+        pool_pledge_influence,AlonzoCompatible Babbage,
+        decentralization_constant,AlonzoCompatible,
+        extra_entropy,AlonzoCompatible
+    );
+
+    generate_era_update!(
+        update_babbage_pparams, BabbageProtParams,
+        minfee_a,AlonzoCompatible Babbage,
+        minfee_b,AlonzoCompatible Babbage,
+        max_block_body_size,AlonzoCompatible Babbage,
+        max_transaction_size,AlonzoCompatible Babbage,
+        max_block_header_size,AlonzoCompatible Babbage,
+        key_deposit,AlonzoCompatible Babbage,
+        pool_deposit,AlonzoCompatible Babbage,
+        desired_number_of_stake_pools,AlonzoCompatible Babbage,
+        protocol_version,AlonzoCompatible Babbage,
+        min_pool_cost,AlonzoCompatible Babbage,
+        ada_per_utxo_byte,AlonzoCompatible Babbage,
+        cost_models_for_script_languages,Babbage,
+        execution_costs,AlonzoCompatible Babbage,
+        max_tx_ex_units,AlonzoCompatible Babbage,
+        max_block_ex_units,AlonzoCompatible Babbage,
+        max_value_size,AlonzoCompatible Babbage,
+        collateral_percentage,AlonzoCompatible Babbage,
+        max_collateral_inputs,AlonzoCompatible Babbage,
+        expansion_rate,AlonzoCompatible Babbage,
+        treasury_growth_rate,AlonzoCompatible Babbage,
+        maximum_epoch,AlonzoCompatible Babbage,
+        pool_pledge_influence,AlonzoCompatible Babbage,
+        decentralization_constant,AlonzoCompatible,
+        extra_entropy,AlonzoCompatible
+    );
+
+    generate_era_update!(
+        update_conway_pparams, ConwayProtParams,
+        minfee_a,AlonzoCompatible Babbage,
+        minfee_b,AlonzoCompatible Babbage,
+        max_block_body_size,AlonzoCompatible Babbage,
+        max_transaction_size,AlonzoCompatible Babbage,
+        max_block_header_size,AlonzoCompatible Babbage,
+        key_deposit,AlonzoCompatible Babbage,
+        pool_deposit,AlonzoCompatible Babbage,
+        desired_number_of_stake_pools,AlonzoCompatible Babbage,
+        protocol_version,AlonzoCompatible Babbage,
+        min_pool_cost,AlonzoCompatible Babbage,
+        ada_per_utxo_byte,AlonzoCompatible Babbage,
+        cost_models_for_script_languages,Conway,
+        execution_costs,AlonzoCompatible Babbage,
+        max_tx_ex_units,AlonzoCompatible Babbage,
+        max_block_ex_units,AlonzoCompatible Babbage,
+        max_value_size,AlonzoCompatible Babbage,
+        collateral_percentage,AlonzoCompatible Babbage,
+        max_collateral_inputs,AlonzoCompatible Babbage,
+        expansion_rate,AlonzoCompatible Babbage,
+        treasury_growth_rate,AlonzoCompatible Babbage,
+        maximum_epoch,AlonzoCompatible Babbage,
+        pool_pledge_influence,AlonzoCompatible Babbage,
+        pool_voting_thresholds,Conway,
+        drep_voting_thresholds,Conway,
+        min_committee_size,Conway,
+        committee_term_limit,Conway,
+        governance_action_validity_period,Conway,
+        governance_action_deposit,Conway,
+        drep_deposit,Conway,
+        drep_inactivity_period,Conway,
+        minfee_refscript_cost_per_byte,Conway
+    );
     match current {
         MultiEraProtocolParameters::Byron(mut pparams) => {
             if let Some(new) = update.byron_proposed_block_version() {
@@ -279,82 +371,21 @@ fn apply_param_update(
             MultiEraProtocolParameters::Byron(pparams)
         }
         MultiEraProtocolParameters::Shelley(mut pparams) => {
-            update_param!(
-                pparams,
-                protocol_version,
-                "found new protocol version",
-                AlonzoCompatible Babbage
-            );
-            update_param!(
-                pparams,
-                minfee_a,
-                "found new minfee a update proposal",
-                AlonzoCompatible Babbage
-            );
-            update_param!(
-                pparams,
-                minfee_b,
-                "found new minfee b update proposal",
-                AlonzoCompatible Babbage
-            );
-            update_param!(
-                pparams,
-                max_transaction_size,
-                "found new max tx size update proposal",
-                AlonzoCompatible Babbage
-            );
-
+            update_shelley_pparams(&mut pparams, update);
             // TODO: where's the min utxo value in the network primitives for shelley? do we
             // have them wrong in Pallas?
-
             MultiEraProtocolParameters::Shelley(pparams)
         }
         MultiEraProtocolParameters::Alonzo(mut pparams) => {
-            update_param!(
-                pparams,
-                protocol_version,
-                "found new protocol version",
-                AlonzoCompatible Babbage
-            );
-            update_param!(
-                pparams,
-                cost_models_for_script_languages,
-                "found new cost models for script languages update proposal",
-                AlonzoCompatible
-            );
-
+            update_alonzo_pparams(&mut pparams, update);
             MultiEraProtocolParameters::Alonzo(pparams)
         }
         MultiEraProtocolParameters::Babbage(mut pparams) => {
-            update_param!(
-                pparams,
-                protocol_version,
-                "found new protocol version",
-                AlonzoCompatible Babbage
-            );
-            update_param!(
-                pparams,
-                cost_models_for_script_languages,
-                "found new cost models for script languages update proposal",
-                Babbage
-            );
-
+            update_babbage_pparams(&mut pparams, update);
             MultiEraProtocolParameters::Babbage(pparams)
         }
         MultiEraProtocolParameters::Conway(mut pparams) => {
-            update_param!(
-                pparams,
-                protocol_version,
-                "found new protocol version",
-                AlonzoCompatible Babbage
-            );
-            update_param!(
-                pparams,
-                cost_models_for_script_languages,
-                "found new cost models for script languages update proposal",
-                Conway
-            );
-
+            update_conway_pparams(&mut pparams, update);
             MultiEraProtocolParameters::Conway(pparams)
         }
         _ => unimplemented!(),
@@ -407,7 +438,7 @@ fn advance_hardfork(
         }
         // Protocol version 9 will transition from Babbage to Conway; not yet implemented
         MultiEraProtocolParameters::Babbage(current) if next_protocol == 9 => {
-            MultiEraProtocolParameters::Conway(bootstrap_conway_pparams(current))
+            MultiEraProtocolParameters::Conway(bootstrap_conway_pparams(current, genesis.conway))
         }
         _ => unimplemented!("don't know how to handle hardfork"),
     }
