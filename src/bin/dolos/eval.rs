@@ -92,7 +92,7 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
             byron: &byron,
             shelley: &shelley,
             alonzo: &alonzo,
-            conway: &conway
+            conway: &conway,
         },
         &updates,
         args.epoch,
