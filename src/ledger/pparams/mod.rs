@@ -334,7 +334,7 @@ fn apply_param_update(
                     "found new cost_models_for_script_languages update proposal"
                 );
 
-                pparams.cost_models_for_script_languages = value.into();
+                pparams.cost_models_for_script_languages = value;
             }
 
             MultiEraProtocolParameters::Alonzo(pparams)
@@ -370,7 +370,7 @@ fn apply_param_update(
                     "found new cost_models_for_script_languages update proposal"
                 );
 
-                pparams.cost_models_for_script_languages = value.into();
+                pparams.cost_models_for_script_languages = value;
             }
 
             MultiEraProtocolParameters::Babbage(pparams)
@@ -413,7 +413,7 @@ fn apply_param_update(
                     "found new cost_models_for_script_languages update proposal"
                 );
 
-                pparams.cost_models_for_script_languages = value.into();
+                pparams.cost_models_for_script_languages = value;
             }
 
             MultiEraProtocolParameters::Conway(pparams)
