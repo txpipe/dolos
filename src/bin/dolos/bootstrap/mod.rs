@@ -44,6 +44,13 @@ pub struct Args {
 }
 
 pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::Result<()> {
+    let wal = crate::common::open_wal(config)?;
+
+    if !wal.is_empty().into_diagnostic()? {
+        println!("found existing data, skipping bootstrap");
+        return Ok(());
+    }
+
     let command = match args.command.clone() {
         Some(x) => x,
         None => Command::inquire()?,
