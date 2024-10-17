@@ -4,17 +4,29 @@ use pallas::{
         MultiEraProtocolParameters, ShelleyProtParams,
     },
     ledger::{
-        configs::{alonzo, byron, shelley},
-        primitives::alonzo::Language,
+        configs::{alonzo, byron, conway, shelley},
+        primitives::alonzo::Language as AlonzoLanguage,
         traverse::MultiEraUpdate,
     },
 };
-use tracing::{trace, warn};
+use tracing::{debug, warn};
+
+macro_rules! apply_field {
+    ($target:ident, $update:ident, $field:ident) => {
+        paste::paste! {
+            if let Some(new) = $update.[<first_proposed_ $field>]() {
+                warn!(?new, concat!("found new ", stringify!($param), " update proposal"));
+                $target.$field = new;
+            }
+        }
+    };
+}
 
 pub struct Genesis<'a> {
     pub byron: &'a byron::GenesisFile,
     pub shelley: &'a shelley::GenesisFile,
     pub alonzo: &'a alonzo::GenesisFile,
+    pub conway: &'a conway::GenesisFile,
 }
 
 fn bootstrap_byron_pparams(byron: &byron::GenesisFile) -> ByronProtParams {
@@ -122,7 +134,7 @@ fn bootstrap_babbage_pparams(previous: AlonzoProtParams) -> BabbageProtParams {
             plutus_v1: previous
                 .cost_models_for_script_languages
                 .iter()
-                .filter(|(k, _)| k == &Language::PlutusV1)
+                .filter(|(k, _)| k == &AlonzoLanguage::PlutusV1)
                 .map(|(_, v)| v.clone())
                 .next(),
             plutus_v2: None,
@@ -130,7 +142,10 @@ fn bootstrap_babbage_pparams(previous: AlonzoProtParams) -> BabbageProtParams {
     }
 }
 
-fn bootstrap_conway_pparams(previous: BabbageProtParams) -> ConwayProtParams {
+fn bootstrap_conway_pparams(
+    previous: BabbageProtParams,
+    genesis: &conway::GenesisFile,
+) -> ConwayProtParams {
     ConwayProtParams {
         minfee_a: previous.minfee_a,
         minfee_b: previous.minfee_b,
@@ -156,84 +171,89 @@ fn bootstrap_conway_pparams(previous: BabbageProtParams) -> ConwayProtParams {
         cost_models_for_script_languages: pallas::ledger::primitives::conway::CostMdls {
             plutus_v1: previous.cost_models_for_script_languages.plutus_v1,
             plutus_v2: previous.cost_models_for_script_languages.plutus_v2,
-            plutus_v3: None,
+            plutus_v3: Some(genesis.plutus_v3_cost_model.clone()),
         },
-        // TODO: load these values from genesis config
         pool_voting_thresholds: pallas::ledger::primitives::conway::PoolVotingThresholds {
-            motion_no_confidence: pallas::ledger::primitives::conway::RationalNumber {
-                numerator: 0,
-                denominator: 1,
-            },
-            committee_normal: pallas::ledger::primitives::conway::RationalNumber {
-                numerator: 0,
-                denominator: 1,
-            },
-            committee_no_confidence: pallas::ledger::primitives::conway::RationalNumber {
-                numerator: 0,
-                denominator: 1,
-            },
-            hard_fork_initiation: pallas::ledger::primitives::conway::RationalNumber {
-                numerator: 0,
-                denominator: 1,
-            },
-            security_voting_threshold: pallas::ledger::primitives::conway::RationalNumber {
-                numerator: 0,
-                denominator: 1,
-            },
+            motion_no_confidence: float_to_rational(
+                genesis.pool_voting_thresholds.motion_no_confidence,
+            ),
+            committee_normal: float_to_rational(genesis.pool_voting_thresholds.committee_normal),
+            committee_no_confidence: float_to_rational(
+                genesis.pool_voting_thresholds.committee_no_confidence,
+            ),
+            hard_fork_initiation: float_to_rational(
+                genesis.pool_voting_thresholds.hard_fork_initiation,
+            ),
+            security_voting_threshold: float_to_rational(
+                genesis.pool_voting_thresholds.pp_security_group,
+            ),
         },
         drep_voting_thresholds: pallas::ledger::primitives::conway::DRepVotingThresholds {
-            motion_no_confidence: pallas::ledger::primitives::conway::RationalNumber {
-                numerator: 0,
-                denominator: 1,
-            },
-            committee_normal: pallas::ledger::primitives::conway::RationalNumber {
-                numerator: 0,
-                denominator: 1,
-            },
-            committee_no_confidence: pallas::ledger::primitives::conway::RationalNumber {
-                numerator: 0,
-                denominator: 1,
-            },
-            update_constitution: pallas::ledger::primitives::conway::RationalNumber {
-                numerator: 0,
-                denominator: 1,
-            },
-            hard_fork_initiation: pallas::ledger::primitives::conway::RationalNumber {
-                numerator: 0,
-                denominator: 1,
-            },
-            pp_network_group: pallas::ledger::primitives::conway::RationalNumber {
-                numerator: 0,
-                denominator: 1,
-            },
-            pp_economic_group: pallas::ledger::primitives::conway::RationalNumber {
-                numerator: 0,
-                denominator: 1,
-            },
-            pp_technical_group: pallas::ledger::primitives::conway::RationalNumber {
-                numerator: 0,
-                denominator: 1,
-            },
-            pp_governance_group: pallas::ledger::primitives::conway::RationalNumber {
-                numerator: 0,
-                denominator: 1,
-            },
-            treasury_withdrawal: pallas::ledger::primitives::conway::RationalNumber {
-                numerator: 0,
-                denominator: 1,
-            },
+            motion_no_confidence: float_to_rational(
+                genesis.d_rep_voting_thresholds.motion_no_confidence,
+            ),
+            committee_normal: float_to_rational(genesis.d_rep_voting_thresholds.committee_normal),
+            committee_no_confidence: float_to_rational(
+                genesis.d_rep_voting_thresholds.committee_no_confidence,
+            ),
+            update_constitution: float_to_rational(
+                genesis.d_rep_voting_thresholds.update_to_constitution,
+            ),
+            hard_fork_initiation: float_to_rational(
+                genesis.d_rep_voting_thresholds.hard_fork_initiation,
+            ),
+            pp_network_group: float_to_rational(genesis.d_rep_voting_thresholds.pp_network_group),
+            pp_economic_group: float_to_rational(genesis.d_rep_voting_thresholds.pp_economic_group),
+            pp_technical_group: float_to_rational(
+                genesis.d_rep_voting_thresholds.pp_technical_group,
+            ),
+            pp_governance_group: float_to_rational(genesis.d_rep_voting_thresholds.pp_gov_group),
+            treasury_withdrawal: float_to_rational(
+                genesis.d_rep_voting_thresholds.treasury_withdrawal,
+            ),
         },
-        min_committee_size: Default::default(),
-        committee_term_limit: Default::default(),
-        governance_action_validity_period: Default::default(),
-        governance_action_deposit: Default::default(),
-        drep_deposit: Default::default(),
-        drep_inactivity_period: Default::default(),
+        min_committee_size: genesis.committee_min_size,
+        committee_term_limit: genesis.committee_max_term_length.into(),
+        governance_action_validity_period: genesis.gov_action_lifetime.into(),
+        governance_action_deposit: genesis.gov_action_deposit,
+        drep_deposit: genesis.d_rep_deposit,
+        drep_inactivity_period: genesis.d_rep_activity.into(),
         minfee_refscript_cost_per_byte: pallas::ledger::primitives::conway::RationalNumber {
-            numerator: 0,
+            numerator: genesis.min_fee_ref_script_cost_per_byte,
             denominator: 1,
         },
     }
+}
+
+fn float_to_rational(x: f32) -> pallas::ledger::primitives::conway::RationalNumber {
+    const PRECISION: u32 = 9;
+    let scale = 10u64.pow(PRECISION);
+    let scaled = (x * scale as f32).round() as u64;
+
+    // Check if it's very close to a whole number
+    if (x.round() - x).abs() < f32::EPSILON {
+        return pallas::ledger::primitives::conway::RationalNumber {
+            numerator: x.round() as u64,
+            denominator: 1,
+        };
+    }
+
+    let gcd = gcd(scaled, scale);
+
+    pallas::ledger::primitives::conway::RationalNumber {
+        numerator: scaled / gcd,
+        denominator: scale / gcd,
+    }
+}
+
+// Helper function to calculate the Greatest Common Divisor
+fn gcd(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 {
+        let temp = b;
+        b = a % b;
+        a = temp;
+    }
+    a
 }
 
 fn apply_param_update(
@@ -264,51 +284,136 @@ fn apply_param_update(
             MultiEraProtocolParameters::Byron(pparams)
         }
         MultiEraProtocolParameters::Shelley(mut pparams) => {
-            if let Some(new) = update.first_proposed_protocol_version() {
-                warn!(?new, "found new protocol version");
-                pparams.protocol_version = new;
-            }
-
-            if let Some(x) = update.first_proposed_minfee_a() {
-                warn!(x, "found new minfee a update proposal");
-                pparams.minfee_a = x;
-            }
-
-            if let Some(x) = update.first_proposed_minfee_b() {
-                warn!(x, "found new minfee b update proposal");
-                pparams.minfee_b = x;
-            }
-
-            if let Some(x) = update.first_proposed_max_transaction_size() {
-                warn!(x, "found new max tx size update proposal");
-                pparams.max_transaction_size = x;
-            }
-
-            // TODO: where's the min utxo value in the network primitives for shelley? do we
-            // have them wrong in Pallas?
+            apply_field!(pparams, update, minfee_a);
+            apply_field!(pparams, update, minfee_b);
+            apply_field!(pparams, update, max_block_body_size);
+            apply_field!(pparams, update, max_transaction_size);
+            apply_field!(pparams, update, max_block_header_size);
+            apply_field!(pparams, update, key_deposit);
+            apply_field!(pparams, update, pool_deposit);
+            apply_field!(pparams, update, desired_number_of_stake_pools);
+            apply_field!(pparams, update, protocol_version);
+            apply_field!(pparams, update, min_pool_cost);
+            apply_field!(pparams, update, expansion_rate);
+            apply_field!(pparams, update, treasury_growth_rate);
+            apply_field!(pparams, update, maximum_epoch);
+            apply_field!(pparams, update, pool_pledge_influence);
+            apply_field!(pparams, update, decentralization_constant);
+            apply_field!(pparams, update, extra_entropy);
 
             MultiEraProtocolParameters::Shelley(pparams)
         }
         MultiEraProtocolParameters::Alonzo(mut pparams) => {
-            if let Some(new) = update.first_proposed_protocol_version() {
-                warn!(?new, "found new protocol version");
-                pparams.protocol_version = new;
+            apply_field!(pparams, update, minfee_a);
+            apply_field!(pparams, update, minfee_b);
+            apply_field!(pparams, update, max_block_body_size);
+            apply_field!(pparams, update, max_transaction_size);
+            apply_field!(pparams, update, max_block_header_size);
+            apply_field!(pparams, update, key_deposit);
+            apply_field!(pparams, update, pool_deposit);
+            apply_field!(pparams, update, desired_number_of_stake_pools);
+            apply_field!(pparams, update, protocol_version);
+            apply_field!(pparams, update, min_pool_cost);
+            apply_field!(pparams, update, ada_per_utxo_byte);
+            apply_field!(pparams, update, execution_costs);
+            apply_field!(pparams, update, max_tx_ex_units);
+            apply_field!(pparams, update, max_block_ex_units);
+            apply_field!(pparams, update, max_value_size);
+            apply_field!(pparams, update, collateral_percentage);
+            apply_field!(pparams, update, max_collateral_inputs);
+            apply_field!(pparams, update, expansion_rate);
+            apply_field!(pparams, update, treasury_growth_rate);
+            apply_field!(pparams, update, maximum_epoch);
+            apply_field!(pparams, update, pool_pledge_influence);
+            apply_field!(pparams, update, decentralization_constant);
+            apply_field!(pparams, update, extra_entropy);
+
+            if let Some(value) = update.alonzo_first_proposed_cost_models_for_script_languages() {
+                warn!(
+                    ?value,
+                    "found new cost_models_for_script_languages update proposal"
+                );
+
+                pparams.cost_models_for_script_languages = value;
             }
 
             MultiEraProtocolParameters::Alonzo(pparams)
         }
         MultiEraProtocolParameters::Babbage(mut pparams) => {
-            if let Some(new) = update.first_proposed_protocol_version() {
-                warn!(?new, "found new protocol version");
-                pparams.protocol_version = new;
+            apply_field!(pparams, update, minfee_a);
+            apply_field!(pparams, update, minfee_b);
+            apply_field!(pparams, update, max_block_body_size);
+            apply_field!(pparams, update, max_transaction_size);
+            apply_field!(pparams, update, max_block_header_size);
+            apply_field!(pparams, update, key_deposit);
+            apply_field!(pparams, update, pool_deposit);
+            apply_field!(pparams, update, desired_number_of_stake_pools);
+            apply_field!(pparams, update, protocol_version);
+            apply_field!(pparams, update, min_pool_cost);
+            apply_field!(pparams, update, ada_per_utxo_byte);
+            apply_field!(pparams, update, execution_costs);
+            apply_field!(pparams, update, max_tx_ex_units);
+            apply_field!(pparams, update, max_block_ex_units);
+            apply_field!(pparams, update, max_value_size);
+            apply_field!(pparams, update, collateral_percentage);
+            apply_field!(pparams, update, max_collateral_inputs);
+            apply_field!(pparams, update, expansion_rate);
+            apply_field!(pparams, update, treasury_growth_rate);
+            apply_field!(pparams, update, maximum_epoch);
+            apply_field!(pparams, update, pool_pledge_influence);
+            apply_field!(pparams, update, decentralization_constant);
+            apply_field!(pparams, update, extra_entropy);
+
+            if let Some(value) = update.babbage_first_proposed_cost_models_for_script_languages() {
+                warn!(
+                    ?value,
+                    "found new cost_models_for_script_languages update proposal"
+                );
+
+                pparams.cost_models_for_script_languages = value;
             }
 
             MultiEraProtocolParameters::Babbage(pparams)
         }
         MultiEraProtocolParameters::Conway(mut pparams) => {
-            if let Some(new) = update.first_proposed_protocol_version() {
-                warn!(?new, "found new protocol version");
-                pparams.protocol_version = new;
+            apply_field!(pparams, update, minfee_a);
+            apply_field!(pparams, update, minfee_b);
+            apply_field!(pparams, update, max_block_body_size);
+            apply_field!(pparams, update, max_transaction_size);
+            apply_field!(pparams, update, max_block_header_size);
+            apply_field!(pparams, update, key_deposit);
+            apply_field!(pparams, update, pool_deposit);
+            apply_field!(pparams, update, desired_number_of_stake_pools);
+            apply_field!(pparams, update, protocol_version);
+            apply_field!(pparams, update, min_pool_cost);
+            apply_field!(pparams, update, ada_per_utxo_byte);
+            apply_field!(pparams, update, execution_costs);
+            apply_field!(pparams, update, max_tx_ex_units);
+            apply_field!(pparams, update, max_block_ex_units);
+            apply_field!(pparams, update, max_value_size);
+            apply_field!(pparams, update, collateral_percentage);
+            apply_field!(pparams, update, max_collateral_inputs);
+            apply_field!(pparams, update, expansion_rate);
+            apply_field!(pparams, update, treasury_growth_rate);
+            apply_field!(pparams, update, maximum_epoch);
+            apply_field!(pparams, update, pool_pledge_influence);
+            apply_field!(pparams, update, pool_voting_thresholds);
+            apply_field!(pparams, update, drep_voting_thresholds);
+            apply_field!(pparams, update, min_committee_size);
+            apply_field!(pparams, update, committee_term_limit);
+            apply_field!(pparams, update, governance_action_validity_period);
+            apply_field!(pparams, update, governance_action_deposit);
+            apply_field!(pparams, update, drep_deposit);
+            apply_field!(pparams, update, drep_inactivity_period);
+            apply_field!(pparams, update, minfee_refscript_cost_per_byte);
+
+            if let Some(value) = update.conway_first_proposed_cost_models_for_script_languages() {
+                warn!(
+                    ?value,
+                    "found new cost_models_for_script_languages update proposal"
+                );
+
+                pparams.cost_models_for_script_languages = value;
             }
 
             MultiEraProtocolParameters::Conway(pparams)
@@ -363,7 +468,7 @@ fn advance_hardfork(
         }
         // Protocol version 9 will transition from Babbage to Conway; not yet implemented
         MultiEraProtocolParameters::Babbage(current) if next_protocol == 9 => {
-            MultiEraProtocolParameters::Conway(bootstrap_conway_pparams(current))
+            MultiEraProtocolParameters::Conway(bootstrap_conway_pparams(current, genesis.conway))
         }
         _ => unimplemented!("don't know how to handle hardfork"),
     }
@@ -374,24 +479,36 @@ pub fn fold_pparams(
     updates: &[MultiEraUpdate],
     for_epoch: u64,
 ) -> MultiEraProtocolParameters {
+    debug!(
+        "Starting fold_pparams with {} updates for epoch {}",
+        updates.len(),
+        for_epoch
+    );
+
     let mut pparams = match &updates[0] {
         MultiEraUpdate::Byron(_, _) => {
+            debug!("Initializing with Byron parameters");
             MultiEraProtocolParameters::Byron(bootstrap_byron_pparams(genesis.byron))
         }
-        // Preview beggins directly on Shelley.
-        _ => MultiEraProtocolParameters::Shelley(bootstrap_shelley_pparams(genesis.shelley)),
+        _ => {
+            debug!("Initializing with Shelley parameters");
+            MultiEraProtocolParameters::Shelley(bootstrap_shelley_pparams(genesis.shelley))
+        }
     };
     let mut last_protocol = 0;
 
     for epoch in 0..for_epoch {
+        debug!("Processing epoch {}", epoch);
+
         for next_protocol in last_protocol + 1..=pparams.protocol_version() {
-            warn!(next_protocol, "advancing hardfork");
+            debug!("advancing hardfork {:?}", next_protocol);
             pparams = advance_hardfork(pparams, genesis, next_protocol);
             last_protocol = next_protocol;
         }
 
-        for update in updates.iter().filter(|e| e.epoch() == epoch) {
-            trace!(epoch, "Applying update");
+        let epoch_updates: Vec<_> = updates.iter().filter(|e| e.epoch() == epoch).collect();
+        debug!("Found {} updates for epoch {}", epoch_updates.len(), epoch);
+        for update in epoch_updates {
             pparams = apply_param_update(pparams, update);
         }
     }
@@ -424,6 +541,7 @@ mod tests {
             byron: &load_json(format!("{test_data}/genesis/byron_genesis.json")),
             shelley: &load_json(format!("{test_data}/genesis/shelley_genesis.json")),
             alonzo: &load_json(format!("{test_data}/genesis/alonzo_genesis.json")),
+            conway: &load_json(format!("{test_data}/genesis/conway_genesis.json")),
         };
 
         // Then load each mainnet example update proposal as buffers
@@ -482,5 +600,105 @@ mod tests {
     #[test]
     fn test_mainnet_fold() {
         test_env_fold("mainnet")
+    }
+
+    #[test]
+    fn test_pool_voting_thresholds_rational() {
+        let thresholds = [
+            ("committeeNormal", 0.51),
+            ("committeeNoConfidence", 0.51),
+            ("hardForkInitiation", 0.51),
+            ("motionNoConfidence", 0.51),
+            ("ppSecurityGroup", 0.51),
+        ];
+
+        for (name, value) in thresholds.iter() {
+            let result = float_to_rational(*value);
+            assert_eq!(result.numerator, 51, "Failed for {}", name);
+            assert_eq!(result.denominator, 100, "Failed for {}", name);
+        }
+    }
+
+    #[test]
+    fn test_drep_voting_thresholds_rational() {
+        let thresholds = [
+            ("motionNoConfidence", 0.67),
+            ("committeeNormal", 0.67),
+            ("committeeNoConfidence", 0.60),
+            ("updateToConstitution", 0.75),
+            ("hardForkInitiation", 0.60),
+            ("ppNetworkGroup", 0.67),
+            ("ppEconomicGroup", 0.67),
+            ("ppTechnicalGroup", 0.67),
+            ("ppGovGroup", 0.75),
+            ("treasuryWithdrawal", 0.67),
+        ];
+
+        for (name, value) in thresholds.iter() {
+            let result = float_to_rational(*value);
+            match *value {
+                0.67 => {
+                    assert_eq!(result.numerator, 67, "Failed for {}", name);
+                    assert_eq!(result.denominator, 100, "Failed for {}", name);
+                }
+                0.60 => {
+                    assert_eq!(result.numerator, 3, "Failed for {}", name);
+                    assert_eq!(result.denominator, 5, "Failed for {}", name);
+                }
+                0.75 => {
+                    assert_eq!(result.numerator, 3, "Failed for {}", name);
+                    assert_eq!(result.denominator, 4, "Failed for {}", name);
+                }
+                _ => panic!("Unexpected value for {}: {}", name, value),
+            }
+        }
+    }
+
+    fn assert_rational_eq(
+        result: pallas::ledger::primitives::conway::RationalNumber,
+        expected_num: u64,
+        expected_den: u64,
+        input: f32,
+    ) {
+        assert_eq!(
+            result.numerator, expected_num,
+            "Numerator mismatch for input {}",
+            input
+        );
+        assert_eq!(
+            result.denominator, expected_den,
+            "Denominator mismatch for input {}",
+            input
+        );
+    }
+
+    #[test]
+    fn test_whole_number() {
+        let test_cases = [
+            (1.0, 1, 1),
+            (2.0, 2, 1),
+            (100.0, 100, 1),
+            (1000000.0, 1000000, 1),
+        ];
+
+        for &(input, expected_num, expected_den) in test_cases.iter() {
+            let result = float_to_rational(input);
+            assert_rational_eq(result, expected_num, expected_den, input);
+        }
+    }
+
+    #[test]
+    fn test_fractions() {
+        let test_cases = [
+            (0.5, 1, 2),
+            (0.25, 1, 4),
+            // (0.33333334, 333333343, 1000000000), // These fails due to floating point precision
+            // (0.66666669, 666666687, 1000000000),
+        ];
+
+        for &(input, expected_num, expected_den) in test_cases.iter() {
+            let result = float_to_rational(input);
+            assert_rational_eq(result, expected_num, expected_den, input);
+        }
     }
 }

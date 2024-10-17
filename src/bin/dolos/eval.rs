@@ -55,7 +55,7 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
         .into_diagnostic()
         .context("resolving utxo")?;
 
-    let (byron, shelley, alonzo) = crate::common::open_genesis_files(&config.genesis)?;
+    let (byron, shelley, alonzo, conway) = crate::common::open_genesis_files(&config.genesis)?;
 
     let mut utxos2 = UTxOs::new();
 
@@ -92,6 +92,7 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
             byron: &byron,
             shelley: &shelley,
             alonzo: &alonzo,
+            conway: &conway,
         },
         &updates,
         args.epoch,

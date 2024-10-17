@@ -2,6 +2,7 @@ use dolos::{state, wal};
 use miette::{Context as _, IntoDiagnostic};
 use pallas::ledger::configs::alonzo::GenesisFile as AlonzoFile;
 use pallas::ledger::configs::byron::GenesisFile as ByronFile;
+use pallas::ledger::configs::conway::GenesisFile as ConwayFile;
 use pallas::ledger::configs::shelley::GenesisFile as ShelleyFile;
 use std::{path::PathBuf, time::Duration};
 use tokio::task::JoinHandle;
@@ -99,7 +100,7 @@ pub fn setup_tracing(config: &LoggingConfig) -> miette::Result<()> {
     Ok(())
 }
 
-pub type GenesisFiles = (ByronFile, ShelleyFile, AlonzoFile);
+pub type GenesisFiles = (ByronFile, ShelleyFile, AlonzoFile, ConwayFile);
 
 pub fn open_genesis_files(config: &GenesisConfig) -> miette::Result<GenesisFiles> {
     let byron_genesis = pallas::ledger::configs::byron::from_file(&config.byron_path)
@@ -114,7 +115,16 @@ pub fn open_genesis_files(config: &GenesisConfig) -> miette::Result<GenesisFiles
         .into_diagnostic()
         .context("loading alonzo genesis config")?;
 
-    Ok((byron_genesis, shelley_genesis, alonzo_genesis))
+    let conway_genesis = pallas::ledger::configs::conway::from_file(&config.conway_path)
+        .into_diagnostic()
+        .context("loading conway genesis config")?;
+
+    Ok((
+        byron_genesis,
+        shelley_genesis,
+        alonzo_genesis,
+        conway_genesis,
+    ))
 }
 
 #[inline]
