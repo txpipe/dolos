@@ -23,7 +23,7 @@ gasket = { git = "https://github.com/construkts/gasket-rs.git", features = ["der
 redb = { version = "^2" }
 hex = "0.4.3"
 bech32 = "0.11.0"
-clap = { version = "4.3.0", features = ["derive"] }
+clap = { version = "4.5.20", features = ["derive"] }
 log = "0.4.18"
 config = { version = "0.13.3", default-features = false, features = ["toml", "json"] }
 serde = { version = "1.0.136", features = ["derive"] }
