@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.17.0] - 2024-10-17
+
+### 🚀 Features
+
+- Skip redundant bootstrap in overriding init (#364)
+
+### 🐛 Bug Fixes
+
+- Apply missing pparams in update logic (#361)
+
 ## [0.16.0] - 2024-10-13
 
 ### 🚀 Features
@@ -30,6 +40,7 @@ All notable changes to this project will be documented in this file.
 - Update blaze docs with latest version (#338)
 - Add support for CORS in gRPC-web (#339)
 - Fix lint warnings (#356)
+- Release dolos version 0.16.0
 
 ## [0.15.1] - 2024-09-07
 
