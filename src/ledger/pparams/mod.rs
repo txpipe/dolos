@@ -11,135 +11,16 @@ use pallas::{
 };
 use tracing::{debug, warn};
 
-macro_rules! define_era_updates {
-    ($name:ident, $param_type:ty, $($param:ident, [$($era:ident)+]),+ $(,)?) => {
-        fn $name(params: &mut $param_type, update: &MultiEraUpdate) {
-            $(
-                paste::paste! {
-                    if let Some(new) = update.[<first_proposed_ $param _ $($era:lower)_+>]() {
-                        warn!(?new, concat!("found new ", stringify!($param), " update proposal"));
-                        params.$param = new;
-                    }
-                }
-            )+
+macro_rules! apply_field {
+    ($target:ident, $update:ident, $field:ident) => {
+        paste::paste! {
+            if let Some(new) = $update.[<first_proposed_ $field>]() {
+                warn!(?new, concat!("found new ", stringify!($param), " update proposal"));
+                $target.$field = new;
+            }
         }
     };
 }
-
-define_era_updates!(
-    update_shelley_params,
-    ShelleyProtParams,
-    minfee_a, [AlonzoCompatible Babbage],
-    minfee_b, [AlonzoCompatible Babbage],
-    max_block_body_size, [AlonzoCompatible Babbage],
-    max_transaction_size, [AlonzoCompatible Babbage],
-    max_block_header_size, [AlonzoCompatible Babbage],
-    key_deposit, [AlonzoCompatible Babbage],
-    pool_deposit, [AlonzoCompatible Babbage],
-    desired_number_of_stake_pools, [AlonzoCompatible Babbage],
-    protocol_version, [AlonzoCompatible Babbage],
-    min_pool_cost, [AlonzoCompatible Babbage],
-    expansion_rate, [AlonzoCompatible Babbage],
-    treasury_growth_rate, [AlonzoCompatible Babbage],
-    maximum_epoch, [AlonzoCompatible Babbage],
-    pool_pledge_influence, [AlonzoCompatible Babbage],
-    decentralization_constant, [AlonzoCompatible],
-    extra_entropy, [AlonzoCompatible]
-);
-
-define_era_updates!(
-    update_alonzo_params,
-    AlonzoProtParams,
-    minfee_a, [AlonzoCompatible Babbage],
-    minfee_b,[AlonzoCompatible Babbage],
-    max_block_body_size,[AlonzoCompatible Babbage],
-    max_transaction_size,[AlonzoCompatible Babbage],
-    max_block_header_size,[AlonzoCompatible Babbage],
-    key_deposit,[AlonzoCompatible Babbage],
-    pool_deposit,[AlonzoCompatible Babbage],
-    desired_number_of_stake_pools,[AlonzoCompatible Babbage],
-    protocol_version,[AlonzoCompatible Babbage],
-    min_pool_cost,[AlonzoCompatible Babbage],
-    ada_per_utxo_byte,[AlonzoCompatible Babbage],
-    cost_models_for_script_languages,[AlonzoCompatible],
-    execution_costs,[AlonzoCompatible Babbage],
-    max_tx_ex_units,[AlonzoCompatible Babbage],
-    max_block_ex_units,[AlonzoCompatible Babbage],
-    max_value_size,[AlonzoCompatible Babbage],
-    collateral_percentage,[AlonzoCompatible Babbage],
-    max_collateral_inputs,[AlonzoCompatible Babbage],
-    expansion_rate,[AlonzoCompatible Babbage],
-    treasury_growth_rate,[AlonzoCompatible Babbage],
-    maximum_epoch,[AlonzoCompatible Babbage],
-    pool_pledge_influence,[AlonzoCompatible Babbage],
-    decentralization_constant,[AlonzoCompatible],
-    extra_entropy,[AlonzoCompatible]
-);
-
-define_era_updates!(
-    update_babbage_params,
-    BabbageProtParams,
-    minfee_a,[AlonzoCompatible Babbage],
-    minfee_b,[AlonzoCompatible Babbage],
-    max_block_body_size,[AlonzoCompatible Babbage],
-    max_transaction_size,[AlonzoCompatible Babbage],
-    max_block_header_size,[AlonzoCompatible Babbage],
-    key_deposit,[AlonzoCompatible Babbage],
-    pool_deposit,[AlonzoCompatible Babbage],
-    desired_number_of_stake_pools,[AlonzoCompatible Babbage],
-    protocol_version,[AlonzoCompatible Babbage],
-    min_pool_cost,[AlonzoCompatible Babbage],
-    ada_per_utxo_byte,[AlonzoCompatible Babbage],
-    cost_models_for_script_languages,[Babbage],
-    execution_costs,[AlonzoCompatible Babbage],
-    max_tx_ex_units,[AlonzoCompatible Babbage],
-    max_block_ex_units,[AlonzoCompatible Babbage],
-    max_value_size,[AlonzoCompatible Babbage],
-    collateral_percentage,[AlonzoCompatible Babbage],
-    max_collateral_inputs,[AlonzoCompatible Babbage],
-    expansion_rate,[AlonzoCompatible Babbage],
-    treasury_growth_rate,[AlonzoCompatible Babbage],
-    maximum_epoch,[AlonzoCompatible Babbage],
-    pool_pledge_influence,[AlonzoCompatible Babbage],
-    decentralization_constant,[AlonzoCompatible],
-    extra_entropy,[AlonzoCompatible]
-);
-
-define_era_updates!(
-    update_conway_params,
-    ConwayProtParams,
-    minfee_a,[AlonzoCompatible Babbage],
-    minfee_b,[AlonzoCompatible Babbage],
-    max_block_body_size,[AlonzoCompatible Babbage],
-    max_transaction_size,[AlonzoCompatible Babbage],
-    max_block_header_size,[AlonzoCompatible Babbage],
-    key_deposit,[AlonzoCompatible Babbage],
-    pool_deposit,[AlonzoCompatible Babbage],
-    desired_number_of_stake_pools,[AlonzoCompatible Babbage],
-    protocol_version,[AlonzoCompatible Babbage],
-    min_pool_cost,[AlonzoCompatible Babbage],
-    ada_per_utxo_byte,[AlonzoCompatible Babbage],
-    cost_models_for_script_languages,[Conway],
-    execution_costs,[AlonzoCompatible Babbage],
-    max_tx_ex_units,[AlonzoCompatible Babbage],
-    max_block_ex_units,[AlonzoCompatible Babbage],
-    max_value_size,[AlonzoCompatible Babbage],
-    collateral_percentage,[AlonzoCompatible Babbage],
-    max_collateral_inputs,[AlonzoCompatible Babbage],
-    expansion_rate,[AlonzoCompatible Babbage],
-    treasury_growth_rate,[AlonzoCompatible Babbage],
-    maximum_epoch,[AlonzoCompatible Babbage],
-    pool_pledge_influence,[AlonzoCompatible Babbage],
-    pool_voting_thresholds,[Conway],
-    drep_voting_thresholds,[Conway],
-    min_committee_size,[Conway],
-    committee_term_limit,[Conway],
-    governance_action_validity_period,[Conway],
-    governance_action_deposit,[Conway],
-    drep_deposit,[Conway],
-    drep_inactivity_period,[Conway],
-    minfee_refscript_cost_per_byte,[Conway]
-);
 
 pub struct Genesis<'a> {
     pub byron: &'a byron::GenesisFile,
@@ -403,19 +284,138 @@ fn apply_param_update(
             MultiEraProtocolParameters::Byron(pparams)
         }
         MultiEraProtocolParameters::Shelley(mut pparams) => {
-            update_shelley_params(&mut pparams, update);
+            apply_field!(pparams, update, minfee_a);
+            apply_field!(pparams, update, minfee_b);
+            apply_field!(pparams, update, max_block_body_size);
+            apply_field!(pparams, update, max_transaction_size);
+            apply_field!(pparams, update, max_block_header_size);
+            apply_field!(pparams, update, key_deposit);
+            apply_field!(pparams, update, pool_deposit);
+            apply_field!(pparams, update, desired_number_of_stake_pools);
+            apply_field!(pparams, update, protocol_version);
+            apply_field!(pparams, update, min_pool_cost);
+            apply_field!(pparams, update, expansion_rate);
+            apply_field!(pparams, update, treasury_growth_rate);
+            apply_field!(pparams, update, maximum_epoch);
+            apply_field!(pparams, update, pool_pledge_influence);
+            apply_field!(pparams, update, decentralization_constant);
+            apply_field!(pparams, update, extra_entropy);
+
             MultiEraProtocolParameters::Shelley(pparams)
         }
         MultiEraProtocolParameters::Alonzo(mut pparams) => {
-            update_alonzo_params(&mut pparams, update);
+            apply_field!(pparams, update, minfee_a);
+            apply_field!(pparams, update, minfee_b);
+            apply_field!(pparams, update, max_block_body_size);
+            apply_field!(pparams, update, max_transaction_size);
+            apply_field!(pparams, update, max_block_header_size);
+            apply_field!(pparams, update, key_deposit);
+            apply_field!(pparams, update, pool_deposit);
+            apply_field!(pparams, update, desired_number_of_stake_pools);
+            apply_field!(pparams, update, protocol_version);
+            apply_field!(pparams, update, min_pool_cost);
+            apply_field!(pparams, update, ada_per_utxo_byte);
+            apply_field!(pparams, update, execution_costs);
+            apply_field!(pparams, update, max_tx_ex_units);
+            apply_field!(pparams, update, max_block_ex_units);
+            apply_field!(pparams, update, max_value_size);
+            apply_field!(pparams, update, collateral_percentage);
+            apply_field!(pparams, update, max_collateral_inputs);
+            apply_field!(pparams, update, expansion_rate);
+            apply_field!(pparams, update, treasury_growth_rate);
+            apply_field!(pparams, update, maximum_epoch);
+            apply_field!(pparams, update, pool_pledge_influence);
+            apply_field!(pparams, update, decentralization_constant);
+            apply_field!(pparams, update, extra_entropy);
+
+            if let Some(value) = update.alonzo_first_proposed_cost_models_for_script_languages() {
+                warn!(
+                    ?value,
+                    "found new cost_models_for_script_languages update proposal"
+                );
+
+                pparams.cost_models_for_script_languages = value.into();
+            }
+
             MultiEraProtocolParameters::Alonzo(pparams)
         }
         MultiEraProtocolParameters::Babbage(mut pparams) => {
-            update_babbage_params(&mut pparams, update);
+            apply_field!(pparams, update, minfee_a);
+            apply_field!(pparams, update, minfee_b);
+            apply_field!(pparams, update, max_block_body_size);
+            apply_field!(pparams, update, max_transaction_size);
+            apply_field!(pparams, update, max_block_header_size);
+            apply_field!(pparams, update, key_deposit);
+            apply_field!(pparams, update, pool_deposit);
+            apply_field!(pparams, update, desired_number_of_stake_pools);
+            apply_field!(pparams, update, protocol_version);
+            apply_field!(pparams, update, min_pool_cost);
+            apply_field!(pparams, update, ada_per_utxo_byte);
+            apply_field!(pparams, update, execution_costs);
+            apply_field!(pparams, update, max_tx_ex_units);
+            apply_field!(pparams, update, max_block_ex_units);
+            apply_field!(pparams, update, max_value_size);
+            apply_field!(pparams, update, collateral_percentage);
+            apply_field!(pparams, update, max_collateral_inputs);
+            apply_field!(pparams, update, expansion_rate);
+            apply_field!(pparams, update, treasury_growth_rate);
+            apply_field!(pparams, update, maximum_epoch);
+            apply_field!(pparams, update, pool_pledge_influence);
+            apply_field!(pparams, update, decentralization_constant);
+            apply_field!(pparams, update, extra_entropy);
+
+            if let Some(value) = update.babbage_first_proposed_cost_models_for_script_languages() {
+                warn!(
+                    ?value,
+                    "found new cost_models_for_script_languages update proposal"
+                );
+
+                pparams.cost_models_for_script_languages = value.into();
+            }
+
             MultiEraProtocolParameters::Babbage(pparams)
         }
         MultiEraProtocolParameters::Conway(mut pparams) => {
-            update_conway_params(&mut pparams, update);
+            apply_field!(pparams, update, minfee_a);
+            apply_field!(pparams, update, minfee_b);
+            apply_field!(pparams, update, max_block_body_size);
+            apply_field!(pparams, update, max_transaction_size);
+            apply_field!(pparams, update, max_block_header_size);
+            apply_field!(pparams, update, key_deposit);
+            apply_field!(pparams, update, pool_deposit);
+            apply_field!(pparams, update, desired_number_of_stake_pools);
+            apply_field!(pparams, update, protocol_version);
+            apply_field!(pparams, update, min_pool_cost);
+            apply_field!(pparams, update, ada_per_utxo_byte);
+            apply_field!(pparams, update, execution_costs);
+            apply_field!(pparams, update, max_tx_ex_units);
+            apply_field!(pparams, update, max_block_ex_units);
+            apply_field!(pparams, update, max_value_size);
+            apply_field!(pparams, update, collateral_percentage);
+            apply_field!(pparams, update, max_collateral_inputs);
+            apply_field!(pparams, update, expansion_rate);
+            apply_field!(pparams, update, treasury_growth_rate);
+            apply_field!(pparams, update, maximum_epoch);
+            apply_field!(pparams, update, pool_pledge_influence);
+            apply_field!(pparams, update, pool_voting_thresholds);
+            apply_field!(pparams, update, drep_voting_thresholds);
+            apply_field!(pparams, update, min_committee_size);
+            apply_field!(pparams, update, committee_term_limit);
+            apply_field!(pparams, update, governance_action_validity_period);
+            apply_field!(pparams, update, governance_action_deposit);
+            apply_field!(pparams, update, drep_deposit);
+            apply_field!(pparams, update, drep_inactivity_period);
+            apply_field!(pparams, update, minfee_refscript_cost_per_byte);
+
+            if let Some(value) = update.conway_first_proposed_cost_models_for_script_languages() {
+                warn!(
+                    ?value,
+                    "found new cost_models_for_script_languages update proposal"
+                );
+
+                pparams.cost_models_for_script_languages = value.into();
+            }
+
             MultiEraProtocolParameters::Conway(pparams)
         }
         _ => unimplemented!(),
