@@ -1,9 +1,13 @@
 use miette::{Context, IntoDiagnostic};
 
 #[derive(Debug, clap::Args)]
-pub struct Args {}
+pub struct Args {
+    /// Skip the bootstrap if there's already data in the stores
+    #[arg(long, action)]
+    quit_on_tip: bool,
+}
 
-pub fn run(config: &super::Config, _args: &Args) -> miette::Result<()> {
+pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging)?;
 
     let (wal, ledger) = crate::common::open_data_stores(config)?;
@@ -21,6 +25,7 @@ pub fn run(config: &super::Config, _args: &Args) -> miette::Result<()> {
         shelley,
         mempool,
         &config.retries,
+        args.quit_on_tip,
     )
     .into_diagnostic()
     .context("bootstrapping sync pipeline")?;

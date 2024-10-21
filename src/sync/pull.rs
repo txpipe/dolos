@@ -36,6 +36,7 @@ pub enum WorkUnit {
 
 pub struct Worker {
     peer_session: PeerClient,
+    quit_on_tip: bool,
 }
 
 impl Worker {
@@ -110,7 +111,10 @@ impl gasket::framework::Worker<Stage> for Worker {
 
         info!(?intersection, "found intersection");
 
-        let worker = Self { peer_session };
+        let worker = Self {
+            peer_session,
+            quit_on_tip: stage.quit_on_tip,
+        };
 
         Ok(worker)
     }
@@ -125,8 +129,13 @@ impl gasket::framework::Worker<Stage> for Worker {
             debug!("should request next batch of blocks");
             Ok(WorkSchedule::Unit(WorkUnit::Pull))
         } else {
-            debug!("should await next block");
-            Ok(WorkSchedule::Unit(WorkUnit::Await))
+            if self.quit_on_tip {
+                debug!("reached tip, exiting");
+                Ok(WorkSchedule::Done)
+            } else {
+                debug!("should await next block");
+                Ok(WorkSchedule::Unit(WorkUnit::Await))
+            }
         }
     }
 
@@ -204,6 +213,7 @@ pub struct Stage {
     network_magic: u64,
     block_fetch_batch_size: usize,
     wal: WalStore,
+    quit_on_tip: bool,
 
     pub downstream: DownstreamPort,
 
@@ -220,11 +230,13 @@ impl Stage {
         network_magic: u64,
         block_fetch_batch_size: usize,
         wal: WalStore,
+        quit_on_tip: bool,
     ) -> Self {
         Self {
             peer_address,
             network_magic,
             wal,
+            quit_on_tip,
             block_fetch_batch_size,
             downstream: Default::default(),
             block_count: Default::default(),

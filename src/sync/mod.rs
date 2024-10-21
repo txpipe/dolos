@@ -53,12 +53,14 @@ pub fn pipeline(
     shelley: shelley::GenesisFile,
     mempool: Mempool,
     retries: &Option<gasket::retries::Policy>,
+    quit_on_tip: bool,
 ) -> Result<Vec<gasket::runtime::Tether>, Error> {
     let mut pull = pull::Stage::new(
         upstream.peer_address.clone(),
         upstream.network_magic,
         config.pull_batch_size.unwrap_or(50),
         wal.clone(),
+        quit_on_tip,
     );
 
     let mut roll = roll::Stage::new(wal.clone());
