@@ -5,8 +5,12 @@ use pallas::crypto::hash::Hash;
 use pallas::interop::utxorpc as interop;
 use pallas::interop::utxorpc::spec::cardano::{ExUnits, TxEval};
 use pallas::interop::utxorpc::spec::submit::{WaitForTxResponse, *};
+use pallas::ledger::primitives::conway::{
+    DatumHash, MintedTx, NativeScript, PlutusData, PlutusV1Script, PlutusV2Script, PlutusV3Script,
+    ScriptHash, TransactionInput, TransactionOutput,
+};
 use pallas::ledger::traverse::MultiEraTx;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
 use tokio_stream::wrappers::BroadcastStream;
 use tonic::{Request, Response, Status};
@@ -15,6 +19,121 @@ use tracing::info;
 use crate::ledger::TxoRef;
 use crate::mempool::{Event, Mempool, UpdateFilter};
 use crate::state::LedgerStore;
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct ResolvedInput {
+    pub input: TransactionInput,
+    pub output: TransactionOutput,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum ScriptVersion {
+    Native(NativeScript),
+    V1(PlutusV1Script),
+    V2(PlutusV2Script),
+    V3(PlutusV3Script),
+}
+
+pub struct DataLookupTable {
+    datum: HashMap<DatumHash, PlutusData>,
+    scripts: HashMap<ScriptHash, ScriptVersion>,
+}
+
+impl DataLookupTable {
+    pub fn from_transaction(tx: &MintedTx, utxos: &[ResolvedInput]) -> DataLookupTable {
+        let mut datum = HashMap::new();
+        let mut scripts = HashMap::new();
+
+        // discovery in witness set
+
+        let plutus_data_witnesses = tx
+            .transaction_witness_set
+            .plutus_data
+            .clone()
+            .map(|s| s.to_vec())
+            .unwrap_or_default();
+
+        let scripts_native_witnesses = tx
+            .transaction_witness_set
+            .native_script
+            .clone()
+            .map(|s| s.to_vec())
+            .unwrap_or_default();
+
+        let scripts_v1_witnesses = tx
+            .transaction_witness_set
+            .plutus_v1_script
+            .clone()
+            .map(|s| s.to_vec())
+            .unwrap_or_default();
+
+        let scripts_v2_witnesses = tx
+            .transaction_witness_set
+            .plutus_v2_script
+            .clone()
+            .map(|s| s.to_vec())
+            .unwrap_or_default();
+
+        let scripts_v3_witnesses = tx
+            .transaction_witness_set
+            .plutus_v3_script
+            .clone()
+            .map(|s| s.to_vec())
+            .unwrap_or_default();
+
+        for plutus_data in plutus_data_witnesses.iter() {
+            datum.insert(plutus_data.original_hash(), plutus_data.clone().unwrap());
+        }
+
+        for script in scripts_native_witnesses.iter() {
+            scripts.insert(
+                script.compute_hash(),
+                ScriptVersion::Native(script.clone().unwrap()),
+            );
+        }
+
+        for script in scripts_v1_witnesses.iter() {
+            scripts.insert(script.compute_hash(), ScriptVersion::V1(script.clone()));
+        }
+
+        for script in scripts_v2_witnesses.iter() {
+            scripts.insert(script.compute_hash(), ScriptVersion::V2(script.clone()));
+        }
+
+        for script in scripts_v3_witnesses.iter() {
+            scripts.insert(script.compute_hash(), ScriptVersion::V3(script.clone()));
+        }
+
+        // discovery in utxos (script ref)
+
+        for utxo in utxos.iter() {
+            match &utxo.output {
+                TransactionOutput::Legacy(_) => {}
+                TransactionOutput::PostAlonzo(output) => {
+                    if let Some(script) = &output.script_ref {
+                        match &script.0 {
+                            PseudoScript::NativeScript(ns) => {
+                                scripts
+                                    .insert(ns.compute_hash(), ScriptVersion::Native(ns.clone()));
+                            }
+                            PseudoScript::PlutusV1Script(v1) => {
+                                scripts.insert(v1.compute_hash(), ScriptVersion::V1(v1.clone()));
+                            }
+                            PseudoScript::PlutusV2Script(v2) => {
+                                scripts.insert(v2.compute_hash(), ScriptVersion::V2(v2.clone()));
+                            }
+                            PseudoScript::PlutusV3Script(v3) => {
+                                scripts.insert(v3.compute_hash(), ScriptVersion::V3(v3.clone()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        DataLookupTable { datum, scripts }
+    }
+}
 
 pub struct SubmitServiceImpl {
     mempool: Mempool,
@@ -165,7 +284,7 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
                 any_chain_tx::Type::Raw(bytes) => bytes.to_vec(),
             })
             .unwrap_or_default();
-        
+
         println!("tx_cbor: {:?}", hex::encode(&tx_cbor));
 
         let tx = MultiEraTx::decode(&tx_cbor).unwrap();
