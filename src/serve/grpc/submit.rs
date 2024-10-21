@@ -1,19 +1,24 @@
+use any_chain_eval::Chain;
 use futures_core::Stream;
 use futures_util::{StreamExt as _, TryStreamExt as _};
 use pallas::crypto::hash::Hash;
 use pallas::interop::utxorpc as interop;
+use pallas::interop::utxorpc::spec::cardano::{ExUnits, TxEval};
 use pallas::interop::utxorpc::spec::submit::{WaitForTxResponse, *};
+use pallas::ledger::traverse::MultiEraTx;
 use std::collections::HashSet;
 use std::pin::Pin;
 use tokio_stream::wrappers::BroadcastStream;
 use tonic::{Request, Response, Status};
 use tracing::info;
 
+use crate::ledger::TxoRef;
 use crate::mempool::{Event, Mempool, UpdateFilter};
 use crate::state::LedgerStore;
 
 pub struct SubmitServiceImpl {
     mempool: Mempool,
+    ledger: LedgerStore,
     _mapper: interop::Mapper<LedgerStore>,
 }
 
@@ -21,6 +26,7 @@ impl SubmitServiceImpl {
     pub fn new(mempool: Mempool, ledger: LedgerStore) -> Self {
         Self {
             mempool,
+            ledger: ledger.clone(),
             _mapper: interop::Mapper::new(ledger),
         }
     }
@@ -145,8 +151,65 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
 
     async fn eval_tx(
         &self,
-        _request: tonic::Request<EvalTxRequest>,
+        request: tonic::Request<EvalTxRequest>,
     ) -> Result<tonic::Response<EvalTxResponse>, tonic::Status> {
-        todo!()
+        println!("EvalTx");
+
+        let tx_cbor: Vec<u8> = request
+            .into_inner()
+            .tx
+            .into_iter()
+            .next()
+            .and_then(|any_chain_tx| any_chain_tx.r#type)
+            .map(|tx_type| match tx_type {
+                any_chain_tx::Type::Raw(bytes) => bytes.to_vec(),
+            })
+            .unwrap_or_default();
+        
+        println!("tx_cbor: {:?}", hex::encode(&tx_cbor));
+
+        let tx = MultiEraTx::decode(&tx_cbor).unwrap();
+
+        let input_refs: Vec<TxoRef> = tx
+            .inputs()
+            .iter()
+            .map(|x| TxoRef(*x.hash(), x.index().try_into().unwrap()))
+            .chain(
+                tx.reference_inputs()
+                    .iter()
+                    .map(|x| TxoRef(*x.hash(), x.index().try_into().unwrap())),
+            )
+            .collect();
+
+        println!("input_refs: {:?}", input_refs);
+
+        let utxos = self
+            .ledger
+            .get_utxos(input_refs)
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let utxo_cbors = utxos
+            .values()
+            .map(|cbor| cbor.clone().1)
+            .collect::<Vec<_>>();
+
+        // Loop through the cbors and print in hex
+        for cbor in utxo_cbors.iter() {
+            println!("utxo_cbor: {:?}", hex::encode(cbor));
+        }
+
+        Ok(Response::new(EvalTxResponse {
+            report: vec![AnyChainEval {
+                chain: Some(Chain::Cardano(TxEval {
+                    fee: 123,
+                    ex_units: Some(ExUnits {
+                        memory: 123,
+                        steps: 123,
+                    }),
+                    errors: vec![],
+                    traces: vec![],
+                })),
+            }],
+        }))
     }
 }
