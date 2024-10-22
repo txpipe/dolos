@@ -22,6 +22,7 @@ pub async fn run(config: super::Config, _args: &Args) -> miette::Result<()> {
         shelley,
         mempool.clone(),
         &config.retries,
+        false,
     )
     .into_diagnostic()
     .context("bootstrapping sync pipeline")?;
