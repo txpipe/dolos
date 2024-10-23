@@ -4,12 +4,15 @@ use futures_util::{StreamExt as _, TryStreamExt as _};
 use pallas::crypto::hash::Hash;
 use pallas::interop::utxorpc as interop;
 use pallas::interop::utxorpc::spec::cardano::{ExUnits, TxEval};
+use pallas::interop::utxorpc::spec::query::query_service_server::QueryService;
+use pallas::interop::utxorpc::spec::query::ReadParamsRequest;
 use pallas::interop::utxorpc::spec::submit::{WaitForTxResponse, *};
+use pallas::ledger::configs::{alonzo, byron, conway, shelley};
 use pallas::ledger::primitives::conway::{
     DatumHash, MintedTx, NativeScript, PlutusData, PlutusV1Script, PlutusV2Script, PlutusV3Script,
-    ScriptHash, TransactionInput, TransactionOutput,
+    PseudoScript, ScriptHash, TransactionInput, TransactionOutput,
 };
-use pallas::ledger::traverse::MultiEraTx;
+use pallas::ledger::traverse::{ComputeHash, MultiEraTx, OriginalHash};
 use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
 use tokio_stream::wrappers::BroadcastStream;
@@ -18,6 +21,8 @@ use tracing::info;
 
 use crate::ledger::TxoRef;
 use crate::mempool::{Event, Mempool, UpdateFilter};
+use crate::serve::grpc::query::QueryServiceImpl;
+use crate::serve::GenesisFiles;
 use crate::state::LedgerStore;
 
 #[derive(Debug, PartialEq, Clone)]
@@ -139,14 +144,22 @@ pub struct SubmitServiceImpl {
     mempool: Mempool,
     ledger: LedgerStore,
     _mapper: interop::Mapper<LedgerStore>,
+    alonzo_genesis_file: alonzo::GenesisFile,
+    byron_genesis_file: byron::GenesisFile,
+    shelley_genesis_file: shelley::GenesisFile,
+    conway_genesis_file: conway::GenesisFile,
 }
 
 impl SubmitServiceImpl {
-    pub fn new(mempool: Mempool, ledger: LedgerStore) -> Self {
+    pub fn new(mempool: Mempool, ledger: LedgerStore, genesis_files: GenesisFiles) -> Self {
         Self {
             mempool,
             ledger: ledger.clone(),
             _mapper: interop::Mapper::new(ledger),
+            alonzo_genesis_file: genesis_files.0,
+            byron_genesis_file: genesis_files.1,
+            shelley_genesis_file: genesis_files.2,
+            conway_genesis_file: genesis_files.3,
         }
     }
 }
@@ -274,6 +287,30 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
     ) -> Result<tonic::Response<EvalTxResponse>, tonic::Status> {
         println!("EvalTx");
 
+        let query_service = QueryServiceImpl::new(
+            self.ledger.clone(),
+            (
+                self.alonzo_genesis_file.clone(),
+                self.byron_genesis_file.clone(),
+                self.shelley_genesis_file.clone(),
+                self.conway_genesis_file.clone(),
+            ),
+        );
+
+        let params = query_service
+            .read_params(tonic::Request::new(ReadParamsRequest {
+                field_mask: Default::default(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .values
+            .unwrap()
+            .params
+            .unwrap();
+
+        println!("params: {:?}", params);
+
         let tx_cbor: Vec<u8> = request
             .into_inner()
             .tx
@@ -288,7 +325,6 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
         println!("tx_cbor: {:?}", hex::encode(&tx_cbor));
 
         let tx = MultiEraTx::decode(&tx_cbor).unwrap();
-
         let input_refs: Vec<TxoRef> = tx
             .inputs()
             .iter()

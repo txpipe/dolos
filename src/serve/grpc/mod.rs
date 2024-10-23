@@ -39,13 +39,13 @@ pub async fn serve(
     let sync_service = sync::SyncServiceImpl::new(wal.clone(), ledger.clone());
     let sync_service = u5c::sync::sync_service_server::SyncServiceServer::new(sync_service);
 
-    let query_service = query::QueryServiceImpl::new(ledger.clone(), genesis_files);
+    let query_service = query::QueryServiceImpl::new(ledger.clone(), genesis_files.clone());
     let query_service = u5c::query::query_service_server::QueryServiceServer::new(query_service);
 
     let watch_service = watch::WatchServiceImpl::new(wal.clone(), ledger.clone());
     let watch_service = u5c::watch::watch_service_server::WatchServiceServer::new(watch_service);
 
-    let submit_service = submit::SubmitServiceImpl::new(mempool, ledger.clone());
+    let submit_service = submit::SubmitServiceImpl::new(mempool, ledger.clone(), genesis_files.clone());
     let submit_service =
         u5c::submit::submit_service_server::SubmitServiceServer::new(submit_service);
 

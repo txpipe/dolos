@@ -8,10 +8,10 @@ use crate::{
 };
 use itertools::Itertools as _;
 use pallas::ledger::{
-    configs::{alonzo, byron, shelley},
+    configs::{alonzo, byron, shelley, conway},
     traverse::{MultiEraOutput, MultiEraUpdate},
 };
-use pallas::{interop::utxorpc::spec as u5c, ledger::configs::conway};
+use pallas::interop::utxorpc::spec as u5c;
 use pallas::{
     interop::utxorpc::{self as interop, spec::query::any_utxo_pattern::UtxoPattern},
     ledger::traverse::wellknown::GenesisValues,
