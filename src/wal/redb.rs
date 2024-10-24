@@ -85,7 +85,7 @@ where
 const DEFAULT_CACHE_SIZE_MB: usize = 50;
 
 /// Concrete implementation of WalStore using Redb
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct WalStore {
     db: Arc<redb::Database>,
     max_slots: Option<u64>,
