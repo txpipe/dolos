@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.18.0] - 2024-10-24
+
+### 🚀 Features
+
+- Add flag to quit when reaching tip (#369)
+
+### 🐛 Bug Fixes
+
+- Fix openssl dependency regression (#368)
+- Avoid double open of wal during bootstrap (#371)
+
 ## [0.17.0] - 2024-10-17
 
 ### 🚀 Features
@@ -11,6 +22,10 @@ All notable changes to this project will be documented in this file.
 ### 🐛 Bug Fixes
 
 - Apply missing pparams in update logic (#361)
+
+### ⚙️ Miscellaneous Tasks
+
+- Release dolos version 0.17.0
 
 ## [0.16.0] - 2024-10-13
 
