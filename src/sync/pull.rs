@@ -128,14 +128,12 @@ impl gasket::framework::Worker<Stage> for Worker {
         if client.has_agency() {
             debug!("should request next batch of blocks");
             Ok(WorkSchedule::Unit(WorkUnit::Pull))
+        } else if self.quit_on_tip {
+            debug!("reached tip, exiting");
+            Ok(WorkSchedule::Done)
         } else {
-            if self.quit_on_tip {
-                debug!("reached tip, exiting");
-                Ok(WorkSchedule::Done)
-            } else {
-                debug!("should await next block");
-                Ok(WorkSchedule::Unit(WorkUnit::Await))
-            }
+            debug!("should await next block");
+            Ok(WorkSchedule::Unit(WorkUnit::Await))
         }
     }
 
