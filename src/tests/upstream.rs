@@ -61,6 +61,7 @@ fn test_mainnet_upstream() {
         764824073,
         20,
         wal,
+        false,
     );
 
     upstream.downstream.connect(send);
