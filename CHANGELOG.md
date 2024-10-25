@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.18.1] - 2024-10-25
+
+### 🐛 Bug Fixes
+
+- Adjust ignored failing test after refactor (#372)
+- Include Conway genesis in Docker image (#373)
+
+### ⚙️ Miscellaneous Tasks
+
+- Fix lint warnings (#374)
+
 ## [0.18.0] - 2024-10-24
 
 ### 🚀 Features
@@ -12,6 +23,10 @@ All notable changes to this project will be documented in this file.
 
 - Fix openssl dependency regression (#368)
 - Avoid double open of wal during bootstrap (#371)
+
+### ⚙️ Miscellaneous Tasks
+
+- Release dolos version 0.18.0
 
 ## [0.17.0] - 2024-10-17
 
