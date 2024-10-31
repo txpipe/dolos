@@ -12,7 +12,7 @@ use pallas::ledger::primitives::conway::{
     DatumHash, MintedTx, NativeScript, PlutusData, PlutusV1Script, PlutusV2Script, PlutusV3Script,
     PseudoScript, ScriptHash, TransactionInput, TransactionOutput,
 };
-use pallas::ledger::traverse::{ComputeHash, MultiEraTx, OriginalHash};
+use pallas::ledger::traverse::{wellknown, ComputeHash, MultiEraTx, OriginalHash};
 use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
 use tokio_stream::wrappers::BroadcastStream;

@@ -710,7 +710,7 @@ pub fn get_redeemers_info<'a>(
             .redeemer
             .as_deref()
             .map(|m| {
-                let redeemers_map = match m {
+                let redeemers = match m {
                     pallas::ledger::primitives::conway::Redeemers::List(arr) => arr
                         .deref()
                         .iter()
@@ -730,7 +730,7 @@ pub fn get_redeemers_info<'a>(
                     pallas::ledger::primitives::conway::Redeemers::Map(arr) => arr.deref().clone(),
                 };
 
-                redeemers_map
+                redeemers
                     .iter()
                     .sorted_by(|a, b| sort_redeemers(&a.0, &b.0))
                     .map(|(redeemer_key, redeemer_value)| {
