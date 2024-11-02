@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.18.2] - 2024-11-02
+
+### 🐛 Bug Fixes
+
+- Use s3 accelerate endpoint for snapshots (#377)
+
 ## [0.18.1] - 2024-10-25
 
 ### 🐛 Bug Fixes
@@ -12,6 +18,7 @@ All notable changes to this project will be documented in this file.
 ### ⚙️ Miscellaneous Tasks
 
 - Fix lint warnings (#374)
+- Release dolos version 0.18.1
 
 ## [0.18.0] - 2024-10-24
 
