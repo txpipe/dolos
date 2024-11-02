@@ -42,7 +42,7 @@ impl Args {
 }
 
 const DEFAULT_URL_TEMPLATE: &str =
-    "https://dolos-snapshots.s3.amazonaws.com/v0/${NETWORK}/${VARIANT}/${POINT}.tar.gz";
+    "https://dolos-snapshots.s3-accelerate.amazonaws.com/v0/${NETWORK}/${VARIANT}/${POINT}.tar.gz";
 
 fn define_snapshot_url(config: &crate::Config, args: &Args) -> String {
     let download_url_template = config
