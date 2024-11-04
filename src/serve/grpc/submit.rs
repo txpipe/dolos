@@ -1,6 +1,7 @@
 use any_chain_eval::Chain;
 use futures_core::Stream;
 use futures_util::{StreamExt as _, TryStreamExt as _};
+use pallas::codec::minicbor::{self, Decode};
 use pallas::crypto::hash::Hash;
 use pallas::interop::utxorpc as interop;
 use pallas::interop::utxorpc::spec::cardano::{ExUnits, TxEval};
@@ -12,18 +13,22 @@ use pallas::ledger::primitives::conway::{
     DatumHash, MintedTx, NativeScript, PlutusData, PlutusV1Script, PlutusV2Script, PlutusV3Script,
     PseudoScript, ScriptHash, TransactionInput, TransactionOutput,
 };
-use pallas::ledger::traverse::{wellknown, ComputeHash, MultiEraTx, OriginalHash};
+use pallas::ledger::traverse::wellknown::GenesisValues;
+use pallas::ledger::traverse::{ComputeHash, MultiEraTx, OriginalHash};
 use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
 use tokio_stream::wrappers::BroadcastStream;
 use tonic::{Request, Response, Status};
 use tracing::info;
+use std::convert::TryInto;
 
 use crate::ledger::TxoRef;
 use crate::mempool::{Event, Mempool, UpdateFilter};
 use crate::serve::grpc::query::QueryServiceImpl;
 use crate::serve::GenesisFiles;
 use crate::state::LedgerStore;
+use crate::uplc::script_context::{ResolvedInput as UPLCResolvedInput, SlotConfig};
+use crate::uplc::tx::eval_tx;
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct ResolvedInput {
@@ -309,6 +314,16 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
             .params
             .unwrap();
 
+        let network_magic = match self.shelley_genesis_file.network_magic {
+            Some(magic) => magic.into(),
+            None => return Err(Status::internal("networkMagic missing in shelley genesis.")),
+        };
+
+        let genesis_values = match GenesisValues::from_magic(network_magic) {
+            Some(genesis_values) => genesis_values,
+            None => return Err(Status::internal("Invalid networdMagic.")),
+        };
+
         println!("params: {:?}", params);
 
         let tx_cbor: Vec<u8> = request
@@ -325,6 +340,8 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
         println!("tx_cbor: {:?}", hex::encode(&tx_cbor));
 
         let tx = MultiEraTx::decode(&tx_cbor).unwrap();
+        let minted_tx: MintedTx = minicbor::decode(&tx_cbor).unwrap();
+
         let input_refs: Vec<TxoRef> = tx
             .inputs()
             .iter()
@@ -343,23 +360,32 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
             .get_utxos(input_refs)
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        let utxo_cbors = utxos
-            .values()
-            .map(|cbor| cbor.clone().1)
+        let resolved_inputs = utxos
+            .into_iter()
+            .map(|(txo_ref, utxo_cbor)| UPLCResolvedInput {
+                input: TransactionInput {
+                    transaction_id: txo_ref.0,
+                    index: txo_ref.1.into(),
+                },
+                output: minicbor::decode(&utxo_cbor.1).unwrap(),
+            })
             .collect::<Vec<_>>();
 
-        // Loop through the cbors and print in hex
-        for cbor in utxo_cbors.iter() {
-            println!("utxo_cbor: {:?}", hex::encode(cbor));
-        }
+        let slot_config = SlotConfig {
+            slot_length: genesis_values.shelley_slot_length,
+            zero_slot: genesis_values.shelley_known_slot,
+            zero_time: genesis_values.shelley_known_time,
+        };
+
+        let eval_result = eval_tx(&minted_tx, params, &resolved_inputs, &slot_config).unwrap();
 
         Ok(Response::new(EvalTxResponse {
             report: vec![AnyChainEval {
                 chain: Some(Chain::Cardano(TxEval {
-                    fee: 123,
+                    fee: 0,
                     ex_units: Some(ExUnits {
-                        memory: 123,
-                        steps: 123,
+                        memory: eval_result.mem.try_into().unwrap(),
+                        steps: eval_result.cpu.try_into().unwrap(),
                     }),
                     errors: vec![],
                     traces: vec![],
