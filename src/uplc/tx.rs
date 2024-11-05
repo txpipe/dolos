@@ -99,8 +99,6 @@ pub fn eval_redeemer(
     lookup_table: &DataLookupTable,
     slot_config: &SlotConfig,
 ) -> Result<TxEvalResult, Error> {
-    let tx_info = TxInfoV3::from_transaction(tx, utxos, slot_config).unwrap();
-
     match find_script(redeemer, tx, utxos, lookup_table)? {
         (ScriptVersion::Native(_), _) => Err(Error::NativeScriptPhaseTwo),
 
@@ -109,6 +107,7 @@ pub fn eval_redeemer(
         (ScriptVersion::V2(script), datum) => todo!(),
 
         (ScriptVersion::V3(script), datum) => {
+            let tx_info = TxInfoV3::from_transaction(tx, utxos, slot_config).unwrap();
             let script_context = tx_info
                 .into_script_context(redeemer, datum.as_ref())
                 .unwrap();
@@ -119,13 +118,14 @@ pub fn eval_redeemer(
 
             let arena = uplc::bumpalo::Bump::with_capacity(1_024_000);
 
-            // One-liner to decode the Flat-encoded script
+            // One-liner to cbor decode the Flat-encoded script (assuming its just a CBOR bytestring)
             let mut program = uplc::flat::decode(&arena, &script_bytes[2..])
                 .into_diagnostic()
                 .unwrap();
 
             let script_context_term =
                 map_pallas_data_to_pragma_data(&arena, script_context.to_plutus_data());
+
             let script_context_term = Term::data(&arena, script_context_term);
             program = program.apply(&arena, script_context_term);
 
