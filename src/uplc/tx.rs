@@ -10,6 +10,7 @@ use super::{
     script_context::{
         find_script, DataLookupTable, ResolvedInput, ScriptVersion, SlotConfig, TxInfoV2, TxInfoV3,
     },
+    to_plutus_data::convert_tag_to_constr,
 };
 use miette::IntoDiagnostic;
 use pallas::{
@@ -20,7 +21,10 @@ use pallas::{
         PlutusData,
     },
 };
-use uplc::{bumpalo::Bump, data::PlutusData as PragmaPlutusData, term::Term};
+use uplc::{
+    bumpalo::collections::Vec as BumpVec, bumpalo::Bump, data::PlutusData as PragmaPlutusData,
+    term::Term,
+};
 
 pub struct TxEvalResult {
     pub cpu: i64,
@@ -28,13 +32,74 @@ pub struct TxEvalResult {
 }
 
 pub fn map_pallas_data_to_pragma_data(arena: &Bump, data: PlutusData) -> &PragmaPlutusData<'_> {
-    let bytes = to_vec(&data).expect("failed to encode data");
-    PragmaPlutusData::from_cbor(arena, &bytes).expect("failed to decode data")
+    match data {
+        PlutusData::Constr(constr) => PragmaPlutusData::constr(
+            arena,
+            convert_tag_to_constr(constr.tag).unwrap(),
+            BumpVec::from_iter_in(
+                constr
+                    .fields
+                    .iter()
+                    .map(|f| map_pallas_data_to_pragma_data(arena, f.clone())),
+                arena,
+            ),
+        ),
+        PlutusData::Map(key_value_pairs) => {
+            let key_value_pairs = BumpVec::from_iter_in(
+                key_value_pairs.iter().map(|(k, v)| {
+                    (
+                        map_pallas_data_to_pragma_data(arena, k.clone()),
+                        map_pallas_data_to_pragma_data(arena, v.clone()),
+                    )
+                }),
+                arena,
+            );
+            PragmaPlutusData::map(arena, key_value_pairs)
+        }
+        PlutusData::BigInt(big_int) => match big_int {
+            pallas::ledger::primitives::BigInt::Int(int) => {
+                let val: i128 = int.into();
+                PragmaPlutusData::integer_from(arena, val)
+            }
+            pallas::ledger::primitives::BigInt::BigUInt(big_num_bytes) => {
+                let big_num_bytes_string: String = big_num_bytes.into();
+                let big_num_byte_array =
+                    BumpVec::from_iter_in(hex::decode(big_num_bytes_string).unwrap(), arena);
+                PragmaPlutusData::byte_string(arena, big_num_byte_array)
+            }
+            pallas::ledger::primitives::BigInt::BigNInt(big_num_bytes) => {
+                let big_num_bytes_string: String = big_num_bytes.into();
+                let big_num_byte_array =
+                    BumpVec::from_iter_in(hex::decode(big_num_bytes_string).unwrap(), arena);
+                PragmaPlutusData::byte_string(arena, big_num_byte_array)
+            }
+        },
+        PlutusData::BoundedBytes(bounded_bytes) => {
+            let bounded_bytes_string: String = bounded_bytes.into();
+            let bounded_bytes_byte_array =
+                BumpVec::from_iter_in(hex::decode(bounded_bytes_string).unwrap(), arena);
+            PragmaPlutusData::byte_string(arena, bounded_bytes_byte_array)
+        }
+        PlutusData::Array(maybe_indef_array) => {
+            let items = match maybe_indef_array {
+                pallas::codec::utils::MaybeIndefArray::Def(xs) => BumpVec::from_iter_in(
+                    xs.iter()
+                        .map(|x| map_pallas_data_to_pragma_data(arena, x.clone())),
+                    arena,
+                ),
+                pallas::codec::utils::MaybeIndefArray::Indef(xs) => BumpVec::from_iter_in(
+                    xs.iter()
+                        .map(|x| map_pallas_data_to_pragma_data(arena, x.clone())),
+                    arena,
+                ),
+            };
+            PragmaPlutusData::list(arena, items)
+        }
+    }
 }
 
 pub fn plutus_data_to_pragma_term(arena: &Bump, data: PlutusData) -> &Term<'_> {
-    let pragma_data = map_pallas_data_to_pragma_data(arena, data);
-    Term::data(arena, pragma_data)
+    Term::data(arena, map_pallas_data_to_pragma_data(arena, data))
 }
 
 pub fn eval_tx(
@@ -139,6 +204,7 @@ pub fn eval_redeemer(
         };
 
         let result = program.eval(&arena);
+        println!("{:?}", result);
         TxEvalResult {
             cpu: result.info.consumed_budget.cpu,
             mem: result.info.consumed_budget.mem,
