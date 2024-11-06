@@ -5,6 +5,7 @@ use pallas::codec::minicbor::{self, Decode};
 use pallas::crypto::hash::Hash;
 use pallas::interop::utxorpc as interop;
 use pallas::interop::utxorpc::spec::cardano::{ExUnits, TxEval};
+use pallas::interop::utxorpc::spec::query::any_chain_params::Params;
 use pallas::interop::utxorpc::spec::query::query_service_server::QueryService;
 use pallas::interop::utxorpc::spec::query::ReadParamsRequest;
 use pallas::interop::utxorpc::spec::submit::{WaitForTxResponse, *};
@@ -16,11 +17,11 @@ use pallas::ledger::primitives::conway::{
 use pallas::ledger::traverse::wellknown::GenesisValues;
 use pallas::ledger::traverse::{ComputeHash, MultiEraTx, OriginalHash};
 use std::collections::{HashMap, HashSet};
+use std::convert::TryInto;
 use std::pin::Pin;
 use tokio_stream::wrappers::BroadcastStream;
 use tonic::{Request, Response, Status};
 use tracing::info;
-use std::convert::TryInto;
 
 use crate::ledger::TxoRef;
 use crate::mempool::{Event, Mempool, UpdateFilter};
@@ -28,7 +29,7 @@ use crate::serve::grpc::query::QueryServiceImpl;
 use crate::serve::GenesisFiles;
 use crate::state::LedgerStore;
 use crate::uplc::script_context::{ResolvedInput, SlotConfig};
-use crate::uplc::tx::eval_tx;
+use crate::uplc::tx::{eval_tx, TxEvalResult};
 
 pub struct SubmitServiceImpl {
     mempool: Mempool,
@@ -175,7 +176,44 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
         &self,
         request: tonic::Request<EvalTxRequest>,
     ) -> Result<tonic::Response<EvalTxResponse>, tonic::Status> {
-        println!("EvalTx");
+        fn do_eval_tx(
+            ledger: &LedgerStore,
+            tx_cbor: &[u8],
+            params: &Params,
+            slot_config: &SlotConfig,
+        ) -> TxEvalResult {
+            let minted_tx: MintedTx = minicbor::decode(tx_cbor).unwrap();
+            let input_refs: Vec<TxoRef> = minted_tx
+                .transaction_body
+                .inputs
+                .iter()
+                .map(|x| TxoRef(x.transaction_id, x.index.try_into().unwrap()))
+                .chain(
+                    minted_tx
+                        .transaction_body
+                        .reference_inputs
+                        .clone()
+                        .unwrap()
+                        .iter()
+                        .map(|x| TxoRef(x.transaction_id, x.index.try_into().unwrap())),
+                )
+                .collect();
+
+            let utxos = ledger.get_utxos(input_refs).unwrap();
+
+            let resolved_inputs = utxos
+                .into_iter()
+                .map(|(txo_ref, utxo_cbor)| ResolvedInput {
+                    input: TransactionInput {
+                        transaction_id: txo_ref.0,
+                        index: txo_ref.1.into(),
+                    },
+                    output: minicbor::decode(&utxo_cbor.1).unwrap(),
+                })
+                .collect::<Vec<_>>();
+
+            eval_tx(&minted_tx, params, &resolved_inputs, slot_config).unwrap()
+        }
 
         let query_service = QueryServiceImpl::new(
             self.ledger.clone(),
@@ -209,73 +247,45 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
             None => return Err(Status::internal("Invalid networdMagic.")),
         };
 
-        println!("params: {:?}", params);
-
-        let tx_cbor: Vec<u8> = request
-            .into_inner()
-            .tx
-            .into_iter()
-            .next()
-            .and_then(|any_chain_tx| any_chain_tx.r#type)
-            .map(|tx_type| match tx_type {
-                any_chain_tx::Type::Raw(bytes) => bytes.to_vec(),
-            })
-            .unwrap_or_default();
-
-        println!("tx_cbor: {:?}", hex::encode(&tx_cbor));
-
-        let tx = MultiEraTx::decode(&tx_cbor).unwrap();
-        let minted_tx: MintedTx = minicbor::decode(&tx_cbor).unwrap();
-
-        let input_refs: Vec<TxoRef> = tx
-            .inputs()
-            .iter()
-            .map(|x| TxoRef(*x.hash(), x.index().try_into().unwrap()))
-            .chain(
-                tx.reference_inputs()
-                    .iter()
-                    .map(|x| TxoRef(*x.hash(), x.index().try_into().unwrap())),
-            )
-            .collect();
-
-        println!("input_refs: {:?}", input_refs);
-
-        let utxos = self
-            .ledger
-            .get_utxos(input_refs)
-            .map_err(|e| Status::internal(e.to_string()))?;
-
-        let resolved_inputs = utxos
-            .into_iter()
-            .map(|(txo_ref, utxo_cbor)| ResolvedInput {
-                input: TransactionInput {
-                    transaction_id: txo_ref.0,
-                    index: txo_ref.1.into(),
-                },
-                output: minicbor::decode(&utxo_cbor.1).unwrap(),
-            })
-            .collect::<Vec<_>>();
-
         let slot_config = SlotConfig {
             slot_length: genesis_values.shelley_slot_length,
             zero_slot: genesis_values.shelley_known_slot,
             zero_time: genesis_values.shelley_known_time,
         };
 
-        let eval_result = eval_tx(&minted_tx, params, &resolved_inputs, &slot_config).unwrap();
+        let txs_raw: Vec<Vec<u8>> = request
+            .into_inner()
+            .tx
+            .into_iter()
+            .map(|tx| {
+                tx.r#type
+                    .map(|tx_type| match tx_type {
+                        any_chain_tx::Type::Raw(bytes) => bytes.to_vec(),
+                    })
+                    .unwrap_or_default()
+            })
+            .collect();
+
+        let eval_results = txs_raw
+            .iter()
+            .map(|tx_cbor| {
+                let result = do_eval_tx(&self.ledger, tx_cbor, &params, &slot_config);
+                AnyChainEval {
+                    chain: Some(Chain::Cardano(TxEval {
+                        fee: 0,
+                        ex_units: Some(ExUnits {
+                            memory: result.mem.try_into().unwrap(),
+                            steps: result.cpu.try_into().unwrap(),
+                        }),
+                        errors: vec![],
+                        traces: vec![],
+                    })),
+                }
+            })
+            .collect::<Vec<_>>();
 
         Ok(Response::new(EvalTxResponse {
-            report: vec![AnyChainEval {
-                chain: Some(Chain::Cardano(TxEval {
-                    fee: 0,
-                    ex_units: Some(ExUnits {
-                        memory: eval_result.mem.try_into().unwrap(),
-                        steps: eval_result.cpu.try_into().unwrap(),
-                    }),
-                    errors: vec![],
-                    traces: vec![],
-                })),
-            }],
+            report: eval_results,
         }))
     }
 }

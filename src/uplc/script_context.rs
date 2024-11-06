@@ -482,6 +482,7 @@ pub struct TimeRange {
     pub upper_bound: Option<u64>,
 }
 
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub struct SlotConfig {
     pub slot_length: u32,
     pub zero_slot: u64,

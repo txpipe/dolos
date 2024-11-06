@@ -1,20 +1,26 @@
 use std::ops::Deref;
 
-use crate::uplc::{script_context, to_plutus_data::ToPlutusData};
+use crate::uplc::{
+    script_context::{self, ScriptContext, TxInfo, TxInfoV1},
+    to_plutus_data::ToPlutusData,
+};
 
 use super::{
     error::Error,
     script_context::{
-        find_script, DataLookupTable, ResolvedInput, ScriptVersion, SlotConfig, TxInfoV3,
+        find_script, DataLookupTable, ResolvedInput, ScriptVersion, SlotConfig, TxInfoV2, TxInfoV3,
     },
 };
 use miette::IntoDiagnostic;
 use pallas::{
     codec::minicbor::{self, to_vec},
     interop::utxorpc::spec::query::any_chain_params::Params,
-    ledger::primitives::{
-        conway::{MintedTx, Redeemer, Redeemers, RedeemersKey, RedeemersValue},
-        PlutusData,
+    ledger::{
+        primitives::{
+            conway::{MintedTx, Redeemer, Redeemers, RedeemersKey, RedeemersValue},
+            PlutusData,
+        },
+        traverse::tx,
     },
 };
 use uplc::{bumpalo::Bump, data::PlutusData as PragmaPlutusData, machine::EvalResult, term::Term};
@@ -29,9 +35,14 @@ pub fn map_pallas_data_to_pragma_data(arena: &Bump, data: PlutusData) -> &Pragma
     PragmaPlutusData::from_cbor(arena, &bytes).expect("failed to decode data")
 }
 
+pub fn plutus_data_to_pragma_term(arena: &Bump, data: PlutusData) -> &Term<'_> {
+    let pragma_data = map_pallas_data_to_pragma_data(arena, data);
+    Term::data(arena, pragma_data)
+}
+
 pub fn eval_tx(
     tx: &MintedTx,
-    protocol_params: Params,
+    _protocol_params: &Params, // For Cost Models
     utxos: &[ResolvedInput],
     slot_config: &SlotConfig,
 ) -> Result<TxEvalResult, Error> {
@@ -99,42 +110,66 @@ pub fn eval_redeemer(
     lookup_table: &DataLookupTable,
     slot_config: &SlotConfig,
 ) -> Result<TxEvalResult, Error> {
+    fn do_eval(
+        tx_info: TxInfo,
+        script_bytes: &[u8],
+        datum: Option<PlutusData>,
+        redeemer: &Redeemer,
+    ) -> TxEvalResult {
+        let script_context = tx_info
+            .into_script_context(redeemer, datum.as_ref())
+            .unwrap();
+
+        let arena = Bump::with_capacity(1_024_000);
+        let script_context_term =
+            plutus_data_to_pragma_term(&arena, script_context.to_plutus_data());
+        let redeemer_term = plutus_data_to_pragma_term(&arena, redeemer.to_plutus_data());
+        let program = uplc::flat::decode(&arena, &script_bytes[2..])
+            .into_diagnostic()
+            .unwrap();
+
+        let program = match script_context {
+            ScriptContext::V1V2 { .. } => if let Some(datum) = datum {
+                let datum_term = plutus_data_to_pragma_term(&arena, datum.to_plutus_data());
+                program.apply(&arena, datum_term)
+            } else {
+                program
+            }
+            .apply(&arena, redeemer_term)
+            .apply(&arena, script_context_term),
+
+            ScriptContext::V3 { .. } => program.apply(&arena, script_context_term),
+        };
+
+        let result = program.eval(&arena);
+        TxEvalResult {
+            cpu: result.info.consumed_budget.cpu,
+            mem: result.info.consumed_budget.mem,
+        }
+    }
+
     match find_script(redeemer, tx, utxos, lookup_table)? {
         (ScriptVersion::Native(_), _) => Err(Error::NativeScriptPhaseTwo),
 
-        (ScriptVersion::V1(script), datum) => todo!(),
+        (ScriptVersion::V1(script), datum) => Ok(do_eval(
+            TxInfoV1::from_transaction(tx, utxos, slot_config).unwrap(),
+            script.as_ref(),
+            datum,
+            redeemer,
+        )),
 
-        (ScriptVersion::V2(script), datum) => todo!(),
+        (ScriptVersion::V2(script), datum) => Ok(do_eval(
+            TxInfoV2::from_transaction(tx, utxos, slot_config).unwrap(),
+            script.as_ref(),
+            datum,
+            redeemer,
+        )),
 
-        (ScriptVersion::V3(script), datum) => {
-            let tx_info = TxInfoV3::from_transaction(tx, utxos, slot_config).unwrap();
-            let script_context = tx_info
-                .into_script_context(redeemer, datum.as_ref())
-                .unwrap();
-            let script_bytes = script.as_ref();
-
-            // print in hex
-            println!("Script Cbor Hex: {:?}", hex::encode(script_bytes));
-
-            let arena = uplc::bumpalo::Bump::with_capacity(1_024_000);
-
-            // One-liner to cbor decode the Flat-encoded script (assuming its just a CBOR bytestring)
-            let mut program = uplc::flat::decode(&arena, &script_bytes[2..])
-                .into_diagnostic()
-                .unwrap();
-
-            let script_context_term =
-                map_pallas_data_to_pragma_data(&arena, script_context.to_plutus_data());
-
-            let script_context_term = Term::data(&arena, script_context_term);
-            program = program.apply(&arena, script_context_term);
-
-            let result = program.eval(&arena);
-
-            Ok(TxEvalResult {
-                cpu: result.info.consumed_budget.cpu,
-                mem: result.info.consumed_budget.mem,
-            })
-        }
+        (ScriptVersion::V3(script), datum) => Ok(do_eval(
+            TxInfoV3::from_transaction(tx, utxos, slot_config).unwrap(),
+            script.as_ref(),
+            datum,
+            redeemer,
+        )),
     }
 }
