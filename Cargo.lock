@@ -1023,7 +1023,6 @@ dependencies = [
  "log",
  "miette",
  "mithril-client",
- "num-bigint",
  "num-integer",
  "pallas",
  "paste",
