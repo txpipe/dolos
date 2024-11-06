@@ -10,9 +10,7 @@ use pallas::interop::utxorpc::spec::query::query_service_server::QueryService;
 use pallas::interop::utxorpc::spec::query::ReadParamsRequest;
 use pallas::interop::utxorpc::spec::submit::{WaitForTxResponse, *};
 use pallas::ledger::configs::{alonzo, byron, conway, shelley};
-use pallas::ledger::primitives::conway::{
-    MintedTx, TransactionInput,
-};
+use pallas::ledger::primitives::conway::{MintedTx, TransactionInput};
 use pallas::ledger::traverse::wellknown::GenesisValues;
 use std::collections::HashSet;
 use std::convert::TryInto;
@@ -80,6 +78,10 @@ fn event_to_wait_for_tx_response(event: Event) -> WaitForTxResponse {
         stage: tx_stage_to_u5c(event.new_stage),
         r#ref: event.tx.hash.to_vec().into(),
     }
+}
+
+fn convert_index(index: u32) -> Result<u32, tonic::Status> {
+    index.try_into().map_err(|_| tonic::Status::invalid_argument("Failed to convert index"))
 }
 
 #[async_trait::async_trait]
@@ -179,8 +181,9 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
             tx_cbor: &[u8],
             params: &Params,
             slot_config: &SlotConfig,
-        ) -> TxEvalResult {
+        ) -> Result<TxEvalResult, Status> {
             let minted_tx: MintedTx = minicbor::decode(tx_cbor).unwrap();
+
             let input_refs: Vec<TxoRef> = minted_tx
                 .transaction_body
                 .inputs
@@ -197,20 +200,32 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
                 )
                 .collect();
 
-            let utxos = ledger.get_utxos(input_refs).unwrap();
+            let utxos = ledger.get_utxos(input_refs).map_err(|e| {
+                Status::invalid_argument(format!("Failed to get UTXOs: {:?}", e))
+            })?;
 
             let resolved_inputs = utxos
                 .into_iter()
-                .map(|(txo_ref, utxo_cbor)| ResolvedInput {
-                    input: TransactionInput {
-                        transaction_id: txo_ref.0,
-                        index: txo_ref.1.into(),
-                    },
-                    output: minicbor::decode(&utxo_cbor.1).unwrap(),
+                .map(|(txo_ref, utxo_cbor)| {
+                    let output = minicbor::decode(&utxo_cbor.1).map_err(|e| {
+                        Status::invalid_argument(format!(
+                            "Failed to decode UTXO CBOR: {:?}",
+                            e
+                        ))
+                    })?;
+                    Ok(ResolvedInput {
+                        input: TransactionInput {
+                            transaction_id: txo_ref.0,
+                            index: txo_ref.1.into(),
+                        },
+                        output,
+                    })
                 })
-                .collect::<Vec<_>>();
+                .collect::<Result<Vec<_>, Status>>()?;
 
-            eval_tx(&minted_tx, params, &resolved_inputs, slot_config).unwrap()
+            eval_tx(&minted_tx, params, &resolved_inputs, slot_config).map_err(|e| {
+                Status::internal(format!("Transaction evaluation failed: {:?}", e))
+            })
         }
 
         let query_service = QueryServiceImpl::new(
@@ -228,12 +243,12 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
                 field_mask: Default::default(),
             }))
             .await
-            .unwrap()
+            .map_err(|e| Status::internal(format!("Failed to read params: {:?}", e)))?
             .into_inner()
             .values
-            .unwrap()
+            .ok_or_else(|| Status::internal("Params field missing."))?
             .params
-            .unwrap();
+            .ok_or_else(|| Status::internal("Params field missing in response."))?;
 
         let network_magic = match self.shelley_genesis_file.network_magic {
             Some(magic) => magic.into(),
@@ -268,19 +283,19 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
             .iter()
             .map(|tx_cbor| {
                 let result = do_eval_tx(&self.ledger, tx_cbor, &params, &slot_config);
-                AnyChainEval {
+                result.map(|r| AnyChainEval {
                     chain: Some(Chain::Cardano(TxEval {
                         fee: 0,
                         ex_units: Some(ExUnits {
-                            memory: result.mem.try_into().unwrap(),
-                            steps: result.cpu.try_into().unwrap(),
+                            memory: r.mem.try_into().unwrap_or_default(),
+                            steps: r.cpu.try_into().unwrap_or_default(),
                         }),
                         errors: vec![],
                         traces: vec![],
                     })),
-                }
+                })
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, Status>>()?;
 
         Ok(Response::new(EvalTxResponse {
             report: eval_results,
