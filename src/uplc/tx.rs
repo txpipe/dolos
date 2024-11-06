@@ -14,13 +14,13 @@ use super::{
 };
 use miette::IntoDiagnostic;
 use pallas::{
-    codec::minicbor::to_vec,
     interop::utxorpc::spec::query::any_chain_params::Params,
     ledger::primitives::{
         conway::{MintedTx, Redeemer, Redeemers, RedeemersKey, RedeemersValue},
         PlutusData,
     },
 };
+use rug::Integer;
 use uplc::{
     bumpalo::collections::Vec as BumpVec, bumpalo::Bump, data::PlutusData as PragmaPlutusData,
     term::Term,
@@ -61,17 +61,22 @@ pub fn map_pallas_data_to_pragma_data(arena: &Bump, data: PlutusData) -> &Pragma
                 let val: i128 = int.into();
                 PragmaPlutusData::integer_from(arena, val)
             }
+            // @TODO: recheck this implementations correctness
             pallas::ledger::primitives::BigInt::BigUInt(big_num_bytes) => {
                 let big_num_bytes_string: String = big_num_bytes.into();
-                let big_num_byte_array =
-                    BumpVec::from_iter_in(hex::decode(big_num_bytes_string).unwrap(), arena);
-                PragmaPlutusData::byte_string(arena, big_num_byte_array)
+                let big_num_byte_array = hex::decode(big_num_bytes_string).unwrap();
+                let val = arena.alloc(Integer::from_digits(
+                    &big_num_byte_array,
+                    rug::integer::Order::MsfBe,
+                ));
+                PragmaPlutusData::integer(arena, val)
             }
             pallas::ledger::primitives::BigInt::BigNInt(big_num_bytes) => {
                 let big_num_bytes_string: String = big_num_bytes.into();
-                let big_num_byte_array =
-                    BumpVec::from_iter_in(hex::decode(big_num_bytes_string).unwrap(), arena);
-                PragmaPlutusData::byte_string(arena, big_num_byte_array)
+                let big_num_byte_array = hex::decode(big_num_bytes_string).unwrap();
+                let mut val = Integer::from_digits(&big_num_byte_array, rug::integer::Order::MsfBe);
+                val = -(&val + Integer::from(1));
+                PragmaPlutusData::integer(arena, arena.alloc(val))
             }
         },
         PlutusData::BoundedBytes(bounded_bytes) => {
