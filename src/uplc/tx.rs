@@ -1,7 +1,7 @@
 use std::ops::Deref;
 
 use crate::uplc::{
-    script_context::{self, ScriptContext, TxInfo, TxInfoV1},
+    script_context::{ScriptContext, TxInfo, TxInfoV1},
     to_plutus_data::ToPlutusData,
 };
 
@@ -13,17 +13,14 @@ use super::{
 };
 use miette::IntoDiagnostic;
 use pallas::{
-    codec::minicbor::{self, to_vec},
+    codec::minicbor::to_vec,
     interop::utxorpc::spec::query::any_chain_params::Params,
-    ledger::{
-        primitives::{
-            conway::{MintedTx, Redeemer, Redeemers, RedeemersKey, RedeemersValue},
-            PlutusData,
-        },
-        traverse::tx,
+    ledger::primitives::{
+        conway::{MintedTx, Redeemer, Redeemers, RedeemersKey, RedeemersValue},
+        PlutusData,
     },
 };
-use uplc::{bumpalo::Bump, data::PlutusData as PragmaPlutusData, machine::EvalResult, term::Term};
+use uplc::{bumpalo::Bump, data::PlutusData as PragmaPlutusData, term::Term};
 
 pub struct TxEvalResult {
     pub cpu: i64,

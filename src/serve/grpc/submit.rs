@@ -1,7 +1,7 @@
 use any_chain_eval::Chain;
 use futures_core::Stream;
 use futures_util::{StreamExt as _, TryStreamExt as _};
-use pallas::codec::minicbor::{self, Decode};
+use pallas::codec::minicbor::{self};
 use pallas::crypto::hash::Hash;
 use pallas::interop::utxorpc as interop;
 use pallas::interop::utxorpc::spec::cardano::{ExUnits, TxEval};
@@ -11,12 +11,10 @@ use pallas::interop::utxorpc::spec::query::ReadParamsRequest;
 use pallas::interop::utxorpc::spec::submit::{WaitForTxResponse, *};
 use pallas::ledger::configs::{alonzo, byron, conway, shelley};
 use pallas::ledger::primitives::conway::{
-    DatumHash, MintedTx, NativeScript, PlutusData, PlutusV1Script, PlutusV2Script, PlutusV3Script,
-    PseudoScript, ScriptHash, TransactionInput, TransactionOutput,
+    MintedTx, TransactionInput,
 };
 use pallas::ledger::traverse::wellknown::GenesisValues;
-use pallas::ledger::traverse::{ComputeHash, MultiEraTx, OriginalHash};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::convert::TryInto;
 use std::pin::Pin;
 use tokio_stream::wrappers::BroadcastStream;

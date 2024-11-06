@@ -11,7 +11,7 @@ use pallas::ledger::primitives::{
     conway::{
         AddrKeyhash, Certificate, Coin, DatumHash, DatumOption, GovAction, GovActionId, Mint,
         MintedTransactionBody, MintedTransactionOutput, MintedTx, MintedWitnessSet, NativeScript,
-        PlutusData, PlutusV1Script, PlutusV2Script, PlutusV3Script, PolicyId,
+        PlutusData, PlutusScript, PolicyId,
         PostAlonzoTransactionOutput, ProposalProcedure, PseudoDatumOption, PseudoScript, Redeemer,
         RedeemerTag, RedeemersKey, RequiredSigners, RewardAccount, ScriptHash, StakeCredential,
         TransactionInput, TransactionOutput, Value, Voter, VotingProcedure,
@@ -78,9 +78,9 @@ impl ScriptPurpose {
 #[derive(Debug, PartialEq, Clone)]
 pub enum ScriptVersion {
     Native(NativeScript),
-    V1(PlutusV1Script),
-    V2(PlutusV2Script),
-    V3(PlutusV3Script),
+    V1(PlutusScript<1>),
+    V2(PlutusScript<2>),
+    V3(PlutusScript<3>),
 }
 
 pub struct DataLookupTable {
