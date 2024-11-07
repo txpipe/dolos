@@ -13,9 +13,8 @@ authors = ["Santiago Carmuega <santiago@carmuega.me>"]
 
 [dependencies]
 # pallas = { git = "https://github.com/txpipe/pallas.git", features = ["hardano", "applying"] }
-# pallas = { version = "^0.30.1", features = ["hardano", "applying"] }
-pallas = { path = "../pallas/pallas", features = ["hardano", "applying"] }
-uplc = { git = "https://github.com/pragma-org/uplc.git" }
+pallas = { version = "^0.31.0", features = ["hardano", "applying"] }
+# pallas = { path = "../pallas/pallas", features = ["hardano", "applying"] }
 gasket = { git = "https://github.com/construkts/gasket-rs.git", features = ["derive"] }
 # gasket = { version = "^0.8", features = ["derive"] }
 # gasket = { path = "../../construkts/gasket-rs/gasket", features = ["derive"] }
@@ -64,6 +63,8 @@ tar = "0.4.41"
 reqwest = { version = "0.12.7", default-features = false, features = ["blocking", "rustls-tls"] }
 paste = "1.0.15"
 tower-http = { version = "0.6.1", features = ["cors"] }
+# UPLC dependencies
+uplc = { git = "https://github.com/pragma-org/uplc.git" }
 blst = "=0.3.13"
 rug = "1.26.1"
 num-integer = "0.1.46"

@@ -161,7 +161,7 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
 
         Ok(Response::new(stream))
     }
-
+    
     async fn eval_tx(
         &self,
         request: tonic::Request<EvalTxRequest>,
