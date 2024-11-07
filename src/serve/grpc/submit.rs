@@ -190,19 +190,15 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
                 )
                 .collect();
 
-            let utxos = ledger.get_utxos(input_refs).map_err(|e| {
-                Status::invalid_argument(format!("Failed to get UTXOs: {:?}", e))
-            })?;
+            let utxos = ledger
+                .get_utxos(input_refs)
+                .map_err(|e| Status::invalid_argument(e.to_string()))?;
 
             let resolved_inputs = utxos
                 .into_iter()
                 .map(|(txo_ref, utxo_cbor)| {
-                    let output = minicbor::decode(&utxo_cbor.1).map_err(|e| {
-                        Status::invalid_argument(format!(
-                            "Failed to decode UTXO CBOR: {:?}",
-                            e
-                        ))
-                    })?;
+                    let output = minicbor::decode(&utxo_cbor.1)
+                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
                     Ok(ResolvedInput {
                         input: TransactionInput {
                             transaction_id: txo_ref.0,
@@ -213,37 +209,34 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
                 })
                 .collect::<Result<Vec<_>, Status>>()?;
 
-            eval_tx(&minted_tx, params, &resolved_inputs, slot_config).map_err(|e| {
-                Status::internal(format!("Transaction evaluation failed: {:?}", e))
-            })
+            eval_tx(&minted_tx, params, &resolved_inputs, slot_config)
+                .map_err(|e| Status::internal(e.to_string()))
         }
 
-        let query_service = QueryServiceImpl::new(
-            self.ledger.clone(),
-            Arc::clone(&self.genesis_files),
-        );
+        let query_service =
+            QueryServiceImpl::new(self.ledger.clone(), Arc::clone(&self.genesis_files));
 
         let params = query_service
             .read_params(tonic::Request::new(ReadParamsRequest {
                 field_mask: Default::default(),
             }))
             .await
-            .map_err(|e| Status::internal(format!("Failed to read params: {:?}", e)))?
+            .map_err(|e| Status::internal(e.to_string()))?
             .into_inner()
             .values
-            .ok_or_else(|| Status::internal("Params field missing."))?
+            .ok_or_else(|| Status::internal("Could not retrieve protocol parameters."))?
             .params
-            .ok_or_else(|| Status::internal("Params field missing in response."))?;
+            .ok_or_else(|| Status::internal("Could not retrieve protocol parameters."))?;
 
-        let network_magic = match self.genesis_files.2.network_magic {
-            Some(magic) => magic.into(),
-            None => return Err(Status::internal("networkMagic missing in shelley genesis.")),
-        };
+        let network_magic = self
+            .genesis_files
+            .2
+            .network_magic
+            .ok_or_else(|| Status::internal("networkMagic missing in shelley genesis."))?
+            .into();
 
-        let genesis_values = match GenesisValues::from_magic(network_magic) {
-            Some(genesis_values) => genesis_values,
-            None => return Err(Status::internal("Invalid networdMagic.")),
-        };
+        let genesis_values = GenesisValues::from_magic(network_magic)
+            .ok_or_else(|| Status::internal("Could not retrieve genesis values."))?;
 
         let slot_config = SlotConfig {
             slot_length: genesis_values.shelley_slot_length,

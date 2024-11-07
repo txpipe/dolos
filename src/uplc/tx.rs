@@ -12,7 +12,6 @@ use super::{
     },
     to_plutus_data::convert_tag_to_constr,
 };
-use miette::IntoDiagnostic;
 use pallas::{
     interop::utxorpc::spec::query::any_chain_params::Params,
     ledger::primitives::{
@@ -182,19 +181,16 @@ pub fn eval_redeemer(
         script_bytes: &[u8],
         datum: Option<PlutusData>,
         redeemer: &Redeemer,
-    ) -> TxEvalResult {
+    ) -> Result<TxEvalResult, Error> {
         let script_context = tx_info
             .into_script_context(redeemer, datum.as_ref())
-            .unwrap();
+            .ok_or_else(|| Error::ScriptContextBuildError)?;
 
         let arena = Bump::with_capacity(1_024_000);
         let script_context_term =
             plutus_data_to_pragma_term(&arena, script_context.to_plutus_data());
         let redeemer_term = plutus_data_to_pragma_term(&arena, redeemer.to_plutus_data());
-        let program = uplc::flat::decode(&arena, &script_bytes[2..])
-            .into_diagnostic()
-            .unwrap();
-
+        let program = uplc::flat::decode(&arena, &script_bytes[2..])?;
         let program = match script_context {
             ScriptContext::V1V2 { .. } => if let Some(datum) = datum {
                 let datum_term = plutus_data_to_pragma_term(&arena, datum.to_plutus_data());
@@ -209,35 +205,35 @@ pub fn eval_redeemer(
         };
 
         let result = program.eval(&arena);
-        println!("{:?}", result);
-        TxEvalResult {
+
+        Ok(TxEvalResult {
             cpu: result.info.consumed_budget.cpu,
             mem: result.info.consumed_budget.mem,
-        }
+        })
     }
 
     match find_script(redeemer, tx, utxos, lookup_table)? {
         (ScriptVersion::Native(_), _) => Err(Error::NativeScriptPhaseTwo),
 
         (ScriptVersion::V1(script), datum) => Ok(do_eval(
-            TxInfoV1::from_transaction(tx, utxos, slot_config).unwrap(),
+            TxInfoV1::from_transaction(tx, utxos, slot_config)?,
             script.as_ref(),
             datum,
             redeemer,
-        )),
+        )?),
 
         (ScriptVersion::V2(script), datum) => Ok(do_eval(
-            TxInfoV2::from_transaction(tx, utxos, slot_config).unwrap(),
+            TxInfoV2::from_transaction(tx, utxos, slot_config)?,
             script.as_ref(),
             datum,
             redeemer,
-        )),
+        )?),
 
         (ScriptVersion::V3(script), datum) => Ok(do_eval(
-            TxInfoV3::from_transaction(tx, utxos, slot_config).unwrap(),
+            TxInfoV3::from_transaction(tx, utxos, slot_config)?,
             script.as_ref(),
             datum,
             redeemer,
-        )),
+        )?),
     }
 }

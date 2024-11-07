@@ -1,5 +1,5 @@
 use pallas::ledger::primitives::{conway::Language, TransactionInput};
-use uplc::machine::{self, ExBudget};
+use uplc::{flat::decode::FlatDecodeError, machine::{self, ExBudget}};
 
 #[derive(thiserror::Error, Debug, miette::Diagnostic)]
 pub enum Error {
@@ -8,7 +8,7 @@ pub enum Error {
     #[error("only shelley reward addresses can be a part of withdrawals")]
     BadWithdrawalAddress,
     #[error("{0}")]
-    FlatDecode(#[from] pallas::codec::flat::de::Error),
+    FlatDecode(#[from] FlatDecodeError),
     #[error("{0}")]
     FragmentDecode(#[from] pallas::ledger::primitives::Error),
     #[error("{}{}", .0, .2.iter()
@@ -98,4 +98,6 @@ pub enum Error {
     ApplyParamsError,
     #[error("validity start or end too far in the past")]
     SlotTooFarInThePast { oldest_allowed: u64 },
+    #[error("could not build script context")]
+    ScriptContextBuildError,
 }
