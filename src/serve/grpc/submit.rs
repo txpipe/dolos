@@ -9,12 +9,12 @@ use pallas::interop::utxorpc::spec::query::any_chain_params::Params;
 use pallas::interop::utxorpc::spec::query::query_service_server::QueryService;
 use pallas::interop::utxorpc::spec::query::ReadParamsRequest;
 use pallas::interop::utxorpc::spec::submit::{WaitForTxResponse, *};
-use pallas::ledger::configs::{alonzo, byron, conway, shelley};
 use pallas::ledger::primitives::conway::{MintedTx, TransactionInput};
 use pallas::ledger::traverse::wellknown::GenesisValues;
 use std::collections::HashSet;
 use std::convert::TryInto;
 use std::pin::Pin;
+use std::sync::Arc;
 use tokio_stream::wrappers::BroadcastStream;
 use tonic::{Request, Response, Status};
 use tracing::info;
@@ -31,22 +31,16 @@ pub struct SubmitServiceImpl {
     mempool: Mempool,
     ledger: LedgerStore,
     _mapper: interop::Mapper<LedgerStore>,
-    alonzo_genesis_file: alonzo::GenesisFile,
-    byron_genesis_file: byron::GenesisFile,
-    shelley_genesis_file: shelley::GenesisFile,
-    conway_genesis_file: conway::GenesisFile,
+    genesis_files: Arc<GenesisFiles>,
 }
 
 impl SubmitServiceImpl {
-    pub fn new(mempool: Mempool, ledger: LedgerStore, genesis_files: GenesisFiles) -> Self {
+    pub fn new(mempool: Mempool, ledger: LedgerStore, genesis_files: Arc<GenesisFiles>) -> Self {
         Self {
             mempool,
             ledger: ledger.clone(),
             _mapper: interop::Mapper::new(ledger),
-            alonzo_genesis_file: genesis_files.0,
-            byron_genesis_file: genesis_files.1,
-            shelley_genesis_file: genesis_files.2,
-            conway_genesis_file: genesis_files.3,
+            genesis_files,
         }
     }
 }
@@ -226,12 +220,7 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
 
         let query_service = QueryServiceImpl::new(
             self.ledger.clone(),
-            (
-                self.alonzo_genesis_file.clone(),
-                self.byron_genesis_file.clone(),
-                self.shelley_genesis_file.clone(),
-                self.conway_genesis_file.clone(),
-            ),
+            Arc::clone(&self.genesis_files),
         );
 
         let params = query_service
@@ -246,7 +235,7 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
             .params
             .ok_or_else(|| Status::internal("Params field missing in response."))?;
 
-        let network_magic = match self.shelley_genesis_file.network_magic {
+        let network_magic = match self.genesis_files.2.network_magic {
             Some(magic) => magic.into(),
             None => return Err(Status::internal("networkMagic missing in shelley genesis.")),
         };

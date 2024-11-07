@@ -7,36 +7,27 @@ use crate::{
     state::{LedgerError, LedgerStore},
 };
 use itertools::Itertools as _;
-use pallas::ledger::{
-    configs::{alonzo, byron, shelley, conway},
-    traverse::{MultiEraOutput, MultiEraUpdate},
-};
+use pallas::ledger::traverse::{MultiEraOutput, MultiEraUpdate};
 use pallas::interop::utxorpc::spec as u5c;
 use pallas::{
     interop::utxorpc::{self as interop, spec::query::any_utxo_pattern::UtxoPattern},
     ledger::traverse::wellknown::GenesisValues,
 };
-use std::collections::HashSet;
+use std::{collections::HashSet, sync::Arc};
 use tonic::{Request, Response, Status};
 use tracing::info;
 
 pub struct QueryServiceImpl {
     ledger: LedgerStore,
     mapper: interop::Mapper<LedgerStore>,
-    alonzo_genesis_file: alonzo::GenesisFile,
-    byron_genesis_file: byron::GenesisFile,
-    shelley_genesis_file: shelley::GenesisFile,
-    conway_genesis_file: conway::GenesisFile,
+    genesis_files: Arc<GenesisFiles>,
 }
 
 impl QueryServiceImpl {
-    pub fn new(ledger: LedgerStore, genesis_files: GenesisFiles) -> Self {
+    pub fn new(ledger: LedgerStore, genesis_files: Arc<GenesisFiles>) -> Self {
         Self {
             ledger: ledger.clone(),
-            alonzo_genesis_file: genesis_files.0,
-            byron_genesis_file: genesis_files.1,
-            shelley_genesis_file: genesis_files.2,
-            conway_genesis_file: genesis_files.3,
+            genesis_files,
             mapper: interop::Mapper::new(ledger),
         }
     }
@@ -250,15 +241,16 @@ impl u5c::query::query_service_server::QueryService for QueryServiceImpl {
                     .map_err(|e| Status::internal(e.to_string()))
             })
             .try_collect()?;
+        
 
         let genesis = Genesis {
-            alonzo: &self.alonzo_genesis_file,
-            byron: &self.byron_genesis_file,
-            shelley: &self.shelley_genesis_file,
-            conway: &self.conway_genesis_file,
+            alonzo: &self.genesis_files.0,
+            byron: &self.genesis_files.1,
+            shelley: &self.genesis_files.2,
+            conway: &self.genesis_files.3,
         };
 
-        let network_magic = match self.shelley_genesis_file.network_magic {
+        let network_magic = match genesis.shelley.network_magic {
             Some(magic) => magic.into(),
             None => return Err(Status::internal("networkMagic missing in shelley genesis.")),
         };
