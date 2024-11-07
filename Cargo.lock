@@ -426,6 +426,15 @@ dependencies = [
 
 [[package]]
 name = "block-buffer"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4152116fd6e9dadb291ae18fc1ec3575ed6d84c29642d97890f4b4a3417297e4"
+dependencies = [
+ "generic-array",
+]
+
+[[package]]
+name = "block-buffer"
 version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3078c7629b62d3f0439517fa394996acacc5cbc91c5a20d8c658e77abd503a71"
@@ -856,6 +865,31 @@ checksum = "382ce8820a5bb815055d3553a610e8cb542b2d767bbacea99038afda96cd760d"
 
 [[package]]
 name = "curve25519-dalek"
+version = "3.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b9fdf9972b2bd6af2d913799d9ebc165ea4d2e65878e329d9c6b372c4491b61"
+dependencies = [
+ "byteorder",
+ "digest 0.9.0",
+ "rand_core 0.5.1",
+ "subtle",
+ "zeroize",
+]
+
+[[package]]
+name = "curve25519-dalek"
+version = "3.2.0"
+source = "git+https://github.com/txpipe/curve25519-dalek?branch=ietf03_vrf_compat_ell2#70a36f41cfc3fbb7357ec3062201b911787decba"
+dependencies = [
+ "byteorder",
+ "digest 0.9.0",
+ "rand_core 0.5.1",
+ "subtle",
+ "zeroize",
+]
+
+[[package]]
+name = "curve25519-dalek"
 version = "4.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0a677b8922c94e01bdbb12126b0bc852f00447528dee1782229af9c720c3f348"
@@ -952,7 +986,7 @@ version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
 dependencies = [
- "block-buffer",
+ "block-buffer 0.10.4",
  "crypto-common",
  "subtle",
 ]
@@ -1048,11 +1082,11 @@ version = "2.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4a3daa8e81a3963a60642bcc1f90a670680bd4a77535faa384e9d1c79d620871"
 dependencies = [
- "curve25519-dalek",
+ "curve25519-dalek 4.1.2",
  "ed25519",
  "rand_core 0.6.4",
  "serde",
- "sha2",
+ "sha2 0.10.8",
  "subtle",
  "zeroize",
 ]
@@ -1326,6 +1360,17 @@ dependencies = [
 
 [[package]]
 name = "getrandom"
+version = "0.1.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8fc3cb4d91f53b50155bdcfd23f6a4c39ae1969c2ae85982b135750cccaf5fce"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "wasi 0.9.0+wasi-snapshot-preview1",
+]
+
+[[package]]
+name = "getrandom"
 version = "0.2.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "190092ea657667030ac6a35e305e62fc4dd69fd98ac98631e5d3a2b1575a12b5"
@@ -1333,7 +1378,7 @@ dependencies = [
  "cfg-if",
  "js-sys",
  "libc",
- "wasi",
+ "wasi 0.11.0+wasi-snapshot-preview1",
  "wasm-bindgen",
 ]
 
@@ -1832,6 +1877,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "kes-summed-ed25519"
+version = "0.2.1"
+source = "git+https://github.com/txpipe/kes?rev=f69fb357d46f6a18925543d785850059569d7e78#f69fb357d46f6a18925543d785850059569d7e78"
+dependencies = [
+ "blake2 0.10.6",
+ "ed25519-dalek",
+ "rand_core 0.6.4",
+ "thiserror",
+ "zeroize",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2003,7 +2060,7 @@ checksum = "a4a650543ca06a924e8b371db273b2756685faae30f8487da1b56505a8f78b0c"
 dependencies = [
  "libc",
  "log",
- "wasi",
+ "wasi 0.11.0+wasi-snapshot-preview1",
  "windows-sys 0.48.0",
 ]
 
@@ -2015,7 +2072,7 @@ checksum = "80e04d1dcff3aae0704555fe5fee3bcfaf3d1fdf8a7e521d5b9d2b42acb52cec"
 dependencies = [
  "hermit-abi",
  "libc",
- "wasi",
+ "wasi 0.11.0+wasi-snapshot-preview1",
  "windows-sys 0.52.0",
 ]
 
@@ -2041,7 +2098,7 @@ dependencies = [
  "flate2",
  "flume",
  "futures",
- "getrandom",
+ "getrandom 0.2.12",
  "mithril-common",
  "reqwest",
  "semver",
@@ -2072,7 +2129,7 @@ dependencies = [
  "ed25519-dalek",
  "fixed",
  "hex",
- "kes-summed-ed25519",
+ "kes-summed-ed25519 0.2.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "mithril-build-script",
  "mithril-stm",
  "nom",
@@ -2091,7 +2148,7 @@ dependencies = [
  "serde_json",
  "serde_with 3.8.1",
  "serde_yaml",
- "sha2",
+ "sha2 0.10.8",
  "slog",
  "strum",
  "thiserror",
@@ -2131,7 +2188,7 @@ version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6a51313c5820b0b02bd422f4b44776fbf47961755c74ce64afc73bfad10226c3"
 dependencies = [
- "getrandom",
+ "getrandom 0.2.12",
 ]
 
 [[package]]
@@ -2260,17 +2317,17 @@ checksum = "caff54706df99d2a78a5a4e3455ff45448d81ef1bb63c22cd14052ca0e993a3f"
 
 [[package]]
 name = "pallas"
-version = "0.31.0"
+version = "0.30.2"
 dependencies = [
- "pallas-addresses 0.31.0",
+ "pallas-addresses 0.30.2",
  "pallas-applying",
- "pallas-codec 0.31.0",
+ "pallas-codec 0.30.2",
  "pallas-configs",
- "pallas-crypto 0.31.0",
- "pallas-hardano 0.31.0",
- "pallas-network 0.31.0",
- "pallas-primitives 0.31.0",
- "pallas-traverse 0.31.0",
+ "pallas-crypto 0.30.2",
+ "pallas-hardano 0.30.2",
+ "pallas-network 0.30.2",
+ "pallas-primitives 0.30.2",
+ "pallas-traverse 0.30.2",
  "pallas-txbuilder",
  "pallas-utxorpc",
 ]
@@ -2293,28 +2350,28 @@ dependencies = [
 
 [[package]]
 name = "pallas-addresses"
-version = "0.31.0"
+version = "0.30.2"
 dependencies = [
  "base58",
  "bech32 0.9.1",
  "crc",
  "cryptoxide",
  "hex",
- "pallas-codec 0.31.0",
- "pallas-crypto 0.31.0",
+ "pallas-codec 0.30.2",
+ "pallas-crypto 0.30.2",
  "thiserror",
 ]
 
 [[package]]
 name = "pallas-applying"
-version = "0.31.0"
+version = "0.30.2"
 dependencies = [
  "hex",
- "pallas-addresses 0.31.0",
- "pallas-codec 0.31.0",
- "pallas-crypto 0.31.0",
- "pallas-primitives 0.31.0",
- "pallas-traverse 0.31.0",
+ "pallas-addresses 0.30.2",
+ "pallas-codec 0.30.2",
+ "pallas-crypto 0.30.2",
+ "pallas-primitives 0.30.2",
+ "pallas-traverse 0.30.2",
  "rand",
 ]
 
@@ -2332,7 +2389,7 @@ dependencies = [
 
 [[package]]
 name = "pallas-codec"
-version = "0.31.0"
+version = "0.30.2"
 dependencies = [
  "hex",
  "minicbor 0.25.1",
@@ -2342,15 +2399,15 @@ dependencies = [
 
 [[package]]
 name = "pallas-configs"
-version = "0.31.0"
+version = "0.30.2"
 dependencies = [
  "base64 0.22.0",
  "hex",
  "num-rational",
- "pallas-addresses 0.31.0",
- "pallas-codec 0.31.0",
- "pallas-crypto 0.31.0",
- "pallas-primitives 0.31.0",
+ "pallas-addresses 0.30.2",
+ "pallas-codec 0.30.2",
+ "pallas-crypto 0.30.2",
+ "pallas-primitives 0.30.2",
  "serde",
  "serde_json",
  "serde_with 3.8.1",
@@ -2372,14 +2429,16 @@ dependencies = [
 
 [[package]]
 name = "pallas-crypto"
-version = "0.31.0"
+version = "0.30.2"
 dependencies = [
  "cryptoxide",
  "hex",
- "pallas-codec 0.31.0",
+ "kes-summed-ed25519 0.2.1 (git+https://github.com/txpipe/kes?rev=f69fb357d46f6a18925543d785850059569d7e78)",
+ "pallas-codec 0.30.2",
  "rand_core 0.6.4",
  "serde",
  "thiserror",
+ "vrf_dalek",
  "zeroize",
 ]
 
@@ -2399,11 +2458,11 @@ dependencies = [
 
 [[package]]
 name = "pallas-hardano"
-version = "0.31.0"
+version = "0.30.2"
 dependencies = [
  "binary-layout",
- "pallas-network 0.31.0",
- "pallas-traverse 0.31.0",
+ "pallas-network 0.30.2",
+ "pallas-traverse 0.30.2",
  "tap",
  "thiserror",
  "tracing",
@@ -2429,13 +2488,13 @@ dependencies = [
 
 [[package]]
 name = "pallas-network"
-version = "0.31.0"
+version = "0.30.2"
 dependencies = [
  "byteorder",
  "hex",
  "itertools 0.13.0",
- "pallas-codec 0.31.0",
- "pallas-crypto 0.31.0",
+ "pallas-codec 0.30.2",
+ "pallas-crypto 0.30.2",
  "rand",
  "socket2",
  "thiserror",
@@ -2461,14 +2520,14 @@ dependencies = [
 
 [[package]]
 name = "pallas-primitives"
-version = "0.31.0"
+version = "0.30.2"
 dependencies = [
  "base58",
  "bech32 0.9.1",
  "hex",
  "log",
- "pallas-codec 0.31.0",
- "pallas-crypto 0.31.0",
+ "pallas-codec 0.30.2",
+ "pallas-crypto 0.30.2",
  "serde",
  "serde_json",
 ]
@@ -2491,14 +2550,14 @@ dependencies = [
 
 [[package]]
 name = "pallas-traverse"
-version = "0.31.0"
+version = "0.30.2"
 dependencies = [
  "hex",
  "itertools 0.13.0",
- "pallas-addresses 0.31.0",
- "pallas-codec 0.31.0",
- "pallas-crypto 0.31.0",
- "pallas-primitives 0.31.0",
+ "pallas-addresses 0.30.2",
+ "pallas-codec 0.30.2",
+ "pallas-crypto 0.30.2",
+ "pallas-primitives 0.30.2",
  "paste",
  "serde",
  "thiserror",
@@ -2506,14 +2565,14 @@ dependencies = [
 
 [[package]]
 name = "pallas-txbuilder"
-version = "0.31.0"
+version = "0.30.2"
 dependencies = [
  "hex",
- "pallas-addresses 0.31.0",
- "pallas-codec 0.31.0",
- "pallas-crypto 0.31.0",
- "pallas-primitives 0.31.0",
- "pallas-traverse 0.31.0",
+ "pallas-addresses 0.30.2",
+ "pallas-codec 0.30.2",
+ "pallas-crypto 0.30.2",
+ "pallas-primitives 0.30.2",
+ "pallas-traverse 0.30.2",
  "pallas-wallet",
  "serde",
  "serde_json",
@@ -2522,26 +2581,26 @@ dependencies = [
 
 [[package]]
 name = "pallas-utxorpc"
-version = "0.31.0"
+version = "0.30.2"
 dependencies = [
  "pallas-applying",
- "pallas-codec 0.31.0",
- "pallas-crypto 0.31.0",
- "pallas-primitives 0.31.0",
- "pallas-traverse 0.31.0",
+ "pallas-codec 0.30.2",
+ "pallas-crypto 0.30.2",
+ "pallas-primitives 0.30.2",
+ "pallas-traverse 0.30.2",
  "prost-types 0.13.1",
  "utxorpc-spec",
 ]
 
 [[package]]
 name = "pallas-wallet"
-version = "0.31.0"
+version = "0.30.2"
 dependencies = [
  "bech32 0.9.1",
  "bip39",
  "cryptoxide",
  "ed25519-bip32",
- "pallas-crypto 0.31.0",
+ "pallas-crypto 0.30.2",
  "rand",
  "thiserror",
 ]
@@ -2908,6 +2967,9 @@ name = "rand_core"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "90bde5296fc891b0cef12a6d03ddccc162ce7b2aff54160af9338f8d40df6d19"
+dependencies = [
+ "getrandom 0.1.16",
+]
 
 [[package]]
 name = "rand_core"
@@ -2915,7 +2977,7 @@ version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c"
 dependencies = [
- "getrandom",
+ "getrandom 0.2.12",
 ]
 
 [[package]]
@@ -3082,7 +3144,7 @@ checksum = "c17fa4cb658e3583423e915b9f3acc01cceaee1860e33d59ebae66adc3a2dc0d"
 dependencies = [
  "cc",
  "cfg-if",
- "getrandom",
+ "getrandom 0.2.12",
  "libc",
  "spin",
  "untrusted",
@@ -3361,6 +3423,19 @@ dependencies = [
  "ryu",
  "serde",
  "unsafe-libyaml",
+]
+
+[[package]]
+name = "sha2"
+version = "0.9.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4d58a1e1bf39749807d89cf2d98ac2dfa0ff1cb3faa38fbb64dd88ac8013d800"
+dependencies = [
+ "block-buffer 0.9.0",
+ "cfg-if",
+ "cpufeatures",
+ "digest 0.9.0",
+ "opaque-debug",
 ]
 
 [[package]]
@@ -4232,7 +4307,7 @@ version = "1.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a183cf7feeba97b4dd1c0d46788634f6221d87fa961b305bed08c851829efcc0"
 dependencies = [
- "getrandom",
+ "getrandom 0.2.12",
 ]
 
 [[package]]
@@ -4246,6 +4321,18 @@ name = "version_check"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "49874b5167b65d7193b8aba1567f5c7d93d001cafc34600cee003eda787e483f"
+
+[[package]]
+name = "vrf_dalek"
+version = "0.1.0"
+source = "git+https://github.com/txpipe/vrf?rev=044b45a1a919ba9d9c2471fc5c4d441f13086676#044b45a1a919ba9d9c2471fc5c4d441f13086676"
+dependencies = [
+ "curve25519-dalek 3.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "curve25519-dalek 3.2.0 (git+https://github.com/txpipe/curve25519-dalek?branch=ietf03_vrf_compat_ell2)",
+ "rand_core 0.5.1",
+ "sha2 0.9.9",
+ "thiserror",
+]
 
 [[package]]
 name = "walkdir"
@@ -4265,6 +4352,12 @@ checksum = "bfa7760aed19e106de2c7c0b581b509f2f25d3dacaf737cb82ac61bc6d760b0e"
 dependencies = [
  "try-lock",
 ]
+
+[[package]]
+name = "wasi"
+version = "0.9.0+wasi-snapshot-preview1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cccddf32554fecc6acb585f82a32a72e28b48f8c4c1883ddfeeeaa96f7d8e519"
 
 [[package]]
 name = "wasi"

@@ -80,10 +80,6 @@ fn event_to_wait_for_tx_response(event: Event) -> WaitForTxResponse {
     }
 }
 
-fn convert_index(index: u32) -> Result<u32, tonic::Status> {
-    index.try_into().map_err(|_| tonic::Status::invalid_argument("Failed to convert index"))
-}
-
 #[async_trait::async_trait]
 impl submit_service_server::SubmitService for SubmitServiceImpl {
     type WaitForTxStream =
