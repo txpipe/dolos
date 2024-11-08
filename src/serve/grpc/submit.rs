@@ -161,7 +161,8 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
 
         Ok(Response::new(stream))
     }
-    
+
+    #[cfg(feature = "unstable")]
     async fn eval_tx(
         &self,
         request: tonic::Request<EvalTxRequest>,
@@ -278,5 +279,15 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
         Ok(Response::new(EvalTxResponse {
             report: eval_results,
         }))
+    }
+
+    #[cfg(not(feature = "unstable"))]
+    async fn eval_tx(
+        &self,
+        _request: tonic::Request<EvalTxRequest>,
+    ) -> Result<tonic::Response<EvalTxResponse>, Status> {
+        Err(Status::unimplemented(
+            "eval_tx is not yet available",
+        ))
     }
 }

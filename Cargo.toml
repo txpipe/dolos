@@ -77,6 +77,7 @@ mithril = ["mithril-client"]
 utils = ["comfy-table", "inquire", "toml"]
 debug = ["console-subscriber", "tokio/tracing"]
 default = ["mithril", "utils"]
+unstable = []
 
 # The profile that 'cargo dist' will build with
 [profile.dist]
