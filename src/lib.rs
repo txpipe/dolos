@@ -7,6 +7,7 @@ pub mod serve;
 pub mod state;
 pub mod sync;
 pub mod wal;
+pub mod uplc;
 
 #[cfg(test)]
 mod tests;
