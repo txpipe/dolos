@@ -1,4 +1,4 @@
-use pallas::ledger::primitives::{Constr, PlutusData};
+use pallas::ledger::primitives::{BigInt, Constr, PlutusData};
 
 pub struct Data;
 
@@ -11,20 +11,9 @@ impl Data {
             .expect("failed to encode Plutus Data as cbor?");
         hex::encode(bytes)
     }
-    // pub fn integer(i: BigInt) -> PlutusData {
-    //     match i.to_i128().map(|n| n.try_into()) {
-    //         Some(Ok(i)) => PlutusData::BigInt(alonzo::BigInt::Int(i)),
-    //         _ => {
-    //             let (sign, bytes) = i.to_bytes_be();
-    //             match sign {
-    //                 num_bigint::Sign::Minus => {
-    //                     PlutusData::BigInt(alonzo::BigInt::BigNInt(bytes.into()))
-    //                 }
-    //                 _ => PlutusData::BigInt(alonzo::BigInt::BigUInt(bytes.into())),
-    //             }
-    //         }
-    //     }
-    // }
+    pub fn integer(i: BigInt) -> PlutusData {
+        PlutusData::BigInt(i)
+    }
 
     pub fn bytestring(bytes: Vec<u8>) -> PlutusData {
         PlutusData::BoundedBytes(bytes.into())
