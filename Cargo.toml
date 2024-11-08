@@ -64,7 +64,7 @@ reqwest = { version = "0.12.7", default-features = false, features = ["blocking"
 paste = "1.0.15"
 tower-http = { version = "0.6.1", features = ["cors"] }
 # UPLC dependencies
-uplc = { git = "https://github.com/pragma-org/uplc.git" }
+uplc = { git = "https://github.com/pragma-org/uplc.git", optional = true}
 blst = "=0.3.13"
 rug = "1.26.1"
 num-integer = "0.1.46"
@@ -77,7 +77,7 @@ mithril = ["mithril-client"]
 utils = ["comfy-table", "inquire", "toml"]
 debug = ["console-subscriber", "tokio/tracing"]
 default = ["mithril", "utils"]
-unstable = []
+unstable = ["uplc"]
 
 # The profile that 'cargo dist' will build with
 [profile.dist]

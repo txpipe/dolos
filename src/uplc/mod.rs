@@ -1,5 +1,10 @@
+#[cfg(feature = "unstable")]
 pub mod script_context;
+#[cfg(feature = "unstable")]
 pub mod to_plutus_data;
+#[cfg(feature = "unstable")]
 pub mod tx;
+#[cfg(feature = "unstable")]
 pub mod error;
+#[cfg(feature = "unstable")]
 pub mod data;

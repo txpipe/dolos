@@ -24,7 +24,9 @@ use crate::mempool::{Event, Mempool, UpdateFilter};
 use crate::serve::grpc::query::QueryServiceImpl;
 use crate::serve::GenesisFiles;
 use crate::state::LedgerStore;
+#[cfg(feature = "unstable")]
 use crate::uplc::script_context::{ResolvedInput, SlotConfig};
+#[cfg(feature = "unstable")]
 use crate::uplc::tx::{eval_tx, TxEvalResult};
 
 pub struct SubmitServiceImpl {
