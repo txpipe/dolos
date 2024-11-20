@@ -1,5 +1,5 @@
 [upstream]
-peer_address = "relays-new.cardano-mainnet.iohk.io:3001"
+peer_address = "backbone.mainnet.cardanofoundation.org:3001"
 network_magic = 764824073
 is_testnet = false
 
@@ -10,6 +10,7 @@ path = "data"
 byron_path = "byron.json"
 shelley_path = "shelley.json"
 alonzo_path = "alonzo.json"
+conway_path = "conway.json"
 
 [sync]
 pull_batch_size = 100
