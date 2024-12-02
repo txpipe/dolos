@@ -60,63 +60,75 @@ fn matches_output(
     pattern: &u5c::cardano::TxOutputPattern,
     outputs: &Vec<u5c::cardano::TxOutput>,
 ) -> bool {
-    let mut matches = true;
+    let address_match = pattern.address.as_ref().map_or(true, |addr_pattern| {
+        outputs_match_address(addr_pattern, outputs)
+    });
 
-    if let Some(addr_pattern) = &pattern.address {
-        matches &= outputs_match_address(&addr_pattern, outputs);
-    }
-    if let Some(asset_pattern) = &pattern.asset {
-        matches &= outputs_match_asset(&asset_pattern, outputs);
-    }
+    let asset_match = pattern.asset.as_ref().map_or(true, |asset_pattern| {
+        outputs_match_asset(asset_pattern, outputs)
+    });
 
-    matches
+    address_match && asset_match
 }
 
 fn matches_cardano_pattern(tx_pattern: &u5c::cardano::TxPattern, tx: &u5c::cardano::Tx) -> bool {
-    let mut matches = true;
-    if let Some(addr_pattern) = &tx_pattern.has_address {
-        let outputs = tx.outputs.iter().map(|x| x.to_owned()).collect();
-        let inputs = tx
-            .inputs
-            .iter()
-            .filter_map(|x| x.as_output.as_ref().map(|output| output.to_owned()))
-            .collect();
+    let has_address_match = tx_pattern
+        .has_address
+        .as_ref()
+        .map_or(true, |addr_pattern| {
+            let outputs: Vec<_> = tx.outputs.iter().cloned().collect();
+            let inputs: Vec<_> = tx
+                .inputs
+                .iter()
+                .filter_map(|x| x.as_output.as_ref().cloned())
+                .collect();
 
-        matches &= outputs_match_address(addr_pattern, &inputs)
-            || outputs_match_address(addr_pattern, &outputs);
-    }
-    if let Some(out_pattern) = &tx_pattern.consumes {
-        let inputs = tx
-            .inputs
-            .iter()
-            .filter_map(|x| x.as_output.as_ref().map(|output| output.to_owned()))
-            .collect();
-        matches &= matches_output(out_pattern, &inputs);
-    }
-    if let Some(asset_pattern) = &tx_pattern.mints_asset {
-        matches &= (asset_pattern.asset_name.is_empty() && asset_pattern.policy_id.is_empty())
-            || tx.mint.iter().any(|ma| {
-                ma.policy_id.eq(&asset_pattern.policy_id)
-                    && ma
-                        .assets
-                        .iter()
-                        .any(|a| a.name.eq(&asset_pattern.asset_name))
-            })
-    }
-    if let Some(asset_pattern) = &tx_pattern.moves_asset {
-        let inputs = tx
-            .inputs
-            .iter()
-            .filter_map(|x| x.as_output.as_ref().map(|output| output.to_owned()))
-            .collect();
-        matches &= outputs_match_asset(&asset_pattern, &inputs)
-            || outputs_match_asset(&asset_pattern, &tx.outputs);
-    }
-    if let Some(out_pattern) = &tx_pattern.produces {
-        matches &= matches_output(out_pattern, &tx.outputs);
-    }
+            outputs_match_address(addr_pattern, &inputs)
+                || outputs_match_address(addr_pattern, &outputs)
+        });
 
-    matches
+    let consumes_match = tx_pattern.consumes.as_ref().map_or(true, |out_pattern| {
+        let inputs: Vec<_> = tx
+            .inputs
+            .iter()
+            .filter_map(|x| x.as_output.as_ref().cloned())
+            .collect();
+        matches_output(out_pattern, &inputs)
+    });
+
+    let mints_asset_match = tx_pattern
+        .mints_asset
+        .as_ref()
+        .map_or(true, |asset_pattern| {
+            (asset_pattern.asset_name.is_empty() && asset_pattern.policy_id.is_empty())
+                || tx.mint.iter().any(|ma| {
+                    ma.policy_id.eq(&asset_pattern.policy_id)
+                        && ma
+                            .assets
+                            .iter()
+                            .any(|a| a.name.eq(&asset_pattern.asset_name))
+                })
+        });
+
+    let moves_asset_match = tx_pattern
+        .moves_asset
+        .as_ref()
+        .map_or(true, |asset_pattern| {
+            let inputs: Vec<_> = tx
+                .inputs
+                .iter()
+                .filter_map(|x| x.as_output.as_ref().cloned())
+                .collect();
+            outputs_match_asset(asset_pattern, &inputs)
+                || outputs_match_asset(asset_pattern, &tx.outputs)
+        });
+
+    let produces_match = tx_pattern
+        .produces
+        .as_ref()
+        .map_or(true, |out_pattern| matches_output(out_pattern, &tx.outputs));
+
+    has_address_match && consumes_match && mints_asset_match && moves_asset_match && produces_match
 }
 
 fn matches_chain(chain: &Chain, tx: &u5c::cardano::Tx) -> bool {
@@ -126,20 +138,18 @@ fn matches_chain(chain: &Chain, tx: &u5c::cardano::Tx) -> bool {
 }
 
 fn apply_predicate(predicate: &u5c::watch::TxPredicate, tx: &u5c::cardano::Tx) -> bool {
-    let mut tx_matches = true;
-    if let Some(pattern) = &predicate.r#match {
-        if let Some(chain) = &pattern.chain {
-            tx_matches &= matches_chain(chain, tx);
-        }
-    }
+    let tx_matches = predicate
+        .r#match
+        .as_ref()
+        .and_then(|pattern| pattern.chain.as_ref())
+        .map_or(true, |chain| matches_chain(chain, tx));
 
-    let not_clause = predicate
-        .not
-        .iter()
-        .any(|p: &u5c::watch::TxPredicate| apply_predicate(p, tx));
+    let not_clause = predicate.not.iter().any(|p| apply_predicate(p, tx));
+
     let and_clause = predicate.all_of.iter().all(|p| apply_predicate(p, tx));
+
     let or_clause =
-        predicate.any_of.len() == 0 || predicate.any_of.iter().any(|p| apply_predicate(p, tx));
+        predicate.any_of.is_empty() || predicate.any_of.iter().any(|p| apply_predicate(p, tx));
 
     tx_matches && !not_clause && and_clause && or_clause
 }
@@ -156,10 +166,10 @@ fn block_to_txs(
     txs.iter()
         .map(|x: &pallas::ledger::traverse::MultiEraTx<'_>| mapper.map_tx(x))
         .filter(|tx| {
-            if let Some(predicate) = &request.predicate {
-                return apply_predicate(predicate, tx);
-            }
-            true
+            request
+                .predicate
+                .as_ref()
+                .map_or(true, |predicate| apply_predicate(predicate, tx))
         })
         .map(|x| u5c::watch::AnyChainTx {
             chain: Some(u5c::watch::any_chain_tx::Chain::Cardano(x)),
