@@ -118,7 +118,8 @@ fn bootstrap_babbage_pparams(previous: AlonzoProtParams) -> BabbageProtParams {
         min_pool_cost: previous.min_pool_cost,
         desired_number_of_stake_pools: previous.desired_number_of_stake_pools,
         // This value is temporarily hardcoded as it is outdated and incorrect in the current implementation.
-        // It is highly likely that this value is also hardcoded in the Haskell node.
+        // The current implementation fails to detect updates to this value when it should.
+        // It is highly likely that this value is also hardcoded in the node.
         ada_per_utxo_byte: 4310,
         execution_costs: previous.execution_costs,
         max_tx_ex_units: previous.max_tx_ex_units,
