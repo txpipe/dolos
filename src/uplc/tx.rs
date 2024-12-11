@@ -111,7 +111,7 @@ pub fn eval_tx(
     _protocol_params: &Params, // For Cost Models
     utxos: &[ResolvedInput],
     slot_config: &SlotConfig,
-) -> Result<TxEvalResult, Error> {
+) -> Result<Vec<Redeemer>, Error> {
     let lookup_table = DataLookupTable::from_transaction(tx, utxos);
 
     let redeemers = tx
@@ -151,22 +151,22 @@ pub fn eval_tx(
         })
         .collect::<Vec<_>>();
 
-    redeemers.iter().try_fold(
-        TxEvalResult { cpu: 0, mem: 0 },
-        |eval_result_acc, redeemer| match eval_redeemer(
-            redeemer,
-            tx,
-            utxos,
-            &lookup_table,
-            slot_config,
-        ) {
-            Ok(result) => Ok(TxEvalResult {
-                cpu: eval_result_acc.cpu + result.cpu,
-                mem: eval_result_acc.mem + result.mem,
-            }),
-            Err(e) => Err(e),
-        },
-    )
+    let updated_redeemers = redeemers
+        .iter()
+        .map(
+            |redeemer| match eval_redeemer(redeemer, tx, utxos, &lookup_table, slot_config) {
+                Ok(result) => {
+                    let mut updated_redeemer = redeemer.clone();
+                    updated_redeemer.ex_units.steps = result.cpu as u64;
+                    updated_redeemer.ex_units.mem = result.mem as u64;
+                    Ok(updated_redeemer)
+                }
+                Err(e) => Err(e),
+            },
+        )
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(updated_redeemers)
 }
 
 pub fn eval_redeemer(

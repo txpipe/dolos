@@ -27,7 +27,9 @@ use crate::state::LedgerStore;
 #[cfg(feature = "unstable")]
 use crate::uplc::script_context::{ResolvedInput, SlotConfig};
 #[cfg(feature = "unstable")]
-use crate::uplc::tx::{eval_tx, TxEvalResult};
+use crate::uplc::tx::eval_tx;
+use pallas::interop::utxorpc as u5c;
+use pallas::ledger::primitives::conway::Redeemer;
 
 pub struct SubmitServiceImpl {
     mempool: Mempool,
@@ -174,9 +176,8 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
             tx_cbor: &[u8],
             params: &Params,
             slot_config: &SlotConfig,
-        ) -> Result<TxEvalResult, Status> {
+        ) -> Result<Vec<Redeemer>, Status> {
             let minted_tx: MintedTx = minicbor::decode(tx_cbor).unwrap();
-
             let input_refs: Vec<TxoRef> = minted_tx
                 .transaction_body
                 .inputs
@@ -260,6 +261,7 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
             })
             .collect();
 
+        let mapper = u5c::Mapper::new(self.ledger.clone());
         let eval_results = txs_raw
             .iter()
             .map(|tx_cbor| {
@@ -267,10 +269,31 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
                 result.map(|r| AnyChainEval {
                     chain: Some(Chain::Cardano(TxEval {
                         fee: 0,
-                        ex_units: Some(ExUnits {
-                            memory: r.mem.try_into().unwrap_or_default(),
-                            steps: r.cpu.try_into().unwrap_or_default(),
-                        }),
+                        ex_units: r.iter().try_fold(
+                            ExUnits {
+                                steps: 0,
+                                memory: 0,
+                            },
+                            |acc, redeemer| {
+                                Some(ExUnits {
+                                    steps: acc.steps + redeemer.ex_units.steps,
+                                    memory: acc.memory + redeemer.ex_units.mem,
+                                })
+                            },
+                        ),
+                        redeemers: r
+                            .iter()
+                            .map(|redeemer| u5c::spec::cardano::Redeemer {
+                                purpose: redeemer.tag as i32,
+                                index: redeemer.index,
+                                payload: Some(mapper.map_plutus_datum(&redeemer.data)),
+                                ex_units: Some(u5c::spec::cardano::ExUnits {
+                                    steps: redeemer.ex_units.steps,
+                                    memory: redeemer.ex_units.mem,
+                                }),
+                                original_cbor: minicbor::to_vec(redeemer).unwrap().into(),
+                            })
+                            .collect(),
                         errors: vec![],
                         traces: vec![],
                     })),
@@ -288,8 +311,6 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
         &self,
         _request: tonic::Request<EvalTxRequest>,
     ) -> Result<tonic::Response<EvalTxResponse>, Status> {
-        Err(Status::unimplemented(
-            "eval_tx is not yet available",
-        ))
+        Err(Status::unimplemented("eval_tx is not yet available"))
     }
 }
