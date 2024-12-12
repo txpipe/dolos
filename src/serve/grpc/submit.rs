@@ -90,21 +90,97 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
         &self,
         request: Request<SubmitTxRequest>,
     ) -> Result<Response<SubmitTxResponse>, Status> {
+        fn resolve_inputs(
+            ledger: &LedgerStore,
+            tx_cbor: &[u8],
+        ) -> Result<Vec<ResolvedInput>, Status> {
+            let minted_tx: MintedTx = minicbor::decode(tx_cbor).unwrap();
+            let input_refs: Vec<TxoRef> = minted_tx
+                .transaction_body
+                .inputs
+                .iter()
+                .map(|x| TxoRef(x.transaction_id, x.index.try_into().unwrap()))
+                .chain(
+                    minted_tx
+                        .transaction_body
+                        .reference_inputs
+                        .clone()
+                        .unwrap()
+                        .iter()
+                        .map(|x| TxoRef(x.transaction_id, x.index.try_into().unwrap())),
+                )
+                .collect();
+
+            let utxos = ledger
+                .get_utxos(input_refs)
+                .map_err(|e| Status::invalid_argument(e.to_string()))?;
+
+            let resolved_inputs = utxos
+                .into_iter()
+                .map(|(txo_ref, utxo_cbor)| {
+                    let output = minicbor::decode(&utxo_cbor.1)
+                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
+                    Ok(ResolvedInput {
+                        input: TransactionInput {
+                            transaction_id: txo_ref.0,
+                            index: txo_ref.1.into(),
+                        },
+                        output,
+                    })
+                })
+                .collect::<Result<Vec<_>, Status>>()?;
+
+            Ok(resolved_inputs)
+        }
+
         let message = request.into_inner();
 
         info!("received new grpc submit tx request: {:?}", message);
 
-        let mut hashes = vec![];
+        let query_service =
+            QueryServiceImpl::new(self.ledger.clone(), Arc::clone(&self.genesis_files));
 
+        let params = query_service
+            .read_params(tonic::Request::new(ReadParamsRequest {
+                field_mask: Default::default(),
+            }))
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?
+            .into_inner()
+            .values
+            .ok_or_else(|| Status::internal("Could not retrieve protocol parameters."))?
+            .params
+            .ok_or_else(|| Status::internal("Could not retrieve protocol parameters."))?;
+
+        let network_magic = self
+            .genesis_files
+            .2
+            .network_magic
+            .ok_or_else(|| Status::internal("networkMagic missing in shelley genesis."))?
+            .into();
+
+        let genesis_values = GenesisValues::from_magic(network_magic)
+            .ok_or_else(|| Status::internal("Could not retrieve genesis values."))?;
+
+        let slot_config = SlotConfig {
+            slot_length: genesis_values.shelley_slot_length,
+            zero_slot: genesis_values.shelley_known_slot,
+            zero_time: genesis_values.shelley_known_time,
+        };
+
+        let mut hashes = vec![];
         for (idx, tx_bytes) in message.tx.into_iter().flat_map(|x| x.r#type).enumerate() {
             match tx_bytes {
                 any_chain_tx::Type::Raw(bytes) => {
-                    let hash = self.mempool.receive_raw(bytes.as_ref()).map_err(|e| {
-                        Status::invalid_argument(
-                            format! {"could not process tx at index {idx}: {e}"},
-                        )
-                    })?;
-
+                    let utxos = resolve_inputs(&self.ledger, bytes.as_ref()).unwrap();
+                    let hash = self
+                        .mempool
+                        .receive_raw(bytes.as_ref(), &utxos, &params, &slot_config)
+                        .map_err(|e| {
+                            Status::invalid_argument(
+                                format! {"could not process tx at index {idx}: {e}"},
+                            )
+                        })?;
                     hashes.push(hash.to_vec().into());
                 }
             }

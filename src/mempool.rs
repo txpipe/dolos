@@ -2,12 +2,20 @@ use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, RwLock},
 };
-
+use crate::uplc::{
+    script_context::{ResolvedInput, SlotConfig},
+    tx,
+};
 use futures_util::StreamExt;
 use itertools::Itertools;
 use pallas::{
+    codec::minicbor,
     crypto::hash::Hash,
-    ledger::traverse::{MultiEraBlock, MultiEraTx},
+    interop::utxorpc::spec::query::any_chain_params::Params,
+    ledger::{
+        primitives::conway::MintedTx,
+        traverse::{MultiEraBlock, MultiEraTx},
+    },
 };
 use thiserror::Error;
 use tokio::sync::broadcast;
@@ -21,8 +29,8 @@ pub enum MempoolError {
     #[error("decode error: {0}")]
     DecodeError(pallas::ledger::traverse::Error),
 
-    #[error("plutus scripts not supported")]
-    PlutusNotSupported,
+    #[error("tx evaluation failed")]
+    EvaluationError,
 
     #[error("invalid tx: {0}")]
     InvalidTx(String),
@@ -110,15 +118,20 @@ impl Mempool {
         );
     }
 
-    pub fn receive_raw(&self, cbor: &[u8]) -> Result<TxHash, MempoolError> {
+    pub fn receive_raw(
+        &self,
+        cbor: &[u8],
+        utxos: &[ResolvedInput],
+        protocol_params: &Params,
+        slot_config: &SlotConfig,
+    ) -> Result<TxHash, MempoolError> {
         let decoded = MultiEraTx::decode(cbor)?;
-
+        let minted_tx: MintedTx = minicbor::decode(cbor).unwrap();
         let hash = decoded.hash();
+        let eval_tx = tx::eval_tx(&minted_tx, protocol_params, &utxos, slot_config).is_ok();
 
-        // TODO: we don't phase-2 validate txs before propagating so we could
-        // propagate p2 invalid transactions resulting in collateral loss
-        if !decoded.redeemers().is_empty() {
-            return Err(MempoolError::PlutusNotSupported);
+        if !eval_tx {
+            return Err(MempoolError::EvaluationError);
         }
 
         let tx = Tx {
