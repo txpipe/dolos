@@ -128,10 +128,13 @@ impl Mempool {
         let decoded = MultiEraTx::decode(cbor)?;
         let minted_tx: MintedTx = minicbor::decode(cbor).unwrap();
         let hash = decoded.hash();
-        let eval_tx = tx::eval_tx(&minted_tx, protocol_params, &utxos, slot_config).is_ok();
-
-        if !eval_tx {
-            return Err(MempoolError::EvaluationError);
+        
+        if utxos.len() > 0 {
+            let eval_tx = tx::eval_tx(&minted_tx, protocol_params, &utxos, slot_config).is_ok();
+            
+            if !eval_tx {
+                return Err(MempoolError::EvaluationError);
+            }
         }
 
         let tx = Tx {

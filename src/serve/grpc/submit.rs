@@ -95,6 +95,10 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
             tx_cbor: &[u8],
         ) -> Result<Vec<ResolvedInput>, Status> {
             let minted_tx: MintedTx = minicbor::decode(tx_cbor).unwrap();
+            let ref_is_empty = minted_tx.transaction_body.reference_inputs.is_none();
+            if ref_is_empty {
+                return Ok(vec![]);
+            }
             let input_refs: Vec<TxoRef> = minted_tx
                 .transaction_body
                 .inputs
