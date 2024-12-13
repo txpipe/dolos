@@ -15,10 +15,10 @@ use tonic::{Request, Response, Status};
 
 fn outputs_match_address(
     pattern: &u5c::cardano::AddressPattern,
-    outputs: &Vec<u5c::cardano::TxOutput>,
+    outputs: &[u5c::cardano::TxOutput],
 ) -> bool {
     let exact_matches = pattern.exact_address.is_empty()
-        || outputs.iter().any(|o| o.address == &pattern.exact_address);
+        || outputs.iter().any(|o| o.address == pattern.exact_address);
 
     let delegation_matches = pattern.delegation_part.is_empty()
         || outputs.iter().any(|o| {
@@ -42,7 +42,7 @@ fn outputs_match_address(
 
 fn outputs_match_asset(
     asset_pattern: &u5c::cardano::AssetPattern,
-    outputs: &Vec<u5c::cardano::TxOutput>,
+    outputs: &[u5c::cardano::TxOutput],
 ) -> bool {
     (asset_pattern.asset_name.is_empty() && asset_pattern.policy_id.is_empty())
         || outputs.iter().any(|o| {
@@ -58,7 +58,7 @@ fn outputs_match_asset(
 
 fn matches_output(
     pattern: &u5c::cardano::TxOutputPattern,
-    outputs: &Vec<u5c::cardano::TxOutput>,
+    outputs: &[u5c::cardano::TxOutput],
 ) -> bool {
     let address_match = pattern.address.as_ref().map_or(true, |addr_pattern| {
         outputs_match_address(addr_pattern, outputs)
@@ -76,7 +76,7 @@ fn matches_cardano_pattern(tx_pattern: &u5c::cardano::TxPattern, tx: &u5c::carda
         .has_address
         .as_ref()
         .map_or(true, |addr_pattern| {
-            let outputs: Vec<_> = tx.outputs.iter().cloned().collect();
+            let outputs: Vec<_> = tx.outputs.to_vec();
             let inputs: Vec<_> = tx
                 .inputs
                 .iter()
