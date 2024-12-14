@@ -53,7 +53,7 @@ fn point_to_augmented_slot(point: &ChainPoint) -> AugmentedBlockSlot {
 
 pub struct WalIter<'a>(Range<'a, LogSeq, LogValue>);
 
-impl<'a> Iterator for WalIter<'a> {
+impl Iterator for WalIter<'_> {
     type Item = LogEntry;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -64,7 +64,7 @@ impl<'a> Iterator for WalIter<'a> {
     }
 }
 
-impl<'a> DoubleEndedIterator for WalIter<'a> {
+impl DoubleEndedIterator for WalIter<'_> {
     fn next_back(&mut self) -> Option<Self::Item> {
         self.0
             .next_back()
