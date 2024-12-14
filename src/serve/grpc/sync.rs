@@ -208,6 +208,7 @@ impl u5c::sync::sync_service_server::SyncService for SyncServiceImpl {
             .find_tip()
             .map_err(|_err| Status::internal("can't read WAL"))?
             .ok_or(Status::internal("WAL has no data"))?;
+
         let response = u5c::sync::ReadTipResponse {
             tip: match point {
                 ChainPoint::Origin => None,
