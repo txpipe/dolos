@@ -198,4 +198,11 @@ impl u5c::sync::sync_service_server::SyncService for SyncServiceImpl {
 
         Ok(Response::new(Box::pin(stream)))
     }
+
+    async fn read_tip(
+        &self,
+        _: Request<u5c::sync::ReadTipRequest>,
+    ) -> Result<Response<u5c::sync::ReadTipResponse>, tonic::Status> {
+        todo!()
+    }
 }
