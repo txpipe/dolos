@@ -201,8 +201,24 @@ impl u5c::sync::sync_service_server::SyncService for SyncServiceImpl {
 
     async fn read_tip(
         &self,
-        _: Request<u5c::sync::ReadTipRequest>,
-    ) -> Result<Response<u5c::sync::ReadTipResponse>, tonic::Status> {
-        todo!()
+        _request: tonic::Request<u5c::sync::ReadTipRequest>,
+    ) -> std::result::Result<tonic::Response<u5c::sync::ReadTipResponse>, tonic::Status> {
+        let (_, point) = self
+            .wal
+            .find_tip()
+            .map_err(|_err| Status::internal("can't read WAL"))?
+            .ok_or(Status::internal("WAL has no data"))?;
+
+        let response = u5c::sync::ReadTipResponse {
+            tip: match point {
+                ChainPoint::Origin => None,
+                ChainPoint::Specific(slot, hash) => Some(BlockRef {
+                    index: slot,
+                    hash: hash.to_vec().into(),
+                }),
+            },
+        };
+
+        Ok(Response::new(response))
     }
 }
