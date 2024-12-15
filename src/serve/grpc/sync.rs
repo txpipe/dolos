@@ -81,6 +81,7 @@ fn point_to_reset_tip_response(point: ChainPoint) -> u5c::sync::FollowTipRespons
 
 pub struct SyncServiceImpl {
     wal: wal::redb::WalStore,
+    ledger: LedgerStore,
     mapper: interop::Mapper<LedgerStore>,
 }
 
@@ -88,6 +89,7 @@ impl SyncServiceImpl {
     pub fn new(wal: wal::redb::WalStore, ledger: LedgerStore) -> Self {
         Self {
             wal,
+            ledger: ledger.clone(),
             mapper: Mapper::new(ledger),
         }
     }
@@ -179,8 +181,6 @@ impl u5c::sync::sync_service_server::SyncService for SyncServiceImpl {
                 .ok_or(Status::internal("can't find WAL sequence"))?
         };
 
-        let mapper = self.mapper.clone();
-
         // Find the intersect, skip 1 block, then convert each to a tip response
         // We skip 1 block to mimic the ouroboros chainsync miniprotocol convention
         // We both agree that the intersection point is in our past, so it doesn't
@@ -190,9 +190,33 @@ impl u5c::sync::sync_service_server::SyncService for SyncServiceImpl {
 
         let reset = once(async { Ok(point_to_reset_tip_response(point)) });
 
-        let forward = wal::WalStream::start(self.wal.clone(), from_seq)
-            .skip(1)
-            .map(move |(_, log)| Ok(wal_log_to_tip_response(&mapper, &log)));
+        let mapper = self.mapper.clone();
+        let ledger = self.ledger.clone();
+        let wal = self.wal.clone();
+
+        let forward =
+            wal::WalStream::start(wal.clone(), from_seq)
+                .skip(1)
+                .then(move |(wal_seq, log)| {
+                    let mapper = mapper.clone();
+                    let ledger = ledger.clone();
+                    let wal = wal.clone();
+
+                    async move {
+                        // Wait for ledger to catch up before processing the block
+                        loop {
+                            if let Ok(Some(ledger_cursor)) = ledger.cursor() {
+                                let ledger_seq = wal.assert_point(&ledger_cursor.into()).unwrap();
+                                // Check if ledger has caught up to this block
+                                if ledger_seq >= wal_seq {
+                                    break;
+                                }
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                        }
+                        Ok(wal_log_to_tip_response(&mapper, &log))
+                    }
+                });
 
         let stream = reset.chain(forward);
 
