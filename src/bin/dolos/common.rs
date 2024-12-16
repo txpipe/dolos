@@ -9,6 +9,13 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 use tracing_subscriber::{filter::Targets, prelude::*};
+use opentelemetry_appender_tracing::layer;
+use opentelemetry_otlp::WithExportConfig;
+use opentelemetry_otlp::{LogExporter, Protocol};
+use opentelemetry_sdk::{
+    logs::LoggerProvider,
+    runtime,
+};
 
 use dolos::prelude::*;
 
@@ -62,6 +69,19 @@ pub fn open_data_stores(config: &crate::Config) -> Result<Stores, Error> {
 pub fn setup_tracing(config: &LoggingConfig) -> miette::Result<()> {
     let level = config.max_level;
 
+    let exporter = LogExporter::builder()
+        .with_http()
+        .with_endpoint("http://localhost:4318/v1/logs")
+        .with_protocol(Protocol::HttpJson)
+        .build().unwrap();
+
+    // Create a new OpenTelemetry trace pipeline that prints to stdout
+    let provider = LoggerProvider::builder()
+        // .with_simple_exporter(exporter)
+        .with_batch_exporter(exporter, runtime::Tokio)
+        .build();
+    let layer = layer::OpenTelemetryTracingBridge::new(&provider);
+
     let mut filter = Targets::new()
         .with_target("dolos", level)
         .with_target("gasket", level);
@@ -84,6 +104,7 @@ pub fn setup_tracing(config: &LoggingConfig) -> miette::Result<()> {
     {
         tracing_subscriber::registry()
             .with(tracing_subscriber::fmt::layer())
+            .with(layer)
             .with(filter)
             .init();
     }
@@ -92,6 +113,7 @@ pub fn setup_tracing(config: &LoggingConfig) -> miette::Result<()> {
     {
         tracing_subscriber::registry()
             .with(tracing_subscriber::fmt::layer())
+            .with(layer)
             .with(console_subscriber::spawn())
             .with(filter)
             .init();

@@ -186,7 +186,8 @@ impl Config {
     }
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let args = Cli::parse();
     let config = Config::new(&args.config)
         .into_diagnostic()
