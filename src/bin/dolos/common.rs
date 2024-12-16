@@ -75,10 +75,9 @@ pub fn setup_tracing(config: &LoggingConfig) -> miette::Result<()> {
         .with_protocol(Protocol::HttpJson)
         .build().unwrap();
 
-    // Create a new OpenTelemetry trace pipeline that prints to stdout
     let provider = LoggerProvider::builder()
-        // .with_simple_exporter(exporter)
-        .with_batch_exporter(exporter, runtime::Tokio)
+        .with_simple_exporter(exporter)
+        // .with_batch_exporter(exporter, runtime::Tokio)
         .build();
     let layer = layer::OpenTelemetryTracingBridge::new(&provider);
 
