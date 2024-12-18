@@ -133,7 +133,7 @@ fn bootstrap_babbage_pparams(previous: AlonzoProtParams) -> BabbageProtParams {
         pool_pledge_influence: previous.pool_pledge_influence,
         decentralization_constant: previous.decentralization_constant,
         extra_entropy: previous.extra_entropy,
-        cost_models_for_script_languages: pallas::ledger::primitives::babbage::CostMdls {
+        cost_models_for_script_languages: pallas::ledger::primitives::babbage::CostModels {
             plutus_v1: previous
                 .cost_models_for_script_languages
                 .iter()
@@ -171,7 +171,7 @@ fn bootstrap_conway_pparams(
         treasury_growth_rate: previous.treasury_growth_rate,
         maximum_epoch: previous.maximum_epoch,
         pool_pledge_influence: previous.pool_pledge_influence,
-        cost_models_for_script_languages: pallas::ledger::primitives::conway::CostMdls {
+        cost_models_for_script_languages: pallas::ledger::primitives::conway::CostModels {
             plutus_v1: previous.cost_models_for_script_languages.plutus_v1,
             plutus_v2: previous.cost_models_for_script_languages.plutus_v2,
             plutus_v3: Some(genesis.plutus_v3_cost_model.clone()),

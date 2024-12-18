@@ -14,7 +14,7 @@ authors = ["Santiago Carmuega <santiago@carmuega.me>"]
 [dependencies]
 pallas = { git = "https://github.com/txpipe/pallas.git", features = ["hardano", "applying"] }
 # pallas = { version = "^0.30.1", features = ["hardano", "applying"] }
-#pallas = { path = "../pallas/pallas", features = ["hardano", "applying"] }
+# pallas = { path = "../pallas/pallas", features = ["hardano", "applying"] }
 
 gasket = { git = "https://github.com/construkts/gasket-rs.git", features = ["derive"] }
 # gasket = { version = "^0.8", features = ["derive"] }
@@ -52,7 +52,7 @@ mithril-client = { git = "https://github.com/input-output-hk/mithril.git", optio
     "rustls-tls-webpki-roots",
 ], default-features = false }
 protoc-wkt = "1.0.0"
-itertools = "0.12.1"
+itertools = "0.13.0"
 indicatif = "0.17.8"
 trait-variant = "0.1.2"
 comfy-table = { version = "7.1.1", optional = true }
