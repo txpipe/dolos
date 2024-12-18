@@ -174,7 +174,7 @@ fn bootstrap_conway_pparams(
             plutus_v1: previous.cost_models_for_script_languages.plutus_v1,
             plutus_v2: previous.cost_models_for_script_languages.plutus_v2,
             // Temporarily hardcoded Plutus V3 cost models, as the updates for this are not being detected.
-            // It is highly likely that this update is intentionally hardcoded.
+            // It is highly likely that this update is hardcoded in the node.
             plutus_v3: Some(vec![
                 100788, 420, 1, 1, 1000, 173, 0, 1, 1000, 59957, 4, 1, 11183, 32, 201305, 8356, 4,
                 16000, 100, 16000, 100, 16000, 100, 16000, 100, 16000, 100, 16000, 100, 100, 100,
