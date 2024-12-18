@@ -218,10 +218,7 @@ fn bootstrap_conway_pparams(
         governance_action_deposit: genesis.gov_action_deposit,
         drep_deposit: genesis.d_rep_deposit,
         drep_inactivity_period: genesis.d_rep_activity.into(),
-        minfee_refscript_cost_per_byte: pallas::ledger::primitives::conway::RationalNumber {
-            numerator: genesis.min_fee_ref_script_cost_per_byte,
-            denominator: 1,
-        },
+        minfee_refscript_cost_per_byte: genesis.min_fee_ref_script_cost_per_byte.into(),
     }
 }
 
