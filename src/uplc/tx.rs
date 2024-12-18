@@ -21,7 +21,9 @@ use pallas::{
 };
 use rug::Integer;
 use uplc::{
-    bumpalo::collections::Vec as BumpVec, bumpalo::Bump, data::PlutusData as PragmaPlutusData,
+    binder::DeBruijn,
+    bumpalo::{collections::Vec as BumpVec, Bump},
+    data::PlutusData as PragmaPlutusData,
     term::Term,
 };
 
@@ -102,7 +104,7 @@ pub fn map_pallas_data_to_pragma_data(arena: &Bump, data: PlutusData) -> &Pragma
     }
 }
 
-pub fn plutus_data_to_pragma_term(arena: &Bump, data: PlutusData) -> &Term<'_> {
+pub fn plutus_data_to_pragma_term(arena: &Bump, data: PlutusData) -> &Term<'_, DeBruijn> {
     Term::data(arena, map_pallas_data_to_pragma_data(arena, data))
 }
 
@@ -149,12 +151,9 @@ pub fn eval_tx(
             data: v.data.clone(),
             ex_units: v.ex_units,
         })
-        .collect::<Vec<_>>();
-
-    let updated_redeemers = redeemers
-        .iter()
+        .into_iter()
         .map(
-            |redeemer| match eval_redeemer(redeemer, tx, utxos, &lookup_table, slot_config) {
+            |redeemer| match eval_redeemer(&redeemer, tx, utxos, &lookup_table, slot_config) {
                 Ok(result) => {
                     let mut updated_redeemer = redeemer.clone();
                     updated_redeemer.ex_units.steps = result.cpu as u64;
@@ -166,7 +165,7 @@ pub fn eval_tx(
         )
         .collect::<Result<Vec<_>, _>>()?;
 
-    Ok(updated_redeemers)
+    Ok(redeemers)
 }
 
 pub fn eval_redeemer(
@@ -207,8 +206,8 @@ pub fn eval_redeemer(
         let result = program.eval(&arena);
 
         Ok(TxEvalResult {
-            cpu: result.info.consumed_budget.cpu,
-            mem: result.info.consumed_budget.mem,
+            cpu: result.info.consumed_budget.cpu * 11 / 10,
+            mem: result.info.consumed_budget.mem * 11 / 10,
         })
     }
 

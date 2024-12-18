@@ -1,5 +1,5 @@
 use pallas::ledger::primitives::{conway::Language, TransactionInput};
-use uplc::{flat::decode::FlatDecodeError, machine::{self, ExBudget}};
+use uplc::{binder::DeBruijn, flat::FlatDecodeError, machine::{self, ExBudget}};
 
 #[derive(thiserror::Error, Debug, miette::Diagnostic)]
 pub enum Error {
@@ -39,7 +39,7 @@ pub enum Error {
         .join("")
         .as_str()
     )]
-    Machine(machine::MachineError<'static>, ExBudget, Vec<String>),
+    Machine(machine::MachineError<'static, DeBruijn>, ExBudget, Vec<String>),
 
     #[error("native script can't be executed in phase-two")]
     NativeScriptPhaseTwo,
