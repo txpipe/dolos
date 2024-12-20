@@ -1,6 +1,6 @@
 use crate::{
     state::LedgerStore,
-    wal::{self, WalReader as _},
+    wal::{self, ChainPoint, WalReader as _},
 };
 use futures_core::Stream;
 use futures_util::StreamExt;
@@ -226,12 +226,25 @@ impl u5c::watch::watch_service_server::WatchService for WatchServiceImpl {
     ) -> Result<Response<Self::WatchTxStream>, Status> {
         let inner_req = request.into_inner();
 
-        let from_seq = self
-            .wal
-            .find_tip()
-            .map_err(|_err| Status::internal("can't read WAL"))?
-            .map(|(x, _)| x)
-            .unwrap_or_default();
+        let intersect = inner_req
+            .intersect
+            .iter()
+            .map(|x| ChainPoint::Specific(x.index, x.hash.to_vec().as_slice().into()))
+            .collect::<Vec<ChainPoint>>();
+
+        let from_seq = if intersect.is_empty() {
+            self.wal
+                .find_tip()
+                .map_err(|_err| Status::internal("can't read WAL"))?
+                .map(|(x, _)| x)
+                .unwrap_or_default()
+        } else {
+            self.wal
+                .find_intersect(&intersect)
+                .map_err(|_err| Status::internal("can't read WAL"))?
+                .map(|(x, _)| x)
+                .unwrap_or_default()
+        };
 
         let mapper = self.mapper.clone();
 
