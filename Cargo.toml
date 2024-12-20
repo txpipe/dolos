@@ -46,11 +46,12 @@ tokio-stream = { version = "0.1.14", features = ["sync"] }
 futures-util = "0.3.28"
 async-stream = "0.3.5"
 serde_with = "3.8.1"
-mithril-client = { git = "https://github.com/input-output-hk/mithril.git", optional = true, features = [
+mithril-client = { version = "0.10.4", optional = true, default-features = false, features = [
     "fs",
+    "rug-backend",
     "rustls-tls",
     "rustls-tls-webpki-roots",
-], default-features = false }
+] }
 protoc-wkt = "1.0.0"
 itertools = "0.13.0"
 indicatif = "0.17.8"
