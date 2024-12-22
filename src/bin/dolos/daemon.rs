@@ -23,6 +23,7 @@ pub async fn run(config: super::Config, _args: &Args) -> miette::Result<()> {
         mempool.clone(),
         &config.retries,
         false,
+        config.storage.max_slots_before_prune,
     )
     .into_diagnostic()
     .context("bootstrapping sync pipeline")?;

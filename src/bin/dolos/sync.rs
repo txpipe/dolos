@@ -26,6 +26,7 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
         mempool,
         &config.retries,
         args.quit_on_tip,
+        config.storage.max_slots_before_prune,
     )
     .into_diagnostic()
     .context("bootstrapping sync pipeline")?;

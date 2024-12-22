@@ -75,6 +75,9 @@ pub struct StorageConfig {
 
     /// Maximum number of slots (not blocks) to keep in the WAL
     max_wal_history: Option<u64>,
+
+    /// Maximum number of slots to keep in the ledger before pruning
+    max_slots_before_prune: Option<u64>,
 }
 
 impl Default for StorageConfig {
@@ -84,6 +87,7 @@ impl Default for StorageConfig {
             wal_cache: None,
             ledger_cache: None,
             max_wal_history: None,
+            max_slots_before_prune: None,
         }
     }
 }

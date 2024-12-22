@@ -65,17 +65,19 @@ The `upstream` section defines how to connect to the Ouroboros network to synchr
 
 The `storage` section controls how Dolos stores data in the local file system. This includes immutable chain blocks, the write ahead log and the ledger state.
 
-| property        | type    | example  |
-| --------------- | ------- | -------- |
-| path            | string  | "./data" |
-| wal_cache       | integer | 50       |
-| ledger_cache    | integer | 500      |
-| max_wal_history | integer | 10000    |
+| property               | type    | example  |
+| ---------------------- | ------- | -------- |
+| path                   | string  | "./data" |
+| wal_cache              | integer | 50       |
+| ledger_cache           | integer | 500      |
+| max_wal_history        | integer | 10000    |
+| max_slots_before_prune | integer | 10000    |
 
 - `path`: is the root directory where all data will be stored.
 - `wal_cache`: the size (in Mb) of the memory cache for the wal db.
 - `ledger_cache`: the size (in Mb) of the memory cache for the ledger db.
 - `max_wal_history`: the max number of slots to keep in the WAL.
+- `max_slots_before_prune`: the max number of slots to keep in the ledger store before pruning
 
 ## `genesis` section
 
@@ -90,7 +92,6 @@ Dolos requires Cardano genesis data to operate. For simplicity sake, we've decid
 - `byron_path`: file path to the Byron json genesis file
 - `shelley_path`: file path to the Shelley json genesis file
 - `alonzo_path`: file path to the Alonzo json genesis file
-
 
 ### `sync` section
 
@@ -126,8 +127,8 @@ The `serve.grpc` section controls the options for the gRPC endpoint that can be 
 
 The `serve.ouroboros` section controls the options for the Ouroboros mini-protocols endpoint that can be used by clients.
 
-| property       | type   | example           |
-| -------------- | ------ | ----------------- |
+| property    | type   | example        |
+| ----------- | ------ | -------------- |
 | listen_path | string | "dolos.socket" |
 
 - `listen_path`: the file path for the unix socket that will listen for Ouroboros node-to-client mini-protocols.
@@ -136,9 +137,9 @@ The `serve.ouroboros` section controls the options for the Ouroboros mini-protoc
 
 The `relay` section controls the options for handling inbound connection from other peers through Ouroboros node-to-node miniprotocols.
 
-| property       | type   | example           |
-| -------------- | ------ | ----------------- |
-| listen_address | string | "[::]:50051"      |
+| property       | type   | example      |
+| -------------- | ------ | ------------ |
+| listen_address | string | "[::]:50051" |
 
 - `listen_address`: the local address (`IP:PORT`) to listen for incoming Ouroboros connections (`[::]` represents any IP address).
 
@@ -146,8 +147,8 @@ The `relay` section controls the options for handling inbound connection from ot
 
 The `logging` section controls the logging options to define the level of details to output.
 
-| property  | type   | example                                             |
-| --------- | ------ | --------------------------------------------------- |
-| max_level | option | "debug" / "info" / "warn" / "error"                 |
+| property       | type   | example                                        |
+| -------------- | ------ | ---------------------------------------------- |
+| max_level      | option | "debug" / "info" / "warn" / "error"            |
 | include_pallas | option | wheter to include logs from the Pallas library |
-| include_tonic | option | wheter to include logs from the Tonic library   |
+| include_tonic  | option | wheter to include logs from the Tonic library  |
