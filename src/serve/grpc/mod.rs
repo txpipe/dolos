@@ -7,12 +7,11 @@ use tonic::transport::{Certificate, Server, ServerTlsConfig};
 use tower_http::cors::CorsLayer;
 use tracing::info;
 
+use crate::ledger::pparams::Genesis;
 use crate::mempool::Mempool;
 use crate::prelude::*;
 use crate::state::LedgerStore;
 use crate::wal::redb::WalStore;
-
-use super::GenesisFiles;
 
 mod convert;
 mod query;
@@ -29,7 +28,7 @@ pub struct Config {
 
 pub async fn serve(
     config: Config,
-    genesis_files: GenesisFiles,
+    genesis: Arc<Genesis>,
     wal: WalStore,
     ledger: LedgerStore,
     mempool: Mempool,
@@ -42,13 +41,14 @@ pub async fn serve(
     let sync_service = sync::SyncServiceImpl::new(wal.clone(), ledger.clone());
     let sync_service = u5c::sync::sync_service_server::SyncServiceServer::new(sync_service);
 
-    let query_service = query::QueryServiceImpl::new(ledger.clone(), Arc::clone(&genesis_files));
+    let query_service = query::QueryServiceImpl::new(ledger.clone(), genesis);
     let query_service = u5c::query::query_service_server::QueryServiceServer::new(query_service);
 
     let watch_service = watch::WatchServiceImpl::new(wal.clone(), ledger.clone());
     let watch_service = u5c::watch::watch_service_server::WatchServiceServer::new(watch_service);
 
-    let submit_service = submit::SubmitServiceImpl::new(mempool, ledger.clone(), Arc::clone(&genesis_files));
+    let submit_service =
+        submit::SubmitServiceImpl::new(mempool, ledger.clone(), Arc::clone(&genesis_files));
     let submit_service =
         u5c::submit::submit_service_server::SubmitServiceServer::new(submit_service);
 

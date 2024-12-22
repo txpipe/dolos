@@ -11,6 +11,10 @@ use pallas::{
 };
 use tracing::{debug, warn};
 
+mod summary;
+
+pub use summary::*;
+
 macro_rules! apply_field {
     ($target:ident, $update:ident, $field:ident) => {
         paste::paste! {
@@ -22,16 +26,17 @@ macro_rules! apply_field {
     };
 }
 
-pub struct Genesis<'a> {
-    pub byron: &'a byron::GenesisFile,
-    pub shelley: &'a shelley::GenesisFile,
-    pub alonzo: &'a alonzo::GenesisFile,
-    pub conway: &'a conway::GenesisFile,
+pub struct Genesis {
+    pub byron: byron::GenesisFile,
+    pub shelley: shelley::GenesisFile,
+    pub alonzo: alonzo::GenesisFile,
+    pub conway: conway::GenesisFile,
 }
 
 fn bootstrap_byron_pparams(byron: &byron::GenesisFile) -> ByronProtParams {
     ByronProtParams {
         block_version: (0, 0, 0),
+        start_time: byron.start_time,
         summand: byron.block_version_data.tx_fee_policy.summand,
         multiplier: byron.block_version_data.tx_fee_policy.multiplier,
         max_tx_size: byron.block_version_data.max_tx_size,
@@ -52,7 +57,12 @@ fn bootstrap_byron_pparams(byron: &byron::GenesisFile) -> ByronProtParams {
 
 fn bootstrap_shelley_pparams(shelley: &shelley::GenesisFile) -> ShelleyProtParams {
     ShelleyProtParams {
+        // TODO: remove unwrap once we make the whole process fallible
+        system_start: chrono::DateTime::parse_from_rfc3339(shelley.system_start.as_ref().unwrap())
+            .unwrap(),
         protocol_version: shelley.protocol_params.protocol_version.clone().into(),
+        epoch_length: shelley.epoch_length.unwrap_or_default() as u64,
+        slot_length: shelley.slot_length.unwrap_or_default() as u64,
         max_block_body_size: shelley.protocol_params.max_block_body_size,
         max_transaction_size: shelley.protocol_params.max_tx_size,
         max_block_header_size: shelley.protocol_params.max_block_header_size,
@@ -77,6 +87,9 @@ fn bootstrap_alonzo_pparams(
     genesis: &alonzo::GenesisFile,
 ) -> AlonzoProtParams {
     AlonzoProtParams {
+        system_start: previous.system_start,
+        epoch_length: previous.epoch_length,
+        slot_length: previous.slot_length,
         minfee_a: previous.minfee_a,
         minfee_b: previous.minfee_b,
         max_block_body_size: previous.max_block_body_size,
@@ -107,6 +120,9 @@ fn bootstrap_alonzo_pparams(
 
 fn bootstrap_babbage_pparams(previous: AlonzoProtParams) -> BabbageProtParams {
     BabbageProtParams {
+        system_start: previous.system_start,
+        epoch_length: previous.epoch_length,
+        slot_length: previous.slot_length,
         minfee_a: previous.minfee_a,
         minfee_b: previous.minfee_b,
         max_block_body_size: previous.max_block_body_size,
@@ -147,6 +163,9 @@ fn bootstrap_conway_pparams(
     genesis: &conway::GenesisFile,
 ) -> ConwayProtParams {
     ConwayProtParams {
+        system_start: previous.system_start,
+        epoch_length: previous.epoch_length,
+        slot_length: previous.slot_length,
         minfee_a: previous.minfee_a,
         minfee_b: previous.minfee_b,
         max_block_body_size: previous.max_block_body_size,
@@ -443,7 +462,7 @@ fn advance_hardfork(
         }
         // Protocol version 2 transitions from Byron to Shelley
         MultiEraProtocolParameters::Byron(_) if next_protocol == 2 => {
-            MultiEraProtocolParameters::Shelley(bootstrap_shelley_pparams(genesis.shelley))
+            MultiEraProtocolParameters::Shelley(bootstrap_shelley_pparams(&genesis.shelley))
         }
         // Two intra-era hard forks, named Allegra (3) and Mary (4); we don't have separate types
         // for these eras
@@ -452,7 +471,7 @@ fn advance_hardfork(
         }
         // Protocol version 5 transitions from Shelley (Mary, technically) to Alonzo
         MultiEraProtocolParameters::Shelley(current) if next_protocol == 5 => {
-            MultiEraProtocolParameters::Alonzo(bootstrap_alonzo_pparams(current, genesis.alonzo))
+            MultiEraProtocolParameters::Alonzo(bootstrap_alonzo_pparams(current, &genesis.alonzo))
         }
         // One intra-era hard-fork in alonzo at protocol version 6
         MultiEraProtocolParameters::Alonzo(current) if next_protocol == 6 => {
@@ -468,52 +487,68 @@ fn advance_hardfork(
         }
         // Protocol version 9 will transition from Babbage to Conway; not yet implemented
         MultiEraProtocolParameters::Babbage(current) if next_protocol == 9 => {
-            MultiEraProtocolParameters::Conway(bootstrap_conway_pparams(current, genesis.conway))
+            MultiEraProtocolParameters::Conway(bootstrap_conway_pparams(current, &genesis.conway))
         }
         _ => unimplemented!("don't know how to handle hardfork"),
     }
 }
 
-pub fn fold_pparams(
+pub fn fold_until_epoch(
     genesis: &Genesis,
     updates: &[MultiEraUpdate],
     for_epoch: u64,
-) -> MultiEraProtocolParameters {
-    debug!(
-        "Starting fold_pparams with {} updates for epoch {}",
-        updates.len(),
-        for_epoch
-    );
-
+) -> (MultiEraProtocolParameters, ChainSummary) {
     let mut pparams = match &updates[0] {
         MultiEraUpdate::Byron(_, _) => {
             debug!("Initializing with Byron parameters");
-            MultiEraProtocolParameters::Byron(bootstrap_byron_pparams(genesis.byron))
+            MultiEraProtocolParameters::Byron(bootstrap_byron_pparams(&genesis.byron))
         }
         _ => {
             debug!("Initializing with Shelley parameters");
-            MultiEraProtocolParameters::Shelley(bootstrap_shelley_pparams(genesis.shelley))
+            MultiEraProtocolParameters::Shelley(bootstrap_shelley_pparams(&genesis.shelley))
         }
     };
+
+    let mut summary = ChainSummary::start(&pparams);
+
     let mut last_protocol = 0;
 
-    for epoch in 0..for_epoch {
+    for epoch in 1..for_epoch {
         debug!("Processing epoch {}", epoch);
+
+        let epoch_updates: Vec<_> = updates
+            .iter()
+            .filter(|e| e.epoch() == (epoch - 1))
+            .collect();
+
+        debug!("Found {} updates for epoch {}", epoch_updates.len(), epoch);
+
+        for update in epoch_updates {
+            pparams = apply_param_update(pparams, update);
+        }
 
         for next_protocol in last_protocol + 1..=pparams.protocol_version() {
             debug!("advancing hardfork {:?}", next_protocol);
             pparams = advance_hardfork(pparams, genesis, next_protocol);
-            last_protocol = next_protocol;
-        }
 
-        let epoch_updates: Vec<_> = updates.iter().filter(|e| e.epoch() == epoch).collect();
-        debug!("Found {} updates for epoch {}", epoch_updates.len(), epoch);
-        for update in epoch_updates {
-            pparams = apply_param_update(pparams, update);
+            summary.advance(epoch, &pparams);
+
+            last_protocol = next_protocol;
         }
     }
 
-    pparams
+    (pparams, summary)
+}
+
+pub fn fold(
+    genesis: &Genesis,
+    updates: &[MultiEraUpdate],
+) -> (MultiEraProtocolParameters, ChainSummary) {
+    let for_epoch = updates.last().map(|u| u.epoch()).unwrap_or(0);
+
+    let (pparams, summary) = fold_until_epoch(genesis, updates, for_epoch);
+
+    (pparams, summary)
 }
 
 #[cfg(test)]
@@ -538,10 +573,10 @@ mod tests {
 
         // Load each genesis file
         let genesis = Genesis {
-            byron: &load_json(format!("{test_data}/genesis/byron_genesis.json")),
-            shelley: &load_json(format!("{test_data}/genesis/shelley_genesis.json")),
-            alonzo: &load_json(format!("{test_data}/genesis/alonzo_genesis.json")),
-            conway: &load_json(format!("{test_data}/genesis/conway_genesis.json")),
+            byron: load_json(format!("{test_data}/genesis/byron_genesis.json")),
+            shelley: load_json(format!("{test_data}/genesis/shelley_genesis.json")),
+            alonzo: load_json(format!("{test_data}/genesis/alonzo_genesis.json")),
+            conway: load_json(format!("{test_data}/genesis/conway_genesis.json")),
         };
 
         // Then load each mainnet example update proposal as buffers
@@ -582,15 +617,18 @@ mod tests {
         // test if we get the right value when folding
         for file in std::fs::read_dir(format!("{test_data}/expected_params/")).unwrap() {
             let filename = file.unwrap().path();
+
             println!("Comparing to {:?}", filename);
+
             let epoch = filename
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .and_then(|s| s.parse::<u64>().ok())
                 .unwrap();
+
             // TODO: implement serialize/deserialize, and get full protocol param json files
             let expected = load_json::<usize, _>(filename);
-            let actual = fold_pparams(&genesis, &chained_updates, epoch);
+            let (actual, _) = fold_until_epoch(&genesis, &chained_updates, epoch);
             assert_eq!(expected, actual.protocol_version())
 
             //assert_eq!(expected, actual)

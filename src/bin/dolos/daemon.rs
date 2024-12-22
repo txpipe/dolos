@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use miette::{Context, IntoDiagnostic};
 use tracing::warn;
 
@@ -9,7 +11,7 @@ pub async fn run(config: super::Config, _args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging)?;
 
     let (wal, ledger) = crate::common::open_data_stores(&config)?;
-    let (byron, shelley, _, _) = crate::common::open_genesis_files(&config.genesis)?;
+    let genesis = Arc::new(crate::common::open_genesis_files(&config.genesis)?);
     let mempool = dolos::mempool::Mempool::new();
     let exit = crate::common::hook_exit_token();
 
@@ -18,8 +20,7 @@ pub async fn run(config: super::Config, _args: &Args) -> miette::Result<()> {
         &config.upstream,
         wal.clone(),
         ledger.clone(),
-        byron,
-        shelley,
+        genesis.clone(),
         mempool.clone(),
         &config.retries,
         false,
@@ -33,10 +34,9 @@ pub async fn run(config: super::Config, _args: &Args) -> miette::Result<()> {
     // that benefits
 
     // We need new file handled for the separate process.
-    let (byron, shelley, alonzo, conway) = crate::common::open_genesis_files(&config.genesis)?;
     let serve = tokio::spawn(dolos::serve::serve(
         config.serve,
-        (alonzo, byron, shelley, conway),
+        genesis.clone(),
         wal.clone(),
         ledger.clone(),
         mempool.clone(),

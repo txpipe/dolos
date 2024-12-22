@@ -3,16 +3,13 @@ use crate::{
         pparams::{self, Genesis},
         EraCbor, PParamsBody, TxoRef,
     },
-    serve::{utils::apply_mask, GenesisFiles},
+    serve::utils::apply_mask,
     state::{LedgerError, LedgerStore},
 };
 use itertools::Itertools as _;
-use pallas::ledger::traverse::{MultiEraOutput, MultiEraUpdate};
 use pallas::interop::utxorpc::spec as u5c;
-use pallas::{
-    interop::utxorpc::{self as interop, spec::query::any_utxo_pattern::UtxoPattern},
-    ledger::traverse::wellknown::GenesisValues,
-};
+use pallas::interop::utxorpc::{self as interop, spec::query::any_utxo_pattern::UtxoPattern};
+use pallas::ledger::traverse::{MultiEraOutput, MultiEraUpdate};
 use std::{collections::HashSet, sync::Arc};
 use tonic::{Request, Response, Status};
 use tracing::info;
@@ -20,14 +17,14 @@ use tracing::info;
 pub struct QueryServiceImpl {
     ledger: LedgerStore,
     mapper: interop::Mapper<LedgerStore>,
-    genesis_files: Arc<GenesisFiles>,
+    genesis: Arc<Genesis>,
 }
 
 impl QueryServiceImpl {
-    pub fn new(ledger: LedgerStore, genesis_files: Arc<GenesisFiles>) -> Self {
+    pub fn new(ledger: LedgerStore, genesis: Arc<Genesis>) -> Self {
         Self {
             ledger: ledger.clone(),
-            genesis_files,
+            genesis,
             mapper: interop::Mapper::new(ledger),
         }
     }
@@ -233,35 +230,15 @@ impl u5c::query::query_service_server::QueryService for QueryServiceImpl {
             None => return Err(Status::internal("Uninitialized ledger.")),
         };
 
-        let updates = self.ledger.get_pparams(curr_point.0)?;
+        let updates: Vec<_> = self.ledger.get_pparams(curr_point.0)?;
+
         let updates: Vec<_> = updates
             .iter()
-            .map(|PParamsBody(era, cbor)| -> Result<MultiEraUpdate, Status> {
-                MultiEraUpdate::decode_for_era(*era, cbor)
-                    .map_err(|e| Status::internal(e.to_string()))
-            })
-            .try_collect()?;
-        
+            .map(|PParamsBody(era, cbor)| MultiEraUpdate::decode_for_era(*era, cbor))
+            .try_collect()
+            .map_err(|e| Status::internal(e.to_string()))?;
 
-        let genesis = Genesis {
-            alonzo: &self.genesis_files.0,
-            byron: &self.genesis_files.1,
-            shelley: &self.genesis_files.2,
-            conway: &self.genesis_files.3,
-        };
-
-        let network_magic = match genesis.shelley.network_magic {
-            Some(magic) => magic.into(),
-            None => return Err(Status::internal("networkMagic missing in shelley genesis.")),
-        };
-
-        let genesis_values = match GenesisValues::from_magic(network_magic) {
-            Some(genesis_values) => genesis_values,
-            None => return Err(Status::internal("Invalid networdMagic.")),
-        };
-
-        let (epoch, _) = genesis_values.absolute_slot_to_relative(curr_point.0);
-        let pparams = pparams::fold_pparams(&genesis, &updates, epoch);
+        let (pparams, _) = pparams::fold(&self.genesis, &updates);
 
         let mut response = u5c::query::ReadParamsResponse {
             values: Some(u5c::query::AnyChainParams {

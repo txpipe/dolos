@@ -1,6 +1,6 @@
-use pallas::ledger::configs::{byron, shelley};
 use pallas::ledger::traverse::{Era, MultiEraBlock};
 use pallas::{crypto::hash::Hash, ledger::traverse::MultiEraOutput};
+use pparams::Genesis;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use thiserror::Error;
@@ -219,13 +219,9 @@ pub fn compute_origin_delta(byron: &pallas::ledger::configs::byron::GenesisFile)
 /// uses the security window guarantee formula from consensus to calculate the
 /// latest slot that can be considered immutable. This is used mainly to define
 /// which slots can be finalized in the ledger store (aka: compaction).
-pub fn lastest_immutable_slot(
-    tip: BlockSlot,
-    byron: &byron::GenesisFile,
-    shelley: &shelley::GenesisFile,
-) -> BlockSlot {
-    let security_window =
-        (3.0 * byron.protocol_consts.k as f32) / (shelley.active_slots_coeff.unwrap());
+pub fn lastest_immutable_slot(tip: BlockSlot, genesis: &Genesis) -> BlockSlot {
+    let security_window = (3.0 * genesis.byron.protocol_consts.k as f32)
+        / (genesis.shelley.active_slots_coeff.unwrap());
 
     tip.saturating_sub(security_window.ceil() as u64)
 }
