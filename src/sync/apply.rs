@@ -17,6 +17,8 @@ pub struct Stage {
     shelley: shelley::GenesisFile,
     mempool: crate::mempool::Mempool, // Add this line
 
+    max_slots_before_prune: Option<u64>,
+
     pub upstream: UpstreamPort,
 
     #[metric]
@@ -33,6 +35,7 @@ impl Stage {
         mempool: crate::mempool::Mempool,
         byron: byron::GenesisFile,
         shelley: shelley::GenesisFile,
+        max_slots_before_prune: Option<u64>,
     ) -> Self {
         Self {
             wal,
@@ -43,6 +46,7 @@ impl Stage {
             upstream: Default::default(),
             block_count: Default::default(),
             wal_count: Default::default(),
+            max_slots_before_prune,
         }
     }
 
@@ -78,8 +82,14 @@ impl Stage {
 
         let block = MultiEraBlock::decode(body).or_panic()?;
 
-        crate::state::apply_block_batch([&block], &mut self.ledger, &self.byron, &self.shelley)
-            .or_panic()?;
+        crate::state::apply_block_batch(
+            [&block],
+            &mut self.ledger,
+            &self.byron,
+            &self.shelley,
+            self.max_slots_before_prune,
+        )
+        .or_panic()?;
 
         self.mempool.apply_block(&block);
 

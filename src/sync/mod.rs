@@ -54,6 +54,7 @@ pub fn pipeline(
     mempool: Mempool,
     retries: &Option<gasket::retries::Policy>,
     quit_on_tip: bool,
+    max_slots_before_prune: Option<u64>,
 ) -> Result<Vec<gasket::runtime::Tether>, Error> {
     let mut pull = pull::Stage::new(
         upstream.peer_address.clone(),
@@ -65,7 +66,14 @@ pub fn pipeline(
 
     let mut roll = roll::Stage::new(wal.clone());
 
-    let mut apply = apply::Stage::new(wal.clone(), ledger, mempool.clone(), byron, shelley);
+    let mut apply = apply::Stage::new(
+        wal.clone(),
+        ledger,
+        mempool.clone(),
+        byron,
+        shelley,
+        max_slots_before_prune,
+    );
 
     let submit = submit::Stage::new(
         upstream.peer_address.clone(),
