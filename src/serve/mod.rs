@@ -1,10 +1,12 @@
+use std::sync::Arc;
+
 use futures_util::future::try_join;
 use miette::{Context, IntoDiagnostic};
-use pallas::ledger::configs::{alonzo, byron, conway, shelley};
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
+use crate::ledger::pparams::Genesis;
 use crate::mempool::Mempool;
 use crate::state::LedgerStore;
 use crate::wal::redb::WalStore;
@@ -30,20 +32,13 @@ pub struct Config {
     pub ouroboros: Option<o7s::Config>,
 }
 
-pub type GenesisFiles = (
-    alonzo::GenesisFile,
-    byron::GenesisFile,
-    shelley::GenesisFile,
-    conway::GenesisFile,
-);
-
 /// Serve remote requests
 ///
 /// Uses specified config to start listening for network connections on either
 /// gRPC, Ouroboros or both protocols.
 pub async fn serve(
     config: Config,
-    genesis_files: GenesisFiles,
+    genesis: Arc<Genesis>,
     wal: WalStore,
     ledger: LedgerStore,
     mempool: Mempool,
@@ -55,7 +50,7 @@ pub async fn serve(
 
             grpc::serve(
                 cfg,
-                genesis_files,
+                genesis.clone(),
                 wal.clone(),
                 ledger,
                 mempool,

@@ -55,7 +55,7 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
         .into_diagnostic()
         .context("resolving utxo")?;
 
-    let (byron, shelley, alonzo, conway) = crate::common::open_genesis_files(&config.genesis)?;
+    let genesis = crate::common::open_genesis_files(&config.genesis)?;
 
     let mut utxos2 = UTxOs::new();
 
@@ -87,16 +87,7 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
         })
         .try_collect()?;
 
-    let pparams = dolos::ledger::pparams::fold_pparams(
-        &dolos::ledger::pparams::Genesis {
-            byron: &byron,
-            shelley: &shelley,
-            alonzo: &alonzo,
-            conway: &conway,
-        },
-        &updates,
-        args.epoch,
-    );
+    let (pparams, _) = dolos::ledger::pparams::fold_until_epoch(&genesis, &updates, args.epoch);
 
     let context = ValidationContext {
         block_slot: args.block_slot,
