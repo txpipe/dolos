@@ -107,7 +107,7 @@ pub fn run(config: &crate::Config, _args: &Args) -> miette::Result<()> {
 
     let updates: Vec<_> = updates
         .iter()
-        .map(|PParamsBody(era, cbor)| MultiEraUpdate::decode_for_era(*era, &cbor))
+        .map(|PParamsBody(era, cbor)| MultiEraUpdate::decode_for_era(*era, cbor))
         .try_collect()
         .into_diagnostic()?;
 

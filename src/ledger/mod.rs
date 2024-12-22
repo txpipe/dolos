@@ -194,7 +194,7 @@ pub fn compute_undo_delta(
 pub fn compute_origin_delta(byron: &pallas::ledger::configs::byron::GenesisFile) -> LedgerDelta {
     let mut delta = LedgerDelta::default();
 
-    let utxos = pallas::ledger::configs::byron::genesis_utxos(&byron);
+    let utxos = pallas::ledger::configs::byron::genesis_utxos(byron);
 
     for (tx, addr, amount) in utxos {
         let utxo_ref = TxoRef(tx, 0);
