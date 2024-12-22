@@ -1,11 +1,9 @@
 use itertools::Itertools as _;
 use pallas::{
     interop::utxorpc as interop,
-    ledger::{
-        configs::{byron, shelley},
-        traverse::{MultiEraBlock, MultiEraTx},
-    },
+    ledger::traverse::{MultiEraBlock, MultiEraTx},
 };
+use pparams::Genesis;
 use std::collections::{HashMap, HashSet};
 use thiserror::Error;
 
@@ -218,8 +216,7 @@ pub fn load_slice_for_block(
 pub fn apply_block_batch<'a>(
     blocks: impl IntoIterator<Item = &'a MultiEraBlock<'a>>,
     store: &mut LedgerStore,
-    byron: &byron::GenesisFile,
-    shelley: &shelley::GenesisFile,
+    genesis: &Genesis,
 ) -> Result<(), LedgerError> {
     let mut deltas: Vec<LedgerDelta> = vec![];
 
@@ -238,7 +235,7 @@ pub fn apply_block_batch<'a>(
         .map(|x| x.0)
         .unwrap();
 
-    let to_finalize = lastest_immutable_slot(tip, byron, shelley);
+    let to_finalize = lastest_immutable_slot(tip, genesis);
     store.finalize(to_finalize)?;
 
     Ok(())

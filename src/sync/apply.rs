@@ -1,8 +1,10 @@
+use std::sync::Arc;
+
 use gasket::framework::*;
-use pallas::ledger::configs::{byron, shelley};
 use pallas::ledger::traverse::MultiEraBlock;
 use tracing::{debug, info};
 
+use crate::ledger::pparams::Genesis;
 use crate::wal::{self, LogValue, WalReader as _};
 use crate::{ledger, prelude::*};
 
@@ -13,8 +15,7 @@ pub type UpstreamPort = gasket::messaging::InputPort<RollEvent>;
 pub struct Stage {
     wal: crate::wal::redb::WalStore,
     ledger: crate::state::LedgerStore,
-    byron: byron::GenesisFile,
-    shelley: shelley::GenesisFile,
+    genesis: Arc<Genesis>,
     mempool: crate::mempool::Mempool, // Add this line
 
     pub upstream: UpstreamPort,
@@ -31,15 +32,13 @@ impl Stage {
         wal: crate::wal::redb::WalStore,
         ledger: crate::state::LedgerStore,
         mempool: crate::mempool::Mempool,
-        byron: byron::GenesisFile,
-        shelley: shelley::GenesisFile,
+        genesis: Arc<Genesis>,
     ) -> Self {
         Self {
             wal,
             ledger,
             mempool,
-            byron,
-            shelley,
+            genesis,
             upstream: Default::default(),
             block_count: Default::default(),
             wal_count: Default::default(),
@@ -49,7 +48,7 @@ impl Stage {
     fn process_origin(&mut self) -> Result<(), WorkerError> {
         info!("applying origin");
 
-        let delta = crate::ledger::compute_origin_delta(&self.byron);
+        let delta = crate::ledger::compute_origin_delta(&self.genesis.byron);
         self.ledger.apply(&[delta]).or_panic()?;
 
         Ok(())
@@ -78,8 +77,7 @@ impl Stage {
 
         let block = MultiEraBlock::decode(body).or_panic()?;
 
-        crate::state::apply_block_batch([&block], &mut self.ledger, &self.byron, &self.shelley)
-            .or_panic()?;
+        crate::state::apply_block_batch([&block], &mut self.ledger, &self.genesis).or_panic()?;
 
         self.mempool.apply_block(&block);
 

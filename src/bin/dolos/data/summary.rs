@@ -1,9 +1,10 @@
+use itertools::Itertools;
 use miette::IntoDiagnostic;
-use pallas::ledger::traverse::MultiEraBlock;
+use pallas::ledger::traverse::{MultiEraBlock, MultiEraUpdate};
 use std::path::Path;
 
 use dolos::{
-    ledger::ChainPoint,
+    ledger::{ChainPoint, PParamsBody},
     wal::{redb::WalStore, RawBlock, ReadUtils, WalReader as _},
 };
 
@@ -94,6 +95,29 @@ pub fn run(config: &crate::Config, _args: &Args) -> miette::Result<()> {
     // );
 
     //dbg!(merged);
+
+    println!("---");
+
+    let curr_point = ledger
+        .cursor()
+        .into_diagnostic()?
+        .ok_or(miette::miette!("Uninitialized ledger."))?;
+
+    let updates: Vec<_> = ledger.get_pparams(curr_point.0).into_diagnostic()?;
+
+    let updates: Vec<_> = updates
+        .iter()
+        .map(|PParamsBody(era, cbor)| MultiEraUpdate::decode_for_era(*era, &cbor))
+        .try_collect()
+        .into_diagnostic()?;
+
+    let genesis = crate::common::open_genesis_files(&config.genesis)?;
+
+    let (pparams, summary) = dolos::ledger::pparams::fold(&genesis, &updates);
+
+    println!("{:?}", summary);
+    println!("---");
+    println!("{:?}", pparams);
 
     println!("---");
 
