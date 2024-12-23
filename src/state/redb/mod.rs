@@ -239,7 +239,7 @@ impl LedgerStore {
         }
     }
 
-    pub fn apply(&mut self, deltas: &[LedgerDelta]) -> Result<(), LedgerError> {
+    pub fn apply(&self, deltas: &[LedgerDelta]) -> Result<(), LedgerError> {
         match self {
             LedgerStore::SchemaV1(x) => Ok(x.apply(deltas)?),
             LedgerStore::SchemaV2(x) => Ok(x.apply(deltas)?),
@@ -247,7 +247,7 @@ impl LedgerStore {
         }
     }
 
-    pub fn finalize(&mut self, until: BlockSlot) -> Result<(), LedgerError> {
+    pub fn finalize(&self, until: BlockSlot) -> Result<(), LedgerError> {
         match self {
             LedgerStore::SchemaV1(x) => Ok(x.finalize(until)?),
             LedgerStore::SchemaV2(x) => Ok(x.finalize(until)?),

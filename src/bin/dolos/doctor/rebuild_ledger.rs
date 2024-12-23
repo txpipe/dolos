@@ -26,7 +26,7 @@ pub fn run(config: &crate::Config, _args: &Args, feedback: &Feedback) -> miette:
         .into_diagnostic()
         .context("creating in-memory state store")?;
 
-    let mut light = dolos::state::LedgerStore::Redb(light);
+    let light = dolos::state::LedgerStore::Redb(light);
 
     if light
         .is_empty()
@@ -81,7 +81,7 @@ pub fn run(config: &crate::Config, _args: &Args, feedback: &Feedback) -> miette:
             .into_diagnostic()
             .context("decoding blocks")?;
 
-        dolos::state::apply_block_batch(&blocks, &mut light, &genesis)
+        dolos::state::apply_block_batch(&blocks, &light, &genesis)
             .into_diagnostic()
             .context("importing blocks to ledger store")?;
 
