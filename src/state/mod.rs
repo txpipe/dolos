@@ -121,13 +121,13 @@ impl LedgerStore {
         }
     }
 
-    pub fn apply(&mut self, deltas: &[LedgerDelta]) -> Result<(), LedgerError> {
+    pub fn apply(&self, deltas: &[LedgerDelta]) -> Result<(), LedgerError> {
         match self {
             LedgerStore::Redb(x) => x.apply(deltas),
         }
     }
 
-    pub fn finalize(&mut self, until: BlockSlot) -> Result<(), LedgerError> {
+    pub fn finalize(&self, until: BlockSlot) -> Result<(), LedgerError> {
         match self {
             LedgerStore::Redb(x) => x.finalize(until),
         }
@@ -215,7 +215,7 @@ pub fn load_slice_for_block(
 
 pub fn apply_block_batch<'a>(
     blocks: impl IntoIterator<Item = &'a MultiEraBlock<'a>>,
-    store: &mut LedgerStore,
+    store: &LedgerStore,
     genesis: &Genesis,
 ) -> Result<(), LedgerError> {
     let mut deltas: Vec<LedgerDelta> = vec![];
