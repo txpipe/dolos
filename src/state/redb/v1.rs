@@ -41,7 +41,7 @@ impl LedgerStore {
         tables::BlocksTable::last(&rx)
     }
 
-    pub fn apply(&mut self, deltas: &[LedgerDelta]) -> Result<(), Error> {
+    pub fn apply(&self, deltas: &[LedgerDelta]) -> Result<(), Error> {
         let mut wx = self.db().begin_write()?;
         wx.set_durability(Durability::Eventual);
 
@@ -57,7 +57,7 @@ impl LedgerStore {
         Ok(())
     }
 
-    pub fn finalize(&mut self, until: BlockSlot) -> Result<(), Error> {
+    pub fn finalize(&self, until: BlockSlot) -> Result<(), Error> {
         let rx = self.db().begin_read()?;
         let tss = tables::TombstonesTable::get_range(&rx, until)?;
 

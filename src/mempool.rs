@@ -211,7 +211,7 @@ impl Mempool {
         }
     }
 
-    pub fn apply_block(&mut self, block: &MultiEraBlock) {
+    pub fn apply_block(&self, block: &MultiEraBlock) {
         let mut state = self.mempool.write().unwrap();
 
         if state.acknowledged.is_empty() {
@@ -229,7 +229,7 @@ impl Mempool {
         }
     }
 
-    pub fn undo_block(&mut self, block: &MultiEraBlock) {
+    pub fn undo_block(&self, block: &MultiEraBlock) {
         let mut state = self.mempool.write().unwrap();
 
         if state.acknowledged.is_empty() {
