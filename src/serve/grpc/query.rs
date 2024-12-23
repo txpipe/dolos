@@ -225,12 +225,11 @@ impl u5c::query::query_service_server::QueryService for QueryServiceImpl {
 
         info!("received new grpc query");
 
-        let curr_point = match self.ledger.cursor()? {
-            Some(point) => point,
-            None => return Err(Status::internal("Uninitialized ledger.")),
-        };
+        let tip = self.ledger.cursor()?;
 
-        let updates: Vec<_> = self.ledger.get_pparams(curr_point.0)?;
+        let updates: Vec<_> = self
+            .ledger
+            .get_pparams(tip.as_ref().map(|p| p.0).unwrap_or_default())?;
 
         let updates: Vec<_> = updates
             .iter()
@@ -247,9 +246,9 @@ impl u5c::query::query_service_server::QueryService for QueryServiceImpl {
                 )
                 .into(),
             }),
-            ledger_tip: Some(u5c::query::ChainPoint {
-                slot: curr_point.0,
-                hash: curr_point.1.to_vec().into(),
+            ledger_tip: tip.map(|p| u5c::query::ChainPoint {
+                slot: p.0,
+                hash: p.1.to_vec().into(),
             }),
         };
 
