@@ -88,14 +88,14 @@ impl Default for StorageConfig {
     }
 }
 
+// TODO: add hash of genesis for runtime verification
 #[derive(Serialize, Deserialize)]
 pub struct GenesisConfig {
     byron_path: PathBuf,
     shelley_path: PathBuf,
     alonzo_path: PathBuf,
     conway_path: PathBuf,
-    // TODO: add hash of genesis for runtime verification
-    // hash: String,
+    force_protocol: Option<usize>,
 }
 
 impl Default for GenesisConfig {
@@ -105,6 +105,7 @@ impl Default for GenesisConfig {
             shelley_path: PathBuf::from("shelley.json"),
             alonzo_path: PathBuf::from("alonzo.json"),
             conway_path: PathBuf::from("conway.json"),
+            force_protocol: None,
         }
     }
 }
