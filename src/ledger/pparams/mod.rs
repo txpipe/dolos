@@ -549,7 +549,7 @@ pub fn fold_until_epoch(
             let version_change = byron_version_change.or(post_byron_version_change);
 
             if let Some(next_protocol) = version_change {
-                while summary.current_protocol_version() < next_protocol as usize {
+                while summary.current_protocol_version() < next_protocol {
                     let next_protocol = summary.current_protocol_version() + 1;
                     pparams = migrate_pparams(pparams, genesis, next_protocol);
                     summary.advance(epoch, &pparams);
@@ -656,8 +656,6 @@ mod tests {
             // TODO: implement serialize/deserialize, and get full protocol param json files
             let expected = load_json::<usize, _>(filename);
             let (_, summary) = fold_until_epoch(&genesis, &chained_updates, epoch);
-
-            dbg!(&summary);
 
             assert_eq!(expected, summary.current_protocol_version())
 
