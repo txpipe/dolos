@@ -19,7 +19,12 @@ macro_rules! apply_field {
     ($target:ident, $update:ident, $field:ident) => {
         paste::paste! {
             if let Some(new) = $update.[<first_proposed_ $field>]() {
-                warn!(?new, concat!("found new ", stringify!($param), " update proposal"));
+                debug!(
+                    ?new,
+                    param = stringify!($field),
+                    "found new update proposal"
+                );
+
                 $target.$field = new;
             }
         }
@@ -31,6 +36,7 @@ pub struct Genesis {
     pub shelley: shelley::GenesisFile,
     pub alonzo: alonzo::GenesisFile,
     pub conway: conway::GenesisFile,
+    pub force_protocol: Option<usize>,
 }
 
 fn bootstrap_byron_pparams(byron: &byron::GenesisFile) -> ByronProtParams {
@@ -282,21 +288,21 @@ fn apply_param_update(
     match current {
         MultiEraProtocolParameters::Byron(mut pparams) => {
             if let Some(new) = update.byron_proposed_block_version() {
-                warn!(?new, "found new block version");
+                debug!(?new, "found new block version");
                 pparams.block_version = new;
             }
 
             if let Some(pallas::ledger::primitives::byron::TxFeePol::Variant0(new)) =
                 update.byron_proposed_fee_policy()
             {
-                warn!("found new byron fee policy update proposal");
+                debug!("found new byron fee policy update proposal");
                 let (summand, multiplier) = new.unwrap();
                 pparams.summand = summand as u64;
                 pparams.multiplier = multiplier as u64;
             }
 
             if let Some(new) = update.byron_proposed_max_tx_size() {
-                warn!("found new byron max tx size update proposal");
+                debug!("found new byron max tx size update proposal");
                 pparams.max_tx_size = new;
             }
 
@@ -311,7 +317,6 @@ fn apply_param_update(
             apply_field!(pparams, update, key_deposit);
             apply_field!(pparams, update, pool_deposit);
             apply_field!(pparams, update, desired_number_of_stake_pools);
-            apply_field!(pparams, update, protocol_version);
             apply_field!(pparams, update, min_pool_cost);
             apply_field!(pparams, update, expansion_rate);
             apply_field!(pparams, update, treasury_growth_rate);
@@ -331,7 +336,6 @@ fn apply_param_update(
             apply_field!(pparams, update, key_deposit);
             apply_field!(pparams, update, pool_deposit);
             apply_field!(pparams, update, desired_number_of_stake_pools);
-            apply_field!(pparams, update, protocol_version);
             apply_field!(pparams, update, min_pool_cost);
             apply_field!(pparams, update, ada_per_utxo_byte);
             apply_field!(pparams, update, execution_costs);
@@ -367,7 +371,6 @@ fn apply_param_update(
             apply_field!(pparams, update, key_deposit);
             apply_field!(pparams, update, pool_deposit);
             apply_field!(pparams, update, desired_number_of_stake_pools);
-            apply_field!(pparams, update, protocol_version);
             apply_field!(pparams, update, min_pool_cost);
             apply_field!(pparams, update, ada_per_utxo_byte);
             apply_field!(pparams, update, execution_costs);
@@ -403,7 +406,6 @@ fn apply_param_update(
             apply_field!(pparams, update, key_deposit);
             apply_field!(pparams, update, pool_deposit);
             apply_field!(pparams, update, desired_number_of_stake_pools);
-            apply_field!(pparams, update, protocol_version);
             apply_field!(pparams, update, min_pool_cost);
             apply_field!(pparams, update, ada_per_utxo_byte);
             apply_field!(pparams, update, execution_costs);
@@ -441,7 +443,7 @@ fn apply_param_update(
     }
 }
 
-fn advance_hardfork(
+fn migrate_pparams(
     current: MultiEraProtocolParameters,
     genesis: &Genesis,
     next_protocol: usize,
@@ -485,11 +487,14 @@ fn advance_hardfork(
         MultiEraProtocolParameters::Babbage(current) if next_protocol == 8 => {
             MultiEraProtocolParameters::Babbage(current)
         }
-        // Protocol version 9 will transition from Babbage to Conway; not yet implemented
+        // Protocol version 9 transitions from Babbage to Conway
         MultiEraProtocolParameters::Babbage(current) if next_protocol == 9 => {
             MultiEraProtocolParameters::Conway(bootstrap_conway_pparams(current, &genesis.conway))
         }
-        _ => unimplemented!("don't know how to handle hardfork"),
+        x => unimplemented!(
+            "don't know how to handle hardfork (protocol: {})",
+            x.protocol_version()
+        ),
     }
 }
 
@@ -498,42 +503,53 @@ pub fn fold_until_epoch(
     updates: &[MultiEraUpdate],
     for_epoch: u64,
 ) -> (MultiEraProtocolParameters, ChainSummary) {
-    let mut pparams = match &updates[0] {
-        MultiEraUpdate::Byron(_, _) => {
-            debug!("Initializing with Byron parameters");
-            MultiEraProtocolParameters::Byron(bootstrap_byron_pparams(&genesis.byron))
-        }
-        _ => {
-            debug!("Initializing with Shelley parameters");
-            MultiEraProtocolParameters::Shelley(bootstrap_shelley_pparams(&genesis.shelley))
-        }
-    };
+    debug!("Initializing with Byron parameters");
+    let mut pparams = MultiEraProtocolParameters::Byron(bootstrap_byron_pparams(&genesis.byron));
 
     let mut summary = ChainSummary::start(&pparams);
 
-    let mut last_protocol = 0;
+    if let Some(force_protocol) = genesis.force_protocol {
+        while summary.current_protocol_version() < force_protocol {
+            let next_protocol = summary.current_protocol_version() + 1;
+            pparams = migrate_pparams(pparams, genesis, next_protocol);
+            summary.advance(0, &pparams);
+
+            debug!(
+                protocol = summary.current_protocol_version(),
+                "forced hardfork"
+            );
+        }
+    }
 
     for epoch in 1..for_epoch {
-        debug!("Processing epoch {}", epoch);
-
         let epoch_updates: Vec<_> = updates
             .iter()
             .filter(|e| e.epoch() == (epoch - 1))
             .collect();
 
-        debug!("Found {} updates for epoch {}", epoch_updates.len(), epoch);
+        if !epoch_updates.is_empty() {
+            debug!(
+                epoch,
+                count = epoch_updates.len(),
+                "found updates for epoch",
+            );
+        }
 
         for update in epoch_updates {
             pparams = apply_param_update(pparams, update);
-        }
 
-        for next_protocol in last_protocol + 1..=pparams.protocol_version() {
-            debug!("advancing hardfork {:?}", next_protocol);
-            pparams = advance_hardfork(pparams, genesis, next_protocol);
+            if let Some((next_protocol, _)) = update.first_proposed_protocol_version() {
+                while summary.current_protocol_version() < next_protocol as usize {
+                    let next_protocol = summary.current_protocol_version() + 1;
+                    pparams = migrate_pparams(pparams, genesis, next_protocol);
+                    summary.advance(epoch, &pparams);
 
-            summary.advance(epoch, &pparams);
-
-            last_protocol = next_protocol;
+                    debug!(
+                        protocol = summary.current_protocol_version(),
+                        "hardfork executed"
+                    );
+                }
+            }
         }
     }
 
@@ -577,6 +593,7 @@ mod tests {
             shelley: load_json(format!("{test_data}/genesis/shelley_genesis.json")),
             alonzo: load_json(format!("{test_data}/genesis/alonzo_genesis.json")),
             conway: load_json(format!("{test_data}/genesis/conway_genesis.json")),
+            force_protocol: None,
         };
 
         // Then load each mainnet example update proposal as buffers

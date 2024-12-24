@@ -118,6 +118,7 @@ pub fn open_genesis_files(config: &GenesisConfig) -> miette::Result<Genesis> {
         shelley: shelley_genesis,
         alonzo: alonzo_genesis,
         conway: conway_genesis,
+        force_protocol: config.force_protocol,
     })
 }
 

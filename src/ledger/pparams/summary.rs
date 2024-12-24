@@ -56,15 +56,21 @@ impl ChainSummary {
             timestamp: end_timestamp,
         };
 
+        let next_protocol = current.protocol_version + 1;
+
         current.end = Some(boundary.clone());
         self.past.push(current);
 
         self.current = Some(EraSummary {
             start: boundary.clone(),
             end: None,
-            protocol_version: pparams.protocol_version(),
+            protocol_version: next_protocol,
             epoch_length: pparams.epoch_length(),
             slot_length: pparams.slot_length(),
         });
+    }
+
+    pub fn current_protocol_version(&self) -> usize {
+        self.current.as_ref().unwrap().protocol_version
     }
 }
