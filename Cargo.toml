@@ -67,6 +67,18 @@ paste = "1.0.15"
 tower-http = { version = "0.6.1", features = ["cors"] }
 chrono = { version = "0.4.39", default-features = false }
 
+[target.'cfg(not(windows))'.dependencies.mithril-client]
+version = "0.10.4"
+optional = true
+default-features = false
+features = ["fs", "rug-backend", "rustls-tls", "rustls-tls-webpki-roots"]
+
+[target.'cfg(windows)'.dependencies.mithril-client]
+version = "0.10.4"
+optional = true
+default-features = false
+features = ["fs", "num-integer-backend", "rustls-tls", "rustls-tls-native-roots"]
+
 [dev-dependencies]
 tempfile = "3.3.0"
 
