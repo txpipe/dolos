@@ -1,3 +1,5 @@
+use crate::ledger::UtxoMap;
+
 use super::{error::Error, to_plutus_data::MintValue};
 use itertools::Itertools;
 use pallas::codec::utils::{
@@ -11,10 +13,10 @@ use pallas::ledger::primitives::{
     conway::{
         AddrKeyhash, Certificate, Coin, DatumHash, DatumOption, GovAction, GovActionId, Mint,
         MintedTransactionBody, MintedTransactionOutput, MintedTx, MintedWitnessSet, NativeScript,
-        PlutusData, PlutusScript, PolicyId,
-        PostAlonzoTransactionOutput, ProposalProcedure, PseudoDatumOption, PseudoScript, Redeemer,
-        RedeemerTag, RedeemersKey, RequiredSigners, RewardAccount, ScriptHash, StakeCredential,
-        TransactionInput, TransactionOutput, Value, Voter, VotingProcedure,
+        PlutusData, PlutusScript, PolicyId, PostAlonzoTransactionOutput, ProposalProcedure,
+        PseudoDatumOption, PseudoScript, Redeemer, RedeemerTag, RedeemersKey, RequiredSigners,
+        RewardAccount, ScriptHash, StakeCredential, TransactionInput, TransactionOutput, Value,
+        Voter, VotingProcedure,
     },
 };
 use pallas::ledger::traverse::{ComputeHash, OriginalHash};
@@ -46,8 +48,8 @@ pub fn output_datum(output: &TransactionOutput) -> Option<DatumOption> {
     }
 }
 
-/// The ScriptPurpose is part of the ScriptContext is the case of Plutus V1 and V2.
-/// It is superseded by the ScriptInfo in PlutusV3.
+/// The ScriptPurpose is part of the ScriptContext is the case of Plutus V1 and
+/// V2. It is superseded by the ScriptInfo in PlutusV3.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum ScriptInfo<T> {
     Minting(PolicyId),
@@ -484,7 +486,7 @@ pub struct TimeRange {
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct SlotConfig {
-    pub slot_length: u32,
+    pub slot_length: u64,
     pub zero_slot: u64,
     pub zero_time: u64,
 }

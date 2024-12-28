@@ -12,9 +12,9 @@ authors = ["Santiago Carmuega <santiago@carmuega.me>"]
 
 
 [dependencies]
-pallas = { git = "https://github.com/txpipe/pallas.git", features = ["hardano", "applying"] }
+# pallas = { git = "https://github.com/txpipe/pallas.git", features = ["hardano", "applying"] }
 # pallas = { version = "^0.30.1", features = ["hardano", "applying"] }
-# pallas = { path = "../pallas/pallas", features = ["hardano", "applying"] }
+pallas = { path = "../pallas/pallas", features = ["hardano", "applying"] }
 
 gasket = { git = "https://github.com/construkts/gasket-rs.git", features = ["derive"] }
 # gasket = { version = "^0.8", features = ["derive"] }
@@ -61,11 +61,11 @@ paste = "1.0.15"
 tower-http = { version = "0.6.1", features = ["cors"] }
 chrono = { version = "0.4.39", default-features = false }
 
-# UPLC dependencies
+# phase2 dependencies
 uplc = { git = "https://github.com/pragma-org/uplc.git", optional = true }
-blst = "=0.3.13"
-rug = "1.26.1"
-num-integer = "0.1.46"
+blst = { version = "=0.3.13", optional = true }
+rug = { version = "1.26.1", optional = true }
+num-integer = { version = "0.1.46", optional = true }
 
 [target.'cfg(not(windows))'.dependencies.mithril-client]
 version = "0.10.4"
@@ -86,8 +86,9 @@ tempfile = "3.3.0"
 mithril = ["mithril-client"]
 utils = ["comfy-table", "inquire", "toml"]
 debug = ["console-subscriber", "tokio/tracing"]
-default = ["mithril", "utils"]
-unstable = ["uplc"]
+phase2 = ["uplc", "blst", "num-integer", "rug"]
+unstable = ["phase2"]
+default = ["mithril", "utils", "phase2"]
 
 # The profile that 'cargo dist' will build with
 [profile.dist]

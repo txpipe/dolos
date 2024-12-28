@@ -4,47 +4,34 @@ use futures_util::{StreamExt as _, TryStreamExt as _};
 use pallas::codec::minicbor::{self};
 use pallas::crypto::hash::Hash;
 use pallas::interop::utxorpc as interop;
+use pallas::interop::utxorpc as u5c;
 use pallas::interop::utxorpc::spec::cardano::{ExUnits, TxEval};
-use pallas::interop::utxorpc::spec::query::any_chain_params::Params;
-use pallas::interop::utxorpc::spec::query::query_service_server::QueryService;
-use pallas::interop::utxorpc::spec::query::ReadParamsRequest;
 use pallas::interop::utxorpc::spec::submit::{WaitForTxResponse, *};
-use pallas::ledger::primitives::conway::{MintedTx, TransactionInput};
-use pallas::ledger::traverse::wellknown::GenesisValues;
 use std::collections::HashSet;
-use std::convert::TryInto;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio_stream::wrappers::BroadcastStream;
 use tonic::{Request, Response, Status};
 use tracing::info;
 
-use crate::ledger::TxoRef;
+use crate::ledger::pparams::Genesis;
 use crate::mempool::{Event, Mempool, UpdateFilter};
-use crate::serve::grpc::query::QueryServiceImpl;
-use crate::serve::GenesisFiles;
 use crate::state::LedgerStore;
-#[cfg(feature = "unstable")]
-use crate::uplc::script_context::{ResolvedInput, SlotConfig};
-#[cfg(feature = "unstable")]
-use crate::uplc::tx::eval_tx;
-use pallas::interop::utxorpc as u5c;
-use pallas::ledger::primitives::conway::Redeemer;
 
 pub struct SubmitServiceImpl {
     mempool: Mempool,
     ledger: LedgerStore,
     _mapper: interop::Mapper<LedgerStore>,
-    genesis_files: Arc<GenesisFiles>,
+    genesis: Arc<Genesis>,
 }
 
 impl SubmitServiceImpl {
-    pub fn new(mempool: Mempool, ledger: LedgerStore, genesis_files: Arc<GenesisFiles>) -> Self {
+    pub fn new(mempool: Mempool, ledger: LedgerStore, genesis: Arc<Genesis>) -> Self {
         Self {
             mempool,
             ledger: ledger.clone(),
             _mapper: interop::Mapper::new(ledger),
-            genesis_files,
+            genesis,
         }
     }
 }
@@ -90,101 +77,19 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
         &self,
         request: Request<SubmitTxRequest>,
     ) -> Result<Response<SubmitTxResponse>, Status> {
-        fn resolve_inputs(
-            ledger: &LedgerStore,
-            tx_cbor: &[u8],
-        ) -> Result<Vec<ResolvedInput>, Status> {
-            let minted_tx: MintedTx = minicbor::decode(tx_cbor).unwrap();
-            let ref_is_empty = minted_tx.transaction_body.reference_inputs.is_none();
-            if ref_is_empty {
-                return Ok(vec![]);
-            }
-            let input_refs: Vec<TxoRef> = minted_tx
-                .transaction_body
-                .inputs
-                .iter()
-                .map(|x| TxoRef(x.transaction_id, x.index.try_into().unwrap()))
-                .chain(
-                    minted_tx
-                        .transaction_body
-                        .reference_inputs
-                        .clone()
-                        .unwrap()
-                        .iter()
-                        .map(|x| TxoRef(x.transaction_id, x.index.try_into().unwrap())),
-                )
-                .collect();
-
-            let utxos = ledger
-                .get_utxos(input_refs)
-                .map_err(|e| Status::invalid_argument(e.to_string()))?;
-
-            let resolved_inputs = utxos
-                .into_iter()
-                .map(|(txo_ref, utxo_cbor)| {
-                    let output = minicbor::decode(&utxo_cbor.1)
-                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
-                    Ok(ResolvedInput {
-                        input: TransactionInput {
-                            transaction_id: txo_ref.0,
-                            index: txo_ref.1.into(),
-                        },
-                        output,
-                    })
-                })
-                .collect::<Result<Vec<_>, Status>>()?;
-
-            Ok(resolved_inputs)
-        }
-
         let message = request.into_inner();
 
         info!("received new grpc submit tx request: {:?}", message);
-
-        let query_service =
-            QueryServiceImpl::new(self.ledger.clone(), Arc::clone(&self.genesis_files));
-
-        let params = query_service
-            .read_params(tonic::Request::new(ReadParamsRequest {
-                field_mask: Default::default(),
-            }))
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?
-            .into_inner()
-            .values
-            .ok_or_else(|| Status::internal("Could not retrieve protocol parameters."))?
-            .params
-            .ok_or_else(|| Status::internal("Could not retrieve protocol parameters."))?;
-
-        let network_magic = self
-            .genesis_files
-            .2
-            .network_magic
-            .ok_or_else(|| Status::internal("networkMagic missing in shelley genesis."))?
-            .into();
-
-        let genesis_values = GenesisValues::from_magic(network_magic)
-            .ok_or_else(|| Status::internal("Could not retrieve genesis values."))?;
-
-        let slot_config = SlotConfig {
-            slot_length: genesis_values.shelley_slot_length,
-            zero_slot: genesis_values.shelley_known_slot,
-            zero_time: genesis_values.shelley_known_time,
-        };
 
         let mut hashes = vec![];
         for (idx, tx_bytes) in message.tx.into_iter().flat_map(|x| x.r#type).enumerate() {
             match tx_bytes {
                 any_chain_tx::Type::Raw(bytes) => {
-                    let utxos = resolve_inputs(&self.ledger, bytes.as_ref()).unwrap();
-                    let hash = self
-                        .mempool
-                        .receive_raw(bytes.as_ref(), &utxos, &params, &slot_config)
-                        .map_err(|e| {
-                            Status::invalid_argument(
-                                format! {"could not process tx at index {idx}: {e}"},
-                            )
-                        })?;
+                    let hash = self.mempool.receive_raw(bytes.as_ref()).map_err(|e| {
+                        Status::invalid_argument(
+                            format! {"could not process tx at index {idx}: {e}"},
+                        )
+                    })?;
                     hashes.push(hash.to_vec().into());
                 }
             }
@@ -229,7 +134,7 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
         &self,
         _request: tonic::Request<ReadMempoolRequest>,
     ) -> Result<tonic::Response<ReadMempoolResponse>, tonic::Status> {
-        todo!()
+        Err(Status::unimplemented("read_mempool is not yet available"))
     }
 
     async fn watch_mempool(
@@ -246,88 +151,11 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
         Ok(Response::new(stream))
     }
 
-    #[cfg(feature = "unstable")]
+    #[cfg(feature = "phase2")]
     async fn eval_tx(
         &self,
         request: tonic::Request<EvalTxRequest>,
     ) -> Result<tonic::Response<EvalTxResponse>, tonic::Status> {
-        fn do_eval_tx(
-            ledger: &LedgerStore,
-            tx_cbor: &[u8],
-            params: &Params,
-            slot_config: &SlotConfig,
-        ) -> Result<Vec<Redeemer>, Status> {
-            let minted_tx: MintedTx = minicbor::decode(tx_cbor).unwrap();
-            let input_refs: Vec<TxoRef> = minted_tx
-                .transaction_body
-                .inputs
-                .iter()
-                .map(|x| TxoRef(x.transaction_id, x.index.try_into().unwrap()))
-                .chain(
-                    minted_tx
-                        .transaction_body
-                        .reference_inputs
-                        .clone()
-                        .unwrap()
-                        .iter()
-                        .map(|x| TxoRef(x.transaction_id, x.index.try_into().unwrap())),
-                )
-                .collect();
-
-            let utxos = ledger
-                .get_utxos(input_refs)
-                .map_err(|e| Status::invalid_argument(e.to_string()))?;
-
-            let resolved_inputs = utxos
-                .into_iter()
-                .map(|(txo_ref, utxo_cbor)| {
-                    let output = minicbor::decode(&utxo_cbor.1)
-                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
-                    Ok(ResolvedInput {
-                        input: TransactionInput {
-                            transaction_id: txo_ref.0,
-                            index: txo_ref.1.into(),
-                        },
-                        output,
-                    })
-                })
-                .collect::<Result<Vec<_>, Status>>()?;
-
-            eval_tx(&minted_tx, params, &resolved_inputs, slot_config)
-                .map_err(|e| Status::internal(e.to_string()))
-        }
-
-        let query_service =
-            QueryServiceImpl::new(self.ledger.clone(), Arc::clone(&self.genesis_files));
-
-        let params = query_service
-            .read_params(tonic::Request::new(ReadParamsRequest {
-                field_mask: Default::default(),
-            }))
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?
-            .into_inner()
-            .values
-            .ok_or_else(|| Status::internal("Could not retrieve protocol parameters."))?
-            .params
-            .ok_or_else(|| Status::internal("Could not retrieve protocol parameters."))?;
-
-        let network_magic = self
-            .genesis_files
-            .2
-            .network_magic
-            .ok_or_else(|| Status::internal("networkMagic missing in shelley genesis."))?
-            .into();
-
-        let genesis_values = GenesisValues::from_magic(network_magic)
-            .ok_or_else(|| Status::internal("Could not retrieve genesis values."))?;
-
-        let slot_config = SlotConfig {
-            slot_length: genesis_values.shelley_slot_length,
-            zero_slot: genesis_values.shelley_known_slot,
-            zero_time: genesis_values.shelley_known_time,
-        };
-
         let txs_raw: Vec<Vec<u8>> = request
             .into_inner()
             .tx
@@ -342,14 +170,19 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
             .collect();
 
         let mapper = u5c::Mapper::new(self.ledger.clone());
+
         let eval_results = txs_raw
             .iter()
             .map(|tx_cbor| {
-                let result = do_eval_tx(&self.ledger, tx_cbor, &params, &slot_config);
-                result.map(|r| AnyChainEval {
+                let result = self
+                    .mempool
+                    .evaluate_raw(tx_cbor)
+                    .map_err(|e| Status::internal(format!("could not evaluate tx: {e}")))?;
+
+                let result = AnyChainEval {
                     chain: Some(Chain::Cardano(TxEval {
                         fee: 0,
-                        ex_units: r.iter().try_fold(
+                        ex_units: result.iter().try_fold(
                             ExUnits {
                                 steps: 0,
                                 memory: 0,
@@ -361,8 +194,8 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
                                 })
                             },
                         ),
-                        redeemers: r
-                            .iter()
+                        redeemers: result
+                            .into_iter()
                             .map(|redeemer| u5c::spec::cardano::Redeemer {
                                 purpose: redeemer.tag as i32,
                                 index: redeemer.index,
@@ -377,7 +210,9 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
                         errors: vec![],
                         traces: vec![],
                     })),
-                })
+                };
+
+                Ok(result)
             })
             .collect::<Result<Vec<_>, Status>>()?;
 
@@ -386,11 +221,13 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
         }))
     }
 
-    #[cfg(not(feature = "unstable"))]
+    #[cfg(not(feature = "phase2"))]
     async fn eval_tx(
         &self,
         _request: tonic::Request<EvalTxRequest>,
     ) -> Result<tonic::Response<EvalTxResponse>, Status> {
-        Err(Status::unimplemented("eval_tx is not yet available"))
+        Err(Status::unimplemented(
+            "phase2 is not enabled on this Dolos binary",
+        ))
     }
 }

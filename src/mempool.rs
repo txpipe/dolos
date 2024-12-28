@@ -1,21 +1,20 @@
-use std::{
-    collections::{HashMap, HashSet},
-    sync::{Arc, RwLock},
-};
-use crate::uplc::{
-    script_context::{ResolvedInput, SlotConfig},
-    tx,
+use crate::{
+    ledger::pparams::Genesis,
+    state::LedgerStore,
+    uplc::{
+        script_context::{ResolvedInput, SlotConfig},
+        tx, EvalReport,
+    },
 };
 use futures_util::StreamExt;
 use itertools::Itertools;
 use pallas::{
-    codec::minicbor,
     crypto::hash::Hash,
-    interop::utxorpc::spec::query::any_chain_params::Params,
-    ledger::{
-        primitives::conway::MintedTx,
-        traverse::{MultiEraBlock, MultiEraTx},
-    },
+    ledger::traverse::{MultiEraBlock, MultiEraOutput, MultiEraTx},
+};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, RwLock},
 };
 use thiserror::Error;
 use tokio::sync::broadcast;
@@ -26,11 +25,21 @@ type TxHash = Hash<32>;
 
 #[derive(Debug, Error)]
 pub enum MempoolError {
-    #[error("decode error: {0}")]
-    DecodeError(pallas::ledger::traverse::Error),
+    #[error("traverse error: {0}")]
+    TraverseError(pallas::ledger::traverse::Error),
 
+    #[error("decode error: {0}")]
+    DecodeError(pallas::codec::minicbor::decode::Error),
+
+    #[cfg(feature = "phase2")]
     #[error("tx evaluation failed")]
-    EvaluationError,
+    EvaluationError(crate::uplc::error::Error),
+
+    #[error("state error: {0}")]
+    StateError(crate::state::LedgerError),
+
+    #[error("plutus not supported")]
+    PlutusNotSupported,
 
     #[error("invalid tx: {0}")]
     InvalidTx(String),
@@ -38,7 +47,25 @@ pub enum MempoolError {
 
 impl From<pallas::ledger::traverse::Error> for MempoolError {
     fn from(value: pallas::ledger::traverse::Error) -> Self {
+        Self::TraverseError(value)
+    }
+}
+
+impl From<pallas::codec::minicbor::decode::Error> for MempoolError {
+    fn from(value: pallas::codec::minicbor::decode::Error) -> Self {
         Self::DecodeError(value)
+    }
+}
+
+impl From<crate::uplc::error::Error> for MempoolError {
+    fn from(value: crate::uplc::error::Error) -> Self {
+        Self::EvaluationError(value)
+    }
+}
+
+impl From<crate::state::LedgerError> for MempoolError {
+    fn from(value: crate::state::LedgerError) -> Self {
+        Self::StateError(value)
     }
 }
 
@@ -78,20 +105,21 @@ struct MempoolState {
 pub struct Mempool {
     mempool: Arc<RwLock<MempoolState>>,
     updates: broadcast::Sender<Event>,
-}
-
-impl Default for Mempool {
-    fn default() -> Self {
-        Self::new()
-    }
+    genesis: Arc<Genesis>,
+    ledger: LedgerStore,
 }
 
 impl Mempool {
-    pub fn new() -> Self {
+    pub fn new(genesis: Arc<Genesis>, ledger: LedgerStore) -> Self {
         let mempool = Arc::new(RwLock::new(MempoolState::default()));
         let (updates, _) = broadcast::channel(16);
 
-        Self { mempool, updates }
+        Self {
+            mempool,
+            updates,
+            genesis,
+            ledger,
+        }
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<Event> {
@@ -118,28 +146,64 @@ impl Mempool {
         );
     }
 
-    pub fn receive_raw(
-        &self,
-        cbor: &[u8],
-        utxos: &[ResolvedInput],
-        protocol_params: &Params,
-        slot_config: &SlotConfig,
-    ) -> Result<TxHash, MempoolError> {
-        let decoded = MultiEraTx::decode(cbor)?;
-        let minted_tx: MintedTx = minicbor::decode(cbor).unwrap();
-        let hash = decoded.hash();
-        
-        if utxos.len() > 0 {
-            let eval_tx = tx::eval_tx(&minted_tx, protocol_params, &utxos, slot_config).is_ok();
-            
-            if !eval_tx {
-                return Err(MempoolError::EvaluationError);
-            }
+    #[cfg(feature = "phase2")]
+    pub fn evaluate(&self, tx: &MultiEraTx) -> Result<EvalReport, MempoolError> {
+        let tip = self.ledger.cursor()?;
+
+        let updates: Vec<_> = self
+            .ledger
+            .get_pparams(tip.as_ref().map(|p| p.0).unwrap_or_default())?;
+
+        let updates: Vec<_> = updates.into_iter().map(TryInto::try_into).try_collect()?;
+
+        let (pparams, eras) = crate::ledger::pparams::fold(&self.genesis, &updates);
+
+        let slot_config = SlotConfig {
+            slot_length: eras.current().slot_length,
+            zero_slot: eras.current().start.slot,
+            zero_time: eras
+                .current()
+                .start
+                .timestamp
+                .timestamp()
+                .try_into()
+                .unwrap(),
+        };
+
+        let input_refs = tx.requires().iter().map(From::from).collect();
+
+        let utxos = self.ledger.get_utxos(input_refs)?;
+
+        let report = tx::eval_tx(&tx.as_conway().unwrap(), &pparams, &utxos, &slot_config)?;
+
+        Ok(report)
+    }
+
+    #[cfg(feature = "phase2")]
+    pub fn evaluate_raw(&self, cbor: &[u8]) -> Result<EvalReport, MempoolError> {
+        let tx = MultiEraTx::decode(cbor)?;
+        self.evaluate(&tx)
+    }
+
+    pub fn receive_raw(&self, cbor: &[u8]) -> Result<TxHash, MempoolError> {
+        let tx = MultiEraTx::decode(cbor)?;
+
+        #[cfg(feature = "phase2")]
+        self.evaluate(&tx)?;
+
+        // if we don't have phase-2 enabled, we reject txs before propagating something
+        // that could result in collateral loss
+        #[cfg(not(feature = "phase2"))]
+        if !decoded.redeemers().is_empty() {
+            return Err(MempoolError::PlutusNotSupported);
         }
+
+        let hash = tx.hash();
 
         let tx = Tx {
             hash,
-            era: u16::from(decoded.era()) - 1,
+            // TODO: this is a hack to make the era compatible with the ledger
+            era: u16::from(tx.era()) - 1,
             bytes: cbor.into(),
             confirmed: false,
         };

@@ -105,7 +105,7 @@ impl LedgerStore {
         tables::UtxosTable::get_sparse(&rx, refs)
     }
 
-    pub fn get_pparams(&self, until: BlockSlot) -> Result<Vec<PParamsBody>, Error> {
+    pub fn get_pparams(&self, until: BlockSlot) -> Result<Vec<EraCbor>, Error> {
         let rx = self.db().begin_read()?;
         tables::PParamsTable::get_range(&rx, until)
     }

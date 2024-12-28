@@ -70,7 +70,8 @@ impl ChainSummary {
         });
     }
 
-    pub fn current_protocol_version(&self) -> usize {
-        self.current.as_ref().unwrap().protocol_version
+    pub fn current(&self) -> &EraSummary {
+        // safe to unwrap since it's a business invariant
+        self.current.as_ref().unwrap()
     }
 }

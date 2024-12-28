@@ -36,19 +36,16 @@ pub async fn serve(
 ) -> Result<(), Error> {
     let addr = config.listen_address.parse().unwrap();
 
-    let genesis_files = Arc::new(genesis_files);
-
     let sync_service = sync::SyncServiceImpl::new(wal.clone(), ledger.clone());
     let sync_service = u5c::sync::sync_service_server::SyncServiceServer::new(sync_service);
 
-    let query_service = query::QueryServiceImpl::new(ledger.clone(), genesis);
+    let query_service = query::QueryServiceImpl::new(ledger.clone(), genesis.clone());
     let query_service = u5c::query::query_service_server::QueryServiceServer::new(query_service);
 
     let watch_service = watch::WatchServiceImpl::new(wal.clone(), ledger.clone());
     let watch_service = u5c::watch::watch_service_server::WatchServiceServer::new(watch_service);
 
-    let submit_service =
-        submit::SubmitServiceImpl::new(mempool, ledger.clone(), Arc::clone(&genesis_files));
+    let submit_service = submit::SubmitServiceImpl::new(mempool, ledger.clone(), genesis.clone());
     let submit_service =
         u5c::submit::submit_service_server::SubmitServiceServer::new(submit_service);
 
