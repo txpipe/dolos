@@ -1,7 +1,6 @@
 use any_chain_eval::Chain;
 use futures_core::Stream;
 use futures_util::{StreamExt as _, TryStreamExt as _};
-use pallas::codec::minicbor::{self};
 use pallas::crypto::hash::Hash;
 use pallas::interop::utxorpc as interop;
 use pallas::interop::utxorpc as u5c;
@@ -9,29 +8,23 @@ use pallas::interop::utxorpc::spec::cardano::{ExUnits, TxEval};
 use pallas::interop::utxorpc::spec::submit::{WaitForTxResponse, *};
 use std::collections::HashSet;
 use std::pin::Pin;
-use std::sync::Arc;
 use tokio_stream::wrappers::BroadcastStream;
 use tonic::{Request, Response, Status};
 use tracing::info;
 
-use crate::ledger::pparams::Genesis;
-use crate::mempool::{Event, Mempool, UpdateFilter};
+use crate::mempool::{Event, Mempool, MempoolError, UpdateFilter};
 use crate::state::LedgerStore;
 
 pub struct SubmitServiceImpl {
     mempool: Mempool,
-    ledger: LedgerStore,
     _mapper: interop::Mapper<LedgerStore>,
-    genesis: Arc<Genesis>,
 }
 
 impl SubmitServiceImpl {
-    pub fn new(mempool: Mempool, ledger: LedgerStore, genesis: Arc<Genesis>) -> Self {
+    pub fn new(mempool: Mempool, ledger: LedgerStore) -> Self {
         Self {
             mempool,
-            ledger: ledger.clone(),
             _mapper: interop::Mapper::new(ledger),
-            genesis,
         }
     }
 }
@@ -62,6 +55,44 @@ fn event_to_wait_for_tx_response(event: Event) -> WaitForTxResponse {
     WaitForTxResponse {
         stage: tx_stage_to_u5c(event.new_stage),
         r#ref: event.tx.hash.to_vec().into(),
+    }
+}
+
+fn tx_eval_to_u5c(
+    eval: Result<crate::uplc::EvalReport, MempoolError>,
+) -> u5c::spec::cardano::TxEval {
+    match eval {
+        Ok(eval) => u5c::spec::cardano::TxEval {
+            ex_units: eval
+                .iter()
+                .try_fold(u5c::spec::cardano::ExUnits::default(), |acc, eval| {
+                    Some(ExUnits {
+                        steps: acc.steps + eval.units.steps,
+                        memory: acc.memory + eval.units.mem,
+                    })
+                }),
+            redeemers: eval
+                .iter()
+                .map(|x| u5c::spec::cardano::Redeemer {
+                    purpose: x.tag as i32,
+                    index: x.index,
+                    ex_units: Some(u5c::spec::cardano::ExUnits {
+                        steps: x.units.steps,
+                        memory: x.units.mem,
+                    }),
+                    ..Default::default()
+                })
+                .collect(),
+            fee: 0,         // TODO
+            traces: vec![], // TODO
+            ..Default::default()
+        },
+        Err(e) => u5c::spec::cardano::TxEval {
+            errors: vec![u5c::spec::cardano::EvalError {
+                msg: format!("{:#?}", e),
+            }],
+            ..Default::default()
+        },
     }
 }
 
@@ -169,52 +200,17 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
             })
             .collect();
 
-        let mapper = u5c::Mapper::new(self.ledger.clone());
-
-        let eval_results = txs_raw
+        let eval_results: Vec<_> = txs_raw
             .iter()
             .map(|tx_cbor| {
-                let result = self
-                    .mempool
-                    .evaluate_raw(tx_cbor)
-                    .map_err(|e| Status::internal(format!("could not evaluate tx: {e}")))?;
+                let result = self.mempool.evaluate_raw(tx_cbor);
+                let result = tx_eval_to_u5c(result);
 
-                let result = AnyChainEval {
-                    chain: Some(Chain::Cardano(TxEval {
-                        fee: 0,
-                        ex_units: result.iter().try_fold(
-                            ExUnits {
-                                steps: 0,
-                                memory: 0,
-                            },
-                            |acc, redeemer| {
-                                Some(ExUnits {
-                                    steps: acc.steps + redeemer.ex_units.steps,
-                                    memory: acc.memory + redeemer.ex_units.mem,
-                                })
-                            },
-                        ),
-                        redeemers: result
-                            .into_iter()
-                            .map(|redeemer| u5c::spec::cardano::Redeemer {
-                                purpose: redeemer.tag as i32,
-                                index: redeemer.index,
-                                payload: Some(mapper.map_plutus_datum(&redeemer.data)),
-                                ex_units: Some(u5c::spec::cardano::ExUnits {
-                                    steps: redeemer.ex_units.steps,
-                                    memory: redeemer.ex_units.mem,
-                                }),
-                                original_cbor: minicbor::to_vec(redeemer).unwrap().into(),
-                            })
-                            .collect(),
-                        errors: vec![],
-                        traces: vec![],
-                    })),
-                };
-
-                Ok(result)
+                AnyChainEval {
+                    chain: Some(Chain::Cardano(result)),
+                }
             })
-            .collect::<Result<Vec<_>, Status>>()?;
+            .collect();
 
         Ok(Response::new(EvalTxResponse {
             report: eval_results,

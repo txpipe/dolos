@@ -19,18 +19,20 @@ use pallas::{
     applying::MultiEraProtocolParameters,
     ledger::{
         primitives::{
-            conway::{MintedTx, Redeemer, Redeemers, RedeemersKey, RedeemersValue},
-            PlutusData,
+            conway::{Redeemer, RedeemerTag},
+            ExUnits, PlutusData,
         },
-        traverse::MultiEraOutput,
+        traverse::{MultiEraRedeemer, MultiEraTx},
     },
 };
 use rug::{ops::NegAssign, Complete, Integer};
+use tracing::{debug, instrument};
 use uplc::{binder::DeBruijn, bumpalo::Bump, data::PlutusData as PragmaPlutusData, term::Term};
 
 pub struct TxEvalResult {
-    pub cpu: i64,
-    pub mem: i64,
+    pub tag: RedeemerTag,
+    pub index: u32,
+    pub units: ExUnits,
 }
 
 pub fn map_pallas_data_to_pragma_data<'a>(
@@ -103,11 +105,11 @@ pub fn plutus_data_to_pragma_term<'a>(
 }
 
 pub fn eval_tx(
-    tx: &MintedTx,
+    tx: &MultiEraTx,
     _pparams: &MultiEraProtocolParameters, // For Cost Models
     utxos: &UtxoMap,
     slot_config: &SlotConfig,
-) -> Result<Vec<Redeemer>, Error> {
+) -> Result<Vec<TxEvalResult>, Error> {
     let utxos = utxos
         .into_iter()
         .map(|(txoref, eracbor)| {
@@ -123,59 +125,17 @@ pub fn eval_tx(
 
     let lookup_table = DataLookupTable::from_transaction(tx, &utxos);
 
-    let redeemers = tx
-        .transaction_witness_set
-        .redeemer
-        .as_ref()
-        .unwrap()
-        .deref();
-
-    let redeemers = match redeemers {
-        Redeemers::List(arr) => arr
-            .deref()
-            .iter()
-            .map(|r| {
-                (
-                    RedeemersKey {
-                        tag: r.tag,
-                        index: r.index,
-                    },
-                    RedeemersValue {
-                        data: r.data.clone(),
-                        ex_units: r.ex_units,
-                    },
-                )
-            })
-            .collect(),
-        Redeemers::Map(arr) => arr.deref().clone(),
-    };
+    let redeemers = tx.redeemers();
 
     let redeemers = redeemers
         .iter()
-        .map(|(k, v)| Redeemer {
-            tag: k.tag,
-            index: k.index,
-            data: v.data.clone(),
-            ex_units: v.ex_units,
-        })
-        .into_iter()
-        .map(
-            |redeemer| match eval_redeemer(&redeemer, tx, &utxos, &lookup_table, slot_config) {
-                Ok(result) => {
-                    let mut updated_redeemer = redeemer.clone();
-                    updated_redeemer.ex_units.steps = result.cpu as u64;
-                    updated_redeemer.ex_units.mem = result.mem as u64;
-                    Ok(updated_redeemer)
-                }
-                Err(e) => Err(e),
-            },
-        )
+        .map(|r| eval_redeemer(&r, tx, &utxos, &lookup_table, slot_config))
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(redeemers)
 }
 
-fn do_eval(
+fn execute_script(
     tx_info: TxInfo,
     script_bytes: &[u8],
     datum: Option<PlutusData>,
@@ -214,40 +174,53 @@ fn do_eval(
     let result = program.eval(&arena);
 
     Ok(TxEvalResult {
-        cpu: result.info.consumed_budget.cpu * 11 / 10,
-        mem: result.info.consumed_budget.mem * 11 / 10,
+        tag: redeemer.tag,
+        index: redeemer.index,
+        units: ExUnits {
+            steps: (result.info.consumed_budget.cpu * 11 / 10) as u64,
+            mem: (result.info.consumed_budget.mem * 11 / 10) as u64,
+        },
     })
 }
 
+#[instrument(skip_all, fields(tag = ?redeemer.tag(), index = redeemer.index()))]
 pub fn eval_redeemer(
-    redeemer: &Redeemer,
-    tx: &MintedTx,
+    redeemer: &MultiEraRedeemer,
+    tx: &MultiEraTx,
     utxos: &[ResolvedInput],
     lookup_table: &DataLookupTable,
     slot_config: &SlotConfig,
 ) -> Result<TxEvalResult, Error> {
-    match find_script(redeemer, tx, utxos, lookup_table)? {
+    // TODO: trickle down the use of MultiEraX structs instead of dealing with
+    // primitives directly. For now, we'll just downcast to Conway era.
+
+    let tx = tx.as_conway().ok_or(Error::WrongEra())?;
+    let redeemer = redeemer.into_conway_deprecated().ok_or(Error::WrongEra())?;
+
+    debug!("evaluating redeemer");
+
+    match find_script(&redeemer, tx, utxos, lookup_table)? {
         (ScriptVersion::Native(_), _) => Err(Error::NativeScriptPhaseTwo),
 
-        (ScriptVersion::V1(script), datum) => Ok(do_eval(
+        (ScriptVersion::V1(script), datum) => Ok(execute_script(
             TxInfoV1::from_transaction(tx, utxos, slot_config)?,
             script.as_ref(),
             datum,
-            redeemer,
+            &redeemer,
         )?),
 
-        (ScriptVersion::V2(script), datum) => Ok(do_eval(
+        (ScriptVersion::V2(script), datum) => Ok(execute_script(
             TxInfoV2::from_transaction(tx, utxos, slot_config)?,
             script.as_ref(),
             datum,
-            redeemer,
+            &redeemer,
         )?),
 
-        (ScriptVersion::V3(script), datum) => Ok(do_eval(
+        (ScriptVersion::V3(script), datum) => Ok(execute_script(
             TxInfoV3::from_transaction(tx, utxos, slot_config)?,
             script.as_ref(),
             datum,
-            redeemer,
+            &redeemer,
         )?),
     }
 }

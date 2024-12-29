@@ -26,47 +26,23 @@ type TxHash = Hash<32>;
 #[derive(Debug, Error)]
 pub enum MempoolError {
     #[error("traverse error: {0}")]
-    TraverseError(pallas::ledger::traverse::Error),
+    TraverseError(#[from] pallas::ledger::traverse::Error),
 
     #[error("decode error: {0}")]
-    DecodeError(pallas::codec::minicbor::decode::Error),
+    DecodeError(#[from] pallas::codec::minicbor::decode::Error),
 
     #[cfg(feature = "phase2")]
     #[error("tx evaluation failed")]
-    EvaluationError(crate::uplc::error::Error),
+    EvaluationError(#[from] crate::uplc::error::Error),
 
     #[error("state error: {0}")]
-    StateError(crate::state::LedgerError),
+    StateError(#[from] crate::state::LedgerError),
 
     #[error("plutus not supported")]
     PlutusNotSupported,
 
     #[error("invalid tx: {0}")]
     InvalidTx(String),
-}
-
-impl From<pallas::ledger::traverse::Error> for MempoolError {
-    fn from(value: pallas::ledger::traverse::Error) -> Self {
-        Self::TraverseError(value)
-    }
-}
-
-impl From<pallas::codec::minicbor::decode::Error> for MempoolError {
-    fn from(value: pallas::codec::minicbor::decode::Error) -> Self {
-        Self::DecodeError(value)
-    }
-}
-
-impl From<crate::uplc::error::Error> for MempoolError {
-    fn from(value: crate::uplc::error::Error) -> Self {
-        Self::EvaluationError(value)
-    }
-}
-
-impl From<crate::state::LedgerError> for MempoolError {
-    fn from(value: crate::state::LedgerError) -> Self {
-        Self::StateError(value)
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -174,7 +150,7 @@ impl Mempool {
 
         let utxos = self.ledger.get_utxos(input_refs)?;
 
-        let report = tx::eval_tx(&tx.as_conway().unwrap(), &pparams, &utxos, &slot_config)?;
+        let report = tx::eval_tx(&tx, &pparams, &utxos, &slot_config)?;
 
         Ok(report)
     }

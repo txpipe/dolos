@@ -1,5 +1,9 @@
 use pallas::ledger::primitives::{conway::Language, TransactionInput};
-use uplc::{binder::DeBruijn, flat::FlatDecodeError, machine::{self, ExBudget}};
+use uplc::{
+    binder::DeBruijn,
+    flat::FlatDecodeError,
+    machine::{self, ExBudget},
+};
 
 #[derive(thiserror::Error, Debug, miette::Diagnostic)]
 pub enum Error {
@@ -39,7 +43,11 @@ pub enum Error {
         .join("")
         .as_str()
     )]
-    Machine(machine::MachineError<'static, DeBruijn>, ExBudget, Vec<String>),
+    Machine(
+        machine::MachineError<'static, DeBruijn>,
+        ExBudget,
+        Vec<String>,
+    ),
 
     #[error("native script can't be executed in phase-two")]
     NativeScriptPhaseTwo,
@@ -68,8 +76,10 @@ pub enum Error {
     NoGuardrailScriptForProcedure,
     #[error("cost model not found for language\n{:>13} {:?}", "Language", .0)]
     CostModelNotFound(Language),
-    #[error("unsupported era, please use Conway\n{:>13} {0}", "Decoder error")]
-    WrongEra(#[from] pallas::codec::minicbor::decode::Error),
+    #[error("unsupported era, please use Conway")]
+    WrongEra(),
+    #[error("decoding error\n{:>13} {0}", "Decoder error")]
+    DecodeError(#[from] pallas::codec::minicbor::decode::Error),
     #[error("byron address not allowed when PlutusV2 scripts are present")]
     ByronAddressNotAllowed,
     #[error("inline datum not allowed when PlutusV1 scripts are present")]

@@ -4,4 +4,4 @@ pub mod script_context;
 pub mod to_plutus_data;
 pub mod tx;
 
-pub type EvalReport = Vec<pallas::ledger::primitives::conway::Redeemer>;
+pub type EvalReport = Vec<tx::TxEvalResult>;

@@ -19,7 +19,7 @@ use pallas::ledger::primitives::{
         Voter, VotingProcedure,
     },
 };
-use pallas::ledger::traverse::{ComputeHash, OriginalHash};
+use pallas::ledger::traverse::{ComputeHash, MultiEraTx, OriginalHash};
 use std::{cmp::Ordering, collections::HashMap, ops::Deref};
 
 #[derive(Debug, PartialEq, Clone)]
@@ -91,67 +91,32 @@ pub struct DataLookupTable {
 }
 
 impl DataLookupTable {
-    pub fn from_transaction(tx: &MintedTx, utxos: &[ResolvedInput]) -> DataLookupTable {
+    pub fn from_transaction(tx: &MultiEraTx, utxos: &[ResolvedInput]) -> DataLookupTable {
         let mut datum = HashMap::new();
         let mut scripts = HashMap::new();
 
         // discovery in witness set
 
-        let plutus_data_witnesses = tx
-            .transaction_witness_set
-            .plutus_data
-            .clone()
-            .map(|s| s.to_vec())
-            .unwrap_or_default();
-
-        let scripts_native_witnesses = tx
-            .transaction_witness_set
-            .native_script
-            .clone()
-            .map(|s| s.to_vec())
-            .unwrap_or_default();
-
-        let scripts_v1_witnesses = tx
-            .transaction_witness_set
-            .plutus_v1_script
-            .clone()
-            .map(|s| s.to_vec())
-            .unwrap_or_default();
-
-        let scripts_v2_witnesses = tx
-            .transaction_witness_set
-            .plutus_v2_script
-            .clone()
-            .map(|s| s.to_vec())
-            .unwrap_or_default();
-
-        let scripts_v3_witnesses = tx
-            .transaction_witness_set
-            .plutus_v3_script
-            .clone()
-            .map(|s| s.to_vec())
-            .unwrap_or_default();
-
-        for plutus_data in plutus_data_witnesses.iter() {
+        for plutus_data in tx.plutus_data() {
             datum.insert(plutus_data.original_hash(), plutus_data.clone().unwrap());
         }
 
-        for script in scripts_native_witnesses.iter() {
+        for script in tx.native_scripts() {
             scripts.insert(
                 script.compute_hash(),
                 ScriptVersion::Native(script.clone().unwrap()),
             );
         }
 
-        for script in scripts_v1_witnesses.iter() {
+        for script in tx.plutus_v1_scripts() {
             scripts.insert(script.compute_hash(), ScriptVersion::V1(script.clone()));
         }
 
-        for script in scripts_v2_witnesses.iter() {
+        for script in tx.plutus_v2_scripts() {
             scripts.insert(script.compute_hash(), ScriptVersion::V2(script.clone()));
         }
 
-        for script in scripts_v3_witnesses.iter() {
+        for script in tx.plutus_v3_scripts() {
             scripts.insert(script.compute_hash(), ScriptVersion::V3(script.clone()));
         }
 
