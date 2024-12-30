@@ -63,9 +63,8 @@ chrono = { version = "0.4.39", default-features = false }
 
 # phase2 dependencies
 uplc = { git = "https://github.com/pragma-org/uplc.git", optional = true }
-blst = { version = "=0.3.13", optional = true }
+# blst = { version = "=0.3.13", optional = true }
 rug = { version = "1.26.1", optional = true }
-num-integer = { version = "0.1.46", optional = true }
 
 [target.'cfg(not(windows))'.dependencies.mithril-client]
 version = "0.10.4"
@@ -86,8 +85,7 @@ tempfile = "3.3.0"
 mithril = ["mithril-client"]
 utils = ["comfy-table", "inquire", "toml"]
 debug = ["console-subscriber", "tokio/tracing"]
-phase2 = ["uplc", "blst", "num-integer", "rug"]
-unstable = ["phase2"]
+phase2 = ["uplc", "rug"]
 default = ["mithril", "utils", "phase2"]
 
 # The profile that 'cargo dist' will build with

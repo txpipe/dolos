@@ -2,7 +2,6 @@ use super::data::Data;
 use super::script_context::{
     from_alonzo_output, ScriptContext, ScriptInfo, ScriptPurpose, TimeRange, TxInInfo, TxInfo,
 };
-use num_integer::Integer;
 use pallas::codec::utils::{
     AnyUInt, Bytes, Int, KeyValuePairs, NonEmptyKeyValuePairs, Nullable, PositiveCoin,
 };
@@ -277,7 +276,7 @@ impl ToPlutusData for AnyUInt {
             AnyUInt::U16(n) => PlutusData::BigInt(BigInt::Int(Int::from(*n as i64))),
             AnyUInt::U32(n) => PlutusData::BigInt(BigInt::Int(Int::from(*n as i64))),
             AnyUInt::U64(n) => PlutusData::BigInt(BigInt::Int(Int::try_from(*n as i128).unwrap())),
-            AnyUInt::MajorByte(n) => PlutusData::BigInt(BigInt::Int(Int::from(*n as i64))), // is this correct? I don't know exactly what is does
+            AnyUInt::MajorByte(n) => PlutusData::BigInt(BigInt::Int(Int::from(*n as i64))), /* is this correct? I don't know exactly what is does */
         }
     }
 }
@@ -884,9 +883,10 @@ impl ToPlutusData for TxInInfo {
     }
 }
 
-// NOTE: This is a _small_ abuse of the 'WithWrappedTransactionId'. We know the wrapped
-// is needed for V1 and V2, and it also appears that for V1 and V2, the certifying
-// purpose mustn't include the certificate index. So, we also short-circuit it here.
+// NOTE: This is a _small_ abuse of the 'WithWrappedTransactionId'. We know the
+// wrapped is needed for V1 and V2, and it also appears that for V1 and V2, the
+// certifying purpose mustn't include the certificate index. So, we also
+// short-circuit it here.
 impl ToPlutusData for WithWrappedTransactionId<'_, ScriptPurpose> {
     fn to_plutus_data(&self) -> PlutusData {
         match self.0 {
@@ -1222,15 +1222,13 @@ impl ToPlutusData for Constitution {
 
 impl ToPlutusData for RationalNumber {
     fn to_plutus_data(&self) -> PlutusData {
-        let gcd = self.numerator.gcd(&self.denominator);
-        (self.numerator / gcd, self.denominator / gcd).to_plutus_data()
+        (self.numerator, self.denominator).to_plutus_data()
     }
 }
 
 impl ToPlutusData for WithArrayRational<'_, RationalNumber> {
     fn to_plutus_data(&self) -> PlutusData {
-        let gcd = self.0.numerator.gcd(&self.0.denominator);
-        vec![self.0.numerator / gcd, self.0.denominator / gcd].to_plutus_data()
+        vec![self.0.numerator, self.0.denominator].to_plutus_data()
     }
 }
 
