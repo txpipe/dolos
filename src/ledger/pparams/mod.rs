@@ -509,13 +509,13 @@ pub fn fold_until_epoch(
     let mut summary = ChainSummary::start(&pparams);
 
     if let Some(force_protocol) = genesis.force_protocol {
-        while summary.current_protocol_version() < force_protocol {
-            let next_protocol = summary.current_protocol_version() + 1;
+        while summary.current().protocol_version < force_protocol {
+            let next_protocol = summary.current().protocol_version + 1;
             pparams = migrate_pparams(pparams, genesis, next_protocol);
             summary.advance(0, &pparams);
 
             debug!(
-                protocol = summary.current_protocol_version(),
+                protocol = summary.current().protocol_version,
                 "forced hardfork"
             );
         }
@@ -549,13 +549,13 @@ pub fn fold_until_epoch(
             let version_change = byron_version_change.or(post_byron_version_change);
 
             if let Some(next_protocol) = version_change {
-                while summary.current_protocol_version() < next_protocol {
-                    let next_protocol = summary.current_protocol_version() + 1;
+                while summary.current().protocol_version < next_protocol {
+                    let next_protocol = summary.current().protocol_version + 1;
                     pparams = migrate_pparams(pparams, genesis, next_protocol);
                     summary.advance(epoch, &pparams);
 
                     debug!(
-                        protocol = summary.current_protocol_version(),
+                        protocol = summary.current().protocol_version,
                         "hardfork executed"
                     );
                 }
@@ -657,7 +657,7 @@ mod tests {
             let expected = load_json::<usize, _>(filename);
             let (_, summary) = fold_until_epoch(&genesis, &chained_updates, epoch);
 
-            assert_eq!(expected, summary.current_protocol_version())
+            assert_eq!(expected, summary.current().protocol_version)
 
             //assert_eq!(expected, actual)
         }

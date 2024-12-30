@@ -13,10 +13,8 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging)?;
 
     let (wal, ledger) = crate::common::open_data_stores(config)?;
-
-    let mempool = dolos::mempool::Mempool::new();
-
     let genesis = Arc::new(crate::common::open_genesis_files(&config.genesis)?);
+    let mempool = dolos::mempool::Mempool::new(genesis.clone(), ledger.clone());
 
     let sync = dolos::sync::pipeline(
         &config.sync,

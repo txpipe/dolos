@@ -1,4 +1,4 @@
-use pallas::ledger::traverse::{Era, MultiEraBlock};
+use pallas::ledger::traverse::{Era, MultiEraBlock, MultiEraInput, MultiEraUpdate};
 use pallas::{crypto::hash::Hash, ledger::traverse::MultiEraOutput};
 use pparams::Genesis;
 use serde::{Deserialize, Serialize};
@@ -29,8 +29,8 @@ impl From<EraCbor> for (Era, Vec<u8>) {
     }
 }
 
-impl<'a> From<MultiEraOutput<'a>> for EraCbor {
-    fn from(value: MultiEraOutput<'a>) -> Self {
+impl From<MultiEraOutput<'_>> for EraCbor {
+    fn from(value: MultiEraOutput<'_>) -> Self {
         EraCbor(value.era(), value.encode())
     }
 }
@@ -40,6 +40,14 @@ impl<'a> TryFrom<&'a EraCbor> for MultiEraOutput<'a> {
 
     fn try_from(value: &'a EraCbor) -> Result<Self, Self::Error> {
         MultiEraOutput::decode(value.0, &value.1)
+    }
+}
+
+impl TryFrom<EraCbor> for MultiEraUpdate<'_> {
+    type Error = pallas::codec::minicbor::decode::Error;
+
+    fn try_from(value: EraCbor) -> Result<Self, Self::Error> {
+        MultiEraUpdate::decode_for_era(value.0, &value.1)
     }
 }
 
@@ -60,11 +68,14 @@ impl From<TxoRef> for (TxHash, TxoIdx) {
     }
 }
 
+impl From<&MultiEraInput<'_>> for TxoRef {
+    fn from(value: &MultiEraInput<'_>) -> Self {
+        TxoRef(*value.hash(), value.index() as u32)
+    }
+}
+
 #[derive(Debug, Eq, PartialEq, Hash)]
 pub struct ChainPoint(pub BlockSlot, pub BlockHash);
-
-#[derive(Debug)]
-pub struct PParamsBody(pub Era, pub Vec<u8>);
 
 pub type UtxoMap = HashMap<TxoRef, EraCbor>;
 
@@ -94,7 +105,7 @@ pub struct LedgerDelta {
     pub consumed_utxo: HashMap<TxoRef, EraCbor>,
     pub recovered_stxi: HashMap<TxoRef, EraCbor>,
     pub undone_utxo: HashMap<TxoRef, EraCbor>,
-    pub new_pparams: Vec<PParamsBody>,
+    pub new_pparams: Vec<EraCbor>,
 }
 
 /// Computes the ledger delta of applying a particular block.
@@ -141,9 +152,7 @@ pub fn compute_delta(
         }
 
         if let Some(update) = tx.update() {
-            delta
-                .new_pparams
-                .push(PParamsBody(tx.era(), update.encode()));
+            delta.new_pparams.push(EraCbor(tx.era(), update.encode()));
         }
     }
 
@@ -151,7 +160,7 @@ pub fn compute_delta(
     if let Some(update) = block.update() {
         delta
             .new_pparams
-            .push(PParamsBody(block.era(), update.encode()));
+            .push(EraCbor(block.era(), update.encode()));
     }
 
     Ok(delta)

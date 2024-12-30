@@ -1,7 +1,7 @@
 use crate::{
     ledger::{
         pparams::{self, Genesis},
-        EraCbor, PParamsBody, TxoRef,
+        EraCbor, TxoRef,
     },
     serve::utils::apply_mask,
     state::{LedgerError, LedgerStore},
@@ -9,7 +9,7 @@ use crate::{
 use itertools::Itertools as _;
 use pallas::interop::utxorpc::spec as u5c;
 use pallas::interop::utxorpc::{self as interop, spec::query::any_utxo_pattern::UtxoPattern};
-use pallas::ledger::traverse::{MultiEraOutput, MultiEraUpdate};
+use pallas::ledger::traverse::MultiEraOutput;
 use std::{collections::HashSet, sync::Arc};
 use tonic::{Request, Response, Status};
 use tracing::info;
@@ -227,14 +227,14 @@ impl u5c::query::query_service_server::QueryService for QueryServiceImpl {
 
         let tip = self.ledger.cursor()?;
 
-        let updates: Vec<_> = self
+        let updates = self
             .ledger
             .get_pparams(tip.as_ref().map(|p| p.0).unwrap_or_default())?;
 
         let updates: Vec<_> = updates
-            .iter()
-            .map(|PParamsBody(era, cbor)| MultiEraUpdate::decode_for_era(*era, cbor))
-            .try_collect()
+            .into_iter()
+            .map(TryInto::try_into)
+            .try_collect::<_, _, pallas::codec::minicbor::decode::Error>()
             .map_err(|e| Status::internal(e.to_string()))?;
 
         let (pparams, _) = pparams::fold(&self.genesis, &updates);

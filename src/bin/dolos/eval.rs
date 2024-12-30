@@ -1,4 +1,4 @@
-use dolos::ledger::{PParamsBody, TxoRef};
+use dolos::ledger::{EraCbor, TxoRef};
 use itertools::*;
 use miette::{Context, IntoDiagnostic};
 use pallas::{
@@ -82,7 +82,7 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
 
     let updates: Vec<_> = updates
         .iter()
-        .map(|PParamsBody(era, cbor)| -> miette::Result<MultiEraUpdate> {
+        .map(|EraCbor(era, cbor)| -> miette::Result<MultiEraUpdate> {
             MultiEraUpdate::decode_for_era(*era, cbor).into_diagnostic()
         })
         .try_collect()?;

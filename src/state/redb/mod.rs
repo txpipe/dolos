@@ -188,7 +188,7 @@ impl LedgerStore {
         }
     }
 
-    pub fn get_pparams(&self, until: BlockSlot) -> Result<Vec<PParamsBody>, LedgerError> {
+    pub fn get_pparams(&self, until: BlockSlot) -> Result<Vec<EraCbor>, LedgerError> {
         match self {
             LedgerStore::SchemaV1(x) => Ok(x.get_pparams(until)?),
             LedgerStore::SchemaV2(x) => Ok(x.get_pparams(until)?),

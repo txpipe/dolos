@@ -1,13 +1,17 @@
-use std::{
-    collections::{HashMap, HashSet},
-    sync::{Arc, RwLock},
+use crate::{
+    ledger::pparams::Genesis,
+    state::LedgerStore,
+    uplc::{script_context::SlotConfig, tx, EvalReport},
 };
-
 use futures_util::StreamExt;
 use itertools::Itertools;
 use pallas::{
     crypto::hash::Hash,
     ledger::traverse::{MultiEraBlock, MultiEraTx},
+};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, RwLock},
 };
 use thiserror::Error;
 use tokio::sync::broadcast;
@@ -18,20 +22,24 @@ type TxHash = Hash<32>;
 
 #[derive(Debug, Error)]
 pub enum MempoolError {
-    #[error("decode error: {0}")]
-    DecodeError(pallas::ledger::traverse::Error),
+    #[error("traverse error: {0}")]
+    TraverseError(#[from] pallas::ledger::traverse::Error),
 
-    #[error("plutus scripts not supported")]
+    #[error("decode error: {0}")]
+    DecodeError(#[from] pallas::codec::minicbor::decode::Error),
+
+    #[cfg(feature = "phase2")]
+    #[error("tx evaluation failed")]
+    EvaluationError(#[from] crate::uplc::error::Error),
+
+    #[error("state error: {0}")]
+    StateError(#[from] crate::state::LedgerError),
+
+    #[error("plutus not supported")]
     PlutusNotSupported,
 
     #[error("invalid tx: {0}")]
     InvalidTx(String),
-}
-
-impl From<pallas::ledger::traverse::Error> for MempoolError {
-    fn from(value: pallas::ledger::traverse::Error) -> Self {
-        Self::DecodeError(value)
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -70,20 +78,21 @@ struct MempoolState {
 pub struct Mempool {
     mempool: Arc<RwLock<MempoolState>>,
     updates: broadcast::Sender<Event>,
-}
-
-impl Default for Mempool {
-    fn default() -> Self {
-        Self::new()
-    }
+    genesis: Arc<Genesis>,
+    ledger: LedgerStore,
 }
 
 impl Mempool {
-    pub fn new() -> Self {
+    pub fn new(genesis: Arc<Genesis>, ledger: LedgerStore) -> Self {
         let mempool = Arc::new(RwLock::new(MempoolState::default()));
         let (updates, _) = broadcast::channel(16);
 
-        Self { mempool, updates }
+        Self {
+            mempool,
+            updates,
+            genesis,
+            ledger,
+        }
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<Event> {
@@ -110,20 +119,64 @@ impl Mempool {
         );
     }
 
+    #[cfg(feature = "phase2")]
+    pub fn evaluate(&self, tx: &MultiEraTx) -> Result<EvalReport, MempoolError> {
+        let tip = self.ledger.cursor()?;
+
+        let updates: Vec<_> = self
+            .ledger
+            .get_pparams(tip.as_ref().map(|p| p.0).unwrap_or_default())?;
+
+        let updates: Vec<_> = updates.into_iter().map(TryInto::try_into).try_collect()?;
+
+        let (pparams, eras) = crate::ledger::pparams::fold(&self.genesis, &updates);
+
+        let slot_config = SlotConfig {
+            slot_length: eras.current().slot_length,
+            zero_slot: eras.current().start.slot,
+            zero_time: eras
+                .current()
+                .start
+                .timestamp
+                .timestamp()
+                .try_into()
+                .unwrap(),
+        };
+
+        let input_refs = tx.requires().iter().map(From::from).collect();
+
+        let utxos = self.ledger.get_utxos(input_refs)?;
+
+        let report = tx::eval_tx(tx, &pparams, &utxos, &slot_config)?;
+
+        Ok(report)
+    }
+
+    #[cfg(feature = "phase2")]
+    pub fn evaluate_raw(&self, cbor: &[u8]) -> Result<EvalReport, MempoolError> {
+        let tx = MultiEraTx::decode(cbor)?;
+        self.evaluate(&tx)
+    }
+
     pub fn receive_raw(&self, cbor: &[u8]) -> Result<TxHash, MempoolError> {
-        let decoded = MultiEraTx::decode(cbor)?;
+        let tx = MultiEraTx::decode(cbor)?;
 
-        let hash = decoded.hash();
+        #[cfg(feature = "phase2")]
+        self.evaluate(&tx)?;
 
-        // TODO: we don't phase-2 validate txs before propagating so we could
-        // propagate p2 invalid transactions resulting in collateral loss
+        // if we don't have phase-2 enabled, we reject txs before propagating something
+        // that could result in collateral loss
+        #[cfg(not(feature = "phase2"))]
         if !decoded.redeemers().is_empty() {
             return Err(MempoolError::PlutusNotSupported);
         }
 
+        let hash = tx.hash();
+
         let tx = Tx {
             hash,
-            era: u16::from(decoded.era()) - 1,
+            // TODO: this is a hack to make the era compatible with the ledger
+            era: u16::from(tx.era()) - 1,
             bytes: cbor.into(),
             confirmed: false,
         };

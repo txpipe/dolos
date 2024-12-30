@@ -27,6 +27,9 @@ pub enum LedgerError {
 
     #[error("invalid store version")]
     InvalidStoreVersion,
+
+    #[error("decoding error")]
+    DecodingError(#[source] pallas::codec::minicbor::decode::Error),
 }
 
 impl From<::redb::TableError> for LedgerError {
@@ -79,7 +82,7 @@ impl LedgerStore {
         }
     }
 
-    pub fn get_pparams(&self, until: BlockSlot) -> Result<Vec<PParamsBody>, LedgerError> {
+    pub fn get_pparams(&self, until: BlockSlot) -> Result<Vec<EraCbor>, LedgerError> {
         match self {
             LedgerStore::Redb(x) => x.get_pparams(until),
         }
