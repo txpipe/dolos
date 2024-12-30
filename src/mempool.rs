@@ -1,10 +1,7 @@
 use crate::{
     ledger::pparams::Genesis,
     state::LedgerStore,
-    uplc::{
-        script_context::SlotConfig,
-        tx, EvalReport,
-    },
+    uplc::{script_context::SlotConfig, tx, EvalReport},
 };
 use futures_util::StreamExt;
 use itertools::Itertools;
