@@ -1,4 +1,3 @@
-use crate::ledger::UtxoMap;
 
 use super::{error::Error, to_plutus_data::MintValue};
 use itertools::Itertools;
@@ -619,7 +618,7 @@ pub fn get_validity_range_info(
                 oldest_allowed: sc.zero_slot,
             });
         }
-        let ms_after_begin = (slot - sc.zero_slot) * sc.slot_length as u64;
+        let ms_after_begin = (slot - sc.zero_slot) * sc.slot_length;
         Ok(sc.zero_time + ms_after_begin)
     }
 

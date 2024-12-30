@@ -9,7 +9,7 @@ use crate::{
 use itertools::Itertools as _;
 use pallas::interop::utxorpc::spec as u5c;
 use pallas::interop::utxorpc::{self as interop, spec::query::any_utxo_pattern::UtxoPattern};
-use pallas::ledger::traverse::{MultiEraOutput, MultiEraUpdate};
+use pallas::ledger::traverse::MultiEraOutput;
 use std::{collections::HashSet, sync::Arc};
 use tonic::{Request, Response, Status};
 use tracing::info;

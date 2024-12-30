@@ -4,7 +4,7 @@ use futures_util::{StreamExt as _, TryStreamExt as _};
 use pallas::crypto::hash::Hash;
 use pallas::interop::utxorpc as interop;
 use pallas::interop::utxorpc as u5c;
-use pallas::interop::utxorpc::spec::cardano::{ExUnits, TxEval};
+use pallas::interop::utxorpc::spec::cardano::ExUnits;
 use pallas::interop::utxorpc::spec::submit::{WaitForTxResponse, *};
 use std::collections::HashSet;
 use std::pin::Pin;

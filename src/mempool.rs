@@ -2,7 +2,7 @@ use crate::{
     ledger::pparams::Genesis,
     state::LedgerStore,
     uplc::{
-        script_context::{ResolvedInput, SlotConfig},
+        script_context::SlotConfig,
         tx, EvalReport,
     },
 };
@@ -10,7 +10,7 @@ use futures_util::StreamExt;
 use itertools::Itertools;
 use pallas::{
     crypto::hash::Hash,
-    ledger::traverse::{MultiEraBlock, MultiEraOutput, MultiEraTx},
+    ledger::traverse::{MultiEraBlock, MultiEraTx},
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -150,7 +150,7 @@ impl Mempool {
 
         let utxos = self.ledger.get_utxos(input_refs)?;
 
-        let report = tx::eval_tx(&tx, &pparams, &utxos, &slot_config)?;
+        let report = tx::eval_tx(tx, &pparams, &utxos, &slot_config)?;
 
         Ok(report)
     }

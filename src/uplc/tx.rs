@@ -1,4 +1,3 @@
-use std::ops::Deref;
 
 use crate::{
     ledger::UtxoMap,
@@ -44,7 +43,7 @@ pub fn map_pallas_data_to_pragma_data<'a>(
             let fields = constr
                 .fields
                 .iter()
-                .map(|f| map_pallas_data_to_pragma_data(arena, &f));
+                .map(|f| map_pallas_data_to_pragma_data(arena, f));
 
             let fields = arena.alloc_slice_fill_iter(fields);
 
@@ -111,7 +110,7 @@ pub fn eval_tx(
     slot_config: &SlotConfig,
 ) -> Result<Vec<TxEvalResult>, Error> {
     let utxos = utxos
-        .into_iter()
+        .iter()
         .map(|(txoref, eracbor)| {
             Ok(ResolvedInput {
                 input: pallas::ledger::primitives::TransactionInput {
@@ -129,7 +128,7 @@ pub fn eval_tx(
 
     let redeemers = redeemers
         .iter()
-        .map(|r| eval_redeemer(&r, tx, &utxos, &lookup_table, slot_config))
+        .map(|r| eval_redeemer(r, tx, &utxos, &lookup_table, slot_config))
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(redeemers)
