@@ -509,10 +509,8 @@ pub fn fold_until_epoch(
     let mut summary = ChainSummary::start(&pparams);
 
     if let Some(force_protocol) = genesis.force_protocol {
-        let current_protocol = summary.current().protocol_version;
-
-        while current_protocol < force_protocol {
-            let next_protocol = current_protocol + 1;
+        while summary.current().protocol_version < force_protocol {
+            let next_protocol = summary.current().protocol_version + 1;
             pparams = migrate_pparams(pparams, genesis, next_protocol);
             summary.advance(0, &pparams);
 
@@ -551,10 +549,8 @@ pub fn fold_until_epoch(
             let version_change = byron_version_change.or(post_byron_version_change);
 
             if let Some(next_protocol) = version_change {
-                let current_protocol = summary.current().protocol_version;
-
-                while current_protocol < next_protocol {
-                    let next_protocol = current_protocol + 1;
+                while summary.current().protocol_version < next_protocol {
+                    let next_protocol = summary.current().protocol_version + 1;
                     pparams = migrate_pparams(pparams, genesis, next_protocol);
                     summary.advance(epoch, &pparams);
 
