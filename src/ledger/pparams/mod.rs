@@ -521,7 +521,7 @@ pub fn fold_until_epoch(
         }
     }
 
-    for epoch in 1..=for_epoch + 1 {
+    for epoch in 1..for_epoch {
         let epoch_updates: Vec<_> = updates
             .iter()
             .filter(|e| e.epoch() == (epoch - 1))
