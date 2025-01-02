@@ -6,12 +6,14 @@ use crate::{
 use futures_util::StreamExt;
 use itertools::Itertools;
 use pallas::{
-    crypto::hash::Hash,
-    ledger::traverse::{MultiEraBlock, MultiEraTx},
+    applying::{utils::AccountState, validate_tx, CertState, Environment, UTxOs}, 
+    crypto::hash::Hash, ledger::{primitives::TransactionInput, 
+    traverse::{wellknown::GenesisValues, MultiEraBlock, MultiEraInput, MultiEraOutput, MultiEraTx}}
 };
 use std::{
-    collections::{HashMap, HashSet},
-    sync::{Arc, RwLock},
+    borrow::Cow, 
+    collections::{HashMap, HashSet}, 
+    sync::{Arc, RwLock}
 };
 use thiserror::Error;
 use tokio::sync::broadcast;
@@ -119,6 +121,52 @@ impl Mempool {
         );
     }
 
+    pub fn validate(&self, tx: &MultiEraTx) -> Result<(), MempoolError> {
+        let tip = self.ledger.cursor()?;
+
+         let updates: Vec<_> = self
+            .ledger
+            .get_pparams(tip.as_ref().map(|p| p.0).unwrap_or_default())?;
+
+        let updates: Vec<_> = updates.into_iter().map(TryInto::try_into).try_collect()?;
+
+        let (pparams, _) = crate::ledger::pparams::fold(&self.genesis, &updates);
+
+        let network_magic = self.genesis.shelley.network_magic.unwrap();
+
+        let genesis_values = GenesisValues::from_magic(network_magic.into()).unwrap();
+        
+        let env = Environment {
+            prot_params: pparams,
+            prot_magic: self.genesis.shelley.network_magic.unwrap(),
+            block_slot: tip.unwrap().0,
+            network_id: genesis_values.network_id as u8,
+            acnt: Some(AccountState::default()),
+            
+        };
+
+        let input_refs = tx.requires().iter().map(From::from).collect();
+
+        let utxos = self.ledger.get_utxos(input_refs)?;
+
+        let mut pallas_utxos = UTxOs::new();
+
+        for (txoref, eracbor) in utxos.iter() {
+            let tx_in = TransactionInput {
+                transaction_id: txoref.0,
+                index: txoref.1.into(),
+            };
+            let input =  MultiEraInput::AlonzoCompatible(<Box<Cow<'_,TransactionInput>>>::from(Cow::Owned(tx_in)));
+            let output = MultiEraOutput::try_from(eracbor)?;
+            pallas_utxos.insert(input, output);
+        }
+
+        validate_tx(tx, 0, &env, &pallas_utxos, &mut CertState::default())
+            .map_err(|_| MempoolError::InvalidTx("validation failed".to_string()))?;
+
+        Ok(())
+    }
+
     #[cfg(feature = "phase2")]
     pub fn evaluate(&self, tx: &MultiEraTx) -> Result<EvalReport, MempoolError> {
         let tip = self.ledger.cursor()?;
@@ -160,6 +208,8 @@ impl Mempool {
 
     pub fn receive_raw(&self, cbor: &[u8]) -> Result<TxHash, MempoolError> {
         let tx = MultiEraTx::decode(cbor)?;
+
+        self.validate(&tx)?;
 
         #[cfg(feature = "phase2")]
         self.evaluate(&tx)?;
