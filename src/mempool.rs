@@ -30,6 +30,9 @@ pub enum MempoolError {
     #[error("decode error: {0}")]
     DecodeError(#[from] pallas::codec::minicbor::decode::Error),
 
+    #[error("tx validation failed: {0}")]
+    ValidationError(#[from] pallas::applying::utils::ValidationError),
+
     #[cfg(feature = "phase2")]
     #[error("tx evaluation failed")]
     EvaluationError(#[from] crate::uplc::error::Error),
@@ -160,11 +163,10 @@ impl Mempool {
             let output = MultiEraOutput::try_from(eracbor)?;
             pallas_utxos.insert(input, output);
         }
+        
+        validate_tx(tx, 0, &env, &pallas_utxos, &mut CertState::default())?;
 
-        validate_tx(tx, 0, &env, &pallas_utxos, &mut CertState::default())
-            .map_err(|_| MempoolError::InvalidTx("validation failed".to_string()))?;
-
-        Ok(())
+        Ok(())  
     }
 
     #[cfg(feature = "phase2")]
