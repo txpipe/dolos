@@ -182,7 +182,9 @@ fn bootstrap_conway_pparams(
         protocol_version: previous.protocol_version,
         min_pool_cost: previous.min_pool_cost,
         desired_number_of_stake_pools: previous.desired_number_of_stake_pools,
-        ada_per_utxo_byte: previous.ada_per_utxo_byte,
+        // In the hardfork, the value got translated from words to bytes
+        // Since the transformation from words to bytes is hardcoded, the transformation here is also hardcoded
+        ada_per_utxo_byte: previous.ada_per_utxo_byte / 8,
         execution_costs: previous.execution_costs,
         max_tx_ex_units: previous.max_tx_ex_units,
         max_block_ex_units: previous.max_block_ex_units,
