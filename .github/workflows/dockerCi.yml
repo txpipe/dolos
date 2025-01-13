@@ -1,0 +1,108 @@
+name: DockerCi
+on:
+  push:
+    branches:
+      - 'main'
+
+
+jobs:
+  build:
+    continue-on-error: true
+
+    strategy:
+      matrix:
+        include:
+          - release_for: Linux-x86_64
+            build_on: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            args: "--locked --release"
+
+          - release_for: Linux-arm64
+            build_on: buildjet-2vcpu-ubuntu-2204-arm
+            target: "aarch64-unknown-linux-gnu"
+            args: "--locked --release"
+
+    runs-on: ${{ matrix.build_on }}
+
+    steps:
+      - name: checkout repository
+        uses: actions/checkout@v4
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "release"
+
+      - name: Install stable toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Run cargo build
+        uses: actions-rs/cargo@v1
+        with:
+          command: build
+          args: --target ${{ matrix.target }} ${{ matrix.args }}
+
+      - name: rename binaries
+        run: |
+          mv target/${{ matrix.target }}/release/dolos${{ matrix.ext }} dolos-${{ matrix.release_for }}${{ matrix.ext }}
+
+      - name: upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.release_for }}
+          path: dolos-${{ matrix.release_for }}${{ matrix.ext }}
+
+  docker:
+    runs-on: ubuntu-latest
+    needs: [build]
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/txpipe/dolos
+          tags: |
+            type=raw,value=main
+            type=sha
+
+      - name: Login to DockerHub
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io/txpipe
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: binaries-*
+          merge-multiple: true
+          path: .github/image/bin
+
+      # we need to rename the artifact so that the name matches
+      # the value that Docker uses for TARGET_ARCH to keep the
+      # Dockerfile simple
+      - name: Rename artifacts
+        run: |+
+          mv .github/image/bin/dolos-Linux-x86_64 .github/image/bin/dolos-Linux-amd64
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .github/image
+          platforms: linux/arm64,linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
