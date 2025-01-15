@@ -1290,8 +1290,9 @@ dependencies = [
 
 [[package]]
 name = "gasket"
-version = "0.8.0"
-source = "git+https://github.com/construkts/gasket-rs.git#a53d605f28b6ac6e5724025f29261b06657516f5"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "37057b6b0b48bb9bdcd4c2bc8ec51090a6cd754744caf28d44b813584473be3a"
 dependencies = [
  "async-trait",
  "crossbeam",
@@ -1300,13 +1301,15 @@ dependencies = [
  "signal-hook",
  "thiserror 1.0.65",
  "tokio",
+ "tokio-util",
  "tracing",
 ]
 
 [[package]]
 name = "gasket-derive"
-version = "0.8.0"
-source = "git+https://github.com/construkts/gasket-rs.git#a53d605f28b6ac6e5724025f29261b06657516f5"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "00c4883f898206041f02b010ab10400715e89e7845c63410f6bad162a3841174"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3857,9 +3860,9 @@ dependencies = [
 
 [[package]]
 name = "tokio-util"
-version = "0.7.11"
+version = "0.7.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9cf6b47b3771c49ac75ad09a6162f53ad4b8088b76ac60e8ec1455b31a189fe1"
+checksum = "d7fcaa8d55a2bdd6b83ace262b016eca0d79ee02818c5c1bcdf0305114081078"
 dependencies = [
  "bytes",
  "futures-core",
