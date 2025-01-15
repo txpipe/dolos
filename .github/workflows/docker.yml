@@ -1,6 +1,8 @@
 name: Docker
 on:
   push:
+    branches:
+      - "**"
     tags:
       - "v*"
 
@@ -74,9 +76,11 @@ jobs:
           images: ghcr.io/txpipe/dolos
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
-            type=semver,pattern=v{{major}}
-            type=semver,pattern=v{{major}}.{{minor}}
-            type=semver,pattern=v{{version}}
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern=v{{major}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=semver,pattern=v{{major}}.{{minor}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=semver,pattern=v{{version}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
             type=sha
 
       - name: Login to DockerHub
