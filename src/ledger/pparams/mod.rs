@@ -319,6 +319,7 @@ fn apply_param_update(
             apply_field!(pparams, update, key_deposit);
             apply_field!(pparams, update, pool_deposit);
             apply_field!(pparams, update, desired_number_of_stake_pools);
+            apply_field!(pparams, update, protocol_version);
             apply_field!(pparams, update, min_pool_cost);
             apply_field!(pparams, update, expansion_rate);
             apply_field!(pparams, update, treasury_growth_rate);
@@ -338,6 +339,7 @@ fn apply_param_update(
             apply_field!(pparams, update, key_deposit);
             apply_field!(pparams, update, pool_deposit);
             apply_field!(pparams, update, desired_number_of_stake_pools);
+            apply_field!(pparams, update, protocol_version);
             apply_field!(pparams, update, min_pool_cost);
             apply_field!(pparams, update, ada_per_utxo_byte);
             apply_field!(pparams, update, execution_costs);
@@ -373,6 +375,7 @@ fn apply_param_update(
             apply_field!(pparams, update, key_deposit);
             apply_field!(pparams, update, pool_deposit);
             apply_field!(pparams, update, desired_number_of_stake_pools);
+            apply_field!(pparams, update, protocol_version);
             apply_field!(pparams, update, min_pool_cost);
             apply_field!(pparams, update, ada_per_utxo_byte);
             apply_field!(pparams, update, execution_costs);
@@ -408,6 +411,7 @@ fn apply_param_update(
             apply_field!(pparams, update, key_deposit);
             apply_field!(pparams, update, pool_deposit);
             apply_field!(pparams, update, desired_number_of_stake_pools);
+            apply_field!(pparams, update, protocol_version);
             apply_field!(pparams, update, min_pool_cost);
             apply_field!(pparams, update, ada_per_utxo_byte);
             apply_field!(pparams, update, execution_costs);
@@ -523,7 +527,7 @@ pub fn fold_until_epoch(
         }
     }
 
-    for epoch in 1..for_epoch {
+    for epoch in 1..=for_epoch + 1{
         let epoch_updates: Vec<_> = updates
             .iter()
             .filter(|e| e.epoch() == (epoch - 1))
