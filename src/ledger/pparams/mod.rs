@@ -9,7 +9,7 @@ use pallas::{
         traverse::MultiEraUpdate,
     },
 };
-use tracing::{debug, warn};
+use tracing::{debug, trace, warn};
 
 mod summary;
 
@@ -183,7 +183,8 @@ fn bootstrap_conway_pparams(
         min_pool_cost: previous.min_pool_cost,
         desired_number_of_stake_pools: previous.desired_number_of_stake_pools,
         // In the hardfork, the value got translated from words to bytes
-        // Since the transformation from words to bytes is hardcoded, the transformation here is also hardcoded
+        // Since the transformation from words to bytes is hardcoded, the transformation here is
+        // also hardcoded
         ada_per_utxo_byte: previous.ada_per_utxo_byte / 8,
         execution_costs: previous.execution_costs,
         max_tx_ex_units: previous.max_tx_ex_units,
@@ -308,9 +309,15 @@ fn apply_param_update(
                 pparams.max_tx_size = new;
             }
 
+            if let Some(new) = update.byron_proposed_block_version() {
+                debug!("found new byron block version update proposal");
+                pparams.block_version = new;
+            }
+
             MultiEraProtocolParameters::Byron(pparams)
         }
         MultiEraProtocolParameters::Shelley(mut pparams) => {
+            apply_field!(pparams, update, protocol_version);
             apply_field!(pparams, update, minfee_a);
             apply_field!(pparams, update, minfee_b);
             apply_field!(pparams, update, max_block_body_size);
@@ -330,6 +337,7 @@ fn apply_param_update(
             MultiEraProtocolParameters::Shelley(pparams)
         }
         MultiEraProtocolParameters::Alonzo(mut pparams) => {
+            apply_field!(pparams, update, protocol_version);
             apply_field!(pparams, update, minfee_a);
             apply_field!(pparams, update, minfee_b);
             apply_field!(pparams, update, max_block_body_size);
@@ -365,6 +373,7 @@ fn apply_param_update(
             MultiEraProtocolParameters::Alonzo(pparams)
         }
         MultiEraProtocolParameters::Babbage(mut pparams) => {
+            apply_field!(pparams, update, protocol_version);
             apply_field!(pparams, update, minfee_a);
             apply_field!(pparams, update, minfee_b);
             apply_field!(pparams, update, max_block_body_size);
@@ -400,6 +409,7 @@ fn apply_param_update(
             MultiEraProtocolParameters::Babbage(pparams)
         }
         MultiEraProtocolParameters::Conway(mut pparams) => {
+            apply_field!(pparams, update, protocol_version);
             apply_field!(pparams, update, minfee_a);
             apply_field!(pparams, update, minfee_b);
             apply_field!(pparams, update, max_block_body_size);
@@ -500,83 +510,16 @@ fn migrate_pparams(
     }
 }
 
-pub fn fold_until_epoch(
-    genesis: &Genesis,
-    updates: &[MultiEraUpdate],
-    for_epoch: u64,
-) -> (MultiEraProtocolParameters, ChainSummary) {
-    debug!("Initializing with Byron parameters");
-    let mut pparams = MultiEraProtocolParameters::Byron(bootstrap_byron_pparams(&genesis.byron));
+pub fn fold(genesis: &Genesis, updates: &[MultiEraUpdate]) -> ChainSummary {
+    let mut summary = ChainSummary::start(genesis);
 
-    let mut summary = ChainSummary::start(&pparams);
+    updates.to_vec().sort_by_key(|u| u.epoch());
 
-    if let Some(force_protocol) = genesis.force_protocol {
-        while summary.current().protocol_version < force_protocol {
-            let next_protocol = summary.current().protocol_version + 1;
-            pparams = migrate_pparams(pparams, genesis, next_protocol);
-            summary.advance(0, &pparams);
-
-            debug!(
-                protocol = summary.current().protocol_version,
-                "forced hardfork"
-            );
-        }
+    for update in updates {
+        summary.apply_update(update, genesis);
     }
 
-    for epoch in 1..for_epoch {
-        let epoch_updates: Vec<_> = updates
-            .iter()
-            .filter(|e| e.epoch() == (epoch - 1))
-            .collect();
-
-        if !epoch_updates.is_empty() {
-            debug!(
-                epoch,
-                count = epoch_updates.len(),
-                "found updates for epoch",
-            );
-        }
-
-        for update in epoch_updates {
-            pparams = apply_param_update(pparams, update);
-
-            let byron_version_change = update
-                .byron_proposed_block_version()
-                .map(|(v, _, _)| (v as usize));
-
-            let post_byron_version_change = update
-                .first_proposed_protocol_version()
-                .map(|(v, _)| v as usize);
-
-            let version_change = byron_version_change.or(post_byron_version_change);
-
-            if let Some(next_protocol) = version_change {
-                while summary.current().protocol_version < next_protocol {
-                    let next_protocol = summary.current().protocol_version + 1;
-                    pparams = migrate_pparams(pparams, genesis, next_protocol);
-                    summary.advance(epoch, &pparams);
-
-                    debug!(
-                        protocol = summary.current().protocol_version,
-                        "hardfork executed"
-                    );
-                }
-            }
-        }
-    }
-
-    (pparams, summary)
-}
-
-pub fn fold(
-    genesis: &Genesis,
-    updates: &[MultiEraUpdate],
-) -> (MultiEraProtocolParameters, ChainSummary) {
-    let for_epoch = updates.last().map(|u| u.epoch()).unwrap_or(0);
-
-    let (pparams, summary) = fold_until_epoch(genesis, updates, for_epoch);
-
-    (pparams, summary)
+    summary
 }
 
 #[cfg(test)]
@@ -649,17 +592,11 @@ mod tests {
 
             println!("Comparing to {:?}", filename);
 
-            let epoch = filename
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap();
-
             // TODO: implement serialize/deserialize, and get full protocol param json files
             let expected = load_json::<usize, _>(filename);
-            let (_, summary) = fold_until_epoch(&genesis, &chained_updates, epoch);
+            let summary = fold(&genesis, &chained_updates);
 
-            assert_eq!(expected, summary.current().protocol_version)
+            assert_eq!(expected, summary.edge().pparams.protocol_version())
 
             //assert_eq!(expected, actual)
         }

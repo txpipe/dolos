@@ -6,14 +6,19 @@ use crate::{
 use futures_util::StreamExt;
 use itertools::Itertools;
 use pallas::{
-    applying::{utils::AccountState, validate_tx, CertState, Environment, UTxOs}, 
-    crypto::hash::Hash, ledger::{primitives::TransactionInput, 
-    traverse::{wellknown::GenesisValues, MultiEraBlock, MultiEraInput, MultiEraOutput, MultiEraTx}}
+    applying::{utils::AccountState, validate_tx, CertState, Environment, UTxOs},
+    crypto::hash::Hash,
+    ledger::{
+        primitives::TransactionInput,
+        traverse::{
+            wellknown::GenesisValues, MultiEraBlock, MultiEraInput, MultiEraOutput, MultiEraTx,
+        },
+    },
 };
 use std::{
-    borrow::Cow, 
-    collections::{HashMap, HashSet}, 
-    sync::{Arc, RwLock}
+    borrow::Cow,
+    collections::{HashMap, HashSet},
+    sync::{Arc, RwLock},
 };
 use thiserror::Error;
 use tokio::sync::broadcast;
@@ -127,25 +132,26 @@ impl Mempool {
     pub fn validate(&self, tx: &MultiEraTx) -> Result<(), MempoolError> {
         let tip = self.ledger.cursor()?;
 
-         let updates: Vec<_> = self
+        let updates: Vec<_> = self
             .ledger
             .get_pparams(tip.as_ref().map(|p| p.0).unwrap_or_default())?;
 
         let updates: Vec<_> = updates.into_iter().map(TryInto::try_into).try_collect()?;
 
-        let (pparams, _) = crate::ledger::pparams::fold(&self.genesis, &updates);
+        let eras = crate::ledger::pparams::fold(&self.genesis, &updates);
+
+        let era = eras.era_for_slot(tip.as_ref().unwrap().0);
 
         let network_magic = self.genesis.shelley.network_magic.unwrap();
 
         let genesis_values = GenesisValues::from_magic(network_magic.into()).unwrap();
-        
+
         let env = Environment {
-            prot_params: pparams,
+            prot_params: era.pparams.clone(),
             prot_magic: self.genesis.shelley.network_magic.unwrap(),
             block_slot: tip.unwrap().0,
             network_id: genesis_values.network_id as u8,
             acnt: Some(AccountState::default()),
-            
         };
 
         let input_refs = tx.requires().iter().map(From::from).collect();
@@ -159,14 +165,16 @@ impl Mempool {
                 transaction_id: txoref.0,
                 index: txoref.1.into(),
             };
-            let input =  MultiEraInput::AlonzoCompatible(<Box<Cow<'_,TransactionInput>>>::from(Cow::Owned(tx_in)));
+            let input = MultiEraInput::AlonzoCompatible(<Box<Cow<'_, TransactionInput>>>::from(
+                Cow::Owned(tx_in),
+            ));
             let output = MultiEraOutput::try_from(eracbor)?;
             pallas_utxos.insert(input, output);
         }
-        
+
         validate_tx(tx, 0, &env, &pallas_utxos, &mut CertState::default())?;
 
-        Ok(())  
+        Ok(())
     }
 
     #[cfg(feature = "phase2")]
@@ -179,25 +187,19 @@ impl Mempool {
 
         let updates: Vec<_> = updates.into_iter().map(TryInto::try_into).try_collect()?;
 
-        let (pparams, eras) = crate::ledger::pparams::fold(&self.genesis, &updates);
+        let eras = crate::ledger::pparams::fold(&self.genesis, &updates);
 
         let slot_config = SlotConfig {
-            slot_length: eras.current().slot_length,
-            zero_slot: eras.current().start.slot,
-            zero_time: eras
-                .current()
-                .start
-                .timestamp
-                .timestamp()
-                .try_into()
-                .unwrap(),
+            slot_length: eras.edge().pparams.slot_length(),
+            zero_slot: eras.edge().start.slot,
+            zero_time: eras.edge().start.timestamp.timestamp().try_into().unwrap(),
         };
 
         let input_refs = tx.requires().iter().map(From::from).collect();
 
         let utxos = self.ledger.get_utxos(input_refs)?;
 
-        let report = tx::eval_tx(tx, &pparams, &utxos, &slot_config)?;
+        let report = tx::eval_tx(tx, &eras.edge().pparams, &utxos, &slot_config)?;
 
         Ok(report)
     }

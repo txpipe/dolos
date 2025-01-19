@@ -113,11 +113,9 @@ pub fn run(config: &crate::Config, _args: &Args) -> miette::Result<()> {
 
     let genesis = crate::common::open_genesis_files(&config.genesis)?;
 
-    let (pparams, summary) = dolos::ledger::pparams::fold(&genesis, &updates);
+    let eras = dolos::ledger::pparams::fold(&genesis, &updates);
 
-    println!("{:?}", summary);
-    println!("---");
-    println!("{:?}", pparams);
+    println!("{:?}", eras);
 
     println!("---");
 
