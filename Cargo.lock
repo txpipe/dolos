@@ -998,7 +998,7 @@ dependencies = [
  "serde_with 3.11.0",
  "tar",
  "tempfile",
- "thiserror 1.0.65",
+ "thiserror 2.0.8",
  "tokio",
  "tokio-stream",
  "tokio-util",
@@ -1297,7 +1297,7 @@ dependencies = [
  "gasket-derive",
  "serde",
  "signal-hook",
- "thiserror 1.0.65",
+ "thiserror 1.0.69",
  "tokio",
  "tokio-util",
  "tracing",
@@ -1897,7 +1897,7 @@ dependencies = [
  "supports-unicode",
  "terminal_size",
  "textwrap",
- "thiserror 1.0.65",
+ "thiserror 1.0.69",
  "unicode-width",
 ]
 
@@ -2088,7 +2088,7 @@ dependencies = [
  "rayon",
  "rug",
  "serde",
- "thiserror 1.0.65",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -2267,7 +2267,7 @@ dependencies = [
  "hex",
  "pallas-codec 0.31.0",
  "pallas-crypto 0.31.0",
- "thiserror 1.0.65",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -2282,7 +2282,7 @@ dependencies = [
  "hex",
  "pallas-codec 0.32.0",
  "pallas-crypto 0.32.0",
- "thiserror 1.0.65",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -2298,7 +2298,7 @@ dependencies = [
  "pallas-primitives 0.32.0",
  "pallas-traverse 0.32.0",
  "rand",
- "thiserror 1.0.65",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -2310,7 +2310,7 @@ dependencies = [
  "hex",
  "minicbor",
  "serde",
- "thiserror 1.0.65",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -2321,7 +2321,7 @@ dependencies = [
  "hex",
  "minicbor",
  "serde",
- "thiserror 1.0.65",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -2352,7 +2352,7 @@ dependencies = [
  "pallas-codec 0.31.0",
  "rand_core 0.6.4",
  "serde",
- "thiserror 1.0.65",
+ "thiserror 1.0.69",
  "zeroize",
 ]
 
@@ -2366,7 +2366,7 @@ dependencies = [
  "pallas-codec 0.32.0",
  "rand_core 0.6.4",
  "serde",
- "thiserror 1.0.65",
+ "thiserror 1.0.69",
  "zeroize",
 ]
 
@@ -2380,7 +2380,7 @@ dependencies = [
  "pallas-network 0.31.0",
  "pallas-traverse 0.31.0",
  "tap",
- "thiserror 1.0.65",
+ "thiserror 1.0.69",
  "tracing",
 ]
 
@@ -2393,7 +2393,7 @@ dependencies = [
  "pallas-network 0.32.0",
  "pallas-traverse 0.32.0",
  "tap",
- "thiserror 1.0.65",
+ "thiserror 1.0.69",
  "tracing",
 ]
 
@@ -2410,7 +2410,7 @@ dependencies = [
  "pallas-crypto 0.31.0",
  "rand",
  "socket2",
- "thiserror 1.0.65",
+ "thiserror 1.0.69",
  "tokio",
  "tracing",
 ]
@@ -2427,7 +2427,7 @@ dependencies = [
  "pallas-crypto 0.32.0",
  "rand",
  "socket2",
- "thiserror 1.0.65",
+ "thiserror 1.0.69",
  "tokio",
  "tracing",
 ]
@@ -2477,7 +2477,7 @@ dependencies = [
  "pallas-primitives 0.31.0",
  "paste",
  "serde",
- "thiserror 1.0.65",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -2493,7 +2493,7 @@ dependencies = [
  "pallas-primitives 0.32.0",
  "paste",
  "serde",
- "thiserror 1.0.65",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -2510,7 +2510,7 @@ dependencies = [
  "pallas-wallet",
  "serde",
  "serde_json",
- "thiserror 1.0.65",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -2538,7 +2538,7 @@ dependencies = [
  "ed25519-bip32",
  "pallas-crypto 0.32.0",
  "rand",
- "thiserror 1.0.65",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -2833,7 +2833,7 @@ dependencies = [
  "rustc-hash",
  "rustls",
  "socket2",
- "thiserror 1.0.65",
+ "thiserror 1.0.69",
  "tokio",
  "tracing",
 ]
@@ -2850,7 +2850,7 @@ dependencies = [
  "rustc-hash",
  "rustls",
  "slab",
- "thiserror 1.0.65",
+ "thiserror 1.0.69",
  "tinyvec",
  "tracing",
 ]
@@ -3685,11 +3685,11 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
-version = "1.0.65"
+version = "1.0.69"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d11abd9594d9b38965ef50805c5e469ca9cc6f197f883f717e0269a3057b3d5"
+checksum = "b6aaf5339b578ea85b50e080feb250a3e8ae8cfcdff9a461c9ec2904bc923f52"
 dependencies = [
- "thiserror-impl 1.0.65",
+ "thiserror-impl 1.0.69",
 ]
 
 [[package]]
@@ -3703,9 +3703,9 @@ dependencies = [
 
 [[package]]
 name = "thiserror-impl"
-version = "1.0.65"
+version = "1.0.69"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ae71770322cbd277e69d762a16c444af02aa0575ac0d174f0b9562d3b37f8602"
+checksum = "4fee6c4efc90059e10f81e6d42c60a18f76588c3d74cb83a0b242a2b6c7504c1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4225,7 +4225,7 @@ dependencies = [
  "once_cell",
  "rug",
  "secp256k1",
- "thiserror 1.0.65",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
