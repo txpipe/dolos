@@ -592,9 +592,21 @@ mod tests {
 
             println!("Comparing to {:?}", filename);
 
+            let epoch = filename
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap();
+
+            let updates: Vec<_> = chained_updates
+                .iter()
+                .filter(|u| u.epoch() <= epoch)
+                .cloned()
+                .collect();
+
             // TODO: implement serialize/deserialize, and get full protocol param json files
             let expected = load_json::<usize, _>(filename);
-            let summary = fold(&genesis, &chained_updates);
+            let summary = fold(&genesis, updates.as_slice());
 
             assert_eq!(expected, summary.edge().pparams.protocol_version())
 

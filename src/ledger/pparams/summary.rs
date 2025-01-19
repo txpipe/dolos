@@ -70,7 +70,7 @@ impl ChainSummary {
         self.advance(apply_epoch, pparams);
     }
 
-    pub fn advance(&mut self, at_epoch: u64, pparams: MultiEraProtocolParameters) {
+    fn advance(&mut self, at_epoch: u64, pparams: MultiEraProtocolParameters) {
         let mut edge = self.edge.take().unwrap();
         let epoch_delta = at_epoch - edge.start.epoch;
 
