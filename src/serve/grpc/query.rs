@@ -203,7 +203,7 @@ fn into_u5c_utxo(
     mapper: &interop::Mapper<LedgerStore>,
 ) -> Result<u5c::query::AnyUtxoData, pallas::codec::minicbor::decode::Error> {
     let parsed = MultiEraOutput::try_from(body)?;
-    let parsed = mapper.map_tx_output(&parsed);
+    let parsed = mapper.map_tx_output(&parsed, None);
 
     Ok(u5c::query::AnyUtxoData {
         txo_ref: Some(u5c::query::TxoRef {
@@ -237,12 +237,14 @@ impl u5c::query::query_service_server::QueryService for QueryServiceImpl {
             .try_collect::<_, _, pallas::codec::minicbor::decode::Error>()
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        let (pparams, _) = pparams::fold(&self.genesis, &updates);
+        let summary = pparams::fold(&self.genesis, &updates);
+
+        let era = summary.era_for_slot(tip.as_ref().unwrap().0);
 
         let mut response = u5c::query::ReadParamsResponse {
             values: Some(u5c::query::AnyChainParams {
                 params: u5c::query::any_chain_params::Params::Cardano(
-                    self.mapper.map_pparams(pparams),
+                    self.mapper.map_pparams(era.pparams.clone()),
                 )
                 .into(),
             }),

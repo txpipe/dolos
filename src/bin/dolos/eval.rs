@@ -87,7 +87,10 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
         })
         .try_collect()?;
 
-    let (pparams, _) = dolos::ledger::pparams::fold_until_epoch(&genesis, &updates, args.epoch);
+    let pparams = dolos::ledger::pparams::fold(&genesis, &updates)
+        .edge()
+        .pparams
+        .clone();
 
     let context = ValidationContext {
         block_slot: args.block_slot,
