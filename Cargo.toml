@@ -48,7 +48,7 @@ async-stream = "0.3.5"
 serde_with = "3.8.1"
 protoc-wkt = "1.0.0"
 itertools = "0.13.0"
-indicatif = "0.17.8"
+indicatif = "0.17.9"
 trait-variant = "0.1.2"
 comfy-table = { version = "7.1.1", optional = true }
 inquire = { version = "0.7.5", optional = true }
