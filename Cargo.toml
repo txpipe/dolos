@@ -45,7 +45,7 @@ futures-core = "0.3.31"
 tokio-stream = { version = "0.1.14", features = ["sync"] }
 futures-util = "0.3.28"
 async-stream = "0.3.5"
-serde_with = "3.8.1"
+serde_with = "3.12.0"
 protoc-wkt = "1.0.0"
 itertools = "0.13.0"
 indicatif = "0.17.8"
