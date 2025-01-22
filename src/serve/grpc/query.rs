@@ -237,7 +237,7 @@ impl u5c::query::query_service_server::QueryService for QueryServiceImpl {
             .try_collect::<_, _, pallas::codec::minicbor::decode::Error>()
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        let summary = pparams::fold(&self.genesis, &updates);
+        let summary = pparams::fold_with_hacks(&self.genesis, &updates, tip.as_ref().unwrap().0);
 
         let era = summary.era_for_slot(tip.as_ref().unwrap().0);
 

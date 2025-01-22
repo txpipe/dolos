@@ -135,4 +135,22 @@ impl ChainSummary {
             .find(|e| slot >= e.start.slot && e.end.as_ref().unwrap().slot > slot)
             .unwrap()
     }
+
+    pub(crate) fn apply_hacks<F>(&mut self, epoch: u64, change: F)
+    where
+        F: Fn(&mut EraSummary),
+    {
+        if epoch >= self.edge().start.epoch {
+            change(self.edge.as_mut().unwrap());
+        }
+
+        let era = self
+            .past
+            .iter_mut()
+            .find(|e| epoch >= e.start.epoch && e.end.as_ref().unwrap().epoch > epoch);
+
+        if let Some(era) = era {
+            change(era);
+        }
+    }
 }

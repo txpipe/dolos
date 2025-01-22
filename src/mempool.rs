@@ -138,7 +138,11 @@ impl Mempool {
 
         let updates: Vec<_> = updates.into_iter().map(TryInto::try_into).try_collect()?;
 
-        let eras = crate::ledger::pparams::fold(&self.genesis, &updates);
+        let eras = crate::ledger::pparams::fold_with_hacks(
+            &self.genesis,
+            &updates,
+            tip.as_ref().unwrap().0,
+        );
 
         let era = eras.era_for_slot(tip.as_ref().unwrap().0);
 
@@ -187,7 +191,11 @@ impl Mempool {
 
         let updates: Vec<_> = updates.into_iter().map(TryInto::try_into).try_collect()?;
 
-        let eras = crate::ledger::pparams::fold(&self.genesis, &updates);
+        let eras = crate::ledger::pparams::fold_with_hacks(
+            &self.genesis,
+            &updates,
+            tip.as_ref().unwrap().0,
+        );
 
         let slot_config = SlotConfig {
             slot_length: eras.edge().pparams.slot_length(),

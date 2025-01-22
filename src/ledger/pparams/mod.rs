@@ -11,6 +11,7 @@ use pallas::{
 };
 use tracing::{debug, trace, warn};
 
+mod hacks;
 mod summary;
 
 pub use summary::*;
@@ -517,6 +518,30 @@ pub fn fold(genesis: &Genesis, updates: &[MultiEraUpdate]) -> ChainSummary {
 
     for update in updates {
         summary.apply_update(update, genesis);
+    }
+
+    summary
+}
+
+/// Fold pparams, applying hacks as necessary
+///
+/// Until we have all of the governance-related logic in place, there's no way
+/// to keep pparams updated. While we implement this, we'll just apply the hacks
+/// manually. Hacks are available in `hacks` folder.
+pub fn fold_with_hacks(
+    genesis: &Genesis,
+    updates: &[MultiEraUpdate],
+    current_slot: u64,
+) -> ChainSummary {
+    let mut summary = fold(genesis, updates);
+
+    let network_magic = genesis.shelley.network_magic.unwrap_or_default();
+
+    match network_magic {
+        764824073 => hacks::mainnet(&mut summary, current_slot),
+        1 => hacks::preprod(&mut summary, current_slot),
+        2 => hacks::preview(&mut summary, current_slot),
+        _ => (),
     }
 
     summary
