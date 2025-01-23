@@ -200,15 +200,12 @@ pub fn compute_undo_delta(
     Ok(delta)
 }
 
-pub fn compute_origin_delta(
-    byron: &pallas::ledger::configs::byron::GenesisFile,
-    shelley: &pallas::ledger::configs::shelley::GenesisFile,
-) -> LedgerDelta {
+pub fn compute_origin_delta(genesis: &Genesis) -> LedgerDelta {
     let mut delta = LedgerDelta::default();
 
     // byron
     {
-        let utxos = pallas::ledger::configs::byron::genesis_utxos(byron);
+        let utxos = pallas::ledger::configs::byron::genesis_utxos(&genesis.byron);
 
         for (tx, addr, amount) in utxos {
             let utxo_ref = TxoRef(tx, 0);
@@ -226,7 +223,7 @@ pub fn compute_origin_delta(
     }
     // shelley
     {
-        let utxos = pallas::ledger::configs::shelley::shelley_utxos(shelley);
+        let utxos = pallas::ledger::configs::shelley::shelley_utxos(&genesis.shelley);
 
         for (tx, addr, amount) in utxos {
             let utxo_ref = TxoRef(tx, 0);
@@ -267,6 +264,22 @@ mod tests {
     use std::str::FromStr;
 
     use super::*;
+
+    fn load_genesis(path: &std::path::Path) -> Genesis {
+        let byron = pallas::ledger::configs::byron::from_file(&path.join("byron.json")).unwrap();
+        let shelley =
+            pallas::ledger::configs::shelley::from_file(&path.join("shelley.json")).unwrap();
+        let alonzo = pallas::ledger::configs::alonzo::from_file(&path.join("alonzo.json")).unwrap();
+        let conway = pallas::ledger::configs::conway::from_file(&path.join("conway.json")).unwrap();
+
+        Genesis {
+            byron,
+            shelley,
+            alonzo,
+            conway,
+            force_protocol: None,
+        }
+    }
 
     fn fake_slice_for_block(block: &MultiEraBlock) -> LedgerSlice {
         let consumed: HashMap<_, _> = block
@@ -310,11 +323,11 @@ mod tests {
     fn test_mainnet_genesis_utxos() {
         let path = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap())
             .join("examples")
-            .join("sync-mainnet")
-            .join("byron.json");
+            .join("sync-mainnet");
 
-        let byron = pallas::ledger::configs::byron::from_file(&path).unwrap();
-        let delta = compute_origin_delta(&byron);
+        let genesis = load_genesis(&path);
+
+        let delta = compute_origin_delta(&genesis);
 
         assert_genesis_utxo_exists(
             &delta,
@@ -328,11 +341,11 @@ mod tests {
     fn test_preview_genesis_utxos() {
         let path = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap())
             .join("examples")
-            .join("sync-preview")
-            .join("byron.json");
+            .join("sync-preview");
 
-        let byron = pallas::ledger::configs::byron::from_file(&path).unwrap();
-        let delta = compute_origin_delta(&byron);
+        let genesis = load_genesis(&path);
+
+        let delta = compute_origin_delta(&genesis);
 
         assert_genesis_utxo_exists(
             &delta,
