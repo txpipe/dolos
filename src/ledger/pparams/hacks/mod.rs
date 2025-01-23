@@ -1,6 +1,7 @@
 use super::ChainSummary;
 
 mod mainnet_epoch526;
+mod preprod_epoch191;
 mod preview_epoch736;
 
 pub fn mainnet(eras: &mut ChainSummary, current_slot: u64) {
@@ -10,7 +11,9 @@ pub fn mainnet(eras: &mut ChainSummary, current_slot: u64) {
 }
 
 pub fn preprod(eras: &mut ChainSummary, current_slot: u64) {
-    // TODO
+    if current_slot >= preprod_epoch191::SLOT {
+        eras.apply_hacks(preprod_epoch191::SLOT, preprod_epoch191::change);
+    }
 }
 
 pub fn preview(eras: &mut ChainSummary, current_slot: u64) {
