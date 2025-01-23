@@ -1,3 +1,4 @@
+use pallas::ledger::primitives::conway::GovAction;
 use pallas::ledger::traverse::{Era, MultiEraBlock, MultiEraInput, MultiEraUpdate};
 use pallas::{crypto::hash::Hash, ledger::traverse::MultiEraOutput};
 use pparams::Genesis;
@@ -119,8 +120,8 @@ pub struct LedgerDelta {
 /// higher-layers to retry the logic if required.
 ///
 /// This method assumes that the block has already been validated, it will
-/// return an error if any of the assumed invariant have been broken in the
-/// process of computing the delta, but it own't provide a comprehensive
+/// return an error if any of the assumed invariants have been broken in the
+/// process of computing the delta, but it doesn't provide a comprehensive
 /// validation of the ledger rules.
 pub fn compute_delta(
     block: &MultiEraBlock,
