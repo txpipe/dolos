@@ -64,32 +64,6 @@ struct Cli {
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct StorageConfig {
-    path: std::path::PathBuf,
-
-    /// Size (in Mb) of memory allocated for WAL caching
-    wal_cache: Option<usize>,
-
-    /// Size (in Mb) of memory allocated for ledger caching
-    ledger_cache: Option<usize>,
-
-    /// Maximum number of slots (not blocks) to keep in the WAL
-    max_wal_history: Option<u64>,
-}
-
-impl Default for StorageConfig {
-    fn default() -> Self {
-        Self {
-            path: PathBuf::from("data"),
-            wal_cache: None,
-            ledger_cache: None,
-            max_wal_history: None,
-        }
-    }
-}
-
-// TODO: add hash of genesis for runtime verification
-#[derive(Serialize, Deserialize)]
 pub struct GenesisConfig {
     byron_path: PathBuf,
     shelley_path: PathBuf,
@@ -151,7 +125,7 @@ impl Default for LoggingConfig {
 #[derive(Serialize, Deserialize)]
 pub struct Config {
     pub upstream: dolos::model::UpstreamConfig,
-    pub storage: StorageConfig,
+    pub storage: dolos::model::StorageConfig,
     pub genesis: GenesisConfig,
     pub sync: dolos::sync::Config,
     pub submit: dolos::model::SubmitConfig,

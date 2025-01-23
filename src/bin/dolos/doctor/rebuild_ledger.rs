@@ -81,9 +81,14 @@ pub fn run(config: &crate::Config, _args: &Args, feedback: &Feedback) -> miette:
             .into_diagnostic()
             .context("decoding blocks")?;
 
-        dolos::state::apply_block_batch(&blocks, &light, &genesis)
-            .into_diagnostic()
-            .context("importing blocks to ledger store")?;
+        dolos::state::apply_block_batch(
+            &blocks,
+            &light,
+            &genesis,
+            config.storage.max_ledger_history,
+        )
+        .into_diagnostic()
+        .context("importing blocks to ledger store")?;
 
         blocks.last().inspect(|b| progress.set_position(b.slot()));
     }

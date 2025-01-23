@@ -220,6 +220,7 @@ pub fn apply_block_batch<'a>(
     blocks: impl IntoIterator<Item = &'a MultiEraBlock<'a>>,
     store: &LedgerStore,
     genesis: &Genesis,
+    max_ledger_history: Option<u64>,
 ) -> Result<(), LedgerError> {
     let mut deltas: Vec<LedgerDelta> = vec![];
 
@@ -238,7 +239,10 @@ pub fn apply_block_batch<'a>(
         .map(|x| x.0)
         .unwrap();
 
-    let to_finalize = lastest_immutable_slot(tip, genesis);
+    let to_finalize = max_ledger_history
+        .map(|x| tip - x)
+        .unwrap_or(lastest_immutable_slot(tip, genesis));
+
     store.finalize(to_finalize)?;
 
     Ok(())

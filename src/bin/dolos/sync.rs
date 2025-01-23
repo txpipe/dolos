@@ -19,6 +19,7 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
     let sync = dolos::sync::pipeline(
         &config.sync,
         &config.upstream,
+        &config.storage,
         wal,
         ledger,
         genesis,

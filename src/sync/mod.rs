@@ -48,6 +48,7 @@ fn define_gasket_policy(config: &Option<gasket::retries::Policy>) -> gasket::run
 pub fn pipeline(
     config: &Config,
     upstream: &UpstreamConfig,
+    storage: &StorageConfig,
     wal: WalStore,
     ledger: LedgerStore,
     genesis: Arc<Genesis>,
@@ -65,7 +66,13 @@ pub fn pipeline(
 
     let mut roll = roll::Stage::new(wal.clone());
 
-    let mut apply = apply::Stage::new(wal.clone(), ledger, mempool.clone(), genesis);
+    let mut apply = apply::Stage::new(
+        wal.clone(),
+        ledger,
+        mempool.clone(),
+        genesis,
+        storage.max_ledger_history,
+    );
 
     let submit = submit::Stage::new(
         upstream.peer_address.clone(),

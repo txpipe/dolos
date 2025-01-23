@@ -18,6 +18,8 @@ pub struct Stage {
     genesis: Arc<Genesis>,
     mempool: crate::mempool::Mempool, // Add this line
 
+    max_ledger_history: Option<u64>,
+
     pub upstream: UpstreamPort,
 
     #[metric]
@@ -33,12 +35,14 @@ impl Stage {
         ledger: crate::state::LedgerStore,
         mempool: crate::mempool::Mempool,
         genesis: Arc<Genesis>,
+        max_ledger_history: Option<u64>,
     ) -> Self {
         Self {
             wal,
             ledger,
             mempool,
             genesis,
+            max_ledger_history,
             upstream: Default::default(),
             block_count: Default::default(),
             wal_count: Default::default(),
@@ -77,7 +81,13 @@ impl Stage {
 
         let block = MultiEraBlock::decode(body).or_panic()?;
 
-        crate::state::apply_block_batch([&block], &self.ledger, &self.genesis).or_panic()?;
+        crate::state::apply_block_batch(
+            [&block],
+            &self.ledger,
+            &self.genesis,
+            self.max_ledger_history,
+        )
+        .or_panic()?;
 
         self.mempool.apply_block(&block);
 

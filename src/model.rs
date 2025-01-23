@@ -42,3 +42,32 @@ pub struct UpstreamConfig {
 pub struct SubmitConfig {
     pub prune_height: Option<u64>,
 }
+
+#[derive(Serialize, Deserialize)]
+pub struct StorageConfig {
+    pub path: std::path::PathBuf,
+
+    /// Size (in Mb) of memory allocated for WAL caching
+    pub wal_cache: Option<usize>,
+
+    /// Size (in Mb) of memory allocated for ledger caching
+    pub ledger_cache: Option<usize>,
+
+    /// Maximum number of slots (not blocks) to keep in the WAL
+    pub max_wal_history: Option<u64>,
+
+    /// Maximum number of slots to keep in the ledger before pruning
+    pub max_ledger_history: Option<u64>,
+}
+
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            path: std::path::PathBuf::from("data"),
+            wal_cache: None,
+            ledger_cache: None,
+            max_wal_history: None,
+            max_ledger_history: None,
+        }
+    }
+}
