@@ -1,42 +1,30 @@
 use crate::{
     ledger::{
         pparams::{self, Genesis},
-        EraCbor, PParamsBody, TxoRef,
+        EraCbor, TxoRef,
     },
-    serve::{utils::apply_mask, GenesisFiles},
+    serve::utils::apply_mask,
     state::{LedgerError, LedgerStore},
 };
 use itertools::Itertools as _;
-use pallas::ledger::{
-    configs::{alonzo, byron, shelley},
-    traverse::{MultiEraOutput, MultiEraUpdate},
-};
-use pallas::{interop::utxorpc::spec as u5c, ledger::configs::conway};
-use pallas::{
-    interop::utxorpc::{self as interop, spec::query::any_utxo_pattern::UtxoPattern},
-    ledger::traverse::wellknown::GenesisValues,
-};
-use std::collections::HashSet;
+use pallas::interop::utxorpc::spec as u5c;
+use pallas::interop::utxorpc::{self as interop, spec::query::any_utxo_pattern::UtxoPattern};
+use pallas::ledger::traverse::MultiEraOutput;
+use std::{collections::HashSet, sync::Arc};
 use tonic::{Request, Response, Status};
 use tracing::info;
 
 pub struct QueryServiceImpl {
     ledger: LedgerStore,
     mapper: interop::Mapper<LedgerStore>,
-    alonzo_genesis_file: alonzo::GenesisFile,
-    byron_genesis_file: byron::GenesisFile,
-    shelley_genesis_file: shelley::GenesisFile,
-    conway_genesis_file: conway::GenesisFile,
+    genesis: Arc<Genesis>,
 }
 
 impl QueryServiceImpl {
-    pub fn new(ledger: LedgerStore, genesis_files: GenesisFiles) -> Self {
+    pub fn new(ledger: LedgerStore, genesis: Arc<Genesis>) -> Self {
         Self {
             ledger: ledger.clone(),
-            alonzo_genesis_file: genesis_files.0,
-            byron_genesis_file: genesis_files.1,
-            shelley_genesis_file: genesis_files.2,
-            conway_genesis_file: genesis_files.3,
+            genesis,
             mapper: interop::Mapper::new(ledger),
         }
     }
@@ -215,7 +203,7 @@ fn into_u5c_utxo(
     mapper: &interop::Mapper<LedgerStore>,
 ) -> Result<u5c::query::AnyUtxoData, pallas::codec::minicbor::decode::Error> {
     let parsed = MultiEraOutput::try_from(body)?;
-    let parsed = mapper.map_tx_output(&parsed);
+    let parsed = mapper.map_tx_output(&parsed, None);
 
     Ok(u5c::query::AnyUtxoData {
         txo_ref: Some(u5c::query::TxoRef {
@@ -237,50 +225,32 @@ impl u5c::query::query_service_server::QueryService for QueryServiceImpl {
 
         info!("received new grpc query");
 
-        let curr_point = match self.ledger.cursor()? {
-            Some(point) => point,
-            None => return Err(Status::internal("Uninitialized ledger.")),
-        };
+        let tip = self.ledger.cursor()?;
 
-        let updates = self.ledger.get_pparams(curr_point.0)?;
+        let updates = self
+            .ledger
+            .get_pparams(tip.as_ref().map(|p| p.0).unwrap_or_default())?;
+
         let updates: Vec<_> = updates
-            .iter()
-            .map(|PParamsBody(era, cbor)| -> Result<MultiEraUpdate, Status> {
-                MultiEraUpdate::decode_for_era(*era, cbor)
-                    .map_err(|e| Status::internal(e.to_string()))
-            })
-            .try_collect()?;
+            .into_iter()
+            .map(TryInto::try_into)
+            .try_collect::<_, _, pallas::codec::minicbor::decode::Error>()
+            .map_err(|e| Status::internal(e.to_string()))?;
 
-        let genesis = Genesis {
-            alonzo: &self.alonzo_genesis_file,
-            byron: &self.byron_genesis_file,
-            shelley: &self.shelley_genesis_file,
-            conway: &self.conway_genesis_file,
-        };
+        let summary = pparams::fold_with_hacks(&self.genesis, &updates, tip.as_ref().unwrap().0);
 
-        let network_magic = match self.shelley_genesis_file.network_magic {
-            Some(magic) => magic.into(),
-            None => return Err(Status::internal("networkMagic missing in shelley genesis.")),
-        };
-
-        let genesis_values = match GenesisValues::from_magic(network_magic) {
-            Some(genesis_values) => genesis_values,
-            None => return Err(Status::internal("Invalid networdMagic.")),
-        };
-
-        let (epoch, _) = genesis_values.absolute_slot_to_relative(curr_point.0);
-        let pparams = pparams::fold_pparams(&genesis, &updates, epoch);
+        let era = summary.era_for_slot(tip.as_ref().unwrap().0);
 
         let mut response = u5c::query::ReadParamsResponse {
             values: Some(u5c::query::AnyChainParams {
                 params: u5c::query::any_chain_params::Params::Cardano(
-                    self.mapper.map_pparams(pparams),
+                    self.mapper.map_pparams(era.pparams.clone()),
                 )
                 .into(),
             }),
-            ledger_tip: Some(u5c::query::ChainPoint {
-                slot: curr_point.0,
-                hash: curr_point.1.to_vec().into(),
+            ledger_tip: tip.map(|p| u5c::query::ChainPoint {
+                slot: p.0,
+                hash: p.1.to_vec().into(),
             }),
         };
 

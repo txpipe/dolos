@@ -172,7 +172,7 @@ impl PParamsTable {
         Ok(())
     }
 
-    pub fn get_range(rx: &ReadTransaction, until: BlockSlot) -> Result<Vec<PParamsBody>, Error> {
+    pub fn get_range(rx: &ReadTransaction, until: BlockSlot) -> Result<Vec<EraCbor>, Error> {
         let table = rx.open_table(Self::DEF)?;
 
         let mut out = vec![];
@@ -181,7 +181,7 @@ impl PParamsTable {
             let (_, body) = item?;
             let (era, cbor) = body.value();
             let era = pallas::ledger::traverse::Era::try_from(era).unwrap();
-            out.push(PParamsBody(era, Vec::from(cbor)));
+            out.push(EraCbor(era, Vec::from(cbor)));
         }
 
         Ok(out)
@@ -191,7 +191,7 @@ impl PParamsTable {
         let mut table = wx.open_table(PParamsTable::DEF)?;
 
         if let Some(ChainPoint(slot, _)) = delta.new_position {
-            for PParamsBody(era, body) in delta.new_pparams.iter() {
+            for EraCbor(era, body) in delta.new_pparams.iter() {
                 let v: (u16, &[u8]) = (u16::from(*era), body);
                 table.insert(slot, v)?;
             }

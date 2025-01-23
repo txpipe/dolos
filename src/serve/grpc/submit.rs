@@ -1,7 +1,10 @@
+use any_chain_eval::Chain;
 use futures_core::Stream;
 use futures_util::{StreamExt as _, TryStreamExt as _};
 use pallas::crypto::hash::Hash;
 use pallas::interop::utxorpc as interop;
+use pallas::interop::utxorpc as u5c;
+use pallas::interop::utxorpc::spec::cardano::ExUnits;
 use pallas::interop::utxorpc::spec::submit::{WaitForTxResponse, *};
 use std::collections::HashSet;
 use std::pin::Pin;
@@ -9,7 +12,7 @@ use tokio_stream::wrappers::BroadcastStream;
 use tonic::{Request, Response, Status};
 use tracing::info;
 
-use crate::mempool::{Event, Mempool, UpdateFilter};
+use crate::mempool::{Event, Mempool, MempoolError, UpdateFilter};
 use crate::state::LedgerStore;
 
 pub struct SubmitServiceImpl {
@@ -55,6 +58,44 @@ fn event_to_wait_for_tx_response(event: Event) -> WaitForTxResponse {
     }
 }
 
+fn tx_eval_to_u5c(
+    eval: Result<crate::uplc::EvalReport, MempoolError>,
+) -> u5c::spec::cardano::TxEval {
+    match eval {
+        Ok(eval) => u5c::spec::cardano::TxEval {
+            ex_units: eval
+                .iter()
+                .try_fold(u5c::spec::cardano::ExUnits::default(), |acc, eval| {
+                    Some(ExUnits {
+                        steps: acc.steps + eval.units.steps,
+                        memory: acc.memory + eval.units.mem,
+                    })
+                }),
+            redeemers: eval
+                .iter()
+                .map(|x| u5c::spec::cardano::Redeemer {
+                    purpose: x.tag as i32,
+                    index: x.index,
+                    ex_units: Some(u5c::spec::cardano::ExUnits {
+                        steps: x.units.steps,
+                        memory: x.units.mem,
+                    }),
+                    ..Default::default()
+                })
+                .collect(),
+            fee: 0,         // TODO
+            traces: vec![], // TODO
+            ..Default::default()
+        },
+        Err(e) => u5c::spec::cardano::TxEval {
+            errors: vec![u5c::spec::cardano::EvalError {
+                msg: format!("{:#?}", e),
+            }],
+            ..Default::default()
+        },
+    }
+}
+
 #[async_trait::async_trait]
 impl submit_service_server::SubmitService for SubmitServiceImpl {
     type WaitForTxStream =
@@ -72,7 +113,6 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
         info!("received new grpc submit tx request: {:?}", message);
 
         let mut hashes = vec![];
-
         for (idx, tx_bytes) in message.tx.into_iter().flat_map(|x| x.r#type).enumerate() {
             match tx_bytes {
                 any_chain_tx::Type::Raw(bytes) => {
@@ -81,7 +121,6 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
                             format! {"could not process tx at index {idx}: {e}"},
                         )
                     })?;
-
                     hashes.push(hash.to_vec().into());
                 }
             }
@@ -126,7 +165,7 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
         &self,
         _request: tonic::Request<ReadMempoolRequest>,
     ) -> Result<tonic::Response<ReadMempoolResponse>, tonic::Status> {
-        todo!()
+        Err(Status::unimplemented("read_mempool is not yet available"))
     }
 
     async fn watch_mempool(
@@ -143,10 +182,48 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
         Ok(Response::new(stream))
     }
 
+    #[cfg(feature = "phase2")]
+    async fn eval_tx(
+        &self,
+        request: tonic::Request<EvalTxRequest>,
+    ) -> Result<tonic::Response<EvalTxResponse>, tonic::Status> {
+        let txs_raw: Vec<Vec<u8>> = request
+            .into_inner()
+            .tx
+            .into_iter()
+            .map(|tx| {
+                tx.r#type
+                    .map(|tx_type| match tx_type {
+                        any_chain_tx::Type::Raw(bytes) => bytes.to_vec(),
+                    })
+                    .unwrap_or_default()
+            })
+            .collect();
+
+        let eval_results: Vec<_> = txs_raw
+            .iter()
+            .map(|tx_cbor| {
+                let result = self.mempool.evaluate_raw(tx_cbor);
+                let result = tx_eval_to_u5c(result);
+
+                AnyChainEval {
+                    chain: Some(Chain::Cardano(result)),
+                }
+            })
+            .collect();
+
+        Ok(Response::new(EvalTxResponse {
+            report: eval_results,
+        }))
+    }
+
+    #[cfg(not(feature = "phase2"))]
     async fn eval_tx(
         &self,
         _request: tonic::Request<EvalTxRequest>,
-    ) -> Result<tonic::Response<EvalTxResponse>, tonic::Status> {
-        todo!()
+    ) -> Result<tonic::Response<EvalTxResponse>, Status> {
+        Err(Status::unimplemented(
+            "phase2 is not enabled on this Dolos binary",
+        ))
     }
 }

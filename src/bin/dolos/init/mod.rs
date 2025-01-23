@@ -78,6 +78,19 @@ impl From<&KnownNetwork> for dolos::model::UpstreamConfig {
     }
 }
 
+impl From<&KnownNetwork> for crate::GenesisConfig {
+    fn from(value: &KnownNetwork) -> Self {
+        match value {
+            KnownNetwork::CardanoPreview => crate::GenesisConfig {
+                force_protocol: Some(6), // Preview network starts at Alonzo
+                ..Default::default()
+            },
+            // KnownNetwork::CardanoSanchonet => todo!(),
+            _ => crate::GenesisConfig::default(),
+        }
+    }
+}
+
 impl From<&KnownNetwork> for crate::MithrilConfig {
     fn from(value: &KnownNetwork) -> Self {
         match value {
@@ -207,7 +220,7 @@ impl Default for ConfigEditor {
 impl ConfigEditor {
     fn apply_known_network(mut self, network: Option<&KnownNetwork>) -> Self {
         if let Some(network) = network {
-            self.0.genesis = Default::default();
+            self.0.genesis = network.into();
             self.0.upstream = network.into();
             self.0.mithril = Some(network.into());
             self.1 = Some(network.clone());

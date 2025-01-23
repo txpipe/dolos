@@ -1,11 +1,9 @@
 use itertools::Itertools as _;
 use pallas::{
     interop::utxorpc as interop,
-    ledger::{
-        configs::{byron, shelley},
-        traverse::{MultiEraBlock, MultiEraTx},
-    },
+    ledger::traverse::{MultiEraBlock, MultiEraTx},
 };
+use pparams::Genesis;
 use std::collections::{HashMap, HashSet};
 use thiserror::Error;
 
@@ -29,6 +27,9 @@ pub enum LedgerError {
 
     #[error("invalid store version")]
     InvalidStoreVersion,
+
+    #[error("decoding error")]
+    DecodingError(#[source] pallas::codec::minicbor::decode::Error),
 }
 
 impl From<::redb::TableError> for LedgerError {
@@ -81,7 +82,7 @@ impl LedgerStore {
         }
     }
 
-    pub fn get_pparams(&self, until: BlockSlot) -> Result<Vec<PParamsBody>, LedgerError> {
+    pub fn get_pparams(&self, until: BlockSlot) -> Result<Vec<EraCbor>, LedgerError> {
         match self {
             LedgerStore::Redb(x) => x.get_pparams(until),
         }
@@ -123,13 +124,13 @@ impl LedgerStore {
         }
     }
 
-    pub fn apply(&mut self, deltas: &[LedgerDelta]) -> Result<(), LedgerError> {
+    pub fn apply(&self, deltas: &[LedgerDelta]) -> Result<(), LedgerError> {
         match self {
             LedgerStore::Redb(x) => x.apply(deltas),
         }
     }
 
-    pub fn finalize(&mut self, until: BlockSlot) -> Result<(), LedgerError> {
+    pub fn finalize(&self, until: BlockSlot) -> Result<(), LedgerError> {
         match self {
             LedgerStore::Redb(x) => x.finalize(until),
         }
@@ -217,9 +218,8 @@ pub fn load_slice_for_block(
 
 pub fn apply_block_batch<'a>(
     blocks: impl IntoIterator<Item = &'a MultiEraBlock<'a>>,
-    store: &mut LedgerStore,
-    byron: &byron::GenesisFile,
-    shelley: &shelley::GenesisFile,
+    store: &LedgerStore,
+    genesis: &Genesis,
     max_ledger_history: Option<u64>,
 ) -> Result<(), LedgerError> {
     let mut deltas: Vec<LedgerDelta> = vec![];
@@ -241,7 +241,7 @@ pub fn apply_block_batch<'a>(
 
     let to_finalize = max_ledger_history
         .map(|x| tip - x)
-        .unwrap_or(lastest_immutable_slot(tip, byron, shelley));
+        .unwrap_or(lastest_immutable_slot(tip, genesis));
 
     store.finalize(to_finalize)?;
 

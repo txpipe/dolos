@@ -1,4 +1,4 @@
-use dolos::ledger::{PParamsBody, TxoRef};
+use dolos::ledger::{EraCbor, TxoRef};
 use itertools::*;
 use miette::{Context, IntoDiagnostic};
 use pallas::{
@@ -55,7 +55,7 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
         .into_diagnostic()
         .context("resolving utxo")?;
 
-    let (byron, shelley, alonzo, conway) = crate::common::open_genesis_files(&config.genesis)?;
+    let genesis = crate::common::open_genesis_files(&config.genesis)?;
 
     let mut utxos2 = UTxOs::new();
 
@@ -82,21 +82,15 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
 
     let updates: Vec<_> = updates
         .iter()
-        .map(|PParamsBody(era, cbor)| -> miette::Result<MultiEraUpdate> {
+        .map(|EraCbor(era, cbor)| -> miette::Result<MultiEraUpdate> {
             MultiEraUpdate::decode_for_era(*era, cbor).into_diagnostic()
         })
         .try_collect()?;
 
-    let pparams = dolos::ledger::pparams::fold_pparams(
-        &dolos::ledger::pparams::Genesis {
-            byron: &byron,
-            shelley: &shelley,
-            alonzo: &alonzo,
-            conway: &conway,
-        },
-        &updates,
-        args.epoch,
-    );
+    let pparams = dolos::ledger::pparams::fold(&genesis, &updates)
+        .edge()
+        .pparams
+        .clone();
 
     let context = ValidationContext {
         block_slot: args.block_slot,

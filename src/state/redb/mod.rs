@@ -188,7 +188,7 @@ impl LedgerStore {
         }
     }
 
-    pub fn get_pparams(&self, until: BlockSlot) -> Result<Vec<PParamsBody>, LedgerError> {
+    pub fn get_pparams(&self, until: BlockSlot) -> Result<Vec<EraCbor>, LedgerError> {
         match self {
             LedgerStore::SchemaV1(x) => Ok(x.get_pparams(until)?),
             LedgerStore::SchemaV2(x) => Ok(x.get_pparams(until)?),
@@ -239,7 +239,7 @@ impl LedgerStore {
         }
     }
 
-    pub fn apply(&mut self, deltas: &[LedgerDelta]) -> Result<(), LedgerError> {
+    pub fn apply(&self, deltas: &[LedgerDelta]) -> Result<(), LedgerError> {
         match self {
             LedgerStore::SchemaV1(x) => Ok(x.apply(deltas)?),
             LedgerStore::SchemaV2(x) => Ok(x.apply(deltas)?),
@@ -247,7 +247,7 @@ impl LedgerStore {
         }
     }
 
-    pub fn finalize(&mut self, until: BlockSlot) -> Result<(), LedgerError> {
+    pub fn finalize(&self, until: BlockSlot) -> Result<(), LedgerError> {
         match self {
             LedgerStore::SchemaV1(x) => Ok(x.finalize(until)?),
             LedgerStore::SchemaV2(x) => Ok(x.finalize(until)?),
@@ -316,7 +316,7 @@ mod tests {
 
     #[test]
     fn empty_until_cursor() {
-        let mut store = LedgerStore::in_memory_v2().unwrap();
+        let store = LedgerStore::in_memory_v2().unwrap();
 
         assert!(store.is_empty().unwrap());
 

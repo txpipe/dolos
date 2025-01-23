@@ -1,6 +1,6 @@
-use pallas::ledger::configs::{byron, shelley};
-use pallas::ledger::traverse::{Era, MultiEraBlock};
+use pallas::ledger::traverse::{Era, MultiEraBlock, MultiEraInput, MultiEraUpdate};
 use pallas::{crypto::hash::Hash, ledger::traverse::MultiEraOutput};
+use pparams::Genesis;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use thiserror::Error;
@@ -29,8 +29,8 @@ impl From<EraCbor> for (Era, Vec<u8>) {
     }
 }
 
-impl<'a> From<MultiEraOutput<'a>> for EraCbor {
-    fn from(value: MultiEraOutput<'a>) -> Self {
+impl From<MultiEraOutput<'_>> for EraCbor {
+    fn from(value: MultiEraOutput<'_>) -> Self {
         EraCbor(value.era(), value.encode())
     }
 }
@@ -40,6 +40,14 @@ impl<'a> TryFrom<&'a EraCbor> for MultiEraOutput<'a> {
 
     fn try_from(value: &'a EraCbor) -> Result<Self, Self::Error> {
         MultiEraOutput::decode(value.0, &value.1)
+    }
+}
+
+impl TryFrom<EraCbor> for MultiEraUpdate<'_> {
+    type Error = pallas::codec::minicbor::decode::Error;
+
+    fn try_from(value: EraCbor) -> Result<Self, Self::Error> {
+        MultiEraUpdate::decode_for_era(value.0, &value.1)
     }
 }
 
@@ -60,11 +68,14 @@ impl From<TxoRef> for (TxHash, TxoIdx) {
     }
 }
 
+impl From<&MultiEraInput<'_>> for TxoRef {
+    fn from(value: &MultiEraInput<'_>) -> Self {
+        TxoRef(*value.hash(), value.index() as u32)
+    }
+}
+
 #[derive(Debug, Eq, PartialEq, Hash)]
 pub struct ChainPoint(pub BlockSlot, pub BlockHash);
-
-#[derive(Debug)]
-pub struct PParamsBody(pub Era, pub Vec<u8>);
 
 pub type UtxoMap = HashMap<TxoRef, EraCbor>;
 
@@ -94,7 +105,7 @@ pub struct LedgerDelta {
     pub consumed_utxo: HashMap<TxoRef, EraCbor>,
     pub recovered_stxi: HashMap<TxoRef, EraCbor>,
     pub undone_utxo: HashMap<TxoRef, EraCbor>,
-    pub new_pparams: Vec<PParamsBody>,
+    pub new_pparams: Vec<EraCbor>,
 }
 
 /// Computes the ledger delta of applying a particular block.
@@ -108,8 +119,8 @@ pub struct LedgerDelta {
 /// higher-layers to retry the logic if required.
 ///
 /// This method assumes that the block has already been validated, it will
-/// return an error if any of the assumed invariant have been broken in the
-/// process of computing the delta, but it own't provide a comprehensive
+/// return an error if any of the assumed invariants have been broken in the
+/// process of computing the delta, but it doesn't provide a comprehensive
 /// validation of the ledger rules.
 pub fn compute_delta(
     block: &MultiEraBlock,
@@ -141,9 +152,7 @@ pub fn compute_delta(
         }
 
         if let Some(update) = tx.update() {
-            delta
-                .new_pparams
-                .push(PParamsBody(tx.era(), update.encode()));
+            delta.new_pparams.push(EraCbor(tx.era(), update.encode()));
         }
     }
 
@@ -151,7 +160,7 @@ pub fn compute_delta(
     if let Some(update) = block.update() {
         delta
             .new_pparams
-            .push(PParamsBody(block.era(), update.encode()));
+            .push(EraCbor(block.era(), update.encode()));
     }
 
     Ok(delta)
@@ -191,23 +200,43 @@ pub fn compute_undo_delta(
     Ok(delta)
 }
 
-pub fn compute_origin_delta(byron: &pallas::ledger::configs::byron::GenesisFile) -> LedgerDelta {
+pub fn compute_origin_delta(genesis: &Genesis) -> LedgerDelta {
     let mut delta = LedgerDelta::default();
 
-    let utxos = pallas::ledger::configs::byron::genesis_utxos(byron);
+    // byron
+    {
+        let utxos = pallas::ledger::configs::byron::genesis_utxos(&genesis.byron);
 
-    for (tx, addr, amount) in utxos {
-        let utxo_ref = TxoRef(tx, 0);
-        let utxo_body = pallas::ledger::primitives::byron::TxOut {
-            address: pallas::ledger::primitives::byron::Address {
-                payload: addr.payload,
-                crc: addr.crc,
-            },
-            amount,
-        };
+        for (tx, addr, amount) in utxos {
+            let utxo_ref = TxoRef(tx, 0);
+            let utxo_body = pallas::ledger::primitives::byron::TxOut {
+                address: pallas::ledger::primitives::byron::Address {
+                    payload: addr.payload,
+                    crc: addr.crc,
+                },
+                amount,
+            };
 
-        let utxo_body = MultiEraOutput::from_byron(&utxo_body).to_owned();
-        delta.produced_utxo.insert(utxo_ref, utxo_body.into());
+            let utxo_body = MultiEraOutput::from_byron(&utxo_body).to_owned();
+            delta.produced_utxo.insert(utxo_ref, utxo_body.into());
+        }
+    }
+    // shelley
+    {
+        let utxos = pallas::ledger::configs::shelley::shelley_utxos(&genesis.shelley);
+
+        for (tx, addr, amount) in utxos {
+            let utxo_ref = TxoRef(tx, 0);
+            let utxo_body = pallas::ledger::primitives::alonzo::TransactionOutput {
+                address: addr.to_vec().into(),
+                amount: pallas::ledger::primitives::alonzo::Value::Coin(amount),
+                datum_hash: None,
+            };
+
+            let utxo_body =
+                MultiEraOutput::from_alonzo_compatible(&utxo_body, Era::Shelley).to_owned();
+            delta.produced_utxo.insert(utxo_ref, utxo_body.into());
+        }
     }
 
     delta
@@ -219,13 +248,9 @@ pub fn compute_origin_delta(byron: &pallas::ledger::configs::byron::GenesisFile)
 /// uses the security window guarantee formula from consensus to calculate the
 /// latest slot that can be considered immutable. This is used mainly to define
 /// which slots can be finalized in the ledger store (aka: compaction).
-pub fn lastest_immutable_slot(
-    tip: BlockSlot,
-    byron: &byron::GenesisFile,
-    shelley: &shelley::GenesisFile,
-) -> BlockSlot {
-    let security_window =
-        (3.0 * byron.protocol_consts.k as f32) / (shelley.active_slots_coeff.unwrap());
+pub fn lastest_immutable_slot(tip: BlockSlot, genesis: &Genesis) -> BlockSlot {
+    let security_window = (3.0 * genesis.byron.protocol_consts.k as f32)
+        / (genesis.shelley.active_slots_coeff.unwrap());
 
     tip.saturating_sub(security_window.ceil() as u64)
 }
@@ -239,6 +264,22 @@ mod tests {
     use std::str::FromStr;
 
     use super::*;
+
+    fn load_genesis(path: &std::path::Path) -> Genesis {
+        let byron = pallas::ledger::configs::byron::from_file(&path.join("byron.json")).unwrap();
+        let shelley =
+            pallas::ledger::configs::shelley::from_file(&path.join("shelley.json")).unwrap();
+        let alonzo = pallas::ledger::configs::alonzo::from_file(&path.join("alonzo.json")).unwrap();
+        let conway = pallas::ledger::configs::conway::from_file(&path.join("conway.json")).unwrap();
+
+        Genesis {
+            byron,
+            shelley,
+            alonzo,
+            conway,
+            force_protocol: None,
+        }
+    }
 
     fn fake_slice_for_block(block: &MultiEraBlock) -> LedgerSlice {
         let consumed: HashMap<_, _> = block
@@ -282,11 +323,11 @@ mod tests {
     fn test_mainnet_genesis_utxos() {
         let path = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap())
             .join("examples")
-            .join("sync-mainnet")
-            .join("byron.json");
+            .join("sync-mainnet");
 
-        let byron = pallas::ledger::configs::byron::from_file(&path).unwrap();
-        let delta = compute_origin_delta(&byron);
+        let genesis = load_genesis(&path);
+
+        let delta = compute_origin_delta(&genesis);
 
         assert_genesis_utxo_exists(
             &delta,
@@ -300,11 +341,11 @@ mod tests {
     fn test_preview_genesis_utxos() {
         let path = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap())
             .join("examples")
-            .join("sync-preview")
-            .join("byron.json");
+            .join("sync-preview");
 
-        let byron = pallas::ledger::configs::byron::from_file(&path).unwrap();
-        let delta = compute_origin_delta(&byron);
+        let genesis = load_genesis(&path);
+
+        let delta = compute_origin_delta(&genesis);
 
         assert_genesis_utxo_exists(
             &delta,

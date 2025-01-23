@@ -1,8 +1,9 @@
+use crate::ledger::pparams::Genesis;
 use crate::state::LedgerStore;
 use crate::wal::redb::WalStore;
 use crate::{mempool::Mempool, prelude::*};
-use pallas::ledger::configs::{byron, shelley};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use std::time::Duration;
 
 pub mod apply;
@@ -50,8 +51,7 @@ pub fn pipeline(
     storage: &StorageConfig,
     wal: WalStore,
     ledger: LedgerStore,
-    byron: byron::GenesisFile,
-    shelley: shelley::GenesisFile,
+    genesis: Arc<Genesis>,
     mempool: Mempool,
     retries: &Option<gasket::retries::Policy>,
     quit_on_tip: bool,
@@ -70,8 +70,7 @@ pub fn pipeline(
         wal.clone(),
         ledger,
         mempool.clone(),
-        byron,
-        shelley,
+        genesis,
         storage.max_ledger_history,
     );
 

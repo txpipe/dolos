@@ -18,7 +18,7 @@ pub fn run(config: &crate::Config, _args: &Args, feedback: &Feedback) -> miette:
     let progress = feedback.slot_progress_bar();
     progress.set_message("rebuilding ledger");
 
-    let (byron, shelley, _, _) = crate::common::open_genesis_files(&config.genesis)?;
+    let genesis = crate::common::open_genesis_files(&config.genesis)?;
 
     let wal = crate::common::open_wal(config).context("opening WAL store")?;
 
@@ -26,7 +26,7 @@ pub fn run(config: &crate::Config, _args: &Args, feedback: &Feedback) -> miette:
         .into_diagnostic()
         .context("creating in-memory state store")?;
 
-    let mut light = dolos::state::LedgerStore::Redb(light);
+    let light = dolos::state::LedgerStore::Redb(light);
 
     if light
         .is_empty()
@@ -35,7 +35,7 @@ pub fn run(config: &crate::Config, _args: &Args, feedback: &Feedback) -> miette:
     {
         debug!("importing genesis");
 
-        let delta = dolos::ledger::compute_origin_delta(&byron);
+        let delta = dolos::ledger::compute_origin_delta(&genesis);
 
         light
             .apply(&[delta])
@@ -83,9 +83,8 @@ pub fn run(config: &crate::Config, _args: &Args, feedback: &Feedback) -> miette:
 
         dolos::state::apply_block_batch(
             &blocks,
-            &mut light,
-            &byron,
-            &shelley,
+            &light,
+            &genesis,
             config.storage.max_ledger_history,
         )
         .into_diagnostic()

@@ -8,5 +8,8 @@ pub mod state;
 pub mod sync;
 pub mod wal;
 
+#[cfg(feature = "phase2")]
+pub mod uplc;
+
 #[cfg(test)]
 mod tests;
