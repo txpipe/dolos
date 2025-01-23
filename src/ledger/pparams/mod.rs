@@ -9,7 +9,7 @@ use pallas::{
         traverse::MultiEraUpdate,
     },
 };
-use tracing::{debug, trace, warn};
+use tracing::{debug, warn};
 
 mod hacks;
 mod summary;
