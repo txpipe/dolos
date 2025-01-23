@@ -1,4 +1,3 @@
-use pallas::ledger::primitives::conway::GovAction;
 use pallas::ledger::traverse::{Era, MultiEraBlock, MultiEraInput, MultiEraUpdate};
 use pallas::{crypto::hash::Hash, ledger::traverse::MultiEraOutput};
 use pparams::Genesis;
@@ -201,7 +200,10 @@ pub fn compute_undo_delta(
     Ok(delta)
 }
 
-pub fn compute_origin_delta(byron: &pallas::ledger::configs::byron::GenesisFile, shelley: &pallas::ledger::configs::shelley::GenesisFile) -> LedgerDelta {
+pub fn compute_origin_delta(
+    byron: &pallas::ledger::configs::byron::GenesisFile,
+    shelley: &pallas::ledger::configs::shelley::GenesisFile,
+) -> LedgerDelta {
     let mut delta = LedgerDelta::default();
 
     // byron
@@ -234,7 +236,8 @@ pub fn compute_origin_delta(byron: &pallas::ledger::configs::byron::GenesisFile,
                 datum_hash: None,
             };
 
-            let utxo_body = MultiEraOutput::from_alonzo_compatible(&utxo_body, Era::Shelley).to_owned();
+            let utxo_body =
+                MultiEraOutput::from_alonzo_compatible(&utxo_body, Era::Shelley).to_owned();
             delta.produced_utxo.insert(utxo_ref, utxo_body.into());
         }
     }

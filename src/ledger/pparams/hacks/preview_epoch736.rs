@@ -25,10 +25,7 @@ pub fn change(era: &mut EraSummary) {
         1964219, 24520, 3,
     ];
 
-    match &mut era.pparams {
-        pallas::applying::MultiEraProtocolParameters::Conway(x) => {
-            x.cost_models_for_script_languages.plutus_v3 = Some(costs)
-        }
-        _ => (),
+    if let pallas::applying::MultiEraProtocolParameters::Conway(x) = &mut era.pparams {
+        x.cost_models_for_script_languages.plutus_v3 = Some(costs)
     }
 }

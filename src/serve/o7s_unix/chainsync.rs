@@ -22,7 +22,7 @@ pub struct Session<'a> {
     connection: N2CServer,
 }
 
-impl<'a> Session<'a> {
+impl Session<'_> {
     fn prepare_tip(&self) -> Result<Tip, Error> {
         let tip = self
             .wal

@@ -6,7 +6,7 @@ pub trait ReadUtils<'a> {
     fn into_blocks(self) -> impl Iterator<Item = Option<RawBlock>>;
 }
 
-impl<'a, T> ReadUtils<'a> for T
+impl<T> ReadUtils<'_> for T
 where
     T: Iterator<Item = LogEntry> + Sized,
 {
