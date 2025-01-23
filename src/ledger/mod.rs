@@ -200,23 +200,42 @@ pub fn compute_undo_delta(
     Ok(delta)
 }
 
-pub fn compute_origin_delta(byron: &pallas::ledger::configs::byron::GenesisFile) -> LedgerDelta {
+pub fn compute_origin_delta(byron: &pallas::ledger::configs::byron::GenesisFile, shelley: &pallas::ledger::configs::shelley::GenesisFile) -> LedgerDelta {
     let mut delta = LedgerDelta::default();
 
-    let utxos = pallas::ledger::configs::byron::genesis_utxos(byron);
+    // byron
+    {
+        let utxos = pallas::ledger::configs::byron::genesis_utxos(byron);
 
-    for (tx, addr, amount) in utxos {
-        let utxo_ref = TxoRef(tx, 0);
-        let utxo_body = pallas::ledger::primitives::byron::TxOut {
-            address: pallas::ledger::primitives::byron::Address {
-                payload: addr.payload,
-                crc: addr.crc,
-            },
-            amount,
-        };
+        for (tx, addr, amount) in utxos {
+            let utxo_ref = TxoRef(tx, 0);
+            let utxo_body = pallas::ledger::primitives::byron::TxOut {
+                address: pallas::ledger::primitives::byron::Address {
+                    payload: addr.payload,
+                    crc: addr.crc,
+                },
+                amount,
+            };
 
-        let utxo_body = MultiEraOutput::from_byron(&utxo_body).to_owned();
-        delta.produced_utxo.insert(utxo_ref, utxo_body.into());
+            let utxo_body = MultiEraOutput::from_byron(&utxo_body).to_owned();
+            delta.produced_utxo.insert(utxo_ref, utxo_body.into());
+        }
+    }
+    // shelley
+    {
+        let utxos = pallas::ledger::configs::shelley::shelley_utxos(shelley);
+
+        for (tx, addr, amount) in utxos {
+            let utxo_ref = TxoRef(tx, 0);
+            let utxo_body = pallas::ledger::primitives::alonzo::TransactionOutput {
+                address: addr.to_vec().into(),
+                amount: pallas::ledger::primitives::alonzo::Value::Coin(amount),
+                datum_hash: None,
+            };
+
+            let utxo_body = MultiEraOutput::from_alonzo_compatible(&utxo_body, Era::Shelley).to_owned();
+            delta.produced_utxo.insert(utxo_ref, utxo_body.into());
+        }
     }
 
     delta

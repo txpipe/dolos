@@ -48,7 +48,7 @@ impl Stage {
     fn process_origin(&self) -> Result<(), WorkerError> {
         info!("applying origin");
 
-        let delta = crate::ledger::compute_origin_delta(&self.genesis.byron);
+        let delta = crate::ledger::compute_origin_delta(&self.genesis.byron, &self.genesis.shelley);
         self.ledger.apply(&[delta]).or_panic()?;
 
         Ok(())
