@@ -35,7 +35,7 @@ pub fn run(config: &crate::Config, _args: &Args, feedback: &Feedback) -> miette:
     {
         debug!("importing genesis");
 
-        let delta = dolos::ledger::compute_origin_delta(&genesis.byron);
+        let delta = dolos::ledger::compute_origin_delta(&genesis.byron, &genesis.shelley);
 
         light
             .apply(&[delta])
