@@ -17,7 +17,7 @@ pub struct Stage {
     shelley: shelley::GenesisFile,
     mempool: crate::mempool::Mempool, // Add this line
 
-    max_slots_before_prune: Option<u64>,
+    max_ledger_history: Option<u64>,
 
     pub upstream: UpstreamPort,
 
@@ -35,7 +35,7 @@ impl Stage {
         mempool: crate::mempool::Mempool,
         byron: byron::GenesisFile,
         shelley: shelley::GenesisFile,
-        max_slots_before_prune: Option<u64>,
+        max_ledger_history: Option<u64>,
     ) -> Self {
         Self {
             wal,
@@ -43,10 +43,10 @@ impl Stage {
             mempool,
             byron,
             shelley,
+            max_ledger_history,
             upstream: Default::default(),
             block_count: Default::default(),
             wal_count: Default::default(),
-            max_slots_before_prune,
         }
     }
 
@@ -87,7 +87,7 @@ impl Stage {
             &mut self.ledger,
             &self.byron,
             &self.shelley,
-            self.max_slots_before_prune,
+            self.max_ledger_history,
         )
         .or_panic()?;
 

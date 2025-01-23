@@ -86,7 +86,7 @@ pub fn run(config: &crate::Config, _args: &Args, feedback: &Feedback) -> miette:
             &mut light,
             &byron,
             &shelley,
-            config.storage.max_slots_before_prune,
+            config.storage.max_ledger_history,
         )
         .into_diagnostic()
         .context("importing blocks to ledger store")?;

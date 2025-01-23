@@ -16,6 +16,7 @@ pub async fn run(config: super::Config, _args: &Args) -> miette::Result<()> {
     let sync = dolos::sync::pipeline(
         &config.sync,
         &config.upstream,
+        &config.storage,
         wal.clone(),
         ledger.clone(),
         byron,
@@ -23,7 +24,6 @@ pub async fn run(config: super::Config, _args: &Args) -> miette::Result<()> {
         mempool.clone(),
         &config.retries,
         false,
-        config.storage.max_slots_before_prune,
     )
     .into_diagnostic()
     .context("bootstrapping sync pipeline")?;

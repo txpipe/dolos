@@ -220,7 +220,7 @@ pub fn apply_block_batch<'a>(
     store: &mut LedgerStore,
     byron: &byron::GenesisFile,
     shelley: &shelley::GenesisFile,
-    max_slots_before_prune: Option<u64>,
+    max_ledger_history: Option<u64>,
 ) -> Result<(), LedgerError> {
     let mut deltas: Vec<LedgerDelta> = vec![];
 
@@ -239,7 +239,7 @@ pub fn apply_block_batch<'a>(
         .map(|x| x.0)
         .unwrap();
 
-    let to_finalize = max_slots_before_prune
+    let to_finalize = max_ledger_history
         .map(|x| tip - x)
         .unwrap_or(lastest_immutable_slot(tip, byron, shelley));
 

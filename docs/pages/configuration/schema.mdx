@@ -71,13 +71,13 @@ The `storage` section controls how Dolos stores data in the local file system. T
 | wal_cache              | integer | 50       |
 | ledger_cache           | integer | 500      |
 | max_wal_history        | integer | 10000    |
-| max_slots_before_prune | integer | 10000    |
+| max_ledger_history     | integer | 10000    |
 
 - `path`: is the root directory where all data will be stored.
 - `wal_cache`: the size (in Mb) of the memory cache for the wal db.
 - `ledger_cache`: the size (in Mb) of the memory cache for the ledger db.
 - `max_wal_history`: the max number of slots to keep in the WAL.
-- `max_slots_before_prune`: the max number of slots to keep in the ledger store before pruning
+- `max_ledger_history`: the max number of slots to keep in the ledger store before pruning. If not set, the ledger will prune past the immutable slot.
 
 ## `genesis` section
 

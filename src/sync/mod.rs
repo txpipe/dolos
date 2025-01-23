@@ -47,6 +47,7 @@ fn define_gasket_policy(config: &Option<gasket::retries::Policy>) -> gasket::run
 pub fn pipeline(
     config: &Config,
     upstream: &UpstreamConfig,
+    storage: &StorageConfig,
     wal: WalStore,
     ledger: LedgerStore,
     byron: byron::GenesisFile,
@@ -54,7 +55,6 @@ pub fn pipeline(
     mempool: Mempool,
     retries: &Option<gasket::retries::Policy>,
     quit_on_tip: bool,
-    max_slots_before_prune: Option<u64>,
 ) -> Result<Vec<gasket::runtime::Tether>, Error> {
     let mut pull = pull::Stage::new(
         upstream.peer_address.clone(),
@@ -72,7 +72,7 @@ pub fn pipeline(
         mempool.clone(),
         byron,
         shelley,
-        max_slots_before_prune,
+        storage.max_ledger_history,
     );
 
     let submit = submit::Stage::new(
