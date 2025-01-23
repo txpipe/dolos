@@ -316,7 +316,7 @@ mod tests {
 
     #[test]
     fn empty_until_cursor() {
-        let mut store = LedgerStore::in_memory_v2().unwrap();
+        let store = LedgerStore::in_memory_v2().unwrap();
 
         assert!(store.is_empty().unwrap());
 
