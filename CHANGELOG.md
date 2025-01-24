@@ -2,11 +2,65 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.19.0] - 2025-01-24
+
+### 🚀 Features
+
+- *(grpc)* Apply predicate on WatchTx (#384)
+- *(serve)* Implement u5c chain-sync read-tip method (#391)
+- *(grpc)* Honor intersect in watch module (#408)
+- Introduce chain summary struct (#410)
+- Support forcing protocol version at epoch 0 (#417)
+- Implement phase-2 validation / evaluation (#421)
+- Enable npm installer (#425)
+- Call Pallas phase-1 validation during submit (#426)
+- Support shelley genesis utxos (#437)
+- Use hacks to keep gov action pparams updated (#436)
+- Allow configurable ledger prune height (#440)
+
+### 🐛 Bug Fixes
+
+- Add detail to IO error (#392)
+- Relax mutability requirements on key structs (#414)
+- Apply ledger genesis when WAL is at origin (#415)
+- *(serve)* Allow pparams query on origin ledger (#416)
+- Adjust mithril-client features for windows target (#418)
+- Hardcode ada_per_utxo_byte transformation from words to bytes (#423)
+
+### 🚜 Refactor
+
+- Revisit pparams folding approach (#430)
+
+### 📚 Documentation
+
+- Add missing conway_path in config section (#393)
+- Add custom network example (#419)
+
+### 🔧 Continuous Integration
+
+- Disable windows builds until upstream issues are resolved (#441)
+- Build docker image on push to main branch  (#428)
+
+### 🧪 Testing
+
+- Fix genesis utxo tests (#439)
+
+### ⚙️ Miscellaneous Tasks
+
+- Fix lint issues (#388)
+- Fix lint warnings from latest clippy (#390)
+- Add conway genesis files to examples (#380)
+- Fix lint warnings (#438)
+
 ## [0.18.2] - 2024-11-02
 
 ### 🐛 Bug Fixes
 
 - Use s3 accelerate endpoint for snapshots (#377)
+
+### ⚙️ Miscellaneous Tasks
+
+- Release dolos version 0.18.2
 
 ## [0.18.1] - 2024-10-25
 
