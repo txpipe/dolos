@@ -14,7 +14,7 @@ jobs:
       matrix:
         include:
           - release_for: Linux-x86_64
-            build_on: ubuntu-latest
+            build_on: ubuntu-22
             target: x86_64-unknown-linux-gnu
             args: "--locked --release"
 
