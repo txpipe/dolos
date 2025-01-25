@@ -17,8 +17,9 @@ jobs:
       matrix:
         os: [
             # windows-latest,
-            ubuntu-latest,
-            macOS-latest,
+            ubuntu-22,
+            macos-14,
+            macos-13,
           ]
         rust: [stable]
     runs-on: ${{ matrix.os }}
