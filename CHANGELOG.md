@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.19.1] - 2025-01-25
+
+### 🐛 Bug Fixes
+
+- Avoid glibc issues by fixing runner os (#442)
+
+### 🔧 Continuous Integration
+
+- Use ubuntu-22.04 tag for runners (#443)
+
 ## [0.19.0] - 2025-01-24
 
 ### 🚀 Features
@@ -51,6 +61,7 @@ All notable changes to this project will be documented in this file.
 - Fix lint warnings from latest clippy (#390)
 - Add conway genesis files to examples (#380)
 - Fix lint warnings (#438)
+- Release dolos version 0.19.0
 
 ## [0.18.2] - 2024-11-02
 
