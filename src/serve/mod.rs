@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use futures_util::future::try_join;
+use futures_util::future::{try_join, try_join3};
 use miette::{Context, IntoDiagnostic};
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
@@ -26,10 +26,13 @@ pub mod o7s_win;
 #[cfg(windows)]
 pub use o7s_win as o7s;
 
+pub mod light_bf;
+
 #[derive(Deserialize, Serialize, Clone, Default)]
 pub struct Config {
     pub grpc: Option<grpc::Config>,
     pub ouroboros: Option<o7s::Config>,
+    pub light_bf: Option<light_bf::Config>,
 }
 
 /// Serve remote requests
@@ -77,7 +80,20 @@ pub async fn serve(
         }
     };
 
-    try_join(grpc, o7s).await?;
+    let light_bf = async {
+        if let Some(cfg) = config.light_bf {
+            info!("found Light BF config");
+
+            light_bf::serve(cfg, ledger, exit.clone())
+                .await
+                .into_diagnostic()
+                .context("service light BF")
+        } else {
+            Ok(())
+        }
+    };
+
+    try_join3(grpc, o7s, light_bf).await?;
 
     Ok(())
 }

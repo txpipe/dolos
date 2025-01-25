@@ -65,6 +65,7 @@ chrono = { version = "0.4.39", default-features = false }
 uplc = { git = "https://github.com/pragma-org/uplc.git", optional = true }
 # blst = { version = "=0.3.13", optional = true }
 rug = { version = "1.26.1", optional = true }
+rocket = { version = "0.5", features = ["json"] }
 
 [target.'cfg(not(windows))'.dependencies.mithril-client]
 version = "0.10.4"
