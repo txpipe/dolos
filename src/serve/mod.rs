@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use futures_util::future::{try_join, try_join3};
+use futures_util::future::try_join3;
 use miette::{Context, IntoDiagnostic};
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
@@ -26,13 +26,13 @@ pub mod o7s_win;
 #[cfg(windows)]
 pub use o7s_win as o7s;
 
-pub mod light_bf;
+pub mod minibf;
 
 #[derive(Deserialize, Serialize, Clone, Default)]
 pub struct Config {
     pub grpc: Option<grpc::Config>,
     pub ouroboros: Option<o7s::Config>,
-    pub light_bf: Option<light_bf::Config>,
+    pub minibf: Option<minibf::Config>,
 }
 
 /// Serve remote requests
@@ -55,7 +55,7 @@ pub async fn serve(
                 cfg,
                 genesis.clone(),
                 wal.clone(),
-                ledger,
+                ledger.clone(),
                 mempool,
                 exit.clone(),
             )
@@ -80,20 +80,20 @@ pub async fn serve(
         }
     };
 
-    let light_bf = async {
-        if let Some(cfg) = config.light_bf {
-            info!("found Light BF config");
+    let minibf = async {
+        if let Some(cfg) = config.minibf {
+            info!("found minibf config");
 
-            light_bf::serve(cfg, ledger, exit.clone())
+            minibf::serve(cfg, ledger.clone(), exit.clone())
                 .await
                 .into_diagnostic()
-                .context("service light BF")
+                .context("serving minibf")
         } else {
             Ok(())
         }
     };
 
-    try_join3(grpc, o7s, light_bf).await?;
+    try_join3(grpc, o7s, minibf).await?;
 
     Ok(())
 }
