@@ -84,10 +84,16 @@ pub async fn serve(
         if let Some(cfg) = config.minibf {
             info!("found minibf config");
 
-            minibf::serve(cfg, ledger.clone(), exit.clone())
-                .await
-                .into_diagnostic()
-                .context("serving minibf")
+            minibf::serve(
+                cfg,
+                genesis.clone(),
+                wal.clone(),
+                ledger.clone(),
+                exit.clone(),
+            )
+            .await
+            .into_diagnostic()
+            .context("serving minibf")
         } else {
             Ok(())
         }
