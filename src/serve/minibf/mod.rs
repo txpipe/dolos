@@ -43,6 +43,7 @@ pub async fn serve(
                 routes::addresses::address::utxo::route,
                 routes::addresses::address::utxo::asset::route,
                 routes::blocks::latest::route,
+                routes::blocks::latest::txs::route,
             ],
         )
         .launch()
