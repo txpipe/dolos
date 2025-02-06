@@ -1,9 +1,12 @@
-use pallas::ledger::traverse::MultiEraBlock;
+use pallas::ledger::traverse::{wellknown::GenesisValues, MultiEraBlock};
+use rocket::http::Status;
 use serde::{Deserialize, Serialize};
 
-use crate::wal::RawBlock;
+use crate::wal::{redb::WalStore, ReadUtils, WalReader};
 
+pub mod hash_or_number;
 pub mod latest;
+pub mod slot;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Block {
@@ -11,7 +14,6 @@ pub struct Block {
     pub hash: String,
     pub tx_count: u64,
     pub size: u64,
-
     pub time: u64,
     pub height: Option<u64>,
     pub epoch: Option<u64>,
@@ -27,16 +29,104 @@ pub struct Block {
     pub confirmations: u64,
 }
 
-impl From<&RawBlock> for Block {
-    fn from(raw_block: &RawBlock) -> Self {
-        let block = MultiEraBlock::decode(&raw_block.body).unwrap();
-        Self {
-            slot: Some(block.slot()),
-            hash: block.hash().to_string(),
-            tx_count: block.tx_count() as u64,
-            size: block.size() as u64,
-            // height: Some(block.epoch(genesis) as u64),
-            ..Default::default()
+impl Block {
+    pub fn find_in_wal(
+        wal: &WalStore,
+        hash_or_number: &str,
+        genesis: &GenesisValues,
+    ) -> Result<Option<Block>, Status> {
+        let iterator = wal
+            .crawl_from(None)
+            .map_err(|_| Status::ServiceUnavailable)?
+            .into_blocks();
+
+        let mut curr = None;
+        let mut next = None;
+        let mut confirmations = 0;
+
+        // Scan the iterator, if found set the current block and continue to set next and count
+        // confirmations.
+        for value in iterator {
+            if curr.is_none() {
+                if let Some(raw) = value {
+                    let block =
+                        MultiEraBlock::decode(&raw.body).map_err(|_| Status::ServiceUnavailable)?;
+                    if block.hash().to_string() == hash_or_number
+                        || block.number().to_string() == hash_or_number
+                    {
+                        curr = Some(raw.body);
+                    }
+                }
+            } else {
+                confirmations += 1;
+                if next.is_none() {
+                    if let Some(raw) = value {
+                        next = Some(
+                            MultiEraBlock::decode(&raw.body)
+                                .map_err(|_| Status::ServiceUnavailable)?
+                                .hash()
+                                .to_string(),
+                        );
+                    }
+                }
+            }
+        }
+        match curr {
+            Some(bytes) => {
+                // Decode the block due to lifetime headaches.
+                let block =
+                    MultiEraBlock::decode(&bytes).map_err(|_| Status::ServiceUnavailable)?;
+
+                let header = block.header();
+                let prev = header.previous_hash().map(|h| h.to_string());
+                let block_vrf = match header.vrf_vkey() {
+                    Some(v) => Some(
+                        bech32::encode::<bech32::Bech32>(bech32::Hrp::parse("vrf_vk").unwrap(), v)
+                            .map_err(|_| Status::ServiceUnavailable)?,
+                    ),
+                    None => None,
+                };
+                let (epoch, epoch_slot) = block.epoch(genesis);
+                Ok(Some(Self {
+                    slot: Some(block.slot()),
+                    hash: block.hash().to_string(),
+                    tx_count: block.tx_count() as u64,
+                    size: block.body_size().unwrap_or(0) as u64,
+                    epoch: Some(epoch),
+                    epoch_slot: Some(epoch_slot),
+                    height: Some(block.number()),
+                    previous_block: prev.clone(),
+                    next_block: next.clone(),
+                    confirmations,
+                    block_vrf,
+                    output: match block.tx_count() {
+                        0 => None,
+                        _ => Some(
+                            block
+                                .txs()
+                                .iter()
+                                .map(|tx| {
+                                    tx.outputs().iter().map(|o| o.value().coin()).sum::<u64>()
+                                })
+                                .sum::<u64>()
+                                .to_string(),
+                        ),
+                    },
+                    fees: match block.tx_count() {
+                        0 => None,
+                        _ => Some(
+                            block
+                                .txs()
+                                .iter()
+                                .map(|tx| tx.fee().unwrap_or(0))
+                                .sum::<u64>()
+                                .to_string(),
+                        ),
+                    },
+                    ..Default::default()
+                }))
+            }
+            _ => Err(Status::ServiceUnavailable),
         }
     }
 }

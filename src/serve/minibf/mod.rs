@@ -40,10 +40,18 @@ pub async fn serve(
         .mount(
             "/",
             routes![
+                // Addresses
                 routes::addresses::address::utxo::route,
                 routes::addresses::address::utxo::asset::route,
+                // Blocks
                 routes::blocks::latest::route,
                 routes::blocks::latest::txs::route,
+                routes::blocks::hash_or_number::route,
+                routes::blocks::hash_or_number::addresses::route,
+                routes::blocks::hash_or_number::next::route,
+                routes::blocks::hash_or_number::previous::route,
+                routes::blocks::hash_or_number::txs::route,
+                routes::blocks::slot::slot_number::route,
             ],
         )
         .launch()
