@@ -1,6 +1,7 @@
 use rocket::{get, http::Status, State};
 
-use crate::{serve::minibf::routes::addresses::address::utxo::Utxo, state::LedgerStore};
+use super::Utxo;
+use crate::state::LedgerStore;
 
 #[get("/addresses/<address>/utxos/<asset>")]
 pub fn route(

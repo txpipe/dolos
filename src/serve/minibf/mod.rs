@@ -40,9 +40,11 @@ pub async fn serve(
         .mount(
             "/",
             routes![
+                // Accounts
+                routes::accounts::stake_address::utxos::route,
                 // Addresses
-                routes::addresses::address::utxo::route,
-                routes::addresses::address::utxo::asset::route,
+                routes::addresses::address::utxos::route,
+                routes::addresses::address::utxos::asset::route,
                 // Blocks
                 routes::blocks::latest::route,
                 routes::blocks::latest::txs::route,
