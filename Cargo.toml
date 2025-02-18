@@ -12,9 +12,9 @@ authors = ["Santiago Carmuega <santiago@carmuega.me>"]
 
 
 [dependencies]
-# pallas = { git = "https://github.com/txpipe/pallas.git", features = ["hardano", "applying"] }
+pallas = { git = "https://github.com/gonzalezzfelipe/pallas.git", branch = "fix/error-on-tx-validation", features = ["hardano", "applying"] }
 # pallas = { version = "0.32.0", features = ["hardano", "applying"] }
-pallas = { path = "../pallas/pallas", features = ["hardano", "applying"] }
+# pallas = { path = "../pallas/pallas", features = ["hardano", "applying"] }
 
 # gasket = { git = "https://github.com/construkts/gasket-rs.git", features = ["derive"] }
 gasket = { version = "^0.9", features = ["derive"] }

@@ -2389,6 +2389,7 @@ checksum = "caff54706df99d2a78a5a4e3455ff45448d81ef1bb63c22cd14052ca0e993a3f"
 [[package]]
 name = "pallas"
 version = "0.32.0"
+source = "git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Ferror-on-tx-validation#831721b9802e6194cccd65af2de51b197c0c9677"
 dependencies = [
  "pallas-addresses 0.32.0",
  "pallas-applying",
@@ -2422,6 +2423,7 @@ dependencies = [
 [[package]]
 name = "pallas-addresses"
 version = "0.32.0"
+source = "git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Ferror-on-tx-validation#831721b9802e6194cccd65af2de51b197c0c9677"
 dependencies = [
  "base58",
  "bech32 0.9.1",
@@ -2436,6 +2438,7 @@ dependencies = [
 [[package]]
 name = "pallas-applying"
 version = "0.32.0"
+source = "git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Ferror-on-tx-validation#831721b9802e6194cccd65af2de51b197c0c9677"
 dependencies = [
  "chrono",
  "hex",
@@ -2463,6 +2466,7 @@ dependencies = [
 [[package]]
 name = "pallas-codec"
 version = "0.32.0"
+source = "git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Ferror-on-tx-validation#831721b9802e6194cccd65af2de51b197c0c9677"
 dependencies = [
  "hex",
  "minicbor",
@@ -2473,6 +2477,7 @@ dependencies = [
 [[package]]
 name = "pallas-configs"
 version = "0.32.0"
+source = "git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Ferror-on-tx-validation#831721b9802e6194cccd65af2de51b197c0c9677"
 dependencies = [
  "base64 0.22.1",
  "hex",
@@ -2504,6 +2509,7 @@ dependencies = [
 [[package]]
 name = "pallas-crypto"
 version = "0.32.0"
+source = "git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Ferror-on-tx-validation#831721b9802e6194cccd65af2de51b197c0c9677"
 dependencies = [
  "cryptoxide",
  "hex",
@@ -2531,6 +2537,7 @@ dependencies = [
 [[package]]
 name = "pallas-hardano"
 version = "0.32.0"
+source = "git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Ferror-on-tx-validation#831721b9802e6194cccd65af2de51b197c0c9677"
 dependencies = [
  "binary-layout",
  "pallas-network 0.32.0",
@@ -2561,6 +2568,7 @@ dependencies = [
 [[package]]
 name = "pallas-network"
 version = "0.32.0"
+source = "git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Ferror-on-tx-validation#831721b9802e6194cccd65af2de51b197c0c9677"
 dependencies = [
  "byteorder",
  "hex",
@@ -2593,6 +2601,7 @@ dependencies = [
 [[package]]
 name = "pallas-primitives"
 version = "0.32.0"
+source = "git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Ferror-on-tx-validation#831721b9802e6194cccd65af2de51b197c0c9677"
 dependencies = [
  "base58",
  "bech32 0.9.1",
@@ -2624,6 +2633,7 @@ dependencies = [
 [[package]]
 name = "pallas-traverse"
 version = "0.32.0"
+source = "git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Ferror-on-tx-validation#831721b9802e6194cccd65af2de51b197c0c9677"
 dependencies = [
  "hex",
  "itertools 0.13.0",
@@ -2639,6 +2649,7 @@ dependencies = [
 [[package]]
 name = "pallas-txbuilder"
 version = "0.32.0"
+source = "git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Ferror-on-tx-validation#831721b9802e6194cccd65af2de51b197c0c9677"
 dependencies = [
  "hex",
  "pallas-addresses 0.32.0",
@@ -2655,6 +2666,7 @@ dependencies = [
 [[package]]
 name = "pallas-utxorpc"
 version = "0.32.0"
+source = "git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Ferror-on-tx-validation#831721b9802e6194cccd65af2de51b197c0c9677"
 dependencies = [
  "pallas-applying",
  "pallas-codec 0.32.0",
@@ -2668,6 +2680,7 @@ dependencies = [
 [[package]]
 name = "pallas-wallet"
 version = "0.32.0"
+source = "git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Ferror-on-tx-validation#831721b9802e6194cccd65af2de51b197c0c9677"
 dependencies = [
  "bech32 0.9.1",
  "bip39",
