@@ -9,7 +9,7 @@ use pallas::{
         traverse::MultiEraUpdate,
     },
 };
-use tracing::{debug, warn};
+use tracing::debug;
 
 mod hacks;
 mod summary;
@@ -363,7 +363,7 @@ fn apply_param_update(
             apply_field!(pparams, update, extra_entropy);
 
             if let Some(value) = update.alonzo_first_proposed_cost_models_for_script_languages() {
-                warn!(
+                debug!(
                     ?value,
                     "found new cost_models_for_script_languages update proposal"
                 );
@@ -399,7 +399,7 @@ fn apply_param_update(
             apply_field!(pparams, update, extra_entropy);
 
             if let Some(value) = update.babbage_first_proposed_cost_models_for_script_languages() {
-                warn!(
+                debug!(
                     ?value,
                     "found new cost_models_for_script_languages update proposal"
                 );
@@ -442,7 +442,7 @@ fn apply_param_update(
             apply_field!(pparams, update, minfee_refscript_cost_per_byte);
 
             if let Some(value) = update.conway_first_proposed_cost_models_for_script_languages() {
-                warn!(
+                debug!(
                     ?value,
                     "found new cost_models_for_script_languages update proposal"
                 );

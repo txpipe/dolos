@@ -1,10 +1,10 @@
 use pallas::ledger::traverse::wellknown::GenesisValues;
 use rocket::routes;
 use serde::{Deserialize, Serialize};
-use std::net::SocketAddr;
+use std::{net::SocketAddr, sync::Arc};
 use tokio_util::sync::CancellationToken;
 
-use crate::{mempool::Mempool, state::LedgerStore, wal::redb::WalStore};
+use crate::{ledger::pparams::Genesis, mempool::Mempool, state::LedgerStore, wal::redb::WalStore};
 
 mod common;
 mod routes;
@@ -16,7 +16,8 @@ pub struct Config {
 
 pub async fn serve(
     cfg: Config,
-    genesis: GenesisValues,
+    genesis: Arc<Genesis>,
+    genesis_values: GenesisValues,
     wal: WalStore,
     ledger: LedgerStore,
     mempool: Mempool,
@@ -38,6 +39,7 @@ pub async fn serve(
                 .merge(("port", cfg.listen_address.port())),
         )
         .manage(genesis)
+        .manage(genesis_values)
         .manage(wal)
         .manage(ledger)
         .manage(mempool)
@@ -59,6 +61,7 @@ pub async fn serve(
                 routes::blocks::hash_or_number::txs::route,
                 routes::blocks::slot::slot_number::route,
                 //Epoch
+                routes::epochs::latest::parameters::route,
                 // Submit
                 routes::tx::submit::route,
             ],

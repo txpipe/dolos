@@ -94,6 +94,7 @@ pub async fn serve(
 
             minibf::serve(
                 cfg,
+                genesis.clone(),
                 values,
                 wal.clone(),
                 ledger.clone(),
