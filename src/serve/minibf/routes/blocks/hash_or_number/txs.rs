@@ -11,6 +11,7 @@ pub fn route(
     let maybe_raw = wal
         .crawl_from(None)
         .map_err(|_| Status::ServiceUnavailable)?
+        .rev()
         .into_blocks()
         .find(|maybe_raw| match maybe_raw {
             Some(raw) => match MultiEraBlock::decode(&raw.body) {

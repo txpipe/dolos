@@ -38,6 +38,7 @@ impl Block {
         let iterator = wal
             .crawl_from(None)
             .map_err(|_| Status::ServiceUnavailable)?
+            .rev()
             .into_blocks();
 
         let mut curr = None;
@@ -46,29 +47,16 @@ impl Block {
 
         // Scan the iterator, if found set the current block and continue to set next and count
         // confirmations.
-        for value in iterator {
-            if curr.is_none() {
-                if let Some(raw) = value {
-                    let block =
-                        MultiEraBlock::decode(&raw.body).map_err(|_| Status::ServiceUnavailable)?;
-                    if block.hash().to_string() == hash_or_number
-                        || block.number().to_string() == hash_or_number
-                    {
-                        curr = Some(raw.body);
-                    }
-                }
+        for raw in iterator.flatten() {
+            let block = MultiEraBlock::decode(&raw.body).map_err(|_| Status::ServiceUnavailable)?;
+            if block.hash().to_string() == hash_or_number
+                || block.number().to_string() == hash_or_number
+            {
+                curr = Some(raw.body);
+                break;
             } else {
+                next = Some(hex::encode(raw.hash));
                 confirmations += 1;
-                if next.is_none() {
-                    if let Some(raw) = value {
-                        next = Some(
-                            MultiEraBlock::decode(&raw.body)
-                                .map_err(|_| Status::ServiceUnavailable)?
-                                .hash()
-                                .to_string(),
-                        );
-                    }
-                }
             }
         }
         match curr {
@@ -97,6 +85,7 @@ impl Block {
                     height: Some(block.number()),
                     previous_block: prev.clone(),
                     next_block: next.clone(),
+                    time: block.wallclock(genesis),
                     confirmations,
                     block_vrf,
                     output: match block.tx_count() {

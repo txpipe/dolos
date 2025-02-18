@@ -1,10 +1,12 @@
+use pallas::ledger::traverse::wellknown::GenesisValues;
 use rocket::routes;
 use serde::{Deserialize, Serialize};
-use std::{net::SocketAddr, sync::Arc};
+use std::net::SocketAddr;
 use tokio_util::sync::CancellationToken;
 
-use crate::{ledger::pparams::Genesis, state::LedgerStore, wal::redb::WalStore};
+use crate::{mempool::Mempool, state::LedgerStore, wal::redb::WalStore};
 
+mod common;
 mod routes;
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -14,9 +16,10 @@ pub struct Config {
 
 pub async fn serve(
     cfg: Config,
-    genesis: Arc<Genesis>,
+    genesis: GenesisValues,
     wal: WalStore,
     ledger: LedgerStore,
+    mempool: Mempool,
     _exit: CancellationToken,
 ) -> Result<(), rocket::Error> {
     // TODO: connect cancellation token to rocket shutdown
@@ -37,6 +40,7 @@ pub async fn serve(
         .manage(genesis)
         .manage(wal)
         .manage(ledger)
+        .manage(mempool)
         .mount(
             "/",
             routes![
@@ -54,6 +58,9 @@ pub async fn serve(
                 routes::blocks::hash_or_number::previous::route,
                 routes::blocks::hash_or_number::txs::route,
                 routes::blocks::slot::slot_number::route,
+                //Epoch
+                // Submit
+                routes::tx::submit::route,
             ],
         )
         .launch()

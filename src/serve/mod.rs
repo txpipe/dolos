@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use futures_util::future::try_join3;
-use miette::{Context, IntoDiagnostic};
+use miette::{bail, Context, IntoDiagnostic};
+use pallas::ledger::traverse::wellknown::GenesisValues;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
@@ -56,7 +57,7 @@ pub async fn serve(
                 genesis.clone(),
                 wal.clone(),
                 ledger.clone(),
-                mempool,
+                mempool.clone(),
                 exit.clone(),
             )
             .await
@@ -83,12 +84,20 @@ pub async fn serve(
     let minibf = async {
         if let Some(cfg) = config.minibf {
             info!("found minibf config");
+            let Some(magic) = genesis.shelley.network_magic else {
+                bail!("Network magic not found on genesis");
+            };
+
+            let Some(values) = GenesisValues::from_magic(magic as u64) else {
+                bail!("Invalid network magic");
+            };
 
             minibf::serve(
                 cfg,
-                genesis.clone(),
+                values,
                 wal.clone(),
                 ledger.clone(),
+                mempool.clone(),
                 exit.clone(),
             )
             .await
