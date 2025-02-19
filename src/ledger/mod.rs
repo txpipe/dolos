@@ -1,9 +1,12 @@
-use pallas::ledger::traverse::{Era, MultiEraBlock, MultiEraInput, MultiEraUpdate};
+use pallas::codec::minicbor;
+use pallas::ledger::traverse::{Era, MultiEraBlock, MultiEraInput, MultiEraTx, MultiEraUpdate};
 use pallas::{crypto::hash::Hash, ledger::traverse::MultiEraOutput};
 use pparams::Genesis;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use thiserror::Error;
+
+use crate::model::BlockBody;
 
 pub mod pparams;
 //pub mod validate;
@@ -40,6 +43,14 @@ impl<'a> TryFrom<&'a EraCbor> for MultiEraOutput<'a> {
 
     fn try_from(value: &'a EraCbor) -> Result<Self, Self::Error> {
         MultiEraOutput::decode(value.0, &value.1)
+    }
+}
+
+impl<'a> TryFrom<&'a EraCbor> for MultiEraTx<'a> {
+    type Error = pallas::codec::minicbor::decode::Error;
+
+    fn try_from(value: &'a EraCbor) -> Result<Self, Self::Error> {
+        MultiEraTx::decode_for_era(value.0, &value.1)
     }
 }
 
@@ -106,6 +117,9 @@ pub struct LedgerDelta {
     pub recovered_stxi: HashMap<TxoRef, EraCbor>,
     pub undone_utxo: HashMap<TxoRef, EraCbor>,
     pub new_pparams: Vec<EraCbor>,
+    pub new_txs: HashMap<TxHash, EraCbor>,
+    pub undone_txs: HashMap<TxHash, EraCbor>,
+    pub new_block: BlockBody,
 }
 
 /// Computes the ledger delta of applying a particular block.
@@ -126,8 +140,17 @@ pub fn compute_delta(
     block: &MultiEraBlock,
     mut context: LedgerSlice,
 ) -> Result<LedgerDelta, BrokenInvariant> {
+    let era: u16 = block.era().into();
     let mut delta = LedgerDelta {
         new_position: Some(ChainPoint(block.slot(), block.hash())),
+        new_block: match block {
+            MultiEraBlock::Byron(x) => minicbor::to_vec((era, x)).unwrap(),
+            MultiEraBlock::Conway(x) => minicbor::to_vec((era, x)).unwrap(),
+            MultiEraBlock::Babbage(x) => minicbor::to_vec((era, x)).unwrap(),
+            MultiEraBlock::AlonzoCompatible(x, _) => minicbor::to_vec((era, x)).unwrap(),
+            MultiEraBlock::EpochBoundary(x) => minicbor::to_vec((0_u16, x)).unwrap(),
+            _ => Default::default(),
+        },
         ..Default::default()
     };
 
@@ -155,6 +178,12 @@ pub fn compute_delta(
             delta.new_pparams.push(EraCbor(tx.era(), update.encode()));
         }
     }
+
+    delta.new_txs = block
+        .txs()
+        .into_iter()
+        .map(|tx| (tx.hash(), EraCbor::from((tx.era(), tx.encode()))))
+        .collect();
 
     // check block-level updates (because of f#!@#@ byron)
     if let Some(update) = block.update() {
@@ -196,6 +225,12 @@ pub fn compute_undo_delta(
             delta.recovered_stxi.insert(stxi_ref, stxi_body);
         }
     }
+
+    delta.undone_txs = block
+        .txs()
+        .into_iter()
+        .map(|tx| (tx.hash(), EraCbor::from((tx.era(), tx.encode()))))
+        .collect();
 
     Ok(delta)
 }

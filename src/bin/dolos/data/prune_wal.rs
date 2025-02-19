@@ -15,7 +15,7 @@ pub struct Args {
 pub fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging)?;
 
-    let (mut wal, _) = crate::common::open_data_stores(config).context("opening data stores")?;
+    let mut wal = crate::common::open_wal(config).context("opening data stores")?;
 
     let max_slots = match args.max_slots {
         Some(x) => x,

@@ -1,4 +1,4 @@
-use dolos::{ledger::pparams::Genesis, state, wal};
+use dolos::{chain, ledger::pparams::Genesis, state, wal};
 use miette::{Context as _, IntoDiagnostic};
 use std::{path::PathBuf, time::Duration};
 use tokio::task::JoinHandle;
@@ -10,7 +10,7 @@ use dolos::prelude::*;
 
 use crate::{GenesisConfig, LoggingConfig};
 
-pub type Stores = (wal::redb::WalStore, state::LedgerStore);
+pub type Stores = (wal::redb::WalStore, state::LedgerStore, chain::ChainStore);
 
 pub fn open_wal(config: &crate::Config) -> Result<wal::redb::WalStore, Error> {
     let root = &config.storage.path;
@@ -36,6 +36,15 @@ pub fn define_ledger_path(config: &crate::Config) -> Result<PathBuf, Error> {
     Ok(ledger)
 }
 
+pub fn define_chain_path(config: &crate::Config) -> Result<PathBuf, Error> {
+    let root = &config.storage.path;
+    std::fs::create_dir_all(root).map_err(Error::storage)?;
+
+    let ledger = root.join("chain");
+
+    Ok(ledger)
+}
+
 pub fn open_data_stores(config: &crate::Config) -> Result<Stores, Error> {
     let root = &config.storage.path;
 
@@ -52,7 +61,11 @@ pub fn open_data_stores(config: &crate::Config) -> Result<Stores, Error> {
         .map_err(Error::storage)?
         .into();
 
-    Ok((wal, ledger))
+    let chain = chain::redb::ChainStore::open(root.join("chain"), config.storage.chain_cache)
+        .map_err(Error::storage)?
+        .into();
+
+    Ok((wal, ledger, chain))
 }
 
 pub fn setup_tracing(config: &LoggingConfig) -> miette::Result<()> {

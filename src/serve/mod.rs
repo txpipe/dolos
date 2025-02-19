@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
+use crate::chain::ChainStore;
 use crate::ledger::pparams::Genesis;
 use crate::mempool::Mempool;
 use crate::state::LedgerStore;
@@ -41,6 +42,7 @@ pub async fn serve(
     genesis: Arc<Genesis>,
     wal: WalStore,
     ledger: LedgerStore,
+    chain: ChainStore,
     mempool: Mempool,
     exit: CancellationToken,
 ) -> miette::Result<()> {
@@ -53,6 +55,7 @@ pub async fn serve(
                 genesis.clone(),
                 wal.clone(),
                 ledger,
+                chain,
                 mempool,
                 exit.clone(),
             )

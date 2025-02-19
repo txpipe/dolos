@@ -1,7 +1,4 @@
-use dolos::{
-    ledger,
-    wal::{self, RawBlock, ReadUtils, WalReader as _},
-};
+use dolos::wal::{self, RawBlock, ReadUtils, WalReader as _};
 use itertools::Itertools;
 use miette::{Context, IntoDiagnostic};
 use pallas::ledger::traverse::MultiEraBlock;
@@ -43,6 +40,11 @@ pub fn run(config: &crate::Config, _args: &Args, feedback: &Feedback) -> miette:
             .context("applying origin utxos")?;
     }
 
+    let chain_path = crate::common::define_chain_path(config).context("finding chain path")?;
+    let chain = dolos::chain::redb::ChainStore::open(chain_path, None)
+        .into_diagnostic()
+        .context("opening chain store.")?;
+
     let (_, tip) = wal
         .find_tip()
         .into_diagnostic()
@@ -54,24 +56,15 @@ pub fn run(config: &crate::Config, _args: &Args, feedback: &Feedback) -> miette:
         wal::ChainPoint::Specific(slot, _) => progress.set_length(slot),
     }
 
-    let wal_seq = light
-        .cursor()
-        .into_diagnostic()
-        .context("finding ledger cursor")?
-        .map(|ledger::ChainPoint(s, h)| wal.assert_point(&wal::ChainPoint::Specific(s, h)))
-        .transpose()
-        .into_diagnostic()
-        .context("locating wal sequence")?;
-
     let remaining = wal
-        .crawl_from(wal_seq)
+        .crawl_from(None)
         .into_diagnostic()
         .context("crawling wal")?
         .filter_forward()
         .into_blocks()
         .flatten();
 
-    for chunk in remaining.chunks(100).into_iter() {
+    for chunk in remaining.chunks(500).into_iter() {
         let bodies = chunk.map(|RawBlock { body, .. }| body).collect_vec();
 
         let blocks: Vec<_> = bodies
@@ -81,8 +74,17 @@ pub fn run(config: &crate::Config, _args: &Args, feedback: &Feedback) -> miette:
             .into_diagnostic()
             .context("decoding blocks")?;
 
-        dolos::state::apply_block_batch(
-            &blocks,
+        let deltas = dolos::state::calculate_block_batch_deltas(&blocks, &light)
+            .into_diagnostic()
+            .context("calculating batch deltas.")?;
+
+        chain
+            .apply(&deltas)
+            .into_diagnostic()
+            .context("applying deltas to chain")?;
+
+        dolos::state::apply_delta_batch(
+            deltas,
             &light,
             &genesis,
             config.storage.max_ledger_history,

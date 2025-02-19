@@ -252,7 +252,7 @@ pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::
 
     import_hardano_into_wal(config, &immutable_path, feedback)?;
 
-    crate::doctor::run_rebuild_ledger(config, feedback).context("rebuilding ledger")?;
+    crate::doctor::run_rebuild(config, feedback).context("rebuilding ledger and chain")?;
 
     if !args.retain_snapshot {
         info!("deleting downloaded snapshot");

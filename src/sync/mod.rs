@@ -1,3 +1,4 @@
+use crate::chain::ChainStore;
 use crate::ledger::pparams::Genesis;
 use crate::state::LedgerStore;
 use crate::wal::redb::WalStore;
@@ -51,6 +52,7 @@ pub fn pipeline(
     storage: &StorageConfig,
     wal: WalStore,
     ledger: LedgerStore,
+    chain: ChainStore,
     genesis: Arc<Genesis>,
     mempool: Mempool,
     retries: &Option<gasket::retries::Policy>,
@@ -69,6 +71,7 @@ pub fn pipeline(
     let mut apply = apply::Stage::new(
         wal.clone(),
         ledger,
+        chain,
         mempool.clone(),
         genesis,
         storage.max_ledger_history,
