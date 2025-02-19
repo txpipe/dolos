@@ -19,7 +19,8 @@ impl ChainStore {
         indexes::AddressPaymentPartApproxIndexTable::initialize(&wx)?;
         indexes::AddressStakePartApproxIndexTable::initialize(&wx)?;
         indexes::BlockHashApproxIndexTable::initialize(&wx)?;
-        indexes::TxsApproxIndexTable::initialize(&wx)?;
+        indexes::BlockNumberApproxIndexTable::initialize(&wx)?;
+        indexes::TxHashApproxIndexTable::initialize(&wx)?;
         tables::BlocksTable::initialize(&wx)?;
 
         wx.commit()?;
@@ -44,7 +45,8 @@ impl ChainStore {
             indexes::AddressPaymentPartApproxIndexTable::apply(&wx, delta)?;
             indexes::AddressStakePartApproxIndexTable::apply(&wx, delta)?;
             indexes::BlockHashApproxIndexTable::apply(&wx, delta)?;
-            indexes::TxsApproxIndexTable::apply(&wx, delta)?;
+            indexes::BlockNumberApproxIndexTable::apply(&wx, delta)?;
+            indexes::TxHashApproxIndexTable::apply(&wx, delta)?;
             tables::BlocksTable::apply(&wx, delta)?;
         }
 
@@ -61,7 +63,8 @@ impl ChainStore {
         indexes::AddressPaymentPartApproxIndexTable::copy(&rx, &wx)?;
         indexes::AddressStakePartApproxIndexTable::copy(&rx, &wx)?;
         indexes::BlockHashApproxIndexTable::copy(&rx, &wx)?;
-        indexes::TxsApproxIndexTable::copy(&rx, &wx)?;
+        indexes::BlockNumberApproxIndexTable::copy(&rx, &wx)?;
+        indexes::TxHashApproxIndexTable::copy(&rx, &wx)?;
         tables::BlocksTable::copy(&rx, &wx)?;
 
         wx.commit()?;
@@ -103,14 +106,6 @@ impl ChainStore {
         )
     }
 
-    pub fn get_possible_block_slots_by_tx_hash(
-        &self,
-        tx_hash: &[u8],
-    ) -> Result<Vec<BlockSlot>, Error> {
-        let rx = self.db().begin_read()?;
-        indexes::TxsApproxIndexTable::get_by_tx_hash(&rx, tx_hash)
-    }
-
     pub fn get_possible_block_slots_by_block_hash(
         &self,
         block_hash: &[u8],
@@ -119,38 +114,24 @@ impl ChainStore {
         indexes::BlockHashApproxIndexTable::get_by_block_hash(&rx, block_hash)
     }
 
-    pub fn get_block_by_slot(&self, slot: &BlockSlot) -> Result<Option<BlockBody>, Error> {
+    pub fn get_possible_block_slots_by_block_number(
+        &self,
+        block_number: u64,
+    ) -> Result<Vec<BlockSlot>, Error> {
         let rx = self.db().begin_read()?;
-        tables::BlocksTable::get_by_slot(&rx, *slot)
+        indexes::BlockNumberApproxIndexTable::get_by_block_number(&rx, block_number)
+    }
+
+    pub fn get_possible_block_slots_by_tx_hash(
+        &self,
+        tx_hash: &[u8],
+    ) -> Result<Vec<BlockSlot>, Error> {
+        let rx = self.db().begin_read()?;
+        indexes::TxHashApproxIndexTable::get_by_tx_hash(&rx, tx_hash)
     }
 
     pub fn get_possible_blocks_by_address(&self, address: &[u8]) -> Result<Vec<BlockBody>, Error> {
         self.get_possible_block_slots_by_address(address)?
-            .iter()
-            .flat_map(|slot| match self.get_block_by_slot(slot) {
-                Ok(Some(block)) => Some(Ok(block)),
-                Ok(None) => None,
-                Err(e) => Some(Err(e)),
-            })
-            .collect()
-    }
-
-    pub fn get_possible_blocks_by_tx_hash(&self, tx_hash: &[u8]) -> Result<Vec<BlockBody>, Error> {
-        self.get_possible_block_slots_by_tx_hash(tx_hash)?
-            .iter()
-            .flat_map(|slot| match self.get_block_by_slot(slot) {
-                Ok(Some(block)) => Some(Ok(block)),
-                Ok(None) => None,
-                Err(e) => Some(Err(e)),
-            })
-            .collect()
-    }
-
-    pub fn get_possible_blocks_by_block_hash(
-        &self,
-        block_hash: &[u8],
-    ) -> Result<Vec<BlockBody>, Error> {
-        self.get_possible_block_slots_by_block_hash(block_hash)?
             .iter()
             .flat_map(|slot| match self.get_block_by_slot(slot) {
                 Ok(Some(block)) => Some(Ok(block)),
@@ -188,11 +169,66 @@ impl ChainStore {
             .collect()
     }
 
+    pub fn get_possible_blocks_by_block_hash(
+        &self,
+        block_hash: &[u8],
+    ) -> Result<Vec<BlockBody>, Error> {
+        self.get_possible_block_slots_by_block_hash(block_hash)?
+            .iter()
+            .flat_map(|slot| match self.get_block_by_slot(slot) {
+                Ok(Some(block)) => Some(Ok(block)),
+                Ok(None) => None,
+                Err(e) => Some(Err(e)),
+            })
+            .collect()
+    }
+
+    pub fn get_possible_blocks_by_block_number(
+        &self,
+        block_number: u64,
+    ) -> Result<Vec<BlockBody>, Error> {
+        self.get_possible_block_slots_by_block_number(block_number)?
+            .iter()
+            .flat_map(|slot| match self.get_block_by_slot(slot) {
+                Ok(Some(block)) => Some(Ok(block)),
+                Ok(None) => None,
+                Err(e) => Some(Err(e)),
+            })
+            .collect()
+    }
+
+    pub fn get_possible_blocks_by_tx_hash(&self, tx_hash: &[u8]) -> Result<Vec<BlockBody>, Error> {
+        self.get_possible_block_slots_by_tx_hash(tx_hash)?
+            .iter()
+            .flat_map(|slot| match self.get_block_by_slot(slot) {
+                Ok(Some(block)) => Some(Ok(block)),
+                Ok(None) => None,
+                Err(e) => Some(Err(e)),
+            })
+            .collect()
+    }
+
+    pub fn get_block_by_slot(&self, slot: &BlockSlot) -> Result<Option<BlockBody>, Error> {
+        let rx = self.db().begin_read()?;
+        tables::BlocksTable::get_by_slot(&rx, *slot)
+    }
+
     pub fn get_block_by_hash(&self, block_hash: &[u8]) -> Result<Option<BlockBody>, Error> {
         let possible = self.get_possible_blocks_by_block_hash(block_hash)?;
         for raw in possible {
             let block = MultiEraBlock::decode(&raw).map_err(Error::BlockDecodingError)?;
             if *block.hash() == *block_hash {
+                return Ok(Some(raw));
+            }
+        }
+        Ok(None)
+    }
+
+    pub fn get_block_by_number(&self, block_number: u64) -> Result<Option<BlockBody>, Error> {
+        let possible = self.get_possible_blocks_by_block_number(block_number)?;
+        for raw in possible {
+            let block = MultiEraBlock::decode(&raw).map_err(Error::BlockDecodingError)?;
+            if block.number() == block_number {
                 return Ok(Some(raw));
             }
         }

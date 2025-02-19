@@ -120,6 +120,7 @@ pub struct LedgerDelta {
     pub new_txs: HashMap<TxHash, EraCbor>,
     pub undone_txs: HashMap<TxHash, EraCbor>,
     pub new_block: BlockBody,
+    pub undone_block: BlockBody,
 }
 
 /// Computes the ledger delta of applying a particular block.
@@ -199,8 +200,17 @@ pub fn compute_undo_delta(
     block: &MultiEraBlock,
     mut context: LedgerSlice,
 ) -> Result<LedgerDelta, BrokenInvariant> {
+    let era: u16 = block.era().into();
     let mut delta = LedgerDelta {
         undone_position: Some(ChainPoint(block.slot(), block.hash())),
+        undone_block: match block {
+            MultiEraBlock::Byron(x) => minicbor::to_vec((era, x)).unwrap(),
+            MultiEraBlock::Conway(x) => minicbor::to_vec((era, x)).unwrap(),
+            MultiEraBlock::Babbage(x) => minicbor::to_vec((era, x)).unwrap(),
+            MultiEraBlock::AlonzoCompatible(x, _) => minicbor::to_vec((era, x)).unwrap(),
+            MultiEraBlock::EpochBoundary(x) => minicbor::to_vec((0_u16, x)).unwrap(),
+            _ => Default::default(),
+        },
         ..Default::default()
     };
 
