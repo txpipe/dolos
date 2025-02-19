@@ -16,6 +16,14 @@ impl BlocksTable {
         Ok(())
     }
 
+    pub fn get_tip(rx: &ReadTransaction) -> Result<Option<(BlockSlot, BlockBody)>, Error> {
+        let table = rx.open_table(Self::DEF)?;
+        let result = table
+            .last()?
+            .map(|(slot, raw)| (slot.value(), raw.value().clone()));
+        Ok(result)
+    }
+
     pub fn get_by_slot(rx: &ReadTransaction, slot: BlockSlot) -> Result<Option<BlockBody>, Error> {
         let table = rx.open_table(Self::DEF)?;
         match table.get(slot)? {

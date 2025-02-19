@@ -66,7 +66,7 @@ impl From<::redb::Error> for ChainError {
     }
 }
 
-const V1_HASH: &str = "ac7a7fbaf084bc058c753a07cc86849db28c051c";
+const V1_HASH: &str = "e6fa4d390bdf3d2ec7f7a234c5660f9d585a0322";
 
 #[derive(Clone)]
 pub enum ChainStore {
@@ -115,57 +115,15 @@ impl ChainStore {
         }
     }
 
-    pub fn get_possible_block_slots_by_address(
-        &self,
-        address: &[u8],
-    ) -> Result<Vec<BlockSlot>, ChainError> {
+    pub fn get_tip(&self) -> Result<Option<(BlockSlot, BlockBody)>, ChainError> {
         match self {
-            ChainStore::SchemaV1(x) => Ok(x.get_possible_block_slots_by_address(address)?),
+            ChainStore::SchemaV1(x) => x.get_tip(),
         }
     }
 
-    pub fn get_possible_block_slots_by_tx_hash(
-        &self,
-        tx_hash: &[u8],
-    ) -> Result<Vec<BlockSlot>, ChainError> {
+    pub fn get_block_by_hash(&self, block_hash: &[u8]) -> Result<Option<BlockBody>, ChainError> {
         match self {
-            ChainStore::SchemaV1(x) => Ok(x.get_possible_block_slots_by_tx_hash(tx_hash)?),
-        }
-    }
-
-    pub fn get_possible_block_slots_by_block_hash(
-        &self,
-        block_hash: &[u8],
-    ) -> Result<Vec<BlockSlot>, ChainError> {
-        match self {
-            ChainStore::SchemaV1(x) => Ok(x.get_possible_block_slots_by_block_hash(block_hash)?),
-        }
-    }
-
-    pub fn get_possible_blocks_by_address(
-        &self,
-        address: &[u8],
-    ) -> Result<Vec<BlockBody>, ChainError> {
-        match self {
-            ChainStore::SchemaV1(x) => Ok(x.get_possible_blocks_by_address(address)?),
-        }
-    }
-
-    pub fn get_possible_blocks_by_tx_hash(
-        &self,
-        tx_hash: &[u8],
-    ) -> Result<Vec<BlockBody>, ChainError> {
-        match self {
-            ChainStore::SchemaV1(x) => Ok(x.get_possible_blocks_by_tx_hash(tx_hash)?),
-        }
-    }
-
-    pub fn get_possible_blocks_by_block_hash(
-        &self,
-        block_hash: &[u8],
-    ) -> Result<Vec<BlockBody>, ChainError> {
-        match self {
-            ChainStore::SchemaV1(x) => Ok(x.get_possible_blocks_by_block_hash(block_hash)?),
+            ChainStore::SchemaV1(x) => x.get_block_by_hash(block_hash),
         }
     }
 

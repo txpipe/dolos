@@ -29,5 +29,5 @@ pub fn run(config: &super::Config, args: &Args, feedback: &Feedback) -> miette::
 }
 
 pub fn run_rebuild(config: &super::Config, feedback: &Feedback) -> miette::Result<()> {
-    rebuild::run(config, &rebuild::Args, feedback)
+    rebuild::run(config, &rebuild::Args { chunk: 500 }, feedback)
 }

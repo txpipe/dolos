@@ -5,6 +5,7 @@ use itertools::{Either, Itertools};
 use pallas::interop::utxorpc as interop;
 use pallas::interop::utxorpc::spec::sync::BlockRef;
 use pallas::interop::utxorpc::{spec as u5c, Mapper};
+use pallas::ledger::traverse::MultiEraBlock;
 use std::pin::Pin;
 use tonic::{Request, Response, Status};
 
@@ -215,20 +216,24 @@ impl u5c::sync::sync_service_server::SyncService for SyncServiceImpl {
         &self,
         _request: tonic::Request<u5c::sync::ReadTipRequest>,
     ) -> std::result::Result<tonic::Response<u5c::sync::ReadTipResponse>, tonic::Status> {
-        let (_, point) = self
-            .wal
-            .find_tip()
-            .map_err(|_err| Status::internal("can't read WAL"))?
-            .ok_or(Status::internal("WAL has no data"))?;
+        let (slot, body) = match self
+            .chain
+            .get_tip()
+            .map_err(|e| Status::internal(format!("Unable to read WAL: {:?}", e)))?
+        {
+            Some((slot, body)) => (slot, body),
+            None => return Err(Status::internal("chain has no data.")),
+        };
+
+        let hash = MultiEraBlock::decode(&body)
+            .map_err(|_| Status::internal("Failed to decode tip block."))?
+            .hash();
 
         let response = u5c::sync::ReadTipResponse {
-            tip: match point {
-                ChainPoint::Origin => None,
-                ChainPoint::Specific(slot, hash) => Some(BlockRef {
-                    index: slot,
-                    hash: hash.to_vec().into(),
-                }),
-            },
+            tip: Some(BlockRef {
+                index: slot,
+                hash: hash.to_vec().into(),
+            }),
         };
 
         Ok(Response::new(response))

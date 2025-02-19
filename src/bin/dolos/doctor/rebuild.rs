@@ -7,9 +7,12 @@ use tracing::debug;
 use crate::feedback::Feedback;
 
 #[derive(Debug, clap::Args)]
-pub struct Args;
+pub struct Args {
+    #[arg(short, long, default_value_t = 500)]
+    pub chunk: usize,
+}
 
-pub fn run(config: &crate::Config, _args: &Args, feedback: &Feedback) -> miette::Result<()> {
+pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::Result<()> {
     //crate::common::setup_tracing(&config.logging)?;
 
     let progress = feedback.slot_progress_bar();
@@ -64,7 +67,7 @@ pub fn run(config: &crate::Config, _args: &Args, feedback: &Feedback) -> miette:
         .into_blocks()
         .flatten();
 
-    for chunk in remaining.chunks(500).into_iter() {
+    for chunk in remaining.chunks(args.chunk).into_iter() {
         let bodies = chunk.map(|RawBlock { body, .. }| body).collect_vec();
 
         let blocks: Vec<_> = bodies
