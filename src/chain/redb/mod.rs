@@ -144,12 +144,6 @@ impl ChainStore {
             ChainStore::SchemaV1(x) => Ok(x.finalize(until)?),
         }
     }
-
-    pub fn copy(&self, target: &Self) -> Result<(), ChainError> {
-        match (self, target) {
-            (ChainStore::SchemaV1(x), ChainStore::SchemaV1(target)) => Ok(x.copy(target)?),
-        }
-    }
 }
 
 impl From<v1::ChainStore> for ChainStore {

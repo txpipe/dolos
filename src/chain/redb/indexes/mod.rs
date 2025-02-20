@@ -1,5 +1,5 @@
-use ::redb::{ReadTransaction, ReadableTable as _};
-use ::redb::{TableDefinition, WriteTransaction};
+use ::redb::ReadTransaction;
+use ::redb::{MultimapTableDefinition, WriteTransaction};
 use itertools::Itertools;
 use pallas::ledger::addresses::Address;
 use pallas::ledger::traverse::{ComputeHash, MultiEraBlock, MultiEraOutput};
@@ -34,16 +34,16 @@ type Error = crate::chain::ChainError;
 pub struct Indexes;
 impl Indexes {
     pub fn initialize(wx: &WriteTransaction) -> Result<(), Error> {
-        wx.open_table(AddressApproxIndexTable::DEF)?;
-        wx.open_table(AddressPaymentPartApproxIndexTable::DEF)?;
-        wx.open_table(AddressStakePartApproxIndexTable::DEF)?;
-        wx.open_table(AssetApproxIndexTable::DEF)?;
-        wx.open_table(BlockHashApproxIndexTable::DEF)?;
-        wx.open_table(BlockNumberApproxIndexTable::DEF)?;
-        wx.open_table(DatumHashApproxIndexTable::DEF)?;
-        wx.open_table(PolicyApproxIndexTable::DEF)?;
-        wx.open_table(ScriptHashApproxIndexTable::DEF)?;
-        wx.open_table(TxHashApproxIndexTable::DEF)?;
+        wx.open_multimap_table(AddressApproxIndexTable::DEF)?;
+        wx.open_multimap_table(AddressPaymentPartApproxIndexTable::DEF)?;
+        wx.open_multimap_table(AddressStakePartApproxIndexTable::DEF)?;
+        wx.open_multimap_table(AssetApproxIndexTable::DEF)?;
+        wx.open_multimap_table(BlockHashApproxIndexTable::DEF)?;
+        wx.open_multimap_table(BlockNumberApproxIndexTable::DEF)?;
+        wx.open_multimap_table(DatumHashApproxIndexTable::DEF)?;
+        wx.open_multimap_table(PolicyApproxIndexTable::DEF)?;
+        wx.open_multimap_table(ScriptHashApproxIndexTable::DEF)?;
+        wx.open_multimap_table(TxHashApproxIndexTable::DEF)?;
 
         Ok(())
     }
@@ -403,30 +403,15 @@ impl Indexes {
 
     pub fn insert<T>(
         wx: &WriteTransaction,
-        table: TableDefinition<'static, u64, Vec<u64>>,
+        table: MultimapTableDefinition<'static, u64, u64>,
         compute_key: fn(&T) -> u64,
         inputs: Vec<T>,
         slot: u64,
     ) -> Result<(), Error> {
-        let mut table = wx.open_table(table)?;
+        let mut table = wx.open_multimap_table(table)?;
         for x in inputs {
             let key = compute_key(&x);
-
-            let maybe_new = match table.get(key)? {
-                Some(value) => {
-                    let mut previous = value.value().clone();
-                    if !previous.contains(&slot) {
-                        previous.push(slot);
-                        Some(previous)
-                    } else {
-                        None
-                    }
-                }
-                None => Some(vec![slot]),
-            };
-            if let Some(new) = maybe_new {
-                table.insert(key, new)?;
-            }
+            let _ = table.insert(key, slot)?;
         }
 
         Ok(())
@@ -434,48 +419,35 @@ impl Indexes {
 
     pub fn remove<T>(
         wx: &WriteTransaction,
-        table: TableDefinition<'static, u64, Vec<u64>>,
+        table: MultimapTableDefinition<'static, u64, u64>,
         compute_key: fn(&T) -> u64,
         inputs: Vec<T>,
         slot: u64,
     ) -> Result<(), Error> {
-        let mut table = wx.open_table(table)?;
-
+        let mut table = wx.open_multimap_table(table)?;
         for x in inputs {
             let key = compute_key(&x);
-
-            let maybe_new = match table.get(key)? {
-                Some(value) => {
-                    let mut previous = value.value().clone();
-                    match previous.iter().position(|x| *x == slot) {
-                        Some(index) => {
-                            previous.remove(index);
-                            Some(previous)
-                        }
-                        None => None,
-                    }
-                }
-                None => None,
-            };
-            if let Some(new) = maybe_new {
-                table.insert(key, new)?;
-            }
+            let _ = table.remove(key, slot)?;
         }
 
         Ok(())
     }
 
     fn copy_table(
-        table: TableDefinition<'static, u64, Vec<u64>>,
+        table: MultimapTableDefinition<'static, u64, u64>,
         rx: &ReadTransaction,
         wx: &WriteTransaction,
     ) -> Result<(), Error> {
-        let source = rx.open_table(table)?;
-        let mut target = wx.open_table(table)?;
+        let source = rx.open_multimap_table(table)?;
+        let mut target = wx.open_multimap_table(table)?;
 
-        for entry in source.iter()? {
-            let (k, v) = entry?;
-            target.insert(k.value(), v.value())?;
+        let all = source.range::<u64>(..)?;
+        for entry in all {
+            let (key, values) = entry?;
+            for value in values {
+                let value = value?;
+                target.insert(key.value(), value.value())?;
+            }
         }
 
         Ok(())

@@ -43,12 +43,6 @@ impl ChainStore {
             ChainStore::Redb(x) => x.finalize(until),
         }
     }
-
-    pub fn copy(&self, target: &Self) -> Result<(), ChainError> {
-        match (self, target) {
-            (Self::Redb(x), Self::Redb(target)) => x.copy(target),
-        }
-    }
 }
 
 impl From<redb::ChainStore> for ChainStore {

@@ -1,4 +1,4 @@
-use ::redb::{ReadTransaction, TableDefinition};
+use ::redb::{MultimapTableDefinition, ReadTransaction};
 use std::hash::{DefaultHasher, Hash as _, Hasher};
 
 use crate::model::BlockSlot;
@@ -7,8 +7,8 @@ type Error = crate::chain::ChainError;
 
 pub struct AddressApproxIndexTable;
 impl AddressApproxIndexTable {
-    pub const DEF: TableDefinition<'static, u64, Vec<u64>> =
-        TableDefinition::new("addressapproxindex");
+    pub const DEF: MultimapTableDefinition<'static, u64, u64> =
+        MultimapTableDefinition::new("addressapproxindex");
 
     pub fn compute_key(address: &Vec<u8>) -> u64 {
         let mut hasher = DefaultHasher::new();
@@ -17,12 +17,12 @@ impl AddressApproxIndexTable {
     }
 
     pub fn get_by_address(rx: &ReadTransaction, address: &[u8]) -> Result<Vec<BlockSlot>, Error> {
-        let table = rx.open_table(Self::DEF)?;
-        let default = Ok(vec![]);
+        let table = rx.open_multimap_table(Self::DEF)?;
         let key = Self::compute_key(&address.to_vec());
-        match table.get(key)? {
-            Some(value) => Ok(value.value().clone()),
-            None => default,
+        let mut out = vec![];
+        for slot in table.get(key)? {
+            out.push(slot?.value());
         }
+        Ok(out)
     }
 }
