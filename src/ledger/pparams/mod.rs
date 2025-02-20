@@ -3,6 +3,7 @@ use pallas::{
         AlonzoProtParams, BabbageProtParams, ByronProtParams, ConwayProtParams,
         MultiEraProtocolParameters, ShelleyProtParams,
     },
+    codec::utils::KeyValuePairs,
     ledger::{
         configs::{alonzo, byron, conway, shelley},
         primitives::alonzo::Language as AlonzoLanguage,
@@ -201,6 +202,7 @@ fn bootstrap_conway_pparams(
             plutus_v1: previous.cost_models_for_script_languages.plutus_v1,
             plutus_v2: previous.cost_models_for_script_languages.plutus_v2,
             plutus_v3: Some(genesis.plutus_v3_cost_model.clone()),
+            unknown: KeyValuePairs::from(vec![]),
         },
         pool_voting_thresholds: pallas::ledger::primitives::conway::PoolVotingThresholds {
             motion_no_confidence: float_to_rational(
