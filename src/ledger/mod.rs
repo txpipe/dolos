@@ -117,8 +117,6 @@ pub struct LedgerDelta {
     pub recovered_stxi: HashMap<TxoRef, EraCbor>,
     pub undone_utxo: HashMap<TxoRef, EraCbor>,
     pub new_pparams: Vec<EraCbor>,
-    pub new_txs: HashMap<TxHash, EraCbor>,
-    pub undone_txs: HashMap<TxHash, EraCbor>,
     pub new_block: BlockBody,
     pub undone_block: BlockBody,
 }
@@ -180,12 +178,6 @@ pub fn compute_delta(
         }
     }
 
-    delta.new_txs = block
-        .txs()
-        .into_iter()
-        .map(|tx| (tx.hash(), EraCbor::from((tx.era(), tx.encode()))))
-        .collect();
-
     // check block-level updates (because of f#!@#@ byron)
     if let Some(update) = block.update() {
         delta
@@ -235,12 +227,6 @@ pub fn compute_undo_delta(
             delta.recovered_stxi.insert(stxi_ref, stxi_body);
         }
     }
-
-    delta.undone_txs = block
-        .txs()
-        .into_iter()
-        .map(|tx| (tx.hash(), EraCbor::from((tx.era(), tx.encode()))))
-        .collect();
 
     Ok(delta)
 }

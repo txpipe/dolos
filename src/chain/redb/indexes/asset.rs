@@ -5,21 +5,21 @@ use crate::model::BlockSlot;
 
 type Error = crate::chain::ChainError;
 
-pub struct AddressApproxIndexTable;
-impl AddressApproxIndexTable {
+pub struct AssetApproxIndexTable;
+impl AssetApproxIndexTable {
     pub const DEF: TableDefinition<'static, u64, Vec<u64>> =
-        TableDefinition::new("addressapproxindex");
+        TableDefinition::new("assetapproxindex");
 
-    pub fn compute_key(address: &Vec<u8>) -> u64 {
+    pub fn compute_key(asset: &Vec<u8>) -> u64 {
         let mut hasher = DefaultHasher::new();
-        address.hash(&mut hasher);
+        asset.hash(&mut hasher);
         hasher.finish()
     }
 
-    pub fn get_by_address(rx: &ReadTransaction, address: &[u8]) -> Result<Vec<BlockSlot>, Error> {
+    pub fn get_by_asset(rx: &ReadTransaction, asset: &[u8]) -> Result<Vec<BlockSlot>, Error> {
         let table = rx.open_table(Self::DEF)?;
         let default = Ok(vec![]);
-        let key = Self::compute_key(&address.to_vec());
+        let key = Self::compute_key(&asset.to_vec());
         match table.get(key)? {
             Some(value) => Ok(value.value().clone()),
             None => default,

@@ -66,7 +66,7 @@ impl From<::redb::Error> for ChainError {
     }
 }
 
-const V1_HASH: &str = "f69bb95c0b9cb23a0c012bd1559b62fee8b2a58c";
+const V1_HASH: &str = "c696c7322ac779ad189c05aa38a88034a16bf450";
 
 #[derive(Clone)]
 pub enum ChainStore {

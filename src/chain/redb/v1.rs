@@ -15,12 +15,7 @@ impl ChainStore {
         let mut wx = db.begin_write()?;
         wx.set_durability(Durability::Immediate);
 
-        indexes::AddressApproxIndexTable::initialize(&wx)?;
-        indexes::AddressPaymentPartApproxIndexTable::initialize(&wx)?;
-        indexes::AddressStakePartApproxIndexTable::initialize(&wx)?;
-        indexes::BlockHashApproxIndexTable::initialize(&wx)?;
-        indexes::BlockNumberApproxIndexTable::initialize(&wx)?;
-        indexes::TxHashApproxIndexTable::initialize(&wx)?;
+        indexes::Indexes::initialize(&wx)?;
         tables::BlocksTable::initialize(&wx)?;
 
         wx.commit()?;
@@ -41,12 +36,7 @@ impl ChainStore {
         wx.set_durability(Durability::Eventual);
 
         for delta in deltas {
-            indexes::AddressApproxIndexTable::apply(&wx, delta)?;
-            indexes::AddressPaymentPartApproxIndexTable::apply(&wx, delta)?;
-            indexes::AddressStakePartApproxIndexTable::apply(&wx, delta)?;
-            indexes::BlockHashApproxIndexTable::apply(&wx, delta)?;
-            indexes::BlockNumberApproxIndexTable::apply(&wx, delta)?;
-            indexes::TxHashApproxIndexTable::apply(&wx, delta)?;
+            indexes::Indexes::apply(&wx, delta)?;
             tables::BlocksTable::apply(&wx, delta)?;
         }
 
@@ -59,12 +49,7 @@ impl ChainStore {
         let rx = self.db().begin_read()?;
         let wx = target.db().begin_write()?;
 
-        indexes::AddressApproxIndexTable::copy(&rx, &wx)?;
-        indexes::AddressPaymentPartApproxIndexTable::copy(&rx, &wx)?;
-        indexes::AddressStakePartApproxIndexTable::copy(&rx, &wx)?;
-        indexes::BlockHashApproxIndexTable::copy(&rx, &wx)?;
-        indexes::BlockNumberApproxIndexTable::copy(&rx, &wx)?;
-        indexes::TxHashApproxIndexTable::copy(&rx, &wx)?;
+        indexes::Indexes::copy(&rx, &wx)?;
         tables::BlocksTable::copy(&rx, &wx)?;
 
         wx.commit()?;
@@ -81,7 +66,7 @@ impl ChainStore {
         address: &[u8],
     ) -> Result<Vec<BlockSlot>, Error> {
         let rx = self.db().begin_read()?;
-        indexes::AddressApproxIndexTable::get_by_address(&rx, address)
+        indexes::Indexes::get_by_address(&rx, address)
     }
 
     pub fn get_possible_block_slots_by_address_payment_part(
@@ -89,10 +74,7 @@ impl ChainStore {
         address_payment_part: &[u8],
     ) -> Result<Vec<BlockSlot>, Error> {
         let rx = self.db().begin_read()?;
-        indexes::AddressPaymentPartApproxIndexTable::get_by_address_payment_part(
-            &rx,
-            address_payment_part,
-        )
+        indexes::Indexes::get_by_address_payment_part(&rx, address_payment_part)
     }
 
     pub fn get_possible_block_slots_by_address_stake_part(
@@ -100,10 +82,12 @@ impl ChainStore {
         address_stake_part: &[u8],
     ) -> Result<Vec<BlockSlot>, Error> {
         let rx = self.db().begin_read()?;
-        indexes::AddressStakePartApproxIndexTable::get_by_address_stake_part(
-            &rx,
-            address_stake_part,
-        )
+        indexes::Indexes::get_by_address_stake_part(&rx, address_stake_part)
+    }
+
+    pub fn get_possible_block_slots_by_asset(&self, asset: &[u8]) -> Result<Vec<BlockSlot>, Error> {
+        let rx = self.db().begin_read()?;
+        indexes::Indexes::get_by_asset(&rx, asset)
     }
 
     pub fn get_possible_block_slots_by_block_hash(
@@ -111,15 +95,39 @@ impl ChainStore {
         block_hash: &[u8],
     ) -> Result<Vec<BlockSlot>, Error> {
         let rx = self.db().begin_read()?;
-        indexes::BlockHashApproxIndexTable::get_by_block_hash(&rx, block_hash)
+        indexes::Indexes::get_by_block_hash(&rx, block_hash)
     }
 
     pub fn get_possible_block_slots_by_block_number(
         &self,
-        block_number: u64,
+        block_number: &u64,
     ) -> Result<Vec<BlockSlot>, Error> {
         let rx = self.db().begin_read()?;
-        indexes::BlockNumberApproxIndexTable::get_by_block_number(&rx, block_number)
+        indexes::Indexes::get_by_block_number(&rx, block_number)
+    }
+
+    pub fn get_possible_block_slots_by_datum_hash(
+        &self,
+        datum_hash: &[u8],
+    ) -> Result<Vec<BlockSlot>, Error> {
+        let rx = self.db().begin_read()?;
+        indexes::Indexes::get_by_datum_hash(&rx, datum_hash)
+    }
+
+    pub fn get_possible_block_slots_by_policy(
+        &self,
+        policy: &[u8],
+    ) -> Result<Vec<BlockSlot>, Error> {
+        let rx = self.db().begin_read()?;
+        indexes::Indexes::get_by_policy(&rx, policy)
+    }
+
+    pub fn get_possible_block_slots_by_script_hash(
+        &self,
+        script_hash: &[u8],
+    ) -> Result<Vec<BlockSlot>, Error> {
+        let rx = self.db().begin_read()?;
+        indexes::Indexes::get_by_script_hash(&rx, script_hash)
     }
 
     pub fn get_possible_block_slots_by_tx_hash(
@@ -127,7 +135,7 @@ impl ChainStore {
         tx_hash: &[u8],
     ) -> Result<Vec<BlockSlot>, Error> {
         let rx = self.db().begin_read()?;
-        indexes::TxHashApproxIndexTable::get_by_tx_hash(&rx, tx_hash)
+        indexes::Indexes::get_by_tx_hash(&rx, tx_hash)
     }
 
     pub fn get_possible_blocks_by_address(&self, address: &[u8]) -> Result<Vec<BlockBody>, Error> {
@@ -169,6 +177,17 @@ impl ChainStore {
             .collect()
     }
 
+    pub fn get_possible_blocks_by_asset(&self, asset: &[u8]) -> Result<Vec<BlockBody>, Error> {
+        self.get_possible_block_slots_by_asset(asset)?
+            .iter()
+            .flat_map(|slot| match self.get_block_by_slot(slot) {
+                Ok(Some(block)) => Some(Ok(block)),
+                Ok(None) => None,
+                Err(e) => Some(Err(e)),
+            })
+            .collect()
+    }
+
     pub fn get_possible_blocks_by_block_hash(
         &self,
         block_hash: &[u8],
@@ -185,9 +204,48 @@ impl ChainStore {
 
     pub fn get_possible_blocks_by_block_number(
         &self,
-        block_number: u64,
+        block_number: &u64,
     ) -> Result<Vec<BlockBody>, Error> {
         self.get_possible_block_slots_by_block_number(block_number)?
+            .iter()
+            .flat_map(|slot| match self.get_block_by_slot(slot) {
+                Ok(Some(block)) => Some(Ok(block)),
+                Ok(None) => None,
+                Err(e) => Some(Err(e)),
+            })
+            .collect()
+    }
+
+    pub fn get_possible_blocks_by_datum_hash(
+        &self,
+        datum_hash: &[u8],
+    ) -> Result<Vec<BlockBody>, Error> {
+        self.get_possible_block_slots_by_datum_hash(datum_hash)?
+            .iter()
+            .flat_map(|slot| match self.get_block_by_slot(slot) {
+                Ok(Some(block)) => Some(Ok(block)),
+                Ok(None) => None,
+                Err(e) => Some(Err(e)),
+            })
+            .collect()
+    }
+
+    pub fn get_possible_blocks_by_policy(&self, policy: &[u8]) -> Result<Vec<BlockBody>, Error> {
+        self.get_possible_block_slots_by_policy(policy)?
+            .iter()
+            .flat_map(|slot| match self.get_block_by_slot(slot) {
+                Ok(Some(block)) => Some(Ok(block)),
+                Ok(None) => None,
+                Err(e) => Some(Err(e)),
+            })
+            .collect()
+    }
+
+    pub fn get_possible_blocks_by_script_hash(
+        &self,
+        script_hash: &[u8],
+    ) -> Result<Vec<BlockBody>, Error> {
+        self.get_possible_block_slots_by_script_hash(script_hash)?
             .iter()
             .flat_map(|slot| match self.get_block_by_slot(slot) {
                 Ok(Some(block)) => Some(Ok(block)),
@@ -224,11 +282,11 @@ impl ChainStore {
         Ok(None)
     }
 
-    pub fn get_block_by_number(&self, block_number: u64) -> Result<Option<BlockBody>, Error> {
+    pub fn get_block_by_number(&self, block_number: &u64) -> Result<Option<BlockBody>, Error> {
         let possible = self.get_possible_blocks_by_block_number(block_number)?;
         for raw in possible {
             let block = MultiEraBlock::decode(&raw).map_err(Error::BlockDecodingError)?;
-            if block.number() == block_number {
+            if block.number() == *block_number {
                 return Ok(Some(raw));
             }
         }
