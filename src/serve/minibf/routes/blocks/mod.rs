@@ -1,4 +1,4 @@
-use pallas::ledger::traverse::{MultiEraBlock, MultiEraUpdate};
+use pallas::ledger::traverse::{MultiEraBlock, MultiEraHeader, MultiEraUpdate};
 use rocket::http::Status;
 use serde::{Deserialize, Serialize};
 
@@ -11,6 +11,13 @@ use crate::{
 pub mod hash_or_number;
 pub mod latest;
 pub mod slot;
+
+pub type BlockHeaderFields = (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Block {
@@ -82,16 +89,9 @@ impl Block {
                     .collect::<Result<Vec<MultiEraUpdate>, Status>>()?;
                 let summary = pparams::fold_with_hacks(genesis, &updates, slot);
 
-                let header = block.header();
-                let prev = header.previous_hash().map(|h| h.to_string());
-                let block_vrf = match header.vrf_vkey() {
-                    Some(v) => Some(
-                        bech32::encode::<bech32::Bech32>(bech32::Hrp::parse("vrf_vk").unwrap(), v)
-                            .map_err(|_| Status::ServiceUnavailable)?,
-                    ),
-                    None => None,
-                };
-                let (epoch, epoch_slot, block_time) =
+                let (previous_block, block_vrf, op_cert, op_cert_counter) =
+                    Self::extract_from_header(&block.header())?;
+                let (epoch, epoch_slot, time) =
                     Self::resolve_time_from_genesis(&slot, summary.era_for_slot(slot));
                 Ok(Some(Self {
                     slot: Some(block.slot()),
@@ -101,11 +101,13 @@ impl Block {
                     epoch: Some(epoch),
                     epoch_slot: Some(epoch_slot),
                     height: Some(block.number()),
-                    previous_block: prev.clone(),
                     next_block: next.clone(),
-                    time: block_time,
+                    time,
                     confirmations,
+                    previous_block,
                     block_vrf,
+                    op_cert,
+                    op_cert_counter,
                     output: match block.tx_count() {
                         0 => None,
                         _ => Some(
@@ -139,12 +141,48 @@ impl Block {
 
     /// Resolve epoch, epoch slot and block time using Genesis values.
     pub fn resolve_time_from_genesis(slot: &u64, summary: &EraSummary) -> (u64, u64, u64) {
-        let era_slot = slot - (summary.start.slot + 410400);
+        let era_slot = slot - summary.start.slot;
         let era_epoch = era_slot / summary.pparams.epoch_length();
         let epoch_slot = era_slot % summary.pparams.epoch_length();
         let epoch = summary.start.epoch + era_epoch;
         let time = summary.start.timestamp.timestamp() as u64
-            + (slot - (summary.start.slot + 410400)) * summary.pparams.slot_length();
+            + (slot - summary.start.slot) * summary.pparams.slot_length();
         (epoch, epoch_slot, time)
+    }
+
+    pub fn extract_from_header(header: &MultiEraHeader) -> Result<BlockHeaderFields, Status> {
+        let prev = header.previous_hash().map(|h| h.to_string());
+        let block_vrf = match header.vrf_vkey() {
+            Some(v) => Some(
+                bech32::encode::<bech32::Bech32>(bech32::Hrp::parse("vrf_vk").unwrap(), v)
+                    .map_err(|_| Status::ServiceUnavailable)?,
+            ),
+            None => None,
+        };
+
+        let (op_cert, op_cert_counter) = match header {
+            MultiEraHeader::ShelleyCompatible(x) => (
+                Some(hex::encode(
+                    x.header_body.operational_cert_hot_vkey.as_slice(),
+                )),
+                Some(x.header_body.operational_cert_sequence_number.to_string()),
+            ),
+            MultiEraHeader::BabbageCompatible(x) => (
+                Some(hex::encode(
+                    x.header_body
+                        .operational_cert
+                        .operational_cert_hot_vkey
+                        .as_slice(),
+                )),
+                Some(
+                    x.header_body
+                        .operational_cert
+                        .operational_cert_sequence_number
+                        .to_string(),
+                ),
+            ),
+            _ => (None, None),
+        };
+        Ok((prev, block_vrf, op_cert, op_cert_counter))
     }
 }

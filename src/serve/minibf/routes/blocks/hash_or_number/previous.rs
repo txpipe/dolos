@@ -55,19 +55,11 @@ pub fn route(
                 let block =
                     MultiEraBlock::decode(&raw.body).map_err(|_| Status::ServiceUnavailable)?;
                 let slot = block.slot();
-                let header = block.header();
-                let block_vrf = match header.vrf_vkey() {
-                    Some(v) => Some(
-                        bech32::encode::<bech32::Bech32>(bech32::Hrp::parse("vrf_vk").unwrap(), v)
-                            .map_err(|_| Status::ServiceUnavailable)?,
-                    ),
-                    None => None,
-                };
 
+                let tip = ledger.cursor().map_err(|_| Status::InternalServerError)?;
                 let updates = ledger
-                    .get_pparams(slot)
-                    .map_err(|_| Status::InternalServerError)?;
-                let updates: Vec<_> = updates
+                    .get_pparams(tip.map(|t| t.0).unwrap_or_default())
+                    .map_err(|_| Status::InternalServerError)?
                     .into_iter()
                     .map(|eracbor| {
                         MultiEraUpdate::try_from(eracbor).map_err(|_| Status::InternalServerError)
@@ -75,8 +67,10 @@ pub fn route(
                     .collect::<Result<Vec<MultiEraUpdate>, Status>>()?;
                 let summary = pparams::fold_with_hacks(genesis, &updates, slot);
 
+                let (previous_block, block_vrf, op_cert, op_cert_counter) =
+                    Block::extract_from_header(&block.header())?;
                 let (epoch, epoch_slot, block_time) =
-                    Block::resolve_time_from_genesis(&slot, summary.edge());
+                    Block::resolve_time_from_genesis(&slot, summary.era_for_slot(slot));
                 output.push(Block {
                     slot: Some(block.slot()),
                     hash: block.hash().to_string(),
@@ -85,10 +79,12 @@ pub fn route(
                     epoch: Some(epoch),
                     epoch_slot: Some(epoch_slot),
                     height: Some(block.number()),
-                    previous_block: block.header().previous_hash().map(hex::encode),
                     time: block_time,
                     confirmations: tip_number - block.number(),
+                    previous_block,
                     block_vrf,
+                    op_cert,
+                    op_cert_counter,
                     output: match block.tx_count() {
                         0 => None,
                         _ => Some(
