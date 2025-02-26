@@ -1,8 +1,12 @@
-use pallas::ledger::traverse::{wellknown::GenesisValues, MultiEraBlock};
+use pallas::ledger::traverse::{MultiEraBlock, MultiEraUpdate};
 use rocket::http::Status;
 use serde::{Deserialize, Serialize};
 
-use crate::wal::{redb::WalStore, ReadUtils, WalReader};
+use crate::{
+    ledger::pparams::{self, EraSummary, Genesis},
+    state::LedgerStore,
+    wal::{redb::WalStore, ReadUtils, WalReader},
+};
 
 pub mod hash_or_number;
 pub mod latest;
@@ -32,8 +36,9 @@ pub struct Block {
 impl Block {
     pub fn find_in_wal(
         wal: &WalStore,
+        ledger: &LedgerStore,
         hash_or_number: &str,
-        genesis: &GenesisValues,
+        genesis: &Genesis,
     ) -> Result<Option<Block>, Status> {
         let iterator = wal
             .crawl_from(None)
@@ -64,6 +69,18 @@ impl Block {
                 // Decode the block due to lifetime headaches.
                 let block =
                     MultiEraBlock::decode(&bytes).map_err(|_| Status::ServiceUnavailable)?;
+                let slot = block.slot();
+
+                let tip = ledger.cursor().map_err(|_| Status::InternalServerError)?;
+                let updates = ledger
+                    .get_pparams(tip.map(|t| t.0).unwrap_or_default())
+                    .map_err(|_| Status::InternalServerError)?
+                    .into_iter()
+                    .map(|eracbor| {
+                        MultiEraUpdate::try_from(eracbor).map_err(|_| Status::InternalServerError)
+                    })
+                    .collect::<Result<Vec<MultiEraUpdate>, Status>>()?;
+                let summary = pparams::fold_with_hacks(genesis, &updates, slot);
 
                 let header = block.header();
                 let prev = header.previous_hash().map(|h| h.to_string());
@@ -74,7 +91,8 @@ impl Block {
                     ),
                     None => None,
                 };
-                let (epoch, epoch_slot) = block.epoch(genesis);
+                let (epoch, epoch_slot, block_time) =
+                    Self::resolve_time_from_genesis(&slot, summary.era_for_slot(slot));
                 Ok(Some(Self {
                     slot: Some(block.slot()),
                     hash: block.hash().to_string(),
@@ -85,7 +103,7 @@ impl Block {
                     height: Some(block.number()),
                     previous_block: prev.clone(),
                     next_block: next.clone(),
-                    time: block.wallclock(genesis),
+                    time: block_time,
                     confirmations,
                     block_vrf,
                     output: match block.tx_count() {
@@ -117,5 +135,16 @@ impl Block {
             }
             _ => Err(Status::ServiceUnavailable),
         }
+    }
+
+    /// Resolve epoch, epoch slot and block time using Genesis values.
+    pub fn resolve_time_from_genesis(slot: &u64, summary: &EraSummary) -> (u64, u64, u64) {
+        let era_slot = slot - (summary.start.slot + 410400);
+        let era_epoch = era_slot / summary.pparams.epoch_length();
+        let epoch_slot = era_slot % summary.pparams.epoch_length();
+        let epoch = summary.start.epoch + era_epoch;
+        let time = summary.start.timestamp.timestamp() as u64
+            + (slot - (summary.start.slot + 410400)) * summary.pparams.slot_length();
+        (epoch, epoch_slot, time)
     }
 }

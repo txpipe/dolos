@@ -1,8 +1,12 @@
-use pallas::ledger::traverse::{wellknown::GenesisValues, MultiEraBlock};
+use std::sync::Arc;
+
+use pallas::ledger::traverse::{MultiEraBlock, MultiEraUpdate};
 use rocket::{get, http::Status, State};
 
 use crate::{
+    ledger::pparams::{self, Genesis},
     serve::minibf::common::{Order, Pagination},
+    state::LedgerStore,
     wal::{redb::WalStore, ReadUtils, WalReader},
 };
 
@@ -14,8 +18,9 @@ pub fn route(
     count: Option<u8>,
     page: Option<u64>,
     order: Option<Order>,
-    genesis: &State<GenesisValues>,
+    genesis: &State<Arc<Genesis>>,
     wal: &State<WalStore>,
+    ledger: &State<LedgerStore>,
 ) -> Result<rocket::serde::json::Json<Vec<Block>>, Status> {
     let pagination = Pagination::try_new(count, page, order)?;
 
@@ -49,6 +54,7 @@ pub fn route(
             if pagination.includes(i) {
                 let block =
                     MultiEraBlock::decode(&raw.body).map_err(|_| Status::ServiceUnavailable)?;
+                let slot = block.slot();
                 let header = block.header();
                 let block_vrf = match header.vrf_vkey() {
                     Some(v) => Some(
@@ -58,7 +64,19 @@ pub fn route(
                     None => None,
                 };
 
-                let (epoch, epoch_slot) = block.epoch(genesis);
+                let updates = ledger
+                    .get_pparams(slot)
+                    .map_err(|_| Status::InternalServerError)?;
+                let updates: Vec<_> = updates
+                    .into_iter()
+                    .map(|eracbor| {
+                        MultiEraUpdate::try_from(eracbor).map_err(|_| Status::InternalServerError)
+                    })
+                    .collect::<Result<Vec<MultiEraUpdate>, Status>>()?;
+                let summary = pparams::fold_with_hacks(genesis, &updates, slot);
+
+                let (epoch, epoch_slot, block_time) =
+                    Block::resolve_time_from_genesis(&slot, summary.edge());
                 output.push(Block {
                     slot: Some(block.slot()),
                     hash: block.hash().to_string(),
@@ -68,7 +86,7 @@ pub fn route(
                     epoch_slot: Some(epoch_slot),
                     height: Some(block.number()),
                     previous_block: block.header().previous_hash().map(hex::encode),
-                    time: block.wallclock(genesis),
+                    time: block_time,
                     confirmations: tip_number - block.number(),
                     block_vrf,
                     output: match block.tx_count() {
