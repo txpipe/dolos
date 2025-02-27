@@ -1,6 +1,7 @@
 use dolos::{
-    ledger,
-    wal::{self, LogValue, WalReader as _},
+    ledger::{self, pparams::Genesis, LedgerDelta},
+    state::LedgerStore,
+    wal::{self, LogEntry, LogValue, WalReader as _},
 };
 use itertools::Itertools;
 use miette::{Context, IntoDiagnostic};
@@ -71,14 +72,12 @@ pub fn run(config: &crate::Config, _args: &Args, feedback: &Feedback) -> miette:
     for chunk in remaining.chunks(100).into_iter() {
         let logentries = chunk.collect_vec();
 
-        dolos::state::apply_logentry_batch(
+        apply_logentry_batch(
             &logentries,
             &light,
             &genesis,
             config.storage.max_ledger_history,
-        )
-        .into_diagnostic()
-        .context("importing blocks to ledger store")?;
+        )?;
 
         logentries.last().inspect(|(_, logvalue)| {
             match logvalue {
@@ -121,6 +120,62 @@ pub fn run(config: &crate::Config, _args: &Args, feedback: &Feedback) -> miette:
         .context("creating indexes")?;
 
     pb.abandon_with_message("indexes created");
+
+    Ok(())
+}
+
+pub fn apply_logentry_batch<'a>(
+    logentries: impl IntoIterator<Item = &'a LogEntry>,
+    store: &LedgerStore,
+    genesis: &Genesis,
+    max_ledger_history: Option<u64>,
+) -> miette::Result<()> {
+    let mut deltas: Vec<LedgerDelta> = vec![];
+
+    for (_, logvalue) in logentries {
+        match logvalue {
+            LogValue::Apply(raw) => {
+                let block = MultiEraBlock::decode(&raw.body)
+                    .into_diagnostic()
+                    .context("decoding block")?;
+                let context = dolos::state::load_slice_for_block(&block, store, &deltas)
+                    .into_diagnostic()
+                    .context("loading context for deltas")?;
+                let delta = dolos::ledger::compute_delta(&block, context).into_diagnostic()?;
+                deltas.push(delta);
+            }
+            LogValue::Undo(raw) => {
+                let block = MultiEraBlock::decode(&raw.body)
+                    .into_diagnostic()
+                    .context("decoding block")?;
+                let context = dolos::state::load_slice_for_block(&block, store, &deltas)
+                    .into_diagnostic()
+                    .context("loading context for deltas")?;
+                let delta = dolos::ledger::compute_undo_delta(&block, context).into_diagnostic()?;
+                deltas.push(delta);
+            }
+            LogValue::Mark(_) => {}
+        }
+    }
+
+    store
+        .apply(&deltas)
+        .into_diagnostic()
+        .context("applying deltas to store")?;
+
+    if let Some(delta) = deltas.last() {
+        let tip = match &delta.new_position {
+            Some(point) => point.0,
+            None => delta.undone_position.as_ref().map(|point| point.0).unwrap(),
+        };
+        let to_finalize = max_ledger_history
+            .map(|x| tip - x)
+            .unwrap_or(dolos::ledger::lastest_immutable_slot(tip, genesis));
+        store
+            .finalize(to_finalize)
+            .into_diagnostic()
+            .context("finalizing chunk on store")?;
+    }
 
     Ok(())
 }

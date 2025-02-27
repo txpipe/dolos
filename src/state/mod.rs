@@ -7,10 +7,7 @@ use pparams::Genesis;
 use std::collections::{HashMap, HashSet};
 use thiserror::Error;
 
-use crate::{
-    ledger::*,
-    wal::{LogEntry, LogValue},
-};
+use crate::ledger::*;
 
 pub mod redb;
 
@@ -33,9 +30,6 @@ pub enum LedgerError {
 
     #[error("decoding error")]
     DecodingError(#[source] pallas::codec::minicbor::decode::Error),
-
-    #[error("decoding error")]
-    BlockDecodingError(#[source] pallas::ledger::traverse::Error),
 }
 
 impl From<::redb::TableError> for LedgerError {
@@ -222,67 +216,34 @@ pub fn load_slice_for_block(
     Ok(LedgerSlice { resolved_inputs })
 }
 
-pub fn apply_block(
-    block: &MultiEraBlock,
-    store: &LedgerStore,
-    genesis: &Genesis,
-    max_ledger_history: Option<u64>,
-) -> Result<(), LedgerError> {
-    let context = load_slice_for_block(block, store, &[])?;
-    let delta = compute_delta(block, context).map_err(LedgerError::BrokenInvariant)?;
-
-    store.apply(&[delta])?;
-
-    let to_finalize = max_ledger_history
-        .map(|x| block.slot() - x)
-        .unwrap_or(lastest_immutable_slot(block.slot(), genesis));
-
-    store.finalize(to_finalize)?;
-
-    Ok(())
-}
-
-pub fn apply_logentry_batch<'a>(
-    logentries: impl IntoIterator<Item = &'a LogEntry>,
+pub fn apply_block_batch<'a>(
+    blocks: impl IntoIterator<Item = &'a MultiEraBlock<'a>>,
     store: &LedgerStore,
     genesis: &Genesis,
     max_ledger_history: Option<u64>,
 ) -> Result<(), LedgerError> {
     let mut deltas: Vec<LedgerDelta> = vec![];
 
-    for (_, logvalue) in logentries {
-        match logvalue {
-            LogValue::Apply(raw) => {
-                let block =
-                    MultiEraBlock::decode(&raw.body).map_err(LedgerError::BlockDecodingError)?;
-                let context = load_slice_for_block(&block, store, &deltas)?;
-                let delta = compute_delta(&block, context).map_err(LedgerError::BrokenInvariant)?;
-                deltas.push(delta);
-            }
-            LogValue::Undo(raw) => {
-                let block =
-                    MultiEraBlock::decode(&raw.body).map_err(LedgerError::BlockDecodingError)?;
-                let context = load_slice_for_block(&block, store, &deltas)?;
-                let delta =
-                    compute_undo_delta(&block, context).map_err(LedgerError::BrokenInvariant)?;
-                deltas.push(delta);
-            }
-            LogValue::Mark(_) => {}
-        }
+    for block in blocks {
+        let context = load_slice_for_block(block, store, &deltas)?;
+        let delta = compute_delta(block, context).map_err(LedgerError::BrokenInvariant)?;
+
+        deltas.push(delta);
     }
 
     store.apply(&deltas)?;
 
-    if let Some(delta) = deltas.last() {
-        let tip = match &delta.new_position {
-            Some(point) => point.0,
-            None => delta.undone_position.as_ref().map(|point| point.0).unwrap(),
-        };
-        let to_finalize = max_ledger_history
-            .map(|x| tip - x)
-            .unwrap_or(lastest_immutable_slot(tip, genesis));
-        store.finalize(to_finalize)?;
-    }
+    let tip = deltas
+        .last()
+        .and_then(|x| x.new_position.as_ref())
+        .map(|x| x.0)
+        .unwrap();
+
+    let to_finalize = max_ledger_history
+        .map(|x| tip - x)
+        .unwrap_or(lastest_immutable_slot(tip, genesis));
+
+    store.finalize(to_finalize)?;
 
     Ok(())
 }
