@@ -81,13 +81,8 @@ impl Stage {
 
         let block = MultiEraBlock::decode(body).or_panic()?;
 
-        crate::state::apply_block_batch(
-            [&block],
-            &self.ledger,
-            &self.genesis,
-            self.max_ledger_history,
-        )
-        .or_panic()?;
+        crate::state::apply_block(&block, &self.ledger, &self.genesis, self.max_ledger_history)
+            .or_panic()?;
 
         self.mempool.apply_block(&block);
 

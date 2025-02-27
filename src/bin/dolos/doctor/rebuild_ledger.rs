@@ -1,6 +1,6 @@
 use dolos::{
     ledger,
-    wal::{self, RawBlock, ReadUtils, WalReader as _},
+    wal::{self, LogValue, WalReader as _},
 };
 use itertools::Itertools;
 use miette::{Context, IntoDiagnostic};
@@ -66,23 +66,13 @@ pub fn run(config: &crate::Config, _args: &Args, feedback: &Feedback) -> miette:
     let remaining = wal
         .crawl_from(wal_seq)
         .into_diagnostic()
-        .context("crawling wal")?
-        .filter_forward()
-        .into_blocks()
-        .flatten();
+        .context("crawling wal")?;
 
     for chunk in remaining.chunks(100).into_iter() {
-        let bodies = chunk.map(|RawBlock { body, .. }| body).collect_vec();
+        let logentries = chunk.collect_vec();
 
-        let blocks: Vec<_> = bodies
-            .iter()
-            .map(|b| MultiEraBlock::decode(b))
-            .try_collect()
-            .into_diagnostic()
-            .context("decoding blocks")?;
-
-        dolos::state::apply_block_batch(
-            &blocks,
+        dolos::state::apply_logentry_batch(
+            &logentries,
             &light,
             &genesis,
             config.storage.max_ledger_history,
@@ -90,7 +80,19 @@ pub fn run(config: &crate::Config, _args: &Args, feedback: &Feedback) -> miette:
         .into_diagnostic()
         .context("importing blocks to ledger store")?;
 
-        blocks.last().inspect(|b| progress.set_position(b.slot()));
+        logentries.last().inspect(|(_, logvalue)| {
+            match logvalue {
+                LogValue::Apply(raw) => {
+                    let b = MultiEraBlock::decode(&raw.body).unwrap(); // Safe
+                    progress.set_position(b.slot())
+                }
+                LogValue::Undo(raw) => {
+                    let b = MultiEraBlock::decode(&raw.body).unwrap(); // Safe
+                    progress.set_position(b.slot())
+                }
+                LogValue::Mark(_) => {}
+            }
+        });
     }
 
     let ledger_path = crate::common::define_ledger_path(config).context("finding ledger path")?;
