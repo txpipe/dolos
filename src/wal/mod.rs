@@ -173,4 +173,19 @@ mod tests {
             ChainPoint::Specific(50, slot_to_hash(50)),
         );
     }
+
+    #[test]
+    fn chainpoint_partial_ord() {
+        assert!(ChainPoint::Origin <= ChainPoint::Origin);
+        assert!(ChainPoint::Origin >= ChainPoint::Origin);
+        assert!(ChainPoint::Origin < ChainPoint::Specific(20, slot_to_hash(20)));
+        assert!(
+            ChainPoint::Specific(19, slot_to_hash(19)) < ChainPoint::Specific(20, slot_to_hash(20))
+        );
+        assert!(
+            ChainPoint::Specific(20, slot_to_hash(20))
+                .cmp(&ChainPoint::Specific(20, slot_to_hash(200)))
+                != std::cmp::Ordering::Equal
+        );
+    }
 }
