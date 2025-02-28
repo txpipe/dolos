@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 
 use crate::ledger::pparams::Genesis;
 
@@ -171,7 +171,7 @@ pub struct WalBlockReader<'a, T>
 where
     T: WalReader,
 {
-    undone: HashSet<ChainPoint>,
+    undone: BTreeSet<ChainPoint>,
     start: <T as WalReader>::LogIterator<'a>,
     window: <T as WalReader>::LogIterator<'a>,
 }
@@ -181,7 +181,7 @@ where
     T: WalReader,
 {
     pub fn try_new(wal: &T, start: Option<LogSeq>, genesis: &Genesis) -> Result<Self, WalError> {
-        let mut undone = HashSet::new();
+        let mut undone = BTreeSet::new();
         let mut iter = wal.crawl_from(start)?;
         let security_window = ((3.0 * genesis.byron.protocol_consts.k as f32)
             / (genesis.shelley.active_slots_coeff.unwrap())) as u64;
@@ -217,8 +217,8 @@ where
         for next in self.start.by_ref() {
             if let (_, LogValue::Apply(raw)) = next {
                 let point = (&raw).into();
-                if self.undone.contains(&point) {
-                    self.undone.remove(&point);
+                if self.undone.first() == Some(&point) {
+                    self.undone.pop_first();
                 } else {
                     return Some(raw);
                 }

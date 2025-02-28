@@ -21,10 +21,40 @@ pub type BlockBody = Vec<u8>;
 pub type BlockHeader = Vec<u8>;
 pub type LogSeq = u64;
 
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, Hash, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Eq)]
 pub enum ChainPoint {
     Origin,
     Specific(BlockSlot, BlockHash),
+}
+
+impl PartialEq for ChainPoint {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Specific(l0, l1), Self::Specific(r0, r1)) => l0 == r0 && l1 == r1,
+            (Self::Origin, Self::Origin) => true,
+            _ => false,
+        }
+    }
+}
+
+impl Ord for ChainPoint {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        match (self, other) {
+            (Self::Origin, Self::Origin) => std::cmp::Ordering::Equal,
+            (Self::Origin, Self::Specific(_, _)) => std::cmp::Ordering::Less,
+            (Self::Specific(_, _), Self::Origin) => std::cmp::Ordering::Greater,
+            (Self::Specific(x, x_hash), Self::Specific(y, y_hash)) => match x.cmp(y) {
+                std::cmp::Ordering::Equal => x_hash.cmp(y_hash),
+                x => x,
+            },
+        }
+    }
+}
+
+impl PartialOrd for ChainPoint {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 impl From<PallasPoint> for ChainPoint {
