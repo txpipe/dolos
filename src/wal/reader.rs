@@ -1,3 +1,7 @@
+use std::collections::HashSet;
+
+use crate::ledger::pparams::Genesis;
+
 use super::*;
 
 pub trait ReadUtils<'a> {
@@ -160,5 +164,66 @@ pub trait WalReader: Clone {
 
     fn read_sparse_blocks(&self, points: &[ChainPoint]) -> Result<Vec<RawBlock>, WalError> {
         points.iter().map(|p| self.read_block(p)).try_collect()
+    }
+}
+
+pub struct WalBlockReader<'a, T>
+where
+    T: WalReader,
+{
+    undone: HashSet<ChainPoint>,
+    start: <T as WalReader>::LogIterator<'a>,
+    window: <T as WalReader>::LogIterator<'a>,
+}
+
+impl<T> WalBlockReader<'_, T>
+where
+    T: WalReader,
+{
+    pub fn try_new(wal: &T, start: Option<LogSeq>, genesis: &Genesis) -> Result<Self, WalError> {
+        let mut undone = HashSet::new();
+        let mut iter = wal.crawl_from(start)?;
+        let security_window = ((3.0 * genesis.byron.protocol_consts.k as f32)
+            / (genesis.shelley.active_slots_coeff.unwrap())) as u64;
+
+        for (slot, value) in iter.by_ref() {
+            let slot_delta = start.map(|start| slot - start).unwrap_or(slot);
+            if slot_delta > security_window {
+                break;
+            }
+            if let LogValue::Undo(raw) = &value {
+                undone.insert(raw.into());
+            }
+        }
+
+        Ok(Self {
+            undone,
+            start: wal.crawl_from(start)?,
+            window: iter,
+        })
+    }
+}
+
+impl<T> Iterator for WalBlockReader<'_, T>
+where
+    T: WalReader,
+{
+    type Item = RawBlock;
+    fn next(&mut self) -> Option<<Self as Iterator>::Item> {
+        if let Some((_, LogValue::Undo(raw))) = &self.window.next() {
+            self.undone.insert(raw.into());
+        }
+
+        for next in self.start.by_ref() {
+            if let (_, LogValue::Apply(raw)) = next {
+                let point = (&raw).into();
+                if self.undone.contains(&point) {
+                    self.undone.remove(&point);
+                } else {
+                    return Some(raw);
+                }
+            }
+        }
+        None
     }
 }

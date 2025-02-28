@@ -21,20 +21,10 @@ pub type BlockBody = Vec<u8>;
 pub type BlockHeader = Vec<u8>;
 pub type LogSeq = u64;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, Hash, PartialEq)]
 pub enum ChainPoint {
     Origin,
     Specific(BlockSlot, BlockHash),
-}
-
-impl PartialEq for ChainPoint {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::Specific(l0, l1), Self::Specific(r0, r1)) => l0 == r0 && l1 == r1,
-            (Self::Origin, Self::Origin) => true,
-            _ => false,
-        }
-    }
 }
 
 impl From<PallasPoint> for ChainPoint {
@@ -115,7 +105,7 @@ pub enum WalError {
     IO(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
-pub use reader::{ReadUtils, WalReader};
+pub use reader::{ReadUtils, WalBlockReader, WalReader};
 pub use stream::WalStream;
 pub use writer::WalWriter;
 
