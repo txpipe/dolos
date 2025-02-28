@@ -1,7 +1,5 @@
 use std::collections::BTreeSet;
 
-use crate::ledger::pparams::Genesis;
-
 use super::*;
 
 pub trait ReadUtils<'a> {
@@ -180,15 +178,12 @@ impl<T> WalBlockReader<'_, T>
 where
     T: WalReader,
 {
-    pub fn try_new(wal: &T, start: Option<LogSeq>, genesis: &Genesis) -> Result<Self, WalError> {
+    pub fn try_new(wal: &T, start: Option<LogSeq>, lookahead: u64) -> Result<Self, WalError> {
         let mut undone = BTreeSet::new();
         let mut iter = wal.crawl_from(start)?;
-        let security_window = ((3.0 * genesis.byron.protocol_consts.k as f32)
-            / (genesis.shelley.active_slots_coeff.unwrap())) as u64;
-
         for (slot, value) in iter.by_ref() {
             let slot_delta = start.map(|start| slot - start).unwrap_or(slot);
-            if slot_delta > security_window {
+            if slot_delta > lookahead {
                 break;
             }
             if let LogValue::Undo(raw) = &value {
