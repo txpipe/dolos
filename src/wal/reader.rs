@@ -325,10 +325,6 @@ mod tests {
         .unwrap();
         db.roll_back(&undone_chain_point).unwrap();
 
-        for a in db.crawl_from(None).unwrap() {
-            println!("{} - LogValue: {:?}", a.0, a.1);
-        }
-
         let wal_block_reader = WalBlockReader::try_new(&db, None, 2).unwrap();
         let output_blocks = wal_block_reader.collect_vec();
 
