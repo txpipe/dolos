@@ -1,0 +1,51 @@
+---
+title: Binary Releases
+sidebar:
+  order: 1
+---
+
+_Dolos_ can be run as a standalone executable. The [Github release](https://github.com/txpipe/dolos/releases/latest/) page includes the binaries for different OS and architectures. It's a self-contained, single-file binary that can be downloaded directly.
+
+For simplicity, we also provide diferent installers for supported platform to automate the installation process. Regardless of the installer, the outcome should be the same, choose the one that fits your needs.
+
+## Install via shell script
+
+You can run the following command line script to install Dolos on supported systems (Mac / Linux)
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/txpipe/dolos/releases/latest/download/dolos-installer.sh | sh
+```
+
+## Install via powershell script
+
+You can use Powershell to install Dolos on Windows systems.
+
+```sh
+powershell -c "irm https://github.com/txpipe/dolos/releases/latest/download/dolos-installer.ps1 | iex"
+```
+
+## Install via Homebrew
+
+You can use Homebrew to install the latest version of Dolos in supported systems (Mac / Linux)
+
+```sh
+brew install txpipe/tap/dolos
+```
+
+## Install via NPM
+
+You can use NPM to install the latest version of Dolos in supported systems (Mac / Linux)
+
+```sh
+npm install @txpipe/dolos
+```
+
+## Download Binaries
+
+|  File  | Platform |
+|--------|----------|
+| [dolos-aarch64-apple-darwin.tar.xz](https://github.com/txpipe/dolos/releases/latest/download/dolos-aarch64-apple-darwin.tar.xz) | Apple Silicon macOS |
+| [dolos-x86_64-apple-darwin.tar.xz](https://github.com/txpipe/dolos/releases/latest/download/dolos-x86_64-apple-darwin.tar.xz) | Intel macOS |
+| [dolos-x86_64-pc-windows-msvc.zip](https://github.com/txpipe/dolos/releases/latest/download/dolos-x86_64-pc-windows-msvc.zip) | x64 Windows |
+| [dolos-x86_64-unknown-linux-gnu.tar.xz](https://github.com/txpipe/dolos/releases/latest/download/dolos-x86_64-unknown-linux-gnu.tar.xz) | x64 Linux |
+| [dolos-aarch64-unknown-linux-gnu.tar.xz](https://github.com/txpipe/dolos/releases/latest/download/dolos-aarch64-unknown-linux-gnu.tar.xz) | ARM64 Linux |

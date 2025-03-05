@@ -1,0 +1,67 @@
+---
+title: Sources
+sidebar:
+  order: 4
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Dolos final configuration is the result of the aggregation of different sources. You can think of these sources as layers that stack on top of each other by overriding specific configuration fields.
+
+From bottom to top, the available sources are:
+
+- System-wide config file located at `/etc/dolos/daemon.toml`
+- Config file name `dolos.toml` in the folder of execution.
+- Environmental variables that start with `DOLOS_`
+
+We'll cover the details of each of these layers in the following sections.
+
+## System-wide Configuration
+
+The lowest level configuration comes from a file located at `/etc/dolos/daemon.toml`. Any instance of Dolos running in the same system (host machine) will inherit the configuration located here. The content of the toml file follows the Dolos configuration [schema](./schema).
+
+<Aside type="note">
+This source is meant to store reasonable default values that make sense to share among different instances of Dolos running in the same host. If you're planning on running a single instance of Dolos, the recommendation is to skip this source altogether.
+</Aside>
+
+## Instance-specific configuration
+
+The most common source for Dolos configuration is a `dolos.toml` file located in the directory where the Dolos is being executed. Only one instance is allowed to run per directory (you'll get an IO error if you try to run multiple). The content of the toml file follows the Dolos configuration [schema](./schema).
+
+If your toml file is located at a different directory or with a different name, you can use specify it by passing the path in the `--config` flag, as shown in the following example:
+
+```sh
+dolos daemon --config /my/custom/location/dolos.toml
+```
+
+## Environmental variables
+
+The top-most source for configuration are env vars. Dolos will read any available variable that starts with `DOLOS_` and override any existing values found in lower-level configuration.
+
+The name of the environmental variable will define which field to override. The available fields are the ones defined in Dolos configuration [schema](./schema).
+
+A very specific convention needs to be followed to map those fields into variable names:
+
+- needs to start with `DOLOS_`
+- nested fields are concatenated using underscore (`_`)
+- hyphens (`-`) in field names are replaced for underscore (`_`)
+
+For example, lets say that our `dolos.toml` file has the following upstream section defined:
+
+```toml
+[upstream]
+peer_address = "preprod-node.world.dev.cardano.org:30000"
+network_magic = 1
+is_testnet = true
+```
+
+To override some of the fields inside the section, one would have to export the following values:
+
+```
+DOLOS_UPSTREAM_PEER_ADDRESS="some-other-hostname:30000"
+DOLOS_UPSTREAM_NETWORK_MAGIC=2
+```
+
+<Aside type="note">
+Overriding configuration through env vars is useful in those scenarios where you have a default configuration already available but you need small, specific details to change depending on where you're deploying Dolos (aka: environments).
+</Aside>
