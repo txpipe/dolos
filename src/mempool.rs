@@ -9,10 +9,8 @@ use pallas::{
     applying::{utils::AccountState, validate_tx, CertState, Environment, UTxOs},
     crypto::hash::Hash,
     ledger::{
-        primitives::TransactionInput,
-        traverse::{
-            wellknown::GenesisValues, MultiEraBlock, MultiEraInput, MultiEraOutput, MultiEraTx,
-        },
+        primitives::{NetworkId, TransactionInput},
+        traverse::{MultiEraBlock, MultiEraInput, MultiEraOutput, MultiEraTx},
     },
 };
 use std::{
@@ -146,15 +144,21 @@ impl Mempool {
 
         let era = eras.era_for_slot(tip.as_ref().unwrap().0);
 
-        let network_magic = self.genesis.shelley.network_magic.unwrap();
-
-        let genesis_values = GenesisValues::from_magic(network_magic.into()).unwrap();
+        let network_id = match self.genesis.shelley.network_id.as_ref() {
+            Some(network) => match network.as_str() {
+                "Mainnet" => Some(NetworkId::Mainnet.into()),
+                "Testnet" => Some(NetworkId::Testnet.into()),
+                _ => None,
+            },
+            None => None,
+        }
+        .unwrap();
 
         let env = Environment {
             prot_params: era.pparams.clone(),
             prot_magic: self.genesis.shelley.network_magic.unwrap(),
             block_slot: tip.unwrap().0,
-            network_id: genesis_values.network_id as u8,
+            network_id,
             acnt: Some(AccountState::default()),
         };
 
