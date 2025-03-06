@@ -6,10 +6,12 @@ use pallas::interop::utxorpc as interop;
 use pallas::interop::utxorpc::spec::sync::BlockRef;
 use pallas::interop::utxorpc::{spec as u5c, Mapper};
 use std::pin::Pin;
+use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
+use crate::ledger::pparams::Genesis;
 use crate::state::LedgerStore;
-use crate::wal::{self, ChainPoint, RawBlock, WalReader as _};
+use crate::wal::{self, ChainPoint, RawBlock, WalBlockReader, WalReader as _};
 
 fn u5c_to_chain_point(block_ref: u5c::sync::BlockRef) -> Result<wal::ChainPoint, Status> {
     Ok(wal::ChainPoint::Specific(
@@ -81,14 +83,16 @@ fn point_to_reset_tip_response(point: ChainPoint) -> u5c::sync::FollowTipRespons
 
 pub struct SyncServiceImpl {
     wal: wal::redb::WalStore,
+    genesis: Arc<Genesis>,
     mapper: interop::Mapper<LedgerStore>,
 }
 
 impl SyncServiceImpl {
-    pub fn new(wal: wal::redb::WalStore, ledger: LedgerStore) -> Self {
+    pub fn new(wal: wal::redb::WalStore, genesis: Arc<Genesis>, ledger: LedgerStore) -> Self {
         Self {
             wal,
-            mapper: Mapper::new(ledger),
+            genesis,
+            mapper: Mapper::new(ledger.clone()),
         }
     }
 }
@@ -133,13 +137,23 @@ impl u5c::sync::sync_service_server::SyncService for SyncServiceImpl {
 
         let len = msg.max_items as usize + 1;
 
-        let page = self
-            .wal
-            .read_block_page(from.as_ref(), len)
-            .map_err(|_err| Status::internal("can't query block"))?;
+        let from = match &from {
+            Some(point) => self
+                .wal
+                .locate_point(point)
+                .map_err(|err| Status::internal(err.to_string()))?,
+            None => None,
+        };
+
+        // Amount of slots until unmutability is guaranteed.
+        let lookahead = ((3.0 * self.genesis.byron.protocol_consts.k as f32)
+            / (self.genesis.shelley.active_slots_coeff.unwrap())) as u64;
+
+        let reader = WalBlockReader::try_new(&self.wal, from, lookahead)
+            .map_err(|_| Status::internal("can't open wal"))?;
 
         let (items, next_token): (_, Vec<_>) =
-            page.into_iter().enumerate().partition_map(|(idx, x)| {
+            reader.take(len + 1).enumerate().partition_map(|(idx, x)| {
                 if idx < len - 1 {
                     Either::Left(raw_to_anychain(&self.mapper, &x))
                 } else {
