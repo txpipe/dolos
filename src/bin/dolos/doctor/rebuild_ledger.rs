@@ -64,9 +64,7 @@ pub fn run(config: &crate::Config, _args: &Args, feedback: &Feedback) -> miette:
         .context("locating wal sequence")?;
 
     // Amount of slots until unmutability is guaranteed.
-    let lookahead = ((3.0 * genesis.byron.protocol_consts.k as f32)
-        / (genesis.shelley.active_slots_coeff.unwrap())) as u64;
-
+    let lookahead = WalBlockReader::<wal::redb::WalStore>::lookahead_from_genesis(&genesis);
     let remaining = WalBlockReader::try_new(&wal, wal_seq, lookahead)
         .into_diagnostic()
         .context("creating wal block reader")?;

@@ -146,9 +146,8 @@ impl u5c::sync::sync_service_server::SyncService for SyncServiceImpl {
         };
 
         // Amount of slots until unmutability is guaranteed.
-        let lookahead = ((3.0 * self.genesis.byron.protocol_consts.k as f32)
-            / (self.genesis.shelley.active_slots_coeff.unwrap())) as u64;
-
+        let lookahead =
+            WalBlockReader::<wal::redb::WalStore>::lookahead_from_genesis(&self.genesis);
         let reader = WalBlockReader::try_new(&self.wal, from, lookahead)
             .map_err(|_| Status::internal("can't open wal"))?;
 
