@@ -1,4 +1,4 @@
-use dolos::wal::{self, RawBlock, ReadUtils, WalReader as _};
+use dolos::wal::{self, WalBlockReader, WalReader as _};
 use itertools::Itertools;
 use miette::{Context, IntoDiagnostic};
 use pallas::ledger::traverse::MultiEraBlock;
@@ -59,20 +59,19 @@ pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::
         wal::ChainPoint::Specific(slot, _) => progress.set_length(slot),
     }
 
-    let remaining = wal
-        .crawl_from(None)
+    // Amount of slots until unmutability is guaranteed.
+    let lookahead = ((3.0 * genesis.byron.protocol_consts.k as f32)
+        / (genesis.shelley.active_slots_coeff.unwrap())) as u64;
+
+    let remaining = WalBlockReader::try_new(&wal, None, lookahead)
         .into_diagnostic()
-        .context("crawling wal")?
-        .filter_forward()
-        .into_blocks()
-        .flatten();
+        .context("creating wal block reader")?;
 
     for chunk in remaining.chunks(args.chunk).into_iter() {
-        let bodies = chunk.map(|RawBlock { body, .. }| body).collect_vec();
-
-        let blocks: Vec<_> = bodies
+        let collected = chunk.collect_vec();
+        let blocks: Vec<_> = collected
             .iter()
-            .map(|b| MultiEraBlock::decode(b))
+            .map(|b| MultiEraBlock::decode(&b.body))
             .try_collect()
             .into_diagnostic()
             .context("decoding blocks")?;
