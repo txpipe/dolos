@@ -1,5 +1,7 @@
 use std::collections::BTreeSet;
 
+use crate::ledger::pparams::Genesis;
+
 use super::*;
 
 pub trait ReadUtils<'a> {
@@ -212,6 +214,12 @@ where
             start: wal.crawl_from(start)?,
             window: iter,
         })
+    }
+
+    /// Extract lookahead window from Genesis.
+    pub fn lookahead_from_genesis(genesis: &Genesis) -> u64 {
+        ((3.0 * genesis.byron.protocol_consts.k as f32)
+            / (genesis.shelley.active_slots_coeff.unwrap())) as u64
     }
 }
 
