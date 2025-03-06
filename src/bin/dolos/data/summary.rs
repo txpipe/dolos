@@ -1,7 +1,7 @@
 use itertools::Itertools;
 use miette::IntoDiagnostic;
 use pallas::ledger::traverse::{MultiEraBlock, MultiEraUpdate};
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 
 use dolos::{
     ledger::{ChainPoint, EraCbor},
@@ -40,7 +40,8 @@ pub struct Args {}
 pub fn run(config: &crate::Config, _args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging)?;
 
-    let (wal, ledger, _) = crate::common::open_data_stores(config)?;
+    let genesis = Arc::new(crate::common::open_genesis_files(&config.genesis)?);
+    let (wal, ledger, _) = crate::common::open_data_stores(config, &genesis)?;
 
     if let Some((seq, point)) = wal.crawl_from(None).unwrap().next() {
         println!("found WAL start");

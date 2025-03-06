@@ -66,7 +66,7 @@ impl From<::redb::Error> for ChainError {
     }
 }
 
-const V1_HASH: &str = "c696c7322ac779ad189c05aa38a88034a16bf450";
+const V1_HASH: &str = "968314d2f28472ed76cadb19e8bb49a32b507419";
 
 #[derive(Clone)]
 pub enum ChainStore {
@@ -74,7 +74,11 @@ pub enum ChainStore {
 }
 
 impl ChainStore {
-    pub fn open(path: impl AsRef<Path>, cache_size: Option<usize>) -> Result<Self, ChainError> {
+    pub fn open(
+        path: impl AsRef<Path>,
+        cache_size: Option<usize>,
+        max_slots: Option<u64>,
+    ) -> Result<Self, ChainError> {
         let db = open_db(path, cache_size)?;
         let hash = compute_schema_hash(&db)?;
 
@@ -82,11 +86,11 @@ impl ChainStore {
             // use stable schema if no hash
             None => {
                 info!("no state db schema, initializing as v1");
-                v1::ChainStore::initialize(db)?.into()
+                v1::ChainStore::initialize(db, max_slots)?.into()
             }
             Some(V1_HASH) => {
                 info!("detected state db schema v1");
-                v1::ChainStore::from(db).into()
+                v1::ChainStore::from((db, max_slots)).into()
             }
             Some(x) => panic!("can't recognize db hash {}", x),
         };
@@ -99,7 +103,7 @@ impl ChainStore {
             .create_with_backend(::redb::backends::InMemoryBackend::new())
             .unwrap();
 
-        let store = v1::ChainStore::initialize(db)?;
+        let store = v1::ChainStore::initialize(db, None)?;
         Ok(store.into())
     }
 
@@ -136,6 +140,22 @@ impl ChainStore {
     pub fn apply(&self, deltas: &[LedgerDelta]) -> Result<(), ChainError> {
         match self {
             ChainStore::SchemaV1(x) => Ok(x.apply(deltas)?),
+        }
+    }
+
+    pub fn prune_history(
+        &mut self,
+        max_slots: u64,
+        max_prune: Option<u64>,
+    ) -> Result<(), ChainError> {
+        match self {
+            ChainStore::SchemaV1(x) => x.prune_history(max_slots, max_prune),
+        }
+    }
+
+    pub fn housekeeping(&mut self) -> Result<(), ChainError> {
+        match self {
+            ChainStore::SchemaV1(x) => x.housekeeping(),
         }
     }
 

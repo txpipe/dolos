@@ -38,6 +38,12 @@ impl ChainStore {
         }
     }
 
+    pub fn housekeeping(&mut self) -> Result<(), ChainError> {
+        match self {
+            ChainStore::Redb(x) => x.housekeeping(),
+        }
+    }
+
     pub fn finalize(&self, until: BlockSlot) -> Result<(), ChainError> {
         match self {
             ChainStore::Redb(x) => x.finalize(until),

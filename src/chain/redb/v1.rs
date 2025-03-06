@@ -1,6 +1,7 @@
 use ::redb::{Database, Durability};
 use pallas::ledger::traverse::MultiEraBlock;
 use std::sync::Arc;
+use tracing::{debug, info};
 
 type Error = crate::chain::ChainError;
 
@@ -8,10 +9,13 @@ use super::{indexes, tables, LedgerDelta};
 use crate::model::{BlockBody, BlockSlot};
 
 #[derive(Clone)]
-pub struct ChainStore(pub Arc<Database>);
+pub struct ChainStore {
+    db: Arc<Database>,
+    max_slots: Option<u64>,
+}
 
 impl ChainStore {
-    pub fn initialize(db: Database) -> Result<Self, Error> {
+    pub fn initialize(db: Database, max_slots: Option<u64>) -> Result<Self, Error> {
         let mut wx = db.begin_write()?;
         wx.set_durability(Durability::Immediate);
 
@@ -20,15 +24,18 @@ impl ChainStore {
 
         wx.commit()?;
 
-        Ok(db.into())
+        Ok(Self {
+            db: Arc::new(db),
+            max_slots,
+        })
     }
 
     pub(crate) fn db(&self) -> &Database {
-        &self.0
+        &self.db
     }
 
     pub(crate) fn db_mut(&mut self) -> Option<&mut Database> {
-        Arc::get_mut(&mut self.0)
+        Arc::get_mut(&mut self.db)
     }
 
     pub fn apply(&self, deltas: &[LedgerDelta]) -> Result<(), Error> {
@@ -297,10 +304,70 @@ impl ChainStore {
         let rx = self.db().begin_read()?;
         tables::BlocksTable::get_tip(&rx)
     }
+
+    pub fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<(), Error> {
+        let rx = self.db().begin_read()?;
+        let start = match tables::BlocksTable::first(&rx)? {
+            Some((slot, _)) => slot,
+            None => {
+                debug!("no start point found on chain, skipping housekeeping");
+                return Ok(());
+            }
+        };
+
+        let last = match tables::BlocksTable::last(&rx)? {
+            Some((slot, _)) => slot,
+            None => {
+                debug!("no tip found on chain, skipping housekeeping");
+                return Ok(());
+            }
+        };
+
+        let delta = last.saturating_sub(start);
+        let excess = delta.saturating_sub(max_slots);
+
+        debug!(delta, excess, last, start, "chain history delta computed");
+
+        if excess == 0 {
+            debug!(delta, max_slots, excess, "no pruning necessary on chain");
+            return Ok(());
+        }
+
+        let max_prune = match max_prune {
+            Some(max) => core::cmp::min(excess, max),
+            None => excess,
+        };
+
+        let prune_before = start + max_prune;
+
+        info!(
+            cutoff_slot = prune_before,
+            start, excess, "pruning chain for excess history"
+        );
+
+        let wx = self.db().begin_write()?;
+        tables::BlocksTable::remove_before(&wx, prune_before)?;
+        wx.commit()?;
+
+        Ok(())
+    }
+
+    const MAX_PRUNE_SLOTS_PER_HOUSEKEEPING: u64 = 10_000;
+    pub fn housekeeping(&mut self) -> Result<(), Error> {
+        if let Some(max_slots) = self.max_slots {
+            info!(max_slots, "pruning chain for excess history");
+            self.prune_history(max_slots, Some(Self::MAX_PRUNE_SLOTS_PER_HOUSEKEEPING))?;
+        }
+
+        Ok(())
+    }
 }
 
-impl From<Database> for ChainStore {
-    fn from(value: Database) -> Self {
-        Self(Arc::new(value))
+impl From<(Database, Option<u64>)> for ChainStore {
+    fn from(value: (Database, Option<u64>)) -> Self {
+        Self {
+            db: Arc::new(value.0),
+            max_slots: value.1,
+        }
     }
 }

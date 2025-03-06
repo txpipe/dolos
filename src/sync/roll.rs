@@ -2,6 +2,7 @@ use gasket::framework::*;
 use tracing::info;
 
 use crate::{
+    chain::ChainStore,
     prelude::*,
     wal::{self, redb::WalStore, WalWriter},
 };
@@ -21,6 +22,7 @@ pub enum WorkUnit {
 #[stage(name = "roll", unit = "WorkUnit", worker = "Worker")]
 pub struct Stage {
     store: WalStore,
+    chain: ChainStore,
 
     pub upstream: UpstreamPort,
     pub downstream: DownstreamPort,
@@ -33,9 +35,10 @@ pub struct Stage {
 }
 
 impl Stage {
-    pub fn new(store: WalStore) -> Self {
+    pub fn new(store: WalStore, chain: ChainStore) -> Self {
         Self {
             store,
+            chain,
             upstream: Default::default(),
             downstream: Default::default(),
             block_count: Default::default(),
@@ -110,7 +113,10 @@ impl gasket::framework::Worker<Stage> for Worker {
     async fn execute(&mut self, unit: &WorkUnit, stage: &mut Stage) -> Result<(), WorkerError> {
         match unit {
             WorkUnit::PullEvent(pull) => stage.process_pull_event(pull).await?,
-            WorkUnit::Housekeeping => stage.store.housekeeping().or_panic()?,
+            WorkUnit::Housekeeping => {
+                stage.store.housekeeping().or_panic()?;
+                stage.chain.housekeeping().or_panic()?;
+            }
         }
 
         Ok(())

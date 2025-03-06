@@ -66,7 +66,7 @@ pub fn pipeline(
         quit_on_tip,
     );
 
-    let mut roll = roll::Stage::new(wal.clone());
+    let mut roll = roll::Stage::new(wal.clone(), chain.clone());
 
     let mut apply = apply::Stage::new(
         wal.clone(),

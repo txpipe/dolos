@@ -7,7 +7,7 @@ use crate::feedback::Feedback;
 pub struct Args {}
 
 fn open_empty_wal(config: &crate::Config) -> miette::Result<WalStore> {
-    let wal = crate::common::open_wal(config)?;
+    let wal = crate::common::open_wal(config, None)?;
 
     let is_empty = wal.is_empty().into_diagnostic()?;
 

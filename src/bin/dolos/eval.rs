@@ -5,7 +5,7 @@ use pallas::{
     applying::{validate_tx, CertState, Environment as ValidationContext, UTxOs},
     ledger::traverse::{Era, MultiEraInput, MultiEraOutput, MultiEraUpdate},
 };
-use std::{borrow::Cow, path::PathBuf};
+use std::{borrow::Cow, path::PathBuf, sync::Arc};
 
 #[derive(Debug, clap::Args)]
 pub struct Args {
@@ -28,7 +28,8 @@ pub struct Args {
 pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging)?;
 
-    let (_, ledger, _) = crate::common::open_data_stores(config)?;
+    let genesis = Arc::new(crate::common::open_genesis_files(&config.genesis)?);
+    let (_, ledger, _) = crate::common::open_data_stores(config, &genesis)?;
 
     let cbor = std::fs::read_to_string(&args.file)
         .into_diagnostic()
@@ -54,8 +55,6 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
         .get_utxos(refs)
         .into_diagnostic()
         .context("resolving utxo")?;
-
-    let genesis = crate::common::open_genesis_files(&config.genesis)?;
 
     let mut utxos2 = UTxOs::new();
 

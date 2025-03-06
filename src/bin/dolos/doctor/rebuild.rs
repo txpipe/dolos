@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use dolos::wal::{self, WalBlockReader, WalReader as _};
 use itertools::Itertools;
 use miette::{Context, IntoDiagnostic};
@@ -18,9 +20,8 @@ pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::
     let progress = feedback.slot_progress_bar();
     progress.set_message("rebuilding ledger");
 
-    let genesis = crate::common::open_genesis_files(&config.genesis)?;
-
-    let wal = crate::common::open_wal(config).context("opening WAL store")?;
+    let genesis = Arc::new(crate::common::open_genesis_files(&config.genesis)?);
+    let wal = crate::common::open_wal(config, None).context("opening WAL store")?;
 
     let light = dolos::state::redb::LedgerStore::in_memory_v2_light()
         .into_diagnostic()
@@ -44,7 +45,7 @@ pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::
     }
 
     let chain_path = crate::common::define_chain_path(config).context("finding chain path")?;
-    let chain = dolos::chain::redb::ChainStore::open(chain_path, None)
+    let chain = dolos::chain::redb::ChainStore::open(chain_path, None, None)
         .into_diagnostic()
         .context("opening chain store.")?;
 

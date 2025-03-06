@@ -4,6 +4,7 @@ use flate2::Compression;
 use miette::IntoDiagnostic as _;
 use std::fs::File;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tar::Builder;
 
 #[derive(Debug, Parser)]
@@ -77,7 +78,8 @@ pub fn run(
     let encoder = GzEncoder::new(export_file, Compression::default());
     let mut archive = Builder::new(encoder);
 
-    let (wal, ledger, chain) = crate::common::open_data_stores(config)?;
+    let genesis = Arc::new(crate::common::open_genesis_files(&config.genesis)?);
+    let (wal, ledger, chain) = crate::common::open_data_stores(config, &genesis)?;
 
     prepare_wal(wal, &pb)?;
 
