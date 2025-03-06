@@ -133,15 +133,11 @@ impl u5c::sync::sync_service_server::SyncService for SyncServiceImpl {
     ) -> Result<Response<u5c::sync::DumpHistoryResponse>, Status> {
         let msg = request.into_inner();
 
-        let from = msg.start_token.map(u5c_to_chain_point).transpose()?;
-
         let len = msg.max_items as usize + 1;
-
-        let from = match &from {
-            Some(point) => self
-                .wal
-                .locate_point(point)
-                .map_err(|err| Status::internal(err.to_string()))?,
+        let from = match &msg.start_token.map(u5c_to_chain_point).transpose()? {
+            Some(point) => self.wal.locate_point(point).map_err(|err| {
+                Status::invalid_argument(format!("failed to locate chain point: {}", err))
+            })?,
             None => None,
         };
 
@@ -152,7 +148,7 @@ impl u5c::sync::sync_service_server::SyncService for SyncServiceImpl {
             .map_err(|_| Status::internal("can't open wal"))?;
 
         let (items, next_token): (_, Vec<_>) =
-            reader.take(len + 1).enumerate().partition_map(|(idx, x)| {
+            reader.take(len).enumerate().partition_map(|(idx, x)| {
                 if idx < len - 1 {
                     Either::Left(raw_to_anychain(&self.mapper, &x))
                 } else {
