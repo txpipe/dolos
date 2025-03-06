@@ -4,6 +4,7 @@ mod copy_wal;
 mod dump_wal;
 mod export;
 mod find_seq;
+mod prune_chain;
 mod prune_wal;
 mod summary;
 
@@ -21,6 +22,8 @@ pub enum Command {
     CopyWal(copy_wal::Args),
     /// removes blocks from the WAL before a given slot
     PruneWal(prune_wal::Args),
+    /// removes blocks from the chain before a given slot
+    PruneChain(prune_chain::Args),
 }
 
 #[derive(Debug, Parser)]
@@ -41,6 +44,7 @@ pub fn run(
         Command::Export(x) => export::run(config, x, feedback)?,
         Command::CopyWal(x) => copy_wal::run(config, x)?,
         Command::PruneWal(x) => prune_wal::run(config, x)?,
+        Command::PruneChain(x) => prune_chain::run(config, x)?,
     }
 
     Ok(())

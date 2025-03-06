@@ -325,12 +325,7 @@ mod tests {
                 1,
                 pallas::crypto::hash::Hash::new(b"01010101010101010101010101010101".to_owned()),
             )),
-            undone_position: Default::default(),
-            produced_utxo: Default::default(),
-            consumed_utxo: Default::default(),
-            recovered_stxi: Default::default(),
-            undone_utxo: Default::default(),
-            new_pparams: Default::default(),
+            ..Default::default()
         };
 
         store.apply(&[delta]).unwrap();

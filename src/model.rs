@@ -53,11 +53,17 @@ pub struct StorageConfig {
     /// Size (in Mb) of memory allocated for ledger caching
     pub ledger_cache: Option<usize>,
 
-    /// Maximum number of slots (not blocks) to keep in the WAL
-    pub max_wal_history: Option<u64>,
+    /// Size (in Mb) of memory allocated for chain caching
+    pub chain_cache: Option<usize>,
+
+    /// Whether to remove inmutable part from WAL. Defaults to true
+    pub prune_wal: Option<bool>,
 
     /// Maximum number of slots to keep in the ledger before pruning
     pub max_ledger_history: Option<u64>,
+
+    /// Maximum number of slots (not blocks) to keep in Chain
+    pub max_chain_history: Option<u64>,
 }
 
 impl Default for StorageConfig {
@@ -66,8 +72,10 @@ impl Default for StorageConfig {
             path: std::path::PathBuf::from("data"),
             wal_cache: None,
             ledger_cache: None,
-            max_wal_history: None,
+            chain_cache: None,
+            prune_wal: None,
             max_ledger_history: None,
+            max_chain_history: None,
         }
     }
 }

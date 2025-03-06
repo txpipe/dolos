@@ -184,6 +184,12 @@ pub fn load_slice_for_block(
         .map(|utxo| TxoRef(*utxo.hash(), utxo.index() as u32))
         .collect();
 
+    let refferenced: HashSet<_> = txs
+        .values()
+        .flat_map(MultiEraTx::reference_inputs)
+        .map(|utxo| TxoRef(*utxo.hash(), utxo.index() as u32))
+        .collect();
+
     let consumed_same_block: HashMap<_, _> = txs
         .iter()
         .flat_map(|(tx_hash, tx)| {
@@ -191,18 +197,19 @@ pub fn load_slice_for_block(
                 .into_iter()
                 .map(|(idx, utxo)| (TxoRef(*tx_hash, idx as u32), utxo.into()))
         })
-        .filter(|(x, _)| consumed.contains(x))
+        .filter(|(x, _)| consumed.contains(x) || refferenced.contains(x))
         .collect();
 
     let consumed_unapplied_deltas: HashMap<_, _> = unapplied_deltas
         .iter()
         .flat_map(|d| d.produced_utxo.iter().chain(d.recovered_stxi.iter()))
-        .filter(|(x, _)| consumed.contains(x))
+        .filter(|(x, _)| consumed.contains(x) || refferenced.contains(x))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
     let to_fetch = consumed
         .into_iter()
+        .chain(refferenced)
         .filter(|x| !consumed_same_block.contains_key(x))
         .filter(|x| !consumed_unapplied_deltas.contains_key(x))
         .collect_vec();
@@ -216,12 +223,10 @@ pub fn load_slice_for_block(
     Ok(LedgerSlice { resolved_inputs })
 }
 
-pub fn apply_block_batch<'a>(
+pub fn calculate_block_batch_deltas<'a>(
     blocks: impl IntoIterator<Item = &'a MultiEraBlock<'a>>,
     store: &LedgerStore,
-    genesis: &Genesis,
-    max_ledger_history: Option<u64>,
-) -> Result<(), LedgerError> {
+) -> Result<Vec<LedgerDelta>, LedgerError> {
     let mut deltas: Vec<LedgerDelta> = vec![];
 
     for block in blocks {
@@ -230,7 +235,15 @@ pub fn apply_block_batch<'a>(
 
         deltas.push(delta);
     }
+    Ok(deltas)
+}
 
+pub fn apply_delta_batch(
+    deltas: Vec<LedgerDelta>,
+    store: &LedgerStore,
+    genesis: &Genesis,
+    max_ledger_history: Option<u64>,
+) -> Result<(), LedgerError> {
     store.apply(&deltas)?;
 
     let tip = deltas
@@ -246,4 +259,14 @@ pub fn apply_block_batch<'a>(
     store.finalize(to_finalize)?;
 
     Ok(())
+}
+
+pub fn apply_block_batch<'a>(
+    blocks: impl IntoIterator<Item = &'a MultiEraBlock<'a>>,
+    store: &LedgerStore,
+    genesis: &Genesis,
+    max_ledger_history: Option<u64>,
+) -> Result<(), LedgerError> {
+    let deltas = calculate_block_batch_deltas(blocks, store)?;
+    apply_delta_batch(deltas, store, genesis, max_ledger_history)
 }

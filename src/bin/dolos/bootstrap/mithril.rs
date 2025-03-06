@@ -148,7 +148,7 @@ async fn fetch_snapshot(
 }
 
 fn open_empty_wal(config: &crate::Config) -> miette::Result<wal::redb::WalStore> {
-    let wal = crate::common::open_wal(config)?;
+    let wal = crate::common::open_wal(config, None)?;
 
     let is_empty = wal.is_empty().into_diagnostic()?;
 
@@ -252,7 +252,7 @@ pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::
 
     import_hardano_into_wal(config, &immutable_path, feedback)?;
 
-    crate::doctor::run_rebuild_ledger(config, feedback).context("rebuilding ledger")?;
+    crate::doctor::run_rebuild(config, feedback).context("rebuilding ledger and chain")?;
 
     if !args.retain_snapshot {
         info!("deleting downloaded snapshot");

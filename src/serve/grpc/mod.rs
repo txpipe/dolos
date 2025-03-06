@@ -7,6 +7,7 @@ use tonic::transport::{Certificate, Server, ServerTlsConfig};
 use tower_http::cors::CorsLayer;
 use tracing::info;
 
+use crate::chain::ChainStore;
 use crate::ledger::pparams::Genesis;
 use crate::mempool::Mempool;
 use crate::prelude::*;
@@ -31,12 +32,13 @@ pub async fn serve(
     genesis: Arc<Genesis>,
     wal: WalStore,
     ledger: LedgerStore,
+    chain: ChainStore,
     mempool: Mempool,
     exit: CancellationToken,
 ) -> Result<(), Error> {
     let addr = config.listen_address.parse().unwrap();
 
-    let sync_service = sync::SyncServiceImpl::new(wal.clone(), ledger.clone());
+    let sync_service = sync::SyncServiceImpl::new(wal.clone(), ledger.clone(), chain);
     let sync_service = u5c::sync::sync_service_server::SyncServiceServer::new(sync_service);
 
     let query_service = query::QueryServiceImpl::new(ledger.clone(), genesis.clone());

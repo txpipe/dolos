@@ -4,6 +4,7 @@ use flate2::Compression;
 use miette::IntoDiagnostic as _;
 use std::fs::File;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tar::Builder;
 
 #[derive(Debug, Parser)]
@@ -47,6 +48,25 @@ fn prepare_ledger(
     Ok(())
 }
 
+fn prepare_chain(
+    chain: dolos::chain::ChainStore,
+    pb: &crate::feedback::ProgressBar,
+) -> miette::Result<()> {
+    let mut chain = match chain {
+        dolos::chain::ChainStore::Redb(x) => x,
+        _ => miette::bail!("Only redb is supported for export"),
+    };
+
+    let db = chain.db_mut().unwrap();
+    pb.set_message("compacting ledger");
+    db.compact().into_diagnostic()?;
+
+    pb.set_message("checking ledger integrity");
+    db.check_integrity().into_diagnostic()?;
+
+    Ok(())
+}
+
 pub fn run(
     config: &crate::Config,
     args: &Args,
@@ -58,7 +78,8 @@ pub fn run(
     let encoder = GzEncoder::new(export_file, Compression::default());
     let mut archive = Builder::new(encoder);
 
-    let (wal, ledger) = crate::common::open_data_stores(config)?;
+    let genesis = Arc::new(crate::common::open_genesis_files(&config.genesis)?);
+    let (wal, ledger, chain) = crate::common::open_data_stores(config, &genesis)?;
 
     prepare_wal(wal, &pb)?;
 
@@ -74,6 +95,14 @@ pub fn run(
 
     archive
         .append_path_with_name(&path, "ledger")
+        .into_diagnostic()?;
+
+    prepare_chain(chain, &pb)?;
+
+    let path = config.storage.path.join("chain");
+
+    archive
+        .append_path_with_name(&path, "chain")
         .into_diagnostic()?;
 
     pb.set_message("creating archive");

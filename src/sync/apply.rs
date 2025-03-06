@@ -15,6 +15,7 @@ pub type UpstreamPort = gasket::messaging::InputPort<RollEvent>;
 pub struct Stage {
     wal: crate::wal::redb::WalStore,
     ledger: crate::state::LedgerStore,
+    chain: crate::chain::ChainStore,
     genesis: Arc<Genesis>,
     mempool: crate::mempool::Mempool, // Add this line
 
@@ -33,6 +34,7 @@ impl Stage {
     pub fn new(
         wal: crate::wal::redb::WalStore,
         ledger: crate::state::LedgerStore,
+        chain: crate::chain::ChainStore,
         mempool: crate::mempool::Mempool,
         genesis: Arc<Genesis>,
         max_ledger_history: Option<u64>,
@@ -40,6 +42,7 @@ impl Stage {
         Self {
             wal,
             ledger,
+            chain,
             mempool,
             genesis,
             max_ledger_history,
@@ -52,8 +55,9 @@ impl Stage {
     fn process_origin(&self) -> Result<(), WorkerError> {
         info!("applying origin");
 
-        let delta = crate::ledger::compute_origin_delta(&self.genesis);
-        self.ledger.apply(&[delta]).or_panic()?;
+        let deltas = vec![crate::ledger::compute_origin_delta(&self.genesis)];
+        self.ledger.apply(&deltas).or_panic()?;
+        self.chain.apply(&deltas).or_panic()?;
 
         Ok(())
     }
@@ -66,8 +70,9 @@ impl Stage {
         let block = MultiEraBlock::decode(body).or_panic()?;
         let context = crate::state::load_slice_for_block(&block, &self.ledger, &[]).or_panic()?;
 
-        let delta = crate::ledger::compute_undo_delta(&block, context).or_panic()?;
-        self.ledger.apply(&[delta]).or_panic()?;
+        let deltas = vec![crate::ledger::compute_undo_delta(&block, context).or_panic()?];
+        self.ledger.apply(&deltas).or_panic()?;
+        self.chain.apply(&deltas).or_panic()?;
 
         self.mempool.undo_block(&block);
 
@@ -81,8 +86,12 @@ impl Stage {
 
         let block = MultiEraBlock::decode(body).or_panic()?;
 
-        crate::state::apply_block_batch(
-            [&block],
+        let deltas =
+            crate::state::calculate_block_batch_deltas([&block], &self.ledger).or_panic()?;
+
+        self.chain.apply(&deltas).or_panic()?;
+        crate::state::apply_delta_batch(
+            deltas,
             &self.ledger,
             &self.genesis,
             self.max_ledger_history,

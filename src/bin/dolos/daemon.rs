@@ -10,8 +10,8 @@ pub struct Args {}
 pub async fn run(config: super::Config, _args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging)?;
 
-    let (wal, ledger) = crate::common::open_data_stores(&config)?;
     let genesis = Arc::new(crate::common::open_genesis_files(&config.genesis)?);
+    let (wal, ledger, chain) = crate::common::open_data_stores(&config, &genesis)?;
     let mempool = dolos::mempool::Mempool::new(genesis.clone(), ledger.clone());
     let exit = crate::common::hook_exit_token();
 
@@ -21,6 +21,7 @@ pub async fn run(config: super::Config, _args: &Args) -> miette::Result<()> {
         &config.storage,
         wal.clone(),
         ledger.clone(),
+        chain.clone(),
         genesis.clone(),
         mempool.clone(),
         &config.retries,
@@ -40,6 +41,7 @@ pub async fn run(config: super::Config, _args: &Args) -> miette::Result<()> {
         genesis.clone(),
         wal.clone(),
         ledger.clone(),
+        chain.clone(),
         mempool.clone(),
         exit.clone(),
     ));

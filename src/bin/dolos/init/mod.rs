@@ -238,7 +238,7 @@ impl ConfigEditor {
     }
 
     fn apply_history_pruning(mut self, value: HistoryPrunningOptions) -> Self {
-        self.0.storage.max_wal_history = value.into();
+        self.0.storage.max_chain_history = value.into();
 
         self
     }
