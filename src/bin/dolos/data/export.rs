@@ -58,10 +58,10 @@ fn prepare_chain(
     };
 
     let db = chain.db_mut().unwrap();
-    pb.set_message("compacting ledger");
+    pb.set_message("compacting chain");
     db.compact().into_diagnostic()?;
 
-    pb.set_message("checking ledger integrity");
+    pb.set_message("checking chain integrity");
     db.check_integrity().into_diagnostic()?;
 
     Ok(())

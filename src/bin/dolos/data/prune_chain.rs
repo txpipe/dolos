@@ -38,7 +38,7 @@ pub fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
     chain
         .prune_history(max_slots, args.max_prune)
         .into_diagnostic()
-        .context("removing range from WAL")?;
+        .context("removing range from chain")?;
 
     let db = chain.db_mut().unwrap();
 
