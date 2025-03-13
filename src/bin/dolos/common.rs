@@ -20,7 +20,7 @@ pub fn open_wal(config: &crate::Config) -> Result<wal::redb::WalStore, Error> {
     let wal = wal::redb::WalStore::open(
         root.join("wal"),
         config.storage.wal_cache,
-        config.storage.max_chain_history,
+        config.storage.max_wal_history,
     )
     .map_err(Error::storage)?;
 
@@ -50,7 +50,12 @@ pub fn open_data_stores(config: &crate::Config) -> Result<Stores, Error> {
 
     std::fs::create_dir_all(root).map_err(Error::storage)?;
 
-    let wal = open_wal(config)?;
+    let wal = wal::redb::WalStore::open(
+        root.join("wal"),
+        config.storage.wal_cache,
+        config.storage.max_wal_history,
+    )
+    .map_err(Error::storage)?;
 
     let ledger = state::redb::LedgerStore::open(root.join("ledger"), config.storage.ledger_cache)
         .map_err(Error::storage)?

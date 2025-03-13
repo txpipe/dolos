@@ -184,12 +184,6 @@ pub fn load_slice_for_block(
         .map(|utxo| TxoRef(*utxo.hash(), utxo.index() as u32))
         .collect();
 
-    let refferenced: HashSet<_> = txs
-        .values()
-        .flat_map(MultiEraTx::reference_inputs)
-        .map(|utxo| TxoRef(*utxo.hash(), utxo.index() as u32))
-        .collect();
-
     let consumed_same_block: HashMap<_, _> = txs
         .iter()
         .flat_map(|(tx_hash, tx)| {
@@ -197,19 +191,18 @@ pub fn load_slice_for_block(
                 .into_iter()
                 .map(|(idx, utxo)| (TxoRef(*tx_hash, idx as u32), utxo.into()))
         })
-        .filter(|(x, _)| consumed.contains(x) || refferenced.contains(x))
+        .filter(|(x, _)| consumed.contains(x))
         .collect();
 
     let consumed_unapplied_deltas: HashMap<_, _> = unapplied_deltas
         .iter()
         .flat_map(|d| d.produced_utxo.iter().chain(d.recovered_stxi.iter()))
-        .filter(|(x, _)| consumed.contains(x) || refferenced.contains(x))
+        .filter(|(x, _)| consumed.contains(x))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
     let to_fetch = consumed
         .into_iter()
-        .chain(refferenced)
         .filter(|x| !consumed_same_block.contains_key(x))
         .filter(|x| !consumed_unapplied_deltas.contains_key(x))
         .collect_vec();
