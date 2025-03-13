@@ -1,4 +1,4 @@
-use ::redb::{Database, MultimapTableHandle as _, TableHandle as _};
+use ::redb::{Database, MultimapTableHandle as _, Range, TableHandle as _};
 use itertools::Itertools;
 use log::info;
 use std::path::Path;
@@ -125,6 +125,16 @@ impl ChainStore {
         }
     }
 
+    pub fn get_range(
+        &self,
+        from: Option<BlockSlot>,
+        to: Option<BlockSlot>,
+    ) -> Result<ChainIter, ChainError> {
+        match self {
+            ChainStore::SchemaV1(x) => x.get_range(from, to),
+        }
+    }
+
     pub fn get_block_by_hash(&self, block_hash: &[u8]) -> Result<Option<BlockBody>, ChainError> {
         match self {
             ChainStore::SchemaV1(x) => x.get_block_by_hash(block_hash),
@@ -134,6 +144,12 @@ impl ChainStore {
     pub fn get_block_by_slot(&self, slot: &BlockSlot) -> Result<Option<BlockBody>, ChainError> {
         match self {
             ChainStore::SchemaV1(x) => x.get_block_by_slot(slot),
+        }
+    }
+
+    pub fn get_block_by_number(&self, number: &u64) -> Result<Option<BlockBody>, ChainError> {
+        match self {
+            ChainStore::SchemaV1(x) => x.get_block_by_number(number),
         }
     }
 
@@ -169,6 +185,27 @@ impl ChainStore {
 impl From<v1::ChainStore> for ChainStore {
     fn from(value: v1::ChainStore) -> Self {
         Self::SchemaV1(value)
+    }
+}
+
+pub struct ChainIter<'a>(Range<'a, BlockSlot, BlockBody>);
+impl Iterator for ChainIter<'_> {
+    type Item = (BlockSlot, BlockBody);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0
+            .next()
+            .map(|x| x.unwrap())
+            .map(|(k, v)| (k.value(), v.value()))
+    }
+}
+
+impl DoubleEndedIterator for ChainIter<'_> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.0
+            .next_back()
+            .map(|x| x.unwrap())
+            .map(|(k, v)| (k.value(), v.value()))
     }
 }
 

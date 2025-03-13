@@ -1,5 +1,6 @@
 use ::redb::{ReadTransaction, ReadableTable as _};
 use ::redb::{TableDefinition, WriteTransaction};
+use redb::Range;
 use tracing::trace;
 
 use crate::ledger::LedgerDelta;
@@ -81,5 +82,19 @@ impl BlocksTable {
         }
 
         Ok(())
+    }
+
+    pub fn get_range<'a>(
+        rx: &ReadTransaction,
+        from: Option<BlockSlot>,
+        to: Option<BlockSlot>,
+    ) -> Result<Range<'a, u64, Vec<u8>>, Error> {
+        let table = rx.open_table(Self::DEF)?;
+        match (from, to) {
+            (Some(from), Some(to)) => Ok(table.range(from..to)?),
+            (Some(from), None) => Ok(table.range(from..)?),
+            (None, Some(to)) => Ok(table.range(..to)?),
+            (None, None) => Ok(table.range(0..)?),
+        }
     }
 }

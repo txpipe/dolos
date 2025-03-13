@@ -5,7 +5,7 @@ use tracing::{debug, info};
 
 type Error = crate::chain::ChainError;
 
-use super::{indexes, tables, LedgerDelta};
+use super::{indexes, tables, ChainIter, LedgerDelta};
 use crate::model::{BlockBody, BlockSlot};
 
 #[derive(Clone)]
@@ -66,6 +66,16 @@ impl ChainStore {
 
     pub fn finalize(&self, _: BlockSlot) -> Result<(), Error> {
         Ok(())
+    }
+
+    pub fn get_range(
+        &self,
+        from: Option<BlockSlot>,
+        to: Option<BlockSlot>,
+    ) -> Result<ChainIter, Error> {
+        let rx = self.db().begin_read()?;
+        let range = tables::BlocksTable::get_range(&rx, from, to)?;
+        Ok(ChainIter(range))
     }
 
     pub fn get_possible_block_slots_by_address(

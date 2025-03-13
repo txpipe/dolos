@@ -3,9 +3,10 @@ use rocket::http::Status;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    chain::ChainStore,
     ledger::pparams::{self, EraSummary, Genesis},
+    model::BlockBody,
     state::LedgerStore,
-    wal::{redb::WalStore, ReadUtils, WalReader},
 };
 
 pub mod hash_or_number;
@@ -18,6 +19,31 @@ pub type BlockHeaderFields = (
     Option<String>,
     Option<String>,
 );
+
+pub fn hash_or_number_to_body(
+    hash_or_number: &str,
+    chain: &ChainStore,
+) -> Result<BlockBody, Status> {
+    match hex::decode(hash_or_number) {
+        Ok(hash) => match chain
+            .get_block_by_hash(&hash)
+            .map_err(|_| Status::InternalServerError)?
+        {
+            Some(body) => Ok(body),
+            None => Err(Status::NotFound),
+        },
+        Err(_) => match hash_or_number.parse() {
+            Ok(number) => match chain
+                .get_block_by_number(&number)
+                .map_err(|_| Status::InternalServerError)?
+            {
+                Some(body) => Ok(body),
+                None => Err(Status::NotFound),
+            },
+            Err(_) => Err(Status::BadRequest),
+        },
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Block {
@@ -41,102 +67,102 @@ pub struct Block {
 }
 
 impl Block {
-    pub fn find_in_wal(
-        wal: &WalStore,
+    pub fn from_body(
+        body: &[u8],
+        chain: &ChainStore,
+        ledger: &LedgerStore,
+        genesis: &Genesis,
+    ) -> Result<Option<Block>, Status> {
+        let curr = MultiEraBlock::decode(body).map_err(|_| Status::InternalServerError)?;
+        let next: Option<String> = match chain
+            .get_block_by_number(&(curr.number() + 1))
+            .map_err(|_| Status::InternalServerError)?
+        {
+            Some(body) => {
+                let block =
+                    MultiEraBlock::decode(&body).map_err(|_| Status::InternalServerError)?;
+                Some(block.hash().to_string())
+            }
+            None => None,
+        };
+
+        let confirmations = match chain.get_tip().map_err(|_| Status::InternalServerError)? {
+            Some((_, body)) => {
+                let block =
+                    MultiEraBlock::decode(&body).map_err(|_| Status::InternalServerError)?;
+                block.number() - curr.number()
+            }
+            None => return Err(Status::ServiceUnavailable),
+        };
+
+        let slot = curr.slot();
+
+        let tip = ledger.cursor().map_err(|_| Status::InternalServerError)?;
+        let updates = ledger
+            .get_pparams(tip.map(|t| t.0).unwrap_or_default())
+            .map_err(|_| Status::InternalServerError)?
+            .into_iter()
+            .map(|eracbor| {
+                MultiEraUpdate::try_from(eracbor).map_err(|_| Status::InternalServerError)
+            })
+            .collect::<Result<Vec<MultiEraUpdate>, Status>>()?;
+        let summary = pparams::fold_with_hacks(genesis, &updates, slot);
+
+        let (previous_block, block_vrf, op_cert, op_cert_counter) =
+            Self::extract_from_header(&curr.header())?;
+        let (epoch, epoch_slot, time) =
+            Self::resolve_time_from_genesis(&slot, summary.era_for_slot(slot));
+        Ok(Some(Self {
+            slot: Some(curr.slot()),
+            hash: curr.hash().to_string(),
+            tx_count: curr.tx_count() as u64,
+            size: curr.body_size().unwrap_or(0) as u64,
+            epoch: Some(epoch),
+            epoch_slot: Some(epoch_slot),
+            height: Some(curr.number()),
+            next_block: next.clone(),
+            time,
+            confirmations,
+            previous_block,
+            block_vrf,
+            op_cert,
+            op_cert_counter,
+            output: match curr.tx_count() {
+                0 => None,
+                _ => Some(
+                    curr.txs()
+                        .iter()
+                        .map(|tx| tx.outputs().iter().map(|o| o.value().coin()).sum::<u64>())
+                        .sum::<u64>()
+                        .to_string(),
+                ),
+            },
+            fees: match curr.tx_count() {
+                0 => None,
+                _ => Some(
+                    curr.txs()
+                        .iter()
+                        .map(|tx| tx.fee().unwrap_or(0))
+                        .sum::<u64>()
+                        .to_string(),
+                ),
+            },
+            ..Default::default()
+        }))
+    }
+
+    pub fn find_in_chain(
+        chain: &ChainStore,
         ledger: &LedgerStore,
         hash_or_number: &str,
         genesis: &Genesis,
     ) -> Result<Option<Block>, Status> {
-        let iterator = wal
-            .crawl_from(None)
-            .map_err(|_| Status::ServiceUnavailable)?
-            .rev()
-            .into_blocks();
-
-        let mut curr = None;
-        let mut next = None;
-        let mut confirmations = 0;
-
-        // Scan the iterator, if found set the current block and continue to set next and count
-        // confirmations.
-        for raw in iterator.flatten() {
-            let block = MultiEraBlock::decode(&raw.body).map_err(|_| Status::ServiceUnavailable)?;
-            if block.hash().to_string() == hash_or_number
-                || block.number().to_string() == hash_or_number
-            {
-                curr = Some(raw.body);
-                break;
-            } else {
-                next = Some(hex::encode(raw.hash));
-                confirmations += 1;
-            }
-        }
-        match curr {
-            Some(bytes) => {
-                // Decode the block due to lifetime headaches.
-                let block =
-                    MultiEraBlock::decode(&bytes).map_err(|_| Status::ServiceUnavailable)?;
-                let slot = block.slot();
-
-                let tip = ledger.cursor().map_err(|_| Status::InternalServerError)?;
-                let updates = ledger
-                    .get_pparams(tip.map(|t| t.0).unwrap_or_default())
-                    .map_err(|_| Status::InternalServerError)?
-                    .into_iter()
-                    .map(|eracbor| {
-                        MultiEraUpdate::try_from(eracbor).map_err(|_| Status::InternalServerError)
-                    })
-                    .collect::<Result<Vec<MultiEraUpdate>, Status>>()?;
-                let summary = pparams::fold_with_hacks(genesis, &updates, slot);
-
-                let (previous_block, block_vrf, op_cert, op_cert_counter) =
-                    Self::extract_from_header(&block.header())?;
-                let (epoch, epoch_slot, time) =
-                    Self::resolve_time_from_genesis(&slot, summary.era_for_slot(slot));
-                Ok(Some(Self {
-                    slot: Some(block.slot()),
-                    hash: block.hash().to_string(),
-                    tx_count: block.tx_count() as u64,
-                    size: block.body_size().unwrap_or(0) as u64,
-                    epoch: Some(epoch),
-                    epoch_slot: Some(epoch_slot),
-                    height: Some(block.number()),
-                    next_block: next.clone(),
-                    time,
-                    confirmations,
-                    previous_block,
-                    block_vrf,
-                    op_cert,
-                    op_cert_counter,
-                    output: match block.tx_count() {
-                        0 => None,
-                        _ => Some(
-                            block
-                                .txs()
-                                .iter()
-                                .map(|tx| {
-                                    tx.outputs().iter().map(|o| o.value().coin()).sum::<u64>()
-                                })
-                                .sum::<u64>()
-                                .to_string(),
-                        ),
-                    },
-                    fees: match block.tx_count() {
-                        0 => None,
-                        _ => Some(
-                            block
-                                .txs()
-                                .iter()
-                                .map(|tx| tx.fee().unwrap_or(0))
-                                .sum::<u64>()
-                                .to_string(),
-                        ),
-                    },
-                    ..Default::default()
-                }))
-            }
-            _ => Err(Status::ServiceUnavailable),
-        }
+        Self::from_body(
+            &hash_or_number_to_body(hash_or_number, chain)?,
+            chain,
+            ledger,
+            genesis,
+        )
     }
 
     /// Resolve epoch, epoch slot and block time using Genesis values.

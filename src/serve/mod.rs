@@ -58,7 +58,7 @@ pub async fn serve(
                 genesis.clone(),
                 wal.clone(),
                 ledger.clone(),
-                chain,
+                chain.clone(),
                 mempool.clone(),
                 exit.clone(),
             )
@@ -91,6 +91,7 @@ pub async fn serve(
                 genesis.clone(),
                 wal.clone(),
                 ledger.clone(),
+                chain.clone(),
                 mempool.clone(),
                 exit.clone(),
             )
