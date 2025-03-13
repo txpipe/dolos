@@ -20,8 +20,8 @@ pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::
     let progress = feedback.slot_progress_bar();
     progress.set_message("rebuilding ledger");
 
+    let wal = crate::common::open_wal(config).context("opening WAL store")?;
     let genesis = Arc::new(crate::common::open_genesis_files(&config.genesis)?);
-    let wal = crate::common::open_wal(config, None).context("opening WAL store")?;
 
     let light = dolos::state::redb::LedgerStore::in_memory_v2_light()
         .into_diagnostic()

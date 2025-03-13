@@ -56,8 +56,8 @@ pub struct StorageConfig {
     /// Size (in Mb) of memory allocated for chain caching
     pub chain_cache: Option<usize>,
 
-    /// Whether to remove inmutable part from WAL. Defaults to true
-    pub prune_wal: Option<bool>,
+    /// Maximum number of slots (not blocks) to keep in the WAL
+    pub max_wal_history: Option<u64>,
 
     /// Maximum number of slots to keep in the ledger before pruning
     pub max_ledger_history: Option<u64>,
@@ -73,7 +73,7 @@ impl Default for StorageConfig {
             wal_cache: None,
             ledger_cache: None,
             chain_cache: None,
-            prune_wal: None,
+            max_wal_history: None,
             max_ledger_history: None,
             max_chain_history: None,
         }

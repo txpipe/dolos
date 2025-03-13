@@ -28,8 +28,8 @@ pub struct Args {
 pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging)?;
 
+    let (_, ledger, _) = crate::common::open_data_stores(config)?;
     let genesis = Arc::new(crate::common::open_genesis_files(&config.genesis)?);
-    let (_, ledger, _) = crate::common::open_data_stores(config, &genesis)?;
 
     let cbor = std::fs::read_to_string(&args.file)
         .into_diagnostic()

@@ -1,6 +1,6 @@
 use dolos::{chain, ledger::pparams::Genesis, state, wal};
 use miette::{Context as _, IntoDiagnostic};
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{path::PathBuf, time::Duration};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
@@ -12,16 +12,17 @@ use crate::{GenesisConfig, LoggingConfig};
 
 pub type Stores = (wal::redb::WalStore, state::LedgerStore, chain::ChainStore);
 
-pub fn open_wal(
-    config: &crate::Config,
-    max_slots: Option<u64>,
-) -> Result<wal::redb::WalStore, Error> {
+pub fn open_wal(config: &crate::Config) -> Result<wal::redb::WalStore, Error> {
     let root = &config.storage.path;
 
     std::fs::create_dir_all(root).map_err(Error::storage)?;
 
-    let wal = wal::redb::WalStore::open(root.join("wal"), config.storage.wal_cache, max_slots)
-        .map_err(Error::storage)?;
+    let wal = wal::redb::WalStore::open(
+        root.join("wal"),
+        config.storage.wal_cache,
+        config.storage.max_chain_history,
+    )
+    .map_err(Error::storage)?;
 
     Ok(wal)
 }
@@ -44,20 +45,12 @@ pub fn define_chain_path(config: &crate::Config) -> Result<PathBuf, Error> {
     Ok(ledger)
 }
 
-pub fn open_data_stores(config: &crate::Config, genesis: &Arc<Genesis>) -> Result<Stores, Error> {
+pub fn open_data_stores(config: &crate::Config) -> Result<Stores, Error> {
     let root = &config.storage.path;
 
     std::fs::create_dir_all(root).map_err(Error::storage)?;
 
-    let max_slots = match config.storage.prune_wal {
-        Some(true) | None => Some(
-            ((3.0 * genesis.byron.protocol_consts.k as f32)
-                / (genesis.shelley.active_slots_coeff.unwrap())) as u64,
-        ),
-        Some(false) => None,
-    };
-
-    let wal = open_wal(config, max_slots)?;
+    let wal = open_wal(config)?;
 
     let ledger = state::redb::LedgerStore::open(root.join("ledger"), config.storage.ledger_cache)
         .map_err(Error::storage)?

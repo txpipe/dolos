@@ -1,6 +1,4 @@
-use std::sync::Arc;
-
-use miette::{Context, IntoDiagnostic};
+use miette::{bail, Context, IntoDiagnostic};
 use tracing::info;
 
 #[derive(Debug, clap::Args)]
@@ -17,15 +15,14 @@ pub struct Args {
 pub fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging)?;
 
-    let genesis = Arc::new(crate::common::open_genesis_files(&config.genesis)?);
-    let mut wal = crate::common::open_wal(config, None).context("opening data stores")?;
+    let mut wal = crate::common::open_wal(config).context("opening data stores")?;
 
     let max_slots = match args.max_slots {
         Some(x) => x,
-        None => {
-            ((3.0 * genesis.byron.protocol_consts.k as f32)
-                / (genesis.shelley.active_slots_coeff.unwrap())) as u64
-        }
+        None => match config.storage.max_chain_history {
+            Some(x) => x,
+            None => bail!("neither args or config provided for max_slots"),
+        },
     };
 
     info!(max_slots, "prunning to max slots");

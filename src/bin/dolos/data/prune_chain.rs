@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use miette::{bail, Context, IntoDiagnostic};
 use tracing::info;
 
@@ -17,9 +15,7 @@ pub struct Args {
 pub fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging)?;
 
-    let genesis = Arc::new(crate::common::open_genesis_files(&config.genesis)?);
-    let (_, _, chain) =
-        crate::common::open_data_stores(config, &genesis).context("opening data stores")?;
+    let (_, _, chain) = crate::common::open_data_stores(config).context("opening data stores")?;
 
     let max_slots = match args.max_slots {
         Some(x) => x,
