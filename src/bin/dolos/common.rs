@@ -40,9 +40,9 @@ pub fn define_chain_path(config: &crate::Config) -> Result<PathBuf, Error> {
     let root = &config.storage.path;
     std::fs::create_dir_all(root).map_err(Error::storage)?;
 
-    let ledger = root.join("chain");
+    let chain = root.join("chain");
 
-    Ok(ledger)
+    Ok(chain)
 }
 
 pub fn open_data_stores(config: &crate::Config) -> Result<Stores, Error> {
