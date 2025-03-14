@@ -1,4 +1,7 @@
-use pallas::ledger::traverse::{MultiEraBlock, MultiEraHeader, MultiEraUpdate};
+use pallas::{
+    crypto::hash::Hasher,
+    ledger::traverse::{MultiEraBlock, MultiEraHeader, MultiEraUpdate},
+};
 use rocket::http::Status;
 use serde::{Deserialize, Serialize};
 
@@ -13,12 +16,13 @@ pub mod hash_or_number;
 pub mod latest;
 pub mod slot;
 
-pub type BlockHeaderFields = (
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-);
+pub struct BlockHeaderFields {
+    pub previous_block: Option<String>,
+    pub block_vrf: Option<String>,
+    pub op_cert: Option<String>,
+    pub op_cert_counter: Option<String>,
+    pub slot_leader: String,
+}
 
 pub fn hash_or_number_to_body(
     hash_or_number: &str,
@@ -108,8 +112,13 @@ impl Block {
             .collect::<Result<Vec<MultiEraUpdate>, Status>>()?;
         let summary = pparams::fold_with_hacks(genesis, &updates, slot);
 
-        let (previous_block, block_vrf, op_cert, op_cert_counter) =
-            Self::extract_from_header(&curr.header())?;
+        let BlockHeaderFields {
+            previous_block,
+            block_vrf,
+            op_cert,
+            op_cert_counter,
+            slot_leader,
+        } = Self::extract_from_header(&curr.header())?;
         let (epoch, epoch_slot, time) =
             Self::resolve_time_from_genesis(&slot, summary.era_for_slot(slot));
         Ok(Some(Self {
@@ -147,7 +156,7 @@ impl Block {
                         .to_string(),
                 ),
             },
-            ..Default::default()
+            slot_leader,
         }))
     }
 
@@ -177,13 +186,25 @@ impl Block {
     }
 
     pub fn extract_from_header(header: &MultiEraHeader) -> Result<BlockHeaderFields, Status> {
-        let prev = header.previous_hash().map(|h| h.to_string());
+        let previous_block = header.previous_hash().map(|h| h.to_string());
         let block_vrf = match header.vrf_vkey() {
             Some(v) => Some(
                 bech32::encode::<bech32::Bech32>(bech32::Hrp::parse("vrf_vk").unwrap(), v)
                     .map_err(|_| Status::ServiceUnavailable)?,
             ),
             None => None,
+        };
+
+        let slot_leader = match header.issuer_vkey() {
+            Some(hash) => bech32::encode::<bech32::Bech32>(
+                bech32::Hrp::parse("pool").unwrap(),
+                Hasher::<224>::hash(hash).as_ref(),
+            )
+            .map_err(|_| {
+                println!("cacota");
+                Status::InternalServerError
+            })?,
+            None => return Err(Status::InternalServerError),
         };
 
         let (op_cert, op_cert_counter) = match header {
@@ -209,6 +230,12 @@ impl Block {
             ),
             _ => (None, None),
         };
-        Ok((prev, block_vrf, op_cert, op_cert_counter))
+        Ok(BlockHeaderFields {
+            previous_block,
+            block_vrf,
+            slot_leader,
+            op_cert_counter,
+            op_cert,
+        })
     }
 }

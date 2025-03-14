@@ -3,7 +3,7 @@ use miette::{Context as _, IntoDiagnostic};
 use std::{path::PathBuf, time::Duration};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, warn};
+use tracing::{debug, error, warn};
 use tracing_subscriber::{filter::Targets, prelude::*};
 
 use dolos::prelude::*;
@@ -47,6 +47,11 @@ pub fn define_chain_path(config: &crate::Config) -> Result<PathBuf, Error> {
 
 pub fn open_data_stores(config: &crate::Config) -> Result<Stores, Error> {
     let root = &config.storage.path;
+
+    if config.storage.version == StorageVersion::V0 {
+        error!("Storage should be removed and init procedure run again.");
+        return Err(Error::StorageError("Invalid store version".to_string()));
+    }
 
     std::fs::create_dir_all(root).map_err(Error::storage)?;
 

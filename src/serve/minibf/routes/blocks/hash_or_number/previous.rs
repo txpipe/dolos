@@ -8,7 +8,7 @@ use crate::{
     ledger::pparams::{self, Genesis},
     serve::minibf::{
         common::{Order, Pagination},
-        routes::blocks::hash_or_number_to_body,
+        routes::blocks::{hash_or_number_to_body, BlockHeaderFields},
     },
     state::LedgerStore,
 };
@@ -59,8 +59,13 @@ pub fn route(
                 .collect::<Result<Vec<MultiEraUpdate>, Status>>()?;
             let summary = pparams::fold_with_hacks(genesis, &updates, slot);
 
-            let (previous_block, block_vrf, op_cert, op_cert_counter) =
-                Block::extract_from_header(&block.header())?;
+            let BlockHeaderFields {
+                previous_block,
+                block_vrf,
+                op_cert,
+                op_cert_counter,
+                slot_leader,
+            } = Block::extract_from_header(&block.header())?;
             let (epoch, epoch_slot, block_time) =
                 Block::resolve_time_from_genesis(&slot, summary.era_for_slot(slot));
             output.push(Block {
@@ -99,6 +104,7 @@ pub fn route(
                             .to_string(),
                     ),
                 },
+                slot_leader,
                 ..Default::default()
             })
         } else if i > pagination.to() {

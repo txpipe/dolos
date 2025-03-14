@@ -1,4 +1,5 @@
 use clap::Parser;
+use include::network_mutable_slots;
 use inquire::{Confirm, Select, Text};
 use miette::{miette, Context as _, IntoDiagnostic};
 use std::{
@@ -177,7 +178,7 @@ pub struct Args {
 
     /// How much history of the chain to keep in disk
     #[arg(long)]
-    max_wal_history: Option<u64>,
+    max_chain_history: Option<u64>,
 
     /// Serve clients via gRPC
     #[arg(long)]
@@ -203,7 +204,10 @@ impl Default for ConfigEditor {
                 upstream: From::from(&KnownNetwork::CardanoMainnet),
                 mithril: Some(From::from(&KnownNetwork::CardanoMainnet)),
                 snapshot: Default::default(),
-                storage: Default::default(),
+                storage: dolos::model::StorageConfig {
+                    version: dolos::model::StorageVersion::V1,
+                    ..Default::default()
+                },
                 genesis: Default::default(),
                 sync: Default::default(),
                 submit: Default::default(),
@@ -224,8 +228,10 @@ impl ConfigEditor {
             self.0.upstream = network.into();
             self.0.mithril = Some(network.into());
             self.1 = Some(network.clone());
-        }
 
+            // Add max wall history for network from Genesis.
+            self.0.storage.max_wal_history = Some(network_mutable_slots(network));
+        }
         self
     }
 
@@ -302,7 +308,7 @@ impl ConfigEditor {
     fn fill_values_from_args(self, args: &Args) -> Self {
         self.apply_known_network(args.known_network.as_ref())
             .apply_remote_peer(args.remote_peer.as_ref())
-            .apply_history_pruning(args.max_wal_history.into())
+            .apply_history_pruning(args.max_chain_history.into())
             .apply_serve_grpc(args.serve_grpc)
             .apply_serve_ouroboros(args.serve_ouroboros)
             .apply_enable_relay(args.enable_relay)

@@ -11,6 +11,10 @@ pub struct Args {
     /// the path to export to
     #[arg(short, long)]
     output: PathBuf,
+
+    // Whether to include ledger
+    #[arg(long, action)]
+    include_chain: bool,
 }
 
 fn prepare_wal(
@@ -97,13 +101,16 @@ pub fn run(
 
     prepare_chain(chain, &pb)?;
 
-    let path = config.storage.path.join("chain");
+    if args.include_chain {
+        let path = config.storage.path.join("chain");
 
-    archive
-        .append_path_with_name(&path, "chain")
-        .into_diagnostic()?;
+        archive
+            .append_path_with_name(&path, "chain")
+            .into_diagnostic()?;
 
-    pb.set_message("creating archive");
+        pb.set_message("creating archive");
+    }
+
     archive.finish().into_diagnostic()?;
 
     Ok(())

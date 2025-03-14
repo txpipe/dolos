@@ -7,7 +7,7 @@ use tracing::info;
 
 use crate::chain::ChainStore;
 use crate::prelude::Error;
-use crate::{ledger::pparams::Genesis, mempool::Mempool, state::LedgerStore, wal::redb::WalStore};
+use crate::{ledger::pparams::Genesis, mempool::Mempool, state::LedgerStore};
 
 mod common;
 mod routes;
@@ -20,7 +20,6 @@ pub struct Config {
 pub async fn serve(
     cfg: Config,
     genesis: Arc<Genesis>,
-    wal: WalStore,
     ledger: LedgerStore,
     chain: ChainStore,
     mempool: Mempool,
@@ -42,7 +41,6 @@ pub async fn serve(
                 )),
         )
         .manage(genesis)
-        .manage(wal)
         .manage(ledger)
         .manage(chain)
         .manage(mempool)
