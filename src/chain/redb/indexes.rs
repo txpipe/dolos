@@ -1,35 +1,250 @@
-use ::redb::ReadTransaction;
-use ::redb::{MultimapTableDefinition, WriteTransaction};
+use ::redb::{MultimapTableDefinition, ReadTransaction, WriteTransaction};
 use itertools::Itertools;
 use pallas::ledger::addresses::Address;
 use pallas::ledger::traverse::{ComputeHash, MultiEraBlock, MultiEraOutput};
+use std::hash::{DefaultHasher, Hash as _, Hasher};
 
 use crate::ledger::LedgerDelta;
 use crate::model::BlockSlot;
 
-mod address;
-mod address_payment_part;
-mod address_stake_part;
-mod asset;
-mod block_hash;
-mod block_number;
-mod datum_hash;
-mod policy;
-mod script_hash;
-mod tx_hash;
-
-use address::AddressApproxIndexTable;
-use address_payment_part::AddressPaymentPartApproxIndexTable;
-use address_stake_part::AddressStakePartApproxIndexTable;
-use asset::AssetApproxIndexTable;
-use block_hash::BlockHashApproxIndexTable;
-use block_number::BlockNumberApproxIndexTable;
-use datum_hash::DatumHashApproxIndexTable;
-use policy::PolicyApproxIndexTable;
-use script_hash::ScriptHashApproxIndexTable;
-use tx_hash::TxHashApproxIndexTable;
-
 type Error = crate::chain::ChainError;
+
+pub struct AddressApproxIndexTable;
+impl AddressApproxIndexTable {
+    pub const DEF: MultimapTableDefinition<'static, u64, u64> =
+        MultimapTableDefinition::new("byaddress");
+
+    pub fn compute_key(address: &Vec<u8>) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        address.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    pub fn get_by_address(rx: &ReadTransaction, address: &[u8]) -> Result<Vec<BlockSlot>, Error> {
+        let table = rx.open_multimap_table(Self::DEF)?;
+        let key = Self::compute_key(&address.to_vec());
+        let mut out = vec![];
+        for slot in table.get(key)? {
+            out.push(slot?.value());
+        }
+        Ok(out)
+    }
+}
+
+pub struct AddressPaymentPartApproxIndexTable;
+impl AddressPaymentPartApproxIndexTable {
+    pub const DEF: MultimapTableDefinition<'static, u64, u64> =
+        MultimapTableDefinition::new("bypayment");
+
+    pub fn compute_key(address: &Vec<u8>) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        address.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    pub fn get_by_address_payment_part(
+        rx: &ReadTransaction,
+        address_payment_part: &[u8],
+    ) -> Result<Vec<BlockSlot>, Error> {
+        let table = rx.open_multimap_table(Self::DEF)?;
+        let key = Self::compute_key(&address_payment_part.to_vec());
+        let mut out = vec![];
+        for slot in table.get(key)? {
+            out.push(slot?.value());
+        }
+        Ok(out)
+    }
+}
+
+pub struct AddressStakePartApproxIndexTable;
+impl AddressStakePartApproxIndexTable {
+    pub const DEF: MultimapTableDefinition<'static, u64, u64> =
+        MultimapTableDefinition::new("bystake");
+
+    pub fn compute_key(address_stake_part: &Vec<u8>) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        address_stake_part.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    pub fn get_by_address_stake_part(
+        rx: &ReadTransaction,
+        address_stake_part: &[u8],
+    ) -> Result<Vec<BlockSlot>, Error> {
+        let table = rx.open_multimap_table(Self::DEF)?;
+        let key = Self::compute_key(&address_stake_part.to_vec());
+        let mut out = vec![];
+        for slot in table.get(key)? {
+            out.push(slot?.value());
+        }
+        Ok(out)
+    }
+}
+
+pub struct AssetApproxIndexTable;
+impl AssetApproxIndexTable {
+    pub const DEF: MultimapTableDefinition<'static, u64, u64> =
+        MultimapTableDefinition::new("byasset");
+
+    pub fn compute_key(asset: &Vec<u8>) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        asset.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    pub fn get_by_asset(rx: &ReadTransaction, asset: &[u8]) -> Result<Vec<BlockSlot>, Error> {
+        let table = rx.open_multimap_table(Self::DEF)?;
+        let key = Self::compute_key(&asset.to_vec());
+        let mut out = vec![];
+        for slot in table.get(key)? {
+            out.push(slot?.value());
+        }
+        Ok(out)
+    }
+}
+
+pub struct BlockHashApproxIndexTable;
+impl BlockHashApproxIndexTable {
+    pub const DEF: MultimapTableDefinition<'static, u64, u64> =
+        MultimapTableDefinition::new("byblockhash");
+
+    pub fn compute_key(block_hash: &Vec<u8>) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        block_hash.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    pub fn get_by_block_hash(
+        rx: &ReadTransaction,
+        block_hash: &[u8],
+    ) -> Result<Vec<BlockSlot>, Error> {
+        let table = rx.open_multimap_table(Self::DEF)?;
+        let key = Self::compute_key(&block_hash.to_vec());
+        let mut out = vec![];
+        for slot in table.get(key)? {
+            out.push(slot?.value());
+        }
+        Ok(out)
+    }
+}
+
+pub struct BlockNumberApproxIndexTable;
+impl BlockNumberApproxIndexTable {
+    pub const DEF: MultimapTableDefinition<'static, u64, u64> =
+        MultimapTableDefinition::new("byblocknumber");
+
+    pub fn compute_key(block_number: &u64) -> u64 {
+        // Left for readability
+        *block_number
+    }
+
+    pub fn get_by_block_number(
+        rx: &ReadTransaction,
+        block_number: &u64,
+    ) -> Result<Vec<BlockSlot>, Error> {
+        let table = rx.open_multimap_table(Self::DEF)?;
+        let key = Self::compute_key(block_number);
+        let mut out = vec![];
+        for slot in table.get(key)? {
+            out.push(slot?.value());
+        }
+        Ok(out)
+    }
+}
+
+pub struct DatumHashApproxIndexTable;
+impl DatumHashApproxIndexTable {
+    pub const DEF: MultimapTableDefinition<'static, u64, u64> =
+        MultimapTableDefinition::new("bydatum");
+
+    pub fn compute_key(datum_hash: &Vec<u8>) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        datum_hash.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    pub fn get_by_datum_hash(
+        rx: &ReadTransaction,
+        datum_hash: &[u8],
+    ) -> Result<Vec<BlockSlot>, Error> {
+        let table = rx.open_multimap_table(Self::DEF)?;
+        let key = Self::compute_key(&datum_hash.to_vec());
+        let mut out = vec![];
+        for slot in table.get(key)? {
+            out.push(slot?.value());
+        }
+        Ok(out)
+    }
+}
+
+pub struct PolicyApproxIndexTable;
+impl PolicyApproxIndexTable {
+    pub const DEF: MultimapTableDefinition<'static, u64, u64> =
+        MultimapTableDefinition::new("bypolicy");
+
+    pub fn compute_key(policy: &Vec<u8>) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        policy.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    pub fn get_by_policy(rx: &ReadTransaction, policy: &[u8]) -> Result<Vec<BlockSlot>, Error> {
+        let table = rx.open_multimap_table(Self::DEF)?;
+        let key = Self::compute_key(&policy.to_vec());
+        let mut out = vec![];
+        for slot in table.get(key)? {
+            out.push(slot?.value());
+        }
+        Ok(out)
+    }
+}
+
+pub struct ScriptHashApproxIndexTable;
+impl ScriptHashApproxIndexTable {
+    pub const DEF: MultimapTableDefinition<'static, u64, u64> =
+        MultimapTableDefinition::new("byscript");
+
+    pub fn compute_key(script_hash: &Vec<u8>) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        script_hash.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    pub fn get_by_script_hash(
+        rx: &ReadTransaction,
+        script_hash: &[u8],
+    ) -> Result<Vec<BlockSlot>, Error> {
+        let table = rx.open_multimap_table(Self::DEF)?;
+        let key = Self::compute_key(&script_hash.to_vec());
+        let mut out = vec![];
+        for slot in table.get(key)? {
+            out.push(slot?.value());
+        }
+        Ok(out)
+    }
+}
+
+pub struct TxHashApproxIndexTable;
+impl TxHashApproxIndexTable {
+    pub const DEF: MultimapTableDefinition<'static, u64, u64> =
+        MultimapTableDefinition::new("bytx");
+
+    pub fn compute_key(tx_hash: &Vec<u8>) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        tx_hash.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    pub fn get_by_tx_hash(rx: &ReadTransaction, tx_hash: &[u8]) -> Result<Vec<BlockSlot>, Error> {
+        let table = rx.open_multimap_table(Self::DEF)?;
+        let key = Self::compute_key(&tx_hash.to_vec());
+        let mut out = vec![];
+        for slot in table.get(key)? {
+            out.push(slot?.value());
+        }
+        Ok(out)
+    }
+}
 
 pub struct Indexes;
 impl Indexes {
