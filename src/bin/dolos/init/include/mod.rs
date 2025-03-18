@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use dolos::ledger::pparams::Genesis;
+use dolos::ledger::{mutable_slots, pparams::Genesis};
 use miette::{Context, IntoDiagnostic};
 
 mod mainnet;
@@ -62,6 +62,5 @@ pub fn network_mutable_slots(network: &super::KnownNetwork) -> u64 {
             force_protocol: Some(6),
         },
     };
-    ((3.0 * genesis.byron.protocol_consts.k as f32) / (genesis.shelley.active_slots_coeff.unwrap()))
-        as u64
+    mutable_slots(&genesis)
 }

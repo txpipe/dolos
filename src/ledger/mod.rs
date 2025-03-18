@@ -273,6 +273,15 @@ pub fn compute_origin_delta(genesis: &Genesis) -> LedgerDelta {
     delta
 }
 
+/// Computes the amount of mutable slots in chain.
+///
+/// Reads the relevant genesis config values and uses the security window guarantee formula from
+/// consensus to calculate the latest slot that can be considered immutable.
+pub fn mutable_slots(genesis: &Genesis) -> u64 {
+    ((3.0 * genesis.byron.protocol_consts.k as f32) / (genesis.shelley.active_slots_coeff.unwrap()))
+        as u64
+}
+
 /// Computes the latest immutable slot
 ///
 /// Takes the latest known tip, reads the relevant genesis config values and
@@ -280,10 +289,7 @@ pub fn compute_origin_delta(genesis: &Genesis) -> LedgerDelta {
 /// latest slot that can be considered immutable. This is used mainly to define
 /// which slots can be finalized in the ledger store (aka: compaction).
 pub fn lastest_immutable_slot(tip: BlockSlot, genesis: &Genesis) -> BlockSlot {
-    let security_window = (3.0 * genesis.byron.protocol_consts.k as f32)
-        / (genesis.shelley.active_slots_coeff.unwrap());
-
-    tip.saturating_sub(security_window.ceil() as u64)
+    tip.saturating_sub(mutable_slots(genesis))
 }
 
 #[cfg(test)]

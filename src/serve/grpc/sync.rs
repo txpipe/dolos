@@ -10,6 +10,7 @@ use std::pin::Pin;
 use tonic::{Request, Response, Status};
 
 use crate::chain::ChainStore;
+use crate::prelude::BlockBody;
 use crate::state::LedgerStore;
 use crate::wal::{self, ChainPoint, RawBlock, WalReader as _};
 
@@ -25,8 +26,7 @@ fn u5c_to_chain_point(block_ref: u5c::sync::BlockRef) -> Result<wal::ChainPoint,
 //     AnyChainBlock { chain: Some(block) }
 // }
 
-fn raw_to_anychain(mapper: &Mapper<LedgerStore>, raw: &wal::RawBlock) -> u5c::sync::AnyChainBlock {
-    let wal::RawBlock { body, .. } = raw;
+fn raw_to_anychain(mapper: &Mapper<LedgerStore>, body: &BlockBody) -> u5c::sync::AnyChainBlock {
     let block = mapper.map_block_cbor(body);
 
     u5c::sync::AnyChainBlock {
@@ -51,10 +51,12 @@ fn wal_log_to_tip_response(
     u5c::sync::FollowTipResponse {
         action: match log {
             wal::LogValue::Apply(x) => {
-                u5c::sync::follow_tip_response::Action::Apply(raw_to_anychain(mapper, x)).into()
+                u5c::sync::follow_tip_response::Action::Apply(raw_to_anychain(mapper, &x.body))
+                    .into()
             }
             wal::LogValue::Undo(x) => {
-                u5c::sync::follow_tip_response::Action::Undo(raw_to_anychain(mapper, x)).into()
+                u5c::sync::follow_tip_response::Action::Undo(raw_to_anychain(mapper, &x.body))
+                    .into()
             }
             // TODO: shouldn't we have a u5c event for origin?
             wal::LogValue::Mark(..) => None,
@@ -112,20 +114,12 @@ impl u5c::sync::sync_service_server::SyncService for SyncServiceImpl {
             .r#ref
             .iter()
             .map(|br| {
-                let maybe_raw = self
+                match self
                     .chain
                     .get_block_by_slot(&br.index)
-                    .map_err(|_| Status::internal("Failed to query chain service."))?;
-
-                match maybe_raw {
-                    Some(body) => {
-                        let block = self.mapper.map_block_cbor(&body);
-
-                        Ok(u5c::sync::AnyChainBlock {
-                            native_bytes: body.to_vec().into(),
-                            chain: u5c::sync::any_chain_block::Chain::Cardano(block).into(),
-                        })
-                    }
+                    .map_err(|_| Status::internal("Failed to query chain service."))?
+                {
+                    Some(body) => Ok(raw_to_anychain(&self.mapper, &body)),
                     None => Err(Status::not_found(format!("Failed to find block: {:?}", br))),
                 }
             })
@@ -154,7 +148,7 @@ impl u5c::sync::sync_service_server::SyncService for SyncServiceImpl {
         let (items, next_token): (_, Vec<_>) =
             page.into_iter().enumerate().partition_map(|(idx, x)| {
                 if idx < len - 1 {
-                    Either::Left(raw_to_anychain(&self.mapper, &x))
+                    Either::Left(raw_to_anychain(&self.mapper, &x.body))
                 } else {
                     Either::Right(raw_to_blockref(&x))
                 }
@@ -216,14 +210,11 @@ impl u5c::sync::sync_service_server::SyncService for SyncServiceImpl {
         &self,
         _request: tonic::Request<u5c::sync::ReadTipRequest>,
     ) -> std::result::Result<tonic::Response<u5c::sync::ReadTipResponse>, tonic::Status> {
-        let (slot, body) = match self
+        let (slot, body) = self
             .chain
             .get_tip()
             .map_err(|e| Status::internal(format!("Unable to read WAL: {:?}", e)))?
-        {
-            Some((slot, body)) => (slot, body),
-            None => return Err(Status::internal("chain has no data.")),
-        };
+            .ok_or(Status::internal("chain has no data."))?;
 
         let hash = MultiEraBlock::decode(&body)
             .map_err(|_| Status::internal("Failed to decode tip block."))?

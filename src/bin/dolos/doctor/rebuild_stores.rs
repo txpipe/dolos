@@ -1,6 +1,9 @@
 use std::sync::Arc;
 
-use dolos::wal::{self, WalBlockReader, WalReader as _};
+use dolos::{
+    ledger::mutable_slots,
+    wal::{self, WalBlockReader, WalReader as _},
+};
 use itertools::Itertools;
 use miette::{Context, IntoDiagnostic};
 use pallas::ledger::traverse::MultiEraBlock;
@@ -61,9 +64,7 @@ pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::
     }
 
     // Amount of slots until unmutability is guaranteed.
-    let lookahead = ((3.0 * genesis.byron.protocol_consts.k as f32)
-        / (genesis.shelley.active_slots_coeff.unwrap())) as u64;
-
+    let lookahead = mutable_slots(&genesis);
     let remaining = WalBlockReader::try_new(&wal, None, lookahead)
         .into_diagnostic()
         .context("creating wal block reader")?;
