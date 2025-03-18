@@ -10,8 +10,13 @@ use crate::{ledger, prelude::*};
 
 pub type UpstreamPort = gasket::messaging::InputPort<RollEvent>;
 
+pub enum WorkUnit {
+    ApplyEvent,
+    Housekeeping,
+}
+
 #[derive(Stage)]
-#[stage(name = "apply", unit = "()", worker = "Worker")]
+#[stage(name = "apply", unit = "WorkUnit", worker = "Worker")]
 pub struct Stage {
     wal: crate::wal::redb::WalStore,
     ledger: crate::state::LedgerStore,
@@ -20,6 +25,7 @@ pub struct Stage {
     mempool: crate::mempool::Mempool, // Add this line
 
     max_ledger_history: Option<u64>,
+    housekeeping_interval: std::time::Duration,
 
     pub upstream: UpstreamPort,
 
@@ -38,6 +44,7 @@ impl Stage {
         mempool: crate::mempool::Mempool,
         genesis: Arc<Genesis>,
         max_ledger_history: Option<u64>,
+        housekeeping_interval: std::time::Duration,
     ) -> Self {
         Self {
             wal,
@@ -49,6 +56,7 @@ impl Stage {
             upstream: Default::default(),
             block_count: Default::default(),
             wal_count: Default::default(),
+            housekeeping_interval,
         }
     }
 
@@ -114,7 +122,10 @@ impl Stage {
     }
 }
 
-pub struct Worker(wal::LogSeq);
+pub struct Worker {
+    logseq: wal::LogSeq,
+    housekeeping_timer: tokio::time::Interval,
+}
 
 #[async_trait::async_trait(?Send)]
 impl gasket::framework::Worker<Stage> for Worker {
@@ -137,28 +148,45 @@ impl gasket::framework::Worker<Stage> for Worker {
 
         info!(seq, "wal sequence found");
 
-        Ok(Self(seq))
+        Ok(Self {
+            logseq: seq,
+            housekeeping_timer: tokio::time::interval(stage.housekeeping_interval),
+        })
     }
 
-    async fn schedule(&mut self, stage: &mut Stage) -> Result<WorkSchedule<()>, WorkerError> {
-        let _ = stage.upstream.recv().await.or_panic()?;
-        Ok(WorkSchedule::Unit(()))
+    async fn schedule(&mut self, stage: &mut Stage) -> Result<WorkSchedule<WorkUnit>, WorkerError> {
+        {
+            tokio::select! {
+                msg = stage.upstream.recv() => {
+                    let _ = msg.or_panic()?;
+                    Ok(WorkSchedule::Unit(WorkUnit::ApplyEvent))
+                }
+                _ = self.housekeeping_timer.tick() => {
+                    Ok(WorkSchedule::Unit(WorkUnit::Housekeeping))
+                }
+            }
+        }
     }
 
     /// Catch-up ledger with latest state of WAL
     ///
     /// Reads from WAL using the latest known cursor and applies the
     /// corresponding downstream changes to the ledger
-    async fn execute(&mut self, _: &(), stage: &mut Stage) -> Result<(), WorkerError> {
-        let iter = stage.wal.crawl_from(Some(self.0)).or_panic()?.skip(1);
+    async fn execute(&mut self, unit: &WorkUnit, stage: &mut Stage) -> Result<(), WorkerError> {
+        match unit {
+            WorkUnit::ApplyEvent => {
+                let iter = stage.wal.crawl_from(Some(self.logseq)).or_panic()?.skip(1);
 
-        // TODO: analyze scenario where we're too far behind and this for loop takes
-        // longer that the allocated policy timeout.
+                // TODO: analyze scenario where we're too far behind and this for loop takes
+                // longer that the allocated policy timeout.
 
-        for (seq, log) in iter {
-            debug!(seq, "processing wal entry");
-            stage.process_wal(log)?;
-            self.0 = seq;
+                for (seq, log) in iter {
+                    debug!(seq, "processing wal entry");
+                    stage.process_wal(log)?;
+                    self.logseq = seq;
+                }
+            }
+            WorkUnit::Housekeeping => stage.chain.housekeeping().or_panic()?,
         }
 
         Ok(())

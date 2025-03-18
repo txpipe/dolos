@@ -12,6 +12,8 @@ pub mod pull;
 pub mod roll;
 pub mod submit;
 
+const HOUSEKEEPING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
 #[derive(Serialize, Deserialize)]
 pub struct Config {
     pub pull_batch_size: Option<usize>,
@@ -66,7 +68,7 @@ pub fn pipeline(
         quit_on_tip,
     );
 
-    let mut roll = roll::Stage::new(wal.clone(), chain.clone());
+    let mut roll = roll::Stage::new(wal.clone(), HOUSEKEEPING_INTERVAL);
 
     let mut apply = apply::Stage::new(
         wal.clone(),
@@ -75,6 +77,7 @@ pub fn pipeline(
         mempool.clone(),
         genesis,
         storage.max_ledger_history,
+        HOUSEKEEPING_INTERVAL,
     );
 
     let submit = submit::Stage::new(
