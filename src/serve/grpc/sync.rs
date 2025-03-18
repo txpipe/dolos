@@ -114,14 +114,11 @@ impl u5c::sync::sync_service_server::SyncService for SyncServiceImpl {
             .r#ref
             .iter()
             .map(|br| {
-                match self
-                    .chain
+                self.chain
                     .get_block_by_slot(&br.index)
                     .map_err(|_| Status::internal("Failed to query chain service."))?
-                {
-                    Some(body) => Ok(raw_to_anychain(&self.mapper, &body)),
-                    None => Err(Status::not_found(format!("Failed to find block: {:?}", br))),
-                }
+                    .map(|body| raw_to_anychain(&self.mapper, &body))
+                    .ok_or(Status::not_found(format!("Failed to find block: {:?}", br)))
             })
             .collect::<Result<Vec<u5c::sync::AnyChainBlock>, Status>>()?;
 

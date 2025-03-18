@@ -148,7 +148,7 @@ pub fn compute_delta(
             MultiEraBlock::Babbage(x) => minicbor::to_vec((era, x)).unwrap(),
             MultiEraBlock::AlonzoCompatible(x, _) => minicbor::to_vec((era, x)).unwrap(),
             MultiEraBlock::EpochBoundary(x) => minicbor::to_vec((0_u16, x)).unwrap(),
-            _ => Default::default(),
+            _ => todo!(),
         },
         ..Default::default()
     };
@@ -201,7 +201,7 @@ pub fn compute_undo_delta(
             MultiEraBlock::Babbage(x) => minicbor::to_vec((era, x)).unwrap(),
             MultiEraBlock::AlonzoCompatible(x, _) => minicbor::to_vec((era, x)).unwrap(),
             MultiEraBlock::EpochBoundary(x) => minicbor::to_vec((0_u16, x)).unwrap(),
-            _ => Default::default(),
+            _ => todo!(),
         },
         ..Default::default()
     };

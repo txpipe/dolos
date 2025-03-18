@@ -14,6 +14,10 @@ pub struct Args {
 
     // Whether to include ledger
     #[arg(long, action)]
+    include_ledger: bool,
+
+    // Whether to include chain
+    #[arg(long, action)]
     include_chain: bool,
 }
 
@@ -91,13 +95,14 @@ pub fn run(
         .append_path_with_name(&path, "wal")
         .into_diagnostic()?;
 
-    prepare_ledger(ledger, &pb)?;
+    if args.include_ledger {
+        prepare_ledger(ledger, &pb)?;
+        let path = config.storage.path.join("ledger");
 
-    let path = config.storage.path.join("ledger");
-
-    archive
-        .append_path_with_name(&path, "ledger")
-        .into_diagnostic()?;
+        archive
+            .append_path_with_name(&path, "ledger")
+            .into_diagnostic()?;
+    }
 
     prepare_chain(chain, &pb)?;
 

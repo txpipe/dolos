@@ -3,7 +3,7 @@ use tracing::info;
 
 #[derive(Debug, clap::Args)]
 pub struct Args {
-    /// the maximum number of slots to keep in the WAL
+    /// the maximum number of slots to keep in the Chain
     #[arg(long)]
     max_slots: Option<u64>,
 
