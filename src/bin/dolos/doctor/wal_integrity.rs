@@ -37,7 +37,7 @@ pub fn run(config: &crate::Config, _args: &Args) -> miette::Result<()> {
 
     let feedback = Feedback::default();
 
-    let (wal, _) = crate::common::open_data_stores(config).context("opening data stores")?;
+    let wal = crate::common::open_wal(config).context("opening data stores")?;
 
     let (_, tip) = wal
         .find_tip()

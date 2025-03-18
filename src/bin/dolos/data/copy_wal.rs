@@ -22,7 +22,7 @@ pub struct Args {
 pub fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging)?;
 
-    let (source, _) = crate::common::open_data_stores(config).context("opening data stores")?;
+    let source = crate::common::open_wal(config).context("opening data stores")?;
 
     let mut target = dolos::wal::redb::WalStore::open(&args.output, None, None)
         .into_diagnostic()

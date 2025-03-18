@@ -10,8 +10,6 @@ pub type Cursor = (BlockSlot, BlockHash);
 pub type UpstreamPort = gasket::messaging::InputPort<PullEvent>;
 pub type DownstreamPort = gasket::messaging::OutputPort<RollEvent>;
 
-const HOUSEKEEPING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
-
 pub enum WorkUnit {
     PullEvent(PullEvent),
     Housekeeping,
@@ -25,6 +23,8 @@ pub struct Stage {
     pub upstream: UpstreamPort,
     pub downstream: DownstreamPort,
 
+    housekeeping_interval: std::time::Duration,
+
     #[metric]
     block_count: gasket::metrics::Counter,
 
@@ -33,13 +33,14 @@ pub struct Stage {
 }
 
 impl Stage {
-    pub fn new(store: WalStore) -> Self {
+    pub fn new(store: WalStore, housekeeping_interval: std::time::Duration) -> Self {
         Self {
             store,
             upstream: Default::default(),
             downstream: Default::default(),
             block_count: Default::default(),
             roll_count: Default::default(),
+            housekeeping_interval,
         }
     }
 
@@ -88,10 +89,9 @@ impl Worker {}
 
 #[async_trait::async_trait(?Send)]
 impl gasket::framework::Worker<Stage> for Worker {
-    async fn bootstrap(_stage: &Stage) -> Result<Self, WorkerError> {
+    async fn bootstrap(stage: &Stage) -> Result<Self, WorkerError> {
         Ok(Worker {
-            // TODO: make this interval user-configurable
-            housekeeping_timer: tokio::time::interval(HOUSEKEEPING_INTERVAL),
+            housekeeping_timer: tokio::time::interval(stage.housekeeping_interval),
         })
     }
 

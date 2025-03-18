@@ -2,13 +2,13 @@ use clap::{Parser, Subcommand};
 
 use crate::feedback::Feedback;
 
-mod rebuild_ledger;
+mod rebuild_stores;
 mod wal_integrity;
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// rebuilds the whole ledger from chain data
-    RebuildLedger(rebuild_ledger::Args),
+    /// rebuilds ledger and chain from WAL
+    RebuildStores(rebuild_stores::Args),
     /// checks the integrity of the WAL records
     WalIntegrity(wal_integrity::Args),
 }
@@ -21,13 +21,13 @@ pub struct Args {
 
 pub fn run(config: &super::Config, args: &Args, feedback: &Feedback) -> miette::Result<()> {
     match &args.command {
-        Command::RebuildLedger(x) => rebuild_ledger::run(config, x, feedback)?,
+        Command::RebuildStores(x) => rebuild_stores::run(config, x, feedback)?,
         Command::WalIntegrity(x) => wal_integrity::run(config, x)?,
     }
 
     Ok(())
 }
 
-pub fn run_rebuild_ledger(config: &super::Config, feedback: &Feedback) -> miette::Result<()> {
-    rebuild_ledger::run(config, &rebuild_ledger::Args, feedback)
+pub fn run_rebuild_stores(config: &super::Config, feedback: &Feedback) -> miette::Result<()> {
+    rebuild_stores::run(config, &rebuild_stores::Args { chunk: 500 }, feedback)
 }

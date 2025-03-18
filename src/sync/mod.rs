@@ -1,3 +1,4 @@
+use crate::chain::ChainStore;
 use crate::ledger::pparams::Genesis;
 use crate::state::LedgerStore;
 use crate::wal::redb::WalStore;
@@ -10,6 +11,8 @@ pub mod apply;
 pub mod pull;
 pub mod roll;
 pub mod submit;
+
+const HOUSEKEEPING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
 #[derive(Serialize, Deserialize)]
 pub struct Config {
@@ -51,6 +54,7 @@ pub fn pipeline(
     storage: &StorageConfig,
     wal: WalStore,
     ledger: LedgerStore,
+    chain: ChainStore,
     genesis: Arc<Genesis>,
     mempool: Mempool,
     retries: &Option<gasket::retries::Policy>,
@@ -64,14 +68,16 @@ pub fn pipeline(
         quit_on_tip,
     );
 
-    let mut roll = roll::Stage::new(wal.clone());
+    let mut roll = roll::Stage::new(wal.clone(), HOUSEKEEPING_INTERVAL);
 
     let mut apply = apply::Stage::new(
         wal.clone(),
         ledger,
+        chain,
         mempool.clone(),
         genesis,
         storage.max_ledger_history,
+        HOUSEKEEPING_INTERVAL,
     );
 
     let submit = submit::Stage::new(
