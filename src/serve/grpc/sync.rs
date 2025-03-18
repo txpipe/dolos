@@ -1,7 +1,7 @@
 use futures_core::Stream;
 use futures_util::stream::once;
 use futures_util::StreamExt;
-use itertools::{Either, Itertools};
+use itertools::Itertools;
 use pallas::interop::utxorpc as interop;
 use pallas::interop::utxorpc::spec::sync::BlockRef;
 use pallas::interop::utxorpc::{spec as u5c, Mapper};
@@ -12,7 +12,7 @@ use tonic::{Request, Response, Status};
 use crate::chain::ChainStore;
 use crate::prelude::BlockBody;
 use crate::state::LedgerStore;
-use crate::wal::{self, ChainPoint, RawBlock, WalReader as _};
+use crate::wal::{self, ChainPoint, WalReader as _};
 
 fn u5c_to_chain_point(block_ref: u5c::sync::BlockRef) -> Result<wal::ChainPoint, Status> {
     Ok(wal::ChainPoint::Specific(
@@ -21,26 +21,12 @@ fn u5c_to_chain_point(block_ref: u5c::sync::BlockRef) -> Result<wal::ChainPoint,
     ))
 }
 
-// fn raw_to_anychain2(raw: &[u8]) -> AnyChainBlock {
-//     let block = any_chain_block::Chain::Raw(Bytes::copy_from_slice(raw));
-//     AnyChainBlock { chain: Some(block) }
-// }
-
 fn raw_to_anychain(mapper: &Mapper<LedgerStore>, body: &BlockBody) -> u5c::sync::AnyChainBlock {
     let block = mapper.map_block_cbor(body);
 
     u5c::sync::AnyChainBlock {
         native_bytes: body.to_vec().into(),
         chain: u5c::sync::any_chain_block::Chain::Cardano(block).into(),
-    }
-}
-
-fn raw_to_blockref(raw: &wal::RawBlock) -> u5c::sync::BlockRef {
-    let RawBlock { slot, hash, .. } = raw;
-
-    u5c::sync::BlockRef {
-        index: *slot,
-        hash: hash.to_vec().into(),
     }
 }
 
@@ -133,27 +119,34 @@ impl u5c::sync::sync_service_server::SyncService for SyncServiceImpl {
     ) -> Result<Response<u5c::sync::DumpHistoryResponse>, Status> {
         let msg = request.into_inner();
 
-        let from = msg.start_token.map(u5c_to_chain_point).transpose()?;
-
         let len = msg.max_items as usize + 1;
+        let blocks = self
+            .chain
+            .get_range(
+                msg.start_token.as_ref().map(|blockref| blockref.index),
+                None,
+            )
+            .map_err(|err| Status::internal(err.to_string()))?;
 
-        let page = self
-            .wal
-            .read_block_page(from.as_ref(), len)
-            .map_err(|_err| Status::internal("can't query block"))?;
+        let mut items = vec![];
+        let mut next_token = None;
 
-        let (items, next_token): (_, Vec<_>) =
-            page.into_iter().enumerate().partition_map(|(idx, x)| {
-                if idx < len - 1 {
-                    Either::Left(raw_to_anychain(&self.mapper, &x.body))
-                } else {
-                    Either::Right(raw_to_blockref(&x))
-                }
-            });
+        for (i, (slot, body)) in blocks.take(len).enumerate() {
+            if i < len {
+                items.push(raw_to_anychain(&self.mapper, &body))
+            } else {
+                let block = MultiEraBlock::decode(&body)
+                    .map_err(|err| Status::internal(err.to_string()))?;
+                next_token = Some(BlockRef {
+                    index: slot,
+                    hash: block.hash().to_vec().into(),
+                })
+            }
+        }
 
         let response = u5c::sync::DumpHistoryResponse {
             block: items,
-            next_token: next_token.into_iter().next(),
+            next_token,
         };
 
         Ok(Response::new(response))
