@@ -129,12 +129,7 @@ impl LedgerStore {
 
             let delta = LedgerDelta {
                 produced_utxo: chunk.into_iter().collect(),
-                new_position: Default::default(),
-                undone_position: Default::default(),
-                consumed_utxo: Default::default(),
-                recovered_stxi: Default::default(),
-                undone_utxo: Default::default(),
-                new_pparams: Default::default(),
+                ..Default::default()
             };
 
             tables::FilterIndexes::apply(&wx, &delta)?;

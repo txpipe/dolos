@@ -10,15 +10,22 @@ use crate::{ledger, prelude::*};
 
 pub type UpstreamPort = gasket::messaging::InputPort<RollEvent>;
 
+pub enum WorkUnit {
+    ApplyEvent,
+    Housekeeping,
+}
+
 #[derive(Stage)]
-#[stage(name = "apply", unit = "()", worker = "Worker")]
+#[stage(name = "apply", unit = "WorkUnit", worker = "Worker")]
 pub struct Stage {
     wal: crate::wal::redb::WalStore,
     ledger: crate::state::LedgerStore,
+    chain: crate::chain::ChainStore,
     genesis: Arc<Genesis>,
     mempool: crate::mempool::Mempool, // Add this line
 
     max_ledger_history: Option<u64>,
+    housekeeping_interval: std::time::Duration,
 
     pub upstream: UpstreamPort,
 
@@ -33,27 +40,32 @@ impl Stage {
     pub fn new(
         wal: crate::wal::redb::WalStore,
         ledger: crate::state::LedgerStore,
+        chain: crate::chain::ChainStore,
         mempool: crate::mempool::Mempool,
         genesis: Arc<Genesis>,
         max_ledger_history: Option<u64>,
+        housekeeping_interval: std::time::Duration,
     ) -> Self {
         Self {
             wal,
             ledger,
+            chain,
             mempool,
             genesis,
             max_ledger_history,
             upstream: Default::default(),
             block_count: Default::default(),
             wal_count: Default::default(),
+            housekeeping_interval,
         }
     }
 
     fn process_origin(&self) -> Result<(), WorkerError> {
         info!("applying origin");
 
-        let delta = crate::ledger::compute_origin_delta(&self.genesis);
-        self.ledger.apply(&[delta]).or_panic()?;
+        let deltas = vec![crate::ledger::compute_origin_delta(&self.genesis)];
+        self.ledger.apply(&deltas).or_panic()?;
+        self.chain.apply(&deltas).or_panic()?;
 
         Ok(())
     }
@@ -66,8 +78,9 @@ impl Stage {
         let block = MultiEraBlock::decode(body).or_panic()?;
         let context = crate::state::load_slice_for_block(&block, &self.ledger, &[]).or_panic()?;
 
-        let delta = crate::ledger::compute_undo_delta(&block, context).or_panic()?;
-        self.ledger.apply(&[delta]).or_panic()?;
+        let deltas = vec![crate::ledger::compute_undo_delta(&block, context).or_panic()?];
+        self.ledger.apply(&deltas).or_panic()?;
+        self.chain.apply(&deltas).or_panic()?;
 
         self.mempool.undo_block(&block);
 
@@ -81,8 +94,12 @@ impl Stage {
 
         let block = MultiEraBlock::decode(body).or_panic()?;
 
-        crate::state::apply_block_batch(
-            [&block],
+        let deltas =
+            crate::state::calculate_block_batch_deltas([&block], &self.ledger).or_panic()?;
+
+        self.chain.apply(&deltas).or_panic()?;
+        crate::state::apply_delta_batch(
+            deltas,
             &self.ledger,
             &self.genesis,
             self.max_ledger_history,
@@ -105,7 +122,10 @@ impl Stage {
     }
 }
 
-pub struct Worker(wal::LogSeq);
+pub struct Worker {
+    logseq: wal::LogSeq,
+    housekeeping_timer: tokio::time::Interval,
+}
 
 #[async_trait::async_trait(?Send)]
 impl gasket::framework::Worker<Stage> for Worker {
@@ -128,28 +148,45 @@ impl gasket::framework::Worker<Stage> for Worker {
 
         info!(seq, "wal sequence found");
 
-        Ok(Self(seq))
+        Ok(Self {
+            logseq: seq,
+            housekeeping_timer: tokio::time::interval(stage.housekeeping_interval),
+        })
     }
 
-    async fn schedule(&mut self, stage: &mut Stage) -> Result<WorkSchedule<()>, WorkerError> {
-        let _ = stage.upstream.recv().await.or_panic()?;
-        Ok(WorkSchedule::Unit(()))
+    async fn schedule(&mut self, stage: &mut Stage) -> Result<WorkSchedule<WorkUnit>, WorkerError> {
+        {
+            tokio::select! {
+                msg = stage.upstream.recv() => {
+                    let _ = msg.or_panic()?;
+                    Ok(WorkSchedule::Unit(WorkUnit::ApplyEvent))
+                }
+                _ = self.housekeeping_timer.tick() => {
+                    Ok(WorkSchedule::Unit(WorkUnit::Housekeeping))
+                }
+            }
+        }
     }
 
     /// Catch-up ledger with latest state of WAL
     ///
     /// Reads from WAL using the latest known cursor and applies the
     /// corresponding downstream changes to the ledger
-    async fn execute(&mut self, _: &(), stage: &mut Stage) -> Result<(), WorkerError> {
-        let iter = stage.wal.crawl_from(Some(self.0)).or_panic()?.skip(1);
+    async fn execute(&mut self, unit: &WorkUnit, stage: &mut Stage) -> Result<(), WorkerError> {
+        match unit {
+            WorkUnit::ApplyEvent => {
+                let iter = stage.wal.crawl_from(Some(self.logseq)).or_panic()?.skip(1);
 
-        // TODO: analyze scenario where we're too far behind and this for loop takes
-        // longer that the allocated policy timeout.
+                // TODO: analyze scenario where we're too far behind and this for loop takes
+                // longer that the allocated policy timeout.
 
-        for (seq, log) in iter {
-            debug!(seq, "processing wal entry");
-            stage.process_wal(log)?;
-            self.0 = seq;
+                for (seq, log) in iter {
+                    debug!(seq, "processing wal entry");
+                    stage.process_wal(log)?;
+                    self.logseq = seq;
+                }
+            }
+            WorkUnit::Housekeeping => stage.chain.housekeeping().or_panic()?,
         }
 
         Ok(())

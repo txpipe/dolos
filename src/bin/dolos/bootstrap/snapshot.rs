@@ -42,7 +42,7 @@ impl Args {
 }
 
 const DEFAULT_URL_TEMPLATE: &str =
-    "https://dolos-snapshots.s3-accelerate.amazonaws.com/v0/${NETWORK}/${VARIANT}/${POINT}.tar.gz";
+    "https://dolos-snapshots.s3-accelerate.amazonaws.com/${VERSION}/${NETWORK}/${VARIANT}/${POINT}.tar.gz";
 
 fn define_snapshot_url(config: &crate::Config, args: &Args) -> String {
     let download_url_template = config
@@ -52,6 +52,7 @@ fn define_snapshot_url(config: &crate::Config, args: &Args) -> String {
         .unwrap_or(DEFAULT_URL_TEMPLATE.to_owned());
 
     download_url_template
+        .replace("${VERSION}", &config.storage.version.to_string())
         .replace("${NETWORK}", &config.upstream.network_magic.to_string())
         .replace("${POINT}", &args.point)
         .replace("${VARIANT}", &args.variant)
@@ -59,6 +60,7 @@ fn define_snapshot_url(config: &crate::Config, args: &Args) -> String {
 
 fn fetch_snapshot(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::Result<()> {
     let snapshot_url = define_snapshot_url(config, args)
+        .replace("${VERSION}", &config.storage.version.to_string())
         .replace("${NETWORK}", &config.upstream.network_magic.to_string())
         .replace("${POINT}", &args.point)
         .replace("${VARIANT}", &args.variant);

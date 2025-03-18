@@ -216,12 +216,10 @@ pub fn load_slice_for_block(
     Ok(LedgerSlice { resolved_inputs })
 }
 
-pub fn apply_block_batch<'a>(
+pub fn calculate_block_batch_deltas<'a>(
     blocks: impl IntoIterator<Item = &'a MultiEraBlock<'a>>,
     store: &LedgerStore,
-    genesis: &Genesis,
-    max_ledger_history: Option<u64>,
-) -> Result<(), LedgerError> {
+) -> Result<Vec<LedgerDelta>, LedgerError> {
     let mut deltas: Vec<LedgerDelta> = vec![];
 
     for block in blocks {
@@ -230,7 +228,15 @@ pub fn apply_block_batch<'a>(
 
         deltas.push(delta);
     }
+    Ok(deltas)
+}
 
+pub fn apply_delta_batch(
+    deltas: Vec<LedgerDelta>,
+    store: &LedgerStore,
+    genesis: &Genesis,
+    max_ledger_history: Option<u64>,
+) -> Result<(), LedgerError> {
     store.apply(&deltas)?;
 
     let tip = deltas
@@ -246,4 +252,14 @@ pub fn apply_block_batch<'a>(
     store.finalize(to_finalize)?;
 
     Ok(())
+}
+
+pub fn apply_block_batch<'a>(
+    blocks: impl IntoIterator<Item = &'a MultiEraBlock<'a>>,
+    store: &LedgerStore,
+    genesis: &Genesis,
+    max_ledger_history: Option<u64>,
+) -> Result<(), LedgerError> {
+    let deltas = calculate_block_batch_deltas(blocks, store)?;
+    apply_delta_batch(deltas, store, genesis, max_ledger_history)
 }

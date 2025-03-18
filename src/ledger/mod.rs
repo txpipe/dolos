@@ -1,9 +1,12 @@
-use pallas::ledger::traverse::{Era, MultiEraBlock, MultiEraInput, MultiEraUpdate};
+use pallas::codec::minicbor;
+use pallas::ledger::traverse::{Era, MultiEraBlock, MultiEraInput, MultiEraTx, MultiEraUpdate};
 use pallas::{crypto::hash::Hash, ledger::traverse::MultiEraOutput};
 use pparams::Genesis;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use thiserror::Error;
+
+use crate::model::BlockBody;
 
 pub mod pparams;
 //pub mod validate;
@@ -40,6 +43,14 @@ impl<'a> TryFrom<&'a EraCbor> for MultiEraOutput<'a> {
 
     fn try_from(value: &'a EraCbor) -> Result<Self, Self::Error> {
         MultiEraOutput::decode(value.0, &value.1)
+    }
+}
+
+impl<'a> TryFrom<&'a EraCbor> for MultiEraTx<'a> {
+    type Error = pallas::codec::minicbor::decode::Error;
+
+    fn try_from(value: &'a EraCbor) -> Result<Self, Self::Error> {
+        MultiEraTx::decode_for_era(value.0, &value.1)
     }
 }
 
@@ -106,6 +117,8 @@ pub struct LedgerDelta {
     pub recovered_stxi: HashMap<TxoRef, EraCbor>,
     pub undone_utxo: HashMap<TxoRef, EraCbor>,
     pub new_pparams: Vec<EraCbor>,
+    pub new_block: BlockBody,
+    pub undone_block: BlockBody,
 }
 
 /// Computes the ledger delta of applying a particular block.
@@ -126,8 +139,17 @@ pub fn compute_delta(
     block: &MultiEraBlock,
     mut context: LedgerSlice,
 ) -> Result<LedgerDelta, BrokenInvariant> {
+    let era: u16 = block.era().into();
     let mut delta = LedgerDelta {
         new_position: Some(ChainPoint(block.slot(), block.hash())),
+        new_block: match block {
+            MultiEraBlock::Byron(x) => minicbor::to_vec((era, x)).unwrap(),
+            MultiEraBlock::Conway(x) => minicbor::to_vec((era, x)).unwrap(),
+            MultiEraBlock::Babbage(x) => minicbor::to_vec((era, x)).unwrap(),
+            MultiEraBlock::AlonzoCompatible(x, _) => minicbor::to_vec((era, x)).unwrap(),
+            MultiEraBlock::EpochBoundary(x) => minicbor::to_vec((0_u16, x)).unwrap(),
+            _ => todo!(),
+        },
         ..Default::default()
     };
 
@@ -170,8 +192,17 @@ pub fn compute_undo_delta(
     block: &MultiEraBlock,
     mut context: LedgerSlice,
 ) -> Result<LedgerDelta, BrokenInvariant> {
+    let era: u16 = block.era().into();
     let mut delta = LedgerDelta {
         undone_position: Some(ChainPoint(block.slot(), block.hash())),
+        undone_block: match block {
+            MultiEraBlock::Byron(x) => minicbor::to_vec((era, x)).unwrap(),
+            MultiEraBlock::Conway(x) => minicbor::to_vec((era, x)).unwrap(),
+            MultiEraBlock::Babbage(x) => minicbor::to_vec((era, x)).unwrap(),
+            MultiEraBlock::AlonzoCompatible(x, _) => minicbor::to_vec((era, x)).unwrap(),
+            MultiEraBlock::EpochBoundary(x) => minicbor::to_vec((0_u16, x)).unwrap(),
+            _ => todo!(),
+        },
         ..Default::default()
     };
 
@@ -242,6 +273,15 @@ pub fn compute_origin_delta(genesis: &Genesis) -> LedgerDelta {
     delta
 }
 
+/// Computes the amount of mutable slots in chain.
+///
+/// Reads the relevant genesis config values and uses the security window guarantee formula from
+/// consensus to calculate the latest slot that can be considered immutable.
+pub fn mutable_slots(genesis: &Genesis) -> u64 {
+    ((3.0 * genesis.byron.protocol_consts.k as f32) / (genesis.shelley.active_slots_coeff.unwrap()))
+        as u64
+}
+
 /// Computes the latest immutable slot
 ///
 /// Takes the latest known tip, reads the relevant genesis config values and
@@ -249,10 +289,7 @@ pub fn compute_origin_delta(genesis: &Genesis) -> LedgerDelta {
 /// latest slot that can be considered immutable. This is used mainly to define
 /// which slots can be finalized in the ledger store (aka: compaction).
 pub fn lastest_immutable_slot(tip: BlockSlot, genesis: &Genesis) -> BlockSlot {
-    let security_window = (3.0 * genesis.byron.protocol_consts.k as f32)
-        / (genesis.shelley.active_slots_coeff.unwrap());
-
-    tip.saturating_sub(security_window.ceil() as u64)
+    tip.saturating_sub(mutable_slots(genesis))
 }
 
 #[cfg(test)]

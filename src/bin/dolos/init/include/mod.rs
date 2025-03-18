@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use dolos::ledger::{mutable_slots, pparams::Genesis};
 use miette::{Context, IntoDiagnostic};
 
 mod mainnet;
@@ -35,4 +36,31 @@ pub fn save_genesis_configs(root: &Path, network: &super::KnownNetwork) -> miett
     }
 
     Ok(())
+}
+
+pub fn network_mutable_slots(network: &super::KnownNetwork) -> u64 {
+    let genesis = match network {
+        super::KnownNetwork::CardanoMainnet => Genesis {
+            alonzo: serde_json::from_slice(mainnet::ALONZO).unwrap(),
+            conway: serde_json::from_slice(mainnet::CONWAY).unwrap(),
+            byron: serde_json::from_slice(mainnet::BYRON).unwrap(),
+            shelley: serde_json::from_slice(mainnet::SHELLEY).unwrap(),
+            force_protocol: None,
+        },
+        super::KnownNetwork::CardanoPreProd => Genesis {
+            alonzo: serde_json::from_slice(preprod::ALONZO).unwrap(),
+            conway: serde_json::from_slice(preprod::CONWAY).unwrap(),
+            byron: serde_json::from_slice(preprod::BYRON).unwrap(),
+            shelley: serde_json::from_slice(preprod::SHELLEY).unwrap(),
+            force_protocol: None,
+        },
+        super::KnownNetwork::CardanoPreview => Genesis {
+            alonzo: serde_json::from_slice(preview::ALONZO).unwrap(),
+            conway: serde_json::from_slice(preview::CONWAY).unwrap(),
+            byron: serde_json::from_slice(preview::BYRON).unwrap(),
+            shelley: serde_json::from_slice(preview::SHELLEY).unwrap(),
+            force_protocol: Some(6),
+        },
+    };
+    mutable_slots(&genesis)
 }

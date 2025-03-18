@@ -3,10 +3,13 @@ use rocket::{get, http::Status, State};
 use std::sync::Arc;
 
 use crate::{
+    chain::ChainStore,
     ledger::pparams::{self, Genesis},
-    serve::minibf::common::{Order, Pagination},
+    serve::minibf::{
+        common::{Order, Pagination},
+        routes::blocks::{hash_or_number_to_body, BlockHeaderFields},
+    },
     state::LedgerStore,
-    wal::{redb::WalStore, ChainPoint, ReadUtils, WalReader},
 };
 
 use super::Block;
@@ -18,60 +21,34 @@ pub fn route(
     page: Option<u64>,
     order: Option<Order>,
     genesis: &State<Arc<Genesis>>,
-    wal: &State<WalStore>,
+    chain: &State<ChainStore>,
     ledger: &State<LedgerStore>,
 ) -> Result<rocket::serde::json::Json<Vec<Block>>, Status> {
     let pagination = Pagination::try_new(count, page, order)?;
 
-    let tip_number = match wal.find_tip().map_err(|_| Status::ServiceUnavailable)? {
+    let tip_number = match chain.get_tip().map_err(|_| Status::ServiceUnavailable)? {
         None => return Err(Status::ServiceUnavailable),
-        Some((_, point)) => {
-            let raw = wal
-                .read_block(&point)
-                .map_err(|_| Status::ServiceUnavailable)?;
-
-            MultiEraBlock::decode(&raw.body)
-                .map_err(|_| Status::ServiceUnavailable)?
-                .number()
-        }
-    };
-
-    let iterator = wal
-        .crawl_from(None)
-        .map_err(|_| Status::ServiceUnavailable)?
-        .rev()
-        .into_blocks();
-
-    let mut logseq = None;
-    for raw in iterator.flatten() {
-        let block = MultiEraBlock::decode(&raw.body).map_err(|_| Status::ServiceUnavailable)?;
-        if block.hash().to_string() == hash_or_number
-            || block.number().to_string() == hash_or_number
-        {
-            logseq = wal
-                .locate_point(&ChainPoint::Specific(block.slot(), block.hash()))
-                .map_err(|_| Status::InternalServerError)?;
-            break;
-        }
-    }
-
-    let mut iterator = match logseq {
-        Some(logseq) => wal
-            .crawl_from(Some(logseq))
+        Some((_, body)) => MultiEraBlock::decode(&body)
             .map_err(|_| Status::ServiceUnavailable)?
-            .into_blocks(),
-        None => return Err(Status::BadRequest),
+            .number(),
     };
+
+    let body = hash_or_number_to_body(&hash_or_number, chain)?;
+    let curr = MultiEraBlock::decode(&body).map_err(|_| Status::ServiceUnavailable)?;
+
+    let mut iterator = chain
+        .get_range(Some(curr.slot()), None)
+        .map_err(|_| Status::ServiceUnavailable)?;
     let _ = iterator.next(); // Discard first.
 
     let mut output = vec![];
 
     // Now we found it, continue forward
     let mut i = 0;
-    for raw in iterator.flatten() {
+    for (_, body) in iterator {
         i += 1;
         if pagination.includes(i) {
-            let block = MultiEraBlock::decode(&raw.body).map_err(|_| Status::ServiceUnavailable)?;
+            let block = MultiEraBlock::decode(&body).map_err(|_| Status::ServiceUnavailable)?;
             let slot = block.slot();
             let tip = ledger.cursor().map_err(|_| Status::InternalServerError)?;
             let updates = ledger
@@ -84,8 +61,13 @@ pub fn route(
                 .collect::<Result<Vec<MultiEraUpdate>, Status>>()?;
             let summary = pparams::fold_with_hacks(genesis, &updates, slot);
 
-            let (previous_block, block_vrf, op_cert, op_cert_counter) =
-                Block::extract_from_header(&block.header())?;
+            let BlockHeaderFields {
+                previous_block,
+                block_vrf,
+                op_cert,
+                op_cert_counter,
+                slot_leader,
+            } = Block::extract_from_header(&block.header())?;
             let (epoch, epoch_slot, block_time) =
                 Block::resolve_time_from_genesis(&slot, summary.era_for_slot(slot));
             output.push(Block {
@@ -124,6 +106,7 @@ pub fn route(
                             .to_string(),
                     ),
                 },
+                slot_leader,
                 ..Default::default()
             })
         } else if i > pagination.to() {

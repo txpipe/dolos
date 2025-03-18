@@ -1,5 +1,7 @@
+use std::sync::Arc;
+
 use dolos::{
-    ledger,
+    ledger::mutable_slots,
     wal::{self, WalBlockReader, WalReader as _},
 };
 use itertools::Itertools;
@@ -10,17 +12,19 @@ use tracing::debug;
 use crate::feedback::Feedback;
 
 #[derive(Debug, clap::Args)]
-pub struct Args;
+pub struct Args {
+    #[arg(short, long, default_value_t = 500)]
+    pub chunk: usize,
+}
 
-pub fn run(config: &crate::Config, _args: &Args, feedback: &Feedback) -> miette::Result<()> {
+pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::Result<()> {
     //crate::common::setup_tracing(&config.logging)?;
 
     let progress = feedback.slot_progress_bar();
     progress.set_message("rebuilding ledger");
 
-    let genesis = crate::common::open_genesis_files(&config.genesis)?;
-
     let wal = crate::common::open_wal(config).context("opening WAL store")?;
+    let genesis = Arc::new(crate::common::open_genesis_files(&config.genesis)?);
 
     let light = dolos::state::redb::LedgerStore::in_memory_v2_light()
         .into_diagnostic()
@@ -43,6 +47,11 @@ pub fn run(config: &crate::Config, _args: &Args, feedback: &Feedback) -> miette:
             .context("applying origin utxos")?;
     }
 
+    let chain_path = crate::common::define_chain_path(config).context("finding chain path")?;
+    let chain = dolos::chain::redb::ChainStore::open(chain_path, None, None)
+        .into_diagnostic()
+        .context("opening chain store.")?;
+
     let (_, tip) = wal
         .find_tip()
         .into_diagnostic()
@@ -54,24 +63,13 @@ pub fn run(config: &crate::Config, _args: &Args, feedback: &Feedback) -> miette:
         wal::ChainPoint::Specific(slot, _) => progress.set_length(slot),
     }
 
-    let wal_seq = light
-        .cursor()
-        .into_diagnostic()
-        .context("finding ledger cursor")?
-        .map(|ledger::ChainPoint(s, h)| wal.assert_point(&wal::ChainPoint::Specific(s, h)))
-        .transpose()
-        .into_diagnostic()
-        .context("locating wal sequence")?;
-
     // Amount of slots until unmutability is guaranteed.
-    let lookahead = ((3.0 * genesis.byron.protocol_consts.k as f32)
-        / (genesis.shelley.active_slots_coeff.unwrap())) as u64;
-
-    let remaining = WalBlockReader::try_new(&wal, wal_seq, lookahead)
+    let lookahead = mutable_slots(&genesis);
+    let remaining = WalBlockReader::try_new(&wal, None, lookahead)
         .into_diagnostic()
         .context("creating wal block reader")?;
 
-    for chunk in remaining.chunks(100).into_iter() {
+    for chunk in remaining.chunks(args.chunk).into_iter() {
         let collected = chunk.collect_vec();
         let blocks: Vec<_> = collected
             .iter()
@@ -80,8 +78,17 @@ pub fn run(config: &crate::Config, _args: &Args, feedback: &Feedback) -> miette:
             .into_diagnostic()
             .context("decoding blocks")?;
 
-        dolos::state::apply_block_batch(
-            &blocks,
+        let deltas = dolos::state::calculate_block_batch_deltas(&blocks, &light)
+            .into_diagnostic()
+            .context("calculating batch deltas.")?;
+
+        chain
+            .apply(&deltas)
+            .into_diagnostic()
+            .context("applying deltas to chain")?;
+
+        dolos::state::apply_delta_batch(
+            deltas,
             &light,
             &genesis,
             config.storage.max_ledger_history,

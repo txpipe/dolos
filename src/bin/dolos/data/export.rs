@@ -11,6 +11,14 @@ pub struct Args {
     /// the path to export to
     #[arg(short, long)]
     output: PathBuf,
+
+    // Whether to include ledger
+    #[arg(long, action)]
+    include_ledger: bool,
+
+    // Whether to include chain
+    #[arg(long, action)]
+    include_chain: bool,
 }
 
 fn prepare_wal(
@@ -47,6 +55,25 @@ fn prepare_ledger(
     Ok(())
 }
 
+fn prepare_chain(
+    chain: dolos::chain::ChainStore,
+    pb: &crate::feedback::ProgressBar,
+) -> miette::Result<()> {
+    let mut chain = match chain {
+        dolos::chain::ChainStore::Redb(x) => x,
+        _ => miette::bail!("Only redb is supported for export"),
+    };
+
+    let db = chain.db_mut().unwrap();
+    pb.set_message("compacting chain");
+    db.compact().into_diagnostic()?;
+
+    pb.set_message("checking chain integrity");
+    db.check_integrity().into_diagnostic()?;
+
+    Ok(())
+}
+
 pub fn run(
     config: &crate::Config,
     args: &Args,
@@ -58,7 +85,7 @@ pub fn run(
     let encoder = GzEncoder::new(export_file, Compression::default());
     let mut archive = Builder::new(encoder);
 
-    let (wal, ledger) = crate::common::open_data_stores(config)?;
+    let (wal, ledger, chain) = crate::common::open_data_stores(config)?;
 
     prepare_wal(wal, &pb)?;
 
@@ -68,15 +95,27 @@ pub fn run(
         .append_path_with_name(&path, "wal")
         .into_diagnostic()?;
 
-    prepare_ledger(ledger, &pb)?;
+    if args.include_ledger {
+        prepare_ledger(ledger, &pb)?;
+        let path = config.storage.path.join("ledger");
 
-    let path = config.storage.path.join("ledger");
+        archive
+            .append_path_with_name(&path, "ledger")
+            .into_diagnostic()?;
+    }
 
-    archive
-        .append_path_with_name(&path, "ledger")
-        .into_diagnostic()?;
+    prepare_chain(chain, &pb)?;
 
-    pb.set_message("creating archive");
+    if args.include_chain {
+        let path = config.storage.path.join("chain");
+
+        archive
+            .append_path_with_name(&path, "chain")
+            .into_diagnostic()?;
+
+        pb.set_message("creating archive");
+    }
+
     archive.finish().into_diagnostic()?;
 
     Ok(())

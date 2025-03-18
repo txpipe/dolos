@@ -5,8 +5,9 @@ use std::{net::SocketAddr, sync::Arc};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
+use crate::chain::ChainStore;
 use crate::prelude::Error;
-use crate::{ledger::pparams::Genesis, mempool::Mempool, state::LedgerStore, wal::redb::WalStore};
+use crate::{ledger::pparams::Genesis, mempool::Mempool, state::LedgerStore};
 
 mod common;
 mod routes;
@@ -19,8 +20,8 @@ pub struct Config {
 pub async fn serve(
     cfg: Config,
     genesis: Arc<Genesis>,
-    wal: WalStore,
     ledger: LedgerStore,
+    chain: ChainStore,
     mempool: Mempool,
     exit: CancellationToken,
 ) -> Result<(), Error> {
@@ -40,8 +41,8 @@ pub async fn serve(
                 )),
         )
         .manage(genesis)
-        .manage(wal)
         .manage(ledger)
+        .manage(chain)
         .manage(mempool)
         .mount(
             "/",
