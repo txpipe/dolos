@@ -100,6 +100,13 @@ network_peer_discovery = true
 - If enabled via config, a leger query will be executed at the start of the bootstrapping process to access relay data.  The response will be added to the set of cold peers after removing duplicates.
 - The peer discovery process will continue running indefinitely until the max number of cold peers has been reached.
 
+### Peer Churning
+
+- Hot peers will be forced to rotate automatically.
+- A configurable period of max time will decide how long can a hot peer remain active.
+- When a peer is demoted from the list of hot peers, a new peer will be promoted from the list of warm peers.
+- Bootstrapping peers defined via config will be exempted from churning.
+
 ### Chain Sync Pipeline
 
 - Chain sync miniprotocol will be started and executed for each hot peer.
@@ -107,3 +114,8 @@ network_peer_discovery = true
 - A sliding window of received headers will be used to compare against forks and retain only a single one by following the longest chain rule.
 - Block fetch will be executed only once against the peer with smallest latency score that also provided the corresponding header.
 
+### Tx Submit Pipeline
+
+- Tx submit protocol will be initiated for each hot peer and remain idle until a request is made.
+- The current state of mempool txs will be shared upon a request from any of the connected upstream peer.
+- Txs will be removed from mempool once a configurable number of propagations (aka: requests by peers) have been executed.
