@@ -14,14 +14,15 @@ use super::{
     to_plutus_data::convert_tag_to_constr,
 };
 use pallas::{
-    applying::MultiEraProtocolParameters,
+    applying::MultiEraProtocolParameters, 
+    codec::minicbor, 
     ledger::{
         primitives::{
             conway::{Redeemer, RedeemerTag},
             ExUnits, PlutusData,
         },
         traverse::{MultiEraRedeemer, MultiEraTx},
-    },
+    }
 };
 use rug::{ops::NegAssign, Complete, Integer};
 use tracing::{debug, instrument};
@@ -31,6 +32,7 @@ pub struct TxEvalResult {
     pub tag: RedeemerTag,
     pub index: u32,
     pub units: ExUnits,
+    pub original_cbor: Vec<u8>,
 }
 
 pub fn map_pallas_data_to_pragma_data<'a>(
@@ -171,6 +173,14 @@ fn execute_script(
 
     let result = program.eval(&arena);
 
+    let evaluated_redeemer = Redeemer {
+        ex_units: ExUnits {
+            steps: (result.info.consumed_budget.cpu * 11 / 10) as u64,
+            mem: (result.info.consumed_budget.mem * 11 / 10) as u64,
+        },
+        ..redeemer.clone()
+    };
+
     Ok(TxEvalResult {
         tag: redeemer.tag,
         index: redeemer.index,
@@ -178,6 +188,7 @@ fn execute_script(
             steps: (result.info.consumed_budget.cpu * 11 / 10) as u64,
             mem: (result.info.consumed_budget.mem * 11 / 10) as u64,
         },
+        original_cbor: minicbor::to_vec(evaluated_redeemer).unwrap(),
     })
 }
 

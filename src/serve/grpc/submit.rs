@@ -80,6 +80,7 @@ fn tx_eval_to_u5c(
                         steps: x.units.steps,
                         memory: x.units.mem,
                     }),
+                    original_cbor: x.original_cbor.clone().into(),
                     ..Default::default()
                 })
                 .collect(),
