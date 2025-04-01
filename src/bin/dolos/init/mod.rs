@@ -185,7 +185,7 @@ pub struct Args {
     #[arg(long)]
     serve_grpc: Option<bool>,
 
-    /// Serve clients via HTTP
+    /// Serve clients minibf via HTTP
     #[arg(long)]
     serve_minibf: Option<bool>,
 
@@ -279,7 +279,7 @@ impl ConfigEditor {
                 }
                 .into();
             } else {
-                self.0.serve.grpc = None;
+                self.0.serve.minibf = None;
             }
         }
 
