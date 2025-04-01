@@ -286,6 +286,21 @@ impl ConfigEditor {
         self
     }
 
+    fn apply_serve_trp(mut self, value: Option<bool>) -> Self {
+        if let Some(value) = value {
+            if value {
+                self.0.serve.trp = dolos::serve::trp::Config {
+                    listen_address: "[::]:3000".parse().unwrap(),
+                }
+                .into();
+            } else {
+                self.0.serve.trp = None;
+            }
+        }
+
+        self
+    }
+
     #[cfg(unix)]
     fn apply_serve_ouroboros(mut self, value: Option<bool>) -> Self {
         if let Some(value) = value {
@@ -331,6 +346,7 @@ impl ConfigEditor {
             .apply_history_pruning(args.max_chain_history.into())
             .apply_serve_grpc(args.serve_grpc)
             .apply_serve_minibf(args.serve_minibf)
+            .apply_serve_trp(args.serve_minibf)
             .apply_serve_ouroboros(args.serve_ouroboros)
             .apply_enable_relay(args.enable_relay)
     }
@@ -411,6 +427,16 @@ impl ConfigEditor {
         Ok(self.apply_serve_minibf(Some(value)))
     }
 
+    fn prompt_serve_trp(self) -> miette::Result<Self> {
+        let value = Confirm::new("Do you want to serve clients a TRP endpoint?")
+            .with_default(self.0.serve.trp.is_some())
+            .prompt()
+            .into_diagnostic()
+            .context("asking for serve trp")?;
+
+        Ok(self.apply_serve_trp(Some(value)))
+    }
+
     #[cfg(unix)]
     fn prompt_serve_ouroboros(self) -> miette::Result<Self> {
         let value = Confirm::new("Do you want to serve clients via Ouroboros (aka: node socket)?")
@@ -459,6 +485,7 @@ impl ConfigEditor {
             .prompt_history_pruning()?
             .prompt_serve_grpc()?
             .prompt_serve_minibf()?
+            .prompt_serve_trp()?
             .prompt_serve_ouroboros()?
             .prompt_enable_relay()?;
 
