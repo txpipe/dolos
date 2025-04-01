@@ -1,0 +1,29 @@
+import { Callout } from "nextra/components";
+
+# Bootstrap using a Dolos Snapshot
+
+TxPipe generates daily snapshots for the storage of Dolos. This comes in 2 varieties:
+
+* Full: This includes the full chain history.
+* Ledger: This includes only the ledger part, with a minimal WAL used to intersect against peers and continue sync.
+
+## Execution
+
+To execute the _Mithril_ bootstrap procedure, you need to run the following command line:
+
+```sh
+dolos bootstrap snapshot --variant full|ledger
+```
+
+The process will take from several minutes to a few hours depending on the
+network. You'll see a sequence of progress bars describing the each of the
+steps of the process.
+
+<Callout type="warning">
+The process doesn't support resuming from previous runs, if you interrupt the process you'll need to start over.
+</Callout>
+
+<Callout type="info">
+The above command won't proceed if it detects that you already have data from
+previous Dolos runs.
+</Callout>
