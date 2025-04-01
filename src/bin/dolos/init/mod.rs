@@ -9,7 +9,7 @@ use std::{
     str::FromStr,
 };
 
-use crate::{common::remove_files_in_directory, feedback::Feedback};
+use crate::{common::cleanup_data, feedback::Feedback};
 
 mod include;
 
@@ -325,9 +325,9 @@ impl ConfigEditor {
                 .context("asking for storage version upgrade")?;
 
             if delete {
-                remove_files_in_directory(self.0.storage.path.clone())
+                cleanup_data(&self.0)
                     .into_diagnostic()
-                    .context("deleting data dir")?;
+                    .context("cleaning up data")?;
             }
         }
 

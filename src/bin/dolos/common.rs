@@ -1,10 +1,6 @@
 use dolos::{chain, ledger::pparams::Genesis, state, wal};
 use miette::{Context as _, IntoDiagnostic};
-use std::{
-    fs,
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use std::{fs, path::PathBuf, time::Duration};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
@@ -206,20 +202,20 @@ pub fn spawn_pipeline(pipeline: gasket::daemon::Daemon, exit: CancellationToken)
     tokio::spawn(run_pipeline(pipeline, exit))
 }
 
-pub fn remove_files_in_directory<P: AsRef<Path>>(path: P) -> Result<(), std::io::Error> {
-    let path = path.as_ref();
+pub fn cleanup_data(config: &crate::Config) -> Result<(), std::io::Error> {
+    let root = &config.storage.path;
 
-    if path.is_dir() {
-        for entry_result in fs::read_dir(path)? {
+    if root.is_dir() {
+        for entry_result in fs::read_dir(root)? {
             let entry = entry_result?;
             let entry_path = entry.path();
             if entry_path.is_file() {
                 fs::remove_file(&entry_path)?;
             }
         }
-        fs::remove_dir(path)?; // Remove the now-empty directory
+        fs::remove_dir(root)?; // Remove the now-empty directory
     } else {
-        info!("Path is not a directoy, ignoring.");
+        info!("Path is not a directory, ignoring.");
     }
     Ok(())
 }
