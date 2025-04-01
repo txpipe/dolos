@@ -2,6 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.20.0] - 2025-04-01
+
+### 🚀 Features
+
+- Implement mini-blockfrost emulator (#447)
+- Implement new chain store (#451)
+- *(minibf)* Implement `/txs/<hash>/cbor` endpoint (#465)
+
+### 🐛 Bug Fixes
+
+- Remove deprecated GenesisValues (#454)
+- Use look-ahead WAL reader for the ledger rebuild procedure (#453)
+- Prompt for storage upgrade on init (#464)
+
+### 📚 Documentation
+
+- Propose ADR for P2P features (#460)
+
+### ⚙️ Miscellaneous Tasks
+
+- Fix lint warnings (#459)
+- Update Pallas to latest main (#463)
+- Add minibf prompt to init (#466)
+- Refresh example configs (#467)
+
 ## [0.19.1] - 2025-01-25
 
 ### 🐛 Bug Fixes
@@ -11,6 +36,10 @@ All notable changes to this project will be documented in this file.
 ### 🔧 Continuous Integration
 
 - Use ubuntu-22.04 tag for runners (#443)
+
+### ⚙️ Miscellaneous Tasks
+
+- Release dolos version 0.19.1
 
 ## [0.19.0] - 2025-01-24
 

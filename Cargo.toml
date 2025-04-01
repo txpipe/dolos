@@ -1,7 +1,7 @@
 [package]
 name = "dolos"
 description = "A Cardano data-node built in Rust"
-version = "0.19.1"
+version = "0.20.0"
 edition = "2021"
 repository = "https://github.com/txpipe/dolos"
 homepage = "https://github.com/txpipe/dolos"
@@ -108,7 +108,7 @@ pr-run-mode = "plan"
 # Whether to install an updater program
 install-updater = false
 # The preferred Rust toolchain to use in CI (rustup toolchain syntax)
-rust-toolchain-version = "1.81.0"
+rust-toolchain-version = "1.85.1"
 # The archive format to use for windows builds (defaults .zip)
 windows-archive = ".tar.gz"
 # The archive format to use for non-windows builds (defaults .tar.xz)
