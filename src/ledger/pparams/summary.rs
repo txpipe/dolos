@@ -1,4 +1,6 @@
-use pallas::{applying::MultiEraProtocolParameters, ledger::traverse::MultiEraUpdate};
+use pallas::{
+    ledger::traverse::MultiEraUpdate, ledger::validate::utils::MultiEraProtocolParameters,
+};
 use tracing::debug;
 
 use super::Genesis;

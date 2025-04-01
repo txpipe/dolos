@@ -2,8 +2,8 @@ use dolos::ledger::{EraCbor, TxoRef};
 use itertools::*;
 use miette::{Context, IntoDiagnostic};
 use pallas::{
-    applying::{validate_tx, CertState, Environment as ValidationContext, UTxOs},
     ledger::traverse::{Era, MultiEraInput, MultiEraOutput, MultiEraUpdate},
+    ledger::validate::utils::{CertState, Environment as ValidationContext, UTxOs},
 };
 use std::{borrow::Cow, path::PathBuf, sync::Arc};
 
@@ -101,7 +101,8 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
 
     let mut cert_state = CertState::default();
 
-    validate_tx(&tx, 0, &context, &utxos2, &mut cert_state).unwrap();
+    pallas::ledger::validate::phase1::validate_tx(&tx, 0, &context, &utxos2, &mut cert_state)
+        .unwrap();
 
     Ok(())
 }

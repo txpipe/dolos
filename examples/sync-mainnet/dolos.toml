@@ -4,7 +4,10 @@ network_magic = 764824073
 is_testnet = false
 
 [storage]
+version = "v1"
 path = "data"
+max_wal_history = 129600
+max_chain_history = 2592000
 
 [genesis]
 byron_path = "byron.json"
@@ -20,13 +23,10 @@ prune_height = 200
 
 [serve.grpc]
 listen_address = "[::]:50051"
+permissive_cors = true
 
 [serve.ouroboros]
 listen_path = "dolos.socket"
-magic = 764824073
-
-[relay]
-listen_address = "[::]:30031"
 magic = 764824073
 
 [mithril]
@@ -35,5 +35,6 @@ genesis_key = "5b3139312c36362c3134302c3138352c3133382c31312c3233372c3230372c323
 
 [logging]
 max_level = "INFO"
+include_tokio = false
 include_pallas = false
 include_grpc = false
