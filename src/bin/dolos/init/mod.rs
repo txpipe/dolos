@@ -1,4 +1,5 @@
 use clap::Parser;
+use dolos::model::StorageVersion;
 use include::network_mutable_slots;
 use inquire::{Confirm, Select, Text};
 use miette::{miette, Context as _, IntoDiagnostic};
@@ -8,7 +9,7 @@ use std::{
     str::FromStr,
 };
 
-use crate::feedback::Feedback;
+use crate::{common::cleanup_data, feedback::Feedback};
 
 mod include;
 
@@ -314,6 +315,25 @@ impl ConfigEditor {
             .apply_enable_relay(args.enable_relay)
     }
 
+    fn prompt_storage_upgrade(mut self) -> miette::Result<Self> {
+        if self.0.storage.version == StorageVersion::V0 {
+            self.0.storage.version = StorageVersion::V1;
+            let delete = Confirm::new("Your storage is incompatible with current version. Do you want to delete data and bootstrap?")
+                .with_default(true)
+                .prompt()
+                .into_diagnostic()
+                .context("asking for storage version upgrade")?;
+
+            if delete {
+                cleanup_data(&self.0)
+                    .into_diagnostic()
+                    .context("cleaning up data")?;
+            }
+        }
+
+        Ok(self)
+    }
+
     fn prompt_known_network(self) -> miette::Result<Self> {
         let value = Select::new(
             "Which network are you connecting to?",
@@ -401,6 +421,7 @@ impl ConfigEditor {
 
     fn confirm_values(mut self) -> miette::Result<ConfigEditor> {
         self = self
+            .prompt_storage_upgrade()?
             .prompt_known_network()?
             .prompt_include_genesis()?
             .prompt_remote_peer()?
