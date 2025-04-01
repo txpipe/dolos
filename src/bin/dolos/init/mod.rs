@@ -401,11 +401,12 @@ impl ConfigEditor {
     }
 
     fn prompt_serve_minibf(self) -> miette::Result<Self> {
-        let value = Confirm::new("Do you want to serve clients via HTTP (Blockfrost)?")
-            .with_default(self.0.serve.minibf.is_some())
-            .prompt()
-            .into_diagnostic()
-            .context("asking for serve http")?;
+        let value =
+            Confirm::new("Do you want to serve clients via a Blockfrost-like HTTP endpoint?")
+                .with_default(self.0.serve.minibf.is_some())
+                .prompt()
+                .into_diagnostic()
+                .context("asking for serve http")?;
 
         Ok(self.apply_serve_minibf(Some(value)))
     }
