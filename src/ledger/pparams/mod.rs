@@ -1,12 +1,10 @@
 use pallas::{
-    applying::utils::{
+    ledger::validate::utils::{
         AlonzoProtParams, BabbageProtParams, ByronProtParams, ConwayProtParams,
         MultiEraProtocolParameters, ShelleyProtParams,
     },
-    codec::utils::KeyValuePairs,
     ledger::{
         configs::{alonzo, byron, conway, shelley},
-        primitives::alonzo::Language as AlonzoLanguage,
         traverse::MultiEraUpdate,
     },
 };
@@ -158,7 +156,7 @@ fn bootstrap_babbage_pparams(previous: AlonzoProtParams) -> BabbageProtParams {
             plutus_v1: previous
                 .cost_models_for_script_languages
                 .iter()
-                .filter(|(k, _)| k == &AlonzoLanguage::PlutusV1)
+                .filter(|(k, _)| *k == &pallas::ledger::primitives::alonzo::Language::PlutusV1)
                 .map(|(_, v)| v.clone())
                 .next(),
             plutus_v2: None,
@@ -202,7 +200,7 @@ fn bootstrap_conway_pparams(
             plutus_v1: previous.cost_models_for_script_languages.plutus_v1,
             plutus_v2: previous.cost_models_for_script_languages.plutus_v2,
             plutus_v3: Some(genesis.plutus_v3_cost_model.clone()),
-            unknown: KeyValuePairs::from(vec![]),
+            unknown: Default::default(),
         },
         pool_voting_thresholds: pallas::ledger::primitives::conway::PoolVotingThresholds {
             motion_no_confidence: float_to_rational(

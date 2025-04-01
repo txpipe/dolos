@@ -59,7 +59,7 @@ fn event_to_wait_for_tx_response(event: Event) -> WaitForTxResponse {
 }
 
 fn tx_eval_to_u5c(
-    eval: Result<crate::uplc::EvalReport, MempoolError>,
+    eval: Result<pallas::ledger::validate::uplc::EvalReport, MempoolError>,
 ) -> u5c::spec::cardano::TxEval {
     match eval {
         Ok(eval) => u5c::spec::cardano::TxEval {

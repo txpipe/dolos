@@ -1,16 +1,12 @@
-use crate::{
-    ledger::pparams::Genesis,
-    state::LedgerStore,
-    uplc::{script_context::SlotConfig, tx, EvalReport},
-};
+use crate::{ledger::pparams::Genesis, state::LedgerStore};
 use futures_util::StreamExt;
 use itertools::Itertools;
 use pallas::{
-    applying::{utils::AccountState, validate_tx, CertState, Environment, UTxOs},
     crypto::hash::Hash,
     ledger::{
         primitives::{NetworkId, TransactionInput},
         traverse::{MultiEraBlock, MultiEraInput, MultiEraOutput, MultiEraTx},
+        validate::{phase_one::validate_tx, utils::AccountState},
     },
 };
 use std::{
@@ -34,11 +30,11 @@ pub enum MempoolError {
     DecodeError(#[from] pallas::codec::minicbor::decode::Error),
 
     #[error("tx validation failed: {0}")]
-    ValidationError(#[from] pallas::applying::utils::ValidationError),
+    ValidationError(#[from] pallas::ledger::validate::utils::ValidationError),
 
     #[cfg(feature = "phase2")]
     #[error("tx evaluation failed")]
-    EvaluationError(#[from] crate::uplc::error::Error),
+    EvaluationError(#[from] pallas::ledger::validate::uplc::error::Error),
 
     #[error("state error: {0}")]
     StateError(#[from] crate::state::LedgerError),
@@ -154,7 +150,7 @@ impl Mempool {
         }
         .unwrap();
 
-        let env = Environment {
+        let env = pallas::ledger::validate::utils::Environment {
             prot_params: era.pparams.clone(),
             prot_magic: self.genesis.shelley.network_magic.unwrap(),
             block_slot: tip.unwrap().0,
@@ -166,7 +162,7 @@ impl Mempool {
 
         let utxos = self.ledger.get_utxos(input_refs)?;
 
-        let mut pallas_utxos = UTxOs::new();
+        let mut pallas_utxos = pallas::ledger::validate::utils::UTxOs::new();
 
         for (txoref, eracbor) in utxos.iter() {
             let tx_in = TransactionInput {
@@ -180,13 +176,24 @@ impl Mempool {
             pallas_utxos.insert(input, output);
         }
 
-        validate_tx(tx, 0, &env, &pallas_utxos, &mut CertState::default())?;
+        validate_tx(
+            tx,
+            0,
+            &env,
+            &pallas_utxos,
+            &mut pallas::ledger::validate::utils::CertState::default(),
+        )?;
 
         Ok(())
     }
 
     #[cfg(feature = "phase2")]
-    pub fn evaluate(&self, tx: &MultiEraTx) -> Result<EvalReport, MempoolError> {
+    pub fn evaluate(
+        &self,
+        tx: &MultiEraTx,
+    ) -> Result<pallas::ledger::validate::uplc::EvalReport, MempoolError> {
+        use crate::ledger::{EraCbor, TxoRef};
+
         let tip = self.ledger.cursor()?;
 
         let updates: Vec<_> = self
@@ -201,7 +208,7 @@ impl Mempool {
             tip.as_ref().unwrap().0,
         );
 
-        let slot_config = SlotConfig {
+        let slot_config = pallas::ledger::validate::uplc::script_context::SlotConfig {
             slot_length: eras.edge().pparams.slot_length(),
             zero_slot: eras.edge().start.slot,
             zero_time: eras.edge().start.timestamp.timestamp().try_into().unwrap(),
@@ -209,15 +216,33 @@ impl Mempool {
 
         let input_refs = tx.requires().iter().map(From::from).collect();
 
-        let utxos = self.ledger.get_utxos(input_refs)?;
+        let utxos: pallas::ledger::validate::utils::UtxoMap = self
+            .ledger
+            .get_utxos(input_refs)?
+            .into_iter()
+            .map(|(TxoRef(a, b), EraCbor(c, d))| {
+                (
+                    pallas::ledger::validate::utils::TxoRef::from((a, b)),
+                    pallas::ledger::validate::utils::EraCbor::from((c, d)),
+                )
+            })
+            .collect();
 
-        let report = tx::eval_tx(tx, &eras.edge().pparams, &utxos, &slot_config)?;
+        let report = pallas::ledger::validate::phase_two::evaluate_tx(
+            tx,
+            &eras.edge().pparams,
+            &utxos,
+            &slot_config,
+        )?;
 
         Ok(report)
     }
 
     #[cfg(feature = "phase2")]
-    pub fn evaluate_raw(&self, cbor: &[u8]) -> Result<EvalReport, MempoolError> {
+    pub fn evaluate_raw(
+        &self,
+        cbor: &[u8],
+    ) -> Result<pallas::ledger::validate::uplc::EvalReport, MempoolError> {
         let tx = MultiEraTx::decode(cbor)?;
         self.evaluate(&tx)
     }
