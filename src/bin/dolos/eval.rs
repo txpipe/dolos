@@ -101,7 +101,7 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
 
     let mut cert_state = CertState::default();
 
-    pallas::ledger::validate::phase_one::validate_tx(&tx, 0, &context, &utxos2, &mut cert_state)
+    pallas::ledger::validate::phase1::validate_tx(&tx, 0, &context, &utxos2, &mut cert_state)
         .unwrap();
 
     Ok(())

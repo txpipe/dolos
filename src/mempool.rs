@@ -6,7 +6,7 @@ use pallas::{
     ledger::{
         primitives::{NetworkId, TransactionInput},
         traverse::{MultiEraBlock, MultiEraInput, MultiEraOutput, MultiEraTx},
-        validate::{phase_one::validate_tx, utils::AccountState},
+        validate::{phase1::validate_tx, utils::AccountState},
     },
 };
 use std::{
@@ -29,12 +29,12 @@ pub enum MempoolError {
     #[error("decode error: {0}")]
     DecodeError(#[from] pallas::codec::minicbor::decode::Error),
 
-    #[error("tx validation failed: {0}")]
-    ValidationError(#[from] pallas::ledger::validate::utils::ValidationError),
+    #[error("tx validation failed during phase-1: {0}")]
+    Phase1Error(#[from] pallas::ledger::validate::utils::ValidationError),
 
     #[cfg(feature = "phase2")]
-    #[error("tx evaluation failed")]
-    EvaluationError(#[from] pallas::ledger::validate::uplc::error::Error),
+    #[error("tx evaluation failed during phase-2: {0}")]
+    Phase2Error(#[from] pallas::ledger::validate::phase2::error::Error),
 
     #[error("state error: {0}")]
     StateError(#[from] crate::state::LedgerError),
@@ -191,7 +191,7 @@ impl Mempool {
     pub fn evaluate(
         &self,
         tx: &MultiEraTx,
-    ) -> Result<pallas::ledger::validate::uplc::EvalReport, MempoolError> {
+    ) -> Result<pallas::ledger::validate::phase2::EvalReport, MempoolError> {
         use crate::ledger::{EraCbor, TxoRef};
 
         let tip = self.ledger.cursor()?;
@@ -208,7 +208,7 @@ impl Mempool {
             tip.as_ref().unwrap().0,
         );
 
-        let slot_config = pallas::ledger::validate::uplc::script_context::SlotConfig {
+        let slot_config = pallas::ledger::validate::phase2::script_context::SlotConfig {
             slot_length: eras.edge().pparams.slot_length(),
             zero_slot: eras.edge().start.slot,
             zero_time: eras.edge().start.timestamp.timestamp().try_into().unwrap(),
@@ -228,7 +228,7 @@ impl Mempool {
             })
             .collect();
 
-        let report = pallas::ledger::validate::phase_two::evaluate_tx(
+        let report = pallas::ledger::validate::phase2::evaluate_tx(
             tx,
             &eras.edge().pparams,
             &utxos,
@@ -242,7 +242,7 @@ impl Mempool {
     pub fn evaluate_raw(
         &self,
         cbor: &[u8],
-    ) -> Result<pallas::ledger::validate::uplc::EvalReport, MempoolError> {
+    ) -> Result<pallas::ledger::validate::phase2::EvalReport, MempoolError> {
         let tx = MultiEraTx::decode(cbor)?;
         self.evaluate(&tx)
     }
