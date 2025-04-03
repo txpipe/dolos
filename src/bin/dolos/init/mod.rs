@@ -189,6 +189,10 @@ pub struct Args {
     #[arg(long)]
     serve_minibf: Option<bool>,
 
+    /// Serve clients TRP
+    #[arg(long)]
+    serve_trp: Option<bool>,
+
     /// Serve clients via Ouroboros
     #[arg(long)]
     serve_ouroboros: Option<bool>,
@@ -346,7 +350,7 @@ impl ConfigEditor {
             .apply_history_pruning(args.max_chain_history.into())
             .apply_serve_grpc(args.serve_grpc)
             .apply_serve_minibf(args.serve_minibf)
-            .apply_serve_trp(args.serve_minibf)
+            .apply_serve_trp(args.serve_trp)
             .apply_serve_ouroboros(args.serve_ouroboros)
             .apply_enable_relay(args.enable_relay)
     }
