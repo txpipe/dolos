@@ -82,6 +82,7 @@ The `storage` section controls how Dolos stores data in the local file system. T
 | max_chain_history      | integer | 10000    |
 
 - `path`: is the root directory where all data will be stored.
+- `version`: after Dolos v0.20.0, we've introduced a versioning system to handle schema upgrades more gracefully.
 - `wal_cache`: the size (in Mb) of the memory cache for the wal db.
 - `ledger_cache`: the size (in Mb) of the memory cache for the ledger db.
 - `max_wal_history`: the max number of slots to keep in the WAL. It makes sense to set this to the amount of mutable slots of the chain.
