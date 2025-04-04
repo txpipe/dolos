@@ -230,3 +230,7 @@ impl tx3_cardano::Ledger for Context {
             .collect()
     }
 }
+
+pub fn health(context: &Context) -> bool {
+    context.ledger.cursor().is_ok()
+}
