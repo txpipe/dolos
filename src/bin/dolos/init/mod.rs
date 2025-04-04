@@ -294,7 +294,8 @@ impl ConfigEditor {
         if let Some(value) = value {
             if value {
                 self.0.serve.trp = dolos::serve::trp::Config {
-                    listen_address: "[::]:3000".parse().unwrap(),
+                    listen_address: "[::]:8000".parse().unwrap(),
+                    max_optimize_rounds: 10,
                 }
                 .into();
             } else {

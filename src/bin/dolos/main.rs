@@ -109,6 +109,9 @@ pub struct LoggingConfig {
 
     #[serde(default)]
     include_grpc: bool,
+
+    #[serde(default)]
+    include_trp: bool,
 }
 
 impl Default for LoggingConfig {
@@ -118,6 +121,7 @@ impl Default for LoggingConfig {
             include_tokio: Default::default(),
             include_pallas: Default::default(),
             include_grpc: Default::default(),
+            include_trp: Default::default(),
         }
     }
 }
