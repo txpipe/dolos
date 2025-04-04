@@ -15,12 +15,14 @@ pub mod methods;
 #[derive(Deserialize, Serialize, Clone)]
 pub struct Config {
     pub listen_address: SocketAddr,
+    pub max_optimize_rounds: u8,
 }
 
 #[derive(Clone)]
 pub struct Context {
     pub genesis: Arc<Genesis>,
     pub ledger: LedgerStore,
+    pub config: Arc<Config>,
 }
 
 pub async fn serve(
@@ -36,7 +38,11 @@ pub async fn serve(
         .await
         .map_err(Error::server)?;
 
-    let mut module = RpcModule::new(Context { genesis, ledger });
+    let mut module = RpcModule::new(Context {
+        genesis,
+        ledger,
+        config: Arc::new(cfg),
+    });
     module
         .register_async_method("trp.resolve", |params, context, _| async {
             methods::trp_resolve(params, context).await
@@ -52,7 +58,7 @@ pub async fn serve(
 
     let cancellation = async {
         exit.cancelled().await;
-        info!("Gracefully shuting down minibf.");
+        info!("Gracefully shuting down trp.");
         let _ = handle.stop(); // Empty result with AlreadyStoppedError, can be ignored.
         Ok::<(), Error>(())
     };
