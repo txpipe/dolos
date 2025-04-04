@@ -48,6 +48,9 @@ pub async fn serve(
             methods::trp_resolve(params, context).await
         })
         .map_err(Error::server)?;
+    module
+        .register_method("health", |_, context, _| methods::health(context))
+        .map_err(Error::server)?;
 
     let handle = server.start(module);
 
