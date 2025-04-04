@@ -98,6 +98,10 @@ pub fn setup_tracing(config: &LoggingConfig) -> miette::Result<()> {
         filter = filter.with_target("tonic", level);
     }
 
+    if config.include_trp {
+        filter = filter.with_target("jsonrpsee-server", level);
+    }
+
     #[cfg(not(feature = "debug"))]
     {
         tracing_subscriber::registry()
