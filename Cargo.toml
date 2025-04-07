@@ -58,7 +58,7 @@ flate2 = "1.0.34"
 tar = "0.4.41"
 reqwest = { version = "0.12.7", default-features = false, features = ["blocking", "rustls-tls"] }
 paste = "1.0.15"
-tower-http = { version = "0.6.1", features = ["cors"] }
+tower-http = { version = "0.6.1", features = ["cors", "trace"] }
 chrono = { version = "0.4.39", default-features = false }
 
 jsonrpsee = { version = "0.24.9", features = ["server"] }
@@ -73,7 +73,7 @@ tx3-cardano = { git = "https://github.com/txpipe/tx3", rev = "545d6cb6eed3720531
 uplc = { git = "https://github.com/pragma-org/uplc.git", optional = true }
 # blst = { version = "=0.3.13", optional = true }
 rug = { version = "1.26.1", optional = true }
-rocket = { version = "0.5", features = ["json"] }
+axum = { version = "0.7.5", features = ["macros"] }
 
 [target.'cfg(not(windows))'.dependencies.mithril-client]
 version = "0.10.4"

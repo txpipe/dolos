@@ -280,6 +280,7 @@ impl ConfigEditor {
             if value {
                 self.0.serve.minibf = dolos::serve::minibf::Config {
                     listen_address: "[::]:3000".parse().unwrap(),
+                    permissive_cors: Some(true),
                 }
                 .into();
             } else {
