@@ -1,0 +1,66 @@
+# Mini Blockfrost
+
+Dolos exposes a HTTP endpoint that exposes some of Blockfrost's endpoints.
+
+The endpoint provided implements some but not all of the endpoints defined by the [Blockfrost OpenAPI specification](https://github.com/blockfrost/openapi). Currently implemented endpoints are:
+
+* ``/accounts/{stake_address}/utxos``
+* ``/addresses/{address}/utxos``
+* ``/addresses/{address}/utxos/asset``
+* ``/blocks/latest``
+* ``/blocks/latest/txs``
+* ``/blocks/{hash_or_number}``
+* ``/blocks/{hash_or_number}/addresses``
+* ``/blocks/{hash_or_number}/next``
+* ``/blocks/{hash_or_number}/previous``
+* ``/blocks/{hash_or_number}/txs``
+* ``/blocks/slot/{slot_number}``
+* ``/epochs/latest/parameters``
+* ``/tx/submit``
+* ``/txs/{tx_hash}/cbor``
+
+If enabled via configuration, _Dolos_ will expose a TCP port accepting HTTP
+connections. The default port number is `3000`, but this value can be changed
+via configuration.
+
+## SDKs
+
+Blockfrost's SDKs can (to the most part) be adapted to be used with the Dolos MiniBF endpoint.
+An example with the [Python SDK](https://github.com/blockfrost/blockfrost-python/) looks like this:
+
+```python
+import json
+
+from blockfrost import BlockFrostApi
+
+api = BlockFrostApi(
+    project_id="",  # This parameter can mostly be ignored.
+    base_url="http://localhost:3000",
+    api_version=None,
+)
+api.api_version = None  # The API version defaults to "v0" on __init__.
+
+print(json.dumps(api.block_latest().to_dict(), indent=2))
+```
+
+## TX Builder support.
+
+Support for TX building tools as a Blockfrost Provider is not yet complete, but we're working towrds that goal.
+ 
+
+## Configuration
+
+The `serve.minibf` section controls the options for the MiniBF endpoint that can be used by clients.
+
+| property       | type   | example      |
+| -------------- | ------ | ------------ |
+| listen_address | string | "[::]:3000" |
+
+- `listen_address`: the local address (`IP:PORT`) to listen for incoming connections (`[::]` represents any IP address).
+
+This is an example of the `serve.minibf` fragment with a `dolos.toml` configuration file.
+
+```toml
+[serve.minibf]
+listen_address = "[::]:3000"
+```
