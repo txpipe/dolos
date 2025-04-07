@@ -296,6 +296,7 @@ impl ConfigEditor {
                 self.0.serve.trp = dolos::serve::trp::Config {
                     listen_address: "[::]:8000".parse().unwrap(),
                     max_optimize_rounds: 10,
+                    permissive_cors: Some(true),
                 }
                 .into();
             } else {
