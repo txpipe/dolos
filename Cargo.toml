@@ -1,7 +1,7 @@
 [package]
 name = "dolos"
 description = "A Cardano data-node built in Rust"
-version = "0.19.1"
+version = "0.20.0"
 edition = "2021"
 repository = "https://github.com/txpipe/dolos"
 homepage = "https://github.com/txpipe/dolos"
@@ -12,9 +12,9 @@ authors = ["Santiago Carmuega <santiago@carmuega.me>"]
 
 
 [dependencies]
-pallas = { git = "https://github.com/txpipe/pallas.git", features = ["hardano", "applying"] }
-# pallas = { version = "0.32.0", features = ["hardano", "applying"] }
-# pallas = { path = "../pallas/pallas", features = ["hardano", "applying"] }
+pallas = { git = "https://github.com/txpipe/pallas.git", features = ["hardano"] }
+# pallas = { version = "0.32.0", features = ["hardano"] }
+# pallas = { path = "../pallas/pallas", features = ["hardano"] }
 
 # gasket = { git = "https://github.com/construkts/gasket-rs.git", features = ["derive"] }
 gasket = { version = "^0.9", features = ["derive"] }
@@ -60,11 +60,6 @@ reqwest = { version = "0.12.7", default-features = false, features = ["blocking"
 paste = "1.0.15"
 tower-http = { version = "0.6.1", features = ["cors"] }
 chrono = { version = "0.4.39", default-features = false }
-
-# phase2 dependencies
-uplc = { git = "https://github.com/pragma-org/uplc.git", optional = true }
-# blst = { version = "=0.3.13", optional = true }
-rug = { version = "1.26.1", optional = true }
 rocket = { version = "0.5", features = ["json"] }
 
 [target.'cfg(not(windows))'.dependencies.mithril-client]
@@ -86,7 +81,7 @@ tempfile = "3.3.0"
 mithril = ["mithril-client"]
 utils = ["comfy-table", "inquire", "toml"]
 debug = ["console-subscriber", "tokio/tracing"]
-phase2 = ["uplc", "rug"]
+phase2 = ["pallas/phase2"]
 default = ["mithril", "utils", "phase2"]
 
 # The profile that 'cargo dist' will build with
@@ -113,7 +108,7 @@ pr-run-mode = "plan"
 # Whether to install an updater program
 install-updater = false
 # The preferred Rust toolchain to use in CI (rustup toolchain syntax)
-rust-toolchain-version = "1.81.0"
+rust-toolchain-version = "1.85.1"
 # The archive format to use for windows builds (defaults .zip)
 windows-archive = ".tar.gz"
 # The archive format to use for non-windows builds (defaults .tar.xz)

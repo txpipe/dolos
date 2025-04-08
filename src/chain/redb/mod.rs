@@ -153,6 +153,12 @@ impl ChainStore {
         }
     }
 
+    pub fn get_tx(&self, tx_hash: &[u8]) -> Result<Option<Vec<u8>>, ChainError> {
+        match self {
+            ChainStore::SchemaV1(x) => x.get_tx(tx_hash),
+        }
+    }
+
     pub fn apply(&self, deltas: &[LedgerDelta]) -> Result<(), ChainError> {
         match self {
             ChainStore::SchemaV1(x) => Ok(x.apply(deltas)?),

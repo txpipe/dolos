@@ -32,6 +32,12 @@ impl ChainStore {
         }
     }
 
+    pub fn get_tx(&self, tx_hash: &[u8]) -> Result<Option<Vec<u8>>, ChainError> {
+        match self {
+            ChainStore::Redb(x) => x.get_tx(tx_hash),
+        }
+    }
+
     pub fn get_range(
         &self,
         from: Option<BlockSlot>,

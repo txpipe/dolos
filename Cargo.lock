@@ -386,7 +386,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "93f2635620bf0b9d4576eb7bb9a38a55df78bd1205d26fa994b25911a69f212f"
 dependencies = [
  "bitcoin_hashes 0.11.0",
- "rand_core 0.6.4",
+ "rand_core 0.5.1",
  "serde",
  "unicode-normalization",
 ]
@@ -1028,7 +1028,7 @@ checksum = "fea41bba32d969b513997752735605054bc0dfa92b4c56bf1189f2e174be7a10"
 
 [[package]]
 name = "dolos"
-version = "0.19.1"
+version = "0.20.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1058,10 +1058,9 @@ dependencies = [
  "redb",
  "reqwest",
  "rocket",
- "rug",
  "serde",
  "serde_json",
- "serde_with 3.11.0",
+ "serde_with 3.12.0",
  "tar",
  "tempfile",
  "thiserror 1.0.65",
@@ -1076,7 +1075,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "trait-variant",
- "uplc",
 ]
 
 [[package]]
@@ -1899,6 +1897,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "itertools"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2b192c782037fadd9cfa75548310488aabdbf3d2da73885b31bd0abd03351285"
+dependencies = [
+ "either",
+]
+
+[[package]]
 name = "itoa"
 version = "1.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2061,12 +2068,12 @@ dependencies = [
 
 [[package]]
 name = "minicbor"
-version = "0.26.0"
+version = "0.26.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e661deac75bd438730c7335469ea8aee72a607e2bc93282386ef765b4ea7cdc0"
+checksum = "1936e27fffe7d8557c060eb82cb71668608cd1a5fb56b63e66d22ae8d7564321"
 dependencies = [
  "half",
- "minicbor-derive 0.16.0",
+ "minicbor-derive 0.16.2",
 ]
 
 [[package]]
@@ -2082,9 +2089,9 @@ dependencies = [
 
 [[package]]
 name = "minicbor-derive"
-version = "0.16.0"
+version = "0.16.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1164934feccd1ca0b67754a8656c409ec80c5888bcbdb6a7ccd2e43722d819c1"
+checksum = "a9882ef5c56df184b8ffc107fc6c61e33ee3a654b021961d790a78571bb9d67a"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2212,7 +2219,7 @@ dependencies = [
  "serde",
  "serde_bytes",
  "serde_json",
- "serde_with 3.11.0",
+ "serde_with 3.12.0",
  "serde_yaml",
  "sha2",
  "slog",
@@ -2410,10 +2417,9 @@ checksum = "caff54706df99d2a78a5a4e3455ff45448d81ef1bb63c22cd14052ca0e993a3f"
 [[package]]
 name = "pallas"
 version = "0.32.0"
-source = "git+https://github.com/txpipe/pallas.git#2ddb5b066bbde9d2ed55014b286f47ad370b828e"
+source = "git+https://github.com/txpipe/pallas.git#c1cb1b444f85fe226bce57fe459fb7bd5874aa04"
 dependencies = [
  "pallas-addresses 0.32.0",
- "pallas-applying",
  "pallas-codec 0.32.0",
  "pallas-configs",
  "pallas-crypto 0.32.0",
@@ -2423,6 +2429,7 @@ dependencies = [
  "pallas-traverse 0.32.0",
  "pallas-txbuilder",
  "pallas-utxorpc",
+ "pallas-validate",
 ]
 
 [[package]]
@@ -2444,7 +2451,7 @@ dependencies = [
 [[package]]
 name = "pallas-addresses"
 version = "0.32.0"
-source = "git+https://github.com/txpipe/pallas.git#2ddb5b066bbde9d2ed55014b286f47ad370b828e"
+source = "git+https://github.com/txpipe/pallas.git#c1cb1b444f85fe226bce57fe459fb7bd5874aa04"
 dependencies = [
  "base58",
  "bech32 0.9.1",
@@ -2453,22 +2460,6 @@ dependencies = [
  "hex",
  "pallas-codec 0.32.0",
  "pallas-crypto 0.32.0",
- "thiserror 1.0.65",
-]
-
-[[package]]
-name = "pallas-applying"
-version = "0.32.0"
-source = "git+https://github.com/txpipe/pallas.git#2ddb5b066bbde9d2ed55014b286f47ad370b828e"
-dependencies = [
- "chrono",
- "hex",
- "pallas-addresses 0.32.0",
- "pallas-codec 0.32.0",
- "pallas-crypto 0.32.0",
- "pallas-primitives 0.32.0",
- "pallas-traverse 0.32.0",
- "rand",
  "thiserror 1.0.65",
 ]
 
@@ -2487,10 +2478,10 @@ dependencies = [
 [[package]]
 name = "pallas-codec"
 version = "0.32.0"
-source = "git+https://github.com/txpipe/pallas.git#2ddb5b066bbde9d2ed55014b286f47ad370b828e"
+source = "git+https://github.com/txpipe/pallas.git#c1cb1b444f85fe226bce57fe459fb7bd5874aa04"
 dependencies = [
  "hex",
- "minicbor 0.26.0",
+ "minicbor 0.26.3",
  "serde",
  "thiserror 1.0.65",
 ]
@@ -2498,18 +2489,16 @@ dependencies = [
 [[package]]
 name = "pallas-configs"
 version = "0.32.0"
-source = "git+https://github.com/txpipe/pallas.git#2ddb5b066bbde9d2ed55014b286f47ad370b828e"
+source = "git+https://github.com/txpipe/pallas.git#c1cb1b444f85fe226bce57fe459fb7bd5874aa04"
 dependencies = [
  "base64 0.22.1",
- "hex",
  "num-rational",
  "pallas-addresses 0.32.0",
- "pallas-codec 0.32.0",
  "pallas-crypto 0.32.0",
  "pallas-primitives 0.32.0",
  "serde",
  "serde_json",
- "serde_with 3.11.0",
+ "serde_with 3.12.0",
 ]
 
 [[package]]
@@ -2530,7 +2519,7 @@ dependencies = [
 [[package]]
 name = "pallas-crypto"
 version = "0.32.0"
-source = "git+https://github.com/txpipe/pallas.git#2ddb5b066bbde9d2ed55014b286f47ad370b828e"
+source = "git+https://github.com/txpipe/pallas.git#c1cb1b444f85fe226bce57fe459fb7bd5874aa04"
 dependencies = [
  "cryptoxide",
  "hex",
@@ -2538,7 +2527,6 @@ dependencies = [
  "rand_core 0.6.4",
  "serde",
  "thiserror 1.0.65",
- "zeroize",
 ]
 
 [[package]]
@@ -2558,11 +2546,18 @@ dependencies = [
 [[package]]
 name = "pallas-hardano"
 version = "0.32.0"
-source = "git+https://github.com/txpipe/pallas.git#2ddb5b066bbde9d2ed55014b286f47ad370b828e"
+source = "git+https://github.com/txpipe/pallas.git#c1cb1b444f85fe226bce57fe459fb7bd5874aa04"
 dependencies = [
  "binary-layout",
+ "hex",
+ "pallas-addresses 0.32.0",
+ "pallas-codec 0.32.0",
+ "pallas-crypto 0.32.0",
  "pallas-network 0.32.0",
  "pallas-traverse 0.32.0",
+ "serde",
+ "serde_json",
+ "serde_with 3.12.0",
  "tap",
  "thiserror 1.0.65",
  "tracing",
@@ -2589,7 +2584,7 @@ dependencies = [
 [[package]]
 name = "pallas-network"
 version = "0.32.0"
-source = "git+https://github.com/txpipe/pallas.git#2ddb5b066bbde9d2ed55014b286f47ad370b828e"
+source = "git+https://github.com/txpipe/pallas.git#c1cb1b444f85fe226bce57fe459fb7bd5874aa04"
 dependencies = [
  "byteorder",
  "hex",
@@ -2622,12 +2617,9 @@ dependencies = [
 [[package]]
 name = "pallas-primitives"
 version = "0.32.0"
-source = "git+https://github.com/txpipe/pallas.git#2ddb5b066bbde9d2ed55014b286f47ad370b828e"
+source = "git+https://github.com/txpipe/pallas.git#c1cb1b444f85fe226bce57fe459fb7bd5874aa04"
 dependencies = [
- "base58",
- "bech32 0.9.1",
  "hex",
- "log",
  "pallas-codec 0.32.0",
  "pallas-crypto 0.32.0",
  "serde",
@@ -2654,7 +2646,7 @@ dependencies = [
 [[package]]
 name = "pallas-traverse"
 version = "0.32.0"
-source = "git+https://github.com/txpipe/pallas.git#2ddb5b066bbde9d2ed55014b286f47ad370b828e"
+source = "git+https://github.com/txpipe/pallas.git#c1cb1b444f85fe226bce57fe459fb7bd5874aa04"
 dependencies = [
  "hex",
  "itertools 0.13.0",
@@ -2670,7 +2662,7 @@ dependencies = [
 [[package]]
 name = "pallas-txbuilder"
 version = "0.32.0"
-source = "git+https://github.com/txpipe/pallas.git#2ddb5b066bbde9d2ed55014b286f47ad370b828e"
+source = "git+https://github.com/txpipe/pallas.git#c1cb1b444f85fe226bce57fe459fb7bd5874aa04"
 dependencies = [
  "hex",
  "pallas-addresses 0.32.0",
@@ -2687,21 +2679,41 @@ dependencies = [
 [[package]]
 name = "pallas-utxorpc"
 version = "0.32.0"
-source = "git+https://github.com/txpipe/pallas.git#2ddb5b066bbde9d2ed55014b286f47ad370b828e"
+source = "git+https://github.com/txpipe/pallas.git#c1cb1b444f85fe226bce57fe459fb7bd5874aa04"
 dependencies = [
- "pallas-applying",
  "pallas-codec 0.32.0",
  "pallas-crypto 0.32.0",
  "pallas-primitives 0.32.0",
  "pallas-traverse 0.32.0",
+ "pallas-validate",
  "prost-types 0.13.1",
  "utxorpc-spec",
 ]
 
 [[package]]
+name = "pallas-validate"
+version = "0.32.0"
+source = "git+https://github.com/txpipe/pallas.git#c1cb1b444f85fe226bce57fe459fb7bd5874aa04"
+dependencies = [
+ "chrono",
+ "hex",
+ "itertools 0.14.0",
+ "pallas-addresses 0.32.0",
+ "pallas-codec 0.32.0",
+ "pallas-crypto 0.32.0",
+ "pallas-primitives 0.32.0",
+ "pallas-traverse 0.32.0",
+ "rug",
+ "serde",
+ "thiserror 1.0.65",
+ "tracing",
+ "uplc",
+]
+
+[[package]]
 name = "pallas-wallet"
 version = "0.32.0"
-source = "git+https://github.com/txpipe/pallas.git#2ddb5b066bbde9d2ed55014b286f47ad370b828e"
+source = "git+https://github.com/txpipe/pallas.git#c1cb1b444f85fe226bce57fe459fb7bd5874aa04"
 dependencies = [
  "bech32 0.9.1",
  "bip39",
@@ -2955,7 +2967,7 @@ checksum = "5bb182580f71dd070f88d01ce3de9f4da5021db7115d2e1c3605a754153b77c1"
 dependencies = [
  "bytes",
  "heck",
- "itertools 0.13.0",
+ "itertools 0.12.1",
  "log",
  "multimap",
  "once_cell",
@@ -2988,7 +3000,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "18bec9b0adc4eba778b33684b7ba3e7137789434769ee3ce3930463ef904cfca"
 dependencies = [
  "anyhow",
- "itertools 0.13.0",
+ "itertools 0.12.1",
  "proc-macro2",
  "quote",
  "syn",
@@ -3588,9 +3600,9 @@ checksum = "3cb6eb87a131f756572d7fb904f6e7b68633f09cca868c5df1c4b8d1a694bbba"
 
 [[package]]
 name = "serde"
-version = "1.0.216"
+version = "1.0.219"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0b9781016e935a97e8beecf0c933758c97a5520d32930e460142b4cd80c6338e"
+checksum = "5f0e2c6ed6606019b4e29e69dbaba95b11854410e5347d525002456dbbb786b6"
 dependencies = [
  "serde_derive",
 ]
@@ -3606,9 +3618,9 @@ dependencies = [
 
 [[package]]
 name = "serde_derive"
-version = "1.0.216"
+version = "1.0.219"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "46f859dbbf73865c6627ed570e78961cd3ac92407a2d117204c49232485da55e"
+checksum = "5b0276cf7f2c73365f7157c8123c21cd9a50fbbd844757af28ca1f5925fc2a00"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3617,9 +3629,9 @@ dependencies = [
 
 [[package]]
 name = "serde_json"
-version = "1.0.133"
+version = "1.0.140"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c7fceb2473b9166b2294ef05efcb65a3db80803f0b03ef86a5fc88a2b85ee377"
+checksum = "20068b6e96dc6c9bd23e01df8827e6c7e1f2fddd43c21810382803c136b99373"
 dependencies = [
  "itoa",
  "memchr",
@@ -3666,9 +3678,9 @@ dependencies = [
 
 [[package]]
 name = "serde_with"
-version = "3.11.0"
+version = "3.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e28bdad6db2b8340e449f7108f020b3b092e8583a9e3fb82713e1d4e71fe817"
+checksum = "d6b6f7f2fcb69f747921f79f3926bd1e203fce4fef62c268dd3abfb6d86029aa"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -3678,7 +3690,7 @@ dependencies = [
  "serde",
  "serde_derive",
  "serde_json",
- "serde_with_macros 3.11.0",
+ "serde_with_macros 3.12.0",
  "time",
 ]
 
@@ -3696,9 +3708,9 @@ dependencies = [
 
 [[package]]
 name = "serde_with_macros"
-version = "3.11.0"
+version = "3.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d846214a9854ef724f3da161b426242d8de7c1fc7de2f89bb1efcb154dca79d"
+checksum = "8d00caa5193a3c8362ac2b73be6b9e768aa5a4b2f721d8f4b339600c3cb51f8e"
 dependencies = [
  "darling",
  "proc-macro2",
@@ -4388,9 +4400,9 @@ checksum = "b6bc1c9ce2b5135ac7f93c72918fc37feb872bdc6a5533a8b85eb4b86bfdae52"
 
 [[package]]
 name = "tracing"
-version = "0.1.40"
+version = "0.1.41"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c3523ab5a71916ccf420eebdf5521fcef02141234bbc0b8a49f2fdc4544364ef"
+checksum = "784e0ac535deb450455cbfa28a6f0df145ea1bb7ae51b821cf5e7927fdcfbdd0"
 dependencies = [
  "pin-project-lite",
  "tracing-attributes",
@@ -4399,9 +4411,9 @@ dependencies = [
 
 [[package]]
 name = "tracing-attributes"
-version = "0.1.27"
+version = "0.1.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34704c8d6ebcbc939824180af020566b01a7c01f80641264eba0999f6c2b6be7"
+checksum = "395ae124c09f9e6918a2310af6038fba074bcf474ac352496d5910dd59a2226d"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4410,9 +4422,9 @@ dependencies = [
 
 [[package]]
 name = "tracing-core"
-version = "0.1.32"
+version = "0.1.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c06d3da6113f116aaee68e4d601191614c9053067f9ab7f6edbcb161237daa54"
+checksum = "e672c95779cf947c5311f83787af4fa8fffd12fb27e4993211a84bdfd9610f9c"
 dependencies = [
  "once_cell",
  "valuable",
@@ -4573,7 +4585,7 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 [[package]]
 name = "uplc"
 version = "0.1.0"
-source = "git+https://github.com/pragma-org/uplc.git#35bf6b1dc6cf911fc59dd3a93345b0a1b453a9f8"
+source = "git+https://github.com/pragma-org/uplc.git#0c307f84123c51a7436aad0e3ef853e9f6b12662"
 dependencies = [
  "blst",
  "bumpalo",

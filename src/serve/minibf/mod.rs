@@ -61,10 +61,12 @@ pub async fn serve(
                 routes::blocks::hash_or_number::previous::route,
                 routes::blocks::hash_or_number::txs::route,
                 routes::blocks::slot::slot_number::route,
-                //Epoch
+                // Epoch
                 routes::epochs::latest::parameters::route,
                 // Submit
                 routes::tx::submit::route,
+                // Transactions
+                routes::txs::tx_hash::cbor::route,
             ],
         )
         .ignite()
