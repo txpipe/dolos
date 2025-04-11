@@ -11,7 +11,7 @@ use std::{
 
 use crate::{common::cleanup_data, feedback::Feedback};
 
-mod include;
+pub mod include;
 
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -20,7 +20,6 @@ pub enum KnownNetwork {
     CardanoMainnet,
     CardanoPreProd,
     CardanoPreview,
-    Devnet,
 }
 
 impl KnownNetwork {
@@ -28,7 +27,6 @@ impl KnownNetwork {
         KnownNetwork::CardanoMainnet,
         KnownNetwork::CardanoPreProd,
         KnownNetwork::CardanoPreview,
-        KnownNetwork::Devnet,
     ];
 }
 
@@ -40,7 +38,6 @@ impl FromStr for KnownNetwork {
             "mainnet" => Ok(KnownNetwork::CardanoMainnet),
             "preprod" => Ok(KnownNetwork::CardanoPreProd),
             "preview" => Ok(KnownNetwork::CardanoPreview),
-            "devnet" => Ok(KnownNetwork::Devnet),
             x => Err(miette!("unknown network {x}")),
         }
     }
@@ -52,7 +49,6 @@ impl Display for KnownNetwork {
             KnownNetwork::CardanoMainnet => f.write_str("Cardano Mainnet"),
             KnownNetwork::CardanoPreProd => f.write_str("Cardano PreProd"),
             KnownNetwork::CardanoPreview => f.write_str("Cardano Preview"),
-            KnownNetwork::Devnet => f.write_str("Devnet"),
             // KnownNetwork::CardanoSanchonet => f.write_str("Cardano SanchoNet"),
         }
     }
@@ -80,11 +76,6 @@ impl From<&KnownNetwork> for dolos::model::UpstreamConfig {
                     peer_address: "preview-node.world.dev.cardano.org:30002".into(),
                     network_magic: 2,
                     is_testnet: true,
-                })
-            }
-            KnownNetwork::Devnet => {
-                dolos::model::UpstreamConfig::Emulator(dolos::model::EmulatorConfig {
-                    block_production_interval: 20,
                 })
             }
         }
@@ -119,7 +110,6 @@ impl From<&KnownNetwork> for Option<crate::MithrilConfig> {
                 aggregator: "https://aggregator.pre-release-preview.api.mithril.network/aggregator".into(),
                 genesis_key: "5b3132372c37332c3132342c3136312c362c3133372c3133312c3231332c3230372c3131372c3139382c38352c3137362c3139392c3136322c3234312c36382c3132332c3131392c3134352c31332c3233322c3234332c34392c3232392c322c3234392c3230352c3230352c33392c3233352c34345d".into(),
             } ),
-            KnownNetwork::Devnet => None
         }
     }
 }
