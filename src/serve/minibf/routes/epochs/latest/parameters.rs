@@ -1,36 +1,31 @@
-use itertools::Itertools as _;
-use rocket::{get, http::Status, State};
-use std::sync::Arc;
+use axum::{extract::State, http::StatusCode, Json};
 
-use crate::{
-    ledger::pparams::{self, Genesis},
-    state::LedgerStore,
-};
+use crate::{ledger::pparams, serve::minibf::SharedState};
+use itertools::Itertools as _;
 
 use super::{
     CostModels, CostModelsRaw, CostParametersV1, CostParametersV2, CostParametersV3, ProtocolParams,
 };
 
-#[get("/epochs/latest/parameters")]
-pub fn route(
-    ledger: &State<LedgerStore>,
-    genesis: &State<Arc<Genesis>>,
-) -> Result<rocket::serde::json::Json<ProtocolParams>, Status> {
-    let ledger = ledger.inner();
-    let tip = ledger.cursor().map_err(|_| Status::InternalServerError)?;
-    let updates = ledger
+pub async fn route(State(state): State<SharedState>) -> Result<Json<ProtocolParams>, StatusCode> {
+    let tip = state
+        .ledger
+        .cursor()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let updates = state
+        .ledger
         .get_pparams(tip.as_ref().map(|p| p.0).unwrap_or_default())
-        .map_err(|_| Status::InternalServerError)?;
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let updates: Vec<_> = updates
         .into_iter()
         .map(TryInto::try_into)
         .try_collect()
-        .map_err(|_| Status::InternalServerError)?;
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let summary = pparams::fold_with_hacks(genesis, &updates, tip.as_ref().unwrap().0);
+    let summary = pparams::fold_with_hacks(&state.genesis, &updates, tip.as_ref().unwrap().0);
     let era = summary.era_for_slot(tip.as_ref().unwrap().0);
-    let mapper = pallas::interop::utxorpc::Mapper::new(ledger.clone());
+    let mapper = pallas::interop::utxorpc::Mapper::new(state.ledger.clone());
     let mapped = mapper.map_pparams(era.pparams.clone());
 
     let pparams = ProtocolParams {
@@ -101,9 +96,9 @@ pub fn route(
             .min_fee_script_ref_cost_per_byte
             .as_ref()
             .map(|x| x.numerator as f64 / x.denominator as f64),
-        e_max: genesis.shelley.protocol_params.e_max,
-        a0: genesis.shelley.protocol_params.a0.numerator as f64
-            / genesis.shelley.protocol_params.a0.denominator as f64,
+        e_max: state.genesis.shelley.protocol_params.e_max,
+        a0: state.genesis.shelley.protocol_params.a0.numerator as f64
+            / state.genesis.shelley.protocol_params.a0.denominator as f64,
         rho: mapped
             .monetary_expansion
             .as_ref()
@@ -119,5 +114,5 @@ pub fn route(
         ..Default::default()
     };
 
-    Ok(rocket::serde::json::Json(pparams))
+    Ok(Json(pparams))
 }

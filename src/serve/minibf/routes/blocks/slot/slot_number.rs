@@ -1,28 +1,27 @@
-use rocket::{get, http::Status, State};
-use std::sync::Arc;
-
-use crate::{
-    chain::ChainStore, ledger::pparams::Genesis, serve::minibf::routes::blocks::Block,
-    state::LedgerStore,
+use axum::{
+    extract::{Path, State},
+    http::StatusCode,
+    Json,
 };
 
-#[get("/blocks/slot/<slot_number>")]
-pub fn route(
-    slot_number: u64,
-    genesis: &State<Arc<Genesis>>,
-    chain: &State<ChainStore>,
-    ledger: &State<LedgerStore>,
-) -> Result<rocket::serde::json::Json<Block>, Status> {
-    let body = chain
+use crate::serve::minibf::{routes::blocks::Block, SharedState};
+
+pub async fn route(
+    Path(slot_number): Path<u64>,
+    State(state): State<SharedState>,
+) -> Result<Json<Block>, StatusCode> {
+    let body = state
+        .chain
         .get_block_by_slot(&slot_number)
-        .map_err(|_| Status::InternalServerError)?;
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     match body {
-        Some(body) => match Block::from_body(&body, chain, ledger, genesis) {
-            Ok(Some(block)) => Ok(rocket::serde::json::Json(block)),
-            Ok(None) => Err(Status::NotFound),
-            Err(_) => Err(Status::ServiceUnavailable),
-        },
-        _ => Err(Status::NotFound),
+        Some(body) => Ok(Json(Block::from_body(
+            &body,
+            &state.chain,
+            &state.ledger,
+            &state.genesis,
+        )?)),
+        _ => Err(StatusCode::NOT_FOUND),
     }
 }

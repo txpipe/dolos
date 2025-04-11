@@ -1,18 +1,21 @@
+use axum::{
+    extract::{Path, State},
+    http::StatusCode,
+    Json,
+};
 use pallas::ledger::traverse::MultiEraBlock;
-use rocket::{get, http::Status, State};
 
-use crate::{chain::ChainStore, serve::minibf::routes::blocks::hash_or_number_to_body};
+use crate::serve::minibf::{routes::blocks::hash_or_number_to_body, SharedState};
 
-#[get("/blocks/<hash_or_number>/txs", rank = 2)]
-pub fn route(
-    hash_or_number: String,
-    chain: &State<ChainStore>,
-) -> Result<rocket::serde::json::Json<Vec<String>>, Status> {
-    let body =
-        hash_or_number_to_body(&hash_or_number, chain).map_err(|_| Status::ServiceUnavailable)?;
+pub async fn route(
+    Path(hash_or_number): Path<String>,
+    State(state): State<SharedState>,
+) -> Result<Json<Vec<String>>, StatusCode> {
+    let body = hash_or_number_to_body(&hash_or_number, &state.chain)
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
 
-    let block = MultiEraBlock::decode(&body).map_err(|_| Status::ServiceUnavailable)?;
-    Ok(rocket::serde::json::Json(
+    let block = MultiEraBlock::decode(&body).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(
         block.txs().iter().map(|tx| tx.hash().to_string()).collect(),
     ))
 }

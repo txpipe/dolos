@@ -1,10 +1,15 @@
 use pallas::ledger::{addresses::Address, primitives::conway, traverse::MultiEraAsset};
-use rocket::{get, http::Status, State};
 use serde::{Deserialize, Serialize};
+
+use axum::{
+    extract::{Path, State},
+    http::StatusCode,
+    response::IntoResponse,
+};
 
 use crate::{
     ledger::{EraCbor, TxoRef},
-    state::LedgerStore,
+    serve::minibf::SharedState,
 };
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -46,11 +51,11 @@ pub struct AccountUtxo {
 }
 
 impl TryFrom<(TxoRef, EraCbor)> for AccountUtxo {
-    type Error = Status;
+    type Error = StatusCode;
 
     fn try_from((txo, era): (TxoRef, EraCbor)) -> Result<Self, Self::Error> {
         let parsed = pallas::ledger::traverse::MultiEraOutput::decode(era.0, &era.1)
-            .map_err(|_| Status::InternalServerError)?;
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
         let value = parsed.value();
         let lovelace = Amount::lovelace(value.coin());
@@ -64,7 +69,7 @@ impl TryFrom<(TxoRef, EraCbor)> for AccountUtxo {
         Ok(Self {
             address: parsed
                 .address()
-                .map_err(|_| Status::InternalServerError)?
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
                 .to_string(),
             tx_index: txo.1,
             output_index: txo.1,
@@ -83,29 +88,30 @@ impl TryFrom<(TxoRef, EraCbor)> for AccountUtxo {
     }
 }
 
-#[get("/accounts/<stake_address>/utxos")]
-pub fn route(
-    stake_address: String,
-    ledger: &State<LedgerStore>,
-) -> Result<rocket::serde::json::Json<Vec<AccountUtxo>>, Status> {
+pub async fn route(
+    Path(stake_address): Path<String>,
+    State(state): State<SharedState>,
+) -> Result<impl IntoResponse, StatusCode> {
     let stake = match pallas::ledger::addresses::Address::from_bech32(&stake_address)
-        .map_err(|_| Status::BadRequest)?
+        .map_err(|_| StatusCode::BAD_REQUEST)?
     {
         Address::Shelley(x) => x.delegation().to_vec(),
         Address::Stake(x) => x.to_vec(),
-        Address::Byron(_) => return Err(Status::BadRequest),
+        Address::Byron(_) => return Err(StatusCode::BAD_REQUEST),
     };
 
-    let refs = ledger
+    let refs = state
+        .ledger
         .get_utxo_by_stake(&stake)
-        .map_err(|_| Status::InternalServerError)?;
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let utxos: Vec<_> = ledger
+    let utxos: Vec<_> = state
+        .ledger
         .get_utxos(refs.into_iter().collect())
-        .map_err(|_| Status::InternalServerError)?
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .into_iter()
         .map(AccountUtxo::try_from)
         .collect::<Result<_, _>>()?;
 
-    Ok(rocket::serde::json::Json(utxos))
+    Ok(axum::Json(utxos))
 }

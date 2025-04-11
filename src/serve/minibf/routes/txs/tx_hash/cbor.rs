@@ -1,25 +1,29 @@
-use rocket::{get, http::Status, State};
+use axum::{
+    extract::{Path, State},
+    http::StatusCode,
+    Json,
+};
 use serde::{Deserialize, Serialize};
 
-use crate::chain::ChainStore;
+use crate::serve::minibf::SharedState;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TxCbor {
     pub cbor: String,
 }
 
-#[get("/txs/<tx_hash>/cbor", rank = 2)]
-pub fn route(
-    tx_hash: String,
-    chain: &State<ChainStore>,
-) -> Result<rocket::serde::json::Json<TxCbor>, Status> {
-    match chain
-        .get_tx(&hex::decode(tx_hash).map_err(|_| Status::BadRequest)?)
-        .map_err(|_| Status::InternalServerError)?
+pub async fn route(
+    Path(tx_hash): Path<String>,
+    State(state): State<SharedState>,
+) -> Result<Json<TxCbor>, StatusCode> {
+    match state
+        .chain
+        .get_tx(&hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     {
-        Some(tx) => Ok(rocket::serde::json::Json(TxCbor {
+        Some(tx) => Ok(Json(TxCbor {
             cbor: hex::encode(tx),
         })),
-        None => Err(Status::NotFound),
+        None => Err(StatusCode::NOT_FOUND),
     }
 }
