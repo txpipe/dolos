@@ -1,63 +1,68 @@
-use std::sync::Arc;
-
+use axum::{
+    extract::{Path, Query, State},
+    http::StatusCode,
+    Json,
+};
 use pallas::ledger::traverse::{MultiEraBlock, MultiEraUpdate};
-use rocket::{get, http::Status, State};
 
 use crate::{
-    chain::ChainStore,
-    ledger::pparams::{self, Genesis},
+    ledger::pparams,
     serve::minibf::{
-        common::{Order, Pagination},
+        common::{Order, Pagination, PaginationParameters},
         routes::blocks::{hash_or_number_to_body, BlockHeaderFields},
+        SharedState,
     },
-    state::LedgerStore,
 };
 
 use super::Block;
 
-#[get("/blocks/<hash_or_number>/previous?<count>&<page>&<order>", rank = 2)]
-pub fn route(
-    hash_or_number: String,
-    count: Option<u8>,
-    page: Option<u64>,
-    order: Option<Order>,
-    genesis: &State<Arc<Genesis>>,
-    chain: &State<ChainStore>,
-    ledger: &State<LedgerStore>,
-) -> Result<rocket::serde::json::Json<Vec<Block>>, Status> {
-    let pagination = Pagination::try_new(count, page, order)?;
-
-    let tip_number = match chain.get_tip().map_err(|_| Status::ServiceUnavailable)? {
-        None => return Err(Status::ServiceUnavailable),
+pub async fn route(
+    Path(hash_or_number): Path<String>,
+    Query(params): Query<PaginationParameters>,
+    State(state): State<SharedState>,
+) -> Result<Json<Vec<Block>>, StatusCode> {
+    let pagination = Pagination::try_from(params)?;
+    let tip_number = match state
+        .chain
+        .get_tip()
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+    {
+        None => return Err(StatusCode::SERVICE_UNAVAILABLE),
         Some((_, body)) => MultiEraBlock::decode(&body)
-            .map_err(|_| Status::ServiceUnavailable)?
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
             .number(),
     };
 
-    let body = hash_or_number_to_body(&hash_or_number, chain)?;
-    let curr = MultiEraBlock::decode(&body).map_err(|_| Status::ServiceUnavailable)?;
+    let body = hash_or_number_to_body(&hash_or_number, &state.chain)?;
+    let curr = MultiEraBlock::decode(&body).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let mut output = vec![];
     let mut i = 0;
-    for (_, body) in chain
+    for (_, body) in state
+        .chain
         .get_range(None, Some(curr.slot()))
-        .map_err(|_| Status::ServiceUnavailable)?
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
         .rev()
     {
         i += 1;
         if pagination.includes(i) {
-            let block = MultiEraBlock::decode(&body).map_err(|_| Status::ServiceUnavailable)?;
+            let block =
+                MultiEraBlock::decode(&body).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
             let slot = block.slot();
-            let tip = ledger.cursor().map_err(|_| Status::InternalServerError)?;
-            let updates = ledger
+            let tip = state
+                .ledger
+                .cursor()
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            let updates = state
+                .ledger
                 .get_pparams(tip.map(|t| t.0).unwrap_or_default())
-                .map_err(|_| Status::InternalServerError)?
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
                 .into_iter()
                 .map(|eracbor| {
-                    MultiEraUpdate::try_from(eracbor).map_err(|_| Status::InternalServerError)
+                    MultiEraUpdate::try_from(eracbor).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
                 })
-                .collect::<Result<Vec<MultiEraUpdate>, Status>>()?;
-            let summary = pparams::fold_with_hacks(genesis, &updates, slot);
+                .collect::<Result<Vec<MultiEraUpdate>, StatusCode>>()?;
+            let summary = pparams::fold_with_hacks(&state.genesis, &updates, slot);
 
             let BlockHeaderFields {
                 previous_block,
@@ -116,5 +121,5 @@ pub fn route(
         Order::Desc => output,
     };
 
-    Ok(rocket::serde::json::Json(output))
+    Ok(Json(output))
 }

@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use futures_util::future::try_join3;
 use miette::{Context, IntoDiagnostic};
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
@@ -28,12 +27,14 @@ pub mod o7s_win;
 pub use o7s_win as o7s;
 
 pub mod minibf;
+pub mod trp;
 
 #[derive(Deserialize, Serialize, Clone, Default)]
 pub struct Config {
     pub grpc: Option<grpc::Config>,
     pub ouroboros: Option<o7s::Config>,
     pub minibf: Option<minibf::Config>,
+    pub trp: Option<trp::Config>,
 }
 
 /// Serve remote requests
@@ -102,7 +103,19 @@ pub async fn serve(
         }
     };
 
-    try_join3(grpc, o7s, minibf).await?;
+    let trp = async {
+        if let Some(cfg) = config.trp {
+            info!("found trp config");
+            trp::serve(cfg, genesis.clone(), ledger.clone(), exit.clone())
+                .await
+                .into_diagnostic()
+                .context("serving minibf")
+        } else {
+            Ok(())
+        }
+    };
+
+    tokio::try_join!(grpc, o7s, minibf, trp)?;
 
     Ok(())
 }

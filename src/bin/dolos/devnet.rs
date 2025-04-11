@@ -73,6 +73,12 @@ pub async fn run(args: &Args) -> miette::Result<()> {
             }),
             minibf: Some(dolos::serve::minibf::Config {
                 listen_address: format!("[::]:{}", args.minibf_port).parse().unwrap(),
+                permissive_cors: Some(true),
+            }),
+            trp: Some(dolos::serve::trp::Config {
+                listen_address: format!("[::]:{}", args.trp_port).parse().unwrap(),
+                permissive_cors: Some(true),
+                max_optimize_rounds: 20,
             }),
             ouroboros: None,
         },
