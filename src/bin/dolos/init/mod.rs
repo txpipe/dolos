@@ -20,7 +20,7 @@ pub enum KnownNetwork {
     CardanoMainnet,
     CardanoPreProd,
     CardanoPreview,
-    // CardanoSanchonet,
+    Devnet,
 }
 
 impl KnownNetwork {
@@ -28,7 +28,7 @@ impl KnownNetwork {
         KnownNetwork::CardanoMainnet,
         KnownNetwork::CardanoPreProd,
         KnownNetwork::CardanoPreview,
-        // KnownNetwork::CardanoSanchonet,
+        KnownNetwork::Devnet,
     ];
 }
 
@@ -40,7 +40,7 @@ impl FromStr for KnownNetwork {
             "mainnet" => Ok(KnownNetwork::CardanoMainnet),
             "preprod" => Ok(KnownNetwork::CardanoPreProd),
             "preview" => Ok(KnownNetwork::CardanoPreview),
-            // "sanchonet" => Ok(KnownNetwork::CardanoSanchonet),
+            "devnet" => Ok(KnownNetwork::Devnet),
             x => Err(miette!("unknown network {x}")),
         }
     }
@@ -52,6 +52,7 @@ impl Display for KnownNetwork {
             KnownNetwork::CardanoMainnet => f.write_str("Cardano Mainnet"),
             KnownNetwork::CardanoPreProd => f.write_str("Cardano PreProd"),
             KnownNetwork::CardanoPreview => f.write_str("Cardano Preview"),
+            KnownNetwork::Devnet => f.write_str("Devnet"),
             // KnownNetwork::CardanoSanchonet => f.write_str("Cardano SanchoNet"),
         }
     }
@@ -60,22 +61,32 @@ impl Display for KnownNetwork {
 impl From<&KnownNetwork> for dolos::model::UpstreamConfig {
     fn from(value: &KnownNetwork) -> Self {
         match value {
-            KnownNetwork::CardanoMainnet => dolos::model::UpstreamConfig {
-                peer_address: "backbone.mainnet.cardanofoundation.org:3001".into(),
-                network_magic: 764824073,
-                is_testnet: false,
-            },
-            KnownNetwork::CardanoPreProd => dolos::model::UpstreamConfig {
-                peer_address: "preprod-node.world.dev.cardano.org:30000".into(),
-                network_magic: 1,
-                is_testnet: true,
-            },
-            KnownNetwork::CardanoPreview => dolos::model::UpstreamConfig {
-                peer_address: "preview-node.world.dev.cardano.org:30002".into(),
-                network_magic: 2,
-                is_testnet: true,
-            },
-            // KnownNetwork::CardanoSanchonet => todo!(),
+            KnownNetwork::CardanoMainnet => {
+                dolos::model::UpstreamConfig::Peer(dolos::model::PeerConfig {
+                    peer_address: "backbone.mainnet.cardanofoundation.org:3001".into(),
+                    network_magic: 764824073,
+                    is_testnet: false,
+                })
+            }
+            KnownNetwork::CardanoPreProd => {
+                dolos::model::UpstreamConfig::Peer(dolos::model::PeerConfig {
+                    peer_address: "preprod-node.world.dev.cardano.org:30000".into(),
+                    network_magic: 1,
+                    is_testnet: true,
+                })
+            }
+            KnownNetwork::CardanoPreview => {
+                dolos::model::UpstreamConfig::Peer(dolos::model::PeerConfig {
+                    peer_address: "preview-node.world.dev.cardano.org:30002".into(),
+                    network_magic: 2,
+                    is_testnet: true,
+                })
+            }
+            KnownNetwork::Devnet => {
+                dolos::model::UpstreamConfig::Emulator(dolos::model::EmulatorConfig {
+                    block_production_interval: 20,
+                })
+            }
         }
     }
 }
@@ -93,25 +104,22 @@ impl From<&KnownNetwork> for crate::GenesisConfig {
     }
 }
 
-impl From<&KnownNetwork> for crate::MithrilConfig {
+impl From<&KnownNetwork> for Option<crate::MithrilConfig> {
     fn from(value: &KnownNetwork) -> Self {
         match value {
-            KnownNetwork::CardanoMainnet => crate::MithrilConfig {
+            KnownNetwork::CardanoMainnet => Some( crate::MithrilConfig {
                 aggregator: "https://aggregator.release-mainnet.api.mithril.network/aggregator".into(),
                 genesis_key: "5b3139312c36362c3134302c3138352c3133382c31312c3233372c3230372c3235302c3134342c32372c322c3138382c33302c31322c38312c3135352c3230342c31302c3137392c37352c32332c3133382c3139362c3231372c352c31342c32302c35372c37392c33392c3137365d".into(),
-            },
-            KnownNetwork::CardanoPreProd => crate::MithrilConfig {
+            } ),
+            KnownNetwork::CardanoPreProd => Some( crate::MithrilConfig {
                 aggregator: "https://aggregator.release-preprod.api.mithril.network/aggregator".into(),
                 genesis_key: "5b3132372c37332c3132342c3136312c362c3133372c3133312c3231332c3230372c3131372c3139382c38352c3137362c3139392c3136322c3234312c36382c3132332c3131392c3134352c31332c3233322c3234332c34392c3232392c322c3234392c3230352c3230352c33392c3233352c34345d".into()
-            },
-            KnownNetwork::CardanoPreview => crate::MithrilConfig {
+            } ),
+            KnownNetwork::CardanoPreview => Some( crate::MithrilConfig {
                 aggregator: "https://aggregator.pre-release-preview.api.mithril.network/aggregator".into(),
                 genesis_key: "5b3132372c37332c3132342c3136312c362c3133372c3133312c3231332c3230372c3131372c3139382c38352c3137362c3139392c3136322c3234312c36382c3132332c3131392c3134352c31332c3233322c3234332c34392c3232392c322c3234392c3230352c3230352c33392c3233352c34345d".into(),
-            },
-            // KnownNetwork::CardanoSanchonet => crate::MithrilConfig {
-            //     aggregator: todo!(),
-            //     genesis_key: todo!(),
-            // },
+            } ),
+            KnownNetwork::Devnet => None
         }
     }
 }
@@ -207,7 +215,7 @@ impl Default for ConfigEditor {
         Self(
             crate::Config {
                 upstream: From::from(&KnownNetwork::CardanoMainnet),
-                mithril: Some(From::from(&KnownNetwork::CardanoMainnet)),
+                mithril: From::from(&KnownNetwork::CardanoMainnet),
                 snapshot: Default::default(),
                 storage: dolos::model::StorageConfig {
                     version: dolos::model::StorageVersion::V1,
@@ -231,7 +239,7 @@ impl ConfigEditor {
         if let Some(network) = network {
             self.0.genesis = network.into();
             self.0.upstream = network.into();
-            self.0.mithril = Some(network.into());
+            self.0.mithril = network.into();
             self.1 = Some(network.clone());
 
             // Add max wall history for network from Genesis.
@@ -241,10 +249,11 @@ impl ConfigEditor {
     }
 
     fn apply_remote_peer(mut self, value: Option<&String>) -> Self {
-        if let Some(remote_peer) = value {
-            remote_peer.clone_into(&mut self.0.upstream.peer_address)
+        if let dolos::model::UpstreamConfig::Peer(peer) = &mut self.0.upstream {
+            if let Some(remote_peer) = value {
+                remote_peer.clone_into(&mut peer.peer_address)
+            }
         }
-
         self
     }
 
@@ -288,18 +297,19 @@ impl ConfigEditor {
 
     #[cfg(unix)]
     fn apply_serve_ouroboros(mut self, value: Option<bool>) -> Self {
-        if let Some(value) = value {
-            if value {
-                self.0.serve.ouroboros = dolos::serve::o7s::Config {
-                    listen_path: "dolos.socket".into(),
-                    magic: self.0.upstream.network_magic,
+        if let dolos::model::UpstreamConfig::Peer(peer) = &self.0.upstream {
+            if let Some(value) = value {
+                if value {
+                    self.0.serve.ouroboros = dolos::serve::o7s::Config {
+                        listen_path: "dolos.socket".into(),
+                        magic: peer.network_magic,
+                    }
+                    .into();
+                } else {
+                    self.0.serve.ouroboros = None;
                 }
-                .into();
-            } else {
-                self.0.serve.ouroboros = None;
             }
         }
-
         self
     }
 
@@ -312,11 +322,13 @@ impl ConfigEditor {
     fn apply_enable_relay(mut self, value: Option<bool>) -> Self {
         if let Some(value) = value {
             if value {
-                self.0.relay = dolos::relay::Config {
-                    listen_address: "[::]:30031".into(),
-                    magic: self.0.upstream.network_magic,
+                if let dolos::model::UpstreamConfig::Peer(peer) = &self.0.upstream {
+                    self.0.relay = dolos::relay::Config {
+                        listen_address: "[::]:30031".into(),
+                        magic: peer.network_magic,
+                    }
+                    .into();
                 }
-                .into();
             } else {
                 self.0.relay = None;
             }
@@ -381,13 +393,18 @@ impl ConfigEditor {
     }
 
     fn prompt_remote_peer(self) -> miette::Result<Self> {
-        let value = Text::new("Which remote peer (relay) do you want to use?")
-            .with_default(&self.0.upstream.peer_address)
-            .prompt()
-            .into_diagnostic()
-            .context("asking for remote peer")?;
+        match &self.0.upstream {
+            dolos::model::UpstreamConfig::Peer(peer) => {
+                let value = Text::new("Which remote peer (relay) do you want to use?")
+                    .with_default(&peer.peer_address)
+                    .prompt()
+                    .into_diagnostic()
+                    .context("asking for remote peer")?;
 
-        Ok(self.apply_remote_peer(Some(&value)))
+                Ok(self.apply_remote_peer(Some(&value)))
+            }
+            _ => Ok(self),
+        }
     }
 
     fn prompt_serve_grpc(self) -> miette::Result<Self> {
@@ -505,7 +522,9 @@ pub fn run(
         .into_diagnostic()
         .context("parsing configuration")?;
 
-    super::bootstrap::run(&config, &super::bootstrap::Args::default(), feedback)?;
+    if let dolos::model::UpstreamConfig::Peer(_) = &config.upstream {
+        super::bootstrap::run(&config, &super::bootstrap::Args::default(), feedback)?;
+    }
 
     println!("\nDolos is ready!");
     println!("- run `dolos daemon` to start the node");

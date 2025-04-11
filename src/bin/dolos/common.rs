@@ -13,22 +13,29 @@ use crate::{GenesisConfig, LoggingConfig};
 pub type Stores = (wal::redb::WalStore, state::LedgerStore, chain::ChainStore);
 
 pub fn open_wal(config: &crate::Config) -> Result<wal::redb::WalStore, Error> {
-    let root = &config.storage.path;
+    match &config.storage.path {
+        Some(root) => {
+            std::fs::create_dir_all(root).map_err(Error::storage)?;
 
-    std::fs::create_dir_all(root).map_err(Error::storage)?;
+            let wal = wal::redb::WalStore::open(
+                root.join("wal"),
+                config.storage.wal_cache,
+                config.storage.max_wal_history,
+            )
+            .map_err(Error::storage)?;
 
-    let wal = wal::redb::WalStore::open(
-        root.join("wal"),
-        config.storage.wal_cache,
-        config.storage.max_wal_history,
-    )
-    .map_err(Error::storage)?;
-
-    Ok(wal)
+            Ok(wal)
+        }
+        None => {
+            let mut wal = wal::redb::WalStore::memory(config.storage.max_wal_history)
+                .map_err(Error::storage)?;
+            wal.initialize_from_origin().map_err(Error::storage)?;
+            Ok(wal)
+        }
+    }
 }
 
-pub fn define_ledger_path(config: &crate::Config) -> Result<PathBuf, Error> {
-    let root = &config.storage.path;
+pub fn define_ledger_path(root: &PathBuf) -> Result<PathBuf, Error> {
     std::fs::create_dir_all(root).map_err(Error::storage)?;
 
     let ledger = root.join("ledger");
@@ -36,8 +43,7 @@ pub fn define_ledger_path(config: &crate::Config) -> Result<PathBuf, Error> {
     Ok(ledger)
 }
 
-pub fn define_chain_path(config: &crate::Config) -> Result<PathBuf, Error> {
-    let root = &config.storage.path;
+pub fn define_chain_path(root: &PathBuf) -> Result<PathBuf, Error> {
     std::fs::create_dir_all(root).map_err(Error::storage)?;
 
     let chain = root.join("chain");
@@ -46,35 +52,46 @@ pub fn define_chain_path(config: &crate::Config) -> Result<PathBuf, Error> {
 }
 
 pub fn open_data_stores(config: &crate::Config) -> Result<Stores, Error> {
-    let root = &config.storage.path;
-
     if config.storage.version == StorageVersion::V0 {
         error!("Storage should be removed and init procedure run again.");
         return Err(Error::StorageError("Invalid store version".to_string()));
     }
 
-    std::fs::create_dir_all(root).map_err(Error::storage)?;
+    match &config.storage.path {
+        Some(root) => {
+            std::fs::create_dir_all(root).map_err(Error::storage)?;
+            let wal = wal::redb::WalStore::open(
+                root.join("wal"),
+                config.storage.wal_cache,
+                config.storage.max_wal_history,
+            )
+            .map_err(Error::storage)?;
 
-    let wal = wal::redb::WalStore::open(
-        root.join("wal"),
-        config.storage.wal_cache,
-        config.storage.max_wal_history,
-    )
-    .map_err(Error::storage)?;
+            let ledger =
+                state::redb::LedgerStore::open(root.join("ledger"), config.storage.ledger_cache)
+                    .map_err(Error::storage)?
+                    .into();
 
-    let ledger = state::redb::LedgerStore::open(root.join("ledger"), config.storage.ledger_cache)
-        .map_err(Error::storage)?
-        .into();
-
-    let chain = chain::redb::ChainStore::open(
-        root.join("chain"),
-        config.storage.chain_cache,
-        config.storage.max_chain_history,
-    )
-    .map_err(Error::storage)?
-    .into();
-
-    Ok((wal, ledger, chain))
+            let chain = chain::redb::ChainStore::open(
+                root.join("chain"),
+                config.storage.chain_cache,
+                config.storage.max_chain_history,
+            )
+            .map_err(Error::storage)?
+            .into();
+            Ok((wal, ledger, chain))
+        }
+        None => {
+            let wal = open_wal(config).map_err(Error::storage)?;
+            let ledger = state::LedgerStore::Redb(
+                state::redb::LedgerStore::in_memory_v2().map_err(Error::storage)?,
+            );
+            let chain = chain::ChainStore::Redb(
+                chain::redb::ChainStore::in_memory_v1().map_err(Error::storage)?,
+            );
+            Ok((wal, ledger, chain))
+        }
+    }
 }
 
 pub fn setup_tracing(config: &LoggingConfig) -> miette::Result<()> {
@@ -203,7 +220,9 @@ pub fn spawn_pipeline(pipeline: gasket::daemon::Daemon, exit: CancellationToken)
 }
 
 pub fn cleanup_data(config: &crate::Config) -> Result<(), std::io::Error> {
-    let root = &config.storage.path;
+    let Some(root) = &config.storage.path else {
+        return Ok(());
+    };
 
     if root.is_dir() {
         for entry_result in fs::read_dir(root)? {

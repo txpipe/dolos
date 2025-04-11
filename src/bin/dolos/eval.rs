@@ -1,6 +1,6 @@
 use dolos::ledger::{EraCbor, TxoRef};
 use itertools::*;
-use miette::{Context, IntoDiagnostic};
+use miette::{bail, Context, IntoDiagnostic};
 use pallas::{
     ledger::traverse::{Era, MultiEraInput, MultiEraOutput, MultiEraUpdate},
     ledger::validate::utils::{CertState, Environment as ValidationContext, UTxOs},
@@ -93,7 +93,10 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
 
     let context = ValidationContext {
         block_slot: args.block_slot,
-        prot_magic: config.upstream.network_magic as u32,
+        prot_magic: match &config.upstream {
+            dolos::model::UpstreamConfig::Peer(peer) => peer.network_magic as u32,
+            _ => bail!("Invalid upstream config"),
+        },
         network_id: args.network_id,
         prot_params: pparams,
         acnt: None,

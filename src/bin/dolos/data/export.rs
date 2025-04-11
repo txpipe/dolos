@@ -1,7 +1,7 @@
 use clap::Parser;
 use flate2::write::GzEncoder;
 use flate2::Compression;
-use miette::IntoDiagnostic as _;
+use miette::{bail, IntoDiagnostic as _};
 use std::fs::File;
 use std::path::PathBuf;
 use tar::Builder;
@@ -89,7 +89,10 @@ pub fn run(
 
     prepare_wal(wal, &pb)?;
 
-    let path = config.storage.path.join("wal");
+    let Some(root) = &config.storage.path else {
+        bail!("storage path is undefined")
+    };
+    let path = root.join("wal");
 
     archive
         .append_path_with_name(&path, "wal")
@@ -97,7 +100,7 @@ pub fn run(
 
     if args.include_ledger {
         prepare_ledger(ledger, &pb)?;
-        let path = config.storage.path.join("ledger");
+        let path = root.join("ledger");
 
         archive
             .append_path_with_name(&path, "ledger")
@@ -107,7 +110,7 @@ pub fn run(
     prepare_chain(chain, &pb)?;
 
     if args.include_chain {
-        let path = config.storage.path.join("chain");
+        let path = root.join("chain");
 
         archive
             .append_path_with_name(&path, "chain")

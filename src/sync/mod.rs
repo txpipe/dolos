@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub mod apply;
+pub mod emulator;
 pub mod pull;
 pub mod roll;
 pub mod submit;
@@ -51,6 +52,38 @@ fn define_gasket_policy(config: &Option<gasket::retries::Policy>) -> gasket::run
 pub fn pipeline(
     config: &Config,
     upstream: &UpstreamConfig,
+    storage: &StorageConfig,
+    wal: WalStore,
+    ledger: LedgerStore,
+    chain: ChainStore,
+    genesis: Arc<Genesis>,
+    mempool: Mempool,
+    retries: &Option<gasket::retries::Policy>,
+    quit_on_tip: bool,
+) -> Result<Vec<gasket::runtime::Tether>, Error> {
+    match upstream {
+        UpstreamConfig::Peer(cfg) => sync(
+            config,
+            cfg,
+            storage,
+            wal,
+            ledger,
+            chain,
+            genesis,
+            mempool,
+            retries,
+            quit_on_tip,
+        ),
+        UpstreamConfig::Emulator(cfg) => {
+            devnet(cfg, storage, wal, ledger, chain, genesis, mempool, retries)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn sync(
+    config: &Config,
+    upstream: &PeerConfig,
     storage: &StorageConfig,
     wal: WalStore,
     ledger: LedgerStore,
@@ -105,4 +138,52 @@ pub fn pipeline(
     let submit = gasket::runtime::spawn_stage(submit, policy.clone());
 
     Ok(vec![pull, roll, apply, submit])
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn devnet(
+    emulator_cfg: &EmulatorConfig,
+    storage: &StorageConfig,
+    wal: WalStore,
+    ledger: LedgerStore,
+    chain: ChainStore,
+    genesis: Arc<Genesis>,
+    mempool: Mempool,
+    retries: &Option<gasket::retries::Policy>,
+) -> Result<Vec<gasket::runtime::Tether>, Error> {
+    let mut emulator = emulator::Stage::new(
+        wal.clone(),
+        mempool.clone(),
+        std::time::Duration::from_secs(emulator_cfg.block_production_interval),
+    );
+
+    let mut roll = roll::Stage::new(wal.clone(), HOUSEKEEPING_INTERVAL);
+    let mut apply = apply::Stage::new(
+        wal.clone(),
+        ledger,
+        chain,
+        mempool.clone(),
+        genesis,
+        storage.max_ledger_history,
+        HOUSEKEEPING_INTERVAL,
+    );
+
+    let (to_roll, from_pull) = gasket::messaging::tokio::mpsc_channel(50);
+    emulator.downstream.connect(to_roll);
+    roll.upstream.connect(from_pull);
+
+    let (to_ledger, from_roll) = gasket::messaging::tokio::mpsc_channel(50);
+    roll.downstream.connect(to_ledger);
+    apply.upstream.connect(from_roll);
+
+    // output to outside of out pipeline
+    // apply.downstream.connect(output);
+
+    let policy = define_gasket_policy(retries);
+
+    let emulator = gasket::runtime::spawn_stage(emulator, policy.clone());
+    let roll = gasket::runtime::spawn_stage(roll, policy.clone());
+    let apply = gasket::runtime::spawn_stage(apply, policy.clone());
+
+    Ok(vec![emulator, roll, apply])
 }
