@@ -9,8 +9,10 @@ network_magic = 1
 is_testnet = true
 
 [storage]
+version = "v1"
 path = "data"
 max_wal_history = 10000
+max_chain_history = 10000
 
 [genesis]
 byron_path = "byron.json"
@@ -26,6 +28,9 @@ prune_height = 200
 
 [serve.grpc]
 listen_address = "[::]:50051"
+
+[serve.minibf]
+listen_address = "[::]:3000"
 
 [serve.ouroboros]
 listen_path = "dolos.socket"
@@ -69,16 +74,20 @@ The `storage` section controls how Dolos stores data in the local file system. T
 | property               | type    | example  |
 | ---------------------- | ------- | -------- |
 | path                   | string  | "./data" |
+| version                | string  | "v1"     |
 | wal_cache              | integer | 50       |
 | ledger_cache           | integer | 500      |
 | max_wal_history        | integer | 10000    |
 | max_ledger_history     | integer | 10000    |
+| max_chain_history      | integer | 10000    |
 
 - `path`: is the root directory where all data will be stored.
+- `version`: after Dolos v0.20.0, we've introduced a versioning system to handle schema upgrades more gracefully.
 - `wal_cache`: the size (in Mb) of the memory cache for the wal db.
 - `ledger_cache`: the size (in Mb) of the memory cache for the ledger db.
-- `max_wal_history`: the max number of slots to keep in the WAL.
+- `max_wal_history`: the max number of slots to keep in the WAL. It makes sense to set this to the amount of mutable slots of the chain.
 - `max_ledger_history`: the max number of slots to keep in the ledger store before pruning. If not set, the ledger will prune past the immutable slot.
+- `max_chain_history`: the max number of slots to keep in the historic chain store before pruning. If not set, this won't be pruned.
 
 ## `genesis` section
 
@@ -127,6 +136,16 @@ The `serve.grpc` section controls the options for the gRPC endpoint that can be 
 | listen_address | string | "[::]:50051" |
 
 - `listen_address`: the local address (`IP:PORT`) to listen for incoming gRPC connections (`[::]` represents any IP address).
+
+## `serve.minibf` section
+
+The `serve.minibf` section controls the options for the HTTP endpoint that hosts a Blockfrost-like endpoint.
+
+| property       | type   | example      |
+| -------------- | ------ | ------------ |
+| listen_address | string | "[::]:3000"  |
+
+- `listen_address`: the local address (`IP:PORT`) to listen for incoming connections (`[::]` represents any IP address).
 
 ## `serve.ouroboros` section
 
