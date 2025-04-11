@@ -3,9 +3,9 @@ use std::path::Path;
 use dolos::ledger::{mutable_slots, pparams::Genesis};
 use miette::{Context, IntoDiagnostic};
 
-mod mainnet;
-mod preprod;
-mod preview;
+pub mod mainnet;
+pub mod preprod;
+pub mod preview;
 
 fn save_one(root: &Path, name: &str, contents: &[u8]) -> miette::Result<()> {
     std::fs::write(root.join(name), contents)

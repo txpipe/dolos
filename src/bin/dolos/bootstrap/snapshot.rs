@@ -1,6 +1,6 @@
 use flate2::read::GzDecoder;
 use inquire::list_option::ListOption;
-use miette::{Context, IntoDiagnostic};
+use miette::{bail, Context, IntoDiagnostic};
 use tar::Archive;
 
 use crate::feedback::{Feedback, ProgressReader};
@@ -44,7 +44,7 @@ impl Args {
 const DEFAULT_URL_TEMPLATE: &str =
     "https://dolos-snapshots.s3-accelerate.amazonaws.com/${VERSION}/${NETWORK}/${VARIANT}/${POINT}.tar.gz";
 
-fn define_snapshot_url(config: &crate::Config, args: &Args) -> String {
+fn define_snapshot_url(config: &crate::Config) -> String {
     let download_url_template = config
         .snapshot
         .as_ref()
@@ -52,20 +52,25 @@ fn define_snapshot_url(config: &crate::Config, args: &Args) -> String {
         .unwrap_or(DEFAULT_URL_TEMPLATE.to_owned());
 
     download_url_template
-        .replace("${VERSION}", &config.storage.version.to_string())
-        .replace("${NETWORK}", &config.upstream.network_magic.to_string())
-        .replace("${POINT}", &args.point)
-        .replace("${VARIANT}", &args.variant)
 }
 
 fn fetch_snapshot(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::Result<()> {
-    let snapshot_url = define_snapshot_url(config, args)
+    let network_magic = match &config.upstream {
+        dolos::model::UpstreamConfig::Peer(peer) => peer.network_magic.to_string(),
+        _ => bail!("Missing network magic"),
+    };
+
+    let snapshot_url = define_snapshot_url(config)
         .replace("${VERSION}", &config.storage.version.to_string())
-        .replace("${NETWORK}", &config.upstream.network_magic.to_string())
+        .replace("${NETWORK}", &network_magic)
         .replace("${POINT}", &args.point)
         .replace("${VARIANT}", &args.variant);
 
-    std::fs::create_dir_all(&config.storage.path)
+    let Some(root) = &config.storage.path else {
+        bail!("storage path is undefined")
+    };
+
+    std::fs::create_dir_all(root)
         .into_diagnostic()
         .context("Failed to create target directory")?;
 
@@ -97,7 +102,7 @@ fn fetch_snapshot(config: &crate::Config, args: &Args, feedback: &Feedback) -> m
     let mut archive = Archive::new(tar_gz);
 
     archive
-        .unpack(&config.storage.path)
+        .unpack(root)
         .into_diagnostic()
         .context("Failed to extract snapshot")?;
 

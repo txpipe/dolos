@@ -5,7 +5,7 @@ use dolos::{
     wal::{self, WalBlockReader, WalReader as _},
 };
 use itertools::Itertools;
-use miette::{Context, IntoDiagnostic};
+use miette::{bail, Context, IntoDiagnostic};
 use pallas::ledger::traverse::MultiEraBlock;
 use tracing::debug;
 
@@ -47,7 +47,11 @@ pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::
             .context("applying origin utxos")?;
     }
 
-    let chain_path = crate::common::define_chain_path(config).context("finding chain path")?;
+    let Some(root) = &config.storage.path else {
+        bail!("storage path is undefined")
+    };
+
+    let chain_path = crate::common::define_chain_path(root).context("finding chain path")?;
     let chain = dolos::chain::redb::ChainStore::open(chain_path, None, None)
         .into_diagnostic()
         .context("opening chain store.")?;
@@ -99,7 +103,7 @@ pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::
         blocks.last().inspect(|b| progress.set_position(b.slot()));
     }
 
-    let ledger_path = crate::common::define_ledger_path(config).context("finding ledger path")?;
+    let ledger_path = crate::common::define_ledger_path(root).context("finding ledger path")?;
 
     let disk = dolos::state::redb::LedgerStore::open_v2_light(ledger_path, None)
         .into_diagnostic()

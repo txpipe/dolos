@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 mod common;
 mod daemon;
+mod devnet;
 mod doctor;
 mod eval;
 mod feedback;
@@ -29,6 +30,9 @@ enum Command {
 
     /// Run the node in all its glory
     Daemon(daemon::Args),
+
+    /// Run the node in all its glory
+    Devnet(devnet::Args),
 
     /// Just sync from upstream peer
     Sync(sync::Args),
@@ -187,6 +191,7 @@ fn main() -> Result<()> {
 
         #[cfg(feature = "mithril")]
         (Ok(config), Command::Bootstrap(args)) => bootstrap::run(&config, &args, &feedback),
+        (_, Command::Devnet(args)) => devnet::run(&args),
 
         (Err(x), _) => Err(x),
     }
