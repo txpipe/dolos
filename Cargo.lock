@@ -4496,9 +4496,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
-name = "uplc"
+name = "uplc-turbo"
 version = "0.1.0"
-source = "git+https://github.com/pragma-org/uplc.git#0c307f84123c51a7436aad0e3ef853e9f6b12662"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "214465664561ad67daf411e1d575a67cf25107369191f26c16243ac98073c0a8"
 dependencies = [
  "blst",
  "bumpalo",
