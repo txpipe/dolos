@@ -12,8 +12,8 @@ authors = ["Santiago Carmuega <santiago@carmuega.me>"]
 
 
 [dependencies]
-pallas = { git = "https://github.com/txpipe/pallas.git", features = ["hardano"] }
-# pallas = { version = "0.32.0", features = ["hardano"] }
+# pallas = { git = "https://github.com/txpipe/pallas.git", features = ["hardano"] }
+pallas = { version = "1.0.0-alpha.1", features = ["hardano"] }
 # pallas = { path = "../pallas/pallas", features = ["hardano"] }
 
 # gasket = { git = "https://github.com/construkts/gasket-rs.git", features = ["derive"] }
@@ -66,8 +66,8 @@ http = "1.3.1"
 hyper = "1.5"
 tower = "0.4"
 base64 = "0.22.1"
-tx3-lang = { git = "https://github.com/txpipe/tx3", rev = "545d6cb6eed3720531792eea9d7893468e49578c" }
-tx3-cardano = { git = "https://github.com/txpipe/tx3", rev = "545d6cb6eed3720531792eea9d7893468e49578c" }
+tx3-lang = "0.1.0"
+tx3-cardano =  "0.1.0"
 
 # phase2 dependencies
 uplc = { git = "https://github.com/pragma-org/uplc.git", optional = true }
