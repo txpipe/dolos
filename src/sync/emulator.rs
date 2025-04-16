@@ -39,19 +39,19 @@ impl Worker {
         let mut transaction_witness_sets = vec![];
         let mut auxiliary_data_set = BTreeMap::new();
 
-        for (i, tx) in self.mempool.request(10).iter().enumerate() {
+        let txs = self.mempool.request(10);
+
+        for (i, tx) in txs.iter().enumerate() {
             info!(tx = hex::encode(tx.hash), "adding tx to emulated block");
             let MultiEraTx::Conway(conway) = MultiEraTx::decode(&tx.bytes).or_panic()? else {
                 return Err(WorkerError::Panic);
             };
 
             // Encode and decode to remove all intermediate representations
-            transaction_bodies
-                .push(minicbor::decode(conway.transaction_body.raw_cbor()).or_panic()?);
-            transaction_witness_sets
-                .push(minicbor::decode(conway.transaction_witness_set.raw_cbor()).or_panic()?);
+            transaction_bodies.push(conway.transaction_body.raw_cbor().to_vec());
+            transaction_witness_sets.push(conway.transaction_witness_set.raw_cbor().to_vec());
             if let Nullable::Some(aux) = &conway.auxiliary_data {
-                auxiliary_data_set.insert(i as u32, minicbor::decode(aux.raw_cbor()).or_panic()?);
+                auxiliary_data_set.insert(i as u32, aux.raw_cbor().to_vec());
             }
         }
 
@@ -80,10 +80,23 @@ impl Worker {
                     protocol_version: (1, 0),
                 },
                 body_signature: empty_bytes(),
-            },
-            transaction_bodies,
-            transaction_witness_sets,
-            auxiliary_data_set,
+            }
+            .into(),
+            transaction_bodies: transaction_bodies
+                .iter()
+                .map(|x| minicbor::decode(x).or_panic())
+                .collect::<Result<Vec<_>, WorkerError>>()?,
+            transaction_witness_sets: transaction_witness_sets
+                .iter()
+                .map(|x| minicbor::decode(x).or_panic())
+                .collect::<Result<Vec<_>, WorkerError>>()?,
+            auxiliary_data_set: auxiliary_data_set
+                .iter()
+                .map(|(i, x)| {
+                    let decoded = minicbor::decode(x).or_panic()?;
+                    Ok((*i, decoded))
+                })
+                .collect::<Result<BTreeMap<u32, _>, WorkerError>>()?,
             invalid_transactions: None,
         };
 
