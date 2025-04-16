@@ -76,12 +76,12 @@ impl TryFrom<(TxoRef, EraCbor)> for AccountUtxo {
             tx_hash: txo.0.to_string(),
             amount: std::iter::once(lovelace).chain(assets).collect(),
             data_hash: parsed.datum().and_then(|x| match x {
-                conway::PseudoDatumOption::Hash(hash) => Some(hash.to_string()),
-                conway::PseudoDatumOption::Data(_) => None,
+                conway::DatumOption::Hash(hash) => Some(hash.to_string()),
+                conway::DatumOption::Data(_) => None,
             }),
             inline_datum: parsed.datum().and_then(|x| match x {
-                conway::PseudoDatumOption::Hash(_) => None,
-                conway::PseudoDatumOption::Data(x) => Some(hex::encode(x.raw_cbor())),
+                conway::DatumOption::Hash(_) => None,
+                conway::DatumOption::Data(x) => Some(hex::encode(x.raw_cbor())),
             }),
             ..Default::default()
         })
