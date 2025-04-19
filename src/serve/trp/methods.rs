@@ -220,8 +220,8 @@ impl tx3_cardano::Ledger for Context {
                         .map_err(tx3_cardano::Error::InvalidAddress)?,
                     datum: None,
                     assets: vec![tx3_lang::ir::AssetExpr {
-                        policy: vec![],
-                        asset_name: tx3_lang::ir::Expression::Bytes(vec![]),
+                        policy: tx3_lang::ir::Expression::None,
+                        asset_name: tx3_lang::ir::Expression::None,
                         amount: tx3_lang::ir::Expression::Number(parsed.value().coin() as i128),
                     }],
                     script: None,
