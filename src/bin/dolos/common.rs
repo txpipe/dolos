@@ -102,6 +102,10 @@ pub fn setup_tracing(config: &LoggingConfig) -> miette::Result<()> {
         filter = filter.with_target("jsonrpsee-server", level);
     }
 
+    if config.include_minibf {
+        filter = filter.with_target("tower_http", level);
+    }
+
     #[cfg(not(feature = "debug"))]
     {
         tracing_subscriber::registry()

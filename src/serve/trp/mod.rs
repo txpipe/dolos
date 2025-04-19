@@ -16,6 +16,7 @@ pub mod methods;
 pub struct Config {
     pub listen_address: SocketAddr,
     pub max_optimize_rounds: u8,
+    pub permissive_cors: Option<bool>,
 }
 
 #[derive(Clone)]
@@ -31,7 +32,13 @@ pub async fn serve(
     ledger: LedgerStore,
     exit: CancellationToken,
 ) -> Result<(), Error> {
-    let middleware = ServiceBuilder::new().layer(CorsLayer::permissive());
+    let cors_layer = if cfg.permissive_cors.unwrap_or_default() {
+        CorsLayer::permissive()
+    } else {
+        CorsLayer::new()
+    };
+
+    let middleware = ServiceBuilder::new().layer(cors_layer);
     let server = Server::builder()
         .set_http_middleware(middleware)
         .build(cfg.listen_address)

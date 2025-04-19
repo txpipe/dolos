@@ -280,6 +280,7 @@ impl ConfigEditor {
             if value {
                 self.0.serve.minibf = dolos::serve::minibf::Config {
                     listen_address: "[::]:3000".parse().unwrap(),
+                    permissive_cors: Some(true),
                 }
                 .into();
             } else {
@@ -296,6 +297,7 @@ impl ConfigEditor {
                 self.0.serve.trp = dolos::serve::trp::Config {
                     listen_address: "[::]:8000".parse().unwrap(),
                     max_optimize_rounds: 10,
+                    permissive_cors: Some(true),
                 }
                 .into();
             } else {

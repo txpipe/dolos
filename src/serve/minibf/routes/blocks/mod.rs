@@ -1,8 +1,8 @@
+use axum::http::StatusCode;
 use pallas::{
     crypto::hash::Hasher,
     ledger::traverse::{MultiEraBlock, MultiEraHeader, MultiEraUpdate},
 };
-use rocket::http::Status;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -27,24 +27,24 @@ pub struct BlockHeaderFields {
 pub fn hash_or_number_to_body(
     hash_or_number: &str,
     chain: &ChainStore,
-) -> Result<BlockBody, Status> {
+) -> Result<BlockBody, StatusCode> {
     match hex::decode(hash_or_number) {
         Ok(hash) => match chain
             .get_block_by_hash(&hash)
-            .map_err(|_| Status::InternalServerError)?
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         {
             Some(body) => Ok(body),
-            None => Err(Status::NotFound),
+            None => Err(StatusCode::NOT_FOUND),
         },
         Err(_) => match hash_or_number.parse() {
             Ok(number) => match chain
                 .get_block_by_number(&number)
-                .map_err(|_| Status::InternalServerError)?
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
             {
                 Some(body) => Ok(body),
-                None => Err(Status::NotFound),
+                None => Err(StatusCode::NOT_FOUND),
             },
-            Err(_) => Err(Status::BadRequest),
+            Err(_) => Err(StatusCode::BAD_REQUEST),
         },
     }
 }
@@ -76,40 +76,45 @@ impl Block {
         chain: &ChainStore,
         ledger: &LedgerStore,
         genesis: &Genesis,
-    ) -> Result<Option<Block>, Status> {
-        let curr = MultiEraBlock::decode(body).map_err(|_| Status::InternalServerError)?;
+    ) -> Result<Block, StatusCode> {
+        let curr = MultiEraBlock::decode(body).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         let next: Option<String> = match chain
             .get_block_by_number(&(curr.number() + 1))
-            .map_err(|_| Status::InternalServerError)?
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         {
             Some(body) => {
                 let block =
-                    MultiEraBlock::decode(&body).map_err(|_| Status::InternalServerError)?;
+                    MultiEraBlock::decode(&body).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
                 Some(block.hash().to_string())
             }
             None => None,
         };
 
-        let confirmations = match chain.get_tip().map_err(|_| Status::InternalServerError)? {
+        let confirmations = match chain
+            .get_tip()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        {
             Some((_, body)) => {
                 let block =
-                    MultiEraBlock::decode(&body).map_err(|_| Status::InternalServerError)?;
+                    MultiEraBlock::decode(&body).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
                 block.number() - curr.number()
             }
-            None => return Err(Status::ServiceUnavailable),
+            None => return Err(StatusCode::SERVICE_UNAVAILABLE),
         };
 
         let slot = curr.slot();
 
-        let tip = ledger.cursor().map_err(|_| Status::InternalServerError)?;
+        let tip = ledger
+            .cursor()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         let updates = ledger
             .get_pparams(tip.map(|t| t.0).unwrap_or_default())
-            .map_err(|_| Status::InternalServerError)?
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
             .into_iter()
             .map(|eracbor| {
-                MultiEraUpdate::try_from(eracbor).map_err(|_| Status::InternalServerError)
+                MultiEraUpdate::try_from(eracbor).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
             })
-            .collect::<Result<Vec<MultiEraUpdate>, Status>>()?;
+            .collect::<Result<Vec<MultiEraUpdate>, StatusCode>>()?;
         let summary = pparams::fold_with_hacks(genesis, &updates, slot);
 
         let BlockHeaderFields {
@@ -121,7 +126,7 @@ impl Block {
         } = Self::extract_from_header(&curr.header())?;
         let (epoch, epoch_slot, time) =
             Self::resolve_time_from_genesis(&slot, summary.era_for_slot(slot));
-        Ok(Some(Self {
+        Ok(Self {
             slot: Some(curr.slot()),
             hash: curr.hash().to_string(),
             tx_count: curr.tx_count() as u64,
@@ -157,7 +162,7 @@ impl Block {
                 ),
             },
             slot_leader,
-        }))
+        })
     }
 
     pub fn find_in_chain(
@@ -165,7 +170,7 @@ impl Block {
         ledger: &LedgerStore,
         hash_or_number: &str,
         genesis: &Genesis,
-    ) -> Result<Option<Block>, Status> {
+    ) -> Result<Block, StatusCode> {
         Self::from_body(
             &hash_or_number_to_body(hash_or_number, chain)?,
             chain,
@@ -185,12 +190,12 @@ impl Block {
         (epoch, epoch_slot, time)
     }
 
-    pub fn extract_from_header(header: &MultiEraHeader) -> Result<BlockHeaderFields, Status> {
+    pub fn extract_from_header(header: &MultiEraHeader) -> Result<BlockHeaderFields, StatusCode> {
         let previous_block = header.previous_hash().map(|h| h.to_string());
         let block_vrf = match header.vrf_vkey() {
             Some(v) => Some(
                 bech32::encode::<bech32::Bech32>(bech32::Hrp::parse("vrf_vk").unwrap(), v)
-                    .map_err(|_| Status::ServiceUnavailable)?,
+                    .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?,
             ),
             None => None,
         };
@@ -200,11 +205,8 @@ impl Block {
                 bech32::Hrp::parse("pool").unwrap(),
                 Hasher::<224>::hash(hash).as_ref(),
             )
-            .map_err(|_| {
-                println!("cacota");
-                Status::InternalServerError
-            })?,
-            None => return Err(Status::InternalServerError),
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+            None => return Err(StatusCode::INTERNAL_SERVER_ERROR),
         };
 
         let (op_cert, op_cert_counter) = match header {
