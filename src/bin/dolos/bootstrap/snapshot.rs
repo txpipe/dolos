@@ -1,6 +1,6 @@
 use flate2::read::GzDecoder;
 use inquire::list_option::ListOption;
-use miette::{bail, Context, IntoDiagnostic};
+use miette::{Context, IntoDiagnostic};
 use tar::Archive;
 
 use crate::feedback::{Feedback, ProgressReader};

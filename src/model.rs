@@ -133,6 +133,12 @@ pub struct StorageConfig {
     pub max_chain_history: Option<u64>,
 }
 
+impl StorageConfig {
+    pub fn is_ephemeral(&self) -> bool {
+        self.path.is_none()
+    }
+}
+
 impl Default for StorageConfig {
     fn default() -> Self {
         Self {

@@ -54,31 +54,31 @@ impl Display for KnownNetwork {
     }
 }
 
-impl From<&KnownNetwork> for dolos::model::UpstreamConfig {
+impl From<&KnownNetwork> for dolos::model::PeerConfig {
     fn from(value: &KnownNetwork) -> Self {
         match value {
-            KnownNetwork::CardanoMainnet => {
-                dolos::model::UpstreamConfig::Peer(dolos::model::PeerConfig {
-                    peer_address: "backbone.mainnet.cardanofoundation.org:3001".into(),
-                    network_magic: 764824073,
-                    is_testnet: false,
-                })
-            }
-            KnownNetwork::CardanoPreProd => {
-                dolos::model::UpstreamConfig::Peer(dolos::model::PeerConfig {
-                    peer_address: "preprod-node.world.dev.cardano.org:30000".into(),
-                    network_magic: 1,
-                    is_testnet: true,
-                })
-            }
-            KnownNetwork::CardanoPreview => {
-                dolos::model::UpstreamConfig::Peer(dolos::model::PeerConfig {
-                    peer_address: "preview-node.world.dev.cardano.org:30002".into(),
-                    network_magic: 2,
-                    is_testnet: true,
-                })
-            }
+            KnownNetwork::CardanoMainnet => dolos::model::PeerConfig {
+                peer_address: "backbone.mainnet.cardanofoundation.org:3001".into(),
+                network_magic: 764824073,
+                is_testnet: false,
+            },
+            KnownNetwork::CardanoPreProd => dolos::model::PeerConfig {
+                peer_address: "preprod-node.world.dev.cardano.org:30000".into(),
+                network_magic: 1,
+                is_testnet: true,
+            },
+            KnownNetwork::CardanoPreview => dolos::model::PeerConfig {
+                peer_address: "preview-node.world.dev.cardano.org:30002".into(),
+                network_magic: 2,
+                is_testnet: true,
+            },
         }
+    }
+}
+
+impl From<&KnownNetwork> for dolos::model::UpstreamConfig {
+    fn from(value: &KnownNetwork) -> Self {
+        dolos::model::UpstreamConfig::Peer(value.into())
     }
 }
 

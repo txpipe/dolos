@@ -40,7 +40,7 @@ pub struct Args {}
 pub fn run(config: &crate::Config, _args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging)?;
 
-    let (wal, ledger, _) = crate::common::open_data_stores(config)?;
+    let (wal, ledger, _) = crate::common::setup_data_stores(config)?;
 
     if let Some((seq, point)) = wal.crawl_from(None).unwrap().next() {
         println!("found WAL start");
