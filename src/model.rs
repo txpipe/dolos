@@ -32,7 +32,45 @@ pub enum RollEvent {
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct UpstreamConfig {
+#[serde(untagged)]
+pub enum UpstreamConfig {
+    Peer(PeerConfig),
+    Emulator(EmulatorConfig),
+}
+
+impl UpstreamConfig {
+    pub fn network_magic(&self) -> Option<u64> {
+        match self {
+            Self::Peer(peer) => Some(peer.network_magic),
+            Self::Emulator(_) => None,
+        }
+    }
+
+    pub fn peer_address(&self) -> Option<&str> {
+        match self {
+            Self::Peer(peer) => Some(&peer.peer_address),
+            Self::Emulator(_) => None,
+        }
+    }
+
+    pub fn is_emulator(&self) -> bool {
+        matches!(self, Self::Emulator(_))
+    }
+
+    pub fn as_peer_mut(&mut self) -> Option<&mut PeerConfig> {
+        match self {
+            Self::Peer(peer) => Some(peer),
+            _ => None,
+        }
+    }
+}
+#[derive(Serialize, Deserialize)]
+pub struct EmulatorConfig {
+    pub block_production_interval: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct PeerConfig {
     pub peer_address: String,
     pub network_magic: u64,
 
@@ -86,7 +124,9 @@ impl Display for StorageVersion {
 pub struct StorageConfig {
     pub version: StorageVersion,
 
-    pub path: std::path::PathBuf,
+    /// Directory where to find storage. If undefined, ephemeral storage will be
+    /// used.
+    pub path: Option<std::path::PathBuf>,
 
     /// Size (in Mb) of memory allocated for WAL caching
     pub wal_cache: Option<usize>,
@@ -107,11 +147,17 @@ pub struct StorageConfig {
     pub max_chain_history: Option<u64>,
 }
 
+impl StorageConfig {
+    pub fn is_ephemeral(&self) -> bool {
+        self.path.is_none()
+    }
+}
+
 impl Default for StorageConfig {
     fn default() -> Self {
         Self {
             version: Default::default(),
-            path: std::path::PathBuf::from("data"),
+            path: Some(std::path::PathBuf::from("data")),
             wal_cache: None,
             ledger_cache: None,
             chain_cache: None,

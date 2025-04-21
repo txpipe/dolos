@@ -148,7 +148,7 @@ async fn fetch_snapshot(
 }
 
 fn open_empty_wal(config: &crate::Config) -> miette::Result<wal::redb::WalStore> {
-    let wal = crate::common::open_wal(config)?;
+    let wal = crate::common::open_wal_store(config)?;
 
     let is_empty = wal.is_empty().into_diagnostic()?;
 

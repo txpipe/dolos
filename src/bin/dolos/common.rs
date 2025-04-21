@@ -12,69 +12,79 @@ use crate::{GenesisConfig, LoggingConfig};
 
 pub type Stores = (wal::redb::WalStore, state::LedgerStore, chain::ChainStore);
 
-pub fn open_wal(config: &crate::Config) -> Result<wal::redb::WalStore, Error> {
-    let root = &config.storage.path;
+pub fn ensure_storage_path(config: &crate::Config) -> Result<PathBuf, Error> {
+    let root = config.storage.path.as_ref().ok_or(Error::config(
+        "can't define storage path for ephemeral config",
+    ))?;
 
-    std::fs::create_dir_all(root).map_err(Error::storage)?;
+    std::fs::create_dir_all(root)?;
+
+    Ok(root.to_path_buf())
+}
+
+pub fn open_wal_store(config: &crate::Config) -> Result<wal::redb::WalStore, Error> {
+    let root = ensure_storage_path(config)?;
 
     let wal = wal::redb::WalStore::open(
         root.join("wal"),
         config.storage.wal_cache,
         config.storage.max_wal_history,
-    )
-    .map_err(Error::storage)?;
+    )?;
 
     Ok(wal)
 }
 
-pub fn define_ledger_path(config: &crate::Config) -> Result<PathBuf, Error> {
-    let root = &config.storage.path;
-    std::fs::create_dir_all(root).map_err(Error::storage)?;
-
-    let ledger = root.join("ledger");
-
-    Ok(ledger)
-}
-
-pub fn define_chain_path(config: &crate::Config) -> Result<PathBuf, Error> {
-    let root = &config.storage.path;
-    std::fs::create_dir_all(root).map_err(Error::storage)?;
-
-    let chain = root.join("chain");
-
-    Ok(chain)
-}
-
-pub fn open_data_stores(config: &crate::Config) -> Result<Stores, Error> {
-    let root = &config.storage.path;
-
-    if config.storage.version == StorageVersion::V0 {
-        error!("Storage should be removed and init procedure run again.");
-        return Err(Error::StorageError("Invalid store version".to_string()));
-    }
-
-    std::fs::create_dir_all(root).map_err(Error::storage)?;
-
-    let wal = wal::redb::WalStore::open(
-        root.join("wal"),
-        config.storage.wal_cache,
-        config.storage.max_wal_history,
-    )
-    .map_err(Error::storage)?;
-
-    let ledger = state::redb::LedgerStore::open(root.join("ledger"), config.storage.ledger_cache)
-        .map_err(Error::storage)?
-        .into();
+pub fn open_chain_store(config: &crate::Config) -> Result<chain::ChainStore, Error> {
+    let root = ensure_storage_path(config)?;
 
     let chain = chain::redb::ChainStore::open(
         root.join("chain"),
         config.storage.chain_cache,
         config.storage.max_chain_history,
-    )
-    .map_err(Error::storage)?
-    .into();
+    )?;
+
+    Ok(chain.into())
+}
+
+pub fn open_ledger_store(config: &crate::Config) -> Result<state::LedgerStore, Error> {
+    let root = ensure_storage_path(config)?;
+
+    let ledger = state::redb::LedgerStore::open(root.join("ledger"), config.storage.ledger_cache)?;
+
+    Ok(ledger.into())
+}
+
+pub fn open_persistent_data_stores(config: &crate::Config) -> Result<Stores, Error> {
+    if config.storage.version == StorageVersion::V0 {
+        error!("Storage should be removed and init procedure run again.");
+        return Err(Error::StorageError("Invalid store version".to_string()));
+    }
+
+    let wal = open_wal_store(config)?;
+    let ledger = open_ledger_store(config)?;
+    let chain = open_chain_store(config)?;
 
     Ok((wal, ledger, chain))
+}
+
+pub fn create_ephemeral_data_stores(config: &crate::Config) -> Result<Stores, Error> {
+    let mut wal = wal::redb::WalStore::memory(config.storage.max_wal_history)?;
+
+    wal.initialize_from_origin()?;
+
+    let ledger = state::LedgerStore::Redb(state::redb::LedgerStore::in_memory_v2()?);
+
+    let chain = chain::ChainStore::Redb(chain::redb::ChainStore::in_memory_v1()?);
+
+    Ok((wal, ledger, chain))
+}
+
+pub fn setup_data_stores(config: &crate::Config) -> Result<Stores, Error> {
+    if config.storage.is_ephemeral() {
+        create_ephemeral_data_stores(config)
+    } else {
+        open_persistent_data_stores(config)
+    }
 }
 
 pub fn setup_tracing(config: &LoggingConfig) -> miette::Result<()> {
@@ -211,7 +221,9 @@ pub fn spawn_pipeline(pipeline: gasket::daemon::Daemon, exit: CancellationToken)
 }
 
 pub fn cleanup_data(config: &crate::Config) -> Result<(), std::io::Error> {
-    let root = &config.storage.path;
+    let Some(root) = &config.storage.path else {
+        return Ok(());
+    };
 
     if root.is_dir() {
         for entry_result in fs::read_dir(root)? {

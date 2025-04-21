@@ -28,7 +28,7 @@ pub struct Args {
 pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging)?;
 
-    let (_, ledger, _) = crate::common::open_data_stores(config)?;
+    let (_, ledger, _) = crate::common::setup_data_stores(config)?;
     let genesis = Arc::new(crate::common::open_genesis_files(&config.genesis)?);
 
     let cbor = std::fs::read_to_string(&args.file)
@@ -93,7 +93,7 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
 
     let context = ValidationContext {
         block_slot: args.block_slot,
-        prot_magic: config.upstream.network_magic as u32,
+        prot_magic: config.upstream.network_magic().unwrap() as u32,
         network_id: args.network_id,
         prot_params: pparams,
         acnt: None,
