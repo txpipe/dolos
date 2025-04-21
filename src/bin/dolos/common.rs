@@ -64,7 +64,7 @@ pub fn open_persistent_data_stores(config: &crate::Config) -> Result<Stores, Err
     let ledger = open_ledger_store(config)?;
     let chain = open_chain_store(config)?;
 
-    Ok((wal, ledger.into(), chain.into()))
+    Ok((wal, ledger, chain))
 }
 
 pub fn create_ephemeral_data_stores(config: &crate::Config) -> Result<Stores, Error> {

@@ -1,7 +1,7 @@
 use clap::Parser;
 use flate2::write::GzEncoder;
 use flate2::Compression;
-use miette::{bail, IntoDiagnostic as _};
+use miette::IntoDiagnostic as _;
 use std::fs::File;
 use std::path::PathBuf;
 use tar::Builder;

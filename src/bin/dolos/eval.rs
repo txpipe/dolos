@@ -1,6 +1,6 @@
 use dolos::ledger::{EraCbor, TxoRef};
 use itertools::*;
-use miette::{bail, Context, IntoDiagnostic};
+use miette::{Context, IntoDiagnostic};
 use pallas::{
     ledger::traverse::{Era, MultiEraInput, MultiEraOutput, MultiEraUpdate},
     ledger::validate::utils::{CertState, Environment as ValidationContext, UTxOs},
