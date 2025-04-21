@@ -2,6 +2,32 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.21.0] - 2025-04-21
+
+### 🚀 Features
+
+- *(serve)* Add TRP server (#462)
+- Introduce support for ephemeral devents (#475)
+
+### 🐛 Bug Fixes
+
+- *(minibf)* Add missing fields on protocol parameters (#474)
+
+### 📚 Documentation
+
+- Add MiniBF api section (#473)
+- Propose ADR for light consensus (#477)
+
+### 🔧 Continuous Integration
+
+- Trigger docker on `demeter` branch push (#470)
+- Use github ARM runner (#471)
+
+### ⚙️ Miscellaneous Tasks
+
+- Update docs to match v0.20 (#468)
+- *(serve)* Split services into compile-time features (#479)
+
 ## [0.20.0] - 2025-04-01
 
 ### 🚀 Features
@@ -26,6 +52,7 @@ All notable changes to this project will be documented in this file.
 - Update Pallas to latest main (#463)
 - Add minibf prompt to init (#466)
 - Refresh example configs (#467)
+- Release dolos version 0.20.0
 
 ## [0.19.1] - 2025-01-25
 
