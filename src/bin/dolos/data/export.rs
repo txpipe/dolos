@@ -89,9 +89,8 @@ pub fn run(
 
     prepare_wal(wal, &pb)?;
 
-    let Some(root) = &config.storage.path else {
-        bail!("storage path is undefined")
-    };
+    let root = crate::common::ensure_storage_path(config)?;
+
     let path = root.join("wal");
 
     archive

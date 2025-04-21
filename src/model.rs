@@ -46,8 +46,22 @@ impl UpstreamConfig {
         }
     }
 
+    pub fn peer_address(&self) -> Option<&str> {
+        match self {
+            Self::Peer(peer) => Some(&peer.peer_address),
+            Self::Emulator(_) => None,
+        }
+    }
+
     pub fn is_emulator(&self) -> bool {
         matches!(self, Self::Emulator(_))
+    }
+
+    pub fn as_peer_mut(&mut self) -> Option<&mut PeerConfig> {
+        match self {
+            Self::Peer(peer) => Some(peer),
+            _ => None,
+        }
     }
 }
 #[derive(Serialize, Deserialize)]

@@ -93,10 +93,7 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
 
     let context = ValidationContext {
         block_slot: args.block_slot,
-        prot_magic: match &config.upstream {
-            dolos::model::UpstreamConfig::Peer(peer) => peer.network_magic as u32,
-            _ => bail!("Invalid upstream config"),
-        },
+        prot_magic: config.upstream.network_magic().unwrap() as u32,
         network_id: args.network_id,
         prot_params: pparams,
         acnt: None,
