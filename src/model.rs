@@ -38,6 +38,18 @@ pub enum UpstreamConfig {
     Emulator(EmulatorConfig),
 }
 
+impl UpstreamConfig {
+    pub fn network_magic(&self) -> Option<u64> {
+        match self {
+            Self::Peer(peer) => Some(peer.network_magic),
+            Self::Emulator(_) => None,
+        }
+    }
+
+    pub fn is_emulator(&self) -> bool {
+        matches!(self, Self::Emulator(_))
+    }
+}
 #[derive(Serialize, Deserialize)]
 pub struct EmulatorConfig {
     pub block_production_interval: u64,
@@ -98,7 +110,8 @@ impl Display for StorageVersion {
 pub struct StorageConfig {
     pub version: StorageVersion,
 
-    /// Directory where to find storage. If undefined, ephemeral storage will be used.
+    /// Directory where to find storage. If undefined, ephemeral storage will be
+    /// used.
     pub path: Option<std::path::PathBuf>,
 
     /// Size (in Mb) of memory allocated for WAL caching
