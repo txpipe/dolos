@@ -19,6 +19,7 @@ pub fn empty_bytes() -> Bytes {
 }
 
 pub struct Worker {
+    block_production_interval_seconds: u64,
     block_production_timer: tokio::time::Interval,
     mempool: Mempool,
 }
@@ -30,9 +31,13 @@ impl Worker {
         let (block_number, slot, prev_hash) = match current {
             Some(raw) => {
                 let block = MultiEraBlock::decode(&raw.body).unwrap();
-                (block.number() + 1, block.slot() + 20, Some(block.hash()))
+                (
+                    block.number() + 1,
+                    block.slot() + self.block_production_interval_seconds,
+                    Some(block.hash()),
+                )
             }
-            None => (1, 20, None),
+            None => (1, self.block_production_interval_seconds, None),
         };
 
         let mut transaction_bodies = vec![];
@@ -116,7 +121,10 @@ impl Worker {
 impl gasket::framework::Worker<Stage> for Worker {
     async fn bootstrap(stage: &Stage) -> Result<Self, WorkerError> {
         Ok(Self {
-            block_production_timer: tokio::time::interval(stage.block_production_interval),
+            block_production_interval_seconds: stage.block_production_interval,
+            block_production_timer: tokio::time::interval(std::time::Duration::from_secs(
+                stage.block_production_interval,
+            )),
             mempool: stage.mempool.clone(),
         })
     }
@@ -146,7 +154,8 @@ impl gasket::framework::Worker<Stage> for Worker {
 #[derive(Stage)]
 #[stage(name = "emulator", unit = "()", worker = "Worker")]
 pub struct Stage {
-    block_production_interval: std::time::Duration,
+    // block_production_interval: std::time::Duration,
+    block_production_interval: u64,
     wal: WalStore,
     mempool: Mempool,
 
@@ -160,11 +169,7 @@ pub struct Stage {
 }
 
 impl Stage {
-    pub fn new(
-        wal: WalStore,
-        mempool: Mempool,
-        block_production_interval: std::time::Duration,
-    ) -> Self {
+    pub fn new(wal: WalStore, mempool: Mempool, block_production_interval: u64) -> Self {
         Self {
             downstream: Default::default(),
             block_count: Default::default(),
