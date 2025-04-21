@@ -12,8 +12,8 @@ authors = ["Santiago Carmuega <santiago@carmuega.me>"]
 
 
 [dependencies]
-pallas = { git = "https://github.com/txpipe/pallas.git", features = ["hardano"] }
-# pallas = { version = "0.32.0", features = ["hardano"] }
+# pallas = { git = "https://github.com/txpipe/pallas.git", features = ["hardano"] }
+pallas = { version = "1.0.0-alpha.1", features = ["hardano"] }
 # pallas = { path = "../pallas/pallas", features = ["hardano"] }
 
 # gasket = { git = "https://github.com/construkts/gasket-rs.git", features = ["derive"] }
@@ -58,9 +58,22 @@ flate2 = "1.0.34"
 tar = "0.4.41"
 reqwest = { version = "0.12.7", default-features = false, features = ["blocking", "rustls-tls"] }
 paste = "1.0.15"
-tower-http = { version = "0.6.1", features = ["cors"] }
+tower-http = { version = "0.6.1", features = ["cors", "trace"] }
 chrono = { version = "0.4.39", default-features = false }
-rocket = { version = "0.5", features = ["json"] }
+
+jsonrpsee = { version = "0.24.9", features = ["server"] }
+http = "1.3.1"
+hyper = "1.5"
+tower = "0.4"
+base64 = "0.22.1"
+tx3-lang = "0.2.0"
+tx3-cardano =  "0.2.0"
+
+# phase2 dependencies
+uplc = { git = "https://github.com/pragma-org/uplc.git", optional = true }
+# blst = { version = "=0.3.13", optional = true }
+rug = { version = "1.26.1", optional = true }
+axum = { version = "0.7.5", features = ["macros"] }
 
 [target.'cfg(not(windows))'.dependencies.mithril-client]
 version = "0.10.4"
