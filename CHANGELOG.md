@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.21.1] - 2025-04-22
+
+### 🐛 Bug Fixes
+
+- Use Conway structs for genesis UTxOs (#480)
+- *(trp)* Use input query criteria correctly (#481)
+
 ## [0.21.0] - 2025-04-21
 
 ### 🚀 Features
@@ -27,6 +34,7 @@ All notable changes to this project will be documented in this file.
 
 - Update docs to match v0.20 (#468)
 - *(serve)* Split services into compile-time features (#479)
+- Release dolos version 0.21.0
 
 ## [0.20.0] - 2025-04-01
 
