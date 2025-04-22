@@ -154,7 +154,7 @@ pub fn devnet(
     let mut emulator = emulator::Stage::new(
         wal.clone(),
         mempool.clone(),
-        std::time::Duration::from_secs(emulator_cfg.block_production_interval),
+        emulator_cfg.block_production_interval,
     );
 
     let mut roll = roll::Stage::new(wal.clone(), HOUSEKEEPING_INTERVAL);
