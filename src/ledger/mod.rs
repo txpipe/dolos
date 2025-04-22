@@ -263,9 +263,10 @@ pub fn compute_origin_delta(genesis: &Genesis) -> LedgerDelta {
                 amount: pallas::ledger::primitives::alonzo::Value::Coin(amount),
                 datum_hash: None,
             };
-
             let utxo_body =
-                MultiEraOutput::from_alonzo_compatible(&utxo_body, Era::Shelley).to_owned();
+                pallas::ledger::primitives::conway::TransactionOutput::Legacy(utxo_body.into());
+
+            let utxo_body = MultiEraOutput::from_conway(&utxo_body).to_owned();
             delta.produced_utxo.insert(utxo_ref, utxo_body.into());
         }
     }
