@@ -1,4 +1,5 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
+use itertools::Itertools;
 use jsonrpsee::types::{ErrorCode, ErrorObject, ErrorObjectOwned, Params};
 use pallas::ledger::{
     primitives::NetworkId,
@@ -6,9 +7,9 @@ use pallas::ledger::{
 };
 use serde::Deserialize;
 use std::sync::Arc;
-use tx3_lang::ProtoTx;
+use tx3_lang::{ir::Expression, ProtoTx};
 
-use crate::ledger::pparams;
+use crate::ledger::{pparams, EraCbor, TxoRef};
 
 use super::Context;
 
@@ -184,96 +185,214 @@ impl tx3_cardano::Ledger for Context {
         &self,
         query: &tx3_lang::ir::InputQuery,
     ) -> Result<tx3_lang::UtxoSet, tx3_cardano::Error> {
+        let mut result: Option<tx3_lang::UtxoSet> = None;
+
         let address = match &query.address {
-            Some(tx3_lang::ir::Expression::Address(address)) => address.clone(),
-            Some(tx3_lang::ir::Expression::String(address)) => {
+            Some(Expression::Address(address)) => Some(address.clone()),
+            Some(Expression::String(address)) => Some(
                 pallas::ledger::addresses::Address::from_bech32(address)
                     .map_err(tx3_cardano::Error::InvalidAddress)?
-                    .to_vec()
-            }
-            _ => return Err(tx3_cardano::Error::MissingAddress),
+                    .to_vec(),
+            ),
+            _ => None,
         };
 
-        let refs = self
-            .ledger
-            .get_utxo_by_address(&address)
-            .map_err(|err| tx3_cardano::Error::LedgerInternalError(err.to_string()))?;
+        if let Some(address) = &address {
+            let refs = self
+                .ledger
+                .get_utxo_by_address(address)
+                .map_err(|err| tx3_cardano::Error::LedgerInternalError(err.to_string()))?;
+            let set = self
+                .ledger
+                .get_utxos(refs.into_iter().collect())
+                .map_err(|err| tx3_cardano::Error::LedgerInternalError(err.to_string()))?
+                .into_iter()
+                .map(|(txoref, eracbor)| into_tx3_utxo(&txoref, &eracbor))
+                .collect::<Result<tx3_lang::UtxoSet, _>>()?;
+            match result {
+                Some(set) => result = Some(set.intersection(&set).cloned().collect()),
+                None => result = Some(set),
+            }
+        }
 
-        let utxos = self
-            .ledger
-            .get_utxos(refs.into_iter().collect())
-            .map_err(|err| tx3_cardano::Error::LedgerInternalError(err.to_string()))?;
+        let mut min_lovelace_filter = None;
 
-        utxos
-            .into_iter()
-            .filter_map(|(txoref, eracbor)| {
-                let parsed = match MultiEraOutput::try_from(&eracbor) {
-                    Ok(parsed) => parsed,
-                    Err(err) => {
-                        return Some(Err(tx3_cardano::Error::LedgerInternalError(
-                            err.to_string(),
-                        )))
-                    }
+        if let Some(Expression::Assets(min_amount)) = &query.min_amount {
+            for expr in min_amount {
+                let policy = match &expr.policy {
+                    Expression::Bytes(policy) => Some(policy),
+                    _ => None,
+                };
+                let asset_name = match &expr.asset_name {
+                    Expression::Bytes(asset_name) => Some(asset_name),
+                    _ => None,
+                };
+                let amount = match expr.amount {
+                    Expression::Number(amount) => amount,
+                    _ => return Err(tx3_cardano::Error::MissingAmount),
                 };
 
-                let coin = parsed.value().coin() as i128;
-                if let Some(tx3_lang::ir::Expression::Number(amount)) = &query.min_amount {
-                    if coin < *amount {
-                        println!("coin: {coin}");
-                        println!("amount: {amount}");
-                        return None;
-                    }
-                };
-
-                let address = match parsed.address() {
-                    Ok(address) => address.to_vec(),
-                    Err(err) => return Some(Err(tx3_cardano::Error::InvalidAddress(err))),
-                };
-
-                let mut assets = vec![tx3_lang::ir::AssetExpr {
-                    policy: tx3_lang::ir::Expression::None,
-                    asset_name: tx3_lang::ir::Expression::None,
-                    amount: tx3_lang::ir::Expression::Number(coin),
-                }];
-                assets.extend(parsed.value().assets().into_iter().flat_map(|x| {
-                    let policy = x.policy().to_vec();
-                    x.assets()
-                        .into_iter()
-                        .map(|y| {
-                            let asset_name = y.name().to_vec();
-                            let amount = y.output_coin();
-                            tx3_lang::ir::AssetExpr {
-                                policy: tx3_lang::ir::Expression::Bytes(policy.clone()),
-                                asset_name: tx3_lang::ir::Expression::Bytes(asset_name),
-                                amount: match amount {
-                                    Some(amount) => tx3_lang::ir::Expression::Number(amount.into()),
-                                    None => tx3_lang::ir::Expression::None,
-                                },
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                }));
-
-                Some(Ok(tx3_lang::Utxo {
-                    r#ref: tx3_lang::UtxoRef {
-                        txid: txoref.0.to_vec(),
-                        index: txoref.1,
-                    },
-                    address,
-                    datum: match parsed.datum() {
-                        Some(pallas::ledger::primitives::conway::DatumOption::Data(x)) => {
-                            Some(tx3_lang::ir::Expression::Bytes(x.raw_cbor().to_vec()))
+                match (policy, asset_name, amount) {
+                    // Minimum lovelace in UTxO. Will be applied last.
+                    (None, None, amount) => min_lovelace_filter = Some(amount),
+                    (Some(policy), None, amount) => {
+                        let refs = self.ledger.get_utxo_by_policy(policy).map_err(|err| {
+                            tx3_cardano::Error::LedgerInternalError(err.to_string())
+                        })?;
+                        let utxos = self
+                            .ledger
+                            .get_utxos(refs.into_iter().collect())
+                            .map_err(|err| {
+                                tx3_cardano::Error::LedgerInternalError(err.to_string())
+                            })?
+                            .iter()
+                            .map(|(txoref, eracbor)| into_tx3_utxo(txoref, eracbor))
+                            .filter_ok(|utxo| {
+                                let assetexpr =
+                                    utxo.assets.iter().find(|asset| match &asset.policy {
+                                        Expression::Bytes(x) => x == policy,
+                                        _ => false,
+                                    });
+                                match assetexpr {
+                                    Some(assetexpr) => match assetexpr.amount {
+                                        Expression::Number(y) => y > amount,
+                                        _ => false,
+                                    },
+                                    _ => false,
+                                }
+                            })
+                            .collect::<Result<tx3_lang::UtxoSet, _>>()?;
+                        match result {
+                            Some(set) => result = Some(set.intersection(&utxos).cloned().collect()),
+                            None => result = Some(utxos),
                         }
-                        _ => None,
+                    }
+                    (Some(policy), Some(asset_name), amount) => {
+                        let mut asset = Vec::new();
+                        asset.extend_from_slice(policy.as_slice());
+                        asset.extend_from_slice(asset_name.as_slice());
+
+                        let refs = self.ledger.get_utxo_by_asset(&asset).map_err(|err| {
+                            tx3_cardano::Error::LedgerInternalError(err.to_string())
+                        })?;
+                        let utxos = self
+                            .ledger
+                            .get_utxos(refs.into_iter().collect())
+                            .map_err(|err| {
+                                tx3_cardano::Error::LedgerInternalError(err.to_string())
+                            })?
+                            .iter()
+                            .map(|(txoref, eracbor)| into_tx3_utxo(txoref, eracbor))
+                            .filter_ok(|utxo| {
+                                let assetexpr = utxo.assets.iter().find(|asset| {
+                                    match (&asset.policy, &asset.asset_name) {
+                                        (Expression::Bytes(x), Expression::Bytes(y)) => {
+                                            x == policy && y == asset_name
+                                        }
+                                        _ => false,
+                                    }
+                                });
+                                match assetexpr {
+                                    Some(assetexpr) => match assetexpr.amount {
+                                        Expression::Number(y) => y > amount,
+                                        _ => false,
+                                    },
+                                    _ => false,
+                                }
+                            })
+                            .collect::<Result<tx3_lang::UtxoSet, _>>()?;
+
+                        match result {
+                            Some(set) => result = Some(set.intersection(&utxos).cloned().collect()),
+                            None => result = Some(utxos),
+                        }
+                    }
+                    (_, Some(_), _) => {
+                        return Err(tx3_cardano::Error::InvalidAssetExpression(
+                            "policy must be defined when asset name is not None".to_string(),
+                        ))
+                    }
+                }
+            }
+        }
+
+        let Some(mut result) = result else {
+            return Ok(tx3_lang::UtxoSet::new());
+        };
+
+        // Finally, filter by lovelace is needed
+        if let Some(min_lovelace_filter) = min_lovelace_filter {
+            result.retain(|utxo| {
+                let assetexpr = utxo
+                    .assets
+                    .iter()
+                    .find(|asset| matches!(&asset.policy, Expression::None));
+                match assetexpr {
+                    Some(assetexpr) => match assetexpr.amount {
+                        Expression::Number(y) => y > min_lovelace_filter,
+                        _ => false,
                     },
-                    assets,
-                    script: None,
-                }))
-            })
-            .collect()
+                    _ => false,
+                }
+            });
+        }
+
+        Ok(result)
     }
 }
 
 pub fn health(context: &Context) -> bool {
     context.ledger.cursor().is_ok()
+}
+
+pub fn into_tx3_utxo(
+    txoref: &TxoRef,
+    eracbor: &EraCbor,
+) -> Result<tx3_lang::Utxo, tx3_cardano::Error> {
+    let parsed = MultiEraOutput::try_from(eracbor)
+        .map_err(|err| tx3_cardano::Error::LedgerInternalError(err.to_string()))?;
+
+    let coin = parsed.value().coin() as i128;
+    let address = parsed
+        .address()
+        .map_err(tx3_cardano::Error::InvalidAddress)?
+        .to_vec();
+
+    let mut assets = vec![tx3_lang::ir::AssetExpr {
+        policy: Expression::None,
+        asset_name: Expression::None,
+        amount: Expression::Number(coin),
+    }];
+
+    assets.extend(parsed.value().assets().into_iter().flat_map(|x| {
+        let policy = x.policy().to_vec();
+        x.assets()
+            .into_iter()
+            .map(|y| {
+                let asset_name = y.name().to_vec();
+                let amount = y.any_coin();
+                tx3_lang::ir::AssetExpr {
+                    policy: Expression::Bytes(policy.clone()),
+                    asset_name: Expression::Bytes(asset_name),
+                    amount: Expression::Number(amount),
+                }
+            })
+            .collect::<Vec<_>>()
+    }));
+
+    Ok(tx3_lang::Utxo {
+        r#ref: tx3_lang::UtxoRef {
+            txid: txoref.0.to_vec(),
+            index: txoref.1,
+        },
+        address,
+        datum: match parsed.datum() {
+            Some(pallas::ledger::primitives::conway::DatumOption::Data(x)) => {
+                Some(Expression::Bytes(x.raw_cbor().to_vec()))
+            }
+            _ => None,
+        },
+        assets,
+        script: None,
+    })
 }
