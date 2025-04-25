@@ -323,9 +323,11 @@ impl tx3_cardano::Ledger for Context {
                 .ledger
                 .get_utxos(
                     refs.iter()
-                        .map(|r#ref| TxoRef {
-                            0: pallas::ledger::primitives::Hash::<32>::from(r#ref.txid.as_slice()),
-                            1: r#ref.index,
+                        .map(|r#ref| {
+                            TxoRef(
+                                pallas::ledger::primitives::Hash::<32>::from(r#ref.txid.as_slice()),
+                                r#ref.index,
+                            )
                         })
                         .collect(),
                 )
