@@ -316,6 +316,30 @@ impl tx3_cardano::Ledger for Context {
             }
         }
 
+        // TODO: think about the position of this block
+        // ref have precedence
+        if let Some(Expression::UtxoRefs(refs)) = &query.r#ref {
+            let utxos = self
+                .ledger
+                .get_utxos(
+                    refs.iter()
+                        .map(|r#ref| {
+                            TxoRef(
+                                pallas::ledger::primitives::Hash::<32>::from(r#ref.txid.as_slice()),
+                                r#ref.index,
+                            )
+                        })
+                        .collect(),
+                )
+                .unwrap()
+                .iter()
+                .map(|(txoref, eracbor)| into_tx3_utxo(txoref, eracbor))
+                .collect::<Result<tx3_lang::UtxoSet, _>>()?;
+            if !utxos.is_empty() {
+                return Ok(utxos);
+            }
+        }
+
         let Some(mut result) = result else {
             return Ok(tx3_lang::UtxoSet::new());
         };
