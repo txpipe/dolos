@@ -64,7 +64,7 @@ tonic-web = { version = "0.12.3", optional = true }
 tonic-reflection = { version = "0.12.3", optional = true }
 
 # MiniBF dependencies
-axum = { version = "0.8.3", features = ["macros"], optional = true }
+axum = { version = "0.8.4", features = ["macros"], optional = true }
 
 # TRP dependencies
 jsonrpsee = { version = "0.24.9", features = ["server"], optional = true }
