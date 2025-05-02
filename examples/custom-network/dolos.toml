@@ -1,17 +1,23 @@
 [upstream]
-peer_address = "preview-node.world.dev.cardano.org:30002"
-network_magic = 42
-is_testnet = true
+type = "emulator"
 
 [storage]
 path = "data"
 max_wal_history = 10000
+ephemeral = true
 
 [genesis]
-byron_path = "byron.json"
-shelley_path = "shelley.json"
-alonzo_path = "alonzo.json"
-conway_path = "conway.json"
+type = "inline"
+
+[[genesis.accounts]]
+name = "Alice"
+address = "addr_test1qx234567890123456789012345678901234567890123456789012345678901234567890123456789"
+initial_balance = 1000000000000000000
+
+[[genesis.accounts]]
+name = "Bob"
+address = "addr_test1qx234567890123456789012345678901234567890123456789012345678901234567890123456789"
+initial_balance = 1000000000000000000
 
 [sync]
 pull_batch_size = 100
