@@ -40,15 +40,15 @@ pub async fn serve(
 ) -> Result<(), Error> {
     let app = Router::new()
         .route(
-            "/accounts/:stake_address/utxos",
+            "/accounts/{stake_address}/utxos",
             get(routes::accounts::stake_address::utxos::route),
         )
         .route(
-            "/addresses/:address/utxos",
+            "/addresses/{address}/utxos",
             get(routes::addresses::address::utxos::route),
         )
         .route(
-            "/addresses/:address/utxos/:asset",
+            "/addresses/{address}/utxos/{asset}",
             get(routes::addresses::address::utxos::asset::route),
         )
         .route("/blocks/latest", get(routes::blocks::latest::route))
@@ -57,27 +57,27 @@ pub async fn serve(
             get(routes::blocks::latest::txs::route),
         )
         .route(
-            "/blocks/:hash_or_number",
+            "/blocks/{hash_or_number}",
             get(routes::blocks::hash_or_number::route),
         )
         .route(
-            "/blocks/:hash_or_number/addresses",
+            "/blocks/{hash_or_number}/addresses",
             get(routes::blocks::hash_or_number::addresses::route),
         )
         .route(
-            "/blocks/:hash_or_number/next",
+            "/blocks/{hash_or_number}/next",
             get(routes::blocks::hash_or_number::next::route),
         )
         .route(
-            "/blocks/:hash_or_number/previous",
+            "/blocks/{hash_or_number}/previous",
             get(routes::blocks::hash_or_number::previous::route),
         )
         .route(
-            "/blocks/:hash_or_number/txs",
+            "/blocks/{hash_or_number}/txs",
             get(routes::blocks::hash_or_number::txs::route),
         )
         .route(
-            "/blocks/slot/:slot_number",
+            "/blocks/slot/{slot_number}",
             get(routes::blocks::slot::slot_number::route),
         )
         .route(
@@ -85,7 +85,10 @@ pub async fn serve(
             get(routes::epochs::latest::parameters::route),
         )
         .route("/tx/submit", post(routes::tx::submit::route))
-        .route("/txs/:tx_hash/cbor", get(routes::txs::tx_hash::cbor::route))
+        .route(
+            "/txs/{tx_hash}/cbor",
+            get(routes::txs::tx_hash::cbor::route),
+        )
         .with_state(SharedState::new(State {
             genesis,
             ledger,
