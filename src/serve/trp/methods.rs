@@ -6,7 +6,7 @@ use pallas::ledger::{
     traverse::{MultiEraOutput, MultiEraUpdate},
 };
 use serde::Deserialize;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 use tx3_lang::{ir::Expression, ProtoTx};
 
 use crate::ledger::{pparams, EraCbor, TxoRef};
@@ -144,6 +144,16 @@ pub async fn trp_resolve(
 
 impl tx3_cardano::Ledger for Context {
     async fn get_pparams(&self) -> Result<tx3_cardano::PParams, tx3_cardano::Error> {
+        let network = match self.genesis.shelley.network_id.as_ref() {
+            Some(network) => match network.as_str() {
+                "Mainnet" => Some(NetworkId::Mainnet),
+                "Testnet" => Some(NetworkId::Testnet),
+                _ => None,
+            },
+            None => None,
+        }
+        .unwrap();
+
         let tip = self
             .ledger
             .cursor()
@@ -162,23 +172,46 @@ impl tx3_cardano::Ledger for Context {
 
         let summary = pparams::fold_with_hacks(&self.genesis, &updates, tip.as_ref().unwrap().0);
         let era = summary.era_for_slot(tip.as_ref().unwrap().0);
-        let mapper = pallas::interop::utxorpc::Mapper::new(self.ledger.clone());
-        let params = mapper.map_pparams(era.pparams.clone());
 
-        Ok(tx3_cardano::PParams {
-            network: match self.genesis.shelley.network_id.as_ref() {
-                Some(network) => match network.as_str() {
-                    "Mainnet" => Some(NetworkId::Mainnet),
-                    "Testnet" => Some(NetworkId::Testnet),
-                    _ => None,
-                },
-                None => None,
+        let out = match &era.pparams {
+            pallas::ledger::validate::utils::MultiEraProtocolParameters::Conway(pparams) => {
+                tx3_cardano::PParams {
+                    network,
+                    cost_models: HashMap::from([
+                        (
+                            1,
+                            pparams
+                                .cost_models_for_script_languages
+                                .plutus_v1
+                                .clone()
+                                .unwrap(),
+                        ),
+                        (
+                            2,
+                            pparams
+                                .cost_models_for_script_languages
+                                .plutus_v2
+                                .clone()
+                                .unwrap(),
+                        ),
+                        (
+                            3,
+                            pparams
+                                .cost_models_for_script_languages
+                                .plutus_v3
+                                .clone()
+                                .unwrap(),
+                        ),
+                    ]),
+                    min_fee_coefficient: pparams.minfee_a as u64,
+                    min_fee_constant: pparams.minfee_b as u64,
+                    coins_per_utxo_byte: pparams.ada_per_utxo_byte,
+                }
             }
-            .unwrap(),
-            min_fee_coefficient: params.min_fee_coefficient,
-            min_fee_constant: params.min_fee_constant,
-            coins_per_utxo_byte: params.coins_per_utxo_byte,
-        })
+            _ => todo!("unsupported era for pparams"),
+        };
+
+        Ok(out)
     }
 
     async fn resolve_input(

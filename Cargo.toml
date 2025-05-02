@@ -74,8 +74,8 @@ http = "1.3.1"
 hyper = "1.5"
 tower = "0.4"
 base64 = "0.22.1"
-tx3-lang = "0.2.0"
-tx3-cardano = "0.2.0"
+tx3-lang = "0.3.0"
+tx3-cardano = "0.3.0"
 
 
 [target.'cfg(not(windows))'.dependencies.mithril-client]
