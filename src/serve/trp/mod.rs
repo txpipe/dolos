@@ -10,7 +10,8 @@ use tracing::info;
 use crate::prelude::Error;
 use crate::{ledger::pparams::Genesis, state::LedgerStore};
 
-pub mod methods;
+mod adapter;
+mod methods;
 
 #[derive(Deserialize, Serialize, Clone)]
 pub struct Config {
