@@ -6,13 +6,6 @@ use tx3_lang::ProtoTx;
 
 use super::Context;
 
-#[derive(Debug, Default)]
-pub struct TxEval {
-    pub payload: Vec<u8>,
-    pub fee: u64,
-    pub ex_units: u64,
-}
-
 #[derive(Deserialize)]
 enum IrEncoding {
     #[serde(rename = "base64")]
