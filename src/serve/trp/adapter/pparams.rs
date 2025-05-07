@@ -44,7 +44,7 @@ pub fn resolve(
                 network,
                 cost_models: HashMap::from([
                     (
-                        1,
+                        0,
                         pparams
                             .cost_models_for_script_languages
                             .plutus_v1
@@ -52,7 +52,7 @@ pub fn resolve(
                             .unwrap(),
                     ),
                     (
-                        2,
+                        1,
                         pparams
                             .cost_models_for_script_languages
                             .plutus_v2
@@ -60,7 +60,7 @@ pub fn resolve(
                             .unwrap(),
                     ),
                     (
-                        3,
+                        2,
                         pparams
                             .cost_models_for_script_languages
                             .plutus_v3
