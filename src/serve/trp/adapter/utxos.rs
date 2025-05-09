@@ -35,10 +35,10 @@ fn map_assets(value: &MultiEraValue<'_>) -> Vec<tx3_lang::ir::AssetExpr> {
 
     let assets = value.assets();
 
-    let policy_assets = assets.iter().flat_map(|x| map_policy_assets(&x));
+    let policy_assets = assets.iter().flat_map(|x| map_policy_assets(x));
 
     let mut out = vec![coin];
-    out.extend(policy_assets.into_iter());
+    out.extend(policy_assets);
 
     out
 }
@@ -111,7 +111,7 @@ pub fn into_tx3_utxo(
     let assets = map_assets(&parsed.value());
 
     let datum = match parsed.datum() {
-        Some(DatumOption::Data(x)) => Some(map_datum(&*x.0)),
+        Some(DatumOption::Data(x)) => Some(map_datum(&x.0)),
         _ => None,
     };
 
