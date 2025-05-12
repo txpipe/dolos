@@ -2,12 +2,38 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.22.0] - 2025-05-12
+
+### 🚀 Features
+
+- *(trp)* Enforce valid TIR version (#497)
+
+### 🐛 Bug Fixes
+
+- *(trp)* Resolve reference inputs (#487)
+- *(minibf)* Use new syntax for capture groups (#492)
+- *(trp)* Fix input selection algorithm (#494)
+- *(trp)* Make cost models index match language view (#495)
+- *(trp)* Implement mapping of datum to IR (#496)
+
+### ⚙️ Miscellaneous Tasks
+
+- Update Pallas to v1.0.0-alpha.2 (#491)
+
 ## [0.21.1] - 2025-04-22
 
 ### 🐛 Bug Fixes
 
 - Use Conway structs for genesis UTxOs (#480)
 - *(trp)* Use input query criteria correctly (#481)
+
+### 🔧 Continuous Integration
+
+- Update cargo dist version
+
+### ⚙️ Miscellaneous Tasks
+
+- Release dolos version 0.21.1
 
 ## [0.21.0] - 2025-04-21
 
