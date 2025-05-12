@@ -31,6 +31,17 @@ struct TrpResolveParams {
 pub fn decode_params(params: Params<'_>) -> Result<ProtoTx, ErrorObjectOwned> {
     let params: TrpResolveParams = params.parse()?;
 
+    if params.tir.version != tx3_lang::ir::IR_VERSION {
+        return Err(ErrorObject::owned(
+            ErrorCode::InvalidParams.code(),
+            format!(
+                "Unsupported IR version, expected {}",
+                tx3_lang::ir::IR_VERSION
+            ),
+            Some(params.tir.version),
+        ));
+    }
+
     let tx = match params.tir.encoding {
         IrEncoding::Base64 => STANDARD.decode(params.tir.bytecode).map_err(|x| {
             ErrorObject::owned(
