@@ -1,11 +1,16 @@
 use futures_core::Stream;
+use tokio_util::sync::CancellationToken;
 
 use super::*;
 
 pub struct WalStream;
 
 impl WalStream {
-    pub fn start<R>(wal: R, from: super::LogSeq) -> impl Stream<Item = LogEntry>
+    pub fn start<R>(
+        wal: R,
+        from: super::LogSeq,
+        cancellation_token: CancellationToken,
+    ) -> impl Stream<Item = LogEntry>
     where
         R: WalReader,
     {
@@ -20,12 +25,18 @@ impl WalStream {
             }
 
             loop {
-                wal.tip_change().await.unwrap();
-                let iter = wal.crawl_from(Some(last_seq)).unwrap().skip(1);
+                tokio::select! {
+                    _ = cancellation_token.cancelled() => {
+                        break;
+                    }
+                    _ = wal.tip_change() => {
+                        let iter = wal.crawl_from(Some(last_seq)).unwrap().skip(1);
 
-                for entry in iter {
-                    last_seq = entry.0;
-                    yield entry;
+                        for entry in iter {
+                            last_seq = entry.0;
+                            yield entry;
+                        }
+                    }
                 }
             }
         }

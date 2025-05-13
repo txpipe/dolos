@@ -11,6 +11,7 @@ use pallas::{
     ledger::{addresses::Address, traverse::MultiEraBlock},
 };
 use std::pin::Pin;
+use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
 
 fn outputs_match_address(
@@ -196,13 +197,19 @@ fn roll_to_watch_response(
 pub struct WatchServiceImpl {
     wal: wal::redb::WalStore,
     mapper: interop::Mapper<LedgerStore>,
+    cancellation_token: CancellationToken,
 }
 
 impl WatchServiceImpl {
-    pub fn new(wal: wal::redb::WalStore, ledger: LedgerStore) -> Self {
+    pub fn new(
+        wal: wal::redb::WalStore,
+        ledger: LedgerStore,
+        cancellation_token: CancellationToken,
+    ) -> Self {
         Self {
             wal,
             mapper: interop::Mapper::new(ledger),
+            cancellation_token,
         }
     }
 }
@@ -241,9 +248,10 @@ impl u5c::watch::watch_service_server::WatchService for WatchServiceImpl {
 
         let mapper = self.mapper.clone();
 
-        let stream = wal::WalStream::start(self.wal.clone(), from_seq)
-            .flat_map(move |(_, log)| roll_to_watch_response(&mapper, &log, &inner_req))
-            .map(Ok);
+        let stream =
+            wal::WalStream::start(self.wal.clone(), from_seq, self.cancellation_token.clone())
+                .flat_map(move |(_, log)| roll_to_watch_response(&mapper, &log, &inner_req))
+                .map(Ok);
 
         Ok(Response::new(Box::pin(stream)))
     }
