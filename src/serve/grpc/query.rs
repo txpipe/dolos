@@ -363,4 +363,62 @@ impl u5c::query::query_service_server::QueryService for QueryServiceImpl {
             next_token: String::default(),
         }))
     }
+
+    async fn read_tx(
+        &self,
+        request: Request<u5c::query::ReadTxRequest>,
+    ) -> Result<Response<u5c::query::ReadTxResponse>, Status> {
+        let message = request.into_inner();
+
+        info!("received new grpc query");
+
+        let tx_hash = message.hash;
+
+        let (block_body, tx) = self
+            .chain
+            .get_tx_with_block_data(&tx_hash)
+            .map_err(|e| Status::not_found(format!("transaction not found: {e}")))?
+            .ok_or_else(|| Status::not_found("transaction not found"))?;
+
+        let mtx = MultiEraTx::decode(&tx)
+            .map_err(|e| Status::internal(format!("failed to decode transaction: {e}")))?;
+
+        let mblock = MultiEraBlock::decode(&block_body)
+            .map_err(|e| Status::internal(format!("failed to decode block: {e}")))?;
+        let block_slot = mblock.slot();
+        let block_hash = mblock.hash();
+
+        let block = self.mapper.map_block_cbor(&block_body);
+
+        let mut response = u5c::query::ReadTxResponse {
+            tx: Some(u5c::query::AnyChainTx {
+                native_bytes: mtx.encode().into(),
+                chain: Some(u5c::query::any_chain_tx::Chain::Cardano(
+                    self.mapper.map_tx(&mtx),
+                )),
+                block: Some(u5c::query::AnyChainBlock {
+                    native_bytes: block_body.to_vec().into(),
+                    chain: Some(u5c::query::any_chain_block::Chain::Cardano(block)),
+                }),
+            }),
+            ledger_tip: Some(u5c::query::ChainPoint {
+                slot: block_slot,
+                hash: block_hash.to_vec().into(),
+            }),
+        };
+
+        if let Some(mask) = message.field_mask {
+            response = apply_mask(response, mask.paths)
+                .map_err(|_| Status::internal("Failed to apply field mask"))?
+        }
+
+        Ok(Response::new(response))
+    }
+
+    async fn read_chain_config(
+        &self,
+        _request: Request<u5c::query::ReadChainConfigRequest>,
+    ) -> Result<Response<u5c::query::ReadChainConfigResponse>, Status> {
+        todo!()
+    }
 }
