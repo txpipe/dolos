@@ -17,7 +17,7 @@ use crate::wal::{self, ChainPoint, RawBlock, WalReader as _};
 
 fn u5c_to_chain_point(block_ref: u5c::sync::BlockRef) -> Result<wal::ChainPoint, Status> {
     Ok(wal::ChainPoint::Specific(
-        block_ref.index,
+        block_ref.slot,
         super::convert::bytes_to_hash32(&block_ref.hash)?,
     ))
 }
@@ -40,8 +40,9 @@ fn raw_to_blockref(raw: &wal::RawBlock) -> u5c::sync::BlockRef {
     let RawBlock { slot, hash, .. } = raw;
 
     u5c::sync::BlockRef {
-        index: *slot,
+        slot: *slot,
         hash: hash.to_vec().into(),
+        height: 0,
     }
 }
 
@@ -69,15 +70,17 @@ fn point_to_reset_tip_response(point: ChainPoint) -> u5c::sync::FollowTipRespons
     match point {
         ChainPoint::Origin => u5c::sync::FollowTipResponse {
             action: u5c::sync::follow_tip_response::Action::Reset(BlockRef {
+                slot: 0,
                 hash: vec![].into(),
-                index: 0,
+                height: 0,
             })
             .into(),
         },
         ChainPoint::Specific(slot, hash) => u5c::sync::FollowTipResponse {
             action: u5c::sync::follow_tip_response::Action::Reset(BlockRef {
+                slot,
                 hash: hash.to_vec().into(),
-                index: slot,
+                height: 0,
             })
             .into(),
         },
@@ -123,7 +126,7 @@ impl u5c::sync::sync_service_server::SyncService for SyncServiceImpl {
             .iter()
             .map(|br| {
                 self.chain
-                    .get_block_by_slot(&br.index)
+                    .get_block_by_slot(&br.slot)
                     .map_err(|_| Status::internal("Failed to query chain service."))?
                     .map(|body| raw_to_anychain(&self.mapper, &body))
                     .ok_or(Status::not_found(format!("Failed to find block: {:?}", br)))
@@ -228,8 +231,9 @@ impl u5c::sync::sync_service_server::SyncService for SyncServiceImpl {
 
         let response = u5c::sync::ReadTipResponse {
             tip: Some(BlockRef {
-                index: slot,
+                slot,
                 hash: hash.to_vec().into(),
+                height: 0,
             }),
         };
 
