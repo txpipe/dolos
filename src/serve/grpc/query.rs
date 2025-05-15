@@ -1,4 +1,5 @@
 use crate::{
+    chain::ChainStore,
     ledger::{
         pparams::{self, Genesis},
         EraCbor, TxoRef,
@@ -7,9 +8,12 @@ use crate::{
     state::{LedgerError, LedgerStore},
 };
 use itertools::Itertools as _;
-use pallas::interop::utxorpc::spec as u5c;
 use pallas::interop::utxorpc::{self as interop, spec::query::any_utxo_pattern::UtxoPattern};
 use pallas::ledger::traverse::MultiEraOutput;
+use pallas::{
+    interop::utxorpc::spec as u5c,
+    ledger::traverse::{MultiEraBlock, MultiEraTx},
+};
 use std::{collections::HashSet, sync::Arc};
 use tonic::{Request, Response, Status};
 use tracing::info;
@@ -18,14 +22,16 @@ pub struct QueryServiceImpl {
     ledger: LedgerStore,
     mapper: interop::Mapper<LedgerStore>,
     genesis: Arc<Genesis>,
+    chain: ChainStore,
 }
 
 impl QueryServiceImpl {
-    pub fn new(ledger: LedgerStore, genesis: Arc<Genesis>) -> Self {
+    pub fn new(ledger: LedgerStore, genesis: Arc<Genesis>, chain: ChainStore) -> Self {
         Self {
             ledger: ledger.clone(),
             genesis,
             mapper: interop::Mapper::new(ledger),
+            chain,
         }
     }
 }
