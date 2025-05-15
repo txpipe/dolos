@@ -1,15 +1,15 @@
 use crate::{
     ledger::{
-        pparams::{self, Genesis},
+        pparams::{self, EraSummary, Genesis},
         EraCbor, TxoRef,
     },
     serve::utils::apply_mask,
     state::{LedgerError, LedgerStore},
 };
 use itertools::Itertools as _;
-use pallas::interop::utxorpc::spec as u5c;
 use pallas::interop::utxorpc::{self as interop, spec::query::any_utxo_pattern::UtxoPattern};
 use pallas::ledger::traverse::MultiEraOutput;
+use pallas::{interop::utxorpc::spec as u5c, ledger::validate::utils::MultiEraProtocolParameters};
 use std::{collections::HashSet, sync::Arc};
 use tonic::{Request, Response, Status};
 use tracing::info;
@@ -215,6 +215,38 @@ fn into_u5c_utxo(
     })
 }
 
+fn into_u5c_era_summary(summary: EraSummary) -> u5c::cardano::EraSummary {
+    let start = summary.start;
+    let end = summary.end.unwrap();
+    let pparams = summary.pparams;
+
+    u5c::cardano::EraSummary {
+        name: match_pparams_to_era_name(pparams),
+        start: Some(u5c::cardano::EraBoundary {
+            time: start.timestamp.timestamp() as u64,
+            slot: start.slot,
+            epoch: start.epoch,
+        }),
+        end: Some(u5c::cardano::EraBoundary {
+            time: end.timestamp.timestamp() as u64,
+            slot: end.slot,
+            epoch: end.epoch,
+        }),
+        config: "".to_string(),
+    }
+}
+
+fn match_pparams_to_era_name(pparams: MultiEraProtocolParameters) -> String {
+    match pparams {
+        MultiEraProtocolParameters::Alonzo(_) => "alonzo".to_string(),
+        MultiEraProtocolParameters::Babbage(_) => "babbage".to_string(),
+        MultiEraProtocolParameters::Byron(_) => "byron".to_string(),
+        MultiEraProtocolParameters::Shelley(_) => "shelley".to_string(),
+        MultiEraProtocolParameters::Conway(_) => "conway".to_string(),
+        _ => "Unknown".to_string(),
+    }
+}
+
 #[async_trait::async_trait]
 impl u5c::query::query_service_server::QueryService for QueryServiceImpl {
     async fn read_params(
@@ -362,5 +394,67 @@ impl u5c::query::query_service_server::QueryService for QueryServiceImpl {
             ledger_tip: cursor,
             next_token: String::default(),
         }))
+    }
+
+    async fn read_tx(
+        &self,
+        _request: Request<u5c::query::ReadTxRequest>,
+    ) -> Result<Response<u5c::query::ReadTxResponse>, Status> {
+        todo!()
+    }
+
+    async fn read_chain_config(
+        &self,
+        request: Request<u5c::query::ReadChainConfigRequest>,
+    ) -> Result<Response<u5c::query::ReadChainConfigResponse>, Status> {
+        let message = request.into_inner();
+
+        info!("received new grpc query");
+
+        let tip = self.ledger.cursor()?;
+
+        let updates = self
+            .ledger
+            .get_pparams(tip.as_ref().map(|p| p.0).unwrap_or_default())?;
+
+        let updates: Vec<_> = updates
+            .into_iter()
+            .map(TryInto::try_into)
+            .try_collect::<_, _, pallas::codec::minicbor::decode::Error>()
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let summary = pparams::fold_with_hacks(&self.genesis, &updates, tip.as_ref().unwrap().0);
+
+        let era_summaries = summary.past;
+        let era_summaries: Vec<_> = era_summaries
+            .into_iter()
+            .map(|x| into_u5c_era_summary(x))
+            .collect();
+
+        let network_id = match self.genesis.shelley.network_id.as_ref() {
+            Some(network) => network.clone(),
+            None => "".to_string(),
+        };
+        let network_magic = self.genesis.shelley.network_magic.unwrap();
+        let caip2 = format!("cip34:{}-{}", network_id, network_magic);
+
+        let genesis = "".to_string();
+
+        let mut response = u5c::query::ReadChainConfigResponse {
+            genesis: genesis.as_bytes().to_vec().into(),
+            caip2,
+            summary: Some(u5c::query::read_chain_config_response::Summary::Cardano(
+                u5c::cardano::EraSummaries {
+                    summaries: era_summaries,
+                },
+            )),
+        };
+
+        if let Some(mask) = message.field_mask {
+            response = apply_mask(response, mask.paths)
+                .map_err(|_| Status::internal("Failed to apply field mask"))?
+        }
+
+        Ok(Response::new(response))
     }
 }
