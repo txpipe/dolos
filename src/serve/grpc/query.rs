@@ -7,9 +7,12 @@ use crate::{
     state::{LedgerError, LedgerStore},
 };
 use itertools::Itertools as _;
-use pallas::interop::utxorpc::{self as interop, spec::query::any_utxo_pattern::UtxoPattern};
+use pallas::interop::utxorpc::spec as u5c;
 use pallas::ledger::traverse::MultiEraOutput;
-use pallas::{interop::utxorpc::spec as u5c, ledger::validate::utils::MultiEraProtocolParameters};
+use pallas::{
+    interop::utxorpc::{self as interop, spec::query::any_utxo_pattern::UtxoPattern},
+    ledger::validate::utils::MultiEraProtocolParameters,
+};
 use std::{collections::HashSet, sync::Arc};
 use tonic::{Request, Response, Status};
 use tracing::info;
@@ -396,13 +399,6 @@ impl u5c::query::query_service_server::QueryService for QueryServiceImpl {
         }))
     }
 
-    async fn read_tx(
-        &self,
-        _request: Request<u5c::query::ReadTxRequest>,
-    ) -> Result<Response<u5c::query::ReadTxResponse>, Status> {
-        todo!()
-    }
-
     async fn read_chain_config(
         &self,
         request: Request<u5c::query::ReadChainConfigRequest>,
@@ -428,7 +424,7 @@ impl u5c::query::query_service_server::QueryService for QueryServiceImpl {
         let era_summaries = summary.past;
         let era_summaries: Vec<_> = era_summaries
             .into_iter()
-            .map(|x| into_u5c_era_summary(x))
+            .map(into_u5c_era_summary)
             .collect();
 
         let network_id = match self.genesis.shelley.network_id.as_ref() {
