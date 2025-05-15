@@ -22,7 +22,7 @@ pub struct EraSummary {
 #[derive(Debug)]
 pub struct ChainSummary {
     pub past: Vec<EraSummary>,
-    pub edge: Option<EraSummary>,
+    edge: Option<EraSummary>,
 }
 
 impl ChainSummary {
