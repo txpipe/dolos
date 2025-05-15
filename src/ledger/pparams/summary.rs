@@ -21,8 +21,8 @@ pub struct EraSummary {
 
 #[derive(Debug)]
 pub struct ChainSummary {
-    past: Vec<EraSummary>,
-    edge: Option<EraSummary>,
+    pub past: Vec<EraSummary>,
+    pub edge: Option<EraSummary>,
 }
 
 impl ChainSummary {
