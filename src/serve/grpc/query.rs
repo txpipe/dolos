@@ -414,11 +414,4 @@ impl u5c::query::query_service_server::QueryService for QueryServiceImpl {
 
         Ok(Response::new(response))
     }
-
-    async fn read_chain_config(
-        &self,
-        _request: Request<u5c::query::ReadChainConfigRequest>,
-    ) -> Result<Response<u5c::query::ReadChainConfigResponse>, Status> {
-        todo!()
-    }
 }
