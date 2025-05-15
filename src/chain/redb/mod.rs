@@ -159,6 +159,15 @@ impl ChainStore {
         }
     }
 
+    pub fn get_tx_with_block_data(
+        &self,
+        tx_hash: &[u8],
+    ) -> Result<Option<(BlockBody, Vec<u8>)>, ChainError> {
+        match self {
+            ChainStore::SchemaV1(x) => x.get_tx_with_block_data(tx_hash),
+        }
+    }
+
     pub fn apply(&self, deltas: &[LedgerDelta]) -> Result<(), ChainError> {
         match self {
             ChainStore::SchemaV1(x) => Ok(x.apply(deltas)?),
