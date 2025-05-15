@@ -383,7 +383,7 @@ impl u5c::query::query_service_server::QueryService for QueryServiceImpl {
         let (block_body, tx) = self
             .chain
             .get_tx_with_block_data(&tx_hash)
-            .map_err(|e| Status::not_found(format!("transaction not found: {e}")))?
+            .map_err(|e| Status::internal(format!("failed to query chain for tx: {e}")))?
             .ok_or_else(|| Status::not_found("transaction not found"))?;
 
         let mtx = MultiEraTx::decode(&tx)
