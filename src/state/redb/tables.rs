@@ -66,7 +66,6 @@ impl Iterator for UtxosIterator {
             let k = TxoRef((*hash).into(), idx);
 
             let (era, cbor) = v.value();
-            let era = pallas::ledger::traverse::Era::try_from(era).unwrap();
             let cbor = cbor.to_owned();
             let v = EraCbor(era, cbor);
 
@@ -104,7 +103,6 @@ impl UtxosTable {
         for key in refs {
             if let Some(body) = table.get(&(&key.0 as &[u8; 32], key.1))? {
                 let (era, cbor) = body.value();
-                let era = pallas::ledger::traverse::Era::try_from(era).unwrap();
                 let cbor = cbor.to_owned();
                 let value = EraCbor(era, cbor);
 
@@ -180,7 +178,6 @@ impl PParamsTable {
         for item in table.range(..until)? {
             let (_, body) = item?;
             let (era, cbor) = body.value();
-            let era = pallas::ledger::traverse::Era::try_from(era).unwrap();
             out.push(EraCbor(era, Vec::from(cbor)));
         }
 

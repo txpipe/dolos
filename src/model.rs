@@ -64,6 +64,7 @@ impl UpstreamConfig {
         }
     }
 }
+
 #[derive(Serialize, Deserialize)]
 pub struct EmulatorConfig {
     pub block_production_interval: u64,
@@ -90,6 +91,7 @@ pub enum StorageVersion {
     V0,
     V1,
 }
+
 impl<'de> Deserialize<'de> for StorageVersion {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where

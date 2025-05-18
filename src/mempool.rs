@@ -221,9 +221,11 @@ impl Mempool {
             .get_utxos(input_refs)?
             .into_iter()
             .map(|(TxoRef(a, b), EraCbor(c, d))| {
+                let era = c.try_into().expect("era out of range");
+
                 (
                     pallas::ledger::validate::utils::TxoRef::from((a, b)),
-                    pallas::ledger::validate::utils::EraCbor::from((c, d)),
+                    pallas::ledger::validate::utils::EraCbor::from((era, d)),
                 )
             })
             .collect();

@@ -163,7 +163,10 @@ impl interop::LedgerContext for LedgerStore {
             .get_utxos(refs)
             .ok()?
             .into_iter()
-            .map(|(k, v)| (k.into(), v.into()))
+            .map(|(k, v)| {
+                let era = v.0.try_into().expect("era out of range");
+                (k.into(), (era, v.1))
+            })
             .collect();
 
         Some(some)
