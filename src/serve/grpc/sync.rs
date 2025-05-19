@@ -259,7 +259,9 @@ impl u5c::sync::sync_service_server::SyncService for SyncServiceImpl {
             .map_err(|_| Status::internal("Failed to decode tip block."))?
             .hash();
 
-        let height = get_block_height(slot, &self.chain)?;
+        let height = MultiEraBlock::decode(&body)
+            .map_err(|_| Status::internal("Failed to decode tip block."))?
+            .number();
 
         let response = u5c::sync::ReadTipResponse {
             tip: Some(BlockRef {
