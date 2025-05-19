@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
+use tracing::debug;
 
-use pallas::ledger::traverse::MultiEraOutput;
+use tx3_cardano::pallas::ledger::traverse::{Era, MultiEraOutput};
 
 use crate::{
     ledger::{EraCbor, TxoRef},
@@ -42,6 +43,13 @@ impl Subset {
         }
 
         result
+    }
+
+    fn is_empty(&self) -> bool {
+        match self {
+            Self::All => false,
+            Self::Specific(s) => s.is_empty(),
+        }
     }
 }
 
@@ -136,6 +144,7 @@ fn pick_first_utxo_match(
     criteria: &tx3_lang::ir::InputQuery,
 ) -> Result<Option<tx3_lang::Utxo>, tx3_cardano::Error> {
     for (txoref, EraCbor(era, cbor)) in utxos {
+        let era = Era::try_from(era).expect("era out of range");
         let parsed = MultiEraOutput::decode(era, &cbor)
             .map_err(|err| tx3_cardano::Error::LedgerInternalError(err.to_string()))?;
 
@@ -240,17 +249,29 @@ impl<'a> InputSelector<'a> {
             Subset::All
         };
 
+        if matching_address.is_empty() {
+            debug!("matching address is empty");
+        }
+
         let matching_assets = if let Some(min_amount) = &criteria.min_amount {
             self.narrow_by_multi_asset_presence(min_amount)?
         } else {
             Subset::All
         };
 
+        if matching_assets.is_empty() {
+            debug!("matching assets is empty");
+        }
+
         let matching_refs = if let Some(refs) = &criteria.r#ref {
             self.narrow_by_ref(refs)?
         } else {
             Subset::All
         };
+
+        if matching_refs.is_empty() {
+            debug!("matching refs is empty");
+        }
 
         Ok(Subset::intersection_of_all([
             matching_address,

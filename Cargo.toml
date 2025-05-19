@@ -20,12 +20,12 @@ pallas = { version = "1.0.0-alpha.2", features = ["hardano"] }
 gasket = { version = "^0.9", features = ["derive"] }
 # gasket = { path = "../../construkts/gasket-rs/gasket", features = ["derive"] }
 
-tx3-lang = "0.4.1"
-tx3-cardano = "0.4.1"
+# tx3-lang = "0.4.1"
+# tx3-cardano = "0.4.1"
 # tx3-lang = { path = "../../tx3-lang/tx3/crates/tx3-lang" }
 # tx3-cardano = { path = "../../tx3-lang/tx3/crates/tx3-cardano" }
-# tx3-lang = { git = "https://github.com/tx3-lang/tx3.git" }
-# tx3-cardano = { git = "https://github.com/tx3-lang/tx3.git" }
+tx3-lang = { git = "https://github.com/tx3-lang/tx3.git" }
+tx3-cardano = { git = "https://github.com/tx3-lang/tx3.git" }
 
 redb = { version = "^2" }
 hex = "0.4.3"

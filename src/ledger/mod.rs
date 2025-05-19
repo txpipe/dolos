@@ -1,5 +1,5 @@
 use pallas::codec::minicbor;
-use pallas::ledger::traverse::{Era, MultiEraBlock, MultiEraInput, MultiEraTx, MultiEraUpdate};
+use pallas::ledger::traverse::{MultiEraBlock, MultiEraInput, MultiEraTx, MultiEraUpdate};
 use pallas::{crypto::hash::Hash, ledger::traverse::MultiEraOutput};
 use pparams::Genesis;
 use serde::{Deserialize, Serialize};
@@ -11,6 +11,7 @@ use crate::model::BlockBody;
 pub mod pparams;
 //pub mod validate;
 
+pub type Era = u16;
 pub type TxHash = Hash<32>;
 pub type TxoIdx = u32;
 pub type BlockSlot = u64;
@@ -34,7 +35,7 @@ impl From<EraCbor> for (Era, Vec<u8>) {
 
 impl From<MultiEraOutput<'_>> for EraCbor {
     fn from(value: MultiEraOutput<'_>) -> Self {
-        EraCbor(value.era(), value.encode())
+        EraCbor(value.era().into(), value.encode())
     }
 }
 
@@ -42,7 +43,8 @@ impl<'a> TryFrom<&'a EraCbor> for MultiEraOutput<'a> {
     type Error = pallas::codec::minicbor::decode::Error;
 
     fn try_from(value: &'a EraCbor) -> Result<Self, Self::Error> {
-        MultiEraOutput::decode(value.0, &value.1)
+        let era = value.0.try_into().expect("era out of range");
+        MultiEraOutput::decode(era, &value.1)
     }
 }
 
@@ -50,7 +52,8 @@ impl<'a> TryFrom<&'a EraCbor> for MultiEraTx<'a> {
     type Error = pallas::codec::minicbor::decode::Error;
 
     fn try_from(value: &'a EraCbor) -> Result<Self, Self::Error> {
-        MultiEraTx::decode_for_era(value.0, &value.1)
+        let era = value.0.try_into().expect("era out of range");
+        MultiEraTx::decode_for_era(era, &value.1)
     }
 }
 
@@ -58,7 +61,8 @@ impl TryFrom<EraCbor> for MultiEraUpdate<'_> {
     type Error = pallas::codec::minicbor::decode::Error;
 
     fn try_from(value: EraCbor) -> Result<Self, Self::Error> {
-        MultiEraUpdate::decode_for_era(value.0, &value.1)
+        let era = value.0.try_into().expect("era out of range");
+        MultiEraUpdate::decode_for_era(era, &value.1)
     }
 }
 
@@ -174,7 +178,9 @@ pub fn compute_delta(
         }
 
         if let Some(update) = tx.update() {
-            delta.new_pparams.push(EraCbor(tx.era(), update.encode()));
+            delta
+                .new_pparams
+                .push(EraCbor(tx.era().into(), update.encode()));
         }
     }
 
@@ -182,7 +188,7 @@ pub fn compute_delta(
     if let Some(update) = block.update() {
         delta
             .new_pparams
-            .push(EraCbor(block.era(), update.encode()));
+            .push(EraCbor(block.era().into(), update.encode()));
     }
 
     Ok(delta)
@@ -276,8 +282,9 @@ pub fn compute_origin_delta(genesis: &Genesis) -> LedgerDelta {
 
 /// Computes the amount of mutable slots in chain.
 ///
-/// Reads the relevant genesis config values and uses the security window guarantee formula from
-/// consensus to calculate the latest slot that can be considered immutable.
+/// Reads the relevant genesis config values and uses the security window
+/// guarantee formula from consensus to calculate the latest slot that can be
+/// considered immutable.
 pub fn mutable_slots(genesis: &Genesis) -> u64 {
     ((3.0 * genesis.byron.protocol_consts.k as f32) / (genesis.shelley.active_slots_coeff.unwrap()))
         as u64
@@ -325,7 +332,7 @@ mod tests {
             .iter()
             .flat_map(MultiEraTx::consumes)
             .map(|utxo| TxoRef(*utxo.hash(), utxo.index() as u32))
-            .map(|key| (key, EraCbor(block.era(), vec![])))
+            .map(|key| (key, EraCbor(block.era().into(), vec![])))
             .collect();
 
         LedgerSlice {
@@ -341,7 +348,7 @@ mod tests {
         assert!(utxo_body.is_some(), "utxo not found");
         let utxo_body = MultiEraOutput::try_from(utxo_body.unwrap()).unwrap();
 
-        assert_eq!(utxo_body.era(), Era::Byron);
+        assert_eq!(utxo_body.era(), pallas::ledger::traverse::Era::Byron);
 
         assert_eq!(
             utxo_body.value().coin(),

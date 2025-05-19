@@ -1,4 +1,4 @@
-use pallas::{
+use tx3_cardano::pallas::{
     codec::utils::KeyValuePairs,
     ledger::{
         primitives::{conway::DatumOption, BigInt, Constr, PlutusData},
