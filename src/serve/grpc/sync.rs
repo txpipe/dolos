@@ -83,7 +83,10 @@ fn wal_log_to_tip_response(
     }
 }
 
-fn point_to_reset_tip_response(point: ChainPoint) -> u5c::sync::FollowTipResponse {
+fn point_to_reset_tip_response(
+    point: ChainPoint,
+    chain: ChainStore,
+) -> u5c::sync::FollowTipResponse {
     match point {
         ChainPoint::Origin => u5c::sync::FollowTipResponse {
             action: u5c::sync::follow_tip_response::Action::Reset(BlockRef {
@@ -97,7 +100,9 @@ fn point_to_reset_tip_response(point: ChainPoint) -> u5c::sync::FollowTipRespons
             action: u5c::sync::follow_tip_response::Action::Reset(BlockRef {
                 slot,
                 hash: hash.to_vec().into(),
-                height: 0,
+                height: get_block_height(&chain, slot)
+                    .map_err(|_| Status::internal("Failed to query chain service.".to_string()))
+                    .unwrap_or(0),
             })
             .into(),
         },
@@ -220,7 +225,8 @@ impl u5c::sync::sync_service_server::SyncService for SyncServiceImpl {
         // the consumer knows what intersection was found and can reset their state
         // This would also mimic ouroboros giving a `Rollback` as the first message.
 
-        let reset = once(async { Ok(point_to_reset_tip_response(point)) });
+        let chain = self.chain.clone();
+        let reset = once(async { Ok(point_to_reset_tip_response(point, chain)) });
 
         let forward =
             wal::WalStream::start(self.wal.clone(), from_seq, self.cancellation_token.clone())
