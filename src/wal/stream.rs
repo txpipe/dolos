@@ -79,7 +79,7 @@ mod tests {
             }
         });
 
-        let s = WalStream::start(db.clone(), 50);
+        let s = WalStream::start(db.clone(), 50, CancellationToken::new());
 
         pin_mut!(s);
 
