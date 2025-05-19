@@ -75,7 +75,7 @@ fn wal_log_to_tip_response(
 
 fn point_to_reset_tip_response(
     point: ChainPoint,
-    raw: RawBlock,
+    raw: wal::RawBlock,
 ) -> Result<u5c::sync::FollowTipResponse, Status> {
     let (slot, hash) = match point {
         ChainPoint::Origin => {
@@ -92,8 +92,7 @@ fn point_to_reset_tip_response(
     };
 
     let height = MultiEraBlock::decode(&raw.body)
-        .map_err(|e| panic!("corrupt WAL entry: {:?}", e))
-        .unwrap()
+        .map_err(|_| Status::internal("Failed to decode block."))?
         .number();
 
     Ok(u5c::sync::FollowTipResponse {
