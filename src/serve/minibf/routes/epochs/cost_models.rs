@@ -611,7 +611,7 @@ fn get_name_for_value_index(plutus_version: u64, value_index: u64) -> &'static s
     }
 }
 
-pub fn get_named_cost_model(plutus_version: u64, values: &Vec<i64>) -> serde_json::Value {
+pub fn get_named_cost_model(plutus_version: u64, values: &[i64]) -> serde_json::Value {
     let mut map = serde_json::Map::new();
 
     for (i, value) in values.iter().enumerate() {

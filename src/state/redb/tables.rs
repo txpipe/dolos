@@ -118,7 +118,7 @@ impl UtxosTable {
 
         for (k, v) in delta.produced_utxo.iter() {
             let k: (&[u8; 32], u32) = (&k.0, k.1);
-            let v: (u16, &[u8]) = (v.0.into(), &v.1);
+            let v: (u16, &[u8]) = (v.0, &v.1);
             table.insert(k, v)?;
         }
 
@@ -189,7 +189,7 @@ impl PParamsTable {
 
         if let Some(ChainPoint(slot, _)) = delta.new_position {
             for EraCbor(era, body) in delta.new_pparams.iter() {
-                let v: (u16, &[u8]) = (u16::from(*era), body);
+                let v: (u16, &[u8]) = (*era, body);
                 table.insert(slot, v)?;
             }
         }
