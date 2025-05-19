@@ -27,19 +27,6 @@ fn u5c_to_chain_point(block_ref: u5c::sync::BlockRef) -> Result<wal::ChainPoint,
 //     AnyChainBlock { chain: Some(block) }
 // }
 
-fn get_block_height(slot: u64, chain: &ChainStore) -> Result<u64, Status> {
-    let block_body = chain
-        .get_block_by_slot(&slot)
-        .map_err(|_| Status::internal("Failed to query chain service.".to_string()))?
-        .ok_or_else(|| Status::not_found(format!("No block at slot {}", slot)))?;
-
-    let height = MultiEraBlock::decode(&block_body)
-        .map_err(|e| Status::internal(format!("block decode error: {}", e)))?
-        .number();
-
-    Ok(height)
-}
-
 fn raw_to_anychain(mapper: &Mapper<LedgerStore>, body: &BlockBody) -> u5c::sync::AnyChainBlock {
     let block = mapper.map_block_cbor(body);
 
@@ -88,7 +75,7 @@ fn wal_log_to_tip_response(
 
 fn point_to_reset_tip_response(
     point: ChainPoint,
-    chain: ChainStore,
+    raw: RawBlock,
 ) -> Result<u5c::sync::FollowTipResponse, Status> {
     let (slot, hash) = match point {
         ChainPoint::Origin => {
@@ -104,7 +91,10 @@ fn point_to_reset_tip_response(
         ChainPoint::Specific(s, h) => (s, h.to_vec()),
     };
 
-    let height = get_block_height(slot, &chain)?;
+    let height = MultiEraBlock::decode(&raw.body)
+        .map_err(|e| panic!("corrupt WAL entry: {:?}", e))
+        .unwrap()
+        .number();
 
     Ok(u5c::sync::FollowTipResponse {
         action: u5c::sync::follow_tip_response::Action::Reset(BlockRef {
@@ -232,8 +222,12 @@ impl u5c::sync::sync_service_server::SyncService for SyncServiceImpl {
         // the consumer knows what intersection was found and can reset their state
         // This would also mimic ouroboros giving a `Rollback` as the first message.
 
-        let chain = self.chain.clone();
-        let reset = once(async { point_to_reset_tip_response(point, chain) });
+        let raw_block = self
+            .wal
+            .read_block(&point)
+            .map_err(|_err| Status::internal("can't read WAL"))?;
+
+        let reset = once(async { point_to_reset_tip_response(point, raw_block) });
 
         let forward =
             wal::WalStream::start(self.wal.clone(), from_seq, self.cancellation_token.clone())
@@ -255,13 +249,11 @@ impl u5c::sync::sync_service_server::SyncService for SyncServiceImpl {
             .map_err(|e| Status::internal(format!("Unable to read WAL: {:?}", e)))?
             .ok_or(Status::internal("chain has no data."))?;
 
-        let hash = MultiEraBlock::decode(&body)
-            .map_err(|_| Status::internal("Failed to decode tip block."))?
-            .hash();
+        let block = MultiEraBlock::decode(&body)
+            .map_err(|_| Status::internal("Failed to decode tip block."))?;
 
-        let height = MultiEraBlock::decode(&body)
-            .map_err(|_| Status::internal("Failed to decode tip block."))?
-            .number();
+        let hash = block.hash();
+        let height = block.number();
 
         let response = u5c::sync::ReadTipResponse {
             tip: Some(BlockRef {
