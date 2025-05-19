@@ -27,6 +27,19 @@ fn u5c_to_chain_point(block_ref: u5c::sync::BlockRef) -> Result<wal::ChainPoint,
 //     AnyChainBlock { chain: Some(block) }
 // }
 
+fn get_block_height(chain: &ChainStore, slot: u64) -> Result<u64, Status> {
+    let block_body = chain
+        .get_block_by_slot(&slot)
+        .map_err(|_| Status::internal("Failed to query chain service.".to_string()))?
+        .ok_or(Status::not_found("Failed to find block.".to_string()))?;
+
+    let height = MultiEraBlock::decode(&block_body)
+        .map_err(|_| Status::internal("Failed to decode block."))?
+        .number();
+
+    Ok(height)
+}
+
 fn raw_to_anychain(mapper: &Mapper<LedgerStore>, body: &BlockBody) -> u5c::sync::AnyChainBlock {
     let block = mapper.map_block_cbor(body);
 
@@ -36,13 +49,17 @@ fn raw_to_anychain(mapper: &Mapper<LedgerStore>, body: &BlockBody) -> u5c::sync:
     }
 }
 
-fn raw_to_blockref(raw: &wal::RawBlock) -> u5c::sync::BlockRef {
+fn raw_to_blockref(raw: &wal::RawBlock, chain: &ChainStore) -> u5c::sync::BlockRef {
     let RawBlock { slot, hash, .. } = raw;
+
+    let height = get_block_height(chain, *slot)
+        .map_err(|_| Status::internal("Failed to query chain service.".to_string()))
+        .unwrap_or(0);
 
     u5c::sync::BlockRef {
         slot: *slot,
         hash: hash.to_vec().into(),
-        height: 0,
+        height,
     }
 }
 
@@ -158,7 +175,7 @@ impl u5c::sync::sync_service_server::SyncService for SyncServiceImpl {
                 if idx < len - 1 {
                     Either::Left(raw_to_anychain(&self.mapper, &x.body))
                 } else {
-                    Either::Right(raw_to_blockref(&x))
+                    Either::Right(raw_to_blockref(&x, &self.chain))
                 }
             });
 
@@ -229,11 +246,13 @@ impl u5c::sync::sync_service_server::SyncService for SyncServiceImpl {
             .map_err(|_| Status::internal("Failed to decode tip block."))?
             .hash();
 
+        let height = get_block_height(&self.chain, slot)?;
+
         let response = u5c::sync::ReadTipResponse {
             tip: Some(BlockRef {
                 slot,
                 hash: hash.to_vec().into(),
-                height: 0,
+                height,
             }),
         };
 
