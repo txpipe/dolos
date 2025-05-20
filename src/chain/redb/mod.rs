@@ -16,18 +16,16 @@ const DEFAULT_CACHE_SIZE_MB: usize = 500;
 fn compute_schema_hash(db: &Database) -> Result<Option<String>, ChainError> {
     let mut hasher = pallas::crypto::hash::Hasher::<160>::new();
 
-    let rx = db
-        .begin_read()
-        .map_err(|e| ChainError::StorageError(e.into()))?;
+    let rx = db.begin_read().map_err(ChainError::from)?;
 
     let names_1 = rx
         .list_tables()
-        .map_err(|e| ChainError::StorageError(e.into()))?
+        .map_err(ChainError::from)?
         .map(|t| t.name().to_owned());
 
     let names_2 = rx
         .list_multimap_tables()
-        .map_err(|e| ChainError::StorageError(e.into()))?
+        .map_err(ChainError::from)?
         .map(|t| t.name().to_owned());
 
     let mut names = names_1.chain(names_2).collect_vec();
@@ -54,16 +52,9 @@ fn open_db(path: impl AsRef<Path>, cache_size: Option<usize>) -> Result<Database
     let db = Database::builder()
         .set_repair_callback(|x| warn!(progress = x.progress() * 100f64, "ledger db is repairing"))
         .set_cache_size(1024 * 1024 * cache_size.unwrap_or(DEFAULT_CACHE_SIZE_MB))
-        .create(path)
-        .map_err(|x| ChainError::StorageError(x.into()))?;
+        .create(path)?;
 
     Ok(db)
-}
-
-impl From<::redb::Error> for ChainError {
-    fn from(value: ::redb::Error) -> Self {
-        ChainError::StorageError(value)
-    }
 }
 
 const V1_HASH: &str = "b9e1e00f2427e24139929a60fbaf925948c11069";
