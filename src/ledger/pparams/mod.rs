@@ -124,7 +124,10 @@ fn bootstrap_alonzo_pparams(
     }
 }
 
-fn bootstrap_babbage_pparams(previous: AlonzoProtParams) -> BabbageProtParams {
+fn bootstrap_babbage_pparams(
+    previous: AlonzoProtParams,
+    genesis: &alonzo::GenesisFile,
+) -> BabbageProtParams {
     BabbageProtParams {
         system_start: previous.system_start,
         epoch_length: previous.epoch_length,
@@ -159,7 +162,10 @@ fn bootstrap_babbage_pparams(previous: AlonzoProtParams) -> BabbageProtParams {
                 .filter(|(k, _)| *k == &pallas::ledger::primitives::alonzo::Language::PlutusV1)
                 .map(|(_, v)| v.clone())
                 .next(),
-            plutus_v2: None,
+            plutus_v2: genesis
+                .cost_models
+                .get(&pallas::interop::hardano::configs::alonzo::Language::PlutusV2)
+                .map(|v| v.clone().into()),
         },
     }
 }
@@ -494,7 +500,7 @@ fn migrate_pparams(
         }
         // Protocol version 7 transitions from Alonzo to Babbage
         MultiEraProtocolParameters::Alonzo(current) if next_protocol == 7 => {
-            MultiEraProtocolParameters::Babbage(bootstrap_babbage_pparams(current))
+            MultiEraProtocolParameters::Babbage(bootstrap_babbage_pparams(current, &genesis.alonzo))
         }
         // One intra-era hard-fork in babbage at protocol version 8
         MultiEraProtocolParameters::Babbage(current) if next_protocol == 8 => {

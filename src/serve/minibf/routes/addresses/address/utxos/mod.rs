@@ -51,8 +51,12 @@ pub struct Utxo {
 impl TryFrom<(TxoRef, EraCbor)> for Utxo {
     type Error = StatusCode;
 
-    fn try_from((txo, era): (TxoRef, EraCbor)) -> Result<Self, Self::Error> {
-        let parsed = pallas::ledger::traverse::MultiEraOutput::decode(era.0, &era.1)
+    fn try_from((txo, EraCbor(era, cbor)): (TxoRef, EraCbor)) -> Result<Self, Self::Error> {
+        let era = era
+            .try_into()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        let parsed = pallas::ledger::traverse::MultiEraOutput::decode(era, &cbor)
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
         let value = parsed.value();

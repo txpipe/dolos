@@ -8,7 +8,7 @@ use pallas::ledger::traverse::MultiEraBlock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::serve::minibf::SharedState;
+use crate::{ledger::EraCbor, serve::minibf::SharedState};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BlockAddress {
@@ -61,9 +61,11 @@ pub async fn route(
                 StatusCode::INTERNAL_SERVER_ERROR
             })?;
 
-        for (_, eracbor) in utxos {
-            let parsed = pallas::ledger::traverse::MultiEraOutput::decode(eracbor.0, &eracbor.1)
-                .map_err(|err| {
+        for (_, EraCbor(era, cbor)) in utxos {
+            let era = era.try_into().expect("era out of range");
+
+            let parsed =
+                pallas::ledger::traverse::MultiEraOutput::decode(era, &cbor).map_err(|err| {
                     tracing::error!(err =? err, "Failed to get decode utxos from ledger.");
                     StatusCode::INTERNAL_SERVER_ERROR
                 })?;
