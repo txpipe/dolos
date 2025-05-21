@@ -59,6 +59,13 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
     let mut utxos2 = UTxOs::new();
 
     for (ref_, body) in resolved.iter() {
+        let EraCbor(era, cbor) = body;
+
+        let era = (*era)
+            .try_into()
+            .into_diagnostic()
+            .context("era out of range")?;
+
         let txin = pallas::ledger::primitives::byron::TxIn::Variant0(
             pallas::codec::utils::CborWrap((ref_.0, ref_.1)),
         );
@@ -67,7 +74,7 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
             <Box<Cow<'_, pallas::ledger::primitives::byron::TxIn>>>::from(Cow::Owned(txin)),
         );
 
-        let value = MultiEraOutput::decode(body.0, &body.1)
+        let value = MultiEraOutput::decode(era, cbor)
             .into_diagnostic()
             .context("decoding utxo")?;
 
@@ -82,7 +89,8 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
     let updates: Vec<_> = updates
         .iter()
         .map(|EraCbor(era, cbor)| -> miette::Result<MultiEraUpdate> {
-            MultiEraUpdate::decode_for_era(*era, cbor).into_diagnostic()
+            let era = (*era).try_into().expect("era out of range");
+            MultiEraUpdate::decode_for_era(era, cbor).into_diagnostic()
         })
         .try_collect()?;
 

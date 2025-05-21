@@ -1,11 +1,12 @@
 use axum::{extract::State, http::StatusCode, Json};
 
-use crate::{ledger::pparams, serve::minibf::SharedState};
+use crate::{
+    ledger::pparams,
+    serve::minibf::{routes::epochs::cost_models::get_named_cost_model, SharedState},
+};
 use itertools::Itertools as _;
 
-use super::{
-    CostModels, CostModelsRaw, CostParametersV1, CostParametersV2, CostParametersV3, ProtocolParams,
-};
+use super::{CostModels, CostModelsRaw, ProtocolParams};
 
 pub async fn route(State(state): State<SharedState>) -> Result<Json<ProtocolParams>, StatusCode> {
     let tip = state
@@ -44,13 +45,13 @@ pub async fn route(State(state): State<SharedState>) -> Result<Json<ProtocolPara
         cost_models: mapped.cost_models.clone().map(|cost_models| CostModels {
             plutus_v1: cost_models
                 .plutus_v1
-                .map(|v1| CostParametersV1::from(&v1.values)),
+                .map(|v1| get_named_cost_model(1, &v1.values)),
             plutus_v2: cost_models
                 .plutus_v2
-                .map(|v2| CostParametersV2::from(&v2.values)),
+                .map(|v2| get_named_cost_model(2, &v2.values)),
             plutus_v3: cost_models
                 .plutus_v3
-                .map(|v3| CostParametersV3::from(&v3.values)),
+                .map(|v3| get_named_cost_model(3, &v3.values)),
         }),
         cost_models_raw: mapped.cost_models.clone().map(|cost_models| CostModelsRaw {
             plutus_v1: cost_models.plutus_v1.map(|v1| v1.values),
