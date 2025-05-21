@@ -12,8 +12,8 @@ authors = ["Santiago Carmuega <santiago@carmuega.me>"]
 
 
 [dependencies]
-# pallas = { git = "https://github.com/txpipe/pallas.git", features = ["hardano"] }
-pallas = { version = "1.0.0-alpha.2", features = ["hardano"] }
+pallas = { git = "https://github.com/txpipe/pallas.git", features = ["hardano"] }
+# pallas = { version = "1.0.0-alpha.2", features = ["hardano"] }
 # pallas = { path = "../pallas/pallas", features = ["hardano"] }
 
 # gasket = { git = "https://github.com/construkts/gasket-rs.git", features = ["derive"] }
@@ -121,3 +121,6 @@ lto = "thin"
 push = false
 publish = false
 pre-release-hook = ["git", "cliff", "-o", "CHANGELOG.md", "--tag", "{{version}}"]
+
+[lints.clippy]
+result_large_err = "allow"

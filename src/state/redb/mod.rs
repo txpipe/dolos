@@ -17,19 +17,11 @@ const DEFAULT_CACHE_SIZE_MB: usize = 500;
 fn compute_schema_hash(db: &Database) -> Result<Option<String>, LedgerError> {
     let mut hasher = pallas::crypto::hash::Hasher::<160>::new();
 
-    let rx = db
-        .begin_read()
-        .map_err(|e| LedgerError::StorageError(e.into()))?;
+    let rx = db.begin_read()?;
 
-    let names_1 = rx
-        .list_tables()
-        .map_err(|e| LedgerError::StorageError(e.into()))?
-        .map(|t| t.name().to_owned());
+    let names_1 = rx.list_tables()?.map(|t| t.name().to_owned());
 
-    let names_2 = rx
-        .list_multimap_tables()
-        .map_err(|e| LedgerError::StorageError(e.into()))?
-        .map(|t| t.name().to_owned());
+    let names_2 = rx.list_multimap_tables()?.map(|t| t.name().to_owned());
 
     let mut names = names_1.chain(names_2).collect_vec();
 
@@ -55,16 +47,9 @@ fn open_db(path: impl AsRef<Path>, cache_size: Option<usize>) -> Result<Database
     let db = Database::builder()
         .set_repair_callback(|x| warn!(progress = x.progress() * 100f64, "ledger db is repairing"))
         .set_cache_size(1024 * 1024 * cache_size.unwrap_or(DEFAULT_CACHE_SIZE_MB))
-        .create(path)
-        .map_err(|x| LedgerError::StorageError(x.into()))?;
+        .create(path)?;
 
     Ok(db)
-}
-
-impl From<::redb::Error> for LedgerError {
-    fn from(value: ::redb::Error) -> Self {
-        LedgerError::StorageError(value)
-    }
 }
 
 const V1_HASH: &str = "067c3397778523b67202fa0ea720ef4d2c091e30";

@@ -74,7 +74,7 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
             <Box<Cow<'_, pallas::ledger::primitives::byron::TxIn>>>::from(Cow::Owned(txin)),
         );
 
-        let value = MultiEraOutput::decode(era, &cbor)
+        let value = MultiEraOutput::decode(era, cbor)
             .into_diagnostic()
             .context("decoding utxo")?;
 
