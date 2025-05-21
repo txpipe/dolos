@@ -121,3 +121,6 @@ lto = "thin"
 push = false
 publish = false
 pre-release-hook = ["git", "cliff", "-o", "CHANGELOG.md", "--tag", "{{version}}"]
+
+[lints.clippy]
+result_large_err = "allow"

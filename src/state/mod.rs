@@ -14,13 +14,13 @@ pub mod redb;
 #[derive(Debug, Error)]
 pub enum LedgerError {
     #[error("broken invariant")]
-    BrokenInvariant(#[source] BrokenInvariant),
+    BrokenInvariant(#[from] BrokenInvariant),
 
     #[error("storage error")]
-    StorageError(#[source] ::redb::Error),
+    StorageError(#[from] Box<::redb::Error>),
 
     #[error("address decoding error")]
-    AddressDecoding(pallas::ledger::addresses::Error),
+    AddressDecoding(#[from] pallas::ledger::addresses::Error),
 
     #[error("query not supported")]
     QueryNotSupported,
@@ -29,36 +29,36 @@ pub enum LedgerError {
     InvalidStoreVersion,
 
     #[error("decoding error")]
-    DecodingError(#[source] pallas::codec::minicbor::decode::Error),
+    DecodingError(#[from] pallas::codec::minicbor::decode::Error),
+}
+
+impl From<::redb::DatabaseError> for LedgerError {
+    fn from(value: ::redb::DatabaseError) -> Self {
+        Self::from(Box::new(::redb::Error::from(value)))
+    }
 }
 
 impl From<::redb::TableError> for LedgerError {
     fn from(value: ::redb::TableError) -> Self {
-        Self::StorageError(value.into())
+        Self::from(Box::new(::redb::Error::from(value)))
     }
 }
 
 impl From<::redb::CommitError> for LedgerError {
     fn from(value: ::redb::CommitError) -> Self {
-        Self::StorageError(value.into())
+        Self::from(Box::new(::redb::Error::from(value)))
     }
 }
 
 impl From<::redb::StorageError> for LedgerError {
     fn from(value: ::redb::StorageError) -> Self {
-        Self::StorageError(value.into())
+        Self::from(Box::new(::redb::Error::from(value)))
     }
 }
 
 impl From<::redb::TransactionError> for LedgerError {
     fn from(value: ::redb::TransactionError) -> Self {
-        Self::StorageError(value.into())
-    }
-}
-
-impl From<pallas::ledger::addresses::Error> for LedgerError {
-    fn from(value: pallas::ledger::addresses::Error) -> Self {
-        Self::AddressDecoding(value)
+        Self::from(Box::new(::redb::Error::from(value)))
     }
 }
 
