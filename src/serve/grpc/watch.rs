@@ -1,11 +1,12 @@
 use crate::{
+    model::BlockBody,
     state::LedgerStore,
     wal::{self, ChainPoint, WalReader as _},
 };
 use futures_core::Stream;
 use futures_util::StreamExt;
-use pallas::interop::utxorpc as interop;
 use pallas::interop::utxorpc::spec as u5c;
+use pallas::interop::utxorpc::{self as interop, Mapper};
 use pallas::{
     interop::utxorpc::spec::watch::any_chain_tx_pattern::Chain,
     ledger::{addresses::Address, traverse::MultiEraBlock},
@@ -13,6 +14,15 @@ use pallas::{
 use std::pin::Pin;
 use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
+
+fn raw_to_anychain(mapper: &Mapper<LedgerStore>, body: &BlockBody) -> u5c::watch::AnyChainBlock {
+    let block = mapper.map_block_cbor(body);
+
+    u5c::watch::AnyChainBlock {
+        native_bytes: body.to_vec().into(),
+        chain: u5c::watch::any_chain_block::Chain::Cardano(block).into(),
+    }
+}
 
 fn outputs_match_address(
     pattern: &u5c::cardano::AddressPattern,
@@ -166,6 +176,7 @@ fn block_to_txs(
                 .is_none_or(|predicate| apply_predicate(predicate, tx))
         })
         .map(|x| u5c::watch::AnyChainTx {
+            block: Some(raw_to_anychain(mapper, body)),
             chain: Some(u5c::watch::any_chain_tx::Chain::Cardano(x)),
         })
         .collect()
@@ -229,7 +240,7 @@ impl u5c::watch::watch_service_server::WatchService for WatchServiceImpl {
         let intersect = inner_req
             .intersect
             .iter()
-            .map(|x| ChainPoint::Specific(x.index, x.hash.to_vec().as_slice().into()))
+            .map(|x| ChainPoint::Specific(x.slot, x.hash.to_vec().as_slice().into()))
             .collect::<Vec<ChainPoint>>();
 
         let from_seq = if intersect.is_empty() {
