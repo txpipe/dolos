@@ -1,10 +1,12 @@
 use crate::{
-    model::BlockBody, state::LedgerStore, wal::{self, ChainPoint, WalReader as _}
+    model::BlockBody,
+    state::LedgerStore,
+    wal::{self, ChainPoint, WalReader as _},
 };
 use futures_core::Stream;
 use futures_util::StreamExt;
-use pallas::interop::utxorpc::{self as interop, Mapper};
 use pallas::interop::utxorpc::spec as u5c;
+use pallas::interop::utxorpc::{self as interop, Mapper};
 use pallas::{
     interop::utxorpc::spec::watch::any_chain_tx_pattern::Chain,
     ledger::{addresses::Address, traverse::MultiEraBlock},

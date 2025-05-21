@@ -73,36 +73,25 @@ fn wal_log_to_tip_response(
     }
 }
 
-fn point_to_reset_tip_response(
-    point: ChainPoint,
-    raw: wal::RawBlock,
-) -> Result<u5c::sync::FollowTipResponse, Status> {
-    let (slot, hash) = match point {
-        ChainPoint::Origin => {
-            return Ok(u5c::sync::FollowTipResponse {
-                action: u5c::sync::follow_tip_response::Action::Reset(BlockRef {
-                    slot: 0,
-                    hash: vec![].into(),
-                    height: 0,
-                })
-                .into(),
+fn point_to_reset_tip_response(point: ChainPoint, height: u64) -> u5c::sync::FollowTipResponse {
+    match point {
+        ChainPoint::Origin => u5c::sync::FollowTipResponse {
+            action: u5c::sync::follow_tip_response::Action::Reset(BlockRef {
+                slot: 0,
+                hash: vec![].into(),
+                height: 0,
             })
-        }
-        ChainPoint::Specific(s, h) => (s, h.to_vec()),
-    };
-
-    let height = MultiEraBlock::decode(&raw.body)
-        .map_err(|_| Status::internal("Failed to decode block."))?
-        .number();
-
-    Ok(u5c::sync::FollowTipResponse {
-        action: u5c::sync::follow_tip_response::Action::Reset(BlockRef {
-            slot,
-            hash: hash.into(),
-            height,
-        })
-        .into(),
-    })
+            .into(),
+        },
+        ChainPoint::Specific(slot, hash) => u5c::sync::FollowTipResponse {
+            action: u5c::sync::follow_tip_response::Action::Reset(BlockRef {
+                slot,
+                hash: hash.to_vec().into(),
+                height,
+            })
+            .into(),
+        },
+    }
 }
 
 pub struct SyncServiceImpl {
@@ -226,7 +215,11 @@ impl u5c::sync::sync_service_server::SyncService for SyncServiceImpl {
             .read_block(&point)
             .map_err(|_err| Status::internal("can't read WAL"))?;
 
-        let reset = once(async { point_to_reset_tip_response(point, raw_block) });
+        let height = MultiEraBlock::decode(&raw_block.body)
+            .map_err(|e| Status::internal(format!("corrupt WAL entry: {:?}", e)))?
+            .number();
+
+        let reset = once(async move { Ok(point_to_reset_tip_response(point, height)) });
 
         let forward =
             wal::WalStream::start(self.wal.clone(), from_seq, self.cancellation_token.clone())
