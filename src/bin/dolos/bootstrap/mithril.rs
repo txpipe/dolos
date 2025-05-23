@@ -82,6 +82,13 @@ impl mithril_client::feedback::FeedbackReceiver for MithrilFeedback {
             mithril_client::feedback::MithrilEvent::CertificateChainValidated { .. } => {
                 self.validate_pb.set_message("certificate chain validated");
             }
+            mithril_client::feedback::MithrilEvent::CertificateFetchedFromCache { .. } => {
+                self.validate_pb
+                    .set_message("certificate fetched from cache");
+            }
+            x => {
+                self.validate_pb.set_message(format!("{:?}", x));
+            }
         }
     }
 }
@@ -98,9 +105,10 @@ async fn fetch_snapshot(
 
     let client = ClientBuilder::aggregator(&config.aggregator, &config.genesis_key)
         .add_feedback_receiver(Arc::new(feedback))
+        .set_ancillary_verification_key(config.ancillary_key.clone())
         .build()?;
 
-    let snapshots = client.snapshot().list().await?;
+    let snapshots = client.cardano_database().list().await?;
 
     let last_digest = snapshots
         .first()
@@ -109,34 +117,31 @@ async fn fetch_snapshot(
         .as_ref();
 
     let snapshot = client
-        .snapshot()
+        .cardano_database()
         .get(last_digest)
         .await?
         .ok_or(MithrilError::msg("no snapshot available"))?;
 
+    let certificate = client
+        .certificate()
+        .verify_chain(&snapshot.certificate_hash)
+        .await?;
+
     let target_directory = Path::new(&args.download_dir);
 
     client
-        .snapshot()
+        .cardano_database()
         .download_unpack(&snapshot, target_directory)
         .await?;
 
-    if let Err(e) = client.snapshot().add_statistics(&snapshot).await {
+    if let Err(e) = client.cardano_database().add_statistics(&snapshot).await {
         warn!("failed incrementing snapshot download statistics: {:?}", e);
     }
 
-    let certificate = if args.skip_validation {
-        client
-            .certificate()
-            .get(&snapshot.certificate_hash)
-            .await?
-            .ok_or(MithrilError::msg("certificate for snapshot not found"))?
-    } else {
-        client
-            .certificate()
-            .verify_chain(&snapshot.certificate_hash)
-            .await?
-    };
+    if !args.skip_validation {
+        warn!("skipping validation, assuming snapshot is already validated");
+        return Ok(());
+    }
 
     let message = MessageBuilder::new()
         .compute_snapshot_message(&certificate, target_directory)
