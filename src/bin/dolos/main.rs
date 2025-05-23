@@ -88,6 +88,7 @@ impl Default for GenesisConfig {
 pub struct MithrilConfig {
     aggregator: String,
     genesis_key: String,
+    ancillary_key: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
