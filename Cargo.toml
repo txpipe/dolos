@@ -96,7 +96,7 @@ default-features = false
 features = ["fs", "num-integer-backend", "rustls-tls", "rustls-tls-native-roots"]
 
 [dev-dependencies]
-tempfile = "3.3.0"
+tempfile = "3.20.0"
 
 [features]
 mithril = ["mithril-client"]
