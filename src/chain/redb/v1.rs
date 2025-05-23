@@ -311,11 +311,22 @@ impl ChainStore {
     }
 
     pub fn get_tx(&self, tx_hash: &[u8]) -> Result<Option<Vec<u8>>, Error> {
+        let tx_with_block = self.get_tx_with_block_data(tx_hash)?;
+        if let Some((_, tx)) = tx_with_block {
+            return Ok(Some(tx));
+        }
+        Ok(None)
+    }
+
+    pub fn get_tx_with_block_data(
+        &self,
+        tx_hash: &[u8],
+    ) -> Result<Option<(BlockBody, Vec<u8>)>, Error> {
         let possible = self.get_possible_blocks_by_tx_hash(tx_hash)?;
-        for raw in possible {
-            let block = MultiEraBlock::decode(&raw).map_err(Error::BlockDecodingError)?;
+        for raw in possible.iter() {
+            let block = MultiEraBlock::decode(raw).map_err(Error::BlockDecodingError)?;
             if let Some(tx) = block.txs().iter().find(|x| x.hash().to_vec() == tx_hash) {
-                return Ok(Some(tx.encode()));
+                return Ok(Some((raw.clone(), tx.encode())));
             }
         }
         Ok(None)
