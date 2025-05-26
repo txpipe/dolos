@@ -1,7 +1,7 @@
 [package]
 name = "dolos"
 description = "A Cardano data-node built in Rust"
-version = "0.22.0"
+version = "0.23.0"
 edition = "2021"
 repository = "https://github.com/txpipe/dolos"
 homepage = "https://github.com/txpipe/dolos"
@@ -72,7 +72,7 @@ tonic-web = { version = "0.12.3", optional = true }
 tonic-reflection = { version = "0.12.3", optional = true }
 
 # MiniBF dependencies
-axum = { version = "0.8.3", features = ["macros"], optional = true }
+axum = { version = "0.8.4", features = ["macros"], optional = true }
 
 # TRP dependencies
 jsonrpsee = { version = "0.24.9", features = ["server"], optional = true }
@@ -84,13 +84,13 @@ tower = "0.4"
 
 
 [target.'cfg(not(windows))'.dependencies.mithril-client]
-version = "0.10.4"
+version = "0.12.2"
 optional = true
 default-features = false
 features = ["fs", "rug-backend", "rustls-tls", "rustls-tls-webpki-roots"]
 
 [target.'cfg(windows)'.dependencies.mithril-client]
-version = "0.10.4"
+version = "0.12.2"
 optional = true
 default-features = false
 features = ["fs", "num-integer-backend", "rustls-tls", "rustls-tls-native-roots"]
