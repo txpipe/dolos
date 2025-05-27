@@ -321,7 +321,7 @@ impl ChainStore {
     pub fn get_tx_with_block_data(
         &self,
         tx_hash: &[u8],
-    ) -> Result<Option<(BlockBody, Vec<u8>)>, Error> {
+    ) -> Result<Option<(Vec<u8>, Vec<u8>)>, Error> {
         let possible = self.get_possible_blocks_by_tx_hash(tx_hash)?;
         for raw in possible.iter() {
             let block = MultiEraBlock::decode(raw).map_err(Error::BlockDecodingError)?;

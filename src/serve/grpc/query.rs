@@ -380,7 +380,7 @@ impl u5c::query::query_service_server::QueryService for QueryServiceImpl {
 
         let tx_hash = message.hash;
 
-        let (block_body, tx) = self
+        let (block_data, tx) = self
             .chain
             .get_tx_with_block_data(&tx_hash)
             .map_err(|e| Status::internal(format!("failed to query chain for tx: {e}")))?
@@ -389,12 +389,12 @@ impl u5c::query::query_service_server::QueryService for QueryServiceImpl {
         let mtx = MultiEraTx::decode(&tx)
             .map_err(|e| Status::internal(format!("failed to decode transaction: {e}")))?;
 
-        let mblock = MultiEraBlock::decode(&block_body)
+        let mblock = MultiEraBlock::decode(&block_data)
             .map_err(|e| Status::internal(format!("failed to decode block: {e}")))?;
         let block_slot = mblock.slot();
         let block_hash = mblock.hash();
 
-        let block = self.mapper.map_block_cbor(&block_body);
+        let block = self.mapper.map_block_cbor(&block_data);
 
         let mut response = u5c::query::ReadTxResponse {
             tx: Some(u5c::query::AnyChainTx {
@@ -403,7 +403,7 @@ impl u5c::query::query_service_server::QueryService for QueryServiceImpl {
                     self.mapper.map_tx(&mtx),
                 )),
                 block: Some(u5c::query::AnyChainBlock {
-                    native_bytes: block_body.to_vec().into(),
+                    native_bytes: block_data.to_vec().into(),
                     chain: Some(u5c::query::any_chain_block::Chain::Cardano(block)),
                 }),
             }),

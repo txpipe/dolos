@@ -41,7 +41,7 @@ impl ChainStore {
     pub fn get_tx_with_block_data(
         &self,
         tx_hash: &[u8],
-    ) -> Result<Option<(BlockBody, Vec<u8>)>, ChainError> {
+    ) -> Result<Option<(Vec<u8>, Vec<u8>)>, ChainError> {
         match self {
             ChainStore::Redb(x) => x.get_tx_with_block_data(tx_hash),
         }
