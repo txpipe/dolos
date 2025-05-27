@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.23.0] - 2025-05-23
+
+### 🐛 Bug Fixes
+
+- Graceful shutdown when GRPC streams are being served (#499)
+- *(minibf)* Handle Byron addresses correctly (#498)
+- Load Plutus v2 cost models if available in config (#505)
+- *(minibf)* Make cost model names more flexible (#506)
+- Apply latest changes to Mithril flow (#510)
+
+### ⚙️ Miscellaneous Tasks
+
+- *(trp)* Decouple tx3 pallas version from the rest (#503)
+- Fix lint warnings (#507)
+
 ## [0.22.0] - 2025-05-12
 
 ### 🚀 Features
@@ -19,6 +34,7 @@ All notable changes to this project will be documented in this file.
 ### ⚙️ Miscellaneous Tasks
 
 - Update Pallas to v1.0.0-alpha.2 (#491)
+- Release dolos version 0.22.0
 
 ## [0.21.1] - 2025-04-22
 
