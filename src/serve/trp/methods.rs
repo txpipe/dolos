@@ -1,12 +1,12 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
 use jsonrpsee::types::{ErrorCode, ErrorObject, ErrorObjectOwned, Params};
 use serde::Deserialize;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 use tx3_lang::ProtoTx;
 
 use super::Context;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 enum IrEncoding {
     #[serde(rename = "base64")]
     Base64,
@@ -14,7 +14,7 @@ enum IrEncoding {
     Hex,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 struct IrEnvelope {
     #[allow(dead_code)]
     pub version: String,
@@ -22,10 +22,90 @@ struct IrEnvelope {
     pub encoding: IrEncoding,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum BytesEncoding {
+    Base64,
+    Hex,
+}
+
+#[derive(Debug, Deserialize)]
+struct BytesPayload {
+    content: String,
+    encoding: BytesEncoding,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", content = "value")]
+enum ParamsArgValue {
+    #[serde(rename = "string")]
+    String(String),
+
+    #[serde(rename = "number")]
+    Number(i64),
+
+    #[serde(rename = "boolean")]
+    Boolean(bool),
+
+    #[serde(rename = "null")]
+    Null,
+
+    #[serde(rename = "bytes")]
+    Bytes(BytesPayload),
+}
+
+#[derive(Deserialize, Debug)]
 struct TrpResolveParams {
     pub tir: IrEnvelope,
-    pub args: serde_json::Value,
+    pub args: HashMap<String, ParamsArgValue>,
+}
+
+fn handle_param_args(
+    tx: &mut ProtoTx,
+    key: &str,
+    val: &ParamsArgValue,
+) -> Result<(), ErrorObjectOwned> {
+    match val {
+        ParamsArgValue::String(s) => {
+            tx.set_arg(key, s.as_str().into());
+        }
+        ParamsArgValue::Number(n) => {
+            tx.set_arg(key, (*n).into());
+        }
+        ParamsArgValue::Boolean(b) => {
+            tx.set_arg(key, (*b).into());
+        }
+        ParamsArgValue::Bytes(payload) => {
+            let decoded = match payload.encoding {
+                BytesEncoding::Base64 => base64::engine::general_purpose::STANDARD
+                    .decode(&payload.content)
+                    .map_err(|e| {
+                        ErrorObject::owned(
+                            ErrorCode::InvalidParams.code(),
+                            format!("Invalid base64 for key '{}'", key),
+                            Some(e.to_string()),
+                        )
+                    })?,
+                BytesEncoding::Hex => hex::decode(&payload.content).map_err(|e| {
+                    ErrorObject::owned(
+                        ErrorCode::InvalidParams.code(),
+                        format!("Invalid hex for key '{}'", key),
+                        Some(e.to_string()),
+                    )
+                })?,
+            };
+            tx.set_arg(key, decoded.into());
+        }
+        ParamsArgValue::Null => {
+            return Err(ErrorObject::owned(
+                ErrorCode::InvalidParams.code(),
+                format!("Null is not a valid argument for key '{}'", key),
+                None::<()>,
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 pub fn decode_params(params: Params<'_>) -> Result<ProtoTx, ErrorObjectOwned> {
@@ -67,38 +147,8 @@ pub fn decode_params(params: Params<'_>) -> Result<ProtoTx, ErrorObjectOwned> {
         )
     })?;
 
-    let Some(arguments) = params.args.as_object() else {
-        return Err(ErrorObject::owned(
-            ErrorCode::InvalidParams.code(),
-            "Failed to parse arguments as object.",
-            None as Option<String>,
-        ));
-    };
-
-    for (key, val) in arguments.iter() {
-        match val {
-            serde_json::Value::String(x) => tx.set_arg(key, x.as_str().into()),
-            serde_json::Value::Number(x) => tx.set_arg(
-                key,
-                match x.as_i64() {
-                    Some(y) => y.into(),
-                    None => {
-                        return Err(ErrorObject::owned(
-                            ErrorCode::InvalidParams.code(),
-                            "Argument cannot be cast as i64",
-                            Some(serde_json::json!({ "key": key, "value": val })),
-                        ))
-                    }
-                },
-            ),
-            _ => {
-                return Err(ErrorObject::owned(
-                    ErrorCode::InvalidParams.code(),
-                    "Invalid argument",
-                    Some(serde_json::json!({ "key": key, "value": val })),
-                ))
-            }
-        }
+    for (key, val) in params.args.iter() {
+        handle_param_args(&mut tx, key, val)?;
     }
 
     Ok(tx)
