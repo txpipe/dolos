@@ -77,7 +77,23 @@ pub fn decode_params(params: Params<'_>) -> Result<ProtoTx, ErrorObjectOwned> {
 
     for (key, val) in arguments.iter() {
         match val {
-            serde_json::Value::String(x) => tx.set_arg(key, x.as_str().into()),
+            serde_json::Value::String(x) => {
+                let arg = if let Some(hex_str) = x.strip_prefix("0x") {
+                    hex::decode(hex_str)
+                        .map_err(|err| {
+                            ErrorObject::owned(
+                                ErrorCode::InvalidParams.code(),
+                                err.to_string(),
+                                Some(serde_json::json!({ "key": key, "value": val })),
+                            )
+                        })?
+                        .into()
+                } else {
+                    x.as_str().into()
+                };
+
+                tx.set_arg(key, arg);
+            }
             serde_json::Value::Number(x) => tx.set_arg(
                 key,
                 match x.as_i64() {
