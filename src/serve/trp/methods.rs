@@ -80,10 +80,10 @@ pub fn decode_params(params: Params<'_>) -> Result<ProtoTx, ErrorObjectOwned> {
             serde_json::Value::String(x) => {
                 let arg = if let Some(hex_str) = x.strip_prefix("0x") {
                     hex::decode(hex_str)
-                        .map_err(|err| {
+                        .map_err(|_err| {
                             ErrorObject::owned(
                                 ErrorCode::InvalidParams.code(),
-                                err.to_string(),
+                                "Failed to decode hex",
                                 Some(serde_json::json!({ "key": key, "value": val })),
                             )
                         })?
