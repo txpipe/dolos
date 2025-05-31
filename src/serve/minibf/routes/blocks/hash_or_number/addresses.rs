@@ -8,7 +8,8 @@ use pallas::ledger::traverse::MultiEraBlock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::{ledger::EraCbor, serve::minibf::SharedState};
+use crate::serve::minibf::SharedState;
+use dolos_core::EraCbor;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BlockAddress {

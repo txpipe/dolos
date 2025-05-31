@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-use crate::ledger::BrokenInvariant;
+use dolos_core::BrokenInvariant;
 
 #[derive(Debug, Error)]
 pub enum ChainError {

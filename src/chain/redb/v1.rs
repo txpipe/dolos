@@ -5,8 +5,9 @@ use tracing::{debug, info};
 
 type Error = crate::chain::ChainError;
 
-use super::{indexes, tables, ChainIter, LedgerDelta};
-use crate::model::{BlockBody, BlockSlot};
+use dolos_core::{BlockBody, BlockSlot, LedgerDelta};
+
+use super::{indexes, tables, ChainIter};
 
 #[derive(Clone)]
 pub struct ChainStore {

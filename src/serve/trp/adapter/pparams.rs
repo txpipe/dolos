@@ -2,7 +2,9 @@ use std::collections::HashMap;
 
 use pallas::ledger::{traverse::MultiEraUpdate, validate::utils::ConwayProtParams};
 
-use crate::{ledger::pparams, state::LedgerStore};
+use dolos_cardano::pparams;
+
+use crate::state::LedgerStore;
 
 pub fn network_id_from_genesis(genesis: &pparams::Genesis) -> Option<tx3_cardano::Network> {
     match genesis.shelley.network_id.as_ref() {

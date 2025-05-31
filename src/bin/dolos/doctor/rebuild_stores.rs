@@ -1,9 +1,7 @@
 use std::sync::Arc;
 
-use dolos::{
-    ledger::mutable_slots,
-    wal::{self, WalBlockReader, WalReader as _},
-};
+use dolos::cardano::mutable_slots;
+use dolos::wal::{self, WalBlockReader, WalReader as _};
 use itertools::Itertools;
 use miette::{Context, IntoDiagnostic};
 use pallas::ledger::traverse::MultiEraBlock;
@@ -39,7 +37,7 @@ pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::
     {
         debug!("importing genesis");
 
-        let delta = dolos::ledger::compute_origin_delta(&genesis);
+        let delta = dolos::cardano::compute_origin_delta(&genesis);
 
         light
             .apply(&[delta])

@@ -1,11 +1,12 @@
 use crate::chain::ChainStore;
-use crate::ledger::pparams::Genesis;
 use crate::state::LedgerStore;
 use crate::wal::redb::WalStore;
 use crate::{mempool::Mempool, prelude::*};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
+
+use dolos_cardano::pparams::Genesis;
 
 pub mod apply;
 pub mod emulator;

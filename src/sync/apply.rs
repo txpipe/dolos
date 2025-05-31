@@ -4,9 +4,10 @@ use gasket::framework::*;
 use pallas::ledger::traverse::MultiEraBlock;
 use tracing::{debug, info};
 
-use crate::ledger::pparams::Genesis;
+use crate::prelude::*;
 use crate::wal::{self, LogValue, WalReader as _};
-use crate::{ledger, prelude::*};
+
+use dolos_cardano::pparams::Genesis;
 
 pub type UpstreamPort = gasket::messaging::InputPort<RollEvent>;
 
@@ -63,7 +64,7 @@ impl Stage {
     fn process_origin(&self) -> Result<(), WorkerError> {
         info!("applying origin");
 
-        let deltas = vec![crate::ledger::compute_origin_delta(&self.genesis)];
+        let deltas = vec![dolos_cardano::compute_origin_delta(&self.genesis)];
         self.ledger.apply(&deltas).or_panic()?;
         self.chain.apply(&deltas).or_panic()?;
 
@@ -78,7 +79,7 @@ impl Stage {
         let block = MultiEraBlock::decode(body).or_panic()?;
         let context = crate::state::load_slice_for_block(&block, &self.ledger, &[]).or_panic()?;
 
-        let deltas = vec![crate::ledger::compute_undo_delta(&block, context).or_panic()?];
+        let deltas = vec![dolos_cardano::compute_undo_delta(&block, context).or_panic()?];
         self.ledger.apply(&deltas).or_panic()?;
         self.chain.apply(&deltas).or_panic()?;
 
@@ -140,7 +141,7 @@ impl gasket::framework::Worker<Stage> for Worker {
         }
 
         let point = match cursor {
-            Some(ledger::ChainPoint(s, h)) => wal::ChainPoint::Specific(s, h),
+            Some(ChainPoint(s, h)) => wal::ChainPoint::Specific(s, h),
             None => wal::ChainPoint::Origin,
         };
 

@@ -1,4 +1,4 @@
-pub use super::model::*;
+pub use dolos_core::*;
 
 use miette::Diagnostic;
 use std::fmt::Display;

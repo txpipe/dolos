@@ -5,6 +5,8 @@ use std::path::Path;
 
 use tracing::{debug, warn};
 
+use dolos_core::ChainPoint;
+
 use super::*;
 
 mod tables;

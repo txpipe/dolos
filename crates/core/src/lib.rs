@@ -1,8 +1,19 @@
-use std::fmt::Display;
+use std::{
+    collections::{HashMap, HashSet},
+    fmt::Display,
+};
 
-use pallas::{crypto::hash::Hash, network::miniprotocols::Point};
+use pallas::{
+    crypto::hash::Hash,
+    ledger::traverse::{MultiEraInput, MultiEraOutput, MultiEraTx, MultiEraUpdate},
+    network::miniprotocols::Point,
+};
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
+pub type Era = u16;
+pub type TxoIdx = u32;
+pub type TxOrder = usize;
 pub type BlockSlot = u64;
 pub type BlockHeight = u64;
 pub type BlockBody = Vec<u8>;
@@ -11,6 +22,111 @@ pub type BlockHash = Hash<32>;
 pub type TxHash = Hash<32>;
 pub type OutputIdx = u64;
 pub type UtxoBody = (u16, Vec<u8>);
+
+#[derive(Debug, Eq, PartialEq, Clone)]
+pub struct EraCbor(pub Era, pub Vec<u8>);
+
+impl From<(Era, Vec<u8>)> for EraCbor {
+    fn from(value: (Era, Vec<u8>)) -> Self {
+        Self(value.0, value.1)
+    }
+}
+
+impl From<EraCbor> for (Era, Vec<u8>) {
+    fn from(value: EraCbor) -> Self {
+        (value.0, value.1)
+    }
+}
+
+impl From<MultiEraOutput<'_>> for EraCbor {
+    fn from(value: MultiEraOutput<'_>) -> Self {
+        EraCbor(value.era().into(), value.encode())
+    }
+}
+
+impl<'a> TryFrom<&'a EraCbor> for MultiEraOutput<'a> {
+    type Error = pallas::codec::minicbor::decode::Error;
+
+    fn try_from(value: &'a EraCbor) -> Result<Self, Self::Error> {
+        let era = value.0.try_into().expect("era out of range");
+        MultiEraOutput::decode(era, &value.1)
+    }
+}
+
+impl<'a> TryFrom<&'a EraCbor> for MultiEraTx<'a> {
+    type Error = pallas::codec::minicbor::decode::Error;
+
+    fn try_from(value: &'a EraCbor) -> Result<Self, Self::Error> {
+        let era = value.0.try_into().expect("era out of range");
+        MultiEraTx::decode_for_era(era, &value.1)
+    }
+}
+
+impl TryFrom<EraCbor> for MultiEraUpdate<'_> {
+    type Error = pallas::codec::minicbor::decode::Error;
+
+    fn try_from(value: EraCbor) -> Result<Self, Self::Error> {
+        let era = value.0.try_into().expect("era out of range");
+        MultiEraUpdate::decode_for_era(era, &value.1)
+    }
+}
+
+impl From<&MultiEraInput<'_>> for TxoRef {
+    fn from(value: &MultiEraInput<'_>) -> Self {
+        TxoRef(*value.hash(), value.index() as u32)
+    }
+}
+
+#[derive(Debug, Eq, PartialEq, Hash, Clone, Serialize, Deserialize)]
+pub struct TxoRef(pub TxHash, pub TxoIdx);
+
+impl From<(TxHash, TxoIdx)> for TxoRef {
+    fn from(value: (TxHash, TxoIdx)) -> Self {
+        Self(value.0, value.1)
+    }
+}
+
+impl From<TxoRef> for (TxHash, TxoIdx) {
+    fn from(value: TxoRef) -> Self {
+        (value.0, value.1)
+    }
+}
+
+#[derive(Debug, Eq, PartialEq, Hash)]
+pub struct ChainPoint(pub BlockSlot, pub BlockHash);
+
+#[derive(Debug, Error)]
+pub enum BrokenInvariant {
+    #[error("missing utxo {0:?}")]
+    MissingUtxo(TxoRef),
+}
+
+pub type UtxoMap = HashMap<TxoRef, EraCbor>;
+
+pub type UtxoSet = HashSet<TxoRef>;
+
+/// A slice of the ledger relevant for a specific task
+///
+/// A ledger slice represents a partial view of the ledger which is optimized
+/// for a particular task, such tx validation. In essence, it is a subset of all
+/// the UTxO which are being consumed or referenced by a block or tx.
+#[derive(Clone)]
+pub struct LedgerSlice {
+    pub resolved_inputs: HashMap<TxoRef, EraCbor>,
+}
+
+#[derive(Default, Debug)]
+pub struct LedgerDelta {
+    pub new_position: Option<ChainPoint>,
+    pub undone_position: Option<ChainPoint>,
+    pub produced_utxo: HashMap<TxoRef, EraCbor>,
+    pub consumed_utxo: HashMap<TxoRef, EraCbor>,
+    pub recovered_stxi: HashMap<TxoRef, EraCbor>,
+    pub undone_utxo: HashMap<TxoRef, EraCbor>,
+    pub new_pparams: Vec<EraCbor>,
+    pub new_block: BlockBody,
+    pub undone_block: BlockBody,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RawBlock {

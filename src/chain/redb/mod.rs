@@ -186,6 +186,7 @@ impl From<v1::ChainStore> for ChainStore {
 }
 
 pub struct ChainIter<'a>(Range<'a, BlockSlot, BlockBody>);
+
 impl Iterator for ChainIter<'_> {
     type Item = (BlockSlot, BlockBody);
 

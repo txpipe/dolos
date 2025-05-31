@@ -7,10 +7,9 @@ use axum::{
     response::IntoResponse,
 };
 
-use crate::{
-    ledger::{EraCbor, TxoRef},
-    serve::minibf::SharedState,
-};
+use dolos_core::{EraCbor, TxoRef};
+
+use crate::serve::minibf::SharedState;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Amount {

@@ -1,6 +1,7 @@
 use std::path::Path;
 
-use dolos::ledger::{mutable_slots, pparams::Genesis};
+use dolos::cardano::pparams::Genesis;
+use dolos_cardano::mutable_slots;
 use miette::{Context, IntoDiagnostic};
 
 pub mod mainnet;
@@ -62,5 +63,6 @@ pub fn network_mutable_slots(network: &super::KnownNetwork) -> u64 {
             force_protocol: Some(6),
         },
     };
+
     mutable_slots(&genesis)
 }

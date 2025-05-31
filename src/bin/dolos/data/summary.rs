@@ -3,10 +3,8 @@ use miette::IntoDiagnostic;
 use pallas::ledger::traverse::{MultiEraBlock, MultiEraUpdate};
 use std::path::Path;
 
-use dolos::{
-    ledger::{ChainPoint, EraCbor},
-    wal::{redb::WalStore, RawBlock, ReadUtils, WalReader as _},
-};
+use dolos::core::{ChainPoint, EraCbor};
+use dolos::wal::{redb::WalStore, RawBlock, ReadUtils, WalReader as _};
 
 #[allow(dead_code)]
 fn dump_txs(chain: &WalStore) -> miette::Result<()> {
@@ -116,7 +114,7 @@ pub fn run(config: &crate::Config, _args: &Args) -> miette::Result<()> {
 
     let genesis = crate::common::open_genesis_files(&config.genesis)?;
 
-    let eras = dolos::ledger::pparams::fold(&genesis, &updates);
+    let eras = dolos::cardano::pparams::fold(&genesis, &updates);
 
     println!("{:?}", eras);
 

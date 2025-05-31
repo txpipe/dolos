@@ -5,13 +5,12 @@ use axum::{
 };
 use pallas::ledger::traverse::{MultiEraBlock, MultiEraUpdate};
 
-use crate::{
-    ledger::pparams,
-    serve::minibf::{
-        common::{Order, Pagination, PaginationParameters},
-        routes::blocks::{hash_or_number_to_body, BlockHeaderFields},
-        SharedState,
-    },
+use dolos_cardano::pparams;
+
+use crate::serve::minibf::{
+    common::{Order, Pagination, PaginationParameters},
+    routes::blocks::{hash_or_number_to_body, BlockHeaderFields},
+    SharedState,
 };
 
 use super::Block;

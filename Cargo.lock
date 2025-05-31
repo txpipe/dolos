@@ -1053,6 +1053,8 @@ dependencies = [
  "comfy-table",
  "config",
  "console-subscriber",
+ "dolos-cardano",
+ "dolos-core",
  "flate2",
  "futures-core",
  "futures-util",
@@ -1093,6 +1095,31 @@ dependencies = [
  "trait-variant",
  "tx3-cardano",
  "tx3-lang",
+]
+
+[[package]]
+name = "dolos-cardano"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "dolos-core",
+ "hex",
+ "itertools 0.14.0",
+ "pallas 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
+ "paste",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.12",
+ "tracing",
+]
+
+[[package]]
+name = "dolos-core"
+version = "0.1.0"
+dependencies = [
+ "pallas 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
+ "serde",
+ "thiserror 2.0.12",
 ]
 
 [[package]]

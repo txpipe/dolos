@@ -3,10 +3,9 @@ use tracing::debug;
 
 use tx3_cardano::pallas::ledger::traverse::{Era, MultiEraOutput};
 
-use crate::{
-    ledger::{EraCbor, TxoRef},
-    state::LedgerStore,
-};
+use dolos_core::{EraCbor, TxoRef};
+
+use crate::state::LedgerStore;
 
 enum Subset {
     All,

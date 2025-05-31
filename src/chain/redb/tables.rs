@@ -3,12 +3,12 @@ use ::redb::{TableDefinition, WriteTransaction};
 use redb::Range;
 use tracing::trace;
 
-use crate::ledger::LedgerDelta;
-use crate::model::{BlockBody, BlockSlot};
+use dolos_core::{BlockBody, BlockSlot, LedgerDelta};
 
 type Error = crate::chain::ChainError;
 
 pub struct BlocksTable;
+
 impl BlocksTable {
     pub const DEF: TableDefinition<'static, BlockSlot, BlockBody> = TableDefinition::new("blocks");
 

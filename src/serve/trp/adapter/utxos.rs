@@ -8,7 +8,7 @@ use tx3_cardano::pallas::{
 
 use tx3_lang::ir::{Expression, StructExpr};
 
-use crate::ledger::TxoRef;
+use dolos_core::TxoRef;
 
 fn map_custom_asset(asset: &MultiEraAsset) -> tx3_lang::ir::AssetExpr {
     let policy = asset.policy().to_vec();
