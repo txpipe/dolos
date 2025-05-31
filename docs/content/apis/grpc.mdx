@@ -1,0 +1,56 @@
+---
+title: gRPC
+sidebar:
+  order: 1
+---
+
+Dolos exposes a gRPC endpoint allowing clients to perform operations such as querying data, receiving notifications and submitting transactions.
+
+The endpoint provide by _Dolos_ adheres to the [UTxO RPC](https://utxorpc.org) interface definition. UtxoRPC is a generic specification of how to exchange data with UTxO-based blockchains, such as Cardano.
+
+If enabled via configuration, _Dolos_ will expose a TCP port accepting gRPC connections. The default port number is `50051`, but this value can be changed via configuration.
+
+## Off the Shelf Tools
+
+The underlying transport mechanism for gRPC is HTTP/2. Given that HTTP/2 is an ubiquotus protocol, there are many off-the-shelf tools to interact with this endpoint (eg: postman, grpcurl). You can find more options in the [Awesome gRPC](https://github.com/grpc-ecosystem/awesome-grpc?tab=readme-ov-file#tools) repository.
+
+gRPC relies on well-known schemas describing the available operations. These schemas are available and documented in the [UtxoRPC](https://utxorpc.org) site. Nevertheless, gRPC has a mechansim called _reflection_ that allows clients to retrieve the schemas from the endpoint itself, Dolos support this option. You can try out this mechanism using Postman.
+
+## SDKs
+
+One of the main goals of Dolos is to serve as a backend for dApps. dApps will want to integrate Dolos programmatically. gRPC is ideal for this since it's an industry-standard with support in all of the mainstream programming languages.
+
+To simplify this process even further, the UtxoRPC specification provides a set of [SDKs](https://utxorpc.org) that can be used to easily interact using Rust, Go, Python and NodeJS.
+
+## Access from the Browser
+
+Interacting with gRPC from browsers is supported but with a catch. Since HTTP/2 framing mechansims is not compatible with browsers, _Dolos_ allows interacting with the same gRPC operations using HTTP/1 via a common adapter refered to as _gRPC-Web_.
+
+No changes are required in Dolos to support web access, the same port that accepts HTTP/2 gRPC connections will detect when a client requests HTTP/1 (as when originated from a browser) and switch to _gRPC-Web_. Make sure to use the UtxoRPC Web SDK and not the NodeJS one which is also based on Javascript. 
+
+## Authentication Mechanism
+
+Dolos has a built-in mechanism for authenticating clients using TLS. By specifying a specific CA authority via configuration, Dolos wil accept client connections that provide a matching certificate and reject any other connection attempt.
+
+To enable TLS authentication, a `.pem` file needs to be specified via configuration to define the CA authority use for validating client certificates. If no pem is specified, Dolos will assume that the endpoint should not perform any authentication and allow any connection.
+
+## Available Operations
+
+// TODO: specify which UtxoRPC modules are currently supported.
+
+## Configuration
+
+The `serve.grpc` section controls the options for the gRPC endpoint that can be used by clients.
+
+| property       | type   | example      |
+| -------------- | ------ | ------------ |
+| listen_address | string | "[::]:50051" |
+
+- `listen_address`: the local address (`IP:PORT`) to listen for incoming gRPC connections (`[::]` represents any IP address).
+
+This is an example of the `serve.grpc` fragment with a `dolos.toml` configuration file.
+
+```toml
+[serve.grpc]
+listen_address = "[::]:50051"
+```

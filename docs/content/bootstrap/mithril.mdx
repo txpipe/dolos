@@ -1,0 +1,68 @@
+---
+title: Mithril Snapshot
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+# Bootstrap using a Mithril Snapshot
+
+_Mithril_ is a signature scheme that generates a certificate to convince verifiers that a portion of the stake of a system has signed a message. There's currently a network of Cardano SPOs continuosuly verifing snapshots of the history of the chain and making them available for consumption by client applications, such as Dolos.
+
+From _Dolos'_ perspective, the process of bootsrapping with _Mihtril_ involves the following steps (which are executed automatically):
+
+1. Downloading a snapshot from a cloud server
+2. Verifying that the _Mithril_ signature is valid
+3. Importing block data into Dolos' internal representation
+4. Re-creating the ledger state from the chain history
+
+## Configuration
+
+To use _Mithril_ snapshots, _Dolos_ requires a few configuration values to download and verify data:
+
+| property     | type   | example          |
+| ------------ | ------ | ---------------- |
+| aggregator   | string | "https://aggregator.release-preprod.api.mithril.network/aggregator"  |
+| genesis_key | string |  "5b3...45d" (redacted) |
+
+- `aggregator`: url of the Mithril aggregator
+- `genesis_key`: hex-encoded value of the Mithril genesis key
+
+This is how the configuration fragment would look like inside a `dolos.toml` file:
+
+```toml
+[mithril]
+aggregator = "https://aggregator.release-preprod.api.mithril.network/aggregator"
+genesis_key = "5b3132372c37332c3132342c3136312c362c3133372c3133312c3231332c3230372c3131372c3139382c38352c3137362c3139392c3136322c3234312c36382c3132332c3131392c3134352c31332c3233322c3234332c34392c3232392c322c3234392c3230352c3230352c33392c3233352c34345d"
+```
+
+<Aside type="note">
+If you use the `dolos init` command to initialize your configuration, these values will be already populated with their defaults for each of the known networks.
+</Aside>
+
+## Execution
+
+To execute the _Mithril_ bootstrap procedure, you need to run the following command line:
+
+```sh
+dolos bootstrap
+```
+
+The process will take from several minutes to a few hours depending on the network. You'll see a sequence of progress bars describing the each of the steps of the process.
+
+<Aside type="caution">
+The process doesn't support resuming from previous runs, if you interrupt the process you'll need to start over.
+</Aside>
+
+<Aside type="note">
+The above command won't proceed if it detects that you already have data from previous Dolos runs. It will prompt a confirmation dialog to decide if existing data should be deleted.
+</Aside>
+
+The `bootstrap` command has a few optional arguments to help with specific scenarios:
+
+| arg | description | default |
+| --- | ----------- | ------- |
+| `--download-dir <DOWNLOAD_DIR>` | Directory to store the downloaded snapshot |  `./snapshot` |
+| `--skip-if-not-empty` | Skip the bootstrap if there's already data in the stores | `false` |
+| `--skip-validation` | Skip the Mithril certificate validation | `false` |
+| `--skip-download` | Assume the snapshot is already available in the download dir | `false` |
+| `--retain-snapshot` | Retain downloaded snapshot instead of deleting it | `false` |
