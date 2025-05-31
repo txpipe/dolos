@@ -1,4 +1,5 @@
 use crate::{
+    chain::ChainStore,
     ledger::{
         pparams::{self, Genesis},
         EraCbor, TxoRef,
@@ -7,9 +8,12 @@ use crate::{
     state::{LedgerError, LedgerStore},
 };
 use itertools::Itertools as _;
-use pallas::interop::utxorpc::spec as u5c;
 use pallas::interop::utxorpc::{self as interop, spec::query::any_utxo_pattern::UtxoPattern};
 use pallas::ledger::traverse::MultiEraOutput;
+use pallas::{
+    interop::utxorpc::spec as u5c,
+    ledger::traverse::{MultiEraBlock, MultiEraTx},
+};
 use std::{collections::HashSet, sync::Arc};
 use tonic::{Request, Response, Status};
 use tracing::info;
@@ -18,14 +22,16 @@ pub struct QueryServiceImpl {
     ledger: LedgerStore,
     mapper: interop::Mapper<LedgerStore>,
     genesis: Arc<Genesis>,
+    chain: ChainStore,
 }
 
 impl QueryServiceImpl {
-    pub fn new(ledger: LedgerStore, genesis: Arc<Genesis>) -> Self {
+    pub fn new(ledger: LedgerStore, genesis: Arc<Genesis>, chain: ChainStore) -> Self {
         Self {
             ledger: ledger.clone(),
             genesis,
             mapper: interop::Mapper::new(ledger),
+            chain,
         }
     }
 }
@@ -362,5 +368,56 @@ impl u5c::query::query_service_server::QueryService for QueryServiceImpl {
             ledger_tip: cursor,
             next_token: String::default(),
         }))
+    }
+
+    async fn read_tx(
+        &self,
+        request: Request<u5c::query::ReadTxRequest>,
+    ) -> Result<Response<u5c::query::ReadTxResponse>, Status> {
+        let message = request.into_inner();
+
+        info!("received new grpc query");
+
+        let tx_hash = message.hash;
+
+        let (block_data, tx) = self
+            .chain
+            .get_tx_with_block_data(&tx_hash)
+            .map_err(|e| Status::internal(format!("failed to query chain for tx: {e}")))?
+            .ok_or_else(|| Status::not_found("transaction not found"))?;
+
+        let mtx = MultiEraTx::decode(&tx)
+            .map_err(|e| Status::internal(format!("failed to decode transaction: {e}")))?;
+
+        let mblock = MultiEraBlock::decode(&block_data)
+            .map_err(|e| Status::internal(format!("failed to decode block: {e}")))?;
+        let block_slot = mblock.slot();
+        let block_hash = mblock.hash();
+
+        let block = self.mapper.map_block_cbor(&block_data);
+
+        let mut response = u5c::query::ReadTxResponse {
+            tx: Some(u5c::query::AnyChainTx {
+                native_bytes: mtx.encode().into(),
+                chain: Some(u5c::query::any_chain_tx::Chain::Cardano(
+                    self.mapper.map_tx(&mtx),
+                )),
+                block: Some(u5c::query::AnyChainBlock {
+                    native_bytes: block_data.to_vec().into(),
+                    chain: Some(u5c::query::any_chain_block::Chain::Cardano(block)),
+                }),
+            }),
+            ledger_tip: Some(u5c::query::ChainPoint {
+                slot: block_slot,
+                hash: block_hash.to_vec().into(),
+            }),
+        };
+
+        if let Some(mask) = message.field_mask {
+            response = apply_mask(response, mask.paths)
+                .map_err(|_| Status::internal("Failed to apply field mask"))?
+        }
+
+        Ok(Response::new(response))
     }
 }
