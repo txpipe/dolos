@@ -1,8 +1,10 @@
-use std::sync::Arc;
+use axum::{
+    extract::{Path, State},
+    http::StatusCode,
+    Json,
+};
 
-use rocket::{get, http::Status, State};
-
-use crate::{chain::ChainStore, ledger::pparams::Genesis, state::LedgerStore};
+use crate::serve::minibf::SharedState;
 
 use super::Block;
 
@@ -11,16 +13,14 @@ pub mod next;
 pub mod previous;
 pub mod txs;
 
-#[get("/blocks/<hash_or_number>", rank = 2)]
-pub fn route(
-    hash_or_number: String,
-    genesis: &State<Arc<Genesis>>,
-    chain: &State<ChainStore>,
-    ledger: &State<LedgerStore>,
-) -> Result<rocket::serde::json::Json<Block>, Status> {
-    let block = Block::find_in_chain(chain, ledger, &hash_or_number, genesis)?;
-    match block {
-        Some(block) => Ok(rocket::serde::json::Json(block)),
-        None => Err(Status::NotFound),
-    }
+pub async fn route(
+    Path(hash_or_number): Path<String>,
+    State(state): State<SharedState>,
+) -> Result<Json<Block>, StatusCode> {
+    Ok(Json(Block::find_in_chain(
+        &state.chain,
+        &state.ledger,
+        &hash_or_number,
+        &state.genesis,
+    )?))
 }

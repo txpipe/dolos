@@ -85,11 +85,13 @@ pub fn run(
     let encoder = GzEncoder::new(export_file, Compression::default());
     let mut archive = Builder::new(encoder);
 
-    let (wal, ledger, chain) = crate::common::open_data_stores(config)?;
+    let (wal, ledger, chain) = crate::common::setup_data_stores(config)?;
 
     prepare_wal(wal, &pb)?;
 
-    let path = config.storage.path.join("wal");
+    let root = crate::common::ensure_storage_path(config)?;
+
+    let path = root.join("wal");
 
     archive
         .append_path_with_name(&path, "wal")
@@ -97,7 +99,7 @@ pub fn run(
 
     if args.include_ledger {
         prepare_ledger(ledger, &pb)?;
-        let path = config.storage.path.join("ledger");
+        let path = root.join("ledger");
 
         archive
             .append_path_with_name(&path, "ledger")
@@ -107,7 +109,7 @@ pub fn run(
     prepare_chain(chain, &pb)?;
 
     if args.include_chain {
-        let path = config.storage.path.join("chain");
+        let path = root.join("chain");
 
         archive
             .append_path_with_name(&path, "chain")

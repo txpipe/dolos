@@ -1,10 +1,19 @@
-use rocket::{http::Status, FromFormField};
+use axum::http::StatusCode;
+use serde::Deserialize;
 
-#[derive(Default, Debug, Clone, FromFormField)]
+#[derive(Default, Debug, Clone, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Order {
     #[default]
     Asc,
     Desc,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PaginationParameters {
+    pub count: Option<u8>,
+    pub page: Option<u64>,
+    pub order: Option<Order>,
 }
 
 #[derive(Debug, Clone)]
@@ -22,26 +31,24 @@ impl Default for Pagination {
         }
     }
 }
-impl Pagination {
-    pub fn try_new(
-        count: Option<u8>,
-        page: Option<u64>,
-        order: Option<Order>,
-    ) -> Result<Self, Status> {
-        let count = match count {
+
+impl TryFrom<PaginationParameters> for Pagination {
+    type Error = StatusCode;
+    fn try_from(value: PaginationParameters) -> Result<Self, StatusCode> {
+        let count = match value.count {
             Some(count) => {
                 if !(1..=100).contains(&count) {
-                    return Err(Status::BadRequest);
+                    return Err(StatusCode::BAD_REQUEST);
                 } else {
                     count
                 }
             }
             None => 100,
         };
-        let page = match page {
+        let page = match value.page {
             Some(page) => {
                 if page < 1 {
-                    return Err(Status::BadRequest);
+                    return Err(StatusCode::BAD_REQUEST);
                 } else {
                     page
                 }
@@ -51,10 +58,11 @@ impl Pagination {
         Ok(Self {
             count,
             page,
-            order: order.unwrap_or_default(),
+            order: value.order.unwrap_or_default(),
         })
     }
-
+}
+impl Pagination {
     pub fn from(&self) -> usize {
         ((self.page - 1) * self.count as u64) as usize
     }

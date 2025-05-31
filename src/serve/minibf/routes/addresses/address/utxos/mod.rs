@@ -1,10 +1,14 @@
+use axum::{
+    extract::{Path, State},
+    http::StatusCode,
+    response::IntoResponse,
+};
 use pallas::ledger::{primitives::conway, traverse::MultiEraAsset};
-use rocket::{get, http::Status, State};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     ledger::{EraCbor, TxoRef},
-    state::LedgerStore,
+    serve::minibf::SharedState,
 };
 
 pub mod asset;
@@ -45,11 +49,15 @@ pub struct Utxo {
 }
 
 impl TryFrom<(TxoRef, EraCbor)> for Utxo {
-    type Error = Status;
+    type Error = StatusCode;
 
-    fn try_from((txo, era): (TxoRef, EraCbor)) -> Result<Self, Self::Error> {
-        let parsed = pallas::ledger::traverse::MultiEraOutput::decode(era.0, &era.1)
-            .map_err(|_| Status::InternalServerError)?;
+    fn try_from((txo, EraCbor(era, cbor)): (TxoRef, EraCbor)) -> Result<Self, Self::Error> {
+        let era = era
+            .try_into()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        let parsed = pallas::ledger::traverse::MultiEraOutput::decode(era, &cbor)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
         let value = parsed.value();
         let lovelace = Amount::lovelace(value.coin());
@@ -65,40 +73,41 @@ impl TryFrom<(TxoRef, EraCbor)> for Utxo {
             output_index: txo.1,
             address: parsed
                 .address()
-                .map_err(|_| Status::InternalServerError)?
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
                 .to_string(),
             amount: std::iter::once(lovelace).chain(assets).collect(),
             data_hash: parsed.datum().and_then(|x| match x {
-                conway::PseudoDatumOption::Hash(hash) => Some(hash.to_string()),
-                conway::PseudoDatumOption::Data(_) => None,
+                conway::DatumOption::Hash(hash) => Some(hash.to_string()),
+                conway::DatumOption::Data(_) => None,
             }),
             inline_datum: parsed.datum().and_then(|x| match x {
-                conway::PseudoDatumOption::Hash(_) => None,
-                conway::PseudoDatumOption::Data(x) => Some(hex::encode(x.raw_cbor())),
+                conway::DatumOption::Hash(_) => None,
+                conway::DatumOption::Data(x) => Some(hex::encode(x.raw_cbor())),
             }),
             reference_script_hash: None,
         })
     }
 }
 
-#[get("/addresses/<address>/utxos")]
-pub fn route(
-    address: String,
-    ledger: &State<LedgerStore>,
-) -> Result<rocket::serde::json::Json<Vec<Utxo>>, Status> {
+pub async fn route(
+    Path(address): Path<String>,
+    State(state): State<SharedState>,
+) -> Result<impl IntoResponse, StatusCode> {
     let address = pallas::ledger::addresses::Address::from_bech32(&address)
-        .map_err(|_| Status::BadRequest)?;
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
 
-    let refs = ledger
+    let refs = state
+        .ledger
         .get_utxo_by_address(&address.to_vec())
-        .map_err(|_| Status::InternalServerError)?;
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let utxos: Vec<_> = ledger
+    let utxos: Vec<_> = state
+        .ledger
         .get_utxos(refs.into_iter().collect())
-        .map_err(|_| Status::InternalServerError)?
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .into_iter()
         .map(Utxo::try_from)
         .collect::<Result<_, _>>()?;
 
-    Ok(rocket::serde::json::Json(utxos))
+    Ok(axum::Json(utxos))
 }

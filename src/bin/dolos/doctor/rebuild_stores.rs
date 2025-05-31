@@ -23,7 +23,7 @@ pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::
     let progress = feedback.slot_progress_bar();
     progress.set_message("rebuilding ledger");
 
-    let wal = crate::common::open_wal(config).context("opening WAL store")?;
+    let wal = crate::common::open_wal_store(config)?;
     let genesis = Arc::new(crate::common::open_genesis_files(&config.genesis)?);
 
     let light = dolos::state::redb::LedgerStore::in_memory_v2_light()
@@ -47,10 +47,9 @@ pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::
             .context("applying origin utxos")?;
     }
 
-    let chain_path = crate::common::define_chain_path(config).context("finding chain path")?;
-    let chain = dolos::chain::redb::ChainStore::open(chain_path, None, None)
-        .into_diagnostic()
-        .context("opening chain store.")?;
+    let root = crate::common::ensure_storage_path(config)?;
+
+    let chain = crate::common::open_chain_store(config)?;
 
     let (_, tip) = wal
         .find_tip()
@@ -99,7 +98,7 @@ pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::
         blocks.last().inspect(|b| progress.set_position(b.slot()));
     }
 
-    let ledger_path = crate::common::define_ledger_path(config).context("finding ledger path")?;
+    let ledger_path = root.join("ledger");
 
     let disk = dolos::state::redb::LedgerStore::open_v2_light(ledger_path, None)
         .into_diagnostic()

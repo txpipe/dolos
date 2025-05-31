@@ -1,17 +1,20 @@
+use axum::{extract::State, http::StatusCode, Json};
 use pallas::ledger::traverse::MultiEraBlock;
-use rocket::{get, http::Status, State};
 
-use crate::chain::ChainStore;
+use crate::serve::minibf::SharedState;
 
-#[get("/blocks/latest/txs")]
-pub fn route(chain: &State<ChainStore>) -> Result<rocket::serde::json::Json<Vec<String>>, Status> {
-    let tip = chain.get_tip().map_err(|_| Status::ServiceUnavailable)?;
+pub async fn route(State(state): State<SharedState>) -> Result<Json<Vec<String>>, StatusCode> {
+    let tip = state
+        .chain
+        .get_tip()
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     match tip {
-        None => Err(Status::ServiceUnavailable),
+        None => Err(StatusCode::SERVICE_UNAVAILABLE),
         Some((_, body)) => {
-            let block = MultiEraBlock::decode(&body).map_err(|_| Status::ServiceUnavailable)?;
+            let block =
+                MultiEraBlock::decode(&body).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
             let txs = block.txs().iter().map(|tx| tx.hash().to_string()).collect();
-            Ok(rocket::serde::json::Json(txs))
+            Ok(Json(txs))
         }
     }
 }

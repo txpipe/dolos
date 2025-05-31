@@ -7,6 +7,7 @@ use pallas::interop::utxorpc::spec::sync::BlockRef;
 use pallas::interop::utxorpc::{spec as u5c, Mapper};
 use pallas::ledger::traverse::MultiEraBlock;
 use std::pin::Pin;
+use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
 
 use crate::chain::ChainStore;
@@ -87,14 +88,21 @@ pub struct SyncServiceImpl {
     wal: wal::redb::WalStore,
     chain: ChainStore,
     mapper: interop::Mapper<LedgerStore>,
+    cancellation_token: CancellationToken,
 }
 
 impl SyncServiceImpl {
-    pub fn new(wal: wal::redb::WalStore, ledger: LedgerStore, chain: ChainStore) -> Self {
+    pub fn new(
+        wal: wal::redb::WalStore,
+        ledger: LedgerStore,
+        chain: ChainStore,
+        cancellation_token: CancellationToken,
+    ) -> Self {
         Self {
             wal,
             mapper: Mapper::new(ledger),
             chain,
+            cancellation_token,
         }
     }
 }
@@ -194,9 +202,10 @@ impl u5c::sync::sync_service_server::SyncService for SyncServiceImpl {
 
         let reset = once(async { Ok(point_to_reset_tip_response(point)) });
 
-        let forward = wal::WalStream::start(self.wal.clone(), from_seq)
-            .skip(1)
-            .map(move |(_, log)| Ok(wal_log_to_tip_response(&mapper, &log)));
+        let forward =
+            wal::WalStream::start(self.wal.clone(), from_seq, self.cancellation_token.clone())
+                .skip(1)
+                .map(move |(_, log)| Ok(wal_log_to_tip_response(&mapper, &log)));
 
         let stream = reset.chain(forward);
 

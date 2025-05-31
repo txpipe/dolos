@@ -99,7 +99,7 @@ impl Formatter {
 pub fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging)?;
 
-    let wal = crate::common::open_wal(config).context("opening data stores")?;
+    let wal = crate::common::open_wal_store(config)?;
 
     let mut formatter = Formatter::new_table();
 

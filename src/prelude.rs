@@ -6,6 +6,9 @@ use thiserror::Error;
 
 #[derive(Error, Debug, Diagnostic)]
 pub enum Error {
+    #[error("io error: {0}")]
+    IO(#[from] std::io::Error),
+
     #[error("configuration error: {0}")]
     ConfigError(String),
 
@@ -20,6 +23,15 @@ pub enum Error {
 
     #[error("storage error: {0}")]
     StorageError(String),
+
+    #[error("wal error: {0}")]
+    WalError(#[from] crate::wal::WalError),
+
+    #[error("chain error: {0}")]
+    ChainError(#[from] crate::chain::ChainError),
+
+    #[error("state error: {0}")]
+    StateError(#[from] crate::state::LedgerError),
 
     #[error("{0}")]
     Message(String),
@@ -43,10 +55,6 @@ impl Error {
 
     pub fn server(error: impl Display) -> Error {
         Error::ServerError(error.to_string())
-    }
-
-    pub fn storage(error: impl Display) -> Error {
-        Error::StorageError(error.to_string())
     }
 
     pub fn message(text: impl Into<String>) -> Error {

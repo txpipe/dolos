@@ -44,30 +44,40 @@ impl Args {
 const DEFAULT_URL_TEMPLATE: &str =
     "https://dolos-snapshots.s3-accelerate.amazonaws.com/${VERSION}/${NETWORK}/${VARIANT}/${POINT}.tar.gz";
 
-fn define_snapshot_url(config: &crate::Config, args: &Args) -> String {
+fn define_snapshot_url(config: &crate::Config, args: &Args) -> Option<String> {
+    if config.upstream.is_emulator() {
+        return None;
+    }
+
+    let magic = config.upstream.network_magic()?;
+
     let download_url_template = config
         .snapshot
         .as_ref()
         .map(|x| x.download_url.to_owned())
         .unwrap_or(DEFAULT_URL_TEMPLATE.to_owned());
 
-    download_url_template
+    let snapshot_url = download_url_template
         .replace("${VERSION}", &config.storage.version.to_string())
-        .replace("${NETWORK}", &config.upstream.network_magic.to_string())
-        .replace("${POINT}", &args.point)
-        .replace("${VARIANT}", &args.variant)
-}
-
-fn fetch_snapshot(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::Result<()> {
-    let snapshot_url = define_snapshot_url(config, args)
-        .replace("${VERSION}", &config.storage.version.to_string())
-        .replace("${NETWORK}", &config.upstream.network_magic.to_string())
+        .replace("${NETWORK}", &magic.to_string())
         .replace("${POINT}", &args.point)
         .replace("${VARIANT}", &args.variant);
 
-    std::fs::create_dir_all(&config.storage.path)
+    Some(snapshot_url)
+}
+
+fn fetch_snapshot(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::Result<()> {
+    let root = config.storage.path.as_ref().ok_or(miette::miette!(
+        "can't fetch snapshot for ephemeral storage"
+    ))?;
+
+    std::fs::create_dir_all(root)
         .into_diagnostic()
         .context("Failed to create target directory")?;
+
+    let snapshot_url = define_snapshot_url(config, args).ok_or(miette::miette!(
+        "can't find a valid snapshot for this configuration"
+    ))?;
 
     let client = reqwest::blocking::Client::builder()
         .redirect(reqwest::redirect::Policy::limited(10)) // Follow up to 10 redirects
@@ -97,7 +107,7 @@ fn fetch_snapshot(config: &crate::Config, args: &Args, feedback: &Feedback) -> m
     let mut archive = Archive::new(tar_gz);
 
     archive
-        .unpack(&config.storage.path)
+        .unpack(root)
         .into_diagnostic()
         .context("Failed to extract snapshot")?;
 
