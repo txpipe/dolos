@@ -5,12 +5,10 @@ use pallas::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    chain::ChainStore,
-    ledger::pparams::{self, EraSummary, Genesis},
-    model::BlockBody,
-    state::LedgerStore,
-};
+use dolos_cardano::pparams::{self, EraSummary, Genesis};
+use dolos_core::BlockBody;
+
+use crate::{chain::ChainStore, state::LedgerStore};
 
 pub mod hash_or_number;
 pub mod latest;

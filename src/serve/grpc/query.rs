@@ -1,11 +1,3 @@
-use crate::{
-    ledger::{
-        pparams::{self, Genesis},
-        EraCbor, TxoRef,
-    },
-    serve::utils::apply_mask,
-    state::{LedgerError, LedgerStore},
-};
 use itertools::Itertools as _;
 use pallas::interop::utxorpc::spec as u5c;
 use pallas::interop::utxorpc::{self as interop, spec::query::any_utxo_pattern::UtxoPattern};
@@ -14,14 +6,22 @@ use std::{collections::HashSet, sync::Arc};
 use tonic::{Request, Response, Status};
 use tracing::info;
 
+use dolos_cardano::pparams;
+use dolos_core::{EraCbor, TxoRef};
+
+use crate::{
+    serve::utils::apply_mask,
+    state::{LedgerError, LedgerStore},
+};
+
 pub struct QueryServiceImpl {
     ledger: LedgerStore,
     mapper: interop::Mapper<LedgerStore>,
-    genesis: Arc<Genesis>,
+    genesis: Arc<pparams::Genesis>,
 }
 
 impl QueryServiceImpl {
-    pub fn new(ledger: LedgerStore, genesis: Arc<Genesis>) -> Self {
+    pub fn new(ledger: LedgerStore, genesis: Arc<pparams::Genesis>) -> Self {
         Self {
             ledger: ledger.clone(),
             genesis,

@@ -1,5 +1,5 @@
 use clap::Parser;
-use dolos::model::StorageVersion;
+use dolos::core::StorageVersion;
 use include::network_mutable_slots;
 use inquire::{Confirm, Select, Text};
 use miette::{miette, Context as _, IntoDiagnostic};
@@ -54,20 +54,20 @@ impl Display for KnownNetwork {
     }
 }
 
-impl From<&KnownNetwork> for dolos::model::PeerConfig {
+impl From<&KnownNetwork> for dolos::core::PeerConfig {
     fn from(value: &KnownNetwork) -> Self {
         match value {
-            KnownNetwork::CardanoMainnet => dolos::model::PeerConfig {
+            KnownNetwork::CardanoMainnet => dolos::core::PeerConfig {
                 peer_address: "backbone.mainnet.cardanofoundation.org:3001".into(),
                 network_magic: 764824073,
                 is_testnet: false,
             },
-            KnownNetwork::CardanoPreProd => dolos::model::PeerConfig {
+            KnownNetwork::CardanoPreProd => dolos::core::PeerConfig {
                 peer_address: "preprod-node.world.dev.cardano.org:30000".into(),
                 network_magic: 1,
                 is_testnet: true,
             },
-            KnownNetwork::CardanoPreview => dolos::model::PeerConfig {
+            KnownNetwork::CardanoPreview => dolos::core::PeerConfig {
                 peer_address: "preview-node.world.dev.cardano.org:30002".into(),
                 network_magic: 2,
                 is_testnet: true,
@@ -76,9 +76,9 @@ impl From<&KnownNetwork> for dolos::model::PeerConfig {
     }
 }
 
-impl From<&KnownNetwork> for dolos::model::UpstreamConfig {
+impl From<&KnownNetwork> for dolos::core::UpstreamConfig {
     fn from(value: &KnownNetwork) -> Self {
-        dolos::model::UpstreamConfig::Peer(value.into())
+        dolos::core::UpstreamConfig::Peer(value.into())
     }
 }
 
@@ -214,8 +214,8 @@ impl Default for ConfigEditor {
                 upstream: From::from(&KnownNetwork::CardanoMainnet),
                 mithril: Some(From::from(&KnownNetwork::CardanoMainnet)),
                 snapshot: Default::default(),
-                storage: dolos::model::StorageConfig {
-                    version: dolos::model::StorageVersion::V1,
+                storage: dolos::core::StorageConfig {
+                    version: dolos::core::StorageVersion::V1,
                     ..Default::default()
                 },
                 genesis: Default::default(),
@@ -544,7 +544,7 @@ pub fn run(
         .into_diagnostic()
         .context("parsing configuration")?;
 
-    if let dolos::model::UpstreamConfig::Peer(_) = &config.upstream {
+    if let dolos::core::UpstreamConfig::Peer(_) = &config.upstream {
         super::bootstrap::run(&config, &super::bootstrap::Args::default(), feedback)?;
     }
 

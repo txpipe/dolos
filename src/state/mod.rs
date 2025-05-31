@@ -3,11 +3,12 @@ use pallas::{
     interop::utxorpc as interop,
     ledger::traverse::{MultiEraBlock, MultiEraTx},
 };
-use pparams::Genesis;
 use std::collections::{HashMap, HashSet};
 use thiserror::Error;
 
-use crate::ledger::*;
+use dolos_cardano::{compute_delta, lastest_immutable_slot, pparams::Genesis};
+
+use crate::prelude::*;
 
 pub mod redb;
 

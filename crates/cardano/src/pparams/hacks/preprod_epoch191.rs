@@ -1,4 +1,4 @@
-use crate::ledger::pparams::EraSummary;
+use crate::pparams::EraSummary;
 
 pub const SLOT: u64 = 80870419;
 

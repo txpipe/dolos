@@ -1,4 +1,4 @@
-use dolos::ledger::{EraCbor, TxoRef};
+use dolos::core::{EraCbor, TxoRef};
 use itertools::*;
 use miette::{Context, IntoDiagnostic};
 use pallas::{
@@ -94,7 +94,7 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
         })
         .try_collect()?;
 
-    let pparams = dolos::ledger::pparams::fold(&genesis, &updates)
+    let pparams = dolos::cardano::pparams::fold(&genesis, &updates)
         .edge()
         .pparams
         .clone();

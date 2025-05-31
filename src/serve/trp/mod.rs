@@ -8,7 +8,8 @@ use tower_http::cors::CorsLayer;
 use tracing::info;
 
 use crate::prelude::Error;
-use crate::{ledger::pparams::Genesis, state::LedgerStore};
+use crate::state::LedgerStore;
+use dolos_cardano::pparams::Genesis;
 
 mod adapter;
 mod methods;

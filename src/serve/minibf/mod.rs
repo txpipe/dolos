@@ -8,9 +8,11 @@ use tokio_util::sync::CancellationToken;
 use tower_http::{cors::CorsLayer, trace};
 use tracing::Level;
 
+use dolos_cardano::pparams::Genesis;
+
 use crate::chain::ChainStore;
 use crate::prelude::Error;
-use crate::{ledger::pparams::Genesis, mempool::Mempool, state::LedgerStore};
+use crate::{mempool::Mempool, state::LedgerStore};
 
 mod common;
 mod routes;

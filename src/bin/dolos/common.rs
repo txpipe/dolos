@@ -1,4 +1,4 @@
-use dolos::{chain, ledger::pparams::Genesis, state, wal};
+use dolos::{cardano::pparams::Genesis, chain, state, wal};
 use miette::{Context as _, IntoDiagnostic};
 use std::{fs, path::PathBuf, time::Duration};
 use tokio::task::JoinHandle;

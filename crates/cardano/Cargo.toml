@@ -1,0 +1,18 @@
+[package]
+name = "dolos-cardano"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dolos-core = { path = "../core" }
+pallas.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+serde.workspace = true
+chrono.workspace = true
+paste = "1.0.15"
+
+[dev-dependencies]
+hex = "0.4.3"
+itertools = "0.14.0"
+serde_json = "1.0.140"

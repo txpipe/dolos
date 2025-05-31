@@ -1,5 +1,4 @@
-use crate::ledger::LedgerDelta;
-use crate::model::{BlockBody, BlockSlot};
+use dolos_core::{BlockBody, BlockSlot, LedgerDelta};
 
 pub mod error;
 pub mod redb;
@@ -47,6 +46,7 @@ impl ChainStore {
             ChainStore::Redb(x) => Ok(x.get_range(from, to)?.into()),
         }
     }
+
     pub fn get_tip(&self) -> Result<Option<(BlockSlot, BlockBody)>, ChainError> {
         match self {
             ChainStore::Redb(x) => x.get_tip(),
@@ -81,6 +81,7 @@ impl From<redb::ChainStore> for ChainStore {
 pub enum ChainIter<'a> {
     Redb(redb::ChainIter<'a>),
 }
+
 impl Iterator for ChainIter<'_> {
     type Item = (BlockSlot, BlockBody);
 

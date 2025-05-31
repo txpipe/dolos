@@ -7,8 +7,9 @@ use tonic::transport::{Certificate, Server, ServerTlsConfig};
 use tower_http::cors::CorsLayer;
 use tracing::info;
 
+use dolos_cardano::pparams::Genesis;
+
 use crate::chain::ChainStore;
-use crate::ledger::pparams::Genesis;
 use crate::mempool::Mempool;
 use crate::prelude::*;
 use crate::state::LedgerStore;

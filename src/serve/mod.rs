@@ -5,8 +5,9 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
+use dolos_cardano::pparams::Genesis;
+
 use crate::chain::ChainStore;
-use crate::ledger::pparams::Genesis;
 use crate::mempool::Mempool;
 use crate::state::LedgerStore;
 use crate::wal::redb::WalStore;

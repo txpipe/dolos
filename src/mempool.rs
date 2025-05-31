@@ -1,4 +1,3 @@
-use crate::{ledger::pparams::Genesis, state::LedgerStore};
 use futures_util::StreamExt;
 use itertools::Itertools;
 use pallas::{
@@ -18,6 +17,10 @@ use thiserror::Error;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
 use tracing::debug;
+
+use dolos_cardano::pparams;
+
+use crate::state::LedgerStore;
 
 type TxHash = Hash<32>;
 
@@ -82,12 +85,12 @@ struct MempoolState {
 pub struct Mempool {
     mempool: Arc<RwLock<MempoolState>>,
     updates: broadcast::Sender<Event>,
-    genesis: Arc<Genesis>,
+    genesis: Arc<pparams::Genesis>,
     ledger: LedgerStore,
 }
 
 impl Mempool {
-    pub fn new(genesis: Arc<Genesis>, ledger: LedgerStore) -> Self {
+    pub fn new(genesis: Arc<pparams::Genesis>, ledger: LedgerStore) -> Self {
         let mempool = Arc::new(RwLock::new(MempoolState::default()));
         let (updates, _) = broadcast::channel(16);
 
@@ -132,11 +135,7 @@ impl Mempool {
 
         let updates: Vec<_> = updates.into_iter().map(TryInto::try_into).try_collect()?;
 
-        let eras = crate::ledger::pparams::fold_with_hacks(
-            &self.genesis,
-            &updates,
-            tip.as_ref().unwrap().0,
-        );
+        let eras = pparams::fold_with_hacks(&self.genesis, &updates, tip.as_ref().unwrap().0);
 
         let era = eras.era_for_slot(tip.as_ref().unwrap().0);
 
@@ -192,7 +191,7 @@ impl Mempool {
         &self,
         tx: &MultiEraTx,
     ) -> Result<pallas::ledger::validate::phase2::EvalReport, MempoolError> {
-        use crate::ledger::{EraCbor, TxoRef};
+        use dolos_core::{EraCbor, TxoRef};
 
         let tip = self.ledger.cursor()?;
 
@@ -202,11 +201,7 @@ impl Mempool {
 
         let updates: Vec<_> = updates.into_iter().map(TryInto::try_into).try_collect()?;
 
-        let eras = crate::ledger::pparams::fold_with_hacks(
-            &self.genesis,
-            &updates,
-            tip.as_ref().unwrap().0,
-        );
+        let eras = pparams::fold_with_hacks(&self.genesis, &updates, tip.as_ref().unwrap().0);
 
         let slot_config = pallas::ledger::validate::phase2::script_context::SlotConfig {
             slot_length: eras.edge().pparams.slot_length(),

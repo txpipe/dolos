@@ -1,7 +1,9 @@
 use gasket::{framework::*, runtime::Policy};
 use tracing::{error, info};
 
-use crate::{model::PullEvent, wal::redb::WalStore};
+use dolos_core::PullEvent;
+
+use crate::wal::redb::WalStore;
 
 struct WitnessStage {
     input: gasket::messaging::InputPort<PullEvent>,
