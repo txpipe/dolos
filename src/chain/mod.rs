@@ -65,27 +65,27 @@ impl ArchiveStore for ChainStore {
     }
 
     fn apply(&self, deltas: &[LedgerDelta]) -> Result<(), ArchiveError> {
-        let out = match self {
+        match self {
             ChainStore::Redb(x) => x.apply(deltas)?,
         };
 
-        Ok(out)
+        Ok(())
     }
 
     fn housekeeping(&mut self) -> Result<(), ArchiveError> {
-        let out = match self {
+        match self {
             ChainStore::Redb(x) => x.housekeeping()?,
         };
 
-        Ok(out)
+        Ok(())
     }
 
     fn finalize(&self, until: BlockSlot) -> Result<(), ArchiveError> {
-        let out = match self {
+        match self {
             ChainStore::Redb(x) => x.finalize(until)?,
         };
 
-        Ok(out)
+        Ok(())
     }
 }
 

@@ -90,19 +90,19 @@ impl StateStore for LedgerStore {
     }
 
     fn apply(&self, deltas: &[LedgerDelta]) -> Result<(), StateError> {
-        let out = match self {
+        match self {
             LedgerStore::Redb(x) => x.apply(deltas)?,
         };
 
-        Ok(out)
+        Ok(())
     }
 
     fn finalize(&self, until: BlockSlot) -> Result<(), StateError> {
-        let out = match self {
+        match self {
             LedgerStore::Redb(x) => x.finalize(until)?,
         };
 
-        Ok(out)
+        Ok(())
     }
 
     fn upgrade(self) -> Result<Self, StateError> {

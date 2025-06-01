@@ -107,7 +107,7 @@ pub fn run(config: &crate::Config, _args: &Args) -> miette::Result<()> {
         .iter()
         .map(|EraCbor(era, cbor)| {
             let era = (*era).try_into().expect("era out of range");
-            MultiEraUpdate::decode_for_era(era, &cbor)
+            MultiEraUpdate::decode_for_era(era, cbor)
         })
         .try_collect()
         .into_diagnostic()?;
