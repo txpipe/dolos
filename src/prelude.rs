@@ -28,10 +28,10 @@ pub enum Error {
     WalError(#[from] crate::wal::WalError),
 
     #[error("chain error: {0}")]
-    ChainError(#[from] crate::chain::ChainError),
+    ArchiveError(#[from] ArchiveError),
 
     #[error("state error: {0}")]
-    StateError(#[from] crate::state::LedgerError),
+    StateError(#[from] StateError),
 
     #[error("{0}")]
     Message(String),

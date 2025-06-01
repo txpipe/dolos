@@ -7,21 +7,19 @@ use tonic::{Request, Response, Status};
 use tracing::info;
 
 use dolos_cardano::pparams;
-use dolos_core::{EraCbor, TxoRef};
+use dolos_core::{EraCbor, Genesis, StateStore as _, TxoRef};
 
-use crate::{
-    serve::utils::apply_mask,
-    state::{LedgerError, LedgerStore},
-};
+use crate::serve::utils::apply_mask;
+use crate::state::LedgerStore;
 
 pub struct QueryServiceImpl {
     ledger: LedgerStore,
     mapper: interop::Mapper<LedgerStore>,
-    genesis: Arc<pparams::Genesis>,
+    genesis: Arc<Genesis>,
 }
 
 impl QueryServiceImpl {
-    pub fn new(ledger: LedgerStore, genesis: Arc<pparams::Genesis>) -> Self {
+    pub fn new(ledger: LedgerStore, genesis: Arc<Genesis>) -> Self {
         Self {
             ledger: ledger.clone(),
             genesis,
@@ -30,10 +28,8 @@ impl QueryServiceImpl {
     }
 }
 
-impl From<LedgerError> for Status {
-    fn from(value: LedgerError) -> Self {
-        Status::internal(value.to_string())
-    }
+fn into_status(err: impl std::error::Error) -> Status {
+    Status::internal(err.to_string())
 }
 
 trait IntoSet {
@@ -65,7 +61,7 @@ impl ByAddressQuery {
 
 impl IntoSet for ByAddressQuery {
     fn into_set(self, ledger: &LedgerStore) -> Result<HashSet<TxoRef>, Status> {
-        Ok(ledger.get_utxo_by_address(&self.0)?)
+        ledger.get_utxo_by_address(&self.0).map_err(into_status)
     }
 }
 
@@ -83,7 +79,7 @@ impl ByPaymentQuery {
 
 impl IntoSet for ByPaymentQuery {
     fn into_set(self, ledger: &LedgerStore) -> Result<HashSet<TxoRef>, Status> {
-        Ok(ledger.get_utxo_by_payment(&self.0)?)
+        ledger.get_utxo_by_payment(&self.0).map_err(into_status)
     }
 }
 
@@ -101,7 +97,7 @@ impl ByDelegationQuery {
 
 impl IntoSet for ByDelegationQuery {
     fn into_set(self, ledger: &LedgerStore) -> Result<HashSet<TxoRef>, Status> {
-        Ok(ledger.get_utxo_by_stake(&self.0)?)
+        ledger.get_utxo_by_stake(&self.0).map_err(into_status)
     }
 }
 
@@ -136,7 +132,7 @@ impl ByPolicyQuery {
 
 impl IntoSet for ByPolicyQuery {
     fn into_set(self, ledger: &LedgerStore) -> Result<HashSet<TxoRef>, Status> {
-        Ok(ledger.get_utxo_by_policy(&self.0)?)
+        ledger.get_utxo_by_policy(&self.0).map_err(into_status)
     }
 }
 
@@ -154,7 +150,7 @@ impl ByAssetQuery {
 
 impl IntoSet for ByAssetQuery {
     fn into_set(self, ledger: &LedgerStore) -> Result<HashSet<TxoRef>, Status> {
-        Ok(ledger.get_utxo_by_asset(&self.0)?)
+        ledger.get_utxo_by_asset(&self.0).map_err(into_status)
     }
 }
 
@@ -225,11 +221,12 @@ impl u5c::query::query_service_server::QueryService for QueryServiceImpl {
 
         info!("received new grpc query");
 
-        let tip = self.ledger.cursor()?;
+        let tip = self.ledger.cursor().map_err(into_status)?;
 
         let updates = self
             .ledger
-            .get_pparams(tip.as_ref().map(|p| p.0).unwrap_or_default())?;
+            .get_pparams(tip.as_ref().map(|p| p.0).unwrap_or_default())
+            .map_err(into_status)?;
 
         let updates: Vec<_> = updates
             .into_iter()

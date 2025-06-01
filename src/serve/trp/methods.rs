@@ -4,6 +4,8 @@ use serde::Deserialize;
 use std::{collections::HashMap, sync::Arc};
 use tx3_lang::ProtoTx;
 
+use dolos_core::StateStore as _;
+
 use super::Context;
 
 #[derive(Deserialize, Debug)]

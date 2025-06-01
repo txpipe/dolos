@@ -13,41 +13,16 @@ use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, RwLock},
 };
-use thiserror::Error;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
 use tracing::debug;
 
 use dolos_cardano::pparams;
+use dolos_core::{Genesis, MempoolError, MempoolStore, StateStore as _};
 
 use crate::state::LedgerStore;
 
 type TxHash = Hash<32>;
-
-#[derive(Debug, Error)]
-pub enum MempoolError {
-    #[error("traverse error: {0}")]
-    TraverseError(#[from] pallas::ledger::traverse::Error),
-
-    #[error("decode error: {0}")]
-    DecodeError(#[from] pallas::codec::minicbor::decode::Error),
-
-    #[error("tx validation failed during phase-1: {0}")]
-    Phase1Error(#[from] pallas::ledger::validate::utils::ValidationError),
-
-    #[cfg(feature = "phase2")]
-    #[error("tx evaluation failed during phase-2: {0}")]
-    Phase2Error(#[from] pallas::ledger::validate::phase2::error::Error),
-
-    #[error("state error: {0}")]
-    StateError(#[from] crate::state::LedgerError),
-
-    #[error("plutus not supported")]
-    PlutusNotSupported,
-
-    #[error("invalid tx: {0}")]
-    InvalidTx(String),
-}
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Tx {
@@ -85,12 +60,12 @@ struct MempoolState {
 pub struct Mempool {
     mempool: Arc<RwLock<MempoolState>>,
     updates: broadcast::Sender<Event>,
-    genesis: Arc<pparams::Genesis>,
+    genesis: Arc<Genesis>,
     ledger: LedgerStore,
 }
 
 impl Mempool {
-    pub fn new(genesis: Arc<pparams::Genesis>, ledger: LedgerStore) -> Self {
+    pub fn new(genesis: Arc<Genesis>, ledger: LedgerStore) -> Self {
         let mempool = Arc::new(RwLock::new(MempoolState::default()));
         let (updates, _) = broadcast::channel(16);
 
@@ -191,7 +166,7 @@ impl Mempool {
         &self,
         tx: &MultiEraTx,
     ) -> Result<pallas::ledger::validate::phase2::EvalReport, MempoolError> {
-        use dolos_core::{EraCbor, TxoRef};
+        use dolos_core::{EraCbor, StateStore as _, TxoRef};
 
         let tip = self.ledger.cursor()?;
 
@@ -242,36 +217,6 @@ impl Mempool {
     ) -> Result<pallas::ledger::validate::phase2::EvalReport, MempoolError> {
         let tx = MultiEraTx::decode(cbor)?;
         self.evaluate(&tx)
-    }
-
-    pub fn receive_raw(&self, cbor: &[u8]) -> Result<TxHash, MempoolError> {
-        let tx = MultiEraTx::decode(cbor)?;
-
-        self.validate(&tx)?;
-
-        #[cfg(feature = "phase2")]
-        self.evaluate(&tx)?;
-
-        // if we don't have phase-2 enabled, we reject txs before propagating something
-        // that could result in collateral loss
-        #[cfg(not(feature = "phase2"))]
-        if !decoded.redeemers().is_empty() {
-            return Err(MempoolError::PlutusNotSupported);
-        }
-
-        let hash = tx.hash();
-
-        let tx = Tx {
-            hash,
-            // TODO: this is a hack to make the era compatible with the ledger
-            era: u16::from(tx.era()) - 1,
-            bytes: cbor.into(),
-            confirmed: false,
-        };
-
-        self.receive(tx);
-
-        Ok(hash)
     }
 
     pub fn request(&self, desired: usize) -> Vec<Tx> {
@@ -385,6 +330,38 @@ impl Mempool {
                 debug!(%tx_hash, "un-confirming tx");
             }
         }
+    }
+}
+
+impl MempoolStore for Mempool {
+    fn receive_raw(&self, cbor: &[u8]) -> Result<TxHash, MempoolError> {
+        let tx = MultiEraTx::decode(cbor)?;
+
+        self.validate(&tx)?;
+
+        #[cfg(feature = "phase2")]
+        self.evaluate(&tx)?;
+
+        // if we don't have phase-2 enabled, we reject txs before propagating something
+        // that could result in collateral loss
+        #[cfg(not(feature = "phase2"))]
+        if !decoded.redeemers().is_empty() {
+            return Err(MempoolError::PlutusNotSupported);
+        }
+
+        let hash = tx.hash();
+
+        let tx = Tx {
+            hash,
+            // TODO: this is a hack to make the era compatible with the ledger
+            era: u16::from(tx.era()) - 1,
+            bytes: cbor.into(),
+            confirmed: false,
+        };
+
+        self.receive(tx);
+
+        Ok(hash)
     }
 }
 

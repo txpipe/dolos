@@ -3,7 +3,7 @@ use tracing::debug;
 
 use tx3_cardano::pallas::ledger::traverse::{Era, MultiEraOutput};
 
-use dolos_core::{EraCbor, TxoRef};
+use dolos_core::{EraCbor, StateStore as _, TxoRef};
 
 use crate::state::LedgerStore;
 

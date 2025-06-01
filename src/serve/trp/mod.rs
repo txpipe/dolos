@@ -7,9 +7,10 @@ use tower::ServiceBuilder;
 use tower_http::cors::CorsLayer;
 use tracing::info;
 
+use dolos_core::Genesis;
+
 use crate::prelude::Error;
 use crate::state::LedgerStore;
-use dolos_cardano::pparams::Genesis;
 
 mod adapter;
 mod methods;

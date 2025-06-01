@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-use dolos_cardano::pparams::Genesis;
+use dolos_core::Genesis;
 
 use crate::chain::ChainStore;
 use crate::mempool::Mempool;
@@ -30,7 +30,7 @@ pub mod o7s_win;
 pub use o7s_win as o7s;
 
 #[cfg(feature = "minibf")]
-pub mod minibf;
+pub use dolos_minibf as minibf;
 
 #[cfg(feature = "trp")]
 pub mod trp;
@@ -52,6 +52,38 @@ macro_rules! feature_not_included {
             $service_name.to_lowercase()
         )
     };
+}
+
+#[derive(Clone)]
+struct Domain {
+    genesis: Arc<Genesis>,
+    ledger: LedgerStore,
+    chain: ChainStore,
+    mempool: Mempool,
+}
+
+impl dolos_core::Domain for Domain {
+    type State = LedgerStore;
+
+    type Archive = ChainStore;
+
+    type Mempool = Mempool;
+
+    fn genesis(&self) -> &Genesis {
+        &self.genesis
+    }
+
+    fn state(&self) -> &Self::State {
+        &self.ledger
+    }
+
+    fn archive(&self) -> &Self::Archive {
+        &self.chain
+    }
+
+    fn mempool(&self) -> &Self::Mempool {
+        &self.mempool
+    }
 }
 
 /// Serve remote requests
@@ -111,18 +143,18 @@ pub async fn serve(
             #[cfg(not(feature = "minibf"))]
             feature_not_included!("minibf");
 
+            let domain = Domain {
+                genesis: genesis.clone(),
+                ledger: ledger.clone(),
+                chain: chain.clone(),
+                mempool: mempool.clone(),
+            };
+
             #[cfg(feature = "minibf")]
-            minibf::serve(
-                cfg,
-                genesis.clone(),
-                ledger.clone(),
-                chain.clone(),
-                mempool.clone(),
-                exit.clone(),
-            )
-            .await
-            .into_diagnostic()
-            .context("serving minibf")
+            minibf::serve(cfg, domain, exit.clone())
+                .await
+                .into_diagnostic()
+                .context("serving minibf")
         } else {
             Ok(())
         }

@@ -9,3 +9,6 @@ thiserror.workspace = true
 
 # TODO: we shouldn't need Pallas in core
 pallas.workspace = true
+
+[features]
+phase2 = ["pallas/phase2"]

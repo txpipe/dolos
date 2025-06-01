@@ -1,8 +1,8 @@
+use miette::{Context, IntoDiagnostic};
 use std::path::Path;
 
-use dolos::cardano::pparams::Genesis;
 use dolos_cardano::mutable_slots;
-use miette::{Context, IntoDiagnostic};
+use dolos_core::Genesis;
 
 pub mod mainnet;
 pub mod preprod;

@@ -1,11 +1,14 @@
-use std::sync::Arc;
-
-use dolos::cardano::mutable_slots;
-use dolos::wal::{self, WalBlockReader, WalReader as _};
 use itertools::Itertools;
 use miette::{Context, IntoDiagnostic};
 use pallas::ledger::traverse::MultiEraBlock;
+use std::sync::Arc;
 use tracing::debug;
+
+use dolos::{
+    cardano::mutable_slots,
+    core::{ArchiveStore as _, StateError, StateStore as _},
+    wal::{self, WalBlockReader, WalReader as _},
+};
 
 use crate::feedback::Feedback;
 
@@ -25,6 +28,7 @@ pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::
     let genesis = Arc::new(crate::common::open_genesis_files(&config.genesis)?);
 
     let light = dolos::state::redb::LedgerStore::in_memory_v2_light()
+        .map_err(StateError::from)
         .into_diagnostic()
         .context("creating in-memory state store")?;
 
@@ -99,6 +103,7 @@ pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::
     let ledger_path = root.join("ledger");
 
     let disk = dolos::state::redb::LedgerStore::open_v2_light(ledger_path, None)
+        .map_err(StateError::from)
         .into_diagnostic()
         .context("opening ledger db")?;
 

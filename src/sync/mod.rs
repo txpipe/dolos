@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
 
-use dolos_cardano::pparams::Genesis;
+use dolos_core::Genesis;
 
 pub mod apply;
 pub mod emulator;

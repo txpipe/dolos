@@ -1,4 +1,3 @@
-use dolos::core::{EraCbor, TxoRef};
 use itertools::*;
 use miette::{Context, IntoDiagnostic};
 use pallas::{
@@ -6,6 +5,8 @@ use pallas::{
     ledger::validate::utils::{CertState, Environment as ValidationContext, UTxOs},
 };
 use std::{borrow::Cow, path::PathBuf, sync::Arc};
+
+use dolos::core::{EraCbor, StateStore as _, TxoRef};
 
 #[derive(Debug, clap::Args)]
 pub struct Args {
@@ -74,7 +75,7 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
             <Box<Cow<'_, pallas::ledger::primitives::byron::TxIn>>>::from(Cow::Owned(txin)),
         );
 
-        let value = MultiEraOutput::decode(era, cbor)
+        let value = MultiEraOutput::decode(era, &cbor)
             .into_diagnostic()
             .context("decoding utxo")?;
 
@@ -90,7 +91,7 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
         .iter()
         .map(|EraCbor(era, cbor)| -> miette::Result<MultiEraUpdate> {
             let era = (*era).try_into().expect("era out of range");
-            MultiEraUpdate::decode_for_era(era, cbor).into_diagnostic()
+            MultiEraUpdate::decode_for_era(era, &cbor).into_diagnostic()
         })
         .try_collect()?;
 

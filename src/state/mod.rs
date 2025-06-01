@@ -1,67 +1,13 @@
 use itertools::Itertools as _;
-use pallas::{
-    interop::utxorpc as interop,
-    ledger::traverse::{MultiEraBlock, MultiEraTx},
-};
+use pallas::ledger::traverse::{MultiEraBlock, MultiEraTx};
 use std::collections::{HashMap, HashSet};
-use thiserror::Error;
 
-use dolos_cardano::{compute_delta, lastest_immutable_slot, pparams::Genesis};
+use dolos_cardano::{compute_delta, lastest_immutable_slot};
+use dolos_core::{Genesis, StateStore};
 
 use crate::prelude::*;
 
 pub mod redb;
-
-#[derive(Debug, Error)]
-pub enum LedgerError {
-    #[error("broken invariant")]
-    BrokenInvariant(#[from] BrokenInvariant),
-
-    #[error("storage error")]
-    StorageError(#[from] Box<::redb::Error>),
-
-    #[error("address decoding error")]
-    AddressDecoding(#[from] pallas::ledger::addresses::Error),
-
-    #[error("query not supported")]
-    QueryNotSupported,
-
-    #[error("invalid store version")]
-    InvalidStoreVersion,
-
-    #[error("decoding error")]
-    DecodingError(#[from] pallas::codec::minicbor::decode::Error),
-}
-
-impl From<::redb::DatabaseError> for LedgerError {
-    fn from(value: ::redb::DatabaseError) -> Self {
-        Self::from(Box::new(::redb::Error::from(value)))
-    }
-}
-
-impl From<::redb::TableError> for LedgerError {
-    fn from(value: ::redb::TableError) -> Self {
-        Self::from(Box::new(::redb::Error::from(value)))
-    }
-}
-
-impl From<::redb::CommitError> for LedgerError {
-    fn from(value: ::redb::CommitError) -> Self {
-        Self::from(Box::new(::redb::Error::from(value)))
-    }
-}
-
-impl From<::redb::StorageError> for LedgerError {
-    fn from(value: ::redb::StorageError) -> Self {
-        Self::from(Box::new(::redb::Error::from(value)))
-    }
-}
-
-impl From<::redb::TransactionError> for LedgerError {
-    fn from(value: ::redb::TransactionError) -> Self {
-        Self::from(Box::new(::redb::Error::from(value)))
-    }
-}
 
 /// A persistent store for ledger state
 #[derive(Clone)]
@@ -70,83 +16,109 @@ pub enum LedgerStore {
     Redb(redb::LedgerStore),
 }
 
-impl LedgerStore {
-    pub fn cursor(&self) -> Result<Option<ChainPoint>, LedgerError> {
-        match self {
-            LedgerStore::Redb(x) => x.cursor(),
-        }
+impl StateStore for LedgerStore {
+    fn cursor(&self) -> Result<Option<ChainPoint>, StateError> {
+        let out = match self {
+            LedgerStore::Redb(x) => x.cursor()?,
+        };
+
+        Ok(out)
     }
 
-    pub fn is_empty(&self) -> Result<bool, LedgerError> {
-        match self {
-            LedgerStore::Redb(x) => x.is_empty(),
-        }
+    fn is_empty(&self) -> Result<bool, StateError> {
+        let out = match self {
+            LedgerStore::Redb(x) => x.is_empty()?,
+        };
+
+        Ok(out)
     }
 
-    pub fn get_pparams(&self, until: BlockSlot) -> Result<Vec<EraCbor>, LedgerError> {
-        match self {
-            LedgerStore::Redb(x) => x.get_pparams(until),
-        }
+    fn get_pparams(&self, until: BlockSlot) -> Result<Vec<EraCbor>, StateError> {
+        let out = match self {
+            LedgerStore::Redb(x) => x.get_pparams(until)?,
+        };
+
+        Ok(out)
     }
 
-    pub fn get_utxos(&self, refs: Vec<TxoRef>) -> Result<UtxoMap, LedgerError> {
-        match self {
-            LedgerStore::Redb(x) => x.get_utxos(refs),
-        }
+    fn get_utxos(&self, refs: Vec<TxoRef>) -> Result<UtxoMap, StateError> {
+        let out = match self {
+            LedgerStore::Redb(x) => x.get_utxos(refs)?,
+        };
+
+        Ok(out)
     }
 
-    pub fn get_utxo_by_address(&self, address: &[u8]) -> Result<UtxoSet, LedgerError> {
-        match self {
-            LedgerStore::Redb(x) => x.get_utxo_by_address(address),
-        }
+    fn get_utxo_by_address(&self, address: &[u8]) -> Result<UtxoSet, StateError> {
+        let out = match self {
+            LedgerStore::Redb(x) => x.get_utxo_by_address(address)?,
+        };
+
+        Ok(out)
     }
 
-    pub fn get_utxo_by_payment(&self, payment: &[u8]) -> Result<UtxoSet, LedgerError> {
-        match self {
-            LedgerStore::Redb(x) => x.get_utxo_by_payment(payment),
-        }
+    fn get_utxo_by_payment(&self, payment: &[u8]) -> Result<UtxoSet, StateError> {
+        let out = match self {
+            LedgerStore::Redb(x) => x.get_utxo_by_payment(payment)?,
+        };
+
+        Ok(out)
     }
 
-    pub fn get_utxo_by_stake(&self, stake: &[u8]) -> Result<UtxoSet, LedgerError> {
-        match self {
-            LedgerStore::Redb(x) => x.get_utxo_by_stake(stake),
-        }
+    fn get_utxo_by_stake(&self, stake: &[u8]) -> Result<UtxoSet, StateError> {
+        let out = match self {
+            LedgerStore::Redb(x) => x.get_utxo_by_stake(stake)?,
+        };
+
+        Ok(out)
     }
 
-    pub fn get_utxo_by_policy(&self, policy: &[u8]) -> Result<UtxoSet, LedgerError> {
-        match self {
-            LedgerStore::Redb(x) => x.get_utxo_by_policy(policy),
-        }
+    fn get_utxo_by_policy(&self, policy: &[u8]) -> Result<UtxoSet, StateError> {
+        let out = match self {
+            LedgerStore::Redb(x) => x.get_utxo_by_policy(policy)?,
+        };
+
+        Ok(out)
     }
 
-    pub fn get_utxo_by_asset(&self, asset: &[u8]) -> Result<UtxoSet, LedgerError> {
-        match self {
-            LedgerStore::Redb(x) => x.get_utxo_by_asset(asset),
-        }
+    fn get_utxo_by_asset(&self, asset: &[u8]) -> Result<UtxoSet, StateError> {
+        let out = match self {
+            LedgerStore::Redb(x) => x.get_utxo_by_asset(asset)?,
+        };
+
+        Ok(out)
     }
 
-    pub fn apply(&self, deltas: &[LedgerDelta]) -> Result<(), LedgerError> {
-        match self {
-            LedgerStore::Redb(x) => x.apply(deltas),
-        }
+    fn apply(&self, deltas: &[LedgerDelta]) -> Result<(), StateError> {
+        let out = match self {
+            LedgerStore::Redb(x) => x.apply(deltas)?,
+        };
+
+        Ok(out)
     }
 
-    pub fn finalize(&self, until: BlockSlot) -> Result<(), LedgerError> {
-        match self {
-            LedgerStore::Redb(x) => x.finalize(until),
-        }
+    fn finalize(&self, until: BlockSlot) -> Result<(), StateError> {
+        let out = match self {
+            LedgerStore::Redb(x) => x.finalize(until)?,
+        };
+
+        Ok(out)
     }
 
-    pub fn upgrade(self) -> Result<Self, LedgerError> {
-        match self {
-            LedgerStore::Redb(x) => Ok(LedgerStore::Redb(x.upgrade()?)),
-        }
+    fn upgrade(self) -> Result<Self, StateError> {
+        let out = match self {
+            LedgerStore::Redb(x) => LedgerStore::Redb(x.upgrade()?),
+        };
+
+        Ok(out)
     }
 
-    pub fn copy(&self, target: &Self) -> Result<(), LedgerError> {
+    fn copy(&self, target: &Self) -> Result<(), StateError> {
         match (self, target) {
-            (Self::Redb(x), Self::Redb(target)) => x.copy(target),
+            (Self::Redb(x), Self::Redb(target)) => x.copy(target)?,
         }
+
+        Ok(())
     }
 }
 
@@ -156,12 +128,14 @@ impl From<redb::LedgerStore> for LedgerStore {
     }
 }
 
-impl interop::LedgerContext for LedgerStore {
-    fn get_utxos<'a>(&self, refs: &[interop::TxoRef]) -> Option<interop::UtxoMap> {
+impl pallas::interop::utxorpc::LedgerContext for LedgerStore {
+    fn get_utxos<'a>(
+        &self,
+        refs: &[pallas::interop::utxorpc::TxoRef],
+    ) -> Option<pallas::interop::utxorpc::UtxoMap> {
         let refs: Vec<_> = refs.iter().map(|x| TxoRef::from(*x)).collect();
 
-        let some = self
-            .get_utxos(refs)
+        let some = dolos_core::StateStore::get_utxos(self, refs)
             .ok()?
             .into_iter()
             .map(|(k, v)| {
@@ -178,7 +152,7 @@ pub fn load_slice_for_block(
     block: &MultiEraBlock,
     store: &LedgerStore,
     unapplied_deltas: &[LedgerDelta],
-) -> Result<LedgerSlice, LedgerError> {
+) -> Result<LedgerSlice, StateError> {
     let txs: HashMap<_, _> = block.txs().into_iter().map(|tx| (tx.hash(), tx)).collect();
 
     // TODO: turn this into "referenced utxos" intead of just consumed.
@@ -223,12 +197,12 @@ pub fn load_slice_for_block(
 pub fn calculate_block_batch_deltas<'a>(
     blocks: impl IntoIterator<Item = &'a MultiEraBlock<'a>>,
     store: &LedgerStore,
-) -> Result<Vec<LedgerDelta>, LedgerError> {
+) -> Result<Vec<LedgerDelta>, StateError> {
     let mut deltas: Vec<LedgerDelta> = vec![];
 
     for block in blocks {
         let context = load_slice_for_block(block, store, &deltas)?;
-        let delta = compute_delta(block, context).map_err(LedgerError::BrokenInvariant)?;
+        let delta = compute_delta(block, context).map_err(StateError::BrokenInvariant)?;
 
         deltas.push(delta);
     }
@@ -240,7 +214,7 @@ pub fn apply_delta_batch(
     store: &LedgerStore,
     genesis: &Genesis,
     max_ledger_history: Option<u64>,
-) -> Result<(), LedgerError> {
+) -> Result<(), StateError> {
     store.apply(&deltas)?;
 
     let tip = deltas
@@ -263,7 +237,7 @@ pub fn apply_block_batch<'a>(
     store: &LedgerStore,
     genesis: &Genesis,
     max_ledger_history: Option<u64>,
-) -> Result<(), LedgerError> {
+) -> Result<(), StateError> {
     let deltas = calculate_block_batch_deltas(blocks, store)?;
     apply_delta_batch(deltas, store, genesis, max_ledger_history)
 }

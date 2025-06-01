@@ -4,9 +4,9 @@ use pallas::ledger::addresses::Address;
 use pallas::ledger::traverse::{ComputeHash, MultiEraBlock, MultiEraOutput};
 use std::hash::{DefaultHasher, Hash as _, Hasher};
 
-use dolos_core::{BlockSlot, LedgerDelta};
+use dolos_core::{ArchiveError, BlockSlot, LedgerDelta};
 
-type Error = crate::chain::ChainError;
+type Error = super::RedbArchiveError;
 
 pub struct AddressApproxIndexTable;
 
@@ -350,8 +350,8 @@ impl Indexes {
         if let Some(point) = &delta.new_position {
             let slot = point.0;
 
-            let block =
-                MultiEraBlock::decode(&delta.new_block).map_err(Error::BlockDecodingError)?;
+            let block = MultiEraBlock::decode(&delta.new_block)
+                .map_err(ArchiveError::BlockDecodingError)?;
 
             Self::insert(
                 wx,
@@ -424,8 +424,9 @@ impl Indexes {
             let mut assets = vec![];
 
             for (_, body) in delta.produced_utxo.iter().chain(delta.consumed_utxo.iter()) {
-                let utxo = MultiEraOutput::try_from(body).map_err(Error::DecodingError)?;
-                match utxo.address()? {
+                let utxo = MultiEraOutput::try_from(body).map_err(ArchiveError::DecodingError)?;
+
+                match utxo.address().map_err(ArchiveError::AddressDecoding)? {
                     Address::Shelley(addr) => {
                         addresses.push(addr.to_vec());
                         address_payment_parts.push(addr.payment().to_vec());
@@ -496,8 +497,8 @@ impl Indexes {
         if let Some(point) = &delta.undone_position {
             let slot = point.0;
 
-            let block =
-                MultiEraBlock::decode(&delta.undone_block).map_err(Error::BlockDecodingError)?;
+            let block = MultiEraBlock::decode(&delta.undone_block)
+                .map_err(ArchiveError::BlockDecodingError)?;
 
             Self::insert(
                 wx,
@@ -566,8 +567,9 @@ impl Indexes {
             let mut assets = vec![];
 
             for (_, body) in delta.recovered_stxi.iter().chain(delta.undone_utxo.iter()) {
-                let utxo = MultiEraOutput::try_from(body).map_err(Error::DecodingError)?;
-                match utxo.address()? {
+                let utxo = MultiEraOutput::try_from(body).map_err(ArchiveError::DecodingError)?;
+
+                match utxo.address().map_err(ArchiveError::AddressDecoding)? {
                     Address::Shelley(addr) => {
                         addresses.push(addr.to_vec());
                         address_payment_parts.push(addr.payment().to_vec());
