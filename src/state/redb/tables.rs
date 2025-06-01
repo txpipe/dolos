@@ -5,9 +5,9 @@ use pallas::{crypto::hash::Hash, ledger::traverse::MultiEraOutput};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
-use crate::state::*;
+type Error = super::RedbStateError;
 
-type Error = crate::state::LedgerError;
+use crate::state::*;
 
 pub struct BlocksTable;
 
@@ -467,7 +467,7 @@ impl FilterIndexes {
                     Ok(SplitAddressResult(Some(a), None, None))
                 }
             },
-            Err(err) => Err(err.into()),
+            Err(err) => Err(Error::from(StateError::from(err))),
         }
     }
 

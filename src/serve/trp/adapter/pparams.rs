@@ -3,10 +3,11 @@ use std::collections::HashMap;
 use pallas::ledger::{traverse::MultiEraUpdate, validate::utils::ConwayProtParams};
 
 use dolos_cardano::pparams;
+use dolos_core::{Genesis, StateStore as _};
 
 use crate::state::LedgerStore;
 
-pub fn network_id_from_genesis(genesis: &pparams::Genesis) -> Option<tx3_cardano::Network> {
+pub fn network_id_from_genesis(genesis: &Genesis) -> Option<tx3_cardano::Network> {
     match genesis.shelley.network_id.as_ref() {
         Some(network) => match network.as_str() {
             "Mainnet" => Some(tx3_cardano::Network::Mainnet),
@@ -35,7 +36,7 @@ fn map_cost_models(pparams: &ConwayProtParams) -> HashMap<u8, tx3_cardano::CostM
 }
 
 pub fn resolve(
-    genesis: &pparams::Genesis,
+    genesis: &Genesis,
     ledger: &LedgerStore,
 ) -> Result<tx3_cardano::PParams, tx3_cardano::Error> {
     let network = network_id_from_genesis(genesis).unwrap();

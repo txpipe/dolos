@@ -1,6 +1,8 @@
 use miette::{bail, Context, IntoDiagnostic};
 use tracing::info;
 
+use dolos::core::ArchiveError;
+
 #[derive(Debug, clap::Args)]
 pub struct Args {
     /// the maximum number of slots to keep in the Chain
@@ -33,6 +35,7 @@ pub fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
 
     chain
         .prune_history(max_slots, args.max_prune)
+        .map_err(ArchiveError::from)
         .into_diagnostic()
         .context("removing range from chain")?;
 

@@ -7,7 +7,7 @@ use tracing::{debug, info};
 use crate::prelude::*;
 use crate::wal::{self, LogValue, WalReader as _};
 
-use dolos_cardano::pparams::Genesis;
+use dolos_core::Genesis;
 
 pub type UpstreamPort = gasket::messaging::InputPort<RollEvent>;
 

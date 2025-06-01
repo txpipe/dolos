@@ -3,30 +3,78 @@ use itertools::Itertools;
 use log::info;
 use std::path::Path;
 
+use super::*;
 use tracing::{debug, warn};
 
 mod indexes;
 mod tables;
 mod v1;
 
-use super::*;
+#[derive(Debug)]
+pub struct RedbArchiveError(ArchiveError);
+
+impl From<ArchiveError> for RedbArchiveError {
+    fn from(value: ArchiveError) -> Self {
+        Self(value)
+    }
+}
+
+impl From<RedbArchiveError> for ArchiveError {
+    fn from(value: RedbArchiveError) -> Self {
+        value.0
+    }
+}
+
+impl From<::redb::DatabaseError> for RedbArchiveError {
+    fn from(value: ::redb::DatabaseError) -> Self {
+        Self(ArchiveError::InternalError(Box::new(::redb::Error::from(
+            value,
+        ))))
+    }
+}
+
+impl From<::redb::TableError> for RedbArchiveError {
+    fn from(value: ::redb::TableError) -> Self {
+        Self(ArchiveError::InternalError(Box::new(::redb::Error::from(
+            value,
+        ))))
+    }
+}
+
+impl From<::redb::CommitError> for RedbArchiveError {
+    fn from(value: ::redb::CommitError) -> Self {
+        Self(ArchiveError::InternalError(Box::new(::redb::Error::from(
+            value,
+        ))))
+    }
+}
+
+impl From<::redb::StorageError> for RedbArchiveError {
+    fn from(value: ::redb::StorageError) -> Self {
+        Self(ArchiveError::InternalError(Box::new(::redb::Error::from(
+            value,
+        ))))
+    }
+}
+
+impl From<::redb::TransactionError> for RedbArchiveError {
+    fn from(value: ::redb::TransactionError) -> Self {
+        Self(ArchiveError::InternalError(Box::new(::redb::Error::from(
+            value,
+        ))))
+    }
+}
 
 const DEFAULT_CACHE_SIZE_MB: usize = 500;
 
-fn compute_schema_hash(db: &Database) -> Result<Option<String>, ChainError> {
+fn compute_schema_hash(db: &Database) -> Result<Option<String>, RedbArchiveError> {
     let mut hasher = pallas::crypto::hash::Hasher::<160>::new();
 
-    let rx = db.begin_read().map_err(ChainError::from)?;
+    let rx = db.begin_read()?;
 
-    let names_1 = rx
-        .list_tables()
-        .map_err(ChainError::from)?
-        .map(|t| t.name().to_owned());
+    let names_1 = rx.list_tables()?.map(|t| t.name().to_owned());
 
-    let names_2 = rx
-        .list_multimap_tables()
-        .map_err(ChainError::from)?
-        .map(|t| t.name().to_owned());
+    let names_2 = rx.list_multimap_tables()?.map(|t| t.name().to_owned());
 
     let mut names = names_1.chain(names_2).collect_vec();
 
@@ -48,7 +96,10 @@ fn compute_schema_hash(db: &Database) -> Result<Option<String>, ChainError> {
     Ok(Some(hash.to_string()))
 }
 
-fn open_db(path: impl AsRef<Path>, cache_size: Option<usize>) -> Result<Database, ChainError> {
+fn open_db(
+    path: impl AsRef<Path>,
+    cache_size: Option<usize>,
+) -> Result<Database, RedbArchiveError> {
     let db = Database::builder()
         .set_repair_callback(|x| warn!(progress = x.progress() * 100f64, "ledger db is repairing"))
         .set_cache_size(1024 * 1024 * cache_size.unwrap_or(DEFAULT_CACHE_SIZE_MB))
@@ -69,7 +120,7 @@ impl ChainStore {
         path: impl AsRef<Path>,
         cache_size: Option<usize>,
         max_slots: Option<u64>,
-    ) -> Result<Self, ChainError> {
+    ) -> Result<Self, RedbArchiveError> {
         let db = open_db(path, cache_size)?;
         let hash = compute_schema_hash(&db)?;
 
@@ -89,10 +140,10 @@ impl ChainStore {
         Ok(schema)
     }
 
-    pub fn in_memory_v1() -> Result<Self, ChainError> {
+    pub fn in_memory_v1() -> Result<Self, ArchiveError> {
         let db = ::redb::Database::builder()
             .create_with_backend(::redb::backends::InMemoryBackend::new())
-            .unwrap();
+            .map_err(RedbArchiveError::from)?;
 
         let store = v1::ChainStore::initialize(db, None)?;
         Ok(store.into())
@@ -110,47 +161,55 @@ impl ChainStore {
         }
     }
 
-    pub fn get_tip(&self) -> Result<Option<(BlockSlot, BlockBody)>, ChainError> {
+    pub fn get_tip(&self) -> Result<Option<(BlockSlot, BlockBody)>, RedbArchiveError> {
         match self {
             ChainStore::SchemaV1(x) => x.get_tip(),
         }
     }
 
-    pub fn get_range(
+    pub fn get_range<'a>(
         &self,
         from: Option<BlockSlot>,
         to: Option<BlockSlot>,
-    ) -> Result<ChainIter, ChainError> {
-        match self {
-            ChainStore::SchemaV1(x) => x.get_range(from, to),
-        }
+    ) -> Result<ChainIter<'a>, RedbArchiveError> {
+        let out = match self {
+            ChainStore::SchemaV1(x) => x.get_range(from, to)?,
+        };
+
+        Ok(out)
     }
 
-    pub fn get_block_by_hash(&self, block_hash: &[u8]) -> Result<Option<BlockBody>, ChainError> {
+    pub fn get_block_by_hash(
+        &self,
+        block_hash: &[u8],
+    ) -> Result<Option<BlockBody>, RedbArchiveError> {
         match self {
             ChainStore::SchemaV1(x) => x.get_block_by_hash(block_hash),
         }
     }
 
-    pub fn get_block_by_slot(&self, slot: &BlockSlot) -> Result<Option<BlockBody>, ChainError> {
+    pub fn get_block_by_slot(
+        &self,
+        slot: &BlockSlot,
+    ) -> Result<Option<BlockBody>, RedbArchiveError> {
         match self {
             ChainStore::SchemaV1(x) => x.get_block_by_slot(slot),
         }
     }
 
-    pub fn get_block_by_number(&self, number: &u64) -> Result<Option<BlockBody>, ChainError> {
+    pub fn get_block_by_number(&self, number: &u64) -> Result<Option<BlockBody>, RedbArchiveError> {
         match self {
             ChainStore::SchemaV1(x) => x.get_block_by_number(number),
         }
     }
 
-    pub fn get_tx(&self, tx_hash: &[u8]) -> Result<Option<Vec<u8>>, ChainError> {
+    pub fn get_tx(&self, tx_hash: &[u8]) -> Result<Option<Vec<u8>>, RedbArchiveError> {
         match self {
             ChainStore::SchemaV1(x) => x.get_tx(tx_hash),
         }
     }
 
-    pub fn apply(&self, deltas: &[LedgerDelta]) -> Result<(), ChainError> {
+    pub fn apply(&self, deltas: &[LedgerDelta]) -> Result<(), RedbArchiveError> {
         match self {
             ChainStore::SchemaV1(x) => Ok(x.apply(deltas)?),
         }
@@ -160,19 +219,19 @@ impl ChainStore {
         &mut self,
         max_slots: u64,
         max_prune: Option<u64>,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), RedbArchiveError> {
         match self {
             ChainStore::SchemaV1(x) => x.prune_history(max_slots, max_prune),
         }
     }
 
-    pub fn housekeeping(&mut self) -> Result<(), ChainError> {
+    pub fn housekeeping(&mut self) -> Result<(), RedbArchiveError> {
         match self {
             ChainStore::SchemaV1(x) => x.housekeeping(),
         }
     }
 
-    pub fn finalize(&self, until: BlockSlot) -> Result<(), ChainError> {
+    pub fn finalize(&self, until: BlockSlot) -> Result<(), RedbArchiveError> {
         match self {
             ChainStore::SchemaV1(x) => Ok(x.finalize(until)?),
         }
@@ -187,7 +246,7 @@ impl From<v1::ChainStore> for ChainStore {
 
 pub struct ChainIter<'a>(Range<'a, BlockSlot, BlockBody>);
 
-impl Iterator for ChainIter<'_> {
+impl<'a> Iterator for ChainIter<'a> {
     type Item = (BlockSlot, BlockBody);
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -198,7 +257,7 @@ impl Iterator for ChainIter<'_> {
     }
 }
 
-impl DoubleEndedIterator for ChainIter<'_> {
+impl<'a> DoubleEndedIterator for ChainIter<'a> {
     fn next_back(&mut self) -> Option<Self::Item> {
         self.0
             .next_back()

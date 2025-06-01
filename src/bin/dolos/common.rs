@@ -1,4 +1,3 @@
-use dolos::{cardano::pparams::Genesis, chain, state, wal};
 use miette::{Context as _, IntoDiagnostic};
 use std::{fs, path::PathBuf, time::Duration};
 use tokio::task::JoinHandle;
@@ -6,7 +5,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::{filter::Targets, prelude::*};
 
+use dolos::core::Genesis;
 use dolos::prelude::*;
+use dolos::{chain, state, wal};
 
 use crate::{GenesisConfig, LoggingConfig};
 
@@ -41,7 +42,8 @@ pub fn open_chain_store(config: &crate::Config) -> Result<chain::ChainStore, Err
         root.join("chain"),
         config.storage.chain_cache,
         config.storage.max_chain_history,
-    )?;
+    )
+    .map_err(ArchiveError::from)?;
 
     Ok(chain.into())
 }
@@ -49,7 +51,8 @@ pub fn open_chain_store(config: &crate::Config) -> Result<chain::ChainStore, Err
 pub fn open_ledger_store(config: &crate::Config) -> Result<state::LedgerStore, Error> {
     let root = ensure_storage_path(config)?;
 
-    let ledger = state::redb::LedgerStore::open(root.join("ledger"), config.storage.ledger_cache)?;
+    let ledger = state::redb::LedgerStore::open(root.join("ledger"), config.storage.ledger_cache)
+        .map_err(StateError::from)?;
 
     Ok(ledger.into())
 }

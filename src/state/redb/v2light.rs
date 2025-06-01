@@ -2,10 +2,10 @@ use ::redb::{Database, Durability};
 use itertools::Itertools;
 use std::sync::Arc;
 
-use crate::state::*;
-type Error = crate::state::LedgerError;
-
 use super::tables;
+use crate::state::*;
+
+type Error = super::RedbStateError;
 
 #[derive(Clone)]
 pub struct LedgerStore(Arc<Database>);

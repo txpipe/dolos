@@ -3,9 +3,9 @@ use pallas::ledger::traverse::MultiEraBlock;
 use std::sync::Arc;
 use tracing::{debug, info};
 
-type Error = crate::chain::ChainError;
+type Error = super::RedbArchiveError;
 
-use dolos_core::{BlockBody, BlockSlot, LedgerDelta};
+use dolos_core::{ArchiveError, BlockBody, BlockSlot, LedgerDelta};
 
 use super::{indexes, tables, ChainIter};
 
@@ -69,11 +69,11 @@ impl ChainStore {
         Ok(())
     }
 
-    pub fn get_range(
+    pub fn get_range<'a>(
         &self,
         from: Option<BlockSlot>,
         to: Option<BlockSlot>,
-    ) -> Result<ChainIter, Error> {
+    ) -> Result<ChainIter<'a>, Error> {
         let rx = self.db().begin_read()?;
         let range = tables::BlocksTable::get_range(&rx, from, to)?;
         Ok(ChainIter(range))
@@ -292,7 +292,7 @@ impl ChainStore {
     pub fn get_block_by_hash(&self, block_hash: &[u8]) -> Result<Option<BlockBody>, Error> {
         let possible = self.get_possible_blocks_by_block_hash(block_hash)?;
         for raw in possible {
-            let block = MultiEraBlock::decode(&raw).map_err(Error::BlockDecodingError)?;
+            let block = MultiEraBlock::decode(&raw).map_err(ArchiveError::BlockDecodingError)?;
             if *block.hash() == *block_hash {
                 return Ok(Some(raw));
             }
@@ -303,7 +303,7 @@ impl ChainStore {
     pub fn get_block_by_number(&self, block_number: &u64) -> Result<Option<BlockBody>, Error> {
         let possible = self.get_possible_blocks_by_block_number(block_number)?;
         for raw in possible {
-            let block = MultiEraBlock::decode(&raw).map_err(Error::BlockDecodingError)?;
+            let block = MultiEraBlock::decode(&raw).map_err(ArchiveError::BlockDecodingError)?;
             if block.number() == *block_number {
                 return Ok(Some(raw));
             }
@@ -314,7 +314,7 @@ impl ChainStore {
     pub fn get_tx(&self, tx_hash: &[u8]) -> Result<Option<Vec<u8>>, Error> {
         let possible = self.get_possible_blocks_by_tx_hash(tx_hash)?;
         for raw in possible {
-            let block = MultiEraBlock::decode(&raw).map_err(Error::BlockDecodingError)?;
+            let block = MultiEraBlock::decode(&raw).map_err(ArchiveError::BlockDecodingError)?;
             if let Some(tx) = block.txs().iter().find(|x| x.hash().to_vec() == tx_hash) {
                 return Ok(Some(tx.encode()));
             }

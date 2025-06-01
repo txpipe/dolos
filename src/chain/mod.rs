@@ -1,9 +1,6 @@
-use dolos_core::{BlockBody, BlockSlot, LedgerDelta};
+use dolos_core::{ArchiveError, ArchiveStore, BlockBody, BlockSlot, LedgerDelta};
 
-pub mod error;
 pub mod redb;
-
-pub use error::ChainError;
 
 /// A persistent store for ledger state
 #[derive(Clone)]
@@ -12,63 +9,83 @@ pub enum ChainStore {
     Redb(redb::ChainStore),
 }
 
-impl ChainStore {
-    pub fn get_block_by_hash(&self, block_hash: &[u8]) -> Result<Option<BlockBody>, ChainError> {
-        match self {
-            ChainStore::Redb(x) => x.get_block_by_hash(block_hash),
-        }
+impl ArchiveStore for ChainStore {
+    type BlockIter<'a> = ChainIter<'a>;
+
+    fn get_block_by_hash(&self, block_hash: &[u8]) -> Result<Option<BlockBody>, ArchiveError> {
+        let out = match self {
+            ChainStore::Redb(x) => x.get_block_by_hash(block_hash)?,
+        };
+
+        Ok(out)
     }
 
-    pub fn get_block_by_slot(&self, slot: &BlockSlot) -> Result<Option<BlockBody>, ChainError> {
-        match self {
-            ChainStore::Redb(x) => x.get_block_by_slot(slot),
-        }
+    fn get_block_by_slot(&self, slot: &BlockSlot) -> Result<Option<BlockBody>, ArchiveError> {
+        let out = match self {
+            ChainStore::Redb(x) => x.get_block_by_slot(slot)?,
+        };
+
+        Ok(out)
     }
 
-    pub fn get_block_by_number(&self, number: &u64) -> Result<Option<BlockBody>, ChainError> {
-        match self {
-            ChainStore::Redb(x) => x.get_block_by_number(number),
-        }
+    fn get_block_by_number(&self, number: &u64) -> Result<Option<BlockBody>, ArchiveError> {
+        let out = match self {
+            ChainStore::Redb(x) => x.get_block_by_number(number)?,
+        };
+
+        Ok(out)
     }
 
-    pub fn get_tx(&self, tx_hash: &[u8]) -> Result<Option<Vec<u8>>, ChainError> {
-        match self {
-            ChainStore::Redb(x) => x.get_tx(tx_hash),
-        }
+    fn get_tx(&self, tx_hash: &[u8]) -> Result<Option<Vec<u8>>, ArchiveError> {
+        let out = match self {
+            ChainStore::Redb(x) => x.get_tx(tx_hash)?,
+        };
+
+        Ok(out)
     }
 
-    pub fn get_range(
+    fn get_range<'a>(
         &self,
         from: Option<BlockSlot>,
         to: Option<BlockSlot>,
-    ) -> Result<ChainIter, ChainError> {
-        match self {
-            ChainStore::Redb(x) => Ok(x.get_range(from, to)?.into()),
-        }
+    ) -> Result<Self::BlockIter<'a>, ArchiveError> {
+        let out = match self {
+            ChainStore::Redb(x) => x.get_range(from, to)?.into(),
+        };
+
+        Ok(out)
     }
 
-    pub fn get_tip(&self) -> Result<Option<(BlockSlot, BlockBody)>, ChainError> {
-        match self {
-            ChainStore::Redb(x) => x.get_tip(),
-        }
+    fn get_tip(&self) -> Result<Option<(BlockSlot, BlockBody)>, ArchiveError> {
+        let out = match self {
+            ChainStore::Redb(x) => x.get_tip()?,
+        };
+
+        Ok(out)
     }
 
-    pub fn apply(&self, deltas: &[LedgerDelta]) -> Result<(), ChainError> {
+    fn apply(&self, deltas: &[LedgerDelta]) -> Result<(), ArchiveError> {
         match self {
-            ChainStore::Redb(x) => x.apply(deltas),
-        }
+            ChainStore::Redb(x) => x.apply(deltas)?,
+        };
+
+        Ok(())
     }
 
-    pub fn housekeeping(&mut self) -> Result<(), ChainError> {
+    fn housekeeping(&mut self) -> Result<(), ArchiveError> {
         match self {
-            ChainStore::Redb(x) => x.housekeeping(),
-        }
+            ChainStore::Redb(x) => x.housekeeping()?,
+        };
+
+        Ok(())
     }
 
-    pub fn finalize(&self, until: BlockSlot) -> Result<(), ChainError> {
+    fn finalize(&self, until: BlockSlot) -> Result<(), ArchiveError> {
         match self {
-            ChainStore::Redb(x) => x.finalize(until),
-        }
+            ChainStore::Redb(x) => x.finalize(until)?,
+        };
+
+        Ok(())
     }
 }
 

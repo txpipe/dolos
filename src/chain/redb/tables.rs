@@ -5,7 +5,7 @@ use tracing::trace;
 
 use dolos_core::{BlockBody, BlockSlot, LedgerDelta};
 
-type Error = crate::chain::ChainError;
+type Error = super::RedbArchiveError;
 
 pub struct BlocksTable;
 

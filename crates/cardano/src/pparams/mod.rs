@@ -10,6 +10,8 @@ use pallas::{
 };
 use tracing::debug;
 
+use dolos_core::Genesis;
+
 mod hacks;
 mod summary;
 
@@ -29,14 +31,6 @@ macro_rules! apply_field {
             }
         }
     };
-}
-
-pub struct Genesis {
-    pub byron: byron::GenesisFile,
-    pub shelley: shelley::GenesisFile,
-    pub alonzo: alonzo::GenesisFile,
-    pub conway: conway::GenesisFile,
-    pub force_protocol: Option<usize>,
 }
 
 fn bootstrap_byron_pparams(byron: &byron::GenesisFile) -> ByronProtParams {

@@ -285,3 +285,159 @@ impl Default for StorageConfig {
         }
     }
 }
+
+#[derive(Debug, Error)]
+pub enum ServeError {
+    #[error("Failed to bind listener")]
+    BindError(std::io::Error),
+
+    #[error("Failed to shutdown")]
+    ShutdownError(std::io::Error),
+}
+
+pub struct Genesis {
+    pub byron: pallas::interop::hardano::configs::byron::GenesisFile,
+    pub shelley: pallas::interop::hardano::configs::shelley::GenesisFile,
+    pub alonzo: pallas::interop::hardano::configs::alonzo::GenesisFile,
+    pub conway: pallas::interop::hardano::configs::conway::GenesisFile,
+    pub force_protocol: Option<usize>,
+}
+
+#[derive(Debug, Error)]
+pub enum StateError {
+    #[error("broken invariant")]
+    BrokenInvariant(#[from] BrokenInvariant),
+
+    #[error("storage error")]
+    InternalError(#[from] Box<dyn std::error::Error + Send + Sync>),
+
+    #[error("address decoding error")]
+    AddressDecoding(#[from] pallas::ledger::addresses::Error),
+
+    #[error("query not supported")]
+    QueryNotSupported,
+
+    #[error("invalid store version")]
+    InvalidStoreVersion,
+
+    #[error("decoding error")]
+    DecodingError(#[from] pallas::codec::minicbor::decode::Error),
+}
+
+pub trait StateStore: Sized + pallas::interop::utxorpc::LedgerContext {
+    fn cursor(&self) -> Result<Option<ChainPoint>, StateError>;
+
+    fn is_empty(&self) -> Result<bool, StateError>;
+
+    fn get_pparams(&self, until: BlockSlot) -> Result<Vec<EraCbor>, StateError>;
+
+    fn get_utxos(&self, refs: Vec<TxoRef>) -> Result<UtxoMap, StateError>;
+
+    fn get_utxo_by_address(&self, address: &[u8]) -> Result<UtxoSet, StateError>;
+
+    fn get_utxo_by_payment(&self, payment: &[u8]) -> Result<UtxoSet, StateError>;
+
+    fn get_utxo_by_stake(&self, stake: &[u8]) -> Result<UtxoSet, StateError>;
+
+    fn get_utxo_by_policy(&self, policy: &[u8]) -> Result<UtxoSet, StateError>;
+
+    fn get_utxo_by_asset(&self, asset: &[u8]) -> Result<UtxoSet, StateError>;
+
+    fn apply(&self, deltas: &[LedgerDelta]) -> Result<(), StateError>;
+
+    fn finalize(&self, until: BlockSlot) -> Result<(), StateError>;
+
+    fn upgrade(self) -> Result<Self, StateError>;
+
+    fn copy(&self, target: &Self) -> Result<(), StateError>;
+}
+
+#[derive(Debug, Error)]
+pub enum ArchiveError {
+    #[error("broken invariant")]
+    BrokenInvariant(#[from] BrokenInvariant),
+
+    #[error("storage error")]
+    InternalError(#[from] Box<dyn std::error::Error + Send + Sync>),
+
+    #[error("address decoding error")]
+    AddressDecoding(#[from] pallas::ledger::addresses::Error),
+
+    #[error("query not supported")]
+    QueryNotSupported,
+
+    #[error("invalid store version")]
+    InvalidStoreVersion,
+
+    #[error("decoding error")]
+    DecodingError(#[from] pallas::codec::minicbor::decode::Error),
+
+    #[error("block decoding error")]
+    BlockDecodingError(#[from] pallas::ledger::traverse::Error),
+}
+
+pub trait ArchiveStore {
+    type BlockIter<'a>: Iterator<Item = (BlockSlot, BlockBody)> + DoubleEndedIterator + 'a;
+
+    fn get_block_by_hash(&self, block_hash: &[u8]) -> Result<Option<BlockBody>, ArchiveError>;
+
+    fn get_block_by_slot(&self, slot: &BlockSlot) -> Result<Option<BlockBody>, ArchiveError>;
+
+    fn get_block_by_number(&self, number: &u64) -> Result<Option<BlockBody>, ArchiveError>;
+
+    fn get_tx(&self, tx_hash: &[u8]) -> Result<Option<Vec<u8>>, ArchiveError>;
+
+    fn get_range<'a>(
+        &self,
+        from: Option<BlockSlot>,
+        to: Option<BlockSlot>,
+    ) -> Result<Self::BlockIter<'a>, ArchiveError>;
+
+    fn get_tip(&self) -> Result<Option<(BlockSlot, BlockBody)>, ArchiveError>;
+
+    fn apply(&self, deltas: &[LedgerDelta]) -> Result<(), ArchiveError>;
+
+    fn housekeeping(&mut self) -> Result<(), ArchiveError>;
+
+    fn finalize(&self, until: BlockSlot) -> Result<(), ArchiveError>;
+}
+
+#[derive(Debug, Error)]
+pub enum MempoolError {
+    #[error("traverse error: {0}")]
+    TraverseError(#[from] pallas::ledger::traverse::Error),
+
+    #[error("decode error: {0}")]
+    DecodeError(#[from] pallas::codec::minicbor::decode::Error),
+
+    #[error("tx validation failed during phase-1: {0}")]
+    Phase1Error(#[from] pallas::ledger::validate::utils::ValidationError),
+
+    #[cfg(feature = "phase2")]
+    #[error("tx evaluation failed during phase-2: {0}")]
+    Phase2Error(#[from] pallas::ledger::validate::phase2::error::Error),
+
+    #[error("state error: {0}")]
+    StateError(#[from] StateError),
+
+    #[error("plutus not supported")]
+    PlutusNotSupported,
+
+    #[error("invalid tx: {0}")]
+    InvalidTx(String),
+}
+
+pub trait MempoolStore {
+    fn receive_raw(&self, cbor: &[u8]) -> Result<TxHash, MempoolError>;
+}
+
+pub trait Domain: Send + Sync + Clone + 'static {
+    type State: StateStore;
+    type Archive: ArchiveStore;
+    type Mempool: MempoolStore;
+
+    fn genesis(&self) -> &Genesis;
+    fn state(&self) -> &Self::State;
+    fn archive(&self) -> &Self::Archive;
+    fn mempool(&self) -> &Self::Mempool;
+}

@@ -3,7 +3,7 @@ use miette::IntoDiagnostic;
 use pallas::ledger::traverse::{MultiEraBlock, MultiEraUpdate};
 use std::path::Path;
 
-use dolos::core::{ChainPoint, EraCbor};
+use dolos::core::{ChainPoint, EraCbor, StateStore as _};
 use dolos::wal::{redb::WalStore, RawBlock, ReadUtils, WalReader as _};
 
 #[allow(dead_code)]

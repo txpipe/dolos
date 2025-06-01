@@ -10,6 +10,8 @@ use std::pin::Pin;
 use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
 
+use dolos_core::ArchiveStore as _;
+
 use crate::chain::ChainStore;
 use crate::prelude::BlockBody;
 use crate::state::LedgerStore;

@@ -1043,7 +1043,6 @@ version = "0.23.0"
 dependencies = [
  "async-stream",
  "async-trait",
- "axum 0.8.4",
  "base64 0.22.1",
  "bech32 0.11.0",
  "bincode",
@@ -1055,6 +1054,7 @@ dependencies = [
  "console-subscriber",
  "dolos-cardano",
  "dolos-core",
+ "dolos-minibf",
  "flate2",
  "futures-core",
  "futures-util",
@@ -1120,6 +1120,25 @@ dependencies = [
  "pallas 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
  "serde",
  "thiserror 2.0.12",
+]
+
+[[package]]
+name = "dolos-minibf"
+version = "0.1.0"
+dependencies = [
+ "axum 0.8.4",
+ "bech32 0.11.0",
+ "dolos-cardano",
+ "dolos-core",
+ "hex",
+ "itertools 0.14.0",
+ "pallas 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tower-http 0.6.2",
+ "tracing",
 ]
 
 [[package]]

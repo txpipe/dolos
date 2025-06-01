@@ -12,7 +12,9 @@ use tokio_stream::wrappers::BroadcastStream;
 use tonic::{Request, Response, Status};
 use tracing::info;
 
-use crate::mempool::{Event, Mempool, MempoolError, UpdateFilter};
+use dolos_core::{MempoolError, MempoolStore as _};
+
+use crate::mempool::{Event, Mempool, UpdateFilter};
 use crate::state::LedgerStore;
 
 pub struct SubmitServiceImpl {

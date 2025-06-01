@@ -14,9 +14,64 @@ pub mod v1;
 pub mod v2;
 pub mod v2light;
 
+#[derive(Debug)]
+pub struct RedbStateError(StateError);
+
+impl From<StateError> for RedbStateError {
+    fn from(value: StateError) -> Self {
+        Self(value)
+    }
+}
+
+impl From<RedbStateError> for StateError {
+    fn from(value: RedbStateError) -> Self {
+        value.0
+    }
+}
+
+impl From<::redb::DatabaseError> for RedbStateError {
+    fn from(value: ::redb::DatabaseError) -> Self {
+        Self(StateError::InternalError(Box::new(::redb::Error::from(
+            value,
+        ))))
+    }
+}
+
+impl From<::redb::TableError> for RedbStateError {
+    fn from(value: ::redb::TableError) -> Self {
+        Self(StateError::InternalError(Box::new(::redb::Error::from(
+            value,
+        ))))
+    }
+}
+
+impl From<::redb::CommitError> for RedbStateError {
+    fn from(value: ::redb::CommitError) -> Self {
+        Self(StateError::InternalError(Box::new(::redb::Error::from(
+            value,
+        ))))
+    }
+}
+
+impl From<::redb::StorageError> for RedbStateError {
+    fn from(value: ::redb::StorageError) -> Self {
+        Self(StateError::InternalError(Box::new(::redb::Error::from(
+            value,
+        ))))
+    }
+}
+
+impl From<::redb::TransactionError> for RedbStateError {
+    fn from(value: ::redb::TransactionError) -> Self {
+        Self(StateError::InternalError(Box::new(::redb::Error::from(
+            value,
+        ))))
+    }
+}
+
 const DEFAULT_CACHE_SIZE_MB: usize = 500;
 
-fn compute_schema_hash(db: &Database) -> Result<Option<String>, LedgerError> {
+fn compute_schema_hash(db: &Database) -> Result<Option<String>, RedbStateError> {
     let mut hasher = pallas::crypto::hash::Hasher::<160>::new();
 
     let rx = db.begin_read()?;
@@ -45,7 +100,7 @@ fn compute_schema_hash(db: &Database) -> Result<Option<String>, LedgerError> {
     Ok(Some(hash.to_string()))
 }
 
-fn open_db(path: impl AsRef<Path>, cache_size: Option<usize>) -> Result<Database, LedgerError> {
+fn open_db(path: impl AsRef<Path>, cache_size: Option<usize>) -> Result<Database, RedbStateError> {
     let db = Database::builder()
         .set_repair_callback(|x| warn!(progress = x.progress() * 100f64, "ledger db is repairing"))
         .set_cache_size(1024 * 1024 * cache_size.unwrap_or(DEFAULT_CACHE_SIZE_MB))
@@ -66,7 +121,7 @@ pub enum LedgerStore {
 }
 
 impl LedgerStore {
-    pub fn open(path: impl AsRef<Path>, cache_size: Option<usize>) -> Result<Self, LedgerError> {
+    pub fn open(path: impl AsRef<Path>, cache_size: Option<usize>) -> Result<Self, RedbStateError> {
         let db = open_db(path, cache_size)?;
         let hash = compute_schema_hash(&db)?;
 
@@ -97,7 +152,7 @@ impl LedgerStore {
     pub fn open_v2_light(
         path: impl AsRef<Path>,
         cache_size: Option<usize>,
-    ) -> Result<Self, LedgerError> {
+    ) -> Result<Self, RedbStateError> {
         let db = open_db(path, cache_size)?;
         let hash = compute_schema_hash(&db)?;
 
@@ -110,31 +165,31 @@ impl LedgerStore {
                 info!("detected state db schema v2-light");
                 v2light::LedgerStore::new(db).into()
             }
-            _ => return Err(LedgerError::InvalidStoreVersion),
+            _ => return Err(RedbStateError(StateError::InvalidStoreVersion)),
         };
 
         Ok(schema)
     }
 
-    pub fn in_memory_v1() -> Result<Self, LedgerError> {
+    pub fn in_memory_v1() -> Result<Self, StateError> {
         let db = ::redb::Database::builder()
             .create_with_backend(::redb::backends::InMemoryBackend::new())
-            .unwrap();
+            .map_err(RedbStateError::from)?;
 
         let store = v1::LedgerStore::initialize(db)?;
         Ok(store.into())
     }
 
-    pub fn in_memory_v2() -> Result<Self, LedgerError> {
+    pub fn in_memory_v2() -> Result<Self, StateError> {
         let db = ::redb::Database::builder()
             .create_with_backend(::redb::backends::InMemoryBackend::new())
-            .unwrap();
+            .map_err(RedbStateError::from)?;
 
         let store = v2::LedgerStore::initialize(db)?;
         Ok(store.into())
     }
 
-    pub fn in_memory_v2_light() -> Result<Self, LedgerError> {
+    pub fn in_memory_v2_light() -> Result<Self, RedbStateError> {
         let db = ::redb::Database::builder()
             .create_with_backend(::redb::backends::InMemoryBackend::new())
             .unwrap();
@@ -159,7 +214,7 @@ impl LedgerStore {
         }
     }
 
-    pub fn cursor(&self) -> Result<Option<ChainPoint>, LedgerError> {
+    pub fn cursor(&self) -> Result<Option<ChainPoint>, RedbStateError> {
         match self {
             LedgerStore::SchemaV1(x) => Ok(x.cursor()?),
             LedgerStore::SchemaV2(x) => Ok(x.cursor()?),
@@ -167,7 +222,7 @@ impl LedgerStore {
         }
     }
 
-    pub fn is_empty(&self) -> Result<bool, LedgerError> {
+    pub fn is_empty(&self) -> Result<bool, RedbStateError> {
         match self {
             LedgerStore::SchemaV1(x) => Ok(x.is_empty()?),
             LedgerStore::SchemaV2(x) => Ok(x.is_empty()?),
@@ -175,7 +230,7 @@ impl LedgerStore {
         }
     }
 
-    pub fn get_pparams(&self, until: BlockSlot) -> Result<Vec<EraCbor>, LedgerError> {
+    pub fn get_pparams(&self, until: BlockSlot) -> Result<Vec<EraCbor>, RedbStateError> {
         match self {
             LedgerStore::SchemaV1(x) => Ok(x.get_pparams(until)?),
             LedgerStore::SchemaV2(x) => Ok(x.get_pparams(until)?),
@@ -183,7 +238,7 @@ impl LedgerStore {
         }
     }
 
-    pub fn get_utxos(&self, refs: Vec<TxoRef>) -> Result<UtxoMap, LedgerError> {
+    pub fn get_utxos(&self, refs: Vec<TxoRef>) -> Result<UtxoMap, RedbStateError> {
         match self {
             LedgerStore::SchemaV1(x) => Ok(x.get_utxos(refs)?),
             LedgerStore::SchemaV2(x) => Ok(x.get_utxos(refs)?),
@@ -191,42 +246,42 @@ impl LedgerStore {
         }
     }
 
-    pub fn get_utxo_by_address(&self, address: &[u8]) -> Result<UtxoSet, LedgerError> {
+    pub fn get_utxo_by_address(&self, address: &[u8]) -> Result<UtxoSet, RedbStateError> {
         match self {
             LedgerStore::SchemaV2(x) => Ok(x.get_utxos_by_address(address)?),
-            _ => Err(LedgerError::QueryNotSupported),
+            _ => Err(RedbStateError(StateError::QueryNotSupported)),
         }
     }
 
-    pub fn get_utxo_by_payment(&self, payment: &[u8]) -> Result<UtxoSet, LedgerError> {
+    pub fn get_utxo_by_payment(&self, payment: &[u8]) -> Result<UtxoSet, RedbStateError> {
         match self {
             LedgerStore::SchemaV2(x) => Ok(x.get_utxos_by_payment(payment)?),
-            _ => Err(LedgerError::QueryNotSupported),
+            _ => Err(RedbStateError(StateError::QueryNotSupported)),
         }
     }
 
-    pub fn get_utxo_by_stake(&self, stake: &[u8]) -> Result<UtxoSet, LedgerError> {
+    pub fn get_utxo_by_stake(&self, stake: &[u8]) -> Result<UtxoSet, RedbStateError> {
         match self {
             LedgerStore::SchemaV2(x) => Ok(x.get_utxos_by_stake(stake)?),
-            _ => Err(LedgerError::QueryNotSupported),
+            _ => Err(RedbStateError(StateError::QueryNotSupported)),
         }
     }
 
-    pub fn get_utxo_by_policy(&self, policy: &[u8]) -> Result<UtxoSet, LedgerError> {
+    pub fn get_utxo_by_policy(&self, policy: &[u8]) -> Result<UtxoSet, RedbStateError> {
         match self {
             LedgerStore::SchemaV2(x) => Ok(x.get_utxos_by_policy(policy)?),
-            _ => Err(LedgerError::QueryNotSupported),
+            _ => Err(RedbStateError(StateError::QueryNotSupported)),
         }
     }
 
-    pub fn get_utxo_by_asset(&self, asset: &[u8]) -> Result<UtxoSet, LedgerError> {
+    pub fn get_utxo_by_asset(&self, asset: &[u8]) -> Result<UtxoSet, RedbStateError> {
         match self {
             LedgerStore::SchemaV2(x) => Ok(x.get_utxos_by_asset(asset)?),
-            _ => Err(LedgerError::QueryNotSupported),
+            _ => Err(RedbStateError(StateError::QueryNotSupported)),
         }
     }
 
-    pub fn apply(&self, deltas: &[LedgerDelta]) -> Result<(), LedgerError> {
+    pub fn apply(&self, deltas: &[LedgerDelta]) -> Result<(), RedbStateError> {
         match self {
             LedgerStore::SchemaV1(x) => Ok(x.apply(deltas)?),
             LedgerStore::SchemaV2(x) => Ok(x.apply(deltas)?),
@@ -234,7 +289,7 @@ impl LedgerStore {
         }
     }
 
-    pub fn finalize(&self, until: BlockSlot) -> Result<(), LedgerError> {
+    pub fn finalize(&self, until: BlockSlot) -> Result<(), RedbStateError> {
         match self {
             LedgerStore::SchemaV1(x) => Ok(x.finalize(until)?),
             LedgerStore::SchemaV2(x) => Ok(x.finalize(until)?),
@@ -243,23 +298,23 @@ impl LedgerStore {
     }
 
     /// Upgrades a light store to a full store by indexing data
-    pub fn upgrade(self) -> Result<Self, LedgerError> {
+    pub fn upgrade(self) -> Result<Self, RedbStateError> {
         match self {
             LedgerStore::SchemaV2Light(x) => {
                 let db = x.upgrade()?;
                 Ok(LedgerStore::SchemaV2(v2::LedgerStore::new(db)))
             }
-            _ => Err(LedgerError::InvalidStoreVersion),
+            _ => Err(RedbStateError(StateError::InvalidStoreVersion)),
         }
     }
 
-    pub fn copy(&self, target: &Self) -> Result<(), LedgerError> {
+    pub fn copy(&self, target: &Self) -> Result<(), RedbStateError> {
         match (self, target) {
             (LedgerStore::SchemaV2(x), LedgerStore::SchemaV2(target)) => Ok(x.copy(target)?),
             (LedgerStore::SchemaV2Light(x), LedgerStore::SchemaV2Light(target)) => {
                 Ok(x.copy(target)?)
             }
-            _ => Err(LedgerError::InvalidStoreVersion),
+            _ => Err(RedbStateError(StateError::InvalidStoreVersion)),
         }
     }
 }

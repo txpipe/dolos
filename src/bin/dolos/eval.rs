@@ -1,4 +1,3 @@
-use dolos::core::{EraCbor, TxoRef};
 use itertools::*;
 use miette::{Context, IntoDiagnostic};
 use pallas::{
@@ -6,6 +5,8 @@ use pallas::{
     ledger::validate::utils::{CertState, Environment as ValidationContext, UTxOs},
 };
 use std::{borrow::Cow, path::PathBuf, sync::Arc};
+
+use dolos::core::{EraCbor, StateStore as _, TxoRef};
 
 #[derive(Debug, clap::Args)]
 pub struct Args {
