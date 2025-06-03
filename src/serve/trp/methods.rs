@@ -69,7 +69,21 @@ fn handle_param_args(
 ) -> Result<(), ErrorObjectOwned> {
     match val {
         ParamsArgValue::String(s) => {
-            tx.set_arg(key, s.as_str().into());
+            let arg = if let Some(hex_str) = s.strip_prefix("0x") {
+                hex::decode(hex_str)
+                    .map_err(|e| {
+                        ErrorObject::owned(
+                            ErrorCode::InvalidParams.code(),
+                            format!("Invalid hex for key '{}'", key),
+                            Some(e.to_string()),
+                        )
+                    })?
+                    .into()
+            } else {
+                s.as_str().into()
+            };
+
+            tx.set_arg(key, arg);
         }
         ParamsArgValue::Number(n) => {
             tx.set_arg(key, (*n).into());
