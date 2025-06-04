@@ -3,11 +3,10 @@ use miette::IntoDiagnostic;
 use pallas::ledger::traverse::{MultiEraBlock, MultiEraUpdate};
 use std::path::Path;
 
-use dolos::core::{ChainPoint, EraCbor, StateStore as _};
-use dolos::wal::{redb::WalStore, RawBlock, ReadUtils, WalReader as _};
+use dolos::{adapters::WalAdapter, prelude::*};
 
 #[allow(dead_code)]
-fn dump_txs(chain: &WalStore) -> miette::Result<()> {
+fn dump_txs(chain: &WalAdapter) -> miette::Result<()> {
     let blocks = chain
         .crawl_from(None)
         .into_diagnostic()?
@@ -56,7 +55,7 @@ pub fn run(config: &crate::Config, _args: &Args) -> miette::Result<()> {
 
     println!("---");
 
-    if let Some(ChainPoint(slot, hash)) = ledger.cursor().unwrap() {
+    if let Some(ChainPoint::Specific(slot, hash)) = ledger.cursor().unwrap() {
         println!("found ledger tip");
         println!("slot: {slot}, hash: {hash}");
     } else {
@@ -101,7 +100,7 @@ pub fn run(config: &crate::Config, _args: &Args) -> miette::Result<()> {
         .into_diagnostic()?
         .ok_or(miette::miette!("Uninitialized ledger."))?;
 
-    let updates: Vec<_> = ledger.get_pparams(curr_point.0).into_diagnostic()?;
+    let updates: Vec<_> = ledger.get_pparams(curr_point.slot()).into_diagnostic()?;
 
     let updates: Vec<_> = updates
         .iter()

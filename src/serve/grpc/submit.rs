@@ -8,40 +8,37 @@ use pallas::interop::utxorpc::spec::cardano::ExUnits;
 use pallas::interop::utxorpc::spec::submit::{WaitForTxResponse, *};
 use std::collections::HashSet;
 use std::pin::Pin;
-use tokio_stream::wrappers::BroadcastStream;
 use tonic::{Request, Response, Status};
 use tracing::info;
 
-use dolos_core::{MempoolError, MempoolStore as _};
+use crate::mempool::UpdateFilter;
+use crate::prelude::*;
 
-use crate::mempool::{Event, Mempool, UpdateFilter};
-use crate::state::LedgerStore;
-
-pub struct SubmitServiceImpl {
-    mempool: Mempool,
-    _mapper: interop::Mapper<LedgerStore>,
+pub struct SubmitServiceImpl<D: Domain> {
+    mempool: D::Mempool,
+    _mapper: interop::Mapper<D::State>,
 }
 
-impl SubmitServiceImpl {
-    pub fn new(mempool: Mempool, ledger: LedgerStore) -> Self {
-        Self {
-            mempool,
-            _mapper: interop::Mapper::new(ledger),
-        }
+impl<D: Domain> SubmitServiceImpl<D> {
+    pub fn new(domain: D) -> Self {
+        let mempool = domain.mempool().clone();
+        let _mapper = interop::Mapper::new(domain.state().clone());
+
+        Self { mempool, _mapper }
     }
 }
 
-fn tx_stage_to_u5c(stage: crate::mempool::TxStage) -> i32 {
+fn tx_stage_to_u5c(stage: MempoolTxStage) -> i32 {
     match stage {
-        crate::mempool::TxStage::Pending => Stage::Mempool as i32,
-        crate::mempool::TxStage::Inflight => Stage::Network as i32,
-        crate::mempool::TxStage::Acknowledged => Stage::Acknowledged as i32,
-        crate::mempool::TxStage::Confirmed => Stage::Confirmed as i32,
+        MempoolTxStage::Pending => Stage::Mempool as i32,
+        MempoolTxStage::Inflight => Stage::Network as i32,
+        MempoolTxStage::Acknowledged => Stage::Acknowledged as i32,
+        MempoolTxStage::Confirmed => Stage::Confirmed as i32,
         _ => Stage::Unspecified as i32,
     }
 }
 
-fn event_to_watch_mempool_response(event: Event) -> WatchMempoolResponse {
+fn event_to_watch_mempool_response(event: MempoolEvent) -> WatchMempoolResponse {
     WatchMempoolResponse {
         tx: TxInMempool {
             r#ref: event.tx.hash.to_vec().into(),
@@ -53,7 +50,7 @@ fn event_to_watch_mempool_response(event: Event) -> WatchMempoolResponse {
     }
 }
 
-fn event_to_wait_for_tx_response(event: Event) -> WaitForTxResponse {
+fn event_to_wait_for_tx_response(event: MempoolEvent) -> WaitForTxResponse {
     WaitForTxResponse {
         stage: tx_stage_to_u5c(event.new_stage),
         r#ref: event.tx.hash.to_vec().into(),
@@ -99,7 +96,7 @@ fn tx_eval_to_u5c(
 }
 
 #[async_trait::async_trait]
-impl submit_service_server::SubmitService for SubmitServiceImpl {
+impl<D: Domain> submit_service_server::SubmitService for SubmitServiceImpl<D> {
     type WaitForTxStream =
         Pin<Box<dyn Stream<Item = Result<WaitForTxResponse, tonic::Status>> + Send + 'static>>;
 
@@ -154,7 +151,7 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
 
         let updates = self.mempool.subscribe();
 
-        let updates = UpdateFilter::new(updates, subjects)
+        let updates = UpdateFilter::<D::Mempool>::new(updates, subjects)
             .map(|x| Ok(event_to_wait_for_tx_response(x)))
             .boxed();
 
@@ -176,7 +173,7 @@ impl submit_service_server::SubmitService for SubmitServiceImpl {
     ) -> Result<tonic::Response<Self::WatchMempoolStream>, tonic::Status> {
         let updates = self.mempool.subscribe();
 
-        let stream = BroadcastStream::new(updates)
+        let stream = updates
             .map_ok(event_to_watch_mempool_response)
             .map_err(|e| Status::internal(e.to_string()))
             .boxed();

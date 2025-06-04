@@ -2,8 +2,9 @@ use gasket::{framework::*, runtime::Policy};
 use tracing::{error, info};
 
 use dolos_core::PullEvent;
+use dolos_redb::wal::RedbWalStore;
 
-use crate::wal::redb::WalStore;
+use crate::adapters::WalAdapter;
 
 struct WitnessStage {
     input: gasket::messaging::InputPort<PullEvent>,
@@ -52,7 +53,7 @@ fn test_mainnet_upstream() {
     )
     .unwrap();
 
-    let mut wal = WalStore::memory(None).unwrap();
+    let mut wal = RedbWalStore::memory(None).unwrap();
 
     wal.initialize_from_origin().unwrap();
 
@@ -62,7 +63,7 @@ fn test_mainnet_upstream() {
         "relays-new.cardano-mainnet.iohk.io:3001".into(),
         764824073,
         20,
-        wal,
+        WalAdapter::Redb(wal),
         false,
     );
 

@@ -6,17 +6,12 @@ use pallas::network::miniprotocols::{
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
-use crate::{
-    prelude::Error,
-    wal::{
-        self, redb::WalStore, ChainPoint, LogEntry, LogSeq, LogValue, RawBlock, ReadUtils,
-        WalReader,
-    },
-};
+use crate::adapters::{WalAdapter, WalIter};
+use crate::prelude::*;
 
 pub struct Session<'a> {
-    wal: WalStore,
-    current_iterator: Option<wal::redb::WalIter<'a>>,
+    wal: WalAdapter,
+    current_iterator: Option<WalIter<'a>>,
     is_new_intersection: bool,
     last_known_seq: Option<LogSeq>,
     connection: N2NServer,
@@ -95,7 +90,7 @@ impl Session<'_> {
 
     async fn wait_for_next_wal(&mut self) -> Result<LogEntry, Error> {
         loop {
-            self.wal.tip_change().await.map_err(Error::server)?;
+            self.wal.tip_change().await;
 
             self.restart_iterator()?;
 
@@ -225,7 +220,7 @@ impl Session<'_> {
 }
 
 pub async fn handle_session(
-    wal: WalStore,
+    wal: WalAdapter,
     connection: N2NServer,
     cancel: CancellationToken,
 ) -> Result<(), Error> {

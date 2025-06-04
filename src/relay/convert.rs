@@ -3,8 +3,6 @@ use pallas::ledger::traverse::MultiEraBlock;
 use pallas::network::miniprotocols::chainsync;
 
 use crate::prelude::*;
-use crate::wal;
-use crate::wal::RawBlock;
 
 fn era_to_header_variant(era: Era) -> u8 {
     match era {
@@ -32,7 +30,7 @@ fn define_byron_prefix(block: &MultiEraBlock) -> Option<(u8, u64)> {
     }
 }
 
-pub fn header_cbor_to_chainsync(block: wal::RawBlock) -> Result<chainsync::HeaderContent, Error> {
+pub fn header_cbor_to_chainsync(block: RawBlock) -> Result<chainsync::HeaderContent, Error> {
     let RawBlock { body, .. } = block;
 
     let block = pallas::ledger::traverse::MultiEraBlock::decode(&body).map_err(Error::parse)?;

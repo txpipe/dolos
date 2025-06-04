@@ -7,10 +7,9 @@ use pallas::ledger::traverse::{ComputeHash, Era, MultiEraBlock, MultiEraTx};
 use pallas::network::miniprotocols::chainsync::Tip;
 use tracing::info;
 
+use crate::adapters::WalAdapter;
 use crate::mempool::Mempool;
 use crate::prelude::*;
-use crate::wal::redb::WalStore;
-use crate::wal::{self, ChainPoint, WalReader};
 
 pub type DownstreamPort = gasket::messaging::OutputPort<PullEvent>;
 
@@ -23,10 +22,11 @@ pub struct Worker {
     block_production_timer: tokio::time::Interval,
     mempool: Mempool,
 }
+
 impl Worker {
     pub fn create_next_block(
         &self,
-        current: Option<wal::RawBlock>,
+        current: Option<RawBlock>,
     ) -> Result<(Tip, BlockBody), WorkerError> {
         let (block_number, slot, prev_hash) = match current {
             Some(raw) => {
@@ -156,7 +156,7 @@ impl gasket::framework::Worker<Stage> for Worker {
 pub struct Stage {
     // block_production_interval: std::time::Duration,
     block_production_interval: u64,
-    wal: WalStore,
+    wal: WalAdapter,
     mempool: Mempool,
 
     pub downstream: DownstreamPort,
@@ -169,7 +169,7 @@ pub struct Stage {
 }
 
 impl Stage {
-    pub fn new(wal: WalStore, mempool: Mempool, block_production_interval: u64) -> Self {
+    pub fn new(wal: WalAdapter, mempool: Mempool, block_production_interval: u64) -> Self {
         Self {
             downstream: Default::default(),
             block_count: Default::default(),

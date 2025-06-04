@@ -1,11 +1,11 @@
 use pallas::codec::minicbor;
 use pallas::ledger::traverse::MultiEraBlock;
 use pallas::ledger::traverse::MultiEraOutput;
+use pallas::ledger::traverse::MultiEraTx;
 use std::collections::HashMap;
+use std::collections::HashSet;
 
-use dolos_core::{
-    BlockSlot, BrokenInvariant, ChainPoint, EraCbor, Genesis, LedgerDelta, LedgerSlice, TxoRef,
-};
+use dolos_core::*;
 
 pub mod pparams;
 //pub mod validate;
@@ -26,13 +26,13 @@ pub type UtxoBody<'a> = MultiEraOutput<'a>;
 /// return an error if any of the assumed invariants have been broken in the
 /// process of computing the delta, but it doesn't provide a comprehensive
 /// validation of the ledger rules.
-pub fn compute_delta(
+pub fn compute_apply_delta(
     block: &MultiEraBlock,
-    mut context: LedgerSlice,
+    mut ledger: LedgerSlice,
 ) -> Result<LedgerDelta, BrokenInvariant> {
     let era: u16 = block.era().into();
     let mut delta = LedgerDelta {
-        new_position: Some(ChainPoint(block.slot(), block.hash())),
+        new_position: Some(ChainPoint::Specific(block.slot(), block.hash())),
         new_block: match block {
             MultiEraBlock::Byron(x) => minicbor::to_vec((era, x)).unwrap(),
             MultiEraBlock::Conway(x) => minicbor::to_vec((era, x)).unwrap(),
@@ -56,7 +56,7 @@ pub fn compute_delta(
         for consumed in tx.consumes() {
             let stxi_ref = TxoRef(*consumed.hash(), consumed.index() as u32);
 
-            let stxi_body = context
+            let stxi_body = ledger
                 .resolved_inputs
                 .remove(&stxi_ref)
                 .ok_or_else(|| BrokenInvariant::MissingUtxo(stxi_ref.clone()))?;
@@ -87,7 +87,7 @@ pub fn compute_undo_delta(
 ) -> Result<LedgerDelta, BrokenInvariant> {
     let era: u16 = block.era().into();
     let mut delta = LedgerDelta {
-        undone_position: Some(ChainPoint(block.slot(), block.hash())),
+        undone_position: Some(ChainPoint::Specific(block.slot(), block.hash())),
         undone_block: match block {
             MultiEraBlock::Byron(x) => minicbor::to_vec((era, x)).unwrap(),
             MultiEraBlock::Conway(x) => minicbor::to_vec((era, x)).unwrap(),
@@ -185,6 +185,100 @@ pub fn mutable_slots(genesis: &Genesis) -> u64 {
 /// which slots can be finalized in the ledger store (aka: compaction).
 pub fn lastest_immutable_slot(tip: BlockSlot, genesis: &Genesis) -> BlockSlot {
     tip.saturating_sub(mutable_slots(genesis))
+}
+
+pub fn ledger_query_for_block(
+    block: &MultiEraBlock,
+    unapplied_deltas: &[LedgerDelta],
+) -> Result<LedgerQuery, ChainError> {
+    let txs: HashMap<_, _> = block.txs().into_iter().map(|tx| (tx.hash(), tx)).collect();
+
+    // TODO: turn this into "referenced utxos" intead of just consumed.
+    let consumed: HashSet<_> = txs
+        .values()
+        .flat_map(MultiEraTx::consumes)
+        .map(|utxo| TxoRef(*utxo.hash(), utxo.index() as u32))
+        .collect();
+
+    let consumed_same_block: HashMap<_, _> = txs
+        .iter()
+        .flat_map(|(tx_hash, tx)| {
+            tx.produces()
+                .into_iter()
+                .map(|(idx, utxo)| (TxoRef(*tx_hash, idx as u32), utxo.into()))
+        })
+        .filter(|(x, _)| consumed.contains(x))
+        .collect();
+
+    let consumed_unapplied_deltas: HashMap<_, _> = unapplied_deltas
+        .iter()
+        .flat_map(|d| d.produced_utxo.iter().chain(d.recovered_stxi.iter()))
+        .filter(|(x, _)| consumed.contains(x))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+
+    let required_inputs = consumed
+        .into_iter()
+        .filter(|x| !consumed_same_block.contains_key(x))
+        .filter(|x| !consumed_unapplied_deltas.contains_key(x))
+        .collect::<Vec<_>>();
+
+    let extra_inputs = consumed_same_block
+        .into_iter()
+        .chain(consumed_unapplied_deltas.into_iter())
+        .collect();
+
+    // TODO: include reference scripts and collateral
+
+    Ok(LedgerQuery {
+        required_inputs,
+        extra_inputs,
+    })
+}
+
+pub struct ChainLogic;
+
+impl dolos_core::ChainLogic for ChainLogic {
+    type Block<'a> = MultiEraBlock<'a>;
+
+    fn decode_block<'a>(block: &'a [u8]) -> Result<Self::Block<'a>, ChainError> {
+        MultiEraBlock::decode(block).map_err(ChainError::DecodingError)
+    }
+
+    fn lastest_immutable_slot(domain: &impl Domain, tip: BlockSlot) -> BlockSlot {
+        lastest_immutable_slot(tip, domain.genesis())
+    }
+
+    fn compute_origin_delta<'a>(genesis: &Genesis) -> Result<LedgerDelta, ChainError> {
+        let delta = compute_origin_delta(genesis);
+
+        Ok(delta)
+    }
+
+    fn compute_apply_delta<'a>(
+        ledger: LedgerSlice,
+        block: &Self::Block<'a>,
+    ) -> Result<LedgerDelta, ChainError> {
+        let delta = compute_apply_delta(&block, ledger).map_err(ChainError::BrokenInvariant)?;
+
+        Ok(delta)
+    }
+
+    fn compute_undo_delta<'a>(
+        ledger: LedgerSlice,
+        block: &Self::Block<'a>,
+    ) -> Result<LedgerDelta, ChainError> {
+        let delta = compute_undo_delta(&block, ledger).map_err(ChainError::BrokenInvariant)?;
+
+        Ok(delta)
+    }
+
+    fn ledger_query_for_block<'a>(
+        block: &Self::Block<'a>,
+        unapplied_deltas: &[LedgerDelta],
+    ) -> Result<LedgerQuery, ChainError> {
+        ledger_query_for_block(block, unapplied_deltas)
+    }
 }
 
 #[cfg(test)]
@@ -303,7 +397,7 @@ mod tests {
         let block = MultiEraBlock::decode(&cbor).unwrap();
         let context = fake_slice_for_block(&block);
 
-        let delta = super::compute_delta(&block, context).unwrap();
+        let delta = super::compute_apply_delta(&block, context).unwrap();
 
         for tx in block.txs() {
             for input in tx.consumes() {
@@ -329,7 +423,7 @@ mod tests {
         let block = MultiEraBlock::decode(&cbor).unwrap();
         let context = fake_slice_for_block(&block);
 
-        let apply = super::compute_delta(&block, context.clone()).unwrap();
+        let apply = super::compute_apply_delta(&block, context.clone()).unwrap();
         let undo = super::compute_undo_delta(&block, context).unwrap();
 
         for (produced, _) in apply.produced_utxo.iter() {

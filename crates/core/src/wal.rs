@@ -1,3 +1,4 @@
+use itertools::Itertools as _;
 use std::collections::BTreeSet;
 
 use super::*;
@@ -30,10 +31,12 @@ where
 }
 
 #[trait_variant::make(Send)]
-pub trait WalReader: Clone {
+pub trait WalStore: Clone + Send + Sync + 'static {
     type LogIterator<'a>: DoubleEndedIterator<Item = LogEntry> + Sized + Sync + Send;
 
-    async fn tip_change(&self) -> Result<(), WalError>;
+    async fn tip_change(&self);
+
+    fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<(), WalError>;
 
     fn crawl_range<'a>(
         &self,
@@ -163,28 +166,64 @@ pub trait WalReader: Clone {
     fn read_sparse_blocks(&self, points: &[ChainPoint]) -> Result<Vec<RawBlock>, WalError> {
         points.iter().map(|p| self.read_block(p)).try_collect()
     }
+
+    fn append_entries(&mut self, logs: impl Iterator<Item = LogValue>) -> Result<(), WalError>;
+
+    fn roll_forward(&mut self, blocks: impl Iterator<Item = RawBlock>) -> Result<(), WalError> {
+        self.append_entries(blocks.map(LogValue::Apply))
+    }
+
+    fn roll_back(&mut self, until: &ChainPoint) -> Result<(), WalError> {
+        let seq = self.assert_point(until)?;
+
+        // find all of the "apply" event in the wall and gather the contained block
+        // data.
+        let applies: Vec<_> = self
+            .crawl_from(Some(seq))?
+            .rev()
+            .filter_apply()
+            .into_blocks()
+            .flatten()
+            .collect();
+
+        // take all of the applies, except the last one, and turn them into undo.
+        let undos: Vec<_> = applies
+            .into_iter()
+            .filter(|x| !ChainPoint::from(x).eq(until))
+            .map(LogValue::Undo)
+            .collect();
+
+        // the last one (which is the point the chain is at) is turned into a mark.
+        let mark = std::iter::once(LogValue::Mark(until.clone()));
+
+        self.append_entries(undos.into_iter().chain(mark))?;
+
+        Ok(())
+    }
 }
 
 /// Iterator for raw blocks present in WAL.
 ///
-/// Skips undone blocks that are present in the next "lookahead" items in the WAL sequence.
+/// Skips undone blocks that are present in the next "lookahead" items in the
+/// WAL sequence.
 pub struct WalBlockReader<'a, T>
 where
-    T: WalReader,
+    T: WalStore,
 {
     undone: BTreeSet<ChainPoint>,
-    start: <T as WalReader>::LogIterator<'a>,
-    window: <T as WalReader>::LogIterator<'a>,
+    start: <T as WalStore>::LogIterator<'a>,
+    window: <T as WalStore>::LogIterator<'a>,
 }
 
 impl<T> WalBlockReader<'_, T>
 where
-    T: WalReader,
+    T: WalStore,
 {
     /// Create a new iterator of raw blocks skipping rollbacks.
     ///
-    /// Setting a eager lookahead value may lead to unwanted results. This is intended to be the
-    /// amount of slots by which a block is considered to be inmutable.
+    /// Setting a eager lookahead value may lead to unwanted results. This is
+    /// intended to be the amount of slots by which a block is considered to
+    /// be inmutable.
     pub fn try_new(wal: &T, start: Option<LogSeq>, lookahead: u64) -> Result<Self, WalError> {
         let mut undone = BTreeSet::new();
         let mut iter = wal.crawl_from(start)?;
@@ -217,7 +256,7 @@ where
 
 impl<T> Iterator for WalBlockReader<'_, T>
 where
-    T: WalReader,
+    T: WalStore,
 {
     type Item = RawBlock;
     fn next(&mut self) -> Option<<Self as Iterator>::Item> {
@@ -236,124 +275,5 @@ where
             }
         }
         None
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::redb::WalStore;
-    use super::*;
-
-    fn dummy_block(slot: u64) -> RawBlock {
-        let hash = pallas::crypto::hash::Hasher::<256>::hash(slot.to_be_bytes().as_slice());
-
-        RawBlock {
-            slot,
-            hash,
-            era: pallas::ledger::traverse::Era::Byron,
-            body: slot.to_be_bytes().to_vec(),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_wal_block_reader_happy_path() {
-        let mut db = WalStore::memory(None).unwrap();
-        db.initialize_from_origin().unwrap();
-
-        let blocks = (0..=5).map(dummy_block).collect_vec();
-        db.roll_forward(blocks.clone().into_iter()).unwrap();
-
-        let wal_block_reader = WalBlockReader::try_new(&db, None, 20).unwrap();
-        let output_blocks = wal_block_reader.collect_vec();
-
-        assert_eq!(blocks, output_blocks);
-    }
-
-    #[tokio::test]
-    async fn test_wal_block_reader_undone_blocks_in_lookahead_window() {
-        let mut db = WalStore::memory(None).unwrap();
-        db.initialize_from_origin().unwrap();
-
-        let undone_chain_point = (&dummy_block(1)).into();
-        db.roll_forward(
-            vec![
-                dummy_block(0),
-                dummy_block(1),
-                dummy_block(2),
-                dummy_block(3),
-            ]
-            .into_iter(),
-        )
-        .unwrap();
-        db.roll_back(&undone_chain_point).unwrap();
-        db.roll_forward(vec![dummy_block(4), dummy_block(5), dummy_block(6)].into_iter())
-            .unwrap();
-
-        let wal_block_reader = WalBlockReader::try_new(&db, None, 20).unwrap();
-        let output_blocks = wal_block_reader.collect_vec();
-
-        assert_eq!(
-            vec![
-                dummy_block(0),
-                dummy_block(1),
-                dummy_block(4),
-                dummy_block(5),
-                dummy_block(6)
-            ],
-            output_blocks
-        );
-    }
-
-    #[tokio::test]
-    async fn test_wal_block_reader_undone_blocks_not_in_lookahead_window() {
-        let mut db = WalStore::memory(None).unwrap();
-        db.initialize_from_origin().unwrap();
-
-        let undone_chain_point = (&dummy_block(2)).into();
-        db.roll_forward(
-            vec![
-                dummy_block(0),
-                dummy_block(1),
-                dummy_block(2),
-                dummy_block(3),
-                dummy_block(4),
-                dummy_block(5),
-                dummy_block(6),
-            ]
-            .into_iter(),
-        )
-        .unwrap();
-        db.roll_back(&undone_chain_point).unwrap();
-
-        let wal_block_reader = WalBlockReader::try_new(&db, None, 2).unwrap();
-        let output_blocks = wal_block_reader.collect_vec();
-
-        // With a correctly sized lookback window, only 0 1 and 2 should be returned
-        assert_eq!(
-            vec![
-                dummy_block(0),
-                dummy_block(1),
-                dummy_block(2),
-                dummy_block(3),
-                dummy_block(4),
-                dummy_block(5),
-                dummy_block(6),
-            ],
-            output_blocks
-        );
-
-        let wal_block_reader = WalBlockReader::try_new(&db, None, 3).unwrap();
-        let output_blocks = wal_block_reader.collect_vec();
-
-        // With a correctly sized lookback window, only 0 1 and 2 should be returned
-        assert_eq!(
-            vec![
-                dummy_block(0),
-                dummy_block(1),
-                dummy_block(2),
-                dummy_block(3),
-            ],
-            output_blocks
-        );
     }
 }

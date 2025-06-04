@@ -1,7 +1,8 @@
-use dolos::wal::{ChainPoint, WalReader as _};
-use miette::{Context, IntoDiagnostic};
+use miette::{bail, Context, IntoDiagnostic};
 use pallas::crypto::hash::Hash;
 use std::str::FromStr;
+
+use dolos::prelude::*;
 
 #[derive(Debug, clap::Args)]
 pub struct Args {
@@ -17,7 +18,10 @@ pub struct Args {
 pub fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging)?;
 
-    let wal = crate::common::open_wal_store(config)?;
+    let wal = match crate::common::open_wal_store(config)? {
+        dolos::adapters::WalAdapter::Redb(x) => x,
+        _ => bail!("only redb wal adapter is supported"),
+    };
 
     let hash = Hash::from_str(&args.hash)
         .into_diagnostic()

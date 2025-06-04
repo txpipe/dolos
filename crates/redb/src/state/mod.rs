@@ -1,13 +1,10 @@
 use ::redb::{Database, MultimapTableHandle as _, TableHandle as _};
-use itertools::Itertools;
-use log::info;
 use std::path::Path;
+use tracing::{debug, info, warn};
 
-use tracing::{debug, warn};
-
-use dolos_core::ChainPoint;
-
-use super::*;
+use dolos_core::{
+    BlockSlot, ChainPoint, EraCbor, LedgerDelta, StateError, TxoRef, UtxoMap, UtxoSet,
+};
 
 mod tables;
 pub mod v1;
@@ -80,7 +77,7 @@ fn compute_schema_hash(db: &Database) -> Result<Option<String>, RedbStateError> 
 
     let names_2 = rx.list_multimap_tables()?.map(|t| t.name().to_owned());
 
-    let mut names = names_1.chain(names_2).collect_vec();
+    let mut names: Vec<_> = names_1.chain(names_2).collect();
 
     debug!(tables = ?names, "tables names used to compute hash");
 
@@ -363,7 +360,7 @@ mod tests {
         assert!(store.is_empty().unwrap());
 
         let delta = LedgerDelta {
-            new_position: Some(ChainPoint(
+            new_position: Some(ChainPoint::Specific(
                 1,
                 pallas::crypto::hash::Hash::new(b"01010101010101010101010101010101".to_owned()),
             )),

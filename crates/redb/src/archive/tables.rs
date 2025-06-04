@@ -37,12 +37,12 @@ impl BlocksTable {
     pub fn apply(wx: &WriteTransaction, delta: &LedgerDelta) -> Result<(), Error> {
         let mut table = wx.open_table(Self::DEF)?;
         if let Some(point) = &delta.new_position {
-            let slot = point.0;
+            let slot = point.slot();
             table.insert(slot, delta.new_block.clone())?;
         }
 
         if let Some(point) = &delta.undone_position {
-            let slot = point.0;
+            let slot = point.slot();
             table.remove(slot)?;
         }
 

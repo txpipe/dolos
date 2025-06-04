@@ -8,9 +8,8 @@ use pallas::network::miniprotocols::chainsync::{
 use pallas::network::miniprotocols::Point;
 use tracing::{debug, info};
 
+use crate::adapters::WalAdapter;
 use crate::prelude::*;
-use crate::wal::redb::WalStore;
-use crate::wal::WalReader;
 
 fn to_traverse(header: &HeaderContent) -> Result<MultiEraHeader<'_>, WorkerError> {
     let out = match header.byron_prefix {
@@ -210,7 +209,7 @@ pub struct Stage {
     peer_address: String,
     network_magic: u64,
     block_fetch_batch_size: usize,
-    wal: WalStore,
+    wal: WalAdapter,
     quit_on_tip: bool,
 
     pub downstream: DownstreamPort,
@@ -227,7 +226,7 @@ impl Stage {
         peer_address: String,
         network_magic: u64,
         block_fetch_batch_size: usize,
-        wal: WalStore,
+        wal: WalAdapter,
         quit_on_tip: bool,
     ) -> Self {
         Self {
@@ -273,7 +272,7 @@ impl Stage {
         };
 
         self.downstream
-            .send(PullEvent::Rollback(point.clone()).into())
+            .send(PullEvent::Rollback(point.into()).into())
             .await
             .or_panic()?;
 

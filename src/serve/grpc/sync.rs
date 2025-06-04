@@ -5,20 +5,15 @@ use itertools::{Either, Itertools};
 use pallas::interop::utxorpc as interop;
 use pallas::interop::utxorpc::spec::sync::BlockRef;
 use pallas::interop::utxorpc::{spec as u5c, Mapper};
-use pallas::ledger::traverse::MultiEraBlock;
 use std::pin::Pin;
 use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
 
-use dolos_core::ArchiveStore as _;
+use crate::prelude::*;
+use crate::wal::WalStream;
 
-use crate::chain::ChainStore;
-use crate::prelude::BlockBody;
-use crate::state::LedgerStore;
-use crate::wal::{self, ChainPoint, RawBlock, WalReader as _};
-
-fn u5c_to_chain_point(block_ref: u5c::sync::BlockRef) -> Result<wal::ChainPoint, Status> {
-    Ok(wal::ChainPoint::Specific(
+fn u5c_to_chain_point(block_ref: u5c::sync::BlockRef) -> Result<ChainPoint, Status> {
+    Ok(ChainPoint::Specific(
         block_ref.index,
         super::convert::bytes_to_hash32(&block_ref.hash)?,
     ))
@@ -29,7 +24,10 @@ fn u5c_to_chain_point(block_ref: u5c::sync::BlockRef) -> Result<wal::ChainPoint,
 //     AnyChainBlock { chain: Some(block) }
 // }
 
-fn raw_to_anychain(mapper: &Mapper<LedgerStore>, body: &BlockBody) -> u5c::sync::AnyChainBlock {
+fn raw_to_anychain<D: Domain>(
+    mapper: &Mapper<D::State>,
+    body: &BlockBody,
+) -> u5c::sync::AnyChainBlock {
     let block = mapper.map_block_cbor(body);
 
     u5c::sync::AnyChainBlock {
@@ -38,7 +36,7 @@ fn raw_to_anychain(mapper: &Mapper<LedgerStore>, body: &BlockBody) -> u5c::sync:
     }
 }
 
-fn raw_to_blockref(raw: &wal::RawBlock) -> u5c::sync::BlockRef {
+fn raw_to_blockref(raw: &RawBlock) -> u5c::sync::BlockRef {
     let RawBlock { slot, hash, .. } = raw;
 
     u5c::sync::BlockRef {
@@ -47,22 +45,35 @@ fn raw_to_blockref(raw: &wal::RawBlock) -> u5c::sync::BlockRef {
     }
 }
 
-fn wal_log_to_tip_response(
-    mapper: &Mapper<LedgerStore>,
-    log: &wal::LogValue,
+fn point_to_blockref(point: &ChainPoint) -> u5c::sync::BlockRef {
+    match point {
+        ChainPoint::Origin => u5c::sync::BlockRef {
+            index: 0,
+            hash: vec![].into(),
+        },
+        ChainPoint::Specific(slot, hash) => u5c::sync::BlockRef {
+            index: *slot,
+            hash: hash.to_vec().into(),
+        },
+    }
+}
+
+fn wal_log_to_tip_response<D: Domain>(
+    mapper: &Mapper<D::State>,
+    log: &LogValue,
 ) -> u5c::sync::FollowTipResponse {
     u5c::sync::FollowTipResponse {
         action: match log {
-            wal::LogValue::Apply(x) => {
-                u5c::sync::follow_tip_response::Action::Apply(raw_to_anychain(mapper, &x.body))
+            LogValue::Apply(x) => {
+                u5c::sync::follow_tip_response::Action::Apply(raw_to_anychain::<D>(mapper, &x.body))
                     .into()
             }
-            wal::LogValue::Undo(x) => {
-                u5c::sync::follow_tip_response::Action::Undo(raw_to_anychain(mapper, &x.body))
+            LogValue::Undo(x) => {
+                u5c::sync::follow_tip_response::Action::Undo(raw_to_anychain::<D>(mapper, &x.body))
                     .into()
             }
             // TODO: shouldn't we have a u5c event for origin?
-            wal::LogValue::Mark(..) => None,
+            LogValue::Mark(..) => None,
         },
     }
 }
@@ -86,31 +97,26 @@ fn point_to_reset_tip_response(point: ChainPoint) -> u5c::sync::FollowTipRespons
     }
 }
 
-pub struct SyncServiceImpl {
-    wal: wal::redb::WalStore,
-    chain: ChainStore,
-    mapper: interop::Mapper<LedgerStore>,
+pub struct SyncServiceImpl<D: Domain> {
+    domain: D,
+    mapper: interop::Mapper<D::State>,
     cancellation_token: CancellationToken,
 }
 
-impl SyncServiceImpl {
-    pub fn new(
-        wal: wal::redb::WalStore,
-        ledger: LedgerStore,
-        chain: ChainStore,
-        cancellation_token: CancellationToken,
-    ) -> Self {
+impl<D: Domain> SyncServiceImpl<D> {
+    pub fn new(domain: D, cancellation_token: CancellationToken) -> Self {
+        let mapper = Mapper::new(domain.state().clone());
+
         Self {
-            wal,
-            mapper: Mapper::new(ledger),
-            chain,
+            domain,
+            mapper,
             cancellation_token,
         }
     }
 }
 
 #[async_trait::async_trait]
-impl u5c::sync::sync_service_server::SyncService for SyncServiceImpl {
+impl<D: Domain> u5c::sync::sync_service_server::SyncService for SyncServiceImpl<D> {
     type FollowTipStream =
         Pin<Box<dyn Stream<Item = Result<u5c::sync::FollowTipResponse, Status>> + Send + 'static>>;
 
@@ -124,10 +130,11 @@ impl u5c::sync::sync_service_server::SyncService for SyncServiceImpl {
             .r#ref
             .iter()
             .map(|br| {
-                self.chain
+                self.domain
+                    .archive()
                     .get_block_by_slot(&br.index)
                     .map_err(|_| Status::internal("Failed to query chain service."))?
-                    .map(|body| raw_to_anychain(&self.mapper, &body))
+                    .map(|body| raw_to_anychain::<D>(&self.mapper, &body))
                     .ok_or(Status::not_found(format!("Failed to find block: {:?}", br)))
             })
             .collect::<Result<Vec<u5c::sync::AnyChainBlock>, Status>>()?;
@@ -148,14 +155,15 @@ impl u5c::sync::sync_service_server::SyncService for SyncServiceImpl {
         let len = msg.max_items as usize + 1;
 
         let page = self
-            .wal
+            .domain
+            .wal()
             .read_block_page(from.as_ref(), len)
             .map_err(|_err| Status::internal("can't query block"))?;
 
         let (items, next_token): (_, Vec<_>) =
             page.into_iter().enumerate().partition_map(|(idx, x)| {
                 if idx < len - 1 {
-                    Either::Left(raw_to_anychain(&self.mapper, &x.body))
+                    Either::Left(raw_to_anychain::<D>(&self.mapper, &x.body))
                 } else {
                     Either::Right(raw_to_blockref(&x))
                 }
@@ -176,7 +184,8 @@ impl u5c::sync::sync_service_server::SyncService for SyncServiceImpl {
         let request = request.into_inner();
 
         let (from_seq, point) = if request.intersect.is_empty() {
-            self.wal
+            self.domain
+                .wal()
                 .find_tip()
                 .map_err(|_err| Status::internal("can't read WAL"))?
                 .ok_or(Status::internal("WAL has no data"))?
@@ -187,7 +196,8 @@ impl u5c::sync::sync_service_server::SyncService for SyncServiceImpl {
                 .map(u5c_to_chain_point)
                 .try_collect()?;
 
-            self.wal
+            self.domain
+                .wal()
                 .find_intersect(&intersect)
                 .map_err(|_err| Status::internal("can't read WAL"))?
                 .ok_or(Status::internal("can't find WAL sequence"))?
@@ -204,10 +214,13 @@ impl u5c::sync::sync_service_server::SyncService for SyncServiceImpl {
 
         let reset = once(async { Ok(point_to_reset_tip_response(point)) });
 
-        let forward =
-            wal::WalStream::start(self.wal.clone(), from_seq, self.cancellation_token.clone())
-                .skip(1)
-                .map(move |(_, log)| Ok(wal_log_to_tip_response(&mapper, &log)));
+        let forward = WalStream::start(
+            self.domain.wal().clone(),
+            from_seq,
+            self.cancellation_token.clone(),
+        )
+        .skip(1)
+        .map(move |(_, log)| Ok(wal_log_to_tip_response::<D>(&mapper, &log)));
 
         let stream = reset.chain(forward);
 
@@ -218,21 +231,15 @@ impl u5c::sync::sync_service_server::SyncService for SyncServiceImpl {
         &self,
         _request: tonic::Request<u5c::sync::ReadTipRequest>,
     ) -> std::result::Result<tonic::Response<u5c::sync::ReadTipResponse>, tonic::Status> {
-        let (slot, body) = self
-            .chain
-            .get_tip()
+        let (_, point) = self
+            .domain
+            .wal()
+            .find_tip()
             .map_err(|e| Status::internal(format!("Unable to read WAL: {:?}", e)))?
             .ok_or(Status::internal("chain has no data."))?;
 
-        let hash = MultiEraBlock::decode(&body)
-            .map_err(|_| Status::internal("Failed to decode tip block."))?
-            .hash();
-
         let response = u5c::sync::ReadTipResponse {
-            tip: Some(BlockRef {
-                index: slot,
-                hash: hash.to_vec().into(),
-            }),
+            tip: Some(point_to_blockref(&point)),
         };
 
         Ok(Response::new(response))

@@ -1,8 +1,8 @@
 use itertools::Itertools;
-use miette::{Context, IntoDiagnostic};
+use miette::{bail, Context, IntoDiagnostic};
 use std::path::PathBuf;
 
-use dolos::wal::{BlockSlot, WalReader, WalWriter};
+use dolos::prelude::*;
 
 #[derive(Debug, clap::Args)]
 pub struct Args {
@@ -22,9 +22,12 @@ pub struct Args {
 pub fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging)?;
 
-    let source = crate::common::open_wal_store(config)?;
+    let source = match crate::common::open_wal_store(config)? {
+        dolos::adapters::WalAdapter::Redb(x) => x,
+        _ => bail!("only redb wal adapter is supported"),
+    };
 
-    let mut target = dolos::wal::redb::WalStore::open(&args.output, None, None)
+    let mut target = dolos_redb::wal::RedbWalStore::open(&args.output, None, None)
         .into_diagnostic()
         .context("opening target WAL")?;
 

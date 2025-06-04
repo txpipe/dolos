@@ -7,7 +7,7 @@ type Error = super::RedbArchiveError;
 
 use dolos_core::{ArchiveError, BlockBody, BlockSlot, LedgerDelta};
 
-use super::{indexes, tables, ChainIter};
+use super::{ChainIter, indexes, tables};
 
 #[derive(Clone)]
 pub struct ChainStore {
@@ -62,10 +62,6 @@ impl ChainStore {
 
         wx.commit()?;
 
-        Ok(())
-    }
-
-    pub fn finalize(&self, _: BlockSlot) -> Result<(), Error> {
         Ok(())
     }
 
@@ -364,22 +360,12 @@ impl ChainStore {
 
         info!(
             cutoff_slot = prune_before,
-            start, excess, "pruning chain for excess history"
+            start, excess, "pruning archive for excess history"
         );
 
         let wx = self.db().begin_write()?;
         tables::BlocksTable::remove_before(&wx, prune_before)?;
         wx.commit()?;
-
-        Ok(())
-    }
-
-    const MAX_PRUNE_SLOTS_PER_HOUSEKEEPING: u64 = 10_000;
-    pub fn housekeeping(&mut self) -> Result<(), Error> {
-        if let Some(max_slots) = self.max_slots {
-            info!(max_slots, "pruning chain for excess history");
-            self.prune_history(max_slots, Some(Self::MAX_PRUNE_SLOTS_PER_HOUSEKEEPING))?;
-        }
 
         Ok(())
     }

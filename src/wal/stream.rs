@@ -1,18 +1,18 @@
 use futures_core::Stream;
 use tokio_util::sync::CancellationToken;
 
-use super::*;
+use crate::prelude::*;
 
 pub struct WalStream;
 
 impl WalStream {
-    pub fn start<R>(
-        wal: R,
-        from: super::LogSeq,
+    pub fn start<W>(
+        wal: W,
+        from: LogSeq,
         cancellation_token: CancellationToken,
     ) -> impl Stream<Item = LogEntry>
     where
-        R: WalReader,
+        W: WalStore,
     {
         async_stream::stream! {
             let mut last_seq = from;
@@ -47,8 +47,8 @@ impl WalStream {
 mod tests {
     use futures_util::{pin_mut, StreamExt};
 
-    use super::redb::WalStore;
     use super::*;
+    use dolos_redb::wal::RedbWalStore;
 
     fn dummy_block(slot: u64) -> RawBlock {
         let hash = pallas::crypto::hash::Hasher::<256>::hash(slot.to_be_bytes().as_slice());
@@ -63,7 +63,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stream_waiting() {
-        let mut db = WalStore::memory(None).unwrap();
+        let mut db = RedbWalStore::memory(None).unwrap();
 
         db.initialize_from_origin().unwrap();
 

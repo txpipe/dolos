@@ -25,7 +25,7 @@ pub enum Error {
     StorageError(String),
 
     #[error("wal error: {0}")]
-    WalError(#[from] crate::wal::WalError),
+    WalError(#[from] WalError),
 
     #[error("chain error: {0}")]
     ArchiveError(#[from] ArchiveError),

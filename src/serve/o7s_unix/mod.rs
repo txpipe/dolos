@@ -6,8 +6,8 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use tracing::{debug, info, instrument, warn};
 
+use crate::adapters::{DomainAdapter, WalAdapter};
 use crate::prelude::*;
-use crate::wal::redb::WalStore;
 
 mod chainsync;
 
@@ -21,7 +21,7 @@ pub struct Config {
 }
 
 async fn handle_session(
-    wal: WalStore,
+    wal: WalAdapter,
     connection: NodeServer,
     cancel: CancellationToken,
 ) -> Result<(), Error> {
@@ -42,7 +42,7 @@ async fn handle_session(
 }
 
 async fn accept_client_connections(
-    wal: WalStore,
+    wal: WalAdapter,
     config: &Config,
     tasks: &mut TaskTracker,
     cancel: CancellationToken,
@@ -73,11 +73,15 @@ async fn accept_client_connections(
 
 #[cfg(unix)]
 #[instrument(skip_all)]
-pub async fn serve(config: Config, wal: WalStore, cancel: CancellationToken) -> Result<(), Error> {
+pub async fn serve(
+    config: Config,
+    domain: DomainAdapter,
+    cancel: CancellationToken,
+) -> Result<(), Error> {
     let mut tasks = TaskTracker::new();
 
     tokio::select! {
-        res = accept_client_connections(wal.clone(), &config, &mut tasks, cancel.clone()) => {
+        res = accept_client_connections(domain.wal().clone(), &config, &mut tasks, cancel.clone()) => {
             res?;
         },
         _ = cancel.cancelled() => {

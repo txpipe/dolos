@@ -22,9 +22,14 @@ pub struct Args {
 }
 
 fn prepare_wal(
-    mut wal: dolos::wal::redb::WalStore,
+    wal: dolos::adapters::WalAdapter,
     pb: &crate::feedback::ProgressBar,
 ) -> miette::Result<()> {
+    let mut wal = match wal {
+        dolos::adapters::WalAdapter::Redb(x) => x,
+        _ => miette::bail!("Only redb is supported for export"),
+    };
+
     let db = wal.db_mut().unwrap();
 
     pb.set_message("compacting wal");
@@ -37,11 +42,11 @@ fn prepare_wal(
 }
 
 fn prepare_ledger(
-    ledger: dolos::state::LedgerStore,
+    ledger: dolos::adapters::StateAdapter,
     pb: &crate::feedback::ProgressBar,
 ) -> miette::Result<()> {
     let mut ledger = match ledger {
-        dolos::state::LedgerStore::Redb(x) => x,
+        dolos::adapters::StateAdapter::Redb(x) => x,
         _ => miette::bail!("Only redb is supported for export"),
     };
 
@@ -56,11 +61,11 @@ fn prepare_ledger(
 }
 
 fn prepare_chain(
-    chain: dolos::chain::ChainStore,
+    chain: dolos::adapters::ArchiveAdapter,
     pb: &crate::feedback::ProgressBar,
 ) -> miette::Result<()> {
     let mut chain = match chain {
-        dolos::chain::ChainStore::Redb(x) => x,
+        dolos::adapters::ArchiveAdapter::Redb(x) => x,
         _ => miette::bail!("Only redb is supported for export"),
     };
 

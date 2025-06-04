@@ -1,6 +1,7 @@
 use comfy_table::Table;
-use dolos::wal::{ChainPoint, LogSeq, LogValue, RawBlock, WalReader as _};
 use miette::{Context, IntoDiagnostic};
+
+use dolos::prelude::*;
 
 #[derive(Debug, clap::Args)]
 pub struct Args {

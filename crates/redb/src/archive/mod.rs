@@ -1,10 +1,8 @@
 use ::redb::{Database, MultimapTableHandle as _, Range, TableHandle as _};
-use itertools::Itertools;
-use log::info;
 use std::path::Path;
+use tracing::{debug, info, warn};
 
-use super::*;
-use tracing::{debug, warn};
+use dolos_core::{ArchiveError, BlockBody, BlockSlot, LedgerDelta};
 
 mod indexes;
 mod tables;
@@ -76,7 +74,7 @@ fn compute_schema_hash(db: &Database) -> Result<Option<String>, RedbArchiveError
 
     let names_2 = rx.list_multimap_tables()?.map(|t| t.name().to_owned());
 
-    let mut names = names_1.chain(names_2).collect_vec();
+    let mut names: Vec<_> = names_1.chain(names_2).collect();
 
     debug!(tables = ?names, "tables names used to compute hash");
 
@@ -216,24 +214,12 @@ impl ChainStore {
     }
 
     pub fn prune_history(
-        &mut self,
+        &self,
         max_slots: u64,
         max_prune: Option<u64>,
     ) -> Result<(), RedbArchiveError> {
         match self {
             ChainStore::SchemaV1(x) => x.prune_history(max_slots, max_prune),
-        }
-    }
-
-    pub fn housekeeping(&mut self) -> Result<(), RedbArchiveError> {
-        match self {
-            ChainStore::SchemaV1(x) => x.housekeeping(),
-        }
-    }
-
-    pub fn finalize(&self, until: BlockSlot) -> Result<(), RedbArchiveError> {
-        match self {
-            ChainStore::SchemaV1(x) => Ok(x.finalize(until)?),
         }
     }
 }

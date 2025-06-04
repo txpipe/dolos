@@ -1,14 +1,12 @@
+use dolos::adapters::StateAdapter;
 use itertools::Itertools;
 use miette::{Context, IntoDiagnostic};
 use pallas::ledger::traverse::MultiEraBlock;
 use std::sync::Arc;
 use tracing::debug;
 
-use dolos::{
-    cardano::mutable_slots,
-    core::{ArchiveStore as _, StateError, StateStore as _},
-    wal::{self, WalBlockReader, WalReader as _},
-};
+use dolos::cardano::mutable_slots;
+use dolos::prelude::*;
 
 use crate::feedback::Feedback;
 
@@ -27,12 +25,12 @@ pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::
     let wal = crate::common::open_wal_store(config)?;
     let genesis = Arc::new(crate::common::open_genesis_files(&config.genesis)?);
 
-    let light = dolos::state::redb::LedgerStore::in_memory_v2_light()
+    let light = dolos_redb::state::LedgerStore::in_memory_v2_light()
         .map_err(StateError::from)
         .into_diagnostic()
         .context("creating in-memory state store")?;
 
-    let light = dolos::state::LedgerStore::Redb(light);
+    let light = StateAdapter::Redb(light);
 
     if light
         .is_empty()
@@ -60,8 +58,8 @@ pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::
         .ok_or(miette::miette!("no WAL tip found"))?;
 
     match tip {
-        wal::ChainPoint::Origin => progress.set_length(0),
-        wal::ChainPoint::Specific(slot, _) => progress.set_length(slot),
+        ChainPoint::Origin => progress.set_length(0),
+        ChainPoint::Specific(slot, _) => progress.set_length(slot),
     }
 
     // Amount of slots until unmutability is guaranteed.
@@ -79,35 +77,52 @@ pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::
             .into_diagnostic()
             .context("decoding blocks")?;
 
-        let deltas = dolos::state::calculate_block_batch_deltas(&blocks, &light)
-            .into_diagnostic()
-            .context("calculating batch deltas.")?;
+        let mut deltas = Vec::new();
+
+        for block in blocks.iter() {
+            let ledger_query = dolos_cardano::ChainLogic::ledger_query_for_block(&block, &deltas)
+                .into_diagnostic()?;
+
+            let required_utxos = light
+                .get_utxos(ledger_query.required_inputs)
+                .into_diagnostic()
+                .context("getting required utxos")?;
+
+            let slice = LedgerSlice {
+                resolved_inputs: [required_utxos, ledger_query.extra_inputs]
+                    .into_iter()
+                    .flatten()
+                    .collect(),
+            };
+
+            let delta = dolos_cardano::ChainLogic::compute_apply_delta(slice, &block)
+                .into_diagnostic()
+                .context("calculating batch deltas.")?;
+
+            deltas.push(delta);
+        }
 
         chain
             .apply(&deltas)
             .into_diagnostic()
             .context("applying deltas to chain")?;
 
-        dolos::state::apply_delta_batch(
-            deltas,
-            &light,
-            &genesis,
-            config.storage.max_ledger_history,
-        )
-        .into_diagnostic()
-        .context("importing blocks to ledger store")?;
+        light
+            .apply(&deltas)
+            .into_diagnostic()
+            .context("applying deltas to ledger")?;
 
         blocks.last().inspect(|b| progress.set_position(b.slot()));
     }
 
     let ledger_path = root.join("ledger");
 
-    let disk = dolos::state::redb::LedgerStore::open_v2_light(ledger_path, None)
+    let disk = dolos_redb::state::LedgerStore::open_v2_light(ledger_path, None)
         .map_err(StateError::from)
         .into_diagnostic()
         .context("opening ledger db")?;
 
-    let disk = dolos::state::LedgerStore::Redb(disk);
+    let disk = StateAdapter::Redb(disk);
 
     let pb = feedback.indeterminate_progress_bar();
     pb.set_message("copying memory ledger into disc");

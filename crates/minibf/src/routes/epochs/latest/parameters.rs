@@ -16,7 +16,7 @@ pub async fn route<D: Domain>(State(domain): State<D>) -> Result<Json<ProtocolPa
 
     let updates = domain
         .state()
-        .get_pparams(tip.as_ref().map(|p| p.0).unwrap_or_default())
+        .get_pparams(tip.as_ref().map(|p| p.slot()).unwrap_or_default())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let updates: Vec<_> = updates
@@ -25,8 +25,9 @@ pub async fn route<D: Domain>(State(domain): State<D>) -> Result<Json<ProtocolPa
         .try_collect()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let summary = pparams::fold_with_hacks(domain.genesis(), &updates, tip.as_ref().unwrap().0);
-    let era = summary.era_for_slot(tip.as_ref().unwrap().0);
+    let summary =
+        pparams::fold_with_hacks(domain.genesis(), &updates, tip.as_ref().unwrap().slot());
+    let era = summary.era_for_slot(tip.as_ref().unwrap().slot());
     let mapper = pallas::interop::utxorpc::Mapper::new(domain.state().clone());
     let mapped = mapper.map_pparams(era.pparams.clone());
 

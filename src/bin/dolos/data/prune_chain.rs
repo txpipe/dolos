@@ -29,7 +29,7 @@ pub fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
 
     info!(max_slots, "prunning to max slots");
 
-    let dolos::chain::ChainStore::Redb(mut chain) = chain else {
+    let dolos::adapters::ArchiveAdapter::Redb(mut chain) = chain else {
         bail!("Invalid store kind")
     };
 

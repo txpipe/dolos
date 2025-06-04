@@ -57,7 +57,7 @@ pub async fn route<D: Domain>(
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
             let updates = domain
                 .state()
-                .get_pparams(tip.map(|t| t.0).unwrap_or_default())
+                .get_pparams(tip.map(|t| t.slot()).unwrap_or_default())
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
                 .into_iter()
                 .map(|eracbor| {

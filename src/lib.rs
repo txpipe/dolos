@@ -1,9 +1,8 @@
-pub mod chain;
+pub mod adapters;
 pub mod mempool;
 pub mod prelude;
 pub mod relay;
 pub mod serve;
-pub mod state;
 pub mod sync;
 pub mod wal;
 

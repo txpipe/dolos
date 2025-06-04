@@ -1,5 +1,6 @@
 use ::redb::{MultimapTableDefinition, TableDefinition, WriteTransaction};
 use ::redb::{Range, ReadTransaction, ReadableTable as _, TableError};
+use dolos_core::TxoIdx;
 use itertools::Itertools as _;
 use pallas::{crypto::hash::Hash, ledger::traverse::MultiEraOutput};
 use serde::{Deserialize, Serialize};
@@ -29,7 +30,7 @@ impl BlocksTable {
         };
 
         let last = table.last()?;
-        let last = last.map(|(k, v)| ChainPoint(k.value(), Hash::new(*v.value())));
+        let last = last.map(|(k, v)| ChainPoint::Specific(k.value(), Hash::new(*v.value())));
 
         Ok(last)
     }
@@ -37,12 +38,12 @@ impl BlocksTable {
     pub fn apply(wx: &WriteTransaction, delta: &LedgerDelta) -> Result<(), Error> {
         let mut table = wx.open_table(Self::DEF)?;
 
-        if let Some(ChainPoint(slot, hash)) = delta.new_position.as_ref() {
+        if let Some(ChainPoint::Specific(slot, hash)) = delta.new_position.as_ref() {
             let v: &[u8; 32] = hash;
             table.insert(slot, v)?;
         }
 
-        if let Some(ChainPoint(slot, _)) = delta.undone_position.as_ref() {
+        if let Some(ChainPoint::Specific(slot, _)) = delta.undone_position.as_ref() {
             table.remove(slot)?;
         }
 
@@ -187,14 +188,14 @@ impl PParamsTable {
     pub fn apply(wx: &WriteTransaction, delta: &LedgerDelta) -> Result<(), Error> {
         let mut table = wx.open_table(PParamsTable::DEF)?;
 
-        if let Some(ChainPoint(slot, _)) = delta.new_position {
+        if let Some(ChainPoint::Specific(slot, _)) = delta.new_position {
             for EraCbor(era, body) in delta.new_pparams.iter() {
                 let v: (u16, &[u8]) = (*era, body);
                 table.insert(slot, v)?;
             }
         }
 
-        if let Some(ChainPoint(slot, _)) = delta.undone_position {
+        if let Some(ChainPoint::Specific(slot, _)) = delta.undone_position {
             table.remove(slot)?;
         }
 
@@ -252,14 +253,14 @@ impl TombstonesTable {
     pub fn apply(wx: &WriteTransaction, delta: &LedgerDelta) -> Result<(), Error> {
         let mut table = wx.open_multimap_table(Self::DEF)?;
 
-        if let Some(ChainPoint(slot, _)) = delta.new_position.as_ref() {
+        if let Some(ChainPoint::Specific(slot, _)) = delta.new_position.as_ref() {
             for (stxi, _) in delta.consumed_utxo.iter() {
                 let stxi: (&[u8; 32], u32) = (&stxi.0, stxi.1);
                 table.insert(slot, stxi)?;
             }
         }
 
-        if let Some(ChainPoint(slot, _)) = delta.undone_position.as_ref() {
+        if let Some(ChainPoint::Specific(slot, _)) = delta.undone_position.as_ref() {
             table.remove_all(slot)?;
         }
 
@@ -318,7 +319,7 @@ impl CursorTable {
     pub fn apply(wx: &WriteTransaction, delta: &LedgerDelta) -> Result<(), Error> {
         let mut table = wx.open_table(Self::DEF)?;
 
-        if let Some(ChainPoint(slot, hash)) = delta.new_position.as_ref() {
+        if let Some(ChainPoint::Specific(slot, hash)) = delta.new_position.as_ref() {
             let value = CursorValue {
                 hash: *hash,
                 tombstones: delta.consumed_utxo.keys().cloned().collect_vec(),
@@ -329,7 +330,7 @@ impl CursorTable {
             table.insert(slot, value.as_slice())?;
         }
 
-        if let Some(ChainPoint(slot, _)) = delta.undone_position.as_ref() {
+        if let Some(ChainPoint::Specific(slot, _)) = delta.undone_position.as_ref() {
             table.remove(slot)?;
         }
 
