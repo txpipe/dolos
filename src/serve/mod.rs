@@ -4,6 +4,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use crate::adapters::DomainAdapter;
+use crate::prelude::*;
 
 pub mod utils;
 
@@ -76,7 +77,7 @@ pub async fn serve(
     let o7s = async {
         if let Some(cfg) = config.ouroboros {
             info!("found Ouroboros config");
-            o7s::serve(cfg, domain.clone(), exit.clone())
+            o7s::serve(cfg, domain.wal().clone(), exit.clone())
                 .await
                 .into_diagnostic()
                 .context("serving Ouroboros")

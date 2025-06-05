@@ -231,7 +231,7 @@ pub fn ledger_query_for_block(
 
     let extra_inputs = consumed_same_block
         .into_iter()
-        .chain(consumed_unapplied_deltas.into_iter())
+        .chain(consumed_unapplied_deltas)
         .collect();
 
     // TODO: include reference scripts and collateral
@@ -265,7 +265,7 @@ impl dolos_core::ChainLogic for ChainLogic {
         ledger: LedgerSlice,
         block: &Self::Block<'a>,
     ) -> Result<LedgerDelta, ChainError> {
-        let delta = compute_apply_delta(&block, ledger).map_err(ChainError::BrokenInvariant)?;
+        let delta = compute_apply_delta(block, ledger).map_err(ChainError::BrokenInvariant)?;
 
         Ok(delta)
     }
@@ -274,7 +274,7 @@ impl dolos_core::ChainLogic for ChainLogic {
         ledger: LedgerSlice,
         block: &Self::Block<'a>,
     ) -> Result<LedgerDelta, ChainError> {
-        let delta = compute_undo_delta(&block, ledger).map_err(ChainError::BrokenInvariant)?;
+        let delta = compute_undo_delta(block, ledger).map_err(ChainError::BrokenInvariant)?;
 
         Ok(delta)
     }

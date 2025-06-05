@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 use inquire::list_option::ListOption;
-use miette::{bail, IntoDiagnostic};
+use miette::IntoDiagnostic;
 
 use crate::feedback::Feedback;
 
@@ -46,10 +46,7 @@ pub struct Args {
 }
 
 pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::Result<()> {
-    let wal = match crate::common::open_wal_store(config)? {
-        dolos::adapters::WalAdapter::Redb(x) => x,
-        _ => bail!("only redb wal adapter is supported"),
-    };
+    let dolos::adapters::WalAdapter::Redb(wal) = crate::common::open_wal_store(config)?;
 
     if !wal.is_empty().map_err(WalError::from).into_diagnostic()? {
         println!("found existing data, skipping bootstrap");

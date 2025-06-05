@@ -16,8 +16,6 @@ pub struct Stage {
     pub upstream: UpstreamPort,
     pub downstream: DownstreamPort,
 
-    housekeeping_interval: std::time::Duration,
-
     #[metric]
     block_count: gasket::metrics::Counter,
 
@@ -26,14 +24,13 @@ pub struct Stage {
 }
 
 impl Stage {
-    pub fn new(store: WalAdapter, housekeeping_interval: std::time::Duration) -> Self {
+    pub fn new(store: WalAdapter) -> Self {
         Self {
             store,
             upstream: Default::default(),
             downstream: Default::default(),
             block_count: Default::default(),
             roll_count: Default::default(),
-            housekeeping_interval,
         }
     }
 
@@ -54,7 +51,7 @@ impl Stage {
             PullEvent::Rollback(point) => {
                 info!(?point, "rolling back wal");
 
-                self.store.roll_back(&point).or_panic()?;
+                self.store.roll_back(point).or_panic()?;
             }
         }
 
@@ -67,18 +64,14 @@ impl Stage {
     }
 }
 
-pub struct Worker {
-    housekeeping_timer: tokio::time::Interval,
-}
+pub struct Worker;
 
 impl Worker {}
 
 #[async_trait::async_trait(?Send)]
 impl gasket::framework::Worker<Stage> for Worker {
-    async fn bootstrap(stage: &Stage) -> Result<Self, WorkerError> {
-        Ok(Worker {
-            housekeeping_timer: tokio::time::interval(stage.housekeeping_interval),
-        })
+    async fn bootstrap(_: &Stage) -> Result<Self, WorkerError> {
+        Ok(Worker)
     }
 
     async fn schedule(

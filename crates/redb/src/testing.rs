@@ -23,7 +23,7 @@ pub fn dummy_block_from_slot(slot: u64) -> RawBlock {
 }
 
 pub fn empty_wal_db() -> RedbWalStore {
-    let mut wal = RedbWalStore::memory(None).unwrap();
+    let mut wal = RedbWalStore::memory().unwrap();
 
     wal.initialize_from_origin().unwrap();
 

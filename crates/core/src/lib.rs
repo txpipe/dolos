@@ -622,7 +622,7 @@ pub trait ChainLogic {
         unapplied_deltas: &[LedgerDelta],
     ) -> Result<LedgerQuery, ChainError>;
 
-    fn compute_origin_delta<'a>(genesis: &Genesis) -> Result<LedgerDelta, ChainError>;
+    fn compute_origin_delta(genesis: &Genesis) -> Result<LedgerDelta, ChainError>;
 
     fn compute_apply_delta<'a>(
         ledger: LedgerSlice,
@@ -639,7 +639,7 @@ pub trait ChainLogic {
         block: &Self::Block<'a>,
         unapplied_deltas: &[LedgerDelta],
     ) -> Result<LedgerSlice, DomainError> {
-        let query = Self::ledger_query_for_block(&block, unapplied_deltas)?;
+        let query = Self::ledger_query_for_block(block, unapplied_deltas)?;
 
         let required_utxos = StateStore::get_utxos(state, query.required_inputs)?;
 
@@ -709,7 +709,7 @@ pub trait Domain: Send + Sync + Clone + 'static {
         Ok(deltas)
     }
 
-    fn apply_blocks<'a>(&self, blocks: &[RawBlock]) -> Result<(), DomainError> {
+    fn apply_blocks(&self, blocks: &[RawBlock]) -> Result<(), DomainError> {
         let deltas = self.compute_apply_deltas(blocks)?;
 
         self.state().apply(&deltas)?;
@@ -732,7 +732,7 @@ pub trait Domain: Send + Sync + Clone + 'static {
         Ok(deltas)
     }
 
-    fn undo_blocks<'a>(&self, blocks: &[RawBlock]) -> Result<(), DomainError> {
+    fn undo_blocks(&self, blocks: &[RawBlock]) -> Result<(), DomainError> {
         let deltas = self.compute_undo_deltas(blocks)?;
 
         self.state().apply(&deltas)?;

@@ -80,7 +80,7 @@ pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::
         let mut deltas = Vec::new();
 
         for block in blocks.iter() {
-            let ledger_query = dolos_cardano::ChainLogic::ledger_query_for_block(&block, &deltas)
+            let ledger_query = dolos_cardano::ChainLogic::ledger_query_for_block(block, &deltas)
                 .into_diagnostic()?;
 
             let required_utxos = light
@@ -95,7 +95,7 @@ pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::
                     .collect(),
             };
 
-            let delta = dolos_cardano::ChainLogic::compute_apply_delta(slice, &block)
+            let delta = dolos_cardano::ChainLogic::compute_apply_delta(slice, block)
                 .into_diagnostic()
                 .context("calculating batch deltas.")?;
 

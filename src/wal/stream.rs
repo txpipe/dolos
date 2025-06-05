@@ -63,7 +63,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stream_waiting() {
-        let mut db = RedbWalStore::memory(None).unwrap();
+        let mut db = RedbWalStore::memory().unwrap();
 
         db.initialize_from_origin().unwrap();
 

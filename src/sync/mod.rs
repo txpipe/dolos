@@ -75,7 +75,7 @@ pub fn sync(
         quit_on_tip,
     );
 
-    let mut roll = roll::Stage::new(domain.wal().clone(), HOUSEKEEPING_INTERVAL);
+    let mut roll = roll::Stage::new(domain.wal().clone());
 
     let mut apply = apply::Stage::new(domain.clone(), HOUSEKEEPING_INTERVAL);
 
@@ -118,7 +118,7 @@ pub fn devnet(
         emulator_cfg.block_production_interval,
     );
 
-    let mut roll = roll::Stage::new(domain.wal().clone(), HOUSEKEEPING_INTERVAL);
+    let mut roll = roll::Stage::new(domain.wal().clone());
     let mut apply = apply::Stage::new(domain.clone(), HOUSEKEEPING_INTERVAL);
 
     let (to_roll, from_pull) = gasket::messaging::tokio::mpsc_channel(50);

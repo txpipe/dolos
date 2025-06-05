@@ -7,7 +7,7 @@ use tower::ServiceBuilder;
 use tower_http::cors::CorsLayer;
 use tracing::info;
 
-use dolos_core::{Domain, Genesis};
+use dolos_core::Domain;
 
 use crate::prelude::Error;
 

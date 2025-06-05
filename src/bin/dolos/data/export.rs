@@ -25,10 +25,7 @@ fn prepare_wal(
     wal: dolos::adapters::WalAdapter,
     pb: &crate::feedback::ProgressBar,
 ) -> miette::Result<()> {
-    let mut wal = match wal {
-        dolos::adapters::WalAdapter::Redb(x) => x,
-        _ => miette::bail!("Only redb is supported for export"),
-    };
+    let dolos::adapters::WalAdapter::Redb(mut wal) = wal;
 
     let db = wal.db_mut().unwrap();
 

@@ -154,10 +154,7 @@ async fn fetch_snapshot(
 }
 
 fn open_empty_wal(config: &crate::Config) -> miette::Result<dolos_redb::wal::RedbWalStore> {
-    let wal = match crate::common::open_wal_store(config)? {
-        dolos::adapters::WalAdapter::Redb(x) => x,
-        _ => bail!("only redb wal adapter is supported"),
-    };
+    let dolos::adapters::WalAdapter::Redb(wal) = crate::common::open_wal_store(config)?;
 
     let is_empty = wal.is_empty().map_err(WalError::from).into_diagnostic()?;
 

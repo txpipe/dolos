@@ -117,7 +117,6 @@ impl ChainStore {
     pub fn open(
         path: impl AsRef<Path>,
         cache_size: Option<usize>,
-        max_slots: Option<u64>,
     ) -> Result<Self, RedbArchiveError> {
         let db = open_db(path, cache_size)?;
         let hash = compute_schema_hash(&db)?;
@@ -126,11 +125,11 @@ impl ChainStore {
             // use stable schema if no hash
             None => {
                 info!("no state db schema, initializing as v1");
-                v1::ChainStore::initialize(db, max_slots)?.into()
+                v1::ChainStore::initialize(db)?.into()
             }
             Some(V1_HASH) => {
                 info!("detected state db schema v1");
-                v1::ChainStore::from((db, max_slots)).into()
+                v1::ChainStore::from(db).into()
             }
             Some(x) => panic!("can't recognize db hash {}", x),
         };
@@ -143,7 +142,7 @@ impl ChainStore {
             .create_with_backend(::redb::backends::InMemoryBackend::new())
             .map_err(RedbArchiveError::from)?;
 
-        let store = v1::ChainStore::initialize(db, None)?;
+        let store = v1::ChainStore::initialize(db)?;
         Ok(store.into())
     }
 

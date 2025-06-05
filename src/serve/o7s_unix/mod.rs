@@ -6,7 +6,7 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use tracing::{debug, info, instrument, warn};
 
-use crate::adapters::{DomainAdapter, WalAdapter};
+use crate::adapters::WalAdapter;
 use crate::prelude::*;
 
 mod chainsync;
@@ -75,13 +75,13 @@ async fn accept_client_connections(
 #[instrument(skip_all)]
 pub async fn serve(
     config: Config,
-    domain: DomainAdapter,
+    wal: WalAdapter,
     cancel: CancellationToken,
 ) -> Result<(), Error> {
     let mut tasks = TaskTracker::new();
 
     tokio::select! {
-        res = accept_client_connections(domain.wal().clone(), &config, &mut tasks, cancel.clone()) => {
+        res = accept_client_connections(wal.clone(), &config, &mut tasks, cancel.clone()) => {
             res?;
         },
         _ = cancel.cancelled() => {

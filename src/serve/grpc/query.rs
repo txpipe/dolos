@@ -2,7 +2,7 @@ use itertools::Itertools as _;
 use pallas::interop::utxorpc::spec as u5c;
 use pallas::interop::utxorpc::{self as interop, spec::query::any_utxo_pattern::UtxoPattern};
 use pallas::ledger::traverse::MultiEraOutput;
-use std::{collections::HashSet, sync::Arc};
+use std::collections::HashSet;
 use tonic::{Request, Response, Status};
 use tracing::info;
 
@@ -245,7 +245,7 @@ impl<D: Domain> u5c::query::query_service_server::QueryService for QueryServiceI
             .map_err(|e| Status::internal(e.to_string()))?;
 
         let summary = pparams::fold_with_hacks(
-            &self.domain.genesis(),
+            self.domain.genesis(),
             &updates,
             tip.as_ref().unwrap().slot(),
         );

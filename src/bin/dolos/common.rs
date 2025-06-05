@@ -27,12 +27,7 @@ pub fn ensure_storage_path(config: &crate::Config) -> Result<PathBuf, Error> {
 pub fn open_wal_store(config: &crate::Config) -> Result<WalAdapter, Error> {
     let root = ensure_storage_path(config)?;
 
-    let wal = dolos_redb::wal::RedbWalStore::open(
-        root.join("wal"),
-        config.storage.wal_cache,
-        config.storage.max_wal_history,
-    )
-    .map_err(WalError::from)?;
+    let wal = dolos_redb::wal::RedbWalStore::open(root.join("wal"), config.storage.wal_cache)?;
 
     Ok(WalAdapter::Redb(wal))
 }
@@ -40,12 +35,9 @@ pub fn open_wal_store(config: &crate::Config) -> Result<WalAdapter, Error> {
 pub fn open_chain_store(config: &crate::Config) -> Result<ArchiveAdapter, Error> {
     let root = ensure_storage_path(config)?;
 
-    let chain = dolos_redb::archive::ChainStore::open(
-        root.join("chain"),
-        config.storage.chain_cache,
-        config.storage.max_chain_history,
-    )
-    .map_err(ArchiveError::from)?;
+    let chain =
+        dolos_redb::archive::ChainStore::open(root.join("chain"), config.storage.chain_cache)
+            .map_err(ArchiveError::from)?;
 
     Ok(chain.into())
 }
@@ -73,8 +65,8 @@ pub fn open_persistent_data_stores(config: &crate::Config) -> Result<Stores, Err
     Ok((wal, ledger, chain))
 }
 
-pub fn create_ephemeral_data_stores(config: &crate::Config) -> Result<Stores, Error> {
-    let mut wal = dolos_redb::wal::RedbWalStore::memory(config.storage.max_wal_history)?;
+pub fn create_ephemeral_data_stores() -> Result<Stores, Error> {
+    let mut wal = dolos_redb::wal::RedbWalStore::memory()?;
 
     wal.initialize_from_origin().map_err(WalError::from)?;
 
@@ -87,23 +79,23 @@ pub fn create_ephemeral_data_stores(config: &crate::Config) -> Result<Stores, Er
 
 pub fn setup_data_stores(config: &crate::Config) -> Result<Stores, Error> {
     if config.storage.is_ephemeral() {
-        create_ephemeral_data_stores(config)
+        create_ephemeral_data_stores()
     } else {
         open_persistent_data_stores(config)
     }
 }
 
 pub fn setup_domain(config: &crate::Config) -> miette::Result<DomainAdapter> {
-    let (wal, ledger, chain) = setup_data_stores(config)?;
+    let (wal, state, archive) = setup_data_stores(config)?;
     let genesis = Arc::new(open_genesis_files(&config.genesis)?);
-    let mempool = dolos::mempool::Mempool::new(genesis.clone(), ledger.clone());
+    let mempool = dolos::mempool::Mempool::new(genesis.clone(), state.clone());
 
     let domain = DomainAdapter {
         storage_config: Arc::new(config.storage.clone()),
         genesis,
-        wal: wal.into(),
-        state: ledger.into(),
-        archive: chain.into(),
+        wal,
+        state,
+        archive,
         mempool,
     };
 

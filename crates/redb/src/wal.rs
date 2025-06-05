@@ -3,6 +3,7 @@ use itertools::Itertools;
 use redb::{Range, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 use std::{path::Path, sync::Arc};
+use thiserror::Error;
 use tracing::{debug, info, trace, warn};
 
 use dolos_core::{BlockSlot, ChainPoint, LogEntry, LogSeq, RawBlock, WalError, WalStore};
@@ -53,14 +54,9 @@ impl redb::Value for LogValue {
     }
 }
 
-#[derive(Debug)]
-pub struct RedbWalError(WalError);
-
-impl From<WalError> for RedbWalError {
-    fn from(value: WalError) -> Self {
-        Self(value)
-    }
-}
+#[derive(Debug, Error)]
+#[error(transparent)]
+pub struct RedbWalError(#[from] WalError);
 
 impl From<redb::Error> for RedbWalError {
     fn from(value: redb::Error) -> Self {
@@ -144,7 +140,6 @@ const DEFAULT_CACHE_SIZE_MB: usize = 50;
 #[derive(Clone, Debug)]
 pub struct RedbWalStore {
     db: Arc<redb::Database>,
-    max_slots: Option<u64>,
     tip_change: Arc<tokio::sync::Notify>,
 }
 
@@ -182,7 +177,7 @@ impl RedbWalStore {
         Ok(())
     }
 
-    pub fn memory(max_slots: Option<u64>) -> Result<Self, WalError> {
+    pub fn memory() -> Result<Self, WalError> {
         let db = redb::Database::builder()
             .create_with_backend(redb::backends::InMemoryBackend::new())
             .map_err(WalError::internal)?;
@@ -190,17 +185,12 @@ impl RedbWalStore {
         let out = Self {
             db: Arc::new(db),
             tip_change: Arc::new(tokio::sync::Notify::new()),
-            max_slots,
         };
 
         Ok(out)
     }
 
-    pub fn open(
-        path: impl AsRef<Path>,
-        cache_size: Option<usize>,
-        max_slots: Option<u64>,
-    ) -> Result<Self, WalError> {
+    pub fn open(path: impl AsRef<Path>, cache_size: Option<usize>) -> Result<Self, WalError> {
         let inner = redb::Database::builder()
             .set_repair_callback(|x| warn!(progress = x.progress() * 100f64, "wal db is repairing"))
             .set_cache_size(1024 * 1024 * cache_size.unwrap_or(DEFAULT_CACHE_SIZE_MB))
@@ -210,7 +200,6 @@ impl RedbWalStore {
         let out = Self {
             db: Arc::new(inner),
             tip_change: Arc::new(tokio::sync::Notify::new()),
-            max_slots,
         };
 
         Ok(out)
@@ -226,7 +215,7 @@ impl RedbWalStore {
         &mut self,
         from: Option<LogSeq>,
         to: Option<LogSeq>,
-    ) -> Result<(), redb::Error> {
+    ) -> Result<(), RedbWalError> {
         let wx = self.db.begin_write()?;
         {
             let mut wal = wx.open_table(WAL)?;
@@ -372,7 +361,7 @@ impl RedbWalStore {
         &self,
         target: BlockSlot,
         search_range: impl std::ops::RangeBounds<BlockSlot>,
-    ) -> Result<Option<LogSeq>, redb::Error> {
+    ) -> Result<Option<LogSeq>, RedbWalError> {
         let min_slot = match search_range.start_bound() {
             std::ops::Bound::Included(x) => *x as i128,
             std::ops::Bound::Excluded(x) => *x as i128 + 1,
@@ -437,7 +426,7 @@ impl RedbWalStore {
         &self,
         target: BlockSlot,
         search_range: F,
-    ) -> Result<Option<LogSeq>, redb::Error>
+    ) -> Result<Option<LogSeq>, RedbWalError>
     where
         F: Fn(usize) -> R,
         R: std::ops::RangeBounds<BlockSlot>,
@@ -640,7 +629,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_wal_block_reader_happy_path() {
-        let mut db = RedbWalStore::memory(None).unwrap();
+        let mut db = RedbWalStore::memory().unwrap();
         db.initialize_from_origin().unwrap();
 
         let blocks = (0..=5).map(dummy_block).collect_vec();
@@ -654,7 +643,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_wal_block_reader_undone_blocks_in_lookahead_window() {
-        let mut db = RedbWalStore::memory(None).unwrap();
+        let mut db = RedbWalStore::memory().unwrap();
         db.initialize_from_origin().unwrap();
 
         let undone_chain_point = (&dummy_block(1)).into();
@@ -689,7 +678,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_wal_block_reader_undone_blocks_not_in_lookahead_window() {
-        let mut db = RedbWalStore::memory(None).unwrap();
+        let mut db = RedbWalStore::memory().unwrap();
         db.initialize_from_origin().unwrap();
 
         let undone_chain_point = (&dummy_block(2)).into();

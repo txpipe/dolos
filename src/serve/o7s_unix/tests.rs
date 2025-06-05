@@ -10,7 +10,7 @@ use crate::prelude::*;
 
 type ServerHandle = tokio::task::JoinHandle<Result<(), crate::prelude::Error>>;
 
-async fn setup_server_client_pair(port: u32, domain: DomainAdapter) -> (ServerHandle, NodeClient) {
+async fn setup_server_client_pair(port: u32, wal: WalAdapter) -> (ServerHandle, NodeClient) {
     let cancel = CancellationToken::new();
 
     let server = tokio::spawn(super::serve(
@@ -18,7 +18,7 @@ async fn setup_server_client_pair(port: u32, domain: DomainAdapter) -> (ServerHa
             listen_path: format!("dolos{port}.socket").into(),
             magic: MAINNET_MAGIC,
         },
-        domain,
+        wal,
         cancel,
     ));
 
@@ -39,17 +39,10 @@ async fn test_chainsync_happy_path() {
     //         .finish(),
     // );
 
-    let domain = DomainAdapter {
-        storage_config: std::sync::Arc::new(StorageConfig::default()),
-        wal: WalAdapter::Redb(dolos_redb::testing::wal_with_dummy_blocks(300)),
-        state: StateAdapter::Redb(dolos_redb::state::LedgerStore::in_memory_v2_light().unwrap()),
-        genesis: todo!(),
-        archive: todo!(),
-        mempool: todo!(),
-    };
+    let mut wal = WalAdapter::Redb(dolos_redb::testing::wal_with_dummy_blocks(300));
 
     // use servers in different ports until we implement some sort of test harness
-    let (server, mut client) = setup_server_client_pair(30032, domain.clone()).await;
+    let (server, mut client) = setup_server_client_pair(30032, wal.clone()).await;
 
     let known_points = vec![Point::Specific(
         20,
@@ -88,12 +81,10 @@ async fn test_chainsync_happy_path() {
     }
 
     for slot in 301..320 {
-        domain
-            .wal()
-            .roll_forward(std::iter::once(dolos_redb::testing::dummy_block_from_slot(
-                slot,
-            )))
-            .unwrap();
+        wal.roll_forward(std::iter::once(dolos_redb::testing::dummy_block_from_slot(
+            slot,
+        )))
+        .unwrap();
 
         let next = client.chainsync().recv_while_must_reply().await.unwrap();
 
@@ -110,13 +101,11 @@ async fn test_chainsync_happy_path() {
         }
     }
 
-    domain
-        .wal()
-        .roll_back(&ChainPoint::Specific(
-            310,
-            dolos_redb::testing::slot_to_hash(310),
-        ))
-        .unwrap();
+    wal.roll_back(&ChainPoint::Specific(
+        310,
+        dolos_redb::testing::slot_to_hash(310),
+    ))
+    .unwrap();
 
     let next = client.chainsync().recv_while_must_reply().await.unwrap();
 

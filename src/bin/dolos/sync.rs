@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use miette::{Context, IntoDiagnostic};
 
 #[derive(Debug, clap::Args)]

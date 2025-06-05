@@ -17,10 +17,7 @@ pub struct Args {
 pub fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging)?;
 
-    let mut wal = match crate::common::open_wal_store(config)? {
-        dolos::adapters::WalAdapter::Redb(x) => x,
-        _ => bail!("only redb wal adapter is supported"),
-    };
+    let dolos::adapters::WalAdapter::Redb(mut wal) = crate::common::open_wal_store(config)?;
 
     let max_slots = match args.max_slots {
         Some(x) => x,
