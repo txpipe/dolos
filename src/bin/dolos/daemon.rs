@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use miette::{Context, IntoDiagnostic};
 use tracing::warn;
 
@@ -10,20 +8,14 @@ pub struct Args {}
 pub async fn run(config: super::Config, _args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging)?;
 
-    let (wal, ledger, chain) = crate::common::setup_data_stores(&config)?;
-    let genesis = Arc::new(crate::common::open_genesis_files(&config.genesis)?);
-    let mempool = dolos::mempool::Mempool::new(genesis.clone(), ledger.clone());
+    let domain = crate::common::setup_domain(&config)?;
+
     let exit = crate::common::hook_exit_token();
 
     let sync = dolos::sync::pipeline(
         &config.sync,
         &config.upstream,
-        &config.storage,
-        wal.clone(),
-        ledger.clone(),
-        chain.clone(),
-        genesis.clone(),
-        mempool.clone(),
+        domain.clone(),
         &config.retries,
         false,
     )
@@ -38,15 +30,15 @@ pub async fn run(config: super::Config, _args: &Args) -> miette::Result<()> {
     // We need new file handled for the separate process.
     let serve = tokio::spawn(dolos::serve::serve(
         config.serve,
-        genesis.clone(),
-        wal.clone(),
-        ledger.clone(),
-        chain.clone(),
-        mempool.clone(),
+        domain.clone(),
         exit.clone(),
     ));
 
-    let relay = tokio::spawn(dolos::relay::serve(config.relay, wal.clone(), exit.clone()));
+    let relay = tokio::spawn(dolos::relay::serve(
+        config.relay,
+        domain.wal.clone(),
+        exit.clone(),
+    ));
 
     let (_, serve, relay) = tokio::try_join!(sync, serve, relay)
         .into_diagnostic()

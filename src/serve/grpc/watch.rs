@@ -1,7 +1,3 @@
-use crate::{
-    state::LedgerStore,
-    wal::{self, ChainPoint, WalReader as _},
-};
 use futures_core::Stream;
 use futures_util::StreamExt;
 use pallas::interop::utxorpc as interop;
@@ -13,6 +9,9 @@ use pallas::{
 use std::pin::Pin;
 use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
+
+use crate::prelude::*;
+use crate::wal::WalStream;
 
 fn outputs_match_address(
     pattern: &u5c::cardano::AddressPattern,
@@ -148,12 +147,12 @@ fn apply_predicate(predicate: &u5c::watch::TxPredicate, tx: &u5c::cardano::Tx) -
     tx_matches && !not_clause && and_clause && or_clause
 }
 
-fn block_to_txs(
-    block: &wal::RawBlock,
-    mapper: &interop::Mapper<LedgerStore>,
+fn block_to_txs<S: StateStore>(
+    block: &RawBlock,
+    mapper: &interop::Mapper<S>,
     request: &u5c::watch::WatchTxRequest,
 ) -> Vec<u5c::watch::AnyChainTx> {
-    let wal::RawBlock { body, .. } = block;
+    let RawBlock { body, .. } = block;
     let block = MultiEraBlock::decode(body).unwrap();
     let txs = block.txs();
 
@@ -171,51 +170,49 @@ fn block_to_txs(
         .collect()
 }
 
-fn roll_to_watch_response(
-    mapper: &interop::Mapper<LedgerStore>,
-    log: &wal::LogValue,
+fn roll_to_watch_response<S: StateStore>(
+    mapper: &interop::Mapper<S>,
+    log: &LogValue,
     request: &u5c::watch::WatchTxRequest,
 ) -> impl Stream<Item = u5c::watch::WatchTxResponse> {
     let txs: Vec<_> = match log {
-        wal::LogValue::Apply(block) => block_to_txs(block, mapper, request)
+        LogValue::Apply(block) => block_to_txs(block, mapper, request)
             .into_iter()
             .map(u5c::watch::watch_tx_response::Action::Apply)
             .map(|x| u5c::watch::WatchTxResponse { action: Some(x) })
             .collect(),
-        wal::LogValue::Undo(block) => block_to_txs(block, mapper, request)
+        LogValue::Undo(block) => block_to_txs(block, mapper, request)
             .into_iter()
             .map(u5c::watch::watch_tx_response::Action::Undo)
             .map(|x| u5c::watch::WatchTxResponse { action: Some(x) })
             .collect(),
         // TODO: shouldn't we have a u5c event for origin?
-        wal::LogValue::Mark(..) => vec![],
+        LogValue::Mark(..) => vec![],
     };
 
     tokio_stream::iter(txs)
 }
 
-pub struct WatchServiceImpl {
-    wal: wal::redb::WalStore,
-    mapper: interop::Mapper<LedgerStore>,
+pub struct WatchServiceImpl<D: Domain> {
+    domain: D,
+    mapper: interop::Mapper<D::State>,
     cancellation_token: CancellationToken,
 }
 
-impl WatchServiceImpl {
-    pub fn new(
-        wal: wal::redb::WalStore,
-        ledger: LedgerStore,
-        cancellation_token: CancellationToken,
-    ) -> Self {
+impl<D: Domain> WatchServiceImpl<D> {
+    pub fn new(domain: D, cancellation_token: CancellationToken) -> Self {
+        let mapper = interop::Mapper::new(domain.state().clone());
+
         Self {
-            wal,
-            mapper: interop::Mapper::new(ledger),
+            domain,
+            mapper,
             cancellation_token,
         }
     }
 }
 
 #[async_trait::async_trait]
-impl u5c::watch::watch_service_server::WatchService for WatchServiceImpl {
+impl<D: Domain> u5c::watch::watch_service_server::WatchService for WatchServiceImpl<D> {
     type WatchTxStream = Pin<
         Box<dyn Stream<Item = Result<u5c::watch::WatchTxResponse, tonic::Status>> + Send + 'static>,
     >;
@@ -233,13 +230,15 @@ impl u5c::watch::watch_service_server::WatchService for WatchServiceImpl {
             .collect::<Vec<ChainPoint>>();
 
         let from_seq = if intersect.is_empty() {
-            self.wal
+            self.domain
+                .wal()
                 .find_tip()
                 .map_err(|_err| Status::internal("can't read WAL"))?
                 .map(|(x, _)| x)
                 .unwrap_or_default()
         } else {
-            self.wal
+            self.domain
+                .wal()
                 .find_intersect(&intersect)
                 .map_err(|_err| Status::internal("can't read WAL"))?
                 .map(|(x, _)| x)
@@ -248,10 +247,13 @@ impl u5c::watch::watch_service_server::WatchService for WatchServiceImpl {
 
         let mapper = self.mapper.clone();
 
-        let stream =
-            wal::WalStream::start(self.wal.clone(), from_seq, self.cancellation_token.clone())
-                .flat_map(move |(_, log)| roll_to_watch_response(&mapper, &log, &inner_req))
-                .map(Ok);
+        let stream = WalStream::start(
+            self.domain.wal().clone(),
+            from_seq,
+            self.cancellation_token.clone(),
+        )
+        .flat_map(move |(_, log)| roll_to_watch_response(&mapper, &log, &inner_req))
+        .map(Ok);
 
         Ok(Response::new(Box::pin(stream)))
     }

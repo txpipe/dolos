@@ -1,10 +1,8 @@
 use ::redb::{Database, MultimapTableHandle as _, Range, TableHandle as _};
-use itertools::Itertools;
-use log::info;
 use std::path::Path;
+use tracing::{debug, info, warn};
 
-use super::*;
-use tracing::{debug, warn};
+use dolos_core::{ArchiveError, BlockBody, BlockSlot, LedgerDelta};
 
 mod indexes;
 mod tables;
@@ -76,7 +74,7 @@ fn compute_schema_hash(db: &Database) -> Result<Option<String>, RedbArchiveError
 
     let names_2 = rx.list_multimap_tables()?.map(|t| t.name().to_owned());
 
-    let mut names = names_1.chain(names_2).collect_vec();
+    let mut names: Vec<_> = names_1.chain(names_2).collect();
 
     debug!(tables = ?names, "tables names used to compute hash");
 
@@ -119,7 +117,6 @@ impl ChainStore {
     pub fn open(
         path: impl AsRef<Path>,
         cache_size: Option<usize>,
-        max_slots: Option<u64>,
     ) -> Result<Self, RedbArchiveError> {
         let db = open_db(path, cache_size)?;
         let hash = compute_schema_hash(&db)?;
@@ -128,11 +125,11 @@ impl ChainStore {
             // use stable schema if no hash
             None => {
                 info!("no state db schema, initializing as v1");
-                v1::ChainStore::initialize(db, max_slots)?.into()
+                v1::ChainStore::initialize(db)?.into()
             }
             Some(V1_HASH) => {
                 info!("detected state db schema v1");
-                v1::ChainStore::from((db, max_slots)).into()
+                v1::ChainStore::from(db).into()
             }
             Some(x) => panic!("can't recognize db hash {}", x),
         };
@@ -145,7 +142,7 @@ impl ChainStore {
             .create_with_backend(::redb::backends::InMemoryBackend::new())
             .map_err(RedbArchiveError::from)?;
 
-        let store = v1::ChainStore::initialize(db, None)?;
+        let store = v1::ChainStore::initialize(db)?;
         Ok(store.into())
     }
 
@@ -216,24 +213,12 @@ impl ChainStore {
     }
 
     pub fn prune_history(
-        &mut self,
+        &self,
         max_slots: u64,
         max_prune: Option<u64>,
     ) -> Result<(), RedbArchiveError> {
         match self {
             ChainStore::SchemaV1(x) => x.prune_history(max_slots, max_prune),
-        }
-    }
-
-    pub fn housekeeping(&mut self) -> Result<(), RedbArchiveError> {
-        match self {
-            ChainStore::SchemaV1(x) => x.housekeeping(),
-        }
-    }
-
-    pub fn finalize(&self, until: BlockSlot) -> Result<(), RedbArchiveError> {
-        match self {
-            ChainStore::SchemaV1(x) => Ok(x.finalize(until)?),
         }
     }
 }

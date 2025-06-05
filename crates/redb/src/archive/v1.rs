@@ -7,16 +7,15 @@ type Error = super::RedbArchiveError;
 
 use dolos_core::{ArchiveError, BlockBody, BlockSlot, LedgerDelta};
 
-use super::{indexes, tables, ChainIter};
+use super::{ChainIter, indexes, tables};
 
 #[derive(Clone)]
 pub struct ChainStore {
     db: Arc<Database>,
-    max_slots: Option<u64>,
 }
 
 impl ChainStore {
-    pub fn initialize(db: Database, max_slots: Option<u64>) -> Result<Self, Error> {
+    pub fn initialize(db: Database) -> Result<Self, Error> {
         let mut wx = db.begin_write()?;
         wx.set_durability(Durability::Immediate);
 
@@ -25,10 +24,7 @@ impl ChainStore {
 
         wx.commit()?;
 
-        Ok(Self {
-            db: Arc::new(db),
-            max_slots,
-        })
+        Ok(Self { db: Arc::new(db) })
     }
 
     pub(crate) fn db(&self) -> &Database {
@@ -62,10 +58,6 @@ impl ChainStore {
 
         wx.commit()?;
 
-        Ok(())
-    }
-
-    pub fn finalize(&self, _: BlockSlot) -> Result<(), Error> {
         Ok(())
     }
 
@@ -364,7 +356,7 @@ impl ChainStore {
 
         info!(
             cutoff_slot = prune_before,
-            start, excess, "pruning chain for excess history"
+            start, excess, "pruning archive for excess history"
         );
 
         let wx = self.db().begin_write()?;
@@ -373,23 +365,12 @@ impl ChainStore {
 
         Ok(())
     }
-
-    const MAX_PRUNE_SLOTS_PER_HOUSEKEEPING: u64 = 10_000;
-    pub fn housekeeping(&mut self) -> Result<(), Error> {
-        if let Some(max_slots) = self.max_slots {
-            info!(max_slots, "pruning chain for excess history");
-            self.prune_history(max_slots, Some(Self::MAX_PRUNE_SLOTS_PER_HOUSEKEEPING))?;
-        }
-
-        Ok(())
-    }
 }
 
-impl From<(Database, Option<u64>)> for ChainStore {
-    fn from(value: (Database, Option<u64>)) -> Self {
+impl From<Database> for ChainStore {
+    fn from(value: Database) -> Self {
         Self {
-            db: Arc::new(value.0),
-            max_slots: value.1,
+            db: Arc::new(value),
         }
     }
 }

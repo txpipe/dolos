@@ -1,12 +1,27 @@
 use bincode;
 use itertools::Itertools;
 use redb::{Range, ReadableTable, TableDefinition};
+use serde::{Deserialize, Serialize};
 use std::{path::Path, sync::Arc};
+use thiserror::Error;
 use tracing::{debug, info, trace, warn};
 
-use super::{
-    BlockSlot, ChainPoint, LogEntry, LogSeq, LogValue, RawBlock, WalError, WalReader, WalWriter,
-};
+use dolos_core::{BlockSlot, ChainPoint, LogEntry, LogSeq, RawBlock, WalError, WalStore};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LogValue(dolos_core::LogValue);
+
+impl From<dolos_core::LogValue> for LogValue {
+    fn from(value: dolos_core::LogValue) -> Self {
+        Self(value)
+    }
+}
+
+impl From<LogValue> for dolos_core::LogValue {
+    fn from(value: LogValue) -> Self {
+        value.0
+    }
+}
 
 impl redb::Value for LogValue {
     type SelfType<'a> = Self;
@@ -39,6 +54,52 @@ impl redb::Value for LogValue {
     }
 }
 
+#[derive(Debug, Error)]
+#[error(transparent)]
+pub struct RedbWalError(#[from] WalError);
+
+impl From<redb::Error> for RedbWalError {
+    fn from(value: redb::Error) -> Self {
+        Self(WalError::internal(value))
+    }
+}
+
+impl From<RedbWalError> for WalError {
+    fn from(value: RedbWalError) -> Self {
+        value.0
+    }
+}
+
+impl From<::redb::DatabaseError> for RedbWalError {
+    fn from(value: ::redb::DatabaseError) -> Self {
+        Self(WalError::internal(Box::new(::redb::Error::from(value))))
+    }
+}
+
+impl From<::redb::TableError> for RedbWalError {
+    fn from(value: ::redb::TableError) -> Self {
+        Self(WalError::internal(Box::new(::redb::Error::from(value))))
+    }
+}
+
+impl From<::redb::CommitError> for RedbWalError {
+    fn from(value: ::redb::CommitError) -> Self {
+        Self(WalError::internal(Box::new(::redb::Error::from(value))))
+    }
+}
+
+impl From<::redb::StorageError> for RedbWalError {
+    fn from(value: ::redb::StorageError) -> Self {
+        Self(WalError::internal(Box::new(::redb::Error::from(value))))
+    }
+}
+
+impl From<::redb::TransactionError> for RedbWalError {
+    fn from(value: ::redb::TransactionError) -> Self {
+        Self(WalError::internal(Box::new(::redb::Error::from(value))))
+    }
+}
+
 pub type AugmentedBlockSlot = i128;
 
 const WAL: TableDefinition<LogSeq, LogValue> = TableDefinition::new("wal");
@@ -60,7 +121,7 @@ impl Iterator for WalIter<'_> {
         self.0
             .next()
             .map(|x| x.unwrap())
-            .map(|(k, v)| (k.value(), v.value()))
+            .map(|(k, v)| (k.value(), v.value().into()))
     }
 }
 
@@ -69,16 +130,7 @@ impl DoubleEndedIterator for WalIter<'_> {
         self.0
             .next_back()
             .map(|x| x.unwrap())
-            .map(|(k, v)| (k.value(), v.value()))
-    }
-}
-
-impl<T> From<T> for WalError
-where
-    T: Into<redb::Error>,
-{
-    fn from(value: T) -> Self {
-        WalError::IO(value.into().into())
+            .map(|(k, v)| (k.value(), v.value().into()))
     }
 }
 
@@ -86,17 +138,18 @@ const DEFAULT_CACHE_SIZE_MB: usize = 50;
 
 /// Concrete implementation of WalStore using Redb
 #[derive(Clone, Debug)]
-pub struct WalStore {
+pub struct RedbWalStore {
     db: Arc<redb::Database>,
-    max_slots: Option<u64>,
     tip_change: Arc<tokio::sync::Notify>,
 }
 
-impl WalStore {
-    pub fn is_empty(&self) -> Result<bool, WalError> {
+impl RedbWalStore {
+    pub fn is_empty(&self) -> Result<bool, RedbWalError> {
         let wr = self.db.begin_read()?;
 
-        if wr.list_tables()?.count() == 0 {
+        let tables = wr.list_tables()?;
+
+        if tables.count() == 0 {
             return Ok(true);
         }
 
@@ -111,44 +164,42 @@ impl WalStore {
         Ok(false)
     }
 
-    pub fn initialize_from_origin(&mut self) -> Result<(), WalError> {
+    pub fn initialize_from_origin(&mut self) -> Result<(), RedbWalError> {
         if !self.is_empty()? {
-            return Err(WalError::NotEmpty);
+            return Err(RedbWalError(WalError::NotEmpty));
         }
 
         info!("initializing wal");
-        self.append_entries(std::iter::once(LogValue::Mark(ChainPoint::Origin)))?;
+        self.append_entries(std::iter::once(dolos_core::LogValue::Mark(
+            ChainPoint::Origin,
+        )))?;
 
         Ok(())
     }
 
-    pub fn memory(max_slots: Option<u64>) -> Result<Self, WalError> {
-        let db =
-            redb::Database::builder().create_with_backend(redb::backends::InMemoryBackend::new())?;
+    pub fn memory() -> Result<Self, WalError> {
+        let db = redb::Database::builder()
+            .create_with_backend(redb::backends::InMemoryBackend::new())
+            .map_err(WalError::internal)?;
 
         let out = Self {
             db: Arc::new(db),
             tip_change: Arc::new(tokio::sync::Notify::new()),
-            max_slots,
         };
 
         Ok(out)
     }
 
-    pub fn open(
-        path: impl AsRef<Path>,
-        cache_size: Option<usize>,
-        max_slots: Option<u64>,
-    ) -> Result<Self, WalError> {
+    pub fn open(path: impl AsRef<Path>, cache_size: Option<usize>) -> Result<Self, WalError> {
         let inner = redb::Database::builder()
             .set_repair_callback(|x| warn!(progress = x.progress() * 100f64, "wal db is repairing"))
             .set_cache_size(1024 * 1024 * cache_size.unwrap_or(DEFAULT_CACHE_SIZE_MB))
-            .create(path)?;
+            .create(path)
+            .map_err(WalError::internal)?;
 
         let out = Self {
             db: Arc::new(inner),
             tip_change: Arc::new(tokio::sync::Notify::new()),
-            max_slots,
         };
 
         Ok(out)
@@ -164,7 +215,7 @@ impl WalStore {
         &mut self,
         from: Option<LogSeq>,
         to: Option<LogSeq>,
-    ) -> Result<(), WalError> {
+    ) -> Result<(), RedbWalError> {
         let wx = self.db.begin_write()?;
         {
             let mut wal = wx.open_table(WAL)?;
@@ -228,10 +279,10 @@ impl WalStore {
     ///   single operation, which can help avoid long-running operations.
     /// - If `max_prune` is not specified, all excess slots will be pruned.
     pub fn prune_history(
-        &mut self,
+        &self,
         max_slots: u64,
         max_prune: Option<u64>,
-    ) -> Result<(), WalError> {
+    ) -> Result<(), RedbWalError> {
         let start_slot = match self.find_start()? {
             Some((_, ChainPoint::Origin)) => 0,
             Some((_, ChainPoint::Specific(slot, _))) => slot,
@@ -275,24 +326,13 @@ impl WalStore {
         );
 
         match self.remove_before(prune_before) {
-            Err(WalError::SlotNotFound(_)) => {
+            Err(RedbWalError(WalError::SlotNotFound(_))) => {
                 warn!("pruning target slot not found, skipping");
                 Ok(())
             }
             Err(e) => Err(e),
             Ok(_) => Ok(()),
         }
-    }
-
-    const MAX_PRUNE_SLOTS_PER_HOUSEKEEPING: u64 = 10_000;
-
-    pub fn housekeeping(&mut self) -> Result<(), WalError> {
-        if let Some(max_slots) = self.max_slots {
-            info!(max_slots, "pruning wal for excess history");
-            self.prune_history(max_slots, Some(Self::MAX_PRUNE_SLOTS_PER_HOUSEKEEPING))?;
-        }
-
-        Ok(())
     }
 
     /// Approximates the LogSeq for a given BlockSlot within a specified delta
@@ -321,7 +361,7 @@ impl WalStore {
         &self,
         target: BlockSlot,
         search_range: impl std::ops::RangeBounds<BlockSlot>,
-    ) -> Result<Option<LogSeq>, WalError> {
+    ) -> Result<Option<LogSeq>, RedbWalError> {
         let min_slot = match search_range.start_bound() {
             std::ops::Bound::Included(x) => *x as i128,
             std::ops::Bound::Excluded(x) => *x as i128 + 1,
@@ -386,7 +426,7 @@ impl WalStore {
         &self,
         target: BlockSlot,
         search_range: F,
-    ) -> Result<Option<LogSeq>, WalError>
+    ) -> Result<Option<LogSeq>, RedbWalError>
     where
         F: Fn(usize) -> R,
         R: std::ops::RangeBounds<BlockSlot>,
@@ -429,7 +469,7 @@ impl WalStore {
     /// This operation is irreversible and should be used with caution. Make
     /// sure you have backups or are certain about trimming the WAL before
     /// calling this function.
-    pub fn remove_before(&mut self, slot: BlockSlot) -> Result<(), WalError> {
+    pub fn remove_before(&self, slot: BlockSlot) -> Result<(), RedbWalError> {
         let wx = self.db.begin_write()?;
 
         {
@@ -438,7 +478,7 @@ impl WalStore {
                     let start = slot - (20 * attempt as u64);
                     start..=slot
                 })?
-                .ok_or(WalError::SlotNotFound(slot))?;
+                .ok_or(RedbWalError(WalError::SlotNotFound(slot)))?;
 
             debug!(last_seq, "found max sequence to remove");
 
@@ -447,7 +487,7 @@ impl WalStore {
             let mut to_remove = wal.extract_from_if(..last_seq, |_, _| true)?;
 
             while let Some(Ok((seq, _))) = to_remove.next() {
-                trace!(seq = seq.value(), "removing log entry");
+                trace!(seq = seq.value(), "removing wal table entry");
             }
         }
 
@@ -456,7 +496,7 @@ impl WalStore {
             let mut to_remove = pos.extract_from_if(..(slot as i128), |_, _| true)?;
 
             while let Some(Ok((slot, _))) = to_remove.next() {
-                trace!(slot = slot.value(), "removing log entry");
+                trace!(slot = slot.value(), "removing pos table entry");
             }
         }
 
@@ -464,22 +504,8 @@ impl WalStore {
 
         Ok(())
     }
-}
 
-impl super::WalReader for WalStore {
-    type LogIterator<'a> = WalIter<'a>;
-
-    async fn tip_change(&self) -> Result<(), WalError> {
-        self.tip_change.notified().await;
-
-        Ok(())
-    }
-
-    fn crawl_range<'a>(
-        &self,
-        start: LogSeq,
-        end: LogSeq,
-    ) -> Result<Self::LogIterator<'a>, WalError> {
+    fn crawl_range<'a>(&self, start: LogSeq, end: LogSeq) -> Result<WalIter<'a>, RedbWalError> {
         let rx = self.db.begin_read()?;
         let table = rx.open_table(WAL)?;
 
@@ -488,7 +514,7 @@ impl super::WalReader for WalStore {
         Ok(WalIter(range))
     }
 
-    fn crawl_from<'a>(&self, start: Option<LogSeq>) -> Result<Self::LogIterator<'a>, WalError> {
+    fn crawl_from<'a>(&self, start: Option<LogSeq>) -> Result<WalIter<'a>, RedbWalError> {
         let rx = self.db.begin_read()?;
         let table = rx.open_table(WAL)?;
 
@@ -500,7 +526,7 @@ impl super::WalReader for WalStore {
         Ok(WalIter(range))
     }
 
-    fn locate_point(&self, point: &super::ChainPoint) -> Result<Option<LogSeq>, WalError> {
+    fn locate_point(&self, point: &ChainPoint) -> Result<Option<LogSeq>, RedbWalError> {
         let rx = self.db.begin_read()?;
         let table = rx.open_table(POS)?;
 
@@ -509,13 +535,11 @@ impl super::WalReader for WalStore {
 
         Ok(pos)
     }
-}
 
-impl super::WalWriter for WalStore {
     fn append_entries(
         &mut self,
-        logs: impl Iterator<Item = super::LogValue>,
-    ) -> Result<(), super::WalError> {
+        logs: impl Iterator<Item = dolos_core::LogValue>,
+    ) -> Result<(), RedbWalError> {
         let wx = self.db.begin_write()?;
 
         {
@@ -529,13 +553,13 @@ impl super::WalWriter for WalStore {
                 // integers and treat -1 as the reference for Origin. This is not ideal from
                 // disk space perspective, but good enough for this stage.
                 let pos_key = match &log {
-                    LogValue::Apply(RawBlock { slot, .. }) => *slot as i128,
-                    LogValue::Undo(RawBlock { slot, .. }) => *slot as i128,
-                    LogValue::Mark(x) => point_to_augmented_slot(x),
+                    dolos_core::LogValue::Apply(RawBlock { slot, .. }) => *slot as i128,
+                    dolos_core::LogValue::Undo(RawBlock { slot, .. }) => *slot as i128,
+                    dolos_core::LogValue::Mark(x) => point_to_augmented_slot(x),
                 };
 
                 pos.insert(pos_key, next_seq)?;
-                wal.insert(next_seq, log)?;
+                wal.insert(next_seq, LogValue::from(log))?;
 
                 next_seq += 1;
             }
@@ -546,5 +570,269 @@ impl super::WalWriter for WalStore {
         self.tip_change.notify_waiters();
 
         Ok(())
+    }
+}
+
+impl WalStore for RedbWalStore {
+    type LogIterator<'a> = WalIter<'a>;
+
+    async fn tip_change(&self) {
+        self.tip_change.notified().await;
+    }
+
+    fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<(), WalError> {
+        RedbWalStore::prune_history(self, max_slots, max_prune).map_err(From::from)
+    }
+
+    fn crawl_range<'a>(
+        &self,
+        start: LogSeq,
+        end: LogSeq,
+    ) -> Result<Self::LogIterator<'a>, WalError> {
+        RedbWalStore::crawl_range(self, start, end).map_err(From::from)
+    }
+
+    fn crawl_from<'a>(&self, start: Option<LogSeq>) -> Result<Self::LogIterator<'a>, WalError> {
+        RedbWalStore::crawl_from(self, start).map_err(From::from)
+    }
+
+    fn locate_point(&self, point: &ChainPoint) -> Result<Option<LogSeq>, WalError> {
+        RedbWalStore::locate_point(self, point).map_err(From::from)
+    }
+
+    fn append_entries(
+        &mut self,
+        logs: impl Iterator<Item = dolos_core::LogValue>,
+    ) -> Result<(), WalError> {
+        RedbWalStore::append_entries(self, logs).map_err(From::from)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use dolos_core::WalBlockReader;
+
+    use crate::testing::{dummy_block_from_slot, empty_wal_db, slot_to_hash};
+
+    use super::*;
+
+    fn dummy_block(slot: u64) -> RawBlock {
+        let hash = pallas::crypto::hash::Hasher::<256>::hash(slot.to_be_bytes().as_slice());
+
+        RawBlock {
+            slot,
+            hash,
+            era: pallas::ledger::traverse::Era::Byron,
+            body: slot.to_be_bytes().to_vec(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_wal_block_reader_happy_path() {
+        let mut db = RedbWalStore::memory().unwrap();
+        db.initialize_from_origin().unwrap();
+
+        let blocks = (0..=5).map(dummy_block).collect_vec();
+        db.roll_forward(blocks.clone().into_iter()).unwrap();
+
+        let wal_block_reader = WalBlockReader::try_new(&db, None, 20).unwrap();
+        let output_blocks = wal_block_reader.collect_vec();
+
+        assert_eq!(blocks, output_blocks);
+    }
+
+    #[tokio::test]
+    async fn test_wal_block_reader_undone_blocks_in_lookahead_window() {
+        let mut db = RedbWalStore::memory().unwrap();
+        db.initialize_from_origin().unwrap();
+
+        let undone_chain_point = (&dummy_block(1)).into();
+        db.roll_forward(
+            vec![
+                dummy_block(0),
+                dummy_block(1),
+                dummy_block(2),
+                dummy_block(3),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+        db.roll_back(&undone_chain_point).unwrap();
+        db.roll_forward(vec![dummy_block(4), dummy_block(5), dummy_block(6)].into_iter())
+            .unwrap();
+
+        let wal_block_reader = WalBlockReader::try_new(&db, None, 20).unwrap();
+        let output_blocks = wal_block_reader.collect_vec();
+
+        assert_eq!(
+            vec![
+                dummy_block(0),
+                dummy_block(1),
+                dummy_block(4),
+                dummy_block(5),
+                dummy_block(6)
+            ],
+            output_blocks
+        );
+    }
+
+    #[tokio::test]
+    async fn test_wal_block_reader_undone_blocks_not_in_lookahead_window() {
+        let mut db = RedbWalStore::memory().unwrap();
+        db.initialize_from_origin().unwrap();
+
+        let undone_chain_point = (&dummy_block(2)).into();
+        db.roll_forward(
+            vec![
+                dummy_block(0),
+                dummy_block(1),
+                dummy_block(2),
+                dummy_block(3),
+                dummy_block(4),
+                dummy_block(5),
+                dummy_block(6),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+        db.roll_back(&undone_chain_point).unwrap();
+
+        let wal_block_reader = WalBlockReader::try_new(&db, None, 2).unwrap();
+        let output_blocks = wal_block_reader.collect_vec();
+
+        // With a correctly sized lookback window, only 0 1 and 2 should be returned
+        assert_eq!(
+            vec![
+                dummy_block(0),
+                dummy_block(1),
+                dummy_block(2),
+                dummy_block(3),
+                dummy_block(4),
+                dummy_block(5),
+                dummy_block(6),
+            ],
+            output_blocks
+        );
+
+        let wal_block_reader = WalBlockReader::try_new(&db, None, 3).unwrap();
+        let output_blocks = wal_block_reader.collect_vec();
+
+        // With a correctly sized lookback window, only 0 1 and 2 should be returned
+        assert_eq!(
+            vec![
+                dummy_block(0),
+                dummy_block(1),
+                dummy_block(2),
+                dummy_block(3),
+            ],
+            output_blocks
+        );
+    }
+
+    #[test]
+    fn test_origin_event() {
+        let db = empty_wal_db();
+
+        let mut iter = db.crawl_from(None).unwrap();
+
+        let origin = iter.next();
+        assert!(origin.is_some());
+
+        let (seq, value) = origin.unwrap();
+        assert_eq!(seq, 0);
+        assert!(matches!(
+            value,
+            dolos_core::LogValue::Mark(ChainPoint::Origin)
+        ));
+
+        // ensure nothing else
+        let origin = iter.next();
+        assert!(origin.is_none());
+    }
+
+    #[test]
+    fn test_basic_append() {
+        let mut db = empty_wal_db();
+
+        let expected_block = dummy_block_from_slot(11);
+        let expected_point = ChainPoint::Specific(11, expected_block.hash);
+
+        db.roll_forward(std::iter::once(expected_block.clone()))
+            .unwrap();
+
+        // ensure tip matches
+        let (seq, point) = db.find_tip().unwrap().unwrap();
+        assert_eq!(seq, 1);
+        assert_eq!(point, expected_point);
+
+        // ensure point can be located
+        let seq = db.locate_point(&expected_point).unwrap().unwrap();
+        assert_eq!(seq, 1);
+
+        // ensure chain has item
+        let mut iter = db.crawl_from(None).unwrap();
+
+        iter.next(); // origin
+
+        let (seq, log) = iter.next().unwrap();
+        assert_eq!(seq, 1);
+        assert_eq!(log, dolos_core::LogValue::Apply(expected_block));
+
+        // ensure nothing else
+        let origin = iter.next();
+        assert!(origin.is_none());
+    }
+
+    #[test]
+    fn test_rollback_undos() {
+        let mut db = empty_wal_db();
+
+        let forward = (0..=5).map(|x| dummy_block_from_slot(x * 10));
+        db.roll_forward(forward).unwrap();
+
+        let rollback_to = ChainPoint::Specific(20, slot_to_hash(20));
+        db.roll_back(&rollback_to).unwrap();
+
+        // ensure tip show rollback point
+        let (_, tip_point) = db.find_tip().unwrap().unwrap();
+        assert_eq!(tip_point, rollback_to);
+
+        // after the previous actions, we should get the following sequence
+        // Origin => Apply(0) => Apply(10) => Apply(20) => Apply(30) => Apply(40) =>
+        // Apply(50) => Undo(50) => Undo(40) => Undo(30) => Mark(20)
+
+        // ensure wal has correct sequence of events
+        let mut wal = db.crawl_from(None).unwrap();
+
+        let (seq, log) = wal.next().unwrap();
+        assert_eq!(log, dolos_core::LogValue::Mark(ChainPoint::Origin));
+        println!("{seq}");
+
+        for i in 0..=5 {
+            let (seq, log) = wal.next().unwrap();
+            println!("{seq}");
+
+            match log {
+                dolos_core::LogValue::Apply(RawBlock { slot, .. }) => assert_eq!(slot, i * 10),
+                _ => panic!("expected apply"),
+            }
+        }
+
+        for i in (3..=5).rev() {
+            let (seq, log) = wal.next().unwrap();
+            println!("{seq}");
+
+            match log {
+                dolos_core::LogValue::Undo(RawBlock { slot, .. }) => assert_eq!(slot, i * 10),
+                _ => panic!("expected undo"),
+            }
+        }
+
+        let (seq, log) = wal.next().unwrap();
+        assert_eq!(log, dolos_core::LogValue::Mark(rollback_to));
+        println!("{seq}");
+
+        // ensure chain stops here
+        assert!(wal.next().is_none());
     }
 }

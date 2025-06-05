@@ -1,17 +1,18 @@
 use miette::{Context as _, IntoDiagnostic};
+use std::sync::Arc;
 use std::{fs, path::PathBuf, time::Duration};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::{filter::Targets, prelude::*};
 
+use dolos::adapters::{ArchiveAdapter, DomainAdapter, StateAdapter, WalAdapter};
 use dolos::core::Genesis;
 use dolos::prelude::*;
-use dolos::{chain, state, wal};
 
 use crate::{GenesisConfig, LoggingConfig};
 
-pub type Stores = (wal::redb::WalStore, state::LedgerStore, chain::ChainStore);
+pub type Stores = (WalAdapter, StateAdapter, ArchiveAdapter);
 
 pub fn ensure_storage_path(config: &crate::Config) -> Result<PathBuf, Error> {
     let root = config.storage.path.as_ref().ok_or(Error::config(
@@ -23,36 +24,30 @@ pub fn ensure_storage_path(config: &crate::Config) -> Result<PathBuf, Error> {
     Ok(root.to_path_buf())
 }
 
-pub fn open_wal_store(config: &crate::Config) -> Result<wal::redb::WalStore, Error> {
+pub fn open_wal_store(config: &crate::Config) -> Result<WalAdapter, Error> {
     let root = ensure_storage_path(config)?;
 
-    let wal = wal::redb::WalStore::open(
-        root.join("wal"),
-        config.storage.wal_cache,
-        config.storage.max_wal_history,
-    )?;
+    let wal = dolos_redb::wal::RedbWalStore::open(root.join("wal"), config.storage.wal_cache)?;
 
-    Ok(wal)
+    Ok(WalAdapter::Redb(wal))
 }
 
-pub fn open_chain_store(config: &crate::Config) -> Result<chain::ChainStore, Error> {
+pub fn open_chain_store(config: &crate::Config) -> Result<ArchiveAdapter, Error> {
     let root = ensure_storage_path(config)?;
 
-    let chain = chain::redb::ChainStore::open(
-        root.join("chain"),
-        config.storage.chain_cache,
-        config.storage.max_chain_history,
-    )
-    .map_err(ArchiveError::from)?;
+    let chain =
+        dolos_redb::archive::ChainStore::open(root.join("chain"), config.storage.chain_cache)
+            .map_err(ArchiveError::from)?;
 
     Ok(chain.into())
 }
 
-pub fn open_ledger_store(config: &crate::Config) -> Result<state::LedgerStore, Error> {
+pub fn open_ledger_store(config: &crate::Config) -> Result<StateAdapter, Error> {
     let root = ensure_storage_path(config)?;
 
-    let ledger = state::redb::LedgerStore::open(root.join("ledger"), config.storage.ledger_cache)
-        .map_err(StateError::from)?;
+    let ledger =
+        dolos_redb::state::LedgerStore::open(root.join("ledger"), config.storage.ledger_cache)
+            .map_err(StateError::from)?;
 
     Ok(ledger.into())
 }
@@ -70,24 +65,41 @@ pub fn open_persistent_data_stores(config: &crate::Config) -> Result<Stores, Err
     Ok((wal, ledger, chain))
 }
 
-pub fn create_ephemeral_data_stores(config: &crate::Config) -> Result<Stores, Error> {
-    let mut wal = wal::redb::WalStore::memory(config.storage.max_wal_history)?;
+pub fn create_ephemeral_data_stores() -> Result<Stores, Error> {
+    let mut wal = dolos_redb::wal::RedbWalStore::memory()?;
 
-    wal.initialize_from_origin()?;
+    wal.initialize_from_origin().map_err(WalError::from)?;
 
-    let ledger = state::LedgerStore::Redb(state::redb::LedgerStore::in_memory_v2()?);
+    let ledger = dolos_redb::state::LedgerStore::in_memory_v2()?;
 
-    let chain = chain::ChainStore::Redb(chain::redb::ChainStore::in_memory_v1()?);
+    let chain = dolos_redb::archive::ChainStore::in_memory_v1()?;
 
-    Ok((wal, ledger, chain))
+    Ok((wal.into(), ledger.into(), chain.into()))
 }
 
 pub fn setup_data_stores(config: &crate::Config) -> Result<Stores, Error> {
     if config.storage.is_ephemeral() {
-        create_ephemeral_data_stores(config)
+        create_ephemeral_data_stores()
     } else {
         open_persistent_data_stores(config)
     }
+}
+
+pub fn setup_domain(config: &crate::Config) -> miette::Result<DomainAdapter> {
+    let (wal, state, archive) = setup_data_stores(config)?;
+    let genesis = Arc::new(open_genesis_files(&config.genesis)?);
+    let mempool = dolos::mempool::Mempool::new(genesis.clone(), state.clone());
+
+    let domain = DomainAdapter {
+        storage_config: Arc::new(config.storage.clone()),
+        genesis,
+        wal,
+        state,
+        archive,
+        mempool,
+    };
+
+    Ok(domain)
 }
 
 pub fn setup_tracing(config: &LoggingConfig) -> miette::Result<()> {

@@ -4,7 +4,7 @@ use serde::Deserialize;
 use std::sync::Arc;
 use tx3_lang::ProtoTx;
 
-use dolos_core::StateStore as _;
+use dolos_core::{Domain, StateStore as _};
 
 use super::Context;
 
@@ -172,9 +172,9 @@ fn decode_params(params: Params<'_>) -> Result<ProtoTx, ErrorObjectOwned> {
     Ok(tx)
 }
 
-pub async fn trp_resolve(
+pub async fn trp_resolve<D: Domain>(
     params: Params<'_>,
-    context: Arc<Context>,
+    context: Arc<Context<D>>,
 ) -> Result<serde_json::Value, ErrorObjectOwned> {
     tracing::info!(method = "trp.resolve", "Received TRP request.");
     let tx = match decode_params(params) {
@@ -185,7 +185,7 @@ pub async fn trp_resolve(
         }
     };
 
-    let resolved = tx3_cardano::resolve_tx::<Context>(
+    let resolved = tx3_cardano::resolve_tx::<Context<D>>(
         tx,
         (*context).clone(),
         context.config.max_optimize_rounds.into(),
@@ -210,6 +210,6 @@ pub async fn trp_resolve(
     Ok(serde_json::json!({ "tx": hex::encode(resolved.payload) }))
 }
 
-pub fn health(context: &Context) -> bool {
-    context.ledger.cursor().is_ok()
+pub fn health<D: Domain>(context: &Context<D>) -> bool {
+    context.domain.state().cursor().is_ok()
 }

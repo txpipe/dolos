@@ -31,11 +31,13 @@ pub async fn route<D: Domain>(
 
         #[cfg(feature = "phase2")]
         MempoolError::Phase2Error(_) => StatusCode::BAD_REQUEST,
+
         MempoolError::InvalidTx(_) => StatusCode::BAD_REQUEST,
         MempoolError::TraverseError(_) => StatusCode::BAD_REQUEST,
         MempoolError::StateError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         MempoolError::DecodeError(_) => StatusCode::BAD_REQUEST,
         MempoolError::PlutusNotSupported => StatusCode::BAD_REQUEST,
+        MempoolError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
     })?;
 
     Ok(hex::encode(hash))

@@ -3,9 +3,7 @@ use tracing::debug;
 
 use tx3_cardano::pallas::ledger::traverse::{Era, MultiEraOutput};
 
-use dolos_core::{EraCbor, StateStore as _, TxoRef};
-
-use crate::state::LedgerStore;
+use dolos_core::{Domain, EraCbor, StateStore as _, TxoRef};
 
 enum Subset {
     All,
@@ -158,13 +156,13 @@ fn pick_first_utxo_match(
 
 const MAX_SEARCH_SPACE_SIZE: usize = 50;
 
-struct InputSelector<'a> {
-    ledger: &'a LedgerStore,
+struct InputSelector<'a, D: Domain> {
+    ledger: &'a D::State,
     network: tx3_cardano::Network,
 }
 
-impl<'a> InputSelector<'a> {
-    pub fn new(ledger: &'a LedgerStore, network: tx3_cardano::Network) -> Self {
+impl<'a, D: Domain> InputSelector<'a, D> {
+    pub fn new(ledger: &'a D::State, network: tx3_cardano::Network) -> Self {
         Self { ledger, network }
     }
 
@@ -306,10 +304,10 @@ impl<'a> InputSelector<'a> {
     }
 }
 
-pub fn resolve(
-    ledger: &LedgerStore,
+pub fn resolve<D: Domain>(
+    ledger: &D::State,
     network: tx3_cardano::Network,
     criteria: &tx3_lang::ir::InputQuery,
 ) -> Result<tx3_lang::UtxoSet, tx3_cardano::Error> {
-    InputSelector::new(ledger, network).select(criteria)
+    InputSelector::<D>::new(ledger, network).select(criteria)
 }

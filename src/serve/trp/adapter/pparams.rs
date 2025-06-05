@@ -3,9 +3,7 @@ use std::collections::HashMap;
 use pallas::ledger::{traverse::MultiEraUpdate, validate::utils::ConwayProtParams};
 
 use dolos_cardano::pparams;
-use dolos_core::{Genesis, StateStore as _};
-
-use crate::state::LedgerStore;
+use dolos_core::{Domain, Genesis, StateStore as _};
 
 pub fn network_id_from_genesis(genesis: &Genesis) -> Option<tx3_cardano::Network> {
     match genesis.shelley.network_id.as_ref() {
@@ -35,9 +33,9 @@ fn map_cost_models(pparams: &ConwayProtParams) -> HashMap<u8, tx3_cardano::CostM
     HashMap::from_iter(present)
 }
 
-pub fn resolve(
+pub fn resolve<D: Domain>(
     genesis: &Genesis,
-    ledger: &LedgerStore,
+    ledger: &D::State,
 ) -> Result<tx3_cardano::PParams, tx3_cardano::Error> {
     let network = network_id_from_genesis(genesis).unwrap();
 
@@ -46,7 +44,7 @@ pub fn resolve(
         .map_err(|err| tx3_cardano::Error::LedgerInternalError(err.to_string()))?;
 
     let updates = ledger
-        .get_pparams(tip.as_ref().map(|p| p.0).unwrap_or_default())
+        .get_pparams(tip.as_ref().map(|p| p.slot()).unwrap_or_default())
         .map_err(|err| tx3_cardano::Error::LedgerInternalError(err.to_string()))?;
 
     let updates: Vec<_> = updates
@@ -55,8 +53,8 @@ pub fn resolve(
         .collect::<Result<Vec<MultiEraUpdate>, pallas::codec::minicbor::decode::Error>>()
         .map_err(|err| tx3_cardano::Error::LedgerInternalError(err.to_string()))?;
 
-    let summary = pparams::fold_with_hacks(genesis, &updates, tip.as_ref().unwrap().0);
-    let era = summary.era_for_slot(tip.as_ref().unwrap().0);
+    let summary = pparams::fold_with_hacks(genesis, &updates, tip.as_ref().unwrap().slot());
+    let era = summary.era_for_slot(tip.as_ref().unwrap().slot());
 
     let out = match &era.pparams {
         pallas::ledger::validate::utils::MultiEraProtocolParameters::Conway(pparams) => {

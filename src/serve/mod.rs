@@ -1,16 +1,10 @@
-use std::sync::Arc;
-
 use miette::{Context, IntoDiagnostic};
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-use dolos_core::Genesis;
-
-use crate::chain::ChainStore;
-use crate::mempool::Mempool;
-use crate::state::LedgerStore;
-use crate::wal::redb::WalStore;
+use crate::adapters::DomainAdapter;
+use crate::prelude::*;
 
 pub mod utils;
 
@@ -54,49 +48,13 @@ macro_rules! feature_not_included {
     };
 }
 
-#[derive(Clone)]
-struct Domain {
-    genesis: Arc<Genesis>,
-    ledger: LedgerStore,
-    chain: ChainStore,
-    mempool: Mempool,
-}
-
-impl dolos_core::Domain for Domain {
-    type State = LedgerStore;
-
-    type Archive = ChainStore;
-
-    type Mempool = Mempool;
-
-    fn genesis(&self) -> &Genesis {
-        &self.genesis
-    }
-
-    fn state(&self) -> &Self::State {
-        &self.ledger
-    }
-
-    fn archive(&self) -> &Self::Archive {
-        &self.chain
-    }
-
-    fn mempool(&self) -> &Self::Mempool {
-        &self.mempool
-    }
-}
-
 /// Serve remote requests
 ///
 /// Uses specified config to start listening for network connections on either
 /// gRPC, Ouroboros or both protocols.
 pub async fn serve(
     config: Config,
-    genesis: Arc<Genesis>,
-    wal: WalStore,
-    ledger: LedgerStore,
-    chain: ChainStore,
-    mempool: Mempool,
+    domain: DomainAdapter,
     exit: CancellationToken,
 ) -> miette::Result<()> {
     let grpc = async {
@@ -107,18 +65,10 @@ pub async fn serve(
             feature_not_included!("gRPC");
 
             #[cfg(feature = "grpc")]
-            grpc::serve(
-                cfg,
-                genesis.clone(),
-                wal.clone(),
-                ledger.clone(),
-                chain.clone(),
-                mempool.clone(),
-                exit.clone(),
-            )
-            .await
-            .into_diagnostic()
-            .context("serving gRPC")
+            grpc::serve(cfg, domain.clone(), exit.clone())
+                .await
+                .into_diagnostic()
+                .context("serving gRPC")
         } else {
             Ok(())
         }
@@ -127,7 +77,7 @@ pub async fn serve(
     let o7s = async {
         if let Some(cfg) = config.ouroboros {
             info!("found Ouroboros config");
-            o7s::serve(cfg, wal.clone(), exit.clone())
+            o7s::serve(cfg, domain.wal().clone(), exit.clone())
                 .await
                 .into_diagnostic()
                 .context("serving Ouroboros")
@@ -143,15 +93,8 @@ pub async fn serve(
             #[cfg(not(feature = "minibf"))]
             feature_not_included!("minibf");
 
-            let domain = Domain {
-                genesis: genesis.clone(),
-                ledger: ledger.clone(),
-                chain: chain.clone(),
-                mempool: mempool.clone(),
-            };
-
             #[cfg(feature = "minibf")]
-            minibf::serve(cfg, domain, exit.clone())
+            minibf::serve(cfg, domain.clone(), exit.clone())
                 .await
                 .into_diagnostic()
                 .context("serving minibf")
@@ -168,7 +111,7 @@ pub async fn serve(
             feature_not_included!("trp");
 
             #[cfg(feature = "trp")]
-            trp::serve(cfg, genesis.clone(), ledger.clone(), exit.clone())
+            trp::serve(cfg, domain.clone(), exit.clone())
                 .await
                 .into_diagnostic()
                 .context("serving trp")

@@ -2,13 +2,11 @@ use pallas::network::miniprotocols::blockfetch;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
-use crate::{
-    prelude::Error,
-    wal::{redb::WalStore, LogSeq, ReadUtils, WalReader},
-};
+use crate::adapters::WalAdapter;
+use crate::prelude::*;
 
 async fn send_batch(
-    wal: &WalStore,
+    wal: &WalAdapter,
     s1: LogSeq,
     s2: LogSeq,
     prot: &mut blockfetch::Server,
@@ -22,7 +20,7 @@ async fn send_batch(
 
     prot.send_start_batch().await.map_err(Error::server)?;
 
-    for crate::wal::RawBlock { body, .. } in iter {
+    for RawBlock { body, .. } in iter {
         prot.send_block(body.to_vec())
             .await
             .map_err(Error::server)?;
@@ -34,7 +32,7 @@ async fn send_batch(
 }
 
 async fn process_request(
-    wal: &WalStore,
+    wal: &WalAdapter,
     req: blockfetch::BlockRequest,
     prot: &mut blockfetch::Server,
 ) -> Result<(), Error> {
@@ -51,7 +49,7 @@ async fn process_request(
     }
 }
 
-pub async fn process_requests(wal: WalStore, mut prot: blockfetch::Server) -> Result<(), Error> {
+pub async fn process_requests(wal: WalAdapter, mut prot: blockfetch::Server) -> Result<(), Error> {
     while let Some(req) = prot.recv_while_idle().await.map_err(Error::server)? {
         process_request(&wal, req, &mut prot).await?;
     }
@@ -60,7 +58,7 @@ pub async fn process_requests(wal: WalStore, mut prot: blockfetch::Server) -> Re
 }
 
 pub async fn handle_session(
-    wal: WalStore,
+    wal: WalAdapter,
     connection: blockfetch::Server,
     cancel: CancellationToken,
 ) -> Result<(), Error> {

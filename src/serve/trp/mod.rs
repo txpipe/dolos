@@ -7,10 +7,9 @@ use tower::ServiceBuilder;
 use tower_http::cors::CorsLayer;
 use tracing::info;
 
-use dolos_core::Genesis;
+use dolos_core::Domain;
 
 use crate::prelude::Error;
-use crate::state::LedgerStore;
 
 mod adapter;
 mod methods;
@@ -23,16 +22,14 @@ pub struct Config {
 }
 
 #[derive(Clone)]
-pub struct Context {
-    pub genesis: Arc<Genesis>,
-    pub ledger: LedgerStore,
+pub struct Context<D: Domain> {
+    pub domain: D,
     pub config: Arc<Config>,
 }
 
-pub async fn serve(
+pub async fn serve<D: Domain>(
     cfg: Config,
-    genesis: Arc<Genesis>,
-    ledger: LedgerStore,
+    domain: D,
     exit: CancellationToken,
 ) -> Result<(), Error> {
     let cors_layer = if cfg.permissive_cors.unwrap_or_default() {
@@ -49,15 +46,16 @@ pub async fn serve(
         .map_err(Error::server)?;
 
     let mut module = RpcModule::new(Context {
-        genesis,
-        ledger,
+        domain,
         config: Arc::new(cfg),
     });
+
     module
         .register_async_method("trp.resolve", |params, context, _| async {
             methods::trp_resolve(params, context).await
         })
         .map_err(Error::server)?;
+
     module
         .register_method("health", |_, context, _| methods::health(context))
         .map_err(Error::server)?;

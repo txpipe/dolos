@@ -1,12 +1,8 @@
-use crate::chain::ChainStore;
-use crate::state::LedgerStore;
-use crate::wal::redb::WalStore;
-use crate::{mempool::Mempool, prelude::*};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use std::time::Duration;
 
-use dolos_core::Genesis;
+use crate::adapters::DomainAdapter;
+use crate::prelude::*;
 
 pub mod apply;
 pub mod emulator;
@@ -53,31 +49,13 @@ fn define_gasket_policy(config: &Option<gasket::retries::Policy>) -> gasket::run
 pub fn pipeline(
     config: &Config,
     upstream: &UpstreamConfig,
-    storage: &StorageConfig,
-    wal: WalStore,
-    ledger: LedgerStore,
-    chain: ChainStore,
-    genesis: Arc<Genesis>,
-    mempool: Mempool,
+    domain: DomainAdapter,
     retries: &Option<gasket::retries::Policy>,
     quit_on_tip: bool,
 ) -> Result<Vec<gasket::runtime::Tether>, Error> {
     match upstream {
-        UpstreamConfig::Peer(cfg) => sync(
-            config,
-            cfg,
-            storage,
-            wal,
-            ledger,
-            chain,
-            genesis,
-            mempool,
-            retries,
-            quit_on_tip,
-        ),
-        UpstreamConfig::Emulator(cfg) => {
-            devnet(cfg, storage, wal, ledger, chain, genesis, mempool, retries)
-        }
+        UpstreamConfig::Peer(cfg) => sync(config, cfg, domain.clone(), retries, quit_on_tip),
+        UpstreamConfig::Emulator(cfg) => devnet(cfg, domain.clone(), retries),
     }
 }
 
@@ -85,12 +63,7 @@ pub fn pipeline(
 pub fn sync(
     config: &Config,
     upstream: &PeerConfig,
-    storage: &StorageConfig,
-    wal: WalStore,
-    ledger: LedgerStore,
-    chain: ChainStore,
-    genesis: Arc<Genesis>,
-    mempool: Mempool,
+    domain: DomainAdapter,
     retries: &Option<gasket::retries::Policy>,
     quit_on_tip: bool,
 ) -> Result<Vec<gasket::runtime::Tether>, Error> {
@@ -98,26 +71,18 @@ pub fn sync(
         upstream.peer_address.clone(),
         upstream.network_magic,
         config.pull_batch_size.unwrap_or(50),
-        wal.clone(),
+        domain.wal().clone(),
         quit_on_tip,
     );
 
-    let mut roll = roll::Stage::new(wal.clone(), HOUSEKEEPING_INTERVAL);
+    let mut roll = roll::Stage::new(domain.wal().clone());
 
-    let mut apply = apply::Stage::new(
-        wal.clone(),
-        ledger,
-        chain,
-        mempool.clone(),
-        genesis,
-        storage.max_ledger_history,
-        HOUSEKEEPING_INTERVAL,
-    );
+    let mut apply = apply::Stage::new(domain.clone(), HOUSEKEEPING_INTERVAL);
 
     let submit = submit::Stage::new(
         upstream.peer_address.clone(),
         upstream.network_magic,
-        mempool,
+        domain.mempool().clone(),
     );
 
     let (to_roll, from_pull) = gasket::messaging::tokio::mpsc_channel(50);
@@ -144,30 +109,17 @@ pub fn sync(
 #[allow(clippy::too_many_arguments)]
 pub fn devnet(
     emulator_cfg: &EmulatorConfig,
-    storage: &StorageConfig,
-    wal: WalStore,
-    ledger: LedgerStore,
-    chain: ChainStore,
-    genesis: Arc<Genesis>,
-    mempool: Mempool,
+    domain: DomainAdapter,
     retries: &Option<gasket::retries::Policy>,
 ) -> Result<Vec<gasket::runtime::Tether>, Error> {
     let mut emulator = emulator::Stage::new(
-        wal.clone(),
-        mempool.clone(),
+        domain.wal().clone(),
+        domain.mempool().clone(),
         emulator_cfg.block_production_interval,
     );
 
-    let mut roll = roll::Stage::new(wal.clone(), HOUSEKEEPING_INTERVAL);
-    let mut apply = apply::Stage::new(
-        wal.clone(),
-        ledger,
-        chain,
-        mempool.clone(),
-        genesis,
-        storage.max_ledger_history,
-        HOUSEKEEPING_INTERVAL,
-    );
+    let mut roll = roll::Stage::new(domain.wal().clone());
+    let mut apply = apply::Stage::new(domain.clone(), HOUSEKEEPING_INTERVAL);
 
     let (to_roll, from_pull) = gasket::messaging::tokio::mpsc_channel(50);
     emulator.downstream.connect(to_roll);

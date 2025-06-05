@@ -1,29 +1,20 @@
 use gasket::framework::*;
 use tracing::info;
 
-use crate::{
-    prelude::*,
-    wal::{self, redb::WalStore, WalWriter},
-};
+use crate::adapters::WalAdapter;
+use crate::prelude::*;
 
 pub type Cursor = (BlockSlot, BlockHash);
 pub type UpstreamPort = gasket::messaging::InputPort<PullEvent>;
 pub type DownstreamPort = gasket::messaging::OutputPort<RollEvent>;
 
-pub enum WorkUnit {
-    PullEvent(PullEvent),
-    Housekeeping,
-}
-
 #[derive(Stage)]
-#[stage(name = "roll", unit = "WorkUnit", worker = "Worker")]
+#[stage(name = "roll", unit = "PullEvent", worker = "Worker")]
 pub struct Stage {
-    store: WalStore,
+    store: WalAdapter,
 
     pub upstream: UpstreamPort,
     pub downstream: DownstreamPort,
-
-    housekeeping_interval: std::time::Duration,
 
     #[metric]
     block_count: gasket::metrics::Counter,
@@ -33,21 +24,20 @@ pub struct Stage {
 }
 
 impl Stage {
-    pub fn new(store: WalStore, housekeeping_interval: std::time::Duration) -> Self {
+    pub fn new(store: WalAdapter) -> Self {
         Self {
             store,
             upstream: Default::default(),
             downstream: Default::default(),
             block_count: Default::default(),
             roll_count: Default::default(),
-            housekeeping_interval,
         }
     }
 
     async fn process_pull_event(&mut self, unit: &PullEvent) -> Result<(), WorkerError> {
         match unit {
             PullEvent::RollForward(block) => {
-                let block = wal::RawBlock {
+                let block = RawBlock {
                     slot: block.slot,
                     hash: block.hash,
                     era: block.era,
@@ -59,16 +49,9 @@ impl Stage {
                 self.store.roll_forward(std::iter::once(block)).or_panic()?;
             }
             PullEvent::Rollback(point) => {
-                let point = match point {
-                    pallas::network::miniprotocols::Point::Origin => wal::ChainPoint::Origin,
-                    pallas::network::miniprotocols::Point::Specific(s, h) => {
-                        wal::ChainPoint::Specific(*s, h.as_slice().into())
-                    }
-                };
-
                 info!(?point, "rolling back wal");
 
-                self.store.roll_back(&point).or_panic()?;
+                self.store.roll_back(point).or_panic()?;
             }
         }
 
@@ -81,37 +64,26 @@ impl Stage {
     }
 }
 
-pub struct Worker {
-    housekeeping_timer: tokio::time::Interval,
-}
+pub struct Worker;
 
 impl Worker {}
 
 #[async_trait::async_trait(?Send)]
 impl gasket::framework::Worker<Stage> for Worker {
-    async fn bootstrap(stage: &Stage) -> Result<Self, WorkerError> {
-        Ok(Worker {
-            housekeeping_timer: tokio::time::interval(stage.housekeeping_interval),
-        })
+    async fn bootstrap(_: &Stage) -> Result<Self, WorkerError> {
+        Ok(Worker)
     }
 
-    async fn schedule(&mut self, stage: &mut Stage) -> Result<WorkSchedule<WorkUnit>, WorkerError> {
-        tokio::select! {
-            msg = stage.upstream.recv() => {
-                let msg = msg.or_panic()?;
-                Ok(WorkSchedule::Unit(WorkUnit::PullEvent(msg.payload)))
-            }
-            _ = self.housekeeping_timer.tick() => {
-                Ok(WorkSchedule::Unit(WorkUnit::Housekeeping))
-            }
-        }
+    async fn schedule(
+        &mut self,
+        stage: &mut Stage,
+    ) -> Result<WorkSchedule<PullEvent>, WorkerError> {
+        let msg = stage.upstream.recv().await.or_panic()?;
+        Ok(WorkSchedule::Unit(msg.payload))
     }
 
-    async fn execute(&mut self, unit: &WorkUnit, stage: &mut Stage) -> Result<(), WorkerError> {
-        match unit {
-            WorkUnit::PullEvent(pull) => stage.process_pull_event(pull).await?,
-            WorkUnit::Housekeeping => stage.store.housekeeping().or_panic()?,
-        }
+    async fn execute(&mut self, unit: &PullEvent, stage: &mut Stage) -> Result<(), WorkerError> {
+        stage.process_pull_event(unit).await?;
 
         Ok(())
     }

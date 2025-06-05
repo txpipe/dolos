@@ -4,6 +4,8 @@ use miette::IntoDiagnostic;
 
 use crate::feedback::Feedback;
 
+use dolos::prelude::*;
+
 mod mithril;
 mod relay;
 mod snapshot;
@@ -44,9 +46,9 @@ pub struct Args {
 }
 
 pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::Result<()> {
-    let wal = crate::common::open_wal_store(config)?;
+    let dolos::adapters::WalAdapter::Redb(wal) = crate::common::open_wal_store(config)?;
 
-    if !wal.is_empty().into_diagnostic()? {
+    if !wal.is_empty().map_err(WalError::from).into_diagnostic()? {
         println!("found existing data, skipping bootstrap");
         return Ok(());
     }

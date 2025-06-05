@@ -1,10 +1,11 @@
-use dolos::wal::{self, WalWriter};
 use itertools::Itertools;
 use miette::{bail, Context, IntoDiagnostic};
 use mithril_client::{ClientBuilder, MessageBuilder, MithrilError, MithrilResult};
 use pallas::ledger::traverse::MultiEraBlock;
 use std::{path::Path, sync::Arc};
 use tracing::{debug, info, warn};
+
+use dolos::prelude::*;
 
 use crate::{feedback::Feedback, MithrilConfig};
 
@@ -152,10 +153,10 @@ async fn fetch_snapshot(
     Ok(())
 }
 
-fn open_empty_wal(config: &crate::Config) -> miette::Result<wal::redb::WalStore> {
-    let wal = crate::common::open_wal_store(config)?;
+fn open_empty_wal(config: &crate::Config) -> miette::Result<dolos_redb::wal::RedbWalStore> {
+    let dolos::adapters::WalAdapter::Redb(wal) = crate::common::open_wal_store(config)?;
 
-    let is_empty = wal.is_empty().into_diagnostic()?;
+    let is_empty = wal.is_empty().map_err(WalError::from).into_diagnostic()?;
 
     if !is_empty {
         bail!("can't continue with data already available");
@@ -181,6 +182,7 @@ fn import_hardano_into_wal(
     let mut wal = open_empty_wal(config).context("opening WAL")?;
 
     wal.initialize_from_origin()
+        .map_err(WalError::from)
         .into_diagnostic()
         .context("initializing WAL")?;
 
@@ -205,7 +207,7 @@ fn import_hardano_into_wal(
                 progress.set_position(blockd.slot());
                 debug!(slot = blockd.slot(), "importing block");
 
-                miette::Result::Ok(wal::RawBlock {
+                miette::Result::Ok(RawBlock {
                     slot: blockd.slot(),
                     hash: blockd.hash(),
                     era: blockd.era(),

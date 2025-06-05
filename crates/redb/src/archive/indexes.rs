@@ -348,7 +348,7 @@ impl Indexes {
 
     pub fn apply(wx: &WriteTransaction, delta: &LedgerDelta) -> Result<(), Error> {
         if let Some(point) = &delta.new_position {
-            let slot = point.0;
+            let slot = point.slot();
 
             let block = MultiEraBlock::decode(&delta.new_block)
                 .map_err(ArchiveError::BlockDecodingError)?;
@@ -495,7 +495,7 @@ impl Indexes {
         }
 
         if let Some(point) = &delta.undone_position {
-            let slot = point.0;
+            let slot = point.slot();
 
             let block = MultiEraBlock::decode(&delta.undone_block)
                 .map_err(ArchiveError::BlockDecodingError)?;

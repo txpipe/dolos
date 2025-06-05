@@ -1,15 +1,18 @@
+use pallas::{
+    crypto::hash::Hash,
+    ledger::traverse::{MultiEraInput, MultiEraOutput, MultiEraTx, MultiEraUpdate},
+    network::miniprotocols::Point as PallasPoint,
+};
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     fmt::Display,
 };
-
-use pallas::{
-    crypto::hash::Hash,
-    ledger::traverse::{MultiEraInput, MultiEraOutput, MultiEraTx, MultiEraUpdate},
-    network::miniprotocols::Point,
-};
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tracing::info;
+
+mod mempool;
+mod wal;
 
 pub type Era = u16;
 pub type TxoIdx = u32;
@@ -19,9 +22,15 @@ pub type BlockHeight = u64;
 pub type BlockBody = Vec<u8>;
 pub type BlockEra = pallas::ledger::traverse::Era;
 pub type BlockHash = Hash<32>;
+pub type BlockHeader = Vec<u8>;
 pub type TxHash = Hash<32>;
 pub type OutputIdx = u64;
 pub type UtxoBody = (u16, Vec<u8>);
+pub type ChainTip = pallas::network::miniprotocols::chainsync::Tip;
+pub type LogSeq = u64;
+
+pub use mempool::*;
+pub use wal::*;
 
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub struct EraCbor(pub Era, pub Vec<u8>);
@@ -92,8 +101,9 @@ impl From<TxoRef> for (TxHash, TxoIdx) {
     }
 }
 
-#[derive(Debug, Eq, PartialEq, Hash)]
-pub struct ChainPoint(pub BlockSlot, pub BlockHash);
+// TODO: remove legacy
+// #[derive(Debug, Eq, PartialEq, Hash)]
+// pub struct ChainPoint(pub BlockSlot, pub BlockHash);
 
 #[derive(Debug, Error)]
 pub enum BrokenInvariant {
@@ -104,6 +114,11 @@ pub enum BrokenInvariant {
 pub type UtxoMap = HashMap<TxoRef, EraCbor>;
 
 pub type UtxoSet = HashSet<TxoRef>;
+
+pub struct LedgerQuery {
+    pub required_inputs: Vec<TxoRef>,
+    pub extra_inputs: HashMap<TxoRef, EraCbor>,
+}
 
 /// A slice of the ledger relevant for a specific task
 ///
@@ -123,6 +138,8 @@ pub struct LedgerDelta {
     pub consumed_utxo: HashMap<TxoRef, EraCbor>,
     pub recovered_stxi: HashMap<TxoRef, EraCbor>,
     pub undone_utxo: HashMap<TxoRef, EraCbor>,
+    pub seen_txs: HashSet<TxHash>,
+    pub unseen_txs: HashSet<TxHash>,
     pub new_pparams: Vec<EraCbor>,
     pub new_block: BlockBody,
     pub undone_block: BlockBody,
@@ -136,15 +153,151 @@ pub struct RawBlock {
     pub body: BlockBody,
 }
 
+impl PartialEq for RawBlock {
+    fn eq(&self, other: &Self) -> bool {
+        self.slot == other.slot && self.hash == other.hash
+    }
+}
+
+impl PartialOrd for RawBlock {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.slot.partial_cmp(&other.slot)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum PullEvent {
     RollForward(RawBlock),
-    Rollback(Point),
+    Rollback(ChainPoint),
 }
 
 #[derive(Debug, Clone)]
 pub enum RollEvent {
     TipChanged,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Eq)]
+pub enum ChainPoint {
+    Origin,
+    Specific(BlockSlot, BlockHash),
+}
+
+impl ChainPoint {
+    pub fn slot(&self) -> BlockSlot {
+        match self {
+            Self::Origin => 0,
+            Self::Specific(slot, _) => *slot,
+        }
+    }
+}
+
+impl PartialEq for ChainPoint {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Specific(l0, l1), Self::Specific(r0, r1)) => l0 == r0 && l1 == r1,
+            (Self::Origin, Self::Origin) => true,
+            _ => false,
+        }
+    }
+}
+
+impl Ord for ChainPoint {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        match (self, other) {
+            (Self::Origin, Self::Origin) => std::cmp::Ordering::Equal,
+            (Self::Origin, Self::Specific(_, _)) => std::cmp::Ordering::Less,
+            (Self::Specific(_, _), Self::Origin) => std::cmp::Ordering::Greater,
+            (Self::Specific(x, x_hash), Self::Specific(y, y_hash)) => match x.cmp(y) {
+                std::cmp::Ordering::Equal => x_hash.cmp(y_hash),
+                x => x,
+            },
+        }
+    }
+}
+
+impl PartialOrd for ChainPoint {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl From<PallasPoint> for ChainPoint {
+    fn from(value: PallasPoint) -> Self {
+        match value {
+            PallasPoint::Origin => ChainPoint::Origin,
+            PallasPoint::Specific(s, h) => ChainPoint::Specific(s, h.as_slice().into()),
+        }
+    }
+}
+
+impl From<ChainPoint> for PallasPoint {
+    fn from(value: ChainPoint) -> Self {
+        match value {
+            ChainPoint::Origin => PallasPoint::Origin,
+            ChainPoint::Specific(s, h) => PallasPoint::Specific(s, h.to_vec()),
+        }
+    }
+}
+
+impl From<&RawBlock> for ChainPoint {
+    fn from(value: &RawBlock) -> Self {
+        let RawBlock { slot, hash, .. } = value;
+        ChainPoint::Specific(*slot, *hash)
+    }
+}
+
+impl From<&LogValue> for ChainPoint {
+    fn from(value: &LogValue) -> Self {
+        match value {
+            LogValue::Apply(x) => ChainPoint::from(x),
+            LogValue::Undo(x) => ChainPoint::from(x),
+            LogValue::Mark(x) => x.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum LogValue {
+    Apply(RawBlock),
+    Undo(RawBlock),
+    Mark(ChainPoint),
+}
+
+impl PartialEq for LogValue {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Apply(l0), Self::Apply(r0)) => l0 == r0,
+            (Self::Undo(l0), Self::Undo(r0)) => l0 == r0,
+            (Self::Mark(l0), Self::Mark(r0)) => l0 == r0,
+            _ => false,
+        }
+    }
+}
+
+pub type LogEntry = (LogSeq, LogValue);
+
+#[derive(Debug, Error)]
+pub enum WalError {
+    #[error("wal is not empty")]
+    NotEmpty,
+
+    #[error("point not found in chain {0:?}")]
+    PointNotFound(ChainPoint),
+
+    #[error("slot not found in chain {0}")]
+    SlotNotFound(BlockSlot),
+
+    #[error("IO error: {0}")]
+    Internal(#[source] Box<dyn std::error::Error + Send + Sync>),
+}
+
+impl WalError {
+    pub fn internal<T>(value: T) -> Self
+    where
+        T: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
+        WalError::Internal(value.into())
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -200,7 +353,7 @@ pub struct SubmitConfig {
     pub prune_height: Option<u64>,
 }
 
-#[derive(Serialize, Default, PartialEq)]
+#[derive(Serialize, Default, PartialEq, Clone, Debug)]
 #[serde(rename_all = "lowercase")]
 pub enum StorageVersion {
     #[default]
@@ -238,7 +391,7 @@ impl Display for StorageVersion {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct StorageConfig {
     pub version: StorageVersion,
 
@@ -311,6 +464,7 @@ pub enum StateError {
     #[error("storage error")]
     InternalError(#[from] Box<dyn std::error::Error + Send + Sync>),
 
+    // TODO: refactor this to avoid Pallas dependency
     #[error("address decoding error")]
     AddressDecoding(#[from] pallas::ledger::addresses::Error),
 
@@ -320,11 +474,14 @@ pub enum StateError {
     #[error("invalid store version")]
     InvalidStoreVersion,
 
+    // TODO: refactor this to avoid Pallas dependency
     #[error("decoding error")]
     DecodingError(#[from] pallas::codec::minicbor::decode::Error),
 }
 
-pub trait StateStore: Sized + pallas::interop::utxorpc::LedgerContext {
+pub trait StateStore:
+    Sized + pallas::interop::utxorpc::LedgerContext + Clone + Send + Sync + 'static
+{
     fn cursor(&self) -> Result<Option<ChainPoint>, StateError>;
 
     fn is_empty(&self) -> Result<bool, StateError>;
@@ -397,13 +554,14 @@ pub trait ArchiveStore {
 
     fn apply(&self, deltas: &[LedgerDelta]) -> Result<(), ArchiveError>;
 
-    fn housekeeping(&mut self) -> Result<(), ArchiveError>;
-
-    fn finalize(&self, until: BlockSlot) -> Result<(), ArchiveError>;
+    fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<(), ArchiveError>;
 }
 
 #[derive(Debug, Error)]
 pub enum MempoolError {
+    #[error("internal error: {0}")]
+    Internal(#[from] Box<dyn std::error::Error + Send + Sync>),
+
     #[error("traverse error: {0}")]
     TraverseError(#[from] pallas::ledger::traverse::Error),
 
@@ -427,17 +585,242 @@ pub enum MempoolError {
     InvalidTx(String),
 }
 
-pub trait MempoolStore {
+pub trait MempoolStore: Clone + Send + Sync + 'static {
+    type Stream: futures_core::Stream<Item = Result<MempoolEvent, MempoolError>>
+        + Unpin
+        + Send
+        + Sync;
+
     fn receive_raw(&self, cbor: &[u8]) -> Result<TxHash, MempoolError>;
+
+    #[cfg(feature = "phase2")]
+    fn evaluate_raw(&self, cbor: &[u8]) -> Result<EvalReport, MempoolError>;
+
+    fn apply(&self, deltas: &[LedgerDelta]);
+    fn check_stage(&self, tx_hash: &TxHash) -> MempoolTxStage;
+    fn subscribe(&self) -> Self::Stream;
+}
+
+#[derive(Debug, Error)]
+pub enum ChainError {
+    #[error("broken invariant")]
+    BrokenInvariant(#[from] BrokenInvariant),
+
+    #[error("decoding error")]
+    DecodingError(#[from] pallas::ledger::traverse::Error),
+}
+
+pub trait ChainLogic {
+    type Block<'a>: Sized;
+
+    fn decode_block<'a>(block: &'a [u8]) -> Result<Self::Block<'a>, ChainError>;
+
+    fn lastest_immutable_slot(domain: &impl Domain, tip: BlockSlot) -> BlockSlot;
+
+    fn ledger_query_for_block<'a>(
+        block: &Self::Block<'a>,
+        unapplied_deltas: &[LedgerDelta],
+    ) -> Result<LedgerQuery, ChainError>;
+
+    fn compute_origin_delta(genesis: &Genesis) -> Result<LedgerDelta, ChainError>;
+
+    fn compute_apply_delta<'a>(
+        ledger: LedgerSlice,
+        block: &Self::Block<'a>,
+    ) -> Result<LedgerDelta, ChainError>;
+
+    fn compute_undo_delta<'a>(
+        ledger: LedgerSlice,
+        block: &Self::Block<'a>,
+    ) -> Result<LedgerDelta, ChainError>;
+
+    fn load_slice_for_block<'a>(
+        state: &impl StateStore,
+        block: &Self::Block<'a>,
+        unapplied_deltas: &[LedgerDelta],
+    ) -> Result<LedgerSlice, DomainError> {
+        let query = Self::ledger_query_for_block(block, unapplied_deltas)?;
+
+        let required_utxos = StateStore::get_utxos(state, query.required_inputs)?;
+
+        let out = LedgerSlice {
+            resolved_inputs: [required_utxos, query.extra_inputs]
+                .into_iter()
+                .flatten()
+                .collect(),
+        };
+
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum DomainError {
+    #[error("wal error: {0}")]
+    WalError(#[from] WalError),
+
+    #[error("chain error: {0}")]
+    ChainError(#[from] ChainError),
+
+    #[error("state error: {0}")]
+    StateError(#[from] StateError),
+
+    #[error("archive error: {0}")]
+    ArchiveError(#[from] ArchiveError),
+
+    #[error("mempool error: {0}")]
+    MempoolError(#[from] MempoolError),
 }
 
 pub trait Domain: Send + Sync + Clone + 'static {
+    type Wal: WalStore;
     type State: StateStore;
     type Archive: ArchiveStore;
     type Mempool: MempoolStore;
+    type Chain: ChainLogic;
 
+    fn storage_config(&self) -> &StorageConfig;
     fn genesis(&self) -> &Genesis;
+
+    fn wal(&self) -> &Self::Wal;
     fn state(&self) -> &Self::State;
     fn archive(&self) -> &Self::Archive;
     fn mempool(&self) -> &Self::Mempool;
+
+    fn apply_origin(&self) -> Result<(), DomainError> {
+        let deltas = vec![Self::Chain::compute_origin_delta(self.genesis())?];
+
+        self.state().apply(&deltas)?;
+        self.archive().apply(&deltas)?;
+
+        Ok(())
+    }
+
+    fn compute_apply_deltas(&self, blocks: &[RawBlock]) -> Result<Vec<LedgerDelta>, DomainError> {
+        let mut deltas = Vec::with_capacity(blocks.len());
+
+        for block in blocks {
+            let block = Self::Chain::decode_block(&block.body)?;
+            let slice = Self::Chain::load_slice_for_block(self.state(), &block, &deltas)?;
+            let delta = Self::Chain::compute_apply_delta(slice, &block)?;
+            deltas.push(delta);
+        }
+
+        Ok(deltas)
+    }
+
+    fn apply_blocks(&self, blocks: &[RawBlock]) -> Result<(), DomainError> {
+        let deltas = self.compute_apply_deltas(blocks)?;
+
+        self.state().apply(&deltas)?;
+        self.archive().apply(&deltas)?;
+        self.mempool().apply(&deltas);
+
+        Ok(())
+    }
+
+    fn compute_undo_deltas(&self, blocks: &[RawBlock]) -> Result<Vec<LedgerDelta>, DomainError> {
+        let mut deltas = Vec::with_capacity(blocks.len());
+
+        for block in blocks {
+            let block = Self::Chain::decode_block(&block.body)?;
+            let slice = Self::Chain::load_slice_for_block(self.state(), &block, &deltas)?;
+            let delta = Self::Chain::compute_undo_delta(slice, &block)?;
+            deltas.push(delta);
+        }
+
+        Ok(deltas)
+    }
+
+    fn undo_blocks(&self, blocks: &[RawBlock]) -> Result<(), DomainError> {
+        let deltas = self.compute_undo_deltas(blocks)?;
+
+        self.state().apply(&deltas)?;
+        self.archive().apply(&deltas)?;
+        self.mempool().apply(&deltas);
+
+        Ok(())
+    }
+
+    const MAX_PRUNE_SLOTS_PER_HOUSEKEEPING: u64 = 10_000;
+
+    fn housekeeping(&self) -> Result<(), DomainError> {
+        // IMPROVE: maybe we can keep the tip in memory as part of the domain struct as
+        // a cache mechanism.
+        let tip = self.state().cursor()?.map(|x| x.slot()).unwrap();
+
+        let max_ledger_history = self
+            .storage_config()
+            .max_ledger_history
+            .unwrap_or_else(|| Self::Chain::lastest_immutable_slot(self, tip));
+
+        let to_finalize = tip - max_ledger_history;
+
+        self.state().finalize(to_finalize)?;
+
+        if let Some(max_slots) = self.storage_config().max_chain_history {
+            info!(max_slots, "pruning archive for excess history");
+            self.archive()
+                .prune_history(max_slots, Some(Self::MAX_PRUNE_SLOTS_PER_HOUSEKEEPING))?;
+        }
+
+        if let Some(max_slots) = self.storage_config().max_wal_history {
+            info!(max_slots, "pruning wal for excess history");
+            self.wal()
+                .prune_history(max_slots, Some(Self::MAX_PRUNE_SLOTS_PER_HOUSEKEEPING))?;
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn slot_to_hash(slot: u64) -> BlockHash {
+        let mut hasher = pallas::crypto::hash::Hasher::<256>::new();
+        hasher.input(&(slot as i32).to_le_bytes());
+        hasher.finalize()
+    }
+
+    #[test]
+    fn chainpoint_partial_eq() {
+        assert_eq!(ChainPoint::Origin, ChainPoint::Origin);
+
+        assert_eq!(
+            ChainPoint::Specific(20, slot_to_hash(20)),
+            ChainPoint::Specific(20, slot_to_hash(20))
+        );
+
+        assert_ne!(
+            ChainPoint::Origin,
+            ChainPoint::Specific(20, slot_to_hash(20))
+        );
+
+        assert_ne!(
+            ChainPoint::Specific(20, slot_to_hash(20)),
+            ChainPoint::Specific(50, slot_to_hash(50)),
+        );
+
+        assert_ne!(
+            ChainPoint::Specific(50, slot_to_hash(20)),
+            ChainPoint::Specific(50, slot_to_hash(50)),
+        );
+    }
+
+    #[test]
+    fn chainpoint_partial_ord() {
+        assert!(ChainPoint::Origin <= ChainPoint::Origin);
+        assert!(ChainPoint::Origin >= ChainPoint::Origin);
+        assert!(ChainPoint::Origin < ChainPoint::Specific(20, slot_to_hash(20)));
+        assert!(
+            ChainPoint::Specific(19, slot_to_hash(19)) < ChainPoint::Specific(20, slot_to_hash(20))
+        );
+        assert!(
+            ChainPoint::Specific(20, slot_to_hash(20))
+                .cmp(&ChainPoint::Specific(20, slot_to_hash(200)))
+                != std::cmp::Ordering::Equal
+        );
+    }
 }

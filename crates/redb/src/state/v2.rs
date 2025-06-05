@@ -43,7 +43,7 @@ impl LedgerStore {
     pub fn cursor(&self) -> Result<Option<ChainPoint>, Error> {
         let rx = self.db().begin_read()?;
 
-        let last = tables::CursorTable::last(&rx)?.map(|(k, v)| ChainPoint(k, v.hash));
+        let last = tables::CursorTable::last(&rx)?.map(|(k, v)| ChainPoint::Specific(k, v.hash));
 
         Ok(last)
     }
