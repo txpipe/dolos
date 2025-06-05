@@ -138,6 +138,8 @@ pub struct LedgerDelta {
     pub consumed_utxo: HashMap<TxoRef, EraCbor>,
     pub recovered_stxi: HashMap<TxoRef, EraCbor>,
     pub undone_utxo: HashMap<TxoRef, EraCbor>,
+    pub seen_txs: HashSet<TxHash>,
+    pub unseen_txs: HashSet<TxHash>,
     pub new_pparams: Vec<EraCbor>,
     pub new_block: BlockBody,
     pub undone_block: BlockBody,
@@ -584,7 +586,6 @@ pub enum MempoolError {
 }
 
 pub trait MempoolStore: Clone + Send + Sync + 'static {
-    type Block: Sized;
     type Stream: futures_core::Stream<Item = Result<MempoolEvent, MempoolError>>
         + Unpin
         + Send
@@ -595,8 +596,7 @@ pub trait MempoolStore: Clone + Send + Sync + 'static {
     #[cfg(feature = "phase2")]
     fn evaluate_raw(&self, cbor: &[u8]) -> Result<EvalReport, MempoolError>;
 
-    fn apply_block(&self, block: &Self::Block);
-    fn undo_block(&self, block: &Self::Block);
+    fn apply(&self, deltas: &[LedgerDelta]);
     fn check_stage(&self, tx_hash: &TxHash) -> MempoolTxStage;
     fn subscribe(&self) -> Self::Stream;
 }
@@ -633,6 +633,25 @@ pub trait ChainLogic {
         ledger: LedgerSlice,
         block: &Self::Block<'a>,
     ) -> Result<LedgerDelta, ChainError>;
+
+    fn load_slice_for_block<'a>(
+        state: &impl StateStore,
+        block: &Self::Block<'a>,
+        unapplied_deltas: &[LedgerDelta],
+    ) -> Result<LedgerSlice, DomainError> {
+        let query = Self::ledger_query_for_block(&block, unapplied_deltas)?;
+
+        let required_utxos = StateStore::get_utxos(state, query.required_inputs)?;
+
+        let out = LedgerSlice {
+            resolved_inputs: [required_utxos, query.extra_inputs]
+                .into_iter()
+                .flatten()
+                .collect(),
+        };
+
+        Ok(out)
+    }
 }
 
 #[derive(Debug, Error)]
@@ -682,17 +701,7 @@ pub trait Domain: Send + Sync + Clone + 'static {
 
         for block in blocks {
             let block = Self::Chain::decode_block(&block.body)?;
-            let query = Self::Chain::ledger_query_for_block(&block, &deltas)?;
-
-            let required_utxos = self.state().get_utxos(query.required_inputs)?;
-
-            let slice = LedgerSlice {
-                resolved_inputs: [required_utxos, query.extra_inputs]
-                    .into_iter()
-                    .flatten()
-                    .collect(),
-            };
-
+            let slice = Self::Chain::load_slice_for_block(self.state(), &block, &deltas)?;
             let delta = Self::Chain::compute_apply_delta(slice, &block)?;
             deltas.push(delta);
         }
@@ -705,11 +714,7 @@ pub trait Domain: Send + Sync + Clone + 'static {
 
         self.state().apply(&deltas)?;
         self.archive().apply(&deltas)?;
-
-        for block in blocks {
-            //self.mempool().apply_block(&block);
-            todo!()
-        }
+        self.mempool().apply(&deltas);
 
         Ok(())
     }
@@ -719,17 +724,7 @@ pub trait Domain: Send + Sync + Clone + 'static {
 
         for block in blocks {
             let block = Self::Chain::decode_block(&block.body)?;
-            let query = Self::Chain::ledger_query_for_block(&block, &deltas)?;
-
-            let required_utxos = self.state().get_utxos(query.required_inputs)?;
-
-            let slice = LedgerSlice {
-                resolved_inputs: [required_utxos, query.extra_inputs]
-                    .into_iter()
-                    .flatten()
-                    .collect(),
-            };
-
+            let slice = Self::Chain::load_slice_for_block(self.state(), &block, &deltas)?;
             let delta = Self::Chain::compute_undo_delta(slice, &block)?;
             deltas.push(delta);
         }
@@ -742,11 +737,7 @@ pub trait Domain: Send + Sync + Clone + 'static {
 
         self.state().apply(&deltas)?;
         self.archive().apply(&deltas)?;
-
-        for block in blocks {
-            //self.mempool().apply_block(&block);
-            todo!()
-        }
+        self.mempool().apply(&deltas);
 
         Ok(())
     }

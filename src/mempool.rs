@@ -2,7 +2,7 @@ use futures_util::StreamExt;
 use itertools::Itertools;
 use pallas::ledger::{
     primitives::{NetworkId, TransactionInput},
-    traverse::{MultiEraBlock, MultiEraInput, MultiEraOutput, MultiEraTx},
+    traverse::{MultiEraInput, MultiEraOutput, MultiEraTx},
     validate::{phase1::validate_tx, utils::AccountState},
 };
 use std::{
@@ -240,40 +240,30 @@ impl Mempool {
 }
 
 impl MempoolStore for Mempool {
-    type Block = MultiEraBlock<'static>;
     type Stream = MempoolStream;
 
-    fn apply_block(&self, block: &Self::Block) {
+    fn apply(&self, deltas: &[LedgerDelta]) {
         let mut state = self.mempool.write().unwrap();
 
         if state.acknowledged.is_empty() {
             return;
         }
 
-        for tx in block.txs() {
-            let tx_hash = tx.hash();
-
-            if let Some(acknowledged_tx) = state.acknowledged.get_mut(&tx_hash) {
-                acknowledged_tx.confirmed = true;
-                self.notify(MempoolTxStage::Confirmed, acknowledged_tx.clone());
-                debug!(%tx_hash, "confirming tx");
+        for delta in deltas {
+            for tx_hash in delta.seen_txs.iter() {
+                if let Some(acknowledged_tx) = state.acknowledged.get_mut(tx_hash) {
+                    acknowledged_tx.confirmed = true;
+                    self.notify(MempoolTxStage::Confirmed, acknowledged_tx.clone());
+                    debug!(%tx_hash, "confirming tx");
+                }
             }
-        }
-    }
 
-    fn undo_block(&self, block: &Self::Block) {
-        let mut state = self.mempool.write().unwrap();
-
-        if state.acknowledged.is_empty() {
-            return;
-        }
-
-        for tx in block.txs() {
-            let tx_hash = tx.hash();
-
-            if let Some(acknowledged_tx) = state.acknowledged.get_mut(&tx_hash) {
-                acknowledged_tx.confirmed = false;
-                debug!(%tx_hash, "un-confirming tx");
+            for tx_hash in delta.unseen_txs.iter() {
+                if let Some(acknowledged_tx) = state.acknowledged.get_mut(tx_hash) {
+                    acknowledged_tx.confirmed = false;
+                    self.notify(MempoolTxStage::Acknowledged, acknowledged_tx.clone());
+                    debug!(%tx_hash, "un-confirming tx");
+                }
             }
         }
     }

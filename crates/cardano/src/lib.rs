@@ -10,6 +10,8 @@ use dolos_core::*;
 pub mod pparams;
 //pub mod validate;
 
+pub type Block<'a> = MultiEraBlock<'a>;
+
 pub type UtxoBody<'a> = MultiEraOutput<'a>;
 
 /// Computes the ledger delta of applying a particular block.
@@ -47,6 +49,8 @@ pub fn compute_apply_delta(
     let txs: HashMap<_, _> = block.txs().into_iter().map(|tx| (tx.hash(), tx)).collect();
 
     for (tx_hash, tx) in txs.iter() {
+        delta.seen_txs.insert(*tx_hash);
+
         for (idx, produced) in tx.produces() {
             let uxto_ref = TxoRef(*tx_hash, idx as u32);
 
@@ -102,6 +106,8 @@ pub fn compute_undo_delta(
     let txs: HashMap<_, _> = block.txs().into_iter().map(|tx| (tx.hash(), tx)).collect();
 
     for (tx_hash, tx) in txs.iter() {
+        delta.unseen_txs.insert(*tx_hash);
+
         for (idx, body) in tx.produces() {
             let utxo_ref = TxoRef(*tx_hash, idx as u32);
             delta.undone_utxo.insert(utxo_ref, body.into());
