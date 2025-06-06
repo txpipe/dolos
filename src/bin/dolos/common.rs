@@ -6,6 +6,12 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::{filter::Targets, prelude::*};
 
+use once_cell::sync::OnceCell;
+use opentelemetry::KeyValue;
+use opentelemetry_sdk::{logs as sdklog, Resource};
+use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
+use opentelemetry_otlp::{Protocol, WithExportConfig};
+
 use dolos::adapters::{ArchiveAdapter, DomainAdapter, StateAdapter, WalAdapter};
 use dolos::core::Genesis;
 use dolos::prelude::*;
@@ -102,9 +108,37 @@ pub fn setup_domain(config: &crate::Config) -> miette::Result<DomainAdapter> {
     Ok(domain)
 }
 
-pub fn setup_tracing(config: &LoggingConfig) -> miette::Result<()> {
-    let level = config.max_level;
+static LOGGER_PROVIDER: OnceCell<sdklog::SdkLoggerProvider> = OnceCell::new();
 
+pub fn setup_tracing(config: &LoggingConfig) -> miette::Result<()> {
+
+    let exporter = opentelemetry_otlp::LogExporter::builder()
+        .with_http()
+        .with_protocol(Protocol::HttpJson)
+        .with_endpoint("http://localhost:4318/v1/logs")
+        .with_timeout(Duration::from_secs(3))
+        .build().unwrap();
+
+    let provider = sdklog::SdkLoggerProvider::builder()
+        .with_batch_exporter(exporter)
+        .with_resource(
+            Resource::builder_empty()
+                .with_service_name("dolos")
+                .with_attribute(KeyValue::new(
+                "service.version",
+                env!("CARGO_PKG_VERSION"),
+                ))
+            .build(),
+        )
+        .build();
+
+    // keep provider alive for the whole program
+    LOGGER_PROVIDER.set(provider.clone()).ok();
+
+    let otel_layer = OpenTelemetryTracingBridge::new(&provider);
+    let fmt_layer  = tracing_subscriber::fmt::layer();
+
+    let level  = config.max_level;
     let mut filter = Targets::new()
         .with_target("dolos", level)
         .with_target("gasket", level);
@@ -134,7 +168,8 @@ pub fn setup_tracing(config: &LoggingConfig) -> miette::Result<()> {
     #[cfg(not(feature = "debug"))]
     {
         tracing_subscriber::registry()
-            .with(tracing_subscriber::fmt::layer())
+            .with(fmt_layer)
+            .with(otel_layer)
             .with(filter)
             .init();
     }
@@ -142,13 +177,20 @@ pub fn setup_tracing(config: &LoggingConfig) -> miette::Result<()> {
     #[cfg(feature = "debug")]
     {
         tracing_subscriber::registry()
-            .with(tracing_subscriber::fmt::layer())
+            .with(fmt_layer)
             .with(console_subscriber::spawn())
+            .with(otel_layer)
             .with(filter)
             .init();
     }
 
     Ok(())
+}
+
+pub fn shutdown_tracing() {
+    if let Some(p) = LOGGER_PROVIDER.get() {
+        let _ = p.shutdown();
+    }
 }
 
 pub fn open_genesis_files(config: &GenesisConfig) -> miette::Result<Genesis> {
