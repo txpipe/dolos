@@ -46,6 +46,7 @@ pub async fn run(config: super::Config, _args: &Args) -> miette::Result<()> {
 
     serve.context("serve thread")?;
     relay.into_diagnostic().context("relay thread")?;
+    crate::common::shutdown_tracing();
 
     warn!("shutdown complete");
 
