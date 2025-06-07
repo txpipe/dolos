@@ -23,7 +23,7 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::ExternalTest => {
             println!("Running smoke tests...");
-            cmd!(sh, "cargo test --test smoke -- --nocapture").run()?;
+            cmd!(sh, "cargo test --test smoke -- --ignored --nocapture").run()?;
         }
     }
 

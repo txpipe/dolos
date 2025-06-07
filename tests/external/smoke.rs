@@ -161,6 +161,7 @@ const SCENARIOS: &[Scenario] = &[
 macro_rules! test_for_scenario {
     ($name:ident, $func:ident, $scenario:expr) => {
         #[test]
+        #[ignore]
         fn $name() {
             $func(&SCENARIOS[$scenario]);
         }
