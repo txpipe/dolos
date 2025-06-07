@@ -23,7 +23,7 @@ pull_batch_size = 100
 prune_height = 200
 
 [serve.grpc]
-listen_address = "[::]:50051"
+listen_address = "[::]:6450"
 permissive_cors = true
 
 [serve.ouroboros]
@@ -31,11 +31,11 @@ listen_path = "dolos.socket"
 magic = 2
 
 [serve.minibf]
-listen_address = "[::]:3000"
+listen_address = "[::]:6451"
 permissive_cors = true
 
 [serve.trp]
-listen_address = "[::]:8000"
+listen_address = "[::]:6452"
 max_optimize_rounds = 10
 permissive_cors = true
 

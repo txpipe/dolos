@@ -52,8 +52,9 @@ fn daemon_process_runs(scenario: &str) {
         .spawn()
         .expect("failed to spawn process");
 
-    wait_for_tcp_port(50051, Duration::from_secs(10));
-    wait_for_tcp_port(3000, Duration::from_secs(10));
+    wait_for_tcp_port(6450, Duration::from_secs(10));
+    wait_for_tcp_port(6451, Duration::from_secs(10));
+    wait_for_tcp_port(6452, Duration::from_secs(10));
 
     std::thread::sleep(Duration::from_secs(5));
 
