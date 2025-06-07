@@ -1,5 +1,5 @@
 use std::net::TcpStream;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 fn prepare_scenario_process(scenario: &str) -> Command {
@@ -30,22 +30,34 @@ fn wait_for_tcp_port(port: u16, timeout: Duration) {
     }
 }
 
+fn shutdown_gracefully(mut handle: Child) {
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(handle.id() as i32),
+        nix::sys::signal::Signal::SIGTERM,
+    )
+    .expect("failed to kill process");
+
+    handle.wait().expect("failed to wait for process");
+}
+
 const SCENARIOS: &[&str] = &["preview"];
 
 fn daemon_process_runs(scenario: &str) {
     let mut cmd = prepare_scenario_process(scenario);
 
-    let mut handle = cmd
+    let handle = cmd
         .args(&["daemon"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
         .spawn()
         .expect("failed to spawn process");
 
     wait_for_tcp_port(50051, Duration::from_secs(10));
     wait_for_tcp_port(3000, Duration::from_secs(10));
 
-    handle.kill().expect("failed to kill process");
+    std::thread::sleep(Duration::from_secs(5));
+
+    shutdown_gracefully(handle);
 }
 
 macro_rules! test_all_scenarios {
