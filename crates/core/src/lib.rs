@@ -9,7 +9,7 @@ use std::{
     fmt::Display,
 };
 use thiserror::Error;
-use tracing::info;
+use tracing::{info, warn};
 
 mod mempool;
 mod wal;
@@ -747,7 +747,10 @@ pub trait Domain: Send + Sync + Clone + 'static {
     fn housekeeping(&self) -> Result<(), DomainError> {
         // IMPROVE: maybe we can keep the tip in memory as part of the domain struct as
         // a cache mechanism.
-        let tip = self.state().cursor()?.map(|x| x.slot()).unwrap();
+        let Some(tip) = self.state().cursor()?.map(|x| x.slot()) else {
+            warn!("skipping housekeeping, no tip found");
+            return Ok(());
+        };
 
         let max_ledger_history = self
             .storage_config()
