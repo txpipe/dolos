@@ -18,27 +18,13 @@ jobs:
           toolchain: stable
           override: true
 
-      - name: Cargo check
+      - name: check
         uses: actions-rs/cargo@v1
         with:
           command: check
           args: --workspace --all-targets
 
-  lint:
-    name: Clippy Lint
-    runs-on: ubuntu-latest
-    needs: check
-    steps:
-      - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
-
-      - uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          components: clippy
-          override: true
-
-      - name: Clippy
+      - name: lint
         uses: actions-rs/cargo@v1
         with:
           command: clippy
