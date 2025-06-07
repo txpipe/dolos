@@ -97,6 +97,10 @@ features = ["fs", "num-integer-backend", "rustls-tls", "rustls-tls-native-roots"
 [dev-dependencies]
 tempfile = "3.20.0"
 
+[[test]]
+name = "smoke"
+path = "tests/external/smoke.rs"
+
 [features]
 mithril = ["mithril-client"]
 utils = ["comfy-table", "inquire", "toml"]
@@ -117,7 +121,7 @@ inherits = "release"
 lto = "thin"
 
 [workspace]
-members = ["crates/cardano", "crates/core", "crates/minibf", "crates/redb"]
+members = ["crates/cardano", "crates/core", "crates/minibf", "crates/redb", "xtask"]
 
 [workspace.dependencies]
 pallas = { git = "https://github.com/txpipe/pallas.git", features = ["hardano"] }
