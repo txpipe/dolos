@@ -5,7 +5,7 @@ use pallas::network::{
 use std::{path::Path, time::Duration};
 use tokio_util::sync::CancellationToken;
 
-use crate::adapters::{DomainAdapter, StateAdapter, WalAdapter};
+use crate::adapters::WalAdapter;
 use crate::prelude::*;
 
 type ServerHandle = tokio::task::JoinHandle<Result<(), crate::prelude::Error>>;

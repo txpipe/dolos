@@ -50,7 +50,7 @@ jobs:
     needs: check
     strategy:
       matrix:
-        os: [ubuntu-22.04, macos-14, macos-13]
+        os: [ubuntu-latest, ubuntu-22.04, macos-14, macos-13]
 
     steps:
       - uses: actions/checkout@v4
@@ -61,8 +61,14 @@ jobs:
           toolchain: stable
           override: true
 
-      - name: Run tests
+      - name: Run unit tests
         uses: actions-rs/cargo@v1
         with:
           command: test
           args: --all-targets
+
+      - name: Run external smoke tests
+        uses: actions-rs/cargo@v1
+        with:
+          command: run
+          args: -p xtask -- external-test

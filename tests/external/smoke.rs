@@ -65,12 +65,12 @@ fn wait_for_socket_file(scenario: &Scenario, relative_path: &str, timeout: Durat
 
 fn assert_port_released(scenario: &Scenario, port_suffix: u16) {
     let port = scenario.port_prefix + port_suffix;
-    assert!(!TcpStream::connect(format!("127.0.0.1:{}", port)).is_ok());
+    assert!(TcpStream::connect(format!("127.0.0.1:{}", port)).is_err());
 }
 
 fn assert_file_released(scenario: &Scenario, relative_path: &str) {
     let path = scenario_path(scenario).join(relative_path);
-    assert!(!std::fs::metadata(path).is_ok());
+    assert!(std::fs::metadata(path).is_err());
 }
 
 fn shutdown_gracefully(mut handle: Child) {
@@ -117,15 +117,15 @@ struct Scenario {
 }
 
 fn daemon_runs(scenario: &Scenario) {
-    assert_port_released(&scenario, 0);
-    assert_port_released(&scenario, 1);
-    assert_port_released(&scenario, 2);
-    assert_file_released(&scenario, "dolos.socket");
+    assert_port_released(scenario, 0);
+    assert_port_released(scenario, 1);
+    assert_port_released(scenario, 2);
+    assert_file_released(scenario, "dolos.socket");
 
-    let mut cmd = prepare_scenario_process(&scenario);
+    let mut cmd = prepare_scenario_process(scenario);
 
     let handle = cmd
-        .args(&["daemon"])
+        .args(["daemon"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -133,18 +133,18 @@ fn daemon_runs(scenario: &Scenario) {
 
     let guard = ProcessGuard::new(handle);
 
-    wait_for_tcp_port(&scenario, 0, Duration::from_secs(10));
-    wait_for_tcp_port(&scenario, 1, Duration::from_secs(10));
-    wait_for_tcp_port(&scenario, 2, Duration::from_secs(10));
-    wait_for_socket_file(&scenario, "dolos.socket", Duration::from_secs(10));
+    wait_for_tcp_port(scenario, 0, Duration::from_secs(10));
+    wait_for_tcp_port(scenario, 1, Duration::from_secs(10));
+    wait_for_tcp_port(scenario, 2, Duration::from_secs(10));
+    wait_for_socket_file(scenario, "dolos.socket", Duration::from_secs(10));
 
     let handle = guard.into_inner();
     shutdown_gracefully(handle);
 
-    assert_port_released(&scenario, 0);
-    assert_port_released(&scenario, 1);
-    assert_port_released(&scenario, 2);
-    assert_file_released(&scenario, "dolos.socket");
+    assert_port_released(scenario, 0);
+    assert_port_released(scenario, 1);
+    assert_port_released(scenario, 2);
+    assert_file_released(scenario, "dolos.socket");
 }
 
 const SCENARIOS: &[Scenario] = &[
