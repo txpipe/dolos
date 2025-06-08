@@ -73,7 +73,7 @@ fn assert_file_released(scenario: &Scenario, relative_path: &str) {
     assert!(std::fs::metadata(path).is_err());
 }
 
-fn shutdown_gracefully(mut handle: Child) {
+fn shutdown_gracefully(handle: &mut Child) {
     nix::sys::signal::kill(
         nix::unistd::Pid::from_raw(handle.id() as i32),
         nix::sys::signal::Signal::SIGTERM,
@@ -89,9 +89,19 @@ impl ProcessGuard {
     fn new(child: Child) -> Self {
         Self(Some(child))
     }
+}
 
-    fn into_inner(mut self) -> Child {
-        self.0.take().unwrap()
+impl std::ops::Deref for ProcessGuard {
+    type Target = Child;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_ref().unwrap()
+    }
+}
+
+impl std::ops::DerefMut for ProcessGuard {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.0.as_mut().unwrap()
     }
 }
 
@@ -126,25 +136,39 @@ fn daemon_runs(scenario: &Scenario) {
 
     let handle = cmd
         .args(["daemon"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
         .spawn()
         .expect("failed to spawn process");
 
-    let guard = ProcessGuard::new(handle);
+    let mut guard = ProcessGuard::new(handle);
 
     wait_for_tcp_port(scenario, 0, Duration::from_secs(10));
     wait_for_tcp_port(scenario, 1, Duration::from_secs(10));
     wait_for_tcp_port(scenario, 2, Duration::from_secs(10));
     wait_for_socket_file(scenario, "dolos.socket", Duration::from_secs(10));
 
-    let handle = guard.into_inner();
-    shutdown_gracefully(handle);
+    shutdown_gracefully(&mut guard);
 
     assert_port_released(scenario, 0);
     assert_port_released(scenario, 1);
     assert_port_released(scenario, 2);
     assert_file_released(scenario, "dolos.socket");
+}
+
+fn daemon_syncs(scenario: &Scenario) {
+    let mut cmd = prepare_scenario_process(scenario);
+
+    let handle = cmd
+        .args(["daemon"])
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("failed to spawn process");
+
+    let mut guard = ProcessGuard::new(handle);
+
+    guard.wait().expect("failed to wait for process");
 }
 
 const SCENARIOS: &[Scenario] = &[
@@ -171,3 +195,5 @@ macro_rules! test_for_scenario {
 test_for_scenario!(daemon_runs_for_preview, daemon_runs, 0);
 
 test_for_scenario!(daemon_runs_for_mainnet, daemon_runs, 1);
+
+test_for_scenario!(daemon_syncs_for_preview, daemon_syncs, 0);

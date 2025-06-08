@@ -18,6 +18,7 @@ force_protocol = 6
 
 [sync]
 pull_batch_size = 100
+sync_limit = 10
 
 [submit]
 prune_height = 200
