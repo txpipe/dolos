@@ -42,10 +42,7 @@ pub enum PullQuota {
 
 impl PullQuota {
     fn should_quit(&self) -> bool {
-        match self {
-            Self::Reached => true,
-            _ => false,
-        }
+        matches!(self, Self::Reached)
     }
 
     fn on_tip(&mut self) {
