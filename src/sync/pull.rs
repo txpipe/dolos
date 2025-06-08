@@ -6,7 +6,7 @@ use pallas::network::miniprotocols::chainsync::{
     HeaderContent, NextResponse, RollbackBuffer, RollbackEffect, Tip,
 };
 use pallas::network::miniprotocols::Point;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::adapters::WalAdapter;
 use crate::prelude::*;
@@ -33,9 +33,52 @@ pub enum WorkUnit {
     Await,
 }
 
+pub enum PullQuota {
+    WaitingTip,
+    Unlimited,
+    BlockQuota(u64),
+    Reached,
+}
+
+impl PullQuota {
+    fn should_quit(&self) -> bool {
+        match self {
+            Self::Reached => true,
+            _ => false,
+        }
+    }
+
+    fn on_tip(&mut self) {
+        if let Self::WaitingTip = self {
+            *self = Self::Reached;
+        }
+    }
+
+    fn consume_blocks(&mut self, count: u64) {
+        if let Self::BlockQuota(x) = self {
+            let new = x.saturating_sub(count);
+
+            if new == 0 {
+                *self = Self::Reached;
+            } else {
+                *self = Self::BlockQuota(new);
+            }
+        }
+    }
+}
+
+impl From<super::SyncLimit> for PullQuota {
+    fn from(limit: super::SyncLimit) -> Self {
+        match limit {
+            super::SyncLimit::UntilTip => Self::WaitingTip,
+            super::SyncLimit::NoLimit => Self::Unlimited,
+            super::SyncLimit::MaxBlocks(blocks) => Self::BlockQuota(blocks),
+        }
+    }
+}
+
 pub struct Worker {
     peer_session: PeerClient,
-    quit_on_tip: bool,
 }
 
 impl Worker {
@@ -110,26 +153,22 @@ impl gasket::framework::Worker<Stage> for Worker {
 
         info!(?intersection, "found intersection");
 
-        let worker = Self {
-            peer_session,
-            quit_on_tip: stage.quit_on_tip,
-        };
+        let worker = Self { peer_session };
 
         Ok(worker)
     }
 
-    async fn schedule(
-        &mut self,
-        _stage: &mut Stage,
-    ) -> Result<WorkSchedule<WorkUnit>, WorkerError> {
+    async fn schedule(&mut self, stage: &mut Stage) -> Result<WorkSchedule<WorkUnit>, WorkerError> {
+        if stage.quota.should_quit() {
+            warn!("quota reached, stopping sync");
+            return Ok(WorkSchedule::Done);
+        }
+
         let client = self.peer_session.chainsync();
 
         if client.has_agency() {
             debug!("should request next batch of blocks");
             Ok(WorkSchedule::Unit(WorkUnit::Pull))
-        } else if self.quit_on_tip {
-            debug!("reached tip, exiting");
-            Ok(WorkSchedule::Done)
         } else {
             debug!("should await next block");
             Ok(WorkSchedule::Unit(WorkUnit::Await))
@@ -153,6 +192,7 @@ impl gasket::framework::Worker<Stage> for Worker {
 
                         info!(len = blocks.len(), "block batch pulled from peer");
 
+                        stage.quota.consume_blocks(blocks.len() as u64);
                         stage.flush_blocks(blocks).await?;
                     }
                     PullBatch::OutOfScopeRollback(point) => {
@@ -162,7 +202,7 @@ impl gasket::framework::Worker<Stage> for Worker {
                 };
             }
             WorkUnit::Await => {
-                info!("reached tip, waiting for new block");
+                info!("waiting for new block");
 
                 let next = self
                     .peer_session
@@ -186,6 +226,7 @@ impl gasket::framework::Worker<Stage> for Worker {
                             .or_restart()?;
 
                         stage.flush_blocks(vec![block]).await?;
+                        stage.quota.consume_blocks(1);
                         stage.track_tip(&tip);
                     }
                     NextResponse::RollBackward(point, tip) => {
@@ -194,7 +235,11 @@ impl gasket::framework::Worker<Stage> for Worker {
                         stage.flush_rollback(point).await?;
                         stage.track_tip(&tip);
                     }
-                    NextResponse::Await => (),
+                    NextResponse::Await => {
+                        info!("reached tip");
+
+                        stage.quota.on_tip();
+                    }
                 }
             }
         }
@@ -210,7 +255,7 @@ pub struct Stage {
     network_magic: u64,
     block_fetch_batch_size: usize,
     wal: WalAdapter,
-    quit_on_tip: bool,
+    quota: PullQuota,
 
     pub downstream: DownstreamPort,
 
@@ -222,19 +267,13 @@ pub struct Stage {
 }
 
 impl Stage {
-    pub fn new(
-        peer_address: String,
-        network_magic: u64,
-        block_fetch_batch_size: usize,
-        wal: WalAdapter,
-        quit_on_tip: bool,
-    ) -> Self {
+    pub fn new(config: &super::Config, upstream: &PeerConfig, wal: WalAdapter) -> Self {
         Self {
-            peer_address,
-            network_magic,
+            peer_address: upstream.peer_address.clone(),
+            network_magic: upstream.network_magic,
+            quota: config.sync_limit.clone().into(),
+            block_fetch_batch_size: config.pull_batch_size.unwrap_or(50),
             wal,
-            quit_on_tip,
-            block_fetch_batch_size,
             downstream: Default::default(),
             block_count: Default::default(),
             chain_tip: Default::default(),
