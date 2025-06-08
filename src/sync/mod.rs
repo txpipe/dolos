@@ -12,15 +12,33 @@ pub mod submit;
 
 const HOUSEKEEPING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(untagged)]
+pub enum SyncLimit {
+    UntilTip,
+    NoLimit,
+    MaxBlocks(u64),
+}
+
+impl Default for SyncLimit {
+    fn default() -> Self {
+        Self::NoLimit
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct Config {
     pub pull_batch_size: Option<usize>,
+
+    #[serde(default)]
+    pub sync_limit: SyncLimit,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             pull_batch_size: Some(100),
+            sync_limit: Default::default(),
         }
     }
 }
@@ -51,10 +69,9 @@ pub fn pipeline(
     upstream: &UpstreamConfig,
     domain: DomainAdapter,
     retries: &Option<gasket::retries::Policy>,
-    quit_on_tip: bool,
 ) -> Result<Vec<gasket::runtime::Tether>, Error> {
     match upstream {
-        UpstreamConfig::Peer(cfg) => sync(config, cfg, domain.clone(), retries, quit_on_tip),
+        UpstreamConfig::Peer(cfg) => sync(config, cfg, domain.clone(), retries),
         UpstreamConfig::Emulator(cfg) => devnet(cfg, domain.clone(), retries),
     }
 }
@@ -65,15 +82,8 @@ pub fn sync(
     upstream: &PeerConfig,
     domain: DomainAdapter,
     retries: &Option<gasket::retries::Policy>,
-    quit_on_tip: bool,
 ) -> Result<Vec<gasket::runtime::Tether>, Error> {
-    let mut pull = pull::Stage::new(
-        upstream.peer_address.clone(),
-        upstream.network_magic,
-        config.pull_batch_size.unwrap_or(50),
-        domain.wal().clone(),
-        quit_on_tip,
-    );
+    let mut pull = pull::Stage::new(config, upstream, domain.wal().clone());
 
     let mut roll = roll::Stage::new(domain.wal().clone());
 

@@ -17,7 +17,6 @@ pub async fn run(config: super::Config, _args: &Args) -> miette::Result<()> {
         &config.upstream,
         domain.clone(),
         &config.retries,
-        false,
     )
     .into_diagnostic()
     .context("bootstrapping sync pipeline")?;
