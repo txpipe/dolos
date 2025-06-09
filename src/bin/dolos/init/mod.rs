@@ -13,7 +13,7 @@ use crate::{common::cleanup_data, feedback::Feedback};
 
 pub mod include;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 #[allow(clippy::enum_variant_names)]
 pub enum KnownNetwork {
@@ -28,6 +28,15 @@ impl KnownNetwork {
         KnownNetwork::CardanoPreProd,
         KnownNetwork::CardanoPreview,
     ];
+
+    pub fn from_magic(magic: u64) -> Option<Self> {
+        match magic {
+            764824073 => Some(KnownNetwork::CardanoMainnet),
+            1 => Some(KnownNetwork::CardanoPreProd),
+            2 => Some(KnownNetwork::CardanoPreview),
+            _ => None,
+        }
+    }
 }
 
 impl FromStr for KnownNetwork {
@@ -383,20 +392,30 @@ impl ConfigEditor {
     }
 
     fn prompt_known_network(self) -> miette::Result<Self> {
-        let value = Select::new(
-            "Which network are you connecting to?",
-            KnownNetwork::VARIANTS.to_vec(),
-        )
-        .prompt()
-        .into_diagnostic()
-        .context("asking for network")?;
+        let options = KnownNetwork::VARIANTS.to_vec();
+
+        let selected = self
+            .0
+            .upstream
+            .network_magic()
+            .and_then(KnownNetwork::from_magic);
+
+        let starting_cursor = selected
+            .and_then(|x| options.iter().position(|y| y.eq(&x)))
+            .unwrap_or_default();
+
+        let value = Select::new("Which network are you connecting to?", options)
+            .with_starting_cursor(starting_cursor)
+            .prompt()
+            .into_diagnostic()
+            .context("asking for network")?;
 
         Ok(self.apply_known_network(Some(&value)))
     }
 
     fn prompt_include_genesis(mut self) -> miette::Result<Self> {
         if let Some(network) = self.1 {
-            let value = Confirm::new("Do you want to use included genesis files?")
+            let value = Confirm::new("Do you want to us to provide the genesis files?")
                 .with_default(true)
                 .prompt()
                 .into_diagnostic()
