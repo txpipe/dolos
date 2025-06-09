@@ -26,7 +26,7 @@ pub fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
         }
     };
 
-    include::save_genesis_configs(&PathBuf::from("./"), &network)?;
+    include::save_genesis_configs(&PathBuf::from("./"), network)?;
 
     Ok(())
 }
