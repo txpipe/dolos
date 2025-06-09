@@ -34,12 +34,12 @@ dolos-minibf = { path = "crates/minibf", optional = true }
 gasket = { version = "^0.9", features = ["derive"] }
 # gasket = { path = "../../construkts/gasket-rs/gasket", features = ["derive"] }
 
-# tx3-lang = "0.4.1"
-# tx3-cardano = "0.4.1"
+tx3-lang = "0.6.0"
+tx3-cardano = "0.6.0"
 # tx3-lang = { path = "../../tx3-lang/tx3/crates/tx3-lang" }
 # tx3-cardano = { path = "../../tx3-lang/tx3/crates/tx3-cardano" }
-tx3-lang = { git = "https://github.com/tx3-lang/tx3.git" }
-tx3-cardano = { git = "https://github.com/tx3-lang/tx3.git" }
+# tx3-lang = { git = "https://github.com/tx3-lang/tx3.git" }
+# tx3-cardano = { git = "https://github.com/tx3-lang/tx3.git" }
 
 bech32 = "0.11.0"
 base64 = "0.22.1"
@@ -100,7 +100,12 @@ default-features = false
 features = ["fs", "num-integer-backend", "rustls-tls", "rustls-tls-native-roots"]
 
 [dev-dependencies]
+nix = { version = "0.30.1", features = ["signal"] }
 tempfile = "3.20.0"
+
+[[test]]
+name = "smoke"
+path = "tests/external/smoke.rs"
 
 [features]
 mithril = ["mithril-client"]
@@ -122,7 +127,7 @@ inherits = "release"
 lto = "thin"
 
 [workspace]
-members = ["crates/cardano", "crates/core", "crates/minibf", "crates/redb"]
+members = ["crates/cardano", "crates/core", "crates/minibf", "crates/redb", "xtask"]
 
 [workspace.dependencies]
 pallas = { git = "https://github.com/txpipe/pallas.git", features = ["hardano"] }

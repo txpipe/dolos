@@ -1,0 +1,51 @@
+[upstream]
+peer_address = "backbone.mainnet.cardanofoundation.org:3001"
+network_magic = 764824073
+is_testnet = false
+
+[storage]
+version = "v1"
+path = "data"
+max_wal_history = 129600
+max_chain_history = 86400
+
+[genesis]
+byron_path = "byron.json"
+shelley_path = "shelley.json"
+alonzo_path = "alonzo.json"
+conway_path = "conway.json"
+
+[sync]
+pull_batch_size = 100
+
+[submit]
+
+[serve.grpc]
+listen_address = "[::]:6460"
+permissive_cors = true
+
+[serve.ouroboros]
+listen_path = "dolos.socket"
+magic = 764824073
+
+[serve.minibf]
+listen_address = "[::]:6461"
+permissive_cors = true
+
+[serve.trp]
+listen_address = "[::]:6462"
+max_optimize_rounds = 10
+permissive_cors = true
+
+[mithril]
+aggregator = "https://aggregator.release-mainnet.api.mithril.network/aggregator"
+genesis_key = "5b3139312c36362c3134302c3138352c3133382c31312c3233372c3230372c3235302c3134342c32372c322c3138382c33302c31322c38312c3135352c3230342c31302c3137392c37352c32332c3133382c3139362c3231372c352c31342c32302c35372c37392c33392c3137365d"
+ancillary_key = "5b32332c37312c39362c3133332c34372c3235332c3232362c3133362c3233352c35372c3136342c3130362c3138362c322c32312c32392c3132302c3136332c38392c3132312c3137372c3133382c3230382c3133382c3231342c39392c35382c32322c302c35382c332c36395d"
+
+[logging]
+max_level = "INFO"
+include_tokio = false
+include_pallas = false
+include_grpc = false
+include_trp = false
+include_minibf = false

@@ -1,15 +1,12 @@
-use futures_util::future::try_join;
 use jsonrpsee::server::{RpcModule, Server};
 use serde::{Deserialize, Serialize};
 use std::{net::SocketAddr, sync::Arc};
-use tokio_util::sync::CancellationToken;
+use tokio::select;
 use tower::ServiceBuilder;
 use tower_http::cors::CorsLayer;
 use tracing::info;
 
-use dolos_core::Domain;
-
-use crate::prelude::Error;
+use dolos_core::{CancelToken, Domain, ServeError};
 
 mod adapter;
 mod methods;
@@ -27,53 +24,51 @@ pub struct Context<D: Domain> {
     pub config: Arc<Config>,
 }
 
-pub async fn serve<D: Domain>(
-    cfg: Config,
-    domain: D,
-    exit: CancellationToken,
-) -> Result<(), Error> {
-    let cors_layer = if cfg.permissive_cors.unwrap_or_default() {
-        CorsLayer::permissive()
-    } else {
-        CorsLayer::new()
-    };
+pub struct Driver;
 
-    let middleware = ServiceBuilder::new().layer(cors_layer);
-    let server = Server::builder()
-        .set_http_middleware(middleware)
-        .build(cfg.listen_address)
-        .await
-        .map_err(Error::server)?;
+impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
+    type Config = Config;
 
-    let mut module = RpcModule::new(Context {
-        domain,
-        config: Arc::new(cfg),
-    });
+    async fn run(cfg: Self::Config, domain: D, cancel: C) -> Result<(), ServeError> {
+        let cors_layer = if cfg.permissive_cors.unwrap_or_default() {
+            CorsLayer::permissive()
+        } else {
+            CorsLayer::new()
+        };
 
-    module
-        .register_async_method("trp.resolve", |params, context, _| async {
-            methods::trp_resolve(params, context).await
-        })
-        .map_err(Error::server)?;
+        let middleware = ServiceBuilder::new().layer(cors_layer);
+        let server = Server::builder()
+            .set_http_middleware(middleware)
+            .build(cfg.listen_address)
+            .await
+            .map_err(ServeError::BindError)?;
 
-    module
-        .register_method("health", |_, context, _| methods::health(context))
-        .map_err(Error::server)?;
+        let mut module = RpcModule::new(Context {
+            domain,
+            config: Arc::new(cfg.clone()),
+        });
 
-    let handle = server.start(module);
+        module
+            .register_async_method("trp.resolve", |params, context, _| async {
+                methods::trp_resolve(params, context).await
+            })
+            .map_err(|_| ServeError::Internal("failed to register trp.resolve".into()))?;
 
-    let server = async {
-        handle.clone().stopped().await;
-        Ok::<(), Error>(())
-    };
+        module
+            .register_method("health", |_, context, _| methods::health(context))
+            .map_err(|_| ServeError::Internal("failed to register health".into()))?;
 
-    let cancellation = async {
-        exit.cancelled().await;
-        info!("Gracefully shuting down trp.");
-        let _ = handle.stop(); // Empty result with AlreadyStoppedError, can be ignored.
-        Ok::<(), Error>(())
-    };
+        let handle = server.start(module);
 
-    try_join(server, cancellation).await?;
-    Ok(())
+        select! {
+            _ = handle.clone().stopped() => {
+                Ok(())
+            }
+            _ = cancel.cancelled() => {
+                info!("exit requested, shutting down trp");
+                let _ = handle.stop(); // Empty result with AlreadyStoppedError, can be ignored.
+                Ok(())
+            }
+        }
+    }
 }

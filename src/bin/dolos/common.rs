@@ -1,7 +1,6 @@
 use miette::{Context as _, IntoDiagnostic};
 use std::sync::Arc;
 use std::{fs, path::PathBuf, time::Duration};
-use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::{filter::Targets, prelude::*};
@@ -284,8 +283,12 @@ pub fn hook_exit_token() -> CancellationToken {
 pub async fn run_pipeline(pipeline: gasket::daemon::Daemon, exit: CancellationToken) {
     loop {
         tokio::select! {
-            _ = tokio::time::sleep(Duration::from_secs(5000)) => {
+            _ = tokio::time::sleep(Duration::from_secs(5)) => {
                 if pipeline.should_stop() {
+                    debug!("pipeline should stop");
+
+                    // trigger cancel so that stages stop early
+                    exit.cancel();
                     break;
                 }
             }
@@ -298,10 +301,6 @@ pub async fn run_pipeline(pipeline: gasket::daemon::Daemon, exit: CancellationTo
 
     debug!("shutting down pipeline");
     pipeline.teardown();
-}
-
-pub fn spawn_pipeline(pipeline: gasket::daemon::Daemon, exit: CancellationToken) -> JoinHandle<()> {
-    tokio::spawn(run_pipeline(pipeline, exit))
 }
 
 pub fn cleanup_data(config: &crate::Config) -> Result<(), std::io::Error> {
