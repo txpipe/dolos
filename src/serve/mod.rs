@@ -1,8 +1,7 @@
 use futures_util::stream::FuturesUnordered;
-use miette::{Context, IntoDiagnostic};
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info};
+use tracing::info;
 
 use crate::adapters::DomainAdapter;
 use crate::prelude::*;

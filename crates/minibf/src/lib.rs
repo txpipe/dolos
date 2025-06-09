@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use tower_http::{cors::CorsLayer, trace};
 use tracing::Level;
 
-use dolos_core::{CancelToken, Domain, DomainError, ServeError};
+use dolos_core::{CancelToken, Domain, ServeError};
 
 mod common;
 mod routes;

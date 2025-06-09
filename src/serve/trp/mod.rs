@@ -1,4 +1,3 @@
-use futures_util::future::try_join;
 use jsonrpsee::server::{RpcModule, Server};
 use serde::{Deserialize, Serialize};
 use std::{net::SocketAddr, sync::Arc};

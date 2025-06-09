@@ -1,7 +1,6 @@
 use miette::{Context as _, IntoDiagnostic};
 use std::sync::Arc;
 use std::{fs, path::PathBuf, time::Duration};
-use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::{filter::Targets, prelude::*};
