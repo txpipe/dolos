@@ -1,5 +1,6 @@
+use futures_util::stream::FuturesUnordered;
 use miette::{Context, IntoDiagnostic};
-use tracing::warn;
+use tracing::{error, warn};
 
 #[derive(Debug, clap::Args)]
 pub struct Args {}
@@ -21,30 +22,26 @@ pub async fn run(config: super::Config, _args: &Args) -> miette::Result<()> {
     .into_diagnostic()
     .context("bootstrapping sync pipeline")?;
 
-    let sync = crate::common::spawn_pipeline(gasket::daemon::Daemon::new(sync), exit.clone());
-
-    // TODO: spawn submit pipeline. Skipping for now since it's giving more trouble
-    // that benefits
-
-    // We need new file handled for the separate process.
-    let serve = tokio::spawn(dolos::serve::serve(
-        config.serve,
-        domain.clone(),
+    let sync = tokio::spawn(crate::common::run_pipeline(
+        gasket::daemon::Daemon::new(sync),
         exit.clone(),
     ));
 
-    let relay = tokio::spawn(dolos::relay::serve(
-        config.relay,
-        domain.wal.clone(),
-        exit.clone(),
-    ));
+    let drivers = FuturesUnordered::new();
 
-    let (_, serve, relay) = tokio::try_join!(sync, serve, relay)
-        .into_diagnostic()
-        .context("joining threads")?;
+    dolos::serve::load_drivers(&drivers, config.serve, domain.clone(), exit.clone());
+    dolos::relay::load_drivers(&drivers, config.relay, domain.clone(), exit.clone());
 
-    serve.context("serve thread")?;
-    relay.into_diagnostic().context("relay thread")?;
+    for result in drivers {
+        if let Err(e) = result.await.unwrap() {
+            error!("driver error: {}", e);
+
+            warn!("cancelling remaining drivers");
+            exit.cancel();
+        }
+    }
+
+    sync.await.unwrap();
 
     warn!("shutdown complete");
 

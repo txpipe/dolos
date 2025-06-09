@@ -1,18 +1,13 @@
-use futures_core::Stream;
-use tokio_util::sync::CancellationToken;
-
 use crate::prelude::*;
+use futures_core::Stream;
 
 pub struct WalStream;
 
 impl WalStream {
-    pub fn start<W>(
-        wal: W,
-        from: LogSeq,
-        cancellation_token: CancellationToken,
-    ) -> impl Stream<Item = LogEntry>
+    pub fn start<W, C>(wal: W, from: LogSeq, cancel: C) -> impl Stream<Item = LogEntry>
     where
         W: WalStore,
+        C: CancelToken,
     {
         async_stream::stream! {
             let mut last_seq = from;
@@ -26,7 +21,7 @@ impl WalStream {
 
             loop {
                 tokio::select! {
-                    _ = cancellation_token.cancelled() => {
+                    _ = cancel.cancelled() => {
                         break;
                     }
                     _ = wal.tip_change() => {
@@ -45,10 +40,12 @@ impl WalStream {
 
 #[cfg(test)]
 mod tests {
+    use dolos_redb::wal::RedbWalStore;
     use futures_util::{pin_mut, StreamExt};
+    use tokio_util::sync::CancellationToken;
 
     use super::*;
-    use dolos_redb::wal::RedbWalStore;
+    use crate::serve::CancelTokenImpl;
 
     fn dummy_block(slot: u64) -> RawBlock {
         let hash = pallas::crypto::hash::Hasher::<256>::hash(slot.to_be_bytes().as_slice());
@@ -79,7 +76,7 @@ mod tests {
             }
         });
 
-        let s = WalStream::start(db.clone(), 50, CancellationToken::new());
+        let s = WalStream::start(db.clone(), 50, CancelTokenImpl(CancellationToken::new()));
 
         pin_mut!(s);
 

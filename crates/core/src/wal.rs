@@ -158,7 +158,7 @@ pub trait WalStore: Clone + Send + Sync + 'static {
             .into_blocks()
             .flatten()
             .next()
-            .ok_or(WalError::PointNotFound(point.clone()))?;
+            .ok_or_else(|| WalError::PointNotFound(point.clone()))?;
 
         Ok(block)
     }

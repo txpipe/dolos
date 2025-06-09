@@ -12,8 +12,14 @@ pub struct Config {
     pub magic: u64,
 }
 
-pub async fn serve(_: Config, _: WalStore, _: CancellationToken) -> Result<(), Error> {
-    error!("ouroboros client socket not yet supported on windows (soon)");
+pub struct Driver;
 
-    Ok(())
+impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
+    type Config = Config;
+
+    #[instrument(skip_all)]
+    async fn run(cfg: Self::Config, domain: D, cancel: C) -> Result<(), ServeError> {
+        error!("ouroboros client socket not yet supported on windows (soon)");
+        Ok(())
+    }
 }

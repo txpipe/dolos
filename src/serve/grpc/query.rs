@@ -8,8 +8,8 @@ use tracing::info;
 
 use dolos_cardano::pparams;
 
+use super::masking::apply_mask;
 use crate::prelude::*;
-use crate::serve::utils::apply_mask;
 
 pub fn point_to_u5c(point: &ChainPoint) -> u5c::query::ChainPoint {
     match point {
