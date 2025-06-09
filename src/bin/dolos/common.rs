@@ -215,8 +215,9 @@ pub fn hook_exit_token() -> CancellationToken {
 pub async fn run_pipeline(pipeline: gasket::daemon::Daemon, exit: CancellationToken) {
     loop {
         tokio::select! {
-            _ = tokio::time::sleep(Duration::from_secs(5000)) => {
+            _ = tokio::time::sleep(Duration::from_secs(5)) => {
                 if pipeline.should_stop() {
+                    debug!("pipeline should stop");
                     break;
                 }
             }
@@ -229,10 +230,6 @@ pub async fn run_pipeline(pipeline: gasket::daemon::Daemon, exit: CancellationTo
 
     debug!("shutting down pipeline");
     pipeline.teardown();
-}
-
-pub fn spawn_pipeline(pipeline: gasket::daemon::Daemon, exit: CancellationToken) -> JoinHandle<()> {
-    tokio::spawn(run_pipeline(pipeline, exit))
 }
 
 pub fn cleanup_data(config: &crate::Config) -> Result<(), std::io::Error> {

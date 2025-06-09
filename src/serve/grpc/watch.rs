@@ -7,11 +7,10 @@ use pallas::{
     ledger::{addresses::Address, traverse::MultiEraBlock},
 };
 use std::pin::Pin;
-use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
 
+use super::stream::WalStream;
 use crate::prelude::*;
-use crate::wal::WalStream;
 
 fn outputs_match_address(
     pattern: &u5c::cardano::AddressPattern,
@@ -193,26 +192,28 @@ fn roll_to_watch_response<S: StateStore>(
     tokio_stream::iter(txs)
 }
 
-pub struct WatchServiceImpl<D: Domain> {
+pub struct WatchServiceImpl<D: Domain, C: CancelToken> {
     domain: D,
     mapper: interop::Mapper<D::State>,
-    cancellation_token: CancellationToken,
+    cancel: C,
 }
 
-impl<D: Domain> WatchServiceImpl<D> {
-    pub fn new(domain: D, cancellation_token: CancellationToken) -> Self {
+impl<D: Domain, C: CancelToken> WatchServiceImpl<D, C> {
+    pub fn new(domain: D, cancel: C) -> Self {
         let mapper = interop::Mapper::new(domain.state().clone());
 
         Self {
             domain,
             mapper,
-            cancellation_token,
+            cancel,
         }
     }
 }
 
 #[async_trait::async_trait]
-impl<D: Domain> u5c::watch::watch_service_server::WatchService for WatchServiceImpl<D> {
+impl<D: Domain, C: CancelToken> u5c::watch::watch_service_server::WatchService
+    for WatchServiceImpl<D, C>
+{
     type WatchTxStream = Pin<
         Box<dyn Stream<Item = Result<u5c::watch::WatchTxResponse, tonic::Status>> + Send + 'static>,
     >;
@@ -247,13 +248,9 @@ impl<D: Domain> u5c::watch::watch_service_server::WatchService for WatchServiceI
 
         let mapper = self.mapper.clone();
 
-        let stream = WalStream::start(
-            self.domain.wal().clone(),
-            from_seq,
-            self.cancellation_token.clone(),
-        )
-        .flat_map(move |(_, log)| roll_to_watch_response(&mapper, &log, &inner_req))
-        .map(Ok);
+        let stream = WalStream::start(self.domain.wal().clone(), from_seq, self.cancel.clone())
+            .flat_map(move |(_, log)| roll_to_watch_response(&mapper, &log, &inner_req))
+            .map(Ok);
 
         Ok(Response::new(Box::pin(stream)))
     }

@@ -6,11 +6,10 @@ use pallas::interop::utxorpc as interop;
 use pallas::interop::utxorpc::spec::sync::BlockRef;
 use pallas::interop::utxorpc::{spec as u5c, Mapper};
 use std::pin::Pin;
-use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
 
+use super::stream::WalStream;
 use crate::prelude::*;
-use crate::wal::WalStream;
 
 fn u5c_to_chain_point(block_ref: u5c::sync::BlockRef) -> Result<ChainPoint, Status> {
     Ok(ChainPoint::Specific(
@@ -97,26 +96,28 @@ fn point_to_reset_tip_response(point: ChainPoint) -> u5c::sync::FollowTipRespons
     }
 }
 
-pub struct SyncServiceImpl<D: Domain> {
+pub struct SyncServiceImpl<D: Domain, C: CancelToken> {
     domain: D,
     mapper: interop::Mapper<D::State>,
-    cancellation_token: CancellationToken,
+    cancel: C,
 }
 
-impl<D: Domain> SyncServiceImpl<D> {
-    pub fn new(domain: D, cancellation_token: CancellationToken) -> Self {
+impl<D: Domain, C: CancelToken> SyncServiceImpl<D, C> {
+    pub fn new(domain: D, cancel: C) -> Self {
         let mapper = Mapper::new(domain.state().clone());
 
         Self {
             domain,
             mapper,
-            cancellation_token,
+            cancel,
         }
     }
 }
 
 #[async_trait::async_trait]
-impl<D: Domain> u5c::sync::sync_service_server::SyncService for SyncServiceImpl<D> {
+impl<D: Domain, C: CancelToken> u5c::sync::sync_service_server::SyncService
+    for SyncServiceImpl<D, C>
+{
     type FollowTipStream =
         Pin<Box<dyn Stream<Item = Result<u5c::sync::FollowTipResponse, Status>> + Send + 'static>>;
 
@@ -214,13 +215,9 @@ impl<D: Domain> u5c::sync::sync_service_server::SyncService for SyncServiceImpl<
 
         let reset = once(async { Ok(point_to_reset_tip_response(point)) });
 
-        let forward = WalStream::start(
-            self.domain.wal().clone(),
-            from_seq,
-            self.cancellation_token.clone(),
-        )
-        .skip(1)
-        .map(move |(_, log)| Ok(wal_log_to_tip_response::<D>(&mapper, &log)));
+        let forward = WalStream::start(self.domain.wal().clone(), from_seq, self.cancel.clone())
+            .skip(1)
+            .map(move |(_, log)| Ok(wal_log_to_tip_response::<D>(&mapper, &log)));
 
         let stream = reset.chain(forward);
 

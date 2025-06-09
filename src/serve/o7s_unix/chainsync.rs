@@ -3,23 +3,19 @@ use pallas::network::miniprotocols::{
     chainsync::{BlockContent, ClientRequest, N2CServer, Tip},
     Point,
 };
-use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
-use crate::{
-    adapters::{WalAdapter, WalIter},
-    prelude::*,
-};
+use crate::prelude::*;
 
-pub struct Session<'a> {
-    wal: WalAdapter,
-    current_iterator: Option<WalIter<'a>>,
+pub struct Session<'a, W: WalStore> {
+    wal: W,
+    current_iterator: Option<W::LogIterator<'a>>,
     is_new_intersection: bool,
     last_known_seq: Option<LogSeq>,
     connection: N2CServer,
 }
 
-impl Session<'_> {
+impl<'a, W: WalStore> Session<'a, W> {
     fn prepare_tip(&self) -> Result<Tip, Error> {
         let tip = self
             .wal
@@ -221,11 +217,11 @@ impl Session<'_> {
     }
 }
 
-pub async fn handle_session(
-    wal: WalAdapter,
+pub async fn handle_session<W: WalStore, C: CancelToken>(
+    wal: W,
     connection: N2CServer,
-    cancel: CancellationToken,
-) -> Result<(), Error> {
+    cancel: C,
+) -> Result<(), ServeError> {
     let mut session = Session {
         wal,
         connection,

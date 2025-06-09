@@ -1,12 +1,11 @@
+use futures_util::stream::FuturesUnordered;
 use miette::{Context, IntoDiagnostic};
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::adapters::DomainAdapter;
 use crate::prelude::*;
-
-pub mod utils;
 
 #[cfg(feature = "grpc")]
 pub mod grpc;
@@ -48,79 +47,53 @@ macro_rules! feature_not_included {
     };
 }
 
-/// Serve remote requests
-///
-/// Uses specified config to start listening for network connections on either
-/// gRPC, Ouroboros or both protocols.
-pub async fn serve(
+pub fn load_drivers(
+    all_drivers: &FuturesUnordered<tokio::task::JoinHandle<Result<(), ServeError>>>,
     config: Config,
     domain: DomainAdapter,
     exit: CancellationToken,
-) -> miette::Result<()> {
-    let grpc = async {
-        if let Some(cfg) = config.grpc {
-            info!("found gRPC config");
+) {
+    if let Some(cfg) = config.ouroboros {
+        info!("found Ouroboros config");
 
-            #[cfg(not(feature = "grpc"))]
-            feature_not_included!("gRPC");
+        let driver = o7s::Driver::run(cfg.clone(), domain.clone(), CancelTokenImpl(exit.clone()));
 
-            #[cfg(feature = "grpc")]
-            grpc::serve(cfg, domain.clone(), exit.clone())
-                .await
-                .into_diagnostic()
-                .context("serving gRPC")
-        } else {
-            Ok(())
-        }
-    };
+        let task = tokio::spawn(driver);
 
-    let o7s = async {
-        if let Some(cfg) = config.ouroboros {
-            info!("found Ouroboros config");
-            o7s::serve(cfg, domain.wal().clone(), exit.clone())
-                .await
-                .into_diagnostic()
-                .context("serving Ouroboros")
-        } else {
-            Ok(())
-        }
-    };
+        all_drivers.push(task);
+    }
 
-    let minibf = async {
-        if let Some(cfg) = config.minibf {
-            info!("found minibf config");
+    #[cfg(feature = "grpc")]
+    if let Some(cfg) = config.grpc {
+        info!("found gRPC config");
 
-            #[cfg(not(feature = "minibf"))]
-            feature_not_included!("minibf");
+        let driver = grpc::Driver::run(cfg.clone(), domain.clone(), CancelTokenImpl(exit.clone()));
 
-            #[cfg(feature = "minibf")]
-            minibf::serve(cfg, domain.clone(), exit.clone())
-                .await
-                .into_diagnostic()
-                .context("serving minibf")
-        } else {
-            Ok(())
-        }
-    };
+        let task = tokio::spawn(driver);
 
-    let trp = async {
-        if let Some(cfg) = config.trp {
-            info!("found trp config");
+        all_drivers.push(task);
+    }
 
-            #[cfg(not(feature = "trp"))]
-            feature_not_included!("trp");
+    #[cfg(feature = "minibf")]
+    if let Some(cfg) = config.minibf {
+        info!("found minibf config");
 
-            #[cfg(feature = "trp")]
-            trp::serve(cfg, domain.clone(), exit.clone())
-                .await
-                .into_diagnostic()
-                .context("serving trp")
-        } else {
-            Ok(())
-        }
-    };
+        let driver =
+            minibf::Driver::run(cfg.clone(), domain.clone(), CancelTokenImpl(exit.clone()));
 
-    tokio::try_join!(grpc, o7s, minibf, trp)?;
+        let task = tokio::spawn(driver);
 
-    Ok(())
+        all_drivers.push(task);
+    }
+
+    #[cfg(feature = "trp")]
+    if let Some(cfg) = config.trp {
+        info!("found trp config");
+
+        let driver = trp::Driver::run(cfg.clone(), domain.clone(), CancelTokenImpl(exit.clone()));
+
+        let task = tokio::spawn(driver);
+
+        all_drivers.push(task);
+    }
 }

@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     fmt::Display,
+    future::Future,
+    pin::Pin,
 };
 use thiserror::Error;
 use tracing::{info, warn};
@@ -441,11 +443,14 @@ impl Default for StorageConfig {
 
 #[derive(Debug, Error)]
 pub enum ServeError {
-    #[error("Failed to bind listener")]
+    #[error("failed to bind listener")]
     BindError(std::io::Error),
 
-    #[error("Failed to shutdown")]
+    #[error("failed to shutdown")]
     ShutdownError(std::io::Error),
+
+    #[error(transparent)]
+    Internal(#[from] Box<dyn std::error::Error + Send + Sync>),
 }
 
 pub struct Genesis {
@@ -775,6 +780,18 @@ pub trait Domain: Send + Sync + Clone + 'static {
 
         Ok(())
     }
+}
+
+#[trait_variant::make(Send)]
+pub trait CancelToken: Send + Sync + 'static + Clone {
+    async fn cancelled(&self);
+}
+
+#[trait_variant::make(Send)]
+pub trait Driver<D: Domain, C: CancelToken>: Send + Sync + 'static {
+    type Config: Clone;
+
+    async fn run(config: Self::Config, domain: D, cancel: C) -> Result<(), ServeError>;
 }
 
 #[cfg(test)]
