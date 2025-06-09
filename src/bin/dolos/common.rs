@@ -217,6 +217,9 @@ pub async fn run_pipeline(pipeline: gasket::daemon::Daemon, exit: CancellationTo
             _ = tokio::time::sleep(Duration::from_secs(5)) => {
                 if pipeline.should_stop() {
                     debug!("pipeline should stop");
+
+                    // trigger cancel so that stages stop early
+                    exit.cancel();
                     break;
                 }
             }
