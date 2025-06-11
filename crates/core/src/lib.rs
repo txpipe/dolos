@@ -263,6 +263,16 @@ pub enum LogValue {
     Mark(ChainPoint),
 }
 
+impl LogValue {
+    pub fn slot(&self) -> u64 {
+        match self {
+            LogValue::Apply(x) => x.slot,
+            LogValue::Undo(x) => x.slot,
+            LogValue::Mark(x) => x.slot(),
+        }
+    }
+}
+
 impl PartialEq for LogValue {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
