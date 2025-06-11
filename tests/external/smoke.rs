@@ -134,6 +134,14 @@ fn daemon_runs(scenario: &Scenario) {
 
     let mut cmd = prepare_scenario_process(scenario);
 
+    cmd.args(["doctor", "reset-genesis"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .expect("failed to reset genesis");
+
+    let mut cmd = prepare_scenario_process(scenario);
+
     let handle = cmd
         .args(["daemon"])
         .stdout(Stdio::inherit())

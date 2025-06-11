@@ -71,3 +71,12 @@ impl From<Box<dyn std::error::Error>> for Error {
         Error::custom(err)
     }
 }
+
+#[derive(Clone)]
+pub struct CancelTokenImpl(pub tokio_util::sync::CancellationToken);
+
+impl CancelToken for CancelTokenImpl {
+    async fn cancelled(&self) {
+        self.0.cancelled().await;
+    }
+}

@@ -13,14 +13,21 @@ type ServerHandle = tokio::task::JoinHandle<Result<(), crate::prelude::Error>>;
 async fn setup_server_client_pair(port: u32, wal: WalAdapter) -> (ServerHandle, NodeClient) {
     let cancel = CancellationToken::new();
 
-    let server = tokio::spawn(super::serve(
-        super::Config {
+    let server = tokio::spawn(async move {
+        let cfg = super::Config {
             listen_path: format!("dolos{port}.socket").into(),
             magic: MAINNET_MAGIC,
-        },
-        wal,
-        cancel,
-    ));
+        };
+
+        tokio::select! {
+            res = super::accept_client_connections(wal.clone(), &cfg, &mut tasks, cancel.clone()) => {
+                res?;
+            },
+            _ = cancel.cancelled() => {
+                warn!("exit requested");
+            }
+        }
+    });
 
     tokio::time::sleep(Duration::from_secs(3)).await;
 

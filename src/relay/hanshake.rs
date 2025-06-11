@@ -1,6 +1,6 @@
+use dolos_core::{CancelToken, ServeError};
 use pallas::network::miniprotocols::keepalive;
 use std::time::Duration;
-use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use super::Error;
@@ -16,10 +16,10 @@ pub async fn send_forever(mut keepalive: keepalive::Server) -> Result<(), Error>
     }
 }
 
-pub async fn handle_session(
+pub async fn handle_session<C: CancelToken>(
     connection: keepalive::Server,
-    cancel: CancellationToken,
-) -> Result<(), Error> {
+    cancel: C,
+) -> Result<(), ServeError> {
     tokio::select! {
         _ = send_forever(connection) => {
             info!("peer ended protocol");
