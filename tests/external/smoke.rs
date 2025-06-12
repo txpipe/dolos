@@ -73,7 +73,7 @@ fn assert_file_released(scenario: &Scenario, relative_path: &str) {
     assert!(std::fs::metadata(path).is_err());
 }
 
-fn shutdown_gracefully(mut handle: Child) {
+fn shutdown_gracefully(handle: &mut Child) {
     nix::sys::signal::kill(
         nix::unistd::Pid::from_raw(handle.id() as i32),
         nix::sys::signal::Signal::SIGTERM,
@@ -89,9 +89,19 @@ impl ProcessGuard {
     fn new(child: Child) -> Self {
         Self(Some(child))
     }
+}
 
-    fn into_inner(mut self) -> Child {
-        self.0.take().unwrap()
+impl std::ops::Deref for ProcessGuard {
+    type Target = Child;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_ref().unwrap()
+    }
+}
+
+impl std::ops::DerefMut for ProcessGuard {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.0.as_mut().unwrap()
     }
 }
 
@@ -101,6 +111,11 @@ impl Drop for ProcessGuard {
             let pid = nix::unistd::Pid::from_raw(child.id() as i32);
 
             if let Err(err) = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM) {
+                // ESRCH means the process has already exited
+                if err == nix::Error::ESRCH {
+                    return;
+                }
+
                 eprintln!("could not SIGTERM process {}: {}", pid, err);
             }
 
@@ -132,22 +147,29 @@ fn daemon_runs(scenario: &Scenario) {
 
     let mut cmd = prepare_scenario_process(scenario);
 
-    let handle = cmd
-        .args(["daemon"])
+    cmd.args(["bootstrap", "relay"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
+        .output()
+        .expect("failed to bootstrap data");
+
+    let mut cmd = prepare_scenario_process(scenario);
+
+    let handle = cmd
+        .args(["daemon"])
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
         .spawn()
         .expect("failed to spawn process");
 
-    let guard = ProcessGuard::new(handle);
+    let mut guard = ProcessGuard::new(handle);
 
     wait_for_tcp_port(scenario, 0, Duration::from_secs(10));
     wait_for_tcp_port(scenario, 1, Duration::from_secs(10));
     wait_for_tcp_port(scenario, 2, Duration::from_secs(10));
     wait_for_socket_file(scenario, "dolos.socket", Duration::from_secs(10));
 
-    let handle = guard.into_inner();
-    shutdown_gracefully(handle);
+    shutdown_gracefully(&mut guard);
 
     assert_port_released(scenario, 0);
     assert_port_released(scenario, 1);
@@ -155,14 +177,74 @@ fn daemon_runs(scenario: &Scenario) {
     assert_file_released(scenario, "dolos.socket");
 }
 
+fn daemon_syncs(scenario: &Scenario) {
+    let mut cmd = prepare_scenario_process(scenario);
+
+    cmd.args(["doctor", "reset-genesis"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .expect("failed to reset genesis");
+
+    let mut cmd = prepare_scenario_process(scenario);
+
+    cmd.args(["bootstrap", "relay"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .expect("failed to bootstrap data");
+
+    let mut cmd = prepare_scenario_process(scenario);
+
+    let data = cmd
+        .args(["data", "summary"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .expect("failed to get data summary");
+
+    let before = serde_json::from_slice::<dolos::cli::DataSummary>(&data.stdout).unwrap();
+
+    let mut cmd = prepare_scenario_process(scenario);
+
+    let handle = cmd
+        .args(["daemon"])
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("failed to spawn process");
+
+    let mut guard = ProcessGuard::new(handle);
+
+    guard.wait().expect("failed to wait for process");
+
+    let mut cmd = prepare_scenario_process(scenario);
+
+    let data = cmd
+        .args(["data", "summary"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .expect("failed to get data summary");
+
+    let after = serde_json::from_slice::<dolos::cli::DataSummary>(&data.stdout).unwrap();
+
+    assert!(after.wal.tip_slot.unwrap() >= before.wal.tip_slot.unwrap() + 20);
+    assert!(after.wal.tip_seq.unwrap() >= before.wal.tip_seq.unwrap() + 20);
+}
+
 const SCENARIOS: &[Scenario] = &[
     Scenario {
         name: "preview",
-        port_prefix: 6450,
+        port_prefix: 6440,
     },
     Scenario {
-        name: "mainnet",
+        name: "mainnet-forever",
         port_prefix: 6460,
+    },
+    Scenario {
+        name: "mainnet-20-blocks",
+        port_prefix: 6470,
     },
 ];
 
@@ -179,3 +261,5 @@ macro_rules! test_for_scenario {
 test_for_scenario!(daemon_runs_for_preview, daemon_runs, 0);
 
 test_for_scenario!(daemon_runs_for_mainnet, daemon_runs, 1);
+
+test_for_scenario!(daemon_syncs_for_mainnet, daemon_syncs, 2);

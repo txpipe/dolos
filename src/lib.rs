@@ -1,4 +1,5 @@
 pub mod adapters;
+pub mod cli;
 pub mod mempool;
 pub mod prelude;
 pub mod relay;
