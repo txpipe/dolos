@@ -18,13 +18,12 @@ force_protocol = 6
 
 [sync]
 pull_batch_size = 100
-sync_limit = 10
 
 [submit]
 prune_height = 200
 
 [serve.grpc]
-listen_address = "[::]:6450"
+listen_address = "[::]:6440"
 permissive_cors = true
 
 [serve.ouroboros]
@@ -32,11 +31,11 @@ listen_path = "dolos.socket"
 magic = 2
 
 [serve.minibf]
-listen_address = "[::]:6451"
+listen_address = "[::]:6441"
 permissive_cors = true
 
 [serve.trp]
-listen_address = "[::]:6452"
+listen_address = "[::]:6442"
 max_optimize_rounds = 10
 permissive_cors = true
 

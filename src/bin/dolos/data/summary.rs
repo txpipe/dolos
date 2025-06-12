@@ -1,32 +1,5 @@
+use dolos::cli::{ArchiveSummary, DataSummary, StateSummary, WalSummary};
 use dolos::prelude::*;
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WalSummary {
-    pub start_seq: Option<LogSeq>,
-    pub start_slot: Option<BlockSlot>,
-    pub tip_seq: Option<LogSeq>,
-    pub tip_slot: Option<BlockSlot>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ArchiveSummary {
-    // TODO: archive interface needs a way to query from the start
-    // pub start: Option<ChainPoint>,
-    pub tip_slot: Option<BlockSlot>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StateSummary {
-    pub tip_slot: Option<BlockSlot>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Summary {
-    pub wal: WalSummary,
-    pub archive: ArchiveSummary,
-    pub state: StateSummary,
-}
 
 #[derive(Debug, clap::Args)]
 pub struct Args {}
@@ -52,7 +25,7 @@ pub fn run(config: &crate::Config, _args: &Args) -> miette::Result<()> {
         tip_slot: state.cursor().unwrap().map(|x| x.slot()),
     };
 
-    let summary = Summary {
+    let summary = DataSummary {
         wal: wal_summary,
         archive: archive_summary,
         state: state_summary,
