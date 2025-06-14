@@ -22,6 +22,7 @@ pub struct Pagination {
     pub page: u64,
     pub order: Order,
 }
+
 impl Default for Pagination {
     fn default() -> Self {
         Pagination {
@@ -62,6 +63,7 @@ impl TryFrom<PaginationParameters> for Pagination {
         })
     }
 }
+
 impl Pagination {
     pub fn from(&self) -> usize {
         ((self.page - 1) * self.count as u64) as usize
@@ -70,6 +72,7 @@ impl Pagination {
     pub fn to(&self) -> usize {
         (self.count as u64 * self.page) as usize
     }
+
     pub fn includes(&self, i: usize) -> bool {
         i > self.from() && i <= self.to()
     }

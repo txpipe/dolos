@@ -5,7 +5,7 @@ use tracing::{debug, info};
 
 type Error = super::RedbArchiveError;
 
-use dolos_core::{ArchiveError, BlockBody, BlockSlot, LedgerDelta};
+use dolos_core::{ArchiveError, BlockBody, BlockSlot, LedgerDelta, TxOrder};
 
 use super::{ChainIter, indexes, tables};
 
@@ -274,6 +274,19 @@ impl ChainStore {
                 Err(e) => Some(Err(e)),
             })
             .collect()
+    }
+
+    pub fn get_block_with_tx(&self, tx_hash: &[u8]) -> Result<Option<(BlockBody, TxOrder)>, Error> {
+        let possible = self.get_possible_blocks_by_tx_hash(tx_hash)?;
+        for raw in possible {
+            let block = MultiEraBlock::decode(&raw).map_err(ArchiveError::BlockDecodingError)?;
+            for (idx, tx) in block.txs().iter().enumerate() {
+                if tx.hash().to_vec() == tx_hash {
+                    return Ok(Some((raw, idx)));
+                }
+            }
+        }
+        Ok(None)
     }
 
     pub fn get_block_by_slot(&self, slot: &BlockSlot) -> Result<Option<BlockBody>, Error> {

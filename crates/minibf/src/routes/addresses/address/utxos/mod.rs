@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 
 use dolos_core::{Domain, EraCbor, StateStore as _, TxoRef};
 
+use crate::Facade;
+
 pub mod asset;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -88,7 +90,7 @@ impl TryFrom<(TxoRef, EraCbor)> for Utxo {
 
 pub async fn route<D: Domain>(
     Path(address): Path<String>,
-    State(domain): State<D>,
+    State(domain): State<Facade<D>>,
 ) -> Result<impl IntoResponse, StatusCode> {
     let address = pallas::ledger::addresses::Address::from_bech32(&address)
         .map_err(|_| StatusCode::BAD_REQUEST)?;

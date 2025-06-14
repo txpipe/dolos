@@ -6,11 +6,11 @@ use axum::{
 
 use dolos_core::{ArchiveStore as _, Domain};
 
-use crate::routes::blocks::Block;
+use crate::{Facade, routes::blocks::Block};
 
 pub async fn route<D: Domain>(
     Path(slot_number): Path<u64>,
-    State(domain): State<D>,
+    State(domain): State<Facade<D>>,
 ) -> Result<Json<Block>, StatusCode> {
     let body = domain
         .archive()
@@ -18,7 +18,7 @@ pub async fn route<D: Domain>(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     match body {
-        Some(body) => Ok(Json(Block::from_body(&body, &domain)?)),
+        Some(body) => Ok(Json(Block::from_body(&body, &*domain)?)),
         _ => Err(StatusCode::NOT_FOUND),
     }
 }

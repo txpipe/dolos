@@ -15,9 +15,17 @@ mod mempool;
 mod wal;
 
 pub type Era = u16;
+
+/// The index of an output in a tx
 pub type TxoIdx = u32;
+
+/// The order of a tx in a block
 pub type TxOrder = usize;
+
+/// The slot of a block (a.k.a. block index)
 pub type BlockSlot = u64;
+
+/// The height of a block (a.k.a. block number)
 pub type BlockHeight = u64;
 pub type BlockBody = Vec<u8>;
 pub type BlockEra = pallas::ledger::traverse::Era;
@@ -554,6 +562,11 @@ pub trait ArchiveStore {
     fn get_block_by_slot(&self, slot: &BlockSlot) -> Result<Option<BlockBody>, ArchiveError>;
 
     fn get_block_by_number(&self, number: &u64) -> Result<Option<BlockBody>, ArchiveError>;
+
+    fn get_block_with_tx(
+        &self,
+        tx_hash: &[u8],
+    ) -> Result<Option<(BlockBody, TxOrder)>, ArchiveError>;
 
     fn get_tx(&self, tx_hash: &[u8]) -> Result<Option<Vec<u8>>, ArchiveError>;
 

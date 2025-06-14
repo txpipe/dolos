@@ -504,6 +504,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "blockfrost-openapi"
+version = "0.1.75"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "43e88a3c131d5e95b82a761d9b4ae0d100b67b138a9fd1d880742b50b26318a5"
+dependencies = [
+ "serde",
+ "serde_json",
+ "serde_with 3.12.0",
+ "uuid",
+]
+
+[[package]]
 name = "blst"
 version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1153,6 +1165,7 @@ version = "0.1.0"
 dependencies = [
  "axum 0.8.4",
  "bech32 0.11.0",
+ "blockfrost-openapi",
  "dolos-cardano",
  "dolos-core",
  "hex",
@@ -5139,6 +5152,7 @@ checksum = "458f7a779bf54acc9f347480ac654f68407d3aab21269a6e3c9f922acd9e2da9"
 dependencies = [
  "getrandom 0.3.2",
  "js-sys",
+ "serde",
  "wasm-bindgen",
 ]
 

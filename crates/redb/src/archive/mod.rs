@@ -2,7 +2,7 @@ use ::redb::{Database, MultimapTableHandle as _, Range, TableHandle as _};
 use std::path::Path;
 use tracing::{debug, info, warn};
 
-use dolos_core::{ArchiveError, BlockBody, BlockSlot, LedgerDelta};
+use dolos_core::{ArchiveError, BlockBody, BlockSlot, LedgerDelta, TxOrder};
 
 mod indexes;
 mod tables;
@@ -197,6 +197,15 @@ impl ChainStore {
     pub fn get_block_by_number(&self, number: &u64) -> Result<Option<BlockBody>, RedbArchiveError> {
         match self {
             ChainStore::SchemaV1(x) => x.get_block_by_number(number),
+        }
+    }
+
+    pub fn get_block_with_tx(
+        &self,
+        tx_hash: &[u8],
+    ) -> Result<Option<(BlockBody, TxOrder)>, RedbArchiveError> {
+        match self {
+            ChainStore::SchemaV1(x) => x.get_block_with_tx(tx_hash),
         }
     }
 

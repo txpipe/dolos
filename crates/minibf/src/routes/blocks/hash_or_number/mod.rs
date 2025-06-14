@@ -7,6 +7,7 @@ use axum::{
 use dolos_core::Domain;
 
 use super::Block;
+use crate::Facade;
 
 pub mod addresses;
 pub mod next;
@@ -15,7 +16,7 @@ pub mod txs;
 
 pub async fn route<D: Domain>(
     Path(hash_or_number): Path<String>,
-    State(domain): State<D>,
+    State(domain): State<Facade<D>>,
 ) -> Result<Json<Block>, StatusCode> {
-    Ok(Json(Block::find_in_chain(&domain, &hash_or_number)?))
+    Ok(Json(Block::find_in_chain(&*domain, &hash_or_number)?))
 }

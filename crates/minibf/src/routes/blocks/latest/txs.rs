@@ -1,9 +1,12 @@
 use axum::{Json, extract::State, http::StatusCode};
 use pallas::ledger::traverse::MultiEraBlock;
 
+use crate::Facade;
 use dolos_core::{ArchiveStore as _, Domain};
 
-pub async fn route<D: Domain>(State(domain): State<D>) -> Result<Json<Vec<String>>, StatusCode> {
+pub async fn route<D: Domain>(
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Vec<String>>, StatusCode> {
     let tip = domain
         .archive()
         .get_tip()
