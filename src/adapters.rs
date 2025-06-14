@@ -258,6 +258,17 @@ impl ArchiveStore for ArchiveAdapter {
         Ok(out)
     }
 
+    fn get_block_with_tx(
+        &self,
+        tx_hash: &[u8],
+    ) -> Result<Option<(BlockBody, TxOrder)>, ArchiveError> {
+        let out = match self {
+            ArchiveAdapter::Redb(x) => x.get_block_with_tx(tx_hash)?,
+        };
+
+        Ok(out)
+    }
+
     fn get_tx(&self, tx_hash: &[u8]) -> Result<Option<Vec<u8>>, ArchiveError> {
         let out = match self {
             ArchiveAdapter::Redb(x) => x.get_tx(tx_hash)?,

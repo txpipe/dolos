@@ -121,8 +121,7 @@ impl Block {
             op_cert_counter,
             slot_leader,
         } = Self::extract_from_header(&curr.header())?;
-        let (epoch, epoch_slot, time) =
-            Self::resolve_time_from_genesis(&slot, summary.era_for_slot(slot));
+        let (epoch, epoch_slot, time) = crate::mapping::slot_time(slot, &summary);
         Ok(Self {
             slot: Some(curr.slot()),
             hash: curr.hash().to_string(),
@@ -167,17 +166,6 @@ impl Block {
             &hash_or_number_to_body(hash_or_number, domain.archive())?,
             domain,
         )
-    }
-
-    /// Resolve epoch, epoch slot and block time using Genesis values.
-    pub fn resolve_time_from_genesis(slot: &u64, summary: &EraSummary) -> (u64, u64, u64) {
-        let era_slot = slot - summary.start.slot;
-        let era_epoch = era_slot / summary.pparams.epoch_length();
-        let epoch_slot = era_slot % summary.pparams.epoch_length();
-        let epoch = summary.start.epoch + era_epoch;
-        let time = summary.start.timestamp.timestamp() as u64
-            + (slot - summary.start.slot) * summary.pparams.slot_length();
-        (epoch, epoch_slot, time)
     }
 
     pub fn extract_from_header(header: &MultiEraHeader) -> Result<BlockHeaderFields, StatusCode> {

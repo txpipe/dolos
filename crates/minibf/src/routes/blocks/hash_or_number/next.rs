@@ -9,7 +9,8 @@ use dolos_cardano::pparams;
 use dolos_core::{ArchiveStore as _, Domain, StateStore as _};
 
 use crate::{
-    common::{Order, Pagination, PaginationParameters},
+    Facade,
+    pagination::{Order, Pagination, PaginationParameters},
     routes::blocks::{BlockHeaderFields, hash_or_number_to_body},
 };
 
@@ -18,7 +19,7 @@ use super::Block;
 pub async fn route<D: Domain>(
     Path(hash_or_number): Path<String>,
     Query(params): Query<PaginationParameters>,
-    State(domain): State<D>,
+    State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<Block>>, StatusCode> {
     let pagination = Pagination::try_from(params)?;
     let tip_number = match domain
@@ -73,8 +74,7 @@ pub async fn route<D: Domain>(
                 op_cert_counter,
                 slot_leader,
             } = Block::extract_from_header(&block.header())?;
-            let (epoch, epoch_slot, block_time) =
-                Block::resolve_time_from_genesis(&slot, summary.era_for_slot(slot));
+            let (epoch, epoch_slot, block_time) = crate::mapping::slot_time(slot, &summary);
             output.push(Block {
                 slot: Some(block.slot()),
                 hash: block.hash().to_string(),

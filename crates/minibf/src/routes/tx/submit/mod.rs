@@ -5,6 +5,8 @@ use axum::{
 };
 use dolos_core::{Domain, MempoolError, MempoolStore as _};
 
+use crate::Facade;
+
 fn is_valid_cbor_content_type(headers: &HeaderMap) -> bool {
     let Some(content_type) = headers.get(header::CONTENT_TYPE) else {
         return false;
@@ -18,7 +20,7 @@ fn is_valid_cbor_content_type(headers: &HeaderMap) -> bool {
 }
 
 pub async fn route<D: Domain>(
-    State(domain): State<D>,
+    State(domain): State<Facade<D>>,
     headers: HeaderMap,
     cbor: Bytes,
 ) -> Result<String, StatusCode> {

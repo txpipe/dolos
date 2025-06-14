@@ -10,6 +10,8 @@ use std::collections::HashMap;
 
 use dolos_core::{ArchiveStore as _, Domain, EraCbor, StateStore as _};
 
+use crate::Facade;
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BlockAddress {
     address: String,
@@ -23,7 +25,7 @@ pub struct BlockAddressTx {
 
 pub async fn route<D: Domain>(
     Path(hash_or_number): Path<String>,
-    State(domain): State<D>,
+    State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<BlockAddress>>, StatusCode> {
     let body = match hex::decode(&hash_or_number) {
         Ok(hash) => match domain.archive().get_block_by_hash(&hash).map_err(|err| {

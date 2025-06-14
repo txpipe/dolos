@@ -8,10 +8,11 @@ use axum::{
 use dolos_core::{Domain, StateStore as _};
 
 use super::Utxo;
+use crate::Facade;
 
 pub async fn route<D: Domain>(
     Path((address, asset)): Path<(String, String)>,
-    State(domain): State<D>,
+    State(domain): State<Facade<D>>,
 ) -> Result<impl IntoResponse, StatusCode> {
     let address = pallas::ledger::addresses::Address::from_bech32(&address)
         .map_err(|_| StatusCode::BAD_REQUEST)?;

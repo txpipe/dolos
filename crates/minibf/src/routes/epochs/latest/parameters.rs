@@ -4,11 +4,13 @@ use itertools::Itertools as _;
 use dolos_cardano::pparams;
 use dolos_core::{Domain, StateStore as _};
 
-use crate::routes::epochs::cost_models::get_named_cost_model;
+use crate::{Facade, routes::epochs::cost_models::get_named_cost_model};
 
 use super::{CostModels, CostModelsRaw, ProtocolParams};
 
-pub async fn route<D: Domain>(State(domain): State<D>) -> Result<Json<ProtocolParams>, StatusCode> {
+pub async fn route<D: Domain>(
+    State(domain): State<Facade<D>>,
+) -> Result<Json<ProtocolParams>, StatusCode> {
     let tip = domain
         .state()
         .cursor()
