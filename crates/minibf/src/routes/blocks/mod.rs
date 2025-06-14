@@ -5,7 +5,7 @@ use pallas::{
 };
 use serde::{Deserialize, Serialize};
 
-use dolos_cardano::pparams::{self, EraSummary};
+use dolos_cardano::pparams;
 use dolos_core::{ArchiveStore, BlockBody, Domain, StateStore as _};
 
 pub mod hash_or_number;
