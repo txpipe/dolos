@@ -269,7 +269,7 @@ impl ArchiveStore for ArchiveAdapter {
         Ok(out)
     }
 
-    fn get_tx(&self, tx_hash: &[u8]) -> Result<Option<Vec<u8>>, ArchiveError> {
+    fn get_tx(&self, tx_hash: &[u8]) -> Result<Option<EraCbor>, ArchiveError> {
         let out = match self {
             ArchiveAdapter::Redb(x) => x.get_tx(tx_hash)?,
         };
