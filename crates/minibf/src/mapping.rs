@@ -6,7 +6,7 @@ use blockfrost_openapi::models::{
     tx_content_utxo_outputs_inner::TxContentUtxoOutputsInner,
 };
 use dolos_cardano::pparams::ChainSummary;
-use dolos_core::{BlockBody, EraCbor, TxHash, TxOrder, TxoIdx};
+use dolos_core::{EraCbor, TxHash, TxOrder, TxoIdx};
 use itertools::Itertools;
 use pallas::{
     codec::minicbor,
@@ -144,16 +144,14 @@ impl<'a> IntoModel<String> for ScriptRef<'a> {
 }
 
 pub struct UtxoOutputModelBuilder<'a> {
-    tx_hash: TxHash,
     txo_idx: TxoIdx,
     output: MultiEraOutput<'a>,
     is_collateral: bool,
 }
 
 impl<'a> UtxoOutputModelBuilder<'a> {
-    pub fn from_output(tx_hash: TxHash, txo_idx: TxoIdx, output: MultiEraOutput<'a>) -> Self {
+    pub fn from_output(txo_idx: TxoIdx, output: MultiEraOutput<'a>) -> Self {
         Self {
-            tx_hash,
             txo_idx,
             output,
             is_collateral: false,
@@ -161,13 +159,11 @@ impl<'a> UtxoOutputModelBuilder<'a> {
     }
 
     pub fn from_collateral_return(
-        tx_hash: TxHash,
         output_count: usize,
         collateral_idx: TxoIdx,
         output: MultiEraOutput<'a>,
     ) -> Self {
         Self {
-            tx_hash,
             txo_idx: (output_count + collateral_idx as usize) as u32,
             output,
             is_collateral: true,
@@ -323,7 +319,7 @@ impl<'a> TxModelBuilder<'a> {
         Ok(())
     }
 
-    fn into_input_builder<'b, 'c>(
+    fn new_input_builder<'b, 'c>(
         &'b self,
         input: MultiEraInput<'c>,
         is_collateral: bool,
@@ -351,7 +347,7 @@ impl<'a> IntoModel<TxContentUtxo> for TxModelBuilder<'a> {
         let mut reference: Vec<_> = tx
             .reference_inputs()
             .into_iter()
-            .map(|i| self.into_input_builder(i, false, true))
+            .map(|i| self.new_input_builder(i, false, true))
             .map(|b| b.into_model())
             .try_collect()?;
 
@@ -360,7 +356,7 @@ impl<'a> IntoModel<TxContentUtxo> for TxModelBuilder<'a> {
         let mut inputs: Vec<_> = tx
             .inputs()
             .into_iter()
-            .map(|i| self.into_input_builder(i, false, false))
+            .map(|i| self.new_input_builder(i, false, false))
             .map(|b| b.into_model())
             .try_collect()?;
 
@@ -369,7 +365,7 @@ impl<'a> IntoModel<TxContentUtxo> for TxModelBuilder<'a> {
         let mut collateral_inputs: Vec<_> = tx
             .collateral()
             .into_iter()
-            .map(|i| self.into_input_builder(i, true, false))
+            .map(|i| self.new_input_builder(i, true, false))
             .map(|b| b.into_model())
             .try_collect()?;
 
@@ -385,7 +381,7 @@ impl<'a> IntoModel<TxContentUtxo> for TxModelBuilder<'a> {
             .outputs()
             .into_iter()
             .enumerate()
-            .map(|(i, o)| UtxoOutputModelBuilder::from_output(tx.hash(), i as u32, o).into_model())
+            .map(|(i, o)| UtxoOutputModelBuilder::from_output(i as u32, o).into_model())
             .try_collect()?;
 
         let collateral_outputs: Vec<_> = tx
@@ -393,14 +389,9 @@ impl<'a> IntoModel<TxContentUtxo> for TxModelBuilder<'a> {
             .into_iter()
             .enumerate()
             .map(|(i, o)| {
-                UtxoOutputModelBuilder::from_collateral_return(
-                    tx.hash(),
-                    outputs.len(),
-                    i as u32,
-                    o,
-                )
-                .into_model()
+                UtxoOutputModelBuilder::from_collateral_return(outputs.len(), i as u32, o)
             })
+            .map(|b| b.into_model())
             .try_collect()?;
 
         let all_outputs = outputs.into_iter().chain(collateral_outputs).collect();
@@ -422,7 +413,7 @@ impl IntoModel<TxContent> for TxModelBuilder<'_> {
         let txouts = tx.outputs();
         let chain = self.chain_or_500()?;
 
-        let (_, _, block_time) = slot_time(block.slot(), &chain);
+        let (_, _, block_time) = slot_time(block.slot(), chain);
 
         let tx = TxContent {
             hash: tx.hash().to_string(),
