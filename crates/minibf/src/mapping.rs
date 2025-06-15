@@ -12,7 +12,10 @@ use pallas::{
     codec::minicbor,
     ledger::{
         addresses::Address,
-        primitives::conway::{DatumOption, ScriptRef},
+        primitives::{
+            alonzo::Certificate,
+            conway::{DatumOption, ScriptRef},
+        },
         traverse::{
             ComputeHash, MultiEraBlock, MultiEraInput, MultiEraOutput, MultiEraTx, MultiEraValue,
             OriginalHash,
@@ -158,7 +161,7 @@ impl<'a> UtxoOutputModelBuilder<'a> {
         }
     }
 
-    pub fn from_collateral_return(
+    pub fn from_collateral(
         output_count: usize,
         collateral_idx: TxoIdx,
         output: MultiEraOutput<'a>,
@@ -381,16 +384,15 @@ impl<'a> IntoModel<TxContentUtxo> for TxModelBuilder<'a> {
             .outputs()
             .into_iter()
             .enumerate()
-            .map(|(i, o)| UtxoOutputModelBuilder::from_output(i as u32, o).into_model())
+            .map(|(i, o)| UtxoOutputModelBuilder::from_output(i as u32, o))
+            .map(|b| b.into_model())
             .try_collect()?;
 
         let collateral_outputs: Vec<_> = tx
             .collateral_return()
             .into_iter()
             .enumerate()
-            .map(|(i, o)| {
-                UtxoOutputModelBuilder::from_collateral_return(outputs.len(), i as u32, o)
-            })
+            .map(|(i, o)| UtxoOutputModelBuilder::from_collateral(outputs.len(), i as u32, o))
             .map(|b| b.into_model())
             .try_collect()?;
 
@@ -402,6 +404,17 @@ impl<'a> IntoModel<TxContentUtxo> for TxModelBuilder<'a> {
             outputs: all_outputs,
         })
     }
+}
+
+macro_rules! count_certs {
+    ($tx:expr, "alonzo", $cert:ident) => {
+        $tx.certs()
+            .iter()
+            .map(|x| x.as_alonzo())
+            .flatten()
+            .filter(|x| matches!(x, Certificate::$cert { .. }))
+            .count() as i32
+    };
 }
 
 impl IntoModel<TxContent> for TxModelBuilder<'_> {
@@ -430,14 +443,15 @@ impl IntoModel<TxContent> for TxModelBuilder<'_> {
             redeemer_count: try_into_or_500!(tx.redeemers().len()),
             valid_contract: tx.is_valid(),
             block_time: try_into_or_500!(block_time),
-            withdrawal_count: 0,         // TODO
-            mir_cert_count: 0,           // TODO
-            delegation_count: 0,         // TODO
-            stake_cert_count: 0,         // TODO
-            pool_update_count: 0,        // TODO
-            pool_retire_count: 0,        // TODO
-            asset_mint_or_burn_count: 0, // TODO
-            deposit: "0".to_string(),    // TODO
+            withdrawal_count: tx.withdrawals().collect::<Vec<_>>().len() as i32,
+            mir_cert_count: count_certs!(tx, "alonzo", MoveInstantaneousRewardsCert),
+            delegation_count: count_certs!(tx, "alonzo", StakeDelegation),
+            stake_cert_count: count_certs!(tx, "alonzo", StakeRegistration),
+            pool_update_count: count_certs!(tx, "alonzo", PoolRegistration),
+            pool_retire_count: count_certs!(tx, "alonzo", PoolRetirement),
+            asset_mint_or_burn_count: tx.mints().iter().flat_map(|x| x.assets()).count() as i32,
+            // TODO: need to understand exactly what this means in terms of the transaction
+            deposit: "0".to_string(),
         };
 
         Ok(tx)
