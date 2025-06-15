@@ -568,7 +568,7 @@ pub trait ArchiveStore {
         tx_hash: &[u8],
     ) -> Result<Option<(BlockBody, TxOrder)>, ArchiveError>;
 
-    fn get_tx(&self, tx_hash: &[u8]) -> Result<Option<Vec<u8>>, ArchiveError>;
+    fn get_tx(&self, tx_hash: &[u8]) -> Result<Option<EraCbor>, ArchiveError>;
 
     fn get_range<'a>(
         &self,

@@ -3,41 +3,74 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
 };
-use blockfrost_openapi::models::{tx_content::TxContent, tx_content_cbor::TxContentCbor};
+use blockfrost_openapi::models::{
+    tx_content::TxContent, tx_content_cbor::TxContentCbor, tx_content_utxo::TxContentUtxo,
+};
 use dolos_core::{ArchiveStore as _, Domain};
 
-use crate::{Facade, mapping::IntoModel as _};
+use crate::{
+    Facade,
+    mapping::{IntoModel as _, TxModelBuilder},
+};
 
-pub async fn tx_hash<D: Domain>(
+pub async fn by_hash<D: Domain>(
     Path(tx_hash): Path<String>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<TxContent>, StatusCode> {
     let hash = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
 
-    let raw = domain
+    let (raw, order) = domain
         .archive()
         .get_block_with_tx(&hash)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    let ctx = domain.get_context()?;
+    let chain = domain.get_chain_summary()?;
 
-    raw.into_response(&ctx)
+    let tx = TxModelBuilder::new(&raw, order)?.with_chain(chain);
+
+    tx.into_response()
 }
 
-pub async fn tx_hash_cbor<D: Domain>(
+pub async fn by_hash_cbor<D: Domain>(
     Path(tx_hash): Path<String>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<TxContentCbor>, StatusCode> {
     let hash = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
 
-    let raw = domain
+    let (raw, order) = domain
         .archive()
-        .get_block_with_tx(&hash)
+        .get_block_with_tx(hash.as_slice())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    let ctx = domain.get_context()?;
+    let tx = TxModelBuilder::new(&raw, order)?;
 
-    raw.into_response(&ctx)
+    tx.into_response()
+}
+
+pub async fn by_hash_utxos<D: Domain>(
+    Path(tx_hash): Path<String>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<TxContentUtxo>, StatusCode> {
+    let hash = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    let (raw, order) = domain
+        .archive()
+        .get_block_with_tx(hash.as_slice())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let mut builder = TxModelBuilder::new(&raw, order)?;
+
+    let deps = builder.required_deps()?;
+    let deps = domain.get_tx_batch(deps)?;
+
+    for (key, cbor) in deps.iter() {
+        if let Some(cbor) = cbor {
+            builder.load_dep(*key, cbor)?;
+        }
+    }
+
+    builder.into_response()
 }

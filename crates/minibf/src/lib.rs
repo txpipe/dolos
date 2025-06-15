@@ -3,13 +3,15 @@ use axum::{
     http::StatusCode,
     routing::{get, post},
 };
-use pallas::ledger::traverse::MultiEraUpdate;
+use dolos_cardano::pparams::ChainSummary;
+use itertools::Itertools;
+use pallas::{crypto::hash::Hash, ledger::traverse::MultiEraUpdate};
 use serde::{Deserialize, Serialize};
-use std::{net::SocketAddr, ops::Deref};
+use std::{collections::HashMap, net::SocketAddr, ops::Deref};
 use tower_http::{cors::CorsLayer, trace};
 use tracing::Level;
 
-use dolos_core::{CancelToken, Domain, ServeError, StateStore as _};
+use dolos_core::{ArchiveStore as _, CancelToken, Domain, EraCbor, ServeError, StateStore as _};
 
 pub(crate) mod mapping;
 mod pagination;
@@ -34,8 +36,10 @@ impl<D: Domain> Deref for Facade<D> {
     }
 }
 
+pub type TxMap = HashMap<Hash<32>, Option<EraCbor>>;
+
 impl<D: Domain> Facade<D> {
-    pub fn get_context(&self) -> Result<mapping::Context, StatusCode> {
+    pub fn get_chain_summary(&self) -> Result<ChainSummary, StatusCode> {
         let tip = self
             .state()
             .cursor()
@@ -55,7 +59,28 @@ impl<D: Domain> Facade<D> {
 
         let summary = dolos_cardano::pparams::fold_with_hacks(self.genesis(), &updates, slot);
 
-        Ok(mapping::Context { pparams: summary })
+        Ok(summary)
+    }
+
+    pub fn get_tx(&self, hash: Hash<32>) -> Result<Option<EraCbor>, StatusCode> {
+        let tx = self
+            .archive()
+            .get_tx(hash.as_slice())
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        Ok(tx)
+    }
+
+    pub fn get_tx_batch(
+        &self,
+        hashes: impl IntoIterator<Item = Hash<32>>,
+    ) -> Result<TxMap, StatusCode> {
+        let txs = hashes
+            .into_iter()
+            .map(|h| self.get_tx(h).map(|tx| (h, tx)))
+            .try_collect()?;
+
+        Ok(txs)
     }
 }
 
@@ -112,8 +137,9 @@ impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
                 get(routes::epochs::latest::parameters::route::<D>),
             )
             .route("/tx/submit", post(routes::tx::submit::route::<D>))
-            .route("/txs/{tx_hash}", get(routes::txs::tx_hash::<D>))
-            .route("/txs/{tx_hash}/cbor", get(routes::txs::tx_hash_cbor::<D>))
+            .route("/txs/{tx_hash}", get(routes::txs::by_hash::<D>))
+            .route("/txs/{tx_hash}/cbor", get(routes::txs::by_hash_cbor::<D>))
+            .route("/txs/{tx_hash}/utxos", get(routes::txs::by_hash_utxos::<D>))
             .with_state(Facade::<D> { inner: domain })
             .layer(
                 trace::TraceLayer::new_for_http()
