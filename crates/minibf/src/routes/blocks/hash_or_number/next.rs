@@ -1,7 +1,7 @@
 use axum::{
-    Json,
     extract::{Path, Query, State},
     http::StatusCode,
+    Json,
 };
 use pallas::ledger::traverse::{MultiEraBlock, MultiEraUpdate};
 
@@ -9,9 +9,9 @@ use dolos_cardano::pparams;
 use dolos_core::{ArchiveStore as _, Domain, StateStore as _};
 
 use crate::{
-    Facade,
     pagination::{Order, Pagination, PaginationParameters},
-    routes::blocks::{BlockHeaderFields, hash_or_number_to_body},
+    routes::blocks::{hash_or_number_to_body, BlockHeaderFields},
+    Facade,
 };
 
 use super::Block;
@@ -45,9 +45,7 @@ pub async fn route<D: Domain>(
     let mut output = vec![];
 
     // Now we found it, continue forward
-    let mut i = 0;
-    for (_, body) in iterator {
-        i += 1;
+    for (i, (_, body)) in iterator.enumerate() {
         if pagination.includes(i) {
             let block =
                 MultiEraBlock::decode(&body).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
