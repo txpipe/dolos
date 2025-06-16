@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
 };
@@ -8,7 +8,10 @@ use serde::{Deserialize, Serialize};
 
 use dolos_core::{Domain, EraCbor, StateStore as _, TxoRef};
 
-use crate::Facade;
+use crate::{
+    pagination::{Pagination, PaginationParameters},
+    Facade,
+};
 
 pub mod asset;
 
@@ -90,8 +93,10 @@ impl TryFrom<(TxoRef, EraCbor)> for Utxo {
 
 pub async fn route<D: Domain>(
     Path(address): Path<String>,
+    Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
 ) -> Result<impl IntoResponse, StatusCode> {
+    let pagination = Pagination::try_from(params)?;
     let address = pallas::ledger::addresses::Address::from_bech32(&address)
         .map_err(|_| StatusCode::BAD_REQUEST)?;
 
@@ -105,7 +110,14 @@ pub async fn route<D: Domain>(
         .get_utxos(refs.into_iter().collect())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .into_iter()
-        .map(Utxo::try_from)
+        .enumerate()
+        .flat_map(|(i, utxo)| {
+            if pagination.includes(i + 1) {
+                Some(Utxo::try_from(utxo))
+            } else {
+                None
+            }
+        })
         .collect::<Result<_, _>>()?;
 
     Ok(axum::Json(utxos))

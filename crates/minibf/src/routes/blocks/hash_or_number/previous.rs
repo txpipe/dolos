@@ -1,7 +1,7 @@
 use axum::{
-    Json,
     extract::{Path, Query, State},
     http::StatusCode,
+    Json,
 };
 use pallas::ledger::traverse::{MultiEraBlock, MultiEraUpdate};
 
@@ -9,9 +9,9 @@ use dolos_cardano::pparams;
 use dolos_core::{ArchiveStore as _, Domain, StateStore as _};
 
 use crate::{
-    Facade,
     pagination::{Order, Pagination, PaginationParameters},
-    routes::blocks::{BlockHeaderFields, hash_or_number_to_body},
+    routes::blocks::{hash_or_number_to_body, BlockHeaderFields},
+    Facade,
 };
 
 use super::Block;
@@ -37,14 +37,13 @@ pub async fn route<D: Domain>(
     let curr = MultiEraBlock::decode(&body).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let mut output = vec![];
-    let mut i = 0;
-    for (_, body) in domain
+    for (i, (_, body)) in domain
         .archive()
         .get_range(None, Some(curr.slot()))
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
         .rev()
+        .enumerate()
     {
-        i += 1;
         if pagination.includes(i) {
             let block =
                 MultiEraBlock::decode(&body).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -110,7 +109,7 @@ pub async fn route<D: Domain>(
                 },
                 slot_leader,
                 ..Default::default()
-            })
+            });
         } else if i > pagination.to() {
             break;
         }

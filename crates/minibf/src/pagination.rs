@@ -74,6 +74,6 @@ impl Pagination {
     }
 
     pub fn includes(&self, i: usize) -> bool {
-        i > self.from() && i <= self.to()
+        i >= self.from() && i < self.to()
     }
 }
