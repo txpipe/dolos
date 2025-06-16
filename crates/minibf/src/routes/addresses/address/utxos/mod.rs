@@ -112,7 +112,7 @@ pub async fn route<D: Domain>(
         .into_iter()
         .enumerate()
         .flat_map(|(i, utxo)| {
-            if pagination.includes(i + 1) {
+            if pagination.includes(i) {
                 Some(Utxo::try_from(utxo))
             } else {
                 None
