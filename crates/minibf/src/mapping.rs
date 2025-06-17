@@ -1,8 +1,8 @@
 use axum::{Json, http::StatusCode};
 use blockfrost_openapi::models::{
-    tx_content::TxContent, tx_content_cbor::TxContentCbor,
-    tx_content_output_amount_inner::TxContentOutputAmountInner, tx_content_utxo::TxContentUtxo,
-    tx_content_utxo_inputs_inner::TxContentUtxoInputsInner,
+    address_utxo_content_inner::AddressUtxoContentInner, tx_content::TxContent,
+    tx_content_cbor::TxContentCbor, tx_content_output_amount_inner::TxContentOutputAmountInner,
+    tx_content_utxo::TxContentUtxo, tx_content_utxo_inputs_inner::TxContentUtxoInputsInner,
     tx_content_utxo_outputs_inner::TxContentUtxoOutputsInner,
 };
 use dolos_cardano::pparams::ChainSummary;
@@ -37,7 +37,19 @@ where
     T: serde::Serialize,
     Self: Sized,
 {
+    type SortKey: Ord + Clone + Default + Sized;
+
+    fn sort_key(&self) -> Option<Self::SortKey> {
+        None
+    }
+
     fn into_model(self) -> Result<T, StatusCode>;
+
+    fn into_model_with_sort_key(self) -> Result<(Self::SortKey, T), StatusCode> {
+        let sort_key = self.sort_key().unwrap_or_default();
+        let model = self.into_model()?;
+        Ok((sort_key, model))
+    }
 
     fn into_response(self) -> Result<Json<T>, StatusCode> {
         let tx = self.into_model()?;
@@ -101,6 +113,8 @@ pub fn aggregate_amount<'a>(
 }
 
 impl IntoModel<Vec<TxContentOutputAmountInner>> for MultiEraValue<'_> {
+    type SortKey = ();
+
     fn into_model(self) -> Result<Vec<TxContentOutputAmountInner>, StatusCode> {
         let mut out = vec![];
 
@@ -126,6 +140,8 @@ impl IntoModel<Vec<TxContentOutputAmountInner>> for MultiEraValue<'_> {
 }
 
 impl IntoModel<String> for Result<Address, pallas::ledger::addresses::Error> {
+    type SortKey = ();
+
     fn into_model(self) -> Result<String, StatusCode> {
         self.map(|a| a.to_string())
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
@@ -133,6 +149,8 @@ impl IntoModel<String> for Result<Address, pallas::ledger::addresses::Error> {
 }
 
 impl<'a> IntoModel<String> for ScriptRef<'a> {
+    type SortKey = ();
+
     fn into_model(self) -> Result<String, StatusCode> {
         let out = match self {
             ScriptRef::NativeScript(x) => x.original_hash(),
@@ -150,6 +168,8 @@ pub struct UtxoOutputModelBuilder<'a> {
     txo_idx: TxoIdx,
     output: MultiEraOutput<'a>,
     is_collateral: bool,
+    block: Option<MultiEraBlock<'a>>,
+    tx_order: Option<TxOrder>,
 }
 
 impl<'a> UtxoOutputModelBuilder<'a> {
@@ -158,6 +178,8 @@ impl<'a> UtxoOutputModelBuilder<'a> {
             txo_idx,
             output,
             is_collateral: false,
+            block: None,
+            tx_order: None,
         }
     }
 
@@ -170,11 +192,30 @@ impl<'a> UtxoOutputModelBuilder<'a> {
             txo_idx: (output_count + collateral_idx as usize) as u32,
             output,
             is_collateral: true,
+            block: None,
+            tx_order: None,
         }
+    }
+
+    pub fn with_block_data(self, block: MultiEraBlock<'a>, tx_order: TxOrder) -> Self {
+        Self {
+            block: Some(block),
+            tx_order: Some(tx_order),
+            ..self
+        }
+    }
+
+    pub fn find_tx(&self) -> Option<MultiEraTx<'_>> {
+        let txs = self.block.as_ref()?.txs();
+        let order = self.tx_order?;
+
+        txs.get(order).cloned()
     }
 }
 
 impl<'a> IntoModel<TxContentUtxoOutputsInner> for UtxoOutputModelBuilder<'a> {
+    type SortKey = u64;
+
     fn into_model(self) -> Result<TxContentUtxoOutputsInner, StatusCode> {
         let out = TxContentUtxoOutputsInner {
             address: self.output.address().into_model()?,
@@ -207,6 +248,52 @@ impl<'a> IntoModel<TxContentUtxoOutputsInner> for UtxoOutputModelBuilder<'a> {
     }
 }
 
+impl<'a> IntoModel<AddressUtxoContentInner> for UtxoOutputModelBuilder<'a> {
+    type SortKey = u64;
+
+    fn sort_key(&self) -> Option<Self::SortKey> {
+        self.block.as_ref().map(|b| b.slot())
+    }
+
+    fn into_model(self) -> Result<AddressUtxoContentInner, StatusCode> {
+        let out = AddressUtxoContentInner {
+            address: self.output.address().into_model()?,
+            tx_hash: self
+                .find_tx()
+                .map(|tx| tx.hash().to_string())
+                .unwrap_or_default(),
+            block: self
+                .block
+                .as_ref()
+                .map(|b| b.hash().to_string())
+                .unwrap_or_default(),
+            output_index: try_into_or_500!(self.txo_idx),
+            amount: self.output.value().into_model()?,
+            data_hash: self.output.datum().map(|x| match x {
+                DatumOption::Hash(x) => x.to_string(),
+                DatumOption::Data(x) => x.original_hash().to_string(),
+            }),
+            inline_datum: self
+                .output
+                .datum()
+                .and_then(|x| match x {
+                    DatumOption::Hash(_) => None,
+                    DatumOption::Data(x) => Some(minicbor::to_vec(&x.0).unwrap()),
+                })
+                .map(hex::encode),
+            reference_script_hash: self
+                .output
+                .script_ref()
+                .map(|h| h.into_model())
+                .transpose()?,
+
+            // DEPRECATED
+            tx_index: try_into_or_500!(self.txo_idx),
+        };
+
+        Ok(out)
+    }
+}
 pub struct UtxoInputModelBuilder<'a> {
     input: MultiEraInput<'a>,
     as_output: Option<MultiEraOutput<'a>>,
@@ -215,6 +302,8 @@ pub struct UtxoInputModelBuilder<'a> {
 }
 
 impl<'a> IntoModel<TxContentUtxoInputsInner> for UtxoInputModelBuilder<'a> {
+    type SortKey = ();
+
     fn into_model(self) -> Result<TxContentUtxoInputsInner, StatusCode> {
         let mut out = TxContentUtxoInputsInner {
             tx_hash: self.input.hash().to_string(),
@@ -344,6 +433,8 @@ impl<'a> TxModelBuilder<'a> {
 }
 
 impl<'a> IntoModel<TxContentUtxo> for TxModelBuilder<'a> {
+    type SortKey = ();
+
     fn into_model(self) -> Result<TxContentUtxo, StatusCode> {
         let tx = self.tx()?;
 
@@ -418,6 +509,8 @@ macro_rules! count_certs {
 }
 
 impl IntoModel<TxContent> for TxModelBuilder<'_> {
+    type SortKey = ();
+
     fn into_model(self) -> Result<TxContent, StatusCode> {
         let tx = self.tx()?;
         let block = &self.block;
@@ -459,6 +552,8 @@ impl IntoModel<TxContent> for TxModelBuilder<'_> {
 }
 
 impl IntoModel<TxContentCbor> for TxModelBuilder<'_> {
+    type SortKey = ();
+
     fn into_model(self) -> Result<TxContentCbor, StatusCode> {
         let tx = self.tx()?;
 

@@ -46,6 +46,7 @@ impl TryFrom<PaginationParameters> for Pagination {
             }
             None => 100,
         };
+
         let page = match value.page {
             Some(page) => {
                 if page < 1 {
@@ -56,6 +57,7 @@ impl TryFrom<PaginationParameters> for Pagination {
             }
             None => 1,
         };
+
         Ok(Self {
             count,
             page,
@@ -75,5 +77,9 @@ impl Pagination {
 
     pub fn includes(&self, i: usize) -> bool {
         i >= self.from() && i < self.to()
+    }
+
+    pub fn as_included_item<T>(&self, i: usize, item: T) -> Option<T> {
+        if self.includes(i) { Some(item) } else { None }
     }
 }
