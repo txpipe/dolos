@@ -277,6 +277,14 @@ impl ArchiveStore for ArchiveAdapter {
         Ok(out)
     }
 
+    fn get_slot_for_tx(&self, tx_hash: &[u8]) -> Result<Option<BlockSlot>, ArchiveError> {
+        let out = match self {
+            ArchiveAdapter::Redb(x) => x.get_slot_for_tx(tx_hash)?,
+        };
+
+        Ok(out)
+    }
+
     fn get_range<'a>(
         &self,
         from: Option<BlockSlot>,

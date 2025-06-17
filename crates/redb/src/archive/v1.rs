@@ -1,4 +1,5 @@
 use ::redb::{Database, Durability};
+use itertools::Itertools;
 use pallas::ledger::traverse::MultiEraBlock;
 use std::sync::Arc;
 use tracing::{debug, info};
@@ -7,7 +8,7 @@ type Error = super::RedbArchiveError;
 
 use dolos_core::{ArchiveError, BlockBody, BlockSlot, EraCbor, LedgerDelta, TxOrder};
 
-use super::{ChainIter, indexes, tables};
+use super::{indexes, tables, ChainIter};
 
 #[derive(Clone)]
 pub struct ChainStore {
@@ -151,6 +152,7 @@ impl ChainStore {
     pub fn get_possible_blocks_by_address(&self, address: &[u8]) -> Result<Vec<BlockBody>, Error> {
         self.get_possible_block_slots_by_address(address)?
             .iter()
+            .sorted()
             .flat_map(|slot| match self.get_block_by_slot(slot) {
                 Ok(Some(block)) => Some(Ok(block)),
                 Ok(None) => None,
@@ -314,6 +316,24 @@ impl ChainStore {
             }
         }
         Ok(None)
+    }
+
+    pub fn get_slot_for_tx(&self, tx_hash: &[u8]) -> Result<Option<BlockSlot>, Error> {
+        let mut possible = self.get_possible_block_slots_by_tx_hash(tx_hash)?;
+        if possible.len() == 1 {
+            Ok(possible.pop())
+        } else {
+            for slot in possible {
+                if let Some(raw) = self.get_block_by_slot(&slot)? {
+                    let block =
+                        MultiEraBlock::decode(&raw).map_err(ArchiveError::BlockDecodingError)?;
+                    if block.txs().iter().any(|x| x.hash().to_vec() == tx_hash) {
+                        return Ok(Some(slot));
+                    }
+                }
+            }
+            Ok(None)
+        }
     }
 
     pub fn get_tx(&self, tx_hash: &[u8]) -> Result<Option<EraCbor>, Error> {

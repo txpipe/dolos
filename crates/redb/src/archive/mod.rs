@@ -215,6 +215,12 @@ impl ChainStore {
         }
     }
 
+    pub fn get_slot_for_tx(&self, tx_hash: &[u8]) -> Result<Option<BlockSlot>, RedbArchiveError> {
+        match self {
+            ChainStore::SchemaV1(x) => x.get_slot_for_tx(tx_hash),
+        }
+    }
+
     pub fn apply(&self, deltas: &[LedgerDelta]) -> Result<(), RedbArchiveError> {
         match self {
             ChainStore::SchemaV1(x) => Ok(x.apply(deltas)?),

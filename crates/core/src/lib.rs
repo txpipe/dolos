@@ -570,6 +570,8 @@ pub trait ArchiveStore {
 
     fn get_tx(&self, tx_hash: &[u8]) -> Result<Option<EraCbor>, ArchiveError>;
 
+    fn get_slot_for_tx(&self, tx_hash: &[u8]) -> Result<Option<BlockSlot>, ArchiveError>;
+
     fn get_range<'a>(
         &self,
         from: Option<BlockSlot>,
