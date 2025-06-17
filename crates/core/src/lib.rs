@@ -570,6 +570,8 @@ pub trait ArchiveStore {
 
     fn get_tx(&self, tx_hash: &[u8]) -> Result<Option<EraCbor>, ArchiveError>;
 
+    fn get_utxo_by_address(&self, address: &[u8]) -> Result<Vec<(TxoRef, EraCbor)>, ArchiveError>;
+
     fn get_range<'a>(
         &self,
         from: Option<BlockSlot>,

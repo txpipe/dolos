@@ -6,10 +6,10 @@ use axum::{
 use pallas::ledger::{primitives::conway, traverse::MultiEraAsset};
 use serde::{Deserialize, Serialize};
 
-use dolos_core::{Domain, EraCbor, StateStore as _, TxoRef};
+use dolos_core::{ArchiveStore as _, Domain, EraCbor, StateStore as _, TxoRef};
 
 use crate::{
-    pagination::{Pagination, PaginationParameters},
+    pagination::{Order, Pagination, PaginationParameters},
     Facade,
 };
 
@@ -105,20 +105,31 @@ pub async fn route<D: Domain>(
         .get_utxo_by_address(&address.to_vec())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let utxos: Vec<_> = domain
+    let unspent_refs = domain
         .state()
         .get_utxos(refs.into_iter().collect())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let utxos: Vec<_> = domain
+        .archive()
+        .get_utxo_by_address(&address.to_vec())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .into_iter()
+        .filter(|(txoref, _)| unspent_refs.contains_key(txoref))
         .enumerate()
-        .flat_map(|(i, utxo)| {
+        .flat_map(|(i, (txoref, eracbor))| {
             if pagination.includes(i) {
-                Some(Utxo::try_from(utxo))
+                Some(Utxo::try_from((txoref, eracbor)))
             } else {
                 None
             }
         })
         .collect::<Result<_, _>>()?;
+
+    let utxos = match pagination.order {
+        Order::Asc => utxos,
+        Order::Desc => utxos.into_iter().rev().collect(),
+    };
 
     Ok(axum::Json(utxos))
 }
