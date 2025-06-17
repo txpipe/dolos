@@ -1,12 +1,12 @@
 use ::redb::{Database, Durability};
 use itertools::Itertools;
-use pallas::ledger::{addresses::Address, traverse::MultiEraBlock};
+use pallas::ledger::traverse::MultiEraBlock;
 use std::sync::Arc;
 use tracing::{debug, info};
 
 type Error = super::RedbArchiveError;
 
-use dolos_core::{ArchiveError, BlockBody, BlockSlot, EraCbor, LedgerDelta, TxOrder, TxoRef};
+use dolos_core::{ArchiveError, BlockBody, BlockSlot, EraCbor, LedgerDelta, TxOrder};
 
 use super::{indexes, tables, ChainIter};
 
@@ -316,27 +316,6 @@ impl ChainStore {
             }
         }
         Ok(None)
-    }
-
-    pub fn get_utxo_by_address(&self, address: &[u8]) -> Result<Vec<(TxoRef, EraCbor)>, Error> {
-        let possible = self.get_possible_blocks_by_address(address)?;
-        let mut output = vec![];
-        for raw in possible {
-            let block = MultiEraBlock::decode(&raw).map_err(ArchiveError::BlockDecodingError)?;
-            for tx in block.txs() {
-                for (idx, utxo) in tx.produces() {
-                    if match &utxo.address().map_err(ArchiveError::AddressDecoding)? {
-                        Address::Shelley(addr) => addr.to_vec(),
-                        Address::Stake(addr) => addr.to_vec(),
-                        Address::Byron(addr) => addr.to_vec(),
-                    } == address
-                    {
-                        output.push((TxoRef(tx.hash(), idx as u32), utxo.into()));
-                    }
-                }
-            }
-        }
-        Ok(output)
     }
 
     pub fn get_slot_for_tx(&self, tx_hash: &[u8]) -> Result<Option<BlockSlot>, Error> {

@@ -130,9 +130,9 @@ pub async fn route<D: Domain>(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .into_iter()
         .enumerate()
-        .flat_map(|(i, (txoref, eracbor))| {
+        .flat_map(|(i, utxo)| {
             if pagination.includes(i) {
-                Some(Utxo::try_from((txoref, eracbor)))
+                Some(Utxo::try_from(utxo))
             } else {
                 None
             }
