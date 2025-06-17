@@ -1,9 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
 use axum::{
-    Json,
     extract::{Path, Query, State},
     http::StatusCode,
+    Json,
 };
 use blockfrost_openapi::models::address_utxo_content_inner::AddressUtxoContentInner;
 use itertools::Itertools;
@@ -12,9 +12,9 @@ use dolos_core::{Domain, StateStore as _, TxoRef};
 use pallas::ledger::traverse::{MultiEraBlock, MultiEraOutput};
 
 use crate::{
-    Facade,
     mapping::{IntoModel, UtxoOutputModelBuilder},
     pagination::{Order, Pagination, PaginationParameters},
+    Facade,
 };
 
 fn load_utxo_models<D: Domain>(
@@ -62,10 +62,10 @@ fn load_utxo_models<D: Domain>(
 
     match pagination.order {
         Order::Asc => {
-            models.sort_by_key(|(slot, _)| *slot);
+            models.sort_by_key(|(sort_key, _)| *sort_key);
         }
         Order::Desc => {
-            models.sort_by_key(|(slot, _)| *slot);
+            models.sort_by_key(|(sort_key, _)| *sort_key);
             models.reverse();
         }
     }
