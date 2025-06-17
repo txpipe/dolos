@@ -18,6 +18,7 @@ serde.workspace = true
 chrono.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+tower.workspace = true
 tower-http.workspace = true
 itertools.workspace = true
 bincode.workspace = true
@@ -79,7 +80,6 @@ jsonrpsee = { version = "0.24.9", features = ["server"], optional = true }
 # Common HTTP dependencies
 http = "1.3.1"
 hyper = "1.5"
-tower = "0.4"
 
 
 [target.'cfg(not(windows))'.dependencies.mithril-client]
@@ -110,7 +110,7 @@ phase2 = ["pallas/phase2", "dolos-core/phase2", "dolos-minibf/phase2"]
 
 # Service features
 grpc = ["tonic", "tonic-web", "tonic-reflection", "tower-http/cors"]
-minibf = ["dolos-minibf", "tower-http/cors", "tower-http/trace"]
+minibf = ["dolos-minibf", "tower-http/cors", "tower-http/trace", "tower-http/normalize-path"]
 trp = ["jsonrpsee", "tower-http/cors"]
 
 # Default features - includes all services
@@ -139,6 +139,7 @@ serde = { version = "1.0.136", features = ["derive"] }
 chrono = { version = "0.4.39", default-features = false }
 tokio = { version = "^1.40", features = ["rt", "rt-multi-thread", "signal"] }
 tokio-util = { version = "0.7.11", features = ["rt"] }
+tower = "0.4"
 tower-http = { version = "0.6.1", features = ["cors", "trace"] }
 
 [workspace.metadata.release]

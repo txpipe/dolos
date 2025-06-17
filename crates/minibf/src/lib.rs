@@ -1,14 +1,16 @@
 use axum::{
+    extract::Request,
     http::StatusCode,
     routing::{get, post},
-    Router,
+    Router, ServiceExt,
 };
 use dolos_cardano::pparams::ChainSummary;
 use itertools::Itertools;
 use pallas::{crypto::hash::Hash, ledger::traverse::MultiEraUpdate};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, net::SocketAddr, ops::Deref};
-use tower_http::{cors::CorsLayer, trace};
+use tower::Layer;
+use tower_http::{cors::CorsLayer, normalize_path::NormalizePathLayer, trace};
 use tracing::Level;
 
 use dolos_core::{ArchiveStore as _, CancelToken, Domain, EraCbor, ServeError, StateStore as _};
@@ -151,12 +153,13 @@ impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
             } else {
                 CorsLayer::new()
             });
+        let app = NormalizePathLayer::trim_trailing_slash().layer(app);
 
         let listener = tokio::net::TcpListener::bind(cfg.listen_address)
             .await
             .map_err(ServeError::BindError)?;
 
-        axum::serve(listener, app)
+        axum::serve(listener, ServiceExt::<Request>::into_make_service(app))
             .with_graceful_shutdown(async move { cancel.cancelled().await })
             .await
             .map_err(ServeError::ShutdownError)?;
