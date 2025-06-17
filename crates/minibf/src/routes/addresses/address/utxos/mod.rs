@@ -33,7 +33,7 @@ impl Amount {
 impl From<MultiEraAsset<'_>> for Amount {
     fn from(value: MultiEraAsset<'_>) -> Self {
         Self {
-            unit: value.policy().to_string(),
+            unit: hex::encode([value.policy().as_slice(), value.name()].concat()),
             quantity: value.any_coin().to_string(),
         }
     }
