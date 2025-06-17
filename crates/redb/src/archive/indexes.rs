@@ -1,7 +1,7 @@
 use ::redb::{MultimapTableDefinition, ReadTransaction, WriteTransaction};
 use itertools::Itertools;
 use pallas::ledger::addresses::Address;
-use pallas::ledger::traverse::{ComputeHash, MultiEraBlock, MultiEraOutput};
+use pallas::ledger::traverse::{ComputeHash, MultiEraBlock, MultiEraOutput, OriginalHash as _};
 use std::hash::{DefaultHasher, Hash as _, Hasher};
 
 use dolos_core::{ArchiveError, BlockSlot, LedgerDelta};
@@ -273,6 +273,21 @@ impl Indexes {
         Ok(())
     }
 
+    pub fn nuke(wx: &WriteTransaction) -> Result<(), Error> {
+        wx.delete_multimap_table(AddressApproxIndexTable::DEF)?;
+        wx.delete_multimap_table(AddressPaymentPartApproxIndexTable::DEF)?;
+        wx.delete_multimap_table(AddressStakePartApproxIndexTable::DEF)?;
+        wx.delete_multimap_table(AssetApproxIndexTable::DEF)?;
+        wx.delete_multimap_table(BlockHashApproxIndexTable::DEF)?;
+        wx.delete_multimap_table(BlockNumberApproxIndexTable::DEF)?;
+        wx.delete_multimap_table(DatumHashApproxIndexTable::DEF)?;
+        wx.delete_multimap_table(PolicyApproxIndexTable::DEF)?;
+        wx.delete_multimap_table(ScriptHashApproxIndexTable::DEF)?;
+        wx.delete_multimap_table(TxHashApproxIndexTable::DEF)?;
+
+        Ok(())
+    }
+
     pub fn get_by_address(rx: &ReadTransaction, address: &[u8]) -> Result<Vec<BlockSlot>, Error> {
         AddressApproxIndexTable::get_by_address(rx, address)
     }
@@ -353,145 +368,13 @@ impl Indexes {
             let block = MultiEraBlock::decode(&delta.new_block)
                 .map_err(ArchiveError::BlockDecodingError)?;
 
-            Self::insert(
-                wx,
-                BlockHashApproxIndexTable::DEF,
-                BlockHashApproxIndexTable::compute_key,
-                vec![block.hash().to_vec()],
-                slot,
-            )?;
-
-            Self::insert(
-                wx,
-                BlockNumberApproxIndexTable::DEF,
-                BlockNumberApproxIndexTable::compute_key,
-                vec![block.number()],
-                slot,
-            )?;
-
-            let tx_hashes = block.txs().iter().map(|tx| tx.hash().to_vec()).collect();
-
-            Self::insert(
-                wx,
-                TxHashApproxIndexTable::DEF,
-                TxHashApproxIndexTable::compute_key,
-                tx_hashes,
-                slot,
-            )?;
-
-            let script_hashes = block
-                .txs()
-                .iter()
-                .flat_map(|tx| {
-                    tx.aux_native_scripts()
-                        .iter()
-                        .map(|s| s.compute_hash().to_vec())
-                        .collect_vec()
-                })
-                .collect_vec();
-
-            Self::insert(
-                wx,
-                ScriptHashApproxIndexTable::DEF,
-                ScriptHashApproxIndexTable::compute_key,
-                script_hashes,
-                slot,
-            )?;
-
-            let datum_hashes = block
-                .txs()
-                .iter()
-                .flat_map(|tx| {
-                    tx.aux_plutus_v1_scripts()
-                        .iter()
-                        .map(|d| d.compute_hash().to_vec())
-                        .collect_vec()
-                })
-                .collect_vec();
-
-            Self::insert(
-                wx,
-                DatumHashApproxIndexTable::DEF,
-                DatumHashApproxIndexTable::compute_key,
-                datum_hashes,
-                slot,
-            )?;
-
-            let mut addresses = vec![];
-            let mut address_payment_parts = vec![];
-            let mut address_stake_parts = vec![];
-            let mut policies = vec![];
-            let mut assets = vec![];
+            Self::index_block(wx, &block)?;
 
             for (_, body) in delta.produced_utxo.iter().chain(delta.consumed_utxo.iter()) {
                 let utxo = MultiEraOutput::try_from(body).map_err(ArchiveError::DecodingError)?;
 
-                match utxo.address().map_err(ArchiveError::AddressDecoding)? {
-                    Address::Shelley(addr) => {
-                        addresses.push(addr.to_vec());
-                        address_payment_parts.push(addr.payment().to_vec());
-                        address_stake_parts.push(addr.delegation().to_vec());
-                    }
-                    Address::Stake(addr) => {
-                        addresses.push(addr.to_vec());
-                        address_stake_parts.push(addr.to_vec());
-                    }
-                    Address::Byron(addr) => {
-                        addresses.push(addr.to_vec());
-                    }
-                }
-
-                for batch in utxo.value().assets() {
-                    policies.push(batch.policy().to_vec());
-
-                    for asset in batch.assets() {
-                        let mut subject = asset.policy().to_vec();
-                        subject.extend(asset.name());
-
-                        assets.push(subject.to_vec());
-                    }
-                }
+                Self::index_utxo(wx, &utxo, slot)?;
             }
-
-            Self::insert(
-                wx,
-                AddressApproxIndexTable::DEF,
-                AddressApproxIndexTable::compute_key,
-                addresses,
-                slot,
-            )?;
-
-            Self::insert(
-                wx,
-                AddressPaymentPartApproxIndexTable::DEF,
-                AddressPaymentPartApproxIndexTable::compute_key,
-                address_payment_parts,
-                slot,
-            )?;
-
-            Self::insert(
-                wx,
-                AddressStakePartApproxIndexTable::DEF,
-                AddressStakePartApproxIndexTable::compute_key,
-                address_stake_parts,
-                slot,
-            )?;
-
-            Self::insert(
-                wx,
-                PolicyApproxIndexTable::DEF,
-                PolicyApproxIndexTable::compute_key,
-                policies,
-                slot,
-            )?;
-
-            Self::insert(
-                wx,
-                AssetApproxIndexTable::DEF,
-                AssetApproxIndexTable::compute_key,
-                assets,
-                slot,
-            )?;
         }
 
         if let Some(point) = &delta.undone_position {
@@ -500,138 +383,314 @@ impl Indexes {
             let block = MultiEraBlock::decode(&delta.undone_block)
                 .map_err(ArchiveError::BlockDecodingError)?;
 
-            Self::insert(
-                wx,
-                BlockHashApproxIndexTable::DEF,
-                BlockHashApproxIndexTable::compute_key,
-                vec![block.hash().to_vec()],
-                slot,
-            )?;
-            Self::insert(
-                wx,
-                BlockNumberApproxIndexTable::DEF,
-                BlockNumberApproxIndexTable::compute_key,
-                vec![block.number()],
-                slot,
-            )?;
-
-            let tx_hashes = block.txs().iter().map(|tx| tx.hash().to_vec()).collect();
-            Self::remove(
-                wx,
-                TxHashApproxIndexTable::DEF,
-                TxHashApproxIndexTable::compute_key,
-                tx_hashes,
-                slot,
-            )?;
-
-            let script_hashes = block
-                .txs()
-                .iter()
-                .flat_map(|tx| {
-                    tx.aux_native_scripts()
-                        .iter()
-                        .map(|s| s.compute_hash().to_vec())
-                        .collect_vec()
-                })
-                .collect_vec();
-            Self::remove(
-                wx,
-                ScriptHashApproxIndexTable::DEF,
-                ScriptHashApproxIndexTable::compute_key,
-                script_hashes,
-                slot,
-            )?;
-
-            let datum_hashes = block
-                .txs()
-                .iter()
-                .flat_map(|tx| {
-                    tx.aux_plutus_v1_scripts()
-                        .iter()
-                        .map(|d| d.compute_hash().to_vec())
-                        .collect_vec()
-                })
-                .collect_vec();
-            Self::remove(
-                wx,
-                DatumHashApproxIndexTable::DEF,
-                DatumHashApproxIndexTable::compute_key,
-                datum_hashes,
-                slot,
-            )?;
-
-            let mut addresses = vec![];
-            let mut address_payment_parts = vec![];
-            let mut address_stake_parts = vec![];
-            let mut policies = vec![];
-            let mut assets = vec![];
+            Self::forget_block(wx, &block)?;
 
             for (_, body) in delta.recovered_stxi.iter().chain(delta.undone_utxo.iter()) {
                 let utxo = MultiEraOutput::try_from(body).map_err(ArchiveError::DecodingError)?;
 
-                match utxo.address().map_err(ArchiveError::AddressDecoding)? {
-                    Address::Shelley(addr) => {
-                        addresses.push(addr.to_vec());
-                        address_payment_parts.push(addr.payment().to_vec());
-                        address_stake_parts.push(addr.delegation().to_vec());
-                    }
-                    Address::Stake(addr) => {
-                        addresses.push(addr.to_vec());
-                        address_stake_parts.push(addr.to_vec());
-                    }
-                    Address::Byron(addr) => {
-                        addresses.push(addr.to_vec());
-                    }
-                }
-
-                for batch in utxo.value().assets() {
-                    policies.push(batch.policy().to_vec());
-
-                    for asset in batch.assets() {
-                        let mut subject = asset.policy().to_vec();
-                        subject.extend(asset.name());
-
-                        assets.push(subject.to_vec());
-                    }
-                }
+                Self::forget_utxo(wx, &utxo, slot)?;
             }
-
-            Self::remove(
-                wx,
-                AddressApproxIndexTable::DEF,
-                AddressApproxIndexTable::compute_key,
-                addresses,
-                slot,
-            )?;
-            Self::remove(
-                wx,
-                AddressPaymentPartApproxIndexTable::DEF,
-                AddressPaymentPartApproxIndexTable::compute_key,
-                address_payment_parts,
-                slot,
-            )?;
-            Self::remove(
-                wx,
-                AddressStakePartApproxIndexTable::DEF,
-                AddressStakePartApproxIndexTable::compute_key,
-                address_stake_parts,
-                slot,
-            )?;
-            Self::remove(
-                wx,
-                PolicyApproxIndexTable::DEF,
-                PolicyApproxIndexTable::compute_key,
-                policies,
-                slot,
-            )?;
-            Self::remove(
-                wx,
-                AssetApproxIndexTable::DEF,
-                AssetApproxIndexTable::compute_key,
-                assets,
-                slot,
-            )?;
         }
+
+        Ok(())
+    }
+
+    pub fn index_block(wx: &WriteTransaction, block: &MultiEraBlock) -> Result<(), Error> {
+        let slot = block.slot();
+
+        Self::insert(
+            wx,
+            BlockHashApproxIndexTable::DEF,
+            BlockHashApproxIndexTable::compute_key,
+            vec![block.hash().to_vec()],
+            slot,
+        )?;
+
+        Self::insert(
+            wx,
+            BlockNumberApproxIndexTable::DEF,
+            BlockNumberApproxIndexTable::compute_key,
+            vec![block.number()],
+            slot,
+        )?;
+
+        let tx_hashes = block.txs().iter().map(|tx| tx.hash().to_vec()).collect();
+
+        Self::insert(
+            wx,
+            TxHashApproxIndexTable::DEF,
+            TxHashApproxIndexTable::compute_key,
+            tx_hashes,
+            slot,
+        )?;
+
+        let script_hashes = block
+            .txs()
+            .iter()
+            .flat_map(|tx| {
+                tx.aux_native_scripts()
+                    .iter()
+                    .map(|s| s.compute_hash().to_vec())
+                    .collect_vec()
+            })
+            .collect_vec();
+
+        Self::insert(
+            wx,
+            ScriptHashApproxIndexTable::DEF,
+            ScriptHashApproxIndexTable::compute_key,
+            script_hashes,
+            slot,
+        )?;
+
+        let datum_hashes = block
+            .txs()
+            .iter()
+            .flat_map(|tx| {
+                tx.plutus_data()
+                    .iter()
+                    .map(|d| d.original_hash().to_vec())
+                    .collect_vec()
+            })
+            .collect_vec();
+
+        Self::insert(
+            wx,
+            DatumHashApproxIndexTable::DEF,
+            DatumHashApproxIndexTable::compute_key,
+            datum_hashes,
+            slot,
+        )?;
+
+        Ok(())
+    }
+
+    pub fn index_utxo(
+        wx: &WriteTransaction,
+        utxo: &MultiEraOutput,
+        slot: u64,
+    ) -> Result<(), Error> {
+        let mut addresses = vec![];
+        let mut address_payment_parts = vec![];
+        let mut address_stake_parts = vec![];
+        let mut policies = vec![];
+        let mut assets = vec![];
+
+        match utxo.address().map_err(ArchiveError::AddressDecoding)? {
+            Address::Shelley(addr) => {
+                addresses.push(addr.to_vec());
+                address_payment_parts.push(addr.payment().to_vec());
+                address_stake_parts.push(addr.delegation().to_vec());
+            }
+            Address::Stake(addr) => {
+                addresses.push(addr.to_vec());
+                address_stake_parts.push(addr.to_vec());
+            }
+            Address::Byron(addr) => {
+                addresses.push(addr.to_vec());
+            }
+        }
+
+        for batch in utxo.value().assets() {
+            policies.push(batch.policy().to_vec());
+
+            for asset in batch.assets() {
+                let mut subject = asset.policy().to_vec();
+                subject.extend(asset.name());
+
+                assets.push(subject.to_vec());
+            }
+        }
+
+        Self::insert(
+            wx,
+            AddressApproxIndexTable::DEF,
+            AddressApproxIndexTable::compute_key,
+            addresses,
+            slot,
+        )?;
+
+        Self::insert(
+            wx,
+            AddressPaymentPartApproxIndexTable::DEF,
+            AddressPaymentPartApproxIndexTable::compute_key,
+            address_payment_parts,
+            slot,
+        )?;
+
+        Self::insert(
+            wx,
+            AddressStakePartApproxIndexTable::DEF,
+            AddressStakePartApproxIndexTable::compute_key,
+            address_stake_parts,
+            slot,
+        )?;
+
+        Self::insert(
+            wx,
+            PolicyApproxIndexTable::DEF,
+            PolicyApproxIndexTable::compute_key,
+            policies,
+            slot,
+        )?;
+
+        Self::insert(
+            wx,
+            AssetApproxIndexTable::DEF,
+            AssetApproxIndexTable::compute_key,
+            assets,
+            slot,
+        )?;
+
+        Ok(())
+    }
+
+    pub fn forget_block(wx: &WriteTransaction, block: &MultiEraBlock) -> Result<(), Error> {
+        let slot = block.slot();
+
+        Self::insert(
+            wx,
+            BlockHashApproxIndexTable::DEF,
+            BlockHashApproxIndexTable::compute_key,
+            vec![block.hash().to_vec()],
+            slot,
+        )?;
+
+        Self::insert(
+            wx,
+            BlockNumberApproxIndexTable::DEF,
+            BlockNumberApproxIndexTable::compute_key,
+            vec![block.number()],
+            slot,
+        )?;
+
+        let tx_hashes = block.txs().iter().map(|tx| tx.hash().to_vec()).collect();
+
+        Self::remove(
+            wx,
+            TxHashApproxIndexTable::DEF,
+            TxHashApproxIndexTable::compute_key,
+            tx_hashes,
+            slot,
+        )?;
+
+        let script_hashes = block
+            .txs()
+            .iter()
+            .flat_map(|tx| {
+                tx.aux_native_scripts()
+                    .iter()
+                    .map(|s| s.compute_hash().to_vec())
+                    .collect_vec()
+            })
+            .collect_vec();
+
+        Self::remove(
+            wx,
+            ScriptHashApproxIndexTable::DEF,
+            ScriptHashApproxIndexTable::compute_key,
+            script_hashes,
+            slot,
+        )?;
+
+        let datum_hashes = block
+            .txs()
+            .iter()
+            .flat_map(|tx| {
+                tx.aux_plutus_v1_scripts()
+                    .iter()
+                    .map(|d| d.compute_hash().to_vec())
+                    .collect_vec()
+            })
+            .collect_vec();
+
+        Self::remove(
+            wx,
+            DatumHashApproxIndexTable::DEF,
+            DatumHashApproxIndexTable::compute_key,
+            datum_hashes,
+            slot,
+        )?;
+
+        Ok(())
+    }
+
+    pub fn forget_utxo(
+        wx: &WriteTransaction,
+        utxo: &MultiEraOutput,
+        slot: u64,
+    ) -> Result<(), Error> {
+        let mut addresses = vec![];
+        let mut address_payment_parts = vec![];
+        let mut address_stake_parts = vec![];
+        let mut policies = vec![];
+        let mut assets = vec![];
+
+        match utxo.address().map_err(ArchiveError::AddressDecoding)? {
+            Address::Shelley(addr) => {
+                addresses.push(addr.to_vec());
+                address_payment_parts.push(addr.payment().to_vec());
+                address_stake_parts.push(addr.delegation().to_vec());
+            }
+            Address::Stake(addr) => {
+                addresses.push(addr.to_vec());
+                address_stake_parts.push(addr.to_vec());
+            }
+            Address::Byron(addr) => {
+                addresses.push(addr.to_vec());
+            }
+        }
+
+        for batch in utxo.value().assets() {
+            policies.push(batch.policy().to_vec());
+
+            for asset in batch.assets() {
+                let mut subject = asset.policy().to_vec();
+                subject.extend(asset.name());
+
+                assets.push(subject.to_vec());
+            }
+        }
+
+        Self::remove(
+            wx,
+            AddressApproxIndexTable::DEF,
+            AddressApproxIndexTable::compute_key,
+            addresses,
+            slot,
+        )?;
+
+        Self::remove(
+            wx,
+            AddressPaymentPartApproxIndexTable::DEF,
+            AddressPaymentPartApproxIndexTable::compute_key,
+            address_payment_parts,
+            slot,
+        )?;
+
+        Self::remove(
+            wx,
+            AddressStakePartApproxIndexTable::DEF,
+            AddressStakePartApproxIndexTable::compute_key,
+            address_stake_parts,
+            slot,
+        )?;
+
+        Self::remove(
+            wx,
+            PolicyApproxIndexTable::DEF,
+            PolicyApproxIndexTable::compute_key,
+            policies,
+            slot,
+        )?;
+
+        Self::remove(
+            wx,
+            AssetApproxIndexTable::DEF,
+            AssetApproxIndexTable::compute_key,
+            assets,
+            slot,
+        )?;
 
         Ok(())
     }

@@ -61,6 +61,22 @@ impl ChainStore {
         Ok(())
     }
 
+    pub fn rebuild_indexes(&self) -> Result<(), Error> {
+        let rx = self.db().begin_read()?;
+        let wx = self.db().begin_write()?;
+
+        indexes::Indexes::nuke(&wx)?;
+
+        for block in tables::BlocksTable::get_range(&rx, None, None)? {
+            let (slot, block) = block?;
+            indexes::Indexes::index_block(&wx, &block)?;
+        }
+
+        wx.commit()?;
+
+        Ok(())
+    }
+
     pub fn get_range<'a>(
         &self,
         from: Option<BlockSlot>,
