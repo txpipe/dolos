@@ -1,4 +1,4 @@
-use axum::{Json, http::StatusCode};
+use axum::{http::StatusCode, Json};
 use blockfrost_openapi::models::{
     address_utxo_content_inner::AddressUtxoContentInner, tx_content::TxContent,
     tx_content_cbor::TxContentCbor, tx_content_output_amount_inner::TxContentOutputAmountInner,
@@ -249,10 +249,13 @@ impl<'a> IntoModel<TxContentUtxoOutputsInner> for UtxoOutputModelBuilder<'a> {
 }
 
 impl<'a> IntoModel<AddressUtxoContentInner> for UtxoOutputModelBuilder<'a> {
-    type SortKey = u64;
+    type SortKey = (u64, usize, u32);
 
     fn sort_key(&self) -> Option<Self::SortKey> {
-        self.block.as_ref().map(|b| b.slot())
+        match (self.block.as_ref(), self.tx_order.as_ref()) {
+            (Some(block), Some(txorder)) => Some((block.slot(), *txorder, self.txo_idx)),
+            _ => None,
+        }
     }
 
     fn into_model(self) -> Result<AddressUtxoContentInner, StatusCode> {
