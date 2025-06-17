@@ -41,7 +41,7 @@ fn load_utxo_models<D: Domain>(
     // decoded
     let blocks_deps: HashMap<_, _> = block_deps
         .iter()
-        .map(|(k, (cbor, order))| MultiEraBlock::decode(&cbor).map(|x| (k, (x, order))))
+        .map(|(k, (cbor, order))| MultiEraBlock::decode(cbor).map(|x| (k, (x, order))))
         .try_collect()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
