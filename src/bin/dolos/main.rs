@@ -164,10 +164,8 @@ impl Config {
         }
 
         // finally, we use env vars to make some last-step overrides.
-        // DEPRECATED: Use double underscore instead.
+        // DEPRECATED: Use double underscore instead, config values include _ in the name
         s = s.add_source(config::Environment::with_prefix("DOLOS").separator("_"));
-
-        // config values include _ in the option, making the separator not work
         s = s.add_source(config::Environment::with_prefix("DOLOS").separator("__"));
 
         s.build()?.try_deserialize()
