@@ -156,19 +156,20 @@ impl gasket::framework::Worker<Stage> for Worker {
     }
 
     async fn schedule(&mut self, stage: &mut Stage) -> Result<WorkSchedule<WorkUnit>, WorkerError> {
-        if stage.quota.should_quit() {
-            warn!("quota reached, stopping sync");
-            return Ok(WorkSchedule::Done);
-        }
-
         let client = self.peer_session.chainsync();
 
         if client.has_agency() {
             debug!("should request next batch of blocks");
             Ok(WorkSchedule::Unit(WorkUnit::Pull))
         } else {
-            debug!("should await next block");
-            Ok(WorkSchedule::Unit(WorkUnit::Await))
+            stage.quota.on_tip();
+            if stage.quota.should_quit() {
+                warn!("quota reached, stopping sync");
+                Ok(WorkSchedule::Done)
+            } else {
+                debug!("should await next block");
+                Ok(WorkSchedule::Unit(WorkUnit::Await))
+            }
         }
     }
 
@@ -233,9 +234,7 @@ impl gasket::framework::Worker<Stage> for Worker {
                         stage.track_tip(&tip);
                     }
                     NextResponse::Await => {
-                        info!("reached tip");
-
-                        stage.quota.on_tip();
+                        warn!("unexpected response, skipping");
                     }
                 }
             }
