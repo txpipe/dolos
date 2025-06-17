@@ -106,29 +106,25 @@ pub async fn route<D: Domain>(
         .get_utxo_by_address(&address.to_vec())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let sorted: Vec<_> = refs
+    let utxos: Vec<_> = domain
+        .state()
+        .get_utxos(refs.into_iter().collect())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .into_iter()
-        .map(|txoref| {
+        .map(|(txoref, eracbor)| {
             match domain
                 .archive()
                 .get_slot_for_tx(txoref.0.as_slice())
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
             {
-                Some(slot) => Ok((slot, txoref)),
+                Some(slot) => Ok((slot, (txoref, eracbor))),
                 None => Err(StatusCode::INTERNAL_SERVER_ERROR),
             }
         })
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
         .sorted_by_key(|(slot, _)| *slot)
-        .map(|(_, txoref)| txoref)
-        .collect();
-
-    let utxos: Vec<_> = domain
-        .state()
-        .get_utxos(sorted)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .into_iter()
+        .map(|(_, utxo)| utxo)
         .enumerate()
         .flat_map(|(i, utxo)| {
             if pagination.includes(i) {
