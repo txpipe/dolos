@@ -339,6 +339,24 @@ impl ChainStore {
         Ok(output)
     }
 
+    pub fn get_slot_for_tx(&self, tx_hash: &[u8]) -> Result<Option<BlockSlot>, Error> {
+        let mut possible = self.get_possible_block_slots_by_tx_hash(tx_hash)?;
+        if possible.len() == 1 {
+            Ok(possible.pop())
+        } else {
+            for slot in possible {
+                if let Some(raw) = self.get_block_by_slot(&slot)? {
+                    let block =
+                        MultiEraBlock::decode(&raw).map_err(ArchiveError::BlockDecodingError)?;
+                    if block.txs().iter().any(|x| x.hash().to_vec() == tx_hash) {
+                        return Ok(Some(slot));
+                    }
+                }
+            }
+            Ok(None)
+        }
+    }
+
     pub fn get_tx(&self, tx_hash: &[u8]) -> Result<Option<EraCbor>, Error> {
         let possible = self.get_possible_blocks_by_tx_hash(tx_hash)?;
         for raw in possible {

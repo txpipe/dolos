@@ -2,7 +2,7 @@ use ::redb::{Database, MultimapTableHandle as _, Range, TableHandle as _};
 use std::path::Path;
 use tracing::{debug, info, warn};
 
-use dolos_core::{ArchiveError, BlockBody, BlockSlot, EraCbor, LedgerDelta, TxOrder, TxoRef};
+use dolos_core::{ArchiveError, BlockBody, BlockSlot, EraCbor, LedgerDelta, TxOrder};
 
 mod indexes;
 mod tables;
@@ -209,18 +209,15 @@ impl ChainStore {
         }
     }
 
-    pub fn get_utxo_by_address(
-        &self,
-        address: &[u8],
-    ) -> Result<Vec<(TxoRef, EraCbor)>, RedbArchiveError> {
-        match self {
-            ChainStore::SchemaV1(x) => x.get_utxo_by_address(address),
-        }
-    }
-
     pub fn get_tx(&self, tx_hash: &[u8]) -> Result<Option<EraCbor>, RedbArchiveError> {
         match self {
             ChainStore::SchemaV1(x) => x.get_tx(tx_hash),
+        }
+    }
+
+    pub fn get_slot_for_tx(&self, tx_hash: &[u8]) -> Result<Option<BlockSlot>, RedbArchiveError> {
+        match self {
+            ChainStore::SchemaV1(x) => x.get_slot_for_tx(tx_hash),
         }
     }
 

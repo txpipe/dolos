@@ -3,6 +3,7 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
+use itertools::Itertools;
 use pallas::ledger::{primitives::conway, traverse::MultiEraAsset};
 use serde::{Deserialize, Serialize};
 
@@ -105,17 +106,29 @@ pub async fn route<D: Domain>(
         .get_utxo_by_address(&address.to_vec())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let unspent_refs = domain
-        .state()
-        .get_utxos(refs.into_iter().collect())
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let sorted: Vec<_> = refs
+        .into_iter()
+        .map(|txoref| {
+            match domain
+                .archive()
+                .get_slot_for_tx(txoref.0.as_slice())
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            {
+                Some(slot) => Ok((slot, txoref)),
+                None => Err(StatusCode::INTERNAL_SERVER_ERROR),
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .sorted_by_key(|(slot, _)| *slot)
+        .map(|(_, txoref)| txoref)
+        .collect();
 
     let utxos: Vec<_> = domain
-        .archive()
-        .get_utxo_by_address(&address.to_vec())
+        .state()
+        .get_utxos(sorted)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .into_iter()
-        .filter(|(txoref, _)| unspent_refs.contains_key(txoref))
         .enumerate()
         .flat_map(|(i, (txoref, eracbor))| {
             if pagination.includes(i) {

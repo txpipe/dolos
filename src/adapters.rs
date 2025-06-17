@@ -269,17 +269,17 @@ impl ArchiveStore for ArchiveAdapter {
         Ok(out)
     }
 
-    fn get_utxo_by_address(&self, address: &[u8]) -> Result<Vec<(TxoRef, EraCbor)>, ArchiveError> {
+    fn get_tx(&self, tx_hash: &[u8]) -> Result<Option<EraCbor>, ArchiveError> {
         let out = match self {
-            ArchiveAdapter::Redb(x) => x.get_utxo_by_address(address)?,
+            ArchiveAdapter::Redb(x) => x.get_tx(tx_hash)?,
         };
 
         Ok(out)
     }
 
-    fn get_tx(&self, tx_hash: &[u8]) -> Result<Option<EraCbor>, ArchiveError> {
+    fn get_slot_for_tx(&self, tx_hash: &[u8]) -> Result<Option<BlockSlot>, ArchiveError> {
         let out = match self {
-            ArchiveAdapter::Redb(x) => x.get_tx(tx_hash)?,
+            ArchiveAdapter::Redb(x) => x.get_slot_for_tx(tx_hash)?,
         };
 
         Ok(out)
