@@ -1,8 +1,8 @@
 use axum::{
+    Router, ServiceExt,
     extract::Request,
     http::StatusCode,
     routing::{get, post},
-    Router, ServiceExt,
 };
 use dolos_cardano::pparams::ChainSummary;
 use itertools::Itertools;
@@ -13,7 +13,9 @@ use tower::Layer;
 use tower_http::{cors::CorsLayer, normalize_path::NormalizePathLayer, trace};
 use tracing::Level;
 
-use dolos_core::{ArchiveStore as _, CancelToken, Domain, EraCbor, ServeError, StateStore as _};
+use dolos_core::{
+    ArchiveStore as _, CancelToken, Domain, EraCbor, ServeError, StateStore as _, TxOrder,
+};
 
 pub(crate) mod mapping;
 mod pagination;
@@ -39,6 +41,8 @@ impl<D: Domain> Deref for Facade<D> {
 }
 
 pub type TxMap = HashMap<Hash<32>, Option<EraCbor>>;
+pub type BlockWithTx = (Vec<u8>, TxOrder);
+pub type BlockWithTxMap = HashMap<Hash<32>, BlockWithTx>;
 
 impl<D: Domain> Facade<D> {
     pub fn get_chain_summary(&self) -> Result<ChainSummary, StatusCode> {
@@ -84,6 +88,24 @@ impl<D: Domain> Facade<D> {
 
         Ok(txs)
     }
+
+    pub fn get_block_with_tx_batch(
+        &self,
+        hashes: impl IntoIterator<Item = Hash<32>>,
+    ) -> Result<BlockWithTxMap, StatusCode> {
+        let blocks = hashes
+            .into_iter()
+            .map(|h| {
+                self.archive()
+                    .get_block_with_tx(h.as_slice())
+                    .map(|x| (h, x))
+            })
+            .filter_map_ok(|(k, v)| v.map(|x| (k, x)))
+            .try_collect()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        Ok(blocks)
+    }
 }
 
 pub struct Driver;
@@ -99,11 +121,11 @@ impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
             )
             .route(
                 "/addresses/{address}/utxos",
-                get(routes::addresses::address::utxos::route::<D>),
+                get(routes::addresses::utxos::<D>),
             )
             .route(
                 "/addresses/{address}/utxos/{asset}",
-                get(routes::addresses::address::utxos::asset::route::<D>),
+                get(routes::addresses::utxos_with_asset::<D>),
             )
             .route("/blocks/latest", get(routes::blocks::latest::route::<D>))
             .route(
