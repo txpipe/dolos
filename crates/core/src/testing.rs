@@ -16,61 +16,63 @@ use pallas::{
 use crate::*;
 
 #[derive(Clone)]
-pub enum FakeAddress {
+pub enum TestAddress {
     Alice,
     Bob,
     Carol,
     Dave,
     Eve,
-    Fred,
-    George,
-    Harry,
+    // Fred,
+    // George,
+    // Harry,
     Custom(String),
 }
 
-const HARDCODED_ADDRESS: &str = "addr_test1qruhen60uwzpwnnr7gjs50z2v8u9zyfw6zunet4k42zrpr54mrlv55f93rs6j48wt29w90hlxt4rvpvshe55k5r9mpvqjv2wt4";
+pub const ADDRESS_TEST_VECTORS: [&str; 5] = [
+    // a Shelley address with both payment and stake parts
+    "addr1q9dhugez3ka82k2kgh7r2lg0j7aztr8uell46kydfwu3vk6n8w2cdu8mn2ha278q6q25a9rc6gmpfeekavuargcd32vsvxhl7e",
+    // a Shelley address with only payment part
+    "addr1vx2fxv2umyhttkxyxp8x0dlpdt3k6cwng5pxj3jhsydzers66hrl8",
+    // a Shelley stake address
+    "stake178phkx6acpnf78fuvxn0mkew3l0fd058hzquvz7w36x4gtcccycj5",
+    // a Shelley script address
+    "addr1w9jx45flh83z6wuqypyash54mszwmdj8r64fydafxtfc6jgrw4rm3",
+    // a Byron address
+    "37btjrVyb4KDXBNC4haBVPCrro8AQPHwvCMp3RFhhSVWwfFmZ6wwzSK6JK1hY6wHNmtrpTf1kdbva8TCneM2YsiXT7mrzT21EacHnPpz5YyUdj64na",
+];
 
-impl FakeAddress {
+impl TestAddress {
     pub fn everyone() -> Vec<Self> {
         vec![
-            FakeAddress::Alice,
-            FakeAddress::Bob,
-            FakeAddress::Carol,
-            FakeAddress::Dave,
-            FakeAddress::Eve,
-            FakeAddress::Fred,
-            FakeAddress::George,
-            FakeAddress::Harry,
+            TestAddress::Alice,
+            TestAddress::Bob,
+            TestAddress::Carol,
+            TestAddress::Dave,
+            TestAddress::Eve,
+            // TestAddress::Fred,
+            // TestAddress::George,
+            // TestAddress::Harry,
         ]
     }
 
     pub fn ordinal(&self) -> usize {
         match self {
-            FakeAddress::Alice => 0,
-            FakeAddress::Bob => 1,
-            FakeAddress::Carol => 2,
-            FakeAddress::Dave => 3,
-            FakeAddress::Eve => 4,
-            FakeAddress::Fred => 5,
-            FakeAddress::George => 6,
-            FakeAddress::Harry => 7,
-            FakeAddress::Custom(_) => 8,
+            TestAddress::Alice => 0,
+            TestAddress::Bob => 1,
+            TestAddress::Carol => 2,
+            TestAddress::Dave => 3,
+            TestAddress::Eve => 4,
+            // TestAddress::Fred => 5,
+            // TestAddress::George => 6,
+            // TestAddress::Harry => 7,
+            TestAddress::Custom(_) => 8,
         }
     }
 
     pub fn as_str(&self) -> &str {
         match self {
-            FakeAddress::Alice => HARDCODED_ADDRESS,
-            FakeAddress::Bob => "addr_test1wr4c5ruvn9ss5r4davqh8nf964c8t2hu7kl8cqmxt42hdwqhuqp46",
-            FakeAddress::Carol => {
-                "addr_test1qq969yp0wz6qw9kcfh3ansqamsvm29x337dkjyf3nfefqrtwu22xqq55v3vnm4fu69p4qf0zu4s57c97qcgyc495wt4smkcg42"
-            }
-            FakeAddress::Dave => HARDCODED_ADDRESS,
-            FakeAddress::Eve => HARDCODED_ADDRESS,
-            FakeAddress::Fred => HARDCODED_ADDRESS,
-            FakeAddress::George => HARDCODED_ADDRESS,
-            FakeAddress::Harry => HARDCODED_ADDRESS,
-            FakeAddress::Custom(addr) => addr,
+            TestAddress::Custom(addr) => addr,
+            x => ADDRESS_TEST_VECTORS[x.ordinal()],
         }
     }
 
@@ -79,21 +81,21 @@ impl FakeAddress {
     }
 }
 
-impl Into<Vec<u8>> for FakeAddress {
+impl Into<Vec<u8>> for TestAddress {
     fn into(self) -> Vec<u8> {
         self.to_bytes()
     }
 }
 
-impl From<&str> for FakeAddress {
+impl From<&str> for TestAddress {
     fn from(value: &str) -> Self {
-        FakeAddress::Custom(value.to_owned())
+        TestAddress::Custom(value.to_owned())
     }
 }
 
-impl From<String> for FakeAddress {
+impl From<String> for TestAddress {
     fn from(value: String) -> Self {
-        FakeAddress::Custom(value)
+        TestAddress::Custom(value)
     }
 }
 
@@ -120,7 +122,7 @@ pub fn tx_sequence_to_hash(sequence: u64) -> TxHash {
 pub fn fake_utxo(
     tx_hash: Hash<32>,
     txo_idx: u32,
-    address: impl Into<FakeAddress>,
+    address: impl Into<TestAddress>,
     amount: u64,
 ) -> (TxoRef, EraCbor) {
     let txoref = TxoRef(tx_hash, txo_idx);
@@ -145,14 +147,14 @@ pub fn fake_utxo(
 }
 
 pub fn fake_genesis_utxo(
-    address: impl Into<FakeAddress>,
+    address: impl Into<TestAddress>,
     ordinal: usize,
     amount: u64,
 ) -> (TxoRef, EraCbor) {
     fake_utxo(genesis_tx_hash(), ordinal as u32, address, amount)
 }
 
-pub fn replace_utxo_address(utxo: EraCbor, new_address: FakeAddress) -> EraCbor {
+pub fn replace_utxo_address(utxo: EraCbor, new_address: TestAddress) -> EraCbor {
     let EraCbor(_, cbor) = utxo;
 
     let output = MultiEraOutput::decode(Era::Conway, &cbor).unwrap();
@@ -166,7 +168,7 @@ pub fn replace_utxo_address(utxo: EraCbor, new_address: FakeAddress) -> EraCbor 
     EraCbor(Era::Conway.into(), minicbor::to_vec(&output).unwrap())
 }
 
-pub fn replace_utxo_map_address(utxos: UtxoMap, new_address: FakeAddress) -> UtxoMap {
+pub fn replace_utxo_map_address(utxos: UtxoMap, new_address: TestAddress) -> UtxoMap {
     utxos
         .into_iter()
         .map(|(k, v)| (k, replace_utxo_address(v, new_address.clone())))
@@ -233,7 +235,7 @@ pub fn print_utxo_map(utxos: &UtxoMap) {
 pub fn fake_genesis_delta(initial_amount: u64) -> LedgerDelta {
     LedgerDelta {
         new_position: Some(ChainPoint::Origin),
-        produced_utxo: FakeAddress::everyone()
+        produced_utxo: TestAddress::everyone()
             .into_iter()
             .enumerate()
             .map(|(ordinal, addr)| fake_genesis_utxo(addr, ordinal, initial_amount))
@@ -269,7 +271,7 @@ pub fn make_move_utxo_delta(
     utxos: UtxoMap,
     slot: u64,
     tx_seq: u64,
-    to: FakeAddress,
+    to: TestAddress,
 ) -> LedgerDelta {
     let moved = utxos.clone();
     let moved = replace_utxo_map_address(moved, to);
