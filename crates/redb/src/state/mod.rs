@@ -99,7 +99,7 @@ fn compute_schema_hash(db: &Database) -> Result<Option<String>, RedbStateError> 
 
 fn open_db(path: impl AsRef<Path>, cache_size: Option<usize>) -> Result<Database, RedbStateError> {
     let db = Database::builder()
-        .set_repair_callback(|x| warn!(progress = x.progress() * 100f64, "ledger db is repairing"))
+        .set_repair_callback(|x| warn!(progress = x.progress() * 100f64, "state db is repairing"))
         .set_cache_size(1024 * 1024 * cache_size.unwrap_or(DEFAULT_CACHE_SIZE_MB))
         .create(path)?;
 

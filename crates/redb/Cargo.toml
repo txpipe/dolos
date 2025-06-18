@@ -17,4 +17,4 @@ thiserror.workspace = true
 
 dolos-core = { path = "../core" }
 
-redb = { version = "^2" }
+redb = { version = "^2.6" }

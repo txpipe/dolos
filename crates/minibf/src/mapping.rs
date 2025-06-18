@@ -72,7 +72,8 @@ pub fn slot_time(slot: u64, summary: &ChainSummary) -> (u64, u64, u64) {
     (epoch, epoch_slot, time)
 }
 
-pub fn aggregate_amount<'a>(
+#[allow(unused)]
+pub fn aggregate_assets<'a>(
     txouts: impl Iterator<Item = &'a MultiEraOutput<'a>>,
 ) -> Vec<TxContentOutputAmountInner> {
     let mut lovelace = 0;
@@ -106,6 +107,41 @@ pub fn aggregate_amount<'a>(
             quantity: quantity.to_string(),
         })
         .collect();
+
+    assets.sort_by_key(|a| a.unit.clone());
+
+    std::iter::once(lovelace).chain(assets).collect()
+}
+
+pub fn list_assets<'a>(
+    txouts: impl Iterator<Item = &'a MultiEraOutput<'a>>,
+) -> Vec<TxContentOutputAmountInner> {
+    let mut lovelace = 0;
+    let mut assets: Vec<TxContentOutputAmountInner> = vec![];
+
+    for txout in txouts {
+        let value = txout.value();
+
+        // Add lovelace amount
+        lovelace += value.coin();
+
+        // Add other assets
+        for ma in value.assets() {
+            for asset in ma.assets() {
+                let unit = format!("{}{}", ma.policy(), hex::encode(asset.name()));
+                let amount = asset.output_coin().unwrap_or_default();
+                assets.push(TxContentOutputAmountInner {
+                    unit,
+                    quantity: amount.to_string(),
+                });
+            }
+        }
+    }
+
+    let lovelace = TxContentOutputAmountInner {
+        unit: "lovelace".to_string(),
+        quantity: lovelace.to_string(),
+    };
 
     assets.sort_by_key(|a| a.unit.clone());
 
@@ -530,7 +566,7 @@ impl IntoModel<TxContent> for TxModelBuilder<'_> {
             block_height: try_into_or_500!(block.number()),
             slot: try_into_or_500!(block.slot()),
             index: try_into_or_500!(order),
-            output_amount: aggregate_amount(txouts.iter()),
+            output_amount: list_assets(txouts.iter()),
             fees: tx.fee().map(|f| f.to_string()).unwrap_or_default(),
             size: try_into_or_500!(tx.size()),
             invalid_before: tx.validity_start().map(|v| v.to_string()),
