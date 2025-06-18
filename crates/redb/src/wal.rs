@@ -216,7 +216,9 @@ impl RedbWalStore {
         from: Option<LogSeq>,
         to: Option<LogSeq>,
     ) -> Result<(), RedbWalError> {
-        let wx = self.db.begin_write()?;
+        let mut wx = self.db.begin_write()?;
+        wx.set_quick_repair(true);
+
         {
             let mut wal = wx.open_table(WAL)?;
 
@@ -470,7 +472,8 @@ impl RedbWalStore {
     /// sure you have backups or are certain about trimming the WAL before
     /// calling this function.
     pub fn remove_before(&self, slot: BlockSlot) -> Result<(), RedbWalError> {
-        let wx = self.db.begin_write()?;
+        let mut wx = self.db.begin_write()?;
+        wx.set_quick_repair(true);
 
         {
             let last_seq = self
@@ -540,7 +543,8 @@ impl RedbWalStore {
         &mut self,
         logs: impl Iterator<Item = dolos_core::LogValue>,
     ) -> Result<(), RedbWalError> {
-        let wx = self.db.begin_write()?;
+        let mut wx = self.db.begin_write()?;
+        wx.set_quick_repair(true);
 
         {
             let mut wal = wx.open_table(WAL)?;
