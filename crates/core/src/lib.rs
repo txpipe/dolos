@@ -14,6 +14,8 @@ use tracing::{info, warn};
 mod mempool;
 mod wal;
 
+pub mod testing;
+
 pub type Era = u16;
 
 /// The index of an output in a tx
@@ -138,7 +140,7 @@ pub struct LedgerSlice {
     pub resolved_inputs: HashMap<TxoRef, EraCbor>,
 }
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 pub struct LedgerDelta {
     pub new_position: Option<ChainPoint>,
     pub undone_position: Option<ChainPoint>,
@@ -820,12 +822,7 @@ pub trait Driver<D: Domain, C: CancelToken>: Send + Sync + 'static {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn slot_to_hash(slot: u64) -> BlockHash {
-        let mut hasher = pallas::crypto::hash::Hasher::<256>::new();
-        hasher.input(&(slot as i32).to_le_bytes());
-        hasher.finalize()
-    }
+    use crate::testing::slot_to_hash;
 
     #[test]
     fn chainpoint_partial_eq() {

@@ -335,39 +335,4 @@ impl From<v2light::LedgerStore> for LedgerStore {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn schema_hash_computation() {
-        let store = LedgerStore::in_memory_v1().unwrap();
-        let hash = compute_schema_hash(store.db()).unwrap();
-        assert_eq!(hash.unwrap(), V1_HASH);
-
-        let store = LedgerStore::in_memory_v2().unwrap();
-        let hash = compute_schema_hash(store.db()).unwrap();
-        assert_eq!(hash.unwrap(), V2_HASH);
-
-        let store = LedgerStore::in_memory_v2_light().unwrap();
-        let hash = compute_schema_hash(store.db()).unwrap();
-        assert_eq!(hash.unwrap(), V2_LIGHT_HASH);
-    }
-
-    #[test]
-    fn empty_until_cursor() {
-        let store = LedgerStore::in_memory_v2().unwrap();
-
-        assert!(store.is_empty().unwrap());
-
-        let delta = LedgerDelta {
-            new_position: Some(ChainPoint::Specific(
-                1,
-                pallas::crypto::hash::Hash::new(b"01010101010101010101010101010101".to_owned()),
-            )),
-            ..Default::default()
-        };
-
-        store.apply(&[delta]).unwrap();
-        assert!(!store.is_empty().unwrap());
-    }
-}
+mod tests;
