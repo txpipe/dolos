@@ -81,9 +81,9 @@ impl TestAddress {
     }
 }
 
-impl Into<Vec<u8>> for TestAddress {
-    fn into(self) -> Vec<u8> {
-        self.to_bytes()
+impl From<TestAddress> for Vec<u8> {
+    fn from(addr: TestAddress) -> Self {
+        addr.to_bytes()
     }
 }
 
@@ -186,7 +186,7 @@ pub fn replace_utxo_map_txhash(utxos: UtxoMap, tx_sequence: u64) -> UtxoMap {
 
 pub fn assert_utxo_address_and_value(utxo: &EraCbor, address: impl Into<Vec<u8>>, value: u64) {
     let EraCbor(_, cbor) = utxo;
-    let output = MultiEraOutput::decode(Era::Conway, &cbor).unwrap();
+    let output = MultiEraOutput::decode(Era::Conway, cbor).unwrap();
 
     let Some(GenTransactionOutput::PostAlonzo(output)) = output.as_conway() else {
         unreachable!()
@@ -207,7 +207,7 @@ where
 
 pub fn print_utxo(txoref: &TxoRef, utxo: &EraCbor) {
     let EraCbor(_, cbor) = utxo;
-    let output = MultiEraOutput::decode(Era::Conway, &cbor).unwrap();
+    let output = MultiEraOutput::decode(Era::Conway, cbor).unwrap();
 
     let Some(GenTransactionOutput::PostAlonzo(output)) = output.as_conway() else {
         unreachable!()
