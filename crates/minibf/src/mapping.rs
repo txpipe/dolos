@@ -72,7 +72,48 @@ pub fn slot_time(slot: u64, summary: &ChainSummary) -> (u64, u64, u64) {
     (epoch, epoch_slot, time)
 }
 
-pub fn get_output_amount<'a>(
+#[allow(unused)]
+pub fn aggregate_assets<'a>(
+    txouts: impl Iterator<Item = &'a MultiEraOutput<'a>>,
+) -> Vec<TxContentOutputAmountInner> {
+    let mut lovelace = 0;
+    let mut by_asset: HashMap<String, u64> = HashMap::new();
+
+    for txout in txouts {
+        let value = txout.value();
+
+        // Add lovelace amount
+        lovelace += value.coin();
+
+        // Add other assets
+        for ma in value.assets() {
+            for asset in ma.assets() {
+                let unit = format!("{}{}", ma.policy(), hex::encode(asset.name()));
+                let amount = asset.output_coin().unwrap_or_default();
+                *by_asset.entry(unit).or_insert(0) += amount;
+            }
+        }
+    }
+
+    let lovelace = TxContentOutputAmountInner {
+        unit: "lovelace".to_string(),
+        quantity: lovelace.to_string(),
+    };
+
+    let mut assets: Vec<_> = by_asset
+        .into_iter()
+        .map(|(unit, quantity)| TxContentOutputAmountInner {
+            unit,
+            quantity: quantity.to_string(),
+        })
+        .collect();
+
+    assets.sort_by_key(|a| a.unit.clone());
+
+    std::iter::once(lovelace).chain(assets).collect()
+}
+
+pub fn list_assets<'a>(
     txouts: impl Iterator<Item = &'a MultiEraOutput<'a>>,
 ) -> Vec<TxContentOutputAmountInner> {
     let mut lovelace = 0;
@@ -525,7 +566,7 @@ impl IntoModel<TxContent> for TxModelBuilder<'_> {
             block_height: try_into_or_500!(block.number()),
             slot: try_into_or_500!(block.slot()),
             index: try_into_or_500!(order),
-            output_amount: get_output_amount(txouts.iter()),
+            output_amount: list_assets(txouts.iter()),
             fees: tx.fee().map(|f| f.to_string()).unwrap_or_default(),
             size: try_into_or_500!(tx.size()),
             invalid_before: tx.validity_start().map(|v| v.to_string()),
