@@ -2,6 +2,59 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.24.0] - 2025-06-19
+
+### 🚀 Features
+
+- *(trp)* Improve argument decoding (#512)
+- *(trp)* Make arg decoding more  flexible (#519)
+- Support sync limit via config (#526)
+- Add reset-genesis command (#532)
+- Improve data summary command (#536)
+- *(minibf)* Implement `txs/{hash}` endpoint (#537)
+- *(minibf)* Implement `txs/{hash}/utxos` endpoint (#538)
+- *(redb)* Use quick repair on all write transactions (#551)
+
+### 🐛 Bug Fixes
+
+- Improve shutdown of stuck pipelines (#531)
+- *(minibf)* Implement cert count in tx model (#539)
+- *(minibf)* Include pagination in addresses utxos endpoint (#540)
+- *(minibf)* Handle trailing backlash (#541)
+- *(minibf)* Use full name for asset unit in utxos by address (#542)
+- *(minibf)* Sort utxos by slot in `addresses/{address}/utxos` endpoint (#543)
+- *(minibf)* Include block data in `/addresses` endpoints (#547)
+- *(minibf)* Include tx index in utxo ordering (#548)
+- *(minibf)* Show disaggregated output amounts  (#549)
+- *(redb)* Skip index for addresses with empty delegation (#552)
+
+### 🚜 Refactor
+
+- Split Cardano ledger into new crate (#514)
+- Split minibf into new crate (#515)
+- Abstract core domain as trait (#521)
+- Introduce driver abstraction (#528)
+
+### 📚 Documentation
+
+- Replace old docs with new structure (#513)
+
+### 🔧 Continuous Integration
+
+- Improve PR workflow speed (#525)
+- Run tests for the whole workspace (#553)
+
+### 🧪 Testing
+
+- Introduce xtask for smoke tests (#524)
+- Add daemon sync smoke test (#527)
+- *(redb)* Add state store tests (#550)
+
+### ⚙️ Miscellaneous Tasks
+
+- Update tx3 lib to v0.6.0 (#530)
+- Avoid commit of genesis files in test scenarios (#533)
+
 ## [0.23.0] - 2025-05-23
 
 ### 🐛 Bug Fixes
@@ -16,6 +69,7 @@ All notable changes to this project will be documented in this file.
 
 - *(trp)* Decouple tx3 pallas version from the rest (#503)
 - Fix lint warnings (#507)
+- Release dolos version 0.23.0
 
 ## [0.22.0] - 2025-05-12
 
