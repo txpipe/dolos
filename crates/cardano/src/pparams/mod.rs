@@ -549,14 +549,17 @@ pub fn fold_with_hacks(
 
 #[cfg(test)]
 mod tests {
-    use std::{io::Read, path::Path};
+    use std::{
+        io::Read,
+        path::{Path, PathBuf},
+    };
 
     use itertools::Itertools;
     use pallas::ledger::traverse::{MultiEraBlock, MultiEraTx};
 
     use super::*;
 
-    fn load_json<T, P: AsRef<Path>>(path: P) -> T
+    fn load_json<T>(path: &Path) -> T
     where
         T: serde::de::DeserializeOwned,
     {
@@ -565,19 +568,21 @@ mod tests {
     }
 
     fn test_env_fold(env: &str) {
-        let test_data = format!("src/ledger/pparams/test_data/{env}");
+        let test_data = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap())
+            .join("test_data")
+            .join(env);
 
         // Load each genesis file
         let genesis = Genesis {
-            byron: load_json(format!("{test_data}/genesis/byron_genesis.json")),
-            shelley: load_json(format!("{test_data}/genesis/shelley_genesis.json")),
-            alonzo: load_json(format!("{test_data}/genesis/alonzo_genesis.json")),
-            conway: load_json(format!("{test_data}/genesis/conway_genesis.json")),
+            byron: load_json(&test_data.join("genesis/byron.json")),
+            shelley: load_json(&test_data.join("genesis/shelley.json")),
+            alonzo: load_json(&test_data.join("genesis/alonzo.json")),
+            conway: load_json(&test_data.join("genesis/conway.json")),
             force_protocol: None,
         };
 
         // Then load each mainnet example update proposal as buffers
-        let files: Vec<_> = std::fs::read_dir(format!("{test_data}/update_proposal_blocks/"))
+        let files: Vec<_> = std::fs::read_dir(test_data.join("update_proposal_blocks"))
             .unwrap()
             .map(|x| std::fs::File::open(x.unwrap().path()).unwrap())
             .map(|mut x| {
@@ -612,7 +617,7 @@ mod tests {
 
         // Now, for each epoch we've recorded protocol parameters for,
         // test if we get the right value when folding
-        for file in std::fs::read_dir(format!("{test_data}/expected_params/")).unwrap() {
+        for file in std::fs::read_dir(test_data.join("expected_params")).unwrap() {
             let filename = file.unwrap().path();
 
             println!("Comparing to {:?}", filename);
@@ -630,7 +635,7 @@ mod tests {
                 .collect();
 
             // TODO: implement serialize/deserialize, and get full protocol param json files
-            let expected = load_json::<usize, _>(filename);
+            let expected = load_json::<usize>(&filename);
             let summary = fold(&genesis, updates.as_slice());
 
             assert_eq!(expected, summary.edge().pparams.protocol_version())
