@@ -99,7 +99,7 @@ fn open_db(
     cache_size: Option<usize>,
 ) -> Result<Database, RedbArchiveError> {
     let db = Database::builder()
-        .set_repair_callback(|x| warn!(progress = x.progress() * 100f64, "ledger db is repairing"))
+        .set_repair_callback(|x| warn!(progress = x.progress() * 100f64, "archive db is repairing"))
         .set_cache_size(1024 * 1024 * cache_size.unwrap_or(DEFAULT_CACHE_SIZE_MB))
         .create(path)?;
 

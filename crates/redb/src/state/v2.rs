@@ -25,6 +25,7 @@ impl LedgerStore {
     pub fn initialize(db: Database) -> Result<Self, Error> {
         let mut wx = db.begin_write()?;
         wx.set_durability(Durability::Immediate);
+        wx.set_quick_repair(true);
 
         tables::CursorTable::initialize(&wx)?;
         tables::UtxosTable::initialize(&wx)?;
@@ -51,6 +52,7 @@ impl LedgerStore {
     pub fn apply(&self, deltas: &[LedgerDelta]) -> Result<(), Error> {
         let mut wx = self.db().begin_write()?;
         wx.set_durability(Durability::Eventual);
+        wx.set_quick_repair(true);
 
         for delta in deltas {
             tables::CursorTable::apply(&wx, delta)?;
@@ -70,6 +72,7 @@ impl LedgerStore {
 
         let mut wx = self.db().begin_write()?;
         wx.set_durability(Durability::Eventual);
+        wx.set_quick_repair(true);
 
         for (slot, value) in cursors {
             tables::CursorTable::compact(&wx, slot)?;

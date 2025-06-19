@@ -8,7 +8,7 @@ type Error = super::RedbArchiveError;
 
 use dolos_core::{ArchiveError, BlockBody, BlockSlot, EraCbor, LedgerDelta, TxOrder};
 
-use super::{indexes, tables, ChainIter};
+use super::{ChainIter, indexes, tables};
 
 #[derive(Clone)]
 pub struct ChainStore {
@@ -39,6 +39,7 @@ impl ChainStore {
     pub fn apply(&self, deltas: &[LedgerDelta]) -> Result<(), Error> {
         let mut wx = self.db().begin_write()?;
         wx.set_durability(Durability::Eventual);
+        wx.set_quick_repair(true);
 
         for delta in deltas {
             indexes::Indexes::apply(&wx, delta)?;
@@ -392,8 +393,11 @@ impl ChainStore {
             start, excess, "pruning archive for excess history"
         );
 
-        let wx = self.db().begin_write()?;
+        let mut wx = self.db().begin_write()?;
+        wx.set_quick_repair(true);
+
         tables::BlocksTable::remove_before(&wx, prune_before)?;
+
         wx.commit()?;
 
         Ok(())

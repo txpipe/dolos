@@ -354,8 +354,9 @@ mod tests {
     #[test]
     fn test_mainnet_genesis_utxos() {
         let path = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap())
-            .join("examples")
-            .join("sync-mainnet");
+            .join("test_data")
+            .join("mainnet")
+            .join("genesis");
 
         let genesis = load_genesis(&path);
 
@@ -372,8 +373,9 @@ mod tests {
     #[test]
     fn test_preview_genesis_utxos() {
         let path = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap())
-            .join("examples")
-            .join("sync-preview");
+            .join("test_data")
+            .join("preview")
+            .join("genesis");
 
         let genesis = load_genesis(&path);
 

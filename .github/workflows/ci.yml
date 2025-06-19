@@ -51,7 +51,7 @@ jobs:
         uses: actions-rs/cargo@v1
         with:
           command: test
-          args: --all-targets
+          args: --workspace --all-targets
 
       - name: Run external smoke tests
         uses: actions-rs/cargo@v1

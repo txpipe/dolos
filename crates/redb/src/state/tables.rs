@@ -2,6 +2,7 @@ use ::redb::{MultimapTableDefinition, TableDefinition, WriteTransaction};
 use ::redb::{Range, ReadTransaction, ReadableTable as _, TableError};
 use dolos_core::TxoIdx;
 use itertools::Itertools as _;
+use pallas::ledger::addresses::ShelleyDelegationPart;
 use pallas::{crypto::hash::Hash, ledger::traverse::MultiEraOutput};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -455,8 +456,15 @@ impl FilterIndexes {
                 Address::Shelley(x) => {
                     let a = x.to_vec();
                     let b = x.payment().to_vec();
-                    let c = x.delegation().to_vec();
-                    Ok(SplitAddressResult(Some(a), Some(b), Some(c)))
+
+                    let c = match x.delegation() {
+                        ShelleyDelegationPart::Key(..) => Some(x.delegation().to_vec()),
+                        ShelleyDelegationPart::Script(..) => Some(x.delegation().to_vec()),
+                        ShelleyDelegationPart::Pointer(..) => Some(x.delegation().to_vec()),
+                        ShelleyDelegationPart::Null => None,
+                    };
+
+                    Ok(SplitAddressResult(Some(a), Some(b), c))
                 }
                 Address::Stake(x) => {
                     let a = x.to_vec();
