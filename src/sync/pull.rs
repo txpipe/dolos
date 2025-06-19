@@ -167,7 +167,6 @@ impl gasket::framework::Worker<Stage> for Worker {
             debug!("should request next batch of blocks");
             Ok(WorkSchedule::Unit(WorkUnit::Pull))
         } else {
-            stage.quota.on_tip();
             debug!("should await next block");
             Ok(WorkSchedule::Unit(WorkUnit::Await))
         }
@@ -198,6 +197,9 @@ impl gasket::framework::Worker<Stage> for Worker {
                     }
                     PullBatch::Empty => (),
                 };
+                if !self.peer_session.chainsync().has_agency() {
+                    stage.quota.on_tip();
+                }
             }
             WorkUnit::Await => {
                 info!("waiting for new block");
