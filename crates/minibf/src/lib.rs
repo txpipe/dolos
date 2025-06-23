@@ -172,6 +172,10 @@ impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
                 "/txs/{tx_hash}/metadata/cbor",
                 get(routes::txs::by_hash_metadata_cbor::<D>),
             )
+            .route(
+                "/txs/{tx_hash}/redeemers",
+                get(routes::txs::by_hash_redeemers::<D>),
+            )
             .with_state(Facade::<D> { inner: domain })
             .layer(
                 trace::TraceLayer::new_for_http()
