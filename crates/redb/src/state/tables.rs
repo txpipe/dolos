@@ -4,6 +4,7 @@ use dolos_core::TxoIdx;
 use itertools::Itertools as _;
 use pallas::ledger::addresses::ShelleyDelegationPart;
 use pallas::{crypto::hash::Hash, ledger::traverse::MultiEraOutput};
+use redb::ReadableTableMetadata as _;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
@@ -158,6 +159,13 @@ impl UtxosTable {
 
         Ok(())
     }
+
+    pub fn stats(rx: &ReadTransaction) -> Result<redb::TableStats, Error> {
+        let table = rx.open_table(Self::DEF)?;
+        let stats = table.stats()?;
+
+        Ok(stats)
+    }
 }
 
 pub struct PParamsTable;
@@ -213,6 +221,13 @@ impl PParamsTable {
         }
 
         Ok(())
+    }
+
+    pub fn stats(rx: &ReadTransaction) -> Result<redb::TableStats, Error> {
+        let table = rx.open_table(Self::DEF)?;
+        let stats = table.stats()?;
+
+        Ok(stats)
     }
 }
 
@@ -356,6 +371,13 @@ impl CursorTable {
         }
 
         Ok(())
+    }
+
+    pub fn stats(rx: &ReadTransaction) -> Result<redb::TableStats, Error> {
+        let table = rx.open_table(Self::DEF)?;
+        let stats = table.stats()?;
+
+        Ok(stats)
     }
 
     pub fn last(rx: &ReadTransaction) -> Result<Option<(BlockSlot, CursorValue)>, Error> {
@@ -595,5 +617,21 @@ impl FilterIndexes {
         Self::copy_table(rx, wx, Self::BY_ASSET)?;
 
         Ok(())
+    }
+
+    pub fn stats(rx: &ReadTransaction) -> Result<HashMap<&'static str, redb::TableStats>, Error> {
+        let address = rx.open_multimap_table(Self::BY_ADDRESS)?;
+        let payment = rx.open_multimap_table(Self::BY_PAYMENT)?;
+        let stake = rx.open_multimap_table(Self::BY_STAKE)?;
+        let policy = rx.open_multimap_table(Self::BY_POLICY)?;
+        let asset = rx.open_multimap_table(Self::BY_ASSET)?;
+
+        Ok(HashMap::from_iter([
+            ("address", address.stats()?),
+            ("payment", payment.stats()?),
+            ("stake", stake.stats()?),
+            ("policy", policy.stats()?),
+            ("asset", asset.stats()?),
+        ]))
     }
 }

@@ -6,6 +6,7 @@ mod export;
 mod find_seq;
 mod prune_chain;
 mod prune_wal;
+mod stats;
 mod summary;
 
 #[derive(Debug, Subcommand)]
@@ -24,6 +25,8 @@ pub enum Command {
     PruneWal(prune_wal::Args),
     /// removes blocks from the chain before a given slot
     PruneChain(prune_chain::Args),
+    /// shows statistics about the data for Redb stores
+    Stats(stats::Args),
 }
 
 #[derive(Debug, Parser)]
@@ -45,6 +48,7 @@ pub fn run(
         Command::CopyWal(x) => copy_wal::run(config, x)?,
         Command::PruneWal(x) => prune_wal::run(config, x)?,
         Command::PruneChain(x) => prune_chain::run(config, x)?,
+        Command::Stats(x) => stats::run(config, x)?,
     }
 
     Ok(())

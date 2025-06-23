@@ -121,6 +121,16 @@ impl From<dolos_redb::state::LedgerStore> for StateAdapter {
     }
 }
 
+impl TryFrom<StateAdapter> for dolos_redb::state::LedgerStore {
+    type Error = StateError;
+
+    fn try_from(value: StateAdapter) -> Result<Self, Self::Error> {
+        match value {
+            StateAdapter::Redb(x) => Ok(x),
+        }
+    }
+}
+
 impl pallas::interop::utxorpc::LedgerContext for StateAdapter {
     fn get_utxos<'a>(
         &self,
