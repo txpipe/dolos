@@ -1,5 +1,6 @@
 use ::redb::{Database, MultimapTableHandle as _, TableHandle as _};
-use std::path::Path;
+use redb::TableStats;
+use std::{collections::HashMap, path::Path};
 use tracing::{debug, info, warn};
 
 use dolos_core::{
@@ -311,6 +312,13 @@ impl LedgerStore {
             (LedgerStore::SchemaV2Light(x), LedgerStore::SchemaV2Light(target)) => {
                 Ok(x.copy(target)?)
             }
+            _ => Err(RedbStateError(StateError::InvalidStoreVersion)),
+        }
+    }
+
+    pub fn stats(&self) -> Result<HashMap<&str, TableStats>, RedbStateError> {
+        match self {
+            LedgerStore::SchemaV2(x) => Ok(x.stats()?),
             _ => Err(RedbStateError(StateError::InvalidStoreVersion)),
         }
     }

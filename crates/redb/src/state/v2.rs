@@ -1,5 +1,6 @@
 use ::redb::{Database, Durability};
-use std::sync::Arc;
+use redb::TableStats;
+use std::{collections::HashMap, sync::Arc};
 
 use super::tables;
 use crate::state::*;
@@ -82,6 +83,21 @@ impl LedgerStore {
         wx.commit()?;
 
         Ok(())
+    }
+
+    pub fn stats(&self) -> Result<HashMap<&str, TableStats>, Error> {
+        let rx = self.db().begin_read()?;
+
+        let cursor = tables::CursorTable::stats(&rx)?;
+        let utxos = tables::UtxosTable::stats(&rx)?;
+        let pparams = tables::PParamsTable::stats(&rx)?;
+        let filters = tables::FilterIndexes::stats(&rx)?;
+
+        let all_tables = [("cursor", cursor), ("utxos", utxos), ("pparams", pparams)]
+            .into_iter()
+            .chain(filters.into_iter());
+
+        Ok(HashMap::from_iter(all_tables))
     }
 
     pub fn copy(&self, target: &Self) -> Result<(), Error> {
