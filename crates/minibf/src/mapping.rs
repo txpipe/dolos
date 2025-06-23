@@ -15,7 +15,7 @@ use itertools::Itertools;
 use pallas::{
     codec::minicbor,
     ledger::{
-        addresses::{Address, StakeAddress},
+        addresses::Address,
         primitives::{
             alonzo::{self, Certificate},
             conway::{DatumOption, ScriptRef},

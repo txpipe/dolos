@@ -127,7 +127,6 @@ impl TryFrom<StateAdapter> for dolos_redb::state::LedgerStore {
     fn try_from(value: StateAdapter) -> Result<Self, Self::Error> {
         match value {
             StateAdapter::Redb(x) => Ok(x),
-            _ => Err(StateError::InvalidStoreVersion),
         }
     }
 }

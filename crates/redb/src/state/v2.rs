@@ -95,7 +95,7 @@ impl LedgerStore {
 
         let all_tables = [("cursor", cursor), ("utxos", utxos), ("pparams", pparams)]
             .into_iter()
-            .chain(filters.into_iter());
+            .chain(filters);
 
         Ok(HashMap::from_iter(all_tables))
     }
