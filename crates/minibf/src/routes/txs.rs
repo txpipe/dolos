@@ -7,6 +7,7 @@ use blockfrost_openapi::models::{
     tx_content::TxContent, tx_content_cbor::TxContentCbor,
     tx_content_metadata_cbor_inner::TxContentMetadataCborInner,
     tx_content_metadata_inner::TxContentMetadataInner, tx_content_utxo::TxContentUtxo,
+    tx_content_withdrawals_inner::TxContentWithdrawalsInner,
 };
 use dolos_core::{ArchiveStore as _, Domain};
 
@@ -98,6 +99,23 @@ pub async fn by_hash_metadata_cbor<D: Domain>(
     Path(tx_hash): Path<String>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<TxContentMetadataCborInner>>, StatusCode> {
+    let hash = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    let (raw, order) = domain
+        .archive()
+        .get_block_with_tx(hash.as_slice())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let tx = TxModelBuilder::new(&raw, order)?;
+
+    tx.into_response()
+}
+
+pub async fn by_hash_withdrawals<D: Domain>(
+    Path(tx_hash): Path<String>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Vec<TxContentWithdrawalsInner>>, StatusCode> {
     let hash = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
 
     let (raw, order) = domain
