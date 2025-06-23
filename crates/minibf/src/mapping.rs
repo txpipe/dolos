@@ -1,7 +1,8 @@
 use axum::{Json, http::StatusCode};
 use blockfrost_openapi::models::{
     address_utxo_content_inner::AddressUtxoContentInner, tx_content::TxContent,
-    tx_content_cbor::TxContentCbor, tx_content_metadata_inner::TxContentMetadataInner,
+    tx_content_cbor::TxContentCbor, tx_content_metadata_cbor_inner::TxContentMetadataCborInner,
+    tx_content_metadata_inner::TxContentMetadataInner,
     tx_content_metadata_inner_json_metadata::TxContentMetadataInnerJsonMetadata,
     tx_content_output_amount_inner::TxContentOutputAmountInner, tx_content_utxo::TxContentUtxo,
     tx_content_utxo_inputs_inner::TxContentUtxoInputsInner,
@@ -703,6 +704,31 @@ impl IntoModel<Vec<TxContentMetadataInner>> for TxModelBuilder<'_> {
                 Ok(TxContentMetadataInner {
                     label: label.to_string(),
                     json_metadata: Box::new(metadatum.clone().into_model()?),
+                })
+            })
+            .try_collect()
+            .map_err(|_: StatusCode| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        Ok(items)
+    }
+}
+
+impl IntoModel<Vec<TxContentMetadataCborInner>> for TxModelBuilder<'_> {
+    type SortKey = ();
+
+    fn into_model(self) -> Result<Vec<TxContentMetadataCborInner>, StatusCode> {
+        let tx = self.tx()?;
+        let metadata = tx.metadata();
+
+        let entries: Vec<_> = metadata.collect();
+
+        let items = entries
+            .into_iter()
+            .map(|(label, metadatum)| {
+                Ok(TxContentMetadataCborInner {
+                    label: label.to_string(),
+                    metadata: Some(hex::encode(minicbor::to_vec(metadatum).unwrap())),
+                    ..Default::default()
                 })
             })
             .try_collect()
