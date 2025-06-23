@@ -4,8 +4,9 @@ use blockfrost_openapi::models::{
     tx_content_cbor::TxContentCbor, tx_content_metadata_cbor_inner::TxContentMetadataCborInner,
     tx_content_metadata_inner::TxContentMetadataInner,
     tx_content_metadata_inner_json_metadata::TxContentMetadataInnerJsonMetadata,
-    tx_content_output_amount_inner::TxContentOutputAmountInner, tx_content_utxo::TxContentUtxo,
-    tx_content_utxo_inputs_inner::TxContentUtxoInputsInner,
+    tx_content_output_amount_inner::TxContentOutputAmountInner,
+    tx_content_redeemers_inner::Purpose, tx_content_redeemers_inner::TxContentRedeemersInner,
+    tx_content_utxo::TxContentUtxo, tx_content_utxo_inputs_inner::TxContentUtxoInputsInner,
     tx_content_utxo_outputs_inner::TxContentUtxoOutputsInner,
 };
 use dolos_cardano::pparams::ChainSummary;
@@ -20,8 +21,8 @@ use pallas::{
             conway::{DatumOption, ScriptRef},
         },
         traverse::{
-            ComputeHash, MultiEraBlock, MultiEraInput, MultiEraOutput, MultiEraTx, MultiEraValue,
-            OriginalHash,
+            ComputeHash, MultiEraBlock, MultiEraInput, MultiEraOutput, MultiEraRedeemer,
+            MultiEraTx, MultiEraValue, OriginalHash,
         },
     },
 };
@@ -731,6 +732,51 @@ impl IntoModel<Vec<TxContentMetadataCborInner>> for TxModelBuilder<'_> {
                     ..Default::default()
                 })
             })
+            .try_collect()
+            .map_err(|_: StatusCode| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        Ok(items)
+    }
+}
+
+impl IntoModel<TxContentRedeemersInner> for MultiEraRedeemer<'_> {
+    type SortKey = ();
+
+    fn into_model(self) -> Result<TxContentRedeemersInner, StatusCode> {
+        let out = TxContentRedeemersInner {
+            purpose: match self.tag() {
+                pallas::ledger::primitives::conway::RedeemerTag::Spend => Purpose::Spend,
+                pallas::ledger::primitives::conway::RedeemerTag::Mint => Purpose::Mint,
+                pallas::ledger::primitives::conway::RedeemerTag::Cert => Purpose::Cert,
+                pallas::ledger::primitives::conway::RedeemerTag::Reward => Purpose::Reward,
+                // TODO: discuss with BF team if schema should be extended to include these
+                _ => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+            },
+            tx_index: self.index() as i32,
+            unit_mem: self.ex_units().mem.to_string(),
+            unit_steps: self.ex_units().steps.to_string(),
+            // TODO: we should change this in Pallas to ensure that we have a KeepRaw wrapping the
+            // redeemer data
+            redeemer_data_hash: self.data().compute_hash().to_string(),
+            script_hash: todo!(),
+            datum_hash: todo!(),
+            fee: todo!(),
+        };
+
+        Ok(out)
+    }
+}
+
+impl IntoModel<Vec<TxContentRedeemersInner>> for TxModelBuilder<'_> {
+    type SortKey = ();
+
+    fn into_model(self) -> Result<Vec<TxContentRedeemersInner>, StatusCode> {
+        let tx = self.tx()?;
+        let redeemers = tx.redeemers();
+
+        let items = redeemers
+            .into_iter()
+            .map(|redeemer| redeemer.into_model())
             .try_collect()
             .map_err(|_: StatusCode| StatusCode::INTERNAL_SERVER_ERROR)?;
 
