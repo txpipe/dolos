@@ -7,6 +7,7 @@ use blockfrost_openapi::models::{
     tx_content_output_amount_inner::TxContentOutputAmountInner, tx_content_utxo::TxContentUtxo,
     tx_content_utxo_inputs_inner::TxContentUtxoInputsInner,
     tx_content_utxo_outputs_inner::TxContentUtxoOutputsInner,
+    tx_content_withdrawals_inner::TxContentWithdrawalsInner,
 };
 use dolos_cardano::pparams::ChainSummary;
 use dolos_core::{EraCbor, TxHash, TxOrder, TxoIdx};
@@ -14,7 +15,7 @@ use itertools::Itertools;
 use pallas::{
     codec::minicbor,
     ledger::{
-        addresses::Address,
+        addresses::{Address, StakeAddress},
         primitives::{
             alonzo::{self, Certificate},
             conway::{DatumOption, ScriptRef},
@@ -729,6 +730,32 @@ impl IntoModel<Vec<TxContentMetadataCborInner>> for TxModelBuilder<'_> {
                     label: label.to_string(),
                     metadata: Some(hex::encode(minicbor::to_vec(metadatum).unwrap())),
                     ..Default::default()
+                })
+            })
+            .try_collect()
+            .map_err(|_: StatusCode| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        Ok(items)
+    }
+}
+
+impl IntoModel<Vec<TxContentWithdrawalsInner>> for TxModelBuilder<'_> {
+    type SortKey = ();
+
+    fn into_model(self) -> Result<Vec<TxContentWithdrawalsInner>, StatusCode> {
+        let tx = self.tx()?;
+        let withdrawals = tx.withdrawals();
+        let withdrawals: Vec<_> = withdrawals.collect();
+
+        let items = withdrawals
+            .into_iter()
+            .map(|(address, amount)| {
+                let address =
+                    Address::from_bytes(address).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+                Ok(TxContentWithdrawalsInner {
+                    address: address.to_string(),
+                    amount: amount.to_string(),
                 })
             })
             .try_collect()
