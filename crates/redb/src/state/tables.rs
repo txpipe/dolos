@@ -380,6 +380,21 @@ impl CursorTable {
         Ok(stats)
     }
 
+    pub fn first(rx: &ReadTransaction) -> Result<Option<(BlockSlot, CursorValue)>, Error> {
+        let table = rx.open_table(Self::DEF)?;
+
+        let first = table.first()?;
+
+        if let Some((slot, value)) = first {
+            let slot = slot.value();
+            let value = bincode::deserialize(value.value()).unwrap();
+
+            Ok(Some((slot, value)))
+        } else {
+            Ok(None)
+        }
+    }
+
     pub fn last(rx: &ReadTransaction) -> Result<Option<(BlockSlot, CursorValue)>, Error> {
         let table = rx.open_table(Self::DEF)?;
 

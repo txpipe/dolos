@@ -22,6 +22,7 @@ pub fn run(config: &crate::Config, _args: &Args) -> miette::Result<()> {
     };
 
     let state_summary = StateSummary {
+        start_slot: state.start().unwrap().map(|x| x.slot()),
         tip_slot: state.cursor().unwrap().map(|x| x.slot()),
     };
 

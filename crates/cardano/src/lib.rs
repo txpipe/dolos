@@ -444,4 +444,24 @@ mod tests {
 
         assert_eq!(apply.new_position, undo.undone_position);
     }
+
+    #[test]
+    fn test_lastest_immutable_slot() {
+        let path = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap())
+            .join("test_data")
+            .join("mainnet")
+            .join("genesis");
+
+        let genesis = load_genesis(&path);
+
+        let tip: BlockSlot = 1_000_000;
+
+        let result = lastest_immutable_slot(tip, &genesis);
+
+        // slot delta in hours
+        let delta_in_hours = tip.saturating_sub(result) / (60 * 60);
+
+        // the well-known volatility window for mainnet is 36 hours.
+        assert_eq!(delta_in_hours, 36);
+    }
 }
