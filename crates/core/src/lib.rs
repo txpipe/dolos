@@ -649,7 +649,7 @@ pub trait ChainLogic {
 
     fn mutable_slots(domain: &impl Domain) -> BlockSlot;
 
-    /// Computes the latest immutable slot
+    /// Computes the last immutable slot
     ///
     /// Takes the latest known tip, reads the relevant genesis config values and
     /// uses the security window guarantee formula from consensus to calculate the
