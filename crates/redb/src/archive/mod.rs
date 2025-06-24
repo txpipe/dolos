@@ -231,7 +231,7 @@ impl ChainStore {
         &self,
         max_slots: u64,
         max_prune: Option<u64>,
-    ) -> Result<(), RedbArchiveError> {
+    ) -> Result<bool, RedbArchiveError> {
         match self {
             ChainStore::SchemaV1(x) => x.prune_history(max_slots, max_prune),
         }

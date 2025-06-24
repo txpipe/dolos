@@ -8,7 +8,7 @@ type Error = super::RedbArchiveError;
 
 use dolos_core::{ArchiveError, BlockBody, BlockSlot, EraCbor, LedgerDelta, TxOrder};
 
-use super::{ChainIter, indexes, tables};
+use super::{indexes, tables, ChainIter};
 
 #[derive(Clone)]
 pub struct ChainStore {
@@ -353,13 +353,13 @@ impl ChainStore {
         tables::BlocksTable::get_tip(&rx)
     }
 
-    pub fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<(), Error> {
+    pub fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, Error> {
         let rx = self.db().begin_read()?;
         let start = match tables::BlocksTable::first(&rx)? {
             Some((slot, _)) => slot,
             None => {
                 debug!("no start point found on chain, skipping housekeeping");
-                return Ok(());
+                return Ok(true);
             }
         };
 
@@ -367,7 +367,7 @@ impl ChainStore {
             Some((slot, _)) => slot,
             None => {
                 debug!("no tip found on chain, skipping housekeeping");
-                return Ok(());
+                return Ok(true);
             }
         };
 
@@ -378,12 +378,12 @@ impl ChainStore {
 
         if excess == 0 {
             debug!(delta, max_slots, excess, "no pruning necessary on chain");
-            return Ok(());
+            return Ok(true);
         }
 
-        let max_prune = match max_prune {
-            Some(max) => core::cmp::min(excess, max),
-            None => excess,
+        let (done, max_prune) = match max_prune {
+            Some(max) => (excess <= max, core::cmp::min(excess, max)),
+            None => (true, excess),
         };
 
         let prune_before = start + max_prune;
@@ -400,7 +400,7 @@ impl ChainStore {
 
         wx.commit()?;
 
-        Ok(())
+        Ok(done)
     }
 }
 

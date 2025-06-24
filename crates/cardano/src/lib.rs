@@ -251,8 +251,8 @@ impl dolos_core::ChainLogic for ChainLogic {
         MultiEraBlock::decode(block).map_err(ChainError::DecodingError)
     }
 
-    fn lastest_immutable_slot(domain: &impl Domain, tip: BlockSlot) -> BlockSlot {
-        lastest_immutable_slot(tip, domain.genesis())
+    fn mutable_slots(domain: &impl Domain) -> BlockSlot {
+        mutable_slots(domain.genesis())
     }
 
     fn compute_origin_delta<'a>(genesis: &Genesis) -> Result<LedgerDelta, ChainError> {

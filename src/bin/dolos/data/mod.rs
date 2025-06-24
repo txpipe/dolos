@@ -4,6 +4,7 @@ mod copy_wal;
 mod dump_wal;
 mod export;
 mod find_seq;
+mod housekeeping;
 mod prune_chain;
 mod prune_wal;
 mod stats;
@@ -27,6 +28,8 @@ pub enum Command {
     PruneChain(prune_chain::Args),
     /// shows statistics about the data for Redb stores
     Stats(stats::Args),
+    /// shows statistics about the data for Redb stores
+    Housekeeping(housekeeping::Args),
 }
 
 #[derive(Debug, Parser)]
@@ -49,6 +52,7 @@ pub fn run(
         Command::PruneWal(x) => prune_wal::run(config, x)?,
         Command::PruneChain(x) => prune_chain::run(config, x)?,
         Command::Stats(x) => stats::run(config, x)?,
+        Command::Housekeeping(x) => housekeeping::run(config, x)?,
     }
 
     Ok(())
