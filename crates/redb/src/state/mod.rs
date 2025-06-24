@@ -212,6 +212,13 @@ impl LedgerStore {
         }
     }
 
+    pub fn start(&self) -> Result<Option<ChainPoint>, RedbStateError> {
+        match self {
+            LedgerStore::SchemaV2(x) => Ok(x.start()?),
+            _ => Err(RedbStateError(StateError::InvalidStoreVersion)),
+        }
+    }
+
     pub fn cursor(&self) -> Result<Option<ChainPoint>, RedbStateError> {
         match self {
             LedgerStore::SchemaV1(x) => Ok(x.cursor()?),

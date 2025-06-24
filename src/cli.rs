@@ -19,6 +19,7 @@ pub struct ArchiveSummary {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StateSummary {
+    pub start_slot: Option<BlockSlot>,
     pub tip_slot: Option<BlockSlot>,
 }
 

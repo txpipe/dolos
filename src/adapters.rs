@@ -10,6 +10,14 @@ pub enum StateAdapter {
 }
 
 impl StateStore for StateAdapter {
+    fn start(&self) -> Result<Option<ChainPoint>, StateError> {
+        let out = match self {
+            StateAdapter::Redb(x) => x.start()?,
+        };
+
+        Ok(out)
+    }
+
     fn cursor(&self) -> Result<Option<ChainPoint>, StateError> {
         let out = match self {
             StateAdapter::Redb(x) => x.cursor()?,

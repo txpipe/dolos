@@ -42,6 +42,15 @@ impl LedgerStore {
         self.cursor().map(|x| x.is_none())
     }
 
+    pub fn start(&self) -> Result<Option<ChainPoint>, Error> {
+        let rx = self.db().begin_read()?;
+
+        let earliest =
+            tables::CursorTable::first(&rx)?.map(|(k, v)| ChainPoint::Specific(k, v.hash));
+
+        Ok(earliest)
+    }
+
     pub fn cursor(&self) -> Result<Option<ChainPoint>, Error> {
         let rx = self.db().begin_read()?;
 

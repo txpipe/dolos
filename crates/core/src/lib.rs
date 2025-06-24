@@ -505,6 +505,8 @@ pub enum StateError {
 pub trait StateStore:
     Sized + pallas::interop::utxorpc::LedgerContext + Clone + Send + Sync + 'static
 {
+    fn start(&self) -> Result<Option<ChainPoint>, StateError>;
+
     fn cursor(&self) -> Result<Option<ChainPoint>, StateError>;
 
     fn is_empty(&self) -> Result<bool, StateError>;
@@ -782,14 +784,14 @@ pub trait Domain: Send + Sync + Clone + 'static {
             return Ok(());
         };
 
-        let max_ledger_history = self
+        let finalized_slot = self
             .storage_config()
             .max_ledger_history
+            .map(|x| tip.saturating_sub(x))
             .unwrap_or_else(|| Self::Chain::lastest_immutable_slot(self, tip));
 
-        let to_finalize = tip - max_ledger_history;
-
-        self.state().finalize(to_finalize)?;
+        info!(finalized_slot, "finalizing old ledger state");
+        self.state().finalize(finalized_slot)?;
 
         if let Some(max_slots) = self.storage_config().max_chain_history {
             info!(max_slots, "pruning archive for excess history");
