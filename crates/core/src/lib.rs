@@ -9,7 +9,7 @@ use std::{
     fmt::Display,
 };
 use thiserror::Error;
-use tracing::{info, warn};
+use tracing::info;
 
 mod mempool;
 mod wal;
@@ -527,11 +527,11 @@ pub trait StateStore:
 
     fn apply(&self, deltas: &[LedgerDelta]) -> Result<(), StateError>;
 
-    fn finalize(&self, until: BlockSlot) -> Result<(), StateError>;
-
     fn upgrade(self) -> Result<Self, StateError>;
 
     fn copy(&self, target: &Self) -> Result<(), StateError>;
+
+    fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, StateError>;
 }
 
 #[derive(Debug, Error)]
@@ -586,7 +586,7 @@ pub trait ArchiveStore {
 
     fn apply(&self, deltas: &[LedgerDelta]) -> Result<(), ArchiveError>;
 
-    fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<(), ArchiveError>;
+    fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, ArchiveError>;
 }
 
 #[derive(Debug, Error)]
@@ -647,7 +647,17 @@ pub trait ChainLogic {
 
     fn decode_block<'a>(block: &'a [u8]) -> Result<Self::Block<'a>, ChainError>;
 
-    fn lastest_immutable_slot(domain: &impl Domain, tip: BlockSlot) -> BlockSlot;
+    fn mutable_slots(domain: &impl Domain) -> BlockSlot;
+
+    /// Computes the last immutable slot
+    ///
+    /// Takes the latest known tip, reads the relevant genesis config values and
+    /// uses the security window guarantee formula from consensus to calculate the
+    /// latest slot that can be considered immutable. This is used mainly to define
+    /// which slots can be finalized in the ledger store (aka: compaction).
+    fn last_immutable_slot(domain: &impl Domain, tip: BlockSlot) -> BlockSlot {
+        tip.saturating_sub(Self::mutable_slots(domain))
+    }
 
     fn ledger_query_for_block<'a>(
         block: &Self::Block<'a>,
@@ -776,36 +786,34 @@ pub trait Domain: Send + Sync + Clone + 'static {
 
     const MAX_PRUNE_SLOTS_PER_HOUSEKEEPING: u64 = 10_000;
 
-    fn housekeeping(&self) -> Result<(), DomainError> {
-        // IMPROVE: maybe we can keep the tip in memory as part of the domain struct as
-        // a cache mechanism.
-        let Some(tip) = self.state().cursor()?.map(|x| x.slot()) else {
-            warn!("skipping housekeeping, no tip found");
-            return Ok(());
-        };
-
-        let finalized_slot = self
+    fn housekeeping(&self) -> Result<bool, DomainError> {
+        let max_ledger_slots = self
             .storage_config()
             .max_ledger_history
-            .map(|x| tip.saturating_sub(x))
-            .unwrap_or_else(|| Self::Chain::lastest_immutable_slot(self, tip));
+            .unwrap_or(Self::Chain::mutable_slots(self));
+        info!(max_ledger_slots, "pruning ledger for excess history");
+        let state_pruned = self.state().prune_history(
+            max_ledger_slots,
+            Some(Self::MAX_PRUNE_SLOTS_PER_HOUSEKEEPING),
+        )?;
 
-        info!(finalized_slot, "finalizing old ledger state");
-        self.state().finalize(finalized_slot)?;
-
+        let mut archive_pruned = true;
         if let Some(max_slots) = self.storage_config().max_chain_history {
             info!(max_slots, "pruning archive for excess history");
-            self.archive()
+            archive_pruned = self
+                .archive()
                 .prune_history(max_slots, Some(Self::MAX_PRUNE_SLOTS_PER_HOUSEKEEPING))?;
         }
 
+        let mut wal_pruned = true;
         if let Some(max_slots) = self.storage_config().max_wal_history {
             info!(max_slots, "pruning wal for excess history");
-            self.wal()
+            wal_pruned = self
+                .wal()
                 .prune_history(max_slots, Some(Self::MAX_PRUNE_SLOTS_PER_HOUSEKEEPING))?;
         }
 
-        Ok(())
+        Ok(state_pruned && archive_pruned && wal_pruned)
     }
 }
 

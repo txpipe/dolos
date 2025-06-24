@@ -36,7 +36,7 @@ pub trait WalStore: Clone + Send + Sync + 'static {
 
     async fn tip_change(&self);
 
-    fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<(), WalError>;
+    fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, WalError>;
 
     fn crawl_range<'a>(
         &self,

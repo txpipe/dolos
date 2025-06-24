@@ -294,11 +294,15 @@ impl LedgerStore {
         }
     }
 
-    pub fn finalize(&self, until: BlockSlot) -> Result<(), RedbStateError> {
+    pub fn prune_history(
+        &self,
+        max_slots: u64,
+        max_prune: Option<u64>,
+    ) -> Result<bool, RedbStateError> {
         match self {
-            LedgerStore::SchemaV1(x) => Ok(x.finalize(until)?),
-            LedgerStore::SchemaV2(x) => Ok(x.finalize(until)?),
-            LedgerStore::SchemaV2Light(x) => Ok(x.finalize(until)?),
+            LedgerStore::SchemaV2(x) => Ok(x.prune_history(max_slots, max_prune)?),
+            LedgerStore::SchemaV2Light(x) => Ok(x.prune_history(max_slots, max_prune)?),
+            _ => Err(RedbStateError(StateError::InvalidStoreVersion)),
         }
     }
 

@@ -98,12 +98,12 @@ impl StateStore for StateAdapter {
         Ok(())
     }
 
-    fn finalize(&self, until: BlockSlot) -> Result<(), StateError> {
-        match self {
-            StateAdapter::Redb(x) => x.finalize(until)?,
+    fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, StateError> {
+        let done = match self {
+            StateAdapter::Redb(x) => x.prune_history(max_slots, max_prune)?,
         };
 
-        Ok(())
+        Ok(done)
     }
 
     fn upgrade(self) -> Result<Self, StateError> {
@@ -173,7 +173,7 @@ impl WalStore for WalAdapter {
         }
     }
 
-    fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<(), WalError> {
+    fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, WalError> {
         match self {
             WalAdapter::Redb(x) => WalStore::prune_history(x, max_slots, max_prune),
         }
@@ -331,12 +331,12 @@ impl ArchiveStore for ArchiveAdapter {
         Ok(())
     }
 
-    fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<(), ArchiveError> {
-        match self {
+    fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, ArchiveError> {
+        let done = match self {
             ArchiveAdapter::Redb(x) => x.prune_history(max_slots, max_prune)?,
         };
 
-        Ok(())
+        Ok(done)
     }
 }
 
