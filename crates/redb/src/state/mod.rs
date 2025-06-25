@@ -7,6 +7,8 @@ use dolos_core::{
     BlockSlot, ChainPoint, EraCbor, LedgerDelta, StateError, TxoRef, UtxoMap, UtxoSet,
 };
 
+use crate::state::tables::UtxoKeyIterator;
+
 mod tables;
 pub mod v1;
 pub mod v2;
@@ -170,29 +172,20 @@ impl LedgerStore {
     }
 
     pub fn in_memory_v1() -> Result<Self, StateError> {
-        let db = ::redb::Database::builder()
-            .create_with_backend(::redb::backends::InMemoryBackend::new())
-            .map_err(RedbStateError::from)?;
+        let store = v1::LedgerStore::in_memory()?;
 
-        let store = v1::LedgerStore::initialize(db)?;
         Ok(store.into())
     }
 
     pub fn in_memory_v2() -> Result<Self, StateError> {
-        let db = ::redb::Database::builder()
-            .create_with_backend(::redb::backends::InMemoryBackend::new())
-            .map_err(RedbStateError::from)?;
+        let store = v2::LedgerStore::in_memory()?;
 
-        let store = v2::LedgerStore::initialize(db)?;
         Ok(store.into())
     }
 
     pub fn in_memory_v2_light() -> Result<Self, RedbStateError> {
-        let db = ::redb::Database::builder()
-            .create_with_backend(::redb::backends::InMemoryBackend::new())
-            .unwrap();
+        let store = v2light::LedgerStore::in_memory()?;
 
-        let store = v2light::LedgerStore::initialize(db)?;
         Ok(store.into())
     }
 
@@ -254,6 +247,20 @@ impl LedgerStore {
     pub fn get_utxo_by_address(&self, address: &[u8]) -> Result<UtxoSet, RedbStateError> {
         match self {
             LedgerStore::SchemaV2(x) => Ok(x.get_utxos_by_address(address)?),
+            _ => Err(RedbStateError(StateError::QueryNotSupported)),
+        }
+    }
+
+    pub fn count_utxos_by_address(&self, address: &[u8]) -> Result<u64, RedbStateError> {
+        match self {
+            LedgerStore::SchemaV2(x) => Ok(x.count_utxos_by_address(address)?),
+            _ => Err(RedbStateError(StateError::QueryNotSupported)),
+        }
+    }
+
+    pub fn iter_utxos_by_address(&self, address: &[u8]) -> Result<UtxoKeyIterator, RedbStateError> {
+        match self {
+            LedgerStore::SchemaV2(x) => Ok(x.iter_utxos_by_address(address)?),
             _ => Err(RedbStateError(StateError::QueryNotSupported)),
         }
     }

@@ -3,7 +3,7 @@ use redb::TableStats;
 use std::{collections::HashMap, sync::Arc};
 
 use super::tables;
-use crate::state::*;
+use crate::state::{tables::UtxoKeyIterator, *};
 
 type Error = super::RedbStateError;
 
@@ -21,6 +21,16 @@ impl LedgerStore {
 
     pub(crate) fn db_mut(&mut self) -> Option<&mut Database> {
         Arc::get_mut(&mut self.0)
+    }
+
+    pub fn in_memory() -> Result<Self, StateError> {
+        let db = ::redb::Database::builder()
+            .create_with_backend(::redb::backends::InMemoryBackend::new())
+            .map_err(RedbStateError::from)?;
+
+        let store = Self::initialize(db)?;
+
+        Ok(store)
     }
 
     pub fn initialize(db: Database) -> Result<Self, Error> {
@@ -179,6 +189,16 @@ impl LedgerStore {
     pub fn get_utxos_by_address(&self, address: &[u8]) -> Result<UtxoSet, Error> {
         let rx = self.db().begin_read()?;
         tables::FilterIndexes::get_by_address(&rx, address)
+    }
+
+    pub fn count_utxos_by_address(&self, address: &[u8]) -> Result<u64, Error> {
+        let rx = self.db().begin_read()?;
+        tables::FilterIndexes::count_within_key(&rx, tables::FilterIndexes::BY_ADDRESS, address)
+    }
+
+    pub fn iter_utxos_by_address(&self, address: &[u8]) -> Result<UtxoKeyIterator, Error> {
+        let rx = self.db().begin_read()?;
+        tables::FilterIndexes::iter_within_key(&rx, tables::FilterIndexes::BY_ADDRESS, address)
     }
 
     pub fn get_utxos_by_payment(&self, payment: &[u8]) -> Result<UtxoSet, Error> {

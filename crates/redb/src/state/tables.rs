@@ -411,6 +411,25 @@ impl CursorTable {
     }
 }
 
+pub struct UtxoKeyIterator(redb::MultimapValue<'static, UtxosKey>);
+
+impl Iterator for UtxoKeyIterator {
+    type Item = Result<TxoRef, Error>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let item = self.0.next()?;
+
+        let out = item
+            .map(|item| {
+                let (hash, idx) = item.value();
+                TxoRef((*hash).into(), idx)
+            })
+            .map_err(Error::from);
+
+        Some(out)
+    }
+}
+
 pub struct FilterIndexes;
 
 struct SplitAddressResult(Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>);
@@ -457,6 +476,30 @@ impl FilterIndexes {
         }
 
         Ok(out)
+    }
+
+    pub fn count_within_key(
+        rx: &ReadTransaction,
+        table_def: MultimapTableDefinition<&[u8], UtxosKey>,
+        key: &[u8],
+    ) -> Result<u64, Error> {
+        let table = rx.open_multimap_table(table_def)?;
+
+        let count = table.get(key)?.len();
+
+        Ok(count)
+    }
+
+    pub fn iter_within_key(
+        rx: &ReadTransaction,
+        table_def: MultimapTableDefinition<&[u8], UtxosKey>,
+        key: &[u8],
+    ) -> Result<UtxoKeyIterator, Error> {
+        let table = rx.open_multimap_table(table_def)?;
+
+        let inner = table.get(key)?;
+
+        Ok(UtxoKeyIterator(inner))
     }
 
     pub fn get_by_address(
