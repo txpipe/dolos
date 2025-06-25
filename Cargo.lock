@@ -1186,6 +1186,7 @@ version = "0.1.0"
 dependencies = [
  "bincode 1.3.3",
  "dolos-core",
+ "dolos-testing",
  "hex",
  "itertools 0.13.0",
  "pallas 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
@@ -1196,6 +1197,15 @@ dependencies = [
  "tokio-util",
  "tower-http 0.6.2",
  "tracing",
+]
+
+[[package]]
+name = "dolos-testing"
+version = "0.1.0"
+dependencies = [
+ "dolos-core",
+ "pallas 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
+ "rand 0.9.1",
 ]
 
 [[package]]
