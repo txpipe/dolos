@@ -24,7 +24,6 @@ pub fn hash_or_number_to_body(
     hash_or_number: &str,
     chain: &impl ArchiveStore,
 ) -> Result<BlockBody, StatusCode> {
-    println!("len: {}", hash_or_number.len());
     if hash_or_number.len() == 64 {
         let hash = hex::decode(hash_or_number).map_err(|_| StatusCode::BAD_REQUEST)?;
         match chain
