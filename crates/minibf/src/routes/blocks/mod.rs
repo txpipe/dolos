@@ -24,24 +24,27 @@ pub fn hash_or_number_to_body(
     hash_or_number: &str,
     chain: &impl ArchiveStore,
 ) -> Result<BlockBody, StatusCode> {
-    match hex::decode(hash_or_number) {
-        Ok(hash) => match chain
+    println!("len: {}", hash_or_number.len());
+    if hash_or_number.len() == 64 {
+        let hash = hex::decode(hash_or_number).map_err(|_| StatusCode::BAD_REQUEST)?;
+        match chain
             .get_block_by_hash(&hash)
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         {
             Some(body) => Ok(body),
             None => Err(StatusCode::NOT_FOUND),
-        },
-        Err(_) => match hash_or_number.parse() {
-            Ok(number) => match chain
-                .get_block_by_number(&number)
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-            {
-                Some(body) => Ok(body),
-                None => Err(StatusCode::NOT_FOUND),
-            },
-            Err(_) => Err(StatusCode::BAD_REQUEST),
-        },
+        }
+    } else {
+        let number = hash_or_number
+            .parse()
+            .map_err(|_| StatusCode::BAD_REQUEST)?;
+        match chain
+            .get_block_by_number(&number)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        {
+            Some(body) => Ok(body),
+            None => Err(StatusCode::NOT_FOUND),
+        }
     }
 }
 
