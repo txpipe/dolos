@@ -122,7 +122,7 @@ inherits = "release"
 lto = "thin"
 
 [workspace]
-members = ["crates/cardano", "crates/core", "crates/minibf", "crates/redb", "xtask"]
+members = ["crates/cardano", "crates/core", "crates/testing", "crates/minibf", "crates/redb", "xtask"]
 
 [workspace.dependencies]
 pallas = { git = "https://github.com/txpipe/pallas.git", features = ["hardano"] }

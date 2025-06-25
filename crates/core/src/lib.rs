@@ -14,8 +14,6 @@ use tracing::info;
 mod mempool;
 mod wal;
 
-pub mod testing;
-
 pub type Era = u16;
 
 /// The index of an output in a tx
@@ -652,9 +650,10 @@ pub trait ChainLogic {
     /// Computes the last immutable slot
     ///
     /// Takes the latest known tip, reads the relevant genesis config values and
-    /// uses the security window guarantee formula from consensus to calculate the
-    /// latest slot that can be considered immutable. This is used mainly to define
-    /// which slots can be finalized in the ledger store (aka: compaction).
+    /// uses the security window guarantee formula from consensus to calculate
+    /// the latest slot that can be considered immutable. This is used
+    /// mainly to define which slots can be finalized in the ledger store
+    /// (aka: compaction).
     fn last_immutable_slot(domain: &impl Domain, tip: BlockSlot) -> BlockSlot {
         tip.saturating_sub(Self::mutable_slots(domain))
     }
@@ -832,7 +831,12 @@ pub trait Driver<D: Domain, C: CancelToken>: Send + Sync + 'static {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::slot_to_hash;
+
+    pub fn slot_to_hash(slot: u64) -> BlockHash {
+        let mut hasher = pallas::crypto::hash::Hasher::<256>::new();
+        hasher.input(&(slot as i32).to_le_bytes());
+        hasher.finalize()
+    }
 
     #[test]
     fn chainpoint_partial_eq() {

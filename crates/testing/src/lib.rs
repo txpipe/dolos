@@ -9,11 +9,12 @@ use pallas::{
             babbage::GenTransactionOutput,
             conway::{PostAlonzoTransactionOutput, Value},
         },
-        traverse::Era,
+        traverse::{Era, MultiEraOutput},
     },
 };
+use rand::Rng;
 
-use crate::*;
+use dolos_core::*;
 
 #[derive(Clone)]
 pub enum TestAddress {
@@ -184,16 +185,29 @@ pub fn replace_utxo_map_txhash(utxos: UtxoMap, tx_sequence: u64) -> UtxoMap {
         .collect()
 }
 
-pub fn assert_utxo_address_and_value(utxo: &EraCbor, address: impl Into<Vec<u8>>, value: u64) {
+pub fn get_utxo_address_and_value(utxo: &EraCbor) -> (Vec<u8>, u64) {
     let EraCbor(_, cbor) = utxo;
+
     let output = MultiEraOutput::decode(Era::Conway, cbor).unwrap();
 
     let Some(GenTransactionOutput::PostAlonzo(output)) = output.as_conway() else {
         unreachable!()
     };
 
-    assert_eq!(output.address.as_slice(), address.into());
-    assert_eq!(output.value, Value::Coin(value));
+    (
+        output.address.as_slice().to_vec(),
+        match output.value {
+            Value::Coin(value) => value,
+            _ => unreachable!(),
+        },
+    )
+}
+
+pub fn assert_utxo_address_and_value(utxo: &EraCbor, address: impl Into<Vec<u8>>, value: u64) {
+    let (output_address, output_value) = get_utxo_address_and_value(utxo);
+
+    assert_eq!(output_address, address.into());
+    assert_eq!(output_value, value);
 }
 
 pub fn assert_utxo_map_address_and_value<A>(utxos: &UtxoMap, address: A, value: u64)
@@ -206,24 +220,11 @@ where
 }
 
 pub fn print_utxo(txoref: &TxoRef, utxo: &EraCbor) {
-    let EraCbor(_, cbor) = utxo;
-    let output = MultiEraOutput::decode(Era::Conway, cbor).unwrap();
+    let (output_address, output_value) = get_utxo_address_and_value(utxo);
 
-    let Some(GenTransactionOutput::PostAlonzo(output)) = output.as_conway() else {
-        unreachable!()
-    };
+    let bech32 = Address::from_bytes(&output_address).unwrap().to_string();
 
-    let bech32 = Address::from_bytes(&output.address)
-        .unwrap()
-        .to_bech32()
-        .unwrap();
-
-    let value = match output.value {
-        Value::Coin(value) => value,
-        _ => unreachable!(),
-    };
-
-    println!("{}#{} -> {} = {}", txoref.0, txoref.1, bech32, value);
+    println!("{}#{} -> {} = {}", txoref.0, txoref.1, bech32, output_value);
 }
 
 pub fn print_utxo_map(utxos: &UtxoMap) {
@@ -280,5 +281,38 @@ pub fn make_move_utxo_delta(
     let mut delta = forward_delta_from_slot(slot);
     delta.consumed_utxo = utxos;
     delta.produced_utxo = moved;
+    delta
+}
+
+pub fn make_random_utxo_delta(
+    slot: u64,
+    addresses: impl IntoIterator<Item = TestAddress>,
+    max_utxo_per_address: u64,
+    max_amount_per_utxo: u64,
+) -> LedgerDelta {
+    let addresses = addresses.into_iter().collect::<Vec<_>>();
+
+    let mut utxos = UtxoMap::new();
+
+    for (tx, address) in addresses.iter().enumerate() {
+        let utxo_count = rand::rng().random_range(0..max_utxo_per_address);
+
+        for ordinal in 0..utxo_count {
+            let tx = tx_sequence_to_hash(tx as u64);
+
+            let (key, value) = fake_utxo(
+                tx,
+                ordinal as u32,
+                address.clone(),
+                rand::rng().random_range(0..max_amount_per_utxo),
+            );
+
+            utxos.insert(key, value);
+        }
+    }
+
+    let mut delta = forward_delta_from_slot(slot);
+    delta.consumed_utxo = utxos;
+
     delta
 }
