@@ -23,6 +23,16 @@ impl LedgerStore {
         Arc::get_mut(&mut self.0)
     }
 
+    pub fn in_memory() -> Result<Self, RedbStateError> {
+        let db = ::redb::Database::builder()
+            .create_with_backend(::redb::backends::InMemoryBackend::new())
+            .unwrap();
+
+        let store = Self::initialize(db)?;
+
+        Ok(store)
+    }
+
     pub fn initialize(db: Database) -> Result<Self, Error> {
         let mut wx = db.begin_write()?;
         wx.set_durability(Durability::Immediate);

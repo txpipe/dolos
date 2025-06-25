@@ -10,6 +10,16 @@ type Error = super::RedbStateError;
 pub struct LedgerStore(pub Arc<Database>);
 
 impl LedgerStore {
+    pub fn in_memory() -> Result<Self, StateError> {
+        let db = ::redb::Database::builder()
+            .create_with_backend(::redb::backends::InMemoryBackend::new())
+            .map_err(RedbStateError::from)?;
+
+        let store = Self::initialize(db)?;
+
+        Ok(store)
+    }
+
     pub fn initialize(db: Database) -> Result<Self, Error> {
         let mut wx = db.begin_write()?;
         wx.set_durability(Durability::Immediate);
