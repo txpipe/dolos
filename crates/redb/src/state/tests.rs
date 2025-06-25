@@ -1,9 +1,9 @@
+use pallas::ledger::addresses::{Address, ShelleyDelegationPart};
 use std::{collections::HashSet, str::FromStr as _};
 
+use dolos_testing::*;
+
 use super::*;
-use dolos_core::TxHash;
-use dolos_testing::{TestAddress, fake_utxo, tx_sequence_to_hash, *};
-use pallas::ledger::addresses::{Address, ShelleyDelegationPart};
 
 #[test]
 fn schema_hash_computation() {
@@ -37,13 +37,16 @@ fn cursor_is_persisted() {
         );
     }
 
-    for i in 10..5 {
-        let delta = undo_delta_from_slot(i);
+    for i in 0..5 {
+        let undo_slot = 10 - i;
+        let delta = undo_delta_from_slot(undo_slot);
         store.apply(&[delta]).unwrap();
+
+        let cursor_slot = undo_slot - 1;
 
         assert_eq!(
             store.cursor().unwrap(),
-            Some(ChainPoint::Specific(i, slot_to_hash(i)))
+            Some(ChainPoint::Specific(cursor_slot, slot_to_hash(cursor_slot)))
         );
     }
 }
@@ -252,8 +255,8 @@ fn test_count_utxos_by_address() {
     for address in TestAddress::everyone().iter() {
         let expected = delta
             .produced_utxo
-            .iter()
-            .map(|(_, v)| get_utxo_address_and_value(v))
+            .values()
+            .map(get_utxo_address_and_value)
             .filter(|(addr, _)| addr == address.to_bytes().as_slice())
             .count();
 
