@@ -1,20 +1,20 @@
 use std::collections::{HashMap, HashSet};
 
 use axum::{
-    Json,
     extract::{Path, Query, State},
     http::StatusCode,
+    Json,
 };
 use blockfrost_openapi::models::address_utxo_content_inner::AddressUtxoContentInner;
 use itertools::Itertools;
 
-use dolos_core::{Domain, StateStore as _, TxoRef};
+use dolos_core::{ArchiveStore as _, Domain, StateStore as _, TxoRef};
 use pallas::ledger::traverse::{MultiEraBlock, MultiEraOutput};
 
 use crate::{
-    Facade,
-    mapping::{IntoModel, UtxoOutputModelBuilder},
+    mapping::{IntoModel, UtxoBlockData, UtxoOutputModelBuilder},
     pagination::{Order, Pagination, PaginationParameters},
+    Facade,
 };
 
 fn load_utxo_models<D: Domain>(
@@ -35,24 +35,34 @@ fn load_utxo_models<D: Domain>(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let tx_deps: Vec<_> = utxos.keys().map(|txoref| txoref.0).unique().collect();
-
-    let block_deps = domain.get_block_with_tx_batch(tx_deps)?;
-
-    // decoded
-    let blocks_deps: HashMap<_, _> = block_deps
+    let block_deps: HashMap<_, _> = tx_deps
         .iter()
-        .map(|(k, (cbor, order))| MultiEraBlock::decode(cbor).map(|x| (k, (x, order))))
-        .try_collect()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .flat_map(
+            |tx| match domain.archive().get_block_with_tx(tx.as_slice()) {
+                Ok(Some((cbor, txorder))) => {
+                    let Ok(block) = MultiEraBlock::decode(&cbor) else {
+                        return Some(Err(StatusCode::INTERNAL_SERVER_ERROR));
+                    };
+                    let block_data = match UtxoBlockData::try_from((block, txorder)) {
+                        Ok(data) => data,
+                        Err(err) => return Some(Err(err)),
+                    };
+                    Some(Ok((tx, block_data)))
+                }
+                Ok(None) => None,
+                Err(_) => Some(Err(StatusCode::INTERNAL_SERVER_ERROR)),
+            },
+        )
+        .try_collect()?;
 
     let mut models: Vec<_> = utxos
         .into_iter()
         .map(|(TxoRef(tx_hash, txo_idx), txo)| {
             let builder = UtxoOutputModelBuilder::from_output(*txo_idx, txo);
-            let block_data = blocks_deps.get(&tx_hash).cloned();
+            let block_data = block_deps.get(&tx_hash).cloned();
 
-            if let Some((block, tx_order)) = block_data {
-                builder.with_block_data(block, *tx_order)
+            if let Some(data) = block_data {
+                builder.with_block_data(data)
             } else {
                 builder
             }
