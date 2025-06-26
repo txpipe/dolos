@@ -10,6 +10,7 @@ use itertools::Itertools;
 
 use dolos_core::{ArchiveStore as _, Domain, StateStore as _, TxoRef};
 use pallas::ledger::traverse::{MultiEraBlock, MultiEraOutput};
+use rayon::prelude::*;
 
 use crate::{
     mapping::{IntoModel, UtxoBlockData, UtxoOutputModelBuilder},
@@ -36,7 +37,7 @@ fn load_utxo_models<D: Domain>(
 
     let tx_deps: Vec<_> = utxos.keys().map(|txoref| txoref.0).unique().collect();
     let block_deps: HashMap<_, _> = tx_deps
-        .iter()
+        .par_iter()
         .flat_map(
             |tx| match domain.archive().get_block_with_tx(tx.as_slice()) {
                 Ok(Some((cbor, txorder))) => {
@@ -53,7 +54,7 @@ fn load_utxo_models<D: Domain>(
                 Err(_) => Some(Err(StatusCode::INTERNAL_SERVER_ERROR)),
             },
         )
-        .try_collect()?;
+        .collect::<Result<_, _>>()?;
 
     let mut models: Vec<_> = utxos
         .into_iter()
