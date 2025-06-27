@@ -42,7 +42,7 @@ pub async fn run(config: super::Config, _args: &Args) -> miette::Result<()> {
     }
 
     sync.await.unwrap();
-
+    crate::common::shutdown_tracing();
     warn!("shutdown complete");
 
     Ok(())
