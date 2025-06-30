@@ -280,6 +280,7 @@ impl<'a, D: Domain> InputSelector<'a, D> {
     pub fn select(
         &self,
         criteria: &tx3_lang::ir::InputQuery,
+        ignore: &[tx3_lang::UtxoRef],
     ) -> Result<tx3_lang::UtxoSet, tx3_cardano::Error> {
         let search_space = self.narrow_search_space(criteria)?;
 
@@ -288,6 +289,17 @@ impl<'a, D: Domain> InputSelector<'a, D> {
             Subset::Specific(_) => return Err(tx3_cardano::Error::InputQueryTooBroad),
             Subset::All => return Err(tx3_cardano::Error::InputQueryTooBroad),
         };
+
+        let refs = refs
+            .into_iter()
+            .filter(|TxoRef(hash, index)| {
+                let utxo_ref = tx3_lang::UtxoRef {
+                    txid: hash.to_vec(),
+                    index: *index,
+                };
+                !ignore.contains(&utxo_ref)
+            })
+            .collect::<Vec<_>>();
 
         let utxos = self
             .ledger
@@ -308,6 +320,7 @@ pub fn resolve<D: Domain>(
     ledger: &D::State,
     network: tx3_cardano::Network,
     criteria: &tx3_lang::ir::InputQuery,
+    ignore: &[tx3_lang::UtxoRef],
 ) -> Result<tx3_lang::UtxoSet, tx3_cardano::Error> {
-    InputSelector::<D>::new(ledger, network).select(criteria)
+    InputSelector::<D>::new(ledger, network).select(criteria, ignore)
 }
