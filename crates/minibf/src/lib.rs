@@ -127,34 +127,27 @@ impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
                 "/addresses/{address}/utxos/{asset}",
                 get(routes::addresses::utxos_with_asset::<D>),
             )
-            .route("/blocks/latest", get(routes::blocks::latest::route::<D>))
-            .route(
-                "/blocks/latest/txs",
-                get(routes::blocks::latest::txs::route::<D>),
-            )
+            .route("/blocks/latest", get(routes::blocks::latest::<D>))
+            .route("/blocks/latest/txs", get(routes::blocks::latest_txs::<D>))
             .route(
                 "/blocks/{hash_or_number}",
-                get(routes::blocks::hash_or_number::route::<D>),
-            )
-            .route(
-                "/blocks/{hash_or_number}/addresses",
-                get(routes::blocks::hash_or_number::addresses::route::<D>),
+                get(routes::blocks::by_hash_or_number::<D>),
             )
             .route(
                 "/blocks/{hash_or_number}/next",
-                get(routes::blocks::hash_or_number::next::route::<D>),
+                get(routes::blocks::by_hash_or_number_next::<D>),
             )
             .route(
                 "/blocks/{hash_or_number}/previous",
-                get(routes::blocks::hash_or_number::previous::route::<D>),
+                get(routes::blocks::by_hash_or_number_previous::<D>),
             )
             .route(
                 "/blocks/{hash_or_number}/txs",
-                get(routes::blocks::hash_or_number::txs::route::<D>),
+                get(routes::blocks::by_hash_or_number_txs::<D>),
             )
             .route(
                 "/blocks/slot/{slot_number}",
-                get(routes::blocks::slot::slot_number::route::<D>),
+                get(routes::blocks::by_slot::<D>),
             )
             .route(
                 "/epochs/latest/parameters",

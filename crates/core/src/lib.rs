@@ -27,13 +27,16 @@ pub type BlockSlot = u64;
 
 /// The height of a block (a.k.a. block number)
 pub type BlockHeight = u64;
-pub type BlockBody = Vec<u8>;
+
+pub type Cbor = Vec<u8>;
+
+pub type BlockBody = Cbor;
 pub type BlockEra = pallas::ledger::traverse::Era;
 pub type BlockHash = Hash<32>;
-pub type BlockHeader = Vec<u8>;
+pub type BlockHeader = Cbor;
 pub type TxHash = Hash<32>;
 pub type OutputIdx = u64;
-pub type UtxoBody = (u16, Vec<u8>);
+pub type UtxoBody = (u16, Cbor);
 pub type ChainTip = pallas::network::miniprotocols::chainsync::Tip;
 pub type LogSeq = u64;
 
@@ -41,15 +44,15 @@ pub use mempool::*;
 pub use wal::*;
 
 #[derive(Debug, Eq, PartialEq, Clone)]
-pub struct EraCbor(pub Era, pub Vec<u8>);
+pub struct EraCbor(pub Era, pub Cbor);
 
-impl From<(Era, Vec<u8>)> for EraCbor {
-    fn from(value: (Era, Vec<u8>)) -> Self {
+impl From<(Era, Cbor)> for EraCbor {
+    fn from(value: (Era, Cbor)) -> Self {
         Self(value.0, value.1)
     }
 }
 
-impl From<EraCbor> for (Era, Vec<u8>) {
+impl From<EraCbor> for (Era, Cbor) {
     fn from(value: EraCbor) -> Self {
         (value.0, value.1)
     }
