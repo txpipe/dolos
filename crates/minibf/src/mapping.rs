@@ -4,14 +4,15 @@ use pallas::{
     codec::minicbor,
     crypto::hash::Hash,
     ledger::{
-        addresses::Address,
+        addresses::{Address, Network, StakeAddress, StakePayload},
         primitives::{
-            alonzo::{self, Certificate},
-            conway::{DatumOption, ScriptRef},
+            StakeCredential,
+            alonzo::{self, Certificate as AlonzoCert},
+            conway::{Certificate as ConwayCert, DatumOption, ScriptRef},
         },
         traverse::{
-            ComputeHash, MultiEraBlock, MultiEraHeader, MultiEraInput, MultiEraOutput, MultiEraTx,
-            MultiEraValue, OriginalHash,
+            ComputeHash, MultiEraBlock, MultiEraCert, MultiEraHeader, MultiEraInput,
+            MultiEraOutput, MultiEraTx, MultiEraValue, OriginalHash,
         },
     },
 };
@@ -20,6 +21,7 @@ use std::collections::HashMap;
 use blockfrost_openapi::models::{
     address_utxo_content_inner::AddressUtxoContentInner, block_content::BlockContent,
     tx_content::TxContent, tx_content_cbor::TxContentCbor,
+    tx_content_delegations_inner::TxContentDelegationsInner,
     tx_content_metadata_cbor_inner::TxContentMetadataCborInner,
     tx_content_metadata_inner::TxContentMetadataInner,
     tx_content_metadata_inner_json_metadata::TxContentMetadataInnerJsonMetadata,
@@ -387,6 +389,7 @@ impl<'a> IntoModel<TxContentUtxoInputsInner> for UtxoInputModelBuilder<'a> {
 
 pub struct TxModelBuilder<'a> {
     chain: Option<ChainSummary>,
+    network: Option<Network>,
     block: MultiEraBlock<'a>,
     order: TxOrder,
     deps: HashMap<TxHash, MultiEraTx<'a>>,
@@ -400,6 +403,7 @@ impl<'a> TxModelBuilder<'a> {
             block,
             order,
             chain: None,
+            network: None,
             deps: HashMap::new(),
         })
     }
@@ -407,6 +411,13 @@ impl<'a> TxModelBuilder<'a> {
     pub fn with_chain(self, chain: ChainSummary) -> Self {
         Self {
             chain: Some(chain),
+            ..self
+        }
+    }
+
+    pub fn with_network(self, network: Network) -> Self {
+        Self {
+            network: Some(network),
             ..self
         }
     }
@@ -551,7 +562,15 @@ macro_rules! count_certs {
             .iter()
             .map(|x| x.as_alonzo())
             .flatten()
-            .filter(|x| matches!(x, Certificate::$cert { .. }))
+            .filter(|x| matches!(x, AlonzoCert::$cert { .. }))
+            .count() as i32
+    };
+    ($tx:expr, "conway", $cert:ident) => {
+        $tx.certs()
+            .iter()
+            .map(|x| x.as_alonzo())
+            .flatten()
+            .filter(|x| matches!(x, ConwayCert::$cert { .. }))
             .count() as i32
     };
 }
@@ -765,6 +784,86 @@ impl IntoModel<Vec<TxContentWithdrawalsInner>> for TxModelBuilder<'_> {
             })
             .try_collect()
             .map_err(|_: StatusCode| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        Ok(items)
+    }
+}
+
+fn build_delegation_inner(
+    index: usize,
+    cred: &StakeCredential,
+    pool: &Hash<28>,
+    network: Network,
+    active_epoch: i32,
+) -> Result<TxContentDelegationsInner, StatusCode> {
+    let pool_hrp = bech32::Hrp::parse("pool").map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let pool_id = bech32::encode::<bech32::Bech32>(pool_hrp, pool.as_slice())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let address = match cred {
+        StakeCredential::AddrKeyhash(key) => StakeAddress::new(network, StakePayload::Stake(*key)),
+        StakeCredential::ScriptHash(key) => StakeAddress::new(network, StakePayload::Script(*key)),
+    };
+
+    let address = address
+        .to_bech32()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(TxContentDelegationsInner {
+        index: index as i32,
+        address,
+        pool_id,
+        active_epoch,
+        // DEPRECATED
+        cert_index: index as i32,
+    })
+}
+
+impl IntoModel<Vec<TxContentDelegationsInner>> for TxModelBuilder<'_> {
+    type SortKey = ();
+
+    fn into_model(self) -> Result<Vec<TxContentDelegationsInner>, StatusCode> {
+        let tx = self.tx()?;
+
+        let certs = tx.certs();
+
+        let network = self.network.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        // TODO: we're hardcoding a ledger rule here by saying that the active epoch is
+        // the epoch number + 1. Although this is correct, the mapping layer
+        // shouldn't be the one defining this.
+        let active_epoch = self
+            .chain
+            .as_ref()
+            .map(|c| slot_time(self.block.slot(), c))
+            .map(|(a, _, _)| a + 1)
+            .unwrap_or_default();
+
+        let items =
+            certs
+                .into_iter()
+                .enumerate()
+                .filter_map(|(index, cert)| match cert {
+                    MultiEraCert::AlonzoCompatible(cert) => {
+                        match &**cert {
+                            AlonzoCert::StakeDelegation(cred, pool) => Some(
+                                build_delegation_inner(index, &cred, &pool, network, active_epoch),
+                            ),
+                            _ => None,
+                        }
+                    }
+                    MultiEraCert::Conway(cert) => {
+                        match &**cert {
+                            ConwayCert::StakeDelegation(cred, pool) => Some(
+                                build_delegation_inner(index, &cred, &pool, network, active_epoch),
+                            ),
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                })
+                .try_collect()?;
 
         Ok(items)
     }
