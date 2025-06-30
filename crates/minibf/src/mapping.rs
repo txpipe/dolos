@@ -920,7 +920,7 @@ impl<'a> IntoModel<BlockContent> for BlockModelBuilder<'a> {
         let (epoch, epoch_slot, block_time) = self
             .chain
             .as_ref()
-            .map(|c| slot_time(block.slot(), &c))
+            .map(|c| slot_time(block.slot(), c))
             .map(|(a, b, c)| (Some(a), Some(b), Some(c)))
             .unwrap_or_default();
 
@@ -949,8 +949,8 @@ impl<'a> IntoModel<BlockContent> for BlockModelBuilder<'a> {
             hash: block.hash().to_string(),
             next_block,
             previous_block,
-            epoch: epoch,
-            epoch_slot: epoch_slot,
+            epoch,
+            epoch_slot,
             time: block_time.unwrap_or_default(),
             slot: Some(block.slot() as i32),
             height: Some(block.number() as i32),

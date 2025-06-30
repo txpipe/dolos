@@ -3,10 +3,7 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
 };
-use blockfrost_openapi::models::{
-    block_content::BlockContent,
-    block_content_addresses_inner_transactions_inner::BlockContentAddressesInnerTransactionsInner,
-};
+use blockfrost_openapi::models::block_content::BlockContent;
 use dolos_cardano::pparams::ChainSummary;
 use dolos_core::{ArchiveStore as _, BlockBody, Domain};
 use pallas::ledger::traverse::MultiEraBlock;
@@ -63,7 +60,7 @@ fn build_block_model<D: Domain>(
     tip: &BlockBody,
     chain: &ChainSummary,
 ) -> Result<BlockContent, StatusCode> {
-    let mut builder = BlockModelBuilder::new(&block)?;
+    let mut builder = BlockModelBuilder::new(block)?;
 
     let previous_hash = builder.previous_hash();
 
@@ -89,7 +86,7 @@ fn build_block_model<D: Domain>(
         builder = builder.with_next(next)?;
     }
 
-    builder = builder.with_tip(&tip)?;
+    builder = builder.with_tip(tip)?;
 
     builder = builder.with_chain(chain);
 
