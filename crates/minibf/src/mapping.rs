@@ -1,19 +1,8 @@
 use axum::{Json, http::StatusCode};
-use blockfrost_openapi::models::{
-    address_utxo_content_inner::AddressUtxoContentInner, tx_content::TxContent,
-    tx_content_cbor::TxContentCbor, tx_content_metadata_cbor_inner::TxContentMetadataCborInner,
-    tx_content_metadata_inner::TxContentMetadataInner,
-    tx_content_metadata_inner_json_metadata::TxContentMetadataInnerJsonMetadata,
-    tx_content_output_amount_inner::TxContentOutputAmountInner, tx_content_utxo::TxContentUtxo,
-    tx_content_utxo_inputs_inner::TxContentUtxoInputsInner,
-    tx_content_utxo_outputs_inner::TxContentUtxoOutputsInner,
-    tx_content_withdrawals_inner::TxContentWithdrawalsInner,
-};
-use dolos_cardano::pparams::ChainSummary;
-use dolos_core::{EraCbor, TxHash, TxOrder, TxoIdx};
 use itertools::Itertools;
 use pallas::{
     codec::minicbor,
+    crypto::hash::Hash,
     ledger::{
         addresses::Address,
         primitives::{
@@ -21,12 +10,27 @@ use pallas::{
             conway::{DatumOption, ScriptRef},
         },
         traverse::{
-            ComputeHash, MultiEraBlock, MultiEraInput, MultiEraOutput, MultiEraTx, MultiEraValue,
-            OriginalHash,
+            ComputeHash, MultiEraBlock, MultiEraHeader, MultiEraInput, MultiEraOutput, MultiEraTx,
+            MultiEraValue, OriginalHash,
         },
     },
 };
 use std::collections::HashMap;
+
+use blockfrost_openapi::models::{
+    address_utxo_content_inner::AddressUtxoContentInner, block_content::BlockContent,
+    tx_content::TxContent, tx_content_cbor::TxContentCbor,
+    tx_content_metadata_cbor_inner::TxContentMetadataCborInner,
+    tx_content_metadata_inner::TxContentMetadataInner,
+    tx_content_metadata_inner_json_metadata::TxContentMetadataInnerJsonMetadata,
+    tx_content_output_amount_inner::TxContentOutputAmountInner, tx_content_utxo::TxContentUtxo,
+    tx_content_utxo_inputs_inner::TxContentUtxoInputsInner,
+    tx_content_utxo_outputs_inner::TxContentUtxoOutputsInner,
+    tx_content_withdrawals_inner::TxContentWithdrawalsInner,
+};
+
+use dolos_cardano::pparams::ChainSummary;
+use dolos_core::{EraCbor, TxHash, TxOrder, TxoIdx};
 
 macro_rules! try_into_or_500 {
     ($expr:expr) => {
@@ -62,8 +66,9 @@ where
     }
 }
 
-/// Resolve epoch, epoch slot and block time using Genesis values.
-pub fn slot_time(slot: u64, summary: &ChainSummary) -> (u64, u64, u64) {
+/// Resolve epoch, epoch slot and block time using Genesis values and return
+/// them as BF expects them as i32.
+pub fn slot_time(slot: u64, summary: &ChainSummary) -> (i32, i32, i32) {
     let era = summary.era_for_slot(slot);
 
     let era_slot = slot - era.start.slot;
@@ -73,7 +78,7 @@ pub fn slot_time(slot: u64, summary: &ChainSummary) -> (u64, u64, u64) {
     let time = era.start.timestamp.timestamp() as u64
         + (slot - era.start.slot) * era.pparams.slot_length();
 
-    (epoch, epoch_slot, time)
+    (epoch as i32, epoch_slot as i32, time as i32)
 }
 
 #[allow(unused)]
@@ -762,5 +767,226 @@ impl IntoModel<Vec<TxContentWithdrawalsInner>> for TxModelBuilder<'_> {
             .map_err(|_: StatusCode| StatusCode::INTERNAL_SERVER_ERROR)?;
 
         Ok(items)
+    }
+}
+
+pub struct BlockModelBuilder<'a> {
+    block: MultiEraBlock<'a>,
+    chain: Option<&'a ChainSummary>,
+    previous: Option<MultiEraBlock<'a>>,
+    next: Option<MultiEraBlock<'a>>,
+    tip: Option<MultiEraBlock<'a>>,
+}
+
+impl<'a> BlockModelBuilder<'a> {
+    pub fn new(block: &'a [u8]) -> Result<Self, StatusCode> {
+        let block = MultiEraBlock::decode(block).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        Ok(Self {
+            block,
+            previous: None,
+            next: None,
+            tip: None,
+            chain: None,
+        })
+    }
+
+    pub fn with_chain(self, chain: &'a ChainSummary) -> Self {
+        Self {
+            chain: Some(chain),
+            ..self
+        }
+    }
+
+    pub fn with_previous(self, previous: &'a [u8]) -> Result<Self, StatusCode> {
+        let previous =
+            MultiEraBlock::decode(previous).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        Ok(Self {
+            previous: Some(previous),
+            ..self
+        })
+    }
+
+    pub fn with_next(self, next: &'a [u8]) -> Result<Self, StatusCode> {
+        let next = MultiEraBlock::decode(next).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        Ok(Self {
+            next: Some(next),
+            ..self
+        })
+    }
+
+    pub fn with_tip(self, tip: &'a [u8]) -> Result<Self, StatusCode> {
+        let tip = MultiEraBlock::decode(tip).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        Ok(Self {
+            tip: Some(tip),
+            ..self
+        })
+    }
+
+    pub fn previous_hash(&self) -> Option<Hash<32>> {
+        self.block.header().previous_hash()
+    }
+
+    pub fn next_number(&self) -> u64 {
+        self.block.number() + 1
+    }
+
+    fn format_block_vrf(&self) -> Result<Option<String>, StatusCode> {
+        let header = self.block.header();
+
+        let Some(key) = header.vrf_vkey() else {
+            return Ok(None);
+        };
+
+        let hrp = bech32::Hrp::parse("vrf_vk").map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        let out = bech32::encode::<bech32::Bech32>(hrp, key)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        Ok(Some(out))
+    }
+
+    fn format_slot_leader(&self) -> Result<Option<String>, StatusCode> {
+        let header = self.block.header();
+
+        let Some(key) = header.issuer_vkey() else {
+            return Ok(None);
+        };
+
+        let hrp = bech32::Hrp::parse("pool").map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        let out = bech32::encode::<bech32::Bech32>(hrp, key)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        Ok(Some(out))
+    }
+
+    fn format_ops_cert_data(&self) -> (Option<String>, Option<String>) {
+        let header = self.block.header();
+
+        match header {
+            MultiEraHeader::ShelleyCompatible(x) => (
+                Some(hex::encode(
+                    x.header_body.operational_cert_hot_vkey.as_slice(),
+                )),
+                Some(x.header_body.operational_cert_sequence_number.to_string()),
+            ),
+            MultiEraHeader::BabbageCompatible(x) => (
+                Some(hex::encode(
+                    x.header_body
+                        .operational_cert
+                        .operational_cert_hot_vkey
+                        .as_slice(),
+                )),
+                Some(
+                    x.header_body
+                        .operational_cert
+                        .operational_cert_sequence_number
+                        .to_string(),
+                ),
+            ),
+            _ => (None, None),
+        }
+    }
+
+    fn compute_total_fees(&self) -> String {
+        let txs = self.block.txs();
+
+        txs.iter()
+            .map(|tx| tx.fee().unwrap_or(0))
+            .sum::<u64>()
+            .to_string()
+    }
+
+    fn compute_total_output(&self) -> String {
+        let txs = self.block.txs();
+
+        txs.iter()
+            .map(|tx| tx.outputs().iter().map(|o| o.value().coin()).sum::<u64>())
+            .sum::<u64>()
+            .to_string()
+    }
+}
+
+impl<'a> IntoModel<BlockContent> for BlockModelBuilder<'a> {
+    type SortKey = ();
+
+    fn into_model(self) -> Result<BlockContent, StatusCode> {
+        let block = &self.block;
+
+        let (epoch, epoch_slot, block_time) = self
+            .chain
+            .as_ref()
+            .map(|c| slot_time(block.slot(), c))
+            .map(|(a, b, c)| (Some(a), Some(b), Some(c)))
+            .unwrap_or_default();
+
+        let confirmations = self
+            .tip
+            .as_ref()
+            .map(|x| x.number() - block.number())
+            .map(|x| x as i32)
+            .unwrap_or_default();
+
+        let block_vrf = self.format_block_vrf()?;
+
+        let slot_leader = self.format_slot_leader()?.unwrap_or_default();
+
+        let next_block = self.next.as_ref().map(|x| x.hash().to_string());
+
+        let previous_block = self.previous.as_ref().map(|x| x.hash().to_string());
+
+        let (op_cert, op_cert_counter) = self.format_ops_cert_data();
+
+        let output = self.compute_total_output();
+
+        let fees = self.compute_total_fees();
+
+        let out = BlockContent {
+            hash: block.hash().to_string(),
+            next_block,
+            previous_block,
+            epoch,
+            epoch_slot,
+            time: block_time.unwrap_or_default(),
+            slot: Some(block.slot() as i32),
+            height: Some(block.number() as i32),
+            tx_count: block.txs().len() as i32,
+            size: block.size() as i32,
+            confirmations,
+            slot_leader,
+            block_vrf,
+            op_cert,
+            op_cert_counter,
+            output: Some(output),
+            fees: Some(fees),
+        };
+
+        Ok(out)
+    }
+}
+
+// HACK: This is the mapping to return the tx hashes for a block. For some
+// reason, the openspi type BlockContentAddressesInnerTransactionsInner is being
+// serialized as an object instead of a the expected strings. As a workaround,
+// we return a Vec<String> instead.
+impl<'a> IntoModel<Vec<String>> for BlockModelBuilder<'a> {
+    type SortKey = ();
+
+    fn into_model(self) -> Result<Vec<String>, StatusCode> {
+        let block = &self.block;
+
+        let txs = block
+            .txs()
+            .iter()
+            .map(|tx| tx.hash().to_string())
+            //.sorted()
+            //.map(|tx| BlockContentAddressesInnerTransactionsInner { tx_hash: tx })
+            .collect();
+
+        Ok(txs)
     }
 }
