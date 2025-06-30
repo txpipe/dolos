@@ -6,7 +6,10 @@ use axum::{
 };
 use dolos_cardano::pparams::ChainSummary;
 use itertools::Itertools;
-use pallas::{crypto::hash::Hash, ledger::traverse::MultiEraUpdate};
+use pallas::{
+    crypto::hash::Hash,
+    ledger::{addresses::Network, traverse::MultiEraUpdate},
+};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, net::SocketAddr, ops::Deref};
 use tower::Layer;
@@ -45,6 +48,14 @@ pub type BlockWithTx = (Vec<u8>, TxOrder);
 pub type BlockWithTxMap = HashMap<Hash<32>, BlockWithTx>;
 
 impl<D: Domain> Facade<D> {
+    pub fn get_network_id(&self) -> Result<Network, StatusCode> {
+        match self.genesis().shelley.network_id.as_ref() {
+            Some(x) if x == "Mainnet" => Ok(Network::Mainnet),
+            Some(x) if x == "Testnet" => Ok(Network::Testnet),
+            _ => Err(StatusCode::INTERNAL_SERVER_ERROR),
+        }
+    }
+
     pub fn get_chain_summary(&self) -> Result<ChainSummary, StatusCode> {
         let tip = self
             .state()
@@ -168,6 +179,10 @@ impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
             .route(
                 "/txs/{tx_hash}/withdrawals",
                 get(routes::txs::by_hash_withdrawals::<D>),
+            )
+            .route(
+                "/txs/{tx_hash}/delegations",
+                get(routes::txs::by_hash_delegations::<D>),
             )
             .with_state(Facade::<D> { inner: domain })
             .layer(

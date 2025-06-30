@@ -5,6 +5,7 @@ use axum::{
 };
 use blockfrost_openapi::models::{
     tx_content::TxContent, tx_content_cbor::TxContentCbor,
+    tx_content_delegations_inner::TxContentDelegationsInner,
     tx_content_metadata_cbor_inner::TxContentMetadataCborInner,
     tx_content_metadata_inner::TxContentMetadataInner, tx_content_utxo::TxContentUtxo,
     tx_content_withdrawals_inner::TxContentWithdrawalsInner,
@@ -125,6 +126,28 @@ pub async fn by_hash_withdrawals<D: Domain>(
         .ok_or(StatusCode::NOT_FOUND)?;
 
     let tx = TxModelBuilder::new(&raw, order)?;
+
+    tx.into_response()
+}
+
+pub async fn by_hash_delegations<D: Domain>(
+    Path(tx_hash): Path<String>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Vec<TxContentDelegationsInner>>, StatusCode> {
+    let hash = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    let (raw, order) = domain
+        .archive()
+        .get_block_with_tx(hash.as_slice())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let network = domain.get_network_id()?;
+    let chain = domain.get_chain_summary()?;
+
+    let tx = TxModelBuilder::new(&raw, order)?
+        .with_network(network)
+        .with_chain(chain);
 
     tx.into_response()
 }
