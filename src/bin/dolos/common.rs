@@ -5,11 +5,17 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::{filter::Targets, prelude::*};
 
+use once_cell::sync::OnceCell;
+use opentelemetry::KeyValue;
+use opentelemetry_sdk::{logs as sdklog, Resource};
+use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
+use opentelemetry_otlp::{Protocol, WithExportConfig};
+
 use dolos::adapters::{ArchiveAdapter, DomainAdapter, StateAdapter, WalAdapter};
 use dolos::core::Genesis;
 use dolos::prelude::*;
 
-use crate::{GenesisConfig, LoggingConfig};
+use crate::{GenesisConfig, LoggingConfig, TelemetryConfig};
 
 pub type Stores = (WalAdapter, StateAdapter, ArchiveAdapter);
 
@@ -101,9 +107,12 @@ pub fn setup_domain(config: &crate::Config) -> miette::Result<DomainAdapter> {
     Ok(domain)
 }
 
-pub fn setup_tracing(config: &LoggingConfig) -> miette::Result<()> {
-    let level = config.max_level;
+static LOGGER_PROVIDER: OnceCell<sdklog::SdkLoggerProvider> = OnceCell::new();
 
+pub fn setup_tracing(config: &LoggingConfig) -> miette::Result<()> {
+    let fmt_layer = tracing_subscriber::fmt::layer();
+
+    let level = config.max_level;
     let mut filter = Targets::new()
         .with_target("dolos", level)
         .with_target("gasket", level);
@@ -130,24 +139,84 @@ pub fn setup_tracing(config: &LoggingConfig) -> miette::Result<()> {
         filter = filter.with_target("tower_http", level);
     }
 
-    #[cfg(not(feature = "debug"))]
-    {
-        tracing_subscriber::registry()
-            .with(tracing_subscriber::fmt::layer())
-            .with(filter)
-            .init();
-    }
+    // Check if telemetry should be enabled (default to true if not specified)
+    let include_telemetry = config.include_telemetry.unwrap_or(true);
 
-    #[cfg(feature = "debug")]
-    {
-        tracing_subscriber::registry()
-            .with(tracing_subscriber::fmt::layer())
-            .with(console_subscriber::spawn())
-            .with(filter)
-            .init();
+    if include_telemetry {
+        // Use telemetry config if provided, otherwise use defaults
+        let default_telemetry_config = TelemetryConfig::default();
+        let telemetry_config = config.telemetry.as_ref().unwrap_or(&default_telemetry_config);
+
+        let exporter = opentelemetry_otlp::LogExporter::builder()
+            .with_http()
+            .with_protocol(Protocol::HttpJson)
+            .with_endpoint(&telemetry_config.endpoint)
+            .with_timeout(Duration::from_secs(3))
+            .build().unwrap();
+
+        let provider = sdklog::SdkLoggerProvider::builder()
+            .with_batch_exporter(exporter)
+            .with_resource(
+                Resource::builder_empty()
+                    .with_service_name(telemetry_config.service_name.clone())
+                    .with_attribute(KeyValue::new(
+                        "service.version",
+                        env!("CARGO_PKG_VERSION"),
+                    ))
+                    .build(),
+            )
+            .build();
+
+        // keep provider alive for the whole program
+        LOGGER_PROVIDER.set(provider.clone()).ok();
+
+        let otel_layer = OpenTelemetryTracingBridge::new(&provider);
+
+        #[cfg(not(feature = "debug"))]
+        {
+            tracing_subscriber::registry()
+                .with(fmt_layer)
+                .with(otel_layer)
+                .with(filter)
+                .init();
+        }
+
+        #[cfg(feature = "debug")]
+        {
+            tracing_subscriber::registry()
+                .with(fmt_layer)
+                .with(console_subscriber::spawn())
+                .with(otel_layer)
+                .with(filter)
+                .init();
+        }
+    } else {
+        // No telemetry, just use fmt layer
+        #[cfg(not(feature = "debug"))]
+        {
+            tracing_subscriber::registry()
+                .with(fmt_layer)
+                .with(filter)
+                .init();
+        }
+
+        #[cfg(feature = "debug")]
+        {
+            tracing_subscriber::registry()
+                .with(fmt_layer)
+                .with(console_subscriber::spawn())
+                .with(filter)
+                .init();
+        }
     }
 
     Ok(())
+}
+
+pub fn shutdown_tracing() {
+    if let Some(p) = LOGGER_PROVIDER.get() {
+        let _ = p.shutdown();
+    }
 }
 
 pub fn open_genesis_files(config: &GenesisConfig) -> miette::Result<Genesis> {
