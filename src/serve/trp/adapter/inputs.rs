@@ -126,7 +126,7 @@ fn utxo_matches(
     utxo: &MultiEraOutput<'_>,
     criteria: &tx3_lang::ir::InputQuery,
 ) -> Result<bool, tx3_cardano::Error> {
-    let min_amount_check = if let Some(min_amount) = &criteria.min_amount {
+    let min_amount_check = if let min_amount = &criteria.min_amount {
         utxo_matches_min_amount(utxo, min_amount)?
     } else {
         // if there is no min amount requirement, then the utxo matches
@@ -240,7 +240,7 @@ impl<'a, D: Domain> InputSelector<'a, D> {
         &self,
         criteria: &tx3_lang::ir::InputQuery,
     ) -> Result<Subset, tx3_cardano::Error> {
-        let matching_address = if let Some(address) = &criteria.address {
+        let matching_address = if let address = &criteria.address {
             self.narrow_by_address(address)?
         } else {
             Subset::All
@@ -250,7 +250,7 @@ impl<'a, D: Domain> InputSelector<'a, D> {
             debug!("matching address is empty");
         }
 
-        let matching_assets = if let Some(min_amount) = &criteria.min_amount {
+        let matching_assets = if let min_amount = &criteria.min_amount {
             self.narrow_by_multi_asset_presence(min_amount)?
         } else {
             Subset::All
@@ -260,7 +260,7 @@ impl<'a, D: Domain> InputSelector<'a, D> {
             debug!("matching assets is empty");
         }
 
-        let matching_refs = if let Some(refs) = &criteria.r#ref {
+        let matching_refs = if let refs = &criteria.r#ref {
             self.narrow_by_ref(refs)?
         } else {
             Subset::All
@@ -280,7 +280,7 @@ impl<'a, D: Domain> InputSelector<'a, D> {
     pub fn select(
         &self,
         criteria: &tx3_lang::ir::InputQuery,
-        ignore: &[tx3_lang::UtxoRef],
+        resolve_context: &tx3_cardano::ResolveContext,
     ) -> Result<tx3_lang::UtxoSet, tx3_cardano::Error> {
         let search_space = self.narrow_search_space(criteria)?;
 
@@ -297,7 +297,7 @@ impl<'a, D: Domain> InputSelector<'a, D> {
                     txid: hash.to_vec(),
                     index: *index,
                 };
-                !ignore.contains(&utxo_ref)
+                !resolve_context.ignore.contains(&utxo_ref)
             })
             .collect::<Vec<_>>();
 
@@ -320,7 +320,7 @@ pub fn resolve<D: Domain>(
     ledger: &D::State,
     network: tx3_cardano::Network,
     criteria: &tx3_lang::ir::InputQuery,
-    ignore: &[tx3_lang::UtxoRef],
+    resolve_context: &tx3_cardano::ResolveContext,
 ) -> Result<tx3_lang::UtxoSet, tx3_cardano::Error> {
-    InputSelector::<D>::new(ledger, network).select(criteria, ignore)
+    InputSelector::<D>::new(ledger, network).select(criteria, &resolve_context)
 }
