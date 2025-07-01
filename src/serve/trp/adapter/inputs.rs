@@ -126,12 +126,7 @@ fn utxo_matches(
     utxo: &MultiEraOutput<'_>,
     criteria: &tx3_lang::ir::InputQuery,
 ) -> Result<bool, tx3_cardano::Error> {
-    let min_amount_check = if let min_amount = &criteria.min_amount {
-        utxo_matches_min_amount(utxo, min_amount)?
-    } else {
-        // if there is no min amount requirement, then the utxo matches
-        true
-    };
+    let min_amount_check = utxo_matches_min_amount(utxo, &criteria.min_amount)?;
 
     Ok(min_amount_check)
 }
@@ -240,31 +235,19 @@ impl<'a, D: Domain> InputSelector<'a, D> {
         &self,
         criteria: &tx3_lang::ir::InputQuery,
     ) -> Result<Subset, tx3_cardano::Error> {
-        let matching_address = if let address = &criteria.address {
-            self.narrow_by_address(address)?
-        } else {
-            Subset::All
-        };
+        let matching_address = self.narrow_by_address(&criteria.address)?;
 
         if matching_address.is_empty() {
             debug!("matching address is empty");
         }
 
-        let matching_assets = if let min_amount = &criteria.min_amount {
-            self.narrow_by_multi_asset_presence(min_amount)?
-        } else {
-            Subset::All
-        };
+        let matching_assets = self.narrow_by_multi_asset_presence(&criteria.min_amount)?;
 
         if matching_assets.is_empty() {
             debug!("matching assets is empty");
         }
 
-        let matching_refs = if let refs = &criteria.r#ref {
-            self.narrow_by_ref(refs)?
-        } else {
-            Subset::All
-        };
+        let matching_refs = self.narrow_by_ref(&criteria.r#ref)?;
 
         if matching_refs.is_empty() {
             debug!("matching refs is empty");
@@ -280,7 +263,7 @@ impl<'a, D: Domain> InputSelector<'a, D> {
     pub fn select(
         &self,
         criteria: &tx3_lang::ir::InputQuery,
-        resolve_context: &tx3_cardano::ResolveContext,
+        resolve_context: &tx3_cardano::resolve::ResolveContext,
     ) -> Result<tx3_lang::UtxoSet, tx3_cardano::Error> {
         let search_space = self.narrow_search_space(criteria)?;
 
@@ -320,7 +303,7 @@ pub fn resolve<D: Domain>(
     ledger: &D::State,
     network: tx3_cardano::Network,
     criteria: &tx3_lang::ir::InputQuery,
-    resolve_context: &tx3_cardano::ResolveContext,
+    resolve_context: &tx3_cardano::resolve::ResolveContext,
 ) -> Result<tx3_lang::UtxoSet, tx3_cardano::Error> {
     InputSelector::<D>::new(ledger, network).select(criteria, &resolve_context)
 }
