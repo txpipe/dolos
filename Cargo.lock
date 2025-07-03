@@ -1104,7 +1104,7 @@ dependencies = [
  "miette",
  "mithril-client",
  "nix",
- "pallas 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
+ "pallas 1.0.0-alpha.2 (git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag)",
  "paste",
  "protoc-wkt",
  "reqwest",
@@ -1138,7 +1138,7 @@ dependencies = [
  "dolos-core",
  "hex",
  "itertools 0.14.0",
- "pallas 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
+ "pallas 1.0.0-alpha.2 (git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag)",
  "paste",
  "serde",
  "serde_json",
@@ -1152,7 +1152,7 @@ version = "0.1.0"
 dependencies = [
  "futures-core",
  "itertools 0.13.0",
- "pallas 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
+ "pallas 1.0.0-alpha.2 (git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag)",
  "serde",
  "thiserror 2.0.12",
  "tracing",
@@ -1170,7 +1170,7 @@ dependencies = [
  "dolos-core",
  "hex",
  "itertools 0.13.0",
- "pallas 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
+ "pallas 1.0.0-alpha.2 (git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag)",
  "serde",
  "serde_json",
  "tokio",
@@ -1189,7 +1189,7 @@ dependencies = [
  "dolos-testing",
  "hex",
  "itertools 0.13.0",
- "pallas 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
+ "pallas 1.0.0-alpha.2 (git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag)",
  "redb",
  "serde",
  "thiserror 2.0.12",
@@ -1204,7 +1204,7 @@ name = "dolos-testing"
 version = "0.1.0"
 dependencies = [
  "dolos-core",
- "pallas 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
+ "pallas 1.0.0-alpha.2 (git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag)",
  "rand 0.9.1",
 ]
 
@@ -2737,19 +2737,19 @@ dependencies = [
 [[package]]
 name = "pallas"
 version = "1.0.0-alpha.2"
-source = "git+https://github.com/txpipe/pallas.git#8290c67ff3b2d6c61d11bf81cfffc31e871078e6"
+source = "git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag#9cef6e19542b36389fe4613d4e924533ec8897b3"
 dependencies = [
- "pallas-addresses 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
- "pallas-codec 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
- "pallas-configs 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
- "pallas-crypto 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
+ "pallas-addresses 1.0.0-alpha.2 (git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag)",
+ "pallas-codec 1.0.0-alpha.2 (git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag)",
+ "pallas-configs 1.0.0-alpha.2 (git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag)",
+ "pallas-crypto 1.0.0-alpha.2 (git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag)",
  "pallas-hardano",
- "pallas-network 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
- "pallas-primitives 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
- "pallas-traverse 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
- "pallas-txbuilder 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
- "pallas-utxorpc 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
- "pallas-validate 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
+ "pallas-network 1.0.0-alpha.2 (git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag)",
+ "pallas-primitives 1.0.0-alpha.2 (git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag)",
+ "pallas-traverse 1.0.0-alpha.2 (git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag)",
+ "pallas-txbuilder 1.0.0-alpha.2 (git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag)",
+ "pallas-utxorpc 1.0.0-alpha.2 (git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag)",
+ "pallas-validate 1.0.0-alpha.2 (git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag)",
 ]
 
 [[package]]
@@ -2787,15 +2787,15 @@ dependencies = [
 [[package]]
 name = "pallas-addresses"
 version = "1.0.0-alpha.2"
-source = "git+https://github.com/txpipe/pallas.git#8290c67ff3b2d6c61d11bf81cfffc31e871078e6"
+source = "git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag#9cef6e19542b36389fe4613d4e924533ec8897b3"
 dependencies = [
  "base58",
  "bech32 0.9.1",
  "crc",
  "cryptoxide",
  "hex",
- "pallas-codec 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
- "pallas-crypto 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
+ "pallas-codec 1.0.0-alpha.2 (git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag)",
+ "pallas-crypto 1.0.0-alpha.2 (git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag)",
  "thiserror 1.0.69",
 ]
 
@@ -2826,7 +2826,7 @@ dependencies = [
 [[package]]
 name = "pallas-codec"
 version = "1.0.0-alpha.2"
-source = "git+https://github.com/txpipe/pallas.git#8290c67ff3b2d6c61d11bf81cfffc31e871078e6"
+source = "git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag#9cef6e19542b36389fe4613d4e924533ec8897b3"
 dependencies = [
  "hex",
  "minicbor 0.26.4",
@@ -2853,13 +2853,13 @@ dependencies = [
 [[package]]
 name = "pallas-configs"
 version = "1.0.0-alpha.2"
-source = "git+https://github.com/txpipe/pallas.git#8290c67ff3b2d6c61d11bf81cfffc31e871078e6"
+source = "git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag#9cef6e19542b36389fe4613d4e924533ec8897b3"
 dependencies = [
  "base64 0.22.1",
  "num-rational",
- "pallas-addresses 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
- "pallas-crypto 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
- "pallas-primitives 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
+ "pallas-addresses 1.0.0-alpha.2 (git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag)",
+ "pallas-crypto 1.0.0-alpha.2 (git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag)",
+ "pallas-primitives 1.0.0-alpha.2 (git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag)",
  "serde",
  "serde_json",
  "serde_with 3.12.0",
@@ -2897,11 +2897,11 @@ dependencies = [
 [[package]]
 name = "pallas-crypto"
 version = "1.0.0-alpha.2"
-source = "git+https://github.com/txpipe/pallas.git#8290c67ff3b2d6c61d11bf81cfffc31e871078e6"
+source = "git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag#9cef6e19542b36389fe4613d4e924533ec8897b3"
 dependencies = [
  "cryptoxide",
  "hex",
- "pallas-codec 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
+ "pallas-codec 1.0.0-alpha.2 (git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag)",
  "rand_core 0.6.4",
  "serde",
  "thiserror 1.0.69",
@@ -2910,15 +2910,15 @@ dependencies = [
 [[package]]
 name = "pallas-hardano"
 version = "1.0.0-alpha.2"
-source = "git+https://github.com/txpipe/pallas.git#8290c67ff3b2d6c61d11bf81cfffc31e871078e6"
+source = "git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag#9cef6e19542b36389fe4613d4e924533ec8897b3"
 dependencies = [
  "binary-layout",
  "hex",
- "pallas-addresses 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
- "pallas-codec 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
- "pallas-crypto 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
- "pallas-network 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
- "pallas-traverse 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
+ "pallas-addresses 1.0.0-alpha.2 (git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag)",
+ "pallas-codec 1.0.0-alpha.2 (git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag)",
+ "pallas-crypto 1.0.0-alpha.2 (git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag)",
+ "pallas-network 1.0.0-alpha.2 (git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag)",
+ "pallas-traverse 1.0.0-alpha.2 (git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag)",
  "serde",
  "serde_json",
  "serde_with 3.12.0",
@@ -2966,13 +2966,13 @@ dependencies = [
 [[package]]
 name = "pallas-network"
 version = "1.0.0-alpha.2"
-source = "git+https://github.com/txpipe/pallas.git#8290c67ff3b2d6c61d11bf81cfffc31e871078e6"
+source = "git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag#9cef6e19542b36389fe4613d4e924533ec8897b3"
 dependencies = [
  "byteorder",
  "hex",
  "itertools 0.13.0",
- "pallas-codec 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
- "pallas-crypto 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
+ "pallas-codec 1.0.0-alpha.2 (git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag)",
+ "pallas-crypto 1.0.0-alpha.2 (git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag)",
  "rand 0.8.5",
  "socket2",
  "thiserror 1.0.69",
@@ -3012,11 +3012,11 @@ dependencies = [
 [[package]]
 name = "pallas-primitives"
 version = "1.0.0-alpha.2"
-source = "git+https://github.com/txpipe/pallas.git#8290c67ff3b2d6c61d11bf81cfffc31e871078e6"
+source = "git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag#9cef6e19542b36389fe4613d4e924533ec8897b3"
 dependencies = [
  "hex",
- "pallas-codec 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
- "pallas-crypto 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
+ "pallas-codec 1.0.0-alpha.2 (git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag)",
+ "pallas-crypto 1.0.0-alpha.2 (git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag)",
  "serde",
  "serde_json",
 ]
@@ -3058,14 +3058,14 @@ dependencies = [
 [[package]]
 name = "pallas-traverse"
 version = "1.0.0-alpha.2"
-source = "git+https://github.com/txpipe/pallas.git#8290c67ff3b2d6c61d11bf81cfffc31e871078e6"
+source = "git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag#9cef6e19542b36389fe4613d4e924533ec8897b3"
 dependencies = [
  "hex",
  "itertools 0.13.0",
- "pallas-addresses 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
- "pallas-codec 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
- "pallas-crypto 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
- "pallas-primitives 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
+ "pallas-addresses 1.0.0-alpha.2 (git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag)",
+ "pallas-codec 1.0.0-alpha.2 (git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag)",
+ "pallas-crypto 1.0.0-alpha.2 (git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag)",
+ "pallas-primitives 1.0.0-alpha.2 (git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag)",
  "paste",
  "serde",
  "thiserror 1.0.69",
@@ -3091,14 +3091,14 @@ dependencies = [
 [[package]]
 name = "pallas-txbuilder"
 version = "1.0.0-alpha.2"
-source = "git+https://github.com/txpipe/pallas.git#8290c67ff3b2d6c61d11bf81cfffc31e871078e6"
+source = "git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag#9cef6e19542b36389fe4613d4e924533ec8897b3"
 dependencies = [
  "hex",
- "pallas-addresses 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
- "pallas-codec 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
- "pallas-crypto 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
- "pallas-primitives 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
- "pallas-traverse 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
+ "pallas-addresses 1.0.0-alpha.2 (git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag)",
+ "pallas-codec 1.0.0-alpha.2 (git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag)",
+ "pallas-crypto 1.0.0-alpha.2 (git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag)",
+ "pallas-primitives 1.0.0-alpha.2 (git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag)",
+ "pallas-traverse 1.0.0-alpha.2 (git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag)",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -3122,13 +3122,13 @@ dependencies = [
 [[package]]
 name = "pallas-utxorpc"
 version = "1.0.0-alpha.2"
-source = "git+https://github.com/txpipe/pallas.git#8290c67ff3b2d6c61d11bf81cfffc31e871078e6"
+source = "git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag#9cef6e19542b36389fe4613d4e924533ec8897b3"
 dependencies = [
- "pallas-codec 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
- "pallas-crypto 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
- "pallas-primitives 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
- "pallas-traverse 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
- "pallas-validate 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
+ "pallas-codec 1.0.0-alpha.2 (git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag)",
+ "pallas-crypto 1.0.0-alpha.2 (git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag)",
+ "pallas-primitives 1.0.0-alpha.2 (git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag)",
+ "pallas-traverse 1.0.0-alpha.2 (git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag)",
+ "pallas-validate 1.0.0-alpha.2 (git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag)",
  "prost-types 0.13.5",
  "utxorpc-spec 0.16.0",
 ]
@@ -3155,16 +3155,16 @@ dependencies = [
 [[package]]
 name = "pallas-validate"
 version = "1.0.0-alpha.2"
-source = "git+https://github.com/txpipe/pallas.git#8290c67ff3b2d6c61d11bf81cfffc31e871078e6"
+source = "git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag#9cef6e19542b36389fe4613d4e924533ec8897b3"
 dependencies = [
  "chrono",
  "hex",
  "itertools 0.14.0",
- "pallas-addresses 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
- "pallas-codec 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
- "pallas-crypto 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
- "pallas-primitives 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
- "pallas-traverse 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
+ "pallas-addresses 1.0.0-alpha.2 (git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag)",
+ "pallas-codec 1.0.0-alpha.2 (git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag)",
+ "pallas-crypto 1.0.0-alpha.2 (git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag)",
+ "pallas-primitives 1.0.0-alpha.2 (git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag)",
+ "pallas-traverse 1.0.0-alpha.2 (git+https://github.com/gonzalezzfelipe/pallas.git?branch=fix%2Fpropagate-unstable-flag)",
  "rug",
  "serde",
  "thiserror 1.0.69",

@@ -995,7 +995,7 @@ impl<'a> BlockModelBuilder<'a> {
         let txs = self.block.txs();
 
         txs.iter()
-            .map(|tx| tx.fee().unwrap_or(0))
+            .map(|tx| tx.fee_or_compute())
             .sum::<u64>()
             .to_string()
     }
