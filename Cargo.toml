@@ -1,7 +1,7 @@
 [package]
 name = "dolos"
 description = "A Cardano data-node built in Rust"
-version = "0.24.0"
+version = "0.25.0"
 edition = "2021"
 repository = "https://github.com/txpipe/dolos"
 homepage = "https://github.com/txpipe/dolos"
@@ -145,6 +145,7 @@ tower-http = { version = "0.6.1", features = ["cors", "trace"] }
 [workspace.metadata.release]
 push = false
 publish = false
+pre-release-commit-message = "release: v{{version}}"
 pre-release-hook = ["git", "cliff", "-o", "CHANGELOG.md", "--tag", "{{version}}"]
 
 [lints.clippy]

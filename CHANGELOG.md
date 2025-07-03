@@ -2,6 +2,34 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.25.0] - 2025-07-03
+
+### 🚀 Features
+
+- *(minibf)* Implement `txs/{hash}/meatadata` endpoint (#554)
+- *(minibf)* Implement `txs/{hash}/metadata/cbor` endpoint (#555)
+- *(minibf)* Implement `txs/{hash}/withdrawals` endpoint (#557)
+- Add local storage stats command (#558)
+- Add housekeeping command (#561)
+- Add copy-ledger command (#560)
+- *(redb)* Support iterating multi-value keys (#565)
+- *(minibf)* Implement `txs/{hash}/delegations` endpoint (#571)
+
+### 🐛 Bug Fixes
+
+- *(core)* Use correct default value for max ledger history (#559)
+- *(minibf)* Use correct status code in `/blocks` endpoint (#563)
+- *(minibf)* Parse hash or number param corectly (#567)
+
+### 🚜 Refactor
+
+- Move testing artifacts to new crate (#564)
+- *(minibf)* Use open-api specs for `blocks/` endpoints (#570)
+
+### ⚙️ Miscellaneous Tasks
+
+- Update tx3 to v0.7.0 (#575)
+
 ## [0.24.0] - 2025-06-19
 
 ### 🚀 Features
@@ -54,6 +82,7 @@ All notable changes to this project will be documented in this file.
 
 - Update tx3 lib to v0.6.0 (#530)
 - Avoid commit of genesis files in test scenarios (#533)
+- Release v0.24.0
 
 ## [0.23.0] - 2025-05-23
 
