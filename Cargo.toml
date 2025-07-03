@@ -75,7 +75,7 @@ tonic-web = { version = "0.12.3", optional = true }
 tonic-reflection = { version = "0.12.3", optional = true }
 
 # TRP dependencies
-jsonrpsee = { version = "0.24.9", features = ["server"], optional = true }
+jsonrpsee = { version = "0.25.1", features = ["server"], optional = true }
 
 # Common HTTP dependencies
 http = "1.3.1"
