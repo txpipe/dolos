@@ -344,47 +344,47 @@ impl LedgerStore {
 
 impl dolos_core::StateStore for LedgerStore {
     fn start(&self) -> Result<Option<ChainPoint>, StateError> {
-        Ok(Self::start(&self)?)
+        Ok(Self::start(self)?)
     }
 
     fn cursor(&self) -> Result<Option<ChainPoint>, StateError> {
-        Ok(Self::cursor(&self)?)
+        Ok(Self::cursor(self)?)
     }
 
     fn is_empty(&self) -> Result<bool, StateError> {
-        Ok(Self::is_empty(&self)?)
+        Ok(Self::is_empty(self)?)
     }
 
     fn get_pparams(&self, until: BlockSlot) -> Result<Vec<EraCbor>, StateError> {
-        Ok(Self::get_pparams(&self, until)?)
+        Ok(Self::get_pparams(self, until)?)
     }
 
     fn get_utxos(&self, refs: Vec<TxoRef>) -> Result<UtxoMap, StateError> {
-        Ok(Self::get_utxos(&self, refs)?)
+        Ok(Self::get_utxos(self, refs)?)
     }
 
     fn get_utxo_by_address(&self, address: &[u8]) -> Result<UtxoSet, StateError> {
-        Ok(Self::get_utxo_by_address(&self, address)?)
+        Ok(Self::get_utxo_by_address(self, address)?)
     }
 
     fn get_utxo_by_payment(&self, payment: &[u8]) -> Result<UtxoSet, StateError> {
-        Ok(Self::get_utxo_by_payment(&self, payment)?)
+        Ok(Self::get_utxo_by_payment(self, payment)?)
     }
 
     fn get_utxo_by_stake(&self, stake: &[u8]) -> Result<UtxoSet, StateError> {
-        Ok(Self::get_utxo_by_stake(&self, stake)?)
+        Ok(Self::get_utxo_by_stake(self, stake)?)
     }
 
     fn get_utxo_by_policy(&self, policy: &[u8]) -> Result<UtxoSet, StateError> {
-        Ok(Self::get_utxo_by_policy(&self, policy)?)
+        Ok(Self::get_utxo_by_policy(self, policy)?)
     }
 
     fn get_utxo_by_asset(&self, asset: &[u8]) -> Result<UtxoSet, StateError> {
-        Ok(Self::get_utxo_by_asset(&self, asset)?)
+        Ok(Self::get_utxo_by_asset(self, asset)?)
     }
 
     fn apply(&self, deltas: &[LedgerDelta]) -> Result<(), StateError> {
-        Ok(Self::apply(&self, deltas)?)
+        Ok(Self::apply(self, deltas)?)
     }
 
     fn upgrade(self) -> Result<Self, StateError> {
@@ -392,11 +392,11 @@ impl dolos_core::StateStore for LedgerStore {
     }
 
     fn copy(&self, target: &Self) -> Result<(), StateError> {
-        Ok(Self::copy(&self, target)?)
+        Ok(Self::copy(self, target)?)
     }
 
     fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, StateError> {
-        Ok(Self::prune_history(&self, max_slots, max_prune)?)
+        Ok(Self::prune_history(self, max_slots, max_prune)?)
     }
 }
 
