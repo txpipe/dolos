@@ -126,7 +126,7 @@ fn utxo_matches(
     utxo: &MultiEraOutput<'_>,
     criteria: &tx3_lang::ir::InputQuery,
 ) -> Result<bool, tx3_cardano::Error> {
-    let min_amount_check = if let Some(min_amount) = &criteria.min_amount {
+    let min_amount_check = if let Some(min_amount) = &criteria.min_amount.as_option() {
         utxo_matches_min_amount(utxo, min_amount)?
     } else {
         // if there is no min amount requirement, then the utxo matches
@@ -240,7 +240,7 @@ impl<'a, D: Domain> InputSelector<'a, D> {
         &self,
         criteria: &tx3_lang::ir::InputQuery,
     ) -> Result<Subset, tx3_cardano::Error> {
-        let matching_address = if let Some(address) = &criteria.address {
+        let matching_address = if let Some(address) = &criteria.address.as_option() {
             self.narrow_by_address(address)?
         } else {
             Subset::All
@@ -250,7 +250,7 @@ impl<'a, D: Domain> InputSelector<'a, D> {
             debug!("matching address is empty");
         }
 
-        let matching_assets = if let Some(min_amount) = &criteria.min_amount {
+        let matching_assets = if let Some(min_amount) = &criteria.min_amount.as_option() {
             self.narrow_by_multi_asset_presence(min_amount)?
         } else {
             Subset::All
@@ -260,7 +260,7 @@ impl<'a, D: Domain> InputSelector<'a, D> {
             debug!("matching assets is empty");
         }
 
-        let matching_refs = if let Some(refs) = &criteria.r#ref {
+        let matching_refs = if let Some(refs) = &criteria.r#ref.as_option() {
             self.narrow_by_ref(refs)?
         } else {
             Subset::All
