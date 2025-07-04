@@ -1,6 +1,6 @@
 use itertools::Itertools as _;
-use pallas::interop::utxorpc::spec as u5c;
 use pallas::interop::utxorpc::{self as interop, spec::query::any_utxo_pattern::UtxoPattern};
+use pallas::interop::utxorpc::{LedgerContext, spec as u5c};
 use pallas::ledger::traverse::MultiEraOutput;
 use std::collections::HashSet;
 use tonic::{Request, Response, Status};
@@ -24,12 +24,18 @@ pub fn point_to_u5c(point: &ChainPoint) -> u5c::query::ChainPoint {
     }
 }
 
-pub struct QueryServiceImpl<D: Domain> {
+pub struct QueryServiceImpl<D: Domain>
+where
+    D::State: LedgerContext,
+{
     domain: D,
     mapper: interop::Mapper<D::State>,
 }
 
-impl<D: Domain> QueryServiceImpl<D> {
+impl<D: Domain> QueryServiceImpl<D>
+where
+    D::State: LedgerContext,
+{
     pub fn new(domain: D) -> Self {
         let mapper = interop::Mapper::new(domain.state().clone());
 
@@ -202,7 +208,7 @@ fn from_u5c_txoref(txo: u5c::query::TxoRef) -> Result<TxoRef, Status> {
     Ok(TxoRef(hash, txo.index))
 }
 
-fn into_u5c_utxo<S: StateStore>(
+fn into_u5c_utxo<S: StateStore + LedgerContext>(
     txo: &TxoRef,
     body: &EraCbor,
     mapper: &interop::Mapper<S>,
@@ -221,7 +227,10 @@ fn into_u5c_utxo<S: StateStore>(
 }
 
 #[async_trait::async_trait]
-impl<D: Domain> u5c::query::query_service_server::QueryService for QueryServiceImpl<D> {
+impl<D: Domain> u5c::query::query_service_server::QueryService for QueryServiceImpl<D>
+where
+    D::State: LedgerContext,
+{
     async fn read_params(
         &self,
         request: Request<u5c::query::ReadParamsRequest>,
@@ -295,10 +304,7 @@ impl<D: Domain> u5c::query::query_service_server::QueryService for QueryServiceI
             .map(from_u5c_txoref)
             .try_collect()?;
 
-        let utxos = self
-            .domain
-            .state()
-            .get_utxos(keys)
+        let utxos = StateStore::get_utxos(self.domain.state(), keys)
             .map_err(|e| Status::internal(e.to_string()))?;
 
         let items: Vec<_> = utxos
@@ -335,20 +341,17 @@ impl<D: Domain> u5c::query::query_service_server::QueryService for QueryServiceI
                 _ => {
                     return Err(Status::invalid_argument(
                         "only 'match' predicate is supported by Dolos",
-                    ))
+                    ));
                 }
             },
             _ => {
                 return Err(Status::invalid_argument(
                     "criteria too broad, narrow it down",
-                ))
+                ));
             }
         };
 
-        let utxos = self
-            .domain
-            .state()
-            .get_utxos(set.into_iter().collect_vec())
+        let utxos = StateStore::get_utxos(self.domain.state(), set.into_iter().collect_vec())
             .map_err(|e| Status::internal(e.to_string()))?;
 
         let items: Vec<_> = utxos

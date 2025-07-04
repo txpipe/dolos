@@ -503,9 +503,7 @@ pub enum StateError {
     DecodingError(#[from] pallas::codec::minicbor::decode::Error),
 }
 
-pub trait StateStore:
-    Sized + pallas::interop::utxorpc::LedgerContext + Clone + Send + Sync + 'static
-{
+pub trait StateStore: Sized + Clone + Send + Sync + 'static {
     fn start(&self) -> Result<Option<ChainPoint>, StateError>;
 
     fn cursor(&self) -> Result<Option<ChainPoint>, StateError>;
