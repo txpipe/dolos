@@ -1,10 +1,10 @@
 use futures_core::Stream;
-use futures_util::stream::once;
 use futures_util::StreamExt;
+use futures_util::stream::once;
 use itertools::{Either, Itertools};
-use pallas::interop::utxorpc as interop;
 use pallas::interop::utxorpc::spec::sync::BlockRef;
-use pallas::interop::utxorpc::{spec as u5c, Mapper};
+use pallas::interop::utxorpc::{self as interop, LedgerContext};
+use pallas::interop::utxorpc::{Mapper, spec as u5c};
 use std::pin::Pin;
 use tonic::{Request, Response, Status};
 
@@ -23,8 +23,8 @@ fn u5c_to_chain_point(block_ref: u5c::sync::BlockRef) -> Result<ChainPoint, Stat
 //     AnyChainBlock { chain: Some(block) }
 // }
 
-fn raw_to_anychain<D: Domain>(
-    mapper: &Mapper<D::State>,
+fn raw_to_anychain<C: LedgerContext>(
+    mapper: &Mapper<C>,
     body: &BlockBody,
 ) -> u5c::sync::AnyChainBlock {
     let block = mapper.map_block_cbor(body);
@@ -57,18 +57,18 @@ fn point_to_blockref(point: &ChainPoint) -> u5c::sync::BlockRef {
     }
 }
 
-fn wal_log_to_tip_response<D: Domain>(
-    mapper: &Mapper<D::State>,
+fn wal_log_to_tip_response<C: LedgerContext>(
+    mapper: &Mapper<C>,
     log: &LogValue,
 ) -> u5c::sync::FollowTipResponse {
     u5c::sync::FollowTipResponse {
         action: match log {
             LogValue::Apply(x) => {
-                u5c::sync::follow_tip_response::Action::Apply(raw_to_anychain::<D>(mapper, &x.body))
+                u5c::sync::follow_tip_response::Action::Apply(raw_to_anychain(mapper, &x.body))
                     .into()
             }
             LogValue::Undo(x) => {
-                u5c::sync::follow_tip_response::Action::Undo(raw_to_anychain::<D>(mapper, &x.body))
+                u5c::sync::follow_tip_response::Action::Undo(raw_to_anychain(mapper, &x.body))
                     .into()
             }
             // TODO: shouldn't we have a u5c event for origin?
@@ -96,13 +96,19 @@ fn point_to_reset_tip_response(point: ChainPoint) -> u5c::sync::FollowTipRespons
     }
 }
 
-pub struct SyncServiceImpl<D: Domain, C: CancelToken> {
+pub struct SyncServiceImpl<D: Domain, C: CancelToken>
+where
+    D::State: LedgerContext,
+{
     domain: D,
     mapper: interop::Mapper<D::State>,
     cancel: C,
 }
 
-impl<D: Domain, C: CancelToken> SyncServiceImpl<D, C> {
+impl<D: Domain, C: CancelToken> SyncServiceImpl<D, C>
+where
+    D::State: LedgerContext,
+{
     pub fn new(domain: D, cancel: C) -> Self {
         let mapper = Mapper::new(domain.state().clone());
 
@@ -117,6 +123,8 @@ impl<D: Domain, C: CancelToken> SyncServiceImpl<D, C> {
 #[async_trait::async_trait]
 impl<D: Domain, C: CancelToken> u5c::sync::sync_service_server::SyncService
     for SyncServiceImpl<D, C>
+where
+    D::State: LedgerContext,
 {
     type FollowTipStream =
         Pin<Box<dyn Stream<Item = Result<u5c::sync::FollowTipResponse, Status>> + Send + 'static>>;
@@ -135,7 +143,7 @@ impl<D: Domain, C: CancelToken> u5c::sync::sync_service_server::SyncService
                     .archive()
                     .get_block_by_slot(&br.index)
                     .map_err(|_| Status::internal("Failed to query chain service."))?
-                    .map(|body| raw_to_anychain::<D>(&self.mapper, &body))
+                    .map(|body| raw_to_anychain(&self.mapper, &body))
                     .ok_or(Status::not_found(format!("Failed to find block: {br:?}")))
             })
             .collect::<Result<Vec<u5c::sync::AnyChainBlock>, Status>>()?;
@@ -164,7 +172,7 @@ impl<D: Domain, C: CancelToken> u5c::sync::sync_service_server::SyncService
         let (items, next_token): (_, Vec<_>) =
             page.into_iter().enumerate().partition_map(|(idx, x)| {
                 if idx < len - 1 {
-                    Either::Left(raw_to_anychain::<D>(&self.mapper, &x.body))
+                    Either::Left(raw_to_anychain(&self.mapper, &x.body))
                 } else {
                     Either::Right(raw_to_blockref(&x))
                 }
@@ -217,7 +225,7 @@ impl<D: Domain, C: CancelToken> u5c::sync::sync_service_server::SyncService
 
         let forward = WalStream::start(self.domain.wal().clone(), from_seq, self.cancel.clone())
             .skip(1)
-            .map(move |(_, log)| Ok(wal_log_to_tip_response::<D>(&mapper, &log)));
+            .map(move |(_, log)| Ok(wal_log_to_tip_response(&mapper, &log)));
 
         let stream = reset.chain(forward);
 
