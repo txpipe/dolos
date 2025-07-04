@@ -131,7 +131,7 @@ impl ChainStore {
                 info!("detected state db schema v1");
                 v1::ChainStore::from(db).into()
             }
-            Some(x) => panic!("can't recognize db hash {}", x),
+            Some(x) => panic!("can't recognize db hash {x}"),
         };
 
         Ok(schema)

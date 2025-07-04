@@ -88,7 +88,7 @@ fn tx_eval_to_u5c(
         },
         Err(e) => u5c::spec::cardano::TxEval {
             errors: vec![u5c::spec::cardano::EvalError {
-                msg: format!("{:#?}", e),
+                msg: format!("{e:#?}"),
             }],
             ..Default::default()
         },

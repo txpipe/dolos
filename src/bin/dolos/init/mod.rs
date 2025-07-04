@@ -151,7 +151,7 @@ impl Display for HistoryPrunningOptions {
             Self::Keep1Week => f.write_str("1 week"),
             Self::Keep1Month => f.write_str("1 month"),
             Self::KeepEverything => f.write_str("keep everything"),
-            Self::Custom(x) => write!(f, "{} slots", x),
+            Self::Custom(x) => write!(f, "{x} slots"),
         }
     }
 }
