@@ -25,7 +25,7 @@ pub use o7s_win as o7s;
 pub use dolos_minibf as minibf;
 
 #[cfg(feature = "trp")]
-pub mod trp;
+pub use dolos_trp as trp;
 
 #[derive(Deserialize, Serialize, Clone, Default)]
 pub struct Config {

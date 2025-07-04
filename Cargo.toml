@@ -25,29 +25,23 @@ bincode.workspace = true
 trait-variant.workspace = true
 hex.workspace = true
 futures-core.workspace = true
+serde_json.workspace = true
+base64.workspace = true
 
 dolos-core = { path = "crates/core" }
 dolos-cardano = { path = "crates/cardano" }
 dolos-redb = { path = "crates/redb" }
 dolos-minibf = { path = "crates/minibf", optional = true }
+dolos-trp = { path = "crates/trp", optional = true }
 
 # gasket = { git = "https://github.com/construkts/gasket-rs.git", features = ["derive"] }
 gasket = { version = "^0.9", features = ["derive"] }
 # gasket = { path = "../../construkts/gasket-rs/gasket", features = ["derive"] }
 
-tx3-lang = "0.7.0"
-tx3-cardano = "0.7.0"
-# tx3-lang = { path = "../../tx3-lang/tx3/crates/tx3-lang" }
-# tx3-cardano = { path = "../../tx3-lang/tx3/crates/tx3-cardano" }
-# tx3-lang = { git = "https://github.com/tx3-lang/tx3.git" }
-# tx3-cardano = { git = "https://github.com/tx3-lang/tx3.git" }
-
 bech32 = "0.11.0"
-base64 = "0.22.1"
 clap = { version = "4.5.37", features = ["derive"] }
 log = "0.4.18"
 config = { version = "0.14.1", default-features = false, features = ["toml", "json"] }
-serde_json = "1.0.122"
 lazy_static = "1.4.0"
 tracing-subscriber = "0.3.17"
 miette = { version = "7.4.0", features = ["fancy"] }
@@ -73,9 +67,6 @@ paste = "1.0.15"
 tonic = { version = "0.12.3", features = ["tls"], optional = true }
 tonic-web = { version = "0.12.3", optional = true }
 tonic-reflection = { version = "0.12.3", optional = true }
-
-# TRP dependencies
-jsonrpsee = { version = "0.24.9", features = ["server"], optional = true }
 
 # Common HTTP dependencies
 http = "1.3.1"
@@ -111,7 +102,7 @@ phase2 = ["pallas/phase2", "dolos-core/phase2", "dolos-minibf/phase2"]
 # Service features
 grpc = ["tonic", "tonic-web", "tonic-reflection", "tower-http/cors"]
 minibf = ["dolos-minibf", "tower-http/cors", "tower-http/trace", "tower-http/normalize-path"]
-trp = ["jsonrpsee", "tower-http/cors"]
+trp = ["dolos-trp"]
 
 # Default features - includes all services
 default = ["mithril", "utils", "phase2", "grpc", "minibf", "trp"]
@@ -141,6 +132,8 @@ tokio = { version = "^1.40", features = ["rt", "rt-multi-thread", "signal"] }
 tokio-util = { version = "0.7.11", features = ["rt"] }
 tower = "0.4"
 tower-http = { version = "0.6.1", features = ["cors", "trace"] }
+serde_json = "1.0.122"
+base64 = "0.22.1"
 
 [workspace.metadata.release]
 push = false

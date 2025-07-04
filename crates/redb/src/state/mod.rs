@@ -143,7 +143,7 @@ impl LedgerStore {
                 info!("detected state db schema v2-light");
                 v2light::LedgerStore::new(db).into()
             }
-            Some(x) => panic!("can't recognize db hash {}", x),
+            Some(x) => panic!("can't recognize db hash {x}"),
         };
 
         Ok(schema)

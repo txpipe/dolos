@@ -1,4 +1,4 @@
-use axum::{Json, http::StatusCode};
+use axum::{http::StatusCode, Json};
 use itertools::Itertools;
 use pallas::{
     codec::minicbor,
@@ -6,9 +6,9 @@ use pallas::{
     ledger::{
         addresses::{Address, Network, StakeAddress, StakePayload},
         primitives::{
-            StakeCredential,
             alonzo::{self, Certificate as AlonzoCert},
             conway::{Certificate as ConwayCert, DatumOption, ScriptRef},
+            StakeCredential,
         },
         traverse::{
             ComputeHash, MultiEraBlock, MultiEraCert, MultiEraHeader, MultiEraInput,
@@ -848,7 +848,7 @@ impl IntoModel<Vec<TxContentDelegationsInner>> for TxModelBuilder<'_> {
                     MultiEraCert::AlonzoCompatible(cert) => {
                         match &**cert {
                             AlonzoCert::StakeDelegation(cred, pool) => Some(
-                                build_delegation_inner(index, &cred, &pool, network, active_epoch),
+                                build_delegation_inner(index, cred, pool, network, active_epoch),
                             ),
                             _ => None,
                         }
@@ -856,7 +856,7 @@ impl IntoModel<Vec<TxContentDelegationsInner>> for TxModelBuilder<'_> {
                     MultiEraCert::Conway(cert) => {
                         match &**cert {
                             ConwayCert::StakeDelegation(cred, pool) => Some(
-                                build_delegation_inner(index, &cred, &pool, network, active_epoch),
+                                build_delegation_inner(index, cred, pool, network, active_epoch),
                             ),
                             _ => None,
                         }

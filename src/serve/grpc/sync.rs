@@ -136,7 +136,7 @@ impl<D: Domain, C: CancelToken> u5c::sync::sync_service_server::SyncService
                     .get_block_by_slot(&br.index)
                     .map_err(|_| Status::internal("Failed to query chain service."))?
                     .map(|body| raw_to_anychain::<D>(&self.mapper, &body))
-                    .ok_or(Status::not_found(format!("Failed to find block: {:?}", br)))
+                    .ok_or(Status::not_found(format!("Failed to find block: {br:?}")))
             })
             .collect::<Result<Vec<u5c::sync::AnyChainBlock>, Status>>()?;
 
@@ -232,7 +232,7 @@ impl<D: Domain, C: CancelToken> u5c::sync::sync_service_server::SyncService
             .domain
             .wal()
             .find_tip()
-            .map_err(|e| Status::internal(format!("Unable to read WAL: {:?}", e)))?
+            .map_err(|e| Status::internal(format!("Unable to read WAL: {e:?}")))?
             .ok_or(Status::internal("chain has no data."))?;
 
         let response = u5c::sync::ReadTipResponse {
