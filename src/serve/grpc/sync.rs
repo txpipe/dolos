@@ -5,6 +5,7 @@ use itertools::{Either, Itertools};
 use pallas::interop::utxorpc as interop;
 use pallas::interop::utxorpc::spec::sync::BlockRef;
 use pallas::interop::utxorpc::{spec as u5c, Mapper};
+use pallas::ledger::traverse::MultiEraBlock;
 use std::pin::Pin;
 use tonic::{Request, Response, Status};
 
@@ -152,27 +153,77 @@ impl<D: Domain, C: CancelToken> u5c::sync::sync_service_server::SyncService
         let msg = request.into_inner();
 
         let from = msg.start_token.map(u5c_to_chain_point).transpose()?;
-
-        let len = msg.max_items as usize + 1;
-
-        let page = self
+        let len = msg.max_items as usize;
+        let (_, start) = self
             .domain
             .wal()
-            .read_block_page(from.as_ref(), len)
-            .map_err(|_err| Status::internal("can't query block"))?;
+            .find_start()
+            .map_err(|_| Status::internal("Failed to find WAL start"))?
+            .ok_or(Status::internal("empty wal"))?;
 
-        let (items, next_token): (_, Vec<_>) =
-            page.into_iter().enumerate().partition_map(|(idx, x)| {
-                if idx < len - 1 {
-                    Either::Left(raw_to_anychain::<D>(&self.mapper, &x.body))
-                } else {
-                    Either::Right(raw_to_blockref(&x))
-                }
-            });
+        let use_archive = match (from.as_ref(), start) {
+            (_, ChainPoint::Origin) => false,
+            (None, _) => true,
+            (Some(ChainPoint::Origin), _) => true,
+
+            (Some(ChainPoint::Specific(from_slot, _)), ChainPoint::Specific(start_slot, _)) => {
+                *from_slot < start_slot
+            }
+        };
+
+        let (items, next_token) = if use_archive {
+            let mut range = self
+                .domain
+                .archive()
+                .get_range(
+                    match &from {
+                        Some(ChainPoint::Specific(slot, _)) => Some(*slot),
+                        _ => None,
+                    },
+                    None,
+                )
+                .map_err(|_| Status::internal("cant query archive"))?;
+            let items = range
+                .by_ref()
+                .take(len)
+                .map(|(_, body)| raw_to_anychain::<D>(&self.mapper, &body))
+                .collect();
+            let next_token = match range.next() {
+                Some((slot, raw)) => Some(BlockRef {
+                    index: slot,
+                    hash: MultiEraBlock::decode(&raw)
+                        .map_err(|_| Status::internal("failed to decode block"))?
+                        .hash()
+                        .as_slice()
+                        .to_vec()
+                        .into(),
+                }),
+                None => None,
+            };
+
+            (items, next_token)
+        } else {
+            let page = self
+                .domain
+                .wal()
+                .read_block_page(from.as_ref(), len + 1)
+                .map_err(|_err| Status::internal("can't query block"))?;
+
+            let (items, next_token): (_, Vec<_>) =
+                page.into_iter().enumerate().partition_map(|(idx, x)| {
+                    if idx < len {
+                        Either::Left(raw_to_anychain::<D>(&self.mapper, &x.body))
+                    } else {
+                        Either::Right(raw_to_blockref(&x))
+                    }
+                });
+
+            (items, next_token.into_iter().next())
+        };
 
         let response = u5c::sync::DumpHistoryResponse {
             block: items,
-            next_token: next_token.into_iter().next(),
+            next_token,
         };
 
         Ok(Response::new(response))
