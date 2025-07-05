@@ -34,3 +34,4 @@ tx3-cardano = "0.7.0"
 
 [dev-dependencies]
 dolos-testing = { path = "../testing" }
+dolos-redb = { path = "../redb" }

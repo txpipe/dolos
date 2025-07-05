@@ -248,7 +248,9 @@ fn test_query_by_address() {
 fn test_count_utxos_by_address() {
     let store = LedgerStore::in_memory_v2().unwrap();
 
-    let delta = make_random_utxo_delta(0, TestAddress::everyone(), 10, 1_000_000);
+    let utxo_generator = |x: &TestAddress| utxo_with_random_amount(x, 1_000_000..1_500_000);
+
+    let delta = make_custom_utxo_delta(0, TestAddress::everyone(), 10..11, utxo_generator);
 
     store.apply(&[delta.clone()]).unwrap();
 
@@ -272,7 +274,9 @@ fn test_count_utxos_by_address() {
 fn test_iter_within_key() {
     let store = LedgerStore::in_memory_v2().unwrap();
 
-    let delta = make_random_utxo_delta(0, TestAddress::everyone(), 10, 1_000_000);
+    let utxo_generator = |x: &TestAddress| utxo_with_random_amount(x, 1_000_000..1_500_000);
+
+    let delta = make_custom_utxo_delta(0, TestAddress::everyone(), 10..11, utxo_generator);
 
     store.apply(&[delta.clone()]).unwrap();
 
