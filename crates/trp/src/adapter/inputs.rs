@@ -352,10 +352,7 @@ mod tests {
             })
             .collect();
 
-        let all_assets = naked_asset
-            .into_iter()
-            .chain(other_assets.into_iter())
-            .collect();
+        let all_assets = naked_asset.into_iter().chain(other_assets).collect();
 
         tx3_lang::ir::InputQuery {
             address: tx3_lang::ir::Expression::Address(address.to_bytes()),
