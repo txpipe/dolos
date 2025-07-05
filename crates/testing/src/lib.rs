@@ -1,4 +1,4 @@
-use std::str::FromStr;
+use std::{collections::BTreeMap, ops::Range, str::FromStr};
 
 use pallas::{
     codec::minicbor,
@@ -15,6 +15,19 @@ use pallas::{
 use rand::Rng;
 
 use dolos_core::*;
+
+pub trait UtxoGenerator {
+    fn generate(&self, address: &TestAddress) -> EraCbor;
+}
+
+impl<F> UtxoGenerator for F
+where
+    F: Fn(&TestAddress) -> EraCbor,
+{
+    fn generate(&self, address: &TestAddress) -> EraCbor {
+        self(address)
+    }
+}
 
 #[derive(Clone)]
 pub enum TestAddress {
@@ -100,6 +113,47 @@ impl From<String> for TestAddress {
     }
 }
 
+impl From<&TestAddress> for TestAddress {
+    fn from(value: &TestAddress) -> Self {
+        value.clone()
+    }
+}
+
+pub enum TestAsset {
+    Hosky,
+    Snek,
+    NikePig,
+    Custom(&'static str, &'static str),
+}
+
+impl TestAsset {
+    pub fn policy_hex(&self) -> &str {
+        match self {
+            TestAsset::Hosky => "a0028f350aaabe0545fdcb56b039bfb08e4bb4d8c4d7c3c7d481c235",
+            TestAsset::Snek => "279c909f348e533da5808898f87f9a14bb2c3dfbbacccd631d927a3f",
+            TestAsset::NikePig => "c881c20e49dbaca3ff6cef365969354150983230c39520b917f5cf7c",
+            TestAsset::Custom(policy, _) => policy,
+        }
+    }
+
+    pub fn ticker(&self) -> &str {
+        match self {
+            TestAsset::Hosky => "HOSKY",
+            TestAsset::Snek => "SNEK",
+            TestAsset::NikePig => "NIKEPIG",
+            TestAsset::Custom(_, name) => name,
+        }
+    }
+
+    pub fn name(&self) -> Option<&[u8]> {
+        Some(self.ticker().as_bytes())
+    }
+
+    pub fn policy(&self) -> Hash<28> {
+        Hash::from_str(self.policy_hex()).unwrap()
+    }
+}
+
 pub fn genesis_tx_hash() -> Hash<32> {
     Hash::from_str("0000000000000000000000000000000000000000000000000000000000000000").unwrap()
 }
@@ -120,39 +174,14 @@ pub fn tx_sequence_to_hash(sequence: u64) -> TxHash {
     hasher.finalize()
 }
 
-pub fn fake_utxo(
-    tx_hash: Hash<32>,
-    txo_idx: u32,
-    address: impl Into<TestAddress>,
-    amount: u64,
-) -> (TxoRef, EraCbor) {
-    let txoref = TxoRef(tx_hash, txo_idx);
-
-    let output = pallas::ledger::primitives::conway::TransactionOutput::PostAlonzo(
-        PostAlonzoTransactionOutput {
-            address: address.into().to_bytes().into(),
-            value: pallas::ledger::primitives::conway::Value::Coin(amount),
-            datum_option: None,
-            script_ref: None,
-        }
-        .into(),
-    );
-
-    (
-        txoref,
-        EraCbor(
-            pallas::ledger::traverse::Era::Conway.into(),
-            pallas::codec::minicbor::to_vec(&output).unwrap(),
-        ),
-    )
-}
-
 pub fn fake_genesis_utxo(
     address: impl Into<TestAddress>,
     ordinal: usize,
     amount: u64,
 ) -> (TxoRef, EraCbor) {
-    fake_utxo(genesis_tx_hash(), ordinal as u32, address, amount)
+    let tx_hash = genesis_tx_hash();
+    let txoref = TxoRef(tx_hash, ordinal as u32);
+    (txoref, utxo_with_value(address, Value::Coin(amount)))
 }
 
 pub fn replace_utxo_address(utxo: EraCbor, new_address: TestAddress) -> EraCbor {
@@ -284,35 +313,82 @@ pub fn make_move_utxo_delta(
     delta
 }
 
-pub fn make_random_utxo_delta(
+pub fn make_custom_utxo_delta<G>(
     slot: u64,
     addresses: impl IntoIterator<Item = TestAddress>,
-    max_utxo_per_address: u64,
-    max_amount_per_utxo: u64,
-) -> LedgerDelta {
+    utxos_per_address: Range<u64>,
+    utxo_generator: G,
+) -> LedgerDelta
+where
+    G: UtxoGenerator,
+{
     let addresses = addresses.into_iter().collect::<Vec<_>>();
 
     let mut utxos = UtxoMap::new();
 
     for (tx, address) in addresses.iter().enumerate() {
-        let utxo_count = rand::rng().random_range(0..max_utxo_per_address);
+        let utxo_count = rand::rng().random_range(utxos_per_address.clone());
 
         for ordinal in 0..utxo_count {
             let tx = tx_sequence_to_hash(tx as u64);
 
-            let (key, value) = fake_utxo(
-                tx,
-                ordinal as u32,
-                address.clone(),
-                rand::rng().random_range(0..max_amount_per_utxo),
-            );
+            let key = TxoRef(tx, ordinal as u32);
+            let cbor = utxo_generator.generate(address);
 
-            utxos.insert(key, value);
+            utxos.insert(key, cbor);
         }
     }
 
     let mut delta = forward_delta_from_slot(slot);
-    delta.consumed_utxo = utxos;
+    delta.produced_utxo = utxos;
 
     delta
+}
+
+pub fn utxo_with_value(address: impl Into<TestAddress>, value: Value) -> EraCbor {
+    let output = pallas::ledger::primitives::conway::TransactionOutput::PostAlonzo(
+        PostAlonzoTransactionOutput {
+            address: address.into().to_bytes().into(),
+            value,
+            datum_option: None,
+            script_ref: None,
+        }
+        .into(),
+    );
+
+    EraCbor(
+        pallas::ledger::traverse::Era::Conway.into(),
+        pallas::codec::minicbor::to_vec(&output).unwrap(),
+    )
+}
+
+pub fn utxo_with_random_amount(address: impl Into<TestAddress>, amount: Range<u64>) -> EraCbor {
+    let amount = rand::rng().random_range(amount);
+
+    utxo_with_value(address, Value::Coin(amount))
+}
+
+pub const MIN_UTXO_AMOUNT: u64 = 1_111_111;
+
+pub fn utxo_with_random_asset(
+    address: impl Into<TestAddress>,
+    asset: impl Into<TestAsset>,
+    asset_amount: Range<u64>,
+) -> EraCbor {
+    let rnd_amount = rand::rng().random_range(asset_amount);
+
+    let asset: TestAsset = asset.into();
+
+    let multi_assets = BTreeMap::from_iter(vec![(
+        asset.policy(),
+        BTreeMap::from_iter(vec![(
+            asset.name().unwrap().to_vec().into(),
+            pallas::ledger::primitives::conway::PositiveCoin::try_from(rnd_amount).unwrap(),
+        )]),
+    )]);
+
+    let value =
+        pallas::ledger::primitives::conway::Value::Multiasset(MIN_UTXO_AMOUNT, multi_assets);
+
+    utxo_with_value(address, value)
 }
