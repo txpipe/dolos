@@ -31,7 +31,7 @@ serde_json.workspace = true
 base64.workspace = true
 
 dolos-core = { path = "crates/core" }
-dolos-cardano = { path = "crates/cardano" }
+dolos-cardano = { path = "crates/cardano", features = ["include-genesis"] }
 dolos-redb = { path = "crates/redb" }
 dolos-minibf = { path = "crates/minibf", optional = true }
 dolos-trp = { path = "crates/trp", optional = true }

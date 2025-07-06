@@ -10,6 +10,9 @@ use dolos_core::*;
 pub mod pparams;
 //pub mod validate;
 
+#[cfg(feature = "include-genesis")]
+pub mod include;
+
 pub type Block<'a> = MultiEraBlock<'a>;
 
 pub type UtxoBody<'a> = MultiEraOutput<'a>;
