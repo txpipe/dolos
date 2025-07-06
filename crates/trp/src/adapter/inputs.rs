@@ -314,23 +314,9 @@ pub fn resolve<S: StateStore>(
 
 #[cfg(test)]
 mod tests {
-    use dolos_redb::state::LedgerStore;
+    use dolos_testing::toy_domain::seed_random_memory_store;
 
     use super::*;
-
-    fn seed_random_memory_store(utxo_generator: impl dolos_testing::UtxoGenerator) -> LedgerStore {
-        let store = LedgerStore::in_memory_v2().unwrap();
-
-        let everyone = dolos_testing::TestAddress::everyone();
-        let utxos_per_address = 2..4;
-
-        let delta =
-            dolos_testing::make_custom_utxo_delta(1, everyone, utxos_per_address, utxo_generator);
-
-        store.apply(&[delta]).unwrap();
-
-        store
-    }
 
     fn new_input_query(
         address: &dolos_testing::TestAddress,
