@@ -18,4 +18,11 @@ futures-util = { workspace = true, optional = true }
 
 [features]
 default = []
-toy-domain = ["dolos-core/phase2", "dolos-redb", "dolos-cardano", "tokio-stream", "futures-core", "futures-util"]
+toy-domain = [
+    "dolos-core/phase2",
+    "dolos-redb",
+    "dolos-cardano/include-genesis",
+    "tokio-stream",
+    "futures-core",
+    "futures-util",
+]

@@ -1,6 +1,7 @@
+use dolos_cardano::include;
 use std::path::PathBuf;
 
-use crate::init::{include, KnownNetwork};
+use crate::init::KnownNetwork;
 
 #[derive(Debug, clap::Args)]
 pub struct Args {
@@ -26,7 +27,7 @@ pub fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
         }
     };
 
-    include::save_genesis_configs(&PathBuf::from("./"), network)?;
+    network.save_included_genesis(&PathBuf::from("./"))?;
 
     Ok(())
 }

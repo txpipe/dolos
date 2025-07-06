@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::{TestAddress, UtxoGenerator, make_custom_utxo_delta};
 use dolos_core::*;
 use dolos_redb::state::LedgerStore;
@@ -74,6 +76,7 @@ pub struct ToyDomain {
     archive: dolos_redb::archive::ChainStore,
     mempool: Mempool,
     storage_config: dolos_core::StorageConfig,
+    genesis: Arc<dolos_core::Genesis>,
 }
 
 impl ToyDomain {
@@ -85,6 +88,7 @@ impl ToyDomain {
             archive: dolos_redb::archive::ChainStore::in_memory_v1().unwrap(),
             mempool: Mempool {},
             storage_config: dolos_core::StorageConfig::default(),
+            genesis: Arc::new(dolos_cardano::include::preprod::load()),
         }
     }
 }
@@ -101,7 +105,7 @@ impl dolos_core::Domain for ToyDomain {
     }
 
     fn genesis(&self) -> &dolos_core::Genesis {
-        unreachable!("MockDomain: genesis not implemented")
+        &self.genesis
     }
 
     fn wal(&self) -> &Self::Wal {

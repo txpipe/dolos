@@ -1,6 +1,7 @@
 use clap::Parser;
 use dolos::core::StorageVersion;
-use include::network_mutable_slots;
+use dolos_cardano::{include, mutable_slots};
+use dolos_core::Genesis;
 use inquire::{Confirm, Select, Text};
 use miette::{miette, Context as _, IntoDiagnostic};
 use std::{
@@ -10,8 +11,6 @@ use std::{
 };
 
 use crate::{common::cleanup_data, feedback::Feedback};
-
-pub mod include;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -36,6 +35,24 @@ impl KnownNetwork {
             2 => Some(KnownNetwork::CardanoPreview),
             _ => None,
         }
+    }
+
+    pub fn load_included_genesis(&self) -> Genesis {
+        match self {
+            KnownNetwork::CardanoMainnet => include::mainnet::load(),
+            KnownNetwork::CardanoPreProd => include::preprod::load(),
+            KnownNetwork::CardanoPreview => include::preview::load(),
+        }
+    }
+
+    pub fn save_included_genesis(&self, root: &Path) -> miette::Result<()> {
+        let result = match self {
+            KnownNetwork::CardanoMainnet => include::mainnet::save(root),
+            KnownNetwork::CardanoPreProd => include::preprod::save(root),
+            KnownNetwork::CardanoPreview => include::preview::save(root),
+        };
+
+        result.into_diagnostic().context("saving genesis")
     }
 }
 
@@ -249,8 +266,10 @@ impl ConfigEditor {
             self.1 = Some(network.clone());
 
             // Add max wall history for network from Genesis.
-            self.0.storage.max_wal_history = Some(network_mutable_slots(network));
+            let genesis = network.load_included_genesis();
+            self.0.storage.max_wal_history = Some(mutable_slots(&genesis));
         }
+
         self
     }
 
@@ -525,7 +544,7 @@ impl ConfigEditor {
 
     fn include_genesis_files(self) -> miette::Result<Self> {
         if let Some(network) = &self.1 {
-            include::save_genesis_configs(&PathBuf::from("./"), network)?;
+            network.save_included_genesis(&PathBuf::from("./"))?;
         }
 
         Ok(self)

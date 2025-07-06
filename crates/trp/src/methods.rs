@@ -1,4 +1,4 @@
-use base64::{engine::general_purpose::STANDARD, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD};
 use jsonrpsee::types::{ErrorCode, ErrorObject, ErrorObjectOwned, Params};
 use serde::Deserialize;
 use std::sync::Arc;
@@ -64,7 +64,7 @@ fn handle_param_args(tx: &mut ProtoTx, args: &serde_json::Value) -> Result<(), E
                             ErrorCode::InvalidParams.code(),
                             "Argument cannot be cast as i64",
                             Some(serde_json::json!({ "key": key, "value": val })),
-                        ))
+                        ));
                     }
                 },
             ),
@@ -120,7 +120,7 @@ fn handle_param_args(tx: &mut ProtoTx, args: &serde_json::Value) -> Result<(), E
                     ErrorCode::InvalidParams.code(),
                     "Invalid argument",
                     Some(serde_json::json!({ "key": key, "value": val })),
-                ))
+                ));
             }
         }
     }
@@ -135,7 +135,7 @@ fn decode_params(params: Params<'_>) -> Result<ProtoTx, ErrorObjectOwned> {
         return Err(ErrorObject::owned(
             ErrorCode::InvalidParams.code(),
             format!(
-                "Unsupported IR version, expected {}",
+                "Unsupported IR version, expected {}. Make sure you have the latest version of the tx3 toolchain",
                 tx3_lang::ir::IR_VERSION
             ),
             Some(params.tir.version),
@@ -212,4 +212,72 @@ pub async fn trp_resolve<D: Domain>(
 
 pub fn health<D: Domain>(context: &Context<D>) -> bool {
     context.domain.state().cursor().is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use dolos_testing::TestAddress::{Alice, Bob};
+    use dolos_testing::toy_domain::{ToyDomain, seed_random_memory_store};
+    use serde_json::json;
+
+    use crate::{Config, metrics::Metrics};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn test_resolve_happy_path() {
+        let protocol = tx3_lang::Protocol::from_string(
+            "party Sender;
+            party Receiver;
+            tx swap(quantity: Int) {}"
+                .to_string(),
+        )
+        .load()
+        .unwrap();
+
+        let tx = protocol
+            .new_tx("swap")
+            .unwrap()
+            .with_arg("quantity", 100.into())
+            .with_arg("sender", Alice.to_bytes().into())
+            .with_arg("receiver", Bob.to_bytes().into())
+            .apply()
+            .unwrap();
+
+        let ir = tx.apply().unwrap().ir_bytes();
+
+        let req = json!({
+            "tir": {
+                "version": "v1alpha6",
+                "bytecode": hex::encode(ir),
+                "encoding": "hex"
+            },
+            "args": {}
+        })
+        .to_string();
+
+        let params = Params::new(Some(req.as_str()));
+
+        let store = seed_random_memory_store(|x: &dolos_testing::TestAddress| {
+            dolos_testing::utxo_with_random_amount(x, 4_000_000..5_000_000)
+        });
+
+        let domain = ToyDomain::new();
+
+        let context = Arc::new(Context {
+            domain,
+            config: Arc::new(Config {
+                max_optimize_rounds: 3,
+
+                // next are dummy, not used
+                listen_address: "[::]:1234".parse().unwrap(),
+                permissive_cors: None,
+            }),
+            metrics: Metrics::default(),
+        });
+
+        let resolved = trp_resolve(params, context.clone()).await.unwrap();
+
+        dbg!(&resolved);
+    }
 }
