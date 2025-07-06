@@ -5,7 +5,17 @@ edition = "2024"
 
 [dependencies]
 pallas.workspace = true
-
 dolos-core = { path = "../core" }
-
 rand = "0.9.1"
+
+# optional dependencies for toy domain
+dolos-redb = { path = "../redb", optional = true }
+dolos-cardano = { path = "../cardano", optional = true }
+tokio-stream = { workspace = true, optional = true }
+futures-core = { workspace = true, optional = true }
+futures-util = { workspace = true, optional = true }
+
+
+[features]
+default = []
+toy-domain = ["dolos-core/phase2", "dolos-redb", "dolos-cardano", "tokio-stream", "futures-core", "futures-util"]

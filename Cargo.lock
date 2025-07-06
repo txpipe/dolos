@@ -1201,9 +1201,14 @@ dependencies = [
 name = "dolos-testing"
 version = "0.1.0"
 dependencies = [
+ "dolos-cardano",
  "dolos-core",
+ "dolos-redb",
+ "futures-core",
+ "futures-util",
  "pallas 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
  "rand 0.9.1",
+ "tokio-stream",
 ]
 
 [[package]]
@@ -1214,7 +1219,6 @@ dependencies = [
  "bincode 1.3.3",
  "dolos-cardano",
  "dolos-core",
- "dolos-redb",
  "dolos-testing",
  "hex",
  "itertools 0.13.0",
@@ -4999,9 +5003,9 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "tx3-cardano"
-version = "0.7.0"
+version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d1334ba7c260cfe5df3923e75126949a580351841ce6c2137df39ad8de1965e"
+checksum = "ce67d811dfb64da4c80093e16e942597c1c1c873c20bb846decd7c991497df67"
 dependencies = [
  "hex",
  "pallas 1.0.0-alpha.2 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -5015,9 +5019,9 @@ dependencies = [
 
 [[package]]
 name = "tx3-lang"
-version = "0.7.0"
+version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c0a45723cea8deff15587048a1b4a2fa6d4fe9ac5c0e66ab2e9a4d22b2eb6bbd"
+checksum = "caaf36a74abb4a2633b8c382bc9eba8b7a00fb70c146fbc7c1d54f14794b51dc"
 dependencies = [
  "bincode 2.0.1",
  "hex",

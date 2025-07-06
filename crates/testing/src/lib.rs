@@ -12,9 +12,13 @@ use pallas::{
         traverse::{Era, MultiEraOutput},
     },
 };
+
 use rand::Rng;
 
 use dolos_core::*;
+
+#[cfg(feature = "toy-domain")]
+pub mod toy_domain;
 
 pub trait UtxoGenerator {
     fn generate(&self, address: &TestAddress) -> EraCbor;
