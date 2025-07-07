@@ -11,8 +11,8 @@ use pallas::ledger::{
 fn rational_number_to_f64(val: &RationalNumber, decimal_places: u32) -> f64 {
     let res = val.numerator as f64 / val.denominator as f64;
     let multiplier = 10_f64.powi(decimal_places as i32);
-    let res = (res * multiplier).round() / multiplier;
-    res
+
+    (res * multiplier).round() / multiplier
 }
 
 fn cost_models_to_key_value(cost_models: &CostModels) -> Vec<(&'static str, &[i64])> {
@@ -38,7 +38,7 @@ fn map_cost_models_raw(cost_models: &CostModels) -> HashMap<String, serde_json::
 fn map_cost_models_named(cost_models: &CostModels) -> HashMap<String, serde_json::Value> {
     cost_models_to_key_value(cost_models)
         .into_iter()
-        .map(|(k, v)| (k.to_string(), get_named_cost_model(1, &v)))
+        .map(|(k, v)| (k.to_string(), get_named_cost_model(1, v)))
         .collect()
 }
 

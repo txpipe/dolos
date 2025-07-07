@@ -1,7 +1,6 @@
 use axum::{Json, extract::State, http::StatusCode};
 use blockfrost_openapi::models::epoch_param_content::EpochParamContent;
 
-use dolos_cardano::pparams;
 use dolos_core::{Domain, StateStore as _};
 
 use crate::{Facade, mapping::IntoModel as _};
