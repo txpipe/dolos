@@ -229,8 +229,23 @@ mod tests {
         let protocol = tx3_lang::Protocol::from_string(
             "party Sender;
             party Receiver;
-            tx swap(quantity: Int) {}"
-                .to_string(),
+            tx swap(quantity: Int) {
+              input source {
+                from: Sender,
+                min_amount: Ada(quantity) + fees,
+              }
+
+              output {
+                to: Receiver,
+                amount: Ada(quantity),
+              }
+
+              output {
+                to: Sender,
+                amount: source - Ada(quantity) - fees,
+              }
+            }"
+            .to_string(),
         )
         .load()
         .unwrap();
@@ -258,11 +273,16 @@ mod tests {
 
         let params = Params::new(Some(req.as_str()));
 
-        let store = seed_random_memory_store(|x: &dolos_testing::TestAddress| {
-            dolos_testing::utxo_with_random_amount(x, 4_000_000..5_000_000)
-        });
+        let delta = dolos_testing::make_custom_utxo_delta(
+            1,
+            dolos_testing::TestAddress::everyone(),
+            2..4,
+            |x: &dolos_testing::TestAddress| {
+                dolos_testing::utxo_with_random_amount(x, 4_000_000..5_000_000)
+            },
+        );
 
-        let domain = ToyDomain::new();
+        let domain = ToyDomain::new(Some(delta));
 
         let context = Arc::new(Context {
             domain,

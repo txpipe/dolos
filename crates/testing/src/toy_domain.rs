@@ -81,14 +81,20 @@ pub struct ToyDomain {
 
 impl ToyDomain {
     /// Create a new MockDomain with the provided state implementation
-    pub fn new() -> Self {
+    pub fn new(initial_delta: Option<LedgerDelta>) -> Self {
+        let state = dolos_redb::state::LedgerStore::in_memory_v2().unwrap();
+
+        if let Some(delta) = initial_delta {
+            state.apply(&[delta]).unwrap();
+        }
+
         Self {
-            state: dolos_redb::state::LedgerStore::in_memory_v2().unwrap(),
+            state,
             wal: dolos_redb::wal::RedbWalStore::memory().unwrap(),
             archive: dolos_redb::archive::ChainStore::in_memory_v1().unwrap(),
             mempool: Mempool {},
             storage_config: dolos_core::StorageConfig::default(),
-            genesis: Arc::new(dolos_cardano::include::preprod::load()),
+            genesis: Arc::new(dolos_cardano::include::devnet::load()),
         }
     }
 }
