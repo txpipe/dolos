@@ -162,7 +162,7 @@ impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
             )
             .route(
                 "/epochs/latest/parameters",
-                get(routes::epochs::latest::parameters::route::<D>),
+                get(routes::epochs::latest_parameters::<D>),
             )
             .route("/tx/submit", post(routes::tx::submit::route::<D>))
             .route("/txs/{tx_hash}", get(routes::txs::by_hash::<D>))
