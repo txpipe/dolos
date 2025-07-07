@@ -7,8 +7,8 @@ use dolos_core::Genesis;
 use pallas::ledger::{
     primitives::{RationalNumber, conway::CostModels},
     validate::utils::{
-        AlonzoProtParams, BabbageProtParams, ByronProtParams, ConwayProtParams,
-        MultiEraProtocolParameters, ShelleyProtParams,
+        AlonzoProtParams, BabbageProtParams, ConwayProtParams, MultiEraProtocolParameters,
+        ShelleyProtParams,
     },
 };
 
@@ -270,10 +270,10 @@ impl<'a> IntoModel<EpochParamContent> for ParametersModelBuilder<'a> {
 
     fn into_model(self) -> Result<EpochParamContent, axum::http::StatusCode> {
         let out = match &self.params {
-            MultiEraProtocolParameters::Conway(x) => self.map_conway_params(&x),
-            MultiEraProtocolParameters::Babbage(x) => self.map_babbage_params(&x),
-            MultiEraProtocolParameters::Alonzo(x) => self.map_alonzo_params(&x),
-            MultiEraProtocolParameters::Shelley(x) => self.map_shelley_params(&x),
+            MultiEraProtocolParameters::Conway(x) => self.map_conway_params(x),
+            MultiEraProtocolParameters::Babbage(x) => self.map_babbage_params(x),
+            MultiEraProtocolParameters::Alonzo(x) => self.map_alonzo_params(x),
+            MultiEraProtocolParameters::Shelley(x) => self.map_shelley_params(x),
             // TODO: define mapping for byron params
             _ => return Err(StatusCode::INTERNAL_SERVER_ERROR),
         };
