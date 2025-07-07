@@ -2,6 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.26.0] - 2025-07-07
+
+### 🚀 Features
+
+- Move TRP into crate and add OTEL (#572)
+- *(minibf)* Implement `epoch/latest/parameters` endpoint (#584)
+- *(minibf)* Implement `epoch/{number}/parameters` endpoint (#585)
+- *(minibf)* Implement `genesis` endpoint (#586)
+
+### 🚜 Refactor
+
+- Decouple u5c trait from state store (#577)
+- Move genesis include files to cardano crate (#581)
+
+### 🧪 Testing
+
+- *(trp)* Cover input resolver logic (#578)
+- Introduce toy domain artifact (#580)
+- Improve toy domain features (#583)
+
+### ⚙️ Miscellaneous Tasks
+
+- Fix new lint warnings (#579)
+- *(trp)* Update tx3-lang to v0.7.2 (#587)
+
 ## [0.25.0] - 2025-07-03
 
 ### 🚀 Features
@@ -29,6 +54,7 @@ All notable changes to this project will be documented in this file.
 ### ⚙️ Miscellaneous Tasks
 
 - Update tx3 to v0.7.0 (#575)
+- Release v0.25.0
 
 ## [0.24.0] - 2025-06-19
 
