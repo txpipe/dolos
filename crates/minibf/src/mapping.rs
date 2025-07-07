@@ -42,6 +42,16 @@ macro_rules! try_into_or_500 {
     };
 }
 
+pub fn round_f64<const DECIMALS: u8>(val: f64) -> f64 {
+    let multiplier = 10_f64.powi(DECIMALS as i32);
+    (val * multiplier).round() / multiplier
+}
+
+pub fn rational_to_f64<const DECIMALS: u8>(val: &alonzo::RationalNumber) -> f64 {
+    let res = val.numerator as f64 / val.denominator as f64;
+    round_f64::<DECIMALS>(res)
+}
+
 pub trait IntoModel<T>
 where
     T: serde::Serialize,

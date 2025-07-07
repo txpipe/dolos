@@ -1,23 +1,19 @@
 use std::collections::HashMap;
 
-use crate::{mapping::IntoModel, routes::epochs::cost_models::get_named_cost_model};
+use crate::{
+    mapping::{IntoModel, rational_to_f64},
+    routes::epochs::cost_models::get_named_cost_model,
+};
 use axum::http::StatusCode;
 use blockfrost_openapi::models::epoch_param_content::EpochParamContent;
 use dolos_core::Genesis;
 use pallas::ledger::{
-    primitives::{RationalNumber, conway::CostModels},
+    primitives::conway::CostModels,
     validate::utils::{
         AlonzoProtParams, BabbageProtParams, ConwayProtParams, MultiEraProtocolParameters,
         ShelleyProtParams,
     },
 };
-
-fn rational_to_f64<const DECIMALS: u8>(val: &RationalNumber) -> f64 {
-    let res = val.numerator as f64 / val.denominator as f64;
-    let multiplier = 10_f64.powi(DECIMALS as i32);
-
-    (res * multiplier).round() / multiplier
-}
 
 fn cost_models_to_key_value(cost_models: &CostModels) -> Vec<(&'static str, &[i64])> {
     let maybe = vec![
