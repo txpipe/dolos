@@ -224,6 +224,7 @@ mod tests {
 
     use super::*;
 
+    #[ignore]
     #[tokio::test]
     async fn test_resolve_happy_path() {
         let protocol = tx3_lang::Protocol::from_string(

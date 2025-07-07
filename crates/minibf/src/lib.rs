@@ -161,6 +161,10 @@ impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
                 get(routes::blocks::by_slot::<D>),
             )
             .route(
+                "/epochs/{epoch}/parameters",
+                get(routes::epochs::by_number_parameters::<D>),
+            )
+            .route(
                 "/epochs/latest/parameters",
                 get(routes::epochs::latest_parameters::<D>),
             )
