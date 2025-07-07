@@ -24,10 +24,10 @@ jsonrpsee = { version = "0.24.9", features = ["server"] }
 opentelemetry = "0.30.0"
 opentelemetry_sdk = "0.30.0"
 
-tx3-lang = "0.7.0"
-tx3-cardano = "0.7.0"
-# tx3-lang = { path = "../../tx3-lang/tx3/crates/tx3-lang" }
-# tx3-cardano = { path = "../../tx3-lang/tx3/crates/tx3-cardano" }
+tx3-lang = "0.7.2"
+tx3-cardano = "0.7.2"
+# tx3-lang = { path = "../../../../tx3-lang/tx3/crates/tx3-lang" }
+# tx3-cardano = { path = "../../../../tx3-lang/tx3/crates/tx3-cardano" }
 # tx3-lang = { git = "https://github.com/tx3-lang/tx3.git" }
 # tx3-cardano = { git = "https://github.com/tx3-lang/tx3.git" }
 

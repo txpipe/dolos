@@ -217,14 +217,13 @@ pub fn health<D: Domain>(context: &Context<D>) -> bool {
 #[cfg(test)]
 mod tests {
     use dolos_testing::TestAddress::{Alice, Bob};
-    use dolos_testing::toy_domain::{ToyDomain, seed_random_memory_store};
+    use dolos_testing::toy_domain::ToyDomain;
     use serde_json::json;
 
     use crate::{Config, metrics::Metrics};
 
     use super::*;
 
-    #[ignore]
     #[tokio::test]
     async fn test_resolve_happy_path() {
         let protocol = tx3_lang::Protocol::from_string(
@@ -299,6 +298,8 @@ mod tests {
 
         let resolved = trp_resolve(params, context.clone()).await.unwrap();
 
-        dbg!(&resolved);
+        let tx = hex::decode(resolved["tx"].as_str().unwrap()).unwrap();
+
+        let _ = pallas::ledger::traverse::MultiEraTx::decode(&tx).unwrap();
     }
 }
