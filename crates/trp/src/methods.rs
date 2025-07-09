@@ -24,19 +24,6 @@ struct IrEnvelope {
     pub encoding: IrEncoding,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum BytesEncoding {
-    Base64,
-    Hex,
-}
-
-#[derive(Debug, Deserialize)]
-struct BytesPayload {
-    content: String,
-    encoding: BytesEncoding,
-}
-
 #[derive(Deserialize, Debug)]
 struct TrpResolveParams {
     pub tir: IrEnvelope,
@@ -52,77 +39,26 @@ fn handle_param_args(tx: &mut ProtoTx, args: &serde_json::Value) -> Result<(), E
         ));
     };
 
-    for (key, val) in arguments.iter() {
-        match val {
-            serde_json::Value::Bool(v) => tx.set_arg(key, (*v).into()),
-            serde_json::Value::Number(v) => tx.set_arg(
-                key,
-                match v.as_i64() {
-                    Some(i) => i.into(),
-                    None => {
-                        return Err(ErrorObject::owned(
-                            ErrorCode::InvalidParams.code(),
-                            "Argument cannot be cast as i64",
-                            Some(serde_json::json!({ "key": key, "value": val })),
-                        ));
-                    }
-                },
-            ),
-            serde_json::Value::String(v) => {
-                let arg = if let Some(hex_str) = v.strip_prefix("0x") {
-                    hex::decode(hex_str)
-                        .map_err(|_| {
-                            ErrorObject::owned(
-                                ErrorCode::InvalidParams.code(),
-                                "Invalid hex string",
-                                Some(serde_json::json!({ "key": key, "value": val })),
-                            )
-                        })?
-                        .into()
-                } else {
-                    v.as_str().into()
-                };
+    let params = tx.find_params();
 
-                tx.set_arg(key, arg);
-            }
-            serde_json::Value::Object(v) => {
-                let obj = serde_json::Value::Object(v.clone());
-                let Ok(v) = serde_json::from_value::<BytesPayload>(obj) else {
-                    return Err(ErrorObject::owned(
-                        ErrorCode::InvalidParams.code(),
-                        "Invalid object type",
-                        Some(serde_json::json!({ "key": key, "value": val })),
-                    ));
-                };
+    for (key, ty) in params {
+        let Some(arg) = arguments.get(&key) else {
+            return Err(ErrorObject::owned(
+                ErrorCode::InvalidParams.code(),
+                format!("Missing argument for parameter {key} of type {ty:?}"),
+                Some(serde_json::json!({ "key": key, "type": ty })),
+            ));
+        };
 
-                let decoded = match v.encoding {
-                    BytesEncoding::Base64 => base64::engine::general_purpose::STANDARD
-                        .decode(&v.content)
-                        .map_err(|_| {
-                            ErrorObject::owned(
-                                ErrorCode::InvalidParams.code(),
-                                "Invalid base64 content",
-                                Some(serde_json::json!({ "key": key, "value": val })),
-                            )
-                        })?,
-                    BytesEncoding::Hex => hex::decode(&v.content).map_err(|_| {
-                        ErrorObject::owned(
-                            ErrorCode::InvalidParams.code(),
-                            "Invalid hex content",
-                            Some(serde_json::json!({ "key": key, "value": val })),
-                        )
-                    })?,
-                };
-                tx.set_arg(key, decoded.into());
-            }
-            _ => {
-                return Err(ErrorObject::owned(
-                    ErrorCode::InvalidParams.code(),
-                    "Invalid argument",
-                    Some(serde_json::json!({ "key": key, "value": val })),
-                ));
-            }
-        }
+        let arg = tx3_sdk::trp::args::from_json(arg.clone(), &ty).map_err(|e| {
+            ErrorObject::owned(
+                ErrorCode::InvalidParams.code(),
+                format!("Failed to parse argument {key} of type {ty:?}"),
+                Some(serde_json::json!({ "error": e.to_string(), "value": arg })),
+            )
+        })?;
+
+        tx.set_arg(&key, arg);
     }
 
     Ok(())
@@ -224,55 +160,7 @@ mod tests {
 
     use super::*;
 
-    #[tokio::test]
-    async fn test_resolve_happy_path() {
-        let protocol = tx3_lang::Protocol::from_string(
-            "party Sender;
-            party Receiver;
-            tx swap(quantity: Int) {
-              input source {
-                from: Sender,
-                min_amount: Ada(quantity) + fees,
-              }
-
-              output {
-                to: Receiver,
-                amount: Ada(quantity),
-              }
-
-              output {
-                to: Sender,
-                amount: source - Ada(quantity) - fees,
-              }
-            }"
-            .to_string(),
-        )
-        .load()
-        .unwrap();
-
-        let tx = protocol
-            .new_tx("swap")
-            .unwrap()
-            .with_arg("quantity", 100.into())
-            .with_arg("sender", Alice.to_bytes().into())
-            .with_arg("receiver", Bob.to_bytes().into())
-            .apply()
-            .unwrap();
-
-        let ir = tx.apply().unwrap().ir_bytes();
-
-        let req = json!({
-            "tir": {
-                "version": "v1alpha6",
-                "bytecode": hex::encode(ir),
-                "encoding": "hex"
-            },
-            "args": {}
-        })
-        .to_string();
-
-        let params = Params::new(Some(req.as_str()));
-
+    fn setup_test_context() -> Arc<Context<ToyDomain>> {
         let delta = dolos_testing::make_custom_utxo_delta(
             1,
             dolos_testing::TestAddress::everyone(),
@@ -284,7 +172,7 @@ mod tests {
 
         let domain = ToyDomain::new(Some(delta));
 
-        let context = Arc::new(Context {
+        Arc::new(Context {
             domain,
             config: Arc::new(Config {
                 max_optimize_rounds: 3,
@@ -294,12 +182,101 @@ mod tests {
                 permissive_cors: None,
             }),
             metrics: Metrics::default(),
+        })
+    }
+
+    const SUBJECT_PROTOCOL: &str = r#"
+        party Sender;
+        party Receiver;
+    
+        tx swap(quantity: Int) {
+            input source {
+                from: Sender,
+                min_amount: Ada(quantity) + fees,
+            }
+
+            output {
+                to: Receiver,
+                amount: Ada(quantity),
+            }
+
+            output {
+                to: Sender,
+                amount: source - Ada(quantity) - fees,
+            }
+        }
+    "#;
+
+    async fn attempt_resolve(
+        args: &serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let protocol = tx3_lang::Protocol::from_string(SUBJECT_PROTOCOL.to_owned())
+            .load()
+            .unwrap();
+
+        let tx = protocol.new_tx("swap").unwrap();
+
+        let ir = tx.apply().unwrap().ir_bytes();
+
+        let req = json!({
+            "tir": {
+                "version": "v1alpha6",
+                "bytecode": hex::encode(ir),
+                "encoding": "hex"
+            },
+            "args": args
+        })
+        .to_string();
+
+        let params = Params::new(Some(req.as_str()));
+
+        let context = setup_test_context();
+
+        trp_resolve(params, context.clone()).await
+    }
+
+    #[tokio::test]
+    async fn test_resolve_happy_path() {
+        let args = json!({
+            "quantity": 100,
+            "sender": Alice.as_str(),
+            "receiver": Bob.as_str(),
         });
 
-        let resolved = trp_resolve(params, context.clone()).await.unwrap();
+        let resolved = attempt_resolve(&args).await.unwrap();
 
         let tx = hex::decode(resolved["tx"].as_str().unwrap()).unwrap();
 
         let _ = pallas::ledger::traverse::MultiEraTx::decode(&tx).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_resolve_missing_args() {
+        let args = json!({});
+
+        let resolved = attempt_resolve(&args).await;
+
+        let err = resolved.unwrap_err();
+
+        dbg!(&err);
+
+        assert_eq!(err.code(), ErrorCode::InvalidParams.code());
+    }
+
+    #[tokio::test]
+    async fn test_resolve_invalid_args() {
+        let args = json!({
+            "quantity": "abc",
+            "sender": "Alice",
+            "receiver": "Bob",
+        });
+
+        let resolved = attempt_resolve(&args).await;
+
+        let err = resolved.unwrap_err();
+
+        dbg!(&err);
+
+        assert_eq!(err.code(), ErrorCode::InvalidParams.code());
     }
 }
