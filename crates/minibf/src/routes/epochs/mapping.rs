@@ -17,9 +17,9 @@ use pallas::ledger::{
 
 fn cost_models_to_key_value(cost_models: &CostModels) -> Vec<(&'static str, &[i64])> {
     let maybe = vec![
-        ("plutus_v1", cost_models.plutus_v1.as_ref()),
-        ("plutus_v2", cost_models.plutus_v2.as_ref()),
-        ("plutus_v3", cost_models.plutus_v3.as_ref()),
+        ("PlutusV1", cost_models.plutus_v1.as_ref()),
+        ("PlutusV2", cost_models.plutus_v2.as_ref()),
+        ("PlutusV3", cost_models.plutus_v3.as_ref()),
     ];
 
     maybe
