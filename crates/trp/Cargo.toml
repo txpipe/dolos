@@ -31,5 +31,7 @@ tx3-cardano = "0.7.2"
 # tx3-lang = { git = "https://github.com/tx3-lang/tx3.git" }
 # tx3-cardano = { git = "https://github.com/tx3-lang/tx3.git" }
 
+tx3-sdk = { version = "0.2.0" }
+
 [dev-dependencies]
 dolos-testing = { path = "../testing", features = ["toy-domain"] }
