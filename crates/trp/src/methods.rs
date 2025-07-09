@@ -160,55 +160,7 @@ mod tests {
 
     use super::*;
 
-    #[tokio::test]
-    async fn test_resolve_happy_path() {
-        let protocol = tx3_lang::Protocol::from_string(
-            "party Sender;
-            party Receiver;
-            tx swap(quantity: Int) {
-              input source {
-                from: Sender,
-                min_amount: Ada(quantity) + fees,
-              }
-
-              output {
-                to: Receiver,
-                amount: Ada(quantity),
-              }
-
-              output {
-                to: Sender,
-                amount: source - Ada(quantity) - fees,
-              }
-            }"
-            .to_string(),
-        )
-        .load()
-        .unwrap();
-
-        let tx = protocol
-            .new_tx("swap")
-            .unwrap()
-            .with_arg("quantity", 100.into())
-            .with_arg("sender", Alice.to_bytes().into())
-            .with_arg("receiver", Bob.to_bytes().into())
-            .apply()
-            .unwrap();
-
-        let ir = tx.apply().unwrap().ir_bytes();
-
-        let req = json!({
-            "tir": {
-                "version": "v1alpha6",
-                "bytecode": hex::encode(ir),
-                "encoding": "hex"
-            },
-            "args": {}
-        })
-        .to_string();
-
-        let params = Params::new(Some(req.as_str()));
-
+    fn setup_test_context() -> Arc<Context<ToyDomain>> {
         let delta = dolos_testing::make_custom_utxo_delta(
             1,
             dolos_testing::TestAddress::everyone(),
@@ -220,7 +172,7 @@ mod tests {
 
         let domain = ToyDomain::new(Some(delta));
 
-        let context = Arc::new(Context {
+        Arc::new(Context {
             domain,
             config: Arc::new(Config {
                 max_optimize_rounds: 3,
@@ -230,12 +182,101 @@ mod tests {
                 permissive_cors: None,
             }),
             metrics: Metrics::default(),
+        })
+    }
+
+    const SUBJECT_PROTOCOL: &str = r#"
+        party Sender;
+        party Receiver;
+    
+        tx swap(quantity: Int) {
+            input source {
+                from: Sender,
+                min_amount: Ada(quantity) + fees,
+            }
+
+            output {
+                to: Receiver,
+                amount: Ada(quantity),
+            }
+
+            output {
+                to: Sender,
+                amount: source - Ada(quantity) - fees,
+            }
+        }
+    "#;
+
+    async fn attempt_resolve(
+        args: &serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let protocol = tx3_lang::Protocol::from_string(SUBJECT_PROTOCOL.to_owned())
+            .load()
+            .unwrap();
+
+        let tx = protocol.new_tx("swap").unwrap();
+
+        let ir = tx.apply().unwrap().ir_bytes();
+
+        let req = json!({
+            "tir": {
+                "version": "v1alpha6",
+                "bytecode": hex::encode(ir),
+                "encoding": "hex"
+            },
+            "args": args
+        })
+        .to_string();
+
+        let params = Params::new(Some(req.as_str()));
+
+        let context = setup_test_context();
+
+        trp_resolve(params, context.clone()).await
+    }
+
+    #[tokio::test]
+    async fn test_resolve_happy_path() {
+        let args = json!({
+            "quantity": 100,
+            "sender": Alice.as_str(),
+            "receiver": Bob.as_str(),
         });
 
-        let resolved = trp_resolve(params, context.clone()).await.unwrap();
+        let resolved = attempt_resolve(&args).await.unwrap();
 
         let tx = hex::decode(resolved["tx"].as_str().unwrap()).unwrap();
 
         let _ = pallas::ledger::traverse::MultiEraTx::decode(&tx).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_resolve_missing_args() {
+        let args = json!({});
+
+        let resolved = attempt_resolve(&args).await;
+
+        let err = resolved.unwrap_err();
+
+        dbg!(&err);
+
+        assert_eq!(err.code(), ErrorCode::InvalidParams.code());
+    }
+
+    #[tokio::test]
+    async fn test_resolve_invalid_args() {
+        let args = json!({
+            "quantity": "abc",
+            "sender": "Alice",
+            "receiver": "Bob",
+        });
+
+        let resolved = attempt_resolve(&args).await;
+
+        let err = resolved.unwrap_err();
+
+        dbg!(&err);
+
+        assert_eq!(err.code(), ErrorCode::InvalidParams.code());
     }
 }
