@@ -42,6 +42,16 @@ macro_rules! try_into_or_500 {
     };
 }
 
+pub fn round_f64<const DECIMALS: u8>(val: f64) -> f64 {
+    let multiplier = 10_f64.powi(DECIMALS as i32);
+    (val * multiplier).round() / multiplier
+}
+
+pub fn rational_to_f64<const DECIMALS: u8>(val: &alonzo::RationalNumber) -> f64 {
+    let res = val.numerator as f64 / val.denominator as f64;
+    round_f64::<DECIMALS>(res)
+}
+
 pub trait IntoModel<T>
 where
     T: serde::Serialize,
@@ -66,21 +76,6 @@ where
 
         Ok(Json(tx))
     }
-}
-
-/// Resolve epoch, epoch slot and block time using Genesis values and return
-/// them as BF expects them as i32.
-pub fn slot_time(slot: u64, summary: &ChainSummary) -> (i32, i32, i32) {
-    let era = summary.era_for_slot(slot);
-
-    let era_slot = slot - era.start.slot;
-    let era_epoch = era_slot / era.pparams.epoch_length();
-    let epoch_slot = era_slot % era.pparams.epoch_length();
-    let epoch = era.start.epoch + era_epoch;
-    let time = era.start.timestamp.timestamp() as u64
-        + (slot - era.start.slot) * era.pparams.slot_length();
-
-    (epoch as i32, epoch_slot as i32, time as i32)
 }
 
 #[allow(unused)]
@@ -586,7 +581,7 @@ impl IntoModel<TxContent> for TxModelBuilder<'_> {
         let txouts = tx.outputs();
         let chain = self.chain_or_500()?;
 
-        let (_, _, block_time) = slot_time(block.slot(), chain);
+        let block_time = dolos_cardano::slot_time(block.slot(), chain);
 
         let tx = TxContent {
             hash: tx.hash().to_string(),
@@ -836,8 +831,8 @@ impl IntoModel<Vec<TxContentDelegationsInner>> for TxModelBuilder<'_> {
         let active_epoch = self
             .chain
             .as_ref()
-            .map(|c| slot_time(self.block.slot(), c))
-            .map(|(a, _, _)| a + 1)
+            .map(|c| dolos_cardano::slot_epoch(self.block.slot(), c))
+            .map(|(a, _)| (a + 1) as i32)
             .unwrap_or_default();
 
         let items =
@@ -848,7 +843,7 @@ impl IntoModel<Vec<TxContentDelegationsInner>> for TxModelBuilder<'_> {
                     MultiEraCert::AlonzoCompatible(cert) => {
                         match &**cert {
                             AlonzoCert::StakeDelegation(cred, pool) => Some(
-                                build_delegation_inner(index, &cred, &pool, network, active_epoch),
+                                build_delegation_inner(index, cred, pool, network, active_epoch),
                             ),
                             _ => None,
                         }
@@ -856,7 +851,7 @@ impl IntoModel<Vec<TxContentDelegationsInner>> for TxModelBuilder<'_> {
                     MultiEraCert::Conway(cert) => {
                         match &**cert {
                             ConwayCert::StakeDelegation(cred, pool) => Some(
-                                build_delegation_inner(index, &cred, &pool, network, active_epoch),
+                                build_delegation_inner(index, cred, pool, network, active_epoch),
                             ),
                             _ => None,
                         }
@@ -1016,11 +1011,18 @@ impl<'a> IntoModel<BlockContent> for BlockModelBuilder<'a> {
     fn into_model(self) -> Result<BlockContent, StatusCode> {
         let block = &self.block;
 
-        let (epoch, epoch_slot, block_time) = self
+        let (epoch, epoch_slot) = self
             .chain
             .as_ref()
-            .map(|c| slot_time(block.slot(), c))
-            .map(|(a, b, c)| (Some(a), Some(b), Some(c)))
+            .map(|c| dolos_cardano::slot_epoch(block.slot(), c))
+            .map(|(a, b)| (Some(a), Some(b)))
+            .unwrap_or_default();
+
+        let block_time = self
+            .chain
+            .as_ref()
+            .map(|c| dolos_cardano::slot_time(block.slot(), c))
+            .map(|x| Some(x as i32))
             .unwrap_or_default();
 
         let confirmations = self
@@ -1048,8 +1050,8 @@ impl<'a> IntoModel<BlockContent> for BlockModelBuilder<'a> {
             hash: block.hash().to_string(),
             next_block,
             previous_block,
-            epoch,
-            epoch_slot,
+            epoch: epoch.map(|x| x as i32),
+            epoch_slot: epoch_slot.map(|x| x as i32),
             time: block_time.unwrap_or_default(),
             slot: Some(block.slot() as i32),
             height: Some(block.number() as i32),

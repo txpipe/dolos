@@ -620,7 +620,7 @@ mod tests {
         for file in std::fs::read_dir(test_data.join("expected_params")).unwrap() {
             let filename = file.unwrap().path();
 
-            println!("Comparing to {:?}", filename);
+            println!("Comparing to {filename:?}");
 
             let epoch = filename
                 .file_stem()
@@ -661,8 +661,8 @@ mod tests {
 
         for (name, value) in thresholds.iter() {
             let result = float_to_rational(*value);
-            assert_eq!(result.numerator, 51, "Failed for {}", name);
-            assert_eq!(result.denominator, 100, "Failed for {}", name);
+            assert_eq!(result.numerator, 51, "Failed for {name}");
+            assert_eq!(result.denominator, 100, "Failed for {name}");
         }
     }
 
@@ -685,18 +685,18 @@ mod tests {
             let result = float_to_rational(*value);
             match *value {
                 0.67 => {
-                    assert_eq!(result.numerator, 67, "Failed for {}", name);
-                    assert_eq!(result.denominator, 100, "Failed for {}", name);
+                    assert_eq!(result.numerator, 67, "Failed for {name}");
+                    assert_eq!(result.denominator, 100, "Failed for {name}");
                 }
                 0.60 => {
-                    assert_eq!(result.numerator, 3, "Failed for {}", name);
-                    assert_eq!(result.denominator, 5, "Failed for {}", name);
+                    assert_eq!(result.numerator, 3, "Failed for {name}");
+                    assert_eq!(result.denominator, 5, "Failed for {name}");
                 }
                 0.75 => {
-                    assert_eq!(result.numerator, 3, "Failed for {}", name);
-                    assert_eq!(result.denominator, 4, "Failed for {}", name);
+                    assert_eq!(result.numerator, 3, "Failed for {name}");
+                    assert_eq!(result.denominator, 4, "Failed for {name}");
                 }
-                _ => panic!("Unexpected value for {}: {}", name, value),
+                _ => panic!("Unexpected value for {name}: {value}"),
             }
         }
     }
@@ -709,13 +709,11 @@ mod tests {
     ) {
         assert_eq!(
             result.numerator, expected_num,
-            "Numerator mismatch for input {}",
-            input
+            "Numerator mismatch for input {input}",
         );
         assert_eq!(
             result.denominator, expected_den,
-            "Denominator mismatch for input {}",
-            input
+            "Denominator mismatch for input {input}",
         );
     }
 

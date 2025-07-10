@@ -7,8 +7,13 @@ use std::collections::HashSet;
 
 use dolos_core::*;
 
+use crate::pparams::ChainSummary;
+
 pub mod pparams;
 //pub mod validate;
+
+#[cfg(feature = "include-genesis")]
+pub mod include;
 
 pub type Block<'a> = MultiEraBlock<'a>;
 
@@ -191,6 +196,31 @@ pub fn mutable_slots(genesis: &Genesis) -> u64 {
 /// which slots can be finalized in the ledger store (aka: compaction).
 pub fn lastest_immutable_slot(tip: BlockSlot, genesis: &Genesis) -> BlockSlot {
     tip.saturating_sub(mutable_slots(genesis))
+}
+
+pub type Timestamp = u64;
+
+/// Resolve wall-clock time from a slot number and a chain summary.
+pub fn slot_time(slot: u64, summary: &ChainSummary) -> Timestamp {
+    let era = summary.era_for_slot(slot);
+
+    let time = era.start.timestamp.timestamp() as u64
+        + (slot - era.start.slot) * era.pparams.slot_length();
+
+    time as Timestamp
+}
+
+pub type Epoch = u32;
+pub type EpochSlot = u32;
+
+/// Resolve epoch and sub-epoch slot from a slot number and a chain summary.
+pub fn slot_epoch(slot: u64, summary: &ChainSummary) -> (Epoch, EpochSlot) {
+    let era = summary.era_for_slot(slot);
+    let era_slot = slot - era.start.slot;
+    let era_epoch = era_slot / era.pparams.epoch_length();
+    let epoch = era.start.epoch + era_epoch;
+
+    (epoch as Epoch, era_slot as EpochSlot)
 }
 
 pub fn ledger_query_for_block(

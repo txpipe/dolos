@@ -1,4 +1,4 @@
-use pallas::interop::utxorpc::spec as u5c;
+use pallas::interop::utxorpc::{LedgerContext, spec as u5c};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tonic::transport::{Certificate, Server, ServerTlsConfig};
@@ -24,7 +24,10 @@ pub struct Config {
 
 pub struct Driver;
 
-impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
+impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver
+where
+    D::State: LedgerContext,
+{
     type Config = Config;
 
     async fn run(cfg: Self::Config, domain: D, cancel: C) -> Result<(), ServeError> {

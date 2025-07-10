@@ -3,7 +3,7 @@ use tracing::debug;
 
 use tx3_cardano::pallas::ledger::traverse::{Era, MultiEraOutput};
 
-use dolos_core::{Domain, EraCbor, StateStore as _, TxoRef};
+use dolos_core::{EraCbor, StateStore, TxoRef};
 
 enum Subset {
     All,
@@ -126,7 +126,12 @@ fn utxo_matches(
     utxo: &MultiEraOutput<'_>,
     criteria: &tx3_lang::ir::InputQuery,
 ) -> Result<bool, tx3_cardano::Error> {
-    let min_amount_check = utxo_matches_min_amount(utxo, &criteria.min_amount)?;
+    let min_amount_check = if let Some(min_amount) = &criteria.min_amount.as_option() {
+        utxo_matches_min_amount(utxo, min_amount)?
+    } else {
+        // if there is no min amount requirement, then the utxo matches
+        true
+    };
 
     Ok(min_amount_check)
 }
@@ -151,13 +156,13 @@ fn pick_first_utxo_match(
 
 const MAX_SEARCH_SPACE_SIZE: usize = 50;
 
-struct InputSelector<'a, D: Domain> {
-    ledger: &'a D::State,
+struct InputSelector<'a, S: StateStore> {
+    ledger: &'a S,
     network: tx3_cardano::Network,
 }
 
-impl<'a, D: Domain> InputSelector<'a, D> {
-    pub fn new(ledger: &'a D::State, network: tx3_cardano::Network) -> Self {
+impl<'a, S: StateStore> InputSelector<'a, S> {
+    pub fn new(ledger: &'a S, network: tx3_cardano::Network) -> Self {
         Self { ledger, network }
     }
 
@@ -235,19 +240,31 @@ impl<'a, D: Domain> InputSelector<'a, D> {
         &self,
         criteria: &tx3_lang::ir::InputQuery,
     ) -> Result<Subset, tx3_cardano::Error> {
-        let matching_address = self.narrow_by_address(&criteria.address)?;
+        let matching_address = if let Some(address) = &criteria.address.as_option() {
+            self.narrow_by_address(address)?
+        } else {
+            Subset::All
+        };
 
         if matching_address.is_empty() {
             debug!("matching address is empty");
         }
 
-        let matching_assets = self.narrow_by_multi_asset_presence(&criteria.min_amount)?;
+        let matching_assets = if let Some(min_amount) = &criteria.min_amount.as_option() {
+            self.narrow_by_multi_asset_presence(min_amount)?
+        } else {
+            Subset::All
+        };
 
         if matching_assets.is_empty() {
             debug!("matching assets is empty");
         }
 
-        let matching_refs = self.narrow_by_ref(&criteria.r#ref)?;
+        let matching_refs = if let Some(refs) = &criteria.r#ref.as_option() {
+            self.narrow_by_ref(refs)?
+        } else {
+            Subset::All
+        };
 
         if matching_refs.is_empty() {
             debug!("matching refs is empty");
@@ -284,9 +301,7 @@ impl<'a, D: Domain> InputSelector<'a, D> {
             })
             .collect::<Vec<_>>();
 
-        let utxos = self
-            .ledger
-            .get_utxos(refs.into_iter().collect())
+        let utxos = StateStore::get_utxos(self.ledger, refs)
             .map_err(|e| tx3_cardano::Error::LedgerInternalError(e.to_string()))?;
 
         let matched = pick_first_utxo_match(utxos, criteria)?;
@@ -299,11 +314,163 @@ impl<'a, D: Domain> InputSelector<'a, D> {
     }
 }
 
-pub fn resolve<D: Domain>(
-    ledger: &D::State,
+pub fn resolve<S: StateStore>(
+    ledger: &S,
     network: tx3_cardano::Network,
     criteria: &tx3_lang::ir::InputQuery,
     resolve_context: &tx3_cardano::resolve::ResolveContext,
 ) -> Result<tx3_lang::UtxoSet, tx3_cardano::Error> {
-    InputSelector::<D>::new(ledger, network).select(criteria, &resolve_context)
+    InputSelector::<S>::new(ledger, network).select(criteria, &resolve_context)
+}
+
+#[cfg(test)]
+mod tests {
+    use dolos_testing::toy_domain::seed_random_memory_store;
+
+    use super::*;
+
+    fn new_input_query(
+        address: &dolos_testing::TestAddress,
+        naked_amount: Option<u64>,
+        other_assets: Vec<(dolos_testing::TestAsset, u64)>,
+    ) -> tx3_lang::ir::InputQuery {
+        let naked_asset = naked_amount.map(|x| tx3_lang::ir::AssetExpr {
+            policy: tx3_lang::ir::Expression::None,
+            asset_name: tx3_lang::ir::Expression::None,
+            amount: tx3_lang::ir::Expression::Number(x as i128),
+        });
+
+        let other_assets: Vec<tx3_lang::ir::AssetExpr> = other_assets
+            .into_iter()
+            .map(|(asset, amount)| tx3_lang::ir::AssetExpr {
+                policy: tx3_lang::ir::Expression::Bytes(asset.policy().as_slice().to_vec()),
+                asset_name: tx3_lang::ir::Expression::Bytes(asset.name().unwrap().to_vec()),
+                amount: tx3_lang::ir::Expression::Number(amount as i128),
+            })
+            .collect();
+
+        let all_assets = naked_asset.into_iter().chain(other_assets).collect();
+
+        tx3_lang::ir::InputQuery {
+            address: tx3_lang::ir::Expression::Address(address.to_bytes()),
+            min_amount: tx3_lang::ir::Expression::Assets(all_assets),
+            r#ref: tx3_lang::ir::Expression::None,
+        }
+    }
+
+    #[test]
+    fn test_select_by_address() {
+        let network = tx3_cardano::Network::Testnet;
+
+        let store = seed_random_memory_store(|x: &dolos_testing::TestAddress| {
+            dolos_testing::utxo_with_random_amount(x, 4_000_000..5_000_000)
+        });
+
+        for subject in dolos_testing::TestAddress::everyone() {
+            let criteria = new_input_query(&subject, None, vec![]);
+
+            let utxos = resolve(
+                &store,
+                network,
+                &criteria,
+                &tx3_cardano::resolve::ResolveContext::default(),
+            )
+            .unwrap();
+
+            assert_eq!(utxos.len(), 1);
+
+            for utxo in utxos {
+                assert_eq!(utxo.address, subject.to_bytes());
+            }
+        }
+    }
+
+    #[test]
+    fn test_select_by_naked_amount() {
+        let network = tx3_cardano::Network::Testnet;
+
+        let store = seed_random_memory_store(|x: &dolos_testing::TestAddress| {
+            dolos_testing::utxo_with_random_amount(x, 4_000_000..5_000_000)
+        });
+
+        let criteria = new_input_query(&dolos_testing::TestAddress::Alice, Some(6_000_000), vec![]);
+
+        let utxos = resolve(
+            &store,
+            network,
+            &criteria,
+            &tx3_cardano::resolve::ResolveContext::default(),
+        )
+        .unwrap();
+        assert!(utxos.is_empty());
+
+        let criteria = new_input_query(&dolos_testing::TestAddress::Alice, Some(4_000_000), vec![]);
+
+        let utxos = resolve(
+            &store,
+            network,
+            &criteria,
+            &tx3_cardano::resolve::ResolveContext::default(),
+        )
+        .unwrap();
+
+        let match_count = dbg!(utxos.len());
+        assert_eq!(match_count, 1);
+    }
+
+    #[test]
+    fn test_select_by_asset_amount() {
+        let network = tx3_cardano::Network::Testnet;
+
+        let store = seed_random_memory_store(|x: &dolos_testing::TestAddress| {
+            dolos_testing::utxo_with_random_asset(x, dolos_testing::TestAsset::Hosky, 500..1000)
+        });
+
+        for address in dolos_testing::TestAddress::everyone() {
+            // test negative case where we ask more than available amount
+
+            let criteria = new_input_query(
+                &address,
+                None,
+                vec![(dolos_testing::TestAsset::Hosky, 2000)],
+            );
+
+            let utxos = resolve(
+                &store,
+                network,
+                &criteria,
+                &tx3_cardano::resolve::ResolveContext::default(),
+            )
+            .unwrap();
+            assert!(utxos.is_empty());
+
+            // test negative case where we ask for a different asset
+
+            let criteria =
+                new_input_query(&address, None, vec![(dolos_testing::TestAsset::Snek, 500)]);
+
+            let utxos = resolve(
+                &store,
+                network,
+                &criteria,
+                &tx3_cardano::resolve::ResolveContext::default(),
+            )
+            .unwrap();
+            assert!(utxos.is_empty());
+
+            // test positive case where we ask for the present asset and amount within range
+
+            let criteria =
+                new_input_query(&address, None, vec![(dolos_testing::TestAsset::Hosky, 500)]);
+
+            let utxos = resolve(
+                &store,
+                network,
+                &criteria,
+                &tx3_cardano::resolve::ResolveContext::default(),
+            )
+            .unwrap();
+            assert_eq!(utxos.len(), 1);
+        }
+    }
 }

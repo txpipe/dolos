@@ -126,6 +126,7 @@ impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
 
     async fn run(cfg: Self::Config, domain: D, cancel: C) -> Result<(), ServeError> {
         let app = Router::new()
+            .route("/genesis", get(routes::genesis::naked::<D>))
             .route(
                 "/accounts/{stake_address}/utxos",
                 get(routes::accounts::stake_address::utxos::route::<D>),
@@ -161,8 +162,12 @@ impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
                 get(routes::blocks::by_slot::<D>),
             )
             .route(
+                "/epochs/{epoch}/parameters",
+                get(routes::epochs::by_number_parameters::<D>),
+            )
+            .route(
                 "/epochs/latest/parameters",
-                get(routes::epochs::latest::parameters::route::<D>),
+                get(routes::epochs::latest_parameters::<D>),
             )
             .route("/tx/submit", post(routes::tx::submit::route::<D>))
             .route("/txs/{tx_hash}", get(routes::txs::by_hash::<D>))

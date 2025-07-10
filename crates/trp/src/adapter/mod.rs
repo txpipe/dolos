@@ -17,6 +17,6 @@ impl<D: Domain> tx3_cardano::Ledger for Context<D> {
         resolve_context: &tx3_cardano::resolve::ResolveContext,
     ) -> Result<tx3_lang::UtxoSet, tx3_cardano::Error> {
         let network = pparams::network_id_from_genesis(self.domain.genesis()).unwrap();
-        inputs::resolve::<D>(self.domain.state(), network, query, &resolve_context)
+        inputs::resolve(self.domain.state(), network, query, &resolve_context)
     }
 }
