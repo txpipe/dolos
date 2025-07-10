@@ -1,4 +1,4 @@
-use base64::{Engine, engine::general_purpose::STANDARD};
+use base64::{engine::general_purpose::STANDARD, Engine};
 use jsonrpsee::types::{ErrorCode, ErrorObject, ErrorObjectOwned, Params};
 use serde::Deserialize;
 use std::sync::Arc;
@@ -69,7 +69,7 @@ fn decode_params(params: Params<'_>) -> Result<ProtoTx, ErrorObjectOwned> {
 
     if params.tir.version != tx3_lang::ir::IR_VERSION {
         return Err(ErrorObject::owned(
-            ErrorCode::InvalidParams.code(),
+            ErrorCode::ServerError(-32000).code(),
             format!(
                 "Unsupported IR version, expected {}. Make sure you have the latest version of the tx3 toolchain",
                 tx3_lang::ir::IR_VERSION
@@ -152,11 +152,11 @@ pub fn health<D: Domain>(context: &Context<D>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use dolos_testing::TestAddress::{Alice, Bob};
     use dolos_testing::toy_domain::ToyDomain;
+    use dolos_testing::TestAddress::{Alice, Bob};
     use serde_json::json;
 
-    use crate::{Config, metrics::Metrics};
+    use crate::{metrics::Metrics, Config};
 
     use super::*;
 
