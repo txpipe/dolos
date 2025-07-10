@@ -98,7 +98,7 @@ impl Formatter {
 }
 
 pub fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
-    crate::common::setup_tracing(&config.logging)?;
+    crate::common::setup_tracing(config)?;
 
     let wal = crate::common::open_wal_store(config)?;
 

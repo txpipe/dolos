@@ -98,14 +98,16 @@ pub struct SnapshotConfig {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct TelemetryConfig {
-    endpoint: String,
+    metrics_endpoint: String,
+    logs_endpoint: String,
     service_name: String,
 }
 
 impl Default for TelemetryConfig {
     fn default() -> Self {
         Self {
-            endpoint: "http://localhost:4318/v1/logs".to_string(),
+            metrics_endpoint: "http://localhost:4318/v1/metrics".to_string(),
+            logs_endpoint: "http://localhost:4318/v1/logs".to_string(),
             service_name: "dolos".to_string(),
         }
     }
@@ -131,12 +133,6 @@ pub struct LoggingConfig {
 
     #[serde(default)]
     include_minibf: bool,
-
-    #[serde(default)]
-    include_telemetry: Option<bool>,
-
-    #[serde(default)]
-    telemetry: Option<TelemetryConfig>,
 }
 
 impl Default for LoggingConfig {
@@ -148,8 +144,6 @@ impl Default for LoggingConfig {
             include_grpc: Default::default(),
             include_trp: Default::default(),
             include_minibf: Default::default(),
-            include_telemetry: Default::default(),
-            telemetry: Default::default(),
         }
     }
 }
@@ -169,6 +163,9 @@ pub struct Config {
 
     #[serde(default)]
     pub logging: LoggingConfig,
+
+    #[serde(default)]
+    pub telemetry: Option<TelemetryConfig>,
 }
 
 impl Config {
