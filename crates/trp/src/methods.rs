@@ -124,7 +124,10 @@ pub async fn trp_resolve<D: Domain>(
     let resolved = tx3_cardano::resolve_tx::<Context<D>>(
         tx,
         (*context).clone(),
-        context.config.max_optimize_rounds.into(),
+        tx3_cardano::resolve::Config {
+            max_optimize_rounds: context.config.max_optimize_rounds.into(),
+            extra_fees: None,
+        },
     )
     .await
     .map_err(|err| {
