@@ -7,8 +7,13 @@ use std::collections::HashSet;
 
 use dolos_core::*;
 
+use crate::pparams::ChainSummary;
+
 pub mod pparams;
 //pub mod validate;
+
+#[cfg(feature = "include-genesis")]
+pub mod include;
 
 pub type Block<'a> = MultiEraBlock<'a>;
 
@@ -193,6 +198,31 @@ pub fn lastest_immutable_slot(tip: BlockSlot, genesis: &Genesis) -> BlockSlot {
     tip.saturating_sub(mutable_slots(genesis))
 }
 
+pub type Timestamp = u64;
+
+/// Resolve wall-clock time from a slot number and a chain summary.
+pub fn slot_time(slot: u64, summary: &ChainSummary) -> Timestamp {
+    let era = summary.era_for_slot(slot);
+
+    let time = era.start.timestamp.timestamp() as u64
+        + (slot - era.start.slot) * era.pparams.slot_length();
+
+    time as Timestamp
+}
+
+pub type Epoch = u32;
+pub type EpochSlot = u32;
+
+/// Resolve epoch and sub-epoch slot from a slot number and a chain summary.
+pub fn slot_epoch(slot: u64, summary: &ChainSummary) -> (Epoch, EpochSlot) {
+    let era = summary.era_for_slot(slot);
+    let era_slot = slot - era.start.slot;
+    let era_epoch = era_slot / era.pparams.epoch_length();
+    let epoch = era.start.epoch + era_epoch;
+
+    (epoch as Epoch, era_slot as EpochSlot)
+}
+
 pub fn ledger_query_for_block(
     block: &MultiEraBlock,
     unapplied_deltas: &[LedgerDelta],
@@ -251,8 +281,8 @@ impl dolos_core::ChainLogic for ChainLogic {
         MultiEraBlock::decode(block).map_err(ChainError::DecodingError)
     }
 
-    fn lastest_immutable_slot(domain: &impl Domain, tip: BlockSlot) -> BlockSlot {
-        lastest_immutable_slot(tip, domain.genesis())
+    fn mutable_slots(domain: &impl Domain) -> BlockSlot {
+        mutable_slots(domain.genesis())
     }
 
     fn compute_origin_delta<'a>(genesis: &Genesis) -> Result<LedgerDelta, ChainError> {
@@ -354,8 +384,9 @@ mod tests {
     #[test]
     fn test_mainnet_genesis_utxos() {
         let path = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap())
-            .join("examples")
-            .join("sync-mainnet");
+            .join("test_data")
+            .join("mainnet")
+            .join("genesis");
 
         let genesis = load_genesis(&path);
 
@@ -372,8 +403,9 @@ mod tests {
     #[test]
     fn test_preview_genesis_utxos() {
         let path = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap())
-            .join("examples")
-            .join("sync-preview");
+            .join("test_data")
+            .join("preview")
+            .join("genesis");
 
         let genesis = load_genesis(&path);
 
@@ -441,5 +473,25 @@ mod tests {
         }
 
         assert_eq!(apply.new_position, undo.undone_position);
+    }
+
+    #[test]
+    fn test_lastest_immutable_slot() {
+        let path = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap())
+            .join("test_data")
+            .join("mainnet")
+            .join("genesis");
+
+        let genesis = load_genesis(&path);
+
+        let tip: BlockSlot = 1_000_000;
+
+        let result = lastest_immutable_slot(tip, &genesis);
+
+        // slot delta in hours
+        let delta_in_hours = tip.saturating_sub(result) / (60 * 60);
+
+        // the well-known volatility window for mainnet is 36 hours.
+        assert_eq!(delta_in_hours, 36);
     }
 }

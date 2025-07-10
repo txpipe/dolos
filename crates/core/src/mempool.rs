@@ -1,5 +1,6 @@
 use super::*;
 
+#[cfg(feature = "phase2")]
 pub use pallas::ledger::validate::phase2::EvalReport;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

@@ -10,6 +10,14 @@ pub enum StateAdapter {
 }
 
 impl StateStore for StateAdapter {
+    fn start(&self) -> Result<Option<ChainPoint>, StateError> {
+        let out = match self {
+            StateAdapter::Redb(x) => x.start()?,
+        };
+
+        Ok(out)
+    }
+
     fn cursor(&self) -> Result<Option<ChainPoint>, StateError> {
         let out = match self {
             StateAdapter::Redb(x) => x.cursor()?,
@@ -90,12 +98,12 @@ impl StateStore for StateAdapter {
         Ok(())
     }
 
-    fn finalize(&self, until: BlockSlot) -> Result<(), StateError> {
-        match self {
-            StateAdapter::Redb(x) => x.finalize(until)?,
+    fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, StateError> {
+        let done = match self {
+            StateAdapter::Redb(x) => x.prune_history(max_slots, max_prune)?,
         };
 
-        Ok(())
+        Ok(done)
     }
 
     fn upgrade(self) -> Result<Self, StateError> {
@@ -118,6 +126,16 @@ impl StateStore for StateAdapter {
 impl From<dolos_redb::state::LedgerStore> for StateAdapter {
     fn from(value: dolos_redb::state::LedgerStore) -> Self {
         Self::Redb(value)
+    }
+}
+
+impl TryFrom<StateAdapter> for dolos_redb::state::LedgerStore {
+    type Error = StateError;
+
+    fn try_from(value: StateAdapter) -> Result<Self, Self::Error> {
+        match value {
+            StateAdapter::Redb(x) => Ok(x),
+        }
     }
 }
 
@@ -155,7 +173,7 @@ impl WalStore for WalAdapter {
         }
     }
 
-    fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<(), WalError> {
+    fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, WalError> {
         match self {
             WalAdapter::Redb(x) => WalStore::prune_history(x, max_slots, max_prune),
         }
@@ -258,9 +276,28 @@ impl ArchiveStore for ArchiveAdapter {
         Ok(out)
     }
 
-    fn get_tx(&self, tx_hash: &[u8]) -> Result<Option<Vec<u8>>, ArchiveError> {
+    fn get_block_with_tx(
+        &self,
+        tx_hash: &[u8],
+    ) -> Result<Option<(BlockBody, TxOrder)>, ArchiveError> {
+        let out = match self {
+            ArchiveAdapter::Redb(x) => x.get_block_with_tx(tx_hash)?,
+        };
+
+        Ok(out)
+    }
+
+    fn get_tx(&self, tx_hash: &[u8]) -> Result<Option<EraCbor>, ArchiveError> {
         let out = match self {
             ArchiveAdapter::Redb(x) => x.get_tx(tx_hash)?,
+        };
+
+        Ok(out)
+    }
+
+    fn get_slot_for_tx(&self, tx_hash: &[u8]) -> Result<Option<BlockSlot>, ArchiveError> {
+        let out = match self {
+            ArchiveAdapter::Redb(x) => x.get_slot_for_tx(tx_hash)?,
         };
 
         Ok(out)
@@ -294,12 +331,12 @@ impl ArchiveStore for ArchiveAdapter {
         Ok(())
     }
 
-    fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<(), ArchiveError> {
-        match self {
+    fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, ArchiveError> {
+        let done = match self {
             ArchiveAdapter::Redb(x) => x.prune_history(max_slots, max_prune)?,
         };
 
-        Ok(())
+        Ok(done)
     }
 }
 

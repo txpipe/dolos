@@ -2,7 +2,7 @@ use ::redb::{Database, MultimapTableHandle as _, Range, TableHandle as _};
 use std::path::Path;
 use tracing::{debug, info, warn};
 
-use dolos_core::{ArchiveError, BlockBody, BlockSlot, LedgerDelta};
+use dolos_core::{ArchiveError, BlockBody, BlockSlot, EraCbor, LedgerDelta, TxOrder};
 
 mod indexes;
 mod tables;
@@ -99,7 +99,7 @@ fn open_db(
     cache_size: Option<usize>,
 ) -> Result<Database, RedbArchiveError> {
     let db = Database::builder()
-        .set_repair_callback(|x| warn!(progress = x.progress() * 100f64, "ledger db is repairing"))
+        .set_repair_callback(|x| warn!(progress = x.progress() * 100f64, "archive db is repairing"))
         .set_cache_size(1024 * 1024 * cache_size.unwrap_or(DEFAULT_CACHE_SIZE_MB))
         .create(path)?;
 
@@ -131,7 +131,7 @@ impl ChainStore {
                 info!("detected state db schema v1");
                 v1::ChainStore::from(db).into()
             }
-            Some(x) => panic!("can't recognize db hash {}", x),
+            Some(x) => panic!("can't recognize db hash {x}"),
         };
 
         Ok(schema)
@@ -200,9 +200,24 @@ impl ChainStore {
         }
     }
 
-    pub fn get_tx(&self, tx_hash: &[u8]) -> Result<Option<Vec<u8>>, RedbArchiveError> {
+    pub fn get_block_with_tx(
+        &self,
+        tx_hash: &[u8],
+    ) -> Result<Option<(BlockBody, TxOrder)>, RedbArchiveError> {
+        match self {
+            ChainStore::SchemaV1(x) => x.get_block_with_tx(tx_hash),
+        }
+    }
+
+    pub fn get_tx(&self, tx_hash: &[u8]) -> Result<Option<EraCbor>, RedbArchiveError> {
         match self {
             ChainStore::SchemaV1(x) => x.get_tx(tx_hash),
+        }
+    }
+
+    pub fn get_slot_for_tx(&self, tx_hash: &[u8]) -> Result<Option<BlockSlot>, RedbArchiveError> {
+        match self {
+            ChainStore::SchemaV1(x) => x.get_slot_for_tx(tx_hash),
         }
     }
 
@@ -216,10 +231,61 @@ impl ChainStore {
         &self,
         max_slots: u64,
         max_prune: Option<u64>,
-    ) -> Result<(), RedbArchiveError> {
+    ) -> Result<bool, RedbArchiveError> {
         match self {
             ChainStore::SchemaV1(x) => x.prune_history(max_slots, max_prune),
         }
+    }
+}
+
+impl dolos_core::ArchiveStore for ChainStore {
+    type BlockIter<'a> = ChainIter<'a>;
+
+    fn get_block_by_hash(&self, block_hash: &[u8]) -> Result<Option<BlockBody>, ArchiveError> {
+        Ok(Self::get_block_by_hash(self, block_hash)?)
+    }
+
+    fn get_block_by_slot(&self, slot: &BlockSlot) -> Result<Option<BlockBody>, ArchiveError> {
+        Ok(Self::get_block_by_slot(self, slot)?)
+    }
+
+    fn get_block_by_number(&self, number: &u64) -> Result<Option<BlockBody>, ArchiveError> {
+        Ok(Self::get_block_by_number(self, number)?)
+    }
+
+    fn get_block_with_tx(
+        &self,
+        tx_hash: &[u8],
+    ) -> Result<Option<(BlockBody, TxOrder)>, ArchiveError> {
+        Ok(Self::get_block_with_tx(self, tx_hash)?)
+    }
+
+    fn get_tx(&self, tx_hash: &[u8]) -> Result<Option<EraCbor>, ArchiveError> {
+        Ok(Self::get_tx(self, tx_hash)?)
+    }
+
+    fn get_slot_for_tx(&self, tx_hash: &[u8]) -> Result<Option<BlockSlot>, ArchiveError> {
+        Ok(Self::get_slot_for_tx(self, tx_hash)?)
+    }
+
+    fn get_range<'a>(
+        &self,
+        from: Option<BlockSlot>,
+        to: Option<BlockSlot>,
+    ) -> Result<Self::BlockIter<'a>, ArchiveError> {
+        Ok(Self::get_range(self, from, to)?)
+    }
+
+    fn get_tip(&self) -> Result<Option<(BlockSlot, BlockBody)>, ArchiveError> {
+        Ok(Self::get_tip(self)?)
+    }
+
+    fn apply(&self, deltas: &[LedgerDelta]) -> Result<(), ArchiveError> {
+        Ok(Self::apply(self, deltas)?)
+    }
+
+    fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, ArchiveError> {
+        Ok(Self::prune_history(self, max_slots, max_prune)?)
     }
 }
 

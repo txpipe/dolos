@@ -23,9 +23,20 @@ impl LedgerStore {
         Arc::get_mut(&mut self.0)
     }
 
+    pub fn in_memory() -> Result<Self, RedbStateError> {
+        let db = ::redb::Database::builder()
+            .create_with_backend(::redb::backends::InMemoryBackend::new())
+            .unwrap();
+
+        let store = Self::initialize(db)?;
+
+        Ok(store)
+    }
+
     pub fn initialize(db: Database) -> Result<Self, Error> {
         let mut wx = db.begin_write()?;
         wx.set_durability(Durability::Immediate);
+        wx.set_quick_repair(true);
 
         tables::CursorTable::initialize(&wx)?;
         tables::UtxosTable::initialize(&wx)?;
@@ -51,6 +62,7 @@ impl LedgerStore {
     pub fn apply(&self, deltas: &[LedgerDelta]) -> Result<(), Error> {
         let mut wx = self.db().begin_write()?;
         wx.set_durability(Durability::Eventual);
+        wx.set_quick_repair(true);
 
         for delta in deltas {
             tables::CursorTable::apply(&wx, delta)?;
@@ -63,12 +75,51 @@ impl LedgerStore {
         Ok(())
     }
 
-    pub fn finalize(&self, until: BlockSlot) -> Result<(), Error> {
+    pub fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, Error> {
         let rx = self.db().begin_read()?;
-        let cursors = tables::CursorTable::get_range(&rx, until)?;
+        let start = match tables::CursorTable::first(&rx)? {
+            Some((slot, _)) => slot,
+            None => {
+                debug!("no start point found on ledger, skipping housekeeping");
+                return Ok(true);
+            }
+        };
+
+        let last = match tables::CursorTable::last(&rx)? {
+            Some((slot, _)) => slot,
+            None => {
+                debug!("no tip found on chain, skipping housekeeping");
+                return Ok(true);
+            }
+        };
+
+        let delta = last.saturating_sub(start);
+        let excess = delta.saturating_sub(max_slots);
+
+        debug!(delta, excess, last, start, "ledger history delta computed");
+
+        if excess == 0 {
+            debug!(delta, max_slots, excess, "no pruning necessary on ledger");
+            return Ok(true);
+        }
+
+        let (done, max_prune) = match max_prune {
+            Some(max) => (excess <= max, core::cmp::min(excess, max)),
+            None => (true, excess),
+        };
+
+        let prune_before = start + max_prune;
+
+        info!(
+            cutoff_slot = prune_before,
+            start, excess, "pruning ledger for excess history"
+        );
+
+        let cursors = tables::CursorTable::get_range(&rx, prune_before)?;
 
         let mut wx = self.db().begin_write()?;
         wx.set_durability(Durability::Eventual);
+        wx.set_quick_repair(true);
 
         for (slot, value) in cursors {
             tables::CursorTable::compact(&wx, slot)?;
@@ -77,12 +128,13 @@ impl LedgerStore {
 
         wx.commit()?;
 
-        Ok(())
+        Ok(done)
     }
 
     pub fn copy(&self, target: &Self) -> Result<(), Error> {
         let rx = self.db().begin_read()?;
-        let wx = target.db().begin_write()?;
+        let mut wx = target.db().begin_write()?;
+        wx.set_quick_repair(true);
 
         tables::CursorTable::copy(&rx, &wx)?;
         tables::UtxosTable::copy(&rx, &wx)?;
@@ -117,6 +169,7 @@ impl LedgerStore {
 
         let mut wx = db.begin_write()?;
         wx.set_durability(Durability::Eventual);
+        wx.set_quick_repair(true);
 
         tables::FilterIndexes::initialize(&wx)?;
 

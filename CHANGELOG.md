@@ -2,6 +2,114 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.26.0] - 2025-07-07
+
+### 🚀 Features
+
+- Move TRP into crate and add OTEL (#572)
+- *(minibf)* Implement `epoch/latest/parameters` endpoint (#584)
+- *(minibf)* Implement `epoch/{number}/parameters` endpoint (#585)
+- *(minibf)* Implement `genesis` endpoint (#586)
+
+### 🚜 Refactor
+
+- Decouple u5c trait from state store (#577)
+- Move genesis include files to cardano crate (#581)
+
+### 🧪 Testing
+
+- *(trp)* Cover input resolver logic (#578)
+- Introduce toy domain artifact (#580)
+- Improve toy domain features (#583)
+
+### ⚙️ Miscellaneous Tasks
+
+- Fix new lint warnings (#579)
+- *(trp)* Update tx3-lang to v0.7.2 (#587)
+
+## [0.25.0] - 2025-07-03
+
+### 🚀 Features
+
+- *(minibf)* Implement `txs/{hash}/meatadata` endpoint (#554)
+- *(minibf)* Implement `txs/{hash}/metadata/cbor` endpoint (#555)
+- *(minibf)* Implement `txs/{hash}/withdrawals` endpoint (#557)
+- Add local storage stats command (#558)
+- Add housekeeping command (#561)
+- Add copy-ledger command (#560)
+- *(redb)* Support iterating multi-value keys (#565)
+- *(minibf)* Implement `txs/{hash}/delegations` endpoint (#571)
+
+### 🐛 Bug Fixes
+
+- *(core)* Use correct default value for max ledger history (#559)
+- *(minibf)* Use correct status code in `/blocks` endpoint (#563)
+- *(minibf)* Parse hash or number param corectly (#567)
+
+### 🚜 Refactor
+
+- Move testing artifacts to new crate (#564)
+- *(minibf)* Use open-api specs for `blocks/` endpoints (#570)
+
+### ⚙️ Miscellaneous Tasks
+
+- Update tx3 to v0.7.0 (#575)
+- Release v0.25.0
+
+## [0.24.0] - 2025-06-19
+
+### 🚀 Features
+
+- *(trp)* Improve argument decoding (#512)
+- *(trp)* Make arg decoding more  flexible (#519)
+- Support sync limit via config (#526)
+- Add reset-genesis command (#532)
+- Improve data summary command (#536)
+- *(minibf)* Implement `txs/{hash}` endpoint (#537)
+- *(minibf)* Implement `txs/{hash}/utxos` endpoint (#538)
+- *(redb)* Use quick repair on all write transactions (#551)
+
+### 🐛 Bug Fixes
+
+- Improve shutdown of stuck pipelines (#531)
+- *(minibf)* Implement cert count in tx model (#539)
+- *(minibf)* Include pagination in addresses utxos endpoint (#540)
+- *(minibf)* Handle trailing backlash (#541)
+- *(minibf)* Use full name for asset unit in utxos by address (#542)
+- *(minibf)* Sort utxos by slot in `addresses/{address}/utxos` endpoint (#543)
+- *(minibf)* Include block data in `/addresses` endpoints (#547)
+- *(minibf)* Include tx index in utxo ordering (#548)
+- *(minibf)* Show disaggregated output amounts  (#549)
+- *(redb)* Skip index for addresses with empty delegation (#552)
+
+### 🚜 Refactor
+
+- Split Cardano ledger into new crate (#514)
+- Split minibf into new crate (#515)
+- Abstract core domain as trait (#521)
+- Introduce driver abstraction (#528)
+
+### 📚 Documentation
+
+- Replace old docs with new structure (#513)
+
+### 🔧 Continuous Integration
+
+- Improve PR workflow speed (#525)
+- Run tests for the whole workspace (#553)
+
+### 🧪 Testing
+
+- Introduce xtask for smoke tests (#524)
+- Add daemon sync smoke test (#527)
+- *(redb)* Add state store tests (#550)
+
+### ⚙️ Miscellaneous Tasks
+
+- Update tx3 lib to v0.6.0 (#530)
+- Avoid commit of genesis files in test scenarios (#533)
+- Release v0.24.0
+
 ## [0.23.0] - 2025-05-23
 
 ### 🐛 Bug Fixes
@@ -16,6 +124,7 @@ All notable changes to this project will be documented in this file.
 
 - *(trp)* Decouple tx3 pallas version from the rest (#503)
 - Fix lint warnings (#507)
+- Release dolos version 0.23.0
 
 ## [0.22.0] - 2025-05-12
 

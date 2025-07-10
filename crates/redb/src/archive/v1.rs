@@ -1,13 +1,14 @@
 use ::redb::{Database, Durability};
+use itertools::Itertools;
 use pallas::ledger::traverse::MultiEraBlock;
 use std::sync::Arc;
 use tracing::{debug, info};
 
 type Error = super::RedbArchiveError;
 
-use dolos_core::{ArchiveError, BlockBody, BlockSlot, LedgerDelta};
+use dolos_core::{ArchiveError, BlockBody, BlockSlot, EraCbor, LedgerDelta, TxOrder};
 
-use super::{ChainIter, indexes, tables};
+use super::{indexes, tables, ChainIter};
 
 #[derive(Clone)]
 pub struct ChainStore {
@@ -38,6 +39,7 @@ impl ChainStore {
     pub fn apply(&self, deltas: &[LedgerDelta]) -> Result<(), Error> {
         let mut wx = self.db().begin_write()?;
         wx.set_durability(Durability::Eventual);
+        wx.set_quick_repair(true);
 
         for delta in deltas {
             indexes::Indexes::apply(&wx, delta)?;
@@ -151,6 +153,7 @@ impl ChainStore {
     pub fn get_possible_blocks_by_address(&self, address: &[u8]) -> Result<Vec<BlockBody>, Error> {
         self.get_possible_block_slots_by_address(address)?
             .iter()
+            .sorted()
             .flat_map(|slot| match self.get_block_by_slot(slot) {
                 Ok(Some(block)) => Some(Ok(block)),
                 Ok(None) => None,
@@ -276,6 +279,19 @@ impl ChainStore {
             .collect()
     }
 
+    pub fn get_block_with_tx(&self, tx_hash: &[u8]) -> Result<Option<(BlockBody, TxOrder)>, Error> {
+        let possible = self.get_possible_blocks_by_tx_hash(tx_hash)?;
+        for raw in possible {
+            let block = MultiEraBlock::decode(&raw).map_err(ArchiveError::BlockDecodingError)?;
+            for (idx, tx) in block.txs().iter().enumerate() {
+                if tx.hash().to_vec() == tx_hash {
+                    return Ok(Some((raw, idx)));
+                }
+            }
+        }
+        Ok(None)
+    }
+
     pub fn get_block_by_slot(&self, slot: &BlockSlot) -> Result<Option<BlockBody>, Error> {
         let rx = self.db().begin_read()?;
         tables::BlocksTable::get_by_slot(&rx, *slot)
@@ -303,12 +319,30 @@ impl ChainStore {
         Ok(None)
     }
 
-    pub fn get_tx(&self, tx_hash: &[u8]) -> Result<Option<Vec<u8>>, Error> {
+    pub fn get_slot_for_tx(&self, tx_hash: &[u8]) -> Result<Option<BlockSlot>, Error> {
+        let mut possible = self.get_possible_block_slots_by_tx_hash(tx_hash)?;
+        if possible.len() == 1 {
+            Ok(possible.pop())
+        } else {
+            for slot in possible {
+                if let Some(raw) = self.get_block_by_slot(&slot)? {
+                    let block =
+                        MultiEraBlock::decode(&raw).map_err(ArchiveError::BlockDecodingError)?;
+                    if block.txs().iter().any(|x| x.hash().to_vec() == tx_hash) {
+                        return Ok(Some(slot));
+                    }
+                }
+            }
+            Ok(None)
+        }
+    }
+
+    pub fn get_tx(&self, tx_hash: &[u8]) -> Result<Option<EraCbor>, Error> {
         let possible = self.get_possible_blocks_by_tx_hash(tx_hash)?;
         for raw in possible {
             let block = MultiEraBlock::decode(&raw).map_err(ArchiveError::BlockDecodingError)?;
             if let Some(tx) = block.txs().iter().find(|x| x.hash().to_vec() == tx_hash) {
-                return Ok(Some(tx.encode()));
+                return Ok(Some(EraCbor(block.era().into(), tx.encode())));
             }
         }
         Ok(None)
@@ -319,13 +353,13 @@ impl ChainStore {
         tables::BlocksTable::get_tip(&rx)
     }
 
-    pub fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<(), Error> {
+    pub fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, Error> {
         let rx = self.db().begin_read()?;
         let start = match tables::BlocksTable::first(&rx)? {
             Some((slot, _)) => slot,
             None => {
                 debug!("no start point found on chain, skipping housekeeping");
-                return Ok(());
+                return Ok(true);
             }
         };
 
@@ -333,7 +367,7 @@ impl ChainStore {
             Some((slot, _)) => slot,
             None => {
                 debug!("no tip found on chain, skipping housekeeping");
-                return Ok(());
+                return Ok(true);
             }
         };
 
@@ -344,12 +378,12 @@ impl ChainStore {
 
         if excess == 0 {
             debug!(delta, max_slots, excess, "no pruning necessary on chain");
-            return Ok(());
+            return Ok(true);
         }
 
-        let max_prune = match max_prune {
-            Some(max) => core::cmp::min(excess, max),
-            None => excess,
+        let (done, max_prune) = match max_prune {
+            Some(max) => (excess <= max, core::cmp::min(excess, max)),
+            None => (true, excess),
         };
 
         let prune_before = start + max_prune;
@@ -359,11 +393,14 @@ impl ChainStore {
             start, excess, "pruning archive for excess history"
         );
 
-        let wx = self.db().begin_write()?;
+        let mut wx = self.db().begin_write()?;
+        wx.set_quick_repair(true);
+
         tables::BlocksTable::remove_before(&wx, prune_before)?;
+
         wx.commit()?;
 
-        Ok(())
+        Ok(done)
     }
 }
 

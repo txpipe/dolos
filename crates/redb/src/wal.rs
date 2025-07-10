@@ -216,7 +216,9 @@ impl RedbWalStore {
         from: Option<LogSeq>,
         to: Option<LogSeq>,
     ) -> Result<(), RedbWalError> {
-        let wx = self.db.begin_write()?;
+        let mut wx = self.db.begin_write()?;
+        wx.set_quick_repair(true);
+
         {
             let mut wal = wx.open_table(WAL)?;
 
@@ -282,13 +284,13 @@ impl RedbWalStore {
         &self,
         max_slots: u64,
         max_prune: Option<u64>,
-    ) -> Result<(), RedbWalError> {
+    ) -> Result<bool, RedbWalError> {
         let start_slot = match self.find_start()? {
             Some((_, ChainPoint::Origin)) => 0,
             Some((_, ChainPoint::Specific(slot, _))) => slot,
             _ => {
                 debug!("no start point found, skipping housekeeping");
-                return Ok(());
+                return Ok(true);
             }
         };
 
@@ -296,7 +298,7 @@ impl RedbWalStore {
             Some((_, ChainPoint::Specific(slot, _))) => slot,
             _ => {
                 debug!("no tip found, skipping housekeeping");
-                return Ok(());
+                return Ok(true);
             }
         };
 
@@ -310,12 +312,12 @@ impl RedbWalStore {
 
         if excess == 0 {
             debug!(delta, max_slots, excess, "no pruning necessary");
-            return Ok(());
+            return Ok(true);
         }
 
-        let max_prune = match max_prune {
-            Some(max) => core::cmp::min(excess, max),
-            None => excess,
+        let (done, max_prune) = match max_prune {
+            Some(max) => (excess <= max, core::cmp::min(excess, max)),
+            None => (true, excess),
         };
 
         let prune_before = start_slot + max_prune;
@@ -328,10 +330,10 @@ impl RedbWalStore {
         match self.remove_before(prune_before) {
             Err(RedbWalError(WalError::SlotNotFound(_))) => {
                 warn!("pruning target slot not found, skipping");
-                Ok(())
+                Ok(true)
             }
             Err(e) => Err(e),
-            Ok(_) => Ok(()),
+            Ok(_) => Ok(done),
         }
     }
 
@@ -470,7 +472,8 @@ impl RedbWalStore {
     /// sure you have backups or are certain about trimming the WAL before
     /// calling this function.
     pub fn remove_before(&self, slot: BlockSlot) -> Result<(), RedbWalError> {
-        let wx = self.db.begin_write()?;
+        let mut wx = self.db.begin_write()?;
+        wx.set_quick_repair(true);
 
         {
             let last_seq = self
@@ -540,7 +543,8 @@ impl RedbWalStore {
         &mut self,
         logs: impl Iterator<Item = dolos_core::LogValue>,
     ) -> Result<(), RedbWalError> {
-        let wx = self.db.begin_write()?;
+        let mut wx = self.db.begin_write()?;
+        wx.set_quick_repair(true);
 
         {
             let mut wal = wx.open_table(WAL)?;
@@ -580,7 +584,7 @@ impl WalStore for RedbWalStore {
         self.tip_change.notified().await;
     }
 
-    fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<(), WalError> {
+    fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, WalError> {
         RedbWalStore::prune_history(self, max_slots, max_prune).map_err(From::from)
     }
 

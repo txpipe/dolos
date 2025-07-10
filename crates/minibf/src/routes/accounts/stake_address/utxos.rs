@@ -9,6 +9,8 @@ use axum::{
 
 use dolos_core::{Domain, EraCbor, StateStore as _, TxoRef};
 
+use crate::Facade;
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Amount {
     pub unit: String,
@@ -93,7 +95,7 @@ impl TryFrom<(TxoRef, EraCbor)> for AccountUtxo {
 
 pub async fn route<D: Domain>(
     Path(stake_address): Path<String>,
-    State(domain): State<D>,
+    State(domain): State<Facade<D>>,
 ) -> Result<impl IntoResponse, StatusCode> {
     let stake = match pallas::ledger::addresses::Address::from_bech32(&stake_address)
         .map_err(|_| StatusCode::BAD_REQUEST)?
