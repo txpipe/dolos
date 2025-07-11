@@ -131,7 +131,7 @@ impl ChainStore {
                 info!("detected state db schema v1");
                 v1::ChainStore::from(db).into()
             }
-            Some(x) => panic!("can't recognize db hash {}", x),
+            Some(x) => panic!("can't recognize db hash {x}"),
         };
 
         Ok(schema)
@@ -235,6 +235,57 @@ impl ChainStore {
         match self {
             ChainStore::SchemaV1(x) => x.prune_history(max_slots, max_prune),
         }
+    }
+}
+
+impl dolos_core::ArchiveStore for ChainStore {
+    type BlockIter<'a> = ChainIter<'a>;
+
+    fn get_block_by_hash(&self, block_hash: &[u8]) -> Result<Option<BlockBody>, ArchiveError> {
+        Ok(Self::get_block_by_hash(self, block_hash)?)
+    }
+
+    fn get_block_by_slot(&self, slot: &BlockSlot) -> Result<Option<BlockBody>, ArchiveError> {
+        Ok(Self::get_block_by_slot(self, slot)?)
+    }
+
+    fn get_block_by_number(&self, number: &u64) -> Result<Option<BlockBody>, ArchiveError> {
+        Ok(Self::get_block_by_number(self, number)?)
+    }
+
+    fn get_block_with_tx(
+        &self,
+        tx_hash: &[u8],
+    ) -> Result<Option<(BlockBody, TxOrder)>, ArchiveError> {
+        Ok(Self::get_block_with_tx(self, tx_hash)?)
+    }
+
+    fn get_tx(&self, tx_hash: &[u8]) -> Result<Option<EraCbor>, ArchiveError> {
+        Ok(Self::get_tx(self, tx_hash)?)
+    }
+
+    fn get_slot_for_tx(&self, tx_hash: &[u8]) -> Result<Option<BlockSlot>, ArchiveError> {
+        Ok(Self::get_slot_for_tx(self, tx_hash)?)
+    }
+
+    fn get_range<'a>(
+        &self,
+        from: Option<BlockSlot>,
+        to: Option<BlockSlot>,
+    ) -> Result<Self::BlockIter<'a>, ArchiveError> {
+        Ok(Self::get_range(self, from, to)?)
+    }
+
+    fn get_tip(&self) -> Result<Option<(BlockSlot, BlockBody)>, ArchiveError> {
+        Ok(Self::get_tip(self)?)
+    }
+
+    fn apply(&self, deltas: &[LedgerDelta]) -> Result<(), ArchiveError> {
+        Ok(Self::apply(self, deltas)?)
+    }
+
+    fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, ArchiveError> {
+        Ok(Self::prune_history(self, max_slots, max_prune)?)
     }
 }
 

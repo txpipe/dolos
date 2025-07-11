@@ -29,7 +29,7 @@ fn wait_for_tcp_port(scenario: &Scenario, port_suffix: u16, timeout: Duration) {
     let mut connected = false;
 
     while start.elapsed() < timeout {
-        if TcpStream::connect(format!("127.0.0.1:{}", port)).is_ok() {
+        if TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
             connected = true;
             break;
         }
@@ -37,7 +37,7 @@ fn wait_for_tcp_port(scenario: &Scenario, port_suffix: u16, timeout: Duration) {
     }
 
     if !connected {
-        panic!("timed out waiting for port {} to open", port);
+        panic!("timed out waiting for port {port} to open");
     }
 }
 
@@ -65,7 +65,7 @@ fn wait_for_socket_file(scenario: &Scenario, relative_path: &str, timeout: Durat
 
 fn assert_port_released(scenario: &Scenario, port_suffix: u16) {
     let port = scenario.port_prefix + port_suffix;
-    assert!(TcpStream::connect(format!("127.0.0.1:{}", port)).is_err());
+    assert!(TcpStream::connect(format!("127.0.0.1:{port}")).is_err());
 }
 
 fn assert_file_released(scenario: &Scenario, relative_path: &str) {
@@ -116,11 +116,11 @@ impl Drop for ProcessGuard {
                     return;
                 }
 
-                eprintln!("could not SIGTERM process {}: {}", pid, err);
+                eprintln!("could not SIGTERM process {pid}: {err}");
             }
 
             if let Err(err) = child.wait() {
-                eprintln!("error waiting for process {} to exit: {}", pid, err);
+                eprintln!("error waiting for process {pid} to exit: {err}");
             }
         }
     }

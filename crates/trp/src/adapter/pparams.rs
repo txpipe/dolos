@@ -19,8 +19,6 @@ pub fn network_id_from_genesis(genesis: &Genesis) -> Option<tx3_cardano::Network
 fn map_cost_models(pparams: &ConwayProtParams) -> HashMap<u8, tx3_cardano::CostModel> {
     let original = pparams.cost_models_for_script_languages.clone();
 
-    dbg!(&original);
-
     let present: Vec<(u8, tx3_cardano::CostModel)> = [
         original.plutus_v1.map(|x| (0, x)),
         original.plutus_v2.map(|x| (1, x)),

@@ -10,6 +10,7 @@ use dolos_core::{CancelToken, Domain, ServeError};
 
 mod adapter;
 mod methods;
+mod metrics;
 
 #[derive(Deserialize, Serialize, Clone)]
 pub struct Config {
@@ -22,6 +23,7 @@ pub struct Config {
 pub struct Context<D: Domain> {
     pub domain: D,
     pub config: Arc<Config>,
+    pub metrics: metrics::Metrics,
 }
 
 pub struct Driver;
@@ -46,13 +48,36 @@ impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
         let mut module = RpcModule::new(Context {
             domain,
             config: Arc::new(cfg.clone()),
+            metrics: metrics::Metrics::new(),
         });
 
         module
-            .register_async_method("trp.resolve", |params, context, _| async {
-                methods::trp_resolve(params, context).await
+            .register_async_method("trp.resolve", |params, context, _| async move {
+                let response = methods::trp_resolve(params, context.clone()).await;
+                context.metrics.register_request(
+                    "trp-resolve",
+                    match response.as_ref() {
+                        Ok(_) => 200,
+                        Err(err) => err.code(),
+                    },
+                );
+                response
             })
             .map_err(|_| ServeError::Internal("failed to register trp.resolve".into()))?;
+
+        module
+            .register_async_method("trp.submit", |params, context, _| async move {
+                let response = methods::trp_submit(params, context.clone()).await;
+                context.metrics.register_request(
+                    "trp-submit",
+                    match response.as_ref() {
+                        Ok(_) => 200,
+                        Err(err) => err.code(),
+                    },
+                );
+                response
+            })
+            .map_err(|_| ServeError::Internal("failed to register trp.submit".into()))?;
 
         module
             .register_method("health", |_, context, _| methods::health(context))

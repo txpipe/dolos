@@ -1,7 +1,7 @@
 use futures_core::Stream;
 use futures_util::StreamExt;
-use pallas::interop::utxorpc as interop;
 use pallas::interop::utxorpc::spec as u5c;
+use pallas::interop::utxorpc::{self as interop, LedgerContext};
 use pallas::{
     interop::utxorpc::spec::watch::any_chain_tx_pattern::Chain,
     ledger::{addresses::Address, traverse::MultiEraBlock},
@@ -146,9 +146,9 @@ fn apply_predicate(predicate: &u5c::watch::TxPredicate, tx: &u5c::cardano::Tx) -
     tx_matches && !not_clause && and_clause && or_clause
 }
 
-fn block_to_txs<S: StateStore>(
+fn block_to_txs<C: LedgerContext>(
     block: &RawBlock,
-    mapper: &interop::Mapper<S>,
+    mapper: &interop::Mapper<C>,
     request: &u5c::watch::WatchTxRequest,
 ) -> Vec<u5c::watch::AnyChainTx> {
     let RawBlock { body, .. } = block;
@@ -169,8 +169,8 @@ fn block_to_txs<S: StateStore>(
         .collect()
 }
 
-fn roll_to_watch_response<S: StateStore>(
-    mapper: &interop::Mapper<S>,
+fn roll_to_watch_response<C: LedgerContext>(
+    mapper: &interop::Mapper<C>,
     log: &LogValue,
     request: &u5c::watch::WatchTxRequest,
 ) -> impl Stream<Item = u5c::watch::WatchTxResponse> {
@@ -192,13 +192,19 @@ fn roll_to_watch_response<S: StateStore>(
     tokio_stream::iter(txs)
 }
 
-pub struct WatchServiceImpl<D: Domain, C: CancelToken> {
+pub struct WatchServiceImpl<D: Domain, C: CancelToken>
+where
+    D::State: LedgerContext,
+{
     domain: D,
     mapper: interop::Mapper<D::State>,
     cancel: C,
 }
 
-impl<D: Domain, C: CancelToken> WatchServiceImpl<D, C> {
+impl<D: Domain, C: CancelToken> WatchServiceImpl<D, C>
+where
+    D::State: LedgerContext,
+{
     pub fn new(domain: D, cancel: C) -> Self {
         let mapper = interop::Mapper::new(domain.state().clone());
 
@@ -213,6 +219,8 @@ impl<D: Domain, C: CancelToken> WatchServiceImpl<D, C> {
 #[async_trait::async_trait]
 impl<D: Domain, C: CancelToken> u5c::watch::watch_service_server::WatchService
     for WatchServiceImpl<D, C>
+where
+    D::State: LedgerContext,
 {
     type WatchTxStream = Pin<
         Box<dyn Stream<Item = Result<u5c::watch::WatchTxResponse, tonic::Status>> + Send + 'static>,

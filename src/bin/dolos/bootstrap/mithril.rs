@@ -88,7 +88,7 @@ impl mithril_client::feedback::FeedbackReceiver for MithrilFeedback {
                     .set_message("certificate fetched from cache");
             }
             x => {
-                self.validate_pb.set_message(format!("{:?}", x));
+                self.validate_pb.set_message(format!("{x:?}"));
             }
         }
     }
