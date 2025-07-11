@@ -66,6 +66,20 @@ impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
             .map_err(|_| ServeError::Internal("failed to register trp.resolve".into()))?;
 
         module
+            .register_async_method("trp.submit", |params, context, _| async move {
+                let response = methods::trp_submit(params, context.clone()).await;
+                context.metrics.register_request(
+                    "trp-submit",
+                    match response.as_ref() {
+                        Ok(_) => 200,
+                        Err(err) => err.code(),
+                    },
+                );
+                response
+            })
+            .map_err(|_| ServeError::Internal("failed to register trp.submit".into()))?;
+
+        module
             .register_method("health", |_, context, _| methods::health(context))
             .map_err(|_| ServeError::Internal("failed to register health".into()))?;
 
