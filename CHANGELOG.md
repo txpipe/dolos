@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.26.1] - 2025-07-11
+
+### 🚀 Features
+
+- *(trp)* Implement submit endpoint (#592)
+
+### 🐛 Bug Fixes
+
+- *(minibf)* Match cost model keys with official API (#589)
+
+### 🚜 Refactor
+
+- *(trp)* Parse json args using tx3 sdk (#588)
+
 ## [0.26.0] - 2025-07-07
 
 ### 🚀 Features
@@ -26,6 +40,10 @@ All notable changes to this project will be documented in this file.
 
 - Fix new lint warnings (#579)
 - *(trp)* Update tx3-lang to v0.7.2 (#587)
+
+### Release
+
+- V0.26.0
 
 ## [0.25.0] - 2025-07-03
 
