@@ -72,14 +72,8 @@ impl From<Box<dyn std::error::Error>> for Error {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct CancelTokenImpl(pub tokio_util::sync::CancellationToken);
-
-impl CancelTokenImpl {
-    pub fn new() -> Self {
-        Self(tokio_util::sync::CancellationToken::new())
-    }
-}
 
 impl CancelToken for CancelTokenImpl {
     async fn cancelled(&self) {

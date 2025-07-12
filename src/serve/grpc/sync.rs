@@ -163,8 +163,7 @@ where
 
         if msg.max_items > MAX_DUMP_HISTORY_ITEMS {
             return Err(Status::invalid_argument(format!(
-                "max_items must be less than or equal to {}",
-                MAX_DUMP_HISTORY_ITEMS
+                "max_items must be less than or equal to {MAX_DUMP_HISTORY_ITEMS}"
             )));
         }
 
@@ -268,7 +267,7 @@ mod tests {
     #[tokio::test]
     async fn test_dump_history_pagination() {
         let domain = ToyDomain::new(None);
-        let cancel = CancelTokenImpl::new();
+        let cancel = CancelTokenImpl::default();
 
         for i in 0..34 {
             let block = dolos_testing::blocks::make_conway_block(i);
@@ -316,7 +315,7 @@ mod tests {
     #[tokio::test]
     async fn test_dump_history_max_items() {
         let domain = ToyDomain::new(None);
-        let cancel = CancelTokenImpl::new();
+        let cancel = CancelTokenImpl::default();
 
         let service = SyncServiceImpl::new(domain, cancel);
 

@@ -1,4 +1,4 @@
-use dolos_core::{BlockBody, BlockHash, BlockSlot, RawBlock};
+use dolos_core::{BlockHash, BlockSlot, RawBlock};
 use pallas::{
     codec::utils::{Bytes, KeepRaw},
     ledger::{
