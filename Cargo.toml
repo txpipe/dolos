@@ -88,6 +88,7 @@ features = ["fs", "num-integer-backend", "rustls-tls", "rustls-tls-native-roots"
 [dev-dependencies]
 nix = { version = "0.30.1", features = ["signal"] }
 tempfile = "3.20.0"
+dolos-testing = { path = "crates/testing", features = ["toy-domain"] }
 
 [[test]]
 name = "smoke"
