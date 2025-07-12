@@ -1088,6 +1088,7 @@ dependencies = [
  "dolos-core",
  "dolos-minibf",
  "dolos-redb",
+ "dolos-testing",
  "dolos-trp",
  "flate2",
  "futures-core",
