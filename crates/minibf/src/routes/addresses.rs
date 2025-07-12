@@ -130,3 +130,24 @@ pub async fn utxos_with_asset<D: Domain>(
 
     Ok(Json(utxos))
 }
+
+
+// not part of blockfrost but a good convenience
+pub async fn utxos_with_asset_no_addr<D: Domain>(
+    Path(asset): Path<String>,
+    Query(params): Query<PaginationParameters>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Vec<AddressUtxoContentInner>>, StatusCode> {
+    let pagination = Pagination::try_from(params)?;
+
+    let asset = hex::decode(asset).map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    let asset_refs = domain
+        .state()
+        .get_utxo_by_asset(&asset)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let utxos = load_utxo_models(&domain, asset_refs, pagination)?;
+
+    Ok(Json(utxos))
+}
