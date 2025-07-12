@@ -1,13 +1,9 @@
-use std::{
-    ops::{Deref, DerefMut},
-    sync::Arc,
-};
+use std::sync::Arc;
 
 use crate::{TestAddress, UtxoGenerator, make_custom_utxo_delta};
 use dolos_core::*;
 use dolos_redb::state::LedgerStore;
 use futures_util::stream::StreamExt;
-use pallas::interop::utxorpc;
 
 pub fn seed_random_memory_store(utxo_generator: impl UtxoGenerator) -> impl StateStore {
     let store = LedgerStore::in_memory_v2().unwrap();
