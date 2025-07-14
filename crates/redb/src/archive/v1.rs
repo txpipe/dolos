@@ -1,5 +1,4 @@
 use ::redb::{Database, Durability};
-use itertools::Itertools;
 use pallas::ledger::traverse::MultiEraBlock;
 use std::sync::Arc;
 use tracing::{debug, info};
@@ -8,7 +7,9 @@ type Error = super::RedbArchiveError;
 
 use dolos_core::{ArchiveError, BlockBody, BlockSlot, EraCbor, LedgerDelta, TxOrder};
 
-use super::{indexes, tables, ChainIter};
+use crate::archive::ChainSparseIter;
+
+use super::{ChainRangeIter, indexes, tables};
 
 #[derive(Clone)]
 pub struct ChainStore {
@@ -63,22 +64,14 @@ impl ChainStore {
         Ok(())
     }
 
-    pub fn get_range<'a>(
+    pub fn get_range(
         &self,
         from: Option<BlockSlot>,
         to: Option<BlockSlot>,
-    ) -> Result<ChainIter<'a>, Error> {
+    ) -> Result<ChainRangeIter, Error> {
         let rx = self.db().begin_read()?;
         let range = tables::BlocksTable::get_range(&rx, from, to)?;
-        Ok(ChainIter(range))
-    }
-
-    pub fn get_possible_block_slots_by_address(
-        &self,
-        address: &[u8],
-    ) -> Result<Vec<BlockSlot>, Error> {
-        let rx = self.db().begin_read()?;
-        indexes::Indexes::get_by_address(&rx, address)
+        Ok(ChainRangeIter(range))
     }
 
     pub fn get_possible_block_slots_by_address_payment_part(
@@ -148,18 +141,6 @@ impl ChainStore {
     ) -> Result<Vec<BlockSlot>, Error> {
         let rx = self.db().begin_read()?;
         indexes::Indexes::get_by_tx_hash(&rx, tx_hash)
-    }
-
-    pub fn get_possible_blocks_by_address(&self, address: &[u8]) -> Result<Vec<BlockBody>, Error> {
-        self.get_possible_block_slots_by_address(address)?
-            .iter()
-            .sorted()
-            .flat_map(|slot| match self.get_block_by_slot(slot) {
-                Ok(Some(block)) => Some(Ok(block)),
-                Ok(None) => None,
-                Err(e) => Some(Err(e)),
-            })
-            .collect()
     }
 
     pub fn get_possible_blocks_by_address_payment_part(
@@ -290,6 +271,15 @@ impl ChainStore {
             }
         }
         Ok(None)
+    }
+
+    pub fn iter_possible_blocks_with_address(
+        &self,
+        address: &[u8],
+    ) -> Result<ChainSparseIter, Error> {
+        let rx = self.db().begin_read()?;
+        let range = indexes::Indexes::iter_by_address(&rx, address)?;
+        Ok(ChainSparseIter(rx, range))
     }
 
     pub fn get_block_by_slot(&self, slot: &BlockSlot) -> Result<Option<BlockBody>, Error> {

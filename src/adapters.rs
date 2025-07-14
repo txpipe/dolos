@@ -250,7 +250,8 @@ pub enum ArchiveAdapter {
 }
 
 impl ArchiveStore for ArchiveAdapter {
-    type BlockIter<'a> = ArchiveBlockIter<'a>;
+    type BlockIter<'a> = ArchiveRangeBlockIter;
+    type SparseBlockIter = ArchiveSparseBlockIter;
 
     fn get_block_by_hash(&self, block_hash: &[u8]) -> Result<Option<BlockBody>, ArchiveError> {
         let out = match self {
@@ -303,6 +304,17 @@ impl ArchiveStore for ArchiveAdapter {
         Ok(out)
     }
 
+    fn iter_blocks_with_address(
+        &self,
+        address: &[u8],
+    ) -> Result<Self::SparseBlockIter, ArchiveError> {
+        let out = match self {
+            ArchiveAdapter::Redb(x) => x.iter_blocks_with_address(address)?,
+        };
+
+        Ok(out.into())
+    }
+
     fn get_range<'a>(
         &self,
         from: Option<BlockSlot>,
@@ -346,31 +358,47 @@ impl From<dolos_redb::archive::ChainStore> for ArchiveAdapter {
     }
 }
 
-pub enum ArchiveBlockIter<'a> {
-    Redb(dolos_redb::archive::ChainIter<'a>),
+pub enum ArchiveRangeBlockIter {
+    Redb(dolos_redb::archive::ChainRangeIter),
 }
 
-impl Iterator for ArchiveBlockIter<'_> {
+impl Iterator for ArchiveRangeBlockIter {
     type Item = (BlockSlot, BlockBody);
 
     fn next(&mut self) -> Option<Self::Item> {
         match self {
-            ArchiveBlockIter::Redb(chainiter) => chainiter.next(),
+            ArchiveRangeBlockIter::Redb(chainiter) => chainiter.next(),
         }
     }
 }
 
-impl DoubleEndedIterator for ArchiveBlockIter<'_> {
+impl DoubleEndedIterator for ArchiveRangeBlockIter {
     fn next_back(&mut self) -> Option<Self::Item> {
         match self {
-            ArchiveBlockIter::Redb(chainiter) => chainiter.next_back(),
+            ArchiveRangeBlockIter::Redb(chainiter) => chainiter.next_back(),
         }
     }
 }
 
-impl<'a> From<dolos_redb::archive::ChainIter<'a>> for ArchiveBlockIter<'a> {
-    fn from(value: dolos_redb::archive::ChainIter<'a>) -> Self {
+impl From<dolos_redb::archive::ChainRangeIter> for ArchiveRangeBlockIter {
+    fn from(value: dolos_redb::archive::ChainRangeIter) -> Self {
         Self::Redb(value)
+    }
+}
+
+pub struct ArchiveSparseBlockIter(dolos_redb::archive::ChainSparseIter);
+
+impl Iterator for ArchiveSparseBlockIter {
+    type Item = Result<(BlockSlot, Option<BlockBody>), ArchiveError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next()
+    }
+}
+
+impl From<dolos_redb::archive::ChainSparseIter> for ArchiveSparseBlockIter {
+    fn from(value: dolos_redb::archive::ChainSparseIter) -> Self {
+        Self(value)
     }
 }
 
