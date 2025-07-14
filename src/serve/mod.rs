@@ -7,7 +7,7 @@ use crate::adapters::DomainAdapter;
 use crate::prelude::*;
 
 #[cfg(feature = "grpc")]
-pub mod grpc;
+pub use dolos_grpc as grpc;
 
 #[cfg(unix)]
 pub mod o7s_unix;

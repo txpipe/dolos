@@ -427,6 +427,10 @@ impl Domain for DomainAdapter {
         &self.wal
     }
 
+    fn wal_mut(&mut self) -> &mut Self::Wal {
+        &mut self.wal
+    }
+
     fn state(&self) -> &Self::State {
         &self.state
     }

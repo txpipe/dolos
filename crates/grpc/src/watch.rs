@@ -1,3 +1,4 @@
+use dolos_core::{CancelToken, ChainPoint, Domain, LogValue, RawBlock, WalStore};
 use futures_core::Stream;
 use futures_util::StreamExt;
 use pallas::interop::utxorpc::spec as u5c;
@@ -10,7 +11,6 @@ use std::pin::Pin;
 use tonic::{Request, Response, Status};
 
 use super::stream::WalStream;
-use crate::prelude::*;
 
 fn outputs_match_address(
     pattern: &u5c::cardano::AddressPattern,
@@ -170,17 +170,17 @@ fn block_to_txs<C: LedgerContext>(
 }
 
 fn roll_to_watch_response<C: LedgerContext>(
-    mapper: &interop::Mapper<C>,
-    log: &LogValue,
-    request: &u5c::watch::WatchTxRequest,
+    mapper: interop::Mapper<C>,
+    log: LogValue,
+    request: u5c::watch::WatchTxRequest,
 ) -> impl Stream<Item = u5c::watch::WatchTxResponse> {
     let txs: Vec<_> = match log {
-        LogValue::Apply(block) => block_to_txs(block, mapper, request)
+        LogValue::Apply(block) => block_to_txs(&block, &mapper, &request)
             .into_iter()
             .map(u5c::watch::watch_tx_response::Action::Apply)
             .map(|x| u5c::watch::WatchTxResponse { action: Some(x) })
             .collect(),
-        LogValue::Undo(block) => block_to_txs(block, mapper, request)
+        LogValue::Undo(block) => block_to_txs(&block, &mapper, &request)
             .into_iter()
             .map(u5c::watch::watch_tx_response::Action::Undo)
             .map(|x| u5c::watch::WatchTxResponse { action: Some(x) })
@@ -255,9 +255,10 @@ where
         };
 
         let mapper = self.mapper.clone();
-
         let stream = WalStream::start(self.domain.wal().clone(), from_seq, self.cancel.clone())
-            .flat_map(move |(_, log)| roll_to_watch_response(&mapper, &log, &inner_req))
+            .flat_map(move |(_, log)| {
+                roll_to_watch_response(mapper.clone(), log, inner_req.clone())
+            })
             .map(Ok);
 
         Ok(Response::new(Box::pin(stream)))

@@ -1,0 +1,43 @@
+[package]
+name = "dolos-grpc"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+base64.workspace = true
+bincode.workspace = true
+futures-core.workspace = true
+futures-util.workspace = true
+hex.workspace = true
+itertools.workspace = true
+pallas.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio-stream.workspace = true
+tokio-util.workspace = true
+tokio.workspace = true
+tower-http.workspace = true
+tower.workspace = true
+tracing.workspace = true
+
+# gRPC dependencies
+async-trait = "0.1.81"
+async-stream = "0.3.5"
+bytes = "1.9.0"
+protoc-wkt = "1.0.0"
+tonic = { version = "0.12.3", features = ["tls"] }
+tonic-web = "0.12.3"
+tonic-reflection = "0.12.3"
+
+dolos-core = { path = "../core" }
+dolos-cardano = { path = "../cardano" }
+opentelemetry = "0.30.0"
+opentelemetry_sdk = "0.30.0"
+
+[dev-dependencies]
+dolos-redb = { path = "../redb" }
+dolos-testing = { path = "../testing", features = ["toy-domain"] }
+
+[features]
+phase2 = ["pallas/phase2"]

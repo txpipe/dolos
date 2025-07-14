@@ -1,4 +1,4 @@
-use crate::prelude::*;
+use dolos_core::{CancelToken, LogEntry, LogSeq, WalStore};
 use futures_core::Stream;
 
 pub struct WalStream;
@@ -40,12 +40,14 @@ impl WalStream {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use dolos_core::{LogValue, RawBlock};
     use dolos_redb::wal::RedbWalStore;
+    use dolos_testing::ToyCancelToken;
     use futures_util::{pin_mut, StreamExt};
-    use tokio_util::sync::CancellationToken;
 
     use super::*;
-    use crate::serve::CancelTokenImpl;
 
     fn dummy_block(slot: u64) -> RawBlock {
         let hash = pallas::crypto::hash::Hasher::<256>::hash(slot.to_be_bytes().as_slice());
@@ -76,7 +78,8 @@ mod tests {
             }
         });
 
-        let s = WalStream::start(db.clone(), 50, CancelTokenImpl(CancellationToken::new()));
+        let cancel = ToyCancelToken::new(Duration::from_secs(10));
+        let s = WalStream::start(db.clone(), 50, cancel);
 
         pin_mut!(s);
 

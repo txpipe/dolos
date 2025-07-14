@@ -1,3 +1,4 @@
+use dolos_core::{ArchiveStore, BlockBody, CancelToken, ChainPoint, Domain, LogValue, WalStore};
 use futures_core::Stream;
 use futures_util::stream::once;
 use futures_util::StreamExt;
@@ -10,7 +11,6 @@ use std::pin::Pin;
 use tonic::{Request, Response, Status};
 
 use super::stream::WalStream;
-use crate::prelude::*;
 
 const MAX_DUMP_HISTORY_ITEMS: u32 = 100;
 
@@ -260,14 +260,18 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use dolos_testing::toy_domain::ToyDomain;
+    use std::time::Duration;
+
+    use dolos_core::WalStore as _;
+    use dolos_testing::{toy_domain::ToyDomain, ToyCancelToken};
     use pallas::interop::utxorpc::spec::sync::sync_service_server::SyncService as _;
+
+    use super::*;
 
     #[tokio::test]
     async fn test_dump_history_pagination() {
         let domain = ToyDomain::new(None);
-        let cancel = CancelTokenImpl::default();
+        let cancel = ToyCancelToken::new(Duration::from_secs(10));
 
         for i in 0..34 {
             let block = dolos_testing::blocks::make_conway_block(i);
@@ -315,7 +319,7 @@ mod tests {
     #[tokio::test]
     async fn test_dump_history_max_items() {
         let domain = ToyDomain::new(None);
-        let cancel = CancelTokenImpl::default();
+        let cancel = ToyCancelToken::new(Duration::from_secs(10));
 
         let service = SyncServiceImpl::new(domain, cancel);
 
@@ -331,5 +335,124 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(response.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn test_read_tip_no_data() {
+        let domain = ToyDomain::new(None);
+        let cancel = ToyCancelToken::new(Duration::from_secs(10));
+
+        let service = SyncServiceImpl::new(domain, cancel);
+
+        let request = u5c::sync::ReadTipRequest {};
+        let response = service.read_tip(Request::new(request)).await.unwrap_err();
+
+        assert_eq!(response.code(), tonic::Code::Internal);
+    }
+
+    #[tokio::test]
+    async fn test_read_tip_happy() {
+        let mut domain = ToyDomain::new(None);
+        let block = dolos_testing::blocks::make_conway_block(0);
+        let index = block.slot;
+        let hash = block.hash.to_vec();
+        let blocks = vec![block];
+        domain.apply_blocks(&blocks).unwrap();
+        domain.wal_mut().roll_forward(blocks.into_iter()).unwrap();
+
+        let cancel = ToyCancelToken::new(Duration::from_secs(10));
+
+        let service = SyncServiceImpl::new(domain, cancel);
+
+        let request = u5c::sync::ReadTipRequest {};
+        let response = service.read_tip(Request::new(request)).await.unwrap();
+        let tip = response.into_inner().tip.unwrap();
+
+        assert_eq!(tip.index, index);
+        assert_eq!(tip.hash, hash);
+    }
+
+    #[tokio::test]
+    async fn test_fetch_block_happy() {
+        let mut domain = ToyDomain::new(None);
+        let block = dolos_testing::blocks::make_conway_block(0);
+        let index = block.slot;
+        let hash = block.hash.to_vec();
+        let blocks = vec![block];
+
+        domain.apply_blocks(&blocks).unwrap();
+        domain.wal_mut().roll_forward(blocks.into_iter()).unwrap();
+
+        let cancel = ToyCancelToken::new(Duration::from_secs(10));
+        let service = SyncServiceImpl::new(domain, cancel);
+
+        let request = u5c::sync::FetchBlockRequest {
+            r#ref: vec![u5c::sync::BlockRef {
+                index,
+                hash: hash.clone().into(),
+            }],
+            ..Default::default()
+        };
+        let response = service.fetch_block(Request::new(request)).await.unwrap();
+        let inner = response.into_inner();
+        let block = inner.block.first();
+
+        assert!(block.is_some());
+
+        let block = block.unwrap();
+        let u5c::sync::any_chain_block::Chain::Cardano(chain) = block.chain.as_ref().unwrap();
+
+        let header = chain.clone().header.unwrap();
+        assert_eq!(header.slot, index);
+    }
+
+    #[tokio::test]
+    async fn test_fetch_block_no_data() {
+        let domain = ToyDomain::new(None);
+        let cancel = ToyCancelToken::new(Duration::from_secs(10));
+        let service = SyncServiceImpl::new(domain, cancel);
+
+        let request = u5c::sync::FetchBlockRequest {
+            r#ref: vec![u5c::sync::BlockRef {
+                index: 1,
+                hash: vec![].into(),
+            }],
+            ..Default::default()
+        };
+        let response = service
+            .fetch_block(Request::new(request))
+            .await
+            .unwrap_err();
+
+        assert_eq!(response.code(), tonic::Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn test_fetch_block_not_found() {
+        let mut domain = ToyDomain::new(None);
+        let block = dolos_testing::blocks::make_conway_block(0);
+        let index = block.slot;
+        let hash = block.hash.to_vec();
+        let blocks = vec![block];
+
+        domain.apply_blocks(&blocks).unwrap();
+        domain.wal_mut().roll_forward(blocks.into_iter()).unwrap();
+
+        let cancel = ToyCancelToken::new(Duration::from_secs(10));
+        let service = SyncServiceImpl::new(domain, cancel);
+
+        let request = u5c::sync::FetchBlockRequest {
+            r#ref: vec![u5c::sync::BlockRef {
+                index: index + 1,
+                hash: hash.clone().into(),
+            }],
+            ..Default::default()
+        };
+        let response = service
+            .fetch_block(Request::new(request))
+            .await
+            .unwrap_err();
+
+        assert_eq!(response.code(), tonic::Code::NotFound);
     }
 }

@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, ops::Range, str::FromStr};
+use std::{collections::BTreeMap, ops::Range, str::FromStr, time::Duration};
 
 use pallas::{
     codec::minicbor,
@@ -397,4 +397,22 @@ pub fn utxo_with_random_asset(
         pallas::ledger::primitives::conway::Value::Multiasset(MIN_UTXO_AMOUNT, multi_assets);
 
     utxo_with_value(address, value)
+}
+
+#[derive(Clone, Default)]
+/// Cancel token that cancels after a set amount of time.
+pub struct ToyCancelToken {
+    duration: Duration,
+}
+
+impl ToyCancelToken {
+    pub fn new(duration: Duration) -> Self {
+        Self { duration }
+    }
+}
+
+impl CancelToken for ToyCancelToken {
+    async fn cancelled(&self) {
+        tokio::time::sleep(self.duration).await;
+    }
 }

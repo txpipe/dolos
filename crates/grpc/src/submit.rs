@@ -1,9 +1,7 @@
-use any_chain_eval::Chain;
+use dolos_core::{Domain, MempoolEvent, MempoolStore, MempoolTxStage, TxHash};
 use futures_core::Stream;
 use futures_util::{StreamExt as _, TryStreamExt as _};
 use pallas::crypto::hash::Hash;
-use pallas::interop::utxorpc as u5c;
-use pallas::interop::utxorpc::spec::cardano::ExUnits;
 use pallas::interop::utxorpc::spec::submit::{WaitForTxResponse, *};
 use pallas::interop::utxorpc::{self as interop, LedgerContext};
 use std::collections::HashSet;
@@ -11,8 +9,48 @@ use std::pin::Pin;
 use tonic::{Request, Response, Status};
 use tracing::info;
 
-use crate::mempool::UpdateFilter;
-use crate::prelude::*;
+#[cfg(feature = "phase2")]
+use {
+    any_chain_eval::Chain, dolos_core::MempoolError, pallas::interop::utxorpc as u5c,
+    pallas::interop::utxorpc::spec::cardano::ExUnits,
+};
+
+pub struct UpdateFilter<M: MempoolStore> {
+    inner: M::Stream,
+    subjects: HashSet<TxHash>,
+}
+
+impl<M: MempoolStore> UpdateFilter<M> {
+    pub fn new(inner: M::Stream, subjects: HashSet<TxHash>) -> Self {
+        Self { inner, subjects }
+    }
+}
+
+impl<M: MempoolStore> futures_core::Stream for UpdateFilter<M> {
+    type Item = MempoolEvent;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        let x = self.inner.poll_next_unpin(cx);
+
+        match x {
+            std::task::Poll::Ready(None) => std::task::Poll::Ready(None),
+            std::task::Poll::Ready(Some(x)) => match x {
+                Ok(x) => {
+                    if self.subjects.contains(&x.tx.hash) {
+                        std::task::Poll::Ready(Some(x))
+                    } else {
+                        std::task::Poll::Pending
+                    }
+                }
+                Err(_) => std::task::Poll::Ready(None),
+            },
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
+    }
+}
 
 pub struct SubmitServiceImpl<D: Domain>
 where
@@ -63,6 +101,7 @@ fn event_to_wait_for_tx_response(event: MempoolEvent) -> WaitForTxResponse {
     }
 }
 
+#[cfg(feature = "phase2")]
 fn tx_eval_to_u5c(
     eval: Result<pallas::ledger::validate::phase2::EvalReport, MempoolError>,
 ) -> u5c::spec::cardano::TxEval {

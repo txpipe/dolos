@@ -1,6 +1,7 @@
+use dolos_core::{ChainPoint, Domain, EraCbor, StateStore, TxoRef};
 use itertools::Itertools as _;
 use pallas::interop::utxorpc::{self as interop, spec::query::any_utxo_pattern::UtxoPattern};
-use pallas::interop::utxorpc::{LedgerContext, spec as u5c};
+use pallas::interop::utxorpc::{spec as u5c, LedgerContext};
 use pallas::ledger::traverse::MultiEraOutput;
 use std::collections::HashSet;
 use tonic::{Request, Response, Status};
@@ -9,7 +10,6 @@ use tracing::info;
 use dolos_cardano::pparams;
 
 use super::masking::apply_mask;
-use crate::prelude::*;
 
 pub fn point_to_u5c(point: &ChainPoint) -> u5c::query::ChainPoint {
     match point {
