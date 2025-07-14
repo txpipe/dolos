@@ -120,6 +120,7 @@ members = ["crates/cardano", "crates/core", "crates/testing", "crates/minibf", "
 pallas = { git = "https://github.com/txpipe/pallas.git", features = ["hardano"] }
 # pallas = { version = "1.0.0-alpha.2", features = ["hardano"] }
 # pallas = { path = "../pallas/pallas", features = ["hardano"] }
+
 thiserror = "2.0.12"
 hex = "0.4.3"
 tracing = "0.1.37"
