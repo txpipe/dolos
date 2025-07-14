@@ -1,11 +1,10 @@
+use dolos_core::{CancelToken, Domain, ServeError};
 use pallas::interop::utxorpc::{spec as u5c, LedgerContext};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tonic::transport::{Certificate, Server, ServerTlsConfig};
 use tower_http::cors::CorsLayer;
 use tracing::info;
-
-use crate::prelude::*;
 
 mod convert;
 mod masking;
@@ -30,7 +29,7 @@ impl<T: dolos_core::StateStore> pallas::interop::utxorpc::LedgerContext for Cont
         &self,
         refs: &[pallas::interop::utxorpc::TxoRef],
     ) -> Option<pallas::interop::utxorpc::UtxoMap> {
-        let refs: Vec<_> = refs.iter().map(|x| TxoRef::from(*x)).collect();
+        let refs: Vec<_> = refs.iter().map(|x| dolos_core::TxoRef::from(*x)).collect();
 
         let some = self
             .0

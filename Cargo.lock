@@ -1073,12 +1073,10 @@ checksum = "fea41bba32d969b513997752735605054bc0dfa92b4c56bf1189f2e174be7a10"
 name = "dolos"
 version = "0.26.1"
 dependencies = [
- "async-stream",
  "async-trait",
  "base64 0.22.1",
  "bech32 0.11.0",
  "bincode 1.3.3",
- "bytes",
  "chrono",
  "clap",
  "comfy-table",
@@ -1086,6 +1084,7 @@ dependencies = [
  "console-subscriber",
  "dolos-cardano",
  "dolos-core",
+ "dolos-grpc",
  "dolos-minibf",
  "dolos-redb",
  "dolos-testing",
@@ -1107,7 +1106,6 @@ dependencies = [
  "nix",
  "pallas 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
  "paste",
- "protoc-wkt",
  "reqwest",
  "serde",
  "serde_json",
@@ -1119,9 +1117,6 @@ dependencies = [
  "tokio-stream",
  "tokio-util",
  "toml",
- "tonic 0.12.3",
- "tonic-reflection",
- "tonic-web",
  "tower 0.4.13",
  "tower-http 0.6.6",
  "tracing",
@@ -1156,6 +1151,41 @@ dependencies = [
  "thiserror 2.0.12",
  "tracing",
  "trait-variant",
+]
+
+[[package]]
+name = "dolos-grpc"
+version = "0.1.0"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "base64 0.22.1",
+ "bincode 1.3.3",
+ "bytes",
+ "dolos-cardano",
+ "dolos-core",
+ "dolos-redb",
+ "dolos-testing",
+ "futures-core",
+ "futures-util",
+ "hex",
+ "itertools 0.13.0",
+ "opentelemetry",
+ "opentelemetry_sdk",
+ "pallas 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
+ "protoc-wkt",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.12",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tonic 0.12.3",
+ "tonic-reflection",
+ "tonic-web",
+ "tower 0.4.13",
+ "tower-http 0.6.6",
+ "tracing",
 ]
 
 [[package]]
@@ -1210,6 +1240,7 @@ dependencies = [
  "futures-util",
  "pallas 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git)",
  "rand 0.9.1",
+ "tokio",
  "tokio-stream",
 ]
 

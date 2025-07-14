@@ -7,7 +7,7 @@ use pallas::ledger::{
 };
 use std::{
     borrow::Cow,
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     sync::{Arc, RwLock},
 };
 use tokio::sync::broadcast;
@@ -325,43 +325,6 @@ impl MempoolStore for Mempool {
     fn subscribe(&self) -> Self::Stream {
         MempoolStream {
             inner: BroadcastStream::new(self.updates.subscribe()),
-        }
-    }
-}
-
-pub struct UpdateFilter<M: MempoolStore> {
-    inner: M::Stream,
-    subjects: HashSet<TxHash>,
-}
-
-impl<M: MempoolStore> UpdateFilter<M> {
-    pub fn new(inner: M::Stream, subjects: HashSet<TxHash>) -> Self {
-        Self { inner, subjects }
-    }
-}
-
-impl<M: MempoolStore> futures_core::Stream for UpdateFilter<M> {
-    type Item = MempoolEvent;
-
-    fn poll_next(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        let x = self.inner.poll_next_unpin(cx);
-
-        match x {
-            std::task::Poll::Ready(None) => std::task::Poll::Ready(None),
-            std::task::Poll::Ready(Some(x)) => match x {
-                Ok(x) => {
-                    if self.subjects.contains(&x.tx.hash) {
-                        std::task::Poll::Ready(Some(x))
-                    } else {
-                        std::task::Poll::Pending
-                    }
-                }
-                Err(_) => std::task::Poll::Ready(None),
-            },
-            std::task::Poll::Pending => std::task::Poll::Pending,
         }
     }
 }
