@@ -285,7 +285,7 @@ impl MempoolStore for Mempool {
         // if we don't have phase-2 enabled, we reject txs before propagating something
         // that could result in collateral loss
         #[cfg(not(feature = "phase2"))]
-        if !decoded.redeemers().is_empty() {
+        if !tx.redeemers().is_empty() {
             return Err(MempoolError::PlutusNotSupported);
         }
 
