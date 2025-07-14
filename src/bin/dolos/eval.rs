@@ -27,7 +27,7 @@ pub struct Args {
 }
 
 pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
-    crate::common::setup_tracing(&config.logging)?;
+    crate::common::setup_tracing(config)?;
 
     let (_, ledger, _) = crate::common::setup_data_stores(config)?;
     let genesis = Arc::new(crate::common::open_genesis_files(&config.genesis)?);

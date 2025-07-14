@@ -251,6 +251,7 @@ impl Default for ConfigEditor {
                 relay: Default::default(),
                 retries: Default::default(),
                 logging: Default::default(),
+                telemetry: Some(Default::default()),
             },
             None,
         )
