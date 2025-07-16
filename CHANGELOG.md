@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.27.1] - 2025-07-16
+
+### 🐛 Bug Fixes
+
+- Handle phase-2 eval errors (#598)
+
+### ⚙️ Miscellaneous Tasks
+
+- Fix cargo release config
+- Unify cargo metadata across all crates
+
 ## [0.27.0] - 2025-07-14
 
 ### 🚀 Features
@@ -20,6 +31,10 @@ All notable changes to this project will be documented in this file.
 ### ⚙️ Miscellaneous Tasks
 
 - Skip required code when no default features available (#595)
+
+### Release
+
+- V{{version}}
 
 ## [0.26.1] - 2025-07-11
 
