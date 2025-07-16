@@ -1,14 +1,14 @@
 [package]
 name = "dolos"
 description = "A Cardano data-node built in Rust"
-version = "0.27.0"
-edition = "2021"
-repository = "https://github.com/txpipe/dolos"
-homepage = "https://github.com/txpipe/dolos"
-documentation = "https://docs.rs/dolos"
-license = "Apache-2.0"
-readme = "README.md"
-authors = ["Santiago Carmuega <santiago@carmuega.me>"]
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+license.workspace = true
+readme.workspace = true
+authors.workspace = true
 
 [dependencies]
 pallas.workspace = true
@@ -115,6 +115,16 @@ lto = "thin"
 
 [workspace]
 members = ["crates/cardano", "crates/core", "crates/testing", "crates/minibf", "crates/redb", "xtask"]
+
+[workspace.package]
+version = "0.27.0"
+edition = "2021"
+repository = "https://github.com/txpipe/dolos"
+homepage = "https://github.com/txpipe/dolos"
+documentation = "https://docs.rs/dolos"
+license = "Apache-2.0"
+readme = "README.md"
+authors = ["TxPipe <hello@txpipe.io>"]
 
 [workspace.dependencies]
 pallas = { git = "https://github.com/txpipe/pallas.git", features = ["hardano"] }
