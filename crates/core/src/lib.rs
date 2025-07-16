@@ -612,6 +612,10 @@ pub enum MempoolError {
     #[error("tx evaluation failed during phase-2: {0}")]
     Phase2Error(#[from] pallas::ledger::validate::phase2::error::Error),
 
+    #[cfg(feature = "phase2")]
+    #[error("phase-2 script yielded an error")]
+    Phase2ExplicitError,
+
     #[error("state error: {0}")]
     StateError(#[from] StateError),
 

@@ -280,7 +280,15 @@ impl MempoolStore for Mempool {
         self.validate(&tx)?;
 
         #[cfg(feature = "phase2")]
-        self.evaluate(&tx)?;
+        {
+            let report = self.evaluate(&tx)?;
+
+            for eval in report.iter() {
+                if !eval.success {
+                    return Err(MempoolError::Phase2ExplicitError);
+                }
+            }
+        }
 
         // if we don't have phase-2 enabled, we reject txs before propagating something
         // that could result in collateral loss
