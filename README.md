@@ -5,7 +5,7 @@
     <hr/>
 </div>
 
-## Introduction
+## Intro
 
 Dolos is a new type of Cardano node, fine-tuned to solve a very narrow scope: keeping an updated copy of the ledger and replying to queries from trusted clients, while requiring a small fraction of the resources
 
