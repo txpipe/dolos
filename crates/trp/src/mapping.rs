@@ -95,7 +95,7 @@ fn map_datum(datum: &PlutusData) -> Expression {
 }
 
 pub fn from_tx3_utxoref(r#ref: tx3_lang::UtxoRef) -> TxoRef {
-    let txid = dolos_cardano::pallas::crypto::hash::Hash::try_from(r#ref.txid.as_slice()).unwrap();
+    let txid = dolos_cardano::pallas::crypto::hash::Hash::from(r#ref.txid.as_slice());
 
     TxoRef(txid, r#ref.index)
 }

@@ -24,13 +24,13 @@ impl<D: Domain> UtxoStoreAdapter<D> {
     }
 
     fn match_utxos_by_address(&self, address: &[u8]) -> Result<HashSet<TxoRef>, Error> {
-        let utxos = self.state().get_utxo_by_address(&address)?;
+        let utxos = self.state().get_utxo_by_address(address)?;
 
         Ok(utxos)
     }
 
     fn match_utxos_by_asset_policy(&self, policy: &[u8]) -> Result<HashSet<TxoRef>, Error> {
-        let utxos = self.state().get_utxo_by_policy(&policy)?;
+        let utxos = self.state().get_utxo_by_policy(policy)?;
 
         Ok(utxos)
     }
@@ -50,8 +50,8 @@ impl<D: Domain> UtxoStore for UtxoStoreAdapter<D> {
         pattern: UtxoPattern<'_>,
     ) -> Result<HashSet<UtxoRef>, tx3_lang::backend::Error> {
         let refs = match pattern {
-            UtxoPattern::ByAddress(address) => self.match_utxos_by_address(&address),
-            UtxoPattern::ByAssetPolicy(policy) => self.match_utxos_by_asset_policy(&policy),
+            UtxoPattern::ByAddress(address) => self.match_utxos_by_address(address),
+            UtxoPattern::ByAssetPolicy(policy) => self.match_utxos_by_asset_policy(policy),
             UtxoPattern::ByAsset(policy, name) => self.match_utxos_by_asset(policy, name),
         }?;
 
@@ -71,8 +71,7 @@ impl<D: Domain> UtxoStore for UtxoStoreAdapter<D> {
         let utxos = utxos
             .into_iter()
             .map(|(txoref, utxo)| into_tx3_utxo(txoref, utxo))
-            .collect::<Result<_, _>>()
-            .map_err(Error::from)?;
+            .collect::<Result<_, _>>()?;
 
         Ok(utxos)
     }
