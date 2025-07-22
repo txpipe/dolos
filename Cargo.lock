@@ -1238,6 +1238,7 @@ dependencies = [
  "tracing",
  "tx3-cardano",
  "tx3-lang",
+ "tx3-resolver",
  "tx3-sdk",
 ]
 
@@ -3500,7 +3501,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be769465445e8c1474e9c5dac2018218498557af32d9ed057325ec9a41ae81bf"
 dependencies = [
  "heck",
- "itertools 0.12.1",
+ "itertools 0.14.0",
  "log",
  "multimap",
  "once_cell",
@@ -3533,7 +3534,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.12.1",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn",
@@ -5021,15 +5022,14 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "tx3-cardano"
-version = "0.8.2"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f03542397e6ba2d792eb64425f0818bab2c291357eab8ac97d553d8b3af2efc4"
+checksum = "d5ae0559827352d7572ec2a0cd6e77d9397ace2b31fc22e293062391e964c958"
 dependencies = [
  "hex",
  "pallas 1.0.0-alpha.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde",
  "thiserror 2.0.12",
- "tokio",
  "trait-variant",
  "tx3-lang",
  "utxorpc",
@@ -5037,9 +5037,9 @@ dependencies = [
 
 [[package]]
 name = "tx3-lang"
-version = "0.8.2"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bea8fb2e4346de691f5004e08aea16313a84799f7fe8af5da3fd848d54e99baa"
+checksum = "d67a332fe43d1758581f69810fa0eb8ec5cb044b3a1d0219beedd831a99cdd8f"
 dependencies = [
  "bincode 2.0.1",
  "hex",
@@ -5048,13 +5048,25 @@ dependencies = [
  "pest_derive",
  "serde",
  "thiserror 2.0.12",
+ "trait-variant",
+]
+
+[[package]]
+name = "tx3-resolver"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a281f641f969c886ba6f778672cd363a83b89a0351aedef8669e08f1a3978381"
+dependencies = [
+ "thiserror 2.0.12",
+ "trait-variant",
+ "tx3-lang",
 ]
 
 [[package]]
 name = "tx3-sdk"
-version = "0.4.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "959c977407648de05614971f41113bd937090d27ed07d45987b42b861498c7c5"
+checksum = "01c77336fd78ba3cd473d6a654b016e74524cd60a1d3660a55b2c9ff922d196c"
 dependencies = [
  "base64 0.22.1",
  "bech32 0.11.0",
@@ -5455,7 +5467,7 @@ version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf221c93e13a30d793f7645a0e7762c55d169dbb0a49671918a2319d289b10bb"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

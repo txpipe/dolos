@@ -9,6 +9,9 @@ use dolos_core::*;
 
 use crate::pparams::ChainSummary;
 
+// re-export pallas for version compatibility downstream
+pub use pallas;
+
 pub mod pparams;
 //pub mod validate;
 

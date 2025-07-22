@@ -1,4 +1,4 @@
-use base64::{Engine, engine::general_purpose::STANDARD};
+use base64::{engine::general_purpose::STANDARD, Engine};
 use jsonrpsee::types::{ErrorCode, ErrorObject, ErrorObjectOwned, Params};
 use pallas::{codec::utils::NonEmptySet, ledger::primitives::conway::VKeyWitness};
 use serde::Deserialize;
@@ -7,6 +7,8 @@ use tx3_lang::ProtoTx;
 use tx3_sdk::trp::{SubmitParams, SubmitWitness};
 
 use dolos_core::{Domain, MempoolStore as _, StateStore as _};
+
+use crate::{compiler::load_compiler, utxos::UtxoStoreAdapter};
 
 use super::Context;
 
@@ -122,34 +124,33 @@ pub async fn trp_resolve<D: Domain>(
         }
     };
 
-    let resolved = tx3_cardano::resolve_tx::<Context<D>>(
+    let mut compiler = load_compiler::<D>(context.domain.genesis(), context.domain.state())?;
+
+    let utxos = UtxoStoreAdapter::<D>::new(context.domain.state().clone());
+
+    let resolved = tx3_resolver::resolve_tx(
         tx,
-        (*context).clone(),
-        tx3_cardano::resolve::Config {
-            max_optimize_rounds: context.config.max_optimize_rounds.into(),
-            extra_fees: None,
-        },
+        &mut compiler,
+        &utxos,
+        context.config.max_optimize_rounds.into(),
     )
-    .await
-    .map_err(|err| {
-        ErrorObject::owned(
-            ErrorCode::InternalError.code(),
-            "Failed to resolve",
-            Some(err.to_string()),
-        )
-    });
+    .await;
 
     let resolved = match resolved {
         Ok(resolved) => resolved,
         Err(err) => {
             tracing::warn!(err = ?err, "Failed to resolve tx.");
-            return Err(err);
+            return Err(ErrorObject::owned(
+                ErrorCode::InternalError.code(),
+                "Failed to resolve",
+                Some(err.to_string()),
+            ));
         }
     };
 
     Ok(serde_json::json!({
         "tx": hex::encode(resolved.payload),
-        "hash": resolved.hash.to_string(),
+        "hash": hex::encode(resolved.hash),
     }))
 }
 
@@ -239,11 +240,11 @@ pub fn health<D: Domain>(context: &Context<D>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use dolos_testing::TestAddress::{Alice, Bob};
     use dolos_testing::toy_domain::ToyDomain;
+    use dolos_testing::TestAddress::{Alice, Bob};
     use serde_json::json;
 
-    use crate::{Config, metrics::Metrics};
+    use crate::{metrics::Metrics, Config};
 
     use super::*;
 
@@ -307,7 +308,7 @@ mod tests {
 
         let req = json!({
             "tir": {
-                "version": "v1alpha7",
+                "version": "v1alpha8",
                 "bytecode": hex::encode(ir),
                 "encoding": "hex"
             },

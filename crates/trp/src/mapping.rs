@@ -1,46 +1,46 @@
-use tx3_cardano::pallas::{
+use tx3_lang::ir::{Expression, StructExpr};
+
+use dolos_core::{EraCbor, TxoRef};
+use pallas::{
     codec::utils::KeyValuePairs,
     ledger::{
         primitives::{conway::DatumOption, BigInt, Constr, PlutusData},
-        traverse::{MultiEraAsset, MultiEraOutput, MultiEraPolicyAssets, MultiEraValue},
+        traverse::{Era, MultiEraAsset, MultiEraOutput, MultiEraPolicyAssets, MultiEraValue},
     },
 };
 
-use tx3_lang::ir::{Expression, StructExpr};
+use crate::Error;
 
-use dolos_core::TxoRef;
-
-fn map_custom_asset(asset: &MultiEraAsset) -> tx3_lang::ir::AssetExpr {
-    let policy = asset.policy().to_vec();
-    let asset_name = asset.name().to_vec();
+fn map_custom_asset(asset: &MultiEraAsset) -> tx3_lang::CanonicalAssets {
+    let policy = asset.policy().as_slice();
+    let asset_name = asset.name();
     let amount = asset.any_coin();
 
-    tx3_lang::ir::AssetExpr {
-        policy: Expression::Bytes(policy),
-        asset_name: Expression::Bytes(asset_name),
-        amount: Expression::Number(amount),
-    }
+    tx3_lang::CanonicalAssets::from_defined_asset(policy, asset_name, amount)
 }
 
-fn map_policy_assets(assets: &MultiEraPolicyAssets) -> Vec<tx3_lang::ir::AssetExpr> {
-    assets.assets().iter().map(map_custom_asset).collect()
+fn map_policy_assets(assets: &MultiEraPolicyAssets) -> tx3_lang::CanonicalAssets {
+    let all = tx3_lang::CanonicalAssets::empty();
+
+    let all = assets
+        .assets()
+        .iter()
+        .map(map_custom_asset)
+        .fold(all, |acc, x| acc + x);
+
+    all
 }
 
-fn map_assets(value: &MultiEraValue<'_>) -> Vec<tx3_lang::ir::AssetExpr> {
-    let coin = tx3_lang::ir::AssetExpr {
-        policy: Expression::None,
-        asset_name: Expression::None,
-        amount: Expression::Number(value.coin() as i128),
-    };
+fn map_assets(value: &MultiEraValue<'_>) -> tx3_lang::CanonicalAssets {
+    let naked = tx3_lang::CanonicalAssets::from_naked_amount(value.coin() as i128);
 
-    let assets = value.assets();
+    let all = value
+        .assets()
+        .iter()
+        .map(map_policy_assets)
+        .fold(naked, |acc, x| acc + x);
 
-    let policy_assets = assets.iter().flat_map(|x| map_policy_assets(x));
-
-    let mut out = vec![coin];
-    out.extend(policy_assets);
-
-    out
+    all
 }
 
 fn map_big_int(x: &BigInt) -> Expression {
@@ -94,19 +94,29 @@ fn map_datum(datum: &PlutusData) -> Expression {
     }
 }
 
-pub fn into_tx3_utxo(
-    txoref: &TxoRef,
-    parsed: &MultiEraOutput<'_>,
-) -> Result<tx3_lang::Utxo, tx3_cardano::Error> {
-    let r#ref = tx3_lang::UtxoRef {
+pub fn from_tx3_utxoref(r#ref: tx3_lang::UtxoRef) -> TxoRef {
+    let txid = dolos_cardano::pallas::crypto::hash::Hash::try_from(r#ref.txid.as_slice()).unwrap();
+
+    TxoRef(txid, r#ref.index)
+}
+
+pub fn into_tx3_utxoref(txoref: TxoRef) -> tx3_lang::UtxoRef {
+    tx3_lang::UtxoRef {
         txid: txoref.0.to_vec(),
         index: txoref.1,
-    };
+    }
+}
 
-    let address = parsed
-        .address()
-        .map_err(tx3_cardano::Error::InvalidAddress)?
-        .to_vec();
+pub fn into_tx3_utxo(txoref: TxoRef, utxo: EraCbor) -> Result<tx3_lang::Utxo, Error> {
+    let r#ref = into_tx3_utxoref(txoref);
+
+    let EraCbor(era, cbor) = utxo;
+
+    let era = Era::try_from(era)?;
+
+    let parsed = MultiEraOutput::decode(era, &cbor)?;
+
+    let address = parsed.address()?.to_vec();
 
     let assets = map_assets(&parsed.value());
 
