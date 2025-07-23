@@ -1,4 +1,4 @@
-use axum::{Json, http::StatusCode};
+use axum::{http::StatusCode, Json};
 use itertools::Itertools;
 use pallas::{
     codec::minicbor,
@@ -6,9 +6,9 @@ use pallas::{
     ledger::{
         addresses::{Address, Network, StakeAddress, StakePayload},
         primitives::{
-            StakeCredential,
             alonzo::{self, Certificate as AlonzoCert},
             conway::{Certificate as ConwayCert, DatumOption, ScriptRef},
+            StakeCredential,
         },
         traverse::{
             ComputeHash, MultiEraBlock, MultiEraCert, MultiEraHeader, MultiEraInput,
@@ -16,16 +16,20 @@ use pallas::{
         },
     },
 };
-use std::collections::HashMap;
+use std::{collections::HashMap, ops::Deref};
 
 use blockfrost_openapi::models::{
-    address_utxo_content_inner::AddressUtxoContentInner, block_content::BlockContent,
-    tx_content::TxContent, tx_content_cbor::TxContentCbor,
+    address_utxo_content_inner::AddressUtxoContentInner,
+    block_content::BlockContent,
+    tx_content::TxContent,
+    tx_content_cbor::TxContentCbor,
     tx_content_delegations_inner::TxContentDelegationsInner,
     tx_content_metadata_cbor_inner::TxContentMetadataCborInner,
     tx_content_metadata_inner::TxContentMetadataInner,
     tx_content_metadata_inner_json_metadata::TxContentMetadataInnerJsonMetadata,
-    tx_content_output_amount_inner::TxContentOutputAmountInner, tx_content_utxo::TxContentUtxo,
+    tx_content_mirs_inner::{Pot, TxContentMirsInner},
+    tx_content_output_amount_inner::TxContentOutputAmountInner,
+    tx_content_utxo::TxContentUtxo,
     tx_content_utxo_inputs_inner::TxContentUtxoInputsInner,
     tx_content_utxo_outputs_inner::TxContentUtxoOutputsInner,
     tx_content_withdrawals_inner::TxContentWithdrawalsInner,
@@ -784,6 +788,13 @@ impl IntoModel<Vec<TxContentWithdrawalsInner>> for TxModelBuilder<'_> {
     }
 }
 
+fn stake_cred_to_address(cred: &StakeCredential, network: Network) -> StakeAddress {
+    match cred {
+        StakeCredential::AddrKeyhash(key) => StakeAddress::new(network, StakePayload::Stake(*key)),
+        StakeCredential::ScriptHash(key) => StakeAddress::new(network, StakePayload::Script(*key)),
+    }
+}
+
 fn build_delegation_inner(
     index: usize,
     cred: &StakeCredential,
@@ -796,10 +807,7 @@ fn build_delegation_inner(
     let pool_id = bech32::encode::<bech32::Bech32>(pool_hrp, pool.as_slice())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let address = match cred {
-        StakeCredential::AddrKeyhash(key) => StakeAddress::new(network, StakePayload::Stake(*key)),
-        StakeCredential::ScriptHash(key) => StakeAddress::new(network, StakePayload::Script(*key)),
-    };
+    let address = stake_cred_to_address(cred, network);
 
     let address = address
         .to_bech32()
@@ -861,6 +869,74 @@ impl IntoModel<Vec<TxContentDelegationsInner>> for TxModelBuilder<'_> {
                 .try_collect()?;
 
         Ok(items)
+    }
+}
+
+fn build_mir_inners(
+    index: usize,
+    mir: &alonzo::MoveInstantaneousReward,
+    network: Network,
+) -> Result<Vec<TxContentMirsInner>, StatusCode> {
+    let pot = match mir.source {
+        alonzo::InstantaneousRewardSource::Reserves => Pot::Reserve,
+        alonzo::InstantaneousRewardSource::Treasury => Pot::Treasury,
+    };
+
+    let targets = match &mir.target {
+        alonzo::InstantaneousRewardTarget::StakeCredentials(creds) => creds.iter().collect(),
+        _ => vec![],
+    };
+
+    let items = targets
+        .into_iter()
+        .map(|(cred, amount)| {
+            let address = stake_cred_to_address(cred, network);
+
+            let address = address
+                .to_bech32()
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+            Ok::<_, StatusCode>(TxContentMirsInner {
+                pot,
+                cert_index: index as i32,
+                address,
+                amount: amount.to_string(),
+            })
+        })
+        .try_collect()?;
+
+    Ok(items)
+}
+
+impl IntoModel<Vec<TxContentMirsInner>> for TxModelBuilder<'_> {
+    type SortKey = ();
+
+    fn into_model(self) -> Result<Vec<TxContentMirsInner>, StatusCode> {
+        let tx = self.tx()?;
+
+        let network = self.network.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        let mirs = tx
+            .certs()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, cert)| {
+                let MultiEraCert::AlonzoCompatible(cert) = cert else {
+                    return None;
+                };
+
+                let AlonzoCert::MoveInstantaneousRewardsCert(mir) = cert.deref().deref() else {
+                    return None;
+                };
+
+                Some(build_mir_inners(index, mir, network))
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect();
+
+        Ok(mirs)
     }
 }
 
