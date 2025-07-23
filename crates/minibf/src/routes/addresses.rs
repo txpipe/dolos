@@ -40,7 +40,7 @@ fn load_utxo_models<D: Domain>(
 
     let tx_deps: Vec<_> = utxos.keys().map(|txoref| txoref.0).unique().collect();
     let block_deps: HashMap<_, _> = tx_deps
-        .chunks(100)
+        .chunks(1000)
         .collect::<Vec<_>>() // Chunk into slices of 100
         .par_iter() // Parallelize over the chunks
         .map(|chunk| {
