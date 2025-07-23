@@ -16,7 +16,7 @@ use pallas::{
         },
     },
 };
-use std::{collections::HashMap, ops::Deref};
+use std::collections::HashMap;
 
 use blockfrost_openapi::models::{
     address_utxo_content_inner::AddressUtxoContentInner,
@@ -29,6 +29,7 @@ use blockfrost_openapi::models::{
     tx_content_metadata_inner_json_metadata::TxContentMetadataInnerJsonMetadata,
     tx_content_mirs_inner::{Pot, TxContentMirsInner},
     tx_content_output_amount_inner::TxContentOutputAmountInner,
+    tx_content_pool_retires_inner::TxContentPoolRetiresInner,
     tx_content_utxo::TxContentUtxo,
     tx_content_utxo_inputs_inner::TxContentUtxoInputsInner,
     tx_content_utxo_outputs_inner::TxContentUtxoOutputsInner,
@@ -555,23 +556,41 @@ impl<'a> IntoModel<TxContentUtxo> for TxModelBuilder<'a> {
     }
 }
 
-macro_rules! count_certs {
+macro_rules! match_certs {
     ($tx:expr, "alonzo", $cert:ident) => {
         $tx.certs()
             .iter()
-            .map(|x| x.as_alonzo())
-            .flatten()
-            .filter(|x| matches!(x, AlonzoCert::$cert { .. }))
-            .count() as i32
+            .enumerate()
+            .filter_map(|(index, x)| x.as_alonzo().map(|x| (index, x)))
+            .filter(|(_, x)| matches!(x, AlonzoCert::$cert { .. }))
     };
+
     ($tx:expr, "conway", $cert:ident) => {
         $tx.certs()
             .iter()
-            .map(|x| x.as_alonzo())
-            .flatten()
-            .filter(|x| matches!(x, ConwayCert::$cert { .. }))
-            .count() as i32
+            .enumerate()
+            .filter_map(|(index, x)| x.as_conway().map(|x| (index, x)))
+            .filter(|(_, x)| matches!(x, ConwayCert::$cert { .. }))
     };
+}
+
+macro_rules! count_certs {
+    ($tx:expr, "alonzo", $cert:ident) => {{
+        let alonzo = match_certs!($tx, "alonzo", $cert).count();
+        alonzo
+    }};
+
+    ($tx:expr, "conway", $cert:ident) => {{
+        let conway = match_certs!($tx, "conway", $cert).count();
+        conway
+    }};
+
+    ($tx:expr, $cert:ident) => {{
+        let alonzo = match_certs!($tx, "alonzo", $cert).count();
+        let conway = match_certs!($tx, "conway", $cert).count();
+
+        alonzo + conway
+    }};
 }
 
 impl IntoModel<TxContent> for TxModelBuilder<'_> {
@@ -603,11 +622,11 @@ impl IntoModel<TxContent> for TxModelBuilder<'_> {
             valid_contract: tx.is_valid(),
             block_time: try_into_or_500!(block_time),
             withdrawal_count: tx.withdrawals().collect::<Vec<_>>().len() as i32,
-            mir_cert_count: count_certs!(tx, "alonzo", MoveInstantaneousRewardsCert),
-            delegation_count: count_certs!(tx, "alonzo", StakeDelegation),
-            stake_cert_count: count_certs!(tx, "alonzo", StakeRegistration),
-            pool_update_count: count_certs!(tx, "alonzo", PoolRegistration),
-            pool_retire_count: count_certs!(tx, "alonzo", PoolRetirement),
+            mir_cert_count: count_certs!(tx, "alonzo", MoveInstantaneousRewardsCert) as i32,
+            delegation_count: count_certs!(tx, StakeDelegation) as i32,
+            stake_cert_count: count_certs!(tx, StakeRegistration) as i32,
+            pool_update_count: count_certs!(tx, PoolRegistration) as i32,
+            pool_retire_count: count_certs!(tx, PoolRetirement) as i32,
             asset_mint_or_burn_count: tx.mints().iter().flat_map(|x| x.assets()).count() as i32,
             // TODO: need to understand exactly what this means in terms of the transaction
             deposit: "0".to_string(),
@@ -874,9 +893,13 @@ impl IntoModel<Vec<TxContentDelegationsInner>> for TxModelBuilder<'_> {
 
 fn build_mir_inners(
     index: usize,
-    mir: &alonzo::MoveInstantaneousReward,
+    mir: &alonzo::Certificate,
     network: Network,
 ) -> Result<Vec<TxContentMirsInner>, StatusCode> {
+    let AlonzoCert::MoveInstantaneousRewardsCert(mir) = mir else {
+        return Ok(vec![]);
+    };
+
     let pot = match mir.source {
         alonzo::InstantaneousRewardSource::Reserves => Pot::Reserve,
         alonzo::InstantaneousRewardSource::Treasury => Pot::Treasury,
@@ -916,27 +939,54 @@ impl IntoModel<Vec<TxContentMirsInner>> for TxModelBuilder<'_> {
 
         let network = self.network.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
 
-        let mirs = tx
-            .certs()
-            .iter()
-            .enumerate()
-            .filter_map(|(index, cert)| {
-                let MultiEraCert::AlonzoCompatible(cert) = cert else {
-                    return None;
-                };
-
-                let AlonzoCert::MoveInstantaneousRewardsCert(mir) = cert.deref().deref() else {
-                    return None;
-                };
-
-                Some(build_mir_inners(index, mir, network))
-            })
+        let items = match_certs!(tx, "alonzo", MoveInstantaneousRewardsCert)
+            .map(|(index, cert)| build_mir_inners(index, cert, network))
             .collect::<Result<Vec<_>, _>>()?
             .into_iter()
             .flatten()
             .collect();
 
-        Ok(mirs)
+        Ok(items)
+    }
+}
+
+impl IntoModel<Vec<TxContentPoolRetiresInner>> for TxModelBuilder<'_> {
+    type SortKey = ();
+
+    fn into_model(self) -> Result<Vec<TxContentPoolRetiresInner>, StatusCode> {
+        let tx = self.tx()?;
+
+        let alonzo = match_certs!(tx, "alonzo", PoolRetirement)
+            .filter_map(|(index, cert)| {
+                let AlonzoCert::PoolRetirement(pool, epoch) = cert else {
+                    return None;
+                };
+
+                Some(TxContentPoolRetiresInner {
+                    pool_id: pool.to_string(),
+                    cert_index: index as i32,
+                    retiring_epoch: *epoch as i32,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let conway = match_certs!(tx, "conway", PoolRetirement)
+            .filter_map(|(index, cert)| {
+                let ConwayCert::PoolRetirement(pool, epoch) = cert else {
+                    return None;
+                };
+
+                Some(TxContentPoolRetiresInner {
+                    pool_id: pool.to_string(),
+                    cert_index: index as i32,
+                    retiring_epoch: *epoch as i32,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let items = alonzo.into_iter().chain(conway).collect();
+
+        Ok(items)
     }
 }
 
