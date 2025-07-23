@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 pallas.workspace = true
+tokio.workspace = true
 dolos-core = { path = "../core" }
 rand = "0.9.1"
 

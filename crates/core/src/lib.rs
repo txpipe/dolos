@@ -735,6 +735,7 @@ pub trait Domain: Send + Sync + Clone + 'static {
     fn genesis(&self) -> &Genesis;
 
     fn wal(&self) -> &Self::Wal;
+    fn wal_mut(&mut self) -> &mut Self::Wal;
     fn state(&self) -> &Self::State;
     fn archive(&self) -> &Self::Archive;
     fn mempool(&self) -> &Self::Mempool;
