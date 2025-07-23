@@ -32,7 +32,7 @@ pub fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
         .context("finding intersect")?;
 
     match seq {
-        Some((seq, _)) => println!("{}", seq),
+        Some((seq, _)) => println!("{seq}"),
         None => println!("can't find block"),
     };
 

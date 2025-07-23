@@ -1,11 +1,28 @@
 [package]
 name = "dolos-testing"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 
 [dependencies]
 pallas.workspace = true
-
 dolos-core = { path = "../core" }
-
 rand = "0.9.1"
+
+# optional dependencies for toy domain
+dolos-redb = { path = "../redb", optional = true }
+dolos-cardano = { path = "../cardano", optional = true }
+tokio-stream = { workspace = true, optional = true }
+futures-core = { workspace = true, optional = true }
+futures-util = { workspace = true, optional = true }
+
+
+[features]
+default = []
+toy-domain = [
+    "dolos-core/phase2",
+    "dolos-redb",
+    "dolos-cardano/include-genesis",
+    "tokio-stream",
+    "futures-core",
+    "futures-util",
+]

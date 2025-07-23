@@ -1,15 +1,18 @@
 use futures_core::Stream;
 use futures_util::stream::once;
 use futures_util::StreamExt;
-use itertools::{Either, Itertools};
+use itertools::Itertools;
 use pallas::interop::utxorpc as interop;
 use pallas::interop::utxorpc::spec::sync::BlockRef;
+use pallas::interop::utxorpc::LedgerContext;
 use pallas::interop::utxorpc::{spec as u5c, Mapper};
 use std::pin::Pin;
 use tonic::{Request, Response, Status};
 
 use super::stream::WalStream;
 use crate::prelude::*;
+
+const MAX_DUMP_HISTORY_ITEMS: u32 = 100;
 
 fn u5c_to_chain_point(block_ref: u5c::sync::BlockRef) -> Result<ChainPoint, Status> {
     Ok(ChainPoint::Specific(
@@ -23,8 +26,8 @@ fn u5c_to_chain_point(block_ref: u5c::sync::BlockRef) -> Result<ChainPoint, Stat
 //     AnyChainBlock { chain: Some(block) }
 // }
 
-fn raw_to_anychain<D: Domain>(
-    mapper: &Mapper<D::State>,
+fn raw_to_anychain<C: LedgerContext>(
+    mapper: &Mapper<C>,
     body: &BlockBody,
 ) -> u5c::sync::AnyChainBlock {
     let block = mapper.map_block_cbor(body);
@@ -35,13 +38,16 @@ fn raw_to_anychain<D: Domain>(
     }
 }
 
-fn raw_to_blockref(raw: &RawBlock) -> u5c::sync::BlockRef {
-    let RawBlock { slot, hash, .. } = raw;
+fn raw_to_blockref<C: LedgerContext>(
+    mapper: &Mapper<C>,
+    body: &BlockBody,
+) -> Option<u5c::sync::BlockRef> {
+    let u5c::cardano::Block { header, .. } = mapper.map_block_cbor(body);
 
-    u5c::sync::BlockRef {
-        index: *slot,
-        hash: hash.to_vec().into(),
-    }
+    header.map(|h| u5c::sync::BlockRef {
+        index: h.slot,
+        hash: h.hash,
+    })
 }
 
 fn point_to_blockref(point: &ChainPoint) -> u5c::sync::BlockRef {
@@ -57,18 +63,18 @@ fn point_to_blockref(point: &ChainPoint) -> u5c::sync::BlockRef {
     }
 }
 
-fn wal_log_to_tip_response<D: Domain>(
-    mapper: &Mapper<D::State>,
+fn wal_log_to_tip_response<C: LedgerContext>(
+    mapper: &Mapper<C>,
     log: &LogValue,
 ) -> u5c::sync::FollowTipResponse {
     u5c::sync::FollowTipResponse {
         action: match log {
             LogValue::Apply(x) => {
-                u5c::sync::follow_tip_response::Action::Apply(raw_to_anychain::<D>(mapper, &x.body))
+                u5c::sync::follow_tip_response::Action::Apply(raw_to_anychain(mapper, &x.body))
                     .into()
             }
             LogValue::Undo(x) => {
-                u5c::sync::follow_tip_response::Action::Undo(raw_to_anychain::<D>(mapper, &x.body))
+                u5c::sync::follow_tip_response::Action::Undo(raw_to_anychain(mapper, &x.body))
                     .into()
             }
             // TODO: shouldn't we have a u5c event for origin?
@@ -98,13 +104,13 @@ fn point_to_reset_tip_response(point: ChainPoint) -> u5c::sync::FollowTipRespons
 
 pub struct SyncServiceImpl<D: Domain, C: CancelToken> {
     domain: D,
-    mapper: interop::Mapper<D::State>,
+    mapper: interop::Mapper<super::ContextAdapter<D::State>>,
     cancel: C,
 }
 
 impl<D: Domain, C: CancelToken> SyncServiceImpl<D, C> {
     pub fn new(domain: D, cancel: C) -> Self {
-        let mapper = Mapper::new(domain.state().clone());
+        let mapper = Mapper::new(super::ContextAdapter(domain.state().clone()));
 
         Self {
             domain,
@@ -115,8 +121,10 @@ impl<D: Domain, C: CancelToken> SyncServiceImpl<D, C> {
 }
 
 #[async_trait::async_trait]
-impl<D: Domain, C: CancelToken> u5c::sync::sync_service_server::SyncService
-    for SyncServiceImpl<D, C>
+impl<D, C> u5c::sync::sync_service_server::SyncService for SyncServiceImpl<D, C>
+where
+    D: Domain,
+    C: CancelToken,
 {
     type FollowTipStream =
         Pin<Box<dyn Stream<Item = Result<u5c::sync::FollowTipResponse, Status>> + Send + 'static>>;
@@ -135,8 +143,8 @@ impl<D: Domain, C: CancelToken> u5c::sync::sync_service_server::SyncService
                     .archive()
                     .get_block_by_slot(&br.index)
                     .map_err(|_| Status::internal("Failed to query chain service."))?
-                    .map(|body| raw_to_anychain::<D>(&self.mapper, &body))
-                    .ok_or(Status::not_found(format!("Failed to find block: {:?}", br)))
+                    .map(|body| raw_to_anychain(&self.mapper, &body))
+                    .ok_or(Status::not_found(format!("Failed to find block: {br:?}")))
             })
             .collect::<Result<Vec<u5c::sync::AnyChainBlock>, Status>>()?;
 
@@ -151,28 +159,35 @@ impl<D: Domain, C: CancelToken> u5c::sync::sync_service_server::SyncService
     ) -> Result<Response<u5c::sync::DumpHistoryResponse>, Status> {
         let msg = request.into_inner();
 
-        let from = msg.start_token.map(u5c_to_chain_point).transpose()?;
+        let from = msg.start_token.map(|x| x.index);
 
-        let len = msg.max_items as usize + 1;
+        if msg.max_items > MAX_DUMP_HISTORY_ITEMS {
+            return Err(Status::invalid_argument(format!(
+                "max_items must be less than or equal to {MAX_DUMP_HISTORY_ITEMS}"
+            )));
+        }
 
-        let page = self
+        let len = msg.max_items as usize;
+
+        let mut range = self
             .domain
-            .wal()
-            .read_block_page(from.as_ref(), len)
-            .map_err(|_err| Status::internal("can't query block"))?;
+            .archive()
+            .get_range(from, None)
+            .map_err(|_| Status::internal("cant query archive"))?;
 
-        let (items, next_token): (_, Vec<_>) =
-            page.into_iter().enumerate().partition_map(|(idx, x)| {
-                if idx < len - 1 {
-                    Either::Left(raw_to_anychain::<D>(&self.mapper, &x.body))
-                } else {
-                    Either::Right(raw_to_blockref(&x))
-                }
-            });
+        let items = range
+            .by_ref()
+            .take(len)
+            .map(|(_, body)| raw_to_anychain(&self.mapper, &body))
+            .collect();
+
+        let next_token = range
+            .next()
+            .and_then(|(_, body)| raw_to_blockref(&self.mapper, &body));
 
         let response = u5c::sync::DumpHistoryResponse {
             block: items,
-            next_token: next_token.into_iter().next(),
+            next_token,
         };
 
         Ok(Response::new(response))
@@ -217,7 +232,7 @@ impl<D: Domain, C: CancelToken> u5c::sync::sync_service_server::SyncService
 
         let forward = WalStream::start(self.domain.wal().clone(), from_seq, self.cancel.clone())
             .skip(1)
-            .map(move |(_, log)| Ok(wal_log_to_tip_response::<D>(&mapper, &log)));
+            .map(move |(_, log)| Ok(wal_log_to_tip_response(&mapper, &log)));
 
         let stream = reset.chain(forward);
 
@@ -232,7 +247,7 @@ impl<D: Domain, C: CancelToken> u5c::sync::sync_service_server::SyncService
             .domain
             .wal()
             .find_tip()
-            .map_err(|e| Status::internal(format!("Unable to read WAL: {:?}", e)))?
+            .map_err(|e| Status::internal(format!("Unable to read WAL: {e:?}")))?
             .ok_or(Status::internal("chain has no data."))?;
 
         let response = u5c::sync::ReadTipResponse {
@@ -240,5 +255,81 @@ impl<D: Domain, C: CancelToken> u5c::sync::sync_service_server::SyncService
         };
 
         Ok(Response::new(response))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dolos_testing::toy_domain::ToyDomain;
+    use pallas::interop::utxorpc::spec::sync::sync_service_server::SyncService as _;
+
+    #[tokio::test]
+    async fn test_dump_history_pagination() {
+        let domain = ToyDomain::new(None);
+        let cancel = CancelTokenImpl::default();
+
+        for i in 0..34 {
+            let block = dolos_testing::blocks::make_conway_block(i);
+            domain.apply_blocks(&[block]).unwrap();
+        }
+
+        let service = SyncServiceImpl::new(domain, cancel);
+
+        let mut start_token = None;
+
+        for _ in 0..3 {
+            let request = u5c::sync::DumpHistoryRequest {
+                start_token,
+                max_items: 10,
+                field_mask: None,
+            };
+
+            let response = service
+                .dump_history(Request::new(request))
+                .await
+                .unwrap()
+                .into_inner();
+
+            assert_eq!(response.block.len(), 10);
+
+            start_token = response.next_token;
+        }
+
+        let request = u5c::sync::DumpHistoryRequest {
+            start_token,
+            max_items: 10,
+            field_mask: None,
+        };
+
+        let response = service
+            .dump_history(Request::new(request))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(response.block.len(), 4);
+        assert_eq!(response.next_token, None);
+    }
+
+    #[tokio::test]
+    async fn test_dump_history_max_items() {
+        let domain = ToyDomain::new(None);
+        let cancel = CancelTokenImpl::default();
+
+        let service = SyncServiceImpl::new(domain, cancel);
+
+        let request = u5c::sync::DumpHistoryRequest {
+            start_token: None,
+            max_items: MAX_DUMP_HISTORY_ITEMS + 1,
+            field_mask: None,
+        };
+
+        let response = service
+            .dump_history(Request::new(request))
+            .await
+            .unwrap_err();
+
+        assert_eq!(response.code(), tonic::Code::InvalidArgument);
     }
 }

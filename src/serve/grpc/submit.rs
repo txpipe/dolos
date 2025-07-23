@@ -2,10 +2,10 @@ use any_chain_eval::Chain;
 use futures_core::Stream;
 use futures_util::{StreamExt as _, TryStreamExt as _};
 use pallas::crypto::hash::Hash;
-use pallas::interop::utxorpc as interop;
 use pallas::interop::utxorpc as u5c;
 use pallas::interop::utxorpc::spec::cardano::ExUnits;
 use pallas::interop::utxorpc::spec::submit::{WaitForTxResponse, *};
+use pallas::interop::utxorpc::{self as interop, LedgerContext};
 use std::collections::HashSet;
 use std::pin::Pin;
 use tonic::{Request, Response, Status};
@@ -14,12 +14,18 @@ use tracing::info;
 use crate::mempool::UpdateFilter;
 use crate::prelude::*;
 
-pub struct SubmitServiceImpl<D: Domain> {
+pub struct SubmitServiceImpl<D: Domain>
+where
+    D::State: LedgerContext,
+{
     mempool: D::Mempool,
     _mapper: interop::Mapper<D::State>,
 }
 
-impl<D: Domain> SubmitServiceImpl<D> {
+impl<D: Domain> SubmitServiceImpl<D>
+where
+    D::State: LedgerContext,
+{
     pub fn new(domain: D) -> Self {
         let mempool = domain.mempool().clone();
         let _mapper = interop::Mapper::new(domain.state().clone());
@@ -57,6 +63,7 @@ fn event_to_wait_for_tx_response(event: MempoolEvent) -> WaitForTxResponse {
     }
 }
 
+#[cfg(feature = "phase2")]
 fn tx_eval_to_u5c(
     eval: Result<pallas::ledger::validate::phase2::EvalReport, MempoolError>,
 ) -> u5c::spec::cardano::TxEval {
@@ -88,7 +95,7 @@ fn tx_eval_to_u5c(
         },
         Err(e) => u5c::spec::cardano::TxEval {
             errors: vec![u5c::spec::cardano::EvalError {
-                msg: format!("{:#?}", e),
+                msg: format!("{e:#?}"),
             }],
             ..Default::default()
         },
@@ -96,7 +103,10 @@ fn tx_eval_to_u5c(
 }
 
 #[async_trait::async_trait]
-impl<D: Domain> submit_service_server::SubmitService for SubmitServiceImpl<D> {
+impl<D: Domain> submit_service_server::SubmitService for SubmitServiceImpl<D>
+where
+    D::State: LedgerContext,
+{
     type WaitForTxStream =
         Pin<Box<dyn Stream<Item = Result<WaitForTxResponse, tonic::Status>> + Send + 'static>>;
 

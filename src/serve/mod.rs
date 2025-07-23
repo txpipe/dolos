@@ -25,13 +25,19 @@ pub use o7s_win as o7s;
 pub use dolos_minibf as minibf;
 
 #[cfg(feature = "trp")]
-pub mod trp;
+pub use dolos_trp as trp;
 
 #[derive(Deserialize, Serialize, Clone, Default)]
 pub struct Config {
-    pub grpc: Option<grpc::Config>,
     pub ouroboros: Option<o7s::Config>,
+
+    #[cfg(feature = "grpc")]
+    pub grpc: Option<grpc::Config>,
+
+    #[cfg(feature = "minibf")]
     pub minibf: Option<minibf::Config>,
+
+    #[cfg(feature = "trp")]
     pub trp: Option<trp::Config>,
 }
 

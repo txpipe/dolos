@@ -72,7 +72,7 @@ impl From<Box<dyn std::error::Error>> for Error {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct CancelTokenImpl(pub tokio_util::sync::CancellationToken);
 
 impl CancelToken for CancelTokenImpl {

@@ -27,13 +27,16 @@ pub type BlockSlot = u64;
 
 /// The height of a block (a.k.a. block number)
 pub type BlockHeight = u64;
-pub type BlockBody = Vec<u8>;
+
+pub type Cbor = Vec<u8>;
+
+pub type BlockBody = Cbor;
 pub type BlockEra = pallas::ledger::traverse::Era;
 pub type BlockHash = Hash<32>;
-pub type BlockHeader = Vec<u8>;
+pub type BlockHeader = Cbor;
 pub type TxHash = Hash<32>;
 pub type OutputIdx = u64;
-pub type UtxoBody = (u16, Vec<u8>);
+pub type UtxoBody = (u16, Cbor);
 pub type ChainTip = pallas::network::miniprotocols::chainsync::Tip;
 pub type LogSeq = u64;
 
@@ -41,15 +44,15 @@ pub use mempool::*;
 pub use wal::*;
 
 #[derive(Debug, Eq, PartialEq, Clone)]
-pub struct EraCbor(pub Era, pub Vec<u8>);
+pub struct EraCbor(pub Era, pub Cbor);
 
-impl From<(Era, Vec<u8>)> for EraCbor {
-    fn from(value: (Era, Vec<u8>)) -> Self {
+impl From<(Era, Cbor)> for EraCbor {
+    fn from(value: (Era, Cbor)) -> Self {
         Self(value.0, value.1)
     }
 }
 
-impl From<EraCbor> for (Era, Vec<u8>) {
+impl From<EraCbor> for (Era, Cbor) {
     fn from(value: EraCbor) -> Self {
         (value.0, value.1)
     }
@@ -500,9 +503,7 @@ pub enum StateError {
     DecodingError(#[from] pallas::codec::minicbor::decode::Error),
 }
 
-pub trait StateStore:
-    Sized + pallas::interop::utxorpc::LedgerContext + Clone + Send + Sync + 'static
-{
+pub trait StateStore: Sized + Clone + Send + Sync + 'static {
     fn start(&self) -> Result<Option<ChainPoint>, StateError>;
 
     fn cursor(&self) -> Result<Option<ChainPoint>, StateError>;
@@ -558,6 +559,7 @@ pub enum ArchiveError {
 
 pub trait ArchiveStore {
     type BlockIter<'a>: Iterator<Item = (BlockSlot, BlockBody)> + DoubleEndedIterator + 'a;
+    type SparseBlockIter: Iterator<Item = Result<(BlockSlot, Option<BlockBody>), ArchiveError>>;
 
     fn get_block_by_hash(&self, block_hash: &[u8]) -> Result<Option<BlockBody>, ArchiveError>;
 
@@ -573,6 +575,11 @@ pub trait ArchiveStore {
     fn get_tx(&self, tx_hash: &[u8]) -> Result<Option<EraCbor>, ArchiveError>;
 
     fn get_slot_for_tx(&self, tx_hash: &[u8]) -> Result<Option<BlockSlot>, ArchiveError>;
+
+    fn iter_blocks_with_address(
+        &self,
+        address: &[u8],
+    ) -> Result<Self::SparseBlockIter, ArchiveError>;
 
     fn get_range<'a>(
         &self,
@@ -604,6 +611,10 @@ pub enum MempoolError {
     #[cfg(feature = "phase2")]
     #[error("tx evaluation failed during phase-2: {0}")]
     Phase2Error(#[from] pallas::ledger::validate::phase2::error::Error),
+
+    #[cfg(feature = "phase2")]
+    #[error("phase-2 script yielded an error")]
+    Phase2ExplicitError,
 
     #[error("state error: {0}")]
     StateError(#[from] StateError),
