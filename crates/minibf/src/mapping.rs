@@ -1,4 +1,23 @@
 use axum::{http::StatusCode, Json};
+use blockfrost_openapi::models::{
+    address_utxo_content_inner::AddressUtxoContentInner,
+    block_content::BlockContent,
+    tx_content::TxContent,
+    tx_content_cbor::TxContentCbor,
+    tx_content_delegations_inner::TxContentDelegationsInner,
+    tx_content_metadata_cbor_inner::TxContentMetadataCborInner,
+    tx_content_metadata_inner::TxContentMetadataInner,
+    tx_content_metadata_inner_json_metadata::TxContentMetadataInnerJsonMetadata,
+    tx_content_mirs_inner::{Pot, TxContentMirsInner},
+    tx_content_output_amount_inner::TxContentOutputAmountInner,
+    tx_content_pool_retires_inner::TxContentPoolRetiresInner,
+    tx_content_utxo::TxContentUtxo,
+    tx_content_utxo_inputs_inner::TxContentUtxoInputsInner,
+    tx_content_utxo_outputs_inner::TxContentUtxoOutputsInner,
+    tx_content_withdrawals_inner::TxContentWithdrawalsInner,
+};
+use dolos_cardano::pparams::ChainSummary;
+use dolos_core::{BlockSlot, EraCbor, TxHash, TxOrder, TxoIdx};
 use itertools::Itertools;
 use pallas::{
     codec::minicbor,
@@ -17,27 +36,6 @@ use pallas::{
     },
 };
 use std::collections::HashMap;
-
-use blockfrost_openapi::models::{
-    address_utxo_content_inner::AddressUtxoContentInner,
-    block_content::BlockContent,
-    tx_content::TxContent,
-    tx_content_cbor::TxContentCbor,
-    tx_content_delegations_inner::TxContentDelegationsInner,
-    tx_content_metadata_cbor_inner::TxContentMetadataCborInner,
-    tx_content_metadata_inner::TxContentMetadataInner,
-    tx_content_metadata_inner_json_metadata::TxContentMetadataInnerJsonMetadata,
-    tx_content_mirs_inner::{Pot, TxContentMirsInner},
-    tx_content_output_amount_inner::TxContentOutputAmountInner,
-    tx_content_pool_retires_inner::TxContentPoolRetiresInner,
-    tx_content_utxo::TxContentUtxo,
-    tx_content_utxo_inputs_inner::TxContentUtxoInputsInner,
-    tx_content_utxo_outputs_inner::TxContentUtxoOutputsInner,
-    tx_content_withdrawals_inner::TxContentWithdrawalsInner,
-};
-
-use dolos_cardano::pparams::ChainSummary;
-use dolos_core::{EraCbor, TxHash, TxOrder, TxoIdx};
 
 macro_rules! try_into_or_500 {
     ($expr:expr) => {
@@ -211,12 +209,36 @@ impl<'a> IntoModel<String> for ScriptRef<'a> {
     }
 }
 
+#[derive(Clone)]
+pub struct UtxoBlockData {
+    pub block_slot: BlockSlot,
+    pub block_hash: Hash<32>,
+    pub tx_hash: Hash<32>,
+    pub tx_order: TxOrder,
+}
+
+impl TryFrom<(MultiEraBlock<'_>, TxOrder)> for UtxoBlockData {
+    type Error = StatusCode;
+    fn try_from(value: (MultiEraBlock<'_>, TxOrder)) -> Result<Self, Self::Error> {
+        Ok(Self {
+            block_slot: value.0.slot(),
+            block_hash: value.0.hash(),
+            tx_hash: value
+                .0
+                .txs()
+                .get(value.1)
+                .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?
+                .hash(),
+            tx_order: value.1,
+        })
+    }
+}
+
 pub struct UtxoOutputModelBuilder<'a> {
     txo_idx: TxoIdx,
     output: MultiEraOutput<'a>,
     is_collateral: bool,
-    block: Option<MultiEraBlock<'a>>,
-    tx_order: Option<TxOrder>,
+    block_data: Option<UtxoBlockData>,
 }
 
 impl<'a> UtxoOutputModelBuilder<'a> {
@@ -225,8 +247,7 @@ impl<'a> UtxoOutputModelBuilder<'a> {
             txo_idx,
             output,
             is_collateral: false,
-            block: None,
-            tx_order: None,
+            block_data: None,
         }
     }
 
@@ -239,24 +260,15 @@ impl<'a> UtxoOutputModelBuilder<'a> {
             txo_idx: (output_count + collateral_idx as usize) as u32,
             output,
             is_collateral: true,
-            block: None,
-            tx_order: None,
+            block_data: None,
         }
     }
 
-    pub fn with_block_data(self, block: MultiEraBlock<'a>, tx_order: TxOrder) -> Self {
+    pub fn with_block_data(self, block_data: UtxoBlockData) -> Self {
         Self {
-            block: Some(block),
-            tx_order: Some(tx_order),
+            block_data: Some(block_data),
             ..self
         }
-    }
-
-    pub fn find_tx(&self) -> Option<MultiEraTx<'_>> {
-        let txs = self.block.as_ref()?.txs();
-        let order = self.tx_order?;
-
-        txs.get(order).cloned()
     }
 }
 
@@ -299,23 +311,24 @@ impl<'a> IntoModel<AddressUtxoContentInner> for UtxoOutputModelBuilder<'a> {
     type SortKey = (u64, usize, u32);
 
     fn sort_key(&self) -> Option<Self::SortKey> {
-        match (self.block.as_ref(), self.tx_order.as_ref()) {
-            (Some(block), Some(txorder)) => Some((block.slot(), *txorder, self.txo_idx)),
-            _ => None,
-        }
+        self.block_data
+            .as_ref()
+            .map(|data| (data.block_slot, data.tx_order, self.txo_idx))
     }
 
     fn into_model(self) -> Result<AddressUtxoContentInner, StatusCode> {
         let out = AddressUtxoContentInner {
             address: self.output.address().into_model()?,
             tx_hash: self
-                .find_tx()
-                .map(|tx| tx.hash().to_string())
-                .unwrap_or_default(),
-            block: self
-                .block
+                .block_data
                 .as_ref()
-                .map(|b| b.hash().to_string())
+                .map(|x| x.tx_hash.to_string())
+                .unwrap_or_default(),
+
+            block: self
+                .block_data
+                .as_ref()
+                .map(|x| x.block_hash.to_string())
                 .unwrap_or_default(),
             output_index: try_into_or_500!(self.txo_idx),
             amount: self.output.value().into_model()?,
