@@ -40,30 +40,40 @@ fn load_utxo_models<D: Domain>(
 
     let tx_deps: Vec<_> = utxos.keys().map(|txoref| txoref.0).unique().collect();
     let block_deps: HashMap<_, _> = tx_deps
-        .par_iter()
-        .flat_map(
-            |tx| match domain.archive().get_block_with_tx(tx.as_slice()) {
-                Ok(Some((cbor, txorder))) => {
-                    let Ok(block) = MultiEraBlock::decode(&cbor) else {
-                        return Some(Err(StatusCode::INTERNAL_SERVER_ERROR));
-                    };
-                    let block_data = match UtxoBlockData::try_from((block, txorder)) {
-                        Ok(data) => data,
-                        Err(err) => return Some(Err(err)),
-                    };
-                    Some(Ok((tx, block_data)))
-                }
-                Ok(None) => None,
-                Err(_) => Some(Err(StatusCode::INTERNAL_SERVER_ERROR)),
-            },
-        )
-        .collect::<Result<_, _>>()?;
+        .chunks(100)
+        .collect::<Vec<_>>() // Chunk into slices of 100
+        .par_iter() // Parallelize over the chunks
+        .map(|chunk| {
+            chunk
+                .iter()
+                .flat_map(|tx| {
+                    match domain.archive().get_block_with_tx(tx.as_slice()) {
+                        Ok(Some((cbor, txorder))) => {
+                            let Ok(block) = MultiEraBlock::decode(&cbor) else {
+                                return Some(Err(StatusCode::INTERNAL_SERVER_ERROR));
+                            };
+                            let block_data = match UtxoBlockData::try_from((block, txorder)) {
+                                Ok(data) => data,
+                                Err(err) => return Some(Err(err)),
+                            };
+                            Some(Ok((*tx, block_data))) // Clone tx to move into the new scope if needed by HashMap
+                        }
+                        Ok(None) => None,
+                        Err(_) => Some(Err(StatusCode::INTERNAL_SERVER_ERROR)),
+                    }
+                })
+                .collect::<Result<Vec<(_, UtxoBlockData)>, _>>()
+        })
+        .collect::<Result<Vec<Vec<_>>, _>>()?
+        .into_iter()
+        .flatten()
+        .collect();
 
     let mut models: Vec<_> = utxos
         .into_iter()
         .map(|(TxoRef(tx_hash, txo_idx), txo)| {
             let builder = UtxoOutputModelBuilder::from_output(*txo_idx, txo);
-            let block_data = block_deps.get(&tx_hash).cloned();
+            let block_data = block_deps.get(tx_hash).cloned();
 
             if let Some(data) = block_data {
                 builder.with_block_data(data)
