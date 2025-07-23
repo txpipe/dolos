@@ -2,6 +2,40 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.27.1] - 2025-07-16
+
+### 🐛 Bug Fixes
+
+- Handle phase-2 eval errors (#598)
+
+### ⚙️ Miscellaneous Tasks
+
+- Fix cargo release config
+- Unify cargo metadata across all crates
+
+## [0.27.0] - 2025-07-14
+
+### 🚀 Features
+
+- *(minibf)* Implement `address/{address}/transactions` endpoint (#593)
+
+### 🐛 Bug Fixes
+
+- *(u5c)* Use chain storage for DumpHistory requests (#568)
+- *(cardano)* Use uplc fork that support lists (#596)
+
+### 🧪 Testing
+
+- *(cardano)* Add pparams timeline data
+
+### ⚙️ Miscellaneous Tasks
+
+- Skip required code when no default features available (#595)
+
+### Release
+
+- V{{version}}
+
 ## [0.26.1] - 2025-07-11
 
 ### 🚀 Features
@@ -15,6 +49,10 @@ All notable changes to this project will be documented in this file.
 ### 🚜 Refactor
 
 - *(trp)* Parse json args using tx3 sdk (#588)
+
+### Release
+
+- V0.26.1
 
 ## [0.26.0] - 2025-07-07
 

@@ -34,6 +34,9 @@ pub async fn route<D: Domain>(
         #[cfg(feature = "phase2")]
         MempoolError::Phase2Error(_) => StatusCode::BAD_REQUEST,
 
+        #[cfg(feature = "phase2")]
+        MempoolError::Phase2ExplicitError => StatusCode::BAD_REQUEST,
+
         MempoolError::InvalidTx(_) => StatusCode::BAD_REQUEST,
         MempoolError::TraverseError(_) => StatusCode::BAD_REQUEST,
         MempoolError::StateError(_) => StatusCode::INTERNAL_SERVER_ERROR,
