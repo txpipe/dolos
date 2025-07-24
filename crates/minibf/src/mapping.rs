@@ -16,7 +16,7 @@ use pallas::{
         },
     },
 };
-use std::collections::HashMap;
+use std::{collections::HashMap, ops::Deref};
 
 use blockfrost_openapi::models::{
     address_utxo_content_inner::AddressUtxoContentInner,
@@ -33,6 +33,7 @@ use blockfrost_openapi::models::{
     tx_content_pool_certs_inner_metadata::TxContentPoolCertsInnerMetadata,
     tx_content_pool_certs_inner_relays_inner::TxContentPoolCertsInnerRelaysInner,
     tx_content_pool_retires_inner::TxContentPoolRetiresInner,
+    tx_content_stake_addr_inner::TxContentStakeAddrInner,
     tx_content_utxo::TxContentUtxo,
     tx_content_utxo_inputs_inner::TxContentUtxoInputsInner,
     tx_content_utxo_outputs_inner::TxContentUtxoOutputsInner,
@@ -1190,6 +1191,89 @@ impl IntoModel<Vec<TxContentPoolCertsInner>> for TxModelBuilder<'_> {
             .filter_map(|(cert_index, cert)| {
                 PoolUpdateModelBuilder::new(cert, cert_index, network, epoch as i32)
             })
+            .map(|builder| builder.into_model())
+            .try_collect()?;
+
+        Ok(items)
+    }
+}
+
+struct StakeCertModelBuilder {
+    stake_credential: StakeCredential,
+    is_registration: bool,
+    cert_index: usize,
+    network: Network,
+}
+
+impl StakeCertModelBuilder {
+    fn new(cert: MultiEraCert, cert_index: usize, network: Network) -> Option<Self> {
+        match cert {
+            MultiEraCert::AlonzoCompatible(cow) => match cow.deref().deref() {
+                AlonzoCert::StakeRegistration(stake_credential) => Some(Self {
+                    stake_credential: stake_credential.clone(),
+                    is_registration: true,
+                    cert_index,
+                    network,
+                }),
+                AlonzoCert::StakeDeregistration(stake_credential) => Some(Self {
+                    stake_credential: stake_credential.clone(),
+                    is_registration: false,
+                    cert_index,
+                    network,
+                }),
+                _ => None,
+            },
+            MultiEraCert::Conway(cow) => match cow.deref().deref() {
+                ConwayCert::StakeRegistration(stake_credential) => Some(Self {
+                    stake_credential: stake_credential.clone(),
+                    is_registration: true,
+                    cert_index,
+                    network,
+                }),
+                ConwayCert::StakeDeregistration(stake_credential) => Some(Self {
+                    stake_credential: stake_credential.clone(),
+                    is_registration: false,
+                    cert_index,
+                    network,
+                }),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+}
+
+impl IntoModel<TxContentStakeAddrInner> for StakeCertModelBuilder {
+    type SortKey = ();
+
+    fn into_model(self) -> Result<TxContentStakeAddrInner, StatusCode> {
+        let address = stake_cred_to_address(&self.stake_credential, self.network)
+            .to_bech32()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        let out = TxContentStakeAddrInner {
+            address,
+            registration: self.is_registration,
+            cert_index: self.cert_index as i32,
+        };
+
+        Ok(out)
+    }
+}
+
+impl IntoModel<Vec<TxContentStakeAddrInner>> for TxModelBuilder<'_> {
+    type SortKey = ();
+
+    fn into_model(self) -> Result<Vec<TxContentStakeAddrInner>, StatusCode> {
+        let tx = self.tx()?;
+
+        let network = self.network.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        let items = tx
+            .certs()
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, cert)| StakeCertModelBuilder::new(cert, index, network))
             .map(|builder| builder.into_model())
             .try_collect()?;
 
