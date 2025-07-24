@@ -195,6 +195,10 @@ impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
             )
             .route("/txs/{tx_hash}/mirs", get(routes::txs::by_hash_mirs::<D>))
             .route(
+                "/txs/{tx_hash}/pool_updates",
+                get(routes::txs::by_hash_pool_updates::<D>),
+            )
+            .route(
                 "/txs/{tx_hash}/pool_retires",
                 get(routes::txs::by_hash_pool_retires::<D>),
             )

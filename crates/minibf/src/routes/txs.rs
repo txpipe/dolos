@@ -8,6 +8,7 @@ use blockfrost_openapi::models::{
     tx_content_delegations_inner::TxContentDelegationsInner,
     tx_content_metadata_cbor_inner::TxContentMetadataCborInner,
     tx_content_metadata_inner::TxContentMetadataInner, tx_content_mirs_inner::TxContentMirsInner,
+    tx_content_pool_certs_inner::TxContentPoolCertsInner,
     tx_content_pool_retires_inner::TxContentPoolRetiresInner, tx_content_utxo::TxContentUtxo,
     tx_content_withdrawals_inner::TxContentWithdrawalsInner,
 };
@@ -176,6 +177,23 @@ pub async fn by_hash_pool_retires<D: Domain>(
     Path(tx_hash): Path<String>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<TxContentPoolRetiresInner>>, StatusCode> {
+    let hash = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    let (raw, order) = domain
+        .archive()
+        .get_block_with_tx(hash.as_slice())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let tx = TxModelBuilder::new(&raw, order)?;
+
+    tx.into_response()
+}
+
+pub async fn by_hash_pool_updates<D: Domain>(
+    Path(tx_hash): Path<String>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Vec<TxContentPoolCertsInner>>, StatusCode> {
     let hash = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
 
     let (raw, order) = domain
