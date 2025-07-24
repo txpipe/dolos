@@ -63,6 +63,7 @@ fn event_to_wait_for_tx_response(event: MempoolEvent) -> WaitForTxResponse {
     }
 }
 
+#[cfg(feature = "phase2")]
 fn tx_eval_to_u5c(
     eval: Result<pallas::ledger::validate::phase2::EvalReport, MempoolError>,
 ) -> u5c::spec::cardano::TxEval {

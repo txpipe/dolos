@@ -2,11 +2,32 @@ use ::redb::{MultimapTableDefinition, ReadTransaction, WriteTransaction};
 use itertools::Itertools;
 use pallas::ledger::addresses::Address;
 use pallas::ledger::traverse::{ComputeHash, MultiEraBlock, MultiEraOutput};
+use redb::MultimapValue;
 use std::hash::{DefaultHasher, Hash as _, Hasher};
 
 use dolos_core::{ArchiveError, BlockSlot, LedgerDelta};
 
 type Error = super::RedbArchiveError;
+
+pub struct SlotKeyIterator {
+    range: MultimapValue<'static, u64>,
+}
+
+impl SlotKeyIterator {
+    pub fn new(range: MultimapValue<'static, u64>) -> Self {
+        Self { range }
+    }
+}
+
+impl Iterator for SlotKeyIterator {
+    type Item = Result<u64, Error>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let next = self.range.next()?;
+        let res = next.map(|x| x.value()).map_err(Error::from);
+        Some(res)
+    }
+}
 
 pub struct AddressApproxIndexTable;
 
@@ -20,14 +41,11 @@ impl AddressApproxIndexTable {
         hasher.finish()
     }
 
-    pub fn get_by_address(rx: &ReadTransaction, address: &[u8]) -> Result<Vec<BlockSlot>, Error> {
+    pub fn iter_by_address(rx: &ReadTransaction, address: &[u8]) -> Result<SlotKeyIterator, Error> {
         let table = rx.open_multimap_table(Self::DEF)?;
         let key = Self::compute_key(&address.to_vec());
-        let mut out = vec![];
-        for slot in table.get(key)? {
-            out.push(slot?.value());
-        }
-        Ok(out)
+        let range = table.get(key)?;
+        Ok(SlotKeyIterator::new(range))
     }
 }
 
@@ -273,8 +291,8 @@ impl Indexes {
         Ok(())
     }
 
-    pub fn get_by_address(rx: &ReadTransaction, address: &[u8]) -> Result<Vec<BlockSlot>, Error> {
-        AddressApproxIndexTable::get_by_address(rx, address)
+    pub fn iter_by_address(rx: &ReadTransaction, address: &[u8]) -> Result<SlotKeyIterator, Error> {
+        AddressApproxIndexTable::iter_by_address(rx, address)
     }
 
     pub fn get_by_address_payment_part(

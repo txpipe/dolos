@@ -1,7 +1,7 @@
 [package]
 name = "dolos-trp"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 
 [dependencies]
 base64.workspace = true
@@ -24,14 +24,21 @@ jsonrpsee = { version = "0.24.9", features = ["server"] }
 opentelemetry = "0.30.0"
 opentelemetry_sdk = "0.30.0"
 
-tx3-lang = "0.7.2"
-tx3-cardano = "0.7.2"
+tx3-lang = "0.10.1"
+tx3-cardano = "0.10.1"
+tx3-resolver = "0.10.1"
+
 # tx3-lang = { path = "../../../../tx3-lang/tx3/crates/tx3-lang" }
 # tx3-cardano = { path = "../../../../tx3-lang/tx3/crates/tx3-cardano" }
+# tx3-resolver = { path = "../../../../tx3-lang/tx3/crates/tx3-resolver" }
+
 # tx3-lang = { git = "https://github.com/tx3-lang/tx3.git" }
 # tx3-cardano = { git = "https://github.com/tx3-lang/tx3.git" }
+# tx3-resolver = { git = "https://github.com/tx3-lang/tx3.git" }
 
-tx3-sdk = { version = "0.2.0" }
+tx3-sdk = { version = "^0" }
+# tx3-sdk = { path = "../../../../tx3-lang/rust-sdk/sdk" }
+# tx3-sdk = { git = "https://github.com/tx3-lang/rust-sdk.git" }
 
 [dev-dependencies]
 dolos-testing = { path = "../testing", features = ["toy-domain"] }

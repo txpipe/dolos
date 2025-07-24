@@ -1,10 +1,14 @@
-use base64::{Engine, engine::general_purpose::STANDARD};
+use base64::{engine::general_purpose::STANDARD, Engine};
 use jsonrpsee::types::{ErrorCode, ErrorObject, ErrorObjectOwned, Params};
+use pallas::{codec::utils::NonEmptySet, ledger::primitives::conway::VKeyWitness};
 use serde::Deserialize;
 use std::sync::Arc;
 use tx3_lang::ProtoTx;
+use tx3_sdk::trp::{SubmitParams, SubmitWitness};
 
-use dolos_core::{Domain, StateStore as _};
+use dolos_core::{Domain, MempoolStore as _, StateStore as _};
+
+use crate::{compiler::load_compiler, utxos::UtxoStoreAdapter};
 
 use super::Context;
 
@@ -112,7 +116,6 @@ pub async fn trp_resolve<D: Domain>(
     params: Params<'_>,
     context: Arc<Context<D>>,
 ) -> Result<serde_json::Value, ErrorObjectOwned> {
-    tracing::info!(method = "trp.resolve", "Received TRP request.");
     let tx = match decode_params(params) {
         Ok(tx) => tx,
         Err(err) => {
@@ -121,32 +124,114 @@ pub async fn trp_resolve<D: Domain>(
         }
     };
 
-    let resolved = tx3_cardano::resolve_tx::<Context<D>>(
+    let mut compiler = load_compiler::<D>(context.domain.genesis(), context.domain.state())?;
+
+    let utxos = UtxoStoreAdapter::<D>::new(context.domain.state().clone());
+
+    let resolved = tx3_resolver::resolve_tx(
         tx,
-        (*context).clone(),
-        tx3_cardano::resolve::Config {
-            max_optimize_rounds: context.config.max_optimize_rounds.into(),
-            extra_fees: None,
-        },
+        &mut compiler,
+        &utxos,
+        context.config.max_optimize_rounds.into(),
     )
-    .await
-    .map_err(|err| {
-        ErrorObject::owned(
-            ErrorCode::InternalError.code(),
-            "Failed to resolve",
-            Some(err.to_string()),
-        )
-    });
+    .await;
 
     let resolved = match resolved {
         Ok(resolved) => resolved,
         Err(err) => {
             tracing::warn!(err = ?err, "Failed to resolve tx.");
-            return Err(err);
+            return Err(ErrorObject::owned(
+                ErrorCode::InternalError.code(),
+                "Failed to resolve",
+                Some(err.to_string()),
+            ));
         }
     };
 
-    Ok(serde_json::json!({ "tx": hex::encode(resolved.payload) }))
+    Ok(serde_json::json!({
+        "tx": hex::encode(resolved.payload),
+        "hash": hex::encode(resolved.hash),
+    }))
+}
+
+fn apply_witnesses(
+    original: &[u8],
+    witnesses: &[SubmitWitness],
+) -> Result<Vec<u8>, ErrorObjectOwned> {
+    let tx = pallas::ledger::traverse::MultiEraTx::decode(original).map_err(|err| {
+        ErrorObject::owned(
+            ErrorCode::InvalidParams.code(),
+            "Failed to decode tx",
+            Some(err.to_string()),
+        )
+    })?;
+
+    let mut tx = tx
+        .as_conway()
+        .ok_or_else(|| {
+            ErrorObject::owned(
+                ErrorCode::InvalidParams.code(),
+                "Failed to decode tx as conway era tx, TRP only supports conway era txs",
+                Option::<()>::None,
+            )
+        })?
+        .to_owned();
+
+    let map_witness = |witness: &SubmitWitness| {
+        let SubmitWitness::VKey(witness) = witness;
+
+        VKeyWitness {
+            vkey: Vec::<u8>::from(witness.key.clone()).into(),
+            signature: Vec::<u8>::from(witness.signature.clone()).into(),
+        }
+    };
+
+    let mut witness_set = tx.transaction_witness_set.unwrap();
+
+    let old = witness_set
+        .vkeywitness
+        .iter()
+        .flat_map(|x| x.iter())
+        .cloned();
+
+    let new = witnesses.iter().map(map_witness);
+
+    let all: Vec<_> = old.chain(new).collect();
+
+    dbg!(&all);
+
+    witness_set.vkeywitness = NonEmptySet::from_vec(all);
+
+    tx.transaction_witness_set = pallas::codec::utils::KeepRaw::from(witness_set);
+
+    Ok(pallas::codec::minicbor::to_vec(&tx).unwrap())
+}
+
+pub async fn trp_submit<D: Domain>(
+    params: Params<'_>,
+    context: Arc<Context<D>>,
+) -> Result<serde_json::Value, ErrorObjectOwned> {
+    let params: SubmitParams = params.parse()?;
+
+    let mut bytes = Vec::<u8>::from(params.tx);
+
+    if !params.witnesses.is_empty() {
+        bytes = apply_witnesses(&bytes, &params.witnesses)?;
+    }
+
+    let tx = context
+        .domain
+        .mempool()
+        .receive_raw(&bytes)
+        .map_err(|err| {
+            ErrorObject::owned(
+                ErrorCode::InternalError.code(),
+                "Failed to submit tx",
+                Some(err.to_string()),
+            )
+        })?;
+
+    Ok(serde_json::json!({ "hash": tx.to_string() }))
 }
 
 pub fn health<D: Domain>(context: &Context<D>) -> bool {
@@ -155,11 +240,11 @@ pub fn health<D: Domain>(context: &Context<D>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use dolos_testing::TestAddress::{Alice, Bob};
     use dolos_testing::toy_domain::ToyDomain;
+    use dolos_testing::TestAddress::{Alice, Bob};
     use serde_json::json;
 
-    use crate::{Config, metrics::Metrics};
+    use crate::{metrics::Metrics, Config};
 
     use super::*;
 
@@ -223,7 +308,7 @@ mod tests {
 
         let req = json!({
             "tir": {
-                "version": "v1alpha6",
+                "version": "v1alpha8",
                 "bytecode": hex::encode(ir),
                 "encoding": "hex"
             },

@@ -1,14 +1,14 @@
-use axum::{Json, http::StatusCode};
+use axum::{http::StatusCode, Json};
 use itertools::Itertools;
 use pallas::{
-    codec::minicbor,
+    codec::{minicbor, utils::Bytes},
     crypto::hash::Hash,
     ledger::{
         addresses::{Address, Network, StakeAddress, StakePayload},
         primitives::{
-            StakeCredential,
             alonzo::{self, Certificate as AlonzoCert},
             conway::{Certificate as ConwayCert, DatumOption, ScriptRef},
+            StakeCredential,
         },
         traverse::{
             ComputeHash, MultiEraBlock, MultiEraCert, MultiEraHeader, MultiEraInput,
@@ -19,13 +19,21 @@ use pallas::{
 use std::collections::HashMap;
 
 use blockfrost_openapi::models::{
-    address_utxo_content_inner::AddressUtxoContentInner, block_content::BlockContent,
-    tx_content::TxContent, tx_content_cbor::TxContentCbor,
+    address_utxo_content_inner::AddressUtxoContentInner,
+    block_content::BlockContent,
+    tx_content::TxContent,
+    tx_content_cbor::TxContentCbor,
     tx_content_delegations_inner::TxContentDelegationsInner,
     tx_content_metadata_cbor_inner::TxContentMetadataCborInner,
     tx_content_metadata_inner::TxContentMetadataInner,
     tx_content_metadata_inner_json_metadata::TxContentMetadataInnerJsonMetadata,
-    tx_content_output_amount_inner::TxContentOutputAmountInner, tx_content_utxo::TxContentUtxo,
+    tx_content_mirs_inner::{Pot, TxContentMirsInner},
+    tx_content_output_amount_inner::TxContentOutputAmountInner,
+    tx_content_pool_certs_inner::TxContentPoolCertsInner,
+    tx_content_pool_certs_inner_metadata::TxContentPoolCertsInnerMetadata,
+    tx_content_pool_certs_inner_relays_inner::TxContentPoolCertsInnerRelaysInner,
+    tx_content_pool_retires_inner::TxContentPoolRetiresInner,
+    tx_content_utxo::TxContentUtxo,
     tx_content_utxo_inputs_inner::TxContentUtxoInputsInner,
     tx_content_utxo_outputs_inner::TxContentUtxoOutputsInner,
     tx_content_withdrawals_inner::TxContentWithdrawalsInner,
@@ -551,23 +559,41 @@ impl<'a> IntoModel<TxContentUtxo> for TxModelBuilder<'a> {
     }
 }
 
-macro_rules! count_certs {
+macro_rules! match_certs {
     ($tx:expr, "alonzo", $cert:ident) => {
         $tx.certs()
             .iter()
-            .map(|x| x.as_alonzo())
-            .flatten()
-            .filter(|x| matches!(x, AlonzoCert::$cert { .. }))
-            .count() as i32
+            .enumerate()
+            .filter_map(|(index, x)| x.as_alonzo().map(|x| (index, x)))
+            .filter(|(_, x)| matches!(x, AlonzoCert::$cert { .. }))
     };
+
     ($tx:expr, "conway", $cert:ident) => {
         $tx.certs()
             .iter()
-            .map(|x| x.as_alonzo())
-            .flatten()
-            .filter(|x| matches!(x, ConwayCert::$cert { .. }))
-            .count() as i32
+            .enumerate()
+            .filter_map(|(index, x)| x.as_conway().map(|x| (index, x)))
+            .filter(|(_, x)| matches!(x, ConwayCert::$cert { .. }))
     };
+}
+
+macro_rules! count_certs {
+    ($tx:expr, "alonzo", $cert:ident) => {{
+        let alonzo = match_certs!($tx, "alonzo", $cert).count();
+        alonzo
+    }};
+
+    ($tx:expr, "conway", $cert:ident) => {{
+        let conway = match_certs!($tx, "conway", $cert).count();
+        conway
+    }};
+
+    ($tx:expr, $cert:ident) => {{
+        let alonzo = match_certs!($tx, "alonzo", $cert).count();
+        let conway = match_certs!($tx, "conway", $cert).count();
+
+        alonzo + conway
+    }};
 }
 
 impl IntoModel<TxContent> for TxModelBuilder<'_> {
@@ -599,11 +625,11 @@ impl IntoModel<TxContent> for TxModelBuilder<'_> {
             valid_contract: tx.is_valid(),
             block_time: try_into_or_500!(block_time),
             withdrawal_count: tx.withdrawals().collect::<Vec<_>>().len() as i32,
-            mir_cert_count: count_certs!(tx, "alonzo", MoveInstantaneousRewardsCert),
-            delegation_count: count_certs!(tx, "alonzo", StakeDelegation),
-            stake_cert_count: count_certs!(tx, "alonzo", StakeRegistration),
-            pool_update_count: count_certs!(tx, "alonzo", PoolRegistration),
-            pool_retire_count: count_certs!(tx, "alonzo", PoolRetirement),
+            mir_cert_count: count_certs!(tx, "alonzo", MoveInstantaneousRewardsCert) as i32,
+            delegation_count: count_certs!(tx, StakeDelegation) as i32,
+            stake_cert_count: count_certs!(tx, StakeRegistration) as i32,
+            pool_update_count: count_certs!(tx, PoolRegistration) as i32,
+            pool_retire_count: count_certs!(tx, PoolRetirement) as i32,
             asset_mint_or_burn_count: tx.mints().iter().flat_map(|x| x.assets()).count() as i32,
             // TODO: need to understand exactly what this means in terms of the transaction
             deposit: "0".to_string(),
@@ -784,6 +810,13 @@ impl IntoModel<Vec<TxContentWithdrawalsInner>> for TxModelBuilder<'_> {
     }
 }
 
+fn stake_cred_to_address(cred: &StakeCredential, network: Network) -> StakeAddress {
+    match cred {
+        StakeCredential::AddrKeyhash(key) => StakeAddress::new(network, StakePayload::Stake(*key)),
+        StakeCredential::ScriptHash(key) => StakeAddress::new(network, StakePayload::Script(*key)),
+    }
+}
+
 fn build_delegation_inner(
     index: usize,
     cred: &StakeCredential,
@@ -796,10 +829,7 @@ fn build_delegation_inner(
     let pool_id = bech32::encode::<bech32::Bech32>(pool_hrp, pool.as_slice())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let address = match cred {
-        StakeCredential::AddrKeyhash(key) => StakeAddress::new(network, StakePayload::Stake(*key)),
-        StakeCredential::ScriptHash(key) => StakeAddress::new(network, StakePayload::Script(*key)),
-    };
+    let address = stake_cred_to_address(cred, network);
 
     let address = address
         .to_bech32()
@@ -859,6 +889,309 @@ impl IntoModel<Vec<TxContentDelegationsInner>> for TxModelBuilder<'_> {
                     _ => None,
                 })
                 .try_collect()?;
+
+        Ok(items)
+    }
+}
+
+fn build_mir_inners(
+    index: usize,
+    mir: &alonzo::Certificate,
+    network: Network,
+) -> Result<Vec<TxContentMirsInner>, StatusCode> {
+    let AlonzoCert::MoveInstantaneousRewardsCert(mir) = mir else {
+        return Ok(vec![]);
+    };
+
+    let pot = match mir.source {
+        alonzo::InstantaneousRewardSource::Reserves => Pot::Reserve,
+        alonzo::InstantaneousRewardSource::Treasury => Pot::Treasury,
+    };
+
+    let targets = match &mir.target {
+        alonzo::InstantaneousRewardTarget::StakeCredentials(creds) => creds.iter().collect(),
+        _ => vec![],
+    };
+
+    let items = targets
+        .into_iter()
+        .map(|(cred, amount)| {
+            let address = stake_cred_to_address(cred, network);
+
+            let address = address
+                .to_bech32()
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+            Ok::<_, StatusCode>(TxContentMirsInner {
+                pot,
+                cert_index: index as i32,
+                address,
+                amount: amount.to_string(),
+            })
+        })
+        .try_collect()?;
+
+    Ok(items)
+}
+
+impl IntoModel<Vec<TxContentMirsInner>> for TxModelBuilder<'_> {
+    type SortKey = ();
+
+    fn into_model(self) -> Result<Vec<TxContentMirsInner>, StatusCode> {
+        let tx = self.tx()?;
+
+        let network = self.network.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        let items = match_certs!(tx, "alonzo", MoveInstantaneousRewardsCert)
+            .map(|(index, cert)| build_mir_inners(index, cert, network))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect();
+
+        Ok(items)
+    }
+}
+
+impl IntoModel<Vec<TxContentPoolRetiresInner>> for TxModelBuilder<'_> {
+    type SortKey = ();
+
+    fn into_model(self) -> Result<Vec<TxContentPoolRetiresInner>, StatusCode> {
+        let tx = self.tx()?;
+
+        let alonzo = match_certs!(tx, "alonzo", PoolRetirement)
+            .filter_map(|(index, cert)| {
+                let AlonzoCert::PoolRetirement(pool, epoch) = cert else {
+                    return None;
+                };
+
+                Some(TxContentPoolRetiresInner {
+                    pool_id: pool.to_string(),
+                    cert_index: index as i32,
+                    retiring_epoch: *epoch as i32,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let conway = match_certs!(tx, "conway", PoolRetirement)
+            .filter_map(|(index, cert)| {
+                let ConwayCert::PoolRetirement(pool, epoch) = cert else {
+                    return None;
+                };
+
+                Some(TxContentPoolRetiresInner {
+                    pool_id: pool.to_string(),
+                    cert_index: index as i32,
+                    retiring_epoch: *epoch as i32,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let items = alonzo.into_iter().chain(conway).collect();
+
+        Ok(items)
+    }
+}
+
+impl IntoModel<TxContentPoolCertsInnerRelaysInner> for alonzo::Relay {
+    type SortKey = ();
+
+    fn into_model(self) -> Result<TxContentPoolCertsInnerRelaysInner, StatusCode> {
+        let out = match self {
+            alonzo::Relay::SingleHostAddr(port, ipv4, ipv6) => TxContentPoolCertsInnerRelaysInner {
+                ipv4: ipv4.map(|ipv4| ipv4.to_string()),
+                ipv6: ipv6.map(|ipv6| ipv6.to_string()),
+                dns: None,
+                dns_srv: None,
+                port: port.unwrap_or_default() as i32,
+            },
+            alonzo::Relay::SingleHostName(port, dns) => TxContentPoolCertsInnerRelaysInner {
+                ipv4: None,
+                ipv6: None,
+                dns: Some(dns.to_string()),
+                dns_srv: None,
+                port: port.unwrap_or_default() as i32,
+            },
+            alonzo::Relay::MultiHostName(dns) => TxContentPoolCertsInnerRelaysInner {
+                ipv4: None,
+                ipv6: None,
+                dns: Some(dns.to_string()),
+                dns_srv: None,
+                port: Default::default(),
+            },
+        };
+
+        Ok(out)
+    }
+}
+
+struct PoolUpdateModelBuilder {
+    operator: Hash<28>,
+    vrf_keyhash: Hash<32>,
+    pledge: u64,
+    cost: u64,
+    margin: alonzo::RationalNumber,
+    reward_account: Bytes,
+    pool_owners: Vec<Hash<28>>,
+    relays: Vec<alonzo::Relay>,
+    pool_metadata: Option<alonzo::PoolMetadata>,
+    cert_index: usize,
+    network: Network,
+    current_epoch: i32,
+}
+
+impl PoolUpdateModelBuilder {
+    fn new_from_alonzo(
+        cert: AlonzoCert,
+        cert_index: usize,
+        network: Network,
+        current_epoch: i32,
+    ) -> Option<Self> {
+        let AlonzoCert::PoolRegistration {
+            operator,
+            vrf_keyhash,
+            pledge,
+            cost,
+            margin,
+            reward_account,
+            pool_owners,
+            relays,
+            pool_metadata,
+        } = cert
+        else {
+            return None;
+        };
+
+        Some(Self {
+            operator,
+            vrf_keyhash,
+            pledge,
+            cost,
+            margin,
+            reward_account,
+            pool_owners,
+            relays,
+            pool_metadata,
+            cert_index,
+            network,
+            current_epoch,
+        })
+    }
+
+    fn new_from_conway(
+        cert: ConwayCert,
+        cert_index: usize,
+        network: Network,
+        current_epoch: i32,
+    ) -> Option<Self> {
+        let ConwayCert::PoolRegistration {
+            operator,
+            vrf_keyhash,
+            pledge,
+            cost,
+            margin,
+            reward_account,
+            pool_owners,
+            relays,
+            pool_metadata,
+        } = cert
+        else {
+            return None;
+        };
+
+        Some(Self {
+            operator,
+            vrf_keyhash,
+            pledge,
+            cost,
+            margin,
+            reward_account,
+            pool_owners: pool_owners.to_vec(),
+            relays,
+            pool_metadata,
+            cert_index,
+            network,
+            current_epoch,
+        })
+    }
+
+    fn new(
+        cert: MultiEraCert,
+        cert_index: usize,
+        network: Network,
+        current_epoch: i32,
+    ) -> Option<Self> {
+        match cert {
+            MultiEraCert::AlonzoCompatible(cow) => {
+                Self::new_from_alonzo((**cow).clone(), cert_index, network, current_epoch)
+            }
+            MultiEraCert::Conway(cow) => {
+                Self::new_from_conway((**cow).clone(), cert_index, network, current_epoch)
+            }
+            _ => None,
+        }
+    }
+}
+
+impl IntoModel<TxContentPoolCertsInner> for PoolUpdateModelBuilder {
+    type SortKey = ();
+
+    fn into_model(self) -> Result<TxContentPoolCertsInner, StatusCode> {
+        Ok(TxContentPoolCertsInner {
+            vrf_key: self.vrf_keyhash.to_string(),
+            pledge: self.pledge.to_string(),
+            margin_cost: rational_to_f64::<3>(&self.margin),
+            fixed_cost: self.cost.to_string(),
+            reward_account: self.reward_account.to_string(),
+            owners: self
+                .pool_owners
+                .iter()
+                .map(|owner| owner.to_string())
+                .collect(),
+            metadata: Some(Box::new(TxContentPoolCertsInnerMetadata {
+                url: self.pool_metadata.as_ref().map(|x| x.url.clone()),
+                hash: self.pool_metadata.as_ref().map(|x| x.hash.to_string()),
+                ticker: None,
+                name: None,
+                description: None,
+                homepage: None,
+            })),
+            relays: self
+                .relays
+                .iter()
+                .map(|relay| relay.clone().into_model())
+                .try_collect()?,
+            cert_index: self.cert_index as i32,
+            pool_id: self.operator.to_string(),
+            active_epoch: self.current_epoch + 1,
+        })
+    }
+}
+
+impl IntoModel<Vec<TxContentPoolCertsInner>> for TxModelBuilder<'_> {
+    type SortKey = ();
+
+    fn into_model(self) -> Result<Vec<TxContentPoolCertsInner>, StatusCode> {
+        let tx = self.tx()?;
+
+        let network = self.network.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        let epoch = self
+            .chain
+            .as_ref()
+            .map(|c| dolos_cardano::slot_epoch(self.block.slot(), c))
+            .map(|(a, _)| a)
+            .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        let items = tx
+            .certs()
+            .into_iter()
+            .enumerate()
+            .filter_map(|(cert_index, cert)| {
+                PoolUpdateModelBuilder::new(cert, cert_index, network, epoch as i32)
+            })
+            .map(|builder| builder.into_model())
+            .try_collect()?;
 
         Ok(items)
     }

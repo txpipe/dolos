@@ -48,15 +48,15 @@ impl futures_core::Stream for MempoolStream {
 impl dolos_core::MempoolStore for Mempool {
     type Stream = MempoolStream;
 
-    fn receive_raw(&self, cbor: &[u8]) -> Result<TxHash, MempoolError> {
+    fn receive_raw(&self, _cbor: &[u8]) -> Result<TxHash, MempoolError> {
         todo!()
     }
 
-    fn apply(&self, deltas: &[LedgerDelta]) {
-        todo!()
+    fn apply(&self, _deltas: &[LedgerDelta]) {
+        // do nothing for now
     }
 
-    fn check_stage(&self, tx_hash: &TxHash) -> MempoolTxStage {
+    fn check_stage(&self, _tx_hash: &TxHash) -> MempoolTxStage {
         todo!()
     }
 
@@ -64,7 +64,7 @@ impl dolos_core::MempoolStore for Mempool {
         todo!()
     }
 
-    fn evaluate_raw(&self, cbor: &[u8]) -> Result<EvalReport, MempoolError> {
+    fn evaluate_raw(&self, _cbor: &[u8]) -> Result<EvalReport, MempoolError> {
         todo!()
     }
 }

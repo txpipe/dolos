@@ -1,8 +1,8 @@
 use axum::{
-    Router, ServiceExt,
     extract::Request,
     http::StatusCode,
     routing::{get, post},
+    Router, ServiceExt,
 };
 use dolos_cardano::pparams::ChainSummary;
 use itertools::Itertools;
@@ -139,6 +139,10 @@ impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
                 "/addresses/{address}/utxos/{asset}",
                 get(routes::addresses::utxos_with_asset::<D>),
             )
+            .route(
+                "/addresses/{address}/transactions",
+                get(routes::addresses::transactions::<D>),
+            )
             .route("/blocks/latest", get(routes::blocks::latest::<D>))
             .route("/blocks/latest/txs", get(routes::blocks::latest_txs::<D>))
             .route(
@@ -188,6 +192,15 @@ impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
             .route(
                 "/txs/{tx_hash}/delegations",
                 get(routes::txs::by_hash_delegations::<D>),
+            )
+            .route("/txs/{tx_hash}/mirs", get(routes::txs::by_hash_mirs::<D>))
+            .route(
+                "/txs/{tx_hash}/pool_updates",
+                get(routes::txs::by_hash_pool_updates::<D>),
+            )
+            .route(
+                "/txs/{tx_hash}/pool_retires",
+                get(routes::txs::by_hash_pool_retires::<D>),
             )
             .with_state(Facade::<D> { inner: domain })
             .layer(
