@@ -201,7 +201,7 @@ impl WalStore for WalAdapter {
         }
     }
 
-    fn append_entries(&mut self, logs: impl Iterator<Item = LogValue>) -> Result<(), WalError> {
+    fn append_entries(&self, logs: impl Iterator<Item = LogValue>) -> Result<(), WalError> {
         match self {
             WalAdapter::Redb(x) => x.append_entries(logs),
         }
@@ -322,6 +322,17 @@ impl ArchiveStore for ArchiveAdapter {
     ) -> Result<Self::BlockIter<'a>, ArchiveError> {
         let out = match self {
             ArchiveAdapter::Redb(x) => x.get_range(from, to)?.into(),
+        };
+
+        Ok(out)
+    }
+
+    fn find_intersect<'a>(
+        &self,
+        intersect: &[ChainPoint],
+    ) -> Result<Option<ChainPoint>, ArchiveError> {
+        let out = match self {
+            ArchiveAdapter::Redb(x) => x.find_intersect(intersect)?,
         };
 
         Ok(out)

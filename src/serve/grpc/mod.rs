@@ -8,6 +8,7 @@ use tracing::info;
 use crate::prelude::*;
 
 mod convert;
+mod iterator;
 mod masking;
 mod query;
 mod stream;

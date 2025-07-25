@@ -3,7 +3,7 @@ use redb::ReadTransaction;
 use std::path::Path;
 use tracing::{debug, info, warn};
 
-use dolos_core::{ArchiveError, BlockBody, BlockSlot, EraCbor, LedgerDelta, TxOrder};
+use dolos_core::{ArchiveError, BlockBody, BlockSlot, ChainPoint, EraCbor, LedgerDelta, TxOrder};
 
 mod indexes;
 mod tables;
@@ -177,6 +177,17 @@ impl ChainStore {
         Ok(out)
     }
 
+    pub fn find_intersect(
+        &self,
+        intersect: &[ChainPoint],
+    ) -> Result<Option<ChainPoint>, RedbArchiveError> {
+        let out = match self {
+            ChainStore::SchemaV1(x) => x.find_intersect(intersect)?,
+        };
+
+        Ok(out)
+    }
+
     pub fn get_block_by_hash(
         &self,
         block_hash: &[u8],
@@ -295,6 +306,10 @@ impl dolos_core::ArchiveStore for ChainStore {
         to: Option<BlockSlot>,
     ) -> Result<Self::BlockIter<'a>, ArchiveError> {
         Ok(Self::get_range(self, from, to)?)
+    }
+
+    fn find_intersect(&self, intersect: &[ChainPoint]) -> Result<Option<ChainPoint>, ArchiveError> {
+        Ok(Self::find_intersect(self, intersect)?)
     }
 
     fn get_tip(&self) -> Result<Option<(BlockSlot, BlockBody)>, ArchiveError> {
