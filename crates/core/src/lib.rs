@@ -587,10 +587,7 @@ pub trait ArchiveStore: Clone + Send + Sync + 'static {
         to: Option<BlockSlot>,
     ) -> Result<Self::BlockIter<'a>, ArchiveError>;
 
-    fn find_intersect<'a>(
-        &self,
-        intersect: &[ChainPoint],
-    ) -> Result<Option<ChainPoint>, ArchiveError>;
+    fn find_intersect(&self, intersect: &[ChainPoint]) -> Result<Option<ChainPoint>, ArchiveError>;
 
     fn get_tip(&self) -> Result<Option<(BlockSlot, BlockBody)>, ArchiveError>;
 
