@@ -167,9 +167,9 @@ pub trait WalStore: Clone + Send + Sync + 'static {
         points.iter().map(|p| self.read_block(p)).try_collect()
     }
 
-    fn append_entries(&mut self, logs: impl Iterator<Item = LogValue>) -> Result<(), WalError>;
+    fn append_entries(&self, logs: impl Iterator<Item = LogValue>) -> Result<(), WalError>;
 
-    fn roll_forward(&mut self, blocks: impl Iterator<Item = RawBlock>) -> Result<(), WalError> {
+    fn roll_forward(&self, blocks: impl Iterator<Item = RawBlock>) -> Result<(), WalError> {
         self.append_entries(blocks.map(LogValue::Apply))
     }
 

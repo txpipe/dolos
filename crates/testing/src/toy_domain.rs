@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::{TestAddress, UtxoGenerator, make_custom_utxo_delta};
+use crate::{make_custom_utxo_delta, TestAddress, UtxoGenerator};
 use dolos_core::*;
 use dolos_redb::state::LedgerStore;
 use futures_util::stream::StreamExt;
@@ -81,7 +81,7 @@ pub struct ToyDomain {
 
 impl ToyDomain {
     /// Create a new MockDomain with the provided state implementation
-    pub fn new(initial_delta: Option<LedgerDelta>) -> Self {
+    pub fn new(initial_delta: Option<LedgerDelta>, storage_config: Option<StorageConfig>) -> Self {
         let state = dolos_redb::state::LedgerStore::in_memory_v2().unwrap();
 
         if let Some(delta) = initial_delta {
@@ -93,7 +93,7 @@ impl ToyDomain {
             wal: dolos_redb::wal::RedbWalStore::memory().unwrap(),
             archive: dolos_redb::archive::ChainStore::in_memory_v1().unwrap(),
             mempool: Mempool {},
-            storage_config: dolos_core::StorageConfig::default(),
+            storage_config: storage_config.unwrap_or_default(),
             genesis: Arc::new(dolos_cardano::include::devnet::load()),
         }
     }

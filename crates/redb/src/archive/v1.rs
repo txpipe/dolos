@@ -5,11 +5,11 @@ use tracing::{debug, info};
 
 type Error = super::RedbArchiveError;
 
-use dolos_core::{ArchiveError, BlockBody, BlockSlot, EraCbor, LedgerDelta, TxOrder};
+use dolos_core::{ArchiveError, BlockBody, BlockSlot, ChainPoint, EraCbor, LedgerDelta, TxOrder};
 
 use crate::archive::ChainSparseIter;
 
-use super::{ChainRangeIter, indexes, tables};
+use super::{indexes, tables, ChainRangeIter};
 
 #[derive(Clone)]
 pub struct ChainStore {
@@ -72,6 +72,27 @@ impl ChainStore {
         let rx = self.db().begin_read()?;
         let range = tables::BlocksTable::get_range(&rx, from, to)?;
         Ok(ChainRangeIter(range))
+    }
+
+    pub fn find_intersect(&self, intersect: &[ChainPoint]) -> Result<Option<ChainPoint>, Error> {
+        let rx = self.db().begin_read()?;
+
+        for point in intersect {
+            let ChainPoint::Specific(slot, hash) = point else {
+                return Ok(Some(ChainPoint::Origin));
+            };
+
+            if let Some(body) = tables::BlocksTable::get_by_slot(&rx, *slot)? {
+                let decoded =
+                    MultiEraBlock::decode(&body).map_err(ArchiveError::BlockDecodingError)?;
+
+                if decoded.hash().eq(hash) {
+                    return Ok(Some(ChainPoint::Specific(decoded.slot(), decoded.hash())));
+                }
+            }
+        }
+
+        Ok(None)
     }
 
     pub fn get_possible_block_slots_by_address_payment_part(

@@ -3,8 +3,8 @@ use pallas::{
     codec::utils::{Bytes, KeepRaw},
     ledger::{
         primitives::{
-            VrfCert,
             conway::{Header, OperationalCert},
+            VrfCert,
         },
         traverse::Era,
     },
@@ -23,8 +23,8 @@ pub fn make_conway_block(slot: BlockSlot) -> RawBlock {
         header: KeepRaw::from(Header {
             header_body: pallas::ledger::primitives::conway::HeaderBody {
                 slot,
+                block_body_hash: hash,
                 block_number: 0,
-                block_body_hash: slot_to_hash(slot),
                 prev_hash: None,
                 issuer_vkey: vec![].into(),
                 vrf_vkey: vec![].into(),

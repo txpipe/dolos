@@ -9,7 +9,6 @@ use pallas::interop::utxorpc::{spec as u5c, Mapper};
 use std::pin::Pin;
 use tonic::{Request, Response, Status};
 
-use super::stream::WalStream;
 use crate::prelude::*;
 
 const MAX_DUMP_HISTORY_ITEMS: u32 = 100;
@@ -77,8 +76,20 @@ fn wal_log_to_tip_response<C: LedgerContext>(
                 u5c::sync::follow_tip_response::Action::Undo(raw_to_anychain(mapper, &x.body))
                     .into()
             }
-            // TODO: shouldn't we have a u5c event for origin?
-            LogValue::Mark(..) => None,
+            LogValue::Mark(ChainPoint::Specific(slot, hash)) => {
+                u5c::sync::follow_tip_response::Action::Reset(BlockRef {
+                    hash: hash.to_vec().into(),
+                    index: *slot,
+                })
+                .into()
+            }
+            LogValue::Mark(ChainPoint::Origin) => {
+                u5c::sync::follow_tip_response::Action::Reset(BlockRef {
+                    hash: vec![].into(),
+                    index: 0,
+                })
+                .into()
+            }
         },
     }
 }
@@ -199,42 +210,28 @@ where
     ) -> Result<Response<Self::FollowTipStream>, tonic::Status> {
         let request = request.into_inner();
 
-        let (from_seq, point) = if request.intersect.is_empty() {
-            self.domain
-                .wal()
-                .find_tip()
-                .map_err(|_err| Status::internal("can't read WAL"))?
-                .ok_or(Status::internal("WAL has no data"))?
-        } else {
-            let intersect: Vec<_> = request
-                .intersect
-                .into_iter()
-                .map(u5c_to_chain_point)
-                .try_collect()?;
+        let intersect: Vec<_> = request
+            .intersect
+            .into_iter()
+            .map(u5c_to_chain_point)
+            .try_collect()?;
 
-            self.domain
-                .wal()
-                .find_intersect(&intersect)
-                .map_err(|_err| Status::internal("can't read WAL"))?
-                .ok_or(Status::internal("can't find WAL sequence"))?
-        };
+        // let (stream, point) = super::stream::ChainStream::<D>::start(
+        //     self.domain.wal().clone(),
+        //     self.domain.archive().clone(),
+        //     &intersect,
+        // );
+
+        let stream = super::stream::ChainStream::start::<D, _>(
+            self.domain.wal().clone(),
+            self.domain.archive().clone(),
+            intersect.clone(),
+            self.cancel.clone(),
+        );
 
         let mapper = self.mapper.clone();
 
-        // Find the intersect, skip 1 block, then convert each to a tip response
-        // We skip 1 block to mimic the ouroboros chainsync miniprotocol convention
-        // We both agree that the intersection point is in our past, so it doesn't
-        // make sense to broadcast this. We send a `Reset` message, so that
-        // the consumer knows what intersection was found and can reset their state
-        // This would also mimic ouroboros giving a `Rollback` as the first message.
-
-        let reset = once(async { Ok(point_to_reset_tip_response(point)) });
-
-        let forward = WalStream::start(self.domain.wal().clone(), from_seq, self.cancel.clone())
-            .skip(1)
-            .map(move |(_, log)| Ok(wal_log_to_tip_response(&mapper, &log)));
-
-        let stream = reset.chain(forward);
+        let stream = stream.map(move |log| Ok(wal_log_to_tip_response(&mapper, &log)));
 
         Ok(Response::new(Box::pin(stream)))
     }
@@ -266,7 +263,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_dump_history_pagination() {
-        let domain = ToyDomain::new(None);
+        let domain = ToyDomain::new(None, None);
         let cancel = CancelTokenImpl::default();
 
         for i in 0..34 {
@@ -314,7 +311,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_dump_history_max_items() {
-        let domain = ToyDomain::new(None);
+        let domain = ToyDomain::new(None, None);
         let cancel = CancelTokenImpl::default();
 
         let service = SyncServiceImpl::new(domain, cancel);

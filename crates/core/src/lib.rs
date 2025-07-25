@@ -557,7 +557,7 @@ pub enum ArchiveError {
     BlockDecodingError(#[from] pallas::ledger::traverse::Error),
 }
 
-pub trait ArchiveStore {
+pub trait ArchiveStore: Clone + Send + Sync + 'static {
     type BlockIter<'a>: Iterator<Item = (BlockSlot, BlockBody)> + DoubleEndedIterator + 'a;
     type SparseBlockIter: Iterator<Item = Result<(BlockSlot, Option<BlockBody>), ArchiveError>>;
 
@@ -586,6 +586,11 @@ pub trait ArchiveStore {
         from: Option<BlockSlot>,
         to: Option<BlockSlot>,
     ) -> Result<Self::BlockIter<'a>, ArchiveError>;
+
+    fn find_intersect<'a>(
+        &self,
+        intersect: &[ChainPoint],
+    ) -> Result<Option<ChainPoint>, ArchiveError>;
 
     fn get_tip(&self) -> Result<Option<(BlockSlot, BlockBody)>, ArchiveError>;
 

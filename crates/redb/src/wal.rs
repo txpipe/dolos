@@ -164,7 +164,7 @@ impl RedbWalStore {
         Ok(false)
     }
 
-    pub fn initialize_from_origin(&mut self) -> Result<(), RedbWalError> {
+    pub fn initialize_from_origin(&self) -> Result<(), RedbWalError> {
         if !self.is_empty()? {
             return Err(RedbWalError(WalError::NotEmpty));
         }
@@ -540,7 +540,7 @@ impl RedbWalStore {
     }
 
     fn append_entries(
-        &mut self,
+        &self,
         logs: impl Iterator<Item = dolos_core::LogValue>,
     ) -> Result<(), RedbWalError> {
         let mut wx = self.db.begin_write()?;
@@ -605,7 +605,7 @@ impl WalStore for RedbWalStore {
     }
 
     fn append_entries(
-        &mut self,
+        &self,
         logs: impl Iterator<Item = dolos_core::LogValue>,
     ) -> Result<(), WalError> {
         RedbWalStore::append_entries(self, logs).map_err(From::from)

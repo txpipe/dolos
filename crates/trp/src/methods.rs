@@ -258,7 +258,7 @@ mod tests {
             },
         );
 
-        let domain = ToyDomain::new(Some(delta));
+        let domain = ToyDomain::new(Some(delta), None);
 
         Arc::new(Context {
             domain,

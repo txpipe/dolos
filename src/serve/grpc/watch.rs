@@ -9,7 +9,7 @@ use pallas::{
 use std::pin::Pin;
 use tonic::{Request, Response, Status};
 
-use super::stream::WalStream;
+use super::stream::ChainStream;
 use crate::prelude::*;
 
 fn outputs_match_address(
@@ -238,26 +238,17 @@ where
             .map(|x| ChainPoint::Specific(x.index, x.hash.to_vec().as_slice().into()))
             .collect::<Vec<ChainPoint>>();
 
-        let from_seq = if intersect.is_empty() {
-            self.domain
-                .wal()
-                .find_tip()
-                .map_err(|_err| Status::internal("can't read WAL"))?
-                .map(|(x, _)| x)
-                .unwrap_or_default()
-        } else {
-            self.domain
-                .wal()
-                .find_intersect(&intersect)
-                .map_err(|_err| Status::internal("can't read WAL"))?
-                .map(|(x, _)| x)
-                .unwrap_or_default()
-        };
+        let stream = ChainStream::start::<D, _>(
+            self.domain.wal().clone(),
+            self.domain.archive().clone(),
+            intersect,
+            self.cancel.clone(),
+        );
 
         let mapper = self.mapper.clone();
 
-        let stream = WalStream::start(self.domain.wal().clone(), from_seq, self.cancel.clone())
-            .flat_map(move |(_, log)| roll_to_watch_response(&mapper, &log, &inner_req))
+        let stream = stream
+            .flat_map(move |log| roll_to_watch_response(&mapper, &log, &inner_req))
             .map(Ok);
 
         Ok(Response::new(Box::pin(stream)))
