@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.28.0] - 2025-07-25
+
+### 🚀 Features
+
+- *(minibf)* Implement `tx/{hash}/mirs` endpoint (#602)
+- *(minibf)* Implement `txs/{hash}/pool_retires` endpoint (#603)
+- *(minibf)* Implement `txs/{hash}/pool_updates` endpoint (#604)
+
+### 🐛 Bug Fixes
+
+- Fallback to archive if WAL intersect fails (#606)
+
+### 🚜 Refactor
+
+- Use tx3 built-in resolver (#601)
+
 ## [0.27.1] - 2025-07-16
 
 ### 🐛 Bug Fixes
@@ -12,6 +28,10 @@ All notable changes to this project will be documented in this file.
 
 - Fix cargo release config
 - Unify cargo metadata across all crates
+
+### Release
+
+- V0.27.1
 
 ## [0.27.0] - 2025-07-14
 
