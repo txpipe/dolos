@@ -11,6 +11,7 @@ rand = "0.9.1"
 # optional dependencies for toy domain
 dolos-redb = { path = "../redb", optional = true }
 dolos-cardano = { path = "../cardano", optional = true }
+dolos-redb3 = { path = "../redb3", optional = true }
 tokio-stream = { workspace = true, optional = true }
 futures-core = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
@@ -26,3 +27,4 @@ toy-domain = [
     "futures-core",
     "futures-util",
 ]
+unstable = ["dolos-core/unstable", "dolos-cardano/unstable", "dolos-redb3"]

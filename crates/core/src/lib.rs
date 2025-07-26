@@ -14,6 +14,9 @@ use tracing::info;
 mod mempool;
 mod wal;
 
+#[cfg(feature = "unstable")]
+mod state;
+
 pub type Era = u16;
 
 /// The index of an output in a tx
@@ -42,6 +45,9 @@ pub type LogSeq = u64;
 
 pub use mempool::*;
 pub use wal::*;
+
+#[cfg(feature = "unstable")]
+pub use state::*;
 
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub struct EraCbor(pub Era, pub Cbor);
@@ -706,6 +712,12 @@ pub trait ChainLogic {
 
         Ok(out)
     }
+
+    #[cfg(feature = "unstable")]
+    fn compute_apply_delta3<'a>(
+        state: &impl StateStore3,
+        block: &Self::Block<'a>,
+    ) -> Result<StateDelta, ChainError>;
 }
 
 #[derive(Debug, Error)]
@@ -718,6 +730,10 @@ pub enum DomainError {
 
     #[error("state error: {0}")]
     StateError(#[from] StateError),
+
+    #[cfg(feature = "unstable")]
+    #[error("state3 error: {0}")]
+    StateError3(#[from] StateError3),
 
     #[error("archive error: {0}")]
     ArchiveError(#[from] ArchiveError),
@@ -733,6 +749,9 @@ pub trait Domain: Send + Sync + Clone + 'static {
     type Mempool: MempoolStore;
     type Chain: ChainLogic;
 
+    #[cfg(feature = "unstable")]
+    type State3: StateStore3;
+
     fn storage_config(&self) -> &StorageConfig;
     fn genesis(&self) -> &Genesis;
 
@@ -740,6 +759,9 @@ pub trait Domain: Send + Sync + Clone + 'static {
     fn state(&self) -> &Self::State;
     fn archive(&self) -> &Self::Archive;
     fn mempool(&self) -> &Self::Mempool;
+
+    #[cfg(feature = "unstable")]
+    fn state3(&self) -> &Self::State3;
 
     fn apply_origin(&self) -> Result<(), DomainError> {
         let deltas = vec![Self::Chain::compute_origin_delta(self.genesis())?];
@@ -763,12 +785,32 @@ pub trait Domain: Send + Sync + Clone + 'static {
         Ok(deltas)
     }
 
+    #[cfg(feature = "unstable")]
+    fn compute_apply_deltas3(&self, blocks: &[RawBlock]) -> Result<Vec<StateDelta>, DomainError> {
+        let mut deltas = Vec::with_capacity(blocks.len());
+
+        for block in blocks {
+            let block = Self::Chain::decode_block(&block.body)?;
+            let delta = Self::Chain::compute_apply_delta3(self.state3(), &block)?;
+            deltas.push(delta);
+        }
+
+        Ok(deltas)
+    }
+
     fn apply_blocks(&self, blocks: &[RawBlock]) -> Result<(), DomainError> {
         let deltas = self.compute_apply_deltas(blocks)?;
 
         self.state().apply(&deltas)?;
         self.archive().apply(&deltas)?;
         self.mempool().apply(&deltas);
+
+        #[cfg(feature = "unstable")]
+        {
+            for delta in self.compute_apply_deltas3(blocks)? {
+                self.state3().apply_delta(delta)?;
+            }
+        }
 
         Ok(())
     }

@@ -11,7 +11,14 @@ use dolos::prelude::*;
 
 use crate::{GenesisConfig, LoggingConfig};
 
-pub type Stores = (WalAdapter, StateAdapter, ArchiveAdapter);
+pub struct Stores {
+    pub wal: WalAdapter,
+    pub state: StateAdapter,
+    pub archive: ArchiveAdapter,
+
+    #[cfg(feature = "unstable")]
+    pub state3: dolos_redb3::StateStore,
+}
 
 pub fn ensure_storage_path(config: &crate::Config) -> Result<PathBuf, Error> {
     let root = config.storage.path.as_ref().ok_or(Error::config(
@@ -51,6 +58,18 @@ pub fn open_ledger_store(config: &crate::Config) -> Result<StateAdapter, Error> 
     Ok(ledger.into())
 }
 
+#[cfg(feature = "unstable")]
+pub fn open_state3_store(config: &crate::Config) -> Result<dolos_redb3::StateStore, Error> {
+    let root = ensure_storage_path(config)?;
+    let schema = dolos_cardano::model::build_schema();
+
+    let state3 =
+        dolos_redb3::StateStore::open(schema, root.join("state"), config.storage.ledger_cache)
+            .map_err(StateError3::from)?;
+
+    Ok(state3)
+}
+
 pub fn open_persistent_data_stores(config: &crate::Config) -> Result<Stores, Error> {
     if config.storage.version == StorageVersion::V0 {
         error!("Storage should be removed and init procedure run again.");
@@ -58,22 +77,45 @@ pub fn open_persistent_data_stores(config: &crate::Config) -> Result<Stores, Err
     }
 
     let wal = open_wal_store(config)?;
+
     let ledger = open_ledger_store(config)?;
+
+    #[cfg(feature = "unstable")]
+    let state3 = open_state3_store(config)?;
+
     let chain = open_chain_store(config)?;
 
-    Ok((wal, ledger, chain))
+    Ok(Stores {
+        wal,
+        state: ledger,
+        archive: chain,
+
+        #[cfg(feature = "unstable")]
+        state3,
+    })
 }
 
 pub fn create_ephemeral_data_stores() -> Result<Stores, Error> {
-    let mut wal = dolos_redb::wal::RedbWalStore::memory()?;
+    let wal = dolos_redb::wal::RedbWalStore::memory()?;
 
     wal.initialize_from_origin().map_err(WalError::from)?;
 
     let ledger = dolos_redb::state::LedgerStore::in_memory_v2()?;
 
+    #[cfg(feature = "unstable")]
+    let state3 = dolos_redb3::StateStore::in_memory(dolos_cardano::model::build_schema())
+        .map_err(StateError3::from)?;
+
     let chain = dolos_redb::archive::ChainStore::in_memory_v1()?;
 
-    Ok((wal.into(), ledger.into(), chain.into()))
+    Ok(Stores {
+        wal: wal.into(),
+        state: ledger.into(),
+        archive: chain.into(),
+
+        #[cfg(feature = "unstable")]
+        state3,
+    })
 }
 
 pub fn setup_data_stores(config: &crate::Config) -> Result<Stores, Error> {
@@ -85,17 +127,20 @@ pub fn setup_data_stores(config: &crate::Config) -> Result<Stores, Error> {
 }
 
 pub fn setup_domain(config: &crate::Config) -> miette::Result<DomainAdapter> {
-    let (wal, state, archive) = setup_data_stores(config)?;
+    let stores = setup_data_stores(config)?;
     let genesis = Arc::new(open_genesis_files(&config.genesis)?);
-    let mempool = dolos::mempool::Mempool::new(genesis.clone(), state.clone());
+    let mempool = dolos::mempool::Mempool::new(genesis.clone(), stores.state.clone());
 
     let domain = DomainAdapter {
         storage_config: Arc::new(config.storage.clone()),
         genesis,
-        wal,
-        state,
-        archive,
+        wal: stores.wal,
+        state: stores.state,
+        archive: stores.archive,
         mempool,
+
+        #[cfg(feature = "unstable")]
+        state3: stores.state3,
     };
 
     Ok(domain)

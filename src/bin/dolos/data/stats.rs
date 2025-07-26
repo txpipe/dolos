@@ -16,9 +16,9 @@ fn stats_to_json(stats: &dolos_redb::redb::TableStats) -> serde_json::Value {
 }
 
 pub fn run(config: &crate::Config, _args: &Args) -> miette::Result<()> {
-    let (_, state, _) = crate::common::setup_data_stores(config)?;
+    let stores = crate::common::setup_data_stores(config)?;
 
-    let state: dolos_redb::state::LedgerStore = state.try_into().into_diagnostic()?;
+    let state: dolos_redb::state::LedgerStore = stores.state.try_into().into_diagnostic()?;
 
     let stats = state.stats().unwrap();
 
