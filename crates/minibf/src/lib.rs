@@ -128,8 +128,12 @@ impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
         let app = Router::new()
             .route("/genesis", get(routes::genesis::naked::<D>))
             .route(
+                "/accounts/{stake_address}",
+                get(routes::accounts::by_stake::<D>),
+            )
+            .route(
                 "/accounts/{stake_address}/utxos",
-                get(routes::accounts::stake_address::utxos::route::<D>),
+                get(routes::accounts::by_stake_utxos::<D>),
             )
             .route(
                 "/addresses/{address}/utxos",

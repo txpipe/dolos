@@ -127,8 +127,9 @@ impl StateDelta {
         entity: T,
         prev: Option<T>,
     ) {
-        let entity = entity.into();
-        let prev = prev.map(Into::into);
+        let entity = entity.encode_value();
+        let prev = prev.map(T::encode_value);
+
         self.override_key(T::NS, key, entity, prev);
     }
 }
@@ -143,6 +144,12 @@ pub enum StateError {
 
     #[error("namespace {0} not found")]
     NamespaceNotFound(Namespace),
+
+    #[error("encoding error: {0}")]
+    EncodingError(String),
+
+    #[error(transparent)]
+    DecodingError(#[from] pallas::codec::minicbor::decode::Error),
 }
 
 // temporary alias to avoid collision with existing StateError
@@ -178,11 +185,16 @@ pub trait State3Store {
 
     fn read_entity_typed<T: Entity>(&self, key: impl AsRef<[u8]>) -> Result<Option<T>, StateError> {
         let value = self.read_entity(T::NS, key)?;
+        let decoded = value.map(T::decode_value).transpose()?;
 
-        Ok(value.map(T::from))
+        Ok(decoded)
     }
 }
 
-pub trait Entity: From<EntityValue> + Into<EntityValue> {
+pub trait Entity: Sized {
     const NS: Namespace;
+    const NS_TYPE: NamespaceType;
+
+    fn decode_value(value: EntityValue) -> Result<Self, StateError>;
+    fn encode_value(self) -> EntityValue;
 }
