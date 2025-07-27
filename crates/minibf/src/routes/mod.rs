@@ -3,6 +3,7 @@ pub mod addresses;
 pub mod blocks;
 pub mod epochs;
 pub mod genesis;
+pub mod metadata;
 pub mod tx;
 pub mod txs;
 pub mod utxos;
