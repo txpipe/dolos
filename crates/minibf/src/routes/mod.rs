@@ -5,6 +5,7 @@ pub mod blocks;
 pub mod epochs;
 pub mod genesis;
 pub mod metadata;
+pub mod pools;
 pub mod tx;
 pub mod txs;
 pub mod utxos;

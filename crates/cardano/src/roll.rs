@@ -1,11 +1,88 @@
+use std::ops::Deref;
+
 use dolos_core::{State3Error, State3Store, StateDelta};
-use pallas::ledger::{
-    addresses::{Address, StakeAddress},
-    traverse::{MultiEraBlock, MultiEraOutput, MultiEraPolicyAssets, MultiEraTx},
+use pallas::{
+    crypto::hash::Hash,
+    ledger::{
+        addresses::{Address, StakeAddress},
+        traverse::{MultiEraBlock, MultiEraCert, MultiEraOutput, MultiEraPolicyAssets, MultiEraTx},
+    },
 };
+
+use pallas::ledger::primitives::alonzo::Certificate as AlonzoCert;
+use pallas::ledger::primitives::conway::Certificate as ConwayCert;
+
 use tracing::info;
 
-use crate::model::{AccountState, AssetState};
+use crate::model::{AccountState, AssetState, PoolState};
+
+fn cert_to_pool_state(cert: &MultiEraCert) -> Option<(Hash<28>, PoolState)> {
+    match cert {
+        MultiEraCert::AlonzoCompatible(cow) => match cow.deref().deref() {
+            AlonzoCert::PoolRegistration {
+                operator,
+                vrf_keyhash,
+                pledge,
+                cost,
+                margin,
+                reward_account,
+                pool_owners,
+                relays,
+                pool_metadata,
+            } => {
+                let state = PoolState {
+                    active_stake: 0,
+                    live_stake: 0,
+                    blocks_minted: 0,
+                    live_saturation: 0.0,
+                    vrf_keyhash: *vrf_keyhash,
+                    reward_account: reward_account.to_vec(),
+                    pool_owners: pool_owners.clone(),
+                    relays: relays.clone(),
+                    declared_pledge: *pledge,
+                    margin_cost: margin.clone(),
+                    fixed_cost: *cost,
+                    metadata: pool_metadata.clone(),
+                };
+
+                Some((*operator, state))
+            }
+            _ => None,
+        },
+        MultiEraCert::Conway(cow) => match cow.deref().deref() {
+            ConwayCert::PoolRegistration {
+                operator,
+                vrf_keyhash,
+                pledge,
+                cost,
+                margin,
+                reward_account,
+                pool_owners,
+                relays,
+                pool_metadata,
+            } => {
+                let state = PoolState {
+                    active_stake: 0,
+                    live_stake: 0,
+                    blocks_minted: 0,
+                    live_saturation: 0.0,
+                    vrf_keyhash: *vrf_keyhash,
+                    reward_account: reward_account.to_vec(),
+                    pool_owners: pool_owners.clone().to_vec(),
+                    relays: relays.clone(),
+                    declared_pledge: *pledge,
+                    margin_cost: margin.clone(),
+                    fixed_cost: *cost,
+                    metadata: pool_metadata.clone(),
+                };
+
+                Some((*operator, state))
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
 
 trait RollVisitor {
     #[allow(unused_variables)]
@@ -13,6 +90,8 @@ trait RollVisitor {
         &mut self,
         state: &impl State3Store,
         delta: &mut StateDelta,
+        tx: &MultiEraTx,
+        index: u32,
         output: &MultiEraOutput,
     ) -> Result<(), State3Error> {
         Ok(())
@@ -28,6 +107,17 @@ trait RollVisitor {
     ) -> Result<(), State3Error> {
         Ok(())
     }
+
+    #[allow(unused_variables)]
+    fn visit_cert(
+        &mut self,
+        state: &impl State3Store,
+        delta: &mut StateDelta,
+        tx: &MultiEraTx,
+        cert: &MultiEraCert,
+    ) -> Result<(), State3Error> {
+        Ok(())
+    }
 }
 
 fn crawl_block<'a, T: RollVisitor>(
@@ -37,12 +127,16 @@ fn crawl_block<'a, T: RollVisitor>(
     visitor: &mut T,
 ) -> Result<(), State3Error> {
     for tx in block.txs() {
-        for output in tx.outputs() {
-            visitor.visit_output(state, delta, &output)?;
+        for (index, output) in tx.outputs().iter().enumerate() {
+            visitor.visit_output(state, delta, &tx, index as u32, output)?;
         }
 
         for mint in tx.mints() {
             visitor.visit_mint(state, delta, &tx, &mint)?;
+        }
+
+        for cert in tx.certs() {
+            visitor.visit_cert(state, delta, &tx, &cert)?;
         }
     }
 
@@ -56,6 +150,8 @@ impl RollVisitor for SeenAddressesVisitor {
         &mut self,
         state: &impl State3Store,
         delta: &mut StateDelta,
+        _: &MultiEraTx,
+        _: u32,
         output: &MultiEraOutput,
     ) -> Result<(), State3Error> {
         let full_address = output.address().unwrap();
@@ -124,9 +220,29 @@ impl RollVisitor for AssetStateVisitor {
     }
 }
 
+struct PoolStateVisitor;
+
+impl RollVisitor for PoolStateVisitor {
+    fn visit_cert(
+        &mut self,
+        state: &impl State3Store,
+        delta: &mut StateDelta,
+        _: &MultiEraTx,
+        cert: &MultiEraCert,
+    ) -> Result<(), State3Error> {
+        if let Some((operator, new)) = cert_to_pool_state(cert) {
+            let current = state.read_entity_typed::<PoolState>(&operator.to_vec())?;
+            delta.override_entity(operator.to_vec(), new, current);
+        }
+
+        Ok(())
+    }
+}
+
 struct AllInOneVisitor {
     seen_addresses: SeenAddressesVisitor,
     asset_state: AssetStateVisitor,
+    pool_state: PoolStateVisitor,
 }
 
 impl RollVisitor for AllInOneVisitor {
@@ -134,10 +250,16 @@ impl RollVisitor for AllInOneVisitor {
         &mut self,
         state: &impl State3Store,
         delta: &mut StateDelta,
+        tx: &MultiEraTx,
+        index: u32,
         output: &MultiEraOutput,
     ) -> Result<(), State3Error> {
-        self.seen_addresses.visit_output(state, delta, output)?;
-        self.asset_state.visit_output(state, delta, output)?;
+        self.seen_addresses
+            .visit_output(state, delta, tx, index, output)?;
+        self.asset_state
+            .visit_output(state, delta, tx, index, output)?;
+        self.pool_state
+            .visit_output(state, delta, tx, index, output)?;
         Ok(())
     }
 
@@ -150,6 +272,20 @@ impl RollVisitor for AllInOneVisitor {
     ) -> Result<(), State3Error> {
         self.seen_addresses.visit_mint(state, delta, tx, mint)?;
         self.asset_state.visit_mint(state, delta, tx, mint)?;
+        self.pool_state.visit_mint(state, delta, tx, mint)?;
+        Ok(())
+    }
+
+    fn visit_cert(
+        &mut self,
+        state: &impl State3Store,
+        delta: &mut StateDelta,
+        tx: &MultiEraTx,
+        cert: &MultiEraCert,
+    ) -> Result<(), State3Error> {
+        self.seen_addresses.visit_cert(state, delta, tx, cert)?;
+        self.asset_state.visit_cert(state, delta, tx, cert)?;
+        self.pool_state.visit_cert(state, delta, tx, cert)?;
         Ok(())
     }
 }
@@ -163,6 +299,7 @@ pub fn compute_block_delta<'a>(
     let mut visitor = AllInOneVisitor {
         seen_addresses: SeenAddressesVisitor,
         asset_state: AssetStateVisitor,
+        pool_state: PoolStateVisitor,
     };
 
     crawl_block(&mut delta, state, block, &mut visitor)?;
