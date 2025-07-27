@@ -15,9 +15,12 @@ bincode.workspace = true
 hex.workspace = true
 thiserror.workspace = true
 
-dolos-core = { path = "../core", features = ["unstable"] }
+dolos-core = { path = "../core" }
 
 redb = { version = "^2.6" }
 
 [dev-dependencies]
 dolos-testing = { path = "../testing", features = ["unstable"] }
+
+[features]
+unstable = ["dolos-core/unstable"]
