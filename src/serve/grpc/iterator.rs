@@ -153,12 +153,12 @@ impl<D: Domain> ChainIterator<D> {
             return Ok((iter, point));
         }
 
-        if let Some((seq, point)) = wal.find_intersect(&intersect)? {
+        if let Some((seq, point)) = wal.find_intersect(intersect)? {
             let iter = Self::at_wal_seq(wal, archive, seq)?;
             return Ok((iter, point));
         }
 
-        if let Some(point) = archive.find_intersect(&intersect)? {
+        if let Some(point) = archive.find_intersect(intersect)? {
             let iter = Self::at_archive_point(wal, archive, point.clone())?;
             return Ok((iter, point));
         }
@@ -180,6 +180,7 @@ impl<D: Domain> ChainIterator<D> {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn assume_tip_change(&mut self) -> Result<(), DomainError> {
         let next = match &self.batch {
             Batch::Tip(seq) => Batch::WalPage(*seq, VecDeque::new()),

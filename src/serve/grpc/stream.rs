@@ -51,7 +51,6 @@ impl ChainStream {
 
 #[cfg(test)]
 mod tests {
-    use dolos_redb::wal::RedbWalStore;
     use dolos_testing::toy_domain::ToyDomain;
     use futures_util::{pin_mut, StreamExt};
     use pallas::crypto::hash::Hash;
