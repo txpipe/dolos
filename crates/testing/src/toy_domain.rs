@@ -78,7 +78,6 @@ pub struct ToyDomain {
     storage_config: dolos_core::StorageConfig,
     genesis: Arc<dolos_core::Genesis>,
 
-    #[cfg(feature = "unstable")]
     state3: dolos_redb3::StateStore,
 }
 
@@ -91,7 +90,6 @@ impl ToyDomain {
             state.apply(&[delta]).unwrap();
         }
 
-        #[cfg(feature = "unstable")]
         let state3 =
             dolos_redb3::StateStore::in_memory(dolos_cardano::model::build_schema()).unwrap();
 
@@ -102,8 +100,6 @@ impl ToyDomain {
             mempool: Mempool {},
             storage_config: storage_config.unwrap_or_default(),
             genesis: Arc::new(dolos_cardano::include::devnet::load()),
-
-            #[cfg(feature = "unstable")]
             state3,
         }
     }
@@ -116,7 +112,6 @@ impl dolos_core::Domain for ToyDomain {
     type Mempool = Mempool;
     type Chain = dolos_cardano::ChainLogic;
 
-    #[cfg(feature = "unstable")]
     type State3 = dolos_redb3::StateStore;
 
     fn storage_config(&self) -> &dolos_core::StorageConfig {
@@ -135,7 +130,6 @@ impl dolos_core::Domain for ToyDomain {
         &self.state
     }
 
-    #[cfg(feature = "unstable")]
     fn state3(&self) -> &Self::State3 {
         &self.state3
     }

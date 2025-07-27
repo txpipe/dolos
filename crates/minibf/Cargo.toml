@@ -25,4 +25,3 @@ chrono.workspace = true
 
 [features]
 phase2 = ["pallas/phase2"]
-unstable = ["dolos-core/unstable", "dolos-cardano/unstable"]

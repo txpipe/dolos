@@ -20,7 +20,6 @@ dolos-core = { path = "../core" }
 redb = { version = "^2.6" }
 
 [dev-dependencies]
-dolos-testing = { path = "../testing", features = ["unstable"] }
+dolos-testing = { path = "../testing" }
 
 [features]
-unstable = ["dolos-core/unstable"]

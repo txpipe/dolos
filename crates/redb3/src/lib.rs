@@ -1,13 +1,17 @@
 use std::{collections::HashMap, ops::Range, path::Path, sync::Arc};
 
+use dolos_core::BlockSlot;
+
 use dolos_core::{
-    BlockSlot, EntityDelta, EntityKey, EntityValue, Namespace, NamespaceType,
-    State3Error as StateError, StateDelta, StateSchema,
+    EntityDelta, EntityKey, EntityValue, Namespace, NamespaceType, State3Error as StateError,
+    StateDelta, StateSchema,
 };
+
 use redb::{
     Database, Durability, MultimapTableDefinition, ReadTransaction, TableDefinition,
     WriteTransaction,
 };
+
 use tracing::warn;
 
 #[derive(Debug, thiserror::Error)]

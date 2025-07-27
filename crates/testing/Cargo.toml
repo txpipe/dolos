@@ -27,4 +27,3 @@ toy-domain = [
     "futures-core",
     "futures-util",
 ]
-unstable = ["dolos-core/unstable", "dolos-cardano/unstable", "dolos-redb3"]

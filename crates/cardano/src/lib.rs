@@ -15,10 +15,8 @@ pub use pallas;
 pub mod pparams;
 //pub mod validate;
 
-#[cfg(feature = "unstable")]
 pub mod model;
 
-#[cfg(feature = "unstable")]
 pub mod roll;
 
 #[cfg(feature = "include-genesis")]
@@ -325,7 +323,6 @@ impl dolos_core::ChainLogic for ChainLogic {
         ledger_query_for_block(block, unapplied_deltas)
     }
 
-    #[cfg(feature = "unstable")]
     fn compute_apply_delta3<'a>(
         state: &impl State3Store,
         block: &Self::Block<'a>,

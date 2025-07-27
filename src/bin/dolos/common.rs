@@ -16,7 +16,6 @@ pub struct Stores {
     pub state: StateAdapter,
     pub archive: ArchiveAdapter,
 
-    #[cfg(feature = "unstable")]
     pub state3: dolos_redb3::StateStore,
 }
 
@@ -58,7 +57,6 @@ pub fn open_ledger_store(config: &crate::Config) -> Result<StateAdapter, Error> 
     Ok(ledger.into())
 }
 
-#[cfg(feature = "unstable")]
 pub fn open_state3_store(config: &crate::Config) -> Result<dolos_redb3::StateStore, Error> {
     let root = ensure_storage_path(config)?;
     let schema = dolos_cardano::model::build_schema();
@@ -80,7 +78,6 @@ pub fn open_persistent_data_stores(config: &crate::Config) -> Result<Stores, Err
 
     let ledger = open_ledger_store(config)?;
 
-    #[cfg(feature = "unstable")]
     let state3 = open_state3_store(config)?;
 
     let chain = open_chain_store(config)?;
@@ -89,8 +86,6 @@ pub fn open_persistent_data_stores(config: &crate::Config) -> Result<Stores, Err
         wal,
         state: ledger,
         archive: chain,
-
-        #[cfg(feature = "unstable")]
         state3,
     })
 }
@@ -102,7 +97,6 @@ pub fn create_ephemeral_data_stores() -> Result<Stores, Error> {
 
     let ledger = dolos_redb::state::LedgerStore::in_memory_v2()?;
 
-    #[cfg(feature = "unstable")]
     let state3 = dolos_redb3::StateStore::in_memory(dolos_cardano::model::build_schema())
         .map_err(State3Error::from)?;
 
@@ -112,8 +106,6 @@ pub fn create_ephemeral_data_stores() -> Result<Stores, Error> {
         wal: wal.into(),
         state: ledger.into(),
         archive: chain.into(),
-
-        #[cfg(feature = "unstable")]
         state3,
     })
 }
@@ -139,7 +131,6 @@ pub fn setup_domain(config: &crate::Config) -> miette::Result<DomainAdapter> {
         archive: stores.archive,
         mempool,
 
-        #[cfg(feature = "unstable")]
         state3: stores.state3,
     };
 

@@ -12,10 +12,8 @@ use thiserror::Error;
 use tracing::info;
 
 mod mempool;
-mod wal;
-
-#[cfg(feature = "unstable")]
 mod state;
+mod wal;
 
 pub type Era = u16;
 
@@ -44,10 +42,8 @@ pub type ChainTip = pallas::network::miniprotocols::chainsync::Tip;
 pub type LogSeq = u64;
 
 pub use mempool::*;
-pub use wal::*;
-
-#[cfg(feature = "unstable")]
 pub use state::*;
+pub use wal::*;
 
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub struct EraCbor(pub Era, pub Cbor);
@@ -713,7 +709,6 @@ pub trait ChainLogic {
         Ok(out)
     }
 
-    #[cfg(feature = "unstable")]
     fn compute_apply_delta3<'a>(
         state: &impl State3Store,
         block: &Self::Block<'a>,
@@ -731,7 +726,6 @@ pub enum DomainError {
     #[error("state error: {0}")]
     StateError(#[from] StateError),
 
-    #[cfg(feature = "unstable")]
     #[error("state3 error: {0}")]
     State3Error(#[from] State3Error),
 
@@ -749,7 +743,6 @@ pub trait Domain: Send + Sync + Clone + 'static {
     type Mempool: MempoolStore;
     type Chain: ChainLogic;
 
-    #[cfg(feature = "unstable")]
     type State3: State3Store;
 
     fn storage_config(&self) -> &StorageConfig;
@@ -760,7 +753,6 @@ pub trait Domain: Send + Sync + Clone + 'static {
     fn archive(&self) -> &Self::Archive;
     fn mempool(&self) -> &Self::Mempool;
 
-    #[cfg(feature = "unstable")]
     fn state3(&self) -> &Self::State3;
 
     fn apply_origin(&self) -> Result<(), DomainError> {
@@ -785,7 +777,6 @@ pub trait Domain: Send + Sync + Clone + 'static {
         Ok(deltas)
     }
 
-    #[cfg(feature = "unstable")]
     fn compute_apply_deltas3(&self, blocks: &[RawBlock]) -> Result<Vec<StateDelta>, DomainError> {
         let mut deltas = Vec::with_capacity(blocks.len());
 
@@ -805,7 +796,7 @@ pub trait Domain: Send + Sync + Clone + 'static {
         self.archive().apply(&deltas)?;
         self.mempool().apply(&deltas);
 
-        #[cfg(feature = "unstable")]
+        #[cfg(feature = "state3")]
         {
             for delta in self.compute_apply_deltas3(blocks)? {
                 self.state3().apply_delta(delta)?;

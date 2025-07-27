@@ -33,7 +33,7 @@ base64.workspace = true
 dolos-core = { path = "crates/core" }
 dolos-cardano = { path = "crates/cardano", features = ["include-genesis"] }
 dolos-redb = { path = "crates/redb" }
-dolos-redb3 = { path = "crates/redb3", optional = true }
+dolos-redb3 = { path = "crates/redb3" }
 dolos-minibf = { path = "crates/minibf", optional = true }
 dolos-trp = { path = "crates/trp", optional = true }
 
@@ -100,7 +100,7 @@ mithril = ["mithril-client"]
 utils = ["comfy-table", "inquire", "toml"]
 debug = ["console-subscriber", "tokio/tracing"]
 phase2 = ["pallas/phase2", "dolos-core/phase2", "dolos-minibf/phase2"]
-unstable = ["dolos-core/unstable", "dolos-cardano/unstable", "dolos-testing/unstable", "dolos-redb3/unstable"]
+state3 = ["dolos-core/state3"]
 
 # Service features
 grpc = ["tonic", "tonic-web", "tonic-reflection", "tower-http/cors"]
