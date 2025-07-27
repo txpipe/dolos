@@ -1,64 +1,59 @@
 use std::collections::HashSet;
 
-use dolos_core::{Entity, EntityValue, Namespace, NamespaceType, StateSchema};
+use dolos_core::{Entity, EntityValue, Namespace, NamespaceType, State3Error, StateSchema};
 use pallas::codec::minicbor::{self, Decode, Encode};
 
 #[derive(Debug, Clone, PartialEq, Eq, Decode, Encode, Default)]
 pub struct AccountState {
     #[n(0)]
-    pub active: bool,
+    pub active_epoch: Option<u32>,
 
     #[n(1)]
-    pub active_epoch: u32,
+    pub controlled_amount: u64,
 
     #[n(2)]
-    pub controlled_amount: String,
+    pub rewards_sum: u64,
 
     #[n(3)]
-    pub rewards_sum: String,
+    pub withdrawals_sum: u64,
 
     #[n(4)]
-    pub withdrawals_sum: String,
+    pub reserves_sum: u64,
 
     #[n(5)]
-    pub reserves_sum: String,
+    pub treasury_sum: u64,
 
     #[n(6)]
-    pub treasury_sum: String,
+    pub withdrawable_amount: u64,
 
     #[n(7)]
-    pub withdrawable_amount: String,
+    pub pool_id: Option<Vec<u8>>,
 
     #[n(8)]
-    pub pool_id: String,
-
-    #[n(9)]
-    pub drep_id: String,
+    pub drep_id: Option<Vec<u8>>,
 
     // capped size, LRU type cache
-    #[n(10)]
+    #[n(9)]
     pub seen_addresses: HashSet<Vec<u8>>,
 }
 
-impl From<EntityValue> for AccountState {
-    fn from(value: EntityValue) -> Self {
-        let mut decoder = minicbor::Decoder::new(value.as_slice());
-        decoder.decode().unwrap()
-    }
-}
+impl Entity for AccountState {
+    const NS: Namespace = "accounts";
+    const NS_TYPE: NamespaceType = NamespaceType::KeyValue;
 
-impl Into<EntityValue> for AccountState {
-    fn into(self) -> EntityValue {
+    fn decode_value(value: EntityValue) -> Result<Self, State3Error> {
+        let out = minicbor::Decoder::new(value.as_slice()).decode()?;
+
+        Ok(out)
+    }
+
+    fn encode_value(self) -> EntityValue {
         pallas::codec::minicbor::to_vec(&self).unwrap()
     }
 }
 
-impl Entity for AccountState {
-    const NS: Namespace = "account_state";
-}
-
 pub fn build_schema() -> StateSchema {
     let mut schema = StateSchema::default();
-    schema.insert("account_state", NamespaceType::KeyValue);
+    schema.insert(AccountState::NS, AccountState::NS_TYPE);
     schema
 }

@@ -5,3 +5,4 @@ pub mod epochs;
 pub mod genesis;
 pub mod tx;
 pub mod txs;
+pub mod utxos;
