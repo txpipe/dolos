@@ -1,5 +1,4 @@
 use futures_core::Stream;
-use futures_util::stream::once;
 use futures_util::StreamExt;
 use itertools::Itertools;
 use pallas::interop::utxorpc as interop;
@@ -90,25 +89,6 @@ fn wal_log_to_tip_response<C: LedgerContext>(
                 })
                 .into()
             }
-        },
-    }
-}
-
-fn point_to_reset_tip_response(point: ChainPoint) -> u5c::sync::FollowTipResponse {
-    match point {
-        ChainPoint::Origin => u5c::sync::FollowTipResponse {
-            action: u5c::sync::follow_tip_response::Action::Reset(BlockRef {
-                hash: vec![].into(),
-                index: 0,
-            })
-            .into(),
-        },
-        ChainPoint::Specific(slot, hash) => u5c::sync::FollowTipResponse {
-            action: u5c::sync::follow_tip_response::Action::Reset(BlockRef {
-                hash: hash.to_vec().into(),
-                index: slot,
-            })
-            .into(),
         },
     }
 }

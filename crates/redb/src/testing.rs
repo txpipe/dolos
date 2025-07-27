@@ -23,7 +23,7 @@ pub fn dummy_block_from_slot(slot: u64) -> RawBlock {
 }
 
 pub fn empty_wal_db() -> RedbWalStore {
-    let mut wal = RedbWalStore::memory().unwrap();
+    let wal = RedbWalStore::memory().unwrap();
 
     wal.initialize_from_origin().unwrap();
 
@@ -31,7 +31,7 @@ pub fn empty_wal_db() -> RedbWalStore {
 }
 
 pub fn wal_with_dummy_blocks(quantity: usize) -> RedbWalStore {
-    let mut wal = empty_wal_db();
+    let wal = empty_wal_db();
 
     let blocks = (0..quantity).map(|x| dummy_block_from_slot(x as u64));
     wal.roll_forward(blocks).unwrap();

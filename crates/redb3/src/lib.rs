@@ -20,7 +20,7 @@ pub enum Error {
     DatabaseError(#[from] ::redb::DatabaseError),
 
     #[error(transparent)]
-    TransactionError(#[from] ::redb::TransactionError),
+    TransactionError(Box<::redb::TransactionError>),
 
     #[error(transparent)]
     CommitError(#[from] ::redb::CommitError),
@@ -33,6 +33,12 @@ pub enum Error {
 
     #[error(transparent)]
     StateError(#[from] StateError),
+}
+
+impl From<::redb::TransactionError> for Error {
+    fn from(error: ::redb::TransactionError) -> Self {
+        Error::TransactionError(Box::new(error))
+    }
 }
 
 impl From<Error> for StateError {
@@ -100,7 +106,7 @@ impl Table {
                 let value = table.get(key)?;
                 Ok(value.map(|v| v.value().to_vec()))
             }
-            _ => return Err(Error::from(StateError::InvalidOpForTable)),
+            _ => Err(Error::from(StateError::InvalidOpForTable)),
         }
     }
 
@@ -274,6 +280,7 @@ impl StateStore {
         &self.db
     }
 
+    #[allow(dead_code)]
     pub(crate) fn db_mut(&mut self) -> Option<&mut Database> {
         Arc::get_mut(&mut self.db)
     }

@@ -633,7 +633,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_wal_block_reader_happy_path() {
-        let mut db = RedbWalStore::memory().unwrap();
+        let db = RedbWalStore::memory().unwrap();
         db.initialize_from_origin().unwrap();
 
         let blocks = (0..=5).map(dummy_block).collect_vec();
@@ -756,7 +756,7 @@ mod tests {
 
     #[test]
     fn test_basic_append() {
-        let mut db = empty_wal_db();
+        let db = empty_wal_db();
 
         let expected_block = dummy_block_from_slot(11);
         let expected_point = ChainPoint::Specific(11, expected_block.hash);

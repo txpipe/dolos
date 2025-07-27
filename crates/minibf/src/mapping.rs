@@ -835,6 +835,10 @@ fn stake_cred_to_address(cred: &StakeCredential, network: Network) -> StakeAddre
     }
 }
 
+fn vkey_to_stake_address(vkey: Hash<28>, network: Network) -> StakeAddress {
+    StakeAddress::new(network, StakePayload::Stake(vkey))
+}
+
 fn build_delegation_inner(
     index: usize,
     cred: &StakeCredential,
@@ -1155,17 +1159,29 @@ impl IntoModel<TxContentPoolCertsInner> for PoolUpdateModelBuilder {
     type SortKey = ();
 
     fn into_model(self) -> Result<TxContentPoolCertsInner, StatusCode> {
+        let reward_account =
+            vkey_to_stake_address(self.reward_account.as_slice().into(), self.network)
+                .to_bech32()
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        let owners: Vec<_> = self
+            .pool_owners
+            .iter()
+            .map(|owner| vkey_to_stake_address(*owner, self.network))
+            .map(|owner| {
+                owner
+                    .to_bech32()
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+            })
+            .try_collect()?;
+
         Ok(TxContentPoolCertsInner {
             vrf_key: self.vrf_keyhash.to_string(),
             pledge: self.pledge.to_string(),
             margin_cost: rational_to_f64::<3>(&self.margin),
             fixed_cost: self.cost.to_string(),
-            reward_account: self.reward_account.to_string(),
-            owners: self
-                .pool_owners
-                .iter()
-                .map(|owner| owner.to_string())
-                .collect(),
+            reward_account,
+            owners,
             metadata: Some(Box::new(TxContentPoolCertsInnerMetadata {
                 url: self.pool_metadata.as_ref().map(|x| x.url.clone()),
                 hash: self.pool_metadata.as_ref().map(|x| x.hash.to_string()),
