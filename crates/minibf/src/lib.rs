@@ -202,6 +202,10 @@ impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
                 "/txs/{tx_hash}/pool_retires",
                 get(routes::txs::by_hash_pool_retires::<D>),
             )
+            .route(
+                "/txs/{tx_hash}/stakes",
+                get(routes::txs::by_hash_stakes::<D>),
+            )
             .with_state(Facade::<D> { inner: domain })
             .layer(
                 trace::TraceLayer::new_for_http()

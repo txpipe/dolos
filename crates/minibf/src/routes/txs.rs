@@ -9,7 +9,8 @@ use blockfrost_openapi::models::{
     tx_content_metadata_cbor_inner::TxContentMetadataCborInner,
     tx_content_metadata_inner::TxContentMetadataInner, tx_content_mirs_inner::TxContentMirsInner,
     tx_content_pool_certs_inner::TxContentPoolCertsInner,
-    tx_content_pool_retires_inner::TxContentPoolRetiresInner, tx_content_utxo::TxContentUtxo,
+    tx_content_pool_retires_inner::TxContentPoolRetiresInner,
+    tx_content_stake_addr_inner::TxContentStakeAddrInner, tx_content_utxo::TxContentUtxo,
     tx_content_withdrawals_inner::TxContentWithdrawalsInner,
 };
 use dolos_core::{ArchiveStore as _, Domain};
@@ -196,13 +197,34 @@ pub async fn by_hash_pool_updates<D: Domain>(
 ) -> Result<Json<Vec<TxContentPoolCertsInner>>, StatusCode> {
     let hash = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
 
+    let network = domain.get_network_id()?;
+
     let (raw, order) = domain
         .archive()
         .get_block_with_tx(hash.as_slice())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    let tx = TxModelBuilder::new(&raw, order)?;
+    let tx = TxModelBuilder::new(&raw, order)?.with_network(network);
+
+    tx.into_response()
+}
+
+pub async fn by_hash_stakes<D: Domain>(
+    Path(tx_hash): Path<String>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Vec<TxContentStakeAddrInner>>, StatusCode> {
+    let hash = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    let network = domain.get_network_id()?;
+
+    let (raw, order) = domain
+        .archive()
+        .get_block_with_tx(hash.as_slice())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let tx = TxModelBuilder::new(&raw, order)?.with_network(network);
 
     tx.into_response()
 }
