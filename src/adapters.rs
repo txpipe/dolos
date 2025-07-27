@@ -421,6 +421,8 @@ pub struct DomainAdapter {
     pub state: StateAdapter,
     pub archive: ArchiveAdapter,
     pub mempool: crate::mempool::Mempool,
+
+    pub state3: dolos_redb3::StateStore,
 }
 
 impl Domain for DomainAdapter {
@@ -429,6 +431,8 @@ impl Domain for DomainAdapter {
     type Archive = ArchiveAdapter;
     type Mempool = crate::mempool::Mempool;
     type Chain = dolos_cardano::ChainLogic;
+
+    type State3 = dolos_redb3::StateStore;
 
     fn genesis(&self) -> &Genesis {
         &self.genesis
@@ -440,6 +444,10 @@ impl Domain for DomainAdapter {
 
     fn state(&self) -> &Self::State {
         &self.state
+    }
+
+    fn state3(&self) -> &Self::State3 {
+        &self.state3
     }
 
     fn archive(&self) -> &Self::Archive {

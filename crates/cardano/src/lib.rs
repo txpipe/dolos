@@ -15,6 +15,10 @@ pub use pallas;
 pub mod pparams;
 //pub mod validate;
 
+pub mod model;
+
+pub mod roll;
+
 #[cfg(feature = "include-genesis")]
 pub mod include;
 
@@ -317,6 +321,15 @@ impl dolos_core::ChainLogic for ChainLogic {
         unapplied_deltas: &[LedgerDelta],
     ) -> Result<LedgerQuery, ChainError> {
         ledger_query_for_block(block, unapplied_deltas)
+    }
+
+    fn compute_apply_delta3<'a>(
+        state: &impl State3Store,
+        block: &Self::Block<'a>,
+    ) -> Result<StateDelta, ChainError> {
+        let delta = roll::compute_block_delta(state, block).unwrap();
+
+        Ok(delta)
     }
 }
 
