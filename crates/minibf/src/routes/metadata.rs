@@ -68,7 +68,7 @@ impl MetadataHistoryModelBuilder {
     }
 }
 
-impl<'a> IntoModel<Vec<TxMetadataLabelJsonInner>> for MetadataHistoryModelBuilder {
+impl IntoModel<Vec<TxMetadataLabelJsonInner>> for MetadataHistoryModelBuilder {
     type SortKey = ();
 
     fn into_model(self) -> Result<Vec<TxMetadataLabelJsonInner>, StatusCode> {
@@ -91,7 +91,7 @@ impl<'a> IntoModel<Vec<TxMetadataLabelJsonInner>> for MetadataHistoryModelBuilde
     }
 }
 
-impl<'a> IntoModel<Vec<TxMetadataLabelCborInner>> for MetadataHistoryModelBuilder {
+impl IntoModel<Vec<TxMetadataLabelCborInner>> for MetadataHistoryModelBuilder {
     type SortKey = ();
 
     fn into_model(self) -> Result<Vec<TxMetadataLabelCborInner>, StatusCode> {
