@@ -8,6 +8,7 @@ use tracing::info;
 use crate::model::{AccountState, AssetState};
 
 trait RollVisitor {
+    #[allow(unused_variables)]
     fn visit_output(
         &mut self,
         state: &impl State3Store,
@@ -17,6 +18,7 @@ trait RollVisitor {
         Ok(())
     }
 
+    #[allow(unused_variables)]
     fn visit_mint(
         &mut self,
         state: &impl State3Store,

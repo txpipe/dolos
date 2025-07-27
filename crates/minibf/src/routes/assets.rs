@@ -136,7 +136,7 @@ pub async fn by_subject<D: Domain>(
 ) -> Result<Json<Asset>, StatusCode> {
     let subject = hex::decode(subject).map_err(|_| StatusCode::BAD_REQUEST)?;
 
-    let state = domain
+    let asset_state = domain
         .state3()
         .read_entity_typed::<dolos_cardano::model::AssetState>(&subject)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -144,13 +144,13 @@ pub async fn by_subject<D: Domain>(
 
     let initial_tx = domain
         .archive()
-        .get_tx(state.initial_tx.as_slice())
+        .get_tx(asset_state.initial_tx.as_slice())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let model = AssetModelBuilder {
         subject,
-        asset_state: state,
-        initial_tx: initial_tx,
+        asset_state,
+        initial_tx,
     };
 
     model.into_response()
