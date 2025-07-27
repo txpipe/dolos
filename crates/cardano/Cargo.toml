@@ -10,6 +10,7 @@ thiserror.workspace = true
 tracing.workspace = true
 serde.workspace = true
 chrono.workspace = true
+hex.workspace = true
 paste = "1.0.15"
 
 serde_json = { workspace = true, optional = true }
