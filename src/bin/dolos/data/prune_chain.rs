@@ -17,7 +17,7 @@ pub struct Args {
 pub fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging)?;
 
-    let (_, _, chain) = crate::common::setup_data_stores(config).context("opening data stores")?;
+    let stores = crate::common::setup_data_stores(config).context("opening data stores")?;
 
     let max_slots = match args.max_slots {
         Some(x) => x,
@@ -29,7 +29,7 @@ pub fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
 
     info!(max_slots, "prunning to max slots");
 
-    let dolos::adapters::ArchiveAdapter::Redb(mut chain) = chain else {
+    let dolos::adapters::ArchiveAdapter::Redb(mut chain) = stores.archive else {
         bail!("Invalid store kind")
     };
 
