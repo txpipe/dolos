@@ -1,4 +1,4 @@
-use std::{collections::HashMap, ops::Range};
+use std::{collections::HashMap, marker::PhantomData, ops::Range};
 
 use crate::BlockSlot;
 
@@ -155,7 +155,33 @@ pub enum StateError {
 // temporary alias to avoid collision with existing StateError
 pub type State3Error = StateError;
 
-pub trait State3Store {
+pub struct EntityIterTyped<S: State3Store, T: Entity> {
+    inner: S::EntityIter,
+    _marker: PhantomData<T>,
+}
+
+impl<S: State3Store, T: Entity> EntityIterTyped<S, T> {
+    pub fn new(inner: S::EntityIter) -> Self {
+        Self {
+            inner,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<S: State3Store, T: Entity> Iterator for EntityIterTyped<S, T> {
+    type Item = Result<(EntityKey, T), StateError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let next = self.inner.next()?;
+
+        let mapped = next.and_then(|(key, value)| T::decode_value(value).map(|v| (key, v)));
+
+        Some(mapped)
+    }
+}
+
+pub trait State3Store: Sized {
     type EntityIter: Iterator<Item = Result<(EntityKey, EntityValue), StateError>>;
     type EntityValueIter: Iterator<Item = Result<EntityValue, StateError>>;
 
@@ -188,6 +214,14 @@ pub trait State3Store {
         let decoded = value.map(T::decode_value).transpose()?;
 
         Ok(decoded)
+    }
+
+    fn iter_entities_typed<T: Entity>(
+        &self,
+        range: Range<&[u8]>,
+    ) -> Result<EntityIterTyped<Self, T>, StateError> {
+        let inner = self.iter_entities(T::NS, range)?;
+        Ok(EntityIterTyped::<_, T>::new(inner))
     }
 }
 

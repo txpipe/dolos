@@ -4,6 +4,7 @@ use dolos_core::{Entity, EntityValue, Namespace, NamespaceType, State3Error, Sta
 use pallas::{
     codec::minicbor::{self, Decode, Encode},
     crypto::hash::Hash,
+    ledger::primitives::{PoolMetadata, RationalNumber, Relay},
 };
 
 /// Macro to generate Entity implementation for a type
@@ -76,9 +77,51 @@ pub struct AssetState {
 
 impl_entity!(AssetState, "assets", NamespaceType::KeyValue);
 
+#[derive(Debug, Encode, Decode, Clone)]
+pub struct PoolState {
+    #[n(0)]
+    pub vrf_keyhash: Hash<32>,
+
+    #[n(1)]
+    pub reward_account: Vec<u8>,
+
+    #[n(2)]
+    pub pool_owners: Vec<Hash<28>>,
+
+    #[n(3)]
+    pub relays: Vec<Relay>,
+
+    #[n(4)]
+    pub declared_pledge: u64,
+
+    #[n(5)]
+    pub margin_cost: RationalNumber,
+
+    #[n(6)]
+    pub fixed_cost: u64,
+
+    #[n(7)]
+    pub metadata: Option<PoolMetadata>,
+
+    #[n(8)]
+    pub active_stake: u64,
+
+    #[n(9)]
+    pub live_stake: u64,
+
+    #[n(10)]
+    pub blocks_minted: u32,
+
+    #[n(11)]
+    pub live_saturation: f64,
+}
+
+impl_entity!(PoolState, "pools", NamespaceType::KeyValue);
+
 pub fn build_schema() -> StateSchema {
     let mut schema = StateSchema::default();
     schema.insert(AccountState::NS, AccountState::NS_TYPE);
     schema.insert(AssetState::NS, AssetState::NS_TYPE);
+    schema.insert(PoolState::NS, PoolState::NS_TYPE);
     schema
 }
