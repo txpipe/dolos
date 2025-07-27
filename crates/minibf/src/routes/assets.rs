@@ -6,12 +6,11 @@ use axum::{
     Json,
 };
 use blockfrost_openapi::models::asset::{Asset, OnchainMetadataStandard};
-use dolos_core::{ArchiveStore, Domain, Era, EraCbor, State3Store as _};
+use dolos_core::{ArchiveStore, Domain, EraCbor, State3Store as _};
 use pallas::ledger::{primitives::Metadatum, traverse::MultiEraTx};
 
 use crate::{
     mapping::{asset_fingerprint, IntoModel},
-    routes::metadata,
     Facade,
 };
 
