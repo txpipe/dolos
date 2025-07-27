@@ -78,6 +78,27 @@ pub fn bech32_pool(key: impl AsRef<[u8]>) -> Result<String, StatusCode> {
     bech32(POOL_HRP, key)
 }
 
+pub fn bytes_to_address(bytes: &[u8]) -> Result<Address, StatusCode> {
+    Address::from_bytes(bytes).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+pub fn bytes_to_address_bech32(bytes: &[u8]) -> Result<String, StatusCode> {
+    let addr = bytes_to_address(bytes)?;
+    addr.to_bech32()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+fn stake_cred_to_address(cred: &StakeCredential, network: Network) -> StakeAddress {
+    match cred {
+        StakeCredential::AddrKeyhash(key) => StakeAddress::new(network, StakePayload::Stake(*key)),
+        StakeCredential::ScriptHash(key) => StakeAddress::new(network, StakePayload::Script(*key)),
+    }
+}
+
+fn vkey_to_stake_address(vkey: Hash<28>, network: Network) -> StakeAddress {
+    StakeAddress::new(network, StakePayload::Stake(vkey))
+}
+
 pub trait IntoModel<T>
 where
     T: serde::Serialize,
@@ -826,17 +847,6 @@ impl IntoModel<Vec<TxContentWithdrawalsInner>> for TxModelBuilder<'_> {
 
         Ok(items)
     }
-}
-
-fn stake_cred_to_address(cred: &StakeCredential, network: Network) -> StakeAddress {
-    match cred {
-        StakeCredential::AddrKeyhash(key) => StakeAddress::new(network, StakePayload::Stake(*key)),
-        StakeCredential::ScriptHash(key) => StakeAddress::new(network, StakePayload::Script(*key)),
-    }
-}
-
-fn vkey_to_stake_address(vkey: Hash<28>, network: Network) -> StakeAddress {
-    StakeAddress::new(network, StakePayload::Stake(vkey))
 }
 
 fn build_delegation_inner(

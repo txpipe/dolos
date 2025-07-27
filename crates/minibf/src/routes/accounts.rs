@@ -4,7 +4,8 @@ use axum::{
     Json,
 };
 use blockfrost_openapi::models::{
-    account_content::AccountContent, address_utxo_content_inner::AddressUtxoContentInner,
+    account_addresses_content_inner::AccountAddressesContentInner, account_content::AccountContent,
+    address_utxo_content_inner::AddressUtxoContentInner,
 };
 
 use dolos_cardano::pparams::ChainSummary;
@@ -12,7 +13,7 @@ use dolos_core::{ArchiveStore, Domain, State3Store as _, StateStore};
 use pallas::ledger::addresses::StakeAddress;
 
 use crate::{
-    mapping::{bech32_drep, bech32_pool, IntoModel},
+    mapping::{bech32_drep, bech32_pool, bytes_to_address_bech32, IntoModel},
     pagination::{Pagination, PaginationParameters},
     Facade,
 };
@@ -33,17 +34,27 @@ fn ensure_stake_address(address: &str) -> Result<StakeAddress, StatusCode> {
 }
 
 struct AccountModelBuilder<'a> {
-    stake_address: StakeAddress,
     account_state: dolos_cardano::model::AccountState,
-    tip_slot: u64,
-    chain: &'a ChainSummary,
+    stake_address: Option<StakeAddress>,
+    tip_slot: Option<u64>,
+    chain: Option<&'a ChainSummary>,
 }
 
 impl<'a> IntoModel<AccountContent> for AccountModelBuilder<'a> {
     type SortKey = ();
 
     fn into_model(self) -> Result<AccountContent, StatusCode> {
-        let (current_epoch, _) = dolos_cardano::slot_epoch(self.tip_slot, self.chain);
+        let tip_slot = self.tip_slot.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        let chain = self.chain.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        let stake_address = self
+            .stake_address
+            .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?
+            .to_bech32()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        let (current_epoch, _) = dolos_cardano::slot_epoch(tip_slot, chain);
 
         let active = self
             .account_state
@@ -66,7 +77,7 @@ impl<'a> IntoModel<AccountContent> for AccountModelBuilder<'a> {
             .transpose()?;
 
         let out = AccountContent {
-            stake_address: self.stake_address.to_bech32().unwrap(),
+            stake_address,
             active,
             active_epoch: self.account_state.active_epoch.map(|x| x as i32),
             controlled_amount: self.account_state.controlled_amount.to_string(),
@@ -78,6 +89,26 @@ impl<'a> IntoModel<AccountContent> for AccountModelBuilder<'a> {
             pool_id,
             drep_id,
         };
+
+        Ok(out)
+    }
+}
+
+impl<'a> IntoModel<Vec<AccountAddressesContentInner>> for AccountModelBuilder<'a> {
+    type SortKey = ();
+
+    fn into_model(self) -> Result<Vec<AccountAddressesContentInner>, StatusCode> {
+        let addresses: Vec<_> = self
+            .account_state
+            .seen_addresses
+            .iter()
+            .map(|x| bytes_to_address_bech32(x.as_slice()))
+            .collect::<Result<_, _>>()?;
+
+        let out: Vec<_> = addresses
+            .into_iter()
+            .map(|x| AccountAddressesContentInner { address: x })
+            .collect();
 
         Ok(out)
     }
@@ -107,10 +138,33 @@ pub async fn by_stake<D: Domain>(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let model = AccountModelBuilder {
-        stake_address,
         account_state: state,
-        tip_slot,
-        chain: &chain,
+        stake_address: Some(stake_address),
+        tip_slot: Some(tip_slot),
+        chain: Some(&chain),
+    }
+    .into_model()?;
+
+    Ok(Json(model))
+}
+
+pub async fn by_stake_addresses<D: Domain>(
+    Path(stake_address): Path<String>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Vec<AccountAddressesContentInner>>, StatusCode> {
+    let stake_address = ensure_stake_address(&stake_address)?;
+
+    let state = domain
+        .state3()
+        .read_entity_typed::<dolos_cardano::model::AccountState>(stake_address.to_vec())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let model = AccountModelBuilder {
+        account_state: state,
+        stake_address: Some(stake_address),
+        tip_slot: None,
+        chain: None,
     }
     .into_model()?;
 
