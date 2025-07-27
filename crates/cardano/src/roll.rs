@@ -1,4 +1,4 @@
-use dolos_core::{StateDelta, StateError3, StateStore3};
+use dolos_core::{State3Error, State3Store, StateDelta};
 use pallas::ledger::{
     addresses::{Address, StakeAddress},
     traverse::MultiEraBlock,
@@ -8,9 +8,9 @@ use tracing::info;
 use crate::model::AccountState;
 
 pub fn compute_block_delta<'a>(
-    state: &impl StateStore3,
+    state: &impl State3Store,
     block: &MultiEraBlock<'a>,
-) -> Result<StateDelta, StateError3> {
+) -> Result<StateDelta, State3Error> {
     let mut delta = StateDelta::new(block.slot());
 
     for tx in block.txs() {

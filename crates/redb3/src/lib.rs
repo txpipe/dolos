@@ -1,8 +1,8 @@
 use std::{collections::HashMap, ops::Range, path::Path, sync::Arc};
 
 use dolos_core::{
-    BlockSlot, EntityDelta, EntityKey, EntityValue, Namespace, NamespaceType, StateDelta,
-    StateError3 as StateError, StateSchema,
+    BlockSlot, EntityDelta, EntityKey, EntityValue, Namespace, NamespaceType,
+    State3Error as StateError, StateDelta, StateSchema,
 };
 use redb::{
     Database, Durability, MultimapTableDefinition, ReadTransaction, TableDefinition,
@@ -311,7 +311,7 @@ impl StateStore {
     }
 }
 
-impl dolos_core::StateStore3 for StateStore {
+impl dolos_core::State3Store for StateStore {
     type EntityIter = EntityIter;
     type EntityValueIter = EntityValueIter;
 
@@ -425,7 +425,7 @@ impl dolos_core::StateStore3 for StateStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dolos_core::StateStore3 as _;
+    use dolos_core::State3Store as _;
 
     #[test]
     fn test_apply_value_table() {

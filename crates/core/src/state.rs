@@ -146,9 +146,9 @@ pub enum StateError {
 }
 
 // temporary alias to avoid collision with existing StateError
-pub type StateError3 = StateError;
+pub type State3Error = StateError;
 
-pub trait StateStore3 {
+pub trait State3Store {
     type EntityIter: Iterator<Item = Result<(EntityKey, EntityValue), StateError>>;
     type EntityValueIter: Iterator<Item = Result<EntityValue, StateError>>;
 

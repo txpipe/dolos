@@ -327,7 +327,7 @@ impl dolos_core::ChainLogic for ChainLogic {
 
     #[cfg(feature = "unstable")]
     fn compute_apply_delta3<'a>(
-        state: &impl StateStore3,
+        state: &impl State3Store,
         block: &Self::Block<'a>,
     ) -> Result<StateDelta, ChainError> {
         let delta = roll::compute_block_delta(state, block).unwrap();

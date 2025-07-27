@@ -35,7 +35,7 @@ pub enum Error {
 
     #[cfg(feature = "unstable")]
     #[error("state3 error: {0}")]
-    State3Error(#[from] StateError3),
+    State3Error(#[from] State3Error),
 
     #[error("{0}")]
     Message(String),

@@ -65,7 +65,7 @@ pub fn open_state3_store(config: &crate::Config) -> Result<dolos_redb3::StateSto
 
     let state3 =
         dolos_redb3::StateStore::open(schema, root.join("state"), config.storage.ledger_cache)
-            .map_err(StateError3::from)?;
+            .map_err(State3Error::from)?;
 
     Ok(state3)
 }
@@ -104,7 +104,7 @@ pub fn create_ephemeral_data_stores() -> Result<Stores, Error> {
 
     #[cfg(feature = "unstable")]
     let state3 = dolos_redb3::StateStore::in_memory(dolos_cardano::model::build_schema())
-        .map_err(StateError3::from)?;
+        .map_err(State3Error::from)?;
 
     let chain = dolos_redb::archive::ChainStore::in_memory_v1()?;
 

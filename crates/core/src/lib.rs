@@ -715,7 +715,7 @@ pub trait ChainLogic {
 
     #[cfg(feature = "unstable")]
     fn compute_apply_delta3<'a>(
-        state: &impl StateStore3,
+        state: &impl State3Store,
         block: &Self::Block<'a>,
     ) -> Result<StateDelta, ChainError>;
 }
@@ -733,7 +733,7 @@ pub enum DomainError {
 
     #[cfg(feature = "unstable")]
     #[error("state3 error: {0}")]
-    StateError3(#[from] StateError3),
+    State3Error(#[from] State3Error),
 
     #[error("archive error: {0}")]
     ArchiveError(#[from] ArchiveError),
@@ -750,7 +750,7 @@ pub trait Domain: Send + Sync + Clone + 'static {
     type Chain: ChainLogic;
 
     #[cfg(feature = "unstable")]
-    type State3: StateStore3;
+    type State3: State3Store;
 
     fn storage_config(&self) -> &StorageConfig;
     fn genesis(&self) -> &Genesis;
