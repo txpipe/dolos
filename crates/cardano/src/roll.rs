@@ -14,7 +14,7 @@ use pallas::ledger::primitives::conway::Certificate as ConwayCert;
 
 use tracing::info;
 
-use crate::model::{AccountState, AssetState, PoolDelegator, PoolState};
+use crate::model::{AccountState, AssetState, EpochState, PoolDelegator, PoolState};
 
 fn cert_to_pool_state(cert: &MultiEraCert) -> Option<(Hash<28>, PoolState)> {
     match cert {
@@ -108,6 +108,16 @@ fn cert_to_pool_delegator(cert: &MultiEraCert) -> Option<(Hash<28>, PoolDelegato
 
 trait RollVisitor {
     #[allow(unused_variables)]
+    fn visit_block(
+        &mut self,
+        state: &impl State3Store,
+        delta: &mut StateDelta,
+        block: &MultiEraBlock,
+    ) -> Result<(), State3Error> {
+        Ok(())
+    }
+
+    #[allow(unused_variables)]
     fn visit_output(
         &mut self,
         state: &impl State3Store,
@@ -148,6 +158,8 @@ fn crawl_block<'a, T: RollVisitor>(
     block: &MultiEraBlock<'a>,
     visitor: &mut T,
 ) -> Result<(), State3Error> {
+    visitor.visit_block(state, delta, block)?;
+
     for tx in block.txs() {
         for (index, output) in tx.outputs().iter().enumerate() {
             visitor.visit_output(state, delta, &tx, index as u32, output)?;
@@ -280,14 +292,51 @@ impl RollVisitor for PoolDelegatorVisitor {
     }
 }
 
+struct EpochStateVisitor;
+
+impl RollVisitor for EpochStateVisitor {
+    fn visit_block(
+        &mut self,
+        state: &impl State3Store,
+        delta: &mut StateDelta,
+        block: &MultiEraBlock,
+    ) -> Result<(), State3Error> {
+        let current = state
+            .read_entity_typed::<EpochState>(crate::model::CURRENT_EPOCH_KEY)?
+            .unwrap_or_default();
+
+        let block_fees = block.txs().iter().map(|tx| tx.fee()).flatten().sum::<u64>();
+
+        let new = EpochState {
+            gathered_fees: Some(current.gathered_fees.unwrap_or_default() + block_fees),
+            ..current
+        };
+
+        delta.override_entity(crate::model::CURRENT_EPOCH_KEY, new, None);
+
+        Ok(())
+    }
+}
+
 struct AllInOneVisitor {
     seen_addresses: SeenAddressesVisitor,
     asset_state: AssetStateVisitor,
     pool_state: PoolStateVisitor,
     pool_delegator: PoolDelegatorVisitor,
+    epoch_state: EpochStateVisitor,
 }
 
 impl RollVisitor for AllInOneVisitor {
+    fn visit_block(
+        &mut self,
+        state: &impl State3Store,
+        delta: &mut StateDelta,
+        block: &MultiEraBlock,
+    ) -> Result<(), State3Error> {
+        self.epoch_state.visit_block(state, delta, block)?;
+        Ok(())
+    }
+
     fn visit_output(
         &mut self,
         state: &impl State3Store,
@@ -304,6 +353,8 @@ impl RollVisitor for AllInOneVisitor {
             .visit_output(state, delta, tx, index, output)?;
         self.pool_delegator
             .visit_output(state, delta, tx, index, output)?;
+        self.epoch_state
+            .visit_output(state, delta, tx, index, output)?;
         Ok(())
     }
 
@@ -318,6 +369,7 @@ impl RollVisitor for AllInOneVisitor {
         self.asset_state.visit_mint(state, delta, tx, mint)?;
         self.pool_state.visit_mint(state, delta, tx, mint)?;
         self.pool_delegator.visit_mint(state, delta, tx, mint)?;
+        self.epoch_state.visit_mint(state, delta, tx, mint)?;
         Ok(())
     }
 
@@ -332,6 +384,7 @@ impl RollVisitor for AllInOneVisitor {
         self.asset_state.visit_cert(state, delta, tx, cert)?;
         self.pool_state.visit_cert(state, delta, tx, cert)?;
         self.pool_delegator.visit_cert(state, delta, tx, cert)?;
+        self.epoch_state.visit_cert(state, delta, tx, cert)?;
         Ok(())
     }
 }
@@ -347,6 +400,7 @@ pub fn compute_block_delta<'a>(
         asset_state: AssetStateVisitor,
         pool_state: PoolStateVisitor,
         pool_delegator: PoolDelegatorVisitor,
+        epoch_state: EpochStateVisitor,
     };
 
     crawl_block(&mut delta, state, block, &mut visitor)?;

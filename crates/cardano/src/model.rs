@@ -127,11 +127,40 @@ impl_entity!(
     NamespaceType::KeyMultiValue
 );
 
+#[derive(Debug, Encode, Decode, Clone, Default)]
+pub struct EpochState {
+    #[n(0)]
+    pub supply_circulating: u64,
+
+    #[n(1)]
+    pub supply_locked: u64,
+
+    #[n(2)]
+    pub treasury: u64,
+
+    #[n(3)]
+    pub stake_live: u64,
+
+    #[n(4)]
+    pub stake_active: u64,
+
+    #[n(5)]
+    pub gathered_fees: Option<u64>,
+
+    #[n(6)]
+    pub decayed_deposits: Option<u64>,
+}
+
+pub const CURRENT_EPOCH_KEY: &[u8] = b"current";
+
+impl_entity!(EpochState, "epoch", NamespaceType::KeyValue);
+
 pub fn build_schema() -> StateSchema {
     let mut schema = StateSchema::default();
     schema.insert(AccountState::NS, AccountState::NS_TYPE);
     schema.insert(AssetState::NS, AssetState::NS_TYPE);
     schema.insert(PoolState::NS, PoolState::NS_TYPE);
     schema.insert(PoolDelegator::NS, PoolDelegator::NS_TYPE);
+    schema.insert(EpochState::NS, EpochState::NS_TYPE);
     schema
 }
