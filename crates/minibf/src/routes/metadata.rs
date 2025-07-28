@@ -77,8 +77,7 @@ impl IntoModel<Vec<TxMetadataLabelJsonInner>> for MetadataHistoryModelBuilder {
             .into_iter()
             .take(self.page_size)
             .map(|(hash, datum)| {
-                let json =
-                    serde_json::to_value(datum).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                let json = datum.into_model()?;
 
                 Result::<_, StatusCode>::Ok(TxMetadataLabelJsonInner {
                     tx_hash: hash.to_string(),
