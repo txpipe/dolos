@@ -60,9 +60,12 @@ pub async fn all_extended<D: Domain>(
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<PoolListExtendedInner>>, StatusCode> {
+    let start = &[0u8; 28].as_slice();
+    let end = &[255u8; 28].as_slice();
+
     let iter = domain
         .state3()
-        .iter_entities_typed::<PoolState>(&[]..&[])
+        .iter_entities_typed::<PoolState>(start..end)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let page_size = params.count.unwrap_or(100) as usize;
