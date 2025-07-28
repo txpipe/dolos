@@ -6,8 +6,10 @@ use axum::{
     Json,
 };
 use blockfrost_openapi::models::{
-    account_addresses_content_inner::AccountAddressesContentInner, account_content::AccountContent,
+    account_addresses_content_inner::AccountAddressesContentInner,
+    account_content::AccountContent,
     account_delegation_content_inner::AccountDelegationContentInner,
+    account_registration_content_inner::{AccountRegistrationContentInner, Action},
     address_utxo_content_inner::AddressUtxoContentInner,
 };
 
@@ -204,59 +206,88 @@ pub async fn by_stake_utxos<D: Domain>(
 
 const MAX_SCAN_DEPTH: usize = 5000;
 
-struct AccountDelegationModelBuilder<'a> {
-    stake_address: StakeAddress,
+fn build_delegation(
+    stake_address: &StakeAddress,
     tx_hash: Hash<32>,
-    cert: &'a MultiEraCert<'a>,
+    cert: &MultiEraCert,
     epoch: u32,
     network: Network,
-}
-
-impl<'a> IntoModel<Option<AccountDelegationContentInner>> for AccountDelegationModelBuilder<'a> {
-    type SortKey = ();
-
-    fn into_model(self) -> Result<Option<AccountDelegationContentInner>, StatusCode> {
-        let cert = self.cert;
-
-        let (cred, pool) = match cert {
-            MultiEraCert::AlonzoCompatible(cert) => match cert.deref().deref() {
-                AlonzoCert::StakeDelegation(cred, pool) => (cred, pool),
-                _ => return Ok(None),
-            },
-            MultiEraCert::Conway(cert) => match cert.deref().deref() {
-                ConwayCert::StakeDelegation(cred, pool) => (cred, pool),
-                _ => return Ok(None),
-            },
+) -> Result<Option<AccountDelegationContentInner>, StatusCode> {
+    let (cred, pool) = match cert {
+        MultiEraCert::AlonzoCompatible(cert) => match cert.deref().deref() {
+            AlonzoCert::StakeDelegation(cred, pool) => (cred, pool),
             _ => return Ok(None),
-        };
+        },
+        MultiEraCert::Conway(cert) => match cert.deref().deref() {
+            ConwayCert::StakeDelegation(cred, pool) => (cred, pool),
+            _ => return Ok(None),
+        },
+        _ => return Ok(None),
+    };
 
-        let cred = mapping::stake_cred_to_address(cred, self.network);
+    let address = mapping::stake_cred_to_address(&cred, network);
 
-        if cred != self.stake_address {
-            return Ok(None);
-        }
-
-        let pool = mapping::bech32_pool(pool)?;
-
-        Ok(Some(AccountDelegationContentInner {
-            active_epoch: (self.epoch + 1) as i32,
-            tx_hash: self.tx_hash.to_string(),
-            amount: Default::default(),
-            pool_id: pool,
-        }))
+    if address != *stake_address {
+        return Ok(None);
     }
+
+    let pool = mapping::bech32_pool(pool)?;
+
+    Ok(Some(AccountDelegationContentInner {
+        active_epoch: (epoch + 1) as i32,
+        tx_hash: tx_hash.to_string(),
+        amount: Default::default(),
+        pool_id: pool,
+    }))
 }
 
-struct AccountActivityModelBuilder {
+fn build_registration(
+    stake_address: &StakeAddress,
+    tx_hash: Hash<32>,
+    cert: &MultiEraCert,
+    epoch: u32,
+    network: Network,
+) -> Result<Option<AccountRegistrationContentInner>, StatusCode> {
+    let (cred, is_registration) = match cert {
+        MultiEraCert::AlonzoCompatible(cert) => match cert.deref().deref() {
+            AlonzoCert::StakeRegistration(cred) => (cred, true),
+            AlonzoCert::StakeDeregistration(cred) => (cred, false),
+            _ => return Ok(None),
+        },
+        MultiEraCert::Conway(cert) => match cert.deref().deref() {
+            ConwayCert::StakeRegistration(cred) => (cred, true),
+            ConwayCert::StakeDeregistration(cred) => (cred, false),
+            _ => return Ok(None),
+        },
+        _ => return Ok(None),
+    };
+
+    let address = mapping::stake_cred_to_address(&cred, network);
+
+    if address != *stake_address {
+        return Ok(None);
+    }
+
+    Ok(Some(AccountRegistrationContentInner {
+        tx_hash: tx_hash.to_string(),
+        action: if is_registration {
+            Action::Registered
+        } else {
+            Action::Deregistered
+        },
+    }))
+}
+
+struct AccountActivityModelBuilder<T> {
     stake_address: StakeAddress,
     network: Network,
     page_size: usize,
     page_number: usize,
     skipped: usize,
-    items: Vec<AccountDelegationContentInner>,
+    items: Vec<T>,
 }
 
-impl AccountActivityModelBuilder {
+impl<T> AccountActivityModelBuilder<T> {
     fn new(
         stake_address: StakeAddress,
         network: Network,
@@ -277,7 +308,7 @@ impl AccountActivityModelBuilder {
         self.skipped < (self.page_number - 1) * self.page_size
     }
 
-    fn add(&mut self, item: AccountDelegationContentInner) {
+    fn add(&mut self, item: T) {
         if self.should_skip() {
             self.skipped += 1;
         } else {
@@ -289,39 +320,33 @@ impl AccountActivityModelBuilder {
         self.items.len() < self.page_size
     }
 
-    fn scan_cert_for_delegations(
-        &mut self,
-        epoch: u32,
-        tx: &MultiEraTx,
-        cert: &MultiEraCert,
-    ) -> Result<(), StatusCode> {
-        let builder = AccountDelegationModelBuilder {
-            stake_address: self.stake_address.clone(),
-            tx_hash: tx.hash(),
-            cert: &cert,
-            epoch,
-            network: self.network,
-        };
-
-        if let Some(model) = builder.into_model()? {
-            self.add(model);
-        }
-
-        Ok(())
-    }
-
-    fn scan_block_for_delegations(
+    fn scan_block<F>(
         &mut self,
         epoch: u32,
         block: &MultiEraBlock,
-    ) -> Result<(), StatusCode> {
+        mapper: F,
+    ) -> Result<(), StatusCode>
+    where
+        F: Fn(
+            &StakeAddress,
+            Hash<32>,
+            &MultiEraCert,
+            u32,
+            Network,
+        ) -> Result<Option<T>, StatusCode>,
+    {
         let txs = block.txs();
 
-        for tx in txs.iter() {
+        for tx in txs {
+            let tx_hash = tx.hash();
             let certs = tx.certs();
 
-            for cert in certs.iter() {
-                self.scan_cert_for_delegations(epoch, tx, cert)?;
+            for cert in certs {
+                let model = mapper(&self.stake_address, tx_hash, &cert, epoch, self.network)?;
+
+                if let Some(model) = model {
+                    self.add(model);
+                }
             }
         }
 
@@ -329,7 +354,9 @@ impl AccountActivityModelBuilder {
     }
 }
 
-impl IntoModel<Vec<AccountDelegationContentInner>> for AccountActivityModelBuilder {
+impl IntoModel<Vec<AccountDelegationContentInner>>
+    for AccountActivityModelBuilder<AccountDelegationContentInner>
+{
     type SortKey = ();
 
     fn into_model(self) -> Result<Vec<AccountDelegationContentInner>, StatusCode> {
@@ -337,11 +364,15 @@ impl IntoModel<Vec<AccountDelegationContentInner>> for AccountActivityModelBuild
     }
 }
 
-pub async fn by_stake_delegations<D: Domain>(
-    Path(stake_address): Path<String>,
-    Query(params): Query<PaginationParameters>,
-    State(domain): State<Facade<D>>,
-) -> Result<Json<Vec<AccountDelegationContentInner>>, StatusCode> {
+pub async fn by_stake_actions<D: Domain, F, T>(
+    stake_address: &str,
+    params: PaginationParameters,
+    domain: Facade<D>,
+    mapper: F,
+) -> Result<Vec<T>, StatusCode>
+where
+    F: Fn(&StakeAddress, Hash<32>, &MultiEraCert, u32, Network) -> Result<Option<T>, StatusCode>,
+{
     let stake_address = ensure_stake_address(&stake_address)?;
 
     let stake_hash = match stake_address.payload() {
@@ -387,8 +418,40 @@ pub async fn by_stake_delegations<D: Domain>(
 
         let block = MultiEraBlock::decode(&block).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-        builder.scan_block_for_delegations(epoch, &block)?;
+        builder.scan_block(epoch, &block, &mapper)?;
     }
 
-    builder.into_response()
+    Ok(builder.items)
+}
+
+pub async fn by_stake_delegations<D: Domain>(
+    Path(stake_address): Path<String>,
+    Query(params): Query<PaginationParameters>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Vec<AccountDelegationContentInner>>, StatusCode> {
+    let items = by_stake_actions::<D, _, AccountDelegationContentInner>(
+        &stake_address,
+        params,
+        domain,
+        build_delegation,
+    )
+    .await?;
+
+    Ok(Json(items))
+}
+
+pub async fn by_stake_registrations<D: Domain>(
+    Path(stake_address): Path<String>,
+    Query(params): Query<PaginationParameters>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Vec<AccountRegistrationContentInner>>, StatusCode> {
+    let items = by_stake_actions::<D, _, AccountRegistrationContentInner>(
+        &stake_address,
+        params,
+        domain,
+        build_registration,
+    )
+    .await?;
+
+    Ok(Json(items))
 }
