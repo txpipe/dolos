@@ -132,6 +132,10 @@ impl StateDelta {
 
         self.override_key(T::NS, key, entity, prev);
     }
+
+    pub fn append_entity<T: Entity>(&mut self, key: impl Into<EntityKey>, entity: T) {
+        self.append_value(T::NS, key, entity.encode_value());
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
