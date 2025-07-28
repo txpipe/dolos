@@ -14,7 +14,7 @@ use pallas::ledger::primitives::conway::Certificate as ConwayCert;
 
 use tracing::info;
 
-use crate::model::{AccountState, AssetState, PoolState};
+use crate::model::{AccountState, AssetState, PoolDelegator, PoolState};
 
 fn cert_to_pool_state(cert: &MultiEraCert) -> Option<(Hash<28>, PoolState)> {
     match cert {
@@ -77,6 +77,28 @@ fn cert_to_pool_state(cert: &MultiEraCert) -> Option<(Hash<28>, PoolState)> {
                 };
 
                 Some((*operator, state))
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn cert_to_pool_delegator(cert: &MultiEraCert) -> Option<(Hash<28>, PoolDelegator)> {
+    match cert {
+        MultiEraCert::AlonzoCompatible(cow) => match cow.deref().deref() {
+            AlonzoCert::StakeDelegation(delegator, pool) => {
+                let delegator = PoolDelegator(delegator.clone());
+
+                Some((*pool, delegator))
+            }
+            _ => None,
+        },
+        MultiEraCert::Conway(cow) => match cow.deref().deref() {
+            ConwayCert::StakeDelegation(delegator, pool) => {
+                let delegator = PoolDelegator(delegator.clone());
+
+                Some((*pool, delegator))
             }
             _ => None,
         },
@@ -239,10 +261,30 @@ impl RollVisitor for PoolStateVisitor {
     }
 }
 
+struct PoolDelegatorVisitor;
+
+impl RollVisitor for PoolDelegatorVisitor {
+    fn visit_cert(
+        &mut self,
+        _: &impl State3Store,
+        delta: &mut StateDelta,
+        _: &MultiEraTx,
+        cert: &MultiEraCert,
+    ) -> Result<(), State3Error> {
+        if let Some((operator, new)) = cert_to_pool_delegator(cert) {
+            info!(%operator, "new pool delegator");
+            delta.append_entity(operator.as_slice(), new);
+        }
+
+        Ok(())
+    }
+}
+
 struct AllInOneVisitor {
     seen_addresses: SeenAddressesVisitor,
     asset_state: AssetStateVisitor,
     pool_state: PoolStateVisitor,
+    pool_delegator: PoolDelegatorVisitor,
 }
 
 impl RollVisitor for AllInOneVisitor {
@@ -260,6 +302,8 @@ impl RollVisitor for AllInOneVisitor {
             .visit_output(state, delta, tx, index, output)?;
         self.pool_state
             .visit_output(state, delta, tx, index, output)?;
+        self.pool_delegator
+            .visit_output(state, delta, tx, index, output)?;
         Ok(())
     }
 
@@ -273,6 +317,7 @@ impl RollVisitor for AllInOneVisitor {
         self.seen_addresses.visit_mint(state, delta, tx, mint)?;
         self.asset_state.visit_mint(state, delta, tx, mint)?;
         self.pool_state.visit_mint(state, delta, tx, mint)?;
+        self.pool_delegator.visit_mint(state, delta, tx, mint)?;
         Ok(())
     }
 
@@ -286,6 +331,7 @@ impl RollVisitor for AllInOneVisitor {
         self.seen_addresses.visit_cert(state, delta, tx, cert)?;
         self.asset_state.visit_cert(state, delta, tx, cert)?;
         self.pool_state.visit_cert(state, delta, tx, cert)?;
+        self.pool_delegator.visit_cert(state, delta, tx, cert)?;
         Ok(())
     }
 }
@@ -300,6 +346,7 @@ pub fn compute_block_delta<'a>(
         seen_addresses: SeenAddressesVisitor,
         asset_state: AssetStateVisitor,
         pool_state: PoolStateVisitor,
+        pool_delegator: PoolDelegatorVisitor,
     };
 
     crawl_block(&mut delta, state, block, &mut visitor)?;
