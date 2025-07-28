@@ -1,3 +1,5 @@
+use std::ops::Deref;
+
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
@@ -5,15 +7,25 @@ use axum::{
 };
 use blockfrost_openapi::models::{
     account_addresses_content_inner::AccountAddressesContentInner, account_content::AccountContent,
+    account_delegation_content_inner::AccountDelegationContentInner,
     address_utxo_content_inner::AddressUtxoContentInner,
 };
 
-use dolos_cardano::pparams::ChainSummary;
-use dolos_core::{ArchiveStore, Domain, State3Store as _, StateStore};
-use pallas::ledger::addresses::StakeAddress;
+use dolos_cardano::{model::AccountActivity, pparams::ChainSummary};
+use dolos_core::{ArchiveStore, Domain, Entity as _, State3Store as _, StateStore};
+use pallas::{
+    crypto::hash::Hash,
+    ledger::{
+        addresses::{Network, StakeAddress, StakePayload},
+        traverse::{MultiEraBlock, MultiEraCert, MultiEraTx},
+    },
+};
+
+use pallas::ledger::primitives::alonzo::Certificate as AlonzoCert;
+use pallas::ledger::primitives::conway::Certificate as ConwayCert;
 
 use crate::{
-    mapping::{bech32_drep, bech32_pool, bytes_to_address_bech32, IntoModel},
+    mapping::{self, bech32_drep, bech32_pool, bytes_to_address_bech32, IntoModel},
     pagination::{Pagination, PaginationParameters},
     Facade,
 };
@@ -188,4 +200,195 @@ pub async fn by_stake_utxos<D: Domain>(
     let utxos = super::utxos::load_utxo_models(&domain, refs, pagination)?;
 
     Ok(Json(utxos))
+}
+
+const MAX_SCAN_DEPTH: usize = 5000;
+
+struct AccountDelegationModelBuilder<'a> {
+    stake_address: StakeAddress,
+    tx_hash: Hash<32>,
+    cert: &'a MultiEraCert<'a>,
+    epoch: u32,
+    network: Network,
+}
+
+impl<'a> IntoModel<Option<AccountDelegationContentInner>> for AccountDelegationModelBuilder<'a> {
+    type SortKey = ();
+
+    fn into_model(self) -> Result<Option<AccountDelegationContentInner>, StatusCode> {
+        let cert = self.cert;
+
+        let (cred, pool) = match cert {
+            MultiEraCert::AlonzoCompatible(cert) => match cert.deref().deref() {
+                AlonzoCert::StakeDelegation(cred, pool) => (cred, pool),
+                _ => return Ok(None),
+            },
+            MultiEraCert::Conway(cert) => match cert.deref().deref() {
+                ConwayCert::StakeDelegation(cred, pool) => (cred, pool),
+                _ => return Ok(None),
+            },
+            _ => return Ok(None),
+        };
+
+        let cred = mapping::stake_cred_to_address(cred, self.network);
+
+        if cred != self.stake_address {
+            return Ok(None);
+        }
+
+        let pool = mapping::bech32_pool(pool)?;
+
+        Ok(Some(AccountDelegationContentInner {
+            active_epoch: (self.epoch + 1) as i32,
+            tx_hash: self.tx_hash.to_string(),
+            amount: Default::default(),
+            pool_id: pool,
+        }))
+    }
+}
+
+struct AccountActivityModelBuilder {
+    stake_address: StakeAddress,
+    network: Network,
+    page_size: usize,
+    page_number: usize,
+    skipped: usize,
+    items: Vec<AccountDelegationContentInner>,
+}
+
+impl AccountActivityModelBuilder {
+    fn new(
+        stake_address: StakeAddress,
+        network: Network,
+        page_size: usize,
+        page_number: usize,
+    ) -> Self {
+        Self {
+            stake_address,
+            network,
+            page_size,
+            page_number,
+            skipped: 0,
+            items: vec![],
+        }
+    }
+
+    fn should_skip(&self) -> bool {
+        self.skipped < (self.page_number - 1) * self.page_size
+    }
+
+    fn add(&mut self, item: AccountDelegationContentInner) {
+        if self.should_skip() {
+            self.skipped += 1;
+        } else {
+            self.items.push(item);
+        }
+    }
+
+    fn needs_more(&self) -> bool {
+        self.items.len() < self.page_size
+    }
+
+    fn scan_cert_for_delegations(
+        &mut self,
+        epoch: u32,
+        tx: &MultiEraTx,
+        cert: &MultiEraCert,
+    ) -> Result<(), StatusCode> {
+        let builder = AccountDelegationModelBuilder {
+            stake_address: self.stake_address.clone(),
+            tx_hash: tx.hash(),
+            cert: &cert,
+            epoch,
+            network: self.network,
+        };
+
+        if let Some(model) = builder.into_model()? {
+            self.add(model);
+        }
+
+        Ok(())
+    }
+
+    fn scan_block_for_delegations(
+        &mut self,
+        epoch: u32,
+        block: &MultiEraBlock,
+    ) -> Result<(), StatusCode> {
+        let txs = block.txs();
+
+        for tx in txs.iter() {
+            let certs = tx.certs();
+
+            for cert in certs.iter() {
+                self.scan_cert_for_delegations(epoch, tx, cert)?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl IntoModel<Vec<AccountDelegationContentInner>> for AccountActivityModelBuilder {
+    type SortKey = ();
+
+    fn into_model(self) -> Result<Vec<AccountDelegationContentInner>, StatusCode> {
+        Ok(self.items)
+    }
+}
+
+pub async fn by_stake_delegations<D: Domain>(
+    Path(stake_address): Path<String>,
+    Query(params): Query<PaginationParameters>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Vec<AccountDelegationContentInner>>, StatusCode> {
+    let stake_address = ensure_stake_address(&stake_address)?;
+
+    let stake_hash = match stake_address.payload() {
+        StakePayload::Stake(x) => x.to_vec(),
+        StakePayload::Script(x) => x.to_vec(),
+    };
+
+    let chain = domain
+        .get_chain_summary()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let network = domain
+        .get_network_id()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let mut slot_iter = domain
+        .state3()
+        .iter_entity_values_typed::<AccountActivity>(stake_hash)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .take(MAX_SCAN_DEPTH);
+
+    let mut builder = AccountActivityModelBuilder::new(
+        stake_address,
+        network,
+        params.count.unwrap_or(100) as usize,
+        params.page.unwrap_or(1) as usize,
+    );
+
+    while builder.needs_more() {
+        let Some(slot) = slot_iter.next() else {
+            break;
+        };
+
+        let AccountActivity(slot) = slot.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        let (epoch, _) = dolos_cardano::slot_epoch(slot, &chain);
+
+        let block = domain
+            .archive()
+            .get_block_by_slot(&slot)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .ok_or(StatusCode::NOT_FOUND)?;
+
+        let block = MultiEraBlock::decode(&block).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        builder.scan_block_for_delegations(epoch, &block)?;
+    }
+
+    builder.into_response()
 }

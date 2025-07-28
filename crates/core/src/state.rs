@@ -185,6 +185,32 @@ impl<S: State3Store, T: Entity> Iterator for EntityIterTyped<S, T> {
     }
 }
 
+pub struct EntityValueIterTyped<S: State3Store, T: Entity> {
+    inner: S::EntityValueIter,
+    _marker: PhantomData<T>,
+}
+
+impl<S: State3Store, T: Entity> EntityValueIterTyped<S, T> {
+    pub fn new(inner: S::EntityValueIter) -> Self {
+        Self {
+            inner,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<S: State3Store, T: Entity> Iterator for EntityValueIterTyped<S, T> {
+    type Item = Result<T, StateError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let next = self.inner.next()?;
+
+        let mapped = next.and_then(|value| T::decode_value(value).map(|v| v));
+
+        Some(mapped)
+    }
+}
+
 pub trait State3Store: Sized {
     type EntityIter: Iterator<Item = Result<(EntityKey, EntityValue), StateError>>;
     type EntityValueIter: Iterator<Item = Result<EntityValue, StateError>>;
@@ -226,6 +252,14 @@ pub trait State3Store: Sized {
     ) -> Result<EntityIterTyped<Self, T>, StateError> {
         let inner = self.iter_entities(T::NS, range)?;
         Ok(EntityIterTyped::<_, T>::new(inner))
+    }
+
+    fn iter_entity_values_typed<T: Entity>(
+        &self,
+        key: impl AsRef<[u8]>,
+    ) -> Result<EntityValueIterTyped<Self, T>, StateError> {
+        let inner = self.iter_entity_values(T::NS, key)?;
+        Ok(EntityValueIterTyped::<_, T>::new(inner))
     }
 }
 
