@@ -127,6 +127,7 @@ impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
     async fn run(cfg: Self::Config, domain: D, cancel: C) -> Result<(), ServeError> {
         let app = Router::new()
             .route("/genesis", get(routes::genesis::naked::<D>))
+            .route("/network/eras", get(routes::network::eras::<D>))
             .route(
                 "/accounts/{stake_address}",
                 get(routes::accounts::by_stake::<D>),

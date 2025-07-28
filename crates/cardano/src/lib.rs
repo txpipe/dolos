@@ -8,6 +8,7 @@ use std::collections::HashSet;
 use dolos_core::*;
 
 use crate::pparams::ChainSummary;
+use crate::pparams::EraSummary;
 
 // re-export pallas for version compatibility downstream
 pub use pallas;
@@ -207,14 +208,18 @@ pub fn lastest_immutable_slot(tip: BlockSlot, genesis: &Genesis) -> BlockSlot {
 
 pub type Timestamp = u64;
 
-/// Resolve wall-clock time from a slot number and a chain summary.
-pub fn slot_time(slot: u64, summary: &ChainSummary) -> Timestamp {
-    let era = summary.era_for_slot(slot);
-
+pub fn slot_time_within_era(slot: u64, era: &EraSummary) -> Timestamp {
     let time = era.start.timestamp.timestamp() as u64
         + (slot - era.start.slot) * era.pparams.slot_length();
 
     time as Timestamp
+}
+
+/// Resolve wall-clock time from a slot number and a chain summary.
+pub fn slot_time(slot: u64, summary: &ChainSummary) -> Timestamp {
+    let era = summary.era_for_slot(slot);
+
+    slot_time_within_era(slot, era)
 }
 
 pub type Epoch = u32;
