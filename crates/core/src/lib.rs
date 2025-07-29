@@ -618,7 +618,7 @@ pub enum MempoolError {
 
     #[cfg(feature = "phase2")]
     #[error("phase-2 script yielded an error")]
-    Phase2ExplicitError,
+    Phase2ExplicitError(Vec<String>),
 
     #[error("state error: {0}")]
     StateError(#[from] StateError),
