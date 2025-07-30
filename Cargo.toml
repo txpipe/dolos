@@ -108,7 +108,7 @@ minibf = ["dolos-minibf", "tower-http/cors", "tower-http/trace", "tower-http/nor
 trp = ["dolos-trp"]
 
 # Default features - includes all services
-default = ["mithril", "utils", "phase2", "grpc", "minibf", "trp"]
+default = ["mithril", "utils", "phase2", "grpc", "minibf", "trp", "state3"]
 
 # The profile that 'cargo dist' will build with
 [profile.dist]
