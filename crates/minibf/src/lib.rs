@@ -238,6 +238,10 @@ impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
                 get(routes::pools::by_id_delegators::<D>),
             )
             .route("/pools/extended", get(routes::pools::all_extended::<D>))
+            .route(
+                "/governance/dreps/{drep_id}",
+                get(routes::governance::drep_by_id::<D>),
+            )
             .with_state(Facade::<D> { inner: domain })
             .layer(
                 trace::TraceLayer::new_for_http()
