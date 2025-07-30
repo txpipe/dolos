@@ -20,6 +20,7 @@ use dolos_core::{
     ArchiveStore as _, CancelToken, Domain, EraCbor, ServeError, StateStore as _, TxOrder,
 };
 
+mod error;
 pub(crate) mod mapping;
 mod pagination;
 mod routes;
@@ -161,6 +162,7 @@ impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
                 "/addresses/{address}/transactions",
                 get(routes::addresses::transactions::<D>),
             )
+            .route("/addresses/{address}/txs", get(routes::addresses::txs::<D>))
             .route("/blocks/latest", get(routes::blocks::latest::<D>))
             .route("/blocks/latest/txs", get(routes::blocks::latest_txs::<D>))
             .route(

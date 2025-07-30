@@ -29,6 +29,14 @@ impl Iterator for SlotKeyIterator {
     }
 }
 
+impl DoubleEndedIterator for SlotKeyIterator {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        let next = self.range.next_back()?;
+        let res = next.map(|x| x.value()).map_err(Error::from);
+        Some(res)
+    }
+}
+
 pub struct AddressApproxIndexTable;
 
 impl AddressApproxIndexTable {

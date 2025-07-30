@@ -1,7 +1,7 @@
 use axum::{
-    Json,
     extract::{Path, Query, State},
     http::StatusCode,
+    Json,
 };
 use blockfrost_openapi::models::block_content::BlockContent;
 use dolos_cardano::pparams::ChainSummary;
@@ -9,25 +9,11 @@ use dolos_core::{ArchiveStore as _, BlockBody, Domain};
 use pallas::ledger::traverse::MultiEraBlock;
 
 use crate::{
-    Facade,
+    error::Error,
     mapping::{BlockModelBuilder, IntoModel as _},
     pagination::{Order, Pagination, PaginationParameters},
+    Facade,
 };
-
-const MAX_BLOCKS_PER_PAGE: u8 = 100;
-const MAX_PAGES: u64 = 5;
-
-fn assert_pagination_threshold(params: &Pagination) -> Result<(), StatusCode> {
-    if params.count > MAX_BLOCKS_PER_PAGE {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-
-    if params.page > MAX_PAGES {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-
-    Ok(())
-}
 
 fn load_block_by_hash_or_number<D: Domain>(
     domain: &Facade<D>,
@@ -116,10 +102,8 @@ pub async fn by_hash_or_number_previous<D: Domain>(
     Path(hash_or_number): Path<String>,
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<Vec<BlockContent>>, StatusCode> {
+) -> Result<Json<Vec<BlockContent>>, Error> {
     let pagination = Pagination::try_from(params)?;
-
-    assert_pagination_threshold(&pagination)?;
 
     let curr = load_block_by_hash_or_number(&domain, &hash_or_number)?;
 
@@ -163,10 +147,8 @@ pub async fn by_hash_or_number_next<D: Domain>(
     Path(hash_or_number): Path<String>,
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<Vec<BlockContent>>, StatusCode> {
+) -> Result<Json<Vec<BlockContent>>, Error> {
     let pagination = Pagination::try_from(params)?;
-
-    assert_pagination_threshold(&pagination)?;
 
     let curr = load_block_by_hash_or_number(&domain, &hash_or_number)?;
 

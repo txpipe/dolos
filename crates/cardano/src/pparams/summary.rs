@@ -98,7 +98,7 @@ impl ChainSummary {
     }
 
     pub fn first(&self) -> &EraSummary {
-        self.past.iter().next().unwrap()
+        self.past.first().unwrap()
     }
 
     /// Return the edge era
