@@ -112,9 +112,9 @@ pub async fn by_hash_metadata_cbor<D: Domain>(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    let tx = TxModelBuilder::new(&raw, order)?;
+    let builder = TxModelBuilder::new(&raw, order)?;
 
-    tx.into_response()
+    builder.into_response()
 }
 
 pub async fn by_hash_redeemers<D: Domain>(
@@ -129,9 +129,20 @@ pub async fn by_hash_redeemers<D: Domain>(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    let tx = TxModelBuilder::new(&raw, order)?;
+    let chain = domain.get_chain_summary()?;
 
-    tx.into_response()
+    let mut builder = TxModelBuilder::new(&raw, order)?.with_chain(chain);
+
+    let deps = builder.required_deps()?;
+    let deps = domain.get_tx_batch(deps)?;
+
+    for (key, cbor) in deps.iter() {
+        if let Some(cbor) = cbor {
+            builder.load_dep(*key, cbor)?;
+        }
+    }
+
+    builder.into_response()
 }
 
 pub async fn by_hash_withdrawals<D: Domain>(
