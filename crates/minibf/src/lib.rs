@@ -186,6 +186,10 @@ impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
                 get(routes::blocks::by_hash_or_number_txs::<D>),
             )
             .route(
+                "/blocks/{hash_or_number}/addresses",
+                get(routes::blocks::by_hash_or_number_addresses::<D>),
+            )
+            .route(
                 "/blocks/slot/{slot_number}",
                 get(routes::blocks::by_slot::<D>),
             )

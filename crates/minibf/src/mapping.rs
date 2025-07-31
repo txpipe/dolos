@@ -22,6 +22,8 @@ use std::{collections::HashMap, ops::Deref};
 use blockfrost_openapi::models::{
     address_utxo_content_inner::AddressUtxoContentInner,
     block_content::BlockContent,
+    block_content_addresses_inner::BlockContentAddressesInner,
+    block_content_addresses_inner_transactions_inner::BlockContentAddressesInnerTransactionsInner,
     tx_content::TxContent,
     tx_content_cbor::TxContentCbor,
     tx_content_delegations_inner::TxContentDelegationsInner,
@@ -1010,7 +1012,7 @@ fn build_delegation_inner(
         index: index as i32,
         address,
         pool_id,
-        active_epoch,
+        active_epoch: active_epoch + 1,
         // DEPRECATED
         cert_index: index as i32,
     })
@@ -1655,14 +1657,20 @@ impl<'a> IntoModel<BlockContent> for BlockModelBuilder<'a> {
             slot: Some(block.slot() as i32),
             height: Some(block.number() as i32),
             tx_count: block.txs().len() as i32,
-            size: block.size() as i32,
+            size: block.body_size().unwrap() as i32,
             confirmations,
             slot_leader,
             block_vrf,
             op_cert,
             op_cert_counter,
-            output: Some(output),
-            fees: Some(fees),
+            output: match output.as_str() {
+                "0" => None,
+                _ => Some(output),
+            },
+            fees: match fees.as_str() {
+                "0" => None,
+                _ => Some(fees),
+            },
         };
 
         Ok(out)
@@ -1688,5 +1696,31 @@ impl<'a> IntoModel<Vec<String>> for BlockModelBuilder<'a> {
             .collect();
 
         Ok(txs)
+    }
+}
+
+impl<'a> IntoModel<Vec<BlockContentAddressesInner>> for BlockModelBuilder<'a> {
+    type SortKey = ();
+
+    fn into_model(self) -> Result<Vec<BlockContentAddressesInner>, StatusCode> {
+        let block = &self.block;
+        let addresses = block
+            .txs()
+            .iter()
+            .flat_map(|tx| {
+                tx.produces()
+                    .iter()
+                    .map(|(_, output)| BlockContentAddressesInner {
+                        address: output.address().unwrap().to_string(),
+                        transactions: vec![BlockContentAddressesInnerTransactionsInner {
+                            tx_hash: tx.hash().to_string(),
+                        }],
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .sorted_by(|x, y| x.address.cmp(&y.address))
+            .collect();
+
+        Ok(addresses)
     }
 }

@@ -11,6 +11,8 @@ pub enum Error {
     Code(StatusCode),
     InvalidAddress,
     InvalidAsset,
+    InvalidBlockNumber,
+    InvalidBlockHash,
 }
 
 impl IntoResponse for Error {
@@ -47,6 +49,24 @@ impl IntoResponse for Error {
                     "status_code": 400,
                     "error": "Bad Request",
                     "message": "Invalid or malformed asset format."
+                })),
+            )
+                .into_response(),
+            Error::InvalidBlockNumber => (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                  "error": "Bad Request",
+                  "message": "Missing, out of range or malformed block number.",
+                  "status_code": 400,
+                })),
+            )
+                .into_response(),
+            Error::InvalidBlockHash => (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                  "error": "Bad Request",
+                  "message": "Missing or malformed block hash.",
+                  "status_code": 400,
                 })),
             )
                 .into_response(),

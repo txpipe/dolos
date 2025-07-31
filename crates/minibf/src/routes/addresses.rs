@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
@@ -11,13 +13,39 @@ use itertools::Itertools;
 use pallas::ledger::traverse::{MultiEraBlock, MultiEraTx};
 
 use dolos_cardano::pparams::ChainSummary;
-use dolos_core::{ArchiveStore, Domain, StateStore};
+use dolos_core::{ArchiveStore, Domain, StateStore, TxoRef};
 
 use crate::{
     error::Error,
     pagination::{Order, Pagination, PaginationParameters},
     Facade,
 };
+
+fn refs_for_address<D: Domain>(
+    domain: &Facade<D>,
+    address: &str,
+) -> Result<HashSet<TxoRef>, Error> {
+    if address.starts_with("addr_vkh") {
+        let (_, addr) = bech32::decode(address).expect("failed to parse");
+
+        Ok(domain.state().get_utxo_by_payment(&addr).map_err(|err| {
+            dbg!(err);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?)
+    } else {
+        let address = pallas::ledger::addresses::Address::from_bech32(address).map_err(|err| {
+            dbg!(err);
+            Error::InvalidAddress
+        })?;
+        Ok(domain
+            .state()
+            .get_utxo_by_address(&address.to_vec())
+            .map_err(|err| {
+                dbg!(err);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?)
+    }
+}
 
 pub async fn utxos<D: Domain>(
     Path(address): Path<String>,
@@ -26,31 +54,12 @@ pub async fn utxos<D: Domain>(
 ) -> Result<Json<Vec<AddressUtxoContentInner>>, Error> {
     let pagination = Pagination::try_from(params)?;
 
-    let address = pallas::ledger::addresses::Address::from_bech32(&address).map_err(|err| {
-        dbg!(err);
-        Error::InvalidAddress
-    })?;
-
-    let refs = domain
-        .state()
-        .get_utxo_by_address(&address.to_vec())
-        .map_err(|err| {
-            dbg!(err);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    let refs = refs_for_address(&domain, &address)?;
 
     // If the address is not seen on the chain, send 404.
-    if domain
-        .archive()
-        .iter_blocks_with_address(&address.to_vec())
-        .iter()
-        .next()
-        .is_none()
-    {
+    if refs.is_empty() {
         return Err(Error::Code(StatusCode::NOT_FOUND));
     }
-
-    dbg!(&refs);
 
     let utxos = super::utxos::load_utxo_models(&domain, refs, pagination)?;
 
@@ -64,27 +73,7 @@ pub async fn utxos_with_asset<D: Domain>(
 ) -> Result<Json<Vec<AddressUtxoContentInner>>, Error> {
     let pagination = Pagination::try_from(params)?;
 
-    let address = pallas::ledger::addresses::Address::from_bech32(&address).map_err(|err| {
-        dbg!(err);
-        Error::InvalidAddress
-    })?;
-
-    // If the address is not seen on the chain, send 404.
-    if domain
-        .archive()
-        .iter_blocks_with_address(&address.to_vec())
-        .iter()
-        .next()
-        .is_none()
-    {
-        return Err(Error::Code(StatusCode::NOT_FOUND));
-    }
-
-    let mut refs = domain
-        .state()
-        .get_utxo_by_address(&address.to_vec())
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
+    let mut refs = refs_for_address(&domain, &address)?;
     let mut should_filter = false;
     if &asset == "lovelace" {
         should_filter = true;
@@ -97,6 +86,11 @@ pub async fn utxos_with_asset<D: Domain>(
 
         refs = refs.intersection(&asset_refs).cloned().collect();
     };
+
+    // If the address is not seen on the chain, send 404.
+    if refs.is_empty() {
+        return Err(Error::Code(StatusCode::NOT_FOUND));
+    }
 
     let mut utxos = super::utxos::load_utxo_models(&domain, refs, pagination)?;
 
