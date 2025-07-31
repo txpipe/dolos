@@ -1,6 +1,12 @@
 pub mod accounts;
 pub mod addresses;
+pub mod assets;
 pub mod blocks;
 pub mod epochs;
+pub mod genesis;
+pub mod metadata;
+pub mod network;
+pub mod pools;
 pub mod tx;
 pub mod txs;
+pub mod utxos;

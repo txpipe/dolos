@@ -1,10 +1,13 @@
 use ::redb::{Database, MultimapTableHandle as _, TableHandle as _};
-use std::path::Path;
+use redb::TableStats;
+use std::{collections::HashMap, path::Path};
 use tracing::{debug, info, warn};
 
 use dolos_core::{
     BlockSlot, ChainPoint, EraCbor, LedgerDelta, StateError, TxoRef, UtxoMap, UtxoSet,
 };
+
+use crate::state::tables::UtxoKeyIterator;
 
 mod tables;
 pub mod v1;
@@ -140,7 +143,7 @@ impl LedgerStore {
                 info!("detected state db schema v2-light");
                 v2light::LedgerStore::new(db).into()
             }
-            Some(x) => panic!("can't recognize db hash {}", x),
+            Some(x) => panic!("can't recognize db hash {x}"),
         };
 
         Ok(schema)
@@ -169,29 +172,20 @@ impl LedgerStore {
     }
 
     pub fn in_memory_v1() -> Result<Self, StateError> {
-        let db = ::redb::Database::builder()
-            .create_with_backend(::redb::backends::InMemoryBackend::new())
-            .map_err(RedbStateError::from)?;
+        let store = v1::LedgerStore::in_memory()?;
 
-        let store = v1::LedgerStore::initialize(db)?;
         Ok(store.into())
     }
 
     pub fn in_memory_v2() -> Result<Self, StateError> {
-        let db = ::redb::Database::builder()
-            .create_with_backend(::redb::backends::InMemoryBackend::new())
-            .map_err(RedbStateError::from)?;
+        let store = v2::LedgerStore::in_memory()?;
 
-        let store = v2::LedgerStore::initialize(db)?;
         Ok(store.into())
     }
 
     pub fn in_memory_v2_light() -> Result<Self, RedbStateError> {
-        let db = ::redb::Database::builder()
-            .create_with_backend(::redb::backends::InMemoryBackend::new())
-            .unwrap();
+        let store = v2light::LedgerStore::in_memory()?;
 
-        let store = v2light::LedgerStore::initialize(db)?;
         Ok(store.into())
     }
 
@@ -208,6 +202,13 @@ impl LedgerStore {
             LedgerStore::SchemaV1(x) => x.db_mut(),
             LedgerStore::SchemaV2(x) => x.db_mut(),
             LedgerStore::SchemaV2Light(x) => x.db_mut(),
+        }
+    }
+
+    pub fn start(&self) -> Result<Option<ChainPoint>, RedbStateError> {
+        match self {
+            LedgerStore::SchemaV2(x) => Ok(x.start()?),
+            _ => Err(RedbStateError(StateError::InvalidStoreVersion)),
         }
     }
 
@@ -250,6 +251,20 @@ impl LedgerStore {
         }
     }
 
+    pub fn count_utxos_by_address(&self, address: &[u8]) -> Result<u64, RedbStateError> {
+        match self {
+            LedgerStore::SchemaV2(x) => Ok(x.count_utxos_by_address(address)?),
+            _ => Err(RedbStateError(StateError::QueryNotSupported)),
+        }
+    }
+
+    pub fn iter_utxos_by_address(&self, address: &[u8]) -> Result<UtxoKeyIterator, RedbStateError> {
+        match self {
+            LedgerStore::SchemaV2(x) => Ok(x.iter_utxos_by_address(address)?),
+            _ => Err(RedbStateError(StateError::QueryNotSupported)),
+        }
+    }
+
     pub fn get_utxo_by_payment(&self, payment: &[u8]) -> Result<UtxoSet, RedbStateError> {
         match self {
             LedgerStore::SchemaV2(x) => Ok(x.get_utxos_by_payment(payment)?),
@@ -286,11 +301,15 @@ impl LedgerStore {
         }
     }
 
-    pub fn finalize(&self, until: BlockSlot) -> Result<(), RedbStateError> {
+    pub fn prune_history(
+        &self,
+        max_slots: u64,
+        max_prune: Option<u64>,
+    ) -> Result<bool, RedbStateError> {
         match self {
-            LedgerStore::SchemaV1(x) => Ok(x.finalize(until)?),
-            LedgerStore::SchemaV2(x) => Ok(x.finalize(until)?),
-            LedgerStore::SchemaV2Light(x) => Ok(x.finalize(until)?),
+            LedgerStore::SchemaV2(x) => Ok(x.prune_history(max_slots, max_prune)?),
+            LedgerStore::SchemaV2Light(x) => Ok(x.prune_history(max_slots, max_prune)?),
+            _ => Err(RedbStateError(StateError::InvalidStoreVersion)),
         }
     }
 
@@ -313,6 +332,71 @@ impl LedgerStore {
             }
             _ => Err(RedbStateError(StateError::InvalidStoreVersion)),
         }
+    }
+
+    pub fn stats(&self) -> Result<HashMap<&str, TableStats>, RedbStateError> {
+        match self {
+            LedgerStore::SchemaV2(x) => Ok(x.stats()?),
+            _ => Err(RedbStateError(StateError::InvalidStoreVersion)),
+        }
+    }
+}
+
+impl dolos_core::StateStore for LedgerStore {
+    fn start(&self) -> Result<Option<ChainPoint>, StateError> {
+        Ok(Self::start(self)?)
+    }
+
+    fn cursor(&self) -> Result<Option<ChainPoint>, StateError> {
+        Ok(Self::cursor(self)?)
+    }
+
+    fn is_empty(&self) -> Result<bool, StateError> {
+        Ok(Self::is_empty(self)?)
+    }
+
+    fn get_pparams(&self, until: BlockSlot) -> Result<Vec<EraCbor>, StateError> {
+        Ok(Self::get_pparams(self, until)?)
+    }
+
+    fn get_utxos(&self, refs: Vec<TxoRef>) -> Result<UtxoMap, StateError> {
+        Ok(Self::get_utxos(self, refs)?)
+    }
+
+    fn get_utxo_by_address(&self, address: &[u8]) -> Result<UtxoSet, StateError> {
+        Ok(Self::get_utxo_by_address(self, address)?)
+    }
+
+    fn get_utxo_by_payment(&self, payment: &[u8]) -> Result<UtxoSet, StateError> {
+        Ok(Self::get_utxo_by_payment(self, payment)?)
+    }
+
+    fn get_utxo_by_stake(&self, stake: &[u8]) -> Result<UtxoSet, StateError> {
+        Ok(Self::get_utxo_by_stake(self, stake)?)
+    }
+
+    fn get_utxo_by_policy(&self, policy: &[u8]) -> Result<UtxoSet, StateError> {
+        Ok(Self::get_utxo_by_policy(self, policy)?)
+    }
+
+    fn get_utxo_by_asset(&self, asset: &[u8]) -> Result<UtxoSet, StateError> {
+        Ok(Self::get_utxo_by_asset(self, asset)?)
+    }
+
+    fn apply(&self, deltas: &[LedgerDelta]) -> Result<(), StateError> {
+        Ok(Self::apply(self, deltas)?)
+    }
+
+    fn upgrade(self) -> Result<Self, StateError> {
+        Ok(Self::upgrade(self)?)
+    }
+
+    fn copy(&self, target: &Self) -> Result<(), StateError> {
+        Ok(Self::copy(self, target)?)
+    }
+
+    fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, StateError> {
+        Ok(Self::prune_history(self, max_slots, max_prune)?)
     }
 }
 

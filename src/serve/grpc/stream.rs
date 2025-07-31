@@ -1,22 +1,29 @@
 use crate::prelude::*;
 use futures_core::Stream;
 
-pub struct WalStream;
+pub struct ChainStream;
 
-impl WalStream {
-    pub fn start<W, C>(wal: W, from: LogSeq, cancel: C) -> impl Stream<Item = LogEntry>
-    where
-        W: WalStore,
-        C: CancelToken,
-    {
+impl ChainStream {
+    pub fn start<D: Domain, C: CancelToken>(
+        wal: D::Wal,
+        archive: D::Archive,
+        intersect: Vec<ChainPoint>,
+        cancel: C,
+    ) -> impl Stream<Item = LogValue> + 'static {
         async_stream::stream! {
-            let mut last_seq = from;
+            let (catchup, intersected) = super::iterator::ChainIterator::<D>::new(
+                wal.clone(),
+                archive.clone(),
+                &intersect,
+            ).unwrap();
 
-            let iter = wal.crawl_from(Some(last_seq)).unwrap();
+            yield LogValue::Mark(intersected.clone());
 
-            for entry in iter {
-                last_seq = entry.0;
-                yield entry;
+            let mut last_point = intersected.clone();
+
+            for value in catchup {
+                last_point = ChainPoint::from(&value);
+                yield value;
             }
 
             loop {
@@ -25,11 +32,15 @@ impl WalStream {
                         break;
                     }
                     _ = wal.tip_change() => {
-                        let iter = wal.crawl_from(Some(last_seq)).unwrap().skip(1);
+                        let (updates, _) = super::iterator::ChainIterator::<D>::new(
+                            wal.clone(),
+                            archive.clone(),
+                            &[last_point.clone()],
+                        ).unwrap();
 
-                        for entry in iter {
-                            last_seq = entry.0;
-                            yield entry;
+                        for value in updates {
+                            last_point = ChainPoint::from(&value);
+                            yield value;
                         }
                     }
                 }
@@ -40,8 +51,9 @@ impl WalStream {
 
 #[cfg(test)]
 mod tests {
-    use dolos_redb::wal::RedbWalStore;
+    use dolos_testing::toy_domain::ToyDomain;
     use futures_util::{pin_mut, StreamExt};
+    use pallas::crypto::hash::Hash;
     use tokio_util::sync::CancellationToken;
 
     use super::*;
@@ -60,29 +72,35 @@ mod tests {
 
     #[tokio::test]
     async fn test_stream_waiting() {
-        let mut db = RedbWalStore::memory().unwrap();
+        let wal = dolos_redb::wal::RedbWalStore::memory().unwrap();
+        let archive = dolos_redb::archive::ChainStore::in_memory_v1().unwrap();
 
-        db.initialize_from_origin().unwrap();
+        wal.initialize_from_origin().unwrap();
 
         let blocks = (0..=100).map(|i| dummy_block(i * 10));
-        db.roll_forward(blocks).unwrap();
+        wal.roll_forward(blocks).unwrap();
 
-        let mut db2 = db.clone();
+        let wal2 = wal.clone();
         let background = tokio::spawn(async move {
             for i in 101..=200 {
                 let block = dummy_block(i * 10);
-                db2.roll_forward([block].into_iter()).unwrap();
+                wal2.roll_forward([block].into_iter()).unwrap();
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
             }
         });
 
-        let s = WalStream::start(db.clone(), 50, CancelTokenImpl(CancellationToken::new()));
+        let s = ChainStream::start::<ToyDomain, CancelTokenImpl>(
+            wal.clone(),
+            archive.clone(),
+            vec![ChainPoint::Specific(50, Hash::<32>::from([0; 32]))],
+            CancelTokenImpl(CancellationToken::new()),
+        );
 
         pin_mut!(s);
 
         for i in 49..=200 {
             let evt = s.next().await;
-            let (_, value) = evt.unwrap();
+            let value = evt.unwrap();
 
             match value {
                 LogValue::Apply(RawBlock { slot, .. }) => assert_eq!(slot, i * 10),

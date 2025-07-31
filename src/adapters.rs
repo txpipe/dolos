@@ -10,6 +10,14 @@ pub enum StateAdapter {
 }
 
 impl StateStore for StateAdapter {
+    fn start(&self) -> Result<Option<ChainPoint>, StateError> {
+        let out = match self {
+            StateAdapter::Redb(x) => x.start()?,
+        };
+
+        Ok(out)
+    }
+
     fn cursor(&self) -> Result<Option<ChainPoint>, StateError> {
         let out = match self {
             StateAdapter::Redb(x) => x.cursor()?,
@@ -90,12 +98,12 @@ impl StateStore for StateAdapter {
         Ok(())
     }
 
-    fn finalize(&self, until: BlockSlot) -> Result<(), StateError> {
-        match self {
-            StateAdapter::Redb(x) => x.finalize(until)?,
+    fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, StateError> {
+        let done = match self {
+            StateAdapter::Redb(x) => x.prune_history(max_slots, max_prune)?,
         };
 
-        Ok(())
+        Ok(done)
     }
 
     fn upgrade(self) -> Result<Self, StateError> {
@@ -118,6 +126,16 @@ impl StateStore for StateAdapter {
 impl From<dolos_redb::state::LedgerStore> for StateAdapter {
     fn from(value: dolos_redb::state::LedgerStore) -> Self {
         Self::Redb(value)
+    }
+}
+
+impl TryFrom<StateAdapter> for dolos_redb::state::LedgerStore {
+    type Error = StateError;
+
+    fn try_from(value: StateAdapter) -> Result<Self, Self::Error> {
+        match value {
+            StateAdapter::Redb(x) => Ok(x),
+        }
     }
 }
 
@@ -155,7 +173,7 @@ impl WalStore for WalAdapter {
         }
     }
 
-    fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<(), WalError> {
+    fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, WalError> {
         match self {
             WalAdapter::Redb(x) => WalStore::prune_history(x, max_slots, max_prune),
         }
@@ -183,7 +201,7 @@ impl WalStore for WalAdapter {
         }
     }
 
-    fn append_entries(&mut self, logs: impl Iterator<Item = LogValue>) -> Result<(), WalError> {
+    fn append_entries(&self, logs: impl Iterator<Item = LogValue>) -> Result<(), WalError> {
         match self {
             WalAdapter::Redb(x) => x.append_entries(logs),
         }
@@ -232,7 +250,8 @@ pub enum ArchiveAdapter {
 }
 
 impl ArchiveStore for ArchiveAdapter {
-    type BlockIter<'a> = ArchiveBlockIter<'a>;
+    type BlockIter<'a> = ArchiveRangeBlockIter;
+    type SparseBlockIter = ArchiveSparseBlockIter;
 
     fn get_block_by_hash(&self, block_hash: &[u8]) -> Result<Option<BlockBody>, ArchiveError> {
         let out = match self {
@@ -285,6 +304,17 @@ impl ArchiveStore for ArchiveAdapter {
         Ok(out)
     }
 
+    fn iter_blocks_with_address(
+        &self,
+        address: &[u8],
+    ) -> Result<Self::SparseBlockIter, ArchiveError> {
+        let out = match self {
+            ArchiveAdapter::Redb(x) => x.iter_blocks_with_address(address)?,
+        };
+
+        Ok(out.into())
+    }
+
     fn get_range<'a>(
         &self,
         from: Option<BlockSlot>,
@@ -292,6 +322,17 @@ impl ArchiveStore for ArchiveAdapter {
     ) -> Result<Self::BlockIter<'a>, ArchiveError> {
         let out = match self {
             ArchiveAdapter::Redb(x) => x.get_range(from, to)?.into(),
+        };
+
+        Ok(out)
+    }
+
+    fn find_intersect<'a>(
+        &self,
+        intersect: &[ChainPoint],
+    ) -> Result<Option<ChainPoint>, ArchiveError> {
+        let out = match self {
+            ArchiveAdapter::Redb(x) => x.find_intersect(intersect)?,
         };
 
         Ok(out)
@@ -313,12 +354,12 @@ impl ArchiveStore for ArchiveAdapter {
         Ok(())
     }
 
-    fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<(), ArchiveError> {
-        match self {
+    fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, ArchiveError> {
+        let done = match self {
             ArchiveAdapter::Redb(x) => x.prune_history(max_slots, max_prune)?,
         };
 
-        Ok(())
+        Ok(done)
     }
 }
 
@@ -328,31 +369,47 @@ impl From<dolos_redb::archive::ChainStore> for ArchiveAdapter {
     }
 }
 
-pub enum ArchiveBlockIter<'a> {
-    Redb(dolos_redb::archive::ChainIter<'a>),
+pub enum ArchiveRangeBlockIter {
+    Redb(dolos_redb::archive::ChainRangeIter),
 }
 
-impl Iterator for ArchiveBlockIter<'_> {
+impl Iterator for ArchiveRangeBlockIter {
     type Item = (BlockSlot, BlockBody);
 
     fn next(&mut self) -> Option<Self::Item> {
         match self {
-            ArchiveBlockIter::Redb(chainiter) => chainiter.next(),
+            ArchiveRangeBlockIter::Redb(chainiter) => chainiter.next(),
         }
     }
 }
 
-impl DoubleEndedIterator for ArchiveBlockIter<'_> {
+impl DoubleEndedIterator for ArchiveRangeBlockIter {
     fn next_back(&mut self) -> Option<Self::Item> {
         match self {
-            ArchiveBlockIter::Redb(chainiter) => chainiter.next_back(),
+            ArchiveRangeBlockIter::Redb(chainiter) => chainiter.next_back(),
         }
     }
 }
 
-impl<'a> From<dolos_redb::archive::ChainIter<'a>> for ArchiveBlockIter<'a> {
-    fn from(value: dolos_redb::archive::ChainIter<'a>) -> Self {
+impl From<dolos_redb::archive::ChainRangeIter> for ArchiveRangeBlockIter {
+    fn from(value: dolos_redb::archive::ChainRangeIter) -> Self {
         Self::Redb(value)
+    }
+}
+
+pub struct ArchiveSparseBlockIter(dolos_redb::archive::ChainSparseIter);
+
+impl Iterator for ArchiveSparseBlockIter {
+    type Item = Result<(BlockSlot, Option<BlockBody>), ArchiveError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next()
+    }
+}
+
+impl From<dolos_redb::archive::ChainSparseIter> for ArchiveSparseBlockIter {
+    fn from(value: dolos_redb::archive::ChainSparseIter) -> Self {
+        Self(value)
     }
 }
 
@@ -364,6 +421,8 @@ pub struct DomainAdapter {
     pub state: StateAdapter,
     pub archive: ArchiveAdapter,
     pub mempool: crate::mempool::Mempool,
+
+    pub state3: dolos_redb3::StateStore,
 }
 
 impl Domain for DomainAdapter {
@@ -372,6 +431,8 @@ impl Domain for DomainAdapter {
     type Archive = ArchiveAdapter;
     type Mempool = crate::mempool::Mempool;
     type Chain = dolos_cardano::ChainLogic;
+
+    type State3 = dolos_redb3::StateStore;
 
     fn genesis(&self) -> &Genesis {
         &self.genesis
@@ -383,6 +444,10 @@ impl Domain for DomainAdapter {
 
     fn state(&self) -> &Self::State {
         &self.state
+    }
+
+    fn state3(&self) -> &Self::State3 {
+        &self.state3
     }
 
     fn archive(&self) -> &Self::Archive {

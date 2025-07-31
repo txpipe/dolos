@@ -164,7 +164,7 @@ impl RedbWalStore {
         Ok(false)
     }
 
-    pub fn initialize_from_origin(&mut self) -> Result<(), RedbWalError> {
+    pub fn initialize_from_origin(&self) -> Result<(), RedbWalError> {
         if !self.is_empty()? {
             return Err(RedbWalError(WalError::NotEmpty));
         }
@@ -284,13 +284,13 @@ impl RedbWalStore {
         &self,
         max_slots: u64,
         max_prune: Option<u64>,
-    ) -> Result<(), RedbWalError> {
+    ) -> Result<bool, RedbWalError> {
         let start_slot = match self.find_start()? {
             Some((_, ChainPoint::Origin)) => 0,
             Some((_, ChainPoint::Specific(slot, _))) => slot,
             _ => {
                 debug!("no start point found, skipping housekeeping");
-                return Ok(());
+                return Ok(true);
             }
         };
 
@@ -298,7 +298,7 @@ impl RedbWalStore {
             Some((_, ChainPoint::Specific(slot, _))) => slot,
             _ => {
                 debug!("no tip found, skipping housekeeping");
-                return Ok(());
+                return Ok(true);
             }
         };
 
@@ -312,12 +312,12 @@ impl RedbWalStore {
 
         if excess == 0 {
             debug!(delta, max_slots, excess, "no pruning necessary");
-            return Ok(());
+            return Ok(true);
         }
 
-        let max_prune = match max_prune {
-            Some(max) => core::cmp::min(excess, max),
-            None => excess,
+        let (done, max_prune) = match max_prune {
+            Some(max) => (excess <= max, core::cmp::min(excess, max)),
+            None => (true, excess),
         };
 
         let prune_before = start_slot + max_prune;
@@ -330,10 +330,10 @@ impl RedbWalStore {
         match self.remove_before(prune_before) {
             Err(RedbWalError(WalError::SlotNotFound(_))) => {
                 warn!("pruning target slot not found, skipping");
-                Ok(())
+                Ok(true)
             }
             Err(e) => Err(e),
-            Ok(_) => Ok(()),
+            Ok(_) => Ok(done),
         }
     }
 
@@ -540,7 +540,7 @@ impl RedbWalStore {
     }
 
     fn append_entries(
-        &mut self,
+        &self,
         logs: impl Iterator<Item = dolos_core::LogValue>,
     ) -> Result<(), RedbWalError> {
         let mut wx = self.db.begin_write()?;
@@ -584,7 +584,7 @@ impl WalStore for RedbWalStore {
         self.tip_change.notified().await;
     }
 
-    fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<(), WalError> {
+    fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, WalError> {
         RedbWalStore::prune_history(self, max_slots, max_prune).map_err(From::from)
     }
 
@@ -605,7 +605,7 @@ impl WalStore for RedbWalStore {
     }
 
     fn append_entries(
-        &mut self,
+        &self,
         logs: impl Iterator<Item = dolos_core::LogValue>,
     ) -> Result<(), WalError> {
         RedbWalStore::append_entries(self, logs).map_err(From::from)
@@ -633,7 +633,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_wal_block_reader_happy_path() {
-        let mut db = RedbWalStore::memory().unwrap();
+        let db = RedbWalStore::memory().unwrap();
         db.initialize_from_origin().unwrap();
 
         let blocks = (0..=5).map(dummy_block).collect_vec();
@@ -756,7 +756,7 @@ mod tests {
 
     #[test]
     fn test_basic_append() {
-        let mut db = empty_wal_db();
+        let db = empty_wal_db();
 
         let expected_block = dummy_block_from_slot(11);
         let expected_point = ChainPoint::Specific(11, expected_block.hash);

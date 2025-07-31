@@ -88,7 +88,7 @@ impl mithril_client::feedback::FeedbackReceiver for MithrilFeedback {
                     .set_message("certificate fetched from cache");
             }
             x => {
-                self.validate_pb.set_message(format!("{:?}", x));
+                self.validate_pb.set_message(format!("{x:?}"));
             }
         }
     }
@@ -179,7 +179,7 @@ fn import_hardano_into_wal(
         .context("reading immutable db tip")?
         .ok_or(miette::miette!("immutable db has no tip"))?;
 
-    let mut wal = open_empty_wal(config).context("opening WAL")?;
+    let wal = open_empty_wal(config).context("opening WAL")?;
 
     wal.initialize_from_origin()
         .map_err(WalError::from)

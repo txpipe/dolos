@@ -20,7 +20,7 @@ fn open_empty_wal(config: &crate::Config) -> miette::Result<dolos_redb::wal::Red
 }
 
 pub fn run(config: &crate::Config, _args: &Args, _feedback: &Feedback) -> miette::Result<()> {
-    let mut wal = open_empty_wal(config).context("opening WAL")?;
+    let wal = open_empty_wal(config).context("opening WAL")?;
 
     wal.initialize_from_origin()
         .map_err(WalError::from)

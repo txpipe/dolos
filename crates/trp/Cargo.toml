@@ -1,0 +1,44 @@
+[package]
+name = "dolos-trp"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+base64.workspace = true
+bincode.workspace = true
+hex.workspace = true
+itertools.workspace = true
+pallas.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio-util.workspace = true
+tokio.workspace = true
+tower-http.workspace = true
+tower.workspace = true
+tracing.workspace = true
+
+dolos-core = { path = "../core" }
+dolos-cardano = { path = "../cardano" }
+jsonrpsee = { version = "0.24.9", features = ["server"] }
+opentelemetry = "0.30.0"
+opentelemetry_sdk = "0.30.0"
+
+tx3-lang = "0.10.1"
+tx3-cardano = "0.10.1"
+tx3-resolver = "0.10.1"
+
+# tx3-lang = { path = "../../../../tx3-lang/tx3/crates/tx3-lang" }
+# tx3-cardano = { path = "../../../../tx3-lang/tx3/crates/tx3-cardano" }
+# tx3-resolver = { path = "../../../../tx3-lang/tx3/crates/tx3-resolver" }
+
+# tx3-lang = { git = "https://github.com/tx3-lang/tx3.git" }
+# tx3-cardano = { git = "https://github.com/tx3-lang/tx3.git" }
+# tx3-resolver = { git = "https://github.com/tx3-lang/tx3.git" }
+
+tx3-sdk = { version = "^0" }
+# tx3-sdk = { path = "../../../../tx3-lang/rust-sdk/sdk" }
+# tx3-sdk = { git = "https://github.com/tx3-lang/rust-sdk.git" }
+
+[dev-dependencies]
+dolos-testing = { path = "../testing", features = ["toy-domain"] }

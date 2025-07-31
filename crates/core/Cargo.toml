@@ -1,7 +1,7 @@
 [package]
 name = "dolos-core"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 
 [dependencies]
 serde.workspace = true
@@ -16,3 +16,4 @@ pallas.workspace = true
 
 [features]
 phase2 = ["pallas/phase2"]
+state3 = []

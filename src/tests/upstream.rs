@@ -53,7 +53,7 @@ fn test_mainnet_upstream() {
     )
     .unwrap();
 
-    let mut wal = RedbWalStore::memory().unwrap();
+    let wal = RedbWalStore::memory().unwrap();
 
     wal.initialize_from_origin().unwrap();
 

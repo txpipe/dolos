@@ -138,7 +138,9 @@ impl gasket::framework::Worker<Stage> for Worker {
                     self.logseq = seq;
                 }
             }
-            WorkUnit::Housekeeping => stage.domain.housekeeping().or_panic()?,
+            WorkUnit::Housekeeping => {
+                stage.domain.housekeeping().or_panic()?;
+            }
         }
 
         Ok(())
