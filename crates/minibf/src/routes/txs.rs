@@ -10,6 +10,7 @@ use blockfrost_openapi::models::{
     tx_content_metadata_inner::TxContentMetadataInner, tx_content_mirs_inner::TxContentMirsInner,
     tx_content_pool_certs_inner::TxContentPoolCertsInner,
     tx_content_pool_retires_inner::TxContentPoolRetiresInner,
+    tx_content_redeemers_inner::TxContentRedeemersInner,
     tx_content_stake_addr_inner::TxContentStakeAddrInner, tx_content_utxo::TxContentUtxo,
     tx_content_withdrawals_inner::TxContentWithdrawalsInner,
 };
@@ -111,9 +112,37 @@ pub async fn by_hash_metadata_cbor<D: Domain>(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    let tx = TxModelBuilder::new(&raw, order)?;
+    let builder = TxModelBuilder::new(&raw, order)?;
 
-    tx.into_response()
+    builder.into_response()
+}
+
+pub async fn by_hash_redeemers<D: Domain>(
+    Path(tx_hash): Path<String>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Vec<TxContentRedeemersInner>>, StatusCode> {
+    let hash = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    let (raw, order) = domain
+        .archive()
+        .get_block_with_tx(hash.as_slice())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let chain = domain.get_chain_summary()?;
+
+    let mut builder = TxModelBuilder::new(&raw, order)?.with_chain(chain);
+
+    let deps = builder.required_deps()?;
+    let deps = domain.get_tx_batch(deps)?;
+
+    for (key, cbor) in deps.iter() {
+        if let Some(cbor) = cbor {
+            builder.load_dep(*key, cbor)?;
+        }
+    }
+
+    builder.into_response()
 }
 
 pub async fn by_hash_withdrawals<D: Domain>(

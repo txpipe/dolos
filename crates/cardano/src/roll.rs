@@ -13,7 +13,7 @@ use pallas::{
 use pallas::ledger::primitives::alonzo::Certificate as AlonzoCert;
 use pallas::ledger::primitives::conway::Certificate as ConwayCert;
 
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::model::{
     AccountActivity, AccountState, AssetState, EpochState, PoolDelegator, PoolState,
@@ -261,7 +261,7 @@ impl RollVisitor for AssetStateVisitor {
             subject.extend_from_slice(policy.as_slice());
             subject.extend_from_slice(asset.name());
 
-            info!("tracking asset: {:?}", hex::encode(&subject));
+            debug!(subject = %hex::encode(&subject), "tracking asset");
 
             let current = state
                 .read_entity_typed::<AssetState>(&subject)?
@@ -293,7 +293,7 @@ impl RollVisitor for PoolStateVisitor {
         cert: &MultiEraCert,
     ) -> Result<(), State3Error> {
         if let Some((operator, new)) = cert_to_pool_state(cert) {
-            let current = state.read_entity_typed::<PoolState>(&operator.to_vec())?;
+            let current = state.read_entity_typed::<PoolState>(operator)?;
             delta.override_entity(operator.to_vec(), new, current);
         }
 
@@ -313,7 +313,7 @@ impl RollVisitor for PoolDelegatorVisitor {
         cert: &MultiEraCert,
     ) -> Result<(), State3Error> {
         if let Some((operator, new)) = cert_to_pool_delegator(cert) {
-            info!(%operator, "new pool delegator");
+            debug!(%operator, "new pool delegator");
             delta.append_entity(operator.as_slice(), new);
         }
 
@@ -334,7 +334,7 @@ impl RollVisitor for EpochStateVisitor {
             .read_entity_typed::<EpochState>(crate::model::CURRENT_EPOCH_KEY)?
             .unwrap_or_default();
 
-        let block_fees = block.txs().iter().map(|tx| tx.fee()).flatten().sum::<u64>();
+        let block_fees = block.txs().iter().filter_map(|tx| tx.fee()).sum::<u64>();
 
         let new = EpochState {
             gathered_fees: Some(current.gathered_fees.unwrap_or_default() + block_fees),

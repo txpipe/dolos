@@ -16,7 +16,12 @@ use pallas::{
     },
 };
 
-use crate::{mapping::IntoModel, pagination::PaginationParameters, Facade};
+use crate::{
+    error::Error,
+    mapping::IntoModel,
+    pagination::{Pagination, PaginationParameters},
+    Facade,
+};
 
 struct MetadataHistoryModelBuilder {
     label: u64,
@@ -123,8 +128,9 @@ async fn by_label<D: Domain>(
     label: &str,
     pagination: PaginationParameters,
     domain: &Facade<D>,
-) -> Result<MetadataHistoryModelBuilder, StatusCode> {
+) -> Result<MetadataHistoryModelBuilder, Error> {
     let label: u64 = label.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    let pagination = Pagination::try_from(pagination)?;
 
     let mut reverse_blocks = domain
         .archive()
@@ -133,15 +139,12 @@ async fn by_label<D: Domain>(
         .rev()
         .take(MAX_SCAN_DEPTH);
 
-    let mut builder = MetadataHistoryModelBuilder::new(
-        label,
-        pagination.count.unwrap_or(10) as usize,
-        pagination.page.unwrap_or(1) as usize,
-    );
+    let mut builder =
+        MetadataHistoryModelBuilder::new(label, pagination.count, pagination.page as usize);
 
     while builder.needs_more() {
         let Some((_, cbor)) = reverse_blocks.next() else {
-            return Err(StatusCode::NOT_FOUND);
+            return Err(Error::Code(StatusCode::NOT_FOUND));
         };
 
         builder.scan_block(&cbor)?;
@@ -154,18 +157,18 @@ pub async fn by_label_json<D: Domain>(
     Path(label): Path<String>,
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<Vec<TxMetadataLabelJsonInner>>, StatusCode> {
+) -> Result<Json<Vec<TxMetadataLabelJsonInner>>, Error> {
     let builder = by_label(&label, params, &domain).await?;
 
-    builder.into_model().map(Json)
+    Ok(builder.into_model().map(Json)?)
 }
 
 pub async fn by_label_cbor<D: Domain>(
     Path(label): Path<String>,
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<Vec<TxMetadataLabelCborInner>>, StatusCode> {
+) -> Result<Json<Vec<TxMetadataLabelCborInner>>, Error> {
     let builder = by_label(&label, params, &domain).await?;
 
-    builder.into_model().map(Json)
+    Ok(builder.into_model().map(Json)?)
 }
