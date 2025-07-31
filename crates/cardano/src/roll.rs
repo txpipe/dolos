@@ -13,7 +13,7 @@ use pallas::{
 use pallas::ledger::primitives::alonzo::Certificate as AlonzoCert;
 use pallas::ledger::primitives::conway::Certificate as ConwayCert;
 
-use tracing::{debug, info};
+use tracing::debug;
 
 use crate::model::{
     AccountActivity, AccountState, AssetState, EpochState, PoolDelegator, PoolState,

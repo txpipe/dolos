@@ -167,6 +167,29 @@ impl_entity!(
 );
 
 #[derive(Debug, Encode, Decode, Clone)]
+pub struct DRepState {
+    #[n(0)]
+    pub drep_id: Vec<u8>,
+
+    #[n(1)]
+    pub start_epoch: Option<u32>,
+
+    #[n(2)]
+    pub voting_power: u64,
+
+    #[n(3)]
+    pub last_active_epoch: Option<u32>,
+
+    #[n(4)]
+    pub retired: bool,
+
+    #[n(5)]
+    pub expired: bool,
+}
+
+impl_entity!(DRepState, "drep", NamespaceType::KeyValue);
+
+#[derive(Debug, Encode, Decode, Clone)]
 pub struct RewardLog {
     // we make sure epoch is the first item because we'll rely on it for sorting the items in a
     // multi-value store
@@ -192,6 +215,7 @@ pub fn build_schema() -> StateSchema {
     schema.insert(PoolState::NS, PoolState::NS_TYPE);
     schema.insert(PoolDelegator::NS, PoolDelegator::NS_TYPE);
     schema.insert(EpochState::NS, EpochState::NS_TYPE);
+    schema.insert(DRepState::NS, DRepState::NS_TYPE);
     schema.insert(AccountActivity::NS, AccountActivity::NS_TYPE);
     schema.insert(RewardLog::NS, RewardLog::NS_TYPE);
     schema
