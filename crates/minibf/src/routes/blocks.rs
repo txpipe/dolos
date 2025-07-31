@@ -3,7 +3,9 @@ use axum::{
     http::StatusCode,
     Json,
 };
-use blockfrost_openapi::models::block_content::BlockContent;
+use blockfrost_openapi::models::{
+    block_content::BlockContent, block_content_addresses_inner::BlockContentAddressesInner,
+};
 use dolos_cardano::pparams::ChainSummary;
 use dolos_core::{ArchiveStore as _, BlockBody, Domain};
 use pallas::ledger::traverse::MultiEraBlock;
@@ -18,25 +20,39 @@ use crate::{
 fn load_block_by_hash_or_number<D: Domain>(
     domain: &Facade<D>,
     hash_or_number: &str,
-) -> Result<BlockBody, StatusCode> {
-    if hash_or_number.len() == 64 {
-        let hash = hex::decode(hash_or_number).map_err(|_| StatusCode::BAD_REQUEST)?;
+) -> Result<BlockBody, Error> {
+    if hash_or_number.is_empty() {
+        return Err(Error::InvalidBlockHash);
+    }
 
-        domain
-            .archive()
-            .get_block_by_hash(&hash)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-            .ok_or(StatusCode::NOT_FOUND)
-    } else {
+    if hash_or_number.chars().all(|c| c.is_numeric() || c == '-') {
         let number = hash_or_number
             .parse()
-            .map_err(|_| StatusCode::BAD_REQUEST)?;
+            .map_err(|_| Error::InvalidBlockNumber)?;
 
-        domain
+        let (tip, _) = domain
+            .archive()
+            .get_tip()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        if number > tip {
+            return Err(Error::InvalidBlockNumber);
+        }
+
+        Ok(domain
             .archive()
             .get_block_by_number(&number)
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-            .ok_or(StatusCode::NOT_FOUND)
+            .ok_or(StatusCode::NOT_FOUND)?)
+    } else {
+        let hash = hex::decode(hash_or_number).map_err(|_| Error::InvalidBlockHash)?;
+
+        Ok(domain
+            .archive()
+            .get_block_by_hash(&hash)
+            .map_err(|_| Error::InvalidBlockHash)?
+            .ok_or(StatusCode::NOT_FOUND)?)
     }
 }
 
@@ -82,7 +98,7 @@ fn build_block_model<D: Domain>(
 pub async fn by_hash_or_number<D: Domain>(
     Path(hash_or_number): Path<String>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<BlockContent>, StatusCode> {
+) -> Result<Json<BlockContent>, Error> {
     let block = load_block_by_hash_or_number(&domain, &hash_or_number)?;
 
     let (_, tip) = domain
@@ -229,18 +245,57 @@ pub async fn by_slot<D: Domain>(
 
 pub async fn by_hash_or_number_txs<D: Domain>(
     Path(hash_or_number): Path<String>,
+    Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<Vec<String>>, StatusCode> {
+) -> Result<Json<Vec<String>>, Error> {
+    let pagination = Pagination::try_from(params)?;
     let block = load_block_by_hash_or_number(&domain, &hash_or_number)?;
 
     let model = BlockModelBuilder::new(&block)?;
 
-    Ok(Json(model.into_model()?))
+    let txs: Vec<String> = model.into_model()?;
+    let txs = match pagination.order {
+        Order::Asc => txs,
+        Order::Desc => txs.into_iter().rev().collect(),
+    };
+
+    Ok(Json(
+        txs.into_iter()
+            .skip(pagination.skip())
+            .take(pagination.count)
+            .collect(),
+    ))
+}
+
+pub async fn by_hash_or_number_addresses<D: Domain>(
+    Path(hash_or_number): Path<String>,
+    Query(params): Query<PaginationParameters>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Vec<String>>, Error> {
+    let pagination = Pagination::try_from(params)?;
+    let block = load_block_by_hash_or_number(&domain, &hash_or_number)?;
+
+    let model = BlockModelBuilder::new(&block)?;
+
+    let txs: Vec<String> = model.into_model()?;
+    let txs = match pagination.order {
+        Order::Asc => txs,
+        Order::Desc => txs.into_iter().rev().collect(),
+    };
+
+    Ok(Json(
+        txs.into_iter()
+            .skip(pagination.skip())
+            .take(pagination.count)
+            .collect(),
+    ))
 }
 
 pub async fn latest_txs<D: Domain>(
+    Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<Vec<String>>, StatusCode> {
+) -> Result<Json<Vec<BlockContentAddressesInner>>, Error> {
+    let pagination = Pagination::try_from(params)?;
     let (_, tip) = domain
         .archive()
         .get_tip()
@@ -249,5 +304,17 @@ pub async fn latest_txs<D: Domain>(
 
     let model = BlockModelBuilder::new(&tip)?;
 
-    Ok(Json(model.into_model()?))
+    let addresses: Vec<BlockContentAddressesInner> = model.into_model()?;
+    let addresses = match pagination.order {
+        Order::Asc => addresses,
+        Order::Desc => addresses.into_iter().rev().collect(),
+    };
+
+    Ok(Json(
+        addresses
+            .into_iter()
+            .skip(pagination.skip())
+            .take(pagination.count)
+            .collect(),
+    ))
 }
