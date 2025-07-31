@@ -19,7 +19,6 @@ use dolos_cardano::{
     pparams::ChainSummary,
 };
 use dolos_core::{ArchiveStore, Domain, State3Store as _, StateStore};
-use itertools::Itertools;
 use pallas::{
     crypto::hash::Hash,
     ledger::{

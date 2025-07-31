@@ -189,6 +189,7 @@ pub struct DRepState {
 
 impl_entity!(DRepState, "drep", NamespaceType::KeyValue);
 
+#[derive(Debug, Encode, Decode, Clone)]
 pub struct RewardLog {
     // we make sure epoch is the first item because we'll rely on it for sorting the items in a
     // multi-value store

@@ -835,12 +835,6 @@ impl IntoModel<Vec<TxContentMetadataCborInner>> for TxModelBuilder<'_> {
     }
 }
 
-struct RedeemerModelBuilder<'a> {
-    tx: MultiEraTx<'a>,
-    redeemer: MultiEraRedeemer<'a>,
-    prices: ExUnitPrices,
-}
-
 impl TxModelBuilder<'_> {
     fn find_output_for_input(&self, input: &MultiEraInput<'_>) -> Option<MultiEraOutput<'_>> {
         let tx_hash = input.hash();
