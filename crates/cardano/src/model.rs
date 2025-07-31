@@ -166,6 +166,25 @@ impl_entity!(
     NamespaceType::KeyMultiValue
 );
 
+#[derive(Debug, Encode, Decode, Clone)]
+pub struct RewardLog {
+    // we make sure epoch is the first item because we'll rely on it for sorting the items in a
+    // multi-value store
+    #[n(0)]
+    pub epoch: u32,
+
+    #[n(1)]
+    pub amount: u64,
+
+    #[n(2)]
+    pub pool_id: Hash<28>,
+
+    #[n(3)]
+    pub as_leader: bool,
+}
+
+impl_entity!(RewardLog, "reward_log", NamespaceType::KeyMultiValue);
+
 pub fn build_schema() -> StateSchema {
     let mut schema = StateSchema::default();
     schema.insert(AccountState::NS, AccountState::NS_TYPE);
@@ -174,5 +193,6 @@ pub fn build_schema() -> StateSchema {
     schema.insert(PoolDelegator::NS, PoolDelegator::NS_TYPE);
     schema.insert(EpochState::NS, EpochState::NS_TYPE);
     schema.insert(AccountActivity::NS, AccountActivity::NS_TYPE);
+    schema.insert(RewardLog::NS, RewardLog::NS_TYPE);
     schema
 }

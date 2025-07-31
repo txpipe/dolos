@@ -151,6 +151,10 @@ impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
                 get(routes::accounts::by_stake_utxos::<D>),
             )
             .route(
+                "/accounts/{stake_address}/rewards",
+                get(routes::accounts::by_stake_rewards::<D>),
+            )
+            .route(
                 "/addresses/{address}/utxos",
                 get(routes::addresses::utxos::<D>),
             )

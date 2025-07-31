@@ -10,11 +10,16 @@ use blockfrost_openapi::models::{
     account_content::AccountContent,
     account_delegation_content_inner::AccountDelegationContentInner,
     account_registration_content_inner::{AccountRegistrationContentInner, Action},
+    account_reward_content_inner::AccountRewardContentInner,
     address_utxo_content_inner::AddressUtxoContentInner,
 };
 
-use dolos_cardano::{model::AccountActivity, pparams::ChainSummary};
+use dolos_cardano::{
+    model::{AccountActivity, RewardLog},
+    pparams::ChainSummary,
+};
 use dolos_core::{ArchiveStore, Domain, State3Store as _, StateStore};
+use itertools::Itertools;
 use pallas::{
     crypto::hash::Hash,
     ledger::{
@@ -431,6 +436,7 @@ pub async fn by_stake_delegations<D: Domain>(
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<AccountDelegationContentInner>>, Error> {
     let pagination = Pagination::try_from(params)?;
+
     let items = by_stake_actions::<D, _, AccountDelegationContentInner>(
         &stake_address,
         pagination,
@@ -448,6 +454,7 @@ pub async fn by_stake_registrations<D: Domain>(
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<AccountRegistrationContentInner>>, Error> {
     let pagination = Pagination::try_from(params)?;
+
     let items = by_stake_actions::<D, _, AccountRegistrationContentInner>(
         &stake_address,
         pagination,
@@ -457,4 +464,58 @@ pub async fn by_stake_registrations<D: Domain>(
     .await?;
 
     Ok(Json(items))
+}
+
+impl IntoModel<AccountRewardContentInner> for RewardLog {
+    type SortKey = ();
+
+    fn into_model(self) -> Result<AccountRewardContentInner, StatusCode> {
+        let pool_id = mapping::bech32_pool(&self.pool_id)?;
+
+        let r#type = if self.as_leader {
+            blockfrost_openapi::models::account_reward_content_inner::Type::Leader
+        } else {
+            blockfrost_openapi::models::account_reward_content_inner::Type::Member
+        };
+
+        let out = AccountRewardContentInner {
+            epoch: self.epoch as i32,
+            amount: self.amount.to_string(),
+            pool_id,
+            r#type,
+        };
+
+        Ok(out)
+    }
+}
+
+pub async fn by_stake_rewards<D: Domain>(
+    Path(stake_address): Path<String>,
+    Query(params): Query<PaginationParameters>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Vec<AccountRewardContentInner>>, Error> {
+    let pagination = Pagination::try_from(params)?;
+
+    let stake_address = ensure_stake_address(&stake_address)?;
+
+    let stake_hash = match stake_address.payload() {
+        StakePayload::Stake(x) => x.to_vec(),
+        StakePayload::Script(x) => x.to_vec(),
+    };
+
+    let items: Vec<_> = domain
+        .state3()
+        .iter_entity_values_typed::<RewardLog>(stake_hash)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .skip(pagination.skip())
+        .take(pagination.count)
+        .collect::<Result<_, _>>()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let mapped = items
+        .into_iter()
+        .map(|x| x.into_model())
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(Json(mapped))
 }
