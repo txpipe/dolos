@@ -222,14 +222,13 @@ mod tests {
             None,
             Some(StorageConfig {
                 max_wal_history: Some(50),
-                max_chain_history: Some(200),
+                max_chain_history: Some(1000),
                 ..Default::default()
             }),
         );
 
-        domain.wal().initialize_from_origin().unwrap();
-
         let genesis_block = dolos_testing::blocks::make_conway_block(0);
+
         domain.apply_blocks(&[genesis_block.clone()]).unwrap();
 
         let genesis_point = ChainPoint::Specific(genesis_block.slot, genesis_block.hash);
