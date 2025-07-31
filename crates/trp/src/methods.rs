@@ -4,7 +4,7 @@ use pallas::{codec::utils::NonEmptySet, ledger::primitives::conway::VKeyWitness}
 use serde::Deserialize;
 use std::sync::Arc;
 use tx3_lang::ProtoTx;
-use tx3_sdk::trp::{SubmitParams, SubmitWitness};
+use tx3_sdk::trp::{error::pretty::PrettyError, SubmitParams, SubmitWitness};
 
 use dolos_core::{Domain, MempoolStore as _, StateStore as _};
 
@@ -143,7 +143,7 @@ pub async fn trp_resolve<D: Domain>(
             return Err(ErrorObject::owned(
                 ErrorCode::InternalError.code(),
                 "Failed to resolve",
-                Some(err.to_string()),
+                Some(err.pretty()),
             ));
         }
     };
