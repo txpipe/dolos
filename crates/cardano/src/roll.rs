@@ -13,7 +13,7 @@ use pallas::{
 use pallas::ledger::primitives::alonzo::Certificate as AlonzoCert;
 use pallas::ledger::primitives::conway::Certificate as ConwayCert;
 
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::model::{
     AccountActivity, AccountState, AssetState, EpochState, PoolDelegator, PoolState,
@@ -261,7 +261,7 @@ impl RollVisitor for AssetStateVisitor {
             subject.extend_from_slice(policy.as_slice());
             subject.extend_from_slice(asset.name());
 
-            info!("tracking asset: {:?}", hex::encode(&subject));
+            debug!(subject = %hex::encode(&subject), "tracking asset");
 
             let current = state
                 .read_entity_typed::<AssetState>(&subject)?
@@ -313,7 +313,7 @@ impl RollVisitor for PoolDelegatorVisitor {
         cert: &MultiEraCert,
     ) -> Result<(), State3Error> {
         if let Some((operator, new)) = cert_to_pool_delegator(cert) {
-            info!(%operator, "new pool delegator");
+            debug!(%operator, "new pool delegator");
             delta.append_entity(operator.as_slice(), new);
         }
 
