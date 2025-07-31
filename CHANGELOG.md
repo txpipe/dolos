@@ -2,6 +2,42 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.29.0] - 2025-07-31
+
+### 🚀 Features
+
+- *(minibf)* Implement `txs/{hash}/stakes` endpoint (#605)
+- *(minibf)* Implement `accounts/{stake}` endpoint (#608)
+- *(minibf)* Implement `accounts/{stake}/addresses` endpoint (#610)
+- *(minibf)* Implement `metadata/txs/{label}` endpoints (#611)
+- *(minibf)* Implement `/assets/{asset}` endpoint (#612)
+- *(minibf)* Implement `/pools/extended` endpoint (#613)
+- *(minibf)* Implement `/pool/{id}/delegators` endpoint (#614)
+- *(minibf)* Implement `/network/eras` endpoint (#615)
+- *(minibf)* Implement `/network` endpoint (#617)
+- *(minibf)* Implement `accounts/{stake_address}/delegations` endpoint (#618)
+- *(minibf)* Implement `/accounts/{stake_address}/registrations` endpoint (#619)
+- *(minibf)* Implement `txs/{hash}/redeemers` endpoint (#556)
+- *(minibf)* Implement `accounts/{stake_address}/rewards` endpoint (#628)
+- *(minibf)* Implement `governance/dreps/{drepid}` endpoint (#626)
+
+### 🐛 Bug Fixes
+
+- *(minibf)* Improve endpoint conformance (#627)
+
+### 🚜 Refactor
+
+- Introduce chain-agnostic state interface (#607)
+
+### 🧪 Testing
+
+- Fix fake block hash mismatch
+
+### ⚙️ Miscellaneous Tasks
+
+- Fix lint warnings (#609)
+- *(minibf)* Use correct json & range  mappings (#620)
+
 ## [0.28.0] - 2025-07-25
 
 ### 🚀 Features
@@ -17,6 +53,10 @@ All notable changes to this project will be documented in this file.
 ### 🚜 Refactor
 
 - Use tx3 built-in resolver (#601)
+
+### Release
+
+- V0.28.0
 
 ## [0.27.1] - 2025-07-16
 
