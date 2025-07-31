@@ -375,6 +375,24 @@ impl Iterator for ChainSparseIter {
     }
 }
 
+impl DoubleEndedIterator for ChainSparseIter {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        let next = self.1.next_back()?;
+
+        let Ok(slot) = next else {
+            return Some(Err(next.err().unwrap().into()));
+        };
+
+        let block = tables::BlocksTable::get_by_slot(&self.0, slot);
+
+        let Ok(block) = block else {
+            return Some(Err(block.err().unwrap().into()));
+        };
+
+        Some(Ok((slot, block)))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

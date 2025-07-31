@@ -293,7 +293,7 @@ impl RollVisitor for PoolStateVisitor {
         cert: &MultiEraCert,
     ) -> Result<(), State3Error> {
         if let Some((operator, new)) = cert_to_pool_state(cert) {
-            let current = state.read_entity_typed::<PoolState>(&operator.to_vec())?;
+            let current = state.read_entity_typed::<PoolState>(operator)?;
             delta.override_entity(operator.to_vec(), new, current);
         }
 
@@ -334,7 +334,7 @@ impl RollVisitor for EpochStateVisitor {
             .read_entity_typed::<EpochState>(crate::model::CURRENT_EPOCH_KEY)?
             .unwrap_or_default();
 
-        let block_fees = block.txs().iter().map(|tx| tx.fee()).flatten().sum::<u64>();
+        let block_fees = block.txs().iter().filter_map(|tx| tx.fee()).sum::<u64>();
 
         let new = EpochState {
             gathered_fees: Some(current.gathered_fees.unwrap_or_default() + block_fees),
