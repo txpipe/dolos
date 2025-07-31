@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.29.1] - 2025-07-31
+
+### 🐛 Bug Fixes
+
+- *(minibf)* Improve conformance test coverage (#629)
+
 ## [0.29.0] - 2025-07-31
 
 ### 🚀 Features
@@ -37,6 +43,10 @@ All notable changes to this project will be documented in this file.
 
 - Fix lint warnings (#609)
 - *(minibf)* Use correct json & range  mappings (#620)
+
+### Release
+
+- V0.29.0
 
 ## [0.28.0] - 2025-07-25
 
