@@ -5043,9 +5043,9 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "tx3-cardano"
-version = "0.10.1"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aaa4ee5b6032ea674b938d17497634b3efb0e4105a764f5484fcd7790a4c6f8f"
+checksum = "e8647f1c8bb3e5d95ad9da5280f682c28a6bf7895249b641f5fefb0b37388f13"
 dependencies = [
  "hex",
  "pallas 1.0.0-alpha.2 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -5058,9 +5058,9 @@ dependencies = [
 
 [[package]]
 name = "tx3-lang"
-version = "0.10.1"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ffaa32efb0788a1de7a67be5b13233a6b24a5cce0247c6d7411cb4c84e88b88"
+checksum = "6b9d050963aff1d574bfc4635d01b01e09df2401633ccbf83c24797de5f426b9"
 dependencies = [
  "bincode 2.0.1",
  "hex",
@@ -5074,10 +5074,11 @@ dependencies = [
 
 [[package]]
 name = "tx3-resolver"
-version = "0.10.1"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d50ad0c4d6b63a3d425044ba40aa96dd1092a8366bacfebe562c3cafa10a6769"
+checksum = "9c4b6d485b257ffbdd41f0bfa9d9f2e5ab31a89cc174e92c048f83f8b5964337"
 dependencies = [
+ "hex",
  "thiserror 2.0.12",
  "trait-variant",
  "tx3-lang",
@@ -5488,7 +5489,7 @@ version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf221c93e13a30d793f7645a0e7762c55d169dbb0a49671918a2319d289b10bb"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
