@@ -5,11 +5,17 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::{filter::Targets, prelude::*};
 
+use once_cell::sync::OnceCell;
+use opentelemetry::{global, KeyValue};
+use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
+use opentelemetry_otlp::{Protocol, WithExportConfig};
+use opentelemetry_sdk::{logs as sdklog, Resource};
+
 use dolos::adapters::{ArchiveAdapter, DomainAdapter, StateAdapter, WalAdapter};
 use dolos::core::Genesis;
 use dolos::prelude::*;
 
-use crate::{GenesisConfig, LoggingConfig};
+use crate::{Config, GenesisConfig};
 
 pub struct Stores {
     pub wal: WalAdapter,
@@ -137,53 +143,127 @@ pub fn setup_domain(config: &crate::Config) -> miette::Result<DomainAdapter> {
     Ok(domain)
 }
 
-pub fn setup_tracing(config: &LoggingConfig) -> miette::Result<()> {
-    let level = config.max_level;
+static LOGGER_PROVIDER: OnceCell<sdklog::SdkLoggerProvider> = OnceCell::new();
+static METRICS_PROVIDER: OnceCell<opentelemetry_sdk::metrics::SdkMeterProvider> = OnceCell::new();
 
+pub fn setup_tracing(config: &Config) -> miette::Result<()> {
+    let fmt_layer = tracing_subscriber::fmt::layer();
+
+    let level = config.logging.max_level;
     let mut filter = Targets::new()
         .with_target("dolos", level)
         .with_target("gasket", level);
 
-    if config.include_tokio {
+    if config.logging.include_tokio {
         filter = filter
             .with_target("tokio", level)
             .with_target("runtime", level);
     }
 
-    if config.include_pallas {
+    if config.logging.include_pallas {
         filter = filter.with_target("pallas", level);
     }
 
-    if config.include_grpc {
+    if config.logging.include_grpc {
         filter = filter.with_target("tonic", level);
     }
 
-    if config.include_trp {
+    if config.logging.include_trp {
         filter = filter.with_target("jsonrpsee-server", level);
     }
 
-    if config.include_minibf {
+    if config.logging.include_minibf {
         filter = filter.with_target("tower_http", level);
     }
 
-    #[cfg(not(feature = "debug"))]
-    {
-        tracing_subscriber::registry()
-            .with(tracing_subscriber::fmt::layer())
-            .with(filter)
-            .init();
-    }
+    if let Some(telemetry_config) = config.telemetry.as_ref() {
+        let resource = Resource::builder_empty()
+            .with_service_name(telemetry_config.service_name.clone())
+            .with_attribute(KeyValue::new("service.version", env!("CARGO_PKG_VERSION")))
+            .build();
 
-    #[cfg(feature = "debug")]
-    {
-        tracing_subscriber::registry()
-            .with(tracing_subscriber::fmt::layer())
-            .with(console_subscriber::spawn())
-            .with(filter)
-            .init();
+        let exporter = opentelemetry_otlp::LogExporter::builder()
+            .with_http()
+            .with_protocol(Protocol::HttpJson)
+            .with_endpoint(&telemetry_config.logs_endpoint)
+            .with_timeout(Duration::from_secs(3))
+            .build()
+            .unwrap();
+
+        let provider = sdklog::SdkLoggerProvider::builder()
+            .with_batch_exporter(exporter)
+            .with_resource(resource.clone())
+            .build();
+
+        // keep provider alive for the whole program
+        LOGGER_PROVIDER.set(provider.clone()).ok();
+
+        let otel_layer = OpenTelemetryTracingBridge::new(&provider);
+
+        let exporter = opentelemetry_otlp::MetricExporter::builder()
+            .with_http()
+            .with_protocol(Protocol::HttpJson)
+            .with_timeout(Duration::from_secs(3))
+            .with_endpoint(&telemetry_config.metrics_endpoint)
+            .build()
+            .expect("Failed to create metric exporter");
+
+        let provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
+            .with_periodic_exporter(exporter)
+            .with_resource(resource)
+            .build();
+
+        METRICS_PROVIDER.set(provider.clone()).ok();
+        global::set_meter_provider(provider);
+
+        #[cfg(not(feature = "debug"))]
+        {
+            tracing_subscriber::registry()
+                .with(fmt_layer)
+                .with(otel_layer)
+                .with(filter)
+                .init();
+        }
+
+        #[cfg(feature = "debug")]
+        {
+            tracing_subscriber::registry()
+                .with(fmt_layer)
+                .with(console_subscriber::spawn())
+                .with(otel_layer)
+                .with(filter)
+                .init();
+        }
+    } else {
+        // No telemetry, just use fmt layer
+        #[cfg(not(feature = "debug"))]
+        {
+            tracing_subscriber::registry()
+                .with(fmt_layer)
+                .with(filter)
+                .init();
+        }
+
+        #[cfg(feature = "debug")]
+        {
+            tracing_subscriber::registry()
+                .with(fmt_layer)
+                .with(console_subscriber::spawn())
+                .with(filter)
+                .init();
+        }
     }
 
     Ok(())
+}
+
+pub fn shutdown_tracing() {
+    if let Some(p) = LOGGER_PROVIDER.get() {
+        let _ = p.shutdown();
+    }
+    if let Some(p) = METRICS_PROVIDER.get() {
+        let _ = p.shutdown();
+    }
 }
 
 pub fn open_genesis_files(config: &GenesisConfig) -> miette::Result<Genesis> {

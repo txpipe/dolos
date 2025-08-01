@@ -73,7 +73,7 @@ fn decode_params(params: Params<'_>) -> Result<ProtoTx, ErrorObjectOwned> {
 
     if params.tir.version != tx3_lang::ir::IR_VERSION {
         return Err(ErrorObject::owned(
-            ErrorCode::InvalidParams.code(),
+            ErrorCode::ServerError(-32000).code(),
             format!(
                 "Unsupported IR version, expected {}. Make sure you have the latest version of the tx3 toolchain",
                 tx3_lang::ir::IR_VERSION

@@ -4,7 +4,7 @@ use miette::{Context, IntoDiagnostic};
 pub struct Args {}
 
 pub fn run(config: &super::Config, _args: &Args) -> miette::Result<()> {
-    crate::common::setup_tracing(&config.logging)?;
+    crate::common::setup_tracing(config)?;
 
     let domain = crate::common::setup_domain(config)?;
 

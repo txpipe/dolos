@@ -7,7 +7,7 @@ pub struct Args {}
 
 #[tokio::main]
 pub async fn run(config: super::Config, _args: &Args) -> miette::Result<()> {
-    crate::common::setup_tracing(&config.logging)?;
+    crate::common::setup_tracing(&config)?;
 
     let domain = crate::common::setup_domain(&config)?;
 
@@ -42,7 +42,7 @@ pub async fn run(config: super::Config, _args: &Args) -> miette::Result<()> {
     }
 
     sync.await.unwrap();
-
+    crate::common::shutdown_tracing();
     warn!("shutdown complete");
 
     Ok(())

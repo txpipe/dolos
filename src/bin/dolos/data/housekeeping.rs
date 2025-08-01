@@ -12,7 +12,7 @@ pub struct Args {
 }
 
 pub fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
-    crate::common::setup_tracing(&config.logging)?;
+    crate::common::setup_tracing(config)?;
 
     let domain = setup_domain(config)?;
 

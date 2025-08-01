@@ -96,6 +96,23 @@ pub struct SnapshotConfig {
     download_url: String,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+pub struct TelemetryConfig {
+    metrics_endpoint: String,
+    logs_endpoint: String,
+    service_name: String,
+}
+
+impl Default for TelemetryConfig {
+    fn default() -> Self {
+        Self {
+            metrics_endpoint: "http://localhost:4318/v1/metrics".to_string(),
+            logs_endpoint: "http://localhost:4318/v1/logs".to_string(),
+            service_name: "dolos".to_string(),
+        }
+    }
+}
+
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
 pub struct LoggingConfig {
@@ -146,6 +163,9 @@ pub struct Config {
 
     #[serde(default)]
     pub logging: LoggingConfig,
+
+    #[serde(default)]
+    pub telemetry: Option<TelemetryConfig>,
 }
 
 impl Config {
