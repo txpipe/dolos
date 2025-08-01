@@ -28,12 +28,9 @@ pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::
         .context("getting range")?;
 
     let schema = dolos_cardano::model::build_schema();
-    //let root = crate::common::ensure_storage_path(config)?;
-    //let state3_path = root.join("state");
-    //let state3 = dolos_redb3::StateStore::open(schema, state3_path, None)
-    //    .into_diagnostic()
-    //    .context("opening state3 db")?;
-    let state3 = dolos_redb3::StateStore::in_memory(schema)
+    let root = crate::common::ensure_storage_path(config)?;
+    let state3_path = root.join("state");
+    let state3 = dolos_redb3::StateStore::open(schema, state3_path, None)
         .into_diagnostic()
         .context("opening state3 db")?;
 
