@@ -17,6 +17,7 @@ use crate::{
 #[derive(Clone)]
 enum OnchainMetadata {
     CIP25v1(Metadatum),
+    #[allow(dead_code)]
     CIP25v2(Metadatum),
 }
 

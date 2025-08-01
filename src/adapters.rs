@@ -407,6 +407,12 @@ impl Iterator for ArchiveSparseBlockIter {
     }
 }
 
+impl DoubleEndedIterator for ArchiveSparseBlockIter {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.0.next_back()
+    }
+}
+
 impl From<dolos_redb::archive::ChainSparseIter> for ArchiveSparseBlockIter {
     fn from(value: dolos_redb::archive::ChainSparseIter) -> Self {
         Self(value)

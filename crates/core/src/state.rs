@@ -205,7 +205,7 @@ impl<S: State3Store, T: Entity> Iterator for EntityValueIterTyped<S, T> {
     fn next(&mut self) -> Option<Self::Item> {
         let next = self.inner.next()?;
 
-        let mapped = next.and_then(|value| T::decode_value(value).map(|v| v));
+        let mapped = next.and_then(|value| T::decode_value(value));
 
         Some(mapped)
     }

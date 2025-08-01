@@ -4,18 +4,15 @@ use axum::{
     Json,
 };
 use blockfrost_openapi::models::{
-    asset::Asset, pool_delegators_inner::PoolDelegatorsInner,
-    pool_list_extended_inner::PoolListExtendedInner,
+    pool_delegators_inner::PoolDelegatorsInner, pool_list_extended_inner::PoolListExtendedInner,
 };
 use dolos_cardano::model::{AccountState, PoolDelegator, PoolState};
 use dolos_core::{Domain, Entity, State3Store as _};
-use pallas::{
-    crypto::hash::Hash,
-    ledger::{addresses::Network, primitives::StakeCredential},
-};
+use pallas::{crypto::hash::Hash, ledger::addresses::Network};
 use serde_json::json;
 
 use crate::{
+    error::Error,
     mapping::{bech32_pool, rational_to_f64, IntoModel},
     pagination::{Pagination, PaginationParameters},
     Facade,
@@ -30,7 +27,7 @@ impl IntoModel<PoolListExtendedInner> for PoolModelBuilder {
     type SortKey = ();
 
     fn into_model(self) -> Result<PoolListExtendedInner, StatusCode> {
-        let pool_id = bech32_pool(&self.operator)?;
+        let pool_id = bech32_pool(self.operator)?;
 
         let out = PoolListExtendedInner {
             pool_id,
@@ -59,7 +56,7 @@ impl IntoModel<PoolListExtendedInner> for PoolModelBuilder {
 pub async fn all_extended<D: Domain>(
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<Vec<PoolListExtendedInner>>, StatusCode> {
+) -> Result<Json<Vec<PoolListExtendedInner>>, Error> {
     let start = &[0u8; 28].as_slice();
     let end = &[255u8; 28].as_slice();
 
@@ -68,13 +65,10 @@ pub async fn all_extended<D: Domain>(
         .iter_entities_typed::<PoolState>(start..end)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let page_size = params.count.unwrap_or(100) as usize;
-    let page_number = params.page.unwrap_or(1) as usize;
-    let skip = page_size * (page_number - 1);
-
+    let pagination = Pagination::try_from(params)?;
     let page: Vec<_> = iter
-        .skip(skip)
-        .take(page_size)
+        .skip(pagination.skip())
+        .take(pagination.count)
         .collect::<Result<_, _>>()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -123,7 +117,7 @@ pub async fn by_id_delegators<D: Domain>(
     Path(id): Path<String>,
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<Vec<PoolDelegatorsInner>>, StatusCode> {
+) -> Result<Json<Vec<PoolDelegatorsInner>>, Error> {
     let (_, operator) = bech32::decode(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
 
     let network = domain.get_network_id()?;
@@ -133,13 +127,11 @@ pub async fn by_id_delegators<D: Domain>(
         .iter_entity_values(PoolDelegator::NS, operator.as_slice())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let page_size = params.count.unwrap_or(100) as usize;
-    let page_number = params.page.unwrap_or(1) as usize;
-    let skip = page_size * (page_number - 1);
+    let pagination = Pagination::try_from(params)?;
 
     let page: Vec<_> = iter
-        .skip(skip)
-        .take(page_size)
+        .skip(pagination.skip())
+        .take(pagination.count)
         .collect::<Result<_, _>>()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 

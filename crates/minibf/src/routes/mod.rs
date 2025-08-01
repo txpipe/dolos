@@ -4,6 +4,7 @@ pub mod assets;
 pub mod blocks;
 pub mod epochs;
 pub mod genesis;
+pub mod governance;
 pub mod metadata;
 pub mod network;
 pub mod pools;

@@ -1,5 +1,3 @@
-use std::ops::Sub;
-
 use axum::{extract::State, http::StatusCode, Json};
 use blockfrost_openapi::models::{
     network::Network, network_eras_inner::NetworkErasInner,
@@ -13,7 +11,7 @@ use dolos_cardano::{
     model::{EpochState, CURRENT_EPOCH_KEY},
     pparams::{ChainSummary, EraSummary},
 };
-use dolos_core::{ArchiveStore as _, Domain, Genesis, State3Store};
+use dolos_core::{Domain, Genesis, State3Store};
 
 use crate::{mapping::IntoModel, Facade};
 

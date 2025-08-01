@@ -4,16 +4,17 @@ use pallas::{
     codec::{minicbor, utils::Bytes},
     crypto::hash::Hash,
     ledger::{
-        addresses::{Address, Network, StakeAddress, StakePayload},
+        addresses::{Address, Network, ShelleyPaymentPart, StakeAddress, StakePayload},
         primitives::{
             alonzo::{self, Certificate as AlonzoCert},
-            conway::{Certificate as ConwayCert, DatumOption, ScriptRef},
-            StakeCredential,
+            conway::{Certificate as ConwayCert, DatumOption, RedeemerTag, ScriptRef},
+            ExUnitPrices, StakeCredential,
         },
         traverse::{
             ComputeHash, MultiEraBlock, MultiEraCert, MultiEraHeader, MultiEraInput,
-            MultiEraOutput, MultiEraTx, MultiEraValue, OriginalHash,
+            MultiEraOutput, MultiEraRedeemer, MultiEraTx, MultiEraValue, OriginalHash,
         },
+        validate::utils::MultiEraProtocolParameters,
     },
 };
 use std::{collections::HashMap, ops::Deref};
@@ -21,6 +22,8 @@ use std::{collections::HashMap, ops::Deref};
 use blockfrost_openapi::models::{
     address_utxo_content_inner::AddressUtxoContentInner,
     block_content::BlockContent,
+    block_content_addresses_inner::BlockContentAddressesInner,
+    block_content_addresses_inner_transactions_inner::BlockContentAddressesInnerTransactionsInner,
     tx_content::TxContent,
     tx_content_cbor::TxContentCbor,
     tx_content_delegations_inner::TxContentDelegationsInner,
@@ -33,6 +36,8 @@ use blockfrost_openapi::models::{
     tx_content_pool_certs_inner_metadata::TxContentPoolCertsInnerMetadata,
     tx_content_pool_certs_inner_relays_inner::TxContentPoolCertsInnerRelaysInner,
     tx_content_pool_retires_inner::TxContentPoolRetiresInner,
+    tx_content_redeemers_inner::Purpose,
+    tx_content_redeemers_inner::TxContentRedeemersInner,
     tx_content_stake_addr_inner::TxContentStakeAddrInner,
     tx_content_utxo::TxContentUtxo,
     tx_content_utxo_inputs_inner::TxContentUtxoInputsInner,
@@ -437,6 +442,7 @@ impl<'a> IntoModel<TxContentUtxoInputsInner> for UtxoInputModelBuilder<'a> {
     }
 }
 
+#[derive(Debug)]
 pub struct TxModelBuilder<'a> {
     chain: Option<ChainSummary>,
     network: Option<Network>,
@@ -831,6 +837,133 @@ impl IntoModel<Vec<TxContentMetadataCborInner>> for TxModelBuilder<'_> {
     }
 }
 
+impl TxModelBuilder<'_> {
+    fn find_output_for_input(&self, input: &MultiEraInput<'_>) -> Option<MultiEraOutput<'_>> {
+        let tx_hash = input.hash();
+        let index = input.index() as usize;
+
+        let Some(source) = self.deps.get(&tx_hash) else {
+            return None;
+        };
+
+        let outputs = source.outputs();
+
+        let Some(output) = outputs.get(index) else {
+            return None;
+        };
+
+        Some(output.clone())
+    }
+
+    fn find_redeemer_script(
+        &self,
+        redeemer: &MultiEraRedeemer<'_>,
+    ) -> Result<Option<Hash<28>>, StatusCode> {
+        let index = redeemer.index() as usize;
+        let tx = self.tx()?;
+
+        match redeemer.tag() {
+            RedeemerTag::Spend => {
+                let inputs = tx.inputs_sorted_set();
+
+                let Some(input) = inputs.get(index) else {
+                    return Ok(None);
+                };
+
+                let Some(output) = self.find_output_for_input(input) else {
+                    return Ok(None);
+                };
+
+                let address = output
+                    .address()
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+                match address {
+                    Address::Shelley(x) => match x.payment() {
+                        ShelleyPaymentPart::Script(hash) => Ok(Some(*hash)),
+                        _ => Ok(None),
+                    },
+                    _ => Ok(None),
+                }
+            }
+
+            _ => Ok(None),
+        }
+    }
+
+    fn build_redeemer_inner(
+        &self,
+        redeemer: &MultiEraRedeemer<'_>,
+        prices: &ExUnitPrices,
+    ) -> Result<TxContentRedeemersInner, StatusCode> {
+        let ExUnitPrices {
+            mem_price,
+            step_price,
+        } = prices;
+
+        let unit_mem = redeemer.ex_units().mem;
+        let unit_steps = redeemer.ex_units().steps;
+
+        let fee = (unit_mem * mem_price.numerator + unit_steps * step_price.numerator)
+            / (mem_price.denominator * step_price.denominator);
+
+        let out = TxContentRedeemersInner {
+            purpose: match redeemer.tag() {
+                RedeemerTag::Spend => Purpose::Spend,
+                RedeemerTag::Mint => Purpose::Mint,
+                RedeemerTag::Cert => Purpose::Cert,
+                RedeemerTag::Reward => Purpose::Reward,
+                // TODO: discuss with BF team if schema should be extended to include these
+                _ => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+            },
+            tx_index: redeemer.index() as i32,
+            // TODO: we should change this in Pallas to ensure that we have a KeepRaw wrapping the
+            // redeemer data
+            redeemer_data_hash: redeemer.data().compute_hash().to_string(),
+            fee: fee.to_string(),
+            unit_mem: unit_mem.to_string(),
+            unit_steps: unit_steps.to_string(),
+            script_hash: self
+                .find_redeemer_script(redeemer)?
+                .map(|x| x.to_string())
+                .unwrap_or_default(),
+            datum_hash: Default::default(),
+        };
+
+        Ok(out)
+    }
+}
+
+impl IntoModel<Vec<TxContentRedeemersInner>> for TxModelBuilder<'_> {
+    type SortKey = ();
+
+    fn into_model(self) -> Result<Vec<TxContentRedeemersInner>, StatusCode> {
+        let tx = self.tx()?;
+        let redeemers = tx.redeemers();
+
+        let era = self
+            .chain
+            .as_ref()
+            .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?
+            .era_for_slot(self.block.slot());
+
+        let prices = match &era.pparams {
+            MultiEraProtocolParameters::Alonzo(x) => x.execution_costs.clone(),
+            MultiEraProtocolParameters::Babbage(x) => x.execution_costs.clone(),
+            MultiEraProtocolParameters::Conway(x) => x.execution_costs.clone(),
+            _ => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+        };
+
+        let items = redeemers
+            .into_iter()
+            .map(|x| self.build_redeemer_inner(&x, &prices))
+            .try_collect()
+            .map_err(|_: StatusCode| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        Ok(items)
+    }
+}
+
 impl IntoModel<Vec<TxContentWithdrawalsInner>> for TxModelBuilder<'_> {
     type SortKey = ();
 
@@ -879,7 +1012,7 @@ fn build_delegation_inner(
         index: index as i32,
         address,
         pool_id,
-        active_epoch,
+        active_epoch: active_epoch + 1,
         // DEPRECATED
         cert_index: index as i32,
     })
@@ -1524,14 +1657,20 @@ impl<'a> IntoModel<BlockContent> for BlockModelBuilder<'a> {
             slot: Some(block.slot() as i32),
             height: Some(block.number() as i32),
             tx_count: block.txs().len() as i32,
-            size: block.size() as i32,
+            size: block.body_size().unwrap() as i32,
             confirmations,
             slot_leader,
             block_vrf,
             op_cert,
             op_cert_counter,
-            output: Some(output),
-            fees: Some(fees),
+            output: match output.as_str() {
+                "0" => None,
+                _ => Some(output),
+            },
+            fees: match fees.as_str() {
+                "0" => None,
+                _ => Some(fees),
+            },
         };
 
         Ok(out)
@@ -1557,5 +1696,31 @@ impl<'a> IntoModel<Vec<String>> for BlockModelBuilder<'a> {
             .collect();
 
         Ok(txs)
+    }
+}
+
+impl<'a> IntoModel<Vec<BlockContentAddressesInner>> for BlockModelBuilder<'a> {
+    type SortKey = ();
+
+    fn into_model(self) -> Result<Vec<BlockContentAddressesInner>, StatusCode> {
+        let block = &self.block;
+        let addresses = block
+            .txs()
+            .iter()
+            .flat_map(|tx| {
+                tx.produces()
+                    .iter()
+                    .map(|(_, output)| BlockContentAddressesInner {
+                        address: output.address().unwrap().to_string(),
+                        transactions: vec![BlockContentAddressesInnerTransactionsInner {
+                            tx_hash: tx.hash().to_string(),
+                        }],
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .sorted_by(|x, y| x.address.cmp(&y.address))
+            .collect();
+
+        Ok(addresses)
     }
 }
