@@ -618,8 +618,8 @@ pub enum MempoolError {
     Phase2Error(#[from] pallas::ledger::validate::phase2::error::Error),
 
     #[cfg(feature = "phase2")]
-    #[error("phase-2 script yielded an error")]
-    Phase2ExplicitError,
+    #[error("phase-2 script yielded an error: {0:?}")]
+    Phase2ExplicitError(Vec<String>),
 
     #[error("state error: {0}")]
     StateError(#[from] StateError),
