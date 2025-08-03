@@ -24,9 +24,7 @@ fn parse_drep_id_type(id: &[u8]) -> Result<DrepIdType, StatusCode> {
     match header_byte & 0b00001111 {
         0b00000010 => Ok(DrepIdType::Script),
         0b00000011 => Ok(DrepIdType::Vk),
-        _ => {
-            return Err(StatusCode::BAD_REQUEST);
-        }
+        _ => Err(StatusCode::BAD_REQUEST),
     }
 }
 

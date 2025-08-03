@@ -80,7 +80,7 @@ impl From<tx3_resolver::Error> for Error {
             return Error::ResolveError(error.into());
         };
 
-        return Error::InputNotResolved(name, q, ss);
+        Error::InputNotResolved(name, q, ss);
     }
 }
 
