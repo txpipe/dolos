@@ -285,7 +285,7 @@ impl MempoolStore for Mempool {
 
             for eval in report {
                 if !eval.success {
-                    return Err(MempoolError::Phase2ExplicitError(eval.logs));
+                    return Err(MempoolError::Phase2ExplicitError(eval.logs.clone()));
                 }
             }
         }
