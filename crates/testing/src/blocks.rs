@@ -6,7 +6,7 @@ use pallas::{
             conway::{Header, OperationalCert},
             VrfCert,
         },
-        traverse::Era,
+        traverse::{ComputeHash, Era},
     },
 };
 
@@ -17,13 +17,13 @@ pub fn slot_to_hash(slot: u64) -> BlockHash {
 }
 
 pub fn make_conway_block(slot: BlockSlot) -> RawBlock {
-    let hash = slot_to_hash(slot);
+    let block_body_hash = slot_to_hash(slot);
 
     let block = pallas::ledger::primitives::conway::Block {
         header: KeepRaw::from(Header {
             header_body: pallas::ledger::primitives::conway::HeaderBody {
                 slot,
-                block_body_hash: hash,
+                block_body_hash,
                 block_number: 0,
                 prev_hash: None,
                 issuer_vkey: vec![].into(),
@@ -45,6 +45,8 @@ pub fn make_conway_block(slot: BlockSlot) -> RawBlock {
         auxiliary_data_set: Default::default(),
         invalid_transactions: Default::default(),
     };
+
+    let hash = block.header.compute_hash();
 
     let wrapper = (Era::Conway as u16, block);
 

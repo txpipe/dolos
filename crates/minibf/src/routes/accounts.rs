@@ -10,16 +10,20 @@ use blockfrost_openapi::models::{
     account_content::AccountContent,
     account_delegation_content_inner::AccountDelegationContentInner,
     account_registration_content_inner::{AccountRegistrationContentInner, Action},
+    account_reward_content_inner::AccountRewardContentInner,
     address_utxo_content_inner::AddressUtxoContentInner,
 };
 
-use dolos_cardano::{model::AccountActivity, pparams::ChainSummary};
-use dolos_core::{ArchiveStore, Domain, Entity as _, State3Store as _, StateStore};
+use dolos_cardano::{
+    model::{AccountActivity, RewardLog},
+    pparams::ChainSummary,
+};
+use dolos_core::{ArchiveStore, Domain, State3Store as _, StateStore};
 use pallas::{
     crypto::hash::Hash,
     ledger::{
         addresses::{Network, StakeAddress, StakePayload},
-        traverse::{MultiEraBlock, MultiEraCert, MultiEraTx},
+        traverse::{MultiEraBlock, MultiEraCert},
     },
 };
 
@@ -27,6 +31,7 @@ use pallas::ledger::primitives::alonzo::Certificate as AlonzoCert;
 use pallas::ledger::primitives::conway::Certificate as ConwayCert;
 
 use crate::{
+    error::Error,
     mapping::{self, bech32_drep, bech32_pool, bytes_to_address_bech32, IntoModel},
     pagination::{Pagination, PaginationParameters},
     Facade,
@@ -189,7 +194,7 @@ pub async fn by_stake_utxos<D: Domain>(
     Path(address): Path<String>,
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<Vec<AddressUtxoContentInner>>, StatusCode> {
+) -> Result<Json<Vec<AddressUtxoContentInner>>, Error> {
     let pagination = Pagination::try_from(params)?;
 
     let address = ensure_stake_address(&address)?;
@@ -225,7 +230,7 @@ fn build_delegation(
         _ => return Ok(None),
     };
 
-    let address = mapping::stake_cred_to_address(&cred, network);
+    let address = mapping::stake_cred_to_address(cred, network);
 
     if address != *stake_address {
         return Ok(None);
@@ -245,7 +250,7 @@ fn build_registration(
     stake_address: &StakeAddress,
     tx_hash: Hash<32>,
     cert: &MultiEraCert,
-    epoch: u32,
+    _epoch: u32,
     network: Network,
 ) -> Result<Option<AccountRegistrationContentInner>, StatusCode> {
     let (cred, is_registration) = match cert {
@@ -262,7 +267,7 @@ fn build_registration(
         _ => return Ok(None),
     };
 
-    let address = mapping::stake_cred_to_address(&cred, network);
+    let address = mapping::stake_cred_to_address(cred, network);
 
     if address != *stake_address {
         return Ok(None);
@@ -366,14 +371,14 @@ impl IntoModel<Vec<AccountDelegationContentInner>>
 
 pub async fn by_stake_actions<D: Domain, F, T>(
     stake_address: &str,
-    params: PaginationParameters,
+    pagination: Pagination,
     domain: Facade<D>,
     mapper: F,
-) -> Result<Vec<T>, StatusCode>
+) -> Result<Vec<T>, Error>
 where
     F: Fn(&StakeAddress, Hash<32>, &MultiEraCert, u32, Network) -> Result<Option<T>, StatusCode>,
 {
-    let stake_address = ensure_stake_address(&stake_address)?;
+    let stake_address = ensure_stake_address(stake_address)?;
 
     let stake_hash = match stake_address.payload() {
         StakePayload::Stake(x) => x.to_vec(),
@@ -397,8 +402,8 @@ where
     let mut builder = AccountActivityModelBuilder::new(
         stake_address,
         network,
-        params.count.unwrap_or(100) as usize,
-        params.page.unwrap_or(1) as usize,
+        pagination.count,
+        pagination.page as usize,
     );
 
     while builder.needs_more() {
@@ -428,10 +433,12 @@ pub async fn by_stake_delegations<D: Domain>(
     Path(stake_address): Path<String>,
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<Vec<AccountDelegationContentInner>>, StatusCode> {
+) -> Result<Json<Vec<AccountDelegationContentInner>>, Error> {
+    let pagination = Pagination::try_from(params)?;
+
     let items = by_stake_actions::<D, _, AccountDelegationContentInner>(
         &stake_address,
-        params,
+        pagination,
         domain,
         build_delegation,
     )
@@ -444,14 +451,70 @@ pub async fn by_stake_registrations<D: Domain>(
     Path(stake_address): Path<String>,
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<Vec<AccountRegistrationContentInner>>, StatusCode> {
+) -> Result<Json<Vec<AccountRegistrationContentInner>>, Error> {
+    let pagination = Pagination::try_from(params)?;
+
     let items = by_stake_actions::<D, _, AccountRegistrationContentInner>(
         &stake_address,
-        params,
+        pagination,
         domain,
         build_registration,
     )
     .await?;
 
     Ok(Json(items))
+}
+
+impl IntoModel<AccountRewardContentInner> for RewardLog {
+    type SortKey = ();
+
+    fn into_model(self) -> Result<AccountRewardContentInner, StatusCode> {
+        let pool_id = mapping::bech32_pool(&self.pool_id)?;
+
+        let r#type = if self.as_leader {
+            blockfrost_openapi::models::account_reward_content_inner::Type::Leader
+        } else {
+            blockfrost_openapi::models::account_reward_content_inner::Type::Member
+        };
+
+        let out = AccountRewardContentInner {
+            epoch: self.epoch as i32,
+            amount: self.amount.to_string(),
+            pool_id,
+            r#type,
+        };
+
+        Ok(out)
+    }
+}
+
+pub async fn by_stake_rewards<D: Domain>(
+    Path(stake_address): Path<String>,
+    Query(params): Query<PaginationParameters>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Vec<AccountRewardContentInner>>, Error> {
+    let pagination = Pagination::try_from(params)?;
+
+    let stake_address = ensure_stake_address(&stake_address)?;
+
+    let stake_hash = match stake_address.payload() {
+        StakePayload::Stake(x) => x.to_vec(),
+        StakePayload::Script(x) => x.to_vec(),
+    };
+
+    let items: Vec<_> = domain
+        .state3()
+        .iter_entity_values_typed::<RewardLog>(stake_hash)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .skip(pagination.skip())
+        .take(pagination.count)
+        .collect::<Result<_, _>>()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let mapped = items
+        .into_iter()
+        .map(|x| x.into_model())
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(Json(mapped))
 }

@@ -20,6 +20,7 @@ use dolos_core::{
     ArchiveStore as _, CancelToken, Domain, EraCbor, ServeError, StateStore as _, TxOrder,
 };
 
+mod error;
 pub(crate) mod mapping;
 mod pagination;
 mod routes;
@@ -150,6 +151,10 @@ impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
                 get(routes::accounts::by_stake_utxos::<D>),
             )
             .route(
+                "/accounts/{stake_address}/rewards",
+                get(routes::accounts::by_stake_rewards::<D>),
+            )
+            .route(
                 "/addresses/{address}/utxos",
                 get(routes::addresses::utxos::<D>),
             )
@@ -161,6 +166,7 @@ impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
                 "/addresses/{address}/transactions",
                 get(routes::addresses::transactions::<D>),
             )
+            .route("/addresses/{address}/txs", get(routes::addresses::txs::<D>))
             .route("/blocks/latest", get(routes::blocks::latest::<D>))
             .route("/blocks/latest/txs", get(routes::blocks::latest_txs::<D>))
             .route(
@@ -178,6 +184,10 @@ impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
             .route(
                 "/blocks/{hash_or_number}/txs",
                 get(routes::blocks::by_hash_or_number_txs::<D>),
+            )
+            .route(
+                "/blocks/{hash_or_number}/addresses",
+                get(routes::blocks::by_hash_or_number_addresses::<D>),
             )
             .route(
                 "/blocks/slot/{slot_number}",
@@ -202,6 +212,10 @@ impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
             .route(
                 "/txs/{tx_hash}/metadata/cbor",
                 get(routes::txs::by_hash_metadata_cbor::<D>),
+            )
+            .route(
+                "/txs/{tx_hash}/redeemers",
+                get(routes::txs::by_hash_redeemers::<D>),
             )
             .route(
                 "/txs/{tx_hash}/withdrawals",
@@ -238,6 +252,10 @@ impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
                 get(routes::pools::by_id_delegators::<D>),
             )
             .route("/pools/extended", get(routes::pools::all_extended::<D>))
+            .route(
+                "/governance/dreps/{drep_id}",
+                get(routes::governance::drep_by_id::<D>),
+            )
             .with_state(Facade::<D> { inner: domain })
             .layer(
                 trace::TraceLayer::new_for_http()

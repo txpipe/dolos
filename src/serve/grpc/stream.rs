@@ -92,13 +92,20 @@ mod tests {
         let s = ChainStream::start::<ToyDomain, CancelTokenImpl>(
             wal.clone(),
             archive.clone(),
-            vec![ChainPoint::Specific(50, Hash::<32>::from([0; 32]))],
+            vec![ChainPoint::Specific(500, Hash::<32>::from([0; 32]))],
             CancelTokenImpl(CancellationToken::new()),
         );
 
         pin_mut!(s);
 
-        for i in 49..=200 {
+        let first = s.next().await.unwrap();
+
+        assert_eq!(
+            first,
+            LogValue::Mark(ChainPoint::Specific(500, Hash::<32>::from([0; 32])))
+        );
+
+        for i in 51..=200 {
             let evt = s.next().await;
             let value = evt.unwrap();
 
