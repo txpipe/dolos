@@ -599,6 +599,8 @@ pub trait ArchiveStore: Clone + Send + Sync + 'static {
     fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, ArchiveError>;
 }
 
+pub type Phase2Log = Vec<String>;
+
 #[derive(Debug, Error)]
 pub enum MempoolError {
     #[error("internal error: {0}")]
@@ -619,7 +621,7 @@ pub enum MempoolError {
 
     #[cfg(feature = "phase2")]
     #[error("phase-2 script yielded an error")]
-    Phase2ExplicitError,
+    Phase2ExplicitError(Phase2Log),
 
     #[error("state error: {0}")]
     StateError(#[from] StateError),
