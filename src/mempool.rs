@@ -283,7 +283,7 @@ impl MempoolStore for Mempool {
         {
             let report = self.evaluate(&tx)?;
 
-            for eval in report.iter() {
+            for eval in report {
                 if !eval.success {
                     return Err(MempoolError::Phase2ExplicitError(eval.logs));
                 }

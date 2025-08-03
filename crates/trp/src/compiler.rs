@@ -60,18 +60,30 @@ fn build_pparams<D: Domain>(
             coins_per_utxo_byte: pparams.ada_per_utxo_byte,
         },
         MultiEraProtocolParameters::Byron(_) => {
-            return Err(Error::UnsupportedEra("Byron".to_string()))
+            return Err(Error::UnsupportedEra {
+                era: "Byron".to_string(),
+            })
         }
         MultiEraProtocolParameters::Shelley(_) => {
-            return Err(Error::UnsupportedEra("Shelley".to_string()))
+            return Err(Error::UnsupportedEra {
+                era: "Shelley".to_string(),
+            })
         }
         MultiEraProtocolParameters::Alonzo(_) => {
-            return Err(Error::UnsupportedEra("Alonzo".to_string()))
+            return Err(Error::UnsupportedEra {
+                era: "Alonzo".to_string(),
+            })
         }
         MultiEraProtocolParameters::Babbage(_) => {
-            return Err(Error::UnsupportedEra("Babbage".to_string()))
+            return Err(Error::UnsupportedEra {
+                era: "Babbage".to_string(),
+            })
         }
-        _ => return Err(Error::UnsupportedEra("Unknown".to_string())),
+        _ => {
+            return Err(Error::UnsupportedEra {
+                era: "Unknown".to_string(),
+            })
+        }
     };
 
     Ok(out)

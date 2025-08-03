@@ -11,7 +11,7 @@ impl Metrics {
         Self { requests }
     }
 
-    pub fn register_request(&self, method: &str, code: i32) {
+    pub fn track_request(&self, method: &str, code: i32) {
         self.requests.add(
             1,
             &[
