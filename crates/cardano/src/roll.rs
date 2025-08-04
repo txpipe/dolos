@@ -128,10 +128,10 @@ fn cert_to_stake_credential(cert: &MultiEraCert) -> Option<StakeCredential> {
     }
 }
 
-trait RollVisitor {
+pub trait RollVisitor {
     #[allow(unused_variables)]
     fn visit_block(
-        &mut self,
+        &self,
         state: &impl State3Store,
         delta: &mut StateDelta,
         block: &MultiEraBlock,
@@ -141,7 +141,7 @@ trait RollVisitor {
 
     #[allow(unused_variables)]
     fn visit_output(
-        &mut self,
+        &self,
         state: &impl State3Store,
         delta: &mut StateDelta,
         block: &MultiEraBlock,
@@ -154,7 +154,7 @@ trait RollVisitor {
 
     #[allow(unused_variables)]
     fn visit_mint(
-        &mut self,
+        &self,
         state: &impl State3Store,
         delta: &mut StateDelta,
         block: &MultiEraBlock,
@@ -166,7 +166,7 @@ trait RollVisitor {
 
     #[allow(unused_variables)]
     fn visit_cert(
-        &mut self,
+        &self,
         state: &impl State3Store,
         delta: &mut StateDelta,
         block: &MultiEraBlock,
@@ -177,11 +177,11 @@ trait RollVisitor {
     }
 }
 
-fn crawl_block<'a, T: RollVisitor>(
+pub fn crawl_block<'a, T: RollVisitor>(
     delta: &mut StateDelta,
     state: &impl State3Store,
     block: &MultiEraBlock<'a>,
-    visitor: &mut T,
+    visitor: &T,
 ) -> Result<(), State3Error> {
     visitor.visit_block(state, delta, block)?;
 
@@ -206,7 +206,7 @@ struct SeenAddressesVisitor;
 
 impl RollVisitor for SeenAddressesVisitor {
     fn visit_output(
-        &mut self,
+        &self,
         state: &impl State3Store,
         delta: &mut StateDelta,
         _: &MultiEraBlock,
@@ -247,7 +247,7 @@ struct AssetStateVisitor;
 
 impl RollVisitor for AssetStateVisitor {
     fn visit_mint(
-        &mut self,
+        &self,
         state: &impl State3Store,
         delta: &mut StateDelta,
         _: &MultiEraBlock,
@@ -285,7 +285,7 @@ struct PoolStateVisitor;
 
 impl RollVisitor for PoolStateVisitor {
     fn visit_cert(
-        &mut self,
+        &self,
         state: &impl State3Store,
         delta: &mut StateDelta,
         _: &MultiEraBlock,
@@ -305,7 +305,7 @@ struct PoolDelegatorVisitor;
 
 impl RollVisitor for PoolDelegatorVisitor {
     fn visit_cert(
-        &mut self,
+        &self,
         _: &impl State3Store,
         delta: &mut StateDelta,
         _: &MultiEraBlock,
@@ -325,7 +325,7 @@ struct EpochStateVisitor;
 
 impl RollVisitor for EpochStateVisitor {
     fn visit_block(
-        &mut self,
+        &self,
         state: &impl State3Store,
         delta: &mut StateDelta,
         block: &MultiEraBlock,
@@ -351,7 +351,7 @@ struct AccountActivityVisitor;
 
 impl RollVisitor for AccountActivityVisitor {
     fn visit_cert(
-        &mut self,
+        &self,
         _: &impl State3Store,
         delta: &mut StateDelta,
         block: &MultiEraBlock,
@@ -375,7 +375,46 @@ impl RollVisitor for AccountActivityVisitor {
     }
 }
 
-struct AllInOneVisitor {
+macro_rules! visit_block {
+    ($self:ident, $visitor:ident, $state:ident, $delta:ident, $block:ident) => {{
+        if $self.config.$visitor {
+            $self.$visitor.visit_block($state, $delta, $block)?;
+        }
+    }};
+}
+
+macro_rules! visit_output {
+    ($self:ident, $visitor:ident, $state:ident, $delta:ident, $block:ident, $tx:ident, $index:ident, $output:ident) => {{
+        if $self.config.$visitor {
+            $self
+                .$visitor
+                .visit_output($state, $delta, $block, $tx, $index, $output)?;
+        }
+    }};
+}
+
+macro_rules! visit_mint {
+    ($self:ident, $visitor:ident, $state:ident, $delta:ident, $block:ident, $tx:ident, $mint:ident) => {{
+        if $self.config.$visitor {
+            $self
+                .$visitor
+                .visit_mint($state, $delta, $block, $tx, $mint)?;
+        }
+    }};
+}
+
+macro_rules! visit_cert {
+    ($self:ident, $visitor:ident, $state:ident, $delta:ident, $block:ident, $tx:ident, $cert:ident) => {{
+        if $self.config.$visitor {
+            $self
+                .$visitor
+                .visit_cert($state, $delta, $block, $tx, $cert)?;
+        }
+    }};
+}
+
+pub struct DynamicVisitor {
+    config: super::TrackConfig,
     seen_addresses: SeenAddressesVisitor,
     asset_state: AssetStateVisitor,
     pool_state: PoolStateVisitor,
@@ -384,19 +423,39 @@ struct AllInOneVisitor {
     account_activity: AccountActivityVisitor,
 }
 
-impl RollVisitor for AllInOneVisitor {
+impl DynamicVisitor {
+    pub fn new(config: super::TrackConfig) -> Self {
+        Self {
+            config,
+            seen_addresses: SeenAddressesVisitor,
+            asset_state: AssetStateVisitor,
+            pool_state: PoolStateVisitor,
+            pool_delegator: PoolDelegatorVisitor,
+            epoch_state: EpochStateVisitor,
+            account_activity: AccountActivityVisitor,
+        }
+    }
+}
+
+impl RollVisitor for DynamicVisitor {
     fn visit_block(
-        &mut self,
+        &self,
         state: &impl State3Store,
         delta: &mut StateDelta,
         block: &MultiEraBlock,
     ) -> Result<(), State3Error> {
-        self.epoch_state.visit_block(state, delta, block)?;
+        visit_block!(self, seen_addresses, state, delta, block);
+        visit_block!(self, asset_state, state, delta, block);
+        visit_block!(self, pool_state, state, delta, block);
+        visit_block!(self, pool_delegator, state, delta, block);
+        visit_block!(self, epoch_state, state, delta, block);
+        visit_block!(self, account_activity, state, delta, block);
+
         Ok(())
     }
 
     fn visit_output(
-        &mut self,
+        &self,
         state: &impl State3Store,
         delta: &mut StateDelta,
         block: &MultiEraBlock,
@@ -404,74 +463,58 @@ impl RollVisitor for AllInOneVisitor {
         index: u32,
         output: &MultiEraOutput,
     ) -> Result<(), State3Error> {
-        self.seen_addresses
-            .visit_output(state, delta, block, tx, index, output)?;
-        self.asset_state
-            .visit_output(state, delta, block, tx, index, output)?;
-        self.pool_state
-            .visit_output(state, delta, block, tx, index, output)?;
-        self.pool_delegator
-            .visit_output(state, delta, block, tx, index, output)?;
-        self.epoch_state
-            .visit_output(state, delta, block, tx, index, output)?;
+        visit_output!(self, seen_addresses, state, delta, block, tx, index, output);
+        visit_output!(self, asset_state, state, delta, block, tx, index, output);
+        visit_output!(self, pool_state, state, delta, block, tx, index, output);
+        visit_output!(self, pool_delegator, state, delta, block, tx, index, output);
+        visit_output!(self, epoch_state, state, delta, block, tx, index, output);
+        visit_output!(
+            self,
+            account_activity,
+            state,
+            delta,
+            block,
+            tx,
+            index,
+            output
+        );
+
         Ok(())
     }
 
     fn visit_mint(
-        &mut self,
+        &self,
         state: &impl State3Store,
         delta: &mut StateDelta,
         block: &MultiEraBlock,
         tx: &MultiEraTx,
         mint: &MultiEraPolicyAssets,
     ) -> Result<(), State3Error> {
-        self.seen_addresses
-            .visit_mint(state, delta, block, tx, mint)?;
-        self.asset_state.visit_mint(state, delta, block, tx, mint)?;
-        self.pool_state.visit_mint(state, delta, block, tx, mint)?;
-        self.pool_delegator
-            .visit_mint(state, delta, block, tx, mint)?;
-        self.epoch_state.visit_mint(state, delta, block, tx, mint)?;
+        visit_mint!(self, seen_addresses, state, delta, block, tx, mint);
+        visit_mint!(self, asset_state, state, delta, block, tx, mint);
+        visit_mint!(self, pool_state, state, delta, block, tx, mint);
+        visit_mint!(self, pool_delegator, state, delta, block, tx, mint);
+        visit_mint!(self, epoch_state, state, delta, block, tx, mint);
+        visit_mint!(self, account_activity, state, delta, block, tx, mint);
+
         Ok(())
     }
 
     fn visit_cert(
-        &mut self,
+        &self,
         state: &impl State3Store,
         delta: &mut StateDelta,
         block: &MultiEraBlock,
         tx: &MultiEraTx,
         cert: &MultiEraCert,
     ) -> Result<(), State3Error> {
-        self.seen_addresses
-            .visit_cert(state, delta, block, tx, cert)?;
-        self.asset_state.visit_cert(state, delta, block, tx, cert)?;
-        self.pool_state.visit_cert(state, delta, block, tx, cert)?;
-        self.pool_delegator
-            .visit_cert(state, delta, block, tx, cert)?;
-        self.epoch_state.visit_cert(state, delta, block, tx, cert)?;
-        self.account_activity
-            .visit_cert(state, delta, block, tx, cert)?;
+        visit_cert!(self, seen_addresses, state, delta, block, tx, cert);
+        visit_cert!(self, asset_state, state, delta, block, tx, cert);
+        visit_cert!(self, pool_state, state, delta, block, tx, cert);
+        visit_cert!(self, pool_delegator, state, delta, block, tx, cert);
+        visit_cert!(self, epoch_state, state, delta, block, tx, cert);
+        visit_cert!(self, account_activity, state, delta, block, tx, cert);
+
         Ok(())
     }
-}
-
-pub fn compute_block_delta<'a>(
-    state: &impl State3Store,
-    block: &MultiEraBlock<'a>,
-) -> Result<StateDelta, State3Error> {
-    let mut delta = StateDelta::new(block.slot());
-
-    let mut visitor = AllInOneVisitor {
-        seen_addresses: SeenAddressesVisitor,
-        asset_state: AssetStateVisitor,
-        pool_state: PoolStateVisitor,
-        pool_delegator: PoolDelegatorVisitor,
-        epoch_state: EpochStateVisitor,
-        account_activity: AccountActivityVisitor,
-    };
-
-    crawl_block(&mut delta, state, block, &mut visitor)?;
-
-    Ok(delta)
 }
