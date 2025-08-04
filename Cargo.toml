@@ -100,7 +100,6 @@ mithril = ["mithril-client"]
 utils = ["comfy-table", "inquire", "toml"]
 debug = ["console-subscriber", "tokio/tracing"]
 phase2 = ["pallas/phase2", "dolos-core/phase2", "dolos-minibf/phase2"]
-state3 = ["dolos-core/state3"]
 
 # Service features
 grpc = ["tonic", "tonic-web", "tonic-reflection", "tower-http/cors"]

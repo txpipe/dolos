@@ -656,6 +656,9 @@ pub enum ChainError {
 
     #[error("decoding error")]
     DecodingError(#[from] pallas::ledger::traverse::Error),
+
+    #[error(transparent)]
+    State3Error(#[from] State3Error),
 }
 
 pub trait ChainLogic {
@@ -801,11 +804,8 @@ pub trait Domain: Send + Sync + Clone + 'static {
         self.archive().apply(&deltas)?;
         self.mempool().apply(&deltas);
 
-        #[cfg(feature = "state3")]
-        {
-            for delta in self.compute_apply_deltas3(blocks)? {
-                self.state3().apply_delta(delta)?;
-            }
+        for delta in self.compute_apply_deltas3(blocks)? {
+            self.state3().apply_delta(delta)?;
         }
 
         Ok(())
