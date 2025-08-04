@@ -5086,9 +5086,9 @@ dependencies = [
 
 [[package]]
 name = "tx3-sdk"
-version = "0.7.0"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "01c77336fd78ba3cd473d6a654b016e74524cd60a1d3660a55b2c9ff922d196c"
+checksum = "8e249299616f099372b45ff1605900671697547bd6691ca154f0aa36dc665cbc"
 dependencies = [
  "base64 0.22.1",
  "bech32 0.11.0",
@@ -5489,7 +5489,7 @@ version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf221c93e13a30d793f7645a0e7762c55d169dbb0a49671918a2319d289b10bb"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

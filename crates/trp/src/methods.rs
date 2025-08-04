@@ -262,7 +262,7 @@ mod tests {
 
         dbg!(&err);
 
-        assert_eq!(err.code(), ErrorCode::InvalidParams.code());
+        assert_eq!(err.code(), Error::CODE_MISSING_TX_ARG);
     }
 
     #[tokio::test]
