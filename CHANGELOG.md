@@ -2,11 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.30.0] - 2025-08-04
+
+### 🚀 Features
+
+- *(trp)* Improve error data (#625)
+- Make rich state configurable (#633)
+
+### 🚜 Refactor
+
+- *(trp)* Move error code to new module
+- Support having chain config values (#632)
+
+### 📚 Documentation
+
+- Include changes regarding minibf endpoints (#634)
+
 ## [0.29.1] - 2025-07-31
 
 ### 🐛 Bug Fixes
 
 - *(minibf)* Improve conformance test coverage (#629)
+
+### Release
+
+- V0.29.1
 
 ## [0.29.0] - 2025-07-31
 

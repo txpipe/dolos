@@ -599,6 +599,8 @@ pub trait ArchiveStore: Clone + Send + Sync + 'static {
     fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, ArchiveError>;
 }
 
+pub type Phase2Log = Vec<String>;
+
 #[derive(Debug, Error)]
 pub enum MempoolError {
     #[error("internal error: {0}")]
@@ -619,7 +621,7 @@ pub enum MempoolError {
 
     #[cfg(feature = "phase2")]
     #[error("phase-2 script yielded an error")]
-    Phase2ExplicitError,
+    Phase2ExplicitError(Phase2Log),
 
     #[error("state error: {0}")]
     StateError(#[from] StateError),
@@ -654,6 +656,9 @@ pub enum ChainError {
 
     #[error("decoding error")]
     DecodingError(#[from] pallas::ledger::traverse::Error),
+
+    #[error(transparent)]
+    State3Error(#[from] State3Error),
 }
 
 pub trait ChainLogic {
@@ -679,7 +684,7 @@ pub trait ChainLogic {
         unapplied_deltas: &[LedgerDelta],
     ) -> Result<LedgerQuery, ChainError>;
 
-    fn compute_origin_delta(genesis: &Genesis) -> Result<LedgerDelta, ChainError>;
+    fn compute_origin_delta(&self, genesis: &Genesis) -> Result<LedgerDelta, ChainError>;
 
     fn compute_apply_delta<'a>(
         ledger: LedgerSlice,
@@ -711,6 +716,7 @@ pub trait ChainLogic {
     }
 
     fn compute_apply_delta3<'a>(
+        &self,
         state: &impl State3Store,
         block: &Self::Block<'a>,
     ) -> Result<StateDelta, ChainError>;
@@ -749,6 +755,7 @@ pub trait Domain: Send + Sync + Clone + 'static {
     fn storage_config(&self) -> &StorageConfig;
     fn genesis(&self) -> &Genesis;
 
+    fn chain(&self) -> &Self::Chain;
     fn wal(&self) -> &Self::Wal;
     fn state(&self) -> &Self::State;
     fn archive(&self) -> &Self::Archive;
@@ -757,7 +764,7 @@ pub trait Domain: Send + Sync + Clone + 'static {
     fn state3(&self) -> &Self::State3;
 
     fn apply_origin(&self) -> Result<(), DomainError> {
-        let deltas = vec![Self::Chain::compute_origin_delta(self.genesis())?];
+        let deltas = vec![self.chain().compute_origin_delta(self.genesis())?];
 
         self.state().apply(&deltas)?;
         self.archive().apply(&deltas)?;
@@ -783,7 +790,7 @@ pub trait Domain: Send + Sync + Clone + 'static {
 
         for block in blocks {
             let block = Self::Chain::decode_block(&block.body)?;
-            let delta = Self::Chain::compute_apply_delta3(self.state3(), &block)?;
+            let delta = self.chain().compute_apply_delta3(self.state3(), &block)?;
             deltas.push(delta);
         }
 
@@ -797,11 +804,8 @@ pub trait Domain: Send + Sync + Clone + 'static {
         self.archive().apply(&deltas)?;
         self.mempool().apply(&deltas);
 
-        #[cfg(feature = "state3")]
-        {
-            for delta in self.compute_apply_deltas3(blocks)? {
-                self.state3().apply_delta(delta)?;
-            }
+        for delta in self.compute_apply_deltas3(blocks)? {
+            self.state3().apply_delta(delta)?;
         }
 
         Ok(())

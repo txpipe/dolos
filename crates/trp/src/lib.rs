@@ -9,52 +9,13 @@ use tracing::info;
 use dolos_core::{CancelToken, Domain, ServeError};
 
 mod compiler;
+mod error;
 mod mapping;
 mod methods;
 mod metrics;
 mod utxos;
 
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    #[error("state error: {0}")]
-    StateError(#[from] dolos_core::StateError),
-
-    #[error("traverse error: {0}")]
-    TraverseError(#[from] pallas::ledger::traverse::Error),
-
-    #[error("address error: {0}")]
-    AddressError(#[from] pallas::ledger::addresses::Error),
-
-    #[error("unsupported era: {0}")]
-    UnsupportedEra(String),
-
-    #[error("decode error: {0}")]
-    DecodeError(#[from] pallas::codec::minicbor::decode::Error),
-}
-
-impl From<Error> for tx3_lang::backend::Error {
-    fn from(error: Error) -> Self {
-        tx3_lang::backend::Error::StoreError(error.to_string())
-    }
-}
-
-impl From<Error> for jsonrpsee::types::ErrorObject<'_> {
-    fn from(error: Error) -> Self {
-        let internal = match error {
-            Error::StateError(x) => x.to_string(),
-            Error::TraverseError(x) => x.to_string(),
-            Error::AddressError(x) => x.to_string(),
-            Error::UnsupportedEra(x) => x.to_string(),
-            Error::DecodeError(x) => x.to_string(),
-        };
-
-        jsonrpsee::types::ErrorObject::owned(
-            jsonrpsee::types::ErrorCode::InternalError.code(),
-            internal,
-            Option::<()>::None,
-        )
-    }
-}
+pub use error::Error;
 
 #[derive(Deserialize, Serialize, Clone)]
 pub struct Config {
@@ -98,13 +59,15 @@ impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
         module
             .register_async_method("trp.resolve", |params, context, _| async move {
                 let response = methods::trp_resolve(params, context.clone()).await;
-                context.metrics.register_request(
+
+                context.metrics.track_request(
                     "trp-resolve",
                     match response.as_ref() {
                         Ok(_) => 200,
                         Err(err) => err.code(),
                     },
                 );
+
                 response
             })
             .map_err(|_| ServeError::Internal("failed to register trp.resolve".into()))?;
@@ -112,13 +75,15 @@ impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
         module
             .register_async_method("trp.submit", |params, context, _| async move {
                 let response = methods::trp_submit(params, context.clone()).await;
-                context.metrics.register_request(
+
+                context.metrics.track_request(
                     "trp-submit",
                     match response.as_ref() {
                         Ok(_) => 200,
                         Err(err) => err.code(),
                     },
                 );
+
                 response
             })
             .map_err(|_| ServeError::Internal("failed to register trp.submit".into()))?;

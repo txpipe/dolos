@@ -73,6 +73,7 @@ impl dolos_core::MempoolStore for Mempool {
 pub struct ToyDomain {
     state: dolos_redb::state::LedgerStore,
     wal: dolos_redb::wal::RedbWalStore,
+    chain: dolos_cardano::ChainLogic,
     archive: dolos_redb::archive::ChainStore,
     mempool: Mempool,
     storage_config: dolos_core::StorageConfig,
@@ -96,6 +97,7 @@ impl ToyDomain {
         Self {
             state,
             wal: dolos_redb::wal::RedbWalStore::memory().unwrap(),
+            chain: dolos_cardano::ChainLogic::new(dolos_cardano::Config::default()),
             archive: dolos_redb::archive::ChainStore::in_memory_v1().unwrap(),
             mempool: Mempool {},
             storage_config: storage_config.unwrap_or_default(),
@@ -120,6 +122,10 @@ impl dolos_core::Domain for ToyDomain {
 
     fn genesis(&self) -> &dolos_core::Genesis {
         &self.genesis
+    }
+
+    fn chain(&self) -> &Self::Chain {
+        &self.chain
     }
 
     fn wal(&self) -> &Self::Wal {

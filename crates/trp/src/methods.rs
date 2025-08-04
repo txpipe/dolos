@@ -1,5 +1,5 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
-use jsonrpsee::types::{ErrorCode, ErrorObject, ErrorObjectOwned, Params};
+use jsonrpsee::types::Params;
 use pallas::{codec::utils::NonEmptySet, ledger::primitives::conway::VKeyWitness};
 use serde::Deserialize;
 use std::sync::Arc;
@@ -10,12 +10,13 @@ use dolos_core::{Domain, MempoolStore as _, StateStore as _};
 
 use crate::{compiler::load_compiler, utxos::UtxoStoreAdapter};
 
-use super::Context;
+use super::{Context, Error};
 
 #[derive(Deserialize, Debug)]
 enum IrEncoding {
     #[serde(rename = "base64")]
     Base64,
+
     #[serde(rename = "hex")]
     Hex,
 }
@@ -31,83 +32,39 @@ struct IrEnvelope {
 #[derive(Deserialize, Debug)]
 struct TrpResolveParams {
     pub tir: IrEnvelope,
-    pub args: serde_json::Value,
+    pub args: serde_json::Map<String, serde_json::Value>,
 }
 
-fn handle_param_args(tx: &mut ProtoTx, args: &serde_json::Value) -> Result<(), ErrorObjectOwned> {
-    let Some(arguments) = args.as_object() else {
-        return Err(ErrorObject::owned(
-            ErrorCode::InvalidParams.code(),
-            "Failed to parse arguments as object.",
-            None as Option<String>,
-        ));
-    };
-
-    let params = tx.find_params();
-
-    for (key, ty) in params {
-        let Some(arg) = arguments.get(&key) else {
-            return Err(ErrorObject::owned(
-                ErrorCode::InvalidParams.code(),
-                format!("Missing argument for parameter {key} of type {ty:?}"),
-                Some(serde_json::json!({ "key": key, "type": ty })),
-            ));
-        };
-
-        let arg = tx3_sdk::trp::args::from_json(arg.clone(), &ty).map_err(|e| {
-            ErrorObject::owned(
-                ErrorCode::InvalidParams.code(),
-                format!("Failed to parse argument {key} of type {ty:?}"),
-                Some(serde_json::json!({ "error": e.to_string(), "value": arg })),
-            )
-        })?;
-
-        tx.set_arg(&key, arg);
-    }
-
-    Ok(())
-}
-
-fn decode_params(params: Params<'_>) -> Result<ProtoTx, ErrorObjectOwned> {
-    let params: TrpResolveParams = params.parse()?;
-
+fn load_tx(params: TrpResolveParams) -> Result<ProtoTx, Error> {
     if params.tir.version != tx3_lang::ir::IR_VERSION {
-        return Err(ErrorObject::owned(
-            ErrorCode::InvalidParams.code(),
-            format!(
-                "Unsupported IR version, expected {}. Make sure you have the latest version of the tx3 toolchain",
-                tx3_lang::ir::IR_VERSION
-            ),
-            Some(params.tir.version),
-        ));
+        return Err(Error::UnsupportedTir {
+            expected: tx3_lang::ir::IR_VERSION.to_string(),
+            provided: params.tir.version,
+        });
     }
 
     let tx = match params.tir.encoding {
-        IrEncoding::Base64 => STANDARD.decode(params.tir.bytecode).map_err(|x| {
-            ErrorObject::owned(
-                ErrorCode::InvalidParams.code(),
-                "Failed to decode IR using Base64 encoding",
-                Some(x.to_string()),
-            )
-        })?,
-        IrEncoding::Hex => hex::decode(params.tir.bytecode).map_err(|x| {
-            ErrorObject::owned(
-                ErrorCode::InvalidParams.code(),
-                "Failed to decode IR using hex encoding",
-                Some(x.to_string()),
-            )
-        })?,
+        IrEncoding::Base64 => STANDARD
+            .decode(params.tir.bytecode)
+            .map_err(|_| Error::InvalidTirEnvelope)?,
+        IrEncoding::Hex => {
+            hex::decode(params.tir.bytecode).map_err(|_| Error::InvalidTirEnvelope)?
+        }
     };
 
-    let mut tx = tx3_lang::ProtoTx::from_ir_bytes(&tx).map_err(|x| {
-        ErrorObject::owned(
-            ErrorCode::InvalidParams.code(),
-            "Failed to decode IR bytes",
-            Some(x.to_string()),
-        )
-    })?;
+    let mut tx = tx3_lang::ProtoTx::from_ir_bytes(&tx).map_err(|_| Error::InvalidTirBytes)?;
 
-    handle_param_args(&mut tx, &params.args)?;
+    let tx_params = tx.find_params();
+
+    for (key, ty) in tx_params {
+        let Some(arg) = params.args.get(&key) else {
+            return Err(Error::MissingTxArg { key, ty });
+        };
+
+        let arg = tx3_sdk::trp::args::from_json(arg.clone(), &ty)?;
+
+        tx.set_arg(&key, arg);
+    }
 
     Ok(tx)
 }
@@ -115,14 +72,10 @@ fn decode_params(params: Params<'_>) -> Result<ProtoTx, ErrorObjectOwned> {
 pub async fn trp_resolve<D: Domain>(
     params: Params<'_>,
     context: Arc<Context<D>>,
-) -> Result<serde_json::Value, ErrorObjectOwned> {
-    let tx = match decode_params(params) {
-        Ok(tx) => tx,
-        Err(err) => {
-            tracing::warn!(err = ?err, "Failed to decode params.");
-            return Err(err);
-        }
-    };
+) -> Result<serde_json::Value, Error> {
+    let params: TrpResolveParams = params.parse()?;
+
+    let tx = load_tx(params)?;
 
     let mut compiler = load_compiler::<D>(context.domain.genesis(), context.domain.state())?;
 
@@ -134,19 +87,7 @@ pub async fn trp_resolve<D: Domain>(
         &utxos,
         context.config.max_optimize_rounds.into(),
     )
-    .await;
-
-    let resolved = match resolved {
-        Ok(resolved) => resolved,
-        Err(err) => {
-            tracing::warn!(err = ?err, "Failed to resolve tx.");
-            return Err(ErrorObject::owned(
-                ErrorCode::InternalError.code(),
-                "Failed to resolve",
-                Some(err.to_string()),
-            ));
-        }
-    };
+    .await?;
 
     Ok(serde_json::json!({
         "tx": hex::encode(resolved.payload),
@@ -154,28 +95,10 @@ pub async fn trp_resolve<D: Domain>(
     }))
 }
 
-fn apply_witnesses(
-    original: &[u8],
-    witnesses: &[SubmitWitness],
-) -> Result<Vec<u8>, ErrorObjectOwned> {
-    let tx = pallas::ledger::traverse::MultiEraTx::decode(original).map_err(|err| {
-        ErrorObject::owned(
-            ErrorCode::InvalidParams.code(),
-            "Failed to decode tx",
-            Some(err.to_string()),
-        )
-    })?;
+fn apply_witnesses(original: &[u8], witnesses: &[SubmitWitness]) -> Result<Vec<u8>, Error> {
+    let tx = pallas::ledger::traverse::MultiEraTx::decode(original)?;
 
-    let mut tx = tx
-        .as_conway()
-        .ok_or_else(|| {
-            ErrorObject::owned(
-                ErrorCode::InvalidParams.code(),
-                "Failed to decode tx as conway era tx, TRP only supports conway era txs",
-                Option::<()>::None,
-            )
-        })?
-        .to_owned();
+    let mut tx = tx.as_conway().ok_or(Error::UnsupportedTxEra)?.to_owned();
 
     let map_witness = |witness: &SubmitWitness| {
         let SubmitWitness::VKey(witness) = witness;
@@ -198,8 +121,6 @@ fn apply_witnesses(
 
     let all: Vec<_> = old.chain(new).collect();
 
-    dbg!(&all);
-
     witness_set.vkeywitness = NonEmptySet::from_vec(all);
 
     tx.transaction_witness_set = pallas::codec::utils::KeepRaw::from(witness_set);
@@ -210,7 +131,7 @@ fn apply_witnesses(
 pub async fn trp_submit<D: Domain>(
     params: Params<'_>,
     context: Arc<Context<D>>,
-) -> Result<serde_json::Value, ErrorObjectOwned> {
+) -> Result<serde_json::Value, Error> {
     let params: SubmitParams = params.parse()?;
 
     let mut bytes = Vec::<u8>::from(params.tx);
@@ -219,17 +140,7 @@ pub async fn trp_submit<D: Domain>(
         bytes = apply_witnesses(&bytes, &params.witnesses)?;
     }
 
-    let tx = context
-        .domain
-        .mempool()
-        .receive_raw(&bytes)
-        .map_err(|err| {
-            ErrorObject::owned(
-                ErrorCode::InternalError.code(),
-                "Failed to submit tx",
-                Some(err.to_string()),
-            )
-        })?;
+    let tx = context.domain.mempool().receive_raw(&bytes)?;
 
     Ok(serde_json::json!({ "hash": tx.to_string() }))
 }
@@ -242,6 +153,7 @@ pub fn health<D: Domain>(context: &Context<D>) -> bool {
 mod tests {
     use dolos_testing::toy_domain::ToyDomain;
     use dolos_testing::TestAddress::{Alice, Bob};
+    use jsonrpsee::types::{ErrorCode, ErrorObjectOwned};
     use serde_json::json;
 
     use crate::{metrics::Metrics, Config};
@@ -320,7 +232,9 @@ mod tests {
 
         let context = setup_test_context();
 
-        trp_resolve(params, context.clone()).await
+        let resolved = trp_resolve(params, context.clone()).await?;
+
+        Ok(resolved)
     }
 
     #[tokio::test]
@@ -348,7 +262,7 @@ mod tests {
 
         dbg!(&err);
 
-        assert_eq!(err.code(), ErrorCode::InvalidParams.code());
+        assert_eq!(err.code(), Error::CODE_MISSING_TX_ARG);
     }
 
     #[tokio::test]

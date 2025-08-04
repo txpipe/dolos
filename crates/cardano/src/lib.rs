@@ -2,8 +2,11 @@ use pallas::codec::minicbor;
 use pallas::ledger::traverse::MultiEraBlock;
 use pallas::ledger::traverse::MultiEraOutput;
 use pallas::ledger::traverse::MultiEraTx;
+use serde::Deserialize;
+use serde::Serialize;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use dolos_core::*;
 
@@ -26,6 +29,21 @@ pub mod include;
 pub type Block<'a> = MultiEraBlock<'a>;
 
 pub type UtxoBody<'a> = MultiEraOutput<'a>;
+
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct TrackConfig {
+    pub seen_addresses: bool,
+    pub asset_state: bool,
+    pub pool_state: bool,
+    pub pool_delegator: bool,
+    pub epoch_state: bool,
+    pub account_activity: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct Config {
+    pub track: Option<TrackConfig>,
+}
 
 /// Computes the ledger delta of applying a particular block.
 ///
@@ -284,7 +302,18 @@ pub fn ledger_query_for_block(
     })
 }
 
-pub struct ChainLogic;
+#[derive(Clone)]
+pub struct ChainLogic {
+    visitor: Arc<roll::DynamicVisitor>,
+}
+
+impl ChainLogic {
+    pub fn new(config: Config) -> Self {
+        Self {
+            visitor: Arc::new(roll::DynamicVisitor::new(config.track.unwrap_or_default())),
+        }
+    }
+}
 
 impl dolos_core::ChainLogic for ChainLogic {
     type Block<'a> = MultiEraBlock<'a>;
@@ -297,7 +326,7 @@ impl dolos_core::ChainLogic for ChainLogic {
         mutable_slots(domain.genesis())
     }
 
-    fn compute_origin_delta<'a>(genesis: &Genesis) -> Result<LedgerDelta, ChainError> {
+    fn compute_origin_delta<'a>(&self, genesis: &Genesis) -> Result<LedgerDelta, ChainError> {
         let delta = compute_origin_delta(genesis);
 
         Ok(delta)
@@ -329,10 +358,13 @@ impl dolos_core::ChainLogic for ChainLogic {
     }
 
     fn compute_apply_delta3<'a>(
+        &self,
         state: &impl State3Store,
         block: &Self::Block<'a>,
     ) -> Result<StateDelta, ChainError> {
-        let delta = roll::compute_block_delta(state, block).unwrap();
+        let mut delta = StateDelta::new(block.slot());
+
+        roll::crawl_block(&mut delta, state, block, self.visitor.as_ref())?;
 
         Ok(delta)
     }
