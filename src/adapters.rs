@@ -1,6 +1,82 @@
 use std::sync::Arc;
 
 use dolos_core::*;
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize, Clone)]
+pub enum ChainConfig {
+    Cardano(dolos_cardano::Config),
+}
+
+impl Default for ChainConfig {
+    fn default() -> Self {
+        Self::Cardano(dolos_cardano::Config::default())
+    }
+}
+
+/// A persistent store for ledger state
+#[derive(Clone)]
+#[non_exhaustive]
+pub enum ChainAdapter {
+    Cardano(dolos_cardano::ChainLogic),
+}
+
+impl From<ChainConfig> for ChainAdapter {
+    fn from(value: ChainConfig) -> Self {
+        match value {
+            ChainConfig::Cardano(x) => ChainAdapter::Cardano(dolos_cardano::ChainLogic::new(x)),
+        }
+    }
+}
+
+impl ChainLogic for ChainAdapter {
+    type Block<'a> = dolos_cardano::Block<'a>;
+
+    fn decode_block<'a>(block: &'a [u8]) -> Result<Self::Block<'a>, ChainError> {
+        dolos_cardano::ChainLogic::decode_block(block)
+    }
+
+    fn mutable_slots(domain: &impl Domain) -> BlockSlot {
+        dolos_cardano::ChainLogic::mutable_slots(domain)
+    }
+
+    fn compute_origin_delta<'a>(&self, genesis: &Genesis) -> Result<LedgerDelta, ChainError> {
+        match self {
+            ChainAdapter::Cardano(x) => x.compute_origin_delta(genesis),
+        }
+    }
+
+    fn compute_apply_delta<'a>(
+        ledger: LedgerSlice,
+        block: &Self::Block<'a>,
+    ) -> Result<LedgerDelta, ChainError> {
+        dolos_cardano::ChainLogic::compute_apply_delta(ledger, block)
+    }
+
+    fn compute_undo_delta<'a>(
+        ledger: LedgerSlice,
+        block: &Self::Block<'a>,
+    ) -> Result<LedgerDelta, ChainError> {
+        dolos_cardano::ChainLogic::compute_undo_delta(ledger, block)
+    }
+
+    fn ledger_query_for_block<'a>(
+        block: &Self::Block<'a>,
+        unapplied_deltas: &[LedgerDelta],
+    ) -> Result<LedgerQuery, ChainError> {
+        dolos_cardano::ChainLogic::ledger_query_for_block(block, unapplied_deltas)
+    }
+
+    fn compute_apply_delta3<'a>(
+        &self,
+        state: &impl State3Store,
+        block: &Self::Block<'a>,
+    ) -> Result<StateDelta, ChainError> {
+        match self {
+            ChainAdapter::Cardano(x) => x.compute_apply_delta3(state, block),
+        }
+    }
+}
 
 /// A persistent store for ledger state
 #[derive(Clone)]
@@ -423,6 +499,7 @@ impl From<dolos_redb::archive::ChainSparseIter> for ArchiveSparseBlockIter {
 pub struct DomainAdapter {
     pub storage_config: Arc<StorageConfig>,
     pub genesis: Arc<Genesis>,
+    pub chain: ChainAdapter,
     pub wal: WalAdapter,
     pub state: StateAdapter,
     pub archive: ArchiveAdapter,
@@ -432,16 +509,20 @@ pub struct DomainAdapter {
 }
 
 impl Domain for DomainAdapter {
+    type Chain = ChainAdapter;
     type Wal = WalAdapter;
     type State = StateAdapter;
     type Archive = ArchiveAdapter;
     type Mempool = crate::mempool::Mempool;
-    type Chain = dolos_cardano::ChainLogic;
 
     type State3 = dolos_redb3::StateStore;
 
     fn genesis(&self) -> &Genesis {
         &self.genesis
+    }
+
+    fn chain(&self) -> &Self::Chain {
+        &self.chain
     }
 
     fn wal(&self) -> &Self::Wal {
