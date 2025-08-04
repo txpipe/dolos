@@ -5,7 +5,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::{filter::Targets, prelude::*};
 
-use dolos::adapters::{ArchiveAdapter, DomainAdapter, StateAdapter, WalAdapter};
+use dolos::adapters::{ArchiveAdapter, ChainAdapter, DomainAdapter, StateAdapter, WalAdapter};
 use dolos::core::Genesis;
 use dolos::prelude::*;
 
@@ -122,10 +122,12 @@ pub fn setup_domain(config: &crate::Config) -> miette::Result<DomainAdapter> {
     let stores = setup_data_stores(config)?;
     let genesis = Arc::new(open_genesis_files(&config.genesis)?);
     let mempool = dolos::mempool::Mempool::new(genesis.clone(), stores.state.clone());
+    let chain = ChainAdapter::from(config.chain.clone().unwrap_or_default());
 
     let domain = DomainAdapter {
         storage_config: Arc::new(config.storage.clone()),
         genesis,
+        chain,
         wal: stores.wal,
         state: stores.state,
         archive: stores.archive,

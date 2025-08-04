@@ -2,6 +2,8 @@ use pallas::codec::minicbor;
 use pallas::ledger::traverse::MultiEraBlock;
 use pallas::ledger::traverse::MultiEraOutput;
 use pallas::ledger::traverse::MultiEraTx;
+use serde::Deserialize;
+use serde::Serialize;
 use std::collections::HashMap;
 use std::collections::HashSet;
 
@@ -26,6 +28,9 @@ pub mod include;
 pub type Block<'a> = MultiEraBlock<'a>;
 
 pub type UtxoBody<'a> = MultiEraOutput<'a>;
+
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct Config {}
 
 /// Computes the ledger delta of applying a particular block.
 ///
@@ -284,7 +289,14 @@ pub fn ledger_query_for_block(
     })
 }
 
-pub struct ChainLogic;
+#[derive(Clone)]
+pub struct ChainLogic(Config);
+
+impl ChainLogic {
+    pub fn new(config: Config) -> Self {
+        Self(config)
+    }
+}
 
 impl dolos_core::ChainLogic for ChainLogic {
     type Block<'a> = MultiEraBlock<'a>;
@@ -297,7 +309,7 @@ impl dolos_core::ChainLogic for ChainLogic {
         mutable_slots(domain.genesis())
     }
 
-    fn compute_origin_delta<'a>(genesis: &Genesis) -> Result<LedgerDelta, ChainError> {
+    fn compute_origin_delta<'a>(&self, genesis: &Genesis) -> Result<LedgerDelta, ChainError> {
         let delta = compute_origin_delta(genesis);
 
         Ok(delta)
@@ -329,6 +341,7 @@ impl dolos_core::ChainLogic for ChainLogic {
     }
 
     fn compute_apply_delta3<'a>(
+        &self,
         state: &impl State3Store,
         block: &Self::Block<'a>,
     ) -> Result<StateDelta, ChainError> {

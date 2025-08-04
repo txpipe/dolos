@@ -681,7 +681,7 @@ pub trait ChainLogic {
         unapplied_deltas: &[LedgerDelta],
     ) -> Result<LedgerQuery, ChainError>;
 
-    fn compute_origin_delta(genesis: &Genesis) -> Result<LedgerDelta, ChainError>;
+    fn compute_origin_delta(&self, genesis: &Genesis) -> Result<LedgerDelta, ChainError>;
 
     fn compute_apply_delta<'a>(
         ledger: LedgerSlice,
@@ -713,6 +713,7 @@ pub trait ChainLogic {
     }
 
     fn compute_apply_delta3<'a>(
+        &self,
         state: &impl State3Store,
         block: &Self::Block<'a>,
     ) -> Result<StateDelta, ChainError>;
@@ -751,6 +752,7 @@ pub trait Domain: Send + Sync + Clone + 'static {
     fn storage_config(&self) -> &StorageConfig;
     fn genesis(&self) -> &Genesis;
 
+    fn chain(&self) -> &Self::Chain;
     fn wal(&self) -> &Self::Wal;
     fn state(&self) -> &Self::State;
     fn archive(&self) -> &Self::Archive;
@@ -759,7 +761,7 @@ pub trait Domain: Send + Sync + Clone + 'static {
     fn state3(&self) -> &Self::State3;
 
     fn apply_origin(&self) -> Result<(), DomainError> {
-        let deltas = vec![Self::Chain::compute_origin_delta(self.genesis())?];
+        let deltas = vec![self.chain().compute_origin_delta(self.genesis())?];
 
         self.state().apply(&deltas)?;
         self.archive().apply(&deltas)?;
@@ -785,7 +787,7 @@ pub trait Domain: Send + Sync + Clone + 'static {
 
         for block in blocks {
             let block = Self::Chain::decode_block(&block.body)?;
-            let delta = Self::Chain::compute_apply_delta3(self.state3(), &block)?;
+            let delta = self.chain().compute_apply_delta3(self.state3(), &block)?;
             deltas.push(delta);
         }
 
