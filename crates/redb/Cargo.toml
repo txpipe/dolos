@@ -1,7 +1,7 @@
 [package]
 name = "dolos-redb"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 
 [dependencies]
 tracing.workspace = true
@@ -16,5 +16,7 @@ hex.workspace = true
 thiserror.workspace = true
 
 dolos-core = { path = "../core" }
-
 redb = { version = "^2.6" }
+
+[dev-dependencies]
+dolos-testing = { path = "../testing" }

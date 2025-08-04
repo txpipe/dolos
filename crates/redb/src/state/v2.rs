@@ -1,8 +1,9 @@
 use ::redb::{Database, Durability};
-use std::sync::Arc;
+use redb::TableStats;
+use std::{collections::HashMap, sync::Arc};
 
 use super::tables;
-use crate::state::*;
+use crate::state::{tables::UtxoKeyIterator, *};
 
 type Error = super::RedbStateError;
 
@@ -22,6 +23,16 @@ impl LedgerStore {
         Arc::get_mut(&mut self.0)
     }
 
+    pub fn in_memory() -> Result<Self, StateError> {
+        let db = ::redb::Database::builder()
+            .create_with_backend(::redb::backends::InMemoryBackend::new())
+            .map_err(RedbStateError::from)?;
+
+        let store = Self::initialize(db)?;
+
+        Ok(store)
+    }
+
     pub fn initialize(db: Database) -> Result<Self, Error> {
         let mut wx = db.begin_write()?;
         wx.set_durability(Durability::Immediate);
@@ -39,6 +50,15 @@ impl LedgerStore {
 
     pub fn is_empty(&self) -> Result<bool, Error> {
         self.cursor().map(|x| x.is_none())
+    }
+
+    pub fn start(&self) -> Result<Option<ChainPoint>, Error> {
+        let rx = self.db().begin_read()?;
+
+        let earliest =
+            tables::CursorTable::first(&rx)?.map(|(k, v)| ChainPoint::Specific(k, v.hash));
+
+        Ok(earliest)
     }
 
     pub fn cursor(&self) -> Result<Option<ChainPoint>, Error> {
@@ -66,9 +86,47 @@ impl LedgerStore {
         Ok(())
     }
 
-    pub fn finalize(&self, until: BlockSlot) -> Result<(), Error> {
+    pub fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, Error> {
         let rx = self.db().begin_read()?;
-        let cursors = tables::CursorTable::get_range(&rx, until)?;
+        let start = match tables::CursorTable::first(&rx)? {
+            Some((slot, _)) => slot,
+            None => {
+                debug!("no start point found on ledger, skipping housekeeping");
+                return Ok(true);
+            }
+        };
+
+        let last = match tables::CursorTable::last(&rx)? {
+            Some((slot, _)) => slot,
+            None => {
+                debug!("no tip found on chain, skipping housekeeping");
+                return Ok(true);
+            }
+        };
+
+        let delta = last.saturating_sub(start);
+        let excess = delta.saturating_sub(max_slots);
+
+        debug!(delta, excess, last, start, "ledger history delta computed");
+
+        if excess == 0 {
+            debug!(delta, max_slots, excess, "no pruning necessary on ledger");
+            return Ok(true);
+        }
+
+        let (done, max_prune) = match max_prune {
+            Some(max) => (excess <= max, core::cmp::min(excess, max)),
+            None => (true, excess),
+        };
+
+        let prune_before = start + max_prune;
+
+        info!(
+            cutoff_slot = prune_before,
+            start, excess, "pruning ledger for excess history"
+        );
+
+        let cursors = tables::CursorTable::get_range(&rx, prune_before)?;
 
         let mut wx = self.db().begin_write()?;
         wx.set_durability(Durability::Eventual);
@@ -81,7 +139,22 @@ impl LedgerStore {
 
         wx.commit()?;
 
-        Ok(())
+        Ok(done)
+    }
+
+    pub fn stats(&self) -> Result<HashMap<&str, TableStats>, Error> {
+        let rx = self.db().begin_read()?;
+
+        let cursor = tables::CursorTable::stats(&rx)?;
+        let utxos = tables::UtxosTable::stats(&rx)?;
+        let pparams = tables::PParamsTable::stats(&rx)?;
+        let filters = tables::FilterIndexes::stats(&rx)?;
+
+        let all_tables = [("cursor", cursor), ("utxos", utxos), ("pparams", pparams)]
+            .into_iter()
+            .chain(filters);
+
+        Ok(HashMap::from_iter(all_tables))
     }
 
     pub fn copy(&self, target: &Self) -> Result<(), Error> {
@@ -116,6 +189,16 @@ impl LedgerStore {
     pub fn get_utxos_by_address(&self, address: &[u8]) -> Result<UtxoSet, Error> {
         let rx = self.db().begin_read()?;
         tables::FilterIndexes::get_by_address(&rx, address)
+    }
+
+    pub fn count_utxos_by_address(&self, address: &[u8]) -> Result<u64, Error> {
+        let rx = self.db().begin_read()?;
+        tables::FilterIndexes::count_within_key(&rx, tables::FilterIndexes::BY_ADDRESS, address)
+    }
+
+    pub fn iter_utxos_by_address(&self, address: &[u8]) -> Result<UtxoKeyIterator, Error> {
+        let rx = self.db().begin_read()?;
+        tables::FilterIndexes::iter_within_key(&rx, tables::FilterIndexes::BY_ADDRESS, address)
     }
 
     pub fn get_utxos_by_payment(&self, payment: &[u8]) -> Result<UtxoSet, Error> {

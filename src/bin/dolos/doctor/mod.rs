@@ -3,8 +3,10 @@ use clap::{Parser, Subcommand};
 use crate::feedback::Feedback;
 
 mod rebuild_stores;
-mod reset_genesis;
 mod wal_integrity;
+
+#[cfg(feature = "utils")]
+mod reset_genesis;
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
@@ -12,6 +14,8 @@ pub enum Command {
     RebuildStores(rebuild_stores::Args),
     /// checks the integrity of the WAL records
     WalIntegrity(wal_integrity::Args),
+
+    #[cfg(feature = "utils")]
     /// resets the genesis files with well-known values
     ResetGenesis(reset_genesis::Args),
 }
@@ -26,6 +30,8 @@ pub fn run(config: &super::Config, args: &Args, feedback: &Feedback) -> miette::
     match &args.command {
         Command::RebuildStores(x) => rebuild_stores::run(config, x, feedback)?,
         Command::WalIntegrity(x) => wal_integrity::run(config, x)?,
+
+        #[cfg(feature = "utils")]
         Command::ResetGenesis(x) => reset_genesis::run(config, x)?,
     }
 

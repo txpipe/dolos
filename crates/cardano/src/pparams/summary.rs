@@ -97,6 +97,10 @@ impl ChainSummary {
         });
     }
 
+    pub fn first(&self) -> &EraSummary {
+        self.past.first().unwrap()
+    }
+
     /// Return the edge era
     ///
     /// The edge era represent the last era in chronological order that we know
@@ -154,5 +158,13 @@ impl ChainSummary {
         if let Some(era) = era {
             change(era);
         }
+    }
+
+    pub fn iter_all(&self) -> impl Iterator<Item = &EraSummary> {
+        self.past.iter().chain(std::iter::once(self.edge()))
+    }
+
+    pub fn iter_past(&self) -> impl Iterator<Item = &EraSummary> {
+        self.past.iter()
     }
 }

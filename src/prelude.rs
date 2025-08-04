@@ -33,6 +33,9 @@ pub enum Error {
     #[error("state error: {0}")]
     StateError(#[from] StateError),
 
+    #[error("state3 error: {0}")]
+    State3Error(#[from] State3Error),
+
     #[error("{0}")]
     Message(String),
 
@@ -72,7 +75,7 @@ impl From<Box<dyn std::error::Error>> for Error {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct CancelTokenImpl(pub tokio_util::sync::CancellationToken);
 
 impl CancelToken for CancelTokenImpl {

@@ -1,8 +1,9 @@
-use std::str::FromStr as _;
+use pallas::ledger::addresses::{Address, ShelleyDelegationPart};
+use std::{collections::HashSet, str::FromStr as _};
+
+use dolos_testing::*;
 
 use super::*;
-use dolos_core::testing::*;
-use pallas::ledger::addresses::{Address, ShelleyDelegationPart};
 
 #[test]
 fn schema_hash_computation() {
@@ -36,13 +37,16 @@ fn cursor_is_persisted() {
         );
     }
 
-    for i in 10..5 {
-        let delta = undo_delta_from_slot(i);
+    for i in 0..5 {
+        let undo_slot = 10 - i;
+        let delta = undo_delta_from_slot(undo_slot);
         store.apply(&[delta]).unwrap();
+
+        let cursor_slot = undo_slot - 1;
 
         assert_eq!(
             store.cursor().unwrap(),
-            Some(ChainPoint::Specific(i, slot_to_hash(i)))
+            Some(ChainPoint::Specific(cursor_slot, slot_to_hash(cursor_slot)))
         );
     }
 }
@@ -177,10 +181,7 @@ fn test_apply_in_batch() {
 fn test_query_by_address() {
     let store = LedgerStore::in_memory_v2().unwrap();
 
-    let addresses: Vec<_> = dolos_core::testing::TestAddress::everyone()
-        .into_iter()
-        .enumerate()
-        .collect();
+    let addresses: Vec<_> = TestAddress::everyone().into_iter().enumerate().collect();
 
     let initial_utxos = addresses
         .iter()
@@ -240,5 +241,68 @@ fn test_query_by_address() {
                 assertion(utxos, &address, ordinal);
             }
         };
+    }
+}
+
+#[test]
+fn test_count_utxos_by_address() {
+    let store = LedgerStore::in_memory_v2().unwrap();
+
+    let utxo_generator = |x: &TestAddress| utxo_with_random_amount(x, 1_000_000..1_500_000);
+
+    let delta = make_custom_utxo_delta(0, TestAddress::everyone(), 10..11, utxo_generator);
+
+    store.apply(&[delta.clone()]).unwrap();
+
+    for address in TestAddress::everyone().iter() {
+        let expected = delta
+            .produced_utxo
+            .values()
+            .map(get_utxo_address_and_value)
+            .filter(|(addr, _)| addr == address.to_bytes().as_slice())
+            .count();
+
+        let count = store
+            .count_utxos_by_address(address.to_bytes().as_slice())
+            .unwrap();
+
+        assert_eq!(expected as u64, count);
+    }
+}
+
+#[test]
+fn test_iter_within_key() {
+    let store = LedgerStore::in_memory_v2().unwrap();
+
+    let utxo_generator = |x: &TestAddress| utxo_with_random_amount(x, 1_000_000..1_500_000);
+
+    let delta = make_custom_utxo_delta(0, TestAddress::everyone(), 10..11, utxo_generator);
+
+    store.apply(&[delta.clone()]).unwrap();
+
+    for address in TestAddress::everyone().iter() {
+        let mut expected: HashSet<TxoRef> = delta
+            .produced_utxo
+            .iter()
+            .map(|(k, v)| (k, get_utxo_address_and_value(v)))
+            .filter_map(|(k, (addr, _))| {
+                if addr == address.to_bytes().as_slice() {
+                    Some(k.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let iterator = store
+            .iter_utxos_by_address(address.to_bytes().as_slice())
+            .unwrap();
+
+        for key in iterator {
+            let key = key.unwrap();
+            assert!(expected.remove(&key));
+        }
+
+        assert!(expected.is_empty());
     }
 }

@@ -1,12 +1,15 @@
 use axum::{
-    Router, ServiceExt,
     extract::Request,
     http::StatusCode,
     routing::{get, post},
+    Router, ServiceExt,
 };
 use dolos_cardano::pparams::ChainSummary;
 use itertools::Itertools;
-use pallas::{crypto::hash::Hash, ledger::traverse::MultiEraUpdate};
+use pallas::{
+    crypto::hash::Hash,
+    ledger::{addresses::Network, traverse::MultiEraUpdate},
+};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, net::SocketAddr, ops::Deref};
 use tower::Layer;
@@ -17,6 +20,7 @@ use dolos_core::{
     ArchiveStore as _, CancelToken, Domain, EraCbor, ServeError, StateStore as _, TxOrder,
 };
 
+mod error;
 pub(crate) mod mapping;
 mod pagination;
 mod routes;
@@ -45,6 +49,14 @@ pub type BlockWithTx = (Vec<u8>, TxOrder);
 pub type BlockWithTxMap = HashMap<Hash<32>, BlockWithTx>;
 
 impl<D: Domain> Facade<D> {
+    pub fn get_network_id(&self) -> Result<Network, StatusCode> {
+        match self.genesis().shelley.network_id.as_ref() {
+            Some(x) if x == "Mainnet" => Ok(Network::Mainnet),
+            Some(x) if x == "Testnet" => Ok(Network::Testnet),
+            _ => Err(StatusCode::INTERNAL_SERVER_ERROR),
+        }
+    }
+
     pub fn get_chain_summary(&self) -> Result<ChainSummary, StatusCode> {
         let tip = self
             .state()
@@ -115,9 +127,32 @@ impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
 
     async fn run(cfg: Self::Config, domain: D, cancel: C) -> Result<(), ServeError> {
         let app = Router::new()
+            .route("/genesis", get(routes::genesis::naked::<D>))
+            .route("/network", get(routes::network::naked::<D>))
+            .route("/network/eras", get(routes::network::eras::<D>))
+            .route(
+                "/accounts/{stake_address}",
+                get(routes::accounts::by_stake::<D>),
+            )
+            .route(
+                "/accounts/{stake_address}/registrations",
+                get(routes::accounts::by_stake_registrations::<D>),
+            )
+            .route(
+                "/accounts/{stake_address}/delegations",
+                get(routes::accounts::by_stake_delegations::<D>),
+            )
+            .route(
+                "/accounts/{stake_address}/addresses",
+                get(routes::accounts::by_stake_addresses::<D>),
+            )
             .route(
                 "/accounts/{stake_address}/utxos",
-                get(routes::accounts::stake_address::utxos::route::<D>),
+                get(routes::accounts::by_stake_utxos::<D>),
+            )
+            .route(
+                "/accounts/{stake_address}/rewards",
+                get(routes::accounts::by_stake_rewards::<D>),
             )
             .route(
                 "/addresses/{address}/utxos",
@@ -127,43 +162,100 @@ impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
                 "/addresses/{address}/utxos/{asset}",
                 get(routes::addresses::utxos_with_asset::<D>),
             )
-            .route("/blocks/latest", get(routes::blocks::latest::route::<D>))
             .route(
-                "/blocks/latest/txs",
-                get(routes::blocks::latest::txs::route::<D>),
+                "/addresses/{address}/transactions",
+                get(routes::addresses::transactions::<D>),
             )
+            .route("/addresses/{address}/txs", get(routes::addresses::txs::<D>))
+            .route("/blocks/latest", get(routes::blocks::latest::<D>))
+            .route("/blocks/latest/txs", get(routes::blocks::latest_txs::<D>))
             .route(
                 "/blocks/{hash_or_number}",
-                get(routes::blocks::hash_or_number::route::<D>),
-            )
-            .route(
-                "/blocks/{hash_or_number}/addresses",
-                get(routes::blocks::hash_or_number::addresses::route::<D>),
+                get(routes::blocks::by_hash_or_number::<D>),
             )
             .route(
                 "/blocks/{hash_or_number}/next",
-                get(routes::blocks::hash_or_number::next::route::<D>),
+                get(routes::blocks::by_hash_or_number_next::<D>),
             )
             .route(
                 "/blocks/{hash_or_number}/previous",
-                get(routes::blocks::hash_or_number::previous::route::<D>),
+                get(routes::blocks::by_hash_or_number_previous::<D>),
             )
             .route(
                 "/blocks/{hash_or_number}/txs",
-                get(routes::blocks::hash_or_number::txs::route::<D>),
+                get(routes::blocks::by_hash_or_number_txs::<D>),
+            )
+            .route(
+                "/blocks/{hash_or_number}/addresses",
+                get(routes::blocks::by_hash_or_number_addresses::<D>),
             )
             .route(
                 "/blocks/slot/{slot_number}",
-                get(routes::blocks::slot::slot_number::route::<D>),
+                get(routes::blocks::by_slot::<D>),
+            )
+            .route(
+                "/epochs/{epoch}/parameters",
+                get(routes::epochs::by_number_parameters::<D>),
             )
             .route(
                 "/epochs/latest/parameters",
-                get(routes::epochs::latest::parameters::route::<D>),
+                get(routes::epochs::latest_parameters::<D>),
             )
             .route("/tx/submit", post(routes::tx::submit::route::<D>))
             .route("/txs/{tx_hash}", get(routes::txs::by_hash::<D>))
             .route("/txs/{tx_hash}/cbor", get(routes::txs::by_hash_cbor::<D>))
             .route("/txs/{tx_hash}/utxos", get(routes::txs::by_hash_utxos::<D>))
+            .route(
+                "/txs/{tx_hash}/metadata",
+                get(routes::txs::by_hash_metadata::<D>),
+            )
+            .route(
+                "/txs/{tx_hash}/metadata/cbor",
+                get(routes::txs::by_hash_metadata_cbor::<D>),
+            )
+            .route(
+                "/txs/{tx_hash}/redeemers",
+                get(routes::txs::by_hash_redeemers::<D>),
+            )
+            .route(
+                "/txs/{tx_hash}/withdrawals",
+                get(routes::txs::by_hash_withdrawals::<D>),
+            )
+            .route(
+                "/txs/{tx_hash}/delegations",
+                get(routes::txs::by_hash_delegations::<D>),
+            )
+            .route("/txs/{tx_hash}/mirs", get(routes::txs::by_hash_mirs::<D>))
+            .route(
+                "/txs/{tx_hash}/pool_updates",
+                get(routes::txs::by_hash_pool_updates::<D>),
+            )
+            .route(
+                "/txs/{tx_hash}/pool_retires",
+                get(routes::txs::by_hash_pool_retires::<D>),
+            )
+            .route(
+                "/txs/{tx_hash}/stakes",
+                get(routes::txs::by_hash_stakes::<D>),
+            )
+            .route("/assets/{subject}", get(routes::assets::by_subject::<D>))
+            .route(
+                "/metadata/txs/labels/{label}",
+                get(routes::metadata::by_label_json::<D>),
+            )
+            .route(
+                "/metadata/txs/labels/{label}/cbor",
+                get(routes::metadata::by_label_cbor::<D>),
+            )
+            .route(
+                "/pools/{id}/delegators",
+                get(routes::pools::by_id_delegators::<D>),
+            )
+            .route("/pools/extended", get(routes::pools::all_extended::<D>))
+            .route(
+                "/governance/dreps/{drep_id}",
+                get(routes::governance::drep_by_id::<D>),
+            )
             .with_state(Facade::<D> { inner: domain })
             .layer(
                 trace::TraceLayer::new_for_http()

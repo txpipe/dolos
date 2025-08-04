@@ -2,17 +2,48 @@ use pallas::codec::minicbor;
 use pallas::ledger::traverse::MultiEraBlock;
 use pallas::ledger::traverse::MultiEraOutput;
 use pallas::ledger::traverse::MultiEraTx;
+use serde::Deserialize;
+use serde::Serialize;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use dolos_core::*;
+
+use crate::pparams::ChainSummary;
+use crate::pparams::EraSummary;
+
+// re-export pallas for version compatibility downstream
+pub use pallas;
 
 pub mod pparams;
 //pub mod validate;
 
+pub mod model;
+
+pub mod roll;
+
+#[cfg(feature = "include-genesis")]
+pub mod include;
+
 pub type Block<'a> = MultiEraBlock<'a>;
 
 pub type UtxoBody<'a> = MultiEraOutput<'a>;
+
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct TrackConfig {
+    pub seen_addresses: bool,
+    pub asset_state: bool,
+    pub pool_state: bool,
+    pub pool_delegator: bool,
+    pub epoch_state: bool,
+    pub account_activity: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct Config {
+    pub track: Option<TrackConfig>,
+}
 
 /// Computes the ledger delta of applying a particular block.
 ///
@@ -193,6 +224,35 @@ pub fn lastest_immutable_slot(tip: BlockSlot, genesis: &Genesis) -> BlockSlot {
     tip.saturating_sub(mutable_slots(genesis))
 }
 
+pub type Timestamp = u64;
+
+pub fn slot_time_within_era(slot: u64, era: &EraSummary) -> Timestamp {
+    let time = era.start.timestamp.timestamp() as u64
+        + (slot - era.start.slot) * era.pparams.slot_length();
+
+    time as Timestamp
+}
+
+/// Resolve wall-clock time from a slot number and a chain summary.
+pub fn slot_time(slot: u64, summary: &ChainSummary) -> Timestamp {
+    let era = summary.era_for_slot(slot);
+
+    slot_time_within_era(slot, era)
+}
+
+pub type Epoch = u32;
+pub type EpochSlot = u32;
+
+/// Resolve epoch and sub-epoch slot from a slot number and a chain summary.
+pub fn slot_epoch(slot: u64, summary: &ChainSummary) -> (Epoch, EpochSlot) {
+    let era = summary.era_for_slot(slot);
+    let era_slot = slot - era.start.slot;
+    let era_epoch = era_slot / era.pparams.epoch_length();
+    let epoch = era.start.epoch + era_epoch;
+
+    (epoch as Epoch, era_slot as EpochSlot)
+}
+
 pub fn ledger_query_for_block(
     block: &MultiEraBlock,
     unapplied_deltas: &[LedgerDelta],
@@ -242,7 +302,18 @@ pub fn ledger_query_for_block(
     })
 }
 
-pub struct ChainLogic;
+#[derive(Clone)]
+pub struct ChainLogic {
+    visitor: Arc<roll::DynamicVisitor>,
+}
+
+impl ChainLogic {
+    pub fn new(config: Config) -> Self {
+        Self {
+            visitor: Arc::new(roll::DynamicVisitor::new(config.track.unwrap_or_default())),
+        }
+    }
+}
 
 impl dolos_core::ChainLogic for ChainLogic {
     type Block<'a> = MultiEraBlock<'a>;
@@ -251,11 +322,11 @@ impl dolos_core::ChainLogic for ChainLogic {
         MultiEraBlock::decode(block).map_err(ChainError::DecodingError)
     }
 
-    fn lastest_immutable_slot(domain: &impl Domain, tip: BlockSlot) -> BlockSlot {
-        lastest_immutable_slot(tip, domain.genesis())
+    fn mutable_slots(domain: &impl Domain) -> BlockSlot {
+        mutable_slots(domain.genesis())
     }
 
-    fn compute_origin_delta<'a>(genesis: &Genesis) -> Result<LedgerDelta, ChainError> {
+    fn compute_origin_delta<'a>(&self, genesis: &Genesis) -> Result<LedgerDelta, ChainError> {
         let delta = compute_origin_delta(genesis);
 
         Ok(delta)
@@ -284,6 +355,18 @@ impl dolos_core::ChainLogic for ChainLogic {
         unapplied_deltas: &[LedgerDelta],
     ) -> Result<LedgerQuery, ChainError> {
         ledger_query_for_block(block, unapplied_deltas)
+    }
+
+    fn compute_apply_delta3<'a>(
+        &self,
+        state: &impl State3Store,
+        block: &Self::Block<'a>,
+    ) -> Result<StateDelta, ChainError> {
+        let mut delta = StateDelta::new(block.slot());
+
+        roll::crawl_block(&mut delta, state, block, self.visitor.as_ref())?;
+
+        Ok(delta)
     }
 }
 
@@ -443,5 +526,25 @@ mod tests {
         }
 
         assert_eq!(apply.new_position, undo.undone_position);
+    }
+
+    #[test]
+    fn test_lastest_immutable_slot() {
+        let path = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap())
+            .join("test_data")
+            .join("mainnet")
+            .join("genesis");
+
+        let genesis = load_genesis(&path);
+
+        let tip: BlockSlot = 1_000_000;
+
+        let result = lastest_immutable_slot(tip, &genesis);
+
+        // slot delta in hours
+        let delta_in_hours = tip.saturating_sub(result) / (60 * 60);
+
+        // the well-known volatility window for mainnet is 36 hours.
+        assert_eq!(delta_in_hours, 36);
     }
 }

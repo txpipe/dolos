@@ -9,12 +9,11 @@ use std::{
     fmt::Display,
 };
 use thiserror::Error;
-use tracing::{info, warn};
+use tracing::info;
 
 mod mempool;
+mod state;
 mod wal;
-
-pub mod testing;
 
 pub type Era = u16;
 
@@ -29,29 +28,33 @@ pub type BlockSlot = u64;
 
 /// The height of a block (a.k.a. block number)
 pub type BlockHeight = u64;
-pub type BlockBody = Vec<u8>;
+
+pub type Cbor = Vec<u8>;
+
+pub type BlockBody = Cbor;
 pub type BlockEra = pallas::ledger::traverse::Era;
 pub type BlockHash = Hash<32>;
-pub type BlockHeader = Vec<u8>;
+pub type BlockHeader = Cbor;
 pub type TxHash = Hash<32>;
 pub type OutputIdx = u64;
-pub type UtxoBody = (u16, Vec<u8>);
+pub type UtxoBody = (u16, Cbor);
 pub type ChainTip = pallas::network::miniprotocols::chainsync::Tip;
 pub type LogSeq = u64;
 
 pub use mempool::*;
+pub use state::*;
 pub use wal::*;
 
 #[derive(Debug, Eq, PartialEq, Clone)]
-pub struct EraCbor(pub Era, pub Vec<u8>);
+pub struct EraCbor(pub Era, pub Cbor);
 
-impl From<(Era, Vec<u8>)> for EraCbor {
-    fn from(value: (Era, Vec<u8>)) -> Self {
+impl From<(Era, Cbor)> for EraCbor {
+    fn from(value: (Era, Cbor)) -> Self {
         Self(value.0, value.1)
     }
 }
 
-impl From<EraCbor> for (Era, Vec<u8>) {
+impl From<EraCbor> for (Era, Cbor) {
     fn from(value: EraCbor) -> Self {
         (value.0, value.1)
     }
@@ -502,9 +505,9 @@ pub enum StateError {
     DecodingError(#[from] pallas::codec::minicbor::decode::Error),
 }
 
-pub trait StateStore:
-    Sized + pallas::interop::utxorpc::LedgerContext + Clone + Send + Sync + 'static
-{
+pub trait StateStore: Sized + Clone + Send + Sync + 'static {
+    fn start(&self) -> Result<Option<ChainPoint>, StateError>;
+
     fn cursor(&self) -> Result<Option<ChainPoint>, StateError>;
 
     fn is_empty(&self) -> Result<bool, StateError>;
@@ -525,11 +528,11 @@ pub trait StateStore:
 
     fn apply(&self, deltas: &[LedgerDelta]) -> Result<(), StateError>;
 
-    fn finalize(&self, until: BlockSlot) -> Result<(), StateError>;
-
     fn upgrade(self) -> Result<Self, StateError>;
 
     fn copy(&self, target: &Self) -> Result<(), StateError>;
+
+    fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, StateError>;
 }
 
 #[derive(Debug, Error)]
@@ -556,8 +559,10 @@ pub enum ArchiveError {
     BlockDecodingError(#[from] pallas::ledger::traverse::Error),
 }
 
-pub trait ArchiveStore {
+pub trait ArchiveStore: Clone + Send + Sync + 'static {
     type BlockIter<'a>: Iterator<Item = (BlockSlot, BlockBody)> + DoubleEndedIterator + 'a;
+    type SparseBlockIter: Iterator<Item = Result<(BlockSlot, Option<BlockBody>), ArchiveError>>
+        + DoubleEndedIterator;
 
     fn get_block_by_hash(&self, block_hash: &[u8]) -> Result<Option<BlockBody>, ArchiveError>;
 
@@ -574,18 +579,27 @@ pub trait ArchiveStore {
 
     fn get_slot_for_tx(&self, tx_hash: &[u8]) -> Result<Option<BlockSlot>, ArchiveError>;
 
+    fn iter_blocks_with_address(
+        &self,
+        address: &[u8],
+    ) -> Result<Self::SparseBlockIter, ArchiveError>;
+
     fn get_range<'a>(
         &self,
         from: Option<BlockSlot>,
         to: Option<BlockSlot>,
     ) -> Result<Self::BlockIter<'a>, ArchiveError>;
 
+    fn find_intersect(&self, intersect: &[ChainPoint]) -> Result<Option<ChainPoint>, ArchiveError>;
+
     fn get_tip(&self) -> Result<Option<(BlockSlot, BlockBody)>, ArchiveError>;
 
     fn apply(&self, deltas: &[LedgerDelta]) -> Result<(), ArchiveError>;
 
-    fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<(), ArchiveError>;
+    fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, ArchiveError>;
 }
+
+pub type Phase2Log = Vec<String>;
 
 #[derive(Debug, Error)]
 pub enum MempoolError {
@@ -604,6 +618,10 @@ pub enum MempoolError {
     #[cfg(feature = "phase2")]
     #[error("tx evaluation failed during phase-2: {0}")]
     Phase2Error(#[from] pallas::ledger::validate::phase2::error::Error),
+
+    #[cfg(feature = "phase2")]
+    #[error("phase-2 script yielded an error")]
+    Phase2ExplicitError(Phase2Log),
 
     #[error("state error: {0}")]
     StateError(#[from] StateError),
@@ -638,6 +656,9 @@ pub enum ChainError {
 
     #[error("decoding error")]
     DecodingError(#[from] pallas::ledger::traverse::Error),
+
+    #[error(transparent)]
+    State3Error(#[from] State3Error),
 }
 
 pub trait ChainLogic {
@@ -645,14 +666,25 @@ pub trait ChainLogic {
 
     fn decode_block<'a>(block: &'a [u8]) -> Result<Self::Block<'a>, ChainError>;
 
-    fn lastest_immutable_slot(domain: &impl Domain, tip: BlockSlot) -> BlockSlot;
+    fn mutable_slots(domain: &impl Domain) -> BlockSlot;
+
+    /// Computes the last immutable slot
+    ///
+    /// Takes the latest known tip, reads the relevant genesis config values and
+    /// uses the security window guarantee formula from consensus to calculate
+    /// the latest slot that can be considered immutable. This is used
+    /// mainly to define which slots can be finalized in the ledger store
+    /// (aka: compaction).
+    fn last_immutable_slot(domain: &impl Domain, tip: BlockSlot) -> BlockSlot {
+        tip.saturating_sub(Self::mutable_slots(domain))
+    }
 
     fn ledger_query_for_block<'a>(
         block: &Self::Block<'a>,
         unapplied_deltas: &[LedgerDelta],
     ) -> Result<LedgerQuery, ChainError>;
 
-    fn compute_origin_delta(genesis: &Genesis) -> Result<LedgerDelta, ChainError>;
+    fn compute_origin_delta(&self, genesis: &Genesis) -> Result<LedgerDelta, ChainError>;
 
     fn compute_apply_delta<'a>(
         ledger: LedgerSlice,
@@ -682,6 +714,12 @@ pub trait ChainLogic {
 
         Ok(out)
     }
+
+    fn compute_apply_delta3<'a>(
+        &self,
+        state: &impl State3Store,
+        block: &Self::Block<'a>,
+    ) -> Result<StateDelta, ChainError>;
 }
 
 #[derive(Debug, Error)]
@@ -694,6 +732,9 @@ pub enum DomainError {
 
     #[error("state error: {0}")]
     StateError(#[from] StateError),
+
+    #[error("state3 error: {0}")]
+    State3Error(#[from] State3Error),
 
     #[error("archive error: {0}")]
     ArchiveError(#[from] ArchiveError),
@@ -709,16 +750,21 @@ pub trait Domain: Send + Sync + Clone + 'static {
     type Mempool: MempoolStore;
     type Chain: ChainLogic;
 
+    type State3: State3Store;
+
     fn storage_config(&self) -> &StorageConfig;
     fn genesis(&self) -> &Genesis;
 
+    fn chain(&self) -> &Self::Chain;
     fn wal(&self) -> &Self::Wal;
     fn state(&self) -> &Self::State;
     fn archive(&self) -> &Self::Archive;
     fn mempool(&self) -> &Self::Mempool;
 
+    fn state3(&self) -> &Self::State3;
+
     fn apply_origin(&self) -> Result<(), DomainError> {
-        let deltas = vec![Self::Chain::compute_origin_delta(self.genesis())?];
+        let deltas = vec![self.chain().compute_origin_delta(self.genesis())?];
 
         self.state().apply(&deltas)?;
         self.archive().apply(&deltas)?;
@@ -739,12 +785,28 @@ pub trait Domain: Send + Sync + Clone + 'static {
         Ok(deltas)
     }
 
+    fn compute_apply_deltas3(&self, blocks: &[RawBlock]) -> Result<Vec<StateDelta>, DomainError> {
+        let mut deltas = Vec::with_capacity(blocks.len());
+
+        for block in blocks {
+            let block = Self::Chain::decode_block(&block.body)?;
+            let delta = self.chain().compute_apply_delta3(self.state3(), &block)?;
+            deltas.push(delta);
+        }
+
+        Ok(deltas)
+    }
+
     fn apply_blocks(&self, blocks: &[RawBlock]) -> Result<(), DomainError> {
         let deltas = self.compute_apply_deltas(blocks)?;
 
         self.state().apply(&deltas)?;
         self.archive().apply(&deltas)?;
         self.mempool().apply(&deltas);
+
+        for delta in self.compute_apply_deltas3(blocks)? {
+            self.state3().apply_delta(delta)?;
+        }
 
         Ok(())
     }
@@ -774,36 +836,34 @@ pub trait Domain: Send + Sync + Clone + 'static {
 
     const MAX_PRUNE_SLOTS_PER_HOUSEKEEPING: u64 = 10_000;
 
-    fn housekeeping(&self) -> Result<(), DomainError> {
-        // IMPROVE: maybe we can keep the tip in memory as part of the domain struct as
-        // a cache mechanism.
-        let Some(tip) = self.state().cursor()?.map(|x| x.slot()) else {
-            warn!("skipping housekeeping, no tip found");
-            return Ok(());
-        };
-
-        let max_ledger_history = self
+    fn housekeeping(&self) -> Result<bool, DomainError> {
+        let max_ledger_slots = self
             .storage_config()
             .max_ledger_history
-            .unwrap_or_else(|| Self::Chain::lastest_immutable_slot(self, tip));
+            .unwrap_or(Self::Chain::mutable_slots(self));
+        info!(max_ledger_slots, "pruning ledger for excess history");
+        let state_pruned = self.state().prune_history(
+            max_ledger_slots,
+            Some(Self::MAX_PRUNE_SLOTS_PER_HOUSEKEEPING),
+        )?;
 
-        let to_finalize = tip - max_ledger_history;
-
-        self.state().finalize(to_finalize)?;
-
+        let mut archive_pruned = true;
         if let Some(max_slots) = self.storage_config().max_chain_history {
             info!(max_slots, "pruning archive for excess history");
-            self.archive()
+            archive_pruned = self
+                .archive()
                 .prune_history(max_slots, Some(Self::MAX_PRUNE_SLOTS_PER_HOUSEKEEPING))?;
         }
 
+        let mut wal_pruned = true;
         if let Some(max_slots) = self.storage_config().max_wal_history {
             info!(max_slots, "pruning wal for excess history");
-            self.wal()
+            wal_pruned = self
+                .wal()
                 .prune_history(max_slots, Some(Self::MAX_PRUNE_SLOTS_PER_HOUSEKEEPING))?;
         }
 
-        Ok(())
+        Ok(state_pruned && archive_pruned && wal_pruned)
     }
 }
 
@@ -822,7 +882,12 @@ pub trait Driver<D: Domain, C: CancelToken>: Send + Sync + 'static {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::slot_to_hash;
+
+    pub fn slot_to_hash(slot: u64) -> BlockHash {
+        let mut hasher = pallas::crypto::hash::Hasher::<256>::new();
+        hasher.input(&(slot as i32).to_le_bytes());
+        hasher.finalize()
+    }
 
     #[test]
     fn chainpoint_partial_eq() {

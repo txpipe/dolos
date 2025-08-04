@@ -1,8 +1,9 @@
 use ::redb::{Database, MultimapTableHandle as _, Range, TableHandle as _};
+use redb::ReadTransaction;
 use std::path::Path;
 use tracing::{debug, info, warn};
 
-use dolos_core::{ArchiveError, BlockBody, BlockSlot, EraCbor, LedgerDelta, TxOrder};
+use dolos_core::{ArchiveError, BlockBody, BlockSlot, ChainPoint, EraCbor, LedgerDelta, TxOrder};
 
 mod indexes;
 mod tables;
@@ -131,7 +132,7 @@ impl ChainStore {
                 info!("detected state db schema v1");
                 v1::ChainStore::from(db).into()
             }
-            Some(x) => panic!("can't recognize db hash {}", x),
+            Some(x) => panic!("can't recognize db hash {x}"),
         };
 
         Ok(schema)
@@ -164,13 +165,24 @@ impl ChainStore {
         }
     }
 
-    pub fn get_range<'a>(
+    pub fn get_range(
         &self,
         from: Option<BlockSlot>,
         to: Option<BlockSlot>,
-    ) -> Result<ChainIter<'a>, RedbArchiveError> {
+    ) -> Result<ChainRangeIter, RedbArchiveError> {
         let out = match self {
             ChainStore::SchemaV1(x) => x.get_range(from, to)?,
+        };
+
+        Ok(out)
+    }
+
+    pub fn find_intersect(
+        &self,
+        intersect: &[ChainPoint],
+    ) -> Result<Option<ChainPoint>, RedbArchiveError> {
+        let out = match self {
+            ChainStore::SchemaV1(x) => x.find_intersect(intersect)?,
         };
 
         Ok(out)
@@ -209,6 +221,18 @@ impl ChainStore {
         }
     }
 
+    pub fn iter_blocks_with_address(
+        &self,
+        address: &[u8],
+    ) -> Result<ChainSparseIter, RedbArchiveError> {
+        match self {
+            ChainStore::SchemaV1(x) => {
+                // TODO: we need to filter the false positives
+                x.iter_possible_blocks_with_address(address)
+            }
+        }
+    }
+
     pub fn get_tx(&self, tx_hash: &[u8]) -> Result<Option<EraCbor>, RedbArchiveError> {
         match self {
             ChainStore::SchemaV1(x) => x.get_tx(tx_hash),
@@ -231,10 +255,73 @@ impl ChainStore {
         &self,
         max_slots: u64,
         max_prune: Option<u64>,
-    ) -> Result<(), RedbArchiveError> {
+    ) -> Result<bool, RedbArchiveError> {
         match self {
             ChainStore::SchemaV1(x) => x.prune_history(max_slots, max_prune),
         }
+    }
+}
+
+impl dolos_core::ArchiveStore for ChainStore {
+    type BlockIter<'a> = ChainRangeIter;
+    type SparseBlockIter = ChainSparseIter;
+
+    fn get_block_by_hash(&self, block_hash: &[u8]) -> Result<Option<BlockBody>, ArchiveError> {
+        Ok(Self::get_block_by_hash(self, block_hash)?)
+    }
+
+    fn get_block_by_slot(&self, slot: &BlockSlot) -> Result<Option<BlockBody>, ArchiveError> {
+        Ok(Self::get_block_by_slot(self, slot)?)
+    }
+
+    fn get_block_by_number(&self, number: &u64) -> Result<Option<BlockBody>, ArchiveError> {
+        Ok(Self::get_block_by_number(self, number)?)
+    }
+
+    fn get_block_with_tx(
+        &self,
+        tx_hash: &[u8],
+    ) -> Result<Option<(BlockBody, TxOrder)>, ArchiveError> {
+        Ok(Self::get_block_with_tx(self, tx_hash)?)
+    }
+
+    fn get_tx(&self, tx_hash: &[u8]) -> Result<Option<EraCbor>, ArchiveError> {
+        Ok(Self::get_tx(self, tx_hash)?)
+    }
+
+    fn get_slot_for_tx(&self, tx_hash: &[u8]) -> Result<Option<BlockSlot>, ArchiveError> {
+        Ok(Self::get_slot_for_tx(self, tx_hash)?)
+    }
+
+    fn iter_blocks_with_address(
+        &self,
+        address: &[u8],
+    ) -> Result<Self::SparseBlockIter, ArchiveError> {
+        Ok(Self::iter_blocks_with_address(self, address)?)
+    }
+
+    fn get_range<'a>(
+        &self,
+        from: Option<BlockSlot>,
+        to: Option<BlockSlot>,
+    ) -> Result<Self::BlockIter<'a>, ArchiveError> {
+        Ok(Self::get_range(self, from, to)?)
+    }
+
+    fn find_intersect(&self, intersect: &[ChainPoint]) -> Result<Option<ChainPoint>, ArchiveError> {
+        Ok(Self::find_intersect(self, intersect)?)
+    }
+
+    fn get_tip(&self) -> Result<Option<(BlockSlot, BlockBody)>, ArchiveError> {
+        Ok(Self::get_tip(self)?)
+    }
+
+    fn apply(&self, deltas: &[LedgerDelta]) -> Result<(), ArchiveError> {
+        Ok(Self::apply(self, deltas)?)
+    }
+
+    fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, ArchiveError> {
+        Ok(Self::prune_history(self, max_slots, max_prune)?)
     }
 }
 
@@ -244,9 +331,9 @@ impl From<v1::ChainStore> for ChainStore {
     }
 }
 
-pub struct ChainIter<'a>(Range<'a, BlockSlot, BlockBody>);
+pub struct ChainRangeIter(Range<'static, BlockSlot, BlockBody>);
 
-impl<'a> Iterator for ChainIter<'a> {
+impl Iterator for ChainRangeIter {
     type Item = (BlockSlot, BlockBody);
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -257,12 +344,52 @@ impl<'a> Iterator for ChainIter<'a> {
     }
 }
 
-impl<'a> DoubleEndedIterator for ChainIter<'a> {
+impl DoubleEndedIterator for ChainRangeIter {
     fn next_back(&mut self) -> Option<Self::Item> {
         self.0
             .next_back()
             .map(|x| x.unwrap())
             .map(|(k, v)| (k.value(), v.value()))
+    }
+}
+
+pub struct ChainSparseIter(ReadTransaction, indexes::SlotKeyIterator);
+
+impl Iterator for ChainSparseIter {
+    type Item = Result<(BlockSlot, Option<BlockBody>), ArchiveError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let next = self.1.next()?;
+
+        let Ok(slot) = next else {
+            return Some(Err(next.err().unwrap().into()));
+        };
+
+        let block = tables::BlocksTable::get_by_slot(&self.0, slot);
+
+        let Ok(block) = block else {
+            return Some(Err(block.err().unwrap().into()));
+        };
+
+        Some(Ok((slot, block)))
+    }
+}
+
+impl DoubleEndedIterator for ChainSparseIter {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        let next = self.1.next_back()?;
+
+        let Ok(slot) = next else {
+            return Some(Err(next.err().unwrap().into()));
+        };
+
+        let block = tables::BlocksTable::get_by_slot(&self.0, slot);
+
+        let Ok(block) = block else {
+            return Some(Err(block.err().unwrap().into()));
+        };
+
+        Some(Ok((slot, block)))
     }
 }
 

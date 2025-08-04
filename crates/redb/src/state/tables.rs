@@ -4,6 +4,7 @@ use dolos_core::TxoIdx;
 use itertools::Itertools as _;
 use pallas::ledger::addresses::ShelleyDelegationPart;
 use pallas::{crypto::hash::Hash, ledger::traverse::MultiEraOutput};
+use redb::ReadableTableMetadata as _;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
@@ -158,6 +159,13 @@ impl UtxosTable {
 
         Ok(())
     }
+
+    pub fn stats(rx: &ReadTransaction) -> Result<redb::TableStats, Error> {
+        let table = rx.open_table(Self::DEF)?;
+        let stats = table.stats()?;
+
+        Ok(stats)
+    }
 }
 
 pub struct PParamsTable;
@@ -213,6 +221,13 @@ impl PParamsTable {
         }
 
         Ok(())
+    }
+
+    pub fn stats(rx: &ReadTransaction) -> Result<redb::TableStats, Error> {
+        let table = rx.open_table(Self::DEF)?;
+        let stats = table.stats()?;
+
+        Ok(stats)
     }
 }
 
@@ -358,6 +373,28 @@ impl CursorTable {
         Ok(())
     }
 
+    pub fn stats(rx: &ReadTransaction) -> Result<redb::TableStats, Error> {
+        let table = rx.open_table(Self::DEF)?;
+        let stats = table.stats()?;
+
+        Ok(stats)
+    }
+
+    pub fn first(rx: &ReadTransaction) -> Result<Option<(BlockSlot, CursorValue)>, Error> {
+        let table = rx.open_table(Self::DEF)?;
+
+        let first = table.first()?;
+
+        if let Some((slot, value)) = first {
+            let slot = slot.value();
+            let value = bincode::deserialize(value.value()).unwrap();
+
+            Ok(Some((slot, value)))
+        } else {
+            Ok(None)
+        }
+    }
+
     pub fn last(rx: &ReadTransaction) -> Result<Option<(BlockSlot, CursorValue)>, Error> {
         let table = rx.open_table(Self::DEF)?;
 
@@ -371,6 +408,25 @@ impl CursorTable {
         } else {
             Ok(None)
         }
+    }
+}
+
+pub struct UtxoKeyIterator(redb::MultimapValue<'static, UtxosKey>);
+
+impl Iterator for UtxoKeyIterator {
+    type Item = Result<TxoRef, Error>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let item = self.0.next()?;
+
+        let out = item
+            .map(|item| {
+                let (hash, idx) = item.value();
+                TxoRef((*hash).into(), idx)
+            })
+            .map_err(Error::from);
+
+        Some(out)
     }
 }
 
@@ -420,6 +476,30 @@ impl FilterIndexes {
         }
 
         Ok(out)
+    }
+
+    pub fn count_within_key(
+        rx: &ReadTransaction,
+        table_def: MultimapTableDefinition<&[u8], UtxosKey>,
+        key: &[u8],
+    ) -> Result<u64, Error> {
+        let table = rx.open_multimap_table(table_def)?;
+
+        let count = table.get(key)?.len();
+
+        Ok(count)
+    }
+
+    pub fn iter_within_key(
+        rx: &ReadTransaction,
+        table_def: MultimapTableDefinition<&[u8], UtxosKey>,
+        key: &[u8],
+    ) -> Result<UtxoKeyIterator, Error> {
+        let table = rx.open_multimap_table(table_def)?;
+
+        let inner = table.get(key)?;
+
+        Ok(UtxoKeyIterator(inner))
     }
 
     pub fn get_by_address(
@@ -595,5 +675,21 @@ impl FilterIndexes {
         Self::copy_table(rx, wx, Self::BY_ASSET)?;
 
         Ok(())
+    }
+
+    pub fn stats(rx: &ReadTransaction) -> Result<HashMap<&'static str, redb::TableStats>, Error> {
+        let address = rx.open_multimap_table(Self::BY_ADDRESS)?;
+        let payment = rx.open_multimap_table(Self::BY_PAYMENT)?;
+        let stake = rx.open_multimap_table(Self::BY_STAKE)?;
+        let policy = rx.open_multimap_table(Self::BY_POLICY)?;
+        let asset = rx.open_multimap_table(Self::BY_ASSET)?;
+
+        Ok(HashMap::from_iter([
+            ("address", address.stats()?),
+            ("payment", payment.stats()?),
+            ("stake", stake.stats()?),
+            ("policy", policy.stats()?),
+            ("asset", asset.stats()?),
+        ]))
     }
 }
