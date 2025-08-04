@@ -3,32 +3,62 @@ title: Mini Blockfrost
 sidebar:
   order: 2
 ---
-Dolos exposes a HTTP endpoint that exposes some of Blockfrost's endpoints.
 
-The endpoint provided implements some but not all of the endpoints defined by the [Blockfrost OpenAPI specification](https://github.com/blockfrost/openapi). Currently implemented endpoints are:
+Dolos provides an HTTP endpoint to access data using [Blockfrost OpenAPI](https://github.com/blockfrost/openapi) specification.
 
-* ``/accounts/{stake_address}/utxos``
-* ``/addresses/{address}/utxos``
-* ``/addresses/{address}/utxos/asset``
-* ``/blocks/latest``
-* ``/blocks/latest/txs``
-* ``/blocks/{hash_or_number}``
-* ``/blocks/{hash_or_number}/addresses``
-* ``/blocks/{hash_or_number}/next``
-* ``/blocks/{hash_or_number}/previous``
-* ``/blocks/{hash_or_number}/txs``
-* ``/blocks/slot/{slot_number}``
-* ``/epochs/latest/parameters``
-* ``/tx/submit``
-* ``/txs/{tx_hash}/cbor``
+## Coverage
 
-If enabled via configuration, _Dolos_ will expose a TCP port accepting HTTP
-connections. The default port number is `3000`, but this value can be changed
-via configuration.
+Dolos provides many, but not all of the Blockfrost endpoints. The following list represent the endpoints currently supported by Dolos:
+
+| Endpoint                                  | Description                                              |
+|-------------------------------------------|----------------------------------------------------------|
+| `/txs/{hash}/mirs`                        | Get MIRs for a specific transaction                      |
+| `/txs/{hash}/pool_retires`                | Get pool retirements for a specific transaction          |
+| `/txs/{hash}/pool_updates`                | Get pool updates for a specific transaction              |
+| `/txs/{hash}/stakes`                      | Get stakes for a specific transaction                    |
+| `/governance/dreps/{drep_id}`             | Get DRep information                                     |
+| `/txs/{hash}/redeemers`                   | Get redeemers for a specific transaction                 |
+| `/accounts/{stake_address}/rewards`       | Get rewards for a stake address                          |
+| `/accounts/{stake_address}/addresses`     | Get addresses for a stake address                        |
+| `/metadata/txs/labels/{label}/cbor`       | Get CBOR metadata for transactions with a specific label |
+| `/metadata/txs/labels/{label}`            | Get metadata for transactions with a specific label      |
+| `/network/eras`                           | Get network eras information                             |
+| `/network`                                | Get network information                                  |
+| `/accounts/{stake_address}/delegations`   | Get delegations for a stake address                      |
+| `/accounts/{stake_address}/registrations` | Get registrations for a stake address                    |
+| `/accounts/{stake_address}`               | Get account information for a stake address              |
+| `/assets/{asset}`                         | Get asset information                                    |
+| `/pools/extended`                         | Get extended pool information                            |
+| `/pools/{pool_id}/delegators`             | Get delegators for a specific pool                       |
+| `/addresses/{address}/utxos/{asset}`      | Get UTXOs for a specific address and asset               |
+| `/txs/{hash}`                             | Get transaction information                              |
+| `/txs/{hash}/cbor`                        | Get CBOR data for a transaction                          |
+| `/txs/{hash}/utxos`                       | Get UTXOs for a specific transaction                     |
+| `/txs/{hash}/metadata`                    | Get metadata for a specific transaction                  |
+| `/txs/{hash}/metadata/cbor`               | Get CBOR metadata for a specific transaction             |
+| `/txs/{hash}/withdrawals`                 | Get withdrawals for a specific transaction               |
+| `/blocks/{hash_or_number}`                | Get block information                                    |
+| `/blocks/latest`                          | Get latest block information                             |
+| `/blocks/{hash_or_number}/next`           | Get next block                                           |
+| `/blocks/{hash_or_number}/previous`       | Get previous block                                       |
+| `/blocks/{hash_or_number}/txs`            | Get transactions for a specific block                    |
+| `/blocks/latest/txs`                      | Get transactions for the latest block                    |
+| `/blocks/slot/{slot}`                     | Get block by slot number                                 |
+| `/txs/{hash}/delegations`                 | Get delegations for a specific transaction               |
+| `/epochs/{number}/parameters`             | Get epoch parameters                                     |
+| `/epochs/latest/parameters`               | Get latest epoch parameters                              |
+| `/genesis`                                | Get genesis information                                  |
+| `/addresses/{address}/transactions`       | Get transactions for a specific address                  |
+| `/addresses/{address}/utxos`              | Get UTXOs for a specific address                         |
+| `/tx/submit`                              | Submit a transaction                                     |
 
 ## Usage
 
-Once you have the daemon running you can hit the endpoint using any HTTP client (cURL, Postman, your browser, etc). Some cURL examples:
+If enabled via configuration, _Dolos_ will expose a TCP port accepting HTTP connections. The default port number is `3000`, but this value can be changed via configuration.
+
+Once you have the daemon running you can hit the endpoint using any HTTP client (cURL, Postman, your browser, etc).
+
+This is an example of querying for the latest block using `curl`:
 
 ```shell
 $ curl localhost:3000/blocks/latest | jq -S
@@ -51,26 +81,9 @@ $ curl localhost:3000/blocks/latest | jq -S
   "time": 1744058777,
   "tx_count": 2
 }
-
-$ curl localhost:3000/blocks/7577092717e9f764d9cda887beaf5b1da022f58fbe140f0c6f0e122fac7c383c/addresses | jq -S
-[
-  {
-    "address": "addr_test1qpqkckcetcavp78f0pj00vfcspmu0xdqev29smnmv7llh4eqgpdscdds83ekk7lg9uztqchvxl64mjcjj2mydl27fef",
-    "transactions": [
-      {
-        "tx_hash": "1a5458ac788cac1b48df584762af5bce43b621f588342b5957402fce4c32ba4a"
-      }
-    ]
-  }
-]
-
-$ curl localhost:3000/txs/1a5458ac788cac1b48df584762af5bce43b621f588342b5957402fce4c32ba4a/cbor | jq -S
-{
-  "cbor": "84aa00d90102838258208243dcc6e325742625b9cc06fe...
-
 ```
 
-## SDKs
+### Using the Blockfrost SDKs
 
 Blockfrost's SDKs can (to the most part) be adapted to be used with the Dolos MiniBF endpoint.
 An example with the [Python SDK](https://github.com/blockfrost/blockfrost-python/) looks like this:
@@ -90,9 +103,9 @@ api.api_version = None  # The API version defaults to "v0" on __init__.
 print(json.dumps(api.block_latest().to_dict(), indent=2))
 ```
 
-## TX Builder support.
+### Using a Tx Builder
 
-Support for TX building tools as a Blockfrost Provider is not yet complete, but we're working towrds that goal.
+The endpoints required for most tx builders to work are supported. Libraries like Lucid, Lucid-evolution, Blaze, MeshJS, etc can be used by pointing their corresponding provider configuration to Dolos Mini-BF endpoint.
  
 
 ## Configuration
@@ -111,3 +124,17 @@ This is an example of the `serve.minibf` fragment with a `dolos.toml` configurat
 [serve.minibf]
 listen_address = "[::]:3000"
 ```
+
+Some of the endpoints require extra data to be tracked by Dolos. We disable tracking all data by default since it can heavily affect the storage requirements for running Dolos.
+
+Depending on the endpoints you want to use, you'll have to opt-in into specific dataset that you want Dolos to track.
+
+- `seen_addresses`: Tracks whether addresses have been observed.
+- `asset_state`: Monitors the state of assets.
+- `pool_state`: Keeps track of the state of pools.
+- `pool_delegator`: Observes delegator information for pools.
+- `epoch_state`: Tracks the state of epochs.
+- `account_activity`: Monitors activity related to accounts.
+- `reward_logs`: Keeps track of rewards for each delegator in each epoch
+
+Check the [Configuration Schema](../configuration/schema) for detailed info on how to setup this.
