@@ -8,7 +8,6 @@ mod wal_integrity;
 #[cfg(feature = "utils")]
 mod reset_genesis;
 
-#[cfg(feature = "state3")]
 mod rebuild_state3_from_archive;
 
 #[derive(Debug, Subcommand)]
