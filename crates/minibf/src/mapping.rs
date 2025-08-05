@@ -2,7 +2,7 @@ use axum::{http::StatusCode, Json};
 use itertools::Itertools;
 use pallas::{
     codec::{minicbor, utils::Bytes},
-    crypto::hash::Hash,
+    crypto::hash::{Hash, Hasher},
     ledger::{
         addresses::{Address, Network, ShelleyPaymentPart, StakeAddress, StakePayload},
         primitives::{
@@ -1550,13 +1550,9 @@ impl<'a> BlockModelBuilder<'a> {
         let Some(key) = header.issuer_vkey() else {
             return Ok(None);
         };
+        let hash: Hash<28> = Hasher::<224>::hash(key);
 
-        let hrp = bech32::Hrp::parse("pool").map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        let out = bech32::encode::<bech32::Bech32>(hrp, key)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        Ok(Some(out))
+        Ok(Some(bech32_pool(hash)?))
     }
 
     fn format_ops_cert_data(&self) -> (Option<String>, Option<String>) {
@@ -1657,7 +1653,7 @@ impl<'a> IntoModel<BlockContent> for BlockModelBuilder<'a> {
             slot: Some(block.slot() as i32),
             height: Some(block.number() as i32),
             tx_count: block.txs().len() as i32,
-            size: block.body_size().unwrap() as i32,
+            size: block.body_size().unwrap_or_default() as i32,
             confirmations,
             slot_leader,
             block_vrf,
