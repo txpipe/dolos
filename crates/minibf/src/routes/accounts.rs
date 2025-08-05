@@ -173,11 +173,13 @@ pub async fn by_stake_addresses<D: Domain>(
 ) -> Result<Json<Vec<AccountAddressesContentInner>>, StatusCode> {
     let stake_address = ensure_stake_address(&stake_address)?;
 
-    let state = domain
+    let Some(state) = domain
         .state3()
         .read_entity_typed::<dolos_cardano::model::AccountState>(stake_address.to_vec())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+    else {
+        return Ok(Json(vec![]));
+    };
 
     let model = AccountModelBuilder {
         account_state: state,
@@ -239,7 +241,7 @@ fn build_delegation(
     let pool = mapping::bech32_pool(pool)?;
 
     Ok(Some(AccountDelegationContentInner {
-        active_epoch: (epoch + 1) as i32,
+        active_epoch: (epoch + 2) as i32,
         tx_hash: tx_hash.to_string(),
         amount: Default::default(),
         pool_id: pool,
