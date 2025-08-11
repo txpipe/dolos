@@ -660,6 +660,61 @@ impl IntoModel<TxContent> for TxModelBuilder<'_> {
         let txouts = tx.outputs();
         let chain = self.chain_or_500()?;
 
+        let era = self
+            .chain
+            .as_ref()
+            .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?
+            .era_for_slot(self.block.slot());
+
+        let key_deposit = match &era.pparams {
+            MultiEraProtocolParameters::Alonzo(x) => x.key_deposit,
+            MultiEraProtocolParameters::Babbage(x) => x.key_deposit,
+            MultiEraProtocolParameters::Conway(x) => x.key_deposit,
+            _ => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+        };
+
+        let mut deposit: u64 = tx
+            .certs()
+            .iter()
+            .flat_map(|x| match x {
+                MultiEraCert::AlonzoCompatible(alonzo) => match *(**alonzo).clone() {
+                    pallas::ledger::primitives::alonzo::Certificate::StakeRegistration(_) => {
+                        Some(key_deposit)
+                    }
+                    _ => None,
+                },
+                MultiEraCert::Conway(conway) => match *(**conway).clone() {
+                    pallas::ledger::primitives::conway::Certificate::StakeRegistration(_) => {
+                        Some(key_deposit)
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .sum();
+
+        deposit += tx
+            .certs()
+            .iter()
+            .flat_map(|x| match x {
+                MultiEraCert::AlonzoCompatible(alonzo) => match *(**alonzo).clone() {
+                    pallas::ledger::primitives::alonzo::Certificate::PoolRegistration {
+                        cost,
+                        ..
+                    } => Some(cost),
+                    _ => None,
+                },
+                MultiEraCert::Conway(conway) => match *(**conway).clone() {
+                    pallas::ledger::primitives::conway::Certificate::PoolRegistration {
+                        cost,
+                        ..
+                    } => Some(cost),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .sum::<u64>();
+
         let block_time = dolos_cardano::slot_time(block.slot(), chain);
 
         let tx = TxContent {
@@ -685,7 +740,7 @@ impl IntoModel<TxContent> for TxModelBuilder<'_> {
             pool_retire_count: count_certs!(tx, PoolRetirement) as i32,
             asset_mint_or_burn_count: tx.mints().iter().flat_map(|x| x.assets()).count() as i32,
             // TODO: need to understand exactly what this means in terms of the transaction
-            deposit: "0".to_string(),
+            deposit: deposit.to_string(),
         };
 
         Ok(tx)
@@ -842,15 +897,10 @@ impl TxModelBuilder<'_> {
         let tx_hash = input.hash();
         let index = input.index() as usize;
 
-        let Some(source) = self.deps.get(&tx_hash) else {
-            return None;
-        };
+        let source = self.deps.get(tx_hash)?;
 
         let outputs = source.outputs();
-
-        let Some(output) = outputs.get(index) else {
-            return None;
-        };
+        let output = outputs.get(index)?;
 
         Some(output.clone())
     }
@@ -1172,8 +1222,20 @@ impl IntoModel<TxContentPoolCertsInnerRelaysInner> for alonzo::Relay {
     fn into_model(self) -> Result<TxContentPoolCertsInnerRelaysInner, StatusCode> {
         let out = match self {
             alonzo::Relay::SingleHostAddr(port, ipv4, ipv6) => TxContentPoolCertsInnerRelaysInner {
-                ipv4: ipv4.map(|ipv4| ipv4.to_string()),
-                ipv6: ipv6.map(|ipv6| ipv6.to_string()),
+                ipv4: ipv4.map(|ipv4| {
+                    if let Ok(slice) = <[u8; 4]>::try_from(ipv4.as_slice()) {
+                        std::net::Ipv4Addr::from(slice).to_string()
+                    } else {
+                        Default::default()
+                    }
+                }),
+                ipv6: ipv6.map(|ipv6| {
+                    if let Ok(slice) = <[u8; 16]>::try_from(ipv6.as_slice()) {
+                        std::net::Ipv6Addr::from(slice).to_string()
+                    } else {
+                        Default::default()
+                    }
+                }),
                 dns: None,
                 dns_srv: None,
                 port: port.unwrap_or_default() as i32,
@@ -1311,7 +1373,7 @@ impl IntoModel<TxContentPoolCertsInner> for PoolUpdateModelBuilder {
 
     fn into_model(self) -> Result<TxContentPoolCertsInner, StatusCode> {
         let reward_account =
-            vkey_to_stake_address(self.reward_account.as_slice().into(), self.network)
+            vkey_to_stake_address(self.reward_account.as_slice()[1..].into(), self.network)
                 .to_bech32()
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -1347,8 +1409,8 @@ impl IntoModel<TxContentPoolCertsInner> for PoolUpdateModelBuilder {
                 .map(|relay| relay.clone().into_model())
                 .try_collect()?,
             cert_index: self.cert_index as i32,
-            pool_id: self.operator.to_string(),
-            active_epoch: self.current_epoch + 1,
+            pool_id: bech32_pool(self.operator.as_slice())?,
+            active_epoch: self.current_epoch + 2,
         })
     }
 }

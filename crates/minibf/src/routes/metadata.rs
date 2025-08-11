@@ -128,6 +128,7 @@ async fn by_label<D: Domain>(
     label: &str,
     pagination: PaginationParameters,
     domain: &Facade<D>,
+    max_scan_depth: usize,
 ) -> Result<MetadataHistoryModelBuilder, Error> {
     let label: u64 = label.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
     let pagination = Pagination::try_from(pagination)?;
@@ -136,8 +137,8 @@ async fn by_label<D: Domain>(
         .archive()
         .get_range(None, None)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .rev()
-        .take(MAX_SCAN_DEPTH);
+        //.rev()
+        .take(max_scan_depth);
 
     let mut builder =
         MetadataHistoryModelBuilder::new(label, pagination.count, pagination.page as usize);
@@ -158,7 +159,16 @@ pub async fn by_label_json<D: Domain>(
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<TxMetadataLabelJsonInner>>, Error> {
-    let builder = by_label(&label, params, &domain).await?;
+    let builder = by_label(
+        &label,
+        params,
+        &domain,
+        domain
+            .config
+            .metadata_max_scan_depth
+            .unwrap_or(MAX_SCAN_DEPTH),
+    )
+    .await?;
 
     Ok(builder.into_model().map(Json)?)
 }
@@ -168,7 +178,16 @@ pub async fn by_label_cbor<D: Domain>(
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<TxMetadataLabelCborInner>>, Error> {
-    let builder = by_label(&label, params, &domain).await?;
+    let builder = by_label(
+        &label,
+        params,
+        &domain,
+        domain
+            .config
+            .metadata_max_scan_depth
+            .unwrap_or(MAX_SCAN_DEPTH),
+    )
+    .await?;
 
     Ok(builder.into_model().map(Json)?)
 }

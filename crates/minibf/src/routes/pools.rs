@@ -18,6 +18,15 @@ use crate::{
     Facade,
 };
 
+fn decode_pool_id(pool_id: &str) -> Result<Vec<u8>, Error> {
+    if pool_id.len() == 56 {
+        hex::decode(pool_id).map_err(|_| Error::Code(StatusCode::BAD_REQUEST))
+    } else {
+        let (_, operator) = bech32::decode(pool_id).map_err(|_| StatusCode::BAD_REQUEST)?;
+        Ok(operator)
+    }
+}
+
 struct PoolModelBuilder {
     operator: Hash<28>,
     state: dolos_cardano::model::PoolState,
@@ -118,7 +127,7 @@ pub async fn by_id_delegators<D: Domain>(
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<PoolDelegatorsInner>>, Error> {
-    let (_, operator) = bech32::decode(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let operator = decode_pool_id(&id)?;
 
     let network = domain.get_network_id()?;
 

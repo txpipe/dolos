@@ -24,7 +24,7 @@ pub enum Error {
     ArgsError(#[from] tx3_sdk::trp::args::Error),
 
     #[error(transparent)]
-    ResolveError(tx3_resolver::Error),
+    ResolveError(Box<tx3_resolver::Error>),
 
     #[error(transparent)]
     JsonRpcError(#[from] jsonrpsee::types::ErrorObjectOwned),
@@ -65,7 +65,7 @@ impl IntoErrorData for tx3_resolver::inputs::CanonicalQuery {
 
     fn into_error_data(self) -> Self::Output {
         tx3_sdk::trp::InputQueryDiagnostic {
-            address: self.address.as_ref().map(|a| hex::encode(a)),
+            address: self.address.as_ref().map(hex::encode),
             min_amount: self
                 .min_amount
                 .iter()
@@ -103,11 +103,11 @@ impl IntoErrorData for tx3_resolver::inputs::SearchSpace {
 impl From<tx3_resolver::Error> for Error {
     fn from(error: tx3_resolver::Error) -> Self {
         let tx3_resolver::Error::InputsError(error) = error else {
-            return Error::ResolveError(error);
+            return Error::ResolveError(Box::new(error));
         };
 
         let tx3_resolver::inputs::Error::InputNotResolved(name, q, ss) = error else {
-            return Error::ResolveError(error.into());
+            return Error::ResolveError(Box::new(error.into()));
         };
 
         Error::InputNotResolved(name, q, ss)
@@ -180,7 +180,7 @@ impl Error {
             Error::MissingTxArg { key, ty } => {
                 let data = tx3_sdk::trp::MissingTxArgDiagnostic {
                     key: key.to_string(),
-                    ty: format!("{:?}", ty),
+                    ty: format!("{ty:?}"),
                 };
 
                 Some(json!(data))

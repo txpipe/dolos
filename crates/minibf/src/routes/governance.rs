@@ -17,7 +17,7 @@ pub enum DrepIdType {
 }
 
 fn parse_drep_id_type(id: &[u8]) -> Result<DrepIdType, StatusCode> {
-    let header_byte = id.get(0).ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let header_byte = id.first().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // second 3 bits can be either 0010 or 0011 to indicate a script or a
     // verification key
@@ -35,7 +35,7 @@ fn parse_drep_id(drep_id: &str) -> Result<Vec<u8>, StatusCode> {
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    let header_byte = drep_id.get(0).ok_or(StatusCode::BAD_REQUEST)?;
+    let header_byte = drep_id.first().ok_or(StatusCode::BAD_REQUEST)?;
 
     // first 4 bits need to be equal to 0010
     if header_byte & 0b11110000 != 0b00100000 {

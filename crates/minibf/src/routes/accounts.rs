@@ -471,7 +471,7 @@ impl IntoModel<AccountRewardContentInner> for RewardLog {
     type SortKey = ();
 
     fn into_model(self) -> Result<AccountRewardContentInner, StatusCode> {
-        let pool_id = mapping::bech32_pool(&self.pool_id)?;
+        let pool_id = mapping::bech32_pool(self.pool_id)?;
 
         let r#type = if self.as_leader {
             blockfrost_openapi::models::account_reward_content_inner::Type::Leader
