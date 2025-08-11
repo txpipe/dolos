@@ -391,6 +391,25 @@ impl ArchiveStore for ArchiveAdapter {
         Ok(out.into())
     }
 
+    fn iter_blocks_with_asset(&self, asset: &[u8]) -> Result<Self::SparseBlockIter, ArchiveError> {
+        let out = match self {
+            ArchiveAdapter::Redb(x) => x.iter_blocks_with_asset(asset)?,
+        };
+
+        Ok(out.into())
+    }
+
+    fn iter_blocks_with_payment(
+        &self,
+        payment: &[u8],
+    ) -> Result<Self::SparseBlockIter, ArchiveError> {
+        let out = match self {
+            ArchiveAdapter::Redb(x) => x.iter_blocks_with_payment(payment)?,
+        };
+
+        Ok(out.into())
+    }
+
     fn get_range<'a>(
         &self,
         from: Option<BlockSlot>,

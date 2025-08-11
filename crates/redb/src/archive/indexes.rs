@@ -81,6 +81,13 @@ impl AddressPaymentPartApproxIndexTable {
         }
         Ok(out)
     }
+
+    pub fn iter_by_payment(rx: &ReadTransaction, payment: &[u8]) -> Result<SlotKeyIterator, Error> {
+        let table = rx.open_multimap_table(Self::DEF)?;
+        let key = Self::compute_key(&payment.to_vec());
+        let range = table.get(key)?;
+        Ok(SlotKeyIterator::new(range))
+    }
 }
 
 pub struct AddressStakePartApproxIndexTable;
@@ -129,6 +136,13 @@ impl AssetApproxIndexTable {
             out.push(slot?.value());
         }
         Ok(out)
+    }
+
+    pub fn iter_by_asset(rx: &ReadTransaction, asset: &[u8]) -> Result<SlotKeyIterator, Error> {
+        let table = rx.open_multimap_table(Self::DEF)?;
+        let key = Self::compute_key(&asset.to_vec());
+        let range = table.get(key)?;
+        Ok(SlotKeyIterator::new(range))
     }
 }
 
@@ -301,6 +315,14 @@ impl Indexes {
 
     pub fn iter_by_address(rx: &ReadTransaction, address: &[u8]) -> Result<SlotKeyIterator, Error> {
         AddressApproxIndexTable::iter_by_address(rx, address)
+    }
+
+    pub fn iter_by_asset(rx: &ReadTransaction, asset: &[u8]) -> Result<SlotKeyIterator, Error> {
+        AssetApproxIndexTable::iter_by_asset(rx, asset)
+    }
+
+    pub fn iter_by_payment(rx: &ReadTransaction, address: &[u8]) -> Result<SlotKeyIterator, Error> {
+        AddressPaymentPartApproxIndexTable::iter_by_payment(rx, address)
     }
 
     pub fn get_by_address_payment_part(
