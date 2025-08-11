@@ -234,7 +234,10 @@ pub async fn by_hash_pool_updates<D: Domain>(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    let tx = TxModelBuilder::new(&raw, order)?.with_network(network);
+    let chain = domain.get_chain_summary()?;
+    let tx = TxModelBuilder::new(&raw, order)?
+        .with_network(network)
+        .with_chain(chain);
 
     tx.into_response()
 }
