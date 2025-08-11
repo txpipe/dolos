@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.30.1] - 2025-08-11
+
+### 🐛 Bug Fixes
+
+- *(minibf)* Improve conformance tests coverage (#635)
+- *(minibf)* Improve conformance test results (#637)
+
+### 🔧 Continuous Integration
+
+- Reinstate windows builds (#639)
+- Handle windows phase2 as a conditional compile (#640)
+
 ## [0.30.0] - 2025-08-04
 
 ### 🚀 Features
@@ -17,6 +29,10 @@ All notable changes to this project will be documented in this file.
 ### 📚 Documentation
 
 - Include changes regarding minibf endpoints (#634)
+
+### Release
+
+- V0.30.0
 
 ## [0.29.1] - 2025-07-31
 
