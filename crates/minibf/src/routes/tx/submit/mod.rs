@@ -31,10 +31,10 @@ pub async fn route<D: Domain>(
     let hash = domain.mempool().receive_raw(&cbor).map_err(|e| match e {
         MempoolError::Phase1Error(_) => StatusCode::BAD_REQUEST,
 
-        #[cfg(feature = "phase2")]
+        #[cfg(all(feature = "phase2", not(target_os = "windows")))]
         MempoolError::Phase2Error(_) => StatusCode::BAD_REQUEST,
 
-        #[cfg(feature = "phase2")]
+        #[cfg(all(feature = "phase2", not(target_os = "windows")))]
         MempoolError::Phase2ExplicitError(_) => StatusCode::BAD_REQUEST,
 
         MempoolError::InvalidTx(_) => StatusCode::BAD_REQUEST,

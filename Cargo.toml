@@ -109,10 +109,6 @@ trp = ["dolos-trp"]
 # Default features - includes all services
 default = ["mithril", "utils", "phase2", "grpc", "minibf", "trp"]
 
-# Windows-specific features (override phase2 to be empty)
-[target.'cfg(windows)'.features]
-phase2 = []
-
 # The profile that 'cargo dist' will build with
 [profile.dist]
 inherits = "release"
