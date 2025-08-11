@@ -47,6 +47,48 @@ fn refs_for_address<D: Domain>(
     }
 }
 
+fn is_address_in_chain<D: Domain>(domain: &Facade<D>, address: &str) -> Result<bool, Error> {
+    if address.starts_with("addr_vkh") {
+        let (_, addr) = bech32::decode(address).expect("failed to parse");
+
+        Ok(domain
+            .archive()
+            .iter_blocks_with_payment(&addr)
+            .map_err(|err| {
+                dbg!(err);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?
+            .next()
+            .is_some())
+    } else {
+        let address = pallas::ledger::addresses::Address::from_bech32(address).map_err(|err| {
+            dbg!(err);
+            Error::InvalidAddress
+        })?;
+        Ok(domain
+            .archive()
+            .iter_blocks_with_address(&address.to_vec())
+            .map_err(|err| {
+                dbg!(err);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?
+            .next()
+            .is_some())
+    }
+}
+
+fn is_asset_in_chain<D: Domain>(domain: &Facade<D>, asset: &[u8]) -> Result<bool, Error> {
+    Ok(domain
+        .archive()
+        .iter_blocks_with_asset(asset)
+        .map_err(|err| {
+            dbg!(err);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .next()
+        .is_some())
+}
+
 pub async fn utxos<D: Domain>(
     Path(address): Path<String>,
     Query(params): Query<PaginationParameters>,
@@ -73,22 +115,33 @@ pub async fn utxos_with_asset<D: Domain>(
 ) -> Result<Json<Vec<AddressUtxoContentInner>>, Error> {
     let pagination = Pagination::try_from(params)?;
 
-    let mut refs = refs_for_address(&domain, &address)?;
     let mut should_filter = false;
-    if &asset == "lovelace" {
+    let refs = if &asset == "lovelace" {
         should_filter = true;
+        refs_for_address(&domain, &address)?
     } else {
+        let refs = refs_for_address(&domain, &address)?;
         let asset = hex::decode(asset).map_err(|_| Error::InvalidAsset)?;
         let asset_refs = domain
             .state()
             .get_utxo_by_asset(&asset)
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-        refs = refs.intersection(&asset_refs).cloned().collect();
+        if asset_refs.is_empty() {
+            if is_asset_in_chain(&domain, &asset)? {
+                return Ok(Json(vec![]));
+            } else {
+                return Err(Error::Code(StatusCode::NOT_FOUND));
+            }
+        }
+
+        refs.intersection(&asset_refs).cloned().collect()
     };
 
-    // If the address is not seen on the chain, send 404.
     if refs.is_empty() {
+        if is_address_in_chain(&domain, &address)? {
+            return Ok(Json(vec![]));
+        }
         return Err(Error::Code(StatusCode::NOT_FOUND));
     }
 

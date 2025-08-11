@@ -19,12 +19,9 @@ use dolos_cardano::{
     pparams::ChainSummary,
 };
 use dolos_core::{ArchiveStore, Domain, State3Store as _, StateStore};
-use pallas::{
-    crypto::hash::Hash,
-    ledger::{
-        addresses::{Network, StakeAddress, StakePayload},
-        traverse::{MultiEraBlock, MultiEraCert},
-    },
+use pallas::ledger::{
+    addresses::{Network, StakeAddress, StakePayload},
+    traverse::{MultiEraBlock, MultiEraCert, MultiEraTx},
 };
 
 use pallas::ledger::primitives::alonzo::Certificate as AlonzoCert;
@@ -200,10 +197,14 @@ pub async fn by_stake_utxos<D: Domain>(
     let pagination = Pagination::try_from(params)?;
 
     let address = ensure_stake_address(&address)?;
+    let payload = match address.payload() {
+        StakePayload::Stake(payload) => payload.as_slice(),
+        StakePayload::Script(payload) => payload.as_slice(),
+    };
 
     let refs = domain
         .state()
-        .get_utxo_by_address(&address.to_vec())
+        .get_utxo_by_stake(payload)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let utxos = super::utxos::load_utxo_models(&domain, refs, pagination)?;
@@ -215,7 +216,7 @@ const MAX_SCAN_DEPTH: usize = 5000;
 
 fn build_delegation(
     stake_address: &StakeAddress,
-    tx_hash: Hash<32>,
+    tx: &MultiEraTx,
     cert: &MultiEraCert,
     epoch: u32,
     network: Network,
@@ -242,15 +243,20 @@ fn build_delegation(
 
     Ok(Some(AccountDelegationContentInner {
         active_epoch: (epoch + 2) as i32,
-        tx_hash: tx_hash.to_string(),
-        amount: Default::default(),
+        tx_hash: tx.hash().to_string(),
+        amount: tx
+            .outputs()
+            .iter()
+            .map(|x| x.value().coin())
+            .sum::<u64>()
+            .to_string(),
         pool_id: pool,
     }))
 }
 
 fn build_registration(
     stake_address: &StakeAddress,
-    tx_hash: Hash<32>,
+    tx: &MultiEraTx,
     cert: &MultiEraCert,
     _epoch: u32,
     network: Network,
@@ -276,7 +282,7 @@ fn build_registration(
     }
 
     Ok(Some(AccountRegistrationContentInner {
-        tx_hash: tx_hash.to_string(),
+        tx_hash: tx.hash().to_string(),
         action: if is_registration {
             Action::Registered
         } else {
@@ -336,7 +342,7 @@ impl<T> AccountActivityModelBuilder<T> {
     where
         F: Fn(
             &StakeAddress,
-            Hash<32>,
+            &MultiEraTx,
             &MultiEraCert,
             u32,
             Network,
@@ -345,11 +351,10 @@ impl<T> AccountActivityModelBuilder<T> {
         let txs = block.txs();
 
         for tx in txs {
-            let tx_hash = tx.hash();
             let certs = tx.certs();
 
             for cert in certs {
-                let model = mapper(&self.stake_address, tx_hash, &cert, epoch, self.network)?;
+                let model = mapper(&self.stake_address, &tx, &cert, epoch, self.network)?;
 
                 if let Some(model) = model {
                     self.add(model);
@@ -378,7 +383,7 @@ pub async fn by_stake_actions<D: Domain, F, T>(
     mapper: F,
 ) -> Result<Vec<T>, Error>
 where
-    F: Fn(&StakeAddress, Hash<32>, &MultiEraCert, u32, Network) -> Result<Option<T>, StatusCode>,
+    F: Fn(&StakeAddress, &MultiEraTx, &MultiEraCert, u32, Network) -> Result<Option<T>, StatusCode>,
 {
     let stake_address = ensure_stake_address(stake_address)?;
 

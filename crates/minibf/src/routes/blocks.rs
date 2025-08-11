@@ -3,9 +3,7 @@ use axum::{
     http::StatusCode,
     Json,
 };
-use blockfrost_openapi::models::{
-    block_content::BlockContent, block_content_addresses_inner::BlockContentAddressesInner,
-};
+use blockfrost_openapi::models::block_content::BlockContent;
 use dolos_cardano::pparams::ChainSummary;
 use dolos_core::{ArchiveStore as _, BlockBody, Domain};
 use pallas::ledger::traverse::MultiEraBlock;
@@ -294,7 +292,7 @@ pub async fn by_hash_or_number_addresses<D: Domain>(
 pub async fn latest_txs<D: Domain>(
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<Vec<BlockContentAddressesInner>>, Error> {
+) -> Result<Json<Vec<String>>, Error> {
     let pagination = Pagination::try_from(params)?;
     let (_, tip) = domain
         .archive()
@@ -304,15 +302,14 @@ pub async fn latest_txs<D: Domain>(
 
     let model = BlockModelBuilder::new(&tip)?;
 
-    let addresses: Vec<BlockContentAddressesInner> = model.into_model()?;
-    let addresses = match pagination.order {
-        Order::Asc => addresses,
-        Order::Desc => addresses.into_iter().rev().collect(),
+    let txs: Vec<String> = model.into_model()?;
+    let txs = match pagination.order {
+        Order::Asc => txs,
+        Order::Desc => txs.into_iter().rev().collect(),
     };
 
     Ok(Json(
-        addresses
-            .into_iter()
+        txs.into_iter()
             .skip(pagination.skip())
             .take(pagination.count)
             .collect(),

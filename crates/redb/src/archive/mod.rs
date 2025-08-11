@@ -233,6 +233,30 @@ impl ChainStore {
         }
     }
 
+    pub fn iter_blocks_with_asset(
+        &self,
+        asset: &[u8],
+    ) -> Result<ChainSparseIter, RedbArchiveError> {
+        match self {
+            ChainStore::SchemaV1(x) => {
+                // TODO: we need to filter the false positives
+                x.iter_possible_blocks_with_asset(asset)
+            }
+        }
+    }
+
+    pub fn iter_blocks_with_payment(
+        &self,
+        payment: &[u8],
+    ) -> Result<ChainSparseIter, RedbArchiveError> {
+        match self {
+            ChainStore::SchemaV1(x) => {
+                // TODO: we need to filter the false positives
+                x.iter_possible_blocks_with_payment(payment)
+            }
+        }
+    }
+
     pub fn get_tx(&self, tx_hash: &[u8]) -> Result<Option<EraCbor>, RedbArchiveError> {
         match self {
             ChainStore::SchemaV1(x) => x.get_tx(tx_hash),
@@ -298,6 +322,17 @@ impl dolos_core::ArchiveStore for ChainStore {
         address: &[u8],
     ) -> Result<Self::SparseBlockIter, ArchiveError> {
         Ok(Self::iter_blocks_with_address(self, address)?)
+    }
+
+    fn iter_blocks_with_asset(&self, asset: &[u8]) -> Result<Self::SparseBlockIter, ArchiveError> {
+        Ok(Self::iter_blocks_with_asset(self, asset)?)
+    }
+
+    fn iter_blocks_with_payment(
+        &self,
+        payment: &[u8],
+    ) -> Result<Self::SparseBlockIter, ArchiveError> {
+        Ok(Self::iter_blocks_with_payment(self, payment)?)
     }
 
     fn get_range<'a>(

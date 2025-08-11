@@ -584,6 +584,13 @@ pub trait ArchiveStore: Clone + Send + Sync + 'static {
         address: &[u8],
     ) -> Result<Self::SparseBlockIter, ArchiveError>;
 
+    fn iter_blocks_with_asset(&self, asset: &[u8]) -> Result<Self::SparseBlockIter, ArchiveError>;
+
+    fn iter_blocks_with_payment(
+        &self,
+        payment: &[u8],
+    ) -> Result<Self::SparseBlockIter, ArchiveError>;
+
     fn get_range<'a>(
         &self,
         from: Option<BlockSlot>,

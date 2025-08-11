@@ -1189,7 +1189,7 @@ impl IntoModel<Vec<TxContentPoolRetiresInner>> for TxModelBuilder<'_> {
                 };
 
                 Some(TxContentPoolRetiresInner {
-                    pool_id: pool.to_string(),
+                    pool_id: bech32_pool(pool.as_slice()).ok()?,
                     cert_index: index as i32,
                     retiring_epoch: *epoch as i32,
                 })
@@ -1203,7 +1203,7 @@ impl IntoModel<Vec<TxContentPoolRetiresInner>> for TxModelBuilder<'_> {
                 };
 
                 Some(TxContentPoolRetiresInner {
-                    pool_id: pool.to_string(),
+                    pool_id: bech32_pool(pool.as_slice()).ok()?,
                     cert_index: index as i32,
                     retiring_epoch: *epoch as i32,
                 })
