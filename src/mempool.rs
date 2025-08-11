@@ -129,7 +129,7 @@ impl Mempool {
         Ok(())
     }
 
-    #[cfg(feature = "phase2")]
+    #[cfg(all(feature = "phase2", not(target_os = "windows")))]
     pub fn evaluate(
         &self,
         tx: &MultiEraTx,
@@ -268,10 +268,15 @@ impl MempoolStore for Mempool {
         }
     }
 
-    #[cfg(feature = "phase2")]
+    #[cfg(all(feature = "phase2", not(target_os = "windows")))]
     fn evaluate_raw(&self, cbor: &[u8]) -> Result<EvalReport, MempoolError> {
         let tx = MultiEraTx::decode(cbor)?;
         self.evaluate(&tx)
+    }
+
+    #[cfg(not(all(feature = "phase2", not(target_os = "windows"))))]
+    fn evaluate_raw(&self, _cbor: &[u8]) -> Result<EvalReport, MempoolError> {
+        unimplemented!()
     }
 
     fn receive_raw(&self, cbor: &[u8]) -> Result<TxHash, MempoolError> {
@@ -279,7 +284,7 @@ impl MempoolStore for Mempool {
 
         self.validate(&tx)?;
 
-        #[cfg(feature = "phase2")]
+        #[cfg(all(feature = "phase2", not(target_os = "windows")))]
         {
             let report = self.evaluate(&tx)?;
 
