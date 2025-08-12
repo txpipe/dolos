@@ -21,7 +21,6 @@ pub enum Command {
     /// resets the genesis files with well-known values
     ResetGenesis(reset_genesis::Args),
 
-    #[cfg(feature = "state3")]
     /// resets the genesis files with well-known values
     RebuildState3FromArchive(rebuild_state3_from_archive::Args),
 }
@@ -40,7 +39,6 @@ pub fn run(config: &super::Config, args: &Args, feedback: &Feedback) -> miette::
         #[cfg(feature = "utils")]
         Command::ResetGenesis(x) => reset_genesis::run(config, x)?,
 
-        #[cfg(feature = "state3")]
         Command::RebuildState3FromArchive(x) => {
             rebuild_state3_from_archive::run(config, x, feedback)?
         }

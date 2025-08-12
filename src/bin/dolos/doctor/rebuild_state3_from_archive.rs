@@ -2,13 +2,13 @@ use itertools::Itertools;
 use miette::{Context, IntoDiagnostic};
 use pallas::ledger::traverse::MultiEraBlock;
 
-use dolos::prelude::*;
+use dolos::{adapters::ChainAdapter, prelude::*};
 
 use crate::feedback::Feedback;
 
 #[derive(Debug, clap::Args)]
 pub struct Args {
-    #[arg(short, long, default_value_t = 100000)]
+    #[arg(long, default_value_t = 100)]
     pub chunk: usize,
 
     #[arg(short, long, action)]
@@ -16,8 +16,6 @@ pub struct Args {
 }
 
 pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::Result<()> {
-    //crate::common::setup_tracing(&config.logging)?;
-
     let progress = feedback.slot_progress_bar();
     progress.set_message("rebuilding ledger");
 
@@ -30,7 +28,7 @@ pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::
     let schema = dolos_cardano::model::build_schema();
     let root = crate::common::ensure_storage_path(config)?;
     let state3_path = root.join("state");
-    let state3 = dolos_redb3::StateStore::open(schema, state3_path, None)
+    let state3 = dolos_redb3::StateStore::open(schema, state3_path, Some(5000))
         .into_diagnostic()
         .context("opening state3 db")?;
 
@@ -42,6 +40,7 @@ pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::
     progress.set_length(tip);
 
     let mut slot = 0;
+    let chain: ChainAdapter = config.chain.clone().unwrap_or_default().into();
 
     for chunk in blocks.chunks(args.chunk).into_iter() {
         let collected = chunk.collect_vec();
@@ -53,7 +52,8 @@ pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::
             .context("decoding blocks")?;
 
         for block in blocks.iter() {
-            let delta = dolos_cardano::ChainLogic::compute_apply_delta3(&state3, block)
+            let delta = chain
+                .compute_apply_delta3(&state3, block)
                 .into_diagnostic()
                 .context("calculating state3 deltas.")?;
 
