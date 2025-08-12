@@ -303,6 +303,21 @@ impl ChainStore {
         Ok(ChainSparseIter(rx, range))
     }
 
+    pub fn iter_possible_blocks_with_asset(&self, asset: &[u8]) -> Result<ChainSparseIter, Error> {
+        let rx = self.db().begin_read()?;
+        let range = indexes::Indexes::iter_by_asset(&rx, asset)?;
+        Ok(ChainSparseIter(rx, range))
+    }
+
+    pub fn iter_possible_blocks_with_payment(
+        &self,
+        payment: &[u8],
+    ) -> Result<ChainSparseIter, Error> {
+        let rx = self.db().begin_read()?;
+        let range = indexes::Indexes::iter_by_payment(&rx, payment)?;
+        Ok(ChainSparseIter(rx, range))
+    }
+
     pub fn get_block_by_slot(&self, slot: &BlockSlot) -> Result<Option<BlockBody>, Error> {
         let rx = self.db().begin_read()?;
         tables::BlocksTable::get_by_slot(&rx, *slot)

@@ -249,8 +249,9 @@ pub fn slot_epoch(slot: u64, summary: &ChainSummary) -> (Epoch, EpochSlot) {
     let era_slot = slot - era.start.slot;
     let era_epoch = era_slot / era.pparams.epoch_length();
     let epoch = era.start.epoch + era_epoch;
+    let epoch_slot = era_slot - era_epoch * era.pparams.epoch_length();
 
-    (epoch as Epoch, era_slot as EpochSlot)
+    (epoch as Epoch, epoch_slot as EpochSlot)
 }
 
 pub fn ledger_query_for_block(

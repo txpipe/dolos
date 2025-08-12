@@ -1,6 +1,6 @@
 use super::*;
 
-#[cfg(feature = "phase2")]
+#[cfg(all(feature = "phase2", not(target_os = "windows")))]
 pub use pallas::ledger::validate::phase2::EvalReport;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

@@ -315,6 +315,7 @@ impl ConfigEditor {
                 self.0.serve.minibf = dolos::serve::minibf::Config {
                     listen_address: "[::]:3000".parse().unwrap(),
                     permissive_cors: Some(true),
+                    metadata_max_scan_depth: None,
                 }
                 .into();
             } else {

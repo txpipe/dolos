@@ -68,7 +68,7 @@ impl_entity!(AccountState, "accounts", NamespaceType::KeyValue);
 #[derive(Debug, Encode, Decode, Clone)]
 pub struct AssetState {
     #[n(2)]
-    pub quantity: u64,
+    pub quantity_bytes: [u8; 16],
 
     #[n(3)]
     pub initial_tx: Hash<32>,
@@ -78,6 +78,19 @@ pub struct AssetState {
 }
 
 impl_entity!(AssetState, "assets", NamespaceType::KeyValue);
+
+impl AssetState {
+    pub fn add_quantity(&mut self, add: u128) -> Result<(), State3Error> {
+        let old = u128::from_be_bytes(self.quantity_bytes);
+        let new = (old + add).to_be_bytes();
+        self.quantity_bytes = new;
+        Ok(())
+    }
+
+    pub fn quantity(&self) -> u128 {
+        u128::from_be_bytes(self.quantity_bytes)
+    }
+}
 
 #[derive(Debug, Encode, Decode, Clone)]
 pub struct PoolState {

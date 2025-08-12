@@ -29,11 +29,13 @@ mod routes;
 pub struct Config {
     pub listen_address: SocketAddr,
     pub permissive_cors: Option<bool>,
+    pub metadata_max_scan_depth: Option<usize>,
 }
 
 #[derive(Clone)]
 pub struct Facade<D: Domain> {
     pub inner: D,
+    pub config: Config,
 }
 
 impl<D: Domain> Deref for Facade<D> {
@@ -256,7 +258,10 @@ impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
                 "/governance/dreps/{drep_id}",
                 get(routes::governance::drep_by_id::<D>),
             )
-            .with_state(Facade::<D> { inner: domain })
+            .with_state(Facade::<D> {
+                inner: domain,
+                config: cfg.clone(),
+            })
             .layer(
                 trace::TraceLayer::new_for_http()
                     .make_span_with(trace::DefaultMakeSpan::new().level(Level::INFO))

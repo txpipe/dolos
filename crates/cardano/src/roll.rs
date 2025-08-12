@@ -266,13 +266,13 @@ impl RollVisitor for AssetStateVisitor {
             let current = state
                 .read_entity_typed::<AssetState>(&subject)?
                 .unwrap_or(AssetState {
-                    quantity: 0,
+                    quantity_bytes: 0_u128.to_be_bytes(),
                     initial_tx: tx.hash(),
                     mint_tx_count: 0,
                 });
 
             let mut new = current.clone();
-            new.quantity += asset.mint_coin().unwrap_or_default() as u64;
+            new.add_quantity(asset.mint_coin().unwrap_or_default() as u128)?;
             new.mint_tx_count += 1;
             delta.override_entity(subject, new, Some(current));
         }
