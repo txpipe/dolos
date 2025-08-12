@@ -8,6 +8,8 @@ mod wal_integrity;
 #[cfg(feature = "utils")]
 mod reset_genesis;
 
+mod rebuild_state3_from_archive;
+
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// rebuilds ledger and chain from WAL
@@ -18,6 +20,9 @@ pub enum Command {
     #[cfg(feature = "utils")]
     /// resets the genesis files with well-known values
     ResetGenesis(reset_genesis::Args),
+
+    /// resets the genesis files with well-known values
+    RebuildState3FromArchive(rebuild_state3_from_archive::Args),
 }
 
 #[derive(Debug, Parser)]
@@ -33,6 +38,10 @@ pub fn run(config: &super::Config, args: &Args, feedback: &Feedback) -> miette::
 
         #[cfg(feature = "utils")]
         Command::ResetGenesis(x) => reset_genesis::run(config, x)?,
+
+        Command::RebuildState3FromArchive(x) => {
+            rebuild_state3_from_archive::run(config, x, feedback)?
+        }
     }
 
     Ok(())
