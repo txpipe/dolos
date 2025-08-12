@@ -118,7 +118,7 @@ impl IntoModel<Asset> for AssetModelBuilder {
             policy_id: hex::encode(policy),
             asset_name: Some(hex::encode(asset)),
             fingerprint: asset_fingerprint(&self.subject)?,
-            quantity: self.asset_state.quantity.to_string(),
+            quantity: self.asset_state.quantity().to_string(),
             initial_mint_tx_hash: self.asset_state.initial_tx.to_string(),
             mint_or_burn_count: self.asset_state.mint_tx_count as i32,
             onchain_metadata: metadata,
