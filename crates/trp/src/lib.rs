@@ -22,6 +22,7 @@ pub struct Config {
     pub listen_address: SocketAddr,
     pub max_optimize_rounds: u8,
     pub permissive_cors: Option<bool>,
+    pub extra_fees: Option<u64>,
 }
 
 #[derive(Clone)]

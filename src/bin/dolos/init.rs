@@ -333,6 +333,7 @@ impl ConfigEditor {
                     listen_address: "[::]:8000".parse().unwrap(),
                     max_optimize_rounds: 10,
                     permissive_cors: Some(true),
+                    extra_fees: None,
                 }
                 .into();
             } else {
