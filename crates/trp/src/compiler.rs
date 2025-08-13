@@ -5,7 +5,7 @@ use pallas::ledger::validate::utils::{ConwayProtParams, MultiEraProtocolParamete
 use dolos_cardano::pparams;
 use dolos_core::{Domain, Genesis, StateStore as _};
 
-use crate::Error;
+use crate::{Config, Error};
 
 pub fn network_id_from_genesis(genesis: &Genesis) -> Option<tx3_cardano::Network> {
     match genesis.shelley.network_id.as_ref() {
@@ -92,10 +92,16 @@ fn build_pparams<D: Domain>(
 pub fn load_compiler<D: Domain>(
     genesis: &Genesis,
     ledger: &D::State,
+    config: &Config,
 ) -> Result<tx3_cardano::Compiler, Error> {
     let pparams = build_pparams::<D>(genesis, ledger)?;
 
-    let compiler = tx3_cardano::Compiler::new(pparams, tx3_cardano::Config { extra_fees: None });
+    let compiler = tx3_cardano::Compiler::new(
+        pparams,
+        tx3_cardano::Config {
+            extra_fees: config.extra_fees,
+        },
+    );
 
     Ok(compiler)
 }
