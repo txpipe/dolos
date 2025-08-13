@@ -136,6 +136,9 @@ pub async fn utxos<D: Domain>(
 
     // If the address is not seen on the chain, send 404.
     if refs.is_empty() {
+        if is_address_in_chain(&domain, &address)? {
+            return Ok(Json(vec![]));
+        }
         return Err(Error::Code(StatusCode::NOT_FOUND));
     }
 

@@ -19,6 +19,10 @@ pub struct Args {
     // Whether to include chain
     #[arg(long, action)]
     include_chain: bool,
+
+    // Whether to include state
+    #[arg(long, action)]
+    include_state: bool,
 }
 
 fn prepare_wal(
@@ -115,6 +119,16 @@ pub fn run(
 
         archive
             .append_path_with_name(&path, "chain")
+            .into_diagnostic()?;
+
+        pb.set_message("creating archive");
+    }
+
+    if args.include_state {
+        let path = root.join("state");
+
+        archive
+            .append_path_with_name(&path, "state")
             .into_diagnostic()?;
 
         pb.set_message("creating archive");
