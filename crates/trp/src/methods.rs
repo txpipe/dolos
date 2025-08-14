@@ -180,6 +180,7 @@ mod tests {
             domain,
             config: Arc::new(Config {
                 max_optimize_rounds: 3,
+                extra_fees: None,
 
                 // next are dummy, not used
                 listen_address: "[::]:1234".parse().unwrap(),
