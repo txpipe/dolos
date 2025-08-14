@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.30.2] - 2025-08-14
+
+### 🚀 Features
+
+- *(trp)* Parametrize extra_fees via config value (#647)
+
+### 🐛 Bug Fixes
+
+- *(minibf)* Improve conformance tests coverage (#641)
+- Support asset quantities larger than u64 (#643)
+- Use latest Pallas with better validation
+
+### 🧪 Testing
+
+- Fix outdated test
+
 ## [0.30.1] - 2025-08-11
 
 ### 🐛 Bug Fixes
@@ -13,6 +29,10 @@ All notable changes to this project will be documented in this file.
 
 - Reinstate windows builds (#639)
 - Handle windows phase2 as a conditional compile (#640)
+
+### Release
+
+- V0.30.1
 
 ## [0.30.0] - 2025-08-04
 
