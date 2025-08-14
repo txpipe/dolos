@@ -15,6 +15,7 @@ pub enum PaginationError {
     PageLessThan1,
     PageNotAnInteger,
     OrderNotAllowed,
+    InvalidFromTo,
 }
 
 impl IntoResponse for PaginationError {
@@ -28,6 +29,9 @@ impl IntoResponse for PaginationError {
             PaginationError::PageNotAnInteger => "querystring/page must be integer",
             PaginationError::OrderNotAllowed => {
                 "querystring/order must be equal to one of the allowed values"
+            }
+            PaginationError::InvalidFromTo => {
+                "Invalid (malformed or out of range) from/to parameter(s)."
             }
         };
         let body = Json(json!({
@@ -48,11 +52,45 @@ pub enum Order {
     Desc,
 }
 
+#[derive(Debug, Clone)]
+pub struct PaginationNumberAndIndex {
+    pub number: u64,
+    pub index: Option<usize>,
+}
+
+impl TryFrom<String> for PaginationNumberAndIndex {
+    type Error = PaginationError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        let mut parts = value.split(':');
+        let Some(number) = parts.next() else {
+            return Err(PaginationError::InvalidFromTo);
+        };
+        let Ok(number) = number.parse() else {
+            return Err(PaginationError::InvalidFromTo);
+        };
+
+        let index = if let Some(index) = parts.next() {
+            Some(
+                index
+                    .parse::<usize>()
+                    .map_err(|_| PaginationError::InvalidFromTo)?,
+            )
+        } else {
+            None
+        };
+
+        Ok(Self { number, index })
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct PaginationParameters {
     pub count: Option<String>,
     pub page: Option<String>,
     pub order: Option<String>,
+    pub from: Option<String>,
+    pub to: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -60,6 +98,8 @@ pub struct Pagination {
     pub count: usize,
     pub page: u64,
     pub order: Order,
+    pub from: Option<PaginationNumberAndIndex>,
+    pub to: Option<PaginationNumberAndIndex>,
 }
 
 impl Default for Pagination {
@@ -68,6 +108,8 @@ impl Default for Pagination {
             count: 100,
             page: 1,
             order: Order::Asc,
+            from: None,
+            to: None,
         }
     }
 }
@@ -116,7 +158,23 @@ impl TryFrom<PaginationParameters> for Pagination {
             None => Default::default(),
         };
 
-        Ok(Self { count, page, order })
+        let from = match value.from {
+            Some(x) => Some(x.try_into()?),
+            None => None,
+        };
+
+        let to = match value.to {
+            Some(x) => Some(x.try_into()?),
+            None => None,
+        };
+
+        Ok(Self {
+            count,
+            page,
+            order,
+            from,
+            to,
+        })
     }
 }
 
@@ -143,5 +201,60 @@ impl Pagination {
         } else {
             None
         }
+    }
+
+    pub fn should_skip(&self, number: u64, index: usize) -> bool {
+        if let Some(from) = self.from.as_ref() {
+            if number < from.number {
+                return true;
+            }
+            if number == from.number {
+                if let Some(idx) = from.index {
+                    if index < idx {
+                        return true;
+                    }
+                }
+            }
+        };
+
+        if let Some(to) = self.to.as_ref() {
+            if number > to.number {
+                return true;
+            }
+            if number == to.number {
+                if let Some(idx) = to.index {
+                    if index > idx {
+                        return true;
+                    }
+                }
+            }
+        };
+
+        false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_should_skip() {
+        let parameters = PaginationParameters {
+            from: Some("123:1".to_string()),
+            to: Some("124:3".to_string()),
+            count: None,
+            page: None,
+            order: None,
+        };
+        let pagination = Pagination::try_from(parameters).unwrap();
+
+        assert!(pagination.should_skip(10, 0));
+        assert!(pagination.should_skip(123, 0));
+        assert!(!pagination.should_skip(123, 1));
+        assert!(!pagination.should_skip(123, 4));
+        assert!(!pagination.should_skip(124, 1));
+        assert!(!pagination.should_skip(124, 3));
+        assert!(pagination.should_skip(124, 4));
     }
 }
