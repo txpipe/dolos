@@ -10,19 +10,20 @@ use dolos_cardano::pparams;
 
 use super::masking::apply_mask;
 use crate::prelude::*;
+use pallas::ledger::traverse::wellknown::{MAINNET_MAGIC, TESTNET_MAGIC, PREVIEW_MAGIC, PRE_PRODUCTION_MAGIC};
 
-pub fn point_to_u5c(point: &ChainPoint) -> u5c::query::ChainPoint {
-    match point {
-        ChainPoint::Origin => u5c::query::ChainPoint {
-            slot: 0,
-            hash: vec![].into(),
-        },
-        ChainPoint::Specific(slot, hash) => u5c::query::ChainPoint {
-            slot: *slot,
-            hash: hash.to_vec().into(),
-        },
+/// Get the CAIP-2 blockchain identifier for the given network magic
+fn get_caip2_identifier(network_magic: u32) -> String {
+    let network_magic = network_magic as u64;
+    match network_magic {
+        MAINNET_MAGIC => format!("cardano-mainnet:{}", network_magic),
+        TESTNET_MAGIC => format!("cardano-testnet:{}", network_magic), 
+        PREVIEW_MAGIC => format!("cardano-preview:{}", network_magic),
+        PRE_PRODUCTION_MAGIC => format!("cardano-preprod:{}", network_magic),
+        _ => format!("cardano:{}", network_magic), // fallback for unknown networks
     }
 }
+
 
 pub struct QueryServiceImpl<D: Domain>
 where
@@ -40,6 +41,61 @@ where
         let mapper = interop::Mapper::new(domain.state().clone());
 
         Self { domain, mapper }
+    }
+
+    fn point_to_u5c(&self, point: &ChainPoint) -> u5c::query::ChainPoint {
+        match point {
+            ChainPoint::Origin => u5c::query::ChainPoint {
+                slot: 0,
+                hash: vec![].into(),
+                height: 0,
+                timestamp: 0,
+            },
+            ChainPoint::Specific(slot, hash) => {
+                // Calculate height by looking up block from slot
+                let height = self.domain
+                    .archive()
+                    .get_block_by_slot(slot)
+                    .map(|block| {
+                        block.map(|body| {
+                            // Parse the block to get the height
+                            use pallas::ledger::traverse::MultiEraBlock;
+                            if let Ok(parsed_block) = MultiEraBlock::decode(&body) {
+                                parsed_block.number()
+                            } else {
+                                *slot  // Fallback to slot
+                            }
+                        }).unwrap_or(*slot)
+                    })
+                    .unwrap_or(*slot);
+
+                // Calculate timestamp from slot using proper era handling
+                // Get protocol parameter updates up to this slot
+                let updates = self.domain.state()
+                    .get_pparams(*slot)
+                    .ok()
+                    .and_then(|updates| {
+                        updates.into_iter()
+                            .map(TryInto::try_into)
+                            .collect::<Result<Vec<_>, _>>()
+                            .ok()
+                    })
+                    .unwrap_or_default();
+
+                // Get chain summary with proper era handling
+                let summary = pparams::fold_with_hacks(self.domain.genesis(), &updates, *slot);
+                
+                // Calculate timestamp using the canonical function
+                let timestamp = dolos_cardano::slot_time(*slot, &summary) as u64;
+
+                u5c::query::ChainPoint {
+                    slot: *slot,
+                    hash: hash.to_vec().into(),
+                    height,
+                    timestamp,
+                }
+            }
+        }
     }
 }
 
@@ -268,7 +324,7 @@ where
                 )
                 .into(),
             }),
-            ledger_tip: tip.as_ref().map(point_to_u5c),
+            ledger_tip: tip.as_ref().map(|p| self.point_to_u5c(p)),
         };
 
         if let Some(mask) = message.field_mask {
@@ -319,7 +375,7 @@ where
             .cursor()
             .map_err(|e| Status::internal(e.to_string()))?
             .as_ref()
-            .map(point_to_u5c);
+            .map(|p| self.point_to_u5c(p));
 
         Ok(Response::new(u5c::query::ReadUtxosResponse {
             items,
@@ -366,12 +422,117 @@ where
             .cursor()
             .map_err(|e| Status::internal(e.to_string()))?
             .as_ref()
-            .map(point_to_u5c);
+            .map(|p| self.point_to_u5c(p));
 
         Ok(Response::new(u5c::query::SearchUtxosResponse {
             items,
             ledger_tip: cursor,
             next_token: String::default(),
         }))
+    }
+
+    async fn read_tx(
+        &self,
+        _request: Request<u5c::query::ReadTxRequest>,
+    ) -> Result<Response<u5c::query::ReadTxResponse>, Status> {
+        Err(Status::unimplemented("read_tx not implemented"))
+    }
+
+    async fn read_genesis(
+        &self,
+        _request: Request<u5c::query::ReadGenesisRequest>,
+    ) -> Result<Response<u5c::query::ReadGenesisResponse>, Status> {
+        info!("received read_genesis grpc query");
+
+        let genesis = self.domain.genesis();
+        let tip = self.domain.state().cursor().map_err(into_status)?;
+
+        // Get current protocol parameters if available
+        let current_params = if let Some(tip_point) = tip.as_ref() {
+            let updates = self
+                .domain
+                .state()
+                .get_pparams(tip_point.slot())
+                .map_err(into_status)?;
+
+            let updates: Vec<_> = updates
+                .into_iter()
+                .map(TryInto::try_into)
+                .try_collect::<_, _, pallas::codec::minicbor::decode::Error>()
+                .map_err(|e| Status::internal(e.to_string()))?;
+
+            let summary = pparams::fold_with_hacks(genesis, &updates, tip_point.slot());
+            let era = summary.era_for_slot(tip_point.slot());
+            Some(era.pparams.clone())
+        } else {
+            None
+        };
+
+        // Map genesis
+        let unified_genesis = self.mapper.map_genesis(
+            &genesis.byron,
+            &genesis.shelley,
+            &genesis.alonzo,
+            &genesis.conway,
+            current_params,
+        );
+
+        // Get genesis hash
+        let genesis_hash = if let Ok(Some(point)) = self.domain.state().cursor() {
+            match point {
+                ChainPoint::Origin => vec![],
+                ChainPoint::Specific(_, hash) => hash.to_vec(),
+            }
+        } else {
+            vec![]
+        };
+
+        let response = u5c::query::ReadGenesisResponse {
+            genesis: genesis_hash.into(),
+            caip2: get_caip2_identifier(unified_genesis.network_magic),
+            config: Some(u5c::query::read_genesis_response::Config::Cardano(unified_genesis)),
+        };
+
+        Ok(Response::new(response))
+    }
+
+    async fn read_era_summary(
+        &self,
+        _request: Request<u5c::query::ReadEraSummaryRequest>,
+    ) -> Result<Response<u5c::query::ReadEraSummaryResponse>, Status> {
+        info!("received read_era_summary grpc query");
+
+        let genesis = self.domain.genesis();
+        let tip = self.domain.state().cursor().map_err(into_status)?;
+
+        // Get current protocol parameters if available
+        let current_params = if let Some(tip_point) = tip.as_ref() {
+            let updates = self
+                .domain
+                .state()
+                .get_pparams(tip_point.slot())
+                .map_err(into_status)?;
+
+            let updates: Vec<_> = updates
+                .into_iter()
+                .map(TryInto::try_into)
+                .try_collect::<_, _, pallas::codec::minicbor::decode::Error>()
+                .map_err(|e| Status::internal(e.to_string()))?;
+
+            let summary = pparams::fold_with_hacks(genesis, &updates, tip_point.slot());
+            let era = summary.era_for_slot(tip_point.slot());
+            Some(era.pparams.clone())
+        } else {
+            None
+        };
+
+        // Map era summaries using pallas
+        let era_summaries = self.mapper.map_era_summaries(current_params);
+
+        let response = u5c::query::ReadEraSummaryResponse {
+            summary: Some(u5c::query::read_era_summary_response::Summary::Cardano(era_summaries)),
+        };
+
+        Ok(Response::new(response))
     }
 }
