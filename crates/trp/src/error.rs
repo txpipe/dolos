@@ -89,7 +89,7 @@ impl IntoErrorData for tx3_resolver::inputs::SearchSpace {
     fn into_error_data(self) -> Self::Output {
         tx3_sdk::trp::SearchSpaceDiagnostic {
             matched: self
-                .matched
+                .take(Some(10))
                 .iter()
                 .map(ToString::to_string)
                 .collect::<Vec<_>>(),
