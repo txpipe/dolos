@@ -272,7 +272,7 @@ impl RollVisitor for AssetStateVisitor {
                 });
 
             let mut new = current.clone();
-            new.add_quantity(asset.mint_coin().unwrap_or_default() as u128)?;
+            new.add_quantity(asset.mint_coin().unwrap_or_default().into())?;
             new.mint_tx_count += 1;
             delta.override_entity(subject, new, Some(current));
         }
