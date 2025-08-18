@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, ops::Deref};
 
 use axum::{
     extract::{Path, State},
@@ -9,9 +9,11 @@ use blockfrost_openapi::models::asset::{Asset, OnchainMetadataStandard};
 use crc::{Crc, CRC_8_SMBUS};
 use dolos_core::{ArchiveStore, Domain, EraCbor, State3Store as _};
 use pallas::ledger::{
-    primitives::{Metadatum, PolicyId},
+    primitives::{BigInt, Metadatum, PlutusData},
     traverse::MultiEraTx,
+    validate::phase2::to_plutus_data::ToPlutusData,
 };
+use serde_json::Value;
 
 use crate::{
     mapping::{asset_fingerprint, IntoModel},
@@ -21,16 +23,7 @@ use crate::{
 #[derive(Clone)]
 enum OnchainMetadata {
     CIP25v1(Metadatum),
-    CIP68v1(Metadatum),
-}
-
-impl OnchainMetadata {
-    fn as_metadatum(&self) -> &Metadatum {
-        match self {
-            OnchainMetadata::CIP25v1(m) => m,
-            OnchainMetadata::CIP68v1(m) => m,
-        }
-    }
+    CIP68v1(PlutusData),
 }
 
 impl IntoModel<OnchainMetadataStandard> for OnchainMetadata {
@@ -50,38 +43,47 @@ impl IntoModel<HashMap<String, serde_json::Value>> for OnchainMetadata {
     type SortKey = ();
 
     fn into_model(self) -> Result<HashMap<String, serde_json::Value>, StatusCode> {
-        let Metadatum::Map(map) = self.as_metadatum() else {
-            return Ok(HashMap::new());
-        };
+        match self {
+            OnchainMetadata::CIP25v1(metadatum) => {
+                let Metadatum::Map(map) = metadatum else {
+                    return Ok(HashMap::new());
+                };
 
-        let to_key = |k: &Metadatum| match k {
-            Metadatum::Int(int) => Ok(int.to_string()),
-            Metadatum::Text(text) => Ok(text.to_string()),
-            _ => Err(StatusCode::INTERNAL_SERVER_ERROR),
-        };
+                let to_key = |k: &Metadatum| match k {
+                    Metadatum::Int(int) => Ok(int.to_string()),
+                    Metadatum::Text(text) => Ok(text.to_string()),
+                    _ => Err(StatusCode::INTERNAL_SERVER_ERROR),
+                };
 
-        let to_value =
-            |v: &Metadatum| serde_json::to_value(v).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR);
+                let to_value = |v: &Metadatum| {
+                    serde_json::to_value(v).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+                };
 
-        let to_entry = |(k, v): (&Metadatum, &Metadatum)| {
-            let k = to_key(k)?;
-            let v = to_value(v)?;
-            Result::<_, StatusCode>::Ok((k, v))
-        };
+                let to_entry = |(k, v): (&Metadatum, &Metadatum)| {
+                    let k = to_key(k)?;
+                    let v = to_value(v)?;
+                    Result::<_, StatusCode>::Ok((k, v))
+                };
 
-        let out = map
-            .iter()
-            .map(|(k, v)| to_entry((k, v)))
-            .collect::<Result<_, _>>()?;
+                let out = map
+                    .iter()
+                    .map(|(k, v)| to_entry((k, v)))
+                    .collect::<Result<_, _>>()?;
 
-        Ok(out)
+                Ok(out)
+            }
+            OnchainMetadata::CIP68v1(plutus_data) => {
+                let v = plutus_metadata(&plutus_data);
+                if v.is_null() || !v.is_object() {
+                    return Ok(HashMap::new());
+                }
+
+                let out = v.as_object().unwrap().clone().into_iter().collect();
+
+                return Ok(out);
+            }
+        }
     }
-}
-
-struct AssetModelBuilder {
-    subject: Vec<u8>,
-    asset_state: dolos_cardano::model::AssetState,
-    initial_tx: Option<EraCbor>,
 }
 
 const CRC8_ALGO: Crc<u8> = Crc::<u8>::new(&CRC_8_SMBUS);
@@ -121,6 +123,12 @@ impl CIP68Label {
     }
 }
 
+struct AssetModelBuilder {
+    subject: Vec<u8>,
+    asset_state: dolos_cardano::model::AssetState,
+    initial_tx: Option<EraCbor>,
+}
+
 impl AssetModelBuilder {
     fn initial_tx_metadata(&self) -> Result<Option<OnchainMetadata>, StatusCode> {
         let Some(EraCbor(era, cbor)) = &self.initial_tx else {
@@ -131,6 +139,47 @@ impl AssetModelBuilder {
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         let tx =
             MultiEraTx::decode_for_era(era, cbor).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        // TODO: add unit hex string into the struct builder
+        // TODO: check if the initial_tx will always contains the token 100 in the output
+        if let Some(ref_asset) = cip_68_reference_asset(&hex::encode(&self.subject)) {
+            let ref_asset_output = tx
+                .outputs()
+                .iter()
+                .find(|o| {
+                    o.value()
+                        .assets()
+                        .iter()
+                        .find(|multi_asset| {
+                            multi_asset
+                                .assets()
+                                .iter()
+                                .find(|asset| {
+                                    let mut unit = multi_asset.policy().to_vec();
+                                    unit.extend(asset.name());
+                                    let unit = hex::encode(unit);
+                                    ref_asset.eq(&unit)
+                                })
+                                .is_some()
+                        })
+                        .is_some()
+                })
+                .cloned();
+
+            if let Some(ref_asset_output) = ref_asset_output {
+                if let Some(datum_option) = ref_asset_output.datum() {
+                    match datum_option {
+                        pallas::ledger::primitives::conway::DatumOption::Hash(_hash) => {
+                            // TODO: what to do?
+                        }
+                        pallas::ledger::primitives::conway::DatumOption::Data(cbor_wrap) => {
+                            let out = OnchainMetadata::CIP68v1(cbor_wrap.to_plutus_data());
+                            return Ok(Some(out));
+                        }
+                    };
+                }
+            }
+        }
 
         let metadata = tx.metadata();
         let out = metadata.find(721).cloned().map(OnchainMetadata::CIP25v1);
@@ -170,9 +219,52 @@ impl IntoModel<Asset> for AssetModelBuilder {
     }
 }
 
+fn plutus_metadata(plutus_data: &PlutusData) -> serde_json::Value {
+    match plutus_data {
+        PlutusData::Constr(x) => x
+            .fields
+            .iter()
+            .map(plutus_metadata)
+            .collect::<Vec<serde_json::Value>>()
+            .first()
+            .cloned()
+            .unwrap_or(serde_json::Value::Null),
+        PlutusData::Map(x) => {
+            let map = x
+                .iter()
+                .filter_map(|(k, v)| {
+                    plutus_metadata(k)
+                        .as_str()
+                        .map(|key| (key.to_string(), plutus_metadata(v)))
+                })
+                .collect();
+
+            Value::Object(map)
+        }
+        PlutusData::Array(x) => serde_json::Value::Array(x.iter().map(plutus_metadata).collect()),
+        PlutusData::BigInt(x) => match x {
+            BigInt::Int(int) => match i64::try_from(*int.deref()) {
+                Ok(x) => serde_json::Value::Number(x.into()),
+                Err(_) => {
+                    serde_json::Value::String(hex::encode(i128::from(*int.deref()).to_be_bytes()))
+                }
+            },
+            BigInt::BigUInt(bounded_bytes) => {
+                serde_json::Value::String(hex::encode(bounded_bytes.as_slice()))
+            }
+            BigInt::BigNInt(bounded_bytes) => {
+                serde_json::Value::String(hex::encode(bounded_bytes.as_slice()))
+            }
+        },
+        PlutusData::BoundedBytes(x) => serde_json::Value::String(
+            String::from_utf8(x.to_vec()).unwrap_or(hex::encode(x.as_slice())),
+        ),
+    }
+}
+
 fn cip_68_reference_asset(unit: &str) -> Option<String> {
-    let policy_id = &unit[..28];
-    let asset_name = &unit[28..];
+    let policy_id = &unit[..56];
+    let asset_name = &unit[56..];
 
     let label = &asset_name[0..8];
 
@@ -180,7 +272,6 @@ fn cip_68_reference_asset(unit: &str) -> Option<String> {
         return None;
     }
 
-    // TODO: check if it's required to ignore label checksum
     let Ok(number) = u32::from_str_radix(&label[1..5], 16) else {
         return None;
     };
@@ -217,17 +308,22 @@ pub async fn by_subject<D: Domain>(
         .archive()
         .get_tx(asset_state.initial_tx.as_slice())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    // dbg!(&initial_tx);
 
     // TODO: check if the ref_asset is inside the output first
     // TODO: if cip_68_reference_asset is None, validate CIP25 metadata
-    if let Some(ref_unit) = cip_68_reference_asset(&unit) {
-        let subject = hex::decode(&ref_unit).map_err(|_| StatusCode::BAD_REQUEST)?;
-        let asset_state = domain
-            .state3()
-            .read_entity_typed::<dolos_cardano::model::AssetState>(&subject);
-        dbg!(asset_state);
-        // TODO: return response when it is CIP68
-    }
+    // if let Some(ref_unit) = cip_68_reference_asset(&unit) {
+    //     let subject = hex::decode(&ref_unit).map_err(|_| StatusCode::BAD_REQUEST)?;
+    //     let asset_state = domain
+    //         .state3()
+    //         .read_entity_typed::<dolos_cardano::model::AssetState>(&subject)
+    //         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    //
+    //     if let Some(asset_state) = asset_state {
+    //         // dbg!(asset_state.initial_tx);
+    //         // TODO: return response when it is CIP68
+    //     }
+    // }
 
     // TODO: check CIP25
 
