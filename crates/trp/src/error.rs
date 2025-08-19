@@ -48,7 +48,7 @@ pub enum Error {
     MissingTxArg { key: String, ty: tx3_lang::ir::Type },
 
     #[error("input `{0}` not resolved")]
-    InputNotResolved(String, CanonicalQuery, SearchSpace),
+    InputNotResolved(String, Box<CanonicalQuery>, Box<SearchSpace>),
 
     #[error("tx script returned failure")]
     TxScriptFailure(Vec<String>),
@@ -110,7 +110,7 @@ impl From<tx3_resolver::Error> for Error {
             return Error::ResolveError(Box::new(error.into()));
         };
 
-        Error::InputNotResolved(name, q, ss)
+        Error::InputNotResolved(name, Box::new(q), Box::new(ss))
     }
 }
 
