@@ -622,11 +622,9 @@ pub enum MempoolError {
     #[error("tx validation failed during phase-1: {0}")]
     Phase1Error(#[from] pallas::ledger::validate::utils::ValidationError),
 
-    #[cfg(all(feature = "phase2", not(target_os = "windows")))]
     #[error("tx evaluation failed during phase-2: {0}")]
     Phase2Error(#[from] pallas::ledger::validate::phase2::error::Error),
 
-    #[cfg(all(feature = "phase2", not(target_os = "windows")))]
     #[error("phase-2 script yielded an error")]
     Phase2ExplicitError(Phase2Log),
 
@@ -648,7 +646,6 @@ pub trait MempoolStore: Clone + Send + Sync + 'static {
 
     fn receive_raw(&self, cbor: &[u8]) -> Result<TxHash, MempoolError>;
 
-    #[cfg(all(feature = "phase2", not(target_os = "windows")))]
     fn evaluate_raw(&self, cbor: &[u8]) -> Result<EvalReport, MempoolError>;
 
     fn apply(&self, deltas: &[LedgerDelta]);

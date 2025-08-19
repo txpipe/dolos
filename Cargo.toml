@@ -99,7 +99,6 @@ path = "tests/external/smoke.rs"
 mithril = ["mithril-client"]
 utils = ["comfy-table", "inquire", "toml"]
 debug = ["console-subscriber", "tokio/tracing"]
-phase2 = ["pallas/phase2", "dolos-core/phase2", "dolos-minibf/phase2"]
 
 # Service features
 grpc = ["tonic", "tonic-web", "tonic-reflection", "tower-http/cors"]
@@ -107,7 +106,7 @@ minibf = ["dolos-minibf", "tower-http/cors", "tower-http/trace", "tower-http/nor
 trp = ["dolos-trp"]
 
 # Default features - includes all services
-default = ["mithril", "utils", "phase2", "grpc", "minibf", "trp"]
+default = ["mithril", "utils", "grpc", "minibf", "trp"]
 
 # The profile that 'cargo dist' will build with
 [profile.dist]
@@ -128,7 +127,7 @@ readme = "README.md"
 authors = ["TxPipe <hello@txpipe.io>"]
 
 [workspace.dependencies]
-pallas = { git = "https://github.com/txpipe/pallas.git", rev = "850452a", features = ["hardano"] }
+pallas = { git = "https://github.com/txpipe/pallas.git", rev = "850452a", features = ["hardano", "phase2"] }
 # pallas = { version = "1.0.0-alpha.2", features = ["hardano"] }
 # pallas = { path = "../pallas/pallas", features = ["hardano"] }
 
