@@ -8,10 +8,13 @@ use axum::{
 use blockfrost_openapi::models::asset::{Asset, OnchainMetadataStandard};
 use crc::{Crc, CRC_8_SMBUS};
 use dolos_core::{ArchiveStore, Domain, EraCbor, State3Store as _};
-use pallas::ledger::{
-    primitives::{BigInt, Metadatum, PlutusData},
-    traverse::MultiEraTx,
-    validate::phase2::to_plutus_data::ToPlutusData,
+use pallas::{
+    codec::minicbor::{self, Encode},
+    ledger::{
+        primitives::{BigInt, Metadatum, PlutusData},
+        traverse::MultiEraTx,
+        validate::phase2::to_plutus_data::ToPlutusData,
+    },
 };
 
 use crate::{
@@ -19,64 +22,88 @@ use crate::{
     Facade,
 };
 
-#[derive(Clone)]
-enum OnchainMetadata {
-    CIP25v1(String, Metadatum),
-    CIP68v1(PlutusData),
+struct OnchainMetadata {
+    version: Option<OnchainMetadataStandard>,
+    metadata: HashMap<String, serde_json::Value>,
+    extra: Option<String>,
 }
+impl OnchainMetadata {
+    pub fn from_plutus_data(plutus_data: PlutusData) -> Result<Option<Self>, StatusCode> {
+        let value: serde_json::Value = plutus_data.into_model()?;
 
-impl IntoModel<OnchainMetadataStandard> for OnchainMetadata {
-    type SortKey = ();
+        if !value.is_array() {
+            return Ok(None);
+        }
 
-    fn into_model(self) -> Result<OnchainMetadataStandard, StatusCode> {
-        let out = match self {
-            OnchainMetadata::CIP25v1(_, _) => OnchainMetadataStandard::Cip25v1,
-            OnchainMetadata::CIP68v1(_) => OnchainMetadataStandard::Cip68v1,
+        let array = value.as_array().unwrap();
+        let Some(metadata) = array.first() else {
+            return Ok(None);
+        };
+        if metadata.is_null() || !metadata.is_object() {
+            return Ok(None);
+        }
+        let metadata = metadata.as_object().unwrap().clone().into_iter().collect();
+
+        let version = array
+            .get(1)
+            .and_then(|v| v.as_number())
+            .and_then(|n| n.as_i64())
+            .and_then(|n| match n {
+                1 => Some(OnchainMetadataStandard::Cip68v1),
+                2 => Some(OnchainMetadataStandard::Cip68v2),
+                3 => Some(OnchainMetadataStandard::Cip68v3),
+                _ => None,
+            });
+
+        let extra = if let PlutusData::Constr(constr) = plutus_data {
+            constr.fields.get(2).and_then(|d| {
+                let mut buf = Vec::new();
+                let mut encoder = minicbor::Encoder::new(&mut buf);
+                d.encode(&mut encoder, &mut ())
+                    .ok()
+                    .map(|_| hex::encode(buf))
+            })
+        } else {
+            None
         };
 
-        Ok(out)
+        Ok(Some(Self {
+            metadata,
+            version,
+            extra,
+        }))
     }
-}
 
-impl IntoModel<HashMap<String, serde_json::Value>> for OnchainMetadata {
-    type SortKey = ();
+    pub fn from_metadatum(unit: &str, metadatum: Metadatum) -> Result<Option<Self>, StatusCode> {
+        let value = AssetMetadatum(metadatum).into_model()?;
 
-    fn into_model(self) -> Result<HashMap<String, serde_json::Value>, StatusCode> {
-        match self {
-            OnchainMetadata::CIP25v1(unit, metadatum) => {
-                let value = AssetMetadatum(metadatum).into_model()?;
+        let metadata = match value {
+            serde_json::Value::Object(map) => {
+                let policy_id = &unit[..56];
+                let asset_name_raw = &unit[56..];
 
-                let out = match value {
-                    serde_json::Value::Object(map) => {
-                        let policy_id = &unit[..56];
-                        let asset_name_raw = &unit[56..];
+                let asset_name = hex::decode(asset_name_raw)
+                    .ok()
+                    .and_then(|v| String::from_utf8(v).ok())
+                    .unwrap_or_else(|| asset_name_raw.to_string());
 
-                        let asset_name = hex::decode(asset_name_raw)
-                            .ok()
-                            .and_then(|v| String::from_utf8(v).ok())
-                            .unwrap_or_else(|| asset_name_raw.to_string());
-
-                        map.get(policy_id)
-                            .and_then(|policy_metadata| policy_metadata.get(&asset_name))
-                            .and_then(|asset_metadata| asset_metadata.as_object())
-                            .map(|obj| obj.clone().into_iter().collect())
-                            .unwrap_or_default()
-                    }
-                    _ => HashMap::new(),
-                };
-
-                Ok(out)
+                map.get(policy_id)
+                    .and_then(|policy_metadata| policy_metadata.get(&asset_name))
+                    .and_then(|asset_metadata| asset_metadata.as_object())
+                    .map(|obj| obj.clone().into_iter().collect())
+                    .unwrap_or_default()
             }
-            OnchainMetadata::CIP68v1(plutus_data) => {
-                let value = plutus_data.into_model()?;
-                if value.is_null() || !value.is_object() {
-                    return Ok(HashMap::new());
-                }
-                let out = value.as_object().unwrap().clone().into_iter().collect();
+            _ => HashMap::new(),
+        };
 
-                Ok(out)
-            }
-        }
+        let version = Some(OnchainMetadataStandard::Cip25v1);
+        let extra = None;
+
+        Ok(Some(Self {
+            metadata,
+            version,
+            extra,
+        }))
     }
 }
 
@@ -113,6 +140,102 @@ impl CIP68Label {
         let bytes = hex::decode(&number_hex).unwrap();
         let checksum = format!("{:02x}", CRC8_ALGO.checksum(&bytes));
         format!("0{}{}0", number_hex, checksum)
+    }
+}
+
+struct AssetMetadatum(Metadatum);
+impl IntoModel<serde_json::Value> for AssetMetadatum {
+    type SortKey = ();
+
+    fn into_model(self) -> Result<serde_json::Value, StatusCode> {
+        Ok(match self.0 {
+            Metadatum::Int(x) => serde_json::Number::from_i128(x.into())
+                .map(serde_json::Value::Number)
+                .unwrap_or(serde_json::Value::String(x.to_string())),
+
+            Metadatum::Text(x) => serde_json::Value::String(x),
+
+            Metadatum::Bytes(x) => match String::from_utf8(x.to_vec().clone()) {
+                Ok(s) => serde_json::Value::String(s),
+                Err(_) => serde_json::Value::String(hex::encode(x.to_vec())),
+            },
+
+            Metadatum::Array(x) => {
+                let values = x
+                    .into_iter()
+                    .map(|d| AssetMetadatum(d).into_model())
+                    .collect::<Result<Vec<_>, _>>()?;
+                serde_json::Value::Array(values)
+            }
+
+            Metadatum::Map(x) => {
+                let mut map = serde_json::Map::new();
+                for (k, v) in x.iter() {
+                    if let Some(key) = AssetMetadatum(k.clone()).into_model()?.as_str() {
+                        map.insert(key.to_string(), AssetMetadatum(v.clone()).into_model()?);
+                    }
+                }
+                serde_json::Value::Object(map)
+            }
+        })
+    }
+}
+
+impl IntoModel<serde_json::Value> for &PlutusData {
+    type SortKey = ();
+
+    fn into_model(self) -> Result<serde_json::Value, StatusCode> {
+        Ok(match self {
+            PlutusData::Constr(x) => {
+                let values = x
+                    .fields
+                    .iter()
+                    .map(|d| d.clone().into_model())
+                    .collect::<Result<Vec<serde_json::Value>, _>>()?;
+
+                serde_json::Value::Array(values)
+            }
+
+            PlutusData::Map(x) => {
+                let mut map = serde_json::Map::new();
+                for (k, v) in x.iter() {
+                    if let Some(key) = k.clone().into_model()?.as_str() {
+                        map.insert(key.to_string(), v.clone().into_model()?);
+                    }
+                }
+                serde_json::Value::Object(map)
+            }
+
+            PlutusData::Array(x) => {
+                let values = x
+                    .iter()
+                    .map(|d| d.clone().into_model())
+                    .collect::<Result<Vec<serde_json::Value>, _>>()?;
+
+                serde_json::Value::Array(values)
+            }
+
+            PlutusData::BigInt(x) => match x {
+                BigInt::Int(int) => match i64::try_from(*int.deref()) {
+                    Ok(num) => serde_json::Value::Number(num.into()),
+                    Err(_) => {
+                        let hex_str = hex::encode(i128::from(*int.deref()).to_be_bytes());
+                        serde_json::Value::String(hex_str)
+                    }
+                },
+                BigInt::BigUInt(bounded_bytes) => {
+                    serde_json::Value::String(hex::encode(bounded_bytes.as_slice()))
+                }
+                BigInt::BigNInt(bounded_bytes) => {
+                    serde_json::Value::String(hex::encode(bounded_bytes.as_slice()))
+                }
+            },
+
+            PlutusData::BoundedBytes(x) => match String::from_utf8(x.to_vec()) {
+                Ok(s) => serde_json::Value::String(s),
+                Err(_) => serde_json::Value::String(hex::encode(x.as_slice())),
+            },
+        })
     }
 }
 
@@ -188,19 +311,21 @@ impl AssetModelBuilder {
                             // TODO: what to do when is it hash?
                         }
                         pallas::ledger::primitives::conway::DatumOption::Data(cbor_wrap) => {
-                            let out = OnchainMetadata::CIP68v1(cbor_wrap.to_plutus_data());
-                            return Ok(Some(out));
+                            let out =
+                                OnchainMetadata::from_plutus_data(cbor_wrap.to_plutus_data())?;
+                            return Ok(out);
                         }
                     };
                 }
             }
         }
 
-        let metadata = tx.metadata();
-        let out = metadata
+        let out = tx
+            .metadata()
             .find(721)
-            .cloned()
-            .map(|metadatum| OnchainMetadata::CIP25v1(self.unit.clone(), metadatum));
+            .map(|metadatum| OnchainMetadata::from_metadatum(&self.unit, metadatum.clone()))
+            .transpose()?
+            .flatten();
 
         Ok(out)
     }
@@ -215,9 +340,9 @@ impl IntoModel<Asset> for AssetModelBuilder {
 
         let metadata = self.initial_tx_metadata()?;
 
-        let standard = metadata.clone().map(|m| m.into_model()).transpose()?;
-
-        let metadata = metadata.map(|m| m.into_model()).transpose()?;
+        let onchain_metadata_standard = metadata.as_ref().map(|m| m.version);
+        let onchain_metadata = metadata.as_ref().map(|m| m.metadata.clone());
+        let onchain_metadata_extra = metadata.as_ref().map(|m| m.extra.clone());
 
         let out = Asset {
             asset: hex::encode(&self.subject),
@@ -227,109 +352,13 @@ impl IntoModel<Asset> for AssetModelBuilder {
             quantity: self.asset_state.quantity().to_string(),
             initial_mint_tx_hash: self.asset_state.initial_tx.to_string(),
             mint_or_burn_count: self.asset_state.mint_tx_count as i32,
-            onchain_metadata: metadata,
-            onchain_metadata_standard: Some(standard),
-            onchain_metadata_extra: None,
+            onchain_metadata,
+            onchain_metadata_standard,
+            onchain_metadata_extra,
             metadata: None,
         };
 
         Ok(out)
-    }
-}
-
-struct AssetMetadatum(Metadatum);
-impl IntoModel<serde_json::Value> for AssetMetadatum {
-    type SortKey = ();
-
-    fn into_model(self) -> Result<serde_json::Value, StatusCode> {
-        Ok(match self.0 {
-            Metadatum::Int(x) => serde_json::Number::from_i128(x.into())
-                .map(serde_json::Value::Number)
-                .unwrap_or(serde_json::Value::String(x.to_string())),
-
-            Metadatum::Text(x) => serde_json::Value::String(x),
-
-            Metadatum::Bytes(x) => match String::from_utf8(x.to_vec().clone()) {
-                Ok(s) => serde_json::Value::String(s),
-                Err(_) => serde_json::Value::String(hex::encode(x.to_vec())),
-            },
-
-            Metadatum::Array(x) => {
-                let values = x
-                    .into_iter()
-                    .map(|d| AssetMetadatum(d).into_model())
-                    .collect::<Result<Vec<_>, _>>()?;
-                serde_json::Value::Array(values)
-            }
-
-            Metadatum::Map(x) => {
-                let mut map = serde_json::Map::new();
-                for (k, v) in x.iter() {
-                    if let Some(key) = AssetMetadatum(k.clone()).into_model()?.as_str() {
-                        map.insert(key.to_string(), AssetMetadatum(v.clone()).into_model()?);
-                    }
-                }
-                serde_json::Value::Object(map)
-            }
-        })
-    }
-}
-
-impl IntoModel<serde_json::Value> for PlutusData {
-    type SortKey = ();
-
-    fn into_model(self) -> Result<serde_json::Value, StatusCode> {
-        Ok(match self {
-            PlutusData::Constr(x) => {
-                let values = x
-                    .fields
-                    .iter()
-                    .map(|d| d.clone().into_model())
-                    .collect::<Result<Vec<serde_json::Value>, _>>()?;
-
-                values.into_iter().next().unwrap_or(serde_json::Value::Null)
-            }
-
-            PlutusData::Map(x) => {
-                let mut map = serde_json::Map::new();
-                for (k, v) in x.iter() {
-                    if let Some(key) = k.clone().into_model()?.as_str() {
-                        map.insert(key.to_string(), v.clone().into_model()?);
-                    }
-                }
-                serde_json::Value::Object(map)
-            }
-
-            PlutusData::Array(x) => {
-                let values = x
-                    .iter()
-                    .map(|d| d.clone().into_model())
-                    .collect::<Result<Vec<serde_json::Value>, _>>()?;
-
-                serde_json::Value::Array(values)
-            }
-
-            PlutusData::BigInt(x) => match x {
-                BigInt::Int(int) => match i64::try_from(*int.deref()) {
-                    Ok(num) => serde_json::Value::Number(num.into()),
-                    Err(_) => {
-                        let hex_str = hex::encode(i128::from(*int.deref()).to_be_bytes());
-                        serde_json::Value::String(hex_str)
-                    }
-                },
-                BigInt::BigUInt(bounded_bytes) => {
-                    serde_json::Value::String(hex::encode(bounded_bytes.as_slice()))
-                }
-                BigInt::BigNInt(bounded_bytes) => {
-                    serde_json::Value::String(hex::encode(bounded_bytes.as_slice()))
-                }
-            },
-
-            PlutusData::BoundedBytes(x) => match String::from_utf8(x.to_vec()) {
-                Ok(s) => serde_json::Value::String(s),
-                Err(_) => serde_json::Value::String(hex::encode(x.as_slice())),
-            },
-        })
     }
 }
 
