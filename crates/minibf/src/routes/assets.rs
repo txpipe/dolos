@@ -368,6 +368,9 @@ pub async fn by_subject<D: Domain>(
 ) -> Result<Json<Asset>, StatusCode> {
     let subject = hex::decode(&unit).map_err(|_| StatusCode::BAD_REQUEST)?;
 
+    // TODO: check if initial_tx will always be the mint tx, if not, validate cip68 before to get
+    // initial_tx for token ref that returns from cip68 fn
+    
     let asset_state = domain
         .state3()
         .read_entity_typed::<dolos_cardano::model::AssetState>(&subject)
