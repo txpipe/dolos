@@ -229,7 +229,9 @@ mod tests {
 
         let genesis_block = dolos_testing::blocks::make_conway_block(0);
 
-        domain.apply_blocks(&[genesis_block.clone()]).unwrap();
+        domain
+            .apply_blocks(std::slice::from_ref(&genesis_block))
+            .unwrap();
 
         let genesis_point = ChainPoint::Specific(genesis_block.slot, genesis_block.hash);
 
@@ -255,7 +257,7 @@ mod tests {
         let (iter, intersected) = ChainIterator::<ToyDomain>::new(
             domain.wal().clone(),
             domain.archive().clone(),
-            &[genesis_point.clone()],
+            std::slice::from_ref(&genesis_point),
         )
         .unwrap();
 

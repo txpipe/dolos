@@ -100,7 +100,7 @@ fn test_apply_forward_block() {
 
     let bobs = get_test_address_utxos(&store, TestAddress::Bob);
     let delta = make_move_utxo_delta(bobs, 1, 1, TestAddress::Carol);
-    store.apply(&[delta.clone()]).unwrap();
+    store.apply(std::slice::from_ref(&delta)).unwrap();
 
     assert_eq!(
         store.cursor().unwrap(),
@@ -125,10 +125,10 @@ fn test_apply_undo_block() {
 
     let bobs = get_test_address_utxos(&store, TestAddress::Bob);
     let forward = make_move_utxo_delta(bobs, 1, 1, TestAddress::Carol);
-    store.apply(&[forward.clone()]).unwrap();
+    store.apply(std::slice::from_ref(&forward)).unwrap();
 
     let undo = revert_delta(forward);
-    store.apply(&[undo]).unwrap();
+    store.apply(std::slice::from_ref(&undo)).unwrap();
 
     // TODO: the store is not persisting the origin cursor, instead it's keeping it
     // empty. We should fix this in the next breaking change version.
@@ -152,16 +152,16 @@ fn test_apply_in_batch() {
     let store = LedgerStore::in_memory_v2().unwrap();
 
     let genesis = fake_genesis_delta(1_000_000_000);
-    store.apply(&[genesis.clone()]).unwrap();
+    store.apply(std::slice::from_ref(&genesis)).unwrap();
     batch.push(genesis);
 
     let bobs = get_test_address_utxos(&store, TestAddress::Bob);
     let forward = make_move_utxo_delta(bobs, 1, 1, TestAddress::Carol);
-    store.apply(&[forward.clone()]).unwrap();
+    store.apply(std::slice::from_ref(&forward)).unwrap();
     batch.push(forward.clone());
 
     let undo = revert_delta(forward);
-    store.apply(&[undo.clone()]).unwrap();
+    store.apply(std::slice::from_ref(&undo)).unwrap();
     batch.push(undo);
 
     // now we apply the batch in one go.
@@ -252,7 +252,7 @@ fn test_count_utxos_by_address() {
 
     let delta = make_custom_utxo_delta(0, TestAddress::everyone(), 10..11, utxo_generator);
 
-    store.apply(&[delta.clone()]).unwrap();
+    store.apply(std::slice::from_ref(&delta)).unwrap();
 
     for address in TestAddress::everyone().iter() {
         let expected = delta
@@ -278,7 +278,7 @@ fn test_iter_within_key() {
 
     let delta = make_custom_utxo_delta(0, TestAddress::everyone(), 10..11, utxo_generator);
 
-    store.apply(&[delta.clone()]).unwrap();
+    store.apply(std::slice::from_ref(&delta)).unwrap();
 
     for address in TestAddress::everyone().iter() {
         let mut expected: HashSet<TxoRef> = delta
