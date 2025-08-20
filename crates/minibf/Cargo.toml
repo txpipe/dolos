@@ -23,6 +23,3 @@ bech32 = "0.11.0"
 blockfrost-openapi = "0.1.75"
 chrono.workspace = true
 crc = "3.3.0"
-
-[features]
-phase2 = ["pallas/phase2"]

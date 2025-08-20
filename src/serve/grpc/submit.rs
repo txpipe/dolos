@@ -63,7 +63,6 @@ fn event_to_wait_for_tx_response(event: MempoolEvent) -> WaitForTxResponse {
     }
 }
 
-#[cfg(all(feature = "phase2", not(target_os = "windows")))]
 fn tx_eval_to_u5c(
     eval: Result<pallas::ledger::validate::phase2::EvalReport, MempoolError>,
 ) -> u5c::spec::cardano::TxEval {
@@ -191,7 +190,6 @@ where
         Ok(Response::new(stream))
     }
 
-    #[cfg(all(feature = "phase2", not(target_os = "windows")))]
     async fn eval_tx(
         &self,
         request: tonic::Request<EvalTxRequest>,
@@ -224,15 +222,5 @@ where
         Ok(Response::new(EvalTxResponse {
             report: eval_results,
         }))
-    }
-
-    #[cfg(not(feature = "phase2"))]
-    async fn eval_tx(
-        &self,
-        _request: tonic::Request<EvalTxRequest>,
-    ) -> Result<tonic::Response<EvalTxResponse>, Status> {
-        Err(Status::unimplemented(
-            "phase2 is not enabled on this Dolos binary",
-        ))
     }
 }

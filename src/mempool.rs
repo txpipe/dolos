@@ -129,7 +129,6 @@ impl Mempool {
         Ok(())
     }
 
-    #[cfg(all(feature = "phase2", not(target_os = "windows")))]
     pub fn evaluate(
         &self,
         tx: &MultiEraTx,
@@ -268,15 +267,9 @@ impl MempoolStore for Mempool {
         }
     }
 
-    #[cfg(all(feature = "phase2", not(target_os = "windows")))]
     fn evaluate_raw(&self, cbor: &[u8]) -> Result<EvalReport, MempoolError> {
         let tx = MultiEraTx::decode(cbor)?;
         self.evaluate(&tx)
-    }
-
-    #[cfg(not(all(feature = "phase2", not(target_os = "windows"))))]
-    fn evaluate_raw(&self, _cbor: &[u8]) -> Result<EvalReport, MempoolError> {
-        unimplemented!()
     }
 
     fn receive_raw(&self, cbor: &[u8]) -> Result<TxHash, MempoolError> {
@@ -284,22 +277,12 @@ impl MempoolStore for Mempool {
 
         self.validate(&tx)?;
 
-        #[cfg(all(feature = "phase2", not(target_os = "windows")))]
-        {
-            let report = self.evaluate(&tx)?;
+        let report = self.evaluate(&tx)?;
 
-            for eval in report {
-                if !eval.success {
-                    return Err(MempoolError::Phase2ExplicitError(eval.logs.clone()));
-                }
+        for eval in report {
+            if !eval.success {
+                return Err(MempoolError::Phase2ExplicitError(eval.logs.clone()));
             }
-        }
-
-        // if we don't have phase-2 enabled, we reject txs before propagating something
-        // that could result in collateral loss
-        #[cfg(not(feature = "phase2"))]
-        if !tx.redeemers().is_empty() {
-            return Err(MempoolError::PlutusNotSupported);
         }
 
         let hash = tx.hash();
