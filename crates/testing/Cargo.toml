@@ -21,7 +21,6 @@ futures-util = { workspace = true, optional = true }
 [features]
 default = []
 toy-domain = [
-    "dolos-core/phase2",
     "dolos-redb",
     "dolos-redb3",
     "dolos-cardano/include-genesis",
