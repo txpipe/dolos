@@ -251,9 +251,8 @@ impl AssetModelBuilder {
         let policy_id = &self.unit[..56];
         let asset_name = &self.unit[56..];
 
-        let label = &asset_name[0..8];
-
-        if label.len() != 8 || !(label.starts_with('0') && label.ends_with('0')) {
+        let label = asset_name.get(0..8)?;
+        if !(label.starts_with('0') && label.ends_with('0')) {
             return None;
         }
 
