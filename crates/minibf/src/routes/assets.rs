@@ -269,24 +269,18 @@ impl AssetModelBuilder {
             return None;
         }
 
-        let Ok(number) = u32::from_str_radix(&label[1..5], 16) else {
-            return None;
-        };
-
+        let number = u32::from_str_radix(&label[1..5], 16).ok()?;
         let asset_name_without_label_prefix = &asset_name[8..];
 
-        match CIP68Label::from_u32(number) {
-            Some(label) => match label {
-                CIP68Label::ReferenceNft => None,
-                _ => Some(format!(
-                    "{}{}{}",
-                    policy_id,
-                    CIP68Label::ReferenceNft.to_label(),
-                    asset_name_without_label_prefix
-                )),
-            },
-            None => None,
-        }
+        CIP68Label::from_u32(number).and_then(|label| match label {
+            CIP68Label::ReferenceNft => None,
+            _ => Some(format!(
+                "{}{}{}",
+                policy_id,
+                CIP68Label::ReferenceNft.to_label(),
+                asset_name_without_label_prefix
+            )),
+        })
     }
 
     fn initial_tx_metadata(&self) -> Result<Option<OnchainMetadata>, StatusCode> {
@@ -299,7 +293,6 @@ impl AssetModelBuilder {
         let tx =
             MultiEraTx::decode_for_era(era, cbor).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-        // TODO: check if the initial_tx will always contains the token ref 100 in the output
         if let Some(ref_asset) = self.cip_68_reference_asset() {
             let ref_asset_output = tx
                 .outputs()
