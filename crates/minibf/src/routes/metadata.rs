@@ -9,9 +9,10 @@ use blockfrost_openapi::models::{
 };
 use dolos_core::{ArchiveStore as _, Domain};
 use pallas::{
+    codec::minicbor,
     crypto::hash::Hash,
     ledger::{
-        primitives::{Fragment, Metadatum},
+        primitives::{alonzo, Metadatum},
         traverse::MultiEraBlock,
     },
 };
@@ -104,16 +105,13 @@ impl IntoModel<Vec<TxMetadataLabelCborInner>> for MetadataHistoryModelBuilder {
             .into_iter()
             .take(self.page_size)
             .map(|(hash, datum)| {
-                let cbor = datum
-                    .encode_fragment()
-                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-                let cbor = hex::encode(cbor);
-
+                let meta: alonzo::Metadata =
+                    vec![(self.label, datum.clone())].into_iter().collect();
+                let encoded = hex::encode(minicbor::to_vec(meta).unwrap());
                 Result::<_, StatusCode>::Ok(TxMetadataLabelCborInner {
                     tx_hash: hash.to_string(),
-                    metadata: Some(cbor.clone()),
-                    cbor_metadata: Some(cbor),
+                    metadata: Some(encoded.clone()),
+                    cbor_metadata: Some(format!("\\x{encoded}")),
                 })
             })
             .collect::<Result<_, _>>()?;

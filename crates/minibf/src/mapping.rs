@@ -768,7 +768,7 @@ impl IntoModel<String> for alonzo::Metadatum {
     fn into_model(self) -> Result<String, StatusCode> {
         let out = match self {
             alonzo::Metadatum::Int(x) => x.to_string(),
-            alonzo::Metadatum::Bytes(x) => hex::encode(x.as_slice()),
+            alonzo::Metadatum::Bytes(x) => format!("0x{}", hex::encode(x.as_slice())),
             alonzo::Metadatum::Text(x) => x.to_string(),
             alonzo::Metadatum::Array(_) => "array".to_string(),
             alonzo::Metadatum::Map(_) => "map".to_string(),
@@ -786,7 +786,7 @@ impl IntoModel<serde_json::Value> for alonzo::Metadatum {
             alonzo::Metadatum::Int(x) => serde_json::Value::String(x.to_string()),
             alonzo::Metadatum::Text(x) => serde_json::Value::String(x.to_string()),
             alonzo::Metadatum::Bytes(x) => {
-                let hex_str = hex::encode(x.as_slice());
+                let hex_str = format!("0x{}", hex::encode(x.as_slice()));
 
                 serde_json::Value::String(hex_str)
             }
@@ -816,9 +816,10 @@ impl IntoModel<TxContentMetadataInnerJsonMetadata> for alonzo::Metadatum {
     fn into_model(self) -> Result<TxContentMetadataInnerJsonMetadata, StatusCode> {
         let out = match self {
             alonzo::Metadatum::Int(x) => TxContentMetadataInnerJsonMetadata::String(x.to_string()),
-            alonzo::Metadatum::Bytes(x) => {
-                TxContentMetadataInnerJsonMetadata::String(hex::encode(x.as_slice()))
-            }
+            alonzo::Metadatum::Bytes(x) => TxContentMetadataInnerJsonMetadata::String(format!(
+                "0x{}",
+                hex::encode(x.as_slice())
+            )),
             alonzo::Metadatum::Text(x) => TxContentMetadataInnerJsonMetadata::String(x.to_string()),
             alonzo::Metadatum::Array(x) => {
                 let items: Vec<_> = x.into_iter().map(|x| x.into_model()).try_collect()?;
@@ -879,10 +880,12 @@ impl IntoModel<Vec<TxContentMetadataCborInner>> for TxModelBuilder<'_> {
         let items = entries
             .into_iter()
             .map(|(label, metadatum)| {
+                let meta: alonzo::Metadata = vec![(label, metadatum.clone())].into_iter().collect();
+                let encoded = hex::encode(minicbor::to_vec(meta).unwrap());
                 Ok(TxContentMetadataCborInner {
                     label: label.to_string(),
-                    metadata: Some(hex::encode(minicbor::to_vec(metadatum).unwrap())),
-                    ..Default::default()
+                    metadata: Some(encoded.clone()),
+                    cbor_metadata: Some(format!("\\x{encoded}")),
                 })
             })
             .try_collect()
