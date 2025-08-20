@@ -838,7 +838,7 @@ pub trait Domain: Send + Sync + Clone + 'static {
         Ok(())
     }
 
-    const MAX_PRUNE_SLOTS_PER_HOUSEKEEPING: u64 = 1_000_000;
+    const MAX_PRUNE_SLOTS_PER_HOUSEKEEPING: u64 = 10_000;
 
     fn housekeeping(&self) -> Result<bool, DomainError> {
         let max_ledger_slots = self
