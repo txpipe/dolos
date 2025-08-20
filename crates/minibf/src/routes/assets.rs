@@ -304,11 +304,18 @@ impl AssetModelBuilder {
                 })
                 .cloned();
 
+            // asset_onchain_metadata_cip25
+            // asset_onchain_metadata_cip68_ft_333
+
             if let Some(ref_asset_output) = ref_asset_output {
                 if let Some(datum_option) = ref_asset_output.datum() {
                     match datum_option {
-                        pallas::ledger::primitives::conway::DatumOption::Hash(_hash) => {
-                            // TODO: what to do when is it hash?
+                        pallas::ledger::primitives::conway::DatumOption::Hash(hash) => {
+                            if let Some(cbor_wrap) = tx.find_plutus_data(&hash) {
+                                let out =
+                                    OnchainMetadata::from_plutus_data(cbor_wrap.to_plutus_data())?;
+                                return Ok(out);
+                            }
                         }
                         pallas::ledger::primitives::conway::DatumOption::Data(cbor_wrap) => {
                             let out =
@@ -370,7 +377,7 @@ pub async fn by_subject<D: Domain>(
 
     // TODO: check if initial_tx will always be the mint tx, if not, validate cip68 before to get
     // initial_tx for token ref that returns from cip68 fn
-    
+
     let asset_state = domain
         .state3()
         .read_entity_typed::<dolos_cardano::model::AssetState>(&subject)
