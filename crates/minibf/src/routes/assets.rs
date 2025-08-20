@@ -346,14 +346,17 @@ impl IntoModel<Asset> for AssetModelBuilder {
 
         let metadata = self.initial_tx_metadata()?;
 
-        let onchain_metadata_standard = metadata.as_ref().map(|m| m.version);
+        let onchain_metadata_standard = Some(metadata.as_ref().and_then(|m| m.version));
         let onchain_metadata = metadata.as_ref().map(|m| m.metadata.clone());
-        let onchain_metadata_extra = metadata.as_ref().map(|m| m.extra.clone());
+        let onchain_metadata_extra = Some(metadata.as_ref().and_then(|m| m.extra.clone()));
+
+        let asset_name = hex::encode(asset);
+        let asset_name = (!asset_name.is_empty()).then_some(asset_name);
 
         let out = Asset {
             asset: hex::encode(&self.subject),
             policy_id: hex::encode(policy),
-            asset_name: Some(hex::encode(asset)),
+            asset_name,
             fingerprint: asset_fingerprint(&self.subject)?,
             quantity: self.asset_state.quantity().to_string(),
             initial_mint_tx_hash: self.asset_state.initial_tx.to_string(),
@@ -373,9 +376,6 @@ pub async fn by_subject<D: Domain>(
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Asset>, StatusCode> {
     let subject = hex::decode(&unit).map_err(|_| StatusCode::BAD_REQUEST)?;
-
-    // TODO: check if initial_tx will always be the mint tx, if not, validate cip68 before to get
-    // initial_tx for token ref that returns from cip68 fn
 
     let asset_state = domain
         .state3()
