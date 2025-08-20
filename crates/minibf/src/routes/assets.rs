@@ -28,7 +28,7 @@ struct OnchainMetadata {
     extra: Option<String>,
 }
 impl OnchainMetadata {
-    pub fn from_plutus_data(plutus_data: PlutusData) -> Result<Option<Self>, StatusCode> {
+    fn from_plutus_data(plutus_data: PlutusData) -> Result<Option<Self>, StatusCode> {
         let value: serde_json::Value = plutus_data.into_model()?;
 
         if !value.is_array() {
@@ -68,7 +68,7 @@ impl OnchainMetadata {
         }))
     }
 
-    pub fn from_metadatum(unit: &str, metadatum: Metadatum) -> Result<Option<Self>, StatusCode> {
+    fn from_metadatum(unit: &str, metadatum: Metadatum) -> Result<Option<Self>, StatusCode> {
         let value = AssetMetadatum(metadatum).into_model()?;
 
         let (metadata, version) = match value {
@@ -114,7 +114,7 @@ impl OnchainMetadata {
     }
 }
 
-pub const CIP68_FIELDS: &[&str] = &[
+const CIP68_FIELDS: &[&str] = &[
     "name",
     "description",
     "image",
@@ -126,7 +126,6 @@ pub const CIP68_FIELDS: &[&str] = &[
     "decimals",
     "src",
 ];
-
 const CRC8_ALGO: Crc<u8> = Crc::<u8>::new(&CRC_8_SMBUS);
 #[derive(Debug, Clone)]
 enum CIP68Label {
@@ -136,7 +135,7 @@ enum CIP68Label {
     Rft,
 }
 impl CIP68Label {
-    pub fn from_u32(value: u32) -> Option<Self> {
+    fn from_u32(value: u32) -> Option<Self> {
         match value {
             100 => Some(Self::ReferenceNft),
             222 => Some(Self::Nft),
@@ -146,7 +145,7 @@ impl CIP68Label {
         }
     }
 
-    pub fn to_u32(&self) -> u32 {
+    fn to_u32(&self) -> u32 {
         match self {
             CIP68Label::ReferenceNft => 100,
             CIP68Label::Nft => 222,
@@ -155,7 +154,7 @@ impl CIP68Label {
         }
     }
 
-    pub fn to_label(&self) -> String {
+    fn to_label(&self) -> String {
         let number_hex = format!("{:04x}", self.to_u32());
         let bytes = hex::decode(&number_hex).unwrap();
         let checksum = format!("{:02x}", CRC8_ALGO.checksum(&bytes));
