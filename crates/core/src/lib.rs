@@ -719,11 +719,12 @@ pub trait ChainLogic {
         Ok(out)
     }
 
-    fn compute_apply_delta3<'a>(
+    fn roll_apply_delta3<'a>(
         &self,
+        delta: &mut StateDelta,
         state: &impl State3Store,
         block: &Self::Block<'a>,
-    ) -> Result<StateDelta, ChainError>;
+    ) -> Result<(), ChainError>;
 }
 
 #[derive(Debug, Error)]
@@ -789,16 +790,16 @@ pub trait Domain: Send + Sync + Clone + 'static {
         Ok(deltas)
     }
 
-    fn compute_apply_deltas3(&self, blocks: &[RawBlock]) -> Result<Vec<StateDelta>, DomainError> {
-        let mut deltas = Vec::with_capacity(blocks.len());
+    fn compute_apply_delta3(&self, blocks: &[RawBlock]) -> Result<StateDelta, DomainError> {
+        let mut delta = StateDelta::new();
 
         for block in blocks {
             let block = Self::Chain::decode_block(&block.body)?;
-            let delta = self.chain().compute_apply_delta3(self.state3(), &block)?;
-            deltas.push(delta);
+            self.chain()
+                .roll_apply_delta3(&mut delta, self.state3(), &block)?;
         }
 
-        Ok(deltas)
+        Ok(delta)
     }
 
     fn apply_blocks(&self, blocks: &[RawBlock]) -> Result<(), DomainError> {
@@ -808,9 +809,8 @@ pub trait Domain: Send + Sync + Clone + 'static {
         self.archive().apply(&deltas)?;
         self.mempool().apply(&deltas);
 
-        for delta in self.compute_apply_deltas3(blocks)? {
-            self.state3().apply_delta(delta)?;
-        }
+        self.state3()
+            .apply_delta(self.compute_apply_delta3(blocks)?)?;
 
         Ok(())
     }

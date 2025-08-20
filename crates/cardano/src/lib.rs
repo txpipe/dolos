@@ -358,16 +358,15 @@ impl dolos_core::ChainLogic for ChainLogic {
         ledger_query_for_block(block, unapplied_deltas)
     }
 
-    fn compute_apply_delta3<'a>(
+    fn roll_apply_delta3<'a>(
         &self,
+        delta: &mut StateDelta,
         state: &impl State3Store,
         block: &Self::Block<'a>,
-    ) -> Result<StateDelta, ChainError> {
-        let mut delta = StateDelta::new(block.slot());
+    ) -> Result<(), ChainError> {
+        roll::crawl_block(delta, state, block, self.visitor.as_ref())?;
 
-        roll::crawl_block(&mut delta, state, block, self.visitor.as_ref())?;
-
-        Ok(delta)
+        Ok(())
     }
 }
 

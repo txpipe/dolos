@@ -199,6 +199,8 @@ pub fn crawl_block<'a, T: RollVisitor>(
         }
     }
 
+    delta.set_slot(block.slot());
+
     Ok(())
 }
 
@@ -227,7 +229,10 @@ impl RollVisitor for SeenAddressesVisitor {
         };
 
         let stake_bytes = stake.clone().to_vec();
-        let current = state.read_entity_typed::<AccountState>(&stake_bytes)?;
+        let current = match delta.get_from_overriden::<AccountState>(stake_bytes.clone()) {
+            Some(state) => Some(state),
+            None => state.read_entity_typed::<AccountState>(&stake_bytes)?,
+        };
 
         if let Some(current) = current {
             let mut new = current.clone();
@@ -263,13 +268,15 @@ impl RollVisitor for AssetStateVisitor {
 
             debug!(subject = %hex::encode(&subject), "tracking asset");
 
-            let current = state
-                .read_entity_typed::<AssetState>(&subject)?
-                .unwrap_or(AssetState {
-                    quantity_bytes: 0_u128.to_be_bytes(),
-                    initial_tx: tx.hash(),
-                    mint_tx_count: 0,
-                });
+            let current = delta.get_from_overriden(subject.clone()).unwrap_or(
+                state
+                    .read_entity_typed::<AssetState>(&subject)?
+                    .unwrap_or(AssetState {
+                        quantity_bytes: 0_u128.to_be_bytes(),
+                        initial_tx: tx.hash(),
+                        mint_tx_count: 0,
+                    }),
+            );
 
             let mut new = current.clone();
             new.add_quantity(asset.mint_coin().unwrap_or_default() as u128)?;
@@ -293,7 +300,10 @@ impl RollVisitor for PoolStateVisitor {
         cert: &MultiEraCert,
     ) -> Result<(), State3Error> {
         if let Some((operator, new)) = cert_to_pool_state(cert) {
-            let current = state.read_entity_typed::<PoolState>(operator)?;
+            let current = match delta.get_from_overriden(operator.to_vec()) {
+                Some(current) => Some(current),
+                None => state.read_entity_typed::<PoolState>(operator)?,
+            };
             delta.override_entity(operator.to_vec(), new, current);
         }
 
@@ -330,9 +340,13 @@ impl RollVisitor for EpochStateVisitor {
         delta: &mut StateDelta,
         block: &MultiEraBlock,
     ) -> Result<(), State3Error> {
-        let current = state
-            .read_entity_typed::<EpochState>(crate::model::CURRENT_EPOCH_KEY)?
-            .unwrap_or_default();
+        let current = delta
+            .get_from_overriden(crate::model::CURRENT_EPOCH_KEY)
+            .unwrap_or(
+                state
+                    .read_entity_typed::<EpochState>(crate::model::CURRENT_EPOCH_KEY)?
+                    .unwrap_or_default(),
+            );
 
         let block_fees = block.txs().iter().filter_map(|tx| tx.fee()).sum::<u64>();
 

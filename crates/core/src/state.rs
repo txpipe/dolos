@@ -52,20 +52,24 @@ impl EntityDelta {
 }
 
 pub struct StateDelta {
-    slot: BlockSlot,
     entries: HashMap<Namespace, Vec<EntityDelta>>,
+    overriden: HashMap<Namespace, HashMap<EntityKey, EntityValue>>,
+    slot: Option<BlockSlot>,
+}
+
+impl Default for StateDelta {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl StateDelta {
-    pub fn new(slot: BlockSlot) -> Self {
+    pub fn new() -> Self {
         Self {
-            slot,
+            slot: None,
             entries: HashMap::new(),
+            overriden: HashMap::new(),
         }
-    }
-
-    pub fn slot(&self) -> BlockSlot {
-        self.slot
     }
 
     pub fn iter_deltas(self) -> impl Iterator<Item = (Namespace, Vec<EntityDelta>)> {
@@ -79,10 +83,13 @@ impl StateDelta {
         value: impl Into<EntityValue>,
         prev: Option<EntityPrevValue>,
     ) {
+        let key = key.into();
+        let value = value.into();
         self.entries
             .entry(ns)
             .or_default()
-            .push(EntityDelta::OverrideKey(key.into(), value.into(), prev));
+            .push(EntityDelta::OverrideKey(key.clone(), value.clone(), prev));
+        self.overriden.entry(ns).or_default().insert(key, value);
     }
 
     pub fn delete_key(
@@ -133,8 +140,24 @@ impl StateDelta {
         self.override_key(T::NS, key, entity, prev);
     }
 
+    pub fn get_from_overriden<T: Entity>(&mut self, key: impl Into<EntityKey>) -> Option<T> {
+        self.overriden
+            .entry(T::NS)
+            .or_default()
+            .get(&key.into())
+            .map(|value| T::decode_value(value.clone()).unwrap())
+    }
+
     pub fn append_entity<T: Entity>(&mut self, key: impl Into<EntityKey>, entity: T) {
         self.append_value(T::NS, key, entity.encode_value());
+    }
+
+    pub fn set_slot(&mut self, slot: BlockSlot) {
+        self.slot = Some(slot)
+    }
+
+    pub fn slot(&self) -> BlockSlot {
+        self.slot.unwrap()
     }
 }
 
@@ -154,6 +177,9 @@ pub enum StateError {
 
     #[error(transparent)]
     DecodingError(#[from] pallas::codec::minicbor::decode::Error),
+
+    #[error("invalid delta: {0}")]
+    InvalidDelta(String),
 }
 
 // temporary alias to avoid collision with existing StateError
