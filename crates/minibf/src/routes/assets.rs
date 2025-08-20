@@ -9,7 +9,7 @@ use blockfrost_openapi::models::asset::{Asset, OnchainMetadataStandard};
 use crc::{Crc, CRC_8_SMBUS};
 use dolos_core::{ArchiveStore, Domain, EraCbor, State3Store as _};
 use pallas::{
-    codec::minicbor::{self, Encode},
+    codec::minicbor,
     ledger::{
         primitives::{BigInt, Metadatum, PlutusData},
         traverse::MultiEraTx,
@@ -56,13 +56,7 @@ impl OnchainMetadata {
             });
 
         let extra = if let PlutusData::Constr(constr) = plutus_data {
-            constr.fields.get(2).and_then(|d| {
-                let mut buf = Vec::new();
-                let mut encoder = minicbor::Encoder::new(&mut buf);
-                d.encode(&mut encoder, &mut ())
-                    .ok()
-                    .map(|_| hex::encode(buf))
-            })
+            constr.fields.get(2).map(encode_to_hex).transpose()?
         } else {
             None
         };
@@ -119,6 +113,19 @@ impl OnchainMetadata {
         }))
     }
 }
+
+pub const CIP68_FIELDS: &[&str] = &[
+    "name",
+    "description",
+    "image",
+    "mediaType",
+    "files",
+    "ticker",
+    "url",
+    "logo",
+    "decimals",
+    "src",
+];
 
 const CRC8_ALGO: Crc<u8> = Crc::<u8>::new(&CRC_8_SMBUS);
 #[derive(Debug, Clone)]
@@ -194,6 +201,12 @@ impl IntoModel<serde_json::Value> for AssetMetadatum {
     }
 }
 
+fn encode_to_hex<T: minicbor::Encode<()>>(value: &T) -> Result<String, StatusCode> {
+    let mut buf = Vec::new();
+    minicbor::encode(value, &mut buf).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(hex::encode(buf))
+}
+
 impl IntoModel<serde_json::Value> for &PlutusData {
     type SortKey = ();
 
@@ -212,8 +225,14 @@ impl IntoModel<serde_json::Value> for &PlutusData {
             PlutusData::Map(x) => {
                 let mut map = serde_json::Map::new();
                 for (k, v) in x.iter() {
-                    if let Some(key) = k.clone().into_model()?.as_str() {
-                        map.insert(key.to_string(), v.clone().into_model()?);
+                    let key_opt = k.into_model()?.as_str().map(|s| s.to_owned());
+
+                    if let Some(key) = key_opt {
+                        if CIP68_FIELDS.contains(&key.as_str()) {
+                            map.insert(key, v.into_model()?);
+                        } else {
+                            map.insert(key, serde_json::Value::String(encode_to_hex(v)?));
+                        }
                     }
                 }
                 serde_json::Value::Object(map)
