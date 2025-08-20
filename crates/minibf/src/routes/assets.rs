@@ -77,7 +77,7 @@ impl OnchainMetadata {
     pub fn from_metadatum(unit: &str, metadatum: Metadatum) -> Result<Option<Self>, StatusCode> {
         let value = AssetMetadatum(metadatum).into_model()?;
 
-        let metadata = match value {
+        let (metadata, version) = match value {
             serde_json::Value::Object(map) => {
                 let policy_id = &unit[..56];
                 let asset_name_raw = &unit[56..];
@@ -87,16 +87,29 @@ impl OnchainMetadata {
                     .and_then(|v| String::from_utf8(v).ok())
                     .unwrap_or_else(|| asset_name_raw.to_string());
 
-                map.get(policy_id)
+                let metadata = map
+                    .get(policy_id)
                     .and_then(|policy_metadata| policy_metadata.get(&asset_name))
                     .and_then(|asset_metadata| asset_metadata.as_object())
                     .map(|obj| obj.clone().into_iter().collect())
-                    .unwrap_or_default()
+                    .unwrap_or_default();
+
+                let version = map.get("version").and_then(|v| match v {
+                    serde_json::Value::Number(num) => num.as_i64(),
+                    serde_json::Value::String(s) => s.parse::<f64>().ok().map(|f| f as i64),
+                    _ => None,
+                });
+
+                (metadata, version)
             }
-            _ => HashMap::new(),
+            _ => (HashMap::new(), None),
         };
 
-        let version = Some(OnchainMetadataStandard::Cip25v1);
+        let version = Some(match version {
+            Some(2) => OnchainMetadataStandard::Cip25v2,
+            _ => OnchainMetadataStandard::Cip25v1,
+        });
+
         let extra = None;
 
         Ok(Some(Self {
@@ -302,9 +315,6 @@ impl AssetModelBuilder {
                     })
                 })
                 .cloned();
-
-            // asset_onchain_metadata_cip25
-            // asset_onchain_metadata_cip68_ft_333
 
             if let Some(ref_asset_output) = ref_asset_output {
                 if let Some(datum_option) = ref_asset_output.datum() {
