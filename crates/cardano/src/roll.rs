@@ -263,17 +263,21 @@ impl RollVisitor for AssetStateVisitor {
 
             debug!(subject = %hex::encode(&subject), "tracking asset");
 
+            let tx_hash = tx.hash();
+
             let current = state
                 .read_entity_typed::<AssetState>(&subject)?
                 .unwrap_or(AssetState {
                     quantity_bytes: 0_u128.to_be_bytes(),
-                    initial_tx: tx.hash(),
+                    initial_tx: tx_hash,
+                    latest_tx: tx_hash,
                     mint_tx_count: 0,
                 });
 
             let mut new = current.clone();
             new.add_quantity(asset.mint_coin().unwrap_or_default().into())?;
             new.mint_tx_count += 1;
+            new.latest_tx = tx_hash;
             delta.override_entity(subject, new, Some(current));
         }
 
