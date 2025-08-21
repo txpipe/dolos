@@ -1173,6 +1173,7 @@ dependencies = [
  "hex",
  "itertools 0.13.0",
  "pallas 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=850452a)",
+ "reqwest",
  "serde",
  "serde_json",
  "tokio",

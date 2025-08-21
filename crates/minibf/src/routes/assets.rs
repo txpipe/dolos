@@ -1,4 +1,4 @@
-use std::{collections::HashMap, ops::Deref};
+use std::{collections::HashMap, ops::Deref, time::Duration};
 
 use axum::{
     extract::{Path, State},
@@ -275,6 +275,7 @@ struct AssetModelBuilder {
     unit: String,
     asset_state: dolos_cardano::model::AssetState,
     initial_tx: Option<EraCbor>,
+    registry_url: Option<String>,
 }
 
 impl AssetModelBuilder {
@@ -301,7 +302,7 @@ impl AssetModelBuilder {
         })
     }
 
-    fn initial_tx_metadata(&self) -> Result<Option<OnchainMetadata>, StatusCode> {
+    fn onchain_metadata(&self) -> Result<Option<OnchainMetadata>, StatusCode> {
         let Some(EraCbor(era, cbor)) = &self.initial_tx else {
             return Ok(None);
         };
@@ -356,20 +357,56 @@ impl AssetModelBuilder {
 
         Ok(out)
     }
-}
 
-impl IntoModel<Asset> for AssetModelBuilder {
-    type SortKey = ();
+    async fn offchain_metadata(
+        &self,
+        asset: &str,
+    ) -> Result<Option<serde_json::Value>, StatusCode> {
+        // TODO: apply memory cache
+        let Some(url) = &self.registry_url else {
+            return Ok(None);
+        };
 
-    fn into_model(self) -> Result<Asset, StatusCode> {
+        let url = format!("{}/metadata/{}", url, asset);
+
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .user_agent("Dolos MiniBF")
+            .build()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        let res = client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        if res.status() != StatusCode::OK {
+            return Ok(None);
+        }
+
+        // TODO: map to metadata
+        let response: serde_json::Value = res
+            .json()
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        dbg!(response);
+
+        Ok(None)
+    }
+
+    async fn into_model(self) -> Result<Asset, StatusCode> {
         let policy = self.subject[..28].to_vec();
         let asset = self.subject[28..].to_vec();
 
-        let metadata = self.initial_tx_metadata()?;
+        let metadata = self.onchain_metadata()?;
 
         let onchain_metadata_standard = Some(metadata.as_ref().and_then(|m| m.version));
         let onchain_metadata = metadata.as_ref().map(|m| m.metadata.clone());
         let onchain_metadata_extra = Some(metadata.as_ref().and_then(|m| m.extra.clone()));
+
+        let metadata = self.offchain_metadata(&self.unit).await?;
+        dbg!(metadata);
 
         let asset_name = hex::encode(asset);
         let asset_name = (!asset_name.is_empty()).then_some(asset_name);
@@ -397,6 +434,7 @@ pub async fn by_subject<D: Domain>(
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Asset>, StatusCode> {
     let subject = hex::decode(&unit).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let token_registry_url = domain.config.token_registry_url.clone();
 
     let asset_state = domain
         .state3()
@@ -414,7 +452,8 @@ pub async fn by_subject<D: Domain>(
         unit,
         asset_state,
         initial_tx,
+        registry_url: token_registry_url,
     };
 
-    model.into_response()
+    Ok(Json(model.into_model().await?))
 }
