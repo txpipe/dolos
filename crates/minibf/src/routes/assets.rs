@@ -274,7 +274,7 @@ struct AssetModelBuilder {
     subject: Vec<u8>,
     unit: String,
     asset_state: dolos_cardano::model::AssetState,
-    tx: Option<EraCbor>,
+    initial_tx: Option<EraCbor>,
 }
 
 impl AssetModelBuilder {
@@ -301,8 +301,8 @@ impl AssetModelBuilder {
         })
     }
 
-    fn metadata(&self) -> Result<Option<OnchainMetadata>, StatusCode> {
-        let Some(EraCbor(era, cbor)) = &self.tx else {
+    fn initial_tx_metadata(&self) -> Result<Option<OnchainMetadata>, StatusCode> {
+        let Some(EraCbor(era, cbor)) = &self.initial_tx else {
             return Ok(None);
         };
 
@@ -365,7 +365,7 @@ impl IntoModel<Asset> for AssetModelBuilder {
         let policy = self.subject[..28].to_vec();
         let asset = self.subject[28..].to_vec();
 
-        let metadata = self.metadata()?;
+        let metadata = self.initial_tx_metadata()?;
 
         let onchain_metadata_standard = Some(metadata.as_ref().and_then(|m| m.version));
         let onchain_metadata = metadata.as_ref().map(|m| m.metadata.clone());
@@ -380,7 +380,7 @@ impl IntoModel<Asset> for AssetModelBuilder {
             asset_name,
             fingerprint: asset_fingerprint(&self.subject)?,
             quantity: self.asset_state.quantity().to_string(),
-            initial_mint_tx_hash: self.asset_state.latest_tx.to_string(),
+            initial_mint_tx_hash: self.asset_state.initial_tx.to_string(),
             mint_or_burn_count: self.asset_state.mint_tx_count as i32,
             onchain_metadata,
             onchain_metadata_standard,
@@ -404,16 +404,16 @@ pub async fn by_subject<D: Domain>(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    let tx = domain
+    let initial_tx = domain
         .archive()
-        .get_tx(asset_state.latest_tx.as_slice())
+        .get_tx(asset_state.initial_tx.as_slice())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let model = AssetModelBuilder {
         subject,
         unit,
         asset_state,
-        tx,
+        initial_tx,
     };
 
     model.into_response()

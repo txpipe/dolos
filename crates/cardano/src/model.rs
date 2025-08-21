@@ -74,9 +74,6 @@ pub struct AssetState {
     pub initial_tx: Hash<32>,
 
     #[n(2)]
-    pub latest_tx: Hash<32>,
-
-    #[n(3)]
     pub mint_tx_count: u64,
 }
 
