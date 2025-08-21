@@ -5,7 +5,10 @@ use axum::{
     http::StatusCode,
     Json,
 };
-use blockfrost_openapi::models::asset::{Asset, OnchainMetadataStandard};
+use blockfrost_openapi::models::{
+    asset::{Asset, OnchainMetadataStandard},
+    asset_metadata::AssetMetadata as OffchainMetadata,
+};
 use crc::{Crc, CRC_8_SMBUS};
 use dolos_core::{ArchiveStore, Domain, EraCbor, State3Store as _};
 use pallas::{
@@ -16,6 +19,7 @@ use pallas::{
         validate::phase2::to_plutus_data::ToPlutusData,
     },
 };
+use serde::Deserialize;
 
 use crate::{
     mapping::{asset_fingerprint, IntoModel},
@@ -29,8 +33,7 @@ struct OnchainMetadata {
 }
 impl OnchainMetadata {
     fn from_plutus_data(plutus_data: PlutusData) -> Result<Option<Self>, StatusCode> {
-        let value: serde_json::Value = plutus_data.into_model()?;
-
+        let value = CIP68Metadata(plutus_data.clone()).into_model()?;
         if !value.is_array() {
             return Ok(None);
         }
@@ -69,7 +72,7 @@ impl OnchainMetadata {
     }
 
     fn from_metadatum(unit: &str, metadatum: Metadatum) -> Result<Option<Self>, StatusCode> {
-        let value = AssetMetadatum(metadatum).into_model()?;
+        let value = CIP25Metadata(metadatum).into_model()?;
 
         let (metadata, version) = match value {
             serde_json::Value::Object(map) => {
@@ -162,8 +165,42 @@ impl CIP68Label {
     }
 }
 
-struct AssetMetadatum(Metadatum);
-impl IntoModel<serde_json::Value> for AssetMetadatum {
+#[derive(Debug, Deserialize)]
+pub struct TokenRegistryValue<T> {
+    pub value: T,
+}
+#[derive(Debug, Deserialize)]
+pub struct TokenRegistryMetadata {
+    pub name: Option<TokenRegistryValue<String>>,
+    pub description: Option<TokenRegistryValue<String>>,
+    pub ticker: Option<TokenRegistryValue<String>>,
+    pub url: Option<TokenRegistryValue<String>>,
+    pub logo: Option<TokenRegistryValue<String>>,
+    pub decimals: Option<TokenRegistryValue<i32>>,
+}
+impl From<TokenRegistryMetadata> for OffchainMetadata {
+    fn from(token_registry_asset: TokenRegistryMetadata) -> Self {
+        Self {
+            name: token_registry_asset.name.as_ref().unwrap().value.clone(),
+            description: token_registry_asset
+                .description
+                .as_ref()
+                .unwrap()
+                .value
+                .clone(),
+            ticker: token_registry_asset
+                .ticker
+                .as_ref()
+                .map(|v| v.value.clone()),
+            url: token_registry_asset.url.as_ref().map(|v| v.value.clone()),
+            logo: token_registry_asset.logo.as_ref().map(|v| v.value.clone()),
+            decimals: token_registry_asset.decimals.as_ref().map(|v| v.value),
+        }
+    }
+}
+
+struct CIP25Metadata(Metadatum);
+impl IntoModel<serde_json::Value> for CIP25Metadata {
     type SortKey = ();
 
     fn into_model(self) -> Result<serde_json::Value, StatusCode> {
@@ -182,7 +219,7 @@ impl IntoModel<serde_json::Value> for AssetMetadatum {
             Metadatum::Array(x) => {
                 let values = x
                     .into_iter()
-                    .map(|d| AssetMetadatum(d).into_model())
+                    .map(|d| CIP25Metadata(d).into_model())
                     .collect::<Result<Vec<_>, _>>()?;
                 serde_json::Value::Array(values)
             }
@@ -190,8 +227,8 @@ impl IntoModel<serde_json::Value> for AssetMetadatum {
             Metadatum::Map(x) => {
                 let mut map = serde_json::Map::new();
                 for (k, v) in x.iter() {
-                    if let Some(key) = AssetMetadatum(k.clone()).into_model()?.as_str() {
-                        map.insert(key.to_string(), AssetMetadatum(v.clone()).into_model()?);
+                    if let Some(key) = CIP25Metadata(k.clone()).into_model()?.as_str() {
+                        map.insert(key.to_string(), CIP25Metadata(v.clone()).into_model()?);
                     }
                 }
                 serde_json::Value::Object(map)
@@ -206,16 +243,17 @@ fn encode_to_hex<T: minicbor::Encode<()>>(value: &T) -> Result<String, StatusCod
     Ok(hex::encode(buf))
 }
 
-impl IntoModel<serde_json::Value> for &PlutusData {
+struct CIP68Metadata(PlutusData);
+impl IntoModel<serde_json::Value> for CIP68Metadata {
     type SortKey = ();
 
     fn into_model(self) -> Result<serde_json::Value, StatusCode> {
-        Ok(match self {
+        Ok(match self.0 {
             PlutusData::Constr(x) => {
                 let values = x
                     .fields
                     .iter()
-                    .map(|d| d.clone().into_model())
+                    .map(|d| CIP68Metadata(d.clone()).into_model())
                     .collect::<Result<Vec<serde_json::Value>, _>>()?;
 
                 serde_json::Value::Array(values)
@@ -224,13 +262,16 @@ impl IntoModel<serde_json::Value> for &PlutusData {
             PlutusData::Map(x) => {
                 let mut map = serde_json::Map::new();
                 for (k, v) in x.iter() {
-                    let key_opt = k.into_model()?.as_str().map(|s| s.to_owned());
+                    let key_opt = CIP68Metadata(k.clone())
+                        .into_model()?
+                        .as_str()
+                        .map(|s| s.to_owned());
 
                     if let Some(key) = key_opt {
                         if CIP68_FIELDS.contains(&key.as_str()) {
-                            map.insert(key, v.into_model()?);
+                            map.insert(key, CIP68Metadata(v.clone()).into_model()?);
                         } else {
-                            map.insert(key, serde_json::Value::String(encode_to_hex(v)?));
+                            map.insert(key, serde_json::Value::String(encode_to_hex(&v)?));
                         }
                     }
                 }
@@ -240,7 +281,7 @@ impl IntoModel<serde_json::Value> for &PlutusData {
             PlutusData::Array(x) => {
                 let values = x
                     .iter()
-                    .map(|d| d.clone().into_model())
+                    .map(|d| CIP68Metadata(d.clone()).into_model())
                     .collect::<Result<Vec<serde_json::Value>, _>>()?;
 
                 serde_json::Value::Array(values)
@@ -358,10 +399,7 @@ impl AssetModelBuilder {
         Ok(out)
     }
 
-    async fn offchain_metadata(
-        &self,
-        asset: &str,
-    ) -> Result<Option<serde_json::Value>, StatusCode> {
+    async fn offchain_metadata(&self, asset: &str) -> Result<Option<OffchainMetadata>, StatusCode> {
         // TODO: apply memory cache
         let Some(url) = &self.registry_url else {
             return Ok(None);
@@ -385,14 +423,16 @@ impl AssetModelBuilder {
             return Ok(None);
         }
 
-        // TODO: map to metadata
-        let response: serde_json::Value = res
+        let metadata: TokenRegistryMetadata = res
             .json()
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        dbg!(response);
 
-        Ok(None)
+        if metadata.name.is_none() || metadata.description.is_none() {
+            return Ok(None);
+        }
+
+        Ok(Some(metadata.into()))
     }
 
     async fn into_model(self) -> Result<Asset, StatusCode> {
@@ -405,8 +445,7 @@ impl AssetModelBuilder {
         let onchain_metadata = metadata.as_ref().map(|m| m.metadata.clone());
         let onchain_metadata_extra = Some(metadata.as_ref().and_then(|m| m.extra.clone()));
 
-        let metadata = self.offchain_metadata(&self.unit).await?;
-        dbg!(metadata);
+        let metadata = self.offchain_metadata(&self.unit).await?.map(Box::new);
 
         let asset_name = hex::encode(asset);
         let asset_name = (!asset_name.is_empty()).then_some(asset_name);
@@ -422,7 +461,7 @@ impl AssetModelBuilder {
             onchain_metadata,
             onchain_metadata_standard,
             onchain_metadata_extra,
-            metadata: None,
+            metadata,
         };
 
         Ok(out)
