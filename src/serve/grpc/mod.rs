@@ -81,7 +81,7 @@ where
             .register_encoded_file_descriptor_set(u5c::submit::FILE_DESCRIPTOR_SET)
             .register_encoded_file_descriptor_set(u5c::watch::FILE_DESCRIPTOR_SET)
             .register_encoded_file_descriptor_set(protoc_wkt::google::protobuf::FILE_DESCRIPTOR_SET)
-            .build_v1alpha()
+            .build_v1()
             .unwrap();
 
         let cors_layer = if cfg.permissive_cors.unwrap_or_default() {
