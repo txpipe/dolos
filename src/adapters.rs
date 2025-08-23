@@ -67,13 +67,14 @@ impl ChainLogic for ChainAdapter {
         dolos_cardano::ChainLogic::ledger_query_for_block(block, unapplied_deltas)
     }
 
-    fn compute_apply_delta3<'a>(
+    fn roll_apply_delta3<'a>(
         &self,
+        delta: &mut StateDelta,
         state: &impl State3Store,
         block: &Self::Block<'a>,
-    ) -> Result<StateDelta, ChainError> {
+    ) -> Result<(), ChainError> {
         match self {
-            ChainAdapter::Cardano(x) => x.compute_apply_delta3(state, block),
+            ChainAdapter::Cardano(x) => x.roll_apply_delta3(delta, state, block),
         }
     }
 }
