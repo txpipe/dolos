@@ -316,6 +316,7 @@ impl ConfigEditor {
                     listen_address: "[::]:3000".parse().unwrap(),
                     permissive_cors: Some(true),
                     metadata_max_scan_depth: None,
+                    token_registry_url: None,
                 }
                 .into();
             } else {
