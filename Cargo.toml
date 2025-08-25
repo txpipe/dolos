@@ -62,6 +62,7 @@ console-subscriber = { version = "0.3.0", optional = true }
 flate2 = "1.0.34"
 tar = "0.4.41"
 paste = "1.0.15"
+rayon = "1.11.0"
 
 
 # gRPC dependencies
