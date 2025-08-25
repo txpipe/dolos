@@ -37,7 +37,3 @@ pub fn run(config: &super::Config, args: &Args, feedback: &Feedback) -> miette::
 
     Ok(())
 }
-
-pub fn run_rebuild_stores(config: &super::Config, feedback: &Feedback) -> miette::Result<()> {
-    rebuild_stores::run(config, &rebuild_stores::Args { chunk: 500 }, feedback)
-}

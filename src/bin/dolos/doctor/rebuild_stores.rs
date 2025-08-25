@@ -55,6 +55,7 @@ pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::
 
     // Amount of slots until unmutability is guaranteed.
     let lookahead = mutable_slots(&genesis);
+
     let remaining = WalBlockReader::try_new(&domain.wal, None, lookahead)
         .into_diagnostic()
         .context("creating wal block reader")?;
