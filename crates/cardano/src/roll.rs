@@ -1,5 +1,3 @@
-use std::ops::Deref;
-
 use dolos_core::{State3Error, State3Store, StateDelta, StateSlice, StateSliceView};
 use pallas::{
     crypto::hash::Hash,
@@ -184,7 +182,7 @@ impl<'a, S: State3Store> SliceBuilder<'a, S> {
     }
 
     pub fn store(&self) -> &S {
-        &self.store
+        self.store
     }
 
     pub fn build(self) -> StateSlice {

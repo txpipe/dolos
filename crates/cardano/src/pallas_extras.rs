@@ -33,7 +33,7 @@ pub fn cert_to_pool_state(cert: &MultiEraCert) -> Option<MultiEraPoolRegistratio
                 relays,
                 pool_metadata,
             } => Some(MultiEraPoolRegistration {
-                operator: operator.clone(),
+                operator: *operator,
                 vrf_keyhash: *vrf_keyhash,
                 pledge: *pledge,
                 cost: *cost,
@@ -57,7 +57,7 @@ pub fn cert_to_pool_state(cert: &MultiEraCert) -> Option<MultiEraPoolRegistratio
                 relays,
                 pool_metadata,
             } => Some(MultiEraPoolRegistration {
-                operator: operator.clone(),
+                operator: *operator,
                 vrf_keyhash: *vrf_keyhash,
                 pledge: *pledge,
                 cost: *cost,

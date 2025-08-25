@@ -6,7 +6,6 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::sync::Arc;
 
 use dolos_core::*;
 
