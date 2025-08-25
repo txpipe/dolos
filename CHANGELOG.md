@@ -2,6 +2,35 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.31.0] - 2025-08-25
+
+### 🐛 Bug Fixes
+
+- *(minifb)* Improve conformance on `/addresses` endpoints (#644)
+- *(minibf)* Use correct mappings for assets metadata CIP68 and CIP25 (#649)
+- Fix windows compile-time errors (#656)
+
+### 🚜 Refactor
+
+- Go through the domain for rebuilding stores (#645)
+- *(core)* Split slice loading from delta in state3 (#653)
+- *(bin)* Improve Mithril bootstrap procedure (#654)
+
+### 🔧 Continuous Integration
+
+- Bring back windows to the test matrix
+
+### 🧪 Testing
+
+- *(minibf)* Fix conformance tests for metadata endpoints (#651)
+
+### ⚙️ Miscellaneous Tasks
+
+- Update tx3 to v0.11.3
+- Bump tx3 and pallas versions
+- Fix new lint warnings
+- Remove phase2 flag (#650)
+
 ## [0.30.2] - 2025-08-14
 
 ### 🚀 Features
@@ -17,6 +46,10 @@ All notable changes to this project will be documented in this file.
 ### 🧪 Testing
 
 - Fix outdated test
+
+### Release
+
+- V0.30.2
 
 ## [0.30.1] - 2025-08-11
 
