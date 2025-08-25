@@ -40,3 +40,17 @@ RUSTFLAGS="--cfg tokio_unstable" cargo --features debug run
 ```
 tokio-console
 ```
+
+### Check build for windows (from non-windows box)
+
+1. Install the rustup target
+
+```
+rustup target add x86_64-pc-windows-gnu
+```
+
+2. Use the `check` (skips problematic link phase)
+
+```
+cargo check --target x86_64-pc-windows-gnu
+```
