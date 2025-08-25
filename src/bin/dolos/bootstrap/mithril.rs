@@ -2,9 +2,9 @@ use itertools::Itertools;
 use miette::{Context, IntoDiagnostic};
 use mithril_client::{ClientBuilder, MessageBuilder, MithrilError, MithrilResult};
 use pallas::ledger::traverse::MultiEraBlock;
-use rayon::iter::{IntoParallelIterator as _, IntoParallelRefIterator as _, ParallelIterator as _};
+use rayon::iter::{IntoParallelIterator as _, ParallelIterator as _};
 use std::{path::Path, sync::Arc};
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use dolos::{adapters::DomainAdapter, prelude::*};
 
