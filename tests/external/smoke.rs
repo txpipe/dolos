@@ -1,3 +1,5 @@
+#![cfg(not(windows))]
+
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
