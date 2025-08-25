@@ -200,7 +200,7 @@ fn import_hardano_into_domain(
 ) -> Result<(), miette::Error> {
     let domain = crate::common::setup_domain(config)?;
 
-    if !domain.state().is_empty().into_diagnostic()? {
+    if domain.state().is_empty().into_diagnostic()? {
         domain
             .apply_origin()
             // TODO: can't use into_diagnostic here because some variant of DomainError doesn't
