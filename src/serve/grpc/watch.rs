@@ -165,6 +165,8 @@ fn block_to_txs<C: LedgerContext>(
         })
         .map(|x| u5c::watch::AnyChainTx {
             chain: Some(u5c::watch::any_chain_tx::Chain::Cardano(x)),
+            // TODO(p): should it be none?
+            block: None,
         })
         .collect()
 }
@@ -235,7 +237,7 @@ where
         let intersect = inner_req
             .intersect
             .iter()
-            .map(|x| ChainPoint::Specific(x.index, x.hash.to_vec().as_slice().into()))
+            .map(|x| ChainPoint::Specific(x.slot, x.hash.to_vec().as_slice().into()))
             .collect::<Vec<ChainPoint>>();
 
         let stream = ChainStream::start::<D, _>(

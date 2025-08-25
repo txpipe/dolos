@@ -1,6 +1,6 @@
 use itertools::Itertools as _;
 use pallas::interop::utxorpc::{self as interop, spec::query::any_utxo_pattern::UtxoPattern};
-use pallas::interop::utxorpc::{LedgerContext, spec as u5c};
+use pallas::interop::utxorpc::{spec as u5c, LedgerContext};
 use pallas::ledger::traverse::MultiEraOutput;
 use std::collections::HashSet;
 use tonic::{Request, Response, Status};
@@ -16,10 +16,16 @@ pub fn point_to_u5c(point: &ChainPoint) -> u5c::query::ChainPoint {
         ChainPoint::Origin => u5c::query::ChainPoint {
             slot: 0,
             hash: vec![].into(),
+            height: 0,
+            timestamp: 0,
         },
         ChainPoint::Specific(slot, hash) => u5c::query::ChainPoint {
             slot: *slot,
             hash: hash.to_vec().into(),
+            // TODO: where do they come?
+            // height
+            // timestamp
+            ..Default::default()
         },
     }
 }
@@ -385,44 +391,60 @@ where
 
         let tx_hash = message.hash;
 
-        let (block_data, tx) = self
-            .chain
-            .get_tx_with_block_data(&tx_hash)
-            .map_err(|e| Status::internal(format!("failed to query chain for tx: {e}")))?
-            .ok_or_else(|| Status::not_found("transaction not found"))?;
+        // let (block_data, tx) = self
+        //     .chain
+        //     .get_tx_with_block_data(&tx_hash)
+        //     .map_err(|e| Status::internal(format!("failed to query chain for tx: {e}")))?
+        //     .ok_or_else(|| Status::not_found("transaction not found"))?;
+        //
+        // let mtx = MultiEraTx::decode(&tx)
+        //     .map_err(|e| Status::internal(format!("failed to decode transaction: {e}")))?;
+        //
+        // let mblock = MultiEraBlock::decode(&block_data)
+        //     .map_err(|e| Status::internal(format!("failed to decode block: {e}")))?;
+        // let block_slot = mblock.slot();
+        // let block_hash = mblock.hash();
+        //
+        // let block = self.mapper.map_block_cbor(&block_data);
+        //
+        todo!();
 
-        let mtx = MultiEraTx::decode(&tx)
-            .map_err(|e| Status::internal(format!("failed to decode transaction: {e}")))?;
+        // let mut response = u5c::query::ReadTxResponse {
+        //     tx: Some(u5c::query::AnyChainTx {
+        //         native_bytes: mtx.encode().into(),
+        //         chain: Some(u5c::query::any_chain_tx::Chain::Cardano(
+        //             self.mapper.map_tx(&mtx),
+        //         )),
+        //         block: Some(u5c::query::AnyChainBlock {
+        //             native_bytes: block_data.to_vec().into(),
+        //             chain: Some(u5c::query::any_chain_block::Chain::Cardano(block)),
+        //         }),
+        //     }),
+        //     ledger_tip: Some(u5c::query::ChainPoint {
+        //         slot: block_slot,
+        //         hash: block_hash.to_vec().into(),
+        //     }),
+        // };
+        //
+        // if let Some(mask) = message.field_mask {
+        //     response = apply_mask(response, mask.paths)
+        //         .map_err(|_| Status::internal("Failed to apply field mask"))?
+        // }
+        //
+        // Ok(Response::new(response))
+    }
 
-        let mblock = MultiEraBlock::decode(&block_data)
-            .map_err(|e| Status::internal(format!("failed to decode block: {e}")))?;
-        let block_slot = mblock.slot();
-        let block_hash = mblock.hash();
+    async fn read_genesis(
+        &self,
+        request: Request<u5c::query::ReadGenesisRequest>,
+    ) -> Result<Response<u5c::query::ReadGenesisResponse>, Status> {
+        todo!();
+    }
 
-        let block = self.mapper.map_block_cbor(&block_data);
-
-        let mut response = u5c::query::ReadTxResponse {
-            tx: Some(u5c::query::AnyChainTx {
-                native_bytes: mtx.encode().into(),
-                chain: Some(u5c::query::any_chain_tx::Chain::Cardano(
-                    self.mapper.map_tx(&mtx),
-                )),
-                block: Some(u5c::query::AnyChainBlock {
-                    native_bytes: block_data.to_vec().into(),
-                    chain: Some(u5c::query::any_chain_block::Chain::Cardano(block)),
-                }),
-            }),
-            ledger_tip: Some(u5c::query::ChainPoint {
-                slot: block_slot,
-                hash: block_hash.to_vec().into(),
-            }),
-        };
-
-        if let Some(mask) = message.field_mask {
-            response = apply_mask(response, mask.paths)
-                .map_err(|_| Status::internal("Failed to apply field mask"))?
-        }
-
-        Ok(Response::new(response))
+    async fn read_era_summary(
+        &self,
+        request: Request<u5c::query::ReadEraSummaryRequest>,
+    ) -> Result<Response<u5c::query::ReadEraSummaryResponse>, Status> {
+        todo!();
     }
 }
