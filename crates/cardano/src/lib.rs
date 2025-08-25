@@ -6,7 +6,6 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::sync::Arc;
 
 use dolos_core::*;
 
@@ -15,9 +14,9 @@ use crate::pparams::EraSummary;
 
 // re-export pallas for version compatibility downstream
 pub use pallas;
+pub mod pallas_extras;
 
 pub mod pparams;
-//pub mod validate;
 
 pub mod model;
 
@@ -42,7 +41,8 @@ pub struct TrackConfig {
 
 #[derive(Serialize, Deserialize, Clone, Default)]
 pub struct Config {
-    pub track: Option<TrackConfig>,
+    #[serde(default)]
+    pub track: TrackConfig,
 }
 
 /// Computes the ledger delta of applying a particular block.
@@ -305,14 +305,12 @@ pub fn ledger_query_for_block(
 
 #[derive(Clone)]
 pub struct ChainLogic {
-    visitor: Arc<roll::DynamicVisitor>,
+    config: Config,
 }
 
 impl ChainLogic {
     pub fn new(config: Config) -> Self {
-        Self {
-            visitor: Arc::new(roll::DynamicVisitor::new(config.track.unwrap_or_default())),
-        }
+        Self { config }
     }
 }
 
@@ -358,16 +356,34 @@ impl dolos_core::ChainLogic for ChainLogic {
         ledger_query_for_block(block, unapplied_deltas)
     }
 
-    fn compute_apply_delta3<'a>(
+    fn load_slice3_for_block<'a>(
         &self,
         state: &impl State3Store,
         block: &Self::Block<'a>,
+        unapplied_deltas: &[StateDelta],
+    ) -> Result<StateSlice, DomainError> {
+        let mut builder = roll::SliceBuilder::new(&self.config.track, state, unapplied_deltas);
+
+        roll::crawl_block(block, &mut builder)?;
+
+        Ok(builder.build())
+    }
+
+    fn compute_apply_delta3<'a>(
+        &self,
+        slice: StateSlice,
+        block: &Self::Block<'a>,
+        unapplied_deltas: &[StateDelta],
     ) -> Result<StateDelta, ChainError> {
-        let mut delta = StateDelta::new(block.slot());
+        let delta = StateDelta::new(block.slot());
 
-        roll::crawl_block(&mut delta, state, block, self.visitor.as_ref())?;
+        let view = StateSliceView::new(slice, unapplied_deltas);
 
-        Ok(delta)
+        let mut builder = roll::DeltaBuilder::new(&self.config.track, view, delta);
+
+        roll::crawl_block(block, &mut builder)?;
+
+        Ok(builder.build())
     }
 }
 

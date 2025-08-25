@@ -4,6 +4,7 @@ use dolos_core::*;
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Clone)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum ChainConfig {
     Cardano(dolos_cardano::Config),
 }
@@ -67,13 +68,25 @@ impl ChainLogic for ChainAdapter {
         dolos_cardano::ChainLogic::ledger_query_for_block(block, unapplied_deltas)
     }
 
-    fn compute_apply_delta3<'a>(
+    fn load_slice3_for_block<'a>(
         &self,
         state: &impl State3Store,
         block: &Self::Block<'a>,
+        unapplied_deltas: &[StateDelta],
+    ) -> Result<StateSlice, DomainError> {
+        match self {
+            ChainAdapter::Cardano(x) => x.load_slice3_for_block(state, block, unapplied_deltas),
+        }
+    }
+
+    fn compute_apply_delta3<'a>(
+        &self,
+        state: StateSlice,
+        block: &Self::Block<'a>,
+        unapplied_deltas: &[StateDelta],
     ) -> Result<StateDelta, ChainError> {
         match self {
-            ChainAdapter::Cardano(x) => x.compute_apply_delta3(state, block),
+            ChainAdapter::Cardano(x) => x.compute_apply_delta3(state, block, unapplied_deltas),
         }
     }
 }

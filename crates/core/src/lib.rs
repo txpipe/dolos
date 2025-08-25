@@ -719,10 +719,20 @@ pub trait ChainLogic {
         Ok(out)
     }
 
-    fn compute_apply_delta3<'a>(
+    // new state functions
+
+    fn load_slice3_for_block<'a>(
         &self,
         state: &impl State3Store,
         block: &Self::Block<'a>,
+        unapplied_deltas: &[StateDelta],
+    ) -> Result<StateSlice, DomainError>;
+
+    fn compute_apply_delta3<'a>(
+        &self,
+        slice: StateSlice,
+        block: &Self::Block<'a>,
+        unapplied_deltas: &[StateDelta],
     ) -> Result<StateDelta, ChainError>;
 }
 
@@ -794,7 +804,13 @@ pub trait Domain: Send + Sync + Clone + 'static {
 
         for block in blocks {
             let block = Self::Chain::decode_block(&block.body)?;
-            let delta = self.chain().compute_apply_delta3(self.state3(), &block)?;
+
+            let slice = self
+                .chain()
+                .load_slice3_for_block(self.state3(), &block, &deltas)?;
+
+            let delta = self.chain().compute_apply_delta3(slice, &block, &deltas)?;
+
             deltas.push(delta);
         }
 
@@ -808,9 +824,9 @@ pub trait Domain: Send + Sync + Clone + 'static {
         self.archive().apply(&deltas)?;
         self.mempool().apply(&deltas);
 
-        for delta in self.compute_apply_deltas3(blocks)? {
-            self.state3().apply_delta(delta)?;
-        }
+        let deltas3 = self.compute_apply_deltas3(blocks)?;
+
+        self.state3().apply(&deltas3)?;
 
         Ok(())
     }
@@ -835,6 +851,8 @@ pub trait Domain: Send + Sync + Clone + 'static {
         self.archive().apply(&deltas)?;
         self.mempool().apply(&deltas);
 
+        // TODO: undo state3
+
         Ok(())
     }
 
@@ -845,23 +863,29 @@ pub trait Domain: Send + Sync + Clone + 'static {
             .storage_config()
             .max_ledger_history
             .unwrap_or(Self::Chain::mutable_slots(self));
+
         info!(max_ledger_slots, "pruning ledger for excess history");
+
         let state_pruned = self.state().prune_history(
             max_ledger_slots,
             Some(Self::MAX_PRUNE_SLOTS_PER_HOUSEKEEPING),
         )?;
 
         let mut archive_pruned = true;
+
         if let Some(max_slots) = self.storage_config().max_chain_history {
             info!(max_slots, "pruning archive for excess history");
+
             archive_pruned = self
                 .archive()
                 .prune_history(max_slots, Some(Self::MAX_PRUNE_SLOTS_PER_HOUSEKEEPING))?;
         }
 
         let mut wal_pruned = true;
+
         if let Some(max_slots) = self.storage_config().max_wal_history {
             info!(max_slots, "pruning wal for excess history");
+
             wal_pruned = self
                 .wal()
                 .prune_history(max_slots, Some(Self::MAX_PRUNE_SLOTS_PER_HOUSEKEEPING))?;

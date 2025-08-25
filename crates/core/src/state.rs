@@ -68,8 +68,25 @@ impl StateDelta {
         self.slot
     }
 
-    pub fn iter_deltas(self) -> impl Iterator<Item = (Namespace, Vec<EntityDelta>)> {
-        self.entries.into_iter()
+    pub fn iter_deltas(&self) -> impl Iterator<Item = (Namespace, &[EntityDelta])> {
+        self.entries
+            .iter()
+            .map(|(ns, deltas)| (*ns, deltas.as_slice()))
+    }
+
+    pub fn get_overriden_key(&self, ns: Namespace, key: impl AsRef<[u8]>) -> Option<&EntityValue> {
+        let key = key.as_ref().to_vec();
+        let deltas = self.entries.get(ns)?;
+
+        let delta = deltas
+            .iter()
+            .rev()
+            .find(|delta| matches!(delta, EntityDelta::OverrideKey(k, _, _) if k == &key))?;
+
+        match delta {
+            EntityDelta::OverrideKey(_, value, _) => Some(value),
+            _ => None,
+        }
     }
 
     pub fn override_key(
@@ -135,6 +152,147 @@ impl StateDelta {
 
     pub fn append_entity<T: Entity>(&mut self, key: impl Into<EntityKey>, entity: T) {
         self.append_value(T::NS, key, entity.encode_value());
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct NamespaceSlice {
+    pub entities: HashMap<EntityKey, EntityValue>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct StateSlice {
+    pub loaded: HashMap<Namespace, NamespaceSlice>,
+}
+
+impl StateSlice {
+    pub fn load_entity(&mut self, ns: Namespace, key: impl AsRef<[u8]>, value: EntityValue) {
+        let key = key.as_ref().to_vec();
+
+        self.loaded
+            .entry(ns)
+            .or_default()
+            .entities
+            .entry(key)
+            .or_insert(value);
+    }
+
+    pub fn load_entity_typed<T: Entity>(&mut self, key: impl AsRef<[u8]>, entity: T) {
+        let value = entity.encode_value();
+
+        self.load_entity(T::NS, key, value);
+    }
+
+    pub fn get_entity(
+        &self,
+        ns: Namespace,
+        key: impl AsRef<[u8]>,
+    ) -> Result<Option<EntityValue>, StateError> {
+        let values = self
+            .loaded
+            .get(ns)
+            .and_then(|ns| ns.entities.get(key.as_ref()));
+
+        let value = values.cloned();
+
+        Ok(value)
+    }
+
+    pub fn get_entity_typed<T: Entity>(
+        &self,
+        key: impl AsRef<[u8]>,
+    ) -> Result<Option<T>, StateError> {
+        let value = self.get_entity(T::NS, key)?;
+
+        // TODO: we need to optimize this so that we don't repeat decoding if this is
+        // called multiple times.
+        let decoded = value.map(T::decode_value).transpose()?;
+
+        Ok(decoded)
+    }
+}
+
+pub struct StateSliceView<'a> {
+    inner: StateSlice,
+    deltas: &'a [StateDelta],
+}
+
+impl<'a> StateSliceView<'a> {
+    pub fn new(inner: StateSlice, deltas: &'a [StateDelta]) -> Self {
+        Self { inner, deltas }
+    }
+
+    /// Looks for an entity overridden in the deltas.
+    ///
+    /// we look for the entity in the deltas in reverse order, so that the
+    /// latest delta is searched first
+    fn find_override(&self, ns: Namespace, key: impl AsRef<[u8]>) -> Option<&EntityValue> {
+        for delta in self.deltas.iter().rev() {
+            if let Some(delta) = delta.get_overriden_key(ns, &key) {
+                return Some(delta);
+            }
+        }
+
+        None
+    }
+
+    pub fn ensure_loaded(
+        &mut self,
+        ns: Namespace,
+        key: impl AsRef<[u8]>,
+        store: &impl State3Store,
+    ) -> Result<(), State3Error> {
+        let key = key.as_ref().to_vec();
+
+        if self.find_override(ns, &key).is_some() {
+            return Ok(());
+        }
+
+        let value = store.read_entity(ns, &key)?;
+
+        if let Some(value) = value {
+            self.inner.load_entity(ns, &key, value);
+        }
+
+        Ok(())
+    }
+
+    pub fn ensure_loaded_typed<T: Entity>(
+        &mut self,
+        key: impl AsRef<[u8]>,
+        store: &impl State3Store,
+    ) -> Result<(), State3Error> {
+        self.ensure_loaded(T::NS, key, store)
+    }
+
+    pub fn get_entity(
+        &self,
+        ns: Namespace,
+        key: impl AsRef<[u8]>,
+    ) -> Result<Option<EntityValue>, StateError> {
+        let key = key.as_ref().to_vec();
+
+        if let Some(delta) = self.find_override(ns, &key) {
+            return Ok(Some(delta.clone()));
+        }
+
+        let value = self.inner.get_entity(ns, key)?;
+
+        Ok(value)
+    }
+
+    pub fn get_entity_typed<T: Entity>(
+        &self,
+        key: impl AsRef<[u8]>,
+    ) -> Result<Option<T>, StateError> {
+        let value = self.get_entity(T::NS, key)?;
+        let decoded = value.map(T::decode_value).transpose()?;
+
+        Ok(decoded)
+    }
+
+    pub fn unwrap(self) -> StateSlice {
+        self.inner
     }
 }
 
@@ -217,9 +375,9 @@ pub trait State3Store: Sized {
 
     fn get_cursor(&self) -> Result<Option<BlockSlot>, StateError>;
 
-    fn apply_delta(&self, delta: StateDelta) -> Result<(), StateError>;
+    fn apply(&self, deltas: &[StateDelta]) -> Result<(), StateError>;
 
-    fn undo_delta(&self, delta: StateDelta) -> Result<(), StateError>;
+    fn undo(&self, deltas: &[StateDelta]) -> Result<(), StateError>;
 
     fn read_entity(
         &self,
@@ -269,4 +427,76 @@ pub trait Entity: Sized {
 
     fn decode_value(value: EntityValue) -> Result<Self, StateError>;
     fn encode_value(self) -> EntityValue;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug, Clone, PartialEq)]
+    struct TestEntity {
+        value: String,
+    }
+
+    impl TestEntity {
+        pub fn new(value: &str) -> Self {
+            Self {
+                value: value.to_string(),
+            }
+        }
+    }
+
+    impl Entity for TestEntity {
+        const NS: Namespace = "test";
+        const NS_TYPE: NamespaceType = NamespaceType::KeyValue;
+
+        fn decode_value(value: EntityValue) -> Result<Self, StateError> {
+            let value_str =
+                String::from_utf8(value).map_err(|e| StateError::EncodingError(e.to_string()))?;
+            Ok(TestEntity { value: value_str })
+        }
+
+        fn encode_value(self) -> EntityValue {
+            self.value.into_bytes()
+        }
+    }
+
+    #[test]
+    fn test_state_slice_view() {
+        // Create a base state slice with an entity
+        let mut base_slice = StateSlice::default();
+
+        let base_entity = TestEntity::new("a");
+        base_slice.load_entity_typed(b"overriden_key", base_entity.clone());
+
+        let base_entity_2 = TestEntity::new("a");
+        base_slice.load_entity_typed(b"not_overriden_key", base_entity_2.clone());
+
+        // Create a delta with a different value for the same key
+        let mut delta = StateDelta::new(1);
+
+        let delta_entity = TestEntity::new("b");
+        delta.override_entity(b"overriden_key", delta_entity, Some(base_entity.clone()));
+
+        // Create a state slice view with the base slice and delta
+        let deltas = vec![delta];
+        let view = StateSliceView::new(base_slice.clone(), &deltas);
+
+        // Test that get_entity returns the delta value, not the base value
+        let found = view
+            .get_entity_typed::<TestEntity>(b"overriden_key")
+            .unwrap()
+            .unwrap();
+
+        // Should return the delta value, not the base value
+        assert_eq!(found.value, "b");
+
+        // Test that get_entity returns the base value when no delta exists
+        let found = view
+            .get_entity_typed::<TestEntity>(b"not_overriden_key")
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(found.value, "a");
+    }
 }
