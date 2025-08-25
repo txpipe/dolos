@@ -2,7 +2,7 @@ use miette::{Context as _, IntoDiagnostic};
 use std::sync::Arc;
 use std::{fs, path::PathBuf, time::Duration};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 use tracing_subscriber::{filter::Targets, prelude::*};
 
 use dolos::adapters::{ArchiveAdapter, ChainAdapter, DomainAdapter, StateAdapter, WalAdapter};
@@ -222,10 +222,10 @@ async fn wait_for_exit_signal() {
 
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {
-            warn!("SIGINT detected");
+            tracing::warn!("SIGINT detected");
         }
         _ = sigterm.recv() => {
-            warn!("SIGTERM detected");
+            tracing::warn!("SIGTERM detected");
         }
     };
 }
