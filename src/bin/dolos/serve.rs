@@ -1,7 +1,6 @@
-use std::sync::Arc;
-
+use futures_util::stream::FuturesUnordered;
 use log::warn;
-use miette::Context;
+use tracing::error;
 
 #[derive(Debug, clap::Args)]
 pub struct Args {}
@@ -10,14 +9,22 @@ pub struct Args {}
 pub async fn run(config: super::Config, _args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging)?;
 
-    let (wal, ledger, chain) = crate::common::setup_data_stores(&config)?;
-    let genesis = Arc::new(crate::common::open_genesis_files(&config.genesis)?);
-    let mempool = dolos::mempool::Mempool::new(genesis.clone(), ledger.clone());
+    let domain = crate::common::setup_domain(&config)?;
+
     let exit = crate::common::hook_exit_token();
 
-    dolos::serve::serve(config.serve, genesis, wal, ledger, chain, mempool, exit)
-        .await
-        .context("serving clients")?;
+    let drivers = FuturesUnordered::new();
+
+    dolos::serve::load_drivers(&drivers, config.serve, domain.clone(), exit.clone());
+
+    for result in drivers {
+        if let Err(e) = result.await.unwrap() {
+            error!("driver error: {}", e);
+
+            warn!("cancelling remaining drivers");
+            exit.cancel();
+        }
+    }
 
     warn!("shutdown complete");
 

@@ -19,12 +19,18 @@ pub struct Args {
     // Whether to include chain
     #[arg(long, action)]
     include_chain: bool,
+
+    // Whether to include state
+    #[arg(long, action)]
+    include_state: bool,
 }
 
 fn prepare_wal(
-    mut wal: dolos::wal::redb::WalStore,
+    wal: dolos::adapters::WalAdapter,
     pb: &crate::feedback::ProgressBar,
 ) -> miette::Result<()> {
+    let dolos::adapters::WalAdapter::Redb(mut wal) = wal;
+
     let db = wal.db_mut().unwrap();
 
     pb.set_message("compacting wal");
@@ -37,11 +43,11 @@ fn prepare_wal(
 }
 
 fn prepare_ledger(
-    ledger: dolos::state::LedgerStore,
+    ledger: dolos::adapters::StateAdapter,
     pb: &crate::feedback::ProgressBar,
 ) -> miette::Result<()> {
     let mut ledger = match ledger {
-        dolos::state::LedgerStore::Redb(x) => x,
+        dolos::adapters::StateAdapter::Redb(x) => x,
         _ => miette::bail!("Only redb is supported for export"),
     };
 
@@ -56,11 +62,11 @@ fn prepare_ledger(
 }
 
 fn prepare_chain(
-    chain: dolos::chain::ChainStore,
+    chain: dolos::adapters::ArchiveAdapter,
     pb: &crate::feedback::ProgressBar,
 ) -> miette::Result<()> {
     let mut chain = match chain {
-        dolos::chain::ChainStore::Redb(x) => x,
+        dolos::adapters::ArchiveAdapter::Redb(x) => x,
         _ => miette::bail!("Only redb is supported for export"),
     };
 
@@ -85,9 +91,9 @@ pub fn run(
     let encoder = GzEncoder::new(export_file, Compression::default());
     let mut archive = Builder::new(encoder);
 
-    let (wal, ledger, chain) = crate::common::setup_data_stores(config)?;
+    let stores = crate::common::setup_data_stores(config)?;
 
-    prepare_wal(wal, &pb)?;
+    prepare_wal(stores.wal, &pb)?;
 
     let root = crate::common::ensure_storage_path(config)?;
 
@@ -98,7 +104,7 @@ pub fn run(
         .into_diagnostic()?;
 
     if args.include_ledger {
-        prepare_ledger(ledger, &pb)?;
+        prepare_ledger(stores.state, &pb)?;
         let path = root.join("ledger");
 
         archive
@@ -106,13 +112,23 @@ pub fn run(
             .into_diagnostic()?;
     }
 
-    prepare_chain(chain, &pb)?;
+    prepare_chain(stores.archive, &pb)?;
 
     if args.include_chain {
         let path = root.join("chain");
 
         archive
             .append_path_with_name(&path, "chain")
+            .into_diagnostic()?;
+
+        pb.set_message("creating archive");
+    }
+
+    if args.include_state {
+        let path = root.join("state");
+
+        archive
+            .append_path_with_name(&path, "state")
             .into_diagnostic()?;
 
         pb.set_message("creating archive");

@@ -133,16 +133,17 @@ impl Default for LoggingConfig {
 
 #[derive(Serialize, Deserialize)]
 pub struct Config {
-    pub upstream: dolos::model::UpstreamConfig,
-    pub storage: dolos::model::StorageConfig,
+    pub upstream: dolos::core::UpstreamConfig,
+    pub storage: dolos::core::StorageConfig,
     pub genesis: GenesisConfig,
     pub sync: dolos::sync::Config,
-    pub submit: dolos::model::SubmitConfig,
+    pub submit: dolos::core::SubmitConfig,
     pub serve: dolos::serve::Config,
     pub relay: Option<dolos::relay::Config>,
     pub retries: Option<gasket::retries::Policy>,
     pub mithril: Option<MithrilConfig>,
     pub snapshot: Option<SnapshotConfig>,
+    pub chain: Option<dolos::adapters::ChainConfig>,
 
     #[serde(default)]
     pub logging: LoggingConfig,

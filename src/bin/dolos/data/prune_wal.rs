@@ -1,6 +1,8 @@
 use miette::{bail, Context, IntoDiagnostic};
 use tracing::info;
 
+use dolos::prelude::*;
+
 #[derive(Debug, clap::Args)]
 pub struct Args {
     /// the maximum number of slots to keep in the WAL
@@ -15,7 +17,7 @@ pub struct Args {
 pub fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging)?;
 
-    let mut wal = crate::common::open_wal_store(config)?;
+    let dolos::adapters::WalAdapter::Redb(mut wal) = crate::common::open_wal_store(config)?;
 
     let max_slots = match args.max_slots {
         Some(x) => x,
@@ -28,6 +30,7 @@ pub fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
     info!(max_slots, "prunning to max slots");
 
     wal.prune_history(max_slots, args.max_prune)
+        .map_err(WalError::from)
         .into_diagnostic()
         .context("removing range from WAL")?;
 

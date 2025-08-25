@@ -1,26 +1,33 @@
-use std::{path::Path, time::Duration};
-
 use pallas::network::{
     facades::NodeClient,
     miniprotocols::{chainsync::NextResponse, Point, MAINNET_MAGIC},
 };
+use std::{path::Path, time::Duration};
 use tokio_util::sync::CancellationToken;
 
-use crate::wal::{self, redb::WalStore, WalWriter};
+use crate::adapters::WalAdapter;
+use crate::prelude::*;
 
 type ServerHandle = tokio::task::JoinHandle<Result<(), crate::prelude::Error>>;
 
-async fn setup_server_client_pair(port: u32, wal: WalStore) -> (ServerHandle, NodeClient) {
+async fn setup_server_client_pair(port: u32, wal: WalAdapter) -> (ServerHandle, NodeClient) {
     let cancel = CancellationToken::new();
 
-    let server = tokio::spawn(super::serve(
-        super::Config {
+    let server = tokio::spawn(async move {
+        let cfg = super::Config {
             listen_path: format!("dolos{port}.socket").into(),
             magic: MAINNET_MAGIC,
-        },
-        wal,
-        cancel,
-    ));
+        };
+
+        tokio::select! {
+            res = super::accept_client_connections(wal.clone(), &cfg, &mut tasks, cancel.clone()) => {
+                res?;
+            },
+            _ = cancel.cancelled() => {
+                warn!("exit requested");
+            }
+        }
+    });
 
     tokio::time::sleep(Duration::from_secs(3)).await;
 
@@ -39,12 +46,15 @@ async fn test_chainsync_happy_path() {
     //         .finish(),
     // );
 
-    let mut wal = wal::testing::db_with_dummy_blocks(300);
+    let mut wal = WalAdapter::Redb(dolos_redb::testing::wal_with_dummy_blocks(300));
 
     // use servers in different ports until we implement some sort of test harness
     let (server, mut client) = setup_server_client_pair(30032, wal.clone()).await;
 
-    let known_points = vec![Point::Specific(20, wal::testing::slot_to_hash(20).to_vec())];
+    let known_points = vec![Point::Specific(
+        20,
+        dolos_redb::testing::slot_to_hash(20).to_vec(),
+    )];
 
     let (point, _) = client
         .chainsync()
@@ -78,8 +88,10 @@ async fn test_chainsync_happy_path() {
     }
 
     for slot in 301..320 {
-        wal.roll_forward(std::iter::once(wal::testing::dummy_block_from_slot(slot)))
-            .unwrap();
+        wal.roll_forward(std::iter::once(dolos_redb::testing::dummy_block_from_slot(
+            slot,
+        )))
+        .unwrap();
 
         let next = client.chainsync().recv_while_must_reply().await.unwrap();
 
@@ -96,9 +108,9 @@ async fn test_chainsync_happy_path() {
         }
     }
 
-    wal.roll_back(&wal::ChainPoint::Specific(
+    wal.roll_back(&ChainPoint::Specific(
         310,
-        wal::testing::slot_to_hash(310),
+        dolos_redb::testing::slot_to_hash(310),
     ))
     .unwrap();
 

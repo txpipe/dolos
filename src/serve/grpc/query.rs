@@ -1,53 +1,58 @@
-use crate::{
-    chain::ChainStore,
-    ledger::{
-        pparams::{self, Genesis},
-        EraCbor, TxoRef,
-    },
-    serve::utils::apply_mask,
-    state::{LedgerError, LedgerStore},
-};
 use itertools::Itertools as _;
 use pallas::interop::utxorpc::{self as interop, spec::query::any_utxo_pattern::UtxoPattern};
+use pallas::interop::utxorpc::{LedgerContext, spec as u5c};
 use pallas::ledger::traverse::MultiEraOutput;
-use pallas::{
-    interop::utxorpc::spec as u5c,
-    ledger::traverse::{MultiEraBlock, MultiEraTx},
-};
-use std::{collections::HashSet, sync::Arc};
+use std::collections::HashSet;
 use tonic::{Request, Response, Status};
 use tracing::info;
 
-pub struct QueryServiceImpl {
-    ledger: LedgerStore,
-    mapper: interop::Mapper<LedgerStore>,
-    genesis: Arc<Genesis>,
-    chain: ChainStore,
-}
+use dolos_cardano::pparams;
 
-impl QueryServiceImpl {
-    pub fn new(ledger: LedgerStore, genesis: Arc<Genesis>, chain: ChainStore) -> Self {
-        Self {
-            ledger: ledger.clone(),
-            genesis,
-            mapper: interop::Mapper::new(ledger),
-            chain,
-        }
+use super::masking::apply_mask;
+use crate::prelude::*;
+
+pub fn point_to_u5c(point: &ChainPoint) -> u5c::query::ChainPoint {
+    match point {
+        ChainPoint::Origin => u5c::query::ChainPoint {
+            slot: 0,
+            hash: vec![].into(),
+        },
+        ChainPoint::Specific(slot, hash) => u5c::query::ChainPoint {
+            slot: *slot,
+            hash: hash.to_vec().into(),
+        },
     }
 }
 
-impl From<LedgerError> for Status {
-    fn from(value: LedgerError) -> Self {
-        Status::internal(value.to_string())
+pub struct QueryServiceImpl<D: Domain>
+where
+    D::State: LedgerContext,
+{
+    domain: D,
+    mapper: interop::Mapper<D::State>,
+}
+
+impl<D: Domain> QueryServiceImpl<D>
+where
+    D::State: LedgerContext,
+{
+    pub fn new(domain: D) -> Self {
+        let mapper = interop::Mapper::new(domain.state().clone());
+
+        Self { domain, mapper }
     }
+}
+
+fn into_status(err: impl std::error::Error) -> Status {
+    Status::internal(err.to_string())
 }
 
 trait IntoSet {
-    fn into_set(self, ledger: &LedgerStore) -> Result<HashSet<TxoRef>, Status>;
+    fn into_set<S: StateStore>(self, ledger: &S) -> Result<HashSet<TxoRef>, Status>;
 }
 
-fn intersect(
-    ledger: &LedgerStore,
+fn intersect<S: StateStore>(
+    ledger: &S,
     a: impl IntoSet,
     b: impl IntoSet,
 ) -> Result<HashSet<TxoRef>, Status> {
@@ -70,8 +75,8 @@ impl ByAddressQuery {
 }
 
 impl IntoSet for ByAddressQuery {
-    fn into_set(self, ledger: &LedgerStore) -> Result<HashSet<TxoRef>, Status> {
-        Ok(ledger.get_utxo_by_address(&self.0)?)
+    fn into_set<S: StateStore>(self, ledger: &S) -> Result<HashSet<TxoRef>, Status> {
+        ledger.get_utxo_by_address(&self.0).map_err(into_status)
     }
 }
 
@@ -88,8 +93,8 @@ impl ByPaymentQuery {
 }
 
 impl IntoSet for ByPaymentQuery {
-    fn into_set(self, ledger: &LedgerStore) -> Result<HashSet<TxoRef>, Status> {
-        Ok(ledger.get_utxo_by_payment(&self.0)?)
+    fn into_set<S: StateStore>(self, ledger: &S) -> Result<HashSet<TxoRef>, Status> {
+        ledger.get_utxo_by_payment(&self.0).map_err(into_status)
     }
 }
 
@@ -106,13 +111,13 @@ impl ByDelegationQuery {
 }
 
 impl IntoSet for ByDelegationQuery {
-    fn into_set(self, ledger: &LedgerStore) -> Result<HashSet<TxoRef>, Status> {
-        Ok(ledger.get_utxo_by_stake(&self.0)?)
+    fn into_set<S: StateStore>(self, ledger: &S) -> Result<HashSet<TxoRef>, Status> {
+        ledger.get_utxo_by_stake(&self.0).map_err(into_status)
     }
 }
 
 impl IntoSet for u5c::cardano::AddressPattern {
-    fn into_set(self, ledger: &LedgerStore) -> Result<HashSet<TxoRef>, Status> {
+    fn into_set<S: StateStore>(self, ledger: &S) -> Result<HashSet<TxoRef>, Status> {
         let exact = ByAddressQuery::maybe_from(self.exact_address);
         let payment = ByPaymentQuery::maybe_from(self.payment_part);
         let delegation = ByDelegationQuery::maybe_from(self.delegation_part);
@@ -141,8 +146,8 @@ impl ByPolicyQuery {
 }
 
 impl IntoSet for ByPolicyQuery {
-    fn into_set(self, ledger: &LedgerStore) -> Result<HashSet<TxoRef>, Status> {
-        Ok(ledger.get_utxo_by_policy(&self.0)?)
+    fn into_set<S: StateStore>(self, ledger: &S) -> Result<HashSet<TxoRef>, Status> {
+        ledger.get_utxo_by_policy(&self.0).map_err(into_status)
     }
 }
 
@@ -159,13 +164,13 @@ impl ByAssetQuery {
 }
 
 impl IntoSet for ByAssetQuery {
-    fn into_set(self, ledger: &LedgerStore) -> Result<HashSet<TxoRef>, Status> {
-        Ok(ledger.get_utxo_by_asset(&self.0)?)
+    fn into_set<S: StateStore>(self, ledger: &S) -> Result<HashSet<TxoRef>, Status> {
+        ledger.get_utxo_by_asset(&self.0).map_err(into_status)
     }
 }
 
 impl IntoSet for u5c::cardano::AssetPattern {
-    fn into_set(self, ledger: &LedgerStore) -> Result<HashSet<TxoRef>, Status> {
+    fn into_set<S: StateStore>(self, ledger: &S) -> Result<HashSet<TxoRef>, Status> {
         let by_policy = ByPolicyQuery::maybe_from(self.policy_id);
         let by_asset = ByAssetQuery::maybe_from(self.asset_name);
 
@@ -179,7 +184,7 @@ impl IntoSet for u5c::cardano::AssetPattern {
 }
 
 impl IntoSet for u5c::cardano::TxOutputPattern {
-    fn into_set(self, ledger: &LedgerStore) -> Result<HashSet<TxoRef>, Status> {
+    fn into_set<S: StateStore>(self, ledger: &S) -> Result<HashSet<TxoRef>, Status> {
         match (self.address, self.asset) {
             (None, Some(x)) => x.into_set(ledger),
             (Some(x), None) => x.into_set(ledger),
@@ -190,7 +195,7 @@ impl IntoSet for u5c::cardano::TxOutputPattern {
 }
 
 impl IntoSet for u5c::query::AnyUtxoPattern {
-    fn into_set(self, ledger: &LedgerStore) -> Result<HashSet<TxoRef>, Status> {
+    fn into_set<S: StateStore>(self, ledger: &S) -> Result<HashSet<TxoRef>, Status> {
         match self.utxo_pattern {
             Some(UtxoPattern::Cardano(x)) => x.into_set(ledger),
             _ => Ok(HashSet::new()),
@@ -203,10 +208,10 @@ fn from_u5c_txoref(txo: u5c::query::TxoRef) -> Result<TxoRef, Status> {
     Ok(TxoRef(hash, txo.index))
 }
 
-fn into_u5c_utxo(
+fn into_u5c_utxo<S: StateStore + LedgerContext>(
     txo: &TxoRef,
     body: &EraCbor,
-    mapper: &interop::Mapper<LedgerStore>,
+    mapper: &interop::Mapper<S>,
 ) -> Result<u5c::query::AnyUtxoData, pallas::codec::minicbor::decode::Error> {
     let parsed = MultiEraOutput::try_from(body)?;
     let parsed = mapper.map_tx_output(&parsed, None);
@@ -222,7 +227,10 @@ fn into_u5c_utxo(
 }
 
 #[async_trait::async_trait]
-impl u5c::query::query_service_server::QueryService for QueryServiceImpl {
+impl<D: Domain> u5c::query::query_service_server::QueryService for QueryServiceImpl<D>
+where
+    D::State: LedgerContext,
+{
     async fn read_params(
         &self,
         request: Request<u5c::query::ReadParamsRequest>,
@@ -231,11 +239,13 @@ impl u5c::query::query_service_server::QueryService for QueryServiceImpl {
 
         info!("received new grpc query");
 
-        let tip = self.ledger.cursor()?;
+        let tip = self.domain.state().cursor().map_err(into_status)?;
 
         let updates = self
-            .ledger
-            .get_pparams(tip.as_ref().map(|p| p.0).unwrap_or_default())?;
+            .domain
+            .state()
+            .get_pparams(tip.as_ref().map(|p| p.slot()).unwrap_or_default())
+            .map_err(into_status)?;
 
         let updates: Vec<_> = updates
             .into_iter()
@@ -243,9 +253,13 @@ impl u5c::query::query_service_server::QueryService for QueryServiceImpl {
             .try_collect::<_, _, pallas::codec::minicbor::decode::Error>()
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        let summary = pparams::fold_with_hacks(&self.genesis, &updates, tip.as_ref().unwrap().0);
+        let summary = pparams::fold_with_hacks(
+            self.domain.genesis(),
+            &updates,
+            tip.as_ref().unwrap().slot(),
+        );
 
-        let era = summary.era_for_slot(tip.as_ref().unwrap().0);
+        let era = summary.era_for_slot(tip.as_ref().unwrap().slot());
 
         let mut response = u5c::query::ReadParamsResponse {
             values: Some(u5c::query::AnyChainParams {
@@ -254,10 +268,7 @@ impl u5c::query::query_service_server::QueryService for QueryServiceImpl {
                 )
                 .into(),
             }),
-            ledger_tip: tip.map(|p| u5c::query::ChainPoint {
-                slot: p.0,
-                hash: p.1.to_vec().into(),
-            }),
+            ledger_tip: tip.as_ref().map(point_to_u5c),
         };
 
         if let Some(mask) = message.field_mask {
@@ -293,9 +304,7 @@ impl u5c::query::query_service_server::QueryService for QueryServiceImpl {
             .map(from_u5c_txoref)
             .try_collect()?;
 
-        let utxos = self
-            .ledger
-            .get_utxos(keys)
+        let utxos = StateStore::get_utxos(self.domain.state(), keys)
             .map_err(|e| Status::internal(e.to_string()))?;
 
         let items: Vec<_> = utxos
@@ -305,13 +314,12 @@ impl u5c::query::query_service_server::QueryService for QueryServiceImpl {
             .map_err(|e| Status::internal(e.to_string()))?;
 
         let cursor = self
-            .ledger
+            .domain
+            .state()
             .cursor()
             .map_err(|e| Status::internal(e.to_string()))?
-            .map(|p| u5c::query::ChainPoint {
-                slot: p.0,
-                hash: p.1.to_vec().into(),
-            });
+            .as_ref()
+            .map(point_to_u5c);
 
         Ok(Response::new(u5c::query::ReadUtxosResponse {
             items,
@@ -329,23 +337,21 @@ impl u5c::query::query_service_server::QueryService for QueryServiceImpl {
 
         let set = match message.predicate {
             Some(x) => match x.r#match {
-                Some(x) => x.into_set(&self.ledger)?,
+                Some(x) => x.into_set(self.domain.state())?,
                 _ => {
                     return Err(Status::invalid_argument(
                         "only 'match' predicate is supported by Dolos",
-                    ))
+                    ));
                 }
             },
             _ => {
                 return Err(Status::invalid_argument(
                     "criteria too broad, narrow it down",
-                ))
+                ));
             }
         };
 
-        let utxos = self
-            .ledger
-            .get_utxos(set.into_iter().collect_vec())
+        let utxos = StateStore::get_utxos(self.domain.state(), set.into_iter().collect_vec())
             .map_err(|e| Status::internal(e.to_string()))?;
 
         let items: Vec<_> = utxos
@@ -355,13 +361,12 @@ impl u5c::query::query_service_server::QueryService for QueryServiceImpl {
             .map_err(|e| Status::internal(e.to_string()))?;
 
         let cursor = self
-            .ledger
+            .domain
+            .state()
             .cursor()
             .map_err(|e| Status::internal(e.to_string()))?
-            .map(|p| u5c::query::ChainPoint {
-                slot: p.0,
-                hash: p.1.to_vec().into(),
-            });
+            .as_ref()
+            .map(point_to_u5c);
 
         Ok(Response::new(u5c::query::SearchUtxosResponse {
             items,

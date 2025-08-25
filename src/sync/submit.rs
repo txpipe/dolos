@@ -7,6 +7,7 @@ use std::time::Duration;
 use tracing::{debug, info, warn};
 
 use crate::mempool::Mempool;
+use crate::prelude::*;
 
 pub struct Worker {
     peer_session: PeerClient,
@@ -14,7 +15,7 @@ pub struct Worker {
 }
 
 impl Worker {
-    async fn propagate_txs(&mut self, txs: Vec<crate::mempool::Tx>) -> Result<(), WorkerError> {
+    async fn propagate_txs(&mut self, txs: Vec<MempoolTx>) -> Result<(), WorkerError> {
         debug!(n = txs.len(), "propagating tx ids");
 
         let payload = txs

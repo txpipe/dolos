@@ -2,6 +2,329 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.31.0] - 2025-08-25
+
+### 🐛 Bug Fixes
+
+- *(minifb)* Improve conformance on `/addresses` endpoints (#644)
+- *(minibf)* Use correct mappings for assets metadata CIP68 and CIP25 (#649)
+- Fix windows compile-time errors (#656)
+
+### 🚜 Refactor
+
+- Go through the domain for rebuilding stores (#645)
+- *(core)* Split slice loading from delta in state3 (#653)
+- *(bin)* Improve Mithril bootstrap procedure (#654)
+
+### 🔧 Continuous Integration
+
+- Bring back windows to the test matrix
+
+### 🧪 Testing
+
+- *(minibf)* Fix conformance tests for metadata endpoints (#651)
+
+### ⚙️ Miscellaneous Tasks
+
+- Update tx3 to v0.11.3
+- Bump tx3 and pallas versions
+- Fix new lint warnings
+- Remove phase2 flag (#650)
+
+## [0.30.2] - 2025-08-14
+
+### 🚀 Features
+
+- *(trp)* Parametrize extra_fees via config value (#647)
+
+### 🐛 Bug Fixes
+
+- *(minibf)* Improve conformance tests coverage (#641)
+- Support asset quantities larger than u64 (#643)
+- Use latest Pallas with better validation
+
+### 🧪 Testing
+
+- Fix outdated test
+
+### Release
+
+- V0.30.2
+
+## [0.30.1] - 2025-08-11
+
+### 🐛 Bug Fixes
+
+- *(minibf)* Improve conformance tests coverage (#635)
+- *(minibf)* Improve conformance test results (#637)
+
+### 🔧 Continuous Integration
+
+- Reinstate windows builds (#639)
+- Handle windows phase2 as a conditional compile (#640)
+
+### Release
+
+- V0.30.1
+
+## [0.30.0] - 2025-08-04
+
+### 🚀 Features
+
+- *(trp)* Improve error data (#625)
+- Make rich state configurable (#633)
+
+### 🚜 Refactor
+
+- *(trp)* Move error code to new module
+- Support having chain config values (#632)
+
+### 📚 Documentation
+
+- Include changes regarding minibf endpoints (#634)
+
+### Release
+
+- V0.30.0
+
+## [0.29.1] - 2025-07-31
+
+### 🐛 Bug Fixes
+
+- *(minibf)* Improve conformance test coverage (#629)
+
+### Release
+
+- V0.29.1
+
+## [0.29.0] - 2025-07-31
+
+### 🚀 Features
+
+- *(minibf)* Implement `txs/{hash}/stakes` endpoint (#605)
+- *(minibf)* Implement `accounts/{stake}` endpoint (#608)
+- *(minibf)* Implement `accounts/{stake}/addresses` endpoint (#610)
+- *(minibf)* Implement `metadata/txs/{label}` endpoints (#611)
+- *(minibf)* Implement `/assets/{asset}` endpoint (#612)
+- *(minibf)* Implement `/pools/extended` endpoint (#613)
+- *(minibf)* Implement `/pool/{id}/delegators` endpoint (#614)
+- *(minibf)* Implement `/network/eras` endpoint (#615)
+- *(minibf)* Implement `/network` endpoint (#617)
+- *(minibf)* Implement `accounts/{stake_address}/delegations` endpoint (#618)
+- *(minibf)* Implement `/accounts/{stake_address}/registrations` endpoint (#619)
+- *(minibf)* Implement `txs/{hash}/redeemers` endpoint (#556)
+- *(minibf)* Implement `accounts/{stake_address}/rewards` endpoint (#628)
+- *(minibf)* Implement `governance/dreps/{drepid}` endpoint (#626)
+
+### 🐛 Bug Fixes
+
+- *(minibf)* Improve endpoint conformance (#627)
+
+### 🚜 Refactor
+
+- Introduce chain-agnostic state interface (#607)
+
+### 🧪 Testing
+
+- Fix fake block hash mismatch
+
+### ⚙️ Miscellaneous Tasks
+
+- Fix lint warnings (#609)
+- *(minibf)* Use correct json & range  mappings (#620)
+
+### Release
+
+- V0.29.0
+
+## [0.28.0] - 2025-07-25
+
+### 🚀 Features
+
+- *(minibf)* Implement `tx/{hash}/mirs` endpoint (#602)
+- *(minibf)* Implement `txs/{hash}/pool_retires` endpoint (#603)
+- *(minibf)* Implement `txs/{hash}/pool_updates` endpoint (#604)
+
+### 🐛 Bug Fixes
+
+- Fallback to archive if WAL intersect fails (#606)
+
+### 🚜 Refactor
+
+- Use tx3 built-in resolver (#601)
+
+### Release
+
+- V0.28.0
+
+## [0.27.1] - 2025-07-16
+
+### 🐛 Bug Fixes
+
+- Handle phase-2 eval errors (#598)
+
+### ⚙️ Miscellaneous Tasks
+
+- Fix cargo release config
+- Unify cargo metadata across all crates
+
+### Release
+
+- V0.27.1
+
+## [0.27.0] - 2025-07-14
+
+### 🚀 Features
+
+- *(minibf)* Implement `address/{address}/transactions` endpoint (#593)
+
+### 🐛 Bug Fixes
+
+- *(u5c)* Use chain storage for DumpHistory requests (#568)
+- *(cardano)* Use uplc fork that support lists (#596)
+
+### 🧪 Testing
+
+- *(cardano)* Add pparams timeline data
+
+### ⚙️ Miscellaneous Tasks
+
+- Skip required code when no default features available (#595)
+
+### Release
+
+- V{{version}}
+
+## [0.26.1] - 2025-07-11
+
+### 🚀 Features
+
+- *(trp)* Implement submit endpoint (#592)
+
+### 🐛 Bug Fixes
+
+- *(minibf)* Match cost model keys with official API (#589)
+
+### 🚜 Refactor
+
+- *(trp)* Parse json args using tx3 sdk (#588)
+
+### Release
+
+- V0.26.1
+
+## [0.26.0] - 2025-07-07
+
+### 🚀 Features
+
+- Move TRP into crate and add OTEL (#572)
+- *(minibf)* Implement `epoch/latest/parameters` endpoint (#584)
+- *(minibf)* Implement `epoch/{number}/parameters` endpoint (#585)
+- *(minibf)* Implement `genesis` endpoint (#586)
+
+### 🚜 Refactor
+
+- Decouple u5c trait from state store (#577)
+- Move genesis include files to cardano crate (#581)
+
+### 🧪 Testing
+
+- *(trp)* Cover input resolver logic (#578)
+- Introduce toy domain artifact (#580)
+- Improve toy domain features (#583)
+
+### ⚙️ Miscellaneous Tasks
+
+- Fix new lint warnings (#579)
+- *(trp)* Update tx3-lang to v0.7.2 (#587)
+
+### Release
+
+- V0.26.0
+
+## [0.25.0] - 2025-07-03
+
+### 🚀 Features
+
+- *(minibf)* Implement `txs/{hash}/meatadata` endpoint (#554)
+- *(minibf)* Implement `txs/{hash}/metadata/cbor` endpoint (#555)
+- *(minibf)* Implement `txs/{hash}/withdrawals` endpoint (#557)
+- Add local storage stats command (#558)
+- Add housekeeping command (#561)
+- Add copy-ledger command (#560)
+- *(redb)* Support iterating multi-value keys (#565)
+- *(minibf)* Implement `txs/{hash}/delegations` endpoint (#571)
+
+### 🐛 Bug Fixes
+
+- *(core)* Use correct default value for max ledger history (#559)
+- *(minibf)* Use correct status code in `/blocks` endpoint (#563)
+- *(minibf)* Parse hash or number param corectly (#567)
+
+### 🚜 Refactor
+
+- Move testing artifacts to new crate (#564)
+- *(minibf)* Use open-api specs for `blocks/` endpoints (#570)
+
+### ⚙️ Miscellaneous Tasks
+
+- Update tx3 to v0.7.0 (#575)
+- Release v0.25.0
+
+## [0.24.0] - 2025-06-19
+
+### 🚀 Features
+
+- *(trp)* Improve argument decoding (#512)
+- *(trp)* Make arg decoding more  flexible (#519)
+- Support sync limit via config (#526)
+- Add reset-genesis command (#532)
+- Improve data summary command (#536)
+- *(minibf)* Implement `txs/{hash}` endpoint (#537)
+- *(minibf)* Implement `txs/{hash}/utxos` endpoint (#538)
+- *(redb)* Use quick repair on all write transactions (#551)
+
+### 🐛 Bug Fixes
+
+- Improve shutdown of stuck pipelines (#531)
+- *(minibf)* Implement cert count in tx model (#539)
+- *(minibf)* Include pagination in addresses utxos endpoint (#540)
+- *(minibf)* Handle trailing backlash (#541)
+- *(minibf)* Use full name for asset unit in utxos by address (#542)
+- *(minibf)* Sort utxos by slot in `addresses/{address}/utxos` endpoint (#543)
+- *(minibf)* Include block data in `/addresses` endpoints (#547)
+- *(minibf)* Include tx index in utxo ordering (#548)
+- *(minibf)* Show disaggregated output amounts  (#549)
+- *(redb)* Skip index for addresses with empty delegation (#552)
+
+### 🚜 Refactor
+
+- Split Cardano ledger into new crate (#514)
+- Split minibf into new crate (#515)
+- Abstract core domain as trait (#521)
+- Introduce driver abstraction (#528)
+
+### 📚 Documentation
+
+- Replace old docs with new structure (#513)
+
+### 🔧 Continuous Integration
+
+- Improve PR workflow speed (#525)
+- Run tests for the whole workspace (#553)
+
+### 🧪 Testing
+
+- Introduce xtask for smoke tests (#524)
+- Add daemon sync smoke test (#527)
+- *(redb)* Add state store tests (#550)
+
+### ⚙️ Miscellaneous Tasks
+
+- Update tx3 lib to v0.6.0 (#530)
+- Avoid commit of genesis files in test scenarios (#533)
+- Release v0.24.0
+
 ## [0.23.0] - 2025-05-23
 
 ### 🐛 Bug Fixes
@@ -16,6 +339,7 @@ All notable changes to this project will be documented in this file.
 
 - *(trp)* Decouple tx3 pallas version from the rest (#503)
 - Fix lint warnings (#507)
+- Release dolos version 0.23.0
 
 ## [0.22.0] - 2025-05-12
 

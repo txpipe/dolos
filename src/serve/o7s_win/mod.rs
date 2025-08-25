@@ -1,10 +1,9 @@
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-use tokio_util::sync::CancellationToken;
-use tracing::error;
+use tracing::{error, instrument};
 
-use crate::{prelude::Error, wal::redb::WalStore};
+use dolos_core::{CancelToken, Domain, ServeError};
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Config {
@@ -12,8 +11,14 @@ pub struct Config {
     pub magic: u64,
 }
 
-pub async fn serve(_: Config, _: WalStore, _: CancellationToken) -> Result<(), Error> {
-    error!("ouroboros client socket not yet supported on windows (soon)");
+pub struct Driver;
 
-    Ok(())
+impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
+    type Config = Config;
+
+    #[instrument(skip_all)]
+    async fn run(_cfg: Self::Config, _domain: D, _cancel: C) -> Result<(), ServeError> {
+        error!("ouroboros client socket not yet supported on windows (soon)");
+        Ok(())
+    }
 }

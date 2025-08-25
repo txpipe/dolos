@@ -1,0 +1,211 @@
+---
+title: Schema
+---
+
+This is an example configuration file for dolos:
+
+```toml
+[upstream]
+peer_address = "preprod-node.world.dev.cardano.org:30000"
+network_magic = 1
+is_testnet = true
+
+[storage]
+version = "v1"
+path = "data"
+max_wal_history = 10000
+max_chain_history = 10000
+
+[genesis]
+byron_path = "byron.json"
+shelley_path = "shelley.json"
+alonzo_path = "alonzo.json"
+conway_path = "conway.json"
+
+[chain]
+type = "Cardano"
+
+[chain.track]
+seen_addresses = true
+asset_state = true
+pool_state = true
+pool_delegator = true
+epoch_state = true
+account_activity = true
+
+[sync]
+pull_batch_size = 100
+
+[submit]
+prune_height = 200
+
+[serve.grpc]
+listen_address = "[::]:50051"
+
+[serve.minibf]
+listen_address = "[::]:3000"
+
+[serve.ouroboros]
+listen_path = "dolos.socket"
+magic = 1
+
+[relay]
+listen_address = "[::]:30031"
+magic = 1
+
+[mithril]
+aggregator = "https://aggregator.release-preprod.api.mithril.network/aggregator"
+genesis_key = "5b3...45d" # redacted
+
+[logging]
+max_level = "INFO"
+include_tokio = false
+include_pallas = false
+include_grpc = false
+```
+
+Each section of the toml controls a different aspect of Dolos' processes. The rest of this document describes in detail each of these sections.
+
+## `upstream` section
+
+The `upstream` section defines how to connect to the Ouroboros network to synchronize the chain and to submit transactions.
+
+| property      | type    | example                                    |
+| ------------- | ------- | ------------------------------------------ |
+| peer_address  | string  | "preprod-node.world.dev.cardano.org:30000" |
+| network_magic | integer | 1                                          |
+| is_testnet    | boolean | true                                       |
+
+- `peer_address`: network address of peer node using `{host}:{port}` syntax.
+- `network_magic`: the magic number of the network we're connecting to.
+- `is_tesnet`: flag to indicate if this network is a testent or not.
+
+## `storage` section
+
+The `storage` section controls how Dolos stores data in the local file system. This includes immutable chain blocks, the write ahead log and the ledger state.
+
+| property               | type    | example  |
+| ---------------------- | ------- | -------- |
+| path                   | string  | "./data" |
+| version                | string  | "v1"     |
+| wal_cache              | integer | 50       |
+| ledger_cache           | integer | 500      |
+| max_wal_history        | integer | 10000    |
+| max_ledger_history     | integer | 10000    |
+| max_chain_history      | integer | 10000    |
+
+- `path`: is the root directory where all data will be stored.
+- `version`: after Dolos v0.20.0, we've introduced a versioning system to handle schema upgrades more gracefully.
+- `wal_cache`: the size (in Mb) of the memory cache for the wal db.
+- `ledger_cache`: the size (in Mb) of the memory cache for the ledger db.
+- `max_wal_history`: the max number of slots to keep in the WAL. It makes sense to set this to the amount of mutable slots of the chain.
+- `max_ledger_history`: the max number of slots to keep in the ledger store before pruning. If not set, the ledger will prune past the immutable slot.
+- `max_chain_history`: the max number of slots to keep in the historic chain store before pruning. If not set, this won't be pruned.
+
+## `genesis` section
+
+Dolos requires Cardano genesis data to operate. For simplicity sake, we've decided to follow the schema for the existing .json files used by the Haskell node. The `genesis` section indicates how to locate the different json files with genesis data for each required era. The content of the json files should match the ones used in the Haskell node.
+
+| property       | type    | example          |
+| -------------  | ------- | ---------------- |
+| byron_path     | string  | "./byron.json"   |
+| shelley_path   | string  | "./shelley.json" |
+| alonzo_path    | string  | "./alonzo.json"  |
+| conway_path    | string  | "./conway.json"  |
+| force_protocol | integer | 2                |
+
+- `byron_path`: file path to the Byron json genesis file
+- `shelley_path`: file path to the Shelley json genesis file
+- `alonzo_path`: file path to the Alonzo json genesis file
+- `conway_path`: file path to the Conway json genesis file
+- `force_protocol`: (optional) the protocol version to force the node to start from. This is useful for networks such as `preview` which skips the Byron era.
+
+## `chain.track` section
+
+| property          | type    | default |
+| ----------------- | ------- | ------- |
+| seen_addresses    | boolean | true    |
+| asset_state       | boolean | true    |
+| pool_state        | boolean | true    |
+| pool_delegator    | boolean | true    |
+| epoch_state       | boolean | true    |
+| account_activity  | boolean | true    |
+| reward_logs       | boolean | true    |
+
+- `seen_addresses`: Tracks whether addresses have been observed.
+- `asset_state`: Monitors the state of assets.
+- `pool_state`: Keeps track of the state of pools.
+- `pool_delegator`: Observes delegator information for pools.
+- `epoch_state`: Tracks the state of epochs.
+- `account_activity`: Monitors activity related to accounts.
+- `reward_logs`: Keeps track of rewards for each delegator in each epoch
+
+## `sync` section
+
+The `sync` section controls how Dolos synchronizes the chain from upstream peers. This involves fetch a batch of blocks from the upstream node and updating the corresponding local storage.
+
+| property        | type    | example |
+| --------------- | ------- | ------- |
+| pull_batch_size | integer | 200     |
+
+- `pull_batch_szie`: the number of blocks that are fetched per batch.
+
+## `submit` section
+
+The `submit` section controls how Dolos submit transactions to the network. This involves maintaining a mempool of txs and sharing them with the upstream node.
+
+| property     | type    | example |
+| ------------ | ------- | ------- |
+| prune_height | integer | 60      |
+
+- `prune_height`: the number of stacked blocks since the tx to be considered safe for pruning.
+
+## `serve.grpc` section
+
+The `serve.grpc` section controls the options for the gRPC endpoint that can be used by clients.
+
+| property       | type   | example      |
+| -------------- | ------ | ------------ |
+| listen_address | string | "[::]:50051" |
+
+- `listen_address`: the local address (`IP:PORT`) to listen for incoming gRPC connections (`[::]` represents any IP address).
+
+## `serve.minibf` section
+
+The `serve.minibf` section controls the options for the HTTP endpoint that hosts a Blockfrost-like endpoint.
+
+| property       | type   | example      |
+| -------------- | ------ | ------------ |
+| listen_address | string | "[::]:3000"  |
+
+- `listen_address`: the local address (`IP:PORT`) to listen for incoming connections (`[::]` represents any IP address).
+
+## `serve.ouroboros` section
+
+The `serve.ouroboros` section controls the options for the Ouroboros mini-protocols endpoint that can be used by clients.
+
+| property    | type   | example        |
+| ----------- | ------ | -------------- |
+| listen_path | string | "dolos.socket" |
+
+- `listen_path`: the file path for the unix socket that will listen for Ouroboros node-to-client mini-protocols.
+
+## `relay` section
+
+The `relay` section controls the options for handling inbound connection from other peers through Ouroboros node-to-node miniprotocols.
+
+| property       | type   | example      |
+| -------------- | ------ | ------------ |
+| listen_address | string | "[::]:50051" |
+
+- `listen_address`: the local address (`IP:PORT`) to listen for incoming Ouroboros connections (`[::]` represents any IP address).
+
+## `logging` section
+
+The `logging` section controls the logging options to define the level of details to output.
+
+| property       | type   | example                                        |
+| -------------- | ------ | ---------------------------------------------- |
+| max_level      | option | "debug" / "info" / "warn" / "error"            |
+| include_pallas | option | wheter to include logs from the Pallas library |
+| include_tonic  | option | wheter to include logs from the Tonic library  |

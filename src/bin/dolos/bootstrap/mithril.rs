@@ -1,10 +1,12 @@
-use dolos::wal::{self, WalWriter};
 use itertools::Itertools;
-use miette::{bail, Context, IntoDiagnostic};
+use miette::{Context, IntoDiagnostic};
 use mithril_client::{ClientBuilder, MessageBuilder, MithrilError, MithrilResult};
 use pallas::ledger::traverse::MultiEraBlock;
+use rayon::iter::{IntoParallelIterator as _, ParallelIterator as _};
 use std::{path::Path, sync::Arc};
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
+
+use dolos::{adapters::DomainAdapter, prelude::*};
 
 use crate::{feedback::Feedback, MithrilConfig};
 
@@ -28,6 +30,11 @@ pub struct Args {
     /// Retain downloaded snapshot instead of deleting it
     #[arg(long, action)]
     retain_snapshot: bool,
+
+    /// Number of blocks to process in each chunk, more is faster but uses more
+    /// memory
+    #[arg(long, default_value = "500")]
+    chunk_size: usize,
 }
 
 impl Default for Args {
@@ -38,6 +45,7 @@ impl Default for Args {
             skip_validation: Default::default(),
             skip_download: Default::default(),
             retain_snapshot: Default::default(),
+            chunk_size: 500,
         }
     }
 }
@@ -87,7 +95,7 @@ impl mithril_client::feedback::FeedbackReceiver for MithrilFeedback {
                     .set_message("certificate fetched from cache");
             }
             x => {
-                self.validate_pb.set_message(format!("{:?}", x));
+                self.validate_pb.set_message(format!("{x:?}"));
             }
         }
     }
@@ -152,74 +160,100 @@ async fn fetch_snapshot(
     Ok(())
 }
 
-fn open_empty_wal(config: &crate::Config) -> miette::Result<wal::redb::WalStore> {
-    let wal = crate::common::open_wal_store(config)?;
+fn process_chunk(
+    domain: &DomainAdapter,
+    chunk: Vec<Vec<u8>>,
+    progress: &indicatif::ProgressBar,
+) -> Result<(), miette::Error> {
+    let decode = |b: Vec<u8>| {
+        let blockd = MultiEraBlock::decode(&b)
+            .into_diagnostic()
+            .context("decoding block cbor")?;
 
-    let is_empty = wal.is_empty().into_diagnostic()?;
+        miette::Result::Ok(RawBlock {
+            slot: blockd.slot(),
+            hash: blockd.hash(),
+            era: blockd.era(),
+            body: b,
+        })
+    };
 
-    if !is_empty {
-        bail!("can't continue with data already available");
+    let raw_blocks: Vec<_> = chunk
+        .into_par_iter()
+        .map(decode)
+        .collect::<miette::Result<_>>()?;
+
+    if let Err(err) = domain.apply_blocks(&raw_blocks) {
+        miette::bail!("failed to apply block chunk: {}", err);
     }
 
-    Ok(wal)
+    raw_blocks.last().inspect(|b| progress.set_position(b.slot));
+
+    Ok(())
 }
 
-fn import_hardano_into_wal(
+fn import_hardano_into_domain(
     config: &crate::Config,
     immutable_path: &Path,
     feedback: &Feedback,
+    chunk_size: usize,
 ) -> Result<(), miette::Error> {
-    let iter = pallas::storage::hardano::immutable::read_blocks(immutable_path)
-        .into_diagnostic()
-        .context("reading immutable db")?;
+    let domain = crate::common::setup_domain(config)?;
+
+    if !domain.state().is_empty().into_diagnostic()? {
+        domain
+            .apply_origin()
+            // TODO: can't use into_diagnostic here because some variant of DomainError doesn't
+            // implement std::error::Error
+            .map_err(|x| miette::miette!(x.to_string()))
+            .context("applying origin")?;
+    }
 
     let tip = pallas::storage::hardano::immutable::get_tip(immutable_path)
         .map_err(|err| miette::miette!(err.to_string()))
         .context("reading immutable db tip")?
         .ok_or(miette::miette!("immutable db has no tip"))?;
 
-    let mut wal = open_empty_wal(config).context("opening WAL")?;
-
-    wal.initialize_from_origin()
+    let cursor = domain
+        .state()
+        .cursor()
         .into_diagnostic()
-        .context("initializing WAL")?;
+        .context("reading state cursor")?
+        .map(|c| c.into())
+        .unwrap_or(pallas::network::miniprotocols::Point::Origin);
+
+    let iter = pallas::storage::hardano::immutable::read_blocks_from_point(immutable_path, cursor)
+        .map_err(|err| miette::miette!(err.to_string()))
+        .context("reading immutable db tip")?;
 
     let progress = feedback.slot_progress_bar();
 
-    progress.set_message("importing immutable db from Haskell into WAL");
+    progress.set_message("importing immutable db");
     progress.set_length(tip.slot_or_default());
 
-    for chunk in iter.chunks(100).into_iter() {
-        let bodies: Vec<_> = chunk
+    for chunk in iter.chunks(chunk_size).into_iter() {
+        let chunk = chunk
             .try_collect()
             .into_diagnostic()
             .context("reading block data")?;
 
-        let blocks: Vec<_> = bodies
-            .iter()
-            .map(|b| {
-                let blockd = MultiEraBlock::decode(b)
-                    .into_diagnostic()
-                    .context("decoding block cbor")?;
-
-                progress.set_position(blockd.slot());
-                debug!(slot = blockd.slot(), "importing block");
-
-                miette::Result::Ok(wal::RawBlock {
-                    slot: blockd.slot(),
-                    hash: blockd.hash(),
-                    era: blockd.era(),
-                    body: b.clone(),
-                })
-            })
-            .try_collect::<_, _, miette::Report>()?;
-
-        wal.roll_forward(blocks.into_iter())
-            .into_diagnostic()
-            .context("adding wal entries")?;
+        process_chunk(&domain, chunk, &progress)?;
     }
 
-    progress.abandon_with_message("WAL import complete");
+    progress.abandon_with_message("immutable db import complete");
+
+    let cursor = domain
+        .state()
+        .cursor()
+        .into_diagnostic()
+        .context("reading state cursor")?
+        .unwrap_or(ChainPoint::Origin);
+
+    domain
+        .wal()
+        .append_entries(std::iter::once(LogValue::Mark(cursor)))
+        .into_diagnostic()
+        .context("appending start location in WAL")?;
 
     Ok(())
 }
@@ -255,9 +289,7 @@ pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::
 
     let immutable_path = Path::new(&args.download_dir).join("immutable");
 
-    import_hardano_into_wal(config, &immutable_path, feedback)?;
-
-    crate::doctor::run_rebuild_stores(config, feedback).context("rebuilding ledger and chain")?;
+    import_hardano_into_domain(config, &immutable_path, feedback, args.chunk_size)?;
 
     if !args.retain_snapshot {
         info!("deleting downloaded snapshot");

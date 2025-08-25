@@ -1,140 +1,38 @@
-use itertools::Itertools;
-use miette::IntoDiagnostic;
-use pallas::ledger::traverse::{MultiEraBlock, MultiEraUpdate};
-use std::path::Path;
-
-use dolos::{
-    ledger::{ChainPoint, EraCbor},
-    wal::{redb::WalStore, RawBlock, ReadUtils, WalReader as _},
-};
-
-#[allow(dead_code)]
-fn dump_txs(chain: &WalStore) -> miette::Result<()> {
-    let blocks = chain
-        .crawl_from(None)
-        .into_diagnostic()?
-        .filter_forward()
-        .into_blocks()
-        .flatten();
-
-    for block in blocks {
-        let RawBlock { slot, body, .. } = block;
-
-        println!("dumping {slot}");
-
-        let block = MultiEraBlock::decode(&body).into_diagnostic()?;
-
-        for tx in block.txs() {
-            let cbor = hex::encode(tx.encode());
-            let path = format!("{}.tx", tx.hash());
-            std::fs::write(Path::new(&path), cbor).into_diagnostic()?;
-        }
-    }
-
-    Ok(())
-}
+use dolos::cli::{ArchiveSummary, DataSummary, StateSummary, WalSummary};
+use dolos::prelude::*;
 
 #[derive(Debug, clap::Args)]
 pub struct Args {}
 
 pub fn run(config: &crate::Config, _args: &Args) -> miette::Result<()> {
-    crate::common::setup_tracing(&config.logging)?;
+    let stores = crate::common::setup_data_stores(config)?;
 
-    let (wal, ledger, _) = crate::common::setup_data_stores(config)?;
+    let wal_start = stores.wal.crawl_from(None).unwrap().next();
+    let wal_tip = stores.wal.find_tip().unwrap();
 
-    if let Some((seq, point)) = wal.crawl_from(None).unwrap().next() {
-        println!("found WAL start");
-        println!("seq: {seq}, point: {point:?}");
-    } else {
-        println!("WAL is empty");
-    }
+    let wal_summary = WalSummary {
+        start_seq: wal_start.as_ref().map(|(seq, _)| *seq),
+        start_slot: wal_start.as_ref().map(|(_, x)| x.slot()),
+        tip_seq: wal_tip.as_ref().map(|(seq, _)| *seq),
+        tip_slot: wal_tip.as_ref().map(|(_, x)| x.slot()),
+    };
 
-    if let Some((seq, point)) = wal.find_tip().unwrap() {
-        println!("found WAL tip");
-        println!("seq: {seq}, point: {point:?}");
-    } else {
-        println!("WAL is empty");
-    }
+    let archive_summary = ArchiveSummary {
+        tip_slot: stores.archive.get_tip().unwrap().map(|(slot, _)| slot),
+    };
 
-    println!("---");
+    let state_summary = StateSummary {
+        start_slot: stores.state.start().unwrap().map(|x| x.slot()),
+        tip_slot: stores.state.cursor().unwrap().map(|x| x.slot()),
+    };
 
-    if let Some(ChainPoint(slot, hash)) = ledger.cursor().unwrap() {
-        println!("found ledger tip");
-        println!("slot: {slot}, hash: {hash}");
-    } else {
-        println!("ledger is empty");
-    }
+    let summary = DataSummary {
+        wal: wal_summary,
+        archive: archive_summary,
+        state: state_summary,
+    };
 
-    // println!("---");
-
-    // let byron =
-    // pallas::ledger::configs::byron::from_file(&config.byron.path).unwrap();
-    // let shelley =
-    // pallas::ledger::configs::shelley::from_file(&config.shelley.path).unwrap();
-    // let alonzo =
-    // pallas::ledger::configs::alonzo::from_file(&config.alonzo.path).unwrap();
-
-    // let data: Vec<_> = ledger.get_pparams(46153027).into_diagnostic()?;
-
-    // let updates = data
-    //     .iter()
-    //     .map(|PParamsBody(era, cbor)| -> miette::Result<MultiEraUpdate> {
-    //         let era = Era::try_from(*era).into_diagnostic()?;
-    //         MultiEraUpdate::decode_for_era(era, cbor).into_diagnostic()
-    //     })
-    //     .try_collect()?;
-
-    // let merged = dolos::ledger::pparams::fold_pparams(
-    //     Genesis {
-    //         byron: &byron,
-    //         shelley: &shelley,
-    //         alonzo: &alonzo,
-    //     },
-    //     updates,
-    //     500,
-    // );
-
-    //dbg!(merged);
-
-    println!("---");
-
-    let curr_point = ledger
-        .cursor()
-        .into_diagnostic()?
-        .ok_or(miette::miette!("Uninitialized ledger."))?;
-
-    let updates: Vec<_> = ledger.get_pparams(curr_point.0).into_diagnostic()?;
-
-    let updates: Vec<_> = updates
-        .iter()
-        .map(|EraCbor(era, cbor)| {
-            let era = (*era).try_into().expect("era out of range");
-            MultiEraUpdate::decode_for_era(era, cbor)
-        })
-        .try_collect()
-        .into_diagnostic()?;
-
-    let genesis = crate::common::open_genesis_files(&config.genesis)?;
-
-    let eras = dolos::ledger::pparams::fold(&genesis, &updates);
-
-    println!("{:?}", eras);
-
-    println!("---");
-
-    for utxo in ledger
-        .get_utxo_by_address(
-            &hex::decode("6059184749e2d67a7ea2ca31ef48fc0befb3c3fad5a88af7264531ae07").unwrap(),
-        )
-        .into_diagnostic()?
-    {
-        println!("{}:{}", hex::encode(utxo.0), utxo.1)
-    }
-
-    // WIP utility to dump tx data for debugging purposes. Should be implemented as
-    // a subcommand.
-
-    // dump_txs(&chain)?;
+    println!("{}", serde_json::to_string_pretty(&summary).unwrap());
 
     Ok(())
 }

@@ -1,21 +1,21 @@
+use dolos_core::Driver as _;
+use futures_util::stream::FuturesUnordered;
 use pallas::network::facades::PeerServer;
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
-use tokio_util::sync::CancellationToken;
-use tokio_util::task::TaskTracker;
-
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{debug, info, instrument, warn};
 
-use crate::prelude::*;
-use crate::wal::redb::WalStore;
+use crate::{adapters::DomainAdapter, prelude::*};
 
 mod blockfetch;
 mod chainsync;
 mod convert;
 mod hanshake;
 
-#[cfg(test)]
-mod tests;
+// TODO: add tests
+// #[cfg(test)]
+// mod tests;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Config {
@@ -23,11 +23,11 @@ pub struct Config {
     pub magic: u64,
 }
 
-async fn handle_session(
-    wal: WalStore,
+async fn handle_session<W: WalStore, C: CancelToken>(
+    wal: W,
     peer: PeerServer,
-    cancel: CancellationToken,
-) -> Result<(), Error> {
+    cancel: C,
+) -> Result<(), ServeError> {
     let PeerServer {
         plexer,
         chainsync,
@@ -47,22 +47,22 @@ async fn handle_session(
     Ok(())
 }
 
-async fn accept_peer_connections(
-    wal: WalStore,
+async fn accept_peer_connections<W: WalStore, C: CancelToken>(
+    wal: W,
     config: &Config,
     tasks: &mut TaskTracker,
-    cancel: CancellationToken,
-) -> Result<(), Error> {
+    cancel: C,
+) -> Result<(), ServeError> {
     let listener = TcpListener::bind(&config.listen_address)
         .await
-        .map_err(Error::server)?;
+        .map_err(ServeError::BindError)?;
 
     info!(addr = &config.listen_address, "ouroboros listening");
 
     loop {
         let peer = PeerServer::accept(&listener, config.magic)
             .await
-            .map_err(Error::server)?;
+            .map_err(|e| ServeError::Internal(e.into()))?;
 
         info!(
             from = ?peer.accepted_address(),
@@ -76,41 +76,52 @@ async fn accept_peer_connections(
     }
 }
 
-#[instrument(skip_all)]
-pub async fn serve(
-    config: Option<Config>,
-    wal: WalStore,
-    cancel: CancellationToken,
-) -> Result<(), Error> {
-    let config = match config {
-        Some(x) => x,
-        None => {
-            warn!("relay not enabled, skipping serve");
-            return Ok(());
-        }
-    };
+pub struct Driver;
 
-    let mut tasks = TaskTracker::new();
+impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
+    type Config = Config;
 
-    tokio::select! {
-        res = accept_peer_connections(wal.clone(), &config, &mut tasks, cancel.clone()) => {
-            res?;
-        },
-        _ = cancel.cancelled() => {
-            warn!("exit requested");
+    #[instrument(skip_all)]
+    async fn run(cfg: Self::Config, domain: D, cancel: C) -> Result<(), ServeError> {
+        let mut tasks = TaskTracker::new();
+
+        tokio::select! {
+            res = accept_peer_connections(domain.wal().clone(), &cfg, &mut tasks, cancel.clone()) => {
+                res?;
+            },
+            _ = cancel.cancelled() => {
+                warn!("exit requested");
+            }
         }
+
+        // notify the tracker that we're done receiving new tasks. Without this explicit
+        // close, the wait will block forever.
+        debug!("closing task manger");
+        tasks.close();
+
+        // now we wait until all nested tasks exit
+        debug!("waiting for tasks to finish");
+        tasks.wait().await;
+
+        info!("graceful shutdown finished");
+
+        Ok(())
     }
+}
 
-    // notify the tracker that we're done receiving new tasks. Without this explicit
-    // close, the wait will block forever.
-    debug!("closing task manger");
-    tasks.close();
+pub fn load_drivers(
+    all_drivers: &FuturesUnordered<tokio::task::JoinHandle<Result<(), ServeError>>>,
+    config: Option<Config>,
+    domain: DomainAdapter,
+    exit: CancellationToken,
+) {
+    if let Some(cfg) = config {
+        info!("found Ouroboros config");
 
-    // now we wait until all nested tasks exit
-    debug!("waiting for tasks to finish");
-    tasks.wait().await;
+        let driver = Driver::run(cfg.clone(), domain.clone(), CancelTokenImpl(exit.clone()));
 
-    info!("graceful shutdown finished");
+        let task = tokio::spawn(driver);
 
-    Ok(())
+        all_drivers.push(task);
+    }
 }

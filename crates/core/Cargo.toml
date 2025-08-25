@@ -1,0 +1,15 @@
+[package]
+name = "dolos-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+trait-variant.workspace = true
+itertools.workspace = true
+tracing.workspace = true
+futures-core.workspace = true
+
+# TODO: we shouldn't need Pallas in core
+pallas.workspace = true

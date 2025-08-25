@@ -1,4 +1,3 @@
-use dolos::ledger::{EraCbor, TxoRef};
 use itertools::*;
 use miette::{Context, IntoDiagnostic};
 use pallas::{
@@ -6,6 +5,8 @@ use pallas::{
     ledger::validate::utils::{CertState, Environment as ValidationContext, UTxOs},
 };
 use std::{borrow::Cow, path::PathBuf, sync::Arc};
+
+use dolos::core::{EraCbor, StateStore as _, TxoRef};
 
 #[derive(Debug, clap::Args)]
 pub struct Args {
@@ -28,7 +29,7 @@ pub struct Args {
 pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging)?;
 
-    let (_, ledger, _) = crate::common::setup_data_stores(config)?;
+    let stores = crate::common::setup_data_stores(config)?;
     let genesis = Arc::new(crate::common::open_genesis_files(&config.genesis)?);
 
     let cbor = std::fs::read_to_string(&args.file)
@@ -51,7 +52,8 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
         .map(|utxo| TxoRef(*utxo.hash(), utxo.index() as u32))
         .collect_vec();
 
-    let resolved = ledger
+    let resolved = stores
+        .state
         .get_utxos(refs)
         .into_diagnostic()
         .context("resolving utxo")?;
@@ -81,7 +83,8 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
         utxos2.insert(key, value);
     }
 
-    let updates = ledger
+    let updates = stores
+        .state
         .get_pparams(args.epoch)
         .into_diagnostic()
         .context("retrieving pparams")?;
@@ -94,7 +97,7 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
         })
         .try_collect()?;
 
-    let pparams = dolos::ledger::pparams::fold(&genesis, &updates)
+    let pparams = dolos::cardano::pparams::fold(&genesis, &updates)
         .edge()
         .pparams
         .clone();

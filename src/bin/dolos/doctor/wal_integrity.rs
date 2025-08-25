@@ -1,7 +1,8 @@
-use dolos::wal::{self, RawBlock, ReadUtils, WalReader as _};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use miette::{Context, IntoDiagnostic};
 use pallas::ledger::traverse::MultiEraBlock;
+
+use dolos::prelude::*;
 
 struct Feedback {
     _multi: MultiProgress,
@@ -46,8 +47,8 @@ pub fn run(config: &crate::Config, _args: &Args) -> miette::Result<()> {
         .ok_or(miette::miette!("no WAL tip found"))?;
 
     match tip {
-        wal::ChainPoint::Origin => feedback.global_pb.set_length(0),
-        wal::ChainPoint::Specific(slot, _) => feedback.global_pb.set_length(slot),
+        ChainPoint::Origin => feedback.global_pb.set_length(0),
+        ChainPoint::Specific(slot, _) => feedback.global_pb.set_length(slot),
     }
 
     let remaining = wal

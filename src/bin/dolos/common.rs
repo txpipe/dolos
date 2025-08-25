@@ -1,16 +1,23 @@
-use dolos::{chain, ledger::pparams::Genesis, state, wal};
 use miette::{Context as _, IntoDiagnostic};
+use std::sync::Arc;
 use std::{fs, path::PathBuf, time::Duration};
-use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 use tracing_subscriber::{filter::Targets, prelude::*};
 
+use dolos::adapters::{ArchiveAdapter, ChainAdapter, DomainAdapter, StateAdapter, WalAdapter};
+use dolos::core::Genesis;
 use dolos::prelude::*;
 
 use crate::{GenesisConfig, LoggingConfig};
 
-pub type Stores = (wal::redb::WalStore, state::LedgerStore, chain::ChainStore);
+pub struct Stores {
+    pub wal: WalAdapter,
+    pub state: StateAdapter,
+    pub archive: ArchiveAdapter,
+
+    pub state3: dolos_redb3::StateStore,
+}
 
 pub fn ensure_storage_path(config: &crate::Config) -> Result<PathBuf, Error> {
     let root = config.storage.path.as_ref().ok_or(Error::config(
@@ -22,36 +29,43 @@ pub fn ensure_storage_path(config: &crate::Config) -> Result<PathBuf, Error> {
     Ok(root.to_path_buf())
 }
 
-pub fn open_wal_store(config: &crate::Config) -> Result<wal::redb::WalStore, Error> {
+pub fn open_wal_store(config: &crate::Config) -> Result<WalAdapter, Error> {
     let root = ensure_storage_path(config)?;
 
-    let wal = wal::redb::WalStore::open(
-        root.join("wal"),
-        config.storage.wal_cache,
-        config.storage.max_wal_history,
-    )?;
+    let wal = dolos_redb::wal::RedbWalStore::open(root.join("wal"), config.storage.wal_cache)?;
 
-    Ok(wal)
+    Ok(WalAdapter::Redb(wal))
 }
 
-pub fn open_chain_store(config: &crate::Config) -> Result<chain::ChainStore, Error> {
+pub fn open_chain_store(config: &crate::Config) -> Result<ArchiveAdapter, Error> {
     let root = ensure_storage_path(config)?;
 
-    let chain = chain::redb::ChainStore::open(
-        root.join("chain"),
-        config.storage.chain_cache,
-        config.storage.max_chain_history,
-    )?;
+    let chain =
+        dolos_redb::archive::ChainStore::open(root.join("chain"), config.storage.chain_cache)
+            .map_err(ArchiveError::from)?;
 
     Ok(chain.into())
 }
 
-pub fn open_ledger_store(config: &crate::Config) -> Result<state::LedgerStore, Error> {
+pub fn open_ledger_store(config: &crate::Config) -> Result<StateAdapter, Error> {
     let root = ensure_storage_path(config)?;
 
-    let ledger = state::redb::LedgerStore::open(root.join("ledger"), config.storage.ledger_cache)?;
+    let ledger =
+        dolos_redb::state::LedgerStore::open(root.join("ledger"), config.storage.ledger_cache)
+            .map_err(StateError::from)?;
 
     Ok(ledger.into())
+}
+
+pub fn open_state3_store(config: &crate::Config) -> Result<dolos_redb3::StateStore, Error> {
+    let root = ensure_storage_path(config)?;
+    let schema = dolos_cardano::model::build_schema();
+
+    let state3 =
+        dolos_redb3::StateStore::open(schema, root.join("state"), config.storage.ledger_cache)
+            .map_err(State3Error::from)?;
+
+    Ok(state3)
 }
 
 pub fn open_persistent_data_stores(config: &crate::Config) -> Result<Stores, Error> {
@@ -61,30 +75,68 @@ pub fn open_persistent_data_stores(config: &crate::Config) -> Result<Stores, Err
     }
 
     let wal = open_wal_store(config)?;
+
     let ledger = open_ledger_store(config)?;
+
+    let state3 = open_state3_store(config)?;
+
     let chain = open_chain_store(config)?;
 
-    Ok((wal, ledger, chain))
+    Ok(Stores {
+        wal,
+        state: ledger,
+        archive: chain,
+        state3,
+    })
 }
 
-pub fn create_ephemeral_data_stores(config: &crate::Config) -> Result<Stores, Error> {
-    let mut wal = wal::redb::WalStore::memory(config.storage.max_wal_history)?;
+pub fn create_ephemeral_data_stores() -> Result<Stores, Error> {
+    let wal = dolos_redb::wal::RedbWalStore::memory()?;
 
-    wal.initialize_from_origin()?;
+    wal.initialize_from_origin().map_err(WalError::from)?;
 
-    let ledger = state::LedgerStore::Redb(state::redb::LedgerStore::in_memory_v2()?);
+    let ledger = dolos_redb::state::LedgerStore::in_memory_v2()?;
 
-    let chain = chain::ChainStore::Redb(chain::redb::ChainStore::in_memory_v1()?);
+    let state3 = dolos_redb3::StateStore::in_memory(dolos_cardano::model::build_schema())
+        .map_err(State3Error::from)?;
 
-    Ok((wal, ledger, chain))
+    let chain = dolos_redb::archive::ChainStore::in_memory_v1()?;
+
+    Ok(Stores {
+        wal: wal.into(),
+        state: ledger.into(),
+        archive: chain.into(),
+        state3,
+    })
 }
 
 pub fn setup_data_stores(config: &crate::Config) -> Result<Stores, Error> {
     if config.storage.is_ephemeral() {
-        create_ephemeral_data_stores(config)
+        create_ephemeral_data_stores()
     } else {
         open_persistent_data_stores(config)
     }
+}
+
+pub fn setup_domain(config: &crate::Config) -> miette::Result<DomainAdapter> {
+    let stores = setup_data_stores(config)?;
+    let genesis = Arc::new(open_genesis_files(&config.genesis)?);
+    let mempool = dolos::mempool::Mempool::new(genesis.clone(), stores.state.clone());
+    let chain = ChainAdapter::from(config.chain.clone().unwrap_or_default());
+
+    let domain = DomainAdapter {
+        storage_config: Arc::new(config.storage.clone()),
+        genesis,
+        chain,
+        wal: stores.wal,
+        state: stores.state,
+        archive: stores.archive,
+        mempool,
+
+        state3: stores.state3,
+    };
+
+    Ok(domain)
 }
 
 pub fn setup_tracing(config: &LoggingConfig) -> miette::Result<()> {
@@ -170,10 +222,10 @@ async fn wait_for_exit_signal() {
 
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {
-            warn!("SIGINT detected");
+            tracing::warn!("SIGINT detected");
         }
         _ = sigterm.recv() => {
-            warn!("SIGTERM detected");
+            tracing::warn!("SIGTERM detected");
         }
     };
 }
@@ -200,8 +252,12 @@ pub fn hook_exit_token() -> CancellationToken {
 pub async fn run_pipeline(pipeline: gasket::daemon::Daemon, exit: CancellationToken) {
     loop {
         tokio::select! {
-            _ = tokio::time::sleep(Duration::from_secs(5000)) => {
+            _ = tokio::time::sleep(Duration::from_secs(5)) => {
                 if pipeline.should_stop() {
+                    debug!("pipeline should stop");
+
+                    // trigger cancel so that stages stop early
+                    exit.cancel();
                     break;
                 }
             }
@@ -214,10 +270,6 @@ pub async fn run_pipeline(pipeline: gasket::daemon::Daemon, exit: CancellationTo
 
     debug!("shutting down pipeline");
     pipeline.teardown();
-}
-
-pub fn spawn_pipeline(pipeline: gasket::daemon::Daemon, exit: CancellationToken) -> JoinHandle<()> {
-    tokio::spawn(run_pipeline(pipeline, exit))
 }
 
 pub fn cleanup_data(config: &crate::Config) -> Result<(), std::io::Error> {

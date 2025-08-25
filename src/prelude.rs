@@ -1,4 +1,4 @@
-pub use super::model::*;
+pub use dolos_core::*;
 
 use miette::Diagnostic;
 use std::fmt::Display;
@@ -25,13 +25,16 @@ pub enum Error {
     StorageError(String),
 
     #[error("wal error: {0}")]
-    WalError(#[from] crate::wal::WalError),
+    WalError(#[from] WalError),
 
     #[error("chain error: {0}")]
-    ChainError(#[from] crate::chain::ChainError),
+    ArchiveError(#[from] ArchiveError),
 
     #[error("state error: {0}")]
-    StateError(#[from] crate::state::LedgerError),
+    StateError(#[from] StateError),
+
+    #[error("state3 error: {0}")]
+    State3Error(#[from] State3Error),
 
     #[error("{0}")]
     Message(String),
@@ -69,5 +72,14 @@ impl Error {
 impl From<Box<dyn std::error::Error>> for Error {
     fn from(err: Box<dyn std::error::Error>) -> Self {
         Error::custom(err)
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct CancelTokenImpl(pub tokio_util::sync::CancellationToken);
+
+impl CancelToken for CancelTokenImpl {
+    async fn cancelled(&self) {
+        self.0.cancelled().await;
     }
 }

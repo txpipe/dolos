@@ -3,26 +3,19 @@ use pallas::network::miniprotocols::{
     chainsync::{ClientRequest, N2NServer, Tip},
     Point,
 };
-use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
-use crate::{
-    prelude::Error,
-    wal::{
-        self, redb::WalStore, ChainPoint, LogEntry, LogSeq, LogValue, RawBlock, ReadUtils,
-        WalReader,
-    },
-};
+use crate::prelude::*;
 
-pub struct Session<'a> {
-    wal: WalStore,
-    current_iterator: Option<wal::redb::WalIter<'a>>,
+pub struct Session<'a, W: WalStore> {
+    wal: W,
+    current_iterator: Option<W::LogIterator<'a>>,
     is_new_intersection: bool,
     last_known_seq: Option<LogSeq>,
     connection: N2NServer,
 }
 
-impl Session<'_> {
+impl<'a, W: WalStore> Session<'a, W> {
     fn prepare_tip(&self) -> Result<Tip, Error> {
         let tip = self
             .wal
@@ -95,7 +88,7 @@ impl Session<'_> {
 
     async fn wait_for_next_wal(&mut self) -> Result<LogEntry, Error> {
         loop {
-            self.wal.tip_change().await.map_err(Error::server)?;
+            self.wal.tip_change().await;
 
             self.restart_iterator()?;
 
@@ -224,11 +217,11 @@ impl Session<'_> {
     }
 }
 
-pub async fn handle_session(
-    wal: WalStore,
+pub async fn handle_session<W: WalStore, C: CancelToken>(
+    wal: W,
     connection: N2NServer,
-    cancel: CancellationToken,
-) -> Result<(), Error> {
+    cancel: C,
+) -> Result<(), ServeError> {
     let mut session = Session {
         wal,
         connection,
