@@ -383,22 +383,24 @@ impl dolos_core::State3Store for StateStore {
         Ok(values)
     }
 
-    fn apply_delta(&self, delta: StateDelta) -> Result<(), StateError> {
+    fn apply(&self, deltas: &[StateDelta]) -> Result<(), StateError> {
         let mut wx = self.db().begin_write().map_err(Error::from)?;
 
         wx.set_durability(Durability::Eventual);
         wx.set_quick_repair(true);
 
-        self.append_cursor(&mut wx, delta.slot())?;
+        for delta in deltas {
+            self.append_cursor(&mut wx, delta.slot())?;
 
-        for (ns, crdts) in delta.iter_deltas() {
-            let table = self
-                .tables
-                .get(&ns)
-                .ok_or(StateError::NamespaceNotFound(ns))?;
+            for (ns, crdts) in delta.iter_deltas() {
+                let table = self
+                    .tables
+                    .get(&ns)
+                    .ok_or(StateError::NamespaceNotFound(ns))?;
 
-            for crdt in crdts {
-                table.apply(&mut wx, crdt.clone())?;
+                for crdt in crdts {
+                    table.apply(&mut wx, crdt.clone())?;
+                }
             }
         }
 
@@ -407,23 +409,25 @@ impl dolos_core::State3Store for StateStore {
         Ok(())
     }
 
-    fn undo_delta(&self, delta: StateDelta) -> Result<(), StateError> {
+    fn undo(&self, deltas: &[StateDelta]) -> Result<(), StateError> {
         let mut wx = self.db().begin_write().map_err(Error::from)?;
 
         wx.set_durability(Durability::Eventual);
         wx.set_quick_repair(true);
 
-        self.undo_cursor(&mut wx, delta.slot())?;
+        for delta in deltas {
+            self.undo_cursor(&mut wx, delta.slot())?;
 
-        for (ns, crdts) in delta.iter_deltas() {
-            let table = self
-                .tables
-                .get(&ns)
-                .ok_or(StateError::NamespaceNotFound(ns))?;
+            for (ns, crdts) in delta.iter_deltas() {
+                let table = self
+                    .tables
+                    .get(&ns)
+                    .ok_or(StateError::NamespaceNotFound(ns))?;
 
-            for crdt in crdts {
-                let undo = crdt.into_undo();
-                table.apply(&mut wx, undo)?;
+                for crdt in crdts {
+                    let undo = crdt.clone().into_undo();
+                    table.apply(&mut wx, undo)?;
+                }
             }
         }
 
@@ -451,7 +455,7 @@ mod tests {
         delta.override_key("x", b"c", b"123", None);
         delta.override_key("x", b"d", b"123", None);
 
-        store.apply_delta(delta).unwrap();
+        store.apply(&[delta]).unwrap();
 
         let cursor = store.get_cursor().unwrap();
         assert_eq!(cursor, Some(1));
@@ -488,7 +492,7 @@ mod tests {
         delta.append_value("y", b"b", b"123");
         delta.append_value("y", b"b", b"456");
 
-        store.apply_delta(delta).unwrap();
+        store.apply(&[delta]).unwrap();
 
         let cursor = store.get_cursor().unwrap();
         assert_eq!(cursor, Some(1));
