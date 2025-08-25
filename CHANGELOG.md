@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.31.1] - 2025-08-25
+
+### 🐛 Bug Fixes
+
+- *(bin)* Fix bad logic in Mithril bootstrap start
+
 ## [0.31.0] - 2025-08-25
 
 ### 🐛 Bug Fixes
@@ -9,6 +15,7 @@ All notable changes to this project will be documented in this file.
 - *(minifb)* Improve conformance on `/addresses` endpoints (#644)
 - *(minibf)* Use correct mappings for assets metadata CIP68 and CIP25 (#649)
 - Fix windows compile-time errors (#656)
+- Calculate correct tx size fixed in Pallas (#655)
 
 ### 🚜 Refactor
 
@@ -30,6 +37,10 @@ All notable changes to this project will be documented in this file.
 - Bump tx3 and pallas versions
 - Fix new lint warnings
 - Remove phase2 flag (#650)
+
+### Release
+
+- V0.31.0
 
 ## [0.30.2] - 2025-08-14
 

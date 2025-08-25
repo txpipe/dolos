@@ -118,7 +118,7 @@ lto = "thin"
 members = ["crates/cardano", "crates/core", "crates/testing", "crates/minibf", "crates/redb", "xtask", "crates/redb3"]
 
 [workspace.package]
-version = "0.31.0"
+version = "0.31.1"
 edition = "2021"
 repository = "https://github.com/txpipe/dolos"
 homepage = "https://github.com/txpipe/dolos"
