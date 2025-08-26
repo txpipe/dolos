@@ -146,14 +146,54 @@ fn apply_predicate(predicate: &u5c::watch::TxPredicate, tx: &u5c::cardano::Tx) -
     tx_matches && !not_clause && and_clause && or_clause
 }
 
-fn block_to_txs<C: LedgerContext>(
+fn block_to_txs<D: Domain, C: LedgerContext>(
     block: &RawBlock,
+    domain: &D,
     mapper: &interop::Mapper<C>,
     request: &u5c::watch::WatchTxRequest,
-) -> Vec<u5c::watch::AnyChainTx> {
+) -> Vec<u5c::watch::AnyChainTx> 
+where
+    D::State: LedgerContext,
+{
     let RawBlock { body, .. } = block;
-    let block = MultiEraBlock::decode(body).unwrap();
-    let txs = block.txs();
+    let parsed_block = MultiEraBlock::decode(body).unwrap();
+    let txs = parsed_block.txs();
+
+    // Map the block to get header information
+    let mapped_block = mapper.map_block_cbor(body);
+    
+    // Calculate timestamp for the block
+    let block_slot = parsed_block.slot();
+    let timestamp = {
+        use dolos_cardano::pparams;
+        
+        // Get protocol parameter updates up to this slot
+        let updates = domain.state()
+            .get_pparams(block_slot)
+            .ok()
+            .and_then(|updates| {
+                updates.into_iter()
+                    .map(TryInto::try_into)
+                    .collect::<Result<Vec<_>, _>>()
+                    .ok()
+            })
+            .unwrap_or_default();
+
+        // Get chain summary with proper era handling
+        let summary = pparams::fold_with_hacks(domain.genesis(), &updates, block_slot);
+        
+        // Calculate timestamp using the canonical function
+        dolos_cardano::slot_time(block_slot, &summary) as u64
+    };
+    
+    let block_header = mapped_block.header.map(|h| u5c::watch::AnyChainBlock {
+        native_bytes: vec![].into(), // Just header info, not full block bytes
+        chain: u5c::watch::any_chain_block::Chain::Cardano(u5c::cardano::Block {
+            header: Some(h),
+            body: None, // Only include header, not full body
+            timestamp,
+        }).into(),
+    });
 
     txs.iter()
         .map(|x: &pallas::ledger::traverse::MultiEraTx<'_>| mapper.map_tx(x))
@@ -165,22 +205,27 @@ fn block_to_txs<C: LedgerContext>(
         })
         .map(|x| u5c::watch::AnyChainTx {
             chain: Some(u5c::watch::any_chain_tx::Chain::Cardano(x)),
+            block: block_header.clone(),
         })
         .collect()
 }
 
-fn roll_to_watch_response<C: LedgerContext>(
+fn roll_to_watch_response<D: Domain, C: LedgerContext>(
+    domain: &D,
     mapper: &interop::Mapper<C>,
     log: &LogValue,
     request: &u5c::watch::WatchTxRequest,
-) -> impl Stream<Item = u5c::watch::WatchTxResponse> {
+) -> impl Stream<Item = u5c::watch::WatchTxResponse> 
+where
+    D::State: LedgerContext,
+{
     let txs: Vec<_> = match log {
-        LogValue::Apply(block) => block_to_txs(block, mapper, request)
+        LogValue::Apply(block) => block_to_txs(block, domain, mapper, request)
             .into_iter()
             .map(u5c::watch::watch_tx_response::Action::Apply)
             .map(|x| u5c::watch::WatchTxResponse { action: Some(x) })
             .collect(),
-        LogValue::Undo(block) => block_to_txs(block, mapper, request)
+        LogValue::Undo(block) => block_to_txs(block, domain, mapper, request)
             .into_iter()
             .map(u5c::watch::watch_tx_response::Action::Undo)
             .map(|x| u5c::watch::WatchTxResponse { action: Some(x) })
@@ -235,7 +280,7 @@ where
         let intersect = inner_req
             .intersect
             .iter()
-            .map(|x| ChainPoint::Specific(x.index, x.hash.to_vec().as_slice().into()))
+            .map(|x| ChainPoint::Specific(x.slot, x.hash.to_vec().as_slice().into()))
             .collect::<Vec<ChainPoint>>();
 
         let stream = ChainStream::start::<D, _>(
@@ -246,9 +291,10 @@ where
         );
 
         let mapper = self.mapper.clone();
+        let domain = self.domain.clone();
 
         let stream = stream
-            .flat_map(move |log| roll_to_watch_response(&mapper, &log, &inner_req))
+            .flat_map(move |log| roll_to_watch_response(&domain, &mapper, &log, &inner_req))
             .map(Ok);
 
         Ok(Response::new(Box::pin(stream)))
