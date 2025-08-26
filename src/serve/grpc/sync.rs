@@ -102,13 +102,13 @@ fn wal_log_to_tip_response<C: LedgerContext>(
 
 pub struct SyncServiceImpl<D: Domain, C: CancelToken> {
     domain: D,
-    mapper: interop::Mapper<super::ContextAdapter<D::State>>,
+    mapper: interop::Mapper<super::ContextAdapter<D>>,
     cancel: C,
 }
 
 impl<D: Domain, C: CancelToken> SyncServiceImpl<D, C> {
     pub fn new(domain: D, cancel: C) -> Self {
-        let mapper = Mapper::new(super::ContextAdapter(domain.state().clone()));
+        let mapper = Mapper::new(super::ContextAdapter(domain.clone()));
 
         Self {
             domain,

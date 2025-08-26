@@ -246,6 +246,14 @@ impl pallas::interop::utxorpc::LedgerContext for StateAdapter {
 
         Some(some)
     }
+
+    fn get_slot_pparams(
+        &self,
+        _slot: u64,
+    ) -> Option<pallas::ledger::validate::utils::MultiEraProtocolParameters> {
+        // TODO(p)
+        todo!()
+    }
 }
 
 #[derive(Clone)]

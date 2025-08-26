@@ -1,3 +1,5 @@
+use dolos_cardano::pparams;
+use itertools::Itertools;
 use pallas::interop::utxorpc::{spec as u5c, LedgerContext};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -24,9 +26,12 @@ pub struct Config {
 }
 
 #[derive(Clone)]
-pub struct ContextAdapter<T: dolos_core::StateStore>(T);
+pub struct ContextAdapter<T: dolos_core::Domain>(T);
 
-impl<T: dolos_core::StateStore> pallas::interop::utxorpc::LedgerContext for ContextAdapter<T> {
+impl<T> pallas::interop::utxorpc::LedgerContext for ContextAdapter<T>
+where
+    T: dolos_core::Domain,
+{
     fn get_utxos<'a>(
         &self,
         refs: &[pallas::interop::utxorpc::TxoRef],
@@ -35,6 +40,7 @@ impl<T: dolos_core::StateStore> pallas::interop::utxorpc::LedgerContext for Cont
 
         let some = self
             .0
+            .state()
             .get_utxos(refs)
             .ok()?
             .into_iter()
@@ -45,6 +51,24 @@ impl<T: dolos_core::StateStore> pallas::interop::utxorpc::LedgerContext for Cont
             .collect();
 
         Some(some)
+    }
+
+    fn get_slot_pparams(
+        &self,
+        slot: BlockSlot,
+    ) -> Option<pallas::ledger::validate::utils::MultiEraProtocolParameters> {
+        let updates = self.0.state().get_pparams(slot).ok()?;
+
+        let updates: Vec<_> = updates
+            .into_iter()
+            .map(TryInto::try_into)
+            .try_collect()
+            .ok()?;
+
+        let eras = pparams::fold_with_hacks(&self.0.genesis(), &updates, slot);
+
+        let era = eras.era_for_slot(slot);
+        Some(era.pparams.clone())
     }
 }
 
