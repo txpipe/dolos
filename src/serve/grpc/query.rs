@@ -11,7 +11,7 @@ use dolos_cardano::pparams;
 use super::masking::apply_mask;
 use crate::prelude::*;
 
-pub fn point_to_u5c(point: &ChainPoint) -> u5c::query::ChainPoint {
+pub fn point_to_u5c<T: LedgerContext>(ledger: &T, point: &ChainPoint) -> u5c::query::ChainPoint {
     match point {
         ChainPoint::Origin => u5c::query::ChainPoint {
             slot: 0,
@@ -22,9 +22,7 @@ pub fn point_to_u5c(point: &ChainPoint) -> u5c::query::ChainPoint {
         ChainPoint::Specific(slot, hash) => u5c::query::ChainPoint {
             slot: *slot,
             hash: hash.to_vec().into(),
-            // TODO: where do they come?
-            // height
-            // timestamp
+            timestamp: ledger.get_slot_timestamp(*slot).unwrap_or_default(),
             ..Default::default()
         },
     }
@@ -274,7 +272,7 @@ where
                 )
                 .into(),
             }),
-            ledger_tip: tip.as_ref().map(point_to_u5c),
+            ledger_tip: tip.as_ref().map(|p| point_to_u5c(&self.domain, p)),
         };
 
         if let Some(mask) = message.field_mask {
@@ -325,7 +323,7 @@ where
             .cursor()
             .map_err(|e| Status::internal(e.to_string()))?
             .as_ref()
-            .map(point_to_u5c);
+            .map(|p| point_to_u5c(&self.domain, p));
 
         Ok(Response::new(u5c::query::ReadUtxosResponse {
             items,
@@ -372,7 +370,7 @@ where
             .cursor()
             .map_err(|e| Status::internal(e.to_string()))?
             .as_ref()
-            .map(point_to_u5c);
+            .map(|p| point_to_u5c(&self.domain, p));
 
         Ok(Response::new(u5c::query::SearchUtxosResponse {
             items,
@@ -413,7 +411,7 @@ where
             .cursor()
             .map_err(|e| Status::internal(e.to_string()))?
             .as_ref()
-            .map(point_to_u5c);
+            .map(|p| point_to_u5c(&self.domain, p));
 
         let mut response = u5c::query::ReadTxResponse {
             tx: Some(u5c::query::AnyChainTx {

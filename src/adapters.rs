@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use dolos_cardano::pparams;
+use dolos_cardano::{pparams, slot_time_within_era};
 use dolos_core::*;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
@@ -593,12 +593,9 @@ impl pallas::interop::utxorpc::LedgerContext for DomainAdapter {
             .ok()?;
 
         let eras = pparams::fold_with_hacks(self.genesis(), &updates, slot);
-        let params = &eras.era_for_slot(slot).pparams;
 
-        let start = params.system_start().timestamp() as u64;
-        let slot_len = params.slot_length();
+        let era = eras.era_for_slot(slot);
 
-        slot.checked_mul(slot_len)
-            .and_then(|d| start.checked_add(d))
+        Some(slot_time_within_era(slot, era))
     }
 }
