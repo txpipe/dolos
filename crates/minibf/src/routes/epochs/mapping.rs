@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::{
-    mapping::{IntoModel, rational_to_f64},
+    mapping::{rational_to_f64, IntoModel},
     routes::epochs::cost_models::get_named_cost_model,
 };
 use axum::http::StatusCode;

@@ -37,6 +37,7 @@ pub struct TrackConfig {
     pub pool_delegator: bool,
     pub epoch_state: bool,
     pub account_activity: bool,
+    pub drep_state: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Default)]

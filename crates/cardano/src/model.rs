@@ -185,19 +185,24 @@ pub struct DRepState {
     pub drep_id: Vec<u8>,
 
     #[n(1)]
-    pub start_epoch: Option<u32>,
+    pub initial_slot: Option<u64>,
 
     #[n(2)]
     pub voting_power: u64,
 
     #[n(3)]
-    pub last_active_epoch: Option<u32>,
+    pub last_active_slot: Option<u64>,
 
     #[n(4)]
     pub retired: bool,
+}
 
-    #[n(5)]
-    pub expired: bool,
+impl DRepState {
+    /// Check that the first byte of the drep id finishes with the 0011 bytes.
+    pub fn has_script(&self) -> bool {
+        let first = self.drep_id.first().unwrap();
+        first & 0b00001111 == 0b00000011
+    }
 }
 
 impl_entity!(DRepState, "drep", NamespaceType::KeyValue);
