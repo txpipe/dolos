@@ -1,6 +1,6 @@
 use std::{collections::HashMap, marker::PhantomData, ops::Range};
 
-use crate::BlockSlot;
+use crate::{BlockSlot, TxoRef};
 
 pub type Namespace = &'static str;
 pub type EntityKey = Vec<u8>;
@@ -297,6 +297,12 @@ impl<'a> StateSliceView<'a> {
 }
 
 #[derive(Debug, thiserror::Error)]
+pub enum InvariantViolation {
+    #[error("input not found: {0}")]
+    InputNotFound(TxoRef),
+}
+
+#[derive(Debug, thiserror::Error)]
 pub enum StateError {
     #[error("internal store error: {0}")]
     InternalStoreError(String),
@@ -312,6 +318,12 @@ pub enum StateError {
 
     #[error(transparent)]
     DecodingError(#[from] pallas::codec::minicbor::decode::Error),
+
+    #[error(transparent)]
+    TraverseError(#[from] pallas::ledger::traverse::Error),
+
+    #[error(transparent)]
+    InvariantViolation(#[from] InvariantViolation),
 }
 
 // temporary alias to avoid collision with existing StateError
