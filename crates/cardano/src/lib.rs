@@ -359,12 +359,13 @@ impl dolos_core::ChainLogic for ChainLogic {
     fn load_slice3_for_block<'a>(
         &self,
         state: &impl State3Store,
+        utxo_slice: &LedgerSlice,
         block: &Self::Block<'a>,
         unapplied_deltas: &[StateDelta],
     ) -> Result<StateSlice, DomainError> {
         let mut builder = roll::SliceBuilder::new(&self.config.track, state, unapplied_deltas);
 
-        roll::crawl_block(block, &mut builder)?;
+        roll::crawl_block(block, utxo_slice, &mut builder)?;
 
         Ok(builder.build())
     }
@@ -372,6 +373,7 @@ impl dolos_core::ChainLogic for ChainLogic {
     fn compute_apply_delta3<'a>(
         &self,
         slice: StateSlice,
+        utxo_slice: &LedgerSlice,
         block: &Self::Block<'a>,
         unapplied_deltas: &[StateDelta],
     ) -> Result<StateDelta, ChainError> {
@@ -381,7 +383,7 @@ impl dolos_core::ChainLogic for ChainLogic {
 
         let mut builder = roll::DeltaBuilder::new(&self.config.track, view, delta);
 
-        roll::crawl_block(block, &mut builder)?;
+        roll::crawl_block(block, utxo_slice, &mut builder)?;
 
         Ok(builder.build())
     }

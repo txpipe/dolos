@@ -114,6 +114,12 @@ impl From<TxoRef> for (TxHash, TxoIdx) {
     }
 }
 
+impl Display for TxoRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}#{}", self.0, self.1)
+    }
+}
+
 // TODO: remove legacy
 // #[derive(Debug, Eq, PartialEq, Hash)]
 // pub struct ChainPoint(pub BlockSlot, pub BlockHash);
@@ -724,6 +730,7 @@ pub trait ChainLogic {
     fn load_slice3_for_block<'a>(
         &self,
         state: &impl State3Store,
+        utxo_slice: &LedgerSlice,
         block: &Self::Block<'a>,
         unapplied_deltas: &[StateDelta],
     ) -> Result<StateSlice, DomainError>;
@@ -731,6 +738,7 @@ pub trait ChainLogic {
     fn compute_apply_delta3<'a>(
         &self,
         slice: StateSlice,
+        utxo_slice: &LedgerSlice,
         block: &Self::Block<'a>,
         unapplied_deltas: &[StateDelta],
     ) -> Result<StateDelta, ChainError>;
@@ -786,47 +794,44 @@ pub trait Domain: Send + Sync + Clone + 'static {
         Ok(())
     }
 
-    fn compute_apply_deltas(&self, blocks: &[RawBlock]) -> Result<Vec<LedgerDelta>, DomainError> {
+    fn compute_apply_deltas(
+        &self,
+        blocks: &[RawBlock],
+    ) -> Result<(Vec<LedgerDelta>, Vec<StateDelta>), DomainError> {
         let mut deltas = Vec::with_capacity(blocks.len());
+        let mut deltas3 = Vec::with_capacity(blocks.len());
 
         for block in blocks {
             let block = Self::Chain::decode_block(&block.body)?;
+
             let slice = Self::Chain::load_slice_for_block(self.state(), &block, &deltas)?;
-            let delta = Self::Chain::compute_apply_delta(slice, &block)?;
+            let delta = Self::Chain::compute_apply_delta(slice.clone(), &block)?;
+
             deltas.push(delta);
-        }
 
-        Ok(deltas)
-    }
+            let slice3 =
+                self.chain()
+                    .load_slice3_for_block(self.state3(), &slice, &block, &deltas3)?;
 
-    fn compute_apply_deltas3(&self, blocks: &[RawBlock]) -> Result<Vec<StateDelta>, DomainError> {
-        let mut deltas = Vec::with_capacity(blocks.len());
-
-        for block in blocks {
-            let block = Self::Chain::decode_block(&block.body)?;
-
-            let slice = self
+            let delta3 = self
                 .chain()
-                .load_slice3_for_block(self.state3(), &block, &deltas)?;
+                .compute_apply_delta3(slice3, &slice, &block, &deltas3)?;
 
-            let delta = self.chain().compute_apply_delta3(slice, &block, &deltas)?;
-
-            deltas.push(delta);
+            deltas3.push(delta3);
         }
 
-        Ok(deltas)
+        Ok((deltas, deltas3))
     }
 
     fn apply_blocks(&self, blocks: &[RawBlock]) -> Result<(), DomainError> {
-        let deltas = self.compute_apply_deltas(blocks)?;
+        let (deltas, deltas3) = self.compute_apply_deltas(blocks)?;
 
         self.state().apply(&deltas)?;
+        self.state3().apply(&deltas3)?; // TODO: apply deltas3
+
         self.archive().apply(&deltas)?;
+
         self.mempool().apply(&deltas);
-
-        let deltas3 = self.compute_apply_deltas3(blocks)?;
-
-        self.state3().apply(&deltas3)?;
 
         Ok(())
     }

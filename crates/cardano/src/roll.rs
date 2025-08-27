@@ -1,10 +1,17 @@
-use dolos_core::{State3Error, State3Store, StateDelta, StateSlice, StateSliceView};
+use dolos_core::{
+    EraCbor, InvariantViolation, LedgerSlice, State3Error, State3Store, StateDelta, StateSlice,
+    StateSliceView, TxoRef,
+};
 use pallas::{
+    codec::minicbor,
     crypto::hash::Hash,
     ledger::{
         addresses::{Address, StakeAddress},
         primitives::StakeCredential,
-        traverse::{MultiEraBlock, MultiEraCert, MultiEraOutput, MultiEraPolicyAssets, MultiEraTx},
+        traverse::{
+            Era, MultiEraBlock, MultiEraCert, MultiEraInput, MultiEraOutput, MultiEraPolicyAssets,
+            MultiEraTx,
+        },
     },
 };
 
@@ -19,6 +26,17 @@ use super::TrackConfig;
 pub trait BlockVisitor {
     #[allow(unused_variables)]
     fn visit_root(&mut self, block: &MultiEraBlock) -> Result<(), State3Error> {
+        Ok(())
+    }
+
+    #[allow(unused_variables)]
+    fn visit_input(
+        &mut self,
+        block: &MultiEraBlock,
+        tx: &MultiEraTx,
+        input: &MultiEraInput,
+        resolved: &MultiEraOutput,
+    ) -> Result<(), State3Error> {
         Ok(())
     }
 
@@ -56,13 +74,29 @@ pub trait BlockVisitor {
 
 pub fn crawl_block<'a, T: BlockVisitor>(
     block: &MultiEraBlock<'a>,
+    utxo_slice: &LedgerSlice,
     visitor: &mut T,
 ) -> Result<(), State3Error> {
     visitor.visit_root(block)?;
 
     for tx in block.txs() {
-        for (index, output) in tx.outputs().iter().enumerate() {
-            visitor.visit_output(block, &tx, index as u32, output)?;
+        for input in tx.consumes() {
+            let txoref = TxoRef::from(&input);
+
+            let EraCbor(era, cbor) = utxo_slice
+                .resolved_inputs
+                .get(&txoref)
+                .ok_or(InvariantViolation::InputNotFound(txoref))?;
+
+            let era = Era::try_from(*era)?;
+
+            let resolved = MultiEraOutput::decode(era, cbor)?;
+
+            visitor.visit_input(block, &tx, &input, &resolved)?;
+        }
+
+        for (index, output) in tx.produces() {
+            visitor.visit_output(block, &tx, index as u32, &output)?;
         }
 
         for mint in tx.mints() {
@@ -127,6 +161,18 @@ impl<'a> DeltaBuilder<'a> {
 impl<'a> BlockVisitor for DeltaBuilder<'a> {
     fn visit_root(&mut self, block: &MultiEraBlock) -> Result<(), State3Error> {
         visit_all!(self, visit_root, block);
+
+        Ok(())
+    }
+
+    fn visit_input(
+        &mut self,
+        block: &MultiEraBlock,
+        tx: &MultiEraTx,
+        input: &MultiEraInput,
+        resolved: &MultiEraOutput,
+    ) -> Result<(), State3Error> {
+        visit_all!(self, visit_input, block, tx, input, resolved);
 
         Ok(())
     }

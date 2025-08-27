@@ -71,22 +71,28 @@ impl ChainLogic for ChainAdapter {
     fn load_slice3_for_block<'a>(
         &self,
         state: &impl State3Store,
+        utxo_slice: &LedgerSlice,
         block: &Self::Block<'a>,
         unapplied_deltas: &[StateDelta],
     ) -> Result<StateSlice, DomainError> {
         match self {
-            ChainAdapter::Cardano(x) => x.load_slice3_for_block(state, block, unapplied_deltas),
+            ChainAdapter::Cardano(x) => {
+                x.load_slice3_for_block(state, utxo_slice, block, unapplied_deltas)
+            }
         }
     }
 
     fn compute_apply_delta3<'a>(
         &self,
         state: StateSlice,
+        utxo_slice: &LedgerSlice,
         block: &Self::Block<'a>,
         unapplied_deltas: &[StateDelta],
     ) -> Result<StateDelta, ChainError> {
         match self {
-            ChainAdapter::Cardano(x) => x.compute_apply_delta3(state, block, unapplied_deltas),
+            ChainAdapter::Cardano(x) => {
+                x.compute_apply_delta3(state, utxo_slice, block, unapplied_deltas)
+            }
         }
     }
 }
