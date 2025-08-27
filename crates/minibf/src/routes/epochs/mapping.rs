@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::{
-    mapping::{IntoModel, rational_to_f64},
+    mapping::{rational_to_f64, IntoModel},
     routes::epochs::cost_models::get_named_cost_model,
 };
 use axum::http::StatusCode;
@@ -38,7 +38,20 @@ fn map_cost_models_raw(cost_models: &CostModels) -> HashMap<String, serde_json::
 fn map_cost_models_named(cost_models: &CostModels) -> HashMap<String, serde_json::Value> {
     cost_models_to_key_value(cost_models)
         .into_iter()
-        .map(|(k, v)| (k.to_string(), get_named_cost_model(1, v)))
+        .map(|(k, v)| {
+            (
+                k.to_string(),
+                get_named_cost_model(
+                    match k {
+                        "PlutusV1" => 1,
+                        "PlutusV2" => 2,
+                        "PlutusV3" => 3,
+                        _ => unreachable!(),
+                    },
+                    v,
+                ),
+            )
+        })
         .collect()
 }
 
@@ -61,7 +74,7 @@ impl<'a> ParametersModelBuilder<'a> {
             max_block_header_size: params.max_block_header_size as i32,
             min_fee_a: params.minfee_a as i32,
             min_fee_b: params.minfee_b as i32,
-            min_utxo: genesis.shelley.protocol_params.min_utxo_value.to_string(),
+            min_utxo: params.ada_per_utxo_byte.to_string(),
             coins_per_utxo_size: Some(params.ada_per_utxo_byte.to_string()),
             coins_per_utxo_word: Some(params.ada_per_utxo_byte.to_string()),
             key_deposit: params.key_deposit.to_string(),
@@ -75,7 +88,7 @@ impl<'a> ParametersModelBuilder<'a> {
             max_val_size: Some(params.max_value_size.to_string()),
             collateral_percent: Some(params.collateral_percentage as i32),
             max_collateral_inputs: Some(params.max_collateral_inputs as i32),
-            price_mem: Some(rational_to_f64::<3>(&params.execution_costs.mem_price)),
+            price_mem: Some(rational_to_f64::<4>(&params.execution_costs.mem_price)),
             price_step: Some(rational_to_f64::<9>(&params.execution_costs.step_price)),
             max_tx_ex_mem: Some(params.max_tx_ex_units.mem.to_string()),
             max_tx_ex_steps: Some(params.max_tx_ex_units.steps.to_string()),
@@ -92,10 +105,6 @@ impl<'a> ParametersModelBuilder<'a> {
             cost_models: Some(map_cost_models_named(
                 &params.cost_models_for_script_languages,
             )),
-            decentralisation_param: rational_to_f64::<3>(
-                &genesis.shelley.protocol_params.decentralisation_param,
-            ),
-
             pvt_motion_no_confidence: Some(rational_to_f64::<3>(
                 &params.pool_voting_thresholds.motion_no_confidence,
             )),
@@ -146,11 +155,12 @@ impl<'a> ParametersModelBuilder<'a> {
                 &params.pool_voting_thresholds.security_voting_threshold,
             )),
             pvt_p_p_security_group: Some(rational_to_f64::<3>(
-                &params.drep_voting_thresholds.pp_technical_group,
+                &params.pool_voting_thresholds.security_voting_threshold,
             )),
             // TODO: confirm mapping
             nonce: String::default(),
             extra_entropy: None,
+            ..Default::default()
         }
     }
 
@@ -166,9 +176,9 @@ impl<'a> ParametersModelBuilder<'a> {
             max_block_header_size: params.max_block_header_size as i32,
             min_fee_a: params.minfee_a as i32,
             min_fee_b: params.minfee_b as i32,
-            min_utxo: genesis.shelley.protocol_params.min_utxo_value.to_string(),
-            coins_per_utxo_size: Some(params.ada_per_utxo_byte.to_string()),
-            coins_per_utxo_word: Some(params.ada_per_utxo_byte.to_string()),
+            min_utxo: (params.ada_per_utxo_byte / 8).to_string(),
+            coins_per_utxo_size: Some((params.ada_per_utxo_byte / 8).to_string()),
+            coins_per_utxo_word: Some((params.ada_per_utxo_byte / 8).to_string()),
             key_deposit: params.key_deposit.to_string(),
             pool_deposit: params.pool_deposit.to_string(),
             n_opt: params.desired_number_of_stake_pools as i32,
@@ -180,15 +190,12 @@ impl<'a> ParametersModelBuilder<'a> {
             max_val_size: Some(params.max_value_size.to_string()),
             collateral_percent: Some(params.collateral_percentage as i32),
             max_collateral_inputs: Some(params.max_collateral_inputs as i32),
-            price_mem: Some(rational_to_f64::<3>(&params.execution_costs.mem_price)),
+            price_mem: Some(rational_to_f64::<4>(&params.execution_costs.mem_price)),
             price_step: Some(rational_to_f64::<9>(&params.execution_costs.step_price)),
             max_tx_ex_mem: Some(params.max_tx_ex_units.mem.to_string()),
             max_tx_ex_steps: Some(params.max_tx_ex_units.steps.to_string()),
             max_block_ex_mem: Some(params.max_block_ex_units.mem.to_string()),
             max_block_ex_steps: Some(params.max_block_ex_units.steps.to_string()),
-            decentralisation_param: rational_to_f64::<3>(
-                &genesis.shelley.protocol_params.decentralisation_param,
-            ),
             ..Default::default()
         }
     }
@@ -205,7 +212,7 @@ impl<'a> ParametersModelBuilder<'a> {
             max_block_header_size: params.max_block_header_size as i32,
             min_fee_a: params.minfee_a as i32,
             min_fee_b: params.minfee_b as i32,
-            min_utxo: genesis.shelley.protocol_params.min_utxo_value.to_string(),
+            min_utxo: params.ada_per_utxo_byte.to_string(),
             coins_per_utxo_size: Some(params.ada_per_utxo_byte.to_string()),
             coins_per_utxo_word: Some(params.ada_per_utxo_byte.to_string()),
             key_deposit: params.key_deposit.to_string(),
@@ -219,15 +226,12 @@ impl<'a> ParametersModelBuilder<'a> {
             max_val_size: Some(params.max_value_size.to_string()),
             collateral_percent: Some(params.collateral_percentage as i32),
             max_collateral_inputs: Some(params.max_collateral_inputs as i32),
-            price_mem: Some(rational_to_f64::<3>(&params.execution_costs.mem_price)),
+            price_mem: Some(rational_to_f64::<4>(&params.execution_costs.mem_price)),
             price_step: Some(rational_to_f64::<9>(&params.execution_costs.step_price)),
             max_tx_ex_mem: Some(params.max_tx_ex_units.mem.to_string()),
             max_tx_ex_steps: Some(params.max_tx_ex_units.steps.to_string()),
             max_block_ex_mem: Some(params.max_block_ex_units.mem.to_string()),
             max_block_ex_steps: Some(params.max_block_ex_units.steps.to_string()),
-            decentralisation_param: rational_to_f64::<3>(
-                &genesis.shelley.protocol_params.decentralisation_param,
-            ),
             ..Default::default()
         }
     }
@@ -253,9 +257,6 @@ impl<'a> ParametersModelBuilder<'a> {
             min_pool_cost: params.min_pool_cost.to_string(),
             protocol_major_ver: params.protocol_version.0 as i32,
             protocol_minor_ver: params.protocol_version.1 as i32,
-            decentralisation_param: rational_to_f64::<3>(
-                &genesis.shelley.protocol_params.decentralisation_param,
-            ),
             ..Default::default()
         }
     }
