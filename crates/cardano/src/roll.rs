@@ -299,6 +299,26 @@ impl<T> SeenAddressesVisitor<'_, T> {
 }
 
 impl<'a, S: State3Store> BlockVisitor for SeenAddressesVisitor<'a, SliceBuilder<'_, S>> {
+    fn visit_input(
+        &mut self,
+        _: &MultiEraBlock,
+        _: &MultiEraTx,
+        _: &MultiEraInput,
+        resolved: &MultiEraOutput,
+    ) -> Result<(), State3Error> {
+        let Some((stake, _)) = Self::extract_address(resolved) else {
+            return Ok(());
+        };
+
+        let stake_bytes = stake.to_vec();
+
+        self.0
+            .slice
+            .ensure_loaded_typed::<AccountState>(&stake_bytes, self.0.store)?;
+
+        Ok(())
+    }
+
     fn visit_output(
         &mut self,
         _: &MultiEraBlock,
@@ -321,6 +341,41 @@ impl<'a, S: State3Store> BlockVisitor for SeenAddressesVisitor<'a, SliceBuilder<
 }
 
 impl<'a> BlockVisitor for SeenAddressesVisitor<'a, DeltaBuilder<'_>> {
+    fn visit_input(
+        &mut self,
+        _: &MultiEraBlock,
+        _: &MultiEraTx,
+        _: &MultiEraInput,
+        resolved: &MultiEraOutput,
+    ) -> Result<(), State3Error> {
+        let Some((stake, _)) = Self::extract_address(resolved) else {
+            return Ok(());
+        };
+
+        let stake_bytes = stake.to_vec();
+
+        let current = self
+            .0
+            .state
+            .get_entity_typed::<AccountState>(&stake_bytes)?;
+
+        let mut new = current.clone().unwrap_or_default();
+
+        // TODO: refactor into CRDT
+        // TODO: check same-crawl delta changes
+        // TODO: saturating sub shouldn't be necesary on the long run, it should be
+        // treated as a invariant violation
+        new.controlled_amount = new
+            .controlled_amount
+            .saturating_sub(resolved.value().coin());
+
+        self.0
+            .delta_mut()
+            .override_entity(stake_bytes, new, current);
+
+        Ok(())
+    }
+
     fn visit_output(
         &mut self,
         _: &MultiEraBlock,
@@ -339,17 +394,16 @@ impl<'a> BlockVisitor for SeenAddressesVisitor<'a, DeltaBuilder<'_>> {
             .state
             .get_entity_typed::<AccountState>(&stake_bytes)?;
 
-        if let Some(current) = current {
-            let mut new = current.clone();
-            new.seen_addresses.insert(full_address.to_vec());
-            self.0
-                .delta_mut()
-                .override_entity(stake_bytes, new, Some(current));
-        } else {
-            let mut new = AccountState::default();
-            new.seen_addresses.insert(full_address.to_vec());
-            self.0.delta_mut().override_entity(stake_bytes, new, None);
-        }
+        let mut new = current.clone().unwrap_or_default();
+
+        // TODO: refactor into CRDT
+        // TODO: check same-crawl delta changes
+        new.controlled_amount += output.value().coin();
+        new.seen_addresses.insert(full_address.to_vec());
+
+        self.0
+            .delta_mut()
+            .override_entity(stake_bytes, new, current);
 
         Ok(())
     }
