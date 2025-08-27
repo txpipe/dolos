@@ -583,10 +583,7 @@ impl pallas::interop::utxorpc::LedgerContext for DomainAdapter {
         Some(some)
     }
 
-    fn get_slot_pparams(
-        &self,
-        slot: u64,
-    ) -> Option<pallas::ledger::validate::utils::MultiEraProtocolParameters> {
+    fn get_slot_timestamp(&self, slot: u64) -> Option<u64> {
         let updates = self.state().get_pparams(slot).ok()?;
 
         let updates: Vec<_> = updates
@@ -596,8 +593,12 @@ impl pallas::interop::utxorpc::LedgerContext for DomainAdapter {
             .ok()?;
 
         let eras = pparams::fold_with_hacks(self.genesis(), &updates, slot);
+        let params = &eras.era_for_slot(slot).pparams;
 
-        let era = eras.era_for_slot(slot);
-        Some(era.pparams.clone())
+        let start = params.system_start().timestamp() as u64;
+        let slot_len = params.slot_length();
+
+        slot.checked_mul(slot_len)
+            .and_then(|d| start.checked_add(d))
     }
 }

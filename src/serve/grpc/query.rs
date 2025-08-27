@@ -422,7 +422,7 @@ where
                     slot: block.slot(),
                     hash: block.hash().to_vec().into(),
                     height: block.header().number(),
-                    timestamp: self.mapper.map_slot_timestamp(block.slot()),
+                    timestamp: self.domain.get_slot_timestamp(block.slot()).unwrap_or(0),
                 }),
                 chain: Some(u5c::query::any_chain_tx::Chain::Cardano(
                     self.mapper.map_tx(&tx),

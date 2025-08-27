@@ -157,10 +157,7 @@ impl pallas::interop::utxorpc::LedgerContext for ToyDomain {
         todo!()
     }
 
-    fn get_slot_pparams(
-        &self,
-        _slot: u64,
-    ) -> Option<pallas::ledger::validate::utils::MultiEraProtocolParameters> {
+    fn get_slot_timestamp(&self, _slot: u64) -> Option<u64> {
         todo!()
     }
 }
