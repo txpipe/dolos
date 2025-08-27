@@ -3212,7 +3212,6 @@ dependencies = [
 name = "pallas-utxorpc"
 version = "1.0.0-alpha.2"
 dependencies = [
- "chrono",
  "pallas-codec 1.0.0-alpha.2",
  "pallas-crypto 1.0.0-alpha.2",
  "pallas-primitives 1.0.0-alpha.2",
