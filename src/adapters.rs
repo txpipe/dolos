@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
+use dolos_cardano::pparams;
 use dolos_core::*;
+use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -225,34 +227,6 @@ impl TryFrom<StateAdapter> for dolos_redb::state::LedgerStore {
         match value {
             StateAdapter::Redb(x) => Ok(x),
         }
-    }
-}
-
-impl pallas::interop::utxorpc::LedgerContext for StateAdapter {
-    fn get_utxos<'a>(
-        &self,
-        refs: &[pallas::interop::utxorpc::TxoRef],
-    ) -> Option<pallas::interop::utxorpc::UtxoMap> {
-        let refs: Vec<_> = refs.iter().map(|x| TxoRef::from(*x)).collect();
-
-        let some = dolos_core::StateStore::get_utxos(self, refs)
-            .ok()?
-            .into_iter()
-            .map(|(k, v)| {
-                let era = v.0.try_into().expect("era out of range");
-                (k.into(), (era, v.1))
-            })
-            .collect();
-
-        Some(some)
-    }
-
-    fn get_slot_pparams(
-        &self,
-        _slot: u64,
-    ) -> Option<pallas::ledger::validate::utils::MultiEraProtocolParameters> {
-        // TODO(p)
-        todo!()
     }
 }
 
@@ -587,5 +561,43 @@ impl Domain for DomainAdapter {
 
     fn storage_config(&self) -> &StorageConfig {
         &self.storage_config
+    }
+}
+
+impl pallas::interop::utxorpc::LedgerContext for DomainAdapter {
+    fn get_utxos(
+        &self,
+        refs: &[pallas::interop::utxorpc::TxoRef],
+    ) -> Option<pallas::interop::utxorpc::UtxoMap> {
+        let refs: Vec<_> = refs.iter().map(|x| TxoRef::from(*x)).collect();
+
+        let some = dolos_core::StateStore::get_utxos(self.state(), refs)
+            .ok()?
+            .into_iter()
+            .map(|(k, v)| {
+                let era = v.0.try_into().expect("era out of range");
+                (k.into(), (era, v.1))
+            })
+            .collect();
+
+        Some(some)
+    }
+
+    fn get_slot_pparams(
+        &self,
+        slot: u64,
+    ) -> Option<pallas::ledger::validate::utils::MultiEraProtocolParameters> {
+        let updates = self.state().get_pparams(slot).ok()?;
+
+        let updates: Vec<_> = updates
+            .into_iter()
+            .map(TryInto::try_into)
+            .try_collect()
+            .ok()?;
+
+        let eras = pparams::fold_with_hacks(self.genesis(), &updates, slot);
+
+        let era = eras.era_for_slot(slot);
+        Some(era.pparams.clone())
     }
 }

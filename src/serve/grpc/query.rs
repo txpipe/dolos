@@ -30,20 +30,20 @@ pub fn point_to_u5c(point: &ChainPoint) -> u5c::query::ChainPoint {
     }
 }
 
-pub struct QueryServiceImpl<D: Domain>
+pub struct QueryServiceImpl<D>
 where
-    D::State: LedgerContext,
+    D: Domain + LedgerContext,
 {
     domain: D,
-    mapper: interop::Mapper<D::State>,
+    mapper: interop::Mapper<D>,
 }
 
-impl<D: Domain> QueryServiceImpl<D>
+impl<D> QueryServiceImpl<D>
 where
-    D::State: LedgerContext,
+    D: Domain + LedgerContext,
 {
     pub fn new(domain: D) -> Self {
-        let mapper = interop::Mapper::new(domain.state().clone());
+        let mapper = interop::Mapper::new(domain.clone());
 
         Self { domain, mapper }
     }
@@ -214,7 +214,7 @@ fn from_u5c_txoref(txo: u5c::query::TxoRef) -> Result<TxoRef, Status> {
     Ok(TxoRef(hash, txo.index))
 }
 
-fn into_u5c_utxo<S: StateStore + LedgerContext>(
+fn into_u5c_utxo<S: Domain + LedgerContext>(
     txo: &TxoRef,
     body: &EraCbor,
     mapper: &interop::Mapper<S>,
@@ -233,9 +233,9 @@ fn into_u5c_utxo<S: StateStore + LedgerContext>(
 }
 
 #[async_trait::async_trait]
-impl<D: Domain> u5c::query::query_service_server::QueryService for QueryServiceImpl<D>
+impl<D> u5c::query::query_service_server::QueryService for QueryServiceImpl<D>
 where
-    D::State: LedgerContext,
+    D: Domain + LedgerContext,
 {
     async fn read_params(
         &self,

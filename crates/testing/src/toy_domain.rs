@@ -148,3 +148,19 @@ impl dolos_core::Domain for ToyDomain {
         &self.mempool
     }
 }
+
+impl pallas::interop::utxorpc::LedgerContext for ToyDomain {
+    fn get_utxos(
+        &self,
+        _refs: &[pallas::interop::utxorpc::TxoRef],
+    ) -> Option<pallas::interop::utxorpc::UtxoMap> {
+        todo!()
+    }
+
+    fn get_slot_pparams(
+        &self,
+        _slot: u64,
+    ) -> Option<pallas::ledger::validate::utils::MultiEraProtocolParameters> {
+        todo!()
+    }
+}

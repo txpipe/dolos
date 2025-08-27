@@ -100,15 +100,23 @@ fn wal_log_to_tip_response<C: LedgerContext>(
     }
 }
 
-pub struct SyncServiceImpl<D: Domain, C: CancelToken> {
+pub struct SyncServiceImpl<D, C>
+where
+    D: Domain + LedgerContext,
+    C: CancelToken,
+{
     domain: D,
-    mapper: interop::Mapper<super::ContextAdapter<D>>,
+    mapper: interop::Mapper<D>,
     cancel: C,
 }
 
-impl<D: Domain, C: CancelToken> SyncServiceImpl<D, C> {
+impl<D, C> SyncServiceImpl<D, C>
+where
+    D: Domain + LedgerContext,
+    C: CancelToken,
+{
     pub fn new(domain: D, cancel: C) -> Self {
-        let mapper = Mapper::new(super::ContextAdapter(domain.clone()));
+        let mapper = Mapper::new(domain.clone());
 
         Self {
             domain,
@@ -121,7 +129,7 @@ impl<D: Domain, C: CancelToken> SyncServiceImpl<D, C> {
 #[async_trait::async_trait]
 impl<D, C> u5c::sync::sync_service_server::SyncService for SyncServiceImpl<D, C>
 where
-    D: Domain,
+    D: Domain + LedgerContext,
     C: CancelToken,
 {
     type FollowTipStream =
