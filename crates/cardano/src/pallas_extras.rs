@@ -118,6 +118,20 @@ pub fn cert_as_stake_registration(cert: &MultiEraCert) -> Option<StakeCredential
     }
 }
 
+pub fn cert_as_stake_deregistration(cert: &MultiEraCert) -> Option<StakeCredential> {
+    match cert {
+        MultiEraCert::AlonzoCompatible(cow) => match cow.deref().deref() {
+            AlonzoCert::StakeDeregistration(credential) => Some(credential.clone()),
+            _ => None,
+        },
+        MultiEraCert::Conway(cow) => match cow.deref().deref() {
+            ConwayCert::StakeDeregistration(credential) => Some(credential.clone()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 pub fn stake_credential_to_address(network: Network, credential: &StakeCredential) -> StakeAddress {
     match credential {
         StakeCredential::ScriptHash(x) => {

@@ -83,7 +83,9 @@ pub fn crawl_block<'a, T: BlockVisitor>(
     visitor.visit_root(block)?;
 
     for tx in block.txs() {
-        for input in tx.consumes() {
+        let consumed = tx.consumes();
+
+        for input in consumed {
             let txoref = TxoRef::from(&input);
 
             let EraCbor(era, cbor) = utxo_slice
@@ -584,6 +586,26 @@ impl<'a, S: State3Store> BlockVisitor for PoolDelegatorVisitor<'a, SliceBuilder<
         _: &MultiEraTx,
         cert: &MultiEraCert,
     ) -> Result<(), State3Error> {
+        if let Some(cred) = pallas_extras::cert_as_stake_registration(cert) {
+            let stake_address = pallas_extras::stake_credential_to_address(self.0.network, &cred);
+
+            let stake_bytes = stake_address.to_vec();
+
+            self.0
+                .slice
+                .ensure_loaded_typed::<AccountState>(&stake_bytes, self.0.store)?;
+        }
+
+        if let Some(cred) = pallas_extras::cert_as_stake_deregistration(cert) {
+            let stake_address = pallas_extras::stake_credential_to_address(self.0.network, &cred);
+
+            let stake_bytes = stake_address.to_vec();
+
+            self.0
+                .slice
+                .ensure_loaded_typed::<AccountState>(&stake_bytes, self.0.store)?;
+        }
+
         if let Some(cert) = pallas_extras::cert_as_stake_delegation(cert) {
             let stake_address =
                 pallas_extras::stake_credential_to_address(self.0.network, &cert.delegator);
@@ -594,7 +616,6 @@ impl<'a, S: State3Store> BlockVisitor for PoolDelegatorVisitor<'a, SliceBuilder<
                 .slice
                 .ensure_loaded_typed::<AccountState>(&stake_bytes, self.0.store)?;
         }
-
         Ok(())
     }
 }
@@ -632,6 +653,51 @@ impl<'a> BlockVisitor for PoolDelegatorVisitor<'a, DeltaBuilder<'_>> {
             self.0
                 .delta_mut()
                 .append_entity(cert.pool.as_slice(), entity);
+        }
+
+        if let Some(credential) = pallas_extras::cert_as_stake_registration(cert) {
+            debug!("stake registration");
+
+            let stake_address =
+                pallas_extras::stake_credential_to_address(self.0.network, &credential);
+
+            let stake_bytes = stake_address.to_vec();
+
+            let current = self
+                .0
+                .slice()
+                .get_entity_typed::<AccountState>(&stake_bytes)?;
+
+            let mut new = current.clone().unwrap_or_default();
+
+            new.active_epoch = Some(1);
+
+            self.0
+                .delta_mut()
+                .override_entity(stake_bytes, new, current);
+        }
+
+        if let Some(credential) = pallas_extras::cert_as_stake_deregistration(cert) {
+            debug!("stake deregistration");
+
+            let stake_address =
+                pallas_extras::stake_credential_to_address(self.0.network, &credential);
+
+            let stake_bytes = stake_address.to_vec();
+
+            let current = self
+                .0
+                .slice()
+                .get_entity_typed::<AccountState>(&stake_bytes)?;
+
+            let mut new = current.clone().unwrap_or_default();
+
+            new.pool_id = None;
+            new.active_epoch = None;
+
+            self.0
+                .delta_mut()
+                .override_entity(stake_bytes, new, current);
         }
 
         Ok(())
