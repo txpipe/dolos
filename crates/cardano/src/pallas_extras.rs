@@ -1,6 +1,7 @@
 use std::ops::Deref as _;
 
 use pallas::crypto::hash::Hash;
+use pallas::ledger::addresses::{Network, StakeAddress, StakePayload};
 use pallas::ledger::primitives::{
     alonzo::Certificate as AlonzoCert, conway::Certificate as ConwayCert, PoolMetadata,
     RationalNumber, Relay, StakeCredential,
@@ -114,5 +115,16 @@ pub fn cert_as_stake_registration(cert: &MultiEraCert) -> Option<StakeCredential
             _ => None,
         },
         _ => None,
+    }
+}
+
+pub fn stake_credential_to_address(network: Network, credential: &StakeCredential) -> StakeAddress {
+    match credential {
+        StakeCredential::ScriptHash(x) => {
+            StakeAddress::new(network, StakePayload::Script(x.clone()))
+        }
+        StakeCredential::AddrKeyhash(x) => {
+            StakeAddress::new(network, StakePayload::Stake(x.clone()))
+        }
     }
 }

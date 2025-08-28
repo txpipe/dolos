@@ -7,7 +7,7 @@ use dolos_core::{
 use pallas::{
     crypto::hash::{Hash, Hasher},
     ledger::{
-        addresses::{Address, StakeAddress},
+        addresses::{Address, Network, StakeAddress},
         primitives::{conway, StakeCredential},
         traverse::{
             Era, MultiEraBlock, MultiEraCert, MultiEraInput, MultiEraOutput, MultiEraPolicyAssets,
@@ -138,14 +138,21 @@ pub struct DeltaBuilder<'a> {
     config: &'a TrackConfig,
     state: StateSliceView<'a>,
     delta: StateDelta,
+    network: Network,
 }
 
 impl<'a> DeltaBuilder<'a> {
-    pub fn new(config: &'a TrackConfig, state: StateSliceView<'a>, delta: StateDelta) -> Self {
+    pub fn new(
+        config: &'a TrackConfig,
+        state: StateSliceView<'a>,
+        delta: StateDelta,
+        network: Network,
+    ) -> Self {
         Self {
             config,
             state,
             delta,
+            network,
         }
     }
 
@@ -220,14 +227,21 @@ pub struct SliceBuilder<'a, S: State3Store> {
     config: &'a TrackConfig,
     store: &'a S,
     slice: StateSliceView<'a>,
+    network: Network,
 }
 
 impl<'a, S: State3Store> SliceBuilder<'a, S> {
-    pub fn new(config: &'a TrackConfig, store: &'a S, unapplied_deltas: &'a [StateDelta]) -> Self {
+    pub fn new(
+        config: &'a TrackConfig,
+        store: &'a S,
+        unapplied_deltas: &'a [StateDelta],
+        network: Network,
+    ) -> Self {
         Self {
             config,
             store,
             slice: StateSliceView::new(StateSlice::default(), unapplied_deltas),
+            network,
         }
     }
 
@@ -563,7 +577,27 @@ impl<'a> BlockVisitor for PoolStateVisitor<'a, DeltaBuilder<'_>> {
 
 struct PoolDelegatorVisitor<'a, T>(&'a mut T);
 
-impl<'a, S: State3Store> BlockVisitor for PoolDelegatorVisitor<'a, SliceBuilder<'_, S>> {}
+impl<'a, S: State3Store> BlockVisitor for PoolDelegatorVisitor<'a, SliceBuilder<'_, S>> {
+    fn visit_cert(
+        &mut self,
+        _: &MultiEraBlock,
+        _: &MultiEraTx,
+        cert: &MultiEraCert,
+    ) -> Result<(), State3Error> {
+        if let Some(cert) = pallas_extras::cert_as_stake_delegation(cert) {
+            let stake_address =
+                pallas_extras::stake_credential_to_address(self.0.network, &cert.delegator);
+
+            let stake_bytes = stake_address.to_vec();
+
+            self.0
+                .slice
+                .ensure_loaded_typed::<AccountState>(&stake_bytes, self.0.store)?;
+        }
+
+        Ok(())
+    }
+}
 
 impl<'a> BlockVisitor for PoolDelegatorVisitor<'a, DeltaBuilder<'_>> {
     fn visit_cert(
@@ -574,6 +608,24 @@ impl<'a> BlockVisitor for PoolDelegatorVisitor<'a, DeltaBuilder<'_>> {
     ) -> Result<(), State3Error> {
         if let Some(cert) = pallas_extras::cert_as_stake_delegation(cert) {
             debug!(%cert.pool, "new pool delegator");
+
+            let stake_address =
+                pallas_extras::stake_credential_to_address(self.0.network, &cert.delegator);
+
+            let stake_bytes = stake_address.to_vec();
+
+            let current = self
+                .0
+                .slice()
+                .get_entity_typed::<AccountState>(&stake_bytes)?;
+
+            let mut new = current.clone().unwrap_or_default();
+
+            new.pool_id = Some(cert.pool.to_vec());
+
+            self.0
+                .delta_mut()
+                .override_entity(stake_bytes, new, current);
 
             let entity = PoolDelegator(cert.delegator);
 
