@@ -1,5 +1,6 @@
 use std::ops::Deref as _;
 
+use dolos_core::BlockSlot;
 use pallas::crypto::hash::Hash;
 use pallas::ledger::addresses::{Network, StakeAddress, StakePayload};
 use pallas::ledger::primitives::{
@@ -7,6 +8,8 @@ use pallas::ledger::primitives::{
     RationalNumber, Relay, StakeCredential,
 };
 use pallas::ledger::traverse::MultiEraCert;
+
+use crate::pparams::ChainSummary;
 
 pub struct MultiEraPoolRegistration {
     pub operator: Hash<28>,
@@ -141,4 +144,19 @@ pub fn stake_credential_to_address(network: Network, credential: &StakeCredentia
             StakeAddress::new(network, StakePayload::Stake(x.clone()))
         }
     }
+}
+
+pub fn is_epoch_boundary(
+    chain_summary: &ChainSummary,
+    prev: Option<BlockSlot>,
+    now: BlockSlot,
+) -> bool {
+    let Some(prev) = prev else {
+        return false;
+    };
+
+    let (prev_epoch, _) = super::slot_epoch(prev, chain_summary);
+    let (now_epoch, _) = super::slot_epoch(now, chain_summary);
+
+    prev_epoch != now_epoch
 }

@@ -1,4 +1,5 @@
 use pallas::codec::minicbor;
+use pallas::ledger::addresses::Network;
 use pallas::ledger::traverse::MultiEraBlock;
 use pallas::ledger::traverse::MultiEraOutput;
 use pallas::ledger::traverse::MultiEraTx;
@@ -6,6 +7,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use dolos_core::*;
 
@@ -307,11 +309,17 @@ pub fn ledger_query_for_block(
 #[derive(Clone)]
 pub struct ChainLogic {
     config: Config,
+    network: Network,
+    chain_summary: Arc<ChainSummary>,
 }
 
 impl ChainLogic {
     pub fn new(config: Config) -> Self {
-        Self { config }
+        Self {
+            config,
+            network: pallas::ledger::addresses::Network::Testnet,
+            chain_summary: Arc::new(ChainSummary::default()),
+        }
     }
 }
 
@@ -369,6 +377,7 @@ impl dolos_core::ChainLogic for ChainLogic {
             state,
             unapplied_deltas,
             pallas::ledger::addresses::Network::Testnet,
+            self.chain_summary.clone(),
         );
 
         roll::crawl_block(block, utxo_slice, &mut builder)?;
