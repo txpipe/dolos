@@ -19,7 +19,7 @@ pub struct EraSummary {
     pub pparams: MultiEraProtocolParameters,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct ChainSummary {
     past: Vec<EraSummary>,
     edge: Option<EraSummary>,

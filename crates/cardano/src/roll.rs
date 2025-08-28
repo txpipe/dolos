@@ -1,6 +1,8 @@
+use std::collections::HashMap;
+
 use dolos_core::{
-    EraCbor, InvariantViolation, LedgerSlice, State3Error, State3Store, StateDelta, StateSlice,
-    StateSliceView, TxoRef,
+    BlockSlot, EraCbor, InvariantViolation, LedgerSlice, State3Error, State3Store, StateDelta,
+    StateSlice, StateSliceView, TxoRef,
 };
 use pallas::{
     crypto::hash::Hash,
@@ -20,9 +22,11 @@ use tracing::debug;
 use crate::{
     model::{AccountActivity, AccountState, AssetState, EpochState, PoolDelegator, PoolState},
     pallas_extras,
+    pparams::ChainSummary,
 };
 
 use super::TrackConfig;
+
 pub trait BlockVisitor {
     #[allow(unused_variables)]
     fn visit_root(&mut self, block: &MultiEraBlock) -> Result<(), State3Error> {
@@ -237,6 +241,7 @@ pub struct SliceBuilder<'a, S: State3Store> {
     store: &'a S,
     slice: StateSliceView<'a>,
     network: Network,
+    chain_summary: std::sync::Arc<ChainSummary>,
 }
 
 impl<'a, S: State3Store> SliceBuilder<'a, S> {
@@ -245,12 +250,14 @@ impl<'a, S: State3Store> SliceBuilder<'a, S> {
         store: &'a S,
         unapplied_deltas: &'a [StateDelta],
         network: Network,
+        chain_summary: std::sync::Arc<ChainSummary>,
     ) -> Self {
         Self {
             config,
             store,
             slice: StateSliceView::new(StateSlice::default(), unapplied_deltas),
             network,
+            chain_summary,
         }
     }
 
@@ -688,10 +695,33 @@ impl<'a> BlockVisitor for PoolDelegatorVisitor<'a, DeltaBuilder<'_>> {
 struct EpochStateVisitor<'a, T>(&'a mut T);
 
 impl<'a, S: State3Store> BlockVisitor for EpochStateVisitor<'a, SliceBuilder<'_, S>> {
-    fn visit_root(&mut self, _: &MultiEraBlock) -> Result<(), State3Error> {
+    fn visit_root(&mut self, block: &MultiEraBlock) -> Result<(), State3Error> {
         self.0
             .slice
             .ensure_loaded_typed::<EpochState>(crate::model::CURRENT_EPOCH_KEY, self.0.store)?;
+
+        let cursor = self.0.store().get_cursor()?;
+
+        let should_compute =
+            pallas_extras::is_epoch_boundary(&self.0.chain_summary, cursor, block.slot());
+
+        if should_compute {
+            let mut by_pool = HashMap::<[u8; 28], u128>::new();
+
+            let all_accounts = self.0.store().iter_entities_typed::<AccountState>(
+                &[0u8; 32].as_slice()..&[255u8; 32].as_slice(),
+            )?;
+
+            for record in all_accounts {
+                let (_, value) = record?;
+
+                if let Some(pool_id) = value.pool_id {
+                    let key = pool_id.try_into().unwrap();
+                    let entry = by_pool.entry(key).or_insert(0);
+                    *entry += value.controlled_amount as u128;
+                }
+            }
+        }
 
         Ok(())
     }
