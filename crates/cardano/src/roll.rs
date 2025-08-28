@@ -6,16 +6,17 @@ use dolos_core::{
 };
 use pallas::{
     crypto::hash::{Hash, Hasher},
+    ledger::traverse::{
+        Era, MultiEraBlock, MultiEraCert, MultiEraInput, MultiEraOutput, MultiEraPolicyAssets,
+        MultiEraTx,
+    },
     ledger::{
         addresses::{Address, Network, StakeAddress},
         primitives::{conway, StakeCredential},
-        traverse::{
-            Era, MultiEraBlock, MultiEraCert, MultiEraInput, MultiEraOutput, MultiEraPolicyAssets,
-            MultiEraTx,
-        },
     },
 };
 
+use rayon::iter::{IntoParallelIterator as _, ParallelIterator as _};
 use tracing::debug;
 
 use crate::{
@@ -75,6 +76,24 @@ pub trait BlockVisitor {
     }
 }
 
+fn load_input<'a>(
+    input: MultiEraInput<'a>,
+    utxo_slice: &'a LedgerSlice,
+) -> Result<(MultiEraInput<'a>, MultiEraOutput<'a>), State3Error> {
+    let txoref = TxoRef::from(&input);
+
+    let EraCbor(era, cbor) = utxo_slice
+        .resolved_inputs
+        .get(&txoref)
+        .ok_or(InvariantViolation::InputNotFound(txoref))?;
+
+    let era = Era::try_from(*era)?;
+
+    let resolved = MultiEraOutput::decode(era, cbor)?;
+
+    Ok((input, resolved))
+}
+
 pub fn crawl_block<'a, T: BlockVisitor>(
     block: &MultiEraBlock<'a>,
     utxo_slice: &LedgerSlice,
@@ -83,20 +102,13 @@ pub fn crawl_block<'a, T: BlockVisitor>(
     visitor.visit_root(block)?;
 
     for tx in block.txs() {
-        let consumed = tx.consumes();
+        let consumed = tx
+            .consumes()
+            .into_par_iter()
+            .map(|input| load_input(input, utxo_slice))
+            .collect::<Result<Vec<_>, _>>()?;
 
-        for input in consumed {
-            let txoref = TxoRef::from(&input);
-
-            let EraCbor(era, cbor) = utxo_slice
-                .resolved_inputs
-                .get(&txoref)
-                .ok_or(InvariantViolation::InputNotFound(txoref))?;
-
-            let era = Era::try_from(*era)?;
-
-            let resolved = MultiEraOutput::decode(era, cbor)?;
-
+        for (input, resolved) in consumed {
             visitor.visit_input(block, &tx, &input, &resolved)?;
         }
 
