@@ -1,7 +1,9 @@
 use clap::{Parser, Subcommand};
 
+mod compute_spdd;
 mod copy_ledger;
 mod copy_wal;
+mod dump_state;
 mod dump_wal;
 mod export;
 mod find_seq;
@@ -17,6 +19,10 @@ pub enum Command {
     Summary(summary::Args),
     /// dumps data from the WAL
     DumpWal(dump_wal::Args),
+    /// dumps data from the state
+    DumpState(dump_state::Args),
+    /// computes the SPDD for the current epoch
+    ComputeSpdd(compute_spdd::Args),
     /// finds the WAL seq for a block
     FindSeq(find_seq::Args),
     /// exports a snapshot from the current data
@@ -49,6 +55,8 @@ pub fn run(
     match &args.command {
         Command::Summary(x) => summary::run(config, x)?,
         Command::DumpWal(x) => dump_wal::run(config, x)?,
+        Command::DumpState(x) => dump_state::run(config, x)?,
+        Command::ComputeSpdd(x) => compute_spdd::run(config, x)?,
         Command::FindSeq(x) => find_seq::run(config, x)?,
         Command::Export(x) => export::run(config, x, feedback)?,
         Command::CopyWal(x) => copy_wal::run(config, x)?,
