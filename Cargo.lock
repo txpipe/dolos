@@ -1141,6 +1141,7 @@ dependencies = [
  "itertools 0.14.0",
  "pallas 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=1d7a0d6)",
  "paste",
+ "rayon",
  "serde",
  "serde_json",
  "thiserror 2.0.12",

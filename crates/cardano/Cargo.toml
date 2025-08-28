@@ -11,7 +11,11 @@ tracing.workspace = true
 serde.workspace = true
 chrono.workspace = true
 hex.workspace = true
+
 paste = "1.0.15"
+
+# TODO: remove rayon once we've moved parallel processing of inputs to the core crate
+rayon = "1.11.0"
 
 serde_json = { workspace = true, optional = true }
 

@@ -1,14 +1,11 @@
-use std::collections::HashMap;
-
 use dolos_core::{
     EraCbor, InvariantViolation, LedgerSlice, State3Error, State3Store, StateDelta, StateSlice,
     StateSliceView, TxoRef,
 };
 use pallas::{
-    codec::minicbor,
     crypto::hash::Hash,
     ledger::{
-        addresses::{Address, Network, StakeAddress, StakePayload},
+        addresses::{Address, Network, StakeAddress},
         primitives::StakeCredential,
         traverse::{
             Era, MultiEraBlock, MultiEraCert, MultiEraInput, MultiEraOutput, MultiEraPolicyAssets,
@@ -17,6 +14,7 @@ use pallas::{
     },
 };
 
+use rayon::iter::{IntoParallelIterator as _, ParallelIterator as _};
 use tracing::debug;
 
 use crate::{
@@ -74,6 +72,24 @@ pub trait BlockVisitor {
     }
 }
 
+fn load_input<'a>(
+    input: MultiEraInput<'a>,
+    utxo_slice: &'a LedgerSlice,
+) -> Result<(MultiEraInput<'a>, MultiEraOutput<'a>), State3Error> {
+    let txoref = TxoRef::from(&input);
+
+    let EraCbor(era, cbor) = utxo_slice
+        .resolved_inputs
+        .get(&txoref)
+        .ok_or(InvariantViolation::InputNotFound(txoref))?;
+
+    let era = Era::try_from(*era)?;
+
+    let resolved = MultiEraOutput::decode(era, cbor)?;
+
+    Ok((input, resolved))
+}
+
 pub fn crawl_block<'a, T: BlockVisitor>(
     block: &MultiEraBlock<'a>,
     utxo_slice: &LedgerSlice,
@@ -82,20 +98,13 @@ pub fn crawl_block<'a, T: BlockVisitor>(
     visitor.visit_root(block)?;
 
     for tx in block.txs() {
-        let consumed = tx.consumes();
+        let consumed = tx
+            .consumes()
+            .into_par_iter()
+            .map(|input| load_input(input, utxo_slice))
+            .collect::<Result<Vec<_>, _>>()?;
 
-        for input in consumed {
-            let txoref = TxoRef::from(&input);
-
-            let EraCbor(era, cbor) = utxo_slice
-                .resolved_inputs
-                .get(&txoref)
-                .ok_or(InvariantViolation::InputNotFound(txoref))?;
-
-            let era = Era::try_from(*era)?;
-
-            let resolved = MultiEraOutput::decode(era, cbor)?;
-
+        for (input, resolved) in consumed {
             visitor.visit_input(block, &tx, &input, &resolved)?;
         }
 
