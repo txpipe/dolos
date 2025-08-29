@@ -154,10 +154,10 @@ impl pallas::interop::utxorpc::LedgerContext for ToyDomain {
         &self,
         _refs: &[pallas::interop::utxorpc::TxoRef],
     ) -> Option<pallas::interop::utxorpc::UtxoMap> {
-        todo!()
+        None
     }
 
     fn get_slot_timestamp(&self, _slot: u64) -> Option<u64> {
-        todo!()
+        None
     }
 }
