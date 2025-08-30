@@ -1,7 +1,7 @@
 use itertools::Itertools as _;
 use pallas::interop::utxorpc::{self as interop, spec::query::any_utxo_pattern::UtxoPattern};
-use pallas::interop::utxorpc::{LedgerContext, spec as u5c};
-use pallas::ledger::traverse::MultiEraOutput;
+use pallas::interop::utxorpc::{spec as u5c, LedgerContext};
+use pallas::ledger::traverse::{MultiEraBlock, MultiEraOutput};
 use std::collections::HashSet;
 use tonic::{Request, Response, Status};
 use tracing::info;
@@ -11,33 +11,37 @@ use dolos_cardano::pparams;
 use super::masking::apply_mask;
 use crate::prelude::*;
 
-pub fn point_to_u5c(point: &ChainPoint) -> u5c::query::ChainPoint {
+pub fn point_to_u5c<T: LedgerContext>(ledger: &T, point: &ChainPoint) -> u5c::query::ChainPoint {
     match point {
         ChainPoint::Origin => u5c::query::ChainPoint {
             slot: 0,
             hash: vec![].into(),
+            height: 0,
+            timestamp: 0,
         },
         ChainPoint::Specific(slot, hash) => u5c::query::ChainPoint {
             slot: *slot,
             hash: hash.to_vec().into(),
+            timestamp: ledger.get_slot_timestamp(*slot).unwrap_or_default(),
+            ..Default::default()
         },
     }
 }
 
-pub struct QueryServiceImpl<D: Domain>
+pub struct QueryServiceImpl<D>
 where
-    D::State: LedgerContext,
+    D: Domain + LedgerContext,
 {
     domain: D,
-    mapper: interop::Mapper<D::State>,
+    mapper: interop::Mapper<D>,
 }
 
-impl<D: Domain> QueryServiceImpl<D>
+impl<D> QueryServiceImpl<D>
 where
-    D::State: LedgerContext,
+    D: Domain + LedgerContext,
 {
     pub fn new(domain: D) -> Self {
-        let mapper = interop::Mapper::new(domain.state().clone());
+        let mapper = interop::Mapper::new(domain.clone());
 
         Self { domain, mapper }
     }
@@ -208,7 +212,7 @@ fn from_u5c_txoref(txo: u5c::query::TxoRef) -> Result<TxoRef, Status> {
     Ok(TxoRef(hash, txo.index))
 }
 
-fn into_u5c_utxo<S: StateStore + LedgerContext>(
+fn into_u5c_utxo<S: Domain + LedgerContext>(
     txo: &TxoRef,
     body: &EraCbor,
     mapper: &interop::Mapper<S>,
@@ -227,9 +231,9 @@ fn into_u5c_utxo<S: StateStore + LedgerContext>(
 }
 
 #[async_trait::async_trait]
-impl<D: Domain> u5c::query::query_service_server::QueryService for QueryServiceImpl<D>
+impl<D> u5c::query::query_service_server::QueryService for QueryServiceImpl<D>
 where
-    D::State: LedgerContext,
+    D: Domain + LedgerContext,
 {
     async fn read_params(
         &self,
@@ -268,7 +272,7 @@ where
                 )
                 .into(),
             }),
-            ledger_tip: tip.as_ref().map(point_to_u5c),
+            ledger_tip: tip.as_ref().map(|p| point_to_u5c(&self.domain, p)),
         };
 
         if let Some(mask) = message.field_mask {
@@ -319,7 +323,7 @@ where
             .cursor()
             .map_err(|e| Status::internal(e.to_string()))?
             .as_ref()
-            .map(point_to_u5c);
+            .map(|p| point_to_u5c(&self.domain, p));
 
         Ok(Response::new(u5c::query::ReadUtxosResponse {
             items,
@@ -366,12 +370,92 @@ where
             .cursor()
             .map_err(|e| Status::internal(e.to_string()))?
             .as_ref()
-            .map(point_to_u5c);
+            .map(|p| point_to_u5c(&self.domain, p));
 
         Ok(Response::new(u5c::query::SearchUtxosResponse {
             items,
             ledger_tip: cursor,
             next_token: String::default(),
         }))
+    }
+
+    async fn read_tx(
+        &self,
+        request: Request<u5c::query::ReadTxRequest>,
+    ) -> Result<Response<u5c::query::ReadTxResponse>, Status> {
+        let message = request.into_inner();
+
+        info!("received new grpc query");
+
+        let tx_hash = message.hash;
+
+        let (block_bytes, tx_index) =
+            ArchiveStore::get_block_with_tx(self.domain.archive(), &tx_hash)
+                .map_err(|e| Status::internal(e.to_string()))?
+                .ok_or_else(|| Status::not_found("tx hash not found"))?;
+
+        let block = MultiEraBlock::decode(&block_bytes)
+            .map_err(|e| Status::internal(format!("failed to decode block: {e}")))?;
+
+        let tx = block
+            .txs()
+            .get(tx_index)
+            .cloned()
+            .ok_or_else(|| Status::not_found("tx hash not found"))?;
+
+        let native_bytes = tx.encode().into();
+
+        let cursor = self
+            .domain
+            .state()
+            .cursor()
+            .map_err(|e| Status::internal(e.to_string()))?
+            .as_ref()
+            .map(|p| point_to_u5c(&self.domain, p));
+
+        let mut response = u5c::query::ReadTxResponse {
+            tx: Some(u5c::query::AnyChainTx {
+                native_bytes,
+                block_ref: Some(u5c::query::ChainPoint {
+                    slot: block.slot(),
+                    hash: block.hash().to_vec().into(),
+                    height: block.header().number(),
+                    timestamp: self.domain.get_slot_timestamp(block.slot()).unwrap_or(0),
+                }),
+                chain: Some(u5c::query::any_chain_tx::Chain::Cardano(
+                    self.mapper.map_tx(&tx),
+                )),
+            }),
+            ledger_tip: cursor,
+        };
+
+        if let Some(mask) = message.field_mask {
+            response = apply_mask(response, mask.paths)
+                .map_err(|e| Status::internal(format!("failed to apply field mask: {e}")))?;
+        }
+
+        Ok(Response::new(response))
+    }
+
+    async fn read_genesis(
+        &self,
+        request: Request<u5c::query::ReadGenesisRequest>,
+    ) -> Result<Response<u5c::query::ReadGenesisResponse>, Status> {
+        let _message = request.into_inner();
+
+        info!("received new grpc query");
+
+        todo!()
+    }
+
+    async fn read_era_summary(
+        &self,
+        request: Request<u5c::query::ReadEraSummaryRequest>,
+    ) -> Result<Response<u5c::query::ReadEraSummaryResponse>, Status> {
+        let _message = request.into_inner();
+
+        info!("received new grpc query");
+
+        todo!()
     }
 }

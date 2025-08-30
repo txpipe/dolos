@@ -165,6 +165,8 @@ fn block_to_txs<C: LedgerContext>(
         })
         .map(|x| u5c::watch::AnyChainTx {
             chain: Some(u5c::watch::any_chain_tx::Chain::Cardano(x)),
+            // TODO(p): should it be none?
+            block: None,
         })
         .collect()
 }
@@ -192,21 +194,23 @@ fn roll_to_watch_response<C: LedgerContext>(
     tokio_stream::iter(txs)
 }
 
-pub struct WatchServiceImpl<D: Domain, C: CancelToken>
+pub struct WatchServiceImpl<D, C>
 where
-    D::State: LedgerContext,
+    D: Domain + LedgerContext,
+    C: CancelToken,
 {
     domain: D,
-    mapper: interop::Mapper<D::State>,
+    mapper: interop::Mapper<D>,
     cancel: C,
 }
 
-impl<D: Domain, C: CancelToken> WatchServiceImpl<D, C>
+impl<D, C> WatchServiceImpl<D, C>
 where
-    D::State: LedgerContext,
+    D: Domain + LedgerContext,
+    C: CancelToken,
 {
     pub fn new(domain: D, cancel: C) -> Self {
-        let mapper = interop::Mapper::new(domain.state().clone());
+        let mapper = interop::Mapper::new(domain.clone());
 
         Self {
             domain,
@@ -217,10 +221,10 @@ where
 }
 
 #[async_trait::async_trait]
-impl<D: Domain, C: CancelToken> u5c::watch::watch_service_server::WatchService
-    for WatchServiceImpl<D, C>
+impl<D, C> u5c::watch::watch_service_server::WatchService for WatchServiceImpl<D, C>
 where
-    D::State: LedgerContext,
+    D: Domain + LedgerContext,
+    C: CancelToken,
 {
     type WatchTxStream = Pin<
         Box<dyn Stream<Item = Result<u5c::watch::WatchTxResponse, tonic::Status>> + Send + 'static>,
@@ -235,7 +239,7 @@ where
         let intersect = inner_req
             .intersect
             .iter()
-            .map(|x| ChainPoint::Specific(x.index, x.hash.to_vec().as_slice().into()))
+            .map(|x| ChainPoint::Specific(x.slot, x.hash.to_vec().as_slice().into()))
             .collect::<Vec<ChainPoint>>();
 
         let stream = ChainStream::start::<D, _>(

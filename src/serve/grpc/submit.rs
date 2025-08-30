@@ -14,21 +14,21 @@ use tracing::info;
 use crate::mempool::UpdateFilter;
 use crate::prelude::*;
 
-pub struct SubmitServiceImpl<D: Domain>
+pub struct SubmitServiceImpl<D>
 where
-    D::State: LedgerContext,
+    D: Domain + LedgerContext,
 {
     mempool: D::Mempool,
-    _mapper: interop::Mapper<D::State>,
+    _mapper: interop::Mapper<D>,
 }
 
-impl<D: Domain> SubmitServiceImpl<D>
+impl<D> SubmitServiceImpl<D>
 where
-    D::State: LedgerContext,
+    D: Domain + LedgerContext,
 {
     pub fn new(domain: D) -> Self {
         let mempool = domain.mempool().clone();
-        let _mapper = interop::Mapper::new(domain.state().clone());
+        let _mapper = interop::Mapper::new(domain.clone());
 
         Self { mempool, _mapper }
     }
@@ -102,9 +102,9 @@ fn tx_eval_to_u5c(
 }
 
 #[async_trait::async_trait]
-impl<D: Domain> submit_service_server::SubmitService for SubmitServiceImpl<D>
+impl<D> submit_service_server::SubmitService for SubmitServiceImpl<D>
 where
-    D::State: LedgerContext,
+    D: Domain + LedgerContext,
 {
     type WaitForTxStream =
         Pin<Box<dyn Stream<Item = Result<WaitForTxResponse, tonic::Status>> + Send + 'static>>;
