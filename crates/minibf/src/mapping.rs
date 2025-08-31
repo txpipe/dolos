@@ -515,6 +515,63 @@ impl<'a> TxModelBuilder<'a> {
         Ok(unique)
     }
 
+    pub fn deposit(&self) -> Result<u64, StatusCode> {
+        let era = self
+            .chain
+            .as_ref()
+            .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?
+            .era_for_slot(self.block.slot());
+
+        let key_deposit = match &era.pparams {
+            MultiEraProtocolParameters::Alonzo(x) => x.key_deposit,
+            MultiEraProtocolParameters::Babbage(x) => x.key_deposit,
+            MultiEraProtocolParameters::Conway(x) => x.key_deposit,
+            _ => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+        };
+
+        let pool_deposit = match &era.pparams {
+            MultiEraProtocolParameters::Alonzo(x) => x.pool_deposit,
+            MultiEraProtocolParameters::Babbage(x) => x.pool_deposit,
+            MultiEraProtocolParameters::Conway(x) => x.pool_deposit,
+            _ => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+        };
+
+        let drep_deposit = match &era.pparams {
+            MultiEraProtocolParameters::Conway(x) => Some(x.drep_deposit),
+            _ => None,
+        };
+
+        Ok(self
+            .tx()?
+            .certs()
+            .iter()
+            .flat_map(|x| match x {
+                MultiEraCert::AlonzoCompatible(alonzo) => match alonzo.deref().deref() {
+                    pallas::ledger::primitives::alonzo::Certificate::StakeRegistration(_) => {
+                        Some(key_deposit)
+                    }
+                    pallas::ledger::primitives::alonzo::Certificate::PoolRegistration {
+                        ..
+                    } => Some(pool_deposit),
+                    _ => None,
+                },
+                MultiEraCert::Conway(conway) => match conway.deref().deref() {
+                    pallas::ledger::primitives::conway::Certificate::StakeRegistration(_) => {
+                        Some(key_deposit)
+                    }
+                    pallas::ledger::primitives::conway::Certificate::PoolRegistration {
+                        ..
+                    } => Some(pool_deposit),
+                    pallas::ledger::primitives::conway::Certificate::RegDRepCert { .. } => {
+                        drep_deposit
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .sum())
+    }
+
     pub fn load_dep(&mut self, key: TxHash, cbor: &'a EraCbor) -> Result<(), StatusCode> {
         let era = try_into_or_500!(cbor.0);
 
@@ -660,61 +717,6 @@ impl IntoModel<TxContent> for TxModelBuilder<'_> {
         let txouts = tx.outputs();
         let chain = self.chain_or_500()?;
 
-        let era = self
-            .chain
-            .as_ref()
-            .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?
-            .era_for_slot(self.block.slot());
-
-        let key_deposit = match &era.pparams {
-            MultiEraProtocolParameters::Alonzo(x) => x.key_deposit,
-            MultiEraProtocolParameters::Babbage(x) => x.key_deposit,
-            MultiEraProtocolParameters::Conway(x) => x.key_deposit,
-            _ => return Err(StatusCode::INTERNAL_SERVER_ERROR),
-        };
-
-        let mut deposit: u64 = tx
-            .certs()
-            .iter()
-            .flat_map(|x| match x {
-                MultiEraCert::AlonzoCompatible(alonzo) => match *(**alonzo).clone() {
-                    pallas::ledger::primitives::alonzo::Certificate::StakeRegistration(_) => {
-                        Some(key_deposit)
-                    }
-                    _ => None,
-                },
-                MultiEraCert::Conway(conway) => match *(**conway).clone() {
-                    pallas::ledger::primitives::conway::Certificate::StakeRegistration(_) => {
-                        Some(key_deposit)
-                    }
-                    _ => None,
-                },
-                _ => None,
-            })
-            .sum();
-
-        deposit += tx
-            .certs()
-            .iter()
-            .flat_map(|x| match x {
-                MultiEraCert::AlonzoCompatible(alonzo) => match *(**alonzo).clone() {
-                    pallas::ledger::primitives::alonzo::Certificate::PoolRegistration {
-                        cost,
-                        ..
-                    } => Some(cost),
-                    _ => None,
-                },
-                MultiEraCert::Conway(conway) => match *(**conway).clone() {
-                    pallas::ledger::primitives::conway::Certificate::PoolRegistration {
-                        cost,
-                        ..
-                    } => Some(cost),
-                    _ => None,
-                },
-                _ => None,
-            })
-            .sum::<u64>();
-
         let block_time = dolos_cardano::slot_time(block.slot(), chain);
 
         let tx = TxContent {
@@ -739,8 +741,7 @@ impl IntoModel<TxContent> for TxModelBuilder<'_> {
             pool_update_count: count_certs!(tx, PoolRegistration) as i32,
             pool_retire_count: count_certs!(tx, PoolRetirement) as i32,
             asset_mint_or_burn_count: tx.mints().iter().flat_map(|x| x.assets()).count() as i32,
-            // TODO: need to understand exactly what this means in terms of the transaction
-            deposit: deposit.to_string(),
+            deposit: self.deposit()?.to_string(),
         };
 
         Ok(tx)
