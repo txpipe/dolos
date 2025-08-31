@@ -1,6 +1,6 @@
 use dolos_core::{State3Error, State3Store, StateDelta, StateSlice, StateSliceView};
 use pallas::{
-    crypto::hash::Hash,
+    crypto::hash::{Hash, Hasher},
     ledger::{
         addresses::{Address, StakeAddress},
         primitives::StakeCredential,
@@ -378,6 +378,17 @@ impl<'a> BlockVisitor for AssetStateVisitor<'a, DeltaBuilder<'_>> {
 struct PoolStateVisitor<'a, T>(&'a mut T);
 
 impl<'a, S: State3Store> BlockVisitor for PoolStateVisitor<'a, SliceBuilder<'_, S>> {
+    fn visit_root(&mut self, block: &MultiEraBlock) -> Result<(), State3Error> {
+        if let Some(key) = block.header().issuer_vkey() {
+            let operator: Hash<28> = Hasher::<224>::hash(key);
+            self.0
+                .slice
+                .ensure_loaded_typed::<PoolState>(operator, self.0.store)?;
+        }
+
+        Ok(())
+    }
+
     fn visit_cert(
         &mut self,
         _: &MultiEraBlock,
@@ -395,6 +406,21 @@ impl<'a, S: State3Store> BlockVisitor for PoolStateVisitor<'a, SliceBuilder<'_, 
 }
 
 impl<'a> BlockVisitor for PoolStateVisitor<'a, DeltaBuilder<'_>> {
+    fn visit_root(&mut self, block: &MultiEraBlock) -> Result<(), State3Error> {
+        if let Some(key) = block.header().issuer_vkey() {
+            let operator: Hash<28> = Hasher::<224>::hash(key);
+            if let Some(mut entity) = self.0.slice().get_entity_typed::<PoolState>(operator)? {
+                let prev = entity.clone();
+                entity.blocks_minted += 1;
+                self.0
+                    .delta_mut()
+                    .override_entity(operator.as_slice(), entity, Some(prev));
+            }
+        }
+
+        Ok(())
+    }
+
     fn visit_cert(
         &mut self,
         _: &MultiEraBlock,
