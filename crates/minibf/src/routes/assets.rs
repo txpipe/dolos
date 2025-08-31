@@ -161,7 +161,7 @@ impl CIP68Label {
         let number_hex = format!("{:04x}", self.to_u32());
         let bytes = hex::decode(&number_hex).unwrap();
         let checksum = format!("{:02x}", CRC8_ALGO.checksum(&bytes));
-        format!("0{}{}0", number_hex, checksum)
+        format!("0{number_hex}{checksum}0")
     }
 }
 
@@ -405,7 +405,7 @@ impl AssetModelBuilder {
             return Ok(None);
         };
 
-        let url = format!("{}/metadata/{}", url, asset);
+        let url = format!("{url}/metadata/{asset}");
 
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
