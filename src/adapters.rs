@@ -33,68 +33,58 @@ impl From<ChainConfig> for ChainAdapter {
 }
 
 impl ChainLogic for ChainAdapter {
-    type Block<'a> = dolos_cardano::Block<'a>;
+    type Block = dolos_cardano::owned::OwnedMultiEraBlock;
+    type Utxo = dolos_cardano::owned::OwnedMultiEraOutput;
+    type EntityDelta = dolos_cardano::CardanoDelta;
 
-    fn decode_block<'a>(block: &'a [u8]) -> Result<Self::Block<'a>, ChainError> {
-        dolos_cardano::ChainLogic::decode_block(block)
+    fn decode_block(&self, block: Arc<BlockBody>) -> Result<Self::Block, ChainError> {
+        match self {
+            ChainAdapter::Cardano(x) => x.decode_block(block),
+        }
+    }
+
+    fn decode_utxo(&self, utxo: Arc<EraCbor>) -> Result<Self::Utxo, ChainError> {
+        match self {
+            ChainAdapter::Cardano(x) => x.decode_utxo(utxo),
+        }
+    }
+
+    fn compute_block_delta(
+        &self,
+        block: &Self::Block,
+        deps: &std::collections::HashMap<TxoRef, Self::Utxo>,
+    ) -> Result<StateDelta<Self::EntityDelta>, ChainError> {
+        match self {
+            ChainAdapter::Cardano(x) => x.compute_block_delta(block, deps),
+        }
+    }
+
+    fn compute_origin_delta(
+        &self,
+        genesis: &Genesis,
+    ) -> Result<StateDelta<Self::EntityDelta>, ChainError> {
+        match self {
+            ChainAdapter::Cardano(x) => x.compute_origin_delta(genesis),
+        }
     }
 
     fn mutable_slots(domain: &impl Domain) -> BlockSlot {
         dolos_cardano::ChainLogic::mutable_slots(domain)
     }
 
-    fn compute_origin_delta<'a>(&self, genesis: &Genesis) -> Result<LedgerDelta, ChainError> {
+    fn compute_origin_utxo_delta(&self, genesis: &Genesis) -> Result<UtxoSetDelta, ChainError> {
         match self {
-            ChainAdapter::Cardano(x) => x.compute_origin_delta(genesis),
+            ChainAdapter::Cardano(x) => x.compute_origin_utxo_delta(genesis),
         }
     }
 
-    fn compute_apply_delta<'a>(
-        ledger: LedgerSlice,
-        block: &Self::Block<'a>,
-    ) -> Result<LedgerDelta, ChainError> {
-        dolos_cardano::ChainLogic::compute_apply_delta(ledger, block)
-    }
-
-    fn compute_undo_delta<'a>(
-        ledger: LedgerSlice,
-        block: &Self::Block<'a>,
-    ) -> Result<LedgerDelta, ChainError> {
-        dolos_cardano::ChainLogic::compute_undo_delta(ledger, block)
-    }
-
-    fn ledger_query_for_block<'a>(
-        block: &Self::Block<'a>,
-        unapplied_deltas: &[LedgerDelta],
-    ) -> Result<LedgerQuery, ChainError> {
-        dolos_cardano::ChainLogic::ledger_query_for_block(block, unapplied_deltas)
-    }
-
-    fn load_slice3_for_block<'a>(
+    fn compute_block_utxo_delta(
         &self,
-        state: &impl State3Store,
-        utxo_slice: &LedgerSlice,
-        block: &Self::Block<'a>,
-        unapplied_deltas: &[StateDelta],
-    ) -> Result<StateSlice, DomainError> {
+        block: &Self::Block,
+        deps: &RawUtxoMap,
+    ) -> Result<UtxoSetDelta, ChainError> {
         match self {
-            ChainAdapter::Cardano(x) => {
-                x.load_slice3_for_block(state, utxo_slice, block, unapplied_deltas)
-            }
-        }
-    }
-
-    fn compute_apply_delta3<'a>(
-        &self,
-        state: StateSlice,
-        utxo_slice: &LedgerSlice,
-        block: &Self::Block<'a>,
-        unapplied_deltas: &[StateDelta],
-    ) -> Result<StateDelta, ChainError> {
-        match self {
-            ChainAdapter::Cardano(x) => {
-                x.compute_apply_delta3(state, utxo_slice, block, unapplied_deltas)
-            }
+            ChainAdapter::Cardano(x) => x.compute_block_utxo_delta(block, deps),
         }
     }
 }
@@ -187,7 +177,7 @@ impl StateStore for StateAdapter {
         Ok(out)
     }
 
-    fn apply(&self, deltas: &[LedgerDelta]) -> Result<(), StateError> {
+    fn apply(&self, deltas: &[UtxoSetDelta]) -> Result<(), StateError> {
         match self {
             StateAdapter::Redb(x) => x.apply(deltas)?,
         };
@@ -233,6 +223,26 @@ impl TryFrom<StateAdapter> for dolos_redb::state::LedgerStore {
         match value {
             StateAdapter::Redb(x) => Ok(x),
         }
+    }
+}
+
+impl pallas::interop::utxorpc::LedgerContext for StateAdapter {
+    fn get_utxos<'a>(
+        &self,
+        refs: &[pallas::interop::utxorpc::TxoRef],
+    ) -> Option<pallas::interop::utxorpc::UtxoMap> {
+        let refs: Vec<_> = refs.iter().map(|x| TxoRef::from(*x)).collect();
+
+        let some = dolos_core::StateStore::get_utxos(self, refs)
+            .ok()?
+            .into_iter()
+            .map(|(k, v)| {
+                let era = v.0.try_into().expect("era out of range");
+                (k.into(), (era, v.1.to_owned()))
+            })
+            .collect();
+
+        Some(some)
     }
 }
 
@@ -442,7 +452,7 @@ impl ArchiveStore for ArchiveAdapter {
         Ok(out)
     }
 
-    fn apply(&self, deltas: &[LedgerDelta]) -> Result<(), ArchiveError> {
+    fn apply(&self, deltas: &[UtxoSetDelta]) -> Result<(), ArchiveError> {
         match self {
             ArchiveAdapter::Redb(x) => x.apply(deltas)?,
         };
@@ -529,6 +539,8 @@ pub struct DomainAdapter {
 }
 
 impl Domain for DomainAdapter {
+    type Entity = dolos_cardano::CardanoEntity;
+    type EntityDelta = dolos_cardano::CardanoDelta;
     type Chain = ChainAdapter;
     type Wal = WalAdapter;
     type State = StateAdapter;

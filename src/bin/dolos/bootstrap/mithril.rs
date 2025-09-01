@@ -1,7 +1,7 @@
 use itertools::Itertools;
 use miette::{Context, IntoDiagnostic};
 use mithril_client::{ClientBuilder, MessageBuilder, MithrilError, MithrilResult};
-use pallas::ledger::traverse::MultiEraBlock;
+
 use rayon::iter::{IntoParallelIterator as _, ParallelIterator as _};
 use std::{path::Path, sync::Arc};
 use tracing::{info, warn};
@@ -162,32 +162,14 @@ async fn fetch_snapshot(
 
 fn process_chunk(
     domain: &DomainAdapter,
-    chunk: Vec<Vec<u8>>,
+    batch: dolos_core::sync::RawBlockBatch,
     progress: &indicatif::ProgressBar,
 ) -> Result<(), miette::Error> {
-    let decode = |b: Vec<u8>| {
-        let blockd = MultiEraBlock::decode(&b)
-            .into_diagnostic()
-            .context("decoding block cbor")?;
-
-        miette::Result::Ok(RawBlock {
-            slot: blockd.slot(),
-            hash: blockd.hash(),
-            era: blockd.era(),
-            body: b,
-        })
+    let Ok(last) = dolos_core::sync::import_batch(domain, batch) else {
+        return Err(miette::miette!("failed to import batch"));
     };
 
-    let raw_blocks: Vec<_> = chunk
-        .into_par_iter()
-        .map(decode)
-        .collect::<miette::Result<_>>()?;
-
-    if let Err(err) = domain.apply_blocks(&raw_blocks) {
-        miette::bail!("failed to apply block chunk: {}", err);
-    }
-
-    raw_blocks.last().inspect(|b| progress.set_position(b.slot));
+    progress.set_position(last);
 
     Ok(())
 }
@@ -201,8 +183,7 @@ fn import_hardano_into_domain(
     let domain = crate::common::setup_domain(config)?;
 
     if domain.state().is_empty().into_diagnostic()? {
-        domain
-            .apply_origin()
+        dolos_core::sync::apply_origin(&domain)
             // TODO: can't use into_diagnostic here because some variant of DomainError doesn't
             // implement std::error::Error
             .map_err(|x| miette::miette!(x.to_string()))
@@ -231,13 +212,17 @@ fn import_hardano_into_domain(
     progress.set_message("importing immutable db");
     progress.set_length(tip.slot_or_default());
 
-    for chunk in iter.chunks(chunk_size).into_iter() {
-        let chunk = chunk
+    for batch in iter.chunks(chunk_size).into_iter() {
+        let batch: Vec<_> = batch
             .try_collect()
             .into_diagnostic()
             .context("reading block data")?;
 
-        process_chunk(&domain, chunk, &progress)?;
+        // we need to wrap them on a ref counter since bytes are going to be shared
+        // around throughout the pipeline
+        let batch: Vec<_> = batch.into_iter().map(Arc::new).collect();
+
+        process_chunk(&domain, batch, &progress)?;
     }
 
     progress.abandon_with_message("immutable db import complete");

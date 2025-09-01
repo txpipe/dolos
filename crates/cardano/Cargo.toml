@@ -18,6 +18,7 @@ paste = "1.0.15"
 rayon = "1.11.0"
 
 serde_json = { workspace = true, optional = true }
+self_cell = "1.2.0"
 
 [dev-dependencies]
 hex = "0.4.3"

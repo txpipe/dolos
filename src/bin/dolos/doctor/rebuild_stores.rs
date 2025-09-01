@@ -32,13 +32,9 @@ pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::
     {
         debug!("importing genesis");
 
-        let delta = dolos::cardano::compute_origin_delta(&genesis);
-
-        domain
-            .state
-            .apply(&[delta])
-            .into_diagnostic()
-            .context("applying origin utxos")?;
+        let Ok(_) = dolos_core::sync::apply_origin(&domain) else {
+            return Err(miette::miette!("failed to apply origin"));
+        };
     }
 
     let (_, tip) = domain
@@ -61,11 +57,13 @@ pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::
         .context("creating wal block reader")?;
 
     for chunk in remaining.chunks(args.chunk).into_iter() {
-        let collected = chunk.collect_vec();
-        if let Err(err) = domain.apply_blocks(&collected) {
-            miette::bail!("failed to apply block chunk: {}", err);
-        }
-        collected.last().inspect(|b| progress.set_position(b.slot));
+        let collected = chunk.into_iter().map(|x| Arc::new(x.body)).collect_vec();
+
+        let Ok(cursor) = dolos_core::sync::import_batch(&domain, collected) else {
+            miette::bail!("failed to apply block chunk");
+        };
+
+        progress.set_position(cursor);
     }
 
     Ok(())

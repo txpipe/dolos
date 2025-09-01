@@ -4,7 +4,7 @@ use std::{collections::HashMap, path::Path};
 use tracing::{debug, info, warn};
 
 use dolos_core::{
-    BlockSlot, ChainPoint, EraCbor, LedgerDelta, StateError, TxoRef, UtxoMap, UtxoSet,
+    BlockSlot, ChainPoint, EraCbor, StateError, TxoRef, UtxoMap, UtxoSet, UtxoSetDelta,
 };
 
 use crate::state::tables::UtxoKeyIterator;
@@ -293,7 +293,7 @@ impl LedgerStore {
         }
     }
 
-    pub fn apply(&self, deltas: &[LedgerDelta]) -> Result<(), RedbStateError> {
+    pub fn apply(&self, deltas: &[UtxoSetDelta]) -> Result<(), RedbStateError> {
         match self {
             LedgerStore::SchemaV1(x) => Ok(x.apply(deltas)?),
             LedgerStore::SchemaV2(x) => Ok(x.apply(deltas)?),
@@ -383,7 +383,7 @@ impl dolos_core::StateStore for LedgerStore {
         Ok(Self::get_utxo_by_asset(self, asset)?)
     }
 
-    fn apply(&self, deltas: &[LedgerDelta]) -> Result<(), StateError> {
+    fn apply(&self, deltas: &[UtxoSetDelta]) -> Result<(), StateError> {
         Ok(Self::apply(self, deltas)?)
     }
 

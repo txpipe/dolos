@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, ops::Range, str::FromStr};
+use std::{collections::BTreeMap, ops::Range, str::FromStr, sync::Arc};
 
 use pallas::{
     codec::minicbor,
@@ -190,10 +190,10 @@ pub fn fake_genesis_utxo(
     (txoref, utxo_with_value(address, Value::Coin(amount)))
 }
 
-pub fn replace_utxo_address(utxo: EraCbor, new_address: TestAddress) -> EraCbor {
-    let EraCbor(_, cbor) = utxo;
+pub fn replace_utxo_address(utxo: Arc<EraCbor>, new_address: TestAddress) -> Arc<EraCbor> {
+    let EraCbor(_, cbor) = utxo.as_ref();
 
-    let output = MultiEraOutput::decode(Era::Conway, &cbor).unwrap();
+    let output = MultiEraOutput::decode(Era::Conway, cbor).unwrap();
 
     let Some(GenTransactionOutput::PostAlonzo(mut output)) = output.as_conway().cloned() else {
         unreachable!()
@@ -201,7 +201,10 @@ pub fn replace_utxo_address(utxo: EraCbor, new_address: TestAddress) -> EraCbor 
 
     output.address = new_address.to_bytes().into();
 
-    EraCbor(Era::Conway.into(), minicbor::to_vec(&output).unwrap())
+    Arc::new(EraCbor(
+        Era::Conway.into(),
+        minicbor::to_vec(&output).unwrap(),
+    ))
 }
 
 pub fn replace_utxo_map_address(utxos: UtxoMap, new_address: TestAddress) -> UtxoMap {
@@ -268,34 +271,35 @@ pub fn print_utxo_map(utxos: &UtxoMap) {
     }
 }
 
-pub fn fake_genesis_delta(initial_amount: u64) -> LedgerDelta {
-    LedgerDelta {
+pub fn fake_genesis_delta(initial_amount: u64) -> UtxoSetDelta {
+    UtxoSetDelta {
         new_position: Some(ChainPoint::Origin),
         produced_utxo: TestAddress::everyone()
             .into_iter()
             .enumerate()
             .map(|(ordinal, addr)| fake_genesis_utxo(addr, ordinal, initial_amount))
+            .map(|(k, v)| (k, Arc::new(v)))
             .collect(),
         ..Default::default()
     }
 }
 
-pub fn forward_delta_from_slot(slot: u64) -> LedgerDelta {
-    LedgerDelta {
+pub fn forward_delta_from_slot(slot: u64) -> UtxoSetDelta {
+    UtxoSetDelta {
         new_position: Some(slot_to_chainpoint(slot)),
         ..Default::default()
     }
 }
 
-pub fn undo_delta_from_slot(slot: u64) -> LedgerDelta {
-    LedgerDelta {
+pub fn undo_delta_from_slot(slot: u64) -> UtxoSetDelta {
+    UtxoSetDelta {
         undone_position: Some(slot_to_chainpoint(slot)),
         ..Default::default()
     }
 }
 
-pub fn revert_delta(delta: LedgerDelta) -> LedgerDelta {
-    LedgerDelta {
+pub fn revert_delta(delta: UtxoSetDelta) -> UtxoSetDelta {
+    UtxoSetDelta {
         undone_position: delta.new_position,
         recovered_stxi: delta.consumed_utxo,
         undone_utxo: delta.produced_utxo,
@@ -308,7 +312,7 @@ pub fn make_move_utxo_delta(
     slot: u64,
     tx_seq: u64,
     to: TestAddress,
-) -> LedgerDelta {
+) -> UtxoSetDelta {
     let moved = utxos.clone();
     let moved = replace_utxo_map_address(moved, to);
     let moved = replace_utxo_map_txhash(moved, tx_seq);
@@ -324,7 +328,7 @@ pub fn make_custom_utxo_delta<G>(
     addresses: impl IntoIterator<Item = TestAddress>,
     utxos_per_address: Range<u64>,
     utxo_generator: G,
-) -> LedgerDelta
+) -> UtxoSetDelta
 where
     G: UtxoGenerator,
 {
@@ -340,6 +344,7 @@ where
 
             let key = TxoRef(tx, ordinal as u32);
             let cbor = utxo_generator.generate(address);
+            let cbor = Arc::new(cbor);
 
             utxos.insert(key, cbor);
         }

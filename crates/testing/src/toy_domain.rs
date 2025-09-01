@@ -52,7 +52,7 @@ impl dolos_core::MempoolStore for Mempool {
         todo!()
     }
 
-    fn apply(&self, _deltas: &[LedgerDelta]) {
+    fn apply(&self, _deltas: &[UtxoSetDelta]) {
         // do nothing for now
     }
 
@@ -84,7 +84,7 @@ pub struct ToyDomain {
 
 impl ToyDomain {
     /// Create a new MockDomain with the provided state implementation
-    pub fn new(initial_delta: Option<LedgerDelta>, storage_config: Option<StorageConfig>) -> Self {
+    pub fn new(initial_delta: Option<UtxoSetDelta>, storage_config: Option<StorageConfig>) -> Self {
         let state = dolos_redb::state::LedgerStore::in_memory_v2().unwrap();
 
         if let Some(delta) = initial_delta {
@@ -108,6 +108,8 @@ impl ToyDomain {
 }
 
 impl dolos_core::Domain for ToyDomain {
+    type Entity = dolos_cardano::CardanoEntity;
+    type EntityDelta = dolos_cardano::CardanoDelta;
     type State = dolos_redb::state::LedgerStore;
     type Wal = dolos_redb::wal::RedbWalStore;
     type Archive = dolos_redb::archive::ChainStore;

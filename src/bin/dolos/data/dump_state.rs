@@ -30,11 +30,11 @@ impl Formatter {
         Self::Table(table)
     }
 
-    fn write(&mut self, key: Vec<u8>, value: AccountState) {
+    fn write(&mut self, key: EntityKey, value: AccountState) {
         match self {
             Formatter::Table(table) => {
                 table.add_row(vec![
-                    format!("{}", hex::encode(&key)),
+                    format!("{}", key),
                     format!("{}", value.controlled_amount),
                     format!("{}", value.seen_addresses.len()),
                     format!(
@@ -60,11 +60,8 @@ pub fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
 
     let mut formatter = Formatter::new_table();
 
-    let start = &[0u8; 32].as_slice();
-    let end = &[255u8; 32].as_slice();
-
     state
-        .iter_entities_typed::<AccountState>(start..end)
+        .iter_entities_typed::<AccountState>("accounts", None)
         .into_diagnostic()
         .context("iterating entities")?
         //.filter_ok(|(_, val)| val.controlled_amount > 0)

@@ -190,7 +190,7 @@ fn test_query_by_address() {
         })
         .collect();
 
-    let delta = LedgerDelta {
+    let delta = UtxoSetDelta {
         new_position: Some(ChainPoint::Origin),
         produced_utxo: initial_utxos,
         ..Default::default()

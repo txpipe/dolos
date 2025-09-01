@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use tx3_lang::ir::{Expression, StructExpr};
 
 use dolos_core::{EraCbor, TxoRef};
@@ -107,14 +109,14 @@ pub fn into_tx3_utxoref(txoref: TxoRef) -> tx3_lang::UtxoRef {
     }
 }
 
-pub fn into_tx3_utxo(txoref: TxoRef, utxo: EraCbor) -> Result<tx3_lang::Utxo, Error> {
+pub fn into_tx3_utxo(txoref: TxoRef, utxo: Arc<EraCbor>) -> Result<tx3_lang::Utxo, Error> {
     let r#ref = into_tx3_utxoref(txoref);
 
-    let EraCbor(era, cbor) = utxo;
+    let EraCbor(era, cbor) = utxo.as_ref();
 
-    let era = Era::try_from(era)?;
+    let era = Era::try_from(*era)?;
 
-    let parsed = MultiEraOutput::decode(era, &cbor)?;
+    let parsed = MultiEraOutput::decode(era, cbor)?;
 
     let address = parsed.address()?.to_vec();
 

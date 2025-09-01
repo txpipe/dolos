@@ -5,7 +5,7 @@ use tracing::{debug, info};
 
 type Error = super::RedbArchiveError;
 
-use dolos_core::{ArchiveError, BlockBody, BlockSlot, ChainPoint, EraCbor, LedgerDelta, TxOrder};
+use dolos_core::{ArchiveError, BlockBody, BlockSlot, ChainPoint, EraCbor, TxOrder, UtxoSetDelta};
 
 use crate::archive::ChainSparseIter;
 
@@ -37,7 +37,7 @@ impl ChainStore {
         Arc::get_mut(&mut self.db)
     }
 
-    pub fn apply(&self, deltas: &[LedgerDelta]) -> Result<(), Error> {
+    pub fn apply(&self, deltas: &[UtxoSetDelta]) -> Result<(), Error> {
         let mut wx = self.db().begin_write()?;
         wx.set_durability(Durability::Eventual);
         wx.set_quick_repair(true);

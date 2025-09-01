@@ -61,7 +61,7 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
     let mut utxos2 = UTxOs::new();
 
     for (ref_, body) in resolved.iter() {
-        let EraCbor(era, cbor) = body;
+        let EraCbor(era, cbor) = body.as_ref();
 
         let era = (*era)
             .try_into()

@@ -5,7 +5,7 @@ use pallas::ledger::traverse::{ComputeHash, MultiEraBlock, MultiEraOutput};
 use redb::MultimapValue;
 use std::hash::{DefaultHasher, Hash as _, Hasher};
 
-use dolos_core::{ArchiveError, BlockSlot, LedgerDelta};
+use dolos_core::{ArchiveError, BlockSlot, UtxoSetDelta};
 
 type Error = super::RedbArchiveError;
 
@@ -394,7 +394,7 @@ impl Indexes {
         Ok(())
     }
 
-    pub fn apply(wx: &WriteTransaction, delta: &LedgerDelta) -> Result<(), Error> {
+    pub fn apply(wx: &WriteTransaction, delta: &UtxoSetDelta) -> Result<(), Error> {
         if let Some(point) = &delta.new_position {
             let slot = point.slot();
 
@@ -472,7 +472,8 @@ impl Indexes {
             let mut assets = vec![];
 
             for (_, body) in delta.produced_utxo.iter().chain(delta.consumed_utxo.iter()) {
-                let utxo = MultiEraOutput::try_from(body).map_err(ArchiveError::DecodingError)?;
+                let utxo =
+                    MultiEraOutput::try_from(body.as_ref()).map_err(ArchiveError::DecodingError)?;
 
                 match utxo.address().map_err(ArchiveError::AddressDecoding)? {
                     Address::Shelley(addr) => {
@@ -615,7 +616,8 @@ impl Indexes {
             let mut assets = vec![];
 
             for (_, body) in delta.recovered_stxi.iter().chain(delta.undone_utxo.iter()) {
-                let utxo = MultiEraOutput::try_from(body).map_err(ArchiveError::DecodingError)?;
+                let utxo =
+                    MultiEraOutput::try_from(body.as_ref()).map_err(ArchiveError::DecodingError)?;
 
                 match utxo.address().map_err(ArchiveError::AddressDecoding)? {
                     Address::Shelley(addr) => {

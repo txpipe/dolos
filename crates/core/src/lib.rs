@@ -1,3 +1,13 @@
+//! Traits and machinery that are common to all dolos crates.
+//!
+//! Glossary:
+//!  - `chunk`: when the grouping is about cutting a continuous sequence into
+//!    pieces for parallel processing (e.g. sequence of blocks to decode).
+//!  - `batch`: when the grouping is about workload semantics for pipelining
+//!    where the order of execution matters (e.g. batch of blocks that need to
+//!    be processed together). A batch is usually split into chunks for parallel
+//!    processing.
+
 use pallas::{
     crypto::hash::Hash,
     ledger::traverse::{MultiEraInput, MultiEraOutput, MultiEraTx, MultiEraUpdate},
@@ -7,13 +17,15 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     fmt::Display,
+    sync::Arc,
 };
 use thiserror::Error;
 use tracing::info;
 
-mod mempool;
-mod state;
-mod wal;
+pub mod mempool;
+pub mod state;
+pub mod sync;
+pub mod wal;
 
 pub type Era = u16;
 
@@ -31,6 +43,7 @@ pub type BlockHeight = u64;
 
 pub type Cbor = Vec<u8>;
 
+pub type RawUtxoMap = HashMap<TxoRef, Arc<EraCbor>>;
 pub type BlockBody = Cbor;
 pub type BlockEra = pallas::ledger::traverse::Era;
 pub type BlockHash = Hash<32>;
@@ -130,7 +143,7 @@ pub enum BrokenInvariant {
     MissingUtxo(TxoRef),
 }
 
-pub type UtxoMap = HashMap<TxoRef, EraCbor>;
+pub type UtxoMap = HashMap<TxoRef, Arc<EraCbor>>;
 
 pub type UtxoSet = HashSet<TxoRef>;
 
@@ -150,16 +163,16 @@ pub struct LedgerSlice {
 }
 
 #[derive(Default, Debug, Clone)]
-pub struct LedgerDelta {
+pub struct UtxoSetDelta {
     pub new_position: Option<ChainPoint>,
     pub undone_position: Option<ChainPoint>,
-    pub produced_utxo: HashMap<TxoRef, EraCbor>,
-    pub consumed_utxo: HashMap<TxoRef, EraCbor>,
-    pub recovered_stxi: HashMap<TxoRef, EraCbor>,
-    pub undone_utxo: HashMap<TxoRef, EraCbor>,
+    pub produced_utxo: HashMap<TxoRef, Arc<EraCbor>>,
+    pub consumed_utxo: HashMap<TxoRef, Arc<EraCbor>>,
+    pub recovered_stxi: HashMap<TxoRef, Arc<EraCbor>>,
+    pub undone_utxo: HashMap<TxoRef, Arc<EraCbor>>,
     pub seen_txs: HashSet<TxHash>,
     pub unseen_txs: HashSet<TxHash>,
-    pub new_pparams: Vec<EraCbor>,
+    pub new_pparams: Vec<Arc<EraCbor>>,
     pub new_block: BlockBody,
     pub undone_block: BlockBody,
 }
@@ -532,7 +545,7 @@ pub trait StateStore: Sized + Clone + Send + Sync + 'static {
 
     fn get_utxo_by_asset(&self, asset: &[u8]) -> Result<UtxoSet, StateError>;
 
-    fn apply(&self, deltas: &[LedgerDelta]) -> Result<(), StateError>;
+    fn apply(&self, deltas: &[UtxoSetDelta]) -> Result<(), StateError>;
 
     fn upgrade(self) -> Result<Self, StateError>;
 
@@ -607,7 +620,7 @@ pub trait ArchiveStore: Clone + Send + Sync + 'static {
 
     fn get_tip(&self) -> Result<Option<(BlockSlot, BlockBody)>, ArchiveError>;
 
-    fn apply(&self, deltas: &[LedgerDelta]) -> Result<(), ArchiveError>;
+    fn apply(&self, deltas: &[UtxoSetDelta]) -> Result<(), ArchiveError>;
 
     fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, ArchiveError>;
 }
@@ -654,9 +667,14 @@ pub trait MempoolStore: Clone + Send + Sync + 'static {
 
     fn evaluate_raw(&self, cbor: &[u8]) -> Result<EvalReport, MempoolError>;
 
-    fn apply(&self, deltas: &[LedgerDelta]);
+    fn apply(&self, deltas: &[UtxoSetDelta]);
     fn check_stage(&self, tx_hash: &TxHash) -> MempoolTxStage;
     fn subscribe(&self) -> Self::Stream;
+}
+
+pub trait Block: Sized {
+    fn depends_on(&self, loaded: &mut RawUtxoMap) -> Vec<TxoRef>;
+    fn slot(&self) -> BlockSlot;
 }
 
 #[derive(Debug, Error)]
@@ -672,11 +690,19 @@ pub enum ChainError {
 }
 
 pub trait ChainLogic {
-    type Block<'a>: Sized;
+    type Block: Block;
+    type Utxo: Sized;
+    type EntityDelta: EntityDelta;
 
-    fn decode_block<'a>(block: &'a [u8]) -> Result<Self::Block<'a>, ChainError>;
+    fn decode_block(&self, block: Arc<BlockBody>) -> Result<Self::Block, ChainError>;
+
+    fn decode_utxo(&self, utxo: Arc<EraCbor>) -> Result<Self::Utxo, ChainError>;
 
     fn mutable_slots(domain: &impl Domain) -> BlockSlot;
+
+    fn execute_sweep<D: Domain>(&self, domain: &D, at: BlockSlot) -> Result<(), ChainError>;
+
+    fn next_sweep(&self, after: BlockSlot) -> BlockSlot;
 
     /// Computes the last immutable slot
     ///
@@ -689,59 +715,24 @@ pub trait ChainLogic {
         tip.saturating_sub(Self::mutable_slots(domain))
     }
 
-    fn ledger_query_for_block<'a>(
-        block: &Self::Block<'a>,
-        unapplied_deltas: &[LedgerDelta],
-    ) -> Result<LedgerQuery, ChainError>;
+    fn compute_origin_utxo_delta(&self, genesis: &Genesis) -> Result<UtxoSetDelta, ChainError>;
 
-    fn compute_origin_delta(&self, genesis: &Genesis) -> Result<LedgerDelta, ChainError>;
-
-    fn compute_apply_delta<'a>(
-        ledger: LedgerSlice,
-        block: &Self::Block<'a>,
-    ) -> Result<LedgerDelta, ChainError>;
-
-    fn compute_undo_delta<'a>(
-        ledger: LedgerSlice,
-        block: &Self::Block<'a>,
-    ) -> Result<LedgerDelta, ChainError>;
-
-    fn load_slice_for_block<'a>(
-        state: &impl StateStore,
-        block: &Self::Block<'a>,
-        unapplied_deltas: &[LedgerDelta],
-    ) -> Result<LedgerSlice, DomainError> {
-        let query = Self::ledger_query_for_block(block, unapplied_deltas)?;
-
-        let required_utxos = StateStore::get_utxos(state, query.required_inputs)?;
-
-        let out = LedgerSlice {
-            resolved_inputs: [required_utxos, query.extra_inputs]
-                .into_iter()
-                .flatten()
-                .collect(),
-        };
-
-        Ok(out)
-    }
-
-    // new state functions
-
-    fn load_slice3_for_block<'a>(
+    fn compute_block_utxo_delta(
         &self,
-        state: &impl State3Store,
-        utxo_slice: &LedgerSlice,
-        block: &Self::Block<'a>,
-        unapplied_deltas: &[StateDelta],
-    ) -> Result<StateSlice, DomainError>;
+        block: &Self::Block,
+        deps: &RawUtxoMap,
+    ) -> Result<UtxoSetDelta, ChainError>;
 
-    fn compute_apply_delta3<'a>(
+    fn compute_origin_delta(
         &self,
-        slice: StateSlice,
-        utxo_slice: &LedgerSlice,
-        block: &Self::Block<'a>,
-        unapplied_deltas: &[StateDelta],
-    ) -> Result<StateDelta, ChainError>;
+        genesis: &Genesis,
+    ) -> Result<StateDelta<Self::EntityDelta>, ChainError>;
+
+    fn compute_block_delta(
+        &self,
+        block: &Self::Block,
+        deps: &HashMap<TxoRef, Self::Utxo>,
+    ) -> Result<StateDelta<Self::EntityDelta>, ChainError>;
 }
 
 #[derive(Debug, Error)]
@@ -766,11 +757,14 @@ pub enum DomainError {
 }
 
 pub trait Domain: Send + Sync + Clone + 'static {
+    type Entity: Entity;
+    type EntityDelta: EntityDelta<Entity = Self::Entity> + std::fmt::Debug;
+
     type Wal: WalStore;
     type State: StateStore;
     type Archive: ArchiveStore;
     type Mempool: MempoolStore;
-    type Chain: ChainLogic;
+    type Chain: ChainLogic<EntityDelta = Self::EntityDelta>;
 
     type State3: State3Store;
 
@@ -784,82 +778,6 @@ pub trait Domain: Send + Sync + Clone + 'static {
     fn mempool(&self) -> &Self::Mempool;
 
     fn state3(&self) -> &Self::State3;
-
-    fn apply_origin(&self) -> Result<(), DomainError> {
-        let deltas = vec![self.chain().compute_origin_delta(self.genesis())?];
-
-        self.state().apply(&deltas)?;
-        self.archive().apply(&deltas)?;
-
-        Ok(())
-    }
-
-    fn compute_apply_deltas(
-        &self,
-        blocks: &[RawBlock],
-    ) -> Result<(Vec<LedgerDelta>, Vec<StateDelta>), DomainError> {
-        let mut deltas = Vec::with_capacity(blocks.len());
-        let mut deltas3 = Vec::with_capacity(blocks.len());
-
-        for block in blocks {
-            let block = Self::Chain::decode_block(&block.body)?;
-
-            let slice = Self::Chain::load_slice_for_block(self.state(), &block, &deltas)?;
-            let delta = Self::Chain::compute_apply_delta(slice.clone(), &block)?;
-
-            deltas.push(delta);
-
-            let slice3 =
-                self.chain()
-                    .load_slice3_for_block(self.state3(), &slice, &block, &deltas3)?;
-
-            let delta3 = self
-                .chain()
-                .compute_apply_delta3(slice3, &slice, &block, &deltas3)?;
-
-            deltas3.push(delta3);
-        }
-
-        Ok((deltas, deltas3))
-    }
-
-    fn apply_blocks(&self, blocks: &[RawBlock]) -> Result<(), DomainError> {
-        let (deltas, deltas3) = self.compute_apply_deltas(blocks)?;
-
-        self.state().apply(&deltas)?;
-        self.state3().apply(&deltas3)?; // TODO: apply deltas3
-
-        self.archive().apply(&deltas)?;
-
-        self.mempool().apply(&deltas);
-
-        Ok(())
-    }
-
-    fn compute_undo_deltas(&self, blocks: &[RawBlock]) -> Result<Vec<LedgerDelta>, DomainError> {
-        let mut deltas = Vec::with_capacity(blocks.len());
-
-        for block in blocks {
-            let block = Self::Chain::decode_block(&block.body)?;
-            let slice = Self::Chain::load_slice_for_block(self.state(), &block, &deltas)?;
-            let delta = Self::Chain::compute_undo_delta(slice, &block)?;
-            deltas.push(delta);
-        }
-
-        Ok(deltas)
-    }
-
-    fn undo_blocks(&self, blocks: &[RawBlock]) -> Result<(), DomainError> {
-        let deltas = self.compute_undo_deltas(blocks)?;
-
-        self.state().apply(&deltas)?;
-        self.archive().apply(&deltas)?;
-        self.mempool().apply(&deltas);
-
-        // TODO: undo state3
-
-        Ok(())
-    }
 
     const MAX_PRUNE_SLOTS_PER_HOUSEKEEPING: u64 = 10_000;
 

@@ -23,6 +23,31 @@ pub struct Config {
     pub permissive_cors: Option<bool>,
 }
 
+#[derive(Clone)]
+pub struct ContextAdapter<T: dolos_core::StateStore>(T);
+
+impl<T: dolos_core::StateStore> pallas::interop::utxorpc::LedgerContext for ContextAdapter<T> {
+    fn get_utxos<'a>(
+        &self,
+        refs: &[pallas::interop::utxorpc::TxoRef],
+    ) -> Option<pallas::interop::utxorpc::UtxoMap> {
+        let refs: Vec<_> = refs.iter().map(|x| TxoRef::from(*x)).collect();
+
+        let some = self
+            .0
+            .get_utxos(refs)
+            .ok()?
+            .into_iter()
+            .map(|(k, v)| {
+                let era = v.0.try_into().expect("era out of range");
+                (k.into(), (era, v.1.to_owned()))
+            })
+            .collect();
+
+        Some(some)
+    }
+}
+
 pub struct Driver;
 
 impl<D, C> dolos_core::Driver<D, C> for Driver

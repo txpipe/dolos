@@ -59,7 +59,7 @@ impl LedgerStore {
         Ok(last)
     }
 
-    pub fn apply(&self, deltas: &[LedgerDelta]) -> Result<(), Error> {
+    pub fn apply(&self, deltas: &[UtxoSetDelta]) -> Result<(), Error> {
         let mut wx = self.db().begin_write()?;
         wx.set_durability(Durability::Eventual);
         wx.set_quick_repair(true);
@@ -180,8 +180,8 @@ impl LedgerStore {
         for chunk in utxo_chunks.into_iter() {
             let chunk: Vec<_> = chunk.try_collect()?;
 
-            let delta = LedgerDelta {
-                produced_utxo: chunk.into_iter().collect(),
+            let delta = UtxoSetDelta {
+                produced_utxo: chunk.into_iter().map(|(k, v)| (k, Arc::new(v))).collect(),
                 ..Default::default()
             };
 
