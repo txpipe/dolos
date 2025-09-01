@@ -238,6 +238,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::sync::Arc;
+
     use dolos_testing::toy_domain::ToyDomain;
     use pallas::interop::utxorpc::spec::sync::sync_service_server::SyncService as _;
 
@@ -248,7 +251,8 @@ mod tests {
 
         for i in 0..34 {
             let block = dolos_testing::blocks::make_conway_block(i);
-            domain.apply_blocks(&[block]).unwrap();
+            let block = Arc::new(block.body);
+            dolos_core::sync::apply_block(&domain, block).unwrap();
         }
 
         let service = SyncServiceImpl::new(domain, cancel);

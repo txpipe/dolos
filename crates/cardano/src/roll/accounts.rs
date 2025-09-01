@@ -1,32 +1,265 @@
-use dolos_core::{State3Error, State3Store};
+use std::borrow::Cow;
+
+use dolos_core::{NsKey, State3Error, StateDelta};
+use pallas::codec::minicbor;
+use pallas::crypto::hash::Hash;
+use pallas::ledger::addresses::{ShelleyDelegationPart, StakePayload};
 use pallas::ledger::{
-    addresses::{Address, StakeAddress},
+    addresses::Address,
     primitives::StakeCredential,
     traverse::{MultiEraBlock, MultiEraCert, MultiEraInput, MultiEraOutput, MultiEraTx},
 };
 use tracing::debug;
 
-use crate::{
-    model::{AccountActivity, AccountState, PoolDelegator},
-    pallas_extras,
-    roll::{BlockVisitor, DeltaBuilder, SliceBuilder},
-};
+use crate::model::FixedNamespace as _;
+use crate::roll::CardanoDelta;
+use crate::{model::AccountState, pallas_extras, roll::BlockVisitor};
 
-pub struct SeenAddressesVisitor<'a, T>(&'a mut T);
+#[derive(Debug, Clone)]
+pub struct TrackSeenAddresses {
+    cred: StakeCredential,
+    full_address: Address,
+    full_address_new: Option<bool>,
+}
 
-impl<'a, T> From<&'a mut T> for SeenAddressesVisitor<'a, T> {
-    fn from(value: &'a mut T) -> Self {
-        Self(value)
+impl TrackSeenAddresses {
+    pub fn new(cred: StakeCredential, full_address: Address) -> Self {
+        Self {
+            cred,
+            full_address,
+            full_address_new: None,
+        }
     }
 }
 
-impl<T> SeenAddressesVisitor<'_, T> {
-    fn extract_address(output: &MultiEraOutput) -> Option<(StakeAddress, Address)> {
+impl dolos_core::EntityDelta for TrackSeenAddresses {
+    type Entity = AccountState;
+
+    fn key(&self) -> Cow<'_, NsKey> {
+        let enc = minicbor::to_vec(&self.cred).unwrap();
+        Cow::Owned(NsKey::from((AccountState::NS, enc)))
+    }
+
+    fn apply(&mut self, entity: &mut Option<AccountState>) {
+        let entity = entity.get_or_insert_default();
+
+        let was_new = entity.seen_addresses.insert(self.full_address.to_vec());
+
+        self.full_address_new = Some(was_new);
+    }
+
+    fn undo(&mut self, entity: &mut Option<AccountState>) {
+        let entity = entity.get_or_insert_default();
+
+        if self.full_address_new.unwrap_or(false) {
+            entity.seen_addresses.remove(&self.full_address.to_vec());
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ControlledAmountInc {
+    cred: StakeCredential,
+    amount: u64,
+}
+
+impl dolos_core::EntityDelta for ControlledAmountInc {
+    type Entity = AccountState;
+
+    fn key(&self) -> Cow<'_, NsKey> {
+        let enc = minicbor::to_vec(&self.cred).unwrap();
+        Cow::Owned(NsKey::from((AccountState::NS, enc)))
+    }
+
+    fn apply(&mut self, entity: &mut Option<AccountState>) {
+        let entity = entity.get_or_insert_default();
+        entity.controlled_amount += self.amount;
+    }
+
+    fn undo(&mut self, entity: &mut Option<AccountState>) {
+        let entity = entity.get_or_insert_default();
+        entity.controlled_amount -= self.amount;
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ControlledAmountDec {
+    cred: StakeCredential,
+    amount: u64,
+}
+
+impl dolos_core::EntityDelta for ControlledAmountDec {
+    type Entity = AccountState;
+
+    fn key(&self) -> Cow<'_, NsKey> {
+        let enc = minicbor::to_vec(&self.cred).unwrap();
+        Cow::Owned(NsKey::from((AccountState::NS, enc)))
+    }
+
+    fn apply(&mut self, entity: &mut Option<AccountState>) {
+        let entity = entity.get_or_insert_default();
+        // TODO: saturating sub shouldn't be necesary
+        //entity.controlled_amount -= self.amount;
+        let _ = entity.controlled_amount.saturating_sub(self.amount);
+    }
+
+    fn undo(&mut self, entity: &mut Option<AccountState>) {
+        let entity = entity.get_or_insert_default();
+        entity.controlled_amount += self.amount;
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct StakeRegistration {
+    cred: StakeCredential,
+    slot: u64,
+
+    // undo
+    prev_registered_at: Option<u64>,
+}
+
+impl StakeRegistration {
+    pub fn new(cred: StakeCredential, slot: u64) -> Self {
+        Self {
+            cred,
+            slot,
+            prev_registered_at: None,
+        }
+    }
+}
+
+impl dolos_core::EntityDelta for StakeRegistration {
+    type Entity = AccountState;
+
+    fn key(&self) -> Cow<'_, NsKey> {
+        let enc = minicbor::to_vec(&self.cred).unwrap();
+        Cow::Owned(NsKey::from((AccountState::NS, enc)))
+    }
+
+    fn apply(&mut self, entity: &mut Option<AccountState>) {
+        let entity = entity.get_or_insert_default();
+        self.prev_registered_at = entity.registered_at;
+        entity.registered_at = Some(self.slot);
+    }
+
+    fn undo(&mut self, entity: &mut Option<AccountState>) {
+        let entity = entity.get_or_insert_default();
+        entity.registered_at = self.prev_registered_at;
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct StakeDelegation {
+    cred: StakeCredential,
+    pool: Hash<28>,
+
+    // undo
+    prev_pool_id: Option<Vec<u8>>,
+}
+
+impl StakeDelegation {
+    pub fn new(cred: StakeCredential, pool: Hash<28>) -> Self {
+        Self {
+            cred,
+            pool,
+            prev_pool_id: None,
+        }
+    }
+}
+
+impl dolos_core::EntityDelta for StakeDelegation {
+    type Entity = AccountState;
+
+    fn key(&self) -> Cow<'_, NsKey> {
+        let enc = minicbor::to_vec(&self.cred).unwrap();
+        Cow::Owned(NsKey::from((AccountState::NS, enc)))
+    }
+
+    fn apply(&mut self, entity: &mut Option<AccountState>) {
+        let entity = entity.get_or_insert_default();
+
+        // save undo info
+        self.prev_pool_id = entity.pool_id.clone();
+
+        entity.pool_id = Some(self.pool.to_vec());
+    }
+
+    fn undo(&mut self, entity: &mut Option<AccountState>) {
+        let entity = entity.get_or_insert_default();
+        entity.pool_id = self.prev_pool_id.clone();
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct StakeDeregistration {
+    cred: StakeCredential,
+    slot: u64,
+
+    // undo
+    prev_registered_at: Option<u64>,
+    prev_pool_id: Option<Vec<u8>>,
+}
+
+impl StakeDeregistration {
+    pub fn new(cred: StakeCredential, slot: u64) -> Self {
+        Self {
+            cred,
+            slot,
+            prev_registered_at: None,
+            prev_pool_id: None,
+        }
+    }
+}
+
+impl dolos_core::EntityDelta for StakeDeregistration {
+    type Entity = AccountState;
+
+    fn key(&self) -> Cow<'_, NsKey> {
+        let enc = minicbor::to_vec(&self.cred).unwrap();
+        Cow::Owned(NsKey::from((AccountState::NS, enc)))
+    }
+
+    fn apply(&mut self, entity: &mut Option<AccountState>) {
+        let entity = entity.get_or_insert_default();
+
+        // save undo info
+        self.prev_registered_at = entity.registered_at;
+        self.prev_pool_id = entity.pool_id.clone();
+
+        entity.registered_at = None;
+    }
+
+    fn undo(&mut self, entity: &mut Option<AccountState>) {
+        let entity = entity.get_or_insert_default();
+        entity.registered_at = self.prev_registered_at;
+        entity.pool_id = self.prev_pool_id.clone();
+    }
+}
+
+pub struct AccountVisitor<'a> {
+    delta: &'a mut StateDelta<CardanoDelta>,
+}
+
+impl<'a> From<&'a mut StateDelta<CardanoDelta>> for AccountVisitor<'a> {
+    fn from(delta: &'a mut StateDelta<CardanoDelta>) -> Self {
+        Self { delta }
+    }
+}
+
+impl AccountVisitor<'_> {
+    fn extract_stake_cred(output: &MultiEraOutput) -> Option<(StakeCredential, Address)> {
         let full = output.address().ok()?;
 
         let stake = match &full {
-            Address::Shelley(x) => StakeAddress::try_from(x.clone()).ok(),
-            Address::Stake(x) => Some(x.clone()),
+            Address::Shelley(x) => match x.delegation() {
+                ShelleyDelegationPart::Key(x) => Some(StakeCredential::AddrKeyhash(*x)),
+                ShelleyDelegationPart::Script(x) => Some(StakeCredential::ScriptHash(*x)),
+                _ => None,
+            },
+            Address::Stake(x) => match x.payload() {
+                StakePayload::Stake(x) => Some(StakeCredential::AddrKeyhash(*x)),
+                StakePayload::Script(x) => Some(StakeCredential::ScriptHash(*x)),
+            },
             _ => None,
         }?;
 
@@ -34,7 +267,7 @@ impl<T> SeenAddressesVisitor<'_, T> {
     }
 }
 
-impl<'a, S: State3Store> BlockVisitor for SeenAddressesVisitor<'a, SliceBuilder<'_, S>> {
+impl<'a> BlockVisitor for AccountVisitor<'a> {
     fn visit_input(
         &mut self,
         _: &MultiEraBlock,
@@ -42,15 +275,14 @@ impl<'a, S: State3Store> BlockVisitor for SeenAddressesVisitor<'a, SliceBuilder<
         _: &MultiEraInput,
         resolved: &MultiEraOutput,
     ) -> Result<(), State3Error> {
-        let Some((stake, _)) = Self::extract_address(resolved) else {
+        let Some((cred, _)) = Self::extract_stake_cred(resolved) else {
             return Ok(());
         };
 
-        let stake_bytes = stake.to_vec();
-
-        self.0
-            .slice
-            .ensure_loaded_typed::<AccountState>(&stake_bytes, self.0.store)?;
+        self.delta.add_delta(ControlledAmountDec {
+            cred,
+            amount: resolved.value().coin(),
+        });
 
         Ok(())
     }
@@ -62,250 +294,46 @@ impl<'a, S: State3Store> BlockVisitor for SeenAddressesVisitor<'a, SliceBuilder<
         _: u32,
         output: &MultiEraOutput,
     ) -> Result<(), State3Error> {
-        let Some((stake, _)) = Self::extract_address(output) else {
+        let Some((cred, full_address)) = Self::extract_stake_cred(output) else {
             return Ok(());
         };
 
-        let stake_bytes = stake.to_vec();
+        self.delta.add_delta(ControlledAmountInc {
+            cred: cred.clone(),
+            amount: output.value().coin(),
+        });
 
-        self.0
-            .slice
-            .ensure_loaded_typed::<AccountState>(&stake_bytes, self.0.store)?;
-
-        Ok(())
-    }
-}
-
-impl<'a> BlockVisitor for SeenAddressesVisitor<'a, DeltaBuilder<'_>> {
-    fn visit_input(
-        &mut self,
-        _: &MultiEraBlock,
-        _: &MultiEraTx,
-        _: &MultiEraInput,
-        resolved: &MultiEraOutput,
-    ) -> Result<(), State3Error> {
-        let Some((stake, _)) = Self::extract_address(resolved) else {
-            return Ok(());
-        };
-
-        let stake_bytes = stake.to_vec();
-
-        let current = self
-            .0
-            .state
-            .get_entity_typed::<AccountState>(&stake_bytes)?;
-
-        let mut new = current.clone().unwrap_or_default();
-
-        // TODO: refactor into CRDT
-        // TODO: check same-crawl delta changes
-        // TODO: saturating sub shouldn't be necesary on the long run, it should be
-        // treated as a invariant violation
-        new.controlled_amount = new
-            .controlled_amount
-            .saturating_sub(resolved.value().coin());
-
-        self.0
-            .delta_mut()
-            .override_entity(stake_bytes, new, current);
+        self.delta
+            .add_delta(TrackSeenAddresses::new(cred, full_address));
 
         Ok(())
     }
 
-    fn visit_output(
-        &mut self,
-        _: &MultiEraBlock,
-        _: &MultiEraTx,
-        _: u32,
-        output: &MultiEraOutput,
-    ) -> Result<(), State3Error> {
-        let Some((stake, full_address)) = Self::extract_address(output) else {
-            return Ok(());
-        };
-
-        let stake_bytes = stake.to_vec();
-
-        let current = self
-            .0
-            .state
-            .get_entity_typed::<AccountState>(&stake_bytes)?;
-
-        let mut new = current.clone().unwrap_or_default();
-
-        // TODO: refactor into CRDT
-        // TODO: check same-crawl delta changes
-        new.controlled_amount += output.value().coin();
-        new.seen_addresses.insert(full_address.to_vec());
-
-        self.0
-            .delta_mut()
-            .override_entity(stake_bytes, new, current);
-
-        Ok(())
-    }
-}
-
-pub struct AccountActivityVisitor<'a, T>(&'a mut T);
-
-impl<'a, T> From<&'a mut T> for AccountActivityVisitor<'a, T> {
-    fn from(value: &'a mut T) -> Self {
-        Self(value)
-    }
-}
-
-impl<'a, S: State3Store> BlockVisitor for AccountActivityVisitor<'a, SliceBuilder<'_, S>> {}
-
-impl<'a> BlockVisitor for AccountActivityVisitor<'a, DeltaBuilder<'_>> {
     fn visit_cert(
         &mut self,
         block: &MultiEraBlock,
         _: &MultiEraTx,
         cert: &MultiEraCert,
     ) -> Result<(), State3Error> {
-        let credential = pallas_extras::cert_as_stake_registration(cert);
+        if let Some(cred) = pallas_extras::cert_as_stake_registration(cert) {
+            debug!("detected stake registration");
 
-        if let Some(credential) = credential {
-            let key = match credential {
-                StakeCredential::ScriptHash(x) => x.to_vec(),
-                StakeCredential::AddrKeyhash(x) => x.to_vec(),
-            };
-
-            let value = AccountActivity(block.slot());
-
-            self.0.delta_mut().append_entity(key, value);
+            self.delta
+                .add_delta(StakeRegistration::new(cred, block.slot()));
         }
 
-        Ok(())
-    }
-}
+        if let Some(cert) = pallas_extras::cert_as_stake_delegation(cert) {
+            debug!(%cert.pool, "detected stake delegation");
 
-pub struct DelegationVisitor<'a, T>(&'a mut T);
-
-impl<'a, T> From<&'a mut T> for DelegationVisitor<'a, T> {
-    fn from(value: &'a mut T) -> Self {
-        Self(value)
-    }
-}
-
-impl<'a, S: State3Store> BlockVisitor for DelegationVisitor<'a, SliceBuilder<'_, S>> {
-    fn visit_cert(
-        &mut self,
-        _: &MultiEraBlock,
-        _: &MultiEraTx,
-        cert: &MultiEraCert,
-    ) -> Result<(), State3Error> {
-        if let Some(cred) = pallas_extras::cert_as_stake_registration(cert) {
-            let stake_address = pallas_extras::stake_credential_to_address(self.0.network, &cred);
-
-            let stake_bytes = stake_address.to_vec();
-
-            self.0
-                .slice
-                .ensure_loaded_typed::<AccountState>(&stake_bytes, self.0.store)?;
+            self.delta
+                .add_delta(StakeDelegation::new(cert.delegator, cert.pool));
         }
 
         if let Some(cred) = pallas_extras::cert_as_stake_deregistration(cert) {
-            let stake_address = pallas_extras::stake_credential_to_address(self.0.network, &cred);
+            debug!("detected stake deregistration");
 
-            let stake_bytes = stake_address.to_vec();
-
-            self.0
-                .slice
-                .ensure_loaded_typed::<AccountState>(&stake_bytes, self.0.store)?;
-        }
-
-        if let Some(cert) = pallas_extras::cert_as_stake_delegation(cert) {
-            let stake_address =
-                pallas_extras::stake_credential_to_address(self.0.network, &cert.delegator);
-
-            let stake_bytes = stake_address.to_vec();
-
-            self.0
-                .slice
-                .ensure_loaded_typed::<AccountState>(&stake_bytes, self.0.store)?;
-        }
-        Ok(())
-    }
-}
-
-impl<'a> BlockVisitor for DelegationVisitor<'a, DeltaBuilder<'_>> {
-    fn visit_cert(
-        &mut self,
-        _: &MultiEraBlock,
-        _: &MultiEraTx,
-        cert: &MultiEraCert,
-    ) -> Result<(), State3Error> {
-        if let Some(cert) = pallas_extras::cert_as_stake_delegation(cert) {
-            debug!(%cert.pool, "new pool delegator");
-
-            let stake_address =
-                pallas_extras::stake_credential_to_address(self.0.network, &cert.delegator);
-
-            let stake_bytes = stake_address.to_vec();
-
-            let current = self
-                .0
-                .slice()
-                .get_entity_typed::<AccountState>(&stake_bytes)?;
-
-            let mut new = current.clone().unwrap_or_default();
-
-            new.pool_id = Some(cert.pool.to_vec());
-
-            self.0
-                .delta_mut()
-                .override_entity(stake_bytes, new, current);
-
-            let entity = PoolDelegator(cert.delegator);
-
-            self.0
-                .delta_mut()
-                .append_entity(cert.pool.as_slice(), entity);
-        }
-
-        if let Some(credential) = pallas_extras::cert_as_stake_registration(cert) {
-            debug!("stake registration");
-
-            let stake_address =
-                pallas_extras::stake_credential_to_address(self.0.network, &credential);
-
-            let stake_bytes = stake_address.to_vec();
-
-            let current = self
-                .0
-                .slice()
-                .get_entity_typed::<AccountState>(&stake_bytes)?;
-
-            let mut new = current.clone().unwrap_or_default();
-
-            new.active_epoch = Some(1);
-
-            self.0
-                .delta_mut()
-                .override_entity(stake_bytes, new, current);
-        }
-
-        if let Some(credential) = pallas_extras::cert_as_stake_deregistration(cert) {
-            debug!("stake deregistration");
-
-            let stake_address =
-                pallas_extras::stake_credential_to_address(self.0.network, &credential);
-
-            let stake_bytes = stake_address.to_vec();
-
-            let current = self
-                .0
-                .slice()
-                .get_entity_typed::<AccountState>(&stake_bytes)?;
-
-            let mut new = current.clone().unwrap_or_default();
-
-            new.pool_id = None;
-            new.active_epoch = None;
-
-            self.0
-                .delta_mut()
-                .override_entity(stake_bytes, new, current);
+            self.delta
+                .add_delta(StakeDeregistration::new(cred, block.slot()));
         }
 
         Ok(())

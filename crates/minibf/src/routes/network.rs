@@ -126,14 +126,14 @@ impl<'a> IntoModel<Network> for NetworkModelBuilder<'a> {
     }
 }
 
-pub async fn naked<D: Domain>(
-    State(domain): State<Facade<D>>,
-) -> Result<Json<Network>, StatusCode> {
+pub async fn naked<D: Domain>(State(domain): State<Facade<D>>) -> Result<Json<Network>, StatusCode>
+where
+    Option<EpochState>: From<D::Entity>,
+{
     let genesis = domain.genesis();
 
     let state = domain
-        .state3()
-        .read_entity_typed::<EpochState>(CURRENT_EPOCH_KEY)
+        .read_cardano_entity::<EpochState>(CURRENT_EPOCH_KEY)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
 

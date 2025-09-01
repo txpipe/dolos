@@ -1,12 +1,80 @@
-use std::{collections::HashMap, marker::PhantomData, ops::Range};
+use std::{borrow::Cow, collections::HashMap, marker::PhantomData, ops::Range};
 
-use crate::{BlockSlot, TxoRef};
+use itertools::Itertools;
+
+use crate::{BlockSlot, Domain, TxoRef};
+
+const KEY_SIZE: usize = 32;
 
 pub type Namespace = &'static str;
-pub type EntityKey = Vec<u8>;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
+pub struct EntityKey([u8; KEY_SIZE]);
+
+impl<const N: usize> From<&[u8; N]> for EntityKey {
+    fn from(value: &[u8; N]) -> Self {
+        value.into()
+    }
+}
+
+impl From<&[u8]> for EntityKey {
+    fn from(value: &[u8]) -> Self {
+        let mut key = [0u8; KEY_SIZE];
+        let len = value.len().min(KEY_SIZE);
+        key[..len].copy_from_slice(&value[..len]);
+        EntityKey(key)
+    }
+}
+
+impl From<Vec<u8>> for EntityKey {
+    fn from(value: Vec<u8>) -> Self {
+        value.as_slice().into()
+    }
+}
+
+impl std::fmt::Display for EntityKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", hex::encode(self.0))
+    }
+}
+
+impl AsRef<[u8]> for EntityKey {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+/// A namespaced key
+///
+/// Represent a key to an entity by also specifying the namespace to which it
+/// belongs.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
+pub struct NsKey(Namespace, EntityKey);
+
+impl<T> From<(&'static str, T)> for NsKey
+where
+    T: Into<EntityKey>,
+{
+    fn from((ns, key): (&'static str, T)) -> Self {
+        Self(ns, key.into())
+    }
+}
+
+impl std::fmt::Display for NsKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}", self.0, self.1)
+    }
+}
+
+impl AsRef<EntityKey> for NsKey {
+    fn as_ref(&self) -> &EntityKey {
+        &self.1
+    }
+}
+
+pub type EntityMap<E> = HashMap<NsKey, Option<E>>;
+
 pub type EntityValue = Vec<u8>;
-pub type EntityPrevValue = EntityValue;
-pub type EntityNewValue = EntityValue;
 
 #[derive(Debug, Clone)]
 pub enum NamespaceType {
@@ -31,268 +99,114 @@ impl std::ops::Deref for StateSchema {
     }
 }
 
-#[derive(Debug, Clone)]
-pub enum EntityDelta {
-    OverrideKey(EntityKey, EntityNewValue, Option<EntityPrevValue>),
-    DeleteKey(EntityKey, EntityPrevValue),
-    AppendValue(EntityKey, EntityNewValue),
-    RemoveValue(EntityKey, EntityPrevValue),
+pub trait Entity: Sized + Send {
+    const KEY_SIZE: usize = 32;
+
+    fn decode_entity(ns: Namespace, value: &EntityValue) -> Result<Self, StateError>;
+    fn encode_entity(value: &Self) -> (Namespace, EntityValue);
 }
 
-impl EntityDelta {
-    pub fn into_undo(self) -> Self {
-        match self {
-            Self::OverrideKey(key, new, Some(prev)) => Self::OverrideKey(key, prev, Some(new)),
-            Self::OverrideKey(key, new, None) => Self::DeleteKey(key, new),
-            Self::DeleteKey(key, prev) => Self::OverrideKey(key, prev, None),
-            Self::AppendValue(key, new) => Self::RemoveValue(key, new),
-            Self::RemoveValue(key, prev) => Self::AppendValue(key, prev),
-        }
-    }
-}
+pub type KeyEntityPair<E> = (EntityKey, Option<E>);
 
-pub struct StateDelta {
-    slot: BlockSlot,
-    entries: HashMap<Namespace, Vec<EntityDelta>>,
-}
+pub trait EntityDelta {
+    type Entity: Entity;
 
-impl StateDelta {
-    pub fn new(slot: BlockSlot) -> Self {
-        Self {
-            slot,
-            entries: HashMap::new(),
-        }
-    }
+    fn key(&self) -> Cow<'_, NsKey>;
 
-    pub fn slot(&self) -> BlockSlot {
-        self.slot
-    }
-
-    pub fn iter_deltas(&self) -> impl Iterator<Item = (Namespace, &[EntityDelta])> {
-        self.entries
-            .iter()
-            .map(|(ns, deltas)| (*ns, deltas.as_slice()))
-    }
-
-    pub fn get_overriden_key(&self, ns: Namespace, key: impl AsRef<[u8]>) -> Option<&EntityValue> {
-        let key = key.as_ref().to_vec();
-        let deltas = self.entries.get(ns)?;
-
-        let delta = deltas
-            .iter()
-            .rev()
-            .find(|delta| matches!(delta, EntityDelta::OverrideKey(k, _, _) if k == &key))?;
-
-        match delta {
-            EntityDelta::OverrideKey(_, value, _) => Some(value),
-            _ => None,
-        }
-    }
-
-    pub fn override_key(
-        &mut self,
-        ns: Namespace,
-        key: impl Into<EntityKey>,
-        value: impl Into<EntityValue>,
-        prev: Option<EntityPrevValue>,
-    ) {
-        self.entries
-            .entry(ns)
-            .or_default()
-            .push(EntityDelta::OverrideKey(key.into(), value.into(), prev));
-    }
-
-    pub fn delete_key(
-        &mut self,
-        ns: Namespace,
-        key: impl Into<EntityKey>,
-        prev: impl Into<EntityPrevValue>,
-    ) {
-        self.entries
-            .entry(ns)
-            .or_default()
-            .push(EntityDelta::DeleteKey(key.into(), prev.into()));
-    }
-
-    pub fn append_value(
-        &mut self,
-        ns: Namespace,
-        key: impl Into<EntityKey>,
-        value: impl Into<EntityValue>,
-    ) {
-        self.entries
-            .entry(ns)
-            .or_default()
-            .push(EntityDelta::AppendValue(key.into(), value.into()));
-    }
-
-    pub fn remove_value(
-        &mut self,
-        ns: Namespace,
-        key: impl Into<EntityKey>,
-        value: impl Into<EntityValue>,
-    ) {
-        self.entries
-            .entry(ns)
-            .or_default()
-            .push(EntityDelta::RemoveValue(key.into(), value.into()));
-    }
-
-    pub fn override_entity<T: Entity>(
-        &mut self,
-        key: impl Into<EntityKey>,
-        entity: T,
-        prev: Option<T>,
-    ) {
-        let entity = entity.encode_value();
-        let prev = prev.map(T::encode_value);
-
-        self.override_key(T::NS, key, entity, prev);
-    }
-
-    pub fn append_entity<T: Entity>(&mut self, key: impl Into<EntityKey>, entity: T) {
-        self.append_value(T::NS, key, entity.encode_value());
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct NamespaceSlice {
-    pub entities: HashMap<EntityKey, EntityValue>,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct StateSlice {
-    pub loaded: HashMap<Namespace, NamespaceSlice>,
-}
-
-impl StateSlice {
-    pub fn load_entity(&mut self, ns: Namespace, key: impl AsRef<[u8]>, value: EntityValue) {
-        let key = key.as_ref().to_vec();
-
-        self.loaded
-            .entry(ns)
-            .or_default()
-            .entities
-            .entry(key)
-            .or_insert(value);
-    }
-
-    pub fn load_entity_typed<T: Entity>(&mut self, key: impl AsRef<[u8]>, entity: T) {
-        let value = entity.encode_value();
-
-        self.load_entity(T::NS, key, value);
-    }
-
-    pub fn get_entity(
-        &self,
-        ns: Namespace,
-        key: impl AsRef<[u8]>,
-    ) -> Result<Option<EntityValue>, StateError> {
-        let values = self
-            .loaded
-            .get(ns)
-            .and_then(|ns| ns.entities.get(key.as_ref()));
-
-        let value = values.cloned();
-
-        Ok(value)
-    }
-
-    pub fn get_entity_typed<T: Entity>(
-        &self,
-        key: impl AsRef<[u8]>,
-    ) -> Result<Option<T>, StateError> {
-        let value = self.get_entity(T::NS, key)?;
-
-        // TODO: we need to optimize this so that we don't repeat decoding if this is
-        // called multiple times.
-        let decoded = value.map(T::decode_value).transpose()?;
-
-        Ok(decoded)
-    }
-}
-
-pub struct StateSliceView<'a> {
-    inner: StateSlice,
-    deltas: &'a [StateDelta],
-}
-
-impl<'a> StateSliceView<'a> {
-    pub fn new(inner: StateSlice, deltas: &'a [StateDelta]) -> Self {
-        Self { inner, deltas }
-    }
-
-    /// Looks for an entity overridden in the deltas.
+    /// Applies the change to the entity
     ///
-    /// we look for the entity in the deltas in reverse order, so that the
-    /// latest delta is searched first
-    fn find_override(&self, ns: Namespace, key: impl AsRef<[u8]>) -> Option<&EntityValue> {
-        for delta in self.deltas.iter().rev() {
-            if let Some(delta) = delta.get_overriden_key(ns, &key) {
-                return Some(delta);
+    /// Implementing types will take an entity representing the latest known
+    /// state and apply any changes declared by the delta.
+    ///
+    /// Returning `Some` instructs the machinery to upsert the entity in the
+    /// database; returning `None` instructs the machinery to delete the record.
+    ///
+    /// Implementors must also use this call to store any required data from the
+    /// entity for a potential `undo` call at a later time. Eg: if the apply
+    /// erases a value, this method should store internally a copy of that value
+    /// in case it needs to re-assign the field during an undo.
+    fn apply(&mut self, entity: &mut Option<Self::Entity>);
+
+    /// Undo the changes to the entity
+    ///
+    /// Implementing types will take the entity with changes already applied and
+    /// undo those updates to reset the entity to the previous state.
+    ///
+    /// This method should assume that `apply` was already called at a prior
+    /// point in time, allowing implementors to retain initial values as
+    /// internal delta state (if required).
+    fn undo(&mut self, entity: &mut Option<Self::Entity>);
+}
+
+#[derive(Debug, Clone)]
+pub struct StateDelta<D> {
+    pub(crate) new_cursor: BlockSlot,
+    pub(crate) deltas: HashMap<NsKey, Vec<D>>,
+}
+
+impl<D> Default for StateDelta<D> {
+    fn default() -> Self {
+        Self::new(0)
+    }
+}
+
+impl<D> std::ops::AddAssign<Self> for StateDelta<D> {
+    fn add_assign(&mut self, rhs: Self) {
+        for (key, deltas) in rhs.deltas {
+            let entry = self.deltas.entry(key).or_default();
+            entry.extend(deltas);
+        }
+
+        self.new_cursor = self.new_cursor.max(rhs.new_cursor);
+    }
+}
+
+impl<D> StateDelta<D> {
+    fn new(new_cursor: BlockSlot) -> Self {
+        Self {
+            new_cursor,
+            deltas: HashMap::new(),
+        }
+    }
+
+    pub fn set_cursor(&mut self, value: BlockSlot) {
+        self.new_cursor = value;
+    }
+}
+
+impl<D> StateDelta<D>
+where
+    D: EntityDelta,
+{
+    pub fn add_delta(&mut self, delta: impl Into<D>) {
+        let delta = delta.into();
+        let key = delta.key();
+        let group = self.deltas.entry(key.into_owned()).or_default();
+        group.push(delta);
+    }
+
+    pub fn compile_keys(&self) -> impl Iterator<Item = &NsKey> {
+        self.deltas.keys()
+    }
+
+    fn apply_to(&mut self, key: &NsKey, entity: &mut Option<D::Entity>) {
+        let to_apply = self.deltas.get_mut(key);
+
+        if let Some(to_apply) = to_apply {
+            for delta in to_apply {
+                delta.apply(entity);
             }
         }
-
-        None
     }
 
-    pub fn ensure_loaded(
-        &mut self,
-        ns: Namespace,
-        key: impl AsRef<[u8]>,
-        store: &impl State3Store,
-    ) -> Result<(), State3Error> {
-        let key = key.as_ref().to_vec();
+    fn undo_to(&mut self, key: &NsKey, entity: &mut Option<D::Entity>) {
+        let to_apply = self.deltas.get_mut(key);
 
-        if self.find_override(ns, &key).is_some() {
-            return Ok(());
+        if let Some(to_apply) = to_apply {
+            for delta in to_apply {
+                delta.undo(entity);
+            }
         }
-
-        let value = store.read_entity(ns, &key)?;
-
-        if let Some(value) = value {
-            self.inner.load_entity(ns, &key, value);
-        }
-
-        Ok(())
-    }
-
-    pub fn ensure_loaded_typed<T: Entity>(
-        &mut self,
-        key: impl AsRef<[u8]>,
-        store: &impl State3Store,
-    ) -> Result<(), State3Error> {
-        self.ensure_loaded(T::NS, key, store)
-    }
-
-    pub fn get_entity(
-        &self,
-        ns: Namespace,
-        key: impl AsRef<[u8]>,
-    ) -> Result<Option<EntityValue>, StateError> {
-        let key = key.as_ref().to_vec();
-
-        if let Some(delta) = self.find_override(ns, &key) {
-            return Ok(Some(delta.clone()));
-        }
-
-        let value = self.inner.get_entity(ns, key)?;
-
-        Ok(value)
-    }
-
-    pub fn get_entity_typed<T: Entity>(
-        &self,
-        key: impl AsRef<[u8]>,
-    ) -> Result<Option<T>, StateError> {
-        let value = self.get_entity(T::NS, key)?;
-        let decoded = value.map(T::decode_value).transpose()?;
-
-        Ok(decoded)
-    }
-
-    pub fn unwrap(self) -> StateSlice {
-        self.inner
     }
 }
 
@@ -300,6 +214,9 @@ impl<'a> StateSliceView<'a> {
 pub enum InvariantViolation {
     #[error("input not found: {0}")]
     InputNotFound(TxoRef),
+
+    #[error("entity not found: {0}")]
+    EntityNotFound(NsKey),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -316,6 +233,9 @@ pub enum StateError {
     #[error("encoding error: {0}")]
     EncodingError(String),
 
+    #[error("invalid namespace: {0}")]
+    InvalidNamespace(Namespace),
+
     #[error(transparent)]
     DecodingError(#[from] pallas::codec::minicbor::decode::Error),
 
@@ -329,78 +249,113 @@ pub enum StateError {
 // temporary alias to avoid collision with existing StateError
 pub type State3Error = StateError;
 
-pub struct EntityIterTyped<S: State3Store, T: Entity> {
+pub struct EntityIterTyped<S: State3Store, E: Entity> {
     inner: S::EntityIter,
-    _marker: PhantomData<T>,
+    ns: Namespace,
+    _marker: PhantomData<E>,
 }
 
-impl<S: State3Store, T: Entity> EntityIterTyped<S, T> {
-    pub fn new(inner: S::EntityIter) -> Self {
+impl<S: State3Store, E: Entity> EntityIterTyped<S, E> {
+    pub fn new(inner: S::EntityIter, ns: Namespace) -> Self {
         Self {
             inner,
+            ns,
             _marker: PhantomData,
         }
     }
 }
 
-impl<S: State3Store, T: Entity> Iterator for EntityIterTyped<S, T> {
-    type Item = Result<(EntityKey, T), StateError>;
+impl<S: State3Store, E: Entity> Iterator for EntityIterTyped<S, E> {
+    type Item = Result<(EntityKey, E), StateError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let next = self.inner.next()?;
 
-        let mapped = next.and_then(|(key, value)| T::decode_value(value).map(|v| (key, v)));
+        let mapped =
+            next.and_then(|(key, value)| E::decode_entity(&self.ns, &value).map(|v| (key, v)));
 
         Some(mapped)
     }
 }
 
-pub struct EntityValueIterTyped<S: State3Store, T: Entity> {
-    inner: S::EntityValueIter,
-    _marker: PhantomData<T>,
-}
+// pub struct EntityValueIterTyped<S: State3Store> {
+//     inner: S::EntityValueIter,
+//     ns: Namespace,
+//     _marker: PhantomData<S::Entity>,
+// }
 
-impl<S: State3Store, T: Entity> EntityValueIterTyped<S, T> {
-    pub fn new(inner: S::EntityValueIter) -> Self {
-        Self {
-            inner,
-            _marker: PhantomData,
-        }
+// impl<S: State3Store> EntityValueIterTyped<S> {
+//     pub fn new(inner: S::EntityValueIter, ns: Namespace) -> Self {
+//         Self {
+//             inner,
+//             ns,
+//             _marker: PhantomData,
+//         }
+//     }
+// }
+
+// impl<S: State3Store> Iterator for EntityValueIterTyped<S> {
+//     type Item = Result<S::Entity, StateError>;
+
+//     fn next(&mut self) -> Option<Self::Item> {
+//         let next = self.inner.next()?;
+
+//         let mapped = next.and_then(|value| S::Entity::decode_entity(&self.ns,
+// &value));
+
+//         Some(mapped)
+//     }
+// }
+
+fn full_range() -> Range<EntityKey> {
+    let start = [0u8; KEY_SIZE];
+    let end = [255u8; KEY_SIZE];
+    Range {
+        start: EntityKey(start),
+        end: EntityKey(end),
     }
 }
 
-impl<S: State3Store, T: Entity> Iterator for EntityValueIterTyped<S, T> {
-    type Item = Result<T, StateError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let next = self.inner.next()?;
-
-        let mapped = next.and_then(|value| T::decode_value(value));
-
-        Some(mapped)
-    }
-}
-
-pub trait State3Store: Sized {
+pub trait State3Store: Sized + Send + Sync {
     type EntityIter: Iterator<Item = Result<(EntityKey, EntityValue), StateError>>;
     type EntityValueIter: Iterator<Item = Result<EntityValue, StateError>>;
 
-    fn get_cursor(&self) -> Result<Option<BlockSlot>, StateError>;
+    fn read_cursor(&self) -> Result<Option<BlockSlot>, StateError>;
 
-    fn apply(&self, deltas: &[StateDelta]) -> Result<(), StateError>;
+    fn append_cursor(&self, cursor: BlockSlot) -> Result<(), StateError>;
 
-    fn undo(&self, deltas: &[StateDelta]) -> Result<(), StateError>;
-
-    fn read_entity(
+    fn read_entities(
         &self,
         ns: Namespace,
-        key: impl AsRef<[u8]>,
-    ) -> Result<Option<EntityValue>, StateError>;
+        keys: &[&EntityKey],
+    ) -> Result<Vec<Option<EntityValue>>, StateError>;
+
+    fn write_entity(
+        &self,
+        ns: Namespace,
+        key: &EntityKey,
+        value: &EntityValue,
+    ) -> Result<(), StateError>;
+
+    fn delete_entity(&self, ns: Namespace, key: &EntityKey) -> Result<(), StateError>;
+
+    fn save_entity(
+        &self,
+        ns: Namespace,
+        key: &EntityKey,
+        maybe_entity: Option<&EntityValue>,
+    ) -> Result<(), StateError> {
+        if let Some(entity) = maybe_entity {
+            self.write_entity(ns, key, &entity)
+        } else {
+            self.delete_entity(ns, key)
+        }
+    }
 
     fn iter_entities(
         &self,
         ns: Namespace,
-        range: Range<&[u8]>,
+        range: Range<EntityKey>,
     ) -> Result<Self::EntityIter, StateError>;
 
     fn iter_entity_values(
@@ -409,40 +364,167 @@ pub trait State3Store: Sized {
         key: impl AsRef<[u8]>,
     ) -> Result<Self::EntityValueIter, StateError>;
 
-    fn read_entity_typed<T: Entity>(&self, key: impl AsRef<[u8]>) -> Result<Option<T>, StateError> {
-        let value = self.read_entity(T::NS, key)?;
-        let decoded = value.map(T::decode_value).transpose()?;
+    fn read_entities_typed<E: Entity>(
+        &self,
+        ns: Namespace,
+        keys: &[&EntityKey],
+    ) -> Result<Vec<Option<E>>, StateError> {
+        let raw = self.read_entities(ns, keys)?;
+
+        let decoded = raw
+            .into_iter()
+            .map(|x| x.map(|v| E::decode_entity(ns, &v)))
+            .map(|x| x.transpose())
+            .try_collect()?;
 
         Ok(decoded)
     }
 
-    fn iter_entities_typed<T: Entity>(
+    fn read_entity_typed<E: Entity>(
         &self,
-        range: Range<&[u8]>,
-    ) -> Result<EntityIterTyped<Self, T>, StateError> {
-        let inner = self.iter_entities(T::NS, range)?;
-        Ok(EntityIterTyped::<_, T>::new(inner))
+        ns: Namespace,
+        key: &EntityKey,
+    ) -> Result<Option<E>, StateError> {
+        let raw = self.read_entities_typed(ns, &[key])?;
+
+        let first = raw.into_iter().next().unwrap();
+
+        Ok(first)
     }
 
-    fn iter_entity_values_typed<T: Entity>(
-        &self,
-        key: impl AsRef<[u8]>,
-    ) -> Result<EntityValueIterTyped<Self, T>, StateError> {
-        let inner = self.iter_entity_values(T::NS, key)?;
-        Ok(EntityValueIterTyped::<_, T>::new(inner))
+    fn write_entity_typed<E: Entity>(&self, key: &EntityKey, entity: &E) -> Result<(), StateError> {
+        let (ns, raw) = E::encode_entity(&entity);
+
+        self.write_entity(ns, key, &raw)
     }
+
+    fn save_entity_typed<E: Entity>(
+        &self,
+        ns: Namespace,
+        key: &EntityKey,
+        maybe_entity: Option<&E>,
+    ) -> Result<(), StateError> {
+        if let Some(entity) = maybe_entity {
+            self.write_entity_typed(key, entity)
+        } else {
+            self.delete_entity(ns, key)
+        }
+    }
+
+    fn iter_entities_typed<E: Entity>(
+        &self,
+        ns: Namespace,
+        range: Option<Range<EntityKey>>,
+    ) -> Result<EntityIterTyped<Self, E>, StateError> {
+        let range = range.unwrap_or_else(|| full_range());
+
+        let inner = self.iter_entities(ns, range)?;
+
+        Ok(EntityIterTyped::<Self, E>::new(inner, ns))
+    }
+
+    // fn iter_entity_values_typed<E: Entity>(
+    //     &self,
+    //     ns: Namespace,
+    //     key: impl AsRef<[u8]>,
+    // ) -> Result<EntityValueIterTyped<E>, StateError> {
+    //     let inner = self.iter_entity_values(ns, key)?;
+    //     Ok(EntityValueIterTyped::<E>::new(inner, ns))
+    // }
 }
 
-pub trait Entity: Sized {
-    const NS: Namespace;
-    const NS_TYPE: NamespaceType;
+use rayon::prelude::*;
 
-    fn decode_value(value: EntityValue) -> Result<Self, StateError>;
-    fn encode_value(self) -> EntityValue;
+fn load_entity_chunk<D: Domain>(
+    chunk: &[NsKey],
+    store: &D::State3,
+) -> Result<EntityMap<D::Entity>, StateError> {
+    let by_ns = chunk.into_iter().chunk_by(|key| key.0);
+
+    let mut loaded: EntityMap<D::Entity> = HashMap::new();
+
+    for (ns, chunk) in &by_ns {
+        let keys = chunk.map(|x| &x.1).collect::<Vec<_>>();
+
+        let decoded = store.read_entities_typed::<D::Entity>(ns, &keys)?;
+
+        loaded = keys
+            .into_iter()
+            .zip(decoded)
+            .fold(loaded, |mut acc, (k, v)| {
+                let k = NsKey(ns, k.clone());
+                acc.insert(k, v);
+                acc
+            });
+    }
+
+    Ok(loaded)
+}
+
+const LOAD_CHUNK_SIZE: usize = 100;
+
+/// Loads the entities involved in a batch of deltas
+///
+/// This methods is a fancy way of loading required entities for a batch of
+/// deltas. It optimizes the process by organizing read operations in chunks
+/// that execute in parallel using Rayon. The assumption is that the storage
+/// backend supports concurrent reads (eg: Redb).
+///
+/// Chunks are defined by sorting the entity keys grouping by namespace. The
+/// assumption is that the storage backend will benefit from loading keys that
+/// are close to each other (eg: disk block reads)
+fn load_entities<D: Domain>(
+    store: &D::State3,
+    delta: &StateDelta<D::EntityDelta>,
+) -> Result<EntityMap<D::Entity>, StateError> {
+    let mut keys: Vec<_> = delta.compile_keys().cloned().collect();
+
+    keys.sort();
+
+    let result = keys
+        .par_chunks(LOAD_CHUNK_SIZE)
+        .map(|chunk| load_entity_chunk::<D>(chunk, store))
+        .try_reduce(
+            || EntityMap::new(),
+            |mut acc, x| {
+                acc.extend(x);
+                Ok(acc)
+            },
+        )?;
+
+    Ok(result)
+}
+
+pub fn apply_batch<D: Domain>(
+    store: &D::State3,
+    delta: &mut StateDelta<D::EntityDelta>,
+) -> Result<(), StateError> {
+    // todo: semantics for starting a read transaction
+
+    let mut entities = load_entities::<D>(store, delta)?;
+
+    for (key, entity) in entities.iter_mut() {
+        delta.apply_to(key, entity);
+    }
+
+    // lets keep this as a separated loop because we might want to isolate the write
+    // phase as a different method for pipelining
+    for (key, entity) in entities {
+        let NsKey(ns, key) = key;
+        store.save_entity_typed(ns, &key, entity.as_ref())?;
+    }
+
+    store.append_cursor(delta.new_cursor)?;
+
+    // todo: semantics for committing a read transaction
+
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, RwLock};
+
     use super::*;
 
     #[derive(Debug, Clone, PartialEq)]
@@ -451,6 +533,8 @@ mod tests {
     }
 
     impl TestEntity {
+        const NS: Namespace = "test";
+
         pub fn new(value: &str) -> Self {
             Self {
                 value: value.to_string(),
@@ -459,56 +543,174 @@ mod tests {
     }
 
     impl Entity for TestEntity {
-        const NS: Namespace = "test";
-        const NS_TYPE: NamespaceType = NamespaceType::KeyValue;
-
-        fn decode_value(value: EntityValue) -> Result<Self, StateError> {
-            let value_str =
-                String::from_utf8(value).map_err(|e| StateError::EncodingError(e.to_string()))?;
+        fn decode_entity(_: Namespace, value: &EntityValue) -> Result<Self, StateError> {
+            let value_str = String::from_utf8(value.clone()).unwrap();
             Ok(TestEntity { value: value_str })
         }
 
-        fn encode_value(self) -> EntityValue {
-            self.value.into_bytes()
+        fn encode_entity(value: &Self) -> (Namespace, EntityValue) {
+            (TestEntity::NS, value.value.as_bytes().to_vec())
         }
     }
 
+    struct ChangeValue {
+        key: NsKey,
+        old_value: Option<String>,
+        override_with: String,
+    }
+
+    impl EntityDelta for ChangeValue {
+        type Entity = TestEntity;
+
+        fn key(&self) -> Cow<'_, NsKey> {
+            Cow::Borrowed(&self.key)
+        }
+
+        fn apply(&mut self, entity: &mut Option<Self::Entity>) {
+            self.old_value = entity.as_ref().map(|e| e.value.clone());
+
+            entity
+                .as_mut()
+                .map(|e| e.value = self.override_with.clone());
+        }
+
+        fn undo(&mut self, entity: &mut Option<Self::Entity>) {
+            entity
+                .as_mut()
+                .map(|e| e.value = self.old_value.clone().unwrap());
+
+            self.old_value = None;
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct MockStoreDb {
+        cursor: Option<BlockSlot>,
+        entities: HashMap<NsKey, EntityValue>,
+    }
+
+    #[derive(Debug, Clone)]
+    struct MockStore {
+        db: Arc<RwLock<MockStoreDb>>,
+    }
+
+    impl State3Store for MockStore {
+        // type Entity = TestEntity;
+        // type EntityDelta = ChangeValue;
+        type EntityIter = std::vec::IntoIter<Result<(EntityKey, EntityValue), StateError>>;
+        type EntityValueIter = std::iter::Empty<Result<EntityValue, StateError>>;
+
+        fn read_cursor(&self) -> Result<Option<BlockSlot>, StateError> {
+            let db = self.db.read().unwrap();
+            Ok(db.cursor)
+        }
+
+        fn append_cursor(&self, new_cursor: BlockSlot) -> Result<(), StateError> {
+            let mut db = self.db.write().unwrap();
+            db.cursor = Some(new_cursor);
+            Ok(())
+        }
+
+        fn read_entities(
+            &self,
+            ns: Namespace,
+            keys: &[&EntityKey],
+        ) -> Result<Vec<Option<EntityValue>>, StateError> {
+            let db = self.db.read().unwrap();
+            let mut out = Vec::with_capacity(keys.len());
+
+            for key in keys {
+                let nskey = NsKey(ns, (*key).clone());
+                let value = db.entities.get(&nskey).cloned();
+                out.push(value);
+            }
+
+            Ok(out)
+        }
+
+        fn write_entity(
+            &self,
+            ns: Namespace,
+            key: &EntityKey,
+            value: &EntityValue,
+        ) -> Result<(), StateError> {
+            let mut db = self.db.write().unwrap();
+            let key = NsKey(ns, key.clone());
+            db.entities.insert(key, value.clone());
+            Ok(())
+        }
+
+        fn delete_entity(&self, ns: Namespace, key: &EntityKey) -> Result<(), StateError> {
+            let mut db = self.db.write().unwrap();
+            let key = NsKey(ns, key.clone());
+            db.entities.remove(&key);
+            Ok(())
+        }
+
+        fn iter_entities(
+            &self,
+            ns: Namespace,
+            range: Range<EntityKey>,
+        ) -> Result<Self::EntityIter, StateError> {
+            let db = self.db.read().unwrap();
+            let mut out = vec![];
+
+            for nskey in db.entities.keys() {
+                if nskey.0 == ns {
+                    if range.contains(&nskey.1) {
+                        let value = db.entities.get(nskey).unwrap();
+                        let pair = (nskey.1.clone(), value.clone());
+                        out.push(Ok(pair));
+                    }
+                }
+            }
+
+            Ok(out.into_iter())
+        }
+
+        fn iter_entity_values(
+            &self,
+            ns: Namespace,
+            key: impl AsRef<[u8]>,
+        ) -> Result<Self::EntityValueIter, StateError> {
+            todo!()
+        }
+    }
+
+    #[derive(Clone)]
+    struct MockDomain;
+
+    fn setup_mock_store() -> MockStore {
+        let store = MockStore {
+            db: Arc::new(RwLock::new(MockStoreDb {
+                cursor: Some(0),
+                entities: HashMap::new(),
+            })),
+        };
+
+        store.write_entity_typed(&EntityKey::from(b"a"), &TestEntity::new("123"));
+
+        store.write_entity_typed(&EntityKey::from(b"b"), &TestEntity::new("456"));
+
+        store.write_entity_typed(&EntityKey::from(b"c"), &TestEntity::new("789"));
+
+        store
+    }
+
     #[test]
-    fn test_state_slice_view() {
-        // Create a base state slice with an entity
-        let mut base_slice = StateSlice::default();
+    fn test_apply_batch() {
+        let store = setup_mock_store();
 
-        let base_entity = TestEntity::new("a");
-        base_slice.load_entity_typed(b"overriden_key", base_entity.clone());
+        let mut delta = StateDelta::<ChangeValue>::new(1);
 
-        let base_entity_2 = TestEntity::new("a");
-        base_slice.load_entity_typed(b"not_overriden_key", base_entity_2.clone());
+        let delta_a = ChangeValue {
+            key: NsKey::from((TestEntity::NS, b"a")),
+            override_with: "new_value".into(),
+            old_value: None,
+        };
 
-        // Create a delta with a different value for the same key
-        let mut delta = StateDelta::new(1);
+        delta.add_delta(delta_a);
 
-        let delta_entity = TestEntity::new("b");
-        delta.override_entity(b"overriden_key", delta_entity, Some(base_entity.clone()));
-
-        // Create a state slice view with the base slice and delta
-        let deltas = vec![delta];
-        let view = StateSliceView::new(base_slice.clone(), &deltas);
-
-        // Test that get_entity returns the delta value, not the base value
-        let found = view
-            .get_entity_typed::<TestEntity>(b"overriden_key")
-            .unwrap()
-            .unwrap();
-
-        // Should return the delta value, not the base value
-        assert_eq!(found.value, "b");
-
-        // Test that get_entity returns the base value when no delta exists
-        let found = view
-            .get_entity_typed::<TestEntity>(b"not_overriden_key")
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(found.value, "a");
+        //super::apply_batch::<MockDomain>(&store, &mut delta).unwrap();
     }
 }

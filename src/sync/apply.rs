@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use gasket::framework::*;
 use tracing::{debug, info};
 
@@ -40,15 +42,7 @@ impl Stage {
     fn process_origin(&self) -> Result<(), WorkerError> {
         info!("applying origin");
 
-        self.domain.apply_origin().or_panic()?;
-
-        Ok(())
-    }
-
-    fn process_undo(&self, block: RawBlock) -> Result<(), WorkerError> {
-        info!(slot = &block.slot, "undoing block");
-
-        self.domain.undo_blocks(&[block]).or_panic()?;
+        dolos_core::sync::apply_origin(&self.domain).or_panic()?;
 
         Ok(())
     }
@@ -56,7 +50,18 @@ impl Stage {
     fn process_apply(&self, block: RawBlock) -> Result<(), WorkerError> {
         info!(slot = &block.slot, "applying block");
 
-        self.domain.apply_blocks(&[block]).or_panic()?;
+        let block = Arc::new(block.body);
+
+        dolos_core::sync::apply_block(&self.domain, block).or_panic()?;
+
+        Ok(())
+    }
+
+    fn process_undo(&self, block: RawBlock) -> Result<(), WorkerError> {
+        info!(slot = &block.slot, "undoing block");
+
+        todo!();
+        //self.domain.undo_blocks(&[block]).or_panic()?;
 
         Ok(())
     }

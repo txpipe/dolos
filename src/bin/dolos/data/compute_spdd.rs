@@ -44,7 +44,7 @@ pub fn compute_spdd(store: &impl State3Store) -> miette::Result<HashMap<[u8; 28]
     let mut by_pool = HashMap::<[u8; 28], u128>::new();
 
     let all_accounts = store
-        .iter_entities_typed::<AccountState>(&[0u8; 32].as_slice()..&[255u8; 32].as_slice())
+        .iter_entities_typed::<AccountState>("accounts", None)
         .into_diagnostic()?;
 
     for record in all_accounts {

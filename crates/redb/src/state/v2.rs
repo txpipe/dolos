@@ -69,7 +69,7 @@ impl LedgerStore {
         Ok(last)
     }
 
-    pub fn apply(&self, deltas: &[LedgerDelta]) -> Result<(), Error> {
+    pub fn apply(&self, deltas: &[UtxoSetDelta]) -> Result<(), Error> {
         let mut wx = self.db().begin_write()?;
         wx.set_durability(Durability::Eventual);
         wx.set_quick_repair(true);

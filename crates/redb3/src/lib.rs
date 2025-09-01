@@ -1,10 +1,10 @@
 use std::{collections::HashMap, ops::Range, path::Path, sync::Arc};
 
-use dolos_core::BlockSlot;
+use dolos_core::{BlockSlot, Entity};
 
 use dolos_core::{
     EntityDelta, EntityKey, EntityValue, Namespace, NamespaceType, State3Error as StateError,
-    StateDelta, StateSchema,
+    StateSchema,
 };
 
 use redb::{
@@ -113,7 +113,7 @@ impl Table {
     pub fn iter_values(
         &self,
         rx: &mut ReadTransaction,
-        range: Range<&[u8]>,
+        range: Range<EntityKey>,
     ) -> Result<EntityIter, Error> {
         let Some(table) = self.as_value() else {
             return Err(Error::from(StateError::InvalidOpForTable));
@@ -121,7 +121,10 @@ impl Table {
 
         let table = rx.open_table(*table)?;
 
-        let values = table.range(range)?;
+        let start = range.start.as_ref();
+        let end = range.end.as_ref();
+
+        let values = table.range(start..end)?;
 
         Ok(EntityIter(values))
     }
@@ -142,35 +145,53 @@ impl Table {
         Ok(EntityValueIter(all_values))
     }
 
-    pub fn apply(&self, wx: &mut WriteTransaction, crdt: EntityDelta) -> Result<(), Error> {
+    fn write_entity(
+        &self,
+        wx: &mut WriteTransaction,
+        key: &EntityKey,
+        value: &EntityValue,
+    ) -> Result<(), Error> {
         match self {
             Table::Value(def) => {
                 let mut open_table = wx.open_table(*def)?;
-
-                match crdt {
-                    EntityDelta::OverrideKey(key, value, _) => {
-                        open_table.insert(key.as_slice(), value.as_slice())?;
-                    }
-                    EntityDelta::DeleteKey(key, _) => {
-                        open_table.remove(key.as_slice())?;
-                    }
-                    _ => return Err(Error::from(StateError::InvalidOpForTable)),
-                }
+                open_table.insert(key.as_ref(), value.as_slice())?;
             }
-
             Table::MultiValue(def) => {
                 let mut open_table = wx.open_multimap_table(*def)?;
-
-                match crdt {
-                    EntityDelta::AppendValue(key, value) => {
-                        open_table.insert(key.as_slice(), value.as_slice())?;
-                    }
-                    EntityDelta::RemoveValue(key, value) => {
-                        open_table.remove(key.as_slice(), value.as_slice())?;
-                    }
-                    _ => return Err(Error::from(StateError::InvalidOpForTable)),
-                }
+                open_table.insert(key.as_ref(), value.as_slice())?;
             }
+        }
+
+        Ok(())
+    }
+
+    fn delete_entity(&self, wx: &mut WriteTransaction, key: &EntityKey) -> Result<(), Error> {
+        match self {
+            Table::Value(def) => {
+                let mut open_table = wx.open_table(*def)?;
+                open_table.remove(key.as_ref())?;
+            }
+            Table::MultiValue(def) => {
+                let mut open_table = wx.open_multimap_table(*def)?;
+                open_table.remove_all(key.as_ref())?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn delete_entity_value(
+        &self,
+        wx: &mut WriteTransaction,
+        key: &EntityKey,
+        value: &EntityValue,
+    ) -> Result<(), Error> {
+        match self {
+            Table::MultiValue(def) => {
+                let mut open_table = wx.open_multimap_table(*def)?;
+                open_table.remove(key.as_ref(), value.as_slice())?;
+            }
+            _ => return Err(Error::from(StateError::InvalidOpForTable)),
         }
 
         Ok(())
@@ -187,6 +208,7 @@ impl Iterator for EntityIter {
 
         let entry = next
             .map(|(k, v)| (k.value().to_vec(), v.value().to_vec()))
+            .map(|(k, v)| (EntityKey::from(k), v))
             .map_err(Error::from)
             .map_err(StateError::from);
 
@@ -310,8 +332,7 @@ impl StateStore {
         Ok(())
     }
 
-    fn get_cursor(&self) -> Result<Option<BlockSlot>, Error> {
-        let rx = self.db().begin_read().map_err(Error::from)?;
+    fn get_cursor(&self, rx: &ReadTransaction) -> Result<Option<BlockSlot>, Error> {
         let cursor = rx.open_table(CURSOR_TABLE)?;
 
         let mut range = cursor.range(0..)?.rev();
@@ -326,33 +347,26 @@ impl dolos_core::State3Store for StateStore {
     type EntityIter = EntityIter;
     type EntityValueIter = EntityValueIter;
 
-    fn get_cursor(&self) -> Result<Option<BlockSlot>, StateError> {
-        let cursor = self.get_cursor()?;
+    fn read_cursor(&self) -> Result<Option<BlockSlot>, StateError> {
+        let rx = self.db().begin_read().map_err(Error::from)?;
+
+        let cursor = self.get_cursor(&rx)?;
 
         Ok(cursor)
     }
 
-    fn read_entity(
-        &self,
-        ns: Namespace,
-        key: impl AsRef<[u8]>,
-    ) -> Result<Option<EntityValue>, StateError> {
-        let mut rx = self.db().begin_read().map_err(Error::from)?;
+    fn append_cursor(&self, cursor: BlockSlot) -> Result<(), StateError> {
+        let mut wx = self.db().begin_write().map_err(Error::from)?;
 
-        let table = self
-            .tables
-            .get(&ns)
-            .ok_or(StateError::NamespaceNotFound(ns))?;
+        self.append_cursor(&mut wx, cursor)?;
 
-        let value = table.read_value(&mut rx, key.as_ref())?;
-
-        Ok(value)
+        Ok(())
     }
 
     fn iter_entities(
         &self,
         ns: Namespace,
-        range: Range<&[u8]>,
+        range: std::ops::Range<EntityKey>,
     ) -> Result<Self::EntityIter, StateError> {
         let mut rx = self.db().begin_read().map_err(Error::from)?;
 
@@ -383,128 +397,55 @@ impl dolos_core::State3Store for StateStore {
         Ok(values)
     }
 
-    fn apply(&self, deltas: &[StateDelta]) -> Result<(), StateError> {
+    fn read_entities(
+        &self,
+        ns: Namespace,
+        keys: &[&EntityKey],
+    ) -> Result<Vec<Option<EntityValue>>, StateError> {
+        let mut rx = self.db().begin_read().map_err(Error::from)?;
+
+        let table = self
+            .tables
+            .get(&ns)
+            .ok_or(StateError::NamespaceNotFound(ns))?;
+
+        let mut out = vec![];
+
+        for key in keys {
+            let value = table.read_value(&mut rx, key.as_ref())?;
+            out.push(value);
+        }
+
+        Ok(out)
+    }
+
+    fn write_entity(
+        &self,
+        ns: Namespace,
+        key: &EntityKey,
+        value: &EntityValue,
+    ) -> Result<(), StateError> {
         let mut wx = self.db().begin_write().map_err(Error::from)?;
 
-        wx.set_durability(Durability::Eventual);
-        wx.set_quick_repair(true);
+        let table = self
+            .tables
+            .get(&ns)
+            .ok_or(StateError::NamespaceNotFound(ns))?;
 
-        for delta in deltas {
-            self.append_cursor(&mut wx, delta.slot())?;
-
-            for (ns, crdts) in delta.iter_deltas() {
-                let table = self
-                    .tables
-                    .get(&ns)
-                    .ok_or(StateError::NamespaceNotFound(ns))?;
-
-                for crdt in crdts {
-                    table.apply(&mut wx, crdt.clone())?;
-                }
-            }
-        }
+        table.write_entity(&mut wx, key, value)?;
 
         wx.commit().map_err(Error::from)?;
 
         Ok(())
     }
 
-    fn undo(&self, deltas: &[StateDelta]) -> Result<(), StateError> {
-        let mut wx = self.db().begin_write().map_err(Error::from)?;
-
-        wx.set_durability(Durability::Eventual);
-        wx.set_quick_repair(true);
-
-        for delta in deltas {
-            self.undo_cursor(&mut wx, delta.slot())?;
-
-            for (ns, crdts) in delta.iter_deltas() {
-                let table = self
-                    .tables
-                    .get(&ns)
-                    .ok_or(StateError::NamespaceNotFound(ns))?;
-
-                for crdt in crdts {
-                    let undo = crdt.clone().into_undo();
-                    table.apply(&mut wx, undo)?;
-                }
-            }
-        }
-
-        wx.commit().map_err(Error::from)?;
-
-        Ok(())
+    fn delete_entity(&self, ns: Namespace, key: &EntityKey) -> Result<(), StateError> {
+        todo!()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dolos_core::State3Store as _;
-
-    #[test]
-    fn test_apply_value_table() {
-        let mut schema = StateSchema::default();
-        schema.insert("x", NamespaceType::KeyValue);
-
-        let store = StateStore::in_memory(schema).unwrap();
-
-        let mut delta = StateDelta::new(1);
-        delta.override_key("x", b"a", b"123", None);
-        delta.override_key("x", b"b", b"123", None);
-        delta.override_key("x", b"c", b"123", None);
-        delta.override_key("x", b"d", b"123", None);
-
-        store.apply(&[delta]).unwrap();
-
-        let cursor = store.get_cursor().unwrap();
-        assert_eq!(cursor, Some(1));
-
-        let value = store.read_entity("x", b"a").unwrap();
-        assert_eq!(value, Some(b"123".to_vec()));
-
-        let value = store.read_entity("x", b"b").unwrap();
-        assert_eq!(value, Some(b"123".to_vec()));
-
-        let mut iter = store.iter_entities("x", b"b"..b"d").unwrap();
-
-        let (k, v) = iter.next().unwrap().unwrap();
-        assert_eq!(k, b"b");
-        assert_eq!(v, b"123");
-
-        let (k, v) = iter.next().unwrap().unwrap();
-        assert_eq!(k, b"c");
-        assert_eq!(v, b"123");
-
-        assert!(iter.next().is_none());
-    }
-
-    #[test]
-    fn test_apply_multivalue_table() {
-        let mut schema = StateSchema::default();
-        schema.insert("y", NamespaceType::KeyMultiValue);
-
-        let store = StateStore::in_memory(schema).unwrap();
-
-        let mut delta = StateDelta::new(1);
-        delta.append_value("y", b"a", b"123");
-        delta.append_value("y", b"a", b"456");
-        delta.append_value("y", b"b", b"123");
-        delta.append_value("y", b"b", b"456");
-
-        store.apply(&[delta]).unwrap();
-
-        let cursor = store.get_cursor().unwrap();
-        assert_eq!(cursor, Some(1));
-
-        let mut iter = store.iter_entity_values("y", b"a").unwrap();
-
-        let v = iter.next().unwrap().unwrap();
-        assert_eq!(v, b"123");
-
-        let v = iter.next().unwrap().unwrap();
-        assert_eq!(v, b"456");
-
-        assert!(iter.next().is_none());
-    }
+    use dolos_core::{State3Store as _, StateDelta};
 }

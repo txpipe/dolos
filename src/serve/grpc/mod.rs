@@ -40,7 +40,7 @@ impl<T: dolos_core::StateStore> pallas::interop::utxorpc::LedgerContext for Cont
             .into_iter()
             .map(|(k, v)| {
                 let era = v.0.try_into().expect("era out of range");
-                (k.into(), (era, v.1))
+                (k.into(), (era, v.1.to_owned()))
             })
             .collect();
 

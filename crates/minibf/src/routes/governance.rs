@@ -86,12 +86,14 @@ impl<'a> IntoModel<blockfrost_openapi::models::drep::Drep> for DrepModelBuilder<
 pub async fn drep_by_id<D: Domain>(
     Path(drep_id): Path<String>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<blockfrost_openapi::models::drep::Drep>, StatusCode> {
+) -> Result<Json<blockfrost_openapi::models::drep::Drep>, StatusCode>
+where
+    Option<DRepState>: From<D::Entity>,
+{
     let drep_id = parse_drep_id(&drep_id).map_err(|_| StatusCode::BAD_REQUEST)?;
 
     let drep_state = domain
-        .state3()
-        .read_entity_typed::<dolos_cardano::model::DRepState>(&drep_id)
+        .read_cardano_entity::<DRepState>(drep_id.clone())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 

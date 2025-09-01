@@ -11,6 +11,7 @@ use pallas::ledger::traverse::MultiEraCert;
 
 use crate::pparams::ChainSummary;
 
+#[derive(Debug, Clone)]
 pub struct MultiEraPoolRegistration {
     pub operator: Hash<28>,
     pub vrf_keyhash: Hash<32>,
@@ -146,17 +147,12 @@ pub fn stake_credential_to_address(network: Network, credential: &StakeCredentia
     }
 }
 
-pub fn is_epoch_boundary(
-    chain_summary: &ChainSummary,
-    prev: Option<BlockSlot>,
-    now: BlockSlot,
-) -> bool {
-    let Some(prev) = prev else {
-        return false;
-    };
+pub fn next_epoch_boundary(chain_summary: &ChainSummary, after: BlockSlot) -> BlockSlot {
+    let era = chain_summary.era_for_slot(after);
+    let epoch_length = era.pparams.epoch_length();
+    let (_, epoch_slot) = super::utils::slot_epoch(after, chain_summary);
 
-    let (prev_epoch, _) = super::slot_epoch(prev, chain_summary);
-    let (now_epoch, _) = super::slot_epoch(now, chain_summary);
+    let missing = epoch_length - epoch_slot as u64;
 
-    prev_epoch != now_epoch
+    after + missing
 }

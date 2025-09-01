@@ -30,6 +30,7 @@ futures-util.workspace = true
 serde_json.workspace = true
 base64.workspace = true
 reqwest.workspace = true
+rayon.workspace = true
 
 dolos-core = { path = "crates/core" }
 dolos-cardano = { path = "crates/cardano", features = ["include-genesis"] }
@@ -62,7 +63,6 @@ console-subscriber = { version = "0.3.0", optional = true }
 flate2 = "1.0.34"
 tar = "0.4.41"
 paste = "1.0.15"
-rayon = "1.11.0"
 
 
 # gRPC dependencies
@@ -129,8 +129,8 @@ authors = ["TxPipe <hello@txpipe.io>"]
 
 [workspace.dependencies]
 pallas = { git = "https://github.com/txpipe/pallas.git", rev = "1d7a0d6", features = ["hardano", "phase2"] }
-# pallas = { version = "1.0.0-alpha.2", features = ["hardano"] }
-# pallas = { path = "../pallas/pallas", features = ["hardano"] }
+# pallas = { version = "1.0.0-alpha.2", features = ["hardano", "phase2"] }
+# pallas = { path = "../pallas/pallas", features = ["hardano", "phase2"] }
 
 thiserror = "2.0.12"
 hex = "0.4.3"
@@ -150,6 +150,7 @@ tower-http = { version = "0.6.1", features = ["cors", "trace", "normalize-path"]
 serde_json = "1.0.122"
 base64 = "0.22.1"
 reqwest = { version = "0.12.7", default-features = false, features = ["blocking", "rustls-tls"] }
+rayon = "1.11.0"
 
 [workspace.metadata.release]
 push = false

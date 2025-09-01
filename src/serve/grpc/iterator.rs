@@ -211,6 +211,8 @@ impl<D: Domain> Iterator for ChainIterator<D> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use dolos_core::StorageConfig;
     use dolos_testing::toy_domain::ToyDomain;
 
@@ -229,24 +231,25 @@ mod tests {
 
         let genesis_block = dolos_testing::blocks::make_conway_block(0);
 
-        domain
-            .apply_blocks(std::slice::from_ref(&genesis_block))
-            .unwrap();
+        dolos_core::sync::apply_block(&domain, Arc::new(genesis_block.body)).unwrap();
 
         let genesis_point = ChainPoint::Specific(genesis_block.slot, genesis_block.hash);
 
         for i in 1..=50 {
             let block = dolos_testing::blocks::make_conway_block(i);
-            domain.apply_blocks(&[block]).unwrap();
+
+            dolos_core::sync::apply_block(&domain, Arc::new(block.body)).unwrap();
         }
 
         for i in 51..=100 {
             let block = dolos_testing::blocks::make_conway_block(i);
+
             domain
                 .wal()
                 .roll_forward([block.clone()].into_iter())
                 .unwrap();
-            domain.apply_blocks(&[block]).unwrap();
+
+            dolos_core::sync::apply_block(&domain, Arc::new(block.body)).unwrap();
         }
 
         for i in 101..=150 {

@@ -1,73 +1,54 @@
-use std::collections::HashMap;
+use std::{borrow::Cow, collections::HashMap};
 
-use dolos_core::{State3Error, State3Store};
+use dolos_core::{NsKey, State3Error, State3Store, StateDelta};
 use pallas::ledger::traverse::MultiEraBlock;
 
 use crate::{
-    model::{AccountState, EpochState},
+    model::{AccountState, CardanoDelta, EpochState, FixedNamespace as _, EPOCH_KEY_MARK},
     pallas_extras,
-    roll::{BlockVisitor, DeltaBuilder, SliceBuilder},
+    roll::{BlockVisitor, DeltaBuilder},
 };
 
-pub struct EpochStateVisitor<'a, T>(&'a mut T);
+#[derive(Debug, Clone)]
+pub struct EpochStatsUpdate {
+    block_fees: u64,
+}
 
-impl<'a, T> From<&'a mut T> for EpochStateVisitor<'a, T> {
-    fn from(value: &'a mut T) -> Self {
-        Self(value)
+impl dolos_core::EntityDelta for EpochStatsUpdate {
+    type Entity = EpochState;
+
+    fn key(&self) -> Cow<'_, NsKey> {
+        Cow::Owned(NsKey::from((EpochState::NS, EPOCH_KEY_MARK)))
+    }
+
+    fn apply(&mut self, entity: &mut Option<EpochState>) {
+        let entity = entity.get_or_insert_default();
+
+        entity.gathered_fees += self.block_fees;
+    }
+
+    fn undo(&mut self, entity: &mut Option<EpochState>) {
+        let entity = entity.get_or_insert_default();
+
+        entity.gathered_fees -= self.block_fees;
     }
 }
 
-impl<'a, S: State3Store> BlockVisitor for EpochStateVisitor<'a, SliceBuilder<'_, S>> {
-    fn visit_root(&mut self, block: &MultiEraBlock) -> Result<(), State3Error> {
-        self.0
-            .slice
-            .ensure_loaded_typed::<EpochState>(crate::model::CURRENT_EPOCH_KEY, self.0.store)?;
+pub struct EpochStateVisitor<'a> {
+    delta: &'a mut StateDelta<CardanoDelta>,
+}
 
-        let cursor = self.0.store().get_cursor()?;
-
-        let should_compute =
-            pallas_extras::is_epoch_boundary(&self.0.chain_summary, cursor, block.slot());
-
-        if should_compute {
-            let mut by_pool = HashMap::<[u8; 28], u128>::new();
-
-            let all_accounts = self.0.store().iter_entities_typed::<AccountState>(
-                &[0u8; 32].as_slice()..&[255u8; 32].as_slice(),
-            )?;
-
-            for record in all_accounts {
-                let (_, value) = record?;
-
-                if let Some(pool_id) = value.pool_id {
-                    let key = pool_id.try_into().unwrap();
-                    let entry = by_pool.entry(key).or_insert(0);
-                    *entry += value.controlled_amount as u128;
-                }
-            }
-        }
-
-        Ok(())
+impl<'a> From<&'a mut StateDelta<CardanoDelta>> for EpochStateVisitor<'a> {
+    fn from(delta: &'a mut StateDelta<CardanoDelta>) -> Self {
+        Self { delta }
     }
 }
 
-impl<'a> BlockVisitor for EpochStateVisitor<'a, DeltaBuilder<'_>> {
+impl<'a> BlockVisitor for EpochStateVisitor<'a> {
     fn visit_root(&mut self, block: &MultiEraBlock) -> Result<(), State3Error> {
-        let current = self
-            .0
-            .slice()
-            .get_entity_typed::<EpochState>(crate::model::CURRENT_EPOCH_KEY)?
-            .unwrap_or_default();
-
         let block_fees = block.txs().iter().filter_map(|tx| tx.fee()).sum::<u64>();
 
-        let new = EpochState {
-            gathered_fees: Some(current.gathered_fees.unwrap_or_default() + block_fees),
-            ..current
-        };
-
-        self.0
-            .delta_mut()
-            .override_entity(crate::model::CURRENT_EPOCH_KEY, new, None);
+        self.delta.add_delta(EpochStatsUpdate { block_fees });
 
         Ok(())
     }

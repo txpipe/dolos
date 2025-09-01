@@ -111,10 +111,12 @@ impl Mempool {
                 transaction_id: txoref.0,
                 index: txoref.1.into(),
             };
+
             let input = MultiEraInput::AlonzoCompatible(<Box<Cow<'_, TransactionInput>>>::from(
                 Cow::Owned(tx_in),
             ));
-            let output = MultiEraOutput::try_from(eracbor)?;
+
+            let output = MultiEraOutput::try_from(eracbor.as_ref())?;
             pallas_utxos.insert(input, output);
         }
 
@@ -157,12 +159,14 @@ impl Mempool {
             .ledger
             .get_utxos(input_refs)?
             .into_iter()
-            .map(|(TxoRef(a, b), EraCbor(c, d))| {
-                let era = c.try_into().expect("era out of range");
+            .map(|(txoref, eracbor)| {
+                let TxoRef(a, b) = txoref;
+                let EraCbor(c, d) = eracbor.as_ref();
+                let era = pallas::ledger::traverse::Era::try_from(*c).expect("era out of range");
 
                 (
                     pallas::ledger::validate::utils::TxoRef::from((a, b)),
-                    pallas::ledger::validate::utils::EraCbor::from((era, d)),
+                    pallas::ledger::validate::utils::EraCbor::from((era, d.clone())),
                 )
             })
             .collect();
@@ -241,7 +245,7 @@ impl Mempool {
 impl MempoolStore for Mempool {
     type Stream = MempoolStream;
 
-    fn apply(&self, deltas: &[LedgerDelta]) {
+    fn apply(&self, deltas: &[UtxoSetDelta]) {
         let mut state = self.mempool.write().unwrap();
 
         if state.acknowledged.is_empty() {

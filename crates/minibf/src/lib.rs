@@ -4,20 +4,28 @@ use axum::{
     routing::{get, post},
     Router, ServiceExt,
 };
-use dolos_cardano::pparams::ChainSummary;
+use dolos_cardano::{
+    model::{AccountState, AssetState, DRepState, EpochState, FixedNamespace, PoolState},
+    pparams::ChainSummary,
+};
 use itertools::Itertools;
 use pallas::{
     crypto::hash::Hash,
     ledger::{addresses::Network, traverse::MultiEraUpdate},
 };
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, net::SocketAddr, ops::Deref};
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    ops::{Deref, Range},
+};
 use tower::Layer;
 use tower_http::{cors::CorsLayer, normalize_path::NormalizePathLayer, trace};
 use tracing::Level;
 
 use dolos_core::{
-    ArchiveStore as _, CancelToken, Domain, EraCbor, ServeError, StateStore as _, TxOrder,
+    ArchiveStore as _, CancelToken, Domain, Entity, EntityIterTyped, EntityKey, EraCbor,
+    ServeError, State3Error, State3Store as _, StateStore as _, TxOrder,
 };
 
 mod error;
@@ -121,11 +129,53 @@ impl<D: Domain> Facade<D> {
 
         Ok(blocks)
     }
+
+    pub fn iter_cardano_entities<T>(
+        &self,
+        range: Option<Range<EntityKey>>,
+    ) -> Result<impl Iterator<Item = Result<(EntityKey, T), State3Error>>, StatusCode>
+    where
+        T: FixedNamespace + Entity,
+        Option<T>: From<D::Entity>,
+    {
+        let generic = self
+            .state3()
+            .iter_entities_typed(T::NS, range)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        let mapped = generic.map(|x| x.map(|(k, v)| (k, T::from(v))));
+
+        Ok(mapped)
+    }
+
+    pub fn read_cardano_entity<T>(&self, key: impl Into<EntityKey>) -> Result<Option<T>, StatusCode>
+    where
+        T: FixedNamespace,
+        Option<T>: From<D::Entity>,
+    {
+        let key = key.into();
+
+        let entity = self
+            .state3()
+            .read_entity_typed(T::NS, &key)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        let downcast = entity.and_then(|e| Option::<T>::from(e));
+
+        Ok(downcast)
+    }
 }
 
 pub struct Driver;
 
-impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
+impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver
+where
+    Option<AccountState>: From<D::Entity>,
+    Option<PoolState>: From<D::Entity>,
+    Option<AssetState>: From<D::Entity>,
+    Option<EpochState>: From<D::Entity>,
+    Option<DRepState>: From<D::Entity>,
+{
     type Config = Config;
 
     async fn run(cfg: Self::Config, domain: D, cancel: C) -> Result<(), ServeError> {

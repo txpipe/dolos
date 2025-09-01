@@ -3,7 +3,7 @@ use redb::ReadTransaction;
 use std::path::Path;
 use tracing::{debug, info, warn};
 
-use dolos_core::{ArchiveError, BlockBody, BlockSlot, ChainPoint, EraCbor, LedgerDelta, TxOrder};
+use dolos_core::{ArchiveError, BlockBody, BlockSlot, ChainPoint, EraCbor, TxOrder, UtxoSetDelta};
 
 mod indexes;
 mod tables;
@@ -269,7 +269,7 @@ impl ChainStore {
         }
     }
 
-    pub fn apply(&self, deltas: &[LedgerDelta]) -> Result<(), RedbArchiveError> {
+    pub fn apply(&self, deltas: &[UtxoSetDelta]) -> Result<(), RedbArchiveError> {
         match self {
             ChainStore::SchemaV1(x) => Ok(x.apply(deltas)?),
         }
@@ -351,7 +351,7 @@ impl dolos_core::ArchiveStore for ChainStore {
         Ok(Self::get_tip(self)?)
     }
 
-    fn apply(&self, deltas: &[LedgerDelta]) -> Result<(), ArchiveError> {
+    fn apply(&self, deltas: &[UtxoSetDelta]) -> Result<(), ArchiveError> {
         Ok(Self::apply(self, deltas)?)
     }
 

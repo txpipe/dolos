@@ -7,6 +7,7 @@ use pallas::{crypto::hash::Hash, ledger::traverse::MultiEraOutput};
 use redb::ReadableTableMetadata as _;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 type Error = super::RedbStateError;
 
@@ -37,7 +38,7 @@ impl BlocksTable {
         Ok(last)
     }
 
-    pub fn apply(wx: &WriteTransaction, delta: &LedgerDelta) -> Result<(), Error> {
+    pub fn apply(wx: &WriteTransaction, delta: &UtxoSetDelta) -> Result<(), Error> {
         let mut table = wx.open_table(Self::DEF)?;
 
         if let Some(ChainPoint::Specific(slot, hash)) = delta.new_position.as_ref() {
@@ -96,10 +97,7 @@ impl UtxosTable {
         Ok(UtxosIterator(range))
     }
 
-    pub fn get_sparse(
-        rx: &ReadTransaction,
-        refs: Vec<TxoRef>,
-    ) -> Result<HashMap<TxoRef, EraCbor>, Error> {
+    pub fn get_sparse(rx: &ReadTransaction, refs: Vec<TxoRef>) -> Result<UtxoMap, Error> {
         let table = rx.open_table(Self::DEF)?;
         let mut out = HashMap::new();
 
@@ -107,7 +105,7 @@ impl UtxosTable {
             if let Some(body) = table.get(&(&key.0 as &[u8; 32], key.1))? {
                 let (era, cbor) = body.value();
                 let cbor = cbor.to_owned();
-                let value = EraCbor(era, cbor);
+                let value = Arc::new(EraCbor(era, cbor));
 
                 out.insert(key, value);
             }
@@ -116,7 +114,7 @@ impl UtxosTable {
         Ok(out)
     }
 
-    pub fn apply(wx: &WriteTransaction, delta: &LedgerDelta) -> Result<(), Error> {
+    pub fn apply(wx: &WriteTransaction, delta: &UtxoSetDelta) -> Result<(), Error> {
         let mut table = wx.open_table(Self::DEF)?;
 
         for (k, v) in delta.produced_utxo.iter() {
@@ -194,11 +192,12 @@ impl PParamsTable {
         Ok(out)
     }
 
-    pub fn apply(wx: &WriteTransaction, delta: &LedgerDelta) -> Result<(), Error> {
+    pub fn apply(wx: &WriteTransaction, delta: &UtxoSetDelta) -> Result<(), Error> {
         let mut table = wx.open_table(PParamsTable::DEF)?;
 
         if let Some(ChainPoint::Specific(slot, _)) = delta.new_position {
-            for EraCbor(era, body) in delta.new_pparams.iter() {
+            for eracbor in delta.new_pparams.iter() {
+                let EraCbor(era, body) = eracbor.as_ref();
                 let v: (u16, &[u8]) = (*era, body);
                 table.insert(slot, v)?;
             }
@@ -266,7 +265,7 @@ impl TombstonesTable {
         Ok(out)
     }
 
-    pub fn apply(wx: &WriteTransaction, delta: &LedgerDelta) -> Result<(), Error> {
+    pub fn apply(wx: &WriteTransaction, delta: &UtxoSetDelta) -> Result<(), Error> {
         let mut table = wx.open_multimap_table(Self::DEF)?;
 
         if let Some(ChainPoint::Specific(slot, _)) = delta.new_position.as_ref() {
@@ -332,7 +331,7 @@ impl CursorTable {
         Ok(out)
     }
 
-    pub fn apply(wx: &WriteTransaction, delta: &LedgerDelta) -> Result<(), Error> {
+    pub fn apply(wx: &WriteTransaction, delta: &UtxoSetDelta) -> Result<(), Error> {
         let mut table = wx.open_table(Self::DEF)?;
 
         if let Some(ChainPoint::Specific(slot, hash)) = delta.new_position.as_ref() {
@@ -560,7 +559,7 @@ impl FilterIndexes {
         }
     }
 
-    pub fn apply(wx: &WriteTransaction, delta: &LedgerDelta) -> Result<(), Error> {
+    pub fn apply(wx: &WriteTransaction, delta: &UtxoSetDelta) -> Result<(), Error> {
         let mut address_table = wx.open_multimap_table(Self::BY_ADDRESS)?;
         let mut payment_table = wx.open_multimap_table(Self::BY_PAYMENT)?;
         let mut stake_table = wx.open_multimap_table(Self::BY_STAKE)?;
@@ -576,7 +575,7 @@ impl FilterIndexes {
             let v: (&[u8; 32], u32) = (&utxo.0, utxo.1);
 
             // TODO: decoding here is very inefficient
-            let body = MultiEraOutput::try_from(body).unwrap();
+            let body = MultiEraOutput::try_from(body.as_ref()).unwrap();
             let SplitAddressResult(addr, pay, stake) = Self::split_address(&body)?;
 
             if let Some(k) = addr {
@@ -612,7 +611,7 @@ impl FilterIndexes {
             let v: (&[u8; 32], u32) = (&stxi.0, stxi.1);
 
             // TODO: decoding here is very inefficient
-            let body = MultiEraOutput::try_from(body).unwrap();
+            let body = MultiEraOutput::try_from(body.as_ref()).unwrap();
 
             let SplitAddressResult(addr, pay, stake) = Self::split_address(&body)?;
 
