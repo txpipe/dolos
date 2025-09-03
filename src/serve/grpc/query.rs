@@ -1,6 +1,6 @@
 use itertools::Itertools as _;
 use pallas::interop::utxorpc::{self as interop, spec::query::any_utxo_pattern::UtxoPattern};
-use pallas::interop::utxorpc::{LedgerContext, spec as u5c};
+use pallas::interop::utxorpc::{spec as u5c, LedgerContext};
 use pallas::ledger::traverse::MultiEraOutput;
 use std::collections::HashSet;
 use tonic::{Request, Response, Status};
@@ -15,6 +15,10 @@ pub fn point_to_u5c(point: &ChainPoint) -> u5c::query::ChainPoint {
     match point {
         ChainPoint::Origin => u5c::query::ChainPoint {
             slot: 0,
+            hash: vec![].into(),
+        },
+        ChainPoint::Slot(slot) => u5c::query::ChainPoint {
+            slot: *slot,
             hash: vec![].into(),
         },
         ChainPoint::Specific(slot, hash) => u5c::query::ChainPoint {

@@ -1,4 +1,6 @@
-use dolos_core::{BlockHash, BlockSlot, RawBlock};
+use std::sync::Arc;
+
+use dolos_core::{BlockHash, BlockSlot, ChainPoint, RawBlock};
 use pallas::{
     codec::utils::{Bytes, KeepRaw},
     ledger::{
@@ -16,7 +18,7 @@ pub fn slot_to_hash(slot: u64) -> BlockHash {
     hasher.finalize()
 }
 
-pub fn make_conway_block(slot: BlockSlot) -> RawBlock {
+pub fn make_conway_block(slot: BlockSlot) -> (ChainPoint, RawBlock) {
     let block_body_hash = slot_to_hash(slot);
 
     let block = pallas::ledger::primitives::conway::Block {
@@ -50,12 +52,10 @@ pub fn make_conway_block(slot: BlockSlot) -> RawBlock {
 
     let wrapper = (Era::Conway as u16, block);
 
-    RawBlock {
-        slot,
-        hash,
-        era: Era::Conway,
-        body: pallas::codec::minicbor::to_vec(&wrapper).unwrap(),
-    }
+    let raw_bytes = pallas::codec::minicbor::to_vec(&wrapper).unwrap();
+    let chain_point = ChainPoint::Specific(slot, hash);
+
+    (chain_point, Arc::new(raw_bytes))
 }
 
 #[cfg(test)]
@@ -66,7 +66,7 @@ mod tests {
 
     #[test]
     fn test_fake_block_can_be_decoded() {
-        let block = make_conway_block(1);
-        let _ = MultiEraBlock::decode(&block.body).unwrap();
+        let (_, body) = make_conway_block(1);
+        let _ = MultiEraBlock::decode(&body).unwrap();
     }
 }

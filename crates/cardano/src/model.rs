@@ -7,6 +7,7 @@ use pallas::{
     crypto::hash::Hash,
     ledger::primitives::{PoolMetadata, RationalNumber, Relay},
 };
+use serde::{Deserialize, Serialize};
 
 pub trait FixedNamespace {
     const NS: &'static str;
@@ -108,11 +109,10 @@ pub struct AssetState {
 entity_boilerplate!(AssetState, "assets");
 
 impl AssetState {
-    pub fn add_quantity(&mut self, value: i128) -> Result<(), State3Error> {
+    pub fn add_quantity(&mut self, value: i128) {
         let old = i128::from_be_bytes(self.quantity_bytes);
         let new = old.saturating_add(value).to_be_bytes();
         self.quantity_bytes = new;
-        Ok(())
     }
 
     pub fn quantity(&self) -> u128 {
@@ -120,7 +120,7 @@ impl AssetState {
     }
 }
 
-#[derive(Debug, Encode, Decode, Clone)]
+#[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize)]
 pub struct PoolState {
     #[n(0)]
     pub vrf_keyhash: Hash<32>,
@@ -344,7 +344,7 @@ use crate::roll::assets::MintStatsUpdate;
 use crate::roll::epochs::EpochStatsUpdate;
 use crate::roll::pools::PoolRegistration;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CardanoDelta {
     ControlledAmountInc(ControlledAmountInc),
     ControlledAmountDec(ControlledAmountDec),

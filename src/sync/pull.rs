@@ -1,6 +1,8 @@
+use std::sync::Arc;
+
 use gasket::framework::*;
 use itertools::Itertools;
-use pallas::ledger::traverse::{MultiEraBlock, MultiEraHeader};
+use pallas::ledger::traverse::MultiEraHeader;
 use pallas::network::facades::PeerClient;
 use pallas::network::miniprotocols::chainsync::{
     HeaderContent, NextResponse, RollbackBuffer, RollbackEffect, Tip,
@@ -121,7 +123,9 @@ impl gasket::framework::Worker<Stage> for Worker {
             .intersect_candidates(5)
             .or_panic()?
             .into_iter()
-            .map(From::from)
+            .map(TryFrom::try_from)
+            .map(|x| x.ok())
+            .flatten()
             .collect_vec();
 
         debug!("connecting to peer");
@@ -279,21 +283,8 @@ impl Stage {
 
     async fn flush_blocks(&mut self, blocks: Vec<BlockBody>) -> Result<(), WorkerError> {
         for cbor in blocks {
-            // TODO: can we avoid decoding in this stage?
-
-            let payload = {
-                let decoded = MultiEraBlock::decode(&cbor).or_panic()?;
-
-                RawBlock {
-                    slot: decoded.slot(),
-                    hash: decoded.hash(),
-                    era: decoded.era(),
-                    body: cbor,
-                }
-            };
-
             self.downstream
-                .send(PullEvent::RollForward(payload).into())
+                .send(PullEvent::RollForward(Arc::new(cbor)).into())
                 .await
                 .or_panic()?;
         }

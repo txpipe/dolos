@@ -40,44 +40,37 @@ pub fn run(config: &crate::Config, _args: &Args) -> miette::Result<()> {
 
     let wal = crate::common::open_wal_store(config)?;
 
-    let (_, tip) = wal
+    let (tip, _) = wal
         .find_tip()
         .into_diagnostic()
         .context("finding WAL tip")?
         .ok_or(miette::miette!("no WAL tip found"))?;
 
-    match tip {
-        ChainPoint::Origin => feedback.global_pb.set_length(0),
-        ChainPoint::Specific(slot, _) => feedback.global_pb.set_length(slot),
-    }
+    feedback.global_pb.set_length(tip.slot());
 
     let remaining = wal
-        .crawl_from(None)
+        .iter_blocks(None, None)
         .into_diagnostic()
-        .context("crawling wal")?
-        .filter_forward()
-        .into_blocks()
-        .flatten();
+        .context("crawling wal")?;
 
     let mut last_hash = None;
 
-    for block in remaining {
-        let RawBlock {
-            slot, hash, body, ..
-        } = block;
+    for (point, block) in remaining {
+        let slot = point.slot();
+        let hash = point.hash();
+        let body = block;
 
         feedback
             .global_pb
-            .set_message(format!("checking block {hash}"));
+            .set_message(format!("checking block {hash:?}"));
 
         let blockd = MultiEraBlock::decode(&body)
             .into_diagnostic()
             .context("decoding blocks")?;
 
         if let Some(last) = last_hash {
-            if let Some(previous) = blockd.header().previous_hash() {
-                assert_eq!(previous, last);
-            }
+            let previous = blockd.header().previous_hash();
+            assert_eq!(previous, last);
         }
 
         last_hash = Some(hash);

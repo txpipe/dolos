@@ -4,7 +4,7 @@ use axum::{
     Json,
 };
 use dolos_cardano::{model::DRepState, pparams::ChainSummary};
-use dolos_core::{ArchiveStore, BlockSlot, Domain, State3Store as _};
+use dolos_core::{ArchiveStore as _, BlockSlot, Domain};
 
 use crate::{
     mapping::{self, IntoModel},

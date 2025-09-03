@@ -1,29 +1,25 @@
 use crate::prelude::*;
+use dolos_core::crawl::ChainCrawler;
 use futures_core::Stream;
 
 pub struct ChainStream;
 
 impl ChainStream {
     pub fn start<D: Domain, C: CancelToken>(
-        wal: D::Wal,
-        archive: D::Archive,
+        domain: D,
         intersect: Vec<ChainPoint>,
         cancel: C,
-    ) -> impl Stream<Item = LogValue> + 'static {
+    ) -> impl Stream<Item = TipEvent> + 'static {
         async_stream::stream! {
-            let (catchup, intersected) = super::iterator::ChainIterator::<D>::new(
-                wal.clone(),
-                archive.clone(),
+            let (mut crawler, intersected) = ChainCrawler::<D>::start(
+                &domain,
                 &intersect,
-            ).unwrap();
+            ).unwrap().unwrap();
 
-            yield LogValue::Mark(intersected.clone());
+            yield TipEvent::Mark(intersected.clone());
 
-            let mut last_point = intersected.clone();
-
-            for value in catchup {
-                last_point = ChainPoint::from(&value);
-                yield value;
+            while let Some((point, block)) = crawler.next_block() {
+                yield TipEvent::Apply(point, block);
             }
 
             loop {
@@ -31,17 +27,8 @@ impl ChainStream {
                     _ = cancel.cancelled() => {
                         break;
                     }
-                    _ = wal.tip_change() => {
-                        let (updates, _) = super::iterator::ChainIterator::<D>::new(
-                            wal.clone(),
-                            archive.clone(),
-                            &[last_point.clone()],
-                        ).unwrap();
-
-                        for value in updates {
-                            last_point = ChainPoint::from(&value);
-                            yield value;
-                        }
+                    next = crawler.next_tip() => {
+                        yield next;
                     }
                 }
             }
@@ -51,6 +38,8 @@ impl ChainStream {
 
 #[cfg(test)]
 mod tests {
+
+    use dolos_redb::testing::dummy_entry_from_slot;
     use dolos_testing::toy_domain::ToyDomain;
     use futures_util::{pin_mut, StreamExt};
     use pallas::crypto::hash::Hash;
@@ -59,32 +48,19 @@ mod tests {
     use super::*;
     use crate::serve::CancelTokenImpl;
 
-    fn dummy_block(slot: u64) -> RawBlock {
-        let hash = pallas::crypto::hash::Hasher::<256>::hash(slot.to_be_bytes().as_slice());
-
-        RawBlock {
-            slot,
-            hash,
-            era: pallas::ledger::traverse::Era::Byron,
-            body: slot.to_be_bytes().to_vec(),
-        }
-    }
-
     #[tokio::test]
     async fn test_stream_waiting() {
         let wal = dolos_redb::wal::RedbWalStore::memory().unwrap();
         let archive = dolos_redb::archive::ChainStore::in_memory_v1().unwrap();
 
-        wal.initialize_from_origin().unwrap();
-
-        let blocks = (0..=100).map(|i| dummy_block(i * 10));
-        wal.roll_forward(blocks).unwrap();
+        let logs: Vec<_> = (0..=100).map(|i| dummy_entry_from_slot(i * 10)).collect();
+        wal.roll_forward(logs).unwrap();
 
         let wal2 = wal.clone();
         let background = tokio::spawn(async move {
             for i in 101..=200 {
-                let block = dummy_block(i * 10);
-                wal2.roll_forward([block].into_iter()).unwrap();
+                let log = dummy_entry_from_slot(i * 10);
+                wal2.roll_forward(vec![log]).unwrap();
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
             }
         });
@@ -110,7 +86,7 @@ mod tests {
             let value = evt.unwrap();
 
             match value {
-                LogValue::Apply(RawBlock { slot, .. }) => assert_eq!(slot, i * 10),
+                LogValue::Apply(p, _) => assert_eq!(p.slot(), i * 10),
                 _ => panic!("unexpected log value variant"),
             }
         }

@@ -24,8 +24,8 @@ use tower_http::{cors::CorsLayer, normalize_path::NormalizePathLayer, trace};
 use tracing::Level;
 
 use dolos_core::{
-    ArchiveStore as _, CancelToken, Domain, Entity, EntityIterTyped, EntityKey, EraCbor,
-    ServeError, State3Error, State3Store as _, StateStore as _, TxOrder,
+    ArchiveStore as _, CancelToken, Domain, Entity, EntityKey, EraCbor, ServeError, State3Error,
+    State3Store as _, StateStore as _, TxOrder,
 };
 
 mod error;

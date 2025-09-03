@@ -55,8 +55,6 @@ fn test_mainnet_upstream() {
 
     let wal = RedbWalStore::memory().unwrap();
 
-    wal.initialize_from_origin().unwrap();
-
     let (send, receive) = gasket::messaging::tokio::mpsc_channel(200);
 
     let mut upstream = crate::sync::pull::Stage::new(
@@ -69,7 +67,7 @@ fn test_mainnet_upstream() {
             network_magic: 764824073,
             is_testnet: false,
         },
-        WalAdapter::Redb(wal),
+        wal,
     );
 
     upstream.downstream.connect(send);

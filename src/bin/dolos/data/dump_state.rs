@@ -1,6 +1,5 @@
 use comfy_table::Table;
 use dolos_cardano::model::AccountState;
-use itertools::Itertools;
 use miette::{Context, IntoDiagnostic};
 
 use dolos::prelude::*;

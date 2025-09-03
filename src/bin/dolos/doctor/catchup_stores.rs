@@ -1,9 +1,7 @@
 use itertools::Itertools;
 use miette::{Context, IntoDiagnostic};
-use std::sync::Arc;
 use tracing::debug;
 
-use dolos::cardano::mutable_slots;
 use dolos::prelude::*;
 
 use crate::feedback::Feedback;
@@ -22,8 +20,6 @@ pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::
 
     let domain = crate::common::setup_domain(config)?;
 
-    let genesis = Arc::new(crate::common::open_genesis_files(&config.genesis)?);
-
     if domain
         .state
         .is_empty()
@@ -32,34 +28,30 @@ pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::
     {
         debug!("importing genesis");
 
-        let Ok(_) = dolos_core::sync::apply_origin(&domain) else {
+        let Ok(_) = dolos_core::catchup::apply_origin(&domain) else {
             return Err(miette::miette!("failed to apply origin"));
         };
     }
 
-    let (_, tip) = domain
+    let (tip, _) = domain
         .wal
         .find_tip()
         .into_diagnostic()
         .context("finding WAL tip")?
         .ok_or(miette::miette!("no WAL tip found"))?;
 
-    match tip {
-        ChainPoint::Origin => progress.set_length(0),
-        ChainPoint::Specific(slot, _) => progress.set_length(slot),
-    }
+    progress.set_length(tip.slot());
 
-    // Amount of slots until unmutability is guaranteed.
-    let lookahead = mutable_slots(&genesis);
-
-    let remaining = WalBlockReader::try_new(&domain.wal, None, lookahead)
+    let remaining = domain
+        .wal
+        .iter_blocks(None, None)
         .into_diagnostic()
-        .context("creating wal block reader")?;
+        .context("iterating over wal blocks")?;
 
     for chunk in remaining.chunks(args.chunk).into_iter() {
-        let collected = chunk.into_iter().map(|x| Arc::new(x.body)).collect_vec();
+        let collected = chunk.into_iter().map(|(_, x)| x).collect_vec();
 
-        let Ok(cursor) = dolos_core::sync::import_batch(&domain, collected) else {
+        let Ok(cursor) = dolos_core::catchup::import_batch(&domain, collected) else {
             miette::bail!("failed to apply block chunk");
         };
 

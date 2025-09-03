@@ -1,4 +1,4 @@
-use dolos_core::{BlockBody, BlockSlot, EraCbor, RawUtxoMap, TxoRef};
+use dolos_core::{BlockBody, BlockHash, BlockSlot, EraCbor, RawUtxoMap, TxoRef};
 use pallas::ledger::traverse::{MultiEraBlock, MultiEraOutput};
 use self_cell::self_cell;
 use std::sync::Arc;
@@ -29,6 +29,10 @@ impl dolos_core::Block for OwnedMultiEraBlock {
 
     fn slot(&self) -> BlockSlot {
         self.view().slot()
+    }
+
+    fn hash(&self) -> BlockHash {
+        self.view().hash()
     }
 }
 

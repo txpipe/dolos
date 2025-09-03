@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use dolos_cardano::CardanoLogic;
 use dolos_core::*;
 use serde::{Deserialize, Serialize};
 
@@ -12,78 +13,6 @@ pub enum ChainConfig {
 impl Default for ChainConfig {
     fn default() -> Self {
         Self::Cardano(dolos_cardano::Config::default())
-    }
-}
-
-/// A persistent store for ledger state
-#[derive(Clone)]
-#[non_exhaustive]
-pub enum ChainAdapter {
-    Cardano(dolos_cardano::ChainLogic),
-}
-
-impl From<ChainConfig> for ChainAdapter {
-    fn from(value: ChainConfig) -> Self {
-        match value {
-            ChainConfig::Cardano(x) => ChainAdapter::Cardano(dolos_cardano::ChainLogic::new(x)),
-        }
-    }
-}
-
-impl ChainLogic for ChainAdapter {
-    type Block = dolos_cardano::owned::OwnedMultiEraBlock;
-    type Utxo = dolos_cardano::owned::OwnedMultiEraOutput;
-    type EntityDelta = dolos_cardano::CardanoDelta;
-
-    fn decode_block(&self, block: Arc<BlockBody>) -> Result<Self::Block, ChainError> {
-        match self {
-            ChainAdapter::Cardano(x) => x.decode_block(block),
-        }
-    }
-
-    fn decode_utxo(&self, utxo: Arc<EraCbor>) -> Result<Self::Utxo, ChainError> {
-        match self {
-            ChainAdapter::Cardano(x) => x.decode_utxo(utxo),
-        }
-    }
-
-    fn compute_block_delta(
-        &self,
-        block: &Self::Block,
-        deps: &std::collections::HashMap<TxoRef, Self::Utxo>,
-    ) -> Result<StateDelta<Self::EntityDelta>, ChainError> {
-        match self {
-            ChainAdapter::Cardano(x) => x.compute_block_delta(block, deps),
-        }
-    }
-
-    fn compute_origin_delta(
-        &self,
-        genesis: &Genesis,
-    ) -> Result<StateDelta<Self::EntityDelta>, ChainError> {
-        match self {
-            ChainAdapter::Cardano(x) => x.compute_origin_delta(genesis),
-        }
-    }
-
-    fn mutable_slots(domain: &impl Domain) -> BlockSlot {
-        dolos_cardano::ChainLogic::mutable_slots(domain)
-    }
-
-    fn compute_origin_utxo_delta(&self, genesis: &Genesis) -> Result<UtxoSetDelta, ChainError> {
-        match self {
-            ChainAdapter::Cardano(x) => x.compute_origin_utxo_delta(genesis),
-        }
-    }
-
-    fn compute_block_utxo_delta(
-        &self,
-        block: &Self::Block,
-        deps: &RawUtxoMap,
-    ) -> Result<UtxoSetDelta, ChainError> {
-        match self {
-            ChainAdapter::Cardano(x) => x.compute_block_utxo_delta(block, deps),
-        }
     }
 }
 
@@ -244,89 +173,6 @@ impl pallas::interop::utxorpc::LedgerContext for StateAdapter {
     }
 }
 
-#[derive(Clone)]
-pub enum WalAdapter {
-    Redb(dolos_redb::wal::RedbWalStore),
-}
-
-impl WalStore for WalAdapter {
-    type LogIterator<'a> = WalIter<'a>;
-
-    async fn tip_change(&self) {
-        match self {
-            WalAdapter::Redb(x) => x.tip_change().await,
-        }
-    }
-
-    fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, WalError> {
-        match self {
-            WalAdapter::Redb(x) => WalStore::prune_history(x, max_slots, max_prune),
-        }
-    }
-
-    fn crawl_range<'a>(
-        &self,
-        start: LogSeq,
-        end: LogSeq,
-    ) -> Result<Self::LogIterator<'a>, WalError> {
-        match self {
-            WalAdapter::Redb(x) => Ok(WalIter::Redb(x.crawl_range(start, end)?)),
-        }
-    }
-
-    fn crawl_from<'a>(&self, start: Option<LogSeq>) -> Result<Self::LogIterator<'a>, WalError> {
-        match self {
-            WalAdapter::Redb(x) => Ok(WalIter::Redb(x.crawl_from(start)?)),
-        }
-    }
-
-    fn locate_point(&self, point: &ChainPoint) -> Result<Option<LogSeq>, WalError> {
-        match self {
-            WalAdapter::Redb(x) => x.locate_point(point),
-        }
-    }
-
-    fn append_entries(&self, logs: impl Iterator<Item = LogValue>) -> Result<(), WalError> {
-        match self {
-            WalAdapter::Redb(x) => x.append_entries(logs),
-        }
-    }
-}
-
-impl From<dolos_redb::wal::RedbWalStore> for WalAdapter {
-    fn from(value: dolos_redb::wal::RedbWalStore) -> Self {
-        Self::Redb(value)
-    }
-}
-
-pub enum WalIter<'a> {
-    Redb(dolos_redb::wal::WalIter<'a>),
-}
-
-impl Iterator for WalIter<'_> {
-    type Item = LogEntry;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match self {
-            WalIter::Redb(chainiter) => chainiter.next(),
-        }
-    }
-}
-
-impl DoubleEndedIterator for WalIter<'_> {
-    fn next_back(&mut self) -> Option<Self::Item> {
-        match self {
-            WalIter::Redb(chainiter) => chainiter.next_back(),
-        }
-    }
-}
-
-impl<'a> From<dolos_redb::wal::WalIter<'a>> for WalIter<'a> {
-    fn from(value: dolos_redb::wal::WalIter<'a>) -> Self {
-        Self::Redb(value)
-    }
-}
-
 /// A persistent store for ledger state
 #[derive(Clone)]
 #[non_exhaustive]
@@ -450,9 +296,22 @@ impl ArchiveStore for ArchiveAdapter {
         Ok(out)
     }
 
-    fn apply(&self, deltas: &[UtxoSetDelta]) -> Result<(), ArchiveError> {
+    fn apply(
+        &self,
+        point: &ChainPoint,
+        block: &RawBlock,
+        tags: &SlotTags,
+    ) -> Result<(), ArchiveError> {
         match self {
-            ArchiveAdapter::Redb(x) => x.apply(deltas)?,
+            ArchiveAdapter::Redb(x) => x.apply(point, block, tags)?,
+        };
+
+        Ok(())
+    }
+
+    fn undo(&self, point: &ChainPoint, tags: &SlotTags) -> Result<(), ArchiveError> {
+        match self {
+            ArchiveAdapter::Redb(x) => x.undo(point, tags)?,
         };
 
         Ok(())
@@ -523,28 +382,48 @@ impl From<dolos_redb::archive::ChainSparseIter> for ArchiveSparseBlockIter {
     }
 }
 
+// we can hardcode the WAL since we don't expect multiple types of
+// implementations
+pub type WalAdapter = dolos_redb::wal::RedbWalStore<dolos_cardano::CardanoDelta>;
+
+pub struct TipSubscription {
+    replay: Vec<(ChainPoint, RawBlock)>,
+    receiver: tokio::sync::broadcast::Receiver<TipEvent>,
+}
+
+impl dolos_core::TipSubscription for TipSubscription {
+    async fn next_tip(&mut self) -> TipEvent {
+        if !self.replay.is_empty() {
+            let (point, block) = self.replay.pop().unwrap();
+            return TipEvent::Apply(point, block);
+        }
+
+        self.receiver.recv().await.unwrap()
+    }
+}
+
 #[derive(Clone)]
 pub struct DomainAdapter {
     pub storage_config: Arc<StorageConfig>,
     pub genesis: Arc<Genesis>,
-    pub chain: ChainAdapter,
     pub wal: WalAdapter,
+    pub chain: CardanoLogic,
     pub state: StateAdapter,
     pub archive: ArchiveAdapter,
     pub mempool: crate::mempool::Mempool,
-
     pub state3: dolos_redb3::StateStore,
+    pub tip_broadcast: tokio::sync::broadcast::Sender<TipEvent>,
 }
 
 impl Domain for DomainAdapter {
     type Entity = dolos_cardano::CardanoEntity;
     type EntityDelta = dolos_cardano::CardanoDelta;
-    type Chain = ChainAdapter;
+    type Chain = CardanoLogic;
     type Wal = WalAdapter;
     type State = StateAdapter;
     type Archive = ArchiveAdapter;
     type Mempool = crate::mempool::Mempool;
-
+    type TipSubscription = TipSubscription;
     type State3 = dolos_redb3::StateStore;
 
     fn genesis(&self) -> &Genesis {
@@ -577,5 +456,33 @@ impl Domain for DomainAdapter {
 
     fn storage_config(&self) -> &StorageConfig {
         &self.storage_config
+    }
+
+    fn watch_tip(&self, from: Option<ChainPoint>) -> Result<Self::TipSubscription, DomainError> {
+        // TODO: do a more thorough analysis to understand if this approach is
+        // susceptible to race conditions. Things to explore:
+        // - a mutex to block the sending of events while gathering the replay.
+        // - storing the previous block hash in the db to use for consistency checks.
+
+        // We first create the receiver so that the subscriber internal ring-buffer
+        // position is defined.
+        let receiver = self.tip_broadcast.subscribe();
+
+        // We then collect any gap between the from point and the current tip. This
+        // assumes that no event will be sent between the creation of the receiver and
+        // the collection of the replay.
+        let replay = self
+            .wal()
+            .iter_blocks(from, None)
+            .map_err(WalError::from)?
+            .collect::<Vec<_>>();
+
+        Ok(TipSubscription { replay, receiver })
+    }
+
+    fn notify_tip(&self, tip: TipEvent) {
+        if !self.tip_broadcast.receiver_count() == 0 {
+            self.tip_broadcast.send(tip);
+        }
     }
 }

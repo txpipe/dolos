@@ -1,15 +1,16 @@
-use std::{borrow::Cow, collections::HashMap};
+use std::borrow::Cow;
 
-use dolos_core::{NsKey, State3Error, State3Store, StateDelta};
+use dolos_core::{batch::WorkDeltas, NsKey, State3Error};
 use pallas::ledger::traverse::MultiEraBlock;
+use serde::{Deserialize, Serialize};
 
 use crate::{
-    model::{AccountState, CardanoDelta, EpochState, FixedNamespace as _, EPOCH_KEY_MARK},
-    pallas_extras,
-    roll::{BlockVisitor, DeltaBuilder},
+    model::{EpochState, FixedNamespace as _, EPOCH_KEY_MARK},
+    roll::BlockVisitor,
+    CardanoLogic,
 };
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EpochStatsUpdate {
     block_fees: u64,
 }
@@ -34,21 +35,16 @@ impl dolos_core::EntityDelta for EpochStatsUpdate {
     }
 }
 
-pub struct EpochStateVisitor<'a> {
-    delta: &'a mut StateDelta<CardanoDelta>,
-}
+pub struct EpochStateVisitor;
 
-impl<'a> From<&'a mut StateDelta<CardanoDelta>> for EpochStateVisitor<'a> {
-    fn from(delta: &'a mut StateDelta<CardanoDelta>) -> Self {
-        Self { delta }
-    }
-}
-
-impl<'a> BlockVisitor for EpochStateVisitor<'a> {
-    fn visit_root(&mut self, block: &MultiEraBlock) -> Result<(), State3Error> {
+impl BlockVisitor for EpochStateVisitor {
+    fn visit_root(
+        deltas: &mut WorkDeltas<CardanoLogic>,
+        block: &MultiEraBlock,
+    ) -> Result<(), State3Error> {
         let block_fees = block.txs().iter().filter_map(|tx| tx.fee()).sum::<u64>();
 
-        self.delta.add_delta(EpochStatsUpdate { block_fees });
+        deltas.add_for_entity(EpochStatsUpdate { block_fees });
 
         Ok(())
     }
