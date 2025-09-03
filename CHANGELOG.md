@@ -2,11 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.32.0] - 2025-09-03
+
+### 🚀 Features
+
+- *(u5c)* Implement readtx call and update specs (#657)
+
+### 🐛 Bug Fixes
+
+- *(cardano)* Track minted blocks per pool during roll (#661)
+- *(minibf)* Compute deposits correctly on tx mappings (#659)
+- *(minibf)* Improve epoch params mappings (#660)
+- *(cardano)* Compute drep state values during roll (#658)
+
 ## [0.31.1] - 2025-08-25
 
 ### 🐛 Bug Fixes
 
 - *(bin)* Fix bad logic in Mithril bootstrap start
+
+### Release
+
+- V0.31.1
 
 ## [0.31.0] - 2025-08-25
 
