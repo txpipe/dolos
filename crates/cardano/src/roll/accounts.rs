@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 
-use dolos_core::{NsKey, State3Error, StateDelta};
+use dolos_core::batch::WorkDeltas;
+use dolos_core::{NsKey, State3Error};
 use pallas::codec::minicbor;
 use pallas::crypto::hash::Hash;
 use pallas::ledger::addresses::{ShelleyDelegationPart, StakePayload};
@@ -9,16 +10,17 @@ use pallas::ledger::{
     primitives::StakeCredential,
     traverse::{MultiEraBlock, MultiEraCert, MultiEraInput, MultiEraOutput, MultiEraTx},
 };
+use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use crate::model::FixedNamespace as _;
-use crate::roll::CardanoDelta;
+use crate::CardanoLogic;
 use crate::{model::AccountState, pallas_extras, roll::BlockVisitor};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrackSeenAddresses {
     cred: StakeCredential,
-    full_address: Address,
+    full_address: Vec<u8>,
     full_address_new: Option<bool>,
 }
 
@@ -26,7 +28,7 @@ impl TrackSeenAddresses {
     pub fn new(cred: StakeCredential, full_address: Address) -> Self {
         Self {
             cred,
-            full_address,
+            full_address: full_address.to_vec(),
             full_address_new: None,
         }
     }
@@ -43,7 +45,7 @@ impl dolos_core::EntityDelta for TrackSeenAddresses {
     fn apply(&mut self, entity: &mut Option<AccountState>) {
         let entity = entity.get_or_insert_default();
 
-        let was_new = entity.seen_addresses.insert(self.full_address.to_vec());
+        let was_new = entity.seen_addresses.insert(self.full_address.clone());
 
         self.full_address_new = Some(was_new);
     }
@@ -52,12 +54,12 @@ impl dolos_core::EntityDelta for TrackSeenAddresses {
         let entity = entity.get_or_insert_default();
 
         if self.full_address_new.unwrap_or(false) {
-            entity.seen_addresses.remove(&self.full_address.to_vec());
+            entity.seen_addresses.remove(&self.full_address);
         }
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ControlledAmountInc {
     cred: StakeCredential,
     amount: u64,
@@ -82,7 +84,7 @@ impl dolos_core::EntityDelta for ControlledAmountInc {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ControlledAmountDec {
     cred: StakeCredential,
     amount: u64,
@@ -109,7 +111,7 @@ impl dolos_core::EntityDelta for ControlledAmountDec {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StakeRegistration {
     cred: StakeCredential,
     slot: u64,
@@ -148,7 +150,7 @@ impl dolos_core::EntityDelta for StakeRegistration {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StakeDelegation {
     cred: StakeCredential,
     pool: Hash<28>,
@@ -190,7 +192,7 @@ impl dolos_core::EntityDelta for StakeDelegation {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StakeDeregistration {
     cred: StakeCredential,
     slot: u64,
@@ -236,17 +238,9 @@ impl dolos_core::EntityDelta for StakeDeregistration {
     }
 }
 
-pub struct AccountVisitor<'a> {
-    delta: &'a mut StateDelta<CardanoDelta>,
-}
+pub struct AccountVisitor;
 
-impl<'a> From<&'a mut StateDelta<CardanoDelta>> for AccountVisitor<'a> {
-    fn from(delta: &'a mut StateDelta<CardanoDelta>) -> Self {
-        Self { delta }
-    }
-}
-
-impl AccountVisitor<'_> {
+impl AccountVisitor {
     fn extract_stake_cred(output: &MultiEraOutput) -> Option<(StakeCredential, Address)> {
         let full = output.address().ok()?;
 
@@ -267,9 +261,9 @@ impl AccountVisitor<'_> {
     }
 }
 
-impl<'a> BlockVisitor for AccountVisitor<'a> {
+impl BlockVisitor for AccountVisitor {
     fn visit_input(
-        &mut self,
+        deltas: &mut WorkDeltas<CardanoLogic>,
         _: &MultiEraBlock,
         _: &MultiEraTx,
         _: &MultiEraInput,
@@ -279,7 +273,7 @@ impl<'a> BlockVisitor for AccountVisitor<'a> {
             return Ok(());
         };
 
-        self.delta.add_delta(ControlledAmountDec {
+        deltas.add_for_entity(ControlledAmountDec {
             cred,
             amount: resolved.value().coin(),
         });
@@ -288,7 +282,7 @@ impl<'a> BlockVisitor for AccountVisitor<'a> {
     }
 
     fn visit_output(
-        &mut self,
+        deltas: &mut WorkDeltas<CardanoLogic>,
         _: &MultiEraBlock,
         _: &MultiEraTx,
         _: u32,
@@ -298,19 +292,18 @@ impl<'a> BlockVisitor for AccountVisitor<'a> {
             return Ok(());
         };
 
-        self.delta.add_delta(ControlledAmountInc {
+        deltas.add_for_entity(ControlledAmountInc {
             cred: cred.clone(),
             amount: output.value().coin(),
         });
 
-        self.delta
-            .add_delta(TrackSeenAddresses::new(cred, full_address));
+        deltas.add_for_entity(TrackSeenAddresses::new(cred, full_address));
 
         Ok(())
     }
 
     fn visit_cert(
-        &mut self,
+        deltas: &mut WorkDeltas<CardanoLogic>,
         block: &MultiEraBlock,
         _: &MultiEraTx,
         cert: &MultiEraCert,
@@ -318,22 +311,19 @@ impl<'a> BlockVisitor for AccountVisitor<'a> {
         if let Some(cred) = pallas_extras::cert_as_stake_registration(cert) {
             debug!("detected stake registration");
 
-            self.delta
-                .add_delta(StakeRegistration::new(cred, block.slot()));
+            deltas.add_for_entity(StakeRegistration::new(cred, block.slot()));
         }
 
         if let Some(cert) = pallas_extras::cert_as_stake_delegation(cert) {
             debug!(%cert.pool, "detected stake delegation");
 
-            self.delta
-                .add_delta(StakeDelegation::new(cert.delegator, cert.pool));
+            deltas.add_for_entity(StakeDelegation::new(cert.delegator, cert.pool));
         }
 
         if let Some(cred) = pallas_extras::cert_as_stake_deregistration(cert) {
             debug!("detected stake deregistration");
 
-            self.delta
-                .add_delta(StakeDeregistration::new(cred, block.slot()));
+            deltas.add_for_entity(StakeDeregistration::new(cred, block.slot()));
         }
 
         Ok(())

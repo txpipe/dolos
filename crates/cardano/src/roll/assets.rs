@@ -1,19 +1,21 @@
 use std::borrow::Cow;
 use std::u64;
 
-use dolos_core::{NsKey, StateDelta};
+use dolos_core::batch::WorkDeltas;
+use dolos_core::NsKey;
 use pallas::crypto::hash::Hash;
 use pallas::ledger::traverse::{MultiEraBlock, MultiEraPolicyAssets, MultiEraTx};
+use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use crate::model::FixedNamespace as _;
-use crate::roll::CardanoDelta;
+use crate::CardanoLogic;
 use crate::{
     model::AssetState,
     roll::{BlockVisitor, State3Error},
 };
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MintStatsUpdate {
     policy: Hash<28>,
     asset: Vec<u8>,
@@ -61,29 +63,11 @@ impl dolos_core::EntityDelta for MintStatsUpdate {
     }
 }
 
-pub struct AssetStateVisitor<'a> {
-    delta: &'a mut StateDelta<CardanoDelta>,
-}
+pub struct AssetStateVisitor;
 
-impl<'a> From<&'a mut StateDelta<CardanoDelta>> for AssetStateVisitor<'a> {
-    fn from(delta: &'a mut StateDelta<CardanoDelta>) -> Self {
-        Self { delta }
-    }
-}
-
-impl AssetStateVisitor<'_> {
-    fn define_subject(policy: &Hash<28>, asset: &[u8]) -> Vec<u8> {
-        let mut subject = vec![];
-        subject.extend_from_slice(policy.as_slice());
-        subject.extend_from_slice(asset);
-
-        subject
-    }
-}
-
-impl<'a> BlockVisitor for AssetStateVisitor<'a> {
+impl BlockVisitor for AssetStateVisitor {
     fn visit_mint(
-        &mut self,
+        deltas: &mut WorkDeltas<CardanoLogic>,
         block: &MultiEraBlock,
         tx: &MultiEraTx,
         mint: &MultiEraPolicyAssets,
@@ -93,7 +77,7 @@ impl<'a> BlockVisitor for AssetStateVisitor<'a> {
         for asset in mint.assets() {
             debug!(%policy, asset = %hex::encode(&asset.name()), "detected mint");
 
-            self.delta.add_delta(MintStatsUpdate {
+            deltas.add_for_entity(MintStatsUpdate {
                 policy: policy.clone(),
                 asset: asset.name().to_vec(),
                 quantity: asset.mint_coin().unwrap_or_default().into(),

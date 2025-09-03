@@ -60,7 +60,7 @@ pub fn compute_spdd(store: &impl State3Store) -> miette::Result<HashMap<[u8; 28]
     Ok(by_pool)
 }
 
-pub fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
+pub fn run(config: &crate::Config, _args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging)?;
 
     let state = crate::common::open_state3_store(config)?;

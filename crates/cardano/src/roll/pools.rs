@@ -3,16 +3,14 @@ use std::borrow::Cow;
 use dolos_core::{NsKey, State3Error, StateDelta};
 use pallas::crypto::hash::{Hash, Hasher};
 use pallas::ledger::traverse::{MultiEraBlock, MultiEraCert, MultiEraTx};
+use serde::{Deserialize, Serialize};
 
 use crate::model::FixedNamespace as _;
 use crate::pallas_extras::MultiEraPoolRegistration;
-use crate::{
-    model::PoolState,
-    pallas_extras,
-    roll::{BlockVisitor, CardanoDelta},
-};
+use crate::CardanoLogic;
+use crate::{model::PoolState, pallas_extras, roll::BlockVisitor};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PoolRegistration {
     cert: MultiEraPoolRegistration,
 
@@ -104,13 +102,13 @@ impl<'a> BlockVisitor for PoolStateVisitor<'a> {
     }
 
     fn visit_cert(
-        &mut self,
+        deltas: &mut WorkDeltas<CardanoLogic>,
         _: &MultiEraBlock,
         _: &MultiEraTx,
         cert: &MultiEraCert,
     ) -> Result<(), State3Error> {
         if let Some(cert) = pallas_extras::cert_to_pool_state(cert) {
-            self.delta.add_delta(PoolRegistration::new(cert));
+            deltas.add_for_entity(PoolRegistration::new(cert));
         }
 
         Ok(())

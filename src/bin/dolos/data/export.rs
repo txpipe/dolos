@@ -26,11 +26,9 @@ pub struct Args {
 }
 
 fn prepare_wal(
-    wal: dolos::adapters::WalAdapter,
+    mut wal: dolos::adapters::WalAdapter,
     pb: &crate::feedback::ProgressBar,
 ) -> miette::Result<()> {
-    let dolos::adapters::WalAdapter::Redb(mut wal) = wal;
-
     let db = wal.db_mut().unwrap();
 
     pb.set_message("compacting wal");

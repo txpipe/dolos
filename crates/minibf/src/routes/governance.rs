@@ -4,7 +4,7 @@ use axum::{
     Json,
 };
 use dolos_cardano::{model::DRepState, pparams::ChainSummary, slot_epoch};
-use dolos_core::{ArchiveStore, BlockSlot, Domain, State3Store as _};
+use dolos_core::{ArchiveStore as _, BlockSlot, Domain, State3Store as _};
 use pallas::ledger::validate::utils::MultiEraProtocolParameters;
 
 use crate::{mapping::IntoModel, Facade};

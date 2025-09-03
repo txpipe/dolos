@@ -23,67 +23,27 @@ enum Formatter {
 impl Formatter {
     fn new_table() -> Self {
         let mut table = Table::new();
-        table.set_header(vec!["Seq", "Event", "Slot", "Hash", "Era", "Block Size"]);
+        table.set_header(vec!["Slot", "Hash", "Block Size"]);
 
         Self::Table(table)
     }
 
-    fn write(&mut self, seq: LogSeq, value: LogValue) {
-        let (evt, slot, hash, era, size) = match value {
-            LogValue::Apply(block) => {
-                let RawBlock {
-                    slot,
-                    hash,
-                    era,
-                    body,
-                } = block;
-
-                ("apply", Some(slot), Some(hash), Some(era), Some(body.len()))
-            }
-            LogValue::Undo(block) => {
-                let RawBlock {
-                    slot,
-                    hash,
-                    era,
-                    body,
-                } = block;
-
-                ("undo", Some(slot), Some(hash), Some(era), Some(body.len()))
-            }
-            LogValue::Mark(ChainPoint::Specific(slot, hash)) => {
-                ("mark", Some(slot), Some(hash), None, None)
-            }
-            LogValue::Mark(ChainPoint::Origin) => ("origin", None, None, None, None),
-        };
-
+    fn write(&mut self, point: &ChainPoint, block: &RawBlock) {
         match self {
             Formatter::Table(table) => {
-                let slot = slot
+                let slot = point.slot().to_string();
+
+                let hash = point
+                    .hash()
                     .as_ref()
                     .map(ToString::to_string)
                     .unwrap_or("none".into());
 
-                let hash = hash
-                    .as_ref()
-                    .map(ToString::to_string)
-                    .unwrap_or("none".into());
-
-                let era = era
-                    .as_ref()
-                    .map(ToString::to_string)
-                    .unwrap_or("none".into());
-
-                let size = size
-                    .as_ref()
-                    .map(ToString::to_string)
-                    .unwrap_or("none".into());
+                let size = block.len().to_string();
 
                 table.add_row(vec![
-                    format!("{seq}"),
-                    format!("{evt}"),
                     format!("{slot}"),
                     format!("{hash}"),
-                    format!("{era}"),
                     format!("{size}"),
                 ]);
             }
@@ -104,11 +64,23 @@ pub fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
 
     let mut formatter = Formatter::new_table();
 
-    wal.crawl_from(args.from)
+    let from = match args.from {
+        Some(slot) => {
+            let point = wal
+                .locate_point(slot)
+                .into_diagnostic()?
+                .ok_or(miette::miette!("slot not found"))?;
+
+            Some(point)
+        }
+        None => None,
+    };
+
+    wal.iter_blocks(from, None)
         .into_diagnostic()
         .context("crawling wal")?
         .take(args.limit)
-        .for_each(|(seq, value)| formatter.write(seq, value));
+        .for_each(|(point, block)| formatter.write(&point, &block));
 
     formatter.flush();
 

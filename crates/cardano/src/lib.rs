@@ -5,7 +5,10 @@ use std::{collections::HashMap, sync::Arc};
 // re-export pallas for version compatibility downstream
 pub use pallas;
 
-use dolos_core::*;
+use dolos_core::{
+    batch::{WorkBatch, WorkBlock},
+    *,
+};
 
 use crate::{
     owned::{OwnedMultiEraBlock, OwnedMultiEraOutput},
@@ -39,6 +42,7 @@ pub struct TrackConfig {
     pub pool_state: bool,
     pub epoch_state: bool,
     pub drep_state: bool,
+    pub tx_logs: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Default)]
@@ -48,12 +52,12 @@ pub struct Config {
 }
 
 #[derive(Clone)]
-pub struct ChainLogic {
+pub struct CardanoLogic {
     config: Config,
     summary: Arc<ChainSummary>,
 }
 
-impl ChainLogic {
+impl CardanoLogic {
     pub fn new(config: Config) -> Self {
         Self {
             config,
@@ -62,10 +66,11 @@ impl ChainLogic {
     }
 }
 
-impl dolos_core::ChainLogic for ChainLogic {
+impl dolos_core::ChainLogic for CardanoLogic {
     type Block = OwnedMultiEraBlock;
     type Utxo = OwnedMultiEraOutput;
-    type EntityDelta = CardanoDelta;
+    type Delta = CardanoDelta;
+    type Entity = CardanoEntity;
 
     fn decode_block(&self, block: Arc<BlockBody>) -> Result<Self::Block, ChainError> {
         let out = OwnedMultiEraBlock::decode(block)?;
@@ -86,7 +91,9 @@ impl dolos_core::ChainLogic for ChainLogic {
     }
 
     fn next_sweep(&self, after: BlockSlot) -> BlockSlot {
-        pallas_extras::next_epoch_boundary(&self.summary, after)
+        // TODO: implement era folding so that it's available for epoch boundaries
+        //pallas_extras::next_epoch_boundary(&self.summary, after)
+        BlockSlot::MAX
     }
 
     fn mutable_slots(domain: &impl Domain) -> BlockSlot {
@@ -109,22 +116,19 @@ impl dolos_core::ChainLogic for ChainLogic {
         Ok(delta)
     }
 
-    fn compute_origin_delta(
-        &self,
-        genesis: &Genesis,
-    ) -> Result<StateDelta<Self::EntityDelta>, ChainError> {
-        Ok(StateDelta::default())
+    fn compute_origin_delta(&self, genesis: &Genesis) -> Result<WorkBatch<Self>, ChainError> {
+        todo!()
     }
 
-    fn compute_block_delta(
+    fn compute_delta(
         &self,
-        block: &Self::Block,
+        block: &mut WorkBlock<Self>,
         deps: &HashMap<TxoRef, Self::Utxo>,
-    ) -> Result<StateDelta<Self::EntityDelta>, ChainError> {
-        let mut builder = roll::DeltaBuilder::new(self.config.track.clone());
+    ) -> Result<(), ChainError> {
+        let mut builder = roll::DeltaBuilder::new(self.config.track.clone(), block);
 
-        roll::crawl_block(block, deps, &mut builder)?;
+        builder.crawl(deps)?;
 
-        Ok(builder.unwrap())
+        Ok(())
     }
 }

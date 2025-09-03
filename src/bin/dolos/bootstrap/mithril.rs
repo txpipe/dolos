@@ -1,8 +1,6 @@
 use itertools::Itertools;
 use miette::{Context, IntoDiagnostic};
 use mithril_client::{ClientBuilder, MessageBuilder, MithrilError, MithrilResult};
-
-use rayon::iter::{IntoParallelIterator as _, ParallelIterator as _};
 use std::{path::Path, sync::Arc};
 use tracing::{info, warn};
 
@@ -162,10 +160,10 @@ async fn fetch_snapshot(
 
 fn process_chunk(
     domain: &DomainAdapter,
-    batch: dolos_core::sync::RawBlockBatch,
+    batch: dolos_core::RawBlockBatch,
     progress: &indicatif::ProgressBar,
 ) -> Result<(), miette::Error> {
-    let Ok(last) = dolos_core::sync::import_batch(domain, batch) else {
+    let Ok(last) = dolos_core::catchup::import_batch(domain, batch) else {
         return Err(miette::miette!("failed to import batch"));
     };
 
@@ -183,7 +181,7 @@ fn import_hardano_into_domain(
     let domain = crate::common::setup_domain(config)?;
 
     if domain.state().is_empty().into_diagnostic()? {
-        dolos_core::sync::apply_origin(&domain)
+        dolos_core::catchup::apply_origin(&domain)
             // TODO: can't use into_diagnostic here because some variant of DomainError doesn't
             // implement std::error::Error
             .map_err(|x| miette::miette!(x.to_string()))
@@ -200,7 +198,7 @@ fn import_hardano_into_domain(
         .cursor()
         .into_diagnostic()
         .context("reading state cursor")?
-        .map(|c| c.into())
+        .map(|c| c.try_into().unwrap())
         .unwrap_or(pallas::network::miniprotocols::Point::Origin);
 
     let iter = pallas::storage::hardano::immutable::read_blocks_from_point(immutable_path, cursor)
@@ -226,19 +224,6 @@ fn import_hardano_into_domain(
     }
 
     progress.abandon_with_message("immutable db import complete");
-
-    let cursor = domain
-        .state()
-        .cursor()
-        .into_diagnostic()
-        .context("reading state cursor")?
-        .unwrap_or(ChainPoint::Origin);
-
-    domain
-        .wal()
-        .append_entries(std::iter::once(LogValue::Mark(cursor)))
-        .into_diagnostic()
-        .context("appending start location in WAL")?;
 
     Ok(())
 }

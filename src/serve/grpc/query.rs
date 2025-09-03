@@ -1,7 +1,7 @@
 use itertools::Itertools as _;
 use pallas::interop::utxorpc::{self as interop, spec::query::any_utxo_pattern::UtxoPattern};
 use pallas::interop::utxorpc::{spec as u5c, LedgerContext};
-use pallas::ledger::traverse::{MultiEraBlock, MultiEraOutput};
+use pallas::ledger::traverse::MultiEraOutput;
 use std::collections::HashSet;
 use tonic::{Request, Response, Status};
 use tracing::info;
@@ -12,19 +12,10 @@ use super::masking::apply_mask;
 use crate::prelude::*;
 
 pub fn point_to_u5c<T: LedgerContext>(ledger: &T, point: &ChainPoint) -> u5c::query::ChainPoint {
-    match point {
-        ChainPoint::Origin => u5c::query::ChainPoint {
-            slot: 0,
-            hash: vec![].into(),
-            height: 0,
-            timestamp: 0,
-        },
-        ChainPoint::Specific(slot, hash) => u5c::query::ChainPoint {
-            slot: *slot,
-            hash: hash.to_vec().into(),
-            timestamp: ledger.get_slot_timestamp(*slot).unwrap_or_default(),
-            ..Default::default()
-        },
+    u5c::query::ChainPoint {
+        slot: point.slot(),
+        hash: point.hash().map(|h| h.to_vec()).unwrap_or_default().into(),
+        ..Default::default()
     }
 }
 

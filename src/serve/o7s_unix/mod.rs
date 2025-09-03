@@ -19,8 +19,8 @@ pub struct Config {
     pub magic: u64,
 }
 
-async fn handle_session<W: WalStore, C: CancelToken>(
-    wal: W,
+async fn handle_session<D: Domain, C: CancelToken>(
+    domain: D,
     connection: NodeServer,
     cancel: C,
 ) -> Result<(), ServeError> {
@@ -29,7 +29,7 @@ async fn handle_session<W: WalStore, C: CancelToken>(
     } = connection;
 
     // leaving this here since there's more threads to come
-    let l1 = tokio::spawn(chainsync::handle_session(wal.clone(), chainsync, cancel));
+    let l1 = tokio::spawn(chainsync::handle_session(domain.clone(), chainsync, cancel));
 
     let (l1,) = tokio::try_join!(l1).map_err(|e| ServeError::Internal(e.into()))?;
 
@@ -40,8 +40,8 @@ async fn handle_session<W: WalStore, C: CancelToken>(
     Ok(())
 }
 
-async fn accept_client_connections<W: WalStore, C: CancelToken>(
-    wal: W,
+async fn accept_client_connections<D: Domain, C: CancelToken>(
+    domain: D,
     config: &Config,
     tasks: &mut TaskTracker,
     cancel: C,
@@ -61,7 +61,7 @@ async fn accept_client_connections<W: WalStore, C: CancelToken>(
                     "accepting incoming connection"
                 );
 
-                tasks.spawn(handle_session(wal.clone(), connection, cancel.clone()));
+                tasks.spawn(handle_session(domain.clone(), connection, cancel.clone()));
                 info!(connections = tasks.len(), "active connections changed");
             }
             Err(error) => {
@@ -87,7 +87,7 @@ impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
         let mut tasks = TaskTracker::new();
 
         tokio::select! {
-            res = accept_client_connections(domain.wal().clone(), &cfg, &mut tasks, cancel.clone()) => {
+            res = accept_client_connections(domain.clone(), &cfg, &mut tasks, cancel.clone()) => {
                 res?;
             },
             _ = cancel.cancelled() => {

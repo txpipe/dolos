@@ -8,10 +8,10 @@ use blockfrost_openapi::models::{
 };
 use chrono::{DateTime, FixedOffset};
 use dolos_cardano::{
-    model::{EpochState, CURRENT_EPOCH_KEY},
+    model::{EpochState, EPOCH_KEY_MARK},
     pparams::{ChainSummary, EraSummary},
 };
-use dolos_core::{Domain, Genesis, State3Store};
+use dolos_core::{Domain, Genesis};
 
 use crate::{mapping::IntoModel, Facade};
 
@@ -133,7 +133,7 @@ where
     let genesis = domain.genesis();
 
     let state = domain
-        .read_cardano_entity::<EpochState>(CURRENT_EPOCH_KEY)
+        .read_cardano_entity::<EpochState>(EPOCH_KEY_MARK)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
 

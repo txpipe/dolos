@@ -5,7 +5,9 @@ use tracing::{debug, info};
 
 type Error = super::RedbArchiveError;
 
-use dolos_core::{ArchiveError, BlockBody, BlockSlot, ChainPoint, EraCbor, TxOrder, UtxoSetDelta};
+use dolos_core::{
+    ArchiveError, BlockBody, BlockSlot, ChainPoint, EraCbor, RawBlock, SlotTags, TxOrder,
+};
 
 use crate::archive::ChainSparseIter;
 
@@ -37,15 +39,31 @@ impl ChainStore {
         Arc::get_mut(&mut self.db)
     }
 
-    pub fn apply(&self, deltas: &[UtxoSetDelta]) -> Result<(), Error> {
+    pub fn apply(
+        &self,
+        point: &ChainPoint,
+        block: &RawBlock,
+        tags: &SlotTags,
+    ) -> Result<(), Error> {
         let mut wx = self.db().begin_write()?;
         wx.set_durability(Durability::Eventual);
         wx.set_quick_repair(true);
 
-        for delta in deltas {
-            indexes::Indexes::apply(&wx, delta)?;
-            tables::BlocksTable::apply(&wx, delta)?;
-        }
+        indexes::Indexes::apply(&wx, point, tags)?;
+        tables::BlocksTable::apply(&wx, point, block)?;
+
+        wx.commit()?;
+
+        Ok(())
+    }
+
+    pub fn undo(&self, point: &ChainPoint, tags: &SlotTags) -> Result<(), Error> {
+        let mut wx = self.db().begin_write()?;
+        wx.set_durability(Durability::Eventual);
+        wx.set_quick_repair(true);
+
+        indexes::Indexes::undo(&wx, point, tags)?;
+        tables::BlocksTable::undo(&wx, point)?;
 
         wx.commit()?;
 

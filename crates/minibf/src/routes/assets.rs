@@ -11,7 +11,7 @@ use blockfrost_openapi::models::{
 };
 use crc::{Crc, CRC_8_SMBUS};
 use dolos_cardano::model::AssetState;
-use dolos_core::{ArchiveStore, Domain, EntityKey, EraCbor, State3Store as _};
+use dolos_core::{ArchiveStore, Domain, EraCbor};
 use pallas::{
     codec::minicbor,
     ledger::{

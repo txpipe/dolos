@@ -43,58 +43,36 @@ fn raw_to_blockref<C: LedgerContext>(
     let u5c::cardano::Block { header, .. } = mapper.map_block_cbor(body);
 
     header.map(|h| u5c::sync::BlockRef {
-        slot: h.slot,
-        hash: h.hash,
-        height: h.height,
+        slot: header.slot,
+        hash: header.hash,
+        height: header.height,
+        ..Default::default()
     })
 }
 
 fn point_to_blockref(point: &ChainPoint) -> u5c::sync::BlockRef {
-    match point {
-        ChainPoint::Origin => u5c::sync::BlockRef {
-            slot: 0,
-            hash: vec![].into(),
-            height: 0,
-        },
-        ChainPoint::Specific(slot, hash) => u5c::sync::BlockRef {
-            slot: *slot,
-            hash: hash.to_vec().into(),
-            // TODO(p): implement height
-            height: 0,
-        },
+    BlockRef {
+        hash: point.hash().map(|h| h.to_vec()).unwrap_or_default().into(),
+        slot: point.slot(),
+        ..Default::default()
     }
 }
 
-fn wal_log_to_tip_response<C: LedgerContext>(
+fn tip_event_to_response<C: LedgerContext>(
     mapper: &Mapper<C>,
-    log: &LogValue,
+    event: &TipEvent,
 ) -> u5c::sync::FollowTipResponse {
     u5c::sync::FollowTipResponse {
-        action: match log {
-            LogValue::Apply(x) => {
-                u5c::sync::follow_tip_response::Action::Apply(raw_to_anychain(mapper, &x.body))
+        action: match event {
+            TipEvent::Apply(_, block) => {
+                u5c::sync::follow_tip_response::Action::Apply(raw_to_anychain(mapper, &block))
                     .into()
             }
-            LogValue::Undo(x) => {
-                u5c::sync::follow_tip_response::Action::Undo(raw_to_anychain(mapper, &x.body))
-                    .into()
+            TipEvent::Undo(_, block) => {
+                u5c::sync::follow_tip_response::Action::Undo(raw_to_anychain(mapper, &block)).into()
             }
-            LogValue::Mark(ChainPoint::Specific(slot, hash)) => {
-                u5c::sync::follow_tip_response::Action::Reset(BlockRef {
-                    hash: hash.to_vec().into(),
-                    slot: *slot,
-                    // TODO(p): implement height
-                    height: 0,
-                })
-                .into()
-            }
-            LogValue::Mark(ChainPoint::Origin) => {
-                u5c::sync::follow_tip_response::Action::Reset(BlockRef {
-                    hash: vec![].into(),
-                    slot: 0,
-                    height: 0,
-                })
-                .into()
+            TipEvent::Mark(x) => {
+                u5c::sync::follow_tip_response::Action::Reset(point_to_blockref(x)).into()
             }
         },
     }
@@ -218,15 +196,14 @@ where
         // );
 
         let stream = super::stream::ChainStream::start::<D, _>(
-            self.domain.wal().clone(),
-            self.domain.archive().clone(),
+            self.domain.clone(),
             intersect.clone(),
             self.cancel.clone(),
         );
 
         let mapper = self.mapper.clone();
 
-        let stream = stream.map(move |log| Ok(wal_log_to_tip_response(&mapper, &log)));
+        let stream = stream.map(move |log| Ok(tip_event_to_response(&mapper, &log)));
 
         Ok(Response::new(Box::pin(stream)))
     }
@@ -235,7 +212,7 @@ where
         &self,
         _request: tonic::Request<u5c::sync::ReadTipRequest>,
     ) -> std::result::Result<tonic::Response<u5c::sync::ReadTipResponse>, tonic::Status> {
-        let (_, point) = self
+        let (point, _) = self
             .domain
             .wal()
             .find_tip()
@@ -267,9 +244,8 @@ mod tests {
         let cancel = CancelTokenImpl::default();
 
         for i in 0..34 {
-            let block = dolos_testing::blocks::make_conway_block(i);
-            let block = Arc::new(block.body);
-            dolos_core::sync::apply_block(&domain, block).unwrap();
+            let (_, block) = dolos_testing::blocks::make_conway_block(i);
+            dolos_core::follow::roll_forward(&domain, &block).unwrap();
         }
 
         let service = SyncServiceImpl::new(domain, cancel);

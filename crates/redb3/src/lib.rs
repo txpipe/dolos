@@ -1,9 +1,7 @@
 use std::{collections::HashMap, ops::Range, path::Path, sync::Arc};
 
-use dolos_core::{BlockSlot, Entity};
-
 use dolos_core::{
-    EntityDelta, EntityKey, EntityValue, Namespace, NamespaceType, State3Error as StateError,
+    BlockSlot, EntityKey, EntityValue, Namespace, NamespaceType, State3Error as StateError,
     StateSchema,
 };
 
@@ -440,12 +438,17 @@ impl dolos_core::State3Store for StateStore {
     }
 
     fn delete_entity(&self, ns: Namespace, key: &EntityKey) -> Result<(), StateError> {
-        todo!()
-    }
-}
+        let mut wx = self.db().begin_write().map_err(Error::from)?;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use dolos_core::{State3Store as _, StateDelta};
+        let table = self
+            .tables
+            .get(&ns)
+            .ok_or(StateError::NamespaceNotFound(ns))?;
+
+        table.delete_entity(&mut wx, key)?;
+
+        wx.commit().map_err(Error::from)?;
+
+        Ok(())
+    }
 }

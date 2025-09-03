@@ -4,9 +4,7 @@ use crate::prelude::*;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WalSummary {
-    pub start_seq: Option<LogSeq>,
     pub start_slot: Option<BlockSlot>,
-    pub tip_seq: Option<LogSeq>,
     pub tip_slot: Option<BlockSlot>,
 }
 

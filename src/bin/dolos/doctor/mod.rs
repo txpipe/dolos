@@ -2,7 +2,8 @@ use clap::{Parser, Subcommand};
 
 use crate::feedback::Feedback;
 
-mod rebuild_stores;
+mod catchup_stores;
+mod reset_wal;
 mod wal_integrity;
 
 #[cfg(feature = "utils")]
@@ -10,8 +11,12 @@ mod reset_genesis;
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// rebuilds ledger and chain from WAL
-    RebuildStores(rebuild_stores::Args),
+    /// catch up store data from WAL records
+    CatchupStores(catchup_stores::Args),
+
+    // Reset WAL position using state cursor
+    ResetWal(reset_wal::Args),
+
     /// checks the integrity of the WAL records
     WalIntegrity(wal_integrity::Args),
 
@@ -28,7 +33,8 @@ pub struct Args {
 
 pub fn run(config: &super::Config, args: &Args, feedback: &Feedback) -> miette::Result<()> {
     match &args.command {
-        Command::RebuildStores(x) => rebuild_stores::run(config, x, feedback)?,
+        Command::CatchupStores(x) => catchup_stores::run(config, x, feedback)?,
+        Command::ResetWal(x) => reset_wal::run(config, x, feedback)?,
         Command::WalIntegrity(x) => wal_integrity::run(config, x)?,
 
         #[cfg(feature = "utils")]

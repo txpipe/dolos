@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use gasket::framework::*;
 use pallas::codec::minicbor;
@@ -27,10 +28,10 @@ impl Worker {
     pub fn create_next_block(
         &self,
         current: Option<RawBlock>,
-    ) -> Result<(Tip, BlockBody), WorkerError> {
+    ) -> Result<(Tip, RawBlock), WorkerError> {
         let (block_number, slot, prev_hash) = match current {
             Some(raw) => {
-                let block = MultiEraBlock::decode(&raw.body).unwrap();
+                let block = MultiEraBlock::decode(&raw).unwrap();
                 (
                     block.number() + 1,
                     block.slot() + self.block_production_interval_seconds,
@@ -113,7 +114,10 @@ impl Worker {
             block_number,
         );
         let era: u16 = Era::Conway.into();
-        Ok((tip, minicbor::to_vec((era, block)).or_panic()?))
+
+        let cbor = minicbor::to_vec((era, block)).or_panic()?;
+
+        Ok((tip, Arc::new(cbor)))
     }
 }
 
@@ -136,17 +140,18 @@ impl gasket::framework::Worker<Stage> for Worker {
     }
 
     async fn execute(&mut self, _unit: &(), stage: &mut Stage) -> Result<(), WorkerError> {
-        let current_tip = match stage.wal.find_tip().or_panic()? {
-            Some((_, point)) => match point {
-                ChainPoint::Origin => None,
-                _ => Some(stage.wal.read_block(&point).or_panic()?),
-            },
-            None => None,
-        };
-        let (tip, block) = self.create_next_block(current_tip)?;
+        let tip = stage
+            .wal
+            .find_tip()
+            .or_panic()?
+            .map(|(_, log)| log)
+            .map(|x| Arc::new(x.block.clone()));
+
+        let (tip, block) = self.create_next_block(tip)?;
 
         stage.flush_block(block).await?;
         stage.track_tip(&tip);
+
         Ok(())
     }
 }
@@ -180,21 +185,12 @@ impl Stage {
         }
     }
 
-    async fn flush_block(&mut self, block: BlockBody) -> Result<(), WorkerError> {
-        let payload = {
-            let decoded = MultiEraBlock::decode(&block).or_panic()?;
-            RawBlock {
-                slot: decoded.slot(),
-                hash: decoded.hash(),
-                era: decoded.era(),
-                body: block,
-            }
-        };
-
+    async fn flush_block(&mut self, block: RawBlock) -> Result<(), WorkerError> {
         self.downstream
-            .send(PullEvent::RollForward(payload).into())
+            .send(PullEvent::RollForward(block).into())
             .await
             .or_panic()?;
+
         Ok(())
     }
 

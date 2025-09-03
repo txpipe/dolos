@@ -1,6 +1,7 @@
 use std::{borrow::Cow, collections::HashMap, marker::PhantomData, ops::Range};
 
 use itertools::Itertools;
+use serde::{Deserialize, Serialize};
 
 use crate::{BlockSlot, Domain, TxoRef};
 
@@ -8,7 +9,7 @@ const KEY_SIZE: usize = 32;
 
 pub type Namespace = &'static str;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct EntityKey([u8; KEY_SIZE]);
 
 impl<const N: usize> From<&[u8; N]> for EntityKey {
@@ -49,7 +50,7 @@ impl AsRef<[u8]> for EntityKey {
 /// Represent a key to an entity by also specifying the namespace to which it
 /// belongs.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
-pub struct NsKey(Namespace, EntityKey);
+pub struct NsKey(pub Namespace, pub EntityKey);
 
 impl<T> From<(&'static str, T)> for NsKey
 where
@@ -108,7 +109,7 @@ pub trait Entity: Sized + Send {
 
 pub type KeyEntityPair<E> = (EntityKey, Option<E>);
 
-pub trait EntityDelta {
+pub trait EntityDelta: Clone {
     type Entity: Entity;
 
     fn key(&self) -> Cow<'_, NsKey>;
@@ -136,78 +137,6 @@ pub trait EntityDelta {
     /// point in time, allowing implementors to retain initial values as
     /// internal delta state (if required).
     fn undo(&mut self, entity: &mut Option<Self::Entity>);
-}
-
-#[derive(Debug, Clone)]
-pub struct StateDelta<D> {
-    pub(crate) new_cursor: BlockSlot,
-    pub(crate) deltas: HashMap<NsKey, Vec<D>>,
-}
-
-impl<D> Default for StateDelta<D> {
-    fn default() -> Self {
-        Self::new(0)
-    }
-}
-
-impl<D> std::ops::AddAssign<Self> for StateDelta<D> {
-    fn add_assign(&mut self, rhs: Self) {
-        for (key, deltas) in rhs.deltas {
-            let entry = self.deltas.entry(key).or_default();
-            entry.extend(deltas);
-        }
-
-        self.new_cursor = self.new_cursor.max(rhs.new_cursor);
-    }
-}
-
-impl<D> StateDelta<D> {
-    fn new(new_cursor: BlockSlot) -> Self {
-        Self {
-            new_cursor,
-            deltas: HashMap::new(),
-        }
-    }
-
-    pub fn set_cursor(&mut self, value: BlockSlot) {
-        self.new_cursor = value;
-    }
-}
-
-impl<D> StateDelta<D>
-where
-    D: EntityDelta,
-{
-    pub fn add_delta(&mut self, delta: impl Into<D>) {
-        let delta = delta.into();
-        let key = delta.key();
-        let group = self.deltas.entry(key.into_owned()).or_default();
-        group.push(delta);
-    }
-
-    pub fn compile_keys(&self) -> impl Iterator<Item = &NsKey> {
-        self.deltas.keys()
-    }
-
-    fn apply_to(&mut self, key: &NsKey, entity: &mut Option<D::Entity>) {
-        let to_apply = self.deltas.get_mut(key);
-
-        if let Some(to_apply) = to_apply {
-            for delta in to_apply {
-                delta.apply(entity);
-            }
-        }
-    }
-
-    fn undo_to(&mut self, key: &NsKey, entity: &mut Option<D::Entity>) {
-        let to_apply = self.deltas.get_mut(key);
-
-        if let Some(to_apply) = to_apply {
-            for delta in to_apply {
-                delta.undo(entity);
-            }
-        }
-    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -433,96 +362,9 @@ pub trait State3Store: Sized + Send + Sync {
     // }
 }
 
-use rayon::prelude::*;
-
-fn load_entity_chunk<D: Domain>(
-    chunk: &[NsKey],
-    store: &D::State3,
-) -> Result<EntityMap<D::Entity>, StateError> {
-    let by_ns = chunk.into_iter().chunk_by(|key| key.0);
-
-    let mut loaded: EntityMap<D::Entity> = HashMap::new();
-
-    for (ns, chunk) in &by_ns {
-        let keys = chunk.map(|x| &x.1).collect::<Vec<_>>();
-
-        let decoded = store.read_entities_typed::<D::Entity>(ns, &keys)?;
-
-        loaded = keys
-            .into_iter()
-            .zip(decoded)
-            .fold(loaded, |mut acc, (k, v)| {
-                let k = NsKey(ns, k.clone());
-                acc.insert(k, v);
-                acc
-            });
-    }
-
-    Ok(loaded)
-}
-
-const LOAD_CHUNK_SIZE: usize = 100;
-
-/// Loads the entities involved in a batch of deltas
-///
-/// This methods is a fancy way of loading required entities for a batch of
-/// deltas. It optimizes the process by organizing read operations in chunks
-/// that execute in parallel using Rayon. The assumption is that the storage
-/// backend supports concurrent reads (eg: Redb).
-///
-/// Chunks are defined by sorting the entity keys grouping by namespace. The
-/// assumption is that the storage backend will benefit from loading keys that
-/// are close to each other (eg: disk block reads)
-fn load_entities<D: Domain>(
-    store: &D::State3,
-    delta: &StateDelta<D::EntityDelta>,
-) -> Result<EntityMap<D::Entity>, StateError> {
-    let mut keys: Vec<_> = delta.compile_keys().cloned().collect();
-
-    keys.sort();
-
-    let result = keys
-        .par_chunks(LOAD_CHUNK_SIZE)
-        .map(|chunk| load_entity_chunk::<D>(chunk, store))
-        .try_reduce(
-            || EntityMap::new(),
-            |mut acc, x| {
-                acc.extend(x);
-                Ok(acc)
-            },
-        )?;
-
-    Ok(result)
-}
-
-pub fn apply_batch<D: Domain>(
-    store: &D::State3,
-    delta: &mut StateDelta<D::EntityDelta>,
-) -> Result<(), StateError> {
-    // todo: semantics for starting a read transaction
-
-    let mut entities = load_entities::<D>(store, delta)?;
-
-    for (key, entity) in entities.iter_mut() {
-        delta.apply_to(key, entity);
-    }
-
-    // lets keep this as a separated loop because we might want to isolate the write
-    // phase as a different method for pipelining
-    for (key, entity) in entities {
-        let NsKey(ns, key) = key;
-        store.save_entity_typed(ns, &key, entity.as_ref())?;
-    }
-
-    store.append_cursor(delta.new_cursor)?;
-
-    // todo: semantics for committing a read transaction
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
+    use serde::{Deserialize, Serialize};
     use std::sync::{Arc, RwLock};
 
     use super::*;
@@ -553,8 +395,9 @@ mod tests {
         }
     }
 
+    #[derive(Serialize, Deserialize, Clone)]
     struct ChangeValue {
-        key: NsKey,
+        key: Vec<u8>,
         old_value: Option<String>,
         override_with: String,
     }
@@ -563,7 +406,7 @@ mod tests {
         type Entity = TestEntity;
 
         fn key(&self) -> Cow<'_, NsKey> {
-            Cow::Borrowed(&self.key)
+            Cow::Owned(NsKey(TestEntity::NS, EntityKey::from(self.key.clone())))
         }
 
         fn apply(&mut self, entity: &mut Option<Self::Entity>) {
@@ -696,21 +539,30 @@ mod tests {
 
         store
     }
+}
 
-    #[test]
-    fn test_apply_batch() {
-        let store = setup_mock_store();
+pub fn load_entity_chunk<D: Domain>(
+    chunk: &[NsKey],
+    store: &D::State3,
+) -> Result<EntityMap<D::Entity>, State3Error> {
+    let by_ns = chunk.into_iter().chunk_by(|key| key.0);
 
-        let mut delta = StateDelta::<ChangeValue>::new(1);
+    let mut loaded: EntityMap<D::Entity> = HashMap::new();
 
-        let delta_a = ChangeValue {
-            key: NsKey::from((TestEntity::NS, b"a")),
-            override_with: "new_value".into(),
-            old_value: None,
-        };
+    for (ns, chunk) in &by_ns {
+        let keys = chunk.map(|x| &x.1).collect::<Vec<_>>();
 
-        delta.add_delta(delta_a);
+        let decoded = store.read_entities_typed::<D::Entity>(ns, &keys)?;
 
-        //super::apply_batch::<MockDomain>(&store, &mut delta).unwrap();
+        loaded = keys
+            .into_iter()
+            .zip(decoded)
+            .fold(loaded, |mut acc, (k, v)| {
+                let k = NsKey(ns, k.clone());
+                acc.insert(k, v);
+                acc
+            });
     }
+
+    Ok(loaded)
 }

@@ -8,10 +8,11 @@ use pallas::ledger::primitives::{
     RationalNumber, Relay, StakeCredential,
 };
 use pallas::ledger::traverse::MultiEraCert;
+use serde::{Deserialize, Serialize};
 
 use crate::pparams::ChainSummary;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MultiEraPoolRegistration {
     pub operator: Hash<28>,
     pub vrf_keyhash: Hash<32>,

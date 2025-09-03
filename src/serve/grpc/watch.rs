@@ -151,8 +151,7 @@ fn block_to_txs<C: LedgerContext>(
     mapper: &interop::Mapper<C>,
     request: &u5c::watch::WatchTxRequest,
 ) -> Vec<u5c::watch::AnyChainTx> {
-    let RawBlock { body, .. } = block;
-    let block = MultiEraBlock::decode(body).unwrap();
+    let block = MultiEraBlock::decode(&block).unwrap();
     let txs = block.txs();
 
     txs.iter()
@@ -173,22 +172,22 @@ fn block_to_txs<C: LedgerContext>(
 
 fn roll_to_watch_response<C: LedgerContext>(
     mapper: &interop::Mapper<C>,
-    log: &LogValue,
+    log: &TipEvent,
     request: &u5c::watch::WatchTxRequest,
 ) -> impl Stream<Item = u5c::watch::WatchTxResponse> {
     let txs: Vec<_> = match log {
-        LogValue::Apply(block) => block_to_txs(block, mapper, request)
+        TipEvent::Apply(_, block) => block_to_txs(block, mapper, request)
             .into_iter()
             .map(u5c::watch::watch_tx_response::Action::Apply)
             .map(|x| u5c::watch::WatchTxResponse { action: Some(x) })
             .collect(),
-        LogValue::Undo(block) => block_to_txs(block, mapper, request)
+        TipEvent::Undo(_, block) => block_to_txs(block, mapper, request)
             .into_iter()
             .map(u5c::watch::watch_tx_response::Action::Undo)
             .map(|x| u5c::watch::WatchTxResponse { action: Some(x) })
             .collect(),
         // TODO: shouldn't we have a u5c event for origin?
-        LogValue::Mark(..) => vec![],
+        TipEvent::Mark(..) => vec![],
     };
 
     tokio_stream::iter(txs)
@@ -242,12 +241,8 @@ where
             .map(|x| ChainPoint::Specific(x.slot, x.hash.to_vec().as_slice().into()))
             .collect::<Vec<ChainPoint>>();
 
-        let stream = ChainStream::start::<D, _>(
-            self.domain.wal().clone(),
-            self.domain.archive().clone(),
-            intersect,
-            self.cancel.clone(),
-        );
+        let stream =
+            ChainStream::start::<D, _>(self.domain.clone(), intersect, self.cancel.clone());
 
         let mapper = self.mapper.clone();
 

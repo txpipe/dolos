@@ -5,7 +5,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
 use tracing_subscriber::{filter::Targets, prelude::*};
 
-use dolos::adapters::{ArchiveAdapter, ChainAdapter, DomainAdapter, StateAdapter, WalAdapter};
+use dolos::adapters::{ArchiveAdapter, ChainConfig, DomainAdapter, StateAdapter, WalAdapter};
 use dolos::core::Genesis;
 use dolos::prelude::*;
 
@@ -34,7 +34,7 @@ pub fn open_wal_store(config: &crate::Config) -> Result<WalAdapter, Error> {
 
     let wal = dolos_redb::wal::RedbWalStore::open(root.join("wal"), config.storage.wal_cache)?;
 
-    Ok(WalAdapter::Redb(wal))
+    Ok(wal)
 }
 
 pub fn open_chain_store(config: &crate::Config) -> Result<ArchiveAdapter, Error> {
@@ -93,8 +93,6 @@ pub fn open_persistent_data_stores(config: &crate::Config) -> Result<Stores, Err
 pub fn create_ephemeral_data_stores() -> Result<Stores, Error> {
     let wal = dolos_redb::wal::RedbWalStore::memory()?;
 
-    wal.initialize_from_origin().map_err(WalError::from)?;
-
     let ledger = dolos_redb::state::LedgerStore::in_memory_v2()?;
 
     let state3 = dolos_redb3::StateStore::in_memory(dolos_cardano::model::build_schema())
@@ -122,7 +120,13 @@ pub fn setup_domain(config: &crate::Config) -> miette::Result<DomainAdapter> {
     let stores = setup_data_stores(config)?;
     let genesis = Arc::new(open_genesis_files(&config.genesis)?);
     let mempool = dolos::mempool::Mempool::new(genesis.clone(), stores.state.clone());
-    let chain = ChainAdapter::from(config.chain.clone().unwrap_or_default());
+    let (tip_broadcast, _) = tokio::sync::broadcast::channel(100);
+    let chain = config.chain.clone().unwrap_or_default();
+
+    let chain = match chain {
+        ChainConfig::Cardano(config) => dolos_cardano::CardanoLogic::new(config.clone()),
+        // TODO: add other chains here
+    };
 
     let domain = DomainAdapter {
         storage_config: Arc::new(config.storage.clone()),
@@ -131,10 +135,12 @@ pub fn setup_domain(config: &crate::Config) -> miette::Result<DomainAdapter> {
         wal: stores.wal,
         state: stores.state,
         archive: stores.archive,
-        mempool,
-
         state3: stores.state3,
+        mempool,
+        tip_broadcast,
     };
+
+    dolos_core::init::check_integrity(&domain).map_err(|x| miette::miette!("{:?}", x))?;
 
     Ok(domain)
 }

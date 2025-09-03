@@ -447,6 +447,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "bit-set"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08807e080ed7f9d5433fa9b275196cfc35414f66a0c79d864dc51a0d825231a3"
+dependencies = [
+ "bit-vec",
+]
+
+[[package]]
+name = "bit-vec"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5e764a1d40d510daf35e07be9eb06e75770908c27d411ee6c92109c9840eaaf7"
+
+[[package]]
 name = "bitcoin-io"
 version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1106,7 +1121,7 @@ dependencies = [
  "miette",
  "mithril-client",
  "nix",
- "pallas 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=1d7a0d6)",
+ "pallas 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=08e6356)",
  "paste",
  "protoc-wkt",
  "rayon",
@@ -1139,7 +1154,7 @@ dependencies = [
  "dolos-core",
  "hex",
  "itertools 0.14.0",
- "pallas 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=1d7a0d6)",
+ "pallas 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=08e6356)",
  "paste",
  "rayon",
  "self_cell",
@@ -1156,7 +1171,8 @@ dependencies = [
  "futures-core",
  "hex",
  "itertools 0.13.0",
- "pallas 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=1d7a0d6)",
+ "pallas 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=08e6356)",
+ "proptest",
  "rayon",
  "serde",
  "thiserror 2.0.12",
@@ -1177,7 +1193,7 @@ dependencies = [
  "dolos-core",
  "hex",
  "itertools 0.13.0",
- "pallas 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=1d7a0d6)",
+ "pallas 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=08e6356)",
  "reqwest",
  "serde",
  "serde_json",
@@ -1197,7 +1213,7 @@ dependencies = [
  "dolos-testing",
  "hex",
  "itertools 0.13.0",
- "pallas 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=1d7a0d6)",
+ "pallas 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=08e6356)",
  "redb",
  "serde",
  "thiserror 2.0.12",
@@ -1216,7 +1232,7 @@ dependencies = [
  "dolos-testing",
  "hex",
  "itertools 0.13.0",
- "pallas 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=1d7a0d6)",
+ "pallas 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=08e6356)",
  "redb",
  "serde",
  "thiserror 2.0.12",
@@ -1236,7 +1252,7 @@ dependencies = [
  "dolos-redb3",
  "futures-core",
  "futures-util",
- "pallas 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=1d7a0d6)",
+ "pallas 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=08e6356)",
  "rand 0.9.1",
  "tokio-stream",
 ]
@@ -1255,7 +1271,7 @@ dependencies = [
  "jsonrpsee",
  "opentelemetry",
  "opentelemetry_sdk",
- "pallas 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=1d7a0d6)",
+ "pallas 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=08e6356)",
  "serde",
  "serde_json",
  "thiserror 2.0.12",
@@ -2855,19 +2871,19 @@ dependencies = [
 [[package]]
 name = "pallas"
 version = "1.0.0-alpha.2"
-source = "git+https://github.com/txpipe/pallas.git?rev=1d7a0d6#1d7a0d6defc54562d62cea570f9d77a4f306de51"
+source = "git+https://github.com/txpipe/pallas.git?rev=08e6356#08e635609999e45140e401674232191e074e60dc"
 dependencies = [
- "pallas-addresses 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=1d7a0d6)",
- "pallas-codec 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=1d7a0d6)",
- "pallas-configs 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=1d7a0d6)",
- "pallas-crypto 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=1d7a0d6)",
+ "pallas-addresses 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=08e6356)",
+ "pallas-codec 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=08e6356)",
+ "pallas-configs 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=08e6356)",
+ "pallas-crypto 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=08e6356)",
  "pallas-hardano",
- "pallas-network 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=1d7a0d6)",
- "pallas-primitives 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=1d7a0d6)",
- "pallas-traverse 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=1d7a0d6)",
- "pallas-txbuilder 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=1d7a0d6)",
- "pallas-utxorpc 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=1d7a0d6)",
- "pallas-validate 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=1d7a0d6)",
+ "pallas-network 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=08e6356)",
+ "pallas-primitives 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=08e6356)",
+ "pallas-traverse 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=08e6356)",
+ "pallas-txbuilder 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=08e6356)",
+ "pallas-utxorpc 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=08e6356)",
+ "pallas-validate 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=08e6356)",
 ]
 
 [[package]]
@@ -2905,15 +2921,15 @@ dependencies = [
 [[package]]
 name = "pallas-addresses"
 version = "1.0.0-alpha.2"
-source = "git+https://github.com/txpipe/pallas.git?rev=1d7a0d6#1d7a0d6defc54562d62cea570f9d77a4f306de51"
+source = "git+https://github.com/txpipe/pallas.git?rev=08e6356#08e635609999e45140e401674232191e074e60dc"
 dependencies = [
  "base58",
  "bech32 0.9.1",
  "crc",
  "cryptoxide",
  "hex",
- "pallas-codec 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=1d7a0d6)",
- "pallas-crypto 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=1d7a0d6)",
+ "pallas-codec 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=08e6356)",
+ "pallas-crypto 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=08e6356)",
  "thiserror 1.0.69",
 ]
 
@@ -2944,7 +2960,7 @@ dependencies = [
 [[package]]
 name = "pallas-codec"
 version = "1.0.0-alpha.2"
-source = "git+https://github.com/txpipe/pallas.git?rev=1d7a0d6#1d7a0d6defc54562d62cea570f9d77a4f306de51"
+source = "git+https://github.com/txpipe/pallas.git?rev=08e6356#08e635609999e45140e401674232191e074e60dc"
 dependencies = [
  "hex",
  "minicbor 0.26.4",
@@ -2971,13 +2987,13 @@ dependencies = [
 [[package]]
 name = "pallas-configs"
 version = "1.0.0-alpha.2"
-source = "git+https://github.com/txpipe/pallas.git?rev=1d7a0d6#1d7a0d6defc54562d62cea570f9d77a4f306de51"
+source = "git+https://github.com/txpipe/pallas.git?rev=08e6356#08e635609999e45140e401674232191e074e60dc"
 dependencies = [
  "base64 0.22.1",
  "num-rational",
- "pallas-addresses 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=1d7a0d6)",
- "pallas-crypto 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=1d7a0d6)",
- "pallas-primitives 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=1d7a0d6)",
+ "pallas-addresses 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=08e6356)",
+ "pallas-crypto 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=08e6356)",
+ "pallas-primitives 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=08e6356)",
  "serde",
  "serde_json",
  "serde_with 3.12.0",
@@ -3015,11 +3031,11 @@ dependencies = [
 [[package]]
 name = "pallas-crypto"
 version = "1.0.0-alpha.2"
-source = "git+https://github.com/txpipe/pallas.git?rev=1d7a0d6#1d7a0d6defc54562d62cea570f9d77a4f306de51"
+source = "git+https://github.com/txpipe/pallas.git?rev=08e6356#08e635609999e45140e401674232191e074e60dc"
 dependencies = [
  "cryptoxide",
  "hex",
- "pallas-codec 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=1d7a0d6)",
+ "pallas-codec 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=08e6356)",
  "rand_core 0.6.4",
  "serde",
  "thiserror 1.0.69",
@@ -3028,15 +3044,15 @@ dependencies = [
 [[package]]
 name = "pallas-hardano"
 version = "1.0.0-alpha.2"
-source = "git+https://github.com/txpipe/pallas.git?rev=1d7a0d6#1d7a0d6defc54562d62cea570f9d77a4f306de51"
+source = "git+https://github.com/txpipe/pallas.git?rev=08e6356#08e635609999e45140e401674232191e074e60dc"
 dependencies = [
  "binary-layout",
  "hex",
- "pallas-addresses 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=1d7a0d6)",
- "pallas-codec 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=1d7a0d6)",
- "pallas-crypto 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=1d7a0d6)",
- "pallas-network 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=1d7a0d6)",
- "pallas-traverse 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=1d7a0d6)",
+ "pallas-addresses 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=08e6356)",
+ "pallas-codec 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=08e6356)",
+ "pallas-crypto 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=08e6356)",
+ "pallas-network 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=08e6356)",
+ "pallas-traverse 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=08e6356)",
  "serde",
  "serde_json",
  "serde_with 3.12.0",
@@ -3084,13 +3100,13 @@ dependencies = [
 [[package]]
 name = "pallas-network"
 version = "1.0.0-alpha.2"
-source = "git+https://github.com/txpipe/pallas.git?rev=1d7a0d6#1d7a0d6defc54562d62cea570f9d77a4f306de51"
+source = "git+https://github.com/txpipe/pallas.git?rev=08e6356#08e635609999e45140e401674232191e074e60dc"
 dependencies = [
  "byteorder",
  "hex",
  "itertools 0.13.0",
- "pallas-codec 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=1d7a0d6)",
- "pallas-crypto 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=1d7a0d6)",
+ "pallas-codec 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=08e6356)",
+ "pallas-crypto 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=08e6356)",
  "rand 0.8.5",
  "socket2",
  "thiserror 1.0.69",
@@ -3130,11 +3146,11 @@ dependencies = [
 [[package]]
 name = "pallas-primitives"
 version = "1.0.0-alpha.2"
-source = "git+https://github.com/txpipe/pallas.git?rev=1d7a0d6#1d7a0d6defc54562d62cea570f9d77a4f306de51"
+source = "git+https://github.com/txpipe/pallas.git?rev=08e6356#08e635609999e45140e401674232191e074e60dc"
 dependencies = [
  "hex",
- "pallas-codec 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=1d7a0d6)",
- "pallas-crypto 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=1d7a0d6)",
+ "pallas-codec 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=08e6356)",
+ "pallas-crypto 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=08e6356)",
  "serde",
  "serde_json",
 ]
@@ -3176,14 +3192,14 @@ dependencies = [
 [[package]]
 name = "pallas-traverse"
 version = "1.0.0-alpha.2"
-source = "git+https://github.com/txpipe/pallas.git?rev=1d7a0d6#1d7a0d6defc54562d62cea570f9d77a4f306de51"
+source = "git+https://github.com/txpipe/pallas.git?rev=08e6356#08e635609999e45140e401674232191e074e60dc"
 dependencies = [
  "hex",
  "itertools 0.13.0",
- "pallas-addresses 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=1d7a0d6)",
- "pallas-codec 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=1d7a0d6)",
- "pallas-crypto 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=1d7a0d6)",
- "pallas-primitives 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=1d7a0d6)",
+ "pallas-addresses 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=08e6356)",
+ "pallas-codec 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=08e6356)",
+ "pallas-crypto 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=08e6356)",
+ "pallas-primitives 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=08e6356)",
  "paste",
  "serde",
  "thiserror 1.0.69",
@@ -3209,14 +3225,14 @@ dependencies = [
 [[package]]
 name = "pallas-txbuilder"
 version = "1.0.0-alpha.2"
-source = "git+https://github.com/txpipe/pallas.git?rev=1d7a0d6#1d7a0d6defc54562d62cea570f9d77a4f306de51"
+source = "git+https://github.com/txpipe/pallas.git?rev=08e6356#08e635609999e45140e401674232191e074e60dc"
 dependencies = [
  "hex",
- "pallas-addresses 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=1d7a0d6)",
- "pallas-codec 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=1d7a0d6)",
- "pallas-crypto 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=1d7a0d6)",
- "pallas-primitives 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=1d7a0d6)",
- "pallas-traverse 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=1d7a0d6)",
+ "pallas-addresses 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=08e6356)",
+ "pallas-codec 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=08e6356)",
+ "pallas-crypto 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=08e6356)",
+ "pallas-primitives 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=08e6356)",
+ "pallas-traverse 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=08e6356)",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -3240,15 +3256,15 @@ dependencies = [
 [[package]]
 name = "pallas-utxorpc"
 version = "1.0.0-alpha.2"
-source = "git+https://github.com/txpipe/pallas.git?rev=1d7a0d6#1d7a0d6defc54562d62cea570f9d77a4f306de51"
+source = "git+https://github.com/txpipe/pallas.git?rev=08e6356#08e635609999e45140e401674232191e074e60dc"
 dependencies = [
- "pallas-codec 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=1d7a0d6)",
- "pallas-crypto 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=1d7a0d6)",
- "pallas-primitives 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=1d7a0d6)",
- "pallas-traverse 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=1d7a0d6)",
- "pallas-validate 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=1d7a0d6)",
+ "pallas-codec 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=08e6356)",
+ "pallas-crypto 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=08e6356)",
+ "pallas-primitives 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=08e6356)",
+ "pallas-traverse 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=08e6356)",
+ "pallas-validate 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=08e6356)",
  "prost-types 0.13.5",
- "utxorpc-spec 0.16.0",
+ "utxorpc-spec 0.17.0",
 ]
 
 [[package]]
@@ -3273,16 +3289,16 @@ dependencies = [
 [[package]]
 name = "pallas-validate"
 version = "1.0.0-alpha.2"
-source = "git+https://github.com/txpipe/pallas.git?rev=1d7a0d6#1d7a0d6defc54562d62cea570f9d77a4f306de51"
+source = "git+https://github.com/txpipe/pallas.git?rev=08e6356#08e635609999e45140e401674232191e074e60dc"
 dependencies = [
  "chrono",
  "hex",
  "itertools 0.14.0",
- "pallas-addresses 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=1d7a0d6)",
- "pallas-codec 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=1d7a0d6)",
- "pallas-crypto 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=1d7a0d6)",
- "pallas-primitives 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=1d7a0d6)",
- "pallas-traverse 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=1d7a0d6)",
+ "pallas-addresses 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=08e6356)",
+ "pallas-codec 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=08e6356)",
+ "pallas-crypto 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=08e6356)",
+ "pallas-primitives 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=08e6356)",
+ "pallas-traverse 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=08e6356)",
  "serde",
  "thiserror 1.0.69",
  "tracing",
@@ -3513,6 +3529,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "proptest"
+version = "1.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6fcdab19deb5195a31cf7726a210015ff1496ba1464fd42cb4f537b8b01b471f"
+dependencies = [
+ "bit-set",
+ "bit-vec",
+ "bitflags 2.9.0",
+ "lazy_static",
+ "num-traits",
+ "rand 0.9.1",
+ "rand_chacha 0.9.0",
+ "rand_xorshift",
+ "regex-syntax 0.8.5",
+ "rusty-fork",
+ "tempfile",
+ "unarray",
+]
+
+[[package]]
 name = "prost"
 version = "0.12.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3610,6 +3646,12 @@ checksum = "6e944464ec8536cd1beb0bbfd96987eb5e3b72f2ecdafdc5c769a37f1fa2ae1f"
 dependencies = [
  "cc",
 ]
+
+[[package]]
+name = "quick-error"
+version = "1.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a1d01941d82fa2ab50be1e79e6714289dd7cde78eba4c074bc5a4374f650dfe0"
 
 [[package]]
 name = "quinn"
@@ -3743,6 +3785,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "99d9a13982dcf210057a8a78572b2217b667c3beacbf3a0d8b454f6f82837d38"
 dependencies = [
  "getrandom 0.3.2",
+]
+
+[[package]]
+name = "rand_xorshift"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "513962919efc330f829edb2535844d1b912b0fbe2ca165d613e4e8788bb05a5a"
+dependencies = [
+ "rand_core 0.9.3",
 ]
 
 [[package]]
@@ -4030,6 +4081,18 @@ name = "rustversion"
 version = "1.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eded382c5f5f786b989652c49544c4877d9f015cc22e145a5ea8ea66c2921cd2"
+
+[[package]]
+name = "rusty-fork"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cb3dcc6e454c328bb824492db107ab7c0ae8fcffe4ad210136ef014458c1bc4f"
+dependencies = [
+ "fnv",
+ "quick-error",
+ "tempfile",
+ "wait-timeout",
+]
 
 [[package]]
 name = "ryu"
@@ -4417,7 +4480,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "psm",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5173,6 +5236,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2896d95c02a80c6d6a5d6e953d479f5ddf2dfdb6a244441010e373ac0fb88971"
 
 [[package]]
+name = "unarray"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eaea85b334db583fe3274d12b4cd1880032beab409c0d774be044d4480ab9a94"
+
+[[package]]
 name = "unicode-ident"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5312,6 +5381,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "utxorpc-spec"
+version = "0.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a1d984ee351b308377e118135e638a5d544fdb0855f12a3b088d9dcaf0432052"
+dependencies = [
+ "bytes",
+ "futures-core",
+ "pbjson",
+ "pbjson-types",
+ "prost 0.13.5",
+ "prost-types 0.13.5",
+ "serde",
+ "tonic 0.12.3",
+]
+
+[[package]]
 name = "uuid"
 version = "1.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5340,6 +5425,15 @@ name = "virtue"
 version = "0.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "051eb1abcf10076295e815102942cc58f9d5e3b4560e46e53c21e8ff6f3af7b1"
+
+[[package]]
+name = "wait-timeout"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09ac3b126d3914f9849036f826e054cbabdc8519970b8998ddaf3b5bd3c65f11"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "walkdir"

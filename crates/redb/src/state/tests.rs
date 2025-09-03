@@ -1,5 +1,5 @@
 use pallas::ledger::addresses::{Address, ShelleyDelegationPart};
-use std::{collections::HashSet, str::FromStr as _};
+use std::{collections::HashSet, str::FromStr as _, sync::Arc};
 
 use dolos_testing::*;
 
@@ -186,7 +186,9 @@ fn test_query_by_address() {
     let initial_utxos = addresses
         .iter()
         .map(|(ordinal, address)| {
-            fake_genesis_utxo(address.clone(), *ordinal, 1_000_000_000 * (*ordinal as u64))
+            let (k, v) =
+                fake_genesis_utxo(address.clone(), *ordinal, 1_000_000_000 * (*ordinal as u64));
+            (k, Arc::new(v))
         })
         .collect();
 
@@ -258,7 +260,7 @@ fn test_count_utxos_by_address() {
         let expected = delta
             .produced_utxo
             .values()
-            .map(get_utxo_address_and_value)
+            .map(|x| get_utxo_address_and_value(x))
             .filter(|(addr, _)| addr == address.to_bytes().as_slice())
             .count();
 

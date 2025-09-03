@@ -7,7 +7,6 @@ use crate::prelude::*;
 pub mod apply;
 pub mod emulator;
 pub mod pull;
-pub mod roll;
 pub mod submit;
 
 const HOUSEKEEPING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
@@ -84,8 +83,6 @@ pub fn sync(
 ) -> Result<Vec<gasket::runtime::Tether>, Error> {
     let mut pull = pull::Stage::new(config, upstream, domain.wal().clone());
 
-    let mut roll = roll::Stage::new(domain.wal().clone());
-
     let mut apply = apply::Stage::new(domain.clone(), HOUSEKEEPING_INTERVAL);
 
     let submit = submit::Stage::new(
@@ -94,13 +91,9 @@ pub fn sync(
         domain.mempool().clone(),
     );
 
-    let (to_roll, from_pull) = gasket::messaging::tokio::mpsc_channel(50);
-    pull.downstream.connect(to_roll);
-    roll.upstream.connect(from_pull);
-
-    let (to_ledger, from_roll) = gasket::messaging::tokio::mpsc_channel(50);
-    roll.downstream.connect(to_ledger);
-    apply.upstream.connect(from_roll);
+    let (to_apply, from_pull) = gasket::messaging::tokio::mpsc_channel(50);
+    pull.downstream.connect(to_apply);
+    apply.upstream.connect(from_pull);
 
     // output to outside of out pipeline
     // apply.downstream.connect(output);
@@ -108,11 +101,10 @@ pub fn sync(
     let policy = define_gasket_policy(retries);
 
     let pull = gasket::runtime::spawn_stage(pull, policy.clone());
-    let roll = gasket::runtime::spawn_stage(roll, policy.clone());
     let apply = gasket::runtime::spawn_stage(apply, policy.clone());
     let submit = gasket::runtime::spawn_stage(submit, policy.clone());
 
-    Ok(vec![pull, roll, apply, submit])
+    Ok(vec![pull, apply, submit])
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -127,16 +119,11 @@ pub fn devnet(
         emulator_cfg.block_production_interval,
     );
 
-    let mut roll = roll::Stage::new(domain.wal().clone());
     let mut apply = apply::Stage::new(domain.clone(), HOUSEKEEPING_INTERVAL);
 
-    let (to_roll, from_pull) = gasket::messaging::tokio::mpsc_channel(50);
-    emulator.downstream.connect(to_roll);
-    roll.upstream.connect(from_pull);
-
-    let (to_ledger, from_roll) = gasket::messaging::tokio::mpsc_channel(50);
-    roll.downstream.connect(to_ledger);
-    apply.upstream.connect(from_roll);
+    let (to_apply, from_pull) = gasket::messaging::tokio::mpsc_channel(50);
+    emulator.downstream.connect(to_apply);
+    apply.upstream.connect(from_pull);
 
     // output to outside of out pipeline
     // apply.downstream.connect(output);
@@ -144,8 +131,7 @@ pub fn devnet(
     let policy = define_gasket_policy(retries);
 
     let emulator = gasket::runtime::spawn_stage(emulator, policy.clone());
-    let roll = gasket::runtime::spawn_stage(roll, policy.clone());
     let apply = gasket::runtime::spawn_stage(apply, policy.clone());
 
-    Ok(vec![emulator, roll, apply])
+    Ok(vec![emulator, apply])
 }

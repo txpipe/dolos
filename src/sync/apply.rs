@@ -1,15 +1,25 @@
-use std::sync::Arc;
-
-use gasket::framework::*;
-use tracing::{debug, info};
+use gasket::{framework::*, messaging::Message};
+use tracing::info;
 
 use crate::{adapters::DomainAdapter, prelude::*};
 
-pub type UpstreamPort = gasket::messaging::InputPort<RollEvent>;
+pub type UpstreamPort = gasket::messaging::InputPort<PullEvent>;
 
 pub enum WorkUnit {
-    ApplyEvent,
+    PullEvent(PullEvent),
     Housekeeping,
+}
+
+impl From<Message<PullEvent>> for WorkUnit {
+    fn from(value: Message<PullEvent>) -> Self {
+        WorkUnit::PullEvent(value.payload)
+    }
+}
+
+impl From<WorkUnit> for WorkSchedule<WorkUnit> {
+    fn from(value: WorkUnit) -> Self {
+        WorkSchedule::Unit(value)
+    }
 }
 
 #[derive(Stage)]
@@ -39,110 +49,54 @@ impl Stage {
         }
     }
 
-    fn process_origin(&self) -> Result<(), WorkerError> {
-        info!("applying origin");
+    fn on_roll_forward(&self, block: &RawBlock) -> Result<(), WorkerError> {
+        info!("handling roll forward");
 
-        dolos_core::sync::apply_origin(&self.domain).or_panic()?;
-
-        Ok(())
-    }
-
-    fn process_apply(&self, block: RawBlock) -> Result<(), WorkerError> {
-        info!(slot = &block.slot, "applying block");
-
-        let block = Arc::new(block.body);
-
-        dolos_core::sync::apply_block(&self.domain, block).or_panic()?;
+        dolos_core::follow::roll_forward(&self.domain, block).or_panic()?;
 
         Ok(())
     }
 
-    fn process_undo(&self, block: RawBlock) -> Result<(), WorkerError> {
-        info!(slot = &block.slot, "undoing block");
+    fn on_rollback(&self, point: &ChainPoint) -> Result<(), WorkerError> {
+        info!(slot = &point.slot(), "handling rollback");
 
-        todo!();
-        //self.domain.undo_blocks(&[block]).or_panic()?;
+        dolos_core::follow::rollback(&self.domain, point).or_panic()?;
 
         Ok(())
-    }
-
-    fn process_wal(&mut self, log: LogValue) -> Result<(), WorkerError> {
-        match log {
-            LogValue::Mark(ChainPoint::Origin) => self.process_origin(),
-            LogValue::Apply(x) => self.process_apply(x),
-            LogValue::Undo(x) => self.process_undo(x),
-            // we can skip marks since we know they have been already applied
-            LogValue::Mark(..) => Ok(()),
-        }
     }
 }
 
 pub struct Worker {
-    logseq: LogSeq,
-    housekeeping_timer: tokio::time::Interval,
+    interval: tokio::time::Interval,
 }
 
 #[async_trait::async_trait(?Send)]
 impl gasket::framework::Worker<Stage> for Worker {
     async fn bootstrap(stage: &Stage) -> Result<Self, WorkerError> {
-        let cursor = stage.domain.state().cursor().or_panic()?;
-
-        if cursor.is_none() {
-            info!("cursor not found, applying origin");
-            stage.process_origin()?;
-        } else {
-            info!(?cursor, "cursor found");
-        }
-
-        let point = cursor.unwrap_or(ChainPoint::Origin);
-
-        let seq = stage.domain.wal().assert_point(&point).or_panic()?;
-
-        info!(seq, "wal sequence found");
-
         Ok(Self {
-            logseq: seq,
-            housekeeping_timer: tokio::time::interval(stage.housekeeping_interval),
+            interval: tokio::time::interval(stage.housekeeping_interval),
         })
     }
 
     async fn schedule(&mut self, stage: &mut Stage) -> Result<WorkSchedule<WorkUnit>, WorkerError> {
-        {
-            tokio::select! {
-                msg = stage.upstream.recv() => {
-                    let _ = msg.or_panic()?;
-                    Ok(WorkSchedule::Unit(WorkUnit::ApplyEvent))
-                }
-                _ = self.housekeeping_timer.tick() => {
-                    Ok(WorkSchedule::Unit(WorkUnit::Housekeeping))
-                }
+        tokio::select! {
+            msg = stage.upstream.recv() => {
+                let msg = msg.or_panic()?;
+                let unit = WorkUnit::from(msg);
+                Ok(unit.into())
+            }
+            _ = self.interval.tick() => {
+                Ok(WorkSchedule::Unit(WorkUnit::Housekeeping))
             }
         }
     }
 
-    /// Catch-up ledger with latest state of WAL
-    ///
-    /// Reads from WAL using the latest known cursor and applies the
-    /// corresponding downstream changes to the ledger
     async fn execute(&mut self, unit: &WorkUnit, stage: &mut Stage) -> Result<(), WorkerError> {
         match unit {
-            WorkUnit::ApplyEvent => {
-                let iter = stage
-                    .domain
-                    .wal()
-                    .crawl_from(Some(self.logseq))
-                    .or_panic()?
-                    .skip(1);
-
-                // TODO: analyze scenario where we're too far behind and this for loop takes
-                // longer that the allocated policy timeout.
-
-                for (seq, log) in iter {
-                    debug!(seq, "processing wal entry");
-                    stage.process_wal(log)?;
-                    self.logseq = seq;
-                }
-            }
+            WorkUnit::PullEvent(evt) => match evt {
+                PullEvent::RollForward(x) => stage.on_roll_forward(x)?,
+                PullEvent::Rollback(x) => stage.on_rollback(x)?,
+            },
             WorkUnit::Housekeeping => {
                 stage.domain.housekeeping().or_panic()?;
             }
