@@ -37,7 +37,7 @@ impl From<&Config> for RootResponse {
                 .clone()
                 .unwrap_or(value.listen_address.to_string()),
             version: env!("CARGO_PKG_VERSION").to_string(),
-            revision: env::var("GIT_REVISION").ok(),
+            revision: option_env!("GIT_REVISION").map(|x| x.to_string()),
         }
     }
 }
