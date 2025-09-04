@@ -31,6 +31,7 @@ pub struct Config {
     pub permissive_cors: Option<bool>,
     pub metadata_max_scan_depth: Option<usize>,
     pub token_registry_url: Option<String>,
+    pub url: Option<String>,
 }
 
 #[derive(Clone)]
@@ -130,6 +131,9 @@ impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
 
     async fn run(cfg: Self::Config, domain: D, cancel: C) -> Result<(), ServeError> {
         let app = Router::new()
+            .route("/", get(routes::root::<D>))
+            .route("/health", get(routes::health::naked))
+            .route("/health/clock", get(routes::health::clock))
             .route("/genesis", get(routes::genesis::naked::<D>))
             .route("/network", get(routes::network::naked::<D>))
             .route("/network/eras", get(routes::network::eras::<D>))
