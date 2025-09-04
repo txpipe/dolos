@@ -25,6 +25,8 @@ jobs:
             args: "--locked --release"
 
     runs-on: ${{ matrix.build_on }}
+    env:
+        GIT_REVISION: "{{ github.sha }}"
 
     steps:
       - name: checkout repository
@@ -58,8 +60,6 @@ jobs:
   docker:
     runs-on: ubuntu-latest
     needs: [build]
-    env:
-        GIT_REVISION: "{{ github.sha }}"
 
     permissions:
       contents: read
