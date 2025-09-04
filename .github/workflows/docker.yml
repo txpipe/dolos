@@ -26,7 +26,7 @@ jobs:
 
     runs-on: ${{ matrix.build_on }}
     env:
-        GIT_REVISION: "{{ github.sha }}"
+        GIT_REVISION: "${{ github.sha }}"
 
     steps:
       - name: checkout repository
