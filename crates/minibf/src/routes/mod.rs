@@ -13,6 +13,8 @@ pub mod tx;
 pub mod txs;
 pub mod utxos;
 
+use std::env;
+
 use axum::{extract::State, http::StatusCode, Json};
 use dolos_core::Domain;
 use serde::{Deserialize, Serialize};
@@ -23,6 +25,8 @@ use crate::{Config, Facade};
 pub struct RootResponse {
     url: String,
     version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    revision: Option<String>,
 }
 
 impl From<&Config> for RootResponse {
@@ -33,6 +37,7 @@ impl From<&Config> for RootResponse {
                 .clone()
                 .unwrap_or(value.listen_address.to_string()),
             version: env!("CARGO_PKG_VERSION").to_string(),
+            revision: env::var("GIT_REVISION").ok(),
         }
     }
 }
