@@ -317,6 +317,7 @@ impl ConfigEditor {
                     permissive_cors: Some(true),
                     metadata_max_scan_depth: None,
                     token_registry_url: None,
+                    url: None,
                 }
                 .into();
             } else {
