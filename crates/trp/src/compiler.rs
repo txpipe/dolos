@@ -70,6 +70,7 @@ pub fn load_compiler<D: Domain>(
         pparams,
         tx3_cardano::Config {
             extra_fees: config.extra_fees,
+            tip_slot: tip_slot.as_ref().map(|p| p.slot()),
         },
     );
 
