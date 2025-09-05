@@ -94,12 +94,14 @@ pub fn load_compiler<D: Domain>(
     ledger: &D::State,
     config: &Config,
 ) -> Result<tx3_cardano::Compiler, Error> {
+    let tip_slot = ledger.cursor()?;
     let pparams = build_pparams::<D>(genesis, ledger)?;
 
     let compiler = tx3_cardano::Compiler::new(
         pparams,
         tx3_cardano::Config {
             extra_fees: config.extra_fees,
+            tip_slot: tip_slot.as_ref().map(|p| p.slot()),
         },
     );
 
