@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 
-use dolos_core::{NsKey, State3Error, StateDelta};
+use dolos_core::batch::WorkDeltas;
+use dolos_core::{ChainError, NsKey};
 use pallas::crypto::hash::{Hash, Hasher};
 use pallas::ledger::traverse::{MultiEraBlock, MultiEraCert, MultiEraTx};
 use serde::{Deserialize, Serialize};
@@ -55,7 +56,7 @@ impl dolos_core::EntityDelta for PoolRegistration {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MintedBlocksInc {
     operator: Hash<28>,
     count: u32,
@@ -81,21 +82,16 @@ impl dolos_core::EntityDelta for MintedBlocksInc {
     }
 }
 
-pub struct PoolStateVisitor<'a> {
-    delta: &'a mut StateDelta<CardanoDelta>,
-}
+pub struct PoolStateVisitor;
 
-impl<'a> From<&'a mut StateDelta<CardanoDelta>> for PoolStateVisitor<'a> {
-    fn from(delta: &'a mut StateDelta<CardanoDelta>) -> Self {
-        Self { delta }
-    }
-}
-
-impl<'a> BlockVisitor for PoolStateVisitor<'a> {
-    fn visit_root(&mut self, block: &MultiEraBlock) -> Result<(), State3Error> {
+impl<'a> BlockVisitor for PoolStateVisitor {
+    fn visit_root(
+        deltas: &mut WorkDeltas<CardanoLogic>,
+        block: &MultiEraBlock,
+    ) -> Result<(), ChainError> {
         if let Some(key) = block.header().issuer_vkey() {
             let operator: Hash<28> = Hasher::<224>::hash(key);
-            self.delta.add_delta(MintedBlocksInc { operator, count: 1 });
+            deltas.add_for_entity(MintedBlocksInc { operator, count: 1 });
         }
 
         Ok(())
@@ -106,7 +102,7 @@ impl<'a> BlockVisitor for PoolStateVisitor<'a> {
         _: &MultiEraBlock,
         _: &MultiEraTx,
         cert: &MultiEraCert,
-    ) -> Result<(), State3Error> {
+    ) -> Result<(), ChainError> {
         if let Some(cert) = pallas_extras::cert_to_pool_state(cert) {
             deltas.add_for_entity(PoolRegistration::new(cert));
         }

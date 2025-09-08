@@ -487,6 +487,9 @@ pub enum ChainError {
     #[error("decoding error")]
     DecodingError(#[from] pallas::ledger::traverse::Error),
 
+    #[error("address decoding error")]
+    AddressDecoding(#[from] pallas::ledger::addresses::Error),
+
     #[error(transparent)]
     State3Error(#[from] State3Error),
 }
@@ -556,7 +559,7 @@ pub enum DomainError {
     MempoolError(#[from] MempoolError),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TipEvent {
     Mark(ChainPoint),
     Apply(ChainPoint, RawBlock),

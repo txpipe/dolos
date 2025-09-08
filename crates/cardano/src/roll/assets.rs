@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::u64;
 
 use dolos_core::batch::WorkDeltas;
-use dolos_core::NsKey;
+use dolos_core::{ChainError, NsKey};
 use pallas::crypto::hash::Hash;
 use pallas::ledger::traverse::{MultiEraBlock, MultiEraPolicyAssets, MultiEraTx};
 use serde::{Deserialize, Serialize};
@@ -71,7 +71,7 @@ impl BlockVisitor for AssetStateVisitor {
         block: &MultiEraBlock,
         tx: &MultiEraTx,
         mint: &MultiEraPolicyAssets,
-    ) -> Result<(), State3Error> {
+    ) -> Result<(), ChainError> {
         let policy = mint.policy();
 
         for asset in mint.assets() {

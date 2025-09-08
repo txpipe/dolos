@@ -1,4 +1,4 @@
-use dolos_core::{batch::WorkDeltas, State3Error};
+use dolos_core::{batch::WorkDeltas, ChainError};
 use pallas::ledger::traverse::{MultiEraBlock, MultiEraTx};
 
 use crate::{roll::BlockVisitor, CardanoLogic};
@@ -10,7 +10,7 @@ impl BlockVisitor for TxLogVisitor {
         deltas: &mut WorkDeltas<CardanoLogic>,
         _: &MultiEraBlock,
         tx: &MultiEraTx,
-    ) -> Result<(), State3Error> {
+    ) -> Result<(), ChainError> {
         deltas.slot.tx_hashes.push(tx.hash().to_vec());
 
         Ok(())

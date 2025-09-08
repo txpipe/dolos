@@ -1,6 +1,6 @@
 use std::{borrow::Cow, ops::Deref as _};
 
-use dolos_core::{NsKey, State3Error, State3Store, StateDelta};
+use dolos_core::{batch::WorkDeltas, ChainError, NsKey};
 use pallas::{
     codec::minicbor,
     ledger::{
@@ -11,11 +11,12 @@ use pallas::{
         traverse::{MultiEraBlock, MultiEraCert, MultiEraTx},
     },
 };
+use serde::{Deserialize, Serialize};
 
 use crate::{
     model::DRepState,
     roll::{BlockVisitor, DeltaBuilder},
-    CardanoDelta, FixedNamespace as _,
+    CardanoDelta, CardanoLogic, FixedNamespace as _,
 };
 
 const DREP_KEY_PREFIX: u8 = 0b00100010;
@@ -53,7 +54,7 @@ fn cert_to_id(cert: &MultiEraCert) -> Option<Vec<u8>> {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DRepReg {
     cred: StakeCredential,
     slot: u64,
@@ -104,6 +105,7 @@ impl dolos_core::EntityDelta for DRepReg {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DRepUnReg {
     cred: StakeCredential,
     slot: u64,
@@ -150,27 +152,19 @@ impl dolos_core::EntityDelta for DRepUnReg {
     }
 }
 
-pub struct DRepStateVisitor<'a> {
-    delta: &'a mut StateDelta<CardanoDelta>,
-}
+pub struct DRepStateVisitor;
 
-impl<'a> From<&'a mut StateDelta<CardanoDelta>> for DRepStateVisitor<'a> {
-    fn from(delta: &'a mut StateDelta<CardanoDelta>) -> Self {
-        Self { delta }
-    }
-}
-
-impl<'a> BlockVisitor for DRepStateVisitor<'a> {
+impl BlockVisitor for DRepStateVisitor {
     fn visit_cert(
-        &mut self,
+        deltas: &mut WorkDeltas<CardanoLogic>,
         block: &MultiEraBlock,
         _: &MultiEraTx,
         cert: &MultiEraCert,
-    ) -> Result<(), State3Error> {
+    ) -> Result<(), ChainError> {
         if let MultiEraCert::Conway(conway) = &cert {
             match conway.deref().deref() {
                 conway::Certificate::RegDRepCert(cred, deposit, anchor) => {
-                    self.delta.add_delta(DRepReg::new(
+                    deltas.add_for_entity(DRepReg::new(
                         cred.clone(),
                         block.slot(),
                         *deposit,
@@ -178,8 +172,7 @@ impl<'a> BlockVisitor for DRepStateVisitor<'a> {
                     ));
                 }
                 conway::Certificate::UnRegDRepCert(cred, coin) => {
-                    self.delta
-                        .add_delta(DRepUnReg::new(cred.clone(), block.slot(), *coin));
+                    deltas.add_for_entity(DRepUnReg::new(cred.clone(), block.slot(), *coin));
                 }
                 _ => (),
             }

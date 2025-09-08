@@ -1,10 +1,10 @@
 use std::borrow::Cow;
 
 use dolos_core::batch::WorkDeltas;
-use dolos_core::{NsKey, State3Error};
+use dolos_core::{ChainError, NsKey};
 use pallas::codec::minicbor;
 use pallas::crypto::hash::Hash;
-use pallas::ledger::addresses::{ShelleyDelegationPart, StakePayload};
+use pallas::ledger::primitives::conway::DRep;
 use pallas::ledger::{
     addresses::Address,
     primitives::StakeCredential,
@@ -102,7 +102,7 @@ impl dolos_core::EntityDelta for ControlledAmountDec {
         let entity = entity.get_or_insert_default();
         // TODO: saturating sub shouldn't be necesary
         //entity.controlled_amount -= self.amount;
-        let _ = entity.controlled_amount.saturating_sub(self.amount);
+        entity.controlled_amount = entity.controlled_amount.saturating_sub(self.amount);
     }
 
     fn undo(&mut self, entity: &mut Option<AccountState>) {
@@ -193,6 +193,48 @@ impl dolos_core::EntityDelta for StakeDelegation {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VoteDelegation {
+    cred: StakeCredential,
+    drep: DRep,
+
+    // undo
+    prev_drep_id: Option<DRep>,
+}
+
+impl VoteDelegation {
+    pub fn new(cred: StakeCredential, drep: DRep) -> Self {
+        Self {
+            cred,
+            drep,
+            prev_drep_id: None,
+        }
+    }
+}
+
+impl dolos_core::EntityDelta for VoteDelegation {
+    type Entity = AccountState;
+
+    fn key(&self) -> Cow<'_, NsKey> {
+        let enc = minicbor::to_vec(&self.cred).unwrap();
+        Cow::Owned(NsKey::from((AccountState::NS, enc)))
+    }
+
+    fn apply(&mut self, entity: &mut Option<AccountState>) {
+        let entity = entity.get_or_insert_default();
+
+        // save undo info
+        self.prev_drep_id = entity.drep.clone();
+
+        entity.drep = Some(self.drep.clone());
+    }
+
+    fn undo(&mut self, entity: &mut Option<AccountState>) {
+        let entity = entity.get_or_insert_default();
+        entity.drep = self.prev_drep_id.clone();
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StakeDeregistration {
     cred: StakeCredential,
     slot: u64,
@@ -229,6 +271,7 @@ impl dolos_core::EntityDelta for StakeDeregistration {
         self.prev_pool_id = entity.pool_id.clone();
 
         entity.registered_at = None;
+        entity.pool_id = None;
     }
 
     fn undo(&mut self, entity: &mut Option<AccountState>) {
@@ -238,28 +281,32 @@ impl dolos_core::EntityDelta for StakeDeregistration {
     }
 }
 
-pub struct AccountVisitor;
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WithdrawalInc {
+    cred: StakeCredential,
+    amount: u64,
+}
 
-impl AccountVisitor {
-    fn extract_stake_cred(output: &MultiEraOutput) -> Option<(StakeCredential, Address)> {
-        let full = output.address().ok()?;
+impl dolos_core::EntityDelta for WithdrawalInc {
+    type Entity = AccountState;
 
-        let stake = match &full {
-            Address::Shelley(x) => match x.delegation() {
-                ShelleyDelegationPart::Key(x) => Some(StakeCredential::AddrKeyhash(*x)),
-                ShelleyDelegationPart::Script(x) => Some(StakeCredential::ScriptHash(*x)),
-                _ => None,
-            },
-            Address::Stake(x) => match x.payload() {
-                StakePayload::Stake(x) => Some(StakeCredential::AddrKeyhash(*x)),
-                StakePayload::Script(x) => Some(StakeCredential::ScriptHash(*x)),
-            },
-            _ => None,
-        }?;
+    fn key(&self) -> Cow<'_, NsKey> {
+        let enc = minicbor::to_vec(&self.cred).unwrap();
+        Cow::Owned(NsKey::from((AccountState::NS, enc)))
+    }
 
-        Some((stake, full))
+    fn apply(&mut self, entity: &mut Option<Self::Entity>) {
+        let entity = entity.get_or_insert_default();
+        entity.withdrawals_sum += self.amount;
+    }
+
+    fn undo(&mut self, entity: &mut Option<Self::Entity>) {
+        let entity = entity.get_or_insert_default();
+        entity.withdrawals_sum = entity.withdrawals_sum.saturating_sub(self.amount);
     }
 }
+
+pub struct AccountVisitor;
 
 impl BlockVisitor for AccountVisitor {
     fn visit_input(
@@ -268,8 +315,10 @@ impl BlockVisitor for AccountVisitor {
         _: &MultiEraTx,
         _: &MultiEraInput,
         resolved: &MultiEraOutput,
-    ) -> Result<(), State3Error> {
-        let Some((cred, _)) = Self::extract_stake_cred(resolved) else {
+    ) -> Result<(), ChainError> {
+        let address = resolved.address().unwrap();
+
+        let Some(cred) = pallas_extras::address_as_stake_cred(&address) else {
             return Ok(());
         };
 
@@ -287,8 +336,10 @@ impl BlockVisitor for AccountVisitor {
         _: &MultiEraTx,
         _: u32,
         output: &MultiEraOutput,
-    ) -> Result<(), State3Error> {
-        let Some((cred, full_address)) = Self::extract_stake_cred(output) else {
+    ) -> Result<(), ChainError> {
+        let address = output.address().unwrap();
+
+        let Some(cred) = pallas_extras::address_as_stake_cred(&address) else {
             return Ok(());
         };
 
@@ -297,7 +348,7 @@ impl BlockVisitor for AccountVisitor {
             amount: output.value().coin(),
         });
 
-        deltas.add_for_entity(TrackSeenAddresses::new(cred, full_address));
+        deltas.add_for_entity(TrackSeenAddresses::new(cred, address));
 
         Ok(())
     }
@@ -307,7 +358,7 @@ impl BlockVisitor for AccountVisitor {
         block: &MultiEraBlock,
         _: &MultiEraTx,
         cert: &MultiEraCert,
-    ) -> Result<(), State3Error> {
+    ) -> Result<(), ChainError> {
         if let Some(cred) = pallas_extras::cert_as_stake_registration(cert) {
             debug!("detected stake registration");
 
@@ -325,6 +376,30 @@ impl BlockVisitor for AccountVisitor {
 
             deltas.add_for_entity(StakeDeregistration::new(cred, block.slot()));
         }
+
+        if let Some(cert) = pallas_extras::cert_as_vote_delegation(cert) {
+            debug!("detected vote delegation");
+
+            deltas.add_for_entity(VoteDelegation::new(cert.delegator, cert.drep));
+        }
+
+        Ok(())
+    }
+
+    fn visit_withdrawal(
+        deltas: &mut WorkDeltas<CardanoLogic>,
+        _: &MultiEraBlock,
+        _: &MultiEraTx,
+        account: &[u8],
+        amount: u64,
+    ) -> Result<(), ChainError> {
+        let address = Address::from_bytes(account)?;
+
+        let Some(cred) = pallas_extras::address_as_stake_cred(&address) else {
+            return Ok(());
+        };
+
+        deltas.add_for_entity(WithdrawalInc { cred, amount });
 
         Ok(())
     }

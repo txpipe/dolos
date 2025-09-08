@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use dolos_core::{
     batch::{WorkBlock, WorkDeltas},
-    InvariantViolation, State3Error, TxoRef,
+    ChainError, InvariantViolation, State3Error, TxoRef,
 };
 use pallas::ledger::traverse::{
     MultiEraBlock, MultiEraCert, MultiEraInput, MultiEraOutput, MultiEraPolicyAssets, MultiEraTx,
@@ -31,7 +31,7 @@ pub trait BlockVisitor {
     fn visit_root(
         deltas: &mut WorkDeltas<CardanoLogic>,
         block: &MultiEraBlock,
-    ) -> Result<(), State3Error> {
+    ) -> Result<(), ChainError> {
         Ok(())
     }
 
@@ -40,7 +40,7 @@ pub trait BlockVisitor {
         deltas: &mut WorkDeltas<CardanoLogic>,
         block: &MultiEraBlock,
         tx: &MultiEraTx,
-    ) -> Result<(), State3Error> {
+    ) -> Result<(), ChainError> {
         Ok(())
     }
 
@@ -51,7 +51,7 @@ pub trait BlockVisitor {
         tx: &MultiEraTx,
         input: &MultiEraInput,
         resolved: &MultiEraOutput,
-    ) -> Result<(), State3Error> {
+    ) -> Result<(), ChainError> {
         Ok(())
     }
 
@@ -62,7 +62,7 @@ pub trait BlockVisitor {
         tx: &MultiEraTx,
         index: u32,
         output: &MultiEraOutput,
-    ) -> Result<(), State3Error> {
+    ) -> Result<(), ChainError> {
         Ok(())
     }
 
@@ -72,7 +72,7 @@ pub trait BlockVisitor {
         block: &MultiEraBlock,
         tx: &MultiEraTx,
         mint: &MultiEraPolicyAssets,
-    ) -> Result<(), State3Error> {
+    ) -> Result<(), ChainError> {
         Ok(())
     }
 
@@ -82,7 +82,18 @@ pub trait BlockVisitor {
         block: &MultiEraBlock,
         tx: &MultiEraTx,
         cert: &MultiEraCert,
-    ) -> Result<(), State3Error> {
+    ) -> Result<(), ChainError> {
+        Ok(())
+    }
+
+    #[allow(unused_variables)]
+    fn visit_withdrawal(
+        deltas: &mut WorkDeltas<CardanoLogic>,
+        block: &MultiEraBlock,
+        tx: &MultiEraTx,
+        account: &[u8],
+        amount: u64,
+    ) -> Result<(), ChainError> {
         Ok(())
     }
 }
@@ -119,7 +130,7 @@ impl<'a> DeltaBuilder<'a> {
     pub fn crawl(
         &mut self,
         inputs: &HashMap<TxoRef, OwnedMultiEraOutput>,
-    ) -> Result<(), State3Error> {
+    ) -> Result<(), ChainError> {
         let block = self.work.unwrap_decoded();
         let block = block.view();
         let mut deltas = WorkDeltas::default();
@@ -138,7 +149,7 @@ impl<'a> DeltaBuilder<'a> {
 
                 resolved.with_dependent(|_, resolved| {
                     visit_all!(self, deltas, visit_input, block, &tx, &input, &resolved);
-                    Result::<_, State3Error>::Ok(())
+                    Result::<_, ChainError>::Ok(())
                 })?;
             }
 
@@ -160,6 +171,10 @@ impl<'a> DeltaBuilder<'a> {
 
             for cert in tx.certs() {
                 visit_all!(self, deltas, visit_cert, block, &tx, &cert);
+            }
+
+            for (account, amount) in tx.withdrawals().collect::<Vec<_>>() {
+                visit_all!(self, deltas, visit_withdrawal, block, &tx, &account, amount);
             }
         }
 
