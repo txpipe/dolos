@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use dolos_core::{batch::WorkDeltas, NsKey, State3Error};
+use dolos_core::{batch::WorkDeltas, ChainError, NsKey, State3Error};
 use pallas::ledger::traverse::MultiEraBlock;
 use serde::{Deserialize, Serialize};
 
@@ -41,7 +41,7 @@ impl BlockVisitor for EpochStateVisitor {
     fn visit_root(
         deltas: &mut WorkDeltas<CardanoLogic>,
         block: &MultiEraBlock,
-    ) -> Result<(), State3Error> {
+    ) -> Result<(), ChainError> {
         let block_fees = block.txs().iter().filter_map(|tx| tx.fee()).sum::<u64>();
 
         deltas.add_for_entity(EpochStatsUpdate { block_fees });

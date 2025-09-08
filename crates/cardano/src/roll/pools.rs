@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 
 use dolos_core::batch::WorkDeltas;
-use dolos_core::{NsKey, State3Error};
+use dolos_core::{ChainError, NsKey};
 use pallas::ledger::traverse::{MultiEraBlock, MultiEraCert, MultiEraTx};
 use serde::{Deserialize, Serialize};
 
@@ -63,7 +63,7 @@ impl BlockVisitor for PoolStateVisitor {
         _: &MultiEraBlock,
         _: &MultiEraTx,
         cert: &MultiEraCert,
-    ) -> Result<(), State3Error> {
+    ) -> Result<(), ChainError> {
         if let Some(cert) = pallas_extras::cert_to_pool_state(cert) {
             deltas.add_for_entity(PoolRegistration::new(cert));
         }

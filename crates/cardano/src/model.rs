@@ -5,7 +5,7 @@ use dolos_core::{EntityValue, Namespace, NamespaceType, NsKey, State3Error, Stat
 use pallas::{
     codec::minicbor::{self, Decode, Encode},
     crypto::hash::Hash,
-    ledger::primitives::{PoolMetadata, RationalNumber, Relay},
+    ledger::primitives::{conway::DRep, PoolMetadata, RationalNumber, Relay},
 };
 use serde::{Deserialize, Serialize};
 
@@ -76,7 +76,7 @@ pub struct AccountState {
     pub pool_id: Option<Vec<u8>>,
 
     #[n(8)]
-    pub drep_id: Option<Vec<u8>>,
+    pub drep: Option<DRep>,
 
     // capped size, LRU type cache
     #[n(9)]
@@ -338,7 +338,7 @@ pub fn build_schema() -> StateSchema {
 
 use crate::roll::accounts::{
     ControlledAmountDec, ControlledAmountInc, StakeDelegation, StakeDeregistration,
-    StakeRegistration, TrackSeenAddresses,
+    StakeRegistration, TrackSeenAddresses, VoteDelegation, WithdrawalInc,
 };
 use crate::roll::assets::MintStatsUpdate;
 use crate::roll::epochs::EpochStatsUpdate;
@@ -355,6 +355,8 @@ pub enum CardanoDelta {
     PoolRegistration(PoolRegistration),
     MintStatsUpdate(MintStatsUpdate),
     EpochStatsUpdate(EpochStatsUpdate),
+    WithdrawalInc(WithdrawalInc),
+    VoteDelegation(VoteDelegation),
 }
 
 impl CardanoDelta {
@@ -400,6 +402,8 @@ delta_from!(StakeDeregistration);
 delta_from!(PoolRegistration);
 delta_from!(MintStatsUpdate);
 delta_from!(EpochStatsUpdate);
+delta_from!(WithdrawalInc);
+delta_from!(VoteDelegation);
 
 impl dolos_core::EntityDelta for CardanoDelta {
     type Entity = super::model::CardanoEntity;
@@ -415,6 +419,8 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::PoolRegistration(x) => x.key(),
             Self::MintStatsUpdate(x) => x.key(),
             Self::EpochStatsUpdate(x) => x.key(),
+            Self::WithdrawalInc(x) => x.key(),
+            Self::VoteDelegation(x) => x.key(),
         }
     }
 
@@ -429,6 +435,8 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::PoolRegistration(x) => Self::downcast_apply(x, entity),
             Self::MintStatsUpdate(x) => Self::downcast_apply(x, entity),
             Self::EpochStatsUpdate(x) => Self::downcast_apply(x, entity),
+            Self::WithdrawalInc(x) => Self::downcast_apply(x, entity),
+            Self::VoteDelegation(x) => Self::downcast_apply(x, entity),
         }
     }
 
@@ -443,6 +451,8 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::PoolRegistration(x) => Self::downcast_undo(x, entity),
             Self::MintStatsUpdate(x) => Self::downcast_undo(x, entity),
             Self::EpochStatsUpdate(x) => Self::downcast_undo(x, entity),
+            Self::WithdrawalInc(x) => Self::downcast_undo(x, entity),
+            Self::VoteDelegation(x) => Self::downcast_undo(x, entity),
         }
     }
 }

@@ -2,7 +2,10 @@ use std::ops::Deref as _;
 
 use dolos_core::BlockSlot;
 use pallas::crypto::hash::Hash;
-use pallas::ledger::addresses::{Network, StakeAddress, StakePayload};
+use pallas::ledger::addresses::{
+    Address, Network, ShelleyAddress, ShelleyDelegationPart, StakeAddress, StakePayload,
+};
+use pallas::ledger::primitives::conway::DRep;
 use pallas::ledger::primitives::{
     alonzo::Certificate as AlonzoCert, conway::Certificate as ConwayCert, PoolMetadata,
     RationalNumber, Relay, StakeCredential,
@@ -79,6 +82,24 @@ pub fn cert_to_pool_state(cert: &MultiEraCert) -> Option<MultiEraPoolRegistratio
     }
 }
 
+pub struct MultiEraVoteDelegation {
+    pub delegator: StakeCredential,
+    pub drep: DRep,
+}
+
+pub fn cert_as_vote_delegation(cert: &MultiEraCert) -> Option<MultiEraVoteDelegation> {
+    match cert {
+        MultiEraCert::Conway(cow) => match cow.deref().deref() {
+            ConwayCert::VoteDeleg(delegator, drep) => Some(MultiEraVoteDelegation {
+                delegator: delegator.clone(),
+                drep: drep.clone(),
+            }),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 pub struct MultiEraStakeDelegation {
     pub delegator: StakeCredential,
     pub pool: Hash<28>,
@@ -145,6 +166,43 @@ pub fn stake_credential_to_address(network: Network, credential: &StakeCredentia
         StakeCredential::AddrKeyhash(x) => {
             StakeAddress::new(network, StakePayload::Stake(x.clone()))
         }
+    }
+}
+
+pub fn stake_address_to_cred(address: &StakeAddress) -> StakeCredential {
+    match address.payload() {
+        StakePayload::Stake(x) => StakeCredential::AddrKeyhash(*x),
+        StakePayload::Script(x) => StakeCredential::ScriptHash(*x),
+    }
+}
+
+pub fn shelley_address_to_stake_cred(address: &ShelleyAddress) -> Option<StakeCredential> {
+    match address.delegation() {
+        ShelleyDelegationPart::Key(x) => Some(StakeCredential::AddrKeyhash(*x)),
+        ShelleyDelegationPart::Script(x) => Some(StakeCredential::ScriptHash(*x)),
+        _ => None,
+    }
+}
+
+pub fn shelley_address_to_stake_address(address: &ShelleyAddress) -> Option<StakeAddress> {
+    match address.delegation() {
+        ShelleyDelegationPart::Key(x) => Some(StakeAddress::new(
+            address.network(),
+            StakePayload::Stake(*x),
+        )),
+        ShelleyDelegationPart::Script(x) => Some(StakeAddress::new(
+            address.network(),
+            StakePayload::Script(*x),
+        )),
+        _ => None,
+    }
+}
+
+pub fn address_as_stake_cred(address: &Address) -> Option<StakeCredential> {
+    match &address {
+        Address::Shelley(x) => shelley_address_to_stake_cred(x),
+        Address::Stake(x) => Some(stake_address_to_cred(x)),
+        _ => None,
     }
 }
 
