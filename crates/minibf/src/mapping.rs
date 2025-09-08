@@ -7,7 +7,7 @@ use pallas::{
         addresses::{Address, Network, ShelleyPaymentPart, StakeAddress, StakePayload},
         primitives::{
             alonzo::{self, Certificate as AlonzoCert},
-            conway::{Certificate as ConwayCert, DatumOption, RedeemerTag, ScriptRef},
+            conway::{Certificate as ConwayCert, DRep, DatumOption, RedeemerTag, ScriptRef},
             ExUnitPrices, StakeCredential,
         },
         traverse::{
@@ -76,8 +76,12 @@ pub fn bech32(hrp: bech32::Hrp, key: impl AsRef<[u8]>) -> Result<String, StatusC
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
-pub fn bech32_drep(key: impl AsRef<[u8]>) -> Result<String, StatusCode> {
-    bech32(DREP_HRP, key)
+pub fn bech32_drep(drep: &DRep) -> Result<String, StatusCode> {
+    match drep {
+        DRep::Script(key) => bech32(DREP_HRP, key),
+        DRep::Key(key) => bech32(DREP_HRP, key),
+        _ => todo!(),
+    }
 }
 
 pub fn bech32_pool(key: impl AsRef<[u8]>) -> Result<String, StatusCode> {
