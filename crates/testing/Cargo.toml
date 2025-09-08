@@ -13,6 +13,7 @@ dolos-redb = { path = "../redb", optional = true }
 dolos-redb3 = { path = "../redb3", optional = true }
 dolos-cardano = { path = "../cardano", optional = true }
 
+tokio = { workspace = true, optional = true }
 tokio-stream = { workspace = true, optional = true }
 futures-core = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
@@ -24,6 +25,7 @@ toy-domain = [
     "dolos-redb",
     "dolos-redb3",
     "dolos-cardano/include-genesis",
+    "tokio",
     "tokio-stream",
     "futures-core",
     "futures-util",

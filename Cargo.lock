@@ -1254,6 +1254,7 @@ dependencies = [
  "futures-util",
  "pallas 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=08e6356)",
  "rand 0.9.1",
+ "tokio",
  "tokio-stream",
 ]
 
