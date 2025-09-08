@@ -45,6 +45,15 @@ impl AsRef<[u8]> for EntityKey {
     }
 }
 
+impl<const HASH_SIZE: usize> From<EntityKey> for pallas::crypto::hash::Hash<HASH_SIZE> {
+    fn from(value: EntityKey) -> Self {
+        let mut array = [0u8; HASH_SIZE];
+        let source = &value.0[..HASH_SIZE];
+        array.copy_from_slice(source);
+        pallas::crypto::hash::Hash::<HASH_SIZE>::new(array)
+    }
+}
+
 /// A namespaced key
 ///
 /// Represent a key to an entity by also specifying the namespace to which it

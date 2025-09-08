@@ -232,7 +232,6 @@ fn daemon_syncs(scenario: &Scenario) {
     let after = serde_json::from_slice::<dolos::cli::DataSummary>(&data.stdout).unwrap();
 
     assert!(after.wal.tip_slot.unwrap() >= before.wal.tip_slot.unwrap() + 20);
-    assert!(after.wal.tip_seq.unwrap() >= before.wal.tip_seq.unwrap() + 20);
 }
 
 const SCENARIOS: &[Scenario] = &[

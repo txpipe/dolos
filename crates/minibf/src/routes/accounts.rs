@@ -14,11 +14,15 @@ use blockfrost_openapi::models::{
     address_utxo_content_inner::AddressUtxoContentInner,
 };
 
-use dolos_cardano::{model::AccountState, pparams::ChainSummary, RewardLog};
+use dolos_cardano::{model::AccountState, pallas_extras, pparams::ChainSummary, RewardLog};
 use dolos_core::{ArchiveStore, Domain, StateStore};
-use pallas::ledger::{
-    addresses::{Network, StakeAddress, StakePayload},
-    traverse::{MultiEraBlock, MultiEraCert, MultiEraTx},
+use pallas::{
+    codec::minicbor,
+    ledger::{
+        addresses::{Address, Network, StakeAddress, StakePayload},
+        primitives::StakeCredential,
+        traverse::{MultiEraBlock, MultiEraCert, MultiEraTx},
+    },
 };
 
 use pallas::ledger::primitives::alonzo::Certificate as AlonzoCert;
@@ -31,19 +35,31 @@ use crate::{
     Facade,
 };
 
-fn ensure_stake_address(address: &str) -> Result<StakeAddress, StatusCode> {
+struct AccountKeyParam {
+    address: StakeAddress,
+    entity_key: Vec<u8>,
+}
+
+fn parse_account_key_param(address: &str) -> Result<AccountKeyParam, StatusCode> {
     let address = pallas::ledger::addresses::Address::from_bech32(address)
         .map_err(|_| StatusCode::BAD_REQUEST)?;
 
     let address = match address {
-        pallas::ledger::addresses::Address::Shelley(addr) => {
-            StakeAddress::try_from(addr).map_err(|_| StatusCode::BAD_REQUEST)?
-        }
-        pallas::ledger::addresses::Address::Stake(addr) => addr,
-        _ => return Err(StatusCode::BAD_REQUEST),
+        Address::Shelley(x) => pallas_extras::shelley_address_to_stake_address(&x),
+        Address::Stake(x) => Some(x),
+        _ => None,
     };
 
-    Ok(address)
+    let address = address.ok_or(StatusCode::BAD_REQUEST)?;
+
+    let stake_cred = dolos_cardano::pallas_extras::stake_address_to_cred(&address);
+
+    let entity_key = minicbor::to_vec(&stake_cred).unwrap();
+
+    Ok(AccountKeyParam {
+        address,
+        entity_key,
+    })
 }
 
 struct AccountModelBuilder<'a> {
@@ -86,7 +102,7 @@ impl<'a> IntoModel<AccountContent> for AccountModelBuilder<'a> {
 
         let drep_id = self
             .account_state
-            .drep_id
+            .drep
             .as_ref()
             .map(bech32_drep)
             .transpose()?;
@@ -136,10 +152,10 @@ pub async fn by_stake<D: Domain>(
 where
     Option<AccountState>: From<D::Entity>,
 {
-    let stake_address = ensure_stake_address(&stake_address)?;
+    let account_key = parse_account_key_param(&stake_address)?;
 
     let state = domain
-        .read_cardano_entity::<AccountState>(stake_address.to_vec())
+        .read_cardano_entity::<AccountState>(account_key.entity_key.as_slice())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
@@ -156,7 +172,7 @@ where
 
     let model = AccountModelBuilder {
         account_state: state,
-        stake_address: Some(stake_address),
+        stake_address: Some(account_key.address),
         tip_slot: Some(tip_slot),
         chain: Some(&chain),
     }
@@ -172,10 +188,10 @@ pub async fn by_stake_addresses<D: Domain>(
 where
     Option<AccountState>: From<D::Entity>,
 {
-    let stake_address = ensure_stake_address(&stake_address)?;
+    let account_key = parse_account_key_param(&stake_address)?;
 
     let Some(state) = domain
-        .read_cardano_entity::<AccountState>(stake_address.to_vec())
+        .read_cardano_entity::<AccountState>(account_key.entity_key.as_slice())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     else {
         return Ok(Json(vec![]));
@@ -183,7 +199,7 @@ where
 
     let model = AccountModelBuilder {
         account_state: state,
-        stake_address: Some(stake_address),
+        stake_address: Some(account_key.address),
         tip_slot: None,
         chain: None,
     }
@@ -199,8 +215,9 @@ pub async fn by_stake_utxos<D: Domain>(
 ) -> Result<Json<Vec<AddressUtxoContentInner>>, Error> {
     let pagination = Pagination::try_from(params)?;
 
-    let address = ensure_stake_address(&address)?;
-    let payload = match address.payload() {
+    let account_key = parse_account_key_param(&address)?;
+
+    let payload = match account_key.address.payload() {
         StakePayload::Stake(payload) => payload.as_slice(),
         StakePayload::Script(payload) => payload.as_slice(),
     };
@@ -389,12 +406,7 @@ where
     Option<AccountState>: From<D::Entity>,
     F: Fn(&StakeAddress, &MultiEraTx, &MultiEraCert, u32, Network) -> Result<Option<T>, StatusCode>,
 {
-    let stake_address = ensure_stake_address(stake_address)?;
-
-    let stake_hash = match stake_address.payload() {
-        StakePayload::Stake(x) => x.to_vec(),
-        StakePayload::Script(x) => x.to_vec(),
-    };
+    let account_key = parse_account_key_param(stake_address)?;
 
     let chain = domain
         .get_chain_summary()
@@ -405,14 +417,14 @@ where
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let account = domain
-        .read_cardano_entity::<AccountState>(stake_hash)
+        .read_cardano_entity::<AccountState>(account_key.entity_key.as_slice())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
     let mut slot_iter = account.active_slots.iter().take(MAX_SCAN_DEPTH);
 
     let mut builder = AccountActivityModelBuilder::new(
-        stake_address,
+        account_key.address,
         network,
         pagination.count,
         pagination.page as usize,
@@ -514,15 +526,10 @@ where
 {
     let pagination = Pagination::try_from(params)?;
 
-    let stake_address = ensure_stake_address(&stake_address)?;
-
-    let stake_hash = match stake_address.payload() {
-        StakePayload::Stake(x) => x.to_vec(),
-        StakePayload::Script(x) => x.to_vec(),
-    };
+    let account_key = parse_account_key_param(&stake_address)?;
 
     let account = domain
-        .read_cardano_entity::<AccountState>(stake_hash)
+        .read_cardano_entity::<AccountState>(account_key.entity_key.as_slice())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 

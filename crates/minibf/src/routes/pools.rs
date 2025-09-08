@@ -89,10 +89,9 @@ where
     let mapped: Vec<_> = page
         .into_iter()
         .map(|(key, state)| {
-            let builder = PoolModelBuilder {
-                operator: Hash::<28>::from(key.as_ref()),
-                state,
-            };
+            let operator = Hash::<28>::from(key);
+
+            let builder = PoolModelBuilder { operator, state };
 
             builder.into_model()
         })
