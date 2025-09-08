@@ -78,8 +78,8 @@ pub struct ToyDomain {
     mempool: Mempool,
     storage_config: dolos_core::StorageConfig,
     genesis: Arc<dolos_core::Genesis>,
-
     state3: dolos_redb3::StateStore,
+    tip_broadcast: tokio::sync::broadcast::Sender<TipEvent>,
 }
 
 impl ToyDomain {
@@ -94,6 +94,8 @@ impl ToyDomain {
         let state3 =
             dolos_redb3::StateStore::in_memory(dolos_cardano::model::build_schema()).unwrap();
 
+        let (tip_broadcast, _) = tokio::sync::broadcast::channel(100);
+
         Self {
             state,
             wal: dolos_redb::wal::RedbWalStore::memory().unwrap(),
@@ -102,8 +104,25 @@ impl ToyDomain {
             mempool: Mempool {},
             storage_config: storage_config.unwrap_or_default(),
             genesis: Arc::new(dolos_cardano::include::devnet::load()),
+            tip_broadcast,
             state3,
         }
+    }
+}
+
+pub struct TipSubscription {
+    replay: Vec<(ChainPoint, RawBlock)>,
+    receiver: tokio::sync::broadcast::Receiver<TipEvent>,
+}
+
+impl dolos_core::TipSubscription for TipSubscription {
+    async fn next_tip(&mut self) -> TipEvent {
+        if !self.replay.is_empty() {
+            let (point, block) = self.replay.pop().unwrap();
+            return TipEvent::Apply(point, block);
+        }
+
+        self.receiver.recv().await.unwrap()
     }
 }
 
@@ -148,5 +167,23 @@ impl dolos_core::Domain for ToyDomain {
 
     fn mempool(&self) -> &Self::Mempool {
         &self.mempool
+    }
+
+    fn watch_tip(&self, from: Option<ChainPoint>) -> Result<Self::TipSubscription, DomainError> {
+        let receiver = self.tip_broadcast.subscribe();
+
+        let replay = self
+            .wal()
+            .iter_blocks(from, None)
+            .map_err(WalError::from)?
+            .collect::<Vec<_>>();
+
+        Ok(TipSubscription { replay, receiver })
+    }
+
+    fn notify_tip(&self, tip: TipEvent) {
+        if !self.tip_broadcast.receiver_count() == 0 {
+            self.tip_broadcast.send(tip).unwrap();
+        }
     }
 }
