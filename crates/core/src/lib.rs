@@ -371,6 +371,7 @@ pub struct Genesis {
     pub alonzo: pallas::interop::hardano::configs::alonzo::GenesisFile,
     pub conway: pallas::interop::hardano::configs::conway::GenesisFile,
     pub force_protocol: Option<usize>,
+    pub shelley_hash: Hash<32>,
 }
 
 #[derive(Debug, Error)]
@@ -495,6 +496,9 @@ pub enum ChainError {
 
     #[error("pparams not found")]
     PParamsNotFound,
+
+    #[error("invalid parameters")]
+    InvalidParameters,
 }
 
 pub trait ChainLogic: Sized + Send + Sync {

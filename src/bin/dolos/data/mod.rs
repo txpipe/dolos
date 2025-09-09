@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand};
 
+mod compute_nonce;
 mod compute_spdd;
 mod copy_ledger;
 mod copy_wal;
@@ -23,6 +24,8 @@ pub enum Command {
     DumpState(dump_state::Args),
     /// computes the SPDD for the current epoch
     ComputeSpdd(compute_spdd::Args),
+    /// computes nonce for epoch
+    ComputeNonce(compute_nonce::Args),
     /// finds the WAL seq for a block
     FindSeq(find_seq::Args),
     /// exports a snapshot from the current data
@@ -57,6 +60,7 @@ pub fn run(
         Command::DumpWal(x) => dump_wal::run(config, x)?,
         Command::DumpState(x) => dump_state::run(config, x)?,
         Command::ComputeSpdd(x) => compute_spdd::run(config, x)?,
+        Command::ComputeNonce(x) => compute_nonce::run(config, x)?,
         Command::FindSeq(x) => find_seq::run(config, x)?,
         Command::Export(x) => export::run(config, x, feedback)?,
         Command::CopyWal(x) => copy_wal::run(config, x)?,

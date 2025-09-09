@@ -1,4 +1,5 @@
 use miette::{Context as _, IntoDiagnostic};
+use pallas::crypto::hash::Hasher;
 use std::sync::Arc;
 use std::{fs, path::PathBuf, time::Duration};
 use tokio_util::sync::CancellationToken;
@@ -203,6 +204,13 @@ pub fn open_genesis_files(config: &GenesisConfig) -> miette::Result<Genesis> {
         .into_diagnostic()
         .context("loading shelley genesis config")?;
 
+    let shelley_bytes = std::fs::read(&config.shelley_path)
+        .into_diagnostic()
+        .context("opening shelley genesis file")?;
+    let mut hasher = Hasher::<256>::new();
+    hasher.input(&shelley_bytes);
+    let shelley_hash = hasher.finalize();
+
     let alonzo_genesis = pallas::ledger::configs::alonzo::from_file(&config.alonzo_path)
         .into_diagnostic()
         .context("loading alonzo genesis config")?;
@@ -216,6 +224,7 @@ pub fn open_genesis_files(config: &GenesisConfig) -> miette::Result<Genesis> {
         shelley: shelley_genesis,
         alonzo: alonzo_genesis,
         conway: conway_genesis,
+        shelley_hash,
         force_protocol: config.force_protocol,
     })
 }
