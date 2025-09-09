@@ -4,7 +4,7 @@ use axum::{
     Json,
 };
 use dolos_cardano::{model::DRepState, pparams::ChainSummary, slot_epoch};
-use dolos_core::{ArchiveStore as _, BlockSlot, Domain, State3Store as _};
+use dolos_core::{ArchiveStore as _, BlockSlot, Domain};
 use pallas::ledger::validate::utils::MultiEraProtocolParameters;
 
 use crate::{mapping::IntoModel, Facade};
@@ -106,9 +106,7 @@ pub async fn drep_by_id<D: Domain>(
 where
     Option<DRepState>: From<D::Entity>,
 {
-    let drep = parse_drep_id(&drep).map_err(|_| StatusCode::BAD_REQUEST)?;
-
-    let drep_bytes = minicbor::to_vec(&drep).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let drep_bytes = parse_drep_id(&drep).map_err(|_| StatusCode::BAD_REQUEST)?;
 
     let drep_state = domain
         .read_cardano_entity::<DRepState>(drep_bytes.clone())

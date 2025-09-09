@@ -1,7 +1,7 @@
 use itertools::Itertools as _;
 use pallas::interop::utxorpc::{self as interop, spec::query::any_utxo_pattern::UtxoPattern};
 use pallas::interop::utxorpc::{spec as u5c, LedgerContext};
-use pallas::ledger::traverse::MultiEraOutput;
+use pallas::ledger::traverse::{MultiEraBlock, MultiEraOutput};
 use std::collections::HashSet;
 use tonic::{Request, Response, Status};
 use tracing::info;

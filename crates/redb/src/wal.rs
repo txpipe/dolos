@@ -7,8 +7,7 @@ use thiserror::Error;
 use tracing::{debug, event_enabled, info, trace, warn, Level};
 
 use dolos_core::{
-    BlockSlot, ChainPoint, EntityDelta, LogEntry, LogValue, RawBlock, TipEvent, TipSubscription,
-    WalError, WalStore,
+    BlockSlot, ChainPoint, EntityDelta, LogEntry, LogValue, RawBlock, TipEvent, WalError, WalStore,
 };
 
 #[derive(Debug, Error)]
@@ -59,8 +58,6 @@ impl From<::redb::TransactionError> for RedbWalError {
 
 pub type AugmentedBlockSlot = i128;
 pub type DbLogValue = Vec<u8>;
-
-use pallas::crypto::hash::Hash;
 
 #[derive(Debug)]
 pub struct DbChainPoint([u8; 40]);
@@ -258,8 +255,7 @@ const DEFAULT_CACHE_SIZE_MB: usize = 50;
 #[derive(Clone, Debug)]
 pub struct RedbWalStore<T> {
     db: Arc<redb::Database>,
-    tip_broadcast: tokio::sync::broadcast::Sender<TipEvent>,
-    phantom: PhantomData<T>,
+    _phantom: PhantomData<T>,
 }
 
 impl<T> RedbWalStore<T>
@@ -289,12 +285,9 @@ where
             .create_with_backend(redb::backends::InMemoryBackend::new())
             .map_err(WalError::internal)?;
 
-        let (tip_broadcast, _) = tokio::sync::broadcast::channel(50);
-
         let out = Self {
             db: Arc::new(db),
-            tip_broadcast,
-            phantom: PhantomData,
+            _phantom: Default::default(),
         };
 
         Ok(out)
@@ -307,12 +300,9 @@ where
             .create(path)
             .map_err(WalError::internal)?;
 
-        let (tip_broadcast, _) = tokio::sync::broadcast::channel(50);
-
         let out = Self {
             db: Arc::new(inner),
-            tip_broadcast,
-            phantom: PhantomData,
+            _phantom: Default::default(),
         };
 
         Ok(out)

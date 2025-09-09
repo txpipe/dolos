@@ -55,7 +55,7 @@ fn cert_to_id(cert: &MultiEraCert) -> Option<Vec<u8>> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DRepReg {
+pub struct DRepRegistration {
     cred: StakeCredential,
     slot: u64,
     deposit: u64,
@@ -65,7 +65,7 @@ pub struct DRepReg {
     was_retired: bool,
 }
 
-impl DRepReg {
+impl DRepRegistration {
     pub fn new(cred: StakeCredential, slot: u64, deposit: u64, anchor: Option<Anchor>) -> Self {
         Self {
             cred,
@@ -77,7 +77,7 @@ impl DRepReg {
     }
 }
 
-impl dolos_core::EntityDelta for DRepReg {
+impl dolos_core::EntityDelta for DRepRegistration {
     type Entity = DRepState;
 
     fn key(&self) -> Cow<'_, NsKey> {
@@ -106,7 +106,7 @@ impl dolos_core::EntityDelta for DRepReg {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DRepUnReg {
+pub struct DRepUnRegistration {
     cred: StakeCredential,
     slot: u64,
     deposit: u64,
@@ -115,7 +115,7 @@ pub struct DRepUnReg {
     prev_voting_power: Option<u64>,
 }
 
-impl DRepUnReg {
+impl DRepUnRegistration {
     pub fn new(cred: StakeCredential, slot: u64, deposit: u64) -> Self {
         Self {
             cred,
@@ -126,7 +126,7 @@ impl DRepUnReg {
     }
 }
 
-impl dolos_core::EntityDelta for DRepUnReg {
+impl dolos_core::EntityDelta for DRepUnRegistration {
     type Entity = DRepState;
 
     fn key(&self) -> Cow<'_, NsKey> {
@@ -164,7 +164,7 @@ impl BlockVisitor for DRepStateVisitor {
         if let MultiEraCert::Conway(conway) = &cert {
             match conway.deref().deref() {
                 conway::Certificate::RegDRepCert(cred, deposit, anchor) => {
-                    deltas.add_for_entity(DRepReg::new(
+                    deltas.add_for_entity(DRepRegistration::new(
                         cred.clone(),
                         block.slot(),
                         *deposit,
@@ -172,7 +172,11 @@ impl BlockVisitor for DRepStateVisitor {
                     ));
                 }
                 conway::Certificate::UnRegDRepCert(cred, coin) => {
-                    deltas.add_for_entity(DRepUnReg::new(cred.clone(), block.slot(), *coin));
+                    deltas.add_for_entity(DRepUnRegistration::new(
+                        cred.clone(),
+                        block.slot(),
+                        *coin,
+                    ));
                 }
                 _ => (),
             }

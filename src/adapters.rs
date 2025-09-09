@@ -155,42 +155,6 @@ impl TryFrom<StateAdapter> for dolos_redb::state::LedgerStore {
     }
 }
 
-impl pallas::interop::utxorpc::LedgerContext for StateAdapter {
-    fn get_utxos<'a>(
-        &self,
-        refs: &[pallas::interop::utxorpc::TxoRef],
-    ) -> Option<pallas::interop::utxorpc::UtxoMap> {
-        let refs: Vec<_> = refs.iter().map(|x| TxoRef::from(*x)).collect();
-
-        let some = dolos_core::StateStore::get_utxos(self, refs)
-            .ok()?
-            .into_iter()
-            .map(|(k, v)| {
-                let era = v.0.try_into().expect("era out of range");
-                (k.into(), (era, v.1.to_owned()))
-            })
-            .collect();
-
-        Some(some)
-    }
-
-    fn get_slot_timestamp(&self, slot: u64) -> Option<u64> {
-        let updates = self.get_pparams(slot).ok()?;
-
-        let updates: Vec<_> = updates
-            .into_iter()
-            .map(TryInto::try_into)
-            .try_collect()
-            .ok()?;
-
-        let eras = pparams::fold_with_hacks(self.genesis(), &updates, slot);
-
-        let era = eras.era_for_slot(slot);
-
-        Some(slot_time_within_era(slot, era))
-    }
-}
-
 /// A persistent store for ledger state
 #[derive(Clone)]
 #[non_exhaustive]
@@ -517,7 +481,7 @@ impl pallas::interop::utxorpc::LedgerContext for DomainAdapter {
             .into_iter()
             .map(|(k, v)| {
                 let era = v.0.try_into().expect("era out of range");
-                (k.into(), (era, v.1))
+                (k.into(), (era, v.1.clone()))
             })
             .collect();
 

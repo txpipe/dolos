@@ -20,7 +20,6 @@ use pallas::{
     codec::minicbor,
     ledger::{
         addresses::{Address, Network, StakeAddress, StakePayload},
-        primitives::StakeCredential,
         traverse::{MultiEraBlock, MultiEraCert, MultiEraTx},
     },
 };

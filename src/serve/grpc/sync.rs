@@ -43,9 +43,9 @@ fn raw_to_blockref<C: LedgerContext>(
     let u5c::cardano::Block { header, .. } = mapper.map_block_cbor(body);
 
     header.map(|h| u5c::sync::BlockRef {
-        slot: header.slot,
-        hash: header.hash,
-        height: header.height,
+        slot: h.slot,
+        hash: h.hash,
+        height: h.height,
         ..Default::default()
     })
 }

@@ -1,4 +1,4 @@
-use std::{borrow::Cow, sync::Arc};
+use std::borrow::Cow;
 
 use dolos_core::{BlockHash, ChainPoint, Entity, EntityDelta, LogValue, NsKey};
 use serde::{Deserialize, Serialize};
