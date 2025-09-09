@@ -1,20 +1,13 @@
 use dolos_core::{ArchiveStore, ChainError, Domain, DomainError};
 use pallas::{
-    crypto::{
-        hash::Hash,
-        nonce::{generate_epoch_nonce, generate_rolling_nonce},
-    },
+    crypto::{hash::Hash, nonce::generate_rolling_nonce},
     ledger::traverse::MultiEraBlock,
 };
 
-use crate::{
-    mutable_slots,
-    pparams::ChainSummary,
-    utils::{epoch_first_slot, get_first_shelley_slot_and_epoch},
-};
+use crate::{mutable_slots, pparams::ChainSummary, utils::epoch_first_slot};
 
 /// Calculate rolling nonce for last inmutable block before epoch boundary using archive.
-/// 
+///
 /// Note: This will iterate from the beggining of Shelley, will be heavy for high epochs.
 pub fn calculate_nc_from_archive<D: Domain>(
     first_shelley_slot: u64,
@@ -54,17 +47,6 @@ pub fn calculate_nc_from_archive<D: Domain>(
     Ok(eta)
 }
 
-/// Get rolling nonce from last inmutable block before epoch boundary using state.
-///
-/// Note: Only valid for latest epoch.
-pub fn get_nc_from_state<D: Domain>(
-    domain: &D,
-    summary: &ChainSummary,
-) -> Result<Hash<32>, DomainError> {
-    match get_nc
-    Ok(eta)
-}
-
 /// Get the previous block hash of the first block from the previous epoch.
 pub fn get_nh<D: Domain>(
     epoch: u64,
@@ -80,31 +62,4 @@ pub fn get_nh<D: Domain>(
 
     let block = MultiEraBlock::decode(&raw).map_err(ChainError::from)?;
     Ok(block.header().previous_hash())
-}
-
-fn compute_nonce_from_archive<D: Domain>(
-    epoch: u64,
-    domain: &D,
-    summary: &ChainSummary,
-    use_archive: bool,
-) -> Result<Hash<32>, DomainError> {
-    let (first_shelley_slot, first_shelley_epoch) = get_first_shelley_slot_and_epoch(&summary)
-        .ok_or(DomainError::from(ChainError::InvalidParameters))?;
-
-    if first_shelley_epoch == epoch {
-        return Ok(domain.genesis().shelley_hash);
-    }
-
-    let nc = if use_archive {
-        get_nc_from_archive(first_shelley_slot, epoch, domain, &summary)?
-    } else {
-        get_nc_from_state(first_shelley_slot, epoch, domain, &summary)?
-    };
-    match get_nh(epoch, domain, &summary)? {
-        Some(nh) => {
-            dbg!(nh);
-            Ok(generate_epoch_nonce(nc, nh, None))
-        }
-        None => Ok(nc),
-    }
 }
