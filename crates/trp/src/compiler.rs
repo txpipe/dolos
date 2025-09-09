@@ -59,18 +59,28 @@ fn build_pparams<D: Domain>(domain: &D) -> Result<tx3_cardano::PParams, Error> {
 
     Ok(out)
 }
-
 pub fn load_compiler<D: Domain>(
     domain: &D,
     config: &Config,
 ) -> Result<tx3_cardano::Compiler, Error> {
     let pparams = build_pparams::<D>(domain)?;
 
+    let cursor = ledger.cursor()?.ok_or(Error::TipNotResolved)?;
+
+    let tip = match cursor {
+        ChainPoint::Specific(slot, hash) => tx3_cardano::ChainTip {
+            slot,
+            hash: hash.to_vec(),
+        },
+        ChainPoint::Origin => return Err(Error::TipNotResolved),
+    };
+
     let compiler = tx3_cardano::Compiler::new(
         pparams,
         tx3_cardano::Config {
             extra_fees: config.extra_fees,
         },
+        tip,
     );
 
     Ok(compiler)
