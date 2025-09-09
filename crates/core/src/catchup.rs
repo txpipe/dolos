@@ -38,7 +38,7 @@ where
     C: ChainLogic,
     D: Domain<Chain = C, Entity = C::Entity>,
 {
-    let (mut before, after) = batch.split_by_sweep(domain.chain());
+    let (mut before, after) = batch.split_by_sweep(domain)?;
 
     if let Some((next_sweep, after)) = after {
         import_contiguous_batch(domain, &mut before)?;
@@ -62,15 +62,4 @@ where
     let last = import_decoded_batch(domain, batch)?;
 
     Ok(last)
-}
-
-pub fn apply_origin<D>(domain: &D) -> Result<(), DomainError>
-where
-    D: Domain,
-{
-    let delta = domain.chain().compute_origin_utxo_delta(domain.genesis())?;
-
-    domain.state().apply(&[delta])?;
-
-    Ok(())
 }

@@ -15,7 +15,7 @@ use pallas::ledger::{
     traverse::{MultiEraBlock, MultiEraTx},
 };
 
-use dolos_cardano::pparams::ChainSummary;
+use dolos_cardano::ChainSummary;
 use dolos_core::{ArchiveStore, Domain, EraCbor, StateStore, TxoRef};
 
 use crate::{
@@ -280,7 +280,7 @@ impl<A: ArchiveStore> TransactionWithAddressIter<A> {
                     tx_hash: hex::encode(tx.hash().as_slice()),
                     tx_index: idx as i32,
                     block_height: block.number() as i32,
-                    block_time: dolos_cardano::slot_time(block.slot(), &self.chain) as i32,
+                    block_time: self.chain.slot_time(block.slot()) as i32,
                 };
 
                 matches.push(model);

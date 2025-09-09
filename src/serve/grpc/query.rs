@@ -6,8 +6,6 @@ use std::collections::HashSet;
 use tonic::{Request, Response, Status};
 use tracing::info;
 
-use dolos_cardano::pparams;
-
 use super::masking::apply_mask;
 use crate::prelude::*;
 
@@ -236,30 +234,16 @@ where
 
         let tip = self.domain.state().cursor().map_err(into_status)?;
 
-        let updates = self
-            .domain
-            .state()
-            .get_pparams(tip.as_ref().map(|p| p.slot()).unwrap_or_default())
-            .map_err(into_status)?;
+        let pparams = dolos_cardano::load_current_pparams(&self.domain)
+            .map_err(|_| Status::internal("Failed to load current pparams"))?
+            .ok_or_else(|| Status::internal("No current pparams available"))?;
 
-        let updates: Vec<_> = updates
-            .into_iter()
-            .map(TryInto::try_into)
-            .try_collect::<_, _, pallas::codec::minicbor::decode::Error>()
-            .map_err(|e| Status::internal(e.to_string()))?;
-
-        let summary = pparams::fold_with_hacks(
-            self.domain.genesis(),
-            &updates,
-            tip.as_ref().unwrap().slot(),
-        );
-
-        let era = summary.era_for_slot(tip.as_ref().unwrap().slot());
+        let pparams = dolos_cardano::utils::pparams_to_pallas(&pparams);
 
         let mut response = u5c::query::ReadParamsResponse {
             values: Some(u5c::query::AnyChainParams {
                 params: u5c::query::any_chain_params::Params::Cardano(
-                    self.mapper.map_pparams(era.pparams.clone()),
+                    self.mapper.map_pparams(pparams),
                 )
                 .into(),
             }),

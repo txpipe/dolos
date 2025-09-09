@@ -183,16 +183,22 @@ impl<C: ChainLogic> WorkBatch<C> {
         Ok(())
     }
 
-    pub fn split_by_sweep(self, chain: &C) -> (Self, Option<(BlockSlot, Self)>) {
+    pub fn split_by_sweep<D>(
+        self,
+        domain: &D,
+    ) -> Result<(Self, Option<(BlockSlot, Self)>), DomainError>
+    where
+        D: Domain<Chain = C>,
+    {
         let range = self.range();
-        let next_sweep = chain.next_sweep(*range.start());
+        let next_sweep = domain.chain().next_sweep(domain, *range.start())?;
 
         if !range.contains(&next_sweep) {
-            (self, None)
+            Ok((self, None))
         } else {
             let (before, after) = self.split_at(next_sweep);
 
-            (before, Some((next_sweep, after)))
+            Ok((before, Some((next_sweep, after))))
         }
     }
 

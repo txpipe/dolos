@@ -77,11 +77,7 @@ pub async fn trp_resolve<D: Domain>(
 
     let tx = load_tx(params)?;
 
-    let mut compiler = load_compiler::<D>(
-        context.domain.genesis(),
-        context.domain.state(),
-        &context.config,
-    )?;
+    let mut compiler = load_compiler::<D>(&context.domain, &context.config)?;
 
     let utxos = UtxoStoreAdapter::<D>::new(context.domain.state().clone());
 

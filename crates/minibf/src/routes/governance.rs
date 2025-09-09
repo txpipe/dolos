@@ -3,7 +3,7 @@ use axum::{
     http::StatusCode,
     Json,
 };
-use dolos_cardano::{model::DRepState, pparams::ChainSummary, slot_epoch};
+use dolos_cardano::{model::DRepState, ChainSummary, PParamsState};
 use dolos_core::{ArchiveStore as _, BlockSlot, Domain};
 use pallas::ledger::validate::utils::MultiEraProtocolParameters;
 
@@ -35,6 +35,7 @@ fn parse_drep_id(drep_id: &str) -> Result<Vec<u8>, StatusCode> {
 pub struct DrepModelBuilder<'a> {
     drep_id: String,
     state: DRepState,
+    pparams: PParamsState,
     chain: &'a ChainSummary,
     tip: BlockSlot,
 }
@@ -49,16 +50,14 @@ impl<'a> IntoModel<blockfrost_openapi::models::drep::Drep> for DrepModelBuilder<
     type SortKey = ();
 
     fn into_model(self) -> Result<blockfrost_openapi::models::drep::Drep, StatusCode> {
-        let (epoch, _) = dolos_cardano::slot_epoch(self.tip, self.chain);
+        let (epoch, _) = self.chain.slot_epoch(self.tip);
+
         let last_active_epoch = self
             .state
             .last_active_slot
-            .map(|x| slot_epoch(x, self.chain).0 as i32);
+            .map(|x| self.chain.slot_epoch(x).0 as i32);
 
-        let drep_activity = match &self.chain.era_for_slot(self.tip).pparams {
-            MultiEraProtocolParameters::Conway(params) => params.drep_inactivity_period,
-            _ => return Err(StatusCode::INTERNAL_SERVER_ERROR),
-        };
+        let drep_activity = self.pparams.drep_inactivity_period;
 
         let out = blockfrost_openapi::models::drep::Drep {
             drep_id: self.drep_id.clone(),
@@ -74,7 +73,7 @@ impl<'a> IntoModel<blockfrost_openapi::models::drep::Drep> for DrepModelBuilder<
             } else {
                 self.state
                     .initial_slot
-                    .map(|x| slot_epoch(x, self.chain).0 as i32)
+                    .map(|x| self.chain.slot_epoch(x).0 as i32)
             },
             has_script: self.state.has_script(),
             retired: self.state.retired,
@@ -113,6 +112,10 @@ where
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
+    let pparams = domain
+        .get_current_pparams()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
     let chain = domain
         .get_chain_summary()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -126,6 +129,7 @@ where
     let model = DrepModelBuilder {
         drep_id: drep,
         state: drep_state,
+        pparams,
         chain: &chain,
         tip,
     };

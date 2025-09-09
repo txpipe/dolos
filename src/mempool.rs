@@ -14,11 +14,7 @@ use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
 use tracing::debug;
 
-use dolos_cardano::pparams;
-
-use crate::prelude::*;
-
-use crate::adapters::StateAdapter;
+use crate::{adapters::DomainAdapter, prelude::*};
 
 #[derive(Default)]
 struct MempoolState {
@@ -32,20 +28,18 @@ struct MempoolState {
 pub struct Mempool {
     mempool: Arc<RwLock<MempoolState>>,
     updates: broadcast::Sender<MempoolEvent>,
-    genesis: Arc<Genesis>,
-    ledger: StateAdapter,
+    domain: DomainAdapter,
 }
 
 impl Mempool {
-    pub fn new(genesis: Arc<Genesis>, ledger: StateAdapter) -> Self {
+    pub fn new(domain: DomainAdapter) -> Self {
         let mempool = Arc::new(RwLock::new(MempoolState::default()));
         let (updates, _) = broadcast::channel(16);
 
         Self {
             mempool,
             updates,
-            genesis,
-            ledger,
+            domain,
         }
     }
 

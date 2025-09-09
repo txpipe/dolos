@@ -17,6 +17,7 @@ pub mod assets;
 pub mod dreps;
 pub mod epochs;
 pub mod pools;
+pub mod pparams;
 pub mod txs;
 
 use accounts::AccountVisitor;

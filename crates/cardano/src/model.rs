@@ -275,7 +275,7 @@ entity_boilerplate!(DRepState, "dreps");
 /// update_implicit: u64
 /// soft_fork_rule: (u64, u64, u64)
 /// unlock_stake_epoch: u64
-#[derive(Debug, Encode, Decode, Clone)]
+#[derive(Debug, Encode, Decode, Clone, Default)]
 pub struct PParamsState {
     // shelley
 
@@ -293,23 +293,23 @@ pub struct PParamsState {
 
     // byron alias: multiplier
     #[n(3)]
-    pub minfee_a: u32,
+    pub minfee_a: u64,
 
     // byron alias: summand
     #[n(4)]
-    pub minfee_b: u32,
+    pub minfee_b: u64,
 
     // byron alias: max_block_size
     #[n(5)]
-    pub max_block_body_size: u32,
+    pub max_block_body_size: u64,
 
     // byron alias: max_tx_size
     #[n(6)]
-    pub max_transaction_size: u32,
+    pub max_transaction_size: u64,
 
     // byron alias: max_header_size
     #[n(7)]
-    pub max_block_header_size: u32,
+    pub max_block_header_size: u64,
 
     #[n(8)]
     pub key_deposit: Coin,
@@ -331,38 +331,38 @@ pub struct PParamsState {
     pub min_pool_cost: Coin,
 
     #[n(14)]
-    pub expansion_rate: UnitInterval,
+    pub expansion_rate: Option<UnitInterval>,
 
     #[n(15)]
-    pub treasury_growth_rate: UnitInterval,
+    pub treasury_growth_rate: Option<UnitInterval>,
 
     #[n(16)]
     pub maximum_epoch: Epoch,
 
     #[n(17)]
-    pub pool_pledge_influence: RationalNumber,
+    pub pool_pledge_influence: Option<RationalNumber>,
 
     #[n(18)]
-    pub decentralization_constant: UnitInterval,
+    pub decentralization_constant: Option<UnitInterval>,
 
     #[n(19)]
-    pub extra_entropy: Nonce,
+    pub extra_entropy: Option<Nonce>,
 
     // alonzo
     #[n(20)]
     pub ada_per_utxo_byte: Coin,
 
     #[n(21)]
-    pub cost_models_for_script_languages: CostModels,
+    pub cost_models_for_script_languages: Option<CostModels>,
 
     #[n(22)]
-    pub execution_costs: ExUnitPrices,
+    pub execution_costs: Option<ExUnitPrices>,
 
     #[n(23)]
-    pub max_tx_ex_units: ExUnits,
+    pub max_tx_ex_units: Option<ExUnits>,
 
     #[n(24)]
-    pub max_block_ex_units: ExUnits,
+    pub max_block_ex_units: Option<ExUnits>,
 
     #[n(25)]
     pub max_value_size: u32,
@@ -375,10 +375,10 @@ pub struct PParamsState {
 
     // conway
     #[n(28)]
-    pub pool_voting_thresholds: PoolVotingThresholds,
+    pub pool_voting_thresholds: Option<PoolVotingThresholds>,
 
     #[n(29)]
-    pub drep_voting_thresholds: DRepVotingThresholds,
+    pub drep_voting_thresholds: Option<DRepVotingThresholds>,
 
     #[n(30)]
     pub min_committee_size: u64,
@@ -399,31 +399,80 @@ pub struct PParamsState {
     pub drep_inactivity_period: Epoch,
 
     #[n(36)]
-    pub minfee_refscript_cost_per_byte: UnitInterval,
+    pub minfee_refscript_cost_per_byte: Option<UnitInterval>,
 }
 
 impl PParamsState {
+    pub fn protocol_major(&self) -> u16 {
+        self.protocol_version.0 as u16
+    }
+
     pub fn k(&self) -> u32 {
         self.desired_number_of_stake_pools
     }
 
     pub fn a0(&self) -> &RationalNumber {
-        &self.pool_pledge_influence
+        &self
+            .pool_pledge_influence
+            .as_ref()
+            .unwrap_or(&RationalNumber {
+                numerator: 0,
+                denominator: 1,
+            })
     }
 
     pub fn tau(&self) -> &RationalNumber {
-        &self.treasury_growth_rate
+        &self
+            .treasury_growth_rate
+            .as_ref()
+            .unwrap_or(&RationalNumber {
+                numerator: 0,
+                denominator: 1,
+            })
     }
 
     pub fn rho(&self) -> &RationalNumber {
-        &self.expansion_rate
+        &self.expansion_rate.as_ref().unwrap_or(&RationalNumber {
+            numerator: 0,
+            denominator: 1,
+        })
     }
 }
 
 entity_boilerplate!(PParamsState, "pparams");
 
+#[derive(Debug, Encode, Decode, Clone)]
+pub struct EraBoundary {
+    #[n(0)]
+    pub epoch: u64,
+
+    #[n(1)]
+    pub slot: u64,
+
+    #[n(2)]
+    pub timestamp: u64,
+}
+
+#[derive(Debug, Encode, Decode, Clone)]
+pub struct EraSummary {
+    #[n(0)]
+    pub start: EraBoundary,
+
+    #[n(1)]
+    pub end: Option<EraBoundary>,
+
+    #[n(2)]
+    pub epoch_length: u64,
+
+    #[n(3)]
+    pub slot_length: u64,
+}
+
+entity_boilerplate!(EraSummary, "eras");
+
 #[derive(Debug, Clone)]
 pub enum CardanoEntity {
+    EraSummary(EraSummary),
     PParamsState(PParamsState),
     AccountState(AccountState),
     AssetState(AssetState),
@@ -451,6 +500,7 @@ macro_rules! variant_boilerplate {
     };
 }
 
+variant_boilerplate!(EraSummary);
 variant_boilerplate!(PParamsState);
 variant_boilerplate!(AccountState);
 variant_boilerplate!(AssetState);
@@ -461,6 +511,7 @@ variant_boilerplate!(DRepState);
 impl dolos_core::Entity for CardanoEntity {
     fn decode_entity(ns: Namespace, value: &EntityValue) -> Result<Self, State3Error> {
         match ns {
+            EraSummary::NS => EraSummary::decode_entity(ns, value).map(Into::into),
             PParamsState::NS => PParamsState::decode_entity(ns, value).map(Into::into),
             AccountState::NS => AccountState::decode_entity(ns, value).map(Into::into),
             AssetState::NS => AssetState::decode_entity(ns, value).map(Into::into),
@@ -473,6 +524,10 @@ impl dolos_core::Entity for CardanoEntity {
 
     fn encode_entity(value: &Self) -> (Namespace, EntityValue) {
         match value {
+            Self::EraSummary(x) => {
+                let (ns, enc) = EraSummary::encode_entity(x);
+                (ns, enc.into())
+            }
             Self::PParamsState(x) => {
                 let (ns, enc) = PParamsState::encode_entity(x);
                 (ns, enc.into())
@@ -503,6 +558,7 @@ impl dolos_core::Entity for CardanoEntity {
 
 pub fn build_schema() -> StateSchema {
     let mut schema = StateSchema::default();
+    schema.insert(EraSummary::NS, NamespaceType::KeyValue);
     schema.insert(AccountState::NS, NamespaceType::KeyValue);
     schema.insert(AssetState::NS, NamespaceType::KeyValue);
     schema.insert(PoolState::NS, NamespaceType::KeyValue);

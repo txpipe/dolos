@@ -6,13 +6,10 @@ use axum::{
 };
 use dolos_cardano::{
     model::{AccountState, AssetState, DRepState, EpochState, FixedNamespace, PoolState},
-    pparams::ChainSummary,
+    ChainSummary, PParamsState,
 };
 use itertools::Itertools;
-use pallas::{
-    crypto::hash::Hash,
-    ledger::{addresses::Network, traverse::MultiEraUpdate},
-};
+use pallas::{crypto::hash::Hash, ledger::addresses::Network};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -24,8 +21,8 @@ use tower_http::{cors::CorsLayer, normalize_path::NormalizePathLayer, trace};
 use tracing::Level;
 
 use dolos_core::{
-    ArchiveStore as _, CancelToken, Domain, Entity, EntityKey, EraCbor, ServeError, State3Error,
-    State3Store as _, StateStore as _, TxOrder,
+    ArchiveStore as _, BlockSlot, CancelToken, Domain, Entity, EntityKey, EraCbor, ServeError,
+    State3Error, State3Store as _, TxOrder,
 };
 
 mod error;
@@ -60,6 +57,16 @@ pub type BlockWithTx = (Vec<u8>, TxOrder);
 pub type BlockWithTxMap = HashMap<Hash<32>, BlockWithTx>;
 
 impl<D: Domain> Facade<D> {
+    pub fn get_tip_slot(&self) -> Result<BlockSlot, StatusCode> {
+        let tip = self
+            .state3()
+            .read_cursor()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        Ok(tip)
+    }
+
     pub fn get_network_id(&self) -> Result<Network, StatusCode> {
         match self.genesis().shelley.network_id.as_ref() {
             Some(x) if x == "Mainnet" => Ok(Network::Mainnet),
@@ -69,26 +76,18 @@ impl<D: Domain> Facade<D> {
     }
 
     pub fn get_chain_summary(&self) -> Result<ChainSummary, StatusCode> {
-        let tip = self
-            .state()
-            .cursor()
+        let summary = dolos_cardano::eras::load_era_summary(&self.inner)
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-        let slot = tip.map(|t| t.slot()).unwrap_or_default();
-
-        let updates = self
-            .state()
-            .get_pparams(slot)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-            .into_iter()
-            .map(|eracbor| {
-                MultiEraUpdate::try_from(eracbor).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
-            })
-            .collect::<Result<Vec<MultiEraUpdate>, StatusCode>>()?;
-
-        let summary = dolos_cardano::pparams::fold_with_hacks(self.genesis(), &updates, slot);
-
         Ok(summary)
+    }
+
+    pub fn get_current_pparams(&self) -> Result<PParamsState, StatusCode> {
+        let pparams = dolos_cardano::load_current_pparams(&self.inner)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        Ok(pparams)
     }
 
     pub fn get_tx(&self, hash: Hash<32>) -> Result<Option<EraCbor>, StatusCode> {

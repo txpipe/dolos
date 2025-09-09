@@ -491,6 +491,9 @@ pub enum ChainError {
     AddressDecoding(#[from] pallas::ledger::addresses::Error),
 
     #[error(transparent)]
+    StateError(#[from] StateError),
+
+    #[error(transparent)]
     State3Error(#[from] State3Error),
 
     #[error("pparams not found")]
@@ -503,6 +506,8 @@ pub trait ChainLogic: Sized + Send + Sync {
     type Utxo: Sized + Send + Sync;
     type Delta: EntityDelta<Entity = Self::Entity>;
 
+    fn bootstrap<D: Domain>(&self, domain: &D) -> Result<(), ChainError>;
+
     fn decode_block(&self, block: Arc<BlockBody>) -> Result<Self::Block, ChainError>;
 
     fn decode_utxo(&self, utxo: Arc<EraCbor>) -> Result<Self::Utxo, ChainError>;
@@ -511,7 +516,7 @@ pub trait ChainLogic: Sized + Send + Sync {
 
     fn execute_sweep<D: Domain>(&self, domain: &D, at: BlockSlot) -> Result<(), ChainError>;
 
-    fn next_sweep(&self, after: BlockSlot) -> BlockSlot;
+    fn next_sweep<D: Domain>(&self, domain: &D, after: BlockSlot) -> Result<BlockSlot, ChainError>;
 
     /// Computes the last immutable slot
     ///
@@ -524,15 +529,11 @@ pub trait ChainLogic: Sized + Send + Sync {
         tip.saturating_sub(Self::mutable_slots(domain))
     }
 
-    fn compute_origin_utxo_delta(&self, genesis: &Genesis) -> Result<UtxoSetDelta, ChainError>;
-
     fn compute_block_utxo_delta(
         &self,
         block: &Self::Block,
         deps: &RawUtxoMap,
     ) -> Result<UtxoSetDelta, ChainError>;
-
-    fn compute_origin_delta(&self, genesis: &Genesis) -> Result<WorkBatch<Self>, ChainError>;
 
     fn compute_delta(
         &self,
@@ -560,6 +561,9 @@ pub enum DomainError {
 
     #[error("mempool error: {0}")]
     MempoolError(#[from] MempoolError),
+
+    #[error("wal is empty")]
+    WalIsEmpty,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

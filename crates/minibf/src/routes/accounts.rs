@@ -14,7 +14,7 @@ use blockfrost_openapi::models::{
     address_utxo_content_inner::AddressUtxoContentInner,
 };
 
-use dolos_cardano::{model::AccountState, pallas_extras, pparams::ChainSummary, RewardLog};
+use dolos_cardano::{model::AccountState, pallas_extras, ChainSummary, RewardLog};
 use dolos_core::{ArchiveStore, Domain, StateStore};
 use pallas::{
     codec::minicbor,
@@ -82,12 +82,12 @@ impl<'a> IntoModel<AccountContent> for AccountModelBuilder<'a> {
             .to_bech32()
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-        let (current_epoch, _) = dolos_cardano::slot_epoch(tip_slot, chain);
+        let (current_epoch, _) = chain.slot_epoch(tip_slot);
 
         let active_epoch = self
             .account_state
             .registered_at
-            .map(|x| dolos_cardano::slot_epoch(x, chain))
+            .map(|x| chain.slot_epoch(x))
             .map(|(x, _)| x);
 
         let active = active_epoch.map(|x| x < current_epoch).unwrap_or(false);
@@ -434,7 +434,7 @@ where
             break;
         };
 
-        let (epoch, _) = dolos_cardano::slot_epoch(*slot, &chain);
+        let (epoch, _) = chain.slot_epoch(*slot);
 
         let block = domain
             .archive()

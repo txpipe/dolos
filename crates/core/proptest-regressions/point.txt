@@ -1,7 +1,0 @@
-# Seeds for failure cases proptest has generated in the past. It is
-# automatically read and these particular cases re-run before any
-# novel cases are generated.
-#
-# It is recommended to check this file in to source control so that
-# everyone who runs the test benefits from these saved cases.
-cc f5bfdbabc7e415b8e5f37119ce821b516c68f58da1960173465533dcbe4606b3 # shrinks to point1 = Specific(13552415037818894336, Hash<32>("0000000000000000000000000000000000000000000000000000000000000000")), point2 = Specific(1, Hash<32>("0000000000000000000000000000000000000000000000000000000000000000"))

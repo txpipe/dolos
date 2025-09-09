@@ -4,7 +4,7 @@ use axum::{
     Json,
 };
 use blockfrost_openapi::models::block_content::BlockContent;
-use dolos_cardano::pparams::ChainSummary;
+use dolos_cardano::ChainSummary;
 use dolos_core::{ArchiveStore as _, BlockBody, Domain};
 use pallas::ledger::traverse::MultiEraBlock;
 

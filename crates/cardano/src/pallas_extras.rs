@@ -13,7 +13,7 @@ use pallas::ledger::primitives::{
 use pallas::ledger::traverse::MultiEraCert;
 use serde::{Deserialize, Serialize};
 
-use crate::pparams::ChainSummary;
+use crate::eras::ChainSummary;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MultiEraPoolRegistration {
@@ -208,8 +208,8 @@ pub fn address_as_stake_cred(address: &Address) -> Option<StakeCredential> {
 
 pub fn next_epoch_boundary(chain_summary: &ChainSummary, after: BlockSlot) -> BlockSlot {
     let era = chain_summary.era_for_slot(after);
-    let epoch_length = era.pparams.epoch_length();
-    let (_, epoch_slot) = super::utils::slot_epoch(after, chain_summary);
+    let epoch_length = era.epoch_length;
+    let (_, epoch_slot) = era.slot_epoch(after);
 
     let missing = epoch_length - epoch_slot as u64;
 
