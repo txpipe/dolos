@@ -1,4 +1,5 @@
 use dolos_core::*;
+use pallas::{crypto::hash::Hasher, ledger::validate::utils::MultiEraProtocolParameters};
 
 use crate::pparams::{ChainSummary, EraSummary};
 
@@ -52,11 +53,21 @@ pub fn slot_epoch(slot: u64, summary: &ChainSummary) -> (Epoch, EpochSlot) {
     (epoch as Epoch, epoch_slot as EpochSlot)
 }
 
+pub fn epoch_first_slot(epoch: u64, summary: &ChainSummary) -> BlockSlot {
+    let era = summary.era_for_epoch(epoch);
+    era.start.slot + (epoch - era.start.epoch) * era.pparams.epoch_length()
+}
+
 pub fn load_genesis(path: &std::path::Path) -> Genesis {
     let byron = pallas::ledger::configs::byron::from_file(&path.join("byron.json")).unwrap();
     let shelley = pallas::ledger::configs::shelley::from_file(&path.join("shelley.json")).unwrap();
     let alonzo = pallas::ledger::configs::alonzo::from_file(&path.join("alonzo.json")).unwrap();
     let conway = pallas::ledger::configs::conway::from_file(&path.join("conway.json")).unwrap();
+
+    let shelley_bytes = std::fs::read(path.join("shelley.json")).unwrap();
+    let mut hasher = Hasher::<256>::new();
+    hasher.input(&shelley_bytes);
+    let shelley_hash = hasher.finalize();
 
     Genesis {
         byron,
@@ -64,7 +75,18 @@ pub fn load_genesis(path: &std::path::Path) -> Genesis {
         alonzo,
         conway,
         force_protocol: None,
+        shelley_hash,
     }
+}
+
+/// Get first shelley slot and epoch.
+pub fn get_first_shelley_slot_and_epoch(summary: &ChainSummary) -> Option<(u64, u64)> {
+    for item in summary.iter_past() {
+        if !matches!(item.pparams, MultiEraProtocolParameters::Byron(_)) {
+            return Some((item.start.slot, item.start.epoch));
+        }
+    }
+    None
 }
 
 #[cfg(test)]

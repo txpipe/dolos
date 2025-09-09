@@ -18,6 +18,7 @@ use crate::{
 pub mod pallas_extras;
 
 pub mod model;
+pub mod nonce;
 pub mod owned;
 pub mod pparams;
 pub mod roll;

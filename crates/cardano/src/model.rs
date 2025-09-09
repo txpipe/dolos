@@ -227,6 +227,9 @@ pub struct EpochState {
 
     #[n(12)]
     pub to_distribute: Option<u64>,
+
+    #[n(13)]
+    pub nc_candidate: Option<Hash<32>>,
 }
 
 entity_boilerplate!(EpochState, "epochs");
