@@ -52,6 +52,9 @@ pub enum Error {
 
     #[error("tx script returned failure")]
     TxScriptFailure(Vec<String>),
+
+    #[error("failed to resolve tip slot/hash")]
+    TipNotResolved,
 }
 
 trait IntoErrorData {
@@ -128,6 +131,7 @@ impl Error {
     pub const CODE_MISSING_TX_ARG: i32 = -32001;
     pub const CODE_INPUT_NOT_RESOLVED: i32 = -32002;
     pub const CODE_TX_SCRIPT_FAILURE: i32 = -32003;
+    pub const CODE_TIP_NOT_RESOLVED: i32 = -32004;
 
     pub fn code(&self) -> i32 {
         match self {
@@ -149,6 +153,7 @@ impl Error {
             Error::MissingTxArg { .. } => Self::CODE_MISSING_TX_ARG,
             Error::InputNotResolved(_, _, _) => Self::CODE_INPUT_NOT_RESOLVED,
             Error::TxScriptFailure(_) => Self::CODE_TX_SCRIPT_FAILURE,
+            Error::TipNotResolved => Self::CODE_TIP_NOT_RESOLVED,
         }
     }
 

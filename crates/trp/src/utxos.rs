@@ -75,9 +75,4 @@ impl<D: Domain> UtxoStore for UtxoStoreAdapter<D> {
 
         Ok(utxos)
     }
-
-    async fn get_tip(&self) -> Result<u64, tx3_lang::backend::Error> {
-        let cursor = self.state().cursor().map_err(Error::from)?;
-        Ok(cursor.unwrap().slot())
-    }
 }

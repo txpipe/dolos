@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use pallas::ledger::validate::utils::{ConwayProtParams, MultiEraProtocolParameters};
 
 use dolos_cardano::pparams;
-use dolos_core::{Domain, Genesis, StateStore as _};
+use dolos_core::{ChainPoint, Domain, Genesis, StateStore as _};
 
 use crate::{Config, Error};
 
@@ -88,7 +88,6 @@ fn build_pparams<D: Domain>(
 
     Ok(out)
 }
-
 pub fn load_compiler<D: Domain>(
     genesis: &Genesis,
     ledger: &D::State,
@@ -96,11 +95,22 @@ pub fn load_compiler<D: Domain>(
 ) -> Result<tx3_cardano::Compiler, Error> {
     let pparams = build_pparams::<D>(genesis, ledger)?;
 
+    let cursor = ledger.cursor()?.ok_or(Error::TipNotResolved)?;
+
+    let tip = match cursor {
+        ChainPoint::Specific(slot, hash) => tx3_cardano::ChainTip {
+            slot,
+            hash: hash.to_vec(),
+        },
+        ChainPoint::Origin => return Err(Error::TipNotResolved),
+    };
+
     let compiler = tx3_cardano::Compiler::new(
         pparams,
         tx3_cardano::Config {
             extra_fees: config.extra_fees,
         },
+        tip,
     );
 
     Ok(compiler)
