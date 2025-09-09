@@ -492,6 +492,9 @@ pub enum ChainError {
 
     #[error(transparent)]
     State3Error(#[from] State3Error),
+
+    #[error("pparams not found")]
+    PParamsNotFound,
 }
 
 pub trait ChainLogic: Sized + Send + Sync {

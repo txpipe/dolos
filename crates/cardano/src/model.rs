@@ -5,7 +5,11 @@ use dolos_core::{EntityValue, Namespace, NamespaceType, NsKey, State3Error, Stat
 use pallas::{
     codec::minicbor::{self, Decode, Encode},
     crypto::hash::Hash,
-    ledger::primitives::{conway::DRep, PoolMetadata, RationalNumber, Relay},
+    ledger::primitives::{
+        conway::{CostModels, DRep, DRepVotingThresholds, PoolVotingThresholds},
+        Coin, Epoch, ExUnitPrices, ExUnits, Nonce, PoolMetadata, ProtocolVersion, RationalNumber,
+        Relay, UnitInterval,
+    },
 };
 use serde::{Deserialize, Serialize};
 
@@ -259,8 +263,168 @@ impl DRepState {
 
 entity_boilerplate!(DRepState, "dreps");
 
+/// we're purposely not including these Byron params because Dolos doesn't need
+/// them for any logic:
+///
+/// script_version: u16
+/// max_proposal_size: u64
+/// mpc_thd: u64
+/// heavy_del_thd: u64
+/// update_vote_thd: u64
+/// update_proposal_thd: u64
+/// update_implicit: u64
+/// soft_fork_rule: (u64, u64, u64)
+/// unlock_stake_epoch: u64
+#[derive(Debug, Encode, Decode, Clone)]
+pub struct PParamsState {
+    // shelley
+
+    // byron alias: start_time
+    // should be exposed as type chrono::DateTime<chrono::FixedOffset>
+    #[n(0)]
+    pub system_start: u64,
+
+    #[n(1)]
+    pub epoch_length: u64,
+
+    // byron alias: slot_duration
+    #[n(2)]
+    pub slot_length: u64,
+
+    // byron alias: multiplier
+    #[n(3)]
+    pub minfee_a: u32,
+
+    // byron alias: summand
+    #[n(4)]
+    pub minfee_b: u32,
+
+    // byron alias: max_block_size
+    #[n(5)]
+    pub max_block_body_size: u32,
+
+    // byron alias: max_tx_size
+    #[n(6)]
+    pub max_transaction_size: u32,
+
+    // byron alias: max_header_size
+    #[n(7)]
+    pub max_block_header_size: u32,
+
+    #[n(8)]
+    pub key_deposit: Coin,
+
+    #[n(9)]
+    pub pool_deposit: Coin,
+
+    #[n(10)]
+    pub desired_number_of_stake_pools: u32,
+
+    // byron alias: block_version
+    #[n(11)]
+    pub protocol_version: ProtocolVersion,
+
+    #[n(12)]
+    pub min_utxo_value: Coin,
+
+    #[n(13)]
+    pub min_pool_cost: Coin,
+
+    #[n(14)]
+    pub expansion_rate: UnitInterval,
+
+    #[n(15)]
+    pub treasury_growth_rate: UnitInterval,
+
+    #[n(16)]
+    pub maximum_epoch: Epoch,
+
+    #[n(17)]
+    pub pool_pledge_influence: RationalNumber,
+
+    #[n(18)]
+    pub decentralization_constant: UnitInterval,
+
+    #[n(19)]
+    pub extra_entropy: Nonce,
+
+    // alonzo
+    #[n(20)]
+    pub ada_per_utxo_byte: Coin,
+
+    #[n(21)]
+    pub cost_models_for_script_languages: CostModels,
+
+    #[n(22)]
+    pub execution_costs: ExUnitPrices,
+
+    #[n(23)]
+    pub max_tx_ex_units: ExUnits,
+
+    #[n(24)]
+    pub max_block_ex_units: ExUnits,
+
+    #[n(25)]
+    pub max_value_size: u32,
+
+    #[n(26)]
+    pub collateral_percentage: u32,
+
+    #[n(27)]
+    pub max_collateral_inputs: u32,
+
+    // conway
+    #[n(28)]
+    pub pool_voting_thresholds: PoolVotingThresholds,
+
+    #[n(29)]
+    pub drep_voting_thresholds: DRepVotingThresholds,
+
+    #[n(30)]
+    pub min_committee_size: u64,
+
+    #[n(31)]
+    pub committee_term_limit: Epoch,
+
+    #[n(32)]
+    pub governance_action_validity_period: Epoch,
+
+    #[n(33)]
+    pub governance_action_deposit: Coin,
+
+    #[n(34)]
+    pub drep_deposit: Coin,
+
+    #[n(35)]
+    pub drep_inactivity_period: Epoch,
+
+    #[n(36)]
+    pub minfee_refscript_cost_per_byte: UnitInterval,
+}
+
+impl PParamsState {
+    pub fn k(&self) -> u32 {
+        self.desired_number_of_stake_pools
+    }
+
+    pub fn a0(&self) -> &RationalNumber {
+        &self.pool_pledge_influence
+    }
+
+    pub fn tau(&self) -> &RationalNumber {
+        &self.treasury_growth_rate
+    }
+
+    pub fn rho(&self) -> &RationalNumber {
+        &self.expansion_rate
+    }
+}
+
+entity_boilerplate!(PParamsState, "pparams");
+
 #[derive(Debug, Clone)]
 pub enum CardanoEntity {
+    PParamsState(PParamsState),
     AccountState(AccountState),
     AssetState(AssetState),
     PoolState(PoolState),
@@ -287,6 +451,7 @@ macro_rules! variant_boilerplate {
     };
 }
 
+variant_boilerplate!(PParamsState);
 variant_boilerplate!(AccountState);
 variant_boilerplate!(AssetState);
 variant_boilerplate!(PoolState);
@@ -296,6 +461,7 @@ variant_boilerplate!(DRepState);
 impl dolos_core::Entity for CardanoEntity {
     fn decode_entity(ns: Namespace, value: &EntityValue) -> Result<Self, State3Error> {
         match ns {
+            PParamsState::NS => PParamsState::decode_entity(ns, value).map(Into::into),
             AccountState::NS => AccountState::decode_entity(ns, value).map(Into::into),
             AssetState::NS => AssetState::decode_entity(ns, value).map(Into::into),
             PoolState::NS => PoolState::decode_entity(ns, value).map(Into::into),
@@ -307,6 +473,10 @@ impl dolos_core::Entity for CardanoEntity {
 
     fn encode_entity(value: &Self) -> (Namespace, EntityValue) {
         match value {
+            Self::PParamsState(x) => {
+                let (ns, enc) = PParamsState::encode_entity(x);
+                (ns, enc.into())
+            }
             Self::AccountState(x) => {
                 let (ns, enc) = AccountState::encode_entity(x);
                 (ns, enc.into())

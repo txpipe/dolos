@@ -1153,6 +1153,7 @@ dependencies = [
  "chrono",
  "dolos-core",
  "hex",
+ "itertools 0.13.0",
  "itertools 0.14.0",
  "pallas 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=08e6356)",
  "paste",

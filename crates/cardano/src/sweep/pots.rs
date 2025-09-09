@@ -1,7 +1,7 @@
 use dolos_core::{ChainError, Domain, EntityKey, State3Store as _};
 use pallas::ledger::validate::utils::MultiEraProtocolParameters;
 
-use crate::{EpochState, FixedNamespace as _, EPOCH_KEY_MARK, EPOCH_KEY_SET};
+use crate::{EpochState, FixedNamespace as _, PParamsState, EPOCH_KEY_MARK, EPOCH_KEY_SET};
 
 pub type PParams = MultiEraProtocolParameters;
 
@@ -13,21 +13,22 @@ fn compute_new_pots(
     previous_reserves: u64,
     gathered_fees: u64,
     decayed_deposits: u64,
-    pparams: &PParams,
+    pparams: &PParamsState,
 ) -> (NewReserves, ToTreasury, ToDistribute) {
-    let from_reserves = pparams.rho * (previous_reserves as f64);
+    let rho = pparams.rho().numerator as f64 / pparams.rho().denominator as f64;
+    let from_reserves = rho * (previous_reserves as f64);
 
-    let reward_pot_f64 = (from_reserves + gathered_fees + decayed_deposits) as f64;
+    let reward_pot_f64 = (from_reserves.round() as u64 + gathered_fees + decayed_deposits) as f64;
 
-    let to_treasury_f64 = pparams.tau * reward_pot_f64;
-    let to_distribute_f64 = (1.0 - pparams.tau) * reward_pot_f64;
+    let tau = pparams.tau().numerator as f64 / pparams.tau().denominator as f64;
+    let to_treasury_f64 = tau * reward_pot_f64;
+    let to_distribute_f64 = (1.0 - tau) * reward_pot_f64;
 
-    let reward_pot = reward_pot_f64.round() as u64;
     let to_treasury = to_treasury_f64.round() as u64;
     let to_distribute = to_distribute_f64.round() as u64;
 
     // Update reserves
-    let new_reserves = previous_reserves.saturating_sub(from_reserves).round() as u64;
+    let new_reserves = previous_reserves.saturating_sub(from_reserves.round() as u64);
 
     (new_reserves, to_treasury, to_distribute)
 }
@@ -45,15 +46,23 @@ pub fn sweep<D: Domain>(domain: &D) -> Result<(), ChainError> {
         .state3()
         .read_entity_typed::<EpochState>(EpochState::NS, &EntityKey::from(EPOCH_KEY_MARK))?;
 
-    let Some(live_epoch) = live_epoch else {
+    let Some(mut live_epoch) = live_epoch else {
         return Ok(());
+    };
+
+    let pparams = domain
+        .state3()
+        .read_entity_typed::<PParamsState>(PParamsState::NS, &EntityKey::from(EPOCH_KEY_MARK))?;
+
+    let Some(pparams) = pparams else {
+        return Err(ChainError::PParamsNotFound);
     };
 
     let (new_reserves, to_treasury, to_distribute) = compute_new_pots(
         prev_epoch.reserves,
         live_epoch.gathered_fees,
         live_epoch.decayed_deposits,
-        pparams,
+        &pparams,
     );
 
     live_epoch.end_reserves = Some(new_reserves);

@@ -11,6 +11,7 @@ tracing.workspace = true
 serde.workspace = true
 chrono.workspace = true
 hex.workspace = true
+itertools.workspace = true
 
 paste = "1.0.15"
 

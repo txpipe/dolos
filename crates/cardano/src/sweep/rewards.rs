@@ -1,11 +1,12 @@
 use dolos_core::{ChainError, Domain, EntityKey, State3Store};
+use itertools::Itertools as _;
 use pallas::ledger::validate::utils::MultiEraProtocolParameters;
 
 pub type PParams = MultiEraProtocolParameters;
 
 use crate::{
-    AccountState, EpochState, FixedNamespace as _, PoolState, RewardLog, EPOCH_KEY_GO,
-    EPOCH_KEY_MARK,
+    AccountState, EpochState, FixedNamespace as _, PParamsState, PoolState, RewardLog,
+    EPOCH_KEY_GO, EPOCH_KEY_MARK,
 };
 
 type TotalPoolReward = u64;
@@ -15,19 +16,21 @@ fn compute_pool_reward(
     total_rewards: u64,
     total_active_stake: u64,
     pool: &PoolState,
-    pparams: &PParams,
+    pparams: &PParamsState,
 ) -> (TotalPoolReward, OperatorShare) {
-    let z0 = 1.0 / pparams.k as f64;
+    let z0 = 1.0 / pparams.k() as f64;
     let sigma = pool.active_stake as f64 / total_active_stake as f64;
     let s = pool.declared_pledge as f64 / total_active_stake as f64;
     let sigma_prime = sigma.min(z0);
 
     let r = total_rewards as f64;
-    let r_pool = r * (sigma_prime + s.min(sigma) * pparams.a0 * (sigma_prime - sigma));
+    let a0 = pparams.a0().numerator as f64 / pparams.a0().denominator as f64;
+    let r_pool = r * (sigma_prime + s.min(sigma) * a0 * (sigma_prime - sigma));
 
     let r_pool_u64 = r_pool.round() as u64;
     let after_cost = r_pool_u64.saturating_sub(pool.fixed_cost);
-    let operator_share = pool.fixed_cost + ((after_cost as f64) * pool.margin_cost).round() as u64;
+    let pool_margin_cost = pool.margin_cost.numerator as f64 / pool.margin_cost.denominator as f64;
+    let operator_share = pool.fixed_cost + ((after_cost as f64) * pool_margin_cost).round() as u64;
 
     (r_pool_u64, operator_share)
 }
@@ -80,6 +83,14 @@ pub fn sweep<D: Domain>(domain: &D) -> Result<(), ChainError> {
         return Ok(());
     };
 
+    let pparams = domain
+        .state3()
+        .read_entity_typed::<PParamsState>(PParamsState::NS, &EntityKey::from(EPOCH_KEY_MARK))?;
+
+    let Some(pparams) = pparams else {
+        return Err(ChainError::PParamsNotFound);
+    };
+
     for pool in pools {
         let (pool_key, pool) = pool?;
 
@@ -106,7 +117,7 @@ pub fn sweep<D: Domain>(domain: &D) -> Result<(), ChainError> {
         let delegators = domain
             .state3()
             .iter_entities_typed::<AccountState>(AccountState::NS, None)?
-            .filter_ok(|(_, x)| x.pool_id.is_some_and(|v| &v == pool_key.as_ref()));
+            .filter_ok(|(_, x)| x.pool_id.as_ref().is_some_and(|v| v == pool_key.as_ref()));
 
         for delegator in delegators {
             let (delegator_key, delegator) = delegator?;
