@@ -309,6 +309,8 @@ impl StateStore {
         let mut wx = self.db().begin_write()?;
         wx.set_durability(Durability::Immediate);
 
+        let _ = wx.open_table(CURSOR_TABLE)?;
+
         for (_, table) in self.tables.iter() {
             table.initialize(&mut wx)?;
         }

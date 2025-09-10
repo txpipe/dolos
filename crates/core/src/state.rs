@@ -12,18 +12,18 @@ pub type Namespace = &'static str;
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct EntityKey([u8; KEY_SIZE]);
 
-impl<const N: usize> From<&[u8; N]> for EntityKey {
-    fn from(value: &[u8; N]) -> Self {
-        value.into()
-    }
-}
-
 impl From<&[u8]> for EntityKey {
     fn from(value: &[u8]) -> Self {
         let mut key = [0u8; KEY_SIZE];
         let len = value.len().min(KEY_SIZE);
         key[..len].copy_from_slice(&value[..len]);
         EntityKey(key)
+    }
+}
+
+impl<const N: usize> From<&[u8; N]> for EntityKey {
+    fn from(value: &[u8; N]) -> Self {
+        EntityKey::from(value.as_slice())
     }
 }
 

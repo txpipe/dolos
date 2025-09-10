@@ -20,19 +20,6 @@ pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::
 
     let domain = crate::common::setup_domain(config)?;
 
-    if domain
-        .state
-        .is_empty()
-        .into_diagnostic()
-        .context("checking empty state")?
-    {
-        debug!("importing genesis");
-
-        let Ok(_) = dolos_core::catchup::apply_origin(&domain) else {
-            return Err(miette::miette!("failed to apply origin"));
-        };
-    }
-
     let (tip, _) = domain
         .wal
         .find_tip()

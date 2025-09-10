@@ -290,6 +290,8 @@ where
             _phantom: Default::default(),
         };
 
+        out.ensure_initialized()?;
+
         Ok(out)
     }
 
@@ -304,6 +306,8 @@ where
             db: Arc::new(inner),
             _phantom: Default::default(),
         };
+
+        out.ensure_initialized()?;
 
         Ok(out)
     }
@@ -618,7 +622,7 @@ where
         Ok(())
     }
 
-    fn remove_entries(&mut self, after: &ChainPoint) -> Result<(), RedbWalError> {
+    fn remove_entries(&self, after: &ChainPoint) -> Result<(), RedbWalError> {
         let mut wx = self.db.begin_write()?;
         wx.set_quick_repair(true);
 
@@ -641,6 +645,15 @@ where
 
         Ok(())
     }
+
+    fn reset_to(&self, point: &ChainPoint) -> Result<(), RedbWalError> {
+        self.remove_entries(&ChainPoint::Origin)?;
+
+        let entry = (point.clone(), LogValue::origin());
+        self.append_entries(&[entry])?;
+
+        Ok(())
+    }
 }
 
 impl<T> WalStore for RedbWalStore<T>
@@ -651,8 +664,8 @@ where
     type LogIterator<'a> = LogIter<'a, Self::Delta>;
     type BlockIterator<'a> = BlockIter<'a, Self::Delta>;
 
-    fn ensure_initialized(&self) -> Result<(), WalError> {
-        RedbWalStore::ensure_initialized(self).map_err(From::from)
+    fn reset_to(&self, point: &ChainPoint) -> Result<(), WalError> {
+        RedbWalStore::reset_to(self, point).map_err(From::from)
     }
 
     fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, WalError> {

@@ -91,13 +91,13 @@ pub struct WorkBatch<C: ChainLogic> {
 // }
 
 impl<C: ChainLogic> WorkBatch<C> {
-    fn new(blocks: Vec<WorkBlock<C>>) -> Self {
+    fn new(blocks: Vec<WorkBlock<C>>, is_sorted: bool) -> Self {
         Self {
             blocks,
             entities: HashMap::new(),
             utxos: HashMap::new(),
             utxos_decoded: HashMap::new(),
-            is_sorted: false,
+            is_sorted,
         }
     }
 
@@ -111,7 +111,7 @@ impl<C: ChainLogic> WorkBatch<C> {
             })
             .collect();
 
-        Self::new(blocks)
+        Self::new(blocks, false)
     }
 
     pub fn iter_raw(&self) -> impl Iterator<Item = (ChainPoint, &RawBlock)> {
@@ -167,8 +167,8 @@ impl<C: ChainLogic> WorkBatch<C> {
             }
         }
 
-        let before = Self::new(before);
-        let after = Self::new(after);
+        let before = Self::new(before, true);
+        let after = Self::new(after, true);
 
         (before, after)
     }

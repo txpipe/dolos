@@ -124,10 +124,11 @@ impl dolos_core::ChainLogic for CardanoLogic {
     }
 }
 
-pub fn load_current_pparams<D: Domain>(domain: &D) -> Result<Option<PParamsState>, ChainError> {
+pub fn load_current_pparams<D: Domain>(domain: &D) -> Result<PParamsState, ChainError> {
     let pparams = domain
         .state3()
-        .read_entity_typed::<PParamsState>(PParamsState::NS, &EntityKey::from(EPOCH_KEY_MARK))?;
+        .read_entity_typed::<PParamsState>(PParamsState::NS, &EntityKey::from(EPOCH_KEY_MARK))?
+        .ok_or(ChainError::PParamsNotFound)?;
 
     Ok(pparams)
 }

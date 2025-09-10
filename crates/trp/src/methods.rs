@@ -140,7 +140,10 @@ pub async fn trp_submit<D: Domain>(
         bytes = apply_witnesses(&bytes, &params.witnesses)?;
     }
 
-    let tx = context.domain.mempool().receive_raw(&bytes)?;
+    let tx = context
+        .domain
+        .mempool()
+        .receive_raw(&context.domain, &bytes)?;
 
     Ok(serde_json::json!({ "hash": tx.to_string() }))
 }

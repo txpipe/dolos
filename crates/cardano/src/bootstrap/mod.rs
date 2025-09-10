@@ -1,7 +1,31 @@
-use dolos_core::{ChainError, Domain, EntityKey, State3Store, StateStore as _};
+use dolos_core::{
+    BrokenInvariant, ChainError, Domain, EntityKey, Genesis, State3Store, StateStore as _,
+};
 use tracing::debug;
 
 use crate::{EraBoundary, EraSummary, PParamsState, EPOCH_KEY_MARK};
+
+fn force_hardforks(
+    pparams: &mut PParamsState,
+    force_protocol: usize,
+    genesis: &Genesis,
+) -> Result<(), BrokenInvariant> {
+    while pparams.protocol_major() < force_protocol as u16 {
+        let previous = pparams.protocol_major();
+
+        *pparams = crate::forks::bump_pparams_version(&pparams, genesis);
+
+        // if the protocol major didn't increase, something went wrong and we might be
+        // stuck in a loop. We return an error to avoid infinite loops.
+        if pparams.protocol_major() <= previous as u16 {
+            return Err(BrokenInvariant::InvalidGenesisConfig.into());
+        }
+
+        debug!(protocol = pparams.protocol_major(), "forced hardfork");
+    }
+
+    Ok(())
+}
 
 fn bootrap_pparams<D: Domain>(domain: &D) -> Result<PParamsState, ChainError> {
     let genesis = domain.genesis();
@@ -9,11 +33,7 @@ fn bootrap_pparams<D: Domain>(domain: &D) -> Result<PParamsState, ChainError> {
     let mut pparams = crate::forks::from_byron_genesis(&genesis.byron);
 
     if let Some(force_protocol) = genesis.force_protocol {
-        for next_protocol in 1..=force_protocol {
-            pparams = crate::forks::migrate_pparams(&pparams, genesis, next_protocol);
-
-            debug!(protocol = next_protocol, "forced hardfork");
-        }
+        force_hardforks(&mut pparams, force_protocol, genesis)?;
     }
 
     domain
@@ -55,9 +75,15 @@ pub fn bootstrap_utxos<D: Domain>(domain: &D) -> Result<(), ChainError> {
 pub fn execute<D: Domain>(domain: &D) -> Result<(), ChainError> {
     let pparams = bootrap_pparams(domain)?;
 
+    dbg!("pparams bootstrapped");
+
     bootstrap_eras(domain, &pparams)?;
 
+    dbg!("eras bootstrapped");
+
     bootstrap_utxos(domain)?;
+
+    dbg!("utxos bootstrapped");
 
     Ok(())
 }

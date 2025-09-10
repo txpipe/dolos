@@ -559,6 +559,7 @@ impl dolos_core::Entity for CardanoEntity {
 pub fn build_schema() -> StateSchema {
     let mut schema = StateSchema::default();
     schema.insert(EraSummary::NS, NamespaceType::KeyValue);
+    schema.insert(PParamsState::NS, NamespaceType::KeyValue);
     schema.insert(AccountState::NS, NamespaceType::KeyValue);
     schema.insert(AssetState::NS, NamespaceType::KeyValue);
     schema.insert(PoolState::NS, NamespaceType::KeyValue);

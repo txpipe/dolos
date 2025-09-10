@@ -152,6 +152,9 @@ impl Display for TxoRef {
 pub enum BrokenInvariant {
     #[error("missing utxo {0:?}")]
     MissingUtxo(TxoRef),
+
+    #[error("invalid genesis config")]
+    InvalidGenesisConfig,
 }
 
 pub type UtxoMap = HashMap<TxoRef, Arc<EraCbor>>;
@@ -186,6 +189,18 @@ where
 {
     pub block: Cbor,
     pub delta: Vec<D>,
+}
+
+impl<D> LogValue<D>
+where
+    D: EntityDelta,
+{
+    pub fn origin() -> Self {
+        Self {
+            block: vec![],
+            delta: vec![],
+        }
+    }
 }
 
 pub type LogEntry<D> = (ChainPoint, LogValue<D>);
@@ -448,8 +463,11 @@ pub enum MempoolError {
     #[error("phase-2 script yielded an error")]
     Phase2ExplicitError(Phase2Log),
 
-    #[error("state error: {0}")]
+    #[error(transparent)]
     StateError(#[from] StateError),
+
+    #[error(transparent)]
+    ChainError(#[from] ChainError),
 
     #[error("plutus not supported")]
     PlutusNotSupported,
@@ -464,9 +482,9 @@ pub trait MempoolStore: Clone + Send + Sync + 'static {
         + Send
         + Sync;
 
-    fn receive_raw(&self, cbor: &[u8]) -> Result<TxHash, MempoolError>;
+    fn receive_raw<D: Domain>(&self, domain: &D, cbor: &[u8]) -> Result<TxHash, MempoolError>;
 
-    fn evaluate_raw(&self, cbor: &[u8]) -> Result<EvalReport, MempoolError>;
+    fn evaluate_raw<D: Domain>(&self, domain: &D, cbor: &[u8]) -> Result<EvalReport, MempoolError>;
 
     fn apply(&self, deltas: &[UtxoSetDelta]);
     fn check_stage(&self, tx_hash: &TxHash) -> MempoolTxStage;
@@ -562,8 +580,14 @@ pub enum DomainError {
     #[error("mempool error: {0}")]
     MempoolError(#[from] MempoolError),
 
+    #[error("inconsistent state: {0}")]
+    InconsistentState(String),
+
     #[error("wal is empty")]
     WalIsEmpty,
+
+    #[error("wal is behind state: {0}")]
+    WalIsBehindState(BlockSlot, BlockSlot),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

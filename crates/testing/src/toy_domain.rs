@@ -48,7 +48,7 @@ impl futures_core::Stream for MempoolStream {
 impl dolos_core::MempoolStore for Mempool {
     type Stream = MempoolStream;
 
-    fn receive_raw(&self, _cbor: &[u8]) -> Result<TxHash, MempoolError> {
+    fn receive_raw<D: Domain>(&self, _domain: &D, _cbor: &[u8]) -> Result<TxHash, MempoolError> {
         todo!()
     }
 
@@ -64,7 +64,11 @@ impl dolos_core::MempoolStore for Mempool {
         todo!()
     }
 
-    fn evaluate_raw(&self, _cbor: &[u8]) -> Result<EvalReport, MempoolError> {
+    fn evaluate_raw<D: Domain>(
+        &self,
+        _domain: &D,
+        _cbor: &[u8],
+    ) -> Result<EvalReport, MempoolError> {
         todo!()
     }
 }

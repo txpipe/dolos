@@ -235,8 +235,7 @@ where
         let tip = self.domain.state().cursor().map_err(into_status)?;
 
         let pparams = dolos_cardano::load_current_pparams(&self.domain)
-            .map_err(|_| Status::internal("Failed to load current pparams"))?
-            .ok_or_else(|| Status::internal("No current pparams available"))?;
+            .map_err(|_| Status::internal("Failed to load current pparams"))?;
 
         let pparams = dolos_cardano::utils::pparams_to_pallas(&pparams);
 

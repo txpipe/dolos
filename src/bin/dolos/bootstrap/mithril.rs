@@ -180,14 +180,6 @@ fn import_hardano_into_domain(
 ) -> Result<(), miette::Error> {
     let domain = crate::common::setup_domain(config)?;
 
-    if domain.state().is_empty().into_diagnostic()? {
-        dolos_core::catchup::apply_origin(&domain)
-            // TODO: can't use into_diagnostic here because some variant of DomainError doesn't
-            // implement std::error::Error
-            .map_err(|x| miette::miette!(x.to_string()))
-            .context("applying origin")?;
-    }
-
     let tip = pallas::storage::hardano::immutable::get_tip(immutable_path)
         .map_err(|err| miette::miette!(err.to_string()))
         .context("reading immutable db tip")?

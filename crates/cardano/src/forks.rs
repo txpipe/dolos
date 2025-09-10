@@ -17,10 +17,10 @@ fn from_config_nonce(config: &shelley::ExtraEntropy) -> Nonce {
             shelley::NonceVariant::NeutralNonce => NonceVariant::NeutralNonce,
             shelley::NonceVariant::Nonce => NonceVariant::Nonce,
         },
-        hash: {
-            let bytes = hex::decode(config.hash.as_ref().unwrap()).unwrap();
-            Some(Hash::from(bytes.as_slice()))
-        },
+        hash: config.hash.as_ref().map(|x| {
+            let bytes = hex::decode(x).unwrap();
+            Hash::from(bytes.as_slice())
+        }),
     }
 }
 
@@ -261,11 +261,15 @@ pub fn into_conway(previous: &PParamsState, genesis: &conway::GenesisFile) -> PP
     }
 }
 
-pub fn migrate_pparams(
-    current: &PParamsState,
-    genesis: &Genesis,
-    next_protocol: usize,
-) -> PParamsState {
+/// Increments the protocol version by 1 without changing any other fields
+pub fn intra_era_hardfork(current: &PParamsState) -> PParamsState {
+    PParamsState {
+        protocol_version: (current.protocol_version.0 + 1, 0),
+        ..current.clone()
+    }
+}
+
+pub fn bump_pparams_version(current: &PParamsState, genesis: &Genesis) -> PParamsState {
     let current_protocol = current.protocol_major();
     // Source: https://github.com/cardano-foundation/CIPs/blob/master/CIP-0059/feature-table.md
     // NOTE: part of the confusion here is that there are two versioning schemes
@@ -275,30 +279,30 @@ pub fn migrate_pparams(
     // Generally, these refer to the latter; the update proposals jump from 2 to 5,
     // because the node team decided it would be helpful to have these in sync.
 
-    match (current_protocol, next_protocol) {
+    match current_protocol {
         // Protocol starts at version 0;
         // There was one intra-era "hard fork" in byron (even though they weren't called that yet)
-        (0, 1) => from_byron_genesis(&genesis.byron),
+        0 => intra_era_hardfork(current),
         // Protocol version 2 transitions from Byron to Shelley
-        (1, 2) => from_shelley_genesis(&genesis.shelley),
+        1 => from_shelley_genesis(&genesis.shelley),
         // Two intra-era hard forks, named Allegra (3) and Mary (4); we don't have separate types
         // for these eras
-        (2, 3) => current.clone(),
-        (3, 4) => current.clone(),
+        2 => intra_era_hardfork(current),
+        3 => intra_era_hardfork(current),
         // Protocol version 5 transitions from Shelley (Mary, technically) to Alonzo
-        (4, 5) => into_alonzo(current, &genesis.alonzo),
+        4 => into_alonzo(current, &genesis.alonzo),
         // One intra-era hard-fork in alonzo at protocol version 6
-        (5, 6) => current.clone(),
+        5 => intra_era_hardfork(current),
         // Protocol version 7 transitions from Alonzo to Babbage
-        (6, 7) => into_babbage(current, &genesis.alonzo),
+        6 => into_babbage(current, &genesis.alonzo),
         // One intra-era hard-fork in babbage at protocol version 8
-        (7, 8) => current.clone(),
+        7 => intra_era_hardfork(current),
         // Protocol version 9 transitions from Babbage to Conway
-        (8, 9) => into_conway(current, &genesis.conway),
+        8 => into_conway(current, &genesis.conway),
         // One intra-era hard-fork in conway at protocol version 10
-        (9, 10) => current.clone(),
-        (from, to) => {
-            unimplemented!("don't know how to hardfork from version {from} to {to}",)
+        9 => intra_era_hardfork(current),
+        from => {
+            unimplemented!("don't know how to bump from version {from}",)
         }
     }
 }
