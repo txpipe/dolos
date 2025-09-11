@@ -138,9 +138,15 @@ pub struct AssetState {
 entity_boilerplate!(AssetState, "assets");
 
 impl AssetState {
-    pub fn add_quantity(&mut self, value: i128) {
-        let old = i128::from_be_bytes(self.quantity_bytes);
+    pub fn add_quantity(&mut self, value: u128) {
+        let old = u128::from_be_bytes(self.quantity_bytes);
         let new = old.saturating_add(value).to_be_bytes();
+        self.quantity_bytes = new;
+    }
+
+    pub fn sub_quantity(&mut self, value: u128) {
+        let old = u128::from_be_bytes(self.quantity_bytes);
+        let new = old.saturating_sub(value).to_be_bytes();
         self.quantity_bytes = new;
     }
 

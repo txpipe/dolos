@@ -40,7 +40,7 @@ impl dolos_core::EntityDelta for MintStatsUpdate {
     fn apply(&mut self, entity: &mut Option<AssetState>) {
         let entity = entity.get_or_insert_default();
 
-        entity.add_quantity(self.quantity);
+        entity.add_quantity(self.quantity as u128);
         entity.mint_tx_count += 1;
 
         if entity.initial_slot.unwrap_or(u64::MAX) > self.seen_in_slot {
@@ -53,7 +53,7 @@ impl dolos_core::EntityDelta for MintStatsUpdate {
     fn undo(&mut self, entity: &mut Option<AssetState>) {
         let entity = entity.get_or_insert_default();
 
-        entity.add_quantity(-self.quantity);
+        entity.sub_quantity(self.quantity as u128);
         entity.mint_tx_count -= 1;
 
         if self.is_first_mint.unwrap_or(false) {
