@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use dolos_cardano::CardanoLogic;
-use dolos_cardano::{pparams, slot_time_within_era};
 use dolos_core::*;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
@@ -489,18 +488,10 @@ impl pallas::interop::utxorpc::LedgerContext for DomainAdapter {
     }
 
     fn get_slot_timestamp(&self, slot: u64) -> Option<u64> {
-        let updates = self.state().get_pparams(slot).ok()?;
+        let time = dolos_cardano::eras::load_era_summary(self)
+            .ok()?
+            .slot_time(slot);
 
-        let updates: Vec<_> = updates
-            .into_iter()
-            .map(TryInto::try_into)
-            .try_collect()
-            .ok()?;
-
-        let eras = pparams::fold_with_hacks(self.genesis(), &updates, slot);
-
-        let era = eras.era_for_slot(slot);
-
-        Some(slot_time_within_era(slot, era))
+        Some(time)
     }
 }

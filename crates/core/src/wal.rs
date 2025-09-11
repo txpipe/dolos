@@ -8,7 +8,7 @@ pub trait WalStore: Clone + Send + Sync + 'static {
     type LogIterator<'a>: DoubleEndedIterator<Item = LogEntry<Self::Delta>> + Sized + Sync + Send;
     type BlockIterator<'a>: DoubleEndedIterator<Item = (ChainPoint, RawBlock)> + Sized + Sync + Send;
 
-    fn ensure_initialized(&self) -> Result<(), WalError>;
+    fn reset_to(&self, point: &ChainPoint) -> Result<(), WalError>;
 
     fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, WalError>;
 

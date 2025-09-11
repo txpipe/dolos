@@ -152,6 +152,12 @@ impl Display for TxoRef {
 pub enum BrokenInvariant {
     #[error("missing utxo {0:?}")]
     MissingUtxo(TxoRef),
+
+    #[error("invalid genesis config")]
+    InvalidGenesisConfig,
+
+    #[error("bad bootstrap")]
+    BadBootstrap,
 }
 
 pub type UtxoMap = HashMap<TxoRef, Arc<EraCbor>>;
@@ -186,6 +192,18 @@ where
 {
     pub block: Cbor,
     pub delta: Vec<D>,
+}
+
+impl<D> LogValue<D>
+where
+    D: EntityDelta,
+{
+    pub fn origin() -> Self {
+        Self {
+            block: vec![],
+            delta: vec![],
+        }
+    }
 }
 
 pub type LogEntry<D> = (ChainPoint, LogValue<D>);
@@ -448,8 +466,11 @@ pub enum MempoolError {
     #[error("phase-2 script yielded an error")]
     Phase2ExplicitError(Phase2Log),
 
-    #[error("state error: {0}")]
+    #[error(transparent)]
     StateError(#[from] StateError),
+
+    #[error(transparent)]
+    ChainError(#[from] ChainError),
 
     #[error("plutus not supported")]
     PlutusNotSupported,
@@ -464,9 +485,9 @@ pub trait MempoolStore: Clone + Send + Sync + 'static {
         + Send
         + Sync;
 
-    fn receive_raw(&self, cbor: &[u8]) -> Result<TxHash, MempoolError>;
+    fn receive_raw<D: Domain>(&self, domain: &D, cbor: &[u8]) -> Result<TxHash, MempoolError>;
 
-    fn evaluate_raw(&self, cbor: &[u8]) -> Result<EvalReport, MempoolError>;
+    fn evaluate_raw<D: Domain>(&self, domain: &D, cbor: &[u8]) -> Result<EvalReport, MempoolError>;
 
     fn apply(&self, deltas: &[UtxoSetDelta]);
     fn check_stage(&self, tx_hash: &TxHash) -> MempoolTxStage;
@@ -491,6 +512,9 @@ pub enum ChainError {
     AddressDecoding(#[from] pallas::ledger::addresses::Error),
 
     #[error(transparent)]
+    StateError(#[from] StateError),
+
+    #[error(transparent)]
     State3Error(#[from] State3Error),
 
     #[error("pparams not found")]
@@ -503,6 +527,8 @@ pub trait ChainLogic: Sized + Send + Sync {
     type Utxo: Sized + Send + Sync;
     type Delta: EntityDelta<Entity = Self::Entity>;
 
+    fn bootstrap<D: Domain>(&self, domain: &D) -> Result<(), ChainError>;
+
     fn decode_block(&self, block: Arc<BlockBody>) -> Result<Self::Block, ChainError>;
 
     fn decode_utxo(&self, utxo: Arc<EraCbor>) -> Result<Self::Utxo, ChainError>;
@@ -511,7 +537,7 @@ pub trait ChainLogic: Sized + Send + Sync {
 
     fn execute_sweep<D: Domain>(&self, domain: &D, at: BlockSlot) -> Result<(), ChainError>;
 
-    fn next_sweep(&self, after: BlockSlot) -> BlockSlot;
+    fn next_sweep<D: Domain>(&self, domain: &D, after: BlockSlot) -> Result<BlockSlot, ChainError>;
 
     /// Computes the last immutable slot
     ///
@@ -524,15 +550,11 @@ pub trait ChainLogic: Sized + Send + Sync {
         tip.saturating_sub(Self::mutable_slots(domain))
     }
 
-    fn compute_origin_utxo_delta(&self, genesis: &Genesis) -> Result<UtxoSetDelta, ChainError>;
-
     fn compute_block_utxo_delta(
         &self,
         block: &Self::Block,
         deps: &RawUtxoMap,
     ) -> Result<UtxoSetDelta, ChainError>;
-
-    fn compute_origin_delta(&self, genesis: &Genesis) -> Result<WorkBatch<Self>, ChainError>;
 
     fn compute_delta(
         &self,
@@ -560,6 +582,15 @@ pub enum DomainError {
 
     #[error("mempool error: {0}")]
     MempoolError(#[from] MempoolError),
+
+    #[error("inconsistent state: {0}")]
+    InconsistentState(String),
+
+    #[error("wal is empty")]
+    WalIsEmpty,
+
+    #[error("wal is behind state: {0}")]
+    WalIsBehindState(BlockSlot, BlockSlot),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -9,14 +9,14 @@ use blockfrost_openapi::models::{
 use chrono::{DateTime, FixedOffset};
 use dolos_cardano::{
     model::{EpochState, EPOCH_KEY_MARK},
-    pparams::{ChainSummary, EraSummary},
+    ChainSummary, EraSummary,
 };
 use dolos_core::{Domain, Genesis};
 
 use crate::{mapping::IntoModel, Facade};
 
 struct EraModelBuilder<'a> {
-    system_start: DateTime<FixedOffset>,
+    system_start: u64,
     era: &'a EraSummary,
     genesis: &'a Genesis,
 }
@@ -25,8 +25,8 @@ impl<'a> IntoModel<NetworkErasInner> for EraModelBuilder<'a> {
     type SortKey = ();
 
     fn into_model(self) -> Result<NetworkErasInner, StatusCode> {
-        let start_time = dolos_cardano::slot_time_within_era(self.era.start.slot, self.era);
-        let start_delta = start_time - self.system_start.timestamp() as u64;
+        let start_time = self.era.slot_time(self.era.start.slot);
+        let start_delta = start_time - self.system_start;
 
         let end = self
             .era
@@ -34,8 +34,8 @@ impl<'a> IntoModel<NetworkErasInner> for EraModelBuilder<'a> {
             .as_ref()
             .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
 
-        let end_time = dolos_cardano::slot_time_within_era(end.slot, self.era);
-        let end_delta = end_time - self.system_start.timestamp() as u64;
+        let end_time = self.era.slot_time(end.slot);
+        let end_delta = end_time - self.system_start;
 
         let out = NetworkErasInner {
             start: Box::new(NetworkErasInnerStart {
@@ -49,8 +49,8 @@ impl<'a> IntoModel<NetworkErasInner> for EraModelBuilder<'a> {
                 epoch: end.epoch as i32,
             }),
             parameters: Box::new(NetworkErasInnerParameters {
-                epoch_length: self.era.pparams.epoch_length() as i32,
-                slot_length: self.era.pparams.slot_length() as f64,
+                epoch_length: self.era.epoch_length as i32,
+                slot_length: self.era.slot_length as f64,
                 safe_zone: dolos_cardano::mutable_slots(self.genesis) as i32,
             }),
         };

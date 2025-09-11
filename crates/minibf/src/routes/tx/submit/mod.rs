@@ -28,17 +28,21 @@ pub async fn route<D: Domain>(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    let hash = domain.mempool().receive_raw(&cbor).map_err(|e| match e {
-        MempoolError::Phase1Error(_) => StatusCode::BAD_REQUEST,
-        MempoolError::Phase2Error(_) => StatusCode::BAD_REQUEST,
-        MempoolError::Phase2ExplicitError(_) => StatusCode::BAD_REQUEST,
-        MempoolError::InvalidTx(_) => StatusCode::BAD_REQUEST,
-        MempoolError::TraverseError(_) => StatusCode::BAD_REQUEST,
-        MempoolError::StateError(_) => StatusCode::INTERNAL_SERVER_ERROR,
-        MempoolError::DecodeError(_) => StatusCode::BAD_REQUEST,
-        MempoolError::PlutusNotSupported => StatusCode::BAD_REQUEST,
-        MempoolError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
-    })?;
+    let hash = domain
+        .mempool()
+        .receive_raw(&domain.inner, &cbor)
+        .map_err(|e| match e {
+            MempoolError::Phase1Error(_) => StatusCode::BAD_REQUEST,
+            MempoolError::Phase2Error(_) => StatusCode::BAD_REQUEST,
+            MempoolError::Phase2ExplicitError(_) => StatusCode::BAD_REQUEST,
+            MempoolError::InvalidTx(_) => StatusCode::BAD_REQUEST,
+            MempoolError::TraverseError(_) => StatusCode::BAD_REQUEST,
+            MempoolError::StateError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            MempoolError::ChainError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            MempoolError::DecodeError(_) => StatusCode::BAD_REQUEST,
+            MempoolError::PlutusNotSupported => StatusCode::BAD_REQUEST,
+            MempoolError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        })?;
 
     Ok(hex::encode(hash))
 }

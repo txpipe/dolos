@@ -119,7 +119,7 @@ pub fn setup_data_stores(config: &crate::Config) -> Result<Stores, Error> {
 pub fn setup_domain(config: &crate::Config) -> miette::Result<DomainAdapter> {
     let stores = setup_data_stores(config)?;
     let genesis = Arc::new(open_genesis_files(&config.genesis)?);
-    let mempool = dolos::mempool::Mempool::new(genesis.clone(), stores.state.clone());
+    let mempool = dolos::mempool::Mempool::new();
     let (tip_broadcast, _) = tokio::sync::broadcast::channel(100);
     let chain = config.chain.clone().unwrap_or_default();
 
@@ -140,7 +140,8 @@ pub fn setup_domain(config: &crate::Config) -> miette::Result<DomainAdapter> {
         tip_broadcast,
     };
 
-    dolos_core::init::check_integrity(&domain).map_err(|x| miette::miette!("{:?}", x))?;
+    // this will make sure the domain is correctly initialized and in a valid state.
+    dolos_core::init::ensure_initialized(&domain).map_err(|x| miette::miette!("{:?}", x))?;
 
     Ok(domain)
 }

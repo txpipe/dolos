@@ -18,7 +18,7 @@ pub struct SubmitServiceImpl<D>
 where
     D: Domain + LedgerContext,
 {
-    mempool: D::Mempool,
+    domain: D,
     _mapper: interop::Mapper<D>,
 }
 
@@ -27,10 +27,10 @@ where
     D: Domain + LedgerContext,
 {
     pub fn new(domain: D) -> Self {
-        let mempool = domain.mempool().clone();
+        let domain = domain.clone();
         let _mapper = interop::Mapper::new(domain.clone());
 
-        Self { mempool, _mapper }
+        Self { domain, _mapper }
     }
 }
 
@@ -120,11 +120,14 @@ where
 
         info!("received new grpc submit tx request: {:?}", message);
 
+        let domain = &self.domain;
+        let mempool = domain.mempool();
+
         let mut hashes = vec![];
         for (idx, tx_bytes) in message.tx.into_iter().flat_map(|x| x.r#type).enumerate() {
             match tx_bytes {
                 any_chain_tx::Type::Raw(bytes) => {
-                    let hash = self.mempool.receive_raw(bytes.as_ref()).map_err(|e| {
+                    let hash = mempool.receive_raw(domain, bytes.as_ref()).map_err(|e| {
                         Status::invalid_argument(
                             format! {"could not process tx at index {idx}: {e}"},
                         )
@@ -148,17 +151,19 @@ where
             .map(|x| Hash::from(x.as_ref()))
             .collect();
 
+        let mempool = self.domain.mempool();
+
         let initial_stages: Vec<_> = subjects
             .iter()
             .map(|x| {
                 Result::<_, Status>::Ok(WaitForTxResponse {
-                    stage: tx_stage_to_u5c(self.mempool.check_stage(x)),
+                    stage: tx_stage_to_u5c(mempool.check_stage(x)),
                     r#ref: x.to_vec().into(),
                 })
             })
             .collect();
 
-        let updates = self.mempool.subscribe();
+        let updates = mempool.subscribe();
 
         let updates = UpdateFilter::<D::Mempool>::new(updates, subjects)
             .map(|x| Ok(event_to_wait_for_tx_response(x)))
@@ -180,7 +185,7 @@ where
         &self,
         _request: tonic::Request<WatchMempoolRequest>,
     ) -> Result<tonic::Response<Self::WatchMempoolStream>, tonic::Status> {
-        let updates = self.mempool.subscribe();
+        let updates = self.domain.mempool().subscribe();
 
         let stream = updates
             .map_ok(event_to_watch_mempool_response)
@@ -210,7 +215,7 @@ where
         let eval_results: Vec<_> = txs_raw
             .iter()
             .map(|tx_cbor| {
-                let result = self.mempool.evaluate_raw(tx_cbor);
+                let result = self.domain.mempool().evaluate_raw(&self.domain, tx_cbor);
                 let result = tx_eval_to_u5c(result);
 
                 AnyChainEval {

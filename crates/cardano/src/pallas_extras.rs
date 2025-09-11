@@ -5,15 +5,18 @@ use pallas::crypto::hash::Hash;
 use pallas::ledger::addresses::{
     Address, Network, ShelleyAddress, ShelleyDelegationPart, StakeAddress, StakePayload,
 };
-use pallas::ledger::primitives::conway::DRep;
+use pallas::ledger::primitives::conway::{
+    CostModels, DRep, DRepVotingThresholds, PoolVotingThresholds,
+};
 use pallas::ledger::primitives::{
     alonzo::Certificate as AlonzoCert, conway::Certificate as ConwayCert, PoolMetadata,
     RationalNumber, Relay, StakeCredential,
 };
+use pallas::ledger::primitives::{ExUnitPrices, ExUnits, Nonce, NonceVariant};
 use pallas::ledger::traverse::MultiEraCert;
 use serde::{Deserialize, Serialize};
 
-use crate::pparams::ChainSummary;
+use crate::eras::ChainSummary;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MultiEraPoolRegistration {
@@ -208,10 +211,69 @@ pub fn address_as_stake_cred(address: &Address) -> Option<StakeCredential> {
 
 pub fn next_epoch_boundary(chain_summary: &ChainSummary, after: BlockSlot) -> BlockSlot {
     let era = chain_summary.era_for_slot(after);
-    let epoch_length = era.pparams.epoch_length();
-    let (_, epoch_slot) = super::utils::slot_epoch(after, chain_summary);
+    let epoch_length = era.epoch_length;
+    let (_, epoch_slot) = era.slot_epoch(after);
 
     let missing = epoch_length - epoch_slot as u64;
 
     after + missing
+}
+
+pub fn default_rational_number() -> RationalNumber {
+    RationalNumber {
+        numerator: 0,
+        denominator: 1,
+    }
+}
+
+pub fn default_pool_voting_thresholds() -> PoolVotingThresholds {
+    PoolVotingThresholds {
+        motion_no_confidence: default_rational_number(),
+        committee_normal: default_rational_number(),
+        committee_no_confidence: default_rational_number(),
+        hard_fork_initiation: default_rational_number(),
+        security_voting_threshold: default_rational_number(),
+    }
+}
+
+pub fn default_drep_voting_thresholds() -> DRepVotingThresholds {
+    DRepVotingThresholds {
+        motion_no_confidence: default_rational_number(),
+        committee_normal: default_rational_number(),
+        committee_no_confidence: default_rational_number(),
+        hard_fork_initiation: default_rational_number(),
+        pp_network_group: default_rational_number(),
+        pp_economic_group: default_rational_number(),
+        pp_technical_group: default_rational_number(),
+        treasury_withdrawal: default_rational_number(),
+        update_constitution: default_rational_number(),
+        pp_governance_group: default_rational_number(),
+    }
+}
+
+pub fn default_nonce() -> Nonce {
+    Nonce {
+        variant: NonceVariant::NeutralNonce,
+        hash: None,
+    }
+}
+
+pub fn default_ex_units() -> ExUnits {
+    ExUnits { mem: 0, steps: 0 }
+}
+
+pub fn default_ex_unit_prices() -> ExUnitPrices {
+    ExUnitPrices {
+        mem_price: default_rational_number(),
+        step_price: default_rational_number(),
+    }
+}
+
+pub fn default_cost_models() -> CostModels {
+    CostModels {
+        plutus_v1: None,
+        plutus_v2: None,
+        plutus_v3: None,
+        unknown: Default::default(),
+    }
 }
