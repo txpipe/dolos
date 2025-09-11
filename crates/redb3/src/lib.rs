@@ -450,6 +450,9 @@ impl dolos_core::State3Store for StateStore {
         for (k, v) in batch.iter() {
             table.write_entity(&mut wx, k, v)?;
         }
+
+        wx.commit().map_err(Error::from)?;
+
         Ok(())
     }
 

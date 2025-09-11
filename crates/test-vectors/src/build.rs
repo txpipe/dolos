@@ -8,11 +8,11 @@ use std::{
 use bb8::Pool;
 use bb8_postgres::PostgresConnectionManager;
 use dolos_cardano::{build_schema, AccountState, AssetState, FixedNamespace, PoolState, RewardLog};
-use dolos_core::{Entity, EntityKey, EntityValue, State3Store as _};
+use dolos_core::{EntityKey, State3Store as _};
 use handlebars::Handlebars;
 use miette::{bail, Context, IntoDiagnostic};
 use pallas::{
-    codec::minicbor::{self, Encode},
+    codec::minicbor,
     ledger::{
         addresses::Address,
         primitives::{PoolMetadata, RationalNumber, Relay},
@@ -92,6 +92,7 @@ pub async fn run(args: &Args) -> miette::Result<()> {
 
     handle_account_state(args, &pool, &state, &registry).await?;
     handle_asset_state(args, &pool, &state, &registry).await?;
+    handle_cursor(args, &pool, &state, &registry).await?;
     handle_pool_state(args, &pool, &state, &registry).await?;
 
     Ok(())
@@ -296,6 +297,42 @@ pub async fn handle_asset_state(
         .into_diagnostic()
         .context("writing entity")?;
     tracing::info!("Finished writing assets.");
+
+    Ok(())
+}
+
+pub async fn handle_cursor(
+    args: &Args,
+    pool: &Pool<PostgresConnectionManager<NoTls>>,
+    state: &dolos_redb3::StateStore,
+    registry: &Handlebars<'static>,
+) -> miette::Result<()> {
+    let query = registry
+        .render("cursor", &&serde_json::json!({ "epoch": args.epoch }))
+        .into_diagnostic()
+        .context("rendering query")?;
+
+    let conn = pool
+        .get()
+        .await
+        .into_diagnostic()
+        .context("getting connection from pool")?;
+
+    tracing::info!("Querying cursor...");
+    let row = conn
+        .query_one(&query, &[])
+        .await
+        .into_diagnostic()
+        .context("executing query")?;
+    tracing::info!("Finished querying cursor.");
+
+    let slot = from_row!(row, i64, "slot") as u64;
+
+    state
+        .set_cursor(slot)
+        .into_diagnostic()
+        .context("writing cursor")?;
+    tracing::info!("Finished setting cursor.");
 
     Ok(())
 }
