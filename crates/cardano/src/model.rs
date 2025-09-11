@@ -22,7 +22,7 @@ use crate::roll::{
         ControlledAmountDec, ControlledAmountInc, StakeDelegation, StakeDeregistration,
         StakeRegistration, TrackSeenAddresses, VoteDelegation, WithdrawalInc,
     },
-    pparams::PParamsUpdate,
+    epochs::PParamsUpdate,
 };
 use crate::{
     pallas_extras::default_nonce,
@@ -686,7 +686,7 @@ impl DRepState {
 
 entity_boilerplate!(DRepState, "dreps");
 
-#[derive(Debug, Encode, Decode, Clone)]
+#[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize)]
 pub struct EraBoundary {
     #[n(0)]
     pub epoch: u64,

@@ -39,7 +39,6 @@ pub struct TrackConfig {
     pub pool_state: bool,
     pub epoch_state: bool,
     pub drep_state: bool,
-    pub pparams_state: bool,
     pub tx_logs: bool,
 }
 

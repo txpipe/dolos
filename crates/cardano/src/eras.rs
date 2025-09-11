@@ -1,6 +1,6 @@
 use dolos_core::{ChainError, Domain, State3Store};
 
-use crate::{model::EraSummary, FixedNamespace as _};
+use crate::{model::EraSummary, EraBoundary, FixedNamespace as _};
 
 pub type Epoch = u32;
 pub type EpochSlot = u32;
@@ -20,6 +20,23 @@ impl EraSummary {
         let time = self.start.timestamp + (slot - self.start.slot) * self.slot_length;
 
         time as Timestamp
+    }
+
+    pub fn define_end(&mut self, at_epoch: u64) {
+        let epoch_delta = at_epoch - self.start.epoch;
+
+        let slot_delta = (epoch_delta as u64) * self.epoch_length;
+        let end_slot = self.start.slot + slot_delta;
+        let second_delta = slot_delta * self.slot_length;
+        let end_timestamp = self.start.timestamp + second_delta;
+
+        let boundary = EraBoundary {
+            epoch: at_epoch,
+            slot: end_slot,
+            timestamp: end_timestamp,
+        };
+
+        self.end = Some(boundary.clone());
     }
 }
 

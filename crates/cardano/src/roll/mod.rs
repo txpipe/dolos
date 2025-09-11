@@ -18,7 +18,6 @@ pub mod assets;
 pub mod dreps;
 pub mod epochs;
 pub mod pools;
-pub mod pparams;
 pub mod txs;
 
 use accounts::AccountVisitor;
@@ -26,7 +25,6 @@ use assets::AssetStateVisitor;
 use dreps::DRepStateVisitor;
 use epochs::EpochStateVisitor;
 use pools::PoolStateVisitor;
-use pparams::PParamsStateVisitor;
 use txs::TxLogVisitor;
 
 pub trait BlockVisitor {
@@ -126,7 +124,6 @@ macro_rules! visit_all {
         maybe_visit!($self, $deltas, drep_state, DRepStateVisitor, $method, $($args)*);
         maybe_visit!($self, $deltas, epoch_state, EpochStateVisitor, $method, $($args)*);
         maybe_visit!($self, $deltas, pool_state, PoolStateVisitor, $method, $($args)*);
-        maybe_visit!($self, $deltas, pparams_state, PParamsStateVisitor, $method, $($args)*);
         maybe_visit!($self, $deltas, tx_logs, TxLogVisitor, $method, $($args)*);
     };
 }

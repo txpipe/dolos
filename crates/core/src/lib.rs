@@ -155,6 +155,9 @@ pub enum BrokenInvariant {
 
     #[error("invalid genesis config")]
     InvalidGenesisConfig,
+
+    #[error("bad bootstrap")]
+    BadBootstrap,
 }
 
 pub type UtxoMap = HashMap<TxoRef, Arc<EraCbor>>;
