@@ -468,18 +468,12 @@ impl PParamValue {
     }
 }
 
-impl std::hash::Hash for PParamValue {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.kind().hash(state);
-    }
-}
-
 #[derive(Debug, Encode, Decode, Clone, Default)]
 #[cbor(transparent)]
-pub struct PParamsSet(#[n(0)] HashSet<PParamValue>);
+pub struct PParamsSet(#[n(0)] Vec<PParamValue>);
 
 impl Deref for PParamsSet {
-    type Target = HashSet<PParamValue>;
+    type Target = Vec<PParamValue>;
 
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -521,16 +515,31 @@ macro_rules! pgetter {
 
 impl PParamsSet {
     pub fn new() -> Self {
-        Self(HashSet::new())
-    }
-
-    pub fn with(mut self, value: PParamValue) -> Self {
-        self.0.insert(value);
-        self
+        Self(Vec::new())
     }
 
     pub fn get(&self, kind: PParamKind) -> Option<&PParamValue> {
         self.0.iter().find(|value| value.kind() == kind)
+    }
+
+    pub fn get_mut(&mut self, kind: PParamKind) -> Option<&mut PParamValue> {
+        self.0.iter_mut().find(|value| value.kind() == kind)
+    }
+
+    pub fn set(&mut self, value: PParamValue) {
+        let existing = self.get_mut(value.kind());
+
+        if let Some(existing) = existing {
+            *existing = value;
+        } else {
+            self.0.push(value);
+        }
+    }
+
+    pub fn with(mut self, value: PParamValue) -> Self {
+        self.set(value);
+
+        self
     }
 
     pub fn get_or_default(&self, kind: PParamKind) -> PParamValue {

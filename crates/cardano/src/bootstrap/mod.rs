@@ -13,7 +13,11 @@ fn force_hardforks(
     while pparams.protocol_major().unwrap_or_default() < force_protocol {
         let previous = pparams.protocol_major();
 
+        dbg!(&pparams);
+
         *pparams = crate::forks::bump_pparams_version(&pparams, genesis);
+
+        dbg!(&pparams);
 
         // if the protocol major is not set, something went wrong and we might be
         // stuck in a loop. We return an error to avoid infinite loops.
