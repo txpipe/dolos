@@ -3,6 +3,7 @@ use miette::{Context, IntoDiagnostic};
 
 pub const ACCOUNTS: &str = include_str!("accounts.sql");
 pub const ASSETS: &str = include_str!("assets.sql");
+pub const ERA_SUMMARIES: &str = include_str!("era_summaries.sql");
 pub const CURSOR: &str = include_str!("cursor.sql");
 pub const POOLS: &str = include_str!("pools.sql");
 
@@ -15,6 +16,9 @@ pub fn init_registry() -> miette::Result<Handlebars<'static>> {
         .into_diagnostic()
         .context("registering template")?;
     reg.register_template_string("cursor", CURSOR)
+        .into_diagnostic()
+        .context("registering template")?;
+    reg.register_template_string("era_summaries", ERA_SUMMARIES)
         .into_diagnostic()
         .context("registering template")?;
     reg.register_template_string("pools", POOLS)

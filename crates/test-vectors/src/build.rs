@@ -7,8 +7,12 @@ use std::{
 
 use bb8::Pool;
 use bb8_postgres::PostgresConnectionManager;
-use dolos_cardano::{build_schema, AccountState, AssetState, FixedNamespace, PoolState, RewardLog};
-use dolos_core::{EntityKey, State3Store as _};
+use chrono::NaiveDateTime;
+use dolos_cardano::{
+    build_schema, include, AccountState, AssetState, EraBoundary, EraSummary, FixedNamespace,
+    PoolState, RewardLog,
+};
+use dolos_core::{EntityKey, Genesis, State3Store as _};
 use handlebars::Handlebars;
 use miette::{bail, Context, IntoDiagnostic};
 use pallas::{
@@ -40,6 +44,25 @@ macro_rules! from_row_bigint {
     };
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, clap::ValueEnum)]
+#[non_exhaustive]
+#[allow(clippy::enum_variant_names)]
+pub enum KnownNetwork {
+    CardanoMainnet,
+    CardanoPreProd,
+    CardanoPreview,
+}
+
+impl KnownNetwork {
+    pub fn load_included_genesis(&self) -> Genesis {
+        match self {
+            KnownNetwork::CardanoMainnet => include::mainnet::load(),
+            KnownNetwork::CardanoPreProd => include::preprod::load(),
+            KnownNetwork::CardanoPreview => include::preview::load(),
+        }
+    }
+}
+
 #[derive(Debug, clap::Args)]
 pub struct Args {
     /// Build snapshot up until selected epoch, included.
@@ -61,6 +84,10 @@ pub struct Args {
     /// Add a limit to queries for debbuging
     #[arg(long)]
     limit: Option<usize>,
+
+    /// Network to build snapshot to, needed for genesis information.
+    #[arg(long)]
+    network: KnownNetwork,
 }
 
 #[tokio::main]
@@ -90,10 +117,11 @@ pub async fn run(args: &Args) -> miette::Result<()> {
 
     let registry = init_registry()?;
 
-    handle_account_state(args, &pool, &state, &registry).await?;
-    handle_asset_state(args, &pool, &state, &registry).await?;
-    handle_cursor(args, &pool, &state, &registry).await?;
-    handle_pool_state(args, &pool, &state, &registry).await?;
+    //handle_account_state(args, &pool, &state, &registry).await?;
+    //handle_asset_state(args, &pool, &state, &registry).await?;
+    //handle_cursor(args, &pool, &state, &registry).await?;
+    handle_era_summaries(args, &pool, &state, &registry).await?;
+    //handle_pool_state(args, &pool, &state, &registry).await?;
 
     Ok(())
 }
@@ -332,6 +360,93 @@ pub async fn handle_cursor(
         .set_cursor(slot)
         .into_diagnostic()
         .context("writing cursor")?;
+    tracing::info!("Finished setting cursor.");
+
+    Ok(())
+}
+
+pub async fn handle_era_summaries(
+    args: &Args,
+    pool: &Pool<PostgresConnectionManager<NoTls>>,
+    state: &dolos_redb3::StateStore,
+    registry: &Handlebars<'static>,
+) -> miette::Result<()> {
+    let query = registry
+        .render(
+            "era_summaries",
+            &&serde_json::json!({ "epoch": args.epoch }),
+        )
+        .into_diagnostic()
+        .context("rendering query")?;
+
+    let conn = pool
+        .get()
+        .await
+        .into_diagnostic()
+        .context("getting connection from pool")?;
+
+    tracing::info!("Querying era summaries...");
+    let rows = conn
+        .query(&query, &[])
+        .await
+        .into_diagnostic()
+        .context("executing query")?;
+    tracing::info!("Finished querying era summaries.");
+
+    let genesis = args.network.load_included_genesis();
+
+    let mut it = rows.iter().zip(rows.iter().skip(1)).peekable();
+    while let Some((prev, next)) = it.next() {
+        let epoch = from_row!(prev, i32, "epoch") as u64;
+        let slot = from_row!(prev, i64, "slot") as u64;
+        let start = from_row!(prev, NaiveDateTime, "start_time");
+        let end = from_row!(prev, NaiveDateTime, "end_time");
+        let epoch_end = from_row!(next, i32, "epoch") as u64;
+        let slot_end = from_row!(next, i64, "slot") as u64;
+
+        let key = (epoch as u16).to_be_bytes().as_slice().into();
+
+        let era = EraSummary {
+            start: EraBoundary {
+                epoch,
+                slot,
+                timestamp: start.and_utc().timestamp() as u64,
+            },
+            end: Some(EraBoundary {
+                epoch: epoch_end,
+                slot: slot_end,
+                timestamp: end.and_utc().timestamp() as u64,
+            }),
+            // TODO: This will break in preprod and mainnet, but for now it will do
+            epoch_length: genesis.shelley.epoch_length.unwrap() as u64,
+            slot_length: genesis.shelley.slot_length.unwrap() as u64,
+        };
+
+        state
+            .write_entity_typed(&key, &era)
+            .into_diagnostic()
+            .context("writing era")?;
+
+        if it.peek().is_none() {
+            let key = (epoch_end as u16).to_be_bytes().as_slice().into();
+            let curr = EraSummary {
+                start: EraBoundary {
+                    epoch: epoch_end,
+                    slot: slot_end,
+                    timestamp: end.and_utc().timestamp() as u64,
+                },
+                end: None,
+                epoch_length: genesis.shelley.epoch_length.unwrap() as u64,
+                slot_length: genesis.shelley.slot_length.unwrap() as u64,
+            };
+
+            state
+                .write_entity_typed(&key, &curr)
+                .into_diagnostic()
+                .context("writing era")?;
+        }
+    }
+
     tracing::info!("Finished setting cursor.");
 
     Ok(())
