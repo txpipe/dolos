@@ -91,13 +91,13 @@ pub struct WorkBatch<C: ChainLogic> {
 // }
 
 impl<C: ChainLogic> WorkBatch<C> {
-    fn new(blocks: Vec<WorkBlock<C>>) -> Self {
+    fn new(blocks: Vec<WorkBlock<C>>, is_sorted: bool) -> Self {
         Self {
             blocks,
             entities: HashMap::new(),
             utxos: HashMap::new(),
             utxos_decoded: HashMap::new(),
-            is_sorted: false,
+            is_sorted,
         }
     }
 
@@ -111,7 +111,7 @@ impl<C: ChainLogic> WorkBatch<C> {
             })
             .collect();
 
-        Self::new(blocks)
+        Self::new(blocks, false)
     }
 
     pub fn iter_raw(&self) -> impl Iterator<Item = (ChainPoint, &RawBlock)> {
@@ -167,8 +167,8 @@ impl<C: ChainLogic> WorkBatch<C> {
             }
         }
 
-        let before = Self::new(before);
-        let after = Self::new(after);
+        let before = Self::new(before, true);
+        let after = Self::new(after, true);
 
         (before, after)
     }
@@ -183,16 +183,22 @@ impl<C: ChainLogic> WorkBatch<C> {
         Ok(())
     }
 
-    pub fn split_by_sweep(self, chain: &C) -> (Self, Option<(BlockSlot, Self)>) {
+    pub fn split_by_sweep<D>(
+        self,
+        domain: &D,
+    ) -> Result<(Self, Option<(BlockSlot, Self)>), DomainError>
+    where
+        D: Domain<Chain = C>,
+    {
         let range = self.range();
-        let next_sweep = chain.next_sweep(*range.start());
+        let next_sweep = domain.chain().next_sweep(domain, *range.start())?;
 
         if !range.contains(&next_sweep) {
-            (self, None)
+            Ok((self, None))
         } else {
             let (before, after) = self.split_at(next_sweep);
 
-            (before, Some((next_sweep, after)))
+            Ok((before, Some((next_sweep, after))))
         }
     }
 
@@ -357,7 +363,7 @@ impl<C: ChainLogic> WorkBatch<C> {
                 .save_entity_typed(ns, &key, entity.as_ref())?;
         }
 
-        domain.state3().append_cursor(self.last_slot())?;
+        domain.state3().set_cursor(self.last_slot())?;
 
         // TODO: semantics for committing a read transaction
 

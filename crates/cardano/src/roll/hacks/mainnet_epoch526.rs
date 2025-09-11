@@ -1,8 +1,8 @@
-use crate::pparams::EraSummary;
+use pallas::ledger::validate::utils::MultiEraProtocolParameters;
 
-pub const SLOT: u64 = 63590427;
+pub const SLOT: u64 = 141868807;
 
-pub fn change(era: &mut EraSummary) {
+pub fn change(params: &mut MultiEraProtocolParameters) {
     let costs = vec![
         100788, 420, 1, 1, 1000, 173, 0, 1, 1000, 59957, 4, 1, 11183, 32, 201305, 8356, 4, 16000,
         100, 16000, 100, 16000, 100, 16000, 100, 16000, 100, 16000, 100, 100, 100, 16000, 100,
@@ -25,8 +25,7 @@ pub fn change(era: &mut EraSummary) {
         1964219, 24520, 3,
     ];
 
-    if let pallas::ledger::validate::utils::MultiEraProtocolParameters::Conway(x) = &mut era.pparams
-    {
+    if let pallas::ledger::validate::utils::MultiEraProtocolParameters::Conway(x) = params {
         x.cost_models_for_script_languages.plutus_v3 = Some(costs)
     }
 }

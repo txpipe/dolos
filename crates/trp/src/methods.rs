@@ -77,11 +77,7 @@ pub async fn trp_resolve<D: Domain>(
 
     let tx = load_tx(params)?;
 
-    let mut compiler = load_compiler::<D>(
-        context.domain.genesis(),
-        context.domain.state(),
-        &context.config,
-    )?;
+    let mut compiler = load_compiler::<D>(&context.domain, &context.config)?;
 
     let utxos = UtxoStoreAdapter::<D>::new(context.domain.state().clone());
 
@@ -144,7 +140,10 @@ pub async fn trp_submit<D: Domain>(
         bytes = apply_witnesses(&bytes, &params.witnesses)?;
     }
 
-    let tx = context.domain.mempool().receive_raw(&bytes)?;
+    let tx = context
+        .domain
+        .mempool()
+        .receive_raw(&context.domain, &bytes)?;
 
     Ok(serde_json::json!({ "hash": tx.to_string() }))
 }

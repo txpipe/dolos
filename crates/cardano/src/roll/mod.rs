@@ -6,6 +6,7 @@ use dolos_core::{
 };
 use pallas::ledger::traverse::{
     MultiEraBlock, MultiEraCert, MultiEraInput, MultiEraOutput, MultiEraPolicyAssets, MultiEraTx,
+    MultiEraUpdate,
 };
 
 use crate::{owned::OwnedMultiEraOutput, CardanoLogic};
@@ -96,6 +97,16 @@ pub trait BlockVisitor {
     ) -> Result<(), ChainError> {
         Ok(())
     }
+
+    #[allow(unused_variables)]
+    fn visit_update(
+        deltas: &mut WorkDeltas<CardanoLogic>,
+        block: &MultiEraBlock,
+        tx: &MultiEraTx,
+        update: &MultiEraUpdate,
+    ) -> Result<(), ChainError> {
+        Ok(())
+    }
 }
 
 macro_rules! maybe_visit {
@@ -175,6 +186,10 @@ impl<'a> DeltaBuilder<'a> {
 
             for (account, amount) in tx.withdrawals().collect::<Vec<_>>() {
                 visit_all!(self, deltas, visit_withdrawal, block, &tx, &account, amount);
+            }
+
+            if let Some(update) = tx.update() {
+                visit_all!(self, deltas, visit_update, block, &tx, &update);
             }
         }
 

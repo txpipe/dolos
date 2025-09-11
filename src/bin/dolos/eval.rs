@@ -6,7 +6,7 @@ use pallas::{
 };
 use std::{borrow::Cow, path::PathBuf, sync::Arc};
 
-use dolos::core::{EraCbor, StateStore as _, TxoRef};
+use dolos::core::{Domain, EraCbor, StateStore as _, TxoRef};
 
 #[derive(Debug, clap::Args)]
 pub struct Args {
@@ -29,8 +29,7 @@ pub struct Args {
 pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging)?;
 
-    let stores = crate::common::setup_data_stores(config)?;
-    let genesis = Arc::new(crate::common::open_genesis_files(&config.genesis)?);
+    let domain = crate::common::setup_domain(config)?;
 
     let cbor = std::fs::read_to_string(&args.file)
         .into_diagnostic()
@@ -52,8 +51,8 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
         .map(|utxo| TxoRef(*utxo.hash(), utxo.index() as u32))
         .collect_vec();
 
-    let resolved = stores
-        .state
+    let resolved = domain
+        .state()
         .get_utxos(refs)
         .into_diagnostic()
         .context("resolving utxo")?;
@@ -83,24 +82,8 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
         utxos2.insert(key, value);
     }
 
-    let updates = stores
-        .state
-        .get_pparams(args.epoch)
-        .into_diagnostic()
-        .context("retrieving pparams")?;
-
-    let updates: Vec<_> = updates
-        .iter()
-        .map(|EraCbor(era, cbor)| -> miette::Result<MultiEraUpdate> {
-            let era = (*era).try_into().expect("era out of range");
-            MultiEraUpdate::decode_for_era(era, cbor).into_diagnostic()
-        })
-        .try_collect()?;
-
-    let pparams = dolos::cardano::pparams::fold(&genesis, &updates)
-        .edge()
-        .pparams
-        .clone();
+    let pparams = dolos_cardano::load_current_pparams(&domain).into_diagnostic()?;
+    let pparams = dolos_cardano::utils::pparams_to_pallas(&pparams);
 
     let context = ValidationContext {
         block_slot: args.block_slot,
