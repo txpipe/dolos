@@ -1,7 +1,7 @@
 use dolos_core::{ChainError, Domain, EntityKey, State3Store as _};
-use pallas::ledger::validate::utils::MultiEraProtocolParameters;
+use pallas::ledger::{primitives::RationalNumber, validate::utils::MultiEraProtocolParameters};
 
-use crate::{EpochState, FixedNamespace as _, PParamsState, EPOCH_KEY_MARK, EPOCH_KEY_SET};
+use crate::{EpochState, FixedNamespace as _, EPOCH_KEY_MARK, EPOCH_KEY_SET};
 
 pub type PParams = MultiEraProtocolParameters;
 
@@ -13,14 +13,15 @@ fn compute_new_pots(
     previous_reserves: u64,
     gathered_fees: u64,
     decayed_deposits: u64,
-    pparams: &PParamsState,
+    rho: RationalNumber,
+    tau: RationalNumber,
 ) -> (NewReserves, ToTreasury, ToDistribute) {
-    let rho = pparams.rho().numerator as f64 / pparams.rho().denominator as f64;
+    let rho = rho.numerator as f64 / rho.denominator as f64;
     let from_reserves = rho * (previous_reserves as f64);
 
     let reward_pot_f64 = (from_reserves.round() as u64 + gathered_fees + decayed_deposits) as f64;
 
-    let tau = pparams.tau().numerator as f64 / pparams.tau().denominator as f64;
+    let tau = tau.numerator as f64 / tau.denominator as f64;
     let to_treasury_f64 = tau * reward_pot_f64;
     let to_distribute_f64 = (1.0 - tau) * reward_pot_f64;
 
@@ -52,17 +53,23 @@ pub fn sweep<D: Domain>(domain: &D) -> Result<(), ChainError> {
 
     let pparams = domain
         .state3()
-        .read_entity_typed::<PParamsState>(PParamsState::NS, &EntityKey::from(EPOCH_KEY_MARK))?;
+        .read_entity_typed::<EpochState>(EpochState::NS, &EntityKey::from(EPOCH_KEY_MARK))?
+        .map(|x| x.pparams);
 
     let Some(pparams) = pparams else {
         return Err(ChainError::PParamsNotFound);
     };
 
+    let rho = pparams.rho().ok_or(ChainError::PParamsNotFound)?;
+
+    let tau = pparams.tau().ok_or(ChainError::PParamsNotFound)?;
+
     let (new_reserves, to_treasury, to_distribute) = compute_new_pots(
         prev_epoch.reserves,
         live_epoch.gathered_fees,
         live_epoch.decayed_deposits,
-        &pparams,
+        rho,
+        tau,
     );
 
     live_epoch.end_reserves = Some(new_reserves);

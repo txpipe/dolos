@@ -231,7 +231,9 @@ impl Iterator for EntityValueIter {
     }
 }
 
-pub const CURSOR_TABLE: TableDefinition<'static, u64, ()> = TableDefinition::new("cursor");
+pub const CURRENT_CURSOR_KEY: u16 = 0;
+
+pub const CURSOR_TABLE: TableDefinition<'static, u16, u64> = TableDefinition::new("cursor");
 
 fn build_tables(schema: StateSchema) -> HashMap<Namespace, Table> {
     let tables = schema.iter().map(|(ns, ty)| {
@@ -320,26 +322,18 @@ impl StateStore {
         Ok(())
     }
 
-    fn append_cursor(&self, wx: &mut WriteTransaction, slot: BlockSlot) -> Result<(), Error> {
+    fn set_cursor(wx: &mut WriteTransaction, slot: BlockSlot) -> Result<(), Error> {
         let mut cursor = wx.open_table(CURSOR_TABLE)?;
-        cursor.insert(slot, ())?;
+        cursor.insert(CURRENT_CURSOR_KEY, &slot)?;
+
         Ok(())
     }
 
-    fn undo_cursor(&self, wx: &mut WriteTransaction, slot: BlockSlot) -> Result<(), Error> {
-        let mut cursor = wx.open_table(CURSOR_TABLE)?;
-        cursor.remove(slot)?;
-        Ok(())
-    }
-
-    fn get_cursor(&self, rx: &ReadTransaction) -> Result<Option<BlockSlot>, Error> {
+    fn read_cursor(rx: &ReadTransaction) -> Result<Option<BlockSlot>, Error> {
         let cursor = rx.open_table(CURSOR_TABLE)?;
+        let value = cursor.get(CURRENT_CURSOR_KEY)?.map(|x| x.value());
 
-        let mut range = cursor.range(0..)?.rev();
-
-        let last = range.next().transpose()?.map(|(k, _)| k.value());
-
-        Ok(last)
+        Ok(value)
     }
 }
 
@@ -350,15 +344,17 @@ impl dolos_core::State3Store for StateStore {
     fn read_cursor(&self) -> Result<Option<BlockSlot>, StateError> {
         let rx = self.db().begin_read().map_err(Error::from)?;
 
-        let cursor = self.get_cursor(&rx)?;
+        let cursor = Self::read_cursor(&rx)?;
 
         Ok(cursor)
     }
 
-    fn append_cursor(&self, cursor: BlockSlot) -> Result<(), StateError> {
+    fn set_cursor(&self, cursor: BlockSlot) -> Result<(), StateError> {
         let mut wx = self.db().begin_write().map_err(Error::from)?;
 
-        self.append_cursor(&mut wx, cursor)?;
+        Self::set_cursor(&mut wx, cursor)?;
+
+        wx.commit().map_err(Error::from)?;
 
         Ok(())
     }

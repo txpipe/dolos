@@ -39,6 +39,7 @@ pub struct TrackConfig {
     pub pool_state: bool,
     pub epoch_state: bool,
     pub drep_state: bool,
+    pub pparams_state: bool,
     pub tx_logs: bool,
 }
 
@@ -124,13 +125,19 @@ impl dolos_core::ChainLogic for CardanoLogic {
     }
 }
 
-pub fn load_current_pparams<D: Domain>(domain: &D) -> Result<PParamsState, ChainError> {
-    let pparams = domain
+pub fn load_current_epoch<D: Domain>(domain: &D) -> Result<EpochState, ChainError> {
+    let epoch = domain
         .state3()
-        .read_entity_typed::<PParamsState>(PParamsState::NS, &EntityKey::from(EPOCH_KEY_MARK))?
+        .read_entity_typed::<EpochState>(EpochState::NS, &EntityKey::from(EPOCH_KEY_MARK))?
         .ok_or(ChainError::PParamsNotFound)?;
 
-    Ok(pparams)
+    Ok(epoch)
+}
+
+pub fn load_current_pparams<D: Domain>(domain: &D) -> Result<PParamsSet, ChainError> {
+    let epoch = load_current_epoch(domain)?;
+
+    Ok(epoch.pparams)
 }
 
 #[cfg(test)]

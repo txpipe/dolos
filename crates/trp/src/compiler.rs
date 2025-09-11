@@ -36,16 +36,15 @@ fn build_pparams<D: Domain>(domain: &D) -> Result<tx3_cardano::PParams, Error> {
         dolos_cardano::load_current_pparams(domain).map_err(|_| Error::PParamsNotAvailable)?;
 
     let costs = pparams
-        .cost_models_for_script_languages
-        .clone()
+        .cost_models_for_script_languages()
         .ok_or(Error::PParamsNotAvailable)?;
 
     let out = tx3_cardano::PParams {
         network,
         cost_models: map_cost_models(costs),
-        min_fee_coefficient: pparams.minfee_a as u64,
-        min_fee_constant: pparams.minfee_b as u64,
-        coins_per_utxo_byte: pparams.ada_per_utxo_byte,
+        min_fee_coefficient: pparams.min_fee_a_or_default() as u64,
+        min_fee_constant: pparams.min_fee_b_or_default() as u64,
+        coins_per_utxo_byte: pparams.ada_per_utxo_byte_or_default() as u64,
     };
 
     Ok(out)

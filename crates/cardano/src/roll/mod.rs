@@ -6,6 +6,7 @@ use dolos_core::{
 };
 use pallas::ledger::traverse::{
     MultiEraBlock, MultiEraCert, MultiEraInput, MultiEraOutput, MultiEraPolicyAssets, MultiEraTx,
+    MultiEraUpdate,
 };
 
 use crate::{owned::OwnedMultiEraOutput, CardanoLogic};
@@ -25,6 +26,7 @@ use assets::AssetStateVisitor;
 use dreps::DRepStateVisitor;
 use epochs::EpochStateVisitor;
 use pools::PoolStateVisitor;
+use pparams::PParamsStateVisitor;
 use txs::TxLogVisitor;
 
 pub trait BlockVisitor {
@@ -97,6 +99,16 @@ pub trait BlockVisitor {
     ) -> Result<(), ChainError> {
         Ok(())
     }
+
+    #[allow(unused_variables)]
+    fn visit_update(
+        deltas: &mut WorkDeltas<CardanoLogic>,
+        block: &MultiEraBlock,
+        tx: &MultiEraTx,
+        update: &MultiEraUpdate,
+    ) -> Result<(), ChainError> {
+        Ok(())
+    }
 }
 
 macro_rules! maybe_visit {
@@ -114,6 +126,7 @@ macro_rules! visit_all {
         maybe_visit!($self, $deltas, drep_state, DRepStateVisitor, $method, $($args)*);
         maybe_visit!($self, $deltas, epoch_state, EpochStateVisitor, $method, $($args)*);
         maybe_visit!($self, $deltas, pool_state, PoolStateVisitor, $method, $($args)*);
+        maybe_visit!($self, $deltas, pparams_state, PParamsStateVisitor, $method, $($args)*);
         maybe_visit!($self, $deltas, tx_logs, TxLogVisitor, $method, $($args)*);
     };
 }
@@ -176,6 +189,10 @@ impl<'a> DeltaBuilder<'a> {
 
             for (account, amount) in tx.withdrawals().collect::<Vec<_>>() {
                 visit_all!(self, deltas, visit_withdrawal, block, &tx, &account, amount);
+            }
+
+            if let Some(update) = tx.update() {
+                visit_all!(self, deltas, visit_update, block, &tx, &update);
             }
         }
 

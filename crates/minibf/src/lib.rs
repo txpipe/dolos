@@ -6,7 +6,7 @@ use axum::{
 };
 use dolos_cardano::{
     model::{AccountState, AssetState, DRepState, EpochState, FixedNamespace, PoolState},
-    ChainSummary, PParamsState,
+    ChainSummary, PParamsSet,
 };
 use itertools::Itertools;
 use pallas::{crypto::hash::Hash, ledger::addresses::Network};
@@ -82,7 +82,7 @@ impl<D: Domain> Facade<D> {
         Ok(summary)
     }
 
-    pub fn get_current_pparams(&self) -> Result<PParamsState, StatusCode> {
+    pub fn get_current_pparams(&self) -> Result<PParamsSet, StatusCode> {
         let pparams = dolos_cardano::load_current_pparams(&self.inner)
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 

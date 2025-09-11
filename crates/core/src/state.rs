@@ -260,7 +260,7 @@ pub trait State3Store: Sized + Send + Sync {
 
     fn read_cursor(&self) -> Result<Option<BlockSlot>, StateError>;
 
-    fn append_cursor(&self, cursor: BlockSlot) -> Result<(), StateError>;
+    fn set_cursor(&self, cursor: BlockSlot) -> Result<(), StateError>;
 
     fn read_entities(
         &self,
@@ -457,7 +457,7 @@ mod tests {
             Ok(db.cursor)
         }
 
-        fn append_cursor(&self, new_cursor: BlockSlot) -> Result<(), StateError> {
+        fn set_cursor(&self, new_cursor: BlockSlot) -> Result<(), StateError> {
             let mut db = self.db.write().unwrap();
             db.cursor = Some(new_cursor);
             Ok(())

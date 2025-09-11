@@ -14,7 +14,6 @@ use pallas::{
             ComputeHash, MultiEraBlock, MultiEraCert, MultiEraHeader, MultiEraInput,
             MultiEraOutput, MultiEraRedeemer, MultiEraTx, MultiEraValue, OriginalHash,
         },
-        validate::utils::MultiEraProtocolParameters,
     },
 };
 use std::{collections::HashMap, ops::Deref};
@@ -45,7 +44,7 @@ use blockfrost_openapi::models::{
     tx_content_withdrawals_inner::TxContentWithdrawalsInner,
 };
 
-use dolos_cardano::{ChainSummary, PParamsState};
+use dolos_cardano::{ChainSummary, PParamsSet};
 use dolos_core::{EraCbor, TxHash, TxOrder, TxoIdx};
 
 macro_rules! try_into_or_500 {
@@ -449,7 +448,7 @@ impl<'a> IntoModel<TxContentUtxoInputsInner> for UtxoInputModelBuilder<'a> {
 #[derive(Debug)]
 pub struct TxModelBuilder<'a> {
     chain: Option<ChainSummary>,
-    pparams: Option<PParamsState>,
+    pparams: Option<PParamsSet>,
     network: Option<Network>,
     block: MultiEraBlock<'a>,
     order: TxOrder,
@@ -477,7 +476,7 @@ impl<'a> TxModelBuilder<'a> {
         }
     }
 
-    pub fn with_pparams(self, pparams: PParamsState) -> Self {
+    pub fn with_pparams(self, pparams: PParamsSet) -> Self {
         Self {
             pparams: Some(pparams),
             ..self
@@ -532,19 +531,19 @@ impl<'a> TxModelBuilder<'a> {
         let key_deposit = self
             .pparams
             .as_ref()
-            .map(|x| x.key_deposit)
+            .and_then(|x| x.key_deposit())
             .unwrap_or_default();
 
         let pool_deposit = self
             .pparams
             .as_ref()
-            .map(|x| x.pool_deposit)
+            .and_then(|x| x.pool_deposit())
             .unwrap_or_default();
 
         let drep_deposit = self
             .pparams
             .as_ref()
-            .map(|x| x.drep_deposit)
+            .and_then(|x| x.drep_deposit())
             .unwrap_or_default();
 
         Ok(self
@@ -1004,7 +1003,7 @@ impl IntoModel<Vec<TxContentRedeemersInner>> for TxModelBuilder<'_> {
         let prices = self
             .pparams
             .as_ref()
-            .and_then(|x| x.execution_costs.clone())
+            .and_then(|x| x.execution_costs())
             .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
 
         let items = redeemers

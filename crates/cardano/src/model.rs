@@ -1,4 +1,8 @@
-use std::{borrow::Cow, collections::HashSet};
+use std::{
+    borrow::Cow,
+    collections::HashSet,
+    ops::{Deref, DerefMut},
+};
 
 use dolos_core::{EntityValue, Namespace, NamespaceType, NsKey, State3Error, StateSchema};
 
@@ -12,6 +16,27 @@ use pallas::{
     },
 };
 use serde::{Deserialize, Serialize};
+
+use crate::roll::{
+    accounts::{
+        ControlledAmountDec, ControlledAmountInc, StakeDelegation, StakeDeregistration,
+        StakeRegistration, TrackSeenAddresses, VoteDelegation, WithdrawalInc,
+    },
+    pparams::PParamsUpdate,
+};
+use crate::{
+    pallas_extras::default_nonce,
+    roll::pools::{MintedBlocksInc, PoolRegistration},
+};
+use crate::{pallas_extras::default_rational_number, roll::assets::MintStatsUpdate};
+use crate::{
+    pallas_extras::{default_cost_models, default_ex_unit_prices, default_ex_units},
+    roll::epochs::EpochStatsUpdate,
+};
+use crate::{
+    pallas_extras::{default_drep_voting_thresholds, default_pool_voting_thresholds},
+    roll::dreps::{DRepRegistration, DRepUnRegistration},
+};
 
 pub trait FixedNamespace {
     const NS: &'static str;
@@ -187,6 +212,392 @@ impl PoolState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd)]
+pub enum PParamKind {
+    SystemStart = 0,
+    EpochLength = 1,
+    SlotLength = 2,
+    MinFeeA = 3,
+    MinFeeB = 4,
+    MaxBlockBodySize = 5,
+    MaxTransactionSize = 6,
+    MaxBlockHeaderSize = 7,
+    KeyDeposit = 8,
+    PoolDeposit = 9,
+    DesiredNumberOfStakePools = 10,
+    ProtocolVersion = 11,
+    MinUtxoValue = 12,
+    MinPoolCost = 13,
+    ExpansionRate = 14,
+    TreasuryGrowthRate = 15,
+    MaximumEpoch = 16,
+    PoolPledgeInfluence = 17,
+    DecentralizationConstant = 18,
+    ExtraEntropy = 19,
+    AdaPerUtxoByte = 20,
+    CostModelsForScriptLanguages = 21,
+    ExecutionCosts = 22,
+    MaxTxExUnits = 23,
+    MaxBlockExUnits = 24,
+    MaxValueSize = 25,
+    CollateralPercentage = 26,
+    MaxCollateralInputs = 27,
+    PoolVotingThresholds = 28,
+    DrepVotingThresholds = 29,
+    MinCommitteeSize = 30,
+    CommitteeTermLimit = 31,
+    GovernanceActionValidityPeriod = 32,
+    GovernanceActionDeposit = 33,
+    DrepDeposit = 34,
+    DrepInactivityPeriod = 35,
+    MinFeeRefScriptCostPerByte = 36,
+}
+
+impl PParamKind {
+    pub fn default_value(self) -> PParamValue {
+        match self {
+            Self::SystemStart => PParamValue::SystemStart(0),
+            Self::EpochLength => PParamValue::EpochLength(0),
+            Self::SlotLength => PParamValue::SlotLength(0),
+            Self::MinFeeA => PParamValue::MinFeeA(0),
+            Self::MinFeeB => PParamValue::MinFeeB(0),
+            Self::MaxBlockBodySize => PParamValue::MaxBlockBodySize(0),
+            Self::MaxTransactionSize => PParamValue::MaxTransactionSize(0),
+            Self::MaxBlockHeaderSize => PParamValue::MaxBlockHeaderSize(0),
+            Self::KeyDeposit => PParamValue::KeyDeposit(0),
+            Self::PoolDeposit => PParamValue::PoolDeposit(0),
+            Self::DesiredNumberOfStakePools => PParamValue::DesiredNumberOfStakePools(0),
+            Self::ProtocolVersion => PParamValue::ProtocolVersion(ProtocolVersion::default()),
+            Self::MinUtxoValue => PParamValue::MinUtxoValue(0),
+            Self::MinPoolCost => PParamValue::MinPoolCost(0),
+            Self::ExpansionRate => PParamValue::ExpansionRate(default_rational_number()),
+            Self::TreasuryGrowthRate => PParamValue::TreasuryGrowthRate(default_rational_number()),
+            Self::MaximumEpoch => PParamValue::MaximumEpoch(0),
+            Self::PoolPledgeInfluence => {
+                PParamValue::PoolPledgeInfluence(default_rational_number())
+            }
+            Self::DecentralizationConstant => {
+                PParamValue::DecentralizationConstant(default_rational_number())
+            }
+            Self::ExtraEntropy => PParamValue::ExtraEntropy(default_nonce()),
+            Self::AdaPerUtxoByte => PParamValue::AdaPerUtxoByte(0),
+            Self::CostModelsForScriptLanguages => {
+                PParamValue::CostModelsForScriptLanguages(default_cost_models())
+            }
+            Self::ExecutionCosts => PParamValue::ExecutionCosts(default_ex_unit_prices()),
+            Self::MaxTxExUnits => PParamValue::MaxTxExUnits(default_ex_units()),
+            Self::MaxBlockExUnits => PParamValue::MaxBlockExUnits(default_ex_units()),
+            Self::MaxValueSize => PParamValue::MaxValueSize(0),
+            Self::CollateralPercentage => PParamValue::CollateralPercentage(0),
+            Self::MaxCollateralInputs => PParamValue::MaxCollateralInputs(0),
+            Self::PoolVotingThresholds => {
+                PParamValue::PoolVotingThresholds(default_pool_voting_thresholds())
+            }
+            Self::DrepVotingThresholds => {
+                PParamValue::DrepVotingThresholds(default_drep_voting_thresholds())
+            }
+            Self::MinCommitteeSize => PParamValue::MinCommitteeSize(0),
+            Self::CommitteeTermLimit => PParamValue::CommitteeTermLimit(0),
+            Self::GovernanceActionValidityPeriod => PParamValue::GovernanceActionValidityPeriod(0),
+            Self::GovernanceActionDeposit => PParamValue::GovernanceActionDeposit(0),
+            Self::DrepDeposit => PParamValue::DrepDeposit(0),
+            Self::DrepInactivityPeriod => PParamValue::DrepInactivityPeriod(0),
+            Self::MinFeeRefScriptCostPerByte => {
+                PParamValue::MinFeeRefScriptCostPerByte(default_rational_number())
+            }
+        }
+    }
+}
+
+#[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cbor(flat)]
+pub enum PParamValue {
+    #[n(0)]
+    SystemStart(#[n(0)] u64),
+
+    #[n(1)]
+    EpochLength(#[n(0)] u64),
+
+    #[n(2)]
+    SlotLength(#[n(0)] u64),
+
+    #[n(3)]
+    MinFeeA(#[n(0)] u64),
+
+    #[n(4)]
+    MinFeeB(#[n(0)] u64),
+
+    #[n(5)]
+    MaxBlockBodySize(#[n(0)] u64),
+
+    #[n(6)]
+    MaxTransactionSize(#[n(0)] u64),
+
+    #[n(7)]
+    MaxBlockHeaderSize(#[n(0)] u64),
+
+    #[n(8)]
+    KeyDeposit(#[n(0)] Coin),
+
+    #[n(9)]
+    PoolDeposit(#[n(0)] Coin),
+
+    #[n(10)]
+    DesiredNumberOfStakePools(#[n(0)] u32),
+
+    #[n(11)]
+    ProtocolVersion(#[n(0)] ProtocolVersion),
+
+    #[n(12)]
+    MinUtxoValue(#[n(0)] Coin),
+
+    #[n(13)]
+    MinPoolCost(#[n(0)] Coin),
+
+    #[n(14)]
+    ExpansionRate(#[n(0)] UnitInterval),
+
+    #[n(15)]
+    TreasuryGrowthRate(#[n(0)] UnitInterval),
+
+    #[n(16)]
+    MaximumEpoch(#[n(0)] Epoch),
+
+    #[n(17)]
+    PoolPledgeInfluence(#[n(0)] RationalNumber),
+
+    #[n(18)]
+    DecentralizationConstant(#[n(0)] UnitInterval),
+
+    #[n(19)]
+    ExtraEntropy(#[n(0)] Nonce),
+
+    #[n(20)]
+    AdaPerUtxoByte(#[n(0)] Coin),
+
+    #[n(21)]
+    CostModelsForScriptLanguages(#[n(0)] CostModels),
+
+    #[n(22)]
+    ExecutionCosts(#[n(0)] ExUnitPrices),
+
+    #[n(23)]
+    MaxTxExUnits(#[n(0)] ExUnits),
+
+    #[n(24)]
+    MaxBlockExUnits(#[n(0)] ExUnits),
+
+    #[n(25)]
+    MaxValueSize(#[n(0)] u32),
+
+    #[n(26)]
+    CollateralPercentage(#[n(0)] u32),
+
+    #[n(27)]
+    MaxCollateralInputs(#[n(0)] u32),
+
+    #[n(28)]
+    PoolVotingThresholds(#[n(0)] PoolVotingThresholds),
+
+    #[n(29)]
+    DrepVotingThresholds(#[n(0)] DRepVotingThresholds),
+
+    #[n(30)]
+    MinCommitteeSize(#[n(0)] u64),
+
+    #[n(31)]
+    CommitteeTermLimit(#[n(0)] Epoch),
+
+    #[n(32)]
+    GovernanceActionValidityPeriod(#[n(0)] Epoch),
+
+    #[n(33)]
+    GovernanceActionDeposit(#[n(0)] Coin),
+
+    #[n(34)]
+    DrepDeposit(#[n(0)] Coin),
+
+    #[n(35)]
+    DrepInactivityPeriod(#[n(0)] Epoch),
+
+    #[n(36)]
+    MinFeeRefScriptCostPerByte(#[n(0)] UnitInterval),
+}
+
+impl PParamValue {
+    pub fn kind(&self) -> PParamKind {
+        match self {
+            Self::SystemStart(_) => PParamKind::SystemStart,
+            Self::EpochLength(_) => PParamKind::EpochLength,
+            Self::SlotLength(_) => PParamKind::SlotLength,
+            Self::MinFeeA(_) => PParamKind::MinFeeA,
+            Self::MinFeeB(_) => PParamKind::MinFeeB,
+            Self::MaxBlockBodySize(_) => PParamKind::MaxBlockBodySize,
+            Self::MaxTransactionSize(_) => PParamKind::MaxTransactionSize,
+            Self::MaxBlockHeaderSize(_) => PParamKind::MaxBlockHeaderSize,
+            Self::KeyDeposit(_) => PParamKind::KeyDeposit,
+            Self::PoolDeposit(_) => PParamKind::PoolDeposit,
+            Self::DesiredNumberOfStakePools(_) => PParamKind::DesiredNumberOfStakePools,
+            Self::ProtocolVersion(_) => PParamKind::ProtocolVersion,
+            Self::MinUtxoValue(_) => PParamKind::MinUtxoValue,
+            Self::MinPoolCost(_) => PParamKind::MinPoolCost,
+            Self::ExpansionRate(_) => PParamKind::ExpansionRate,
+            Self::TreasuryGrowthRate(_) => PParamKind::TreasuryGrowthRate,
+            Self::MaximumEpoch(_) => PParamKind::MaximumEpoch,
+            Self::PoolPledgeInfluence(_) => PParamKind::PoolPledgeInfluence,
+            Self::DecentralizationConstant(_) => PParamKind::DecentralizationConstant,
+            Self::ExtraEntropy(_) => PParamKind::ExtraEntropy,
+            Self::AdaPerUtxoByte(_) => PParamKind::AdaPerUtxoByte,
+            Self::CostModelsForScriptLanguages(_) => PParamKind::CostModelsForScriptLanguages,
+            Self::ExecutionCosts(_) => PParamKind::ExecutionCosts,
+            Self::MaxTxExUnits(_) => PParamKind::MaxTxExUnits,
+            Self::MaxBlockExUnits(_) => PParamKind::MaxBlockExUnits,
+            Self::MaxValueSize(_) => PParamKind::MaxValueSize,
+            Self::CollateralPercentage(_) => PParamKind::CollateralPercentage,
+            Self::MaxCollateralInputs(_) => PParamKind::MaxCollateralInputs,
+            Self::PoolVotingThresholds(_) => PParamKind::PoolVotingThresholds,
+            Self::DrepVotingThresholds(_) => PParamKind::DrepVotingThresholds,
+            Self::MinCommitteeSize(_) => PParamKind::MinCommitteeSize,
+            Self::CommitteeTermLimit(_) => PParamKind::CommitteeTermLimit,
+            Self::GovernanceActionValidityPeriod(_) => PParamKind::GovernanceActionValidityPeriod,
+            Self::GovernanceActionDeposit(_) => PParamKind::GovernanceActionDeposit,
+            Self::DrepDeposit(_) => PParamKind::DrepDeposit,
+            Self::DrepInactivityPeriod(_) => PParamKind::DrepInactivityPeriod,
+            Self::MinFeeRefScriptCostPerByte(_) => PParamKind::MinFeeRefScriptCostPerByte,
+        }
+    }
+}
+
+impl std::hash::Hash for PParamValue {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.kind().hash(state);
+    }
+}
+
+#[derive(Debug, Encode, Decode, Clone, Default)]
+#[cbor(transparent)]
+pub struct PParamsSet(#[n(0)] HashSet<PParamValue>);
+
+impl Deref for PParamsSet {
+    type Target = HashSet<PParamValue>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for PParamsSet {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+macro_rules! pgetter {
+    ($kind:ident, $ty:ty) => {
+        paste::paste! {
+            pub fn [<$kind:snake>](&self) -> Option<$ty> {
+                let value = self.get(PParamKind::$kind)?;
+
+                let PParamValue::$kind(x) = value else {
+                    panic!("pparam $kind doesn't match value");
+                };
+
+                Some(x.clone())
+            }
+
+
+            pub fn [<$kind:snake _or_default>](&self) -> $ty {
+                let value = self.get_or_default(PParamKind::$kind);
+
+                let PParamValue::$kind(x) = value else {
+                    panic!("pparam $kind doesn't match value");
+                };
+
+                x
+            }
+        }
+    };
+}
+
+impl PParamsSet {
+    pub fn new() -> Self {
+        Self(HashSet::new())
+    }
+
+    pub fn with(mut self, value: PParamValue) -> Self {
+        self.0.insert(value);
+        self
+    }
+
+    pub fn get(&self, kind: PParamKind) -> Option<&PParamValue> {
+        self.0.iter().find(|value| value.kind() == kind)
+    }
+
+    pub fn get_or_default(&self, kind: PParamKind) -> PParamValue {
+        self.get(kind)
+            .cloned()
+            .unwrap_or_else(|| PParamKind::default_value(kind))
+    }
+
+    pub fn protocol_major(&self) -> Option<u16> {
+        self.protocol_version().map(|(major, _)| major as u16)
+    }
+
+    pub fn k(&self) -> Option<u32> {
+        self.desired_number_of_stake_pools()
+    }
+
+    pub fn a0(&self) -> Option<RationalNumber> {
+        self.pool_pledge_influence()
+    }
+
+    pub fn tau(&self) -> Option<RationalNumber> {
+        self.treasury_growth_rate()
+    }
+
+    pub fn rho(&self) -> Option<RationalNumber> {
+        self.expansion_rate()
+    }
+
+    pgetter!(SystemStart, u64);
+    pgetter!(EpochLength, u64);
+    pgetter!(SlotLength, u64);
+    pgetter!(MinFeeA, u64);
+    pgetter!(MinFeeB, u64);
+    pgetter!(MaxBlockBodySize, u64);
+    pgetter!(MaxTransactionSize, u64);
+    pgetter!(MaxBlockHeaderSize, u64);
+    pgetter!(KeyDeposit, u64);
+    pgetter!(PoolDeposit, u64);
+    pgetter!(DesiredNumberOfStakePools, u32);
+    pgetter!(ProtocolVersion, ProtocolVersion);
+    pgetter!(MinUtxoValue, u64);
+    pgetter!(MinPoolCost, u64);
+    pgetter!(ExpansionRate, RationalNumber);
+    pgetter!(TreasuryGrowthRate, RationalNumber);
+    pgetter!(MaximumEpoch, u64);
+    pgetter!(PoolPledgeInfluence, RationalNumber);
+    pgetter!(DecentralizationConstant, RationalNumber);
+    pgetter!(ExtraEntropy, Nonce);
+    pgetter!(AdaPerUtxoByte, u64);
+    pgetter!(CostModelsForScriptLanguages, CostModels);
+    pgetter!(ExecutionCosts, ExUnitPrices);
+    pgetter!(MaxTxExUnits, ExUnits);
+    pgetter!(MaxBlockExUnits, ExUnits);
+    pgetter!(MaxValueSize, u32);
+    pgetter!(CollateralPercentage, u32);
+    pgetter!(MaxCollateralInputs, u32);
+    pgetter!(PoolVotingThresholds, PoolVotingThresholds);
+    pgetter!(DrepVotingThresholds, DRepVotingThresholds);
+    pgetter!(MinCommitteeSize, u64);
+    pgetter!(CommitteeTermLimit, u64);
+    pgetter!(GovernanceActionValidityPeriod, u64);
+    pgetter!(GovernanceActionDeposit, u64);
+    pgetter!(DrepDeposit, u64);
+    pgetter!(DrepInactivityPeriod, u64);
+    pgetter!(MinFeeRefScriptCostPerByte, RationalNumber);
+}
+
 #[derive(Debug, Encode, Decode, Clone, Default)]
 pub struct EpochState {
     #[n(0)]
@@ -227,6 +638,9 @@ pub struct EpochState {
 
     #[n(12)]
     pub to_distribute: Option<u64>,
+
+    #[n(13)]
+    pub pparams: PParamsSet,
 }
 
 entity_boilerplate!(EpochState, "epochs");
@@ -263,184 +677,6 @@ impl DRepState {
 
 entity_boilerplate!(DRepState, "dreps");
 
-/// we're purposely not including these Byron params because Dolos doesn't need
-/// them for any logic:
-///
-/// script_version: u16
-/// max_proposal_size: u64
-/// mpc_thd: u64
-/// heavy_del_thd: u64
-/// update_vote_thd: u64
-/// update_proposal_thd: u64
-/// update_implicit: u64
-/// soft_fork_rule: (u64, u64, u64)
-/// unlock_stake_epoch: u64
-#[derive(Debug, Encode, Decode, Clone, Default)]
-pub struct PParamsState {
-    // shelley
-
-    // byron alias: start_time
-    // should be exposed as type chrono::DateTime<chrono::FixedOffset>
-    #[n(0)]
-    pub system_start: u64,
-
-    #[n(1)]
-    pub epoch_length: u64,
-
-    // byron alias: slot_duration
-    #[n(2)]
-    pub slot_length: u64,
-
-    // byron alias: multiplier
-    #[n(3)]
-    pub minfee_a: u64,
-
-    // byron alias: summand
-    #[n(4)]
-    pub minfee_b: u64,
-
-    // byron alias: max_block_size
-    #[n(5)]
-    pub max_block_body_size: u64,
-
-    // byron alias: max_tx_size
-    #[n(6)]
-    pub max_transaction_size: u64,
-
-    // byron alias: max_header_size
-    #[n(7)]
-    pub max_block_header_size: u64,
-
-    #[n(8)]
-    pub key_deposit: Coin,
-
-    #[n(9)]
-    pub pool_deposit: Coin,
-
-    #[n(10)]
-    pub desired_number_of_stake_pools: u32,
-
-    // byron alias: block_version
-    #[n(11)]
-    pub protocol_version: ProtocolVersion,
-
-    #[n(12)]
-    pub min_utxo_value: Coin,
-
-    #[n(13)]
-    pub min_pool_cost: Coin,
-
-    #[n(14)]
-    pub expansion_rate: Option<UnitInterval>,
-
-    #[n(15)]
-    pub treasury_growth_rate: Option<UnitInterval>,
-
-    #[n(16)]
-    pub maximum_epoch: Epoch,
-
-    #[n(17)]
-    pub pool_pledge_influence: Option<RationalNumber>,
-
-    #[n(18)]
-    pub decentralization_constant: Option<UnitInterval>,
-
-    #[n(19)]
-    pub extra_entropy: Option<Nonce>,
-
-    // alonzo
-    #[n(20)]
-    pub ada_per_utxo_byte: Coin,
-
-    #[n(21)]
-    pub cost_models_for_script_languages: Option<CostModels>,
-
-    #[n(22)]
-    pub execution_costs: Option<ExUnitPrices>,
-
-    #[n(23)]
-    pub max_tx_ex_units: Option<ExUnits>,
-
-    #[n(24)]
-    pub max_block_ex_units: Option<ExUnits>,
-
-    #[n(25)]
-    pub max_value_size: u32,
-
-    #[n(26)]
-    pub collateral_percentage: u32,
-
-    #[n(27)]
-    pub max_collateral_inputs: u32,
-
-    // conway
-    #[n(28)]
-    pub pool_voting_thresholds: Option<PoolVotingThresholds>,
-
-    #[n(29)]
-    pub drep_voting_thresholds: Option<DRepVotingThresholds>,
-
-    #[n(30)]
-    pub min_committee_size: u64,
-
-    #[n(31)]
-    pub committee_term_limit: Epoch,
-
-    #[n(32)]
-    pub governance_action_validity_period: Epoch,
-
-    #[n(33)]
-    pub governance_action_deposit: Coin,
-
-    #[n(34)]
-    pub drep_deposit: Coin,
-
-    #[n(35)]
-    pub drep_inactivity_period: Epoch,
-
-    #[n(36)]
-    pub minfee_refscript_cost_per_byte: Option<UnitInterval>,
-}
-
-impl PParamsState {
-    pub fn protocol_major(&self) -> u16 {
-        self.protocol_version.0 as u16
-    }
-
-    pub fn k(&self) -> u32 {
-        self.desired_number_of_stake_pools
-    }
-
-    pub fn a0(&self) -> &RationalNumber {
-        &self
-            .pool_pledge_influence
-            .as_ref()
-            .unwrap_or(&RationalNumber {
-                numerator: 0,
-                denominator: 1,
-            })
-    }
-
-    pub fn tau(&self) -> &RationalNumber {
-        &self
-            .treasury_growth_rate
-            .as_ref()
-            .unwrap_or(&RationalNumber {
-                numerator: 0,
-                denominator: 1,
-            })
-    }
-
-    pub fn rho(&self) -> &RationalNumber {
-        &self.expansion_rate.as_ref().unwrap_or(&RationalNumber {
-            numerator: 0,
-            denominator: 1,
-        })
-    }
-}
-
-entity_boilerplate!(PParamsState, "pparams");
-
 #[derive(Debug, Encode, Decode, Clone)]
 pub struct EraBoundary {
     #[n(0)]
@@ -473,7 +709,6 @@ entity_boilerplate!(EraSummary, "eras");
 #[derive(Debug, Clone)]
 pub enum CardanoEntity {
     EraSummary(EraSummary),
-    PParamsState(PParamsState),
     AccountState(AccountState),
     AssetState(AssetState),
     PoolState(PoolState),
@@ -501,7 +736,6 @@ macro_rules! variant_boilerplate {
 }
 
 variant_boilerplate!(EraSummary);
-variant_boilerplate!(PParamsState);
 variant_boilerplate!(AccountState);
 variant_boilerplate!(AssetState);
 variant_boilerplate!(PoolState);
@@ -512,7 +746,6 @@ impl dolos_core::Entity for CardanoEntity {
     fn decode_entity(ns: Namespace, value: &EntityValue) -> Result<Self, State3Error> {
         match ns {
             EraSummary::NS => EraSummary::decode_entity(ns, value).map(Into::into),
-            PParamsState::NS => PParamsState::decode_entity(ns, value).map(Into::into),
             AccountState::NS => AccountState::decode_entity(ns, value).map(Into::into),
             AssetState::NS => AssetState::decode_entity(ns, value).map(Into::into),
             PoolState::NS => PoolState::decode_entity(ns, value).map(Into::into),
@@ -526,10 +759,6 @@ impl dolos_core::Entity for CardanoEntity {
         match value {
             Self::EraSummary(x) => {
                 let (ns, enc) = EraSummary::encode_entity(x);
-                (ns, enc.into())
-            }
-            Self::PParamsState(x) => {
-                let (ns, enc) = PParamsState::encode_entity(x);
                 (ns, enc.into())
             }
             Self::AccountState(x) => {
@@ -559,7 +788,6 @@ impl dolos_core::Entity for CardanoEntity {
 pub fn build_schema() -> StateSchema {
     let mut schema = StateSchema::default();
     schema.insert(EraSummary::NS, NamespaceType::KeyValue);
-    schema.insert(PParamsState::NS, NamespaceType::KeyValue);
     schema.insert(AccountState::NS, NamespaceType::KeyValue);
     schema.insert(AssetState::NS, NamespaceType::KeyValue);
     schema.insert(PoolState::NS, NamespaceType::KeyValue);
@@ -567,15 +795,6 @@ pub fn build_schema() -> StateSchema {
     schema.insert(DRepState::NS, NamespaceType::KeyValue);
     schema
 }
-
-use crate::roll::accounts::{
-    ControlledAmountDec, ControlledAmountInc, StakeDelegation, StakeDeregistration,
-    StakeRegistration, TrackSeenAddresses, VoteDelegation, WithdrawalInc,
-};
-use crate::roll::assets::MintStatsUpdate;
-use crate::roll::dreps::{DRepRegistration, DRepUnRegistration};
-use crate::roll::epochs::EpochStatsUpdate;
-use crate::roll::pools::{MintedBlocksInc, PoolRegistration};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CardanoDelta {
@@ -593,6 +812,7 @@ pub enum CardanoDelta {
     DRepUnRegistration(DRepUnRegistration),
     WithdrawalInc(WithdrawalInc),
     VoteDelegation(VoteDelegation),
+    PParamsUpdate(PParamsUpdate),
 }
 
 impl CardanoDelta {
@@ -643,6 +863,7 @@ delta_from!(DRepRegistration);
 delta_from!(DRepUnRegistration);
 delta_from!(WithdrawalInc);
 delta_from!(VoteDelegation);
+delta_from!(PParamsUpdate);
 
 impl dolos_core::EntityDelta for CardanoDelta {
     type Entity = super::model::CardanoEntity;
@@ -663,6 +884,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::DRepUnRegistration(x) => x.key(),
             Self::WithdrawalInc(x) => x.key(),
             Self::VoteDelegation(x) => x.key(),
+            Self::PParamsUpdate(x) => x.key(),
         }
     }
 
@@ -682,6 +904,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::DRepUnRegistration(x) => Self::downcast_apply(x, entity),
             Self::WithdrawalInc(x) => Self::downcast_apply(x, entity),
             Self::VoteDelegation(x) => Self::downcast_apply(x, entity),
+            Self::PParamsUpdate(x) => Self::downcast_apply(x, entity),
         }
     }
 
@@ -701,6 +924,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::DRepUnRegistration(x) => Self::downcast_undo(x, entity),
             Self::WithdrawalInc(x) => Self::downcast_undo(x, entity),
             Self::VoteDelegation(x) => Self::downcast_undo(x, entity),
+            Self::PParamsUpdate(x) => Self::downcast_undo(x, entity),
         }
     }
 }

@@ -1,199 +1,109 @@
-use pallas::{
-    ledger::validate::utils::MultiEraProtocolParameters,
-    ledger::{
-        configs::{alonzo, byron, conway, shelley},
-        traverse::MultiEraUpdate,
-    },
-};
-use tracing::debug;
+use crate::roll::BlockVisitor;
+use crate::{CardanoLogic, EpochState, FixedNamespace as _, PParamValue, EPOCH_KEY_MARK};
+use dolos_core::batch::WorkDeltas;
+use dolos_core::{ChainError, NsKey};
+use pallas::ledger::traverse::{MultiEraBlock, MultiEraTx, MultiEraUpdate};
+use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 
-use dolos_core::Genesis;
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PParamsUpdate {
+    to_update: PParamValue,
 
-use crate::PParamsState;
+    // undo
+    prev_value: Option<PParamValue>,
+}
 
-macro_rules! apply_field {
-    ($target:ident, $update:ident, $field:ident) => {
-        paste::paste! {
-            if let Some(new) = $update.[<first_proposed_ $field>]() {
-                debug!(
-                    ?new,
-                    param = stringify!($field),
-                    "found new update proposal"
-                );
+impl dolos_core::EntityDelta for PParamsUpdate {
+    type Entity = EpochState;
 
-                $target.$field = new;
+    fn key(&self) -> Cow<'_, NsKey> {
+        Cow::Owned(NsKey::from((EpochState::NS, EPOCH_KEY_MARK)))
+    }
+
+    fn apply(&mut self, entity: &mut Option<EpochState>) {
+        let entity = entity.get_or_insert_default();
+        entity.pparams.insert(self.to_update.clone());
+    }
+
+    fn undo(&mut self, entity: &mut Option<EpochState>) {
+        if let Some(entity) = entity {
+            if let Some(prev_value) = &self.prev_value {
+                entity.pparams.insert(prev_value.clone());
             }
         }
+    }
+}
+
+macro_rules! pparams_update {
+    ($update:expr, $getter:ident, $deltas:expr, $variant:ident) => {
+        $update.$getter().iter().for_each(|value| {
+            $deltas.add_for_entity(PParamsUpdate {
+                to_update: PParamValue::$variant(value.clone().into()),
+                prev_value: None,
+            });
+        });
     };
 }
 
-fn apply_param_update(
-    current: MultiEraProtocolParameters,
-    update: &MultiEraUpdate,
-) -> MultiEraProtocolParameters {
-    match current {
-        MultiEraProtocolParameters::Byron(mut pparams) => {
-            if let Some(new) = update.byron_proposed_block_version() {
-                debug!(?new, "found new block version");
-                pparams.block_version = new;
-            }
+macro_rules! check_all_proposed {
+    ($update:expr, $deltas:expr, $($getter:ident => $variant:ident),*) => {
+        $(
+            pparams_update!($update, $getter, $deltas, $variant);
+        )*
+    };
+}
 
-            if let Some(pallas::ledger::primitives::byron::TxFeePol::Variant0(new)) =
-                update.byron_proposed_fee_policy()
-            {
-                debug!("found new byron fee policy update proposal");
-                let (summand, multiplier) = new.unwrap();
-                pparams.summand = summand as u64;
-                pparams.multiplier = multiplier as u64;
-            }
+pub struct PParamsStateVisitor;
 
-            if let Some(new) = update.byron_proposed_max_tx_size() {
-                debug!("found new byron max tx size update proposal");
-                pparams.max_tx_size = new;
-            }
+impl<'a> BlockVisitor for PParamsStateVisitor {
+    fn visit_update(
+        deltas: &mut WorkDeltas<CardanoLogic>,
+        _: &MultiEraBlock,
+        _: &MultiEraTx,
+        update: &MultiEraUpdate,
+    ) -> Result<(), ChainError> {
+        check_all_proposed! {
+            update,
+            deltas,
 
-            if let Some(new) = update.byron_proposed_block_version() {
-                debug!("found new byron block version update proposal");
-                pparams.block_version = new;
-            }
+            all_proposed_minfee_a => MinFeeA,
+            all_proposed_minfee_b => MinFeeB,
+            all_proposed_max_block_body_size => MaxBlockBodySize,
+            all_proposed_max_transaction_size => MaxTransactionSize,
+            all_proposed_max_block_header_size => MaxBlockHeaderSize,
+            all_proposed_key_deposit => KeyDeposit,
+            all_proposed_pool_deposit => PoolDeposit,
+            all_proposed_desired_number_of_stake_pools => DesiredNumberOfStakePools,
+            all_proposed_protocol_version => ProtocolVersion,
+            all_proposed_ada_per_utxo_byte => MinUtxoValue,
+            all_proposed_min_pool_cost => MinPoolCost,
+            all_proposed_expansion_rate => ExpansionRate,
+            all_proposed_treasury_growth_rate => TreasuryGrowthRate,
+            all_proposed_maximum_epoch => MaximumEpoch,
+            all_proposed_pool_pledge_influence => PoolPledgeInfluence,
+            all_proposed_decentralization_constant => DecentralizationConstant,
+            all_proposed_extra_entropy => ExtraEntropy,
+            all_proposed_ada_per_utxo_byte => AdaPerUtxoByte,
+            all_proposed_execution_costs => ExecutionCosts,
+            all_proposed_max_tx_ex_units => MaxTxExUnits,
+            all_proposed_max_block_ex_units => MaxBlockExUnits,
+            all_proposed_max_value_size => MaxValueSize,
+            all_proposed_collateral_percentage => CollateralPercentage,
+            all_proposed_max_collateral_inputs => MaxCollateralInputs,
+            all_proposed_pool_voting_thresholds => PoolVotingThresholds,
+            all_proposed_drep_voting_thresholds => DrepVotingThresholds,
+            all_proposed_min_committee_size => MinCommitteeSize,
+            all_proposed_committee_term_limit => CommitteeTermLimit,
+            all_proposed_governance_action_validity_period => GovernanceActionValidityPeriod,
+            all_proposed_governance_action_deposit => GovernanceActionDeposit,
+            all_proposed_drep_deposit => DrepDeposit,
+            all_proposed_drep_inactivity_period => DrepInactivityPeriod,
+            all_proposed_minfee_refscript_cost_per_byte => MinFeeRefScriptCostPerByte
+        };
 
-            MultiEraProtocolParameters::Byron(pparams)
-        }
-        MultiEraProtocolParameters::Shelley(mut pparams) => {
-            apply_field!(pparams, update, protocol_version);
-            apply_field!(pparams, update, minfee_a);
-            apply_field!(pparams, update, minfee_b);
-            apply_field!(pparams, update, max_block_body_size);
-            apply_field!(pparams, update, max_transaction_size);
-            apply_field!(pparams, update, max_block_header_size);
-            apply_field!(pparams, update, key_deposit);
-            apply_field!(pparams, update, pool_deposit);
-            apply_field!(pparams, update, desired_number_of_stake_pools);
-            apply_field!(pparams, update, min_pool_cost);
-            apply_field!(pparams, update, expansion_rate);
-            apply_field!(pparams, update, treasury_growth_rate);
-            apply_field!(pparams, update, maximum_epoch);
-            apply_field!(pparams, update, pool_pledge_influence);
-            apply_field!(pparams, update, decentralization_constant);
-            apply_field!(pparams, update, extra_entropy);
+        // TODO: cost model updates
 
-            MultiEraProtocolParameters::Shelley(pparams)
-        }
-        MultiEraProtocolParameters::Alonzo(mut pparams) => {
-            apply_field!(pparams, update, protocol_version);
-            apply_field!(pparams, update, minfee_a);
-            apply_field!(pparams, update, minfee_b);
-            apply_field!(pparams, update, max_block_body_size);
-            apply_field!(pparams, update, max_transaction_size);
-            apply_field!(pparams, update, max_block_header_size);
-            apply_field!(pparams, update, key_deposit);
-            apply_field!(pparams, update, pool_deposit);
-            apply_field!(pparams, update, desired_number_of_stake_pools);
-            apply_field!(pparams, update, min_pool_cost);
-            apply_field!(pparams, update, ada_per_utxo_byte);
-            apply_field!(pparams, update, execution_costs);
-            apply_field!(pparams, update, max_tx_ex_units);
-            apply_field!(pparams, update, max_block_ex_units);
-            apply_field!(pparams, update, max_value_size);
-            apply_field!(pparams, update, collateral_percentage);
-            apply_field!(pparams, update, max_collateral_inputs);
-            apply_field!(pparams, update, expansion_rate);
-            apply_field!(pparams, update, treasury_growth_rate);
-            apply_field!(pparams, update, maximum_epoch);
-            apply_field!(pparams, update, pool_pledge_influence);
-            apply_field!(pparams, update, decentralization_constant);
-            apply_field!(pparams, update, extra_entropy);
-
-            if let Some(value) = update.alonzo_first_proposed_cost_models_for_script_languages() {
-                debug!(
-                    ?value,
-                    "found new cost_models_for_script_languages update proposal"
-                );
-
-                pparams.cost_models_for_script_languages = value;
-            }
-
-            MultiEraProtocolParameters::Alonzo(pparams)
-        }
-        MultiEraProtocolParameters::Babbage(mut pparams) => {
-            apply_field!(pparams, update, protocol_version);
-            apply_field!(pparams, update, minfee_a);
-            apply_field!(pparams, update, minfee_b);
-            apply_field!(pparams, update, max_block_body_size);
-            apply_field!(pparams, update, max_transaction_size);
-            apply_field!(pparams, update, max_block_header_size);
-            apply_field!(pparams, update, key_deposit);
-            apply_field!(pparams, update, pool_deposit);
-            apply_field!(pparams, update, desired_number_of_stake_pools);
-            apply_field!(pparams, update, min_pool_cost);
-            apply_field!(pparams, update, ada_per_utxo_byte);
-            apply_field!(pparams, update, execution_costs);
-            apply_field!(pparams, update, max_tx_ex_units);
-            apply_field!(pparams, update, max_block_ex_units);
-            apply_field!(pparams, update, max_value_size);
-            apply_field!(pparams, update, collateral_percentage);
-            apply_field!(pparams, update, max_collateral_inputs);
-            apply_field!(pparams, update, expansion_rate);
-            apply_field!(pparams, update, treasury_growth_rate);
-            apply_field!(pparams, update, maximum_epoch);
-            apply_field!(pparams, update, pool_pledge_influence);
-            apply_field!(pparams, update, decentralization_constant);
-            apply_field!(pparams, update, extra_entropy);
-
-            if let Some(value) = update.babbage_first_proposed_cost_models_for_script_languages() {
-                debug!(
-                    ?value,
-                    "found new cost_models_for_script_languages update proposal"
-                );
-
-                pparams.cost_models_for_script_languages = value;
-            }
-
-            MultiEraProtocolParameters::Babbage(pparams)
-        }
-        MultiEraProtocolParameters::Conway(mut pparams) => {
-            apply_field!(pparams, update, protocol_version);
-            apply_field!(pparams, update, minfee_a);
-            apply_field!(pparams, update, minfee_b);
-            apply_field!(pparams, update, max_block_body_size);
-            apply_field!(pparams, update, max_transaction_size);
-            apply_field!(pparams, update, max_block_header_size);
-            apply_field!(pparams, update, key_deposit);
-            apply_field!(pparams, update, pool_deposit);
-            apply_field!(pparams, update, desired_number_of_stake_pools);
-            apply_field!(pparams, update, min_pool_cost);
-            apply_field!(pparams, update, ada_per_utxo_byte);
-            apply_field!(pparams, update, execution_costs);
-            apply_field!(pparams, update, max_tx_ex_units);
-            apply_field!(pparams, update, max_block_ex_units);
-            apply_field!(pparams, update, max_value_size);
-            apply_field!(pparams, update, collateral_percentage);
-            apply_field!(pparams, update, max_collateral_inputs);
-            apply_field!(pparams, update, expansion_rate);
-            apply_field!(pparams, update, treasury_growth_rate);
-            apply_field!(pparams, update, maximum_epoch);
-            apply_field!(pparams, update, pool_pledge_influence);
-            apply_field!(pparams, update, pool_voting_thresholds);
-            apply_field!(pparams, update, drep_voting_thresholds);
-            apply_field!(pparams, update, min_committee_size);
-            apply_field!(pparams, update, committee_term_limit);
-            apply_field!(pparams, update, governance_action_validity_period);
-            apply_field!(pparams, update, governance_action_deposit);
-            apply_field!(pparams, update, drep_deposit);
-            apply_field!(pparams, update, drep_inactivity_period);
-            apply_field!(pparams, update, minfee_refscript_cost_per_byte);
-
-            if let Some(value) = update.conway_first_proposed_cost_models_for_script_languages() {
-                debug!(
-                    ?value,
-                    "found new cost_models_for_script_languages update proposal"
-                );
-
-                pparams.cost_models_for_script_languages = value;
-            }
-
-            MultiEraProtocolParameters::Conway(pparams)
-        }
-        _ => unimplemented!(),
+        Ok(())
     }
 }

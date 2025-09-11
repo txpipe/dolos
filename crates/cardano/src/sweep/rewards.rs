@@ -1,12 +1,12 @@
 use dolos_core::{ChainError, Domain, EntityKey, State3Store};
 use itertools::Itertools as _;
-use pallas::ledger::validate::utils::MultiEraProtocolParameters;
+use pallas::ledger::{primitives::RationalNumber, validate::utils::MultiEraProtocolParameters};
 
 pub type PParams = MultiEraProtocolParameters;
 
 use crate::{
-    AccountState, EpochState, FixedNamespace as _, PParamsState, PoolState, RewardLog,
-    EPOCH_KEY_GO, EPOCH_KEY_MARK,
+    AccountState, EpochState, FixedNamespace as _, PoolState, RewardLog, EPOCH_KEY_GO,
+    EPOCH_KEY_MARK,
 };
 
 type TotalPoolReward = u64;
@@ -16,15 +16,16 @@ fn compute_pool_reward(
     total_rewards: u64,
     total_active_stake: u64,
     pool: &PoolState,
-    pparams: &PParamsState,
+    k: u32,
+    a0: RationalNumber,
 ) -> (TotalPoolReward, OperatorShare) {
-    let z0 = 1.0 / pparams.k() as f64;
+    let z0 = 1.0 / k as f64;
     let sigma = pool.active_stake as f64 / total_active_stake as f64;
     let s = pool.declared_pledge as f64 / total_active_stake as f64;
     let sigma_prime = sigma.min(z0);
 
     let r = total_rewards as f64;
-    let a0 = pparams.a0().numerator as f64 / pparams.a0().denominator as f64;
+    let a0 = a0.numerator as f64 / a0.denominator as f64;
     let r_pool = r * (sigma_prime + s.min(sigma) * a0 * (sigma_prime - sigma));
 
     let r_pool_u64 = r_pool.round() as u64;
@@ -85,11 +86,15 @@ pub fn sweep<D: Domain>(domain: &D) -> Result<(), ChainError> {
 
     let pparams = domain
         .state3()
-        .read_entity_typed::<PParamsState>(PParamsState::NS, &EntityKey::from(EPOCH_KEY_MARK))?;
+        .read_entity_typed::<EpochState>(EpochState::NS, &EntityKey::from(EPOCH_KEY_MARK))?
+        .map(|x| x.pparams);
 
     let Some(pparams) = pparams else {
         return Err(ChainError::PParamsNotFound);
     };
+
+    let k = pparams.k().ok_or(ChainError::PParamsNotFound)?;
+    let a0 = pparams.a0().ok_or(ChainError::PParamsNotFound)?;
 
     for pool in pools {
         let (pool_key, pool) = pool?;
@@ -98,7 +103,8 @@ pub fn sweep<D: Domain>(domain: &D) -> Result<(), ChainError> {
             live_epoch.rewards,
             active_epoch.stake_active,
             &pool,
-            &pparams,
+            k,
+            a0.clone(),
         );
 
         append_reward_log(

@@ -1,4 +1,4 @@
-use crate::{utils::float_to_rational, PParamsState};
+use crate::{utils::float_to_rational, PParamValue, PParamsSet};
 use dolos_core::Genesis;
 use pallas::{
     crypto::hash::Hash,
@@ -10,6 +10,8 @@ use pallas::{
         },
     },
 };
+
+pub type Val = PParamValue;
 
 fn from_config_nonce(config: &shelley::ExtraEntropy) -> Nonce {
     Nonce {
@@ -71,213 +73,166 @@ fn from_conway_drep_voting_thresholds(
     }
 }
 
-pub fn from_byron_genesis(byron: &byron::GenesisFile) -> PParamsState {
-    PParamsState {
-        protocol_version: (0, 0),
-        system_start: byron.start_time,
-        slot_length: byron.block_version_data.slot_duration,
-        minfee_a: byron.block_version_data.tx_fee_policy.multiplier,
-        minfee_b: byron.block_version_data.tx_fee_policy.summand,
-        max_block_body_size: byron.block_version_data.max_block_size,
-        max_transaction_size: byron.block_version_data.max_tx_size,
-        max_block_header_size: byron.block_version_data.max_header_size,
-        ..Default::default()
-    }
+pub fn from_byron_genesis(byron: &byron::GenesisFile) -> PParamsSet {
+    let version = &byron.block_version_data;
+
+    PParamsSet::new()
+        .with(Val::ProtocolVersion((0, 0)))
+        .with(Val::SystemStart(byron.start_time))
+        .with(Val::SlotLength(version.slot_duration))
+        .with(Val::MinFeeA(version.tx_fee_policy.multiplier))
+        .with(Val::MinFeeB(version.tx_fee_policy.summand))
+        .with(Val::MaxBlockBodySize(version.max_block_size))
+        .with(Val::MaxTransactionSize(version.max_tx_size))
+        .with(Val::MaxBlockHeaderSize(version.max_header_size))
 }
 
-pub fn from_shelley_genesis(shelley: &shelley::GenesisFile) -> PParamsState {
+pub fn from_shelley_genesis(shelley: &shelley::GenesisFile) -> PParamsSet {
     let system_start = chrono::DateTime::parse_from_rfc3339(shelley.system_start.as_ref().unwrap())
         .expect("invalid system start value");
 
-    PParamsState {
-        system_start: system_start.timestamp() as u64,
-        protocol_version: shelley.protocol_params.protocol_version.clone().into(),
-        epoch_length: shelley.epoch_length.unwrap_or_default() as u64,
-        slot_length: shelley.slot_length.unwrap_or_default() as u64,
-        max_block_body_size: shelley.protocol_params.max_block_body_size as u64,
-        max_transaction_size: shelley.protocol_params.max_tx_size as u64,
-        max_block_header_size: shelley.protocol_params.max_block_header_size as u64,
-        key_deposit: shelley.protocol_params.key_deposit,
-        min_utxo_value: shelley.protocol_params.min_utxo_value,
-        minfee_a: shelley.protocol_params.min_fee_a as u64,
-        minfee_b: shelley.protocol_params.min_fee_b as u64,
-        pool_deposit: shelley.protocol_params.pool_deposit,
-        desired_number_of_stake_pools: shelley.protocol_params.n_opt,
-        min_pool_cost: shelley.protocol_params.min_pool_cost,
-        expansion_rate: Some(shelley.protocol_params.rho.clone()),
-        treasury_growth_rate: Some(shelley.protocol_params.tau.clone()),
-        maximum_epoch: shelley.protocol_params.e_max,
-        pool_pledge_influence: Some(shelley.protocol_params.a0.clone()),
-        decentralization_constant: Some(shelley.protocol_params.decentralisation_param.clone()),
-        extra_entropy: Some(from_config_nonce(&shelley.protocol_params.extra_entropy)),
-        ..Default::default()
-    }
+    let epoch_length = shelley.epoch_length.unwrap_or_default();
+    let slot_length = shelley.slot_length.unwrap_or_default();
+    let shelley = &shelley.protocol_params;
+    let version = &shelley.protocol_version;
+
+    PParamsSet::new()
+        .with(Val::SystemStart(system_start.timestamp() as u64))
+        .with(Val::ProtocolVersion(version.clone().into()))
+        .with(Val::EpochLength(epoch_length as u64))
+        .with(Val::SlotLength(slot_length as u64))
+        .with(Val::MaxBlockBodySize(shelley.max_block_body_size as u64))
+        .with(Val::MaxTransactionSize(shelley.max_tx_size as u64))
+        .with(Val::MaxBlockHeaderSize(
+            shelley.max_block_header_size as u64,
+        ))
+        .with(Val::KeyDeposit(shelley.key_deposit))
+        .with(Val::MinUtxoValue(shelley.min_utxo_value))
+        .with(Val::MinFeeA(shelley.min_fee_a as u64))
+        .with(Val::MinFeeB(shelley.min_fee_b as u64))
+        .with(Val::PoolDeposit(shelley.pool_deposit))
+        .with(Val::DesiredNumberOfStakePools(shelley.n_opt))
+        .with(Val::MinPoolCost(shelley.min_pool_cost))
+        .with(Val::ExpansionRate(shelley.rho.clone()))
+        .with(Val::TreasuryGrowthRate(shelley.tau.clone()))
+        .with(Val::MaximumEpoch(shelley.e_max))
+        .with(Val::PoolPledgeInfluence(shelley.a0.clone()))
+        .with(Val::DecentralizationConstant(
+            shelley.decentralisation_param.clone(),
+        ))
+        .with(Val::ExtraEntropy(from_config_nonce(&shelley.extra_entropy)))
 }
 
-pub fn into_alonzo(previous: &PParamsState, genesis: &alonzo::GenesisFile) -> PParamsState {
-    PParamsState {
-        system_start: previous.system_start,
-        epoch_length: previous.epoch_length,
-        slot_length: previous.slot_length,
-        minfee_a: previous.minfee_a,
-        minfee_b: previous.minfee_b,
-        max_block_body_size: previous.max_block_body_size,
-        max_transaction_size: previous.max_transaction_size,
-        max_block_header_size: previous.max_block_header_size,
-        key_deposit: previous.key_deposit,
-        pool_deposit: previous.pool_deposit,
-        protocol_version: previous.protocol_version,
-        min_pool_cost: previous.min_pool_cost,
-        desired_number_of_stake_pools: previous.desired_number_of_stake_pools,
-        expansion_rate: previous.expansion_rate.clone(),
-        treasury_growth_rate: previous.treasury_growth_rate.clone(),
-        maximum_epoch: previous.maximum_epoch,
-        pool_pledge_influence: previous.pool_pledge_influence.clone(),
-        decentralization_constant: previous.decentralization_constant.clone(),
-        extra_entropy: previous.extra_entropy.clone(),
-        // new from genesis
-        ada_per_utxo_byte: genesis.lovelace_per_utxo_word,
-        cost_models_for_script_languages: Some(CostModels {
-            plutus_v1: from_alonzo_cost_models_map(
-                &genesis.cost_models,
-                &alonzo::Language::PlutusV1,
-            ),
+pub fn into_alonzo(previous: &PParamsSet, genesis: &alonzo::GenesisFile) -> PParamsSet {
+    let cost_models = CostModels {
+        plutus_v1: from_alonzo_cost_models_map(&genesis.cost_models, &alonzo::Language::PlutusV1),
+        plutus_v2: None,
+        plutus_v3: None,
+        unknown: Default::default(),
+    };
+
+    previous
+        .clone()
+        .with(Val::AdaPerUtxoByte(genesis.lovelace_per_utxo_word))
+        .with(Val::CostModelsForScriptLanguages(cost_models))
+        .with(Val::ExecutionCosts(genesis.execution_prices.clone().into()))
+        .with(Val::MaxTxExUnits(from_config_exunits(
+            &genesis.max_tx_ex_units,
+        )))
+        .with(Val::MaxBlockExUnits(from_config_exunits(
+            &genesis.max_block_ex_units,
+        )))
+        .with(Val::MaxValueSize(genesis.max_value_size))
+        .with(Val::CollateralPercentage(genesis.collateral_percentage))
+        .with(Val::MaxCollateralInputs(genesis.max_collateral_inputs))
+}
+
+pub fn into_babbage(previous: &PParamsSet, genesis: &alonzo::GenesisFile) -> PParamsSet {
+    let cost_models = previous
+        .cost_models_for_script_languages()
+        .unwrap_or_else(|| CostModels {
+            plutus_v1: None,
             plutus_v2: None,
             plutus_v3: None,
             unknown: Default::default(),
-        }),
-        execution_costs: Some(genesis.execution_prices.clone().into()),
-        max_tx_ex_units: Some(from_config_exunits(&genesis.max_tx_ex_units)),
-        max_block_ex_units: Some(from_config_exunits(&genesis.max_block_ex_units)),
-        max_value_size: genesis.max_value_size,
-        collateral_percentage: genesis.collateral_percentage,
-        max_collateral_inputs: genesis.max_collateral_inputs,
-        ..previous.clone()
-    }
+        });
+
+    let cost_models = CostModels {
+        plutus_v2: from_alonzo_cost_models_map(&genesis.cost_models, &alonzo::Language::PlutusV2),
+        ..cost_models
+    };
+
+    previous
+        .clone()
+        .with(Val::CostModelsForScriptLanguages(cost_models))
 }
 
-pub fn into_babbage(previous: &PParamsState, genesis: &alonzo::GenesisFile) -> PParamsState {
-    PParamsState {
-        system_start: previous.system_start,
-        epoch_length: previous.epoch_length,
-        slot_length: previous.slot_length,
-        minfee_a: previous.minfee_a,
-        minfee_b: previous.minfee_b,
-        max_block_body_size: previous.max_block_body_size,
-        max_transaction_size: previous.max_transaction_size,
-        max_block_header_size: previous.max_block_header_size,
-        key_deposit: previous.key_deposit,
-        pool_deposit: previous.pool_deposit,
-        protocol_version: previous.protocol_version,
-        min_pool_cost: previous.min_pool_cost,
-        desired_number_of_stake_pools: previous.desired_number_of_stake_pools,
-        ada_per_utxo_byte: previous.ada_per_utxo_byte,
-        execution_costs: previous.execution_costs.clone(),
-        max_tx_ex_units: previous.max_tx_ex_units,
-        max_block_ex_units: previous.max_block_ex_units,
-        max_value_size: previous.max_value_size,
-        collateral_percentage: previous.collateral_percentage,
-        max_collateral_inputs: previous.max_collateral_inputs,
-        expansion_rate: previous.expansion_rate.clone(),
-        treasury_growth_rate: previous.treasury_growth_rate.clone(),
-        maximum_epoch: previous.maximum_epoch,
-        pool_pledge_influence: previous.pool_pledge_influence.clone(),
-        decentralization_constant: previous.decentralization_constant.clone(),
-        extra_entropy: previous.extra_entropy.clone(),
-        cost_models_for_script_languages: Some(CostModels {
-            plutus_v1: previous
-                .cost_models_for_script_languages
-                .as_ref()
-                .and_then(|x| x.plutus_v1.clone()),
-            plutus_v2: from_alonzo_cost_models_map(
-                &genesis.cost_models,
-                &alonzo::Language::PlutusV2,
-            ),
+pub fn into_conway(previous: &PParamsSet, genesis: &conway::GenesisFile) -> PParamsSet {
+    let cost_models = previous
+        .cost_models_for_script_languages()
+        .unwrap_or_else(|| CostModels {
+            plutus_v1: None,
+            plutus_v2: None,
             plutus_v3: None,
             unknown: Default::default(),
-        }),
-        ..previous.clone()
-    }
-}
+        });
 
-pub fn into_conway(previous: &PParamsState, genesis: &conway::GenesisFile) -> PParamsState {
-    PParamsState {
-        system_start: previous.system_start,
-        epoch_length: previous.epoch_length,
-        slot_length: previous.slot_length,
-        minfee_a: previous.minfee_a,
-        minfee_b: previous.minfee_b,
-        max_block_body_size: previous.max_block_body_size,
-        max_transaction_size: previous.max_transaction_size,
-        max_block_header_size: previous.max_block_header_size,
-        key_deposit: previous.key_deposit,
-        pool_deposit: previous.pool_deposit,
-        protocol_version: previous.protocol_version,
-        min_pool_cost: previous.min_pool_cost,
-        desired_number_of_stake_pools: previous.desired_number_of_stake_pools,
-        // In the hardfork, the value got translated from words to bytes
-        // Since the transformation from words to bytes is hardcoded, the transformation here is
-        // also hardcoded
-        ada_per_utxo_byte: previous.ada_per_utxo_byte / 8,
-        execution_costs: previous.execution_costs.clone(),
-        max_tx_ex_units: previous.max_tx_ex_units,
-        max_block_ex_units: previous.max_block_ex_units,
-        max_value_size: previous.max_value_size,
-        collateral_percentage: previous.collateral_percentage,
-        max_collateral_inputs: previous.max_collateral_inputs,
-        expansion_rate: previous.expansion_rate.clone(),
-        treasury_growth_rate: previous.treasury_growth_rate.clone(),
-        maximum_epoch: previous.maximum_epoch,
-        pool_pledge_influence: previous.pool_pledge_influence.clone(),
-        cost_models_for_script_languages: Some(CostModels {
-            plutus_v1: previous
-                .cost_models_for_script_languages
-                .as_ref()
-                .and_then(|x| x.plutus_v1.clone()),
-            plutus_v2: previous
-                .cost_models_for_script_languages
-                .as_ref()
-                .and_then(|x| x.plutus_v2.clone()),
-            plutus_v3: Some(genesis.plutus_v3_cost_model.clone()),
-            unknown: Default::default(),
-        }),
-        pool_voting_thresholds: Some(from_conway_pool_voting_thresholds(
-            &genesis.pool_voting_thresholds,
-        )),
-        drep_voting_thresholds: Some(from_conway_drep_voting_thresholds(
-            &genesis.d_rep_voting_thresholds,
-        )),
-        min_committee_size: genesis.committee_min_size,
-        committee_term_limit: genesis.committee_max_term_length.into(),
-        governance_action_validity_period: genesis.gov_action_lifetime.into(),
-        governance_action_deposit: genesis.gov_action_deposit,
-        drep_deposit: genesis.d_rep_deposit,
-        drep_inactivity_period: genesis.d_rep_activity.into(),
-        minfee_refscript_cost_per_byte: Some(pallas::ledger::primitives::conway::RationalNumber {
-            numerator: genesis.min_fee_ref_script_cost_per_byte,
-            denominator: 1,
-        }),
-        ..previous.clone()
-    }
+    let cost_models = CostModels {
+        plutus_v3: Some(genesis.plutus_v3_cost_model.clone()),
+        ..cost_models
+    };
+
+    // In the hardfork, the value got translated from words to bytes
+    // Since the transformation from words to bytes is hardcoded, the transformation
+    // here is also hardcoded
+    let ada_per_utxo_byte = previous.ada_per_utxo_byte().unwrap_or_default() / 8;
+
+    previous
+        .clone()
+        .with(Val::AdaPerUtxoByte(ada_per_utxo_byte))
+        .with(Val::CostModelsForScriptLanguages(cost_models))
+        .with(Val::PoolVotingThresholds(
+            from_conway_pool_voting_thresholds(&genesis.pool_voting_thresholds),
+        ))
+        .with(Val::DrepVotingThresholds(
+            from_conway_drep_voting_thresholds(&genesis.d_rep_voting_thresholds),
+        ))
+        .with(Val::MinCommitteeSize(genesis.committee_min_size))
+        .with(Val::CommitteeTermLimit(
+            genesis.committee_max_term_length.into(),
+        ))
+        .with(Val::GovernanceActionValidityPeriod(
+            genesis.gov_action_lifetime.into(),
+        ))
+        .with(Val::GovernanceActionDeposit(genesis.gov_action_deposit))
+        .with(Val::DrepDeposit(genesis.d_rep_deposit))
+        .with(Val::DrepInactivityPeriod(genesis.d_rep_activity.into()))
+        .with(Val::MinFeeRefScriptCostPerByte(
+            pallas::ledger::primitives::conway::RationalNumber {
+                numerator: genesis.min_fee_ref_script_cost_per_byte,
+                denominator: 1,
+            },
+        ))
 }
 
 /// Increments the protocol version by 1 without changing any other fields
-pub fn intra_era_hardfork(current: &PParamsState) -> PParamsState {
-    PParamsState {
-        protocol_version: (current.protocol_version.0 + 1, 0),
-        ..current.clone()
-    }
+pub fn intra_era_hardfork(current: &PParamsSet) -> PParamsSet {
+    let version = current.protocol_major().unwrap_or_default();
+
+    current
+        .clone()
+        .with(PParamValue::ProtocolVersion((version as u64 + 1, 0)))
 }
 
-pub fn bump_pparams_version(current: &PParamsState, genesis: &Genesis) -> PParamsState {
-    let current_protocol = current.protocol_major();
-    // Source: https://github.com/cardano-foundation/CIPs/blob/master/CIP-0059/feature-table.md
-    // NOTE: part of the confusion here is that there are two versioning schemes
-    // that can be easily conflated:
-    // - The protocol version, negotiated in the networking layer
-    // - The protocol version broadcast in the block header
-    // Generally, these refer to the latter; the update proposals jump from 2 to 5,
-    // because the node team decided it would be helpful to have these in sync.
+// Source: https://github.com/cardano-foundation/CIPs/blob/master/CIP-0059/feature-table.md
+// NOTE: part of the confusion here is that there are two versioning schemes
+// that can be easily conflated:
+// - The protocol version, negotiated in the networking layer
+// - The protocol version broadcast in the block header
+// Generally, these refer to the latter; the update proposals jump from 2 to 5,
+// because the node team decided it would be helpful to have these in sync.
+pub fn bump_pparams_version(current: &PParamsSet, genesis: &Genesis) -> PParamsSet {
+    let current_protocol = current.protocol_major().unwrap_or_default();
 
     match current_protocol {
         // Protocol starts at version 0;

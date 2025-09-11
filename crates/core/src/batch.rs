@@ -363,7 +363,7 @@ impl<C: ChainLogic> WorkBatch<C> {
                 .save_entity_typed(ns, &key, entity.as_ref())?;
         }
 
-        domain.state3().append_cursor(self.last_slot())?;
+        domain.state3().set_cursor(self.last_slot())?;
 
         // TODO: semantics for committing a read transaction
 

@@ -3,9 +3,8 @@ use axum::{
     http::StatusCode,
     Json,
 };
-use dolos_cardano::{model::DRepState, ChainSummary, PParamsState};
+use dolos_cardano::{model::DRepState, ChainSummary, PParamsSet};
 use dolos_core::{ArchiveStore as _, BlockSlot, Domain};
-use pallas::ledger::validate::utils::MultiEraProtocolParameters;
 
 use crate::{mapping::IntoModel, Facade};
 
@@ -35,7 +34,7 @@ fn parse_drep_id(drep_id: &str) -> Result<Vec<u8>, StatusCode> {
 pub struct DrepModelBuilder<'a> {
     drep_id: String,
     state: DRepState,
-    pparams: PParamsState,
+    pparams: PParamsSet,
     chain: &'a ChainSummary,
     tip: BlockSlot,
 }
@@ -57,7 +56,7 @@ impl<'a> IntoModel<blockfrost_openapi::models::drep::Drep> for DrepModelBuilder<
             .last_active_slot
             .map(|x| self.chain.slot_epoch(x).0 as i32);
 
-        let drep_activity = self.pparams.drep_inactivity_period;
+        let drep_activity = self.pparams.drep_inactivity_period_or_default() as i32;
 
         let out = blockfrost_openapi::models::drep::Drep {
             drep_id: self.drep_id.clone(),
