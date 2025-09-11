@@ -1309,6 +1309,7 @@ dependencies = [
  "dolos-core",
  "dolos-redb3",
  "handlebars",
+ "hex",
  "itertools 0.13.0",
  "miette",
  "pallas 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=08e6356)",
@@ -1321,6 +1322,7 @@ dependencies = [
  "tower 0.4.13",
  "tower-http 0.6.6",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

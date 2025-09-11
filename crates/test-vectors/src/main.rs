@@ -21,6 +21,7 @@ struct Cli {
 
 fn main() -> miette::Result<()> {
     let args = Cli::parse();
+    tracing_subscriber::fmt::init();
 
     match args.command {
         Command::Build(args) => build::run(&args),

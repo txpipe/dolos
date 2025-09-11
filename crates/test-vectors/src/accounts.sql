@@ -181,5 +181,4 @@ LEFT JOIN treasuries ON sa.id = treasuries.addr_id
 LEFT JOIN instant_rewards ON sa.id = instant_rewards.addr_id
 LEFT JOIN refunds ON sa.id = refunds.addr_id
 
-
-LIMIT 10
+{{ limit }}
