@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     net::{Ipv4Addr, Ipv6Addr},
     path::PathBuf,
     str::FromStr,
@@ -7,13 +7,16 @@ use std::{
 
 use bb8::Pool;
 use bb8_postgres::PostgresConnectionManager;
-use dolos_cardano::{build_schema, AccountState, AssetState, PoolState, RewardLog};
-use dolos_core::State3Store as _;
+use dolos_cardano::{build_schema, AccountState, AssetState, FixedNamespace, PoolState, RewardLog};
+use dolos_core::{Entity, EntityKey, EntityValue, State3Store as _};
 use handlebars::Handlebars;
 use miette::{bail, Context, IntoDiagnostic};
-use pallas::ledger::{
-    addresses::Address,
-    primitives::{PoolMetadata, RationalNumber, Relay},
+use pallas::{
+    codec::minicbor::{self, Encode},
+    ledger::{
+        addresses::Address,
+        primitives::{PoolMetadata, RationalNumber, Relay},
+    },
 };
 use serde_json::Value;
 use tokio_postgres::types::Json;
@@ -117,6 +120,9 @@ pub async fn handle_account_state(
         .into_diagnostic()
         .context("getting connection from pool")?;
 
+    let ns = AccountState::NS;
+    let mut batch = HashMap::new();
+
     tracing::info!("Querying accounts...");
     for (i, row) in conn
         .query(&query, &[])
@@ -201,13 +207,21 @@ pub async fn handle_account_state(
             ..Default::default()
         };
 
-        state
-            .write_entity_typed(&key.into(), &account)
-            .into_diagnostic()
-            .context("writing entity")?;
+        batch.insert(
+            EntityKey::from(key),
+            minicbor::to_vec(account)
+                .into_diagnostic()
+                .context("encoding entity")?,
+        );
     }
-
     tracing::info!("Finished processing accounts.");
+
+    tracing::info!("Writing accounts...");
+    state
+        .write_entity_batch(ns, batch)
+        .into_diagnostic()
+        .context("writing entity")?;
+    tracing::info!("Finished writing accounts.");
 
     Ok(())
 }
@@ -234,6 +248,9 @@ pub async fn handle_asset_state(
         .await
         .into_diagnostic()
         .context("getting connection from pool")?;
+
+    let ns = AccountState::NS;
+    let mut batch = HashMap::new();
 
     tracing::info!("Querying assets...");
     for (i, row) in conn
@@ -263,13 +280,22 @@ pub async fn handle_asset_state(
             mint_tx_count: from_row!(row, i64, "mint_tx_count") as u64,
         };
 
-        state
-            .write_entity_typed(&key.into(), &asset)
-            .into_diagnostic()
-            .context("writing entity")?;
+        batch.insert(
+            EntityKey::from(key),
+            minicbor::to_vec(asset)
+                .into_diagnostic()
+                .context("encoding entity")?,
+        );
     }
 
     tracing::info!("Finished processing assets.");
+
+    tracing::info!("Writing assets...");
+    state
+        .write_entity_batch(ns, batch)
+        .into_diagnostic()
+        .context("writing entity")?;
+    tracing::info!("Finished writing assets.");
 
     Ok(())
 }
@@ -304,6 +330,9 @@ pub async fn handle_pool_state(
         .into_diagnostic()
         .context("executing query")?;
     tracing::info!("Finished querying pools.");
+
+    let ns = AccountState::NS;
+    let mut batch = HashMap::new();
 
     for (i, row) in rows.iter().enumerate() {
         if i % 100 == 1 {
@@ -363,7 +392,11 @@ pub async fn handle_pool_state(
                                 Relay::MultiHostName(dnssrv.to_string())
                             } else if let Some(Value::String(dns)) = data.get("dns") {
                                 Relay::SingleHostName(
-                                    data.get("port").map(|x| x.as_u64().unwrap() as u32),
+                                    if let Some(Value::Number(a)) = data.get("port") {
+                                        Some(a.as_u64().unwrap() as u32)
+                                    } else {
+                                        None
+                                    },
                                     dns.to_string(),
                                 )
                             } else {
@@ -415,13 +448,22 @@ pub async fn handle_pool_state(
             },
         };
 
-        state
-            .write_entity_typed(&key.into(), &pool)
-            .into_diagnostic()
-            .context("writing entity")?;
+        batch.insert(
+            EntityKey::from(key),
+            minicbor::to_vec(pool)
+                .into_diagnostic()
+                .context("encoding entity")?,
+        );
     }
 
     tracing::info!("Finished processing pools.");
+
+    tracing::info!("Writing pools...");
+    state
+        .write_entity_batch(ns, batch)
+        .into_diagnostic()
+        .context("writing entity")?;
+    tracing::info!("Finished writing pools.");
 
     Ok(())
 }
