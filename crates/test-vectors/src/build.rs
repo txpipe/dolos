@@ -7,7 +7,7 @@ use std::{
 
 use bb8::Pool;
 use bb8_postgres::PostgresConnectionManager;
-use dolos_cardano::{build_schema, AccountState, PoolState, RewardLog};
+use dolos_cardano::{build_schema, AccountState, AssetState, PoolState, RewardLog};
 use dolos_core::State3Store as _;
 use handlebars::Handlebars;
 use miette::{bail, Context, IntoDiagnostic};
@@ -87,8 +87,8 @@ pub async fn run(args: &Args) -> miette::Result<()> {
 
     let registry = init_registry()?;
 
-    tracing::info!("Handling accounts...");
     handle_account_state(args, &pool, &state, &registry).await?;
+    handle_asset_state(args, &pool, &state, &registry).await?;
     handle_pool_state(args, &pool, &state, &registry).await?;
 
     Ok(())
@@ -118,14 +118,14 @@ pub async fn handle_account_state(
         .context("getting connection from pool")?;
 
     tracing::info!("Querying accounts...");
-    let rows = conn
+    for (i, row) in conn
         .query(&query, &[])
         .await
         .into_diagnostic()
-        .context("executing query")?;
-    tracing::info!("Finished querying accounts.");
-
-    for (i, row) in rows.iter().enumerate() {
+        .context("executing query")?
+        .iter()
+        .enumerate()
+    {
         if i % 100 == 1 {
             tracing::info!(i = i, "Processing accounts...");
         }
@@ -135,12 +135,9 @@ pub async fn handle_account_state(
                 .context("getting from row")?,
         )?;
 
-        let registered_at = row
-            .try_get::<_, Option<i64>>("registered_at")
-            .into_diagnostic()
-            .context("getting registered_at")?;
         let account = AccountState {
-            registered_at: registered_at.map(|x| x.try_into().unwrap()),
+            registered_at: from_row!(row, Option<i64>, "registered_at")
+                .map(|x| x.try_into().unwrap()),
             controlled_amount: from_row_bigint!(row, "controlled_amount"),
             rewards_sum: from_row_bigint!(row, "rewards_sum"),
             withdrawals_sum: from_row_bigint!(row, "withdrawals_sum"),
@@ -211,6 +208,68 @@ pub async fn handle_account_state(
     }
 
     tracing::info!("Finished processing accounts.");
+
+    Ok(())
+}
+
+pub async fn handle_asset_state(
+    args: &Args,
+    pool: &Pool<PostgresConnectionManager<NoTls>>,
+    state: &dolos_redb3::StateStore,
+    registry: &Handlebars<'static>,
+) -> miette::Result<()> {
+    let query = registry
+        .render(
+            "assets",
+            &serde_json::json!({ "epoch": args.epoch, "limit": match args.limit {
+            Some(limit) => format!("LIMIT {limit}"),
+            None => "".to_string()
+        } }),
+        )
+        .into_diagnostic()
+        .context("rendering query")?;
+
+    let conn = pool
+        .get()
+        .await
+        .into_diagnostic()
+        .context("getting connection from pool")?;
+
+    tracing::info!("Querying assets...");
+    for (i, row) in conn
+        .query(&query, &[])
+        .await
+        .into_diagnostic()
+        .context("executing query")?
+        .iter()
+        .enumerate()
+    {
+        if i % 100 == 1 {
+            tracing::info!(i = i, "Processing assets...");
+        }
+        let key = hex::decode(from_row!(row, &str, "key"))
+            .into_diagnostic()
+            .context("decoding asset key")?;
+
+        let asset = AssetState {
+            quantity_bytes: from_row!(row, String, "quantity")
+                .parse::<u128>()
+                .into_diagnostic()
+                .context("parsing asset quantity")?
+                .to_be_bytes(),
+            initial_tx: from_row!(row, Option<String>, "initial_tx")
+                .map(|x| hex::decode(&x).unwrap().as_slice().into()),
+            initial_slot: from_row!(row, Option<i64>, "initial_slot").map(|x| x as u64),
+            mint_tx_count: from_row!(row, i64, "mint_tx_count") as u64,
+        };
+
+        state
+            .write_entity_typed(&key.into(), &asset)
+            .into_diagnostic()
+            .context("writing entity")?;
+    }
+
+    tracing::info!("Finished processing assets.");
 
     Ok(())
 }
