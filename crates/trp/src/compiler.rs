@@ -68,7 +68,7 @@ pub fn load_compiler<D: Domain>(
     let cursor = ledger.cursor()?.ok_or(Error::TipNotResolved)?;
 
     let tip = match cursor {
-        ChainPoint::Specific(slot, hash) => tx3_cardano::ChainTip {
+        ChainPoint::Specific(slot, hash) => tx3_cardano::ChainPoint {
             slot,
             hash: hash.to_vec(),
         },
