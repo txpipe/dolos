@@ -34,31 +34,6 @@ impl TrackSeenAddresses {
     }
 }
 
-impl dolos_core::EntityDelta for TrackSeenAddresses {
-    type Entity = AccountState;
-
-    fn key(&self) -> Cow<'_, NsKey> {
-        let enc = minicbor::to_vec(&self.cred).unwrap();
-        Cow::Owned(NsKey::from((AccountState::NS, enc)))
-    }
-
-    fn apply(&mut self, entity: &mut Option<AccountState>) {
-        let entity = entity.get_or_insert_default();
-
-        let was_new = entity.seen_addresses.insert(self.full_address.clone());
-
-        self.full_address_new = Some(was_new);
-    }
-
-    fn undo(&mut self, entity: &mut Option<AccountState>) {
-        let entity = entity.get_or_insert_default();
-
-        if self.full_address_new.unwrap_or(false) {
-            entity.seen_addresses.remove(&self.full_address);
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ControlledAmountInc {
     cred: StakeCredential,
@@ -75,12 +50,12 @@ impl dolos_core::EntityDelta for ControlledAmountInc {
 
     fn apply(&mut self, entity: &mut Option<AccountState>) {
         let entity = entity.get_or_insert_default();
-        entity.live_stake += self.amount;
+        entity.controlled_amount += self.amount;
     }
 
     fn undo(&mut self, entity: &mut Option<AccountState>) {
         let entity = entity.get_or_insert_default();
-        entity.live_stake -= self.amount;
+        entity.controlled_amount -= self.amount;
     }
 }
 
@@ -102,12 +77,12 @@ impl dolos_core::EntityDelta for ControlledAmountDec {
         let entity = entity.get_or_insert_default();
         // TODO: saturating sub shouldn't be necesary
         //entity.controlled_amount -= self.amount;
-        entity.live_stake = entity.live_stake.saturating_sub(self.amount);
+        entity.controlled_amount = entity.controlled_amount.saturating_sub(self.amount);
     }
 
     fn undo(&mut self, entity: &mut Option<AccountState>) {
         let entity = entity.get_or_insert_default();
-        entity.live_stake += self.amount;
+        entity.controlled_amount += self.amount;
     }
 }
 
@@ -348,7 +323,8 @@ impl BlockVisitor for AccountVisitor {
             amount: output.value().coin(),
         });
 
-        deltas.add_for_entity(TrackSeenAddresses::new(cred, address));
+        // TODO: refactor this into an archive log
+        //deltas.add_for_entity(TrackSeenAddresses::new(cred, address));
 
         Ok(())
     }

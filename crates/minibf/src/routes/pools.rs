@@ -116,7 +116,7 @@ impl IntoModel<PoolDelegatorsInner> for PoolDelegatorModelBuilder {
 
         let live_stake = self
             .account
-            .map(|a| a.live_stake.to_string())
+            .map(|a| a.live_stake().to_string())
             .unwrap_or_default();
 
         Ok(PoolDelegatorsInner {

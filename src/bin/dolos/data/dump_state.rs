@@ -26,14 +26,24 @@ trait TableRow: Entity {
 
 impl TableRow for AccountState {
     fn header() -> Vec<&'static str> {
-        vec!["cred", "live stake", "seen addresses", "pool id"]
+        vec![
+            "cred",
+            "active stake",
+            "wait stake",
+            "rewards sum",
+            "withdrawals sum",
+            "pool id",
+            "drep",
+        ]
     }
 
     fn row(&self, key: &EntityKey) -> Vec<String> {
         vec![
             format!("{}", hex::encode(key)),
-            format!("{}", self.live_stake),
-            format!("{}", self.seen_addresses.len()),
+            format!("{}", self.active_stake),
+            format!("{}", self.wait_stake),
+            format!("{}", self.rewards_sum),
+            format!("{}", self.withdrawals_sum),
             format!(
                 "{}",
                 self.pool_id
@@ -41,6 +51,7 @@ impl TableRow for AccountState {
                     .map(|x| hex::encode(x))
                     .unwrap_or_default()
             ),
+            format!("{}", self.drep.is_some()),
         ]
     }
 }
