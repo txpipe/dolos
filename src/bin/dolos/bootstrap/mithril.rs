@@ -33,6 +33,10 @@ pub struct Args {
     /// memory
     #[arg(long, default_value = "500")]
     chunk_size: usize,
+
+    /// Import up until a particular slot
+    #[arg(long)]
+    max_slot: Option<BlockSlot>,
 }
 
 impl Default for Args {
@@ -44,6 +48,7 @@ impl Default for Args {
             skip_download: Default::default(),
             retain_snapshot: Default::default(),
             chunk_size: 500,
+            max_slot: None,
         }
     }
 }
@@ -162,13 +167,14 @@ fn process_chunk(
     domain: &DomainAdapter,
     batch: dolos_core::RawBlockBatch,
     progress: &indicatif::ProgressBar,
-) -> Result<(), miette::Error> {
-    let last = dolos_core::catchup::import_batch(domain, batch)
+    max_slot: Option<BlockSlot>,
+) -> Result<bool, miette::Error> {
+    let (last, finished) = dolos_core::catchup::import_batch(domain, batch, max_slot)
         .map_err(|e| miette::miette!(e.to_string()))?;
 
     progress.set_position(last);
 
-    Ok(())
+    Ok(finished)
 }
 
 fn import_hardano_into_domain(
@@ -176,6 +182,7 @@ fn import_hardano_into_domain(
     immutable_path: &Path,
     feedback: &Feedback,
     chunk_size: usize,
+    max_slot: Option<BlockSlot>,
 ) -> Result<(), miette::Error> {
     let domain = crate::common::setup_domain(config)?;
 
@@ -199,7 +206,7 @@ fn import_hardano_into_domain(
     let progress = feedback.slot_progress_bar();
 
     progress.set_message("importing immutable db");
-    progress.set_length(tip.slot_or_default());
+    progress.set_length(max_slot.unwrap_or(tip.slot_or_default()));
 
     for batch in iter.chunks(chunk_size).into_iter() {
         let batch: Vec<_> = batch
@@ -211,7 +218,9 @@ fn import_hardano_into_domain(
         // around throughout the pipeline
         let batch: Vec<_> = batch.into_iter().map(Arc::new).collect();
 
-        process_chunk(&domain, batch, &progress)?;
+        if process_chunk(&domain, batch, &progress, max_slot)? {
+            break;
+        }
     }
 
     progress.abandon_with_message("immutable db import complete");
@@ -250,7 +259,13 @@ pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::
 
     let immutable_path = Path::new(&args.download_dir).join("immutable");
 
-    import_hardano_into_domain(config, &immutable_path, feedback, args.chunk_size)?;
+    import_hardano_into_domain(
+        config,
+        &immutable_path,
+        feedback,
+        args.chunk_size,
+        args.max_slot,
+    )?;
 
     if !args.retain_snapshot {
         info!("deleting downloaded snapshot");

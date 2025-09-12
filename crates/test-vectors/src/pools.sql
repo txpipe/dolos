@@ -286,6 +286,16 @@ SELECT
     ),
     0
   )::TEXT AS "active_stake",
+
+  COALESCE(
+    (
+      SELECT COALESCE(SUM(es.amount), 0)
+      FROM epoch_stake es
+      WHERE es.pool_id = qp.pool_hash_id
+        AND es.epoch_no = {{ epoch }} + 1
+    ),
+    0
+  )::TEXT AS "wait_stake",
   -- cast to TEXT to avoid number overflow
   (
     COALESCE(

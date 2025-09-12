@@ -75,6 +75,7 @@ pub struct WorkBatch<C: ChainLogic> {
 
     // internal checks
     is_sorted: bool,
+    max_slot: Option<BlockSlot>,
 }
 
 // impl<C: ChainLogic> std::ops::AddAssign<Self> for WorkBatch<C> {
@@ -91,17 +92,18 @@ pub struct WorkBatch<C: ChainLogic> {
 // }
 
 impl<C: ChainLogic> WorkBatch<C> {
-    fn new(blocks: Vec<WorkBlock<C>>, is_sorted: bool) -> Self {
+    fn new(blocks: Vec<WorkBlock<C>>, is_sorted: bool, max_slot: Option<BlockSlot>) -> Self {
         Self {
             blocks,
             entities: HashMap::new(),
             utxos: HashMap::new(),
             utxos_decoded: HashMap::new(),
             is_sorted,
+            max_slot,
         }
     }
 
-    pub fn from_raw_batch(raw: Vec<RawBlock>) -> Self {
+    pub fn from_raw_batch(raw: Vec<RawBlock>, max_slot: Option<BlockSlot>) -> Self {
         let blocks = raw
             .into_iter()
             .map(|raw| WorkBlock {
@@ -111,7 +113,7 @@ impl<C: ChainLogic> WorkBatch<C> {
             })
             .collect();
 
-        Self::new(blocks, false)
+        Self::new(blocks, false, max_slot)
     }
 
     pub fn iter_raw(&self) -> impl Iterator<Item = (ChainPoint, &RawBlock)> {
@@ -123,6 +125,16 @@ impl<C: ChainLogic> WorkBatch<C> {
             .iter()
             .flat_map(|x| x.deltas.entities.keys())
             .unique()
+    }
+
+    fn filter_by_slot(&mut self) {
+        if let Some(max) = self.max_slot {
+            self.blocks.retain(|x| x.unwrap_slot() < max);
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.blocks.is_empty()
     }
 
     fn sort_by_slot(&mut self) {
@@ -173,8 +185,8 @@ impl<C: ChainLogic> WorkBatch<C> {
             }
         }
 
-        let before = Self::new(before, true);
-        let after = Self::new(after, true);
+        let before = Self::new(before, true, self.max_slot);
+        let after = Self::new(after, true, self.max_slot);
 
         (before, after)
     }
@@ -185,6 +197,7 @@ impl<C: ChainLogic> WorkBatch<C> {
         }
 
         self.sort_by_slot();
+        self.filter_by_slot();
 
         Ok(())
     }

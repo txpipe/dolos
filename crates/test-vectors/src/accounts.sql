@@ -71,28 +71,118 @@ registered_at AS (
 ),
 
 pool AS (
-  SELECT addr_id, ph."view" AS pool
-  FROM (
-    SELECT
-    addr_id,
-    pool_hash_id AS phid
-    FROM (
-      SELECT
-        d.addr_id,
-        d.tx_id,
-        d.pool_hash_id,
-        ROW_NUMBER() OVER (
-          PARTITION BY d.addr_id
-          ORDER BY d.pool_hash_id DESC
-        ) AS rn
-      FROM delegation AS d
+  SELECT sa.id AS addr_id, ph.view AS "pool"
+  FROM stake_address sa
+    JOIN stake_registration sr ON (sr.addr_id = sa.id)
+    JOIN delegation d ON (d.addr_id = sa.id)
+    JOIN pool_hash ph ON (ph.id = d.pool_hash_id)
+  WHERE 
+    d.id = (
+      SELECT MAX(d.id)
+      FROM delegation d
       JOIN tx ON d.tx_id = tx.id
       JOIN block ON tx.block_id = block.id
       WHERE block.epoch_no <= {{ epoch }}
-    ) AS subquery
-    WHERE rn = 1
-  ) addr_to_ph 
-  JOIN pool_hash ph ON addr_to_ph.phid = ph.id
+      AND addr_id = sa.id
+    )
+    AND sr.tx_id = (
+      SELECT MAX(sr.tx_id)
+      FROM stake_registration sr
+      JOIN tx ON sr.tx_id = tx.id
+      JOIN block ON tx.block_id = block.id
+      WHERE block.epoch_no <= {{ epoch }}
+      AND addr_id = sa.id
+    )
+    AND (
+      sr.tx_id > (
+        SELECT COALESCE(MAX(sd.tx_id), 0) -- handles IS NULL option so we don't have to run that query again
+        FROM stake_deregistration sd
+        JOIN tx ON sd.tx_id = tx.id
+        JOIN block ON tx.block_id = block.id
+        WHERE block.epoch_no <= {{ epoch }}
+        AND addr_id = sa.id
+      )
+    )
+),
+
+drep AS (
+  SELECT 
+    sa.id AS addr_id,
+    dh.view AS "drep_id",
+    dh.has_script AS "drep_id_has_script"
+  FROM stake_address sa
+    JOIN delegation_vote dv ON (dv.addr_id = sa.id)
+    JOIN drep_hash dh ON (dh.id = dv.drep_hash_id)
+  WHERE 
+  -- latest delegation vote record possible
+    NOT EXISTS (
+      SELECT TRUE
+      FROM delegation_vote dv1
+      JOIN tx ON dv1.tx_id = tx.id
+      JOIN block ON tx.block_id = block.id
+      WHERE block.epoch_no <= {{ epoch }}
+      AND dv1.addr_id = dv.addr_id
+      AND dv1.id > dv.id
+      LIMIT 1
+    )
+    -- while having no stake acc deregistration after the delegation vote
+    AND NOT EXISTS (
+      SELECT TRUE
+      FROM stake_deregistration sd
+      JOIN tx ON sd.tx_id = tx.id
+      JOIN block ON tx.block_id = block.id
+      WHERE block.epoch_no <= {{ epoch }}
+      AND sd.addr_id = dv.addr_id
+      AND sd.tx_id > dv.tx_id
+      LIMIT 1
+    )
+     -- while the drep is still registered (not retired)
+    AND (
+      COALESCE((
+        SELECT ROW(dr.tx_id, dr.cert_index)
+        FROM drep_registration dr
+        JOIN tx ON dr.tx_id = tx.id
+        JOIN block ON tx.block_id = block.id
+        WHERE block.epoch_no <= {{ epoch }}
+        AND dr.drep_hash_id = dv.drep_hash_id AND dr.deposit > 0
+        ORDER BY dr.tx_id DESC, dr.cert_index DESC
+        LIMIT 1
+      ), ROW(1::bigint, 1::integer)) 
+      > 
+      COALESCE((
+        SELECT ROW(dr.tx_id, dr.cert_index)
+        FROM drep_registration dr
+        JOIN tx ON dr.tx_id = tx.id
+        JOIN block ON tx.block_id = block.id
+        WHERE block.epoch_no <= {{ epoch }}
+        AND dr.drep_hash_id = dv.drep_hash_id AND dr.deposit < 0
+        ORDER BY dr.tx_id DESC, dr.cert_index DESC
+        LIMIT 1
+      ), ROW(-1::bigint, -1::integer))
+    )
+    -- delegation_vote must be after latest drep registration
+    AND dv.tx_id >= (
+      SELECT COALESCE(MAX(dr.tx_id), -1)
+      FROM drep_registration dr
+      JOIN tx ON dr.tx_id = tx.id
+      JOIN block ON tx.block_id = block.id
+      WHERE block.epoch_no <= {{ epoch }}
+      AND dr.drep_hash_id = dv.drep_hash_id AND dr.deposit > 0
+    )
+),
+
+active_stake AS (
+  SELECT addr_id, SUM(amount) AS active_stake
+  FROM epoch_stake
+  WHERE epoch_no = {{ epoch }}
+  GROUP BY 1
+),
+
+wait_stake AS (
+  SELECT addr_id, SUM(amount) AS wait_stake
+  FROM epoch_stake
+  WHERE epoch_no = {{ epoch }} + 1
+  GROUP BY 1
 ),
 
 active_slots AS (
@@ -163,7 +253,7 @@ SELECT
     + COALESCE(instant_rewards.amount, 0) 
     + COALESCE(refunds.amount, 0) 
     - COALESCE(withdrawals.amount, 0)
-  )::TEXT AS "controlled_amount",
+  )::TEXT AS "live_stake",
   (
     COALESCE(rewards.amount, 0) + COALESCE(instant_rewards.amount, 0)
   )::TEXT AS "rewards_sum",
@@ -177,15 +267,23 @@ SELECT
     - COALESCE(withdrawals.amount, 0)
   )::TEXT AS "withdrawable_amount",
   pool.pool AS pool_id,
+  drep.drep_id AS drep_id,
+  drep.drep_id_has_script AS drep_id_has_script,
+  active_stake.active_stake::TEXT AS active_stake,
+  wait_stake.wait_stake::TEXT AS wait_stake,
+
   active_slots.active_slots,
   seen_addresses.seen_addresses,
   reward_log.reward_log
 
 FROM stake_address sa
+LEFT JOIN active_stake ON sa.id = active_stake.addr_id
+LEFT JOIN wait_stake ON sa.id = wait_stake.addr_id
 LEFT JOIN reward_log ON sa.id = reward_log.addr_id
 LEFT JOIN seen_addresses ON sa.id = seen_addresses.addr_id
 LEFT JOIN active_slots ON sa.id = active_slots.addr_id
 LEFT JOIN pool ON sa.id = pool.addr_id
+LEFT JOIN drep ON sa.id = drep.addr_id
 LEFT JOIN registered_at ON sa.id = registered_at.addr_id
 LEFT JOIN all_utxos ON sa.id = all_utxos.addr_id
 LEFT JOIN rewards ON sa.id = rewards.addr_id

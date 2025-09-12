@@ -10,7 +10,7 @@ where
     C: ChainLogic,
     D: Domain<Chain = C, Entity = C::Entity, EntityDelta = C::Delta>,
 {
-    let mut batch = WorkBatch::from_raw_batch(vec![block.clone()]);
+    let mut batch = WorkBatch::from_raw_batch(vec![block.clone()], None);
 
     batch.decode_blocks(domain.chain())?;
 

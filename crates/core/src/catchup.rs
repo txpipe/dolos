@@ -50,16 +50,24 @@ where
     }
 }
 
-pub fn import_batch<D, C>(domain: &D, batch: Vec<RawBlock>) -> Result<BlockSlot, DomainError>
+pub fn import_batch<D, C>(
+    domain: &D,
+    batch: Vec<RawBlock>,
+    max_slot: Option<BlockSlot>,
+) -> Result<(BlockSlot, bool), DomainError>
 where
     C: ChainLogic,
     D: Domain<Chain = C, Entity = C::Entity>,
 {
-    let mut batch = WorkBatch::from_raw_batch(batch);
+    let mut batch = WorkBatch::from_raw_batch(batch, max_slot);
 
     batch.decode_blocks(domain.chain())?;
 
+    if batch.is_empty() {
+        return Ok((max_slot.unwrap(), true));
+    }
+
     let last = import_decoded_batch(domain, batch)?;
 
-    Ok(last)
+    Ok((last, false))
 }

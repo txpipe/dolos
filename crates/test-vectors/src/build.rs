@@ -7,19 +7,17 @@ use std::{
 
 use bb8::Pool;
 use bb8_postgres::PostgresConnectionManager;
-use chrono::NaiveDateTime;
 use dolos_cardano::{
-    build_schema, include, AccountState, AssetState, EraBoundary, EraSummary, FixedNamespace,
-    PoolState, RewardLog,
+    build_schema, include, AccountState, AssetState, FixedNamespace, PoolState, RewardLog,
 };
-use dolos_core::{EntityKey, Genesis, State3Store as _};
+use dolos_core::{EntityKey, Genesis, StateStore as _};
 use handlebars::Handlebars;
 use miette::{bail, Context, IntoDiagnostic};
 use pallas::{
     codec::minicbor,
     ledger::{
         addresses::Address,
-        primitives::{PoolMetadata, RationalNumber, Relay},
+        primitives::{conway::DRep, PoolMetadata, RationalNumber, Relay},
     },
 };
 use serde_json::Value;
@@ -38,9 +36,11 @@ macro_rules! from_row {
 
 macro_rules! from_row_bigint {
     ($row:ident, $name:literal) => {
-        from_row!($row, Option<String>, $name)
-            .map(|x| x.parse().unwrap())
-            .unwrap_or_default()
+        match from_row!($row, Option<String>, $name) {
+            Some(x) => x.parse().ok(),
+            None => None,
+        }
+        .unwrap_or_default()
     };
 }
 
@@ -119,8 +119,6 @@ pub async fn run(args: &Args) -> miette::Result<()> {
 
     handle_account_state(args, &pool, &state, &registry).await?;
     handle_asset_state(args, &pool, &state, &registry).await?;
-    handle_cursor(args, &pool, &state, &registry).await?;
-    handle_era_summaries(args, &pool, &state, &registry).await?;
     handle_pool_state(args, &pool, &state, &registry).await?;
 
     Ok(())
@@ -173,12 +171,32 @@ pub async fn handle_account_state(
         let account = AccountState {
             registered_at: from_row!(row, Option<i64>, "registered_at")
                 .map(|x| x.try_into().unwrap()),
-            controlled_amount: from_row_bigint!(row, "controlled_amount"),
+            live_stake: from_row_bigint!(row, "live_stake"),
+            active_stake: from_row_bigint!(row, "active_stake"),
+            wait_stake: from_row_bigint!(row, "wait_stake"),
             rewards_sum: from_row_bigint!(row, "rewards_sum"),
             withdrawals_sum: from_row_bigint!(row, "withdrawals_sum"),
             reserves_sum: from_row_bigint!(row, "reserves_sum"),
             treasury_sum: from_row_bigint!(row, "treasury_sum"),
-            withdrawable_amount: from_row_bigint!(row, "withdrawable_amount"),
+            drep: from_row!(row, Option<String>, "drep_id")
+                .map(|drep_id| -> miette::Result<DRep> {
+                    match drep_id.as_str() {
+                        "drep_always_abstain" => Ok(DRep::Abstain),
+                        "drep_always_no_confidence" => Ok(DRep::NoConfidence),
+                        x => {
+                            let bytes = bech32::decode(x)
+                                .into_diagnostic()
+                                .context("decoding drep")?
+                                .1;
+                            if from_row!(row, bool, "drep_id_has_script") {
+                                Ok(DRep::Script(bytes.as_slice().into()))
+                            } else {
+                                Ok(DRep::Key(bytes.as_slice().into()))
+                            }
+                        }
+                    }
+                })
+                .transpose()?,
             pool_id: from_row!(row, Option<String>, "pool_id")
                 .map(|x| bech32::decode(&x).unwrap().1),
             active_slots: from_row!(row, Option<Json<serde_json::Value>>, "active_slots")
@@ -233,7 +251,6 @@ pub async fn handle_account_state(
                         .collect()
                 })
                 .unwrap_or_default(),
-            ..Default::default()
         };
 
         batch.insert(
@@ -329,129 +346,6 @@ pub async fn handle_asset_state(
     Ok(())
 }
 
-pub async fn handle_cursor(
-    args: &Args,
-    pool: &Pool<PostgresConnectionManager<NoTls>>,
-    state: &dolos_redb3::StateStore,
-    registry: &Handlebars<'static>,
-) -> miette::Result<()> {
-    let query = registry
-        .render("cursor", &&serde_json::json!({ "epoch": args.epoch }))
-        .into_diagnostic()
-        .context("rendering query")?;
-
-    let conn = pool
-        .get()
-        .await
-        .into_diagnostic()
-        .context("getting connection from pool")?;
-
-    tracing::info!("Querying cursor...");
-    let row = conn
-        .query_one(&query, &[])
-        .await
-        .into_diagnostic()
-        .context("executing query")?;
-    tracing::info!("Finished querying cursor.");
-
-    let slot = from_row!(row, i64, "slot") as u64;
-
-    state
-        .set_cursor(slot)
-        .into_diagnostic()
-        .context("writing cursor")?;
-    tracing::info!("Finished setting cursor.");
-
-    Ok(())
-}
-
-pub async fn handle_era_summaries(
-    args: &Args,
-    pool: &Pool<PostgresConnectionManager<NoTls>>,
-    state: &dolos_redb3::StateStore,
-    registry: &Handlebars<'static>,
-) -> miette::Result<()> {
-    let query = registry
-        .render(
-            "era_summaries",
-            &&serde_json::json!({ "epoch": args.epoch }),
-        )
-        .into_diagnostic()
-        .context("rendering query")?;
-
-    let conn = pool
-        .get()
-        .await
-        .into_diagnostic()
-        .context("getting connection from pool")?;
-
-    tracing::info!("Querying era summaries...");
-    let rows = conn
-        .query(&query, &[])
-        .await
-        .into_diagnostic()
-        .context("executing query")?;
-    tracing::info!("Finished querying era summaries.");
-
-    let genesis = args.network.load_included_genesis();
-
-    let mut it = rows.iter().zip(rows.iter().skip(1)).peekable();
-    while let Some((prev, next)) = it.next() {
-        let epoch = from_row!(prev, i32, "epoch") as u64;
-        let slot = from_row!(prev, i64, "slot") as u64;
-        let start = from_row!(prev, NaiveDateTime, "start_time");
-        let end = from_row!(prev, NaiveDateTime, "end_time");
-        let epoch_end = from_row!(next, i32, "epoch") as u64;
-        let slot_end = from_row!(next, i64, "slot") as u64;
-
-        let key = (epoch as u16).to_be_bytes().as_slice().into();
-
-        let era = EraSummary {
-            start: EraBoundary {
-                epoch,
-                slot,
-                timestamp: start.and_utc().timestamp() as u64,
-            },
-            end: Some(EraBoundary {
-                epoch: epoch_end,
-                slot: slot_end,
-                timestamp: end.and_utc().timestamp() as u64,
-            }),
-            // TODO: This will break in preprod and mainnet, but for now it will do
-            epoch_length: genesis.shelley.epoch_length.unwrap() as u64,
-            slot_length: genesis.shelley.slot_length.unwrap() as u64,
-        };
-
-        state
-            .write_entity_typed(&key, &era)
-            .into_diagnostic()
-            .context("writing era")?;
-
-        if it.peek().is_none() {
-            let key = (epoch_end as u16).to_be_bytes().as_slice().into();
-            let curr = EraSummary {
-                start: EraBoundary {
-                    epoch: epoch_end,
-                    slot: slot_end,
-                    timestamp: end.and_utc().timestamp() as u64,
-                },
-                end: None,
-                epoch_length: genesis.shelley.epoch_length.unwrap() as u64,
-                slot_length: genesis.shelley.slot_length.unwrap() as u64,
-            };
-
-            state
-                .write_entity_typed(&key, &curr)
-                .into_diagnostic()
-                .context("writing era")?;
-        }
-    }
-
-    tracing::info!("Finished setting cursor.");
-
-    Ok(())
-}
-
 pub async fn handle_pool_state(
     args: &Args,
     pool: &Pool<PostgresConnectionManager<NoTls>>,
@@ -513,7 +407,7 @@ pub async fn handle_pool_state(
             active_stake: from_row_bigint!(row, "active_stake"),
             live_stake: from_row_bigint!(row, "live_stake"),
             blocks_minted: from_row!(row, i64, "blocks_minted") as u32,
-            live_saturation: from_row!(row, f64, "live_saturation"),
+            wait_stake: from_row_bigint!(row, "wait_stake"),
             pool_owners: from_row!(row, Option<Json<serde_json::Value>>, "owners")
                 .map(|x| {
                     x.0.as_array()
