@@ -117,11 +117,11 @@ pub async fn run(args: &Args) -> miette::Result<()> {
 
     let registry = init_registry()?;
 
-    //handle_account_state(args, &pool, &state, &registry).await?;
-    //handle_asset_state(args, &pool, &state, &registry).await?;
-    //handle_cursor(args, &pool, &state, &registry).await?;
+    handle_account_state(args, &pool, &state, &registry).await?;
+    handle_asset_state(args, &pool, &state, &registry).await?;
+    handle_cursor(args, &pool, &state, &registry).await?;
     handle_era_summaries(args, &pool, &state, &registry).await?;
-    //handle_pool_state(args, &pool, &state, &registry).await?;
+    handle_pool_state(args, &pool, &state, &registry).await?;
 
     Ok(())
 }
@@ -161,7 +161,7 @@ pub async fn handle_account_state(
         .iter()
         .enumerate()
     {
-        if i % 100 == 1 {
+        if i % 1000 == 1 {
             tracing::info!(i = i, "Processing accounts...");
         }
         let key = account_key(
@@ -290,7 +290,7 @@ pub async fn handle_asset_state(
         .iter()
         .enumerate()
     {
-        if i % 100 == 1 {
+        if i % 1000 == 1 {
             tracing::info!(i = i, "Processing assets...");
         }
         let key = hex::decode(from_row!(row, &str, "key"))

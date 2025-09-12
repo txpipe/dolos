@@ -96,16 +96,30 @@ pool AS (
 ),
 
 active_slots AS (
-  SELECT sa.id AS addr_id, json_agg(block.slot_no ORDER BY block.slot_no) AS active_slots
-  FROM stake_address sa
-  JOIN tx_out txo ON (txo.stake_address_id = sa.id)
-  JOIN tx ON txo.tx_id = tx.id
-  JOIN block ON tx.block_id = block.id
-  LEFT JOIN tx_in txi ON (txo.tx_id = txi.tx_out_id)
-    AND (txo.index = txi.tx_out_index)
-  WHERE txi IS NULL
-    AND txo.stake_address_id = sa.id
-    AND block.epoch_no <= {{ epoch }}
+  SELECT addr_id, json_agg(slot ORDER BY slot) AS active_slots
+  FROM (
+    SELECT addr_id, block.slot_no AS slot
+    FROM stake_registration sr
+    JOIN tx ON sr.tx_id = tx.id
+    JOIN block ON tx.block_id = block.id
+    WHERE block.epoch_no <= {{ epoch }}
+
+    UNION ALL
+
+    SELECT addr_id, block.slot_no AS slot
+    FROM stake_deregistration sd
+    JOIN tx ON sd.tx_id = tx.id
+    JOIN block ON tx.block_id = block.id
+    WHERE block.epoch_no <= {{ epoch }}
+
+    UNION ALL
+
+    SELECT addr_id, block.slot_no AS slot
+    FROM delegation d
+    JOIN tx ON d.tx_id = tx.id
+    JOIN block ON tx.block_id = block.id
+    WHERE block.epoch_no <= {{ epoch }}
+  ) slots
   GROUP BY 1
 ),
 
