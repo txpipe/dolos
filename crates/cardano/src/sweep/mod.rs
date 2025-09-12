@@ -2,8 +2,8 @@ use dolos_core::{BlockSlot, BrokenInvariant, ChainError, Domain, EntityKey, Stat
 use pallas::ledger::primitives::ProtocolVersion;
 
 use crate::{
-    sweep::pots::Pots, EpochState, EraSummary, FixedNamespace as _, EPOCH_KEY_GO, EPOCH_KEY_MARK,
-    EPOCH_KEY_SET,
+    sweep::pots::Pots, Config, EpochState, EraSummary, FixedNamespace as _, EPOCH_KEY_GO,
+    EPOCH_KEY_MARK, EPOCH_KEY_SET,
 };
 
 mod accounts;
@@ -166,7 +166,7 @@ fn start_new_epoch<D: Domain>(domain: &D, prev: &EpochState) -> Result<(), Chain
     Ok(())
 }
 
-pub fn sweep<D: Domain>(domain: &D, _: BlockSlot) -> Result<(), ChainError> {
+pub fn sweep<D: Domain>(domain: &D, _: BlockSlot, config: &Config) -> Result<(), ChainError> {
     // TODO: this should all be one big atomic operation, but for that we need to
     // refactor stores to include start / commit semantics
 
@@ -177,12 +177,21 @@ pub fn sweep<D: Domain>(domain: &D, _: BlockSlot) -> Result<(), ChainError> {
     pools::aggregate_stake(domain)?;
     let pots = pots::compute_for_epoch(&mark)?;
 
+    // TODO: move mark epoch closure here so that it's already impacted in case of a
+    // force stop
+
     // order matters
     if let Some(go) = &go {
         rewards::distribute(domain, mark.number, pots.to_distribute, go.stake)?;
     }
 
     // HERE'S WHERE WE CONSIDER THE EPOCH TRANSITIONING CONCEPTUALLY
+
+    if let Some(stop_epoch) = config.stop_epoch {
+        if mark.number >= stop_epoch {
+            return Err(ChainError::StopEpochReached);
+        }
+    }
 
     // rotate individual delegation
     pools::rotate_delegation(domain)?;

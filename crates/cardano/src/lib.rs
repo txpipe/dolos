@@ -46,6 +46,7 @@ pub struct TrackConfig {
 pub struct Config {
     #[serde(default)]
     pub track: TrackConfig,
+    pub stop_epoch: Option<u32>,
 }
 
 #[derive(Clone)]
@@ -84,7 +85,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
     }
 
     fn execute_sweep<D: Domain>(&self, domain: &D, at: BlockSlot) -> Result<(), ChainError> {
-        sweep::sweep(domain, at)?;
+        sweep::sweep(domain, at, &self.config)?;
 
         Ok(())
     }

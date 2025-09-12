@@ -469,6 +469,9 @@ pub enum ChainError {
 
     #[error("pparams not found")]
     PParamsNotFound,
+
+    #[error("forced stop epoch reached")]
+    StopEpochReached,
 }
 
 pub trait ChainLogic: Sized + Send + Sync {
