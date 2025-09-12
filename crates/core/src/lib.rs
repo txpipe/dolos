@@ -158,6 +158,12 @@ pub enum BrokenInvariant {
 
     #[error("bad bootstrap")]
     BadBootstrap,
+
+    #[error("invalid epoch state")]
+    InvalidEpochState,
+
+    #[error("missing pool {}", hex::encode(.0))]
+    MissingPool(Vec<u8>),
 }
 
 pub type UtxoMap = HashMap<TxoRef, Arc<EraCbor>>;

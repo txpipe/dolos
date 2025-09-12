@@ -106,21 +106,21 @@ impl<'a> IntoModel<Network> for NetworkModelBuilder<'a> {
 
     fn into_model(self) -> Result<Network, StatusCode> {
         let max_supply = self.genesis.shelley.max_lovelace_supply.unwrap_or_default();
-        let total_supply = self.state.supply_circulating + self.state.supply_locked;
-        let reserves = max_supply - total_supply;
+        let total_supply = max_supply.saturating_sub(self.state.reserves);
+        let circulating = total_supply.saturating_sub(self.state.deposits);
 
         Ok(Network {
             supply: Box::new(NetworkSupply {
                 max: max_supply.to_string(),
                 total: total_supply.to_string(),
-                circulating: self.state.supply_circulating.to_string(),
-                locked: self.state.supply_locked.to_string(),
+                circulating: circulating.to_string(),
+                locked: self.state.deposits.to_string(),
                 treasury: self.state.treasury.to_string(),
-                reserves: reserves.to_string(),
+                reserves: self.state.reserves.to_string(),
             }),
             stake: Box::new(NetworkStake {
-                live: self.state.stake_live.to_string(),
-                active: self.state.stake_active.to_string(),
+                live: self.state.stake.to_string(),
+                active: self.state.stake.to_string(),
             }),
         })
     }

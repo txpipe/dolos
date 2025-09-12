@@ -112,7 +112,7 @@ where
         .ok_or(StatusCode::NOT_FOUND)?;
 
     let pparams = domain
-        .get_current_pparams()
+        .get_live_pparams()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let chain = domain

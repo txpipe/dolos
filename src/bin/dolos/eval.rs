@@ -82,7 +82,7 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
         utxos2.insert(key, value);
     }
 
-    let pparams = dolos_cardano::load_current_pparams(&domain).into_diagnostic()?;
+    let pparams = dolos_cardano::use_active_pparams(&domain).into_diagnostic()?;
     let pparams = dolos_cardano::utils::pparams_to_pallas(&pparams);
 
     let context = ValidationContext {

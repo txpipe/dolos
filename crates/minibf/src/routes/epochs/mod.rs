@@ -21,7 +21,7 @@ pub async fn latest_parameters<D: Domain>(
 
     let (epoch, _) = summary.slot_epoch(tip);
 
-    let params = domain.get_current_pparams()?;
+    let params = domain.get_live_pparams()?;
 
     let model = mapping::ParametersModelBuilder {
         epoch: epoch as u64,
@@ -36,7 +36,7 @@ pub async fn by_number_parameters<D: Domain>(
     State(domain): State<Facade<D>>,
     Path(epoch): Path<u64>,
 ) -> Result<Json<EpochParamContent>, StatusCode> {
-    let params = domain.get_current_pparams()?;
+    let params = domain.get_live_pparams()?;
 
     let model = mapping::ParametersModelBuilder {
         epoch,

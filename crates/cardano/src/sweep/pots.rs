@@ -1,21 +1,20 @@
-use dolos_core::{ChainError, Domain, EntityKey, State3Store as _};
-use pallas::ledger::{primitives::RationalNumber, validate::utils::MultiEraProtocolParameters};
+use dolos_core::ChainError;
+use pallas::ledger::primitives::RationalNumber;
 
-use crate::{EpochState, FixedNamespace as _, EPOCH_KEY_MARK, EPOCH_KEY_SET};
+use crate::{AccountState, EpochState, PoolState};
 
-pub type PParams = MultiEraProtocolParameters;
+pub struct Pots {
+    pub to_treasury: u64,
+    pub to_distribute: u64,
+}
 
-pub type NewReserves = u64;
-pub type ToTreasury = u64;
-pub type ToDistribute = u64;
-
-fn compute_new_pots(
+pub fn compute_pure(
     previous_reserves: u64,
     gathered_fees: u64,
     decayed_deposits: u64,
     rho: RationalNumber,
     tau: RationalNumber,
-) -> (NewReserves, ToTreasury, ToDistribute) {
+) -> Pots {
     let rho = rho.numerator as f64 / rho.denominator as f64;
     let from_reserves = rho * (previous_reserves as f64);
 
@@ -28,57 +27,60 @@ fn compute_new_pots(
     let to_treasury = to_treasury_f64.round() as u64;
     let to_distribute = to_distribute_f64.round() as u64;
 
-    // Update reserves
-    let new_reserves = previous_reserves.saturating_sub(from_reserves.round() as u64);
-
-    (new_reserves, to_treasury, to_distribute)
+    Pots {
+        to_treasury,
+        to_distribute,
+    }
 }
 
-pub fn sweep<D: Domain>(domain: &D) -> Result<(), ChainError> {
-    let prev_epoch = domain
-        .state3()
-        .read_entity_typed::<EpochState>(EpochState::NS, &EntityKey::from(EPOCH_KEY_SET))?;
+pub fn compute_for_epoch(epoch: &EpochState) -> Result<Pots, ChainError> {
+    let rho = epoch.pparams.rho().ok_or(ChainError::PParamsNotFound)?;
 
-    let Some(prev_epoch) = prev_epoch else {
-        return Ok(());
-    };
+    let tau = epoch.pparams.tau().ok_or(ChainError::PParamsNotFound)?;
 
-    let live_epoch = domain
-        .state3()
-        .read_entity_typed::<EpochState>(EpochState::NS, &EntityKey::from(EPOCH_KEY_MARK))?;
-
-    let Some(mut live_epoch) = live_epoch else {
-        return Ok(());
-    };
-
-    let pparams = domain
-        .state3()
-        .read_entity_typed::<EpochState>(EpochState::NS, &EntityKey::from(EPOCH_KEY_MARK))?
-        .map(|x| x.pparams);
-
-    let Some(pparams) = pparams else {
-        return Err(ChainError::PParamsNotFound);
-    };
-
-    let rho = pparams.rho().ok_or(ChainError::PParamsNotFound)?;
-
-    let tau = pparams.tau().ok_or(ChainError::PParamsNotFound)?;
-
-    let (new_reserves, to_treasury, to_distribute) = compute_new_pots(
-        prev_epoch.reserves,
-        live_epoch.gathered_fees,
-        live_epoch.decayed_deposits,
+    let pots = compute_pure(
+        epoch.reserves,
+        epoch.gathered_fees,
+        epoch.decayed_deposits,
         rho,
         tau,
     );
 
-    live_epoch.end_reserves = Some(new_reserves);
-    live_epoch.to_treasury = Some(to_treasury);
-    live_epoch.to_distribute = Some(to_distribute);
+    Ok(pots)
+}
 
-    domain
-        .state3()
-        .write_entity_typed::<EpochState>(&EntityKey::from(EPOCH_KEY_MARK), &live_epoch)?;
+pub type TotalPoolReward = u64;
+pub type OperatorShare = u64;
 
-    Ok(())
+pub fn compute_pool_reward(
+    total_rewards: u64,
+    total_active_stake: u64,
+    pool: &PoolState,
+    k: u32,
+    a0: RationalNumber,
+) -> (TotalPoolReward, OperatorShare) {
+    let z0 = 1.0 / k as f64;
+    let sigma = pool.active_stake as f64 / total_active_stake as f64;
+    let s = pool.declared_pledge as f64 / total_active_stake as f64;
+    let sigma_prime = sigma.min(z0);
+
+    let r = total_rewards as f64;
+    let a0 = a0.numerator as f64 / a0.denominator as f64;
+    let r_pool = r * (sigma_prime + s.min(sigma) * a0 * (sigma_prime - sigma));
+
+    let r_pool_u64 = r_pool.round() as u64;
+    let after_cost = r_pool_u64.saturating_sub(pool.fixed_cost);
+    let pool_margin_cost = pool.margin_cost.numerator as f64 / pool.margin_cost.denominator as f64;
+    let operator_share = pool.fixed_cost + ((after_cost as f64) * pool_margin_cost).round() as u64;
+
+    (r_pool_u64, operator_share)
+}
+
+pub fn compute_delegator_reward(
+    remaining: u64,
+    total_delegated: u64,
+    delegator: &AccountState,
+) -> u64 {
+    let share = (delegator.active_stake as f64 / total_delegated as f64) * remaining as f64;
+    share.round() as u64
 }

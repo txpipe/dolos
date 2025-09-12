@@ -124,17 +124,45 @@ impl dolos_core::ChainLogic for CardanoLogic {
     }
 }
 
-pub fn load_current_epoch<D: Domain>(domain: &D) -> Result<EpochState, ChainError> {
+pub fn load_active_epoch<D: Domain>(domain: &D) -> Result<Option<EpochState>, ChainError> {
     let epoch = domain
         .state3()
-        .read_entity_typed::<EpochState>(EpochState::NS, &EntityKey::from(EPOCH_KEY_MARK))?
-        .ok_or(ChainError::PParamsNotFound)?;
+        .read_entity_typed::<EpochState>(EpochState::NS, &EntityKey::from(EPOCH_KEY_GO))?;
 
     Ok(epoch)
 }
 
-pub fn load_current_pparams<D: Domain>(domain: &D) -> Result<PParamsSet, ChainError> {
-    let epoch = load_current_epoch(domain)?;
+pub fn load_active_pparams<D: Domain>(domain: &D) -> Result<Option<PParamsSet>, ChainError> {
+    let epoch = load_active_epoch(domain)?;
+
+    Ok(epoch.map(|e| e.pparams))
+}
+
+pub fn use_active_pparams<D: Domain>(domain: &D) -> Result<PParamsSet, ChainError> {
+    let epoch = load_active_epoch(domain)?.ok_or(ChainError::PParamsNotFound)?;
+
+    Ok(epoch.pparams)
+}
+
+pub fn load_previous_epoch<D: Domain>(domain: &D) -> Result<Option<EpochState>, ChainError> {
+    let epoch = domain
+        .state3()
+        .read_entity_typed::<EpochState>(EpochState::NS, &EntityKey::from(EPOCH_KEY_SET))?;
+
+    Ok(epoch)
+}
+
+pub fn load_live_epoch<D: Domain>(domain: &D) -> Result<EpochState, ChainError> {
+    let epoch = domain
+        .state3()
+        .read_entity_typed::<EpochState>(EpochState::NS, &EntityKey::from(EPOCH_KEY_MARK))?
+        .ok_or(ChainError::from(BrokenInvariant::BadBootstrap))?;
+
+    Ok(epoch)
+}
+
+pub fn load_live_pparams<D: Domain>(domain: &D) -> Result<PParamsSet, ChainError> {
+    let epoch = load_live_epoch(domain)?;
 
     Ok(epoch.pparams)
 }
