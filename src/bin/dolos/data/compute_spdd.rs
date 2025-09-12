@@ -50,10 +50,10 @@ pub fn compute_spdd(store: &impl StateStore) -> miette::Result<HashMap<[u8; 28],
     for record in all_accounts {
         let (_, value) = record.into_diagnostic()?;
 
-        if let Some(pool_id) = value.pool_id {
+        if let Some(pool_id) = value.pool_id.clone() {
             let key = pool_id.try_into().unwrap();
             let entry = by_pool.entry(key).or_insert(0);
-            *entry += value.live_stake as u128;
+            *entry += value.live_stake() as u128;
         }
     }
 

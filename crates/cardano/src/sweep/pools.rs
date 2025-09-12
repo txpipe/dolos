@@ -14,11 +14,11 @@ pub fn aggregate_stake<D: Domain>(domain: &D) -> Result<(), ChainError> {
     for record in accounts {
         let (_, account) = record?;
 
-        if let Some(pool_id) = account.pool_id {
+        if let Some(pool_id) = account.pool_id.clone() {
             by_pool
                 .entry(pool_id)
-                .and_modify(|x| *x += account.live_stake)
-                .or_insert(account.live_stake);
+                .and_modify(|x| *x += account.live_stake())
+                .or_insert(account.live_stake());
         }
     }
 

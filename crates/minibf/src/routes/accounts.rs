@@ -110,7 +110,7 @@ impl<'a> IntoModel<AccountContent> for AccountModelBuilder<'a> {
             stake_address,
             active,
             active_epoch: active_epoch.map(|x| x as i32),
-            controlled_amount: self.account_state.live_stake.to_string(),
+            controlled_amount: self.account_state.live_stake().to_string(),
             rewards_sum: self.account_state.rewards_sum.to_string(),
             withdrawals_sum: self.account_state.withdrawals_sum.to_string(),
             reserves_sum: self.account_state.reserves_sum.to_string(),
@@ -128,14 +128,9 @@ impl<'a> IntoModel<Vec<AccountAddressesContentInner>> for AccountModelBuilder<'a
     type SortKey = ();
 
     fn into_model(self) -> Result<Vec<AccountAddressesContentInner>, StatusCode> {
-        let addresses: Vec<_> = self
-            .account_state
-            .seen_addresses
-            .iter()
-            .map(|x| bytes_to_address_bech32(x.as_slice()))
-            .collect::<Result<_, _>>()?;
+        // TODO: scan archive logs
 
-        let out: Vec<_> = addresses
+        let out: Vec<_> = vec![]
             .into_iter()
             .map(|x| AccountAddressesContentInner { address: x })
             .collect();
@@ -420,7 +415,8 @@ where
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    let mut slot_iter = account.active_slots.iter().take(MAX_SCAN_DEPTH);
+    // TODO: scan archive logs
+    let mut slot_iter = std::iter::empty::<u64>();
 
     let mut builder = AccountActivityModelBuilder::new(
         account_key.address,
@@ -434,7 +430,7 @@ where
             break;
         };
 
-        let (epoch, _) = chain.slot_epoch(*slot);
+        let (epoch, _) = chain.slot_epoch(slot);
 
         let block = domain
             .archive()
@@ -527,17 +523,13 @@ where
 
     let account_key = parse_account_key_param(&stake_address)?;
 
-    let account = domain
-        .read_cardano_entity::<AccountState>(account_key.entity_key.as_slice())
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+    // TODO: scan archive logs
 
-    let mapped: Vec<_> = account
-        .rewards
+    let mapped: Vec<_> = vec![]
         .into_iter()
         .skip(pagination.skip())
         .take(pagination.count)
-        .map(|x| x.into_model())
+        .map(|x: RewardLog| x.into_model())
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(Json(mapped))
