@@ -53,7 +53,7 @@ pub fn compute_spdd(store: &impl State3Store) -> miette::Result<HashMap<[u8; 28]
         if let Some(pool_id) = value.pool_id {
             let key = pool_id.try_into().unwrap();
             let entry = by_pool.entry(key).or_insert(0);
-            *entry += value.controlled_amount as u128;
+            *entry += value.live_stake as u128;
         }
     }
 

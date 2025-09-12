@@ -1,8 +1,10 @@
 use std::marker::PhantomData;
 
 use comfy_table::Table;
-use dolos_cardano::{model::AccountState, EpochState, EraSummary};
-use miette::{Context, IntoDiagnostic};
+use dolos_cardano::{
+    model::AccountState, EpochState, EraSummary, PoolState, RewardLog, EPOCH_KEY_MARK,
+};
+use miette::{bail, Context, IntoDiagnostic};
 
 use dolos::prelude::*;
 
@@ -24,12 +26,13 @@ trait TableRow: Entity {
 
 impl TableRow for AccountState {
     fn header() -> Vec<&'static str> {
-        vec!["cred", "controlled amount", "seen addresses", "pool id"]
+        vec!["cred", "live stake", "seen addresses", "pool id"]
     }
 
     fn row(&self, key: &EntityKey) -> Vec<String> {
         vec![
-            format!("{}", self.controlled_amount),
+            format!("{}", hex::encode(key)),
+            format!("{}", self.live_stake),
             format!("{}", self.seen_addresses.len()),
             format!(
                 "{}",
@@ -45,25 +48,32 @@ impl TableRow for AccountState {
 impl TableRow for EpochState {
     fn header() -> Vec<&'static str> {
         vec![
-            "key",
             "number",
             "version",
             "pparams",
             "gathered fees",
             "decayed deposits",
-            "rewards",
+            "deposits",
+            "reserves",
+            "treasury",
+            "end reserves",
+            "to treasury",
+            "to distribute",
         ]
     }
 
     fn row(&self, key: &EntityKey) -> Vec<String> {
         vec![
-            format!("{}", hex::encode(key)),
             format!("{}", self.number),
             format!("{}", self.pparams.protocol_major().unwrap_or_default()),
             format!("{}", self.pparams.len()),
             format!("{}", self.gathered_fees),
             format!("{}", self.decayed_deposits),
-            format!("{}", self.rewards),
+            format!("{}", self.deposits),
+            format!("{}", self.reserves),
+            format!("{}", self.treasury),
+            format!("{}", self.rewards_to_treasury.unwrap_or_default()),
+            format!("{}", self.rewards_to_distribute.unwrap_or_default()),
         ]
     }
 }
@@ -100,6 +110,46 @@ impl TableRow for EraSummary {
         ]
     }
 }
+
+impl TableRow for PoolState {
+    fn header() -> Vec<&'static str> {
+        vec![
+            "key",
+            "vrf keyhash",
+            "reward account",
+            "active stake",
+            "live stake",
+            "blocks minted",
+        ]
+    }
+
+    fn row(&self, key: &EntityKey) -> Vec<String> {
+        vec![
+            format!("{}", hex::encode(key)),
+            format!("{}", self.vrf_keyhash),
+            format!("{}", hex::encode(&self.reward_account)),
+            format!("{}", self.active_stake),
+            format!("{}", self.live_stake),
+            format!("{}", self.blocks_minted),
+        ]
+    }
+}
+
+// impl TableRow for RewardLog {
+//     fn header() -> Vec<&'static str> {
+//         vec!["key", "epoch", "amount", "pool id", "as leader"]
+//     }
+
+//     fn row(&self, key: &EntityKey) -> Vec<String> {
+//         vec![
+//             format!("{}", hex::encode(key)),
+//             format!("{}", self.epoch),
+//             format!("{}", hex::encode(&self.pool_id)),
+//             format!("{}", self.amount),
+//             format!("{}", self.as_leader),
+//         ]
+//     }
+// }
 
 enum Formatter<T: TableRow> {
     Table(Table, PhantomData<T>),
@@ -142,12 +192,10 @@ fn dump_state<T: TableRow>(
         .iter_entities_typed::<T>(ns, None)
         .into_diagnostic()
         .context("iterating entities")?
-        //.filter_ok(|(_, val)| val.controlled_amount > 0)
-        //.filter_ok(|(_, val)| val.pool_id.is_some())
         .take(count)
         .for_each(|x| match x {
             Ok((key, value)) => formatter.write(key, value),
-            Err(_) => todo!(),
+            Err(e) => panic!("{e}"),
         });
 
     formatter.flush();
@@ -164,6 +212,8 @@ pub fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
         "eras" => dump_state::<EraSummary>(&state, "eras", args.count)?,
         "epochs" => dump_state::<EpochState>(&state, "epochs", args.count)?,
         "accounts" => dump_state::<AccountState>(&state, "accounts", args.count)?,
+        "pools" => dump_state::<PoolState>(&state, "pools", args.count)?,
+        //"rewards" => dump_state::<RewardState>(&state, "rewards", args.count)?,
         _ => todo!(),
     }
 

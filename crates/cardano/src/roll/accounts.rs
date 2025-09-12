@@ -75,12 +75,12 @@ impl dolos_core::EntityDelta for ControlledAmountInc {
 
     fn apply(&mut self, entity: &mut Option<AccountState>) {
         let entity = entity.get_or_insert_default();
-        entity.controlled_amount += self.amount;
+        entity.live_stake += self.amount;
     }
 
     fn undo(&mut self, entity: &mut Option<AccountState>) {
         let entity = entity.get_or_insert_default();
-        entity.controlled_amount -= self.amount;
+        entity.live_stake -= self.amount;
     }
 }
 
@@ -102,12 +102,12 @@ impl dolos_core::EntityDelta for ControlledAmountDec {
         let entity = entity.get_or_insert_default();
         // TODO: saturating sub shouldn't be necesary
         //entity.controlled_amount -= self.amount;
-        entity.controlled_amount = entity.controlled_amount.saturating_sub(self.amount);
+        entity.live_stake = entity.live_stake.saturating_sub(self.amount);
     }
 
     fn undo(&mut self, entity: &mut Option<AccountState>) {
         let entity = entity.get_or_insert_default();
-        entity.controlled_amount += self.amount;
+        entity.live_stake += self.amount;
     }
 }
 

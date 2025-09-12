@@ -84,41 +84,50 @@ pub struct AccountState {
     pub registered_at: Option<u64>,
 
     #[n(1)]
-    pub controlled_amount: u64,
+    pub live_stake: u64,
 
     #[n(2)]
-    pub rewards_sum: u64,
+    pub wait_stake: u64,
 
     #[n(3)]
-    pub withdrawals_sum: u64,
+    pub active_stake: u64,
 
     #[n(4)]
-    pub reserves_sum: u64,
+    pub rewards_sum: u64,
 
     #[n(5)]
-    pub treasury_sum: u64,
+    pub withdrawals_sum: u64,
 
     #[n(6)]
-    pub withdrawable_amount: u64,
+    pub reserves_sum: u64,
 
     #[n(7)]
-    pub pool_id: Option<Vec<u8>>,
+    pub treasury_sum: u64,
 
     #[n(8)]
+    pub pool_id: Option<Vec<u8>>,
+
+    #[n(9)]
     pub drep: Option<DRep>,
 
     // capped size, LRU type cache
-    #[n(9)]
+    #[n(10)]
     pub seen_addresses: HashSet<Vec<u8>>,
 
-    #[n(10)]
+    #[n(11)]
     pub active_slots: HashSet<u64>,
 
-    #[n(11)]
+    #[n(12)]
     pub rewards: Vec<RewardLog>,
 }
 
 entity_boilerplate!(AccountState, "accounts");
+
+impl AccountState {
+    pub fn withdrawable_amount(&self) -> u64 {
+        self.rewards_sum.saturating_add(self.withdrawals_sum)
+    }
+}
 
 #[derive(Debug, Encode, Decode, Clone, Default)]
 pub struct AssetState {
@@ -179,16 +188,26 @@ pub struct PoolState {
     pub active_stake: u64,
 
     #[n(9)]
-    pub live_stake: u64,
+    pub wait_stake: u64,
 
     #[n(10)]
-    pub blocks_minted: u32,
+    pub live_stake: u64,
 
     #[n(11)]
-    pub live_saturation: f64,
+    pub blocks_minted: u32,
 }
 
 entity_boilerplate!(PoolState, "pools");
+
+impl PoolState {
+    pub fn live_saturation(&self) -> RationalNumber {
+        // TODO: implement
+        RationalNumber {
+            numerator: 0,
+            denominator: 1,
+        }
+    }
+}
 
 impl PoolState {
     pub fn new(vrf_keyhash: Hash<32>) -> Self {
@@ -205,9 +224,9 @@ impl PoolState {
             fixed_cost: Default::default(),
             metadata: Default::default(),
             active_stake: Default::default(),
+            wait_stake: Default::default(),
             live_stake: Default::default(),
             blocks_minted: Default::default(),
-            live_saturation: Default::default(),
         }
     }
 }
@@ -610,53 +629,52 @@ impl PParamsSet {
 #[derive(Debug, Encode, Decode, Clone, Default)]
 pub struct EpochState {
     #[n(0)]
-    pub supply_circulating: u64,
+    pub number: u32,
 
     #[n(1)]
-    pub supply_locked: u64,
+    pub stake: u64,
 
     #[n(2)]
-    pub treasury: u64,
+    pub deposits: u64,
 
     #[n(3)]
-    pub stake_live: u64,
+    pub reserves: u64,
 
     #[n(4)]
-    pub stake_active: u64,
+    pub treasury: u64,
 
     #[n(5)]
     pub gathered_fees: u64,
 
     #[n(6)]
-    pub decayed_deposits: u64,
+    pub gathered_deposits: u64,
 
     #[n(7)]
-    pub rewards: u64,
+    pub decayed_deposits: u64,
 
     #[n(8)]
-    pub number: u32,
+    pub rewards_to_distribute: Option<u64>,
 
     #[n(9)]
-    pub reserves: u64,
+    pub rewards_to_treasury: Option<u64>,
 
     #[n(10)]
-    pub end_reserves: Option<u64>,
-
-    #[n(11)]
-    pub to_treasury: Option<u64>,
-
-    #[n(12)]
-    pub to_distribute: Option<u64>,
-
-    #[n(13)]
     pub pparams: PParamsSet,
+}
+
+impl EpochState {
+    pub fn rewards(&self) -> Option<u64> {
+        let to_distribute = self.rewards_to_distribute?;
+        let to_treasury = self.rewards_to_treasury?;
+        Some(to_distribute + to_treasury)
+    }
 }
 
 entity_boilerplate!(EpochState, "epochs");
 
-pub const EPOCH_KEY_GO: &[u8] = b"go";
-pub const EPOCH_KEY_SET: &[u8] = b"set";
-pub const EPOCH_KEY_MARK: &[u8] = b"mark";
+pub const EPOCH_KEY_GO: &[u8] = b"2";
+pub const EPOCH_KEY_SET: &[u8] = b"1";
+pub const EPOCH_KEY_MARK: &[u8] = b"0";
 
 #[derive(Debug, Encode, Decode, Clone, Default)]
 pub struct DRepState {

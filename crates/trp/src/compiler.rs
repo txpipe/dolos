@@ -32,8 +32,9 @@ fn map_cost_models(original: CostModels) -> HashMap<u8, tx3_cardano::CostModel> 
 fn build_pparams<D: Domain>(domain: &D) -> Result<tx3_cardano::PParams, Error> {
     let network = network_id_from_genesis(domain.genesis()).unwrap();
 
-    let pparams =
-        dolos_cardano::load_current_pparams(domain).map_err(|_| Error::PParamsNotAvailable)?;
+    let pparams = dolos_cardano::load_active_pparams(domain)
+        .map_err(|_| Error::PParamsNotAvailable)?
+        .ok_or(Error::PParamsNotAvailable)?;
 
     let costs = pparams
         .cost_models_for_script_languages()

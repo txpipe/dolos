@@ -83,8 +83,8 @@ impl<D: Domain> Facade<D> {
         Ok(summary)
     }
 
-    pub fn get_current_pparams(&self) -> Result<PParamsSet, StatusCode> {
-        let pparams = dolos_cardano::load_current_pparams(&self.inner)
+    pub fn get_live_pparams(&self) -> Result<PParamsSet, StatusCode> {
+        let pparams = dolos_cardano::load_live_pparams(&self.inner)
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
         Ok(pparams)
