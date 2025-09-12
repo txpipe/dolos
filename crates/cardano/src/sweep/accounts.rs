@@ -11,7 +11,7 @@ pub fn rotate_delegation<D: Domain>(domain: &D) -> Result<(), ChainError> {
         let (key, mut state) = record?;
 
         state.active_stake = state.wait_stake;
-        state.wait_stake = state.live_stake;
+        state.wait_stake = state.live_stake();
 
         domain
             .state()

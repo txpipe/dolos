@@ -1,6 +1,5 @@
 use dolos_core::{ChainError, Domain, EntityKey, StateStore};
 use itertools::Itertools as _;
-use pallas::ledger::validate::utils::MultiEraProtocolParameters;
 
 use crate::{AccountState, EpochState, FixedNamespace as _, PoolState, RewardLog, EPOCH_KEY_MARK};
 
@@ -9,19 +8,7 @@ fn append_reward_log<D: Domain>(
     account: &[u8],
     log: RewardLog,
 ) -> Result<(), ChainError> {
-    let key = EntityKey::from(account);
-
-    let account = domain
-        .state()
-        .read_entity_typed::<AccountState>(AccountState::NS, &key)?;
-
-    let Some(mut account) = account else {
-        return Ok(());
-    };
-
-    account.rewards.push(log);
-
-    domain.state().write_entity_typed(&key, &account)?;
+    // TODO: refactor this into an archive log
 
     Ok(())
 }

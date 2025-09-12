@@ -84,7 +84,7 @@ pub struct AccountState {
     pub registered_at: Option<u64>,
 
     #[n(1)]
-    pub live_stake: u64,
+    pub controlled_amount: u64,
 
     #[n(2)]
     pub wait_stake: u64,
@@ -109,16 +109,6 @@ pub struct AccountState {
 
     #[n(9)]
     pub drep: Option<DRep>,
-
-    // capped size, LRU type cache
-    #[n(10)]
-    pub seen_addresses: HashSet<Vec<u8>>,
-
-    #[n(11)]
-    pub active_slots: HashSet<u64>,
-
-    #[n(12)]
-    pub rewards: Vec<RewardLog>,
 }
 
 entity_boilerplate!(AccountState, "accounts");
@@ -126,6 +116,14 @@ entity_boilerplate!(AccountState, "accounts");
 impl AccountState {
     pub fn withdrawable_amount(&self) -> u64 {
         self.rewards_sum.saturating_add(self.withdrawals_sum)
+    }
+
+    pub fn live_stake(&self) -> u64 {
+        let mut out = self.controlled_amount;
+        out += self.rewards_sum;
+        out = out.saturating_sub(self.withdrawals_sum);
+
+        out
     }
 }
 
@@ -827,7 +825,6 @@ pub fn build_schema() -> StateSchema {
 pub enum CardanoDelta {
     ControlledAmountInc(ControlledAmountInc),
     ControlledAmountDec(ControlledAmountDec),
-    TrackSeenAddresses(TrackSeenAddresses),
     StakeRegistration(StakeRegistration),
     StakeDelegation(StakeDelegation),
     StakeDeregistration(StakeDeregistration),
@@ -878,7 +875,6 @@ macro_rules! delta_from {
 
 delta_from!(ControlledAmountInc);
 delta_from!(ControlledAmountDec);
-delta_from!(TrackSeenAddresses);
 delta_from!(StakeRegistration);
 delta_from!(StakeDelegation);
 delta_from!(StakeDeregistration);
@@ -899,7 +895,6 @@ impl dolos_core::EntityDelta for CardanoDelta {
         match self {
             Self::ControlledAmountInc(x) => x.key(),
             Self::ControlledAmountDec(x) => x.key(),
-            Self::TrackSeenAddresses(x) => x.key(),
             Self::StakeRegistration(x) => x.key(),
             Self::StakeDelegation(x) => x.key(),
             Self::StakeDeregistration(x) => x.key(),
@@ -919,7 +914,6 @@ impl dolos_core::EntityDelta for CardanoDelta {
         match self {
             Self::ControlledAmountInc(x) => Self::downcast_apply(x, entity),
             Self::ControlledAmountDec(x) => Self::downcast_apply(x, entity),
-            Self::TrackSeenAddresses(x) => Self::downcast_apply(x, entity),
             Self::StakeRegistration(x) => Self::downcast_apply(x, entity),
             Self::StakeDelegation(x) => Self::downcast_apply(x, entity),
             Self::StakeDeregistration(x) => Self::downcast_apply(x, entity),
@@ -939,7 +933,6 @@ impl dolos_core::EntityDelta for CardanoDelta {
         match self {
             Self::ControlledAmountInc(x) => Self::downcast_undo(x, entity),
             Self::ControlledAmountDec(x) => Self::downcast_undo(x, entity),
-            Self::TrackSeenAddresses(x) => Self::downcast_undo(x, entity),
             Self::StakeRegistration(x) => Self::downcast_undo(x, entity),
             Self::StakeDelegation(x) => Self::downcast_undo(x, entity),
             Self::StakeDeregistration(x) => Self::downcast_undo(x, entity),
