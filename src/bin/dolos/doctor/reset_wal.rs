@@ -17,7 +17,7 @@ pub fn run(config: &crate::Config, _args: &Args, feedback: &Feedback) -> miette:
 
     let cursor = domain
         .state
-        .cursor()
+        .read_cursor()
         .into_diagnostic()
         .context("getting state cursor")?;
 

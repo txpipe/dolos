@@ -397,59 +397,6 @@ pub struct Genesis {
     pub force_protocol: Option<usize>,
 }
 
-#[derive(Debug, Error)]
-pub enum StateError {
-    #[error("broken invariant")]
-    BrokenInvariant(#[from] BrokenInvariant),
-
-    #[error("storage error")]
-    InternalError(#[from] Box<dyn std::error::Error + Send + Sync>),
-
-    // TODO: refactor this to avoid Pallas dependency
-    #[error("address decoding error")]
-    AddressDecoding(#[from] pallas::ledger::addresses::Error),
-
-    #[error("query not supported")]
-    QueryNotSupported,
-
-    #[error("invalid store version")]
-    InvalidStoreVersion,
-
-    // TODO: refactor this to avoid Pallas dependency
-    #[error("decoding error")]
-    DecodingError(#[from] pallas::codec::minicbor::decode::Error),
-}
-
-pub trait StateStore: Sized + Clone + Send + Sync + 'static {
-    fn start(&self) -> Result<Option<ChainPoint>, StateError>;
-
-    fn cursor(&self) -> Result<Option<ChainPoint>, StateError>;
-
-    fn is_empty(&self) -> Result<bool, StateError>;
-
-    fn get_pparams(&self, until: BlockSlot) -> Result<Vec<EraCbor>, StateError>;
-
-    fn get_utxos(&self, refs: Vec<TxoRef>) -> Result<UtxoMap, StateError>;
-
-    fn get_utxo_by_address(&self, address: &[u8]) -> Result<UtxoSet, StateError>;
-
-    fn get_utxo_by_payment(&self, payment: &[u8]) -> Result<UtxoSet, StateError>;
-
-    fn get_utxo_by_stake(&self, stake: &[u8]) -> Result<UtxoSet, StateError>;
-
-    fn get_utxo_by_policy(&self, policy: &[u8]) -> Result<UtxoSet, StateError>;
-
-    fn get_utxo_by_asset(&self, asset: &[u8]) -> Result<UtxoSet, StateError>;
-
-    fn apply(&self, deltas: &[UtxoSetDelta]) -> Result<(), StateError>;
-
-    fn upgrade(self) -> Result<Self, StateError>;
-
-    fn copy(&self, target: &Self) -> Result<(), StateError>;
-
-    fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, StateError>;
-}
-
 pub type Phase2Log = Vec<String>;
 
 #[derive(Debug, Error)]
@@ -520,9 +467,6 @@ pub enum ChainError {
     #[error(transparent)]
     StateError(#[from] StateError),
 
-    #[error(transparent)]
-    State3Error(#[from] State3Error),
-
     #[error("pparams not found")]
     PParamsNotFound,
 }
@@ -580,9 +524,6 @@ pub enum DomainError {
     #[error("state error: {0}")]
     StateError(#[from] StateError),
 
-    #[error("state3 error: {0}")]
-    State3Error(#[from] State3Error),
-
     #[error("archive error: {0}")]
     ArchiveError(#[from] ArchiveError),
 
@@ -622,8 +563,6 @@ pub trait Domain: Send + Sync + Clone + 'static {
     type Chain: ChainLogic<Delta = Self::EntityDelta>;
     type TipSubscription: TipSubscription;
 
-    type State3: State3Store;
-
     fn storage_config(&self) -> &StorageConfig;
     fn genesis(&self) -> &Genesis;
 
@@ -632,8 +571,6 @@ pub trait Domain: Send + Sync + Clone + 'static {
     fn state(&self) -> &Self::State;
     fn archive(&self) -> &Self::Archive;
     fn mempool(&self) -> &Self::Mempool;
-
-    fn state3(&self) -> &Self::State3;
 
     fn watch_tip(&self, from: Option<ChainPoint>) -> Result<Self::TipSubscription, DomainError>;
     fn notify_tip(&self, tip: TipEvent);
@@ -647,11 +584,6 @@ pub trait Domain: Send + Sync + Clone + 'static {
             .unwrap_or(Self::Chain::mutable_slots(self));
 
         info!(max_ledger_slots, "pruning ledger for excess history");
-
-        let state_pruned = self.state().prune_history(
-            max_ledger_slots,
-            Some(Self::MAX_PRUNE_SLOTS_PER_HOUSEKEEPING),
-        )?;
 
         let mut archive_pruned = true;
 
@@ -673,7 +605,7 @@ pub trait Domain: Send + Sync + Clone + 'static {
                 .prune_history(max_slots, Some(Self::MAX_PRUNE_SLOTS_PER_HOUSEKEEPING))?;
         }
 
-        Ok(state_pruned && archive_pruned && wal_pruned)
+        Ok(archive_pruned && wal_pruned)
     }
 }
 

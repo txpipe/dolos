@@ -126,7 +126,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
 
 pub fn load_active_epoch<D: Domain>(domain: &D) -> Result<Option<EpochState>, ChainError> {
     let epoch = domain
-        .state3()
+        .state()
         .read_entity_typed::<EpochState>(EpochState::NS, &EntityKey::from(EPOCH_KEY_GO))?;
 
     Ok(epoch)
@@ -146,7 +146,7 @@ pub fn use_active_pparams<D: Domain>(domain: &D) -> Result<PParamsSet, ChainErro
 
 pub fn load_previous_epoch<D: Domain>(domain: &D) -> Result<Option<EpochState>, ChainError> {
     let epoch = domain
-        .state3()
+        .state()
         .read_entity_typed::<EpochState>(EpochState::NS, &EntityKey::from(EPOCH_KEY_SET))?;
 
     Ok(epoch)
@@ -154,7 +154,7 @@ pub fn load_previous_epoch<D: Domain>(domain: &D) -> Result<Option<EpochState>, 
 
 pub fn load_live_epoch<D: Domain>(domain: &D) -> Result<EpochState, ChainError> {
     let epoch = domain
-        .state3()
+        .state()
         .read_entity_typed::<EpochState>(EpochState::NS, &EntityKey::from(EPOCH_KEY_MARK))?
         .ok_or(ChainError::from(BrokenInvariant::BadBootstrap))?;
 

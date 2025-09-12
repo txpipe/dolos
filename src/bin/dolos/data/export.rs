@@ -12,10 +12,6 @@ pub struct Args {
     #[arg(short, long)]
     output: PathBuf,
 
-    // Whether to include ledger
-    #[arg(long, action)]
-    include_ledger: bool,
-
     // Whether to include chain
     #[arg(long, action)]
     include_chain: bool,
@@ -35,25 +31,6 @@ fn prepare_wal(
     db.compact().into_diagnostic()?;
 
     pb.set_message("checking wal integrity");
-    db.check_integrity().into_diagnostic()?;
-
-    Ok(())
-}
-
-fn prepare_ledger(
-    ledger: dolos::adapters::StateAdapter,
-    pb: &crate::feedback::ProgressBar,
-) -> miette::Result<()> {
-    let mut ledger = match ledger {
-        dolos::adapters::StateAdapter::Redb(x) => x,
-        _ => miette::bail!("Only redb is supported for export"),
-    };
-
-    let db = ledger.db_mut().unwrap();
-    pb.set_message("compacting ledger");
-    db.compact().into_diagnostic()?;
-
-    pb.set_message("checking ledger integrity");
     db.check_integrity().into_diagnostic()?;
 
     Ok(())
@@ -100,15 +77,6 @@ pub fn run(
     archive
         .append_path_with_name(&path, "wal")
         .into_diagnostic()?;
-
-    if args.include_ledger {
-        prepare_ledger(stores.state, &pb)?;
-        let path = root.join("ledger");
-
-        archive
-            .append_path_with_name(&path, "ledger")
-            .into_diagnostic()?;
-    }
 
     prepare_chain(stores.archive, &pb)?;
 

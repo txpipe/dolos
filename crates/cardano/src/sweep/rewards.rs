@@ -1,8 +1,6 @@
-use dolos_core::{ChainError, Domain, EntityKey, State3Store};
+use dolos_core::{ChainError, Domain, EntityKey, StateStore};
 use itertools::Itertools as _;
 use pallas::ledger::validate::utils::MultiEraProtocolParameters;
-
-pub type PParams = MultiEraProtocolParameters;
 
 use crate::{AccountState, EpochState, FixedNamespace as _, PoolState, RewardLog, EPOCH_KEY_MARK};
 
@@ -14,7 +12,7 @@ fn append_reward_log<D: Domain>(
     let key = EntityKey::from(account);
 
     let account = domain
-        .state3()
+        .state()
         .read_entity_typed::<AccountState>(AccountState::NS, &key)?;
 
     let Some(mut account) = account else {
@@ -23,7 +21,7 @@ fn append_reward_log<D: Domain>(
 
     account.rewards.push(log);
 
-    domain.state3().write_entity_typed(&key, &account)?;
+    domain.state().write_entity_typed(&key, &account)?;
 
     Ok(())
 }
@@ -35,11 +33,11 @@ pub fn distribute<D: Domain>(
     total_active_stake: u64,
 ) -> Result<(), ChainError> {
     let pools = domain
-        .state3()
+        .state()
         .iter_entities_typed::<PoolState>(PoolState::NS, None)?;
 
     let pparams = domain
-        .state3()
+        .state()
         .read_entity_typed::<EpochState>(EpochState::NS, &EntityKey::from(EPOCH_KEY_MARK))?
         .map(|x| x.pparams);
 
@@ -75,7 +73,7 @@ pub fn distribute<D: Domain>(
         let remaining = pool_rewards.saturating_sub(operator_share);
 
         let delegators = domain
-            .state3()
+            .state()
             .iter_entities_typed::<AccountState>(AccountState::NS, None)?
             .filter_ok(|(_, x)| x.pool_id.as_ref().is_some_and(|v| v == pool_key.as_ref()));
 

@@ -1,4 +1,4 @@
-use dolos_core::{ChainError, Domain, State3Store};
+use dolos_core::{ChainError, Domain, StateStore as _};
 
 use crate::{model::EraSummary, EraBoundary, FixedNamespace as _};
 
@@ -141,7 +141,7 @@ impl ChainSummary {
 }
 
 pub fn load_era_summary<D: Domain>(domain: &D) -> Result<ChainSummary, ChainError> {
-    let eras = domain.state3().iter_entities_typed(EraSummary::NS, None)?;
+    let eras = domain.state().iter_entities_typed(EraSummary::NS, None)?;
 
     let mut chain = ChainSummary::default();
 

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use dolos_core::{BrokenInvariant, ChainError, Domain, EntityKey, State3Store as _};
+use dolos_core::{BrokenInvariant, ChainError, Domain, EntityKey, StateStore as _};
 
 use crate::{AccountState, FixedNamespace, PoolState};
 
@@ -8,7 +8,7 @@ pub fn aggregate_stake<D: Domain>(domain: &D) -> Result<(), ChainError> {
     let mut by_pool = HashMap::new();
 
     let accounts = domain
-        .state3()
+        .state()
         .iter_entities_typed::<AccountState>(AccountState::NS, None)?;
 
     for record in accounts {
@@ -24,7 +24,7 @@ pub fn aggregate_stake<D: Domain>(domain: &D) -> Result<(), ChainError> {
 
     for (pool_id, stake) in by_pool {
         let pool = domain
-            .state3()
+            .state()
             .read_entity_typed::<PoolState>(PoolState::NS, &EntityKey::from(pool_id.as_slice()))?;
 
         let Some(mut pool) = pool else {
@@ -34,7 +34,7 @@ pub fn aggregate_stake<D: Domain>(domain: &D) -> Result<(), ChainError> {
         pool.live_stake = stake;
 
         domain
-            .state3()
+            .state()
             .write_entity_typed::<PoolState>(&EntityKey::from(pool_id), &pool)?;
     }
 
@@ -43,7 +43,7 @@ pub fn aggregate_stake<D: Domain>(domain: &D) -> Result<(), ChainError> {
 
 pub fn rotate_delegation<D: Domain>(domain: &D) -> Result<(), ChainError> {
     let all = domain
-        .state3()
+        .state()
         .iter_entities_typed::<PoolState>(PoolState::NS, None)?;
 
     for record in all {
@@ -53,7 +53,7 @@ pub fn rotate_delegation<D: Domain>(domain: &D) -> Result<(), ChainError> {
         state.wait_stake = state.live_stake;
 
         domain
-            .state3()
+            .state()
             .write_entity_typed::<PoolState>(&key, &state)?;
     }
 

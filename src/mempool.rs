@@ -16,8 +16,6 @@ use tracing::debug;
 
 use crate::prelude::*;
 
-use crate::adapters::StateAdapter;
-
 #[derive(Default)]
 struct MempoolState {
     pending: Vec<MempoolTx>,
@@ -61,7 +59,7 @@ impl Mempool {
     }
 
     pub fn validate<D: Domain>(&self, domain: &D, tx: &MultiEraTx) -> Result<(), MempoolError> {
-        let tip = domain.state().cursor()?;
+        let tip = domain.state().read_cursor()?;
 
         let genesis = domain.genesis();
 

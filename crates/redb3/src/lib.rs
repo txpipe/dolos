@@ -1,19 +1,26 @@
 use std::{collections::HashMap, ops::Range, path::Path, sync::Arc};
 
 use dolos_core::{
-    BlockSlot, EntityKey, EntityValue, Namespace, NamespaceType, State3Error as StateError,
-    StateSchema,
+    BlockSlot, ChainPoint, EntityKey, EntityValue, Namespace, NamespaceType, StateError,
+    StateSchema, TxoRef, UtxoMap, UtxoSet,
 };
 
 use redb::{
-    Database, Durability, MultimapTableDefinition, ReadTransaction, TableDefinition,
+    Database, Durability, MultimapTableDefinition, ReadTransaction, TableDefinition, TableStats,
     WriteTransaction,
 };
 
 use tracing::warn;
 
+mod utxoset;
+
+pub use utxoset::*;
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("invalid cursor")]
+    InvalidCursor,
+
     #[error(transparent)]
     DatabaseError(#[from] ::redb::DatabaseError),
 
@@ -31,6 +38,10 @@ pub enum Error {
 
     #[error(transparent)]
     StateError(#[from] StateError),
+
+    // TODO: remove this once we generalize opaque filters
+    #[error(transparent)]
+    AddressError(#[from] pallas::ledger::addresses::Error),
 }
 
 impl From<::redb::TransactionError> for Error {
@@ -233,7 +244,7 @@ impl Iterator for EntityValueIter {
 
 pub const CURRENT_CURSOR_KEY: u16 = 0;
 
-pub const CURSOR_TABLE: TableDefinition<'static, u16, u64> = TableDefinition::new("cursor");
+pub const CURSOR_TABLE: TableDefinition<'static, u16, Vec<u8>> = TableDefinition::new("cursor");
 
 fn build_tables(schema: StateSchema) -> HashMap<Namespace, Table> {
     let tables = schema.iter().map(|(ns, ty)| {
@@ -317,31 +328,54 @@ impl StateStore {
             table.initialize(&mut wx)?;
         }
 
+        // TODO: refactor into entities model
+        utxoset::UtxosTable::initialize(&wx)?;
+        utxoset::FilterIndexes::initialize(&wx)?;
+
         wx.commit()?;
 
         Ok(())
     }
 
-    fn set_cursor(wx: &mut WriteTransaction, slot: BlockSlot) -> Result<(), Error> {
+    fn set_cursor(wx: &mut WriteTransaction, point: ChainPoint) -> Result<(), Error> {
         let mut cursor = wx.open_table(CURSOR_TABLE)?;
-        cursor.insert(CURRENT_CURSOR_KEY, &slot)?;
+        let point = bincode::serialize(&point).unwrap();
+        cursor.insert(CURRENT_CURSOR_KEY, &point)?;
 
         Ok(())
     }
 
-    fn read_cursor(rx: &ReadTransaction) -> Result<Option<BlockSlot>, Error> {
+    fn read_cursor(rx: &ReadTransaction) -> Result<Option<ChainPoint>, Error> {
         let cursor = rx.open_table(CURSOR_TABLE)?;
         let value = cursor.get(CURRENT_CURSOR_KEY)?.map(|x| x.value());
 
-        Ok(value)
+        let Some(value) = value else {
+            return Ok(None);
+        };
+
+        let point = bincode::deserialize(&value).map_err(|_| Error::InvalidCursor)?;
+
+        Ok(Some(point))
+    }
+
+    pub fn copy(&self, target: &Self) -> Result<(), Error> {
+        let rx = self.db().begin_read()?;
+        let wx = target.db().begin_write()?;
+
+        utxoset::UtxosTable::copy(&rx, &wx)?;
+        utxoset::FilterIndexes::copy(&rx, &wx)?;
+
+        wx.commit()?;
+
+        Ok(())
     }
 }
 
-impl dolos_core::State3Store for StateStore {
+impl dolos_core::StateStore for StateStore {
     type EntityIter = EntityIter;
     type EntityValueIter = EntityValueIter;
 
-    fn read_cursor(&self) -> Result<Option<BlockSlot>, StateError> {
+    fn read_cursor(&self) -> Result<Option<ChainPoint>, StateError> {
         let rx = self.db().begin_read().map_err(Error::from)?;
 
         let cursor = Self::read_cursor(&rx)?;
@@ -349,7 +383,7 @@ impl dolos_core::State3Store for StateStore {
         Ok(cursor)
     }
 
-    fn set_cursor(&self, cursor: BlockSlot) -> Result<(), StateError> {
+    fn set_cursor(&self, cursor: ChainPoint) -> Result<(), StateError> {
         let mut wx = self.db().begin_write().map_err(Error::from)?;
 
         Self::set_cursor(&mut wx, cursor)?;
@@ -446,6 +480,61 @@ impl dolos_core::State3Store for StateStore {
         table.delete_entity(&mut wx, key)?;
 
         wx.commit().map_err(Error::from)?;
+
+        Ok(())
+    }
+
+    fn get_utxos(&self, refs: Vec<TxoRef>) -> Result<UtxoMap, StateError> {
+        // exit early before opening a read tx in case there's nothing to fetch
+        if refs.is_empty() {
+            return Ok(Default::default());
+        }
+
+        let rx = self.db().begin_read().map_err(Error::from)?;
+
+        let out = utxoset::UtxosTable::get_sparse(&rx, refs)?;
+
+        Ok(out)
+    }
+
+    fn get_utxo_by_address(&self, address: &[u8]) -> Result<UtxoSet, StateError> {
+        let rx = self.db().begin_read().map_err(Error::from)?;
+
+        let out = utxoset::FilterIndexes::get_by_address(&rx, address)?;
+
+        Ok(out)
+    }
+
+    fn get_utxo_by_payment(&self, payment: &[u8]) -> Result<UtxoSet, StateError> {
+        let rx = self.db().begin_read().map_err(Error::from)?;
+        let out = FilterIndexes::get_by_payment(&rx, payment)?;
+
+        Ok(out)
+    }
+
+    fn get_utxo_by_stake(&self, stake: &[u8]) -> Result<UtxoSet, StateError> {
+        let rx = self.db().begin_read().map_err(Error::from)?;
+        let out = FilterIndexes::get_by_stake(&rx, stake)?;
+
+        Ok(out)
+    }
+
+    fn get_utxo_by_policy(&self, policy: &[u8]) -> Result<UtxoSet, StateError> {
+        let rx = self.db().begin_read().map_err(Error::from)?;
+        let out = FilterIndexes::get_by_policy(&rx, policy)?;
+
+        Ok(out)
+    }
+
+    fn get_utxo_by_asset(&self, asset: &[u8]) -> Result<UtxoSet, StateError> {
+        let rx = self.db().begin_read().map_err(Error::from)?;
+        let out = FilterIndexes::get_by_asset(&rx, asset)?;
+
+        Ok(out)
+    }
+
+    fn apply_utxoset(&self, deltas: &[dolos_core::UtxoSetDelta]) -> Result<(), StateError> {
+        Self::apply_utxoset(&self, deltas)?;
 
         Ok(())
     }
