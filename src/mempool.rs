@@ -16,8 +16,6 @@ use tracing::debug;
 
 use crate::prelude::*;
 
-use crate::adapters::StateAdapter;
-
 #[derive(Default)]
 struct MempoolState {
     pending: Vec<MempoolTx>,
@@ -61,7 +59,7 @@ impl Mempool {
     }
 
     pub fn validate<D: Domain>(&self, domain: &D, tx: &MultiEraTx) -> Result<(), MempoolError> {
-        let tip = domain.state().cursor()?;
+        let tip = domain.state().read_cursor()?;
 
         let genesis = domain.genesis();
 
@@ -75,7 +73,7 @@ impl Mempool {
         }
         .unwrap();
 
-        let params = dolos_cardano::load_current_pparams(domain)?;
+        let params = dolos_cardano::use_active_pparams(domain)?;
 
         let env = pallas::ledger::validate::utils::Environment {
             prot_params: dolos_cardano::utils::pparams_to_pallas(&params),
@@ -125,7 +123,7 @@ impl Mempool {
 
         let eras = dolos_cardano::eras::load_era_summary(domain)?;
 
-        let pparams = dolos_cardano::load_current_pparams(domain)?;
+        let pparams = dolos_cardano::use_active_pparams(domain)?;
         let pparams = dolos_cardano::utils::pparams_to_pallas(&pparams);
 
         let slot_config = pallas::ledger::validate::phase2::script_context::SlotConfig {

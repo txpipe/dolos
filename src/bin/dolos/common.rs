@@ -5,7 +5,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
 use tracing_subscriber::{filter::Targets, prelude::*};
 
-use dolos::adapters::{ArchiveAdapter, ChainConfig, DomainAdapter, StateAdapter, WalAdapter};
+use dolos::adapters::{ArchiveAdapter, ChainConfig, DomainAdapter, WalAdapter};
 use dolos::core::Genesis;
 use dolos::prelude::*;
 
@@ -13,10 +13,8 @@ use crate::{GenesisConfig, LoggingConfig};
 
 pub struct Stores {
     pub wal: WalAdapter,
-    pub state: StateAdapter,
+    pub state: dolos_redb3::StateStore,
     pub archive: ArchiveAdapter,
-
-    pub state3: dolos_redb3::StateStore,
 }
 
 pub fn ensure_storage_path(config: &crate::Config) -> Result<PathBuf, Error> {
@@ -47,23 +45,13 @@ pub fn open_chain_store(config: &crate::Config) -> Result<ArchiveAdapter, Error>
     Ok(chain.into())
 }
 
-pub fn open_ledger_store(config: &crate::Config) -> Result<StateAdapter, Error> {
-    let root = ensure_storage_path(config)?;
-
-    let ledger =
-        dolos_redb::state::LedgerStore::open(root.join("ledger"), config.storage.ledger_cache)
-            .map_err(StateError::from)?;
-
-    Ok(ledger.into())
-}
-
-pub fn open_state3_store(config: &crate::Config) -> Result<dolos_redb3::StateStore, Error> {
+pub fn open_state_store(config: &crate::Config) -> Result<dolos_redb3::StateStore, Error> {
     let root = ensure_storage_path(config)?;
     let schema = dolos_cardano::model::build_schema();
 
     let state3 =
         dolos_redb3::StateStore::open(schema, root.join("state"), config.storage.ledger_cache)
-            .map_err(State3Error::from)?;
+            .map_err(StateError::from)?;
 
     Ok(state3)
 }
@@ -76,35 +64,29 @@ pub fn open_persistent_data_stores(config: &crate::Config) -> Result<Stores, Err
 
     let wal = open_wal_store(config)?;
 
-    let ledger = open_ledger_store(config)?;
-
-    let state3 = open_state3_store(config)?;
+    let state = open_state_store(config)?;
 
     let chain = open_chain_store(config)?;
 
     Ok(Stores {
         wal,
-        state: ledger,
+        state,
         archive: chain,
-        state3,
     })
 }
 
 pub fn create_ephemeral_data_stores() -> Result<Stores, Error> {
     let wal = dolos_redb::wal::RedbWalStore::memory()?;
 
-    let ledger = dolos_redb::state::LedgerStore::in_memory_v2()?;
-
-    let state3 = dolos_redb3::StateStore::in_memory(dolos_cardano::model::build_schema())
-        .map_err(State3Error::from)?;
+    let state = dolos_redb3::StateStore::in_memory(dolos_cardano::model::build_schema())
+        .map_err(StateError::from)?;
 
     let chain = dolos_redb::archive::ChainStore::in_memory_v1()?;
 
     Ok(Stores {
         wal: wal.into(),
-        state: ledger.into(),
         archive: chain.into(),
-        state3,
+        state,
     })
 }
 
@@ -135,7 +117,6 @@ pub fn setup_domain(config: &crate::Config) -> miette::Result<DomainAdapter> {
         wal: stores.wal,
         state: stores.state,
         archive: stores.archive,
-        state3: stores.state3,
         mempool,
         tip_broadcast,
     };

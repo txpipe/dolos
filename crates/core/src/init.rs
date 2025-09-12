@@ -1,8 +1,6 @@
 use tracing::warn;
 
-use crate::{
-    ArchiveStore, ChainLogic, ChainPoint, Domain, DomainError, State3Store, StateStore, WalStore,
-};
+use crate::{ArchiveStore, ChainLogic, ChainPoint, Domain, DomainError, StateStore, WalStore};
 
 pub fn catch_up<D: Domain>(domain: &D) -> Result<(), DomainError> {
     let wal = domain
@@ -11,13 +9,7 @@ pub fn catch_up<D: Domain>(domain: &D) -> Result<(), DomainError> {
         .map(|(point, _)| point)
         .ok_or(DomainError::WalIsEmpty)?;
 
-    let state = domain
-        .state3()
-        .read_cursor()?
-        .map(|slot| ChainPoint::Slot(slot))
-        .unwrap_or(ChainPoint::Origin);
-
-    let utxoset = domain.state().cursor()?.unwrap_or(ChainPoint::Origin);
+    let state = domain.state().read_cursor()?.unwrap_or(ChainPoint::Origin);
 
     let archive = domain
         .archive()
@@ -31,10 +23,6 @@ pub fn catch_up<D: Domain>(domain: &D) -> Result<(), DomainError> {
 
     if wal > state {
         warn!(%state, %wal, "catch up needed, wal is ahead of state");
-    }
-
-    if wal > utxoset {
-        warn!(%utxoset, %wal, "catch up needed, wal is ahead of utxoset");
     }
 
     Ok(())
@@ -53,11 +41,7 @@ fn ensure_wal<D: Domain>(domain: &D, at: &ChainPoint) -> Result<ChainPoint, Doma
 }
 
 fn check_integrity<D: Domain>(domain: &D) -> Result<(), DomainError> {
-    let state = domain
-        .state3()
-        .read_cursor()?
-        .map(|slot| ChainPoint::Slot(slot))
-        .unwrap_or(ChainPoint::Origin);
+    let state = domain.state().read_cursor()?.unwrap_or(ChainPoint::Origin);
 
     let wal = ensure_wal(domain, &state)?;
 
@@ -69,16 +53,9 @@ fn check_integrity<D: Domain>(domain: &D) -> Result<(), DomainError> {
 }
 
 fn is_empty<D: Domain>(domain: &D) -> Result<bool, DomainError> {
-    let utxoset = domain.state().is_empty()?;
-    let state = domain.state3().read_cursor()?.is_none();
+    let out = domain.state().read_cursor()?.is_none();
 
-    if utxoset != state {
-        return Err(DomainError::InconsistentState(
-            "utxoset and state are inconsistent".to_string(),
-        ));
-    }
-
-    Ok(utxoset && state)
+    Ok(out)
 }
 
 pub fn ensure_bootstrap<D: Domain>(domain: &D) -> Result<(), DomainError> {

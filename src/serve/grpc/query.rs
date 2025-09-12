@@ -232,9 +232,9 @@ where
 
         info!("received new grpc query");
 
-        let tip = self.domain.state().cursor().map_err(into_status)?;
+        let tip = self.domain.state().read_cursor().map_err(into_status)?;
 
-        let pparams = dolos_cardano::load_current_pparams(&self.domain)
+        let pparams = dolos_cardano::use_active_pparams(&self.domain)
             .map_err(|_| Status::internal("Failed to load current pparams"))?;
 
         let pparams = dolos_cardano::utils::pparams_to_pallas(&pparams);
@@ -294,7 +294,7 @@ where
         let cursor = self
             .domain
             .state()
-            .cursor()
+            .read_cursor()
             .map_err(|e| Status::internal(e.to_string()))?
             .as_ref()
             .map(|p| point_to_u5c(&self.domain, p));
@@ -341,7 +341,7 @@ where
         let cursor = self
             .domain
             .state()
-            .cursor()
+            .read_cursor()
             .map_err(|e| Status::internal(e.to_string()))?
             .as_ref()
             .map(|p| point_to_u5c(&self.domain, p));
@@ -382,7 +382,7 @@ where
         let cursor = self
             .domain
             .state()
-            .cursor()
+            .read_cursor()
             .map_err(|e| Status::internal(e.to_string()))?
             .as_ref()
             .map(|p| point_to_u5c(&self.domain, p));

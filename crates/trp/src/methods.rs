@@ -149,7 +149,7 @@ pub async fn trp_submit<D: Domain>(
 }
 
 pub fn health<D: Domain>(context: &Context<D>) -> bool {
-    context.domain.state().cursor().is_ok()
+    context.domain.state().read_cursor().is_ok()
 }
 
 #[cfg(test)]

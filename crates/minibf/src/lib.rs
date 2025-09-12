@@ -22,7 +22,7 @@ use tracing::Level;
 
 use dolos_core::{
     ArchiveStore as _, BlockSlot, CancelToken, Domain, Entity, EntityKey, EraCbor, ServeError,
-    State3Error, State3Store as _, TxOrder,
+    StateError, StateStore as _, TxOrder,
 };
 
 mod error;
@@ -60,12 +60,12 @@ pub type BlockWithTxMap = HashMap<Hash<32>, BlockWithTx>;
 impl<D: Domain> Facade<D> {
     pub fn get_tip_slot(&self) -> Result<BlockSlot, StatusCode> {
         let tip = self
-            .state3()
+            .state()
             .read_cursor()
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
             .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
 
-        Ok(tip)
+        Ok(tip.slot())
     }
 
     pub fn get_network_id(&self) -> Result<Network, StatusCode> {
@@ -83,8 +83,8 @@ impl<D: Domain> Facade<D> {
         Ok(summary)
     }
 
-    pub fn get_current_pparams(&self) -> Result<PParamsSet, StatusCode> {
-        let pparams = dolos_cardano::load_current_pparams(&self.inner)
+    pub fn get_live_pparams(&self) -> Result<PParamsSet, StatusCode> {
+        let pparams = dolos_cardano::load_live_pparams(&self.inner)
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
         Ok(pparams)
@@ -132,13 +132,13 @@ impl<D: Domain> Facade<D> {
     pub fn iter_cardano_entities<T>(
         &self,
         range: Option<Range<EntityKey>>,
-    ) -> Result<impl Iterator<Item = Result<(EntityKey, T), State3Error>>, StatusCode>
+    ) -> Result<impl Iterator<Item = Result<(EntityKey, T), StateError>>, StatusCode>
     where
         T: FixedNamespace + Entity,
         Option<T>: From<D::Entity>,
     {
         let generic = self
-            .state3()
+            .state()
             .iter_entities_typed(T::NS, range)
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -155,7 +155,7 @@ impl<D: Domain> Facade<D> {
         let key = key.into();
 
         let entity = self
-            .state3()
+            .state()
             .read_entity_typed(T::NS, &key)
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 

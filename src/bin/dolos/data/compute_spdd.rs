@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use comfy_table::Table;
 use dolos_cardano::model::AccountState;
-use dolos_core::State3Store;
+use dolos_core::StateStore;
 use miette::IntoDiagnostic as _;
 
 #[derive(Debug, clap::Args)]
@@ -40,7 +40,7 @@ impl Formatter {
     }
 }
 
-pub fn compute_spdd(store: &impl State3Store) -> miette::Result<HashMap<[u8; 28], u128>> {
+pub fn compute_spdd(store: &impl StateStore) -> miette::Result<HashMap<[u8; 28], u128>> {
     let mut by_pool = HashMap::<[u8; 28], u128>::new();
 
     let all_accounts = store
@@ -53,7 +53,7 @@ pub fn compute_spdd(store: &impl State3Store) -> miette::Result<HashMap<[u8; 28]
         if let Some(pool_id) = value.pool_id {
             let key = pool_id.try_into().unwrap();
             let entry = by_pool.entry(key).or_insert(0);
-            *entry += value.controlled_amount as u128;
+            *entry += value.live_stake as u128;
         }
     }
 
@@ -63,7 +63,7 @@ pub fn compute_spdd(store: &impl State3Store) -> miette::Result<HashMap<[u8; 28]
 pub fn run(config: &crate::Config, _args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging)?;
 
-    let state = crate::common::open_state3_store(config)?;
+    let state = crate::common::open_state_store(config)?;
 
     let spdd = compute_spdd(&state)?;
 

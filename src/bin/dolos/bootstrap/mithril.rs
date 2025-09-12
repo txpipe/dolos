@@ -163,9 +163,8 @@ fn process_chunk(
     batch: dolos_core::RawBlockBatch,
     progress: &indicatif::ProgressBar,
 ) -> Result<(), miette::Error> {
-    let Ok(last) = dolos_core::catchup::import_batch(domain, batch) else {
-        return Err(miette::miette!("failed to import batch"));
-    };
+    let last = dolos_core::catchup::import_batch(domain, batch)
+        .map_err(|e| miette::miette!(e.to_string()))?;
 
     progress.set_position(last);
 
@@ -187,7 +186,7 @@ fn import_hardano_into_domain(
 
     let cursor = domain
         .state()
-        .cursor()
+        .read_cursor()
         .into_diagnostic()
         .context("reading state cursor")?
         .map(|c| c.try_into().unwrap())

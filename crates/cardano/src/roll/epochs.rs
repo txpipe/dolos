@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use dolos_core::{batch::WorkDeltas, ChainError, NsKey, State3Error};
+use dolos_core::{batch::WorkDeltas, ChainError, NsKey};
 use pallas::ledger::traverse::{MultiEraBlock, MultiEraTx, MultiEraUpdate};
 use serde::{Deserialize, Serialize};
 

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use dolos_core::{
     batch::{WorkBlock, WorkDeltas},
-    ChainError, InvariantViolation, State3Error, TxoRef,
+    ChainError, InvariantViolation, StateError, TxoRef,
 };
 use pallas::ledger::traverse::{
     MultiEraBlock, MultiEraCert, MultiEraInput, MultiEraOutput, MultiEraPolicyAssets, MultiEraTx,
@@ -155,7 +155,7 @@ impl<'a> DeltaBuilder<'a> {
                 let txoref = TxoRef::from(&input);
 
                 let resolved = inputs.get(&txoref).ok_or_else(|| {
-                    State3Error::InvariantViolation(InvariantViolation::InputNotFound(txoref))
+                    StateError::InvariantViolation(InvariantViolation::InputNotFound(txoref))
                 })?;
 
                 resolved.with_dependent(|_, resolved| {
