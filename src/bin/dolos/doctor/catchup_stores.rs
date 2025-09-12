@@ -38,7 +38,7 @@ pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::
     for chunk in remaining.chunks(args.chunk).into_iter() {
         let collected = chunk.into_iter().map(|(_, x)| x).collect_vec();
 
-        let Ok(cursor) = dolos_core::catchup::import_batch(&domain, collected) else {
+        let Ok((cursor, _)) = dolos_core::catchup::import_batch(&domain, collected, None) else {
             miette::bail!("failed to apply block chunk");
         };
 

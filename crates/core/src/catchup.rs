@@ -50,7 +50,10 @@ where
     }
 }
 
-pub fn import_batch<D, C>(domain: &D, batch: Vec<RawBlock>) -> Result<BlockSlot, DomainError>
+pub fn import_batch<D, C>(
+    domain: &D,
+    batch: Vec<RawBlock>,
+) -> Result<(BlockSlot, bool), DomainError>
 where
     C: ChainLogic,
     D: Domain<Chain = C, Entity = C::Entity>,
@@ -61,5 +64,5 @@ where
 
     let last = import_decoded_batch(domain, batch)?;
 
-    Ok(last)
+    Ok((last, false))
 }

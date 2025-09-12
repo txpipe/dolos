@@ -272,6 +272,17 @@ pub trait StateStore: Sized + Send + Sync + Clone {
         value: &EntityValue,
     ) -> Result<(), StateError>;
 
+    fn write_entity_batch(
+        &self,
+        ns: Namespace,
+        batch: HashMap<EntityKey, EntityValue>,
+    ) -> Result<(), StateError> {
+        for (k, v) in batch.iter() {
+            self.write_entity(ns, k, v)?;
+        }
+        Ok(())
+    }
+
     fn delete_entity(&self, ns: Namespace, key: &EntityKey) -> Result<(), StateError>;
 
     fn save_entity(
@@ -328,7 +339,7 @@ pub trait StateStore: Sized + Send + Sync + Clone {
     }
 
     fn write_entity_typed<E: Entity>(&self, key: &EntityKey, entity: &E) -> Result<(), StateError> {
-        let (ns, raw) = E::encode_entity(&entity);
+        let (ns, raw) = E::encode_entity(entity);
 
         self.write_entity(ns, key, &raw)
     }
