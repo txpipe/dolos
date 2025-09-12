@@ -5,8 +5,8 @@ use rayon::prelude::*;
 
 use crate::{
     ArchiveStore, Block as _, BlockSlot, ChainLogic, ChainPoint, Domain, DomainError, EntityDelta,
-    EntityMap, LogValue, NsKey, RawBlock, RawUtxoMap, SlotTags, State3Error, State3Store as _,
-    StateError, StateStore as _, TxoRef, WalStore as _,
+    EntityMap, LogValue, NsKey, RawBlock, RawUtxoMap, SlotTags, StateError, StateStore as _,
+    TxoRef, WalStore as _,
 };
 
 pub struct WorkDeltas<C: ChainLogic> {
@@ -142,6 +142,12 @@ impl<C: ChainLogic> WorkBatch<C> {
         self.blocks.last().unwrap().unwrap_slot()
     }
 
+    pub fn last_point(&self) -> ChainPoint {
+        debug_assert!(self.is_sorted);
+
+        self.blocks.last().unwrap().unwrap_point()
+    }
+
     fn range(&self) -> RangeInclusive<BlockSlot> {
         debug_assert!(!self.blocks.is_empty());
 
@@ -265,7 +271,7 @@ impl<C: ChainLogic> WorkBatch<C> {
             })
             .collect::<Result<_, _>>()?;
 
-        domain.state().apply(&deltas)?;
+        domain.state().apply_utxoset(&deltas)?;
 
         Ok(())
     }
@@ -307,7 +313,7 @@ impl<C: ChainLogic> WorkBatch<C> {
     /// Chunks are defined by sorting the entity keys grouping by namespace. The
     /// assumption is that the storage backend will benefit from loading keys
     /// that are close to each other (eg: disk block reads)
-    pub fn load_entities<D>(&mut self, domain: &D) -> Result<(), State3Error>
+    pub fn load_entities<D>(&mut self, domain: &D) -> Result<(), StateError>
     where
         D: Domain<Chain = C, Entity = C::Entity>,
     {
@@ -319,7 +325,7 @@ impl<C: ChainLogic> WorkBatch<C> {
 
         let result = keys
             .par_chunks(Self::LOAD_CHUNK_SIZE)
-            .map(|chunk| crate::state::load_entity_chunk::<D>(chunk, domain.state3()))
+            .map(|chunk| crate::state::load_entity_chunk::<D>(chunk, domain.state()))
             .try_reduce(
                 || EntityMap::new(),
                 |mut acc, x| {
@@ -359,11 +365,11 @@ impl<C: ChainLogic> WorkBatch<C> {
             let NsKey(ns, key) = key;
 
             domain
-                .state3()
+                .state()
                 .save_entity_typed(ns, &key, entity.as_ref())?;
         }
 
-        domain.state3().set_cursor(self.last_slot())?;
+        domain.state().set_cursor(self.last_point())?;
 
         // TODO: semantics for committing a read transaction
 

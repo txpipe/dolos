@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use dolos_cardano::CardanoLogic;
 use dolos_core::*;
-use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -14,143 +13,6 @@ pub enum ChainConfig {
 impl Default for ChainConfig {
     fn default() -> Self {
         Self::Cardano(dolos_cardano::Config::default())
-    }
-}
-
-/// A persistent store for ledger state
-#[derive(Clone)]
-#[non_exhaustive]
-pub enum StateAdapter {
-    Redb(dolos_redb::state::LedgerStore),
-}
-
-impl StateStore for StateAdapter {
-    fn start(&self) -> Result<Option<ChainPoint>, StateError> {
-        let out = match self {
-            StateAdapter::Redb(x) => x.start()?,
-        };
-
-        Ok(out)
-    }
-
-    fn cursor(&self) -> Result<Option<ChainPoint>, StateError> {
-        let out = match self {
-            StateAdapter::Redb(x) => x.cursor()?,
-        };
-
-        Ok(out)
-    }
-
-    fn is_empty(&self) -> Result<bool, StateError> {
-        let out = match self {
-            StateAdapter::Redb(x) => x.is_empty()?,
-        };
-
-        Ok(out)
-    }
-
-    fn get_pparams(&self, until: BlockSlot) -> Result<Vec<EraCbor>, StateError> {
-        let out = match self {
-            StateAdapter::Redb(x) => x.get_pparams(until)?,
-        };
-
-        Ok(out)
-    }
-
-    fn get_utxos(&self, refs: Vec<TxoRef>) -> Result<UtxoMap, StateError> {
-        let out = match self {
-            StateAdapter::Redb(x) => x.get_utxos(refs)?,
-        };
-
-        Ok(out)
-    }
-
-    fn get_utxo_by_address(&self, address: &[u8]) -> Result<UtxoSet, StateError> {
-        let out = match self {
-            StateAdapter::Redb(x) => x.get_utxo_by_address(address)?,
-        };
-
-        Ok(out)
-    }
-
-    fn get_utxo_by_payment(&self, payment: &[u8]) -> Result<UtxoSet, StateError> {
-        let out = match self {
-            StateAdapter::Redb(x) => x.get_utxo_by_payment(payment)?,
-        };
-
-        Ok(out)
-    }
-
-    fn get_utxo_by_stake(&self, stake: &[u8]) -> Result<UtxoSet, StateError> {
-        let out = match self {
-            StateAdapter::Redb(x) => x.get_utxo_by_stake(stake)?,
-        };
-
-        Ok(out)
-    }
-
-    fn get_utxo_by_policy(&self, policy: &[u8]) -> Result<UtxoSet, StateError> {
-        let out = match self {
-            StateAdapter::Redb(x) => x.get_utxo_by_policy(policy)?,
-        };
-
-        Ok(out)
-    }
-
-    fn get_utxo_by_asset(&self, asset: &[u8]) -> Result<UtxoSet, StateError> {
-        let out = match self {
-            StateAdapter::Redb(x) => x.get_utxo_by_asset(asset)?,
-        };
-
-        Ok(out)
-    }
-
-    fn apply(&self, deltas: &[UtxoSetDelta]) -> Result<(), StateError> {
-        match self {
-            StateAdapter::Redb(x) => x.apply(deltas)?,
-        };
-
-        Ok(())
-    }
-
-    fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, StateError> {
-        let done = match self {
-            StateAdapter::Redb(x) => x.prune_history(max_slots, max_prune)?,
-        };
-
-        Ok(done)
-    }
-
-    fn upgrade(self) -> Result<Self, StateError> {
-        let out = match self {
-            StateAdapter::Redb(x) => StateAdapter::Redb(x.upgrade()?),
-        };
-
-        Ok(out)
-    }
-
-    fn copy(&self, target: &Self) -> Result<(), StateError> {
-        match (self, target) {
-            (Self::Redb(x), Self::Redb(target)) => x.copy(target)?,
-        }
-
-        Ok(())
-    }
-}
-
-impl From<dolos_redb::state::LedgerStore> for StateAdapter {
-    fn from(value: dolos_redb::state::LedgerStore) -> Self {
-        Self::Redb(value)
-    }
-}
-
-impl TryFrom<StateAdapter> for dolos_redb::state::LedgerStore {
-    type Error = StateError;
-
-    fn try_from(value: StateAdapter) -> Result<Self, Self::Error> {
-        match value {
-            StateAdapter::Redb(x) => Ok(x),
-        }
     }
 }
 
@@ -389,10 +251,9 @@ pub struct DomainAdapter {
     pub genesis: Arc<Genesis>,
     pub wal: WalAdapter,
     pub chain: CardanoLogic,
-    pub state: StateAdapter,
+    pub state: dolos_redb3::StateStore,
     pub archive: ArchiveAdapter,
     pub mempool: crate::mempool::Mempool,
-    pub state3: dolos_redb3::StateStore,
     pub tip_broadcast: tokio::sync::broadcast::Sender<TipEvent>,
 }
 
@@ -401,11 +262,10 @@ impl Domain for DomainAdapter {
     type EntityDelta = dolos_cardano::CardanoDelta;
     type Chain = CardanoLogic;
     type Wal = WalAdapter;
-    type State = StateAdapter;
+    type State = dolos_redb3::StateStore;
     type Archive = ArchiveAdapter;
     type Mempool = crate::mempool::Mempool;
     type TipSubscription = TipSubscription;
-    type State3 = dolos_redb3::StateStore;
 
     fn genesis(&self) -> &Genesis {
         &self.genesis
@@ -421,10 +281,6 @@ impl Domain for DomainAdapter {
 
     fn state(&self) -> &Self::State {
         &self.state
-    }
-
-    fn state3(&self) -> &Self::State3 {
-        &self.state3
     }
 
     fn archive(&self) -> &Self::Archive {

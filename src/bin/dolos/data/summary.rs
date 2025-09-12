@@ -1,4 +1,4 @@
-use dolos::cli::{ArchiveSummary, DataSummary, StateSummary, UtxoSetSummary, WalSummary};
+use dolos::cli::{ArchiveSummary, DataSummary, StateSummary, WalSummary};
 use dolos::prelude::*;
 
 #[derive(Debug, clap::Args)]
@@ -20,19 +20,13 @@ pub fn run(config: &crate::Config, _args: &Args) -> miette::Result<()> {
     };
 
     let state_summary = StateSummary {
-        tip_slot: stores.state3.read_cursor().unwrap(),
-    };
-
-    let utxoset_summary = UtxoSetSummary {
-        start_slot: stores.state.start().unwrap().map(|x| x.slot()),
-        tip_slot: stores.state.cursor().unwrap().map(|x| x.slot()),
+        tip_slot: stores.state.read_cursor().unwrap().map(|x| x.slot()),
     };
 
     let summary = DataSummary {
         wal: wal_summary,
         archive: archive_summary,
         state: state_summary,
-        utxoset: utxoset_summary,
     };
 
     println!("{}", serde_json::to_string_pretty(&summary).unwrap());

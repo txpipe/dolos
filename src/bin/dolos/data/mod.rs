@@ -1,7 +1,6 @@
 use clap::{Parser, Subcommand};
 
 mod compute_spdd;
-mod copy_ledger;
 mod copy_wal;
 mod dump_state;
 mod dump_wal;
@@ -29,8 +28,6 @@ pub enum Command {
     Export(export::Args),
     /// copies a range of slots from the WAL into a new db
     CopyWal(copy_wal::Args),
-    /// copies a range of slots from the WAL into a new db
-    CopyLedger(copy_ledger::Args),
     /// removes blocks from the WAL before a given slot
     PruneWal(prune_wal::Args),
     /// removes blocks from the chain before a given slot
@@ -60,7 +57,6 @@ pub fn run(
         Command::FindSeq(x) => find_seq::run(config, x)?,
         Command::Export(x) => export::run(config, x, feedback)?,
         Command::CopyWal(x) => copy_wal::run(config, x)?,
-        Command::CopyLedger(x) => copy_ledger::run(config, x, feedback)?,
         Command::PruneWal(x) => prune_wal::run(config, x)?,
         Command::PruneChain(x) => prune_chain::run(config, x)?,
         Command::Stats(x) => stats::run(config, x)?,

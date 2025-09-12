@@ -1,6 +1,4 @@
-use dolos_core::{
-    BrokenInvariant, ChainError, Domain, EntityKey, Genesis, State3Store, StateStore as _,
-};
+use dolos_core::{BrokenInvariant, ChainError, Domain, EntityKey, Genesis, StateStore as _};
 use tracing::debug;
 
 use crate::{EpochState, EraBoundary, EraSummary, PParamsSet, EPOCH_KEY_MARK};
@@ -54,7 +52,7 @@ fn bootrap_epoch<D: Domain>(domain: &D) -> Result<EpochState, ChainError> {
     };
 
     domain
-        .state3()
+        .state()
         .write_entity_typed(&EntityKey::from(EPOCH_KEY_MARK), &epoch)?;
 
     Ok(epoch)
@@ -80,7 +78,7 @@ fn bootstrap_eras<D: Domain>(domain: &D, epoch: &EpochState) -> Result<(), Chain
     let key = protocol_major.to_be_bytes();
 
     domain
-        .state3()
+        .state()
         .write_entity_typed(&EntityKey::from(&key), &era)?;
 
     Ok(())
@@ -89,7 +87,7 @@ fn bootstrap_eras<D: Domain>(domain: &D, epoch: &EpochState) -> Result<(), Chain
 pub fn bootstrap_utxos<D: Domain>(domain: &D) -> Result<(), ChainError> {
     let delta = crate::utxoset::compute_origin_delta(domain.genesis());
 
-    domain.state().apply(&[delta])?;
+    domain.state().apply_utxoset(&[delta])?;
 
     Ok(())
 }

@@ -3,7 +3,7 @@ use std::{borrow::Cow, collections::HashMap, marker::PhantomData, ops::Range};
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 
-use crate::{BlockSlot, Domain, TxoRef};
+use crate::{ChainPoint, Domain, TxoRef, UtxoMap, UtxoSet, UtxoSetDelta};
 
 const KEY_SIZE: usize = 32;
 
@@ -184,16 +184,13 @@ pub enum StateError {
     InvariantViolation(#[from] InvariantViolation),
 }
 
-// temporary alias to avoid collision with existing StateError
-pub type State3Error = StateError;
-
-pub struct EntityIterTyped<S: State3Store, E: Entity> {
+pub struct EntityIterTyped<S: StateStore, E: Entity> {
     inner: S::EntityIter,
     ns: Namespace,
     _marker: PhantomData<E>,
 }
 
-impl<S: State3Store, E: Entity> EntityIterTyped<S, E> {
+impl<S: StateStore, E: Entity> EntityIterTyped<S, E> {
     pub fn new(inner: S::EntityIter, ns: Namespace) -> Self {
         Self {
             inner,
@@ -203,7 +200,7 @@ impl<S: State3Store, E: Entity> EntityIterTyped<S, E> {
     }
 }
 
-impl<S: State3Store, E: Entity> Iterator for EntityIterTyped<S, E> {
+impl<S: StateStore, E: Entity> Iterator for EntityIterTyped<S, E> {
     type Item = Result<(EntityKey, E), StateError>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -254,13 +251,13 @@ fn full_range() -> Range<EntityKey> {
     }
 }
 
-pub trait State3Store: Sized + Send + Sync {
+pub trait StateStore: Sized + Send + Sync + Clone {
     type EntityIter: Iterator<Item = Result<(EntityKey, EntityValue), StateError>>;
     type EntityValueIter: Iterator<Item = Result<EntityValue, StateError>>;
 
-    fn read_cursor(&self) -> Result<Option<BlockSlot>, StateError>;
+    fn read_cursor(&self) -> Result<Option<ChainPoint>, StateError>;
 
-    fn set_cursor(&self, cursor: BlockSlot) -> Result<(), StateError>;
+    fn set_cursor(&self, cursor: ChainPoint) -> Result<(), StateError>;
 
     fn read_entities(
         &self,
@@ -369,6 +366,22 @@ pub trait State3Store: Sized + Send + Sync {
     //     let inner = self.iter_entity_values(ns, key)?;
     //     Ok(EntityValueIterTyped::<E>::new(inner, ns))
     // }
+
+    // TODO: generalize UTxO Set into generic entity system
+
+    fn get_utxos(&self, refs: Vec<TxoRef>) -> Result<UtxoMap, StateError>;
+
+    fn get_utxo_by_address(&self, address: &[u8]) -> Result<UtxoSet, StateError>;
+
+    fn get_utxo_by_payment(&self, payment: &[u8]) -> Result<UtxoSet, StateError>;
+
+    fn get_utxo_by_stake(&self, stake: &[u8]) -> Result<UtxoSet, StateError>;
+
+    fn get_utxo_by_policy(&self, policy: &[u8]) -> Result<UtxoSet, StateError>;
+
+    fn get_utxo_by_asset(&self, asset: &[u8]) -> Result<UtxoSet, StateError>;
+
+    fn apply_utxoset(&self, deltas: &[UtxoSetDelta]) -> Result<(), StateError>;
 }
 
 #[cfg(test)]
@@ -437,7 +450,7 @@ mod tests {
 
     #[derive(Debug, Clone)]
     struct MockStoreDb {
-        cursor: Option<BlockSlot>,
+        cursor: Option<ChainPoint>,
         entities: HashMap<NsKey, EntityValue>,
     }
 
@@ -446,18 +459,19 @@ mod tests {
         db: Arc<RwLock<MockStoreDb>>,
     }
 
-    impl State3Store for MockStore {
+    impl StateStore for MockStore {
         // type Entity = TestEntity;
         // type EntityDelta = ChangeValue;
         type EntityIter = std::vec::IntoIter<Result<(EntityKey, EntityValue), StateError>>;
         type EntityValueIter = std::iter::Empty<Result<EntityValue, StateError>>;
 
-        fn read_cursor(&self) -> Result<Option<BlockSlot>, StateError> {
+        fn read_cursor(&self) -> Result<Option<ChainPoint>, StateError> {
             let db = self.db.read().unwrap();
-            Ok(db.cursor)
+            let cursor = db.cursor.clone();
+            Ok(cursor)
         }
 
-        fn set_cursor(&self, new_cursor: BlockSlot) -> Result<(), StateError> {
+        fn set_cursor(&self, new_cursor: ChainPoint) -> Result<(), StateError> {
             let mut db = self.db.write().unwrap();
             db.cursor = Some(new_cursor);
             Ok(())
@@ -527,6 +541,34 @@ mod tests {
         ) -> Result<Self::EntityValueIter, StateError> {
             todo!()
         }
+
+        fn get_utxos(&self, refs: Vec<TxoRef>) -> Result<UtxoMap, StateError> {
+            todo!()
+        }
+
+        fn get_utxo_by_address(&self, address: &[u8]) -> Result<UtxoSet, StateError> {
+            todo!()
+        }
+
+        fn get_utxo_by_payment(&self, payment: &[u8]) -> Result<UtxoSet, StateError> {
+            todo!()
+        }
+
+        fn get_utxo_by_stake(&self, stake: &[u8]) -> Result<UtxoSet, StateError> {
+            todo!()
+        }
+
+        fn get_utxo_by_policy(&self, policy: &[u8]) -> Result<UtxoSet, StateError> {
+            todo!()
+        }
+
+        fn get_utxo_by_asset(&self, asset: &[u8]) -> Result<UtxoSet, StateError> {
+            todo!()
+        }
+
+        fn apply_utxoset(&self, deltas: &[UtxoSetDelta]) -> Result<(), StateError> {
+            todo!()
+        }
     }
 
     #[derive(Clone)]
@@ -535,7 +577,7 @@ mod tests {
     fn setup_mock_store() -> MockStore {
         let store = MockStore {
             db: Arc::new(RwLock::new(MockStoreDb {
-                cursor: Some(0),
+                cursor: Some(ChainPoint::Slot(0)),
                 entities: HashMap::new(),
             })),
         };
@@ -552,8 +594,8 @@ mod tests {
 
 pub fn load_entity_chunk<D: Domain>(
     chunk: &[NsKey],
-    store: &D::State3,
-) -> Result<EntityMap<D::Entity>, State3Error> {
+    store: &D::State,
+) -> Result<EntityMap<D::Entity>, StateError> {
     let by_ns = chunk.into_iter().chunk_by(|key| key.0);
 
     let mut loaded: EntityMap<D::Entity> = HashMap::new();

@@ -182,7 +182,7 @@ impl<T: TableRow> Formatter<T> {
 }
 
 fn dump_state<T: TableRow>(
-    state: &impl State3Store,
+    state: &impl StateStore,
     ns: Namespace,
     count: usize,
 ) -> miette::Result<()> {
@@ -206,7 +206,7 @@ fn dump_state<T: TableRow>(
 pub fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging)?;
 
-    let state = crate::common::open_state3_store(config)?;
+    let state = crate::common::open_state_store(config)?;
 
     match args.namespace.as_str() {
         "eras" => dump_state::<EraSummary>(&state, "eras", args.count)?,

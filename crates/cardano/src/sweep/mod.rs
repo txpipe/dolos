@@ -1,4 +1,4 @@
-use dolos_core::{BlockSlot, BrokenInvariant, ChainError, Domain, EntityKey, State3Store as _};
+use dolos_core::{BlockSlot, BrokenInvariant, ChainError, Domain, EntityKey, StateStore as _};
 use pallas::ledger::primitives::ProtocolVersion;
 
 use crate::{
@@ -19,7 +19,7 @@ fn apply_era_transition<D: Domain>(
 ) -> Result<(), ChainError> {
     let previous_version = new_version - 1;
 
-    let previous = domain.state3().read_entity_typed::<EraSummary>(
+    let previous = domain.state().read_entity_typed::<EraSummary>(
         EraSummary::NS,
         &EntityKey::from(&previous_version.to_be_bytes()),
     )?;
@@ -30,7 +30,7 @@ fn apply_era_transition<D: Domain>(
 
     previous.define_end(new_version as u64);
 
-    domain.state3().write_entity_typed::<EraSummary>(
+    domain.state().write_entity_typed::<EraSummary>(
         &EntityKey::from(&previous_version.to_be_bytes()),
         &previous,
     )?;
@@ -43,7 +43,7 @@ fn apply_era_transition<D: Domain>(
     };
 
     domain
-        .state3()
+        .state()
         .write_entity_typed(&EntityKey::from(&new_version.to_be_bytes()), &new)?;
 
     Ok(())
@@ -81,7 +81,7 @@ fn drop_go_epoch<D: Domain>(
         .ok_or(ChainError::from(BrokenInvariant::InvalidEpochState))?;
 
     domain
-        .state3()
+        .state()
         .delete_entity(EpochState::NS, &EntityKey::from(EPOCH_KEY_GO))?;
 
     Ok(Some(protocol))
@@ -97,7 +97,7 @@ fn promote_set_epoch<D: Domain>(
     };
 
     domain
-        .state3()
+        .state()
         .write_entity_typed(&EntityKey::from(EPOCH_KEY_GO), &set)?;
 
     let new_go = set;
@@ -119,7 +119,7 @@ fn promote_mark_epoch<D: Domain>(
     set.rewards_to_treasury = Some(pots.to_treasury);
 
     domain
-        .state3()
+        .state()
         .write_entity_typed(&EntityKey::from(EPOCH_KEY_SET), &set)?;
 
     Ok(set)
@@ -160,7 +160,7 @@ fn start_new_epoch<D: Domain>(domain: &D, prev: &EpochState) -> Result<(), Chain
     };
 
     domain
-        .state3()
+        .state()
         .write_entity_typed(&EntityKey::from(EPOCH_KEY_MARK), &epoch)?;
 
     Ok(())

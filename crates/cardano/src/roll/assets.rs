@@ -12,7 +12,7 @@ use crate::model::FixedNamespace as _;
 use crate::CardanoLogic;
 use crate::{
     model::AssetState,
-    roll::{BlockVisitor, State3Error},
+    roll::{BlockVisitor, StateError},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
