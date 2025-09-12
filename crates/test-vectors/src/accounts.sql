@@ -253,7 +253,7 @@ SELECT
     + COALESCE(instant_rewards.amount, 0) 
     + COALESCE(refunds.amount, 0) 
     - COALESCE(withdrawals.amount, 0)
-  )::TEXT AS "live_stake",
+  )::TEXT AS "controlled_amount",
   (
     COALESCE(rewards.amount, 0) + COALESCE(instant_rewards.amount, 0)
   )::TEXT AS "rewards_sum",

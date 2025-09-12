@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     net::{Ipv4Addr, Ipv6Addr},
     path::PathBuf,
     str::FromStr,
@@ -7,9 +7,7 @@ use std::{
 
 use bb8::Pool;
 use bb8_postgres::PostgresConnectionManager;
-use dolos_cardano::{
-    build_schema, include, AccountState, AssetState, FixedNamespace, PoolState, RewardLog,
-};
+use dolos_cardano::{build_schema, include, AccountState, AssetState, FixedNamespace, PoolState};
 use dolos_core::{EntityKey, Genesis, StateStore as _};
 use handlebars::Handlebars;
 use miette::{bail, Context, IntoDiagnostic};
@@ -171,7 +169,7 @@ pub async fn handle_account_state(
         let account = AccountState {
             registered_at: from_row!(row, Option<i64>, "registered_at")
                 .map(|x| x.try_into().unwrap()),
-            live_stake: from_row_bigint!(row, "live_stake"),
+            controlled_amount: from_row_bigint!(row, "controlled_amount"),
             active_stake: from_row_bigint!(row, "active_stake"),
             wait_stake: from_row_bigint!(row, "wait_stake"),
             rewards_sum: from_row_bigint!(row, "rewards_sum"),
@@ -199,58 +197,6 @@ pub async fn handle_account_state(
                 .transpose()?,
             pool_id: from_row!(row, Option<String>, "pool_id")
                 .map(|x| bech32::decode(&x).unwrap().1),
-            active_slots: from_row!(row, Option<Json<serde_json::Value>>, "active_slots")
-                .map(|x| {
-                    x.0.as_array()
-                        .unwrap_or(&vec![])
-                        .iter()
-                        .filter_map(|x| x.as_u64())
-                        .collect()
-                })
-                .unwrap_or_default(),
-            seen_addresses: from_row!(row, Option<Json<serde_json::Value>>, "seen_addresses")
-                .map(|x| {
-                    x.0.as_array()
-                        .unwrap_or(&vec![])
-                        .iter()
-                        .map(|x| {
-                            Address::from_bech32(x.as_str().unwrap())
-                                .map(|x| x.to_vec())
-                                .into_diagnostic()
-                                .context("parsing seen addresses")
-                        })
-                        .collect::<miette::Result<HashSet<Vec<u8>>>>()
-                })
-                .transpose()?
-                .unwrap_or_default(),
-            rewards: from_row!(row, Option<Json<serde_json::Value>>, "reward_log")
-                .map(|x| {
-                    x.0.as_array()
-                        .unwrap_or(&vec![])
-                        .iter()
-                        .filter_map(|x| {
-                            x.as_object().map(|data| RewardLog {
-                                epoch: data
-                                    .get("epoch")
-                                    .map(|epoch| epoch.as_u64().unwrap() as u32)
-                                    .unwrap(),
-                                amount: data
-                                    .get("amount")
-                                    .map(|amount| amount.as_str().unwrap().parse().unwrap())
-                                    .unwrap(),
-                                pool_id: data
-                                    .get("pool_id")
-                                    .map(|pool| bech32::decode(pool.as_str().unwrap()).unwrap().1)
-                                    .unwrap(),
-                                as_leader: data
-                                    .get("as_leader")
-                                    .map(|as_leader| as_leader.as_bool().unwrap())
-                                    .unwrap(),
-                            })
-                        })
-                        .collect()
-                })
-                .unwrap_or_default(),
         };
 
         batch.insert(
