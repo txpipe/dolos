@@ -32,7 +32,8 @@ impl TableRow for AccountState {
             "wait stake",
             "rewards sum",
             "withdrawals sum",
-            "pool id",
+            "latest pool",
+            "active pool",
             "drep",
         ]
     }
@@ -46,7 +47,14 @@ impl TableRow for AccountState {
             format!("{}", self.withdrawals_sum),
             format!(
                 "{}",
-                self.pool_id
+                self.latest_pool
+                    .as_ref()
+                    .map(|x| hex::encode(x))
+                    .unwrap_or_default()
+            ),
+            format!(
+                "{}",
+                self.active_pool
                     .as_ref()
                     .map(|x| hex::encode(x))
                     .unwrap_or_default()
@@ -61,13 +69,12 @@ impl TableRow for EpochState {
         vec![
             "number",
             "version",
-            "pparams",
             "gathered fees",
             "decayed deposits",
             "deposits",
             "reserves",
+            "utxos",
             "treasury",
-            "end reserves",
             "to treasury",
             "to distribute",
         ]
@@ -77,11 +84,11 @@ impl TableRow for EpochState {
         vec![
             format!("{}", self.number),
             format!("{}", self.pparams.protocol_major().unwrap_or_default()),
-            format!("{}", self.pparams.len()),
             format!("{}", self.gathered_fees),
             format!("{}", self.decayed_deposits),
             format!("{}", self.deposits),
             format!("{}", self.reserves),
+            format!("{}", self.utxos),
             format!("{}", self.treasury),
             format!("{}", self.rewards_to_treasury.unwrap_or_default()),
             format!("{}", self.rewards_to_distribute.unwrap_or_default()),
@@ -129,7 +136,7 @@ impl TableRow for PoolState {
             "vrf keyhash",
             "reward account",
             "active stake",
-            "live stake",
+            "wait stake",
             "blocks minted",
         ]
     }
@@ -140,7 +147,7 @@ impl TableRow for PoolState {
             format!("{}", self.vrf_keyhash),
             format!("{}", hex::encode(&self.reward_account)),
             format!("{}", self.active_stake),
-            format!("{}", self.live_stake),
+            format!("{}", self.wait_stake),
             format!("{}", self.blocks_minted),
         ]
     }

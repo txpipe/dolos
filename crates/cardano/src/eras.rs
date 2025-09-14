@@ -147,9 +147,6 @@ pub fn load_era_summary<D: Domain>(domain: &D) -> Result<ChainSummary, ChainErro
 
     for result in eras {
         let (_, era) = result?;
-
-        dbg!(&era);
-
         chain.append_era(era);
     }
 

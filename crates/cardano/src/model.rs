@@ -105,9 +105,12 @@ pub struct AccountState {
     pub treasury_sum: u64,
 
     #[n(8)]
-    pub pool_id: Option<Vec<u8>>,
+    pub latest_pool: Option<Vec<u8>>,
 
     #[n(9)]
+    pub active_pool: Option<Vec<u8>>,
+
+    #[n(10)]
     pub drep: Option<DRep>,
 }
 
@@ -189,7 +192,7 @@ pub struct PoolState {
     pub wait_stake: u64,
 
     #[n(10)]
-    pub live_stake: u64,
+    pub __live_stake: u64,
 
     #[n(11)]
     pub blocks_minted: u32,
@@ -223,7 +226,7 @@ impl PoolState {
             metadata: Default::default(),
             active_stake: Default::default(),
             wait_stake: Default::default(),
-            live_stake: Default::default(),
+            __live_stake: Default::default(),
             blocks_minted: Default::default(),
         }
     }
@@ -629,8 +632,10 @@ pub struct EpochState {
     #[n(0)]
     pub number: u32,
 
+    /// The static value representing what should be considered the active stake
+    /// for this epoch (computed from -2 epochs ago).
     #[n(1)]
-    pub stake: u64,
+    pub active_stake: u64,
 
     #[n(2)]
     pub deposits: u64,
@@ -642,21 +647,24 @@ pub struct EpochState {
     pub treasury: u64,
 
     #[n(5)]
-    pub gathered_fees: u64,
+    pub utxos: u64,
 
     #[n(6)]
-    pub gathered_deposits: u64,
+    pub gathered_fees: u64,
 
     #[n(7)]
-    pub decayed_deposits: u64,
+    pub gathered_deposits: u64,
 
     #[n(8)]
-    pub rewards_to_distribute: Option<u64>,
+    pub decayed_deposits: u64,
 
     #[n(9)]
-    pub rewards_to_treasury: Option<u64>,
+    pub rewards_to_distribute: Option<u64>,
 
     #[n(10)]
+    pub rewards_to_treasury: Option<u64>,
+
+    #[n(11)]
     pub pparams: PParamsSet,
 }
 

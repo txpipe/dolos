@@ -35,6 +35,18 @@ fn force_hardforks(
     Ok(())
 }
 
+fn get_utxo_amount(genesis: &Genesis) -> u64 {
+    let byron_utxo = pallas::ledger::configs::byron::genesis_utxos(&genesis.byron)
+        .iter()
+        .fold(0, |acc, (_, _, amount)| acc + amount);
+
+    let shelley_utxo = pallas::ledger::configs::shelley::shelley_utxos(&genesis.shelley)
+        .iter()
+        .fold(0, |acc, (_, _, amount)| acc + amount);
+
+    byron_utxo + shelley_utxo
+}
+
 fn bootrap_epoch<D: Domain>(domain: &D) -> Result<EpochState, ChainError> {
     let genesis = domain.genesis();
 
@@ -44,11 +56,27 @@ fn bootrap_epoch<D: Domain>(domain: &D) -> Result<EpochState, ChainError> {
         force_hardforks(&mut pparams, force_protocol as u16, genesis)?;
     }
 
+    // bootstrap pots
+    let max_supply = genesis.shelley.max_lovelace_supply.unwrap_or_default();
+    let utxos = get_utxo_amount(domain.genesis());
+
+    let pots = crate::sweep::compute_genesis_pots(max_supply, utxos, &pparams)?;
+
+    dbg!(&pots);
+
     let epoch = EpochState {
         pparams,
         number: 0,
-        reserves: genesis.shelley.max_lovelace_supply.unwrap_or_default(),
-        ..Default::default()
+        reserves: pots.reserves,
+        treasury: pots.treasury,
+        utxos,
+        active_stake: 0,
+        deposits: 0,
+        gathered_fees: 0,
+        gathered_deposits: 0,
+        decayed_deposits: 0,
+        rewards_to_distribute: None,
+        rewards_to_treasury: None,
     };
 
     domain

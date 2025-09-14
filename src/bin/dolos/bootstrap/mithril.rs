@@ -158,19 +158,6 @@ async fn fetch_snapshot(
     Ok(())
 }
 
-fn process_chunk(
-    domain: &DomainAdapter,
-    batch: dolos_core::RawBlockBatch,
-    progress: &indicatif::ProgressBar,
-) -> Result<bool, miette::Error> {
-    let (last, finished) = dolos_core::catchup::import_batch(domain, batch)
-        .map_err(|e| miette::miette!(e.to_string()))?;
-
-    progress.set_position(last);
-
-    Ok(finished)
-}
-
 fn import_hardano_into_domain(
     config: &crate::Config,
     immutable_path: &Path,
@@ -211,7 +198,10 @@ fn import_hardano_into_domain(
         // around throughout the pipeline
         let batch: Vec<_> = batch.into_iter().map(Arc::new).collect();
 
-        process_chunk(&domain, batch, &progress)?;
+        let last = dolos_core::catchup::import_batch(&domain, batch)
+            .map_err(|e| miette::miette!(e.to_string()))?;
+
+        progress.set_position(last);
     }
 
     progress.abandon_with_message("immutable db import complete");
