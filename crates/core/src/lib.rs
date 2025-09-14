@@ -164,6 +164,9 @@ pub enum BrokenInvariant {
 
     #[error("missing pool {}", hex::encode(.0))]
     MissingPool(Vec<u8>),
+
+    #[error("epoch boundary incomplete")]
+    EpochBoundaryIncomplete,
 }
 
 pub type UtxoMap = HashMap<TxoRef, Arc<EraCbor>>;
@@ -455,7 +458,7 @@ pub trait Block: Sized + Send + Sync {
 
 #[derive(Debug, Error)]
 pub enum ChainError {
-    #[error("broken invariant")]
+    #[error(transparent)]
     BrokenInvariant(#[from] BrokenInvariant),
 
     #[error("decoding error")]

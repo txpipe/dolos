@@ -1,207 +1,122 @@
-use dolos_core::{BlockSlot, BrokenInvariant, ChainError, Domain, EntityKey, StateStore as _};
-use pallas::ledger::primitives::ProtocolVersion;
+use std::collections::HashMap;
 
-use crate::{
-    sweep::pots::Pots, Config, EpochState, EraSummary, FixedNamespace as _, EPOCH_KEY_GO,
-    EPOCH_KEY_MARK, EPOCH_KEY_SET,
-};
+use dolos_core::{BlockSlot, ChainError, Domain, EntityKey};
+use pallas::ledger::primitives::RationalNumber;
 
-mod accounts;
-mod pools;
-mod pots;
-mod rewards;
+use crate::{Config, EpochState};
 
-fn apply_era_transition<D: Domain>(
-    domain: &D,
-    new_version: u16,
-    epoch_length: u64,
-    slot_length: u64,
-) -> Result<(), ChainError> {
-    let previous_version = new_version - 1;
+pub mod commit;
+pub mod compute;
+pub mod loading;
 
-    let previous = domain.state().read_entity_typed::<EraSummary>(
-        EraSummary::NS,
-        &EntityKey::from(&previous_version.to_be_bytes()),
-    )?;
+pub use compute::compute_genesis_pots;
 
-    let Some(mut previous) = previous else {
-        return Err(BrokenInvariant::BadBootstrap.into());
-    };
+// Epoch nomenclature
+// - ending: the epoch that is currently ending in this boundary.
+// - starting: the epoch that is currently starting in this boundary.
+// - waiting: (ending - 1) the epoch that will become _active_ after the
+//   boundary.
+// - active: (ending - 2) the epoch considered active for stake distribution &
+//   pool parameters
 
-    previous.define_end(new_version as u64);
+// Reward calculation sequencing
+// - 1. Sweep account data.
+//   - Take snapshot of account balances for _ending_ epoch
+//   - Take snapshot of stake pool distribution for _ending_ epoch
+// - 3. Compute theoretical pots
+// - 4. Compute pool performance
+// - 5. Distribute rewards to pools
+// - 6. Rotate snapshot waiting -> active, ending -> waiting
 
-    domain.state().write_entity_typed::<EraSummary>(
-        &EntityKey::from(&previous_version.to_be_bytes()),
-        &previous,
-    )?;
+pub type AccountId = EntityKey;
+pub type PoolId = EntityKey;
 
-    let new = EraSummary {
-        start: previous.end.clone().unwrap(),
-        end: None,
-        epoch_length,
-        slot_length,
-    };
-
-    domain
-        .state()
-        .write_entity_typed(&EntityKey::from(&new_version.to_be_bytes()), &new)?;
-
-    Ok(())
+#[derive(Debug)]
+pub struct PoolData {
+    pub fixed_cost: u64,
+    pub margin_cost: RationalNumber,
+    pub declared_pledge: u64,
+    pub minted_blocks: u32,
 }
 
-fn check_era_transition<D: Domain>(
-    domain: &D,
-    current: &EpochState,
-    prev_protocol: Option<ProtocolVersion>,
-) -> Result<(), ChainError> {
-    if let Some((last_version, _)) = prev_protocol {
-        let new_version = current.pparams.protocol_major().unwrap_or_default();
+#[derive(Debug)]
+pub struct Pots {
+    pub reserves: u64,
+    pub treasury: u64,
+}
 
-        if last_version != new_version as u64 {
-            let epoch_length = current.pparams.epoch_length_or_default();
-            let slot_length = current.pparams.slot_length_or_default();
-            apply_era_transition(domain, new_version, epoch_length, slot_length)?;
+#[derive(Debug)]
+pub struct Snapshot {
+    pub total_stake: u64,
+    pub pool_by_account: HashMap<AccountId, PoolId>,
+    pub pool_stake: HashMap<PoolId, u64>,
+}
+
+impl Default for Snapshot {
+    fn default() -> Self {
+        Self {
+            total_stake: 0,
+            pool_by_account: HashMap::new(),
+            pool_stake: HashMap::new(),
         }
     }
-
-    Ok(())
 }
 
-fn drop_go_epoch<D: Domain>(
-    domain: &D,
-    go: Option<EpochState>,
-) -> Result<Option<ProtocolVersion>, ChainError> {
-    let Some(go) = go else {
-        return Ok(None);
-    };
-
-    let protocol = go
-        .pparams
-        .protocol_version()
-        .ok_or(ChainError::from(BrokenInvariant::InvalidEpochState))?;
-
-    domain
-        .state()
-        .delete_entity(EpochState::NS, &EntityKey::from(EPOCH_KEY_GO))?;
-
-    Ok(Some(protocol))
+impl Snapshot {
+    // alias just for semantic clarity
+    pub fn empty() -> Self {
+        Self::default()
+    }
 }
 
-fn promote_set_epoch<D: Domain>(
-    domain: &D,
-    set: Option<EpochState>,
-    prev_protocol: Option<ProtocolVersion>,
-) -> Result<Option<EpochState>, ChainError> {
-    let Some(set) = set else {
-        return Ok(None);
-    };
-
-    domain
-        .state()
-        .write_entity_typed(&EntityKey::from(EPOCH_KEY_GO), &set)?;
-
-    let new_go = set;
-
-    check_era_transition(domain, &new_go, prev_protocol)?;
-
-    Ok(Some(new_go))
+#[derive(Debug)]
+pub struct PotDelta {
+    pub incentives: u64,
+    pub treasury_tax: u64,
+    pub available_rewards: u64,
 }
 
-fn promote_mark_epoch<D: Domain>(
-    domain: &D,
-    mark: EpochState,
-    pots: &Pots,
-) -> Result<EpochState, ChainError> {
-    // variable name to avoid confusion
-    let mut set = mark;
-
-    set.rewards_to_distribute = Some(pots.to_distribute);
-    set.rewards_to_treasury = Some(pots.to_treasury);
-
-    domain
-        .state()
-        .write_entity_typed(&EntityKey::from(EPOCH_KEY_SET), &set)?;
-
-    Ok(set)
+#[derive(Debug)]
+pub struct EraTransition {
+    pub prev_version: u16,
+    pub new_version: u16,
+    pub epoch_length: u64,
+    pub slot_length: u64,
 }
 
-fn start_new_epoch<D: Domain>(domain: &D, prev: &EpochState) -> Result<(), ChainError> {
-    let prev_rewards = prev
-        .rewards()
-        .ok_or(ChainError::from(BrokenInvariant::InvalidEpochState))?;
+#[derive(Debug)]
+pub struct BoundaryWork {
+    // loaded
+    pub active_state: Option<EpochState>,
+    pub active_snapshot: Snapshot,
+    pub waiting_state: Option<EpochState>,
+    pub ending_state: EpochState,
+    pub ending_snapshot: Snapshot,
+    pub pools: HashMap<PoolId, PoolData>,
 
-    let additional_treasury = prev
-        .rewards_to_treasury
-        .ok_or(ChainError::from(BrokenInvariant::InvalidEpochState))?;
-
-    let new_reserves = prev.reserves.saturating_sub(prev_rewards);
-    let new_treasury = prev.treasury + additional_treasury;
-    let new_number = prev.number + 1;
-    let new_pparams = prev.pparams.clone();
-
-    let new_deposits = prev.deposits + prev.gathered_deposits - prev.decayed_deposits;
-
-    let epoch = EpochState {
-        treasury: new_treasury,
-        number: new_number,
-        reserves: new_reserves,
-        pparams: new_pparams,
-        deposits: new_deposits,
-        stake: 0, // TODO: compute
-
-        // computed throughout the epoch during _roll_
-        gathered_fees: 0,
-        gathered_deposits: 0,
-        decayed_deposits: 0,
-
-        // computed at the end of the epoch during _sweep_
-        rewards_to_distribute: None,
-        rewards_to_treasury: None,
-    };
-
-    domain
-        .state()
-        .write_entity_typed(&EntityKey::from(EPOCH_KEY_MARK), &epoch)?;
-
-    Ok(())
+    // computed
+    pub pot_delta: Option<PotDelta>,
+    pub effective_rewards: Option<u64>,
+    pub pool_rewards: HashMap<PoolId, u64>,
+    pub starting_state: Option<EpochState>,
+    pub era_transition: Option<EraTransition>,
 }
 
 pub fn sweep<D: Domain>(domain: &D, _: BlockSlot, config: &Config) -> Result<(), ChainError> {
     // TODO: this should all be one big atomic operation, but for that we need to
     // refactor stores to include start / commit semantics
 
-    let mark = crate::load_live_epoch(domain)?;
-    let set = crate::load_previous_epoch(domain)?;
-    let go = crate::load_active_epoch(domain)?;
+    let mut boundary = BoundaryWork::load(domain)?;
 
-    pools::aggregate_stake(domain)?;
-    let pots = pots::compute_for_epoch(&mark)?;
+    boundary.compute()?;
 
-    // TODO: move mark epoch closure here so that it's already impacted in case of a
-    // force stop
-
-    // order matters
-    if let Some(go) = &go {
-        rewards::distribute(domain, mark.number, pots.to_distribute, go.stake)?;
-    }
-
-    // HERE'S WHERE WE CONSIDER THE EPOCH TRANSITIONING CONCEPTUALLY
+    boundary.commit(domain)?;
 
     if let Some(stop_epoch) = config.stop_epoch {
-        if mark.number >= stop_epoch {
+        if boundary.ending_state.number >= stop_epoch {
             return Err(ChainError::StopEpochReached);
         }
     }
-
-    // rotate individual delegation
-    pools::rotate_delegation(domain)?;
-    accounts::rotate_delegation(domain)?;
-
-    // rotate epochs, order matters
-    let prev_protocol = drop_go_epoch(domain, go)?;
-    let _new_go = promote_set_epoch(domain, set, prev_protocol)?;
-    let new_set = promote_mark_epoch(domain, mark, &pots)?;
-    start_new_epoch(domain, &new_set)?;
 
     Ok(())
 }

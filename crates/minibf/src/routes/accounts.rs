@@ -94,7 +94,7 @@ impl<'a> IntoModel<AccountContent> for AccountModelBuilder<'a> {
 
         let pool_id = self
             .account_state
-            .pool_id
+            .latest_pool
             .as_ref()
             .map(bech32_pool)
             .transpose()?;
