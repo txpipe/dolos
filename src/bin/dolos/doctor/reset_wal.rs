@@ -21,8 +21,6 @@ pub fn run(config: &crate::Config, _args: &Args, feedback: &Feedback) -> miette:
         .into_diagnostic()
         .context("getting state cursor")?;
 
-    dbg!(&cursor);
-
     let Some(cursor) = cursor else {
         return Err(miette::miette!("state has no cursor"));
     };

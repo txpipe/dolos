@@ -29,10 +29,7 @@ pub fn lastest_immutable_slot(tip: BlockSlot, genesis: &Genesis) -> BlockSlot {
 }
 
 pub fn float_to_rational(x: f32) -> pallas::ledger::primitives::conway::RationalNumber {
-    dbg!(&x);
     let ratio: num_rational::Ratio<i64> = num_rational::Ratio::approximate_float(x).unwrap();
-
-    dbg!(&ratio);
 
     pallas::ledger::primitives::conway::RationalNumber {
         numerator: *ratio.numer() as u64,

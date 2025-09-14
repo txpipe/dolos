@@ -60,18 +60,13 @@ fn is_empty<D: Domain>(domain: &D) -> Result<bool, DomainError> {
 
 pub fn ensure_bootstrap<D: Domain>(domain: &D) -> Result<(), DomainError> {
     if !is_empty(domain)? {
-        dbg!("skipping bootstrap, data is not empty");
         tracing::debug!("skipping bootstrap, data is not empty");
         return Ok(());
     }
 
     domain.chain().bootstrap(domain)?;
 
-    dbg!("chain bootstrap passed");
-
     domain.wal().reset_to(&ChainPoint::Origin)?;
-
-    dbg!("wal reset to origin");
 
     Ok(())
 }
@@ -79,15 +74,9 @@ pub fn ensure_bootstrap<D: Domain>(domain: &D) -> Result<(), DomainError> {
 pub fn ensure_initialized<D: Domain>(domain: &D) -> Result<(), DomainError> {
     ensure_bootstrap(domain)?;
 
-    dbg!("bootstrap passed");
-
     check_integrity(domain)?;
 
-    dbg!("integrity check passed");
-
     catch_up(domain)?;
-
-    dbg!("initialized");
 
     Ok(())
 }

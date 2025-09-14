@@ -170,17 +170,14 @@ impl BlockVisitor for EpochStateVisitor {
         cert: &MultiEraCert,
     ) -> Result<(), ChainError> {
         if let Some(c) = pallas_extras::cert_as_stake_registration(cert) {
-            dbg!(c);
             self.delta.as_mut().unwrap().gathered_deposits += KEY_DEPOSIT;
         }
 
         if let Some(c) = pallas_extras::cert_as_stake_deregistration(cert) {
-            dbg!(c);
             self.delta.as_mut().unwrap().decayed_deposits += KEY_DEPOSIT;
         }
 
         if let Some(c) = pallas_extras::cert_to_pool_state(cert) {
-            dbg!(c);
             self.delta.as_mut().unwrap().gathered_deposits += POOL_DEPOSIT;
         }
 

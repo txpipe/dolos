@@ -13,11 +13,7 @@ fn force_hardforks(
     while pparams.protocol_major().unwrap_or_default() < force_protocol {
         let previous = pparams.protocol_major();
 
-        dbg!(&pparams);
-
         *pparams = crate::forks::bump_pparams_version(&pparams, genesis);
-
-        dbg!(&pparams);
 
         // if the protocol major is not set, something went wrong and we might be
         // stuck in a loop. We return an error to avoid infinite loops.
@@ -63,8 +59,6 @@ fn bootrap_epoch<D: Domain>(domain: &D) -> Result<EpochState, ChainError> {
     let utxos = get_utxo_amount(domain.genesis());
 
     let pots = crate::sweep::compute_genesis_pots(max_supply, utxos, &pparams)?;
-
-    dbg!(&pots);
 
     let epoch = EpochState {
         pparams,
@@ -125,15 +119,9 @@ pub fn bootstrap_utxos<D: Domain>(domain: &D) -> Result<(), ChainError> {
 pub fn execute<D: Domain>(domain: &D) -> Result<(), ChainError> {
     let epoch = bootrap_epoch(domain)?;
 
-    dbg!("pparams bootstrapped");
-
     bootstrap_eras(domain, &epoch)?;
 
-    dbg!("eras bootstrapped");
-
     bootstrap_utxos(domain)?;
-
-    dbg!("utxos bootstrapped");
 
     Ok(())
 }
