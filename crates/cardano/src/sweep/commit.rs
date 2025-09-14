@@ -137,8 +137,6 @@ fn promote_ending_epoch<D: Domain>(domain: &D, boundary: &BoundaryWork) -> Resul
 
 impl BoundaryWork {
     pub fn commit<D: Domain>(&self, domain: &D) -> Result<(), ChainError> {
-        dbg!(&self);
-
         rotate_pool_stake_data(domain, self)?;
         rotate_account_stake_data(domain)?;
         drop_active_epoch(domain)?;

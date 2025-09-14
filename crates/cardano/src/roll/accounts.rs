@@ -281,10 +281,12 @@ impl dolos_core::EntityDelta for WithdrawalInc {
     }
 }
 
+#[derive(Default)]
 pub struct AccountVisitor;
 
 impl BlockVisitor for AccountVisitor {
     fn visit_input(
+        &mut self,
         deltas: &mut WorkDeltas<CardanoLogic>,
         _: &MultiEraBlock,
         _: &MultiEraTx,
@@ -306,6 +308,7 @@ impl BlockVisitor for AccountVisitor {
     }
 
     fn visit_output(
+        &mut self,
         deltas: &mut WorkDeltas<CardanoLogic>,
         _: &MultiEraBlock,
         _: &MultiEraTx,
@@ -330,6 +333,7 @@ impl BlockVisitor for AccountVisitor {
     }
 
     fn visit_cert(
+        &mut self,
         deltas: &mut WorkDeltas<CardanoLogic>,
         block: &MultiEraBlock,
         _: &MultiEraTx,
@@ -363,6 +367,7 @@ impl BlockVisitor for AccountVisitor {
     }
 
     fn visit_withdrawal(
+        &mut self,
         deltas: &mut WorkDeltas<CardanoLogic>,
         _: &MultiEraBlock,
         _: &MultiEraTx,

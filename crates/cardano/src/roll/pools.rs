@@ -82,10 +82,12 @@ impl dolos_core::EntityDelta for MintedBlocksInc {
     }
 }
 
+#[derive(Default)]
 pub struct PoolStateVisitor;
 
 impl<'a> BlockVisitor for PoolStateVisitor {
     fn visit_root(
+        &mut self,
         deltas: &mut WorkDeltas<CardanoLogic>,
         block: &MultiEraBlock,
     ) -> Result<(), ChainError> {
@@ -98,6 +100,7 @@ impl<'a> BlockVisitor for PoolStateVisitor {
     }
 
     fn visit_cert(
+        &mut self,
         deltas: &mut WorkDeltas<CardanoLogic>,
         _: &MultiEraBlock,
         _: &MultiEraTx,
