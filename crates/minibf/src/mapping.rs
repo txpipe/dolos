@@ -76,11 +76,24 @@ pub fn bech32(hrp: bech32::Hrp, key: impl AsRef<[u8]>) -> Result<String, StatusC
 }
 
 pub fn bech32_drep(drep: &DRep) -> Result<String, StatusCode> {
+    let mut payload = [0; 29];
+
+    let key_prefix: [u8; 1] = [0b00100010];
+    let script_prefix: [u8; 1] = [0b00100011];
+
     match drep {
-        DRep::Script(key) => bech32(DREP_HRP, key),
-        DRep::Key(key) => bech32(DREP_HRP, key),
-        _ => todo!(),
-    }
+        DRep::Key(key) => {
+            payload[..1].copy_from_slice(&key_prefix);
+            payload[1..].copy_from_slice(key.as_slice());
+        }
+        DRep::Script(key) => {
+            payload[..1].copy_from_slice(&script_prefix);
+            payload[1..].copy_from_slice(key.as_slice());
+        }
+        _ => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+    };
+
+    bech32(DREP_HRP, payload)
 }
 
 pub fn bech32_pool(key: impl AsRef<[u8]>) -> Result<String, StatusCode> {
