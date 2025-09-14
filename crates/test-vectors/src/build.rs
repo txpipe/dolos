@@ -7,15 +7,22 @@ use std::{
 
 use bb8::Pool;
 use bb8_postgres::PostgresConnectionManager;
-use dolos_cardano::{build_schema, include, AccountState, AssetState, FixedNamespace, PoolState};
-use dolos_core::{EntityKey, Genesis, StateStore as _};
+use dolos_cardano::{
+    build_schema, include, AccountState, AssetState, EpochState, FixedNamespace, PParamValue,
+    PParamsSet, PoolState, EPOCH_KEY_GO, EPOCH_KEY_MARK, EPOCH_KEY_SET,
+};
+use dolos_core::{EntityKey, Genesis, StateStore as _, StateWriter};
 use handlebars::Handlebars;
 use miette::{bail, Context, IntoDiagnostic};
 use pallas::{
     codec::minicbor,
+    interop::utxorpc::spec::cardano::BigInt,
     ledger::{
         addresses::Address,
-        primitives::{conway::DRep, PoolMetadata, RationalNumber, Relay},
+        primitives::{
+            conway::DRep, ExUnitPrices, ExUnits, PoolMetadata, ProtocolVersion, RationalNumber,
+            Relay,
+        },
     },
 };
 use serde_json::Value;
@@ -40,6 +47,19 @@ macro_rules! from_row_bigint {
         }
         .unwrap_or_default()
     };
+}
+
+macro_rules! from_row_ratio {
+    ($row:ident, $column:literal) => {{
+        let val = from_row!($row, f64, $column);
+        let val = num_rational::Rational64::approximate_float(val).unwrap();
+        let val = pallas::ledger::primitives::RationalNumber {
+            numerator: *val.numer() as u64,
+            denominator: *val.denom() as u64,
+        };
+
+        val
+    }};
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, clap::ValueEnum)]
@@ -86,6 +106,9 @@ pub struct Args {
     /// Network to build snapshot to, needed for genesis information.
     #[arg(long)]
     network: KnownNetwork,
+
+    #[arg(long)]
+    namespace: Option<String>,
 }
 
 #[tokio::main]
@@ -115,9 +138,20 @@ pub async fn run(args: &Args) -> miette::Result<()> {
 
     let registry = init_registry()?;
 
-    handle_account_state(args, &pool, &state, &registry).await?;
-    handle_asset_state(args, &pool, &state, &registry).await?;
-    handle_pool_state(args, &pool, &state, &registry).await?;
+    if let Some(namespace) = args.namespace.as_ref() {
+        match namespace.as_str() {
+            "accounts" => handle_account_state(args, &pool, &state, &registry).await?,
+            "assets" => handle_asset_state(args, &pool, &state, &registry).await?,
+            "pools" => handle_pool_state(args, &pool, &state, &registry).await?,
+            "epochs" => handle_epoch_state(args, &pool, &state, &registry).await?,
+            _ => bail!("invalid namespace"),
+        }
+    } else {
+        handle_account_state(args, &pool, &state, &registry).await?;
+        handle_asset_state(args, &pool, &state, &registry).await?;
+        handle_pool_state(args, &pool, &state, &registry).await?;
+        handle_epoch_state(args, &pool, &state, &registry).await?;
+    }
 
     Ok(())
 }
@@ -146,7 +180,7 @@ pub async fn handle_account_state(
         .context("getting connection from pool")?;
 
     let ns = AccountState::NS;
-    let mut batch = HashMap::new();
+    let writer = state.start_writer().into_diagnostic()?;
 
     tracing::info!("Querying accounts...");
     for (i, row) in conn
@@ -195,22 +229,21 @@ pub async fn handle_account_state(
                     }
                 })
                 .transpose()?,
-            pool_id: from_row!(row, Option<String>, "pool_id")
+
+            latest_pool: None,
+            active_pool: from_row!(row, Option<String>, "pool_id")
                 .map(|x| bech32::decode(&x).unwrap().1),
         };
 
-        batch.insert(
-            EntityKey::from(key),
-            minicbor::to_vec(account)
-                .into_diagnostic()
-                .context("encoding entity")?,
-        );
+        writer
+            .write_entity_typed::<AccountState>(&EntityKey::from(key), &account)
+            .into_diagnostic()?;
     }
     tracing::info!("Finished processing accounts.");
 
     tracing::info!("Writing accounts...");
-    state
-        .write_entity_batch(ns, batch)
+    writer
+        .commit()
         .into_diagnostic()
         .context("writing entity")?;
     tracing::info!("Finished writing accounts.");
@@ -241,8 +274,8 @@ pub async fn handle_asset_state(
         .into_diagnostic()
         .context("getting connection from pool")?;
 
-    let ns = AccountState::NS;
-    let mut batch = HashMap::new();
+    let ns = AssetState::NS;
+    let writer = state.start_writer().into_diagnostic()?;
 
     tracing::info!("Querying assets...");
     for (i, row) in conn
@@ -272,19 +305,16 @@ pub async fn handle_asset_state(
             mint_tx_count: from_row!(row, i64, "mint_tx_count") as u64,
         };
 
-        batch.insert(
-            EntityKey::from(key),
-            minicbor::to_vec(asset)
-                .into_diagnostic()
-                .context("encoding entity")?,
-        );
+        writer
+            .write_entity_typed::<AssetState>(&EntityKey::from(key), &asset)
+            .into_diagnostic()?;
     }
 
     tracing::info!("Finished processing assets.");
 
-    tracing::info!("Writing assets...");
-    state
-        .write_entity_batch(ns, batch)
+    tracing::info!("committing assets...");
+    writer
+        .commit()
         .into_diagnostic()
         .context("writing entity")?;
     tracing::info!("Finished writing assets.");
@@ -323,8 +353,8 @@ pub async fn handle_pool_state(
         .context("executing query")?;
     tracing::info!("Finished querying pools.");
 
-    let ns = AccountState::NS;
-    let mut batch = HashMap::new();
+    let ns = PoolState::NS;
+    let writer = state.start_writer().into_diagnostic()?;
 
     for (i, row) in rows.iter().enumerate() {
         if i % 100 == 1 {
@@ -351,7 +381,7 @@ pub async fn handle_pool_state(
             },
             fixed_cost: from_row_bigint!(row, "fixed_cost"),
             active_stake: from_row_bigint!(row, "active_stake"),
-            live_stake: from_row_bigint!(row, "live_stake"),
+            __live_stake: from_row_bigint!(row, "live_stake"),
             blocks_minted: from_row!(row, i64, "blocks_minted") as u32,
             wait_stake: from_row_bigint!(row, "wait_stake"),
             pool_owners: from_row!(row, Option<Json<serde_json::Value>>, "owners")
@@ -440,22 +470,218 @@ pub async fn handle_pool_state(
             },
         };
 
-        batch.insert(
-            EntityKey::from(key),
-            minicbor::to_vec(pool)
-                .into_diagnostic()
-                .context("encoding entity")?,
-        );
+        writer
+            .write_entity_typed::<PoolState>(&EntityKey::from(key), &pool)
+            .into_diagnostic()?;
     }
 
     tracing::info!("Finished processing pools.");
 
     tracing::info!("Writing pools...");
-    state
-        .write_entity_batch(ns, batch)
+    writer
+        .commit()
         .into_diagnostic()
         .context("writing entity")?;
     tracing::info!("Finished writing pools.");
+
+    Ok(())
+}
+
+macro_rules! pp_col {
+    ($pparams:ident, $variant:ident, $row:ident, $ty:ty, $column:literal) => {
+        let val = from_row!($row, $ty, $column);
+        let val = TryFrom::try_from(val).unwrap();
+        $pparams.set(PParamValue::$variant(val))
+    };
+    ($pparams:ident, $variant:ident, $row:ident, parse, $column:literal) => {
+        let val = from_row!($row, String, $column);
+        let val = val.parse().unwrap();
+        $pparams.set(PParamValue::$variant(val))
+    };
+    ($pparams:ident, $variant:ident, $row:ident, $column:literal) => {
+        let val = from_row!($row, i32, $column);
+        let val = TryFrom::try_from(val).unwrap();
+        $pparams.set(PParamValue::$variant(val))
+    };
+}
+
+macro_rules! pp_col_parse {
+    ($pparams:ident, $variant:ident, $row:ident, $column:literal) => {
+        let val = from_row!($row, String, $column);
+        let val = val.parse().unwrap();
+        $pparams.set(PParamValue::$variant(val))
+    };
+}
+
+macro_rules! pp_col_ratio {
+    ($pparams:ident, $variant:ident, $row:ident, $column:literal) => {
+        let val = from_row_ratio!($row, $column);
+        $pparams.set(PParamValue::$variant(val))
+    };
+}
+
+pub async fn handle_epoch_state(
+    args: &Args,
+    pool: &Pool<PostgresConnectionManager<NoTls>>,
+    state: &dolos_redb3::StateStore,
+    registry: &Handlebars<'static>,
+) -> miette::Result<()> {
+    let query = registry
+        .render(
+            "epochs",
+            &&serde_json::json!({ "epoch": args.epoch, "limit": match args.limit {
+            Some(limit) => format!("LIMIT {limit}"),
+            None => "".to_string()
+        } }),
+        )
+        .into_diagnostic()
+        .context("rendering query")?;
+
+    let conn = pool
+        .get()
+        .await
+        .into_diagnostic()
+        .context("getting connection from pool")?;
+
+    tracing::info!("Querying epochs...");
+    let rows = conn
+        .query(&query, &[])
+        .await
+        .into_diagnostic()
+        .context("executing query")?;
+    tracing::info!("Finished querying epochs.");
+
+    let ns = EpochState::NS;
+    let writer = state.start_writer().into_diagnostic()?;
+
+    let key_for_idx = |idx: u32| match idx {
+        0 => EntityKey::from(EPOCH_KEY_MARK),
+        1 => EntityKey::from(EPOCH_KEY_SET),
+        2 => EntityKey::from(EPOCH_KEY_GO),
+        _ => unreachable!(),
+    };
+
+    for (i, row) in rows.iter().enumerate() {
+        if i % 100 == 1 {
+            tracing::info!(i = i, "Processing epochs...");
+        }
+
+        let mut pp = PParamsSet::new();
+
+        pp_col!(pp, MinFeeA, row, "min_fee_a");
+        pp_col!(pp, MinFeeB, row, "min_fee_b");
+        pp_col!(pp, MaxBlockBodySize, row, "max_block_size");
+        pp_col!(pp, MaxTransactionSize, row, "max_tx_size");
+        pp_col!(pp, MaxBlockHeaderSize, row, "max_block_header_size");
+        pp_col_parse!(pp, KeyDeposit, row, "key_deposit");
+        pp_col_parse!(pp, PoolDeposit, row, "pool_deposit");
+        pp_col!(pp, DesiredNumberOfStakePools, row, i32, "e_max");
+        //pp_col!(pp, OptimalPoolCount, "n_opt");
+        // pp_col!(pp, ProtocolVersion, row, "protocol_minor_ver");
+
+        let protocol_major = from_row!(row, i32, "protocol_major_ver");
+        let protocol_minor = from_row!(row, i32, "protocol_minor_ver");
+
+        pp.set(PParamValue::ProtocolVersion((
+            protocol_major as u64,
+            protocol_minor as u64,
+        )));
+
+        pp_col_ratio!(pp, PoolPledgeInfluence, row, "a0");
+        pp_col_ratio!(pp, ExpansionRate, row, "rho");
+        pp_col_ratio!(pp, TreasuryGrowthRate, row, "tau");
+        pp_col_ratio!(pp, DecentralizationConstant, row, "decentralisation_param");
+        pp_col_ratio!(
+            pp,
+            MinFeeRefScriptCostPerByte,
+            row,
+            "min_fee_ref_script_cost_per_byte"
+        );
+        pp_col_parse!(pp, MinUtxoValue, row, "min_utxo");
+        pp_col_parse!(pp, MinPoolCost, row, "min_pool_cost");
+
+        //pp_col!(pp, Nonce, "nonce");
+        //pp_col!(pp, ExtraEntropy, row, "extra_entropy");
+
+        // TODO: parse cost models
+        // pp_col!(pp, CostModelsForScriptLanguages, row, "cost_models");
+
+        pp.set(PParamValue::ExecutionCosts(ExUnitPrices {
+            mem_price: from_row_ratio!(row, "price_mem"),
+            step_price: from_row_ratio!(row, "price_step"),
+        }));
+
+        pp.set(PParamValue::MaxTxExUnits(ExUnits {
+            mem: from_row!(row, i32, "max_tx_ex_mem") as u64,
+            steps: from_row!(row, i32, "max_tx_ex_steps") as u64,
+        }));
+
+        pp.set(PParamValue::MaxBlockExUnits(ExUnits {
+            mem: from_row!(row, i32, "max_block_ex_mem") as u64,
+            steps: from_row!(row, i32, "max_block_ex_steps") as u64,
+        }));
+
+        pp_col_parse!(pp, MaxValueSize, row, "max_val_size");
+        pp_col!(pp, CollateralPercentage, row, i32, "collateral_percent");
+        pp_col!(pp, MaxCollateralInputs, row, i32, "max_collateral_inputs");
+
+        pp_col_parse!(pp, AdaPerUtxoByte, row, "coins_per_utxo_word");
+        //pp_col!(pp, PvtMotionNoConfidence, "pvt_motion_no_confidence");
+        //pp_col!(pp, PvtCommitteeNormal, "pvt_committee_normal");
+        //pp_col!(pp, PvtCommitteeNoConfidence, "pvt_committee_no_confidence");
+        //pp_col!(pp, PvtHardForkInitiation, "pvt_hard_fork_initiation");
+        //pp_col!(pp, DvtMotionNoConfidence, "dvt_motion_no_confidence");
+        //pp_col!(pp, DvtCommitteeNormal, "dvt_committee_normal");
+        //pp_col!(pp, DvtCommitteeNoConfidence, "dvt_committee_no_confidence");
+        //pp_col!(pp, DvtUpdateToConstitution, "dvt_update_to_constitution");
+        //pp_col!(pp, DvtHardForkInitiation, "dvt_hard_fork_initiation");
+        //pp_col!(pp, DvtPpNetworkGroup, "dvt_p_p_network_group");
+        //pp_col!(pp, DvtPpEconomicGroup, "dvt_p_p_economic_group");
+        //pp_col!(pp, DvtPpTechnicalGroup, "dvt_p_p_technical_group");
+        //pp_col!(pp, DvtPpGovGroup, "dvt_p_p_gov_group");
+        //pp_col!(pp, DvtTreasuryWithdrawal, "dvt_treasury_withdrawal");
+        //pp_col!(pp, CommitteeMinSize, "committee_min_size");
+        //pp_col!(pp, CommitteeMaxTermLength, "committee_max_term_length");
+        //pp_col!(pp, GovActionLifetime, "gov_action_lifetime");
+        //pp_col!(pp, GovActionDeposit, "gov_action_deposit");
+        pp_col!(pp, DrepDeposit, row, i32, "drep_deposit");
+        //pp_col!(pp, DrepActivity, "drep_activity");
+        //pp_col!(pp, PvtPpSecurityGroup, "pvtpp_security_group");
+        //pp_col!(pp, PvtPpSecurityGroup, "pvt_p_p_security_group");
+
+        let deposits_stake: u64 = from_row_bigint!(row, "deposits_stake");
+        let deposits_drep: u64 = from_row_bigint!(row, "deposits_drep");
+        let deposits_proposal: u64 = from_row_bigint!(row, "deposits_proposal");
+
+        let epoch_state = EpochState {
+            pparams: pp,
+            // for some reason dbsync 1-index numeration, so we subtract 1
+            number: from_row!(row, i32, "epoch_no") as u32 - 1,
+            active_stake: 0, // from_row_bigint!(row, "active_stake"),
+            deposits: deposits_stake + deposits_drep + deposits_proposal,
+            reserves: from_row_bigint!(row, "reserves"),
+            treasury: from_row_bigint!(row, "treasury"),
+            utxos: from_row_bigint!(row, "utxo"),
+            gathered_fees: from_row_bigint!(row, "fees"),
+            gathered_deposits: 0, // from_row_bigint!(row, "gathered_deposits"),
+            decayed_deposits: 0,  // from_row_bigint!(row, "decayed_deposits"),
+            rewards_to_distribute: None,
+            rewards_to_treasury: None,
+        };
+
+        writer
+            .write_entity_typed::<EpochState>(&key_for_idx(i as u32), &epoch_state)
+            .into_diagnostic()?;
+    }
+
+    tracing::info!("Finished processing epochs.");
+
+    tracing::info!("Writing epochs...");
+    writer
+        .commit()
+        .into_diagnostic()
+        .context("writing entity")?;
+    tracing::info!("Finished writing epochs.");
 
     Ok(())
 }

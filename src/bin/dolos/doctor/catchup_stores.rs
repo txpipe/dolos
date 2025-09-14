@@ -1,6 +1,5 @@
 use itertools::Itertools;
 use miette::{Context, IntoDiagnostic};
-use tracing::debug;
 
 use dolos::prelude::*;
 
@@ -38,7 +37,7 @@ pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::
     for chunk in remaining.chunks(args.chunk).into_iter() {
         let collected = chunk.into_iter().map(|(_, x)| x).collect_vec();
 
-        let Ok((cursor, _)) = dolos_core::catchup::import_batch(&domain, collected, None) else {
+        let Ok(cursor) = dolos_core::catchup::import_batch(&domain, collected) else {
             miette::bail!("failed to apply block chunk");
         };
 

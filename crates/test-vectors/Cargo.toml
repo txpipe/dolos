@@ -29,3 +29,4 @@ handlebars = "6.3.2"
 miette = { version = "7.6.0", features = ["fancy"] }
 tokio-postgres = { version = "0.7.13", features = ["with-serde_json-1", "with-chrono-0_4"] }
 tracing-subscriber = "0.3.17"
+num-rational = "0.4.2"

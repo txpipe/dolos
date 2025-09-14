@@ -1,6 +1,4 @@
-use crate::{
-    batch::WorkBatch, BlockSlot, ChainLogic, Domain, DomainError, RawBlock, StateStore as _,
-};
+use crate::{batch::WorkBatch, BlockSlot, ChainLogic, Domain, DomainError, RawBlock};
 
 fn import_contiguous_batch<D, C>(domain: &D, batch: &mut WorkBatch<C>) -> Result<(), DomainError>
 where
@@ -50,10 +48,7 @@ where
     }
 }
 
-pub fn import_batch<D, C>(
-    domain: &D,
-    batch: Vec<RawBlock>,
-) -> Result<(BlockSlot, bool), DomainError>
+pub fn import_batch<D, C>(domain: &D, batch: Vec<RawBlock>) -> Result<BlockSlot, DomainError>
 where
     C: ChainLogic,
     D: Domain<Chain = C, Entity = C::Entity>,
@@ -64,5 +59,5 @@ where
 
     let last = import_decoded_batch(domain, batch)?;
 
-    Ok((last, false))
+    Ok(last)
 }
