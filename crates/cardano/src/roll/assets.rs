@@ -63,10 +63,12 @@ impl dolos_core::EntityDelta for MintStatsUpdate {
     }
 }
 
+#[derive(Default)]
 pub struct AssetStateVisitor;
 
 impl BlockVisitor for AssetStateVisitor {
     fn visit_mint(
+        &mut self,
         deltas: &mut WorkDeltas<CardanoLogic>,
         block: &MultiEraBlock,
         tx: &MultiEraTx,

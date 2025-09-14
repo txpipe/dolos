@@ -1,18 +1,26 @@
 use std::borrow::Cow;
 
 use dolos_core::{batch::WorkDeltas, ChainError, NsKey};
-use pallas::ledger::traverse::{MultiEraBlock, MultiEraTx, MultiEraUpdate};
+use pallas::{
+    codec::flat::en,
+    ledger::traverse::{MultiEraBlock, MultiEraCert, MultiEraTx, MultiEraUpdate},
+};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     model::{EpochState, FixedNamespace as _, EPOCH_KEY_MARK},
+    pallas_extras,
     roll::BlockVisitor,
     CardanoLogic, PParamValue,
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct EpochStatsUpdate {
     block_fees: u64,
+    utxo_consumed: u64,
+    utxo_produced: u64,
+    gathered_deposits: u64,
+    decayed_deposits: u64,
 }
 
 impl dolos_core::EntityDelta for EpochStatsUpdate {
@@ -26,12 +34,24 @@ impl dolos_core::EntityDelta for EpochStatsUpdate {
         let entity = entity.get_or_insert_default();
 
         entity.gathered_fees += self.block_fees;
+
+        let utxo_delta = self.utxo_produced - self.utxo_consumed;
+        entity.utxos += utxo_delta;
+
+        entity.gathered_deposits += self.gathered_deposits;
+        entity.decayed_deposits += self.decayed_deposits;
     }
 
     fn undo(&mut self, entity: &mut Option<EpochState>) {
         let entity = entity.get_or_insert_default();
 
         entity.gathered_fees -= self.block_fees;
+
+        let utxo_delta = self.utxo_produced - self.utxo_consumed;
+        entity.utxos -= utxo_delta;
+
+        entity.gathered_deposits -= self.gathered_deposits;
+        entity.decayed_deposits -= self.decayed_deposits;
     }
 }
 
@@ -83,21 +103,94 @@ macro_rules! check_all_proposed {
     };
 }
 
-pub struct EpochStateVisitor;
+// TODO: get these from the protocol parameters
+const POOL_DEPOSIT: u64 = 500_000_000;
+const KEY_DEPOSIT: u64 = 2_000_000;
+
+#[derive(Default)]
+pub struct EpochStateVisitor {
+    delta: Option<EpochStatsUpdate>,
+}
 
 impl BlockVisitor for EpochStateVisitor {
     fn visit_root(
-        deltas: &mut WorkDeltas<CardanoLogic>,
-        block: &MultiEraBlock,
+        &mut self,
+        _: &mut WorkDeltas<CardanoLogic>,
+        _: &MultiEraBlock,
     ) -> Result<(), ChainError> {
-        let block_fees = block.txs().iter().filter_map(|tx| tx.fee()).sum::<u64>();
+        self.delta = Some(EpochStatsUpdate::default());
 
-        deltas.add_for_entity(EpochStatsUpdate { block_fees });
+        Ok(())
+    }
+
+    fn visit_tx(
+        &mut self,
+        _: &mut WorkDeltas<CardanoLogic>,
+        _: &MultiEraBlock,
+        tx: &MultiEraTx,
+    ) -> Result<(), ChainError> {
+        self.delta.as_mut().unwrap().block_fees += tx.fee().unwrap_or_default();
+
+        Ok(())
+    }
+
+    fn visit_input(
+        &mut self,
+        _: &mut WorkDeltas<CardanoLogic>,
+        _: &MultiEraBlock,
+        _: &MultiEraTx,
+        _: &pallas::ledger::traverse::MultiEraInput,
+        resolved: &pallas::ledger::traverse::MultiEraOutput,
+    ) -> Result<(), ChainError> {
+        let amount = resolved.value().coin();
+        self.delta.as_mut().unwrap().utxo_consumed += amount;
+
+        Ok(())
+    }
+
+    fn visit_output(
+        &mut self,
+        _: &mut WorkDeltas<CardanoLogic>,
+        _: &MultiEraBlock,
+        _: &MultiEraTx,
+        _: u32,
+        output: &pallas::ledger::traverse::MultiEraOutput,
+    ) -> Result<(), ChainError> {
+        let amount = output.value().coin();
+        self.delta.as_mut().unwrap().utxo_produced += amount;
+
+        Ok(())
+    }
+
+    fn visit_cert(
+        &mut self,
+        _: &mut WorkDeltas<CardanoLogic>,
+        _: &MultiEraBlock,
+        _: &MultiEraTx,
+        cert: &MultiEraCert,
+    ) -> Result<(), ChainError> {
+        if let Some(c) = pallas_extras::cert_as_stake_registration(cert) {
+            dbg!(c);
+            self.delta.as_mut().unwrap().gathered_deposits += KEY_DEPOSIT;
+        }
+
+        if let Some(c) = pallas_extras::cert_as_stake_deregistration(cert) {
+            dbg!(c);
+            self.delta.as_mut().unwrap().decayed_deposits += KEY_DEPOSIT;
+        }
+
+        if let Some(c) = pallas_extras::cert_to_pool_state(cert) {
+            dbg!(c);
+            self.delta.as_mut().unwrap().gathered_deposits += POOL_DEPOSIT;
+        }
+
+        // TODO: decayed deposits
 
         Ok(())
     }
 
     fn visit_update(
+        &mut self,
         deltas: &mut WorkDeltas<CardanoLogic>,
         _: &MultiEraBlock,
         _: &MultiEraTx,
@@ -143,6 +236,14 @@ impl BlockVisitor for EpochStateVisitor {
         };
 
         // TODO: cost model updates
+
+        Ok(())
+    }
+
+    fn flush(&mut self, deltas: &mut WorkDeltas<CardanoLogic>) -> Result<(), ChainError> {
+        if let Some(delta) = self.delta.take() {
+            deltas.add_for_entity(delta);
+        }
 
         Ok(())
     }
