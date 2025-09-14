@@ -29,23 +29,14 @@ pub fn lastest_immutable_slot(tip: BlockSlot, genesis: &Genesis) -> BlockSlot {
 }
 
 pub fn float_to_rational(x: f32) -> pallas::ledger::primitives::conway::RationalNumber {
-    const PRECISION: u32 = 9;
-    let scale = 10u64.pow(PRECISION);
-    let scaled = (x * scale as f32).round() as u64;
+    dbg!(&x);
+    let ratio: num_rational::Ratio<i64> = num_rational::Ratio::approximate_float(x).unwrap();
 
-    // Check if it's very close to a whole number
-    if (x.round() - x).abs() < f32::EPSILON {
-        return pallas::ledger::primitives::conway::RationalNumber {
-            numerator: x.round() as u64,
-            denominator: 1,
-        };
-    }
-
-    let gcd = gcd(scaled, scale);
+    dbg!(&ratio);
 
     pallas::ledger::primitives::conway::RationalNumber {
-        numerator: scaled / gcd,
-        denominator: scale / gcd,
+        numerator: *ratio.numer() as u64,
+        denominator: *ratio.denom() as u64,
     }
 }
 

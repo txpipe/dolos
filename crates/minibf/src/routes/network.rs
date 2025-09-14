@@ -119,8 +119,8 @@ impl<'a> IntoModel<Network> for NetworkModelBuilder<'a> {
                 reserves: self.state.reserves.to_string(),
             }),
             stake: Box::new(NetworkStake {
-                live: self.state.stake.to_string(),
-                active: self.state.stake.to_string(),
+                live: self.state.active_stake.to_string(),
+                active: self.state.active_stake.to_string(),
             }),
         })
     }
