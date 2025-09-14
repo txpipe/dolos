@@ -69,7 +69,11 @@ impl ChainSummary {
     }
 
     pub fn first(&self) -> &EraSummary {
-        self.past.first().unwrap()
+        if let Some(era) = self.past.first() {
+            era
+        } else {
+            self.edge()
+        }
     }
 
     /// Return the edge era
