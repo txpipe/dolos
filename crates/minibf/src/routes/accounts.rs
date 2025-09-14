@@ -90,11 +90,9 @@ impl<'a> IntoModel<AccountContent> for AccountModelBuilder<'a> {
             .map(|x| chain.slot_epoch(x))
             .map(|(x, _)| x);
 
-        let active = active_epoch.map(|x| x < current_epoch).unwrap_or(false);
-
         let pool_id = self
             .account_state
-            .latest_pool
+            .active_pool
             .as_ref()
             .map(bech32_pool)
             .transpose()?;
@@ -105,6 +103,8 @@ impl<'a> IntoModel<AccountContent> for AccountModelBuilder<'a> {
             .as_ref()
             .map(bech32_drep)
             .transpose()?;
+
+        let active = active_epoch.map(|x| x < current_epoch).unwrap_or(false) && pool_id.is_some();
 
         let out = AccountContent {
             stake_address,
