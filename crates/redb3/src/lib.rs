@@ -156,7 +156,7 @@ impl Table {
 
     fn write_entity(
         &self,
-        wx: &mut WriteTransaction,
+        wx: &WriteTransaction,
         key: &EntityKey,
         value: &EntityValue,
     ) -> Result<(), Error> {
@@ -174,7 +174,7 @@ impl Table {
         Ok(())
     }
 
-    fn delete_entity(&self, wx: &mut WriteTransaction, key: &EntityKey) -> Result<(), Error> {
+    fn delete_entity(&self, wx: &WriteTransaction, key: &EntityKey) -> Result<(), Error> {
         match self {
             Table::Value(def) => {
                 let mut open_table = wx.open_table(*def)?;
@@ -337,14 +337,6 @@ impl StateStore {
         Ok(())
     }
 
-    fn set_cursor(wx: &mut WriteTransaction, point: ChainPoint) -> Result<(), Error> {
-        let mut cursor = wx.open_table(CURSOR_TABLE)?;
-        let point = bincode::serialize(&point).unwrap();
-        cursor.insert(CURRENT_CURSOR_KEY, &point)?;
-
-        Ok(())
-    }
-
     fn read_cursor(rx: &ReadTransaction) -> Result<Option<ChainPoint>, Error> {
         let cursor = rx.open_table(CURSOR_TABLE)?;
         let value = cursor.get(CURRENT_CURSOR_KEY)?.map(|x| x.value());
@@ -371,9 +363,69 @@ impl StateStore {
     }
 }
 
+pub struct StateWriter {
+    tables: HashMap<Namespace, Table>,
+    wx: WriteTransaction,
+}
+
+impl StateWriter {
+    fn new(db: &Database, tables: HashMap<Namespace, Table>) -> Self {
+        let wx = db.begin_write().unwrap();
+        Self { tables, wx }
+    }
+}
+
+impl dolos_core::StateWriter for StateWriter {
+    fn set_cursor(&self, cursor: ChainPoint) -> Result<(), StateError> {
+        let mut table = self.wx.open_table(CURSOR_TABLE).map_err(Error::from)?;
+
+        let point = bincode::serialize(&cursor).unwrap();
+
+        table
+            .insert(CURRENT_CURSOR_KEY, &point)
+            .map_err(Error::from)?;
+
+        Ok(())
+    }
+
+    fn write_entity(
+        &self,
+        ns: Namespace,
+        key: &EntityKey,
+        value: &EntityValue,
+    ) -> Result<(), StateError> {
+        let table = self
+            .tables
+            .get(&ns)
+            .ok_or(StateError::NamespaceNotFound(ns))?;
+
+        table.write_entity(&self.wx, key, value)?;
+
+        Ok(())
+    }
+
+    fn delete_entity(&self, ns: Namespace, key: &EntityKey) -> Result<(), StateError> {
+        let table = self
+            .tables
+            .get(&ns)
+            .ok_or(StateError::NamespaceNotFound(ns))?;
+
+        table.delete_entity(&self.wx, key)?;
+
+        Ok(())
+    }
+
+    fn commit(self) -> Result<(), StateError> {
+        self.wx.commit().map_err(Error::from)?;
+
+        Ok(())
+    }
+}
+
 impl dolos_core::StateStore for StateStore {
     type EntityIter = EntityIter;
     type EntityValueIter = EntityValueIter;
+    type Writer = StateWriter;
 
     fn read_cursor(&self) -> Result<Option<ChainPoint>, StateError> {
         let rx = self.db().begin_read().map_err(Error::from)?;
@@ -383,14 +435,8 @@ impl dolos_core::StateStore for StateStore {
         Ok(cursor)
     }
 
-    fn set_cursor(&self, cursor: ChainPoint) -> Result<(), StateError> {
-        let mut wx = self.db().begin_write().map_err(Error::from)?;
-
-        Self::set_cursor(&mut wx, cursor)?;
-
-        wx.commit().map_err(Error::from)?;
-
-        Ok(())
+    fn start_writer(&self) -> Result<Self::Writer, StateError> {
+        Ok(StateWriter::new(&self.db, self.tables.clone()))
     }
 
     fn iter_entities(
@@ -447,62 +493,6 @@ impl dolos_core::StateStore for StateStore {
         }
 
         Ok(out)
-    }
-
-    fn write_entity(
-        &self,
-        ns: Namespace,
-        key: &EntityKey,
-        value: &EntityValue,
-    ) -> Result<(), StateError> {
-        let mut wx = self.db().begin_write().map_err(Error::from)?;
-
-        let table = self
-            .tables
-            .get(&ns)
-            .ok_or(StateError::NamespaceNotFound(ns))?;
-
-        table.write_entity(&mut wx, key, value)?;
-
-        wx.commit().map_err(Error::from)?;
-
-        Ok(())
-    }
-
-    fn write_entity_batch(
-        &self,
-        ns: Namespace,
-        batch: HashMap<EntityKey, EntityValue>,
-    ) -> Result<(), StateError> {
-        let mut wx = self.db().begin_write().map_err(Error::from)?;
-
-        let table = self
-            .tables
-            .get(&ns)
-            .ok_or(StateError::NamespaceNotFound(ns))?;
-
-        for (k, v) in batch.iter() {
-            table.write_entity(&mut wx, k, v)?;
-        }
-
-        wx.commit().map_err(Error::from)?;
-
-        Ok(())
-    }
-
-    fn delete_entity(&self, ns: Namespace, key: &EntityKey) -> Result<(), StateError> {
-        let mut wx = self.db().begin_write().map_err(Error::from)?;
-
-        let table = self
-            .tables
-            .get(&ns)
-            .ok_or(StateError::NamespaceNotFound(ns))?;
-
-        table.delete_entity(&mut wx, key)?;
-
-        wx.commit().map_err(Error::from)?;
-
-        Ok(())
     }
 
     fn get_utxos(&self, refs: Vec<TxoRef>) -> Result<UtxoMap, StateError> {

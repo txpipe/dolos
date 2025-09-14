@@ -1,4 +1,6 @@
-use dolos_core::{BrokenInvariant, ChainError, Domain, EntityKey, Genesis, StateStore as _};
+use dolos_core::{
+    BrokenInvariant, ChainError, Domain, EntityKey, Genesis, StateStore as _, StateWriter as _,
+};
 use tracing::debug;
 
 use crate::{EpochState, EraBoundary, EraSummary, PParamsSet, EPOCH_KEY_MARK};
@@ -79,9 +81,9 @@ fn bootrap_epoch<D: Domain>(domain: &D) -> Result<EpochState, ChainError> {
         rewards_to_treasury: None,
     };
 
-    domain
-        .state()
-        .write_entity_typed(&EntityKey::from(EPOCH_KEY_MARK), &epoch)?;
+    let writer = domain.state().start_writer()?;
+    writer.write_entity_typed(&EntityKey::from(EPOCH_KEY_MARK), &epoch)?;
+    writer.commit()?;
 
     Ok(epoch)
 }
@@ -105,9 +107,9 @@ fn bootstrap_eras<D: Domain>(domain: &D, epoch: &EpochState) -> Result<(), Chain
 
     let key = protocol_major.to_be_bytes();
 
-    domain
-        .state()
-        .write_entity_typed(&EntityKey::from(&key), &era)?;
+    let writer = domain.state().start_writer()?;
+    writer.write_entity_typed(&EntityKey::from(&key), &era)?;
+    writer.commit()?;
 
     Ok(())
 }

@@ -242,7 +242,7 @@ impl<S: StateStore, E: Entity> Iterator for EntityIterTyped<S, E> {
 //     }
 // }
 
-fn full_range() -> Range<EntityKey> {
+pub fn full_range() -> Range<EntityKey> {
     let start = [0u8; KEY_SIZE];
     let end = [255u8; KEY_SIZE];
     Range {
@@ -251,19 +251,8 @@ fn full_range() -> Range<EntityKey> {
     }
 }
 
-pub trait StateStore: Sized + Send + Sync + Clone {
-    type EntityIter: Iterator<Item = Result<(EntityKey, EntityValue), StateError>>;
-    type EntityValueIter: Iterator<Item = Result<EntityValue, StateError>>;
-
-    fn read_cursor(&self) -> Result<Option<ChainPoint>, StateError>;
-
+pub trait StateWriter: Sized + Send + Sync {
     fn set_cursor(&self, cursor: ChainPoint) -> Result<(), StateError>;
-
-    fn read_entities(
-        &self,
-        ns: Namespace,
-        keys: &[&EntityKey],
-    ) -> Result<Vec<Option<EntityValue>>, StateError>;
 
     fn write_entity(
         &self,
@@ -272,18 +261,16 @@ pub trait StateStore: Sized + Send + Sync + Clone {
         value: &EntityValue,
     ) -> Result<(), StateError>;
 
-    fn write_entity_batch(
-        &self,
-        ns: Namespace,
-        batch: HashMap<EntityKey, EntityValue>,
-    ) -> Result<(), StateError> {
-        for (k, v) in batch.iter() {
-            self.write_entity(ns, k, v)?;
-        }
-        Ok(())
-    }
-
     fn delete_entity(&self, ns: Namespace, key: &EntityKey) -> Result<(), StateError>;
+
+    #[must_use]
+    fn commit(self) -> Result<(), StateError>;
+
+    fn write_entity_typed<E: Entity>(&self, key: &EntityKey, entity: &E) -> Result<(), StateError> {
+        let (ns, raw) = E::encode_entity(entity);
+
+        self.write_entity(ns, key, &raw)
+    }
 
     fn save_entity(
         &self,
@@ -297,6 +284,34 @@ pub trait StateStore: Sized + Send + Sync + Clone {
             self.delete_entity(ns, key)
         }
     }
+    fn save_entity_typed<E: Entity>(
+        &self,
+        ns: Namespace,
+        key: &EntityKey,
+        maybe_entity: Option<&E>,
+    ) -> Result<(), StateError> {
+        if let Some(entity) = maybe_entity {
+            self.write_entity_typed(key, entity)
+        } else {
+            self.delete_entity(ns, key)
+        }
+    }
+}
+
+pub trait StateStore: Sized + Send + Sync + Clone {
+    type EntityIter: Iterator<Item = Result<(EntityKey, EntityValue), StateError>>;
+    type EntityValueIter: Iterator<Item = Result<EntityValue, StateError>>;
+    type Writer: StateWriter;
+
+    fn read_cursor(&self) -> Result<Option<ChainPoint>, StateError>;
+
+    fn read_entities(
+        &self,
+        ns: Namespace,
+        keys: &[&EntityKey],
+    ) -> Result<Vec<Option<EntityValue>>, StateError>;
+
+    fn start_writer(&self) -> Result<Self::Writer, StateError>;
 
     fn iter_entities(
         &self,
@@ -336,25 +351,6 @@ pub trait StateStore: Sized + Send + Sync + Clone {
         let first = raw.into_iter().next().unwrap();
 
         Ok(first)
-    }
-
-    fn write_entity_typed<E: Entity>(&self, key: &EntityKey, entity: &E) -> Result<(), StateError> {
-        let (ns, raw) = E::encode_entity(entity);
-
-        self.write_entity(ns, key, &raw)
-    }
-
-    fn save_entity_typed<E: Entity>(
-        &self,
-        ns: Namespace,
-        key: &EntityKey,
-        maybe_entity: Option<&E>,
-    ) -> Result<(), StateError> {
-        if let Some(entity) = maybe_entity {
-            self.write_entity_typed(key, entity)
-        } else {
-            self.delete_entity(ns, key)
-        }
     }
 
     fn iter_entities_typed<E: Entity>(
@@ -470,39 +466,11 @@ mod tests {
         db: Arc<RwLock<MockStoreDb>>,
     }
 
-    impl StateStore for MockStore {
-        // type Entity = TestEntity;
-        // type EntityDelta = ChangeValue;
-        type EntityIter = std::vec::IntoIter<Result<(EntityKey, EntityValue), StateError>>;
-        type EntityValueIter = std::iter::Empty<Result<EntityValue, StateError>>;
-
-        fn read_cursor(&self) -> Result<Option<ChainPoint>, StateError> {
-            let db = self.db.read().unwrap();
-            let cursor = db.cursor.clone();
-            Ok(cursor)
-        }
-
+    impl StateWriter for MockStore {
         fn set_cursor(&self, new_cursor: ChainPoint) -> Result<(), StateError> {
             let mut db = self.db.write().unwrap();
             db.cursor = Some(new_cursor);
             Ok(())
-        }
-
-        fn read_entities(
-            &self,
-            ns: Namespace,
-            keys: &[&EntityKey],
-        ) -> Result<Vec<Option<EntityValue>>, StateError> {
-            let db = self.db.read().unwrap();
-            let mut out = Vec::with_capacity(keys.len());
-
-            for key in keys {
-                let nskey = NsKey(ns, (*key).clone());
-                let value = db.entities.get(&nskey).cloned();
-                out.push(value);
-            }
-
-            Ok(out)
         }
 
         fn write_entity(
@@ -522,6 +490,45 @@ mod tests {
             let key = NsKey(ns, key.clone());
             db.entities.remove(&key);
             Ok(())
+        }
+
+        fn commit(self) -> Result<(), StateError> {
+            Ok(())
+        }
+    }
+
+    impl StateStore for MockStore {
+        // type Entity = TestEntity;
+        // type EntityDelta = ChangeValue;
+        type EntityIter = std::vec::IntoIter<Result<(EntityKey, EntityValue), StateError>>;
+        type EntityValueIter = std::iter::Empty<Result<EntityValue, StateError>>;
+        type Writer = MockStore;
+
+        fn read_cursor(&self) -> Result<Option<ChainPoint>, StateError> {
+            let db = self.db.read().unwrap();
+            let cursor = db.cursor.clone();
+            Ok(cursor)
+        }
+
+        fn start_writer(&self) -> Result<Self::Writer, StateError> {
+            Ok(self.clone())
+        }
+
+        fn read_entities(
+            &self,
+            ns: Namespace,
+            keys: &[&EntityKey],
+        ) -> Result<Vec<Option<EntityValue>>, StateError> {
+            let db = self.db.read().unwrap();
+            let mut out = Vec::with_capacity(keys.len());
+
+            for key in keys {
+                let nskey = NsKey(ns, (*key).clone());
+                let value = db.entities.get(&nskey).cloned();
+                out.push(value);
+            }
+
+            Ok(out)
         }
 
         fn iter_entities(

@@ -6,7 +6,7 @@ use rayon::prelude::*;
 use crate::{
     ArchiveStore, Block as _, BlockSlot, ChainLogic, ChainPoint, Domain, DomainError, EntityDelta,
     EntityMap, LogValue, NsKey, RawBlock, RawUtxoMap, SlotTags, StateError, StateStore as _,
-    TxoRef, WalStore as _,
+    StateWriter as _, TxoRef, WalStore as _,
 };
 
 pub struct WorkDeltas<C: ChainLogic> {
@@ -359,19 +359,17 @@ impl<C: ChainLogic> WorkBatch<C> {
     where
         D: Domain<Chain = C>,
     {
-        // TODO: semantics for starting a write transaction
+        let writer = domain.state().start_writer()?;
 
         for (key, entity) in self.entities.iter_mut() {
             let NsKey(ns, key) = key;
 
-            domain
-                .state()
-                .save_entity_typed(ns, &key, entity.as_ref())?;
+            writer.save_entity_typed(ns, &key, entity.as_ref())?;
         }
 
-        domain.state().set_cursor(self.last_point())?;
+        writer.set_cursor(self.last_point())?;
 
-        // TODO: semantics for committing a read transaction
+        writer.commit()?;
 
         Ok(())
     }
