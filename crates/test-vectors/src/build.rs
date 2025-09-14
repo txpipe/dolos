@@ -39,6 +39,14 @@ macro_rules! from_row {
     };
 }
 
+macro_rules! from_row_parse {
+    ($row:ident, $type:ty, $name:literal) => {{
+        let val = from_row!($row, String, $name);
+        let val = val.parse().unwrap();
+        val
+    }};
+}
+
 macro_rules! from_row_bigint {
     ($row:ident, $name:literal) => {
         match from_row!($row, Option<String>, $name) {
@@ -612,13 +620,13 @@ pub async fn handle_epoch_state(
         }));
 
         pp.set(PParamValue::MaxTxExUnits(ExUnits {
-            mem: from_row!(row, i32, "max_tx_ex_mem") as u64,
-            steps: from_row!(row, i32, "max_tx_ex_steps") as u64,
+            mem: from_row_parse!(row, i32, "max_tx_ex_mem"),
+            steps: from_row_parse!(row, i32, "max_tx_ex_steps"),
         }));
 
         pp.set(PParamValue::MaxBlockExUnits(ExUnits {
-            mem: from_row!(row, i32, "max_block_ex_mem") as u64,
-            steps: from_row!(row, i32, "max_block_ex_steps") as u64,
+            mem: from_row_parse!(row, i32, "max_block_ex_mem"),
+            steps: from_row_parse!(row, i32, "max_block_ex_steps"),
         }));
 
         pp_col_parse!(pp, MaxValueSize, row, "max_val_size");
