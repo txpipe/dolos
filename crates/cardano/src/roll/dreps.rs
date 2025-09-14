@@ -152,10 +152,12 @@ impl dolos_core::EntityDelta for DRepUnRegistration {
     }
 }
 
+#[derive(Default)]
 pub struct DRepStateVisitor;
 
 impl BlockVisitor for DRepStateVisitor {
     fn visit_cert(
+        &mut self,
         deltas: &mut WorkDeltas<CardanoLogic>,
         block: &MultiEraBlock,
         _: &MultiEraTx,

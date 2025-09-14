@@ -30,6 +30,7 @@ use txs::TxLogVisitor;
 pub trait BlockVisitor {
     #[allow(unused_variables)]
     fn visit_root(
+        &mut self,
         deltas: &mut WorkDeltas<CardanoLogic>,
         block: &MultiEraBlock,
     ) -> Result<(), ChainError> {
@@ -38,6 +39,7 @@ pub trait BlockVisitor {
 
     #[allow(unused_variables)]
     fn visit_tx(
+        &mut self,
         deltas: &mut WorkDeltas<CardanoLogic>,
         block: &MultiEraBlock,
         tx: &MultiEraTx,
@@ -47,6 +49,7 @@ pub trait BlockVisitor {
 
     #[allow(unused_variables)]
     fn visit_input(
+        &mut self,
         deltas: &mut WorkDeltas<CardanoLogic>,
         block: &MultiEraBlock,
         tx: &MultiEraTx,
@@ -58,6 +61,7 @@ pub trait BlockVisitor {
 
     #[allow(unused_variables)]
     fn visit_output(
+        &mut self,
         deltas: &mut WorkDeltas<CardanoLogic>,
         block: &MultiEraBlock,
         tx: &MultiEraTx,
@@ -69,6 +73,7 @@ pub trait BlockVisitor {
 
     #[allow(unused_variables)]
     fn visit_mint(
+        &mut self,
         deltas: &mut WorkDeltas<CardanoLogic>,
         block: &MultiEraBlock,
         tx: &MultiEraTx,
@@ -79,6 +84,7 @@ pub trait BlockVisitor {
 
     #[allow(unused_variables)]
     fn visit_cert(
+        &mut self,
         deltas: &mut WorkDeltas<CardanoLogic>,
         block: &MultiEraBlock,
         tx: &MultiEraTx,
@@ -89,6 +95,7 @@ pub trait BlockVisitor {
 
     #[allow(unused_variables)]
     fn visit_withdrawal(
+        &mut self,
         deltas: &mut WorkDeltas<CardanoLogic>,
         block: &MultiEraBlock,
         tx: &MultiEraTx,
@@ -100,6 +107,7 @@ pub trait BlockVisitor {
 
     #[allow(unused_variables)]
     fn visit_update(
+        &mut self,
         deltas: &mut WorkDeltas<CardanoLogic>,
         block: &MultiEraBlock,
         tx: &MultiEraTx,
@@ -107,35 +115,56 @@ pub trait BlockVisitor {
     ) -> Result<(), ChainError> {
         Ok(())
     }
+
+    #[allow(unused_variables)]
+    fn flush(&mut self, deltas: &mut WorkDeltas<CardanoLogic>) -> Result<(), ChainError> {
+        Ok(())
+    }
 }
 
 macro_rules! maybe_visit {
-    ($self:expr, $deltas:expr, $config:ident, $type:tt, $method:ident, $($args:tt)*) => {{
-        if $self.config.$config {
-            $type::$method(&mut $deltas, $($args)*)?;
+    ($self:expr, $deltas:expr, $visitor:ident, $method:ident, $($args:tt)*) => {{
+        if $self.config.$visitor {
+            $self.$visitor.$method(&mut $deltas, $($args)*)?;
         }
     }};
 }
 
 macro_rules! visit_all {
     ($self:ident, $deltas:expr, $method:ident, $($args:tt)*) => {
-        maybe_visit!($self, $deltas, account_state, AccountVisitor, $method, $($args)*);
-        maybe_visit!($self, $deltas, asset_state, AssetStateVisitor, $method, $($args)*);
-        maybe_visit!($self, $deltas, drep_state, DRepStateVisitor, $method, $($args)*);
-        maybe_visit!($self, $deltas, epoch_state, EpochStateVisitor, $method, $($args)*);
-        maybe_visit!($self, $deltas, pool_state, PoolStateVisitor, $method, $($args)*);
-        maybe_visit!($self, $deltas, tx_logs, TxLogVisitor, $method, $($args)*);
+        maybe_visit!($self, $deltas, account_state, $method, $($args)*);
+        maybe_visit!($self, $deltas, asset_state, $method, $($args)*);
+        maybe_visit!($self, $deltas, drep_state, $method, $($args)*);
+        maybe_visit!($self, $deltas, epoch_state, $method, $($args)*);
+        maybe_visit!($self, $deltas, pool_state, $method, $($args)*);
+        maybe_visit!($self, $deltas, tx_logs, $method, $($args)*);
     };
 }
 
 pub struct DeltaBuilder<'a> {
     config: TrackConfig,
     work: &'a mut WorkBlock<CardanoLogic>,
+
+    account_state: AccountVisitor,
+    asset_state: AssetStateVisitor,
+    drep_state: DRepStateVisitor,
+    epoch_state: EpochStateVisitor,
+    pool_state: PoolStateVisitor,
+    tx_logs: TxLogVisitor,
 }
 
 impl<'a> DeltaBuilder<'a> {
     pub fn new(config: TrackConfig, work: &'a mut WorkBlock<CardanoLogic>) -> Self {
-        Self { config, work }
+        Self {
+            config,
+            work,
+            account_state: Default::default(),
+            asset_state: Default::default(),
+            drep_state: Default::default(),
+            epoch_state: Default::default(),
+            pool_state: Default::default(),
+            tx_logs: Default::default(),
+        }
     }
 
     pub fn crawl(
@@ -192,6 +221,8 @@ impl<'a> DeltaBuilder<'a> {
                 visit_all!(self, deltas, visit_update, block, &tx, &update);
             }
         }
+
+        visit_all!(self, deltas, flush,);
 
         self.work.deltas = deltas;
 
