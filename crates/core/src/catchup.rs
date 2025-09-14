@@ -1,6 +1,4 @@
-use crate::{
-    batch::WorkBatch, BlockSlot, ChainLogic, Domain, DomainError, RawBlock, StateStore as _,
-};
+use crate::{batch::WorkBatch, BlockSlot, ChainLogic, Domain, DomainError, RawBlock};
 
 fn import_contiguous_batch<D, C>(domain: &D, batch: &mut WorkBatch<C>) -> Result<(), DomainError>
 where

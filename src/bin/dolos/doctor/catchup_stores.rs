@@ -1,6 +1,5 @@
 use itertools::Itertools;
 use miette::{Context, IntoDiagnostic};
-use tracing::debug;
 
 use dolos::prelude::*;
 

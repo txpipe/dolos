@@ -154,8 +154,8 @@ impl AssetState {
         self.quantity_bytes = new;
     }
 
-    pub fn quantity(&self) -> u128 {
-        u128::from_be_bytes(self.quantity_bytes)
+    pub fn quantity(&self) -> i128 {
+        i128::from_be_bytes(self.quantity_bytes)
     }
 }
 

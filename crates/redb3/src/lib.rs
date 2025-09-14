@@ -469,6 +469,27 @@ impl dolos_core::StateStore for StateStore {
         Ok(())
     }
 
+    fn write_entity_batch(
+        &self,
+        ns: Namespace,
+        batch: HashMap<EntityKey, EntityValue>,
+    ) -> Result<(), StateError> {
+        let mut wx = self.db().begin_write().map_err(Error::from)?;
+
+        let table = self
+            .tables
+            .get(&ns)
+            .ok_or(StateError::NamespaceNotFound(ns))?;
+
+        for (k, v) in batch.iter() {
+            table.write_entity(&mut wx, k, v)?;
+        }
+
+        wx.commit().map_err(Error::from)?;
+
+        Ok(())
+    }
+
     fn delete_entity(&self, ns: Namespace, key: &EntityKey) -> Result<(), StateError> {
         let mut wx = self.db().begin_write().map_err(Error::from)?;
 
