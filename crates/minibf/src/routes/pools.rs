@@ -143,7 +143,7 @@ where
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let filtered =
-        iter.filter_ok(|(_, account)| account.latest_pool.as_ref().is_some_and(|f| f == &operator));
+        iter.filter_ok(|(_, account)| account.active_pool.as_ref().is_some_and(|f| f == &operator));
 
     let pagination = Pagination::try_from(params)?;
 
