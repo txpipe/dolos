@@ -57,10 +57,10 @@ pub fn load_compiler<D: Domain>(
     let pparams = build_pparams::<D>(domain)?;
 
     let cursor = domain.state().read_cursor()?.ok_or(Error::TipNotResolved)?;
+    let slot = cursor.slot();
+    let hash = cursor.hash().map(|h| h.to_vec()).unwrap_or_default();
 
-    let tip = tx3_cardano::ChainPoint {
-        slot: cursor.slot(),
-    };
+    let tip = tx3_cardano::ChainPoint { slot, hash };
 
     let compiler = tx3_cardano::Compiler::new(
         pparams,
