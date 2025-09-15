@@ -1,7 +1,7 @@
 use pallas::ledger::primitives::conway::CostModels;
 use std::collections::HashMap;
 
-use dolos_core::{ChainPoint, Domain, Genesis, StateStore as _};
+use dolos_core::{Domain, Genesis, StateStore as _};
 
 use crate::{Config, Error};
 
@@ -65,14 +65,18 @@ pub fn load_compiler<D: Domain>(
 ) -> Result<tx3_cardano::Compiler, Error> {
     let pparams = build_pparams::<D>(domain)?;
 
-    let cursor = ledger.cursor()?.ok_or(Error::TipNotResolved)?;
+    let cursor = domain.state().read_cursor()?.ok_or(Error::TipNotResolved)?;
+    let slot = cursor.slot();
+    let hash = cursor.hash().map(|h| h.to_vec()).unwrap_or_default();
 
-    let tip = match cursor {
-        ChainPoint::Specific(slot, hash) => tx3_cardano::ChainPoint {
-            slot,
-            hash: hash.to_vec(),
-        },
-        ChainPoint::Origin => return Err(Error::TipNotResolved),
+    let chain_summary =
+        dolos_cardano::load_era_summary(domain).map_err(|_| Error::TipNotResolved)?;
+    let timestamp = chain_summary.slot_time(slot) as u128 * 1000;
+
+    let tip = tx3_cardano::ChainPoint {
+        slot,
+        hash,
+        timestamp,
     };
 
     let compiler = tx3_cardano::Compiler::new(
