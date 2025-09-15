@@ -17,13 +17,13 @@ calculated_active AS (
           SELECT COALESCE(MAX(dr.tx_id), 1)
           FROM drep_registration dr
           JOIN tx ON tx.id = dr.tx_id
-	      JOIN block b ON b.id = tx.block_id
+	        JOIN block b ON b.id = tx.block_id
           WHERE b.epoch_no <= {{ epoch }} AND dr.drep_hash_id = dh.id AND dr.deposit > 0
         ) > (
           SELECT COALESCE(MAX(dr.tx_id), -1)
           FROM drep_registration dr
           JOIN tx ON tx.id = dr.tx_id
-	      JOIN block b ON b.id = tx.block_id
+	        JOIN block b ON b.id = tx.block_id
           WHERE b.epoch_no <= {{ epoch }} AND dr.drep_hash_id = dh.id AND dr.deposit < 0
         ) THEN true
         ELSE false
@@ -46,7 +46,7 @@ calculated_active AS (
         FROM drep_registration dr
         JOIN tx ON tx.id = dr.tx_id
         JOIN block b ON b.id = tx.block_id
-        where b.epoch_no <= {{ epoch }} AND dr.drep_hash_id = dh.id
+        WHERE b.epoch_no <= {{ epoch }} AND dr.drep_hash_id = dh.id
         
         UNION
 
