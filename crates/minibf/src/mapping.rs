@@ -44,7 +44,7 @@ use blockfrost_openapi::models::{
     tx_content_withdrawals_inner::TxContentWithdrawalsInner,
 };
 
-use dolos_cardano::{ChainSummary, PParamsSet};
+use dolos_cardano::{pallas_extras, ChainSummary, PParamsSet};
 use dolos_core::{EraCbor, TxHash, TxOrder, TxoIdx};
 
 macro_rules! try_into_or_500 {
@@ -559,35 +559,25 @@ impl<'a> TxModelBuilder<'a> {
             .and_then(|x| x.drep_deposit())
             .unwrap_or_default();
 
-        Ok(self
+        let out = self
             .tx()?
             .certs()
             .iter()
-            .flat_map(|x| match x {
-                MultiEraCert::AlonzoCompatible(alonzo) => match alonzo.deref().deref() {
-                    pallas::ledger::primitives::alonzo::Certificate::StakeRegistration(_) => {
-                        Some(key_deposit)
-                    }
-                    pallas::ledger::primitives::alonzo::Certificate::PoolRegistration {
-                        ..
-                    } => Some(pool_deposit),
-                    _ => None,
-                },
-                MultiEraCert::Conway(conway) => match conway.deref().deref() {
-                    pallas::ledger::primitives::conway::Certificate::StakeRegistration(_) => {
-                        Some(key_deposit)
-                    }
-                    pallas::ledger::primitives::conway::Certificate::PoolRegistration {
-                        ..
-                    } => Some(pool_deposit),
-                    pallas::ledger::primitives::conway::Certificate::RegDRepCert { .. } => {
-                        Some(drep_deposit)
-                    }
-                    _ => None,
-                },
-                _ => None,
+            .flat_map(|x| {
+                if pallas_extras::cert_as_stake_registration(x).is_some() {
+                    dbg!(x);
+                    return Some(dbg!(key_deposit));
+                }
+
+                if pallas_extras::cert_to_pool_state(x).is_some() {
+                    return Some(dbg!(pool_deposit));
+                }
+
+                return None;
             })
-            .sum())
+            .sum();
+
+        Ok(out)
     }
 
     pub fn load_dep(&mut self, key: TxHash, cbor: &'a EraCbor) -> Result<(), StatusCode> {

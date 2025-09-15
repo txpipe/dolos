@@ -132,15 +132,10 @@ pub fn cert_as_stake_registration(cert: &MultiEraCert) -> Option<StakeCredential
     match cert {
         MultiEraCert::AlonzoCompatible(cow) => match cow.deref().deref() {
             AlonzoCert::StakeRegistration(credential) => Some(credential.clone()),
-            AlonzoCert::StakeDeregistration(credential) => Some(credential.clone()),
-            AlonzoCert::StakeDelegation(credential, _) => Some(credential.clone()),
-
             _ => None,
         },
         MultiEraCert::Conway(cow) => match cow.deref().deref() {
             ConwayCert::StakeRegistration(credential) => Some(credential.clone()),
-            ConwayCert::StakeDeregistration(credential) => Some(credential.clone()),
-            ConwayCert::StakeDelegation(credential, _) => Some(credential.clone()),
             _ => None,
         },
         _ => None,
