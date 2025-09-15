@@ -6,7 +6,6 @@ WITH queried_epoch AS (
   JOIN epoch_param ep ON (ep.epoch_no = e.no)
   WHERE e.no = {{ epoch }}
   ORDER BY e.no DESC
-  LIMIT 1
 ),
 
 calculated_active AS (
@@ -63,7 +62,7 @@ calculated_active AS (
 )
 
 SELECT 
-  dh.raw as "drep_id",
+  dh.view AS "drep_id",
   COALESCE(dd.amount, 0)::TEXT AS "voting_power",
   NOT ca.registered AS "retired",
   ca.initial_slot,

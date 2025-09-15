@@ -8,8 +8,8 @@ use std::{
 use bb8::Pool;
 use bb8_postgres::PostgresConnectionManager;
 use dolos_cardano::{
-    build_schema, include, AccountState, AssetState, EpochState, FixedNamespace, PParamValue,
-    PParamsSet, PoolState, EPOCH_KEY_GO, EPOCH_KEY_MARK, EPOCH_KEY_SET,
+    build_schema, include, AccountState, AssetState, DRepState, EpochState, FixedNamespace,
+    PParamValue, PParamsSet, PoolState, EPOCH_KEY_GO, EPOCH_KEY_MARK, EPOCH_KEY_SET,
 };
 use dolos_core::{EntityKey, Genesis, StateStore as _, StateWriter};
 use handlebars::Handlebars;
@@ -75,7 +75,7 @@ macro_rules! from_row_ratio {
 #[allow(clippy::enum_variant_names)]
 pub enum KnownNetwork {
     CardanoMainnet,
-    CardanoPreProd,
+    CardanoPreprod,
     CardanoPreview,
 }
 
@@ -83,7 +83,7 @@ impl KnownNetwork {
     pub fn load_included_genesis(&self) -> Genesis {
         match self {
             KnownNetwork::CardanoMainnet => include::mainnet::load(),
-            KnownNetwork::CardanoPreProd => include::preprod::load(),
+            KnownNetwork::CardanoPreprod => include::preprod::load(),
             KnownNetwork::CardanoPreview => include::preview::load(),
         }
     }
@@ -152,6 +152,7 @@ pub async fn run(args: &Args) -> miette::Result<()> {
             "assets" => handle_asset_state(args, &pool, &state, &registry).await?,
             "pools" => handle_pool_state(args, &pool, &state, &registry).await?,
             "epochs" => handle_epoch_state(args, &pool, &state, &registry).await?,
+            "dreps" => handle_drep_state(args, &pool, &state, &registry).await?,
             _ => bail!("invalid namespace"),
         }
     } else {
@@ -159,6 +160,7 @@ pub async fn run(args: &Args) -> miette::Result<()> {
         handle_asset_state(args, &pool, &state, &registry).await?;
         handle_pool_state(args, &pool, &state, &registry).await?;
         handle_epoch_state(args, &pool, &state, &registry).await?;
+        handle_drep_state(args, &pool, &state, &registry).await?;
     }
 
     Ok(())
@@ -690,6 +692,88 @@ pub async fn handle_epoch_state(
         .into_diagnostic()
         .context("writing entity")?;
     tracing::info!("Finished writing epochs.");
+
+    Ok(())
+}
+
+pub async fn handle_drep_state(
+    args: &Args,
+    pool: &Pool<PostgresConnectionManager<NoTls>>,
+    state: &dolos_redb3::StateStore,
+    registry: &Handlebars<'static>,
+) -> miette::Result<()> {
+    let query = registry
+        .render(
+            "dreps",
+            &serde_json::json!({ "epoch": args.epoch, "limit": match args.limit {
+            Some(limit) => format!("LIMIT {limit}"),
+            None => "".to_string()
+        } }),
+        )
+        .into_diagnostic()
+        .context("rendering query")?;
+
+    let conn = pool
+        .get()
+        .await
+        .into_diagnostic()
+        .context("getting connection from pool")?;
+
+    let writer = state.start_writer().into_diagnostic()?;
+
+    tracing::info!("Querying dreps...");
+    for (i, row) in conn
+        .query(&query, &[])
+        .await
+        .into_diagnostic()
+        .context("executing query")?
+        .iter()
+        .enumerate()
+    {
+        if i % 1000 == 1 {
+            tracing::info!(i = i, "Processing dreps...");
+        }
+
+        let drep_id = match from_row!(row, &str, "drep_id") {
+            "drep_always_abstain" => vec![0],
+            "drep_always_no_confidence" => vec![1],
+            drep_id => {
+                bech32::decode(drep_id)
+                    .into_diagnostic()
+                    .context("decoding drep")?
+                    .1
+            }
+        };
+
+        let initial_slot = from_row!(row, Option<i64>, "initial_slot").map(|x| x as u64);
+        let voting_power = from_row!(row, String, "voting_power")
+            .parse::<u64>()
+            .into_diagnostic()
+            .context("parsing drep voting power")?;
+        let last_active_slot = from_row!(row, Option<i64>, "last_active_slot").map(|x| x as u64);
+        let retired = from_row!(row, bool, "retired");
+
+        let drep = DRepState {
+            drep_id: drep_id.clone(),
+            initial_slot,
+            voting_power,
+            last_active_slot,
+            retired,
+        };
+
+        writer
+            .write_entity_typed::<DRepState>(&EntityKey::from(drep_id), &drep)
+            .into_diagnostic()?;
+    }
+
+    tracing::info!("Finished processing dreps.");
+
+    tracing::info!("committing dreps...");
+    writer
+        .commit()
+        .into_diagnostic()
+        .context("writing entity")?;
+    tracing::info!("Finished writing dreps.");
 
     Ok(())
 }
