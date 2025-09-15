@@ -3,7 +3,7 @@ use ::redb::{TableDefinition, WriteTransaction};
 use redb::Range;
 use tracing::trace;
 
-use dolos_core::{BlockBody, BlockSlot, LedgerDelta};
+use dolos_core::{BlockBody, BlockSlot, ChainPoint, RawBlock};
 
 type Error = super::RedbArchiveError;
 
@@ -34,17 +34,20 @@ impl BlocksTable {
         }
     }
 
-    pub fn apply(wx: &WriteTransaction, delta: &LedgerDelta) -> Result<(), Error> {
+    pub fn apply(wx: &WriteTransaction, point: &ChainPoint, block: &RawBlock) -> Result<(), Error> {
         let mut table = wx.open_table(Self::DEF)?;
-        if let Some(point) = &delta.new_position {
-            let slot = point.slot();
-            table.insert(slot, delta.new_block.clone())?;
-        }
 
-        if let Some(point) = &delta.undone_position {
-            let slot = point.slot();
-            table.remove(slot)?;
-        }
+        let slot = point.slot();
+        table.insert(slot, block.clone())?;
+
+        Ok(())
+    }
+
+    pub fn undo(wx: &WriteTransaction, point: &ChainPoint) -> Result<(), Error> {
+        let mut table = wx.open_table(Self::DEF)?;
+
+        let slot = point.slot();
+        table.remove(slot)?;
 
         Ok(())
     }

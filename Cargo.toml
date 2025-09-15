@@ -30,6 +30,8 @@ futures-util.workspace = true
 serde_json.workspace = true
 base64.workspace = true
 reqwest.workspace = true
+rayon.workspace = true
+bech32.workspace = true
 
 dolos-core = { path = "crates/core" }
 dolos-cardano = { path = "crates/cardano", features = ["include-genesis"] }
@@ -42,7 +44,6 @@ dolos-trp = { path = "crates/trp", optional = true }
 gasket = { version = "^0.9", features = ["derive"] }
 # gasket = { path = "../../construkts/gasket-rs/gasket", features = ["derive"] }
 
-bech32 = "0.11.0"
 clap = { version = "4.5.37", features = ["derive"] }
 log = "0.4.18"
 config = { version = "0.14.1", default-features = false, features = ["toml", "json"] }
@@ -62,7 +63,6 @@ console-subscriber = { version = "0.3.0", optional = true }
 flate2 = "1.0.34"
 tar = "0.4.41"
 paste = "1.0.15"
-rayon = "1.11.0"
 
 
 # gRPC dependencies
@@ -115,10 +115,10 @@ inherits = "release"
 lto = "thin"
 
 [workspace]
-members = ["crates/cardano", "crates/core", "crates/testing", "crates/minibf", "crates/redb", "xtask", "crates/redb3"]
+members = ["crates/cardano", "crates/core", "crates/testing", "crates/minibf", "crates/redb", "xtask", "crates/redb3", "crates/test-vectors"]
 
 [workspace.package]
-version = "0.32.0"
+version = "1.0.0-beta.0"
 edition = "2021"
 repository = "https://github.com/txpipe/dolos"
 homepage = "https://github.com/txpipe/dolos"
@@ -128,8 +128,8 @@ readme = "README.md"
 authors = ["TxPipe <hello@txpipe.io>"]
 
 [workspace.dependencies]
-pallas = { git = "https://github.com/txpipe/pallas.git", rev = "b9175a7", features = ["hardano", "phase2"] }
-# pallas = { version = "1.0.0-alpha.2", features = ["hardano"] }
+pallas = { git = "https://github.com/txpipe/pallas.git", rev = "38546da", features = ["hardano", "phase2"] }
+# pallas = { version = "1.0.0-alpha.2", features = ["hardano", "phase2"] }
 # pallas = { path = "../pallas/pallas", features = ["hardano", "phase2"] }
 
 thiserror = "2.0.12"
@@ -149,7 +149,9 @@ tower = "0.4"
 tower-http = { version = "0.6.1", features = ["cors", "trace", "normalize-path"] }
 serde_json = "1.0.122"
 base64 = "0.22.1"
+bech32 = "0.11.0"
 reqwest = { version = "0.12.7", default-features = false, features = ["blocking", "rustls-tls"] }
+rayon = "1.11.0"
 
 [workspace.metadata.release]
 push = false

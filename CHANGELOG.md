@@ -2,6 +2,60 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.0-beta.0] - 2025-09-15
+
+### 🚀 Features
+
+- *(bin)* Add helper command to query state and spdd
+- *(cardano)* Support forced stop epoch via config (#673)
+- *(cli)* Add clear-state data command (#677)
+- *(minibf)* Use active pool for delegation filtering
+
+### 🐛 Bug Fixes
+
+- *(cardano)* Use stake address for pool delegator visitor
+- *(minibf)* Adjust query params to new entity key size
+- *(minibf)* Fix logic for account active flag
+- *(cardano)* Contemplate edge as first era
+- *(minibf)* Use correct header for drep ids
+- *(cardano)* Fix bad filtering of stake certs
+- *(minibf)* Load pparams when doing deposit calc
+- *(core)* Parse origin chain point bytes correctly
+- *(cli)* Always fast-forward wal if behind
+- *(minibf)* Extend max scan window for metadata
+- *(minibf)* Fix mappings of stake values
+- *(cli)* Use active pool for spdd command
+
+### 🚜 Refactor
+
+- *(cardano)* Support visitor pattern for inputs
+- *(cardano)* Improve seen addresses visitor style
+- *(cardano)* Use rayon for input decoding
+- *(cardano)* Handle epoch boundary as a block visitor
+- *(cardano)* Move visitors to their own module
+- Overhaul state using custom delta types
+- Turn WAL into a sequential delta store
+- Move tip broadcast to the domain
+- *(cardano)* Include withdrawals and vote delegation in roll logic
+- *(cardano)* Move pparams to state storage
+- *(cardano)* Compute pparams on roll (#668)
+- *(cardano)* Revisit epoch rotation approach (#669)
+- *(core)* Merge utxoset and state storage (#670)
+- *(cardano)* Avoid excessive data in account entity (#672)
+- *(cardano)* Group all boundary work in a single struct (#674)
+- *(cardano)* Support block visitors with state (#675)
+- *(core)* Introduce state writer approach (#676)
+
+### 🧪 Testing
+
+- Introduce test-vectors crate (#666)
+
+### ⚙️ Miscellaneous Tasks
+
+- Fix post-rebase compiler errors
+- *(minibf)* Add root and health endpoints (#663)
+- Remove excessive dbg! statements
+
 ## [0.32.0] - 2025-09-03
 
 ### 🚀 Features
@@ -14,6 +68,10 @@ All notable changes to this project will be documented in this file.
 - *(minibf)* Compute deposits correctly on tx mappings (#659)
 - *(minibf)* Improve epoch params mappings (#660)
 - *(cardano)* Compute drep state values during roll (#658)
+
+### Release
+
+- V0.32.0
 
 ## [0.31.1] - 2025-08-25
 

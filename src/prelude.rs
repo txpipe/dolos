@@ -33,9 +33,6 @@ pub enum Error {
     #[error("state error: {0}")]
     StateError(#[from] StateError),
 
-    #[error("state3 error: {0}")]
-    State3Error(#[from] State3Error),
-
     #[error("{0}")]
     Message(String),
 

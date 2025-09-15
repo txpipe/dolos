@@ -7,14 +7,13 @@ use pallas::{
         addresses::{Address, Network, ShelleyPaymentPart, StakeAddress, StakePayload},
         primitives::{
             alonzo::{self, Certificate as AlonzoCert},
-            conway::{Certificate as ConwayCert, DatumOption, RedeemerTag, ScriptRef},
+            conway::{Certificate as ConwayCert, DRep, DatumOption, RedeemerTag, ScriptRef},
             ExUnitPrices, StakeCredential,
         },
         traverse::{
             ComputeHash, MultiEraBlock, MultiEraCert, MultiEraHeader, MultiEraInput,
             MultiEraOutput, MultiEraRedeemer, MultiEraTx, MultiEraValue, OriginalHash,
         },
-        validate::utils::MultiEraProtocolParameters,
     },
 };
 use std::{collections::HashMap, ops::Deref};
@@ -45,7 +44,7 @@ use blockfrost_openapi::models::{
     tx_content_withdrawals_inner::TxContentWithdrawalsInner,
 };
 
-use dolos_cardano::pparams::ChainSummary;
+use dolos_cardano::{pallas_extras, ChainSummary, PParamsSet};
 use dolos_core::{EraCbor, TxHash, TxOrder, TxoIdx};
 
 macro_rules! try_into_or_500 {
@@ -76,8 +75,25 @@ pub fn bech32(hrp: bech32::Hrp, key: impl AsRef<[u8]>) -> Result<String, StatusC
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
-pub fn bech32_drep(key: impl AsRef<[u8]>) -> Result<String, StatusCode> {
-    bech32(DREP_HRP, key)
+pub fn bech32_drep(drep: &DRep) -> Result<String, StatusCode> {
+    let mut payload = [0; 29];
+
+    let key_prefix: [u8; 1] = [0b00100010];
+    let script_prefix: [u8; 1] = [0b00100011];
+
+    match drep {
+        DRep::Key(key) => {
+            payload[..1].copy_from_slice(&key_prefix);
+            payload[1..].copy_from_slice(key.as_slice());
+        }
+        DRep::Script(key) => {
+            payload[..1].copy_from_slice(&script_prefix);
+            payload[1..].copy_from_slice(key.as_slice());
+        }
+        _ => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+    };
+
+    bech32(DREP_HRP, payload)
 }
 
 pub fn bech32_pool(key: impl AsRef<[u8]>) -> Result<String, StatusCode> {
@@ -445,6 +461,7 @@ impl<'a> IntoModel<TxContentUtxoInputsInner> for UtxoInputModelBuilder<'a> {
 #[derive(Debug)]
 pub struct TxModelBuilder<'a> {
     chain: Option<ChainSummary>,
+    pparams: Option<PParamsSet>,
     network: Option<Network>,
     block: MultiEraBlock<'a>,
     order: TxOrder,
@@ -459,6 +476,7 @@ impl<'a> TxModelBuilder<'a> {
             block,
             order,
             chain: None,
+            pparams: None,
             network: None,
             deps: HashMap::new(),
         })
@@ -467,6 +485,13 @@ impl<'a> TxModelBuilder<'a> {
     pub fn with_chain(self, chain: ChainSummary) -> Self {
         Self {
             chain: Some(chain),
+            ..self
+        }
+    }
+
+    pub fn with_pparams(self, pparams: PParamsSet) -> Self {
+        Self {
+            pparams: Some(pparams),
             ..self
         }
     }
@@ -516,60 +541,43 @@ impl<'a> TxModelBuilder<'a> {
     }
 
     pub fn deposit(&self) -> Result<u64, StatusCode> {
-        let era = self
-            .chain
+        let key_deposit = self
+            .pparams
             .as_ref()
-            .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?
-            .era_for_slot(self.block.slot());
+            .and_then(|x| x.key_deposit())
+            .unwrap_or_default();
 
-        let key_deposit = match &era.pparams {
-            MultiEraProtocolParameters::Alonzo(x) => x.key_deposit,
-            MultiEraProtocolParameters::Babbage(x) => x.key_deposit,
-            MultiEraProtocolParameters::Conway(x) => x.key_deposit,
-            _ => return Err(StatusCode::INTERNAL_SERVER_ERROR),
-        };
+        let pool_deposit = self
+            .pparams
+            .as_ref()
+            .and_then(|x| x.pool_deposit())
+            .unwrap_or_default();
 
-        let pool_deposit = match &era.pparams {
-            MultiEraProtocolParameters::Alonzo(x) => x.pool_deposit,
-            MultiEraProtocolParameters::Babbage(x) => x.pool_deposit,
-            MultiEraProtocolParameters::Conway(x) => x.pool_deposit,
-            _ => return Err(StatusCode::INTERNAL_SERVER_ERROR),
-        };
+        let drep_deposit = self
+            .pparams
+            .as_ref()
+            .and_then(|x| x.drep_deposit())
+            .unwrap_or_default();
 
-        let drep_deposit = match &era.pparams {
-            MultiEraProtocolParameters::Conway(x) => Some(x.drep_deposit),
-            _ => None,
-        };
-
-        Ok(self
+        let out = self
             .tx()?
             .certs()
             .iter()
-            .flat_map(|x| match x {
-                MultiEraCert::AlonzoCompatible(alonzo) => match alonzo.deref().deref() {
-                    pallas::ledger::primitives::alonzo::Certificate::StakeRegistration(_) => {
-                        Some(key_deposit)
-                    }
-                    pallas::ledger::primitives::alonzo::Certificate::PoolRegistration {
-                        ..
-                    } => Some(pool_deposit),
-                    _ => None,
-                },
-                MultiEraCert::Conway(conway) => match conway.deref().deref() {
-                    pallas::ledger::primitives::conway::Certificate::StakeRegistration(_) => {
-                        Some(key_deposit)
-                    }
-                    pallas::ledger::primitives::conway::Certificate::PoolRegistration {
-                        ..
-                    } => Some(pool_deposit),
-                    pallas::ledger::primitives::conway::Certificate::RegDRepCert { .. } => {
-                        drep_deposit
-                    }
-                    _ => None,
-                },
-                _ => None,
+            .flat_map(|x| {
+                if pallas_extras::cert_as_stake_registration(x).is_some() {
+                    dbg!(x);
+                    return Some(dbg!(key_deposit));
+                }
+
+                if pallas_extras::cert_to_pool_state(x).is_some() {
+                    return Some(dbg!(pool_deposit));
+                }
+
+                return None;
             })
-            .sum())
+            .sum();
+
+        Ok(out)
     }
 
     pub fn load_dep(&mut self, key: TxHash, cbor: &'a EraCbor) -> Result<(), StatusCode> {
@@ -717,7 +725,7 @@ impl IntoModel<TxContent> for TxModelBuilder<'_> {
         let txouts = tx.outputs();
         let chain = self.chain_or_500()?;
 
-        let block_time = dolos_cardano::slot_time(block.slot(), chain);
+        let block_time = chain.slot_time(block.slot());
 
         let tx = TxContent {
             hash: tx.hash().to_string(),
@@ -995,18 +1003,11 @@ impl IntoModel<Vec<TxContentRedeemersInner>> for TxModelBuilder<'_> {
         let tx = self.tx()?;
         let redeemers = tx.redeemers();
 
-        let era = self
-            .chain
+        let prices = self
+            .pparams
             .as_ref()
-            .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?
-            .era_for_slot(self.block.slot());
-
-        let prices = match &era.pparams {
-            MultiEraProtocolParameters::Alonzo(x) => x.execution_costs.clone(),
-            MultiEraProtocolParameters::Babbage(x) => x.execution_costs.clone(),
-            MultiEraProtocolParameters::Conway(x) => x.execution_costs.clone(),
-            _ => return Err(StatusCode::INTERNAL_SERVER_ERROR),
-        };
+            .and_then(|x| x.execution_costs())
+            .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
 
         let items = redeemers
             .into_iter()
@@ -1088,7 +1089,7 @@ impl IntoModel<Vec<TxContentDelegationsInner>> for TxModelBuilder<'_> {
         let active_epoch = self
             .chain
             .as_ref()
-            .map(|c| dolos_cardano::slot_epoch(self.block.slot(), c))
+            .map(|c| c.slot_epoch(self.block.slot()))
             .map(|(a, _)| (a + 1) as i32)
             .unwrap_or_default();
 
@@ -1430,7 +1431,7 @@ impl IntoModel<Vec<TxContentPoolCertsInner>> for TxModelBuilder<'_> {
         let epoch = self
             .chain
             .as_ref()
-            .map(|c| dolos_cardano::slot_epoch(self.block.slot(), c))
+            .map(|c| c.slot_epoch(self.block.slot()))
             .map(|(a, _)| a)
             .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -1677,14 +1678,14 @@ impl<'a> IntoModel<BlockContent> for BlockModelBuilder<'a> {
         let (epoch, epoch_slot) = self
             .chain
             .as_ref()
-            .map(|c| dolos_cardano::slot_epoch(block.slot(), c))
+            .map(|c| c.slot_epoch(block.slot()))
             .map(|(a, b)| (Some(a), Some(b)))
             .unwrap_or_default();
 
         let block_time = self
             .chain
             .as_ref()
-            .map(|c| dolos_cardano::slot_time(block.slot(), c))
+            .map(|c| c.slot_time(block.slot()))
             .map(|x| Some(x as i32))
             .unwrap_or_default();
 

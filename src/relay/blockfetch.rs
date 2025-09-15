@@ -5,21 +5,16 @@ use crate::prelude::*;
 
 async fn send_batch<W: WalStore>(
     wal: &W,
-    s1: LogSeq,
-    s2: LogSeq,
+    s1: ChainPoint,
+    s2: ChainPoint,
     prot: &mut blockfetch::Server,
 ) -> Result<(), Error> {
-    let iter = wal
-        .crawl_range(s1, s2)
-        .map_err(Error::server)?
-        .filter_apply()
-        .into_blocks()
-        .flatten();
+    let iter = wal.iter_blocks(Some(s1), Some(s2)).map_err(Error::server)?;
 
     prot.send_start_batch().await.map_err(Error::server)?;
 
-    for RawBlock { body, .. } in iter {
-        prot.send_block(body.to_vec())
+    for (_, body) in iter {
+        prot.send_block((*body).clone())
             .await
             .map_err(Error::server)?;
     }
@@ -38,13 +33,21 @@ async fn process_request<W: WalStore>(
 
     debug!(?p1, ?p2, "processing equest");
 
-    let s1 = wal.locate_point(&p1.into()).map_err(Error::server)?;
-    let s2 = wal.locate_point(&p2.into()).map_err(Error::server)?;
+    let p1 = ChainPoint::from(p1);
+    let p2 = ChainPoint::from(p2);
 
-    match (s1, s2) {
-        (Some(s1), Some(s2)) if s1 <= s2 => send_batch(wal, s1, s2, prot).await,
-        _ => prot.send_no_blocks().await.map_err(Error::server),
+    let ok1 = wal.contains_point(&p1).map_err(Error::server)?;
+    let ok2 = wal.contains_point(&p2).map_err(Error::server)?;
+
+    if !ok1 || !ok2 {
+        return prot.send_no_blocks().await.map_err(Error::server);
     }
+
+    if p1.slot() > p2.slot() {
+        return prot.send_no_blocks().await.map_err(Error::server);
+    }
+
+    send_batch(wal, p1, p2, prot).await
 }
 
 pub async fn process_requests<W: WalStore>(

@@ -10,7 +10,8 @@ use blockfrost_openapi::models::{
     asset_metadata::AssetMetadata as OffchainMetadata,
 };
 use crc::{Crc, CRC_8_SMBUS};
-use dolos_core::{ArchiveStore, Domain, EraCbor, State3Store as _};
+use dolos_cardano::model::AssetState;
+use dolos_core::{ArchiveStore, Domain, EraCbor};
 use pallas::{
     codec::minicbor,
     ledger::{
@@ -456,7 +457,11 @@ impl AssetModelBuilder {
             asset_name,
             fingerprint: asset_fingerprint(&self.subject)?,
             quantity: self.asset_state.quantity().to_string(),
-            initial_mint_tx_hash: self.asset_state.initial_tx.to_string(),
+            initial_mint_tx_hash: self
+                .asset_state
+                .initial_tx
+                .map(|h| h.to_string())
+                .unwrap_or_default(),
             mint_or_burn_count: self.asset_state.mint_tx_count as i32,
             onchain_metadata,
             onchain_metadata_standard,
@@ -471,27 +476,34 @@ impl AssetModelBuilder {
 pub async fn by_subject<D: Domain>(
     Path(unit): Path<String>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<Asset>, StatusCode> {
+) -> Result<Json<Asset>, StatusCode>
+where
+    Option<AssetState>: From<D::Entity>,
+{
     let subject = hex::decode(&unit).map_err(|_| StatusCode::BAD_REQUEST)?;
-    let token_registry_url = domain.config.token_registry_url.clone();
+
+    let registry_url = domain.config.token_registry_url.clone();
 
     let asset_state = domain
-        .state3()
-        .read_entity_typed::<dolos_cardano::model::AssetState>(&subject)
+        .read_cardano_entity::<AssetState>(subject.clone())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    let initial_tx = domain
-        .archive()
-        .get_tx(asset_state.initial_tx.as_slice())
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let initial_tx = if let Some(initial_tx) = asset_state.initial_tx {
+        domain
+            .archive()
+            .get_tx(initial_tx.as_slice())
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    } else {
+        None
+    };
 
     let model = AssetModelBuilder {
         subject,
         unit,
         asset_state,
         initial_tx,
-        registry_url: token_registry_url,
+        registry_url,
     };
 
     Ok(Json(model.into_model().await?))

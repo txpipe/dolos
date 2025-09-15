@@ -7,14 +7,12 @@ pub struct Args {}
 pub fn run(config: &crate::Config, _args: &Args) -> miette::Result<()> {
     let stores = crate::common::setup_data_stores(config)?;
 
-    let wal_start = stores.wal.crawl_from(None).unwrap().next();
+    let wal_start = stores.wal.find_start().unwrap();
     let wal_tip = stores.wal.find_tip().unwrap();
 
     let wal_summary = WalSummary {
-        start_seq: wal_start.as_ref().map(|(seq, _)| *seq),
-        start_slot: wal_start.as_ref().map(|(_, x)| x.slot()),
-        tip_seq: wal_tip.as_ref().map(|(seq, _)| *seq),
-        tip_slot: wal_tip.as_ref().map(|(_, x)| x.slot()),
+        start_slot: wal_start.as_ref().map(|(x, _)| x.slot()),
+        tip_slot: wal_tip.as_ref().map(|(x, _)| x.slot()),
     };
 
     let archive_summary = ArchiveSummary {
@@ -22,8 +20,7 @@ pub fn run(config: &crate::Config, _args: &Args) -> miette::Result<()> {
     };
 
     let state_summary = StateSummary {
-        start_slot: stores.state.start().unwrap().map(|x| x.slot()),
-        tip_slot: stores.state.cursor().unwrap().map(|x| x.slot()),
+        tip_slot: stores.state.read_cursor().unwrap().map(|x| x.slot()),
     };
 
     let summary = DataSummary {

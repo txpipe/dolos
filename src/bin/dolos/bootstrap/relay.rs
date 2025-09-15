@@ -7,8 +7,8 @@ use crate::feedback::Feedback;
 #[derive(Debug, clap::Args, Default, Clone)]
 pub struct Args {}
 
-fn open_empty_wal(config: &crate::Config) -> miette::Result<dolos_redb::wal::RedbWalStore> {
-    let dolos::adapters::WalAdapter::Redb(wal) = crate::common::open_wal_store(config)?;
+fn ensure_empty_wal(config: &crate::Config) -> miette::Result<()> {
+    let wal = crate::common::open_wal_store(config)?;
 
     let is_empty = wal.is_empty().map_err(WalError::from).into_diagnostic()?;
 
@@ -16,16 +16,11 @@ fn open_empty_wal(config: &crate::Config) -> miette::Result<dolos_redb::wal::Red
         bail!("can't continue with data already available");
     }
 
-    Ok(wal)
+    Ok(())
 }
 
 pub fn run(config: &crate::Config, _args: &Args, _feedback: &Feedback) -> miette::Result<()> {
-    let wal = open_empty_wal(config).context("opening WAL")?;
-
-    wal.initialize_from_origin()
-        .map_err(WalError::from)
-        .into_diagnostic()
-        .context("initializing WAL")?;
+    ensure_empty_wal(config).context("opening WAL")?;
 
     println!("Data initialized to sync from origin");
 

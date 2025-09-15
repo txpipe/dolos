@@ -6,25 +6,14 @@ use std::collections::HashSet;
 use tonic::{Request, Response, Status};
 use tracing::info;
 
-use dolos_cardano::pparams;
-
 use super::masking::apply_mask;
 use crate::prelude::*;
 
 pub fn point_to_u5c<T: LedgerContext>(ledger: &T, point: &ChainPoint) -> u5c::query::ChainPoint {
-    match point {
-        ChainPoint::Origin => u5c::query::ChainPoint {
-            slot: 0,
-            hash: vec![].into(),
-            height: 0,
-            timestamp: 0,
-        },
-        ChainPoint::Specific(slot, hash) => u5c::query::ChainPoint {
-            slot: *slot,
-            hash: hash.to_vec().into(),
-            timestamp: ledger.get_slot_timestamp(*slot).unwrap_or_default(),
-            ..Default::default()
-        },
+    u5c::query::ChainPoint {
+        slot: point.slot(),
+        hash: point.hash().map(|h| h.to_vec()).unwrap_or_default().into(),
+        ..Default::default()
     }
 }
 
@@ -243,32 +232,17 @@ where
 
         info!("received new grpc query");
 
-        let tip = self.domain.state().cursor().map_err(into_status)?;
+        let tip = self.domain.state().read_cursor().map_err(into_status)?;
 
-        let updates = self
-            .domain
-            .state()
-            .get_pparams(tip.as_ref().map(|p| p.slot()).unwrap_or_default())
-            .map_err(into_status)?;
+        let pparams = dolos_cardano::use_active_pparams(&self.domain)
+            .map_err(|_| Status::internal("Failed to load current pparams"))?;
 
-        let updates: Vec<_> = updates
-            .into_iter()
-            .map(TryInto::try_into)
-            .try_collect::<_, _, pallas::codec::minicbor::decode::Error>()
-            .map_err(|e| Status::internal(e.to_string()))?;
-
-        let summary = pparams::fold_with_hacks(
-            self.domain.genesis(),
-            &updates,
-            tip.as_ref().unwrap().slot(),
-        );
-
-        let era = summary.era_for_slot(tip.as_ref().unwrap().slot());
+        let pparams = dolos_cardano::utils::pparams_to_pallas(&pparams);
 
         let mut response = u5c::query::ReadParamsResponse {
             values: Some(u5c::query::AnyChainParams {
                 params: u5c::query::any_chain_params::Params::Cardano(
-                    self.mapper.map_pparams(era.pparams.clone()),
+                    self.mapper.map_pparams(pparams),
                 )
                 .into(),
             }),
@@ -320,7 +294,7 @@ where
         let cursor = self
             .domain
             .state()
-            .cursor()
+            .read_cursor()
             .map_err(|e| Status::internal(e.to_string()))?
             .as_ref()
             .map(|p| point_to_u5c(&self.domain, p));
@@ -367,7 +341,7 @@ where
         let cursor = self
             .domain
             .state()
-            .cursor()
+            .read_cursor()
             .map_err(|e| Status::internal(e.to_string()))?
             .as_ref()
             .map(|p| point_to_u5c(&self.domain, p));
@@ -408,7 +382,7 @@ where
         let cursor = self
             .domain
             .state()
-            .cursor()
+            .read_cursor()
             .map_err(|e| Status::internal(e.to_string()))?
             .as_ref()
             .map(|p| point_to_u5c(&self.domain, p));

@@ -3,9 +3,8 @@ use axum::{
     http::StatusCode,
     Json,
 };
-use dolos_cardano::{model::DRepState, pparams::ChainSummary, slot_epoch};
-use dolos_core::{ArchiveStore, BlockSlot, Domain, State3Store as _};
-use pallas::ledger::validate::utils::MultiEraProtocolParameters;
+use dolos_cardano::{model::DRepState, ChainSummary, PParamsSet};
+use dolos_core::{ArchiveStore as _, BlockSlot, Domain};
 
 use crate::{mapping::IntoModel, Facade};
 
@@ -35,6 +34,7 @@ fn parse_drep_id(drep_id: &str) -> Result<Vec<u8>, StatusCode> {
 pub struct DrepModelBuilder<'a> {
     drep_id: String,
     state: DRepState,
+    pparams: PParamsSet,
     chain: &'a ChainSummary,
     tip: BlockSlot,
 }
@@ -49,16 +49,14 @@ impl<'a> IntoModel<blockfrost_openapi::models::drep::Drep> for DrepModelBuilder<
     type SortKey = ();
 
     fn into_model(self) -> Result<blockfrost_openapi::models::drep::Drep, StatusCode> {
-        let (epoch, _) = dolos_cardano::slot_epoch(self.tip, self.chain);
+        let (epoch, _) = self.chain.slot_epoch(self.tip);
+
         let last_active_epoch = self
             .state
             .last_active_slot
-            .map(|x| slot_epoch(x, self.chain).0 as i32);
+            .map(|x| self.chain.slot_epoch(x).0 as i32);
 
-        let drep_activity = match &self.chain.era_for_slot(self.tip).pparams {
-            MultiEraProtocolParameters::Conway(params) => params.drep_inactivity_period,
-            _ => return Err(StatusCode::INTERNAL_SERVER_ERROR),
-        };
+        let drep_activity = self.pparams.drep_inactivity_period_or_default() as i32;
 
         let out = blockfrost_openapi::models::drep::Drep {
             drep_id: self.drep_id.clone(),
@@ -74,7 +72,7 @@ impl<'a> IntoModel<blockfrost_openapi::models::drep::Drep> for DrepModelBuilder<
             } else {
                 self.state
                     .initial_slot
-                    .map(|x| slot_epoch(x, self.chain).0 as i32)
+                    .map(|x| self.chain.slot_epoch(x).0 as i32)
             },
             has_script: self.state.has_script(),
             retired: self.state.retired,
@@ -100,16 +98,22 @@ impl<'a> IntoModel<blockfrost_openapi::models::drep::Drep> for DrepModelBuilder<
 }
 
 pub async fn drep_by_id<D: Domain>(
-    Path(drep_id): Path<String>,
+    Path(drep): Path<String>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<blockfrost_openapi::models::drep::Drep>, StatusCode> {
-    let key = parse_drep_id(&drep_id)?;
+) -> Result<Json<blockfrost_openapi::models::drep::Drep>, StatusCode>
+where
+    Option<DRepState>: From<D::Entity>,
+{
+    let drep_bytes = parse_drep_id(&drep).map_err(|_| StatusCode::BAD_REQUEST)?;
 
     let drep_state = domain
-        .state3()
-        .read_entity_typed::<dolos_cardano::model::DRepState>(&key)
+        .read_cardano_entity::<DRepState>(drep_bytes.clone())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
+
+    let pparams = domain
+        .get_live_pparams()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let chain = domain
         .get_chain_summary()
@@ -122,8 +126,9 @@ pub async fn drep_by_id<D: Domain>(
         .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let model = DrepModelBuilder {
-        drep_id,
+        drep_id: drep,
         state: drep_state,
+        pparams,
         chain: &chain,
         tip,
     };

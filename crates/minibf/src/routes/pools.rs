@@ -6,9 +6,14 @@ use axum::{
 use blockfrost_openapi::models::{
     pool_delegators_inner::PoolDelegatorsInner, pool_list_extended_inner::PoolListExtendedInner,
 };
-use dolos_cardano::model::{AccountState, PoolDelegator, PoolState};
-use dolos_core::{Domain, Entity, State3Store as _};
-use pallas::{crypto::hash::Hash, ledger::addresses::Network};
+use dolos_cardano::model::{AccountState, PoolState};
+use dolos_core::Domain;
+use itertools::Itertools;
+use pallas::{
+    codec::minicbor,
+    crypto::hash::Hash,
+    ledger::{addresses::Network, primitives::StakeCredential},
+};
 use serde_json::json;
 
 use crate::{
@@ -42,8 +47,8 @@ impl IntoModel<PoolListExtendedInner> for PoolModelBuilder {
             pool_id,
             hex: hex::encode(self.operator),
             active_stake: self.state.active_stake.to_string(),
-            live_stake: self.state.live_stake.to_string(),
-            live_saturation: self.state.live_saturation,
+            live_stake: self.state.__live_stake.to_string(),
+            live_saturation: rational_to_f64::<3>(&self.state.live_saturation()),
             blocks_minted: self.state.blocks_minted as i32,
             declared_pledge: self.state.declared_pledge.to_string(),
             margin_cost: rational_to_f64::<6>(&self.state.margin_cost),
@@ -65,16 +70,16 @@ impl IntoModel<PoolListExtendedInner> for PoolModelBuilder {
 pub async fn all_extended<D: Domain>(
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<Vec<PoolListExtendedInner>>, Error> {
-    let start = &[0u8; 28].as_slice();
-    let end = &[255u8; 28].as_slice();
-
+) -> Result<Json<Vec<PoolListExtendedInner>>, Error>
+where
+    Option<PoolState>: From<D::Entity>,
+{
     let iter = domain
-        .state3()
-        .iter_entities_typed::<PoolState>(start..end)
+        .iter_cardano_entities::<PoolState>(None)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let pagination = Pagination::try_from(params)?;
+
     let page: Vec<_> = iter
         .skip(pagination.skip())
         .take(pagination.count)
@@ -84,10 +89,9 @@ pub async fn all_extended<D: Domain>(
     let mapped: Vec<_> = page
         .into_iter()
         .map(|(key, state)| {
-            let builder = PoolModelBuilder {
-                operator: Hash::<28>::from(key.as_slice()),
-                state,
-            };
+            let operator = Hash::<28>::from(key);
+
+            let builder = PoolModelBuilder { operator, state };
 
             builder.into_model()
         })
@@ -97,7 +101,7 @@ pub async fn all_extended<D: Domain>(
 }
 
 struct PoolDelegatorModelBuilder {
-    delegator: PoolDelegator,
+    delegator: StakeCredential,
     account: Option<dolos_cardano::model::AccountState>,
     network: Network,
 }
@@ -106,13 +110,13 @@ impl IntoModel<PoolDelegatorsInner> for PoolDelegatorModelBuilder {
     type SortKey = ();
 
     fn into_model(self) -> Result<PoolDelegatorsInner, StatusCode> {
-        let address = crate::mapping::stake_cred_to_address(&self.delegator.0, self.network)
+        let address = crate::mapping::stake_cred_to_address(&self.delegator, self.network)
             .to_bech32()
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
         let live_stake = self
             .account
-            .map(|a| a.controlled_amount.to_string())
+            .map(|a| a.live_stake().to_string())
             .unwrap_or_default();
 
         Ok(PoolDelegatorsInner {
@@ -126,19 +130,24 @@ pub async fn by_id_delegators<D: Domain>(
     Path(id): Path<String>,
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<Vec<PoolDelegatorsInner>>, Error> {
+) -> Result<Json<Vec<PoolDelegatorsInner>>, Error>
+where
+    Option<AccountState>: From<D::Entity>,
+{
     let operator = decode_pool_id(&id)?;
 
     let network = domain.get_network_id()?;
 
     let iter = domain
-        .state3()
-        .iter_entity_values(PoolDelegator::NS, operator.as_slice())
+        .iter_cardano_entities::<AccountState>(None)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let filtered =
+        iter.filter_ok(|(_, account)| account.active_pool.as_ref().is_some_and(|f| f == &operator));
 
     let pagination = Pagination::try_from(params)?;
 
-    let page: Vec<_> = iter
+    let page: Vec<_> = filtered
         .skip(pagination.skip())
         .take(pagination.count)
         .collect::<Result<_, _>>()
@@ -146,18 +155,13 @@ pub async fn by_id_delegators<D: Domain>(
 
     let mapped: Vec<_> = page
         .into_iter()
-        .map(|delegator| {
-            let account = domain
-                .state3()
-                .read_entity_typed::<AccountState>(delegator.as_slice())
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-            let delegator = PoolDelegator::decode_value(delegator)
+        .map(|(delegator, account)| {
+            let delegator: StakeCredential = minicbor::decode(delegator.as_ref())
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
             let builder = PoolDelegatorModelBuilder {
                 delegator,
-                account,
+                account: Some(account),
                 network,
             };
 

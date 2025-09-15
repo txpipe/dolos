@@ -22,7 +22,7 @@ pub struct Args {
 pub fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging)?;
 
-    let dolos::adapters::WalAdapter::Redb(source) = crate::common::open_wal_store(config)?;
+    let source = crate::common::open_wal_store(config)?;
 
     let target = dolos_redb::wal::RedbWalStore::open(&args.output, None)
         .into_diagnostic()
@@ -30,7 +30,7 @@ pub fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
 
     let since = match args.since {
         Some(slot) => source
-            .approximate_slot(slot, slot..slot + 200)
+            .locate_point(slot)
             .into_diagnostic()
             .context("finding initial slot")?,
         None => None,
@@ -38,28 +38,22 @@ pub fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
 
     let until = match args.until {
         Some(slot) => source
-            .approximate_slot(slot, slot - 200..=slot)
+            .locate_point(slot)
             .into_diagnostic()
             .context("finding final slot")?,
         None => None,
     };
 
-    let reader = match (since, until) {
-        (Some(since), Some(until)) => source
-            .crawl_range(since, until)
-            .into_diagnostic()
-            .context("crawling range")?,
-        _ => source
-            .crawl_from(since)
-            .into_diagnostic()
-            .context("crawling from")?,
-    };
+    let reader = source
+        .iter_logs(since, until)
+        .into_diagnostic()
+        .context("iterating over logs")?;
 
     for chunk in reader.chunks(100).into_iter() {
-        let entries = chunk.map(|(_, v)| v);
+        let entries: Vec<_> = chunk.collect();
 
         target
-            .append_entries(entries)
+            .append_entries(&entries)
             .into_diagnostic()
             .context("appending to target")?;
     }

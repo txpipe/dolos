@@ -41,8 +41,8 @@ pub enum Error {
     #[error("only txs from Conway era are supported")]
     UnsupportedTxEra,
 
-    #[error("node can't resolve txs while running at era {era}")]
-    UnsupportedEra { era: String },
+    #[error("pparams not available")]
+    PParamsNotAvailable,
 
     #[error("missing argument `{key}` of type {ty:?}")]
     MissingTxArg { key: String, ty: tx3_lang::ir::Type },
@@ -139,7 +139,7 @@ impl Error {
             Error::InvalidTirEnvelope => ErrorCode::InvalidParams.code(),
             Error::InvalidTirBytes => ErrorCode::InvalidParams.code(),
             Error::ArgsError(_) => ErrorCode::InvalidParams.code(),
-            Error::UnsupportedEra { .. } => ErrorCode::InternalError.code(),
+            Error::PParamsNotAvailable => ErrorCode::InternalError.code(),
             Error::UnsupportedTxEra => ErrorCode::InternalError.code(),
             Error::StateError(_) => ErrorCode::InternalError.code(),
             Error::TraverseError(_) => ErrorCode::InternalError.code(),

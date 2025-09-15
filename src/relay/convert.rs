@@ -31,9 +31,7 @@ fn define_byron_prefix(block: &MultiEraBlock) -> Option<(u8, u64)> {
 }
 
 pub fn header_cbor_to_chainsync(block: RawBlock) -> Result<chainsync::HeaderContent, Error> {
-    let RawBlock { body, .. } = block;
-
-    let block = pallas::ledger::traverse::MultiEraBlock::decode(&body).map_err(Error::parse)?;
+    let block = pallas::ledger::traverse::MultiEraBlock::decode(&block).map_err(Error::parse)?;
 
     let out = chainsync::HeaderContent {
         variant: era_to_header_variant(block.era()),

@@ -39,7 +39,7 @@ impl Feedback {
 
         pb.set_style(
             ProgressStyle::with_template(
-                "{spinner:.green} [{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} slots (eta: {eta}) {msg}",
+                "{spinner:.green} [{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {per_sec:>7} slots/s (eta: {eta}) {msg}",
             )
             .unwrap()
             .progress_chars("#>-"),

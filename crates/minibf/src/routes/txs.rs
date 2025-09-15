@@ -35,7 +35,11 @@ pub async fn by_hash<D: Domain>(
 
     let chain = domain.get_chain_summary()?;
 
-    let tx = TxModelBuilder::new(&raw, order)?.with_chain(chain);
+    let pparams = domain.get_live_pparams()?;
+
+    let tx = TxModelBuilder::new(&raw, order)?
+        .with_chain(chain)
+        .with_pparams(pparams);
 
     tx.into_response()
 }

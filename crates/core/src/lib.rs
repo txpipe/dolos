@@ -1,19 +1,37 @@
+//! Traits and machinery that are common to all dolos crates.
+//!
+//! Glossary:
+//!  - `chunk`: when the grouping is about cutting a continuous sequence into
+//!    pieces for parallel processing (e.g. sequence of blocks to decode).
+//!  - `batch`: when the grouping is about workload semantics for pipelining
+//!    where the order of execution matters (e.g. batch of blocks that need to
+//!    be processed together). A batch is usually split into chunks for parallel
+//!    processing.
+
 use pallas::{
     crypto::hash::Hash,
     ledger::traverse::{MultiEraInput, MultiEraOutput, MultiEraTx, MultiEraUpdate},
-    network::miniprotocols::Point as PallasPoint,
 };
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     fmt::Display,
+    sync::Arc,
 };
 use thiserror::Error;
 use tracing::info;
 
-mod mempool;
-mod state;
-mod wal;
+pub mod archive;
+pub mod batch;
+pub mod catchup;
+pub mod crawl;
+pub mod follow;
+pub mod init;
+pub mod mempool;
+pub mod point;
+pub mod state;
+pub mod utxoset;
+pub mod wal;
 
 pub type Era = u16;
 
@@ -30,8 +48,10 @@ pub type BlockSlot = u64;
 pub type BlockHeight = u64;
 
 pub type Cbor = Vec<u8>;
-
 pub type BlockBody = Cbor;
+pub type RawBlock = Arc<BlockBody>;
+pub type RawBlockBatch = Vec<RawBlock>;
+pub type RawUtxoMap = HashMap<TxoRef, Arc<EraCbor>>;
 pub type BlockEra = pallas::ledger::traverse::Era;
 pub type BlockHash = Hash<32>;
 pub type BlockHeader = Cbor;
@@ -41,9 +61,13 @@ pub type UtxoBody = (u16, Cbor);
 pub type ChainTip = pallas::network::miniprotocols::chainsync::Tip;
 pub type LogSeq = u64;
 
+pub use archive::*;
 pub use mempool::*;
+pub use point::*;
 pub use state::*;
 pub use wal::*;
+
+use crate::batch::{WorkBatch, WorkBlock};
 
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub struct EraCbor(pub Era, pub Cbor);
@@ -114,6 +138,12 @@ impl From<TxoRef> for (TxHash, TxoIdx) {
     }
 }
 
+impl Display for TxoRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}#{}", self.0, self.1)
+    }
+}
+
 // TODO: remove legacy
 // #[derive(Debug, Eq, PartialEq, Hash)]
 // pub struct ChainPoint(pub BlockSlot, pub BlockHash);
@@ -122,60 +152,40 @@ impl From<TxoRef> for (TxHash, TxoIdx) {
 pub enum BrokenInvariant {
     #[error("missing utxo {0:?}")]
     MissingUtxo(TxoRef),
+
+    #[error("invalid genesis config")]
+    InvalidGenesisConfig,
+
+    #[error("bad bootstrap")]
+    BadBootstrap,
+
+    #[error("invalid epoch state")]
+    InvalidEpochState,
+
+    #[error("missing pool {}", hex::encode(.0))]
+    MissingPool(Vec<u8>),
+
+    #[error("epoch boundary incomplete")]
+    EpochBoundaryIncomplete,
 }
 
-pub type UtxoMap = HashMap<TxoRef, EraCbor>;
+pub type UtxoMap = HashMap<TxoRef, Arc<EraCbor>>;
 
 pub type UtxoSet = HashSet<TxoRef>;
 
-pub struct LedgerQuery {
-    pub required_inputs: Vec<TxoRef>,
-    pub extra_inputs: HashMap<TxoRef, EraCbor>,
-}
-
-/// A slice of the ledger relevant for a specific task
-///
-/// A ledger slice represents a partial view of the ledger which is optimized
-/// for a particular task, such tx validation. In essence, it is a subset of all
-/// the UTxO which are being consumed or referenced by a block or tx.
-#[derive(Clone)]
-pub struct LedgerSlice {
-    pub resolved_inputs: HashMap<TxoRef, EraCbor>,
-}
-
 #[derive(Default, Debug, Clone)]
-pub struct LedgerDelta {
+pub struct UtxoSetDelta {
     pub new_position: Option<ChainPoint>,
     pub undone_position: Option<ChainPoint>,
-    pub produced_utxo: HashMap<TxoRef, EraCbor>,
-    pub consumed_utxo: HashMap<TxoRef, EraCbor>,
-    pub recovered_stxi: HashMap<TxoRef, EraCbor>,
-    pub undone_utxo: HashMap<TxoRef, EraCbor>,
+    pub produced_utxo: HashMap<TxoRef, Arc<EraCbor>>,
+    pub consumed_utxo: HashMap<TxoRef, Arc<EraCbor>>,
+    pub recovered_stxi: HashMap<TxoRef, Arc<EraCbor>>,
+    pub undone_utxo: HashMap<TxoRef, Arc<EraCbor>>,
     pub seen_txs: HashSet<TxHash>,
     pub unseen_txs: HashSet<TxHash>,
-    pub new_pparams: Vec<EraCbor>,
+    pub new_pparams: Vec<Arc<EraCbor>>,
     pub new_block: BlockBody,
     pub undone_block: BlockBody,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RawBlock {
-    pub slot: BlockSlot,
-    pub hash: BlockHash,
-    pub era: BlockEra,
-    pub body: BlockBody,
-}
-
-impl PartialEq for RawBlock {
-    fn eq(&self, other: &Self) -> bool {
-        self.slot == other.slot && self.hash == other.hash
-    }
-}
-
-impl PartialOrd for RawBlock {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        self.slot.partial_cmp(&other.slot)
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -184,120 +194,28 @@ pub enum PullEvent {
     Rollback(ChainPoint),
 }
 
-#[derive(Debug, Clone)]
-pub enum RollEvent {
-    TipChanged,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Eq)]
-pub enum ChainPoint {
-    Origin,
-    Specific(BlockSlot, BlockHash),
-}
-
-impl ChainPoint {
-    pub fn slot(&self) -> BlockSlot {
-        match self {
-            Self::Origin => 0,
-            Self::Specific(slot, _) => *slot,
-        }
-    }
-}
-
-impl PartialEq for ChainPoint {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::Specific(l0, l1), Self::Specific(r0, r1)) => l0 == r0 && l1 == r1,
-            (Self::Origin, Self::Origin) => true,
-            _ => false,
-        }
-    }
-}
-
-impl Ord for ChainPoint {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        match (self, other) {
-            (Self::Origin, Self::Origin) => std::cmp::Ordering::Equal,
-            (Self::Origin, Self::Specific(_, _)) => std::cmp::Ordering::Less,
-            (Self::Specific(_, _), Self::Origin) => std::cmp::Ordering::Greater,
-            (Self::Specific(x, x_hash), Self::Specific(y, y_hash)) => match x.cmp(y) {
-                std::cmp::Ordering::Equal => x_hash.cmp(y_hash),
-                x => x,
-            },
-        }
-    }
-}
-
-impl PartialOrd for ChainPoint {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl From<PallasPoint> for ChainPoint {
-    fn from(value: PallasPoint) -> Self {
-        match value {
-            PallasPoint::Origin => ChainPoint::Origin,
-            PallasPoint::Specific(s, h) => ChainPoint::Specific(s, h.as_slice().into()),
-        }
-    }
-}
-
-impl From<ChainPoint> for PallasPoint {
-    fn from(value: ChainPoint) -> Self {
-        match value {
-            ChainPoint::Origin => PallasPoint::Origin,
-            ChainPoint::Specific(s, h) => PallasPoint::Specific(s, h.to_vec()),
-        }
-    }
-}
-
-impl From<&RawBlock> for ChainPoint {
-    fn from(value: &RawBlock) -> Self {
-        let RawBlock { slot, hash, .. } = value;
-        ChainPoint::Specific(*slot, *hash)
-    }
-}
-
-impl From<&LogValue> for ChainPoint {
-    fn from(value: &LogValue) -> Self {
-        match value {
-            LogValue::Apply(x) => ChainPoint::from(x),
-            LogValue::Undo(x) => ChainPoint::from(x),
-            LogValue::Mark(x) => x.clone(),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum LogValue {
-    Apply(RawBlock),
-    Undo(RawBlock),
-    Mark(ChainPoint),
+pub struct LogValue<D>
+where
+    D: EntityDelta,
+{
+    pub block: Cbor,
+    pub delta: Vec<D>,
 }
 
-impl LogValue {
-    pub fn slot(&self) -> u64 {
-        match self {
-            LogValue::Apply(x) => x.slot,
-            LogValue::Undo(x) => x.slot,
-            LogValue::Mark(x) => x.slot(),
+impl<D> LogValue<D>
+where
+    D: EntityDelta,
+{
+    pub fn origin() -> Self {
+        Self {
+            block: vec![],
+            delta: vec![],
         }
     }
 }
 
-impl PartialEq for LogValue {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::Apply(l0), Self::Apply(r0)) => l0 == r0,
-            (Self::Undo(l0), Self::Undo(r0)) => l0 == r0,
-            (Self::Mark(l0), Self::Mark(r0)) => l0 == r0,
-            _ => false,
-        }
-    }
-}
-
-pub type LogEntry = (LogSeq, LogValue);
+pub type LogEntry<D> = (ChainPoint, LogValue<D>);
 
 #[derive(Debug, Error)]
 pub enum WalError {
@@ -482,130 +400,6 @@ pub struct Genesis {
     pub force_protocol: Option<usize>,
 }
 
-#[derive(Debug, Error)]
-pub enum StateError {
-    #[error("broken invariant")]
-    BrokenInvariant(#[from] BrokenInvariant),
-
-    #[error("storage error")]
-    InternalError(#[from] Box<dyn std::error::Error + Send + Sync>),
-
-    // TODO: refactor this to avoid Pallas dependency
-    #[error("address decoding error")]
-    AddressDecoding(#[from] pallas::ledger::addresses::Error),
-
-    #[error("query not supported")]
-    QueryNotSupported,
-
-    #[error("invalid store version")]
-    InvalidStoreVersion,
-
-    // TODO: refactor this to avoid Pallas dependency
-    #[error("decoding error")]
-    DecodingError(#[from] pallas::codec::minicbor::decode::Error),
-}
-
-pub trait StateStore: Sized + Clone + Send + Sync + 'static {
-    fn start(&self) -> Result<Option<ChainPoint>, StateError>;
-
-    fn cursor(&self) -> Result<Option<ChainPoint>, StateError>;
-
-    fn is_empty(&self) -> Result<bool, StateError>;
-
-    fn get_pparams(&self, until: BlockSlot) -> Result<Vec<EraCbor>, StateError>;
-
-    fn get_utxos(&self, refs: Vec<TxoRef>) -> Result<UtxoMap, StateError>;
-
-    fn get_utxo_by_address(&self, address: &[u8]) -> Result<UtxoSet, StateError>;
-
-    fn get_utxo_by_payment(&self, payment: &[u8]) -> Result<UtxoSet, StateError>;
-
-    fn get_utxo_by_stake(&self, stake: &[u8]) -> Result<UtxoSet, StateError>;
-
-    fn get_utxo_by_policy(&self, policy: &[u8]) -> Result<UtxoSet, StateError>;
-
-    fn get_utxo_by_asset(&self, asset: &[u8]) -> Result<UtxoSet, StateError>;
-
-    fn apply(&self, deltas: &[LedgerDelta]) -> Result<(), StateError>;
-
-    fn upgrade(self) -> Result<Self, StateError>;
-
-    fn copy(&self, target: &Self) -> Result<(), StateError>;
-
-    fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, StateError>;
-}
-
-#[derive(Debug, Error)]
-pub enum ArchiveError {
-    #[error("broken invariant")]
-    BrokenInvariant(#[from] BrokenInvariant),
-
-    #[error("storage error")]
-    InternalError(#[from] Box<dyn std::error::Error + Send + Sync>),
-
-    #[error("address decoding error")]
-    AddressDecoding(#[from] pallas::ledger::addresses::Error),
-
-    #[error("query not supported")]
-    QueryNotSupported,
-
-    #[error("invalid store version")]
-    InvalidStoreVersion,
-
-    #[error("decoding error")]
-    DecodingError(#[from] pallas::codec::minicbor::decode::Error),
-
-    #[error("block decoding error")]
-    BlockDecodingError(#[from] pallas::ledger::traverse::Error),
-}
-
-pub trait ArchiveStore: Clone + Send + Sync + 'static {
-    type BlockIter<'a>: Iterator<Item = (BlockSlot, BlockBody)> + DoubleEndedIterator + 'a;
-    type SparseBlockIter: Iterator<Item = Result<(BlockSlot, Option<BlockBody>), ArchiveError>>
-        + DoubleEndedIterator;
-
-    fn get_block_by_hash(&self, block_hash: &[u8]) -> Result<Option<BlockBody>, ArchiveError>;
-
-    fn get_block_by_slot(&self, slot: &BlockSlot) -> Result<Option<BlockBody>, ArchiveError>;
-
-    fn get_block_by_number(&self, number: &u64) -> Result<Option<BlockBody>, ArchiveError>;
-
-    fn get_block_with_tx(
-        &self,
-        tx_hash: &[u8],
-    ) -> Result<Option<(BlockBody, TxOrder)>, ArchiveError>;
-
-    fn get_tx(&self, tx_hash: &[u8]) -> Result<Option<EraCbor>, ArchiveError>;
-
-    fn get_slot_for_tx(&self, tx_hash: &[u8]) -> Result<Option<BlockSlot>, ArchiveError>;
-
-    fn iter_blocks_with_address(
-        &self,
-        address: &[u8],
-    ) -> Result<Self::SparseBlockIter, ArchiveError>;
-
-    fn iter_blocks_with_asset(&self, asset: &[u8]) -> Result<Self::SparseBlockIter, ArchiveError>;
-
-    fn iter_blocks_with_payment(
-        &self,
-        payment: &[u8],
-    ) -> Result<Self::SparseBlockIter, ArchiveError>;
-
-    fn get_range<'a>(
-        &self,
-        from: Option<BlockSlot>,
-        to: Option<BlockSlot>,
-    ) -> Result<Self::BlockIter<'a>, ArchiveError>;
-
-    fn find_intersect(&self, intersect: &[ChainPoint]) -> Result<Option<ChainPoint>, ArchiveError>;
-
-    fn get_tip(&self) -> Result<Option<(BlockSlot, BlockBody)>, ArchiveError>;
-
-    fn apply(&self, deltas: &[LedgerDelta]) -> Result<(), ArchiveError>;
-
-    fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, ArchiveError>;
-}
-
 pub type Phase2Log = Vec<String>;
 
 #[derive(Debug, Error)]
@@ -628,8 +422,11 @@ pub enum MempoolError {
     #[error("phase-2 script yielded an error")]
     Phase2ExplicitError(Phase2Log),
 
-    #[error("state error: {0}")]
+    #[error(transparent)]
     StateError(#[from] StateError),
+
+    #[error(transparent)]
+    ChainError(#[from] ChainError),
 
     #[error("plutus not supported")]
     PlutusNotSupported,
@@ -644,33 +441,59 @@ pub trait MempoolStore: Clone + Send + Sync + 'static {
         + Send
         + Sync;
 
-    fn receive_raw(&self, cbor: &[u8]) -> Result<TxHash, MempoolError>;
+    fn receive_raw<D: Domain>(&self, domain: &D, cbor: &[u8]) -> Result<TxHash, MempoolError>;
 
-    fn evaluate_raw(&self, cbor: &[u8]) -> Result<EvalReport, MempoolError>;
+    fn evaluate_raw<D: Domain>(&self, domain: &D, cbor: &[u8]) -> Result<EvalReport, MempoolError>;
 
-    fn apply(&self, deltas: &[LedgerDelta]);
+    fn apply(&self, deltas: &[UtxoSetDelta]);
     fn check_stage(&self, tx_hash: &TxHash) -> MempoolTxStage;
     fn subscribe(&self) -> Self::Stream;
 }
 
+pub trait Block: Sized + Send + Sync {
+    fn depends_on(&self, loaded: &mut RawUtxoMap) -> Vec<TxoRef>;
+    fn slot(&self) -> BlockSlot;
+    fn hash(&self) -> BlockHash;
+}
+
 #[derive(Debug, Error)]
 pub enum ChainError {
-    #[error("broken invariant")]
+    #[error(transparent)]
     BrokenInvariant(#[from] BrokenInvariant),
 
     #[error("decoding error")]
     DecodingError(#[from] pallas::ledger::traverse::Error),
 
+    #[error("address decoding error")]
+    AddressDecoding(#[from] pallas::ledger::addresses::Error),
+
     #[error(transparent)]
-    State3Error(#[from] State3Error),
+    StateError(#[from] StateError),
+
+    #[error("pparams not found")]
+    PParamsNotFound,
+
+    #[error("forced stop epoch reached")]
+    StopEpochReached,
 }
 
-pub trait ChainLogic {
-    type Block<'a>: Sized;
+pub trait ChainLogic: Sized + Send + Sync {
+    type Block: Block + Send + Sync;
+    type Entity: Entity;
+    type Utxo: Sized + Send + Sync;
+    type Delta: EntityDelta<Entity = Self::Entity>;
 
-    fn decode_block<'a>(block: &'a [u8]) -> Result<Self::Block<'a>, ChainError>;
+    fn bootstrap<D: Domain>(&self, domain: &D) -> Result<(), ChainError>;
+
+    fn decode_block(&self, block: Arc<BlockBody>) -> Result<Self::Block, ChainError>;
+
+    fn decode_utxo(&self, utxo: Arc<EraCbor>) -> Result<Self::Utxo, ChainError>;
 
     fn mutable_slots(domain: &impl Domain) -> BlockSlot;
+
+    fn execute_sweep<D: Domain>(&self, domain: &D, at: BlockSlot) -> Result<(), ChainError>;
+
+    fn next_sweep<D: Domain>(&self, domain: &D, after: BlockSlot) -> Result<BlockSlot, ChainError>;
 
     /// Computes the last immutable slot
     ///
@@ -683,57 +506,17 @@ pub trait ChainLogic {
         tip.saturating_sub(Self::mutable_slots(domain))
     }
 
-    fn ledger_query_for_block<'a>(
-        block: &Self::Block<'a>,
-        unapplied_deltas: &[LedgerDelta],
-    ) -> Result<LedgerQuery, ChainError>;
-
-    fn compute_origin_delta(&self, genesis: &Genesis) -> Result<LedgerDelta, ChainError>;
-
-    fn compute_apply_delta<'a>(
-        ledger: LedgerSlice,
-        block: &Self::Block<'a>,
-    ) -> Result<LedgerDelta, ChainError>;
-
-    fn compute_undo_delta<'a>(
-        ledger: LedgerSlice,
-        block: &Self::Block<'a>,
-    ) -> Result<LedgerDelta, ChainError>;
-
-    fn load_slice_for_block<'a>(
-        state: &impl StateStore,
-        block: &Self::Block<'a>,
-        unapplied_deltas: &[LedgerDelta],
-    ) -> Result<LedgerSlice, DomainError> {
-        let query = Self::ledger_query_for_block(block, unapplied_deltas)?;
-
-        let required_utxos = StateStore::get_utxos(state, query.required_inputs)?;
-
-        let out = LedgerSlice {
-            resolved_inputs: [required_utxos, query.extra_inputs]
-                .into_iter()
-                .flatten()
-                .collect(),
-        };
-
-        Ok(out)
-    }
-
-    // new state functions
-
-    fn load_slice3_for_block<'a>(
+    fn compute_block_utxo_delta(
         &self,
-        state: &impl State3Store,
-        block: &Self::Block<'a>,
-        unapplied_deltas: &[StateDelta],
-    ) -> Result<StateSlice, DomainError>;
+        block: &Self::Block,
+        deps: &RawUtxoMap,
+    ) -> Result<UtxoSetDelta, ChainError>;
 
-    fn compute_apply_delta3<'a>(
+    fn compute_delta(
         &self,
-        slice: StateSlice,
-        block: &Self::Block<'a>,
-        unapplied_deltas: &[StateDelta],
-    ) -> Result<StateDelta, ChainError>;
+        block: &mut WorkBlock<Self>,
+        deps: &HashMap<TxoRef, Self::Utxo>,
+    ) -> Result<(), ChainError>;
 }
 
 #[derive(Debug, Error)]
@@ -747,24 +530,44 @@ pub enum DomainError {
     #[error("state error: {0}")]
     StateError(#[from] StateError),
 
-    #[error("state3 error: {0}")]
-    State3Error(#[from] State3Error),
-
     #[error("archive error: {0}")]
     ArchiveError(#[from] ArchiveError),
 
     #[error("mempool error: {0}")]
     MempoolError(#[from] MempoolError),
+
+    #[error("inconsistent state: {0}")]
+    InconsistentState(String),
+
+    #[error("wal is empty")]
+    WalIsEmpty,
+
+    #[error("wal is behind state: {0}")]
+    WalIsBehindState(BlockSlot, BlockSlot),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TipEvent {
+    Mark(ChainPoint),
+    Apply(ChainPoint, RawBlock),
+    Undo(ChainPoint, RawBlock),
+}
+
+#[trait_variant::make(Send)]
+pub trait TipSubscription: Send + Sync + 'static {
+    async fn next_tip(&mut self) -> TipEvent;
 }
 
 pub trait Domain: Send + Sync + Clone + 'static {
-    type Wal: WalStore;
+    type Entity: Entity;
+    type EntityDelta: EntityDelta<Entity = Self::Entity> + std::fmt::Debug;
+
+    type Wal: WalStore<Delta = Self::EntityDelta>;
     type State: StateStore;
     type Archive: ArchiveStore;
     type Mempool: MempoolStore;
-    type Chain: ChainLogic;
-
-    type State3: State3Store;
+    type Chain: ChainLogic<Delta = Self::EntityDelta>;
+    type TipSubscription: TipSubscription;
 
     fn storage_config(&self) -> &StorageConfig;
     fn genesis(&self) -> &Genesis;
@@ -775,86 +578,8 @@ pub trait Domain: Send + Sync + Clone + 'static {
     fn archive(&self) -> &Self::Archive;
     fn mempool(&self) -> &Self::Mempool;
 
-    fn state3(&self) -> &Self::State3;
-
-    fn apply_origin(&self) -> Result<(), DomainError> {
-        let deltas = vec![self.chain().compute_origin_delta(self.genesis())?];
-
-        self.state().apply(&deltas)?;
-        self.archive().apply(&deltas)?;
-
-        Ok(())
-    }
-
-    fn compute_apply_deltas(&self, blocks: &[RawBlock]) -> Result<Vec<LedgerDelta>, DomainError> {
-        let mut deltas = Vec::with_capacity(blocks.len());
-
-        for block in blocks {
-            let block = Self::Chain::decode_block(&block.body)?;
-            let slice = Self::Chain::load_slice_for_block(self.state(), &block, &deltas)?;
-            let delta = Self::Chain::compute_apply_delta(slice, &block)?;
-            deltas.push(delta);
-        }
-
-        Ok(deltas)
-    }
-
-    fn compute_apply_deltas3(&self, blocks: &[RawBlock]) -> Result<Vec<StateDelta>, DomainError> {
-        let mut deltas = Vec::with_capacity(blocks.len());
-
-        for block in blocks {
-            let block = Self::Chain::decode_block(&block.body)?;
-
-            let slice = self
-                .chain()
-                .load_slice3_for_block(self.state3(), &block, &deltas)?;
-
-            let delta = self.chain().compute_apply_delta3(slice, &block, &deltas)?;
-
-            deltas.push(delta);
-        }
-
-        Ok(deltas)
-    }
-
-    fn apply_blocks(&self, blocks: &[RawBlock]) -> Result<(), DomainError> {
-        let deltas = self.compute_apply_deltas(blocks)?;
-
-        self.state().apply(&deltas)?;
-        self.archive().apply(&deltas)?;
-        self.mempool().apply(&deltas);
-
-        let deltas3 = self.compute_apply_deltas3(blocks)?;
-
-        self.state3().apply(&deltas3)?;
-
-        Ok(())
-    }
-
-    fn compute_undo_deltas(&self, blocks: &[RawBlock]) -> Result<Vec<LedgerDelta>, DomainError> {
-        let mut deltas = Vec::with_capacity(blocks.len());
-
-        for block in blocks {
-            let block = Self::Chain::decode_block(&block.body)?;
-            let slice = Self::Chain::load_slice_for_block(self.state(), &block, &deltas)?;
-            let delta = Self::Chain::compute_undo_delta(slice, &block)?;
-            deltas.push(delta);
-        }
-
-        Ok(deltas)
-    }
-
-    fn undo_blocks(&self, blocks: &[RawBlock]) -> Result<(), DomainError> {
-        let deltas = self.compute_undo_deltas(blocks)?;
-
-        self.state().apply(&deltas)?;
-        self.archive().apply(&deltas)?;
-        self.mempool().apply(&deltas);
-
-        // TODO: undo state3
-
-        Ok(())
-    }
+    fn watch_tip(&self, from: Option<ChainPoint>) -> Result<Self::TipSubscription, DomainError>;
+    fn notify_tip(&self, tip: TipEvent);
 
     const MAX_PRUNE_SLOTS_PER_HOUSEKEEPING: u64 = 10_000;
 
@@ -865,11 +590,6 @@ pub trait Domain: Send + Sync + Clone + 'static {
             .unwrap_or(Self::Chain::mutable_slots(self));
 
         info!(max_ledger_slots, "pruning ledger for excess history");
-
-        let state_pruned = self.state().prune_history(
-            max_ledger_slots,
-            Some(Self::MAX_PRUNE_SLOTS_PER_HOUSEKEEPING),
-        )?;
 
         let mut archive_pruned = true;
 
@@ -891,7 +611,7 @@ pub trait Domain: Send + Sync + Clone + 'static {
                 .prune_history(max_slots, Some(Self::MAX_PRUNE_SLOTS_PER_HOUSEKEEPING))?;
         }
 
-        Ok(state_pruned && archive_pruned && wal_pruned)
+        Ok(archive_pruned && wal_pruned)
     }
 }
 

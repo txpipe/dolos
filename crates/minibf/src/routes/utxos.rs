@@ -25,7 +25,7 @@ pub fn load_utxo_models<D: Domain>(
     // decoded
     let utxos: HashMap<_, _> = utxos
         .iter()
-        .map(|(k, v)| MultiEraOutput::try_from(v).map(|x| (k, x)))
+        .map(|(k, v)| MultiEraOutput::try_from(v.as_ref()).map(|x| (k, x)))
         .try_collect()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 

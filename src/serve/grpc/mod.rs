@@ -8,7 +8,6 @@ use tracing::info;
 use crate::prelude::*;
 
 mod convert;
-mod iterator;
 mod masking;
 mod query;
 mod stream;
@@ -22,6 +21,9 @@ pub struct Config {
     pub tls_client_ca_root: Option<PathBuf>,
     pub permissive_cors: Option<bool>,
 }
+
+#[derive(Clone)]
+pub struct ContextAdapter<T: dolos_core::StateStore>(T);
 
 pub struct Driver;
 

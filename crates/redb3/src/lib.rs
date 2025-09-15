@@ -1,21 +1,26 @@
 use std::{collections::HashMap, ops::Range, path::Path, sync::Arc};
 
-use dolos_core::BlockSlot;
-
 use dolos_core::{
-    EntityDelta, EntityKey, EntityValue, Namespace, NamespaceType, State3Error as StateError,
-    StateDelta, StateSchema,
+    BlockSlot, ChainPoint, EntityKey, EntityValue, Namespace, NamespaceType, StateError,
+    StateSchema, TxoRef, UtxoMap, UtxoSet,
 };
 
 use redb::{
-    Database, Durability, MultimapTableDefinition, ReadTransaction, TableDefinition,
+    Database, Durability, MultimapTableDefinition, ReadTransaction, TableDefinition, TableStats,
     WriteTransaction,
 };
 
 use tracing::warn;
 
+mod utxoset;
+
+pub use utxoset::*;
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("invalid cursor")]
+    InvalidCursor,
+
     #[error(transparent)]
     DatabaseError(#[from] ::redb::DatabaseError),
 
@@ -33,6 +38,10 @@ pub enum Error {
 
     #[error(transparent)]
     StateError(#[from] StateError),
+
+    // TODO: remove this once we generalize opaque filters
+    #[error(transparent)]
+    AddressError(#[from] pallas::ledger::addresses::Error),
 }
 
 impl From<::redb::TransactionError> for Error {
@@ -113,7 +122,7 @@ impl Table {
     pub fn iter_values(
         &self,
         rx: &mut ReadTransaction,
-        range: Range<&[u8]>,
+        range: Range<EntityKey>,
     ) -> Result<EntityIter, Error> {
         let Some(table) = self.as_value() else {
             return Err(Error::from(StateError::InvalidOpForTable));
@@ -121,7 +130,10 @@ impl Table {
 
         let table = rx.open_table(*table)?;
 
-        let values = table.range(range)?;
+        let start = range.start.as_ref();
+        let end = range.end.as_ref();
+
+        let values = table.range(start..end)?;
 
         Ok(EntityIter(values))
     }
@@ -142,35 +154,53 @@ impl Table {
         Ok(EntityValueIter(all_values))
     }
 
-    pub fn apply(&self, wx: &mut WriteTransaction, crdt: EntityDelta) -> Result<(), Error> {
+    fn write_entity(
+        &self,
+        wx: &WriteTransaction,
+        key: &EntityKey,
+        value: &EntityValue,
+    ) -> Result<(), Error> {
         match self {
             Table::Value(def) => {
                 let mut open_table = wx.open_table(*def)?;
-
-                match crdt {
-                    EntityDelta::OverrideKey(key, value, _) => {
-                        open_table.insert(key.as_slice(), value.as_slice())?;
-                    }
-                    EntityDelta::DeleteKey(key, _) => {
-                        open_table.remove(key.as_slice())?;
-                    }
-                    _ => return Err(Error::from(StateError::InvalidOpForTable)),
-                }
+                open_table.insert(key.as_ref(), value.as_slice())?;
             }
-
             Table::MultiValue(def) => {
                 let mut open_table = wx.open_multimap_table(*def)?;
-
-                match crdt {
-                    EntityDelta::AppendValue(key, value) => {
-                        open_table.insert(key.as_slice(), value.as_slice())?;
-                    }
-                    EntityDelta::RemoveValue(key, value) => {
-                        open_table.remove(key.as_slice(), value.as_slice())?;
-                    }
-                    _ => return Err(Error::from(StateError::InvalidOpForTable)),
-                }
+                open_table.insert(key.as_ref(), value.as_slice())?;
             }
+        }
+
+        Ok(())
+    }
+
+    fn delete_entity(&self, wx: &WriteTransaction, key: &EntityKey) -> Result<(), Error> {
+        match self {
+            Table::Value(def) => {
+                let mut open_table = wx.open_table(*def)?;
+                open_table.remove(key.as_ref())?;
+            }
+            Table::MultiValue(def) => {
+                let mut open_table = wx.open_multimap_table(*def)?;
+                open_table.remove_all(key.as_ref())?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn delete_entity_value(
+        &self,
+        wx: &mut WriteTransaction,
+        key: &EntityKey,
+        value: &EntityValue,
+    ) -> Result<(), Error> {
+        match self {
+            Table::MultiValue(def) => {
+                let mut open_table = wx.open_multimap_table(*def)?;
+                open_table.remove(key.as_ref(), value.as_slice())?;
+            }
+            _ => return Err(Error::from(StateError::InvalidOpForTable)),
         }
 
         Ok(())
@@ -187,6 +217,7 @@ impl Iterator for EntityIter {
 
         let entry = next
             .map(|(k, v)| (k.value().to_vec(), v.value().to_vec()))
+            .map(|(k, v)| (EntityKey::from(k), v))
             .map_err(Error::from)
             .map_err(StateError::from);
 
@@ -211,7 +242,9 @@ impl Iterator for EntityValueIter {
     }
 }
 
-pub const CURSOR_TABLE: TableDefinition<'static, u64, ()> = TableDefinition::new("cursor");
+pub const CURRENT_CURSOR_KEY: u16 = 0;
+
+pub const CURSOR_TABLE: TableDefinition<'static, u16, Vec<u8>> = TableDefinition::new("cursor");
 
 fn build_tables(schema: StateSchema) -> HashMap<Namespace, Table> {
     let tables = schema.iter().map(|(ns, ty)| {
@@ -289,70 +322,127 @@ impl StateStore {
         let mut wx = self.db().begin_write()?;
         wx.set_durability(Durability::Immediate);
 
+        let _ = wx.open_table(CURSOR_TABLE)?;
+
         for (_, table) in self.tables.iter() {
             table.initialize(&mut wx)?;
         }
+
+        // TODO: refactor into entities model
+        utxoset::UtxosTable::initialize(&wx)?;
+        utxoset::FilterIndexes::initialize(&wx)?;
 
         wx.commit()?;
 
         Ok(())
     }
 
-    fn append_cursor(&self, wx: &mut WriteTransaction, slot: BlockSlot) -> Result<(), Error> {
-        let mut cursor = wx.open_table(CURSOR_TABLE)?;
-        cursor.insert(slot, ())?;
-        Ok(())
-    }
-
-    fn undo_cursor(&self, wx: &mut WriteTransaction, slot: BlockSlot) -> Result<(), Error> {
-        let mut cursor = wx.open_table(CURSOR_TABLE)?;
-        cursor.remove(slot)?;
-        Ok(())
-    }
-
-    fn get_cursor(&self) -> Result<Option<BlockSlot>, Error> {
-        let rx = self.db().begin_read().map_err(Error::from)?;
+    fn read_cursor(rx: &ReadTransaction) -> Result<Option<ChainPoint>, Error> {
         let cursor = rx.open_table(CURSOR_TABLE)?;
+        let value = cursor.get(CURRENT_CURSOR_KEY)?.map(|x| x.value());
 
-        let mut range = cursor.range(0..)?.rev();
+        let Some(value) = value else {
+            return Ok(None);
+        };
 
-        let last = range.next().transpose()?.map(|(k, _)| k.value());
+        let point = bincode::deserialize(&value).map_err(|_| Error::InvalidCursor)?;
 
-        Ok(last)
+        Ok(Some(point))
+    }
+
+    pub fn copy(&self, target: &Self) -> Result<(), Error> {
+        let rx = self.db().begin_read()?;
+        let wx = target.db().begin_write()?;
+
+        utxoset::UtxosTable::copy(&rx, &wx)?;
+        utxoset::FilterIndexes::copy(&rx, &wx)?;
+
+        wx.commit()?;
+
+        Ok(())
     }
 }
 
-impl dolos_core::State3Store for StateStore {
-    type EntityIter = EntityIter;
-    type EntityValueIter = EntityValueIter;
+pub struct StateWriter {
+    tables: HashMap<Namespace, Table>,
+    wx: WriteTransaction,
+}
 
-    fn get_cursor(&self) -> Result<Option<BlockSlot>, StateError> {
-        let cursor = self.get_cursor()?;
+impl StateWriter {
+    fn new(db: &Database, tables: HashMap<Namespace, Table>) -> Self {
+        let wx = db.begin_write().unwrap();
+        Self { tables, wx }
+    }
+}
 
-        Ok(cursor)
+impl dolos_core::StateWriter for StateWriter {
+    fn set_cursor(&self, cursor: ChainPoint) -> Result<(), StateError> {
+        let mut table = self.wx.open_table(CURSOR_TABLE).map_err(Error::from)?;
+
+        let point = bincode::serialize(&cursor).unwrap();
+
+        table
+            .insert(CURRENT_CURSOR_KEY, &point)
+            .map_err(Error::from)?;
+
+        Ok(())
     }
 
-    fn read_entity(
+    fn write_entity(
         &self,
         ns: Namespace,
-        key: impl AsRef<[u8]>,
-    ) -> Result<Option<EntityValue>, StateError> {
-        let mut rx = self.db().begin_read().map_err(Error::from)?;
-
+        key: &EntityKey,
+        value: &EntityValue,
+    ) -> Result<(), StateError> {
         let table = self
             .tables
             .get(&ns)
             .ok_or(StateError::NamespaceNotFound(ns))?;
 
-        let value = table.read_value(&mut rx, key.as_ref())?;
+        table.write_entity(&self.wx, key, value)?;
 
-        Ok(value)
+        Ok(())
+    }
+
+    fn delete_entity(&self, ns: Namespace, key: &EntityKey) -> Result<(), StateError> {
+        let table = self
+            .tables
+            .get(&ns)
+            .ok_or(StateError::NamespaceNotFound(ns))?;
+
+        table.delete_entity(&self.wx, key)?;
+
+        Ok(())
+    }
+
+    fn commit(self) -> Result<(), StateError> {
+        self.wx.commit().map_err(Error::from)?;
+
+        Ok(())
+    }
+}
+
+impl dolos_core::StateStore for StateStore {
+    type EntityIter = EntityIter;
+    type EntityValueIter = EntityValueIter;
+    type Writer = StateWriter;
+
+    fn read_cursor(&self) -> Result<Option<ChainPoint>, StateError> {
+        let rx = self.db().begin_read().map_err(Error::from)?;
+
+        let cursor = Self::read_cursor(&rx)?;
+
+        Ok(cursor)
+    }
+
+    fn start_writer(&self) -> Result<Self::Writer, StateError> {
+        Ok(StateWriter::new(&self.db, self.tables.clone()))
     }
 
     fn iter_entities(
         &self,
         ns: Namespace,
-        range: Range<&[u8]>,
+        range: std::ops::Range<EntityKey>,
     ) -> Result<Self::EntityIter, StateError> {
         let mut rx = self.db().begin_read().map_err(Error::from)?;
 
@@ -383,128 +473,80 @@ impl dolos_core::State3Store for StateStore {
         Ok(values)
     }
 
-    fn apply(&self, deltas: &[StateDelta]) -> Result<(), StateError> {
-        let mut wx = self.db().begin_write().map_err(Error::from)?;
+    fn read_entities(
+        &self,
+        ns: Namespace,
+        keys: &[&EntityKey],
+    ) -> Result<Vec<Option<EntityValue>>, StateError> {
+        let mut rx = self.db().begin_read().map_err(Error::from)?;
 
-        wx.set_durability(Durability::Eventual);
-        wx.set_quick_repair(true);
+        let table = self
+            .tables
+            .get(&ns)
+            .ok_or(StateError::NamespaceNotFound(ns))?;
 
-        for delta in deltas {
-            self.append_cursor(&mut wx, delta.slot())?;
+        let mut out = vec![];
 
-            for (ns, crdts) in delta.iter_deltas() {
-                let table = self
-                    .tables
-                    .get(&ns)
-                    .ok_or(StateError::NamespaceNotFound(ns))?;
-
-                for crdt in crdts {
-                    table.apply(&mut wx, crdt.clone())?;
-                }
-            }
+        for key in keys {
+            let value = table.read_value(&mut rx, key.as_ref())?;
+            out.push(value);
         }
 
-        wx.commit().map_err(Error::from)?;
-
-        Ok(())
+        Ok(out)
     }
 
-    fn undo(&self, deltas: &[StateDelta]) -> Result<(), StateError> {
-        let mut wx = self.db().begin_write().map_err(Error::from)?;
-
-        wx.set_durability(Durability::Eventual);
-        wx.set_quick_repair(true);
-
-        for delta in deltas {
-            self.undo_cursor(&mut wx, delta.slot())?;
-
-            for (ns, crdts) in delta.iter_deltas() {
-                let table = self
-                    .tables
-                    .get(&ns)
-                    .ok_or(StateError::NamespaceNotFound(ns))?;
-
-                for crdt in crdts {
-                    let undo = crdt.clone().into_undo();
-                    table.apply(&mut wx, undo)?;
-                }
-            }
+    fn get_utxos(&self, refs: Vec<TxoRef>) -> Result<UtxoMap, StateError> {
+        // exit early before opening a read tx in case there's nothing to fetch
+        if refs.is_empty() {
+            return Ok(Default::default());
         }
 
-        wx.commit().map_err(Error::from)?;
+        let rx = self.db().begin_read().map_err(Error::from)?;
+
+        let out = utxoset::UtxosTable::get_sparse(&rx, refs)?;
+
+        Ok(out)
+    }
+
+    fn get_utxo_by_address(&self, address: &[u8]) -> Result<UtxoSet, StateError> {
+        let rx = self.db().begin_read().map_err(Error::from)?;
+
+        let out = utxoset::FilterIndexes::get_by_address(&rx, address)?;
+
+        Ok(out)
+    }
+
+    fn get_utxo_by_payment(&self, payment: &[u8]) -> Result<UtxoSet, StateError> {
+        let rx = self.db().begin_read().map_err(Error::from)?;
+        let out = FilterIndexes::get_by_payment(&rx, payment)?;
+
+        Ok(out)
+    }
+
+    fn get_utxo_by_stake(&self, stake: &[u8]) -> Result<UtxoSet, StateError> {
+        let rx = self.db().begin_read().map_err(Error::from)?;
+        let out = FilterIndexes::get_by_stake(&rx, stake)?;
+
+        Ok(out)
+    }
+
+    fn get_utxo_by_policy(&self, policy: &[u8]) -> Result<UtxoSet, StateError> {
+        let rx = self.db().begin_read().map_err(Error::from)?;
+        let out = FilterIndexes::get_by_policy(&rx, policy)?;
+
+        Ok(out)
+    }
+
+    fn get_utxo_by_asset(&self, asset: &[u8]) -> Result<UtxoSet, StateError> {
+        let rx = self.db().begin_read().map_err(Error::from)?;
+        let out = FilterIndexes::get_by_asset(&rx, asset)?;
+
+        Ok(out)
+    }
+
+    fn apply_utxoset(&self, deltas: &[dolos_core::UtxoSetDelta]) -> Result<(), StateError> {
+        Self::apply_utxoset(&self, deltas)?;
 
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use dolos_core::State3Store as _;
-
-    #[test]
-    fn test_apply_value_table() {
-        let mut schema = StateSchema::default();
-        schema.insert("x", NamespaceType::KeyValue);
-
-        let store = StateStore::in_memory(schema).unwrap();
-
-        let mut delta = StateDelta::new(1);
-        delta.override_key("x", b"a", b"123", None);
-        delta.override_key("x", b"b", b"123", None);
-        delta.override_key("x", b"c", b"123", None);
-        delta.override_key("x", b"d", b"123", None);
-
-        store.apply(&[delta]).unwrap();
-
-        let cursor = store.get_cursor().unwrap();
-        assert_eq!(cursor, Some(1));
-
-        let value = store.read_entity("x", b"a").unwrap();
-        assert_eq!(value, Some(b"123".to_vec()));
-
-        let value = store.read_entity("x", b"b").unwrap();
-        assert_eq!(value, Some(b"123".to_vec()));
-
-        let mut iter = store.iter_entities("x", b"b"..b"d").unwrap();
-
-        let (k, v) = iter.next().unwrap().unwrap();
-        assert_eq!(k, b"b");
-        assert_eq!(v, b"123");
-
-        let (k, v) = iter.next().unwrap().unwrap();
-        assert_eq!(k, b"c");
-        assert_eq!(v, b"123");
-
-        assert!(iter.next().is_none());
-    }
-
-    #[test]
-    fn test_apply_multivalue_table() {
-        let mut schema = StateSchema::default();
-        schema.insert("y", NamespaceType::KeyMultiValue);
-
-        let store = StateStore::in_memory(schema).unwrap();
-
-        let mut delta = StateDelta::new(1);
-        delta.append_value("y", b"a", b"123");
-        delta.append_value("y", b"a", b"456");
-        delta.append_value("y", b"b", b"123");
-        delta.append_value("y", b"b", b"456");
-
-        store.apply(&[delta]).unwrap();
-
-        let cursor = store.get_cursor().unwrap();
-        assert_eq!(cursor, Some(1));
-
-        let mut iter = store.iter_entity_values("y", b"a").unwrap();
-
-        let v = iter.next().unwrap().unwrap();
-        assert_eq!(v, b"123");
-
-        let v = iter.next().unwrap().unwrap();
-        assert_eq!(v, b"456");
-
-        assert!(iter.next().is_none());
     }
 }

@@ -1,58 +1,14 @@
 use bincode;
 use itertools::Itertools;
-use redb::{Range, ReadableTable, TableDefinition};
-use serde::{Deserialize, Serialize};
-use std::{path::Path, sync::Arc};
+use redb::{Range, TableDefinition};
+use serde::{de::DeserializeOwned, Serialize};
+use std::{marker::PhantomData, ops::RangeBounds, path::Path, sync::Arc};
 use thiserror::Error;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, event_enabled, info, trace, warn, Level};
 
-use dolos_core::{BlockSlot, ChainPoint, LogEntry, LogSeq, RawBlock, WalError, WalStore};
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct LogValue(dolos_core::LogValue);
-
-impl From<dolos_core::LogValue> for LogValue {
-    fn from(value: dolos_core::LogValue) -> Self {
-        Self(value)
-    }
-}
-
-impl From<LogValue> for dolos_core::LogValue {
-    fn from(value: LogValue) -> Self {
-        value.0
-    }
-}
-
-impl redb::Value for LogValue {
-    type SelfType<'a> = Self;
-    type AsBytes<'a>
-        = Vec<u8>
-    where
-        Self: 'a;
-
-    fn fixed_width() -> Option<usize> {
-        None
-    }
-
-    fn from_bytes<'a>(data: &'a [u8]) -> Self
-    where
-        Self: 'a,
-    {
-        bincode::deserialize(data).unwrap()
-    }
-
-    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
-    where
-        Self: 'a,
-        Self: 'b,
-    {
-        bincode::serialize(value).unwrap()
-    }
-
-    fn type_name() -> redb::TypeName {
-        redb::TypeName::new("logvalue")
-    }
-}
+use dolos_core::{
+    BlockSlot, ChainPoint, EntityDelta, LogEntry, LogValue, RawBlock, TipEvent, WalError, WalStore,
+};
 
 #[derive(Debug, Error)]
 #[error(transparent)]
@@ -101,36 +57,195 @@ impl From<::redb::TransactionError> for RedbWalError {
 }
 
 pub type AugmentedBlockSlot = i128;
+pub type DbLogValue = Vec<u8>;
 
-const WAL: TableDefinition<LogSeq, LogValue> = TableDefinition::new("wal");
-const POS: TableDefinition<AugmentedBlockSlot, LogSeq> = TableDefinition::new("pos");
+#[derive(Debug)]
+pub struct DbChainPoint([u8; 40]);
 
-fn point_to_augmented_slot(point: &ChainPoint) -> AugmentedBlockSlot {
-    match point {
-        ChainPoint::Origin => -1i128,
-        ChainPoint::Specific(x, _) => *x as i128,
+impl DbChainPoint {
+    pub fn slot_range(range: impl RangeBounds<BlockSlot>) -> impl RangeBounds<DbChainPoint> {
+        let min_slot = match range.start_bound() {
+            std::ops::Bound::Included(x) => *x,
+            std::ops::Bound::Excluded(x) => *x + 1,
+            std::ops::Bound::Unbounded => BlockSlot::MIN,
+        };
+
+        let mut min_point = [0u8; 40];
+        min_point[0..8].copy_from_slice(&min_slot.to_le_bytes());
+        let min_point = DbChainPoint(min_point);
+
+        let max_slot = match range.end_bound() {
+            std::ops::Bound::Included(x) => *x,
+            std::ops::Bound::Excluded(x) => *x - 1,
+            std::ops::Bound::Unbounded => BlockSlot::MAX,
+        };
+
+        let mut max_point = [255u8; 40];
+        max_point[0..8].copy_from_slice(&max_slot.to_le_bytes());
+        let max_point = DbChainPoint(max_point);
+
+        std::ops::RangeInclusive::new(min_point, max_point)
     }
 }
 
-pub struct WalIter<'a>(Range<'a, LogSeq, LogValue>);
+impl redb::Value for DbChainPoint {
+    type SelfType<'a>
+        = Self
+    where
+        Self: 'a;
 
-impl Iterator for WalIter<'_> {
-    type Item = LogEntry;
+    type AsBytes<'a>
+        = &'a [u8; 40]
+    where
+        Self: 'a;
+
+    fn fixed_width() -> Option<usize> {
+        Some(40)
+    }
+
+    fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
+    where
+        Self: 'a,
+    {
+        let inner = <[u8; 40]>::try_from(data).unwrap();
+        Self(inner)
+    }
+
+    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
+    where
+        Self: 'b,
+    {
+        &value.0
+    }
+
+    fn type_name() -> redb::TypeName {
+        redb::TypeName::new("chainpoint")
+    }
+}
+
+impl redb::Key for DbChainPoint {
+    fn compare(data1: &[u8], data2: &[u8]) -> std::cmp::Ordering {
+        data1.cmp(data2)
+    }
+}
+
+impl From<ChainPoint> for DbChainPoint {
+    fn from(value: ChainPoint) -> Self {
+        DbChainPoint(value.into_bytes())
+    }
+}
+
+impl From<DbChainPoint> for ChainPoint {
+    fn from(value: DbChainPoint) -> Self {
+        ChainPoint::from_bytes(value.0)
+    }
+}
+
+pub struct DbChainPointRange {
+    start: std::ops::Bound<DbChainPoint>,
+    end: std::ops::Bound<DbChainPoint>,
+}
+
+impl std::ops::RangeBounds<DbChainPoint> for DbChainPointRange {
+    fn start_bound(&self) -> std::ops::Bound<&DbChainPoint> {
+        self.start.as_ref()
+    }
+
+    fn end_bound(&self) -> std::ops::Bound<&DbChainPoint> {
+        self.end.as_ref()
+    }
+}
+
+fn to_raw_log_value<T>(value: &LogValue<T>) -> DbLogValue
+where
+    T: EntityDelta,
+    T: Serialize,
+{
+    bincode::serialize(value).unwrap()
+}
+
+fn from_raw_log_value<T>(value: &DbLogValue) -> LogValue<T>
+where
+    T: EntityDelta,
+    T: DeserializeOwned,
+{
+    bincode::deserialize(value).unwrap()
+}
+
+const WAL: TableDefinition<DbChainPoint, DbLogValue> = TableDefinition::new("wal");
+
+pub struct LogIter<'a, T>(Range<'a, DbChainPoint, DbLogValue>, PhantomData<T>);
+
+impl<'a, T> From<Range<'a, DbChainPoint, DbLogValue>> for LogIter<'a, T>
+where
+    T: EntityDelta + DeserializeOwned,
+{
+    fn from(value: Range<'a, DbChainPoint, DbLogValue>) -> Self {
+        Self(value, PhantomData)
+    }
+}
+
+impl<T> Iterator for LogIter<'_, T>
+where
+    T: EntityDelta + DeserializeOwned,
+{
+    type Item = LogEntry<T>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.0
             .next()
             .map(|x| x.unwrap())
-            .map(|(k, v)| (k.value(), v.value().into()))
+            .map(|(k, v)| (k.value(), v.value()))
+            .map(|(k, v)| (k.into(), from_raw_log_value(&v)))
     }
 }
 
-impl DoubleEndedIterator for WalIter<'_> {
+impl<T> DoubleEndedIterator for LogIter<'_, T>
+where
+    T: EntityDelta,
+    T: DeserializeOwned,
+{
     fn next_back(&mut self) -> Option<Self::Item> {
         self.0
             .next_back()
             .map(|x| x.unwrap())
-            .map(|(k, v)| (k.value(), v.value().into()))
+            .map(|(k, v)| (k.value(), v.value()))
+            .map(|(k, v)| (k.into(), from_raw_log_value(&v)))
+    }
+}
+
+pub struct BlockIter<'a, T>(LogIter<'a, T>);
+
+impl<'a, T> Iterator for BlockIter<'a, T>
+where
+    T: EntityDelta + DeserializeOwned,
+{
+    type Item = (ChainPoint, RawBlock);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0
+            .next()
+            .map(|(point, log)| (point, Arc::new(log.block)))
+    }
+}
+
+impl<'a, T> DoubleEndedIterator for BlockIter<'a, T>
+where
+    T: EntityDelta + DeserializeOwned,
+{
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.0
+            .next_back()
+            .map(|(point, log)| (point, Arc::new(log.block)))
+    }
+}
+
+impl<'a, T> From<LogIter<'a, T>> for BlockIter<'a, T>
+where
+    T: EntityDelta + DeserializeOwned,
+{
+    fn from(value: LogIter<'a, T>) -> Self {
+        Self(value)
     }
 }
 
@@ -138,12 +253,15 @@ const DEFAULT_CACHE_SIZE_MB: usize = 50;
 
 /// Concrete implementation of WalStore using Redb
 #[derive(Clone, Debug)]
-pub struct RedbWalStore {
+pub struct RedbWalStore<T> {
     db: Arc<redb::Database>,
-    tip_change: Arc<tokio::sync::Notify>,
+    _phantom: PhantomData<T>,
 }
 
-impl RedbWalStore {
+impl<T> RedbWalStore<T>
+where
+    T: EntityDelta + Serialize + DeserializeOwned + Send + Sync + 'static,
+{
     pub fn is_empty(&self) -> Result<bool, RedbWalError> {
         let wr = self.db.begin_read()?;
 
@@ -155,26 +273,11 @@ impl RedbWalStore {
 
         let start = self.find_tip()?;
 
-        if let Some((start, _)) = start {
-            if start == 0 {
-                return Ok(true);
-            }
+        if start.is_none() {
+            return Ok(true);
         }
 
         Ok(false)
-    }
-
-    pub fn initialize_from_origin(&self) -> Result<(), RedbWalError> {
-        if !self.is_empty()? {
-            return Err(RedbWalError(WalError::NotEmpty));
-        }
-
-        info!("initializing wal");
-        self.append_entries(std::iter::once(dolos_core::LogValue::Mark(
-            ChainPoint::Origin,
-        )))?;
-
-        Ok(())
     }
 
     pub fn memory() -> Result<Self, WalError> {
@@ -184,8 +287,10 @@ impl RedbWalStore {
 
         let out = Self {
             db: Arc::new(db),
-            tip_change: Arc::new(tokio::sync::Notify::new()),
+            _phantom: Default::default(),
         };
+
+        out.ensure_initialized()?;
 
         Ok(out)
     }
@@ -199,8 +304,10 @@ impl RedbWalStore {
 
         let out = Self {
             db: Arc::new(inner),
-            tip_change: Arc::new(tokio::sync::Notify::new()),
+            _phantom: Default::default(),
         };
+
+        out.ensure_initialized()?;
 
         Ok(out)
     }
@@ -209,42 +316,11 @@ impl RedbWalStore {
         Arc::get_mut(&mut self.db)
     }
 
-    // TODO: see how to expose this method through the official write interface
-    // TODO: improve performance, this approach is immensely inefficient
-    pub fn remove_range(
-        &mut self,
-        from: Option<LogSeq>,
-        to: Option<LogSeq>,
-    ) -> Result<(), RedbWalError> {
+    pub fn ensure_initialized(&self) -> Result<(), RedbWalError> {
         let mut wx = self.db.begin_write()?;
         wx.set_quick_repair(true);
-
-        {
-            let mut wal = wx.open_table(WAL)?;
-
-            wal.extract_if(|seq, _| match (from, to) {
-                (None, None) => true,
-                (Some(a), Some(b)) => seq >= a && seq <= b,
-                (None, Some(x)) => seq <= x,
-                (Some(x), None) => seq >= x,
-            })?
-            .collect_vec();
-        }
-
-        {
-            let mut pos = wx.open_table(POS)?;
-
-            pos.extract_if(|_, seq| match (from, to) {
-                (None, None) => true,
-                (Some(a), Some(b)) => seq >= a && seq <= b,
-                (None, Some(x)) => seq <= x,
-                (Some(x), None) => seq >= x,
-            })?
-            .collect_vec();
-        }
-
+        wx.open_table(WAL)?;
         wx.commit()?;
-
         Ok(())
     }
 
@@ -285,22 +361,18 @@ impl RedbWalStore {
         max_slots: u64,
         max_prune: Option<u64>,
     ) -> Result<bool, RedbWalError> {
-        let start_slot = match self.find_start()? {
-            Some((_, ChainPoint::Origin)) => 0,
-            Some((_, ChainPoint::Specific(slot, _))) => slot,
-            _ => {
-                debug!("no start point found, skipping housekeeping");
-                return Ok(true);
-            }
+        let Some((start, _)) = self.find_start()? else {
+            debug!("no start point found, skipping housekeeping");
+            return Ok(true);
         };
 
-        let last_slot = match self.find_tip()? {
-            Some((_, ChainPoint::Specific(slot, _))) => slot,
-            _ => {
-                debug!("no tip found, skipping housekeeping");
-                return Ok(true);
-            }
+        let Some((last, _)) = self.find_tip()? else {
+            debug!("no tip found, skipping housekeeping");
+            return Ok(true);
         };
+
+        let start_slot = start.slot();
+        let last_slot = last.slot();
 
         let delta = last_slot.saturating_sub(start_slot);
         let excess = delta.saturating_sub(max_slots);
@@ -363,34 +435,26 @@ impl RedbWalStore {
         &self,
         target: BlockSlot,
         search_range: impl std::ops::RangeBounds<BlockSlot>,
-    ) -> Result<Option<LogSeq>, RedbWalError> {
-        let min_slot = match search_range.start_bound() {
-            std::ops::Bound::Included(x) => *x as i128,
-            std::ops::Bound::Excluded(x) => *x as i128 + 1,
-            std::ops::Bound::Unbounded => i128::MIN,
-        };
-
-        let max_slot = match search_range.end_bound() {
-            std::ops::Bound::Included(x) => *x as i128,
-            std::ops::Bound::Excluded(x) => *x as i128 - 1,
-            std::ops::Bound::Unbounded => i128::MAX,
-        };
-
+    ) -> Result<Option<ChainPoint>, RedbWalError> {
         let rx = self.db.begin_read()?;
-        let table = rx.open_table(POS)?;
+        let table = rx.open_table(WAL)?;
 
-        let range = table.range(min_slot..max_slot)?;
+        let range = DbChainPoint::slot_range(search_range);
+        let range = table.range(range)?;
 
         let deltas: Vec<_> = range
-            .map_ok(|(k, v)| (target as i128 - k.value(), v.value()))
+            .map_ok(|(k, _)| k.value())
+            .map_ok(|point| ChainPoint::from(point))
+            .map_ok(|point| (target - point.slot(), point))
             .try_collect()?;
 
-        let seq = deltas.into_iter().min_by_key(|(x, _)| *x).map(|(_, v)| v);
+        let point = deltas.into_iter().min_by_key(|(x, _)| *x).map(|(_, v)| v);
+        let point = point.map(|v| v.into());
 
-        Ok(seq)
+        Ok(point)
     }
 
-    /// Attempts to find an approximate LogSeq for a given BlockSlot with
+    /// Attempts to find an approximate ChainPoint for a given BlockSlot with
     /// retries.
     ///
     /// This function repeatedly calls `approximate_slot` with an expanding
@@ -406,9 +470,9 @@ impl RedbWalStore {
     ///
     /// # Returns
     ///
-    /// Returns a Result containing an Option<LogSeq>. If a suitable entry is
-    /// found within any of the attempted search ranges, it returns
-    /// Some(LogSeq), otherwise None. Returns an error if there's an issue
+    /// Returns a Result containing an Option<ChainPoint>. If a suitable entry
+    /// is found within any of the attempted search ranges, it returns
+    /// Some(ChainPoint), otherwise None. Returns an error if there's an issue
     /// accessing the database.
     ///
     /// # Errors
@@ -428,7 +492,7 @@ impl RedbWalStore {
         &self,
         target: BlockSlot,
         search_range: F,
-    ) -> Result<Option<LogSeq>, RedbWalError>
+    ) -> Result<Option<ChainPoint>, RedbWalError>
     where
         F: Fn(usize) -> R,
         R: std::ops::RangeBounds<BlockSlot>,
@@ -475,31 +539,27 @@ impl RedbWalStore {
         let mut wx = self.db.begin_write()?;
         wx.set_quick_repair(true);
 
+        let last_point = self
+            .approximate_slot_with_retry(slot, |attempt| {
+                let start = slot - (20 * attempt as u64);
+                start..=slot
+            })?
+            .ok_or(RedbWalError(WalError::SlotNotFound(slot)))?;
+
+        debug!(%last_point, "found max chain point to remove");
+
         {
-            let last_seq = self
-                .approximate_slot_with_retry(slot, |attempt| {
-                    let start = slot - (20 * attempt as u64);
-                    start..=slot
-                })?
-                .ok_or(RedbWalError(WalError::SlotNotFound(slot)))?;
-
-            debug!(last_seq, "found max sequence to remove");
-
             let mut wal = wx.open_table(WAL)?;
 
-            let mut to_remove = wal.extract_from_if(..last_seq, |_, _| true)?;
+            let last_point = DbChainPoint::from(last_point);
+            let mut to_remove = wal.extract_from_if(..last_point, |_, _| true)?;
 
-            while let Some(Ok((seq, _))) = to_remove.next() {
-                trace!(seq = seq.value(), "removing wal table entry");
-            }
-        }
-
-        {
-            let mut pos = wx.open_table(POS)?;
-            let mut to_remove = pos.extract_from_if(..(slot as i128), |_, _| true)?;
-
-            while let Some(Ok((slot, _))) = to_remove.next() {
-                trace!(slot = slot.value(), "removing pos table entry");
+            while let Some(Ok((point, _))) = to_remove.next() {
+                if event_enabled!(Level::TRACE) {
+                    let point = point.value();
+                    let point = ChainPoint::from(point);
+                    trace!(%point, "removing wal table entry");
+                }
             }
         }
 
@@ -508,335 +568,154 @@ impl RedbWalStore {
         Ok(())
     }
 
-    fn crawl_range<'a>(&self, start: LogSeq, end: LogSeq) -> Result<WalIter<'a>, RedbWalError> {
+    fn iter_logs<'a>(
+        &self,
+        start: Option<ChainPoint>,
+        end: Option<ChainPoint>,
+    ) -> Result<LogIter<'a, T>, RedbWalError> {
         let rx = self.db.begin_read()?;
         let table = rx.open_table(WAL)?;
 
-        let range = table.range(start..=end)?;
+        let start = start.map(DbChainPoint::from);
+        let end = end.map(DbChainPoint::from);
 
-        Ok(WalIter(range))
-    }
-
-    fn crawl_from<'a>(&self, start: Option<LogSeq>) -> Result<WalIter<'a>, RedbWalError> {
-        let rx = self.db.begin_read()?;
-        let table = rx.open_table(WAL)?;
-
-        let range = match start {
-            Some(start) => table.range(start..)?,
-            None => table.range(0..)?,
+        let range = match (start, end) {
+            (Some(start), Some(end)) => table.range(start..=end)?,
+            (Some(start), None) => table.range(start..)?,
+            (None, Some(end)) => table.range(..end)?,
+            (None, None) => table.range::<DbChainPoint>(..)?,
         };
 
-        Ok(WalIter(range))
+        Ok(LogIter::from(range))
     }
 
-    fn locate_point(&self, point: &ChainPoint) -> Result<Option<LogSeq>, RedbWalError> {
+    fn read_entry(&self, key: &ChainPoint) -> Result<Option<LogValue<T>>, RedbWalError> {
         let rx = self.db.begin_read()?;
-        let table = rx.open_table(POS)?;
+        let table = rx.open_table(WAL)?;
 
-        let pos_key = point_to_augmented_slot(point);
-        let pos = table.get(pos_key)?.map(|x| x.value());
+        let key = DbChainPoint::from(key.clone());
 
-        Ok(pos)
+        let value = table
+            .get(&key)?
+            .map(|v| v.value())
+            .map(|v| from_raw_log_value(&v));
+
+        Ok(value)
     }
 
-    fn append_entries(
-        &self,
-        logs: impl Iterator<Item = dolos_core::LogValue>,
-    ) -> Result<(), RedbWalError> {
+    pub fn append_entries(&self, logs: &[LogEntry<T>]) -> Result<(), RedbWalError> {
         let mut wx = self.db.begin_write()?;
         wx.set_quick_repair(true);
 
         {
             let mut wal = wx.open_table(WAL)?;
-            let mut pos = wx.open_table(POS)?;
 
-            let mut next_seq = wal.last()?.map(|(x, _)| x.value() + 1).unwrap_or_default();
-
-            for log in logs {
-                // Since we need to track Origin as part of the wal, we turn slots into signed
-                // integers and treat -1 as the reference for Origin. This is not ideal from
-                // disk space perspective, but good enough for this stage.
-                let pos_key = match &log {
-                    dolos_core::LogValue::Apply(RawBlock { slot, .. }) => *slot as i128,
-                    dolos_core::LogValue::Undo(RawBlock { slot, .. }) => *slot as i128,
-                    dolos_core::LogValue::Mark(x) => point_to_augmented_slot(x),
-                };
-
-                pos.insert(pos_key, next_seq)?;
-                wal.insert(next_seq, LogValue::from(log))?;
-
-                next_seq += 1;
+            for (point, log) in logs {
+                let point = DbChainPoint::from(point.clone());
+                let log = to_raw_log_value(log);
+                wal.insert(point, log)?;
             }
         }
 
         wx.commit()?;
 
-        self.tip_change.notify_waiters();
+        Ok(())
+    }
+
+    fn remove_entries(&self, after: &ChainPoint) -> Result<(), RedbWalError> {
+        let mut wx = self.db.begin_write()?;
+        wx.set_quick_repair(true);
+
+        {
+            let after = DbChainPoint::from(after.clone());
+            let mut table = wx.open_table(WAL)?;
+
+            let mut to_remove = table.extract_from_if(..after, |_, _| true)?;
+
+            while let Some(Ok((point, _))) = to_remove.next() {
+                if event_enabled!(Level::TRACE) {
+                    let point = point.value();
+                    let point = ChainPoint::from(point);
+                    trace!(%point, "removing wal table entry");
+                }
+            }
+        }
+
+        wx.commit()?;
+
+        Ok(())
+    }
+
+    fn reset_to(&self, point: &ChainPoint) -> Result<(), RedbWalError> {
+        self.remove_entries(&ChainPoint::Origin)?;
+
+        let entry = (point.clone(), LogValue::origin());
+        self.append_entries(&[entry])?;
 
         Ok(())
     }
 }
 
-impl WalStore for RedbWalStore {
-    type LogIterator<'a> = WalIter<'a>;
+impl<T> WalStore for RedbWalStore<T>
+where
+    T: EntityDelta + Serialize + DeserializeOwned + Send + Sync + 'static,
+{
+    type Delta = T;
+    type LogIterator<'a> = LogIter<'a, Self::Delta>;
+    type BlockIterator<'a> = BlockIter<'a, Self::Delta>;
 
-    async fn tip_change(&self) {
-        self.tip_change.notified().await;
+    fn reset_to(&self, point: &ChainPoint) -> Result<(), WalError> {
+        RedbWalStore::reset_to(self, point).map_err(From::from)
     }
 
     fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, WalError> {
         RedbWalStore::prune_history(self, max_slots, max_prune).map_err(From::from)
     }
 
-    fn crawl_range<'a>(
+    fn read_entry(&self, key: &ChainPoint) -> Result<Option<LogValue<Self::Delta>>, WalError> {
+        RedbWalStore::read_entry(self, key).map_err(From::from)
+    }
+
+    fn locate_point(&self, around: BlockSlot) -> Result<Option<ChainPoint>, WalError> {
+        let search = |retry| {
+            let delta = 20 * retry as u64;
+            let start = around - delta;
+            let end = around + delta;
+            start..=end
+        };
+
+        let x = self.approximate_slot_with_retry(around, search)?;
+
+        Ok(x)
+    }
+
+    fn append_entries(&self, logs: Vec<LogEntry<Self::Delta>>) -> Result<(), WalError> {
+        RedbWalStore::append_entries(self, &logs).map_err(WalError::from)?;
+
+        Ok(())
+    }
+
+    fn remove_entries(&mut self, after: &ChainPoint) -> Result<(), WalError> {
+        RedbWalStore::remove_entries(self, after).map_err(WalError::from)?;
+
+        Ok(())
+    }
+
+    fn iter_logs<'a>(
         &self,
-        start: LogSeq,
-        end: LogSeq,
+        start: Option<ChainPoint>,
+        end: Option<ChainPoint>,
     ) -> Result<Self::LogIterator<'a>, WalError> {
-        RedbWalStore::crawl_range(self, start, end).map_err(From::from)
+        RedbWalStore::iter_logs(self, start, end).map_err(From::from)
     }
 
-    fn crawl_from<'a>(&self, start: Option<LogSeq>) -> Result<Self::LogIterator<'a>, WalError> {
-        RedbWalStore::crawl_from(self, start).map_err(From::from)
-    }
-
-    fn locate_point(&self, point: &ChainPoint) -> Result<Option<LogSeq>, WalError> {
-        RedbWalStore::locate_point(self, point).map_err(From::from)
-    }
-
-    fn append_entries(
+    fn iter_blocks<'a>(
         &self,
-        logs: impl Iterator<Item = dolos_core::LogValue>,
-    ) -> Result<(), WalError> {
-        RedbWalStore::append_entries(self, logs).map_err(From::from)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use dolos_core::WalBlockReader;
-
-    use crate::testing::{dummy_block_from_slot, empty_wal_db, slot_to_hash};
-
-    use super::*;
-
-    fn dummy_block(slot: u64) -> RawBlock {
-        let hash = pallas::crypto::hash::Hasher::<256>::hash(slot.to_be_bytes().as_slice());
-
-        RawBlock {
-            slot,
-            hash,
-            era: pallas::ledger::traverse::Era::Byron,
-            body: slot.to_be_bytes().to_vec(),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_wal_block_reader_happy_path() {
-        let db = RedbWalStore::memory().unwrap();
-        db.initialize_from_origin().unwrap();
-
-        let blocks = (0..=5).map(dummy_block).collect_vec();
-        db.roll_forward(blocks.clone().into_iter()).unwrap();
-
-        let wal_block_reader = WalBlockReader::try_new(&db, None, 20).unwrap();
-        let output_blocks = wal_block_reader.collect_vec();
-
-        assert_eq!(blocks, output_blocks);
-    }
-
-    #[tokio::test]
-    async fn test_wal_block_reader_undone_blocks_in_lookahead_window() {
-        let mut db = RedbWalStore::memory().unwrap();
-        db.initialize_from_origin().unwrap();
-
-        let undone_chain_point = (&dummy_block(1)).into();
-        db.roll_forward(
-            vec![
-                dummy_block(0),
-                dummy_block(1),
-                dummy_block(2),
-                dummy_block(3),
-            ]
-            .into_iter(),
-        )
-        .unwrap();
-        db.roll_back(&undone_chain_point).unwrap();
-        db.roll_forward(vec![dummy_block(4), dummy_block(5), dummy_block(6)].into_iter())
-            .unwrap();
-
-        let wal_block_reader = WalBlockReader::try_new(&db, None, 20).unwrap();
-        let output_blocks = wal_block_reader.collect_vec();
-
-        assert_eq!(
-            vec![
-                dummy_block(0),
-                dummy_block(1),
-                dummy_block(4),
-                dummy_block(5),
-                dummy_block(6)
-            ],
-            output_blocks
-        );
-    }
-
-    #[tokio::test]
-    async fn test_wal_block_reader_undone_blocks_not_in_lookahead_window() {
-        let mut db = RedbWalStore::memory().unwrap();
-        db.initialize_from_origin().unwrap();
-
-        let undone_chain_point = (&dummy_block(2)).into();
-        db.roll_forward(
-            vec![
-                dummy_block(0),
-                dummy_block(1),
-                dummy_block(2),
-                dummy_block(3),
-                dummy_block(4),
-                dummy_block(5),
-                dummy_block(6),
-            ]
-            .into_iter(),
-        )
-        .unwrap();
-        db.roll_back(&undone_chain_point).unwrap();
-
-        let wal_block_reader = WalBlockReader::try_new(&db, None, 2).unwrap();
-        let output_blocks = wal_block_reader.collect_vec();
-
-        // With a correctly sized lookback window, only 0 1 and 2 should be returned
-        assert_eq!(
-            vec![
-                dummy_block(0),
-                dummy_block(1),
-                dummy_block(2),
-                dummy_block(3),
-                dummy_block(4),
-                dummy_block(5),
-                dummy_block(6),
-            ],
-            output_blocks
-        );
-
-        let wal_block_reader = WalBlockReader::try_new(&db, None, 3).unwrap();
-        let output_blocks = wal_block_reader.collect_vec();
-
-        // With a correctly sized lookback window, only 0 1 and 2 should be returned
-        assert_eq!(
-            vec![
-                dummy_block(0),
-                dummy_block(1),
-                dummy_block(2),
-                dummy_block(3),
-            ],
-            output_blocks
-        );
-    }
-
-    #[test]
-    fn test_origin_event() {
-        let db = empty_wal_db();
-
-        let mut iter = db.crawl_from(None).unwrap();
-
-        let origin = iter.next();
-        assert!(origin.is_some());
-
-        let (seq, value) = origin.unwrap();
-        assert_eq!(seq, 0);
-        assert!(matches!(
-            value,
-            dolos_core::LogValue::Mark(ChainPoint::Origin)
-        ));
-
-        // ensure nothing else
-        let origin = iter.next();
-        assert!(origin.is_none());
-    }
-
-    #[test]
-    fn test_basic_append() {
-        let db = empty_wal_db();
-
-        let expected_block = dummy_block_from_slot(11);
-        let expected_point = ChainPoint::Specific(11, expected_block.hash);
-
-        db.roll_forward(std::iter::once(expected_block.clone()))
-            .unwrap();
-
-        // ensure tip matches
-        let (seq, point) = db.find_tip().unwrap().unwrap();
-        assert_eq!(seq, 1);
-        assert_eq!(point, expected_point);
-
-        // ensure point can be located
-        let seq = db.locate_point(&expected_point).unwrap().unwrap();
-        assert_eq!(seq, 1);
-
-        // ensure chain has item
-        let mut iter = db.crawl_from(None).unwrap();
-
-        iter.next(); // origin
-
-        let (seq, log) = iter.next().unwrap();
-        assert_eq!(seq, 1);
-        assert_eq!(log, dolos_core::LogValue::Apply(expected_block));
-
-        // ensure nothing else
-        let origin = iter.next();
-        assert!(origin.is_none());
-    }
-
-    #[test]
-    fn test_rollback_undos() {
-        let mut db = empty_wal_db();
-
-        let forward = (0..=5).map(|x| dummy_block_from_slot(x * 10));
-        db.roll_forward(forward).unwrap();
-
-        let rollback_to = ChainPoint::Specific(20, slot_to_hash(20));
-        db.roll_back(&rollback_to).unwrap();
-
-        // ensure tip show rollback point
-        let (_, tip_point) = db.find_tip().unwrap().unwrap();
-        assert_eq!(tip_point, rollback_to);
-
-        // after the previous actions, we should get the following sequence
-        // Origin => Apply(0) => Apply(10) => Apply(20) => Apply(30) => Apply(40) =>
-        // Apply(50) => Undo(50) => Undo(40) => Undo(30) => Mark(20)
-
-        // ensure wal has correct sequence of events
-        let mut wal = db.crawl_from(None).unwrap();
-
-        let (seq, log) = wal.next().unwrap();
-        assert_eq!(log, dolos_core::LogValue::Mark(ChainPoint::Origin));
-        println!("{seq}");
-
-        for i in 0..=5 {
-            let (seq, log) = wal.next().unwrap();
-            println!("{seq}");
-
-            match log {
-                dolos_core::LogValue::Apply(RawBlock { slot, .. }) => assert_eq!(slot, i * 10),
-                _ => panic!("expected apply"),
-            }
-        }
-
-        for i in (3..=5).rev() {
-            let (seq, log) = wal.next().unwrap();
-            println!("{seq}");
-
-            match log {
-                dolos_core::LogValue::Undo(RawBlock { slot, .. }) => assert_eq!(slot, i * 10),
-                _ => panic!("expected undo"),
-            }
-        }
-
-        let (seq, log) = wal.next().unwrap();
-        assert_eq!(log, dolos_core::LogValue::Mark(rollback_to));
-        println!("{seq}");
-
-        // ensure chain stops here
-        assert!(wal.next().is_none());
+        start: Option<ChainPoint>,
+        end: Option<ChainPoint>,
+    ) -> Result<Self::BlockIterator<'a>, WalError> {
+        let iter = RedbWalStore::iter_logs(self, start, end)?;
+        let iter = BlockIter::from(iter);
+        Ok(iter)
     }
 }

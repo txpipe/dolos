@@ -14,11 +14,7 @@ use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
 use tracing::debug;
 
-use dolos_cardano::pparams;
-
 use crate::prelude::*;
-
-use crate::adapters::StateAdapter;
 
 #[derive(Default)]
 struct MempoolState {
@@ -32,21 +28,14 @@ struct MempoolState {
 pub struct Mempool {
     mempool: Arc<RwLock<MempoolState>>,
     updates: broadcast::Sender<MempoolEvent>,
-    genesis: Arc<Genesis>,
-    ledger: StateAdapter,
 }
 
 impl Mempool {
-    pub fn new(genesis: Arc<Genesis>, ledger: StateAdapter) -> Self {
+    pub fn new() -> Self {
         let mempool = Arc::new(RwLock::new(MempoolState::default()));
         let (updates, _) = broadcast::channel(16);
 
-        Self {
-            mempool,
-            updates,
-            genesis,
-            ledger,
-        }
+        Self { mempool, updates }
     }
 
     pub fn notify(&self, new_stage: MempoolTxStage, tx: MempoolTx) {
@@ -69,20 +58,12 @@ impl Mempool {
         );
     }
 
-    pub fn validate(&self, tx: &MultiEraTx) -> Result<(), MempoolError> {
-        let tip = self.ledger.cursor()?;
+    pub fn validate<D: Domain>(&self, domain: &D, tx: &MultiEraTx) -> Result<(), MempoolError> {
+        let tip = domain.state().read_cursor()?;
 
-        let updates: Vec<_> = self
-            .ledger
-            .get_pparams(tip.as_ref().map(|p| p.slot()).unwrap_or_default())?;
+        let genesis = domain.genesis();
 
-        let updates: Vec<_> = updates.into_iter().map(TryInto::try_into).try_collect()?;
-
-        let eras = pparams::fold_with_hacks(&self.genesis, &updates, tip.as_ref().unwrap().slot());
-
-        let era = eras.era_for_slot(tip.as_ref().unwrap().slot());
-
-        let network_id = match self.genesis.shelley.network_id.as_ref() {
+        let network_id = match genesis.shelley.network_id.as_ref() {
             Some(network) => match network.as_str() {
                 "Mainnet" => Some(NetworkId::Mainnet.into()),
                 "Testnet" => Some(NetworkId::Testnet.into()),
@@ -92,9 +73,11 @@ impl Mempool {
         }
         .unwrap();
 
+        let params = dolos_cardano::use_active_pparams(domain)?;
+
         let env = pallas::ledger::validate::utils::Environment {
-            prot_params: era.pparams.clone(),
-            prot_magic: self.genesis.shelley.network_magic.unwrap(),
+            prot_params: dolos_cardano::utils::pparams_to_pallas(&params),
+            prot_magic: genesis.shelley.network_magic.unwrap(),
             block_slot: tip.unwrap().slot(),
             network_id,
             acnt: Some(AccountState::default()),
@@ -102,7 +85,7 @@ impl Mempool {
 
         let input_refs = tx.requires().iter().map(From::from).collect();
 
-        let utxos = self.ledger.get_utxos(input_refs)?;
+        let utxos = domain.state().get_utxos(input_refs)?;
 
         let mut pallas_utxos = pallas::ledger::validate::utils::UTxOs::new();
 
@@ -111,10 +94,12 @@ impl Mempool {
                 transaction_id: txoref.0,
                 index: txoref.1.into(),
             };
+
             let input = MultiEraInput::AlonzoCompatible(<Box<Cow<'_, TransactionInput>>>::from(
                 Cow::Owned(tx_in),
             ));
-            let output = MultiEraOutput::try_from(eracbor)?;
+
+            let output = MultiEraOutput::try_from(eracbor.as_ref())?;
             pallas_utxos.insert(input, output);
         }
 
@@ -129,50 +114,44 @@ impl Mempool {
         Ok(())
     }
 
-    pub fn evaluate(
+    pub fn evaluate<D: Domain>(
         &self,
+        domain: &D,
         tx: &MultiEraTx,
     ) -> Result<pallas::ledger::validate::phase2::EvalReport, MempoolError> {
         use dolos_core::{EraCbor, StateStore as _, TxoRef};
 
-        let tip = self.ledger.cursor()?;
+        let eras = dolos_cardano::eras::load_era_summary(domain)?;
 
-        let updates: Vec<_> = self
-            .ledger
-            .get_pparams(tip.as_ref().map(|p| p.slot()).unwrap_or_default())?;
-
-        let updates: Vec<_> = updates.into_iter().map(TryInto::try_into).try_collect()?;
-
-        let eras = pparams::fold_with_hacks(&self.genesis, &updates, tip.as_ref().unwrap().slot());
+        let pparams = dolos_cardano::use_active_pparams(domain)?;
+        let pparams = dolos_cardano::utils::pparams_to_pallas(&pparams);
 
         let slot_config = pallas::ledger::validate::phase2::script_context::SlotConfig {
-            slot_length: eras.edge().pparams.slot_length(),
+            slot_length: eras.edge().slot_length,
             zero_slot: eras.edge().start.slot,
-            zero_time: eras.edge().start.timestamp.timestamp().try_into().unwrap(),
+            zero_time: eras.edge().start.timestamp,
         };
 
         let input_refs = tx.requires().iter().map(From::from).collect();
 
-        let utxos: pallas::ledger::validate::utils::UtxoMap = self
-            .ledger
+        let utxos: pallas::ledger::validate::utils::UtxoMap = domain
+            .state()
             .get_utxos(input_refs)?
             .into_iter()
-            .map(|(TxoRef(a, b), EraCbor(c, d))| {
-                let era = c.try_into().expect("era out of range");
+            .map(|(txoref, eracbor)| {
+                let TxoRef(a, b) = txoref;
+                let EraCbor(c, d) = eracbor.as_ref();
+                let era = pallas::ledger::traverse::Era::try_from(*c).expect("era out of range");
 
                 (
                     pallas::ledger::validate::utils::TxoRef::from((a, b)),
-                    pallas::ledger::validate::utils::EraCbor::from((era, d)),
+                    pallas::ledger::validate::utils::EraCbor::from((era, d.clone())),
                 )
             })
             .collect();
 
-        let report = pallas::ledger::validate::phase2::evaluate_tx(
-            tx,
-            &eras.edge().pparams,
-            &utxos,
-            &slot_config,
-        )?;
+        let report =
+            pallas::ledger::validate::phase2::evaluate_tx(tx, &pparams, &utxos, &slot_config)?;
 
         Ok(report)
     }
@@ -241,7 +220,7 @@ impl Mempool {
 impl MempoolStore for Mempool {
     type Stream = MempoolStream;
 
-    fn apply(&self, deltas: &[LedgerDelta]) {
+    fn apply(&self, deltas: &[UtxoSetDelta]) {
         let mut state = self.mempool.write().unwrap();
 
         if state.acknowledged.is_empty() {
@@ -267,17 +246,17 @@ impl MempoolStore for Mempool {
         }
     }
 
-    fn evaluate_raw(&self, cbor: &[u8]) -> Result<EvalReport, MempoolError> {
+    fn evaluate_raw<D: Domain>(&self, domain: &D, cbor: &[u8]) -> Result<EvalReport, MempoolError> {
         let tx = MultiEraTx::decode(cbor)?;
-        self.evaluate(&tx)
+        self.evaluate(domain, &tx)
     }
 
-    fn receive_raw(&self, cbor: &[u8]) -> Result<TxHash, MempoolError> {
+    fn receive_raw<D: Domain>(&self, domain: &D, cbor: &[u8]) -> Result<TxHash, MempoolError> {
         let tx = MultiEraTx::decode(cbor)?;
 
-        self.validate(&tx)?;
+        self.validate(domain, &tx)?;
 
-        let report = self.evaluate(&tx)?;
+        let report = self.evaluate(domain, &tx)?;
 
         for eval in report {
             if !eval.success {

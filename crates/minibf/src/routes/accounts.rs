@@ -14,14 +14,14 @@ use blockfrost_openapi::models::{
     address_utxo_content_inner::AddressUtxoContentInner,
 };
 
-use dolos_cardano::{
-    model::{AccountActivity, RewardLog},
-    pparams::ChainSummary,
-};
-use dolos_core::{ArchiveStore, Domain, State3Store as _, StateStore};
-use pallas::ledger::{
-    addresses::{Network, StakeAddress, StakePayload},
-    traverse::{MultiEraBlock, MultiEraCert, MultiEraTx},
+use dolos_cardano::{model::AccountState, pallas_extras, ChainSummary, RewardLog};
+use dolos_core::{ArchiveStore, Domain, StateStore};
+use pallas::{
+    codec::minicbor,
+    ledger::{
+        addresses::{Address, Network, StakeAddress, StakePayload},
+        traverse::{MultiEraBlock, MultiEraCert, MultiEraTx},
+    },
 };
 
 use pallas::ledger::primitives::alonzo::Certificate as AlonzoCert;
@@ -34,19 +34,31 @@ use crate::{
     Facade,
 };
 
-fn ensure_stake_address(address: &str) -> Result<StakeAddress, StatusCode> {
+struct AccountKeyParam {
+    address: StakeAddress,
+    entity_key: Vec<u8>,
+}
+
+fn parse_account_key_param(address: &str) -> Result<AccountKeyParam, StatusCode> {
     let address = pallas::ledger::addresses::Address::from_bech32(address)
         .map_err(|_| StatusCode::BAD_REQUEST)?;
 
     let address = match address {
-        pallas::ledger::addresses::Address::Shelley(addr) => {
-            StakeAddress::try_from(addr).map_err(|_| StatusCode::BAD_REQUEST)?
-        }
-        pallas::ledger::addresses::Address::Stake(addr) => addr,
-        _ => return Err(StatusCode::BAD_REQUEST),
+        Address::Shelley(x) => pallas_extras::shelley_address_to_stake_address(&x),
+        Address::Stake(x) => Some(x),
+        _ => None,
     };
 
-    Ok(address)
+    let address = address.ok_or(StatusCode::BAD_REQUEST)?;
+
+    let stake_cred = dolos_cardano::pallas_extras::stake_address_to_cred(&address);
+
+    let entity_key = minicbor::to_vec(&stake_cred).unwrap();
+
+    Ok(AccountKeyParam {
+        address,
+        entity_key,
+    })
 }
 
 struct AccountModelBuilder<'a> {
@@ -70,38 +82,40 @@ impl<'a> IntoModel<AccountContent> for AccountModelBuilder<'a> {
             .to_bech32()
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-        let (current_epoch, _) = dolos_cardano::slot_epoch(tip_slot, chain);
+        let (current_epoch, _) = chain.slot_epoch(tip_slot);
 
-        let active = self
+        let active_epoch = self
             .account_state
-            .active_epoch
-            .map(|x| x <= current_epoch)
-            .unwrap_or_default();
+            .registered_at
+            .map(|x| chain.slot_epoch(x))
+            .map(|(x, _)| x);
 
         let pool_id = self
             .account_state
-            .pool_id
+            .active_pool
             .as_ref()
             .map(bech32_pool)
             .transpose()?;
 
         let drep_id = self
             .account_state
-            .drep_id
+            .drep
             .as_ref()
             .map(bech32_drep)
             .transpose()?;
 
+        let active = active_epoch.map(|x| x < current_epoch).unwrap_or(false) && pool_id.is_some();
+
         let out = AccountContent {
             stake_address,
             active,
-            active_epoch: self.account_state.active_epoch.map(|x| x as i32),
-            controlled_amount: self.account_state.controlled_amount.to_string(),
+            active_epoch: active_epoch.map(|x| x as i32),
+            controlled_amount: self.account_state.live_stake().to_string(),
             rewards_sum: self.account_state.rewards_sum.to_string(),
             withdrawals_sum: self.account_state.withdrawals_sum.to_string(),
             reserves_sum: self.account_state.reserves_sum.to_string(),
             treasury_sum: self.account_state.treasury_sum.to_string(),
-            withdrawable_amount: self.account_state.withdrawable_amount.to_string(),
+            withdrawable_amount: self.account_state.withdrawable_amount().to_string(),
             pool_id,
             drep_id,
         };
@@ -114,14 +128,9 @@ impl<'a> IntoModel<Vec<AccountAddressesContentInner>> for AccountModelBuilder<'a
     type SortKey = ();
 
     fn into_model(self) -> Result<Vec<AccountAddressesContentInner>, StatusCode> {
-        let addresses: Vec<_> = self
-            .account_state
-            .seen_addresses
-            .iter()
-            .map(|x| bytes_to_address_bech32(x.as_slice()))
-            .collect::<Result<_, _>>()?;
+        // TODO: scan archive logs
 
-        let out: Vec<_> = addresses
+        let out: Vec<_> = vec![]
             .into_iter()
             .map(|x| AccountAddressesContentInner { address: x })
             .collect();
@@ -133,12 +142,14 @@ impl<'a> IntoModel<Vec<AccountAddressesContentInner>> for AccountModelBuilder<'a
 pub async fn by_stake<D: Domain>(
     Path(stake_address): Path<String>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<AccountContent>, StatusCode> {
-    let stake_address = ensure_stake_address(&stake_address)?;
+) -> Result<Json<AccountContent>, StatusCode>
+where
+    Option<AccountState>: From<D::Entity>,
+{
+    let account_key = parse_account_key_param(&stake_address)?;
 
     let state = domain
-        .state3()
-        .read_entity_typed::<dolos_cardano::model::AccountState>(stake_address.to_vec())
+        .read_cardano_entity::<AccountState>(account_key.entity_key.as_slice())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
@@ -155,7 +166,7 @@ pub async fn by_stake<D: Domain>(
 
     let model = AccountModelBuilder {
         account_state: state,
-        stake_address: Some(stake_address),
+        stake_address: Some(account_key.address),
         tip_slot: Some(tip_slot),
         chain: Some(&chain),
     }
@@ -167,12 +178,14 @@ pub async fn by_stake<D: Domain>(
 pub async fn by_stake_addresses<D: Domain>(
     Path(stake_address): Path<String>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<Vec<AccountAddressesContentInner>>, StatusCode> {
-    let stake_address = ensure_stake_address(&stake_address)?;
+) -> Result<Json<Vec<AccountAddressesContentInner>>, StatusCode>
+where
+    Option<AccountState>: From<D::Entity>,
+{
+    let account_key = parse_account_key_param(&stake_address)?;
 
     let Some(state) = domain
-        .state3()
-        .read_entity_typed::<dolos_cardano::model::AccountState>(stake_address.to_vec())
+        .read_cardano_entity::<AccountState>(account_key.entity_key.as_slice())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     else {
         return Ok(Json(vec![]));
@@ -180,7 +193,7 @@ pub async fn by_stake_addresses<D: Domain>(
 
     let model = AccountModelBuilder {
         account_state: state,
-        stake_address: Some(stake_address),
+        stake_address: Some(account_key.address),
         tip_slot: None,
         chain: None,
     }
@@ -196,8 +209,9 @@ pub async fn by_stake_utxos<D: Domain>(
 ) -> Result<Json<Vec<AddressUtxoContentInner>>, Error> {
     let pagination = Pagination::try_from(params)?;
 
-    let address = ensure_stake_address(&address)?;
-    let payload = match address.payload() {
+    let account_key = parse_account_key_param(&address)?;
+
+    let payload = match account_key.address.payload() {
         StakePayload::Stake(payload) => payload.as_slice(),
         StakePayload::Script(payload) => payload.as_slice(),
     };
@@ -383,14 +397,10 @@ pub async fn by_stake_actions<D: Domain, F, T>(
     mapper: F,
 ) -> Result<Vec<T>, Error>
 where
+    Option<AccountState>: From<D::Entity>,
     F: Fn(&StakeAddress, &MultiEraTx, &MultiEraCert, u32, Network) -> Result<Option<T>, StatusCode>,
 {
-    let stake_address = ensure_stake_address(stake_address)?;
-
-    let stake_hash = match stake_address.payload() {
-        StakePayload::Stake(x) => x.to_vec(),
-        StakePayload::Script(x) => x.to_vec(),
-    };
+    let account_key = parse_account_key_param(stake_address)?;
 
     let chain = domain
         .get_chain_summary()
@@ -400,14 +410,16 @@ where
         .get_network_id()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let mut slot_iter = domain
-        .state3()
-        .iter_entity_values_typed::<AccountActivity>(stake_hash)
+    let account = domain
+        .read_cardano_entity::<AccountState>(account_key.entity_key.as_slice())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .take(MAX_SCAN_DEPTH);
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    // TODO: scan archive logs
+    let mut slot_iter = std::iter::empty::<u64>();
 
     let mut builder = AccountActivityModelBuilder::new(
-        stake_address,
+        account_key.address,
         network,
         pagination.count,
         pagination.page as usize,
@@ -418,9 +430,7 @@ where
             break;
         };
 
-        let AccountActivity(slot) = slot.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        let (epoch, _) = dolos_cardano::slot_epoch(slot, &chain);
+        let (epoch, _) = chain.slot_epoch(slot);
 
         let block = domain
             .archive()
@@ -440,7 +450,10 @@ pub async fn by_stake_delegations<D: Domain>(
     Path(stake_address): Path<String>,
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<Vec<AccountDelegationContentInner>>, Error> {
+) -> Result<Json<Vec<AccountDelegationContentInner>>, Error>
+where
+    Option<AccountState>: From<D::Entity>,
+{
     let pagination = Pagination::try_from(params)?;
 
     let items = by_stake_actions::<D, _, AccountDelegationContentInner>(
@@ -458,7 +471,10 @@ pub async fn by_stake_registrations<D: Domain>(
     Path(stake_address): Path<String>,
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<Vec<AccountRegistrationContentInner>>, Error> {
+) -> Result<Json<Vec<AccountRegistrationContentInner>>, Error>
+where
+    Option<AccountState>: From<D::Entity>,
+{
     let pagination = Pagination::try_from(params)?;
 
     let items = by_stake_actions::<D, _, AccountRegistrationContentInner>(
@@ -499,28 +515,21 @@ pub async fn by_stake_rewards<D: Domain>(
     Path(stake_address): Path<String>,
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<Vec<AccountRewardContentInner>>, Error> {
+) -> Result<Json<Vec<AccountRewardContentInner>>, Error>
+where
+    Option<AccountState>: From<D::Entity>,
+{
     let pagination = Pagination::try_from(params)?;
 
-    let stake_address = ensure_stake_address(&stake_address)?;
+    let account_key = parse_account_key_param(&stake_address)?;
 
-    let stake_hash = match stake_address.payload() {
-        StakePayload::Stake(x) => x.to_vec(),
-        StakePayload::Script(x) => x.to_vec(),
-    };
+    // TODO: scan archive logs
 
-    let items: Vec<_> = domain
-        .state3()
-        .iter_entity_values_typed::<RewardLog>(stake_hash)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    let mapped: Vec<_> = vec![]
+        .into_iter()
         .skip(pagination.skip())
         .take(pagination.count)
-        .collect::<Result<_, _>>()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let mapped = items
-        .into_iter()
-        .map(|x| x.into_model())
+        .map(|x: RewardLog| x.into_model())
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(Json(mapped))

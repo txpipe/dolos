@@ -3,7 +3,9 @@ use redb::ReadTransaction;
 use std::path::Path;
 use tracing::{debug, info, warn};
 
-use dolos_core::{ArchiveError, BlockBody, BlockSlot, ChainPoint, EraCbor, LedgerDelta, TxOrder};
+use dolos_core::{
+    ArchiveError, BlockBody, BlockSlot, ChainPoint, EraCbor, RawBlock, SlotTags, TxOrder,
+};
 
 mod indexes;
 mod tables;
@@ -269,9 +271,20 @@ impl ChainStore {
         }
     }
 
-    pub fn apply(&self, deltas: &[LedgerDelta]) -> Result<(), RedbArchiveError> {
+    pub fn apply(
+        &self,
+        point: &ChainPoint,
+        block: &RawBlock,
+        tags: &SlotTags,
+    ) -> Result<(), RedbArchiveError> {
         match self {
-            ChainStore::SchemaV1(x) => Ok(x.apply(deltas)?),
+            ChainStore::SchemaV1(x) => Ok(x.apply(point, block, tags)?),
+        }
+    }
+
+    pub fn undo(&self, point: &ChainPoint, tags: &SlotTags) -> Result<(), RedbArchiveError> {
+        match self {
+            ChainStore::SchemaV1(x) => Ok(x.undo(point, tags)?),
         }
     }
 
@@ -351,8 +364,17 @@ impl dolos_core::ArchiveStore for ChainStore {
         Ok(Self::get_tip(self)?)
     }
 
-    fn apply(&self, deltas: &[LedgerDelta]) -> Result<(), ArchiveError> {
-        Ok(Self::apply(self, deltas)?)
+    fn apply(
+        &self,
+        point: &ChainPoint,
+        block: &RawBlock,
+        tags: &SlotTags,
+    ) -> Result<(), ArchiveError> {
+        Ok(Self::apply(self, point, block, tags)?)
+    }
+
+    fn undo(&self, point: &ChainPoint, tags: &SlotTags) -> Result<(), ArchiveError> {
+        Ok(Self::undo(self, point, tags)?)
     }
 
     fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, ArchiveError> {

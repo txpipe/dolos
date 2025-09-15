@@ -18,7 +18,7 @@ pub struct Args {
 pub fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging)?;
 
-    let dolos::adapters::WalAdapter::Redb(wal) = crate::common::open_wal_store(config)?;
+    let wal = crate::common::open_wal_store(config)?;
 
     let hash = Hash::from_str(&args.hash)
         .into_diagnostic()

@@ -1,8 +1,6 @@
 use itertools::Itertools;
 use miette::{Context, IntoDiagnostic};
 use mithril_client::{ClientBuilder, MessageBuilder, MithrilError, MithrilResult};
-use pallas::ledger::traverse::MultiEraBlock;
-use rayon::iter::{IntoParallelIterator as _, ParallelIterator as _};
 use std::{path::Path, sync::Arc};
 use tracing::{info, warn};
 
@@ -160,38 +158,6 @@ async fn fetch_snapshot(
     Ok(())
 }
 
-fn process_chunk(
-    domain: &DomainAdapter,
-    chunk: Vec<Vec<u8>>,
-    progress: &indicatif::ProgressBar,
-) -> Result<(), miette::Error> {
-    let decode = |b: Vec<u8>| {
-        let blockd = MultiEraBlock::decode(&b)
-            .into_diagnostic()
-            .context("decoding block cbor")?;
-
-        miette::Result::Ok(RawBlock {
-            slot: blockd.slot(),
-            hash: blockd.hash(),
-            era: blockd.era(),
-            body: b,
-        })
-    };
-
-    let raw_blocks: Vec<_> = chunk
-        .into_par_iter()
-        .map(decode)
-        .collect::<miette::Result<_>>()?;
-
-    if let Err(err) = domain.apply_blocks(&raw_blocks) {
-        miette::bail!("failed to apply block chunk: {}", err);
-    }
-
-    raw_blocks.last().inspect(|b| progress.set_position(b.slot));
-
-    Ok(())
-}
-
 fn import_hardano_into_domain(
     config: &crate::Config,
     immutable_path: &Path,
@@ -200,15 +166,6 @@ fn import_hardano_into_domain(
 ) -> Result<(), miette::Error> {
     let domain = crate::common::setup_domain(config)?;
 
-    if domain.state().is_empty().into_diagnostic()? {
-        domain
-            .apply_origin()
-            // TODO: can't use into_diagnostic here because some variant of DomainError doesn't
-            // implement std::error::Error
-            .map_err(|x| miette::miette!(x.to_string()))
-            .context("applying origin")?;
-    }
-
     let tip = pallas::storage::hardano::immutable::get_tip(immutable_path)
         .map_err(|err| miette::miette!(err.to_string()))
         .context("reading immutable db tip")?
@@ -216,10 +173,10 @@ fn import_hardano_into_domain(
 
     let cursor = domain
         .state()
-        .cursor()
+        .read_cursor()
         .into_diagnostic()
         .context("reading state cursor")?
-        .map(|c| c.into())
+        .map(|c| c.try_into().unwrap())
         .unwrap_or(pallas::network::miniprotocols::Point::Origin);
 
     let iter = pallas::storage::hardano::immutable::read_blocks_from_point(immutable_path, cursor)
@@ -231,29 +188,23 @@ fn import_hardano_into_domain(
     progress.set_message("importing immutable db");
     progress.set_length(tip.slot_or_default());
 
-    for chunk in iter.chunks(chunk_size).into_iter() {
-        let chunk = chunk
+    for batch in iter.chunks(chunk_size).into_iter() {
+        let batch: Vec<_> = batch
             .try_collect()
             .into_diagnostic()
             .context("reading block data")?;
 
-        process_chunk(&domain, chunk, &progress)?;
+        // we need to wrap them on a ref counter since bytes are going to be shared
+        // around throughout the pipeline
+        let batch: Vec<_> = batch.into_iter().map(Arc::new).collect();
+
+        let last = dolos_core::catchup::import_batch(&domain, batch)
+            .map_err(|e| miette::miette!(e.to_string()))?;
+
+        progress.set_position(last);
     }
 
     progress.abandon_with_message("immutable db import complete");
-
-    let cursor = domain
-        .state()
-        .cursor()
-        .into_diagnostic()
-        .context("reading state cursor")?
-        .unwrap_or(ChainPoint::Origin);
-
-    domain
-        .wal()
-        .append_entries(std::iter::once(LogValue::Mark(cursor)))
-        .into_diagnostic()
-        .context("appending start location in WAL")?;
 
     Ok(())
 }

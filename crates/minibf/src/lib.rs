@@ -4,20 +4,25 @@ use axum::{
     routing::{get, post},
     Router, ServiceExt,
 };
-use dolos_cardano::pparams::ChainSummary;
-use itertools::Itertools;
-use pallas::{
-    crypto::hash::Hash,
-    ledger::{addresses::Network, traverse::MultiEraUpdate},
+use dolos_cardano::{
+    model::{AccountState, AssetState, DRepState, EpochState, FixedNamespace, PoolState},
+    ChainSummary, PParamsSet,
 };
+use itertools::Itertools;
+use pallas::{crypto::hash::Hash, ledger::addresses::Network};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, net::SocketAddr, ops::Deref};
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    ops::{Deref, Range},
+};
 use tower::Layer;
 use tower_http::{cors::CorsLayer, normalize_path::NormalizePathLayer, trace};
 use tracing::Level;
 
 use dolos_core::{
-    ArchiveStore as _, CancelToken, Domain, EraCbor, ServeError, StateStore as _, TxOrder,
+    ArchiveStore as _, BlockSlot, CancelToken, Domain, Entity, EntityKey, EraCbor, ServeError,
+    StateError, StateStore as _, TxOrder,
 };
 
 mod error;
@@ -31,6 +36,7 @@ pub struct Config {
     pub permissive_cors: Option<bool>,
     pub metadata_max_scan_depth: Option<usize>,
     pub token_registry_url: Option<String>,
+    pub url: Option<String>,
 }
 
 #[derive(Clone)]
@@ -52,6 +58,16 @@ pub type BlockWithTx = (Vec<u8>, TxOrder);
 pub type BlockWithTxMap = HashMap<Hash<32>, BlockWithTx>;
 
 impl<D: Domain> Facade<D> {
+    pub fn get_tip_slot(&self) -> Result<BlockSlot, StatusCode> {
+        let tip = self
+            .state()
+            .read_cursor()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        Ok(tip.slot())
+    }
+
     pub fn get_network_id(&self) -> Result<Network, StatusCode> {
         match self.genesis().shelley.network_id.as_ref() {
             Some(x) if x == "Mainnet" => Ok(Network::Mainnet),
@@ -61,26 +77,17 @@ impl<D: Domain> Facade<D> {
     }
 
     pub fn get_chain_summary(&self) -> Result<ChainSummary, StatusCode> {
-        let tip = self
-            .state()
-            .cursor()
+        let summary = dolos_cardano::eras::load_era_summary(&self.inner)
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-        let slot = tip.map(|t| t.slot()).unwrap_or_default();
-
-        let updates = self
-            .state()
-            .get_pparams(slot)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-            .into_iter()
-            .map(|eracbor| {
-                MultiEraUpdate::try_from(eracbor).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
-            })
-            .collect::<Result<Vec<MultiEraUpdate>, StatusCode>>()?;
-
-        let summary = dolos_cardano::pparams::fold_with_hacks(self.genesis(), &updates, slot);
-
         Ok(summary)
+    }
+
+    pub fn get_live_pparams(&self) -> Result<PParamsSet, StatusCode> {
+        let pparams = dolos_cardano::load_live_pparams(&self.inner)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        Ok(pparams)
     }
 
     pub fn get_tx(&self, hash: Hash<32>) -> Result<Option<EraCbor>, StatusCode> {
@@ -121,15 +128,60 @@ impl<D: Domain> Facade<D> {
 
         Ok(blocks)
     }
+
+    pub fn iter_cardano_entities<T>(
+        &self,
+        range: Option<Range<EntityKey>>,
+    ) -> Result<impl Iterator<Item = Result<(EntityKey, T), StateError>>, StatusCode>
+    where
+        T: FixedNamespace + Entity,
+        Option<T>: From<D::Entity>,
+    {
+        let generic = self
+            .state()
+            .iter_entities_typed(T::NS, range)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        let mapped = generic.map(|x| x.map(|(k, v)| (k, T::from(v))));
+
+        Ok(mapped)
+    }
+
+    pub fn read_cardano_entity<T>(&self, key: impl Into<EntityKey>) -> Result<Option<T>, StatusCode>
+    where
+        T: FixedNamespace,
+        Option<T>: From<D::Entity>,
+    {
+        let key = key.into();
+
+        let entity = self
+            .state()
+            .read_entity_typed(T::NS, &key)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        let downcast = entity.and_then(|e| Option::<T>::from(e));
+
+        Ok(downcast)
+    }
 }
 
 pub struct Driver;
 
-impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
+impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver
+where
+    Option<AccountState>: From<D::Entity>,
+    Option<PoolState>: From<D::Entity>,
+    Option<AssetState>: From<D::Entity>,
+    Option<EpochState>: From<D::Entity>,
+    Option<DRepState>: From<D::Entity>,
+{
     type Config = Config;
 
     async fn run(cfg: Self::Config, domain: D, cancel: C) -> Result<(), ServeError> {
         let app = Router::new()
+            .route("/", get(routes::root::<D>))
+            .route("/health", get(routes::health::naked))
+            .route("/health/clock", get(routes::health::clock))
             .route("/genesis", get(routes::genesis::naked::<D>))
             .route("/network", get(routes::network::naked::<D>))
             .route("/network/eras", get(routes::network::eras::<D>))

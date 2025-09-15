@@ -46,17 +46,6 @@ pub struct Args {
 }
 
 pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::Result<()> {
-    let dolos::adapters::WalAdapter::Redb(wal) = crate::common::open_wal_store(config)?;
-
-    if !wal.is_empty().map_err(WalError::from).into_diagnostic()? {
-        println!("found existing data, skipping bootstrap");
-        return Ok(());
-    }
-
-    // it's important to drop the wal before we start the command
-    // because the commands might need to re-open the wal
-    drop(wal);
-
     let command = match args.command.clone() {
         Some(x) => x,
         None => Command::inquire()?,
