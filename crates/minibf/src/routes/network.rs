@@ -98,7 +98,8 @@ pub async fn eras<D: Domain>(
 
 struct NetworkModelBuilder<'a> {
     genesis: &'a Genesis,
-    state: EpochState,
+    active: EpochState,
+    live: EpochState,
 }
 
 impl<'a> IntoModel<Network> for NetworkModelBuilder<'a> {
@@ -106,21 +107,21 @@ impl<'a> IntoModel<Network> for NetworkModelBuilder<'a> {
 
     fn into_model(self) -> Result<Network, StatusCode> {
         let max_supply = self.genesis.shelley.max_lovelace_supply.unwrap_or_default();
-        let total_supply = max_supply.saturating_sub(self.state.reserves);
-        let circulating = total_supply.saturating_sub(self.state.deposits);
+        let total_supply = max_supply.saturating_sub(self.active.reserves);
+        let circulating = total_supply.saturating_sub(self.active.deposits);
 
         Ok(Network {
             supply: Box::new(NetworkSupply {
                 max: max_supply.to_string(),
                 total: total_supply.to_string(),
                 circulating: circulating.to_string(),
-                locked: self.state.deposits.to_string(),
-                treasury: self.state.treasury.to_string(),
-                reserves: self.state.reserves.to_string(),
+                locked: self.active.deposits.to_string(),
+                treasury: self.active.treasury.to_string(),
+                reserves: self.active.reserves.to_string(),
             }),
             stake: Box::new(NetworkStake {
-                live: self.state.active_stake.to_string(),
-                active: self.state.active_stake.to_string(),
+                live: self.live.active_stake.to_string(),
+                active: self.active.active_stake.to_string(),
             }),
         })
     }
@@ -132,12 +133,17 @@ where
 {
     let genesis = domain.genesis();
 
-    let state = domain
-        .read_cardano_entity::<EpochState>(EPOCH_KEY_MARK)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let active = dolos_cardano::load_live_epoch(&domain.inner)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let builder = NetworkModelBuilder { genesis, state };
+    let live = dolos_cardano::load_live_epoch(&domain.inner)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let builder = NetworkModelBuilder {
+        genesis,
+        active,
+        live,
+    };
 
     builder.into_response()
 }
