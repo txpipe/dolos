@@ -120,7 +120,7 @@ impl IntoModel<Vec<TxMetadataLabelCborInner>> for MetadataHistoryModelBuilder {
     }
 }
 
-const MAX_SCAN_DEPTH: usize = 5000;
+const MAX_SCAN_DEPTH: usize = 1_500_000;
 
 async fn by_label<D: Domain>(
     label: &str,
