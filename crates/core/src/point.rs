@@ -126,7 +126,13 @@ impl ChainPoint {
         out
     }
 
+    const ORIGIN_BYTES: [u8; 40] = [0u8; 40];
+
     pub fn from_bytes(value: [u8; 40]) -> Self {
+        if value == Self::ORIGIN_BYTES {
+            return ChainPoint::Origin;
+        }
+
         let slot_half: [u8; 8] = value[0..8].try_into().unwrap();
         let hash_half: [u8; 32] = value[8..40].try_into().unwrap();
         let slot = u64::from_be_bytes(slot_half);
