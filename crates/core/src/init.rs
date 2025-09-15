@@ -28,26 +28,24 @@ pub fn catch_up<D: Domain>(domain: &D) -> Result<(), DomainError> {
     Ok(())
 }
 
-fn ensure_wal<D: Domain>(domain: &D, at: &ChainPoint) -> Result<ChainPoint, DomainError> {
+fn ensure_wal<D: Domain>(domain: &D, at: &ChainPoint) -> Result<(), DomainError> {
     let wal = domain.wal().find_tip()?.map(|(point, _)| point);
 
     if let Some(wal) = wal {
-        return Ok(wal);
+        if wal.slot() < at.slot() {
+            domain.wal().reset_to(&at)?;
+        }
+    } else {
+        domain.wal().reset_to(&at)?;
     }
 
-    domain.wal().reset_to(&at)?;
-
-    Ok(at.clone())
+    Ok(())
 }
 
 fn check_integrity<D: Domain>(domain: &D) -> Result<(), DomainError> {
     let state = domain.state().read_cursor()?.unwrap_or(ChainPoint::Origin);
 
-    let wal = ensure_wal(domain, &state)?;
-
-    if wal.slot() < state.slot() {
-        return Err(DomainError::WalIsBehindState(wal.slot(), state.slot()));
-    }
+    ensure_wal(domain, &state)?;
 
     Ok(())
 }
