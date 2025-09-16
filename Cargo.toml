@@ -142,7 +142,7 @@ futures-util = "0.3.28"
 trait-variant = "0.1.2"
 serde = { version = "1.0.136", features = ["derive"] }
 chrono = { version = "0.4.39", default-features = false }
-tokio = { version = "^1.40", features = ["rt", "rt-multi-thread", "signal"] }
+tokio = { version = "^1.47", features = ["rt", "rt-multi-thread", "signal"] }
 tokio-util = { version = "0.7.11", features = ["rt"] }
 tokio-stream = { version = "0.1.14", features = ["sync"] }
 tower = "0.4"
