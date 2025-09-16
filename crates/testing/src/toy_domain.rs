@@ -100,7 +100,7 @@ impl ToyDomain {
             state,
             wal: dolos_redb::wal::RedbWalStore::memory().unwrap(),
             chain: dolos_cardano::CardanoLogic::new(dolos_cardano::Config::default()),
-            archive: dolos_redb::archive::ChainStore::in_memory_v1().unwrap(),
+            archive: dolos_redb::archive::ChainStore::in_memory().unwrap(),
             mempool: Mempool {},
             storage_config: storage_config.unwrap_or_default(),
             genesis: Arc::new(dolos_cardano::include::devnet::load()),

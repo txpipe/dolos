@@ -26,6 +26,15 @@ pub enum ArchiveAdapter {
 impl ArchiveStore for ArchiveAdapter {
     type BlockIter<'a> = ArchiveRangeBlockIter;
     type SparseBlockIter = ArchiveSparseBlockIter;
+    type Writer = ArchiveStoreWriter;
+
+    fn start_writer(&self) -> Result<Self::Writer, ArchiveError> {
+        let out = match self {
+            ArchiveAdapter::Redb(x) => ArchiveStoreWriter::Redb(x.start_writer()?),
+        };
+
+        Ok(out)
+    }
 
     fn get_block_by_hash(&self, block_hash: &[u8]) -> Result<Option<BlockBody>, ArchiveError> {
         let out = match self {
@@ -139,27 +148,6 @@ impl ArchiveStore for ArchiveAdapter {
         Ok(out)
     }
 
-    fn apply(
-        &self,
-        point: &ChainPoint,
-        block: &RawBlock,
-        tags: &SlotTags,
-    ) -> Result<(), ArchiveError> {
-        match self {
-            ArchiveAdapter::Redb(x) => x.apply(point, block, tags)?,
-        };
-
-        Ok(())
-    }
-
-    fn undo(&self, point: &ChainPoint, tags: &SlotTags) -> Result<(), ArchiveError> {
-        match self {
-            ArchiveAdapter::Redb(x) => x.undo(point, tags)?,
-        };
-
-        Ok(())
-    }
-
     fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, ArchiveError> {
         let done = match self {
             ArchiveAdapter::Redb(x) => x.prune_history(max_slots, max_prune)?,
@@ -172,6 +160,41 @@ impl ArchiveStore for ArchiveAdapter {
 impl From<dolos_redb::archive::ChainStore> for ArchiveAdapter {
     fn from(value: dolos_redb::archive::ChainStore) -> Self {
         Self::Redb(value)
+    }
+}
+
+pub enum ArchiveStoreWriter {
+    Redb(dolos_redb::archive::ChainStoreWriter),
+}
+
+impl ArchiveWriter for ArchiveStoreWriter {
+    fn apply(
+        &self,
+        point: &ChainPoint,
+        block: &RawBlock,
+        tags: &SlotTags,
+    ) -> Result<(), ArchiveError> {
+        match self {
+            ArchiveStoreWriter::Redb(x) => x.apply(point, block, tags)?,
+        };
+
+        Ok(())
+    }
+
+    fn undo(&self, point: &ChainPoint, tags: &SlotTags) -> Result<(), ArchiveError> {
+        match self {
+            ArchiveStoreWriter::Redb(x) => x.undo(point, tags)?,
+        };
+
+        Ok(())
+    }
+
+    fn commit(self) -> Result<(), ArchiveError> {
+        match self {
+            ArchiveStoreWriter::Redb(x) => x.commit()?,
+        };
+
+        Ok(())
     }
 }
 

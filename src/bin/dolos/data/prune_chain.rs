@@ -39,7 +39,7 @@ pub fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
         .into_diagnostic()
         .context("removing range from chain")?;
 
-    let db = chain.db_mut().unwrap();
+    let db = chain.db_mut();
 
     while db.compact().into_diagnostic()? {
         info!("wal compaction round");

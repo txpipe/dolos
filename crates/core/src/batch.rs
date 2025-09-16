@@ -4,9 +4,9 @@ use itertools::Itertools as _;
 use rayon::prelude::*;
 
 use crate::{
-    ArchiveStore, Block as _, BlockSlot, ChainLogic, ChainPoint, Domain, DomainError, EntityDelta,
-    EntityMap, LogValue, NsKey, RawBlock, RawUtxoMap, SlotTags, StateError, StateStore as _,
-    StateWriter as _, TxoRef, WalStore as _,
+    ArchiveStore, ArchiveWriter as _, Block as _, BlockSlot, ChainLogic, ChainPoint, Domain,
+    DomainError, EntityDelta, EntityMap, LogValue, NsKey, RawBlock, RawUtxoMap, SlotTags,
+    StateError, StateStore as _, StateWriter as _, TxoRef, WalStore as _,
 };
 
 pub struct WorkDeltas<C: ChainLogic> {
@@ -378,13 +378,17 @@ impl<C: ChainLogic> WorkBatch<C> {
     where
         D: Domain<Chain = C>,
     {
+        let writer = domain.archive().start_writer()?;
+
         for block in self.blocks.iter() {
             let point = block.unwrap_point();
             let raw = block.raw.clone();
             let tags = &block.deltas.slot;
 
-            domain.archive().apply(&point, &raw, tags)?;
+            writer.apply(&point, &raw, tags)?;
         }
+
+        writer.commit()?;
 
         Ok(())
     }

@@ -45,7 +45,7 @@ fn prepare_chain(
         _ => miette::bail!("Only redb is supported for export"),
     };
 
-    let db = chain.db_mut().unwrap();
+    let db = chain.db_mut();
     pb.set_message("compacting chain");
     db.compact().into_diagnostic()?;
 
