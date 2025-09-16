@@ -4,9 +4,15 @@ use dolos_core::{
     batch::{WorkBlock, WorkDeltas},
     ChainError, InvariantViolation, StateError, TxoRef,
 };
-use pallas::ledger::traverse::{
-    MultiEraBlock, MultiEraCert, MultiEraInput, MultiEraOutput, MultiEraPolicyAssets, MultiEraTx,
-    MultiEraUpdate,
+use pallas::{
+    codec::utils::KeepRaw,
+    ledger::{
+        primitives::PlutusData,
+        traverse::{
+            MultiEraBlock, MultiEraCert, MultiEraInput, MultiEraOutput, MultiEraPolicyAssets,
+            MultiEraTx, MultiEraUpdate,
+        },
+    },
 };
 
 use crate::{owned::OwnedMultiEraOutput, CardanoLogic};
@@ -116,6 +122,19 @@ pub trait BlockVisitor {
         Ok(())
     }
 
+    /// Visit plutus data available in the tx witness set. IMPORTANT: this does
+    /// not include inline-plutus data (visit the outputs for that).
+    #[allow(unused_variables)]
+    fn visit_datums(
+        &mut self,
+        deltas: &mut WorkDeltas<CardanoLogic>,
+        block: &MultiEraBlock,
+        tx: &MultiEraTx,
+        data: &KeepRaw<'_, PlutusData>,
+    ) -> Result<(), ChainError> {
+        Ok(())
+    }
+
     #[allow(unused_variables)]
     fn flush(&mut self, deltas: &mut WorkDeltas<CardanoLogic>) -> Result<(), ChainError> {
         Ok(())
@@ -219,6 +238,10 @@ impl<'a> DeltaBuilder<'a> {
 
             if let Some(update) = tx.update() {
                 visit_all!(self, deltas, visit_update, block, &tx, &update);
+            }
+
+            for datum in tx.plutus_data() {
+                visit_all!(self, deltas, visit_datums, block, &tx, &datum);
             }
         }
 
