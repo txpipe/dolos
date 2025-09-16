@@ -1,7 +1,11 @@
 use dolos_core::{batch::WorkDeltas, ChainError, SlotTags};
-use pallas::ledger::{
-    addresses::{Address, ShelleyDelegationPart},
-    traverse::{MultiEraBlock, MultiEraTx, MultiEraValue},
+use pallas::{
+    codec::utils::KeepRaw,
+    ledger::{
+        addresses::{Address, ShelleyDelegationPart},
+        primitives::{conway::DatumOption, PlutusData},
+        traverse::{MultiEraBlock, MultiEraTx, MultiEraValue, OriginalHash as _},
+    },
 };
 
 use crate::{roll::BlockVisitor, CardanoLogic};
@@ -50,6 +54,17 @@ fn unpack_assets(tags: &mut SlotTags, assets: &MultiEraValue) {
     }
 }
 
+fn unpack_datum(tags: &mut SlotTags, datum: &DatumOption) {
+    match datum {
+        DatumOption::Hash(hash) => {
+            tags.datums.push(hash.to_vec());
+        }
+        DatumOption::Data(datum) => {
+            tags.datums.push(datum.original_hash().to_vec());
+        }
+    }
+}
+
 impl BlockVisitor for TxLogVisitor {
     fn visit_tx(
         &mut self,
@@ -76,6 +91,10 @@ impl BlockVisitor for TxLogVisitor {
 
         unpack_assets(&mut deltas.slot, &resolved.value());
 
+        if let Some(datum) = resolved.datum() {
+            unpack_datum(&mut deltas.slot, &datum);
+        }
+
         Ok(())
     }
 
@@ -92,6 +111,22 @@ impl BlockVisitor for TxLogVisitor {
         }
 
         unpack_assets(&mut deltas.slot, &output.value());
+
+        if let Some(datum) = output.datum() {
+            unpack_datum(&mut deltas.slot, &datum);
+        }
+
+        Ok(())
+    }
+
+    fn visit_datums(
+        &mut self,
+        deltas: &mut WorkDeltas<CardanoLogic>,
+        _: &MultiEraBlock,
+        _: &MultiEraTx,
+        datum: &KeepRaw<'_, PlutusData>,
+    ) -> Result<(), ChainError> {
+        deltas.slot.datums.push(datum.original_hash().to_vec());
 
         Ok(())
     }
