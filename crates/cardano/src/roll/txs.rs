@@ -1,7 +1,7 @@
 use dolos_core::{batch::WorkDeltas, ChainError, SlotTags};
 use pallas::ledger::{
     addresses::{Address, ShelleyDelegationPart},
-    traverse::{MultiEraBlock, MultiEraTx},
+    traverse::{MultiEraBlock, MultiEraTx, MultiEraValue},
 };
 
 use crate::{roll::BlockVisitor, CardanoLogic};
@@ -35,6 +35,21 @@ fn unpack_address(tags: &mut SlotTags, address: &Address) {
     }
 }
 
+fn unpack_assets(tags: &mut SlotTags, assets: &MultiEraValue) {
+    let assets = assets.assets();
+
+    for ma in assets {
+        tags.policies.push(ma.policy().to_vec());
+
+        for asset in ma.assets() {
+            let mut subject = asset.policy().to_vec();
+            subject.extend(asset.name());
+
+            tags.assets.push(subject);
+        }
+    }
+}
+
 impl BlockVisitor for TxLogVisitor {
     fn visit_tx(
         &mut self,
@@ -55,11 +70,11 @@ impl BlockVisitor for TxLogVisitor {
         _: &pallas::ledger::traverse::MultiEraInput,
         resolved: &pallas::ledger::traverse::MultiEraOutput,
     ) -> Result<(), ChainError> {
-        let address = resolved.address().ok();
-
-        if let Some(address) = address {
+        if let Ok(address) = resolved.address() {
             unpack_address(&mut deltas.slot, &address);
         }
+
+        unpack_assets(&mut deltas.slot, &resolved.value());
 
         Ok(())
     }
@@ -72,11 +87,11 @@ impl BlockVisitor for TxLogVisitor {
         _: u32,
         output: &pallas::ledger::traverse::MultiEraOutput,
     ) -> Result<(), ChainError> {
-        let address = output.address().ok();
-
-        if let Some(address) = address {
+        if let Ok(address) = output.address() {
             unpack_address(&mut deltas.slot, &address);
         }
+
+        unpack_assets(&mut deltas.slot, &output.value());
 
         Ok(())
     }
