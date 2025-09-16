@@ -1,5 +1,4 @@
 use std::{
-    collections::HashMap,
     net::{Ipv4Addr, Ipv6Addr},
     path::PathBuf,
     str::FromStr,
@@ -7,23 +6,17 @@ use std::{
 
 use bb8::Pool;
 use bb8_postgres::PostgresConnectionManager;
+use chrono::NaiveDateTime;
 use dolos_cardano::{
-    build_schema, include, AccountState, AssetState, DRepState, EpochState, FixedNamespace,
-    PParamValue, PParamsSet, PoolState, EPOCH_KEY_GO, EPOCH_KEY_MARK, EPOCH_KEY_SET,
+    build_schema, include, AccountState, AssetState, DRepState, EpochState, EraBoundary,
+    EraSummary, PParamValue, PParamsSet, PoolState, EPOCH_KEY_GO, EPOCH_KEY_MARK, EPOCH_KEY_SET,
 };
 use dolos_core::{EntityKey, Genesis, StateStore as _, StateWriter};
 use handlebars::Handlebars;
 use miette::{bail, Context, IntoDiagnostic};
-use pallas::{
-    codec::minicbor,
-    interop::utxorpc::spec::cardano::BigInt,
-    ledger::{
-        addresses::Address,
-        primitives::{
-            conway::DRep, ExUnitPrices, ExUnits, PoolMetadata, ProtocolVersion, RationalNumber,
-            Relay,
-        },
-    },
+use pallas::ledger::{
+    addresses::Address,
+    primitives::{conway::DRep, ExUnitPrices, ExUnits, PoolMetadata, RationalNumber, Relay},
 };
 use serde_json::Value;
 use tokio_postgres::types::Json;
@@ -150,17 +143,19 @@ pub async fn run(args: &Args) -> miette::Result<()> {
         match namespace.as_str() {
             "accounts" => handle_account_state(args, &pool, &state, &registry).await?,
             "assets" => handle_asset_state(args, &pool, &state, &registry).await?,
-            "pools" => handle_pool_state(args, &pool, &state, &registry).await?,
-            "epochs" => handle_epoch_state(args, &pool, &state, &registry).await?,
             "dreps" => handle_drep_state(args, &pool, &state, &registry).await?,
+            "epochs" => handle_epoch_state(args, &pool, &state, &registry).await?,
+            "era-summaries" => handle_era_summaries(args, &pool, &state, &registry).await?,
+            "pools" => handle_pool_state(args, &pool, &state, &registry).await?,
             _ => bail!("invalid namespace"),
         }
     } else {
         handle_account_state(args, &pool, &state, &registry).await?;
         handle_asset_state(args, &pool, &state, &registry).await?;
-        handle_pool_state(args, &pool, &state, &registry).await?;
-        handle_epoch_state(args, &pool, &state, &registry).await?;
         handle_drep_state(args, &pool, &state, &registry).await?;
+        handle_epoch_state(args, &pool, &state, &registry).await?;
+        handle_era_summaries(args, &pool, &state, &registry).await?;
+        handle_pool_state(args, &pool, &state, &registry).await?;
     }
 
     Ok(())
@@ -189,7 +184,6 @@ pub async fn handle_account_state(
         .into_diagnostic()
         .context("getting connection from pool")?;
 
-    let ns = AccountState::NS;
     let writer = state.start_writer().into_diagnostic()?;
 
     tracing::info!("Querying accounts...");
@@ -284,7 +278,6 @@ pub async fn handle_asset_state(
         .into_diagnostic()
         .context("getting connection from pool")?;
 
-    let ns = AssetState::NS;
     let writer = state.start_writer().into_diagnostic()?;
 
     tracing::info!("Querying assets...");
@@ -332,6 +325,118 @@ pub async fn handle_asset_state(
     Ok(())
 }
 
+pub async fn handle_era_summaries(
+    args: &Args,
+    pool: &Pool<PostgresConnectionManager<NoTls>>,
+    state: &dolos_redb3::StateStore,
+    registry: &Handlebars<'static>,
+) -> miette::Result<()> {
+    let query = registry
+        .render(
+            "era_summaries",
+            &&serde_json::json!({ "epoch": args.epoch }),
+        )
+        .into_diagnostic()
+        .context("rendering query")?;
+
+    let conn = pool
+        .get()
+        .await
+        .into_diagnostic()
+        .context("getting connection from pool")?;
+
+    tracing::info!("Querying era summaries...");
+    let rows = conn
+        .query(&query, &[])
+        .await
+        .into_diagnostic()
+        .context("executing query")?;
+    tracing::info!("Finished querying era summaries.");
+
+    let genesis = args.network.load_included_genesis();
+    let writer = state.start_writer().into_diagnostic()?;
+
+    let mut it = rows.iter().zip(rows.iter().skip(1)).peekable();
+    while let Some((prev, next)) = it.next() {
+        let epoch = from_row!(prev, i32, "epoch") as u64;
+        let slot = from_row!(prev, i64, "slot") as u64;
+        let start = from_row!(prev, NaiveDateTime, "start_time");
+        let end = from_row!(prev, NaiveDateTime, "end_time");
+        let (epoch_length, slot_length) = if from_row!(prev, i32, "protocol_major") < 6 {
+            (4320, 20)
+        } else {
+            (
+                genesis.shelley.epoch_length.unwrap() as u64,
+                genesis.shelley.slot_length.unwrap() as u64,
+            )
+        };
+        let epoch_end = from_row!(next, i32, "epoch") as u64;
+        let slot_end = from_row!(next, i64, "slot") as u64;
+
+        let key = (epoch as u16).to_be_bytes().as_slice().into();
+
+        let era = EraSummary {
+            start: EraBoundary {
+                epoch,
+                slot,
+                timestamp: start.and_utc().timestamp() as u64,
+            },
+            end: Some(EraBoundary {
+                epoch: epoch_end,
+                slot: slot_end,
+                timestamp: end.and_utc().timestamp() as u64,
+            }),
+
+            epoch_length,
+            slot_length,
+        };
+
+        dbg!(&era);
+
+        writer
+            .write_entity_typed(&key, &era)
+            .into_diagnostic()
+            .context("writing era")?;
+
+        if it.peek().is_none() {
+            let key = (epoch_end as u16).to_be_bytes().as_slice().into();
+            let (epoch_length, slot_length) = if from_row!(prev, i32, "protocol_major") < 2 {
+                (21600, 20)
+            } else {
+                (
+                    genesis.shelley.epoch_length.unwrap() as u64,
+                    genesis.shelley.slot_length.unwrap() as u64,
+                )
+            };
+
+            let curr = EraSummary {
+                start: EraBoundary {
+                    epoch: epoch_end,
+                    slot: slot_end,
+                    timestamp: end.and_utc().timestamp() as u64,
+                },
+                end: None,
+                epoch_length,
+                slot_length,
+            };
+
+            writer
+                .write_entity_typed(&key, &curr)
+                .into_diagnostic()
+                .context("writing era")?;
+        }
+    }
+
+    tracing::info!("Writing era summaries...");
+    writer
+        .commit()
+        .into_diagnostic()
+        .context("writing entity")?;
+    tracing::info!("Finished writing era summaries.");
+
+    Ok(())
+}
+
 pub async fn handle_pool_state(
     args: &Args,
     pool: &Pool<PostgresConnectionManager<NoTls>>,
@@ -363,7 +468,6 @@ pub async fn handle_pool_state(
         .context("executing query")?;
     tracing::info!("Finished querying pools.");
 
-    let ns = PoolState::NS;
     let writer = state.start_writer().into_diagnostic()?;
 
     for (i, row) in rows.iter().enumerate() {
@@ -561,7 +665,6 @@ pub async fn handle_epoch_state(
         .context("executing query")?;
     tracing::info!("Finished querying epochs.");
 
-    let ns = EpochState::NS;
     let writer = state.start_writer().into_diagnostic()?;
 
     let key_for_idx = |idx: u32| match idx {
