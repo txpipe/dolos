@@ -45,10 +45,27 @@ pub struct SlotTags {
     pub stake_addresses: Vec<OpaqueTag>,
 }
 
+pub trait ArchiveWriter: Send + Sync + 'static {
+    fn apply(
+        &self,
+        point: &ChainPoint,
+        block: &RawBlock,
+        tags: &SlotTags,
+    ) -> Result<(), ArchiveError>;
+
+    fn undo(&self, point: &ChainPoint, tags: &SlotTags) -> Result<(), ArchiveError>;
+
+    #[must_use]
+    fn commit(self) -> Result<(), ArchiveError>;
+}
+
 pub trait ArchiveStore: Clone + Send + Sync + 'static {
     type BlockIter<'a>: Iterator<Item = (BlockSlot, BlockBody)> + DoubleEndedIterator + 'a;
     type SparseBlockIter: Iterator<Item = Result<(BlockSlot, Option<BlockBody>), ArchiveError>>
         + DoubleEndedIterator;
+    type Writer: ArchiveWriter;
+
+    fn start_writer(&self) -> Result<Self::Writer, ArchiveError>;
 
     fn get_block_by_hash(&self, block_hash: &[u8]) -> Result<Option<BlockBody>, ArchiveError>;
 
@@ -86,15 +103,6 @@ pub trait ArchiveStore: Clone + Send + Sync + 'static {
     fn find_intersect(&self, intersect: &[ChainPoint]) -> Result<Option<ChainPoint>, ArchiveError>;
 
     fn get_tip(&self) -> Result<Option<(BlockSlot, BlockBody)>, ArchiveError>;
-
-    fn apply(
-        &self,
-        point: &ChainPoint,
-        block: &RawBlock,
-        tags: &SlotTags,
-    ) -> Result<(), ArchiveError>;
-
-    fn undo(&self, point: &ChainPoint, tags: &SlotTags) -> Result<(), ArchiveError>;
 
     fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, ArchiveError>;
 }

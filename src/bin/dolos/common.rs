@@ -42,7 +42,7 @@ pub fn open_chain_store(config: &crate::Config) -> Result<ArchiveAdapter, Error>
         dolos_redb::archive::ChainStore::open(root.join("chain"), config.storage.chain_cache)
             .map_err(ArchiveError::from)?;
 
-    Ok(chain.into())
+    Ok(ArchiveAdapter::Redb(chain))
 }
 
 pub fn open_state_store(config: &crate::Config) -> Result<dolos_redb3::StateStore, Error> {
@@ -81,7 +81,7 @@ pub fn create_ephemeral_data_stores() -> Result<Stores, Error> {
     let state = dolos_redb3::StateStore::in_memory(dolos_cardano::model::build_schema())
         .map_err(StateError::from)?;
 
-    let chain = dolos_redb::archive::ChainStore::in_memory_v1()?;
+    let chain = dolos_redb::archive::ChainStore::in_memory()?;
 
     Ok(Stores {
         wal: wal.into(),
