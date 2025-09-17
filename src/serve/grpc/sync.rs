@@ -231,12 +231,12 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    use std::sync::Arc;
-
     use dolos_testing::toy_domain::ToyDomain;
     use pallas::interop::utxorpc::spec::sync::sync_service_server::SyncService as _;
+
+    use crate::facade::DomainExt as _;
+
+    use super::*;
 
     #[tokio::test]
     async fn test_dump_history_pagination() {
@@ -245,7 +245,7 @@ mod tests {
 
         for i in 0..34 {
             let (_, block) = dolos_testing::blocks::make_conway_block(i);
-            dolos_core::follow::roll_forward(&domain, &block).unwrap();
+            domain.roll_forward(&block).unwrap();
         }
 
         let service = SyncServiceImpl::new(domain, cancel);

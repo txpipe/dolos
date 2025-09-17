@@ -554,6 +554,17 @@ impl ChainStore {
 
         Ok(done)
     }
+
+    fn truncate_front(&self, after: BlockSlot) -> Result<(), RedbArchiveError> {
+        let mut wx = self.db().begin_write()?;
+        wx.set_quick_repair(true);
+
+        tables::BlocksTable::remove_after(&wx, after)?;
+
+        wx.commit()?;
+
+        Ok(())
+    }
 }
 
 impl From<Database> for ChainStore {
@@ -676,6 +687,10 @@ impl dolos_core::ArchiveStore for ChainStore {
 
     fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, ArchiveError> {
         Ok(Self::prune_history(self, max_slots, max_prune)?)
+    }
+
+    fn truncate_front(&self, after: BlockSlot) -> Result<(), ArchiveError> {
+        Ok(Self::truncate_front(self, after)?)
     }
 }
 

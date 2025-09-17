@@ -27,7 +27,7 @@ impl<C: ChainLogic> WorkDeltas<C> {
     pub fn add_for_entity(&mut self, delta: impl Into<C::Delta>) {
         let delta = delta.into();
         let key = delta.key();
-        let group = self.entities.entry(key.into_owned()).or_default();
+        let group = self.entities.entry(key).or_default();
         group.push(delta);
     }
 }
