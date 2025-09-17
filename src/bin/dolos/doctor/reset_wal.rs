@@ -35,7 +35,7 @@ pub fn run(config: &crate::Config, _args: &Args, feedback: &Feedback) -> miette:
 
     domain
         .wal()
-        .append_entries(&vec![entry])
+        .append_entries(&[entry])
         .into_diagnostic()
         .context("appending wal entry")?;
 

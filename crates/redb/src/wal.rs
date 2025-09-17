@@ -7,7 +7,7 @@ use thiserror::Error;
 use tracing::{debug, event_enabled, info, trace, warn, Level};
 
 use dolos_core::{
-    BlockSlot, ChainPoint, EntityDelta, LogEntry, LogValue, RawBlock, TipEvent, WalError, WalStore,
+    BlockSlot, ChainPoint, EntityDelta, LogEntry, LogValue, RawBlock, WalError, WalStore,
 };
 
 #[derive(Debug, Error)]
@@ -444,12 +444,11 @@ where
 
         let deltas: Vec<_> = range
             .map_ok(|(k, _)| k.value())
-            .map_ok(|point| ChainPoint::from(point))
+            .map_ok(ChainPoint::from)
             .map_ok(|point| (target - point.slot(), point))
             .try_collect()?;
 
         let point = deltas.into_iter().min_by_key(|(x, _)| *x).map(|(_, v)| v);
-        let point = point.map(|v| v.into());
 
         Ok(point)
     }

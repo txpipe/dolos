@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 
 use dolos_core::batch::WorkDeltas;
 use dolos_core::{ChainError, NsKey};

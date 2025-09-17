@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use dolos_core::{
-    batch::WorkBatch, ArchiveStore as _, Block, BlockSlot, ChainLogic, ChainPoint, Domain,
-    DomainError, EntityDelta as _, RawBlock, StateStore, StateWriter as _, TipEvent, WalStore,
+    batch::WorkBatch, ArchiveStore as _, BlockSlot, ChainLogic, ChainPoint, Domain, DomainError,
+    EntityDelta as _, RawBlock, StateStore, StateWriter as _, TipEvent, WalStore,
 };
 
 pub trait DomainExt: Domain

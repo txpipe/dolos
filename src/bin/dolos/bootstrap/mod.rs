@@ -4,7 +4,6 @@ use miette::IntoDiagnostic;
 
 use crate::feedback::Feedback;
 
-use dolos::prelude::*;
 
 mod mithril;
 mod relay;

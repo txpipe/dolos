@@ -25,7 +25,7 @@ impl EraSummary {
     pub fn define_end(&mut self, at_epoch: u64) {
         let epoch_delta = at_epoch - self.start.epoch;
 
-        let slot_delta = (epoch_delta as u64) * self.epoch_length;
+        let slot_delta = epoch_delta * self.epoch_length;
         let end_slot = self.start.slot + slot_delta;
         let second_delta = slot_delta * self.slot_length;
         let end_timestamp = self.start.timestamp + second_delta;
@@ -117,6 +117,7 @@ impl ChainSummary {
             .unwrap()
     }
 
+    #[allow(unused)]
     pub(crate) fn apply_hacks<F>(&mut self, epoch: u64, change: F)
     where
         F: Fn(&mut EraSummary),

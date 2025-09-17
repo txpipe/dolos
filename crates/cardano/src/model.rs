@@ -1,8 +1,4 @@
-use std::{
-    borrow::Cow,
-    collections::HashSet,
-    ops::{Deref, DerefMut},
-};
+use std::ops::{Deref, DerefMut};
 
 use dolos_core::{EntityValue, Namespace, NamespaceType, NsKey, StateError, StateSchema};
 
@@ -20,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use crate::roll::{
     accounts::{
         ControlledAmountDec, ControlledAmountInc, StakeDelegation, StakeDeregistration,
-        StakeRegistration, TrackSeenAddresses, VoteDelegation, WithdrawalInc,
+        StakeRegistration, VoteDelegation, WithdrawalInc,
     },
     epochs::PParamsUpdate,
 };
@@ -792,27 +788,27 @@ impl dolos_core::Entity for CardanoEntity {
         match value {
             Self::EraSummary(x) => {
                 let (ns, enc) = EraSummary::encode_entity(x);
-                (ns, enc.into())
+                (ns, enc)
             }
             Self::AccountState(x) => {
                 let (ns, enc) = AccountState::encode_entity(x);
-                (ns, enc.into())
+                (ns, enc)
             }
             Self::AssetState(x) => {
                 let (ns, enc) = AssetState::encode_entity(x);
-                (ns, enc.into())
+                (ns, enc)
             }
             Self::PoolState(x) => {
                 let (ns, enc) = PoolState::encode_entity(x);
-                (ns, enc.into())
+                (ns, enc)
             }
             Self::EpochState(x) => {
                 let (ns, enc) = EpochState::encode_entity(x);
-                (ns, enc.into())
+                (ns, enc)
             }
             Self::DRepState(x) => {
                 let (ns, enc) = DRepState::encode_entity(x);
-                (ns, enc.into())
+                (ns, enc)
             }
         }
     }

@@ -4,8 +4,6 @@ use tracing::{error, info};
 use dolos_core::PullEvent;
 use dolos_redb::wal::RedbWalStore;
 
-use crate::adapters::WalAdapter;
-
 struct WitnessStage {
     input: gasket::messaging::InputPort<PullEvent>,
 }

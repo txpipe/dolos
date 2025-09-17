@@ -84,7 +84,7 @@ pub fn create_ephemeral_data_stores() -> Result<Stores, Error> {
     let chain = dolos_redb::archive::ChainStore::in_memory()?;
 
     Ok(Stores {
-        wal: wal.into(),
+        wal,
         archive: chain.into(),
         state,
     })

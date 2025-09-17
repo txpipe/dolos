@@ -1,4 +1,4 @@
-use ::redb::{Database, MultimapTableHandle as _, Range, TableHandle as _};
+use ::redb::{Database, Range};
 use redb::ReadTransaction;
 use std::path::Path;
 use tracing::{debug, info, warn};
@@ -89,7 +89,7 @@ impl ChainStore {
             .set_cache_size(1024 * 1024 * cache_size.unwrap_or(DEFAULT_CACHE_SIZE_MB))
             .create(path)?;
 
-        Ok(Self::initialize(db)?)
+        Self::initialize(db)
     }
 
     pub fn in_memory() -> Result<Self, ArchiveError> {

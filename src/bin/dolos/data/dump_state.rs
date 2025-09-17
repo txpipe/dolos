@@ -1,10 +1,8 @@
 use std::marker::PhantomData;
 
 use comfy_table::Table;
-use dolos_cardano::{
-    model::AccountState, EpochState, EraSummary, PoolState, RewardLog, EPOCH_KEY_MARK,
-};
-use miette::{bail, Context, IntoDiagnostic};
+use dolos_cardano::{model::AccountState, EpochState, EraSummary, PoolState};
+use miette::{Context, IntoDiagnostic};
 
 use dolos::prelude::*;
 
@@ -49,14 +47,14 @@ impl TableRow for AccountState {
                 "{}",
                 self.latest_pool
                     .as_ref()
-                    .map(|x| hex::encode(x))
+                    .map(hex::encode)
                     .unwrap_or_default()
             ),
             format!(
                 "{}",
                 self.active_pool
                     .as_ref()
-                    .map(|x| hex::encode(x))
+                    .map(hex::encode)
                     .unwrap_or_default()
             ),
             format!("{}", self.drep.is_some()),
@@ -80,7 +78,7 @@ impl TableRow for EpochState {
         ]
     }
 
-    fn row(&self, key: &EntityKey) -> Vec<String> {
+    fn row(&self, _key: &EntityKey) -> Vec<String> {
         vec![
             format!("{}", self.number),
             format!("{}", self.pparams.protocol_major().unwrap_or_default()),
@@ -180,7 +178,7 @@ impl<T: TableRow> Formatter<T> {
         let mut table = Table::new();
         table.set_header(T::header());
 
-        Self::Table(table, PhantomData::<T>::default())
+        Self::Table(table, PhantomData::<T>)
     }
 
     fn write(&mut self, key: EntityKey, value: T) {
