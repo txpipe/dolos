@@ -1,4 +1,3 @@
-use ::redb::Durability;
 use dolos_core::{EraCbor, TxoRef, UtxoMap, UtxoSetDelta};
 use pallas::ledger::{addresses::ShelleyDelegationPart, traverse::MultiEraOutput};
 use redb::{

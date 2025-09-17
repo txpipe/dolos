@@ -1,6 +1,6 @@
 use bincode;
 use itertools::Itertools;
-use redb::{Range, ReadableTable, TableDefinition};
+use redb::{Range, TableDefinition};
 use serde::{de::DeserializeOwned, Serialize};
 use std::{marker::PhantomData, ops::RangeBounds, path::Path, sync::Arc};
 use thiserror::Error;

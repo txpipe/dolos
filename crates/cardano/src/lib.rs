@@ -26,7 +26,6 @@ pub mod include;
 
 pub use eras::*;
 pub use model::*;
-pub use owned::*;
 pub use utils::mutable_slots;
 
 pub type Block<'a> = MultiEraBlock<'a>;
