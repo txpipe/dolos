@@ -220,28 +220,26 @@ impl Mempool {
 impl MempoolStore for Mempool {
     type Stream = MempoolStream;
 
-    fn apply(&self, deltas: &[UtxoSetDelta]) {
+    fn apply(&self, seen_txs: &[TxHash], unseen_txs: &[TxHash]) {
         let mut state = self.mempool.write().unwrap();
 
         if state.acknowledged.is_empty() {
             return;
         }
 
-        for delta in deltas {
-            for tx_hash in delta.seen_txs.iter() {
-                if let Some(acknowledged_tx) = state.acknowledged.get_mut(tx_hash) {
-                    acknowledged_tx.confirmed = true;
-                    self.notify(MempoolTxStage::Confirmed, acknowledged_tx.clone());
-                    debug!(%tx_hash, "confirming tx");
-                }
+        for tx_hash in seen_txs.iter() {
+            if let Some(acknowledged_tx) = state.acknowledged.get_mut(tx_hash) {
+                acknowledged_tx.confirmed = true;
+                self.notify(MempoolTxStage::Confirmed, acknowledged_tx.clone());
+                debug!(%tx_hash, "confirming tx");
             }
+        }
 
-            for tx_hash in delta.unseen_txs.iter() {
-                if let Some(acknowledged_tx) = state.acknowledged.get_mut(tx_hash) {
-                    acknowledged_tx.confirmed = false;
-                    self.notify(MempoolTxStage::Acknowledged, acknowledged_tx.clone());
-                    debug!(%tx_hash, "un-confirming tx");
-                }
+        for tx_hash in unseen_txs.iter() {
+            if let Some(acknowledged_tx) = state.acknowledged.get_mut(tx_hash) {
+                acknowledged_tx.confirmed = false;
+                self.notify(MempoolTxStage::Acknowledged, acknowledged_tx.clone());
+                debug!(%tx_hash, "un-confirming tx");
             }
         }
     }

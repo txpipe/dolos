@@ -53,7 +53,7 @@ impl dolos_core::MempoolStore for Mempool {
         todo!()
     }
 
-    fn apply(&self, _deltas: &[UtxoSetDelta]) {
+    fn apply(&self, _seen_txs: &[TxHash], _unseen_txs: &[TxHash]) {
         // do nothing for now
     }
 

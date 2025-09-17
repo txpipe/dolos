@@ -437,7 +437,7 @@ pub trait MempoolStore: Clone + Send + Sync + 'static {
 
     fn evaluate_raw<D: Domain>(&self, domain: &D, cbor: &[u8]) -> Result<EvalReport, MempoolError>;
 
-    fn apply(&self, deltas: &[UtxoSetDelta]);
+    fn apply(&self, seen_txs: &[TxHash], unseen_txs: &[TxHash]);
     fn check_stage(&self, tx_hash: &TxHash) -> MempoolTxStage;
     fn subscribe(&self) -> Self::Stream;
 }

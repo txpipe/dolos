@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use miette::{Context, IntoDiagnostic};
 
 use dolos::prelude::*;
@@ -30,6 +32,7 @@ pub fn run(config: &crate::Config, _args: &Args, feedback: &Feedback) -> miette:
         LogValue {
             block: vec![],
             delta: vec![],
+            inputs: HashMap::new(),
         },
     );
 
