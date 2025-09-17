@@ -553,7 +553,7 @@ impl<'a> TxModelBuilder<'a> {
         Ok(unique)
     }
 
-    pub fn consumed_deps(&self) -> Result<Vec<TxoRef>, StatusCode> {
+    pub fn required_consumed_deps(&self) -> Result<Vec<TxoRef>, StatusCode> {
         let tx = self.tx()?;
 
         let mut deps = vec![];
