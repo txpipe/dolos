@@ -31,9 +31,9 @@ impl PoolRegistration {
 impl dolos_core::EntityDelta for PoolRegistration {
     type Entity = PoolState;
 
-    fn key(&self) -> Cow<'_, NsKey> {
+    fn key(&self) -> NsKey {
         let key = self.cert.operator.as_slice();
-        Cow::Owned(NsKey::from((PoolState::NS, key)))
+        NsKey::from((PoolState::NS, key))
     }
 
     fn apply(&mut self, entity: &mut Option<PoolState>) {
@@ -51,7 +51,7 @@ impl dolos_core::EntityDelta for PoolRegistration {
         entity.metadata = self.cert.pool_metadata.clone();
     }
 
-    fn undo(&mut self, entity: &mut Option<PoolState>) {
+    fn undo(&self, entity: &mut Option<PoolState>) {
         *entity = self.prev_entity.clone();
     }
 }
@@ -65,8 +65,8 @@ pub struct MintedBlocksInc {
 impl dolos_core::EntityDelta for MintedBlocksInc {
     type Entity = PoolState;
 
-    fn key(&self) -> Cow<'_, NsKey> {
-        Cow::Owned(NsKey::from((PoolState::NS, self.operator.as_slice())))
+    fn key(&self) -> NsKey {
+        NsKey::from((PoolState::NS, self.operator.as_slice()))
     }
 
     fn apply(&mut self, entity: &mut Option<PoolState>) {
@@ -75,7 +75,7 @@ impl dolos_core::EntityDelta for MintedBlocksInc {
         }
     }
 
-    fn undo(&mut self, entity: &mut Option<PoolState>) {
+    fn undo(&self, entity: &mut Option<PoolState>) {
         if let Some(entity) = entity {
             entity.blocks_minted = entity.blocks_minted.saturating_sub(self.count);
         }

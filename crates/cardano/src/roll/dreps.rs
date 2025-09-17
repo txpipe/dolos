@@ -80,9 +80,9 @@ impl DRepRegistration {
 impl dolos_core::EntityDelta for DRepRegistration {
     type Entity = DRepState;
 
-    fn key(&self) -> Cow<'_, NsKey> {
+    fn key(&self) -> NsKey {
         let enc = minicbor::to_vec(&self.cred).unwrap();
-        Cow::Owned(NsKey::from((DRepState::NS, enc)))
+        NsKey::from((DRepState::NS, enc))
     }
 
     fn apply(&mut self, entity: &mut Option<DRepState>) {
@@ -97,7 +97,7 @@ impl dolos_core::EntityDelta for DRepRegistration {
         entity.retired = false;
     }
 
-    fn undo(&mut self, entity: &mut Option<DRepState>) {
+    fn undo(&self, entity: &mut Option<DRepState>) {
         let entity = entity.get_or_insert_default();
         entity.initial_slot = None;
         entity.voting_power = 0;
@@ -129,9 +129,9 @@ impl DRepUnRegistration {
 impl dolos_core::EntityDelta for DRepUnRegistration {
     type Entity = DRepState;
 
-    fn key(&self) -> Cow<'_, NsKey> {
+    fn key(&self) -> NsKey {
         let enc = minicbor::to_vec(&self.cred).unwrap();
-        Cow::Owned(NsKey::from((DRepState::NS, enc)))
+        NsKey::from((DRepState::NS, enc))
     }
 
     fn apply(&mut self, entity: &mut Option<DRepState>) {
@@ -145,7 +145,7 @@ impl dolos_core::EntityDelta for DRepUnRegistration {
         entity.retired = true;
     }
 
-    fn undo(&mut self, entity: &mut Option<DRepState>) {
+    fn undo(&self, entity: &mut Option<DRepState>) {
         let entity = entity.get_or_insert_default();
         entity.voting_power = self.prev_voting_power.unwrap();
         entity.retired = false;

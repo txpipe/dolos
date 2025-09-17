@@ -87,6 +87,17 @@ impl BlocksTable {
         Ok(())
     }
 
+    pub fn remove_after(wx: &WriteTransaction, slot: BlockSlot) -> Result<(), Error> {
+        let mut table = wx.open_table(Self::DEF)?;
+        let mut to_remove = table.extract_from_if(slot.., |x, _| x > slot)?;
+
+        while let Some(Ok((slot, _))) = to_remove.next() {
+            trace!(slot = slot.value(), "removing log entry");
+        }
+
+        Ok(())
+    }
+
     pub fn get_range<'a>(
         rx: &ReadTransaction,
         from: Option<BlockSlot>,

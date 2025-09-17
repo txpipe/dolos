@@ -1,7 +1,7 @@
 use gasket::{framework::*, messaging::Message};
 use tracing::info;
 
-use crate::{adapters::DomainAdapter, prelude::*};
+use crate::{adapters::DomainAdapter, facade::DomainExt as _, prelude::*};
 
 pub type UpstreamPort = gasket::messaging::InputPort<PullEvent>;
 
@@ -52,7 +52,7 @@ impl Stage {
     fn on_roll_forward(&self, block: &RawBlock) -> Result<(), WorkerError> {
         info!("handling roll forward");
 
-        dolos_core::follow::roll_forward(&self.domain, block).or_panic()?;
+        self.domain.roll_forward(block).or_panic()?;
 
         Ok(())
     }
@@ -60,7 +60,7 @@ impl Stage {
     fn on_rollback(&self, point: &ChainPoint) -> Result<(), WorkerError> {
         info!(slot = &point.slot(), "handling rollback");
 
-        dolos_core::follow::rollback(&self.domain, point).or_panic()?;
+        self.domain.rollback(point).or_panic()?;
 
         Ok(())
     }

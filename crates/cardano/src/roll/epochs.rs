@@ -27,8 +27,8 @@ pub struct EpochStatsUpdate {
 impl dolos_core::EntityDelta for EpochStatsUpdate {
     type Entity = EpochState;
 
-    fn key(&self) -> Cow<'_, NsKey> {
-        Cow::Owned(NsKey::from((EpochState::NS, EPOCH_KEY_MARK)))
+    fn key(&self) -> NsKey {
+        NsKey::from((EpochState::NS, EPOCH_KEY_MARK))
     }
 
     fn apply(&mut self, entity: &mut Option<EpochState>) {
@@ -36,8 +36,8 @@ impl dolos_core::EntityDelta for EpochStatsUpdate {
 
         entity.gathered_fees += self.block_fees;
 
-        let utxo_delta = self.utxo_produced - self.utxo_consumed;
-        entity.utxos += utxo_delta;
+        entity.utxos += self.utxo_produced;
+        entity.utxos = entity.utxos.saturating_sub(self.utxo_consumed);
 
         entity.gathered_deposits += self.stake_registration_count
             * entity.pparams.key_deposit_or_default()
@@ -46,13 +46,13 @@ impl dolos_core::EntityDelta for EpochStatsUpdate {
             self.stake_deregistration_count * entity.pparams.pool_deposit_or_default();
     }
 
-    fn undo(&mut self, entity: &mut Option<EpochState>) {
+    fn undo(&self, entity: &mut Option<EpochState>) {
         let entity = entity.get_or_insert_default();
 
         entity.gathered_fees -= self.block_fees;
 
-        let utxo_delta = self.utxo_produced - self.utxo_consumed;
-        entity.utxos -= utxo_delta;
+        entity.utxos -= self.utxo_produced;
+        entity.utxos += self.utxo_consumed;
 
         entity.gathered_deposits -= self.stake_registration_count
             * entity.pparams.key_deposit_or_default()
@@ -107,8 +107,8 @@ pub struct PParamsUpdate {
 impl dolos_core::EntityDelta for PParamsUpdate {
     type Entity = EpochState;
 
-    fn key(&self) -> Cow<'_, NsKey> {
-        Cow::Owned(NsKey::from((EpochState::NS, EPOCH_KEY_MARK)))
+    fn key(&self) -> NsKey {
+        NsKey::from((EpochState::NS, EPOCH_KEY_MARK))
     }
 
     fn apply(&mut self, entity: &mut Option<EpochState>) {
@@ -116,7 +116,7 @@ impl dolos_core::EntityDelta for PParamsUpdate {
         entity.pparams.set(self.to_update.clone());
     }
 
-    fn undo(&mut self, entity: &mut Option<EpochState>) {
+    fn undo(&self, entity: &mut Option<EpochState>) {
         if let Some(entity) = entity {
             if let Some(prev_value) = &self.prev_value {
                 entity.pparams.set(prev_value.clone());

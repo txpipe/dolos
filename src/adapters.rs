@@ -155,6 +155,14 @@ impl ArchiveStore for ArchiveAdapter {
 
         Ok(done)
     }
+
+    fn truncate_front(&self, after: BlockSlot) -> Result<(), ArchiveError> {
+        let out = match self {
+            ArchiveAdapter::Redb(x) => x.truncate_front(after)?,
+        };
+
+        Ok(out)
+    }
 }
 
 impl From<dolos_redb::archive::ChainStore> for ArchiveAdapter {

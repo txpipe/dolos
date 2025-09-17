@@ -43,9 +43,9 @@ pub struct ControlledAmountInc {
 impl dolos_core::EntityDelta for ControlledAmountInc {
     type Entity = AccountState;
 
-    fn key(&self) -> Cow<'_, NsKey> {
+    fn key(&self) -> NsKey {
         let enc = minicbor::to_vec(&self.cred).unwrap();
-        Cow::Owned(NsKey::from((AccountState::NS, enc)))
+        NsKey::from((AccountState::NS, enc))
     }
 
     fn apply(&mut self, entity: &mut Option<AccountState>) {
@@ -53,7 +53,7 @@ impl dolos_core::EntityDelta for ControlledAmountInc {
         entity.controlled_amount += self.amount;
     }
 
-    fn undo(&mut self, entity: &mut Option<AccountState>) {
+    fn undo(&self, entity: &mut Option<AccountState>) {
         let entity = entity.get_or_insert_default();
         entity.controlled_amount -= self.amount;
     }
@@ -68,9 +68,9 @@ pub struct ControlledAmountDec {
 impl dolos_core::EntityDelta for ControlledAmountDec {
     type Entity = AccountState;
 
-    fn key(&self) -> Cow<'_, NsKey> {
+    fn key(&self) -> NsKey {
         let enc = minicbor::to_vec(&self.cred).unwrap();
-        Cow::Owned(NsKey::from((AccountState::NS, enc)))
+        NsKey::from((AccountState::NS, enc))
     }
 
     fn apply(&mut self, entity: &mut Option<AccountState>) {
@@ -80,7 +80,7 @@ impl dolos_core::EntityDelta for ControlledAmountDec {
         entity.controlled_amount = entity.controlled_amount.saturating_sub(self.amount);
     }
 
-    fn undo(&mut self, entity: &mut Option<AccountState>) {
+    fn undo(&self, entity: &mut Option<AccountState>) {
         let entity = entity.get_or_insert_default();
         entity.controlled_amount += self.amount;
     }
@@ -108,9 +108,9 @@ impl StakeRegistration {
 impl dolos_core::EntityDelta for StakeRegistration {
     type Entity = AccountState;
 
-    fn key(&self) -> Cow<'_, NsKey> {
+    fn key(&self) -> NsKey {
         let enc = minicbor::to_vec(&self.cred).unwrap();
-        Cow::Owned(NsKey::from((AccountState::NS, enc)))
+        NsKey::from((AccountState::NS, enc))
     }
 
     fn apply(&mut self, entity: &mut Option<AccountState>) {
@@ -119,7 +119,7 @@ impl dolos_core::EntityDelta for StakeRegistration {
         entity.registered_at = Some(self.slot);
     }
 
-    fn undo(&mut self, entity: &mut Option<AccountState>) {
+    fn undo(&self, entity: &mut Option<AccountState>) {
         let entity = entity.get_or_insert_default();
         entity.registered_at = self.prev_registered_at;
     }
@@ -147,9 +147,9 @@ impl StakeDelegation {
 impl dolos_core::EntityDelta for StakeDelegation {
     type Entity = AccountState;
 
-    fn key(&self) -> Cow<'_, NsKey> {
+    fn key(&self) -> NsKey {
         let enc = minicbor::to_vec(&self.cred).unwrap();
-        Cow::Owned(NsKey::from((AccountState::NS, enc)))
+        NsKey::from((AccountState::NS, enc))
     }
 
     fn apply(&mut self, entity: &mut Option<AccountState>) {
@@ -161,7 +161,7 @@ impl dolos_core::EntityDelta for StakeDelegation {
         entity.latest_pool = Some(self.pool.to_vec());
     }
 
-    fn undo(&mut self, entity: &mut Option<AccountState>) {
+    fn undo(&self, entity: &mut Option<AccountState>) {
         let entity = entity.get_or_insert_default();
         entity.latest_pool = self.prev_pool_id.clone();
     }
@@ -189,9 +189,9 @@ impl VoteDelegation {
 impl dolos_core::EntityDelta for VoteDelegation {
     type Entity = AccountState;
 
-    fn key(&self) -> Cow<'_, NsKey> {
+    fn key(&self) -> NsKey {
         let enc = minicbor::to_vec(&self.cred).unwrap();
-        Cow::Owned(NsKey::from((AccountState::NS, enc)))
+        NsKey::from((AccountState::NS, enc))
     }
 
     fn apply(&mut self, entity: &mut Option<AccountState>) {
@@ -203,7 +203,7 @@ impl dolos_core::EntityDelta for VoteDelegation {
         entity.drep = Some(self.drep.clone());
     }
 
-    fn undo(&mut self, entity: &mut Option<AccountState>) {
+    fn undo(&self, entity: &mut Option<AccountState>) {
         let entity = entity.get_or_insert_default();
         entity.drep = self.prev_drep_id.clone();
     }
@@ -233,9 +233,9 @@ impl StakeDeregistration {
 impl dolos_core::EntityDelta for StakeDeregistration {
     type Entity = AccountState;
 
-    fn key(&self) -> Cow<'_, NsKey> {
+    fn key(&self) -> NsKey {
         let enc = minicbor::to_vec(&self.cred).unwrap();
-        Cow::Owned(NsKey::from((AccountState::NS, enc)))
+        NsKey::from((AccountState::NS, enc))
     }
 
     fn apply(&mut self, entity: &mut Option<AccountState>) {
@@ -249,7 +249,7 @@ impl dolos_core::EntityDelta for StakeDeregistration {
         entity.latest_pool = None;
     }
 
-    fn undo(&mut self, entity: &mut Option<AccountState>) {
+    fn undo(&self, entity: &mut Option<AccountState>) {
         let entity = entity.get_or_insert_default();
         entity.registered_at = self.prev_registered_at;
         entity.latest_pool = self.prev_pool_id.clone();
@@ -265,9 +265,9 @@ pub struct WithdrawalInc {
 impl dolos_core::EntityDelta for WithdrawalInc {
     type Entity = AccountState;
 
-    fn key(&self) -> Cow<'_, NsKey> {
+    fn key(&self) -> NsKey {
         let enc = minicbor::to_vec(&self.cred).unwrap();
-        Cow::Owned(NsKey::from((AccountState::NS, enc)))
+        NsKey::from((AccountState::NS, enc))
     }
 
     fn apply(&mut self, entity: &mut Option<Self::Entity>) {
@@ -275,7 +275,7 @@ impl dolos_core::EntityDelta for WithdrawalInc {
         entity.withdrawals_sum += self.amount;
     }
 
-    fn undo(&mut self, entity: &mut Option<Self::Entity>) {
+    fn undo(&self, entity: &mut Option<Self::Entity>) {
         let entity = entity.get_or_insert_default();
         entity.withdrawals_sum = entity.withdrawals_sum.saturating_sub(self.amount);
     }

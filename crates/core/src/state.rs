@@ -121,7 +121,7 @@ pub type KeyEntityPair<E> = (EntityKey, Option<E>);
 pub trait EntityDelta: Clone {
     type Entity: Entity;
 
-    fn key(&self) -> Cow<'_, NsKey>;
+    fn key(&self) -> NsKey;
 
     /// Applies the change to the entity
     ///
@@ -145,7 +145,7 @@ pub trait EntityDelta: Clone {
     /// This method should assume that `apply` was already called at a prior
     /// point in time, allowing implementors to retain initial values as
     /// internal delta state (if required).
-    fn undo(&mut self, entity: &mut Option<Self::Entity>);
+    fn undo(&self, entity: &mut Option<Self::Entity>);
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -434,8 +434,8 @@ mod tests {
     impl EntityDelta for ChangeValue {
         type Entity = TestEntity;
 
-        fn key(&self) -> Cow<'_, NsKey> {
-            Cow::Owned(NsKey(TestEntity::NS, EntityKey::from(self.key.clone())))
+        fn key(&self) -> NsKey {
+            NsKey(TestEntity::NS, EntityKey::from(self.key.clone()))
         }
 
         fn apply(&mut self, entity: &mut Option<Self::Entity>) {
@@ -446,12 +446,10 @@ mod tests {
                 .map(|e| e.value = self.override_with.clone());
         }
 
-        fn undo(&mut self, entity: &mut Option<Self::Entity>) {
+        fn undo(&self, entity: &mut Option<Self::Entity>) {
             entity
                 .as_mut()
                 .map(|e| e.value = self.old_value.clone().unwrap());
-
-            self.old_value = None;
         }
     }
 

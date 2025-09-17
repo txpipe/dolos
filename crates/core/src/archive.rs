@@ -105,4 +105,6 @@ pub trait ArchiveStore: Clone + Send + Sync + 'static {
     fn get_tip(&self) -> Result<Option<(BlockSlot, BlockBody)>, ArchiveError>;
 
     fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, ArchiveError>;
+
+    fn truncate_front(&self, after: BlockSlot) -> Result<(), ArchiveError>;
 }

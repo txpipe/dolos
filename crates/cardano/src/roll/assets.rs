@@ -30,11 +30,11 @@ pub struct MintStatsUpdate {
 impl dolos_core::EntityDelta for MintStatsUpdate {
     type Entity = AssetState;
 
-    fn key(&self) -> Cow<'_, NsKey> {
+    fn key(&self) -> NsKey {
         let mut key = vec![];
         key.extend_from_slice(self.policy.as_slice());
         key.extend_from_slice(self.asset.as_slice());
-        Cow::Owned(NsKey::from((AssetState::NS, key)))
+        NsKey::from((AssetState::NS, key))
     }
 
     fn apply(&mut self, entity: &mut Option<AssetState>) {
@@ -50,7 +50,7 @@ impl dolos_core::EntityDelta for MintStatsUpdate {
         }
     }
 
-    fn undo(&mut self, entity: &mut Option<AssetState>) {
+    fn undo(&self, entity: &mut Option<AssetState>) {
         let entity = entity.get_or_insert_default();
 
         entity.add_quantity(-self.quantity);
