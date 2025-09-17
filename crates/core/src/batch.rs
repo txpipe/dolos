@@ -6,7 +6,7 @@ use rayon::prelude::*;
 use crate::{
     ArchiveStore, ArchiveWriter as _, Block as _, BlockSlot, ChainLogic, ChainPoint, Domain,
     DomainError, EntityDelta, EntityMap, LogValue, NsKey, RawBlock, RawUtxoMap, SlotTags,
-    StateError, StateStore as _, StateWriter as _, TxoRef, WalStore as _,
+    StateError, StateStore as _, StateWriter as _, TxoRef, UtxoSetDelta, WalStore as _,
 };
 
 pub struct WorkDeltas<C: ChainLogic> {
@@ -36,6 +36,7 @@ pub struct WorkBlock<C: ChainLogic> {
     pub raw: RawBlock,
     pub decoded: Option<C::Block>,
     pub deltas: WorkDeltas<C>,
+    pub utxo_delta: Option<UtxoSetDelta>,
 }
 
 impl<C: ChainLogic> WorkBlock<C> {
@@ -108,6 +109,7 @@ impl<C: ChainLogic> WorkBatch<C> {
                 raw,
                 decoded: None,
                 deltas: WorkDeltas::default(),
+                utxo_delta: None,
             })
             .collect();
 
@@ -257,25 +259,6 @@ impl<C: ChainLogic> WorkBatch<C> {
         Ok(())
     }
 
-    pub fn commit_utxo_set<D>(&self, domain: &D) -> Result<(), DomainError>
-    where
-        D: Domain<Chain = C>,
-    {
-        let deltas: Vec<_> = self
-            .blocks
-            .iter()
-            .map(|b| {
-                domain
-                    .chain()
-                    .compute_block_utxo_delta(b.unwrap_decoded(), &self.utxos)
-            })
-            .collect::<Result<_, _>>()?;
-
-        domain.state().apply_utxoset(&deltas)?;
-
-        Ok(())
-    }
-
     pub fn commit_wal<D>(&self, domain: &D) -> Result<(), DomainError>
     where
         D: Domain<Chain = C, EntityDelta = C::Delta>,
@@ -291,6 +274,7 @@ impl<C: ChainLogic> WorkBatch<C> {
             let value = LogValue {
                 block: (*block.raw).clone(),
                 delta,
+                inputs: self.utxos.clone(),
             };
 
             entries.push((point.clone(), value));
@@ -363,8 +347,15 @@ impl<C: ChainLogic> WorkBatch<C> {
 
         for (key, entity) in self.entities.iter_mut() {
             let NsKey(ns, key) = key;
-
             writer.save_entity_typed(ns, &key, entity.as_ref())?;
+        }
+
+        // TODO: we treat the UTxO set differently due to tech-debt. We should migrate
+        // this into the entity system.
+        for block in self.blocks.iter() {
+            if let Some(utxo_delta) = &block.utxo_delta {
+                writer.apply_utxoset(&utxo_delta)?;
+            }
         }
 
         writer.set_cursor(self.last_point())?;

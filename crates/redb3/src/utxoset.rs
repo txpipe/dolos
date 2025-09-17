@@ -410,21 +410,6 @@ impl StateStore {
         FilterIndexes::iter_within_key(&rx, FilterIndexes::BY_ADDRESS, address)
     }
 
-    pub fn apply_utxoset(&self, deltas: &[UtxoSetDelta]) -> Result<(), Error> {
-        let mut wx = self.db().begin_write()?;
-        wx.set_durability(Durability::Eventual);
-        wx.set_quick_repair(true);
-
-        for delta in deltas {
-            UtxosTable::apply(&wx, delta)?;
-            FilterIndexes::apply(&wx, delta)?;
-        }
-
-        wx.commit()?;
-
-        Ok(())
-    }
-
     pub fn utxoset_stats(&self) -> Result<HashMap<&str, TableStats>, Error> {
         let rx = self.db().begin_read()?;
 
@@ -442,7 +427,8 @@ mod tests {
     use std::{collections::HashSet, str::FromStr as _, sync::Arc};
 
     use dolos_core::{
-        ChainPoint, StateSchema, StateStore as _, TxoRef, UtxoMap, UtxoSet, UtxoSetDelta,
+        ChainPoint, StateSchema, StateStore as _, StateWriter as _, TxoRef, UtxoMap, UtxoSet,
+        UtxoSetDelta,
     };
     use dolos_testing::*;
     use pallas::ledger::addresses::{Address, ShelleyDelegationPart};
@@ -454,12 +440,22 @@ mod tests {
         store.get_utxos(bobs.into_iter().collect()).unwrap()
     }
 
+    macro_rules! apply_utxoset {
+        ($store:expr, $deltas:expr) => {
+            let writer = $store.start_writer().unwrap();
+            for delta in $deltas.iter() {
+                writer.apply_utxoset(&delta).unwrap();
+            }
+            writer.commit().unwrap();
+        };
+    }
+
     #[test]
     fn test_apply_genesis() {
         let store = StateStore::in_memory(StateSchema::default()).unwrap();
 
         let genesis = fake_genesis_delta(1_000_000_000);
-        store.apply_utxoset(&[genesis]).unwrap();
+        apply_utxoset!(store, [&genesis]);
 
         // TODO: the store is not persisting the cursor unless it's a specific point. We
         // need to fix this in the next breaking change version.
@@ -479,11 +475,11 @@ mod tests {
         let store = StateStore::in_memory(StateSchema::default()).unwrap();
 
         let genesis = fake_genesis_delta(1_000_000_000);
-        store.apply_utxoset(&[genesis]).unwrap();
+        apply_utxoset!(store, [genesis]);
 
         let bobs = get_test_address_utxos(&store, TestAddress::Bob);
-        let delta = make_move_utxo_delta(bobs, 1, 1, TestAddress::Carol);
-        store.apply_utxoset(std::slice::from_ref(&delta)).unwrap();
+        let delta = make_move_utxo_delta(bobs, 1, TestAddress::Carol);
+        apply_utxoset!(store, [&delta]);
 
         assert_eq!(
             store.read_cursor().unwrap(),
@@ -504,14 +500,14 @@ mod tests {
         let store = StateStore::in_memory(StateSchema::default()).unwrap();
 
         let genesis = fake_genesis_delta(1_000_000_000);
-        store.apply_utxoset(&[genesis]).unwrap();
+        apply_utxoset!(store, [&genesis]);
 
         let bobs = get_test_address_utxos(&store, TestAddress::Bob);
-        let forward = make_move_utxo_delta(bobs, 1, 1, TestAddress::Carol);
-        store.apply_utxoset(std::slice::from_ref(&forward)).unwrap();
+        let forward = make_move_utxo_delta(bobs, 1, TestAddress::Carol);
+        apply_utxoset!(store, [&forward]);
 
         let undo = revert_delta(forward);
-        store.apply_utxoset(std::slice::from_ref(&undo)).unwrap();
+        apply_utxoset!(store, [&undo]);
 
         // TODO: the store is not persisting the origin cursor, instead it's keeping it
         // empty. We should fix this in the next breaking change version.
@@ -535,21 +531,21 @@ mod tests {
         let store = StateStore::in_memory(StateSchema::default()).unwrap();
 
         let genesis = fake_genesis_delta(1_000_000_000);
-        store.apply_utxoset(std::slice::from_ref(&genesis)).unwrap();
+        apply_utxoset!(store, [&genesis]);
         batch.push(genesis);
 
         let bobs = get_test_address_utxos(&store, TestAddress::Bob);
-        let forward = make_move_utxo_delta(bobs, 1, 1, TestAddress::Carol);
-        store.apply_utxoset(std::slice::from_ref(&forward)).unwrap();
+        let forward = make_move_utxo_delta(bobs, 1, TestAddress::Carol);
+        apply_utxoset!(store, [&forward]);
         batch.push(forward.clone());
 
         let undo = revert_delta(forward);
-        store.apply_utxoset(std::slice::from_ref(&undo)).unwrap();
+        apply_utxoset!(store, [&undo]);
         batch.push(undo);
 
         // now we apply the batch in one go.
         let store = StateStore::in_memory(StateSchema::default()).unwrap();
-        store.apply_utxoset(&batch).unwrap();
+        apply_utxoset!(store, batch);
 
         let bobs = get_test_address_utxos(&store, TestAddress::Bob);
         assert_eq!(bobs.len(), 1);
@@ -576,12 +572,11 @@ mod tests {
             .collect();
 
         let delta = UtxoSetDelta {
-            new_position: Some(ChainPoint::Origin),
             produced_utxo: initial_utxos,
             ..Default::default()
         };
 
-        store.apply_utxoset(&[delta]).unwrap();
+        apply_utxoset!(store, [&delta]);
 
         let assertion = |utxos: UtxoSet, address: &Address, ordinal: usize| {
             let utxos = store.get_utxos(utxos.into_iter().collect()).unwrap();
@@ -635,9 +630,9 @@ mod tests {
 
         let utxo_generator = |x: &TestAddress| utxo_with_random_amount(x, 1_000_000..1_500_000);
 
-        let delta = make_custom_utxo_delta(0, TestAddress::everyone(), 10..11, utxo_generator);
+        let delta = make_custom_utxo_delta(TestAddress::everyone(), 10..11, utxo_generator);
 
-        store.apply_utxoset(std::slice::from_ref(&delta)).unwrap();
+        apply_utxoset!(store, [&delta]);
 
         for address in TestAddress::everyone().iter() {
             let expected = delta
@@ -661,9 +656,9 @@ mod tests {
 
         let utxo_generator = |x: &TestAddress| utxo_with_random_amount(x, 1_000_000..1_500_000);
 
-        let delta = make_custom_utxo_delta(0, TestAddress::everyone(), 10..11, utxo_generator);
+        let delta = make_custom_utxo_delta(TestAddress::everyone(), 10..11, utxo_generator);
 
-        store.apply_utxoset(std::slice::from_ref(&delta)).unwrap();
+        apply_utxoset!(store, [&delta]);
 
         for address in TestAddress::everyone().iter() {
             let mut expected: HashSet<TxoRef> = delta

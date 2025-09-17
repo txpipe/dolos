@@ -28,7 +28,6 @@ pub mod init;
 pub mod mempool;
 pub mod point;
 pub mod state;
-pub mod utxoset;
 pub mod wal;
 
 pub type Era = u16;
@@ -67,7 +66,7 @@ pub use wal::*;
 
 use crate::batch::{WorkBatch, WorkBlock};
 
-#[derive(Debug, Eq, PartialEq, Clone)]
+#[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
 pub struct EraCbor(pub Era, pub Cbor);
 
 impl From<(Era, Cbor)> for EraCbor {
@@ -173,17 +172,10 @@ pub type UtxoSet = HashSet<TxoRef>;
 
 #[derive(Default, Debug, Clone)]
 pub struct UtxoSetDelta {
-    pub new_position: Option<ChainPoint>,
-    pub undone_position: Option<ChainPoint>,
     pub produced_utxo: HashMap<TxoRef, Arc<EraCbor>>,
     pub consumed_utxo: HashMap<TxoRef, Arc<EraCbor>>,
     pub recovered_stxi: HashMap<TxoRef, Arc<EraCbor>>,
     pub undone_utxo: HashMap<TxoRef, Arc<EraCbor>>,
-    pub seen_txs: HashSet<TxHash>,
-    pub unseen_txs: HashSet<TxHash>,
-    pub new_pparams: Vec<Arc<EraCbor>>,
-    pub new_block: BlockBody,
-    pub undone_block: BlockBody,
 }
 
 #[derive(Debug, Clone)]
@@ -199,6 +191,7 @@ where
 {
     pub block: Cbor,
     pub delta: Vec<D>,
+    pub inputs: HashMap<TxoRef, Arc<EraCbor>>,
 }
 
 impl<D> LogValue<D>
@@ -209,6 +202,7 @@ where
         Self {
             block: vec![],
             delta: vec![],
+            inputs: HashMap::new(),
         }
     }
 }
@@ -503,12 +497,6 @@ pub trait ChainLogic: Sized + Send + Sync {
     fn last_immutable_slot(domain: &impl Domain, tip: BlockSlot) -> BlockSlot {
         tip.saturating_sub(Self::mutable_slots(domain))
     }
-
-    fn compute_block_utxo_delta(
-        &self,
-        block: &Self::Block,
-        deps: &RawUtxoMap,
-    ) -> Result<UtxoSetDelta, ChainError>;
 
     fn compute_delta(
         &self,

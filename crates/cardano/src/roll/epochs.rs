@@ -190,7 +190,7 @@ impl BlockVisitor for EpochStateVisitor {
         &mut self,
         deltas: &mut WorkDeltas<CardanoLogic>,
         _: &MultiEraBlock,
-        _: &MultiEraTx,
+        _: Option<&MultiEraTx>,
         update: &MultiEraUpdate,
     ) -> Result<(), ChainError> {
         check_all_proposed! {

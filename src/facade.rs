@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use dolos_core::{
     batch::WorkBatch, ArchiveStore as _, Block, BlockSlot, ChainLogic, ChainPoint, Domain,
@@ -26,8 +26,6 @@ where
         batch.load_entities(self)?;
 
         batch.apply_entities()?;
-
-        batch.commit_utxo_set(self)?;
 
         batch.commit_state(self)?;
 
@@ -79,8 +77,6 @@ where
 
         batch.apply_entities()?;
 
-        batch.commit_utxo_set(self)?;
-
         batch.commit_state(self)?;
 
         batch.commit_archive(self)?;
@@ -120,7 +116,32 @@ where
                 }
             }
 
-            self.notify_tip(TipEvent::Undo(to.clone(), Arc::new(log.block)));
+            let block = Arc::new(log.block);
+
+            let blockd = dolos_cardano::owned::OwnedMultiEraBlock::decode(block.clone())
+                .map_err(dolos_core::ChainError::from)?;
+            let blockd = blockd.view();
+
+            let inputs: HashMap<_, _> = log
+                .inputs
+                .iter()
+                .map(|(k, v)| {
+                    let out = (
+                        k.clone(),
+                        dolos_cardano::owned::OwnedMultiEraOutput::decode(v.clone())
+                            .map_err(dolos_core::ChainError::from)?,
+                    );
+
+                    Result::<_, dolos_core::ChainError>::Ok(out)
+                })
+                .collect::<Result<_, _>>()?;
+
+            let utxo_undo = dolos_cardano::utxoset::compute_undo_delta(&blockd, &inputs)
+                .map_err(dolos_core::ChainError::from)?;
+
+            writer.apply_utxoset(&utxo_undo)?;
+
+            self.notify_tip(TipEvent::Undo(to.clone(), block));
         }
 
         writer.commit()?;

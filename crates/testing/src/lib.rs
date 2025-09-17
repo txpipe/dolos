@@ -273,7 +273,6 @@ pub fn print_utxo_map(utxos: &UtxoMap) {
 
 pub fn fake_genesis_delta(initial_amount: u64) -> UtxoSetDelta {
     UtxoSetDelta {
-        new_position: Some(ChainPoint::Origin),
         produced_utxo: TestAddress::everyone()
             .into_iter()
             .enumerate()
@@ -284,47 +283,26 @@ pub fn fake_genesis_delta(initial_amount: u64) -> UtxoSetDelta {
     }
 }
 
-pub fn forward_delta_from_slot(slot: u64) -> UtxoSetDelta {
-    UtxoSetDelta {
-        new_position: Some(slot_to_chainpoint(slot)),
-        ..Default::default()
-    }
-}
-
-pub fn undo_delta_from_slot(slot: u64) -> UtxoSetDelta {
-    UtxoSetDelta {
-        undone_position: Some(slot_to_chainpoint(slot)),
-        ..Default::default()
-    }
-}
-
 pub fn revert_delta(delta: UtxoSetDelta) -> UtxoSetDelta {
     UtxoSetDelta {
-        undone_position: delta.new_position,
         recovered_stxi: delta.consumed_utxo,
         undone_utxo: delta.produced_utxo,
         ..Default::default()
     }
 }
 
-pub fn make_move_utxo_delta(
-    utxos: UtxoMap,
-    slot: u64,
-    tx_seq: u64,
-    to: TestAddress,
-) -> UtxoSetDelta {
+pub fn make_move_utxo_delta(utxos: UtxoMap, tx_seq: u64, to: TestAddress) -> UtxoSetDelta {
     let moved = utxos.clone();
     let moved = replace_utxo_map_address(moved, to);
     let moved = replace_utxo_map_txhash(moved, tx_seq);
 
-    let mut delta = forward_delta_from_slot(slot);
+    let mut delta = UtxoSetDelta::default();
     delta.consumed_utxo = utxos;
     delta.produced_utxo = moved;
     delta
 }
 
 pub fn make_custom_utxo_delta<G>(
-    slot: u64,
     addresses: impl IntoIterator<Item = TestAddress>,
     utxos_per_address: Range<u64>,
     utxo_generator: G,
@@ -350,7 +328,7 @@ where
         }
     }
 
-    let mut delta = forward_delta_from_slot(slot);
+    let mut delta = UtxoSetDelta::default();
     delta.produced_utxo = utxos;
 
     delta

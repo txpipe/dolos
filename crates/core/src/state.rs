@@ -263,6 +263,8 @@ pub trait StateWriter: Sized + Send + Sync {
 
     fn delete_entity(&self, ns: Namespace, key: &EntityKey) -> Result<(), StateError>;
 
+    fn apply_utxoset(&self, delta: &UtxoSetDelta) -> Result<(), StateError>;
+
     #[must_use]
     fn commit(self) -> Result<(), StateError>;
 
@@ -387,8 +389,6 @@ pub trait StateStore: Sized + Send + Sync + Clone {
     fn get_utxo_by_policy(&self, policy: &[u8]) -> Result<UtxoSet, StateError>;
 
     fn get_utxo_by_asset(&self, asset: &[u8]) -> Result<UtxoSet, StateError>;
-
-    fn apply_utxoset(&self, deltas: &[UtxoSetDelta]) -> Result<(), StateError>;
 }
 
 #[cfg(test)]
@@ -490,6 +490,10 @@ mod tests {
             Ok(())
         }
 
+        fn apply_utxoset(&self, delta: &UtxoSetDelta) -> Result<(), StateError> {
+            todo!()
+        }
+
         fn commit(self) -> Result<(), StateError> {
             Ok(())
         }
@@ -579,10 +583,6 @@ mod tests {
         }
 
         fn get_utxo_by_asset(&self, asset: &[u8]) -> Result<UtxoSet, StateError> {
-            todo!()
-        }
-
-        fn apply_utxoset(&self, deltas: &[UtxoSetDelta]) -> Result<(), StateError> {
             todo!()
         }
     }

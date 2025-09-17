@@ -415,6 +415,13 @@ impl dolos_core::StateWriter for StateWriter {
         Ok(())
     }
 
+    fn apply_utxoset(&self, delta: &dolos_core::UtxoSetDelta) -> Result<(), StateError> {
+        UtxosTable::apply(&self.wx, delta)?;
+        FilterIndexes::apply(&self.wx, delta)?;
+
+        Ok(())
+    }
+
     fn commit(self) -> Result<(), StateError> {
         self.wx.commit().map_err(Error::from)?;
 
@@ -542,11 +549,5 @@ impl dolos_core::StateStore for StateStore {
         let out = FilterIndexes::get_by_asset(&rx, asset)?;
 
         Ok(out)
-    }
-
-    fn apply_utxoset(&self, deltas: &[dolos_core::UtxoSetDelta]) -> Result<(), StateError> {
-        Self::apply_utxoset(&self, deltas)?;
-
-        Ok(())
     }
 }

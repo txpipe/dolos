@@ -116,7 +116,7 @@ pub trait BlockVisitor {
         &mut self,
         deltas: &mut WorkDeltas<CardanoLogic>,
         block: &MultiEraBlock,
-        tx: &MultiEraTx,
+        tx: Option<&MultiEraTx>,
         update: &MultiEraUpdate,
     ) -> Result<(), ChainError> {
         Ok(())
@@ -237,12 +237,16 @@ impl<'a> DeltaBuilder<'a> {
             }
 
             if let Some(update) = tx.update() {
-                visit_all!(self, deltas, visit_update, block, &tx, &update);
+                visit_all!(self, deltas, visit_update, block, Some(&tx), &update);
             }
 
             for datum in tx.plutus_data() {
                 visit_all!(self, deltas, visit_datums, block, &tx, &datum);
             }
+        }
+
+        if let Some(update) = block.update() {
+            visit_all!(self, deltas, visit_update, block, None, &update);
         }
 
         visit_all!(self, deltas, flush,);
