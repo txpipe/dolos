@@ -165,7 +165,6 @@ mod tests {
 
     fn setup_test_context() -> Arc<Context<ToyDomain>> {
         let delta = dolos_testing::make_custom_utxo_delta(
-            1,
             dolos_testing::TestAddress::everyone(),
             2..4,
             |x: &dolos_testing::TestAddress| {

@@ -10,9 +10,11 @@ pub fn seed_random_memory_store(utxo_generator: impl UtxoGenerator) -> impl Stat
     let everyone = TestAddress::everyone();
     let utxos_per_address = 2..4;
 
-    let delta = make_custom_utxo_delta(1, everyone, utxos_per_address, utxo_generator);
+    let delta = make_custom_utxo_delta(everyone, utxos_per_address, utxo_generator);
 
-    store.apply_utxoset(&[delta]).unwrap();
+    let writer = store.start_writer().unwrap();
+    writer.apply_utxoset(&delta).unwrap();
+    writer.commit().unwrap();
 
     store
 }
@@ -51,7 +53,7 @@ impl dolos_core::MempoolStore for Mempool {
         todo!()
     }
 
-    fn apply(&self, _deltas: &[UtxoSetDelta]) {
+    fn apply(&self, _seen_txs: &[TxHash], _unseen_txs: &[TxHash]) {
         // do nothing for now
     }
 
@@ -91,7 +93,9 @@ impl ToyDomain {
             dolos_redb3::StateStore::in_memory(dolos_cardano::model::build_schema()).unwrap();
 
         if let Some(delta) = initial_delta {
-            state.apply_utxoset(&[delta]).unwrap();
+            let writer = state.start_writer().unwrap();
+            writer.apply_utxoset(&delta).unwrap();
+            writer.commit().unwrap();
         }
 
         let (tip_broadcast, _) = tokio::sync::broadcast::channel(100);

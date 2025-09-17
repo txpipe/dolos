@@ -100,16 +100,6 @@ impl dolos_core::ChainLogic for CardanoLogic {
         utils::mutable_slots(domain.genesis())
     }
 
-    fn compute_block_utxo_delta(
-        &self,
-        block: &Self::Block,
-        deps: &RawUtxoMap,
-    ) -> Result<UtxoSetDelta, ChainError> {
-        let delta = utxoset::compute_apply_delta(block.view(), deps)?;
-
-        Ok(delta)
-    }
-
     fn compute_delta(
         &self,
         block: &mut WorkBlock<Self>,
@@ -117,6 +107,13 @@ impl dolos_core::ChainLogic for CardanoLogic {
     ) -> Result<(), ChainError> {
         let mut builder = roll::DeltaBuilder::new(self.config.track.clone(), block);
         builder.crawl(deps)?;
+
+        // TODO: we treat the UTxO set differently due to tech-debt. We should migrate
+        // this into the entity system.
+        let blockd = block.unwrap_decoded();
+        let blockd = blockd.view();
+        let utxos = utxoset::compute_apply_delta(blockd, deps)?;
+        block.utxo_delta = Some(utxos);
 
         Ok(())
     }

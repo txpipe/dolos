@@ -117,7 +117,9 @@ fn bootstrap_eras<D: Domain>(domain: &D, epoch: &EpochState) -> Result<(), Chain
 pub fn bootstrap_utxos<D: Domain>(domain: &D) -> Result<(), ChainError> {
     let delta = crate::utxoset::compute_origin_delta(domain.genesis());
 
-    domain.state().apply_utxoset(&[delta])?;
+    let writer = domain.state().start_writer()?;
+    writer.apply_utxoset(&delta)?;
+    writer.commit()?;
 
     Ok(())
 }

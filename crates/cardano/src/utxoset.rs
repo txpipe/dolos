@@ -1,9 +1,10 @@
-use pallas::codec::minicbor;
 use pallas::ledger::traverse::{MultiEraBlock, MultiEraOutput, MultiEraTx};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use dolos_core::*;
+
+use crate::owned::OwnedMultiEraOutput;
 
 pub fn compute_block_dependencies(block: &MultiEraBlock, loaded: &mut RawUtxoMap) -> Vec<TxoRef> {
     let txs: HashMap<_, _> = block.txs().into_iter().map(|tx| (tx.hash(), tx)).collect();
@@ -26,7 +27,6 @@ pub fn compute_block_dependencies(block: &MultiEraBlock, loaded: &mut RawUtxoMap
         .collect();
 
     // find all missing utxos that are not already in the loaded map
-    
 
     consumed
         .into_iter()
@@ -50,28 +50,13 @@ pub fn compute_block_dependencies(block: &MultiEraBlock, loaded: &mut RawUtxoMap
 /// validation of the ledger rules.
 pub fn compute_apply_delta(
     block: &MultiEraBlock,
-    loaded: &RawUtxoMap,
+    loaded: &HashMap<TxoRef, OwnedMultiEraOutput>,
 ) -> Result<UtxoSetDelta, BrokenInvariant> {
-    let era: u16 = block.era().into();
-
-    let mut delta = UtxoSetDelta {
-        new_position: Some(ChainPoint::Specific(block.slot(), block.hash())),
-        new_block: match block {
-            MultiEraBlock::Byron(x) => minicbor::to_vec((era, x)).unwrap(),
-            MultiEraBlock::Conway(x) => minicbor::to_vec((era, x)).unwrap(),
-            MultiEraBlock::Babbage(x) => minicbor::to_vec((era, x)).unwrap(),
-            MultiEraBlock::AlonzoCompatible(x, _) => minicbor::to_vec((era, x)).unwrap(),
-            MultiEraBlock::EpochBoundary(x) => minicbor::to_vec((0_u16, x)).unwrap(),
-            _ => todo!(),
-        },
-        ..Default::default()
-    };
+    let mut delta = UtxoSetDelta::default();
 
     let txs: HashMap<_, _> = block.txs().into_iter().map(|tx| (tx.hash(), tx)).collect();
 
     for (tx_hash, tx) in txs.iter() {
-        delta.seen_txs.insert(*tx_hash);
-
         for (idx, produced) in tx.produces() {
             let uxto_ref = TxoRef(*tx_hash, idx as u32);
 
@@ -85,24 +70,11 @@ pub fn compute_apply_delta(
 
             let stxi_body = loaded
                 .get(&stxi_ref)
-                .ok_or_else(|| BrokenInvariant::MissingUtxo(stxi_ref.clone()))?
-                .clone();
+                .ok_or_else(|| BrokenInvariant::MissingUtxo(stxi_ref.clone()))?;
 
+            let stxi_body = stxi_body.borrow_owner().clone();
             delta.consumed_utxo.insert(stxi_ref, stxi_body);
         }
-
-        if let Some(update) = tx.update() {
-            delta
-                .new_pparams
-                .push(Arc::new(EraCbor(tx.era().into(), update.encode())));
-        }
-    }
-
-    // check block-level updates (because of f#!@#@ byron)
-    if let Some(update) = block.update() {
-        delta
-            .new_pparams
-            .push(Arc::new(EraCbor(block.era().into(), update.encode())));
     }
 
     Ok(delta)
@@ -110,28 +82,13 @@ pub fn compute_apply_delta(
 
 pub fn compute_undo_delta(
     block: &MultiEraBlock,
-    context: RawUtxoMap,
+    context: &HashMap<TxoRef, OwnedMultiEraOutput>,
 ) -> Result<UtxoSetDelta, BrokenInvariant> {
-    let era: u16 = block.era().into();
-
-    let mut delta = UtxoSetDelta {
-        undone_position: Some(ChainPoint::Specific(block.slot(), block.hash())),
-        undone_block: match block {
-            MultiEraBlock::Byron(x) => minicbor::to_vec((era, x)).unwrap(),
-            MultiEraBlock::Conway(x) => minicbor::to_vec((era, x)).unwrap(),
-            MultiEraBlock::Babbage(x) => minicbor::to_vec((era, x)).unwrap(),
-            MultiEraBlock::AlonzoCompatible(x, _) => minicbor::to_vec((era, x)).unwrap(),
-            MultiEraBlock::EpochBoundary(x) => minicbor::to_vec((0_u16, x)).unwrap(),
-            _ => todo!(),
-        },
-        ..Default::default()
-    };
+    let mut delta = UtxoSetDelta::default();
 
     let txs: HashMap<_, _> = block.txs().into_iter().map(|tx| (tx.hash(), tx)).collect();
 
     for (tx_hash, tx) in txs.iter() {
-        delta.unseen_txs.insert(*tx_hash);
-
         for (idx, body) in tx.produces() {
             let utxo_ref = TxoRef(*tx_hash, idx as u32);
             delta.undone_utxo.insert(utxo_ref, Arc::new(body.into()));
@@ -144,9 +101,9 @@ pub fn compute_undo_delta(
 
             let stxi_body = context
                 .get(&stxi_ref)
-                .ok_or_else(|| BrokenInvariant::MissingUtxo(stxi_ref.clone()))?
-                .clone();
+                .ok_or_else(|| BrokenInvariant::MissingUtxo(stxi_ref.clone()))?;
 
+            let stxi_body = stxi_body.borrow_owner().clone();
             delta.recovered_stxi.insert(stxi_ref, stxi_body);
         }
     }
@@ -212,13 +169,19 @@ mod tests {
 
     use super::*;
 
-    fn fake_slice_for_block(block: &MultiEraBlock) -> UtxoMap {
+    fn fake_slice_for_block(block: &MultiEraBlock) -> HashMap<TxoRef, OwnedMultiEraOutput> {
         let consumed: HashMap<_, _> = block
             .txs()
             .iter()
             .flat_map(MultiEraTx::consumes)
             .map(|utxo| TxoRef(*utxo.hash(), utxo.index() as u32))
-            .map(|key| (key, Arc::new(EraCbor(block.era().into(), vec![]))))
+            .map(|key| {
+                (
+                    key,
+                    OwnedMultiEraOutput::decode(Arc::new(EraCbor(block.era().into(), vec![])))
+                        .unwrap(),
+                )
+            })
             .collect();
 
         consumed
@@ -331,7 +294,7 @@ mod tests {
         let context = fake_slice_for_block(&block);
 
         let apply = super::compute_apply_delta(&block, &context).unwrap();
-        let undo = super::compute_undo_delta(&block, context).unwrap();
+        let undo = super::compute_undo_delta(&block, &context).unwrap();
 
         for (produced, _) in apply.produced_utxo.iter() {
             assert!(undo.undone_utxo.contains_key(produced));
@@ -340,7 +303,5 @@ mod tests {
         for (consumed, _) in apply.consumed_utxo.iter() {
             assert!(undo.recovered_stxi.contains_key(consumed));
         }
-
-        assert_eq!(apply.new_position, undo.undone_position);
     }
 }

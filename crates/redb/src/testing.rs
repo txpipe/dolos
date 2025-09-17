@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 
 use dolos_core::{BlockHash, ChainPoint, Entity, EntityDelta, LogValue, NsKey};
 use serde::{Deserialize, Serialize};
@@ -54,6 +55,7 @@ pub fn dummy_entry_from_slot(slot: u64) -> (ChainPoint, LogValue<DummyDelta>) {
         LogValue {
             block: bytes,
             delta: vec![DummyDelta],
+            inputs: HashMap::new(),
         },
     )
 }

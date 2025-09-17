@@ -4,6 +4,7 @@ use crate::feedback::Feedback;
 
 mod catchup_stores;
 mod reset_wal;
+mod rollback;
 mod wal_integrity;
 
 #[cfg(feature = "utils")]
@@ -23,6 +24,9 @@ pub enum Command {
     #[cfg(feature = "utils")]
     /// resets the genesis files with well-known values
     ResetGenesis(reset_genesis::Args),
+
+    /// rolls back the node to a specific slot and hash
+    Rollback(rollback::Args),
 }
 
 #[derive(Debug, Parser)]
@@ -36,6 +40,7 @@ pub fn run(config: &super::Config, args: &Args, feedback: &Feedback) -> miette::
         Command::CatchupStores(x) => catchup_stores::run(config, x, feedback)?,
         Command::ResetWal(x) => reset_wal::run(config, x, feedback)?,
         Command::WalIntegrity(x) => wal_integrity::run(config, x)?,
+        Command::Rollback(x) => rollback::run(config, x)?,
 
         #[cfg(feature = "utils")]
         Command::ResetGenesis(x) => reset_genesis::run(config, x)?,
