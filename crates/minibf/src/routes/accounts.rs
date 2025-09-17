@@ -29,7 +29,7 @@ use pallas::ledger::primitives::conway::Certificate as ConwayCert;
 
 use crate::{
     error::Error,
-    mapping::{self, bech32_drep, bech32_pool, bytes_to_address_bech32, IntoModel},
+    mapping::{self, bech32_drep, bech32_pool, IntoModel},
     pagination::{Pagination, PaginationParameters},
     Facade,
 };
@@ -226,8 +226,6 @@ pub async fn by_stake_utxos<D: Domain>(
     Ok(Json(utxos))
 }
 
-const MAX_SCAN_DEPTH: usize = 5000;
-
 fn build_delegation(
     stake_address: &StakeAddress,
     tx: &MultiEraTx,
@@ -410,11 +408,6 @@ where
         .get_network_id()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let account = domain
-        .read_cardano_entity::<AccountState>(account_key.entity_key.as_slice())
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
-
     // TODO: scan archive logs
     let mut slot_iter = std::iter::empty::<u64>();
 
@@ -514,14 +507,14 @@ impl IntoModel<AccountRewardContentInner> for RewardLog {
 pub async fn by_stake_rewards<D: Domain>(
     Path(stake_address): Path<String>,
     Query(params): Query<PaginationParameters>,
-    State(domain): State<Facade<D>>,
+    State(_domain): State<Facade<D>>,
 ) -> Result<Json<Vec<AccountRewardContentInner>>, Error>
 where
     Option<AccountState>: From<D::Entity>,
 {
     let pagination = Pagination::try_from(params)?;
 
-    let account_key = parse_account_key_param(&stake_address)?;
+    let _account_key = parse_account_key_param(&stake_address)?;
 
     // TODO: scan archive logs
 

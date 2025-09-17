@@ -1,5 +1,3 @@
-use std::borrow::Cow;
-
 use dolos_core::batch::WorkDeltas;
 use dolos_core::{ChainError, NsKey};
 use pallas::crypto::hash::{Hash, Hasher};
@@ -82,10 +80,10 @@ impl dolos_core::EntityDelta for MintedBlocksInc {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct PoolStateVisitor;
 
-impl<'a> BlockVisitor for PoolStateVisitor {
+impl BlockVisitor for PoolStateVisitor {
     fn visit_root(
         &mut self,
         deltas: &mut WorkDeltas<CardanoLogic>,

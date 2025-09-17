@@ -9,7 +9,7 @@ use tracing::info;
 use super::masking::apply_mask;
 use crate::prelude::*;
 
-pub fn point_to_u5c<T: LedgerContext>(ledger: &T, point: &ChainPoint) -> u5c::query::ChainPoint {
+pub fn point_to_u5c<T: LedgerContext>(_ledger: &T, point: &ChainPoint) -> u5c::query::ChainPoint {
     u5c::query::ChainPoint {
         slot: point.slot(),
         hash: point.hash().map(|h| h.to_vec()).unwrap_or_default().into(),

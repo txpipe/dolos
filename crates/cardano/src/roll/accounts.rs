@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 
 use dolos_core::batch::WorkDeltas;
 use dolos_core::{ChainError, NsKey};
@@ -281,7 +280,7 @@ impl dolos_core::EntityDelta for WithdrawalInc {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct AccountVisitor;
 
 impl BlockVisitor for AccountVisitor {

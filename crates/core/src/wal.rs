@@ -71,7 +71,7 @@ pub trait WalStore: Clone + Send + Sync + 'static {
     }
 
     fn find_tip(&self) -> Result<Option<LogEntry<Self::Delta>>, WalError> {
-        let tip = self.iter_all()?.rev().next();
+        let tip = self.iter_all()?.next_back();
 
         Ok(tip)
     }

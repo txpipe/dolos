@@ -1,12 +1,8 @@
 use chrono::DateTime;
 use dolos_core::*;
-use pallas::ledger::primitives::conway::{
-    DRepVotingThresholds, PoolVotingThresholds, UnitInterval,
-};
-use pallas::ledger::primitives::{ExUnitPrices, ExUnits, RationalNumber};
 use pallas::ledger::validate::utils::{ConwayProtParams, MultiEraProtocolParameters};
 
-use crate::PParamsSet;
+use crate::{EraSummary, PParamsSet};
 
 /// Computes the amount of mutable slots in chain.
 ///
@@ -26,6 +22,10 @@ pub fn mutable_slots(genesis: &Genesis) -> u64 {
 /// which slots can be finalized in the ledger store (aka: compaction).
 pub fn lastest_immutable_slot(tip: BlockSlot, genesis: &Genesis) -> BlockSlot {
     tip.saturating_sub(mutable_slots(genesis))
+}
+
+pub fn epoch_first_slot(epoch: u32, era: &EraSummary) -> BlockSlot {
+    era.start.slot + (epoch as u64 - era.start.epoch) * era.epoch_length
 }
 
 pub fn float_to_rational(x: f32) -> pallas::ledger::primitives::conway::RationalNumber {
@@ -48,18 +48,14 @@ pub fn gcd(mut a: u64, mut b: u64) -> u64 {
 }
 
 pub fn load_genesis(path: &std::path::Path) -> Genesis {
-    let byron = pallas::ledger::configs::byron::from_file(&path.join("byron.json")).unwrap();
-    let shelley = pallas::ledger::configs::shelley::from_file(&path.join("shelley.json")).unwrap();
-    let alonzo = pallas::ledger::configs::alonzo::from_file(&path.join("alonzo.json")).unwrap();
-    let conway = pallas::ledger::configs::conway::from_file(&path.join("conway.json")).unwrap();
-
-    Genesis {
-        byron,
-        shelley,
-        alonzo,
-        conway,
-        force_protocol: None,
-    }
+    Genesis::from_file_paths(
+        path.join("byron.json"),
+        path.join("shelley.json"),
+        path.join("alonzo.json"),
+        path.join("conway.json"),
+        None,
+    )
+    .unwrap()
 }
 
 pub fn pparams_to_pallas(pparams: &PParamsSet) -> MultiEraProtocolParameters {
@@ -67,8 +63,8 @@ pub fn pparams_to_pallas(pparams: &PParamsSet) -> MultiEraProtocolParameters {
         system_start: DateTime::from_timestamp(pparams.system_start_or_default() as i64, 0)
             .unwrap_or_default()
             .into(),
-        epoch_length: pparams.epoch_length_or_default() as u64,
-        slot_length: pparams.slot_length_or_default() as u64,
+        epoch_length: pparams.epoch_length_or_default(),
+        slot_length: pparams.slot_length_or_default(),
         minfee_a: pparams.min_fee_a_or_default() as u32,
         minfee_b: pparams.min_fee_b_or_default() as u32,
         max_block_body_size: pparams.max_block_body_size_or_default() as u32,

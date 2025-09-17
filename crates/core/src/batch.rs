@@ -310,13 +310,10 @@ impl<C: ChainLogic> WorkBatch<C> {
         let result = keys
             .par_chunks(Self::LOAD_CHUNK_SIZE)
             .map(|chunk| crate::state::load_entity_chunk::<D>(chunk, domain.state()))
-            .try_reduce(
-                || EntityMap::new(),
-                |mut acc, x| {
-                    acc.extend(x);
-                    Ok(acc)
-                },
-            )?;
+            .try_reduce(EntityMap::new, |mut acc, x| {
+                acc.extend(x);
+                Ok(acc)
+            })?;
 
         self.entities.extend(result);
 
@@ -339,7 +336,7 @@ impl<C: ChainLogic> WorkBatch<C> {
         Ok(())
     }
 
-    pub fn commit_state<D: Domain>(&mut self, domain: &D) -> Result<(), DomainError>
+    pub fn commit_state<D>(&mut self, domain: &D) -> Result<(), DomainError>
     where
         D: Domain<Chain = C>,
     {
@@ -347,7 +344,7 @@ impl<C: ChainLogic> WorkBatch<C> {
 
         for (key, entity) in self.entities.iter_mut() {
             let NsKey(ns, key) = key;
-            writer.save_entity_typed(ns, &key, entity.as_ref())?;
+            writer.save_entity_typed(ns, key, entity.as_ref())?;
         }
 
         // TODO: we treat the UTxO set differently due to tech-debt. We should migrate
@@ -365,7 +362,7 @@ impl<C: ChainLogic> WorkBatch<C> {
         Ok(())
     }
 
-    pub fn commit_archive<D: Domain>(&mut self, domain: &D) -> Result<(), DomainError>
+    pub fn commit_archive<D>(&mut self, domain: &D) -> Result<(), DomainError>
     where
         D: Domain<Chain = C>,
     {

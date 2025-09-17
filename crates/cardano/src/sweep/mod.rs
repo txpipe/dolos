@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 
 use dolos_core::{BlockSlot, ChainError, Domain, EntityKey};
-use pallas::ledger::primitives::RationalNumber;
+use pallas::{crypto::hash::Hash, ledger::primitives::RationalNumber};
 
-use crate::{Config, EpochState};
+use crate::{Config, EpochState, EraSummary};
 
 pub mod commit;
 pub mod compute;
@@ -46,21 +46,13 @@ pub struct Pots {
 }
 
 #[derive(Debug)]
+#[derive(Default)]
 pub struct Snapshot {
     pub total_stake: u64,
     pub pool_by_account: HashMap<AccountId, PoolId>,
     pub pool_stake: HashMap<PoolId, u64>,
 }
 
-impl Default for Snapshot {
-    fn default() -> Self {
-        Self {
-            total_stake: 0,
-            pool_by_account: HashMap::new(),
-            pool_stake: HashMap::new(),
-        }
-    }
-}
 
 impl Snapshot {
     // alias just for semantic clarity
@@ -87,12 +79,15 @@ pub struct EraTransition {
 #[derive(Debug)]
 pub struct BoundaryWork {
     // loaded
+    pub active_era: EraSummary,
     pub active_state: Option<EpochState>,
     pub active_snapshot: Snapshot,
     pub waiting_state: Option<EpochState>,
     pub ending_state: EpochState,
     pub ending_snapshot: Snapshot,
     pub pools: HashMap<PoolId, PoolData>,
+    pub mutable_slots: u64,
+    pub shelley_hash: Hash<32>,
 
     // computed
     pub pot_delta: Option<PotDelta>,

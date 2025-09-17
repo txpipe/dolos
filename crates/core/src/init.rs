@@ -33,10 +33,10 @@ fn ensure_wal<D: Domain>(domain: &D, at: &ChainPoint) -> Result<(), DomainError>
 
     if let Some(wal) = wal {
         if wal.slot() < at.slot() {
-            domain.wal().reset_to(&at)?;
+            domain.wal().reset_to(at)?;
         }
     } else {
-        domain.wal().reset_to(&at)?;
+        domain.wal().reset_to(at)?;
     }
 
     Ok(())
@@ -70,6 +70,8 @@ pub fn ensure_bootstrap<D: Domain>(domain: &D) -> Result<(), DomainError> {
 }
 
 pub fn ensure_initialized<D: Domain>(domain: &D) -> Result<(), DomainError> {
+    // TODO: Add ChainLogic initialization ==> should load current era and pparams.
+
     ensure_bootstrap(domain)?;
 
     check_integrity(domain)?;

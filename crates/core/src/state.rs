@@ -1,4 +1,4 @@
-use std::{borrow::Cow, collections::HashMap, marker::PhantomData, ops::Range};
+use std::{collections::HashMap, marker::PhantomData, ops::Range};
 
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
@@ -207,7 +207,7 @@ impl<S: StateStore, E: Entity> Iterator for EntityIterTyped<S, E> {
         let next = self.inner.next()?;
 
         let mapped =
-            next.and_then(|(key, value)| E::decode_entity(&self.ns, &value).map(|v| (key, v)));
+            next.and_then(|(key, value)| E::decode_entity(self.ns, &value).map(|v| (key, v)));
 
         Some(mapped)
     }
@@ -281,7 +281,7 @@ pub trait StateWriter: Sized + Send + Sync {
         maybe_entity: Option<&EntityValue>,
     ) -> Result<(), StateError> {
         if let Some(entity) = maybe_entity {
-            self.write_entity(ns, key, &entity)
+            self.write_entity(ns, key, entity)
         } else {
             self.delete_entity(ns, key)
         }
@@ -360,7 +360,7 @@ pub trait StateStore: Sized + Send + Sync + Clone {
         ns: Namespace,
         range: Option<Range<EntityKey>>,
     ) -> Result<EntityIterTyped<Self, E>, StateError> {
-        let range = range.unwrap_or_else(|| full_range());
+        let range = range.unwrap_or_else(full_range);
 
         let inner = self.iter_entities(ns, range)?;
 
@@ -612,7 +612,7 @@ pub fn load_entity_chunk<D: Domain>(
     chunk: &[NsKey],
     store: &D::State,
 ) -> Result<EntityMap<D::Entity>, StateError> {
-    let by_ns = chunk.into_iter().chunk_by(|key| key.0);
+    let by_ns = chunk.iter().chunk_by(|key| key.0);
 
     let mut loaded: EntityMap<D::Entity> = HashMap::new();
 

@@ -27,12 +27,11 @@ pub fn compute_block_dependencies(block: &MultiEraBlock, loaded: &mut RawUtxoMap
         .collect();
 
     // find all missing utxos that are not already in the loaded map
-    let missing = consumed
+
+    consumed
         .into_iter()
         .filter(|x| !loaded.contains_key(x))
-        .collect::<Vec<_>>();
-
-    missing
+        .collect::<Vec<_>>()
 }
 
 /// Computes the ledger delta of applying a particular block.

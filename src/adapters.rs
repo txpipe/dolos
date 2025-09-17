@@ -157,11 +157,11 @@ impl ArchiveStore for ArchiveAdapter {
     }
 
     fn truncate_front(&self, after: BlockSlot) -> Result<(), ArchiveError> {
-        let out = match self {
+        match self {
             ArchiveAdapter::Redb(x) => x.truncate_front(after)?,
         };
 
-        Ok(out)
+        Ok(())
     }
 }
 
@@ -341,8 +341,7 @@ impl Domain for DomainAdapter {
         // the collection of the replay.
         let replay = self
             .wal()
-            .iter_blocks(from, None)
-            .map_err(WalError::from)?
+            .iter_blocks(from, None)?
             .collect::<Vec<_>>();
 
         Ok(TipSubscription { replay, receiver })

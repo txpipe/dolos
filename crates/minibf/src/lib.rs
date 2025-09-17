@@ -137,12 +137,10 @@ impl<D: Domain> Facade<D> {
         T: FixedNamespace + Entity,
         Option<T>: From<D::Entity>,
     {
-        let generic = self
+        let mapped = self
             .state()
             .iter_entities_typed(T::NS, range)
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        let mapped = generic.map(|x| x.map(|(k, v)| (k, T::from(v))));
 
         Ok(mapped)
     }
@@ -159,7 +157,7 @@ impl<D: Domain> Facade<D> {
             .read_entity_typed(T::NS, &key)
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-        let downcast = entity.and_then(|e| Option::<T>::from(e));
+        let downcast = entity.and_then(Option::<T>::from);
 
         Ok(downcast)
     }

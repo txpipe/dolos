@@ -9,13 +9,14 @@
 //!    processing.
 
 use pallas::{
-    crypto::hash::Hash,
+    crypto::hash::{Hash, Hasher},
     ledger::traverse::{MultiEraInput, MultiEraOutput, MultiEraTx, MultiEraUpdate},
 };
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     fmt::Display,
+    path::Path,
     sync::Arc,
 };
 use thiserror::Error;
@@ -64,7 +65,7 @@ pub use point::*;
 pub use state::*;
 pub use wal::*;
 
-use crate::batch::{WorkBatch, WorkBlock};
+use crate::batch::WorkBlock;
 
 #[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
 pub struct EraCbor(pub Era, pub Cbor);
@@ -384,12 +385,43 @@ pub enum ServeError {
     Internal(#[from] Box<dyn std::error::Error + Send + Sync>),
 }
 
+#[derive(Clone)]
 pub struct Genesis {
     pub byron: pallas::interop::hardano::configs::byron::GenesisFile,
     pub shelley: pallas::interop::hardano::configs::shelley::GenesisFile,
     pub alonzo: pallas::interop::hardano::configs::alonzo::GenesisFile,
     pub conway: pallas::interop::hardano::configs::conway::GenesisFile,
+    pub shelley_hash: Hash<32>,
     pub force_protocol: Option<usize>,
+}
+
+impl Genesis {
+    pub fn from_file_paths(
+        byron: impl AsRef<Path>,
+        shelley: impl AsRef<Path>,
+        alonzo: impl AsRef<Path>,
+        conway: impl AsRef<Path>,
+        force_protocol: Option<usize>,
+    ) -> Result<Self, std::io::Error> {
+        let shelley_bytes = std::fs::read(shelley.as_ref())?;
+        let mut hasher = Hasher::<256>::new();
+        hasher.input(&shelley_bytes);
+        let shelley_hash = hasher.finalize();
+
+        let byron = pallas::ledger::configs::byron::from_file(byron.as_ref())?;
+        let shelley = pallas::ledger::configs::shelley::from_file(shelley.as_ref())?;
+        let alonzo = pallas::ledger::configs::alonzo::from_file(alonzo.as_ref())?;
+        let conway = pallas::ledger::configs::conway::from_file(conway.as_ref())?;
+
+        Ok(Self {
+            byron,
+            shelley,
+            alonzo,
+            conway,
+            force_protocol,
+            shelley_hash,
+        })
+    }
 }
 
 pub type Phase2Log = Vec<String>;
@@ -465,6 +497,9 @@ pub enum ChainError {
     #[error("pparams not found")]
     PParamsNotFound,
 
+    #[error("era not found")]
+    EraNotFound,
+
     #[error("forced stop epoch reached")]
     StopEpochReached,
 }
@@ -474,6 +509,10 @@ pub trait ChainLogic: Sized + Send + Sync {
     type Entity: Entity;
     type Utxo: Sized + Send + Sync;
     type Delta: EntityDelta<Entity = Self::Entity>;
+
+    fn initialize<D: Domain>(&self, _domain: &D) -> Result<(), ChainError> {
+        Ok(())
+    }
 
     fn bootstrap<D: Domain>(&self, domain: &D) -> Result<(), ChainError>;
 

@@ -1,5 +1,5 @@
 use ::redb::Durability;
-use dolos_core::{BlockSlot, EraCbor, TxoRef, UtxoMap, UtxoSet, UtxoSetDelta};
+use dolos_core::{EraCbor, TxoRef, UtxoMap, UtxoSetDelta};
 use pallas::ledger::{addresses::ShelleyDelegationPart, traverse::MultiEraOutput};
 use redb::{
     MultimapTableDefinition, Range, ReadTransaction, ReadableTable as _,
@@ -267,7 +267,7 @@ impl FilterIndexes {
                     Ok(SplitAddressResult(Some(a), None, None))
                 }
             },
-            Err(err) => Err(Error::from(Error::from(err))),
+            Err(err) => Err(Error::from(err)),
         }
     }
 

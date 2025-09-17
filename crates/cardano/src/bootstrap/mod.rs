@@ -3,7 +3,9 @@ use dolos_core::{
 };
 use tracing::debug;
 
-use crate::{EpochState, EraBoundary, EraSummary, PParamsSet, EPOCH_KEY_MARK};
+use crate::{
+    mutable_slots, EpochState, EraBoundary, EraSummary, Nonces, PParamsSet, EPOCH_KEY_MARK,
+};
 
 fn force_hardforks(
     pparams: &mut PParamsSet,
@@ -13,18 +15,18 @@ fn force_hardforks(
     while pparams.protocol_major().unwrap_or_default() < force_protocol {
         let previous = pparams.protocol_major();
 
-        *pparams = crate::forks::bump_pparams_version(&pparams, genesis);
+        *pparams = crate::forks::bump_pparams_version(pparams, genesis);
 
         // if the protocol major is not set, something went wrong and we might be
         // stuck in a loop. We return an error to avoid infinite loops.
         let Some(previous) = previous else {
-            return Err(BrokenInvariant::InvalidGenesisConfig.into());
+            return Err(BrokenInvariant::InvalidGenesisConfig);
         };
 
         // if the protocol major didn't increase, something went wrong and we might be
         // stuck in a loop. We return an error to avoid infinite loops.
         if pparams.protocol_major().unwrap_or_default() <= previous {
-            return Err(BrokenInvariant::InvalidGenesisConfig.into());
+            return Err(BrokenInvariant::InvalidGenesisConfig);
         }
 
         debug!(protocol = pparams.protocol_major(), "forced hardfork");
@@ -49,9 +51,11 @@ fn bootrap_epoch<D: Domain>(domain: &D) -> Result<EpochState, ChainError> {
     let genesis = domain.genesis();
 
     let mut pparams = crate::forks::from_byron_genesis(&genesis.byron);
+    let mut nonces = None;
 
     if let Some(force_protocol) = genesis.force_protocol {
         force_hardforks(&mut pparams, force_protocol as u16, genesis)?;
+        nonces = Some(Nonces::bootstrap(genesis.shelley_hash));
     }
 
     // bootstrap pots
@@ -73,6 +77,8 @@ fn bootrap_epoch<D: Domain>(domain: &D) -> Result<EpochState, ChainError> {
         decayed_deposits: 0,
         rewards_to_distribute: None,
         rewards_to_treasury: None,
+        largest_stable_slot: genesis.shelley.epoch_length.unwrap() as u64 - mutable_slots(genesis),
+        nonces,
     };
 
     let writer = domain.state().start_writer()?;

@@ -1,4 +1,4 @@
-use std::{borrow::Cow, ops::Deref as _};
+use std::ops::Deref as _;
 
 use dolos_core::{batch::WorkDeltas, ChainError, NsKey};
 use pallas::{
@@ -13,46 +13,42 @@ use pallas::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    model::DRepState,
-    roll::{BlockVisitor, DeltaBuilder},
-    CardanoDelta, CardanoLogic, FixedNamespace as _,
-};
+use crate::{model::DRepState, roll::BlockVisitor, CardanoLogic, FixedNamespace as _};
 
-const DREP_KEY_PREFIX: u8 = 0b00100010;
-const DREP_SCRIPT_PREFIX: u8 = 0b00100011;
-
-fn cred_to_id(cred: &StakeCredential) -> Vec<u8> {
-    match cred {
-        StakeCredential::AddrKeyhash(key) => [vec![DREP_KEY_PREFIX], key.to_vec()].concat(),
-        StakeCredential::ScriptHash(key) => [vec![DREP_SCRIPT_PREFIX], key.to_vec()].concat(),
-    }
-}
-
-fn drep_to_id(drep: &conway::DRep) -> Vec<u8> {
-    match drep {
-        conway::DRep::Key(key) => [vec![DREP_KEY_PREFIX], key.to_vec()].concat(),
-        conway::DRep::Script(key) => [vec![DREP_SCRIPT_PREFIX], key.to_vec()].concat(),
-        // Invented keys for convenience
-        conway::DRep::Abstain => vec![0],
-        conway::DRep::NoConfidence => vec![1],
-    }
-}
-
-fn cert_to_id(cert: &MultiEraCert) -> Option<Vec<u8>> {
-    match &cert {
-        MultiEraCert::Conway(conway) => match conway.deref().deref() {
-            conway::Certificate::RegDRepCert(cert, _, _) => Some(cred_to_id(cert)),
-            conway::Certificate::UnRegDRepCert(cert, _) => Some(cred_to_id(cert)),
-            conway::Certificate::UpdateDRepCert(cert, _) => Some(cred_to_id(cert)),
-            conway::Certificate::StakeVoteDeleg(_, _, drep) => Some(drep_to_id(drep)),
-            conway::Certificate::VoteRegDeleg(_, drep, _) => Some(drep_to_id(drep)),
-            conway::Certificate::VoteDeleg(_, drep) => Some(drep_to_id(drep)),
-            _ => None,
-        },
-        _ => None,
-    }
-}
+//const DREP_KEY_PREFIX: u8 = 0b00100010;
+//const DREP_SCRIPT_PREFIX: u8 = 0b00100011;
+//
+//fn cred_to_id(cred: &StakeCredential) -> Vec<u8> {
+//    match cred {
+//        StakeCredential::AddrKeyhash(key) => [vec![DREP_KEY_PREFIX], key.to_vec()].concat(),
+//        StakeCredential::ScriptHash(key) => [vec![DREP_SCRIPT_PREFIX], key.to_vec()].concat(),
+//    }
+//}
+//
+//fn drep_to_id(drep: &conway::DRep) -> Vec<u8> {
+//    match drep {
+//        conway::DRep::Key(key) => [vec![DREP_KEY_PREFIX], key.to_vec()].concat(),
+//        conway::DRep::Script(key) => [vec![DREP_SCRIPT_PREFIX], key.to_vec()].concat(),
+//        // Invented keys for convenience
+//        conway::DRep::Abstain => vec![0],
+//        conway::DRep::NoConfidence => vec![1],
+//    }
+//}
+//
+//fn cert_to_id(cert: &MultiEraCert) -> Option<Vec<u8>> {
+//    match &cert {
+//        MultiEraCert::Conway(conway) => match conway.deref().deref() {
+//            conway::Certificate::RegDRepCert(cert, _, _) => Some(cred_to_id(cert)),
+//            conway::Certificate::UnRegDRepCert(cert, _) => Some(cred_to_id(cert)),
+//            conway::Certificate::UpdateDRepCert(cert, _) => Some(cred_to_id(cert)),
+//            conway::Certificate::StakeVoteDeleg(_, _, drep) => Some(drep_to_id(drep)),
+//            conway::Certificate::VoteRegDeleg(_, drep, _) => Some(drep_to_id(drep)),
+//            conway::Certificate::VoteDeleg(_, drep) => Some(drep_to_id(drep)),
+//            _ => None,
+//        },
+//        _ => None,
+//    }
+//}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DRepRegistration {
@@ -152,7 +148,7 @@ impl dolos_core::EntityDelta for DRepUnRegistration {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct DRepStateVisitor;
 
 impl BlockVisitor for DRepStateVisitor {
