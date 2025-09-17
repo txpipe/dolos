@@ -28,7 +28,7 @@ pub struct DummyDelta;
 impl EntityDelta for DummyDelta {
     type Entity = DummyEntity;
 
-    fn key(&self) -> Cow<'_, NsKey> {
+    fn key(&self) -> NsKey {
         todo!()
     }
 
@@ -36,7 +36,7 @@ impl EntityDelta for DummyDelta {
         todo!()
     }
 
-    fn undo(&mut self, _entity: &mut Option<Self::Entity>) {
+    fn undo(&self, _entity: &mut Option<Self::Entity>) {
         todo!()
     }
 }

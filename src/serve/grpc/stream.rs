@@ -49,7 +49,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::*;
-    use crate::serve::CancelTokenImpl;
+    use crate::{facade::DomainExt as _, serve::CancelTokenImpl};
 
     #[tokio::test]
     async fn test_stream_waiting() {
@@ -57,14 +57,14 @@ mod tests {
 
         for i in 0..=100 {
             let (_, block) = make_conway_block(i * 10);
-            dolos_core::follow::roll_forward(&domain, &block).unwrap();
+            domain.roll_forward(&block).unwrap();
         }
 
         let domain2 = domain.clone();
         let background = tokio::spawn(async move {
             for i in 101..=200 {
                 let (_, block) = make_conway_block(i * 10);
-                dolos_core::follow::roll_forward(&domain2, &block).unwrap();
+                domain2.roll_forward(&block).unwrap();
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
             }
         });

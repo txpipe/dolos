@@ -4,7 +4,7 @@ use mithril_client::{ClientBuilder, MessageBuilder, MithrilError, MithrilResult}
 use std::{path::Path, sync::Arc};
 use tracing::{info, warn};
 
-use dolos::{adapters::DomainAdapter, prelude::*};
+use dolos::{adapters::DomainAdapter, facade::DomainExt as _, prelude::*};
 
 use crate::{feedback::Feedback, MithrilConfig};
 
@@ -198,7 +198,8 @@ fn import_hardano_into_domain(
         // around throughout the pipeline
         let batch: Vec<_> = batch.into_iter().map(Arc::new).collect();
 
-        let last = dolos_core::catchup::import_batch(&domain, batch)
+        let last = domain
+            .import_batch(batch)
             .map_err(|e| miette::miette!(e.to_string()))?;
 
         progress.set_position(last);

@@ -23,9 +23,7 @@ use tracing::info;
 
 pub mod archive;
 pub mod batch;
-pub mod catchup;
 pub mod crawl;
-pub mod follow;
 pub mod init;
 pub mod mempool;
 pub mod point;

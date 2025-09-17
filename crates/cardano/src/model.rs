@@ -859,7 +859,7 @@ impl CardanoDelta {
         *entity = sub_entity.map(|x| x.into());
     }
 
-    pub fn downcast_undo<T, D>(delta: &mut D, entity: &mut Option<CardanoEntity>)
+    pub fn downcast_undo<T, D>(delta: &D, entity: &mut Option<CardanoEntity>)
     where
         Option<T>: From<CardanoEntity>,
         D: dolos_core::EntityDelta<Entity = T>,
@@ -899,7 +899,7 @@ delta_from!(PParamsUpdate);
 impl dolos_core::EntityDelta for CardanoDelta {
     type Entity = super::model::CardanoEntity;
 
-    fn key(&self) -> Cow<'_, NsKey> {
+    fn key(&self) -> NsKey {
         match self {
             Self::ControlledAmountInc(x) => x.key(),
             Self::ControlledAmountDec(x) => x.key(),
@@ -937,7 +937,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
         }
     }
 
-    fn undo(&mut self, entity: &mut Option<Self::Entity>) {
+    fn undo(&self, entity: &mut Option<Self::Entity>) {
         match self {
             Self::ControlledAmountInc(x) => Self::downcast_undo(x, entity),
             Self::ControlledAmountDec(x) => Self::downcast_undo(x, entity),
