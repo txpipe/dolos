@@ -177,29 +177,15 @@ pub fn setup_tracing(config: &LoggingConfig) -> miette::Result<()> {
 }
 
 pub fn open_genesis_files(config: &GenesisConfig) -> miette::Result<Genesis> {
-    let byron_genesis = pallas::ledger::configs::byron::from_file(&config.byron_path)
-        .into_diagnostic()
-        .context("loading byron genesis config")?;
-
-    let shelley_genesis = pallas::ledger::configs::shelley::from_file(&config.shelley_path)
-        .into_diagnostic()
-        .context("loading shelley genesis config")?;
-
-    let alonzo_genesis = pallas::ledger::configs::alonzo::from_file(&config.alonzo_path)
-        .into_diagnostic()
-        .context("loading alonzo genesis config")?;
-
-    let conway_genesis = pallas::ledger::configs::conway::from_file(&config.conway_path)
-        .into_diagnostic()
-        .context("loading conway genesis config")?;
-
-    Ok(Genesis {
-        byron: byron_genesis,
-        shelley: shelley_genesis,
-        alonzo: alonzo_genesis,
-        conway: conway_genesis,
-        force_protocol: config.force_protocol,
-    })
+    Genesis::from_file_paths(
+        &config.byron_path,
+        &config.shelley_path,
+        &config.alonzo_path,
+        &config.conway_path,
+        config.force_protocol,
+    )
+    .into_diagnostic()
+    .context("loading genesis files")
 }
 
 #[inline]

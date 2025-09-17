@@ -10,7 +10,7 @@ use pallas::{
 
 use crate::{roll::BlockVisitor, CardanoLogic};
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct TxLogVisitor;
 
 fn unpack_address(tags: &mut SlotTags, address: &Address) {

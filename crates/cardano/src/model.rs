@@ -1,10 +1,14 @@
 use std::ops::{Deref, DerefMut};
 
-use dolos_core::{EntityValue, Namespace, NamespaceType, NsKey, StateError, StateSchema};
-
+use dolos_core::{
+    BlockSlot, EntityValue, Namespace, NamespaceType, NsKey, StateError, StateSchema,
+};
 use pallas::{
     codec::minicbor::{self, Decode, Encode},
-    crypto::hash::Hash,
+    crypto::{
+        hash::Hash,
+        nonce::{generate_epoch_nonce, generate_rolling_nonce},
+    },
     ledger::primitives::{
         conway::{CostModels, DRep, DRepVotingThresholds, PoolVotingThresholds},
         Coin, Epoch, ExUnitPrices, ExUnits, Nonce, PoolMetadata, ProtocolVersion, RationalNumber,
@@ -13,25 +17,21 @@ use pallas::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::roll::{
-    accounts::{
-        ControlledAmountDec, ControlledAmountInc, StakeDelegation, StakeDeregistration,
-        StakeRegistration, VoteDelegation, WithdrawalInc,
+use crate::{
+    pallas_extras::{
+        default_cost_models, default_drep_voting_thresholds, default_ex_unit_prices,
+        default_ex_units, default_nonce, default_pool_voting_thresholds, default_rational_number,
     },
-    epochs::PParamsUpdate,
-};
-use crate::{
-    pallas_extras::default_nonce,
-    roll::pools::{MintedBlocksInc, PoolRegistration},
-};
-use crate::{pallas_extras::default_rational_number, roll::assets::MintStatsUpdate};
-use crate::{
-    pallas_extras::{default_cost_models, default_ex_unit_prices, default_ex_units},
-    roll::epochs::EpochStatsUpdate,
-};
-use crate::{
-    pallas_extras::{default_drep_voting_thresholds, default_pool_voting_thresholds},
-    roll::dreps::{DRepRegistration, DRepUnRegistration},
+    roll::{
+        accounts::{
+            ControlledAmountDec, ControlledAmountInc, StakeDelegation, StakeDeregistration,
+            StakeRegistration, VoteDelegation, WithdrawalInc,
+        },
+        assets::MintStatsUpdate,
+        dreps::{DRepRegistration, DRepUnRegistration},
+        epochs::{EpochStatsUpdate, NoncesUpdate, PParamsUpdate},
+        pools::{MintedBlocksInc, PoolRegistration},
+    },
 };
 
 pub trait FixedNamespace {
@@ -623,6 +623,65 @@ impl PParamsSet {
     pgetter!(MinFeeRefScriptCostPerByte, RationalNumber);
 }
 
+#[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize)]
+pub struct Nonces {
+    #[n(0)]
+    pub active: Hash<32>,
+
+    #[n(1)]
+    pub evolving: Hash<32>,
+
+    #[n(2)]
+    pub candidate: Hash<32>,
+
+    #[n(3)]
+    pub tail: Option<Hash<32>>,
+}
+
+impl Nonces {
+    pub fn bootstrap(shelley_hash: Hash<32>) -> Self {
+        Self {
+            active: shelley_hash,
+            evolving: shelley_hash,
+            candidate: shelley_hash,
+            tail: None,
+        }
+    }
+
+    pub fn roll(
+        &self,
+        update_candidate: bool,
+        nonce_vrf_output: &[u8],
+        tail: Option<Hash<32>>,
+    ) -> Nonces {
+        let evolving = generate_rolling_nonce(self.evolving, nonce_vrf_output);
+
+        Self {
+            active: self.active,
+            evolving,
+            candidate: if update_candidate {
+                evolving
+            } else {
+                self.candidate
+            },
+            tail,
+        }
+    }
+
+    /// Compute active nonce for next epoch.
+    pub fn sweep(&self, previous_tail: Option<Hash<32>>, extra_entropy: Option<&[u8]>) -> Self {
+        Self {
+            active: match previous_tail {
+                Some(tail) => generate_epoch_nonce(self.candidate, tail, extra_entropy),
+                None => self.candidate,
+            },
+            candidate: self.evolving,
+            evolving: self.evolving,
+            tail: self.tail,
+        }
+    }
+}
+
 #[derive(Debug, Encode, Decode, Clone, Default)]
 pub struct EpochState {
     #[n(0)]
@@ -662,6 +721,12 @@ pub struct EpochState {
 
     #[n(11)]
     pub pparams: PParamsSet,
+
+    #[n(12)]
+    pub largest_stable_slot: BlockSlot,
+
+    #[n(13)]
+    pub nonces: Option<Nonces>,
 }
 
 impl EpochState {
@@ -841,6 +906,7 @@ pub enum CardanoDelta {
     WithdrawalInc(WithdrawalInc),
     VoteDelegation(VoteDelegation),
     PParamsUpdate(PParamsUpdate),
+    NoncesUpdate(NoncesUpdate),
 }
 
 impl CardanoDelta {
@@ -891,6 +957,7 @@ delta_from!(DRepUnRegistration);
 delta_from!(WithdrawalInc);
 delta_from!(VoteDelegation);
 delta_from!(PParamsUpdate);
+delta_from!(NoncesUpdate);
 
 impl dolos_core::EntityDelta for CardanoDelta {
     type Entity = super::model::CardanoEntity;
@@ -911,6 +978,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::WithdrawalInc(x) => x.key(),
             Self::VoteDelegation(x) => x.key(),
             Self::PParamsUpdate(x) => x.key(),
+            Self::NoncesUpdate(x) => x.key(),
         }
     }
 
@@ -930,6 +998,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::WithdrawalInc(x) => Self::downcast_apply(x, entity),
             Self::VoteDelegation(x) => Self::downcast_apply(x, entity),
             Self::PParamsUpdate(x) => Self::downcast_apply(x, entity),
+            Self::NoncesUpdate(x) => Self::downcast_apply(x, entity),
         }
     }
 
@@ -949,6 +1018,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::WithdrawalInc(x) => Self::downcast_undo(x, entity),
             Self::VoteDelegation(x) => Self::downcast_undo(x, entity),
             Self::PParamsUpdate(x) => Self::downcast_undo(x, entity),
+            Self::NoncesUpdate(x) => Self::downcast_undo(x, entity),
         }
     }
 }

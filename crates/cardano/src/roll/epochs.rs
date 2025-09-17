@@ -1,12 +1,15 @@
 use dolos_core::{batch::WorkDeltas, ChainError, NsKey};
-use pallas::ledger::traverse::{MultiEraBlock, MultiEraCert, MultiEraTx, MultiEraUpdate};
+use pallas::{
+    crypto::hash::Hash,
+    ledger::traverse::{MultiEraBlock, MultiEraCert, MultiEraTx, MultiEraUpdate},
+};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     model::{EpochState, FixedNamespace as _, EPOCH_KEY_MARK},
     pallas_extras,
     roll::BlockVisitor,
-    CardanoLogic, PParamValue,
+    CardanoLogic, Nonces, PParamValue,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -14,8 +17,9 @@ pub struct EpochStatsUpdate {
     block_fees: u64,
     utxo_consumed: u64,
     utxo_produced: u64,
-    gathered_deposits: u64,
-    decayed_deposits: u64,
+    stake_registration_count: u64,
+    stake_deregistration_count: u64,
+    pool_registration_count: u64,
 }
 
 impl dolos_core::EntityDelta for EpochStatsUpdate {
@@ -33,8 +37,11 @@ impl dolos_core::EntityDelta for EpochStatsUpdate {
         entity.utxos += self.utxo_produced;
         entity.utxos = entity.utxos.saturating_sub(self.utxo_consumed);
 
-        entity.gathered_deposits += self.gathered_deposits;
-        entity.decayed_deposits += self.decayed_deposits;
+        entity.gathered_deposits += self.stake_registration_count
+            * entity.pparams.key_deposit_or_default()
+            + self.pool_registration_count * entity.pparams.pool_deposit_or_default();
+        entity.decayed_deposits +=
+            self.stake_deregistration_count * entity.pparams.pool_deposit_or_default();
     }
 
     fn undo(&self, entity: &mut Option<EpochState>) {
@@ -45,8 +52,45 @@ impl dolos_core::EntityDelta for EpochStatsUpdate {
         entity.utxos -= self.utxo_produced;
         entity.utxos += self.utxo_consumed;
 
-        entity.gathered_deposits -= self.gathered_deposits;
-        entity.decayed_deposits -= self.decayed_deposits;
+        entity.gathered_deposits -= self.stake_registration_count
+            * entity.pparams.key_deposit_or_default()
+            + self.pool_registration_count * entity.pparams.pool_deposit_or_default();
+        entity.decayed_deposits -=
+            self.stake_deregistration_count * entity.pparams.pool_deposit_or_default();
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NoncesUpdate {
+    slot: u64,
+    tail: Option<Hash<32>>,
+    nonce_vrf_output: Vec<u8>,
+
+    previous: Option<Nonces>,
+}
+
+impl dolos_core::EntityDelta for NoncesUpdate {
+    type Entity = EpochState;
+
+    fn key(&self) -> NsKey {
+        NsKey::from((EpochState::NS, EPOCH_KEY_MARK))
+    }
+
+    fn apply(&mut self, entity: &mut Option<EpochState>) {
+        let entity = entity.get_or_insert_default();
+        if let Some(nonces) = entity.nonces.as_ref() {
+            self.previous = Some(nonces.clone());
+            entity.nonces = Some(nonces.roll(
+                self.slot < entity.largest_stable_slot,
+                &self.nonce_vrf_output,
+                self.tail,
+            ));
+        }
+    }
+
+    fn undo(&self, entity: &mut Option<EpochState>) {
+        let entity = entity.get_or_insert_default();
+        entity.nonces = self.previous.clone();
     }
 }
 
@@ -98,11 +142,7 @@ macro_rules! check_all_proposed {
     };
 }
 
-// TODO: get these from the protocol parameters
-const POOL_DEPOSIT: u64 = 500_000_000;
-const KEY_DEPOSIT: u64 = 2_000_000;
-
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct EpochStateVisitor {
     delta: Option<EpochStatsUpdate>,
 }
@@ -110,11 +150,16 @@ pub struct EpochStateVisitor {
 impl BlockVisitor for EpochStateVisitor {
     fn visit_root(
         &mut self,
-        _: &mut WorkDeltas<CardanoLogic>,
-        _: &MultiEraBlock,
+        deltas: &mut WorkDeltas<CardanoLogic>,
+        block: &MultiEraBlock,
     ) -> Result<(), ChainError> {
         self.delta = Some(EpochStatsUpdate::default());
-
+        deltas.add_for_entity(NoncesUpdate {
+            slot: block.header().slot(),
+            tail: block.header().previous_hash(),
+            nonce_vrf_output: block.header().nonce_vrf_output()?,
+            previous: None,
+        });
         Ok(())
     }
 
@@ -165,15 +210,15 @@ impl BlockVisitor for EpochStateVisitor {
         cert: &MultiEraCert,
     ) -> Result<(), ChainError> {
         if pallas_extras::cert_as_stake_registration(cert).is_some() {
-            self.delta.as_mut().unwrap().gathered_deposits += KEY_DEPOSIT;
+            self.delta.as_mut().unwrap().stake_registration_count += 1;
         }
 
         if pallas_extras::cert_as_stake_deregistration(cert).is_some() {
-            self.delta.as_mut().unwrap().decayed_deposits += KEY_DEPOSIT;
+            self.delta.as_mut().unwrap().stake_deregistration_count += 1;
         }
 
         if pallas_extras::cert_to_pool_state(cert).is_some() {
-            self.delta.as_mut().unwrap().gathered_deposits += POOL_DEPOSIT;
+            self.delta.as_mut().unwrap().pool_registration_count += 1;
         }
 
         // TODO: decayed deposits

@@ -70,6 +70,8 @@ pub fn ensure_bootstrap<D: Domain>(domain: &D) -> Result<(), DomainError> {
 }
 
 pub fn ensure_initialized<D: Domain>(domain: &D) -> Result<(), DomainError> {
+    // TODO: Add ChainLogic initialization ==> should load current era and pparams.
+
     ensure_bootstrap(domain)?;
 
     check_integrity(domain)?;
