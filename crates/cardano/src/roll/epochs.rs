@@ -35,8 +35,8 @@ impl dolos_core::EntityDelta for EpochStatsUpdate {
 
         entity.gathered_fees += self.block_fees;
 
-        let utxo_delta = self.utxo_produced - self.utxo_consumed;
-        entity.utxos += utxo_delta;
+        entity.utxos += self.utxo_produced;
+        entity.utxos = entity.utxos.saturating_sub(self.utxo_consumed);
 
         entity.gathered_deposits += self.gathered_deposits;
         entity.decayed_deposits += self.decayed_deposits;
@@ -47,8 +47,8 @@ impl dolos_core::EntityDelta for EpochStatsUpdate {
 
         entity.gathered_fees -= self.block_fees;
 
-        let utxo_delta = self.utxo_produced - self.utxo_consumed;
-        entity.utxos -= utxo_delta;
+        entity.utxos -= self.utxo_produced;
+        entity.utxos += self.utxo_consumed;
 
         entity.gathered_deposits -= self.gathered_deposits;
         entity.decayed_deposits -= self.decayed_deposits;
