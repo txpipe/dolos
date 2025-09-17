@@ -44,7 +44,7 @@ fn compute_pot_delta(
 
     let tau = as_ratio!(tau);
     let treasury_tax = (tau * reward_pot).floor();
-    let available_rewards = reward_pot - treasury_tax.clone();
+    let available_rewards = reward_pot - treasury_tax;
 
     let incentives = into_int!(incentives) as u64;
     let treasury_tax = into_int!(treasury_tax) as u64;
@@ -105,6 +105,7 @@ fn compute_pool_reward(
     (r_pool_u64, operator_share)
 }
 
+#[allow(unused)]
 fn compute_delegator_reward(remaining: u64, total_delegated: u64, delegator: &AccountState) -> u64 {
     let share = (delegator.active_stake as f64 / total_delegated as f64) * remaining as f64;
     share.round() as u64
@@ -205,7 +206,7 @@ impl BoundaryWork {
             let rewards = compute_pool_reward(
                 pot_delta.available_rewards,
                 self.active_snapshot.total_stake,
-                &pool,
+                pool,
                 pool_stake,
                 self.active_k()?,
                 &self.active_a0()?,
@@ -279,7 +280,7 @@ impl BoundaryWork {
             .protocol_version()
             .ok_or(ChainError::PParamsNotFound)?;
 
-        if starting_protocol != active_protocol as u64 {
+        if starting_protocol != active_protocol {
             let epoch_length = self.ending_state.pparams.epoch_length_or_default();
             let slot_length = self.ending_state.pparams.slot_length_or_default();
 

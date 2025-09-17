@@ -80,9 +80,7 @@ impl<'a> IntoModel<blockfrost_openapi::models::drep::Drep> for DrepModelBuilder<
                 false
             } else {
                 match last_active_epoch {
-                    Some(last_active_epoch) => {
-                        ((epoch as i32) - last_active_epoch) > drep_activity as i32
-                    }
+                    Some(last_active_epoch) => ((epoch as i32) - last_active_epoch) > drep_activity,
                     None => false,
                 }
             },

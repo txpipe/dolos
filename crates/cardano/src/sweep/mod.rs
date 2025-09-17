@@ -46,21 +46,13 @@ pub struct Pots {
 }
 
 #[derive(Debug)]
+#[derive(Default)]
 pub struct Snapshot {
     pub total_stake: u64,
     pub pool_by_account: HashMap<AccountId, PoolId>,
     pub pool_stake: HashMap<PoolId, u64>,
 }
 
-impl Default for Snapshot {
-    fn default() -> Self {
-        Self {
-            total_stake: 0,
-            pool_by_account: HashMap::new(),
-            pool_stake: HashMap::new(),
-        }
-    }
-}
 
 impl Snapshot {
     // alias just for semantic clarity

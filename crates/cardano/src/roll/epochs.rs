@@ -1,10 +1,5 @@
-use std::borrow::Cow;
-
 use dolos_core::{batch::WorkDeltas, ChainError, NsKey};
-use pallas::{
-    codec::flat::en,
-    ledger::traverse::{MultiEraBlock, MultiEraCert, MultiEraTx, MultiEraUpdate},
-};
+use pallas::ledger::traverse::{MultiEraBlock, MultiEraCert, MultiEraTx, MultiEraUpdate};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -169,15 +164,15 @@ impl BlockVisitor for EpochStateVisitor {
         _: &MultiEraTx,
         cert: &MultiEraCert,
     ) -> Result<(), ChainError> {
-        if let Some(c) = pallas_extras::cert_as_stake_registration(cert) {
+        if pallas_extras::cert_as_stake_registration(cert).is_some() {
             self.delta.as_mut().unwrap().gathered_deposits += KEY_DEPOSIT;
         }
 
-        if let Some(c) = pallas_extras::cert_as_stake_deregistration(cert) {
+        if pallas_extras::cert_as_stake_deregistration(cert).is_some() {
             self.delta.as_mut().unwrap().decayed_deposits += KEY_DEPOSIT;
         }
 
-        if let Some(c) = pallas_extras::cert_to_pool_state(cert) {
+        if pallas_extras::cert_to_pool_state(cert).is_some() {
             self.delta.as_mut().unwrap().gathered_deposits += POOL_DEPOSIT;
         }
 

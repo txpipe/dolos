@@ -18,10 +18,10 @@ pub struct Session<D: Domain> {
 impl<D: Domain> Session<D> {
     fn assume_crawler(&mut self) -> &mut ChainCrawler<D> {
         if let Some(crawler) = self.crawler.as_mut() {
-            return crawler;
+            crawler
         } else {
             unreachable!("crawler should be set");
-        };
+        }
     }
 
     fn prepare_tip(&mut self) -> Result<Tip, Error> {

@@ -1,10 +1,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{
-    BlockBody, BlockHash, BlockSlot, BrokenInvariant, ChainPoint, EraCbor, RawBlock, TxHash,
-    TxOrder,
-};
+use crate::{BlockBody, BlockSlot, BrokenInvariant, ChainPoint, EraCbor, RawBlock, TxOrder};
 
 #[derive(Debug, Error)]
 pub enum ArchiveError {
@@ -55,7 +52,6 @@ pub trait ArchiveWriter: Send + Sync + 'static {
 
     fn undo(&self, point: &ChainPoint, tags: &SlotTags) -> Result<(), ArchiveError>;
 
-    #[must_use]
     fn commit(self) -> Result<(), ArchiveError>;
 }
 

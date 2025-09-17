@@ -124,8 +124,7 @@ impl gasket::framework::Worker<Stage> for Worker {
             .or_panic()?
             .into_iter()
             .map(TryFrom::try_from)
-            .map(|x| x.ok())
-            .flatten()
+            .filter_map(|x| x.ok())
             .collect_vec();
 
         debug!("connecting to peer");

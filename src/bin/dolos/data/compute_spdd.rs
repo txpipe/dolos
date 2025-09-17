@@ -26,7 +26,7 @@ impl Formatter {
         match self {
             Formatter::Table(table) => {
                 table.add_row(vec![
-                    format!("{}", hex::encode(&pool_id)),
+                    format!("{}", hex::encode(pool_id)),
                     format!("{}", delegation),
                 ]);
             }
