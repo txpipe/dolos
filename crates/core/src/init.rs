@@ -17,11 +17,11 @@ pub fn catch_up<D: Domain>(domain: &D) -> Result<(), DomainError> {
         .map(|(slot, _)| ChainPoint::Slot(slot))
         .unwrap_or(ChainPoint::Origin);
 
-    if wal > archive {
+    if wal.slot() > archive.slot() {
         warn!(%archive, %wal,"catch up needed, wal is ahead of archive");
     }
 
-    if wal > state {
+    if wal.slot() > state.slot() {
         warn!(%state, %wal, "catch up needed, wal is ahead of state");
     }
 

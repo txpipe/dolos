@@ -148,6 +148,8 @@ where
 
         self.archive().truncate_front(to.slot())?;
 
+        self.wal().truncate_front(to)?;
+
         Ok(())
     }
 }

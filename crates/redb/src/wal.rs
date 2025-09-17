@@ -1,6 +1,6 @@
 use bincode;
 use itertools::Itertools;
-use redb::{Range, TableDefinition};
+use redb::{Range, ReadableTable, TableDefinition};
 use serde::{de::DeserializeOwned, Serialize};
 use std::{marker::PhantomData, ops::RangeBounds, path::Path, sync::Arc};
 use thiserror::Error;
@@ -59,7 +59,7 @@ impl From<::redb::TransactionError> for RedbWalError {
 pub type AugmentedBlockSlot = i128;
 pub type DbLogValue = Vec<u8>;
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
 pub struct DbChainPoint([u8; 40]);
 
 impl DbChainPoint {
@@ -628,14 +628,18 @@ where
 
         {
             let after = DbChainPoint::from(after.clone());
+
             let mut table = wx.open_table(WAL)?;
 
-            let mut to_remove = table.extract_from_if(..after, |_, _| true)?;
+            let bounds = after.clone()..;
 
-            while let Some(Ok((point, _))) = to_remove.next() {
+            let range = table.extract_from_if(bounds, |current, _| current > after)?;
+
+            for entry in range {
+                let (point, _) = entry?;
+
                 if event_enabled!(Level::TRACE) {
-                    let point = point.value();
-                    let point = ChainPoint::from(point);
+                    let point = ChainPoint::from(point.value());
                     trace!(%point, "removing wal table entry");
                 }
             }
@@ -654,6 +658,12 @@ where
 
         Ok(())
     }
+
+    fn truncate_front(&self, after: &ChainPoint) -> Result<(), RedbWalError> {
+        self.remove_entries(after)?;
+
+        Ok(())
+    }
 }
 
 impl<T> WalStore for RedbWalStore<T>
@@ -666,6 +676,10 @@ where
 
     fn reset_to(&self, point: &ChainPoint) -> Result<(), WalError> {
         RedbWalStore::reset_to(self, point).map_err(From::from)
+    }
+
+    fn truncate_front(&self, after: &ChainPoint) -> Result<(), WalError> {
+        RedbWalStore::truncate_front(self, after).map_err(From::from)
     }
 
     fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, WalError> {

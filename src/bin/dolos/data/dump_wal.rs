@@ -1,4 +1,5 @@
 use comfy_table::Table;
+use dolos_cardano::CardanoDelta;
 use miette::{Context, IntoDiagnostic};
 
 use dolos::prelude::*;
@@ -23,12 +24,12 @@ enum Formatter {
 impl Formatter {
     fn new_table() -> Self {
         let mut table = Table::new();
-        table.set_header(vec!["Slot", "Hash", "Block Size"]);
+        table.set_header(vec!["Slot", "Hash", "Block Size", "State Deltas", "Inputs"]);
 
         Self::Table(table)
     }
 
-    fn write(&mut self, point: &ChainPoint, block: &RawBlock) {
+    fn write(&mut self, point: &ChainPoint, log: &LogValue<CardanoDelta>) {
         match self {
             Formatter::Table(table) => {
                 let slot = point.slot().to_string();
@@ -39,12 +40,16 @@ impl Formatter {
                     .map(ToString::to_string)
                     .unwrap_or("none".into());
 
-                let size = block.len().to_string();
+                let size = log.block.len().to_string();
+                let deltas = log.delta.len().to_string();
+                let inputs = log.inputs.len().to_string();
 
                 table.add_row(vec![
                     format!("{slot}"),
                     format!("{hash}"),
                     format!("{size}"),
+                    format!("{deltas}"),
+                    format!("{inputs}"),
                 ]);
             }
         }
@@ -76,11 +81,11 @@ pub fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
         None => None,
     };
 
-    wal.iter_blocks(from, None)
+    wal.iter_logs(from, None)
         .into_diagnostic()
         .context("crawling wal")?
         .take(args.limit)
-        .for_each(|(point, block)| formatter.write(&point, &block));
+        .for_each(|(point, log)| formatter.write(&point, &log));
 
     formatter.flush();
 

@@ -83,6 +83,12 @@ impl UtxosTable {
             table.insert(k, v)?;
         }
 
+        for (k, v) in delta.recovered_stxi.iter() {
+            let k: (&[u8; 32], u32) = (&k.0, k.1);
+            let v: (u16, &[u8]) = (v.0, &v.1);
+            table.insert(k, v)?;
+        }
+
         for (k, _) in delta.undone_utxo.iter() {
             let k: (&[u8; 32], u32) = (&k.0, k.1);
             table.remove(k)?;
