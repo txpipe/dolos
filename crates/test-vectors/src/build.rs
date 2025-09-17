@@ -780,6 +780,8 @@ pub async fn handle_epoch_state(
             decayed_deposits: 0,  // from_row_bigint!(row, "decayed_deposits"),
             rewards_to_distribute: None,
             rewards_to_treasury: None,
+            largest_stable_slot: Default::default(), // todo!(),
+            nonces: Default::default(),              // todo!(),
         };
 
         writer

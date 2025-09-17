@@ -338,7 +338,7 @@ impl BoundaryWork {
 
 #[cfg(test)]
 mod tests {
-    use crate::{sweep::Snapshot, PParamValue};
+    use crate::{sweep::Snapshot, EraBoundary, EraSummary, PParamValue};
 
     use super::*;
 
@@ -388,6 +388,16 @@ mod tests {
             }));
 
         let mut boundary = BoundaryWork {
+            active_era: EraSummary {
+                start: EraBoundary {
+                    epoch: 0,
+                    slot: 0,
+                    timestamp: 0,
+                },
+                end: None,
+                epoch_length: 86400,
+                slot_length: 1,
+            },
             active_state: None,
             active_snapshot: Snapshot::empty(),
             waiting_state: None,
@@ -409,7 +419,6 @@ mod tests {
             },
             ending_snapshot: Snapshot::empty(),
             mutable_slots: 10,
-            is_first_shelley_epoch: false,
             shelley_hash: [0; 32].as_slice().into(),
 
             // empty until computed
