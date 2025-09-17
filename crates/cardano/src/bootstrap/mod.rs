@@ -3,7 +3,9 @@ use dolos_core::{
 };
 use tracing::debug;
 
-use crate::{EpochState, EraBoundary, EraSummary, PParamsSet, EPOCH_KEY_MARK};
+use crate::{
+    mutable_slots, EpochState, EraBoundary, EraSummary, Nonces, PParamsSet, EPOCH_KEY_MARK,
+};
 
 fn force_hardforks(
     pparams: &mut PParamsSet,
@@ -49,9 +51,16 @@ fn bootrap_epoch<D: Domain>(domain: &D) -> Result<EpochState, ChainError> {
     let genesis = domain.genesis();
 
     let mut pparams = crate::forks::from_byron_genesis(&genesis.byron);
+    let mut nonces = None;
 
     if let Some(force_protocol) = genesis.force_protocol {
         force_hardforks(&mut pparams, force_protocol as u16, genesis)?;
+        nonces = Some(Nonces {
+            active: genesis.shelley_hash,
+            candidate: genesis.shelley_hash,
+            evolving: genesis.shelley_hash,
+            tail: None,
+        });
     }
 
     // bootstrap pots
@@ -73,6 +82,8 @@ fn bootrap_epoch<D: Domain>(domain: &D) -> Result<EpochState, ChainError> {
         decayed_deposits: 0,
         rewards_to_distribute: None,
         rewards_to_treasury: None,
+        largest_stable_slot: genesis.shelley.epoch_length.unwrap() as u64 - mutable_slots(genesis),
+        nonces,
     };
 
     let writer = domain.state().start_writer()?;

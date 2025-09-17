@@ -152,7 +152,7 @@ impl dolos_core::EntityDelta for DRepUnRegistration {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct DRepStateVisitor;
 
 impl BlockVisitor for DRepStateVisitor {

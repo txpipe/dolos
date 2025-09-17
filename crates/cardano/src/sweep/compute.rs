@@ -3,7 +3,8 @@ use pallas::ledger::primitives::RationalNumber;
 
 use crate::{
     sweep::{BoundaryWork, EraTransition, PoolData, PotDelta, Pots},
-    AccountState, EpochState, PParamsSet,
+    utils::epoch_first_slot,
+    AccountState, EpochState, Nonces, PParamsSet,
 };
 
 macro_rules! as_ratio {
@@ -244,6 +245,31 @@ impl BoundaryWork {
         let deposits = self.ending_state.deposits;
         let utxos = self.ending_state.utxos;
 
+        let nonces = if self
+            .era_transition
+            .as_ref()
+            .map(|transition| transition.new_version == 2)
+            .unwrap_or(false)
+        {
+            Some(Nonces::bootstrap(self.shelley_hash))
+        } else {
+            let previous_tail = match self.waiting_state.as_ref() {
+                Some(state) => {
+                    if let Some(nonces) = state.nonces.as_ref() {
+                        nonces.tail
+                    } else {
+                        None
+                    }
+                }
+                None => None,
+            };
+
+            self.ending_state
+                .nonces
+                .as_ref()
+                .map(|nonces| nonces.sweep(previous_tail, None))
+        };
+
         let state = EpochState {
             number: self.ending_state.number + 1,
             active_stake: self.active_snapshot.total_stake,
@@ -252,6 +278,9 @@ impl BoundaryWork {
             reserves,
             treasury,
             pparams,
+            largest_stable_slot: epoch_first_slot(self.ending_state.number + 2, &self.active_era)
+                - self.mutable_slots,
+            nonces,
 
             // computed throughout the epoch during _roll_
             gathered_fees: 0,
@@ -374,8 +403,13 @@ mod tests {
                 decayed_deposits: 0,
                 rewards_to_distribute: None,
                 rewards_to_treasury: None,
+                largest_stable_slot: 1,
+                nonces: None,
             },
             ending_snapshot: Snapshot::empty(),
+            mutable_slots: 10,
+            is_first_shelley_epoch: false,
+            shelley_hash: [0; 32].as_slice().into(),
 
             // empty until computed
             pool_rewards: Default::default(),

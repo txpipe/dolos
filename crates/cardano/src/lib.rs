@@ -85,9 +85,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
     }
 
     fn execute_sweep<D: Domain>(&self, domain: &D, at: BlockSlot) -> Result<(), ChainError> {
-        sweep::sweep(domain, at, &self.config)?;
-
-        Ok(())
+        sweep::sweep(domain, at, &self.config)
     }
 
     fn next_sweep<D: Domain>(&self, domain: &D, after: BlockSlot) -> Result<BlockSlot, ChainError> {
@@ -118,7 +116,6 @@ impl dolos_core::ChainLogic for CardanoLogic {
         deps: &HashMap<TxoRef, Self::Utxo>,
     ) -> Result<(), ChainError> {
         let mut builder = roll::DeltaBuilder::new(self.config.track.clone(), block);
-
         builder.crawl(deps)?;
 
         Ok(())
@@ -184,11 +181,12 @@ pub fn load_test_genesis(env: &str) -> Genesis {
         .join("test_data")
         .join(env);
 
-    Genesis {
-        byron: load_json(&test_data.join("genesis/byron.json")),
-        shelley: load_json(&test_data.join("genesis/shelley.json")),
-        alonzo: load_json(&test_data.join("genesis/alonzo.json")),
-        conway: load_json(&test_data.join("genesis/conway.json")),
-        force_protocol: None,
-    }
+    Genesis::from_file_paths(
+        &test_data.join("genesis/byron.json"),
+        &test_data.join("genesis/shelley.json"),
+        &test_data.join("genesis/alonzo.json"),
+        &test_data.join("genesis/conway.json"),
+        None,
+    )
+    .unwrap()
 }

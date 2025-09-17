@@ -63,7 +63,7 @@ impl dolos_core::EntityDelta for MintStatsUpdate {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct AssetStateVisitor;
 
 impl BlockVisitor for AssetStateVisitor {

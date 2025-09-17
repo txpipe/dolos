@@ -77,6 +77,7 @@ impl TableRow for EpochState {
             "treasury",
             "to treasury",
             "to distribute",
+            "nonce",
         ]
     }
 
@@ -92,6 +93,13 @@ impl TableRow for EpochState {
             format!("{}", self.treasury),
             format!("{}", self.rewards_to_treasury.unwrap_or_default()),
             format!("{}", self.rewards_to_distribute.unwrap_or_default()),
+            format!(
+                "{}",
+                self.nonces
+                    .as_ref()
+                    .map(|x| hex::encode(x.active))
+                    .unwrap_or("".to_string())
+            ),
         ]
     }
 }

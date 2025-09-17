@@ -82,7 +82,7 @@ impl dolos_core::EntityDelta for MintedBlocksInc {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct PoolStateVisitor;
 
 impl<'a> BlockVisitor for PoolStateVisitor {

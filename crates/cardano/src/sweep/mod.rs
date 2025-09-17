@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 
 use dolos_core::{BlockSlot, ChainError, Domain, EntityKey};
-use pallas::ledger::primitives::RationalNumber;
+use pallas::{crypto::hash::Hash, ledger::primitives::RationalNumber};
 
-use crate::{Config, EpochState};
+use crate::{Config, EpochState, EraSummary};
 
 pub mod commit;
 pub mod compute;
@@ -87,12 +87,15 @@ pub struct EraTransition {
 #[derive(Debug)]
 pub struct BoundaryWork {
     // loaded
+    pub active_era: EraSummary,
     pub active_state: Option<EpochState>,
     pub active_snapshot: Snapshot,
     pub waiting_state: Option<EpochState>,
     pub ending_state: EpochState,
     pub ending_snapshot: Snapshot,
     pub pools: HashMap<PoolId, PoolData>,
+    pub mutable_slots: u64,
+    pub shelley_hash: Hash<32>,
 
     // computed
     pub pot_delta: Option<PotDelta>,

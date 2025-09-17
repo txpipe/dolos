@@ -281,7 +281,7 @@ impl dolos_core::EntityDelta for WithdrawalInc {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct AccountVisitor;
 
 impl BlockVisitor for AccountVisitor {

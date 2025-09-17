@@ -156,3 +156,16 @@ pub fn load_era_summary<D: Domain>(domain: &D) -> Result<ChainSummary, ChainErro
 
     Ok(chain)
 }
+
+pub fn load_active_era<D: Domain>(domain: &D) -> Result<EraSummary, ChainError> {
+    let eras = domain
+        .state()
+        .iter_entities_typed::<EraSummary>(EraSummary::NS, None)?;
+    match eras.last() {
+        Some(x) => match x {
+            Ok((_, era)) => Ok(era),
+            Err(_) => Err(ChainError::EraNotFound),
+        },
+        None => Err(ChainError::EraNotFound),
+    }
+}

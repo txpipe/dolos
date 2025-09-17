@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use dolos_core::{ChainError, Domain, EntityKey, StateStore};
 
 use crate::{
+    load_active_era, mutable_slots,
     sweep::{AccountId, BoundaryWork, PoolData, PoolId, Snapshot},
     AccountState, FixedNamespace as _, PoolState,
 };
@@ -100,6 +101,9 @@ impl BoundaryWork {
             active_state: active,
             waiting_state: waiting,
             ending_state: ending,
+            active_era: load_active_era(domain)?,
+            mutable_slots: mutable_slots(domain.genesis()),
+            shelley_hash: domain.genesis().shelley_hash,
 
             // to be loaded right after
             pools: HashMap::new(),
