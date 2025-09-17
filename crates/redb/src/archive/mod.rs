@@ -4,7 +4,8 @@ use std::path::Path;
 use tracing::{debug, info, warn};
 
 use dolos_core::{
-    ArchiveError, BlockBody, BlockSlot, ChainPoint, EraCbor, RawBlock, SlotTags, TxOrder,
+    ArchiveError, BlockBody, BlockSlot, ChainPoint, EraCbor, RawBlock, SlotTags, TxHash, TxOrder,
+    TxoRef,
 };
 
 use ::redb::Durability;
@@ -238,6 +239,14 @@ impl ChainStore {
         indexes::Indexes::get_by_script_hash(&rx, script_hash)
     }
 
+    pub fn get_possible_block_slots_by_spent_txo(
+        &self,
+        spent_txo: &[u8],
+    ) -> Result<Vec<BlockSlot>, RedbArchiveError> {
+        let rx = self.db().begin_read()?;
+        indexes::Indexes::get_by_spent_txo(&rx, spent_txo)
+    }
+
     pub fn get_possible_block_slots_by_tx_hash(
         &self,
         tx_hash: &[u8],
@@ -349,6 +358,20 @@ impl ChainStore {
         script_hash: &[u8],
     ) -> Result<Vec<BlockBody>, RedbArchiveError> {
         self.get_possible_block_slots_by_script_hash(script_hash)?
+            .iter()
+            .flat_map(|slot| match self.get_block_by_slot(slot) {
+                Ok(Some(block)) => Some(Ok(block)),
+                Ok(None) => None,
+                Err(e) => Some(Err(e)),
+            })
+            .collect()
+    }
+
+    pub fn get_possible_blocks_by_spent_txo(
+        &self,
+        txo_ref: &[u8],
+    ) -> Result<Vec<BlockBody>, RedbArchiveError> {
+        self.get_possible_block_slots_by_spent_txo(txo_ref)?
             .iter()
             .flat_map(|slot| match self.get_block_by_slot(slot) {
                 Ok(Some(block)) => Some(Ok(block)),
@@ -480,6 +503,29 @@ impl ChainStore {
             }
             Ok(None)
         }
+    }
+
+    pub fn get_tx_by_spent_txo(
+        &self,
+        spent_txo: &[u8],
+    ) -> Result<Option<TxHash>, RedbArchiveError> {
+        let possible: Vec<BlockBody> = self.get_possible_blocks_by_spent_txo(spent_txo)?;
+
+        for raw in possible {
+            let block =
+                MultiEraBlock::decode(raw.as_slice()).map_err(ArchiveError::BlockDecodingError)?;
+
+            for tx in block.txs().iter() {
+                for input in tx.inputs() {
+                    let bytes: Vec<u8> = TxoRef::from(&input).into();
+                    if bytes.as_slice() == spent_txo {
+                        return Ok(Some(tx.hash()));
+                    }
+                }
+            }
+        }
+
+        Ok(None)
     }
 
     pub fn get_tx(&self, tx_hash: &[u8]) -> Result<Option<EraCbor>, RedbArchiveError> {
@@ -640,6 +686,10 @@ impl dolos_core::ArchiveStore for ChainStore {
 
     fn get_slot_for_tx(&self, tx_hash: &[u8]) -> Result<Option<BlockSlot>, ArchiveError> {
         Ok(Self::get_slot_for_tx(self, tx_hash)?)
+    }
+
+    fn get_tx_by_spent_txo(&self, spent_txo: &[u8]) -> Result<Option<TxHash>, ArchiveError> {
+        Ok(Self::get_tx_by_spent_txo(self, spent_txo)?)
     }
 
     fn iter_blocks_with_address(

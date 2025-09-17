@@ -14,7 +14,7 @@ use blockfrost_openapi::models::{
     tx_content_stake_addr_inner::TxContentStakeAddrInner, tx_content_utxo::TxContentUtxo,
     tx_content_withdrawals_inner::TxContentWithdrawalsInner,
 };
-use dolos_core::{ArchiveStore as _, Domain};
+use dolos_core::{ArchiveStore, Domain};
 
 use crate::{
     mapping::{IntoModel as _, TxModelBuilder},
@@ -74,6 +74,21 @@ pub async fn by_hash_utxos<D: Domain>(
         .ok_or(StatusCode::NOT_FOUND)?;
 
     let mut builder = TxModelBuilder::new(&raw, order)?;
+
+    let consumed_deps = builder
+        .required_consumed_deps()?
+        .into_iter()
+        .filter_map(|x| {
+            let bytes: Vec<u8> = x.clone().into();
+            domain
+                .archive()
+                .get_tx_by_spent_txo(&bytes)
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+                .transpose()
+                .map(|res| res.map(|y| (x, y)))
+        })
+        .collect::<Result<_, _>>()?;
+    builder = builder.with_consumed_deps(consumed_deps);
 
     let deps = builder.required_deps()?;
     let deps = domain.get_tx_batch(deps)?;

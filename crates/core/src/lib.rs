@@ -121,6 +121,14 @@ impl From<&MultiEraInput<'_>> for TxoRef {
     }
 }
 
+impl From<TxoRef> for Vec<u8> {
+    fn from(value: TxoRef) -> Self {
+        let mut bytes = value.0.to_vec();
+        bytes.extend_from_slice(value.1.to_be_bytes().as_slice());
+        bytes
+    }
+}
+
 #[derive(Debug, Eq, PartialEq, Hash, Clone, Serialize, Deserialize)]
 pub struct TxoRef(pub TxHash, pub TxoIdx);
 

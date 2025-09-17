@@ -1,10 +1,10 @@
-use dolos_core::{batch::WorkDeltas, ChainError, SlotTags};
+use dolos_core::{batch::WorkDeltas, ChainError, SlotTags, TxoRef};
 use pallas::{
     codec::utils::KeepRaw,
     ledger::{
         addresses::{Address, ShelleyDelegationPart},
         primitives::{conway::DatumOption, PlutusData},
-        traverse::{MultiEraBlock, MultiEraTx, MultiEraValue, OriginalHash as _},
+        traverse::{MultiEraBlock, MultiEraInput, MultiEraTx, MultiEraValue, OriginalHash as _},
     },
 };
 
@@ -12,6 +12,11 @@ use crate::{roll::BlockVisitor, CardanoLogic};
 
 #[derive(Default, Clone)]
 pub struct TxLogVisitor;
+
+fn unpack_input(tags: &mut SlotTags, input: &MultiEraInput) {
+    let txoref: TxoRef = input.into();
+    tags.spent_txo.push(txoref.into());
+}
 
 fn unpack_address(tags: &mut SlotTags, address: &Address) {
     match address {
@@ -92,9 +97,10 @@ impl BlockVisitor for TxLogVisitor {
         deltas: &mut WorkDeltas<CardanoLogic>,
         _: &MultiEraBlock,
         _: &MultiEraTx,
-        _: &pallas::ledger::traverse::MultiEraInput,
+        input: &MultiEraInput,
         resolved: &pallas::ledger::traverse::MultiEraOutput,
     ) -> Result<(), ChainError> {
+        unpack_input(&mut deltas.slot, input);
         if let Ok(address) = resolved.address() {
             unpack_address(&mut deltas.slot, &address);
         }

@@ -45,7 +45,7 @@ use blockfrost_openapi::models::{
 };
 
 use dolos_cardano::{pallas_extras, ChainSummary, PParamsSet};
-use dolos_core::{EraCbor, TxHash, TxOrder, TxoIdx};
+use dolos_core::{EraCbor, TxHash, TxOrder, TxoIdx, TxoRef};
 
 macro_rules! try_into_or_500 {
     ($expr:expr) => {
@@ -131,6 +131,7 @@ where
 
     fn into_model(self) -> Result<T, StatusCode>;
 
+    #[allow(unused)]
     fn into_model_with_sort_key(self) -> Result<(Self::SortKey, T), StatusCode> {
         let sort_key = self.sort_key().unwrap_or_default();
         let model = self.into_model()?;
@@ -273,35 +274,43 @@ impl<'a> IntoModel<String> for ScriptRef<'a> {
 }
 
 pub struct UtxoOutputModelBuilder<'a> {
-    txo_idx: TxoIdx,
+    txo_ref: TxoRef,
     output: MultiEraOutput<'a>,
     is_collateral: bool,
     block: Option<MultiEraBlock<'a>>,
     tx_order: Option<TxOrder>,
+    consumed_by_tx: Option<TxHash>,
 }
 
 impl<'a> UtxoOutputModelBuilder<'a> {
-    pub fn from_output(txo_idx: TxoIdx, output: MultiEraOutput<'a>) -> Self {
+    pub fn txo_ref(&self) -> TxoRef {
+        self.txo_ref.clone()
+    }
+
+    pub fn from_output(tx_hash: TxHash, tx_index: TxoIdx, output: MultiEraOutput<'a>) -> Self {
         Self {
-            txo_idx,
+            txo_ref: TxoRef(tx_hash, tx_index),
             output,
             is_collateral: false,
             block: None,
             tx_order: None,
+            consumed_by_tx: None,
         }
     }
 
     pub fn from_collateral(
+        tx_hash: TxHash,
         output_count: usize,
         collateral_idx: TxoIdx,
         output: MultiEraOutput<'a>,
     ) -> Self {
         Self {
-            txo_idx: (output_count + collateral_idx as usize) as u32,
+            txo_ref: TxoRef(tx_hash, (output_count + collateral_idx as usize) as u32),
             output,
             is_collateral: true,
             block: None,
             tx_order: None,
+            consumed_by_tx: None,
         }
     }
 
@@ -319,6 +328,13 @@ impl<'a> UtxoOutputModelBuilder<'a> {
 
         txs.get(order).cloned()
     }
+
+    pub fn with_consumed_by(self, tx: TxHash) -> Self {
+        Self {
+            consumed_by_tx: Some(tx),
+            ..self
+        }
+    }
 }
 
 impl<'a> IntoModel<TxContentUtxoOutputsInner> for UtxoOutputModelBuilder<'a> {
@@ -328,10 +344,8 @@ impl<'a> IntoModel<TxContentUtxoOutputsInner> for UtxoOutputModelBuilder<'a> {
         let out = TxContentUtxoOutputsInner {
             address: self.output.address().into_model()?,
             amount: self.output.value().into_model()?,
-            output_index: try_into_or_500!(self.txo_idx),
-            // TODO: searching for this value is an expensive query. Judging by the official BF
-            // endpoint, this is not always populated. Research in which conditions this is set.
-            consumed_by_tx: Some(None),
+            output_index: try_into_or_500!(self.txo_ref.1),
+            consumed_by_tx: Some(self.consumed_by_tx.map(|x| x.to_string())),
             data_hash: self.output.datum().map(|x| match x {
                 DatumOption::Hash(x) => x.to_string(),
                 DatumOption::Data(x) => x.original_hash().to_string(),
@@ -361,7 +375,7 @@ impl<'a> IntoModel<AddressUtxoContentInner> for UtxoOutputModelBuilder<'a> {
 
     fn sort_key(&self) -> Option<Self::SortKey> {
         match (self.block.as_ref(), self.tx_order.as_ref()) {
-            (Some(block), Some(txorder)) => Some((block.slot(), *txorder, self.txo_idx)),
+            (Some(block), Some(txorder)) => Some((block.slot(), *txorder, self.txo_ref.1)),
             _ => None,
         }
     }
@@ -378,7 +392,7 @@ impl<'a> IntoModel<AddressUtxoContentInner> for UtxoOutputModelBuilder<'a> {
                 .as_ref()
                 .map(|b| b.hash().to_string())
                 .unwrap_or_default(),
-            output_index: try_into_or_500!(self.txo_idx),
+            output_index: try_into_or_500!(self.txo_ref.1),
             amount: self.output.value().into_model()?,
             data_hash: self.output.datum().map(|x| match x {
                 DatumOption::Hash(x) => x.to_string(),
@@ -399,7 +413,7 @@ impl<'a> IntoModel<AddressUtxoContentInner> for UtxoOutputModelBuilder<'a> {
                 .transpose()?,
 
             // DEPRECATED
-            tx_index: try_into_or_500!(self.txo_idx),
+            tx_index: try_into_or_500!(self.txo_ref.1),
         };
 
         Ok(out)
@@ -456,6 +470,7 @@ pub struct TxModelBuilder<'a> {
     block: MultiEraBlock<'a>,
     order: TxOrder,
     deps: HashMap<TxHash, MultiEraTx<'a>>,
+    consumed_deps: HashMap<TxoRef, TxHash>,
 }
 
 impl<'a> TxModelBuilder<'a> {
@@ -469,6 +484,7 @@ impl<'a> TxModelBuilder<'a> {
             pparams: None,
             network: None,
             deps: HashMap::new(),
+            consumed_deps: HashMap::new(),
         })
     }
 
@@ -489,6 +505,13 @@ impl<'a> TxModelBuilder<'a> {
     pub fn with_network(self, network: Network) -> Self {
         Self {
             network: Some(network),
+            ..self
+        }
+    }
+
+    pub fn with_consumed_deps(self, consumed_deps: HashMap<TxoRef, TxHash>) -> Self {
+        Self {
+            consumed_deps,
             ..self
         }
     }
@@ -528,6 +551,18 @@ impl<'a> TxModelBuilder<'a> {
         let unique = deps.into_iter().unique().collect();
 
         Ok(unique)
+    }
+
+    pub fn required_consumed_deps(&self) -> Result<Vec<TxoRef>, StatusCode> {
+        let tx = self.tx()?;
+
+        let mut deps = vec![];
+
+        for (i, _) in tx.produces() {
+            deps.push(TxoRef(tx.hash(), i as u32));
+        }
+
+        Ok(deps)
     }
 
     pub fn deposit(&self) -> Result<u64, StatusCode> {
@@ -651,16 +686,32 @@ impl<'a> IntoModel<TxContentUtxo> for TxModelBuilder<'a> {
             .outputs()
             .into_iter()
             .enumerate()
-            .map(|(i, o)| UtxoOutputModelBuilder::from_output(i as u32, o))
-            .map(|b| b.into_model())
+            .map(|(i, o)| UtxoOutputModelBuilder::from_output(tx.hash(), i as u32, o))
+            .map(|b| {
+                let builder = if let Some(consumed_by) = self.consumed_deps.get(&b.txo_ref()) {
+                    b.with_consumed_by(*consumed_by)
+                } else {
+                    b
+                };
+                builder.into_model()
+            })
             .try_collect()?;
 
         let collateral_outputs: Vec<_> = tx
             .collateral_return()
             .into_iter()
             .enumerate()
-            .map(|(i, o)| UtxoOutputModelBuilder::from_collateral(outputs.len(), i as u32, o))
-            .map(|b| b.into_model())
+            .map(|(i, o)| {
+                UtxoOutputModelBuilder::from_collateral(tx.hash(), outputs.len(), i as u32, o)
+            })
+            .map(|b| {
+                let builder = if let Some(consumed_by) = self.consumed_deps.get(&b.txo_ref()) {
+                    b.with_consumed_by(*consumed_by)
+                } else {
+                    b
+                };
+                builder.into_model()
+            })
             .try_collect()?;
 
         let all_outputs = outputs.into_iter().chain(collateral_outputs).collect();

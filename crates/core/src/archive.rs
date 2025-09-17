@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{BlockBody, BlockSlot, BrokenInvariant, ChainPoint, EraCbor, RawBlock, TxOrder};
+use crate::{
+    BlockBody, BlockSlot, BrokenInvariant, ChainPoint, EraCbor, RawBlock, TxHash, TxOrder,
+};
 
 #[derive(Debug, Error)]
 pub enum ArchiveError {
@@ -40,6 +42,7 @@ pub struct SlotTags {
     pub full_addresses: Vec<OpaqueTag>,
     pub payment_addresses: Vec<OpaqueTag>,
     pub stake_addresses: Vec<OpaqueTag>,
+    pub spent_txo: Vec<OpaqueTag>,
 }
 
 pub trait ArchiveWriter: Send + Sync + 'static {
@@ -77,6 +80,8 @@ pub trait ArchiveStore: Clone + Send + Sync + 'static {
     fn get_tx(&self, tx_hash: &[u8]) -> Result<Option<EraCbor>, ArchiveError>;
 
     fn get_slot_for_tx(&self, tx_hash: &[u8]) -> Result<Option<BlockSlot>, ArchiveError>;
+
+    fn get_tx_by_spent_txo(&self, spent_txo: &[u8]) -> Result<Option<TxHash>, ArchiveError>;
 
     fn iter_blocks_with_address(
         &self,

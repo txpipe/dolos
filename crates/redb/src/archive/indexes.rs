@@ -269,6 +269,32 @@ impl ScriptHashApproxIndexTable {
     }
 }
 
+pub struct SpentTxoApproxIndexTable;
+
+impl SpentTxoApproxIndexTable {
+    pub const DEF: MultimapTableDefinition<'static, u64, u64> =
+        MultimapTableDefinition::new("byspenttxo");
+
+    pub fn compute_key(script_hash: &Vec<u8>) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        script_hash.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    pub fn get_by_spent_txo(
+        rx: &ReadTransaction,
+        spent_txo: &[u8],
+    ) -> Result<Vec<BlockSlot>, Error> {
+        let table = rx.open_multimap_table(Self::DEF)?;
+        let key = Self::compute_key(&spent_txo.to_vec());
+        let mut out = vec![];
+        for slot in table.get(key)? {
+            out.push(slot?.value());
+        }
+        Ok(out)
+    }
+}
+
 pub struct TxHashApproxIndexTable;
 
 impl TxHashApproxIndexTable {
@@ -305,6 +331,7 @@ impl Indexes {
         wx.open_multimap_table(DatumHashApproxIndexTable::DEF)?;
         wx.open_multimap_table(PolicyApproxIndexTable::DEF)?;
         wx.open_multimap_table(ScriptHashApproxIndexTable::DEF)?;
+        wx.open_multimap_table(SpentTxoApproxIndexTable::DEF)?;
         wx.open_multimap_table(TxHashApproxIndexTable::DEF)?;
 
         Ok(())
@@ -372,6 +399,13 @@ impl Indexes {
         ScriptHashApproxIndexTable::get_by_script_hash(rx, script_hash)
     }
 
+    pub fn get_by_spent_txo(
+        rx: &ReadTransaction,
+        spent_txo: &[u8],
+    ) -> Result<Vec<BlockSlot>, Error> {
+        SpentTxoApproxIndexTable::get_by_spent_txo(rx, spent_txo)
+    }
+
     pub fn get_by_tx_hash(rx: &ReadTransaction, tx_hash: &[u8]) -> Result<Vec<BlockSlot>, Error> {
         TxHashApproxIndexTable::get_by_tx_hash(rx, tx_hash)
     }
@@ -386,6 +420,7 @@ impl Indexes {
         Self::copy_table(DatumHashApproxIndexTable::DEF, rx, wx)?;
         Self::copy_table(PolicyApproxIndexTable::DEF, rx, wx)?;
         Self::copy_table(ScriptHashApproxIndexTable::DEF, rx, wx)?;
+        Self::copy_table(SpentTxoApproxIndexTable::DEF, rx, wx)?;
         Self::copy_table(TxHashApproxIndexTable::DEF, rx, wx)?;
 
         Ok(())
@@ -467,6 +502,14 @@ impl Indexes {
             AssetApproxIndexTable::DEF,
             AssetApproxIndexTable::compute_key,
             tags.assets.clone(),
+            slot,
+        )?;
+
+        Self::insert(
+            wx,
+            SpentTxoApproxIndexTable::DEF,
+            SpentTxoApproxIndexTable::compute_key,
+            tags.spent_txo.clone(),
             slot,
         )?;
 
@@ -557,6 +600,14 @@ impl Indexes {
             AssetApproxIndexTable::DEF,
             AssetApproxIndexTable::compute_key,
             tags.assets.clone(),
+            slot,
+        )?;
+
+        Self::remove(
+            wx,
+            SpentTxoApproxIndexTable::DEF,
+            SpentTxoApproxIndexTable::compute_key,
+            tags.spent_txo.clone(),
             slot,
         )?;
 

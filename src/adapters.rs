@@ -79,6 +79,14 @@ impl ArchiveStore for ArchiveAdapter {
         Ok(out)
     }
 
+    fn get_tx_by_spent_txo(&self, spent_txo: &[u8]) -> Result<Option<TxHash>, ArchiveError> {
+        let out = match self {
+            ArchiveAdapter::Redb(x) => x.get_tx_by_spent_txo(spent_txo)?,
+        };
+
+        Ok(out)
+    }
+
     fn get_slot_for_tx(&self, tx_hash: &[u8]) -> Result<Option<BlockSlot>, ArchiveError> {
         let out = match self {
             ArchiveAdapter::Redb(x) => x.get_slot_for_tx(tx_hash)?,
@@ -339,10 +347,7 @@ impl Domain for DomainAdapter {
         // We then collect any gap between the from point and the current tip. This
         // assumes that no event will be sent between the creation of the receiver and
         // the collection of the replay.
-        let replay = self
-            .wal()
-            .iter_blocks(from, None)?
-            .collect::<Vec<_>>();
+        let replay = self.wal().iter_blocks(from, None)?.collect::<Vec<_>>();
 
         Ok(TipSubscription { replay, receiver })
     }
