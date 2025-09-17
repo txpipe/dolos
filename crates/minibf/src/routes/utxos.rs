@@ -4,7 +4,7 @@ use itertools::Itertools;
 use pallas::ledger::traverse::{MultiEraBlock, MultiEraOutput};
 use std::collections::{HashMap, HashSet};
 
-use dolos_core::{Domain, StateStore, TxoRef};
+use dolos_core::{ArchiveStore, Domain, StateStore, TxoRef};
 
 use crate::{
     mapping::{IntoModel, UtxoOutputModelBuilder},
@@ -43,7 +43,7 @@ pub fn load_utxo_models<D: Domain>(
     let mut models: Vec<_> = utxos
         .into_iter()
         .map(|(TxoRef(tx_hash, txo_idx), txo)| {
-            let builder = UtxoOutputModelBuilder::from_output(*txo_idx, txo);
+            let builder = UtxoOutputModelBuilder::from_output(*tx_hash, *txo_idx, txo);
             let block_data = blocks_deps.get(&tx_hash).cloned();
 
             if let Some((block, tx_order)) = block_data {
@@ -52,8 +52,13 @@ pub fn load_utxo_models<D: Domain>(
                 builder
             }
         })
-        .map(|x| x.into_model_with_sort_key())
-        .try_collect()?;
+        .map(|x| {
+            (
+                <UtxoOutputModelBuilder<'_> as IntoModel<AddressUtxoContentInner>>::sort_key(&x),
+                x,
+            )
+        })
+        .collect();
 
     match pagination.order {
         Order::Asc => {
@@ -67,10 +72,23 @@ pub fn load_utxo_models<D: Domain>(
 
     let models = models
         .into_iter()
-        .map(|(_, utxo)| utxo)
+        .map(|(_, builder)| builder)
         .enumerate()
-        .filter_map(|(i, utxo)| pagination.as_included_item(i, utxo))
-        .collect();
+        .filter_map(|(i, builder)| pagination.as_included_item(i, builder))
+        .map(|builder| {
+            let key: Vec<u8> = builder.txo_ref().into();
+            let builder = if let Some(consumed_by) = domain
+                .archive()
+                .get_tx_by_spent_txo(&key)
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            {
+                builder.with_consumed_by(consumed_by)
+            } else {
+                builder
+            };
+            builder.into_model()
+        })
+        .try_collect()?;
 
     Ok(models)
 }
