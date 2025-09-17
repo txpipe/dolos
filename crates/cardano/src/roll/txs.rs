@@ -66,6 +66,16 @@ fn unpack_datum(tags: &mut SlotTags, datum: &DatumOption) {
 }
 
 impl BlockVisitor for TxLogVisitor {
+    fn visit_root(
+        &mut self,
+        deltas: &mut WorkDeltas<CardanoLogic>,
+        block: &MultiEraBlock,
+    ) -> Result<(), ChainError> {
+        deltas.slot.number = Some(block.number());
+
+        Ok(())
+    }
+
     fn visit_tx(
         &mut self,
         deltas: &mut WorkDeltas<CardanoLogic>,
