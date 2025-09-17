@@ -55,12 +55,7 @@ fn bootrap_epoch<D: Domain>(domain: &D) -> Result<EpochState, ChainError> {
 
     if let Some(force_protocol) = genesis.force_protocol {
         force_hardforks(&mut pparams, force_protocol as u16, genesis)?;
-        nonces = Some(Nonces {
-            active: genesis.shelley_hash,
-            candidate: genesis.shelley_hash,
-            evolving: genesis.shelley_hash,
-            tail: None,
-        });
+        nonces = Some(Nonces::bootstrap(genesis.shelley_hash));
     }
 
     // bootstrap pots
