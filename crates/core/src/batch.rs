@@ -321,8 +321,8 @@ impl<C: ChainLogic> WorkBatch<C> {
     }
 
     pub fn apply_entities(&mut self) -> Result<(), StateError> {
-        for (key, entity) in self.entities.iter_mut() {
-            for block in self.blocks.iter_mut() {
+        for block in self.blocks.iter_mut() {
+            for (key, entity) in self.entities.iter_mut() {
                 let to_apply = block.deltas.entities.get_mut(key);
 
                 if let Some(to_apply) = to_apply {

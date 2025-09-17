@@ -481,11 +481,12 @@ where
     Option<AssetState>: From<D::Entity>,
 {
     let subject = hex::decode(&unit).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let entity_key = pallas::crypto::hash::Hasher::<256>::hash(subject.as_slice());
 
     let registry_url = domain.config.token_registry_url.clone();
 
     let asset_state = domain
-        .read_cardano_entity::<AssetState>(subject.clone())
+        .read_cardano_entity::<AssetState>(entity_key.as_slice())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 

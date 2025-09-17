@@ -25,9 +25,11 @@ impl dolos_core::EntityDelta for MintStatsUpdate {
     type Entity = AssetState;
 
     fn key(&self) -> NsKey {
-        let mut key = vec![];
-        key.extend_from_slice(self.policy.as_slice());
-        key.extend_from_slice(self.asset.as_slice());
+        let mut hasher = pallas::crypto::hash::Hasher::<256>::new();
+        hasher.input(self.policy.as_slice());
+        hasher.input(self.asset.as_slice());
+        let key = hasher.finalize();
+        let key = key.as_slice();
         NsKey::from((AssetState::NS, key))
     }
 
