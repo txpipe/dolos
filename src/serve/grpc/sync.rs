@@ -46,7 +46,6 @@ fn raw_to_blockref<C: LedgerContext>(
         slot: h.slot,
         hash: h.hash,
         height: h.height,
-        ..Default::default()
     })
 }
 
@@ -65,11 +64,10 @@ fn tip_event_to_response<C: LedgerContext>(
     u5c::sync::FollowTipResponse {
         action: match event {
             TipEvent::Apply(_, block) => {
-                u5c::sync::follow_tip_response::Action::Apply(raw_to_anychain(mapper, &block))
-                    .into()
+                u5c::sync::follow_tip_response::Action::Apply(raw_to_anychain(mapper, block)).into()
             }
             TipEvent::Undo(_, block) => {
-                u5c::sync::follow_tip_response::Action::Undo(raw_to_anychain(mapper, &block)).into()
+                u5c::sync::follow_tip_response::Action::Undo(raw_to_anychain(mapper, block)).into()
             }
             TipEvent::Mark(x) => {
                 u5c::sync::follow_tip_response::Action::Reset(point_to_blockref(x)).into()

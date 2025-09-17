@@ -107,16 +107,6 @@ pub fn asset_fingerprint(subject: &[u8]) -> Result<String, StatusCode> {
     bech32(ASSET_HRP, hash.as_ref())
 }
 
-pub fn bytes_to_address(bytes: &[u8]) -> Result<Address, StatusCode> {
-    Address::from_bytes(bytes).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
-}
-
-pub fn bytes_to_address_bech32(bytes: &[u8]) -> Result<String, StatusCode> {
-    let addr = bytes_to_address(bytes)?;
-    addr.to_bech32()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
-}
-
 pub fn stake_cred_to_address(cred: &StakeCredential, network: Network) -> StakeAddress {
     match cred {
         StakeCredential::AddrKeyhash(key) => StakeAddress::new(network, StakePayload::Stake(*key)),
@@ -573,7 +563,13 @@ impl<'a> TxModelBuilder<'a> {
                     return Some(dbg!(pool_deposit));
                 }
 
-                return None;
+                if let MultiEraCert::Conway(cert) = x {
+                    if let ConwayCert::RegDRepCert(..) = cert.deref().deref() {
+                        return Some(drep_deposit);
+                    }
+                }
+
+                None
             })
             .sum();
 

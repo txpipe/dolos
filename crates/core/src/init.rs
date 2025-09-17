@@ -33,10 +33,10 @@ fn ensure_wal<D: Domain>(domain: &D, at: &ChainPoint) -> Result<(), DomainError>
 
     if let Some(wal) = wal {
         if wal.slot() < at.slot() {
-            domain.wal().reset_to(&at)?;
+            domain.wal().reset_to(at)?;
         }
     } else {
-        domain.wal().reset_to(&at)?;
+        domain.wal().reset_to(at)?;
     }
 
     Ok(())

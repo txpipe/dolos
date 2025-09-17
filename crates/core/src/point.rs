@@ -122,7 +122,7 @@ impl ChainPoint {
 
         let mut out = [0u8; 40];
         out[0..8].copy_from_slice(&slot.to_be_bytes());
-        out[8..40].copy_from_slice(&hash.as_slice());
+        out[8..40].copy_from_slice(hash.as_slice());
         out
     }
 

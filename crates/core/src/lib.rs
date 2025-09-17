@@ -66,7 +66,7 @@ pub use point::*;
 pub use state::*;
 pub use wal::*;
 
-use crate::batch::{WorkBatch, WorkBlock};
+use crate::batch::WorkBlock;
 
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub struct EraCbor(pub Era, pub Cbor);

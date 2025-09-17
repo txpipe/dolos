@@ -1,10 +1,10 @@
 use itertools::*;
 use miette::{Context, IntoDiagnostic};
 use pallas::{
-    ledger::traverse::{Era, MultiEraInput, MultiEraOutput, MultiEraUpdate},
+    ledger::traverse::{Era, MultiEraInput, MultiEraOutput},
     ledger::validate::utils::{CertState, Environment as ValidationContext, UTxOs},
 };
-use std::{borrow::Cow, path::PathBuf, sync::Arc};
+use std::{borrow::Cow, path::PathBuf};
 
 use dolos::core::{Domain, EraCbor, StateStore as _, TxoRef};
 

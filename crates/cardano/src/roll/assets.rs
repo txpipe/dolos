@@ -1,6 +1,3 @@
-use std::borrow::Cow;
-use std::u64;
-
 use dolos_core::batch::WorkDeltas;
 use dolos_core::{ChainError, NsKey};
 use pallas::crypto::hash::Hash;
@@ -10,10 +7,7 @@ use tracing::debug;
 
 use crate::model::FixedNamespace as _;
 use crate::CardanoLogic;
-use crate::{
-    model::AssetState,
-    roll::{BlockVisitor, StateError},
-};
+use crate::{model::AssetState, roll::BlockVisitor};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MintStatsUpdate {
@@ -77,10 +71,10 @@ impl BlockVisitor for AssetStateVisitor {
         let policy = mint.policy();
 
         for asset in mint.assets() {
-            debug!(%policy, asset = %hex::encode(&asset.name()), "detected mint");
+            debug!(%policy, asset = %hex::encode(asset.name()), "detected mint");
 
             deltas.add_for_entity(MintStatsUpdate {
-                policy: policy.clone(),
+                policy: *policy,
                 asset: asset.name().to_vec(),
                 quantity: asset.mint_coin().unwrap_or_default().into(),
                 seen_in_tx: tx.hash(),

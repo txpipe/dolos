@@ -1,12 +1,8 @@
-use std::{
-    borrow::Cow,
-    ops::{Deref, DerefMut},
-};
+use std::ops::{Deref, DerefMut};
 
 use dolos_core::{
     BlockSlot, EntityValue, Namespace, NamespaceType, NsKey, StateError, StateSchema,
 };
-
 use pallas::{
     codec::minicbor::{self, Decode, Encode},
     crypto::{
@@ -857,27 +853,27 @@ impl dolos_core::Entity for CardanoEntity {
         match value {
             Self::EraSummary(x) => {
                 let (ns, enc) = EraSummary::encode_entity(x);
-                (ns, enc.into())
+                (ns, enc)
             }
             Self::AccountState(x) => {
                 let (ns, enc) = AccountState::encode_entity(x);
-                (ns, enc.into())
+                (ns, enc)
             }
             Self::AssetState(x) => {
                 let (ns, enc) = AssetState::encode_entity(x);
-                (ns, enc.into())
+                (ns, enc)
             }
             Self::PoolState(x) => {
                 let (ns, enc) = PoolState::encode_entity(x);
-                (ns, enc.into())
+                (ns, enc)
             }
             Self::EpochState(x) => {
                 let (ns, enc) = EpochState::encode_entity(x);
-                (ns, enc.into())
+                (ns, enc)
             }
             Self::DRepState(x) => {
                 let (ns, enc) = DRepState::encode_entity(x);
-                (ns, enc.into())
+                (ns, enc)
             }
         }
     }

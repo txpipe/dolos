@@ -1,6 +1,4 @@
-use std::borrow::Cow;
-
-use dolos_core::{batch::WorkDeltas, BlockSlot, ChainError, NsKey};
+use dolos_core::{batch::WorkDeltas, ChainError, NsKey};
 use pallas::{
     crypto::hash::Hash,
     ledger::traverse::{MultiEraBlock, MultiEraCert, MultiEraTx, MultiEraUpdate},
@@ -74,8 +72,8 @@ pub struct NoncesUpdate {
 impl dolos_core::EntityDelta for NoncesUpdate {
     type Entity = EpochState;
 
-    fn key(&self) -> Cow<'_, NsKey> {
-        Cow::Owned(NsKey::from((EpochState::NS, EPOCH_KEY_MARK)))
+    fn key(&self) -> NsKey {
+        NsKey::from((EpochState::NS, EPOCH_KEY_MARK))
     }
 
     fn apply(&mut self, entity: &mut Option<EpochState>) {
@@ -90,7 +88,7 @@ impl dolos_core::EntityDelta for NoncesUpdate {
         }
     }
 
-    fn undo(&mut self, entity: &mut Option<EpochState>) {
+    fn undo(&self, entity: &mut Option<EpochState>) {
         let entity = entity.get_or_insert_default();
         entity.nonces = self.previous.clone();
     }
@@ -211,15 +209,15 @@ impl BlockVisitor for EpochStateVisitor {
         _: &MultiEraTx,
         cert: &MultiEraCert,
     ) -> Result<(), ChainError> {
-        if let Some(_) = pallas_extras::cert_as_stake_registration(cert) {
+        if pallas_extras::cert_as_stake_registration(cert).is_some() {
             self.delta.as_mut().unwrap().stake_registration_count += 1;
         }
 
-        if let Some(_) = pallas_extras::cert_as_stake_deregistration(cert) {
+        if pallas_extras::cert_as_stake_deregistration(cert).is_some() {
             self.delta.as_mut().unwrap().stake_deregistration_count += 1;
         }
 
-        if let Some(_) = pallas_extras::cert_to_pool_state(cert) {
+        if pallas_extras::cert_to_pool_state(cert).is_some() {
             self.delta.as_mut().unwrap().pool_registration_count += 1;
         }
 

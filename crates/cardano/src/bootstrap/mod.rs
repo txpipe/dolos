@@ -15,18 +15,18 @@ fn force_hardforks(
     while pparams.protocol_major().unwrap_or_default() < force_protocol {
         let previous = pparams.protocol_major();
 
-        *pparams = crate::forks::bump_pparams_version(&pparams, genesis);
+        *pparams = crate::forks::bump_pparams_version(pparams, genesis);
 
         // if the protocol major is not set, something went wrong and we might be
         // stuck in a loop. We return an error to avoid infinite loops.
         let Some(previous) = previous else {
-            return Err(BrokenInvariant::InvalidGenesisConfig.into());
+            return Err(BrokenInvariant::InvalidGenesisConfig);
         };
 
         // if the protocol major didn't increase, something went wrong and we might be
         // stuck in a loop. We return an error to avoid infinite loops.
         if pparams.protocol_major().unwrap_or_default() <= previous {
-            return Err(BrokenInvariant::InvalidGenesisConfig.into());
+            return Err(BrokenInvariant::InvalidGenesisConfig);
         }
 
         debug!(protocol = pparams.protocol_major(), "forced hardfork");

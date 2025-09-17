@@ -1,12 +1,12 @@
 use std::{collections::HashMap, ops::Range, path::Path, sync::Arc};
 
 use dolos_core::{
-    BlockSlot, ChainPoint, EntityKey, EntityValue, Namespace, NamespaceType, StateError,
-    StateSchema, TxoRef, UtxoMap, UtxoSet,
+    ChainPoint, EntityKey, EntityValue, Namespace, NamespaceType, StateError, StateSchema, TxoRef,
+    UtxoMap, UtxoSet,
 };
 
 use redb::{
-    Database, Durability, MultimapTableDefinition, ReadTransaction, TableDefinition, TableStats,
+    Database, Durability, MultimapTableDefinition, ReadTransaction, TableDefinition,
     WriteTransaction,
 };
 
@@ -189,6 +189,7 @@ impl Table {
         Ok(())
     }
 
+    #[allow(unused)]
     fn delete_entity_value(
         &self,
         wx: &mut WriteTransaction,
@@ -545,7 +546,7 @@ impl dolos_core::StateStore for StateStore {
     }
 
     fn apply_utxoset(&self, deltas: &[dolos_core::UtxoSetDelta]) -> Result<(), StateError> {
-        Self::apply_utxoset(&self, deltas)?;
+        Self::apply_utxoset(self, deltas)?;
 
         Ok(())
     }

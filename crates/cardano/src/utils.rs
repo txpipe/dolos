@@ -63,8 +63,8 @@ pub fn pparams_to_pallas(pparams: &PParamsSet) -> MultiEraProtocolParameters {
         system_start: DateTime::from_timestamp(pparams.system_start_or_default() as i64, 0)
             .unwrap_or_default()
             .into(),
-        epoch_length: pparams.epoch_length_or_default() as u64,
-        slot_length: pparams.slot_length_or_default() as u64,
+        epoch_length: pparams.epoch_length_or_default(),
+        slot_length: pparams.slot_length_or_default(),
         minfee_a: pparams.min_fee_a_or_default() as u32,
         minfee_b: pparams.min_fee_b_or_default() as u32,
         max_block_body_size: pparams.max_block_body_size_or_default() as u32,

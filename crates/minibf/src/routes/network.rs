@@ -6,11 +6,7 @@ use blockfrost_openapi::models::{
     network_eras_inner_start::NetworkErasInnerStart, network_stake::NetworkStake,
     network_supply::NetworkSupply,
 };
-use chrono::{DateTime, FixedOffset};
-use dolos_cardano::{
-    model::{EpochState, EPOCH_KEY_MARK},
-    ChainSummary, EraSummary,
-};
+use dolos_cardano::{model::EpochState, ChainSummary, EraSummary};
 use dolos_core::{Domain, Genesis};
 
 use crate::{mapping::IntoModel, Facade};

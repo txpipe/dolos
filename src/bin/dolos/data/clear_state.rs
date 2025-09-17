@@ -1,12 +1,6 @@
-use std::marker::PhantomData;
 
-use comfy_table::Table;
-use dolos_cardano::{
-    model::AccountState, EpochState, EraSummary, FixedNamespace as _, PoolState, RewardLog,
-    EPOCH_KEY_GO, EPOCH_KEY_MARK, EPOCH_KEY_SET,
-};
 use itertools::Itertools as _;
-use miette::{bail, Context, IntoDiagnostic};
+use miette::{Context, IntoDiagnostic};
 
 use dolos::prelude::*;
 

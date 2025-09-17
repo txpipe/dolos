@@ -30,6 +30,12 @@ pub struct Mempool {
     updates: broadcast::Sender<MempoolEvent>,
 }
 
+impl Default for Mempool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Mempool {
     pub fn new() -> Self {
         let mempool = Arc::new(RwLock::new(MempoolState::default()));

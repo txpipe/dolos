@@ -4,7 +4,7 @@ use mithril_client::{ClientBuilder, MessageBuilder, MithrilError, MithrilResult}
 use std::{path::Path, sync::Arc};
 use tracing::{info, warn};
 
-use dolos::{adapters::DomainAdapter, facade::DomainExt as _, prelude::*};
+use dolos::{facade::DomainExt as _, prelude::*};
 
 use crate::{feedback::Feedback, MithrilConfig};
 

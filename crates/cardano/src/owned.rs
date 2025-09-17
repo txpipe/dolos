@@ -52,7 +52,7 @@ impl OwnedMultiEraOutput {
 
             let era = pallas::ledger::traverse::Era::try_from(*era)?;
 
-            let dec = MultiEraOutput::decode(era, &cbor)
+            let dec = MultiEraOutput::decode(era, cbor)
                 .map_err(|x| pallas::ledger::traverse::Error::InvalidCbor(x.to_string()))?;
 
             Ok(dec)
