@@ -143,7 +143,9 @@ pub struct Config {
     pub retries: Option<gasket::retries::Policy>,
     pub mithril: Option<MithrilConfig>,
     pub snapshot: Option<SnapshotConfig>,
-    pub chain: Option<dolos::adapters::ChainConfig>,
+
+    #[serde(default)]
+    pub chain: dolos::adapters::ChainConfig,
 
     #[serde(default)]
     pub logging: LoggingConfig,

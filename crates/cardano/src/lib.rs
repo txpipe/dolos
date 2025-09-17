@@ -32,7 +32,7 @@ pub type Block<'a> = MultiEraBlock<'a>;
 
 pub type UtxoBody<'a> = MultiEraOutput<'a>;
 
-#[derive(Serialize, Deserialize, Clone, Default)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct TrackConfig {
     pub account_state: bool,
     pub asset_state: bool,
@@ -40,6 +40,19 @@ pub struct TrackConfig {
     pub epoch_state: bool,
     pub drep_state: bool,
     pub tx_logs: bool,
+}
+
+impl Default for TrackConfig {
+    fn default() -> Self {
+        Self {
+            account_state: true,
+            asset_state: true,
+            pool_state: true,
+            epoch_state: true,
+            drep_state: true,
+            tx_logs: true,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Default)]
