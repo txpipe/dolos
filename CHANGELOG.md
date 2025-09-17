@@ -2,6 +2,39 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.0-beta.1] - 2025-09-17
+
+### 🚀 Features
+
+- *(cardano)* Track all state by default (#691)
+- Track slot inputs tags (#692)
+
+### 🐛 Bug Fixes
+
+- *(cardano)* Contemplate negative utxo delta on epoch state roll (#687)
+- *(cardano)* Track block number during roll visitor
+- *(cardano)* Use fingerprint for asset keys (#693)
+
+### 🚜 Refactor
+
+- *(cardano)* Unpack address tags during roll (#679)
+- *(cardano)* Unpack asset tags inside a roll visitor (#680)
+- *(cardano)* Track datums archive tags in roll visitor (#681)
+- *(archive)* Use writer semantic for batched updates (#683)
+- *(core)* Switch to state-undo rollback mechanism (#684)
+- *(cardano)* Compute nonce as part of the sweep process (#688)
+- *(core)* Use WAL to store consumed inputs (#690)
+
+### 🧪 Testing
+
+- Add drep test vectors import (#678)
+- Add era summaries to test vectors (#682)
+- Fix test after epoch state changes
+
+### ⚙️ Miscellaneous Tasks
+
+- Fix lint warnings across the board (#689)
+
 ## [1.0.0-beta.0] - 2025-09-15
 
 ### 🚀 Features
@@ -55,6 +88,10 @@ All notable changes to this project will be documented in this file.
 - Fix post-rebase compiler errors
 - *(minibf)* Add root and health endpoints (#663)
 - Remove excessive dbg! statements
+
+### Release
+
+- V1.0.0-beta.0
 
 ## [0.32.0] - 2025-09-03
 
