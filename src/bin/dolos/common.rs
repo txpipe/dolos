@@ -103,7 +103,7 @@ pub fn setup_domain(config: &crate::Config) -> miette::Result<DomainAdapter> {
     let genesis = Arc::new(open_genesis_files(&config.genesis)?);
     let mempool = dolos::mempool::Mempool::new();
     let (tip_broadcast, _) = tokio::sync::broadcast::channel(100);
-    let chain = config.chain.clone().unwrap_or_default();
+    let chain = config.chain.clone();
 
     let chain = match chain {
         ChainConfig::Cardano(config) => dolos_cardano::CardanoLogic::new(config.clone()),
