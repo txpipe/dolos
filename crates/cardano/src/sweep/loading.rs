@@ -15,8 +15,8 @@ impl Snapshot {
         pool_id: &PoolId,
         stake: u64,
     ) -> Result<(), ChainError> {
-        self.pool_by_account
-            .insert(account.clone(), pool_id.clone());
+        self.accounts_by_pool
+            .insert(pool_id.clone(), account.clone(), stake);
 
         self.pool_stake
             .entry(pool_id.clone())
@@ -112,6 +112,7 @@ impl BoundaryWork {
 
             // empty until computed
             pool_rewards: HashMap::new(),
+            delegator_rewards: HashMap::new(),
             pot_delta: None,
             starting_state: None,
             effective_rewards: None,

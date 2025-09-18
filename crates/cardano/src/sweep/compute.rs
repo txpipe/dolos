@@ -107,8 +107,12 @@ fn compute_pool_reward(
 }
 
 #[allow(unused)]
-fn compute_delegator_reward(remaining: u64, total_delegated: u64, delegator: &AccountState) -> u64 {
-    let share = (delegator.active_stake as f64 / total_delegated as f64) * remaining as f64;
+fn compute_delegator_reward(
+    available_rewards: u64,
+    total_delegated: u64,
+    delegator_stake: u64,
+) -> u64 {
+    let share = (delegator_stake as f64 / total_delegated as f64) * available_rewards as f64;
     share.round() as u64
 }
 
@@ -204,7 +208,7 @@ impl BoundaryWork {
         for (id, pool) in self.pools.iter() {
             let pool_stake = self.active_snapshot.get_pool_stake(id);
 
-            let rewards = compute_pool_reward(
+            let (total_pool_reward, operator_share) = compute_pool_reward(
                 pot_delta.available_rewards,
                 self.active_snapshot.total_stake,
                 pool,
@@ -213,10 +217,13 @@ impl BoundaryWork {
                 &self.active_a0()?,
             );
 
-            let pool_total = rewards.0 + rewards.1;
+            effective_rewards += total_pool_reward;
+            self.pool_rewards.insert(id.clone(), total_pool_reward);
 
-            effective_rewards += pool_total;
-            self.pool_rewards.insert(id.clone(), pool_total);
+            for (delegator, stake) in self.active_snapshot.accounts_by_pool.iter_delegators(id) {
+                let reward = compute_delegator_reward(total_pool_reward, pool_stake, *stake);
+                self.delegator_rewards.insert(delegator.clone(), reward);
+            }
         }
 
         self.effective_rewards = Some(effective_rewards);
@@ -423,6 +430,7 @@ mod tests {
 
             // empty until computed
             pool_rewards: Default::default(),
+            delegator_rewards: Default::default(),
             pools: Default::default(),
             starting_state: None,
             pot_delta: None,
