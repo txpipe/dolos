@@ -45,14 +45,28 @@ pub struct Pots {
     pub treasury: u64,
 }
 
-#[derive(Debug)]
-#[derive(Default)]
-pub struct Snapshot {
-    pub total_stake: u64,
-    pub pool_by_account: HashMap<AccountId, PoolId>,
-    pub pool_stake: HashMap<PoolId, u64>,
+#[derive(Debug, Default, Clone)]
+pub struct DelegatorMap(HashMap<PoolId, HashMap<AccountId, u64>>);
+
+impl DelegatorMap {
+    pub fn insert(&mut self, pool_id: PoolId, account_id: AccountId, stake: u64) {
+        self.0
+            .entry(pool_id)
+            .or_insert_with(HashMap::new)
+            .insert(account_id, stake);
+    }
+
+    pub fn iter_delegators(&self, pool_id: &PoolId) -> impl Iterator<Item = (&AccountId, &u64)> {
+        self.0.get(pool_id).into_iter().flatten()
+    }
 }
 
+#[derive(Debug, Default)]
+pub struct Snapshot {
+    pub total_stake: u64,
+    pub accounts_by_pool: DelegatorMap,
+    pub pool_stake: HashMap<PoolId, u64>,
+}
 
 impl Snapshot {
     // alias just for semantic clarity
@@ -93,6 +107,7 @@ pub struct BoundaryWork {
     pub pot_delta: Option<PotDelta>,
     pub effective_rewards: Option<u64>,
     pub pool_rewards: HashMap<PoolId, u64>,
+    pub delegator_rewards: HashMap<AccountId, u64>,
     pub starting_state: Option<EpochState>,
     pub era_transition: Option<EraTransition>,
 }

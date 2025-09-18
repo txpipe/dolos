@@ -41,6 +41,9 @@ impl BoundaryWork {
 
             state.active_pool = state.latest_pool.clone();
 
+            let rewards = self.delegator_rewards.get(&key).unwrap_or(&0);
+            state.rewards_sum += rewards;
+
             writer.write_entity_typed::<AccountState>(&key, &state)?;
         }
 
