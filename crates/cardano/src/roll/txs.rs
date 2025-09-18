@@ -2,7 +2,7 @@ use dolos_core::{batch::WorkDeltas, ChainError, SlotTags, TxoRef};
 use pallas::{
     codec::{minicbor, utils::KeepRaw},
     ledger::{
-        addresses::{Address, ShelleyDelegationPart},
+        addresses::Address,
         primitives::{conway::DatumOption, PlutusData},
         traverse::{
             MultiEraBlock, MultiEraCert, MultiEraInput, MultiEraTx, MultiEraValue,
@@ -27,19 +27,13 @@ fn unpack_address(tags: &mut SlotTags, address: &Address) {
             tags.full_addresses.push(x.to_vec());
             tags.payment_addresses.push(x.payment().to_vec());
 
-            match x.delegation() {
-                ShelleyDelegationPart::Key(..) => {
-                    tags.stake_addresses.push(x.delegation().to_vec());
-                }
-                ShelleyDelegationPart::Script(..) => {
-                    tags.stake_addresses.push(x.delegation().to_vec());
-                }
-                _ => (),
-            };
+            if let Some(stake) = pallas_extras::shelley_address_to_stake_address(x) {
+                tags.stake_addresses.push(stake.to_vec());
+            }
         }
         Address::Stake(x) => {
             tags.full_addresses.push(x.to_vec());
-            tags.stake_addresses.push(x.payload().as_hash().to_vec());
+            tags.stake_addresses.push(x.to_vec());
         }
         Address::Byron(x) => {
             tags.full_addresses.push(x.to_vec());
@@ -180,7 +174,9 @@ impl BlockVisitor for TxLogVisitor {
 
 #[cfg(test)]
 mod test {
-    use pallas::ledger::addresses::{Network, ShelleyAddress, ShelleyPaymentPart};
+    use pallas::ledger::addresses::{
+        Network, ShelleyAddress, ShelleyDelegationPart, ShelleyPaymentPart,
+    };
 
     use crate::pallas_extras::shelley_address_to_stake_address;
 
