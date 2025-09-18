@@ -20,7 +20,7 @@ use pallas::{
     codec::minicbor,
     ledger::{
         addresses::{Address, Network, StakeAddress, StakePayload},
-        traverse::{MultiEraBlock, MultiEraCert, MultiEraTx},
+        traverse::{MultiEraBlock, MultiEraCert, MultiEraOutput, MultiEraTx},
     },
 };
 
@@ -128,8 +128,6 @@ impl<'a> IntoModel<Vec<AccountAddressesContentInner>> for AccountModelBuilder<'a
     type SortKey = ();
 
     fn into_model(self) -> Result<Vec<AccountAddressesContentInner>, StatusCode> {
-        // TODO: scan archive logs
-
         let out: Vec<_> = vec![]
             .into_iter()
             .map(|x| AccountAddressesContentInner { address: x })
@@ -177,29 +175,53 @@ where
 
 pub async fn by_stake_addresses<D: Domain>(
     Path(stake_address): Path<String>,
+    Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<Vec<AccountAddressesContentInner>>, StatusCode>
+) -> Result<Json<Vec<AccountAddressesContentInner>>, Error>
 where
     Option<AccountState>: From<D::Entity>,
 {
+    let pagination = Pagination::try_from(params)?;
     let account_key = parse_account_key_param(&stake_address)?;
 
-    let Some(state) = domain
-        .read_cardano_entity::<AccountState>(account_key.entity_key.as_slice())
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-    else {
-        return Ok(Json(vec![]));
-    };
+    let network = domain
+        .get_network_id()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let model = AccountModelBuilder {
-        account_state: state,
-        stake_address: Some(account_key.address),
-        tip_slot: None,
-        chain: None,
+    let mut blocks = domain
+        .archive()
+        .iter_blocks_with_stake(match account_key.address.payload() {
+            StakePayload::Stake(x) => x.as_slice(),
+            StakePayload::Script(x) => x.as_slice(),
+        })
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let mut builder = AccountActivityModelBuilder::new(
+        account_key.address,
+        network,
+        pagination.count,
+        pagination.page as usize,
+    );
+
+    while builder.needs_more() {
+        dbg!("first");
+        let Some(block) = blocks.next() else {
+            break;
+        };
+        dbg!("hay bloque");
+
+        let Ok((_, Some(block))) = block else {
+            return Err(StatusCode::INTERNAL_SERVER_ERROR.into());
+        };
+
+        dbg!("pasa el chequeo");
+
+        let block = MultiEraBlock::decode(&block).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        builder.scan_block_utxos(&block, build_addresses)?;
     }
-    .into_model()?;
 
-    Ok(Json(model))
+    Ok(Json(builder.items))
 }
 
 pub async fn by_stake_utxos<D: Domain>(
@@ -224,6 +246,28 @@ pub async fn by_stake_utxos<D: Domain>(
     let utxos = super::utxos::load_utxo_models(&domain, refs, pagination)?;
 
     Ok(Json(utxos))
+}
+
+fn build_addresses(
+    stake_address: &StakeAddress,
+    utxo: &MultiEraOutput,
+) -> Result<Option<AccountAddressesContentInner>, StatusCode> {
+    let address = utxo
+        .address()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if match &address {
+        Address::Shelley(shelley) => pallas_extras::shelley_address_to_stake_address(shelley)
+            .map(|x| x.to_vec() == stake_address.to_vec())
+            .unwrap_or(false),
+        Address::Stake(stake) => stake.to_vec() == stake_address.to_vec(),
+        Address::Byron(_) => false,
+    } {
+        Ok(Some(AccountAddressesContentInner {
+            address: address.to_string(),
+        }))
+    } else {
+        Ok(None)
+    }
 }
 
 fn build_delegation(
@@ -345,7 +389,7 @@ impl<T> AccountActivityModelBuilder<T> {
         self.items.len() < self.page_size
     }
 
-    fn scan_block<F>(
+    fn scan_block_certs<F>(
         &mut self,
         epoch: u32,
         block: &MultiEraBlock,
@@ -376,6 +420,23 @@ impl<T> AccountActivityModelBuilder<T> {
 
         Ok(())
     }
+
+    fn scan_block_utxos<F>(&mut self, block: &MultiEraBlock, mapper: F) -> Result<(), StatusCode>
+    where
+        F: Fn(&StakeAddress, &MultiEraOutput) -> Result<Option<T>, StatusCode>,
+    {
+        let txs = block.txs();
+
+        for (_, utxo) in txs.iter().flat_map(|tx| tx.produces()) {
+            let model = mapper(&self.stake_address, &utxo)?;
+
+            if let Some(model) = model {
+                self.add(model);
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl IntoModel<Vec<AccountDelegationContentInner>>
@@ -384,6 +445,16 @@ impl IntoModel<Vec<AccountDelegationContentInner>>
     type SortKey = ();
 
     fn into_model(self) -> Result<Vec<AccountDelegationContentInner>, StatusCode> {
+        Ok(self.items)
+    }
+}
+
+impl IntoModel<Vec<AccountAddressesContentInner>>
+    for AccountActivityModelBuilder<AccountAddressesContentInner>
+{
+    type SortKey = ();
+
+    fn into_model(self) -> Result<Vec<AccountAddressesContentInner>, StatusCode> {
         Ok(self.items)
     }
 }
@@ -408,9 +479,6 @@ where
         .get_network_id()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // TODO: scan archive logs
-    let mut slot_iter = std::iter::empty::<u64>();
-
     let mut builder = AccountActivityModelBuilder::new(
         account_key.address,
         network,
@@ -418,22 +486,25 @@ where
         pagination.page as usize,
     );
 
+    let mut blocks = domain
+        .archive()
+        .iter_blocks_with_account(&account_key.entity_key)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
     while builder.needs_more() {
-        let Some(slot) = slot_iter.next() else {
+        let Some(block) = blocks.next() else {
             break;
+        };
+
+        let Ok((slot, Some(block))) = block else {
+            return Err(StatusCode::INTERNAL_SERVER_ERROR.into());
         };
 
         let (epoch, _) = chain.slot_epoch(slot);
 
-        let block = domain
-            .archive()
-            .get_block_by_slot(&slot)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-            .ok_or(StatusCode::NOT_FOUND)?;
-
         let block = MultiEraBlock::decode(&block).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-        builder.scan_block(epoch, &block, &mapper)?;
+        builder.scan_block_certs(epoch, &block, &mapper)?;
     }
 
     Ok(builder.items)

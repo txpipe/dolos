@@ -105,6 +105,13 @@ impl AddressStakePartApproxIndexTable {
         }
         Ok(out)
     }
+
+    pub fn iter_by_stake(rx: &ReadTransaction, stake: &[u8]) -> Result<SlotKeyIterator, Error> {
+        let table = rx.open_multimap_table(Self::DEF)?;
+        let key = Self::compute_key(&stake.to_vec());
+        let range = table.get(key)?;
+        Ok(SlotKeyIterator::new(range))
+    }
 }
 
 pub struct AssetApproxIndexTable;
@@ -277,6 +284,34 @@ impl SpentTxoApproxIndexTable {
     }
 }
 
+pub struct AccountCertsApproxIndexTable;
+
+impl AccountCertsApproxIndexTable {
+    pub const DEF: MultimapTableDefinition<'static, u64, u64> =
+        MultimapTableDefinition::new("bystakeactions");
+
+    pub fn compute_key(account: &Vec<u8>) -> u64 {
+        xxh3_64(account.as_slice())
+    }
+
+    pub fn get_by_account(rx: &ReadTransaction, account: &[u8]) -> Result<Vec<BlockSlot>, Error> {
+        let table = rx.open_multimap_table(Self::DEF)?;
+        let key = Self::compute_key(&account.to_vec());
+        let mut out = vec![];
+        for slot in table.get(key)? {
+            out.push(slot?.value());
+        }
+        Ok(out)
+    }
+
+    pub fn iter_by_account(rx: &ReadTransaction, account: &[u8]) -> Result<SlotKeyIterator, Error> {
+        let table = rx.open_multimap_table(Self::DEF)?;
+        let key = Self::compute_key(&account.to_vec());
+        let range = table.get(key)?;
+        Ok(SlotKeyIterator::new(range))
+    }
+}
+
 pub struct TxHashApproxIndexTable;
 
 impl TxHashApproxIndexTable {
@@ -312,6 +347,7 @@ impl Indexes {
         wx.open_multimap_table(PolicyApproxIndexTable::DEF)?;
         wx.open_multimap_table(ScriptHashApproxIndexTable::DEF)?;
         wx.open_multimap_table(SpentTxoApproxIndexTable::DEF)?;
+        wx.open_multimap_table(AccountCertsApproxIndexTable::DEF)?;
         wx.open_multimap_table(TxHashApproxIndexTable::DEF)?;
 
         Ok(())
@@ -325,8 +361,16 @@ impl Indexes {
         AssetApproxIndexTable::iter_by_asset(rx, asset)
     }
 
-    pub fn iter_by_payment(rx: &ReadTransaction, address: &[u8]) -> Result<SlotKeyIterator, Error> {
-        AddressPaymentPartApproxIndexTable::iter_by_payment(rx, address)
+    pub fn iter_by_payment(rx: &ReadTransaction, payment: &[u8]) -> Result<SlotKeyIterator, Error> {
+        AddressPaymentPartApproxIndexTable::iter_by_payment(rx, payment)
+    }
+
+    pub fn iter_by_stake(rx: &ReadTransaction, stake: &[u8]) -> Result<SlotKeyIterator, Error> {
+        AddressStakePartApproxIndexTable::iter_by_stake(rx, stake)
+    }
+
+    pub fn iter_by_account(rx: &ReadTransaction, account: &[u8]) -> Result<SlotKeyIterator, Error> {
+        AccountCertsApproxIndexTable::iter_by_account(rx, account)
     }
 
     pub fn get_by_address_payment_part(
@@ -386,6 +430,10 @@ impl Indexes {
         SpentTxoApproxIndexTable::get_by_spent_txo(rx, spent_txo)
     }
 
+    pub fn get_by_account(rx: &ReadTransaction, account: &[u8]) -> Result<Vec<BlockSlot>, Error> {
+        AccountCertsApproxIndexTable::get_by_account(rx, account)
+    }
+
     pub fn get_by_tx_hash(rx: &ReadTransaction, tx_hash: &[u8]) -> Result<Vec<BlockSlot>, Error> {
         TxHashApproxIndexTable::get_by_tx_hash(rx, tx_hash)
     }
@@ -401,6 +449,7 @@ impl Indexes {
         Self::copy_table(PolicyApproxIndexTable::DEF, rx, wx)?;
         Self::copy_table(ScriptHashApproxIndexTable::DEF, rx, wx)?;
         Self::copy_table(SpentTxoApproxIndexTable::DEF, rx, wx)?;
+        Self::copy_table(AccountCertsApproxIndexTable::DEF, rx, wx)?;
         Self::copy_table(TxHashApproxIndexTable::DEF, rx, wx)?;
 
         Ok(())
@@ -501,6 +550,14 @@ impl Indexes {
             slot,
         )?;
 
+        Self::insert(
+            wx,
+            AccountCertsApproxIndexTable::DEF,
+            AccountCertsApproxIndexTable::compute_key,
+            tags.account_certs.clone(),
+            slot,
+        )?;
+
         Ok(())
     }
 
@@ -596,6 +653,14 @@ impl Indexes {
             SpentTxoApproxIndexTable::DEF,
             SpentTxoApproxIndexTable::compute_key,
             tags.spent_txo.clone(),
+            slot,
+        )?;
+
+        Self::remove(
+            wx,
+            AccountCertsApproxIndexTable::DEF,
+            AccountCertsApproxIndexTable::compute_key,
+            tags.account_certs.clone(),
             slot,
         )?;
 

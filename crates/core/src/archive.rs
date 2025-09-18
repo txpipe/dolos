@@ -43,6 +43,7 @@ pub struct SlotTags {
     pub payment_addresses: Vec<OpaqueTag>,
     pub stake_addresses: Vec<OpaqueTag>,
     pub spent_txo: Vec<OpaqueTag>,
+    pub account_certs: Vec<OpaqueTag>,
 }
 
 pub trait ArchiveWriter: Send + Sync + 'static {
@@ -93,6 +94,13 @@ pub trait ArchiveStore: Clone + Send + Sync + 'static {
     fn iter_blocks_with_payment(
         &self,
         payment: &[u8],
+    ) -> Result<Self::SparseBlockIter, ArchiveError>;
+
+    fn iter_blocks_with_stake(&self, stake: &[u8]) -> Result<Self::SparseBlockIter, ArchiveError>;
+
+    fn iter_blocks_with_account(
+        &self,
+        account: &[u8],
     ) -> Result<Self::SparseBlockIter, ArchiveError>;
 
     fn get_range<'a>(

@@ -255,6 +255,14 @@ impl ChainStore {
         indexes::Indexes::get_by_spent_txo(&rx, spent_txo)
     }
 
+    pub fn get_possible_block_slots_by_account(
+        &self,
+        account: &[u8],
+    ) -> Result<Vec<BlockSlot>, RedbArchiveError> {
+        let rx = self.db().begin_read()?;
+        indexes::Indexes::get_by_account(&rx, account)
+    }
+
     pub fn get_possible_block_slots_by_tx_hash(
         &self,
         tx_hash: &[u8],
@@ -389,6 +397,20 @@ impl ChainStore {
             .collect()
     }
 
+    pub fn get_possible_blocks_by_account(
+        &self,
+        account: &[u8],
+    ) -> Result<Vec<BlockBody>, RedbArchiveError> {
+        self.get_possible_block_slots_by_account(account)?
+            .iter()
+            .flat_map(|slot| match self.get_block_by_slot(slot) {
+                Ok(Some(block)) => Some(Ok(block)),
+                Ok(None) => None,
+                Err(e) => Some(Err(e)),
+            })
+            .collect()
+    }
+
     pub fn get_possible_blocks_by_tx_hash(
         &self,
         tx_hash: &[u8],
@@ -446,6 +468,24 @@ impl ChainStore {
     ) -> Result<ChainSparseIter, RedbArchiveError> {
         let rx = self.db().begin_read()?;
         let range = indexes::Indexes::iter_by_payment(&rx, payment)?;
+        Ok(ChainSparseIter(rx, range))
+    }
+
+    pub fn iter_possible_blocks_with_stake(
+        &self,
+        stake: &[u8],
+    ) -> Result<ChainSparseIter, RedbArchiveError> {
+        let rx = self.db().begin_read()?;
+        let range = indexes::Indexes::iter_by_stake(&rx, stake)?;
+        Ok(ChainSparseIter(rx, range))
+    }
+
+    pub fn iter_possible_blocks_with_account(
+        &self,
+        account: &[u8],
+    ) -> Result<ChainSparseIter, RedbArchiveError> {
+        let rx = self.db().begin_read()?;
+        let range = indexes::Indexes::iter_by_account(&rx, account)?;
         Ok(ChainSparseIter(rx, range))
     }
 
@@ -723,6 +763,23 @@ impl dolos_core::ArchiveStore for ChainStore {
     ) -> Result<Self::SparseBlockIter, ArchiveError> {
         // TODO: we need to filter the false positives
         let out = self.iter_possible_blocks_with_payment(payment)?;
+
+        Ok(out)
+    }
+
+    fn iter_blocks_with_stake(&self, stake: &[u8]) -> Result<Self::SparseBlockIter, ArchiveError> {
+        // TODO: we need to filter the false positives
+        let out = self.iter_possible_blocks_with_stake(stake)?;
+
+        Ok(out)
+    }
+
+    fn iter_blocks_with_account(
+        &self,
+        account: &[u8],
+    ) -> Result<Self::SparseBlockIter, ArchiveError> {
+        // TODO: we need to filter the false positives
+        let out = self.iter_possible_blocks_with_account(account)?;
 
         Ok(out)
     }
