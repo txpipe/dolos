@@ -136,7 +136,7 @@ where
                 })
                 .collect::<Result<_, _>>()?;
 
-            let utxo_undo = dolos_cardano::utxoset::compute_undo_delta(&blockd, &inputs)
+            let utxo_undo = dolos_cardano::utxoset::compute_undo_delta(blockd, &inputs)
                 .map_err(dolos_core::ChainError::from)?;
 
             writer.apply_utxoset(&utxo_undo)?;
