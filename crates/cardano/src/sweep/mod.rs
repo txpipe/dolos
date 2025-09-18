@@ -50,10 +50,7 @@ pub struct DelegatorMap(HashMap<PoolId, HashMap<AccountId, u64>>);
 
 impl DelegatorMap {
     pub fn insert(&mut self, pool_id: PoolId, account_id: AccountId, stake: u64) {
-        self.0
-            .entry(pool_id)
-            .or_insert_with(HashMap::new)
-            .insert(account_id, stake);
+        self.0.entry(pool_id).or_default().insert(account_id, stake);
     }
 
     pub fn iter_delegators(&self, pool_id: &PoolId) -> impl Iterator<Item = (&AccountId, &u64)> {

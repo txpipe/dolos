@@ -1,6 +1,6 @@
 use ::redb::{MultimapTableDefinition, ReadTransaction, WriteTransaction};
 use redb::MultimapValue;
-use std::hash::{DefaultHasher, Hash as _, Hasher};
+use xxhash_rust::xxh3::xxh3_64;
 
 use dolos_core::{BlockSlot, ChainPoint, SlotTags};
 
@@ -41,9 +41,7 @@ impl AddressApproxIndexTable {
         MultimapTableDefinition::new("byaddress");
 
     pub fn compute_key(address: &Vec<u8>) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        address.hash(&mut hasher);
-        hasher.finish()
+        xxh3_64(address.as_slice())
     }
 
     pub fn iter_by_address(rx: &ReadTransaction, address: &[u8]) -> Result<SlotKeyIterator, Error> {
@@ -61,9 +59,7 @@ impl AddressPaymentPartApproxIndexTable {
         MultimapTableDefinition::new("bypayment");
 
     pub fn compute_key(address: &Vec<u8>) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        address.hash(&mut hasher);
-        hasher.finish()
+        xxh3_64(address.as_slice())
     }
 
     pub fn get_by_address_payment_part(
@@ -94,9 +90,7 @@ impl AddressStakePartApproxIndexTable {
         MultimapTableDefinition::new("bystake");
 
     pub fn compute_key(address_stake_part: &Vec<u8>) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        address_stake_part.hash(&mut hasher);
-        hasher.finish()
+        xxh3_64(address_stake_part.as_slice())
     }
 
     pub fn get_by_address_stake_part(
@@ -120,9 +114,7 @@ impl AssetApproxIndexTable {
         MultimapTableDefinition::new("byasset");
 
     pub fn compute_key(asset: &Vec<u8>) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        asset.hash(&mut hasher);
-        hasher.finish()
+        xxh3_64(asset.as_slice())
     }
 
     pub fn get_by_asset(rx: &ReadTransaction, asset: &[u8]) -> Result<Vec<BlockSlot>, Error> {
@@ -150,9 +142,7 @@ impl BlockHashApproxIndexTable {
         MultimapTableDefinition::new("byblockhash");
 
     pub fn compute_key(block_hash: &Vec<u8>) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        block_hash.hash(&mut hasher);
-        hasher.finish()
+        xxh3_64(block_hash.as_slice())
     }
 
     pub fn get_by_block_hash(
@@ -201,9 +191,7 @@ impl DatumHashApproxIndexTable {
         MultimapTableDefinition::new("bydatum");
 
     pub fn compute_key(datum_hash: &Vec<u8>) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        datum_hash.hash(&mut hasher);
-        hasher.finish()
+        xxh3_64(datum_hash.as_slice())
     }
 
     pub fn get_by_datum_hash(
@@ -227,9 +215,7 @@ impl PolicyApproxIndexTable {
         MultimapTableDefinition::new("bypolicy");
 
     pub fn compute_key(policy: &Vec<u8>) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        policy.hash(&mut hasher);
-        hasher.finish()
+        xxh3_64(policy.as_slice())
     }
 
     pub fn get_by_policy(rx: &ReadTransaction, policy: &[u8]) -> Result<Vec<BlockSlot>, Error> {
@@ -250,9 +236,7 @@ impl ScriptHashApproxIndexTable {
         MultimapTableDefinition::new("byscript");
 
     pub fn compute_key(script_hash: &Vec<u8>) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        script_hash.hash(&mut hasher);
-        hasher.finish()
+        xxh3_64(script_hash.as_slice())
     }
 
     pub fn get_by_script_hash(
@@ -275,10 +259,8 @@ impl SpentTxoApproxIndexTable {
     pub const DEF: MultimapTableDefinition<'static, u64, u64> =
         MultimapTableDefinition::new("byspenttxo");
 
-    pub fn compute_key(script_hash: &Vec<u8>) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        script_hash.hash(&mut hasher);
-        hasher.finish()
+    pub fn compute_key(spent_txo: &Vec<u8>) -> u64 {
+        xxh3_64(spent_txo.as_slice())
     }
 
     pub fn get_by_spent_txo(
@@ -302,9 +284,7 @@ impl TxHashApproxIndexTable {
         MultimapTableDefinition::new("bytx");
 
     pub fn compute_key(tx_hash: &Vec<u8>) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        tx_hash.hash(&mut hasher);
-        hasher.finish()
+        xxh3_64(tx_hash.as_slice())
     }
 
     pub fn get_by_tx_hash(rx: &ReadTransaction, tx_hash: &[u8]) -> Result<Vec<BlockSlot>, Error> {
