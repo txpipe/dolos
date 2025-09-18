@@ -491,6 +491,14 @@ impl Indexes {
 
         Self::insert(
             wx,
+            AddressApproxIndexTable::DEF,
+            AddressApproxIndexTable::compute_key,
+            tags.full_addresses.clone(),
+            slot,
+        )?;
+
+        Self::insert(
+            wx,
             PolicyApproxIndexTable::DEF,
             PolicyApproxIndexTable::compute_key,
             tags.policies.clone(),
