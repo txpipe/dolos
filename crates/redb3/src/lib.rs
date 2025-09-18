@@ -6,8 +6,8 @@ use dolos_core::{
 };
 
 use redb::{
-    Database, Durability, MultimapTableDefinition, ReadTransaction, TableDefinition,
-    WriteTransaction,
+    Database, Durability, MultimapTableDefinition, ReadTransaction, ReadableDatabase,
+    TableDefinition, WriteTransaction,
 };
 
 use tracing::warn;
@@ -27,6 +27,9 @@ pub enum Error {
     #[error(transparent)]
     TransactionError(Box<::redb::TransactionError>),
 
+    #[error("internal error")]
+    SetDurabilityError(Box<::redb::SetDurabilityError>),
+
     #[error(transparent)]
     CommitError(#[from] ::redb::CommitError),
 
@@ -42,6 +45,12 @@ pub enum Error {
     // TODO: remove this once we generalize opaque filters
     #[error(transparent)]
     AddressError(#[from] pallas::ledger::addresses::Error),
+}
+
+impl From<::redb::SetDurabilityError> for Error {
+    fn from(error: ::redb::SetDurabilityError) -> Self {
+        Error::SetDurabilityError(Box::new(error))
+    }
 }
 
 impl From<::redb::TransactionError> for Error {
@@ -321,7 +330,7 @@ impl StateStore {
 
     pub fn initialize_schema(&self) -> Result<(), Error> {
         let mut wx = self.db().begin_write()?;
-        wx.set_durability(Durability::Immediate);
+        wx.set_durability(Durability::Immediate)?;
 
         let _ = wx.open_table(CURSOR_TABLE)?;
 

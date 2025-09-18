@@ -16,7 +16,7 @@ hex.workspace = true
 thiserror.workspace = true
 
 dolos-core = { path = "../core" }
-redb = { version = "^2.6" }
+redb = { version = "3.0.2" }
 
 [dev-dependencies]
 dolos-testing = { path = "../testing" }
