@@ -1,4 +1,4 @@
-use ::redb::{Database, Range};
+use ::redb::{Database, Range, ReadableDatabase};
 use redb::ReadTransaction;
 use std::path::Path;
 use tracing::{debug, info, warn};
@@ -33,6 +33,14 @@ impl From<RedbArchiveError> for ArchiveError {
 
 impl From<::redb::DatabaseError> for RedbArchiveError {
     fn from(value: ::redb::DatabaseError) -> Self {
+        Self(ArchiveError::InternalError(Box::new(::redb::Error::from(
+            value,
+        ))))
+    }
+}
+
+impl From<::redb::SetDurabilityError> for RedbArchiveError {
+    fn from(value: ::redb::SetDurabilityError) -> Self {
         Self(ArchiveError::InternalError(Box::new(::redb::Error::from(
             value,
         ))))
@@ -103,7 +111,7 @@ impl ChainStore {
 
     pub fn initialize(db: Database) -> Result<Self, RedbArchiveError> {
         let mut wx = db.begin_write()?;
-        wx.set_durability(Durability::Immediate);
+        wx.set_durability(Durability::Immediate)?;
 
         indexes::Indexes::initialize(&wx)?;
         tables::BlocksTable::initialize(&wx)?;
@@ -145,7 +153,7 @@ impl ChainStore {
 
     pub fn start_writer(&self) -> Result<ChainStoreWriter, RedbArchiveError> {
         let mut wx = self.db().begin_write()?;
-        wx.set_durability(Durability::Eventual);
+        wx.set_durability(Durability::Immediate)?;
         wx.set_quick_repair(true);
 
         Ok(ChainStoreWriter { wx })
