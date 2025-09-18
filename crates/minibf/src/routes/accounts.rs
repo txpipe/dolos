@@ -488,7 +488,7 @@ where
 
     let mut blocks = domain
         .archive()
-        .iter_blocks_with_account(&account_key.entity_key)
+        .iter_blocks_with_account_certs(&account_key.entity_key)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     while builder.needs_more() {

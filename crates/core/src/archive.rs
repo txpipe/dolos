@@ -98,7 +98,7 @@ pub trait ArchiveStore: Clone + Send + Sync + 'static {
 
     fn iter_blocks_with_stake(&self, stake: &[u8]) -> Result<Self::SparseBlockIter, ArchiveError>;
 
-    fn iter_blocks_with_account(
+    fn iter_blocks_with_account_certs(
         &self,
         account: &[u8],
     ) -> Result<Self::SparseBlockIter, ArchiveError>;

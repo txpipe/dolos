@@ -480,12 +480,12 @@ impl ChainStore {
         Ok(ChainSparseIter(rx, range))
     }
 
-    pub fn iter_possible_blocks_with_account(
+    pub fn iter_possible_blocks_with_account_certs(
         &self,
         account: &[u8],
     ) -> Result<ChainSparseIter, RedbArchiveError> {
         let rx = self.db().begin_read()?;
-        let range = indexes::Indexes::iter_by_account(&rx, account)?;
+        let range = indexes::Indexes::iter_by_account_certs(&rx, account)?;
         Ok(ChainSparseIter(rx, range))
     }
 
@@ -774,12 +774,12 @@ impl dolos_core::ArchiveStore for ChainStore {
         Ok(out)
     }
 
-    fn iter_blocks_with_account(
+    fn iter_blocks_with_account_certs(
         &self,
         account: &[u8],
     ) -> Result<Self::SparseBlockIter, ArchiveError> {
         // TODO: we need to filter the false positives
-        let out = self.iter_possible_blocks_with_account(account)?;
+        let out = self.iter_possible_blocks_with_account_certs(account)?;
 
         Ok(out)
     }

@@ -304,7 +304,10 @@ impl AccountCertsApproxIndexTable {
         Ok(out)
     }
 
-    pub fn iter_by_account(rx: &ReadTransaction, account: &[u8]) -> Result<SlotKeyIterator, Error> {
+    pub fn iter_by_account_certs(
+        rx: &ReadTransaction,
+        account: &[u8],
+    ) -> Result<SlotKeyIterator, Error> {
         let table = rx.open_multimap_table(Self::DEF)?;
         let key = Self::compute_key(&account.to_vec());
         let range = table.get(key)?;
@@ -369,8 +372,11 @@ impl Indexes {
         AddressStakePartApproxIndexTable::iter_by_stake(rx, stake)
     }
 
-    pub fn iter_by_account(rx: &ReadTransaction, account: &[u8]) -> Result<SlotKeyIterator, Error> {
-        AccountCertsApproxIndexTable::iter_by_account(rx, account)
+    pub fn iter_by_account_certs(
+        rx: &ReadTransaction,
+        account: &[u8],
+    ) -> Result<SlotKeyIterator, Error> {
+        AccountCertsApproxIndexTable::iter_by_account_certs(rx, account)
     }
 
     pub fn get_by_address_payment_part(
