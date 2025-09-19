@@ -1,3 +1,5 @@
+use std::ops::Deref;
+
 use dolos_core::batch::WorkDeltas;
 use dolos_core::{BlockSlot, ChainError, NsKey};
 use pallas::crypto::hash::{Hash, Hasher};
@@ -82,6 +84,32 @@ impl dolos_core::EntityDelta for MintedBlocksInc {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PoolRetirement {
+    operator: Hash<28>,
+    epoch: u64,
+}
+
+impl dolos_core::EntityDelta for PoolRetirement {
+    type Entity = PoolState;
+
+    fn key(&self) -> NsKey {
+        NsKey::from((PoolState::NS, self.operator.as_slice()))
+    }
+
+    fn apply(&mut self, entity: &mut Option<PoolState>) {
+        if let Some(entity) = entity {
+            entity.retiring_epoch = Some(self.epoch);
+        }
+    }
+
+    fn undo(&self, entity: &mut Option<PoolState>) {
+        if let Some(entity) = entity {
+            entity.retiring_epoch = None;
+        }
+    }
+}
+
 #[derive(Default, Clone)]
 pub struct PoolStateVisitor;
 
@@ -109,6 +137,34 @@ impl BlockVisitor for PoolStateVisitor {
         if let Some(cert) = pallas_extras::cert_to_pool_state(cert) {
             deltas.add_for_entity(PoolRegistration::new(block.slot(), cert));
         }
+
+        match cert {
+            MultiEraCert::AlonzoCompatible(cow) => {
+                if let pallas::ledger::primitives::alonzo::Certificate::PoolRetirement(
+                    operator,
+                    epoch,
+                ) = cow.deref().deref()
+                {
+                    deltas.add_for_entity(PoolRetirement {
+                        operator: *operator,
+                        epoch: *epoch,
+                    });
+                }
+            }
+            MultiEraCert::Conway(cow) => {
+                if let pallas::ledger::primitives::conway::Certificate::PoolRetirement(
+                    operator,
+                    epoch,
+                ) = cow.deref().deref()
+                {
+                    deltas.add_for_entity(PoolRetirement {
+                        operator: *operator,
+                        epoch: *epoch,
+                    });
+                }
+            }
+            _ => {}
+        };
 
         Ok(())
     }
