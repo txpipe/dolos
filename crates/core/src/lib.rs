@@ -502,8 +502,11 @@ pub enum ChainError {
     #[error(transparent)]
     StateError(#[from] StateError),
 
-    #[error("pparams not found")]
-    PParamsNotFound,
+    #[error("protocol params not found: {0}")]
+    PParamsNotFound(String),
+
+    #[error("no active epoch")]
+    NoActiveEpoch,
 
     #[error("era not found")]
     EraNotFound,

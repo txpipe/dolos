@@ -144,22 +144,28 @@ macro_rules! check_all_proposed {
 
 #[derive(Clone, Default)]
 pub struct EpochStateVisitor {
-    delta: Option<EpochStatsUpdate>,
+    stats_delta: Option<EpochStatsUpdate>,
+    nonces_delta: Option<NoncesUpdate>,
 }
 
 impl BlockVisitor for EpochStateVisitor {
     fn visit_root(
         &mut self,
-        deltas: &mut WorkDeltas<CardanoLogic>,
+        _: &mut WorkDeltas<CardanoLogic>,
         block: &MultiEraBlock,
     ) -> Result<(), ChainError> {
-        self.delta = Some(EpochStatsUpdate::default());
-        deltas.add_for_entity(NoncesUpdate {
-            slot: block.header().slot(),
-            tail: block.header().previous_hash(),
-            nonce_vrf_output: block.header().nonce_vrf_output()?,
-            previous: None,
-        });
+        self.stats_delta = Some(EpochStatsUpdate::default());
+
+        // we only track nonces for Shelley and later
+        if block.era() >= pallas::ledger::traverse::Era::Shelley {
+            self.nonces_delta = Some(NoncesUpdate {
+                slot: block.header().slot(),
+                tail: block.header().previous_hash(),
+                nonce_vrf_output: block.header().nonce_vrf_output()?,
+                previous: None,
+            });
+        }
+
         Ok(())
     }
 
@@ -169,7 +175,7 @@ impl BlockVisitor for EpochStateVisitor {
         _: &MultiEraBlock,
         tx: &MultiEraTx,
     ) -> Result<(), ChainError> {
-        self.delta.as_mut().unwrap().block_fees += tx.fee().unwrap_or_default();
+        self.stats_delta.as_mut().unwrap().block_fees += tx.fee().unwrap_or_default();
 
         Ok(())
     }
@@ -183,7 +189,7 @@ impl BlockVisitor for EpochStateVisitor {
         resolved: &pallas::ledger::traverse::MultiEraOutput,
     ) -> Result<(), ChainError> {
         let amount = resolved.value().coin();
-        self.delta.as_mut().unwrap().utxo_consumed += amount;
+        self.stats_delta.as_mut().unwrap().utxo_consumed += amount;
 
         Ok(())
     }
@@ -197,7 +203,7 @@ impl BlockVisitor for EpochStateVisitor {
         output: &pallas::ledger::traverse::MultiEraOutput,
     ) -> Result<(), ChainError> {
         let amount = output.value().coin();
-        self.delta.as_mut().unwrap().utxo_produced += amount;
+        self.stats_delta.as_mut().unwrap().utxo_produced += amount;
 
         Ok(())
     }
@@ -210,15 +216,18 @@ impl BlockVisitor for EpochStateVisitor {
         cert: &MultiEraCert,
     ) -> Result<(), ChainError> {
         if pallas_extras::cert_as_stake_registration(cert).is_some() {
-            self.delta.as_mut().unwrap().stake_registration_count += 1;
+            self.stats_delta.as_mut().unwrap().stake_registration_count += 1;
         }
 
         if pallas_extras::cert_as_stake_deregistration(cert).is_some() {
-            self.delta.as_mut().unwrap().stake_deregistration_count += 1;
+            self.stats_delta
+                .as_mut()
+                .unwrap()
+                .stake_deregistration_count += 1;
         }
 
         if pallas_extras::cert_to_pool_state(cert).is_some() {
-            self.delta.as_mut().unwrap().pool_registration_count += 1;
+            self.stats_delta.as_mut().unwrap().pool_registration_count += 1;
         }
 
         // TODO: decayed deposits
@@ -278,7 +287,11 @@ impl BlockVisitor for EpochStateVisitor {
     }
 
     fn flush(&mut self, deltas: &mut WorkDeltas<CardanoLogic>) -> Result<(), ChainError> {
-        if let Some(delta) = self.delta.take() {
+        if let Some(delta) = self.stats_delta.take() {
+            deltas.add_for_entity(delta);
+        }
+
+        if let Some(delta) = self.nonces_delta.take() {
             deltas.add_for_entity(delta);
         }
 

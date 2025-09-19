@@ -4,7 +4,7 @@ use pallas::ledger::primitives::RationalNumber;
 use crate::{
     sweep::{BoundaryWork, EraTransition, PoolData, PotDelta, Pots},
     utils::epoch_first_slot,
-    EpochState, Nonces, PParamsSet,
+    EpochState, EraProtocol, Nonces, PParamsSet,
 };
 
 macro_rules! as_ratio {
@@ -65,14 +65,15 @@ pub fn compute_genesis_pots(
 ) -> Result<Pots, ChainError> {
     let reserves = max_supply.saturating_sub(utxos);
 
-    let rho = pparams.rho().ok_or(ChainError::PParamsNotFound)?;
-    let tau = pparams.tau().ok_or(ChainError::PParamsNotFound)?;
+    let rho = pparams.ensure_rho()?;
+    let tau = pparams.ensure_tau()?;
 
     let pot_delta = compute_pot_delta(reserves, 0, 0, &rho, &tau);
 
     let out = Pots {
         reserves: reserves - pot_delta.incentives + pot_delta.available_rewards,
         treasury: pot_delta.treasury_tax,
+        utxos,
     };
 
     Ok(out)
@@ -121,6 +122,7 @@ impl BoundaryWork {
         Pots {
             reserves: self.ending_state.reserves,
             treasury: self.ending_state.treasury,
+            utxos: self.ending_state.utxos,
         }
     }
 
@@ -134,34 +136,26 @@ impl BoundaryWork {
         let p = &self
             .active_state
             .as_ref()
-            .ok_or(ChainError::PParamsNotFound)?
+            .ok_or(ChainError::NoActiveEpoch)?
             .pparams;
 
         Ok(p)
     }
 
     pub fn active_rho(&self) -> Result<RationalNumber, ChainError> {
-        self.active_pparams()?
-            .rho()
-            .ok_or(ChainError::PParamsNotFound)
+        self.active_pparams()?.ensure_rho()
     }
 
     pub fn active_tau(&self) -> Result<RationalNumber, ChainError> {
-        self.active_pparams()?
-            .tau()
-            .ok_or(ChainError::PParamsNotFound)
+        self.active_pparams()?.ensure_tau()
     }
 
     pub fn active_k(&self) -> Result<u32, ChainError> {
-        self.active_pparams()?
-            .k()
-            .ok_or(ChainError::PParamsNotFound)
+        self.active_pparams()?.ensure_k()
     }
 
     pub fn active_a0(&self) -> Result<RationalNumber, ChainError> {
-        self.active_pparams()?
-            .a0()
-            .ok_or(ChainError::PParamsNotFound)
+        self.active_pparams()?.ensure_a0()
     }
 
     pub fn starting_pparams(&self) -> Result<&PParamsSet, ChainError> {
@@ -183,7 +177,35 @@ impl BoundaryWork {
         self.ending_state.decayed_deposits
     }
 
+    /// Check if this boundary is transitioning to shelley for the first time.
+    fn is_transitioning_to_shelley(&self) -> bool {
+        self.era_transition
+            .as_ref()
+            .map(|transition| transition.new_version == 2)
+            .unwrap_or(false)
+    }
+
+    /// Check if the starting epoch is still within the byron era.
+    fn still_byron(&self) -> bool {
+        self.active_protocol < 2 || !self.is_transitioning_to_shelley()
+    }
+
+    fn set_neutral_pot_delta(&mut self) {
+        self.pot_delta = Some(PotDelta {
+            incentives: 0,
+            treasury_tax: 0,
+            available_rewards: 0,
+        });
+    }
+
     fn define_pot_delta(&mut self) -> Result<(), ChainError> {
+        // if we're still in Byron, we just skip the pot delta computation by assigning
+        // a neutral pot delta
+        if self.still_byron() {
+            self.set_neutral_pot_delta();
+            return Ok(());
+        }
+
         let delta = compute_pot_delta(
             self.initial_pots().reserves,
             self.gathered_fees(),
@@ -198,6 +220,13 @@ impl BoundaryWork {
     }
 
     fn define_pool_rewards(&mut self) -> Result<(), ChainError> {
+        // if we're still in Byron, we just skip the pool rewards computation and assume
+        // zero effective rewards.
+        if self.still_byron() {
+            self.effective_rewards = Some(0);
+            return Ok(());
+        }
+
         let pot_delta = self
             .pot_delta
             .as_ref()
@@ -231,6 +260,27 @@ impl BoundaryWork {
         Ok(())
     }
 
+    fn define_starting_nonces(&mut self) -> Result<Option<Nonces>, ChainError> {
+        if self.is_transitioning_to_shelley() {
+            let initial = Nonces::bootstrap(self.shelley_hash);
+            return Ok(Some(initial));
+        }
+
+        let tail = self
+            .waiting_state
+            .as_ref()
+            .and_then(|state| state.nonces.as_ref())
+            .and_then(|nonces| nonces.tail);
+
+        let new_nonces = self
+            .ending_state
+            .nonces
+            .as_ref()
+            .map(|nonces| nonces.sweep(tail, None));
+
+        Ok(new_nonces)
+    }
+
     fn define_starting_state(&mut self) -> Result<(), ChainError> {
         let pot_delta = self
             .pot_delta
@@ -253,30 +303,7 @@ impl BoundaryWork {
         let deposits = self.ending_state.deposits;
         let utxos = self.ending_state.utxos;
 
-        let nonces = if self
-            .era_transition
-            .as_ref()
-            .map(|transition| transition.new_version == 2)
-            .unwrap_or(false)
-        {
-            Some(Nonces::bootstrap(self.shelley_hash))
-        } else {
-            let previous_tail = match self.waiting_state.as_ref() {
-                Some(state) => {
-                    if let Some(nonces) = state.nonces.as_ref() {
-                        nonces.tail
-                    } else {
-                        None
-                    }
-                }
-                None => None,
-            };
-
-            self.ending_state
-                .nonces
-                .as_ref()
-                .map(|nonces| nonces.sweep(previous_tail, None))
-        };
+        let nonces = self.define_starting_nonces()?;
 
         let state = EpochState {
             number: self.ending_state.number + 1,
@@ -306,23 +333,16 @@ impl BoundaryWork {
     }
 
     fn define_era_transition(&mut self) -> Result<(), ChainError> {
-        let (active_protocol, _) = self
-            .active_pparams()?
-            .protocol_version()
-            .ok_or(ChainError::PParamsNotFound)?;
-
-        let (starting_protocol, _) = self
-            .starting_pparams()?
-            .protocol_version()
-            .ok_or(ChainError::PParamsNotFound)?;
+        let (active_protocol, _) = self.active_pparams()?.ensure_protocol_version()?;
+        let (starting_protocol, _) = self.starting_pparams()?.ensure_protocol_version()?;
 
         if starting_protocol != active_protocol {
             let epoch_length = self.ending_state.pparams.epoch_length_or_default();
             let slot_length = self.ending_state.pparams.slot_length_or_default();
 
             let era_transition = EraTransition {
-                prev_version: active_protocol as u16,
-                new_version: starting_protocol as u16,
+                prev_version: EraProtocol::from(active_protocol as u16),
+                new_version: EraProtocol::from(starting_protocol as u16),
                 epoch_length,
                 slot_length,
             };
@@ -395,6 +415,7 @@ mod tests {
             }));
 
         let mut boundary = BoundaryWork {
+            active_protocol: EraProtocol::from(6),
             active_era: EraSummary {
                 start: EraBoundary {
                     epoch: 0,
