@@ -167,8 +167,8 @@ pub fn load_era_summary<D: Domain>(domain: &D) -> Result<ChainSummary, ChainErro
 
     for result in eras {
         let (key, era) = result?;
-        let protocol = u16::from_be_bytes(key.as_ref()[..2].try_into().unwrap());
-        chain.append_era(protocol, era);
+        let protocol = EraProtocol::from(key);
+        chain.append_era(protocol.into(), era);
     }
 
     Ok(chain)

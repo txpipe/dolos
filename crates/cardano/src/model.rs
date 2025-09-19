@@ -813,6 +813,12 @@ impl From<u16> for EraProtocol {
     }
 }
 
+impl From<EraProtocol> for u16 {
+    fn from(value: EraProtocol) -> Self {
+        value.0
+    }
+}
+
 impl From<EraProtocol> for EntityKey {
     fn from(value: EraProtocol) -> Self {
         EntityKey::from(&value.0.to_be_bytes())
