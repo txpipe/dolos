@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use dolos_core::{BlockSlot, ChainError, Domain, EntityKey};
 use pallas::{crypto::hash::Hash, ledger::primitives::RationalNumber};
 
-use crate::{Config, EpochState, EraSummary};
+use crate::{Config, EpochState, EraProtocol, EraSummary};
 
 pub mod commit;
 pub mod compute;
@@ -43,6 +43,7 @@ pub struct PoolData {
 pub struct Pots {
     pub reserves: u64,
     pub treasury: u64,
+    pub utxos: u64,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -84,8 +85,8 @@ pub struct PotDelta {
 
 #[derive(Debug)]
 pub struct EraTransition {
-    pub prev_version: u16,
-    pub new_version: u16,
+    pub prev_version: EraProtocol,
+    pub new_version: EraProtocol,
     pub epoch_length: u64,
     pub slot_length: u64,
 }
@@ -93,6 +94,7 @@ pub struct EraTransition {
 #[derive(Debug)]
 pub struct BoundaryWork {
     // loaded
+    pub active_protocol: EraProtocol,
     pub active_era: EraSummary,
     pub active_state: Option<EpochState>,
     pub active_snapshot: Snapshot,

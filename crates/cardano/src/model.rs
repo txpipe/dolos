@@ -1,7 +1,11 @@
-use std::ops::{Deref, DerefMut};
+use std::{
+    cmp::Ordering,
+    ops::{Deref, DerefMut},
+};
 
 use dolos_core::{
-    BlockSlot, EntityValue, Namespace, NamespaceType, NsKey, StateError, StateSchema,
+    BlockSlot, ChainError, EntityKey, EntityValue, Namespace, NamespaceType, NsKey, StateError,
+    StateSchema,
 };
 use pallas::{
     codec::minicbor::{self, Decode, Encode},
@@ -529,6 +533,16 @@ macro_rules! pgetter {
     };
 }
 
+macro_rules! ensure_pparam {
+    ($kind:ident, $ty:ty) => {
+        paste::paste! {
+            pub fn [<ensure_ $kind:snake>](&self) -> Result<$ty, ChainError> {
+                self.$kind().ok_or(ChainError::PParamsNotFound(stringify!($kind).to_string()))
+            }
+        }
+    };
+}
+
 impl PParamsSet {
     pub fn new() -> Self {
         Self(Vec::new())
@@ -583,6 +597,13 @@ impl PParamsSet {
     pub fn rho(&self) -> Option<RationalNumber> {
         self.expansion_rate()
     }
+
+    ensure_pparam!(rho, RationalNumber);
+    ensure_pparam!(tau, RationalNumber);
+    ensure_pparam!(k, u32);
+    ensure_pparam!(a0, RationalNumber);
+
+    ensure_pparam!(protocol_version, ProtocolVersion);
 
     pgetter!(SystemStart, u64);
     pgetter!(EpochLength, u64);
@@ -770,6 +791,40 @@ impl DRepState {
 }
 
 entity_boilerplate!(DRepState, "dreps");
+
+#[derive(Debug, Clone, Copy)]
+pub struct EraProtocol(u16);
+
+impl PartialEq<u16> for EraProtocol {
+    fn eq(&self, other: &u16) -> bool {
+        self.0 == *other
+    }
+}
+
+impl PartialOrd<u16> for EraProtocol {
+    fn partial_cmp(&self, other: &u16) -> Option<Ordering> {
+        self.0.partial_cmp(other)
+    }
+}
+
+impl From<u16> for EraProtocol {
+    fn from(value: u16) -> Self {
+        Self(value)
+    }
+}
+
+impl From<EraProtocol> for EntityKey {
+    fn from(value: EraProtocol) -> Self {
+        EntityKey::from(&value.0.to_be_bytes())
+    }
+}
+
+impl From<EntityKey> for EraProtocol {
+    fn from(value: EntityKey) -> Self {
+        let bytes: [u8; 2] = value.as_ref()[..2].try_into().unwrap();
+        Self(u16::from_be_bytes(bytes))
+    }
+}
 
 #[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize)]
 pub struct EraBoundary {

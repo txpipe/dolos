@@ -93,15 +93,17 @@ fn load_pool_params<D: Domain>(domain: &D, boundary: &mut BoundaryWork) -> Resul
 
 impl BoundaryWork {
     pub fn load<D: Domain>(domain: &D) -> Result<BoundaryWork, ChainError> {
-        let active = crate::load_active_epoch(domain)?;
-        let waiting = crate::load_previous_epoch(domain)?;
-        let ending = crate::load_live_epoch(domain)?;
+        let active_state = crate::load_active_epoch(domain)?;
+        let waiting_state = crate::load_previous_epoch(domain)?;
+        let ending_state = crate::load_live_epoch(domain)?;
+        let (active_protocol, active_era) = load_active_era(domain)?;
 
         let mut boundary = BoundaryWork {
-            active_state: active,
-            waiting_state: waiting,
-            ending_state: ending,
-            active_era: load_active_era(domain)?,
+            active_protocol,
+            active_state,
+            waiting_state,
+            ending_state,
+            active_era,
             mutable_slots: mutable_slots(domain.genesis()),
             shelley_hash: domain.genesis().shelley_hash,
 
