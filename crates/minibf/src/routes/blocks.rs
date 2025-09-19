@@ -6,7 +6,11 @@ use axum::{
 use blockfrost_openapi::models::block_content::BlockContent;
 use dolos_cardano::ChainSummary;
 use dolos_core::{ArchiveStore as _, BlockBody, Domain};
-use pallas::ledger::traverse::MultiEraBlock;
+use itertools::Either;
+use pallas::ledger::{
+    configs::{byron, shelley},
+    traverse::MultiEraBlock,
+};
 
 use crate::{
     error::Error,
@@ -15,10 +19,52 @@ use crate::{
     Facade,
 };
 
-fn load_block_by_hash_or_number<D: Domain>(
-    domain: &Facade<D>,
-    hash_or_number: &str,
-) -> Result<BlockBody, Error> {
+type HashOrNumber = Either<Vec<u8>, u64>;
+
+fn block_0_preview<D: Domain>(domain: &Facade<D>) -> Result<BlockContent, StatusCode> {
+    let confirmations = MultiEraBlock::decode(
+        &domain
+            .archive()
+            .get_tip()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?
+            .1,
+    )
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .header()
+    .number() as i32;
+
+    let byron_utxos = byron::genesis_utxos(&domain.genesis().byron);
+    let shelley_utxos = shelley::shelley_utxos(&domain.genesis().shelley);
+
+    Ok(BlockContent {
+        time: 1666656000,
+        height: None,
+        hash: "83de1d7302569ad56cf9139a41e2e11346d4cb4a31c00142557b6ab3fa550761".to_string(),
+        slot: None,
+        epoch: None,
+        epoch_slot: None,
+        slot_leader: "Genesis slot leader".to_string(),
+        size: 0,
+        tx_count: (byron_utxos.len() + shelley_utxos.len()) as i32,
+        output: Some(
+            (byron_utxos.iter().map(|(_, _, x)| *x).sum::<u64>()
+                + shelley_utxos.iter().map(|(_, _, x)| *x).sum::<u64>())
+            .to_string(),
+        ),
+        fees: Some("0".to_string()),
+        block_vrf: None,
+        op_cert: None,
+        op_cert_counter: None,
+        previous_block: None,
+        next_block: Some(
+            "268ae601af8f9214804735910a3301881fbe0eec9936db7d1fb9fc39e93d1e37".to_string(),
+        ),
+        confirmations,
+    })
+}
+
+fn parse_hash_or_number(hash_or_number: &str) -> Result<HashOrNumber, Error> {
     if hash_or_number.is_empty() {
         return Err(Error::InvalidBlockHash);
     }
@@ -28,29 +74,41 @@ fn load_block_by_hash_or_number<D: Domain>(
             .parse()
             .map_err(|_| Error::InvalidBlockNumber)?;
 
-        let (tip, _) = domain
-            .archive()
-            .get_tip()
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-            .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        if number > tip {
-            return Err(Error::InvalidBlockNumber);
-        }
-
-        Ok(domain
-            .archive()
-            .get_block_by_number(&number)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-            .ok_or(StatusCode::NOT_FOUND)?)
+        Ok(Either::Right(number))
     } else {
         let hash = hex::decode(hash_or_number).map_err(|_| Error::InvalidBlockHash)?;
 
-        Ok(domain
+        Ok(Either::Left(hash))
+    }
+}
+
+fn load_block_by_hash_or_number<D: Domain>(
+    domain: &Facade<D>,
+    hash_or_number: &HashOrNumber,
+) -> Result<BlockBody, Error> {
+    match hash_or_number {
+        Either::Left(hash) => Ok(domain
             .archive()
-            .get_block_by_hash(&hash)
+            .get_block_by_hash(hash)
             .map_err(|_| Error::InvalidBlockHash)?
-            .ok_or(StatusCode::NOT_FOUND)?)
+            .ok_or(StatusCode::NOT_FOUND)?),
+        Either::Right(number) => {
+            let (tip, _) = domain
+                .archive()
+                .get_tip()
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+
+            if *number > tip {
+                return Err(Error::InvalidBlockNumber);
+            }
+
+            Ok(domain
+                .archive()
+                .get_block_by_number(number)
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                .ok_or(StatusCode::NOT_FOUND)?)
+        }
     }
 }
 
@@ -97,6 +155,13 @@ pub async fn by_hash_or_number<D: Domain>(
     Path(hash_or_number): Path<String>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<BlockContent>, Error> {
+    let hash_or_number = parse_hash_or_number(&hash_or_number)?;
+
+    // Very special case only for preview.
+    if Either::Right(0) == hash_or_number && domain.genesis().shelley.network_magic == Some(2) {
+        return Ok(Json(block_0_preview(&domain)?));
+    }
+
     let block = load_block_by_hash_or_number(&domain, &hash_or_number)?;
 
     let (_, tip) = domain
@@ -119,6 +184,7 @@ pub async fn by_hash_or_number_previous<D: Domain>(
 ) -> Result<Json<Vec<BlockContent>>, Error> {
     let pagination = Pagination::try_from(params)?;
 
+    let hash_or_number = parse_hash_or_number(&hash_or_number)?;
     let curr = load_block_by_hash_or_number(&domain, &hash_or_number)?;
 
     let curr = MultiEraBlock::decode(&curr).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -149,6 +215,19 @@ pub async fn by_hash_or_number_previous<D: Domain>(
         }
     }
 
+    // Insert block 0 only in preview
+    if output.len() < pagination.count
+        && domain.genesis().shelley.network_magic == Some(2)
+        && output.last().map(|x| x.height == Some(0)).unwrap_or(false)
+    {
+        let mut block_1 = output.pop().unwrap();
+        let block_0 = block_0_preview(&domain)?;
+
+        block_1.previous_block = Some(block_0.hash.clone());
+        output.push(block_1);
+        output.push(block_0);
+    }
+
     let output = match pagination.order {
         Order::Asc => output.into_iter().rev().collect(),
         Order::Desc => output,
@@ -164,6 +243,7 @@ pub async fn by_hash_or_number_next<D: Domain>(
 ) -> Result<Json<Vec<BlockContent>>, Error> {
     let pagination = Pagination::try_from(params)?;
 
+    let hash_or_number = parse_hash_or_number(&hash_or_number)?;
     let curr = load_block_by_hash_or_number(&domain, &hash_or_number)?;
 
     let curr = MultiEraBlock::decode(&curr).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -247,6 +327,7 @@ pub async fn by_hash_or_number_txs<D: Domain>(
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<String>>, Error> {
     let pagination = Pagination::try_from(params)?;
+    let hash_or_number = parse_hash_or_number(&hash_or_number)?;
     let block = load_block_by_hash_or_number(&domain, &hash_or_number)?;
 
     let model = BlockModelBuilder::new(&block)?;
@@ -271,6 +352,7 @@ pub async fn by_hash_or_number_addresses<D: Domain>(
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<String>>, Error> {
     let pagination = Pagination::try_from(params)?;
+    let hash_or_number = parse_hash_or_number(&hash_or_number)?;
     let block = load_block_by_hash_or_number(&domain, &hash_or_number)?;
 
     let model = BlockModelBuilder::new(&block)?;

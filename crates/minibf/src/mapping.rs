@@ -1661,12 +1661,26 @@ impl<'a> BlockModelBuilder<'a> {
     fn format_slot_leader(&self) -> Result<Option<String>, StatusCode> {
         let header = self.block.header();
 
+        let Some(use_bech32) = self
+            .chain
+            .map(|x| x.slot_epoch(self.block.slot()).0 > x.first_shelley_epoch() as u32 + 1)
+        else {
+            return Ok(None);
+        };
+
         let Some(key) = header.issuer_vkey() else {
             return Ok(None);
         };
         let hash: Hash<28> = Hasher::<224>::hash(key);
 
-        Ok(Some(bech32_pool(hash)?))
+        if use_bech32 {
+            Ok(Some(bech32_pool(hash)?))
+        } else {
+            Ok(Some(format!(
+                "ShelleyGenesis-{}",
+                hex::encode(hash.as_slice().first_chunk::<8>().unwrap())
+            )))
+        }
     }
 
     fn format_ops_cert_data(&self) -> (Option<String>, Option<String>) {
