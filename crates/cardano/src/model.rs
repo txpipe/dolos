@@ -196,6 +196,9 @@ pub struct PoolState {
 
     #[n(11)]
     pub blocks_minted: u32,
+
+    #[n(12)]
+    pub register_slot: u64,
 }
 
 entity_boilerplate!(PoolState, "pools");
@@ -211,8 +214,9 @@ impl PoolState {
 }
 
 impl PoolState {
-    pub fn new(vrf_keyhash: Hash<32>) -> Self {
+    pub fn new(slot: BlockSlot, vrf_keyhash: Hash<32>) -> Self {
         Self {
+            register_slot: slot,
             vrf_keyhash,
             reward_account: Default::default(),
             pool_owners: Default::default(),
