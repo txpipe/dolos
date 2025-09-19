@@ -221,9 +221,10 @@ pub async fn by_hash_or_number_previous<D: Domain>(
         && output.last().map(|x| x.height == Some(0)).unwrap_or(false)
     {
         let mut block_1 = output.pop().unwrap();
-        let block_0 = block_0_preview(&domain)?;
+        let mut block_0 = block_0_preview(&domain)?;
 
         block_1.previous_block = Some(block_0.hash.clone());
+        block_0.next_block = Some(block_1.hash.clone());
         output.push(block_1);
         output.push(block_0);
     }

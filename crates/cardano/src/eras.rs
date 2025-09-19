@@ -156,6 +156,11 @@ impl ChainSummary {
                 return era.start.epoch;
             }
         }
+        if let Some(last) = self.protocols.last() {
+            if *last == 2 {
+                return self.edge().start.epoch;
+            }
+        }
         0
     }
 }
