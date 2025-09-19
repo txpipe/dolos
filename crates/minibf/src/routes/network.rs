@@ -6,12 +6,13 @@ use blockfrost_openapi::models::{
     network_eras_inner_start::NetworkErasInnerStart, network_stake::NetworkStake,
     network_supply::NetworkSupply,
 };
-use dolos_cardano::{model::EpochState, ChainSummary, EraSummary};
-use dolos_core::{Domain, Genesis};
+use dolos_cardano::{model::EpochState, mutable_slots, EraSummary, FixedNamespace};
+use dolos_core::{BlockSlot, Domain, Genesis, StateStore};
 
-use crate::{mapping::IntoModel, Facade};
+use crate::{mapping::IntoModel, routes::genesis::parse_datetime_into_timestamp, Facade};
 
 struct EraModelBuilder<'a> {
+    tip: BlockSlot,
     system_start: u64,
     era: &'a EraSummary,
     genesis: &'a Genesis,
@@ -24,13 +25,14 @@ impl<'a> IntoModel<NetworkErasInner> for EraModelBuilder<'a> {
         let start_time = self.era.slot_time(self.era.start.slot);
         let start_delta = start_time - self.system_start;
 
-        let end = self
+        let (end_slot, end_epoch) = self
             .era
             .end
             .as_ref()
-            .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+            .map(|x| (x.slot, x.epoch))
+            .unwrap_or((self.tip, self.era.slot_epoch(self.tip).0 as u64));
 
-        let end_time = self.era.slot_time(end.slot);
+        let end_time = self.era.slot_time(end_slot);
         let end_delta = end_time - self.system_start;
 
         let out = NetworkErasInner {
@@ -41,8 +43,8 @@ impl<'a> IntoModel<NetworkErasInner> for EraModelBuilder<'a> {
             }),
             end: Box::new(NetworkErasInnerEnd {
                 time: end_delta as f64,
-                slot: end.slot as i32,
-                epoch: end.epoch as i32,
+                slot: end_slot as i32,
+                epoch: end_epoch as i32,
             }),
             parameters: Box::new(NetworkErasInnerParameters {
                 epoch_length: self.era.epoch_length as i32,
@@ -56,7 +58,8 @@ impl<'a> IntoModel<NetworkErasInner> for EraModelBuilder<'a> {
 }
 
 struct ChainModelBuilder<'a> {
-    chain: ChainSummary,
+    tip: BlockSlot,
+    eras: Vec<(u16, EraSummary)>,
     genesis: &'a Genesis,
 }
 
@@ -64,18 +67,133 @@ impl<'a> IntoModel<Vec<NetworkErasInner>> for ChainModelBuilder<'a> {
     type SortKey = ();
 
     fn into_model(self) -> Result<Vec<NetworkErasInner>, StatusCode> {
-        let system_start = self.chain.first().start.timestamp;
+        let system_start = self
+            .genesis
+            .shelley
+            .system_start
+            .as_ref()
+            .map(|x| parse_datetime_into_timestamp(x))
+            .transpose()?
+            .unwrap_or_default() as u64;
+        let mut out = vec![];
 
-        let out: Vec<_> = self
-            .chain
-            .iter_past()
-            .map(|era| EraModelBuilder {
-                system_start,
-                era,
-                genesis: self.genesis,
-            })
-            .map(|era| era.into_model())
-            .collect::<Result<_, _>>()?;
+        // Special, hardcoded stuff.
+        let known_hardforks = [2, 3, 4, 5, 7, 9];
+        match self.genesis.shelley.network_magic {
+            Some(764824073) => {
+                let epoch_length = 4320;
+                let slot_length = 20;
+                let safe_zone = 864;
+                let end_epoch = 0;
+
+                out.push(NetworkErasInner {
+                    start: Box::new(NetworkErasInnerStart {
+                        time: 0.0,
+                        slot: 0,
+                        epoch: 0,
+                    }),
+                    end: Box::new(NetworkErasInnerEnd {
+                        time: (end_epoch * epoch_length * slot_length) as f64,
+                        slot: end_epoch * epoch_length,
+                        epoch: end_epoch,
+                    }),
+                    parameters: Box::new(NetworkErasInnerParameters {
+                        epoch_length,
+                        slot_length: slot_length as f64,
+                        safe_zone,
+                    }),
+                });
+            }
+            Some(1) => {
+                let epoch_length = 4320;
+                let slot_length = 20;
+                let safe_zone = 864;
+                let end_epoch = 0;
+
+                out.push(NetworkErasInner {
+                    start: Box::new(NetworkErasInnerStart {
+                        time: 0.0,
+                        slot: 0,
+                        epoch: 0,
+                    }),
+                    end: Box::new(NetworkErasInnerEnd {
+                        time: (end_epoch * epoch_length * slot_length) as f64,
+                        slot: end_epoch * epoch_length,
+                        epoch: end_epoch,
+                    }),
+                    parameters: Box::new(NetworkErasInnerParameters {
+                        epoch_length,
+                        slot_length: slot_length as f64,
+                        safe_zone,
+                    }),
+                });
+            }
+            Some(2) => {
+                let epoch_length = 4320;
+                let slot_length = 20;
+                let safe_zone = 864;
+                let end_epoch = 0;
+
+                out.push(NetworkErasInner {
+                    start: Box::new(NetworkErasInnerStart {
+                        time: 0.0,
+                        slot: 0,
+                        epoch: 0,
+                    }),
+                    end: Box::new(NetworkErasInnerEnd {
+                        time: (end_epoch * epoch_length * slot_length) as f64,
+                        slot: end_epoch * epoch_length,
+                        epoch: end_epoch,
+                    }),
+                    parameters: Box::new(NetworkErasInnerParameters {
+                        epoch_length,
+                        slot_length: slot_length as f64,
+                        safe_zone,
+                    }),
+                });
+
+                let other = NetworkErasInner {
+                    start: Box::new(NetworkErasInnerStart {
+                        time: 0.0,
+                        slot: 0,
+                        epoch: 0,
+                    }),
+                    end: Box::new(NetworkErasInnerEnd {
+                        time: (end_epoch * epoch_length * slot_length) as f64,
+                        slot: end_epoch * epoch_length,
+                        epoch: end_epoch,
+                    }),
+                    parameters: Box::new(NetworkErasInnerParameters {
+                        epoch_length: self.genesis.shelley.epoch_length.unwrap() as i32,
+                        slot_length: self.genesis.shelley.slot_length.unwrap() as f64,
+                        safe_zone: mutable_slots(self.genesis) as i32,
+                    }),
+                };
+                out.push(other.clone());
+                out.push(other.clone());
+                out.push(other);
+            }
+            _ => {}
+        };
+
+        out.extend(
+            self.eras
+                .iter()
+                .flat_map(|(protocol, era)| {
+                    if known_hardforks.contains(protocol) {
+                        Some(EraModelBuilder {
+                            tip: self.tip,
+                            system_start,
+                            era,
+                            genesis: self.genesis,
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .map(|era| era.into_model())
+                .collect::<Result<Vec<_>, _>>()?,
+        );
 
         Ok(out)
     }
@@ -84,10 +202,26 @@ impl<'a> IntoModel<Vec<NetworkErasInner>> for ChainModelBuilder<'a> {
 pub async fn eras<D: Domain>(
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<NetworkErasInner>>, StatusCode> {
-    let chain = domain.get_chain_summary()?;
     let genesis = domain.genesis();
+    let tip = domain
+        .get_tip_slot()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let builder = ChainModelBuilder { chain, genesis };
+    let eras = domain
+        .state()
+        .iter_entities_typed::<EraSummary>(EraSummary::NS, None)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map(|x| {
+            let (key, era) = x.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            let key: &[u8; 2] = key.as_ref()[..2]
+                .try_into()
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            let protocol = u16::from_be_bytes(*key);
+            Ok((protocol, era))
+        })
+        .collect::<Result<Vec<_>, StatusCode>>()?;
+
+    let builder = ChainModelBuilder { eras, genesis, tip };
 
     builder.into_response()
 }
