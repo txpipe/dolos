@@ -32,7 +32,7 @@ use crate::{
             StakeRegistration, VoteDelegation, WithdrawalInc,
         },
         assets::MintStatsUpdate,
-        dreps::{DRepRegistration, DRepUnRegistration},
+        dreps::{DRepActivity, DRepRegistration, DRepUnRegistration},
         epochs::{EpochStatsUpdate, NoncesUpdate, PParamsUpdate},
         pools::{MintedBlocksInc, PoolRegistration},
     },
@@ -968,6 +968,7 @@ pub enum CardanoDelta {
     EpochStatsUpdate(EpochStatsUpdate),
     DRepRegistration(DRepRegistration),
     DRepUnRegistration(DRepUnRegistration),
+    DRepActivity(DRepActivity),
     WithdrawalInc(WithdrawalInc),
     VoteDelegation(VoteDelegation),
     PParamsUpdate(PParamsUpdate),
@@ -1019,6 +1020,7 @@ delta_from!(MintStatsUpdate);
 delta_from!(EpochStatsUpdate);
 delta_from!(DRepRegistration);
 delta_from!(DRepUnRegistration);
+delta_from!(DRepActivity);
 delta_from!(WithdrawalInc);
 delta_from!(VoteDelegation);
 delta_from!(PParamsUpdate);
@@ -1039,6 +1041,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::MintStatsUpdate(x) => x.key(),
             Self::EpochStatsUpdate(x) => x.key(),
             Self::DRepRegistration(x) => x.key(),
+            Self::DRepActivity(x) => x.key(),
             Self::DRepUnRegistration(x) => x.key(),
             Self::WithdrawalInc(x) => x.key(),
             Self::VoteDelegation(x) => x.key(),
@@ -1060,6 +1063,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::EpochStatsUpdate(x) => Self::downcast_apply(x, entity),
             Self::DRepRegistration(x) => Self::downcast_apply(x, entity),
             Self::DRepUnRegistration(x) => Self::downcast_apply(x, entity),
+            Self::DRepActivity(x) => Self::downcast_apply(x, entity),
             Self::WithdrawalInc(x) => Self::downcast_apply(x, entity),
             Self::VoteDelegation(x) => Self::downcast_apply(x, entity),
             Self::PParamsUpdate(x) => Self::downcast_apply(x, entity),
@@ -1080,6 +1084,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::EpochStatsUpdate(x) => Self::downcast_undo(x, entity),
             Self::DRepRegistration(x) => Self::downcast_undo(x, entity),
             Self::DRepUnRegistration(x) => Self::downcast_undo(x, entity),
+            Self::DRepActivity(x) => Self::downcast_undo(x, entity),
             Self::WithdrawalInc(x) => Self::downcast_undo(x, entity),
             Self::VoteDelegation(x) => Self::downcast_undo(x, entity),
             Self::PParamsUpdate(x) => Self::downcast_undo(x, entity),
