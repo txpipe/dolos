@@ -7,7 +7,7 @@ use blockfrost_openapi::models::{
     pool_delegators_inner::PoolDelegatorsInner, pool_list_extended_inner::PoolListExtendedInner,
 };
 use dolos_cardano::model::{AccountState, PoolState};
-use dolos_core::Domain;
+use dolos_core::{BlockSlot, Domain};
 use itertools::Itertools;
 use pallas::{
     codec::minicbor,
@@ -38,7 +38,11 @@ struct PoolModelBuilder {
 }
 
 impl IntoModel<PoolListExtendedInner> for PoolModelBuilder {
-    type SortKey = ();
+    type SortKey = BlockSlot;
+
+    fn sort_key(&self) -> Option<Self::SortKey> {
+        Some(self.state.register_slot)
+    }
 
     fn into_model(self) -> Result<PoolListExtendedInner, StatusCode> {
         let pool_id = bech32_pool(self.operator)?;
@@ -80,22 +84,23 @@ where
 
     let pagination = Pagination::try_from(params)?;
 
-    let page: Vec<_> = iter
-        .skip(pagination.skip())
-        .take(pagination.count)
-        .collect::<Result<_, _>>()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let mapped: Vec<_> = page
+    let mapped: Vec<_> = iter
         .into_iter()
-        .map(|(key, state)| {
+        .map(|x| {
+            let (key, state) = x.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
             let operator = Hash::<28>::from(key);
 
             let builder = PoolModelBuilder { operator, state };
 
-            builder.into_model()
+            Ok(builder.into_model_with_sort_key())
         })
-        .collect::<Result<_, _>>()?;
+        .collect::<Result<Result<Vec<(BlockSlot, PoolListExtendedInner)>, _>, StatusCode>>()??
+        .into_iter()
+        .sorted_by(|a, b| Ord::cmp(&a.0, &b.0))
+        .map(|(_, x)| x)
+        .skip(pagination.skip())
+        .take(pagination.count)
+        .collect();
 
     Ok(Json(mapped))
 }
