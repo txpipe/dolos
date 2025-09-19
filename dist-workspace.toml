@@ -20,7 +20,7 @@ pr-run-mode = "plan"
 # Whether to install an updater program
 install-updater = false
 # The preferred Rust toolchain to use in CI (rustup toolchain syntax)
-rust-toolchain-version = "1.85.1"
+rust-toolchain-version = "1.89"
 # The archive format to use for windows builds (defaults .zip)
 windows-archive = ".tar.gz"
 # The archive format to use for non-windows builds (defaults .tar.xz)

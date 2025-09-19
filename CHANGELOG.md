@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.0-beta.2] - 2025-09-19
+
+### 🚀 Features
+
+- Track account certs as a slot tag (#697)
+
+### 🐛 Bug Fixes
+
+- *(archive)* Include missing full-address filter insert
+- *(cardano)* Make epoch boundary work for Byron (#698)
+
+### 🚜 Refactor
+
+- *(cardano)* Interleave member rewards calc during pool sweep step (#694)
+- Use xxh3 hash algorithm for entity keys (#695)
+
+### ⚙️ Miscellaneous Tasks
+
+- Update Redb to v3 (#696)
+
 ## [1.0.0-beta.1] - 2025-09-17
 
 ### 🚀 Features
@@ -34,6 +54,10 @@ All notable changes to this project will be documented in this file.
 ### ⚙️ Miscellaneous Tasks
 
 - Fix lint warnings across the board (#689)
+
+### Release
+
+- V1.0.0-beta.1
 
 ## [1.0.0-beta.0] - 2025-09-15
 
