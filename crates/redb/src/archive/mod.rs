@@ -1,4 +1,4 @@
-use ::redb::{Database, Range};
+use ::redb::{Database, Range, ReadableDatabase};
 use redb::ReadTransaction;
 use std::path::Path;
 use tracing::{debug, info, warn};
@@ -33,6 +33,14 @@ impl From<RedbArchiveError> for ArchiveError {
 
 impl From<::redb::DatabaseError> for RedbArchiveError {
     fn from(value: ::redb::DatabaseError) -> Self {
+        Self(ArchiveError::InternalError(Box::new(::redb::Error::from(
+            value,
+        ))))
+    }
+}
+
+impl From<::redb::SetDurabilityError> for RedbArchiveError {
+    fn from(value: ::redb::SetDurabilityError) -> Self {
         Self(ArchiveError::InternalError(Box::new(::redb::Error::from(
             value,
         ))))
@@ -103,7 +111,7 @@ impl ChainStore {
 
     pub fn initialize(db: Database) -> Result<Self, RedbArchiveError> {
         let mut wx = db.begin_write()?;
-        wx.set_durability(Durability::Immediate);
+        wx.set_durability(Durability::Immediate)?;
 
         indexes::Indexes::initialize(&wx)?;
         tables::BlocksTable::initialize(&wx)?;
@@ -145,7 +153,7 @@ impl ChainStore {
 
     pub fn start_writer(&self) -> Result<ChainStoreWriter, RedbArchiveError> {
         let mut wx = self.db().begin_write()?;
-        wx.set_durability(Durability::Eventual);
+        wx.set_durability(Durability::Immediate)?;
         wx.set_quick_repair(true);
 
         Ok(ChainStoreWriter { wx })
@@ -245,6 +253,14 @@ impl ChainStore {
     ) -> Result<Vec<BlockSlot>, RedbArchiveError> {
         let rx = self.db().begin_read()?;
         indexes::Indexes::get_by_spent_txo(&rx, spent_txo)
+    }
+
+    pub fn get_possible_block_slots_by_account(
+        &self,
+        account: &[u8],
+    ) -> Result<Vec<BlockSlot>, RedbArchiveError> {
+        let rx = self.db().begin_read()?;
+        indexes::Indexes::get_by_account(&rx, account)
     }
 
     pub fn get_possible_block_slots_by_tx_hash(
@@ -381,6 +397,20 @@ impl ChainStore {
             .collect()
     }
 
+    pub fn get_possible_blocks_by_account(
+        &self,
+        account: &[u8],
+    ) -> Result<Vec<BlockBody>, RedbArchiveError> {
+        self.get_possible_block_slots_by_account(account)?
+            .iter()
+            .flat_map(|slot| match self.get_block_by_slot(slot) {
+                Ok(Some(block)) => Some(Ok(block)),
+                Ok(None) => None,
+                Err(e) => Some(Err(e)),
+            })
+            .collect()
+    }
+
     pub fn get_possible_blocks_by_tx_hash(
         &self,
         tx_hash: &[u8],
@@ -438,6 +468,24 @@ impl ChainStore {
     ) -> Result<ChainSparseIter, RedbArchiveError> {
         let rx = self.db().begin_read()?;
         let range = indexes::Indexes::iter_by_payment(&rx, payment)?;
+        Ok(ChainSparseIter(rx, range))
+    }
+
+    pub fn iter_possible_blocks_with_stake(
+        &self,
+        stake: &[u8],
+    ) -> Result<ChainSparseIter, RedbArchiveError> {
+        let rx = self.db().begin_read()?;
+        let range = indexes::Indexes::iter_by_stake(&rx, stake)?;
+        Ok(ChainSparseIter(rx, range))
+    }
+
+    pub fn iter_possible_blocks_with_account_certs(
+        &self,
+        account: &[u8],
+    ) -> Result<ChainSparseIter, RedbArchiveError> {
+        let rx = self.db().begin_read()?;
+        let range = indexes::Indexes::iter_by_account_certs(&rx, account)?;
         Ok(ChainSparseIter(rx, range))
     }
 
@@ -715,6 +763,23 @@ impl dolos_core::ArchiveStore for ChainStore {
     ) -> Result<Self::SparseBlockIter, ArchiveError> {
         // TODO: we need to filter the false positives
         let out = self.iter_possible_blocks_with_payment(payment)?;
+
+        Ok(out)
+    }
+
+    fn iter_blocks_with_stake(&self, stake: &[u8]) -> Result<Self::SparseBlockIter, ArchiveError> {
+        // TODO: we need to filter the false positives
+        let out = self.iter_possible_blocks_with_stake(stake)?;
+
+        Ok(out)
+    }
+
+    fn iter_blocks_with_account_certs(
+        &self,
+        account: &[u8],
+    ) -> Result<Self::SparseBlockIter, ArchiveError> {
+        // TODO: we need to filter the false positives
+        let out = self.iter_possible_blocks_with_account_certs(account)?;
 
         Ok(out)
     }

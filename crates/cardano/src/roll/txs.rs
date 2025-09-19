@@ -1,14 +1,17 @@
 use dolos_core::{batch::WorkDeltas, ChainError, SlotTags, TxoRef};
 use pallas::{
-    codec::utils::KeepRaw,
+    codec::{minicbor, utils::KeepRaw},
     ledger::{
-        addresses::{Address, ShelleyDelegationPart},
+        addresses::Address,
         primitives::{conway::DatumOption, PlutusData},
-        traverse::{MultiEraBlock, MultiEraInput, MultiEraTx, MultiEraValue, OriginalHash as _},
+        traverse::{
+            MultiEraBlock, MultiEraCert, MultiEraInput, MultiEraTx, MultiEraValue,
+            OriginalHash as _,
+        },
     },
 };
 
-use crate::{roll::BlockVisitor, CardanoLogic};
+use crate::{pallas_extras, roll::BlockVisitor, CardanoLogic};
 
 #[derive(Default, Clone)]
 pub struct TxLogVisitor;
@@ -24,15 +27,9 @@ fn unpack_address(tags: &mut SlotTags, address: &Address) {
             tags.full_addresses.push(x.to_vec());
             tags.payment_addresses.push(x.payment().to_vec());
 
-            match x.delegation() {
-                ShelleyDelegationPart::Key(..) => {
-                    tags.stake_addresses.push(x.delegation().to_vec());
-                }
-                ShelleyDelegationPart::Script(..) => {
-                    tags.stake_addresses.push(x.delegation().to_vec());
-                }
-                _ => (),
-            };
+            if let Some(stake) = pallas_extras::shelley_address_to_stake_address(x) {
+                tags.stake_addresses.push(stake.to_vec());
+            }
         }
         Address::Stake(x) => {
             tags.full_addresses.push(x.to_vec());
@@ -67,6 +64,21 @@ fn unpack_datum(tags: &mut SlotTags, datum: &DatumOption) {
         DatumOption::Data(datum) => {
             tags.datums.push(datum.original_hash().to_vec());
         }
+    }
+}
+
+fn unpack_cert(tags: &mut SlotTags, cert: &MultiEraCert) {
+    if let Some(cred) = pallas_extras::cert_as_stake_registration(cert) {
+        tags.account_certs.push(minicbor::to_vec(&cred).unwrap());
+    }
+
+    if let Some(cred) = pallas_extras::cert_as_stake_deregistration(cert) {
+        tags.account_certs.push(minicbor::to_vec(&cred).unwrap());
+    }
+
+    if let Some(deleg) = pallas_extras::cert_as_stake_delegation(cert) {
+        tags.account_certs
+            .push(minicbor::to_vec(&deleg.delegator).unwrap());
     }
 }
 
@@ -145,5 +157,56 @@ impl BlockVisitor for TxLogVisitor {
         deltas.slot.datums.push(datum.original_hash().to_vec());
 
         Ok(())
+    }
+
+    fn visit_cert(
+        &mut self,
+        deltas: &mut WorkDeltas<CardanoLogic>,
+        _: &MultiEraBlock,
+        _: &MultiEraTx,
+        cert: &pallas::ledger::traverse::MultiEraCert,
+    ) -> Result<(), ChainError> {
+        unpack_cert(&mut deltas.slot, cert);
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use pallas::ledger::addresses::{
+        Network, ShelleyAddress, ShelleyDelegationPart, ShelleyPaymentPart,
+    };
+
+    use crate::pallas_extras::shelley_address_to_stake_address;
+
+    use super::*;
+
+    #[test]
+    fn test_unpack_address() {
+        let mut tags = SlotTags::default();
+        let shelley_address = ShelleyAddress::new(
+            Network::Testnet,
+            ShelleyPaymentPart::Key([1; 28].as_slice().into()),
+            ShelleyDelegationPart::Key([2; 28].as_slice().into()),
+        );
+        let stake = shelley_address_to_stake_address(&shelley_address).unwrap();
+        let address = Address::Shelley(shelley_address);
+        unpack_address(&mut tags, &address);
+
+        assert_eq!(tags.full_addresses.len(), 1);
+        assert_eq!(tags.payment_addresses.len(), 1);
+        assert_eq!(tags.stake_addresses.len(), 1);
+
+        let mut other = SlotTags::default();
+        let address = Address::Stake(stake);
+        unpack_address(&mut other, &address);
+
+        assert_eq!(other.full_addresses.len(), 1);
+        assert_eq!(other.payment_addresses.len(), 0);
+        assert_eq!(other.stake_addresses.len(), 1);
+
+        // Two addresses with same stake part index that same thing
+        assert_eq!(tags.stake_addresses.first(), other.stake_addresses.first());
     }
 }

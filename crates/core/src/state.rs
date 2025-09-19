@@ -265,6 +265,7 @@ pub trait StateWriter: Sized + Send + Sync {
 
     fn apply_utxoset(&self, delta: &UtxoSetDelta) -> Result<(), StateError>;
 
+    #[allow(clippy::double_must_use)]
     #[must_use]
     fn commit(self) -> Result<(), StateError>;
 

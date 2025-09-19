@@ -237,7 +237,7 @@ impl BoundaryWork {
         for (id, pool) in self.pools.iter() {
             let pool_stake = self.active_snapshot.get_pool_stake(id);
 
-            let (total_pool_reward, operator_share) = compute_pool_reward(
+            let (total_pool_reward, _operator_share) = compute_pool_reward(
                 pot_delta.available_rewards,
                 self.active_snapshot.total_stake,
                 pool,

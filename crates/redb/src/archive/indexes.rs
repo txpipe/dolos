@@ -1,6 +1,6 @@
 use ::redb::{MultimapTableDefinition, ReadTransaction, WriteTransaction};
 use redb::MultimapValue;
-use std::hash::{DefaultHasher, Hash as _, Hasher};
+use xxhash_rust::xxh3::xxh3_64;
 
 use dolos_core::{BlockSlot, ChainPoint, SlotTags};
 
@@ -41,9 +41,7 @@ impl AddressApproxIndexTable {
         MultimapTableDefinition::new("byaddress");
 
     pub fn compute_key(address: &Vec<u8>) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        address.hash(&mut hasher);
-        hasher.finish()
+        xxh3_64(address.as_slice())
     }
 
     pub fn iter_by_address(rx: &ReadTransaction, address: &[u8]) -> Result<SlotKeyIterator, Error> {
@@ -61,9 +59,7 @@ impl AddressPaymentPartApproxIndexTable {
         MultimapTableDefinition::new("bypayment");
 
     pub fn compute_key(address: &Vec<u8>) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        address.hash(&mut hasher);
-        hasher.finish()
+        xxh3_64(address.as_slice())
     }
 
     pub fn get_by_address_payment_part(
@@ -94,9 +90,7 @@ impl AddressStakePartApproxIndexTable {
         MultimapTableDefinition::new("bystake");
 
     pub fn compute_key(address_stake_part: &Vec<u8>) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        address_stake_part.hash(&mut hasher);
-        hasher.finish()
+        xxh3_64(address_stake_part.as_slice())
     }
 
     pub fn get_by_address_stake_part(
@@ -111,6 +105,13 @@ impl AddressStakePartApproxIndexTable {
         }
         Ok(out)
     }
+
+    pub fn iter_by_stake(rx: &ReadTransaction, stake: &[u8]) -> Result<SlotKeyIterator, Error> {
+        let table = rx.open_multimap_table(Self::DEF)?;
+        let key = Self::compute_key(&stake.to_vec());
+        let range = table.get(key)?;
+        Ok(SlotKeyIterator::new(range))
+    }
 }
 
 pub struct AssetApproxIndexTable;
@@ -120,9 +121,7 @@ impl AssetApproxIndexTable {
         MultimapTableDefinition::new("byasset");
 
     pub fn compute_key(asset: &Vec<u8>) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        asset.hash(&mut hasher);
-        hasher.finish()
+        xxh3_64(asset.as_slice())
     }
 
     pub fn get_by_asset(rx: &ReadTransaction, asset: &[u8]) -> Result<Vec<BlockSlot>, Error> {
@@ -150,9 +149,7 @@ impl BlockHashApproxIndexTable {
         MultimapTableDefinition::new("byblockhash");
 
     pub fn compute_key(block_hash: &Vec<u8>) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        block_hash.hash(&mut hasher);
-        hasher.finish()
+        xxh3_64(block_hash.as_slice())
     }
 
     pub fn get_by_block_hash(
@@ -201,9 +198,7 @@ impl DatumHashApproxIndexTable {
         MultimapTableDefinition::new("bydatum");
 
     pub fn compute_key(datum_hash: &Vec<u8>) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        datum_hash.hash(&mut hasher);
-        hasher.finish()
+        xxh3_64(datum_hash.as_slice())
     }
 
     pub fn get_by_datum_hash(
@@ -227,9 +222,7 @@ impl PolicyApproxIndexTable {
         MultimapTableDefinition::new("bypolicy");
 
     pub fn compute_key(policy: &Vec<u8>) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        policy.hash(&mut hasher);
-        hasher.finish()
+        xxh3_64(policy.as_slice())
     }
 
     pub fn get_by_policy(rx: &ReadTransaction, policy: &[u8]) -> Result<Vec<BlockSlot>, Error> {
@@ -250,9 +243,7 @@ impl ScriptHashApproxIndexTable {
         MultimapTableDefinition::new("byscript");
 
     pub fn compute_key(script_hash: &Vec<u8>) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        script_hash.hash(&mut hasher);
-        hasher.finish()
+        xxh3_64(script_hash.as_slice())
     }
 
     pub fn get_by_script_hash(
@@ -275,10 +266,8 @@ impl SpentTxoApproxIndexTable {
     pub const DEF: MultimapTableDefinition<'static, u64, u64> =
         MultimapTableDefinition::new("byspenttxo");
 
-    pub fn compute_key(script_hash: &Vec<u8>) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        script_hash.hash(&mut hasher);
-        hasher.finish()
+    pub fn compute_key(spent_txo: &Vec<u8>) -> u64 {
+        xxh3_64(spent_txo.as_slice())
     }
 
     pub fn get_by_spent_txo(
@@ -295,6 +284,37 @@ impl SpentTxoApproxIndexTable {
     }
 }
 
+pub struct AccountCertsApproxIndexTable;
+
+impl AccountCertsApproxIndexTable {
+    pub const DEF: MultimapTableDefinition<'static, u64, u64> =
+        MultimapTableDefinition::new("bystakeactions");
+
+    pub fn compute_key(account: &Vec<u8>) -> u64 {
+        xxh3_64(account.as_slice())
+    }
+
+    pub fn get_by_account(rx: &ReadTransaction, account: &[u8]) -> Result<Vec<BlockSlot>, Error> {
+        let table = rx.open_multimap_table(Self::DEF)?;
+        let key = Self::compute_key(&account.to_vec());
+        let mut out = vec![];
+        for slot in table.get(key)? {
+            out.push(slot?.value());
+        }
+        Ok(out)
+    }
+
+    pub fn iter_by_account_certs(
+        rx: &ReadTransaction,
+        account: &[u8],
+    ) -> Result<SlotKeyIterator, Error> {
+        let table = rx.open_multimap_table(Self::DEF)?;
+        let key = Self::compute_key(&account.to_vec());
+        let range = table.get(key)?;
+        Ok(SlotKeyIterator::new(range))
+    }
+}
+
 pub struct TxHashApproxIndexTable;
 
 impl TxHashApproxIndexTable {
@@ -302,9 +322,7 @@ impl TxHashApproxIndexTable {
         MultimapTableDefinition::new("bytx");
 
     pub fn compute_key(tx_hash: &Vec<u8>) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        tx_hash.hash(&mut hasher);
-        hasher.finish()
+        xxh3_64(tx_hash.as_slice())
     }
 
     pub fn get_by_tx_hash(rx: &ReadTransaction, tx_hash: &[u8]) -> Result<Vec<BlockSlot>, Error> {
@@ -332,6 +350,7 @@ impl Indexes {
         wx.open_multimap_table(PolicyApproxIndexTable::DEF)?;
         wx.open_multimap_table(ScriptHashApproxIndexTable::DEF)?;
         wx.open_multimap_table(SpentTxoApproxIndexTable::DEF)?;
+        wx.open_multimap_table(AccountCertsApproxIndexTable::DEF)?;
         wx.open_multimap_table(TxHashApproxIndexTable::DEF)?;
 
         Ok(())
@@ -345,8 +364,19 @@ impl Indexes {
         AssetApproxIndexTable::iter_by_asset(rx, asset)
     }
 
-    pub fn iter_by_payment(rx: &ReadTransaction, address: &[u8]) -> Result<SlotKeyIterator, Error> {
-        AddressPaymentPartApproxIndexTable::iter_by_payment(rx, address)
+    pub fn iter_by_payment(rx: &ReadTransaction, payment: &[u8]) -> Result<SlotKeyIterator, Error> {
+        AddressPaymentPartApproxIndexTable::iter_by_payment(rx, payment)
+    }
+
+    pub fn iter_by_stake(rx: &ReadTransaction, stake: &[u8]) -> Result<SlotKeyIterator, Error> {
+        AddressStakePartApproxIndexTable::iter_by_stake(rx, stake)
+    }
+
+    pub fn iter_by_account_certs(
+        rx: &ReadTransaction,
+        account: &[u8],
+    ) -> Result<SlotKeyIterator, Error> {
+        AccountCertsApproxIndexTable::iter_by_account_certs(rx, account)
     }
 
     pub fn get_by_address_payment_part(
@@ -406,6 +436,10 @@ impl Indexes {
         SpentTxoApproxIndexTable::get_by_spent_txo(rx, spent_txo)
     }
 
+    pub fn get_by_account(rx: &ReadTransaction, account: &[u8]) -> Result<Vec<BlockSlot>, Error> {
+        AccountCertsApproxIndexTable::get_by_account(rx, account)
+    }
+
     pub fn get_by_tx_hash(rx: &ReadTransaction, tx_hash: &[u8]) -> Result<Vec<BlockSlot>, Error> {
         TxHashApproxIndexTable::get_by_tx_hash(rx, tx_hash)
     }
@@ -421,6 +455,7 @@ impl Indexes {
         Self::copy_table(PolicyApproxIndexTable::DEF, rx, wx)?;
         Self::copy_table(ScriptHashApproxIndexTable::DEF, rx, wx)?;
         Self::copy_table(SpentTxoApproxIndexTable::DEF, rx, wx)?;
+        Self::copy_table(AccountCertsApproxIndexTable::DEF, rx, wx)?;
         Self::copy_table(TxHashApproxIndexTable::DEF, rx, wx)?;
 
         Ok(())
@@ -521,6 +556,14 @@ impl Indexes {
             slot,
         )?;
 
+        Self::insert(
+            wx,
+            AccountCertsApproxIndexTable::DEF,
+            AccountCertsApproxIndexTable::compute_key,
+            tags.account_certs.clone(),
+            slot,
+        )?;
+
         Ok(())
     }
 
@@ -616,6 +659,14 @@ impl Indexes {
             SpentTxoApproxIndexTable::DEF,
             SpentTxoApproxIndexTable::compute_key,
             tags.spent_txo.clone(),
+            slot,
+        )?;
+
+        Self::remove(
+            wx,
+            AccountCertsApproxIndexTable::DEF,
+            AccountCertsApproxIndexTable::compute_key,
+            tags.account_certs.clone(),
             slot,
         )?;
 

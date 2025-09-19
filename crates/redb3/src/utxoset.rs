@@ -1,7 +1,7 @@
 use dolos_core::{EraCbor, TxoRef, UtxoMap, UtxoSetDelta};
 use pallas::ledger::{addresses::ShelleyDelegationPart, traverse::MultiEraOutput};
 use redb::{
-    MultimapTableDefinition, Range, ReadTransaction, ReadableTable as _,
+    MultimapTableDefinition, Range, ReadTransaction, ReadableDatabase, ReadableTable as _,
     ReadableTableMetadata as _, TableDefinition, TableStats, WriteTransaction,
 };
 use std::{
