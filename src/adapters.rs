@@ -125,6 +125,25 @@ impl ArchiveStore for ArchiveAdapter {
         Ok(out.into())
     }
 
+    fn iter_blocks_with_stake(&self, stake: &[u8]) -> Result<Self::SparseBlockIter, ArchiveError> {
+        let out = match self {
+            ArchiveAdapter::Redb(x) => x.iter_blocks_with_stake(stake)?,
+        };
+
+        Ok(out.into())
+    }
+
+    fn iter_blocks_with_account_certs(
+        &self,
+        account: &[u8],
+    ) -> Result<Self::SparseBlockIter, ArchiveError> {
+        let out = match self {
+            ArchiveAdapter::Redb(x) => x.iter_blocks_with_account_certs(account)?,
+        };
+
+        Ok(out.into())
+    }
+
     fn get_range<'a>(
         &self,
         from: Option<BlockSlot>,

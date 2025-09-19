@@ -158,12 +158,8 @@ pub fn cert_as_stake_deregistration(cert: &MultiEraCert) -> Option<StakeCredenti
 
 pub fn stake_credential_to_address(network: Network, credential: &StakeCredential) -> StakeAddress {
     match credential {
-        StakeCredential::ScriptHash(x) => {
-            StakeAddress::new(network, StakePayload::Script(*x))
-        }
-        StakeCredential::AddrKeyhash(x) => {
-            StakeAddress::new(network, StakePayload::Stake(*x))
-        }
+        StakeCredential::ScriptHash(x) => StakeAddress::new(network, StakePayload::Script(*x)),
+        StakeCredential::AddrKeyhash(x) => StakeAddress::new(network, StakePayload::Stake(*x)),
     }
 }
 

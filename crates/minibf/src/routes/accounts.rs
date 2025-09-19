@@ -1,4 +1,4 @@
-use std::ops::Deref;
+use std::{collections::BTreeSet, ops::Deref};
 
 use axum::{
     extract::{Path, Query, State},
@@ -128,8 +128,6 @@ impl<'a> IntoModel<Vec<AccountAddressesContentInner>> for AccountModelBuilder<'a
     type SortKey = ();
 
     fn into_model(self) -> Result<Vec<AccountAddressesContentInner>, StatusCode> {
-        // TODO: scan archive logs
-
         let out: Vec<_> = vec![]
             .into_iter()
             .map(|x| AccountAddressesContentInner { address: x })
@@ -177,29 +175,59 @@ where
 
 pub async fn by_stake_addresses<D: Domain>(
     Path(stake_address): Path<String>,
+    Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<Vec<AccountAddressesContentInner>>, StatusCode>
+) -> Result<Json<Vec<AccountAddressesContentInner>>, Error>
 where
     Option<AccountState>: From<D::Entity>,
 {
+    let pagination = Pagination::try_from(params)?;
     let account_key = parse_account_key_param(&stake_address)?;
 
-    let Some(state) = domain
-        .read_cardano_entity::<AccountState>(account_key.entity_key.as_slice())
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-    else {
-        return Ok(Json(vec![]));
-    };
+    let mut blocks = domain
+        .archive()
+        .iter_blocks_with_stake(&account_key.address.to_vec())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let model = AccountModelBuilder {
-        account_state: state,
-        stake_address: Some(account_key.address),
-        tip_slot: None,
-        chain: None,
+    let mut items = vec![];
+    let mut skipped = 0;
+    let mut seen = BTreeSet::new();
+
+    while items.len() < pagination.count {
+        let Some(block) = blocks.next() else {
+            break;
+        };
+        let Ok((_, Some(block))) = block else {
+            return Err(StatusCode::INTERNAL_SERVER_ERROR.into());
+        };
+
+        let block = MultiEraBlock::decode(&block).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        for (_, utxo) in block.txs().iter().flat_map(|tx| tx.produces()) {
+            let address = utxo
+                .address()
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            if match &address {
+                Address::Shelley(shelley) => {
+                    pallas_extras::shelley_address_to_stake_address(shelley)
+                        .map(|x| x.to_vec() == account_key.address.to_vec())
+                        .unwrap_or(false)
+                }
+                Address::Stake(stake) => stake.to_vec() == account_key.address.to_vec(),
+                Address::Byron(_) => false,
+            } && seen.insert(address.to_string())
+            {
+                if skipped < (pagination.page as usize - 1) * pagination.count {
+                    skipped += 1;
+                } else {
+                    items.push(AccountAddressesContentInner {
+                        address: address.to_string(),
+                    });
+                }
+            }
+        }
     }
-    .into_model()?;
 
-    Ok(Json(model))
+    Ok(Json(items))
 }
 
 pub async fn by_stake_utxos<D: Domain>(
@@ -345,7 +373,7 @@ impl<T> AccountActivityModelBuilder<T> {
         self.items.len() < self.page_size
     }
 
-    fn scan_block<F>(
+    fn scan_block_certs<F>(
         &mut self,
         epoch: u32,
         block: &MultiEraBlock,
@@ -388,6 +416,16 @@ impl IntoModel<Vec<AccountDelegationContentInner>>
     }
 }
 
+impl IntoModel<Vec<AccountAddressesContentInner>>
+    for AccountActivityModelBuilder<AccountAddressesContentInner>
+{
+    type SortKey = ();
+
+    fn into_model(self) -> Result<Vec<AccountAddressesContentInner>, StatusCode> {
+        Ok(self.items)
+    }
+}
+
 pub async fn by_stake_actions<D: Domain, F, T>(
     stake_address: &str,
     pagination: Pagination,
@@ -408,9 +446,6 @@ where
         .get_network_id()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // TODO: scan archive logs
-    let mut slot_iter = std::iter::empty::<u64>();
-
     let mut builder = AccountActivityModelBuilder::new(
         account_key.address,
         network,
@@ -418,22 +453,25 @@ where
         pagination.page as usize,
     );
 
+    let mut blocks = domain
+        .archive()
+        .iter_blocks_with_account_certs(&account_key.entity_key)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
     while builder.needs_more() {
-        let Some(slot) = slot_iter.next() else {
+        let Some(block) = blocks.next() else {
             break;
+        };
+
+        let Ok((slot, Some(block))) = block else {
+            return Err(StatusCode::INTERNAL_SERVER_ERROR.into());
         };
 
         let (epoch, _) = chain.slot_epoch(slot);
 
-        let block = domain
-            .archive()
-            .get_block_by_slot(&slot)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-            .ok_or(StatusCode::NOT_FOUND)?;
-
         let block = MultiEraBlock::decode(&block).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-        builder.scan_block(epoch, &block, &mapper)?;
+        builder.scan_block_certs(epoch, &block, &mapper)?;
     }
 
     Ok(builder.items)
