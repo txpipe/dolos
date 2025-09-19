@@ -13,6 +13,7 @@ pub mod scripts;
 pub mod tx;
 pub mod txs;
 pub mod utxos;
+pub mod metrics;
 
 use std::env;
 

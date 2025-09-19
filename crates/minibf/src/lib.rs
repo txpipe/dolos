@@ -230,6 +230,7 @@ where
         let app = Router::new()
             .route("/", get(routes::root::<D>))
             .route("/health", get(routes::health::naked))
+            .route("/metrics", get(routes::metrics::metrics::<D>))
             .route("/health/clock", get(routes::health::clock))
             .route("/genesis", get(routes::genesis::naked::<D>))
             .route("/network", get(routes::network::naked::<D>))
