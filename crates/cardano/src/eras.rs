@@ -1,6 +1,6 @@
 use dolos_core::{ChainError, Domain, StateStore as _};
 
-use crate::{model::EraSummary, EraBoundary, FixedNamespace as _};
+use crate::{model::EraSummary, EraBoundary, EraProtocol, FixedNamespace as _};
 
 pub type Epoch = u32;
 pub type EpochSlot = u32;
@@ -158,13 +158,17 @@ pub fn load_era_summary<D: Domain>(domain: &D) -> Result<ChainSummary, ChainErro
     Ok(chain)
 }
 
-pub fn load_active_era<D: Domain>(domain: &D) -> Result<EraSummary, ChainError> {
+pub fn load_active_era<D: Domain>(domain: &D) -> Result<(EraProtocol, EraSummary), ChainError> {
     let eras = domain
         .state()
         .iter_entities_typed::<EraSummary>(EraSummary::NS, None)?;
+
     match eras.last() {
         Some(x) => match x {
-            Ok((_, era)) => Ok(era),
+            Ok((key, summary)) => {
+                let protocol = EraProtocol::from(key);
+                Ok((protocol, summary))
+            }
             Err(_) => Err(ChainError::EraNotFound),
         },
         None => Err(ChainError::EraNotFound),

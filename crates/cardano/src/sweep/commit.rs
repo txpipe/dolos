@@ -78,7 +78,7 @@ impl BoundaryWork {
 
         let previous = state.read_entity_typed::<EraSummary>(
             EraSummary::NS,
-            &EntityKey::from(&transition.prev_version.to_be_bytes()),
+            &EntityKey::from(transition.prev_version),
         )?;
 
         let Some(mut previous) = previous else {
@@ -88,7 +88,7 @@ impl BoundaryWork {
         previous.define_end(self.ending_state.number as u64);
 
         writer.write_entity_typed::<EraSummary>(
-            &EntityKey::from(&transition.prev_version.to_be_bytes()),
+            &EntityKey::from(transition.prev_version),
             &previous,
         )?;
 
@@ -99,10 +99,7 @@ impl BoundaryWork {
             slot_length: transition.slot_length,
         };
 
-        writer.write_entity_typed(
-            &EntityKey::from(&transition.new_version.to_be_bytes()),
-            &new,
-        )?;
+        writer.write_entity_typed(&EntityKey::from(transition.new_version), &new)?;
 
         Ok(())
     }

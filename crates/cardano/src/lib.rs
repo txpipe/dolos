@@ -147,7 +147,7 @@ pub fn load_active_pparams<D: Domain>(domain: &D) -> Result<Option<PParamsSet>, 
 }
 
 pub fn use_active_pparams<D: Domain>(domain: &D) -> Result<PParamsSet, ChainError> {
-    let epoch = load_active_epoch(domain)?.ok_or(ChainError::PParamsNotFound)?;
+    let epoch = load_active_epoch(domain)?.ok_or(ChainError::NoActiveEpoch)?;
 
     Ok(epoch.pparams)
 }

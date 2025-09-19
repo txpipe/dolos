@@ -61,7 +61,7 @@ jobs:
           persist-credentials: false
           submodules: recursive
       - name: Install Rust
-        run: rustup update "1.85.1" --no-self-update && rustup default "1.85.1"
+        run: rustup update "1.89" --no-self-update && rustup default "1.89"
       - name: Install dist
         # we specify bash to get pipefail; it guards against the `curl` command
         # failing. otherwise `sh` won't catch that `curl` returned non-0
@@ -130,7 +130,7 @@ jobs:
             echo "$HOME/.cargo/bin" >> $GITHUB_PATH
           fi
       - name: Use rustup to set correct Rust version
-        run: rustup update "1.85.1" --no-self-update && rustup default "1.85.1"
+        run: rustup update "1.89" --no-self-update && rustup default "1.89"
       - name: Install dist
         run: ${{ matrix.install_dist.run }}
       # Get the dist-manifest
@@ -184,7 +184,7 @@ jobs:
           persist-credentials: false
           submodules: recursive
       - name: Install Rust
-        run: rustup update "1.85.1" --no-self-update && rustup default "1.85.1"
+        run: rustup update "1.89" --no-self-update && rustup default "1.89"
       - name: Install cached dist
         uses: actions/download-artifact@v4
         with:
@@ -236,7 +236,7 @@ jobs:
           persist-credentials: false
           submodules: recursive
       - name: Install Rust
-        run: rustup update "1.85.1" --no-self-update && rustup default "1.85.1"
+        run: rustup update "1.89" --no-self-update && rustup default "1.89"
       - name: Install cached dist
         uses: actions/download-artifact@v4
         with:

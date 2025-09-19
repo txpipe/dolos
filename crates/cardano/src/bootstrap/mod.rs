@@ -4,7 +4,8 @@ use dolos_core::{
 use tracing::debug;
 
 use crate::{
-    mutable_slots, EpochState, EraBoundary, EraSummary, Nonces, PParamsSet, EPOCH_KEY_MARK,
+    mutable_slots, sweep::Pots, EpochState, EraBoundary, EraSummary, Nonces, PParamsSet,
+    EPOCH_KEY_MARK,
 };
 
 fn force_hardforks(
@@ -47,6 +48,29 @@ fn get_utxo_amount(genesis: &Genesis) -> u64 {
     byron_utxo + shelley_utxo
 }
 
+const SHELLEY_PROTOCOL: u16 = 2;
+
+fn bootstrap_pots(
+    protocol: u16,
+    genesis: &Genesis,
+    pparams: &PParamsSet,
+) -> Result<Pots, ChainError> {
+    let initial_utxos = get_utxo_amount(genesis);
+
+    // for any era before shelley, we don't have the concept of reserves or
+    // treasury, so we just return the initial utxos
+    if protocol < SHELLEY_PROTOCOL {
+        return Ok(Pots {
+            reserves: 0,
+            treasury: 0,
+            utxos: initial_utxos,
+        });
+    }
+
+    let max_supply = genesis.shelley.max_lovelace_supply.unwrap_or_default();
+    crate::sweep::compute_genesis_pots(max_supply, initial_utxos, pparams)
+}
+
 fn bootrap_epoch<D: Domain>(domain: &D) -> Result<EpochState, ChainError> {
     let genesis = domain.genesis();
 
@@ -55,21 +79,21 @@ fn bootrap_epoch<D: Domain>(domain: &D) -> Result<EpochState, ChainError> {
 
     if let Some(force_protocol) = genesis.force_protocol {
         force_hardforks(&mut pparams, force_protocol as u16, genesis)?;
+
+        // TODO: why do we set nonces only if there's a force protocol?
         nonces = Some(Nonces::bootstrap(genesis.shelley_hash));
     }
 
-    // bootstrap pots
-    let max_supply = genesis.shelley.max_lovelace_supply.unwrap_or_default();
-    let utxos = get_utxo_amount(domain.genesis());
+    let protocol = pparams.protocol_major().unwrap_or_default();
 
-    let pots = crate::sweep::compute_genesis_pots(max_supply, utxos, &pparams)?;
+    let pots = bootstrap_pots(protocol, genesis, &pparams)?;
 
     let epoch = EpochState {
         pparams,
         number: 0,
         reserves: pots.reserves,
         treasury: pots.treasury,
-        utxos,
+        utxos: pots.utxos,
         active_stake: 0,
         deposits: 0,
         gathered_fees: 0,
