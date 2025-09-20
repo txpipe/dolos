@@ -36,19 +36,48 @@ impl BoundaryWork {
         for record in accounts {
             let (key, mut state) = record?;
 
-            if self.dropped_delegators.contains(&key) {
+            // clear pool if dropped
+            if self.dropped_pool_delegators.contains(&key) {
                 state.latest_pool = None;
             }
 
+            // rotate pool
+            state.active_pool = state.latest_pool.clone();
+
+            // rotate stake
             state.active_stake = state.wait_stake;
             state.wait_stake = state.live_stake();
 
+            // add rewards
             let rewards = self.delegator_rewards.get(&key).unwrap_or(&0);
             state.rewards_sum += rewards;
 
-            state.active_pool = state.latest_pool.clone();
+            // clear drep if dropped
+            if self.dropped_drep_delegators.contains(&key) {
+                state.latest_drep = None;
+            }
+
+            // rotate drep
+            state.active_drep = state.latest_drep.clone();
 
             writer.write_entity_typed::<AccountState>(&key, &state)?;
+        }
+
+        Ok(())
+    }
+
+    fn update_drep_data<W: StateWriter>(
+        &self,
+        writer: &W,
+        dreps: impl Iterator<Item = Result<(EntityKey, crate::DRepState), StateError>>,
+    ) -> Result<(), ChainError> {
+        for record in dreps {
+            let (key, mut state) = record?;
+
+            if self.retired_dreps.contains(&key) {
+                state.retired = true;
+                writer.write_entity_typed::<crate::DRepState>(&key, &state)?;
+            }
         }
 
         Ok(())
@@ -138,10 +167,15 @@ impl BoundaryWork {
             .state()
             .iter_entities_typed::<PoolState>(PoolState::NS, None)?;
 
+        let dreps = domain
+            .state()
+            .iter_entities_typed::<crate::DRepState>(crate::DRepState::NS, None)?;
+
         let writer = domain.state().start_writer()?;
 
         self.rotate_pool_stake_data(&writer, pools)?;
         self.rotate_account_stake_data(&writer, accounts)?;
+        self.update_drep_data(&writer, dreps)?;
         self.drop_active_epoch(&writer)?;
         self.promote_waiting_epoch(&writer)?;
         self.promote_ending_epoch(&writer)?;

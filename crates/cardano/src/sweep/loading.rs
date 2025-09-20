@@ -3,25 +3,38 @@ use std::collections::{HashMap, HashSet};
 use dolos_core::{ChainError, Domain, EntityKey, StateStore};
 
 use crate::{
-    load_active_era, mutable_slots,
-    sweep::{AccountId, BoundaryWork, PoolData, PoolId, Snapshot},
-    AccountState, FixedNamespace as _, PoolState,
+    drep_to_entity_key, load_active_era, mutable_slots,
+    sweep::{AccountId, BoundaryWork, DRepId, PoolData, PoolId, Snapshot},
+    AccountState, DRepState, FixedNamespace as _, PoolState,
 };
 
 impl Snapshot {
-    pub fn insert_account_data(
+    pub fn track_account(
         &mut self,
         account: &AccountId,
-        pool_id: &PoolId,
+        pool_id: Option<PoolId>,
+        drep_id: Option<DRepId>,
         stake: u64,
     ) -> Result<(), ChainError> {
-        self.accounts_by_pool
-            .insert(pool_id.clone(), account.clone(), stake);
+        if let Some(pool_id) = pool_id {
+            self.accounts_by_pool
+                .insert(pool_id.clone(), account.clone(), stake);
 
-        self.pool_stake
-            .entry(pool_id.clone())
-            .and_modify(|x| *x += stake)
-            .or_insert(stake);
+            self.pool_stake
+                .entry(pool_id.clone())
+                .and_modify(|x| *x += stake)
+                .or_insert(stake);
+        }
+
+        if let Some(drep_id) = drep_id {
+            self.accounts_by_drep
+                .insert(drep_id.clone(), account.clone(), stake);
+
+            self.drep_stake
+                .entry(drep_id.clone())
+                .and_modify(|x| *x += stake)
+                .or_insert(stake);
+        }
 
         self.total_stake += stake;
 
@@ -44,25 +57,23 @@ pub fn load_account_data<D: Domain>(
     for record in accounts {
         let (account_id, account) = record?;
 
-        if let Some(pool_id) = account.latest_pool.clone() {
-            let pool_id = EntityKey::from(pool_id);
+        // ending snapshot
+        let pool_id = account.latest_pool.clone().map(EntityKey::from);
+        let drep_id = account.latest_drep.clone().map(drep_to_entity_key);
+        let stake = account.live_stake();
 
-            boundary.ending_snapshot.insert_account_data(
-                &account_id,
-                &pool_id,
-                account.live_stake(),
-            )?;
-        }
+        boundary
+            .ending_snapshot
+            .track_account(&account_id, pool_id, drep_id, stake)?;
 
-        if let Some(pool_id) = account.active_pool.clone() {
-            let pool_id = EntityKey::from(pool_id);
+        // active snapshot
+        let pool_id = account.active_pool.clone().map(EntityKey::from);
+        let drep_id = account.active_drep.clone().map(drep_to_entity_key);
+        let stake = account.active_stake;
 
-            boundary.active_snapshot.insert_account_data(
-                &account_id,
-                &pool_id,
-                account.active_stake,
-            )?;
-        }
+        boundary
+            .active_snapshot
+            .track_account(&account_id, pool_id, drep_id, stake)?;
     }
 
     Ok(())
@@ -90,6 +101,19 @@ fn load_pool_params<D: Domain>(domain: &D, boundary: &mut BoundaryWork) -> Resul
     Ok(())
 }
 
+fn load_drep_data<D: Domain>(domain: &D, boundary: &mut BoundaryWork) -> Result<(), ChainError> {
+    let dreps = domain
+        .state()
+        .iter_entities_typed::<DRepState>(DRepState::NS, None)?;
+
+    for record in dreps {
+        let (drep_id, drep) = record?;
+        boundary.dreps.insert(drep_id, drep);
+    }
+
+    Ok(())
+}
+
 impl BoundaryWork {
     pub fn load<D: Domain>(domain: &D) -> Result<BoundaryWork, ChainError> {
         let active_state = crate::load_active_epoch(domain)?;
@@ -108,6 +132,7 @@ impl BoundaryWork {
 
             // to be loaded right after
             pools: HashMap::new(),
+            dreps: HashMap::new(),
             active_snapshot: Snapshot::default(),
             ending_snapshot: Snapshot::default(),
 
@@ -118,12 +143,15 @@ impl BoundaryWork {
             starting_state: None,
             effective_rewards: None,
             era_transition: None,
-            dropped_delegators: HashSet::new(),
+            dropped_pool_delegators: HashSet::new(),
+            dropped_drep_delegators: HashSet::new(),
+            retired_dreps: HashSet::new(),
         };
 
         // order matters
         load_pool_params(domain, &mut boundary)?;
         load_account_data(domain, &mut boundary)?;
+        load_drep_data(domain, &mut boundary)?;
 
         Ok(boundary)
     }
