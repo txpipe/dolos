@@ -76,9 +76,8 @@ impl BoundaryWork {
 
             if self.retired_dreps.contains(&key) {
                 state.retired = true;
+                writer.write_entity_typed::<crate::DRepState>(&key, &state)?;
             }
-
-            writer.write_entity_typed::<crate::DRepState>(&key, &state)?;
         }
 
         Ok(())
