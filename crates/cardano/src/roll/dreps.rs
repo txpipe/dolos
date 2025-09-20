@@ -78,7 +78,7 @@ impl dolos_core::EntityDelta for DRepRegistration {
     }
 
     fn apply(&mut self, entity: &mut Option<DRepState>) {
-        let entity = entity.get_or_insert_default();
+        let entity = entity.get_or_insert_with(|| DRepState::new(self.drep_id.clone()));
 
         // save undo info
         self.was_retired = entity.retired;
@@ -90,7 +90,7 @@ impl dolos_core::EntityDelta for DRepRegistration {
     }
 
     fn undo(&self, entity: &mut Option<DRepState>) {
-        let entity = entity.get_or_insert_default();
+        let entity = entity.get_or_insert_with(|| DRepState::new(self.drep_id.clone()));
         entity.initial_slot = None;
         entity.voting_power = 0;
         entity.retired = self.was_retired;
@@ -124,7 +124,7 @@ impl dolos_core::EntityDelta for DRepUnRegistration {
     }
 
     fn apply(&mut self, entity: &mut Option<DRepState>) {
-        let entity = entity.get_or_insert_default();
+        let entity = entity.get_or_insert_with(|| DRepState::new(self.drep_id.clone()));
 
         // save undo data
         self.prev_voting_power = Some(entity.voting_power);
@@ -135,7 +135,7 @@ impl dolos_core::EntityDelta for DRepUnRegistration {
     }
 
     fn undo(&self, entity: &mut Option<DRepState>) {
-        let entity = entity.get_or_insert_default();
+        let entity = entity.get_or_insert_with(|| DRepState::new(self.drep_id.clone()));
         entity.voting_power = self.prev_voting_power.unwrap();
         entity.retired = false;
     }
@@ -166,7 +166,7 @@ impl dolos_core::EntityDelta for DRepActivity {
     }
 
     fn apply(&mut self, entity: &mut Option<DRepState>) {
-        let entity = entity.get_or_insert_default();
+        let entity = entity.get_or_insert_with(|| DRepState::new(self.drep_id.clone()));
 
         // save undo info
         self.previous_last_active_slot = entity.last_active_slot;
@@ -176,7 +176,7 @@ impl dolos_core::EntityDelta for DRepActivity {
     }
 
     fn undo(&self, entity: &mut Option<DRepState>) {
-        let entity = entity.get_or_insert_default();
+        let entity = entity.get_or_insert_with(|| DRepState::new(self.drep_id.clone()));
         entity.last_active_slot = self.previous_last_active_slot;
     }
 }

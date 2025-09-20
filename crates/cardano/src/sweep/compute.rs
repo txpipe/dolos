@@ -4,7 +4,7 @@ use pallas::ledger::primitives::RationalNumber;
 use crate::{
     sweep::{BoundaryWork, EraTransition, PoolData, PotDelta, Pots},
     utils::epoch_first_slot,
-    EpochState, EraProtocol, Nonces, PParamsSet, PoolState,
+    EpochState, EraProtocol, Nonces, PParamsSet,
 };
 
 macro_rules! as_ratio {

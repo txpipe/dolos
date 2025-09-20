@@ -773,7 +773,7 @@ pub const EPOCH_KEY_GO: &[u8] = b"2";
 pub const EPOCH_KEY_SET: &[u8] = b"1";
 pub const EPOCH_KEY_MARK: &[u8] = b"0";
 
-#[derive(Debug, Encode, Decode, Clone, Default)]
+#[derive(Debug, Encode, Decode, Clone)]
 pub struct DRepState {
     #[n(0)]
     pub drep_id: Vec<u8>,
@@ -792,6 +792,16 @@ pub struct DRepState {
 }
 
 impl DRepState {
+    pub fn new(drep_id: Vec<u8>) -> Self {
+        Self {
+            drep_id,
+            initial_slot: None,
+            voting_power: 0,
+            last_active_slot: None,
+            retired: false,
+        }
+    }
+
     /// Check that the first byte of the drep id finishes with the 0011 bytes.
     pub fn has_script(&self) -> bool {
         let first = self.drep_id.first().unwrap();

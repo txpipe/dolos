@@ -56,6 +56,18 @@ impl<'a> IntoModel<blockfrost_openapi::models::drep::Drep> for DrepModelBuilder<
             .last_active_slot
             .map(|x| self.chain.slot_epoch(x).0 as i32);
 
+        let active = self.is_special_case()
+            || match (
+                last_active_epoch,
+                self.state.retiring_epoch(
+                    self.chain,
+                    self.pparams.drep_inactivity_period().unwrap_or_default(),
+                ),
+            ) {
+                (Some(lae), Some(re)) => lae <= re as i32,
+                _ => self.is_special_case(),
+            };
+
         let drep_activity = self.pparams.drep_inactivity_period_or_default() as i32;
 
         let out = blockfrost_openapi::models::drep::Drep {
@@ -66,7 +78,7 @@ impl<'a> IntoModel<blockfrost_openapi::models::drep::Drep> for DrepModelBuilder<
                 hex::encode(&self.state.drep_id)
             },
             amount: self.state.voting_power.to_string(),
-            active: self.state.initial_slot.is_some(),
+            active,
             active_epoch: if self.is_special_case() {
                 None
             } else {
