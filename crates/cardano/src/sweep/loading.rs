@@ -68,7 +68,7 @@ pub fn load_account_data<D: Domain>(
 
         // active snapshot
         let pool_id = account.active_pool.clone().map(EntityKey::from);
-        let drep_id = account.latest_drep.clone().map(drep_to_entity_key);
+        let drep_id = account.active_drep.clone().map(drep_to_entity_key);
         let stake = account.active_stake;
 
         boundary
