@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use dolos_core::{BlockSlot, ChainError, Domain, EntityKey};
 use pallas::{crypto::hash::Hash, ledger::primitives::RationalNumber};
 
-use crate::{Config, EpochState, EraProtocol, EraSummary};
+use crate::{Config, DRepState, EpochState, EraProtocol, EraSummary};
 
 pub mod commit;
 pub mod compute;
@@ -30,6 +30,7 @@ pub use compute::compute_genesis_pots;
 
 pub type AccountId = EntityKey;
 pub type PoolId = EntityKey;
+pub type DRepId = EntityKey;
 
 #[derive(Debug)]
 pub struct PoolData {
@@ -64,7 +65,9 @@ impl DelegatorMap {
 pub struct Snapshot {
     pub total_stake: u64,
     pub accounts_by_pool: DelegatorMap,
+    pub accounts_by_drep: DelegatorMap,
     pub pool_stake: HashMap<PoolId, u64>,
+    pub drep_stake: HashMap<DRepId, u64>,
 }
 
 impl Snapshot {
@@ -100,6 +103,7 @@ pub struct BoundaryWork {
     pub ending_state: EpochState,
     pub ending_snapshot: Snapshot,
     pub pools: HashMap<PoolId, PoolData>,
+    pub dreps: HashMap<DRepId, DRepState>,
     pub mutable_slots: u64,
     pub shelley_hash: Hash<32>,
 
@@ -110,7 +114,9 @@ pub struct BoundaryWork {
     pub delegator_rewards: HashMap<AccountId, u64>,
     pub starting_state: Option<EpochState>,
     pub era_transition: Option<EraTransition>,
-    pub dropped_delegators: HashSet<AccountId>,
+    pub dropped_pool_delegators: HashSet<AccountId>,
+    pub dropped_drep_delegators: HashSet<AccountId>,
+    pub retired_dreps: HashSet<DRepId>,
 }
 
 pub fn sweep<D: Domain>(domain: &D, _: BlockSlot, config: &Config) -> Result<(), ChainError> {

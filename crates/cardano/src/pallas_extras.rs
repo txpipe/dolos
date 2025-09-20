@@ -268,3 +268,13 @@ pub fn default_cost_models() -> CostModels {
         unknown: Default::default(),
     }
 }
+
+pub const DREP_KEY_PREFIX: u8 = 0b00100010;
+pub const DREP_SCRIPT_PREFIX: u8 = 0b00100011;
+
+pub fn stake_cred_to_drep(cred: &StakeCredential) -> DRep {
+    match cred {
+        StakeCredential::AddrKeyhash(key) => DRep::Key(*key),
+        StakeCredential::ScriptHash(key) => DRep::Script(*key),
+    }
+}

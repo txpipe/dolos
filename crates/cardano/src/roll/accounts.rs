@@ -196,14 +196,14 @@ impl dolos_core::EntityDelta for VoteDelegation {
         let entity = entity.get_or_insert_default();
 
         // save undo info
-        self.prev_drep_id = entity.drep.clone();
+        self.prev_drep_id = entity.latest_drep.clone();
 
-        entity.drep = Some(self.drep.clone());
+        entity.latest_drep = Some(self.drep.clone());
     }
 
     fn undo(&self, entity: &mut Option<AccountState>) {
         let entity = entity.get_or_insert_default();
-        entity.drep = self.prev_drep_id.clone();
+        entity.latest_drep = self.prev_drep_id.clone();
     }
 }
 
@@ -244,18 +244,18 @@ impl dolos_core::EntityDelta for StakeDeregistration {
         // save undo info
         self.prev_registered_at = entity.registered_at;
         self.prev_pool_id = entity.latest_pool.clone();
-        self.prev_drep = entity.drep.clone();
+        self.prev_drep = entity.latest_drep.clone();
 
         entity.registered_at = None;
         entity.latest_pool = None;
-        entity.drep = None;
+        entity.latest_drep = None;
     }
 
     fn undo(&self, entity: &mut Option<AccountState>) {
         let entity = entity.get_or_insert_default();
         entity.registered_at = self.prev_registered_at;
         entity.latest_pool = self.prev_pool_id.clone();
-        entity.drep = self.prev_drep.clone();
+        entity.latest_drep = self.prev_drep.clone();
     }
 }
 

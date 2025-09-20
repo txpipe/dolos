@@ -57,7 +57,7 @@ impl TableRow for AccountState {
                     .map(hex::encode)
                     .unwrap_or_default()
             ),
-            format!("{}", self.drep.is_some()),
+            format!("{}", self.latest_drep.is_some()),
         ]
     }
 }
