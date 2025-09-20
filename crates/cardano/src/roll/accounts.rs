@@ -1,4 +1,3 @@
-
 use dolos_core::batch::WorkDeltas;
 use dolos_core::{ChainError, NsKey};
 use pallas::codec::minicbor;
@@ -216,6 +215,7 @@ pub struct StakeDeregistration {
     // undo
     prev_registered_at: Option<u64>,
     prev_pool_id: Option<Vec<u8>>,
+    prev_drep: Option<DRep>,
 }
 
 impl StakeDeregistration {
@@ -225,6 +225,7 @@ impl StakeDeregistration {
             slot,
             prev_registered_at: None,
             prev_pool_id: None,
+            prev_drep: None,
         }
     }
 }
@@ -243,15 +244,18 @@ impl dolos_core::EntityDelta for StakeDeregistration {
         // save undo info
         self.prev_registered_at = entity.registered_at;
         self.prev_pool_id = entity.latest_pool.clone();
+        self.prev_drep = entity.drep.clone();
 
         entity.registered_at = None;
         entity.latest_pool = None;
+        entity.drep = None;
     }
 
     fn undo(&self, entity: &mut Option<AccountState>) {
         let entity = entity.get_or_insert_default();
         entity.registered_at = self.prev_registered_at;
         entity.latest_pool = self.prev_pool_id.clone();
+        entity.drep = self.prev_drep.clone();
     }
 }
 
