@@ -362,7 +362,7 @@ impl BoundaryWork {
             return false;
         };
 
-        retiring_epoch >= self.starting_epoch_no()
+        retiring_epoch <= self.starting_epoch_no()
     }
 
     fn retire_pools(&mut self) -> Result<(), ChainError> {
@@ -372,7 +372,7 @@ impl BoundaryWork {
             }
 
             let delegators = self
-                .active_snapshot
+                .ending_snapshot
                 .accounts_by_pool
                 .iter_delegators(pool_id);
 
