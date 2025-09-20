@@ -99,7 +99,7 @@ impl<'a> IntoModel<AccountContent> for AccountModelBuilder<'a> {
 
         let drep_id = self
             .account_state
-            .drep
+            .latest_drep
             .as_ref()
             .map(bech32_drep)
             .transpose()?;

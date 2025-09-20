@@ -4,7 +4,7 @@ use pallas::ledger::primitives::RationalNumber;
 use crate::{
     sweep::{BoundaryWork, EraTransition, PoolData, PotDelta, Pots},
     utils::epoch_first_slot,
-    EpochState, EraProtocol, Nonces, PParamsSet, PoolState,
+    DRepState, EpochState, EraProtocol, Nonces, PParamsSet, PoolState,
 };
 
 macro_rules! as_ratio {
@@ -156,6 +156,10 @@ impl BoundaryWork {
 
     pub fn active_a0(&self) -> Result<RationalNumber, ChainError> {
         self.active_pparams()?.ensure_a0()
+    }
+
+    pub fn active_drep_inactivity_period(&self) -> Result<u64, ChainError> {
+        self.active_pparams()?.ensure_drep_inactivity_period()
     }
 
     pub fn starting_pparams(&self) -> Result<&PParamsSet, ChainError> {
@@ -378,7 +382,7 @@ impl BoundaryWork {
 
             // TODO: understand if the dropped stake should be redistributed somewhere
             for (delegator, _stake) in delegators {
-                self.dropped_delegators.insert(delegator.clone());
+                self.dropped_pool_delegators.insert(delegator.clone());
             }
 
             // TODO: return pledge deposit to owners
@@ -387,9 +391,42 @@ impl BoundaryWork {
         Ok(())
     }
 
+    fn should_retire_drep(&self, drep: &DRepState) -> Result<bool, ChainError> {
+        let last_activity_slot = drep
+            .last_active_slot
+            .unwrap_or(drep.initial_slot.unwrap_or_default());
+
+        let (last_activity_epoch, _) = self.active_era.slot_epoch(last_activity_slot);
+
+        let retiring_epoch = last_activity_epoch as u64 + self.active_drep_inactivity_period()?;
+
+        Ok(retiring_epoch <= self.starting_epoch_no())
+    }
+
+    fn retire_dreps(&mut self) -> Result<(), ChainError> {
+        for (drep_id, drep) in self.dreps.iter() {
+            if !self.should_retire_drep(drep)? {
+                continue;
+            }
+
+            self.retired_dreps.insert(drep_id.clone());
+
+            for (delegator, _) in self
+                .ending_snapshot
+                .accounts_by_drep
+                .iter_delegators(drep_id)
+            {
+                self.dropped_drep_delegators.insert(delegator.clone());
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn compute(&mut self) -> Result<(), ChainError> {
         self.define_pot_delta()?;
         self.retire_pools()?;
+        self.retire_dreps()?;
         self.define_pool_rewards()?;
         self.define_starting_state()?;
         self.define_era_transition()?;
@@ -485,12 +522,15 @@ mod tests {
             ending_snapshot: Snapshot::empty(),
             mutable_slots: 10,
             shelley_hash: [0; 32].as_slice().into(),
+            pools: Default::default(),
+            dreps: Default::default(),
 
             // empty until computed
-            dropped_delegators: HashSet::new(),
+            dropped_pool_delegators: HashSet::new(),
+            dropped_drep_delegators: HashSet::new(),
+            retired_dreps: HashSet::new(),
             pool_rewards: Default::default(),
             delegator_rewards: Default::default(),
-            pools: Default::default(),
             starting_state: None,
             pot_delta: None,
             effective_rewards: None,
