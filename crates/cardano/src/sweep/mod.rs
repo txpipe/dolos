@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use dolos_core::{BlockSlot, ChainError, Domain, EntityKey};
 use pallas::{crypto::hash::Hash, ledger::primitives::RationalNumber};
@@ -37,6 +37,7 @@ pub struct PoolData {
     pub margin_cost: RationalNumber,
     pub declared_pledge: u64,
     pub minted_blocks: u32,
+    pub retiring_epoch: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -109,6 +110,7 @@ pub struct BoundaryWork {
     pub delegator_rewards: HashMap<AccountId, u64>,
     pub starting_state: Option<EpochState>,
     pub era_transition: Option<EraTransition>,
+    pub dropped_delegators: HashSet<AccountId>,
 }
 
 pub fn sweep<D: Domain>(domain: &D, _: BlockSlot, config: &Config) -> Result<(), ChainError> {

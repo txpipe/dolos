@@ -4,7 +4,7 @@ use pallas::ledger::primitives::RationalNumber;
 use crate::{
     sweep::{BoundaryWork, EraTransition, PoolData, PotDelta, Pots},
     utils::epoch_first_slot,
-    EpochState, EraProtocol, Nonces, PParamsSet,
+    EpochState, EraProtocol, Nonces, PParamsSet, PoolState,
 };
 
 macro_rules! as_ratio {
@@ -353,8 +353,43 @@ impl BoundaryWork {
         Ok(())
     }
 
+    fn starting_epoch_no(&self) -> u64 {
+        self.ending_state.number as u64 + 1
+    }
+
+    fn should_retire_pool(&self, pool: &PoolData) -> bool {
+        let Some(retiring_epoch) = pool.retiring_epoch else {
+            return false;
+        };
+
+        retiring_epoch >= self.starting_epoch_no()
+    }
+
+    fn retire_pools(&mut self) -> Result<(), ChainError> {
+        for (pool_id, pool) in self.pools.iter() {
+            if !self.should_retire_pool(pool) {
+                continue;
+            }
+
+            let delegators = self
+                .active_snapshot
+                .accounts_by_pool
+                .iter_delegators(pool_id);
+
+            // TODO: understand if the dropped stake should be redistributed somewhere
+            for (delegator, _stake) in delegators {
+                self.dropped_delegators.insert(delegator.clone());
+            }
+
+            // TODO: return pledge deposit to owners
+        }
+
+        Ok(())
+    }
+
     pub fn compute(&mut self) -> Result<(), ChainError> {
         self.define_pot_delta()?;
+        self.retire_pools()?;
         self.define_pool_rewards()?;
         self.define_starting_state()?;
         self.define_era_transition()?;
@@ -365,6 +400,8 @@ impl BoundaryWork {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use crate::{sweep::Snapshot, EraBoundary, EraSummary, PParamValue};
 
     use super::*;
@@ -450,6 +487,7 @@ mod tests {
             shelley_hash: [0; 32].as_slice().into(),
 
             // empty until computed
+            dropped_delegators: HashSet::new(),
             pool_rewards: Default::default(),
             delegator_rewards: Default::default(),
             pools: Default::default(),

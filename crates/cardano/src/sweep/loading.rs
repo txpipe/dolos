@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use dolos_core::{ChainError, Domain, EntityKey, StateStore};
 
@@ -22,6 +22,8 @@ impl Snapshot {
             .entry(pool_id.clone())
             .and_modify(|x| *x += stake)
             .or_insert(stake);
+
+        self.total_stake += stake;
 
         Ok(())
     }
@@ -50,8 +52,6 @@ pub fn load_account_data<D: Domain>(
                 &pool_id,
                 account.live_stake(),
             )?;
-
-            boundary.ending_snapshot.total_stake += account.live_stake();
         }
 
         if let Some(pool_id) = account.active_pool.clone() {
@@ -62,8 +62,6 @@ pub fn load_account_data<D: Domain>(
                 &pool_id,
                 account.active_stake,
             )?;
-
-            boundary.active_snapshot.total_stake += account.active_stake;
         }
     }
 
@@ -83,6 +81,7 @@ fn load_pool_params<D: Domain>(domain: &D, boundary: &mut BoundaryWork) -> Resul
             margin_cost: pool.margin_cost,
             declared_pledge: pool.declared_pledge,
             minted_blocks: pool.blocks_minted,
+            retiring_epoch: pool.retiring_epoch,
         };
 
         boundary.pools.insert(pool_id, params);
@@ -119,6 +118,7 @@ impl BoundaryWork {
             starting_state: None,
             effective_rewards: None,
             era_transition: None,
+            dropped_delegators: HashSet::new(),
         };
 
         // order matters

@@ -36,13 +36,17 @@ impl BoundaryWork {
         for record in accounts {
             let (key, mut state) = record?;
 
+            if self.dropped_delegators.contains(&key) {
+                state.latest_pool = None;
+            }
+
             state.active_stake = state.wait_stake;
             state.wait_stake = state.live_stake();
 
-            state.active_pool = state.latest_pool.clone();
-
             let rewards = self.delegator_rewards.get(&key).unwrap_or(&0);
             state.rewards_sum += rewards;
+
+            state.active_pool = state.latest_pool.clone();
 
             writer.write_entity_typed::<AccountState>(&key, &state)?;
         }
