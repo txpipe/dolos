@@ -807,8 +807,9 @@ pub fn drep_to_entity_key(value: DRep) -> EntityKey {
 
 #[derive(Debug, Encode, Decode, Clone, Default)]
 pub struct DRepState {
+    // TODO: field is deprecated, remove it in the next breaking change
     #[n(0)]
-    pub drep_id: Vec<u8>,
+    pub __drep_id: Vec<u8>,
 
     #[n(1)]
     pub initial_slot: Option<u64>,
@@ -824,20 +825,14 @@ pub struct DRepState {
 }
 
 impl DRepState {
-    pub fn new(drep_id: Vec<u8>) -> Self {
+    pub fn new() -> Self {
         Self {
-            drep_id,
+            __drep_id: vec![],
             initial_slot: None,
             voting_power: 0,
             last_active_slot: None,
             retired: false,
         }
-    }
-
-    /// Check that the first byte of the drep id finishes with the 0011 bytes.
-    pub fn has_script(&self) -> bool {
-        let first = self.drep_id.first().unwrap();
-        first & 0b00001111 == 0b00000011
     }
 }
 

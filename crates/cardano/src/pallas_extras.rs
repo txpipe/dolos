@@ -272,6 +272,12 @@ pub fn default_cost_models() -> CostModels {
 pub const DREP_KEY_PREFIX: u8 = 0b00100010;
 pub const DREP_SCRIPT_PREFIX: u8 = 0b00100011;
 
+/// Check that the first byte of the drep id finishes with the 0011 bytes.
+pub fn drep_id_is_script(drep_id: &[u8]) -> bool {
+    let first = drep_id.first().unwrap();
+    first & 0b00001111 == 0b00000011
+}
+
 pub fn stake_cred_to_drep(cred: &StakeCredential) -> DRep {
     match cred {
         StakeCredential::AddrKeyhash(key) => DRep::Key(*key),
