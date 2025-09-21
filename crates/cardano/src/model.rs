@@ -501,21 +501,13 @@ impl PParamValue {
 }
 
 #[derive(Debug, Encode, Decode, Clone, Default)]
-#[cbor(transparent)]
-pub struct PParamsSet(#[n(0)] Vec<PParamValue>);
 
-impl Deref for PParamsSet {
-    type Target = Vec<PParamValue>;
+pub struct PParamsSet {
+    #[n(0)]
+    values: Vec<PParamValue>,
 
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl DerefMut for PParamsSet {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
+    #[n(1)]
+    version: u16,
 }
 
 macro_rules! pgetter {
@@ -556,16 +548,40 @@ macro_rules! ensure_pparam {
 }
 
 impl PParamsSet {
-    pub fn new() -> Self {
-        Self(Vec::new())
+    pub fn new(version: u16) -> Self {
+        Self {
+            values: Vec::new(),
+            version,
+        }
+    }
+
+    /// Clone values while incrementing the original version number.
+    ///
+    /// This is used during forks to setup a starting set of values for the next
+    /// version. It usually follows with several `with` calls to set the values
+    /// for the new version.
+    pub fn bump_clone(&self) -> Self {
+        Self {
+            values: self.values.clone(),
+            version: self.version + 1,
+        }
+    }
+
+    /// The original version of the pparams set
+    ///
+    /// Since the protocol version param might be updated throughout an epoch to
+    /// flag a fork, we need this value to understand the version that defines
+    /// the format used to construct the params originally.
+    pub fn version(&self) -> u16 {
+        self.version
     }
 
     pub fn get(&self, kind: PParamKind) -> Option<&PParamValue> {
-        self.0.iter().find(|value| value.kind() == kind)
+        self.values.iter().find(|value| value.kind() == kind)
     }
 
     pub fn get_mut(&mut self, kind: PParamKind) -> Option<&mut PParamValue> {
-        self.0.iter_mut().find(|value| value.kind() == kind)
+        self.values.iter_mut().find(|value| value.kind() == kind)
     }
 
     pub fn set(&mut self, value: PParamValue) {
@@ -574,7 +590,7 @@ impl PParamsSet {
         if let Some(existing) = existing {
             *existing = value;
         } else {
-            self.0.push(value);
+            self.values.push(value);
         }
     }
 
