@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     pallas_extras::{
-        default_cost_models, default_drep_voting_thresholds, default_ex_unit_prices,
+        self, default_cost_models, default_drep_voting_thresholds, default_ex_unit_prices,
         default_ex_units, default_nonce, default_pool_voting_thresholds, default_rational_number,
     },
     roll::{
@@ -112,7 +112,10 @@ pub struct AccountState {
     pub active_pool: Option<Vec<u8>>,
 
     #[n(10)]
-    pub drep: Option<DRep>,
+    pub latest_drep: Option<DRep>,
+
+    #[n(11)]
+    pub active_drep: Option<DRep>,
 }
 
 entity_boilerplate!(AccountState, "accounts");
@@ -498,21 +501,13 @@ impl PParamValue {
 }
 
 #[derive(Debug, Encode, Decode, Clone, Default)]
-#[cbor(transparent)]
-pub struct PParamsSet(#[n(0)] Vec<PParamValue>);
 
-impl Deref for PParamsSet {
-    type Target = Vec<PParamValue>;
+pub struct PParamsSet {
+    #[n(0)]
+    values: Vec<PParamValue>,
 
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl DerefMut for PParamsSet {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
+    #[n(1)]
+    version: u16,
 }
 
 macro_rules! pgetter {
@@ -553,16 +548,40 @@ macro_rules! ensure_pparam {
 }
 
 impl PParamsSet {
-    pub fn new() -> Self {
-        Self(Vec::new())
+    pub fn new(version: u16) -> Self {
+        Self {
+            values: Vec::new(),
+            version,
+        }
+    }
+
+    /// Clone values while incrementing the original version number.
+    ///
+    /// This is used during forks to setup a starting set of values for the next
+    /// version. It usually follows with several `with` calls to set the values
+    /// for the new version.
+    pub fn bump_clone(&self) -> Self {
+        Self {
+            values: self.values.clone(),
+            version: self.version + 1,
+        }
+    }
+
+    /// The original version of the pparams set
+    ///
+    /// Since the protocol version param might be updated throughout an epoch to
+    /// flag a fork, we need this value to understand the version that defines
+    /// the format used to construct the params originally.
+    pub fn version(&self) -> u16 {
+        self.version
     }
 
     pub fn get(&self, kind: PParamKind) -> Option<&PParamValue> {
-        self.0.iter().find(|value| value.kind() == kind)
+        self.values.iter().find(|value| value.kind() == kind)
     }
 
     pub fn get_mut(&mut self, kind: PParamKind) -> Option<&mut PParamValue> {
-        self.0.iter_mut().find(|value| value.kind() == kind)
+        self.values.iter_mut().find(|value| value.kind() == kind)
     }
 
     pub fn set(&mut self, value: PParamValue) {
@@ -571,7 +590,7 @@ impl PParamsSet {
         if let Some(existing) = existing {
             *existing = value;
         } else {
-            self.0.push(value);
+            self.values.push(value);
         }
     }
 
@@ -611,6 +630,7 @@ impl PParamsSet {
     ensure_pparam!(tau, RationalNumber);
     ensure_pparam!(k, u32);
     ensure_pparam!(a0, RationalNumber);
+    ensure_pparam!(drep_inactivity_period, u64);
 
     ensure_pparam!(protocol_version, ProtocolVersion);
 
@@ -773,7 +793,19 @@ pub const EPOCH_KEY_GO: &[u8] = b"2";
 pub const EPOCH_KEY_SET: &[u8] = b"1";
 pub const EPOCH_KEY_MARK: &[u8] = b"0";
 
-#[derive(Debug, Encode, Decode, Clone)]
+pub fn drep_to_entity_key(value: DRep) -> EntityKey {
+    let bytes = match value {
+        DRep::Key(key) => [vec![pallas_extras::DREP_KEY_PREFIX], key.to_vec()].concat(),
+        DRep::Script(key) => [vec![pallas_extras::DREP_SCRIPT_PREFIX], key.to_vec()].concat(),
+        // Invented keys for convenience
+        DRep::Abstain => vec![0],
+        DRep::NoConfidence => vec![1],
+    };
+
+    EntityKey::from(bytes)
+}
+
+#[derive(Debug, Encode, Decode, Clone, Default)]
 pub struct DRepState {
     #[n(0)]
     pub drep_id: Vec<u8>,
@@ -806,15 +838,6 @@ impl DRepState {
     pub fn has_script(&self) -> bool {
         let first = self.drep_id.first().unwrap();
         first & 0b00001111 == 0b00000011
-    }
-
-    pub fn retiring_epoch(
-        &self,
-        summary: &ChainSummary,
-        drep_inactivity_period: u64,
-    ) -> Option<u32> {
-        self.last_active_slot
-            .map(|x| summary.slot_epoch(x).0 + drep_inactivity_period as u32)
     }
 }
 
