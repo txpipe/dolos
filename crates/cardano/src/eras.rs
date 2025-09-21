@@ -45,6 +45,7 @@ pub type Timestamp = u64;
 #[derive(Debug, Default)]
 pub struct ChainSummary {
     past: Vec<EraSummary>,
+    protocols: Vec<u16>,
     edge: Option<EraSummary>,
 }
 
@@ -60,11 +61,12 @@ impl ChainSummary {
         era.slot_time(slot)
     }
 
-    pub(crate) fn append_era(&mut self, era: EraSummary) {
+    pub(crate) fn append_era(&mut self, protocol: u16, era: EraSummary) {
         if let Some(edge) = self.edge.take() {
             self.past.push(edge);
         }
 
+        self.protocols.push(protocol);
         self.edge = Some(era);
     }
 
@@ -143,6 +145,24 @@ impl ChainSummary {
     pub fn iter_past(&self) -> impl Iterator<Item = &EraSummary> {
         self.past.iter()
     }
+
+    pub fn iter_past_with_protocol(&self) -> impl Iterator<Item = (&u16, &EraSummary)> {
+        self.protocols.iter().zip(self.past.iter())
+    }
+
+    pub fn first_shelley_epoch(&self) -> u64 {
+        for (protocol, era) in self.iter_past_with_protocol() {
+            if *protocol == 2 {
+                return era.start.epoch;
+            }
+        }
+        if let Some(last) = self.protocols.last() {
+            if *last == 2 {
+                return self.edge().start.epoch;
+            }
+        }
+        0
+    }
 }
 
 pub fn load_era_summary<D: Domain>(domain: &D) -> Result<ChainSummary, ChainError> {
@@ -151,8 +171,9 @@ pub fn load_era_summary<D: Domain>(domain: &D) -> Result<ChainSummary, ChainErro
     let mut chain = ChainSummary::default();
 
     for result in eras {
-        let (_, era) = result?;
-        chain.append_era(era);
+        let (key, era) = result?;
+        let protocol = EraProtocol::from(key);
+        chain.append_era(protocol.into(), era);
     }
 
     Ok(chain)

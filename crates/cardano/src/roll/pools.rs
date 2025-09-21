@@ -1,5 +1,7 @@
+use std::ops::Deref;
+
 use dolos_core::batch::WorkDeltas;
-use dolos_core::{ChainError, NsKey};
+use dolos_core::{BlockSlot, ChainError, NsKey};
 use pallas::crypto::hash::{Hash, Hasher};
 use pallas::ledger::traverse::{MultiEraBlock, MultiEraCert, MultiEraTx};
 use serde::{Deserialize, Serialize};
@@ -11,6 +13,7 @@ use crate::{model::PoolState, pallas_extras, roll::BlockVisitor};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PoolRegistration {
+    slot: BlockSlot,
     cert: MultiEraPoolRegistration,
 
     // undo
@@ -18,8 +21,9 @@ pub struct PoolRegistration {
 }
 
 impl PoolRegistration {
-    pub fn new(cert: MultiEraPoolRegistration) -> Self {
+    pub fn new(slot: BlockSlot, cert: MultiEraPoolRegistration) -> Self {
         Self {
+            slot,
             cert,
             prev_entity: None,
         }
@@ -37,7 +41,7 @@ impl dolos_core::EntityDelta for PoolRegistration {
     fn apply(&mut self, entity: &mut Option<PoolState>) {
         self.prev_entity = entity.clone();
 
-        let entity = entity.get_or_insert_with(|| PoolState::new(self.cert.vrf_keyhash));
+        let entity = entity.get_or_insert_with(|| PoolState::new(self.slot, self.cert.vrf_keyhash));
 
         entity.vrf_keyhash = self.cert.vrf_keyhash;
         entity.reward_account = self.cert.reward_account.to_vec();
@@ -80,6 +84,32 @@ impl dolos_core::EntityDelta for MintedBlocksInc {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PoolRetirement {
+    operator: Hash<28>,
+    epoch: u64,
+}
+
+impl dolos_core::EntityDelta for PoolRetirement {
+    type Entity = PoolState;
+
+    fn key(&self) -> NsKey {
+        NsKey::from((PoolState::NS, self.operator.as_slice()))
+    }
+
+    fn apply(&mut self, entity: &mut Option<PoolState>) {
+        if let Some(entity) = entity {
+            entity.retiring_epoch = Some(self.epoch);
+        }
+    }
+
+    fn undo(&self, entity: &mut Option<PoolState>) {
+        if let Some(entity) = entity {
+            entity.retiring_epoch = None;
+        }
+    }
+}
+
 #[derive(Default, Clone)]
 pub struct PoolStateVisitor;
 
@@ -100,13 +130,41 @@ impl BlockVisitor for PoolStateVisitor {
     fn visit_cert(
         &mut self,
         deltas: &mut WorkDeltas<CardanoLogic>,
-        _: &MultiEraBlock,
+        block: &MultiEraBlock,
         _: &MultiEraTx,
         cert: &MultiEraCert,
     ) -> Result<(), ChainError> {
         if let Some(cert) = pallas_extras::cert_to_pool_state(cert) {
-            deltas.add_for_entity(PoolRegistration::new(cert));
+            deltas.add_for_entity(PoolRegistration::new(block.slot(), cert));
         }
+
+        match cert {
+            MultiEraCert::AlonzoCompatible(cow) => {
+                if let pallas::ledger::primitives::alonzo::Certificate::PoolRetirement(
+                    operator,
+                    epoch,
+                ) = cow.deref().deref()
+                {
+                    deltas.add_for_entity(PoolRetirement {
+                        operator: *operator,
+                        epoch: *epoch,
+                    });
+                }
+            }
+            MultiEraCert::Conway(cow) => {
+                if let pallas::ledger::primitives::conway::Certificate::PoolRetirement(
+                    operator,
+                    epoch,
+                ) = cow.deref().deref()
+                {
+                    deltas.add_for_entity(PoolRetirement {
+                        operator: *operator,
+                        epoch: *epoch,
+                    });
+                }
+            }
+            _ => {}
+        };
 
         Ok(())
     }

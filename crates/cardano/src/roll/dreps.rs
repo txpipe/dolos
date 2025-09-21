@@ -1,58 +1,35 @@
 use std::ops::Deref as _;
 
 use dolos_core::{batch::WorkDeltas, ChainError, NsKey};
-use pallas::{
-    codec::minicbor,
-    ledger::{
-        primitives::{
-            conway::{self, Anchor},
-            StakeCredential,
-        },
-        traverse::{MultiEraBlock, MultiEraCert, MultiEraTx},
-    },
+use pallas::ledger::{
+    primitives::conway::{self, Anchor, DRep},
+    traverse::{MultiEraBlock, MultiEraCert, MultiEraTx},
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{model::DRepState, roll::BlockVisitor, CardanoLogic, FixedNamespace as _};
+use crate::{
+    drep_to_entity_key, model::DRepState, pallas_extras::stake_cred_to_drep, roll::BlockVisitor,
+    CardanoLogic, FixedNamespace as _,
+};
 
-//const DREP_KEY_PREFIX: u8 = 0b00100010;
-//const DREP_SCRIPT_PREFIX: u8 = 0b00100011;
-//
-//fn cred_to_id(cred: &StakeCredential) -> Vec<u8> {
-//    match cred {
-//        StakeCredential::AddrKeyhash(key) => [vec![DREP_KEY_PREFIX], key.to_vec()].concat(),
-//        StakeCredential::ScriptHash(key) => [vec![DREP_SCRIPT_PREFIX], key.to_vec()].concat(),
-//    }
-//}
-//
-//fn drep_to_id(drep: &conway::DRep) -> Vec<u8> {
-//    match drep {
-//        conway::DRep::Key(key) => [vec![DREP_KEY_PREFIX], key.to_vec()].concat(),
-//        conway::DRep::Script(key) => [vec![DREP_SCRIPT_PREFIX], key.to_vec()].concat(),
-//        // Invented keys for convenience
-//        conway::DRep::Abstain => vec![0],
-//        conway::DRep::NoConfidence => vec![1],
-//    }
-//}
-//
-//fn cert_to_id(cert: &MultiEraCert) -> Option<Vec<u8>> {
-//    match &cert {
-//        MultiEraCert::Conway(conway) => match conway.deref().deref() {
-//            conway::Certificate::RegDRepCert(cert, _, _) => Some(cred_to_id(cert)),
-//            conway::Certificate::UnRegDRepCert(cert, _) => Some(cred_to_id(cert)),
-//            conway::Certificate::UpdateDRepCert(cert, _) => Some(cred_to_id(cert)),
-//            conway::Certificate::StakeVoteDeleg(_, _, drep) => Some(drep_to_id(drep)),
-//            conway::Certificate::VoteRegDeleg(_, drep, _) => Some(drep_to_id(drep)),
-//            conway::Certificate::VoteDeleg(_, drep) => Some(drep_to_id(drep)),
-//            _ => None,
-//        },
-//        _ => None,
-//    }
-//}
+fn cert_drep(cert: &MultiEraCert) -> Option<DRep> {
+    match &cert {
+        MultiEraCert::Conway(conway) => match conway.deref().deref() {
+            conway::Certificate::RegDRepCert(cert, _, _) => Some(stake_cred_to_drep(cert)),
+            conway::Certificate::UnRegDRepCert(cert, _) => Some(stake_cred_to_drep(cert)),
+            conway::Certificate::UpdateDRepCert(cert, _) => Some(stake_cred_to_drep(cert)),
+            conway::Certificate::StakeVoteDeleg(_, _, drep) => Some(drep.clone()),
+            conway::Certificate::VoteRegDeleg(_, drep, _) => Some(drep.clone()),
+            conway::Certificate::VoteDeleg(_, drep) => Some(drep.clone()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DRepRegistration {
-    cred: StakeCredential,
+    drep: DRep,
     slot: u64,
     deposit: u64,
     anchor: Option<Anchor>,
@@ -62,9 +39,9 @@ pub struct DRepRegistration {
 }
 
 impl DRepRegistration {
-    pub fn new(cred: StakeCredential, slot: u64, deposit: u64, anchor: Option<Anchor>) -> Self {
+    pub fn new(drep: DRep, slot: u64, deposit: u64, anchor: Option<Anchor>) -> Self {
         Self {
-            cred,
+            drep,
             slot,
             deposit,
             anchor,
@@ -77,8 +54,7 @@ impl dolos_core::EntityDelta for DRepRegistration {
     type Entity = DRepState;
 
     fn key(&self) -> NsKey {
-        let enc = minicbor::to_vec(&self.cred).unwrap();
-        NsKey::from((DRepState::NS, enc))
+        NsKey::from((DRepState::NS, drep_to_entity_key(self.drep.clone())))
     }
 
     fn apply(&mut self, entity: &mut Option<DRepState>) {
@@ -103,8 +79,7 @@ impl dolos_core::EntityDelta for DRepRegistration {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DRepUnRegistration {
-    cred: StakeCredential,
-    slot: u64,
+    drep: DRep,
     deposit: u64,
 
     // undo data
@@ -112,10 +87,9 @@ pub struct DRepUnRegistration {
 }
 
 impl DRepUnRegistration {
-    pub fn new(cred: StakeCredential, slot: u64, deposit: u64) -> Self {
+    pub fn new(drep: DRep, deposit: u64) -> Self {
         Self {
-            cred,
-            slot,
+            drep,
             deposit,
             prev_voting_power: None,
         }
@@ -126,8 +100,7 @@ impl dolos_core::EntityDelta for DRepUnRegistration {
     type Entity = DRepState;
 
     fn key(&self) -> NsKey {
-        let enc = minicbor::to_vec(&self.cred).unwrap();
-        NsKey::from((DRepState::NS, enc))
+        NsKey::from((DRepState::NS, drep_to_entity_key(self.drep.clone())))
     }
 
     fn apply(&mut self, entity: &mut Option<DRepState>) {
@@ -148,6 +121,46 @@ impl dolos_core::EntityDelta for DRepUnRegistration {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DRepActivity {
+    drep: DRep,
+    slot: u64,
+    previous_last_active_slot: Option<u64>,
+}
+
+impl DRepActivity {
+    pub fn new(drep: DRep, slot: u64) -> Self {
+        Self {
+            drep,
+            slot,
+            previous_last_active_slot: None,
+        }
+    }
+}
+
+impl dolos_core::EntityDelta for DRepActivity {
+    type Entity = DRepState;
+
+    fn key(&self) -> NsKey {
+        NsKey::from((DRepState::NS, drep_to_entity_key(self.drep.clone())))
+    }
+
+    fn apply(&mut self, entity: &mut Option<DRepState>) {
+        let entity = entity.get_or_insert_default();
+
+        // save undo info
+        self.previous_last_active_slot = entity.last_active_slot;
+
+        // apply changes
+        entity.last_active_slot = Some(self.slot);
+    }
+
+    fn undo(&self, entity: &mut Option<DRepState>) {
+        let entity = entity.get_or_insert_default();
+        entity.last_active_slot = self.previous_last_active_slot;
+    }
+}
+
 #[derive(Default, Clone)]
 pub struct DRepStateVisitor;
 
@@ -159,22 +172,24 @@ impl BlockVisitor for DRepStateVisitor {
         _: &MultiEraTx,
         cert: &MultiEraCert,
     ) -> Result<(), ChainError> {
+        let Some(drep) = cert_drep(cert) else {
+            return Ok(());
+        };
+
+        deltas.add_for_entity(DRepActivity::new(drep.clone(), block.slot()));
+
         if let MultiEraCert::Conway(conway) = &cert {
             match conway.deref().deref() {
-                conway::Certificate::RegDRepCert(cred, deposit, anchor) => {
+                conway::Certificate::RegDRepCert(_, deposit, anchor) => {
                     deltas.add_for_entity(DRepRegistration::new(
-                        cred.clone(),
+                        drep.clone(),
                         block.slot(),
                         *deposit,
                         anchor.clone(),
                     ));
                 }
-                conway::Certificate::UnRegDRepCert(cred, coin) => {
-                    deltas.add_for_entity(DRepUnRegistration::new(
-                        cred.clone(),
-                        block.slot(),
-                        *coin,
-                    ));
+                conway::Certificate::UnRegDRepCert(_, coin) => {
+                    deltas.add_for_entity(DRepUnRegistration::new(drep.clone(), *coin));
                 }
                 _ => (),
             }

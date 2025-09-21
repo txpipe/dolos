@@ -3,7 +3,7 @@ use axum::{
     http::StatusCode,
     Json,
 };
-use dolos_cardano::{model::DRepState, ChainSummary, PParamsSet};
+use dolos_cardano::{model::DRepState, pallas_extras, ChainSummary, PParamsSet};
 use dolos_core::{ArchiveStore as _, BlockSlot, Domain};
 
 use crate::{mapping::IntoModel, Facade};
@@ -33,6 +33,7 @@ fn parse_drep_id(drep_id: &str) -> Result<Vec<u8>, StatusCode> {
 
 pub struct DrepModelBuilder<'a> {
     drep_id: String,
+    drep_id_encoded: Vec<u8>,
     state: DRepState,
     pparams: PParamsSet,
     chain: &'a ChainSummary,
@@ -43,52 +44,74 @@ impl<'a> DrepModelBuilder<'a> {
     fn is_special_case(&self) -> bool {
         ["drep_always_abstain", "drep_always_no_confidence"].contains(&self.drep_id.as_str())
     }
+
+    fn first_active_epoch(&self) -> Option<u32> {
+        if self.is_special_case() {
+            return None;
+        }
+
+        self.state.initial_slot.map(|x| self.chain.slot_epoch(x).0)
+    }
+
+    fn last_active_epoch(&self) -> Option<u32> {
+        if self.is_special_case() {
+            return None;
+        }
+
+        self.state
+            .last_active_slot
+            .map(|x| self.chain.slot_epoch(x).0)
+    }
+
+    fn is_drep_expired(&self) -> bool {
+        if self.is_special_case() {
+            return false;
+        }
+
+        let last_active_epoch = self.last_active_epoch();
+
+        let inactivity_period = self.pparams.drep_inactivity_period().unwrap_or_default();
+
+        let expiring_epoch = last_active_epoch.map(|x| x + inactivity_period as u32);
+
+        let (current_epoch, _) = self.chain.slot_epoch(self.tip);
+
+        expiring_epoch
+            .map(|expiration| expiration <= current_epoch)
+            .unwrap_or(false)
+    }
+
+    fn is_drep_active(&self) -> bool {
+        if self.is_special_case() {
+            return true;
+        }
+
+        let expired = self.is_drep_expired();
+
+        !self.state.retired && !expired
+    }
 }
 
 impl<'a> IntoModel<blockfrost_openapi::models::drep::Drep> for DrepModelBuilder<'a> {
     type SortKey = ();
 
     fn into_model(self) -> Result<blockfrost_openapi::models::drep::Drep, StatusCode> {
-        let (epoch, _) = self.chain.slot_epoch(self.tip);
-
-        let last_active_epoch = self
-            .state
-            .last_active_slot
-            .map(|x| self.chain.slot_epoch(x).0 as i32);
-
-        let drep_activity = self.pparams.drep_inactivity_period_or_default() as i32;
+        let expired = self.is_drep_expired();
 
         let out = blockfrost_openapi::models::drep::Drep {
             drep_id: self.drep_id.clone(),
             hex: if self.is_special_case() {
                 "".to_string()
             } else {
-                hex::encode(&self.state.drep_id)
+                hex::encode(&self.drep_id_encoded)
             },
             amount: self.state.voting_power.to_string(),
-            active: self.state.initial_slot.is_some(),
-            active_epoch: if self.is_special_case() {
-                None
-            } else {
-                self.state
-                    .initial_slot
-                    .map(|x| self.chain.slot_epoch(x).0 as i32)
-            },
-            has_script: self.state.has_script(),
+            active: self.is_drep_active(),
+            active_epoch: self.first_active_epoch().map(|x| x as i32),
+            has_script: pallas_extras::drep_id_is_script(&self.drep_id_encoded),
             retired: self.state.retired,
-            expired: if self.is_special_case() {
-                false
-            } else {
-                match last_active_epoch {
-                    Some(last_active_epoch) => ((epoch as i32) - last_active_epoch) > drep_activity,
-                    None => false,
-                }
-            },
-            last_active_epoch: if self.is_special_case() {
-                None
-            } else {
-                last_active_epoch
-            },
+            expired,
+            last_active_epoch: self.last_active_epoch().map(|x| x as i32),
         };
 
         Ok(out)
@@ -125,6 +148,7 @@ where
 
     let model = DrepModelBuilder {
         drep_id: drep,
+        drep_id_encoded: drep_bytes,
         state: drep_state,
         pparams,
         chain: &chain,

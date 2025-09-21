@@ -1,4 +1,3 @@
-
 use dolos_core::batch::WorkDeltas;
 use dolos_core::{ChainError, NsKey};
 use pallas::codec::minicbor;
@@ -10,7 +9,7 @@ use pallas::ledger::{
     traverse::{MultiEraBlock, MultiEraCert, MultiEraInput, MultiEraOutput, MultiEraTx},
 };
 use serde::{Deserialize, Serialize};
-use tracing::debug;
+use tracing::trace;
 
 use crate::model::FixedNamespace as _;
 use crate::CardanoLogic;
@@ -114,7 +113,10 @@ impl dolos_core::EntityDelta for StakeRegistration {
 
     fn apply(&mut self, entity: &mut Option<AccountState>) {
         let entity = entity.get_or_insert_default();
+
+        // save undo info
         self.prev_registered_at = entity.registered_at;
+
         entity.registered_at = Some(self.slot);
     }
 
@@ -197,14 +199,14 @@ impl dolos_core::EntityDelta for VoteDelegation {
         let entity = entity.get_or_insert_default();
 
         // save undo info
-        self.prev_drep_id = entity.drep.clone();
+        self.prev_drep_id = entity.latest_drep.clone();
 
-        entity.drep = Some(self.drep.clone());
+        entity.latest_drep = Some(self.drep.clone());
     }
 
     fn undo(&self, entity: &mut Option<AccountState>) {
         let entity = entity.get_or_insert_default();
-        entity.drep = self.prev_drep_id.clone();
+        entity.latest_drep = self.prev_drep_id.clone();
     }
 }
 
@@ -216,6 +218,7 @@ pub struct StakeDeregistration {
     // undo
     prev_registered_at: Option<u64>,
     prev_pool_id: Option<Vec<u8>>,
+    prev_drep: Option<DRep>,
 }
 
 impl StakeDeregistration {
@@ -225,6 +228,7 @@ impl StakeDeregistration {
             slot,
             prev_registered_at: None,
             prev_pool_id: None,
+            prev_drep: None,
         }
     }
 }
@@ -243,15 +247,18 @@ impl dolos_core::EntityDelta for StakeDeregistration {
         // save undo info
         self.prev_registered_at = entity.registered_at;
         self.prev_pool_id = entity.latest_pool.clone();
+        self.prev_drep = entity.latest_drep.clone();
 
         entity.registered_at = None;
         entity.latest_pool = None;
+        entity.latest_drep = None;
     }
 
     fn undo(&self, entity: &mut Option<AccountState>) {
         let entity = entity.get_or_insert_default();
         entity.registered_at = self.prev_registered_at;
         entity.latest_pool = self.prev_pool_id.clone();
+        entity.latest_drep = self.prev_drep.clone();
     }
 }
 
@@ -339,25 +346,25 @@ impl BlockVisitor for AccountVisitor {
         cert: &MultiEraCert,
     ) -> Result<(), ChainError> {
         if let Some(cred) = pallas_extras::cert_as_stake_registration(cert) {
-            debug!("detected stake registration");
+            trace!("detected stake registration");
 
             deltas.add_for_entity(StakeRegistration::new(cred, block.slot()));
         }
 
         if let Some(cert) = pallas_extras::cert_as_stake_delegation(cert) {
-            debug!(%cert.pool, "detected stake delegation");
+            trace!(%cert.pool, "detected stake delegation");
 
             deltas.add_for_entity(StakeDelegation::new(cert.delegator, cert.pool));
         }
 
         if let Some(cred) = pallas_extras::cert_as_stake_deregistration(cert) {
-            debug!("detected stake deregistration");
+            trace!("detected stake deregistration");
 
             deltas.add_for_entity(StakeDeregistration::new(cred, block.slot()));
         }
 
         if let Some(cert) = pallas_extras::cert_as_vote_delegation(cert) {
-            debug!("detected vote delegation");
+            trace!("detected vote delegation");
 
             deltas.add_for_entity(VoteDelegation::new(cert.delegator, cert.drep));
         }

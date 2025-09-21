@@ -8,34 +8,6 @@ use crate::{
     EPOCH_KEY_MARK,
 };
 
-fn force_hardforks(
-    pparams: &mut PParamsSet,
-    force_protocol: u16,
-    genesis: &Genesis,
-) -> Result<(), BrokenInvariant> {
-    while pparams.protocol_major().unwrap_or_default() < force_protocol {
-        let previous = pparams.protocol_major();
-
-        *pparams = crate::forks::bump_pparams_version(pparams, genesis);
-
-        // if the protocol major is not set, something went wrong and we might be
-        // stuck in a loop. We return an error to avoid infinite loops.
-        let Some(previous) = previous else {
-            return Err(BrokenInvariant::InvalidGenesisConfig);
-        };
-
-        // if the protocol major didn't increase, something went wrong and we might be
-        // stuck in a loop. We return an error to avoid infinite loops.
-        if pparams.protocol_major().unwrap_or_default() <= previous {
-            return Err(BrokenInvariant::InvalidGenesisConfig);
-        }
-
-        debug!(protocol = pparams.protocol_major(), "forced hardfork");
-    }
-
-    Ok(())
-}
-
 fn get_utxo_amount(genesis: &Genesis) -> u64 {
     let byron_utxo = pallas::ledger::configs::byron::genesis_utxos(&genesis.byron)
         .iter()
@@ -78,7 +50,7 @@ fn bootrap_epoch<D: Domain>(domain: &D) -> Result<EpochState, ChainError> {
     let mut nonces = None;
 
     if let Some(force_protocol) = genesis.force_protocol {
-        force_hardforks(&mut pparams, force_protocol as u16, genesis)?;
+        pparams = crate::forks::evolve_pparams(&pparams, genesis, force_protocol as u16)?;
 
         // TODO: why do we set nonces only if there's a force protocol?
         nonces = Some(Nonces::bootstrap(genesis.shelley_hash));

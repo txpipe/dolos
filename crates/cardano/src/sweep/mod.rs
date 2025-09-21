@@ -1,9 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use dolos_core::{BlockSlot, ChainError, Domain, EntityKey};
 use pallas::{crypto::hash::Hash, ledger::primitives::RationalNumber};
+use tracing::{debug, info, instrument, trace};
 
-use crate::{Config, EpochState, EraProtocol, EraSummary};
+use crate::{Config, DRepState, EpochState, EraProtocol, EraSummary, PParamsSet};
 
 pub mod commit;
 pub mod compute;
@@ -30,6 +31,7 @@ pub use compute::compute_genesis_pots;
 
 pub type AccountId = EntityKey;
 pub type PoolId = EntityKey;
+pub type DRepId = EntityKey;
 
 #[derive(Debug)]
 pub struct PoolData {
@@ -37,6 +39,7 @@ pub struct PoolData {
     pub margin_cost: RationalNumber,
     pub declared_pledge: u64,
     pub minted_blocks: u32,
+    pub retiring_epoch: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -63,7 +66,9 @@ impl DelegatorMap {
 pub struct Snapshot {
     pub total_stake: u64,
     pub accounts_by_pool: DelegatorMap,
+    pub accounts_by_drep: DelegatorMap,
     pub pool_stake: HashMap<PoolId, u64>,
+    pub drep_stake: HashMap<DRepId, u64>,
 }
 
 impl Snapshot {
@@ -84,8 +89,7 @@ pub struct PotDelta {
 pub struct EraTransition {
     pub prev_version: EraProtocol,
     pub new_version: EraProtocol,
-    pub epoch_length: u64,
-    pub slot_length: u64,
+    pub new_pparams: PParamsSet,
 }
 
 #[derive(Debug)]
@@ -99,6 +103,7 @@ pub struct BoundaryWork {
     pub ending_state: EpochState,
     pub ending_snapshot: Snapshot,
     pub pools: HashMap<PoolId, PoolData>,
+    pub dreps: HashMap<DRepId, DRepState>,
     pub mutable_slots: u64,
     pub shelley_hash: Hash<32>,
 
@@ -109,15 +114,18 @@ pub struct BoundaryWork {
     pub delegator_rewards: HashMap<AccountId, u64>,
     pub starting_state: Option<EpochState>,
     pub era_transition: Option<EraTransition>,
+    pub dropped_pool_delegators: HashSet<AccountId>,
+    pub dropped_drep_delegators: HashSet<AccountId>,
+    pub retired_dreps: HashSet<DRepId>,
 }
 
-pub fn sweep<D: Domain>(domain: &D, _: BlockSlot, config: &Config) -> Result<(), ChainError> {
-    // TODO: this should all be one big atomic operation, but for that we need to
-    // refactor stores to include start / commit semantics
+#[instrument(skip_all, fields(slot = %slot))]
+pub fn sweep<D: Domain>(domain: &D, slot: BlockSlot, config: &Config) -> Result<(), ChainError> {
+    info!(slot, "executing sweep");
 
     let mut boundary = BoundaryWork::load(domain)?;
 
-    boundary.compute()?;
+    boundary.compute(domain.genesis())?;
 
     boundary.commit(domain)?;
 

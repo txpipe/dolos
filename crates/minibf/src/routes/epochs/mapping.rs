@@ -53,6 +53,7 @@ pub struct ParametersModelBuilder<'a> {
     pub epoch: u64,
     pub params: PParamsSet,
     pub genesis: &'a Genesis,
+    pub nonce: Option<String>,
 }
 
 impl<'a> IntoModel<EpochParamContent> for ParametersModelBuilder<'a> {
@@ -63,6 +64,7 @@ impl<'a> IntoModel<EpochParamContent> for ParametersModelBuilder<'a> {
             genesis,
             epoch,
             params,
+            nonce,
         } = self;
 
         let out = EpochParamContent {
@@ -169,8 +171,7 @@ impl<'a> IntoModel<EpochParamContent> for ParametersModelBuilder<'a> {
             pvt_p_p_security_group: params
                 .pool_voting_thresholds()
                 .map(|x| rational_to_f64::<3>(&x.security_voting_threshold)),
-            // TODO: confirm mapping
-            nonce: String::default(),
+            nonce: nonce.unwrap_or_default(),
             extra_entropy: None,
             ..Default::default()
         };
