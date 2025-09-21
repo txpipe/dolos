@@ -9,7 +9,7 @@ use pallas::ledger::{
     traverse::{MultiEraBlock, MultiEraCert, MultiEraInput, MultiEraOutput, MultiEraTx},
 };
 use serde::{Deserialize, Serialize};
-use tracing::debug;
+use tracing::trace;
 
 use crate::model::FixedNamespace as _;
 use crate::CardanoLogic;
@@ -113,7 +113,10 @@ impl dolos_core::EntityDelta for StakeRegistration {
 
     fn apply(&mut self, entity: &mut Option<AccountState>) {
         let entity = entity.get_or_insert_default();
+
+        // save undo info
         self.prev_registered_at = entity.registered_at;
+
         entity.registered_at = Some(self.slot);
     }
 
@@ -343,25 +346,25 @@ impl BlockVisitor for AccountVisitor {
         cert: &MultiEraCert,
     ) -> Result<(), ChainError> {
         if let Some(cred) = pallas_extras::cert_as_stake_registration(cert) {
-            debug!("detected stake registration");
+            trace!("detected stake registration");
 
             deltas.add_for_entity(StakeRegistration::new(cred, block.slot()));
         }
 
         if let Some(cert) = pallas_extras::cert_as_stake_delegation(cert) {
-            debug!(%cert.pool, "detected stake delegation");
+            trace!(%cert.pool, "detected stake delegation");
 
             deltas.add_for_entity(StakeDelegation::new(cert.delegator, cert.pool));
         }
 
         if let Some(cred) = pallas_extras::cert_as_stake_deregistration(cert) {
-            debug!("detected stake deregistration");
+            trace!("detected stake deregistration");
 
             deltas.add_for_entity(StakeDeregistration::new(cred, block.slot()));
         }
 
         if let Some(cert) = pallas_extras::cert_as_vote_delegation(cert) {
-            debug!("detected vote delegation");
+            trace!("detected vote delegation");
 
             deltas.add_for_entity(VoteDelegation::new(cert.delegator, cert.drep));
         }
