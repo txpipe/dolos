@@ -1,6 +1,7 @@
 use dolos_core::{
     BrokenInvariant, ChainError, Domain, EntityKey, StateError, StateStore, StateWriter,
 };
+use tracing::instrument;
 
 use crate::{
     sweep::BoundaryWork, AccountState, EpochState, EraSummary, FixedNamespace as _, PoolState,
@@ -128,8 +129,8 @@ impl BoundaryWork {
         let new = EraSummary {
             start: previous.end.clone().unwrap(),
             end: None,
-            epoch_length: transition.epoch_length,
-            slot_length: transition.slot_length,
+            epoch_length: transition.new_pparams.epoch_length_or_default(),
+            slot_length: transition.new_pparams.slot_length_or_default(),
         };
 
         writer.write_entity_typed(&EntityKey::from(transition.new_version), &new)?;
@@ -158,6 +159,7 @@ impl BoundaryWork {
         Ok(())
     }
 
+    #[instrument(skip_all)]
     pub fn commit<D: Domain>(&self, domain: &D) -> Result<(), ChainError> {
         let accounts = domain
             .state()

@@ -1,7 +1,9 @@
-use dolos_core::{BrokenInvariant, ChainError};
+use dolos_core::{BrokenInvariant, ChainError, Genesis};
 use pallas::ledger::primitives::RationalNumber;
+use tracing::{debug, instrument, trace};
 
 use crate::{
+    forks,
     sweep::{BoundaryWork, EraTransition, PoolData, PotDelta, Pots},
     utils::epoch_first_slot,
     DRepState, EpochState, EraProtocol, Nonces, PParamsSet, PoolState,
@@ -126,15 +128,15 @@ impl BoundaryWork {
         }
     }
 
-    pub fn active_pparams(&self) -> Result<&PParamsSet, ChainError> {
-        // on the first two epochs, we use the ending state pparams since there's no
+    pub fn valid_pparams(&self) -> Result<&PParamsSet, ChainError> {
+        // on the initial epoch, we use the ending state pparams since there's no
         // active state yet
-        if self.ending_state.number <= 2 {
+        if self.ending_state.number == 0 {
             return Ok(&self.ending_state.pparams);
         }
 
         let p = &self
-            .active_state
+            .waiting_state
             .as_ref()
             .ok_or(ChainError::NoActiveEpoch)?
             .pparams;
@@ -142,35 +144,28 @@ impl BoundaryWork {
         Ok(p)
     }
 
-    pub fn active_rho(&self) -> Result<RationalNumber, ChainError> {
-        self.active_pparams()?.ensure_rho()
+    pub fn valid_rho(&self) -> Result<RationalNumber, ChainError> {
+        self.valid_pparams()?.ensure_rho()
     }
 
-    pub fn active_tau(&self) -> Result<RationalNumber, ChainError> {
-        self.active_pparams()?.ensure_tau()
+    pub fn valid_tau(&self) -> Result<RationalNumber, ChainError> {
+        self.valid_pparams()?.ensure_tau()
     }
 
-    pub fn active_k(&self) -> Result<u32, ChainError> {
-        self.active_pparams()?.ensure_k()
+    pub fn valid_k(&self) -> Result<u32, ChainError> {
+        self.valid_pparams()?.ensure_k()
     }
 
-    pub fn active_a0(&self) -> Result<RationalNumber, ChainError> {
-        self.active_pparams()?.ensure_a0()
+    pub fn valid_a0(&self) -> Result<RationalNumber, ChainError> {
+        self.valid_pparams()?.ensure_a0()
     }
 
-    pub fn active_drep_inactivity_period(&self) -> Result<u64, ChainError> {
-        self.active_pparams()?.ensure_drep_inactivity_period()
+    pub fn valid_drep_inactivity_period(&self) -> Result<u64, ChainError> {
+        self.valid_pparams()?.ensure_drep_inactivity_period()
     }
 
-    pub fn starting_pparams(&self) -> Result<&PParamsSet, ChainError> {
-        let starting_state = self
-            .starting_state
-            .as_ref()
-            .ok_or(ChainError::from(BrokenInvariant::EpochBoundaryIncomplete))?;
-
-        let p = &starting_state.pparams;
-
-        Ok(p)
+    pub fn ending_pparams(&self) -> &PParamsSet {
+        &self.ending_state.pparams
     }
 
     pub fn gathered_fees(&self) -> u64 {
@@ -214,8 +209,8 @@ impl BoundaryWork {
             self.initial_pots().reserves,
             self.gathered_fees(),
             self.decayed_deposits(),
-            &self.active_rho()?,
-            &self.active_tau()?,
+            &self.valid_rho()?,
+            &self.valid_tau()?,
         );
 
         self.pot_delta = Some(delta);
@@ -246,8 +241,8 @@ impl BoundaryWork {
                 self.active_snapshot.total_stake,
                 pool,
                 pool_stake,
-                self.active_k()?,
-                &self.active_a0()?,
+                self.valid_k()?,
+                &self.valid_a0()?,
             );
 
             effective_rewards += total_pool_reward;
@@ -303,11 +298,15 @@ impl BoundaryWork {
 
         let treasury = self.initial_pots().treasury + pot_delta.treasury_tax;
 
-        let pparams = self.ending_state.pparams.clone();
         let deposits = self.ending_state.deposits;
         let utxos = self.ending_state.utxos;
 
         let nonces = self.define_starting_nonces()?;
+
+        let pparams = match &self.era_transition {
+            Some(era_transition) => era_transition.new_pparams.clone(),
+            None => self.ending_state.pparams.clone(),
+        };
 
         let state = EpochState {
             number: self.ending_state.number + 1,
@@ -336,19 +335,21 @@ impl BoundaryWork {
         Ok(())
     }
 
-    fn define_era_transition(&mut self) -> Result<(), ChainError> {
-        let (active_protocol, _) = self.active_pparams()?.ensure_protocol_version()?;
-        let (starting_protocol, _) = self.starting_pparams()?.ensure_protocol_version()?;
+    fn define_era_transition(&mut self, genesis: &Genesis) -> Result<(), ChainError> {
+        let original_version = self.ending_pparams().version();
+        let (effective_version, _) = self.ending_pparams().ensure_protocol_version()?;
 
-        if starting_protocol != active_protocol {
-            let epoch_length = self.ending_state.pparams.epoch_length_or_default();
-            let slot_length = self.ending_state.pparams.slot_length_or_default();
+        if effective_version != original_version as u64 {
+            let new_pparams = forks::evolve_pparams(
+                &self.ending_state.pparams,
+                genesis,
+                effective_version as u16,
+            )?;
 
             let era_transition = EraTransition {
-                prev_version: EraProtocol::from(active_protocol as u16),
-                new_version: EraProtocol::from(starting_protocol as u16),
-                epoch_length,
-                slot_length,
+                prev_version: EraProtocol::from(original_version),
+                new_version: EraProtocol::from(effective_version as u16),
+                new_pparams,
             };
 
             self.era_transition = Some(era_transition);
@@ -398,7 +399,7 @@ impl BoundaryWork {
 
         let (last_activity_epoch, _) = self.active_era.slot_epoch(last_activity_slot);
 
-        let retiring_epoch = last_activity_epoch as u64 + self.active_drep_inactivity_period()?;
+        let retiring_epoch = last_activity_epoch as u64 + self.valid_drep_inactivity_period()?;
 
         Ok(retiring_epoch <= self.starting_epoch_no())
     }
@@ -408,6 +409,8 @@ impl BoundaryWork {
             if !self.should_retire_drep(drep)? {
                 continue;
             }
+
+            debug!(%drep_id, "drep should retire");
 
             self.retired_dreps.insert(drep_id.clone());
 
@@ -423,13 +426,25 @@ impl BoundaryWork {
         Ok(())
     }
 
-    pub fn compute(&mut self) -> Result<(), ChainError> {
+    #[instrument(skip_all)]
+    pub fn compute(&mut self, genesis: &Genesis) -> Result<(), ChainError> {
+        trace!("defining pot delta");
         self.define_pot_delta()?;
+
+        trace!("retiring pools");
         self.retire_pools()?;
+
+        trace!("retiring dreps");
         self.retire_dreps()?;
+
+        trace!("defining pool rewards");
         self.define_pool_rewards()?;
+
+        trace!("defining era transition");
+        self.define_era_transition(genesis)?;
+
+        trace!("defining starting state");
         self.define_starting_state()?;
-        self.define_era_transition()?;
 
         Ok(())
     }
@@ -445,7 +460,7 @@ mod tests {
 
     #[test]
     fn test_genesis_pots() {
-        let pparams = PParamsSet::new()
+        let pparams = PParamsSet::new(0)
             .with(PParamValue::ExpansionRate(RationalNumber {
                 numerator: 3,
                 denominator: 1000,
@@ -473,7 +488,7 @@ mod tests {
         // active stake. We're using data from preview network for the boundary going
         // from 0 to 1.
 
-        let pparams = PParamsSet::new()
+        let pparams = PParamsSet::new(0)
             .with(PParamValue::ExpansionRate(RationalNumber {
                 numerator: 3,
                 denominator: 1000,
@@ -537,7 +552,10 @@ mod tests {
             era_transition: None,
         };
 
-        boundary.compute().unwrap();
+        let genesis =
+            Genesis::from_file_paths(byron, shelley, alonzo, conway, force_protocol).unwrap();
+
+        boundary.compute(&genesis).unwrap();
 
         let starting_state = boundary.starting_state.unwrap();
 
