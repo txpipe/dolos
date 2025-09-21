@@ -5,8 +5,7 @@ use tracing::{debug, instrument, trace};
 use crate::{
     forks,
     sweep::{BoundaryWork, EraTransition, PoolData, PotDelta, Pots},
-    utils::epoch_first_slot,
-    DRepState, EpochState, EraProtocol, Nonces, PParamsSet, PoolState,
+    utils::epoch_first_slot, DRepState, EpochState, EraProtocol, Nonces, PParamsSet, PoolState
 };
 
 macro_rules! as_ratio {

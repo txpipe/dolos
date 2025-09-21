@@ -824,6 +824,16 @@ pub struct DRepState {
 }
 
 impl DRepState {
+    pub fn new(drep_id: Vec<u8>) -> Self {
+        Self {
+            drep_id,
+            initial_slot: None,
+            voting_power: 0,
+            last_active_slot: None,
+            retired: false,
+        }
+    }
+
     /// Check that the first byte of the drep id finishes with the 0011 bytes.
     pub fn has_script(&self) -> bool {
         let first = self.drep_id.first().unwrap();
