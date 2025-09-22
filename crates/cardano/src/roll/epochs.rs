@@ -40,6 +40,7 @@ impl dolos_core::EntityDelta for EpochStatsUpdate {
         entity.gathered_deposits += self.stake_registration_count
             * entity.pparams.key_deposit_or_default()
             + self.pool_registration_count * entity.pparams.pool_deposit_or_default();
+
         entity.decayed_deposits +=
             self.stake_deregistration_count * entity.pparams.pool_deposit_or_default();
     }
@@ -55,6 +56,7 @@ impl dolos_core::EntityDelta for EpochStatsUpdate {
         entity.gathered_deposits -= self.stake_registration_count
             * entity.pparams.key_deposit_or_default()
             + self.pool_registration_count * entity.pparams.pool_deposit_or_default();
+
         entity.decayed_deposits -=
             self.stake_deregistration_count * entity.pparams.pool_deposit_or_default();
     }

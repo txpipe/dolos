@@ -33,6 +33,9 @@ pub struct Args {
     /// memory
     #[arg(long, default_value = "500")]
     chunk_size: usize,
+
+    #[arg(long, action)]
+    verbose: bool,
 }
 
 impl Default for Args {
@@ -43,6 +46,7 @@ impl Default for Args {
             skip_validation: Default::default(),
             skip_download: Default::default(),
             retain_snapshot: Default::default(),
+            verbose: Default::default(),
             chunk_size: 500,
         }
     }
@@ -211,7 +215,9 @@ fn import_hardano_into_domain(
 }
 
 pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::Result<()> {
-    //crate::common::setup_tracing(&config.logging)?;
+    if args.verbose {
+        crate::common::setup_tracing(&config.logging)?;
+    }
 
     let mithril = config
         .mithril

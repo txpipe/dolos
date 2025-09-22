@@ -1,5 +1,5 @@
 use gasket::{framework::*, messaging::Message};
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::{adapters::DomainAdapter, facade::DomainExt as _, prelude::*};
 
@@ -50,7 +50,7 @@ impl Stage {
     }
 
     fn on_roll_forward(&self, block: &RawBlock) -> Result<(), WorkerError> {
-        info!("handling roll forward");
+        debug!("handling roll forward");
 
         self.domain.roll_forward(block).or_panic()?;
 
@@ -58,7 +58,7 @@ impl Stage {
     }
 
     fn on_rollback(&self, point: &ChainPoint) -> Result<(), WorkerError> {
-        info!(slot = &point.slot(), "handling rollback");
+        debug!(slot = &point.slot(), "handling rollback");
 
         self.domain.rollback(point).or_panic()?;
 

@@ -4,6 +4,7 @@ use dolos_core::{
     batch::WorkBatch, ArchiveStore as _, BlockSlot, ChainLogic, ChainPoint, Domain, DomainError,
     EntityDelta as _, RawBlock, StateStore, StateWriter as _, TipEvent, WalStore,
 };
+use tracing::info;
 
 pub trait DomainExt: Domain
 where
@@ -83,6 +84,7 @@ where
 
         for (point, block) in batch.iter_raw() {
             self.notify_tip(TipEvent::Apply(point.clone(), block.clone()));
+            info!(%point, "roll forward");
         }
 
         Ok(())
@@ -141,7 +143,9 @@ where
 
             writer.apply_utxoset(&utxo_undo)?;
 
-            self.notify_tip(TipEvent::Undo(to.clone(), block));
+            // TODO: we should differ notifications until the we commit the writers
+            self.notify_tip(TipEvent::Undo(point.clone(), block));
+            info!(%point, "block undone");
         }
 
         writer.commit()?;
