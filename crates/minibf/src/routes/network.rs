@@ -140,8 +140,7 @@ impl<'a> IntoModel<Vec<NetworkErasInner>> for ChainModelBuilder<'a> {
             .collect();
 
         for (_, era) in eras {
-            // Adding 1 to each epoch to match standard.
-            let start_time = era.slot_time(era.start.slot + era.epoch_length);
+            let start_time = era.slot_time(era.start.slot);
             let start_delta = start_time - system_start;
 
             // Calculate for the final one. The rest will be overwritten
@@ -151,14 +150,14 @@ impl<'a> IntoModel<Vec<NetworkErasInner>> for ChainModelBuilder<'a> {
 
             previous.end = Box::new(NetworkErasInnerEnd {
                 time: start_delta as f64,
-                slot: (era.start.slot + era.epoch_length) as i32,
-                epoch: era.start.epoch as i32 + 1,
+                slot: era.start.slot as i32,
+                epoch: era.start.epoch as i32,
             });
             let current = NetworkErasInner {
                 start: Box::new(NetworkErasInnerStart {
                     time: start_delta as f64,
-                    slot: (era.start.slot + era.epoch_length) as i32,
-                    epoch: era.start.epoch as i32 + 1,
+                    slot: era.start.slot as i32,
+                    epoch: era.start.epoch as i32,
                 }),
                 end: Box::new(NetworkErasInnerEnd {
                     time: end_delta as f64,
