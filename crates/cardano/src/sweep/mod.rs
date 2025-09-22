@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use dolos_core::{BlockSlot, ChainError, Domain, EntityKey};
 use pallas::{crypto::hash::Hash, ledger::primitives::RationalNumber};
-use tracing::{debug, info, instrument, trace};
+use tracing::{info, instrument};
 
 use crate::{Config, DRepState, EpochState, EraProtocol, EraSummary, PParamsSet};
 

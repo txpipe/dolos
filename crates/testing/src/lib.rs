@@ -296,10 +296,11 @@ pub fn make_move_utxo_delta(utxos: UtxoMap, tx_seq: u64, to: TestAddress) -> Utx
     let moved = replace_utxo_map_address(moved, to);
     let moved = replace_utxo_map_txhash(moved, tx_seq);
 
-    let mut delta = UtxoSetDelta::default();
-    delta.consumed_utxo = utxos;
-    delta.produced_utxo = moved;
-    delta
+    UtxoSetDelta {
+        consumed_utxo: utxos,
+        produced_utxo: moved,
+        ..Default::default()
+    }
 }
 
 pub fn make_custom_utxo_delta<G>(
@@ -328,10 +329,10 @@ where
         }
     }
 
-    let mut delta = UtxoSetDelta::default();
-    delta.produced_utxo = utxos;
-
-    delta
+    UtxoSetDelta {
+        produced_utxo: utxos,
+        ..Default::default()
+    }
 }
 
 pub fn utxo_with_value(address: impl Into<TestAddress>, value: Value) -> EraCbor {

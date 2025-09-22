@@ -6,7 +6,7 @@ use crate::{
     forks,
     sweep::{BoundaryWork, EraTransition, PoolData, PotDelta, Pots},
     utils::epoch_first_slot,
-    DRepState, EpochState, EraProtocol, Nonces, PParamsSet, PoolState,
+    DRepState, EpochState, EraProtocol, Nonces, PParamsSet,
 };
 
 macro_rules! as_ratio {

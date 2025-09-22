@@ -214,7 +214,7 @@ pub async fn handle_account_state(
             withdrawals_sum: from_row_bigint!(row, "withdrawals_sum"),
             reserves_sum: from_row_bigint!(row, "reserves_sum"),
             treasury_sum: from_row_bigint!(row, "treasury_sum"),
-            drep: from_row!(row, Option<String>, "drep_id")
+            active_drep: from_row!(row, Option<String>, "drep_id")
                 .map(|drep_id| -> miette::Result<DRep> {
                     match drep_id.as_str() {
                         "drep_always_abstain" => Ok(DRep::Abstain),
@@ -237,6 +237,7 @@ pub async fn handle_account_state(
             latest_pool: None,
             active_pool: from_row!(row, Option<String>, "pool_id")
                 .map(|x| bech32::decode(&x).unwrap().1),
+            latest_drep: None, // TODO: add latest_drep
         };
 
         writer
@@ -582,6 +583,8 @@ pub async fn handle_pool_state(
                 }
                 None => None,
             },
+            register_slot: Default::default(), // TODO: add register_slot
+            retiring_epoch: Default::default(), // TODO: add retiring_epoch
         };
 
         writer
@@ -679,7 +682,9 @@ pub async fn handle_epoch_state(
             tracing::info!(i = i, "Processing epochs...");
         }
 
-        let mut pp = PParamsSet::new();
+        let protocol_major = from_row!(row, i32, "protocol_major_ver");
+
+        let mut pp = PParamsSet::new(protocol_major as u16);
 
         pp_col!(pp, MinFeeA, row, "min_fee_a");
         pp_col!(pp, MinFeeB, row, "min_fee_b");
@@ -692,7 +697,6 @@ pub async fn handle_epoch_state(
         //pp_col!(pp, OptimalPoolCount, "n_opt");
         // pp_col!(pp, ProtocolVersion, row, "protocol_minor_ver");
 
-        let protocol_major = from_row!(row, i32, "protocol_major_ver");
         let protocol_minor = from_row!(row, i32, "protocol_minor_ver");
 
         pp.set(PParamValue::ProtocolVersion((
@@ -859,11 +863,11 @@ pub async fn handle_drep_state(
         let retired = from_row!(row, bool, "retired");
 
         let drep = DRepState {
-            drep_id: drep_id.clone(),
             initial_slot,
             voting_power,
             last_active_slot,
             retired,
+            __drep_id: Default::default(),
         };
 
         writer

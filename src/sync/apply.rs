@@ -1,5 +1,5 @@
 use gasket::{framework::*, messaging::Message};
-use tracing::{debug, info};
+use tracing::debug;
 
 use crate::{adapters::DomainAdapter, facade::DomainExt as _, prelude::*};
 

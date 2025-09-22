@@ -1,7 +1,4 @@
-use std::{
-    cmp::Ordering,
-    ops::{Deref, DerefMut},
-};
+use std::cmp::Ordering;
 
 use dolos_core::{
     BlockSlot, ChainError, EntityKey, EntityValue, Namespace, NamespaceType, NsKey, StateError,
@@ -36,7 +33,6 @@ use crate::{
         epochs::{EpochStatsUpdate, NoncesUpdate, PParamsUpdate},
         pools::{MintedBlocksInc, PoolRegistration, PoolRetirement},
     },
-    ChainSummary,
 };
 
 pub trait FixedNamespace {

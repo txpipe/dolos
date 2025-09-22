@@ -1,7 +1,4 @@
-use dolos_core::{
-    BrokenInvariant, ChainError, Domain, EntityKey, Genesis, StateStore as _, StateWriter as _,
-};
-use tracing::debug;
+use dolos_core::{ChainError, Domain, EntityKey, Genesis, StateStore as _, StateWriter as _};
 
 use crate::{
     mutable_slots, sweep::Pots, EpochState, EraBoundary, EraSummary, Nonces, PParamsSet,

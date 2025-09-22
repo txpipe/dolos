@@ -3,7 +3,7 @@ use dolos_core::{ChainError, NsKey};
 use pallas::crypto::hash::Hash;
 use pallas::ledger::traverse::{MultiEraBlock, MultiEraPolicyAssets, MultiEraTx};
 use serde::{Deserialize, Serialize};
-use tracing::{debug, trace};
+use tracing::trace;
 
 use crate::model::FixedNamespace as _;
 use crate::CardanoLogic;
