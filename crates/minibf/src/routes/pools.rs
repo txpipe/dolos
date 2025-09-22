@@ -24,12 +24,14 @@ use crate::{
 };
 
 fn decode_pool_id(pool_id: &str) -> Result<Vec<u8>, Error> {
-    if pool_id.len() == 56 {
-        hex::decode(pool_id).map_err(|_| Error::Code(StatusCode::BAD_REQUEST))
-    } else {
+    if pool_id.starts_with("pool1") {
         let (_, operator) = bech32::decode(pool_id).map_err(|_| StatusCode::BAD_REQUEST)?;
-        Ok(operator)
+        return Ok(operator);
+    } else if pool_id.len() == 56 {
+        return hex::decode(pool_id).map_err(|_| Error::Code(StatusCode::BAD_REQUEST));
     }
+
+    Err(Error::Code(StatusCode::BAD_REQUEST))
 }
 
 struct PoolModelBuilder {
@@ -140,6 +142,8 @@ where
     Option<AccountState>: From<D::Entity>,
 {
     let operator = decode_pool_id(&id)?;
+
+    dbg!(hex::encode(&operator));
 
     let network = domain.get_network_id()?;
 

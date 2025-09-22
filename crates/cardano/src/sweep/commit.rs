@@ -4,8 +4,8 @@ use dolos_core::{
 use tracing::instrument;
 
 use crate::{
-    sweep::BoundaryWork, AccountState, EpochState, EraSummary, FixedNamespace as _, PoolState,
-    EPOCH_KEY_GO, EPOCH_KEY_MARK, EPOCH_KEY_SET,
+    sweep::BoundaryWork, AccountState, EpochState, EraBoundary, EraSummary, FixedNamespace as _,
+    PoolState, EPOCH_KEY_GO, EPOCH_KEY_MARK, EPOCH_KEY_SET,
 };
 
 impl BoundaryWork {
@@ -119,7 +119,7 @@ impl BoundaryWork {
             return Err(BrokenInvariant::BadBootstrap.into());
         };
 
-        previous.define_end(self.ending_state.number as u64);
+        previous.define_end(self.starting_epoch_no());
 
         writer.write_entity_typed::<EraSummary>(
             &EntityKey::from(transition.prev_version),

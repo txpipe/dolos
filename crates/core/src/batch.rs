@@ -132,10 +132,15 @@ impl<C: ChainLogic> WorkBatch<C> {
         self.is_sorted = true;
     }
 
-    pub fn first_slot(&self) -> BlockSlot {
+    pub fn first_point(&self) -> ChainPoint {
         debug_assert!(self.is_sorted);
 
-        self.blocks.first().unwrap().unwrap_slot()
+        self.blocks.first().unwrap().unwrap_point()
+    }
+
+    pub fn first_slot(&self) -> BlockSlot {
+        let point = self.first_point();
+        point.slot()
     }
 
     pub fn last_slot(&self) -> BlockSlot {

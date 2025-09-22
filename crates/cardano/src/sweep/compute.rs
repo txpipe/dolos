@@ -5,7 +5,8 @@ use tracing::{debug, instrument, trace};
 use crate::{
     forks,
     sweep::{BoundaryWork, EraTransition, PoolData, PotDelta, Pots},
-    utils::epoch_first_slot, DRepState, EpochState, EraProtocol, Nonces, PParamsSet, PoolState
+    utils::epoch_first_slot,
+    DRepState, EpochState, EraProtocol, Nonces, PParamsSet, PoolState,
 };
 
 macro_rules! as_ratio {
@@ -185,7 +186,7 @@ impl BoundaryWork {
 
     /// Check if the starting epoch is still within the byron era.
     fn still_byron(&self) -> bool {
-        self.active_protocol < 2 || !self.is_transitioning_to_shelley()
+        self.active_protocol < 2 && !self.is_transitioning_to_shelley()
     }
 
     fn set_neutral_pot_delta(&mut self) {
@@ -200,6 +201,7 @@ impl BoundaryWork {
         // if we're still in Byron, we just skip the pot delta computation by assigning
         // a neutral pot delta
         if self.still_byron() {
+            debug!("skipping pot delta during byron era");
             self.set_neutral_pot_delta();
             return Ok(());
         }
@@ -210,6 +212,13 @@ impl BoundaryWork {
             self.decayed_deposits(),
             &self.valid_rho()?,
             &self.valid_tau()?,
+        );
+
+        debug!(
+            %delta.incentives,
+            %delta.treasury_tax,
+            %delta.available_rewards,
+            "defined pot delta"
         );
 
         self.pot_delta = Some(delta);
@@ -335,19 +344,22 @@ impl BoundaryWork {
     }
 
     fn define_era_transition(&mut self, genesis: &Genesis) -> Result<(), ChainError> {
-        let original_version = self.ending_pparams().version();
-        let (effective_version, _) = self.ending_pparams().ensure_protocol_version()?;
+        let original = self.ending_pparams().version();
+        let (effective, _) = self.ending_pparams().ensure_protocol_version()?;
 
-        if effective_version != original_version as u64 {
-            let new_pparams = forks::evolve_pparams(
-                &self.ending_state.pparams,
-                genesis,
-                effective_version as u16,
-            )?;
+        if effective != original as u64 {
+            debug!(
+                %original,
+                %effective,
+                "found protocol version change"
+            );
+
+            let new_pparams =
+                forks::evolve_pparams(&self.ending_state.pparams, genesis, effective as u16)?;
 
             let era_transition = EraTransition {
-                prev_version: EraProtocol::from(original_version),
-                new_version: EraProtocol::from(effective_version as u16),
+                prev_version: EraProtocol::from(original),
+                new_version: EraProtocol::from(effective as u16),
                 new_pparams,
             };
 
@@ -357,7 +369,7 @@ impl BoundaryWork {
         Ok(())
     }
 
-    fn starting_epoch_no(&self) -> u64 {
+    pub fn starting_epoch_no(&self) -> u64 {
         self.ending_state.number as u64 + 1
     }
 

@@ -3,7 +3,7 @@ use dolos_core::{ChainError, NsKey};
 use pallas::crypto::hash::Hash;
 use pallas::ledger::traverse::{MultiEraBlock, MultiEraPolicyAssets, MultiEraTx};
 use serde::{Deserialize, Serialize};
-use tracing::debug;
+use tracing::{debug, trace};
 
 use crate::model::FixedNamespace as _;
 use crate::CardanoLogic;
@@ -73,7 +73,7 @@ impl BlockVisitor for AssetStateVisitor {
         let policy = mint.policy();
 
         for asset in mint.assets() {
-            debug!(%policy, asset = %hex::encode(asset.name()), "detected mint");
+            trace!(%policy, asset = %hex::encode(asset.name()), "detected mint");
 
             deltas.add_for_entity(MintStatsUpdate {
                 policy: *policy,
