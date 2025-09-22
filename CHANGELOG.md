@@ -2,6 +2,33 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.0-beta.3] - 2025-09-22
+
+### 🐛 Bug Fixes
+
+- *(minibf)* Handle block 0 edge case for preview network (#701)
+- *(minibf)* Save pool register slot for later sorting (#702)
+- *(cardano)* Handle drep activity during roll (#703)
+- *(cardano)* Clear delegators on retiring pools (#705)
+- *(cardano)* Clear delegators on retiring drep (#707)
+- *(cardano)* Make sure to evolve pparams during forks (#708)
+- *(minibf)* Handle drep_id and include nonce in parameters (#706)
+- *(cardano)* Fix Byron check logic for initial epochs
+- *(cardano)* Use epoch+1 for era end boundary
+- *(minibf)* Avoid edge case of pool bech32 passing as hex
+- *(minibf)* Load pparams before reading redeemers
+
+### 🚜 Refactor
+
+- *(cardano)* Handle drep and pool retirement during roll (#704)
+- *(cardano)* Deprecate redundant drep id state value (#709)
+- *(minibf)* Implement same era hardcoding as BF (#700)
+
+### ⚙️ Miscellaneous Tasks
+
+- Improve trace level for verbose logs
+- Fix lint warnings across the board
+
 ## [1.0.0-beta.2] - 2025-09-19
 
 ### 🚀 Features
@@ -21,6 +48,10 @@ All notable changes to this project will be documented in this file.
 ### ⚙️ Miscellaneous Tasks
 
 - Update Redb to v3 (#696)
+
+### Release
+
+- V1.0.0-beta.2
 
 ## [1.0.0-beta.1] - 2025-09-17
 
