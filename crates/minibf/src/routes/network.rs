@@ -11,52 +11,6 @@ use dolos_core::{BlockSlot, Domain, Genesis, StateStore};
 
 use crate::{mapping::IntoModel, routes::genesis::parse_datetime_into_timestamp, Facade};
 
-struct EraModelBuilder<'a> {
-    tip: BlockSlot,
-    system_start: u64,
-    era: &'a EraSummary,
-    genesis: &'a Genesis,
-}
-
-impl<'a> IntoModel<NetworkErasInner> for EraModelBuilder<'a> {
-    type SortKey = ();
-
-    fn into_model(self) -> Result<NetworkErasInner, StatusCode> {
-        let start_time = self.era.slot_time(self.era.start.slot);
-        let start_delta = start_time - self.system_start;
-
-        let (end_slot, end_epoch) = self
-            .era
-            .end
-            .as_ref()
-            .map(|x| (x.slot, x.epoch))
-            .unwrap_or((self.tip, self.era.slot_epoch(self.tip).0 as u64));
-
-        let end_time = self.era.slot_time(end_slot);
-        let end_delta = end_time - self.system_start;
-
-        let out = NetworkErasInner {
-            start: Box::new(NetworkErasInnerStart {
-                time: start_delta as f64,
-                slot: self.era.start.slot as i32,
-                epoch: self.era.start.epoch as i32,
-            }),
-            end: Box::new(NetworkErasInnerEnd {
-                time: end_delta as f64,
-                slot: end_slot as i32,
-                epoch: end_epoch as i32,
-            }),
-            parameters: Box::new(NetworkErasInnerParameters {
-                epoch_length: self.era.epoch_length as i32,
-                slot_length: self.era.slot_length as f64,
-                safe_zone: dolos_cardano::mutable_slots(self.genesis) as i32,
-            }),
-        };
-
-        Ok(out)
-    }
-}
-
 struct ChainModelBuilder<'a> {
     tip: BlockSlot,
     eras: Vec<(u16, EraSummary)>,
@@ -75,18 +29,19 @@ impl<'a> IntoModel<Vec<NetworkErasInner>> for ChainModelBuilder<'a> {
             .map(|x| parse_datetime_into_timestamp(x))
             .transpose()?
             .unwrap_or_default() as u64;
+
         let mut out = vec![];
 
         // Special, hardcoded stuff.
         let known_hardforks = [2, 3, 4, 5, 7, 9];
-        match self.genesis.shelley.network_magic {
+        let mut previous = match self.genesis.shelley.network_magic {
             Some(764824073) => {
-                let epoch_length = 4320;
+                let epoch_length = 21600;
                 let slot_length = 20;
-                let safe_zone = 864;
-                let end_epoch = 0;
+                let safe_zone = 4320;
+                let end_epoch = 208;
 
-                out.push(NetworkErasInner {
+                NetworkErasInner {
                     start: Box::new(NetworkErasInnerStart {
                         time: 0.0,
                         slot: 0,
@@ -102,15 +57,15 @@ impl<'a> IntoModel<Vec<NetworkErasInner>> for ChainModelBuilder<'a> {
                         slot_length: slot_length as f64,
                         safe_zone,
                     }),
-                });
+                }
             }
             Some(1) => {
-                let epoch_length = 4320;
+                let epoch_length = 21600;
                 let slot_length = 20;
-                let safe_zone = 864;
-                let end_epoch = 0;
+                let safe_zone = 4320;
+                let end_epoch = 4;
 
-                out.push(NetworkErasInner {
+                NetworkErasInner {
                     start: Box::new(NetworkErasInnerStart {
                         time: 0.0,
                         slot: 0,
@@ -126,7 +81,7 @@ impl<'a> IntoModel<Vec<NetworkErasInner>> for ChainModelBuilder<'a> {
                         slot_length: slot_length as f64,
                         safe_zone,
                     }),
-                });
+                }
             }
             Some(2) => {
                 let epoch_length = 4320;
@@ -152,6 +107,7 @@ impl<'a> IntoModel<Vec<NetworkErasInner>> for ChainModelBuilder<'a> {
                     }),
                 });
 
+                // In the case of preview, we add the skipped eras
                 let other = NetworkErasInner {
                     start: Box::new(NetworkErasInnerStart {
                         time: 0.0,
@@ -171,29 +127,55 @@ impl<'a> IntoModel<Vec<NetworkErasInner>> for ChainModelBuilder<'a> {
                 };
                 out.push(other.clone());
                 out.push(other.clone());
-                out.push(other);
+                out.push(other.clone());
+                other
             }
-            _ => {}
+            _ => return Err(StatusCode::INTERNAL_SERVER_ERROR),
         };
 
-        out.extend(
-            self.eras
-                .iter()
-                .flat_map(|(protocol, era)| {
-                    if known_hardforks.contains(protocol) {
-                        Some(EraModelBuilder {
-                            tip: self.tip,
-                            system_start,
-                            era,
-                            genesis: self.genesis,
-                        })
-                    } else {
-                        None
-                    }
-                })
-                .map(|era| era.into_model())
-                .collect::<Result<Vec<_>, _>>()?,
-        );
+        let eras: Vec<_> = self
+            .eras
+            .iter()
+            .filter(|(protocol, _)| known_hardforks.contains(protocol))
+            .collect();
+
+        for (_, era) in eras {
+            // Adding 1 to each epoch to match standard.
+            let start_time = era.slot_time(era.start.slot + era.epoch_length);
+            let start_delta = start_time - system_start;
+
+            // Calculate for the final one. The rest will be overwritten
+            let (end_slot, end_epoch) = (self.tip, era.slot_epoch(self.tip).0 as u64);
+            let end_time = era.slot_time(end_slot);
+            let end_delta = end_time - system_start;
+
+            previous.end = Box::new(NetworkErasInnerEnd {
+                time: start_delta as f64,
+                slot: (era.start.slot + era.epoch_length) as i32,
+                epoch: era.start.epoch as i32 + 1,
+            });
+            let current = NetworkErasInner {
+                start: Box::new(NetworkErasInnerStart {
+                    time: start_delta as f64,
+                    slot: (era.start.slot + era.epoch_length) as i32,
+                    epoch: era.start.epoch as i32 + 1,
+                }),
+                end: Box::new(NetworkErasInnerEnd {
+                    time: end_delta as f64,
+                    slot: end_slot as i32,
+                    epoch: end_epoch as i32,
+                }),
+                parameters: Box::new(NetworkErasInnerParameters {
+                    epoch_length: era.epoch_length as i32,
+                    slot_length: era.slot_length as f64,
+                    safe_zone: dolos_cardano::mutable_slots(self.genesis) as i32,
+                }),
+            };
+
+            out.push(previous.clone());
+            previous = current;
+        }
+        out.push(previous);
 
         Ok(out)
     }
