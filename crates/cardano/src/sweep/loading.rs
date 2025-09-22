@@ -123,10 +123,10 @@ impl BoundaryWork {
 
         let mut boundary = BoundaryWork {
             active_protocol,
+            active_era,
             active_state,
             waiting_state,
             ending_state,
-            active_era,
             mutable_slots: mutable_slots(domain.genesis()),
             shelley_hash: domain.genesis().shelley_hash,
 
