@@ -150,7 +150,11 @@ pub async fn by_hash_redeemers<D: Domain>(
 
     let chain = domain.get_chain_summary()?;
 
-    let mut builder = TxModelBuilder::new(&raw, order)?.with_chain(chain);
+    let pparams = domain.get_live_pparams()?;
+
+    let mut builder = TxModelBuilder::new(&raw, order)?
+        .with_chain(chain)
+        .with_pparams(pparams);
 
     let deps = builder.required_deps()?;
     let deps = domain.get_tx_batch(deps)?;
