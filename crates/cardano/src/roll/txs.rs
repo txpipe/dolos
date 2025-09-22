@@ -5,7 +5,7 @@ use pallas::{
         addresses::Address,
         primitives::{conway::DatumOption, PlutusData},
         traverse::{
-            MultiEraBlock, MultiEraCert, MultiEraInput, MultiEraTx, MultiEraValue,
+            MultiEraBlock, MultiEraCert, MultiEraInput, MultiEraMeta, MultiEraTx, MultiEraValue,
             OriginalHash as _,
         },
     },
@@ -19,6 +19,12 @@ pub struct TxLogVisitor;
 fn unpack_input(tags: &mut SlotTags, input: &MultiEraInput) {
     let txoref: TxoRef = input.into();
     tags.spent_txo.push(txoref.into());
+}
+
+fn unpack_metadata(tags: &mut SlotTags, metadata: &MultiEraMeta) {
+    for (label, _) in metadata.collect::<Vec<_>>().iter() {
+        tags.metadata.push(*label);
+    }
 }
 
 fn unpack_address(tags: &mut SlotTags, address: &Address) {
@@ -100,6 +106,7 @@ impl BlockVisitor for TxLogVisitor {
         tx: &MultiEraTx,
     ) -> Result<(), ChainError> {
         deltas.slot.tx_hashes.push(tx.hash().to_vec());
+        unpack_metadata(&mut deltas.slot, &tx.metadata());
 
         Ok(())
     }

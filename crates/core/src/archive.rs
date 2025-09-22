@@ -44,6 +44,7 @@ pub struct SlotTags {
     pub stake_addresses: Vec<OpaqueTag>,
     pub spent_txo: Vec<OpaqueTag>,
     pub account_certs: Vec<OpaqueTag>,
+    pub metadata: Vec<u64>,
 }
 
 pub trait ArchiveWriter: Send + Sync + 'static {
@@ -101,6 +102,11 @@ pub trait ArchiveStore: Clone + Send + Sync + 'static {
     fn iter_blocks_with_account_certs(
         &self,
         account: &[u8],
+    ) -> Result<Self::SparseBlockIter, ArchiveError>;
+
+    fn iter_blocks_with_metadata(
+        &self,
+        metadata: &u64,
     ) -> Result<Self::SparseBlockIter, ArchiveError>;
 
     fn get_range<'a>(

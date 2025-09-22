@@ -223,6 +223,14 @@ impl ChainStore {
         indexes::Indexes::get_by_block_number(&rx, block_number)
     }
 
+    pub fn get_possible_block_slots_by_metadata(
+        &self,
+        metadata: &u64,
+    ) -> Result<Vec<BlockSlot>, RedbArchiveError> {
+        let rx = self.db().begin_read()?;
+        indexes::Indexes::get_by_metadata(&rx, metadata)
+    }
+
     pub fn get_possible_block_slots_by_datum_hash(
         &self,
         datum_hash: &[u8],
@@ -332,6 +340,20 @@ impl ChainStore {
         block_number: &u64,
     ) -> Result<Vec<BlockBody>, RedbArchiveError> {
         self.get_possible_block_slots_by_block_number(block_number)?
+            .iter()
+            .flat_map(|slot| match self.get_block_by_slot(slot) {
+                Ok(Some(block)) => Some(Ok(block)),
+                Ok(None) => None,
+                Err(e) => Some(Err(e)),
+            })
+            .collect()
+    }
+
+    pub fn get_possible_blocks_by_metadata(
+        &self,
+        metadata: &u64,
+    ) -> Result<Vec<BlockBody>, RedbArchiveError> {
+        self.get_possible_block_slots_by_metadata(metadata)?
             .iter()
             .flat_map(|slot| match self.get_block_by_slot(slot) {
                 Ok(Some(block)) => Some(Ok(block)),
@@ -486,6 +508,15 @@ impl ChainStore {
     ) -> Result<ChainSparseIter, RedbArchiveError> {
         let rx = self.db().begin_read()?;
         let range = indexes::Indexes::iter_by_account_certs(&rx, account)?;
+        Ok(ChainSparseIter(rx, range))
+    }
+
+    pub fn iter_possible_blocks_with_metadata(
+        &self,
+        metadata: &u64,
+    ) -> Result<ChainSparseIter, RedbArchiveError> {
+        let rx = self.db().begin_read()?;
+        let range = indexes::Indexes::iter_by_metadata(&rx, metadata)?;
         Ok(ChainSparseIter(rx, range))
     }
 
@@ -780,6 +811,16 @@ impl dolos_core::ArchiveStore for ChainStore {
     ) -> Result<Self::SparseBlockIter, ArchiveError> {
         // TODO: we need to filter the false positives
         let out = self.iter_possible_blocks_with_account_certs(account)?;
+
+        Ok(out)
+    }
+
+    fn iter_blocks_with_metadata(
+        &self,
+        metadata: &u64,
+    ) -> Result<Self::SparseBlockIter, ArchiveError> {
+        // TODO: we need to filter the false positives
+        let out = self.iter_possible_blocks_with_metadata(metadata)?;
 
         Ok(out)
     }

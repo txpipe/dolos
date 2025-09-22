@@ -34,7 +34,6 @@ mod routes;
 pub struct Config {
     pub listen_address: SocketAddr,
     pub permissive_cors: Option<bool>,
-    pub metadata_max_scan_depth: Option<usize>,
     pub token_registry_url: Option<String>,
     pub url: Option<String>,
 }

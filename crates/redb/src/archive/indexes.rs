@@ -215,6 +215,38 @@ impl DatumHashApproxIndexTable {
     }
 }
 
+pub struct MetadataApproxIndexTable;
+
+impl MetadataApproxIndexTable {
+    pub const DEF: MultimapTableDefinition<'static, u64, u64> =
+        MultimapTableDefinition::new("bymetadata");
+
+    pub fn compute_key(metadata: &u64) -> u64 {
+        // Left for readability
+        *metadata
+    }
+
+    pub fn get_by_metadata(rx: &ReadTransaction, metadata: &u64) -> Result<Vec<BlockSlot>, Error> {
+        let table = rx.open_multimap_table(Self::DEF)?;
+        let key = Self::compute_key(metadata);
+        let mut out = vec![];
+        for slot in table.get(key)? {
+            out.push(slot?.value());
+        }
+        Ok(out)
+    }
+
+    pub fn iter_by_metadata(
+        rx: &ReadTransaction,
+        metadata: &u64,
+    ) -> Result<SlotKeyIterator, Error> {
+        let table = rx.open_multimap_table(Self::DEF)?;
+        let key = Self::compute_key(metadata);
+        let range = table.get(key)?;
+        Ok(SlotKeyIterator::new(range))
+    }
+}
+
 pub struct PolicyApproxIndexTable;
 
 impl PolicyApproxIndexTable {
@@ -347,6 +379,7 @@ impl Indexes {
         wx.open_multimap_table(BlockHashApproxIndexTable::DEF)?;
         wx.open_multimap_table(BlockNumberApproxIndexTable::DEF)?;
         wx.open_multimap_table(DatumHashApproxIndexTable::DEF)?;
+        wx.open_multimap_table(MetadataApproxIndexTable::DEF)?;
         wx.open_multimap_table(PolicyApproxIndexTable::DEF)?;
         wx.open_multimap_table(ScriptHashApproxIndexTable::DEF)?;
         wx.open_multimap_table(SpentTxoApproxIndexTable::DEF)?;
@@ -370,6 +403,13 @@ impl Indexes {
 
     pub fn iter_by_stake(rx: &ReadTransaction, stake: &[u8]) -> Result<SlotKeyIterator, Error> {
         AddressStakePartApproxIndexTable::iter_by_stake(rx, stake)
+    }
+
+    pub fn iter_by_metadata(
+        rx: &ReadTransaction,
+        metadata: &u64,
+    ) -> Result<SlotKeyIterator, Error> {
+        MetadataApproxIndexTable::iter_by_metadata(rx, metadata)
     }
 
     pub fn iter_by_account_certs(
@@ -444,6 +484,10 @@ impl Indexes {
         TxHashApproxIndexTable::get_by_tx_hash(rx, tx_hash)
     }
 
+    pub fn get_by_metadata(rx: &ReadTransaction, metadata: &u64) -> Result<Vec<BlockSlot>, Error> {
+        MetadataApproxIndexTable::get_by_metadata(rx, metadata)
+    }
+
     pub fn copy(rx: &ReadTransaction, wx: &WriteTransaction) -> Result<(), Error> {
         Self::copy_table(AddressApproxIndexTable::DEF, rx, wx)?;
         Self::copy_table(AddressPaymentPartApproxIndexTable::DEF, rx, wx)?;
@@ -453,6 +497,7 @@ impl Indexes {
         Self::copy_table(BlockNumberApproxIndexTable::DEF, rx, wx)?;
         Self::copy_table(DatumHashApproxIndexTable::DEF, rx, wx)?;
         Self::copy_table(PolicyApproxIndexTable::DEF, rx, wx)?;
+        Self::copy_table(MetadataApproxIndexTable::DEF, rx, wx)?;
         Self::copy_table(ScriptHashApproxIndexTable::DEF, rx, wx)?;
         Self::copy_table(SpentTxoApproxIndexTable::DEF, rx, wx)?;
         Self::copy_table(AccountCertsApproxIndexTable::DEF, rx, wx)?;
@@ -564,6 +609,14 @@ impl Indexes {
             slot,
         )?;
 
+        Self::insert(
+            wx,
+            MetadataApproxIndexTable::DEF,
+            MetadataApproxIndexTable::compute_key,
+            tags.metadata.clone(),
+            slot,
+        )?;
+
         Ok(())
     }
 
@@ -667,6 +720,14 @@ impl Indexes {
             AccountCertsApproxIndexTable::DEF,
             AccountCertsApproxIndexTable::compute_key,
             tags.account_certs.clone(),
+            slot,
+        )?;
+
+        Self::remove(
+            wx,
+            MetadataApproxIndexTable::DEF,
+            MetadataApproxIndexTable::compute_key,
+            tags.metadata.clone(),
             slot,
         )?;
 

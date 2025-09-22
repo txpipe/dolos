@@ -144,6 +144,17 @@ impl ArchiveStore for ArchiveAdapter {
         Ok(out.into())
     }
 
+    fn iter_blocks_with_metadata(
+        &self,
+        metadata: &u64,
+    ) -> Result<Self::SparseBlockIter, ArchiveError> {
+        let out = match self {
+            ArchiveAdapter::Redb(x) => x.iter_blocks_with_metadata(metadata)?,
+        };
+
+        Ok(out.into())
+    }
+
     fn get_range<'a>(
         &self,
         from: Option<BlockSlot>,
