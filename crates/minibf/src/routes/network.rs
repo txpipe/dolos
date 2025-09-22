@@ -6,7 +6,7 @@ use blockfrost_openapi::models::{
     network_eras_inner_start::NetworkErasInnerStart, network_stake::NetworkStake,
     network_supply::NetworkSupply,
 };
-use dolos_cardano::{model::EpochState, mutable_slots, EraSummary, FixedNamespace};
+use dolos_cardano::{model::EpochState, mutable_slots, EraProtocol, EraSummary, FixedNamespace};
 use dolos_core::{BlockSlot, Domain, Genesis, StateStore};
 
 use crate::{mapping::IntoModel, routes::genesis::parse_datetime_into_timestamp, Facade};
@@ -194,11 +194,8 @@ pub async fn eras<D: Domain>(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .map(|x| {
             let (key, era) = x.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            let key: &[u8; 2] = key.as_ref()[..2]
-                .try_into()
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            let protocol = u16::from_be_bytes(*key);
-            Ok((protocol, era))
+            let protocol = EraProtocol::from(key);
+            Ok((protocol.into(), era))
         })
         .collect::<Result<Vec<_>, StatusCode>>()?;
 
