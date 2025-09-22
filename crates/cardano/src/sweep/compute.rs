@@ -325,7 +325,12 @@ impl BoundaryWork {
             treasury,
             pparams,
             largest_stable_slot: epoch_first_slot(self.ending_state.number + 2, &self.active_era)
-                - self.mutable_slots,
+                - if self.active_protocol >= 9 {
+                    // https://github.com/IntersectMBO/cardano-ledger/issues/1914
+                    self.stability_window
+                } else {
+                    self.randomness_stability_window
+                },
             nonces,
 
             // computed throughout the epoch during _roll_

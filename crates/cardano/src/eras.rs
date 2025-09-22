@@ -94,13 +94,22 @@ impl ChainSummary {
     /// This method will scan the different eras looking for one that includes
     /// the given epoch.
     pub fn era_for_epoch(&self, epoch: u64) -> &EraSummary {
+        self.protocol_and_era_for_epoch(epoch).1
+    }
+
+    /// Return the protocol and era for a given epoch
+    ///
+    /// This method will scan the different eras looking for one that includes
+    /// the given epoch.
+    pub fn protocol_and_era_for_epoch(&self, epoch: u64) -> (&u16, &EraSummary) {
         if epoch >= self.edge().start.epoch {
-            return self.edge();
+            return (self.protocols.last().unwrap(), self.edge());
         }
 
-        self.past
+        self.protocols
             .iter()
-            .find(|e| epoch >= e.start.epoch && e.end.as_ref().unwrap().epoch > epoch)
+            .zip(self.past.iter())
+            .find(|(_, e)| epoch >= e.start.epoch && e.end.as_ref().unwrap().epoch > epoch)
             .unwrap()
     }
 
