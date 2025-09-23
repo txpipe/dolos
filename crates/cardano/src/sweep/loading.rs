@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use dolos_core::{ChainError, Domain, EntityKey, StateStore};
 
 use crate::{
-    drep_to_entity_key, load_active_era, mutable_slots,
+    drep_to_entity_key, load_active_era,
     sweep::{AccountId, BoundaryWork, DRepId, PoolData, PoolId, Snapshot},
     AccountState, DRepState, FixedNamespace as _, PoolState,
 };
@@ -127,7 +127,6 @@ impl BoundaryWork {
             active_state,
             waiting_state,
             ending_state,
-            mutable_slots: mutable_slots(domain.genesis()),
             shelley_hash: domain.genesis().shelley_hash,
 
             // to be loaded right after
