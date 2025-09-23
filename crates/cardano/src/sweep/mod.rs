@@ -104,7 +104,6 @@ pub struct BoundaryWork {
     pub ending_snapshot: Snapshot,
     pub pools: HashMap<PoolId, PoolData>,
     pub dreps: HashMap<DRepId, DRepState>,
-    pub mutable_slots: u64,
     pub shelley_hash: Hash<32>,
 
     // computed

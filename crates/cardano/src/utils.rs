@@ -14,6 +14,37 @@ pub fn mutable_slots(genesis: &Genesis) -> u64 {
         as u64
 }
 
+/// Computes the amount of mutable slots in chain.
+///
+/// Reads the relevant genesis config values and uses the security window
+/// guarantee formula from consensus to calculate the latest slot that can be
+/// considered immutable. Same as `mutable_slots`, added for the code to be similar in naming
+/// convention to other implementations.
+pub fn stability_window(genesis: &Genesis) -> u64 {
+    mutable_slots(genesis)
+}
+
+/// Computes the amount of slots to substract to get the eta_h value for nonce calculation.
+///
+/// Similar to `mutable_slots` but with 4 instead of 3 as the constant. See the following issue for
+/// refference: https://github.com/IntersectMBO/cardano-ledger/issues/1914
+pub fn randomness_stability_window(genesis: &Genesis) -> u64 {
+    ((4.0 * genesis.byron.protocol_consts.k as f32) / (genesis.shelley.active_slots_coeff.unwrap()))
+        as u64
+}
+
+/// Get the window of slots used to calculate eta_h for epoch nonce calculation.
+///
+/// This is supposed be `randomness_stability_window` but due to a bug in the code it is dependant
+/// on the protocol. See https://github.com/IntersectMBO/cardano-ledger/issues/1914.
+pub fn nonce_stability_window(protocol: u16, genesis: &Genesis) -> u64 {
+    if protocol >= 9 {
+        randomness_stability_window(genesis)
+    } else {
+        stability_window(genesis)
+    }
+}
+
 /// Computes the latest immutable slot
 ///
 /// Takes the latest known tip, reads the relevant genesis config values and
