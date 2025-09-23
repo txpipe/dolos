@@ -3,9 +3,9 @@ use std::{collections::HashMap, marker::PhantomData, ops::Range};
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 
-use crate::{ChainPoint, Domain, TxoRef, UtxoMap, UtxoSet, UtxoSetDelta};
+use crate::{ChainError, ChainPoint, Domain, TxoRef, UtxoMap, UtxoSet, UtxoSetDelta};
 
-const KEY_SIZE: usize = 32;
+pub const KEY_SIZE: usize = 32;
 
 pub type Namespace = &'static str;
 
@@ -112,7 +112,7 @@ impl std::ops::Deref for StateSchema {
 pub trait Entity: Sized + Send {
     const KEY_SIZE: usize = 32;
 
-    fn decode_entity(ns: Namespace, value: &EntityValue) -> Result<Self, StateError>;
+    fn decode_entity(ns: Namespace, value: &EntityValue) -> Result<Self, ChainError>;
     fn encode_entity(value: &Self) -> (Namespace, EntityValue);
 }
 
@@ -182,6 +182,9 @@ pub enum StateError {
 
     #[error(transparent)]
     InvariantViolation(#[from] InvariantViolation),
+
+    #[error("entity decoding error")]
+    EntityDecodingError(String),
 }
 
 pub struct EntityIterTyped<S: StateStore, E: Entity> {
@@ -206,8 +209,11 @@ impl<S: StateStore, E: Entity> Iterator for EntityIterTyped<S, E> {
     fn next(&mut self) -> Option<Self::Item> {
         let next = self.inner.next()?;
 
-        let mapped =
-            next.and_then(|(key, value)| E::decode_entity(self.ns, &value).map(|v| (key, v)));
+        let mapped = next.and_then(|(key, value)| {
+            E::decode_entity(self.ns, &value)
+                .map(|v| (key, v))
+                .map_err(|x| StateError::EntityDecodingError(x.to_string()))
+        });
 
         Some(mapped)
     }
@@ -337,7 +343,12 @@ pub trait StateStore: Sized + Send + Sync + Clone {
 
         let decoded = raw
             .into_iter()
-            .map(|x| x.map(|v| E::decode_entity(ns, &v)))
+            .map(|x| {
+                x.map(|v| {
+                    E::decode_entity(ns, &v)
+                        .map_err(|x| StateError::EntityDecodingError(x.to_string()))
+                })
+            })
             .map(|x| x.transpose())
             .try_collect()?;
 
@@ -415,7 +426,7 @@ mod tests {
     }
 
     impl Entity for TestEntity {
-        fn decode_entity(_: Namespace, value: &EntityValue) -> Result<Self, StateError> {
+        fn decode_entity(_: Namespace, value: &EntityValue) -> Result<Self, ChainError> {
             let value_str = String::from_utf8(value.clone()).unwrap();
             Ok(TestEntity { value: value_str })
         }

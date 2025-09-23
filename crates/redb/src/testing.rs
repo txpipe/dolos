@@ -13,7 +13,7 @@ impl Entity for DummyEntity {
     fn decode_entity(
         _ns: dolos_core::Namespace,
         _value: &dolos_core::EntityValue,
-    ) -> Result<Self, dolos_core::state::StateError> {
+    ) -> Result<Self, dolos_core::ChainError> {
         todo!()
     }
 

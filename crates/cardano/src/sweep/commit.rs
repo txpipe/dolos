@@ -1,21 +1,30 @@
 use dolos_core::{
-    BrokenInvariant, ChainError, Domain, EntityKey, StateError, StateStore, StateWriter,
+    ArchiveStore, ArchiveWriter, BrokenInvariant, ChainError, Domain, EntityKey, LogKey,
+    StateError, StateStore, StateWriter, TemporalKey,
 };
 use tracing::instrument;
 
 use crate::{
-    sweep::BoundaryWork, AccountState, EpochState, EraSummary, FixedNamespace as _, PoolState,
-    EPOCH_KEY_GO, EPOCH_KEY_MARK, EPOCH_KEY_SET,
+    sweep::BoundaryWork, utils::epoch_first_slot, AccountState, EpochState, EraSummary,
+    FixedNamespace, PoolState, EPOCH_KEY_GO, EPOCH_KEY_MARK, EPOCH_KEY_SET,
 };
 
 impl BoundaryWork {
-    pub fn rotate_pool_stake_data<W: StateWriter>(
+    pub fn log_key_for_entity_key(&self, entity_key: EntityKey) -> LogKey {
+        let epoch_start_slot = epoch_first_slot(self.ending_state.number, &self.active_era);
+        (TemporalKey::from(epoch_start_slot), entity_key).into()
+    }
+
+    pub fn rotate_pool_stake_data<S: StateWriter, A: ArchiveWriter>(
         &self,
-        writer: &W,
+        state_writer: &S,
+        archive_writer: &A,
         pools: impl Iterator<Item = Result<(EntityKey, PoolState), StateError>>,
     ) -> Result<(), ChainError> {
         for record in pools {
             let (key, mut state) = record?;
+            archive_writer
+                .write_log_typed::<PoolState>(&self.log_key_for_entity_key(key.clone()), &state)?;
 
             let new_stake = self.ending_snapshot.get_pool_stake(&key);
 
@@ -23,19 +32,24 @@ impl BoundaryWork {
             state.active_stake = state.wait_stake;
             state.wait_stake = new_stake;
 
-            writer.write_entity_typed::<PoolState>(&key, &state)?;
+            state_writer.write_entity_typed::<PoolState>(&key, &state)?;
         }
 
         Ok(())
     }
 
-    pub fn rotate_account_stake_data<W: StateWriter>(
+    pub fn rotate_account_stake_data<S: StateWriter, A: ArchiveWriter>(
         &self,
-        writer: &W,
+        state_writer: &S,
+        archive_writer: &A,
         accounts: impl Iterator<Item = Result<(EntityKey, AccountState), StateError>>,
     ) -> Result<(), ChainError> {
         for record in accounts {
             let (key, mut state) = record?;
+            archive_writer.write_log_typed::<AccountState>(
+                &self.log_key_for_entity_key(key.clone()),
+                &state,
+            )?;
 
             // clear pool if dropped
             if self.dropped_pool_delegators.contains(&key) {
@@ -61,7 +75,33 @@ impl BoundaryWork {
             // rotate drep
             state.active_drep = state.latest_drep.clone();
 
-            writer.write_entity_typed::<AccountState>(&key, &state)?;
+            state_writer.write_entity_typed::<AccountState>(&key, &state)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn archive_pool_data<W: ArchiveWriter>(
+        &self,
+        writer: &W,
+        pools: impl Iterator<Item = Result<(EntityKey, PoolState), StateError>>,
+    ) -> Result<(), ChainError> {
+        for record in pools {
+            let (key, state) = record?;
+            writer.write_log_typed::<PoolState>(&self.log_key_for_entity_key(key), &state)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn archive_account_data<W: ArchiveWriter>(
+        &self,
+        writer: &W,
+        accounts: impl Iterator<Item = Result<(EntityKey, AccountState), StateError>>,
+    ) -> Result<(), ChainError> {
+        for record in accounts {
+            let (key, state) = record?;
+            writer.write_log_typed::<AccountState>(&self.log_key_for_entity_key(key), &state)?;
         }
 
         Ok(())
@@ -159,6 +199,17 @@ impl BoundaryWork {
         Ok(())
     }
 
+    fn archive_ending_epoch<W: ArchiveWriter>(&self, writer: &W) -> Result<(), ChainError> {
+        writer.write_log_typed::<EpochState>(
+            &self.log_key_for_entity_key(EntityKey::from(
+                self.ending_state.number.to_be_bytes().as_slice(),
+            )),
+            &self.ending_state,
+        )?;
+
+        Ok(())
+    }
+
     #[instrument(skip_all)]
     pub fn commit<D: Domain>(&self, domain: &D) -> Result<(), ChainError> {
         let accounts = domain
@@ -174,17 +225,20 @@ impl BoundaryWork {
             .iter_entities_typed::<crate::DRepState>(crate::DRepState::NS, None)?;
 
         let writer = domain.state().start_writer()?;
+        let archive_writer = domain.archive().start_writer()?;
 
-        self.rotate_pool_stake_data(&writer, pools)?;
-        self.rotate_account_stake_data(&writer, accounts)?;
+        self.rotate_pool_stake_data(&writer, &archive_writer, pools)?;
+        self.rotate_account_stake_data(&writer, &archive_writer, accounts)?;
         self.update_drep_data(&writer, dreps)?;
         self.drop_active_epoch(&writer)?;
         self.promote_waiting_epoch(&writer)?;
         self.promote_ending_epoch(&writer)?;
+        self.archive_ending_epoch(&archive_writer)?;
         self.apply_era_transition(&writer, domain.state())?;
         self.start_new_epoch(&writer)?;
 
         writer.commit()?;
+        archive_writer.commit()?;
 
         Ok(())
     }

@@ -50,6 +50,7 @@ impl UtxosTable {
         Ok(())
     }
 
+    #[allow(unused)]
     pub fn iter(rx: &ReadTransaction) -> Result<UtxosIterator, Error> {
         let table = rx.open_table(UtxosTable::DEF)?;
         let range = table.range::<UtxosKey>(..)?;

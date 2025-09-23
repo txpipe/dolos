@@ -19,7 +19,7 @@ pub struct Args {
 
 trait TableRow: Entity {
     fn header() -> Vec<&'static str>;
-    fn row(&self, key: &EntityKey) -> Vec<String>;
+    fn row(&self, key: &LogKey) -> Vec<String>;
 }
 
 impl TableRow for AccountState {
@@ -36,7 +36,7 @@ impl TableRow for AccountState {
         ]
     }
 
-    fn row(&self, key: &EntityKey) -> Vec<String> {
+    fn row(&self, key: &LogKey) -> Vec<String> {
         vec![
             format!("{}", hex::encode(key)),
             format!("{}", self.active_stake),
@@ -79,7 +79,7 @@ impl TableRow for EpochState {
         ]
     }
 
-    fn row(&self, _key: &EntityKey) -> Vec<String> {
+    fn row(&self, _key: &LogKey) -> Vec<String> {
         vec![
             format!("{}", self.number),
             format!("{}", self.pparams.protocol_major().unwrap_or_default()),
@@ -117,7 +117,7 @@ impl TableRow for EraSummary {
         ]
     }
 
-    fn row(&self, key: &EntityKey) -> Vec<String> {
+    fn row(&self, key: &LogKey) -> Vec<String> {
         vec![
             format!("{}", hex::encode(key)),
             format!("{}", self.start.epoch),
@@ -147,7 +147,7 @@ impl TableRow for PoolState {
         ]
     }
 
-    fn row(&self, key: &EntityKey) -> Vec<String> {
+    fn row(&self, key: &LogKey) -> Vec<String> {
         vec![
             format!("{}", hex::encode(key)),
             format!("{}", self.vrf_keyhash),
@@ -164,7 +164,7 @@ impl TableRow for PoolState {
 //         vec!["key", "epoch", "amount", "pool id", "as leader"]
 //     }
 
-//     fn row(&self, key: &EntityKey) -> Vec<String> {
+//     fn row(&self, key: &LogKey) -> Vec<String> {
 //         vec![
 //             format!("{}", hex::encode(key)),
 //             format!("{}", self.epoch),
@@ -189,7 +189,7 @@ impl<T: TableRow> Formatter<T> {
         Self::Table(table, PhantomData::<T>)
     }
 
-    fn write(&mut self, key: EntityKey, value: T) {
+    fn write(&mut self, key: LogKey, value: T) {
         match self {
             Formatter::Table(table, _) => {
                 let row = value.row(&key);
@@ -206,14 +206,14 @@ impl<T: TableRow> Formatter<T> {
 }
 
 fn dump_state<T: TableRow>(
-    state: &impl StateStore,
+    state: &impl ArchiveStore,
     ns: Namespace,
     count: usize,
 ) -> miette::Result<()> {
     let mut formatter = Formatter::<T>::new_table();
 
     state
-        .iter_entities_typed::<T>(ns, None)
+        .iter_logs_typed::<T>(ns, None)
         .into_diagnostic()
         .context("iterating entities")?
         .take(count)
@@ -230,13 +230,14 @@ fn dump_state<T: TableRow>(
 pub fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging)?;
 
-    let state = crate::common::open_state_store(config)?;
+    //let state = crate::common::open_state_store(config)?;
+    let archive = crate::common::open_archive_store(config)?;
 
     match args.namespace.as_str() {
-        "eras" => dump_state::<EraSummary>(&state, "eras", args.count)?,
-        "epochs" => dump_state::<EpochState>(&state, "epochs", args.count)?,
-        "accounts" => dump_state::<AccountState>(&state, "accounts", args.count)?,
-        "pools" => dump_state::<PoolState>(&state, "pools", args.count)?,
+        "eras" => dump_state::<EraSummary>(&archive, "eras", args.count)?,
+        "epochs" => dump_state::<EpochState>(&archive, "epochs", args.count)?,
+        "accounts" => dump_state::<AccountState>(&archive, "accounts", args.count)?,
+        "pools" => dump_state::<PoolState>(&archive, "pools", args.count)?,
         //"rewards" => dump_state::<RewardState>(&state, "rewards", args.count)?,
         _ => todo!(),
     }

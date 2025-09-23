@@ -1,8 +1,7 @@
 use std::cmp::Ordering;
 
 use dolos_core::{
-    BlockSlot, ChainError, EntityKey, EntityValue, Namespace, NamespaceType, NsKey, StateError,
-    StateSchema,
+    BlockSlot, ChainError, EntityKey, EntityValue, Namespace, NamespaceType, NsKey, StateSchema,
 };
 use pallas::{
     codec::minicbor::{self, Decode, Encode},
@@ -46,7 +45,7 @@ macro_rules! entity_boilerplate {
         }
 
         impl dolos_core::Entity for $type {
-            fn decode_entity(ns: Namespace, value: &EntityValue) -> Result<Self, StateError> {
+            fn decode_entity(ns: Namespace, value: &EntityValue) -> Result<Self, ChainError> {
                 assert_eq!(ns, $type::NS);
                 let value = pallas::codec::minicbor::decode(value)?;
                 Ok(value)
@@ -940,7 +939,7 @@ variant_boilerplate!(EpochState);
 variant_boilerplate!(DRepState);
 
 impl dolos_core::Entity for CardanoEntity {
-    fn decode_entity(ns: Namespace, value: &EntityValue) -> Result<Self, StateError> {
+    fn decode_entity(ns: Namespace, value: &EntityValue) -> Result<Self, ChainError> {
         match ns {
             EraSummary::NS => EraSummary::decode_entity(ns, value).map(Into::into),
             AccountState::NS => AccountState::decode_entity(ns, value).map(Into::into),
@@ -948,7 +947,7 @@ impl dolos_core::Entity for CardanoEntity {
             PoolState::NS => PoolState::decode_entity(ns, value).map(Into::into),
             EpochState::NS => EpochState::decode_entity(ns, value).map(Into::into),
             DRepState::NS => DRepState::decode_entity(ns, value).map(Into::into),
-            _ => Err(StateError::InvalidNamespace(ns)),
+            _ => Err(ChainError::InvalidNamespace(ns)),
         }
     }
 
