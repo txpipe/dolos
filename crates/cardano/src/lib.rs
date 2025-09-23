@@ -42,6 +42,13 @@ pub struct TrackConfig {
     pub tx_logs: bool,
 }
 
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct LogConfig {
+    pub account_state: bool,
+    pub pool_state: bool,
+    pub epoch_state: bool,
+}
+
 impl Default for TrackConfig {
     fn default() -> Self {
         Self {
@@ -59,6 +66,7 @@ impl Default for TrackConfig {
 pub struct Config {
     #[serde(default)]
     pub track: TrackConfig,
+    pub log: LogConfig,
     pub stop_epoch: Option<u32>,
 }
 

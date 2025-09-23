@@ -127,7 +127,7 @@ pub fn sweep<D: Domain>(domain: &D, slot: BlockSlot, config: &Config) -> Result<
 
     boundary.compute(domain.genesis())?;
 
-    boundary.commit(domain)?;
+    boundary.commit(domain, config)?;
 
     if let Some(stop_epoch) = config.stop_epoch {
         if boundary.ending_state.number >= stop_epoch {

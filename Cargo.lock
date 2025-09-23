@@ -1231,6 +1231,7 @@ dependencies = [
  "proptest",
  "rayon",
  "serde",
+ "serde-big-array",
  "thiserror 2.0.12",
  "tracing",
  "trait-variant",
@@ -1297,6 +1298,7 @@ dependencies = [
  "tokio-util",
  "tower-http 0.6.6",
  "tracing",
+ "xxhash-rust",
 ]
 
 [[package]]
@@ -4391,6 +4393,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5f0e2c6ed6606019b4e29e69dbaba95b11854410e5347d525002456dbbb786b6"
 dependencies = [
  "serde_derive",
+]
+
+[[package]]
+name = "serde-big-array"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "11fc7cc2c76d73e0f27ee52abbd64eec84d46f370c88371120433196934e4b7f"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
