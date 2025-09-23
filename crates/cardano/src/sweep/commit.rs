@@ -5,13 +5,13 @@ use dolos_core::{
 use tracing::instrument;
 
 use crate::{
-    sweep::BoundaryWork, utils::epoch_first_slot, AccountState, Config, EpochState, EraSummary,
-    FixedNamespace, PoolState, EPOCH_KEY_GO, EPOCH_KEY_MARK, EPOCH_KEY_SET,
+    sweep::BoundaryWork, AccountState, Config, EpochState, EraSummary, FixedNamespace, PoolState,
+    RewardLog, StakeLog, EPOCH_KEY_GO, EPOCH_KEY_MARK, EPOCH_KEY_SET,
 };
 
 impl BoundaryWork {
     pub fn log_key_for_entity_key(&self, entity_key: EntityKey) -> LogKey {
-        let epoch_start_slot = epoch_first_slot(self.ending_state.number, &self.active_era);
+        let epoch_start_slot = self.active_era.epoch_start(self.ending_state.number as u64);
         (TemporalKey::from(epoch_start_slot), entity_key).into()
     }
 
@@ -56,7 +56,11 @@ impl BoundaryWork {
             state.wait_stake = state.live_stake();
 
             // add rewards
-            let rewards = self.delegator_rewards.get(&key).unwrap_or(&0);
+            let rewards = self
+                .delegator_rewards
+                .get(&key)
+                .map(|x| x.amount)
+                .unwrap_or(0);
             state.rewards_sum += rewards;
 
             // clear drep if dropped
@@ -168,29 +172,17 @@ impl BoundaryWork {
     fn archive<D: Domain>(&self, domain: &D, config: &Config) -> Result<(), ChainError> {
         let writer = domain.archive().start_writer()?;
 
-        if config.log.account_state {
-            for record in domain
-                .state()
-                .iter_entities_typed::<AccountState>(AccountState::NS, None)?
-            {
-                let (key, state) = record?;
-                writer.write_log_typed::<AccountState>(
-                    &self.log_key_for_entity_key(key.clone()),
-                    &state,
-                )?;
+        if config.log.rewards {
+            for (key, log) in self.delegator_rewards.iter() {
+                writer
+                    .write_log_typed::<RewardLog>(&self.log_key_for_entity_key(key.clone()), log)?;
             }
         }
 
-        if config.log.pool_state {
-            for record in domain
-                .state()
-                .iter_entities_typed::<PoolState>(PoolState::NS, None)?
-            {
-                let (key, state) = record?;
-                writer.write_log_typed::<PoolState>(
-                    &self.log_key_for_entity_key(key.clone()),
-                    &state,
-                )?;
+        if config.log.pool_stakes {
+            for (key, log) in self.pool_stakes.iter() {
+                writer
+                    .write_log_typed::<StakeLog>(&self.log_key_for_entity_key(key.clone()), log)?;
             }
         }
 

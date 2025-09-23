@@ -62,17 +62,24 @@ macro_rules! entity_boilerplate {
 #[derive(Debug, Clone, PartialEq, Eq, Decode, Encode, Default)]
 pub struct RewardLog {
     #[n(0)]
-    pub epoch: u32,
-
-    #[n(1)]
     pub amount: u64,
 
-    #[n(2)]
+    #[n(1)]
     pub pool_id: Vec<u8>,
 
-    #[n(3)]
+    #[n(2)]
     pub as_leader: bool,
 }
+
+entity_boilerplate!(RewardLog, "rewards");
+
+#[derive(Debug, Clone, PartialEq, Eq, Decode, Encode, Default)]
+pub struct StakeLog {
+    #[n(0)]
+    pub amount: u64,
+}
+
+entity_boilerplate!(StakeLog, "stakes");
 
 #[derive(Debug, Clone, PartialEq, Eq, Decode, Encode, Default)]
 pub struct AccountState {
@@ -989,6 +996,8 @@ pub fn build_schema() -> StateSchema {
     schema.insert(PoolState::NS, NamespaceType::KeyValue);
     schema.insert(EpochState::NS, NamespaceType::KeyValue);
     schema.insert(DRepState::NS, NamespaceType::KeyValue);
+    schema.insert(RewardLog::NS, NamespaceType::KeyValue);
+    schema.insert(StakeLog::NS, NamespaceType::KeyValue);
     schema
 }
 

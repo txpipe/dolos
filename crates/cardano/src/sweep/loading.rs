@@ -88,6 +88,7 @@ fn load_pool_params<D: Domain>(domain: &D, boundary: &mut BoundaryWork) -> Resul
         let (pool_id, pool) = record?;
 
         let params = PoolData {
+            reward_account: pool.reward_account,
             fixed_cost: pool.fixed_cost,
             margin_cost: pool.margin_cost,
             declared_pledge: pool.declared_pledge,
@@ -137,6 +138,7 @@ impl BoundaryWork {
 
             // empty until computed
             pool_rewards: HashMap::new(),
+            pool_stakes: HashMap::new(),
             delegator_rewards: HashMap::new(),
             pot_delta: None,
             starting_state: None,

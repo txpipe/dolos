@@ -5,8 +5,8 @@ use tracing::{debug, instrument, trace};
 use crate::{
     forks,
     sweep::{BoundaryWork, EraTransition, PoolData, PotDelta, Pots},
-    utils::{epoch_first_slot, nonce_stability_window},
-    DRepState, EpochState, EraProtocol, Nonces, PParamsSet,
+    utils::nonce_stability_window,
+    DRepState, EpochState, EraProtocol, Nonces, PParamsSet, RewardLog, StakeLog,
 };
 
 macro_rules! as_ratio {
@@ -243,8 +243,10 @@ impl BoundaryWork {
 
         for (id, pool) in self.pools.iter() {
             let pool_stake = self.active_snapshot.get_pool_stake(id);
+            self.pool_stakes
+                .insert(id.clone(), StakeLog { amount: pool_stake });
 
-            let (total_pool_reward, _operator_share) = compute_pool_reward(
+            let (total_pool_reward, operator_share) = compute_pool_reward(
                 pot_delta.available_rewards,
                 self.active_snapshot.total_stake,
                 pool,
@@ -253,12 +255,28 @@ impl BoundaryWork {
                 &self.valid_a0()?,
             );
 
+            self.delegator_rewards.insert(
+                pool.reward_account.clone().into(),
+                RewardLog {
+                    amount: operator_share,
+                    pool_id: id.as_ref().to_vec(),
+                    as_leader: true,
+                },
+            );
+
             effective_rewards += total_pool_reward;
             self.pool_rewards.insert(id.clone(), total_pool_reward);
 
             for (delegator, stake) in self.active_snapshot.accounts_by_pool.iter_delegators(id) {
                 let reward = compute_delegator_reward(total_pool_reward, pool_stake, *stake);
-                self.delegator_rewards.insert(delegator.clone(), reward);
+                self.delegator_rewards.insert(
+                    delegator.clone(),
+                    RewardLog {
+                        amount: reward,
+                        pool_id: id.as_ref().to_vec(),
+                        as_leader: false,
+                    },
+                );
             }
         }
 
@@ -324,7 +342,9 @@ impl BoundaryWork {
             reserves,
             treasury,
             pparams,
-            largest_stable_slot: epoch_first_slot(self.ending_state.number + 2, &self.active_era)
+            largest_stable_slot: self
+                .active_era
+                .epoch_start(self.ending_state.number as u64 + 2)
                 - nonce_stability_window(self.active_protocol.into(), genesis),
             nonces,
 

@@ -4,7 +4,9 @@ use dolos_core::{BlockSlot, ChainError, Domain, EntityKey};
 use pallas::{crypto::hash::Hash, ledger::primitives::RationalNumber};
 use tracing::{info, instrument};
 
-use crate::{Config, DRepState, EpochState, EraProtocol, EraSummary, PParamsSet};
+use crate::{
+    Config, DRepState, EpochState, EraProtocol, EraSummary, PParamsSet, RewardLog, StakeLog,
+};
 
 pub mod commit;
 pub mod compute;
@@ -35,6 +37,7 @@ pub type DRepId = EntityKey;
 
 #[derive(Debug)]
 pub struct PoolData {
+    pub reward_account: Vec<u8>,
     pub fixed_cost: u64,
     pub margin_cost: RationalNumber,
     pub declared_pledge: u64,
@@ -110,7 +113,8 @@ pub struct BoundaryWork {
     pub pot_delta: Option<PotDelta>,
     pub effective_rewards: Option<u64>,
     pub pool_rewards: HashMap<PoolId, u64>,
-    pub delegator_rewards: HashMap<AccountId, u64>,
+    pub pool_stakes: HashMap<PoolId, StakeLog>,
+    pub delegator_rewards: HashMap<AccountId, RewardLog>,
     pub starting_state: Option<EpochState>,
     pub era_transition: Option<EraTransition>,
     pub dropped_pool_delegators: HashSet<AccountId>,

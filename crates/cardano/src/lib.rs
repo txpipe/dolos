@@ -44,8 +44,8 @@ pub struct TrackConfig {
 
 #[derive(Serialize, Deserialize, Clone, Default)]
 pub struct LogConfig {
-    pub account_state: bool,
-    pub pool_state: bool,
+    pub rewards: bool,
+    pub pool_stakes: bool,
     pub epoch_state: bool,
 }
 
