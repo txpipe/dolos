@@ -5,7 +5,7 @@ use tracing::{debug, instrument, trace};
 use crate::{
     forks,
     sweep::{BoundaryWork, EraTransition, PoolData, PotDelta, Pots},
-    utils::epoch_first_slot,
+    utils::{epoch_first_slot, nonce_stability_window},
     DRepState, EpochState, EraProtocol, Nonces, PParamsSet,
 };
 
@@ -288,7 +288,7 @@ impl BoundaryWork {
         Ok(new_nonces)
     }
 
-    fn define_starting_state(&mut self) -> Result<(), ChainError> {
+    fn define_starting_state(&mut self, genesis: &Genesis) -> Result<(), ChainError> {
         let pot_delta = self
             .pot_delta
             .as_ref()
@@ -325,12 +325,7 @@ impl BoundaryWork {
             treasury,
             pparams,
             largest_stable_slot: epoch_first_slot(self.ending_state.number + 2, &self.active_era)
-                - if self.active_protocol >= 9 {
-                    // https://github.com/IntersectMBO/cardano-ledger/issues/1914
-                    self.stability_window
-                } else {
-                    self.randomness_stability_window
-                },
+                - nonce_stability_window(self.active_protocol.into(), genesis),
             nonces,
 
             // computed throughout the epoch during _roll_
@@ -460,7 +455,7 @@ impl BoundaryWork {
         self.define_era_transition(genesis)?;
 
         trace!("defining starting state");
-        self.define_starting_state()?;
+        self.define_starting_state(genesis)?;
 
         Ok(())
     }
@@ -551,7 +546,6 @@ mod tests {
                 nonces: None,
             },
             ending_snapshot: Snapshot::empty(),
-            mutable_slots: 10,
             shelley_hash: [0; 32].as_slice().into(),
             pools: Default::default(),
             dreps: Default::default(),

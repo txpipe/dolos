@@ -5,7 +5,6 @@ use dolos_core::{ChainError, Domain, EntityKey, StateStore};
 use crate::{
     drep_to_entity_key, load_active_era,
     sweep::{AccountId, BoundaryWork, DRepId, PoolData, PoolId, Snapshot},
-    utils::{randomness_stability_window, stability_window},
     AccountState, DRepState, FixedNamespace as _, PoolState,
 };
 
@@ -128,8 +127,6 @@ impl BoundaryWork {
             active_state,
             waiting_state,
             ending_state,
-            stability_window: stability_window(domain.genesis()),
-            randomness_stability_window: randomness_stability_window(domain.genesis()),
             shelley_hash: domain.genesis().shelley_hash,
 
             // to be loaded right after

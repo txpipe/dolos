@@ -33,6 +33,18 @@ pub fn randomness_stability_window(genesis: &Genesis) -> u64 {
         as u64
 }
 
+/// Get the window of slots used to calculate eta_h for epoch nonce calculation.
+///
+/// This is supposed be `randomness_stability_window` but due to a bug in the code it is dependant
+/// on the protocol. See https://github.com/IntersectMBO/cardano-ledger/issues/1914.
+pub fn nonce_stability_window(protocol: u16, genesis: &Genesis) -> u64 {
+    if protocol >= 9 {
+        randomness_stability_window(genesis)
+    } else {
+        stability_window(genesis)
+    }
+}
+
 /// Computes the latest immutable slot
 ///
 /// Takes the latest known tip, reads the relevant genesis config values and

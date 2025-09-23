@@ -1,6 +1,6 @@
 use dolos_cardano::{
-    load_era_summary, mutable_slots,
-    utils::{epoch_first_slot, randomness_stability_window},
+    load_era_summary,
+    utils::{epoch_first_slot, nonce_stability_window},
     EraSummary, Nonces,
 };
 use dolos_core::{ArchiveStore, Domain};
@@ -51,15 +51,10 @@ pub fn compute_nonce<D: Domain>(epoch: u64, domain: &D) -> miette::Result<Hash<3
     }
 
     let (protocol, era) = summary.protocol_and_era_for_epoch(epoch);
-    let largest_stable_slot = epoch_first_slot(epoch as u32, era)
-        - if *protocol >= 9 {
-            randomness_stability_window(domain.genesis())
-        } else {
-            mutable_slots(domain.genesis())
-        };
+    let largest_stable_slot =
+        epoch_first_slot(epoch as u32, era) - nonce_stability_window(*protocol, domain.genesis());
 
     let mut nonces = Nonces::bootstrap(domain.genesis().shelley_hash);
-    let tail = get_nh(epoch, domain, era).expect("failed to get nh");
 
     for (_, raw) in domain
         .archive()
@@ -78,7 +73,7 @@ pub fn compute_nonce<D: Domain>(epoch: u64, domain: &D) -> miette::Result<Hash<3
         if epoch == first_shelley_epoch + 1 {
             None
         } else {
-            Some(tail)
+            Some(get_nh(epoch, domain, era).expect("failed to get nh"))
         },
         None,
     );
