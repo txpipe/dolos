@@ -15,9 +15,10 @@ use blockfrost_openapi::models::{
 };
 
 use dolos_cardano::{model::AccountState, pallas_extras, ChainSummary, RewardLog};
-use dolos_core::{ArchiveStore, Domain, StateStore};
+use dolos_core::{ArchiveStore, Domain, EntityKey, StateStore};
 use pallas::{
     codec::minicbor,
+    crypto::hash::Hash,
     ledger::{
         addresses::{Address, Network, StakeAddress, StakePayload},
         traverse::{MultiEraBlock, MultiEraCert, MultiEraTx},
@@ -542,7 +543,8 @@ where
         .skip(pagination.skip())
         .take(pagination.count)
         .map(|(epoch, reward)| {
-            let pool_id = mapping::bech32_pool(reward.pool_id)?;
+            let operator = Hash::<28>::from(EntityKey::from(reward.pool_id));
+            let pool_id = mapping::bech32_pool(operator)?;
 
             let r#type = if reward.as_leader {
                 blockfrost_openapi::models::account_reward_content_inner::Type::Leader
