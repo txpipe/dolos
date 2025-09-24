@@ -165,6 +165,10 @@ pub async fn by_hash_redeemers<D: Domain>(
         }
     }
 
+    let report = domain.evaluate_tx(&raw, order)?;
+
+    builder = builder.with_report(report);
+
     builder.into_response()
 }
 

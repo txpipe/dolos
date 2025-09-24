@@ -22,8 +22,9 @@ use tracing::Level;
 
 use dolos_core::{
     ArchiveStore as _, BlockSlot, CancelToken, Domain, Entity, EntityKey, EraCbor, ServeError,
-    StateError, StateStore as _, TxOrder,
+    StateError, StateStore as _, TxOrder, BlockBody
 };
+use pallas::ledger::traverse::{MultiEraTx, MultiEraBlock};
 
 mod error;
 pub(crate) mod mapping;
@@ -127,6 +128,54 @@ impl<D: Domain> Facade<D> {
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
         Ok(blocks)
+    }
+
+    pub fn get_tx_input_utxos(
+        &self,
+        tx: &MultiEraTx,
+    ) -> Result<pallas::ledger::validate::utils::UtxoMap, StatusCode> {
+        use pallas::ledger::validate::utils::{UtxoMap, TxoRef, EraCbor};
+
+        let mut utxos: UtxoMap = UtxoMap::default();
+        let input_refs: Vec<TxoRef> = tx.requires().iter().map(From::from).collect();
+        for input_ref in input_refs {
+            let cbor = self
+                .archive()
+                .get_tx(input_ref.0.as_slice())
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+            if let Some(cbor) = cbor {
+                let tx = MultiEraTx::decode(&cbor.1).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                utxos.insert(input_ref.clone(), EraCbor::from(tx.outputs().get(input_ref.1 as usize).unwrap().clone()));
+            }
+        }
+
+        Ok(utxos)
+    }
+
+    pub fn evaluate_tx(
+        &self,
+        raw: &BlockBody,
+        order: TxOrder,
+    ) -> Result<pallas::ledger::validate::phase2::EvalReport, StatusCode> {
+        let block = MultiEraBlock::decode(&raw).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let tx = block.txs().get(order).ok_or(StatusCode::INTERNAL_SERVER_ERROR)?.clone();
+        let utxos = self.get_tx_input_utxos(&tx)?;
+
+        let pparams = self.get_live_pparams()?;
+        let pparams = dolos_cardano::utils::pparams_to_pallas(&pparams);
+
+        let eras = self.get_chain_summary()?;
+        let slot_config = pallas::ledger::validate::phase2::script_context::SlotConfig {
+            slot_length: eras.edge().slot_length,
+            zero_slot: eras.edge().start.slot,
+            zero_time: eras.edge().start.timestamp,
+        };
+
+        let report = pallas::ledger::validate::phase2::evaluate_tx(&tx, &pparams, &utxos, &slot_config)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        Ok(report)
     }
 
     pub fn iter_cardano_entities<T>(

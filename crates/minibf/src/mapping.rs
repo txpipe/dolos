@@ -14,6 +14,7 @@ use pallas::{
             ComputeHash, MultiEraBlock, MultiEraCert, MultiEraHeader, MultiEraInput,
             MultiEraOutput, MultiEraRedeemer, MultiEraTx, MultiEraValue, OriginalHash,
         },
+        validate::phase2::EvalReport,
     },
 };
 use std::{collections::HashMap, ops::Deref};
@@ -471,6 +472,7 @@ pub struct TxModelBuilder<'a> {
     order: TxOrder,
     deps: HashMap<TxHash, MultiEraTx<'a>>,
     consumed_deps: HashMap<TxoRef, TxHash>,
+    report: EvalReport,
 }
 
 impl<'a> TxModelBuilder<'a> {
@@ -485,6 +487,7 @@ impl<'a> TxModelBuilder<'a> {
             network: None,
             deps: HashMap::new(),
             consumed_deps: HashMap::new(),
+            report: EvalReport::default(),
         })
     }
 
@@ -512,6 +515,13 @@ impl<'a> TxModelBuilder<'a> {
     pub fn with_consumed_deps(self, consumed_deps: HashMap<TxoRef, TxHash>) -> Self {
         Self {
             consumed_deps,
+            ..self
+        }
+    }
+
+    pub fn with_report(self, report: EvalReport) -> Self {
+        Self {
+            report,
             ..self
         }
     }
@@ -1010,8 +1020,17 @@ impl TxModelBuilder<'_> {
             step_price,
         } = prices;
 
-        let unit_mem = redeemer.ex_units().mem;
-        let unit_steps = redeemer.ex_units().steps;
+        let mut unit_mem = redeemer.ex_units().mem;
+        let mut unit_steps = redeemer.ex_units().steps;
+
+        let report = self.report.iter().find(|r| {
+            r.tag == redeemer.tag() && r.index as u32 == redeemer.index()
+        });
+
+        if let Some(report) = report {
+            unit_mem = report.units.mem;
+            unit_steps = report.units.steps;
+        }
 
         let fee = (unit_mem * mem_price.numerator + unit_steps * step_price.numerator)
             / (mem_price.denominator * step_price.denominator);
