@@ -150,10 +150,13 @@ macro_rules! check_all_proposed {
 macro_rules! pparams_update_conway {
     ($update:expr, $getter:ident, $deltas:expr, $variant:ident) => {
         if let Some(value) = &$update.$getter {
-            $deltas.add_for_entity(PParamsUpdate {
-                to_update: PParamValue::$variant(value.clone().try_into().unwrap()),
-                prev_value: None,
-            });
+            #[allow(irrefutable_let_patterns)]
+            if let Ok(converted) = value.clone().try_into() {
+                $deltas.add_for_entity(PParamsUpdate {
+                    to_update: PParamValue::$variant(converted),
+                    prev_value: None,
+                });
+            }
         }
     };
 }
