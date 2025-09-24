@@ -1,7 +1,10 @@
 use dolos_core::{batch::WorkDeltas, ChainError, NsKey};
 use pallas::{
     crypto::hash::Hash,
-    ledger::traverse::{MultiEraBlock, MultiEraCert, MultiEraTx, MultiEraUpdate},
+    ledger::{
+        primitives::conway::GovAction,
+        traverse::{MultiEraBlock, MultiEraCert, MultiEraTx, MultiEraUpdate},
+    },
 };
 use serde::{Deserialize, Serialize};
 
@@ -144,6 +147,25 @@ macro_rules! check_all_proposed {
     };
 }
 
+macro_rules! pparams_update_conway {
+    ($update:expr, $getter:ident, $deltas:expr, $variant:ident) => {
+        if let Some(value) = &$update.$getter {
+            $deltas.add_for_entity(PParamsUpdate {
+                to_update: PParamValue::$variant(value.clone().try_into().unwrap()),
+                prev_value: None,
+            });
+        }
+    };
+}
+
+macro_rules! check_all_proposed_conway {
+    ($update:expr, $deltas:expr, $($getter:ident => $variant:ident),*) => {
+        $(
+            pparams_update_conway!($update, $getter, $deltas, $variant);
+        )*
+    };
+}
+
 #[derive(Clone, Default)]
 pub struct EpochStateVisitor {
     stats_delta: Option<EpochStatsUpdate>,
@@ -173,11 +195,110 @@ impl BlockVisitor for EpochStateVisitor {
 
     fn visit_tx(
         &mut self,
-        _: &mut WorkDeltas<CardanoLogic>,
+        deltas: &mut WorkDeltas<CardanoLogic>,
         _: &MultiEraBlock,
         tx: &MultiEraTx,
     ) -> Result<(), ChainError> {
         self.stats_delta.as_mut().unwrap().block_fees += tx.fee().unwrap_or_default();
+
+        // Check protocol parameters updates for Conway. Assume proposed changes will always be
+        // executed, dont count votes.
+        if let MultiEraTx::Conway(conway) = tx {
+            if let Some(procedures) = &conway
+                .as_ref()
+                .as_ref()
+                .transaction_body
+                .proposal_procedures
+            {
+                for procedure in procedures.iter() {
+                    match &procedure.gov_action {
+                        GovAction::HardForkInitiation(_, version) => {
+                            deltas.add_for_entity(PParamsUpdate {
+                                to_update: PParamValue::ProtocolVersion(version.to_owned()),
+                                prev_value: None,
+                            });
+                        }
+                        GovAction::ParameterChange(_, update, _) => {
+                            check_all_proposed_conway! {
+                                update,
+                                deltas,
+
+                                minfee_a => MinFeeA,
+                                minfee_b => MinFeeB,
+                                max_block_body_size => MaxBlockBodySize,
+                                max_transaction_size => MaxTransactionSize,
+                                max_block_header_size => MaxBlockHeaderSize,
+                                key_deposit => KeyDeposit,
+                                pool_deposit => PoolDeposit,
+                                maximum_epoch => MaximumEpoch,
+                                desired_number_of_stake_pools => DesiredNumberOfStakePools,
+                                pool_pledge_influence => PoolPledgeInfluence,
+                                expansion_rate => ExpansionRate,
+                                treasury_growth_rate => TreasuryGrowthRate,
+                                min_pool_cost => MinPoolCost,
+                                ada_per_utxo_byte => MinUtxoValue,
+                                cost_models_for_script_languages => CostModelsForScriptLanguages,
+                                max_value_size => MaxValueSize,
+                                collateral_percentage => CollateralPercentage,
+                                max_collateral_inputs => MaxCollateralInputs,
+                                pool_voting_thresholds => PoolVotingThresholds,
+                                drep_voting_thresholds => DrepVotingThresholds,
+                                min_committee_size => MinCommitteeSize,
+                                committee_term_limit => CommitteeTermLimit,
+                                governance_action_validity_period => GovernanceActionValidityPeriod,
+                                governance_action_deposit => GovernanceActionDeposit,
+                                drep_deposit => DrepDeposit,
+                                drep_inactivity_period => DrepInactivityPeriod
+                            };
+
+                            // Some cases that has type mismatches:
+                            if let Some(value) = &update.execution_costs {
+                                deltas.add_for_entity(PParamsUpdate {
+                                    to_update: PParamValue::ExecutionCosts(
+                                        pallas::ledger::primitives::ExUnitPrices {
+                                            mem_price: value.mem_price.clone(),
+                                            step_price: value.step_price.clone(),
+                                        },
+                                    ),
+                                    prev_value: None,
+                                });
+                            }
+                            if let Some(value) = &update.max_tx_ex_units {
+                                deltas.add_for_entity(PParamsUpdate {
+                                    to_update: PParamValue::MaxTxExUnits(
+                                        pallas::ledger::primitives::ExUnits {
+                                            mem: value.mem,
+                                            steps: value.steps,
+                                        },
+                                    ),
+                                    prev_value: None,
+                                });
+                            }
+                            if let Some(value) = &update.max_block_ex_units {
+                                deltas.add_for_entity(PParamsUpdate {
+                                    to_update: PParamValue::MaxBlockExUnits(
+                                        pallas::ledger::primitives::ExUnits {
+                                            mem: value.mem,
+                                            steps: value.steps,
+                                        },
+                                    ),
+                                    prev_value: None,
+                                });
+                            }
+                            if let Some(value) = &update.minfee_refscript_cost_per_byte {
+                                deltas.add_for_entity(PParamsUpdate {
+                                    to_update: PParamValue::MinFeeRefScriptCostPerByte(
+                                        value.clone(),
+                                    ),
+                                    prev_value: None,
+                                });
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
 
         Ok(())
     }
