@@ -5,8 +5,8 @@ use serde_big_array::BigArray;
 use thiserror::Error;
 
 use crate::{
-    full_range, state::KEY_SIZE, BlockBody, BlockSlot, BrokenInvariant, ChainPoint, Entity,
-    EntityKey, EntityValue, EraCbor, Namespace, RawBlock, TxHash, TxOrder,
+    state::KEY_SIZE, BlockBody, BlockSlot, BrokenInvariant, ChainPoint, Entity, EntityKey,
+    EntityValue, EraCbor, Namespace, RawBlock, TxHash, TxOrder,
 };
 
 const TEMPORAL_KEY_SIZE: usize = 8;
@@ -98,6 +98,15 @@ impl From<&ChainPoint> for LogKey {
     fn from(value: &ChainPoint) -> Self {
         let temporal: TemporalKey = value.into();
         temporal.into()
+    }
+}
+
+impl LogKey {
+    pub fn full_range() -> Range<LogKey> {
+        Range {
+            start: LogKey([0u8; LOG_KEY_SIZE]),
+            end: LogKey([255u8; LOG_KEY_SIZE]),
+        }
     }
 }
 
@@ -222,11 +231,8 @@ pub trait ArchiveStore: Clone + Send + Sync + 'static {
         keys: &[&LogKey],
     ) -> Result<Vec<Option<EntityValue>>, ArchiveError>;
 
-    fn iter_logs(
-        &self,
-        ns: Namespace,
-        range: Range<EntityKey>,
-    ) -> Result<Self::LogIter, ArchiveError>;
+    fn iter_logs(&self, ns: Namespace, range: Range<LogKey>)
+        -> Result<Self::LogIter, ArchiveError>;
 
     fn read_logs_typed<E: Entity>(
         &self,
@@ -264,9 +270,9 @@ pub trait ArchiveStore: Clone + Send + Sync + 'static {
     fn iter_logs_typed<E: Entity>(
         &self,
         ns: Namespace,
-        range: Option<Range<EntityKey>>,
+        range: Option<Range<LogKey>>,
     ) -> Result<LogIterTyped<Self, E>, ArchiveError> {
-        let range = range.unwrap_or_else(full_range);
+        let range = range.unwrap_or_else(LogKey::full_range);
 
         let inner = self.iter_logs(ns, range)?;
 

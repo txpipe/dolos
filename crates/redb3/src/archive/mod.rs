@@ -914,7 +914,7 @@ impl dolos_core::ArchiveStore for ArchiveStore {
     fn iter_logs(
         &self,
         ns: Namespace,
-        range: std::ops::Range<dolos_core::EntityKey>,
+        range: std::ops::Range<dolos_core::LogKey>,
     ) -> Result<Self::LogIter, ArchiveError> {
         let mut rx = self.db().begin_read().map_err(RedbArchiveError::from)?;
 

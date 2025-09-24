@@ -45,6 +45,15 @@ impl AsRef<[u8]> for EntityKey {
     }
 }
 
+impl EntityKey {
+    pub fn full_range() -> Range<EntityKey> {
+        Range {
+            start: EntityKey([0u8; KEY_SIZE]),
+            end: EntityKey([255u8; KEY_SIZE]),
+        }
+    }
+}
+
 impl<const HASH_SIZE: usize> From<EntityKey> for pallas::crypto::hash::Hash<HASH_SIZE> {
     fn from(value: EntityKey) -> Self {
         let mut array = [0u8; HASH_SIZE];
@@ -248,15 +257,6 @@ impl<S: StateStore, E: Entity> Iterator for EntityIterTyped<S, E> {
 //     }
 // }
 
-pub fn full_range() -> Range<EntityKey> {
-    let start = [0u8; KEY_SIZE];
-    let end = [255u8; KEY_SIZE];
-    Range {
-        start: EntityKey(start),
-        end: EntityKey(end),
-    }
-}
-
 pub trait StateWriter: Sized + Send + Sync {
     fn set_cursor(&self, cursor: ChainPoint) -> Result<(), StateError>;
 
@@ -372,7 +372,7 @@ pub trait StateStore: Sized + Send + Sync + Clone {
         ns: Namespace,
         range: Option<Range<EntityKey>>,
     ) -> Result<EntityIterTyped<Self, E>, StateError> {
-        let range = range.unwrap_or_else(full_range);
+        let range = range.unwrap_or_else(EntityKey::full_range);
 
         let inner = self.iter_entities(ns, range)?;
 
