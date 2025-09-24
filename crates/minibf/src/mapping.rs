@@ -594,7 +594,7 @@ impl<'a> TxModelBuilder<'a> {
                     return Some(dbg!(key_deposit));
                 }
 
-                if pallas_extras::cert_to_pool_state(x).is_some() {
+                if pallas_extras::cert_as_pool_registration(x).is_some() {
                     return Some(dbg!(pool_deposit));
                 }
 

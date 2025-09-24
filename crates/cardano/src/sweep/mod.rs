@@ -1,16 +1,22 @@
 use std::collections::{HashMap, HashSet};
 
-use dolos_core::{BlockSlot, ChainError, Domain, EntityKey};
-use pallas::{crypto::hash::Hash, ledger::primitives::RationalNumber};
+use dolos_core::{batch::WorkDeltas, BlockSlot, ChainError, Domain, EntityKey};
+use pallas::crypto::hash::Hash;
 use tracing::{info, instrument};
 
 use crate::{
-    Config, DRepState, EpochState, EraProtocol, EraSummary, PParamsSet, RewardLog, StakeLog,
+    AccountState, CardanoDelta, CardanoLogic, Config, DRepState, EpochState, EraProtocol,
+    EraSummary, PParamsSet, PoolState,
 };
 
 pub mod commit;
 pub mod compute;
 pub mod loading;
+
+// visitors
+pub mod retires;
+pub mod rewards;
+pub mod transition;
 
 pub use compute::compute_genesis_pots;
 
@@ -22,28 +28,46 @@ pub use compute::compute_genesis_pots;
 // - active: (ending - 2) the epoch considered active for stake distribution &
 //   pool parameters
 
-// Reward calculation sequencing
-// - 1. Sweep account data.
-//   - Take snapshot of account balances for _ending_ epoch
-//   - Take snapshot of stake pool distribution for _ending_ epoch
-// - 3. Compute theoretical pots
-// - 4. Compute pool performance
-// - 5. Distribute rewards to pools
-// - 6. Rotate snapshot waiting -> active, ending -> waiting
+pub trait BoundaryVisitor: Default {
+    #[allow(unused_variables)]
+    fn visit_pool(
+        &mut self,
+        ctx: &mut BoundaryWork,
+        id: &PoolId,
+        pool: &PoolState,
+    ) -> Result<(), ChainError> {
+        Ok(())
+    }
+
+    #[allow(unused_variables)]
+    fn visit_account(
+        &mut self,
+        ctx: &mut BoundaryWork,
+        id: &AccountId,
+        account: &AccountState,
+    ) -> Result<(), ChainError> {
+        Ok(())
+    }
+
+    #[allow(unused_variables)]
+    fn visit_drep(
+        &mut self,
+        ctx: &mut BoundaryWork,
+        id: &DRepId,
+        drep: &DRepState,
+    ) -> Result<(), ChainError> {
+        Ok(())
+    }
+
+    #[allow(unused_variables)]
+    fn flush(&mut self, ctx: &mut BoundaryWork) -> Result<(), ChainError> {
+        Ok(())
+    }
+}
 
 pub type AccountId = EntityKey;
 pub type PoolId = EntityKey;
 pub type DRepId = EntityKey;
-
-#[derive(Debug)]
-pub struct PoolData {
-    pub reward_account: Vec<u8>,
-    pub fixed_cost: u64,
-    pub margin_cost: RationalNumber,
-    pub declared_pledge: u64,
-    pub minted_blocks: u32,
-    pub retiring_epoch: Option<u64>,
-}
 
 #[derive(Debug)]
 pub struct Pots {
@@ -53,15 +77,21 @@ pub struct Pots {
 }
 
 #[derive(Debug, Default, Clone)]
-pub struct DelegatorMap(HashMap<PoolId, HashMap<AccountId, u64>>);
+pub struct DelegatorMap(HashMap<EntityKey, HashMap<AccountId, u64>>);
 
 impl DelegatorMap {
-    pub fn insert(&mut self, pool_id: PoolId, account_id: AccountId, stake: u64) {
-        self.0.entry(pool_id).or_default().insert(account_id, stake);
+    pub fn insert(&mut self, entity_id: EntityKey, account_id: AccountId, stake: u64) {
+        self.0
+            .entry(entity_id)
+            .or_default()
+            .insert(account_id, stake);
     }
 
-    pub fn iter_delegators(&self, pool_id: &PoolId) -> impl Iterator<Item = (&AccountId, &u64)> {
-        self.0.get(pool_id).into_iter().flatten()
+    pub fn iter_delegators(
+        &self,
+        entity_id: &EntityKey,
+    ) -> impl Iterator<Item = (&AccountId, &u64)> {
+        self.0.get(entity_id).into_iter().flatten()
     }
 }
 
@@ -95,7 +125,6 @@ pub struct EraTransition {
     pub new_pparams: PParamsSet,
 }
 
-#[derive(Debug)]
 pub struct BoundaryWork {
     // loaded
     pub active_protocol: EraProtocol,
@@ -105,21 +134,26 @@ pub struct BoundaryWork {
     pub waiting_state: Option<EpochState>,
     pub ending_state: EpochState,
     pub ending_snapshot: Snapshot,
-    pub pools: HashMap<PoolId, PoolData>,
-    pub dreps: HashMap<DRepId, DRepState>,
     pub shelley_hash: Hash<32>,
+
+    // deprecated in favor of deltas
+    // pub dropped_pool_delegators: HashSet<AccountId>,
+    pub deltas: WorkDeltas<CardanoLogic>,
 
     // computed
     pub pot_delta: Option<PotDelta>,
-    pub effective_rewards: Option<u64>,
-    pub pool_rewards: HashMap<PoolId, u64>,
-    pub pool_stakes: HashMap<PoolId, StakeLog>,
-    pub delegator_rewards: HashMap<AccountId, RewardLog>,
     pub starting_state: Option<EpochState>,
     pub era_transition: Option<EraTransition>,
-    pub dropped_pool_delegators: HashSet<AccountId>,
-    pub dropped_drep_delegators: HashSet<AccountId>,
-    pub retired_dreps: HashSet<DRepId>,
+}
+
+impl BoundaryWork {
+    pub fn starting_epoch_no(&self) -> u64 {
+        self.ending_state.number as u64 + 1
+    }
+
+    pub fn add_delta(&mut self, delta: impl Into<CardanoDelta>) {
+        self.deltas.add_for_entity(delta);
+    }
 }
 
 #[instrument(skip_all, fields(slot = %slot))]
@@ -128,9 +162,9 @@ pub fn sweep<D: Domain>(domain: &D, slot: BlockSlot, config: &Config) -> Result<
 
     let mut boundary = BoundaryWork::load(domain)?;
 
-    boundary.compute(domain.genesis())?;
+    boundary.compute(domain)?;
 
-    boundary.commit(domain, config)?;
+    boundary.commit(domain)?;
 
     if let Some(stop_epoch) = config.stop_epoch {
         if boundary.ending_state.number >= stop_epoch {

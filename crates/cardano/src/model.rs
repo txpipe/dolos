@@ -30,7 +30,12 @@ use crate::{
         assets::MintStatsUpdate,
         dreps::{DRepActivity, DRepRegistration, DRepUnRegistration},
         epochs::{EpochStatsUpdate, NoncesUpdate, PParamsUpdate},
-        pools::{MintedBlocksInc, PoolRegistration, PoolRetirement},
+        pools::{MintedBlocksInc, PoolAccountDetected, PoolDeRegistration, PoolRegistration},
+    },
+    sweep::{
+        retires::{DRepDelegatorDrop, DRepExpiration, PoolDelegatorDrop, PoolRetirement},
+        rewards::{AssignDelegatorRewards, AssignPoolRewards},
+        transition::{AccountTransition, PoolTransition},
     },
 };
 
@@ -208,6 +213,9 @@ pub struct PoolState {
 
     #[n(13)]
     pub retiring_epoch: Option<u64>,
+
+    #[n(14)]
+    pub is_retired: bool,
 }
 
 entity_boilerplate!(PoolState, "pools");
@@ -242,6 +250,7 @@ impl PoolState {
             __live_stake: Default::default(),
             blocks_minted: Default::default(),
             retiring_epoch: None,
+            is_retired: false,
         }
     }
 }
@@ -824,6 +833,9 @@ pub struct DRepState {
 
     #[n(4)]
     pub retired: bool,
+
+    #[n(5)]
+    pub expired: bool,
 }
 
 impl DRepState {
@@ -834,6 +846,7 @@ impl DRepState {
             voting_power: 0,
             last_active_slot: None,
             retired: false,
+            expired: false,
         }
     }
 }
@@ -1009,17 +1022,27 @@ pub enum CardanoDelta {
     StakeDelegation(StakeDelegation),
     StakeDeregistration(StakeDeregistration),
     PoolRegistration(PoolRegistration),
-    PoolRetirement(PoolRetirement),
+    PoolDeRegistration(PoolDeRegistration),
+    PoolAccountDetected(PoolAccountDetected),
     MintedBlocksInc(MintedBlocksInc),
     MintStatsUpdate(MintStatsUpdate),
     EpochStatsUpdate(EpochStatsUpdate),
     DRepRegistration(DRepRegistration),
     DRepUnRegistration(DRepUnRegistration),
     DRepActivity(DRepActivity),
+    DRepExpiration(DRepExpiration),
     WithdrawalInc(WithdrawalInc),
     VoteDelegation(VoteDelegation),
     PParamsUpdate(PParamsUpdate),
     NoncesUpdate(NoncesUpdate),
+    PoolDelegatorDrop(PoolDelegatorDrop),
+    DRepDelegatorDrop(DRepDelegatorDrop),
+    PoolRetirement(PoolRetirement),
+    AssignPoolRewards(AssignPoolRewards),
+    AssignDelegatorRewards(AssignDelegatorRewards),
+    //AssignEpochRewards(AssignEpochRewards),
+    PoolTransition(PoolTransition),
+    AccountTransition(AccountTransition),
 }
 
 impl CardanoDelta {
@@ -1062,17 +1085,27 @@ delta_from!(StakeRegistration);
 delta_from!(StakeDelegation);
 delta_from!(StakeDeregistration);
 delta_from!(PoolRegistration);
-delta_from!(PoolRetirement);
+delta_from!(PoolDeRegistration);
+delta_from!(PoolAccountDetected);
 delta_from!(MintedBlocksInc);
 delta_from!(MintStatsUpdate);
 delta_from!(EpochStatsUpdate);
 delta_from!(DRepRegistration);
 delta_from!(DRepUnRegistration);
 delta_from!(DRepActivity);
+delta_from!(DRepExpiration);
 delta_from!(WithdrawalInc);
 delta_from!(VoteDelegation);
 delta_from!(PParamsUpdate);
 delta_from!(NoncesUpdate);
+delta_from!(PoolDelegatorDrop);
+delta_from!(DRepDelegatorDrop);
+delta_from!(PoolRetirement);
+delta_from!(AssignPoolRewards);
+delta_from!(AssignDelegatorRewards);
+//delta_from!(AssignEpochRewards);
+delta_from!(PoolTransition);
+delta_from!(AccountTransition);
 
 impl dolos_core::EntityDelta for CardanoDelta {
     type Entity = super::model::CardanoEntity;
@@ -1085,17 +1118,27 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::StakeDelegation(x) => x.key(),
             Self::StakeDeregistration(x) => x.key(),
             Self::PoolRegistration(x) => x.key(),
+            Self::PoolDeRegistration(x) => x.key(),
             Self::PoolRetirement(x) => x.key(),
+            Self::PoolAccountDetected(x) => x.key(),
             Self::MintedBlocksInc(x) => x.key(),
             Self::MintStatsUpdate(x) => x.key(),
             Self::EpochStatsUpdate(x) => x.key(),
             Self::DRepRegistration(x) => x.key(),
             Self::DRepActivity(x) => x.key(),
             Self::DRepUnRegistration(x) => x.key(),
+            Self::DRepExpiration(x) => x.key(),
             Self::WithdrawalInc(x) => x.key(),
             Self::VoteDelegation(x) => x.key(),
             Self::PParamsUpdate(x) => x.key(),
             Self::NoncesUpdate(x) => x.key(),
+            Self::PoolDelegatorDrop(x) => x.key(),
+            Self::DRepDelegatorDrop(x) => x.key(),
+            Self::AssignPoolRewards(x) => x.key(),
+            Self::AssignDelegatorRewards(x) => x.key(),
+            //Self::AssignEpochRewards(x) => x.key(),
+            Self::PoolTransition(x) => x.key(),
+            Self::AccountTransition(x) => x.key(),
         }
     }
 
@@ -1107,17 +1150,27 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::StakeDelegation(x) => Self::downcast_apply(x, entity),
             Self::StakeDeregistration(x) => Self::downcast_apply(x, entity),
             Self::PoolRegistration(x) => Self::downcast_apply(x, entity),
+            Self::PoolDeRegistration(x) => Self::downcast_apply(x, entity),
             Self::PoolRetirement(x) => Self::downcast_apply(x, entity),
+            Self::PoolAccountDetected(x) => Self::downcast_apply(x, entity),
             Self::MintedBlocksInc(x) => Self::downcast_apply(x, entity),
             Self::MintStatsUpdate(x) => Self::downcast_apply(x, entity),
             Self::EpochStatsUpdate(x) => Self::downcast_apply(x, entity),
             Self::DRepRegistration(x) => Self::downcast_apply(x, entity),
             Self::DRepUnRegistration(x) => Self::downcast_apply(x, entity),
             Self::DRepActivity(x) => Self::downcast_apply(x, entity),
+            Self::DRepExpiration(x) => Self::downcast_apply(x, entity),
             Self::WithdrawalInc(x) => Self::downcast_apply(x, entity),
             Self::VoteDelegation(x) => Self::downcast_apply(x, entity),
             Self::PParamsUpdate(x) => Self::downcast_apply(x, entity),
             Self::NoncesUpdate(x) => Self::downcast_apply(x, entity),
+            Self::PoolDelegatorDrop(x) => Self::downcast_apply(x, entity),
+            Self::DRepDelegatorDrop(x) => Self::downcast_apply(x, entity),
+            Self::AssignPoolRewards(x) => Self::downcast_apply(x, entity),
+            Self::AssignDelegatorRewards(x) => Self::downcast_apply(x, entity),
+            //Self::AssignEpochRewards(x) => Self::downcast_apply(x, entity),
+            Self::PoolTransition(x) => Self::downcast_apply(x, entity),
+            Self::AccountTransition(x) => Self::downcast_apply(x, entity),
         }
     }
 
@@ -1129,17 +1182,27 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::StakeDelegation(x) => Self::downcast_undo(x, entity),
             Self::StakeDeregistration(x) => Self::downcast_undo(x, entity),
             Self::PoolRegistration(x) => Self::downcast_undo(x, entity),
+            Self::PoolDeRegistration(x) => Self::downcast_undo(x, entity),
             Self::PoolRetirement(x) => Self::downcast_undo(x, entity),
+            Self::PoolAccountDetected(x) => Self::downcast_undo(x, entity),
             Self::MintedBlocksInc(x) => Self::downcast_undo(x, entity),
             Self::MintStatsUpdate(x) => Self::downcast_undo(x, entity),
             Self::EpochStatsUpdate(x) => Self::downcast_undo(x, entity),
             Self::DRepRegistration(x) => Self::downcast_undo(x, entity),
             Self::DRepUnRegistration(x) => Self::downcast_undo(x, entity),
             Self::DRepActivity(x) => Self::downcast_undo(x, entity),
+            Self::DRepExpiration(x) => Self::downcast_undo(x, entity),
             Self::WithdrawalInc(x) => Self::downcast_undo(x, entity),
             Self::VoteDelegation(x) => Self::downcast_undo(x, entity),
             Self::PParamsUpdate(x) => Self::downcast_undo(x, entity),
             Self::NoncesUpdate(x) => Self::downcast_undo(x, entity),
+            Self::PoolDelegatorDrop(x) => Self::downcast_undo(x, entity),
+            Self::DRepDelegatorDrop(x) => Self::downcast_undo(x, entity),
+            Self::AssignPoolRewards(x) => Self::downcast_undo(x, entity),
+            Self::AssignDelegatorRewards(x) => Self::downcast_undo(x, entity),
+            //Self::AssignEpochRewards(x) => Self::downcast_undo(x, entity),
+            Self::PoolTransition(x) => Self::downcast_undo(x, entity),
+            Self::AccountTransition(x) => Self::downcast_undo(x, entity),
         }
     }
 }

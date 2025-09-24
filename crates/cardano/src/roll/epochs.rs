@@ -228,7 +228,7 @@ impl BlockVisitor for EpochStateVisitor {
                 .stake_deregistration_count += 1;
         }
 
-        if pallas_extras::cert_to_pool_state(cert).is_some() {
+        if pallas_extras::cert_as_pool_registration(cert).is_some() {
             self.stats_delta.as_mut().unwrap().pool_registration_count += 1;
         }
 

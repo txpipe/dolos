@@ -1,99 +1,15 @@
 use dolos_core::{
-    ArchiveStore, ArchiveWriter, BrokenInvariant, ChainError, Domain, EntityKey, LogKey,
-    StateError, StateStore, StateWriter, TemporalKey,
+    BrokenInvariant, ChainError, Domain, Entity, EntityDelta as _, EntityKey, NsKey, StateError,
+    StateStore, StateWriter,
 };
-use tracing::instrument;
+use tracing::{instrument, warn};
 
 use crate::{
-    sweep::BoundaryWork, AccountState, Config, EpochState, EraSummary, FixedNamespace, PoolState,
-    RewardLog, StakeLog, EPOCH_KEY_GO, EPOCH_KEY_MARK, EPOCH_KEY_SET,
+    sweep::BoundaryWork, AccountState, CardanoEntity, DRepState, EpochState, EraSummary,
+    FixedNamespace, PoolState, EPOCH_KEY_GO, EPOCH_KEY_MARK, EPOCH_KEY_SET,
 };
 
 impl BoundaryWork {
-    pub fn log_key_for_entity_key(&self, entity_key: EntityKey) -> LogKey {
-        let epoch_start_slot = self.active_era.epoch_start(self.ending_state.number as u64);
-        (TemporalKey::from(epoch_start_slot), entity_key).into()
-    }
-
-    pub fn rotate_pool_stake_data<W: StateWriter>(
-        &self,
-        writer: &W,
-        pools: impl Iterator<Item = Result<(EntityKey, PoolState), StateError>>,
-    ) -> Result<(), ChainError> {
-        for record in pools {
-            let (key, mut state) = record?;
-
-            let new_stake = self.ending_snapshot.get_pool_stake(&key);
-
-            // order matters
-            state.active_stake = state.wait_stake;
-            state.wait_stake = new_stake;
-
-            writer.write_entity_typed::<PoolState>(&key, &state)?;
-        }
-
-        Ok(())
-    }
-
-    pub fn rotate_account_stake_data<W: StateWriter>(
-        &self,
-        writer: &W,
-        accounts: impl Iterator<Item = Result<(EntityKey, AccountState), StateError>>,
-    ) -> Result<(), ChainError> {
-        for record in accounts {
-            let (key, mut state) = record?;
-
-            // clear pool if dropped
-            if self.dropped_pool_delegators.contains(&key) {
-                state.latest_pool = None;
-            }
-
-            // rotate pool
-            state.active_pool = state.latest_pool.clone();
-
-            // rotate stake
-            state.active_stake = state.wait_stake;
-            state.wait_stake = state.live_stake();
-
-            // add rewards
-            let rewards = self
-                .delegator_rewards
-                .get(&key)
-                .map(|x| x.amount)
-                .unwrap_or(0);
-            state.rewards_sum += rewards;
-
-            // clear drep if dropped
-            if self.dropped_drep_delegators.contains(&key) {
-                state.latest_drep = None;
-            }
-
-            // rotate drep
-            state.active_drep = state.latest_drep.clone();
-
-            writer.write_entity_typed::<AccountState>(&key, &state)?;
-        }
-
-        Ok(())
-    }
-
-    fn update_drep_data<W: StateWriter>(
-        &self,
-        writer: &W,
-        dreps: impl Iterator<Item = Result<(EntityKey, crate::DRepState), StateError>>,
-    ) -> Result<(), ChainError> {
-        for record in dreps {
-            let (key, mut state) = record?;
-
-            if self.retired_dreps.contains(&key) {
-                state.retired = true;
-                writer.write_entity_typed::<crate::DRepState>(&key, &state)?;
-            }
-        }
-
-        Ok(())
-    }
-
     fn drop_active_epoch<W: StateWriter>(&self, writer: &W) -> Result<(), ChainError> {
         writer.delete_entity(EpochState::NS, &EntityKey::from(EPOCH_KEY_GO))?;
 
@@ -169,58 +85,57 @@ impl BoundaryWork {
         Ok(())
     }
 
-    fn archive<D: Domain>(&self, domain: &D, config: &Config) -> Result<(), ChainError> {
-        let writer = domain.archive().start_writer()?;
+    fn apply_whole_namespace<D, E>(
+        &mut self,
+        domain: &D,
+        writer: &<D::State as StateStore>::Writer,
+    ) -> Result<(), ChainError>
+    where
+        D: Domain,
+        E: Entity + FixedNamespace + Into<CardanoEntity>,
+    {
+        let records = domain.state().iter_entities_typed::<E>(E::NS, None)?;
 
-        if config.log.rewards {
-            for (key, log) in self.delegator_rewards.iter() {
-                writer
-                    .write_log_typed::<RewardLog>(&self.log_key_for_entity_key(key.clone()), log)?;
+        for record in records {
+            let (entity_id, entity) = record?;
+
+            let to_apply = self
+                .deltas
+                .entities
+                .remove(&NsKey::from((E::NS, entity_id.clone())));
+
+            if let Some(to_apply) = to_apply {
+                let mut entity: Option<CardanoEntity> = Some(entity.into());
+
+                for mut delta in to_apply {
+                    delta.apply(&mut entity);
+                }
+
+                writer.save_entity_typed(E::NS, &entity_id, entity.as_ref())?;
             }
         }
-
-        if config.log.pool_stakes {
-            for (key, log) in self.pool_stakes.iter() {
-                writer
-                    .write_log_typed::<StakeLog>(&self.log_key_for_entity_key(key.clone()), log)?;
-            }
-        }
-
-        if config.log.epoch_state {
-            writer.write_log_typed::<EpochState>(
-                &self.log_key_for_entity_key(EntityKey::from(
-                    self.ending_state.number.to_be_bytes().as_slice(),
-                )),
-                &self.ending_state,
-            )?;
-        }
-
-        writer.commit()?;
 
         Ok(())
     }
 
     #[instrument(skip_all)]
-    pub fn commit<D: Domain>(&self, domain: &D, config: &Config) -> Result<(), ChainError> {
-        self.archive(domain, config)?;
-
-        let accounts = domain
-            .state()
-            .iter_entities_typed::<AccountState>(AccountState::NS, None)?;
-
-        let pools = domain
-            .state()
-            .iter_entities_typed::<PoolState>(PoolState::NS, None)?;
-
-        let dreps = domain
-            .state()
-            .iter_entities_typed::<crate::DRepState>(crate::DRepState::NS, None)?;
-
+    pub fn commit<D: Domain>(&mut self, domain: &D) -> Result<(), ChainError> {
         let writer = domain.state().start_writer()?;
 
-        self.rotate_pool_stake_data(&writer, pools)?;
-        self.rotate_account_stake_data(&writer, accounts)?;
-        self.update_drep_data(&writer, dreps)?;
+        self.apply_whole_namespace::<D, AccountState>(domain, &writer)?;
+        self.apply_whole_namespace::<D, PoolState>(domain, &writer)?;
+        self.apply_whole_namespace::<D, DRepState>(domain, &writer)?;
+
+        debug_assert!(self.deltas.entities.is_empty());
+
+        if !self.deltas.entities.is_empty() {
+            warn!(quantity = %self.deltas.entities.len(), "uncommitted deltas");
+        }
+
+        // closing epoch
+        // ================================================
+        // rotating to new one
+
         self.drop_active_epoch(&writer)?;
         self.promote_waiting_epoch(&writer)?;
         self.promote_ending_epoch(&writer)?;
