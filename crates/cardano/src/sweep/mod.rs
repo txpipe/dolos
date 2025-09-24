@@ -4,11 +4,13 @@ use dolos_core::{BlockSlot, ChainError, Domain, EntityKey};
 use pallas::{crypto::hash::Hash, ledger::primitives::RationalNumber};
 use tracing::{info, instrument};
 
-use crate::{Config, DRepState, EpochState, EraProtocol, EraSummary, PParamsSet};
+use crate::{Config, DRepState, EpochState, EraProtocol, EraSummary, PParamsSet, Proposal};
 
 pub mod commit;
 pub mod compute;
 pub mod loading;
+
+mod hacks;
 
 pub use compute::compute_genesis_pots;
 
@@ -104,6 +106,7 @@ pub struct BoundaryWork {
     pub ending_snapshot: Snapshot,
     pub pools: HashMap<PoolId, PoolData>,
     pub dreps: HashMap<DRepId, DRepState>,
+    pub proposals: HashMap<String, Proposal>,
     pub shelley_hash: Hash<32>,
 
     // computed

@@ -5,7 +5,7 @@ use dolos_core::{ChainError, Domain, EntityKey, StateStore};
 use crate::{
     drep_to_entity_key, load_active_era,
     sweep::{AccountId, BoundaryWork, DRepId, PoolData, PoolId, Snapshot},
-    AccountState, DRepState, FixedNamespace as _, PoolState,
+    AccountState, DRepState, FixedNamespace as _, PoolState, Proposal,
 };
 
 impl Snapshot {
@@ -114,6 +114,26 @@ fn load_drep_data<D: Domain>(domain: &D, boundary: &mut BoundaryWork) -> Result<
     Ok(())
 }
 
+fn load_active_proposals<D: Domain>(
+    domain: &D,
+    boundary: &mut BoundaryWork,
+) -> Result<(), ChainError> {
+    let proposals = domain
+        .state()
+        .iter_entities_typed::<Proposal>(Proposal::NS, None)?;
+
+    for record in proposals {
+        let (_, proposal) = record?;
+
+        // Only load proposals that are neither enacted nor expired.
+        if proposal.enacted_epoch.is_none() && proposal.expired_epoch.is_none() {
+            boundary.proposals.insert(proposal.id_as_string(), proposal);
+        }
+    }
+
+    Ok(())
+}
+
 impl BoundaryWork {
     pub fn load<D: Domain>(domain: &D) -> Result<BoundaryWork, ChainError> {
         let active_state = crate::load_active_epoch(domain)?;
@@ -132,6 +152,7 @@ impl BoundaryWork {
             // to be loaded right after
             pools: HashMap::new(),
             dreps: HashMap::new(),
+            proposals: HashMap::new(),
             active_snapshot: Snapshot::default(),
             ending_snapshot: Snapshot::default(),
 
@@ -151,6 +172,7 @@ impl BoundaryWork {
         load_pool_params(domain, &mut boundary)?;
         load_account_data(domain, &mut boundary)?;
         load_drep_data(domain, &mut boundary)?;
+        load_active_proposals(domain, &mut boundary)?;
 
         Ok(boundary)
     }

@@ -10,7 +10,7 @@ use pallas::{
         primitives::PlutusData,
         traverse::{
             MultiEraBlock, MultiEraCert, MultiEraInput, MultiEraOutput, MultiEraPolicyAssets,
-            MultiEraTx, MultiEraUpdate,
+            MultiEraProposal, MultiEraTx, MultiEraUpdate,
         },
     },
 };
@@ -24,6 +24,7 @@ pub mod assets;
 pub mod dreps;
 pub mod epochs;
 pub mod pools;
+pub mod proposals;
 pub mod txs;
 
 use accounts::AccountVisitor;
@@ -136,6 +137,18 @@ pub trait BlockVisitor {
     }
 
     #[allow(unused_variables)]
+    fn visit_proposal(
+        &mut self,
+        deltas: &mut WorkDeltas<CardanoLogic>,
+        block: &MultiEraBlock,
+        tx: &MultiEraTx,
+        proposal: &MultiEraProposal,
+        idx: usize,
+    ) -> Result<(), ChainError> {
+        Ok(())
+    }
+
+    #[allow(unused_variables)]
     fn flush(&mut self, deltas: &mut WorkDeltas<CardanoLogic>) -> Result<(), ChainError> {
         Ok(())
     }
@@ -242,6 +255,10 @@ impl<'a> DeltaBuilder<'a> {
 
             for datum in tx.plutus_data() {
                 visit_all!(self, deltas, visit_datums, block, &tx, &datum);
+            }
+
+            for (idx, proposal) in tx.gov_proposals().iter().enumerate() {
+                visit_all!(self, deltas, visit_proposal, block, &tx, &proposal, idx);
             }
         }
 
