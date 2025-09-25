@@ -15,7 +15,6 @@ rayon.workspace = true
 # TODO: we shouldn't need Pallas in core
 pallas.workspace = true
 hex.workspace = true
-serde-big-array = "0.5.1"
 
 [dev-dependencies]
 proptest = "1.7.0"

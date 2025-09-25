@@ -1,6 +1,6 @@
 use dolos_core::{
-    BrokenInvariant, ChainError, Domain, Entity, EntityDelta as _, EntityKey, NsKey, StateStore,
-    StateWriter,
+    ArchiveStore, ArchiveWriter, BrokenInvariant, ChainError, ChainPoint, Domain, Entity,
+    EntityDelta as _, EntityKey, LogKey, NsKey, StateStore, StateWriter, TemporalKey,
 };
 use tracing::{instrument, warn};
 
@@ -118,6 +118,22 @@ impl BoundaryWork {
         Ok(())
     }
 
+    fn flush_logs<D: Domain>(
+        &mut self,
+        writer: &<D::Archive as ArchiveStore>::Writer,
+    ) -> Result<(), ChainError> {
+        let start_of_epoch = self.active_era.epoch_start(self.ending_state.number as u64);
+        let start_of_epoch = ChainPoint::Slot(start_of_epoch);
+
+        for (entity_key, log) in self.logs.drain(..) {
+            let temporal_key = TemporalKey::from(&start_of_epoch);
+            let log_key = LogKey::from((temporal_key, entity_key));
+            writer.write_log_typed(&log_key, &log)?;
+        }
+
+        Ok(())
+    }
+
     #[instrument(skip_all)]
     pub fn commit<D: Domain>(&mut self, domain: &D) -> Result<(), ChainError> {
         let writer = domain.state().start_writer()?;
@@ -128,9 +144,16 @@ impl BoundaryWork {
 
         debug_assert!(self.deltas.entities.is_empty());
 
+        // TODO: remove this once we stop testing with full snapshots
         if !self.deltas.entities.is_empty() {
             warn!(quantity = %self.deltas.entities.len(), "uncommitted deltas");
         }
+
+        let archive_writer = domain.archive().start_writer()?;
+
+        self.flush_logs::<D>(&archive_writer)?;
+
+        debug_assert!(self.logs.is_empty());
 
         self.drop_active_epoch(&writer)?;
         self.promote_waiting_epoch(&writer)?;
