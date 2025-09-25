@@ -1,11 +1,9 @@
-use std::collections::{HashMap, HashSet};
-
 use dolos_core::{batch::WorkDeltas, ChainError, Domain, EntityKey, StateStore};
 
 use crate::{
-    drep_to_entity_key, load_active_era, mutable_slots,
+    drep_to_entity_key, load_active_era,
     sweep::{AccountId, BoundaryWork, DRepId, PoolId, Snapshot},
-    AccountState, DRepState, FixedNamespace as _, PoolState,
+    AccountState, FixedNamespace as _,
 };
 
 impl Snapshot {

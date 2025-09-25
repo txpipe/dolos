@@ -115,7 +115,7 @@ pub struct Args {
 #[tokio::main]
 pub async fn run(args: &Args) -> miette::Result<()> {
     let schema = build_schema();
-    let state = dolos_redb3::StateStore::open(
+    let state = dolos_redb3::state::StateStore::open(
         schema,
         args.path.as_ref().unwrap_or(&PathBuf::from("state")),
         args.cache_size,
@@ -164,7 +164,7 @@ pub async fn run(args: &Args) -> miette::Result<()> {
 pub async fn handle_account_state(
     args: &Args,
     pool: &Pool<PostgresConnectionManager<NoTls>>,
-    state: &dolos_redb3::StateStore,
+    state: &dolos_redb3::state::StateStore,
     registry: &Handlebars<'static>,
 ) -> miette::Result<()> {
     let query = registry
@@ -259,7 +259,7 @@ pub async fn handle_account_state(
 pub async fn handle_asset_state(
     args: &Args,
     pool: &Pool<PostgresConnectionManager<NoTls>>,
-    state: &dolos_redb3::StateStore,
+    state: &dolos_redb3::state::StateStore,
     registry: &Handlebars<'static>,
 ) -> miette::Result<()> {
     let query = registry
@@ -329,7 +329,7 @@ pub async fn handle_asset_state(
 pub async fn handle_era_summaries(
     args: &Args,
     pool: &Pool<PostgresConnectionManager<NoTls>>,
-    state: &dolos_redb3::StateStore,
+    state: &dolos_redb3::state::StateStore,
     registry: &Handlebars<'static>,
 ) -> miette::Result<()> {
     let query = registry
@@ -441,7 +441,7 @@ pub async fn handle_era_summaries(
 pub async fn handle_pool_state(
     args: &Args,
     pool: &Pool<PostgresConnectionManager<NoTls>>,
-    state: &dolos_redb3::StateStore,
+    state: &dolos_redb3::state::StateStore,
     registry: &Handlebars<'static>,
 ) -> miette::Result<()> {
     let query = registry
@@ -585,6 +585,7 @@ pub async fn handle_pool_state(
             },
             register_slot: Default::default(), // TODO: add register_slot
             retiring_epoch: Default::default(), // TODO: add retiring_epoch
+            is_retired: Default::default(),    // TODO: add is_retired
         };
 
         writer
@@ -640,7 +641,7 @@ macro_rules! pp_col_ratio {
 pub async fn handle_epoch_state(
     args: &Args,
     pool: &Pool<PostgresConnectionManager<NoTls>>,
-    state: &dolos_redb3::StateStore,
+    state: &dolos_redb3::state::StateStore,
     registry: &Handlebars<'static>,
 ) -> miette::Result<()> {
     let query = registry
@@ -808,7 +809,7 @@ pub async fn handle_epoch_state(
 pub async fn handle_drep_state(
     args: &Args,
     pool: &Pool<PostgresConnectionManager<NoTls>>,
-    state: &dolos_redb3::StateStore,
+    state: &dolos_redb3::state::StateStore,
     registry: &Handlebars<'static>,
 ) -> miette::Result<()> {
     let query = registry
@@ -868,6 +869,7 @@ pub async fn handle_drep_state(
             last_active_slot,
             retired,
             __drep_id: Default::default(),
+            expired: Default::default(),
         };
 
         writer

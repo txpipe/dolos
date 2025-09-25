@@ -1,6 +1,6 @@
 use dolos_core::{
-    BrokenInvariant, ChainError, Domain, Entity, EntityDelta as _, EntityKey, NsKey, StateError,
-    StateStore, StateWriter,
+    BrokenInvariant, ChainError, Domain, Entity, EntityDelta as _, EntityKey, NsKey, StateStore,
+    StateWriter,
 };
 use tracing::{instrument, warn};
 

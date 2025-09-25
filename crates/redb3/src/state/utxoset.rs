@@ -439,7 +439,7 @@ mod tests {
     use dolos_testing::*;
     use pallas::ledger::addresses::{Address, ShelleyDelegationPart};
 
-    use crate::StateStore;
+    use crate::state::StateStore;
 
     fn get_test_address_utxos(store: &StateStore, address: TestAddress) -> UtxoMap {
         let bobs = store.get_utxo_by_address(&address.to_bytes()).unwrap();

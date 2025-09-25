@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use dolos_core::{batch::WorkDeltas, BlockSlot, ChainError, Domain, EntityKey};
 use pallas::crypto::hash::Hash;
