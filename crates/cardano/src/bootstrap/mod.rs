@@ -68,6 +68,7 @@ fn bootrap_epoch<D: Domain>(domain: &D) -> Result<EpochState, ChainError> {
         gathered_fees: 0,
         gathered_deposits: 0,
         decayed_deposits: 0,
+        blocks_minted: 0,
         rewards_to_distribute: None,
         rewards_to_treasury: None,
         largest_stable_slot: genesis.shelley.epoch_length.unwrap() as u64 - mutable_slots(genesis),
