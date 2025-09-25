@@ -314,6 +314,9 @@ impl super::BoundaryVisitor for BoundaryVisitor {
                         }));
                 }
             }
+            GovAction::TreasuryWithdrawals(_, _) => {
+                // TODO: Track of this withdrawal from treasury, updating reward account as well
+            }
             _ => {}
         }
 
