@@ -176,7 +176,7 @@ impl dolos_core::EntityDelta for ProposalEnactment {
     }
 }
 
-macro_rules! pparams_update {
+macro_rules! handle_update {
     ($update:expr, $getter:ident, $ctx:expr, $variant:ident) => {
         if let Some(updated) = $update.$getter.as_ref() {
             #[allow(irrefutable_let_patterns)]
@@ -189,10 +189,10 @@ macro_rules! pparams_update {
     };
 }
 
-macro_rules! check_all_proposed {
+macro_rules! check_all {
     ($update:expr, $deltas:expr, $($getter:ident => $variant:ident),*) => {
         $(
-            pparams_update!($update, $getter, $deltas, $variant);
+            handle_update!($update, $getter, $deltas, $variant);
         )*
     };
 }
@@ -248,7 +248,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
                     .set(PParamValue::ProtocolVersion(*version));
             }
             GovAction::ParameterChange(_, update, _) => {
-                check_all_proposed! {
+                check_all! {
                     update,
                     ctx,
 
