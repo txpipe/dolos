@@ -1,10 +1,10 @@
-use dolos_core::{ChainError, NsKey};
+use dolos_core::{ChainError, EntityKey, NsKey};
 use pallas::ledger::primitives::conway::DRep;
 use serde::{Deserialize, Serialize};
 
 use crate::{
     sweep::{AccountId, BoundaryWork, PoolId},
-    AccountState, CardanoDelta, FixedNamespace as _, PoolState,
+    AccountState, CardanoDelta, CardanoEntity, FixedNamespace as _, PoolState, StakeLog,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,6 +119,17 @@ impl dolos_core::EntityDelta for PoolTransition {
 #[derive(Default)]
 pub struct BoundaryVisitor {
     deltas: Vec<CardanoDelta>,
+    logs: Vec<(EntityKey, CardanoEntity)>,
+}
+
+impl BoundaryVisitor {
+    fn change(&mut self, delta: impl Into<CardanoDelta>) {
+        self.deltas.push(delta.into());
+    }
+
+    fn log(&mut self, key: EntityKey, log: impl Into<CardanoEntity>) {
+        self.logs.push((key, log.into()));
+    }
 }
 
 impl super::BoundaryVisitor for BoundaryVisitor {
@@ -130,8 +141,14 @@ impl super::BoundaryVisitor for BoundaryVisitor {
     ) -> Result<(), ChainError> {
         let ending_stake = ctx.ending_snapshot.get_pool_stake(&id);
 
-        self.deltas
-            .push(PoolTransition::new(id.clone(), ending_stake).into());
+        self.change(PoolTransition::new(id.clone(), ending_stake));
+
+        self.log(
+            id.clone(),
+            StakeLog {
+                amount: ending_stake,
+            },
+        );
 
         Ok(())
     }
@@ -142,7 +159,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         id: &AccountId,
         _: &AccountState,
     ) -> Result<(), ChainError> {
-        self.deltas.push(AccountTransition::new(id.clone()).into());
+        self.change(AccountTransition::new(id.clone()));
 
         Ok(())
     }
@@ -150,6 +167,10 @@ impl super::BoundaryVisitor for BoundaryVisitor {
     fn flush(&mut self, ctx: &mut BoundaryWork) -> Result<(), ChainError> {
         for delta in self.deltas.drain(..) {
             ctx.add_delta(delta);
+        }
+
+        for (key, log) in self.logs.drain(..) {
+            ctx.logs.push((key, log));
         }
 
         Ok(())

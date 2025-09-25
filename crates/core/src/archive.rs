@@ -1,7 +1,6 @@
 use std::{marker::PhantomData, ops::Range};
 
 use serde::{Deserialize, Serialize};
-use serde_big_array::BigArray;
 use thiserror::Error;
 
 use crate::{
@@ -12,11 +11,11 @@ use crate::{
 const TEMPORAL_KEY_SIZE: usize = 8;
 const LOG_KEY_SIZE: usize = TEMPORAL_KEY_SIZE + KEY_SIZE;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub struct TemporalKey([u8; TEMPORAL_KEY_SIZE]);
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
-pub struct LogKey(#[serde(with = "BigArray")] [u8; LOG_KEY_SIZE]);
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
+pub struct LogKey([u8; LOG_KEY_SIZE]);
 
 impl AsRef<[u8]> for TemporalKey {
     fn as_ref(&self) -> &[u8] {
@@ -85,7 +84,8 @@ impl From<(TemporalKey, EntityKey)> for LogKey {
 
 impl From<TemporalKey> for LogKey {
     fn from(value: TemporalKey) -> Self {
-        // Safe to unwrap, we know the length matches. We extend the key with 0 to match length.
+        // Safe to unwrap, we know the length matches. We extend the key with 0 to match
+        // length.
         let bytes: [u8; LOG_KEY_SIZE] = [value.as_ref(), &[0; KEY_SIZE]]
             .concat()
             .try_into()
