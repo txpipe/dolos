@@ -74,6 +74,7 @@ pub struct PoolTransition {
 
     // undo
     prev_stake: Option<u64>,
+    prev_blocks_minted: Option<u32>,
 }
 
 impl PoolTransition {
@@ -82,6 +83,7 @@ impl PoolTransition {
             pool,
             ending_stake,
             prev_stake: None,
+            prev_blocks_minted: None,
         }
     }
 }
@@ -100,10 +102,13 @@ impl dolos_core::EntityDelta for PoolTransition {
 
         // undo info
         self.prev_stake = Some(entity.active_stake);
+        self.prev_blocks_minted = Some(entity.blocks_minted_epoch);
 
         // order matters
         entity.active_stake = entity.wait_stake;
         entity.wait_stake = self.ending_stake;
+
+        entity.blocks_minted_epoch = 0;
     }
 
     fn undo(&self, entity: &mut Option<PoolState>) {
@@ -113,6 +118,8 @@ impl dolos_core::EntityDelta for PoolTransition {
 
         entity.wait_stake = entity.active_stake;
         entity.active_stake = self.prev_stake.unwrap_or(0);
+
+        entity.blocks_minted_epoch = self.prev_blocks_minted.unwrap_or(0);
     }
 }
 
