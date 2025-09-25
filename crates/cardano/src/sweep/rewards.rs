@@ -263,6 +263,11 @@ impl super::BoundaryVisitor for BoundaryVisitor {
             return Ok(());
         }
 
+        // if the pool is retired there's no rewards to distribute
+        if pool.is_retired {
+            return Ok(());
+        }
+
         let pool_stake = ctx.active_snapshot.get_pool_stake(id);
         let pot_delta = ctx.pot_delta.as_ref().unwrap(); // TODO: pots should be mandatory
 

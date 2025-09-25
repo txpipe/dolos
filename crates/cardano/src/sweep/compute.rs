@@ -357,8 +357,6 @@ impl BoundaryWork {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
-
     use crate::{sweep::Snapshot, EraBoundary, EraSummary, PParamValue};
 
     use super::*;

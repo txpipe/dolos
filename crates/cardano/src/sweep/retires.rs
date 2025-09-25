@@ -175,6 +175,10 @@ fn should_retire_pool(ctx: &mut BoundaryWork, pool: &PoolState) -> bool {
 }
 
 fn should_expire_drep(ctx: &mut BoundaryWork, drep: &DRepState) -> Result<bool, ChainError> {
+    if drep.retired || drep.expired {
+        return Ok(false);
+    }
+
     let last_activity_slot = drep
         .last_active_slot
         .unwrap_or(drep.initial_slot.unwrap_or_default());
