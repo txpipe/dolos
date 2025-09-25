@@ -1,11 +1,9 @@
-use std::collections::{HashMap, HashSet};
-
-use dolos_core::{ChainError, Domain, EntityKey, StateStore};
+use dolos_core::{batch::WorkDeltas, ChainError, Domain, EntityKey, StateStore};
 
 use crate::{
     drep_to_entity_key, load_active_era,
-    sweep::{AccountId, BoundaryWork, DRepId, PoolData, PoolId, Snapshot},
-    AccountState, DRepState, FixedNamespace as _, PoolState,
+    sweep::{AccountId, BoundaryWork, DRepId, PoolId, Snapshot},
+    AccountState, FixedNamespace as _,
 };
 
 impl Snapshot {
@@ -79,42 +77,6 @@ pub fn load_account_data<D: Domain>(
     Ok(())
 }
 
-fn load_pool_params<D: Domain>(domain: &D, boundary: &mut BoundaryWork) -> Result<(), ChainError> {
-    let pools = domain
-        .state()
-        .iter_entities_typed::<PoolState>(PoolState::NS, None)?;
-
-    for record in pools {
-        let (pool_id, pool) = record?;
-
-        let params = PoolData {
-            reward_account: pool.reward_account,
-            fixed_cost: pool.fixed_cost,
-            margin_cost: pool.margin_cost,
-            declared_pledge: pool.declared_pledge,
-            minted_blocks: pool.blocks_minted,
-            retiring_epoch: pool.retiring_epoch,
-        };
-
-        boundary.pools.insert(pool_id, params);
-    }
-
-    Ok(())
-}
-
-fn load_drep_data<D: Domain>(domain: &D, boundary: &mut BoundaryWork) -> Result<(), ChainError> {
-    let dreps = domain
-        .state()
-        .iter_entities_typed::<DRepState>(DRepState::NS, None)?;
-
-    for record in dreps {
-        let (drep_id, drep) = record?;
-        boundary.dreps.insert(drep_id, drep);
-    }
-
-    Ok(())
-}
-
 impl BoundaryWork {
     pub fn load<D: Domain>(domain: &D) -> Result<BoundaryWork, ChainError> {
         let active_state = crate::load_active_epoch(domain)?;
@@ -131,28 +93,18 @@ impl BoundaryWork {
             shelley_hash: domain.genesis().shelley_hash,
 
             // to be loaded right after
-            pools: HashMap::new(),
-            dreps: HashMap::new(),
             active_snapshot: Snapshot::default(),
             ending_snapshot: Snapshot::default(),
 
             // empty until computed
-            pool_rewards: HashMap::new(),
-            pool_stakes: HashMap::new(),
-            delegator_rewards: HashMap::new(),
+            deltas: WorkDeltas::default(),
             pot_delta: None,
             starting_state: None,
-            effective_rewards: None,
             era_transition: None,
-            dropped_pool_delegators: HashSet::new(),
-            dropped_drep_delegators: HashSet::new(),
-            retired_dreps: HashSet::new(),
         };
 
         // order matters
-        load_pool_params(domain, &mut boundary)?;
         load_account_data(domain, &mut boundary)?;
-        load_drep_data(domain, &mut boundary)?;
 
         Ok(boundary)
     }

@@ -9,6 +9,7 @@ use crate::{
     StateError, StateStore as _, StateWriter as _, TxoRef, UtxoSetDelta, WalStore as _,
 };
 
+#[derive(Debug)]
 pub struct WorkDeltas<C: ChainLogic> {
     pub entities: HashMap<NsKey, Vec<C::Delta>>,
     pub slot: SlotTags,

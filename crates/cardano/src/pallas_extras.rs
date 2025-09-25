@@ -31,7 +31,7 @@ pub struct MultiEraPoolRegistration {
     pub pool_metadata: Option<PoolMetadata>,
 }
 
-pub fn cert_to_pool_state(cert: &MultiEraCert) -> Option<MultiEraPoolRegistration> {
+pub fn cert_as_pool_registration(cert: &MultiEraCert) -> Option<MultiEraPoolRegistration> {
     match cert {
         MultiEraCert::AlonzoCompatible(cow) => match cow.deref().deref() {
             AlonzoCert::PoolRegistration {
@@ -283,4 +283,9 @@ pub fn stake_cred_to_drep(cred: &StakeCredential) -> DRep {
         StakeCredential::AddrKeyhash(key) => DRep::Key(*key),
         StakeCredential::ScriptHash(key) => DRep::Script(*key),
     }
+}
+
+pub fn pool_reward_account(reward_account: &[u8]) -> Option<StakeCredential> {
+    let pool_address = Address::from_bytes(reward_account).ok()?;
+    address_as_stake_cred(&pool_address)
 }
