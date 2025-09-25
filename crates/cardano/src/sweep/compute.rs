@@ -7,7 +7,7 @@ use crate::{
     sweep::{BoundaryVisitor as _, BoundaryWork, EraTransition, PotDelta, Pots},
     utils::nonce_stability_window,
     AccountState, DRepState, EpochState, EraProtocol, FixedNamespace as _, Nonces, PParamsSet,
-    PoolState,
+    PoolState, Proposal,
 };
 
 macro_rules! as_ratio {
@@ -125,6 +125,11 @@ impl BoundaryWork {
 
     pub fn valid_drep_inactivity_period(&self) -> Result<u64, ChainError> {
         self.valid_pparams()?.ensure_drep_inactivity_period()
+    }
+
+    pub fn valid_governance_action_validity_period(&self) -> Result<u64, ChainError> {
+        self.valid_pparams()?
+            .ensure_governance_action_validity_period()
     }
 
     pub fn ending_pparams(&self) -> &PParamsSet {
@@ -341,6 +346,18 @@ impl BoundaryWork {
             visitor_rotate.visit_account(self, &account_id, &account)?;
         }
 
+        let proposals = domain
+            .state()
+            .iter_entities_typed::<Proposal>(Proposal::NS, None)?;
+
+        for proposal in proposals {
+            let (proposal_id, proposal) = proposal?;
+
+            visitor_retires.visit_proposal(self, &proposal_id, &proposal)?;
+            visitor_rewards.visit_proposal(self, &proposal_id, &proposal)?;
+            visitor_rotate.visit_proposal(self, &proposal_id, &proposal)?;
+        }
+
         visitor_retires.flush(self)?;
         visitor_rewards.flush(self)?;
         visitor_rotate.flush(self)?;
@@ -357,8 +374,6 @@ impl BoundaryWork {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
-
     use crate::{sweep::Snapshot, EraBoundary, EraSummary, PParamValue};
 
     use super::*;

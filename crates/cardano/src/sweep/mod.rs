@@ -6,7 +6,7 @@ use tracing::{info, instrument};
 
 use crate::{
     AccountState, CardanoDelta, CardanoLogic, Config, DRepState, EpochState, EraProtocol,
-    EraSummary, PParamsSet, PoolState,
+    EraSummary, PParamsSet, PoolState, Proposal,
 };
 
 pub mod commit;
@@ -61,6 +61,16 @@ pub trait BoundaryVisitor: Default {
     }
 
     #[allow(unused_variables)]
+    fn visit_proposal(
+        &mut self,
+        ctx: &mut BoundaryWork,
+        id: &ProposalId,
+        proposal: &Proposal,
+    ) -> Result<(), ChainError> {
+        Ok(())
+    }
+
+    #[allow(unused_variables)]
     fn flush(&mut self, ctx: &mut BoundaryWork) -> Result<(), ChainError> {
         Ok(())
     }
@@ -69,6 +79,7 @@ pub trait BoundaryVisitor: Default {
 pub type AccountId = EntityKey;
 pub type PoolId = EntityKey;
 pub type DRepId = EntityKey;
+pub type ProposalId = EntityKey;
 
 #[derive(Debug)]
 pub struct Pots {
@@ -135,6 +146,7 @@ pub struct BoundaryWork {
     pub waiting_state: Option<EpochState>,
     pub ending_state: EpochState,
     pub ending_snapshot: Snapshot,
+    pub network_magic: Option<u32>,
     pub shelley_hash: Hash<32>,
 
     // deprecated in favor of deltas

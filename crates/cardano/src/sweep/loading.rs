@@ -90,6 +90,7 @@ impl BoundaryWork {
             active_state,
             waiting_state,
             ending_state,
+            network_magic: domain.genesis().shelley.network_magic,
             shelley_hash: domain.genesis().shelley_hash,
 
             // to be loaded right after
