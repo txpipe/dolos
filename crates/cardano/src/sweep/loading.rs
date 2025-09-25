@@ -99,6 +99,7 @@ impl BoundaryWork {
 
             // empty until computed
             deltas: WorkDeltas::default(),
+            logs: Default::default(),
             pot_delta: None,
             starting_state: None,
             era_transition: None,

@@ -5,8 +5,8 @@ use pallas::crypto::hash::Hash;
 use tracing::{info, instrument};
 
 use crate::{
-    AccountState, CardanoDelta, CardanoLogic, Config, DRepState, EpochState, EraProtocol,
-    EraSummary, PParamsSet, PoolState, Proposal,
+    AccountState, CardanoDelta, CardanoEntity, CardanoLogic, Config, DRepState, EpochState,
+    EraProtocol, EraSummary, PParamsSet, PoolState, Proposal,
 };
 
 pub mod commit;
@@ -149,14 +149,14 @@ pub struct BoundaryWork {
     pub network_magic: Option<u32>,
     pub shelley_hash: Hash<32>,
 
-    // deprecated in favor of deltas
-    // pub dropped_pool_delegators: HashSet<AccountId>,
-    pub deltas: WorkDeltas<CardanoLogic>,
-
     // computed
     pub pot_delta: Option<PotDelta>,
     pub starting_state: Option<EpochState>,
     pub era_transition: Option<EraTransition>,
+
+    // computed via visitors
+    pub deltas: WorkDeltas<CardanoLogic>,
+    pub logs: Vec<(EntityKey, CardanoEntity)>,
 }
 
 impl BoundaryWork {

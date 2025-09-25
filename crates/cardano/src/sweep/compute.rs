@@ -366,7 +366,7 @@ impl BoundaryWork {
         self.define_era_transition(domain.genesis())?;
 
         trace!("defining starting state");
-        self.define_starting_state(domain.genesis(), visitor_rewards.total_rewards)?;
+        self.define_starting_state(domain.genesis(), visitor_rewards.effective_rewards)?;
 
         Ok(())
     }
@@ -459,6 +459,7 @@ mod tests {
 
             // empty until computed
             deltas: Default::default(),
+            logs: Default::default(),
             starting_state: None,
             pot_delta: None,
             era_transition: None,

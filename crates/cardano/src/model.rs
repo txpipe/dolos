@@ -998,6 +998,8 @@ pub enum CardanoEntity {
     EpochState(EpochState),
     DRepState(DRepState),
     Proposal(Proposal),
+    RewardLog(RewardLog),
+    StakeLog(StakeLog),
 }
 
 macro_rules! variant_boilerplate {
@@ -1026,6 +1028,8 @@ variant_boilerplate!(PoolState);
 variant_boilerplate!(EpochState);
 variant_boilerplate!(DRepState);
 variant_boilerplate!(Proposal);
+variant_boilerplate!(RewardLog);
+variant_boilerplate!(StakeLog);
 
 impl dolos_core::Entity for CardanoEntity {
     fn decode_entity(ns: Namespace, value: &EntityValue) -> Result<Self, ChainError> {
@@ -1037,6 +1041,8 @@ impl dolos_core::Entity for CardanoEntity {
             EpochState::NS => EpochState::decode_entity(ns, value).map(Into::into),
             DRepState::NS => DRepState::decode_entity(ns, value).map(Into::into),
             Proposal::NS => Proposal::decode_entity(ns, value).map(Into::into),
+            RewardLog::NS => RewardLog::decode_entity(ns, value).map(Into::into),
+            StakeLog::NS => StakeLog::decode_entity(ns, value).map(Into::into),
             _ => Err(ChainError::InvalidNamespace(ns)),
         }
     }
@@ -1069,6 +1075,14 @@ impl dolos_core::Entity for CardanoEntity {
             }
             Self::Proposal(x) => {
                 let (ns, enc) = Proposal::encode_entity(x);
+                (ns, enc)
+            }
+            Self::RewardLog(x) => {
+                let (ns, enc) = RewardLog::encode_entity(x);
+                (ns, enc)
+            }
+            Self::StakeLog(x) => {
+                let (ns, enc) = StakeLog::encode_entity(x);
                 (ns, enc)
             }
         }

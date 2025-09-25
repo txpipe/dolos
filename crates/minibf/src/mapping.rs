@@ -1037,7 +1037,7 @@ impl TxModelBuilder<'_> {
                 .find_redeemer_script(redeemer)?
                 .map(|x| x.to_string())
                 .unwrap_or_default(),
-            datum_hash: Default::default(),
+            datum_hash: redeemer.data().compute_hash().to_string(),
         };
 
         Ok(out)
