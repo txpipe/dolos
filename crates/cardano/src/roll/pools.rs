@@ -76,13 +76,15 @@ impl dolos_core::EntityDelta for MintedBlocksInc {
 
     fn apply(&mut self, entity: &mut Option<PoolState>) {
         if let Some(entity) = entity {
-            entity.blocks_minted += self.count;
+            entity.blocks_minted_total += self.count;
+            entity.blocks_minted_epoch += self.count;
         }
     }
 
     fn undo(&self, entity: &mut Option<PoolState>) {
         if let Some(entity) = entity {
-            entity.blocks_minted = entity.blocks_minted.saturating_sub(self.count);
+            entity.blocks_minted_total = entity.blocks_minted_total.saturating_sub(self.count);
+            entity.blocks_minted_epoch = entity.blocks_minted_epoch.saturating_sub(self.count);
         }
     }
 }

@@ -206,7 +206,7 @@ pub struct PoolState {
     pub __live_stake: u64,
 
     #[n(11)]
-    pub blocks_minted: u32,
+    pub blocks_minted_total: u32,
 
     #[n(12)]
     pub register_slot: u64,
@@ -216,6 +216,9 @@ pub struct PoolState {
 
     #[n(14)]
     pub is_retired: bool,
+
+    #[n(15)]
+    pub blocks_minted_epoch: u32,
 }
 
 entity_boilerplate!(PoolState, "pools");
@@ -248,7 +251,8 @@ impl PoolState {
             active_stake: Default::default(),
             wait_stake: Default::default(),
             __live_stake: Default::default(),
-            blocks_minted: Default::default(),
+            blocks_minted_total: Default::default(),
+            blocks_minted_epoch: Default::default(),
             retiring_epoch: None,
             is_retired: false,
         }
@@ -788,6 +792,9 @@ pub struct EpochState {
 
     #[n(13)]
     pub nonces: Option<Nonces>,
+
+    #[n(14)]
+    pub blocks_minted: u32,
 }
 
 impl EpochState {
