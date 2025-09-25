@@ -150,7 +150,7 @@ where
 
         writer.commit()?;
 
-        self.archive().truncate_front(to.slot())?;
+        self.archive().truncate_front(to)?;
 
         self.wal().truncate_front(to)?;
 

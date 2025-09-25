@@ -1,6 +1,4 @@
-use ::redb::{ReadTransaction, ReadableTable as _};
-use ::redb::{TableDefinition, WriteTransaction};
-use redb::Range;
+use redb::{Range, ReadTransaction, ReadableTable as _, TableDefinition, WriteTransaction};
 use tracing::trace;
 
 use dolos_core::{BlockBody, BlockSlot, ChainPoint, RawBlock};

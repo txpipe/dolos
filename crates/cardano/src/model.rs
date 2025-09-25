@@ -1,8 +1,7 @@
 use std::cmp::Ordering;
 
 use dolos_core::{
-    BlockSlot, ChainError, EntityKey, EntityValue, Namespace, NamespaceType, NsKey, StateError,
-    StateSchema,
+    BlockSlot, ChainError, EntityKey, EntityValue, Namespace, NamespaceType, NsKey, StateSchema,
 };
 use pallas::{
     codec::minicbor::{self, Decode, Encode},
@@ -31,8 +30,13 @@ use crate::{
         assets::MintStatsUpdate,
         dreps::{DRepActivity, DRepRegistration, DRepUnRegistration},
         epochs::{EpochStatsUpdate, NoncesUpdate, PParamsUpdate},
-        pools::{MintedBlocksInc, PoolRegistration, PoolRetirement},
+        pools::{MintedBlocksInc, PoolAccountDetected, PoolDeRegistration, PoolRegistration},
         proposals::NewProposal,
+    },
+    sweep::{
+        retires::{DRepDelegatorDrop, DRepExpiration, PoolDelegatorDrop, PoolRetirement},
+        rewards::{AssignDelegatorRewards, AssignPoolRewards},
+        transition::{AccountTransition, PoolTransition},
     },
 };
 
@@ -47,7 +51,7 @@ macro_rules! entity_boilerplate {
         }
 
         impl dolos_core::Entity for $type {
-            fn decode_entity(ns: Namespace, value: &EntityValue) -> Result<Self, StateError> {
+            fn decode_entity(ns: Namespace, value: &EntityValue) -> Result<Self, ChainError> {
                 assert_eq!(ns, $type::NS);
                 let value = pallas::codec::minicbor::decode(value)?;
                 Ok(value)
@@ -64,17 +68,24 @@ macro_rules! entity_boilerplate {
 #[derive(Debug, Clone, PartialEq, Eq, Decode, Encode, Default)]
 pub struct RewardLog {
     #[n(0)]
-    pub epoch: u32,
-
-    #[n(1)]
     pub amount: u64,
 
-    #[n(2)]
+    #[n(1)]
     pub pool_id: Vec<u8>,
 
-    #[n(3)]
+    #[n(2)]
     pub as_leader: bool,
 }
+
+entity_boilerplate!(RewardLog, "rewards");
+
+#[derive(Debug, Clone, PartialEq, Eq, Decode, Encode, Default)]
+pub struct StakeLog {
+    #[n(0)]
+    pub amount: u64,
+}
+
+entity_boilerplate!(StakeLog, "stakes");
 
 #[derive(Debug, Clone, PartialEq, Eq, Decode, Encode, Default)]
 pub struct AccountState {
@@ -203,6 +214,9 @@ pub struct PoolState {
 
     #[n(13)]
     pub retiring_epoch: Option<u64>,
+
+    #[n(14)]
+    pub is_retired: bool,
 }
 
 entity_boilerplate!(PoolState, "pools");
@@ -237,6 +251,7 @@ impl PoolState {
             __live_stake: Default::default(),
             blocks_minted: Default::default(),
             retiring_epoch: None,
+            is_retired: false,
         }
     }
 }
@@ -881,6 +896,9 @@ pub struct DRepState {
 
     #[n(4)]
     pub retired: bool,
+
+    #[n(5)]
+    pub expired: bool,
 }
 
 impl DRepState {
@@ -891,6 +909,7 @@ impl DRepState {
             voting_power: 0,
             last_active_slot: None,
             retired: false,
+            expired: false,
         }
     }
 }
@@ -1005,7 +1024,7 @@ variant_boilerplate!(DRepState);
 variant_boilerplate!(Proposal);
 
 impl dolos_core::Entity for CardanoEntity {
-    fn decode_entity(ns: Namespace, value: &EntityValue) -> Result<Self, StateError> {
+    fn decode_entity(ns: Namespace, value: &EntityValue) -> Result<Self, ChainError> {
         match ns {
             EraSummary::NS => EraSummary::decode_entity(ns, value).map(Into::into),
             AccountState::NS => AccountState::decode_entity(ns, value).map(Into::into),
@@ -1014,7 +1033,7 @@ impl dolos_core::Entity for CardanoEntity {
             EpochState::NS => EpochState::decode_entity(ns, value).map(Into::into),
             DRepState::NS => DRepState::decode_entity(ns, value).map(Into::into),
             Proposal::NS => Proposal::decode_entity(ns, value).map(Into::into),
-            _ => Err(StateError::InvalidNamespace(ns)),
+            _ => Err(ChainError::InvalidNamespace(ns)),
         }
     }
 
@@ -1061,6 +1080,8 @@ pub fn build_schema() -> StateSchema {
     schema.insert(EpochState::NS, NamespaceType::KeyValue);
     schema.insert(DRepState::NS, NamespaceType::KeyValue);
     schema.insert(Proposal::NS, NamespaceType::KeyValue);
+    schema.insert(RewardLog::NS, NamespaceType::KeyValue);
+    schema.insert(StakeLog::NS, NamespaceType::KeyValue);
     schema
 }
 
@@ -1072,18 +1093,28 @@ pub enum CardanoDelta {
     StakeDelegation(StakeDelegation),
     StakeDeregistration(StakeDeregistration),
     PoolRegistration(PoolRegistration),
-    PoolRetirement(PoolRetirement),
+    PoolDeRegistration(PoolDeRegistration),
+    PoolAccountDetected(PoolAccountDetected),
     MintedBlocksInc(MintedBlocksInc),
     MintStatsUpdate(MintStatsUpdate),
     EpochStatsUpdate(EpochStatsUpdate),
     DRepRegistration(DRepRegistration),
     DRepUnRegistration(DRepUnRegistration),
     DRepActivity(DRepActivity),
+    DRepExpiration(DRepExpiration),
     WithdrawalInc(WithdrawalInc),
     VoteDelegation(VoteDelegation),
     PParamsUpdate(PParamsUpdate),
     NoncesUpdate(NoncesUpdate),
     NewProposal(NewProposal),
+    PoolDelegatorDrop(PoolDelegatorDrop),
+    DRepDelegatorDrop(DRepDelegatorDrop),
+    PoolRetirement(PoolRetirement),
+    AssignPoolRewards(AssignPoolRewards),
+    AssignDelegatorRewards(AssignDelegatorRewards),
+    //AssignEpochRewards(AssignEpochRewards),
+    PoolTransition(PoolTransition),
+    AccountTransition(AccountTransition),
 }
 
 impl CardanoDelta {
@@ -1126,18 +1157,28 @@ delta_from!(StakeRegistration);
 delta_from!(StakeDelegation);
 delta_from!(StakeDeregistration);
 delta_from!(PoolRegistration);
-delta_from!(PoolRetirement);
+delta_from!(PoolDeRegistration);
+delta_from!(PoolAccountDetected);
 delta_from!(MintedBlocksInc);
 delta_from!(MintStatsUpdate);
 delta_from!(EpochStatsUpdate);
 delta_from!(DRepRegistration);
 delta_from!(DRepUnRegistration);
 delta_from!(DRepActivity);
+delta_from!(DRepExpiration);
 delta_from!(WithdrawalInc);
 delta_from!(VoteDelegation);
 delta_from!(PParamsUpdate);
 delta_from!(NoncesUpdate);
 delta_from!(NewProposal);
+delta_from!(PoolDelegatorDrop);
+delta_from!(DRepDelegatorDrop);
+delta_from!(PoolRetirement);
+delta_from!(AssignPoolRewards);
+delta_from!(AssignDelegatorRewards);
+//delta_from!(AssignEpochRewards);
+delta_from!(PoolTransition);
+delta_from!(AccountTransition);
 
 impl dolos_core::EntityDelta for CardanoDelta {
     type Entity = super::model::CardanoEntity;
@@ -1150,18 +1191,28 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::StakeDelegation(x) => x.key(),
             Self::StakeDeregistration(x) => x.key(),
             Self::PoolRegistration(x) => x.key(),
+            Self::PoolDeRegistration(x) => x.key(),
             Self::PoolRetirement(x) => x.key(),
+            Self::PoolAccountDetected(x) => x.key(),
             Self::MintedBlocksInc(x) => x.key(),
             Self::MintStatsUpdate(x) => x.key(),
             Self::EpochStatsUpdate(x) => x.key(),
             Self::DRepRegistration(x) => x.key(),
             Self::DRepActivity(x) => x.key(),
             Self::DRepUnRegistration(x) => x.key(),
+            Self::DRepExpiration(x) => x.key(),
             Self::WithdrawalInc(x) => x.key(),
             Self::VoteDelegation(x) => x.key(),
             Self::PParamsUpdate(x) => x.key(),
             Self::NoncesUpdate(x) => x.key(),
             Self::NewProposal(x) => x.key(),
+            Self::PoolDelegatorDrop(x) => x.key(),
+            Self::DRepDelegatorDrop(x) => x.key(),
+            Self::AssignPoolRewards(x) => x.key(),
+            Self::AssignDelegatorRewards(x) => x.key(),
+            //Self::AssignEpochRewards(x) => x.key(),
+            Self::PoolTransition(x) => x.key(),
+            Self::AccountTransition(x) => x.key(),
         }
     }
 
@@ -1173,18 +1224,28 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::StakeDelegation(x) => Self::downcast_apply(x, entity),
             Self::StakeDeregistration(x) => Self::downcast_apply(x, entity),
             Self::PoolRegistration(x) => Self::downcast_apply(x, entity),
+            Self::PoolDeRegistration(x) => Self::downcast_apply(x, entity),
             Self::PoolRetirement(x) => Self::downcast_apply(x, entity),
+            Self::PoolAccountDetected(x) => Self::downcast_apply(x, entity),
             Self::MintedBlocksInc(x) => Self::downcast_apply(x, entity),
             Self::MintStatsUpdate(x) => Self::downcast_apply(x, entity),
             Self::EpochStatsUpdate(x) => Self::downcast_apply(x, entity),
             Self::DRepRegistration(x) => Self::downcast_apply(x, entity),
             Self::DRepUnRegistration(x) => Self::downcast_apply(x, entity),
             Self::DRepActivity(x) => Self::downcast_apply(x, entity),
+            Self::DRepExpiration(x) => Self::downcast_apply(x, entity),
             Self::WithdrawalInc(x) => Self::downcast_apply(x, entity),
             Self::VoteDelegation(x) => Self::downcast_apply(x, entity),
             Self::PParamsUpdate(x) => Self::downcast_apply(x, entity),
             Self::NoncesUpdate(x) => Self::downcast_apply(x, entity),
             Self::NewProposal(x) => Self::downcast_apply(x, entity),
+            Self::PoolDelegatorDrop(x) => Self::downcast_apply(x, entity),
+            Self::DRepDelegatorDrop(x) => Self::downcast_apply(x, entity),
+            Self::AssignPoolRewards(x) => Self::downcast_apply(x, entity),
+            Self::AssignDelegatorRewards(x) => Self::downcast_apply(x, entity),
+            //Self::AssignEpochRewards(x) => Self::downcast_apply(x, entity),
+            Self::PoolTransition(x) => Self::downcast_apply(x, entity),
+            Self::AccountTransition(x) => Self::downcast_apply(x, entity),
         }
     }
 
@@ -1196,18 +1257,28 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::StakeDelegation(x) => Self::downcast_undo(x, entity),
             Self::StakeDeregistration(x) => Self::downcast_undo(x, entity),
             Self::PoolRegistration(x) => Self::downcast_undo(x, entity),
+            Self::PoolDeRegistration(x) => Self::downcast_undo(x, entity),
             Self::PoolRetirement(x) => Self::downcast_undo(x, entity),
+            Self::PoolAccountDetected(x) => Self::downcast_undo(x, entity),
             Self::MintedBlocksInc(x) => Self::downcast_undo(x, entity),
             Self::MintStatsUpdate(x) => Self::downcast_undo(x, entity),
             Self::EpochStatsUpdate(x) => Self::downcast_undo(x, entity),
             Self::DRepRegistration(x) => Self::downcast_undo(x, entity),
             Self::DRepUnRegistration(x) => Self::downcast_undo(x, entity),
             Self::DRepActivity(x) => Self::downcast_undo(x, entity),
+            Self::DRepExpiration(x) => Self::downcast_undo(x, entity),
             Self::WithdrawalInc(x) => Self::downcast_undo(x, entity),
             Self::VoteDelegation(x) => Self::downcast_undo(x, entity),
             Self::PParamsUpdate(x) => Self::downcast_undo(x, entity),
             Self::NoncesUpdate(x) => Self::downcast_undo(x, entity),
             Self::NewProposal(x) => Self::downcast_undo(x, entity),
+            Self::PoolDelegatorDrop(x) => Self::downcast_undo(x, entity),
+            Self::DRepDelegatorDrop(x) => Self::downcast_undo(x, entity),
+            Self::AssignPoolRewards(x) => Self::downcast_undo(x, entity),
+            Self::AssignDelegatorRewards(x) => Self::downcast_undo(x, entity),
+            //Self::AssignEpochRewards(x) => Self::downcast_undo(x, entity),
+            Self::PoolTransition(x) => Self::downcast_undo(x, entity),
+            Self::AccountTransition(x) => Self::downcast_undo(x, entity),
         }
     }
 }

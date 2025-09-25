@@ -1,8 +1,4 @@
-use dolos_cardano::{
-    load_era_summary,
-    utils::{epoch_first_slot, nonce_stability_window},
-    EraSummary, Nonces,
-};
+use dolos_cardano::{load_era_summary, utils::nonce_stability_window, EraSummary, Nonces};
 use dolos_core::{ArchiveStore, Domain};
 use miette::{bail, Context, IntoDiagnostic};
 use pallas::{crypto::hash::Hash, ledger::traverse::MultiEraBlock};
@@ -16,7 +12,7 @@ pub struct Args {
 
 /// Get the previous block hash of the first block from the previous epoch.
 pub fn get_nh<D: Domain>(epoch: u64, domain: &D, summary: &EraSummary) -> miette::Result<Hash<32>> {
-    let slot = epoch_first_slot((epoch - 1) as u32, summary);
+    let slot = summary.epoch_start(epoch - 1);
     let (_, raw) = domain
         .archive()
         .get_range(None, Some(slot - 1))
@@ -52,7 +48,7 @@ pub fn compute_nonce<D: Domain>(epoch: u64, domain: &D) -> miette::Result<Hash<3
 
     let (protocol, era) = summary.protocol_and_era_for_epoch(epoch);
     let largest_stable_slot =
-        epoch_first_slot(epoch as u32, era) - nonce_stability_window(*protocol, domain.genesis());
+        era.epoch_start(epoch) - nonce_stability_window(*protocol, domain.genesis());
 
     let mut nonces = Nonces::bootstrap(domain.genesis().shelley_hash);
 

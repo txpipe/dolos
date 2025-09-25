@@ -1,11 +1,11 @@
 use ::redb::{Database, Range, ReadableDatabase};
 use redb::ReadTransaction;
-use std::path::Path;
+use std::{collections::HashMap, path::Path};
 use tracing::{debug, info, warn};
 
 use dolos_core::{
-    ArchiveError, BlockBody, BlockSlot, ChainPoint, EraCbor, RawBlock, SlotTags, TxHash, TxOrder,
-    TxoRef,
+    ArchiveError, BlockBody, BlockSlot, ChainPoint, EntityValue, EraCbor, LogKey, Namespace,
+    RawBlock, SlotTags, StateSchema, TxHash, TxOrder, TxoRef,
 };
 
 use ::redb::Durability;
@@ -13,11 +13,19 @@ use pallas::ledger::traverse::MultiEraBlock;
 use redb::WriteTransaction;
 use std::sync::Arc;
 
+use crate::{build_tables, Error, Table};
+
 mod indexes;
 mod tables;
 
 #[derive(Debug)]
 pub struct RedbArchiveError(ArchiveError);
+
+impl From<Error> for RedbArchiveError {
+    fn from(error: Error) -> Self {
+        Self(ArchiveError::InternalError(error.to_string()))
+    }
+}
 
 impl From<ArchiveError> for RedbArchiveError {
     fn from(value: ArchiveError) -> Self {
@@ -33,61 +41,51 @@ impl From<RedbArchiveError> for ArchiveError {
 
 impl From<::redb::DatabaseError> for RedbArchiveError {
     fn from(value: ::redb::DatabaseError) -> Self {
-        Self(ArchiveError::InternalError(Box::new(::redb::Error::from(
-            value,
-        ))))
+        Self(ArchiveError::InternalError(value.to_string()))
     }
 }
 
 impl From<::redb::SetDurabilityError> for RedbArchiveError {
     fn from(value: ::redb::SetDurabilityError) -> Self {
-        Self(ArchiveError::InternalError(Box::new(::redb::Error::from(
-            value,
-        ))))
+        Self(ArchiveError::InternalError(value.to_string()))
     }
 }
 
 impl From<::redb::TableError> for RedbArchiveError {
     fn from(value: ::redb::TableError) -> Self {
-        Self(ArchiveError::InternalError(Box::new(::redb::Error::from(
-            value,
-        ))))
+        Self(ArchiveError::InternalError(value.to_string()))
     }
 }
 
 impl From<::redb::CommitError> for RedbArchiveError {
     fn from(value: ::redb::CommitError) -> Self {
-        Self(ArchiveError::InternalError(Box::new(::redb::Error::from(
-            value,
-        ))))
+        Self(ArchiveError::InternalError(value.to_string()))
     }
 }
 
 impl From<::redb::StorageError> for RedbArchiveError {
     fn from(value: ::redb::StorageError) -> Self {
-        Self(ArchiveError::InternalError(Box::new(::redb::Error::from(
-            value,
-        ))))
+        Self(ArchiveError::InternalError(value.to_string()))
     }
 }
 
 impl From<::redb::TransactionError> for RedbArchiveError {
     fn from(value: ::redb::TransactionError) -> Self {
-        Self(ArchiveError::InternalError(Box::new(::redb::Error::from(
-            value,
-        ))))
+        Self(ArchiveError::InternalError(value.to_string()))
     }
 }
 
 const DEFAULT_CACHE_SIZE_MB: usize = 500;
 
 #[derive(Clone)]
-pub struct ChainStore {
+pub struct ArchiveStore {
     db: Arc<Database>,
+    tables: HashMap<Namespace, Table>,
 }
 
-impl ChainStore {
+impl ArchiveStore {
     pub fn open(
+        schema: StateSchema,
         path: impl AsRef<Path>,
         cache_size: Option<usize>,
     ) -> Result<Self, RedbArchiveError> {
@@ -98,27 +96,46 @@ impl ChainStore {
             .set_cache_size(1024 * 1024 * cache_size.unwrap_or(DEFAULT_CACHE_SIZE_MB))
             .create(path)?;
 
-        Self::initialize(db)
+        let tables = build_tables(schema);
+        let store = Self {
+            db: db.into(),
+            tables: HashMap::from_iter(tables),
+        };
+
+        store.initialize()?;
+
+        Ok(store)
     }
 
-    pub fn in_memory() -> Result<Self, ArchiveError> {
+    pub fn in_memory(schema: StateSchema) -> Result<Self, RedbArchiveError> {
         let db = ::redb::Database::builder()
-            .create_with_backend(::redb::backends::InMemoryBackend::new())
-            .map_err(RedbArchiveError::from)?;
+            .create_with_backend(::redb::backends::InMemoryBackend::new())?;
 
-        Ok(Self::initialize(db)?)
+        let tables = build_tables(schema);
+        let store = Self {
+            db: db.into(),
+            tables: HashMap::from_iter(tables),
+        };
+
+        store.initialize()?;
+
+        Ok(store)
     }
 
-    pub fn initialize(db: Database) -> Result<Self, RedbArchiveError> {
-        let mut wx = db.begin_write()?;
+    pub fn initialize(&self) -> Result<(), RedbArchiveError> {
+        let mut wx = self.db().begin_write()?;
         wx.set_durability(Durability::Immediate)?;
+
+        for (_, table) in self.tables.iter() {
+            table.initialize(&mut wx)?;
+        }
 
         indexes::Indexes::initialize(&wx)?;
         tables::BlocksTable::initialize(&wx)?;
 
         wx.commit()?;
 
-        Ok(Self { db: Arc::new(db) })
+        Ok(())
     }
 
     pub fn db(&self) -> &Database {
@@ -145,18 +162,21 @@ impl ChainStore {
         &self,
         from: Option<BlockSlot>,
         to: Option<BlockSlot>,
-    ) -> Result<ChainRangeIter, RedbArchiveError> {
+    ) -> Result<ArchiveRangeIter, RedbArchiveError> {
         let rx = self.db().begin_read()?;
         let range = tables::BlocksTable::get_range(&rx, from, to)?;
-        Ok(ChainRangeIter(range))
+        Ok(ArchiveRangeIter(range))
     }
 
-    pub fn start_writer(&self) -> Result<ChainStoreWriter, RedbArchiveError> {
+    pub fn start_writer(&self) -> Result<ArchiveStoreWriter, RedbArchiveError> {
         let mut wx = self.db().begin_write()?;
         wx.set_durability(Durability::Immediate)?;
         wx.set_quick_repair(true);
 
-        Ok(ChainStoreWriter { wx })
+        Ok(ArchiveStoreWriter {
+            wx,
+            tables: self.tables.clone(),
+        })
     }
 
     pub fn find_intersect(
@@ -259,7 +279,7 @@ impl ChainStore {
         &self,
         account: &[u8],
     ) -> Result<Vec<BlockSlot>, RedbArchiveError> {
-        let rx = self.db().begin_read()?;
+        let rx = self.db().begin_read().map_err(Error::from)?;
         indexes::Indexes::get_by_account(&rx, account)
     }
 
@@ -267,7 +287,7 @@ impl ChainStore {
         &self,
         tx_hash: &[u8],
     ) -> Result<Vec<BlockSlot>, RedbArchiveError> {
-        let rx = self.db().begin_read()?;
+        let rx = self.db().begin_read().map_err(Error::from)?;
         indexes::Indexes::get_by_tx_hash(&rx, tx_hash)
     }
 
@@ -447,46 +467,46 @@ impl ChainStore {
     pub fn iter_possible_blocks_with_address(
         &self,
         address: &[u8],
-    ) -> Result<ChainSparseIter, RedbArchiveError> {
+    ) -> Result<ArchiveSparseIter, RedbArchiveError> {
         let rx = self.db().begin_read()?;
         let range = indexes::Indexes::iter_by_address(&rx, address)?;
-        Ok(ChainSparseIter(rx, range))
+        Ok(ArchiveSparseIter(rx, range))
     }
 
     pub fn iter_possible_blocks_with_asset(
         &self,
         asset: &[u8],
-    ) -> Result<ChainSparseIter, RedbArchiveError> {
+    ) -> Result<ArchiveSparseIter, RedbArchiveError> {
         let rx = self.db().begin_read()?;
         let range = indexes::Indexes::iter_by_asset(&rx, asset)?;
-        Ok(ChainSparseIter(rx, range))
+        Ok(ArchiveSparseIter(rx, range))
     }
 
     pub fn iter_possible_blocks_with_payment(
         &self,
         payment: &[u8],
-    ) -> Result<ChainSparseIter, RedbArchiveError> {
+    ) -> Result<ArchiveSparseIter, RedbArchiveError> {
         let rx = self.db().begin_read()?;
         let range = indexes::Indexes::iter_by_payment(&rx, payment)?;
-        Ok(ChainSparseIter(rx, range))
+        Ok(ArchiveSparseIter(rx, range))
     }
 
     pub fn iter_possible_blocks_with_stake(
         &self,
         stake: &[u8],
-    ) -> Result<ChainSparseIter, RedbArchiveError> {
+    ) -> Result<ArchiveSparseIter, RedbArchiveError> {
         let rx = self.db().begin_read()?;
         let range = indexes::Indexes::iter_by_stake(&rx, stake)?;
-        Ok(ChainSparseIter(rx, range))
+        Ok(ArchiveSparseIter(rx, range))
     }
 
     pub fn iter_possible_blocks_with_account_certs(
         &self,
         account: &[u8],
-    ) -> Result<ChainSparseIter, RedbArchiveError> {
+    ) -> Result<ArchiveSparseIter, RedbArchiveError> {
         let rx = self.db().begin_read()?;
         let range = indexes::Indexes::iter_by_account_certs(&rx, account)?;
-        Ok(ChainSparseIter(rx, range))
+        Ok(ArchiveSparseIter(rx, range))
     }
 
     pub fn get_block_by_slot(
@@ -643,17 +663,28 @@ impl ChainStore {
         wx.set_quick_repair(true);
 
         tables::BlocksTable::remove_before(&wx, prune_before)?;
+        let temporal = prune_before.into();
+        self.tables.values().try_for_each(|x| {
+            x.remove_before(&wx, &temporal)
+                .map_err(RedbArchiveError::from)
+        })?;
 
         wx.commit()?;
 
         Ok(done)
     }
 
-    fn truncate_front(&self, after: BlockSlot) -> Result<(), RedbArchiveError> {
+    fn truncate_front(&self, after: &ChainPoint) -> Result<(), RedbArchiveError> {
         let mut wx = self.db().begin_write()?;
         wx.set_quick_repair(true);
 
-        tables::BlocksTable::remove_after(&wx, after)?;
+        tables::BlocksTable::remove_after(&wx, after.slot())?;
+
+        let temporal = after.into();
+        self.tables.values().try_for_each(|x| {
+            x.remove_after(&wx, &temporal)
+                .map_err(RedbArchiveError::from)
+        })?;
 
         wx.commit()?;
 
@@ -661,19 +692,12 @@ impl ChainStore {
     }
 }
 
-impl From<Database> for ChainStore {
-    fn from(value: Database) -> Self {
-        Self {
-            db: Arc::new(value),
-        }
-    }
-}
-
-pub struct ChainStoreWriter {
+pub struct ArchiveStoreWriter {
     wx: WriteTransaction,
+    tables: HashMap<Namespace, Table>,
 }
 
-impl dolos_core::ArchiveWriter for ChainStoreWriter {
+impl dolos_core::ArchiveWriter for ArchiveStoreWriter {
     fn apply(
         &self,
         point: &ChainPoint,
@@ -698,12 +722,67 @@ impl dolos_core::ArchiveWriter for ChainStoreWriter {
 
         Ok(())
     }
+
+    fn write_log(
+        &self,
+        ns: Namespace,
+        key: &dolos_core::LogKey,
+        value: &dolos_core::EntityValue,
+    ) -> Result<(), ArchiveError> {
+        let table = self
+            .tables
+            .get(&ns)
+            .ok_or(ArchiveError::NamespaceNotFound(ns))?;
+
+        table
+            .write(&self.wx, key, value)
+            .map_err(RedbArchiveError::from)?;
+
+        Ok(())
+    }
 }
 
-impl dolos_core::ArchiveStore for ChainStore {
-    type BlockIter<'a> = ChainRangeIter;
-    type SparseBlockIter = ChainSparseIter;
-    type Writer = ChainStoreWriter;
+pub struct LogIter(pub(crate) ::redb::Range<'static, &'static [u8], &'static [u8]>);
+
+impl Iterator for LogIter {
+    type Item = Result<(LogKey, EntityValue), ArchiveError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let next = self.0.next()?;
+
+        let entry = next
+            .map(|(k, v)| (k.value().to_vec(), v.value().to_vec()))
+            .map(|(k, v)| (LogKey::from(k), v))
+            .map_err(RedbArchiveError::from)
+            .map_err(ArchiveError::from);
+
+        Some(entry)
+    }
+}
+
+pub struct EntityValueIter(pub(crate) ::redb::MultimapValue<'static, &'static [u8]>);
+
+impl Iterator for EntityValueIter {
+    type Item = Result<EntityValue, ArchiveError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let next = self.0.next()?;
+
+        let entry = next
+            .map(|v| v.value().to_vec())
+            .map_err(RedbArchiveError::from)
+            .map_err(ArchiveError::from);
+
+        Some(entry)
+    }
+}
+
+impl dolos_core::ArchiveStore for ArchiveStore {
+    type BlockIter<'a> = ArchiveRangeIter;
+    type SparseBlockIter = ArchiveSparseIter;
+    type Writer = ArchiveStoreWriter;
+    type LogIter = LogIter;
+    type EntityValueIter = EntityValueIter;
 
     fn start_writer(&self) -> Result<Self::Writer, ArchiveError> {
         Ok(Self::start_writer(self)?)
@@ -804,14 +883,62 @@ impl dolos_core::ArchiveStore for ChainStore {
         Ok(Self::prune_history(self, max_slots, max_prune)?)
     }
 
-    fn truncate_front(&self, after: BlockSlot) -> Result<(), ArchiveError> {
+    fn truncate_front(&self, after: &ChainPoint) -> Result<(), ArchiveError> {
         Ok(Self::truncate_front(self, after)?)
+    }
+
+    fn read_logs(
+        &self,
+        ns: Namespace,
+        keys: &[&dolos_core::LogKey],
+    ) -> Result<Vec<Option<dolos_core::EntityValue>>, ArchiveError> {
+        let mut rx = self.db().begin_read().map_err(RedbArchiveError::from)?;
+
+        let table = self
+            .tables
+            .get(&ns)
+            .ok_or(ArchiveError::NamespaceNotFound(ns))?;
+
+        let mut out = vec![];
+
+        for key in keys {
+            let value = table
+                .read_value(&mut rx, key.as_ref())
+                .map_err(RedbArchiveError::from)?;
+            out.push(value);
+        }
+
+        Ok(out)
+    }
+
+    fn iter_logs(
+        &self,
+        ns: Namespace,
+        range: std::ops::Range<dolos_core::LogKey>,
+    ) -> Result<Self::LogIter, ArchiveError> {
+        let mut rx = self.db().begin_read().map_err(RedbArchiveError::from)?;
+
+        let range = std::ops::Range {
+            start: range.start.as_ref(),
+            end: range.end.as_ref(),
+        };
+
+        let table = self
+            .tables
+            .get(&ns)
+            .ok_or(ArchiveError::NamespaceNotFound(ns))?;
+
+        let values = table
+            .range(&mut rx, range)
+            .map_err(RedbArchiveError::from)?;
+
+        Ok(LogIter(values))
     }
 }
 
-pub struct ChainRangeIter(Range<'static, BlockSlot, BlockBody>);
+pub struct ArchiveRangeIter(Range<'static, BlockSlot, BlockBody>);
 
-impl Iterator for ChainRangeIter {
+impl Iterator for ArchiveRangeIter {
     type Item = (BlockSlot, BlockBody);
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -822,7 +949,7 @@ impl Iterator for ChainRangeIter {
     }
 }
 
-impl DoubleEndedIterator for ChainRangeIter {
+impl DoubleEndedIterator for ArchiveRangeIter {
     fn next_back(&mut self) -> Option<Self::Item> {
         self.0
             .next_back()
@@ -831,9 +958,9 @@ impl DoubleEndedIterator for ChainRangeIter {
     }
 }
 
-pub struct ChainSparseIter(ReadTransaction, indexes::SlotKeyIterator);
+pub struct ArchiveSparseIter(ReadTransaction, indexes::SlotKeyIterator);
 
-impl Iterator for ChainSparseIter {
+impl Iterator for ArchiveSparseIter {
     type Item = Result<(BlockSlot, Option<BlockBody>), ArchiveError>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -853,7 +980,7 @@ impl Iterator for ChainSparseIter {
     }
 }
 
-impl DoubleEndedIterator for ChainSparseIter {
+impl DoubleEndedIterator for ArchiveSparseIter {
     fn next_back(&mut self) -> Option<Self::Item> {
         let next = self.1.next_back()?;
 

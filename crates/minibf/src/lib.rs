@@ -6,7 +6,7 @@ use axum::{
 };
 use dolos_cardano::{
     model::{AccountState, AssetState, DRepState, EpochState, FixedNamespace, PoolState},
-    ChainSummary, PParamsSet,
+    ChainSummary, Epoch, PParamsSet,
 };
 use itertools::Itertools;
 use pallas::{crypto::hash::Hash, ledger::addresses::Network};
@@ -21,8 +21,8 @@ use tower_http::{cors::CorsLayer, normalize_path::NormalizePathLayer, trace};
 use tracing::Level;
 
 use dolos_core::{
-    ArchiveStore as _, BlockSlot, CancelToken, Domain, Entity, EntityKey, EraCbor, ServeError,
-    StateError, StateStore as _, TxOrder,
+    ArchiveStore as _, BlockSlot, CancelToken, Domain, Entity, EntityKey, EraCbor, LogKey,
+    ServeError, StateError, StateStore as _, TemporalKey, TxOrder,
 };
 
 mod error;
@@ -143,6 +143,32 @@ impl<D: Domain> Facade<D> {
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
         Ok(mapped)
+    }
+
+    pub fn iter_cardano_logs_per_epoch<T>(
+        &self,
+        key: EntityKey,
+        range: Range<Epoch>,
+    ) -> Result<Vec<(Epoch, T)>, StatusCode>
+    where
+        T: FixedNamespace + Entity,
+    {
+        let summary = self.get_chain_summary()?;
+
+        let mut out = vec![];
+        for epoch in range {
+            let slot = summary.epoch_start(epoch as u64);
+            let logkey: LogKey = (TemporalKey::from(slot), key.clone()).into();
+            if let Some(entity) = self
+                .archive()
+                .read_log_typed::<T>(T::NS, &logkey)
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            {
+                out.push((epoch, entity));
+            }
+        }
+
+        Ok(out)
     }
 
     pub fn read_cardano_entity<T>(&self, key: impl Into<EntityKey>) -> Result<Option<T>, StatusCode>

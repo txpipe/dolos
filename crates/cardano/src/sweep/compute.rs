@@ -1,12 +1,13 @@
-use dolos_core::{BrokenInvariant, ChainError, Genesis};
+use dolos_core::{BrokenInvariant, ChainError, Domain, Genesis, StateStore as _};
 use pallas::ledger::primitives::RationalNumber;
 use tracing::{debug, instrument, trace};
 
 use crate::{
     forks,
-    sweep::{BoundaryWork, EraTransition, PoolData, PotDelta, Pots},
-    utils::{epoch_first_slot, nonce_stability_window},
-    DRepState, EpochState, EraProtocol, Nonces, PParamsSet,
+    sweep::{BoundaryVisitor as _, BoundaryWork, EraTransition, PotDelta, Pots},
+    utils::nonce_stability_window,
+    AccountState, DRepState, EpochState, EraProtocol, FixedNamespace as _, Nonces, PParamsSet,
+    PoolState,
 };
 
 macro_rules! as_ratio {
@@ -81,44 +82,6 @@ pub fn compute_genesis_pots(
     Ok(out)
 }
 
-pub type TotalPoolReward = u64;
-pub type OperatorShare = u64;
-
-fn compute_pool_reward(
-    total_rewards: u64,
-    total_active_stake: u64,
-    pool: &PoolData,
-    pool_stake: u64,
-    k: u32,
-    a0: &RationalNumber,
-) -> (TotalPoolReward, OperatorShare) {
-    let z0 = 1.0 / k as f64;
-    let sigma = pool_stake as f64 / total_active_stake as f64;
-    let s = pool.declared_pledge as f64 / total_active_stake as f64;
-    let sigma_prime = sigma.min(z0);
-
-    let r = total_rewards as f64;
-    let a0 = a0.numerator as f64 / a0.denominator as f64;
-    let r_pool = r * (sigma_prime + s.min(sigma) * a0 * (sigma_prime - sigma));
-
-    let r_pool_u64 = r_pool.round() as u64;
-    let after_cost = r_pool_u64.saturating_sub(pool.fixed_cost);
-    let pool_margin_cost = pool.margin_cost.numerator as f64 / pool.margin_cost.denominator as f64;
-    let operator_share = pool.fixed_cost + ((after_cost as f64) * pool_margin_cost).round() as u64;
-
-    (r_pool_u64, operator_share)
-}
-
-#[allow(unused)]
-fn compute_delegator_reward(
-    available_rewards: u64,
-    total_delegated: u64,
-    delegator_stake: u64,
-) -> u64 {
-    let share = (delegator_stake as f64 / total_delegated as f64) * available_rewards as f64;
-    share.round() as u64
-}
-
 impl BoundaryWork {
     pub fn initial_pots(&self) -> Pots {
         Pots {
@@ -185,7 +148,7 @@ impl BoundaryWork {
     }
 
     /// Check if the starting epoch is still within the byron era.
-    fn still_byron(&self) -> bool {
+    pub fn still_byron(&self) -> bool {
         self.active_protocol < 2 && !self.is_transitioning_to_shelley()
     }
 
@@ -226,47 +189,6 @@ impl BoundaryWork {
         Ok(())
     }
 
-    fn define_pool_rewards(&mut self) -> Result<(), ChainError> {
-        // if we're still in Byron, we just skip the pool rewards computation and assume
-        // zero effective rewards.
-        if self.still_byron() {
-            self.effective_rewards = Some(0);
-            return Ok(());
-        }
-
-        let pot_delta = self
-            .pot_delta
-            .as_ref()
-            .ok_or(ChainError::from(BrokenInvariant::EpochBoundaryIncomplete))?;
-
-        let mut effective_rewards = 0;
-
-        for (id, pool) in self.pools.iter() {
-            let pool_stake = self.active_snapshot.get_pool_stake(id);
-
-            let (total_pool_reward, _operator_share) = compute_pool_reward(
-                pot_delta.available_rewards,
-                self.active_snapshot.total_stake,
-                pool,
-                pool_stake,
-                self.valid_k()?,
-                &self.valid_a0()?,
-            );
-
-            effective_rewards += total_pool_reward;
-            self.pool_rewards.insert(id.clone(), total_pool_reward);
-
-            for (delegator, stake) in self.active_snapshot.accounts_by_pool.iter_delegators(id) {
-                let reward = compute_delegator_reward(total_pool_reward, pool_stake, *stake);
-                self.delegator_rewards.insert(delegator.clone(), reward);
-            }
-        }
-
-        self.effective_rewards = Some(effective_rewards);
-
-        Ok(())
-    }
-
     fn define_starting_nonces(&mut self) -> Result<Option<Nonces>, ChainError> {
         if self.is_transitioning_to_shelley() {
             let initial = Nonces::bootstrap(self.shelley_hash);
@@ -288,14 +210,17 @@ impl BoundaryWork {
         Ok(new_nonces)
     }
 
-    fn define_starting_state(&mut self, genesis: &Genesis) -> Result<(), ChainError> {
+    // TODO: since we don't have a nice way to update epochs via delta given the
+    // race conditions in the fixed keys. We should probably move to sequential
+    // keys for epochs. Ideally, the new epoch should be created via delta.
+    fn define_starting_state(
+        &mut self,
+        genesis: &Genesis,
+        effective_rewards: u64,
+    ) -> Result<(), ChainError> {
         let pot_delta = self
             .pot_delta
             .as_ref()
-            .ok_or(ChainError::from(BrokenInvariant::EpochBoundaryIncomplete))?;
-
-        let effective_rewards = self
-            .effective_rewards
             .ok_or(ChainError::from(BrokenInvariant::EpochBoundaryIncomplete))?;
 
         let unused_rewards = pot_delta
@@ -324,7 +249,9 @@ impl BoundaryWork {
             reserves,
             treasury,
             pparams,
-            largest_stable_slot: epoch_first_slot(self.ending_state.number + 2, &self.active_era)
+            largest_stable_slot: self
+                .active_era
+                .epoch_start(self.ending_state.number as u64 + 2)
                 - nonce_stability_window(self.active_protocol.into(), genesis),
             nonces,
 
@@ -369,93 +296,60 @@ impl BoundaryWork {
         Ok(())
     }
 
-    pub fn starting_epoch_no(&self) -> u64 {
-        self.ending_state.number as u64 + 1
-    }
-
-    fn should_retire_pool(&self, pool: &PoolData) -> bool {
-        let Some(retiring_epoch) = pool.retiring_epoch else {
-            return false;
-        };
-
-        retiring_epoch <= self.starting_epoch_no()
-    }
-
-    fn retire_pools(&mut self) -> Result<(), ChainError> {
-        for (pool_id, pool) in self.pools.iter() {
-            if !self.should_retire_pool(pool) {
-                continue;
-            }
-
-            let delegators = self
-                .ending_snapshot
-                .accounts_by_pool
-                .iter_delegators(pool_id);
-
-            // TODO: understand if the dropped stake should be redistributed somewhere
-            for (delegator, _stake) in delegators {
-                self.dropped_pool_delegators.insert(delegator.clone());
-            }
-
-            // TODO: return pledge deposit to owners
-        }
-
-        Ok(())
-    }
-
-    fn should_retire_drep(&self, drep: &DRepState) -> Result<bool, ChainError> {
-        let last_activity_slot = drep
-            .last_active_slot
-            .unwrap_or(drep.initial_slot.unwrap_or_default());
-
-        let (last_activity_epoch, _) = self.active_era.slot_epoch(last_activity_slot);
-
-        let retiring_epoch = last_activity_epoch as u64 + self.valid_drep_inactivity_period()?;
-
-        Ok(retiring_epoch <= self.starting_epoch_no())
-    }
-
-    fn retire_dreps(&mut self) -> Result<(), ChainError> {
-        for (drep_id, drep) in self.dreps.iter() {
-            if !self.should_retire_drep(drep)? {
-                continue;
-            }
-
-            debug!(%drep_id, "drep should retire");
-
-            self.retired_dreps.insert(drep_id.clone());
-
-            for (delegator, _) in self
-                .ending_snapshot
-                .accounts_by_drep
-                .iter_delegators(drep_id)
-            {
-                self.dropped_drep_delegators.insert(delegator.clone());
-            }
-        }
-
-        Ok(())
-    }
-
     #[instrument(skip_all)]
-    pub fn compute(&mut self, genesis: &Genesis) -> Result<(), ChainError> {
+    pub fn compute<D: Domain>(&mut self, domain: &D) -> Result<(), ChainError> {
         trace!("defining pot delta");
         self.define_pot_delta()?;
 
-        trace!("retiring pools");
-        self.retire_pools()?;
+        let mut visitor_retires = super::retires::BoundaryVisitor::default();
+        let mut visitor_rewards = super::rewards::BoundaryVisitor::default();
+        let mut visitor_rotate = super::transition::BoundaryVisitor::default();
 
-        trace!("retiring dreps");
-        self.retire_dreps()?;
+        let pools = domain
+            .state()
+            .iter_entities_typed::<PoolState>(PoolState::NS, None)?;
 
-        trace!("defining pool rewards");
-        self.define_pool_rewards()?;
+        for pool in pools {
+            let (pool_id, pool) = pool?;
+
+            visitor_retires.visit_pool(self, &pool_id, &pool)?;
+            visitor_rewards.visit_pool(self, &pool_id, &pool)?;
+            visitor_rotate.visit_pool(self, &pool_id, &pool)?;
+        }
+
+        let dreps = domain
+            .state()
+            .iter_entities_typed::<DRepState>(DRepState::NS, None)?;
+
+        for drep in dreps {
+            let (drep_id, drep) = drep?;
+
+            visitor_retires.visit_drep(self, &drep_id, &drep)?;
+            visitor_rewards.visit_drep(self, &drep_id, &drep)?;
+            visitor_rotate.visit_drep(self, &drep_id, &drep)?;
+        }
+
+        let accounts = domain
+            .state()
+            .iter_entities_typed::<AccountState>(AccountState::NS, None)?;
+
+        for account in accounts {
+            let (account_id, account) = account?;
+
+            visitor_retires.visit_account(self, &account_id, &account)?;
+            visitor_rewards.visit_account(self, &account_id, &account)?;
+            visitor_rotate.visit_account(self, &account_id, &account)?;
+        }
+
+        visitor_retires.flush(self)?;
+        visitor_rewards.flush(self)?;
+        visitor_rotate.flush(self)?;
 
         trace!("defining era transition");
-        self.define_era_transition(genesis)?;
+        self.define_era_transition(domain.genesis())?;
 
         trace!("defining starting state");
-        self.define_starting_state(genesis)?;
+        self.define_starting_state(domain.genesis(), visitor_rewards.total_rewards)?;
 
         Ok(())
     }
@@ -547,25 +441,17 @@ mod tests {
             },
             ending_snapshot: Snapshot::empty(),
             shelley_hash: [0; 32].as_slice().into(),
-            pools: Default::default(),
-            dreps: Default::default(),
 
             // empty until computed
-            dropped_pool_delegators: HashSet::new(),
-            dropped_drep_delegators: HashSet::new(),
-            retired_dreps: HashSet::new(),
-            pool_rewards: Default::default(),
-            delegator_rewards: Default::default(),
+            deltas: Default::default(),
             starting_state: None,
             pot_delta: None,
-            effective_rewards: None,
             era_transition: None,
         };
 
-        let genesis =
-            Genesis::from_file_paths(byron, shelley, alonzo, conway, force_protocol).unwrap();
+        let domain = todo!();
 
-        boundary.compute(&genesis).unwrap();
+        boundary.compute(&domain).unwrap();
 
         let starting_state = boundary.starting_state.unwrap();
 

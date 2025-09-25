@@ -496,11 +496,20 @@ pub enum ChainError {
     #[error("decoding error")]
     DecodingError(#[from] pallas::ledger::traverse::Error),
 
+    #[error("cbor error")]
+    CborDecodingError(#[from] pallas::codec::minicbor::decode::Error),
+
+    #[error("invalid namespace: {0}")]
+    InvalidNamespace(Namespace),
+
     #[error("address decoding error")]
     AddressDecoding(#[from] pallas::ledger::addresses::Error),
 
     #[error(transparent)]
     StateError(#[from] StateError),
+
+    #[error(transparent)]
+    ArchiveError(#[from] ArchiveError),
 
     #[error("protocol params not found: {0}")]
     PParamsNotFound(String),

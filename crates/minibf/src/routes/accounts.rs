@@ -15,9 +15,10 @@ use blockfrost_openapi::models::{
 };
 
 use dolos_cardano::{model::AccountState, pallas_extras, ChainSummary, RewardLog};
-use dolos_core::{ArchiveStore, Domain, StateStore};
+use dolos_core::{ArchiveStore, Domain, EntityKey, StateStore};
 use pallas::{
     codec::minicbor,
+    crypto::hash::Hash,
     ledger::{
         addresses::{Address, Network, StakeAddress, StakePayload},
         traverse::{MultiEraBlock, MultiEraCert, MultiEraTx},
@@ -519,49 +520,48 @@ where
     Ok(Json(items))
 }
 
-impl IntoModel<AccountRewardContentInner> for RewardLog {
-    type SortKey = ();
-
-    fn into_model(self) -> Result<AccountRewardContentInner, StatusCode> {
-        let pool_id = mapping::bech32_pool(self.pool_id)?;
-
-        let r#type = if self.as_leader {
-            blockfrost_openapi::models::account_reward_content_inner::Type::Leader
-        } else {
-            blockfrost_openapi::models::account_reward_content_inner::Type::Member
-        };
-
-        let out = AccountRewardContentInner {
-            epoch: self.epoch as i32,
-            amount: self.amount.to_string(),
-            pool_id,
-            r#type,
-        };
-
-        Ok(out)
-    }
-}
-
 pub async fn by_stake_rewards<D: Domain>(
     Path(stake_address): Path<String>,
     Query(params): Query<PaginationParameters>,
-    State(_domain): State<Facade<D>>,
+    State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<AccountRewardContentInner>>, Error>
 where
     Option<AccountState>: From<D::Entity>,
 {
     let pagination = Pagination::try_from(params)?;
+    let account_key = parse_account_key_param(&stake_address)?;
+    let tip = domain.get_tip_slot()?;
+    let summary = domain.get_chain_summary()?;
+    let (epoch, _) = summary.slot_epoch(tip);
 
-    let _account_key = parse_account_key_param(&stake_address)?;
+    let rewards = domain
+        .iter_cardano_logs_per_epoch::<RewardLog>(account_key.entity_key.into(), 0..epoch)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // TODO: scan archive logs
-
-    let mapped: Vec<_> = vec![]
+    let mapped: Vec<_> = rewards
         .into_iter()
         .skip(pagination.skip())
         .take(pagination.count)
-        .map(|x: RewardLog| x.into_model())
-        .collect::<Result<Vec<_>, _>>()?;
+        .map(|(epoch, reward)| {
+            let operator = Hash::<28>::from(EntityKey::from(reward.pool_id));
+            let pool_id = mapping::bech32_pool(operator)?;
+
+            let r#type = if reward.as_leader {
+                blockfrost_openapi::models::account_reward_content_inner::Type::Leader
+            } else {
+                blockfrost_openapi::models::account_reward_content_inner::Type::Member
+            };
+
+            let out = AccountRewardContentInner {
+                epoch: epoch as i32,
+                amount: reward.amount.to_string(),
+                pool_id,
+                r#type,
+            };
+
+            Ok(out)
+        })
+        .collect::<Result<Vec<_>, StatusCode>>()?;
 
     Ok(Json(mapped))
 }

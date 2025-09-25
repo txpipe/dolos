@@ -594,7 +594,7 @@ impl<'a> TxModelBuilder<'a> {
                     return Some(dbg!(key_deposit));
                 }
 
-                if pallas_extras::cert_to_pool_state(x).is_some() {
+                if pallas_extras::cert_as_pool_registration(x).is_some() {
                     return Some(dbg!(pool_deposit));
                 }
 
@@ -1013,7 +1013,8 @@ impl TxModelBuilder<'_> {
         let unit_mem = redeemer.ex_units().mem;
         let unit_steps = redeemer.ex_units().steps;
 
-        let fee = (unit_mem * mem_price.numerator + unit_steps * step_price.numerator)
+        let fee = (unit_mem * mem_price.numerator * step_price.denominator
+            + unit_steps * step_price.numerator * mem_price.denominator)
             / (mem_price.denominator * step_price.denominator);
 
         let out = TxContentRedeemersInner {

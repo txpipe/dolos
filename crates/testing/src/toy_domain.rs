@@ -5,7 +5,8 @@ use dolos_core::*;
 use futures_util::stream::StreamExt;
 
 pub fn seed_random_memory_store(utxo_generator: impl UtxoGenerator) -> impl StateStore {
-    let store = dolos_redb3::StateStore::in_memory(dolos_cardano::model::build_schema()).unwrap();
+    let store =
+        dolos_redb3::state::StateStore::in_memory(dolos_cardano::model::build_schema()).unwrap();
 
     let everyone = TestAddress::everyone();
     let utxos_per_address = 2..4;
@@ -78,19 +79,19 @@ impl dolos_core::MempoolStore for Mempool {
 pub struct ToyDomain {
     wal: dolos_redb::wal::RedbWalStore<dolos_cardano::CardanoDelta>,
     chain: dolos_cardano::CardanoLogic,
-    archive: dolos_redb::archive::ChainStore,
+    state: dolos_redb3::state::StateStore,
+    archive: dolos_redb3::archive::ArchiveStore,
     mempool: Mempool,
     storage_config: dolos_core::StorageConfig,
     genesis: Arc<dolos_core::Genesis>,
-    state: dolos_redb3::StateStore,
     tip_broadcast: tokio::sync::broadcast::Sender<TipEvent>,
 }
 
 impl ToyDomain {
     /// Create a new MockDomain with the provided state implementation
     pub fn new(initial_delta: Option<UtxoSetDelta>, storage_config: Option<StorageConfig>) -> Self {
-        let state =
-            dolos_redb3::StateStore::in_memory(dolos_cardano::model::build_schema()).unwrap();
+        let state = dolos_redb3::state::StateStore::in_memory(dolos_cardano::model::build_schema())
+            .unwrap();
 
         if let Some(delta) = initial_delta {
             let writer = state.start_writer().unwrap();
@@ -100,11 +101,15 @@ impl ToyDomain {
 
         let (tip_broadcast, _) = tokio::sync::broadcast::channel(100);
 
+        let archive =
+            dolos_redb3::archive::ArchiveStore::in_memory(dolos_cardano::model::build_schema())
+                .unwrap();
+
         Self {
             state,
             wal: dolos_redb::wal::RedbWalStore::memory().unwrap(),
             chain: dolos_cardano::CardanoLogic::new(dolos_cardano::Config::default()),
-            archive: dolos_redb::archive::ChainStore::in_memory().unwrap(),
+            archive,
             mempool: Mempool {},
             storage_config: storage_config.unwrap_or_default(),
             genesis: Arc::new(dolos_cardano::include::devnet::load()),
@@ -133,11 +138,11 @@ impl dolos_core::Domain for ToyDomain {
     type Entity = dolos_cardano::CardanoEntity;
     type EntityDelta = dolos_cardano::CardanoDelta;
     type Wal = dolos_redb::wal::RedbWalStore<dolos_cardano::CardanoDelta>;
-    type Archive = dolos_redb::archive::ChainStore;
-    type Mempool = Mempool;
+    type Archive = dolos_redb3::archive::ArchiveStore;
+    type State = dolos_redb3::state::StateStore;
     type Chain = dolos_cardano::CardanoLogic;
     type TipSubscription = TipSubscription;
-    type State = dolos_redb3::StateStore;
+    type Mempool = Mempool;
 
     fn storage_config(&self) -> &dolos_core::StorageConfig {
         &self.storage_config
