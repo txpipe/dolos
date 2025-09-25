@@ -1,4 +1,3 @@
-
 use itertools::Itertools as _;
 use miette::{Context, IntoDiagnostic};
 
@@ -16,7 +15,7 @@ fn clear_state(config: &crate::Config, ns: Namespace) -> miette::Result<()> {
     let writer = state.start_writer().into_diagnostic()?;
 
     let all_keys = state
-        .iter_entities(ns, full_range())
+        .iter_entities(ns, EntityKey::full_range())
         .into_diagnostic()
         .context("iterating entities")?
         .map_ok(|(key, _)| key);

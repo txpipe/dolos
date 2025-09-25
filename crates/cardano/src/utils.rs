@@ -2,7 +2,7 @@ use chrono::DateTime;
 use dolos_core::*;
 use pallas::ledger::validate::utils::{ConwayProtParams, MultiEraProtocolParameters};
 
-use crate::{EraSummary, PParamsSet};
+use crate::PParamsSet;
 
 /// Computes the amount of mutable slots in chain.
 ///
@@ -53,10 +53,6 @@ pub fn nonce_stability_window(protocol: u16, genesis: &Genesis) -> u64 {
 /// which slots can be finalized in the ledger store (aka: compaction).
 pub fn lastest_immutable_slot(tip: BlockSlot, genesis: &Genesis) -> BlockSlot {
     tip.saturating_sub(mutable_slots(genesis))
-}
-
-pub fn epoch_first_slot(epoch: u32, era: &EraSummary) -> BlockSlot {
-    era.start.slot + (epoch as u64 - era.start.epoch) * era.epoch_length
 }
 
 pub fn float_to_rational(x: f32) -> pallas::ledger::primitives::conway::RationalNumber {

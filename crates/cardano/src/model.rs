@@ -1,8 +1,7 @@
 use std::cmp::Ordering;
 
 use dolos_core::{
-    BlockSlot, ChainError, EntityKey, EntityValue, Namespace, NamespaceType, NsKey, StateError,
-    StateSchema,
+    BlockSlot, ChainError, EntityKey, EntityValue, Namespace, NamespaceType, NsKey, StateSchema,
 };
 use pallas::{
     codec::minicbor::{self, Decode, Encode},
@@ -46,7 +45,7 @@ macro_rules! entity_boilerplate {
         }
 
         impl dolos_core::Entity for $type {
-            fn decode_entity(ns: Namespace, value: &EntityValue) -> Result<Self, StateError> {
+            fn decode_entity(ns: Namespace, value: &EntityValue) -> Result<Self, ChainError> {
                 assert_eq!(ns, $type::NS);
                 let value = pallas::codec::minicbor::decode(value)?;
                 Ok(value)
@@ -63,17 +62,24 @@ macro_rules! entity_boilerplate {
 #[derive(Debug, Clone, PartialEq, Eq, Decode, Encode, Default)]
 pub struct RewardLog {
     #[n(0)]
-    pub epoch: u32,
-
-    #[n(1)]
     pub amount: u64,
 
-    #[n(2)]
+    #[n(1)]
     pub pool_id: Vec<u8>,
 
-    #[n(3)]
+    #[n(2)]
     pub as_leader: bool,
 }
+
+entity_boilerplate!(RewardLog, "rewards");
+
+#[derive(Debug, Clone, PartialEq, Eq, Decode, Encode, Default)]
+pub struct StakeLog {
+    #[n(0)]
+    pub amount: u64,
+}
+
+entity_boilerplate!(StakeLog, "stakes");
 
 #[derive(Debug, Clone, PartialEq, Eq, Decode, Encode, Default)]
 pub struct AccountState {
@@ -940,7 +946,7 @@ variant_boilerplate!(EpochState);
 variant_boilerplate!(DRepState);
 
 impl dolos_core::Entity for CardanoEntity {
-    fn decode_entity(ns: Namespace, value: &EntityValue) -> Result<Self, StateError> {
+    fn decode_entity(ns: Namespace, value: &EntityValue) -> Result<Self, ChainError> {
         match ns {
             EraSummary::NS => EraSummary::decode_entity(ns, value).map(Into::into),
             AccountState::NS => AccountState::decode_entity(ns, value).map(Into::into),
@@ -948,7 +954,7 @@ impl dolos_core::Entity for CardanoEntity {
             PoolState::NS => PoolState::decode_entity(ns, value).map(Into::into),
             EpochState::NS => EpochState::decode_entity(ns, value).map(Into::into),
             DRepState::NS => DRepState::decode_entity(ns, value).map(Into::into),
-            _ => Err(StateError::InvalidNamespace(ns)),
+            _ => Err(ChainError::InvalidNamespace(ns)),
         }
     }
 
@@ -990,6 +996,8 @@ pub fn build_schema() -> StateSchema {
     schema.insert(PoolState::NS, NamespaceType::KeyValue);
     schema.insert(EpochState::NS, NamespaceType::KeyValue);
     schema.insert(DRepState::NS, NamespaceType::KeyValue);
+    schema.insert(RewardLog::NS, NamespaceType::KeyValue);
+    schema.insert(StakeLog::NS, NamespaceType::KeyValue);
     schema
 }
 

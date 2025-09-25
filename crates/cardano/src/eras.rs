@@ -1,4 +1,4 @@
-use dolos_core::{ChainError, Domain, StateStore as _};
+use dolos_core::{BlockSlot, ChainError, Domain, StateStore as _};
 
 use crate::{model::EraSummary, EraBoundary, EraProtocol, FixedNamespace as _};
 
@@ -20,6 +20,10 @@ impl EraSummary {
         let time = self.start.timestamp + (slot - self.start.slot) * self.slot_length;
 
         time as Timestamp
+    }
+
+    pub fn epoch_start(&self, epoch: u64) -> BlockSlot {
+        self.start.slot + (epoch - self.start.epoch) * self.epoch_length
     }
 
     pub fn define_end(&mut self, at_epoch: u64) {
@@ -53,6 +57,11 @@ impl ChainSummary {
     pub fn slot_epoch(&self, slot: u64) -> (Epoch, EpochSlot) {
         let era = self.era_for_slot(slot);
         era.slot_epoch(slot)
+    }
+
+    pub fn epoch_start(&self, epoch: u64) -> BlockSlot {
+        let era = self.era_for_epoch(epoch);
+        era.epoch_start(epoch)
     }
 
     /// Resolve wall-clock time from a slot number and a chain summary.

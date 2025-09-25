@@ -37,15 +37,10 @@ fn prepare_wal(
 }
 
 fn prepare_chain(
-    chain: dolos::adapters::ArchiveAdapter,
+    archive: &mut dolos_redb3::archive::ArchiveStore,
     pb: &crate::feedback::ProgressBar,
 ) -> miette::Result<()> {
-    let mut chain = match chain {
-        dolos::adapters::ArchiveAdapter::Redb(x) => x,
-        _ => miette::bail!("Only redb is supported for export"),
-    };
-
-    let db = chain.db_mut();
+    let db = archive.db_mut();
     pb.set_message("compacting chain");
     db.compact().into_diagnostic()?;
 
@@ -66,7 +61,7 @@ pub fn run(
     let encoder = GzEncoder::new(export_file, Compression::default());
     let mut archive = Builder::new(encoder);
 
-    let stores = crate::common::setup_data_stores(config)?;
+    let mut stores = crate::common::setup_data_stores(config)?;
 
     prepare_wal(stores.wal, &pb)?;
 
@@ -78,7 +73,7 @@ pub fn run(
         .append_path_with_name(&path, "wal")
         .into_diagnostic()?;
 
-    prepare_chain(stores.archive, &pb)?;
+    prepare_chain(&mut stores.archive, &pb)?;
 
     if args.include_chain {
         let path = root.join("chain");

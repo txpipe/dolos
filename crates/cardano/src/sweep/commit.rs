@@ -1,14 +1,20 @@
 use dolos_core::{
-    BrokenInvariant, ChainError, Domain, EntityKey, StateError, StateStore, StateWriter,
+    ArchiveStore, ArchiveWriter, BrokenInvariant, ChainError, Domain, EntityKey, LogKey,
+    StateError, StateStore, StateWriter, TemporalKey,
 };
 use tracing::instrument;
 
 use crate::{
-    sweep::BoundaryWork, AccountState, EpochState, EraSummary, FixedNamespace as _, PoolState,
-    EPOCH_KEY_GO, EPOCH_KEY_MARK, EPOCH_KEY_SET,
+    sweep::BoundaryWork, AccountState, Config, EpochState, EraSummary, FixedNamespace, PoolState,
+    RewardLog, StakeLog, EPOCH_KEY_GO, EPOCH_KEY_MARK, EPOCH_KEY_SET,
 };
 
 impl BoundaryWork {
+    pub fn log_key_for_entity_key(&self, entity_key: EntityKey) -> LogKey {
+        let epoch_start_slot = self.active_era.epoch_start(self.ending_state.number as u64);
+        (TemporalKey::from(epoch_start_slot), entity_key).into()
+    }
+
     pub fn rotate_pool_stake_data<W: StateWriter>(
         &self,
         writer: &W,
@@ -50,7 +56,11 @@ impl BoundaryWork {
             state.wait_stake = state.live_stake();
 
             // add rewards
-            let rewards = self.delegator_rewards.get(&key).unwrap_or(&0);
+            let rewards = self
+                .delegator_rewards
+                .get(&key)
+                .map(|x| x.amount)
+                .unwrap_or(0);
             state.rewards_sum += rewards;
 
             // clear drep if dropped
@@ -159,8 +169,41 @@ impl BoundaryWork {
         Ok(())
     }
 
+    fn archive<D: Domain>(&self, domain: &D, config: &Config) -> Result<(), ChainError> {
+        let writer = domain.archive().start_writer()?;
+
+        if config.log.rewards {
+            for (key, log) in self.delegator_rewards.iter() {
+                writer
+                    .write_log_typed::<RewardLog>(&self.log_key_for_entity_key(key.clone()), log)?;
+            }
+        }
+
+        if config.log.pool_stakes {
+            for (key, log) in self.pool_stakes.iter() {
+                writer
+                    .write_log_typed::<StakeLog>(&self.log_key_for_entity_key(key.clone()), log)?;
+            }
+        }
+
+        if config.log.epoch_state {
+            writer.write_log_typed::<EpochState>(
+                &self.log_key_for_entity_key(EntityKey::from(
+                    self.ending_state.number.to_be_bytes().as_slice(),
+                )),
+                &self.ending_state,
+            )?;
+        }
+
+        writer.commit()?;
+
+        Ok(())
+    }
+
     #[instrument(skip_all)]
-    pub fn commit<D: Domain>(&self, domain: &D) -> Result<(), ChainError> {
+    pub fn commit<D: Domain>(&self, domain: &D, config: &Config) -> Result<(), ChainError> {
+        self.archive(domain, config)?;
+
         let accounts = domain
             .state()
             .iter_entities_typed::<AccountState>(AccountState::NS, None)?;
