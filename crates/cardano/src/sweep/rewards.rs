@@ -26,7 +26,7 @@ fn compute_delegator_reward(
     share.round() as u64
 }
 
-fn compute_pool_reward(
+fn compute_max_pool_rewards(
     total_rewards: u64,
     total_active_stake: u64,
     pool: &PoolState,
@@ -49,6 +49,21 @@ fn compute_pool_reward(
     let operator_share = pool.fixed_cost + ((after_cost as f64) * pool_margin_cost).round() as u64;
 
     (r_pool_u64, operator_share)
+}
+
+fn compute_pool_rewards(
+    total_rewards: u64,
+    total_active_stake: u64,
+    pool: &PoolState,
+    pool_stake: u64,
+    k: u32,
+    a0: &RationalNumber,
+    _minted_blocks: u32,
+    _blocks_per_epoch: u32,
+) -> (TotalPoolReward, OperatorShare) {
+    // TODO: take into account the pool performance by implementing the required
+    // formula. For now, we just return the max pool rewards.
+    compute_max_pool_rewards(total_rewards, total_active_stake, pool, pool_stake, k, a0)
 }
 
 fn stake_cred_to_entity_key(cred: &StakeCredential) -> EntityKey {
@@ -209,7 +224,6 @@ impl BoundaryVisitor {
         &mut self,
         pool: &PoolId,
         account: &Vec<u8>,
-        total_pool_reward: u64,
         operator_share: u64,
     ) -> Result<(), ChainError> {
         let Some(account) = pallas_extras::pool_reward_account(account) else {
@@ -226,7 +240,7 @@ impl BoundaryVisitor {
         self.log(
             stake_cred_to_entity_key(&account),
             RewardLog {
-                amount: total_pool_reward,
+                amount: operator_share,
                 pool_id: entity_key_to_operator_hash(pool).to_vec(),
                 as_leader: true,
             },
@@ -252,28 +266,31 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         let pool_stake = ctx.active_snapshot.get_pool_stake(id);
         let pot_delta = ctx.pot_delta.as_ref().unwrap(); // TODO: pots should be mandatory
 
-        let (total_pool_reward, operator_share) = compute_pool_reward(
+        let (total_pool_reward, operator_share) = compute_pool_rewards(
             pot_delta.available_rewards,
             ctx.active_snapshot.total_stake,
             pool,
             pool_stake,
             ctx.valid_k()?,
             &ctx.valid_a0()?,
+            pool.blocks_minted,
+            0, // TODO: compute blocks per epoch
         );
 
+        let delegator_rewards = total_pool_reward - operator_share;
         let delegators = ctx.active_snapshot.accounts_by_pool.iter_delegators(&id);
 
         for (delegator, delegator_stake) in delegators {
             self.visit_pool_delegator(
                 &id,
                 &delegator,
-                total_pool_reward,
+                delegator_rewards,
                 pool_stake,
                 *delegator_stake,
             )?;
         }
 
-        self.visit_pool_leader(&id, &pool.reward_account, total_pool_reward, operator_share)?;
+        self.visit_pool_leader(&id, &pool.reward_account, operator_share)?;
 
         // TODO: this is a hack to notify the overall boundary work of the effective
         // rewards needed for epoch transition. We should find a way to treat this as a

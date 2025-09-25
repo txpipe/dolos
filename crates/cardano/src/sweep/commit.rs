@@ -162,6 +162,7 @@ impl BoundaryWork {
         self.start_new_epoch(&writer)?;
 
         writer.commit()?;
+        archive_writer.commit()?;
 
         Ok(())
     }
