@@ -62,9 +62,7 @@ impl dolos_core::EntityDelta for AssignPoolRewards {
 
     fn key(&self) -> NsKey {
         let bytes = minicbor::to_vec(&self.pool_reward_account).unwrap();
-        let key = EntityKey::from(bytes);
-        warn!(key=%key, "pool rewards key");
-        NsKey::from((PoolState::NS, key))
+        NsKey::from((AccountState::NS, EntityKey::from(bytes)))
     }
 
     fn apply(&mut self, entity: &mut Option<Self::Entity>) {

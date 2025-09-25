@@ -132,10 +132,6 @@ impl BoundaryWork {
             warn!(quantity = %self.deltas.entities.len(), "uncommitted deltas");
         }
 
-        // closing epoch
-        // ================================================
-        // rotating to new one
-
         self.drop_active_epoch(&writer)?;
         self.promote_waiting_epoch(&writer)?;
         self.promote_ending_epoch(&writer)?;
