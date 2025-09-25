@@ -30,7 +30,7 @@ impl dolos_core::EntityDelta for EpochStatsUpdate {
     }
 
     fn apply(&mut self, entity: &mut Option<EpochState>) {
-        let entity = entity.get_or_insert_default();
+        let Some(entity) = entity else { return };
 
         entity.gathered_fees += self.block_fees;
 
@@ -46,7 +46,7 @@ impl dolos_core::EntityDelta for EpochStatsUpdate {
     }
 
     fn undo(&self, entity: &mut Option<EpochState>) {
-        let entity = entity.get_or_insert_default();
+        let Some(entity) = entity else { return };
 
         entity.gathered_fees -= self.block_fees;
 
@@ -79,7 +79,7 @@ impl dolos_core::EntityDelta for NoncesUpdate {
     }
 
     fn apply(&mut self, entity: &mut Option<EpochState>) {
-        let entity = entity.get_or_insert_default();
+        let Some(entity) = entity else { return };
         if let Some(nonces) = entity.nonces.as_ref() {
             self.previous = Some(nonces.clone());
             entity.nonces = Some(nonces.roll(
@@ -91,7 +91,7 @@ impl dolos_core::EntityDelta for NoncesUpdate {
     }
 
     fn undo(&self, entity: &mut Option<EpochState>) {
-        let entity = entity.get_or_insert_default();
+        let Some(entity) = entity else { return };
         entity.nonces = self.previous.clone();
     }
 }
@@ -112,7 +112,7 @@ impl dolos_core::EntityDelta for PParamsUpdate {
     }
 
     fn apply(&mut self, entity: &mut Option<EpochState>) {
-        let entity = entity.get_or_insert_default();
+        let Some(entity) = entity else { return };
         entity.pparams.set(self.to_update.clone());
     }
 

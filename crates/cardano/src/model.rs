@@ -577,8 +577,7 @@ impl PParamValue {
     }
 }
 
-#[derive(Debug, Encode, Decode, Clone, Default)]
-
+#[derive(Debug, Encode, Decode, Clone, Default, Serialize)]
 pub struct PParamsSet {
     #[n(0)]
     values: Vec<PParamValue>,
@@ -810,7 +809,7 @@ impl Nonces {
     }
 }
 
-#[derive(Debug, Encode, Decode, Clone, Default)]
+#[derive(Debug, Encode, Decode, Clone)]
 pub struct EpochState {
     #[n(0)]
     pub number: u32,

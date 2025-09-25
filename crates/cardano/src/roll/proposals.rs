@@ -8,11 +8,7 @@ use pallas::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    model::{EpochState, FixedNamespace as _, EPOCH_KEY_MARK},
-    roll::BlockVisitor,
-    CardanoLogic, Proposal,
-};
+use crate::{model::FixedNamespace as _, roll::BlockVisitor, CardanoLogic, Proposal};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewProposal {
@@ -26,7 +22,10 @@ impl dolos_core::EntityDelta for NewProposal {
     type Entity = Proposal;
 
     fn key(&self) -> NsKey {
-        NsKey::from((EpochState::NS, EPOCH_KEY_MARK))
+        NsKey::from((
+            Proposal::NS,
+            Proposal::build_entity_key(self.transaction, self.idx),
+        ))
     }
 
     fn apply(&mut self, entity: &mut Option<Proposal>) {

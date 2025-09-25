@@ -4,6 +4,7 @@ use pallas::ledger::primitives::{
     ExUnitPrices, RationalNumber,
 };
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 
 use crate::{
     sweep::{hacks, AccountId, BoundaryWork, PoolId, ProposalId},
@@ -163,6 +164,7 @@ impl dolos_core::EntityDelta for ProposalEnactment {
             return;
         };
 
+        debug!(proposal=%self.id, "enacting proposal");
         proposal.enacted_epoch = Some(self.epoch);
         proposal.ratified_epoch = Some(self.epoch - 1);
     }
@@ -172,6 +174,7 @@ impl dolos_core::EntityDelta for ProposalEnactment {
             return;
         };
 
+        debug!(proposal=%self.id, "undoing enact proposal");
         entity.enacted_epoch = None;
         entity.ratified_epoch = None;
     }
@@ -182,6 +185,11 @@ macro_rules! handle_update {
         if let Some(updated) = $update.$getter.as_ref() {
             #[allow(irrefutable_let_patterns)]
             if let Ok(converted) = updated.clone().try_into() {
+                debug!(
+                    variant = stringify!($variant),
+                    value =? converted,
+                    "applying new pparam value on ending state"
+                );
                 $ctx.ending_state
                     .pparams
                     .set(PParamValue::$variant(converted))
@@ -259,8 +267,13 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         self.deltas
             .push(ProposalEnactment::new(id.clone(), ctx.starting_epoch_no()).into());
 
+        // Apply proposal on ending state
         match &proposal.proposal.gov_action {
             GovAction::HardForkInitiation(_, version) => {
+                debug!(
+                    version =? version,
+                    "applying proposed hardfork on ending state"
+                );
                 ctx.ending_state
                     .pparams
                     .set(PParamValue::ProtocolVersion(*version));
@@ -300,6 +313,11 @@ impl super::BoundaryVisitor for BoundaryVisitor {
 
                 // Special cases that must be converted by hand:
                 if let Some(updated) = update.max_tx_ex_units {
+                    debug!(
+                        variant = "max_tx_ex_units",
+                        value =? updated,
+                        "applying new pparam value on ending state"
+                    );
                     ctx.ending_state.pparams.set(PParamValue::MaxTxExUnits(
                         pallas::ledger::primitives::ExUnits {
                             mem: updated.mem,
@@ -308,6 +326,11 @@ impl super::BoundaryVisitor for BoundaryVisitor {
                     ))
                 }
                 if let Some(updated) = update.max_block_ex_units {
+                    debug!(
+                        variant = "max_block_ex_units",
+                        value =? updated,
+                        "applying new pparam value on ending state"
+                    );
                     ctx.ending_state.pparams.set(PParamValue::MaxBlockExUnits(
                         pallas::ledger::primitives::ExUnits {
                             mem: updated.mem,
@@ -316,6 +339,11 @@ impl super::BoundaryVisitor for BoundaryVisitor {
                     ))
                 }
                 if let Some(updated) = update.minfee_refscript_cost_per_byte.as_ref() {
+                    debug!(
+                        variant = "minfee_refscript_cost_per_byte",
+                        value =? updated,
+                        "applying new pparam value on ending state"
+                    );
                     ctx.ending_state
                         .pparams
                         .set(PParamValue::MinFeeRefScriptCostPerByte(RationalNumber {
@@ -324,6 +352,11 @@ impl super::BoundaryVisitor for BoundaryVisitor {
                         }))
                 }
                 if let Some(updated) = update.execution_costs.as_ref() {
+                    debug!(
+                        variant = "execution_costs",
+                        value =? updated,
+                        "applying new pparam value on ending state"
+                    );
                     ctx.ending_state
                         .pparams
                         .set(PParamValue::ExecutionCosts(ExUnitPrices {
