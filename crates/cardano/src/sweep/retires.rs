@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 use crate::{
-    sweep::{AccountId, BoundaryWork, DRepId, PoolId},
-    AccountState, CardanoDelta, DRepState, FixedNamespace as _, PoolState,
+    sweep::{AccountId, BoundaryWork, DRepId, PoolId, ProposalId},
+    AccountState, CardanoDelta, DRepState, FixedNamespace as _, PoolState, Proposal,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,6 +40,44 @@ impl dolos_core::EntityDelta for PoolRetirement {
         debug!(pool=%self.pool, "restoring retired pool");
 
         entity.is_retired = false;
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProposalExpiration {
+    proposal: ProposalId,
+    epoch: u64,
+}
+
+impl dolos_core::EntityDelta for ProposalExpiration {
+    type Entity = Proposal;
+
+    fn key(&self) -> NsKey {
+        NsKey::from((Proposal::NS, self.proposal.clone()))
+    }
+
+    fn apply(&mut self, entity: &mut Option<Proposal>) {
+        let Some(entity) = entity else {
+            warn!("missing proposal");
+            return;
+        };
+
+        debug!(proposal=%self.proposal, "expiring proposal");
+
+        entity.dropped_epoch = Some(self.epoch - 1);
+        entity.expired_epoch = Some(self.epoch);
+    }
+
+    fn undo(&self, entity: &mut Option<Proposal>) {
+        let Some(entity) = entity else {
+            warn!("missing pool");
+            return;
+        };
+
+        debug!(proposal=%self.proposal, "restoring expired proposal");
+
+        entity.dropped_epoch = None;
+        entity.expired_epoch = None;
     }
 }
 
@@ -190,6 +228,13 @@ fn should_expire_drep(ctx: &mut BoundaryWork, drep: &DRepState) -> Result<bool, 
     Ok(expiring_epoch <= ctx.starting_epoch_no())
 }
 
+fn should_expire_proposal(ctx: &mut BoundaryWork, proposal: &Proposal) -> Result<bool, ChainError> {
+    let (epoch, _) = ctx.active_era.slot_epoch(proposal.slot);
+    let expiring_epoch = epoch as u64 + ctx.valid_governance_action_validity_period()?;
+
+    Ok(expiring_epoch <= ctx.starting_epoch_no())
+}
+
 #[derive(Default)]
 pub struct BoundaryVisitor {
     deltas: Vec<CardanoDelta>,
@@ -251,6 +296,27 @@ impl super::BoundaryVisitor for BoundaryVisitor {
                 .into(),
             );
         }
+
+        Ok(())
+    }
+
+    fn visit_proposal(
+        &mut self,
+        ctx: &mut BoundaryWork,
+        id: &ProposalId,
+        proposal: &Proposal,
+    ) -> Result<(), ChainError> {
+        if !should_expire_proposal(ctx, proposal)? {
+            return Ok(());
+        }
+
+        self.deltas.push(
+            ProposalExpiration {
+                proposal: id.clone(),
+                epoch: ctx.starting_epoch_no(),
+            }
+            .into(),
+        );
 
         Ok(())
     }

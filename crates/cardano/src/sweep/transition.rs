@@ -1,11 +1,35 @@
 use dolos_core::{ChainError, EntityKey, NsKey};
-use pallas::ledger::primitives::conway::DRep;
+use pallas::ledger::primitives::{
+    conway::{DRep, GovAction},
+    ExUnitPrices, RationalNumber,
+};
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 
 use crate::{
-    sweep::{AccountId, BoundaryWork, PoolId},
-    AccountState, CardanoDelta, CardanoEntity, FixedNamespace as _, PoolState, StakeLog,
+    sweep::{hacks, AccountId, BoundaryWork, PoolId, ProposalId},
+    AccountState, CardanoDelta, CardanoEntity, FixedNamespace as _, PParamValue, PoolState,
+    Proposal, StakeLog,
 };
+
+fn should_enact_proposal(ctx: &mut BoundaryWork, proposal: &Proposal) -> bool {
+    if let Some(epoch) = match ctx.network_magic {
+        Some(764824073) => {
+            hacks::proposals::mainnet::enactment_epoch_by_proposal_id(&proposal.id_as_string())
+        }
+        Some(1) => {
+            hacks::proposals::preprod::enactment_epoch_by_proposal_id(&proposal.id_as_string())
+        }
+        Some(2) => {
+            hacks::proposals::preview::enactment_epoch_by_proposal_id(&proposal.id_as_string())
+        }
+        _ => None,
+    } {
+        epoch as u64 == ctx.starting_epoch_no()
+    } else {
+        false
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccountTransition {
@@ -123,6 +147,72 @@ impl dolos_core::EntityDelta for PoolTransition {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProposalEnactment {
+    id: ProposalId,
+    epoch: u64,
+}
+
+impl ProposalEnactment {
+    pub fn new(id: ProposalId, epoch: u64) -> Self {
+        Self { id, epoch }
+    }
+}
+
+impl dolos_core::EntityDelta for ProposalEnactment {
+    type Entity = Proposal;
+
+    fn key(&self) -> NsKey {
+        NsKey::from((Proposal::NS, self.id.clone()))
+    }
+
+    fn apply(&mut self, entity: &mut Option<Proposal>) {
+        let Some(proposal) = entity else {
+            return;
+        };
+
+        debug!(proposal=%self.id, "enacting proposal");
+        proposal.enacted_epoch = Some(self.epoch);
+        proposal.ratified_epoch = Some(self.epoch - 1);
+    }
+
+    fn undo(&self, entity: &mut Option<Proposal>) {
+        let Some(entity) = entity else {
+            return;
+        };
+
+        debug!(proposal=%self.id, "undoing enact proposal");
+        entity.enacted_epoch = None;
+        entity.ratified_epoch = None;
+    }
+}
+
+macro_rules! handle_update {
+    ($update:expr, $getter:ident, $ctx:expr, $variant:ident) => {
+        if let Some(updated) = $update.$getter.as_ref() {
+            #[allow(irrefutable_let_patterns)]
+            if let Ok(converted) = updated.clone().try_into() {
+                debug!(
+                    variant = stringify!($variant),
+                    value =? converted,
+                    "applying new pparam value on ending state"
+                );
+                $ctx.ending_state
+                    .pparams
+                    .set(PParamValue::$variant(converted))
+            }
+        }
+    };
+}
+
+macro_rules! check_all {
+    ($update:expr, $deltas:expr, $($getter:ident => $variant:ident),*) => {
+        $(
+            handle_update!($update, $getter, $deltas, $variant);
+        )*
+    };
+}
+
 #[derive(Default)]
 pub struct BoundaryVisitor {
     deltas: Vec<CardanoDelta>,
@@ -146,7 +236,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         id: &PoolId,
         _: &PoolState,
     ) -> Result<(), ChainError> {
-        let ending_stake = ctx.ending_snapshot.get_pool_stake(&id);
+        let ending_stake = ctx.ending_snapshot.get_pool_stake(id);
 
         self.change(PoolTransition::new(id.clone(), ending_stake));
 
@@ -167,6 +257,126 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         _: &AccountState,
     ) -> Result<(), ChainError> {
         self.change(AccountTransition::new(id.clone()));
+
+        Ok(())
+    }
+
+    fn visit_proposal(
+        &mut self,
+        ctx: &mut BoundaryWork,
+        id: &ProposalId,
+        proposal: &Proposal,
+    ) -> Result<(), ChainError> {
+        if !should_enact_proposal(ctx, proposal) {
+            return Ok(());
+        }
+
+        self.deltas
+            .push(ProposalEnactment::new(id.clone(), ctx.starting_epoch_no()).into());
+
+        // Apply proposal on ending state
+        match &proposal.proposal.gov_action {
+            GovAction::HardForkInitiation(_, version) => {
+                debug!(
+                    version =? version,
+                    "applying proposed hardfork on ending state"
+                );
+                ctx.ending_state
+                    .pparams
+                    .set(PParamValue::ProtocolVersion(*version));
+            }
+            GovAction::ParameterChange(_, update, _) => {
+                check_all! {
+                    update,
+                    ctx,
+
+                    minfee_a => MinFeeA,
+                    minfee_b => MinFeeB,
+                    max_block_body_size => MaxBlockBodySize,
+                    max_transaction_size => MaxTransactionSize,
+                    max_block_header_size => MaxBlockHeaderSize,
+                    key_deposit => KeyDeposit,
+                    pool_deposit => PoolDeposit,
+                    desired_number_of_stake_pools => DesiredNumberOfStakePools,
+                    ada_per_utxo_byte => MinUtxoValue,
+                    min_pool_cost => MinPoolCost,
+                    expansion_rate => ExpansionRate,
+                    treasury_growth_rate => TreasuryGrowthRate,
+                    maximum_epoch => MaximumEpoch,
+                    pool_pledge_influence => PoolPledgeInfluence,
+                    ada_per_utxo_byte => AdaPerUtxoByte,
+                    max_value_size => MaxValueSize,
+                    collateral_percentage => CollateralPercentage,
+                    max_collateral_inputs => MaxCollateralInputs,
+                    pool_voting_thresholds => PoolVotingThresholds,
+                    drep_voting_thresholds => DrepVotingThresholds,
+                    min_committee_size => MinCommitteeSize,
+                    committee_term_limit => CommitteeTermLimit,
+                    governance_action_validity_period => GovernanceActionValidityPeriod,
+                    governance_action_deposit => GovernanceActionDeposit,
+                    drep_deposit => DrepDeposit,
+                    drep_inactivity_period => DrepInactivityPeriod
+                };
+
+                // Special cases that must be converted by hand:
+                if let Some(updated) = update.max_tx_ex_units {
+                    debug!(
+                        variant = "max_tx_ex_units",
+                        value =? updated,
+                        "applying new pparam value on ending state"
+                    );
+                    ctx.ending_state.pparams.set(PParamValue::MaxTxExUnits(
+                        pallas::ledger::primitives::ExUnits {
+                            mem: updated.mem,
+                            steps: updated.steps,
+                        },
+                    ))
+                }
+                if let Some(updated) = update.max_block_ex_units {
+                    debug!(
+                        variant = "max_block_ex_units",
+                        value =? updated,
+                        "applying new pparam value on ending state"
+                    );
+                    ctx.ending_state.pparams.set(PParamValue::MaxBlockExUnits(
+                        pallas::ledger::primitives::ExUnits {
+                            mem: updated.mem,
+                            steps: updated.steps,
+                        },
+                    ))
+                }
+                if let Some(updated) = update.minfee_refscript_cost_per_byte.as_ref() {
+                    debug!(
+                        variant = "minfee_refscript_cost_per_byte",
+                        value =? updated,
+                        "applying new pparam value on ending state"
+                    );
+                    ctx.ending_state
+                        .pparams
+                        .set(PParamValue::MinFeeRefScriptCostPerByte(RationalNumber {
+                            numerator: updated.numerator,
+                            denominator: updated.denominator,
+                        }))
+                }
+                if let Some(updated) = update.execution_costs.as_ref() {
+                    debug!(
+                        variant = "execution_costs",
+                        value =? updated,
+                        "applying new pparam value on ending state"
+                    );
+                    ctx.ending_state
+                        .pparams
+                        .set(PParamValue::ExecutionCosts(ExUnitPrices {
+                            mem_price: updated.mem_price.clone(),
+                            step_price: updated.step_price.clone(),
+                        }));
+                }
+            }
+            GovAction::TreasuryWithdrawals(_, _) => {
+                // TODO: Track of this withdrawal from treasury, updating reward account as well
+            }
+            _ => {}
+        }
 
         Ok(())
     }

@@ -6,17 +6,18 @@ use tracing::{info, instrument};
 
 use crate::{
     AccountState, CardanoDelta, CardanoEntity, CardanoLogic, Config, DRepState, EpochState,
-    EraProtocol, EraSummary, PParamsSet, PoolState,
+    EraProtocol, EraSummary, PParamsSet, PoolState, Proposal,
 };
 
 pub mod commit;
 pub mod compute;
 pub mod loading;
-
 // visitors
 pub mod retires;
 pub mod rewards;
 pub mod transition;
+
+mod hacks;
 
 pub use compute::compute_genesis_pots;
 
@@ -60,6 +61,16 @@ pub trait BoundaryVisitor: Default {
     }
 
     #[allow(unused_variables)]
+    fn visit_proposal(
+        &mut self,
+        ctx: &mut BoundaryWork,
+        id: &ProposalId,
+        proposal: &Proposal,
+    ) -> Result<(), ChainError> {
+        Ok(())
+    }
+
+    #[allow(unused_variables)]
     fn flush(&mut self, ctx: &mut BoundaryWork) -> Result<(), ChainError> {
         Ok(())
     }
@@ -68,6 +79,7 @@ pub trait BoundaryVisitor: Default {
 pub type AccountId = EntityKey;
 pub type PoolId = EntityKey;
 pub type DRepId = EntityKey;
+pub type ProposalId = EntityKey;
 
 #[derive(Debug)]
 pub struct Pots {
@@ -134,6 +146,7 @@ pub struct BoundaryWork {
     pub waiting_state: Option<EpochState>,
     pub ending_state: EpochState,
     pub ending_snapshot: Snapshot,
+    pub network_magic: Option<u32>,
     pub shelley_hash: Hash<32>,
 
     // computed

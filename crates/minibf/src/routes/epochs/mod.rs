@@ -45,17 +45,27 @@ pub async fn by_number_parameters<D: Domain>(
     State(domain): State<Facade<D>>,
     Path(epoch): Path<u64>,
 ) -> Result<Json<EpochParamContent>, Error> {
-    let epoch_start = domain.get_chain_summary()?.epoch_start(epoch);
-    let state = domain
+    let summary = domain.get_chain_summary()?;
+    let nonce = domain
         .archive()
         .read_log_typed::<EpochState>(
             EpochState::NS,
-            &LogKey::from(TemporalKey::from(epoch_start)),
+            &LogKey::from(TemporalKey::from(summary.epoch_start(epoch))),
         )
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
-    let params = state.pparams;
-    let nonce = state.nonces.map(|x| x.active.to_string());
+        .ok_or(StatusCode::NOT_FOUND)?
+        .nonces
+        .map(|x| x.active.to_string());
+    // Due to how we log epochs, we actually need the previous pparams.
+    let params = domain
+        .archive()
+        .read_log_typed::<EpochState>(
+            EpochState::NS,
+            &LogKey::from(TemporalKey::from(summary.epoch_start(epoch - 1))),
+        )
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?
+        .pparams;
 
     let model = mapping::ParametersModelBuilder {
         epoch,

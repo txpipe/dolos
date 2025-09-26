@@ -7,7 +7,7 @@ use crate::{
     sweep::{BoundaryVisitor as _, BoundaryWork, EraTransition, PotDelta, Pots},
     utils::nonce_stability_window,
     AccountState, DRepState, EpochState, EraProtocol, FixedNamespace as _, Nonces, PParamsSet,
-    PoolState,
+    PoolState, Proposal,
 };
 
 macro_rules! as_ratio {
@@ -125,6 +125,11 @@ impl BoundaryWork {
 
     pub fn valid_drep_inactivity_period(&self) -> Result<u64, ChainError> {
         self.valid_pparams()?.ensure_drep_inactivity_period()
+    }
+
+    pub fn valid_governance_action_validity_period(&self) -> Result<u64, ChainError> {
+        self.valid_pparams()?
+            .ensure_governance_action_validity_period()
     }
 
     pub fn ending_pparams(&self) -> &PParamsSet {
@@ -254,6 +259,7 @@ impl BoundaryWork {
                 .epoch_start(self.ending_state.number as u64 + 2)
                 - nonce_stability_window(self.active_protocol.into(), genesis),
             nonces,
+            blocks_minted: self.ending_state.blocks_minted,
 
             // computed throughout the epoch during _roll_
             gathered_fees: 0,
@@ -339,6 +345,18 @@ impl BoundaryWork {
             visitor_retires.visit_account(self, &account_id, &account)?;
             visitor_rewards.visit_account(self, &account_id, &account)?;
             visitor_rotate.visit_account(self, &account_id, &account)?;
+        }
+
+        let proposals = domain
+            .state()
+            .iter_entities_typed::<Proposal>(Proposal::NS, None)?;
+
+        for proposal in proposals {
+            let (proposal_id, proposal) = proposal?;
+
+            visitor_retires.visit_proposal(self, &proposal_id, &proposal)?;
+            visitor_rewards.visit_proposal(self, &proposal_id, &proposal)?;
+            visitor_rotate.visit_proposal(self, &proposal_id, &proposal)?;
         }
 
         visitor_retires.flush(self)?;

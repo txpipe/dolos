@@ -10,12 +10,12 @@ use pallas::{
         primitives::PlutusData,
         traverse::{
             MultiEraBlock, MultiEraCert, MultiEraInput, MultiEraOutput, MultiEraPolicyAssets,
-            MultiEraTx, MultiEraUpdate,
+            MultiEraProposal, MultiEraTx, MultiEraUpdate,
         },
     },
 };
 
-use crate::{owned::OwnedMultiEraOutput, CardanoLogic};
+use crate::{owned::OwnedMultiEraOutput, roll::proposals::ProposalVisitor, CardanoLogic};
 
 use super::TrackConfig;
 
@@ -24,6 +24,7 @@ pub mod assets;
 pub mod dreps;
 pub mod epochs;
 pub mod pools;
+pub mod proposals;
 pub mod txs;
 
 use accounts::AccountVisitor;
@@ -136,6 +137,18 @@ pub trait BlockVisitor {
     }
 
     #[allow(unused_variables)]
+    fn visit_proposal(
+        &mut self,
+        deltas: &mut WorkDeltas<CardanoLogic>,
+        block: &MultiEraBlock,
+        tx: &MultiEraTx,
+        proposal: &MultiEraProposal,
+        idx: usize,
+    ) -> Result<(), ChainError> {
+        Ok(())
+    }
+
+    #[allow(unused_variables)]
     fn flush(&mut self, deltas: &mut WorkDeltas<CardanoLogic>) -> Result<(), ChainError> {
         Ok(())
     }
@@ -157,6 +170,7 @@ macro_rules! visit_all {
         maybe_visit!($self, $deltas, epoch_state, $method, $($args)*);
         maybe_visit!($self, $deltas, pool_state, $method, $($args)*);
         maybe_visit!($self, $deltas, tx_logs, $method, $($args)*);
+        maybe_visit!($self, $deltas, proposals, $method, $($args)*);
     };
 }
 
@@ -170,6 +184,7 @@ pub struct DeltaBuilder<'a> {
     epoch_state: EpochStateVisitor,
     pool_state: PoolStateVisitor,
     tx_logs: TxLogVisitor,
+    proposals: ProposalVisitor,
 }
 
 impl<'a> DeltaBuilder<'a> {
@@ -183,6 +198,7 @@ impl<'a> DeltaBuilder<'a> {
             epoch_state: Default::default(),
             pool_state: Default::default(),
             tx_logs: Default::default(),
+            proposals: Default::default(),
         }
     }
 
@@ -242,6 +258,10 @@ impl<'a> DeltaBuilder<'a> {
 
             for datum in tx.plutus_data() {
                 visit_all!(self, deltas, visit_datums, block, &tx, &datum);
+            }
+
+            for (idx, proposal) in tx.gov_proposals().iter().enumerate() {
+                visit_all!(self, deltas, visit_proposal, block, &tx, &proposal, idx);
             }
         }
 
