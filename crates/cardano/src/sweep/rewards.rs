@@ -59,8 +59,8 @@ fn compute_pool_rewards(
     pool_stake: u64,
     k: u32,
     a0: &RationalNumber,
-    pool_blocks: u32,
-    epoch_blocks: u32,
+    _pool_blocks: u32,
+    _epoch_blocks: u32,
 ) -> (TotalPoolReward, OperatorShare) {
     // TODO: take into account the pool performance by implementing the required
     // formula. For now, we just return the max pool rewards.

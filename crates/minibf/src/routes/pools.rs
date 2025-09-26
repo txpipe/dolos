@@ -55,7 +55,7 @@ impl IntoModel<PoolListExtendedInner> for PoolModelBuilder {
             active_stake: self.state.active_stake.to_string(),
             live_stake: self.state.__live_stake.to_string(),
             live_saturation: rational_to_f64::<3>(&self.state.live_saturation()),
-            blocks_minted: self.state.blocks_minted as i32,
+            blocks_minted: self.state.blocks_minted_total as i32,
             declared_pledge: self.state.declared_pledge.to_string(),
             margin_cost: rational_to_f64::<6>(&self.state.margin_cost),
             fixed_cost: self.state.fixed_cost.to_string(),

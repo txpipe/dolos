@@ -259,6 +259,7 @@ impl BoundaryWork {
                 .epoch_start(self.ending_state.number as u64 + 2)
                 - nonce_stability_window(self.active_protocol.into(), genesis),
             nonces,
+            blocks_minted: self.ending_state.blocks_minted,
 
             // computed throughout the epoch during _roll_
             gathered_fees: 0,

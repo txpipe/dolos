@@ -1,9 +1,12 @@
+use std::collections::BTreeMap;
+
 use dolos_core::{batch::WorkDeltas, ChainError, NsKey};
 use pallas::{
     crypto::hash::Hash,
     ledger::traverse::{MultiEraBlock, MultiEraCert, MultiEraTx, MultiEraUpdate},
 };
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 
 use crate::{
     model::{EpochState, FixedNamespace as _, EPOCH_KEY_MARK},
@@ -117,6 +120,7 @@ impl dolos_core::EntityDelta for PParamsUpdate {
 
     fn apply(&mut self, entity: &mut Option<EpochState>) {
         let Some(entity) = entity else { return };
+        debug!(update =? self.to_update, "applying pparam update");
         entity.pparams.set(self.to_update.clone());
     }
 
@@ -283,10 +287,41 @@ impl BlockVisitor for EpochStateVisitor {
             all_proposed_governance_action_deposit => GovernanceActionDeposit,
             all_proposed_drep_deposit => DrepDeposit,
             all_proposed_drep_inactivity_period => DrepInactivityPeriod,
-            all_proposed_minfee_refscript_cost_per_byte => MinFeeRefScriptCostPerByte
+            all_proposed_minfee_refscript_cost_per_byte => MinFeeRefScriptCostPerByte,
+            conway_first_proposed_cost_models_for_script_languages => CostModelsForScriptLanguages
         };
 
-        // TODO: cost model updates
+        if let Some(cm) = update.alonzo_first_proposed_cost_models_for_script_languages() {
+            dbg!(&cm);
+            deltas.add_for_entity(PParamsUpdate {
+                to_update: PParamValue::CostModelsForScriptLanguages(
+                    pallas::ledger::primitives::conway::CostModels {
+                        plutus_v1: cm
+                            .get(&pallas::ledger::primitives::alonzo::Language::PlutusV1)
+                            .cloned(),
+                        plutus_v2: None,
+                        plutus_v3: None,
+                        unknown: BTreeMap::default(),
+                    },
+                ),
+                prev_value: None,
+            });
+        }
+
+        if let Some(cm) = update.babbage_first_proposed_cost_models_for_script_languages() {
+            dbg!(&cm);
+            deltas.add_for_entity(PParamsUpdate {
+                to_update: PParamValue::CostModelsForScriptLanguages(
+                    pallas::ledger::primitives::conway::CostModels {
+                        plutus_v1: cm.plutus_v1.clone(),
+                        plutus_v2: cm.plutus_v2.clone(),
+                        plutus_v3: None,
+                        unknown: BTreeMap::default(),
+                    },
+                ),
+                prev_value: None,
+            });
+        }
 
         Ok(())
     }

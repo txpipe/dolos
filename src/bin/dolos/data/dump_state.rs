@@ -154,7 +154,7 @@ impl TableRow for PoolState {
             format!("{}", hex::encode(&self.reward_account)),
             format!("{}", self.active_stake),
             format!("{}", self.wait_stake),
-            format!("{}", self.blocks_minted),
+            format!("{}", self.blocks_minted_total),
         ]
     }
 }
