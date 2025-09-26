@@ -43,6 +43,8 @@ impl dolos_core::EntityDelta for EpochStatsUpdate {
 
         entity.decayed_deposits +=
             self.stake_deregistration_count * entity.pparams.pool_deposit_or_default();
+
+        entity.blocks_minted += 1;
     }
 
     fn undo(&self, entity: &mut Option<EpochState>) {
@@ -59,6 +61,8 @@ impl dolos_core::EntityDelta for EpochStatsUpdate {
 
         entity.decayed_deposits -=
             self.stake_deregistration_count * entity.pparams.pool_deposit_or_default();
+
+        entity.blocks_minted = entity.blocks_minted.saturating_sub(1);
     }
 }
 

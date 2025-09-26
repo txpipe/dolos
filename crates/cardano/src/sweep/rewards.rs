@@ -59,8 +59,8 @@ fn compute_pool_rewards(
     pool_stake: u64,
     k: u32,
     a0: &RationalNumber,
-    _minted_blocks: u32,
-    _blocks_per_epoch: u32,
+    pool_blocks: u32,
+    epoch_blocks: u32,
 ) -> (TotalPoolReward, OperatorShare) {
     // TODO: take into account the pool performance by implementing the required
     // formula. For now, we just return the max pool rewards.
@@ -279,8 +279,8 @@ impl super::BoundaryVisitor for BoundaryVisitor {
             pool_stake,
             ctx.valid_k()?,
             &ctx.valid_a0()?,
-            pool.blocks_minted,
-            0, // TODO: compute blocks per epoch
+            pool.blocks_minted_epoch,
+            ctx.ending_state.blocks_minted,
         );
 
         let delegator_rewards = total_pool_reward - operator_share;
