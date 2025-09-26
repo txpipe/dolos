@@ -39,6 +39,7 @@ pub struct TrackConfig {
     pub pool_state: bool,
     pub epoch_state: bool,
     pub drep_state: bool,
+    pub proposals: bool,
     pub tx_logs: bool,
 }
 
@@ -58,6 +59,7 @@ impl Default for TrackConfig {
             epoch_state: true,
             drep_state: true,
             tx_logs: true,
+            proposals: true,
         }
     }
 }

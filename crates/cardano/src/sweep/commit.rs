@@ -6,7 +6,7 @@ use tracing::{instrument, warn};
 
 use crate::{
     sweep::BoundaryWork, AccountState, CardanoEntity, DRepState, EpochState, EraSummary,
-    FixedNamespace, PoolState, EPOCH_KEY_GO, EPOCH_KEY_MARK, EPOCH_KEY_SET,
+    FixedNamespace, PoolState, Proposal, EPOCH_KEY_GO, EPOCH_KEY_MARK, EPOCH_KEY_SET,
 };
 
 impl BoundaryWork {
@@ -124,12 +124,15 @@ impl BoundaryWork {
     ) -> Result<(), ChainError> {
         let start_of_epoch = self.active_era.epoch_start(self.ending_state.number as u64);
         let start_of_epoch = ChainPoint::Slot(start_of_epoch);
+        let temporal_key = TemporalKey::from(&start_of_epoch);
 
         for (entity_key, log) in self.logs.drain(..) {
-            let temporal_key = TemporalKey::from(&start_of_epoch);
-            let log_key = LogKey::from((temporal_key, entity_key));
+            let log_key = LogKey::from((temporal_key.clone(), entity_key));
             writer.write_log_typed(&log_key, &log)?;
         }
+
+        // Log epoch state.
+        writer.write_log_typed(&temporal_key.into(), &self.ending_state)?;
 
         Ok(())
     }
@@ -141,6 +144,7 @@ impl BoundaryWork {
         self.apply_whole_namespace::<D, AccountState>(domain, &writer)?;
         self.apply_whole_namespace::<D, PoolState>(domain, &writer)?;
         self.apply_whole_namespace::<D, DRepState>(domain, &writer)?;
+        self.apply_whole_namespace::<D, Proposal>(domain, &writer)?;
 
         debug_assert!(self.deltas.entities.is_empty());
 

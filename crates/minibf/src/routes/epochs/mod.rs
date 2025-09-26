@@ -8,14 +8,14 @@ use blockfrost_openapi::models::epoch_param_content::EpochParamContent;
 use dolos_cardano::{EpochState, FixedNamespace, EPOCH_KEY_SET};
 use dolos_core::{Domain, StateStore};
 
-use crate::{mapping::IntoModel as _, Facade};
+use crate::{error::Error, mapping::IntoModel as _, Facade};
 
 pub mod cost_models;
 pub mod mapping;
 
 pub async fn latest_parameters<D: Domain>(
     State(domain): State<Facade<D>>,
-) -> Result<Json<EpochParamContent>, StatusCode> {
+) -> Result<Json<EpochParamContent>, Error> {
     let tip = domain.get_tip_slot()?;
 
     let summary = domain.get_chain_summary()?;
@@ -40,7 +40,7 @@ pub async fn latest_parameters<D: Domain>(
         nonce,
     };
 
-    model.into_response()
+    Ok(model.into_response()?)
 }
 
 pub async fn by_number_parameters<D: Domain>(
@@ -57,8 +57,8 @@ pub async fn by_number_parameters<D: Domain>(
         epoch: epoch.number,
         params: epoch.pparams,
         genesis: domain.genesis(),
-        nonce: None,
+        nonce: epoch.nonces.map(|x| x.active.to_string()),
     };
 
-    model.into_response()
+    Ok(model.into_response()?)
 }
