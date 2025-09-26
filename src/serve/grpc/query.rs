@@ -232,9 +232,18 @@ where
 
         info!("received new grpc query");
 
-        let tip = self.domain.state().read_cursor().map_err(into_status)?;
+        let tip = self
+            .domain
+            .state()
+            .read_cursor()
+            .map_err(into_status)?
+            .ok_or(Status::internal("Failed to find ledger tip"))?;
 
-        let pparams = dolos_cardano::use_active_pparams(&self.domain)
+        let (_, era) = dolos_cardano::eras::load_active_era(&self.domain).map_err(into_status)?;
+
+        let (epoch, _) = era.slot_epoch(tip.slot());
+
+        let pparams = dolos_cardano::load_effective_pparams(&self.domain, epoch)
             .map_err(|_| Status::internal("Failed to load current pparams"))?;
 
         let pparams = dolos_cardano::utils::pparams_to_pallas(&pparams);
@@ -246,7 +255,7 @@ where
                 )
                 .into(),
             }),
-            ledger_tip: tip.as_ref().map(|p| point_to_u5c(&self.domain, p)),
+            ledger_tip: Some(point_to_u5c(&self.domain, &tip)),
         };
 
         if let Some(mask) = message.field_mask {

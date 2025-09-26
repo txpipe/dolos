@@ -15,7 +15,7 @@ use pallas::{
     },
 };
 
-use crate::{owned::OwnedMultiEraOutput, CardanoLogic};
+use crate::{owned::OwnedMultiEraOutput, CardanoLogic, PParamsSet};
 
 use super::TrackConfig;
 
@@ -39,6 +39,7 @@ pub trait BlockVisitor {
         &mut self,
         deltas: &mut WorkDeltas<CardanoLogic>,
         block: &MultiEraBlock,
+        pparams: &PParamsSet,
     ) -> Result<(), ChainError> {
         Ok(())
     }
@@ -163,6 +164,8 @@ macro_rules! visit_all {
 pub struct DeltaBuilder<'a> {
     config: TrackConfig,
     work: &'a mut WorkBlock<CardanoLogic>,
+    active_params: &'a PParamsSet,
+    utxos: &'a HashMap<TxoRef, OwnedMultiEraOutput>,
 
     account_state: AccountVisitor,
     asset_state: AssetStateVisitor,
@@ -173,10 +176,17 @@ pub struct DeltaBuilder<'a> {
 }
 
 impl<'a> DeltaBuilder<'a> {
-    pub fn new(config: TrackConfig, work: &'a mut WorkBlock<CardanoLogic>) -> Self {
+    pub fn new(
+        config: TrackConfig,
+        active_params: &'a PParamsSet,
+        work: &'a mut WorkBlock<CardanoLogic>,
+        utxos: &'a HashMap<TxoRef, OwnedMultiEraOutput>,
+    ) -> Self {
         Self {
             config,
             work,
+            active_params,
+            utxos,
             account_state: Default::default(),
             asset_state: Default::default(),
             drep_state: Default::default(),
@@ -186,15 +196,12 @@ impl<'a> DeltaBuilder<'a> {
         }
     }
 
-    pub fn crawl(
-        &mut self,
-        inputs: &HashMap<TxoRef, OwnedMultiEraOutput>,
-    ) -> Result<(), ChainError> {
+    pub fn crawl(&mut self) -> Result<(), ChainError> {
         let block = self.work.unwrap_decoded();
         let block = block.view();
         let mut deltas = WorkDeltas::default();
 
-        visit_all!(self, deltas, visit_root, block);
+        visit_all!(self, deltas, visit_root, block, self.active_params);
 
         for tx in block.txs() {
             visit_all!(self, deltas, visit_tx, block, &tx);
@@ -202,7 +209,7 @@ impl<'a> DeltaBuilder<'a> {
             for input in tx.consumes() {
                 let txoref = TxoRef::from(&input);
 
-                let resolved = inputs.get(&txoref).ok_or_else(|| {
+                let resolved = self.utxos.get(&txoref).ok_or_else(|| {
                     StateError::InvariantViolation(InvariantViolation::InputNotFound(txoref))
                 })?;
 
@@ -229,7 +236,7 @@ impl<'a> DeltaBuilder<'a> {
             }
 
             for cert in tx.certs() {
-                visit_all!(self, deltas, visit_cert, block, &tx, &cert);
+                visit_all!(self, deltas, visit_cert, block, &tx, &cert,);
             }
 
             for (account, amount) in tx.withdrawals().collect::<Vec<_>>() {

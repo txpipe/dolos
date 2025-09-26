@@ -123,6 +123,9 @@ pub struct AccountState {
 
     #[n(11)]
     pub active_drep: Option<DRep>,
+
+    #[n(12)]
+    pub deposit: u64,
 }
 
 entity_boilerplate!(AccountState, "accounts");
@@ -219,6 +222,9 @@ pub struct PoolState {
 
     #[n(15)]
     pub blocks_minted_epoch: u32,
+
+    #[n(16)]
+    pub deposit: u64,
 }
 
 entity_boilerplate!(PoolState, "pools");
@@ -255,6 +261,7 @@ impl PoolState {
             blocks_minted_epoch: Default::default(),
             retiring_epoch: None,
             is_retired: false,
+            deposit: 0,
         }
     }
 }
@@ -646,7 +653,8 @@ impl PParamsSet {
     ensure_pparam!(k, u32);
     ensure_pparam!(a0, RationalNumber);
     ensure_pparam!(drep_inactivity_period, u64);
-
+    ensure_pparam!(key_deposit, u64);
+    ensure_pparam!(pool_deposit, u64);
     ensure_pparam!(protocol_version, ProtocolVersion);
 
     pgetter!(SystemStart, u64);
@@ -843,6 +851,9 @@ pub struct DRepState {
 
     #[n(5)]
     pub expired: bool,
+
+    #[n(6)]
+    pub deposit: u64,
 }
 
 impl DRepState {
@@ -854,6 +865,7 @@ impl DRepState {
             last_active_slot: None,
             retired: false,
             expired: false,
+            deposit: 0,
         }
     }
 }

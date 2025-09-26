@@ -42,6 +42,7 @@ pub async fn route<D: Domain>(
             MempoolError::DecodeError(_) => StatusCode::BAD_REQUEST,
             MempoolError::PlutusNotSupported => StatusCode::BAD_REQUEST,
             MempoolError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            MempoolError::PParamsNotAvailable => StatusCode::INTERNAL_SERVER_ERROR,
         })?;
 
     Ok(hex::encode(hash))

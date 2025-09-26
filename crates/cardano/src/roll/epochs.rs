@@ -9,7 +9,7 @@ use crate::{
     model::{EpochState, FixedNamespace as _, EPOCH_KEY_MARK},
     pallas_extras,
     roll::BlockVisitor,
-    CardanoLogic, Nonces, PParamValue,
+    CardanoLogic, Nonces, PParamValue, PParamsSet,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -20,6 +20,23 @@ pub struct EpochStatsUpdate {
     stake_registration_count: u64,
     stake_deregistration_count: u64,
     pool_registration_count: u64,
+    pool_deregistration_count: u64,
+
+    // params
+    key_deposit: u64,
+    pool_deposit: u64,
+}
+
+impl EpochStatsUpdate {
+    pub fn new(pparams: &PParamsSet) -> Result<Self, ChainError> {
+        let out = Self {
+            key_deposit: pparams.ensure_key_deposit()?,
+            pool_deposit: pparams.ensure_pool_deposit()?,
+            ..Default::default()
+        };
+
+        Ok(out)
+    }
 }
 
 impl dolos_core::EntityDelta for EpochStatsUpdate {
@@ -37,12 +54,17 @@ impl dolos_core::EntityDelta for EpochStatsUpdate {
         entity.utxos += self.utxo_produced;
         entity.utxos = entity.utxos.saturating_sub(self.utxo_consumed);
 
-        entity.gathered_deposits += self.stake_registration_count
-            * entity.pparams.key_deposit_or_default()
-            + self.pool_registration_count * entity.pparams.pool_deposit_or_default();
+        let key_deposits = self.stake_registration_count * self.key_deposit;
+        let pool_deposits = self.pool_registration_count * self.pool_deposit;
 
-        entity.decayed_deposits +=
-            self.stake_deregistration_count * entity.pparams.pool_deposit_or_default();
+        entity.gathered_deposits += key_deposits + pool_deposits;
+
+        // TODO: this isn't accurate, we should use the deposit value stored in each
+        // entity. The question is: how do we get access to that?
+        let key_decays = self.stake_deregistration_count * self.key_deposit;
+        let pool_decays = self.pool_deregistration_count * self.pool_deposit;
+
+        entity.decayed_deposits += key_decays + pool_decays;
 
         entity.blocks_minted += 1;
     }
@@ -55,12 +77,15 @@ impl dolos_core::EntityDelta for EpochStatsUpdate {
         entity.utxos -= self.utxo_produced;
         entity.utxos += self.utxo_consumed;
 
-        entity.gathered_deposits -= self.stake_registration_count
-            * entity.pparams.key_deposit_or_default()
-            + self.pool_registration_count * entity.pparams.pool_deposit_or_default();
+        let key_deposits = self.stake_registration_count * self.key_deposit;
+        let pool_deposits = self.pool_registration_count * self.pool_deposit;
 
-        entity.decayed_deposits -=
-            self.stake_deregistration_count * entity.pparams.pool_deposit_or_default();
+        entity.gathered_deposits -= key_deposits + pool_deposits;
+
+        let key_decays = self.stake_deregistration_count * self.key_deposit;
+        let pool_decays = self.pool_deregistration_count * self.pool_deposit;
+
+        entity.decayed_deposits -= key_decays + pool_decays;
 
         entity.blocks_minted = entity.blocks_minted.saturating_sub(1);
     }
@@ -159,8 +184,9 @@ impl BlockVisitor for EpochStateVisitor {
         &mut self,
         _: &mut WorkDeltas<CardanoLogic>,
         block: &MultiEraBlock,
+        pparams: &PParamsSet,
     ) -> Result<(), ChainError> {
-        self.stats_delta = Some(EpochStatsUpdate::default());
+        self.stats_delta = Some(EpochStatsUpdate::new(pparams)?);
 
         // we only track nonces for Shelley and later
         if block.era() >= pallas::ledger::traverse::Era::Shelley {

@@ -79,9 +79,9 @@ pub fn load_account_data<D: Domain>(
 
 impl BoundaryWork {
     pub fn load<D: Domain>(domain: &D) -> Result<BoundaryWork, ChainError> {
-        let active_state = crate::load_active_epoch(domain)?;
-        let waiting_state = crate::load_previous_epoch(domain)?;
-        let ending_state = crate::load_live_epoch(domain)?;
+        let active_state = crate::load_go_epoch(domain)?;
+        let waiting_state = crate::load_set_epoch(domain)?;
+        let ending_state = crate::load_mark_epoch(domain)?;
         let (active_protocol, active_era) = load_active_era(domain)?;
 
         let mut boundary = BoundaryWork {

@@ -132,10 +132,6 @@ where
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    let pparams = domain
-        .get_live_pparams()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
     let chain = domain
         .get_chain_summary()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -145,6 +141,10 @@ where
         .get_tip()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let (epoch, _) = chain.slot_epoch(tip);
+
+    let pparams = domain.get_current_effective_pparams(epoch)?;
 
     let model = DrepModelBuilder {
         drep_id: drep,

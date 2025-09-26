@@ -44,7 +44,7 @@ use blockfrost_openapi::models::{
     tx_content_withdrawals_inner::TxContentWithdrawalsInner,
 };
 
-use dolos_cardano::{pallas_extras, ChainSummary, PParamsSet};
+use dolos_cardano::{pallas_extras, ChainSummary, Epoch, PParamsSet};
 use dolos_core::{EraCbor, TxHash, TxOrder, TxoIdx, TxoRef};
 
 macro_rules! try_into_or_500 {
@@ -462,7 +462,6 @@ impl<'a> IntoModel<TxContentUtxoInputsInner> for UtxoInputModelBuilder<'a> {
     }
 }
 
-#[derive(Debug)]
 pub struct TxModelBuilder<'a> {
     chain: Option<ChainSummary>,
     pparams: Option<PParamsSet>,
@@ -531,6 +530,17 @@ impl<'a> TxModelBuilder<'a> {
         self.chain.as_ref().ok_or(StatusCode::INTERNAL_SERVER_ERROR)
     }
 
+    fn pparams_or_500(&self) -> Result<&PParamsSet, StatusCode> {
+        self.pparams
+            .as_ref()
+            .ok_or(StatusCode::INTERNAL_SERVER_ERROR)
+    }
+
+    pub fn tx_epoch(&self) -> Result<Epoch, StatusCode> {
+        let (epoch, _) = self.chain_or_500()?.slot_epoch(self.block.slot());
+        Ok(epoch)
+    }
+
     pub fn required_deps(&self) -> Result<Vec<TxHash>, StatusCode> {
         let tx = self.tx()?;
 
@@ -566,23 +576,11 @@ impl<'a> TxModelBuilder<'a> {
     }
 
     pub fn deposit(&self) -> Result<u64, StatusCode> {
-        let key_deposit = self
-            .pparams
-            .as_ref()
-            .and_then(|x| x.key_deposit())
-            .unwrap_or_default();
+        let pparms = self.pparams_or_500()?;
 
-        let pool_deposit = self
-            .pparams
-            .as_ref()
-            .and_then(|x| x.pool_deposit())
-            .unwrap_or_default();
-
-        let drep_deposit = self
-            .pparams
-            .as_ref()
-            .and_then(|x| x.drep_deposit())
-            .unwrap_or_default();
+        let key_deposit = pparms.key_deposit().unwrap_or_default();
+        let pool_deposit = pparms.pool_deposit().unwrap_or_default();
+        let drep_deposit = pparms.drep_deposit().unwrap_or_default();
 
         let out = self
             .tx()?
@@ -1051,10 +1049,10 @@ impl IntoModel<Vec<TxContentRedeemersInner>> for TxModelBuilder<'_> {
         let tx = self.tx()?;
         let redeemers = tx.redeemers();
 
-        let prices = self
-            .pparams
-            .as_ref()
-            .and_then(|x| x.execution_costs())
+        let pparms = self.pparams_or_500()?;
+
+        let prices = pparms
+            .execution_costs()
             .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
 
         let items = redeemers

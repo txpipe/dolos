@@ -69,11 +69,11 @@ impl<C: ChainLogic> WorkBlock<C> {
 }
 
 pub struct WorkBatch<C: ChainLogic> {
-    blocks: Vec<WorkBlock<C>>,
+    pub blocks: Vec<WorkBlock<C>>,
+    pub utxos: RawUtxoMap,
+    pub utxos_decoded: HashMap<TxoRef, C::Utxo>,
 
     entities: EntityMap<C::Entity>,
-    utxos: RawUtxoMap,
-    utxos_decoded: HashMap<TxoRef, C::Utxo>,
 
     // internal checks
     is_sorted: bool,
@@ -250,17 +250,6 @@ impl<C: ChainLogic> WorkBatch<C> {
             .collect::<Result<_, _>>()?;
 
         self.utxos_decoded = decoded;
-
-        Ok(())
-    }
-
-    pub fn compute_delta<D>(&mut self, domain: &D) -> Result<(), DomainError>
-    where
-        D: Domain<Chain = C>,
-    {
-        for block in self.blocks.iter_mut() {
-            domain.chain().compute_delta(block, &self.utxos_decoded)?;
-        }
 
         Ok(())
     }

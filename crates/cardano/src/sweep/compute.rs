@@ -259,6 +259,7 @@ impl BoundaryWork {
             gathered_fees: 0,
             gathered_deposits: 0,
             decayed_deposits: 0,
+            blocks_minted: 0,
 
             // will be computed at the end of the epoch during _sweep_
             rewards_to_distribute: None,
@@ -432,6 +433,7 @@ mod tests {
                 gathered_fees: 437_793,
                 gathered_deposits: 0,
                 decayed_deposits: 0,
+                blocks_minted: 0,
                 rewards_to_distribute: None,
                 rewards_to_treasury: None,
                 largest_stable_slot: 1,

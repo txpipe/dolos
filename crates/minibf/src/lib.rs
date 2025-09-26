@@ -83,11 +83,45 @@ impl<D: Domain> Facade<D> {
         Ok(summary)
     }
 
-    pub fn get_live_pparams(&self) -> Result<PParamsSet, StatusCode> {
-        let pparams = dolos_cardano::load_live_pparams(&self.inner)
+    pub fn get_current_effective_pparams(
+        &self,
+        caller_epoch: Epoch,
+    ) -> Result<PParamsSet, StatusCode> {
+        let pparams = dolos_cardano::load_effective_pparams(&self.inner, caller_epoch)
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
         Ok(pparams)
+    }
+
+    pub fn get_epoch_log(
+        &self,
+        epoch: Epoch,
+        chain_summary: &ChainSummary,
+    ) -> Result<Option<EpochState>, StatusCode> {
+        let slot = chain_summary.epoch_start(epoch as u64);
+
+        let logkey = LogKey::from(TemporalKey::from(slot));
+
+        let log = self
+            .archive()
+            .read_log_typed::<EpochState>(EpochState::NS, &logkey)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        Ok(log)
+    }
+
+    pub fn get_historical_effective_pparams(
+        &self,
+        effective_in_epoch: Epoch,
+        chain_summary: &ChainSummary,
+    ) -> Result<PParamsSet, StatusCode> {
+        let prior_epoch = effective_in_epoch.saturating_sub(1);
+
+        let log = self
+            .get_epoch_log(prior_epoch, chain_summary)?
+            .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        Ok(log.pparams)
     }
 
     pub fn get_tx(&self, hash: Hash<32>) -> Result<Option<EraCbor>, StatusCode> {

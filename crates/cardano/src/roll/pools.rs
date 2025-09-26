@@ -12,22 +12,26 @@ use tracing::{debug, trace};
 use crate::model::FixedNamespace as _;
 use crate::pallas_extras::MultiEraPoolRegistration;
 use crate::{model::PoolState, pallas_extras, roll::BlockVisitor};
-use crate::{AccountState, CardanoLogic};
+use crate::{AccountState, CardanoLogic, PParamsSet};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PoolRegistration {
     slot: BlockSlot,
     cert: MultiEraPoolRegistration,
 
+    // params
+    pool_deposit: u64,
+
     // undo
     prev_entity: Option<PoolState>,
 }
 
 impl PoolRegistration {
-    pub fn new(slot: BlockSlot, cert: MultiEraPoolRegistration) -> Self {
+    pub fn new(slot: BlockSlot, cert: MultiEraPoolRegistration, pool_deposit: u64) -> Self {
         Self {
             slot,
             cert,
+            pool_deposit,
             prev_entity: None,
         }
     }
@@ -54,6 +58,7 @@ impl dolos_core::EntityDelta for PoolRegistration {
         entity.margin_cost = self.cert.margin.clone();
         entity.fixed_cost = self.cert.cost;
         entity.metadata = self.cert.pool_metadata.clone();
+        entity.deposit = self.pool_deposit;
     }
 
     fn undo(&self, entity: &mut Option<PoolState>) {
@@ -93,6 +98,21 @@ impl dolos_core::EntityDelta for MintedBlocksInc {
 pub struct PoolDeRegistration {
     operator: Hash<28>,
     epoch: u64,
+
+    // undo
+    prev_retiring_epoch: Option<u64>,
+    prev_deposit: Option<u64>,
+}
+
+impl PoolDeRegistration {
+    pub fn new(operator: Hash<28>, epoch: u64) -> Self {
+        Self {
+            operator,
+            epoch,
+            prev_retiring_epoch: None,
+            prev_deposit: None,
+        }
+    }
 }
 
 impl dolos_core::EntityDelta for PoolDeRegistration {
@@ -104,13 +124,20 @@ impl dolos_core::EntityDelta for PoolDeRegistration {
 
     fn apply(&mut self, entity: &mut Option<PoolState>) {
         if let Some(entity) = entity {
+            // save undo info
+            self.prev_retiring_epoch = entity.retiring_epoch;
+            self.prev_deposit = Some(entity.deposit);
+
+            // apply changes
             entity.retiring_epoch = Some(self.epoch);
+            entity.deposit = 0;
         }
     }
 
     fn undo(&self, entity: &mut Option<PoolState>) {
         if let Some(entity) = entity {
-            entity.retiring_epoch = None;
+            entity.retiring_epoch = self.prev_retiring_epoch;
+            entity.deposit = self.prev_deposit.unwrap_or(0);
         }
     }
 }
@@ -167,14 +194,19 @@ impl dolos_core::EntityDelta for PoolAccountDetected {
 }
 
 #[derive(Default, Clone)]
-pub struct PoolStateVisitor;
+pub struct PoolStateVisitor {
+    pool_deposit: Option<u64>,
+}
 
 impl BlockVisitor for PoolStateVisitor {
     fn visit_root(
         &mut self,
         deltas: &mut WorkDeltas<CardanoLogic>,
         block: &MultiEraBlock,
+        pparams: &PParamsSet,
     ) -> Result<(), ChainError> {
+        self.pool_deposit = Some(pparams.ensure_pool_deposit()?);
+
         if let Some(key) = block.header().issuer_vkey() {
             let operator: Hash<28> = Hasher::<224>::hash(key);
             deltas.add_for_entity(MintedBlocksInc { operator, count: 1 });
@@ -191,7 +223,13 @@ impl BlockVisitor for PoolStateVisitor {
         cert: &MultiEraCert,
     ) -> Result<(), ChainError> {
         if let Some(cert) = pallas_extras::cert_as_pool_registration(cert) {
-            deltas.add_for_entity(PoolRegistration::new(block.slot(), cert.clone()));
+            let pool_deposit = self.pool_deposit.expect("value set in root");
+
+            deltas.add_for_entity(PoolRegistration::new(
+                block.slot(),
+                cert.clone(),
+                pool_deposit,
+            ));
 
             // Reward accounts for pool don't need to go through the standard stake
             // registration process. This is why we need to track the account directly on
@@ -208,10 +246,7 @@ impl BlockVisitor for PoolStateVisitor {
                     epoch,
                 ) = cow.deref().deref()
                 {
-                    deltas.add_for_entity(PoolDeRegistration {
-                        operator: *operator,
-                        epoch: *epoch,
-                    });
+                    deltas.add_for_entity(PoolDeRegistration::new(*operator, *epoch));
                 }
             }
             MultiEraCert::Conway(cow) => {
@@ -220,10 +255,7 @@ impl BlockVisitor for PoolStateVisitor {
                     epoch,
                 ) = cow.deref().deref()
                 {
-                    deltas.add_for_entity(PoolDeRegistration {
-                        operator: *operator,
-                        epoch: *epoch,
-                    });
+                    deltas.add_for_entity(PoolDeRegistration::new(*operator, *epoch));
                 }
             }
             _ => {}
