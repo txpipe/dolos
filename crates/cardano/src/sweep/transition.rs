@@ -315,7 +315,8 @@ impl super::BoundaryVisitor for BoundaryVisitor {
                     governance_action_validity_period => GovernanceActionValidityPeriod,
                     governance_action_deposit => GovernanceActionDeposit,
                     drep_deposit => DrepDeposit,
-                    drep_inactivity_period => DrepInactivityPeriod
+                    drep_inactivity_period => DrepInactivityPeriod,
+                    cost_models_for_script_languages => CostModelsForScriptLanguages
                 };
 
                 // Special cases that must be converted by hand:

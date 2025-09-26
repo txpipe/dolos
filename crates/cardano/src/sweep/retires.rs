@@ -229,6 +229,11 @@ fn should_expire_drep(ctx: &mut BoundaryWork, drep: &DRepState) -> Result<bool, 
 }
 
 fn should_expire_proposal(ctx: &mut BoundaryWork, proposal: &Proposal) -> Result<bool, ChainError> {
+    // Skip proposals already in a terminal state
+    if proposal.expired_epoch.is_some() || proposal.enacted_epoch.is_some() {
+        return Ok(false);
+    }
+
     let (epoch, _) = ctx.active_era.slot_epoch(proposal.slot);
     let expiring_epoch = epoch as u64 + ctx.valid_governance_action_validity_period()?;
 

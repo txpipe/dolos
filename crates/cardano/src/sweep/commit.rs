@@ -6,7 +6,7 @@ use tracing::{instrument, warn};
 
 use crate::{
     sweep::BoundaryWork, AccountState, CardanoEntity, DRepState, EpochState, EraSummary,
-    FixedNamespace, PoolState, EPOCH_KEY_GO, EPOCH_KEY_MARK, EPOCH_KEY_SET,
+    FixedNamespace, PoolState, Proposal, EPOCH_KEY_GO, EPOCH_KEY_MARK, EPOCH_KEY_SET,
 };
 
 impl BoundaryWork {
@@ -144,6 +144,7 @@ impl BoundaryWork {
         self.apply_whole_namespace::<D, AccountState>(domain, &writer)?;
         self.apply_whole_namespace::<D, PoolState>(domain, &writer)?;
         self.apply_whole_namespace::<D, DRepState>(domain, &writer)?;
+        self.apply_whole_namespace::<D, Proposal>(domain, &writer)?;
 
         debug_assert!(self.deltas.entities.is_empty());
 
