@@ -174,7 +174,7 @@ impl<C: ChainLogic> WorkBatch<C> {
         let mut after = Vec::new();
 
         for block in self.blocks.drain(..) {
-            if block.unwrap_slot() <= slot {
+            if block.unwrap_slot() < slot {
                 before.push(block);
             } else {
                 after.push(block);
