@@ -1,11 +1,11 @@
 use pallas::ledger::traverse::{MultiEraBlock, MultiEraOutput};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 // re-export pallas for version compatibility downstream
 pub use pallas;
 
-use dolos_core::{batch::WorkBlock, *};
+use dolos_core::{batch::WorkBatch, *};
 
 use crate::owned::{OwnedMultiEraBlock, OwnedMultiEraOutput};
 
@@ -123,26 +123,57 @@ impl dolos_core::ChainLogic for CardanoLogic {
         utils::mutable_slots(domain.genesis())
     }
 
-    fn compute_delta(
+    fn compute_delta<D: Domain>(
         &self,
-        block: &mut WorkBlock<Self>,
-        deps: &HashMap<TxoRef, Self::Utxo>,
+        domain: &D,
+        batch: &mut WorkBatch<Self>,
     ) -> Result<(), ChainError> {
-        let mut builder = roll::DeltaBuilder::new(self.config.track.clone(), block);
-        builder.crawl(deps)?;
+        let (_, active_era) = eras::load_active_era(domain)?;
+        let (epoch, _) = active_era.slot_epoch(batch.first_slot());
+        let active_params = load_effective_pparams(domain, epoch)?;
 
-        // TODO: we treat the UTxO set differently due to tech-debt. We should migrate
-        // this into the entity system.
-        let blockd = block.unwrap_decoded();
-        let blockd = blockd.view();
-        let utxos = utxoset::compute_apply_delta(blockd, deps)?;
-        block.utxo_delta = Some(utxos);
+        for block in batch.blocks.iter_mut() {
+            let mut builder = roll::DeltaBuilder::new(
+                self.config.track.clone(),
+                &active_params,
+                block,
+                &batch.utxos_decoded,
+            );
+
+            builder.crawl()?;
+
+            // TODO: we treat the UTxO set differently due to tech-debt. We should migrate
+            // this into the entity system.
+            let blockd = block.unwrap_decoded();
+            let blockd = blockd.view();
+            let utxos = utxoset::compute_apply_delta(blockd, &batch.utxos_decoded)?;
+            block.utxo_delta = Some(utxos);
+        }
 
         Ok(())
     }
 }
 
-pub fn load_active_epoch<D: Domain>(domain: &D) -> Result<Option<EpochState>, ChainError> {
+pub fn load_effective_pparams<D: Domain>(
+    domain: &D,
+    caller_epoch: Epoch,
+) -> Result<PParamsSet, ChainError> {
+    // the effective pparams are usually the ones for the previous epoch (aka: `set`
+    // epoch) except for the initial epoch, where we use the mark epoch since
+    // there's nothing before
+    let epoch = match caller_epoch {
+        0 => load_mark_epoch(domain)?,
+        _ => load_set_epoch(domain)?.ok_or(BrokenInvariant::InvalidEpochState)?,
+    };
+
+    if epoch.number != 0 && epoch.number != (caller_epoch - 1) {
+        return Err(ChainError::from(BrokenInvariant::InvalidEpochState));
+    }
+
+    Ok(epoch.pparams)
+}
+
+pub fn load_go_epoch<D: Domain>(domain: &D) -> Result<Option<EpochState>, ChainError> {
     let epoch = domain
         .state()
         .read_entity_typed::<EpochState>(EpochState::NS, &EntityKey::from(EPOCH_KEY_GO))?;
@@ -150,19 +181,7 @@ pub fn load_active_epoch<D: Domain>(domain: &D) -> Result<Option<EpochState>, Ch
     Ok(epoch)
 }
 
-pub fn load_active_pparams<D: Domain>(domain: &D) -> Result<Option<PParamsSet>, ChainError> {
-    let epoch = load_active_epoch(domain)?;
-
-    Ok(epoch.map(|e| e.pparams))
-}
-
-pub fn use_active_pparams<D: Domain>(domain: &D) -> Result<PParamsSet, ChainError> {
-    let epoch = load_active_epoch(domain)?.ok_or(ChainError::NoActiveEpoch)?;
-
-    Ok(epoch.pparams)
-}
-
-pub fn load_previous_epoch<D: Domain>(domain: &D) -> Result<Option<EpochState>, ChainError> {
+pub fn load_set_epoch<D: Domain>(domain: &D) -> Result<Option<EpochState>, ChainError> {
     let epoch = domain
         .state()
         .read_entity_typed::<EpochState>(EpochState::NS, &EntityKey::from(EPOCH_KEY_SET))?;
@@ -170,19 +189,13 @@ pub fn load_previous_epoch<D: Domain>(domain: &D) -> Result<Option<EpochState>, 
     Ok(epoch)
 }
 
-pub fn load_live_epoch<D: Domain>(domain: &D) -> Result<EpochState, ChainError> {
+pub fn load_mark_epoch<D: Domain>(domain: &D) -> Result<EpochState, ChainError> {
     let epoch = domain
         .state()
         .read_entity_typed::<EpochState>(EpochState::NS, &EntityKey::from(EPOCH_KEY_MARK))?
         .ok_or(ChainError::from(BrokenInvariant::BadBootstrap))?;
 
     Ok(epoch)
-}
-
-pub fn load_live_pparams<D: Domain>(domain: &D) -> Result<PParamsSet, ChainError> {
-    let epoch = load_live_epoch(domain)?;
-
-    Ok(epoch.pparams)
 }
 
 #[cfg(test)]

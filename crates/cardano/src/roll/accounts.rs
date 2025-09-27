@@ -9,11 +9,10 @@ use pallas::ledger::{
     traverse::{MultiEraBlock, MultiEraCert, MultiEraInput, MultiEraOutput, MultiEraTx},
 };
 use serde::{Deserialize, Serialize};
-use tracing::trace;
 
 use crate::model::FixedNamespace as _;
-use crate::CardanoLogic;
 use crate::{model::AccountState, pallas_extras, roll::BlockVisitor};
+use crate::{CardanoLogic, PParamsSet};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrackSeenAddresses {
@@ -88,17 +87,21 @@ impl dolos_core::EntityDelta for ControlledAmountDec {
 pub struct StakeRegistration {
     cred: StakeCredential,
     slot: u64,
+    deposit: u64,
 
     // undo
     prev_registered_at: Option<u64>,
+    prev_deposit: Option<u64>,
 }
 
 impl StakeRegistration {
-    pub fn new(cred: StakeCredential, slot: u64) -> Self {
+    pub fn new(cred: StakeCredential, slot: u64, deposit: u64) -> Self {
         Self {
             cred,
             slot,
+            deposit,
             prev_registered_at: None,
+            prev_deposit: None,
         }
     }
 }
@@ -116,13 +119,16 @@ impl dolos_core::EntityDelta for StakeRegistration {
 
         // save undo info
         self.prev_registered_at = entity.registered_at;
+        self.prev_deposit = Some(entity.deposit);
 
         entity.registered_at = Some(self.slot);
+        entity.deposit = self.deposit;
     }
 
     fn undo(&self, entity: &mut Option<AccountState>) {
         let entity = entity.get_or_insert_default();
         entity.registered_at = self.prev_registered_at;
+        entity.deposit = self.prev_deposit.unwrap_or(0);
     }
 }
 
@@ -219,6 +225,7 @@ pub struct StakeDeregistration {
     prev_registered_at: Option<u64>,
     prev_pool_id: Option<Vec<u8>>,
     prev_drep: Option<DRep>,
+    prev_deposit: Option<u64>,
 }
 
 impl StakeDeregistration {
@@ -229,6 +236,7 @@ impl StakeDeregistration {
             prev_registered_at: None,
             prev_pool_id: None,
             prev_drep: None,
+            prev_deposit: None,
         }
     }
 }
@@ -248,10 +256,12 @@ impl dolos_core::EntityDelta for StakeDeregistration {
         self.prev_registered_at = entity.registered_at;
         self.prev_pool_id = entity.latest_pool.clone();
         self.prev_drep = entity.latest_drep.clone();
+        self.prev_deposit = Some(entity.deposit);
 
         entity.registered_at = None;
         entity.latest_pool = None;
         entity.latest_drep = None;
+        entity.deposit = 0;
     }
 
     fn undo(&self, entity: &mut Option<AccountState>) {
@@ -259,6 +269,7 @@ impl dolos_core::EntityDelta for StakeDeregistration {
         entity.registered_at = self.prev_registered_at;
         entity.latest_pool = self.prev_pool_id.clone();
         entity.latest_drep = self.prev_drep.clone();
+        entity.deposit = self.prev_deposit.unwrap_or(0);
     }
 }
 
@@ -288,9 +299,22 @@ impl dolos_core::EntityDelta for WithdrawalInc {
 }
 
 #[derive(Default, Clone)]
-pub struct AccountVisitor;
+pub struct AccountVisitor {
+    deposit: Option<u64>,
+}
 
 impl BlockVisitor for AccountVisitor {
+    fn visit_root(
+        &mut self,
+        _: &mut WorkDeltas<CardanoLogic>,
+        _: &MultiEraBlock,
+        pparams: &PParamsSet,
+    ) -> Result<(), ChainError> {
+        let deposit = pparams.ensure_key_deposit()?;
+        self.deposit = Some(deposit);
+        Ok(())
+    }
+
     fn visit_input(
         &mut self,
         deltas: &mut WorkDeltas<CardanoLogic>,
@@ -332,9 +356,6 @@ impl BlockVisitor for AccountVisitor {
             amount: output.value().coin(),
         });
 
-        // TODO: refactor this into an archive log
-        //deltas.add_for_entity(TrackSeenAddresses::new(cred, address));
-
         Ok(())
     }
 
@@ -346,26 +367,19 @@ impl BlockVisitor for AccountVisitor {
         cert: &MultiEraCert,
     ) -> Result<(), ChainError> {
         if let Some(cred) = pallas_extras::cert_as_stake_registration(cert) {
-            trace!("detected stake registration");
-
-            deltas.add_for_entity(StakeRegistration::new(cred, block.slot()));
+            let deposit = self.deposit.expect("value set in root");
+            deltas.add_for_entity(StakeRegistration::new(cred, block.slot(), deposit));
         }
 
         if let Some(cert) = pallas_extras::cert_as_stake_delegation(cert) {
-            trace!(%cert.pool, "detected stake delegation");
-
             deltas.add_for_entity(StakeDelegation::new(cert.delegator, cert.pool));
         }
 
         if let Some(cred) = pallas_extras::cert_as_stake_deregistration(cert) {
-            trace!("detected stake deregistration");
-
             deltas.add_for_entity(StakeDeregistration::new(cred, block.slot()));
         }
 
         if let Some(cert) = pallas_extras::cert_as_vote_delegation(cert) {
-            trace!("detected vote delegation");
-
             deltas.add_for_entity(VoteDelegation::new(cert.delegator, cert.drep));
         }
 

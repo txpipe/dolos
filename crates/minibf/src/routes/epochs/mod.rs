@@ -6,7 +6,7 @@ use axum::{
 use blockfrost_openapi::models::epoch_param_content::EpochParamContent;
 
 use dolos_cardano::{EpochState, FixedNamespace, EPOCH_KEY_SET};
-use dolos_core::{ArchiveStore, Domain, LogKey, StateStore, TemporalKey};
+use dolos_core::{Domain, StateStore};
 
 use crate::{error::Error, mapping::IntoModel as _, Facade};
 
@@ -22,7 +22,9 @@ pub async fn latest_parameters<D: Domain>(
 
     let (epoch, _) = summary.slot_epoch(tip);
 
-    let params = domain.get_live_pparams()?;
+    let params = dolos_cardano::load_mark_epoch(&domain.inner)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
     let nonce = domain
         .state()
         .read_entity_typed::<EpochState>(EpochState::NS, &EPOCH_KEY_SET.into())
@@ -32,8 +34,8 @@ pub async fn latest_parameters<D: Domain>(
         .map(|x| x.active.to_string());
 
     let model = mapping::ParametersModelBuilder {
-        epoch: epoch as u64,
-        params,
+        epoch,
+        params: params.pparams,
         genesis: domain.genesis(),
         nonce,
     };
@@ -43,35 +45,19 @@ pub async fn latest_parameters<D: Domain>(
 
 pub async fn by_number_parameters<D: Domain>(
     State(domain): State<Facade<D>>,
-    Path(epoch): Path<u64>,
-) -> Result<Json<EpochParamContent>, Error> {
-    let summary = domain.get_chain_summary()?;
-    let nonce = domain
-        .archive()
-        .read_log_typed::<EpochState>(
-            EpochState::NS,
-            &LogKey::from(TemporalKey::from(summary.epoch_start(epoch))),
-        )
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?
-        .nonces
-        .map(|x| x.active.to_string());
-    // Due to how we log epochs, we actually need the previous pparams.
-    let params = domain
-        .archive()
-        .read_log_typed::<EpochState>(
-            EpochState::NS,
-            &LogKey::from(TemporalKey::from(summary.epoch_start(epoch - 1))),
-        )
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?
-        .pparams;
+    Path(epoch): Path<u32>,
+) -> Result<Json<EpochParamContent>, StatusCode> {
+    let chain = domain.get_chain_summary()?;
+
+    let epoch = domain
+        .get_epoch_log(epoch, &chain)?
+        .ok_or(StatusCode::NOT_FOUND)?;
 
     let model = mapping::ParametersModelBuilder {
-        epoch,
-        params,
+        epoch: epoch.number,
+        params: epoch.pparams,
         genesis: domain.genesis(),
-        nonce,
+        nonce: epoch.nonces.map(|x| x.active.to_string()),
     };
 
     Ok(model.into_response()?)

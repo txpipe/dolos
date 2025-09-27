@@ -65,7 +65,7 @@ pub use point::*;
 pub use state::*;
 pub use wal::*;
 
-use crate::batch::WorkBlock;
+use crate::batch::WorkBatch;
 
 #[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
 pub struct EraCbor(pub Era, pub Cbor);
@@ -465,6 +465,9 @@ pub enum MempoolError {
 
     #[error("invalid tx: {0}")]
     InvalidTx(String),
+
+    #[error("pparams not available")]
+    PParamsNotAvailable,
 }
 
 pub trait MempoolStore: Clone + Send + Sync + 'static {
@@ -557,10 +560,10 @@ pub trait ChainLogic: Sized + Send + Sync {
         tip.saturating_sub(Self::mutable_slots(domain))
     }
 
-    fn compute_delta(
+    fn compute_delta<D: Domain>(
         &self,
-        block: &mut WorkBlock<Self>,
-        deps: &HashMap<TxoRef, Self::Utxo>,
+        domain: &D,
+        batch: &mut WorkBatch<Self>,
     ) -> Result<(), ChainError>;
 }
 

@@ -425,6 +425,7 @@ mod tests {
             }));
 
         let mut boundary = BoundaryWork {
+            network_magic: None,
             active_protocol: EraProtocol::from(6),
             active_era: EraSummary {
                 start: EraBoundary {
@@ -450,6 +451,7 @@ mod tests {
                 gathered_fees: 437_793,
                 gathered_deposits: 0,
                 decayed_deposits: 0,
+                blocks_minted: 0,
                 rewards_to_distribute: None,
                 rewards_to_treasury: None,
                 largest_stable_slot: 1,

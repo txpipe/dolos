@@ -36,6 +36,7 @@ pub struct DRepRegistration {
 
     // undo
     was_retired: bool,
+    prev_deposit: Option<u64>,
 }
 
 impl DRepRegistration {
@@ -46,6 +47,7 @@ impl DRepRegistration {
             deposit,
             anchor,
             was_retired: false,
+            prev_deposit: None,
         }
     }
 }
@@ -67,6 +69,7 @@ impl dolos_core::EntityDelta for DRepRegistration {
         entity.initial_slot = Some(self.slot);
         entity.voting_power = self.deposit;
         entity.retired = false;
+        entity.deposit = self.deposit;
     }
 
     fn undo(&self, entity: &mut Option<DRepState>) {
@@ -74,24 +77,25 @@ impl dolos_core::EntityDelta for DRepRegistration {
         entity.initial_slot = None;
         entity.voting_power = 0;
         entity.retired = self.was_retired;
+        entity.deposit = self.prev_deposit.unwrap_or(0);
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DRepUnRegistration {
     drep: DRep,
-    deposit: u64,
 
     // undo data
     prev_voting_power: Option<u64>,
+    prev_deposit: Option<u64>,
 }
 
 impl DRepUnRegistration {
-    pub fn new(drep: DRep, deposit: u64) -> Self {
+    pub fn new(drep: DRep) -> Self {
         Self {
             drep,
-            deposit,
             prev_voting_power: None,
+            prev_deposit: None,
         }
     }
 }
@@ -108,16 +112,19 @@ impl dolos_core::EntityDelta for DRepUnRegistration {
 
         // save undo data
         self.prev_voting_power = Some(entity.voting_power);
+        self.prev_deposit = Some(entity.deposit);
 
         // apply changes
         entity.voting_power = 0;
         entity.retired = true;
+        entity.deposit = 0;
     }
 
     fn undo(&self, entity: &mut Option<DRepState>) {
         let entity = entity.get_or_insert_default();
         entity.voting_power = self.prev_voting_power.unwrap();
         entity.retired = false;
+        entity.deposit = self.prev_deposit.unwrap_or(0);
     }
 }
 
@@ -188,8 +195,8 @@ impl BlockVisitor for DRepStateVisitor {
                         anchor.clone(),
                     ));
                 }
-                conway::Certificate::UnRegDRepCert(_, coin) => {
-                    deltas.add_for_entity(DRepUnRegistration::new(drep.clone(), *coin));
+                conway::Certificate::UnRegDRepCert(_, _) => {
+                    deltas.add_for_entity(DRepUnRegistration::new(drep.clone()));
                 }
                 _ => (),
             }

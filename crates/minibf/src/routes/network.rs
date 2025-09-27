@@ -241,10 +241,11 @@ where
 {
     let genesis = domain.genesis();
 
-    let active = dolos_cardano::load_live_epoch(&domain.inner)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let active = dolos_cardano::load_go_epoch(&domain.inner)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let live = dolos_cardano::load_live_epoch(&domain.inner)
+    let live = dolos_cardano::load_mark_epoch(&domain.inner)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let builder = NetworkModelBuilder {

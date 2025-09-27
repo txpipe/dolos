@@ -65,7 +65,10 @@ impl Mempool {
     }
 
     pub fn validate<D: Domain>(&self, domain: &D, tx: &MultiEraTx) -> Result<(), MempoolError> {
-        let tip = domain.state().read_cursor()?;
+        let tip = domain
+            .state()
+            .read_cursor()?
+            .ok_or(MempoolError::PParamsNotAvailable)?;
 
         let genesis = domain.genesis();
 
@@ -79,12 +82,16 @@ impl Mempool {
         }
         .unwrap();
 
-        let params = dolos_cardano::use_active_pparams(domain)?;
+        let (_, era) = dolos_cardano::eras::load_active_era(domain)?;
+
+        let (epoch, _) = era.slot_epoch(tip.slot());
+
+        let params = dolos_cardano::load_effective_pparams(domain, epoch)?;
 
         let env = pallas::ledger::validate::utils::Environment {
             prot_params: dolos_cardano::utils::pparams_to_pallas(&params),
             prot_magic: genesis.shelley.network_magic.unwrap(),
-            block_slot: tip.unwrap().slot(),
+            block_slot: tip.slot(),
             network_id,
             acnt: Some(AccountState::default()),
         };
@@ -129,7 +136,15 @@ impl Mempool {
 
         let eras = dolos_cardano::eras::load_era_summary(domain)?;
 
-        let pparams = dolos_cardano::use_active_pparams(domain)?;
+        let tip = domain
+            .state()
+            .read_cursor()?
+            .ok_or(MempoolError::PParamsNotAvailable)?;
+
+        let (epoch, _) = eras.slot_epoch(tip.slot());
+
+        let pparams = dolos_cardano::load_effective_pparams(domain, epoch)?;
+
         let pparams = dolos_cardano::utils::pparams_to_pallas(&pparams);
 
         let slot_config = pallas::ledger::validate::phase2::script_context::SlotConfig {

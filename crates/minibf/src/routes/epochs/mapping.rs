@@ -50,7 +50,7 @@ fn map_cost_models_named(cost_models: &CostModels) -> HashMap<String, serde_json
 }
 
 pub struct ParametersModelBuilder<'a> {
-    pub epoch: u64,
+    pub epoch: u32,
     pub params: PParamsSet,
     pub genesis: &'a Genesis,
     pub nonce: Option<String>,

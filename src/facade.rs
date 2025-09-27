@@ -18,7 +18,8 @@ where
 
         batch.decode_utxos(self.chain())?;
 
-        batch.compute_delta(self)?;
+        // Chain-specific logic
+        self.chain().compute_delta(self, batch)?;
 
         // since we're are importing finalized blocks, we don't care about the potential
         // for undos. This allows us to just drop the mutated delta without having to
@@ -70,7 +71,8 @@ where
 
         batch.decode_utxos(self.chain())?;
 
-        batch.compute_delta(self)?;
+        // Chain-specific logic
+        self.chain().compute_delta(self, &mut batch)?;
 
         batch.commit_wal(self)?;
 

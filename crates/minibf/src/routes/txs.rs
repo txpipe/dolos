@@ -14,6 +14,7 @@ use blockfrost_openapi::models::{
     tx_content_stake_addr_inner::TxContentStakeAddrInner, tx_content_utxo::TxContentUtxo,
     tx_content_withdrawals_inner::TxContentWithdrawalsInner,
 };
+
 use dolos_core::{ArchiveStore, Domain};
 
 use crate::{
@@ -35,13 +36,16 @@ pub async fn by_hash<D: Domain>(
 
     let chain = domain.get_chain_summary()?;
 
-    let pparams = domain.get_live_pparams()?;
+    let builder = TxModelBuilder::new(&raw, order)?;
 
-    let tx = TxModelBuilder::new(&raw, order)?
+    let tx_epoch = builder.tx_epoch()?;
+
+    let pparams = domain.get_historical_effective_pparams(tx_epoch, &chain)?;
+
+    builder
         .with_chain(chain)
-        .with_pparams(pparams);
-
-    tx.into_response()
+        .with_pparams(pparams)
+        .into_response()
 }
 
 pub async fn by_hash_cbor<D: Domain>(
@@ -150,11 +154,13 @@ pub async fn by_hash_redeemers<D: Domain>(
 
     let chain = domain.get_chain_summary()?;
 
-    let pparams = domain.get_live_pparams()?;
+    let builder = TxModelBuilder::new(&raw, order)?;
 
-    let mut builder = TxModelBuilder::new(&raw, order)?
-        .with_chain(chain)
-        .with_pparams(pparams);
+    let tx_epoch = builder.tx_epoch()?;
+
+    let pparams = domain.get_historical_effective_pparams(tx_epoch, &chain)?;
+
+    let mut builder = builder.with_chain(chain).with_pparams(pparams);
 
     let deps = builder.required_deps()?;
     let deps = domain.get_tx_batch(deps)?;

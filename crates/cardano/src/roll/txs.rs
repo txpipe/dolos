@@ -11,7 +11,7 @@ use pallas::{
     },
 };
 
-use crate::{pallas_extras, roll::BlockVisitor, CardanoLogic};
+use crate::{pallas_extras, roll::BlockVisitor, CardanoLogic, PParamsSet};
 
 #[derive(Default, Clone)]
 pub struct TxLogVisitor;
@@ -87,6 +87,7 @@ impl BlockVisitor for TxLogVisitor {
         &mut self,
         deltas: &mut WorkDeltas<CardanoLogic>,
         block: &MultiEraBlock,
+        _: &PParamsSet,
     ) -> Result<(), ChainError> {
         deltas.slot.number = Some(block.number());
 
