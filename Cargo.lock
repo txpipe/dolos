@@ -430,6 +430,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d965446196e3b7decd44aa7ee49e31d630118f90ef12f97900f262eb915c951d"
 
 [[package]]
+name = "big-int"
+version = "7.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "31375ce97b1316b3a92644c2cbc93fa9dcfba06e4aec9a440bce23397af82fd6"
+dependencies = [
+ "big-int-proc",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "big-int-proc"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73cfa06eb56d71f2bb1874b101a50c3ba29fcf3ff7dd8de274e473929459863b"
+dependencies = [
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "binary-layout"
 version = "3.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1204,11 +1224,13 @@ dependencies = [
 name = "dolos-cardano"
 version = "1.0.0-beta.3"
 dependencies = [
+ "big-int",
  "chrono",
  "dolos-core",
  "hex",
  "itertools 0.13.0",
  "itertools 0.14.0",
+ "num-bigint",
  "num-rational",
  "pallas 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=38546da)",
  "paste",
