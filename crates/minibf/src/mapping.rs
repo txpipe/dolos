@@ -45,7 +45,9 @@ use blockfrost_openapi::models::{
 };
 
 use dolos_cardano::{pallas_extras, ChainSummary, Epoch, PParamsSet};
-use dolos_core::{EraCbor, TxHash, TxOrder, TxoIdx, TxoRef};
+use dolos_core::{Domain, EraCbor, TxHash, TxOrder, TxoIdx, TxoRef};
+
+use crate::Facade;
 
 macro_rules! try_into_or_500 {
     ($expr:expr) => {
@@ -501,6 +503,18 @@ impl<'a> TxModelBuilder<'a> {
         }
     }
 
+    pub fn with_historical_pparams<D: Domain>(
+        self,
+        facade: &Facade<D>,
+    ) -> Result<Self, StatusCode> {
+        let epoch = self.tx_epoch()?;
+        let chain = self.chain_or_500()?;
+
+        let pparams = facade.get_historical_effective_pparams(epoch, chain)?;
+
+        Ok(self.with_pparams(pparams))
+    }
+
     pub fn with_network(self, network: Network) -> Self {
         Self {
             network: Some(network),
@@ -536,7 +550,7 @@ impl<'a> TxModelBuilder<'a> {
             .ok_or(StatusCode::INTERNAL_SERVER_ERROR)
     }
 
-    pub fn tx_epoch(&self) -> Result<Epoch, StatusCode> {
+    fn tx_epoch(&self) -> Result<Epoch, StatusCode> {
         let (epoch, _) = self.chain_or_500()?.slot_epoch(self.block.slot());
         Ok(epoch)
     }

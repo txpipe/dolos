@@ -243,7 +243,7 @@ mod tests {
 
         for i in 0..34 {
             let (_, block) = dolos_testing::blocks::make_conway_block(i);
-            domain.roll_forward(&block).unwrap();
+            dolos_core::facade::roll_forward(&domain, block).unwrap();
         }
 
         let service = SyncServiceImpl::new(domain, cancel);

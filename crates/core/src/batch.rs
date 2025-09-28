@@ -33,38 +33,45 @@ impl<C: ChainLogic> WorkDeltas<C> {
     }
 }
 
+#[derive(Debug)]
 pub struct WorkBlock<C: ChainLogic> {
-    pub raw: RawBlock,
-    pub decoded: Option<C::Block>,
+    pub block: C::Block,
+
+    // computed afterwards
     pub deltas: WorkDeltas<C>,
     pub utxo_delta: Option<UtxoSetDelta>,
 }
 
 impl<C: ChainLogic> WorkBlock<C> {
-    pub fn unwrap_slot(&self) -> BlockSlot {
-        self.decoded.as_ref().unwrap().slot()
+    pub fn new(block: C::Block) -> Self {
+        Self {
+            block,
+            deltas: WorkDeltas::default(),
+            utxo_delta: None,
+        }
     }
 
-    pub fn unwrap_decoded(&self) -> &C::Block {
-        self.decoded.as_ref().unwrap()
+    pub fn slot(&self) -> BlockSlot {
+        self.block.slot()
     }
 
-    pub fn unwrap_deps(&self, loaded: &mut RawUtxoMap) -> Vec<TxoRef> {
-        self.decoded.as_ref().unwrap().depends_on(loaded)
+    pub fn decoded(&self) -> &C::Block {
+        &self.block
     }
 
-    pub fn unwrap_point(&self) -> ChainPoint {
-        let decoded = self.unwrap_decoded();
+    pub fn raw(&self) -> RawBlock {
+        self.block.raw()
+    }
+
+    pub fn depends_on(&self, loaded: &mut RawUtxoMap) -> Vec<TxoRef> {
+        self.block.depends_on(loaded)
+    }
+
+    pub fn point(&self) -> ChainPoint {
+        let decoded = self.decoded();
         let slot = decoded.slot();
         let hash = decoded.hash();
         ChainPoint::Specific(slot, hash)
-    }
-
-    pub fn decode(&mut self, chain: &C) -> Result<(), DomainError> {
-        let decoded = chain.decode_block(self.raw.clone())?;
-        self.decoded = Some(decoded);
-
-        Ok(())
     }
 }
 
@@ -92,33 +99,32 @@ pub struct WorkBatch<C: ChainLogic> {
 //     }
 // }
 
-impl<C: ChainLogic> WorkBatch<C> {
-    fn new(blocks: Vec<WorkBlock<C>>, is_sorted: bool) -> Self {
+impl<C: ChainLogic> Default for WorkBatch<C> {
+    fn default() -> Self {
         Self {
-            blocks,
+            blocks: Vec::new(),
             entities: HashMap::new(),
             utxos: HashMap::new(),
             utxos_decoded: HashMap::new(),
-            is_sorted,
+            is_sorted: false,
         }
     }
+}
 
-    pub fn from_raw_batch(raw: Vec<RawBlock>) -> Self {
-        let blocks = raw
-            .into_iter()
-            .map(|raw| WorkBlock {
-                raw,
-                decoded: None,
-                deltas: WorkDeltas::default(),
-                utxo_delta: None,
-            })
-            .collect();
-
-        Self::new(blocks, false)
+impl<C: ChainLogic> WorkBatch<C> {
+    pub fn for_single_block(block: WorkBlock<C>) -> Self {
+        let mut batch = Self::default();
+        batch.add_work(block);
+        batch
     }
 
-    pub fn iter_raw(&self) -> impl Iterator<Item = (ChainPoint, &RawBlock)> {
-        self.blocks.iter().map(|x| (x.unwrap_point(), &x.raw))
+    pub fn add_work(&mut self, work: WorkBlock<C>) {
+        self.blocks.push(work);
+        self.is_sorted = false;
+    }
+
+    pub fn iter_blocks(&self) -> impl Iterator<Item = &C::Block> {
+        self.blocks.iter().map(|x| &x.block)
     }
 
     fn compile_all_entity_keys(&self) -> impl Iterator<Item = &NsKey> {
@@ -129,14 +135,14 @@ impl<C: ChainLogic> WorkBatch<C> {
     }
 
     fn sort_by_slot(&mut self) {
-        self.blocks.sort_by_key(|x| x.unwrap_slot());
+        self.blocks.sort_by_key(|x| x.slot());
         self.is_sorted = true;
     }
 
     pub fn first_point(&self) -> ChainPoint {
         debug_assert!(self.is_sorted);
 
-        self.blocks.first().unwrap().unwrap_point()
+        self.blocks.first().unwrap().point()
     }
 
     pub fn first_slot(&self) -> BlockSlot {
@@ -147,13 +153,13 @@ impl<C: ChainLogic> WorkBatch<C> {
     pub fn last_slot(&self) -> BlockSlot {
         debug_assert!(self.is_sorted);
 
-        self.blocks.last().unwrap().unwrap_slot()
+        self.blocks.last().unwrap().slot()
     }
 
     pub fn last_point(&self) -> ChainPoint {
         debug_assert!(self.is_sorted);
 
-        self.blocks.last().unwrap().unwrap_point()
+        self.blocks.last().unwrap().point()
     }
 
     fn range(&self) -> RangeInclusive<BlockSlot> {
@@ -165,57 +171,6 @@ impl<C: ChainLogic> WorkBatch<C> {
         start..=end
     }
 
-    fn split_at(mut self, slot: BlockSlot) -> (Self, Self) {
-        debug_assert!(self.entities.is_empty());
-        debug_assert!(self.is_sorted);
-        debug_assert!(self.blocks.len() > 1);
-
-        let mut before = Vec::new();
-        let mut after = Vec::new();
-
-        for block in self.blocks.drain(..) {
-            if block.unwrap_slot() < slot {
-                before.push(block);
-            } else {
-                after.push(block);
-            }
-        }
-
-        let before = Self::new(before, true);
-        let after = Self::new(after, true);
-
-        (before, after)
-    }
-
-    pub fn decode_blocks(&mut self, chain: &C) -> Result<(), DomainError> {
-        for block in self.blocks.iter_mut() {
-            block.decode(chain)?;
-        }
-
-        self.sort_by_slot();
-
-        Ok(())
-    }
-
-    pub fn split_by_sweep<D>(
-        self,
-        domain: &D,
-    ) -> Result<(Self, Option<(BlockSlot, Self)>), DomainError>
-    where
-        D: Domain<Chain = C>,
-    {
-        let range = self.range();
-        let next_sweep = domain.chain().next_sweep(domain, *range.start())?;
-
-        if !range.contains(&next_sweep) {
-            Ok((self, None))
-        } else {
-            let (before, after) = self.split_at(next_sweep);
-
-            Ok((before, Some((next_sweep, after))))
-        }
-    }
-
     pub fn load_utxos<D>(&mut self, domain: &D) -> Result<(), DomainError>
     where
         D: Domain<Chain = C>,
@@ -225,7 +180,7 @@ impl<C: ChainLogic> WorkBatch<C> {
         let all_refs: Vec<_> = self
             .blocks
             .iter()
-            .flat_map(|x| x.unwrap_deps(&mut self.utxos))
+            .flat_map(|x| x.depends_on(&mut self.utxos))
             .unique()
             .collect();
 
@@ -263,11 +218,12 @@ impl<C: ChainLogic> WorkBatch<C> {
         let mut entries = Vec::new();
 
         for block in self.blocks.iter() {
-            let point = block.unwrap_point();
+            let point = block.point();
+            let raw = block.raw();
             let delta = block.deltas.entities.values().flatten().cloned().collect();
 
             let value = LogValue {
-                block: (*block.raw).clone(),
+                block: (*raw).clone(),
                 delta,
                 inputs: self.utxos.clone(),
             };
@@ -364,8 +320,8 @@ impl<C: ChainLogic> WorkBatch<C> {
         let writer = domain.archive().start_writer()?;
 
         for block in self.blocks.iter() {
-            let point = block.unwrap_point();
-            let raw = block.raw.clone();
+            let point = block.point();
+            let raw = block.raw();
             let tags = &block.deltas.slot;
 
             writer.apply(&point, &raw, tags)?;

@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use dolos_core::{
-    batch::{WorkBlock, WorkDeltas},
-    ChainError, InvariantViolation, StateError, TxoRef,
+    batch::{WorkBatch, WorkBlock, WorkDeltas},
+    ChainError, Domain, InvariantViolation, StateError, TxoRef,
 };
 use pallas::{
     codec::utils::KeepRaw,
@@ -14,9 +14,11 @@ use pallas::{
         },
     },
 };
+use tracing::{info, instrument};
 
 use crate::{
-    owned::OwnedMultiEraOutput, roll::proposals::ProposalVisitor, CardanoLogic, PParamsSet,
+    load_effective_pparams, owned::OwnedMultiEraOutput, roll::proposals::ProposalVisitor, utxoset,
+    Cache, CardanoLogic, Config, PParamsSet,
 };
 
 use super::TrackConfig;
@@ -215,7 +217,7 @@ impl<'a> DeltaBuilder<'a> {
     }
 
     pub fn crawl(&mut self) -> Result<(), ChainError> {
-        let block = self.work.unwrap_decoded();
+        let block = self.work.decoded();
         let block = block.view();
         let mut deltas = WorkDeltas::default();
 
@@ -284,4 +286,44 @@ impl<'a> DeltaBuilder<'a> {
 
         Ok(())
     }
+}
+
+#[instrument(name = "roll", skip_all)]
+pub fn compute_delta<D: Domain>(
+    config: &Config,
+    cache: &Cache,
+    state: &D::State,
+    batch: &mut WorkBatch<CardanoLogic>,
+) -> Result<(), ChainError> {
+    info!(
+        from = batch.first_slot(),
+        to = batch.last_slot(),
+        "computing delta"
+    );
+
+    let (epoch, _) = cache.eras.slot_epoch(batch.first_slot());
+
+    info!(epoch, "current epoch");
+
+    let active_params = load_effective_pparams::<D>(state, epoch)?;
+
+    for block in batch.blocks.iter_mut() {
+        let mut builder = DeltaBuilder::new(
+            config.track.clone(),
+            &active_params,
+            block,
+            &batch.utxos_decoded,
+        );
+
+        builder.crawl()?;
+
+        // TODO: we treat the UTxO set differently due to tech-debt. We should migrate
+        // this into the entity system.
+        let blockd = block.decoded();
+        let blockd = blockd.view();
+        let utxos = utxoset::compute_apply_delta(blockd, &batch.utxos_decoded)?;
+        block.utxo_delta = Some(utxos);
+    }
+
+    Ok(())
 }

@@ -24,20 +24,11 @@ pub fn run(config: &crate::Config, _args: &Args, _feedback: &Feedback) -> miette
         return Err(miette::miette!("state has no cursor"));
     };
 
-    let entry = (
-        cursor,
-        LogValue {
-            block: vec![],
-            delta: vec![],
-            inputs: HashMap::new(),
-        },
-    );
-
     domain
         .wal()
-        .append_entries(&[entry])
+        .reset_to(&cursor)
         .into_diagnostic()
-        .context("appending wal entry")?;
+        .context("resetting wal")?;
 
     Ok(())
 }

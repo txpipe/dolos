@@ -77,7 +77,7 @@ impl<D: Domain> Facade<D> {
     }
 
     pub fn get_chain_summary(&self) -> Result<ChainSummary, StatusCode> {
-        let summary = dolos_cardano::eras::load_era_summary(&self.inner)
+        let summary = dolos_cardano::eras::load_era_summary::<D>(self.state())
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
         Ok(summary)
@@ -87,7 +87,7 @@ impl<D: Domain> Facade<D> {
         &self,
         caller_epoch: Epoch,
     ) -> Result<PParamsSet, StatusCode> {
-        let pparams = dolos_cardano::load_effective_pparams(&self.inner, caller_epoch)
+        let pparams = dolos_cardano::load_effective_pparams::<D>(self.state(), caller_epoch)
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
         Ok(pparams)

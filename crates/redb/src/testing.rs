@@ -22,7 +22,7 @@ impl Entity for DummyEntity {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct DummyDelta;
 
 impl EntityDelta for DummyDelta {

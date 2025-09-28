@@ -49,10 +49,10 @@ impl Stage {
         }
     }
 
-    fn on_roll_forward(&self, block: &RawBlock) -> Result<(), WorkerError> {
+    fn on_roll_forward(&self, block: RawBlock) -> Result<(), WorkerError> {
         debug!("handling roll forward");
 
-        self.domain.roll_forward(block).or_panic()?;
+        dolos_core::facade::roll_forward(&self.domain, block).or_panic()?;
 
         Ok(())
     }
@@ -94,7 +94,7 @@ impl gasket::framework::Worker<Stage> for Worker {
     async fn execute(&mut self, unit: &WorkUnit, stage: &mut Stage) -> Result<(), WorkerError> {
         match unit {
             WorkUnit::PullEvent(evt) => match evt {
-                PullEvent::RollForward(x) => stage.on_roll_forward(x)?,
+                PullEvent::RollForward(x) => stage.on_roll_forward(x.clone())?,
                 PullEvent::Rollback(x) => stage.on_rollback(x)?,
             },
             WorkUnit::Housekeeping => {

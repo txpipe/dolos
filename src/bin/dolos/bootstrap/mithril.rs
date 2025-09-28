@@ -202,8 +202,7 @@ fn import_hardano_into_domain(
         // around throughout the pipeline
         let batch: Vec<_> = batch.into_iter().map(Arc::new).collect();
 
-        let last = domain
-            .import_batch(batch)
+        let last = dolos_core::facade::import_blocks(&domain, batch)
             .map_err(|e| miette::miette!(e.to_string()))?;
 
         progress.set_position(last);

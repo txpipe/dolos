@@ -183,8 +183,8 @@ impl ChainSummary {
     }
 }
 
-pub fn load_era_summary<D: Domain>(domain: &D) -> Result<ChainSummary, ChainError> {
-    let eras = domain.state().iter_entities_typed(EraSummary::NS, None)?;
+pub fn load_era_summary<D: Domain>(state: &D::State) -> Result<ChainSummary, ChainError> {
+    let eras = state.iter_entities_typed(EraSummary::NS, None)?;
 
     let mut chain = ChainSummary::default();
 
@@ -197,10 +197,10 @@ pub fn load_era_summary<D: Domain>(domain: &D) -> Result<ChainSummary, ChainErro
     Ok(chain)
 }
 
-pub fn load_active_era<D: Domain>(domain: &D) -> Result<(EraProtocol, EraSummary), ChainError> {
-    let eras = domain
-        .state()
-        .iter_entities_typed::<EraSummary>(EraSummary::NS, None)?;
+pub fn load_active_era<D: Domain>(
+    state: &D::State,
+) -> Result<(EraProtocol, EraSummary), ChainError> {
+    let eras = state.iter_entities_typed::<EraSummary>(EraSummary::NS, None)?;
 
     match eras.last() {
         Some(x) => match x {

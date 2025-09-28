@@ -82,11 +82,11 @@ impl Mempool {
         }
         .unwrap();
 
-        let (_, era) = dolos_cardano::eras::load_active_era(domain)?;
+        let (_, era) = dolos_cardano::eras::load_active_era::<D>(domain.state())?;
 
         let (epoch, _) = era.slot_epoch(tip.slot());
 
-        let params = dolos_cardano::load_effective_pparams(domain, epoch)?;
+        let params = dolos_cardano::load_effective_pparams::<D>(domain.state(), epoch)?;
 
         let env = pallas::ledger::validate::utils::Environment {
             prot_params: dolos_cardano::utils::pparams_to_pallas(&params),
@@ -134,7 +134,7 @@ impl Mempool {
     ) -> Result<pallas::ledger::validate::phase2::EvalReport, MempoolError> {
         use dolos_core::{EraCbor, StateStore as _, TxoRef};
 
-        let eras = dolos_cardano::eras::load_era_summary(domain)?;
+        let eras = dolos_cardano::eras::load_era_summary::<D>(domain.state())?;
 
         let tip = domain
             .state()
@@ -143,7 +143,7 @@ impl Mempool {
 
         let (epoch, _) = eras.slot_epoch(tip.slot());
 
-        let pparams = dolos_cardano::load_effective_pparams(domain, epoch)?;
+        let pparams = dolos_cardano::load_effective_pparams::<D>(domain.state(), epoch)?;
 
         let pparams = dolos_cardano::utils::pparams_to_pallas(&pparams);
 

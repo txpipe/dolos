@@ -303,17 +303,18 @@ impl BoundaryWork {
     }
 
     #[instrument(skip_all)]
-    pub fn compute<D: Domain>(&mut self, domain: &D) -> Result<(), ChainError> {
-        trace!("defining pot delta");
+    pub fn compute<D: Domain>(
+        &mut self,
+        state: &D::State,
+        genesis: &Genesis,
+    ) -> Result<(), ChainError> {
         self.define_pot_delta()?;
 
         let mut visitor_retires = super::retires::BoundaryVisitor::default();
         let mut visitor_rewards = super::rewards::BoundaryVisitor::default();
         let mut visitor_rotate = super::transition::BoundaryVisitor::default();
 
-        let pools = domain
-            .state()
-            .iter_entities_typed::<PoolState>(PoolState::NS, None)?;
+        let pools = state.iter_entities_typed::<PoolState>(PoolState::NS, None)?;
 
         for pool in pools {
             let (pool_id, pool) = pool?;
@@ -323,9 +324,7 @@ impl BoundaryWork {
             visitor_rotate.visit_pool(self, &pool_id, &pool)?;
         }
 
-        let dreps = domain
-            .state()
-            .iter_entities_typed::<DRepState>(DRepState::NS, None)?;
+        let dreps = state.iter_entities_typed::<DRepState>(DRepState::NS, None)?;
 
         for drep in dreps {
             let (drep_id, drep) = drep?;
@@ -335,9 +334,7 @@ impl BoundaryWork {
             visitor_rotate.visit_drep(self, &drep_id, &drep)?;
         }
 
-        let accounts = domain
-            .state()
-            .iter_entities_typed::<AccountState>(AccountState::NS, None)?;
+        let accounts = state.iter_entities_typed::<AccountState>(AccountState::NS, None)?;
 
         for account in accounts {
             let (account_id, account) = account?;
@@ -347,9 +344,7 @@ impl BoundaryWork {
             visitor_rotate.visit_account(self, &account_id, &account)?;
         }
 
-        let proposals = domain
-            .state()
-            .iter_entities_typed::<Proposal>(Proposal::NS, None)?;
+        let proposals = state.iter_entities_typed::<Proposal>(Proposal::NS, None)?;
 
         for proposal in proposals {
             let (proposal_id, proposal) = proposal?;
@@ -364,10 +359,10 @@ impl BoundaryWork {
         visitor_rotate.flush(self)?;
 
         trace!("defining era transition");
-        self.define_era_transition(domain.genesis())?;
+        self.define_era_transition(genesis)?;
 
         trace!("defining starting state");
-        self.define_starting_state(domain.genesis(), visitor_rewards.effective_rewards)?;
+        self.define_starting_state(genesis, visitor_rewards.effective_rewards)?;
 
         Ok(())
     }

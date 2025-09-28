@@ -25,7 +25,7 @@ use tracing::info;
 pub mod archive;
 pub mod batch;
 pub mod crawl;
-pub mod init;
+pub mod facade;
 pub mod mempool;
 pub mod point;
 pub mod state;
@@ -65,7 +65,7 @@ pub use point::*;
 pub use state::*;
 pub use wal::*;
 
-use crate::batch::WorkBatch;
+use crate::batch::{WorkBatch, WorkBlock};
 
 #[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
 pub struct EraCbor(pub Era, pub Cbor);
@@ -489,6 +489,13 @@ pub trait Block: Sized + Send + Sync {
     fn depends_on(&self, loaded: &mut RawUtxoMap) -> Vec<TxoRef>;
     fn slot(&self) -> BlockSlot;
     fn hash(&self) -> BlockHash;
+    fn raw(&self) -> RawBlock;
+
+    fn point(&self) -> ChainPoint {
+        let slot = self.slot();
+        let hash = self.hash();
+        ChainPoint::Specific(slot, hash)
+    }
 }
 
 #[derive(Debug, Error)]
@@ -527,44 +534,75 @@ pub enum ChainError {
     StopEpochReached,
 }
 
+pub enum WorkKind {
+    Genesis,
+    Block,
+    Sweep,
+}
+
+pub enum WorkUnit<C: ChainLogic> {
+    Genesis,
+    Block(WorkBlock<C>),
+    Sweep(BlockSlot),
+}
+
 pub trait ChainLogic: Sized + Send + Sync {
+    type Config: Clone;
     type Block: Block + Send + Sync;
     type Entity: Entity;
     type Utxo: Sized + Send + Sync;
     type Delta: EntityDelta<Entity = Self::Entity>;
 
-    fn initialize<D: Domain>(&self, _domain: &D) -> Result<(), ChainError> {
-        Ok(())
-    }
+    fn initialize<D: Domain>(config: Self::Config, state: &D::State) -> Result<Self, ChainError>;
 
-    fn bootstrap<D: Domain>(&self, domain: &D) -> Result<(), ChainError>;
+    // TODO: there's a risk for potential race conditions between peek_work and
+    // pop_work. It has low probability since we use these methods in the same
+    // thread and with extra care. Regardless, we should revisit the `WorkBuffer`
+    // approach so that we have an overarching lock of the the work state.
+    //
+    // One way to fix this is to move the WorkBuffer concept to the core crate and
+    // let the domain "own" the data and let the chain borrow it for mutations.
+    fn peek_work(&self) -> Option<WorkKind>;
+    fn pop_work(&self) -> Option<WorkUnit<Self>>;
 
-    fn decode_block(&self, block: Arc<BlockBody>) -> Result<Self::Block, ChainError>;
+    fn receive_block(&self, raw: RawBlock) -> Result<(), ChainError>;
 
-    fn decode_utxo(&self, utxo: Arc<EraCbor>) -> Result<Self::Utxo, ChainError>;
+    // TODO: we should invert responsibility here. The chain logic should tell the
+    // domain what to do instead of passing everything down and expecting it to do
+    // the right thing.
+    fn apply_genesis<D: Domain>(
+        &self,
+        state: &D::State,
+        genesis: &Genesis,
+    ) -> Result<(), ChainError>;
 
-    fn mutable_slots(domain: &impl Domain) -> BlockSlot;
-
-    fn execute_sweep<D: Domain>(&self, domain: &D, at: BlockSlot) -> Result<(), ChainError>;
-
-    fn next_sweep<D: Domain>(&self, domain: &D, after: BlockSlot) -> Result<BlockSlot, ChainError>;
-
-    /// Computes the last immutable slot
-    ///
-    /// Takes the latest known tip, reads the relevant genesis config values and
-    /// uses the security window guarantee formula from consensus to calculate
-    /// the latest slot that can be considered immutable. This is used
-    /// mainly to define which slots can be finalized in the ledger store
-    /// (aka: compaction).
-    fn last_immutable_slot(domain: &impl Domain, tip: BlockSlot) -> BlockSlot {
-        tip.saturating_sub(Self::mutable_slots(domain))
-    }
+    // TODO: we should invert responsibility here. The chain logic should tell the
+    // domain what to do instead of passing everything down and expecting it to do
+    // the right thing.
+    fn apply_sweep<D: Domain>(
+        &self,
+        state: &D::State,
+        archive: &D::Archive,
+        genesis: &Genesis,
+        at: BlockSlot,
+    ) -> Result<(), ChainError>;
 
     fn compute_delta<D: Domain>(
         &self,
-        domain: &D,
+        state: &D::State,
         batch: &mut WorkBatch<Self>,
     ) -> Result<(), ChainError>;
+
+    // TODO: remove from the interface
+    fn decode_utxo(&self, utxo: Arc<EraCbor>) -> Result<Self::Utxo, ChainError>;
+
+    // TODO: remove from the interface
+    fn mutable_slots(domain: &impl Domain) -> BlockSlot;
+
+    // TODO: remove from the interface
+    fn last_immutable_slot(domain: &impl Domain, tip: BlockSlot) -> BlockSlot {
+        tip.saturating_sub(Self::mutable_slots(domain))
+    }
 }
 
 #[derive(Debug, Error)]
@@ -610,17 +648,19 @@ pub trait Domain: Send + Sync + Clone + 'static {
     type Entity: Entity;
     type EntityDelta: EntityDelta<Entity = Self::Entity> + std::fmt::Debug;
 
+    type Chain: ChainLogic<Delta = Self::EntityDelta, Entity = Self::Entity>;
+
     type Wal: WalStore<Delta = Self::EntityDelta>;
     type State: StateStore;
     type Archive: ArchiveStore;
     type Mempool: MempoolStore;
-    type Chain: ChainLogic<Delta = Self::EntityDelta>;
     type TipSubscription: TipSubscription;
 
     fn storage_config(&self) -> &StorageConfig;
     fn genesis(&self) -> &Genesis;
 
     fn chain(&self) -> &Self::Chain;
+
     fn wal(&self) -> &Self::Wal;
     fn state(&self) -> &Self::State;
     fn archive(&self) -> &Self::Archive;

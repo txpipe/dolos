@@ -40,9 +40,7 @@ fn bootstrap_pots(
     crate::sweep::compute_genesis_pots(max_supply, initial_utxos, pparams)
 }
 
-fn bootrap_epoch<D: Domain>(domain: &D) -> Result<EpochState, ChainError> {
-    let genesis = domain.genesis();
-
+fn bootrap_epoch<D: Domain>(state: &D::State, genesis: &Genesis) -> Result<EpochState, ChainError> {
     let mut pparams = crate::forks::from_byron_genesis(&genesis.byron);
     let mut nonces = None;
 
@@ -75,14 +73,14 @@ fn bootrap_epoch<D: Domain>(domain: &D) -> Result<EpochState, ChainError> {
         nonces,
     };
 
-    let writer = domain.state().start_writer()?;
+    let writer = state.start_writer()?;
     writer.write_entity_typed(&EntityKey::from(EPOCH_KEY_MARK), &epoch)?;
     writer.commit()?;
 
     Ok(epoch)
 }
 
-fn bootstrap_eras<D: Domain>(domain: &D, epoch: &EpochState) -> Result<(), ChainError> {
+fn bootstrap_eras<D: Domain>(state: &D::State, epoch: &EpochState) -> Result<(), ChainError> {
     let system_start = epoch.pparams.system_start().unwrap_or_default();
     let epoch_length = epoch.pparams.epoch_length().unwrap_or_default();
     let slot_length = epoch.pparams.slot_length().unwrap_or_default();
@@ -101,29 +99,29 @@ fn bootstrap_eras<D: Domain>(domain: &D, epoch: &EpochState) -> Result<(), Chain
 
     let key = protocol_major.to_be_bytes();
 
-    let writer = domain.state().start_writer()?;
+    let writer = state.start_writer()?;
     writer.write_entity_typed(&EntityKey::from(&key), &era)?;
     writer.commit()?;
 
     Ok(())
 }
 
-pub fn bootstrap_utxos<D: Domain>(domain: &D) -> Result<(), ChainError> {
-    let delta = crate::utxoset::compute_origin_delta(domain.genesis());
+pub fn bootstrap_utxos<D: Domain>(state: &D::State, genesis: &Genesis) -> Result<(), ChainError> {
+    let delta = crate::utxoset::compute_origin_delta(genesis);
 
-    let writer = domain.state().start_writer()?;
+    let writer = state.start_writer()?;
     writer.apply_utxoset(&delta)?;
     writer.commit()?;
 
     Ok(())
 }
 
-pub fn execute<D: Domain>(domain: &D) -> Result<(), ChainError> {
-    let epoch = bootrap_epoch(domain)?;
+pub fn execute<D: Domain>(state: &D::State, genesis: &Genesis) -> Result<(), ChainError> {
+    let epoch = bootrap_epoch::<D>(state, genesis)?;
 
-    bootstrap_eras(domain, &epoch)?;
+    bootstrap_eras::<D>(state, &epoch)?;
 
-    bootstrap_utxos(domain)?;
+    bootstrap_utxos::<D>(state, genesis)?;
 
     Ok(())
 }

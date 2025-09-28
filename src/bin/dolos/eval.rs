@@ -6,7 +6,10 @@ use pallas::{
 };
 use std::{borrow::Cow, path::PathBuf};
 
-use dolos::core::{Domain, EraCbor, StateStore as _, TxoRef};
+use dolos::{
+    adapters::DomainAdapter,
+    core::{Domain, EraCbor, StateStore as _, TxoRef},
+};
 
 #[derive(Debug, clap::Args)]
 pub struct Args {
@@ -83,7 +86,8 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
     }
 
     let pparams =
-        dolos_cardano::load_effective_pparams(&domain, args.epoch as u32).into_diagnostic()?;
+        dolos_cardano::load_effective_pparams::<DomainAdapter>(domain.state(), args.epoch as u32)
+            .into_diagnostic()?;
 
     let pparams = dolos_cardano::utils::pparams_to_pallas(&pparams);
 

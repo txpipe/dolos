@@ -37,12 +37,12 @@ fn build_pparams<D: Domain>(domain: &D) -> Result<tx3_cardano::PParams, Error> {
         .read_cursor()?
         .ok_or(Error::PParamsNotAvailable)?;
 
-    let (_, era) =
-        dolos_cardano::eras::load_active_era(domain).map_err(|_| Error::PParamsNotAvailable)?;
+    let (_, era) = dolos_cardano::eras::load_active_era::<D>(domain.state())
+        .map_err(|_| Error::PParamsNotAvailable)?;
 
     let (epoch, _) = era.slot_epoch(tip.slot());
 
-    let pparams = dolos_cardano::load_effective_pparams(domain, epoch)
+    let pparams = dolos_cardano::load_effective_pparams::<D>(domain.state(), epoch)
         .map_err(|_| Error::PParamsNotAvailable)?;
 
     let costs = pparams
