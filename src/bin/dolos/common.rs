@@ -1,4 +1,4 @@
-use miette::{Context as _, IntoDiagnostic};
+use miette::{bail, Context as _, IntoDiagnostic};
 use std::sync::Arc;
 use std::{fs, path::PathBuf, time::Duration};
 use tokio_util::sync::CancellationToken;
@@ -116,10 +116,11 @@ pub fn setup_domain(config: &crate::Config) -> miette::Result<DomainAdapter> {
     let (tip_broadcast, _) = tokio::sync::broadcast::channel(100);
     let chain = config.chain.clone();
 
-    let chain = match chain {
-        ChainConfig::Cardano(config) => dolos_cardano::CardanoLogic::new(config.clone()),
-        // TODO: add other chains here
-    };
+    let ChainConfig::Cardano(chain_config) = chain;
+
+    let chain =
+        dolos_cardano::CardanoLogic::initialize::<DomainAdapter>(chain_config, &stores.state)
+            .into_diagnostic()?;
 
     let domain = DomainAdapter {
         storage_config: Arc::new(config.storage.clone()),
@@ -133,7 +134,7 @@ pub fn setup_domain(config: &crate::Config) -> miette::Result<DomainAdapter> {
     };
 
     // this will make sure the domain is correctly initialized and in a valid state.
-    dolos_core::init::ensure_initialized(&domain).map_err(|x| miette::miette!("{:?}", x))?;
+    dolos_core::facade::bootstrap(&domain).map_err(|x| miette::miette!("{:?}", x))?;
 
     Ok(domain)
 }

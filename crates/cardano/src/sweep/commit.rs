@@ -2,7 +2,7 @@ use dolos_core::{
     ArchiveStore, ArchiveWriter, BrokenInvariant, ChainError, ChainPoint, Domain, Entity,
     EntityDelta as _, EntityKey, LogKey, NsKey, StateStore, StateWriter, TemporalKey,
 };
-use tracing::{instrument, warn};
+use tracing::{info, instrument, warn};
 
 use crate::{
     sweep::BoundaryWork, AccountState, CardanoEntity, DRepState, EpochState, EraSummary,
@@ -11,6 +11,8 @@ use crate::{
 
 impl BoundaryWork {
     fn drop_active_epoch<W: StateWriter>(&self, writer: &W) -> Result<(), ChainError> {
+        info!("dropping active epoch");
+
         writer.delete_entity(EpochState::NS, &EntityKey::from(EPOCH_KEY_GO))?;
 
         Ok(())
@@ -21,6 +23,8 @@ impl BoundaryWork {
             .starting_state
             .clone()
             .ok_or(ChainError::from(BrokenInvariant::EpochBoundaryIncomplete))?;
+
+        info!(number = epoch.number, "starting new epoch");
 
         writer.write_entity_typed(&EntityKey::from(EPOCH_KEY_MARK), &epoch)?;
 
@@ -67,7 +71,7 @@ impl BoundaryWork {
     fn promote_waiting_epoch<W: StateWriter>(&self, writer: &W) -> Result<(), ChainError> {
         let Some(waiting) = &self.waiting_state else {
             // we don't have waiting state for early epochs, we just need to wait
-            if self.ending_state.number <= 1 {
+            if self.ending_state.number == 0 {
                 return Ok(());
             }
 
@@ -75,6 +79,7 @@ impl BoundaryWork {
         };
 
         writer.write_entity_typed(&EntityKey::from(EPOCH_KEY_GO), waiting)?;
+        info!(number = waiting.number, "epoch promoted to active");
 
         Ok(())
     }
@@ -82,19 +87,24 @@ impl BoundaryWork {
     fn promote_ending_epoch<W: StateWriter>(&self, writer: &W) -> Result<(), ChainError> {
         writer.write_entity_typed(&EntityKey::from(EPOCH_KEY_SET), &self.ending_state)?;
 
+        info!(
+            number = self.ending_state.number,
+            "epoch promoted to waiting"
+        );
+
         Ok(())
     }
 
     fn apply_whole_namespace<D, E>(
         &mut self,
-        domain: &D,
+        state: &D::State,
         writer: &<D::State as StateStore>::Writer,
     ) -> Result<(), ChainError>
     where
         D: Domain,
         E: Entity + FixedNamespace + Into<CardanoEntity>,
     {
-        let records = domain.state().iter_entities_typed::<E>(E::NS, None)?;
+        let records = state.iter_entities_typed::<E>(E::NS, None)?;
 
         for record in records {
             let (entity_id, entity) = record?;
@@ -138,13 +148,17 @@ impl BoundaryWork {
     }
 
     #[instrument(skip_all)]
-    pub fn commit<D: Domain>(&mut self, domain: &D) -> Result<(), ChainError> {
-        let writer = domain.state().start_writer()?;
+    pub fn commit<D: Domain>(
+        &mut self,
+        state: &D::State,
+        archive: &D::Archive,
+    ) -> Result<(), ChainError> {
+        let writer = state.start_writer()?;
 
-        self.apply_whole_namespace::<D, AccountState>(domain, &writer)?;
-        self.apply_whole_namespace::<D, PoolState>(domain, &writer)?;
-        self.apply_whole_namespace::<D, DRepState>(domain, &writer)?;
-        self.apply_whole_namespace::<D, Proposal>(domain, &writer)?;
+        self.apply_whole_namespace::<D, AccountState>(state, &writer)?;
+        self.apply_whole_namespace::<D, PoolState>(state, &writer)?;
+        self.apply_whole_namespace::<D, DRepState>(state, &writer)?;
+        self.apply_whole_namespace::<D, Proposal>(state, &writer)?;
 
         debug_assert!(self.deltas.entities.is_empty());
 
@@ -153,7 +167,7 @@ impl BoundaryWork {
             warn!(quantity = %self.deltas.entities.len(), "uncommitted deltas");
         }
 
-        let archive_writer = domain.archive().start_writer()?;
+        let archive_writer = archive.start_writer()?;
 
         self.flush_logs::<D>(&archive_writer)?;
 
@@ -162,7 +176,7 @@ impl BoundaryWork {
         self.drop_active_epoch(&writer)?;
         self.promote_waiting_epoch(&writer)?;
         self.promote_ending_epoch(&writer)?;
-        self.apply_era_transition(&writer, domain.state())?;
+        self.apply_era_transition(&writer, state)?;
         self.start_new_epoch(&writer)?;
 
         writer.commit()?;

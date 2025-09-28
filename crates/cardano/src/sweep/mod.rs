@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use dolos_core::{batch::WorkDeltas, BlockSlot, ChainError, Domain, EntityKey};
+use dolos_core::{batch::WorkDeltas, BlockSlot, ChainError, Domain, EntityKey, Genesis};
 use pallas::crypto::hash::Hash;
 use tracing::{info, instrument};
 
@@ -170,14 +170,20 @@ impl BoundaryWork {
 }
 
 #[instrument(skip_all, fields(slot = %slot))]
-pub fn sweep<D: Domain>(domain: &D, slot: BlockSlot, config: &Config) -> Result<(), ChainError> {
+pub fn sweep<D: Domain>(
+    state: &D::State,
+    archive: &D::Archive,
+    slot: BlockSlot,
+    config: &Config,
+    genesis: &Genesis,
+) -> Result<(), ChainError> {
     info!(slot, "executing sweep");
 
-    let mut boundary = BoundaryWork::load(domain)?;
+    let mut boundary = BoundaryWork::load::<D>(state, genesis)?;
 
-    boundary.compute(domain)?;
+    boundary.compute::<D>(state, genesis)?;
 
-    boundary.commit(domain)?;
+    boundary.commit::<D>(state, archive)?;
 
     if let Some(stop_epoch) = config.stop_epoch {
         if boundary.ending_state.number >= stop_epoch {

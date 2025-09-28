@@ -1,6 +1,6 @@
 use std::ops::Deref as _;
 
-use dolos_core::BlockSlot;
+use dolos_core::{BlockSlot, ChainPoint};
 use pallas::crypto::hash::Hash;
 use pallas::ledger::addresses::{
     Address, Network, ShelleyAddress, ShelleyDelegationPart, StakeAddress, StakePayload,
@@ -208,6 +208,22 @@ pub fn next_epoch_boundary(chain_summary: &ChainSummary, after: BlockSlot) -> Bl
     let missing = epoch_length - epoch_slot as u64;
 
     after + missing
+}
+
+pub fn epoch_boundary(
+    chain_summary: &ChainSummary,
+    prev_slot: BlockSlot,
+    next_slot: BlockSlot,
+) -> Option<BlockSlot> {
+    let (prev_epoch, _) = chain_summary.slot_epoch(prev_slot);
+    let (next_epoch, _) = chain_summary.slot_epoch(next_slot);
+
+    if prev_epoch != next_epoch {
+        let boundary = chain_summary.epoch_start(next_epoch as u64);
+        Some(boundary)
+    } else {
+        None
+    }
 }
 
 pub fn default_rational_number() -> RationalNumber {

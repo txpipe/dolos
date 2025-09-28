@@ -22,7 +22,7 @@ pub async fn latest_parameters<D: Domain>(
 
     let (epoch, _) = summary.slot_epoch(tip);
 
-    let params = dolos_cardano::load_mark_epoch(&domain.inner)
+    let params = dolos_cardano::load_mark_epoch::<D>(domain.state())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let nonce = domain

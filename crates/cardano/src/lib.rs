@@ -1,19 +1,26 @@
 use pallas::ledger::traverse::{MultiEraBlock, MultiEraOutput};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::{
+    collections::VecDeque,
+    sync::{Arc, RwLock},
+};
+use tracing::error;
 
 // re-export pallas for version compatibility downstream
 pub use pallas;
 
-use dolos_core::{batch::WorkBatch, *};
+use dolos_core::{
+    batch::{WorkBatch, WorkBlock},
+    Block as _, *,
+};
 
 use crate::owned::{OwnedMultiEraBlock, OwnedMultiEraOutput};
 
 pub mod pallas_extras;
 
-pub mod bootstrap;
 pub mod eras;
 pub mod forks;
+pub mod genesis;
 pub mod model;
 pub mod owned;
 pub mod roll;
@@ -72,33 +79,130 @@ pub struct Config {
     pub stop_epoch: Option<u32>,
 }
 
+#[derive(Default)]
+struct WorkBuffer {
+    pending: VecDeque<WorkUnit<CardanoLogic>>,
+    last_point_seen: Option<ChainPoint>,
+}
+
+struct Cache {
+    eras: ChainSummary,
+}
+
 #[derive(Clone)]
 pub struct CardanoLogic {
     config: Config,
+    work: Arc<RwLock<WorkBuffer>>,
+    cache: Arc<RwLock<Cache>>,
 }
 
 impl CardanoLogic {
-    pub fn new(config: Config) -> Self {
-        Self { config }
+    fn refresh_cache<D: Domain>(&self, state: &D::State) -> Result<(), ChainError> {
+        let mut cache = self.cache.write().unwrap();
+
+        cache.eras = eras::load_era_summary::<D>(state)?;
+
+        Ok(())
     }
 }
 
 impl dolos_core::ChainLogic for CardanoLogic {
+    type Config = Config;
     type Block = OwnedMultiEraBlock;
     type Utxo = OwnedMultiEraOutput;
     type Delta = CardanoDelta;
     type Entity = CardanoEntity;
 
-    fn bootstrap<D: Domain>(&self, domain: &D) -> Result<(), ChainError> {
-        bootstrap::execute(domain)?;
+    fn initialize<D: Domain>(config: Self::Config, state: &D::State) -> Result<Self, ChainError> {
+        let mut work = WorkBuffer::default();
+
+        let cursor = state.read_cursor()?;
+
+        if cursor.is_none() {
+            work.pending.push_back(WorkUnit::Genesis);
+            work.last_point_seen = Some(ChainPoint::Origin);
+        } else {
+            work.last_point_seen = cursor;
+        }
+
+        let eras = eras::load_era_summary::<D>(state)?;
+
+        Ok(Self {
+            config,
+            cache: Arc::new(RwLock::new(Cache { eras })),
+            work: Arc::new(RwLock::new(work)),
+        })
+    }
+
+    fn receive_block(&self, raw: RawBlock) -> Result<(), ChainError> {
+        let block = OwnedMultiEraBlock::decode(raw)?;
+
+        let mut work = self.work.write().unwrap();
+
+        let prev_slot = work
+            .last_point_seen
+            .as_ref()
+            .expect("last point seen")
+            .slot();
+
+        let next_slot = block.slot();
+
+        let cache = self.cache.read().unwrap();
+
+        let boundary = pallas_extras::epoch_boundary(&cache.eras, prev_slot, next_slot);
+
+        if let Some(slot) = boundary {
+            work.pending.push_back(WorkUnit::Sweep(slot));
+            work.last_point_seen = Some(ChainPoint::Slot(slot));
+        }
+
+        let block = WorkBlock::new(block);
+
+        work.pending.push_back(WorkUnit::Block(block));
+        work.last_point_seen = Some(ChainPoint::Slot(next_slot));
 
         Ok(())
     }
 
-    fn decode_block(&self, block: Arc<BlockBody>) -> Result<Self::Block, ChainError> {
-        let out = OwnedMultiEraBlock::decode(block)?;
+    fn peek_work(&self) -> Option<WorkKind> {
+        let work = self.work.read().unwrap();
 
-        Ok(out)
+        work.pending.front().map(|work| match work {
+            WorkUnit::Block(_) => WorkKind::Block,
+            WorkUnit::Sweep(_) => WorkKind::Sweep,
+            WorkUnit::Genesis => WorkKind::Genesis,
+        })
+    }
+
+    fn pop_work(&self) -> Option<WorkUnit<Self>> {
+        let mut work = self.work.write().unwrap();
+        work.pending.pop_front()
+    }
+
+    fn apply_genesis<D: Domain>(
+        &self,
+        state: &D::State,
+        genesis: &Genesis,
+    ) -> Result<(), ChainError> {
+        genesis::execute::<D>(state, genesis)?;
+
+        self.refresh_cache::<D>(state)?;
+
+        Ok(())
+    }
+
+    fn apply_sweep<D: Domain>(
+        &self,
+        state: &D::State,
+        archive: &D::Archive,
+        genesis: &Genesis,
+        at: BlockSlot,
+    ) -> Result<(), ChainError> {
+        sweep::sweep::<D>(state, archive, at, &self.config, genesis)?;
+
+        self.refresh_cache::<D>(state)?;
+
+        Ok(())
     }
 
     fn decode_utxo(&self, utxo: Arc<EraCbor>) -> Result<Self::Utxo, ChainError> {
@@ -107,91 +211,64 @@ impl dolos_core::ChainLogic for CardanoLogic {
         Ok(out)
     }
 
-    fn execute_sweep<D: Domain>(&self, domain: &D, at: BlockSlot) -> Result<(), ChainError> {
-        sweep::sweep(domain, at, &self.config)
-    }
-
-    fn next_sweep<D: Domain>(&self, domain: &D, after: BlockSlot) -> Result<BlockSlot, ChainError> {
-        let summary = eras::load_era_summary(domain)?;
-
-        let next_sweep = pallas_extras::next_epoch_boundary(&summary, after);
-
-        Ok(next_sweep)
-    }
-
     fn mutable_slots(domain: &impl Domain) -> BlockSlot {
         utils::mutable_slots(domain.genesis())
     }
 
     fn compute_delta<D: Domain>(
         &self,
-        domain: &D,
+        state: &D::State,
         batch: &mut WorkBatch<Self>,
     ) -> Result<(), ChainError> {
-        let (_, active_era) = eras::load_active_era(domain)?;
-        let (epoch, _) = active_era.slot_epoch(batch.first_slot());
-        let active_params = load_effective_pparams(domain, epoch)?;
+        let cache = self.cache.read().unwrap();
 
-        for block in batch.blocks.iter_mut() {
-            let mut builder = roll::DeltaBuilder::new(
-                self.config.track.clone(),
-                &active_params,
-                block,
-                &batch.utxos_decoded,
-            );
-
-            builder.crawl()?;
-
-            // TODO: we treat the UTxO set differently due to tech-debt. We should migrate
-            // this into the entity system.
-            let blockd = block.unwrap_decoded();
-            let blockd = blockd.view();
-            let utxos = utxoset::compute_apply_delta(blockd, &batch.utxos_decoded)?;
-            block.utxo_delta = Some(utxos);
-        }
+        roll::compute_delta::<D>(&self.config, &cache, state, batch)?;
 
         Ok(())
     }
 }
 
 pub fn load_effective_pparams<D: Domain>(
-    domain: &D,
+    state: &D::State,
     caller_epoch: Epoch,
 ) -> Result<PParamsSet, ChainError> {
     // the effective pparams are usually the ones for the previous epoch (aka: `set`
     // epoch) except for the initial epoch, where we use the mark epoch since
     // there's nothing before
     let epoch = match caller_epoch {
-        0 => load_mark_epoch(domain)?,
-        _ => load_set_epoch(domain)?.ok_or(BrokenInvariant::InvalidEpochState)?,
+        0 => load_mark_epoch::<D>(state)?,
+        _ => load_set_epoch::<D>(state)?.ok_or(BrokenInvariant::InvalidEpochState)?,
     };
 
     if epoch.number != 0 && epoch.number != (caller_epoch - 1) {
+        error!(
+            caller_epoch,
+            loaded_epoch = epoch.number,
+            "effective epoch doesn't match for caller"
+        );
+
         return Err(ChainError::from(BrokenInvariant::InvalidEpochState));
     }
 
     Ok(epoch.pparams)
 }
 
-pub fn load_go_epoch<D: Domain>(domain: &D) -> Result<Option<EpochState>, ChainError> {
-    let epoch = domain
-        .state()
-        .read_entity_typed::<EpochState>(EpochState::NS, &EntityKey::from(EPOCH_KEY_GO))?;
+pub fn load_go_epoch<D: Domain>(state: &D::State) -> Result<Option<EpochState>, ChainError> {
+    let epoch =
+        state.read_entity_typed::<EpochState>(EpochState::NS, &EntityKey::from(EPOCH_KEY_GO))?;
 
     Ok(epoch)
 }
 
-pub fn load_set_epoch<D: Domain>(domain: &D) -> Result<Option<EpochState>, ChainError> {
-    let epoch = domain
-        .state()
-        .read_entity_typed::<EpochState>(EpochState::NS, &EntityKey::from(EPOCH_KEY_SET))?;
+pub fn load_set_epoch<D: Domain>(state: &D::State) -> Result<Option<EpochState>, ChainError> {
+    let epoch =
+        state.read_entity_typed::<EpochState>(EpochState::NS, &EntityKey::from(EPOCH_KEY_SET))?;
 
     Ok(epoch)
 }
 
-pub fn load_mark_epoch<D: Domain>(domain: &D) -> Result<EpochState, ChainError> {
-    let epoch = domain
-        .state()
+pub fn load_mark_epoch<D: Domain>(state: &D::State) -> Result<EpochState, ChainError> {
+    let epoch = state
         .read_entity_typed::<EpochState>(EpochState::NS, &EntityKey::from(EPOCH_KEY_MARK))?
         .ok_or(ChainError::from(BrokenInvariant::BadBootstrap))?;
 

@@ -1,4 +1,4 @@
-use dolos_core::{batch::WorkDeltas, ChainError, Domain, EntityKey, StateStore};
+use dolos_core::{batch::WorkDeltas, ChainError, Domain, EntityKey, Genesis, StateStore};
 
 use crate::{
     drep_to_entity_key, load_active_era,
@@ -45,12 +45,10 @@ impl Snapshot {
 }
 
 pub fn load_account_data<D: Domain>(
-    domain: &D,
+    state: &D::State,
     boundary: &mut BoundaryWork,
 ) -> Result<(), ChainError> {
-    let accounts = domain
-        .state()
-        .iter_entities_typed::<AccountState>(AccountState::NS, None)?;
+    let accounts = state.iter_entities_typed::<AccountState>(AccountState::NS, None)?;
 
     for record in accounts {
         let (account_id, account) = record?;
@@ -78,11 +76,14 @@ pub fn load_account_data<D: Domain>(
 }
 
 impl BoundaryWork {
-    pub fn load<D: Domain>(domain: &D) -> Result<BoundaryWork, ChainError> {
-        let active_state = crate::load_go_epoch(domain)?;
-        let waiting_state = crate::load_set_epoch(domain)?;
-        let ending_state = crate::load_mark_epoch(domain)?;
-        let (active_protocol, active_era) = load_active_era(domain)?;
+    pub fn load<D: Domain>(
+        state: &D::State,
+        genesis: &Genesis,
+    ) -> Result<BoundaryWork, ChainError> {
+        let active_state = crate::load_go_epoch::<D>(state)?;
+        let waiting_state = crate::load_set_epoch::<D>(state)?;
+        let ending_state = crate::load_mark_epoch::<D>(state)?;
+        let (active_protocol, active_era) = load_active_era::<D>(state)?;
 
         let mut boundary = BoundaryWork {
             active_protocol,
@@ -90,8 +91,8 @@ impl BoundaryWork {
             active_state,
             waiting_state,
             ending_state,
-            network_magic: domain.genesis().shelley.network_magic,
-            shelley_hash: domain.genesis().shelley_hash,
+            network_magic: genesis.shelley.network_magic,
+            shelley_hash: genesis.shelley_hash,
 
             // to be loaded right after
             active_snapshot: Snapshot::default(),
@@ -106,7 +107,7 @@ impl BoundaryWork {
         };
 
         // order matters
-        load_account_data(domain, &mut boundary)?;
+        load_account_data::<D>(state, &mut boundary)?;
 
         Ok(boundary)
     }

@@ -1,8 +1,8 @@
-use std::sync::Arc;
-
 use crate::{make_custom_utxo_delta, TestAddress, UtxoGenerator};
 use dolos_core::*;
 use futures_util::stream::StreamExt;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 pub fn seed_random_memory_store(utxo_generator: impl UtxoGenerator) -> impl StateStore {
     let store =
@@ -105,10 +105,16 @@ impl ToyDomain {
             dolos_redb3::archive::ArchiveStore::in_memory(dolos_cardano::model::build_schema())
                 .unwrap();
 
+        let chain = dolos_cardano::CardanoLogic::initialize::<Self>(
+            dolos_cardano::Config::default(),
+            &state,
+        )
+        .unwrap();
+
         Self {
             state,
             wal: dolos_redb::wal::RedbWalStore::memory().unwrap(),
-            chain: dolos_cardano::CardanoLogic::new(dolos_cardano::Config::default()),
+            chain,
             archive,
             mempool: Mempool {},
             storage_config: storage_config.unwrap_or_default(),

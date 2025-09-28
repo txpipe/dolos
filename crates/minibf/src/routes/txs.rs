@@ -36,16 +36,11 @@ pub async fn by_hash<D: Domain>(
 
     let chain = domain.get_chain_summary()?;
 
-    let builder = TxModelBuilder::new(&raw, order)?;
-
-    let tx_epoch = builder.tx_epoch()?;
-
-    let pparams = domain.get_historical_effective_pparams(tx_epoch, &chain)?;
-
-    builder
+    let builder = TxModelBuilder::new(&raw, order)?
         .with_chain(chain)
-        .with_pparams(pparams)
-        .into_response()
+        .with_historical_pparams::<D>(&domain)?;
+
+    builder.into_response()
 }
 
 pub async fn by_hash_cbor<D: Domain>(
@@ -154,13 +149,9 @@ pub async fn by_hash_redeemers<D: Domain>(
 
     let chain = domain.get_chain_summary()?;
 
-    let builder = TxModelBuilder::new(&raw, order)?;
-
-    let tx_epoch = builder.tx_epoch()?;
-
-    let pparams = domain.get_historical_effective_pparams(tx_epoch, &chain)?;
-
-    let mut builder = builder.with_chain(chain).with_pparams(pparams);
+    let mut builder = TxModelBuilder::new(&raw, order)?
+        .with_chain(chain)
+        .with_historical_pparams::<D>(&domain)?;
 
     let deps = builder.required_deps()?;
     let deps = domain.get_tx_batch(deps)?;

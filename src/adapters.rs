@@ -131,7 +131,7 @@ impl pallas::interop::utxorpc::LedgerContext for DomainAdapter {
     }
 
     fn get_slot_timestamp(&self, slot: u64) -> Option<u64> {
-        let time = dolos_cardano::eras::load_era_summary(self)
+        let time = dolos_cardano::eras::load_era_summary::<Self>(self.state())
             .ok()?
             .slot_time(slot);
 

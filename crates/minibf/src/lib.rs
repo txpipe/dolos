@@ -77,7 +77,7 @@ impl<D: Domain> Facade<D> {
     }
 
     pub fn get_chain_summary(&self) -> Result<ChainSummary, StatusCode> {
-        let summary = dolos_cardano::eras::load_era_summary(&self.inner)
+        let summary = dolos_cardano::eras::load_era_summary::<D>(self.state())
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
         Ok(summary)
@@ -87,7 +87,7 @@ impl<D: Domain> Facade<D> {
         &self,
         caller_epoch: Epoch,
     ) -> Result<PParamsSet, StatusCode> {
-        let pparams = dolos_cardano::load_effective_pparams(&self.inner, caller_epoch)
+        let pparams = dolos_cardano::load_effective_pparams::<D>(self.state(), caller_epoch)
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
         Ok(pparams)
@@ -101,6 +101,8 @@ impl<D: Domain> Facade<D> {
         let slot = chain_summary.epoch_start(epoch as u64);
 
         let logkey = LogKey::from(TemporalKey::from(slot));
+
+        dbg!(&logkey);
 
         let log = self
             .archive()
@@ -117,9 +119,13 @@ impl<D: Domain> Facade<D> {
     ) -> Result<PParamsSet, StatusCode> {
         let prior_epoch = effective_in_epoch.saturating_sub(1);
 
+        dbg!(&prior_epoch);
+
         let log = self
             .get_epoch_log(prior_epoch, chain_summary)?
             .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        dbg!(&log);
 
         Ok(log.pparams)
     }

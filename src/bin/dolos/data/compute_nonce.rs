@@ -28,7 +28,7 @@ pub fn get_nh<D: Domain>(epoch: u64, domain: &D, summary: &EraSummary) -> miette
 }
 
 pub fn compute_nonce<D: Domain>(epoch: u64, domain: &D) -> miette::Result<Hash<32>> {
-    let summary = load_era_summary(domain)
+    let summary = load_era_summary::<D>(domain.state())
         .into_diagnostic()
         .context("loading era summary")?;
 

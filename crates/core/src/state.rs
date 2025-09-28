@@ -127,7 +127,7 @@ pub trait Entity: Sized + Send {
 
 pub type KeyEntityPair<E> = (EntityKey, Option<E>);
 
-pub trait EntityDelta: Clone {
+pub trait EntityDelta: Clone + std::fmt::Debug {
     type Entity: Entity;
 
     fn key(&self) -> NsKey;
@@ -436,7 +436,7 @@ mod tests {
         }
     }
 
-    #[derive(Serialize, Deserialize, Clone)]
+    #[derive(Serialize, Deserialize, Clone, Debug)]
     struct ChangeValue {
         key: Vec<u8>,
         old_value: Option<String>,
