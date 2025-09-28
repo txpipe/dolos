@@ -555,12 +555,14 @@ pub trait ChainLogic: Sized + Send + Sync {
 
     fn initialize<D: Domain>(config: Self::Config, state: &D::State) -> Result<Self, ChainError>;
 
+    // TODO: there's a risk for potential race conditions between peek_work and
+    // pop_work. It has low probability since we use these methods in the same
+    // thread and with extra care. Regardless, we should revisit the `WorkBuffer`
+    // approach so that we have an overarching lock of the the work state.
+    //
+    // One way to fix this is to move the WorkBuffer concept to the core crate and
+    // let the domain "own" the data and let the chain borrow it for mutations.
     fn peek_work(&self) -> Option<WorkKind>;
-
-    fn has_work(&self) -> bool {
-        self.peek_work().is_some()
-    }
-
     fn pop_work(&self) -> Option<WorkUnit<Self>>;
 
     fn receive_block(&self, raw: RawBlock) -> Result<(), ChainError>;
