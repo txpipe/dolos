@@ -46,15 +46,11 @@ pub struct TrackConfig {
     pub pool_state: bool,
     pub epoch_state: bool,
     pub drep_state: bool,
-    pub proposals: bool,
+    pub proposal_logs: bool,
     pub tx_logs: bool,
-}
-
-#[derive(Serialize, Deserialize, Clone, Default)]
-pub struct LogConfig {
-    pub rewards: bool,
-    pub pool_stakes: bool,
-    pub epoch_state: bool,
+    pub account_logs: bool,
+    pub pool_logs: bool,
+    pub epoch_logs: bool,
 }
 
 impl Default for TrackConfig {
@@ -66,7 +62,10 @@ impl Default for TrackConfig {
             epoch_state: true,
             drep_state: true,
             tx_logs: true,
-            proposals: true,
+            account_logs: true,
+            pool_logs: true,
+            epoch_logs: true,
+            proposal_logs: true,
         }
     }
 }
@@ -75,7 +74,6 @@ impl Default for TrackConfig {
 pub struct Config {
     #[serde(default)]
     pub track: TrackConfig,
-    pub log: LogConfig,
     pub stop_epoch: Option<u32>,
 }
 

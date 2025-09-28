@@ -175,7 +175,7 @@ macro_rules! visit_all {
         maybe_visit!($self, $deltas, epoch_state, $method, $($args)*);
         maybe_visit!($self, $deltas, pool_state, $method, $($args)*);
         maybe_visit!($self, $deltas, tx_logs, $method, $($args)*);
-        maybe_visit!($self, $deltas, proposals, $method, $($args)*);
+        maybe_visit!($self, $deltas, proposal_logs, $method, $($args)*);
     };
 }
 
@@ -191,7 +191,7 @@ pub struct DeltaBuilder<'a> {
     epoch_state: EpochStateVisitor,
     pool_state: PoolStateVisitor,
     tx_logs: TxLogVisitor,
-    proposals: ProposalVisitor,
+    proposal_logs: ProposalVisitor,
 }
 
 impl<'a> DeltaBuilder<'a> {
@@ -212,7 +212,7 @@ impl<'a> DeltaBuilder<'a> {
             epoch_state: Default::default(),
             pool_state: Default::default(),
             tx_logs: Default::default(),
-            proposals: Default::default(),
+            proposal_logs: Default::default(),
         }
     }
 
