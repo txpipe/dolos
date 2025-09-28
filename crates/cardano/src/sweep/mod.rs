@@ -181,15 +181,20 @@ pub fn sweep<D: Domain>(
 
     let mut boundary = BoundaryWork::load::<D>(state, genesis)?;
 
-    boundary.compute::<D>(state, genesis)?;
-
-    boundary.commit::<D>(state, archive)?;
-
+    // If we're going to stop, we need to do it before applying any changes.
+    //
+    // This is due to the fact that the WAL only tracks blocks, if we were to apply
+    // the changes, WAL will think it's still before the epoch boundary and
+    // re-apply everything in the next pass.
     if let Some(stop_epoch) = config.stop_epoch {
         if boundary.ending_state.number >= stop_epoch {
             return Err(ChainError::StopEpochReached);
         }
     }
+
+    boundary.compute::<D>(state, genesis)?;
+
+    boundary.commit::<D>(state, archive)?;
 
     Ok(())
 }
