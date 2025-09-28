@@ -102,8 +102,6 @@ impl<D: Domain> Facade<D> {
 
         let logkey = LogKey::from(TemporalKey::from(slot));
 
-        dbg!(&logkey);
-
         let log = self
             .archive()
             .read_log_typed::<EpochState>(EpochState::NS, &logkey)
@@ -119,13 +117,9 @@ impl<D: Domain> Facade<D> {
     ) -> Result<PParamsSet, StatusCode> {
         let prior_epoch = effective_in_epoch.saturating_sub(1);
 
-        dbg!(&prior_epoch);
-
         let log = self
             .get_epoch_log(prior_epoch, chain_summary)?
             .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        dbg!(&log);
 
         Ok(log.pparams)
     }
