@@ -120,6 +120,7 @@ impl<C: ChainLogic> WorkBatch<C> {
 
     pub fn add_work(&mut self, work: WorkBlock<C>) {
         self.blocks.push(work);
+        self.is_sorted = false;
     }
 
     pub fn iter_blocks(&self) -> impl Iterator<Item = &C::Block> {

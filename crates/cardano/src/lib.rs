@@ -79,10 +79,35 @@ pub struct Config {
     pub stop_epoch: Option<u32>,
 }
 
-#[derive(Default)]
 struct WorkBuffer {
     pending: VecDeque<WorkUnit<CardanoLogic>>,
-    last_point_seen: Option<ChainPoint>,
+    last_point_seen: ChainPoint,
+}
+
+impl WorkBuffer {
+    fn new_from_cursor(cursor: ChainPoint) -> Self {
+        Self {
+            pending: Default::default(),
+            last_point_seen: cursor,
+        }
+    }
+
+    fn new_from_genesis() -> Self {
+        Self {
+            pending: VecDeque::from(vec![WorkUnit::Genesis]),
+            last_point_seen: ChainPoint::Origin,
+        }
+    }
+
+    fn enqueue_block(&mut self, block: WorkBlock<CardanoLogic>) {
+        self.last_point_seen = ChainPoint::Slot(block.slot());
+        self.pending.push_back(WorkUnit::Block(block));
+    }
+
+    fn enqueue_sweep(&mut self, slot: BlockSlot) {
+        self.last_point_seen = ChainPoint::Slot(slot);
+        self.pending.push_back(WorkUnit::Sweep(slot));
+    }
 }
 
 struct Cache {
@@ -114,16 +139,12 @@ impl dolos_core::ChainLogic for CardanoLogic {
     type Entity = CardanoEntity;
 
     fn initialize<D: Domain>(config: Self::Config, state: &D::State) -> Result<Self, ChainError> {
-        let mut work = WorkBuffer::default();
-
         let cursor = state.read_cursor()?;
 
-        if cursor.is_none() {
-            work.pending.push_back(WorkUnit::Genesis);
-            work.last_point_seen = Some(ChainPoint::Origin);
-        } else {
-            work.last_point_seen = cursor;
-        }
+        let work = match cursor {
+            Some(cursor) => WorkBuffer::new_from_cursor(cursor),
+            None => WorkBuffer::new_from_genesis(),
+        };
 
         let eras = eras::load_era_summary::<D>(state)?;
 
@@ -139,11 +160,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
 
         let mut work = self.work.write().unwrap();
 
-        let prev_slot = work
-            .last_point_seen
-            .as_ref()
-            .expect("last point seen")
-            .slot();
+        let prev_slot = work.last_point_seen.slot();
 
         let next_slot = block.slot();
 
@@ -152,14 +169,12 @@ impl dolos_core::ChainLogic for CardanoLogic {
         let boundary = pallas_extras::epoch_boundary(&cache.eras, prev_slot, next_slot);
 
         if let Some(slot) = boundary {
-            work.pending.push_back(WorkUnit::Sweep(slot));
-            work.last_point_seen = Some(ChainPoint::Slot(slot));
+            work.enqueue_sweep(slot);
         }
 
         let block = WorkBlock::new(block);
 
-        work.pending.push_back(WorkUnit::Block(block));
-        work.last_point_seen = Some(ChainPoint::Slot(next_slot));
+        work.enqueue_block(block);
 
         Ok(())
     }

@@ -1,4 +1,4 @@
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::{
     batch::WorkBatch, ArchiveStore, Block as _, BlockSlot, ChainLogic, ChainPoint, Domain,
@@ -70,6 +70,10 @@ fn roll_batch<D: Domain>(
     Ok(batch.last_slot())
 }
 
+/// Execute isolated work, such as genesis or sweeps.
+///
+/// Don't use this to execute blocks, those should be executed in a batch. This
+/// method can be used for both import and roll operations.
 fn execute_isolated_work<D: Domain>(
     domain: &D,
     work: WorkUnit<D::Chain>,
@@ -82,10 +86,7 @@ fn execute_isolated_work<D: Domain>(
 
             domain.wal().reset_to(&ChainPoint::Origin)?;
         }
-        WorkUnit::Block(block) => {
-            let batch = WorkBatch::for_single_block(block);
-            import_batch(domain, batch)?;
-        }
+
         WorkUnit::Sweep(slot) => {
             domain.chain().apply_sweep::<D>(
                 domain.state(),
@@ -94,32 +95,9 @@ fn execute_isolated_work<D: Domain>(
                 slot,
             )?;
         }
-    }
-
-    Ok(())
-}
-
-fn catch_up_stores<D: Domain>(domain: &D) -> Result<(), DomainError> {
-    let wal = domain
-        .wal()
-        .find_tip()?
-        .map(|(point, _)| point)
-        .ok_or(DomainError::WalIsEmpty)?;
-
-    let state = domain.state().read_cursor()?.unwrap_or(ChainPoint::Origin);
-
-    let archive = domain
-        .archive()
-        .get_tip()?
-        .map(|(slot, _)| ChainPoint::Slot(slot))
-        .unwrap_or(ChainPoint::Origin);
-
-    if wal.slot() > archive.slot() {
-        warn!(%archive, %wal,"catch up needed, wal is ahead of archive");
-    }
-
-    if wal.slot() > state.slot() {
-        warn!(%state, %wal, "catch up needed, wal is ahead of state");
+        WorkUnit::Block(_) => {
+            unreachable!("isolated work can't be a block, only genesis or sweeps are allowed");
+        }
     }
 
     Ok(())
@@ -202,14 +180,44 @@ fn ensure_wal_in_sync_with_state<D: Domain>(domain: &D) -> Result<(), DomainErro
     match (wal, state) {
         (Some(wal), Some(state)) => {
             if wal != state {
+                warn!(%wal, %state, "wal is out of sync");
+                info!("resetting wal to match state");
                 domain.wal().reset_to(&state)?;
             }
         }
         (None, Some(state)) => {
+            warn!(%state, "missing wal, resetting to match state");
+            info!("resetting wal to match state");
             domain.wal().reset_to(&state)?;
         }
         (Some(_), None) => {
+            // weird case, strictly speaking, this should clear the wal rather than reset to
+            // origin
+            warn!("missing wal, resetting to origin");
+            info!("resetting wal to origin");
             domain.wal().reset_to(&ChainPoint::Origin)?;
+        }
+        (None, None) => (),
+    }
+
+    Ok(())
+}
+
+fn check_archive_in_sync_with_state<D: Domain>(domain: &D) -> Result<(), DomainError> {
+    let archive = domain.archive().get_tip()?.map(|(slot, _)| slot);
+    let state = domain.state().read_cursor()?.map(|x| x.slot());
+
+    match (archive, state) {
+        (Some(archive), Some(state)) => {
+            if archive != state {
+                error!(%archive, %state, "archive is out of sync");
+            }
+        }
+        (None, Some(_)) => {
+            warn!("archive is missing");
+        }
+        (Some(_), None) => {
+            error!("found archive but no state");
         }
         (None, None) => (),
     }
@@ -219,6 +227,7 @@ fn ensure_wal_in_sync_with_state<D: Domain>(domain: &D) -> Result<(), DomainErro
 
 pub fn check_integrity<D: Domain>(domain: &D) -> Result<(), DomainError> {
     ensure_wal_in_sync_with_state(domain)?;
+    check_archive_in_sync_with_state(domain)?;
 
     Ok(())
 }
