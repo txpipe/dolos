@@ -200,11 +200,16 @@ where
     let summary = domain.get_chain_summary()?;
     let (epoch, _) = summary.slot_epoch(tip);
 
-    let rewards = domain
+    let mut entries = domain
         .iter_cardano_logs_per_epoch::<StakeLog>(operator.into(), 0..epoch)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let mapped: Vec<_> = rewards
+    // Apply order before pagination
+    if matches!(pagination.order, crate::pagination::Order::Desc) {
+        entries.reverse()
+    };
+
+    let mapped: Vec<_> = entries
         .into_iter()
         .skip(pagination.skip())
         .take(pagination.count)
