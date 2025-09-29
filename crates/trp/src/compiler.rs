@@ -65,12 +65,13 @@ pub fn load_compiler<D: Domain>(
 ) -> Result<tx3_cardano::Compiler, Error> {
     let pparams = build_pparams::<D>(domain)?;
 
-    let cursor = domain.state().read_cursor()?.ok_or(Error::TipNotResolved)?;
+    let state = domain.state();
+    let cursor = state.read_cursor()?.ok_or(Error::TipNotResolved)?;
     let slot = cursor.slot();
     let hash = cursor.hash().map(|h| h.to_vec()).unwrap_or_default();
 
     let chain_summary =
-        dolos_cardano::load_era_summary(domain).map_err(|_| Error::TipNotResolved)?;
+        dolos_cardano::eras::load_era_summary::<D>(&state).map_err(|_| Error::TipNotResolved)?;
     let timestamp = chain_summary.slot_time(slot) as u128 * 1000;
 
     let tip = tx3_cardano::ChainPoint {
