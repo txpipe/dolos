@@ -516,12 +516,12 @@ where
 }
 
 pub async fn by_subject_addresses<D: Domain>(
-    Path(unit): Path<String>,
+    Path(subject): Path<String>,
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<AssetAddressesInner>>, Error> {
     let pagination = Pagination::try_from(params)?;
-    let asset = hex::decode(&unit).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let asset = hex::decode(&subject).map_err(|_| Error::InvalidAsset)?;
     let utxoset = domain
         .state()
         .get_utxo_by_asset(&asset)
@@ -574,15 +574,23 @@ pub async fn by_subject_addresses<D: Domain>(
             .or_insert((sort, amount));
     }
 
-    let sorted = addresses
+    let mut items = addresses
         .into_iter()
         .sorted_by_key(|(_, (sort, _))| *sort)
-        .skip(pagination.skip())
-        .take(pagination.count)
         .map(|(address, (_, amount))| AssetAddressesInner {
             address,
             quantity: amount.to_string(),
         })
+        .collect_vec();
+
+    if matches!(pagination.order, Order::Desc) {
+        items.reverse();
+    }
+
+    let sorted = items
+        .into_iter()
+        .skip(pagination.skip())
+        .take(pagination.count)
         .collect_vec();
 
     Ok(Json(sorted))
