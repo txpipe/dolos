@@ -8,8 +8,8 @@ use tracing::debug;
 
 use crate::{
     sweep::{hacks, AccountId, BoundaryWork, PoolId, ProposalId},
-    AccountState, CardanoDelta, CardanoEntity, FixedNamespace as _, PParamValue, PoolState,
-    Proposal, StakeLog,
+    AccountState, CardanoDelta, CardanoEntity, FixedNamespace as _, PParamKind, PParamValue,
+    PoolState, Proposal, StakeLog,
 };
 
 fn should_enact_proposal(ctx: &mut BoundaryWork, proposal: &Proposal) -> bool {
@@ -315,8 +315,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
                     governance_action_validity_period => GovernanceActionValidityPeriod,
                     governance_action_deposit => GovernanceActionDeposit,
                     drep_deposit => DrepDeposit,
-                    drep_inactivity_period => DrepInactivityPeriod,
-                    cost_models_for_script_languages => CostModelsForScriptLanguages
+                    drep_inactivity_period => DrepInactivityPeriod
                 };
 
                 // Special cases that must be converted by hand:
@@ -371,6 +370,44 @@ impl super::BoundaryVisitor for BoundaryVisitor {
                             mem_price: updated.mem_price.clone(),
                             step_price: updated.step_price.clone(),
                         }));
+                }
+
+                if let Some(updated) = update.cost_models_for_script_languages.as_ref() {
+                    debug!(
+                        variant = "cost_models",
+                        value =? updated,
+                        "applying new pparam value on ending state"
+                    );
+                    let Some(PParamValue::CostModelsForScriptLanguages(current)) = ctx
+                        .ending_state
+                        .pparams
+                        .get(PParamKind::CostModelsForScriptLanguages)
+                    else {
+                        // Unreachable
+                        return Ok(());
+                    };
+                    ctx.ending_state
+                        .pparams
+                        .set(PParamValue::CostModelsForScriptLanguages(
+                            pallas::ledger::primitives::conway::CostModels {
+                                plutus_v1: if updated.plutus_v1.is_some() {
+                                    updated.plutus_v1.clone()
+                                } else {
+                                    current.plutus_v1.clone()
+                                },
+                                plutus_v2: if updated.plutus_v2.is_some() {
+                                    updated.plutus_v2.clone()
+                                } else {
+                                    current.plutus_v2.clone()
+                                },
+                                plutus_v3: if updated.plutus_v3.is_some() {
+                                    updated.plutus_v3.clone()
+                                } else {
+                                    current.plutus_v3.clone()
+                                },
+                                unknown: updated.unknown.clone(),
+                            },
+                        ));
                 }
             }
             GovAction::TreasuryWithdrawals(_, _) => {
