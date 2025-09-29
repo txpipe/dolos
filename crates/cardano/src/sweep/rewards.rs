@@ -34,7 +34,7 @@ fn baseline_inner_big(
     s_p: Ratio,     // min(s, z0)
     z0: Ratio,      // 1/k
     a0: Ratio,
-) -> Ratio {
+) -> BigRational {
     let sigma_p = to_big_rational(sigma_p);
     let s_p = to_big_rational(s_p);
     let z0 = to_big_rational(z0);
@@ -42,17 +42,9 @@ fn baseline_inner_big(
 
     // inner = σ′ + s′ * a0 * (σ′ − s′ * (z0 − σ′) / z0)
     let term = &sigma_p - (&s_p * ((&z0 - &sigma_p) / &z0));
-    let big = &sigma_p + (&s_p * &a0 * term);
+    let out = &sigma_p + (&s_p * &a0 * term);
 
-    dbg!(&big);
-
-    let big = big.floor().reduced();
-
-    let numer = big.numer().try_into().unwrap();
-    let denom = big.denom().try_into().unwrap();
-    let ratio = Ratio::new(numer, denom);
-
-    ratio
+    out
 }
 
 fn to_big_rational(ratio: Ratio) -> BigRational {
@@ -68,9 +60,9 @@ fn compute_max_pool_rewards(
     pool_stake: u64,
     k: u32,
     a0: &RationalNumber,
-) -> Ratio {
+) -> u64 {
     if total_stake == 0 || k == 0 {
-        return Ratio::new(0 as i128, 1 as i128);
+        return 0;
     }
 
     // Optional but recommended (if you have live pledge available):
@@ -90,6 +82,7 @@ fn compute_max_pool_rewards(
     let s_p = s.min(z0); // s'
 
     let r = Ratio::from_integer(total_rewards as i128);
+    let r = to_big_rational(r);
 
     let a0r = Ratio::new(a0.numerator as i128, a0.denominator as i128);
 
@@ -97,11 +90,14 @@ fn compute_max_pool_rewards(
     let inner = baseline_inner_big(sigma_p, s_p, z0, a0r);
 
     let denom = Ratio::new(1, 1) + a0r;
+    let denom = to_big_rational(denom);
 
-    dbg!(&inner);
-    dbg!(&denom);
+    let out = r * inner / denom;
+    let out = out.floor().to_integer();
 
-    r * inner / denom
+    let out: i64 = out.try_into().unwrap();
+
+    out.max(0) as u64
 }
 
 fn compute_pool_apparent_performance(
@@ -113,12 +109,16 @@ fn compute_pool_apparent_performance(
     if total_active_stake == 0 {
         return Ratio::new(0 as i128, 1 as i128);
     }
+
     // β = n / max(1, N̄)
     let beta = Ratio::new(pool_blocks as i128, std::cmp::max(epoch_blocks, 1) as i128);
+
     let sigma_a = Ratio::new(pool_stake as i128, total_active_stake as i128);
+
     if sigma_a == Ratio::new(0 as i128, 1 as i128) {
         return Ratio::new(0 as i128, 1 as i128);
     }
+
     // p̄ = β / σ_a
     beta / sigma_a
 }
@@ -126,7 +126,7 @@ fn compute_pool_apparent_performance(
 #[allow(clippy::too_many_arguments)]
 fn compute_pool_rewards(
     total_rewards: u64,
-    total_stake: u64, // <-- add this
+    total_stake: u64,
     total_active_stake: u64,
     pool: &PoolState,
     pool_stake: u64,
@@ -144,7 +144,12 @@ fn compute_pool_rewards(
         total_active_stake,
     );
 
-    let rewards = (max_rewards * pbar).floor().to_integer().max(0) as u64;
+    let rewards = (Ratio::from_integer(max_rewards as i128) * pbar)
+        .floor()
+        .to_integer()
+        .try_into()
+        .unwrap();
+
     rewards
 }
 
@@ -393,23 +398,42 @@ impl super::BoundaryVisitor for BoundaryVisitor {
             45_000_000_000_000_000 - ctx.active_state.as_ref().map(|s| s.reserves).unwrap_or(0);
 
         let pool_stake = ctx.active_snapshot.get_pool_stake(id);
-        let pot_delta = ctx.pot_delta.as_ref().unwrap(); // TODO: pots should be mandatory
+        let epoch_rewards = ctx.pot_delta.as_ref().unwrap().available_rewards;
+        let total_active_stake = ctx.active_snapshot.total_stake;
+        let k = ctx.valid_k()?;
+        let a0 = ctx.valid_a0()?;
+        let pool_blocks = pool.blocks_minted_epoch;
+        let epoch_blocks = ctx.ending_state.blocks_minted;
 
         let total_pool_reward = compute_pool_rewards(
-            pot_delta.available_rewards,
+            epoch_rewards,
             circulating_supply,
-            ctx.active_snapshot.total_stake,
+            total_active_stake,
             pool,
             pool_stake,
-            ctx.valid_k()?,
-            &ctx.valid_a0()?,
-            pool.blocks_minted_epoch,
-            ctx.ending_state.blocks_minted,
+            k,
+            &a0,
+            pool_blocks,
+            epoch_blocks,
         );
 
         let operator_share = compute_pool_operator_share(total_pool_reward, pool, pool_stake);
 
         let delegator_rewards = total_pool_reward.saturating_sub(operator_share);
+
+        debug!(
+            %pool_blocks,
+            %epoch_blocks,
+            %total_active_stake,
+            %pool_stake,
+            %circulating_supply,
+            %k,
+            %epoch_rewards,
+            %total_pool_reward,
+            %operator_share,
+            %delegator_rewards,
+            "computed pool rewards"
+        );
 
         let delegators = ctx.active_snapshot.accounts_by_pool.iter_delegators(id);
 
