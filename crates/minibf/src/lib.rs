@@ -307,6 +307,10 @@ where
                 get(routes::blocks::by_slot::<D>),
             )
             .route(
+                "/epochs/{epoch}/blocks",
+                get(routes::epochs::by_number_blocks::<D>),
+            )
+            .route(
                 "/epochs/{epoch}/parameters",
                 get(routes::epochs::by_number_parameters::<D>),
             )
