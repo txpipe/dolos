@@ -1,5 +1,6 @@
 use axum::{http::StatusCode, Json};
 use itertools::Itertools;
+use num_traits::ToPrimitive;
 use pallas::{
     codec::{minicbor, utils::Bytes},
     crypto::hash::{Hash, Hasher},
@@ -8,7 +9,7 @@ use pallas::{
         primitives::{
             alonzo::{self, Certificate as AlonzoCert},
             conway::{Certificate as ConwayCert, DRep, DatumOption, RedeemerTag, ScriptRef},
-            ExUnitPrices, StakeCredential,
+            ExUnitPrices, PlutusData, StakeCredential,
         },
         traverse::{
             ComputeHash, MultiEraBlock, MultiEraCert, MultiEraHeader, MultiEraInput,
@@ -1859,5 +1860,103 @@ impl<'a> IntoModel<Vec<BlockContentAddressesInner>> for BlockModelBuilder<'a> {
             .collect();
 
         Ok(addresses)
+    }
+}
+
+pub struct PlutusDataWrapper(pub PlutusData);
+impl PlutusDataWrapper {
+    fn as_value(&self) -> Result<serde_json::Value, StatusCode> {
+        match &self.0 {
+            PlutusData::Constr(x) => {
+                let values = x
+                    .fields
+                    .iter()
+                    .map(|d| PlutusDataWrapper(d.clone()).as_value())
+                    .collect::<Result<Vec<serde_json::Value>, _>>()?;
+
+                Ok(serde_json::Value::Object(serde_json::Map::from_iter([(
+                    "list".to_string(),
+                    serde_json::Value::Array(values),
+                )])))
+            }
+
+            PlutusData::Map(x) => {
+                let mut map = serde_json::Map::new();
+                for (k, v) in x.iter() {
+                    let key_opt = PlutusDataWrapper(k.clone())
+                        .as_value()?
+                        .as_str()
+                        .map(|s| s.to_owned());
+
+                    if let Some(key) = key_opt {
+                        map.insert(key, PlutusDataWrapper(v.clone()).as_value()?);
+                    }
+                }
+
+                Ok(serde_json::Value::Object(serde_json::Map::from_iter([(
+                    "map".to_string(),
+                    serde_json::Value::Object(map),
+                )])))
+            }
+
+            PlutusData::Array(x) => {
+                let values = x
+                    .iter()
+                    .map(|d| PlutusDataWrapper(d.clone()).as_value())
+                    .collect::<Result<Vec<serde_json::Value>, _>>()?;
+
+                Ok(serde_json::Value::Object(serde_json::Map::from_iter([(
+                    "list".to_string(),
+                    serde_json::Value::Array(values),
+                )])))
+            }
+
+            PlutusData::BigInt(x) => match x {
+                pallas::ledger::primitives::BigInt::Int(int) => {
+                    let i = Into::<i128>::into(*int);
+                    Ok(serde_json::Value::Object(serde_json::Map::from_iter([(
+                        "int".to_string(),
+                        serde_json::Value::Number((i as i64).into()),
+                    )])))
+                }
+                pallas::ledger::primitives::BigInt::BigUInt(bounded_bytes) => {
+                    let bigint = num_bigint::BigUint::from_bytes_be(bounded_bytes.as_slice());
+                    let number = serde_json::Number::from_f64(
+                        bigint.to_f64().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?,
+                    )
+                    .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+                    Ok(serde_json::Value::Object(serde_json::Map::from_iter([(
+                        "int".to_string(),
+                        serde_json::Value::Number(number),
+                    )])))
+                }
+                pallas::ledger::primitives::BigInt::BigNInt(bounded_bytes) => {
+                    let bigint = num_bigint::BigInt::from_signed_bytes_be(bounded_bytes.as_slice());
+                    let number = serde_json::Number::from_f64(
+                        bigint.to_f64().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?,
+                    )
+                    .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+                    Ok(serde_json::Value::Object(serde_json::Map::from_iter([(
+                        "int".to_string(),
+                        serde_json::Value::Number(number),
+                    )])))
+                }
+            },
+
+            PlutusData::BoundedBytes(x) => {
+                Ok(serde_json::Value::Object(serde_json::Map::from_iter([(
+                    "bytes".to_string(),
+                    serde_json::Value::String(x.to_string()),
+                )])))
+            }
+        }
+    }
+}
+impl IntoModel<HashMap<String, serde_json::Value>> for PlutusDataWrapper {
+    type SortKey = ();
+
+    fn into_model(self) -> Result<HashMap<String, serde_json::Value>, StatusCode> {
+        let value = self.as_value()?;
+        serde_json::from_value(value).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
     }
 }

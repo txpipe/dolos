@@ -318,6 +318,10 @@ where
                 "/epochs/latest/parameters",
                 get(routes::epochs::latest_parameters::<D>),
             )
+            .route(
+                "/scripts/datum/{datum_hash}",
+                get(routes::scripts::by_datum_hash::<D>),
+            )
             .route("/tx/submit", post(routes::tx::submit::route::<D>))
             .route("/txs/{tx_hash}", get(routes::txs::by_hash::<D>))
             .route("/txs/{tx_hash}/cbor", get(routes::txs::by_hash_cbor::<D>))

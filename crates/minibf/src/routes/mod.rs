@@ -9,6 +9,7 @@ pub mod health;
 pub mod metadata;
 pub mod network;
 pub mod pools;
+pub mod scripts;
 pub mod tx;
 pub mod txs;
 pub mod utxos;
