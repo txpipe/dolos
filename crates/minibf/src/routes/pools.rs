@@ -4,9 +4,13 @@ use axum::{
     Json,
 };
 use blockfrost_openapi::models::{
-    pool_delegators_inner::PoolDelegatorsInner, pool_list_extended_inner::PoolListExtendedInner,
+    pool_delegators_inner::PoolDelegatorsInner, pool_history_inner::PoolHistoryInner,
+    pool_list_extended_inner::PoolListExtendedInner,
 };
-use dolos_cardano::model::{AccountState, PoolState};
+use dolos_cardano::{
+    model::{AccountState, PoolState},
+    StakeLog,
+};
 use dolos_core::{BlockSlot, Domain};
 use itertools::Itertools;
 use pallas::{
@@ -178,6 +182,49 @@ where
         })
         .collect::<Result<_, _>>()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(mapped))
+}
+
+pub async fn by_id_history<D: Domain>(
+    Path(id): Path<String>,
+    Query(params): Query<PaginationParameters>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Vec<PoolHistoryInner>>, Error>
+where
+    Option<AccountState>: From<D::Entity>,
+{
+    let operator = decode_pool_id(&id)?;
+    let pagination = Pagination::try_from(params)?;
+    let tip = domain.get_tip_slot()?;
+    let summary = domain.get_chain_summary()?;
+    let (epoch, _) = summary.slot_epoch(tip);
+
+    let mut entries = domain
+        .iter_cardano_logs_per_epoch::<StakeLog>(operator.into(), 0..epoch)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Apply order before pagination
+    if matches!(pagination.order, crate::pagination::Order::Desc) {
+        entries.reverse()
+    };
+
+    let mapped: Vec<_> = entries
+        .into_iter()
+        .skip(pagination.skip())
+        .take(pagination.count)
+        .map(|(epoch, log)| {
+            Ok(PoolHistoryInner {
+                epoch: epoch as i32,
+                blocks: log.blocks_minted as i32,
+                active_stake: log.active_stake.to_string(),
+                active_size: log.active_size,
+                delegators_count: log.delegators_count as i32,
+                rewards: log.rewards.to_string(),
+                fees: log.fees.to_string(),
+            })
+        })
+        .collect::<Result<Vec<_>, StatusCode>>()?;
 
     Ok(Json(mapped))
 }
