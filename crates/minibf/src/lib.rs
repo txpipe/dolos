@@ -361,6 +361,10 @@ where
                 get(routes::assets::by_subject_addresses::<D>),
             )
             .route(
+                "/assets/{subject}/transactions",
+                get(routes::assets::by_subject_transactions::<D>),
+            )
+            .route(
                 "/metadata/txs/labels/{label}",
                 get(routes::metadata::by_label_json::<D>),
             )
