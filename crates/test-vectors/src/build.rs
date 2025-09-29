@@ -237,7 +237,8 @@ pub async fn handle_account_state(
             latest_pool: None,
             active_pool: from_row!(row, Option<String>, "pool_id")
                 .map(|x| bech32::decode(&x).unwrap().1),
-            latest_drep: None, // TODO: add latest_drep
+            latest_drep: None,
+            deposit: Default::default(),
         };
 
         writer
@@ -497,7 +498,7 @@ pub async fn handle_pool_state(
             fixed_cost: from_row_bigint!(row, "fixed_cost"),
             active_stake: from_row_bigint!(row, "active_stake"),
             __live_stake: from_row_bigint!(row, "live_stake"),
-            blocks_minted: from_row!(row, i64, "blocks_minted") as u32,
+            blocks_minted_total: from_row!(row, i64, "blocks_minted") as u32,
             wait_stake: from_row_bigint!(row, "wait_stake"),
             pool_owners: from_row!(row, Option<Json<serde_json::Value>>, "owners")
                 .map(|x| {
@@ -585,7 +586,9 @@ pub async fn handle_pool_state(
             },
             register_slot: Default::default(), // TODO: add register_slot
             retiring_epoch: Default::default(), // TODO: add retiring_epoch
-            is_retired: Default::default(),    // TODO: add is_retired
+            is_retired: Default::default(),
+            blocks_minted_epoch: Default::default(),
+            deposit: Default::default(),
         };
 
         writer
@@ -786,7 +789,8 @@ pub async fn handle_epoch_state(
             rewards_to_distribute: None,
             rewards_to_treasury: None,
             largest_stable_slot: Default::default(), // todo!(),
-            nonces: Default::default(),              // todo!(),
+            nonces: Default::default(),
+            blocks_minted: Default::default(),
         };
 
         writer
@@ -870,6 +874,7 @@ pub async fn handle_drep_state(
             retired,
             __drep_id: Default::default(),
             expired: Default::default(),
+            deposit: Default::default(),
         };
 
         writer

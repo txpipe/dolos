@@ -2,6 +2,36 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.0-beta.4] - 2025-09-29
+
+### 🚀 Features
+
+- *(cardano)* Track governance artifacts (#714)
+- *(cli)* Introduce dump-logs data command
+
+### 🐛 Bug Fixes
+
+- *(cardano)* Nonce after Conway uses different eta_h (#712)
+- *(minibf)* Redeemers fee calculation (#716)
+- *(minibf)* Add missing mapping of redeemer datum hash (#718)
+- *(cardano)* Add missing proposal entity sweep (#722)
+- *(cardano)* Stop epoch before boundary work (#726)
+- *(cardano)* Use big rationals for reward calc (#727)
+- *(cardano)* Handle bootstrap for all networks (#728)
+- *(cardano)* Handle pledge mismatch during pool reward calc (#729)
+- *(minibf)* Adjust drep active model mapping (#730)
+
+### 🚜 Refactor
+
+- *(archive)* Support time-series logs of arbitrary shape (#713)
+- *(cardano)* Use deltas for the sweep process (#717)
+- *(cardano)* Interleave logs in boundary visitors (#719)
+- *(cardano)* Track total vs epoch minted blocks (#720)
+- *(cardano)* Log ending epoch on sweep (#721)
+- *(cardano)* Track deposits explicitly in each entity (#723)
+- *(core)* Move sweep / genesis ops inside chain logic (#724)
+- *(cardano)* Unify track & log config sections (#725)
+
 ## [1.0.0-beta.3] - 2025-09-22
 
 ### 🐛 Bug Fixes
@@ -28,6 +58,10 @@ All notable changes to this project will be documented in this file.
 
 - Improve trace level for verbose logs
 - Fix lint warnings across the board
+
+### Release
+
+- V1.0.0-beta.3
 
 ## [1.0.0-beta.2] - 2025-09-19
 

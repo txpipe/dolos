@@ -1159,7 +1159,7 @@ checksum = "fea41bba32d969b513997752735605054bc0dfa92b4c56bf1189f2e174be7a10"
 
 [[package]]
 name = "dolos"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1222,7 +1222,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-cardano"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "big-int",
  "chrono",
@@ -1244,7 +1244,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-core"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "futures-core",
  "hex",
@@ -1260,7 +1260,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-minibf"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "axum 0.8.4",
  "bech32 0.11.0",
@@ -1284,7 +1284,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-redb"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "bincode 1.3.3",
  "dolos-core",
@@ -1304,7 +1304,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-redb3"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "bincode 1.3.3",
  "dolos-core",
@@ -1324,7 +1324,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-test-vectors"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "bb8",
  "bb8-postgres",
@@ -1354,7 +1354,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-testing"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "dolos-cardano",
  "dolos-core",
@@ -1370,7 +1370,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-trp"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "base64 0.22.1",
  "bincode 1.3.3",
