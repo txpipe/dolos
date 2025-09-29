@@ -86,9 +86,7 @@ impl<'a> DrepModelBuilder<'a> {
             return true;
         }
 
-        let expired = self.is_drep_expired();
-
-        !self.state.retired && !expired
+        !self.state.retired
     }
 }
 
