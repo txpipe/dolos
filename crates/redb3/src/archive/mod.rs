@@ -13,7 +13,7 @@ use pallas::{
     crypto::hash::Hash,
     ledger::{
         primitives::{conway::DatumOption, PlutusData},
-        traverse::{MultiEraBlock, OriginalHash},
+        traverse::{ComputeHash, MultiEraBlock, OriginalHash},
     },
 };
 use redb::WriteTransaction;
@@ -638,6 +638,13 @@ impl ArchiveStore {
                         if &data.original_hash() == datum_hash {
                             return Ok(Some(data.clone().unwrap().unwrap()));
                         }
+                    }
+                }
+
+                // Check redeemer data (we don't have keep raw structures)
+                for redeemer in tx.redeemers() {
+                    if &redeemer.data().compute_hash() == datum_hash {
+                        return Ok(Some(redeemer.data().clone()));
                     }
                 }
             }

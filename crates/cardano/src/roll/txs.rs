@@ -5,8 +5,8 @@ use pallas::{
         addresses::Address,
         primitives::{conway::DatumOption, PlutusData},
         traverse::{
-            MultiEraBlock, MultiEraCert, MultiEraInput, MultiEraTx, MultiEraValue,
-            OriginalHash as _,
+            ComputeHash, MultiEraBlock, MultiEraCert, MultiEraInput, MultiEraRedeemer, MultiEraTx,
+            MultiEraValue, OriginalHash as _,
         },
     },
 };
@@ -168,6 +168,22 @@ impl BlockVisitor for TxLogVisitor {
         cert: &pallas::ledger::traverse::MultiEraCert,
     ) -> Result<(), ChainError> {
         unpack_cert(&mut deltas.slot, cert);
+
+        Ok(())
+    }
+
+    fn visit_redeemers(
+        &mut self,
+        deltas: &mut WorkDeltas<CardanoLogic>,
+        _: &MultiEraBlock,
+        _: &MultiEraTx,
+        redeemer: &MultiEraRedeemer,
+    ) -> Result<(), ChainError> {
+        // We don't have KeepRaw structure
+        deltas
+            .slot
+            .datums
+            .push(redeemer.data().compute_hash().to_vec());
 
         Ok(())
     }
