@@ -267,7 +267,7 @@ impl BoundaryWork {
             decayed_deposits: 0,
 
             // will be computed at the end of the epoch during _sweep_
-            rewards_to_distribute: None,
+            rewards_to_distribute: Some(effective_rewards),
             rewards_to_treasury: None,
         };
 

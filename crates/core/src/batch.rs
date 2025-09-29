@@ -134,14 +134,7 @@ impl<C: ChainLogic> WorkBatch<C> {
             .unique()
     }
 
-    fn sort_by_slot(&mut self) {
-        self.blocks.sort_by_key(|x| x.slot());
-        self.is_sorted = true;
-    }
-
     pub fn first_point(&self) -> ChainPoint {
-        debug_assert!(self.is_sorted);
-
         self.blocks.first().unwrap().point()
     }
 
@@ -151,14 +144,10 @@ impl<C: ChainLogic> WorkBatch<C> {
     }
 
     pub fn last_slot(&self) -> BlockSlot {
-        debug_assert!(self.is_sorted);
-
         self.blocks.last().unwrap().slot()
     }
 
     pub fn last_point(&self) -> ChainPoint {
-        debug_assert!(self.is_sorted);
-
         self.blocks.last().unwrap().point()
     }
 
