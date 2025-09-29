@@ -151,6 +151,7 @@ impl<C: ChainLogic> WorkBatch<C> {
         self.blocks.last().unwrap().point()
     }
 
+    #[allow(dead_code)]
     fn range(&self) -> RangeInclusive<BlockSlot> {
         debug_assert!(!self.blocks.is_empty());
 

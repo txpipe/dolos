@@ -1,4 +1,4 @@
-use miette::{bail, Context as _, IntoDiagnostic};
+use miette::{Context as _, IntoDiagnostic};
 use std::sync::Arc;
 use std::{fs, path::PathBuf, time::Duration};
 use tokio_util::sync::CancellationToken;

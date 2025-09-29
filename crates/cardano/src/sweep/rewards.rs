@@ -42,9 +42,9 @@ fn baseline_inner_big(
 
     // inner = σ′ + s′ * a0 * (σ′ − s′ * (z0 − σ′) / z0)
     let term = &sigma_p - (&s_p * ((&z0 - &sigma_p) / &z0));
-    let out = &sigma_p + (&s_p * &a0 * term);
+    
 
-    out
+    &sigma_p + (&s_p * &a0 * term)
 }
 
 fn to_big_rational(ratio: Ratio) -> BigRational {
@@ -107,7 +107,7 @@ fn compute_pool_apparent_performance(
     total_active_stake: u64, // ACTIVE stake (σ_a denominator)
 ) -> Ratio {
     if total_active_stake == 0 {
-        return Ratio::new(0 as i128, 1 as i128);
+        return Ratio::new(0_i128, 1_i128);
     }
 
     // β = n / max(1, N̄)
@@ -115,8 +115,8 @@ fn compute_pool_apparent_performance(
 
     let sigma_a = Ratio::new(pool_stake as i128, total_active_stake as i128);
 
-    if sigma_a == Ratio::new(0 as i128, 1 as i128) {
-        return Ratio::new(0 as i128, 1 as i128);
+    if sigma_a == Ratio::new(0_i128, 1_i128) {
+        return Ratio::new(0_i128, 1_i128);
     }
 
     // p̄ = β / σ_a
@@ -153,13 +153,13 @@ fn compute_pool_rewards(
         total_active_stake,
     );
 
-    let rewards = (Ratio::from_integer(max_rewards as i128) * pbar)
+    
+
+    (Ratio::from_integer(max_rewards as i128) * pbar)
         .floor()
         .to_integer()
         .try_into()
-        .unwrap();
-
-    rewards
+        .unwrap()
 }
 
 // Includes owner’s member share per spec (Eq. 5.5.4)
@@ -197,9 +197,9 @@ fn compute_pool_operator_share(pool_rewards: u64, pool: &PoolState, pool_stake: 
         .to_integer()
         .max(0) as u64;
 
-    let op_share = c + variable;
+    
 
-    op_share
+    c + variable
 }
 
 fn stake_cred_to_entity_key(cred: &StakeCredential) -> EntityKey {

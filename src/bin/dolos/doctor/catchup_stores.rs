@@ -1,7 +1,7 @@
 use itertools::Itertools;
 use miette::{Context, IntoDiagnostic};
 
-use dolos::{facade::DomainExt as _, prelude::*};
+use dolos::prelude::*;
 
 use crate::feedback::Feedback;
 

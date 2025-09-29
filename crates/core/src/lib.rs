@@ -540,6 +540,7 @@ pub enum WorkKind {
     Sweep,
 }
 
+#[allow(clippy::large_enum_variant)]
 pub enum WorkUnit<C: ChainLogic> {
     Genesis,
     Block(WorkBlock<C>),

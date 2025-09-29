@@ -1,7 +1,7 @@
 use std::marker::PhantomData;
 
 use comfy_table::Table;
-use dolos_cardano::{model::AccountState, EpochState, EraSummary, PoolState, RewardLog};
+use dolos_cardano::{EpochState, RewardLog};
 use miette::{Context, IntoDiagnostic};
 
 use dolos::prelude::*;
