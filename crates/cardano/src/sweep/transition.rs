@@ -386,26 +386,16 @@ impl super::BoundaryVisitor for BoundaryVisitor {
                         // Unreachable
                         return Ok(());
                     };
+                    let mut unknown = current.unknown.clone();
+                    unknown.extend(updated.unknown.clone());
                     ctx.ending_state
                         .pparams
                         .set(PParamValue::CostModelsForScriptLanguages(
                             pallas::ledger::primitives::conway::CostModels {
-                                plutus_v1: if updated.plutus_v1.is_some() {
-                                    updated.plutus_v1.clone()
-                                } else {
-                                    current.plutus_v1.clone()
-                                },
-                                plutus_v2: if updated.plutus_v2.is_some() {
-                                    updated.plutus_v2.clone()
-                                } else {
-                                    current.plutus_v2.clone()
-                                },
-                                plutus_v3: if updated.plutus_v3.is_some() {
-                                    updated.plutus_v3.clone()
-                                } else {
-                                    current.plutus_v3.clone()
-                                },
-                                unknown: updated.unknown.clone(),
+                                plutus_v1: updated.plutus_v1.clone().or(current.plutus_v1.clone()),
+                                plutus_v2: updated.plutus_v2.clone().or(current.plutus_v2.clone()),
+                                plutus_v3: updated.plutus_v3.clone().or(current.plutus_v3.clone()),
+                                unknown,
                             },
                         ));
                 }
