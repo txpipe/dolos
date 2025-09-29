@@ -1271,6 +1271,8 @@ dependencies = [
  "dolos-core",
  "hex",
  "itertools 0.13.0",
+ "num-bigint",
+ "num-traits",
  "pallas 1.0.0-alpha.2 (git+https://github.com/txpipe/pallas.git?rev=38546da)",
  "reqwest",
  "serde",
