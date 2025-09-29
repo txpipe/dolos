@@ -641,8 +641,9 @@ impl ArchiveStore {
                     }
                 }
 
-                // Check redeemer data (we don't have keep raw structures)
+                // Check redeemer data
                 for redeemer in tx.redeemers() {
+                    // TODO: We should use a KeepRaw structure and original_hash
                     if &redeemer.data().compute_hash() == datum_hash {
                         return Ok(Some(redeemer.data().clone()));
                     }

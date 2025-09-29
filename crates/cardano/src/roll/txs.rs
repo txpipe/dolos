@@ -179,7 +179,7 @@ impl BlockVisitor for TxLogVisitor {
         _: &MultiEraTx,
         redeemer: &MultiEraRedeemer,
     ) -> Result<(), ChainError> {
-        // We don't have KeepRaw structure
+        // TODO: We should use a KeepRaw structure and original_hash
         deltas
             .slot
             .datums
