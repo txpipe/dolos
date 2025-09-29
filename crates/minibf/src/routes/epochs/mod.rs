@@ -46,7 +46,7 @@ pub async fn latest_parameters<D: Domain>(
 pub async fn by_number_parameters<D: Domain>(
     State(domain): State<Facade<D>>,
     Path(epoch): Path<u32>,
-) -> Result<Json<EpochParamContent>, StatusCode> {
+) -> Result<Json<EpochParamContent>, Error> {
     let chain = domain.get_chain_summary()?;
 
     let epoch = domain

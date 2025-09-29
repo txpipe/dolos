@@ -1,6 +1,6 @@
 use std::ops::Deref as _;
 
-use dolos_core::{BlockSlot, ChainPoint};
+use dolos_core::BlockSlot;
 use pallas::crypto::hash::Hash;
 use pallas::ledger::addresses::{
     Address, Network, ShelleyAddress, ShelleyDelegationPart, StakeAddress, StakePayload,
