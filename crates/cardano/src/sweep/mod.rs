@@ -115,6 +115,10 @@ impl DelegatorMap {
     ) -> impl Iterator<Item = (&AccountId, &u64)> {
         self.0.get(entity_id).into_iter().flatten()
     }
+
+    pub fn amount(&self, pool_id: &PoolId) -> u64 {
+        self.0.get(pool_id).map(|x| x.len() as u64).unwrap_or(0)
+    }
 }
 
 #[derive(Debug, Default)]

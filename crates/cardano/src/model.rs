@@ -82,10 +82,31 @@ pub struct RewardLog {
 
 entity_boilerplate!(RewardLog, "rewards");
 
-#[derive(Debug, Clone, PartialEq, Eq, Decode, Encode, Default)]
+#[derive(Debug, Clone, PartialEq, Decode, Encode, Default)]
 pub struct StakeLog {
     #[n(0)]
-    pub amount: u64,
+    /// Number of blocks created by pool
+    pub blocks_minted: u32,
+
+    #[n(1)]
+    /// Active (Snapshot of live stake 2 epochs ago) stake in Lovelaces
+    pub active_stake: u64,
+
+    #[n(2)]
+    /// Pool size (percentage) of overall active stake at that epoch
+    pub active_size: f64,
+
+    #[n(3)]
+    /// Number of delegators for epoch
+    pub delegators_count: u64,
+
+    #[n(4)]
+    /// Total rewards received before distribution to delegators
+    pub rewards: u64,
+
+    #[n(5)]
+    /// Pool operator rewards
+    pub fees: u64,
 }
 
 entity_boilerplate!(StakeLog, "stakes");
