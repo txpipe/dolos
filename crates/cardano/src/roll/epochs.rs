@@ -33,8 +33,8 @@ pub struct EpochStatsUpdate {
 impl EpochStatsUpdate {
     pub fn new(pparams: &PParamsSet) -> Result<Self, ChainError> {
         let out = Self {
-            key_deposit: pparams.ensure_key_deposit()?,
-            pool_deposit: pparams.ensure_pool_deposit()?,
+            key_deposit: pparams.key_deposit_or_default(),
+            pool_deposit: pparams.pool_deposit_or_default(),
             ..Default::default()
         };
 
