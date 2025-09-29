@@ -99,6 +99,16 @@ impl DelegatorMap {
             .insert(account_id, stake);
     }
 
+    pub fn get_stake(&self, pool_id: &PoolId, account_id: &AccountId) -> u64 {
+        let for_pool = self.0.get(pool_id);
+
+        let Some(for_pool) = for_pool else {
+            return 0;
+        };
+
+        for_pool.get(account_id).cloned().unwrap_or(0)
+    }
+
     pub fn iter_delegators(
         &self,
         entity_id: &EntityKey,

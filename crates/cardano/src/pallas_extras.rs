@@ -305,3 +305,7 @@ pub fn pool_reward_account(reward_account: &[u8]) -> Option<StakeCredential> {
     let pool_address = Address::from_bytes(reward_account).ok()?;
     address_as_stake_cred(&pool_address)
 }
+
+pub fn keyhash_to_stake_cred(keyhash: Hash<28>) -> StakeCredential {
+    StakeCredential::AddrKeyhash(keyhash)
+}
