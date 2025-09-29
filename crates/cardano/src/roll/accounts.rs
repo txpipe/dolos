@@ -310,8 +310,7 @@ impl BlockVisitor for AccountVisitor {
         _: &MultiEraBlock,
         pparams: &PParamsSet,
     ) -> Result<(), ChainError> {
-        let deposit = pparams.ensure_key_deposit()?;
-        self.deposit = Some(deposit);
+        self.deposit = pparams.ensure_key_deposit().ok();
         Ok(())
     }
 

@@ -205,7 +205,7 @@ impl BlockVisitor for PoolStateVisitor {
         block: &MultiEraBlock,
         pparams: &PParamsSet,
     ) -> Result<(), ChainError> {
-        self.pool_deposit = Some(pparams.ensure_pool_deposit()?);
+        self.pool_deposit = pparams.ensure_pool_deposit().ok();
 
         if let Some(key) = block.header().issuer_vkey() {
             let operator: Hash<28> = Hasher::<224>::hash(key);
