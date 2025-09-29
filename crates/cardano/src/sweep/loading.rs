@@ -106,7 +106,6 @@ impl BoundaryWork {
             era_transition: None,
         };
 
-        // order matters
         load_account_data::<D>(state, &mut boundary)?;
 
         Ok(boundary)

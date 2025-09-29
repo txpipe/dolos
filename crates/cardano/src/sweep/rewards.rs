@@ -1,5 +1,5 @@
 use dolos_core::{ChainError, EntityKey, NsKey};
-use num_rational::{BigRational, Rational64};
+use num_rational::BigRational;
 use pallas::{
     codec::minicbor,
     crypto::hash::Hash,
@@ -10,7 +10,7 @@ use tracing::{debug, warn};
 
 use crate::{
     pallas_extras,
-    sweep::{AccountId, BoundaryWork, PoolId},
+    sweep::{AccountId, BoundaryWork, PoolId, Snapshot},
     AccountState, CardanoDelta, CardanoEntity, FixedNamespace as _, PoolState, RewardLog,
 };
 
@@ -58,6 +58,7 @@ fn compute_max_pool_rewards(
     total_stake: u64,
     pool: &PoolState,
     pool_stake: u64,
+    live_pledge: u64,
     k: u32,
     a0: &RationalNumber,
 ) -> u64 {
@@ -65,10 +66,9 @@ fn compute_max_pool_rewards(
         return 0;
     }
 
-    // Optional but recommended (if you have live pledge available):
-    // if pool.live_pledge < pool.declared_pledge {
-    //     return Rational64::new(0, 1);
-    // }
+    if live_pledge < pool.declared_pledge {
+        return 0;
+    }
 
     let z0 = Ratio::new(1, k as i128);
 
@@ -130,12 +130,21 @@ fn compute_pool_rewards(
     total_active_stake: u64,
     pool: &PoolState,
     pool_stake: u64,
+    live_pledge: u64,
     k: u32,
     a0: &RationalNumber,
     pool_blocks: u32,
     epoch_blocks: u32,
 ) -> u64 {
-    let max_rewards = compute_max_pool_rewards(total_rewards, total_stake, pool, pool_stake, k, a0);
+    let max_rewards = compute_max_pool_rewards(
+        total_rewards,
+        total_stake,
+        pool,
+        pool_stake,
+        live_pledge,
+        k,
+        a0,
+    );
 
     let pbar = compute_pool_apparent_performance(
         pool_blocks,
@@ -164,25 +173,26 @@ fn compute_pool_operator_share(pool_rewards: u64, pool: &PoolState, pool_stake: 
     let after_cost = pool_rewards - c;
 
     // margin m
-    let m = Rational64::new(
-        pool.margin_cost.numerator as i64,
-        pool.margin_cost.denominator as i64,
+    let m = Ratio::new(
+        pool.margin_cost.numerator as i128,
+        pool.margin_cost.denominator as i128,
     );
 
     // s/σ — ratio of owner's pledge to pool stake (denominator cancels, so we can
     // use amounts)
     let s_over_sigma = if pool_stake == 0 {
-        Rational64::new(0, 1)
+        Ratio::new(0, 1)
     } else {
-        Rational64::new(
-            pool.declared_pledge.min(pool_stake) as i64,
-            pool_stake as i64,
+        Ratio::new(
+            pool.declared_pledge.min(pool_stake) as i128,
+            pool_stake as i128,
         )
     };
 
     // c + (f̂ − c) · ( m + (1 − m) · s/σ )
-    let term = m + (Rational64::new(1, 1) - m) * s_over_sigma;
-    let variable = (Rational64::from_integer(after_cost as i64) * term)
+    let term = m + (Ratio::new(1, 1) - m) * s_over_sigma;
+
+    let variable = (Ratio::from_integer(after_cost as i128) * term)
         .floor()
         .to_integer()
         .max(0) as u64;
@@ -202,6 +212,22 @@ fn stake_cred_to_entity_key(cred: &StakeCredential) -> EntityKey {
 fn entity_key_to_operator_hash(key: &EntityKey) -> Hash<28> {
     let bytes: [u8; 28] = key.as_ref()[..28].try_into().unwrap();
     Hash::<28>::new(bytes)
+}
+
+fn aggregate_live_pledge(pool_id: &PoolId, pool: &PoolState, snapshot: &Snapshot) -> u64 {
+    let mut live_pledge = 0;
+
+    for owner in pool.pool_owners.iter() {
+        let owner_cred = pallas_extras::keyhash_to_stake_cred(*owner);
+
+        let account_id = stake_cred_to_entity_key(&owner_cred);
+
+        let owner_stake = snapshot.accounts_by_pool.get_stake(pool_id, &account_id);
+
+        live_pledge += owner_stake;
+    }
+
+    live_pledge
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -277,31 +303,6 @@ impl dolos_core::EntityDelta for AssignDelegatorRewards {
         entity.rewards_sum = entity.rewards_sum.saturating_sub(self.reward);
     }
 }
-
-// #[derive(Debug, Clone, Serialize, Deserialize)]
-// pub struct AssignEpochRewards {
-//     rewards: u64,
-// }
-
-// impl dolos_core::EntityDelta for AssignEpochRewards {
-//     type Entity = EpochState;
-
-//     fn key(&self) -> NsKey {
-//         NsKey::from((EpochState::NS, EPOCH_KEY_GO))
-//     }
-
-//     fn apply(&mut self, entity: &mut Option<Self::Entity>) {
-//         if let Some(entity) = entity {
-//             entity.rewards_to_distribute = Some(self.rewards);
-//         }
-//     }
-
-//     fn undo(&self, entity: &mut Option<Self::Entity>) {
-//         if let Some(entity) = entity {
-//             entity.rewards_to_distribute = None;
-//         }
-//     }
-// }
 
 #[derive(Default)]
 pub struct BoundaryVisitor {
@@ -394,8 +395,11 @@ impl super::BoundaryVisitor for BoundaryVisitor {
             return Ok(());
         }
 
+        // TODO: obviously this should be computed
         let circulating_supply =
             45_000_000_000_000_000 - ctx.active_state.as_ref().map(|s| s.reserves).unwrap_or(0);
+
+        let live_pledge = aggregate_live_pledge(id, pool, &ctx.active_snapshot);
 
         let pool_stake = ctx.active_snapshot.get_pool_stake(id);
         let epoch_rewards = ctx.pot_delta.as_ref().unwrap().available_rewards;
@@ -411,6 +415,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
             total_active_stake,
             pool,
             pool_stake,
+            live_pledge,
             k,
             &a0,
             pool_blocks,
