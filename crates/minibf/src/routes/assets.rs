@@ -1,29 +1,33 @@
 use std::{collections::HashMap, ops::Deref, time::Duration};
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     Json,
 };
 use blockfrost_openapi::models::{
     asset::{Asset, OnchainMetadataStandard},
+    asset_addresses_inner::AssetAddressesInner,
     asset_metadata::AssetMetadata as OffchainMetadata,
 };
 use crc::{Crc, CRC_8_SMBUS};
 use dolos_cardano::model::AssetState;
-use dolos_core::{ArchiveStore, Domain, EraCbor};
+use dolos_core::{ArchiveStore, BlockSlot, Domain, EraCbor, StateStore};
+use itertools::Itertools;
 use pallas::{
     codec::minicbor,
     ledger::{
         primitives::{BigInt, Metadatum, PlutusData},
-        traverse::MultiEraTx,
+        traverse::{MultiEraOutput, MultiEraTx},
         validate::phase2::to_plutus_data::ToPlutusData,
     },
 };
 use serde::Deserialize;
 
 use crate::{
+    error::Error,
     mapping::{asset_fingerprint, IntoModel},
+    pagination::{Pagination, PaginationParameters},
     Facade,
 };
 
@@ -508,4 +512,77 @@ where
     };
 
     Ok(Json(model.into_model().await?))
+}
+
+pub async fn by_subject_addresses<D: Domain>(
+    Path(unit): Path<String>,
+    Query(params): Query<PaginationParameters>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Vec<AssetAddressesInner>>, Error> {
+    let pagination = Pagination::try_from(params)?;
+    let asset = hex::decode(&unit).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let utxoset = domain
+        .state()
+        .get_utxo_by_asset(&asset)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .into_iter()
+        .collect_vec();
+
+    let utxos = domain
+        .state()
+        .get_utxos(utxoset)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let mut addresses: HashMap<String, ((BlockSlot, u32), u128)> = HashMap::new();
+    for (txoref, eracbor) in utxos {
+        let sort = (
+            domain
+                .archive()
+                .get_slot_for_tx(txoref.0.as_slice())
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?,
+            txoref.1,
+        );
+
+        let utxo = MultiEraOutput::decode(eracbor.0.try_into().unwrap(), &eracbor.1)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        let amount = utxo
+            .value()
+            .assets()
+            .iter()
+            .flat_map(|x| {
+                let subject = x.policy().to_vec();
+                x.assets()
+                    .iter()
+                    .find(|x| [subject.as_slice(), x.name()].concat() == asset.as_slice())
+                    .map(|x| x.any_coin() as u128)
+            })
+            .sum();
+
+        addresses
+            .entry(
+                utxo.address()
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                    .to_string(),
+            )
+            .and_modify(|entry| {
+                entry.0 = entry.0.min(sort);
+                entry.1 += amount;
+            })
+            .or_insert((sort, amount));
+    }
+
+    let sorted = addresses
+        .into_iter()
+        .sorted_by_key(|(_, (sort, _))| *sort)
+        .skip(pagination.skip())
+        .take(pagination.count)
+        .map(|(address, (_, amount))| AssetAddressesInner {
+            address,
+            quantity: amount.to_string(),
+        })
+        .collect_vec();
+
+    Ok(Json(sorted))
 }

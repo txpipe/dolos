@@ -357,6 +357,10 @@ where
             )
             .route("/assets/{subject}", get(routes::assets::by_subject::<D>))
             .route(
+                "/assets/{subject}/addresses",
+                get(routes::assets::by_subject_addresses::<D>),
+            )
+            .route(
                 "/metadata/txs/labels/{label}",
                 get(routes::metadata::by_label_json::<D>),
             )
