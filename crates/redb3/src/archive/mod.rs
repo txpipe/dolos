@@ -9,7 +9,13 @@ use dolos_core::{
 };
 
 use ::redb::Durability;
-use pallas::ledger::traverse::MultiEraBlock;
+use pallas::{
+    crypto::hash::Hash,
+    ledger::{
+        primitives::{conway::DatumOption, PlutusData},
+        traverse::{ComputeHash, MultiEraBlock, OriginalHash},
+    },
+};
 use redb::WriteTransaction;
 use std::sync::Arc;
 
@@ -610,6 +616,44 @@ impl ArchiveStore {
         Ok(None)
     }
 
+    pub fn get_plutus_data(
+        &self,
+        datum_hash: &Hash<32>,
+    ) -> Result<Option<PlutusData>, RedbArchiveError> {
+        let possible = self.get_possible_blocks_by_datum_hash(datum_hash.as_slice())?;
+
+        for raw in possible {
+            let block =
+                MultiEraBlock::decode(raw.as_slice()).map_err(ArchiveError::BlockDecodingError)?;
+            for tx in block.txs() {
+                // Check witnesses
+                if let Some(plutus_data) = tx.find_plutus_data(datum_hash) {
+                    // unwarp the KeepRaw wrapper.
+                    return Ok(Some(plutus_data.clone().unwrap()));
+                }
+
+                // Check inline
+                for (_, output) in tx.produces() {
+                    if let Some(DatumOption::Data(data)) = output.datum() {
+                        if &data.original_hash() == datum_hash {
+                            return Ok(Some(data.clone().unwrap().unwrap()));
+                        }
+                    }
+                }
+
+                // Check redeemer data
+                for redeemer in tx.redeemers() {
+                    // TODO: We should use a KeepRaw structure and original_hash
+                    if &redeemer.data().compute_hash() == datum_hash {
+                        return Ok(Some(redeemer.data().clone()));
+                    }
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
     pub fn get_tip(&self) -> Result<Option<(BlockSlot, BlockBody)>, RedbArchiveError> {
         let rx = self.db().begin_read()?;
         tables::BlocksTable::get_tip(&rx)
@@ -809,6 +853,10 @@ impl dolos_core::ArchiveStore for ArchiveStore {
 
     fn get_tx(&self, tx_hash: &[u8]) -> Result<Option<EraCbor>, ArchiveError> {
         Ok(Self::get_tx(self, tx_hash)?)
+    }
+
+    fn get_plutus_data(&self, datum_hash: &Hash<32>) -> Result<Option<PlutusData>, ArchiveError> {
+        Ok(Self::get_plutus_data(self, datum_hash)?)
     }
 
     fn get_slot_for_tx(&self, tx_hash: &[u8]) -> Result<Option<BlockSlot>, ArchiveError> {

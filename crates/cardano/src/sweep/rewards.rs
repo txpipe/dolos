@@ -11,7 +11,7 @@ use tracing::{debug, warn};
 use crate::{
     pallas_extras,
     sweep::{AccountId, BoundaryWork, PoolId, Snapshot},
-    AccountState, CardanoDelta, CardanoEntity, FixedNamespace as _, PoolState, RewardLog,
+    AccountState, CardanoDelta, CardanoEntity, FixedNamespace as _, PoolState, RewardLog, StakeLog,
 };
 
 pub type TotalPoolReward = u64;
@@ -42,7 +42,6 @@ fn baseline_inner_big(
 
     // inner = σ′ + s′ * a0 * (σ′ − s′ * (z0 − σ′) / z0)
     let term = &sigma_p - (&s_p * ((&z0 - &sigma_p) / &z0));
-    
 
     &sigma_p + (&s_p * &a0 * term)
 }
@@ -153,8 +152,6 @@ fn compute_pool_rewards(
         total_active_stake,
     );
 
-    
-
     (Ratio::from_integer(max_rewards as i128) * pbar)
         .floor()
         .to_integer()
@@ -196,8 +193,6 @@ fn compute_pool_operator_share(pool_rewards: u64, pool: &PoolState, pool_stake: 
         .floor()
         .to_integer()
         .max(0) as u64;
-
-    
 
     c + variable
 }
@@ -425,6 +420,18 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         let operator_share = compute_pool_operator_share(total_pool_reward, pool, pool_stake);
 
         let delegator_rewards = total_pool_reward.saturating_sub(operator_share);
+
+        self.log(
+            id.clone(),
+            StakeLog {
+                blocks_minted: pool.blocks_minted_epoch,
+                active_stake: pool.active_stake,
+                active_size: (pool.active_stake as f64) / total_active_stake as f64,
+                delegators_count: ctx.active_snapshot.accounts_by_pool.amount(id),
+                rewards: total_pool_reward,
+                fees: operator_share,
+            },
+        );
 
         debug!(
             %pool_blocks,

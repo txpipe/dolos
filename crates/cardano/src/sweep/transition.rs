@@ -9,7 +9,7 @@ use tracing::debug;
 use crate::{
     sweep::{hacks, AccountId, BoundaryWork, PoolId, ProposalId},
     AccountState, CardanoDelta, CardanoEntity, FixedNamespace as _, PParamKind, PParamValue,
-    PoolState, Proposal, StakeLog,
+    PoolState, Proposal,
 };
 
 fn should_enact_proposal(ctx: &mut BoundaryWork, proposal: &Proposal) -> bool {
@@ -223,10 +223,6 @@ impl BoundaryVisitor {
     fn change(&mut self, delta: impl Into<CardanoDelta>) {
         self.deltas.push(delta.into());
     }
-
-    fn log(&mut self, key: EntityKey, log: impl Into<CardanoEntity>) {
-        self.logs.push((key, log.into()));
-    }
 }
 
 impl super::BoundaryVisitor for BoundaryVisitor {
@@ -236,16 +232,9 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         id: &PoolId,
         _: &PoolState,
     ) -> Result<(), ChainError> {
-        let ending_stake = ctx.ending_snapshot.get_pool_stake(id);
+        let ending_stake = ctx.active_snapshot.get_pool_stake(id);
 
         self.change(PoolTransition::new(id.clone(), ending_stake));
-
-        self.log(
-            id.clone(),
-            StakeLog {
-                amount: ending_stake,
-            },
-        );
 
         Ok(())
     }

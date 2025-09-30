@@ -318,6 +318,10 @@ where
                 "/epochs/latest/parameters",
                 get(routes::epochs::latest_parameters::<D>),
             )
+            .route(
+                "/scripts/datum/{datum_hash}",
+                get(routes::scripts::by_datum_hash::<D>),
+            )
             .route("/tx/submit", post(routes::tx::submit::route::<D>))
             .route("/txs/{tx_hash}", get(routes::txs::by_hash::<D>))
             .route("/txs/{tx_hash}/cbor", get(routes::txs::by_hash_cbor::<D>))
@@ -357,6 +361,14 @@ where
             )
             .route("/assets/{subject}", get(routes::assets::by_subject::<D>))
             .route(
+                "/assets/{subject}/addresses",
+                get(routes::assets::by_subject_addresses::<D>),
+            )
+            .route(
+                "/assets/{subject}/transactions",
+                get(routes::assets::by_subject_transactions::<D>),
+            )
+            .route(
                 "/metadata/txs/labels/{label}",
                 get(routes::metadata::by_label_json::<D>),
             )
@@ -367,6 +379,10 @@ where
             .route(
                 "/pools/{id}/delegators",
                 get(routes::pools::by_id_delegators::<D>),
+            )
+            .route(
+                "/pools/{id}/history",
+                get(routes::pools::by_id_history::<D>),
             )
             .route("/pools/extended", get(routes::pools::all_extended::<D>))
             .route(
