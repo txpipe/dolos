@@ -386,7 +386,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
                     if !updated.unknown.is_empty() {
                         ctx.ending_state
                             .pparams
-                            .set(PParamValue::CostModelsUnknonwn(updated.unknown.clone()));
+                            .set(PParamValue::CostModelsUnknown(updated.unknown.clone()));
                     }
                 }
             }

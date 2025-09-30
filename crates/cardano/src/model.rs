@@ -395,7 +395,7 @@ pub enum PParamKind {
     CostModelsPlutusV1 = 37,
     CostModelsPlutusV2 = 38,
     CostModelsPlutusV3 = 39,
-    CostModelsUnknonwn = 40,
+    CostModelsUnknown = 40,
 }
 
 impl PParamKind {
@@ -459,8 +459,8 @@ impl PParamKind {
             Self::CostModelsPlutusV3 => {
                 PParamValue::CostModelsPlutusV3(default_cost_models().plutus_v3.unwrap_or_default())
             }
-            Self::CostModelsUnknonwn => {
-                PParamValue::CostModelsUnknonwn(default_cost_models().unknown)
+            Self::CostModelsUnknown => {
+                PParamValue::CostModelsUnknown(default_cost_models().unknown)
             }
         }
     }
@@ -590,7 +590,7 @@ pub enum PParamValue {
     CostModelsPlutusV3(#[n(0)] Vec<i64>),
 
     #[n(40)]
-    CostModelsUnknonwn(#[n(0)] BTreeMap<u64, Vec<i64>>),
+    CostModelsUnknown(#[n(0)] BTreeMap<u64, Vec<i64>>),
 }
 
 impl PParamValue {
@@ -636,7 +636,7 @@ impl PParamValue {
             Self::CostModelsPlutusV1(_) => PParamKind::CostModelsPlutusV1,
             Self::CostModelsPlutusV2(_) => PParamKind::CostModelsPlutusV2,
             Self::CostModelsPlutusV3(_) => PParamKind::CostModelsPlutusV3,
-            Self::CostModelsUnknonwn(_) => PParamKind::CostModelsUnknonwn,
+            Self::CostModelsUnknown(_) => PParamKind::CostModelsUnknown,
         }
     }
 }
@@ -762,7 +762,7 @@ impl PParamsSet {
                         .push(PParamValue::CostModelsForScriptLanguages(cost_models));
                 }
             }
-            PParamValue::CostModelsUnknonwn(unknown) => {
+            PParamValue::CostModelsUnknown(unknown) => {
                 let existing = self.get_mut(PParamKind::CostModelsForScriptLanguages);
 
                 if let Some(PParamValue::CostModelsForScriptLanguages(existing)) = existing {

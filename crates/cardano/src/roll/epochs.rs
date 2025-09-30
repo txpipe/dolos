@@ -359,7 +359,7 @@ impl BlockVisitor for EpochStateVisitor {
             }
             if !cm.unknown.is_empty() {
                 deltas.add_for_entity(PParamsUpdate {
-                    to_update: PParamValue::CostModelsUnknonwn(cm.unknown),
+                    to_update: PParamValue::CostModelsUnknown(cm.unknown),
                     prev_value: None,
                 });
             }
