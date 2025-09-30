@@ -376,26 +376,25 @@ pub enum PParamKind {
     DecentralizationConstant = 18,
     ExtraEntropy = 19,
     AdaPerUtxoByte = 20,
-    CostModelsForScriptLanguages = 21,
-    ExecutionCosts = 22,
-    MaxTxExUnits = 23,
-    MaxBlockExUnits = 24,
-    MaxValueSize = 25,
-    CollateralPercentage = 26,
-    MaxCollateralInputs = 27,
-    PoolVotingThresholds = 28,
-    DrepVotingThresholds = 29,
-    MinCommitteeSize = 30,
-    CommitteeTermLimit = 31,
-    GovernanceActionValidityPeriod = 32,
-    GovernanceActionDeposit = 33,
-    DrepDeposit = 34,
-    DrepInactivityPeriod = 35,
-    MinFeeRefScriptCostPerByte = 36,
-    CostModelsPlutusV1 = 37,
-    CostModelsPlutusV2 = 38,
-    CostModelsPlutusV3 = 39,
-    CostModelsUnknown = 40,
+    ExecutionCosts = 21,
+    MaxTxExUnits = 22,
+    MaxBlockExUnits = 23,
+    MaxValueSize = 24,
+    CollateralPercentage = 25,
+    MaxCollateralInputs = 26,
+    PoolVotingThresholds = 27,
+    DrepVotingThresholds = 28,
+    MinCommitteeSize = 29,
+    CommitteeTermLimit = 30,
+    GovernanceActionValidityPeriod = 31,
+    GovernanceActionDeposit = 32,
+    DrepDeposit = 33,
+    DrepInactivityPeriod = 34,
+    MinFeeRefScriptCostPerByte = 35,
+    CostModelsPlutusV1 = 36,
+    CostModelsPlutusV2 = 37,
+    CostModelsPlutusV3 = 38,
+    CostModelsUnknown = 39,
 }
 
 impl PParamKind {
@@ -426,9 +425,6 @@ impl PParamKind {
             }
             Self::ExtraEntropy => PParamValue::ExtraEntropy(default_nonce()),
             Self::AdaPerUtxoByte => PParamValue::AdaPerUtxoByte(0),
-            Self::CostModelsForScriptLanguages => {
-                PParamValue::CostModelsForScriptLanguages(default_cost_models())
-            }
             Self::ExecutionCosts => PParamValue::ExecutionCosts(default_ex_unit_prices()),
             Self::MaxTxExUnits => PParamValue::MaxTxExUnits(default_ex_units()),
             Self::MaxBlockExUnits => PParamValue::MaxBlockExUnits(default_ex_units()),
@@ -533,63 +529,60 @@ pub enum PParamValue {
     AdaPerUtxoByte(#[n(0)] Coin),
 
     #[n(21)]
-    CostModelsForScriptLanguages(#[n(0)] CostModels),
-
-    #[n(22)]
     ExecutionCosts(#[n(0)] ExUnitPrices),
 
-    #[n(23)]
+    #[n(22)]
     MaxTxExUnits(#[n(0)] ExUnits),
 
-    #[n(24)]
+    #[n(23)]
     MaxBlockExUnits(#[n(0)] ExUnits),
 
-    #[n(25)]
+    #[n(24)]
     MaxValueSize(#[n(0)] u32),
 
-    #[n(26)]
+    #[n(25)]
     CollateralPercentage(#[n(0)] u32),
 
-    #[n(27)]
+    #[n(26)]
     MaxCollateralInputs(#[n(0)] u32),
 
-    #[n(28)]
+    #[n(27)]
     PoolVotingThresholds(#[n(0)] PoolVotingThresholds),
 
-    #[n(29)]
+    #[n(28)]
     DrepVotingThresholds(#[n(0)] DRepVotingThresholds),
 
-    #[n(30)]
+    #[n(29)]
     MinCommitteeSize(#[n(0)] u64),
 
-    #[n(31)]
+    #[n(30)]
     CommitteeTermLimit(#[n(0)] Epoch),
 
-    #[n(32)]
+    #[n(31)]
     GovernanceActionValidityPeriod(#[n(0)] Epoch),
 
-    #[n(33)]
+    #[n(32)]
     GovernanceActionDeposit(#[n(0)] Coin),
 
-    #[n(34)]
+    #[n(33)]
     DrepDeposit(#[n(0)] Coin),
 
-    #[n(35)]
+    #[n(34)]
     DrepInactivityPeriod(#[n(0)] Epoch),
 
-    #[n(36)]
+    #[n(35)]
     MinFeeRefScriptCostPerByte(#[n(0)] UnitInterval),
 
-    #[n(37)]
+    #[n(36)]
     CostModelsPlutusV1(#[n(0)] Vec<i64>),
 
-    #[n(38)]
+    #[n(37)]
     CostModelsPlutusV2(#[n(0)] Vec<i64>),
 
-    #[n(39)]
+    #[n(38)]
     CostModelsPlutusV3(#[n(0)] Vec<i64>),
 
-    #[n(40)]
+    #[n(39)]
     CostModelsUnknown(#[n(0)] BTreeMap<u64, Vec<i64>>),
 }
 
@@ -617,7 +610,6 @@ impl PParamValue {
             Self::DecentralizationConstant(_) => PParamKind::DecentralizationConstant,
             Self::ExtraEntropy(_) => PParamKind::ExtraEntropy,
             Self::AdaPerUtxoByte(_) => PParamKind::AdaPerUtxoByte,
-            Self::CostModelsForScriptLanguages(_) => PParamKind::CostModelsForScriptLanguages,
             Self::ExecutionCosts(_) => PParamKind::ExecutionCosts,
             Self::MaxTxExUnits(_) => PParamKind::MaxTxExUnits,
             Self::MaxBlockExUnits(_) => PParamKind::MaxBlockExUnits,
@@ -725,64 +717,12 @@ impl PParamsSet {
     }
 
     pub fn set(&mut self, value: PParamValue) {
-        match value {
-            PParamValue::CostModelsPlutusV1(plutusv1) => {
-                let existing = self.get_mut(PParamKind::CostModelsForScriptLanguages);
+        let existing = self.get_mut(value.kind());
 
-                if let Some(PParamValue::CostModelsForScriptLanguages(existing)) = existing {
-                    existing.plutus_v1 = Some(plutusv1);
-                } else {
-                    let mut cost_models = default_cost_models();
-                    cost_models.plutus_v1 = Some(plutusv1);
-                    self.values
-                        .push(PParamValue::CostModelsForScriptLanguages(cost_models));
-                }
-            }
-            PParamValue::CostModelsPlutusV2(plutusv2) => {
-                let existing = self.get_mut(PParamKind::CostModelsForScriptLanguages);
-
-                if let Some(PParamValue::CostModelsForScriptLanguages(existing)) = existing {
-                    existing.plutus_v2 = Some(plutusv2);
-                } else {
-                    let mut cost_models = default_cost_models();
-                    cost_models.plutus_v2 = Some(plutusv2);
-                    self.values
-                        .push(PParamValue::CostModelsForScriptLanguages(cost_models));
-                }
-            }
-            PParamValue::CostModelsPlutusV3(plutusv3) => {
-                let existing = self.get_mut(PParamKind::CostModelsForScriptLanguages);
-
-                if let Some(PParamValue::CostModelsForScriptLanguages(existing)) = existing {
-                    existing.plutus_v3 = Some(plutusv3);
-                } else {
-                    let mut cost_models = default_cost_models();
-                    cost_models.plutus_v3 = Some(plutusv3);
-                    self.values
-                        .push(PParamValue::CostModelsForScriptLanguages(cost_models));
-                }
-            }
-            PParamValue::CostModelsUnknown(unknown) => {
-                let existing = self.get_mut(PParamKind::CostModelsForScriptLanguages);
-
-                if let Some(PParamValue::CostModelsForScriptLanguages(existing)) = existing {
-                    existing.unknown.extend(unknown);
-                } else {
-                    let mut cost_models = default_cost_models();
-                    cost_models.unknown.extend(unknown);
-                    self.values
-                        .push(PParamValue::CostModelsForScriptLanguages(cost_models));
-                }
-            }
-            _ => {
-                let existing = self.get_mut(value.kind());
-
-                if let Some(existing) = existing {
-                    *existing = value;
-                } else {
-                    self.values.push(value);
-                }
-            }
+        if let Some(existing) = existing {
+            *existing = value;
+        } else {
+            self.values.push(value);
         }
     }
 
@@ -818,6 +758,15 @@ impl PParamsSet {
         self.expansion_rate()
     }
 
+    pub fn cost_models_for_script_languages(&self) -> CostModels {
+        CostModels {
+            plutus_v1: self.cost_models_plutus_v1(),
+            plutus_v2: self.cost_models_plutus_v2(),
+            plutus_v3: self.cost_models_plutus_v3(),
+            unknown: self.cost_models_unknown_or_default(),
+        }
+    }
+
     ensure_pparam!(rho, RationalNumber);
     ensure_pparam!(tau, RationalNumber);
     ensure_pparam!(k, u32);
@@ -849,7 +798,10 @@ impl PParamsSet {
     pgetter!(DecentralizationConstant, RationalNumber);
     pgetter!(ExtraEntropy, Nonce);
     pgetter!(AdaPerUtxoByte, u64);
-    pgetter!(CostModelsForScriptLanguages, CostModels);
+    pgetter!(CostModelsPlutusV1, Vec<i64>);
+    pgetter!(CostModelsPlutusV2, Vec<i64>);
+    pgetter!(CostModelsPlutusV3, Vec<i64>);
+    pgetter!(CostModelsUnknown, BTreeMap<u64, Vec<i64>>);
     pgetter!(ExecutionCosts, ExUnitPrices);
     pgetter!(MaxTxExUnits, ExUnits);
     pgetter!(MaxBlockExUnits, ExUnits);
