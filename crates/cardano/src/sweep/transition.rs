@@ -8,8 +8,8 @@ use tracing::debug;
 
 use crate::{
     sweep::{hacks, AccountId, BoundaryWork, PoolId, ProposalId},
-    AccountState, CardanoDelta, CardanoEntity, FixedNamespace as _, PParamKind, PParamValue,
-    PoolState, Proposal,
+    AccountState, CardanoDelta, CardanoEntity, FixedNamespace as _, PParamValue, PoolState,
+    Proposal,
 };
 
 fn should_enact_proposal(ctx: &mut BoundaryWork, proposal: &Proposal) -> bool {
@@ -367,26 +367,27 @@ impl super::BoundaryVisitor for BoundaryVisitor {
                         value =? updated,
                         "applying new pparam value on ending state"
                     );
-                    let Some(PParamValue::CostModelsForScriptLanguages(current)) = ctx
-                        .ending_state
-                        .pparams
-                        .get(PParamKind::CostModelsForScriptLanguages)
-                    else {
-                        // Unreachable
-                        return Ok(());
-                    };
-                    let mut unknown = current.unknown.clone();
-                    unknown.extend(updated.unknown.clone());
-                    ctx.ending_state
-                        .pparams
-                        .set(PParamValue::CostModelsForScriptLanguages(
-                            pallas::ledger::primitives::conway::CostModels {
-                                plutus_v1: updated.plutus_v1.clone().or(current.plutus_v1.clone()),
-                                plutus_v2: updated.plutus_v2.clone().or(current.plutus_v2.clone()),
-                                plutus_v3: updated.plutus_v3.clone().or(current.plutus_v3.clone()),
-                                unknown,
-                            },
-                        ));
+
+                    if let Some(v1) = updated.plutus_v1.as_ref() {
+                        ctx.ending_state
+                            .pparams
+                            .set(PParamValue::CostModelsPlutusV1(v1.clone()));
+                    }
+                    if let Some(v2) = updated.plutus_v2.as_ref() {
+                        ctx.ending_state
+                            .pparams
+                            .set(PParamValue::CostModelsPlutusV2(v2.clone()));
+                    }
+                    if let Some(v3) = updated.plutus_v3.as_ref() {
+                        ctx.ending_state
+                            .pparams
+                            .set(PParamValue::CostModelsPlutusV3(v3.clone()));
+                    }
+                    if !updated.unknown.is_empty() {
+                        ctx.ending_state
+                            .pparams
+                            .set(PParamValue::CostModelsUnknonwn(updated.unknown.clone()));
+                    }
                 }
             }
             GovAction::TreasuryWithdrawals(_, _) => {

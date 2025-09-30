@@ -1,4 +1,4 @@
-use std::cmp::Ordering;
+use std::{cmp::Ordering, collections::BTreeMap};
 
 use dolos_core::{
     BlockSlot, ChainError, EntityKey, EntityValue, Namespace, NamespaceType, NsKey, StateSchema,
@@ -392,6 +392,10 @@ pub enum PParamKind {
     DrepDeposit = 34,
     DrepInactivityPeriod = 35,
     MinFeeRefScriptCostPerByte = 36,
+    CostModelsPlutusV1 = 37,
+    CostModelsPlutusV2 = 38,
+    CostModelsPlutusV3 = 39,
+    CostModelsUnknonwn = 40,
 }
 
 impl PParamKind {
@@ -445,6 +449,18 @@ impl PParamKind {
             Self::DrepInactivityPeriod => PParamValue::DrepInactivityPeriod(0),
             Self::MinFeeRefScriptCostPerByte => {
                 PParamValue::MinFeeRefScriptCostPerByte(default_rational_number())
+            }
+            Self::CostModelsPlutusV1 => {
+                PParamValue::CostModelsPlutusV1(default_cost_models().plutus_v1.unwrap_or_default())
+            }
+            Self::CostModelsPlutusV2 => {
+                PParamValue::CostModelsPlutusV2(default_cost_models().plutus_v2.unwrap_or_default())
+            }
+            Self::CostModelsPlutusV3 => {
+                PParamValue::CostModelsPlutusV3(default_cost_models().plutus_v3.unwrap_or_default())
+            }
+            Self::CostModelsUnknonwn => {
+                PParamValue::CostModelsUnknonwn(default_cost_models().unknown)
             }
         }
     }
@@ -563,6 +579,18 @@ pub enum PParamValue {
 
     #[n(36)]
     MinFeeRefScriptCostPerByte(#[n(0)] UnitInterval),
+
+    #[n(37)]
+    CostModelsPlutusV1(#[n(0)] Vec<i64>),
+
+    #[n(38)]
+    CostModelsPlutusV2(#[n(0)] Vec<i64>),
+
+    #[n(39)]
+    CostModelsPlutusV3(#[n(0)] Vec<i64>),
+
+    #[n(40)]
+    CostModelsUnknonwn(#[n(0)] BTreeMap<u64, Vec<i64>>),
 }
 
 impl PParamValue {
@@ -605,6 +633,10 @@ impl PParamValue {
             Self::DrepDeposit(_) => PParamKind::DrepDeposit,
             Self::DrepInactivityPeriod(_) => PParamKind::DrepInactivityPeriod,
             Self::MinFeeRefScriptCostPerByte(_) => PParamKind::MinFeeRefScriptCostPerByte,
+            Self::CostModelsPlutusV1(_) => PParamKind::CostModelsPlutusV1,
+            Self::CostModelsPlutusV2(_) => PParamKind::CostModelsPlutusV2,
+            Self::CostModelsPlutusV3(_) => PParamKind::CostModelsPlutusV3,
+            Self::CostModelsUnknonwn(_) => PParamKind::CostModelsUnknonwn,
         }
     }
 }
@@ -693,12 +725,64 @@ impl PParamsSet {
     }
 
     pub fn set(&mut self, value: PParamValue) {
-        let existing = self.get_mut(value.kind());
+        match value {
+            PParamValue::CostModelsPlutusV1(plutusv1) => {
+                let existing = self.get_mut(PParamKind::CostModelsForScriptLanguages);
 
-        if let Some(existing) = existing {
-            *existing = value;
-        } else {
-            self.values.push(value);
+                if let Some(PParamValue::CostModelsForScriptLanguages(existing)) = existing {
+                    existing.plutus_v1 = Some(plutusv1);
+                } else {
+                    let mut cost_models = default_cost_models();
+                    cost_models.plutus_v1 = Some(plutusv1);
+                    self.values
+                        .push(PParamValue::CostModelsForScriptLanguages(cost_models));
+                }
+            }
+            PParamValue::CostModelsPlutusV2(plutusv2) => {
+                let existing = self.get_mut(PParamKind::CostModelsForScriptLanguages);
+
+                if let Some(PParamValue::CostModelsForScriptLanguages(existing)) = existing {
+                    existing.plutus_v2 = Some(plutusv2);
+                } else {
+                    let mut cost_models = default_cost_models();
+                    cost_models.plutus_v2 = Some(plutusv2);
+                    self.values
+                        .push(PParamValue::CostModelsForScriptLanguages(cost_models));
+                }
+            }
+            PParamValue::CostModelsPlutusV3(plutusv3) => {
+                let existing = self.get_mut(PParamKind::CostModelsForScriptLanguages);
+
+                if let Some(PParamValue::CostModelsForScriptLanguages(existing)) = existing {
+                    existing.plutus_v3 = Some(plutusv3);
+                } else {
+                    let mut cost_models = default_cost_models();
+                    cost_models.plutus_v3 = Some(plutusv3);
+                    self.values
+                        .push(PParamValue::CostModelsForScriptLanguages(cost_models));
+                }
+            }
+            PParamValue::CostModelsUnknonwn(unknown) => {
+                let existing = self.get_mut(PParamKind::CostModelsForScriptLanguages);
+
+                if let Some(PParamValue::CostModelsForScriptLanguages(existing)) = existing {
+                    existing.unknown.extend(unknown);
+                } else {
+                    let mut cost_models = default_cost_models();
+                    cost_models.unknown.extend(unknown);
+                    self.values
+                        .push(PParamValue::CostModelsForScriptLanguages(cost_models));
+                }
+            }
+            _ => {
+                let existing = self.get_mut(value.kind());
+
+                if let Some(existing) = existing {
+                    *existing = value;
+                } else {
+                    self.values.push(value);
+                }
+            }
         }
     }
 
