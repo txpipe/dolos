@@ -10,7 +10,10 @@
 
 use pallas::{
     crypto::hash::{Hash, Hasher},
-    ledger::traverse::{MultiEraInput, MultiEraOutput, MultiEraTx, MultiEraUpdate},
+    ledger::{
+        primitives::Epoch,
+        traverse::{MultiEraInput, MultiEraOutput, MultiEraTx, MultiEraUpdate},
+    },
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -521,6 +524,9 @@ pub enum ChainError {
     #[error(transparent)]
     ArchiveError(#[from] ArchiveError),
 
+    #[error("genesis field missing: {0}")]
+    GenesisFieldMissing(String),
+
     #[error("protocol params not found: {0}")]
     PParamsNotFound(String),
 
@@ -532,6 +538,9 @@ pub enum ChainError {
 
     #[error("forced stop epoch reached")]
     StopEpochReached,
+
+    #[error("epoch value version not found for epoch {0}")]
+    EpochValueVersionNotFound(Epoch),
 }
 
 pub enum WorkKind {

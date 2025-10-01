@@ -1,4 +1,7 @@
-use pallas::ledger::traverse::{MultiEraBlock, MultiEraOutput};
+use pallas::ledger::{
+    primitives::Epoch,
+    traverse::{MultiEraBlock, MultiEraOutput},
+};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::VecDeque,
@@ -23,6 +26,7 @@ pub mod forks;
 pub mod genesis;
 pub mod model;
 pub mod owned;
+pub mod pots;
 pub mod roll;
 pub mod sweep;
 pub mod utils;
@@ -74,7 +78,7 @@ impl Default for TrackConfig {
 pub struct Config {
     #[serde(default)]
     pub track: TrackConfig,
-    pub stop_epoch: Option<u32>,
+    pub stop_epoch: Option<Epoch>,
 }
 
 struct WorkBuffer {

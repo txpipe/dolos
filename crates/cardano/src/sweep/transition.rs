@@ -8,8 +8,8 @@ use tracing::debug;
 
 use crate::{
     sweep::{hacks, AccountId, BoundaryWork, PoolId, ProposalId},
-    AccountState, CardanoDelta, CardanoEntity, FixedNamespace as _, PParamValue, PoolState,
-    Proposal,
+    AccountState, CardanoDelta, CardanoEntity, EpochValue, FixedNamespace as _, PParamValue,
+    PoolHash, PoolState, Proposal,
 };
 
 fn should_enact_proposal(ctx: &mut BoundaryWork, proposal: &Proposal) -> bool {
@@ -36,9 +36,9 @@ pub struct AccountTransition {
     account: AccountId,
 
     // undo
-    prev_pool: Option<Vec<u8>>,
-    prev_drep: Option<DRep>,
-    prev_stake: Option<u64>,
+    prev_pool: Option<EpochValue<Option<PoolHash>>>,
+    prev_drep: Option<EpochValue<Option<DRep>>>,
+    prev_stake: Option<EpochValue<u64>>,
 }
 
 impl AccountTransition {
@@ -60,34 +60,25 @@ impl dolos_core::EntityDelta for AccountTransition {
     }
 
     fn apply(&mut self, entity: &mut Option<AccountState>) {
-        let Some(entity) = entity else {
-            return;
-        };
+        let entity = entity.as_mut().expect("existing account");
 
         // undo info
-        self.prev_pool = entity.latest_pool.clone();
-        self.prev_drep = entity.latest_drep.clone();
-        self.prev_stake = Some(entity.active_stake);
+        self.prev_pool = Some(entity.pool.clone());
+        self.prev_drep = Some(entity.drep.clone());
+        self.prev_stake = Some(entity.total_stake.clone());
 
         // apply changes
-        entity.active_pool = entity.latest_pool.clone();
-        entity.active_drep = entity.latest_drep.clone();
-        entity.active_stake = entity.wait_stake;
-        entity.wait_stake = entity.live_stake();
+        entity.total_stake.push_unchecked(entity.live_stake());
+        entity.pool.transition_unchecked();
+        entity.drep.transition_unchecked();
     }
 
     fn undo(&self, entity: &mut Option<AccountState>) {
-        let Some(entity) = entity else {
-            return;
-        };
+        let entity = entity.as_mut().expect("existing account");
 
-        entity.latest_drep = entity.active_drep.clone();
-        entity.latest_pool = entity.active_pool.clone();
-        entity.wait_stake = entity.active_stake;
-
-        entity.active_pool = self.prev_pool.clone();
-        entity.active_drep = self.prev_drep.clone();
-        entity.active_stake = self.prev_stake.unwrap_or(0);
+        entity.pool = self.prev_pool.clone().expect("called with undo data");
+        entity.drep = self.prev_drep.clone().expect("called with undo data");
+        entity.total_stake = self.prev_stake.clone().expect("called with undo data");
     }
 }
 
@@ -97,7 +88,7 @@ pub struct PoolTransition {
     ending_stake: u64,
 
     // undo
-    prev_stake: Option<u64>,
+    prev_stake: Option<EpochValue<u64>>,
     prev_blocks_minted: Option<u32>,
 }
 
@@ -125,13 +116,11 @@ impl dolos_core::EntityDelta for PoolTransition {
         };
 
         // undo info
-        self.prev_stake = Some(entity.active_stake);
+        self.prev_stake = Some(entity.total_stake.clone());
         self.prev_blocks_minted = Some(entity.blocks_minted_epoch);
 
-        // order matters
-        entity.active_stake = entity.wait_stake;
-        entity.wait_stake = self.ending_stake;
-
+        // apply changes
+        entity.total_stake.push_unchecked(self.ending_stake);
         entity.blocks_minted_epoch = 0;
     }
 
@@ -140,10 +129,8 @@ impl dolos_core::EntityDelta for PoolTransition {
             return;
         };
 
-        entity.wait_stake = entity.active_stake;
-        entity.active_stake = self.prev_stake.unwrap_or(0);
-
-        entity.blocks_minted_epoch = self.prev_blocks_minted.unwrap_or(0);
+        entity.total_stake = self.prev_stake.clone().expect("called with undo data");
+        entity.blocks_minted_epoch = self.prev_blocks_minted.expect("called with undo data");
     }
 }
 
@@ -232,7 +219,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         id: &PoolId,
         _: &PoolState,
     ) -> Result<(), ChainError> {
-        let ending_stake = ctx.active_snapshot.get_pool_stake(id);
+        let ending_stake = ctx.ending_snapshot.get_pool_stake(id);
 
         self.change(PoolTransition::new(id.clone(), ending_stake));
 
@@ -241,9 +228,9 @@ impl super::BoundaryVisitor for BoundaryVisitor {
 
     fn visit_account(
         &mut self,
-        _: &mut BoundaryWork,
+        ctx: &mut BoundaryWork,
         id: &AccountId,
-        _: &AccountState,
+        account: &AccountState,
     ) -> Result<(), ChainError> {
         self.change(AccountTransition::new(id.clone()));
 
@@ -391,7 +378,8 @@ impl super::BoundaryVisitor for BoundaryVisitor {
                 }
             }
             GovAction::TreasuryWithdrawals(_, _) => {
-                // TODO: Track of this withdrawal from treasury, updating reward account as well
+                // TODO: Track of this withdrawal from treasury, updating reward
+                // account as well
             }
             _ => {}
         }

@@ -21,6 +21,12 @@ impl From<&[u8]> for EntityKey {
     }
 }
 
+impl<const N: usize> From<pallas::crypto::hash::Hash<N>> for EntityKey {
+    fn from(value: pallas::crypto::hash::Hash<N>) -> Self {
+        EntityKey::from(value.as_slice())
+    }
+}
+
 impl<const N: usize> From<&[u8; N]> for EntityKey {
     fn from(value: &[u8; N]) -> Self {
         EntityKey::from(value.as_slice())

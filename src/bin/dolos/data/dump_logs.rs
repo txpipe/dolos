@@ -1,7 +1,7 @@
 use std::marker::PhantomData;
 
 use comfy_table::Table;
-use dolos_cardano::{EpochState, RewardLog};
+use dolos_cardano::{EpochState, RewardLog, StakeLog};
 use miette::{Context, IntoDiagnostic};
 
 use dolos::prelude::*;
@@ -84,6 +84,45 @@ impl TableRow for EpochState {
     }
 }
 
+const POOL_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("pool");
+
+impl TableRow for StakeLog {
+    fn header() -> Vec<&'static str> {
+        vec![
+            "pool hex",
+            "pool bech32",
+            "blocks minted",
+            "active stake",
+            "active size",
+            "delegators count",
+            "rewards",
+            "fees",
+            "live pledge",
+            "declared pledge",
+        ]
+    }
+
+    fn row(&self, key: &LogKey) -> Vec<String> {
+        let entity_key = EntityKey::from(key.clone());
+        let pool_hash = entity_key.as_ref()[..28].try_into().unwrap();
+        let pool_hex = hex::encode(pool_hash);
+        let pool_bech32 = bech32::encode::<bech32::Bech32>(POOL_HRP, pool_hash).unwrap();
+
+        vec![
+            format!("{}", pool_hex),
+            format!("{}", pool_bech32),
+            format!("{}", self.blocks_minted),
+            format!("{}", self.active_stake),
+            format!("{}", self.active_size),
+            format!("{}", self.delegators_count),
+            format!("{}", self.rewards),
+            format!("{}", self.fees),
+            format!("{}", self.live_pledge),
+            format!("{}", self.declared_pledge),
+        ]
+    }
+}
+
 enum Formatter<T: TableRow> {
     Table(Table, PhantomData<T>),
     // TODO
@@ -145,6 +184,8 @@ pub fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
 
     match args.namespace.as_str() {
         "rewards" => dump_logs::<RewardLog>(&archive, "rewards", args.skip, args.take)?,
+        "stakes" => dump_logs::<StakeLog>(&archive, "stakes", args.skip, args.take)?,
+        "epochs" => dump_logs::<EpochState>(&archive, "epochs", args.skip, args.take)?,
         _ => todo!(),
     }
 

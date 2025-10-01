@@ -21,6 +21,7 @@ use crate::{
     pallas_extras::{
         self, default_cost_models, default_drep_voting_thresholds, default_ex_unit_prices,
         default_ex_units, default_nonce, default_pool_voting_thresholds, default_rational_number,
+        MultiEraPoolRegistration,
     },
     roll::{
         accounts::{
@@ -42,6 +43,101 @@ use crate::{
         transition::{AccountTransition, PoolTransition, ProposalEnactment},
     },
 };
+
+#[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EpochValue<T> {
+    /// Current epoch version of the value
+    #[n(0)]
+    pub latest: T,
+
+    /// Epoch - 1 version of the value
+    #[n(1)]
+    pub previous: Option<T>,
+
+    /// Epoch - 2 version of the value
+    #[n(2)]
+    pub stable: Option<T>,
+
+    /// The epoch at which this value was updated for the last time
+    #[n(3)]
+    pub epoch: Epoch,
+}
+
+impl<T> EpochValue<T>
+where
+    T: Clone + std::fmt::Debug,
+{
+    pub fn new(latest: T, epoch: Epoch) -> Self {
+        Self {
+            latest,
+            previous: None,
+            stable: None,
+            epoch,
+        }
+    }
+
+    /// Updates the latest value for the current epoch without rotating any of
+    /// the previous values
+    pub fn update(&mut self, latest: T, epoch: Epoch) {
+        assert_eq!(epoch, self.epoch);
+        self.latest = latest;
+    }
+
+    /// Same as update, but without checking that that the epoch matches.
+    pub fn update_unchecked(&mut self, latest: T) {
+        self.latest = latest;
+    }
+
+    /// Transitions into the next epoch by rotating the previous values and
+    /// cloning the latest one.
+    pub fn transition(&mut self, next_epoch: Epoch) {
+        assert_eq!(next_epoch, self.epoch + 1);
+        self.transition_unchecked();
+    }
+
+    /// Same as transition, but without checking that that the epoch matches.
+    pub fn transition_unchecked(&mut self) {
+        self.stable = self.previous.clone();
+        self.previous = Some(self.latest.clone());
+        self.epoch += 1;
+        // latest remains the same
+    }
+
+    /// Transitions into the next epoch by rotation the previous values but
+    /// using a new version for the latest one.
+    pub fn push(&mut self, next_epoch: Epoch, latest: T) {
+        assert_eq!(next_epoch, self.epoch + 1);
+        self.push_unchecked(latest);
+    }
+
+    /// Same as push, but without checking that that the epoch matches.
+    pub fn push_unchecked(&mut self, latest: T) {
+        self.transition_unchecked();
+        self.update_unchecked(latest);
+    }
+
+    pub fn version_for(&self, epoch: Epoch) -> Option<&T> {
+        if epoch == self.epoch {
+            Some(&self.latest)
+        } else if epoch == self.epoch - 1 {
+            self.previous.as_ref()
+        } else if epoch == self.epoch - 2 {
+            self.stable.as_ref()
+        } else {
+            None
+        }
+    }
+
+    pub fn try_version_for(&self, epoch: Epoch) -> Result<&T, ChainError> {
+        match self.version_for(epoch) {
+            Some(value) => Ok(value),
+            None => {
+                dbg!(self);
+                Err(ChainError::EpochValueVersionNotFound(epoch))
+            }
+        }
+    }
+}
 
 pub trait FixedNamespace {
     const NS: &'static str;
@@ -84,34 +180,44 @@ entity_boilerplate!(RewardLog, "rewards");
 
 #[derive(Debug, Clone, PartialEq, Decode, Encode, Default)]
 pub struct StakeLog {
-    #[n(0)]
     /// Number of blocks created by pool
+    #[n(0)]
     pub blocks_minted: u32,
 
-    #[n(1)]
     /// Active (Snapshot of live stake 2 epochs ago) stake in Lovelaces
+    #[n(1)]
     pub active_stake: u64,
 
-    #[n(2)]
     /// Pool size (percentage) of overall active stake at that epoch
+    #[n(2)]
     pub active_size: f64,
 
-    #[n(3)]
     /// Number of delegators for epoch
+    #[n(3)]
     pub delegators_count: u64,
 
-    #[n(4)]
     /// Total rewards received before distribution to delegators
+    #[n(4)]
     pub rewards: u64,
 
-    #[n(5)]
     /// Pool operator rewards
+    #[n(5)]
     pub fees: u64,
+
+    /// Live pledge
+    #[n(6)]
+    pub live_pledge: u64,
+
+    /// Declared pledge
+    #[n(7)]
+    pub declared_pledge: u64,
 }
 
 entity_boilerplate!(StakeLog, "stakes");
 
-#[derive(Debug, Clone, PartialEq, Eq, Decode, Encode, Default)]
+pub type PoolHash = Hash<28>;
+
+#[derive(Debug, Clone, PartialEq, Eq, Decode, Encode)]
 pub struct AccountState {
     #[n(0)]
     pub registered_at: Option<u64>,
@@ -120,46 +226,62 @@ pub struct AccountState {
     pub controlled_amount: u64,
 
     #[n(2)]
-    pub wait_stake: u64,
+    pub total_stake: EpochValue<u64>,
 
     #[n(3)]
-    pub active_stake: u64,
-
-    #[n(4)]
     pub rewards_sum: u64,
 
-    #[n(5)]
+    #[n(4)]
     pub withdrawals_sum: u64,
 
-    #[n(6)]
+    #[n(5)]
     pub reserves_sum: u64,
 
-    #[n(7)]
+    #[n(6)]
     pub treasury_sum: u64,
 
-    #[n(8)]
-    pub latest_pool: Option<Vec<u8>>,
+    #[n(7)]
+    pub pool: EpochValue<Option<PoolHash>>,
 
     #[n(9)]
-    pub active_pool: Option<Vec<u8>>,
-
-    #[n(10)]
-    pub latest_drep: Option<DRep>,
+    pub drep: EpochValue<Option<DRep>>,
 
     #[n(11)]
-    pub active_drep: Option<DRep>,
+    pub deposit: u64,
 
     #[n(12)]
-    pub deposit: u64,
+    pub deregistered_at: Option<u64>,
 }
 
 entity_boilerplate!(AccountState, "accounts");
 
 impl AccountState {
+    pub fn new(epoch: Epoch) -> Self {
+        Self {
+            registered_at: None,
+            controlled_amount: 0,
+            total_stake: EpochValue::new(0, epoch),
+            rewards_sum: 0,
+            withdrawals_sum: 0,
+            reserves_sum: 0,
+            treasury_sum: 0,
+            pool: EpochValue::new(None, epoch),
+            drep: EpochValue::new(None, epoch),
+            deposit: 0,
+            deregistered_at: None,
+        }
+    }
+
     pub fn withdrawable_amount(&self) -> u64 {
         self.rewards_sum.saturating_add(self.withdrawals_sum)
     }
 
+    pub fn is_active(&self) -> bool {
+        self.registered_at.is_some() && self.deregistered_at.is_none()
+    }
+
+    /// Computes the new stake from current values taking into account
+    /// registration status.
     pub fn live_stake(&self) -> u64 {
         let mut out = self.controlled_amount;
         out += self.rewards_sum;
@@ -225,13 +347,7 @@ pub struct PoolState {
     pub metadata: Option<PoolMetadata>,
 
     #[n(8)]
-    pub active_stake: u64,
-
-    #[n(9)]
-    pub wait_stake: u64,
-
-    #[n(10)]
-    pub __live_stake: u64,
+    pub total_stake: EpochValue<u64>,
 
     #[n(11)]
     pub blocks_minted_total: u32,
@@ -265,28 +381,28 @@ impl PoolState {
 }
 
 impl PoolState {
-    pub fn new(slot: BlockSlot, vrf_keyhash: Hash<32>) -> Self {
+    pub fn new(
+        cert: &MultiEraPoolRegistration,
+        slot: BlockSlot,
+        epoch: Epoch,
+        deposit: u64,
+    ) -> Self {
         Self {
             register_slot: slot,
-            vrf_keyhash,
-            reward_account: Default::default(),
-            pool_owners: Default::default(),
-            relays: Default::default(),
-            declared_pledge: Default::default(),
-            margin_cost: RationalNumber {
-                numerator: 0,
-                denominator: 1,
-            },
-            fixed_cost: Default::default(),
-            metadata: Default::default(),
-            active_stake: Default::default(),
-            wait_stake: Default::default(),
-            __live_stake: Default::default(),
-            blocks_minted_total: Default::default(),
-            blocks_minted_epoch: Default::default(),
+            vrf_keyhash: cert.vrf_keyhash,
+            reward_account: cert.reward_account.to_vec(),
+            pool_owners: cert.pool_owners.clone(),
+            relays: cert.relays.clone(),
+            declared_pledge: cert.pledge,
+            margin_cost: cert.margin.clone(),
+            fixed_cost: cert.cost,
+            metadata: cert.pool_metadata.clone(),
+            total_stake: EpochValue::new(0, epoch),
+            blocks_minted_total: 0,
+            blocks_minted_epoch: 0,
             retiring_epoch: None,
             is_retired: false,
-            deposit: 0,
+            deposit,
         }
     }
 }
@@ -758,6 +874,10 @@ impl PParamsSet {
         self.expansion_rate()
     }
 
+    pub fn d(&self) -> Option<RationalNumber> {
+        self.decentralization_constant()
+    }
+
     pub fn cost_models_for_script_languages(&self) -> CostModels {
         CostModels {
             plutus_v1: self.cost_models_plutus_v1(),
@@ -767,10 +887,12 @@ impl PParamsSet {
         }
     }
 
+    ensure_pparam!(d, RationalNumber);
     ensure_pparam!(rho, RationalNumber);
     ensure_pparam!(tau, RationalNumber);
     ensure_pparam!(k, u32);
     ensure_pparam!(a0, RationalNumber);
+    ensure_pparam!(epoch_length, u64);
     ensure_pparam!(drep_inactivity_period, u64);
     ensure_pparam!(key_deposit, u64);
     ensure_pparam!(pool_deposit, u64);
@@ -881,12 +1003,7 @@ impl Nonces {
 #[derive(Debug, Encode, Decode, Clone)]
 pub struct EpochState {
     #[n(0)]
-    pub number: u32,
-
-    /// The static value representing what should be considered the active stake
-    /// for this epoch (computed from -2 epochs ago).
-    #[n(1)]
-    pub active_stake: u64,
+    pub number: Epoch,
 
     #[n(2)]
     pub deposits: u64,
@@ -942,7 +1059,7 @@ pub const EPOCH_KEY_GO: &[u8] = b"2";
 pub const EPOCH_KEY_SET: &[u8] = b"1";
 pub const EPOCH_KEY_MARK: &[u8] = b"0";
 
-pub fn drep_to_entity_key(value: DRep) -> EntityKey {
+pub fn drep_to_entity_key(value: &DRep) -> EntityKey {
     let bytes = match value {
         DRep::Key(key) => [vec![pallas_extras::DREP_KEY_PREFIX], key.to_vec()].concat(),
         DRep::Script(key) => [vec![pallas_extras::DREP_SCRIPT_PREFIX], key.to_vec()].concat(),

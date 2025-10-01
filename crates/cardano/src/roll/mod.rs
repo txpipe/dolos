@@ -7,7 +7,7 @@ use dolos_core::{
 use pallas::{
     codec::utils::KeepRaw,
     ledger::{
-        primitives::PlutusData,
+        primitives::{Epoch, PlutusData},
         traverse::{
             MultiEraBlock, MultiEraCert, MultiEraInput, MultiEraOutput, MultiEraPolicyAssets,
             MultiEraProposal, MultiEraRedeemer, MultiEraTx, MultiEraUpdate,
@@ -45,6 +45,7 @@ pub trait BlockVisitor {
         deltas: &mut WorkDeltas<CardanoLogic>,
         block: &MultiEraBlock,
         pparams: &PParamsSet,
+        epoch: Epoch,
     ) -> Result<(), ChainError> {
         Ok(())
     }
@@ -194,6 +195,7 @@ pub struct DeltaBuilder<'a> {
     config: TrackConfig,
     work: &'a mut WorkBlock<CardanoLogic>,
     active_params: &'a PParamsSet,
+    epoch: Epoch,
     utxos: &'a HashMap<TxoRef, OwnedMultiEraOutput>,
 
     account_state: AccountVisitor,
@@ -209,6 +211,7 @@ impl<'a> DeltaBuilder<'a> {
     pub fn new(
         config: TrackConfig,
         active_params: &'a PParamsSet,
+        epoch: Epoch,
         work: &'a mut WorkBlock<CardanoLogic>,
         utxos: &'a HashMap<TxoRef, OwnedMultiEraOutput>,
     ) -> Self {
@@ -216,6 +219,7 @@ impl<'a> DeltaBuilder<'a> {
             config,
             work,
             active_params,
+            epoch,
             utxos,
             account_state: Default::default(),
             asset_state: Default::default(),
@@ -232,7 +236,14 @@ impl<'a> DeltaBuilder<'a> {
         let block = block.view();
         let mut deltas = WorkDeltas::default();
 
-        visit_all!(self, deltas, visit_root, block, self.active_params);
+        visit_all!(
+            self,
+            deltas,
+            visit_root,
+            block,
+            self.active_params,
+            self.epoch
+        );
 
         for tx in block.txs() {
             visit_all!(self, deltas, visit_tx, block, &tx);
@@ -326,6 +337,7 @@ pub fn compute_delta<D: Domain>(
         let mut builder = DeltaBuilder::new(
             config.track.clone(),
             &active_params,
+            epoch,
             block,
             &batch.utxos_decoded,
         );

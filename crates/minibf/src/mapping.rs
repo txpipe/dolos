@@ -9,7 +9,7 @@ use pallas::{
         primitives::{
             alonzo::{self, Certificate as AlonzoCert},
             conway::{Certificate as ConwayCert, DRep, DatumOption, RedeemerTag, ScriptRef},
-            ExUnitPrices, PlutusData, StakeCredential,
+            Epoch, ExUnitPrices, PlutusData, StakeCredential,
         },
         traverse::{
             ComputeHash, MultiEraBlock, MultiEraCert, MultiEraHeader, MultiEraInput,
@@ -45,7 +45,7 @@ use blockfrost_openapi::models::{
     tx_content_withdrawals_inner::TxContentWithdrawalsInner,
 };
 
-use dolos_cardano::{pallas_extras, ChainSummary, Epoch, PParamsSet};
+use dolos_cardano::{pallas_extras, ChainSummary, PParamsSet};
 use dolos_core::{Domain, EraCbor, TxHash, TxOrder, TxoIdx, TxoRef};
 
 use crate::Facade;
@@ -1677,7 +1677,7 @@ impl<'a> BlockModelBuilder<'a> {
 
         let Some(use_bech32) = self
             .chain
-            .map(|x| x.slot_epoch(self.block.slot()).0 > x.first_shelley_epoch() as u32 + 1)
+            .map(|x| x.slot_epoch(self.block.slot()).0 > x.first_shelley_epoch() + 1)
         else {
             return Ok(None);
         };

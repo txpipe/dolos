@@ -56,8 +56,13 @@ impl IntoModel<PoolListExtendedInner> for PoolModelBuilder {
         let out = PoolListExtendedInner {
             pool_id,
             hex: hex::encode(self.operator),
-            active_stake: self.state.active_stake.to_string(),
-            live_stake: self.state.__live_stake.to_string(),
+            active_stake: self
+                .state
+                .total_stake
+                .stable
+                .unwrap_or_default()
+                .to_string(),
+            live_stake: self.state.total_stake.latest.to_string(),
             live_saturation: rational_to_f64::<3>(&self.state.live_saturation()),
             blocks_minted: self.state.blocks_minted_total as i32,
             declared_pledge: self.state.declared_pledge.to_string(),
@@ -147,16 +152,19 @@ where
 {
     let operator = decode_pool_id(&id)?;
 
-    dbg!(hex::encode(&operator));
-
     let network = domain.get_network_id()?;
 
     let iter = domain
         .iter_cardano_entities::<AccountState>(None)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let filtered =
-        iter.filter_ok(|(_, account)| account.active_pool.as_ref().is_some_and(|f| f == &operator));
+    let filtered = iter.filter_ok(|(_, account)| {
+        account
+            .pool
+            .latest
+            .as_ref()
+            .is_some_and(|f| f.as_slice() == operator.as_slice())
+    });
 
     let pagination = Pagination::try_from(params)?;
 

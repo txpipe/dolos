@@ -7,7 +7,7 @@ use crate::{
 use blockfrost_openapi::models::epoch_param_content::EpochParamContent;
 use dolos_cardano::PParamsSet;
 use dolos_core::Genesis;
-use pallas::ledger::primitives::conway::CostModels;
+use pallas::ledger::primitives::{conway::CostModels, Epoch};
 
 fn cost_models_to_key_value(cost_models: &CostModels) -> Vec<(&'static str, &[i64])> {
     let maybe = vec![
@@ -50,7 +50,7 @@ fn map_cost_models_named(cost_models: &CostModels) -> HashMap<String, serde_json
 }
 
 pub struct ParametersModelBuilder<'a> {
-    pub epoch: u32,
+    pub epoch: Epoch,
     pub params: PParamsSet,
     pub genesis: &'a Genesis,
     pub nonce: Option<String>,

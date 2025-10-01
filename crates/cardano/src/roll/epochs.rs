@@ -1,7 +1,10 @@
 use dolos_core::{batch::WorkDeltas, ChainError, NsKey};
 use pallas::{
     crypto::hash::Hash,
-    ledger::traverse::{MultiEraBlock, MultiEraCert, MultiEraTx, MultiEraUpdate},
+    ledger::{
+        primitives::Epoch,
+        traverse::{MultiEraBlock, MultiEraCert, MultiEraTx, MultiEraUpdate},
+    },
 };
 use serde::{Deserialize, Serialize};
 use tracing::debug;
@@ -187,6 +190,7 @@ impl BlockVisitor for EpochStateVisitor {
         _: &mut WorkDeltas<CardanoLogic>,
         block: &MultiEraBlock,
         pparams: &PParamsSet,
+        _: Epoch,
     ) -> Result<(), ChainError> {
         self.stats_delta = Some(EpochStatsUpdate::new(pparams)?);
 

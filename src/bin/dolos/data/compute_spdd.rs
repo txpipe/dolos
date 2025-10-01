@@ -1,9 +1,9 @@
-use std::collections::HashMap;
-
 use comfy_table::Table;
 use dolos_cardano::model::AccountState;
 use dolos_core::StateStore;
 use miette::IntoDiagnostic as _;
+use pallas::crypto::hash::Hash;
+use std::collections::HashMap;
 
 #[derive(Debug, clap::Args)]
 pub struct Args {}
@@ -22,7 +22,7 @@ impl Formatter {
         Self::Table(table)
     }
 
-    fn write(&mut self, pool_id: [u8; 28], delegation: u128) {
+    fn write(&mut self, pool_id: Hash<28>, delegation: u128) {
         match self {
             Formatter::Table(table) => {
                 table.add_row(vec![
@@ -40,8 +40,8 @@ impl Formatter {
     }
 }
 
-pub fn compute_spdd(store: &impl StateStore) -> miette::Result<HashMap<[u8; 28], u128>> {
-    let mut by_pool = HashMap::<[u8; 28], u128>::new();
+pub fn compute_spdd(store: &impl StateStore) -> miette::Result<HashMap<Hash<28>, u128>> {
+    let mut by_pool = HashMap::<Hash<28>, u128>::new();
 
     let all_accounts = store
         .iter_entities_typed::<AccountState>("accounts", None)
@@ -50,9 +50,8 @@ pub fn compute_spdd(store: &impl StateStore) -> miette::Result<HashMap<[u8; 28],
     for record in all_accounts {
         let (_, value) = record.into_diagnostic()?;
 
-        if let Some(pool_id) = value.active_pool.clone() {
-            let key = pool_id.try_into().unwrap();
-            let entry = by_pool.entry(key).or_insert(0);
+        if let Some(pool_id) = value.pool.latest.clone() {
+            let entry = by_pool.entry(pool_id).or_insert(0);
             *entry += value.live_stake() as u128;
         }
     }

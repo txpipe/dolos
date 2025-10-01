@@ -3,7 +3,7 @@ use pallas::{
     codec::{minicbor, utils::KeepRaw},
     ledger::{
         addresses::Address,
-        primitives::{conway::DatumOption, PlutusData},
+        primitives::{conway::DatumOption, Epoch, PlutusData},
         traverse::{
             ComputeHash, MultiEraBlock, MultiEraCert, MultiEraInput, MultiEraRedeemer, MultiEraTx,
             MultiEraValue, OriginalHash as _,
@@ -88,6 +88,7 @@ impl BlockVisitor for TxLogVisitor {
         deltas: &mut WorkDeltas<CardanoLogic>,
         block: &MultiEraBlock,
         _: &PParamsSet,
+        _: Epoch,
     ) -> Result<(), ChainError> {
         deltas.slot.number = Some(block.number());
 

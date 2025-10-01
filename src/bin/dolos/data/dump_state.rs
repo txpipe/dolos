@@ -26,10 +26,14 @@ impl TableRow for AccountState {
     fn header() -> Vec<&'static str> {
         vec![
             "cred",
-            "active stake",
-            "wait stake",
+            "registered at",
+            "deregistered at",
+            "stable stake",
+            "previous stake",
+            "latest stake",
             "rewards sum",
             "withdrawals sum",
+            "epoch values",
             "latest pool",
             "active pool",
             "drep",
@@ -39,25 +43,41 @@ impl TableRow for AccountState {
     fn row(&self, key: &EntityKey) -> Vec<String> {
         vec![
             format!("{}", hex::encode(key)),
-            format!("{}", self.active_stake),
-            format!("{}", self.wait_stake),
+            format!("{}", self.registered_at.unwrap_or_default()),
+            format!("{}", self.deregistered_at.unwrap_or_default()),
+            format!("{}", self.total_stake.stable.unwrap_or_default()),
+            format!("{}", self.total_stake.previous.unwrap_or_default()),
+            format!("{}", self.total_stake.latest),
             format!("{}", self.rewards_sum),
             format!("{}", self.withdrawals_sum),
             format!(
+                "{},{},{}",
+                self.total_stake.epoch, self.pool.epoch, self.drep.epoch,
+            ),
+            format!(
                 "{}",
-                self.latest_pool
+                self.pool
+                    .latest
                     .as_ref()
                     .map(hex::encode)
                     .unwrap_or_default()
             ),
             format!(
                 "{}",
-                self.active_pool
-                    .as_ref()
-                    .map(hex::encode)
-                    .unwrap_or_default()
+                match self.pool.stable {
+                    Some(Some(pool)) => pool.to_string(),
+                    Some(None) => "unavailable".to_string(),
+                    _ => "empty".to_string(),
+                }
             ),
-            format!("{}", self.latest_drep.is_some()),
+            format!(
+                "{}",
+                match self.drep.stable.as_ref() {
+                    Some(Some(_)) => "delegated".to_string(),
+                    Some(None) => "unavailable".to_string(),
+                    _ => "empty".to_string(),
+                }
+            ),
         ]
     }
 }
@@ -152,8 +172,8 @@ impl TableRow for PoolState {
             format!("{}", hex::encode(key)),
             format!("{}", self.vrf_keyhash),
             format!("{}", hex::encode(&self.reward_account)),
-            format!("{}", self.active_stake),
-            format!("{}", self.wait_stake),
+            format!("{}", self.total_stake.stable.unwrap_or_default()),
+            format!("{}", self.total_stake.latest),
             format!("{}", self.blocks_minted_total),
         ]
     }

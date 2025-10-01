@@ -1,86 +1,14 @@
 use dolos_core::{BrokenInvariant, ChainError, Domain, Genesis, StateStore as _};
 use pallas::ledger::primitives::RationalNumber;
-use tracing::{debug, instrument, trace};
+use tracing::{debug, instrument, trace, warn};
 
 use crate::{
-    forks,
+    forks, pots,
     sweep::{BoundaryVisitor as _, BoundaryWork, EraTransition, PotDelta, Pots},
     utils::nonce_stability_window,
     AccountState, DRepState, EpochState, EraProtocol, FixedNamespace as _, Nonces, PParamsSet,
     PoolState, Proposal,
 };
-
-macro_rules! as_ratio {
-    ($x:expr) => {{
-        let numerator = $x.numerator as i64;
-        let denominator = $x.denominator as i64;
-        num_rational::Rational64::new(numerator, denominator).reduced()
-    }};
-}
-
-macro_rules! into_ratio {
-    ($x:expr) => {{
-        let numerator = $x as i64;
-        let denominator = 1i64;
-        num_rational::Rational64::new(numerator, denominator)
-    }};
-}
-
-macro_rules! into_int {
-    ($x:expr) => {
-        $x.floor().to_integer()
-    };
-}
-
-fn compute_pot_delta(
-    reserves: u64,
-    gathered_fees: u64,
-    decayed_deposits: u64,
-    rho: &RationalNumber,
-    tau: &RationalNumber,
-) -> PotDelta {
-    let rho = as_ratio!(rho);
-    let reserves = into_ratio!(reserves);
-
-    let incentives = rho * reserves;
-
-    let reward_pot = incentives + into_ratio!(gathered_fees) + into_ratio!(decayed_deposits);
-
-    let tau = as_ratio!(tau);
-    let treasury_tax = (tau * reward_pot).floor();
-    let available_rewards = reward_pot - treasury_tax;
-
-    let incentives = into_int!(incentives) as u64;
-    let treasury_tax = into_int!(treasury_tax) as u64;
-    let available_rewards = into_int!(available_rewards) as u64;
-
-    PotDelta {
-        incentives,
-        treasury_tax,
-        available_rewards,
-    }
-}
-
-pub fn compute_genesis_pots(
-    max_supply: u64,
-    utxos: u64,
-    pparams: &PParamsSet,
-) -> Result<Pots, ChainError> {
-    let reserves = max_supply.saturating_sub(utxos);
-
-    let rho = pparams.ensure_rho()?;
-    let tau = pparams.ensure_tau()?;
-
-    let pot_delta = compute_pot_delta(reserves, 0, 0, &rho, &tau);
-
-    let out = Pots {
-        reserves: reserves - pot_delta.incentives + pot_delta.available_rewards,
-        treasury: pot_delta.treasury_tax,
-        utxos,
-    };
-
-    Ok(out)
-}
 
 impl BoundaryWork {
     pub fn initial_pots(&self) -> Pots {
@@ -105,6 +33,14 @@ impl BoundaryWork {
             .pparams;
 
         Ok(p)
+    }
+
+    pub fn valid_d(&self) -> Result<RationalNumber, ChainError> {
+        self.valid_pparams()?.ensure_d()
+    }
+
+    pub fn valid_epoch_length(&self) -> Result<u64, ChainError> {
+        self.valid_pparams()?.ensure_epoch_length()
     }
 
     pub fn valid_rho(&self) -> Result<RationalNumber, ChainError> {
@@ -174,13 +110,26 @@ impl BoundaryWork {
             return Ok(());
         }
 
-        let delta = compute_pot_delta(
+        let eta = pots::calculate_eta(
+            self.ending_state.blocks_minted,
+            self.valid_d()?,
+            self.active_slot_coeff,
+            self.valid_epoch_length()?,
+        );
+
+        // TODO: should be debug
+        warn!(%eta, "defined eta");
+
+        let delta = pots::compute_pot_delta(
             self.initial_pots().reserves,
             self.gathered_fees(),
-            self.decayed_deposits(),
             &self.valid_rho()?,
             &self.valid_tau()?,
+            eta,
         );
+
+        // TODO: should be debug
+        warn!(%delta.incentives, %delta.treasury_tax, %delta.available_rewards, "defined pot delta");
 
         debug!(
             %delta.incentives,
@@ -248,7 +197,6 @@ impl BoundaryWork {
 
         let state = EpochState {
             number: self.ending_state.number + 1,
-            active_stake: self.active_snapshot.total_stake,
             deposits,
             utxos,
             reserves,
@@ -365,110 +313,5 @@ impl BoundaryWork {
         self.define_starting_state(genesis, visitor_rewards.effective_rewards)?;
 
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::{sweep::Snapshot, EraBoundary, EraSummary, PParamValue};
-
-    use super::*;
-
-    #[test]
-    fn test_genesis_pots() {
-        let pparams = PParamsSet::new(0)
-            .with(PParamValue::ExpansionRate(RationalNumber {
-                numerator: 3,
-                denominator: 1000,
-            }))
-            .with(PParamValue::TreasuryGrowthRate(RationalNumber {
-                numerator: 20,
-                denominator: 100,
-            }))
-            .with(PParamValue::DesiredNumberOfStakePools(150))
-            .with(PParamValue::PoolPledgeInfluence(RationalNumber {
-                numerator: 3,
-                denominator: 10,
-            }));
-
-        let pots =
-            compute_genesis_pots(45_000_000_000_000_000, 30_000_000_000_000_000, &pparams).unwrap();
-
-        assert_eq!(pots.reserves, 14_991_000_000_000_000);
-        assert_eq!(pots.treasury, 9_000_000_000_000);
-    }
-
-    #[test]
-    fn test_simple_boundary() {
-        // this is one of the initial boundaries when we still don't have any pools or
-        // active stake. We're using data from preview network for the boundary going
-        // from 0 to 1.
-
-        let pparams = PParamsSet::new(0)
-            .with(PParamValue::ExpansionRate(RationalNumber {
-                numerator: 3,
-                denominator: 1000,
-            }))
-            .with(PParamValue::TreasuryGrowthRate(RationalNumber {
-                numerator: 20,
-                denominator: 100,
-            }))
-            .with(PParamValue::DesiredNumberOfStakePools(150))
-            .with(PParamValue::PoolPledgeInfluence(RationalNumber {
-                numerator: 3,
-                denominator: 10,
-            }));
-
-        let mut boundary = BoundaryWork {
-            network_magic: None,
-            active_protocol: EraProtocol::from(6),
-            active_era: EraSummary {
-                start: EraBoundary {
-                    epoch: 0,
-                    slot: 0,
-                    timestamp: 0,
-                },
-                end: None,
-                epoch_length: 86400,
-                slot_length: 1,
-            },
-            active_state: None,
-            active_snapshot: Snapshot::empty(),
-            waiting_state: None,
-            ending_state: EpochState {
-                number: 0,
-                active_stake: 0,
-                deposits: 0,
-                reserves: 14_991_000_000_000_000,
-                treasury: 9_000_000_000_000,
-                pparams,
-                utxos: 29_999_998_493_562_207,
-                gathered_fees: 437_793,
-                gathered_deposits: 0,
-                decayed_deposits: 0,
-                blocks_minted: 0,
-                rewards_to_distribute: None,
-                rewards_to_treasury: None,
-                largest_stable_slot: 1,
-                nonces: None,
-            },
-            ending_snapshot: Snapshot::empty(),
-            shelley_hash: [0; 32].as_slice().into(),
-
-            // empty until computed
-            deltas: Default::default(),
-            logs: Default::default(),
-            starting_state: None,
-            pot_delta: None,
-            era_transition: None,
-        };
-
-        let domain = todo!();
-
-        boundary.compute(&domain).unwrap();
-
-        let starting_state = boundary.starting_state.unwrap();
-
-        assert_eq!(starting_state.reserves, 14982005400350235);
     }
 }

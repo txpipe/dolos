@@ -4,8 +4,9 @@ use axum::{
     Json,
 };
 use blockfrost_openapi::models::epoch_param_content::EpochParamContent;
+use pallas::ledger::{primitives::Epoch, traverse::MultiEraBlock};
+
 use dolos_core::{ArchiveStore, Domain};
-use pallas::ledger::traverse::MultiEraBlock;
 
 use crate::{
     error::Error,
@@ -41,7 +42,7 @@ pub async fn latest_parameters<D: Domain>(
 
 pub async fn by_number_parameters<D: Domain>(
     State(domain): State<Facade<D>>,
-    Path(epoch): Path<u32>,
+    Path(epoch): Path<Epoch>,
 ) -> Result<Json<EpochParamContent>, Error> {
     let tip = domain.get_tip_slot()?;
     let summary = domain.get_chain_summary()?;

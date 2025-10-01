@@ -19,11 +19,7 @@ fn get_utxo_amount(genesis: &Genesis) -> u64 {
 
 const SHELLEY_PROTOCOL: u16 = 2;
 
-fn bootstrap_pots(
-    protocol: u16,
-    genesis: &Genesis,
-    pparams: &PParamsSet,
-) -> Result<Pots, ChainError> {
+fn bootstrap_pots(protocol: u16, genesis: &Genesis) -> Result<Pots, ChainError> {
     let initial_utxos = get_utxo_amount(genesis);
 
     // for any era before shelley, we don't have the concept of reserves or
@@ -36,8 +32,22 @@ fn bootstrap_pots(
         });
     }
 
-    let max_supply = genesis.shelley.max_lovelace_supply.unwrap_or_default();
-    crate::sweep::compute_genesis_pots(max_supply, initial_utxos, pparams)
+    let max_supply = genesis
+        .shelley
+        .max_lovelace_supply
+        .ok_or(ChainError::GenesisFieldMissing(
+            "max_lovelace_supply".to_string(),
+        ))?;
+
+    let reserves = max_supply.saturating_sub(initial_utxos);
+
+    let out = Pots {
+        reserves: reserves,
+        treasury: 0,
+        utxos: initial_utxos,
+    };
+
+    Ok(out)
 }
 
 fn bootrap_epoch<D: Domain>(state: &D::State, genesis: &Genesis) -> Result<EpochState, ChainError> {
@@ -53,7 +63,7 @@ fn bootrap_epoch<D: Domain>(state: &D::State, genesis: &Genesis) -> Result<Epoch
 
     let protocol = pparams.protocol_major().unwrap_or_default();
 
-    let pots = bootstrap_pots(protocol, genesis, &pparams)?;
+    let pots = bootstrap_pots(protocol, genesis)?;
 
     let epoch = EpochState {
         pparams,
@@ -61,7 +71,6 @@ fn bootrap_epoch<D: Domain>(state: &D::State, genesis: &Genesis) -> Result<Epoch
         reserves: pots.reserves,
         treasury: pots.treasury,
         utxos: pots.utxos,
-        active_stake: 0,
         deposits: 0,
         gathered_fees: 0,
         gathered_deposits: 0,

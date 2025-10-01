@@ -1,4 +1,5 @@
 use dolos_core::{batch::WorkDeltas, ChainError, Domain, EntityKey, Genesis, StateStore};
+use tracing::{debug, trace};
 
 use crate::{
     drep_to_entity_key, load_active_era,
@@ -22,6 +23,8 @@ impl Snapshot {
                 .entry(pool_id.clone())
                 .and_modify(|x| *x += stake)
                 .or_insert(stake);
+
+            self.total_stake += stake;
         }
 
         if let Some(drep_id) = drep_id {
@@ -33,8 +36,6 @@ impl Snapshot {
                 .and_modify(|x| *x += stake)
                 .or_insert(stake);
         }
-
-        self.total_stake += stake;
 
         Ok(())
     }
@@ -54,23 +55,59 @@ pub fn load_account_data<D: Domain>(
         let (account_id, account) = record?;
 
         // ending snapshot
-        let pool_id = account.latest_pool.clone().map(EntityKey::from);
-        let drep_id = account.latest_drep.clone().map(drep_to_entity_key);
+        let epoch = boundary.ending_state.number;
+
+        let pool_id = account
+            .pool
+            .version_for(epoch)
+            .and_then(|x| x.clone())
+            .map(EntityKey::from);
+
+        let drep_id = account
+            .drep
+            .version_for(epoch)
+            .and_then(|x| x.as_ref())
+            .map(drep_to_entity_key);
+
         let stake = account.live_stake();
 
         boundary
             .ending_snapshot
             .track_account(&account_id, pool_id, drep_id, stake)?;
 
-        // active snapshot
-        let pool_id = account.active_pool.clone().map(EntityKey::from);
-        let drep_id = account.active_drep.clone().map(drep_to_entity_key);
-        let stake = account.active_stake;
+        // active snapshot (only available from epoch 2 onwards)
+        if let Some(active_state) = boundary.active_state.as_ref() {
+            let epoch = active_state.number;
 
-        boundary
-            .active_snapshot
-            .track_account(&account_id, pool_id, drep_id, stake)?;
+            let pool_id = account
+                .pool
+                .version_for(epoch)
+                .and_then(|x| x.clone())
+                .map(EntityKey::from);
+
+            let drep_id = account
+                .drep
+                .version_for(epoch)
+                .and_then(|x| x.as_ref())
+                .map(drep_to_entity_key);
+
+            let stake = account
+                .total_stake
+                .version_for(epoch)
+                .cloned()
+                .unwrap_or_default();
+
+            boundary
+                .active_snapshot
+                .track_account(&account_id, pool_id, drep_id, stake)?;
+        }
     }
+
+    for (pool_id, stake) in boundary.active_snapshot.pool_stake.iter() {
+        trace!(%pool_id, %stake, "pool stake");
+    }
+
+    debug!(total_stake = %boundary.active_snapshot.total_stake, "total stake");
 
     Ok(())
 }
@@ -85,6 +122,14 @@ impl BoundaryWork {
         let ending_state = crate::load_mark_epoch::<D>(state)?;
         let (active_protocol, active_era) = load_active_era::<D>(state)?;
 
+        let active_slot_coeff =
+            genesis
+                .shelley
+                .active_slots_coeff
+                .ok_or(ChainError::GenesisFieldMissing(
+                    "active_slots_coeff".to_string(),
+                ))?;
+
         let mut boundary = BoundaryWork {
             active_protocol,
             active_era,
@@ -93,6 +138,7 @@ impl BoundaryWork {
             ending_state,
             network_magic: genesis.shelley.network_magic,
             shelley_hash: genesis.shelley_hash,
+            active_slot_coeff,
 
             // to be loaded right after
             active_snapshot: Snapshot::default(),
