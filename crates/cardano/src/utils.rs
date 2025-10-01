@@ -103,7 +103,7 @@ pub fn pparams_to_pallas(pparams: &PParamsSet) -> MultiEraProtocolParameters {
         protocol_version: pparams.protocol_version_or_default(),
         min_pool_cost: pparams.min_pool_cost_or_default(),
         ada_per_utxo_byte: pparams.ada_per_utxo_byte_or_default(),
-        cost_models_for_script_languages: pparams.cost_models_for_script_languages_or_default(),
+        cost_models_for_script_languages: pparams.cost_models_for_script_languages(),
         execution_costs: pparams.execution_costs_or_default(),
         max_tx_ex_units: pparams.max_tx_ex_units_or_default(),
         max_block_ex_units: pparams.max_block_ex_units_or_default(),
