@@ -291,8 +291,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
                     governance_action_validity_period => GovernanceActionValidityPeriod,
                     governance_action_deposit => GovernanceActionDeposit,
                     drep_deposit => DrepDeposit,
-                    drep_inactivity_period => DrepInactivityPeriod,
-                    cost_models_for_script_languages => CostModelsForScriptLanguages
+                    drep_inactivity_period => DrepInactivityPeriod
                 };
 
                 // Special cases that must be converted by hand:
@@ -347,6 +346,35 @@ impl super::BoundaryVisitor for BoundaryVisitor {
                             mem_price: updated.mem_price.clone(),
                             step_price: updated.step_price.clone(),
                         }));
+                }
+
+                if let Some(updated) = update.cost_models_for_script_languages.as_ref() {
+                    debug!(
+                        variant = "cost_models",
+                        value =? updated,
+                        "applying new pparam value on ending state"
+                    );
+
+                    if let Some(v1) = updated.plutus_v1.as_ref() {
+                        ctx.ending_state
+                            .pparams
+                            .set(PParamValue::CostModelsPlutusV1(v1.clone()));
+                    }
+                    if let Some(v2) = updated.plutus_v2.as_ref() {
+                        ctx.ending_state
+                            .pparams
+                            .set(PParamValue::CostModelsPlutusV2(v2.clone()));
+                    }
+                    if let Some(v3) = updated.plutus_v3.as_ref() {
+                        ctx.ending_state
+                            .pparams
+                            .set(PParamValue::CostModelsPlutusV3(v3.clone()));
+                    }
+                    if !updated.unknown.is_empty() {
+                        ctx.ending_state
+                            .pparams
+                            .set(PParamValue::CostModelsUnknown(updated.unknown.clone()));
+                    }
                 }
             }
             GovAction::TreasuryWithdrawals(_, _) => {

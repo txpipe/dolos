@@ -515,6 +515,15 @@ impl ArchiveStore {
         Ok(ArchiveSparseIter(rx, range))
     }
 
+    pub fn iter_possible_blocks_with_metadata(
+        &self,
+        metadata: &u64,
+    ) -> Result<ArchiveSparseIter, RedbArchiveError> {
+        let rx = self.db().begin_read()?;
+        let range = indexes::Indexes::iter_by_metadata(&rx, metadata)?;
+        Ok(ArchiveSparseIter(rx, range))
+    }
+
     pub fn get_block_by_slot(
         &self,
         slot: &BlockSlot,
@@ -907,6 +916,16 @@ impl dolos_core::ArchiveStore for ArchiveStore {
     ) -> Result<Self::SparseBlockIter, ArchiveError> {
         // TODO: we need to filter the false positives
         let out = self.iter_possible_blocks_with_account_certs(account)?;
+
+        Ok(out)
+    }
+
+    fn iter_blocks_with_metadata(
+        &self,
+        metadata: &u64,
+    ) -> Result<Self::SparseBlockIter, ArchiveError> {
+        // TODO: we need to filter the false positives
+        let out = self.iter_possible_blocks_with_metadata(metadata)?;
 
         Ok(out)
     }

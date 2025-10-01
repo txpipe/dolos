@@ -45,9 +45,7 @@ fn build_pparams<D: Domain>(domain: &D) -> Result<tx3_cardano::PParams, Error> {
     let pparams = dolos_cardano::load_effective_pparams::<D>(domain.state(), epoch)
         .map_err(|_| Error::PParamsNotAvailable)?;
 
-    let costs = pparams
-        .cost_models_for_script_languages()
-        .ok_or(Error::PParamsNotAvailable)?;
+    let costs = pparams.cost_models_for_script_languages();
 
     let out = tx3_cardano::PParams {
         network,

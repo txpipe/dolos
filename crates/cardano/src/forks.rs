@@ -5,7 +5,7 @@ use pallas::{
     ledger::{
         configs::{alonzo, byron, conway, shelley},
         primitives::{
-            conway::{CostModels, DRepVotingThresholds, PoolVotingThresholds},
+            conway::{DRepVotingThresholds, PoolVotingThresholds},
             CostModel, ExUnits, Nonce, NonceVariant,
         },
     },
@@ -129,17 +129,9 @@ pub fn from_shelley_genesis(shelley: &shelley::GenesisFile) -> PParamsSet {
 }
 
 pub fn into_alonzo(previous: &PParamsSet, genesis: &alonzo::GenesisFile) -> PParamsSet {
-    let cost_models = CostModels {
-        plutus_v1: from_alonzo_cost_models_map(&genesis.cost_models, &alonzo::Language::PlutusV1),
-        plutus_v2: None,
-        plutus_v3: None,
-        unknown: Default::default(),
-    };
-
-    previous
+    let set = previous
         .bump_clone()
         .with(Val::AdaPerUtxoByte(genesis.lovelace_per_utxo_word))
-        .with(Val::CostModelsForScriptLanguages(cost_models))
         .with(Val::ExecutionCosts(genesis.execution_prices.clone().into()))
         .with(Val::MaxTxExUnits(from_config_exunits(
             &genesis.max_tx_ex_units,
@@ -149,44 +141,27 @@ pub fn into_alonzo(previous: &PParamsSet, genesis: &alonzo::GenesisFile) -> PPar
         )))
         .with(Val::MaxValueSize(genesis.max_value_size))
         .with(Val::CollateralPercentage(genesis.collateral_percentage))
-        .with(Val::MaxCollateralInputs(genesis.max_collateral_inputs))
+        .with(Val::MaxCollateralInputs(genesis.max_collateral_inputs));
+
+    if let Some(v1) = from_alonzo_cost_models_map(&genesis.cost_models, &alonzo::Language::PlutusV1)
+    {
+        set.with(Val::CostModelsPlutusV1(v1))
+    } else {
+        set
+    }
 }
 
 pub fn into_babbage(previous: &PParamsSet, genesis: &alonzo::GenesisFile) -> PParamsSet {
-    let cost_models = previous
-        .cost_models_for_script_languages()
-        .unwrap_or_else(|| CostModels {
-            plutus_v1: None,
-            plutus_v2: None,
-            plutus_v3: None,
-            unknown: Default::default(),
-        });
-
-    let cost_models = CostModels {
-        plutus_v2: from_alonzo_cost_models_map(&genesis.cost_models, &alonzo::Language::PlutusV2),
-        ..cost_models
-    };
-
-    previous
-        .bump_clone()
-        .with(Val::CostModelsForScriptLanguages(cost_models))
+    let set = previous.bump_clone();
+    if let Some(v2) = from_alonzo_cost_models_map(&genesis.cost_models, &alonzo::Language::PlutusV2)
+    {
+        set.with(Val::CostModelsPlutusV2(v2))
+    } else {
+        set
+    }
 }
 
 pub fn into_conway(previous: &PParamsSet, genesis: &conway::GenesisFile) -> PParamsSet {
-    let cost_models = previous
-        .cost_models_for_script_languages()
-        .unwrap_or_else(|| CostModels {
-            plutus_v1: None,
-            plutus_v2: None,
-            plutus_v3: None,
-            unknown: Default::default(),
-        });
-
-    let cost_models = CostModels {
-        plutus_v3: Some(genesis.plutus_v3_cost_model.clone()),
-        ..cost_models
-    };
-
     // In the hardfork, the value got translated from words to bytes
     // Since the transformation from words to bytes is hardcoded, the transformation
     // here is also hardcoded
@@ -195,7 +170,9 @@ pub fn into_conway(previous: &PParamsSet, genesis: &conway::GenesisFile) -> PPar
     previous
         .bump_clone()
         .with(Val::AdaPerUtxoByte(ada_per_utxo_byte))
-        .with(Val::CostModelsForScriptLanguages(cost_models))
+        .with(Val::CostModelsPlutusV3(
+            genesis.plutus_v3_cost_model.clone(),
+        ))
         .with(Val::PoolVotingThresholds(
             from_conway_pool_voting_thresholds(&genesis.pool_voting_thresholds),
         ))

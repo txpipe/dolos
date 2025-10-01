@@ -102,6 +102,9 @@ impl BlockVisitor for TxLogVisitor {
         tx: &MultiEraTx,
     ) -> Result<(), ChainError> {
         deltas.slot.tx_hashes.push(tx.hash().to_vec());
+        for (k, _) in tx.metadata().collect::<Vec<_>>() {
+            deltas.slot.metadata.push(k);
+        }
 
         Ok(())
     }

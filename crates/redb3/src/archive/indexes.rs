@@ -215,6 +215,28 @@ impl DatumHashApproxIndexTable {
     }
 }
 
+pub struct MetadataApproxIndexTable;
+
+impl MetadataApproxIndexTable {
+    pub const DEF: MultimapTableDefinition<'static, u64, u64> =
+        MultimapTableDefinition::new("bymetadata");
+
+    pub fn compute_key(metadata: &u64) -> u64 {
+        // Left for readability
+        *metadata
+    }
+
+    pub fn iter_by_metadata(
+        rx: &ReadTransaction,
+        metadata: &u64,
+    ) -> Result<SlotKeyIterator, Error> {
+        let table = rx.open_multimap_table(Self::DEF)?;
+        let key = Self::compute_key(metadata);
+        let range = table.get(key)?;
+        Ok(SlotKeyIterator::new(range))
+    }
+}
+
 pub struct PolicyApproxIndexTable;
 
 impl PolicyApproxIndexTable {
@@ -352,6 +374,7 @@ impl Indexes {
         wx.open_multimap_table(SpentTxoApproxIndexTable::DEF)?;
         wx.open_multimap_table(AccountCertsApproxIndexTable::DEF)?;
         wx.open_multimap_table(TxHashApproxIndexTable::DEF)?;
+        wx.open_multimap_table(MetadataApproxIndexTable::DEF)?;
 
         Ok(())
     }
@@ -370,6 +393,13 @@ impl Indexes {
 
     pub fn iter_by_stake(rx: &ReadTransaction, stake: &[u8]) -> Result<SlotKeyIterator, Error> {
         AddressStakePartApproxIndexTable::iter_by_stake(rx, stake)
+    }
+
+    pub fn iter_by_metadata(
+        rx: &ReadTransaction,
+        metadata: &u64,
+    ) -> Result<SlotKeyIterator, Error> {
+        MetadataApproxIndexTable::iter_by_metadata(rx, metadata)
     }
 
     pub fn iter_by_account_certs(
@@ -564,6 +594,14 @@ impl Indexes {
             slot,
         )?;
 
+        Self::insert(
+            wx,
+            MetadataApproxIndexTable::DEF,
+            MetadataApproxIndexTable::compute_key,
+            tags.metadata.clone(),
+            slot,
+        )?;
+
         Ok(())
     }
 
@@ -667,6 +705,14 @@ impl Indexes {
             AccountCertsApproxIndexTable::DEF,
             AccountCertsApproxIndexTable::compute_key,
             tags.account_certs.clone(),
+            slot,
+        )?;
+
+        Self::remove(
+            wx,
+            MetadataApproxIndexTable::DEF,
+            MetadataApproxIndexTable::compute_key,
+            tags.metadata.clone(),
             slot,
         )?;
 
