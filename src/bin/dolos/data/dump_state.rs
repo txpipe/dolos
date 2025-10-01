@@ -155,12 +155,13 @@ impl TableRow for EraSummary {
     }
 }
 
+const POOL_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("pool");
+
 impl TableRow for PoolState {
     fn header() -> Vec<&'static str> {
         vec![
-            "key",
-            "vrf keyhash",
-            "reward account",
+            "pool hex",
+            "pool bech32",
             "active stake",
             "wait stake",
             "blocks minted",
@@ -168,10 +169,14 @@ impl TableRow for PoolState {
     }
 
     fn row(&self, key: &EntityKey) -> Vec<String> {
+        let entity_key = EntityKey::from(key.clone());
+        let pool_hash = entity_key.as_ref()[..28].try_into().unwrap();
+        let pool_hex = hex::encode(pool_hash);
+        let pool_bech32 = bech32::encode::<bech32::Bech32>(POOL_HRP, pool_hash).unwrap();
+
         vec![
-            format!("{}", hex::encode(key)),
-            format!("{}", self.vrf_keyhash),
-            format!("{}", hex::encode(&self.reward_account)),
+            format!("{}", pool_hex),
+            format!("{}", pool_bech32),
             format!("{}", self.total_stake.stable.unwrap_or_default()),
             format!("{}", self.total_stake.latest),
             format!("{}", self.blocks_minted_total),

@@ -103,19 +103,6 @@ where
         // latest remains the same
     }
 
-    /// Transitions into the next epoch by rotation the previous values but
-    /// using a new version for the latest one.
-    pub fn push(&mut self, next_epoch: Epoch, latest: T) {
-        assert_eq!(next_epoch, self.epoch + 1);
-        self.push_unchecked(latest);
-    }
-
-    /// Same as push, but without checking that that the epoch matches.
-    pub fn push_unchecked(&mut self, latest: T) {
-        self.transition_unchecked();
-        self.update_unchecked(latest);
-    }
-
     pub fn version_for(&self, epoch: Epoch) -> Option<&T> {
         if epoch == self.epoch {
             Some(&self.latest)

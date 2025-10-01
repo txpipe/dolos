@@ -68,7 +68,9 @@ impl dolos_core::EntityDelta for AccountTransition {
         self.prev_stake = Some(entity.total_stake.clone());
 
         // apply changes
-        entity.total_stake.push_unchecked(entity.live_stake());
+        entity.total_stake.update_unchecked(entity.live_stake());
+
+        entity.total_stake.transition_unchecked();
         entity.pool.transition_unchecked();
         entity.drep.transition_unchecked();
     }
@@ -120,7 +122,9 @@ impl dolos_core::EntityDelta for PoolTransition {
         self.prev_blocks_minted = Some(entity.blocks_minted_epoch);
 
         // apply changes
-        entity.total_stake.push_unchecked(self.ending_stake);
+        entity.total_stake.update_unchecked(self.ending_stake);
+
+        entity.total_stake.transition_unchecked();
         entity.blocks_minted_epoch = 0;
     }
 
