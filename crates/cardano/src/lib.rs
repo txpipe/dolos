@@ -55,7 +55,6 @@ pub struct TrackConfig {
     pub account_logs: bool,
     pub pool_logs: bool,
     pub epoch_logs: bool,
-    pub debugger: bool,
 }
 
 impl Default for TrackConfig {
@@ -71,7 +70,6 @@ impl Default for TrackConfig {
             pool_logs: true,
             epoch_logs: true,
             proposal_logs: true,
-            debugger: true,
         }
     }
 }

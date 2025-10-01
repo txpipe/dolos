@@ -32,7 +32,12 @@ fn bootstrap_pots(protocol: u16, genesis: &Genesis) -> Result<Pots, ChainError> 
         });
     }
 
-    let max_supply = genesis.shelley.max_lovelace_supply.unwrap_or_default();
+    let max_supply = genesis
+        .shelley
+        .max_lovelace_supply
+        .ok_or(ChainError::GenesisFieldMissing(
+            "max_lovelace_supply".to_string(),
+        ))?;
 
     let reserves = max_supply.saturating_sub(initial_utxos);
 

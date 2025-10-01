@@ -238,8 +238,8 @@ pub struct StakeDeregistration {
     // undo
     prev_registered_at: Option<u64>,
     prev_deregistered_at: Option<u64>,
-    prev_pool: Option<Option<PoolHash>>,
-    prev_drep: Option<Option<DRep>>,
+    prev_pool: Option<EpochValue<Option<PoolHash>>>,
+    prev_drep: Option<EpochValue<Option<DRep>>>,
     prev_deposit: Option<u64>,
 }
 
@@ -271,8 +271,8 @@ impl dolos_core::EntityDelta for StakeDeregistration {
         // save undo info
         self.prev_registered_at = entity.registered_at;
         self.prev_deregistered_at = entity.deregistered_at;
-        self.prev_pool = Some(entity.pool.latest);
-        self.prev_drep = Some(entity.drep.latest.clone());
+        self.prev_pool = Some(entity.pool.clone());
+        self.prev_drep = Some(entity.drep.clone());
         self.prev_deposit = Some(entity.deposit);
 
         // TODO: understand if we should keep the registered_at value even if the
@@ -296,11 +296,8 @@ impl dolos_core::EntityDelta for StakeDeregistration {
         entity.registered_at = self.prev_registered_at;
         entity.deregistered_at = self.prev_deregistered_at;
 
-        let prev_pool = self.prev_pool.expect("called with undo data");
-        entity.pool.update_unchecked(prev_pool);
-
-        let prev_drep = self.prev_drep.clone().expect("called with undo data");
-        entity.drep.update_unchecked(prev_drep);
+        entity.pool = self.prev_pool.clone().expect("called with undo data");
+        entity.drep = self.prev_drep.clone().expect("called with undo data");
 
         entity.deposit = self.prev_deposit.unwrap_or(0);
         entity.rewards_sum = entity

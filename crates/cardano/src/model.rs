@@ -112,8 +112,8 @@ where
 
     /// Same as push, but without checking that that the epoch matches.
     pub fn push_unchecked(&mut self, latest: T) {
-        self.update_unchecked(latest);
         self.transition_unchecked();
+        self.update_unchecked(latest);
     }
 
     pub fn version_for(&self, epoch: Epoch) -> Option<&T> {

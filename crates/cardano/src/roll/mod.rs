@@ -228,7 +228,6 @@ impl<'a> DeltaBuilder<'a> {
             pool_state: Default::default(),
             tx_logs: Default::default(),
             proposal_logs: Default::default(),
-            debugger: Default::default(),
         }
     }
 
