@@ -21,6 +21,7 @@ use pallas::{
     crypto::hash::Hash,
     ledger::{
         addresses::{Address, Network, StakeAddress, StakePayload},
+        primitives::Epoch,
         traverse::{MultiEraBlock, MultiEraCert, MultiEraTx},
     },
 };
@@ -93,14 +94,16 @@ impl<'a> IntoModel<AccountContent> for AccountModelBuilder<'a> {
 
         let pool_id = self
             .account_state
-            .active_pool
+            .pool
+            .latest
             .as_ref()
             .map(bech32_pool)
             .transpose()?;
 
         let drep_id = self
             .account_state
-            .latest_drep
+            .drep
+            .latest
             .as_ref()
             .map(bech32_drep)
             .transpose()?;
@@ -259,7 +262,7 @@ fn build_delegation(
     stake_address: &StakeAddress,
     tx: &MultiEraTx,
     cert: &MultiEraCert,
-    epoch: u32,
+    epoch: Epoch,
     network: Network,
 ) -> Result<Option<AccountDelegationContentInner>, StatusCode> {
     let (cred, pool) = match cert {
@@ -299,7 +302,7 @@ fn build_registration(
     stake_address: &StakeAddress,
     tx: &MultiEraTx,
     cert: &MultiEraCert,
-    _epoch: u32,
+    _epoch: Epoch,
     network: Network,
 ) -> Result<Option<AccountRegistrationContentInner>, StatusCode> {
     let (cred, is_registration) = match cert {
@@ -376,7 +379,7 @@ impl<T> AccountActivityModelBuilder<T> {
 
     fn scan_block_certs<F>(
         &mut self,
-        epoch: u32,
+        epoch: Epoch,
         block: &MultiEraBlock,
         mapper: F,
     ) -> Result<(), StatusCode>
@@ -385,7 +388,7 @@ impl<T> AccountActivityModelBuilder<T> {
             &StakeAddress,
             &MultiEraTx,
             &MultiEraCert,
-            u32,
+            Epoch,
             Network,
         ) -> Result<Option<T>, StatusCode>,
     {
@@ -435,7 +438,13 @@ pub async fn by_stake_actions<D: Domain, F, T>(
 ) -> Result<Vec<T>, Error>
 where
     Option<AccountState>: From<D::Entity>,
-    F: Fn(&StakeAddress, &MultiEraTx, &MultiEraCert, u32, Network) -> Result<Option<T>, StatusCode>,
+    F: Fn(
+        &StakeAddress,
+        &MultiEraTx,
+        &MultiEraCert,
+        Epoch,
+        Network,
+    ) -> Result<Option<T>, StatusCode>,
 {
     let account_key = parse_account_key_param(stake_address)?;
 

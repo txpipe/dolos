@@ -227,9 +227,10 @@ impl<'a> IntoModel<Network> for NetworkModelBuilder<'a> {
                 treasury: self.active.treasury.to_string(),
                 reserves: self.active.reserves.to_string(),
             }),
+            // TODO: should compute snapshots as we do during sweep
             stake: Box::new(NetworkStake {
-                live: self.live.active_stake.to_string(),
-                active: self.active.active_stake.to_string(),
+                live: Default::default(),
+                active: Default::default(),
             }),
         })
     }

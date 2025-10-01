@@ -1,11 +1,12 @@
 use dolos_core::{ChainError, NsKey};
-use pallas::ledger::primitives::conway::DRep;
+use pallas::{codec::minicbor::Encode, ledger::primitives::conway::DRep};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 use crate::{
     sweep::{AccountId, BoundaryWork, DRepId, PoolId, ProposalId},
-    AccountState, CardanoDelta, DRepState, FixedNamespace as _, PoolState, Proposal,
+    AccountState, CardanoDelta, DRepState, EpochValue, FixedNamespace as _, PoolHash, PoolState,
+    Proposal,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,7 +87,16 @@ pub struct PoolDelegatorDrop {
     delegator: AccountId,
 
     // undo
-    prev_pool_id: Option<Vec<u8>>,
+    prev_pool: Option<EpochValue<Option<PoolHash>>>,
+}
+
+impl PoolDelegatorDrop {
+    pub fn new(delegator: AccountId) -> Self {
+        Self {
+            delegator,
+            prev_pool: None,
+        }
+    }
 }
 
 impl dolos_core::EntityDelta for PoolDelegatorDrop {
@@ -105,10 +115,10 @@ impl dolos_core::EntityDelta for PoolDelegatorDrop {
         debug!(delegator=%self.delegator, "dropping pool delegator");
 
         // save undo info
-        self.prev_pool_id = entity.latest_pool.clone();
+        self.prev_pool = Some(entity.pool.clone());
 
         // apply changes
-        entity.latest_pool = None;
+        entity.pool.update_unchecked(None);
     }
 
     fn undo(&self, entity: &mut Option<AccountState>) {
@@ -119,7 +129,7 @@ impl dolos_core::EntityDelta for PoolDelegatorDrop {
 
         debug!(delegator=%self.delegator, "restoring pool delegator");
 
-        entity.latest_pool = self.prev_pool_id.clone();
+        entity.pool = self.prev_pool.clone().expect("called with undo data");
     }
 }
 
@@ -163,7 +173,16 @@ pub struct DRepDelegatorDrop {
     delegator: AccountId,
 
     // undo
-    prev_drep_id: Option<DRep>,
+    prev_drep: Option<EpochValue<Option<DRep>>>,
+}
+
+impl DRepDelegatorDrop {
+    pub fn new(delegator: AccountId) -> Self {
+        Self {
+            delegator,
+            prev_drep: None,
+        }
+    }
 }
 
 impl dolos_core::EntityDelta for DRepDelegatorDrop {
@@ -182,10 +201,10 @@ impl dolos_core::EntityDelta for DRepDelegatorDrop {
         debug!(delegator=%self.delegator, "dropping drep delegator");
 
         // save undo info
-        self.prev_drep_id = entity.latest_drep.clone();
+        self.prev_drep = Some(entity.drep.clone());
 
         // apply changes
-        entity.latest_drep = None;
+        entity.drep.update_unchecked(None);
     }
 
     fn undo(&self, entity: &mut Option<AccountState>) {
@@ -196,7 +215,7 @@ impl dolos_core::EntityDelta for DRepDelegatorDrop {
 
         debug!(delegator=%self.delegator, "restoring drep delegator");
 
-        entity.latest_drep = self.prev_drep_id.clone();
+        entity.drep = self.prev_drep.clone().expect("called with undo data");
     }
 }
 
@@ -261,13 +280,8 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         let delegators = ctx.ending_snapshot.accounts_by_pool.iter_delegators(id);
 
         for (delegator, _) in delegators {
-            self.deltas.push(
-                PoolDelegatorDrop {
-                    delegator: delegator.clone(),
-                    prev_pool_id: None,
-                }
-                .into(),
-            );
+            self.deltas
+                .push(PoolDelegatorDrop::new(delegator.clone()).into());
         }
 
         Ok(())
@@ -293,13 +307,8 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         let delegators = ctx.ending_snapshot.accounts_by_drep.iter_delegators(id);
 
         for (delegator, _) in delegators {
-            self.deltas.push(
-                DRepDelegatorDrop {
-                    delegator: delegator.clone(),
-                    prev_drep_id: None,
-                }
-                .into(),
-            );
+            self.deltas
+                .push(DRepDelegatorDrop::new(delegator.clone()).into());
         }
 
         Ok(())

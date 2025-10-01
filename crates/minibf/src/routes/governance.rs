@@ -5,6 +5,7 @@ use axum::{
 };
 use dolos_cardano::{model::DRepState, pallas_extras, ChainSummary, PParamsSet};
 use dolos_core::{ArchiveStore as _, BlockSlot, Domain};
+use pallas::ledger::primitives::Epoch;
 
 use crate::{mapping::IntoModel, Facade};
 
@@ -45,7 +46,7 @@ impl<'a> DrepModelBuilder<'a> {
         ["drep_always_abstain", "drep_always_no_confidence"].contains(&self.drep_id.as_str())
     }
 
-    fn first_active_epoch(&self) -> Option<u32> {
+    fn first_active_epoch(&self) -> Option<Epoch> {
         if self.is_special_case() {
             return None;
         }
@@ -53,7 +54,7 @@ impl<'a> DrepModelBuilder<'a> {
         self.state.initial_slot.map(|x| self.chain.slot_epoch(x).0)
     }
 
-    fn last_active_epoch(&self) -> Option<u32> {
+    fn last_active_epoch(&self) -> Option<Epoch> {
         if self.is_special_case() {
             return None;
         }
@@ -72,7 +73,7 @@ impl<'a> DrepModelBuilder<'a> {
 
         let inactivity_period = self.pparams.drep_inactivity_period().unwrap_or_default();
 
-        let expiring_epoch = last_active_epoch.map(|x| x + inactivity_period as u32);
+        let expiring_epoch = last_active_epoch.map(|x| x + inactivity_period);
 
         let (current_epoch, _) = self.chain.slot_epoch(self.tip);
 

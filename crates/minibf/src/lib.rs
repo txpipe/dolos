@@ -6,10 +6,13 @@ use axum::{
 };
 use dolos_cardano::{
     model::{AccountState, AssetState, DRepState, EpochState, FixedNamespace, PoolState},
-    ChainSummary, Epoch, PParamsSet,
+    ChainSummary, PParamsSet,
 };
 use itertools::Itertools;
-use pallas::{crypto::hash::Hash, ledger::addresses::Network};
+use pallas::{
+    crypto::hash::Hash,
+    ledger::{addresses::Network, primitives::Epoch},
+};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,

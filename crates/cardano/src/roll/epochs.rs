@@ -3,7 +3,10 @@ use std::collections::BTreeMap;
 use dolos_core::{batch::WorkDeltas, ChainError, NsKey};
 use pallas::{
     crypto::hash::Hash,
-    ledger::traverse::{MultiEraBlock, MultiEraCert, MultiEraTx, MultiEraUpdate},
+    ledger::{
+        primitives::Epoch,
+        traverse::{MultiEraBlock, MultiEraCert, MultiEraTx, MultiEraUpdate},
+    },
 };
 use serde::{Deserialize, Serialize};
 use tracing::debug;
@@ -189,6 +192,7 @@ impl BlockVisitor for EpochStateVisitor {
         _: &mut WorkDeltas<CardanoLogic>,
         block: &MultiEraBlock,
         pparams: &PParamsSet,
+        _: Epoch,
     ) -> Result<(), ChainError> {
         self.stats_delta = Some(EpochStatsUpdate::new(pparams)?);
 
@@ -335,7 +339,6 @@ impl BlockVisitor for EpochStateVisitor {
         }
 
         if let Some(cm) = update.babbage_first_proposed_cost_models_for_script_languages() {
-            dbg!(&cm);
             deltas.add_for_entity(PParamsUpdate {
                 to_update: PParamValue::CostModelsForScriptLanguages(
                     pallas::ledger::primitives::conway::CostModels {

@@ -56,7 +56,7 @@ impl dolos_core::EntityDelta for DRepRegistration {
     type Entity = DRepState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((DRepState::NS, drep_to_entity_key(self.drep.clone())))
+        NsKey::from((DRepState::NS, drep_to_entity_key(&self.drep)))
     }
 
     fn apply(&mut self, entity: &mut Option<DRepState>) {
@@ -104,7 +104,7 @@ impl dolos_core::EntityDelta for DRepUnRegistration {
     type Entity = DRepState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((DRepState::NS, drep_to_entity_key(self.drep.clone())))
+        NsKey::from((DRepState::NS, drep_to_entity_key(&self.drep)))
     }
 
     fn apply(&mut self, entity: &mut Option<DRepState>) {
@@ -149,7 +149,7 @@ impl dolos_core::EntityDelta for DRepActivity {
     type Entity = DRepState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((DRepState::NS, drep_to_entity_key(self.drep.clone())))
+        NsKey::from((DRepState::NS, drep_to_entity_key(&self.drep)))
     }
 
     fn apply(&mut self, entity: &mut Option<DRepState>) {

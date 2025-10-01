@@ -5,8 +5,8 @@ use pallas::crypto::hash::Hash;
 use tracing::{info, instrument};
 
 use crate::{
-    AccountState, CardanoDelta, CardanoEntity, CardanoLogic, Config, DRepState, EpochState,
-    EraProtocol, EraSummary, PParamsSet, PoolState, Proposal,
+    pots::PotDelta, AccountState, CardanoDelta, CardanoEntity, CardanoLogic, Config, DRepState,
+    EpochState, EraProtocol, EraSummary, PParamsSet, PoolState, Proposal,
 };
 
 pub mod commit;
@@ -18,8 +18,6 @@ pub mod rewards;
 pub mod transition;
 
 mod hacks;
-
-pub use compute::compute_genesis_pots;
 
 // Epoch nomenclature
 // - ending: the epoch that is currently ending in this boundary.
@@ -109,14 +107,11 @@ impl DelegatorMap {
         for_pool.get(account_id).cloned().unwrap_or(0)
     }
 
-    pub fn iter_delegators(
-        &self,
-        entity_id: &EntityKey,
-    ) -> impl Iterator<Item = (&AccountId, &u64)> {
-        self.0.get(entity_id).into_iter().flatten()
+    pub fn iter_delegators(&self, pool_id: &PoolId) -> impl Iterator<Item = (&AccountId, &u64)> {
+        self.0.get(pool_id).into_iter().flatten()
     }
 
-    pub fn amount(&self, pool_id: &PoolId) -> u64 {
+    pub fn count_delegators(&self, pool_id: &PoolId) -> u64 {
         self.0.get(pool_id).map(|x| x.len() as u64).unwrap_or(0)
     }
 }
@@ -138,13 +133,6 @@ impl Snapshot {
 }
 
 #[derive(Debug)]
-pub struct PotDelta {
-    pub incentives: u64,
-    pub treasury_tax: u64,
-    pub available_rewards: u64,
-}
-
-#[derive(Debug)]
 pub struct EraTransition {
     pub prev_version: EraProtocol,
     pub new_version: EraProtocol,
@@ -162,6 +150,7 @@ pub struct BoundaryWork {
     pub ending_snapshot: Snapshot,
     pub network_magic: Option<u32>,
     pub shelley_hash: Hash<32>,
+    pub active_slot_coeff: f32,
 
     // computed
     pub pot_delta: Option<PotDelta>,

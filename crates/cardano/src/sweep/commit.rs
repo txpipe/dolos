@@ -122,6 +122,8 @@ impl BoundaryWork {
                 }
 
                 writer.save_entity_typed(E::NS, &entity_id, entity.as_ref())?;
+            } else {
+                warn!(ns = E::NS, key = %entity_id, "no deltas for entity");
             }
         }
 

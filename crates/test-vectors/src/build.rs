@@ -294,6 +294,7 @@ pub async fn handle_asset_state(
         if i % 1000 == 1 {
             tracing::info!(i = i, "Processing assets...");
         }
+
         let key = hex::decode(from_row!(row, &str, "key"))
             .into_diagnostic()
             .context("decoding asset key")?;
