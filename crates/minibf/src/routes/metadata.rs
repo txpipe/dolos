@@ -137,11 +137,12 @@ async fn by_label<D: Domain>(
         MetadataHistoryModelBuilder::new(label, pagination.count, pagination.page as usize);
 
     while builder.needs_more() {
-        if let Some(next) = blocks.next() {
-            let (_, maybe) = next.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            if let Some(cbor) = maybe {
-                builder.scan_block(&cbor)?;
-            }
+        let Some(next) = blocks.next() else {
+            break;
+        };
+        let (_, maybe) = next.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        if let Some(cbor) = maybe {
+            builder.scan_block(&cbor)?;
         }
     }
 
