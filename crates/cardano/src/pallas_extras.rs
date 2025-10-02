@@ -136,6 +136,7 @@ pub fn cert_as_stake_registration(cert: &MultiEraCert) -> Option<StakeCredential
         },
         MultiEraCert::Conway(cow) => match cow.deref().deref() {
             ConwayCert::StakeRegistration(credential) => Some(credential.clone()),
+            ConwayCert::Reg(cred, _) => Some(cred.clone()),
             _ => None,
         },
         _ => None,
@@ -150,6 +151,7 @@ pub fn cert_as_stake_deregistration(cert: &MultiEraCert) -> Option<StakeCredenti
         },
         MultiEraCert::Conway(cow) => match cow.deref().deref() {
             ConwayCert::StakeDeregistration(credential) => Some(credential.clone()),
+            ConwayCert::UnReg(cred, _) => Some(cred.clone()),
             _ => None,
         },
         _ => None,
@@ -219,7 +221,7 @@ pub fn epoch_boundary(
     let (next_epoch, _) = chain_summary.slot_epoch(next_slot);
 
     if prev_epoch != next_epoch {
-        let boundary = chain_summary.epoch_start(next_epoch as u64);
+        let boundary = chain_summary.epoch_start(next_epoch);
         Some(boundary)
     } else {
         None
