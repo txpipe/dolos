@@ -97,6 +97,10 @@ pub fn cert_as_vote_delegation(cert: &MultiEraCert) -> Option<MultiEraVoteDelega
                 delegator: delegator.clone(),
                 drep: drep.clone(),
             }),
+            ConwayCert::VoteRegDeleg(delegator, drep, _) => Some(MultiEraVoteDelegation {
+                delegator: delegator.clone(),
+                drep: drep.clone(),
+            }),
             _ => None,
         },
         _ => None,
@@ -122,6 +126,10 @@ pub fn cert_as_stake_delegation(cert: &MultiEraCert) -> Option<MultiEraStakeDele
                 delegator: delegator.clone(),
                 pool: *pool,
             }),
+            ConwayCert::StakeRegDeleg(delegator, pool, _) => Some(MultiEraStakeDelegation {
+                delegator: delegator.clone(),
+                pool: *pool,
+            }),
             _ => None,
         },
         _ => None,
@@ -137,6 +145,8 @@ pub fn cert_as_stake_registration(cert: &MultiEraCert) -> Option<StakeCredential
         MultiEraCert::Conway(cow) => match cow.deref().deref() {
             ConwayCert::StakeRegistration(credential) => Some(credential.clone()),
             ConwayCert::Reg(cred, _) => Some(cred.clone()),
+            ConwayCert::StakeRegDeleg(cred, _, _) => Some(cred.clone()),
+            ConwayCert::VoteRegDeleg(cred, _, _) => Some(cred.clone()),
             _ => None,
         },
         _ => None,
