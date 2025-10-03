@@ -82,12 +82,22 @@ impl<'a> DrepModelBuilder<'a> {
             .unwrap_or(false)
     }
 
+    fn is_drep_retired(&self) -> bool {
+        if self.is_special_case() {
+            return false;
+        }
+        
+        let (current_epoch, _) = self.chain.slot_epoch(self.tip);
+        self.state.retiring_epoch.map(|x| x <= current_epoch).unwrap_or(false)
+    }
+
     fn is_drep_active(&self) -> bool {
         if self.is_special_case() {
             return true;
         }
 
-        !self.state.retired
+        let (current_epoch, _) = self.chain.slot_epoch(self.tip);
+        self.state.retiring_epoch.map(|x| x <= current_epoch).unwrap_or(false)
     }
 }
 
@@ -108,7 +118,7 @@ impl<'a> IntoModel<blockfrost_openapi::models::drep::Drep> for DrepModelBuilder<
             active: self.is_drep_active(),
             active_epoch: self.first_active_epoch().map(|x| x as i32),
             has_script: pallas_extras::drep_id_is_script(&self.drep_id_encoded),
-            retired: self.state.retired,
+            retired: self.is_drep_retired(),
             expired,
             last_active_epoch: self.last_active_epoch().map(|x| x as i32),
         };

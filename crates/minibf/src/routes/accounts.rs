@@ -88,7 +88,7 @@ impl<'a> IntoModel<AccountContent> for AccountModelBuilder<'a> {
 
         let active_epoch = self
             .account_state
-            .registered_at
+            .registered_at.or(self.account_state.deregistered_at)
             .map(|x| chain.slot_epoch(x))
             .map(|(x, _)| x);
 
@@ -314,6 +314,10 @@ fn build_registration(
         MultiEraCert::Conway(cert) => match cert.deref().deref() {
             ConwayCert::StakeRegistration(cred) => (cred, true),
             ConwayCert::StakeDeregistration(cred) => (cred, false),
+            ConwayCert::Reg(cred, _) => (cred, true),
+            ConwayCert::UnReg(cred, _) => (cred, false),
+            ConwayCert::StakeRegDeleg(cred, _, _) => (cred, true),
+            ConwayCert::StakeVoteRegDeleg(cred, _, _, _) => (cred, true),
             _ => return Ok(None),
         },
         _ => return Ok(None),

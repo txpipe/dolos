@@ -1060,37 +1060,32 @@ pub fn drep_to_entity_key(value: &DRep) -> EntityKey {
 
 #[derive(Debug, Encode, Decode, Clone, Default)]
 pub struct DRepState {
-    // TODO: field is deprecated, remove it in the next breaking change
     #[n(0)]
-    pub __drep_id: Vec<u8>,
-
-    #[n(1)]
     pub initial_slot: Option<u64>,
 
-    #[n(2)]
+    #[n(1)]
     pub voting_power: u64,
 
-    #[n(3)]
+    #[n(2)]
     pub last_active_slot: Option<u64>,
 
-    #[n(4)]
-    pub retired: bool,
+    #[n(3)]
+    pub retiring_epoch: Option<u64>,
 
-    #[n(5)]
+    #[n(4)]
     pub expired: bool,
 
-    #[n(6)]
+    #[n(5)]
     pub deposit: u64,
 }
 
 impl DRepState {
     pub fn new() -> Self {
         Self {
-            __drep_id: vec![],
             initial_slot: None,
             voting_power: 0,
             last_active_slot: None,
-            retired: false,
+            retiring_epoch: None,
             expired: false,
             deposit: 0,
         }
