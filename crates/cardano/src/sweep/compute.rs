@@ -191,7 +191,7 @@ impl BoundaryWork {
         let nonces = self.define_starting_nonces()?;
 
         let pparams = match &self.era_transition {
-            Some(era_transition) => era_transition.new_pparams.clone(),
+            Some(era_transition) => era_transition.new_ending_pparams.clone(),
             None => self.ending_state.pparams.clone(),
         };
 
@@ -235,13 +235,16 @@ impl BoundaryWork {
                 "found protocol version change"
             );
 
-            let new_pparams =
+            let new_ending_pparams =
                 forks::evolve_pparams(&self.ending_state.pparams, genesis, effective as u16)?;
+
+            let new_waiting_pparams = self.waiting_state.as_ref().map(|x| forks::evolve_pparams(&x.pparams, genesis, effective as u16)).transpose()?;
 
             let era_transition = EraTransition {
                 prev_version: EraProtocol::from(original),
                 new_version: EraProtocol::from(effective as u16),
-                new_pparams,
+                new_ending_pparams,
+                new_waiting_pparams
             };
 
             self.era_transition = Some(era_transition);

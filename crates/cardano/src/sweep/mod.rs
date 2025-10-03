@@ -136,7 +136,8 @@ impl Snapshot {
 pub struct EraTransition {
     pub prev_version: EraProtocol,
     pub new_version: EraProtocol,
-    pub new_pparams: PParamsSet,
+    pub new_ending_pparams: PParamsSet,
+    pub new_waiting_pparams: Option<PParamsSet>
 }
 
 pub struct BoundaryWork {
