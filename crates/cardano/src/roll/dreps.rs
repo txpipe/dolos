@@ -19,6 +19,7 @@ fn cert_drep(cert: &MultiEraCert) -> Option<DRep> {
             conway::Certificate::UnRegDRepCert(cert, _) => Some(stake_cred_to_drep(cert)),
             conway::Certificate::UpdateDRepCert(cert, _) => Some(stake_cred_to_drep(cert)),
             conway::Certificate::StakeVoteDeleg(_, _, drep) => Some(drep.clone()),
+            conway::Certificate::StakeVoteRegDeleg(_, _, drep, _) => Some(drep.clone()),
             conway::Certificate::VoteRegDeleg(_, drep, _) => Some(drep.clone()),
             conway::Certificate::VoteDeleg(_, drep) => Some(drep.clone()),
             _ => None,

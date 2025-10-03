@@ -1874,10 +1874,13 @@ impl PlutusDataWrapper {
                     .map(|d| PlutusDataWrapper(d.clone()).as_value())
                     .collect::<Result<Vec<serde_json::Value>, _>>()?;
 
-                Ok(serde_json::Value::Object(serde_json::Map::from_iter([(
-                    "list".to_string(),
-                    serde_json::Value::Array(values),
-                )])))
+                Ok(serde_json::Value::Object(serde_json::Map::from_iter([
+                    (
+                        "constructor".to_string(),
+                        serde_json::Value::Number(0.into()),
+                    ),
+                    ("fields".to_string(), serde_json::Value::Array(values)),
+                ])))
             }
 
             PlutusData::Map(x) => {

@@ -549,6 +549,7 @@ where
 
     let mapped: Vec<_> = rewards
         .into_iter()
+        .filter(|(_, reward)| reward.amount > 0)
         .skip(pagination.skip())
         .take(pagination.count)
         .map(|(epoch, reward)| {
