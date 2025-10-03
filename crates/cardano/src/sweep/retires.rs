@@ -231,8 +231,20 @@ fn should_retire_pool(ctx: &mut BoundaryWork, pool: &PoolState) -> bool {
     retiring_epoch <= ctx.starting_epoch_no()
 }
 
+fn should_retire_drep(ctx: &mut BoundaryWork, drep: &DRepState) -> bool {
+    if drep.retiring_epoch.is_none() {
+        return false;
+    }
+
+    let Some(retiring_epoch) = drep.retiring_epoch else {
+        return false;
+    };
+
+    retiring_epoch <= ctx.starting_epoch_no()
+}
+
 fn should_expire_drep(ctx: &mut BoundaryWork, drep: &DRepState) -> Result<bool, ChainError> {
-    if drep.retired || drep.expired {
+    if drep.expired {
         return Ok(false);
     }
 
@@ -293,22 +305,22 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         id: &DRepId,
         drep: &DRepState,
     ) -> Result<(), ChainError> {
-        if !should_expire_drep(ctx, drep)? {
-            return Ok(());
+        if should_expire_drep(ctx, drep)? {
+            self.deltas.push(
+                DRepExpiration {
+                    drep_id: id.clone(),
+                }
+                .into(),
+            );
         }
 
-        self.deltas.push(
-            DRepExpiration {
-                drep_id: id.clone(),
+        if should_retire_drep(ctx, drep) {
+            let delegators = ctx.ending_snapshot.accounts_by_drep.iter_delegators(id);
+
+            for (delegator, _) in delegators {
+                self.deltas
+                    .push(DRepDelegatorDrop::new(delegator.clone()).into());
             }
-            .into(),
-        );
-
-        let delegators = ctx.ending_snapshot.accounts_by_drep.iter_delegators(id);
-
-        for (delegator, _) in delegators {
-            self.deltas
-                .push(DRepDelegatorDrop::new(delegator.clone()).into());
         }
 
         Ok(())

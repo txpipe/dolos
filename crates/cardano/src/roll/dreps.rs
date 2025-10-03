@@ -2,14 +2,14 @@ use std::ops::Deref as _;
 
 use dolos_core::{batch::WorkDeltas, ChainError, NsKey};
 use pallas::ledger::{
-    primitives::conway::{self, Anchor, DRep},
+    primitives::{conway::{self, Anchor, DRep}, Epoch},
     traverse::{MultiEraBlock, MultiEraCert, MultiEraTx},
 };
 use serde::{Deserialize, Serialize};
 
 use crate::{
     drep_to_entity_key, model::DRepState, pallas_extras::stake_cred_to_drep, roll::BlockVisitor,
-    CardanoLogic, FixedNamespace as _,
+    CardanoLogic, FixedNamespace as _, PParamsSet,
 };
 
 fn cert_drep(cert: &MultiEraCert) -> Option<DRep> {
@@ -35,7 +35,7 @@ pub struct DRepRegistration {
     anchor: Option<Anchor>,
 
     // undo
-    was_retired: bool,
+    prev_retiring_epoch: Option<u64>,
     prev_deposit: Option<u64>,
 }
 
@@ -46,7 +46,7 @@ impl DRepRegistration {
             slot,
             deposit,
             anchor,
-            was_retired: false,
+            prev_retiring_epoch: None,
             prev_deposit: None,
         }
     }
@@ -63,12 +63,12 @@ impl dolos_core::EntityDelta for DRepRegistration {
         let entity = entity.get_or_insert_default();
 
         // save undo info
-        self.was_retired = entity.retired;
+        self.prev_retiring_epoch = entity.retiring_epoch;
 
         // apply changes
         entity.initial_slot = Some(self.slot);
         entity.voting_power = self.deposit;
-        entity.retired = false;
+        entity.retiring_epoch = None;
         entity.deposit = self.deposit;
     }
 
@@ -76,7 +76,7 @@ impl dolos_core::EntityDelta for DRepRegistration {
         let entity = entity.get_or_insert_default();
         entity.initial_slot = None;
         entity.voting_power = 0;
-        entity.retired = self.was_retired;
+        entity.retiring_epoch = self.prev_retiring_epoch;
         entity.deposit = self.prev_deposit.unwrap_or(0);
     }
 }
@@ -84,18 +84,22 @@ impl dolos_core::EntityDelta for DRepRegistration {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DRepUnRegistration {
     drep: DRep,
+    retiring_epoch: Epoch,
 
     // undo data
     prev_voting_power: Option<u64>,
     prev_deposit: Option<u64>,
+    prev_retiring_epoch: Option<u64>
 }
 
 impl DRepUnRegistration {
-    pub fn new(drep: DRep) -> Self {
+    pub fn new(drep: DRep, retiring_epoch: Epoch) -> Self {
         Self {
             drep,
+            retiring_epoch,
             prev_voting_power: None,
             prev_deposit: None,
+            prev_retiring_epoch: None,
         }
     }
 }
@@ -112,18 +116,19 @@ impl dolos_core::EntityDelta for DRepUnRegistration {
 
         // save undo data
         self.prev_voting_power = Some(entity.voting_power);
+        self.prev_retiring_epoch = entity.retiring_epoch;
         self.prev_deposit = Some(entity.deposit);
 
         // apply changes
         entity.voting_power = 0;
-        entity.retired = true;
+        entity.retiring_epoch = Some(self.retiring_epoch);
         entity.deposit = 0;
     }
 
     fn undo(&self, entity: &mut Option<DRepState>) {
         let entity = entity.get_or_insert_default();
         entity.voting_power = self.prev_voting_power.unwrap();
-        entity.retired = false;
+        entity.retiring_epoch = self.prev_retiring_epoch;
         entity.deposit = self.prev_deposit.unwrap_or(0);
     }
 }
@@ -169,9 +174,22 @@ impl dolos_core::EntityDelta for DRepActivity {
 }
 
 #[derive(Default, Clone)]
-pub struct DRepStateVisitor;
+pub struct DRepStateVisitor {
+    epoch: Option<Epoch>,
+}
 
 impl BlockVisitor for DRepStateVisitor {
+    fn visit_root(
+        &mut self,
+        _: &mut WorkDeltas<CardanoLogic>,
+        _: &MultiEraBlock,
+        _: &PParamsSet,
+        epoch: Epoch,
+    ) -> Result<(), ChainError> {
+        self.epoch = Some(epoch);
+        Ok(())
+    }
+
     fn visit_cert(
         &mut self,
         deltas: &mut WorkDeltas<CardanoLogic>,
@@ -196,7 +214,7 @@ impl BlockVisitor for DRepStateVisitor {
                     ));
                 }
                 conway::Certificate::UnRegDRepCert(_, _) => {
-                    deltas.add_for_entity(DRepUnRegistration::new(drep.clone()));
+                    deltas.add_for_entity(DRepUnRegistration::new(drep.clone(), self.epoch.expect("set in root")));
                 }
                 _ => (),
             }
