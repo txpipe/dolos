@@ -232,10 +232,6 @@ fn should_retire_pool(ctx: &mut BoundaryWork, pool: &PoolState) -> bool {
 }
 
 fn should_retire_drep(ctx: &mut BoundaryWork, drep: &DRepState) -> bool {
-    if drep.retiring_epoch.is_none() {
-        return false;
-    }
-
     let Some(retiring_epoch) = drep.retiring_epoch else {
         return false;
     };
