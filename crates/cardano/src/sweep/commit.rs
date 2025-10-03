@@ -59,8 +59,8 @@ impl BoundaryWork {
         let new = EraSummary {
             start: previous.end.clone().unwrap(),
             end: None,
-            epoch_length: transition.new_pparams.epoch_length_or_default(),
-            slot_length: transition.new_pparams.slot_length_or_default(),
+            epoch_length: transition.new_ending_pparams.epoch_length_or_default(),
+            slot_length: transition.new_ending_pparams.slot_length_or_default(),
         };
 
         writer.write_entity_typed(&EntityKey::from(transition.new_version), &new)?;
@@ -69,7 +69,7 @@ impl BoundaryWork {
     }
 
     fn promote_waiting_epoch<W: StateWriter>(&self, writer: &W) -> Result<(), ChainError> {
-        let Some(waiting) = &self.waiting_state else {
+        let Some(waiting) = self.waiting_state.as_ref() else {
             // we don't have waiting state for early epochs, we just need to wait
             if self.ending_state.number == 0 {
                 return Ok(());
@@ -78,7 +78,14 @@ impl BoundaryWork {
             return Err(ChainError::from(BrokenInvariant::EpochBoundaryIncomplete));
         };
 
-        writer.write_entity_typed(&EntityKey::from(EPOCH_KEY_GO), waiting)?;
+        let mut waiting = waiting.clone();
+        // On era transition, we must update to include the new pparams injected via genesis
+        if let Some(pparams) = self.era_transition.as_ref().and_then(|x| x.new_waiting_pparams.clone()) {
+            waiting.pparams = pparams;
+
+        }
+
+        writer.write_entity_typed(&EntityKey::from(EPOCH_KEY_GO), &waiting)?;
         info!(number = waiting.number, "epoch promoted to active");
 
         Ok(())
