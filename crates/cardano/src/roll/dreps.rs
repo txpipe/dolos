@@ -214,7 +214,7 @@ impl BlockVisitor for DRepStateVisitor {
                     ));
                 }
                 conway::Certificate::UnRegDRepCert(_, _) => {
-                    deltas.add_for_entity(DRepUnRegistration::new(drep.clone(), self.epoch.expect("set in root")));
+                    deltas.add_for_entity(DRepUnRegistration::new(drep.clone(), self.epoch.expect("set in root") + 1));
                 }
                 _ => (),
             }
