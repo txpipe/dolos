@@ -1,4 +1,3 @@
-use std::cmp::Ordering;
 
 pub type Ratio = num_rational::Ratio<i128>;
 
@@ -90,7 +89,7 @@ pub fn calculate_eta(minted_blocks: u32, d: PallasRatio, f: f32, epoch_length: u
     let epoch_length = into_ratio!(epoch_length);
     let expected_blocks = f * epoch_length;
 
-    let expected_non_obft_blocks = expected_blocks * (&one - d);
+    let expected_non_obft_blocks = expected_blocks * (one - d);
 
     // eta is the ratio between the number of blocks that have been produced during
     // the epoch, and the expectation value of blocks that should have been

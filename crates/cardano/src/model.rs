@@ -232,6 +232,9 @@ pub struct AccountState {
 
     #[n(9)]
     pub drep: EpochValue<Option<DRep>>,
+    
+    #[n(10)]
+    pub vote_delegated_at: Option<BlockSlot>,
 
     #[n(11)]
     pub deposit: u64,
@@ -254,6 +257,7 @@ impl AccountState {
             treasury_sum: 0,
             pool: EpochValue::new(None, epoch),
             drep: EpochValue::new(None, epoch),
+            vote_delegated_at: None,
             deposit: 0,
             deregistered_at: None,
         }
@@ -1070,7 +1074,7 @@ pub struct DRepState {
     pub last_active_slot: Option<u64>,
 
     #[n(3)]
-    pub retiring_epoch: Option<u64>,
+    pub unregistered_at: Option<BlockSlot>,
 
     #[n(4)]
     pub expired: bool,
@@ -1085,7 +1089,7 @@ impl DRepState {
             initial_slot: None,
             voting_power: 0,
             last_active_slot: None,
-            retiring_epoch: None,
+            unregistered_at: None,
             expired: false,
             deposit: 0,
         }

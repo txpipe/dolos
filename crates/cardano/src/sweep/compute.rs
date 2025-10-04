@@ -204,7 +204,7 @@ impl BoundaryWork {
             pparams,
             largest_stable_slot: self
                 .active_era
-                .epoch_start(self.ending_state.number as u64 + 2)
+                .epoch_start(self.ending_state.number + 2)
                 - nonce_stability_window(self.active_protocol.into(), genesis),
             nonces,
 

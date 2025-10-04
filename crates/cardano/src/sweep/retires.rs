@@ -1,5 +1,5 @@
-use dolos_core::{ChainError, NsKey};
-use pallas::{codec::minicbor::Encode, ledger::primitives::conway::DRep};
+use dolos_core::{BlockSlot, ChainError, NsKey};
+use pallas::ledger::primitives::conway::DRep;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
@@ -171,14 +171,16 @@ impl dolos_core::EntityDelta for DRepExpiration {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DRepDelegatorDrop {
     delegator: AccountId,
+    unregistered_at: BlockSlot,
 
     // undo
     prev_drep: Option<EpochValue<Option<DRep>>>,
 }
 
 impl DRepDelegatorDrop {
-    pub fn new(delegator: AccountId) -> Self {
+    pub fn new(delegator: AccountId, unregistered_at: BlockSlot) -> Self {
         Self {
+            unregistered_at,
             delegator,
             prev_drep: None,
         }
@@ -198,13 +200,17 @@ impl dolos_core::EntityDelta for DRepDelegatorDrop {
             return;
         };
 
-        debug!(delegator=%self.delegator, "dropping drep delegator");
+        if let Some(delegated_at) = entity.vote_delegated_at  {
+            if delegated_at <= self.unregistered_at {
+                debug!(delegator=%self.delegator, "dropping drep delegator");
 
-        // save undo info
-        self.prev_drep = Some(entity.drep.clone());
+                // save undo info
+                self.prev_drep = Some(entity.drep.clone());
 
-        // apply changes
-        entity.drep.update_unchecked(None);
+                // apply changes
+                entity.drep.update_unchecked(None);
+            }
+        }
     }
 
     fn undo(&self, entity: &mut Option<AccountState>) {
@@ -231,14 +237,6 @@ fn should_retire_pool(ctx: &mut BoundaryWork, pool: &PoolState) -> bool {
     retiring_epoch <= ctx.starting_epoch_no()
 }
 
-fn should_retire_drep(ctx: &mut BoundaryWork, drep: &DRepState) -> bool {
-    let Some(retiring_epoch) = drep.retiring_epoch else {
-        return false;
-    };
-
-    retiring_epoch <= ctx.starting_epoch_no()
-}
-
 fn should_expire_drep(ctx: &mut BoundaryWork, drep: &DRepState) -> Result<bool, ChainError> {
     if drep.expired {
         return Ok(false);
@@ -250,7 +248,7 @@ fn should_expire_drep(ctx: &mut BoundaryWork, drep: &DRepState) -> Result<bool, 
 
     let (last_activity_epoch, _) = ctx.active_era.slot_epoch(last_activity_slot);
 
-    let expiring_epoch = last_activity_epoch as u64 + ctx.valid_drep_inactivity_period()?;
+    let expiring_epoch = last_activity_epoch + ctx.valid_drep_inactivity_period()?;
 
     Ok(expiring_epoch <= ctx.starting_epoch_no())
 }
@@ -262,7 +260,7 @@ fn should_expire_proposal(ctx: &mut BoundaryWork, proposal: &Proposal) -> Result
     }
 
     let (epoch, _) = ctx.active_era.slot_epoch(proposal.slot);
-    let expiring_epoch = epoch as u64 + ctx.valid_governance_action_validity_period()?;
+    let expiring_epoch = epoch + ctx.valid_governance_action_validity_period()?;
 
     Ok(expiring_epoch <= ctx.starting_epoch_no())
 }
@@ -310,13 +308,12 @@ impl super::BoundaryVisitor for BoundaryVisitor {
             );
         }
 
-        if should_retire_drep(ctx, drep) {
-            let delegators = ctx.ending_snapshot.accounts_by_drep.iter_delegators(id);
-
-            for (delegator, _) in delegators {
+        if let Some(unregistered_at) = drep.unregistered_at {
+            for (delegator, _) in ctx.ending_snapshot.accounts_by_drep.iter_delegators(id) {
                 self.deltas
-                    .push(DRepDelegatorDrop::new(delegator.clone()).into());
+                    .push(DRepDelegatorDrop::new(delegator.clone(), unregistered_at).into());
             }
+
         }
 
         Ok(())

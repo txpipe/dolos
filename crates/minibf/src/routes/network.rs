@@ -144,7 +144,7 @@ impl<'a> IntoModel<Vec<NetworkErasInner>> for ChainModelBuilder<'a> {
             let start_delta = start_time - system_start;
 
             // Calculate for the final one. The rest will be overwritten
-            let (end_slot, end_epoch) = (self.tip, era.slot_epoch(self.tip).0 as u64);
+            let (end_slot, end_epoch) = (self.tip, era.slot_epoch(self.tip).0);
             let end_time = era.slot_time(end_slot);
             let end_delta = end_time - system_start;
 
@@ -207,7 +207,6 @@ pub async fn eras<D: Domain>(
 struct NetworkModelBuilder<'a> {
     genesis: &'a Genesis,
     active: EpochState,
-    live: EpochState,
 }
 
 impl<'a> IntoModel<Network> for NetworkModelBuilder<'a> {
@@ -246,13 +245,9 @@ where
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let live = dolos_cardano::load_mark_epoch::<D>(domain.state())
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
     let builder = NetworkModelBuilder {
         genesis,
         active,
-        live,
     };
 
     builder.into_response()
