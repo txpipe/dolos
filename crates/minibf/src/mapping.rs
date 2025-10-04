@@ -1172,9 +1172,15 @@ impl IntoModel<Vec<TxContentDelegationsInner>> for TxModelBuilder<'_> {
                             ConwayCert::StakeDelegation(cred, pool) => Some(
                                 build_delegation_inner(index, cred, pool, network, active_epoch),
                             ),
+                            ConwayCert::StakeRegDeleg(cred, pool, _) => Some(
+                                build_delegation_inner(index, cred, pool, network, active_epoch),
+                            ),
+                            ConwayCert::StakeVoteRegDeleg(cred, pool, _, _) => Some(
+                                build_delegation_inner(index, cred, pool, network, active_epoch),
+                            ),
                             _ => None,
                         }
-                    }
+                    },
                     _ => None,
                 })
                 .try_collect()?;
@@ -1548,6 +1554,30 @@ impl StakeCertModelBuilder {
                     cert_index,
                     network,
                 }),
+                ConwayCert::Reg(stake_credential, _) => Some(Self {
+                    stake_credential: stake_credential.clone(),
+                    is_registration: true,
+                    cert_index,
+                    network,
+                }),
+                ConwayCert::StakeRegDeleg(stake_credential, _, _) => Some(Self {
+                    stake_credential: stake_credential.clone(),
+                    is_registration: true,
+                    cert_index,
+                    network,
+                }),
+                ConwayCert::StakeVoteRegDeleg(stake_credential, _, _, _) => Some(Self {
+                    stake_credential: stake_credential.clone(),
+                    is_registration: true,
+                    cert_index,
+                    network,
+                }),
+                ConwayCert::UnReg(stake_credential, _) => Some(Self {
+                    stake_credential: stake_credential.clone(),
+                    is_registration: false,
+                    cert_index,
+                    network,
+                }),
                 _ => None,
             },
             _ => None,
@@ -1874,10 +1904,13 @@ impl PlutusDataWrapper {
                     .map(|d| PlutusDataWrapper(d.clone()).as_value())
                     .collect::<Result<Vec<serde_json::Value>, _>>()?;
 
-                Ok(serde_json::Value::Object(serde_json::Map::from_iter([(
-                    "list".to_string(),
-                    serde_json::Value::Array(values),
-                )])))
+                Ok(serde_json::Value::Object(serde_json::Map::from_iter([
+                    (
+                        "constructor".to_string(),
+                        serde_json::Value::Number(x.tag.into()),
+                    ),
+                    ("fields".to_string(), serde_json::Value::Array(values)),
+                ])))
             }
 
             PlutusData::Map(x) => {

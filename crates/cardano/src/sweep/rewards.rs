@@ -375,11 +375,9 @@ impl BoundaryVisitor {
 fn hack_should_skip_pool(id: &PoolId) -> bool {
     // skip these pools that for some weird reason don't show rewards on the
     // explorer.
-    let skip_pools = vec![
-        "38f4a58aaf3fec84f3410520c70ad75321fb651ada7ca026373ce486",
+    let skip_pools = ["38f4a58aaf3fec84f3410520c70ad75321fb651ada7ca026373ce486",
         "40d806d73c8d2a0c8d9b1e95ccb9f380e40cb4d4b23ff6e403ae1456",
-        "d5cfc42cf67f6b637688d19fa50a4342658f63370b9e2c9e3eaf4dfe",
-    ];
+        "d5cfc42cf67f6b637688d19fa50a4342658f63370b9e2c9e3eaf4dfe"];
 
     let pool_hash = Hash::<28>::from(&id.as_ref()[..28]);
 

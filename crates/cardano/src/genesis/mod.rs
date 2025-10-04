@@ -1,7 +1,7 @@
 use dolos_core::{ChainError, Domain, EntityKey, Genesis, StateStore as _, StateWriter as _};
 
 use crate::{
-    mutable_slots, sweep::Pots, EpochState, EraBoundary, EraSummary, Nonces, PParamsSet,
+    mutable_slots, sweep::Pots, EpochState, EraBoundary, EraSummary, Nonces,
     EPOCH_KEY_MARK,
 };
 
@@ -42,7 +42,7 @@ fn bootstrap_pots(protocol: u16, genesis: &Genesis) -> Result<Pots, ChainError> 
     let reserves = max_supply.saturating_sub(initial_utxos);
 
     let out = Pots {
-        reserves: reserves,
+        reserves,
         treasury: 0,
         utxos: initial_utxos,
     };

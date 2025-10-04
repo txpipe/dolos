@@ -97,13 +97,19 @@ where
 
     let mapped: Vec<_> = iter
         .into_iter()
-        .map(|x| {
-            let (key, state) = x.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .flat_map(|x| {
+            let Ok((key, state)) = x else {
+                return Some(Err(StatusCode::INTERNAL_SERVER_ERROR));
+            };
+
+            if state.is_retired {
+                return None;
+            }
             let operator = Hash::<28>::from(key);
 
             let builder = PoolModelBuilder { operator, state };
 
-            Ok(builder.into_model_with_sort_key())
+            Some(Ok(builder.into_model_with_sort_key()))
         })
         .collect::<Result<Result<Vec<(BlockSlot, PoolListExtendedInner)>, _>, StatusCode>>()??
         .into_iter()

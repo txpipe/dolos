@@ -6,18 +6,12 @@ use blockfrost_openapi::models::script_datum::ScriptDatum;
 use dolos_core::{ArchiveStore, Domain};
 use pallas::crypto::hash::Hash;
 use reqwest::StatusCode;
-use serde::{Deserialize, Serialize};
 
 use crate::{
     error::Error,
     mapping::{IntoModel, PlutusDataWrapper},
     Facade,
 };
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct RootResponse {
-    pub is_healthy: bool,
-}
 
 pub async fn by_datum_hash<D: Domain>(
     Path(datum_hash): Path<String>,

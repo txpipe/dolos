@@ -97,6 +97,14 @@ pub fn cert_as_vote_delegation(cert: &MultiEraCert) -> Option<MultiEraVoteDelega
                 delegator: delegator.clone(),
                 drep: drep.clone(),
             }),
+            ConwayCert::VoteRegDeleg(delegator, drep, _) => Some(MultiEraVoteDelegation {
+                delegator: delegator.clone(),
+                drep: drep.clone(),
+            }),
+            ConwayCert::StakeVoteRegDeleg(delegator, _, drep, _) => Some(MultiEraVoteDelegation {
+                delegator: delegator.clone(),
+                drep: drep.clone(),
+            }),
             _ => None,
         },
         _ => None,
@@ -122,6 +130,14 @@ pub fn cert_as_stake_delegation(cert: &MultiEraCert) -> Option<MultiEraStakeDele
                 delegator: delegator.clone(),
                 pool: *pool,
             }),
+            ConwayCert::StakeRegDeleg(delegator, pool, _) => Some(MultiEraStakeDelegation {
+                delegator: delegator.clone(),
+                pool: *pool,
+            }),
+            ConwayCert::StakeVoteRegDeleg(delegator, pool, _, _) => Some(MultiEraStakeDelegation {
+                delegator: delegator.clone(),
+                pool: *pool,
+            }),
             _ => None,
         },
         _ => None,
@@ -136,6 +152,10 @@ pub fn cert_as_stake_registration(cert: &MultiEraCert) -> Option<StakeCredential
         },
         MultiEraCert::Conway(cow) => match cow.deref().deref() {
             ConwayCert::StakeRegistration(credential) => Some(credential.clone()),
+            ConwayCert::Reg(cred, _) => Some(cred.clone()),
+            ConwayCert::StakeRegDeleg(cred, _, _) => Some(cred.clone()),
+            ConwayCert::VoteRegDeleg(cred, _, _) => Some(cred.clone()),
+            ConwayCert::StakeVoteRegDeleg(cred, _, _, _) => Some(cred.clone()),
             _ => None,
         },
         _ => None,
@@ -150,6 +170,7 @@ pub fn cert_as_stake_deregistration(cert: &MultiEraCert) -> Option<StakeCredenti
         },
         MultiEraCert::Conway(cow) => match cow.deref().deref() {
             ConwayCert::StakeDeregistration(credential) => Some(credential.clone()),
+            ConwayCert::UnReg(cred, _) => Some(cred.clone()),
             _ => None,
         },
         _ => None,
@@ -219,7 +240,7 @@ pub fn epoch_boundary(
     let (next_epoch, _) = chain_summary.slot_epoch(next_slot);
 
     if prev_epoch != next_epoch {
-        let boundary = chain_summary.epoch_start(next_epoch as u64);
+        let boundary = chain_summary.epoch_start(next_epoch);
         Some(boundary)
     } else {
         None
