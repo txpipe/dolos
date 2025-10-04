@@ -1907,7 +1907,7 @@ impl PlutusDataWrapper {
                 Ok(serde_json::Value::Object(serde_json::Map::from_iter([
                     (
                         "constructor".to_string(),
-                        serde_json::Value::Number(0.into()),
+                        serde_json::Value::Number(x.tag.into()),
                     ),
                     ("fields".to_string(), serde_json::Value::Array(values)),
                 ])))
