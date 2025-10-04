@@ -49,6 +49,8 @@ impl TableRow for AccountState {
             "rewards",
             "withdrawals",
             "epoch version",
+            "pool latest",
+            "pool stable",
         ]
     }
 

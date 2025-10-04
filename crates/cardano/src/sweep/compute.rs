@@ -125,9 +125,6 @@ impl BoundaryWork {
             eta,
         );
 
-        // TODO: should be debug
-        warn!(%delta.incentives, %delta.treasury_tax, %delta.available_rewards, "defined pot delta");
-
         debug!(
             %delta.incentives,
             %delta.treasury_tax,
@@ -187,14 +184,6 @@ impl BoundaryWork {
         if self.network_magic == Some(2) && self.ending_state.number == 2 {
             unspendable_rewards = 0;
         }
-
-        dbg!(
-            self.initial_pots().reserves,
-            pot_delta.incentives,
-            pot_delta.available_rewards,
-            effective_rewards,
-            unspendable_rewards,
-        );
 
         let consumed_rewards = effective_rewards + unspendable_rewards;
 
