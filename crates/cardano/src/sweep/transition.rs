@@ -122,6 +122,8 @@ impl dolos_core::EntityDelta for PoolTransition {
         self.prev_blocks_minted = Some(entity.blocks_minted_epoch);
 
         // apply changes
+        debug!(%self.pool, %self.ending_stake, "setting pool stake");
+
         entity.total_stake.update_unchecked(self.ending_stake);
 
         entity.total_stake.transition_unchecked();

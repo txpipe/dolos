@@ -55,9 +55,10 @@ impl TableRow for EpochState {
             "reserves",
             "utxos",
             "treasury",
-            "to treasury",
-            "to distribute",
-            "nonce",
+            "treasury tax",
+            "rewards",
+            "rewards (unspendable)",
+            "blocks minted",
         ]
     }
 
@@ -71,15 +72,10 @@ impl TableRow for EpochState {
             format!("{}", self.reserves),
             format!("{}", self.utxos),
             format!("{}", self.treasury),
-            format!("{}", self.rewards_to_treasury.unwrap_or_default()),
-            format!("{}", self.rewards_to_distribute.unwrap_or_default()),
-            format!(
-                "{}",
-                self.nonces
-                    .as_ref()
-                    .map(|x| hex::encode(x.active))
-                    .unwrap_or("".to_string())
-            ),
+            format!("{}", self.treasury_tax.unwrap_or_default()),
+            format!("{}", self.effective_rewards.unwrap_or_default()),
+            format!("{}", self.unspendable_rewards.unwrap_or_default()),
+            format!("{}", self.blocks_minted),
         ]
     }
 }

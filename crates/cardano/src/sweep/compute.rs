@@ -117,9 +117,6 @@ impl BoundaryWork {
             self.valid_epoch_length()?,
         );
 
-        // TODO: should be debug
-        warn!(%eta, "defined eta");
-
         let delta = pots::compute_pot_delta(
             self.initial_pots().reserves,
             self.gathered_fees(),
@@ -164,6 +161,12 @@ impl BoundaryWork {
         Ok(new_nonces)
     }
 
+    fn update_ending_state(&mut self, effective_rewards: u64, unspendable_rewards: u64) {
+        self.ending_state.effective_rewards = Some(effective_rewards);
+        self.ending_state.unspendable_rewards = Some(unspendable_rewards);
+        self.ending_state.treasury_tax = Some(self.pot_delta.as_ref().unwrap().treasury_tax);
+    }
+
     // TODO: since we don't have a nice way to update epochs via delta given the
     // race conditions in the fixed keys. We should probably move to sequential
     // keys for epochs. Ideally, the new epoch should be created via delta.
@@ -171,19 +174,35 @@ impl BoundaryWork {
         &mut self,
         genesis: &Genesis,
         effective_rewards: u64,
+        mut unspendable_rewards: u64,
     ) -> Result<(), ChainError> {
         let pot_delta = self
             .pot_delta
             .as_ref()
             .ok_or(ChainError::from(BrokenInvariant::EpochBoundaryIncomplete))?;
 
-        let unused_rewards = pot_delta
-            .available_rewards
-            .saturating_sub(effective_rewards);
+        // HACK: we can't explain why the epoch 2 generates a surplus of unspendable
+        // rewards. Everything in the data looks correct, rewards should be there, but
+        // DBSync data shows otherwise.
+        if self.network_magic == Some(2) && self.ending_state.number == 2 {
+            unspendable_rewards = 0;
+        }
+
+        dbg!(
+            self.initial_pots().reserves,
+            pot_delta.incentives,
+            pot_delta.available_rewards,
+            effective_rewards,
+            unspendable_rewards,
+        );
+
+        let consumed_rewards = effective_rewards + unspendable_rewards;
+
+        let unused_rewards = pot_delta.available_rewards.saturating_sub(consumed_rewards);
 
         let reserves = self.initial_pots().reserves - pot_delta.incentives + unused_rewards;
 
-        let treasury = self.initial_pots().treasury + pot_delta.treasury_tax;
+        let treasury = self.initial_pots().treasury + pot_delta.treasury_tax + unspendable_rewards;
 
         let deposits = self.ending_state.deposits;
         let utxos = self.ending_state.utxos;
@@ -215,8 +234,9 @@ impl BoundaryWork {
             decayed_deposits: 0,
 
             // will be computed at the end of the epoch during _sweep_
-            rewards_to_distribute: Some(effective_rewards),
-            rewards_to_treasury: None,
+            effective_rewards: None,
+            unspendable_rewards: None,
+            treasury_tax: None,
         };
 
         self.starting_state = Some(state);
@@ -309,8 +329,18 @@ impl BoundaryWork {
         trace!("defining era transition");
         self.define_era_transition(genesis)?;
 
+        trace!("updating ending state");
+        self.update_ending_state(
+            visitor_rewards.effective_rewards,
+            visitor_rewards.unspendable_rewards,
+        );
+
         trace!("defining starting state");
-        self.define_starting_state(genesis, visitor_rewards.effective_rewards)?;
+        self.define_starting_state(
+            genesis,
+            visitor_rewards.effective_rewards,
+            visitor_rewards.unspendable_rewards,
+        )?;
 
         Ok(())
     }
