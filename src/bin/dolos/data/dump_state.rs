@@ -22,21 +22,35 @@ trait TableRow: Entity {
     fn row(&self, key: &EntityKey) -> Vec<String>;
 }
 
+macro_rules! format_epoch_value {
+    ($self:expr, $field:ident) => {
+        format!(
+            "{} ({})",
+            $self.total_stake.$field.unwrap_or_default(),
+            $self
+                .pool
+                .$field
+                .as_ref()
+                .and_then(|x| x.map(|y| hex::encode(y)[..3].to_string()))
+                .unwrap_or_default()
+        )
+    };
+}
+
 impl TableRow for AccountState {
     fn header() -> Vec<&'static str> {
         vec![
             "cred",
-            "registered at",
-            "deregistered at",
-            "stable stake",
-            "previous stake",
-            "latest stake",
-            "rewards sum",
-            "withdrawals sum",
-            "epoch values",
-            "latest pool",
-            "active pool",
-            "drep",
+            "reg",
+            "dereg",
+            "stake (-2)",
+            "stake (-1)",
+            "live stake",
+            "rewards",
+            "withdrawals",
+            "epoch version",
+            "pool latest",
+            "pool stable",
         ]
     }
 
@@ -45,9 +59,9 @@ impl TableRow for AccountState {
             format!("{}", hex::encode(key)),
             format!("{}", self.registered_at.unwrap_or_default()),
             format!("{}", self.deregistered_at.unwrap_or_default()),
-            format!("{}", self.total_stake.stable.unwrap_or_default()),
-            format!("{}", self.total_stake.previous.unwrap_or_default()),
-            format!("{}", self.total_stake.latest),
+            format_epoch_value!(self, stable),
+            format_epoch_value!(self, previous),
+            format!("{}", self.live_stake()),
             format!("{}", self.rewards_sum),
             format!("{}", self.withdrawals_sum),
             format!(
@@ -70,14 +84,6 @@ impl TableRow for AccountState {
                     _ => "empty".to_string(),
                 }
             ),
-            format!(
-                "{}",
-                match self.drep.stable.as_ref() {
-                    Some(Some(_)) => "delegated".to_string(),
-                    Some(None) => "unavailable".to_string(),
-                    _ => "empty".to_string(),
-                }
-            ),
         ]
     }
 }
@@ -93,8 +99,9 @@ impl TableRow for EpochState {
             "reserves",
             "utxos",
             "treasury",
-            "to treasury",
-            "to distribute",
+            "treasury tax",
+            "rewards",
+            "rewards (unspendable)",
             "nonce",
         ]
     }
@@ -109,8 +116,9 @@ impl TableRow for EpochState {
             format!("{}", self.reserves),
             format!("{}", self.utxos),
             format!("{}", self.treasury),
-            format!("{}", self.rewards_to_treasury.unwrap_or_default()),
-            format!("{}", self.rewards_to_distribute.unwrap_or_default()),
+            format!("{}", self.treasury_tax.unwrap_or_default()),
+            format!("{}", self.effective_rewards.unwrap_or_default()),
+            format!("{}", self.unspendable_rewards.unwrap_or_default()),
             format!(
                 "{}",
                 self.nonces
@@ -162,8 +170,10 @@ impl TableRow for PoolState {
         vec![
             "pool hex",
             "pool bech32",
-            "active stake",
-            "wait stake",
+            "stable stake",
+            "previous stake",
+            "latest stake",
+            "stake epoch",
             "blocks minted",
         ]
     }
@@ -178,7 +188,9 @@ impl TableRow for PoolState {
             format!("{}", pool_hex),
             format!("{}", pool_bech32),
             format!("{}", self.total_stake.stable.unwrap_or_default()),
+            format!("{}", self.total_stake.previous.unwrap_or_default()),
             format!("{}", self.total_stake.latest),
+            format!("{}", self.total_stake.epoch),
             format!("{}", self.blocks_minted_total),
         ]
     }

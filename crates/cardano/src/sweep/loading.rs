@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use dolos_core::{batch::WorkDeltas, ChainError, Domain, EntityKey, Genesis, StateStore};
 use tracing::{debug, trace};
 
@@ -53,6 +55,13 @@ pub fn load_account_data<D: Domain>(
 
     for record in accounts {
         let (account_id, account) = record?;
+
+        // registration status
+
+        // TODO: take into account stability window
+        if account.is_registered() {
+            boundary.registered_accounts.insert(account_id.clone());
+        }
 
         // ending snapshot
         let epoch = boundary.ending_state.number;
@@ -143,6 +152,7 @@ impl BoundaryWork {
             // to be loaded right after
             active_snapshot: Snapshot::default(),
             ending_snapshot: Snapshot::default(),
+            registered_accounts: HashSet::new(),
 
             // empty until computed
             deltas: WorkDeltas::default(),

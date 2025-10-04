@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use dolos_core::{batch::WorkDeltas, BlockSlot, ChainError, Domain, EntityKey, Genesis};
 use pallas::crypto::hash::Hash;
@@ -151,6 +151,7 @@ pub struct BoundaryWork {
     pub network_magic: Option<u32>,
     pub shelley_hash: Hash<32>,
     pub active_slot_coeff: f32,
+    pub registered_accounts: HashSet<AccountId>,
 
     // computed
     pub pot_delta: Option<PotDelta>,
