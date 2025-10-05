@@ -19,6 +19,7 @@ use dolos_core::{
 
 use crate::owned::{OwnedMultiEraBlock, OwnedMultiEraOutput};
 
+pub mod math_macros;
 pub mod pallas_extras;
 
 pub mod eras;
@@ -27,6 +28,7 @@ pub mod genesis;
 pub mod model;
 pub mod owned;
 pub mod pots;
+pub mod rewards;
 pub mod roll;
 pub mod sweep;
 pub mod utils;

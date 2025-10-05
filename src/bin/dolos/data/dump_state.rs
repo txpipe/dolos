@@ -23,13 +23,11 @@ trait TableRow: Entity {
 }
 
 macro_rules! format_epoch_value {
-    ($self:expr, $field:ident) => {
+    ($stake:expr, $pool:expr) => {
         format!(
             "{} ({})",
-            $self.total_stake.$field.unwrap_or_default(),
-            $self
-                .pool
-                .$field
+            $stake.unwrap_or_default(),
+            $pool
                 .as_ref()
                 .and_then(|x| x.map(|y| hex::encode(y)[..3].to_string()))
                 .unwrap_or_default()
@@ -49,8 +47,6 @@ impl TableRow for AccountState {
             "rewards",
             "withdrawals",
             "epoch version",
-            "pool latest",
-            "pool stable",
         ]
     }
 
@@ -59,30 +55,14 @@ impl TableRow for AccountState {
             format!("{}", hex::encode(key)),
             format!("{}", self.registered_at.unwrap_or_default()),
             format!("{}", self.deregistered_at.unwrap_or_default()),
-            format_epoch_value!(self, stable),
-            format_epoch_value!(self, previous),
-            format!("{}", self.live_stake()),
+            format_epoch_value!(self.total_stake.stable, self.pool.stable),
+            format_epoch_value!(self.total_stake.previous, self.pool.previous),
+            format_epoch_value!(Some(self.live_stake()), Some(self.pool.latest)),
             format!("{}", self.rewards_sum),
             format!("{}", self.withdrawals_sum),
             format!(
                 "{},{},{}",
                 self.total_stake.epoch, self.pool.epoch, self.drep.epoch,
-            ),
-            format!(
-                "{}",
-                self.pool
-                    .latest
-                    .as_ref()
-                    .map(hex::encode)
-                    .unwrap_or_default()
-            ),
-            format!(
-                "{}",
-                match self.pool.stable {
-                    Some(Some(pool)) => pool.to_string(),
-                    Some(None) => "unavailable".to_string(),
-                    _ => "empty".to_string(),
-                }
             ),
         ]
     }
@@ -170,6 +150,7 @@ impl TableRow for PoolState {
         vec![
             "pool hex",
             "pool bech32",
+            "margin cost",
             "stable stake",
             "previous stake",
             "latest stake",
@@ -187,6 +168,10 @@ impl TableRow for PoolState {
         vec![
             format!("{}", pool_hex),
             format!("{}", pool_bech32),
+            format!(
+                "{}/{}",
+                self.margin_cost.numerator, self.margin_cost.denominator
+            ),
             format!("{}", self.total_stake.stable.unwrap_or_default()),
             format!("{}", self.total_stake.previous.unwrap_or_default()),
             format!("{}", self.total_stake.latest),
