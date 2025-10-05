@@ -239,12 +239,7 @@ where
             .map_err(into_status)?
             .ok_or(Status::internal("Failed to find ledger tip"))?;
 
-        let (_, era) =
-            dolos_cardano::eras::load_active_era::<D>(self.domain.state()).map_err(into_status)?;
-
-        let (epoch, _) = era.slot_epoch(tip.slot());
-
-        let pparams = dolos_cardano::load_effective_pparams::<D>(self.domain.state(), epoch)
+        let pparams = dolos_cardano::load_effective_pparams::<D>(self.domain.state())
             .map_err(|_| Status::internal("Failed to load current pparams"))?;
 
         let pparams = dolos_cardano::utils::pparams_to_pallas(&pparams);

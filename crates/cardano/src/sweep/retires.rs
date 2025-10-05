@@ -242,7 +242,8 @@ fn should_expire_drep(ctx: &mut BoundaryWork, drep: &DRepState) -> Result<bool, 
 
     let (last_activity_epoch, _) = ctx.active_era.slot_epoch(last_activity_slot);
 
-    let expiring_epoch = last_activity_epoch as u64 + ctx.valid_drep_inactivity_period()?;
+    let expiring_epoch =
+        last_activity_epoch as u64 + ctx.ending_pparams().ensure_drep_inactivity_period()?;
 
     Ok(expiring_epoch <= ctx.starting_epoch_no())
 }
@@ -254,7 +255,10 @@ fn should_expire_proposal(ctx: &mut BoundaryWork, proposal: &Proposal) -> Result
     }
 
     let (epoch, _) = ctx.active_era.slot_epoch(proposal.slot);
-    let expiring_epoch = epoch as u64 + ctx.valid_governance_action_validity_period()?;
+    let expiring_epoch = epoch as u64
+        + ctx
+            .ending_pparams()
+            .ensure_governance_action_validity_period()?;
 
     Ok(expiring_epoch <= ctx.starting_epoch_no())
 }

@@ -251,9 +251,9 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         let epoch_rewards = ctx.pot_delta.as_ref().unwrap().available_rewards;
         let total_stake = ctx.active_snapshot.total_stake_sum;
         let total_active_stake = ctx.active_snapshot.active_stake_sum;
-        let k = ctx.valid_k()?;
-        let a0 = ctx.valid_a0()?;
-        let d = ctx.valid_d()?;
+        let k = ctx.ending_pparams().ensure_k()?;
+        let a0 = ctx.ending_pparams().ensure_a0()?;
+        let d = ctx.ending_pparams().ensure_d()?;
         let pool_blocks = pool.blocks_minted_epoch;
         let epoch_blocks = ctx.ending_state.blocks_minted;
         let delegators_count = ctx.active_snapshot.accounts_by_pool.count_delegators(id);

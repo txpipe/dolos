@@ -716,9 +716,6 @@ impl PParamValue {
 pub struct PParamsSet {
     #[n(0)]
     values: Vec<PParamValue>,
-
-    #[n(1)]
-    version: u16,
 }
 
 macro_rules! pgetter {
@@ -759,34 +756,6 @@ macro_rules! ensure_pparam {
 }
 
 impl PParamsSet {
-    pub fn new(version: u16) -> Self {
-        Self {
-            values: Vec::new(),
-            version,
-        }
-    }
-
-    /// Clone values while incrementing the original version number.
-    ///
-    /// This is used during forks to setup a starting set of values for the next
-    /// version. It usually follows with several `with` calls to set the values
-    /// for the new version.
-    pub fn bump_clone(&self) -> Self {
-        Self {
-            values: self.values.clone(),
-            version: self.version + 1,
-        }
-    }
-
-    /// The original version of the pparams set
-    ///
-    /// Since the protocol version param might be updated throughout an epoch to
-    /// flag a fork, we need this value to understand the version that defines
-    /// the format used to construct the params originally.
-    pub fn version(&self) -> u16 {
-        self.version
-    }
-
     pub fn get(&self, kind: PParamKind) -> Option<&PParamValue> {
         self.values.iter().find(|value| value.kind() == kind)
     }
@@ -805,10 +774,20 @@ impl PParamsSet {
         }
     }
 
+    pub fn clear(&mut self, kind: PParamKind) {
+        self.values.retain(|x| x.kind() != kind);
+    }
+
     pub fn with(mut self, value: PParamValue) -> Self {
         self.set(value);
 
         self
+    }
+
+    pub fn merge(&mut self, other: Self) {
+        for param in other.values {
+            self.set(param);
+        }
     }
 
     pub fn get_or_default(&self, kind: PParamKind) -> PParamValue {
@@ -819,6 +798,10 @@ impl PParamsSet {
 
     pub fn protocol_major(&self) -> Option<u16> {
         self.protocol_version().map(|(major, _)| major as u16)
+    }
+
+    pub fn protocol_major_or_default(&self) -> u16 {
+        self.protocol_major().unwrap_or(0)
     }
 
     pub fn k(&self) -> Option<u32> {
@@ -1009,6 +992,9 @@ pub struct EpochState {
 
     #[n(15)]
     pub treasury_tax: Option<u64>,
+
+    #[n(16)]
+    pub pparams_update: PParamsSet,
 }
 
 impl EpochState {

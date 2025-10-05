@@ -178,6 +178,7 @@ impl BoundaryWork {
             pot_delta: None,
             starting_state: None,
             era_transition: None,
+            next_pparams: None,
         };
 
         load_account_data::<D>(state, &mut boundary)?;

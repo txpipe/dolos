@@ -331,7 +331,7 @@ pub fn compute_delta<D: Domain>(
 
     info!(epoch, "current epoch");
 
-    let active_params = load_effective_pparams::<D>(state, epoch)?;
+    let active_params = load_effective_pparams::<D>(state)?;
 
     for block in batch.blocks.iter_mut() {
         let mut builder = DeltaBuilder::new(
