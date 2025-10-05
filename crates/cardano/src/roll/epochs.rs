@@ -147,13 +147,13 @@ impl dolos_core::EntityDelta for PParamsUpdate {
     fn apply(&mut self, entity: &mut Option<EpochState>) {
         let Some(entity) = entity else { return };
         debug!(update =? self.to_update, "applying pparam update");
-        entity.pparams.set(self.to_update.clone());
+        entity.pparams_update.set(self.to_update.clone());
     }
 
     fn undo(&self, entity: &mut Option<EpochState>) {
         if let Some(entity) = entity {
             if let Some(prev_value) = &self.prev_value {
-                entity.pparams.set(prev_value.clone());
+                entity.pparams_update.set(prev_value.clone());
             }
         }
     }

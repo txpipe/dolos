@@ -137,7 +137,6 @@ impl Snapshot {
 pub struct EraTransition {
     pub prev_version: EraProtocol,
     pub new_version: EraProtocol,
-    pub new_pparams: PParamsSet,
 }
 
 pub struct BoundaryWork {
@@ -158,6 +157,7 @@ pub struct BoundaryWork {
     pub pot_delta: Option<PotDelta>,
     pub starting_state: Option<EpochState>,
     pub era_transition: Option<EraTransition>,
+    pub next_pparams: Option<PParamsSet>,
 
     // computed via visitors
     pub deltas: WorkDeltas<CardanoLogic>,

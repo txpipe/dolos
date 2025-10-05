@@ -75,6 +75,7 @@ fn bootrap_epoch<D: Domain>(state: &D::State, genesis: &Genesis) -> Result<Epoch
 
     let epoch = EpochState {
         pparams,
+        pparams_update: PParamsSet::default(),
         number: 0,
         reserves: pots.reserves,
         treasury: pots.treasury,

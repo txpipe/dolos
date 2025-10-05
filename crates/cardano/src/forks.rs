@@ -80,7 +80,7 @@ const BYRON_EPOCH_LENGTH: u64 = 5 * 24 * 60 * 60;
 pub fn from_byron_genesis(byron: &byron::GenesisFile) -> PParamsSet {
     let version = &byron.block_version_data;
 
-    PParamsSet::new(0)
+    PParamsSet::default()
         .with(Val::ProtocolVersion((0, 0)))
         .with(Val::SystemStart(byron.start_time))
         .with(Val::SlotLength(version.slot_duration))
@@ -101,7 +101,7 @@ pub fn from_shelley_genesis(shelley: &shelley::GenesisFile) -> PParamsSet {
     let shelley = &shelley.protocol_params;
     let version = &shelley.protocol_version;
 
-    PParamsSet::new(2)
+    PParamsSet::default()
         .with(Val::SystemStart(system_start.timestamp() as u64))
         .with(Val::ProtocolVersion(version.clone().into()))
         .with(Val::EpochLength(epoch_length as u64))
@@ -130,7 +130,7 @@ pub fn from_shelley_genesis(shelley: &shelley::GenesisFile) -> PParamsSet {
 
 pub fn into_alonzo(previous: &PParamsSet, genesis: &alonzo::GenesisFile) -> PParamsSet {
     let set = previous
-        .bump_clone()
+        .clone()
         .with(Val::AdaPerUtxoByte(genesis.lovelace_per_utxo_word))
         .with(Val::ExecutionCosts(genesis.execution_prices.clone().into()))
         .with(Val::MaxTxExUnits(from_config_exunits(
@@ -152,7 +152,8 @@ pub fn into_alonzo(previous: &PParamsSet, genesis: &alonzo::GenesisFile) -> PPar
 }
 
 pub fn into_babbage(previous: &PParamsSet, genesis: &alonzo::GenesisFile) -> PParamsSet {
-    let set = previous.bump_clone();
+    let set = previous.clone();
+
     if let Some(v2) = from_alonzo_cost_models_map(&genesis.cost_models, &alonzo::Language::PlutusV2)
     {
         set.with(Val::CostModelsPlutusV2(v2))
@@ -168,7 +169,7 @@ pub fn into_conway(previous: &PParamsSet, genesis: &conway::GenesisFile) -> PPar
     let ada_per_utxo_byte = previous.ada_per_utxo_byte().unwrap_or_default() / 8;
 
     previous
-        .bump_clone()
+        .clone()
         .with(Val::AdaPerUtxoByte(ada_per_utxo_byte))
         .with(Val::CostModelsPlutusV3(
             genesis.plutus_v3_cost_model.clone(),
@@ -199,10 +200,10 @@ pub fn into_conway(previous: &PParamsSet, genesis: &conway::GenesisFile) -> PPar
 
 /// Increments the protocol version by 1 without changing any other fields
 pub fn intra_era_hardfork(current: &PParamsSet) -> PParamsSet {
-    let version = current.version();
+    let version = current.protocol_major_or_default();
 
     current
-        .bump_clone()
+        .clone()
         .with(PParamValue::ProtocolVersion((version as u64 + 1, 0)))
 }
 
@@ -214,9 +215,11 @@ pub fn intra_era_hardfork(current: &PParamsSet) -> PParamsSet {
 // Generally, these refer to the latter; the update proposals jump from 2 to 5,
 // because the node team decided it would be helpful to have these in sync.
 pub fn bump_pparams_version(current: &PParamsSet, genesis: &Genesis) -> PParamsSet {
-    debug!(version = current.version(), "bumping pparams version");
+    let version = current.protocol_major_or_default();
 
-    match current.version() {
+    debug!(version, "bumping pparams version");
+
+    match version {
         // Protocol starts at version 0;
         // There was one intra-era "hard fork" in byron (even though they weren't called that yet)
         0 => intra_era_hardfork(current),
@@ -251,19 +254,26 @@ pub fn evolve_pparams(
 ) -> Result<PParamsSet, BrokenInvariant> {
     let mut pparams = current.clone();
 
-    while pparams.version() < target {
-        let previous = pparams.version();
+    while pparams.protocol_major_or_default() < target {
+        let previous = pparams.protocol_major_or_default();
 
         pparams = bump_pparams_version(&pparams, genesis);
 
         // if the protocol major didn't increase, something went wrong and we might be
         // stuck in a loop. We return an error to avoid infinite loops.
-        if pparams.version() <= previous {
-            error!(version = pparams.version(), previous, "stuck in a loop");
+        if pparams.protocol_major_or_default() <= previous {
+            error!(
+                version = pparams.protocol_major_or_default(),
+                previous, "stuck in a loop"
+            );
+
             return Err(BrokenInvariant::InvalidGenesisConfig);
         }
 
-        info!(protocol = pparams.version(), "forced hardfork");
+        info!(
+            protocol = pparams.protocol_major_or_default(),
+            "forced hardfork"
+        );
     }
 
     Ok(pparams)

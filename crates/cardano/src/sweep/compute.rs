@@ -19,55 +19,6 @@ impl BoundaryWork {
         }
     }
 
-    pub fn valid_pparams(&self) -> Result<&PParamsSet, ChainError> {
-        // on the initial epoch, we use the ending state pparams since there's no
-        // active state yet
-        if self.ending_state.number == 0 {
-            return Ok(&self.ending_state.pparams);
-        }
-
-        let p = &self
-            .waiting_state
-            .as_ref()
-            .ok_or(ChainError::NoActiveEpoch)?
-            .pparams;
-
-        Ok(p)
-    }
-
-    pub fn valid_d(&self) -> Result<RationalNumber, ChainError> {
-        self.valid_pparams()?.ensure_d()
-    }
-
-    pub fn valid_epoch_length(&self) -> Result<u64, ChainError> {
-        self.valid_pparams()?.ensure_epoch_length()
-    }
-
-    pub fn valid_rho(&self) -> Result<RationalNumber, ChainError> {
-        self.valid_pparams()?.ensure_rho()
-    }
-
-    pub fn valid_tau(&self) -> Result<RationalNumber, ChainError> {
-        self.valid_pparams()?.ensure_tau()
-    }
-
-    pub fn valid_k(&self) -> Result<u32, ChainError> {
-        self.valid_pparams()?.ensure_k()
-    }
-
-    pub fn valid_a0(&self) -> Result<RationalNumber, ChainError> {
-        self.valid_pparams()?.ensure_a0()
-    }
-
-    pub fn valid_drep_inactivity_period(&self) -> Result<u64, ChainError> {
-        self.valid_pparams()?.ensure_drep_inactivity_period()
-    }
-
-    pub fn valid_governance_action_validity_period(&self) -> Result<u64, ChainError> {
-        self.valid_pparams()?
-            .ensure_governance_action_validity_period()
-    }
-
     pub fn ending_pparams(&self) -> &PParamsSet {
         &self.ending_state.pparams
     }
@@ -112,16 +63,16 @@ impl BoundaryWork {
 
         let eta = pots::calculate_eta(
             self.ending_state.blocks_minted,
-            self.valid_d()?,
+            self.ending_pparams().ensure_d()?,
             self.active_slot_coeff,
-            self.valid_epoch_length()?,
+            self.ending_pparams().ensure_epoch_length()?,
         );
 
         let delta = pots::compute_pot_delta(
             self.initial_pots().reserves,
             self.gathered_fees(),
-            &self.valid_rho()?,
-            &self.valid_tau()?,
+            &self.ending_pparams().ensure_rho()?,
+            &self.ending_pparams().ensure_tau()?,
             eta,
         );
 
@@ -178,6 +129,11 @@ impl BoundaryWork {
             .as_ref()
             .ok_or(ChainError::from(BrokenInvariant::EpochBoundaryIncomplete))?;
 
+        let pparams = self
+            .next_pparams
+            .as_ref()
+            .ok_or(ChainError::from(BrokenInvariant::EpochBoundaryIncomplete))?;
+
         // HACK: we can't explain why the epoch 2 generates a surplus of unspendable
         // rewards. Everything in the data looks correct, rewards should be there, but
         // DBSync data shows otherwise.
@@ -195,13 +151,8 @@ impl BoundaryWork {
 
         let deposits = self.ending_state.deposits;
         let utxos = self.ending_state.utxos;
-
+        let pparams = pparams.clone();
         let nonces = self.define_starting_nonces()?;
-
-        let pparams = match &self.era_transition {
-            Some(era_transition) => era_transition.new_pparams.clone(),
-            None => self.ending_state.pparams.clone(),
-        };
 
         let state = EpochState {
             number: self.ending_state.number + 1,
@@ -221,6 +172,7 @@ impl BoundaryWork {
             gathered_fees: 0,
             gathered_deposits: 0,
             decayed_deposits: 0,
+            pparams_update: PParamsSet::default(),
 
             // will be computed at the end of the epoch during _sweep_
             effective_rewards: None,
@@ -233,28 +185,41 @@ impl BoundaryWork {
         Ok(())
     }
 
-    fn define_era_transition(&mut self, genesis: &Genesis) -> Result<(), ChainError> {
-        let original = self.ending_pparams().version();
-        let (effective, _) = self.ending_pparams().ensure_protocol_version()?;
+    fn define_era_transition(&mut self) -> Result<(), ChainError> {
+        let original = self.ending_pparams().protocol_major_or_default();
 
-        if effective != original as u64 {
+        let update = self.ending_state.pparams_update.protocol_major();
+
+        if let Some(effective) = update {
             debug!(
                 %original,
                 %effective,
                 "found protocol version change"
             );
 
-            let new_pparams =
-                forks::evolve_pparams(&self.ending_state.pparams, genesis, effective as u16)?;
-
             let era_transition = EraTransition {
                 prev_version: EraProtocol::from(original),
                 new_version: EraProtocol::from(effective as u16),
-                new_pparams,
             };
 
             self.era_transition = Some(era_transition);
         }
+
+        Ok(())
+    }
+
+    fn define_next_pparams(&mut self, genesis: &Genesis) -> Result<(), ChainError> {
+        let mut next = self.ending_state.pparams.clone();
+
+        let overridden = self.ending_state.pparams_update.clone();
+
+        next.merge(overridden);
+
+        if let Some(new_era) = &self.era_transition {
+            next = forks::evolve_pparams(&next, genesis, new_era.new_version.into())?;
+        }
+
+        self.next_pparams = Some(next);
 
         Ok(())
     }
@@ -316,7 +281,10 @@ impl BoundaryWork {
         visitor_rotate.flush(self)?;
 
         trace!("defining era transition");
-        self.define_era_transition(genesis)?;
+        self.define_era_transition()?;
+
+        trace!("defining next pparams");
+        self.define_next_pparams(genesis)?;
 
         trace!("updating ending state");
         self.update_ending_state(

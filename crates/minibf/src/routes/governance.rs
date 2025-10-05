@@ -141,9 +141,7 @@ where
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let (epoch, _) = chain.slot_epoch(tip);
-
-    let pparams = domain.get_current_effective_pparams(epoch)?;
+    let pparams = domain.get_current_effective_pparams()?;
 
     let model = DrepModelBuilder {
         drep_id: drep,

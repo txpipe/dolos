@@ -56,11 +56,16 @@ impl BoundaryWork {
             &previous,
         )?;
 
+        let pparams = self
+            .next_pparams
+            .as_ref()
+            .ok_or(ChainError::from(BrokenInvariant::EpochBoundaryIncomplete))?;
+
         let new = EraSummary {
             start: previous.end.clone().unwrap(),
             end: None,
-            epoch_length: transition.new_pparams.epoch_length_or_default(),
-            slot_length: transition.new_pparams.slot_length_or_default(),
+            epoch_length: pparams.epoch_length_or_default(),
+            slot_length: pparams.slot_length_or_default(),
         };
 
         writer.write_entity_typed(&EntityKey::from(transition.new_version), &new)?;

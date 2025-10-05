@@ -86,8 +86,7 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
     }
 
     let pparams =
-        dolos_cardano::load_effective_pparams::<DomainAdapter>(domain.state(), args.epoch)
-            .into_diagnostic()?;
+        dolos_cardano::load_effective_pparams::<DomainAdapter>(domain.state()).into_diagnostic()?;
 
     let pparams = dolos_cardano::utils::pparams_to_pallas(&pparams);
 
