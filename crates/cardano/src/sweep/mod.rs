@@ -118,7 +118,8 @@ impl DelegatorMap {
 
 #[derive(Debug, Default)]
 pub struct Snapshot {
-    pub total_stake: u64,
+    pub total_stake_sum: u64,
+    pub active_stake_sum: u64,
     pub accounts_by_pool: DelegatorMap,
     pub accounts_by_drep: DelegatorMap,
     pub pool_stake: HashMap<PoolId, u64>,

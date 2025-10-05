@@ -249,7 +249,8 @@ impl super::BoundaryVisitor for BoundaryVisitor {
 
         let pool_stake = ctx.active_snapshot.get_pool_stake(id);
         let epoch_rewards = ctx.pot_delta.as_ref().unwrap().available_rewards;
-        let total_active_stake = ctx.active_snapshot.total_stake;
+        let total_stake = ctx.active_snapshot.total_stake_sum;
+        let total_active_stake = ctx.active_snapshot.active_stake_sum;
         let k = ctx.valid_k()?;
         let a0 = ctx.valid_a0()?;
         let d = ctx.valid_d()?;
@@ -260,6 +261,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         let total_pool_reward = crate::rewards::pool_rewards(
             epoch_rewards,
             circulating_supply,
+            total_stake,
             total_active_stake,
             pool_stake,
             pool.declared_pledge,

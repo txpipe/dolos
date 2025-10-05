@@ -103,9 +103,10 @@ fn pool_apparent_performance(
 /// Calculate the total rewards of the pool.
 pub fn pool_rewards(
     epoch_rewards: u64,
-    total_stake_snapshot: u64, // <-- E-2 total registered stake (NOT circulating)
-    active_stake: u64,         // E-2 active stake (σ_a denominator)
-    pool_stake: u64,           // E-2 pool stake
+    circulating_supply: u64,
+    _total_stake: u64, // <-- E-2 total registered stake (NOT circulating)
+    active_stake: u64, // E-2 active stake (σ_a denominator)
+    pool_stake: u64,   // E-2 pool stake
     declared_pledge: u64,
     live_pledge: u64,
     k: u32,
@@ -120,16 +121,22 @@ pub fn pool_rewards(
 
     assert!(k > 0, "k must be > 0");
 
-    let optimal = optimal_pool_rewards(
-        epoch_rewards,
-        k,
-        a0,
-        ratio!(pool_stake, total_stake_snapshot), // σ (relative to total stake)
-        ratio!(declared_pledge, total_stake_snapshot), // s (relative to total stake)
-    );
+    // σ (relative to total stake)
+    // TODO: understand why we need to use circulating supply here instead of total
+    // stake as specified in the spec
+    let σ = ratio!(pool_stake, circulating_supply);
+
+    // s (relative to total stake)
+    // TODO: understand why we need to use circulating supply here instead of total
+    // stake as specified in the spec
+    let s = ratio!(declared_pledge, circulating_supply);
+
+    let optimal = optimal_pool_rewards(epoch_rewards, k, a0, σ, s);
 
     let pbar = pool_apparent_performance(d, pool_blocks, epoch_blocks, pool_stake, active_stake);
+
     let out = ratio!(optimal) * pbar;
+
     floor_int!(out, u64)
 }
 
