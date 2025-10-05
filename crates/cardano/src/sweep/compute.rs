@@ -1,6 +1,6 @@
 use dolos_core::{BrokenInvariant, ChainError, Domain, Genesis, StateStore as _};
 use pallas::ledger::primitives::RationalNumber;
-use tracing::{debug, instrument, trace, warn};
+use tracing::{debug, info, instrument, trace, warn};
 
 use crate::{
     forks, pots,
@@ -188,20 +188,26 @@ impl BoundaryWork {
 
         let update = self.ending_state.pparams_update.protocol_major();
 
-        if let Some(effective) = update {
-            debug!(
-                %original,
-                %effective,
-                "found protocol version change"
-            );
+        let Some(effective) = update else {
+            return Ok(());
+        };
 
-            let era_transition = EraTransition {
-                prev_version: EraProtocol::from(original),
-                new_version: EraProtocol::from(effective as u16),
-            };
-
-            self.era_transition = Some(era_transition);
+        if original == effective {
+            return Ok(());
         }
+
+        info!(
+            %original,
+            %effective,
+            "found protocol version change"
+        );
+
+        let era_transition = EraTransition {
+            prev_version: EraProtocol::from(original),
+            new_version: EraProtocol::from(effective as u16),
+        };
+
+        self.era_transition = Some(era_transition);
 
         Ok(())
     }
@@ -214,7 +220,12 @@ impl BoundaryWork {
         next.merge(overridden);
 
         if let Some(new_era) = &self.era_transition {
-            next = forks::evolve_pparams(&next, genesis, new_era.new_version.into())?;
+            next = forks::migrate_pparams_version(
+                new_era.prev_version.into(),
+                new_era.new_version.into(),
+                &next,
+                genesis,
+            );
         }
 
         self.next_pparams = Some(next);

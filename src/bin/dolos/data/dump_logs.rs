@@ -59,6 +59,7 @@ impl TableRow for EpochState {
             "rewards",
             "rewards (unspendable)",
             "blocks minted",
+            "pparams",
         ]
     }
 
@@ -76,6 +77,7 @@ impl TableRow for EpochState {
             format!("{}", self.effective_rewards.unwrap_or_default()),
             format!("{}", self.unspendable_rewards.unwrap_or_default()),
             format!("{}", self.blocks_minted),
+            format!("{}", self.pparams.len()),
         ]
     }
 }

@@ -211,72 +211,52 @@ pub fn intra_era_hardfork(current: &PParamsSet) -> PParamsSet {
 }
 
 // Source: https://github.com/cardano-foundation/CIPs/blob/master/CIP-0059/feature-table.md
-// NOTE: part of the confusion here is that there are two versioning schemes
-// that can be easily conflated:
-// - The protocol version, negotiated in the networking layer
-// - The protocol version broadcast in the block header
-// Generally, these refer to the latter; the update proposals jump from 2 to 5,
-// because the node team decided it would be helpful to have these in sync.
-pub fn bump_pparams_version(current: &PParamsSet, genesis: &Genesis) -> PParamsSet {
-    let version = current.protocol_major_or_default();
+pub fn migrate_pparams_version(
+    from: u16,
+    to: u16,
+    current: &PParamsSet,
+    genesis: &Genesis,
+) -> PParamsSet {
+    debug!(from, to, "migrating pparams version");
 
-    debug!(version, "bumping pparams version");
-
-    match version {
+    match (from, to) {
         // Protocol starts at version 0;
         // There was one intra-era "hard fork" in byron (even though they weren't called that yet)
-        0 => intra_era_hardfork(current),
+        (0, 1) => intra_era_hardfork(current),
         // Protocol version 2 transitions from Byron to Shelley
-        1 => from_shelley_genesis(&genesis.shelley),
+        (1, 2) => from_shelley_genesis(&genesis.shelley),
         // Two intra-era hard forks, named Allegra (3) and Mary (4); we don't have separate types
         // for these eras
-        2 => intra_era_hardfork(current),
-        3 => intra_era_hardfork(current),
+        (2, 3) => intra_era_hardfork(current),
+        (3, 4) => intra_era_hardfork(current),
         // Protocol version 5 transitions from Shelley (Mary, technically) to Alonzo
-        4 => into_alonzo(current, &genesis.alonzo),
+        (4, 5) => into_alonzo(current, &genesis.alonzo),
         // One intra-era hard-fork in alonzo at protocol version 6
-        5 => intra_era_hardfork(current),
+        (5, 6) => intra_era_hardfork(current),
         // Protocol version 7 transitions from Alonzo to Babbage
-        6 => into_babbage(current, &genesis.alonzo),
+        (6, 7) => into_babbage(current, &genesis.alonzo),
         // One intra-era hard-fork in babbage at protocol version 8
-        7 => intra_era_hardfork(current),
+        (7, 8) => intra_era_hardfork(current),
         // Protocol version 9 transitions from Babbage to Conway
-        8 => into_conway(current, &genesis.conway),
+        (8, 9) => into_conway(current, &genesis.conway),
         // One intra-era hard-fork in conway at protocol version 10
-        9 => intra_era_hardfork(current),
-        from => {
-            unimplemented!("don't know how to bump from version {from}",)
+        (9, 10) => intra_era_hardfork(current),
+        (from, to) => {
+            unimplemented!("don't know how to bump from version {from} to {to}",)
         }
     }
 }
 
-pub fn evolve_pparams(
-    current: &PParamsSet,
+pub fn force_pparams_version(
+    initial: &PParamsSet,
     genesis: &Genesis,
-    target: u16,
+    from: u16,
+    to: u16,
 ) -> Result<PParamsSet, BrokenInvariant> {
-    let mut pparams = current.clone();
+    let mut pparams = initial.clone();
 
-    while pparams.protocol_major_or_default() < target {
-        let previous = pparams.protocol_major_or_default();
-
-        pparams = bump_pparams_version(&pparams, genesis);
-
-        // if the protocol major didn't increase, something went wrong and we might be
-        // stuck in a loop. We return an error to avoid infinite loops.
-        if pparams.protocol_major_or_default() <= previous {
-            error!(
-                version = pparams.protocol_major_or_default(),
-                previous, "stuck in a loop"
-            );
-
-            return Err(BrokenInvariant::InvalidGenesisConfig);
-        }
-
-        info!(
-            protocol = pparams.protocol_major_or_default(),
-            "forced hardfork"
-        );
+    for from in from..to {
+        pparams = migrate_pparams_version(from, from + 1, &pparams, genesis);
     }
 
     Ok(pparams)

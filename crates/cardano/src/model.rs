@@ -231,7 +231,7 @@ pub struct AccountState {
 
     #[n(9)]
     pub drep: EpochValue<Option<DRep>>,
-    
+
     #[n(10)]
     pub vote_delegated_at: Option<BlockSlot>,
 
@@ -760,6 +760,10 @@ macro_rules! ensure_pparam {
 }
 
 impl PParamsSet {
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
+
     pub fn get(&self, kind: PParamKind) -> Option<&PParamValue> {
         self.values.iter().find(|value| value.kind() == kind)
     }
