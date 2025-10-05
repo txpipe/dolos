@@ -166,7 +166,7 @@ pub struct BoundaryWork {
 
 impl BoundaryWork {
     pub fn starting_epoch_no(&self) -> u64 {
-        self.ending_state.number as u64 + 1
+        self.ending_state.number + 1
     }
 
     pub fn add_delta(&mut self, delta: impl Into<CardanoDelta>) {

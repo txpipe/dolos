@@ -25,7 +25,7 @@ fn should_enact_proposal(ctx: &mut BoundaryWork, proposal: &Proposal) -> bool {
         }
         _ => None,
     } {
-        epoch as u64 == ctx.starting_epoch_no()
+        epoch == ctx.starting_epoch_no()
     } else {
         false
     }
@@ -234,9 +234,9 @@ impl super::BoundaryVisitor for BoundaryVisitor {
 
     fn visit_account(
         &mut self,
-        ctx: &mut BoundaryWork,
+        _: &mut BoundaryWork,
         id: &AccountId,
-        account: &AccountState,
+        _: &AccountState,
     ) -> Result<(), ChainError> {
         self.change(AccountTransition::new(id.clone()));
 

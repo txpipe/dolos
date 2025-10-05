@@ -231,6 +231,9 @@ pub struct AccountState {
 
     #[n(9)]
     pub drep: EpochValue<Option<DRep>>,
+    
+    #[n(10)]
+    pub vote_delegated_at: Option<BlockSlot>,
 
     #[n(11)]
     pub deposit: u64,
@@ -253,6 +256,7 @@ impl AccountState {
             treasury_sum: 0,
             pool: EpochValue::new(None, epoch),
             drep: EpochValue::new(None, epoch),
+            vote_delegated_at: None,
             deposit: 0,
             deregistered_at: None,
         }
@@ -1027,37 +1031,32 @@ pub fn drep_to_entity_key(value: &DRep) -> EntityKey {
 
 #[derive(Debug, Encode, Decode, Clone, Default)]
 pub struct DRepState {
-    // TODO: field is deprecated, remove it in the next breaking change
     #[n(0)]
-    pub __drep_id: Vec<u8>,
-
-    #[n(1)]
     pub initial_slot: Option<u64>,
 
-    #[n(2)]
+    #[n(1)]
     pub voting_power: u64,
 
-    #[n(3)]
+    #[n(2)]
     pub last_active_slot: Option<u64>,
 
-    #[n(4)]
-    pub retired: bool,
+    #[n(3)]
+    pub unregistered_at: Option<BlockSlot>,
 
-    #[n(5)]
+    #[n(4)]
     pub expired: bool,
 
-    #[n(6)]
+    #[n(5)]
     pub deposit: u64,
 }
 
 impl DRepState {
     pub fn new() -> Self {
         Self {
-            __drep_id: vec![],
             initial_slot: None,
             voting_power: 0,
             last_active_slot: None,
-            retired: false,
+            unregistered_at: None,
             expired: false,
             deposit: 0,
         }

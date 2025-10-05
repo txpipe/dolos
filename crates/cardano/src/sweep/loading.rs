@@ -80,7 +80,7 @@ pub fn load_account_data<D: Domain>(
         let pool_id = account
             .pool
             .version_for(epoch)
-            .and_then(|x| x.clone())
+            .and_then(|x| *x)
             .map(EntityKey::from);
 
         let drep_id = account
@@ -102,7 +102,7 @@ pub fn load_account_data<D: Domain>(
             let pool_id = account
                 .pool
                 .version_for(epoch)
-                .and_then(|x| x.clone())
+                .and_then(|x| *x)
                 .map(EntityKey::from);
 
             let drep_id = account

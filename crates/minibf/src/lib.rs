@@ -97,7 +97,7 @@ impl<D: Domain> Facade<D> {
         epoch: Epoch,
         chain_summary: &ChainSummary,
     ) -> Result<Option<EpochState>, StatusCode> {
-        let slot = chain_summary.epoch_start(epoch as u64);
+        let slot = chain_summary.epoch_start(epoch);
 
         let logkey = LogKey::from(TemporalKey::from(slot));
 
@@ -190,7 +190,7 @@ impl<D: Domain> Facade<D> {
 
         let mut out = vec![];
         for epoch in range {
-            let slot = summary.epoch_start(epoch as u64);
+            let slot = summary.epoch_start(epoch);
             let logkey: LogKey = (TemporalKey::from(slot), key.clone()).into();
             if let Some(entity) = self
                 .archive()

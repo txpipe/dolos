@@ -139,7 +139,7 @@ impl BoundaryWork {
         &mut self,
         writer: &<D::Archive as ArchiveStore>::Writer,
     ) -> Result<(), ChainError> {
-        let start_of_epoch = self.active_era.epoch_start(self.ending_state.number as u64);
+        let start_of_epoch = self.active_era.epoch_start(self.ending_state.number);
         let start_of_epoch = ChainPoint::Slot(start_of_epoch);
         let temporal_key = TemporalKey::from(&start_of_epoch);
 

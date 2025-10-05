@@ -1,5 +1,5 @@
 use dolos_core::batch::WorkDeltas;
-use dolos_core::{ChainError, NsKey};
+use dolos_core::{BlockSlot, ChainError, NsKey};
 use pallas::codec::minicbor;
 use pallas::crypto::hash::Hash;
 use pallas::ledger::primitives::conway::DRep;
@@ -74,6 +74,7 @@ impl dolos_core::EntityDelta for ControlledAmountDec {
 
     fn apply(&mut self, entity: &mut Option<AccountState>) {
         let entity = entity.as_mut().expect("existing account");
+
         // TODO: saturating sub shouldn't be necesary
         //entity.controlled_amount -= self.amount;
         entity.controlled_amount = entity.controlled_amount.saturating_sub(self.amount);
@@ -81,6 +82,7 @@ impl dolos_core::EntityDelta for ControlledAmountDec {
 
     fn undo(&self, entity: &mut Option<AccountState>) {
         let entity = entity.as_mut().expect("existing account");
+
         entity.controlled_amount += self.amount;
     }
 }
@@ -190,17 +192,21 @@ impl dolos_core::EntityDelta for StakeDelegation {
 pub struct VoteDelegation {
     cred: StakeCredential,
     drep: DRep,
+    vote_delegated_at: BlockSlot,
 
     // undo
     prev_drep: Option<EpochValue<Option<DRep>>>,
+    prev_vote_delegated_at: Option<BlockSlot>,
 }
 
 impl VoteDelegation {
-    pub fn new(cred: StakeCredential, drep: DRep) -> Self {
+    pub fn new(cred: StakeCredential, drep: DRep, vote_delegated_at: BlockSlot) -> Self {
         Self {
             cred,
             drep,
+            vote_delegated_at,
             prev_drep: None,
+            prev_vote_delegated_at: None,
         }
     }
 }
@@ -218,8 +224,10 @@ impl dolos_core::EntityDelta for VoteDelegation {
 
         // save undo
         self.prev_drep = Some(entity.drep.clone());
+        self.prev_vote_delegated_at = entity.vote_delegated_at;
 
         // apply changes
+        entity.vote_delegated_at = Some(self.vote_delegated_at);
         entity.drep.update_unchecked(Some(self.drep.clone()));
     }
 
@@ -227,6 +235,7 @@ impl dolos_core::EntityDelta for VoteDelegation {
         let entity = entity.as_mut().expect("existing account");
 
         entity.drep = self.prev_drep.clone().expect("called with undo data");
+        entity.vote_delegated_at = self.prev_vote_delegated_at;
     }
 }
 
@@ -322,11 +331,13 @@ impl dolos_core::EntityDelta for WithdrawalInc {
 
     fn apply(&mut self, entity: &mut Option<Self::Entity>) {
         let entity = entity.as_mut().expect("existing account");
+
         entity.withdrawals_sum += self.amount;
     }
 
     fn undo(&self, entity: &mut Option<Self::Entity>) {
         let entity = entity.as_mut().expect("existing account");
+
         entity.withdrawals_sum = entity.withdrawals_sum.saturating_sub(self.amount);
     }
 }
@@ -418,7 +429,7 @@ impl BlockVisitor for AccountVisitor {
         }
 
         if let Some(cert) = pallas_extras::cert_as_vote_delegation(cert) {
-            deltas.add_for_entity(VoteDelegation::new(cert.delegator, cert.drep));
+            deltas.add_for_entity(VoteDelegation::new(cert.delegator, cert.drep, block.slot()));
         }
 
         Ok(())
