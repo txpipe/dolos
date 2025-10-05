@@ -190,9 +190,10 @@ macro_rules! handle_update {
                     value =? converted,
                     "applying new pparam value on ending state"
                 );
+
                 $ctx.ending_state
-                    .pparams
-                    .set(PParamValue::$variant(converted))
+                    .pparams_update
+                    .set(PParamValue::$variant(converted));
             }
         }
     };
@@ -264,7 +265,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
                     "applying proposed hardfork on ending state"
                 );
                 ctx.ending_state
-                    .pparams
+                    .pparams_update
                     .set(PParamValue::ProtocolVersion(*version));
             }
             GovAction::ParameterChange(_, update, _) => {
@@ -307,12 +308,14 @@ impl super::BoundaryVisitor for BoundaryVisitor {
                         value =? updated,
                         "applying new pparam value on ending state"
                     );
-                    ctx.ending_state.pparams.set(PParamValue::MaxTxExUnits(
-                        pallas::ledger::primitives::ExUnits {
-                            mem: updated.mem,
-                            steps: updated.steps,
-                        },
-                    ))
+                    ctx.ending_state
+                        .pparams_update
+                        .set(PParamValue::MaxTxExUnits(
+                            pallas::ledger::primitives::ExUnits {
+                                mem: updated.mem,
+                                steps: updated.steps,
+                            },
+                        ))
                 }
                 if let Some(updated) = update.max_block_ex_units {
                     debug!(
@@ -320,12 +323,14 @@ impl super::BoundaryVisitor for BoundaryVisitor {
                         value =? updated,
                         "applying new pparam value on ending state"
                     );
-                    ctx.ending_state.pparams.set(PParamValue::MaxBlockExUnits(
-                        pallas::ledger::primitives::ExUnits {
-                            mem: updated.mem,
-                            steps: updated.steps,
-                        },
-                    ))
+                    ctx.ending_state
+                        .pparams_update
+                        .set(PParamValue::MaxBlockExUnits(
+                            pallas::ledger::primitives::ExUnits {
+                                mem: updated.mem,
+                                steps: updated.steps,
+                            },
+                        ))
                 }
                 if let Some(updated) = update.minfee_refscript_cost_per_byte.as_ref() {
                     debug!(
@@ -334,7 +339,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
                         "applying new pparam value on ending state"
                     );
                     ctx.ending_state
-                        .pparams
+                        .pparams_update
                         .set(PParamValue::MinFeeRefScriptCostPerByte(RationalNumber {
                             numerator: updated.numerator,
                             denominator: updated.denominator,
@@ -347,7 +352,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
                         "applying new pparam value on ending state"
                     );
                     ctx.ending_state
-                        .pparams
+                        .pparams_update
                         .set(PParamValue::ExecutionCosts(ExUnitPrices {
                             mem_price: updated.mem_price.clone(),
                             step_price: updated.step_price.clone(),
@@ -363,22 +368,22 @@ impl super::BoundaryVisitor for BoundaryVisitor {
 
                     if let Some(v1) = updated.plutus_v1.as_ref() {
                         ctx.ending_state
-                            .pparams
+                            .pparams_update
                             .set(PParamValue::CostModelsPlutusV1(v1.clone()));
                     }
                     if let Some(v2) = updated.plutus_v2.as_ref() {
                         ctx.ending_state
-                            .pparams
+                            .pparams_update
                             .set(PParamValue::CostModelsPlutusV2(v2.clone()));
                     }
                     if let Some(v3) = updated.plutus_v3.as_ref() {
                         ctx.ending_state
-                            .pparams
+                            .pparams_update
                             .set(PParamValue::CostModelsPlutusV3(v3.clone()));
                     }
                     if !updated.unknown.is_empty() {
                         ctx.ending_state
-                            .pparams
+                            .pparams_update
                             .set(PParamValue::CostModelsUnknown(updated.unknown.clone()));
                     }
                 }

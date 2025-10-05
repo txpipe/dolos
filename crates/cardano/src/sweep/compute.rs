@@ -132,7 +132,8 @@ impl BoundaryWork {
         let pparams = self
             .next_pparams
             .as_ref()
-            .ok_or(ChainError::from(BrokenInvariant::EpochBoundaryIncomplete))?;
+            .ok_or(ChainError::from(BrokenInvariant::EpochBoundaryIncomplete))?
+            .clone();
 
         // HACK: we can't explain why the epoch 2 generates a surplus of unspendable
         // rewards. Everything in the data looks correct, rewards should be there, but
@@ -151,7 +152,6 @@ impl BoundaryWork {
 
         let deposits = self.ending_state.deposits;
         let utxos = self.ending_state.utxos;
-        let pparams = pparams.clone();
         let nonces = self.define_starting_nonces()?;
 
         let state = EpochState {
@@ -161,9 +161,7 @@ impl BoundaryWork {
             reserves,
             treasury,
             pparams,
-            largest_stable_slot: self
-                .active_era
-                .epoch_start(self.ending_state.number + 2)
+            largest_stable_slot: self.active_era.epoch_start(self.ending_state.number + 2)
                 - nonce_stability_window(self.active_protocol.into(), genesis),
             nonces,
 
