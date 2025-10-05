@@ -774,6 +774,10 @@ impl PParamsSet {
         }
     }
 
+    pub fn clear(&mut self, kind: PParamKind) {
+        self.values.retain(|x| x.kind() != kind);
+    }
+
     pub fn with(mut self, value: PParamValue) -> Self {
         self.set(value);
 

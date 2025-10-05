@@ -145,8 +145,13 @@ impl dolos_core::EntityDelta for PParamsUpdate {
     }
 
     fn apply(&mut self, entity: &mut Option<EpochState>) {
-        let Some(entity) = entity else { return };
+        let entity = entity.as_mut().expect("epoch state missing");
+
         debug!(update =? self.to_update, "applying pparam update");
+
+        // undo data
+        self.prev_value = entity.pparams_update.get(self.to_update.kind()).cloned();
+
         entity.pparams_update.set(self.to_update.clone());
     }
 
@@ -154,6 +159,8 @@ impl dolos_core::EntityDelta for PParamsUpdate {
         if let Some(entity) = entity {
             if let Some(prev_value) = &self.prev_value {
                 entity.pparams_update.set(prev_value.clone());
+            } else {
+                entity.pparams_update.clear(self.to_update.kind());
             }
         }
     }
