@@ -12,184 +12,10 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 use crate::{
-    pallas_extras,
+    pallas_extras, pallas_ratio,
     sweep::{AccountId, BoundaryWork, PoolId, Snapshot},
     AccountState, CardanoDelta, CardanoEntity, FixedNamespace as _, PoolState, RewardLog, StakeLog,
 };
-
-fn optimal_pool_rewards2(
-    epoch_rewards: u64,
-    optimal_pool_count: u32,
-    influence: Ratio,
-    relative_stake_of_pool: Ratio,
-    relative_stake_of_pool_owner: Ratio,
-) -> u64 {
-    let influence = to_big_rational(influence);
-    let relative_stake_of_pool = to_big_rational(relative_stake_of_pool);
-    let relative_stake_of_pool_owner = to_big_rational(relative_stake_of_pool_owner);
-    let epoch_rewards = Ratio::from_integer(epoch_rewards as i128);
-    let epoch_rewards = to_big_rational(epoch_rewards);
-
-    let size_of_saturated_pool = Ratio::new(1, optimal_pool_count as i128);
-    let size_of_saturated_pool = to_big_rational(size_of_saturated_pool);
-    let capped_relative_stake = min(relative_stake_of_pool, size_of_saturated_pool.clone());
-    let capped_relative_stake_of_pool_owner =
-        min(relative_stake_of_pool_owner, size_of_saturated_pool.clone());
-
-    // R / (1 + a0)
-    let one = Ratio::from_integer(1);
-    let one = to_big_rational(one);
-    let one_plus_influence = one + influence.clone();
-    let rewards_divided_by_one_plus_influence = epoch_rewards / one_plus_influence;
-
-    // (z0 - sigma') / z0
-    let size_of_saturated_minus_capped_relative_state =
-        size_of_saturated_pool.clone() - capped_relative_stake.clone();
-    let relative_stake_of_saturated_pool =
-        size_of_saturated_minus_capped_relative_state / size_of_saturated_pool.clone();
-
-    // (sigma' - s' * relativeStakeOfSaturatedPool) / z0
-    let numer = capped_relative_stake.clone()
-        - (capped_relative_stake_of_pool_owner.clone() * relative_stake_of_saturated_pool);
-    let denom = size_of_saturated_pool;
-    let saturated_pool_weight = numer / denom;
-
-    // R / (1+a0) * (sigma' + s' * a0 * saturatedPoolWeight)
-    let mult1 = rewards_divided_by_one_plus_influence;
-    let mult2 = capped_relative_stake
-        + (capped_relative_stake_of_pool_owner * influence * saturated_pool_weight);
-    let out = mult1 * mult2;
-
-    let out: i64 = out.floor().to_integer().try_into().unwrap();
-
-    out.max(0) as u64
-}
-
-pub type TotalPoolReward = u64;
-
-pub type OperatorShare = u64;
-
-pub type Ratio = num_rational::Ratio<i128>;
-
-fn compute_delegator_reward(
-    available_rewards: u64,
-    total_delegated: u64,
-    delegator_stake: u64,
-) -> u64 {
-    let share = (delegator_stake as f64 / total_delegated as f64) * available_rewards as f64;
-    share.round() as u64
-}
-
-fn to_big_rational(ratio: Ratio) -> BigRational {
-    let numer = num_bigint::BigInt::from(*ratio.numer());
-    let denom = num_bigint::BigInt::from(*ratio.denom());
-    BigRational::new(numer, denom)
-}
-
-fn compute_pool_apparent_performance(
-    pool_blocks: u32,
-    epoch_blocks: u32, // total blocks actually added to chain in the epoch
-    pool_stake: u64,
-    total_active_stake: u64, // ACTIVE stake (σ_a denominator)
-) -> Ratio {
-    if total_active_stake == 0 {
-        return Ratio::new(0_i128, 1_i128);
-    }
-
-    // β = n / max(1, N̄)
-    let beta = Ratio::new(pool_blocks as i128, std::cmp::max(epoch_blocks, 1) as i128);
-
-    let sigma_a = Ratio::new(pool_stake as i128, total_active_stake as i128);
-
-    if sigma_a == Ratio::new(0_i128, 1_i128) {
-        return Ratio::new(0_i128, 1_i128);
-    }
-
-    // p̄ = β / σ_a
-    beta / sigma_a
-}
-
-#[allow(clippy::too_many_arguments)]
-fn compute_pool_rewards(
-    total_rewards: u64,
-    total_stake: u64,
-    total_active_stake: u64,
-    pool: &PoolState,
-    pool_stake: u64,
-    live_pledge: u64,
-    k: u32,
-    a0: &RationalNumber,
-    pool_blocks: u32,
-    epoch_blocks: u32,
-) -> u64 {
-    if live_pledge < pool.declared_pledge {
-        return 0;
-    }
-
-    let optimal = optimal_pool_rewards2(
-        total_rewards,
-        k,
-        Ratio::new(a0.numerator as i128, a0.denominator as i128),
-        Ratio::new(pool_stake as i128, total_stake as i128),
-        Ratio::new(pool.declared_pledge as i128, total_stake as i128),
-    );
-
-    let pbar = compute_pool_apparent_performance(
-        pool_blocks,
-        epoch_blocks,
-        pool_stake,
-        total_active_stake,
-    );
-
-    (Ratio::from_integer(optimal as i128) * pbar)
-        .floor()
-        .to_integer()
-        .try_into()
-        .unwrap()
-}
-
-// Includes owner’s member share per spec (Eq. 5.5.4)
-fn compute_pool_operator_share(pool_rewards: u64, pool: &PoolState, pool_stake: u64) -> u64 {
-    let c = pool.fixed_cost;
-
-    if pool_rewards <= c {
-        return pool_rewards; // operator takes it all if rewards ≤ fixed cost
-    }
-
-    let after_cost = pool_rewards - c;
-
-    // margin m
-    let m = Ratio::new(
-        pool.margin_cost.numerator as i128,
-        pool.margin_cost.denominator as i128,
-    );
-
-    let m = to_big_rational(m);
-
-    // s/σ — ratio of owner's pledge to pool stake (denominator cancels, so we can
-    // use amounts)
-    let s_over_sigma = if pool_stake == 0 {
-        to_big_rational(Ratio::new(0, 1))
-    } else {
-        let numer = BigInt::from(pool.declared_pledge.min(pool_stake));
-        let denom = BigInt::from(pool_stake);
-        BigRational::new(numer, denom)
-    };
-
-    let one = Ratio::from_integer(1);
-    let one = to_big_rational(one);
-
-    // c + (f̂ − c) · ( m + (1 − m) · s/σ )
-    let term = m.clone() + (one - m) * s_over_sigma;
-
-    let after_cost = BigRational::from_integer(BigInt::from(after_cost));
-
-    let variable = after_cost * term;
-
-    let variable: u64 = variable.floor().to_integer().try_into().unwrap();
-
-    c + variable
-}
 
 fn stake_cred_to_entity_key(cred: &StakeCredential) -> EntityKey {
     let bytes = minicbor::to_vec(cred).unwrap();
@@ -318,7 +144,8 @@ impl BoundaryVisitor {
         total_delegated: u64,
         delegator_stake: u64,
     ) -> Result<(), ChainError> {
-        let reward = compute_delegator_reward(available_rewards, total_delegated, delegator_stake);
+        let reward =
+            crate::rewards::delegator_reward(available_rewards, total_delegated, delegator_stake);
 
         self.change(AssignDelegatorRewards {
             account: delegator.clone(),
@@ -425,24 +252,33 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         let total_active_stake = ctx.active_snapshot.total_stake;
         let k = ctx.valid_k()?;
         let a0 = ctx.valid_a0()?;
+        let d = ctx.valid_d()?;
         let pool_blocks = pool.blocks_minted_epoch;
         let epoch_blocks = ctx.ending_state.blocks_minted;
         let delegators_count = ctx.active_snapshot.accounts_by_pool.count_delegators(id);
 
-        let total_pool_reward = compute_pool_rewards(
+        let total_pool_reward = crate::rewards::pool_rewards(
             epoch_rewards,
             circulating_supply,
             total_active_stake,
-            pool,
             pool_stake,
+            pool.declared_pledge,
             live_pledge,
             k,
-            &a0,
+            pallas_ratio!(a0),
+            pallas_ratio!(d),
             pool_blocks,
             epoch_blocks,
         );
 
-        let operator_share = compute_pool_operator_share(total_pool_reward, pool, pool_stake);
+        let operator_share = crate::rewards::pool_operator_share(
+            total_pool_reward,
+            pool.fixed_cost,
+            pallas_ratio!(pool.margin_cost),
+            pool_stake,
+            live_pledge,
+            circulating_supply,
+        );
 
         debug!(
             %pool_blocks,
@@ -454,6 +290,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
             %epoch_rewards,
             %total_pool_reward,
             %operator_share,
+            %live_pledge,
             "computed pool rewards"
         );
 

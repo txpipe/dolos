@@ -1,36 +1,7 @@
-use num_bigint::BigInt;
-use num_rational::BigRational;
-use pallas::ledger::primitives::RationalNumber;
+use crate::{floor_int, pallas_ratio, ratio};
 
 pub type Ratio = num_rational::BigRational;
 pub type PallasRatio = pallas::ledger::primitives::RationalNumber;
-
-macro_rules! big_ratio {
-    ($numer:expr, $denom:expr) => {{
-        let numer = BigInt::from($numer);
-        let denom = BigInt::from($denom);
-        BigRational::new(numer, denom)
-    }};
-}
-
-macro_rules! from_pallas_ratio {
-    ($x:expr) => {{
-        big_ratio!($x.numerator, $x.denominator)
-    }};
-}
-
-macro_rules! into_ratio {
-    ($x:expr) => {{
-        let x = BigInt::from($x);
-        BigRational::from_integer(x)
-    }};
-}
-
-macro_rules! floor_int {
-    ($x:expr, $ty:ty) => {
-        <$ty>::try_from($x.floor().to_integer()).unwrap()
-    };
-}
 
 #[derive(Debug)]
 pub struct PotDelta {
@@ -84,10 +55,10 @@ pub struct PotDelta {
 ///   section 5.4.3
 /// - [CF Java Rewards Calculation](https://github.com/cardano-foundation/cf-java-rewards-calculation/blob/b05eddf495af6dc12d96c49718f27c34fa2042b1/calculation/src/main/java/org/cardanofoundation/rewards/calculation/TreasuryCalculation.java#L117)
 pub fn calculate_eta(minted_blocks: u32, d: PallasRatio, f: f32, epoch_length: u64) -> Ratio {
-    let one = into_ratio!(1);
-    let d = from_pallas_ratio!(d);
+    let one = ratio!(1);
+    let d = pallas_ratio!(d);
 
-    let d_threshold = big_ratio!(8, 10); // 0.8
+    let d_threshold = ratio!(8, 10); // 0.8
 
     if d >= d_threshold {
         return one;
@@ -95,16 +66,16 @@ pub fn calculate_eta(minted_blocks: u32, d: PallasRatio, f: f32, epoch_length: u
 
     let f = Ratio::from_float(f).expect("invalid active slot coefficient");
 
-    let epoch_length = into_ratio!(epoch_length);
-    let expected_blocks = f.clone() * epoch_length.clone();
+    let epoch_length = ratio!(epoch_length);
+    let expected_blocks = f * epoch_length;
 
-    let expected_non_obft_blocks = expected_blocks.clone() * (&one - d.clone());
+    let expected_non_obft_blocks = expected_blocks * (&one - d);
 
     // eta is the ratio between the number of blocks that have been produced during
     // the epoch, and the expectation value of blocks that should have been
     // produced during the epoch under ideal conditions.
 
-    let minted_blocks = into_ratio!(minted_blocks);
+    let minted_blocks = ratio!(minted_blocks);
 
     let eta = minted_blocks / expected_non_obft_blocks;
 
@@ -123,9 +94,9 @@ pub fn compute_pot_delta(
     tau: &PallasRatio, // treasuryCut (τ)
     eta: Ratio,        // from calculate_eta (already capped to ≤ 1)
 ) -> PotDelta {
-    let rho = from_pallas_ratio!(rho);
-    let tau = from_pallas_ratio!(tau);
-    let reserves = into_ratio!(reserves);
+    let rho = pallas_ratio!(rho);
+    let tau = pallas_ratio!(tau);
+    let reserves = ratio!(reserves);
 
     // Δr1 = floor( min(1,η) * ρ * reserves )
     let incentives_q = eta * rho * reserves;
@@ -135,7 +106,7 @@ pub fn compute_pot_delta(
     let reward_pot = fee_ss + delta_r1;
 
     // Δt1 = floor( τ * rewardPot )
-    let treasury_tax = floor_int!(tau * into_ratio!(reward_pot), u64);
+    let treasury_tax = floor_int!(tau * ratio!(reward_pot), u64);
 
     // R = rewardPot - Δt1
     let available_rewards = reward_pot - treasury_tax;
