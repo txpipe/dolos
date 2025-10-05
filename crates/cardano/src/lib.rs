@@ -19,6 +19,7 @@ use dolos_core::{
 
 use crate::owned::{OwnedMultiEraBlock, OwnedMultiEraOutput};
 
+pub mod math_macros;
 pub mod pallas_extras;
 
 pub mod eras;
@@ -27,6 +28,7 @@ pub mod genesis;
 pub mod model;
 pub mod owned;
 pub mod pots;
+pub mod rewards;
 pub mod roll;
 pub mod sweep;
 pub mod utils;
@@ -245,27 +247,8 @@ impl dolos_core::ChainLogic for CardanoLogic {
     }
 }
 
-pub fn load_effective_pparams<D: Domain>(
-    state: &D::State,
-    caller_epoch: Epoch,
-) -> Result<PParamsSet, ChainError> {
-    // the effective pparams are usually the ones for the previous epoch (aka: `set`
-    // epoch) except for the initial epoch, where we use the mark epoch since
-    // there's nothing before
-    let epoch = match caller_epoch {
-        0 => load_mark_epoch::<D>(state)?,
-        _ => load_set_epoch::<D>(state)?.ok_or(BrokenInvariant::InvalidEpochState)?,
-    };
-
-    if epoch.number != 0 && epoch.number != (caller_epoch - 1) {
-        error!(
-            caller_epoch,
-            loaded_epoch = epoch.number,
-            "effective epoch doesn't match for caller"
-        );
-
-        return Err(ChainError::from(BrokenInvariant::InvalidEpochState));
-    }
+pub fn load_effective_pparams<D: Domain>(state: &D::State) -> Result<PParamsSet, ChainError> {
+    let epoch = load_mark_epoch::<D>(state)?;
 
     Ok(epoch.pparams)
 }

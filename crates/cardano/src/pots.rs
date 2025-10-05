@@ -1,27 +1,7 @@
+use crate::{floor_int, pallas_ratio, ratio};
 
-pub type Ratio = num_rational::Ratio<i128>;
-
+pub type Ratio = num_rational::BigRational;
 pub type PallasRatio = pallas::ledger::primitives::RationalNumber;
-
-macro_rules! from_pallas_ratio {
-    ($x:expr) => {{
-        let numerator = $x.numerator as i128;
-        let denominator = $x.denominator as i128;
-        Ratio::new(numerator, denominator)
-    }};
-}
-
-macro_rules! into_ratio {
-    ($x:expr) => {{
-        num_rational::Ratio::from_integer($x as i128)
-    }};
-}
-
-macro_rules! floor_int {
-    ($x:expr) => {
-        $x.floor().to_integer()
-    };
-}
 
 #[derive(Debug)]
 pub struct PotDelta {
@@ -48,6 +28,13 @@ pub struct PotDelta {
 /// specification. Eta represents the ratio between actual blocks produced by
 /// pools and the expected number of blocks under ideal conditions.
 ///
+/// The number of expected blocks will be the number of slots per epoch times
+/// the active slots coefficient See: Non-Updatable Parameters: https://cips.cardano.org/cips/cip9/
+///
+/// decentralizationParameter is the proportion of blocks that are expected to
+/// be produced by stake pools instead of the OBFT (Ouroboros Byzantine Fault
+/// Tolerance) nodes. It was introduced close before the Shelley era: https://github.com/input-output-hk/cardano-ledger/commit/c4f10d286faadcec9e4437411bce9c6c3b6e51c2
+///
 /// # Arguments
 ///
 /// * `minted_blocks` - Total number of blocks produced by stake pools in the
@@ -68,34 +55,27 @@ pub struct PotDelta {
 ///   section 5.4.3
 /// - [CF Java Rewards Calculation](https://github.com/cardano-foundation/cf-java-rewards-calculation/blob/b05eddf495af6dc12d96c49718f27c34fa2042b1/calculation/src/main/java/org/cardanofoundation/rewards/calculation/TreasuryCalculation.java#L117)
 pub fn calculate_eta(minted_blocks: u32, d: PallasRatio, f: f32, epoch_length: u64) -> Ratio {
-    let d = from_pallas_ratio!(d);
+    let one = ratio!(1);
+    let d = pallas_ratio!(d);
 
-    let d_threshold = Ratio::new(8, 10); // 0.8
+    let d_threshold = ratio!(8, 10); // 0.8
 
     if d >= d_threshold {
-        return Ratio::from_integer(1);
+        return one.clone();
     }
 
-    // The number of expected blocks will be the number of slots per epoch times the
-    // active slots coefficient See: Non-Updatable Parameters: https://cips.cardano.org/cips/cip9/
+    let f = Ratio::from_float(f).expect("invalid active slot coefficient");
 
-    // decentralizationParameter is the proportion of blocks that are expected to be
-    // produced by stake pools instead of the OBFT (Ouroboros Byzantine Fault
-    // Tolerance) nodes. It was introduced close before the Shelley era: https://github.com/input-output-hk/cardano-ledger/commit/c4f10d286faadcec9e4437411bce9c6c3b6e51c2
-    let one = Ratio::from_integer(1);
-
-    let f = Ratio::approximate_float(f).expect("invalid active slot coefficient");
-
-    let epoch_length = into_ratio!(epoch_length);
+    let epoch_length = ratio!(epoch_length);
     let expected_blocks = f * epoch_length;
 
-    let expected_non_obft_blocks = expected_blocks * (one - d);
+    let expected_non_obft_blocks = expected_blocks * (one.clone() - d);
 
     // eta is the ratio between the number of blocks that have been produced during
     // the epoch, and the expectation value of blocks that should have been
     // produced during the epoch under ideal conditions.
 
-    let minted_blocks = Ratio::from_integer(minted_blocks as i128);
+    let minted_blocks = ratio!(minted_blocks);
 
     let eta = minted_blocks / expected_non_obft_blocks;
 
@@ -114,19 +94,19 @@ pub fn compute_pot_delta(
     tau: &PallasRatio, // treasuryCut (τ)
     eta: Ratio,        // from calculate_eta (already capped to ≤ 1)
 ) -> PotDelta {
-    let rho = from_pallas_ratio!(rho);
-    let tau = from_pallas_ratio!(tau);
-    let reserves = into_ratio!(reserves);
+    let rho = pallas_ratio!(rho);
+    let tau = pallas_ratio!(tau);
+    let reserves = ratio!(reserves);
 
     // Δr1 = floor( min(1,η) * ρ * reserves )
     let incentives_q = eta * rho * reserves;
-    let delta_r1 = floor_int!(incentives_q) as u64;
+    let delta_r1 = floor_int!(incentives_q, u64);
 
     // rewardPot = feeSS + Δr1
     let reward_pot = fee_ss + delta_r1;
 
     // Δt1 = floor( τ * rewardPot )
-    let treasury_tax = floor_int!(tau * into_ratio!(reward_pot)) as u64;
+    let treasury_tax = floor_int!(tau * ratio!(reward_pot), u64);
 
     // R = rewardPot - Δt1
     let available_rewards = reward_pot - treasury_tax;

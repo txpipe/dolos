@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use dolos_core::{batch::WorkDeltas, ChainError, Domain, EntityKey, Genesis, StateStore};
 use tracing::{debug, trace};
 
@@ -8,7 +10,7 @@ use crate::{
 };
 
 impl Snapshot {
-    pub fn track_account(
+    pub fn track_registered_account(
         &mut self,
         account: &AccountId,
         pool_id: Option<PoolId>,
@@ -24,7 +26,7 @@ impl Snapshot {
                 .and_modify(|x| *x += stake)
                 .or_insert(stake);
 
-            self.total_stake += stake;
+            self.active_stake_sum += stake;
         }
 
         if let Some(drep_id) = drep_id {
@@ -36,6 +38,8 @@ impl Snapshot {
                 .and_modify(|x| *x += stake)
                 .or_insert(stake);
         }
+
+        self.total_stake_sum += stake;
 
         Ok(())
     }
@@ -53,6 +57,22 @@ pub fn load_account_data<D: Domain>(
 
     for record in accounts {
         let (account_id, account) = record?;
+
+        // registration status
+
+        // TODO: take into account stability window.
+        // Pre-babbage behavior: Hardano starts the reward calc when the previous
+        // boundary reached the stability period. Any accounts de-registration will be
+        // "seen" by the calc and omitted from the reward distribution. Account
+        // de-registration after the stability period are not seen by the algo so they
+        // "appear" to be registered, and thus counted towards rewards. The problem is
+        // that there's no actual account to send the rewards to, so these are sent to
+        // the treasury.
+        if !account.is_registered() {
+            continue;
+        }
+
+        boundary.registered_accounts.insert(account_id.clone());
 
         // ending snapshot
         let epoch = boundary.ending_state.number;
@@ -73,7 +93,7 @@ pub fn load_account_data<D: Domain>(
 
         boundary
             .ending_snapshot
-            .track_account(&account_id, pool_id, drep_id, stake)?;
+            .track_registered_account(&account_id, pool_id, drep_id, stake)?;
 
         // active snapshot (only available from epoch 2 onwards)
         if let Some(active_state) = boundary.active_state.as_ref() {
@@ -97,9 +117,12 @@ pub fn load_account_data<D: Domain>(
                 .cloned()
                 .unwrap_or_default();
 
-            boundary
-                .active_snapshot
-                .track_account(&account_id, pool_id, drep_id, stake)?;
+            boundary.active_snapshot.track_registered_account(
+                &account_id,
+                pool_id,
+                drep_id,
+                stake,
+            )?;
         }
     }
 
@@ -107,7 +130,11 @@ pub fn load_account_data<D: Domain>(
         trace!(%pool_id, %stake, "pool stake");
     }
 
-    debug!(total_stake = %boundary.active_snapshot.total_stake, "total stake");
+    debug!(
+        total_stake = %boundary.active_snapshot.total_stake_sum,
+        active_stake = %boundary.active_snapshot.active_stake_sum,
+        "stake aggregation"
+    );
 
     Ok(())
 }
@@ -143,6 +170,7 @@ impl BoundaryWork {
             // to be loaded right after
             active_snapshot: Snapshot::default(),
             ending_snapshot: Snapshot::default(),
+            registered_accounts: HashSet::new(),
 
             // empty until computed
             deltas: WorkDeltas::default(),
@@ -150,6 +178,7 @@ impl BoundaryWork {
             pot_delta: None,
             starting_state: None,
             era_transition: None,
+            next_pparams: None,
         };
 
         load_account_data::<D>(state, &mut boundary)?;

@@ -1,18 +1,17 @@
 use std::ops::Deref;
 
 use dolos_core::batch::WorkDeltas;
-use dolos_core::{BlockSlot, ChainError, EntityKey, NsKey};
-use pallas::codec::minicbor;
+use dolos_core::{BlockSlot, ChainError, NsKey};
 use pallas::crypto::hash::{Hash, Hasher};
-use pallas::ledger::primitives::{Epoch, StakeCredential};
+use pallas::ledger::primitives::Epoch;
 use pallas::ledger::traverse::{MultiEraBlock, MultiEraCert, MultiEraTx};
 use serde::{Deserialize, Serialize};
-use tracing::{debug, trace, warn};
+use tracing::{debug, warn};
 
 use crate::model::FixedNamespace as _;
 use crate::pallas_extras::MultiEraPoolRegistration;
 use crate::{model::PoolState, pallas_extras, roll::BlockVisitor};
-use crate::{AccountState, CardanoLogic, PParamsSet};
+use crate::{CardanoLogic, EpochValue, PParamsSet};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PoolRegistration {
@@ -60,9 +59,36 @@ impl dolos_core::EntityDelta for PoolRegistration {
             "applying pool registration",
         );
 
-        let state = PoolState::new(&self.cert, self.slot, self.epoch, self.pool_deposit);
+        if let Some(entity) = entity {
+            entity.vrf_keyhash = self.cert.vrf_keyhash;
+            entity.reward_account = self.cert.reward_account.to_vec();
+            entity.pool_owners = self.cert.pool_owners.clone();
+            entity.relays = self.cert.relays.clone();
+            entity.declared_pledge = self.cert.pledge;
+            entity.margin_cost = self.cert.margin.clone();
+            entity.fixed_cost = self.cert.cost;
+            entity.metadata = self.cert.pool_metadata.clone();
+        } else {
+            let state = PoolState {
+                register_slot: self.slot,
+                vrf_keyhash: self.cert.vrf_keyhash,
+                reward_account: self.cert.reward_account.to_vec(),
+                pool_owners: self.cert.pool_owners.clone(),
+                relays: self.cert.relays.clone(),
+                declared_pledge: self.cert.pledge,
+                margin_cost: self.cert.margin.clone(),
+                fixed_cost: self.cert.cost,
+                metadata: self.cert.pool_metadata.clone(),
+                total_stake: EpochValue::new(0, self.epoch),
+                blocks_minted_total: 0,
+                blocks_minted_epoch: 0,
+                retiring_epoch: None,
+                is_retired: false,
+                deposit: self.pool_deposit,
+            };
 
-        *entity = Some(state);
+            *entity = Some(state);
+        }
     }
 
     fn undo(&self, entity: &mut Option<PoolState>) {
@@ -149,66 +175,6 @@ impl dolos_core::EntityDelta for PoolDeRegistration {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PoolAccountDetected {
-    operator: Hash<28>,
-    reward_account: StakeCredential,
-    slot: BlockSlot,
-    epoch: Epoch,
-
-    // undo
-    is_new: bool,
-}
-
-impl PoolAccountDetected {
-    pub fn new(
-        operator: Hash<28>,
-        reward_account: StakeCredential,
-        slot: BlockSlot,
-        epoch: Epoch,
-    ) -> Self {
-        Self {
-            operator,
-            reward_account,
-            slot,
-            epoch,
-            is_new: false,
-        }
-    }
-}
-
-impl dolos_core::EntityDelta for PoolAccountDetected {
-    type Entity = AccountState;
-
-    fn key(&self) -> NsKey {
-        let key = minicbor::to_vec(&self.reward_account).unwrap();
-        NsKey::from((AccountState::NS, key))
-    }
-
-    fn apply(&mut self, entity: &mut Option<AccountState>) {
-        if entity.is_none() {
-            self.is_new = true;
-
-            if tracing::enabled!(tracing::Level::DEBUG) {
-                let account_key = minicbor::to_vec(&self.reward_account).unwrap();
-                let account_key = EntityKey::from(account_key);
-                debug!(operator=%self.operator, account_key=%account_key, "initializing pool account");
-            }
-
-            *entity = Some(AccountState::new(self.epoch));
-        } else {
-            self.is_new = false;
-            trace!(operator=%self.operator, "pool account already exists");
-        }
-    }
-
-    fn undo(&self, entity: &mut Option<AccountState>) {
-        if self.is_new {
-            *entity = None;
-        }
-    }
-}
-
 #[derive(Default, Clone)]
 pub struct PoolStateVisitor {
     epoch: Option<Epoch>,
@@ -250,19 +216,6 @@ impl BlockVisitor for PoolStateVisitor {
                 block.slot(),
                 epoch,
                 deposit,
-            ));
-
-            // Reward accounts for pool don't need to go through the standard stake
-            // registration process. This is why we need to track the account directly on
-            // pool registration.
-
-            let cred = pallas_extras::pool_reward_account(&cert.reward_account).unwrap();
-
-            deltas.add_for_entity(PoolAccountDetected::new(
-                cert.operator,
-                cred,
-                block.slot(),
-                epoch,
             ));
         }
 

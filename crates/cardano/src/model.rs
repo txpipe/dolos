@@ -21,7 +21,6 @@ use crate::{
     pallas_extras::{
         self, default_cost_models, default_drep_voting_thresholds, default_ex_unit_prices,
         default_ex_units, default_nonce, default_pool_voting_thresholds, default_rational_number,
-        MultiEraPoolRegistration,
     },
     roll::{
         accounts::{
@@ -31,7 +30,7 @@ use crate::{
         assets::MintStatsUpdate,
         dreps::{DRepActivity, DRepRegistration, DRepUnRegistration},
         epochs::{EpochStatsUpdate, NoncesUpdate, PParamsUpdate},
-        pools::{MintedBlocksInc, PoolAccountDetected, PoolDeRegistration, PoolRegistration},
+        pools::{MintedBlocksInc, PoolDeRegistration, PoolRegistration},
         proposals::NewProposal,
     },
     sweep::{
@@ -267,8 +266,12 @@ impl AccountState {
         self.rewards_sum.saturating_add(self.withdrawals_sum)
     }
 
-    pub fn is_active(&self) -> bool {
-        self.registered_at.is_some() && self.deregistered_at.is_none()
+    pub fn is_registered(&self) -> bool {
+        match (self.registered_at, self.deregistered_at) {
+            (Some(_), None) => true,
+            (Some(start), Some(end)) => start >= end,
+            (None, _) => false,
+        }
     }
 
     /// Computes the new stake from current values taking into account
@@ -367,33 +370,6 @@ impl PoolState {
         RationalNumber {
             numerator: 0,
             denominator: 1,
-        }
-    }
-}
-
-impl PoolState {
-    pub fn new(
-        cert: &MultiEraPoolRegistration,
-        slot: BlockSlot,
-        epoch: Epoch,
-        deposit: u64,
-    ) -> Self {
-        Self {
-            register_slot: slot,
-            vrf_keyhash: cert.vrf_keyhash,
-            reward_account: cert.reward_account.to_vec(),
-            pool_owners: cert.pool_owners.clone(),
-            relays: cert.relays.clone(),
-            declared_pledge: cert.pledge,
-            margin_cost: cert.margin.clone(),
-            fixed_cost: cert.cost,
-            metadata: cert.pool_metadata.clone(),
-            total_stake: EpochValue::new(0, epoch),
-            blocks_minted_total: 0,
-            blocks_minted_epoch: 0,
-            retiring_epoch: None,
-            is_retired: false,
-            deposit,
         }
     }
 }
@@ -744,9 +720,6 @@ impl PParamValue {
 pub struct PParamsSet {
     #[n(0)]
     values: Vec<PParamValue>,
-
-    #[n(1)]
-    version: u16,
 }
 
 macro_rules! pgetter {
@@ -787,34 +760,6 @@ macro_rules! ensure_pparam {
 }
 
 impl PParamsSet {
-    pub fn new(version: u16) -> Self {
-        Self {
-            values: Vec::new(),
-            version,
-        }
-    }
-
-    /// Clone values while incrementing the original version number.
-    ///
-    /// This is used during forks to setup a starting set of values for the next
-    /// version. It usually follows with several `with` calls to set the values
-    /// for the new version.
-    pub fn bump_clone(&self) -> Self {
-        Self {
-            values: self.values.clone(),
-            version: self.version + 1,
-        }
-    }
-
-    /// The original version of the pparams set
-    ///
-    /// Since the protocol version param might be updated throughout an epoch to
-    /// flag a fork, we need this value to understand the version that defines
-    /// the format used to construct the params originally.
-    pub fn version(&self) -> u16 {
-        self.version
-    }
-
     pub fn get(&self, kind: PParamKind) -> Option<&PParamValue> {
         self.values.iter().find(|value| value.kind() == kind)
     }
@@ -833,10 +778,20 @@ impl PParamsSet {
         }
     }
 
+    pub fn clear(&mut self, kind: PParamKind) {
+        self.values.retain(|x| x.kind() != kind);
+    }
+
     pub fn with(mut self, value: PParamValue) -> Self {
         self.set(value);
 
         self
+    }
+
+    pub fn merge(&mut self, other: Self) {
+        for param in other.values {
+            self.set(param);
+        }
     }
 
     pub fn get_or_default(&self, kind: PParamKind) -> PParamValue {
@@ -847,6 +802,10 @@ impl PParamsSet {
 
     pub fn protocol_major(&self) -> Option<u16> {
         self.protocol_version().map(|(major, _)| major as u16)
+    }
+
+    pub fn protocol_major_or_default(&self) -> u16 {
+        self.protocol_major().unwrap_or(0)
     }
 
     pub fn k(&self) -> Option<u32> {
@@ -1018,10 +977,10 @@ pub struct EpochState {
     pub decayed_deposits: u64,
 
     #[n(9)]
-    pub rewards_to_distribute: Option<u64>,
+    pub effective_rewards: Option<u64>,
 
     #[n(10)]
-    pub rewards_to_treasury: Option<u64>,
+    pub unspendable_rewards: Option<u64>,
 
     #[n(11)]
     pub pparams: PParamsSet,
@@ -1034,13 +993,21 @@ pub struct EpochState {
 
     #[n(14)]
     pub blocks_minted: u32,
+
+    #[n(15)]
+    pub treasury_tax: Option<u64>,
+
+    #[n(16)]
+    pub pparams_update: PParamsSet,
 }
 
 impl EpochState {
-    pub fn rewards(&self) -> Option<u64> {
-        let to_distribute = self.rewards_to_distribute?;
-        let to_treasury = self.rewards_to_treasury?;
-        Some(to_distribute + to_treasury)
+    pub fn incentives(&self) -> Option<u64> {
+        let total = self.treasury_tax.unwrap_or_default()
+            + self.effective_rewards.unwrap_or_default()
+            + self.unspendable_rewards.unwrap_or_default();
+
+        Some(total)
     }
 }
 
@@ -1290,7 +1257,6 @@ pub enum CardanoDelta {
     StakeDeregistration(StakeDeregistration),
     PoolRegistration(PoolRegistration),
     PoolDeRegistration(PoolDeRegistration),
-    PoolAccountDetected(PoolAccountDetected),
     MintedBlocksInc(MintedBlocksInc),
     MintStatsUpdate(MintStatsUpdate),
     EpochStatsUpdate(EpochStatsUpdate),
@@ -1356,7 +1322,6 @@ delta_from!(StakeDelegation);
 delta_from!(StakeDeregistration);
 delta_from!(PoolRegistration);
 delta_from!(PoolDeRegistration);
-delta_from!(PoolAccountDetected);
 delta_from!(MintedBlocksInc);
 delta_from!(MintStatsUpdate);
 delta_from!(EpochStatsUpdate);
@@ -1393,7 +1358,6 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::PoolRegistration(x) => x.key(),
             Self::PoolDeRegistration(x) => x.key(),
             Self::PoolRetirement(x) => x.key(),
-            Self::PoolAccountDetected(x) => x.key(),
             Self::MintedBlocksInc(x) => x.key(),
             Self::MintStatsUpdate(x) => x.key(),
             Self::EpochStatsUpdate(x) => x.key(),
@@ -1428,7 +1392,6 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::PoolRegistration(x) => Self::downcast_apply(x, entity),
             Self::PoolDeRegistration(x) => Self::downcast_apply(x, entity),
             Self::PoolRetirement(x) => Self::downcast_apply(x, entity),
-            Self::PoolAccountDetected(x) => Self::downcast_apply(x, entity),
             Self::MintedBlocksInc(x) => Self::downcast_apply(x, entity),
             Self::MintStatsUpdate(x) => Self::downcast_apply(x, entity),
             Self::EpochStatsUpdate(x) => Self::downcast_apply(x, entity),
@@ -1463,7 +1426,6 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::PoolRegistration(x) => Self::downcast_undo(x, entity),
             Self::PoolDeRegistration(x) => Self::downcast_undo(x, entity),
             Self::PoolRetirement(x) => Self::downcast_undo(x, entity),
-            Self::PoolAccountDetected(x) => Self::downcast_undo(x, entity),
             Self::MintedBlocksInc(x) => Self::downcast_undo(x, entity),
             Self::MintStatsUpdate(x) => Self::downcast_undo(x, entity),
             Self::EpochStatsUpdate(x) => Self::downcast_undo(x, entity),

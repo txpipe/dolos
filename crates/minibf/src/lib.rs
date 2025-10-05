@@ -85,11 +85,8 @@ impl<D: Domain> Facade<D> {
         Ok(summary)
     }
 
-    pub fn get_current_effective_pparams(
-        &self,
-        caller_epoch: Epoch,
-    ) -> Result<PParamsSet, StatusCode> {
-        let pparams = dolos_cardano::load_effective_pparams::<D>(self.state(), caller_epoch)
+    pub fn get_current_effective_pparams(&self) -> Result<PParamsSet, StatusCode> {
+        let pparams = dolos_cardano::load_effective_pparams::<D>(self.state())
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
         Ok(pparams)

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use dolos_core::{batch::WorkDeltas, BlockSlot, ChainError, Domain, EntityKey, Genesis};
 use pallas::crypto::hash::Hash;
@@ -118,7 +118,8 @@ impl DelegatorMap {
 
 #[derive(Debug, Default)]
 pub struct Snapshot {
-    pub total_stake: u64,
+    pub total_stake_sum: u64,
+    pub active_stake_sum: u64,
     pub accounts_by_pool: DelegatorMap,
     pub accounts_by_drep: DelegatorMap,
     pub pool_stake: HashMap<PoolId, u64>,
@@ -136,7 +137,6 @@ impl Snapshot {
 pub struct EraTransition {
     pub prev_version: EraProtocol,
     pub new_version: EraProtocol,
-    pub new_pparams: PParamsSet,
 }
 
 pub struct BoundaryWork {
@@ -151,11 +151,13 @@ pub struct BoundaryWork {
     pub network_magic: Option<u32>,
     pub shelley_hash: Hash<32>,
     pub active_slot_coeff: f32,
+    pub registered_accounts: HashSet<AccountId>,
 
     // computed
     pub pot_delta: Option<PotDelta>,
     pub starting_state: Option<EpochState>,
     pub era_transition: Option<EraTransition>,
+    pub next_pparams: Option<PParamsSet>,
 
     // computed via visitors
     pub deltas: WorkDeltas<CardanoLogic>,

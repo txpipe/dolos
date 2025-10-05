@@ -200,7 +200,7 @@ impl dolos_core::EntityDelta for DRepDelegatorDrop {
             return;
         };
 
-        if let Some(delegated_at) = entity.vote_delegated_at  {
+        if let Some(delegated_at) = entity.vote_delegated_at {
             if delegated_at <= self.unregistered_at {
                 debug!(delegator=%self.delegator, "dropping drep delegator");
 
@@ -248,7 +248,8 @@ fn should_expire_drep(ctx: &mut BoundaryWork, drep: &DRepState) -> Result<bool, 
 
     let (last_activity_epoch, _) = ctx.active_era.slot_epoch(last_activity_slot);
 
-    let expiring_epoch = last_activity_epoch + ctx.valid_drep_inactivity_period()?;
+    let expiring_epoch =
+        last_activity_epoch + ctx.ending_pparams().ensure_drep_inactivity_period()?;
 
     Ok(expiring_epoch <= ctx.starting_epoch_no())
 }
@@ -260,7 +261,10 @@ fn should_expire_proposal(ctx: &mut BoundaryWork, proposal: &Proposal) -> Result
     }
 
     let (epoch, _) = ctx.active_era.slot_epoch(proposal.slot);
-    let expiring_epoch = epoch + ctx.valid_governance_action_validity_period()?;
+    let expiring_epoch = epoch
+        + ctx
+            .ending_pparams()
+            .ensure_governance_action_validity_period()?;
 
     Ok(expiring_epoch <= ctx.starting_epoch_no())
 }
@@ -313,7 +317,6 @@ impl super::BoundaryVisitor for BoundaryVisitor {
                 self.deltas
                     .push(DRepDelegatorDrop::new(delegator.clone(), unregistered_at).into());
             }
-
         }
 
         Ok(())
