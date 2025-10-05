@@ -75,16 +75,19 @@ fn from_conway_drep_voting_thresholds(
 }
 
 // AFAIK, Byron epoch length is a constant and not available via Genesis files.
-const BYRON_EPOCH_LENGTH: u64 = 5 * 24 * 60 * 60;
+const FIVE_DAYS_IN_SECONDS: u64 = 5 * 24 * 60 * 60;
 
 pub fn from_byron_genesis(byron: &byron::GenesisFile) -> PParamsSet {
     let version = &byron.block_version_data;
 
+    let slot_length_in_secs = version.slot_duration / 1000;
+    let epoch_length = FIVE_DAYS_IN_SECONDS / slot_length_in_secs;
+
     PParamsSet::default()
         .with(Val::ProtocolVersion((0, 0)))
         .with(Val::SystemStart(byron.start_time))
-        .with(Val::SlotLength(version.slot_duration))
-        .with(Val::EpochLength(BYRON_EPOCH_LENGTH))
+        .with(Val::SlotLength(slot_length_in_secs))
+        .with(Val::EpochLength(epoch_length))
         .with(Val::MinFeeA(version.tx_fee_policy.multiplier))
         .with(Val::MinFeeB(version.tx_fee_policy.summand))
         .with(Val::MaxBlockBodySize(version.max_block_size))
