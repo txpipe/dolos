@@ -53,14 +53,7 @@ impl dolos_core::EntityDelta for ControlledAmountInc {
     }
 
     fn undo(&self, entity: &mut Option<AccountState>) {
-        let Some(entity) = entity.as_mut() else {
-            tracing::error!(
-                key = self.key().to_string(),
-                delta = "ControlledAmountInc",
-                "failed to get undo delta to entity, not found."
-            );
-            panic!("entity not found")
-        };
+        let entity = entity.as_mut().expect("existing account");
         entity.controlled_amount -= self.amount;
     }
 }
@@ -80,29 +73,16 @@ impl dolos_core::EntityDelta for ControlledAmountDec {
     }
 
     fn apply(&mut self, entity: &mut Option<AccountState>) {
-        let Some(entity) = entity.as_mut() else {
-            tracing::error!(
-                key = self.key().to_string(),
-                delta = "ControlledAmountDec",
-                "failed to get apply delta to entity, not found."
-            );
-            panic!("entity not found")
-        };
+        let entity = entity.as_mut().expect("existing account");
+
         // TODO: saturating sub shouldn't be necesary
         //entity.controlled_amount -= self.amount;
         entity.controlled_amount = entity.controlled_amount.saturating_sub(self.amount);
     }
 
     fn undo(&self, entity: &mut Option<AccountState>) {
-        let Some(entity) = entity.as_mut() else {
-            tracing::error!(
-                key = self.key().to_string(),
-                delta = "ControlledAmountDec",
-                "failed to get undo delta to entity, not found."
-            );
-            panic!("entity not found")
-        };
-        
+        let entity = entity.as_mut().expect("existing account");
+
         entity.controlled_amount += self.amount;
     }
 }
@@ -156,14 +136,7 @@ impl dolos_core::EntityDelta for StakeRegistration {
     }
 
     fn undo(&self, entity: &mut Option<AccountState>) {
-        let Some(entity) = entity.as_mut() else {
-            tracing::error!(
-                key = self.key().to_string(),
-                delta = "StakeRegistration",
-                "failed to get undo delta to entity, not found."
-            );
-            panic!("entity not found")
-        };
+        let entity = entity.as_mut().expect("existing account");
 
         entity.registered_at = self.prev_registered_at;
         entity.deregistered_at = self.prev_deregistered_at;
@@ -236,7 +209,7 @@ pub struct VoteDelegation {
 
     // undo
     prev_drep: Option<EpochValue<Option<DRep>>>,
-    prev_vote_delegated_at: Option<BlockSlot>
+    prev_vote_delegated_at: Option<BlockSlot>,
 }
 
 impl VoteDelegation {
@@ -246,7 +219,7 @@ impl VoteDelegation {
             drep,
             vote_delegated_at,
             prev_drep: None,
-            prev_vote_delegated_at: None
+            prev_vote_delegated_at: None,
         }
     }
 }
@@ -396,7 +369,7 @@ impl dolos_core::EntityDelta for WithdrawalInc {
     }
 
     fn apply(&mut self, entity: &mut Option<Self::Entity>) {
-       let Some(entity) = entity.as_mut() else {
+        let Some(entity) = entity.as_mut() else {
             tracing::error!(
                 key = self.key().to_string(),
                 delta = "WithdrawalInc",
@@ -404,7 +377,7 @@ impl dolos_core::EntityDelta for WithdrawalInc {
             );
             panic!("entity not found")
         };
-        
+
         entity.withdrawals_sum += self.amount;
     }
 
