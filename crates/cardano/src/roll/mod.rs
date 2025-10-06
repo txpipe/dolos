@@ -245,6 +245,10 @@ impl<'a> DeltaBuilder<'a> {
             self.epoch
         );
 
+        if let Some(update) = block.update() {
+            visit_all!(self, deltas, visit_update, block, None, &update);
+        }
+
         for tx in block.txs() {
             visit_all!(self, deltas, visit_tx, block, &tx);
 
