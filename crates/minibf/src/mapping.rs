@@ -1,5 +1,7 @@
 use axum::{http::StatusCode, Json};
 use itertools::Itertools;
+use num_bigint::BigInt;
+use num_rational::BigRational;
 use num_traits::ToPrimitive;
 use pallas::{
     codec::{minicbor, utils::Bytes},
@@ -9,7 +11,7 @@ use pallas::{
         primitives::{
             alonzo::{self, Certificate as AlonzoCert},
             conway::{Certificate as ConwayCert, DRep, DatumOption, RedeemerTag, ScriptRef},
-            Epoch, ExUnitPrices, PlutusData, StakeCredential,
+            Epoch, ExUnitPrices, ExUnits, PlutusData, StakeCredential,
         },
         traverse::{
             ComputeHash, MultiEraBlock, MultiEraCert, MultiEraHeader, MultiEraInput,
@@ -1013,22 +1015,47 @@ impl TxModelBuilder<'_> {
         }
     }
 
-    fn build_redeemer_inner(
-        &self,
-        redeemer: &MultiEraRedeemer<'_>,
-        prices: &ExUnitPrices,
-    ) -> Result<TxContentRedeemersInner, StatusCode> {
+    fn compute_fee(&self, units: &ExUnits, prices: &ExUnitPrices) -> Result<u64, StatusCode> {
         let ExUnitPrices {
             mem_price,
             step_price,
         } = prices;
 
-        let unit_mem = redeemer.ex_units().mem;
-        let unit_steps = redeemer.ex_units().steps;
+        let unit_mem = BigRational::from_integer(BigInt::from(units.mem));
+        let unit_steps = BigRational::from_integer(BigInt::from(units.steps));
 
-        let fee = (unit_mem * mem_price.numerator * step_price.denominator
-            + unit_steps * step_price.numerator * mem_price.denominator)
-            / (mem_price.denominator * step_price.denominator);
+        let mem_price = BigRational::new(
+            BigInt::from(mem_price.numerator),
+            BigInt::from(mem_price.denominator),
+        );
+
+        let step_price = BigRational::new(
+            BigInt::from(step_price.numerator),
+            BigInt::from(step_price.denominator),
+        );
+
+        let mem_fee = unit_mem * mem_price;
+        let step_fee = unit_steps * step_price;
+
+        let fee = mem_fee + step_fee;
+
+        let fee: u64 = fee
+            .ceil()
+            .to_integer()
+            .try_into()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        Ok(fee)
+    }
+
+    fn build_redeemer_inner(
+        &self,
+        redeemer: &MultiEraRedeemer<'_>,
+        prices: &ExUnitPrices,
+    ) -> Result<TxContentRedeemersInner, StatusCode> {
+        let units = redeemer.ex_units();
+
+        let fee = self.compute_fee(&units, prices)?;
 
         let out = TxContentRedeemersInner {
             purpose: match redeemer.tag() {
@@ -1044,8 +1071,8 @@ impl TxModelBuilder<'_> {
             // redeemer data
             redeemer_data_hash: redeemer.data().compute_hash().to_string(),
             fee: fee.to_string(),
-            unit_mem: unit_mem.to_string(),
-            unit_steps: unit_steps.to_string(),
+            unit_mem: units.mem.to_string(),
+            unit_steps: units.steps.to_string(),
             script_hash: self
                 .find_redeemer_script(redeemer)?
                 .map(|x| x.to_string())
@@ -1180,7 +1207,7 @@ impl IntoModel<Vec<TxContentDelegationsInner>> for TxModelBuilder<'_> {
                             ),
                             _ => None,
                         }
-                    },
+                    }
                     _ => None,
                 })
                 .try_collect()?;
