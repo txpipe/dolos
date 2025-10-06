@@ -1,7 +1,7 @@
 use pallas::ledger::primitives::conway::CostModels;
 use std::collections::HashMap;
 
-use dolos_core::{Domain, Genesis, StateStore as _};
+use dolos_core::{Domain, Genesis};
 
 use crate::{Config, Error};
 

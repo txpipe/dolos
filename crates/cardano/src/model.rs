@@ -764,6 +764,10 @@ impl PParamsSet {
         self.values.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+
     pub fn get(&self, kind: PParamKind) -> Option<&PParamValue> {
         self.values.iter().find(|value| value.kind() == kind)
     }

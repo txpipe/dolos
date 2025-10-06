@@ -1,5 +1,4 @@
 use dolos_core::{BrokenInvariant, ChainError, Domain, Genesis, StateStore as _};
-use pallas::ledger::primitives::RationalNumber;
 use tracing::{debug, info, instrument, trace, warn};
 
 use crate::{
@@ -204,7 +203,7 @@ impl BoundaryWork {
 
         let era_transition = EraTransition {
             prev_version: EraProtocol::from(original),
-            new_version: EraProtocol::from(effective as u16),
+            new_version: EraProtocol::from(effective),
         };
 
         self.era_transition = Some(era_transition);

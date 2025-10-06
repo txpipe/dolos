@@ -1,12 +1,9 @@
-use std::cmp::min;
 
 use dolos_core::{ChainError, EntityKey, NsKey};
-use num_bigint::BigInt;
-use num_rational::BigRational;
 use pallas::{
     codec::minicbor,
     crypto::hash::Hash,
-    ledger::primitives::{RationalNumber, StakeCredential},
+    ledger::primitives::StakeCredential,
 };
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
@@ -177,7 +174,7 @@ impl BoundaryVisitor {
         });
 
         self.log(
-            stake_cred_to_entity_key(&account),
+            stake_cred_to_entity_key(account),
             RewardLog {
                 amount: operator_share,
                 pool_id: entity_key_to_operator_hash(pool).to_vec(),
