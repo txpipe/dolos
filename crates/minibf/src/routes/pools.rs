@@ -225,6 +225,7 @@ where
 
     let mapped: Vec<_> = entries
         .into_iter()
+        .filter(|(_, log)| log.active_stake > 0)
         .skip(pagination.skip())
         .take(pagination.count)
         .map(|(epoch, log)| {
