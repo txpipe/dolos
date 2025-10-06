@@ -208,37 +208,16 @@ pub async fn handle_account_state(
             registered_at: from_row!(row, Option<i64>, "registered_at")
                 .map(|x| x.try_into().unwrap()),
             controlled_amount: from_row_bigint!(row, "controlled_amount"),
-            active_stake: from_row_bigint!(row, "active_stake"),
-            wait_stake: from_row_bigint!(row, "wait_stake"),
-            rewards_sum: from_row_bigint!(row, "rewards_sum"),
             withdrawals_sum: from_row_bigint!(row, "withdrawals_sum"),
             reserves_sum: from_row_bigint!(row, "reserves_sum"),
             treasury_sum: from_row_bigint!(row, "treasury_sum"),
-            active_drep: from_row!(row, Option<String>, "drep_id")
-                .map(|drep_id| -> miette::Result<DRep> {
-                    match drep_id.as_str() {
-                        "drep_always_abstain" => Ok(DRep::Abstain),
-                        "drep_always_no_confidence" => Ok(DRep::NoConfidence),
-                        x => {
-                            let bytes = bech32::decode(x)
-                                .into_diagnostic()
-                                .context("decoding drep")?
-                                .1;
-                            if from_row!(row, bool, "drep_id_has_script") {
-                                Ok(DRep::Script(bytes.as_slice().into()))
-                            } else {
-                                Ok(DRep::Key(bytes.as_slice().into()))
-                            }
-                        }
-                    }
-                })
-                .transpose()?,
-
-            latest_pool: None,
-            active_pool: from_row!(row, Option<String>, "pool_id")
-                .map(|x| bech32::decode(&x).unwrap().1),
-            latest_drep: None,
-            deposit: Default::default(),
+            total_stake: todo!(),
+            rewards_sum: todo!(),
+            pool: todo!(),
+            drep: todo!(),
+            vote_delegated_at: todo!(),
+            deposit: todo!(),
+            deregistered_at: todo!(),
         };
 
         writer
@@ -497,10 +476,7 @@ pub async fn handle_pool_state(
                 denominator: 1,
             },
             fixed_cost: from_row_bigint!(row, "fixed_cost"),
-            active_stake: from_row_bigint!(row, "active_stake"),
-            __live_stake: from_row_bigint!(row, "live_stake"),
             blocks_minted_total: from_row!(row, i64, "blocks_minted") as u32,
-            wait_stake: from_row_bigint!(row, "wait_stake"),
             pool_owners: from_row!(row, Option<Json<serde_json::Value>>, "owners")
                 .map(|x| {
                     x.0.as_array()
@@ -590,6 +566,7 @@ pub async fn handle_pool_state(
             is_retired: Default::default(),
             blocks_minted_epoch: Default::default(),
             deposit: Default::default(),
+            total_stake: todo!(),
         };
 
         writer
@@ -687,9 +664,7 @@ pub async fn handle_epoch_state(
             tracing::info!(i = i, "Processing epochs...");
         }
 
-        let protocol_major = from_row!(row, i32, "protocol_major_ver");
-
-        let mut pp = PParamsSet::new(protocol_major as u16);
+        let mut pp = PParamsSet::default();
 
         pp_col!(pp, MinFeeA, row, "min_fee_a");
         pp_col!(pp, MinFeeB, row, "min_fee_b");
@@ -702,6 +677,7 @@ pub async fn handle_epoch_state(
         //pp_col!(pp, OptimalPoolCount, "n_opt");
         // pp_col!(pp, ProtocolVersion, row, "protocol_minor_ver");
 
+        let protocol_major = from_row!(row, i32, "protocol_major_ver");
         let protocol_minor = from_row!(row, i32, "protocol_minor_ver");
 
         pp.set(PParamValue::ProtocolVersion((
@@ -778,8 +754,6 @@ pub async fn handle_epoch_state(
         let epoch_state = EpochState {
             pparams: pp,
             // for some reason dbsync 1-index numeration, so we subtract 1
-            number: from_row!(row, i32, "epoch_no") as u32 - 1,
-            active_stake: 0, // from_row_bigint!(row, "active_stake"),
             deposits: deposits_stake + deposits_drep + deposits_proposal,
             reserves: from_row_bigint!(row, "reserves"),
             treasury: from_row_bigint!(row, "treasury"),
@@ -787,11 +761,14 @@ pub async fn handle_epoch_state(
             gathered_fees: from_row_bigint!(row, "fees"),
             gathered_deposits: 0, // from_row_bigint!(row, "gathered_deposits"),
             decayed_deposits: 0,  // from_row_bigint!(row, "decayed_deposits"),
-            rewards_to_distribute: None,
-            rewards_to_treasury: None,
             largest_stable_slot: Default::default(), // todo!(),
             nonces: Default::default(),
             blocks_minted: Default::default(),
+            number: todo!(),
+            effective_rewards: todo!(),
+            unspendable_rewards: todo!(),
+            treasury_tax: todo!(),
+            pparams_update: todo!(),
         };
 
         writer
@@ -872,10 +849,9 @@ pub async fn handle_drep_state(
             initial_slot,
             voting_power,
             last_active_slot,
-            retired,
-            __drep_id: Default::default(),
             expired: Default::default(),
             deposit: Default::default(),
+            unregistered_at: todo!(),
         };
 
         writer
