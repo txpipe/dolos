@@ -115,7 +115,13 @@ impl<C: ChainLogic> WorkBatch<C> {
     pub fn for_single_block(block: WorkBlock<C>) -> Self {
         let mut batch = Self::default();
         batch.add_work(block);
+        batch.is_sorted = true;
         batch
+    }
+
+    pub fn sort_by_slot(&mut self) {
+        self.blocks.sort_by_key(|x| x.block.slot());
+        self.is_sorted = true;
     }
 
     pub fn add_work(&mut self, work: WorkBlock<C>) {

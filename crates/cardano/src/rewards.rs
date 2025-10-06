@@ -100,6 +100,7 @@ fn pool_apparent_performance(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 /// Calculate the total rewards of the pool.
 pub fn pool_rewards(
     epoch_rewards: u64,
@@ -121,17 +122,17 @@ pub fn pool_rewards(
 
     assert!(k > 0, "k must be > 0");
 
-    // σ (relative to total stake)
+    // theta (relative to total stake)
     // TODO: understand why we need to use circulating supply here instead of total
     // stake as specified in the spec
-    let σ = ratio!(pool_stake, circulating_supply);
+    let theta = ratio!(pool_stake, circulating_supply);
 
     // s (relative to total stake)
     // TODO: understand why we need to use circulating supply here instead of total
     // stake as specified in the spec
     let s = ratio!(declared_pledge, circulating_supply);
 
-    let optimal = optimal_pool_rewards(epoch_rewards, k, a0, σ, s);
+    let optimal = optimal_pool_rewards(epoch_rewards, k, a0, theta, s);
 
     let pbar = pool_apparent_performance(d, pool_blocks, epoch_blocks, pool_stake, active_stake);
 
@@ -171,11 +172,11 @@ pub fn pool_operator_share(
     let after_cost = pool_rewards - c;
 
     let s = ratio!(live_pledge, circulating_supply);
-    let σ = ratio!(pool_stake, circulating_supply);
+    let theta = ratio!(pool_stake, circulating_supply);
 
     // s/σ — ratio of owner's pledge to pool stake (denominator cancels, so we can
     // use amounts)
-    let s_over_sigma = s / σ;
+    let s_over_sigma = s / theta;
 
     let one = ratio!(1);
 

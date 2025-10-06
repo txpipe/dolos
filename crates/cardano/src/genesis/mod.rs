@@ -58,7 +58,10 @@ fn bootstrap_pots(
     })
 }
 
-fn bootrap_epoch<D: Domain>(state: &D::State, genesis: &Genesis) -> Result<EpochState, ChainError> {
+pub fn bootstrap_epoch<D: Domain>(
+    state: &D::State,
+    genesis: &Genesis,
+) -> Result<EpochState, ChainError> {
     let mut pparams = crate::forks::from_byron_genesis(&genesis.byron);
     let mut nonces = None;
 
@@ -99,7 +102,7 @@ fn bootrap_epoch<D: Domain>(state: &D::State, genesis: &Genesis) -> Result<Epoch
     Ok(epoch)
 }
 
-fn bootstrap_eras<D: Domain>(state: &D::State, epoch: &EpochState) -> Result<(), ChainError> {
+pub fn bootstrap_eras<D: Domain>(state: &D::State, epoch: &EpochState) -> Result<(), ChainError> {
     let system_start = epoch.pparams.system_start().unwrap_or_default();
     let epoch_length = epoch.pparams.epoch_length().unwrap_or_default();
     let slot_length = epoch.pparams.slot_length().unwrap_or_default();
@@ -136,7 +139,7 @@ pub fn bootstrap_utxos<D: Domain>(state: &D::State, genesis: &Genesis) -> Result
 }
 
 pub fn execute<D: Domain>(state: &D::State, genesis: &Genesis) -> Result<(), ChainError> {
-    let epoch = bootrap_epoch::<D>(state, genesis)?;
+    let epoch = bootstrap_epoch::<D>(state, genesis)?;
 
     bootstrap_eras::<D>(state, &epoch)?;
 

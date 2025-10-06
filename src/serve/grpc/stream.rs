@@ -42,14 +42,16 @@ impl ChainStream {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use dolos_testing::blocks::make_conway_block;
     use dolos_testing::toy_domain::ToyDomain;
     use futures_util::{pin_mut, StreamExt};
-    use pallas::crypto::hash::Hash;
+    use tokio::time::timeout;
     use tokio_util::sync::CancellationToken;
 
     use super::*;
-    use crate::{facade::DomainExt as _, serve::CancelTokenImpl};
+    use crate::serve::CancelTokenImpl;
 
     #[tokio::test]
     async fn test_stream_waiting() {
@@ -69,9 +71,10 @@ mod tests {
             }
         });
 
+        let chain_point = make_conway_block(500).0;
         let s = ChainStream::start::<ToyDomain, CancelTokenImpl>(
             domain,
-            vec![ChainPoint::Specific(500, Hash::<32>::from([0; 32]))],
+            vec![chain_point.clone()],
             CancelTokenImpl(CancellationToken::new()),
         );
 
@@ -79,17 +82,18 @@ mod tests {
 
         let first = s.next().await.unwrap();
 
-        assert_eq!(
-            first,
-            TipEvent::Mark(ChainPoint::Specific(500, Hash::<32>::from([0; 32])))
-        );
+        assert_eq!(first, TipEvent::Mark(chain_point));
 
         for i in 51..=200 {
-            let evt = s.next().await;
+            let evt = timeout(Duration::from_secs(5), s.next())
+                .await
+                .expect("took too long");
             let value = evt.unwrap();
 
             match value {
-                TipEvent::Apply(p, _) => assert_eq!(p.slot(), i * 10),
+                TipEvent::Apply(p, _) => {
+                    assert_eq!(p.slot(), i * 10)
+                }
                 _ => panic!("unexpected log value variant"),
             }
         }

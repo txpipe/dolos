@@ -10,7 +10,7 @@ use pallas::{
         },
     },
 };
-use tracing::{debug, error, info};
+use tracing::debug;
 
 pub type Val = PParamValue;
 

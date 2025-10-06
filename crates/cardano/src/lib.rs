@@ -7,7 +7,6 @@ use std::{
     collections::VecDeque,
     sync::{Arc, RwLock},
 };
-use tracing::error;
 
 // re-export pallas for version compatibility downstream
 pub use pallas;

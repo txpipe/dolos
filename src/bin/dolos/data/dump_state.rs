@@ -162,7 +162,7 @@ impl TableRow for PoolState {
     }
 
     fn row(&self, key: &EntityKey) -> Vec<String> {
-        let entity_key = EntityKey::from(key.clone());
+        let entity_key = key.clone();
         let pool_hash = entity_key.as_ref()[..28].try_into().unwrap();
         let pool_hex = hex::encode(pool_hash);
         let pool_bech32 = bech32::encode::<bech32::Bech32>(POOL_HRP, pool_hash).unwrap();
