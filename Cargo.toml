@@ -116,7 +116,16 @@ inherits = "release"
 lto = "thin"
 
 [workspace]
-members = ["crates/cardano", "crates/core", "crates/testing", "crates/minibf", "crates/redb", "xtask", "crates/redb3", "crates/test-vectors"]
+members = [
+    "crates/cardano",
+    "crates/core",
+    "crates/testing",
+    "crates/minibf",
+    "crates/redb",
+    "xtask",
+    "crates/redb3",
+    "crates/test-vectors",
+]
 
 [workspace.package]
 version = "1.0.0-beta.4"
@@ -154,6 +163,8 @@ bech32 = "0.11.0"
 reqwest = { version = "0.12.7", default-features = false, features = ["blocking", "rustls-tls"] }
 rayon = "1.11.0"
 xxhash-rust = { version = "0.8.15", features = ["xxh3", "const_xxh3"] }
+num-rational = "0.4.2"
+num-bigint = "0.4.6"
 
 [workspace.metadata.release]
 push = false

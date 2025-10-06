@@ -12,6 +12,8 @@ serde.workspace = true
 chrono.workspace = true
 hex.workspace = true
 itertools.workspace = true
+num-rational.workspace = true
+num-bigint.workspace = true
 
 paste = "1.0.15"
 
@@ -20,9 +22,7 @@ rayon = "1.11.0"
 
 serde_json = { workspace = true, optional = true }
 self_cell = "1.2.0"
-num-rational = "0.4.2"
-big-int = "7.0.0"
-num-bigint = "0.4.6"
+
 
 [dev-dependencies]
 hex = "0.4.3"
