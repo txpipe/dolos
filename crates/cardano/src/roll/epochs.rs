@@ -325,6 +325,13 @@ impl BlockVisitor for EpochStateVisitor {
             all_proposed_minfee_refscript_cost_per_byte => MinFeeRefScriptCostPerByte
         };
 
+        if let Some((major, minor, _)) = update.byron_proposed_block_version() {
+            deltas.add_for_entity(PParamsUpdate {
+                to_update: PParamValue::ProtocolVersion((major.into(), minor.into())),
+                prev_value: None
+            });
+        }
+
         if let Some(cm) = update.alonzo_first_proposed_cost_models_for_script_languages() {
             if let Some(v1) = cm.get(&pallas::ledger::primitives::alonzo::Language::PlutusV1) {
                 deltas.add_for_entity(PParamsUpdate {
