@@ -41,6 +41,7 @@ fn roll_batch<D: Domain>(
     domain: &D,
     mut batch: WorkBatch<D::Chain>,
 ) -> Result<BlockSlot, DomainError> {
+    batch.sort_by_slot();
     batch.load_utxos(domain)?;
 
     batch.decode_utxos(domain.chain())?;
