@@ -2,6 +2,40 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.0-beta.5] - 2025-10-06
+
+### 🚀 Features
+
+- *(minibf)* Implement `/epochs/{epoch}/blocks` endpoint (#731)
+- *(minibf)* Implement `scripts/datum/{datum_hash}` endpoint (#734)
+- *(minibf)* Implement more `/assets/{asset}/*` endpoints (#735)
+- *(cardano)* Track detailed pool logs and expose via minibf  (#736)
+- *(archive)* Add index for tx metadata (#741)
+
+### 🐛 Bug Fixes
+
+- *(minibf)* Handle cost models updates from proposals (#737)
+- *(minibf)* Fetch correct epoch for params endpoints (#738)
+- *(cardano)* Avoid using push for epoch value
+- *(cardano)* Reset epoch minted blocks on boundary
+- *(cardano)* Improve reward logic accuracy (#745)
+- *(cardano)* Treat current pparams as effective (#747)
+- *(cardano)* Interpret Byron epoch length correctly (#748)
+- *(cardano)* Consider all Conway certs (#742)
+- *(cardano)* Be explicit about hardfork versions (#749)
+- *(minibf)* Avoid rounding errors on fee calc (#750)
+- *(minibf)* Skip pool history with empty stake (#751)
+
+### 🚜 Refactor
+
+- *(cardano)* Tidy up reward calculation logic (#740)
+- *(cardano)* Move reward calc into its own module (#746)
+
+### ⚙️ Miscellaneous Tasks
+
+- Fix lint warnings across the board (#732)
+- Fix build errors on support crates
+
 ## [1.0.0-beta.4] - 2025-09-29
 
 ### 🚀 Features
@@ -31,6 +65,10 @@ All notable changes to this project will be documented in this file.
 - *(cardano)* Track deposits explicitly in each entity (#723)
 - *(core)* Move sweep / genesis ops inside chain logic (#724)
 - *(cardano)* Unify track & log config sections (#725)
+
+### Release
+
+- V1.0.0-beta.4
 
 ## [1.0.0-beta.3] - 2025-09-22
 
