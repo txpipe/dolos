@@ -63,7 +63,7 @@ fn bootrap_epoch<D: Domain>(state: &D::State, genesis: &Genesis) -> Result<Epoch
     let mut nonces = None;
 
     if let Some(force_protocol) = genesis.force_protocol {
-        pparams = crate::forks::evolve_pparams(&pparams, genesis, force_protocol as u16)?;
+        pparams = crate::forks::force_pparams_version(&pparams, genesis, 0, force_protocol as u16)?;
 
         // TODO: why do we set nonces only if there's a force protocol?
         nonces = Some(Nonces::bootstrap(genesis.shelley_hash));

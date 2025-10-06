@@ -82,6 +82,7 @@ impl TableRow for EpochState {
             "treasury tax",
             "rewards",
             "rewards (unspendable)",
+            "pparams",
             "nonce",
         ]
     }
@@ -99,6 +100,7 @@ impl TableRow for EpochState {
             format!("{}", self.treasury_tax.unwrap_or_default()),
             format!("{}", self.effective_rewards.unwrap_or_default()),
             format!("{}", self.unspendable_rewards.unwrap_or_default()),
+            format!("{}", self.pparams.len()),
             format!(
                 "{}",
                 self.nonces
