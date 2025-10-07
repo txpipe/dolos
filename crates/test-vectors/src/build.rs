@@ -16,7 +16,7 @@ use handlebars::Handlebars;
 use miette::{bail, Context, IntoDiagnostic};
 use pallas::ledger::{
     addresses::Address,
-    primitives::{conway::DRep, ExUnitPrices, ExUnits, PoolMetadata, RationalNumber, Relay},
+    primitives::{ExUnitPrices, ExUnits, PoolMetadata, RationalNumber, Relay},
 };
 use serde_json::Value;
 use tokio_postgres::types::Json;
@@ -211,13 +211,13 @@ pub async fn handle_account_state(
             withdrawals_sum: from_row_bigint!(row, "withdrawals_sum"),
             reserves_sum: from_row_bigint!(row, "reserves_sum"),
             treasury_sum: from_row_bigint!(row, "treasury_sum"),
-            total_stake: todo!(),
-            rewards_sum: todo!(),
-            pool: todo!(),
-            drep: todo!(),
-            vote_delegated_at: todo!(),
-            deposit: todo!(),
-            deregistered_at: todo!(),
+            total_stake: dolos_cardano::EpochValue::new(Default::default(), Default::default()),
+            rewards_sum: Default::default(),
+            pool: dolos_cardano::EpochValue::new(Default::default(), Default::default()),
+            drep: dolos_cardano::EpochValue::new(Default::default(), Default::default()),
+            vote_delegated_at: Default::default(),
+            deposit: Default::default(),
+            deregistered_at: Default::default(),
         };
 
         writer
@@ -566,7 +566,7 @@ pub async fn handle_pool_state(
             is_retired: Default::default(),
             blocks_minted_epoch: Default::default(),
             deposit: Default::default(),
-            total_stake: todo!(),
+            total_stake: dolos_cardano::EpochValue::new(Default::default(), Default::default()),
         };
 
         writer
@@ -764,11 +764,11 @@ pub async fn handle_epoch_state(
             largest_stable_slot: Default::default(), // todo!(),
             nonces: Default::default(),
             blocks_minted: Default::default(),
-            number: todo!(),
-            effective_rewards: todo!(),
-            unspendable_rewards: todo!(),
-            treasury_tax: todo!(),
-            pparams_update: todo!(),
+            number: Default::default(),
+            effective_rewards: Default::default(),
+            unspendable_rewards: Default::default(),
+            treasury_tax: Default::default(),
+            pparams_update: Default::default(),
         };
 
         writer
@@ -843,7 +843,6 @@ pub async fn handle_drep_state(
             .into_diagnostic()
             .context("parsing drep voting power")?;
         let last_active_slot = from_row!(row, Option<i64>, "last_active_slot").map(|x| x as u64);
-        let retired = from_row!(row, bool, "retired");
 
         let drep = DRepState {
             initial_slot,
@@ -851,7 +850,7 @@ pub async fn handle_drep_state(
             last_active_slot,
             expired: Default::default(),
             deposit: Default::default(),
-            unregistered_at: todo!(),
+            unregistered_at: Default::default(),
         };
 
         writer
