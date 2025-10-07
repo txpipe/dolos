@@ -276,25 +276,17 @@ pub fn load_mark_epoch<D: Domain>(state: &D::State) -> Result<EpochState, ChainE
 
 #[cfg(test)]
 pub fn load_test_genesis(env: &str) -> Genesis {
-    use std::path::{Path, PathBuf};
-
-    fn load_json<T>(path: &Path) -> T
-    where
-        T: serde::de::DeserializeOwned,
-    {
-        let file = std::fs::File::open(path).unwrap();
-        serde_json::from_reader(file).unwrap()
-    }
+    use std::path::PathBuf;
 
     let test_data = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap())
         .join("test_data")
         .join(env);
 
     Genesis::from_file_paths(
-        &test_data.join("genesis/byron.json"),
-        &test_data.join("genesis/shelley.json"),
-        &test_data.join("genesis/alonzo.json"),
-        &test_data.join("genesis/conway.json"),
+        test_data.join("genesis/byron.json"),
+        test_data.join("genesis/shelley.json"),
+        test_data.join("genesis/alonzo.json"),
+        test_data.join("genesis/conway.json"),
         None,
     )
     .unwrap()

@@ -424,11 +424,11 @@ mod tests {
     impl TestEntity {
         const NS: Namespace = "test";
 
-        pub fn new(value: &str) -> Self {
-            Self {
-                value: value.to_string(),
-            }
-        }
+        //pub fn new(value: &str) -> Self {
+        //    Self {
+        //        value: value.to_string(),
+        //    }
+        //}
     }
 
     impl Entity for TestEntity {
@@ -508,7 +508,7 @@ mod tests {
             Ok(())
         }
 
-        fn apply_utxoset(&self, delta: &UtxoSetDelta) -> Result<(), StateError> {
+        fn apply_utxoset(&self, _delta: &UtxoSetDelta) -> Result<(), StateError> {
             todo!()
         }
 
@@ -574,55 +574,35 @@ mod tests {
 
         fn iter_entity_values(
             &self,
-            ns: Namespace,
-            key: impl AsRef<[u8]>,
+            _ns: Namespace,
+            _key: impl AsRef<[u8]>,
         ) -> Result<Self::EntityValueIter, StateError> {
             todo!()
         }
 
-        fn get_utxos(&self, refs: Vec<TxoRef>) -> Result<UtxoMap, StateError> {
+        fn get_utxos(&self, _refs: Vec<TxoRef>) -> Result<UtxoMap, StateError> {
             todo!()
         }
 
-        fn get_utxo_by_address(&self, address: &[u8]) -> Result<UtxoSet, StateError> {
+        fn get_utxo_by_address(&self, _address: &[u8]) -> Result<UtxoSet, StateError> {
             todo!()
         }
 
-        fn get_utxo_by_payment(&self, payment: &[u8]) -> Result<UtxoSet, StateError> {
+        fn get_utxo_by_payment(&self, _payment: &[u8]) -> Result<UtxoSet, StateError> {
             todo!()
         }
 
-        fn get_utxo_by_stake(&self, stake: &[u8]) -> Result<UtxoSet, StateError> {
+        fn get_utxo_by_stake(&self, _stake: &[u8]) -> Result<UtxoSet, StateError> {
             todo!()
         }
 
-        fn get_utxo_by_policy(&self, policy: &[u8]) -> Result<UtxoSet, StateError> {
+        fn get_utxo_by_policy(&self, _policy: &[u8]) -> Result<UtxoSet, StateError> {
             todo!()
         }
 
-        fn get_utxo_by_asset(&self, asset: &[u8]) -> Result<UtxoSet, StateError> {
+        fn get_utxo_by_asset(&self, _asset: &[u8]) -> Result<UtxoSet, StateError> {
             todo!()
         }
-    }
-
-    #[derive(Clone)]
-    struct MockDomain;
-
-    fn setup_mock_store() -> MockStore {
-        let store = MockStore {
-            db: Arc::new(RwLock::new(MockStoreDb {
-                cursor: Some(ChainPoint::Slot(0)),
-                entities: HashMap::new(),
-            })),
-        };
-
-        store.write_entity_typed(&EntityKey::from(b"a"), &TestEntity::new("123"));
-
-        store.write_entity_typed(&EntityKey::from(b"b"), &TestEntity::new("456"));
-
-        store.write_entity_typed(&EntityKey::from(b"c"), &TestEntity::new("789"));
-
-        store
     }
 }
 

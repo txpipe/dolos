@@ -170,6 +170,15 @@ mod tests {
     use super::*;
 
     fn fake_slice_for_block(block: &MultiEraBlock) -> HashMap<TxoRef, OwnedMultiEraOutput> {
+        let valid_utxo = block
+            .txs()
+            .first()
+            .unwrap()
+            .produces()
+            .first()
+            .unwrap()
+            .1
+            .encode();
         let consumed: HashMap<_, _> = block
             .txs()
             .iter()
@@ -178,8 +187,11 @@ mod tests {
             .map(|key| {
                 (
                     key,
-                    OwnedMultiEraOutput::decode(Arc::new(EraCbor(block.era().into(), vec![])))
-                        .unwrap(),
+                    OwnedMultiEraOutput::decode(Arc::new(EraCbor(
+                        block.era().into(),
+                        valid_utxo.clone(),
+                    )))
+                    .unwrap(),
                 )
             })
             .collect();
