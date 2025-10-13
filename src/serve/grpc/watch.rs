@@ -151,6 +151,7 @@ fn block_to_txs<C: LedgerContext>(
     mapper: &interop::Mapper<C>,
     request: &u5c::watch::WatchTxRequest,
 ) -> Vec<u5c::watch::AnyChainTx> {
+    let body: &BlockBody = &block;
     let block = MultiEraBlock::decode(block).unwrap();
     let txs = block.txs();
 
