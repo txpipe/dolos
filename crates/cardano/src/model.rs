@@ -12,16 +12,22 @@ use pallas::{
     ledger::primitives::{
         conway::{CostModels, DRep, DRepVotingThresholds, PoolVotingThresholds, ProposalProcedure},
         Coin, Epoch, ExUnitPrices, ExUnits, Nonce, PoolMetadata, ProtocolVersion, RationalNumber,
-        Relay, UnitInterval,
+        Relay, StakeCredential, UnitInterval,
     },
 };
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    epoch::{
+        retires::{DRepDelegatorDrop, DRepExpiration, PoolDelegatorDrop, ProposalExpiration},
+        rewards::{AssignDelegatorRewards, PotAdjustment},
+        transition::{AccountTransition, PoolTransition, ProposalEnactment},
+    },
     pallas_extras::{
         self, default_cost_models, default_drep_voting_thresholds, default_ex_unit_prices,
         default_ex_units, default_nonce, default_pool_voting_thresholds, default_rational_number,
     },
+    pots::{PotDelta, Pots},
     roll::{
         accounts::{
             ControlledAmountDec, ControlledAmountInc, StakeDelegation, StakeDeregistration,
@@ -33,62 +39,77 @@ use crate::{
         pools::{MintedBlocksInc, PoolDeRegistration, PoolRegistration},
         proposals::NewProposal,
     },
-    sweep::{
-        retires::{
-            DRepDelegatorDrop, DRepExpiration, PoolDelegatorDrop, PoolRetirement,
-            ProposalExpiration,
-        },
-        rewards::{AssignDelegatorRewards, AssignPoolRewards},
-        transition::{AccountTransition, PoolTransition, ProposalEnactment},
-    },
 };
 
 #[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EpochValue<T> {
-    /// Current epoch version of the value
+    /// The epoch representing the live version of the value
     #[n(0)]
-    pub latest: T,
+    pub epoch: Epoch,
+
+    /// The current ongoing version of the value
+    #[n(1)]
+    pub live: T,
 
     /// Epoch - 1 version of the value
-    #[n(1)]
-    pub previous: Option<T>,
+    #[n(2)]
+    pub mark: Option<T>,
 
     /// Epoch - 2 version of the value
-    #[n(2)]
-    pub stable: Option<T>,
-
-    /// The epoch at which this value was updated for the last time
     #[n(3)]
-    pub epoch: Epoch,
+    pub set: Option<T>,
+
+    /// Epoch - 3 version of the value
+    #[n(4)]
+    pub go: Option<T>,
 }
 
 impl<T> EpochValue<T>
 where
     T: Clone + std::fmt::Debug,
 {
-    pub fn new(latest: T, epoch: Epoch) -> Self {
+    pub fn new(live: T, epoch: Epoch) -> Self {
         Self {
-            latest,
-            previous: None,
-            stable: None,
             epoch,
+            live,
+            mark: None,
+            set: None,
+            go: None,
         }
     }
 
-    /// Updates the latest value for the current epoch without rotating any of
+    /// Mutates the live value for the current epoch without rotating any of
     /// the previous values
-    pub fn update(&mut self, latest: T, epoch: Epoch) {
+    pub fn mutate<F>(&mut self, mutate: F, epoch: Epoch)
+    where
+        F: FnOnce(&mut T),
+    {
         assert_eq!(epoch, self.epoch);
-        self.latest = latest;
+        self.mutate_unchecked(mutate);
     }
 
-    /// Same as update, but without checking that that the epoch matches.
-    pub fn update_unchecked(&mut self, latest: T) {
-        self.latest = latest;
+    /// Same as mutate, but without checking that that the epoch matches.
+    pub fn mutate_unchecked<F>(&mut self, mutate: F)
+    where
+        F: FnOnce(&mut T),
+    {
+        mutate(&mut self.live);
     }
 
-    /// Transitions into the next epoch by rotating the previous values and
-    /// cloning the latest one.
+    /// Replaces the live value for the current epoch without rotating any of
+    /// the previous values
+    pub fn replace(&mut self, live: T, epoch: Epoch) {
+        assert_eq!(epoch, self.epoch);
+        self.live = live;
+    }
+
+    /// Same as replace, but without checking that that the epoch matches.
+    pub fn replace_unchecked(&mut self, live: T) {
+        self.live = live;
+    }
+
+    /// Transitions into the next epoch by taking a snapshot of the live value
+    /// and rotating the previous ones.
     pub fn transition(&mut self, next_epoch: Epoch) {
         assert_eq!(next_epoch, self.epoch + 1);
         self.transition_unchecked();
@@ -96,19 +117,22 @@ where
 
     /// Same as transition, but without checking that that the epoch matches.
     pub fn transition_unchecked(&mut self) {
-        self.stable = self.previous.clone();
-        self.previous = Some(self.latest.clone());
+        self.go = self.set.clone();
+        self.set = self.mark.clone();
+        self.mark = Some(self.live.clone());
+        // live remains the same
         self.epoch += 1;
-        // latest remains the same
     }
 
     pub fn version_for(&self, epoch: Epoch) -> Option<&T> {
         if epoch == self.epoch {
-            Some(&self.latest)
+            Some(&self.live)
         } else if epoch == self.epoch - 1 {
-            self.previous.as_ref()
+            self.mark.as_ref()
         } else if epoch == self.epoch - 2 {
-            self.stable.as_ref()
+            self.set.as_ref()
+        } else if epoch == self.epoch - 3 {
+            self.go.as_ref()
         } else {
             None
         }
@@ -168,7 +192,7 @@ entity_boilerplate!(RewardLog, "rewards");
 pub struct StakeLog {
     /// Number of blocks created by pool
     #[n(0)]
-    pub blocks_minted: u32,
+    pub blocks_minted: u64,
 
     /// Active (Snapshot of live stake 2 epochs ago) stake in Lovelaces
     #[n(1)]
@@ -240,13 +264,17 @@ pub struct AccountState {
 
     #[n(12)]
     pub deregistered_at: Option<u64>,
+
+    #[n(13)]
+    pub credential: StakeCredential,
 }
 
 entity_boilerplate!(AccountState, "accounts");
 
 impl AccountState {
-    pub fn new(epoch: Epoch) -> Self {
+    pub fn new(epoch: Epoch, credential: StakeCredential) -> Self {
         Self {
+            credential,
             registered_at: None,
             controlled_amount: 0,
             total_stake: EpochValue::new(0, epoch),
@@ -315,33 +343,45 @@ impl AssetState {
 }
 
 #[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize)]
-pub struct PoolState {
+pub struct PoolParams {
     #[n(0)]
     pub vrf_keyhash: Hash<32>,
 
     #[n(1)]
-    pub reward_account: Vec<u8>,
+    pub pledge: u64,
 
     #[n(2)]
-    pub pool_owners: Vec<Hash<28>>,
+    pub cost: u64,
 
     #[n(3)]
-    pub relays: Vec<Relay>,
+    pub margin: RationalNumber,
 
     #[n(4)]
-    pub declared_pledge: u64,
+    pub reward_account: Vec<u8>,
 
     #[n(5)]
-    pub margin_cost: RationalNumber,
+    pub pool_owners: Vec<Hash<28>>,
 
     #[n(6)]
-    pub fixed_cost: u64,
+    pub relays: Vec<Relay>,
 
     #[n(7)]
-    pub metadata: Option<PoolMetadata>,
+    pub pool_metadata: Option<PoolMetadata>,
+}
 
-    #[n(8)]
-    pub total_stake: EpochValue<u64>,
+#[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize)]
+pub struct PoolState {
+    #[n(0)]
+    pub params: PoolParams,
+
+    #[n(1)]
+    pub operator: PoolHash,
+
+    #[n(2)]
+    pub snapshot: EpochValue<PoolSnapshot>,
+
+    #[n(3)]
+    pub params_update: Option<PoolParams>,
 
     #[n(11)]
     pub blocks_minted_total: u32,
@@ -352,14 +392,21 @@ pub struct PoolState {
     #[n(13)]
     pub retiring_epoch: Option<u64>,
 
-    #[n(14)]
-    pub is_retired: bool,
-
-    #[n(15)]
-    pub blocks_minted_epoch: u32,
-
     #[n(16)]
     pub deposit: u64,
+}
+
+/// Pool state that is epoch-specific
+#[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize)]
+pub struct PoolSnapshot {
+    #[n(0)]
+    pub is_pending: bool,
+
+    #[n(1)]
+    pub is_retired: bool,
+
+    #[n(2)]
+    pub blocks_minted: u32,
 }
 
 entity_boilerplate!(PoolState, "pools");
@@ -716,7 +763,7 @@ impl PParamValue {
     }
 }
 
-#[derive(Debug, Encode, Decode, Clone, Default, Serialize)]
+#[derive(Debug, Encode, Decode, Clone, Default, Serialize, Deserialize)]
 pub struct PParamsSet {
     #[n(0)]
     values: Vec<PParamValue>,
@@ -760,6 +807,10 @@ macro_rules! ensure_pparam {
 }
 
 impl PParamsSet {
+    pub fn is_byron(&self) -> bool {
+        self.protocol_major_or_default() < 2
+    }
+
     pub fn len(&self) -> usize {
         self.values.len()
     }
@@ -963,60 +1014,44 @@ pub struct EpochState {
     #[n(0)]
     pub number: Epoch,
 
+    #[n(1)]
+    pub initial_pots: Pots,
+
     #[n(2)]
-    pub deposits: u64,
+    pub produced_utxos: u64,
 
     #[n(3)]
-    pub reserves: u64,
+    pub consumed_utxos: u64,
 
     #[n(4)]
-    pub treasury: u64,
-
-    #[n(5)]
-    pub utxos: u64,
-
-    #[n(6)]
     pub gathered_fees: u64,
 
-    #[n(7)]
+    #[n(5)]
     pub gathered_deposits: u64,
 
-    #[n(8)]
+    #[n(6)]
     pub decayed_deposits: u64,
 
-    #[n(9)]
-    pub effective_rewards: Option<u64>,
-
-    #[n(10)]
-    pub unspendable_rewards: Option<u64>,
-
-    #[n(11)]
+    #[n(7)]
     pub pparams: PParamsSet,
 
-    #[n(12)]
+    #[n(8)]
     pub largest_stable_slot: BlockSlot,
 
-    #[n(13)]
+    #[n(9)]
     pub nonces: Option<Nonces>,
 
-    #[n(14)]
+    #[n(10)]
     pub blocks_minted: u32,
 
-    #[n(15)]
-    pub treasury_tax: Option<u64>,
-
-    #[n(16)]
+    #[n(11)]
     pub pparams_update: PParamsSet,
-}
 
-impl EpochState {
-    pub fn incentives(&self) -> Option<u64> {
-        let total = self.treasury_tax.unwrap_or_default()
-            + self.effective_rewards.unwrap_or_default()
-            + self.unspendable_rewards.unwrap_or_default();
+    #[n(12)]
+    pub pot_delta: Option<PotDelta>,
 
-        Some(total)
-    }
+    #[n(13)]
+    pub final_pots: Option<Pots>,
 }
 
 entity_boilerplate!(EpochState, "epochs");
@@ -1037,7 +1072,7 @@ pub fn drep_to_entity_key(value: &DRep) -> EntityKey {
     EntityKey::from(bytes)
 }
 
-#[derive(Debug, Encode, Decode, Clone, Default)]
+#[derive(Debug, Encode, Decode, Clone)]
 pub struct DRepState {
     #[n(0)]
     pub initial_slot: Option<u64>,
@@ -1056,10 +1091,13 @@ pub struct DRepState {
 
     #[n(5)]
     pub deposit: u64,
+
+    #[n(6)]
+    pub identifier: DRep,
 }
 
 impl DRepState {
-    pub fn new() -> Self {
+    pub fn new(identifier: DRep) -> Self {
         Self {
             initial_slot: None,
             voting_power: 0,
@@ -1067,6 +1105,7 @@ impl DRepState {
             unregistered_at: None,
             expired: false,
             deposit: 0,
+            identifier,
         }
     }
 }
@@ -1279,11 +1318,8 @@ pub enum CardanoDelta {
     NewProposal(NewProposal),
     ProposalEnactment(ProposalEnactment),
     PoolDelegatorDrop(PoolDelegatorDrop),
-    DRepDelegatorDrop(DRepDelegatorDrop),
-    PoolRetirement(PoolRetirement),
-    AssignPoolRewards(AssignPoolRewards),
     AssignDelegatorRewards(AssignDelegatorRewards),
-    //AssignEpochRewards(AssignEpochRewards),
+    PotAdjustment(PotAdjustment),
     PoolTransition(PoolTransition),
     AccountTransition(AccountTransition),
     ProposalExpiration(ProposalExpiration),
@@ -1344,11 +1380,8 @@ delta_from!(NoncesUpdate);
 delta_from!(NewProposal);
 delta_from!(ProposalEnactment);
 delta_from!(PoolDelegatorDrop);
-delta_from!(DRepDelegatorDrop);
-delta_from!(PoolRetirement);
-delta_from!(AssignPoolRewards);
 delta_from!(AssignDelegatorRewards);
-//delta_from!(AssignEpochRewards);
+delta_from!(PotAdjustment);
 delta_from!(PoolTransition);
 delta_from!(AccountTransition);
 delta_from!(ProposalExpiration);
@@ -1365,7 +1398,6 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::StakeDeregistration(x) => x.key(),
             Self::PoolRegistration(x) => x.key(),
             Self::PoolDeRegistration(x) => x.key(),
-            Self::PoolRetirement(x) => x.key(),
             Self::MintedBlocksInc(x) => x.key(),
             Self::MintStatsUpdate(x) => x.key(),
             Self::EpochStatsUpdate(x) => x.key(),
@@ -1379,10 +1411,8 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::NoncesUpdate(x) => x.key(),
             Self::NewProposal(x) => x.key(),
             Self::PoolDelegatorDrop(x) => x.key(),
-            Self::DRepDelegatorDrop(x) => x.key(),
-            Self::AssignPoolRewards(x) => x.key(),
             Self::AssignDelegatorRewards(x) => x.key(),
-            //Self::AssignEpochRewards(x) => x.key(),
+            Self::PotAdjustment(x) => x.key(),
             Self::PoolTransition(x) => x.key(),
             Self::AccountTransition(x) => x.key(),
             Self::ProposalExpiration(x) => x.key(),
@@ -1399,7 +1429,6 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::StakeDeregistration(x) => Self::downcast_apply(x, entity),
             Self::PoolRegistration(x) => Self::downcast_apply(x, entity),
             Self::PoolDeRegistration(x) => Self::downcast_apply(x, entity),
-            Self::PoolRetirement(x) => Self::downcast_apply(x, entity),
             Self::MintedBlocksInc(x) => Self::downcast_apply(x, entity),
             Self::MintStatsUpdate(x) => Self::downcast_apply(x, entity),
             Self::EpochStatsUpdate(x) => Self::downcast_apply(x, entity),
@@ -1413,10 +1442,8 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::NoncesUpdate(x) => Self::downcast_apply(x, entity),
             Self::NewProposal(x) => Self::downcast_apply(x, entity),
             Self::PoolDelegatorDrop(x) => Self::downcast_apply(x, entity),
-            Self::DRepDelegatorDrop(x) => Self::downcast_apply(x, entity),
-            Self::AssignPoolRewards(x) => Self::downcast_apply(x, entity),
             Self::AssignDelegatorRewards(x) => Self::downcast_apply(x, entity),
-            //Self::AssignEpochRewards(x) => Self::downcast_apply(x, entity),
+            Self::PotAdjustment(x) => Self::downcast_apply(x, entity),
             Self::PoolTransition(x) => Self::downcast_apply(x, entity),
             Self::AccountTransition(x) => Self::downcast_apply(x, entity),
             Self::ProposalExpiration(x) => Self::downcast_apply(x, entity),
@@ -1433,7 +1460,6 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::StakeDeregistration(x) => Self::downcast_undo(x, entity),
             Self::PoolRegistration(x) => Self::downcast_undo(x, entity),
             Self::PoolDeRegistration(x) => Self::downcast_undo(x, entity),
-            Self::PoolRetirement(x) => Self::downcast_undo(x, entity),
             Self::MintedBlocksInc(x) => Self::downcast_undo(x, entity),
             Self::MintStatsUpdate(x) => Self::downcast_undo(x, entity),
             Self::EpochStatsUpdate(x) => Self::downcast_undo(x, entity),
@@ -1447,10 +1473,8 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::NoncesUpdate(x) => Self::downcast_undo(x, entity),
             Self::NewProposal(x) => Self::downcast_undo(x, entity),
             Self::PoolDelegatorDrop(x) => Self::downcast_undo(x, entity),
-            Self::DRepDelegatorDrop(x) => Self::downcast_undo(x, entity),
-            Self::AssignPoolRewards(x) => Self::downcast_undo(x, entity),
             Self::AssignDelegatorRewards(x) => Self::downcast_undo(x, entity),
-            //Self::AssignEpochRewards(x) => Self::downcast_undo(x, entity),
+            Self::PotAdjustment(x) => Self::downcast_undo(x, entity),
             Self::PoolTransition(x) => Self::downcast_undo(x, entity),
             Self::AccountTransition(x) => Self::downcast_undo(x, entity),
             Self::ProposalExpiration(x) => Self::downcast_undo(x, entity),

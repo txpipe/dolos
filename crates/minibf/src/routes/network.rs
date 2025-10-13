@@ -214,17 +214,21 @@ impl<'a> IntoModel<Network> for NetworkModelBuilder<'a> {
 
     fn into_model(self) -> Result<Network, StatusCode> {
         let max_supply = self.genesis.shelley.max_lovelace_supply.unwrap_or_default();
-        let total_supply = max_supply.saturating_sub(self.active.reserves);
-        let circulating = total_supply.saturating_sub(self.active.deposits);
+
+        // TODO: check why we have this semantic discrepancy. BF uses the name
+        // `total_supply` for what we call `circulating`. For BF, the `circulating`
+        // supply is total supply minus deposits.
+        let total_supply = self.active.initial_pots.circulating();
+        let circulating = total_supply + self.active.initial_pots.deposits;
 
         Ok(Network {
             supply: Box::new(NetworkSupply {
                 max: max_supply.to_string(),
                 total: total_supply.to_string(),
                 circulating: circulating.to_string(),
-                locked: self.active.deposits.to_string(),
-                treasury: self.active.treasury.to_string(),
-                reserves: self.active.reserves.to_string(),
+                locked: self.active.initial_pots.deposits.to_string(),
+                treasury: self.active.initial_pots.treasury.to_string(),
+                reserves: self.active.initial_pots.reserves.to_string(),
             }),
             // TODO: should compute snapshots as we do during sweep
             stake: Box::new(NetworkStake {
@@ -245,10 +249,7 @@ where
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let builder = NetworkModelBuilder {
-        genesis,
-        active,
-    };
+    let builder = NetworkModelBuilder { genesis, active };
 
     builder.into_response()
 }

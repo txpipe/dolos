@@ -41,6 +41,7 @@ impl TableRow for AccountState {
             "cred",
             "reg",
             "dereg",
+            "stake (-3)",
             "stake (-2)",
             "stake (-1)",
             "live stake",
@@ -55,9 +56,10 @@ impl TableRow for AccountState {
             format!("{}", hex::encode(key)),
             format!("{}", self.registered_at.unwrap_or_default()),
             format!("{}", self.deregistered_at.unwrap_or_default()),
-            format_epoch_value!(self.total_stake.stable, self.pool.stable),
-            format_epoch_value!(self.total_stake.previous, self.pool.previous),
-            format_epoch_value!(Some(self.live_stake()), Some(self.pool.latest)),
+            format_epoch_value!(self.total_stake.go, self.pool.go),
+            format_epoch_value!(self.total_stake.set, self.pool.set),
+            format_epoch_value!(self.total_stake.mark, self.pool.mark),
+            format_epoch_value!(Some(self.live_stake()), Some(self.pool.live)),
             format!("{}", self.rewards_sum),
             format!("{}", self.withdrawals_sum),
             format!(
@@ -73,15 +75,17 @@ impl TableRow for EpochState {
         vec![
             "number",
             "version",
+            "pot reserves",
+            "pot utxos",
+            "pot treasury",
+            "pot deposits",
+            "pot rewards",
+            "pot fees",
+            "delta effective rewards",
+            "delta unspendable rewards",
             "gathered fees",
             "gathered deposits",
             "decayed deposits",
-            "reserves",
-            "utxos",
-            "treasury",
-            "treasury tax",
-            "rewards",
-            "rewards (unspendable)",
             "pparams",
             "nonce",
         ]
@@ -91,15 +95,29 @@ impl TableRow for EpochState {
         vec![
             format!("{}", self.number),
             format!("{}", self.pparams.protocol_major().unwrap_or_default()),
+            format!("{}", self.initial_pots.reserves),
+            format!("{}", self.initial_pots.utxos),
+            format!("{}", self.initial_pots.treasury),
+            format!("{}", self.initial_pots.deposits),
+            format!("{}", self.initial_pots.rewards),
+            format!("{}", self.initial_pots.fees),
+            format!(
+                "{}",
+                self.pot_delta
+                    .as_ref()
+                    .and_then(|x| x.effective_rewards)
+                    .unwrap_or_default()
+            ),
+            format!(
+                "{}",
+                self.pot_delta
+                    .as_ref()
+                    .and_then(|x| x.unspendable_rewards)
+                    .unwrap_or_default()
+            ),
             format!("{}", self.gathered_fees),
             format!("{}", self.gathered_deposits),
             format!("{}", self.decayed_deposits),
-            format!("{}", self.reserves),
-            format!("{}", self.utxos),
-            format!("{}", self.treasury),
-            format!("{}", self.treasury_tax.unwrap_or_default()),
-            format!("{}", self.effective_rewards.unwrap_or_default()),
-            format!("{}", self.unspendable_rewards.unwrap_or_default()),
             format!("{}", self.pparams.len()),
             format!(
                 "{}",
@@ -152,12 +170,10 @@ impl TableRow for PoolState {
         vec![
             "pool hex",
             "pool bech32",
-            "margin cost",
-            "stable stake",
-            "previous stake",
-            "latest stake",
-            "stake epoch",
-            "blocks minted",
+            "blocks (go)",
+            "blocks (set)",
+            "blocks (mark)",
+            "blocks (live)",
         ]
     }
 
@@ -171,14 +187,36 @@ impl TableRow for PoolState {
             format!("{}", pool_hex),
             format!("{}", pool_bech32),
             format!(
-                "{}/{}",
-                self.margin_cost.numerator, self.margin_cost.denominator
+                "{} ({})",
+                self.snapshot
+                    .go
+                    .as_ref()
+                    .map(|x| x.blocks_minted)
+                    .unwrap_or_default(),
+                self.snapshot.epoch - 2,
             ),
-            format!("{}", self.total_stake.stable.unwrap_or_default()),
-            format!("{}", self.total_stake.previous.unwrap_or_default()),
-            format!("{}", self.total_stake.latest),
-            format!("{}", self.total_stake.epoch),
-            format!("{}", self.blocks_minted_total),
+            format!(
+                "{} ({})",
+                self.snapshot
+                    .set
+                    .as_ref()
+                    .map(|x| x.blocks_minted)
+                    .unwrap_or_default(),
+                self.snapshot.epoch - 1
+            ),
+            format!(
+                "{} ({})",
+                self.snapshot
+                    .mark
+                    .as_ref()
+                    .map(|x| x.blocks_minted)
+                    .unwrap_or_default(),
+                self.snapshot.epoch - 1
+            ),
+            format!(
+                "{} ({})",
+                self.snapshot.live.blocks_minted, self.snapshot.epoch
+            ),
         ]
     }
 }

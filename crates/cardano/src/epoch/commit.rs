@@ -5,8 +5,8 @@ use dolos_core::{
 use tracing::{info, instrument, warn};
 
 use crate::{
-    sweep::BoundaryWork, AccountState, CardanoEntity, DRepState, EpochState, EraSummary,
-    FixedNamespace, PoolState, Proposal, EPOCH_KEY_GO, EPOCH_KEY_MARK, EPOCH_KEY_SET,
+    epoch::BoundaryWork, AccountState, CardanoEntity, DRepState, EpochState, EraSummary,
+    FixedNamespace, PParamsSet, PoolState, Proposal, EPOCH_KEY_GO, EPOCH_KEY_MARK, EPOCH_KEY_SET,
 };
 
 impl BoundaryWork {
@@ -19,10 +19,51 @@ impl BoundaryWork {
     }
 
     fn start_new_epoch<W: StateWriter>(&self, writer: &W) -> Result<(), ChainError> {
-        let epoch = self
-            .starting_state
-            .clone()
+        let pparams = self
+            .next_pparams
+            .as_ref()
+            .ok_or(ChainError::from(BrokenInvariant::EpochBoundaryIncomplete))?
+            .clone();
+
+        let initial_pots = self
+            .next_pots
+            .as_ref()
+            .ok_or(ChainError::from(BrokenInvariant::EpochBoundaryIncomplete))?
+            .clone();
+
+        let pot_delta = self.rewards.as_pot_delta();
+
+        // TODO: it's weird that we're re-executing the same change that we already
+        // executed for the final pots of the previous epoch. Maybe we should move to
+        // having a singelton for pots.
+        let initial_pots = crate::pots::apply_delta(initial_pots, &pot_delta);
+
+        let nonces = self.next_nonces.as_ref().cloned();
+
+        let largest_stable_slot = self
+            .next_largest_stable_slot
             .ok_or(ChainError::from(BrokenInvariant::EpochBoundaryIncomplete))?;
+
+        let epoch = EpochState {
+            number: self.ending_state.number + 1,
+            initial_pots,
+            pparams,
+            nonces,
+            largest_stable_slot,
+
+            // computed throughout the epoch during _roll_
+            blocks_minted: 0,
+            gathered_fees: 0,
+            gathered_deposits: 0,
+            decayed_deposits: 0,
+            produced_utxos: 0,
+            consumed_utxos: 0,
+            pparams_update: PParamsSet::default(),
+
+            // computed at the end of the next boundary
+            pot_delta: None,
+            final_pots: None,
+        };
 
         info!(number = epoch.number, "starting new epoch");
 
@@ -166,6 +207,7 @@ impl BoundaryWork {
         self.apply_whole_namespace::<D, PoolState>(state, &writer)?;
         self.apply_whole_namespace::<D, DRepState>(state, &writer)?;
         self.apply_whole_namespace::<D, Proposal>(state, &writer)?;
+        self.apply_whole_namespace::<D, EpochState>(state, &writer)?;
 
         debug_assert!(self.deltas.entities.is_empty());
 

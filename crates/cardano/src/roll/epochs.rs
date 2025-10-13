@@ -55,8 +55,8 @@ impl dolos_core::EntityDelta for EpochStatsUpdate {
 
         entity.gathered_fees += self.block_fees;
 
-        entity.utxos += self.utxo_produced;
-        entity.utxos = entity.utxos.saturating_sub(self.utxo_consumed);
+        entity.produced_utxos += self.utxo_produced;
+        entity.consumed_utxos += self.utxo_consumed;
 
         let key_deposits = self.stake_registration_count * self.key_deposit;
         let pool_deposits = self.pool_registration_count * self.pool_deposit;
@@ -78,8 +78,8 @@ impl dolos_core::EntityDelta for EpochStatsUpdate {
 
         entity.gathered_fees -= self.block_fees;
 
-        entity.utxos -= self.utxo_produced;
-        entity.utxos += self.utxo_consumed;
+        entity.produced_utxos -= self.utxo_produced;
+        entity.consumed_utxos -= self.utxo_consumed;
 
         let key_deposits = self.stake_registration_count * self.key_deposit;
         let pool_deposits = self.pool_registration_count * self.pool_deposit;
@@ -328,7 +328,7 @@ impl BlockVisitor for EpochStateVisitor {
         if let Some((major, minor, _)) = update.byron_proposed_block_version() {
             deltas.add_for_entity(PParamsUpdate {
                 to_update: PParamValue::ProtocolVersion((major.into(), minor.into())),
-                prev_value: None
+                prev_value: None,
             });
         }
 

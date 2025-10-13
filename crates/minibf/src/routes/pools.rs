@@ -56,19 +56,14 @@ impl IntoModel<PoolListExtendedInner> for PoolModelBuilder {
         let out = PoolListExtendedInner {
             pool_id,
             hex: hex::encode(self.operator),
-            active_stake: self
-                .state
-                .total_stake
-                .stable
-                .unwrap_or_default()
-                .to_string(),
-            live_stake: self.state.total_stake.latest.to_string(),
+            active_stake: todo!(),
+            live_stake: todo!(),
             live_saturation: rational_to_f64::<3>(&self.state.live_saturation()),
             blocks_minted: self.state.blocks_minted_total as i32,
-            declared_pledge: self.state.declared_pledge.to_string(),
-            margin_cost: rational_to_f64::<6>(&self.state.margin_cost),
-            fixed_cost: self.state.fixed_cost.to_string(),
-            metadata: self.state.metadata.map(|m| {
+            declared_pledge: self.state.params.pledge.to_string(),
+            margin_cost: rational_to_f64::<6>(&self.state.params.margin),
+            fixed_cost: self.state.params.cost.to_string(),
+            metadata: self.state.params.pool_metadata.map(|m| {
                 let out = json!({
                     "url": m.url,
                     "hash": m.hash,
@@ -102,9 +97,10 @@ where
                 return Some(Err(StatusCode::INTERNAL_SERVER_ERROR));
             };
 
-            if state.is_retired {
+            if state.snapshot.live.is_retired {
                 return None;
             }
+
             let operator = Hash::<28>::from(key);
 
             let builder = PoolModelBuilder { operator, state };
@@ -167,7 +163,7 @@ where
     let filtered = iter.filter_ok(|(_, account)| {
         account
             .pool
-            .latest
+            .live
             .as_ref()
             .is_some_and(|f| f.as_slice() == operator.as_slice())
     });

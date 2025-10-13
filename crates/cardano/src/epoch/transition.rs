@@ -7,9 +7,9 @@ use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use crate::{
-    sweep::{hacks, AccountId, BoundaryWork, PoolId, ProposalId},
+    epoch::{hacks, AccountId, BoundaryWork, PoolId, ProposalId},
     AccountState, CardanoDelta, CardanoEntity, EpochValue, FixedNamespace as _, PParamValue,
-    PoolHash, PoolState, Proposal,
+    PoolHash, PoolParams, PoolSnapshot, PoolState, Proposal,
 };
 
 fn should_enact_proposal(ctx: &mut BoundaryWork, proposal: &Proposal) -> bool {
@@ -68,7 +68,7 @@ impl dolos_core::EntityDelta for AccountTransition {
         self.prev_stake = Some(entity.total_stake.clone());
 
         // apply changes
-        entity.total_stake.update_unchecked(entity.live_stake());
+        entity.total_stake.replace_unchecked(entity.live_stake());
 
         entity.total_stake.transition_unchecked();
         entity.pool.transition_unchecked();
@@ -87,20 +87,22 @@ impl dolos_core::EntityDelta for AccountTransition {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PoolTransition {
     pool: PoolId,
-    ending_stake: u64,
+    should_retire: bool,
 
     // undo
-    prev_stake: Option<EpochValue<u64>>,
-    prev_blocks_minted: Option<u32>,
+    prev_params: Option<PoolParams>,
+    prev_params_update: Option<Option<PoolParams>>,
+    prev_snapshot: Option<PoolSnapshot>,
 }
 
 impl PoolTransition {
-    pub fn new(pool: PoolId, ending_stake: u64) -> Self {
+    pub fn new(pool: PoolId, should_retire: bool) -> Self {
         Self {
             pool,
-            ending_stake,
-            prev_stake: None,
-            prev_blocks_minted: None,
+            should_retire,
+            prev_params: None,
+            prev_params_update: None,
+            prev_snapshot: None,
         }
     }
 }
@@ -118,16 +120,22 @@ impl dolos_core::EntityDelta for PoolTransition {
         };
 
         // undo info
-        self.prev_stake = Some(entity.total_stake.clone());
-        self.prev_blocks_minted = Some(entity.blocks_minted_epoch);
+        self.prev_params = Some(entity.params.clone());
+        self.prev_params_update = Some(entity.params_update.clone());
+        self.prev_snapshot = Some(entity.snapshot.live.clone());
 
         // apply changes
-        debug!(%self.pool, %self.ending_stake, "setting pool stake");
+        if let Some(new_params) = entity.params_update.take() {
+            entity.params = new_params;
+        }
 
-        entity.total_stake.update_unchecked(self.ending_stake);
+        entity.snapshot.transition_unchecked();
 
-        entity.total_stake.transition_unchecked();
-        entity.blocks_minted_epoch = 0;
+        entity.snapshot.mutate_unchecked(|snapshot| {
+            snapshot.is_pending = false;
+            snapshot.is_retired = self.should_retire;
+            snapshot.blocks_minted = 0;
+        });
     }
 
     fn undo(&self, entity: &mut Option<PoolState>) {
@@ -135,8 +143,16 @@ impl dolos_core::EntityDelta for PoolTransition {
             return;
         };
 
-        entity.total_stake = self.prev_stake.clone().expect("called with undo data");
-        entity.blocks_minted_epoch = self.prev_blocks_minted.expect("called with undo data");
+        entity.params = self.prev_params.clone().expect("called with undo data");
+
+        entity.params_update = self
+            .prev_params_update
+            .clone()
+            .expect("called with undo data");
+
+        entity
+            .snapshot
+            .replace_unchecked(self.prev_snapshot.clone().expect("called with undo data"));
     }
 }
 
@@ -224,11 +240,11 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         &mut self,
         ctx: &mut BoundaryWork,
         id: &PoolId,
-        _: &PoolState,
+        pool: &PoolState,
     ) -> Result<(), ChainError> {
-        let ending_stake = ctx.ending_snapshot.get_pool_stake(id);
+        let should_retire = ctx.retiring_pools.contains(&pool.operator);
 
-        self.change(PoolTransition::new(id.clone(), ending_stake));
+        self.change(PoolTransition::new(id.clone(), should_retire));
 
         Ok(())
     }

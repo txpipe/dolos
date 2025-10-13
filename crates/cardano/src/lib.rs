@@ -16,11 +16,16 @@ use dolos_core::{
     Block as _, *,
 };
 
-use crate::owned::{OwnedMultiEraBlock, OwnedMultiEraOutput};
+use crate::{
+    owned::{OwnedMultiEraBlock, OwnedMultiEraOutput},
+    rewards::RewardMap,
+    rupd::RupdWork,
+};
 
 pub mod math_macros;
 pub mod pallas_extras;
 
+pub mod epoch;
 pub mod eras;
 pub mod forks;
 pub mod genesis;
@@ -29,7 +34,7 @@ pub mod owned;
 pub mod pots;
 pub mod rewards;
 pub mod roll;
-pub mod sweep;
+pub mod rupd;
 pub mod utils;
 pub mod utxoset;
 
@@ -107,14 +112,21 @@ impl WorkBuffer {
         self.pending.push_back(WorkUnit::Block(block));
     }
 
-    fn enqueue_sweep(&mut self, slot: BlockSlot) {
+    fn enqueue_epoch(&mut self, slot: BlockSlot) {
         self.last_point_seen = ChainPoint::Slot(slot);
-        self.pending.push_back(WorkUnit::Sweep(slot));
+        self.pending.push_back(WorkUnit::Epoch(slot));
+    }
+
+    fn enqueue_rupd(&mut self, slot: BlockSlot) {
+        self.last_point_seen = ChainPoint::Slot(slot);
+        self.pending.push_back(WorkUnit::Rupd(slot));
     }
 }
 
 struct Cache {
     eras: ChainSummary,
+    stability_window: u64,
+    rewards: Option<RewardMap<RupdWork>>,
 }
 
 #[derive(Clone)]
@@ -141,7 +153,11 @@ impl dolos_core::ChainLogic for CardanoLogic {
     type Delta = CardanoDelta;
     type Entity = CardanoEntity;
 
-    fn initialize<D: Domain>(config: Self::Config, state: &D::State) -> Result<Self, ChainError> {
+    fn initialize<D: Domain>(
+        config: Self::Config,
+        state: &D::State,
+        genesis: &Genesis,
+    ) -> Result<Self, ChainError> {
         let cursor = state.read_cursor()?;
 
         let work = match cursor {
@@ -151,9 +167,15 @@ impl dolos_core::ChainLogic for CardanoLogic {
 
         let eras = eras::load_era_summary::<D>(state)?;
 
+        let stability_window = utils::stability_window(genesis);
+
         Ok(Self {
             config,
-            cache: Arc::new(RwLock::new(Cache { eras })),
+            cache: Arc::new(RwLock::new(Cache {
+                eras,
+                stability_window,
+                rewards: None,
+            })),
             work: Arc::new(RwLock::new(work)),
         })
     }
@@ -169,10 +191,17 @@ impl dolos_core::ChainLogic for CardanoLogic {
 
         let cache = self.cache.read().unwrap();
 
-        let boundary = pallas_extras::epoch_boundary(&cache.eras, prev_slot, next_slot);
+        let epoch_boundary = pallas_extras::epoch_boundary(&cache.eras, prev_slot, next_slot);
 
-        if let Some(slot) = boundary {
-            work.enqueue_sweep(slot);
+        if let Some(slot) = epoch_boundary {
+            work.enqueue_epoch(slot);
+        }
+
+        let rupd_boundary =
+            pallas_extras::rupd_boundary(cache.stability_window, &cache.eras, prev_slot, next_slot);
+
+        if let Some(slot) = rupd_boundary {
+            work.enqueue_rupd(slot);
         }
 
         let block = WorkBlock::new(block);
@@ -187,7 +216,8 @@ impl dolos_core::ChainLogic for CardanoLogic {
 
         work.pending.front().map(|work| match work {
             WorkUnit::Block(_) => WorkKind::Block,
-            WorkUnit::Sweep(_) => WorkKind::Sweep,
+            WorkUnit::Epoch(_) => WorkKind::Epoch,
+            WorkUnit::Rupd(_) => WorkKind::Rupd,
             WorkUnit::Genesis => WorkKind::Genesis,
         })
     }
@@ -209,16 +239,38 @@ impl dolos_core::ChainLogic for CardanoLogic {
         Ok(())
     }
 
-    fn apply_sweep<D: Domain>(
+    fn apply_epoch<D: Domain>(
         &self,
         state: &D::State,
         archive: &D::Archive,
         genesis: &Genesis,
         at: BlockSlot,
     ) -> Result<(), ChainError> {
-        sweep::sweep::<D>(state, archive, at, &self.config, genesis)?;
+        let mut cache = self.cache.write().unwrap();
+
+        let rewards = cache.rewards.take().ok_or(ChainError::MissingRewards)?;
+
+        epoch::execute::<D>(state, archive, at, &self.config, genesis, rewards)?;
+
+        drop(cache);
 
         self.refresh_cache::<D>(state)?;
+
+        Ok(())
+    }
+
+    fn apply_rupd<D: Domain>(
+        &self,
+        state: &D::State,
+        _archive: &D::Archive,
+        genesis: &Genesis,
+        at: BlockSlot,
+    ) -> Result<(), ChainError> {
+        let rewards = rupd::execute::<D>(state, at, genesis)?;
+
+        let mut cache = self.cache.write().unwrap();
+
+        cache.rewards = Some(rewards);
 
         Ok(())
     }

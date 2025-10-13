@@ -102,6 +102,7 @@ impl ToyDomain {
         let chain = dolos_cardano::CardanoLogic::initialize::<Self>(
             dolos_cardano::Config::default(),
             &state,
+            &genesis,
         )
         .unwrap();
 

@@ -1,6 +1,6 @@
 use std::ops::Deref as _;
 
-use dolos_core::BlockSlot;
+use dolos_core::{BlockSlot, Genesis};
 use pallas::crypto::hash::Hash;
 use pallas::ledger::addresses::{
     Address, Network, ShelleyAddress, ShelleyDelegationPart, StakeAddress, StakePayload,
@@ -17,6 +17,7 @@ use pallas::ledger::traverse::MultiEraCert;
 use serde::{Deserialize, Serialize};
 
 use crate::eras::ChainSummary;
+use crate::utils;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MultiEraPoolRegistration {
@@ -221,16 +222,6 @@ pub fn address_as_stake_cred(address: &Address) -> Option<StakeCredential> {
     }
 }
 
-pub fn next_epoch_boundary(chain_summary: &ChainSummary, after: BlockSlot) -> BlockSlot {
-    let era = chain_summary.era_for_slot(after);
-    let epoch_length = era.epoch_length;
-    let (_, epoch_slot) = era.slot_epoch(after);
-
-    let missing = epoch_length - epoch_slot as u64;
-
-    after + missing
-}
-
 pub fn epoch_boundary(
     chain_summary: &ChainSummary,
     prev_slot: BlockSlot,
@@ -241,6 +232,25 @@ pub fn epoch_boundary(
 
     if prev_epoch != next_epoch {
         let boundary = chain_summary.epoch_start(next_epoch);
+        Some(boundary)
+    } else {
+        None
+    }
+}
+
+pub fn rupd_boundary(
+    stability_window: u64,
+    chain_summary: &ChainSummary,
+    prev_slot: BlockSlot,
+    next_slot: BlockSlot,
+) -> Option<BlockSlot> {
+    let (prev_epoch, _) = chain_summary.slot_epoch(prev_slot);
+
+    let epoch_start = chain_summary.epoch_start(prev_epoch);
+
+    let boundary = epoch_start + stability_window;
+
+    if prev_slot <= boundary && boundary < next_slot {
         Some(boundary)
     } else {
         None
@@ -329,4 +339,20 @@ pub fn pool_reward_account(reward_account: &[u8]) -> Option<StakeCredential> {
 
 pub fn keyhash_to_stake_cred(keyhash: Hash<28>) -> StakeCredential {
     StakeCredential::AddrKeyhash(keyhash)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    static REWARD_ACCOUNT: [u8; 29] = [
+        224, 185, 111, 206, 243, 185, 53, 26, 246, 131, 75, 216, 80, 227, 169, 120, 89, 215, 189,
+        91, 114, 157, 36, 191, 54, 70, 174, 172, 207,
+    ];
+
+    #[test]
+    fn test_pool_reward_account() {
+        let parsed = pool_reward_account(&REWARD_ACCOUNT).unwrap();
+        dbg!(&parsed);
+    }
 }

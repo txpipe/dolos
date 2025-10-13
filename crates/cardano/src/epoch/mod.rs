@@ -1,16 +1,18 @@
 use std::collections::{HashMap, HashSet};
 
 use dolos_core::{batch::WorkDeltas, BlockSlot, ChainError, Domain, EntityKey, Genesis};
-use pallas::crypto::hash::Hash;
+use pallas::{crypto::hash::Hash, ledger::primitives::conway::DRep};
 use tracing::{info, instrument};
 
 use crate::{
-    pots::PotDelta, AccountState, CardanoDelta, CardanoEntity, CardanoLogic, Config, DRepState,
-    EpochState, EraProtocol, EraSummary, PParamsSet, PoolState, Proposal,
+    pots::{PotDelta, Pots},
+    rewards::RewardMap,
+    rupd::RupdWork,
+    AccountState, CardanoDelta, CardanoEntity, CardanoLogic, Config, DRepState, EpochState,
+    EraProtocol, EraSummary, Nonces, PParamsSet, PoolHash, PoolState, Proposal,
 };
 
 pub mod commit;
-pub mod compute;
 pub mod loading;
 // visitors
 pub mod retires;
@@ -27,7 +29,7 @@ mod hacks;
 // - active: (ending - 2) the epoch considered active for stake distribution &
 //   pool parameters
 
-pub trait BoundaryVisitor: Default {
+pub trait BoundaryVisitor {
     #[allow(unused_variables)]
     fn visit_pool(
         &mut self,
@@ -79,35 +81,15 @@ pub type PoolId = EntityKey;
 pub type DRepId = EntityKey;
 pub type ProposalId = EntityKey;
 
-#[derive(Debug)]
-pub struct Pots {
-    pub reserves: u64,
-    pub treasury: u64,
-    pub utxos: u64,
-}
-
 #[derive(Debug, Default, Clone)]
-pub struct DelegatorMap(HashMap<EntityKey, HashMap<AccountId, u64>>);
+pub struct DelegatorMap(HashMap<EntityKey, HashSet<AccountId>>);
 
 impl DelegatorMap {
-    pub fn insert(&mut self, entity_id: EntityKey, account_id: AccountId, stake: u64) {
-        self.0
-            .entry(entity_id)
-            .or_default()
-            .insert(account_id, stake);
+    pub fn insert(&mut self, entity_id: EntityKey, account_id: AccountId) {
+        self.0.entry(entity_id).or_default().insert(account_id);
     }
 
-    pub fn get_stake(&self, pool_id: &PoolId, account_id: &AccountId) -> u64 {
-        let for_pool = self.0.get(pool_id);
-
-        let Some(for_pool) = for_pool else {
-            return 0;
-        };
-
-        for_pool.get(account_id).cloned().unwrap_or(0)
-    }
-
-    pub fn iter_delegators(&self, pool_id: &PoolId) -> impl Iterator<Item = (&AccountId, &u64)> {
+    pub fn iter_delegators(&self, pool_id: &PoolId) -> impl Iterator<Item = &AccountId> {
         self.0.get(pool_id).into_iter().flatten()
     }
 
@@ -141,23 +123,22 @@ pub struct EraTransition {
 
 pub struct BoundaryWork {
     // loaded
-    pub active_protocol: EraProtocol,
-    pub active_era: EraSummary,
-    pub active_state: Option<EpochState>,
-    pub active_snapshot: Snapshot,
     pub waiting_state: Option<EpochState>,
     pub ending_state: EpochState,
-    pub ending_snapshot: Snapshot,
     pub network_magic: Option<u32>,
     pub shelley_hash: Hash<32>,
-    pub active_slot_coeff: f32,
-    pub registered_accounts: HashSet<AccountId>,
+    pub active_protocol: EraProtocol,
+    pub active_era: EraSummary,
+    pub rewards: RewardMap<RupdWork>,
 
-    // computed
-    pub pot_delta: Option<PotDelta>,
-    pub starting_state: Option<EpochState>,
+    // inferred
+    pub retiring_pools: HashSet<PoolHash>,
+    pub expiring_dreps: HashSet<DRep>,
     pub era_transition: Option<EraTransition>,
     pub next_pparams: Option<PParamsSet>,
+    pub next_nonces: Option<Nonces>,
+    pub next_pots: Option<Pots>,
+    pub next_largest_stable_slot: Option<BlockSlot>,
 
     // computed via visitors
     pub deltas: WorkDeltas<CardanoLogic>,
@@ -174,17 +155,18 @@ impl BoundaryWork {
     }
 }
 
-#[instrument(skip_all, fields(slot = %slot))]
-pub fn sweep<D: Domain>(
+#[instrument("epoch", skip_all, fields(slot = %slot))]
+pub fn execute<D: Domain>(
     state: &D::State,
     archive: &D::Archive,
     slot: BlockSlot,
     config: &Config,
     genesis: &Genesis,
+    rewards: RewardMap<RupdWork>,
 ) -> Result<(), ChainError> {
-    info!(slot, "executing sweep");
+    info!("executing epoch work unit");
 
-    let mut boundary = BoundaryWork::load::<D>(state, genesis)?;
+    let mut boundary = BoundaryWork::load::<D>(state, genesis, rewards)?;
 
     // If we're going to stop, we need to do it before applying any changes.
     //
@@ -197,9 +179,9 @@ pub fn sweep<D: Domain>(
         }
     }
 
-    boundary.compute::<D>(state, genesis)?;
-
     boundary.commit::<D>(state, archive)?;
+
+    info!("epoch work unit committed");
 
     Ok(())
 }

@@ -49,17 +49,19 @@ impl TableRow for EpochState {
         vec![
             "number",
             "version",
+            "pot reserves",
+            "pot utxos",
+            "pot treasury",
+            "pot deposits",
+            "pot rewards",
+            "pot fees",
+            "delta effective rewards",
+            "delta unspendable rewards",
             "gathered fees",
             "gathered deposits",
             "decayed deposits",
-            "reserves",
-            "utxos",
-            "treasury",
-            "treasury tax",
-            "rewards",
-            "rewards (unspendable)",
-            "blocks minted",
             "pparams",
+            "blocks",
         ]
     }
 
@@ -67,17 +69,31 @@ impl TableRow for EpochState {
         vec![
             format!("{}", self.number),
             format!("{}", self.pparams.protocol_major().unwrap_or_default()),
+            format!("{}", self.initial_pots.reserves),
+            format!("{}", self.initial_pots.utxos),
+            format!("{}", self.initial_pots.treasury),
+            format!("{}", self.initial_pots.deposits),
+            format!("{}", self.initial_pots.rewards),
+            format!("{}", self.initial_pots.fees),
+            format!(
+                "{}",
+                self.pot_delta
+                    .as_ref()
+                    .and_then(|x| x.effective_rewards)
+                    .unwrap_or_default()
+            ),
+            format!(
+                "{}",
+                self.pot_delta
+                    .as_ref()
+                    .and_then(|x| x.unspendable_rewards)
+                    .unwrap_or_default()
+            ),
             format!("{}", self.gathered_fees),
             format!("{}", self.gathered_deposits),
             format!("{}", self.decayed_deposits),
-            format!("{}", self.reserves),
-            format!("{}", self.utxos),
-            format!("{}", self.treasury),
-            format!("{}", self.treasury_tax.unwrap_or_default()),
-            format!("{}", self.effective_rewards.unwrap_or_default()),
-            format!("{}", self.unspendable_rewards.unwrap_or_default()),
-            format!("{}", self.blocks_minted),
             format!("{}", self.pparams.len()),
+            format!("{}", self.blocks_minted),
         ]
     }
 }

@@ -50,7 +50,7 @@ pub fn compute_spdd(store: &impl StateStore) -> miette::Result<HashMap<Hash<28>,
     for record in all_accounts {
         let (_, value) = record.into_diagnostic()?;
 
-        if let Some(pool_id) = value.pool.latest {
+        if let Some(pool_id) = value.pool.live {
             let entry = by_pool.entry(pool_id).or_insert(0);
             *entry += value.live_stake() as u128;
         }

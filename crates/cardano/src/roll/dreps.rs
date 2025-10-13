@@ -2,7 +2,7 @@ use std::ops::Deref as _;
 
 use dolos_core::{batch::WorkDeltas, BlockSlot, ChainError, NsKey};
 use pallas::ledger::{
-    primitives::{conway::{self, Anchor, DRep}},
+    primitives::conway::{self, Anchor, DRep},
     traverse::{MultiEraBlock, MultiEraCert, MultiEraTx},
 };
 use serde::{Deserialize, Serialize};
@@ -59,7 +59,7 @@ impl dolos_core::EntityDelta for DRepRegistration {
     }
 
     fn apply(&mut self, entity: &mut Option<DRepState>) {
-        let entity = entity.get_or_insert_default();
+        let entity = entity.get_or_insert_with(|| DRepState::new(self.drep.clone()));
 
         // apply changes
         entity.initial_slot = Some(self.slot);
@@ -68,7 +68,8 @@ impl dolos_core::EntityDelta for DRepRegistration {
     }
 
     fn undo(&self, entity: &mut Option<DRepState>) {
-        let entity = entity.get_or_insert_default();
+        let entity = entity.get_or_insert_with(|| DRepState::new(self.drep.clone()));
+
         entity.initial_slot = None;
         entity.voting_power = 0;
         entity.deposit = self.prev_deposit.unwrap_or(0);
@@ -83,7 +84,7 @@ pub struct DRepUnRegistration {
     // undo data
     prev_voting_power: Option<u64>,
     prev_deposit: Option<u64>,
-    prev_unregistered_at: Option<BlockSlot>
+    prev_unregistered_at: Option<BlockSlot>,
 }
 
 impl DRepUnRegistration {
@@ -106,14 +107,7 @@ impl dolos_core::EntityDelta for DRepUnRegistration {
     }
 
     fn apply(&mut self, entity: &mut Option<DRepState>) {
-        let Some(entity) = entity.as_mut() else {
-            tracing::error!(
-                key = self.key().to_string(),
-                delta = "DRepUnRegistration",
-                "failed to apply delta to entity, not found."
-            );
-            panic!("entity not found")
-        };
+        let entity = entity.as_mut().expect("can't unregister missing drep");
 
         // save undo data
         self.prev_voting_power = Some(entity.voting_power);
@@ -127,7 +121,8 @@ impl dolos_core::EntityDelta for DRepUnRegistration {
     }
 
     fn undo(&self, entity: &mut Option<DRepState>) {
-        let entity = entity.get_or_insert_default();
+        let entity = entity.as_mut().expect("can't undo missing drep");
+
         entity.voting_power = self.prev_voting_power.unwrap();
         entity.unregistered_at = self.prev_unregistered_at;
         entity.deposit = self.prev_deposit.unwrap_or(0);
@@ -159,7 +154,9 @@ impl dolos_core::EntityDelta for DRepActivity {
     }
 
     fn apply(&mut self, entity: &mut Option<DRepState>) {
-        let entity = entity.get_or_insert_default();
+        let entity = entity
+            .as_mut()
+            .expect("can't track activity of missing drep");
 
         // save undo info
         self.previous_last_active_slot = entity.last_active_slot;
@@ -169,7 +166,8 @@ impl dolos_core::EntityDelta for DRepActivity {
     }
 
     fn undo(&self, entity: &mut Option<DRepState>) {
-        let entity = entity.get_or_insert_default();
+        let entity = entity.as_mut().expect("can't undo missing drep");
+
         entity.last_active_slot = self.previous_last_active_slot;
     }
 }

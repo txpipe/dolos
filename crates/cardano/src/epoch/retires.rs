@@ -4,45 +4,10 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 use crate::{
-    sweep::{AccountId, BoundaryWork, DRepId, PoolId, ProposalId},
+    epoch::{AccountId, BoundaryWork, DRepId, PoolId, ProposalId},
     AccountState, CardanoDelta, DRepState, EpochValue, FixedNamespace as _, PoolHash, PoolState,
     Proposal,
 };
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PoolRetirement {
-    pool: PoolId,
-}
-
-impl dolos_core::EntityDelta for PoolRetirement {
-    type Entity = PoolState;
-
-    fn key(&self) -> NsKey {
-        NsKey::from((PoolState::NS, self.pool.clone()))
-    }
-
-    fn apply(&mut self, entity: &mut Option<PoolState>) {
-        let Some(entity) = entity else {
-            warn!("missing pool");
-            return;
-        };
-
-        debug!(pool=%self.pool, "retiring pool");
-
-        entity.is_retired = true;
-    }
-
-    fn undo(&self, entity: &mut Option<PoolState>) {
-        let Some(entity) = entity else {
-            warn!("missing pool");
-            return;
-        };
-
-        debug!(pool=%self.pool, "restoring retired pool");
-
-        entity.is_retired = false;
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProposalExpiration {
@@ -118,7 +83,7 @@ impl dolos_core::EntityDelta for PoolDelegatorDrop {
         self.prev_pool = Some(entity.pool.clone());
 
         // apply changes
-        entity.pool.update_unchecked(None);
+        entity.pool.replace_unchecked(None);
     }
 
     fn undo(&self, entity: &mut Option<AccountState>) {
@@ -208,7 +173,7 @@ impl dolos_core::EntityDelta for DRepDelegatorDrop {
                 self.prev_drep = Some(entity.drep.clone());
 
                 // apply changes
-                entity.drep.update_unchecked(None);
+                entity.drep.replace_unchecked(None);
             }
         }
     }
@@ -225,35 +190,6 @@ impl dolos_core::EntityDelta for DRepDelegatorDrop {
     }
 }
 
-fn should_retire_pool(ctx: &mut BoundaryWork, pool: &PoolState) -> bool {
-    if pool.is_retired {
-        return false;
-    }
-
-    let Some(retiring_epoch) = pool.retiring_epoch else {
-        return false;
-    };
-
-    retiring_epoch <= ctx.starting_epoch_no()
-}
-
-fn should_expire_drep(ctx: &mut BoundaryWork, drep: &DRepState) -> Result<bool, ChainError> {
-    if drep.expired {
-        return Ok(false);
-    }
-
-    let last_activity_slot = drep
-        .last_active_slot
-        .unwrap_or(drep.initial_slot.unwrap_or_default());
-
-    let (last_activity_epoch, _) = ctx.active_era.slot_epoch(last_activity_slot);
-
-    let expiring_epoch =
-        last_activity_epoch + ctx.ending_pparams().ensure_drep_inactivity_period()?;
-
-    Ok(expiring_epoch <= ctx.starting_epoch_no())
-}
-
 fn should_expire_proposal(ctx: &mut BoundaryWork, proposal: &Proposal) -> Result<bool, ChainError> {
     // Skip proposals already in a terminal state
     if proposal.expired_epoch.is_some() || proposal.enacted_epoch.is_some() {
@@ -263,7 +199,8 @@ fn should_expire_proposal(ctx: &mut BoundaryWork, proposal: &Proposal) -> Result
     let (epoch, _) = ctx.active_era.slot_epoch(proposal.slot);
     let expiring_epoch = epoch
         + ctx
-            .ending_pparams()
+            .ending_state
+            .pparams
             .ensure_governance_action_validity_period()?;
 
     Ok(expiring_epoch <= ctx.starting_epoch_no())
@@ -275,23 +212,24 @@ pub struct BoundaryVisitor {
 }
 
 impl super::BoundaryVisitor for BoundaryVisitor {
-    fn visit_pool(
+    fn visit_account(
         &mut self,
         ctx: &mut BoundaryWork,
-        id: &PoolId,
-        pool: &PoolState,
+        id: &AccountId,
+        account: &AccountState,
     ) -> Result<(), ChainError> {
-        if !should_retire_pool(ctx, pool) {
-            return Ok(());
+        if let Some(pool) = account.pool.live {
+            if ctx.retiring_pools.contains(&pool) {
+                self.deltas.push(PoolDelegatorDrop::new(id.clone()).into());
+            }
         }
 
-        self.deltas.push(PoolRetirement { pool: id.clone() }.into());
-
-        let delegators = ctx.ending_snapshot.accounts_by_pool.iter_delegators(id);
-
-        for (delegator, _) in delegators {
-            self.deltas
-                .push(PoolDelegatorDrop::new(delegator.clone()).into());
+        if let Some(drep) = account.drep.live.as_ref() {
+            todo!("primitive drep struct needs to implement hash");
+            // if ctx.expiring_dreps.contains(drep) {
+            //     self.deltas
+            //         .push(DRepDelegatorDrop::new(id.clone(),
+            // drep.unregistered_at).into()); }
         }
 
         Ok(())
@@ -303,21 +241,14 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         id: &DRepId,
         drep: &DRepState,
     ) -> Result<(), ChainError> {
-        if should_expire_drep(ctx, drep)? {
-            self.deltas.push(
-                DRepExpiration {
-                    drep_id: id.clone(),
-                }
-                .into(),
-            );
-        }
-
-        if let Some(unregistered_at) = drep.unregistered_at {
-            for (delegator, _) in ctx.ending_snapshot.accounts_by_drep.iter_delegators(id) {
-                self.deltas
-                    .push(DRepDelegatorDrop::new(delegator.clone(), unregistered_at).into());
-            }
-        }
+        // if ctx.expiring_dreps.contains(&drep.identifier) {
+        //     self.deltas.push(
+        //         DRepExpiration {
+        //             drep_id: id.clone(),
+        //         }
+        //         .into(),
+        //     );
+        // }
 
         Ok(())
     }
