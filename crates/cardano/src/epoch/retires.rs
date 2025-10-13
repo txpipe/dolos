@@ -1,12 +1,15 @@
 use dolos_core::{BlockSlot, ChainError, NsKey};
-use pallas::ledger::primitives::conway::DRep;
+use pallas::{
+    codec::minicbor,
+    ledger::primitives::{conway::DRep, StakeCredential},
+};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 use crate::{
     epoch::{AccountId, BoundaryWork, DRepId, PoolId, ProposalId},
-    AccountState, CardanoDelta, DRepState, EpochValue, FixedNamespace as _, PoolHash, PoolState,
-    Proposal,
+    pallas_extras, AccountState, CardanoDelta, DRepState, EpochValue, FixedNamespace as _,
+    PoolHash, PoolState, Proposal,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -190,6 +193,46 @@ impl dolos_core::EntityDelta for DRepDelegatorDrop {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PoolDepositRefund {
+    pool_deposit: u64,
+    account: StakeCredential,
+}
+
+impl PoolDepositRefund {
+    pub fn new(pool_deposit: u64, account: StakeCredential) -> Self {
+        Self {
+            pool_deposit,
+            account,
+        }
+    }
+}
+
+impl dolos_core::EntityDelta for PoolDepositRefund {
+    type Entity = AccountState;
+
+    fn key(&self) -> NsKey {
+        let enc = minicbor::to_vec(&self.account).unwrap();
+        NsKey::from((PoolState::NS, enc))
+    }
+
+    fn apply(&mut self, entity: &mut Option<Self::Entity>) {
+        let entity = entity.as_mut().expect("existing account");
+
+        if entity.is_registered() {
+            entity.rewards_sum += self.pool_deposit;
+        }
+    }
+
+    fn undo(&self, entity: &mut Option<Self::Entity>) {
+        let entity = entity.as_mut().expect("existing account");
+
+        if entity.is_registered() {
+            entity.rewards_sum = entity.rewards_sum.saturating_sub(self.pool_deposit);
+        }
+    }
+}
+
 fn should_expire_proposal(ctx: &mut BoundaryWork, proposal: &Proposal) -> Result<bool, ChainError> {
     // Skip proposals already in a terminal state
     if proposal.expired_epoch.is_some() || proposal.enacted_epoch.is_some() {
@@ -211,6 +254,12 @@ pub struct BoundaryVisitor {
     deltas: Vec<CardanoDelta>,
 }
 
+impl BoundaryVisitor {
+    fn change(&mut self, delta: impl Into<CardanoDelta>) {
+        self.deltas.push(delta.into());
+    }
+}
+
 impl super::BoundaryVisitor for BoundaryVisitor {
     fn visit_account(
         &mut self,
@@ -220,7 +269,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
     ) -> Result<(), ChainError> {
         if let Some(pool) = account.pool.live {
             if ctx.retiring_pools.contains(&pool) {
-                self.deltas.push(PoolDelegatorDrop::new(id.clone()).into());
+                self.change(PoolDelegatorDrop::new(id.clone()));
             }
         }
 
@@ -230,6 +279,22 @@ impl super::BoundaryVisitor for BoundaryVisitor {
             //     self.deltas
             //         .push(DRepDelegatorDrop::new(id.clone(),
             // drep.unregistered_at).into()); }
+        }
+
+        Ok(())
+    }
+
+    fn visit_pool(
+        &mut self,
+        ctx: &mut BoundaryWork,
+        _: &PoolId,
+        pool: &PoolState,
+    ) -> Result<(), ChainError> {
+        if ctx.retiring_pools.contains(&pool.operator) {
+            if let Some(account) = pallas_extras::pool_reward_account(&pool.params.reward_account) {
+                let deposit = ctx.ending_state.pparams.pool_deposit_or_default();
+                self.change(PoolDepositRefund::new(deposit, account));
+            }
         }
 
         Ok(())

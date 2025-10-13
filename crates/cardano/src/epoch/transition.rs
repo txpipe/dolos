@@ -115,9 +115,7 @@ impl dolos_core::EntityDelta for PoolTransition {
     }
 
     fn apply(&mut self, entity: &mut Option<PoolState>) {
-        let Some(entity) = entity else {
-            return;
-        };
+        let entity = entity.as_mut().expect("existing pool");
 
         // undo info
         self.prev_params = Some(entity.params.clone());

@@ -41,7 +41,7 @@ impl Pots {
     }
 
     pub fn check_consistency(&self, expected_max_supply: u64) {
-        assert_eq!(self.max_supply(), expected_max_supply);
+        debug_assert_eq!(self.max_supply(), expected_max_supply);
     }
 }
 

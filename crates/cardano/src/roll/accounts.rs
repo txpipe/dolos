@@ -131,7 +131,7 @@ impl dolos_core::EntityDelta for StakeRegistration {
         self.prev_deregistered_at = entity.deregistered_at;
         self.prev_deposit = Some(entity.deposit);
 
-        tracing::error!(
+        tracing::debug!(
             slot = self.slot,
             account = hex::encode(minicbor::to_vec(&self.cred).unwrap()),
             "applying registration"
@@ -181,7 +181,7 @@ impl dolos_core::EntityDelta for StakeDelegation {
     fn apply(&mut self, entity: &mut Option<AccountState>) {
         let entity = entity.as_mut().expect("existing account");
 
-        tracing::error!(pool = hex::encode(self.pool), "applying delegation");
+        tracing::debug!(pool = hex::encode(self.pool), "applying delegation");
 
         // save undo
         self.prev_pool = Some(entity.pool.clone());
@@ -286,7 +286,7 @@ impl dolos_core::EntityDelta for StakeDeregistration {
     fn apply(&mut self, entity: &mut Option<AccountState>) {
         let entity = entity.as_mut().expect("existing account");
 
-        tracing::error!(slot = self.slot, "applying deregistration");
+        tracing::debug!(slot = self.slot, "applying deregistration");
 
         // save undo info
         self.prev_registered_at = entity.registered_at;

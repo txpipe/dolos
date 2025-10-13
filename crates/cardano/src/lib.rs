@@ -262,11 +262,11 @@ impl dolos_core::ChainLogic for CardanoLogic {
     fn apply_rupd<D: Domain>(
         &self,
         state: &D::State,
-        _archive: &D::Archive,
+        archive: &D::Archive,
         genesis: &Genesis,
         at: BlockSlot,
     ) -> Result<(), ChainError> {
-        let rewards = rupd::execute::<D>(state, at, genesis)?;
+        let rewards = rupd::execute::<D>(state, archive, at, genesis)?;
 
         let mut cache = self.cache.write().unwrap();
 

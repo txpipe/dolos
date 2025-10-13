@@ -135,6 +135,9 @@ impl BoundaryWork {
         let deposits = pots.deposits as i64 + deposits_delta;
         pots.deposits = deposits as u64;
 
+        pots.rewards += ending.decayed_deposits;
+        pots.rewards -= ending.gathered_withdrawals;
+
         pots.check_consistency(ending.initial_pots.max_supply());
 
         self.next_pots = Some(pots);

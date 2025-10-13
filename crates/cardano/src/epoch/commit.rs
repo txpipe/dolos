@@ -58,6 +58,7 @@ impl BoundaryWork {
             decayed_deposits: 0,
             produced_utxos: 0,
             consumed_utxos: 0,
+            gathered_withdrawals: 0,
             pparams_update: PParamsSet::default(),
 
             // computed at the end of the next boundary

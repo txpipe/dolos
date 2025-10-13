@@ -221,18 +221,18 @@ where
 
     let mapped: Vec<_> = entries
         .into_iter()
-        .filter(|(_, log)| log.active_stake > 0)
+        .filter(|(_, log)| log.total_stake > 0)
         .skip(pagination.skip())
         .take(pagination.count)
         .map(|(epoch, log)| {
             Ok(PoolHistoryInner {
                 epoch: epoch as i32,
                 blocks: log.blocks_minted as i32,
-                active_stake: log.active_stake.to_string(),
-                active_size: log.active_size,
+                active_stake: log.total_stake.to_string(),
+                active_size: log.relative_size,
                 delegators_count: log.delegators_count as i32,
-                rewards: log.rewards.to_string(),
-                fees: log.fees.to_string(),
+                rewards: log.total_rewards.to_string(),
+                fees: log.operator_share.to_string(),
             })
         })
         .collect::<Result<Vec<_>, StatusCode>>()?;

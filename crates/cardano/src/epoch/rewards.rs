@@ -4,13 +4,8 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 use crate::{
-    epoch::BoundaryWork,
-    pallas_extras, pallas_ratio,
-    pots::PotDelta,
-    rewards::RewardMap,
-    rupd::{AccountId, PoolId, RupdWork, StakeSnapshot},
-    AccountState, CardanoDelta, CardanoEntity, EpochState, FixedNamespace, PoolState, RewardLog,
-    StakeLog, EPOCH_KEY_MARK,
+    epoch::BoundaryWork, pots::PotDelta, rupd::AccountId, AccountRewardLog, AccountState,
+    CardanoDelta, CardanoEntity, EpochState, FixedNamespace, PoolRewardLog, EPOCH_KEY_MARK,
 };
 
 fn stake_cred_to_entity_key(cred: &StakeCredential) -> EntityKey {
@@ -139,6 +134,29 @@ impl super::BoundaryVisitor for BoundaryVisitor {
                 account: id.clone(),
                 reward: reward.value(),
             });
+
+            // TODO: the reward mechanism aggregates rewards from multiple pools inside the
+            // same record. Instead, we should log each reward individually.
+            self.log(
+                id.clone(),
+                AccountRewardLog {
+                    amount: reward.value(),
+                    pool_id: reward.pool().to_vec(),
+                    as_leader: reward.as_leader(),
+                },
+            );
+
+            if reward.as_leader() {
+                let pool_id = EntityKey::from(reward.pool().as_slice());
+
+                self.log(
+                    pool_id,
+                    PoolRewardLog {
+                        total_rewards: reward.pool_total().unwrap_or(0),
+                        operator_share: reward.value(),
+                    },
+                );
+            }
         }
 
         Ok(())

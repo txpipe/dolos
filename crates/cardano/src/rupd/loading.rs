@@ -194,6 +194,26 @@ impl StakeSnapshot {
 }
 
 impl RupdWork {
+    pub fn snapshot_epoch(&self) -> Option<u64> {
+        if self.current_epoch < 3 {
+            return None;
+        }
+
+        let snapshot_epoch = self.current_epoch - 3;
+
+        Some(snapshot_epoch)
+    }
+
+    pub fn performance_epoch(&self) -> Option<u64> {
+        if self.current_epoch < 3 {
+            return None;
+        }
+
+        let performance_epoch = self.current_epoch - 1;
+
+        Some(performance_epoch)
+    }
+
     pub fn load<D: Domain>(state: &D::State, genesis: &Genesis) -> Result<RupdWork, ChainError> {
         let set_epoch = crate::load_set_epoch::<D>(state)?;
         let mark_epoch = crate::load_mark_epoch::<D>(state)?;
@@ -224,7 +244,7 @@ impl RupdWork {
         let chain = load_era_summary::<D>(state)?;
 
         let mut work = RupdWork {
-            for_epoch: set_epoch.as_ref().map(|e| e.number),
+            current_epoch,
             max_supply,
             chain,
             pparams,

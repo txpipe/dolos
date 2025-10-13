@@ -14,7 +14,7 @@ use blockfrost_openapi::models::{
     address_utxo_content_inner::AddressUtxoContentInner,
 };
 
-use dolos_cardano::{model::AccountState, pallas_extras, ChainSummary, RewardLog};
+use dolos_cardano::{model::AccountState, pallas_extras, AccountRewardLog, ChainSummary};
 use dolos_core::{ArchiveStore, Domain, EntityKey, StateStore};
 use pallas::{
     codec::minicbor,
@@ -549,7 +549,7 @@ where
     let (epoch, _) = summary.slot_epoch(tip);
 
     let rewards = domain
-        .iter_cardano_logs_per_epoch::<RewardLog>(account_key.entity_key.into(), 0..epoch)
+        .iter_cardano_logs_per_epoch::<AccountRewardLog>(account_key.entity_key.into(), 0..epoch)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let mapped: Vec<_> = rewards

@@ -25,6 +25,7 @@ pub struct EpochStatsUpdate {
     stake_deregistration_count: u64,
     pool_registration_count: u64,
     pool_deregistration_count: u64,
+    withdrawal: u64,
 
     // params
     key_deposit: u64,
@@ -70,6 +71,8 @@ impl dolos_core::EntityDelta for EpochStatsUpdate {
 
         entity.decayed_deposits += key_decays + pool_decays;
 
+        entity.gathered_withdrawals += self.withdrawal;
+
         entity.blocks_minted += 1;
     }
 
@@ -90,6 +93,8 @@ impl dolos_core::EntityDelta for EpochStatsUpdate {
         let pool_decays = self.pool_deregistration_count * self.pool_deposit;
 
         entity.decayed_deposits -= key_decays + pool_decays;
+
+        entity.gathered_withdrawals -= self.withdrawal;
 
         entity.blocks_minted = entity.blocks_minted.saturating_sub(1);
     }
@@ -274,8 +279,18 @@ impl BlockVisitor for EpochStateVisitor {
             self.stats_delta.as_mut().unwrap().pool_registration_count += 1;
         }
 
-        // TODO: decayed deposits
+        Ok(())
+    }
 
+    fn visit_withdrawal(
+        &mut self,
+        _: &mut WorkDeltas<CardanoLogic>,
+        _: &MultiEraBlock,
+        _: &MultiEraTx,
+        _: &[u8],
+        amount: u64,
+    ) -> Result<(), ChainError> {
+        self.stats_delta.as_mut().unwrap().withdrawal += amount;
         Ok(())
     }
 

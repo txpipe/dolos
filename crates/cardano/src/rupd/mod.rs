@@ -1,13 +1,16 @@
 use std::collections::{HashMap, HashSet};
 
-use dolos_core::{BlockSlot, ChainError, Domain, EntityKey, Genesis};
+use dolos_core::{
+    ArchiveStore, ArchiveWriter, BlockSlot, ChainError, ChainPoint, Domain, EntityKey, Genesis,
+    LogKey, TemporalKey,
+};
 use pallas::ledger::primitives::StakeCredential;
 use tracing::{info, instrument};
 
 use crate::{
     pots::{PotDelta, Pots},
     rewards::RewardMap,
-    AccountState, ChainSummary, PParamsSet, PoolHash, PoolParams, PoolState,
+    AccountState, ChainSummary, PParamsSet, PoolHash, PoolParams, PoolState, StakeLog,
 };
 
 pub mod loading;
@@ -109,7 +112,7 @@ impl std::fmt::Display for StakeSnapshot {
 #[derive(Debug)]
 pub struct RupdWork {
     // loaded
-    pub for_epoch: Option<u64>,
+    pub current_epoch: u64,
     pub snapshot: StakeSnapshot,
     pub pots: Pots,
     pub pot_delta: PotDelta,
@@ -118,9 +121,60 @@ pub struct RupdWork {
     pub pparams: PParamsSet,
 }
 
+fn log_work<D: Domain>(
+    work: &RupdWork,
+    rewards: &RewardMap<RupdWork>,
+    archive: &D::Archive,
+) -> Result<(), ChainError> {
+    let Some(epoch) = work.performance_epoch() else {
+        return Ok(());
+    };
+
+    let start_of_epoch = work.chain.epoch_start(epoch);
+    let start_of_epoch = ChainPoint::Slot(start_of_epoch);
+    let temporal_key = TemporalKey::from(&start_of_epoch);
+
+    let snapshot = &work.snapshot;
+
+    let writer = archive.start_writer()?;
+
+    for (pool, blocks_minted) in snapshot.pool_blocks.iter() {
+        let pool_id = EntityKey::from(pool.as_slice());
+        let pool_stake = snapshot.get_pool_stake(pool);
+        let relative_size = (pool_stake as f64) / snapshot.active_stake_sum as f64;
+        let params = snapshot.pool_params.get(&pool);
+        let declared_pledge = params.map(|x| x.pledge).unwrap_or(0);
+        let delegators_count = snapshot.accounts_by_pool.count_delegators(&pool);
+
+        // TODO: implement
+        //let live_pledge = snapshot.get_live_pledge(&pool);
+
+        let leader = rewards.find_leader(*pool);
+
+        let log = StakeLog {
+            blocks_minted: *blocks_minted,
+            total_stake: pool_stake,
+            relative_size,
+            live_pledge: 0,
+            declared_pledge,
+            delegators_count,
+            total_rewards: leader.and_then(|leader| leader.pool_total()).unwrap_or(0),
+            operator_share: leader.map(|leader| leader.value()).unwrap_or(0),
+        };
+
+        let log_key = LogKey::from((temporal_key.clone(), pool_id));
+        writer.write_log_typed(&log_key, &log)?;
+    }
+
+    writer.commit()?;
+
+    Ok(())
+}
+
 #[instrument("rupd", skip_all, fields(slot = %slot))]
 pub fn execute<D: Domain>(
     state: &D::State,
+    archive: &D::Archive,
     slot: BlockSlot,
     genesis: &Genesis,
 ) -> Result<RewardMap<RupdWork>, ChainError> {
@@ -131,6 +185,11 @@ pub fn execute<D: Domain>(
     dbg!(&work.snapshot);
 
     let rewards = crate::rewards::define_rewards(&work)?;
+
+    // TODO: logging the snapshot at this stage is not the right place. We should
+    // treat this problem as part of the epoch transition logic. We put it here for
+    // the time being for simplicity.
+    log_work::<D>(&work, &rewards, archive)?;
 
     dbg!(&rewards);
 

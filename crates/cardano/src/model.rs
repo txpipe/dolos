@@ -19,7 +19,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     epoch::{
-        retires::{DRepDelegatorDrop, DRepExpiration, PoolDelegatorDrop, ProposalExpiration},
+        retires::{
+            DRepDelegatorDrop, DRepExpiration, PoolDelegatorDrop, PoolDepositRefund,
+            ProposalExpiration,
+        },
         rewards::{AssignDelegatorRewards, PotAdjustment},
         transition::{AccountTransition, PoolTransition, ProposalEnactment},
     },
@@ -175,7 +178,7 @@ macro_rules! entity_boilerplate {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Decode, Encode, Default)]
-pub struct RewardLog {
+pub struct AccountRewardLog {
     #[n(0)]
     pub amount: u64,
 
@@ -186,7 +189,18 @@ pub struct RewardLog {
     pub as_leader: bool,
 }
 
-entity_boilerplate!(RewardLog, "rewards");
+entity_boilerplate!(AccountRewardLog, "account_rewards");
+
+#[derive(Debug, Clone, PartialEq, Eq, Decode, Encode, Default)]
+pub struct PoolRewardLog {
+    #[n(0)]
+    pub total_rewards: u64,
+
+    #[n(1)]
+    pub operator_share: u64,
+}
+
+entity_boilerplate!(PoolRewardLog, "pool_rewards");
 
 #[derive(Debug, Clone, PartialEq, Decode, Encode, Default)]
 pub struct StakeLog {
@@ -194,25 +208,17 @@ pub struct StakeLog {
     #[n(0)]
     pub blocks_minted: u64,
 
-    /// Active (Snapshot of live stake 2 epochs ago) stake in Lovelaces
+    /// Total stake in Lovelaces
     #[n(1)]
-    pub active_stake: u64,
+    pub total_stake: u64,
 
     /// Pool size (percentage) of overall active stake at that epoch
     #[n(2)]
-    pub active_size: f64,
+    pub relative_size: f64,
 
     /// Number of delegators for epoch
     #[n(3)]
     pub delegators_count: u64,
-
-    /// Total rewards received before distribution to delegators
-    #[n(4)]
-    pub rewards: u64,
-
-    /// Pool operator rewards
-    #[n(5)]
-    pub fees: u64,
 
     /// Live pledge
     #[n(6)]
@@ -221,6 +227,14 @@ pub struct StakeLog {
     /// Declared pledge
     #[n(7)]
     pub declared_pledge: u64,
+
+    /// Total rewards for epoch
+    #[n(8)]
+    pub total_rewards: u64,
+
+    /// Total fees for epoch
+    #[n(9)]
+    pub operator_share: u64,
 }
 
 entity_boilerplate!(StakeLog, "stakes");
@@ -1032,6 +1046,9 @@ pub struct EpochState {
     #[n(6)]
     pub decayed_deposits: u64,
 
+    #[n(14)]
+    pub gathered_withdrawals: u64,
+
     #[n(7)]
     pub pparams: PParamsSet,
 
@@ -1190,7 +1207,8 @@ pub enum CardanoEntity {
     EpochState(EpochState),
     DRepState(DRepState),
     Proposal(Proposal),
-    RewardLog(RewardLog),
+    PoolRewardLog(PoolRewardLog),
+    AccountRewardLog(AccountRewardLog),
     StakeLog(StakeLog),
 }
 
@@ -1220,7 +1238,8 @@ variant_boilerplate!(PoolState);
 variant_boilerplate!(EpochState);
 variant_boilerplate!(DRepState);
 variant_boilerplate!(Proposal);
-variant_boilerplate!(RewardLog);
+variant_boilerplate!(AccountRewardLog);
+variant_boilerplate!(PoolRewardLog);
 variant_boilerplate!(StakeLog);
 
 impl dolos_core::Entity for CardanoEntity {
@@ -1233,7 +1252,8 @@ impl dolos_core::Entity for CardanoEntity {
             EpochState::NS => EpochState::decode_entity(ns, value).map(Into::into),
             DRepState::NS => DRepState::decode_entity(ns, value).map(Into::into),
             Proposal::NS => Proposal::decode_entity(ns, value).map(Into::into),
-            RewardLog::NS => RewardLog::decode_entity(ns, value).map(Into::into),
+            AccountRewardLog::NS => AccountRewardLog::decode_entity(ns, value).map(Into::into),
+            PoolRewardLog::NS => PoolRewardLog::decode_entity(ns, value).map(Into::into),
             StakeLog::NS => StakeLog::decode_entity(ns, value).map(Into::into),
             _ => Err(ChainError::InvalidNamespace(ns)),
         }
@@ -1269,8 +1289,12 @@ impl dolos_core::Entity for CardanoEntity {
                 let (ns, enc) = Proposal::encode_entity(x);
                 (ns, enc)
             }
-            Self::RewardLog(x) => {
-                let (ns, enc) = RewardLog::encode_entity(x);
+            Self::AccountRewardLog(x) => {
+                let (ns, enc) = AccountRewardLog::encode_entity(x);
+                (ns, enc)
+            }
+            Self::PoolRewardLog(x) => {
+                let (ns, enc) = PoolRewardLog::encode_entity(x);
                 (ns, enc)
             }
             Self::StakeLog(x) => {
@@ -1290,7 +1314,8 @@ pub fn build_schema() -> StateSchema {
     schema.insert(EpochState::NS, NamespaceType::KeyValue);
     schema.insert(DRepState::NS, NamespaceType::KeyValue);
     schema.insert(Proposal::NS, NamespaceType::KeyValue);
-    schema.insert(RewardLog::NS, NamespaceType::KeyValue);
+    schema.insert(AccountRewardLog::NS, NamespaceType::KeyValue);
+    schema.insert(PoolRewardLog::NS, NamespaceType::KeyValue);
     schema.insert(StakeLog::NS, NamespaceType::KeyValue);
     schema
 }
@@ -1323,6 +1348,7 @@ pub enum CardanoDelta {
     PoolTransition(PoolTransition),
     AccountTransition(AccountTransition),
     ProposalExpiration(ProposalExpiration),
+    PoolDepositRefund(PoolDepositRefund),
 }
 
 impl CardanoDelta {
@@ -1385,6 +1411,7 @@ delta_from!(PotAdjustment);
 delta_from!(PoolTransition);
 delta_from!(AccountTransition);
 delta_from!(ProposalExpiration);
+delta_from!(PoolDepositRefund);
 
 impl dolos_core::EntityDelta for CardanoDelta {
     type Entity = super::model::CardanoEntity;
@@ -1417,6 +1444,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::AccountTransition(x) => x.key(),
             Self::ProposalExpiration(x) => x.key(),
             Self::ProposalEnactment(x) => x.key(),
+            Self::PoolDepositRefund(x) => x.key(),
         }
     }
 
@@ -1448,6 +1476,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::AccountTransition(x) => Self::downcast_apply(x, entity),
             Self::ProposalExpiration(x) => Self::downcast_apply(x, entity),
             Self::ProposalEnactment(x) => Self::downcast_apply(x, entity),
+            Self::PoolDepositRefund(x) => Self::downcast_apply(x, entity),
         }
     }
 
@@ -1479,6 +1508,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::AccountTransition(x) => Self::downcast_undo(x, entity),
             Self::ProposalExpiration(x) => Self::downcast_undo(x, entity),
             Self::ProposalEnactment(x) => Self::downcast_undo(x, entity),
+            Self::PoolDepositRefund(x) => Self::downcast_undo(x, entity),
         }
     }
 }

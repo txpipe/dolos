@@ -1,7 +1,7 @@
 use std::marker::PhantomData;
 
 use comfy_table::Table;
-use dolos_cardano::{EpochState, RewardLog, StakeLog};
+use dolos_cardano::{AccountRewardLog, EpochState, StakeLog};
 use miette::{Context, IntoDiagnostic};
 
 use dolos::prelude::*;
@@ -26,7 +26,7 @@ trait TableRow: Entity {
     fn row(&self, key: &LogKey) -> Vec<String>;
 }
 
-impl TableRow for RewardLog {
+impl TableRow for AccountRewardLog {
     fn header() -> Vec<&'static str> {
         vec!["slot", "pool", "as leader", "amount"]
     }
@@ -109,8 +109,6 @@ impl TableRow for StakeLog {
             "active stake",
             "active size",
             "delegators count",
-            "rewards",
-            "fees",
             "live pledge",
             "declared pledge",
         ]
@@ -126,11 +124,9 @@ impl TableRow for StakeLog {
             format!("{}", pool_hex),
             format!("{}", pool_bech32),
             format!("{}", self.blocks_minted),
-            format!("{}", self.active_stake),
-            format!("{}", self.active_size),
+            format!("{}", self.total_stake),
+            format!("{}", self.relative_size),
             format!("{}", self.delegators_count),
-            format!("{}", self.rewards),
-            format!("{}", self.fees),
             format!("{}", self.live_pledge),
             format!("{}", self.declared_pledge),
         ]
@@ -197,7 +193,9 @@ pub fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
     let archive = crate::common::open_archive_store(config)?;
 
     match args.namespace.as_str() {
-        "rewards" => dump_logs::<RewardLog>(&archive, "rewards", args.skip, args.take)?,
+        "account_rewards" => {
+            dump_logs::<AccountRewardLog>(&archive, "account_rewards", args.skip, args.take)?
+        }
         "stakes" => dump_logs::<StakeLog>(&archive, "stakes", args.skip, args.take)?,
         "epochs" => dump_logs::<EpochState>(&archive, "epochs", args.skip, args.take)?,
         _ => todo!(),

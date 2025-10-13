@@ -22,18 +22,22 @@ pub struct Reward {
     is_spendable: bool,
     last_pool: PoolHash,
     as_leader: bool,
+    pool_total: Option<u64>,
 }
 
 impl Reward {
     pub fn merge(self, other: Self) -> Self {
-        assert_eq!(self.is_spendable, other.is_spendable);
-        assert_eq!(self.as_leader, other.as_leader);
+        debug_assert_eq!(self.is_spendable, other.is_spendable);
+        debug_assert_eq!(self.as_leader, other.as_leader);
+        debug_assert!(self.pool_total.is_none());
+        debug_assert!(other.pool_total.is_none());
 
         Self {
             value: self.value + other.value,
             is_spendable: self.is_spendable,
             as_leader: self.as_leader,
             last_pool: std::cmp::max(self.last_pool, other.last_pool),
+            pool_total: None,
         }
     }
 
@@ -51,6 +55,20 @@ impl Reward {
 
     pub fn value(&self) -> u64 {
         self.value
+    }
+
+    // TODO: support the possibility of multiple pools so that we can track
+    // individual contributions to the reward
+    pub fn pool(&self) -> PoolHash {
+        self.last_pool
+    }
+
+    pub fn as_leader(&self) -> bool {
+        self.as_leader
+    }
+
+    pub fn pool_total(&self) -> Option<u64> {
+        self.pool_total
     }
 }
 
@@ -74,6 +92,14 @@ impl<C: RewardsContext> RewardMap<C> {
         }
     }
 
+    // TODO: this is very inefficient. We should should probably revisit the data
+    // structure.
+    pub fn find_leader(&self, pool: PoolHash) -> Option<&Reward> {
+        self.pending
+            .values()
+            .find(|reward| reward.pool() == pool && reward.as_leader())
+    }
+
     fn include(
         &mut self,
         ctx: &C,
@@ -81,12 +107,14 @@ impl<C: RewardsContext> RewardMap<C> {
         reward_value: u64,
         from_pool: PoolHash,
         as_leader: bool,
+        pool_total: Option<u64>,
     ) {
         let new = Reward {
             value: reward_value,
             is_spendable: ctx.is_account_registered(account),
             last_pool: from_pool,
             as_leader,
+            pool_total,
         };
 
         let prev = self.pending.remove(account);
@@ -243,7 +271,14 @@ pub fn define_rewards<C: RewardsContext>(ctx: &C) -> Result<RewardMap<C>, ChainE
             "computed pool rewards"
         );
 
-        map.include(ctx, &operator_account, operator_share, pool, true);
+        map.include(
+            ctx,
+            &operator_account,
+            operator_share,
+            pool,
+            true,
+            Some(total_pool_reward),
+        );
 
         let delegator_rewards = total_pool_reward.saturating_sub(operator_share);
 
@@ -260,7 +295,7 @@ pub fn define_rewards<C: RewardsContext>(ctx: &C) -> Result<RewardMap<C>, ChainE
             let delegator_reward =
                 formulas::delegator_reward(delegator_rewards, pool_stake, delegator_stake);
 
-            map.include(ctx, &delegator, delegator_reward, pool, false);
+            map.include(ctx, &delegator, delegator_reward, pool, false, None);
         }
     }
 

@@ -86,6 +86,7 @@ pub fn bootstrap_epoch<D: Domain>(
         gathered_fees: 0,
         gathered_deposits: 0,
         decayed_deposits: 0,
+        gathered_withdrawals: 0,
         pot_delta: None,
         final_pots: None,
         blocks_minted: 0,
