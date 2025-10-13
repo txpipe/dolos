@@ -304,6 +304,7 @@ pub enum StorageVersion {
     #[default]
     V0,
     V1,
+    V2,
 }
 
 impl<'de> Deserialize<'de> for StorageVersion {
@@ -316,6 +317,7 @@ impl<'de> Deserialize<'de> for StorageVersion {
             Some(version) => match version.as_str() {
                 "v0" => Ok(StorageVersion::V0),
                 "v1" => Ok(StorageVersion::V1),
+                "v2" => Ok(StorageVersion::V2),
                 _ => Err(<D::Error as serde::de::Error>::custom("Invalid version")),
             },
             None => Ok(StorageVersion::V0),
@@ -331,6 +333,7 @@ impl Display for StorageVersion {
             match self {
                 Self::V0 => "v0",
                 Self::V1 => "v1",
+                Self::V2 => "v2",
             }
         )
     }
