@@ -3,7 +3,11 @@
     "reserves": 14000000000000000,
     "treasury": 1000000000000000,
     "fees": 250000000,
-    "deposits": 500000000000,
+    "deposit_per_pool": 500000000000,
+    "deposit_per_account": 2000000,
+    "nominal_deposits": 0,
+    "pool_count": 1,
+    "account_count": 1,
     "utxos": 30000000000000000,
     "rewards": 0
   },
