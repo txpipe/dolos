@@ -184,10 +184,6 @@ pub fn execute<D: Domain>(
 
     let rewards = crate::rewards::define_rewards(&work)?;
 
-    let mut drained_copy = rewards.clone();
-    drained_copy.drain_all();
-    dbg!(drained_copy.as_pot_delta());
-
     // TODO: logging the snapshot at this stage is not the right place. We should
     // treat this problem as part of the epoch transition logic. We put it here for
     // the time being for simplicity.

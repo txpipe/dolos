@@ -63,6 +63,7 @@ impl Pots {
             dbg!(self);
         }
 
+        // TODO: enforce once we have confidence on full-sync success
         //assert_eq!(self.max_supply(), expected_max_supply);
     }
 }

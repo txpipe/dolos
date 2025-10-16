@@ -167,8 +167,6 @@ pub fn define_next_pots(ctx: &super::WorkContext) -> Pots {
     let rolling = epoch.rolling.live();
     let end = epoch.end.as_ref().expect("no end stats available");
 
-    dbg!(end);
-
     let delta = PotDelta {
         produced_utxos: rolling.produced_utxos,
         consumed_utxos: rolling.consumed_utxos,
@@ -181,8 +179,6 @@ pub fn define_next_pots(ctx: &super::WorkContext) -> Pots {
         effective_rewards: end.effective_rewards,
         unspendable_rewards: end.unspendable_rewards,
     };
-
-    dbg!(&epoch.initial_pots);
 
     let pots = apply_delta(epoch.initial_pots.clone(), &end.incentives, &delta);
 
