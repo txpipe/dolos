@@ -16,7 +16,7 @@ use handlebars::Handlebars;
 use miette::{bail, Context, IntoDiagnostic};
 use pallas::ledger::{
     addresses::Address,
-    primitives::{conway::DRep, ExUnitPrices, ExUnits, PoolMetadata, RationalNumber, Relay},
+    primitives::{ExUnitPrices, ExUnits, PoolMetadata, RationalNumber, Relay},
 };
 use serde_json::Value;
 use tokio_postgres::types::Json;
@@ -712,7 +712,6 @@ pub async fn handle_drep_state(
             .into_diagnostic()
             .context("parsing drep voting power")?;
         let last_active_slot = from_row!(row, Option<i64>, "last_active_slot").map(|x| x as u64);
-        let retired = from_row!(row, bool, "retired");
 
         let drep = todo!();
 
