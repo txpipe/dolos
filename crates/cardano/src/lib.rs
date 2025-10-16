@@ -16,22 +16,32 @@ use dolos_core::{
     Block as _, *,
 };
 
-use crate::owned::{OwnedMultiEraBlock, OwnedMultiEraOutput};
+use crate::{
+    owned::{OwnedMultiEraBlock, OwnedMultiEraOutput},
+    rewards::RewardMap,
+    rupd::RupdWork,
+};
 
+// staging zone
 pub mod math_macros;
 pub mod pallas_extras;
 
+// machinery
 pub mod eras;
 pub mod forks;
-pub mod genesis;
 pub mod model;
 pub mod owned;
 pub mod pots;
 pub mod rewards;
-pub mod roll;
-pub mod sweep;
 pub mod utils;
 pub mod utxoset;
+
+// work units
+pub mod estart;
+pub mod ewrap;
+pub mod genesis;
+pub mod roll;
+pub mod rupd;
 
 #[cfg(feature = "include-genesis")]
 pub mod include;
@@ -107,14 +117,26 @@ impl WorkBuffer {
         self.pending.push_back(WorkUnit::Block(block));
     }
 
-    fn enqueue_sweep(&mut self, slot: BlockSlot) {
+    fn enqueue_ewrap(&mut self, slot: BlockSlot) {
         self.last_point_seen = ChainPoint::Slot(slot);
-        self.pending.push_back(WorkUnit::Sweep(slot));
+        self.pending.push_back(WorkUnit::EWrap(slot));
+    }
+
+    fn enqueue_estart(&mut self, slot: BlockSlot) {
+        self.last_point_seen = ChainPoint::Slot(slot);
+        self.pending.push_back(WorkUnit::EStart(slot));
+    }
+
+    fn enqueue_rupd(&mut self, slot: BlockSlot) {
+        self.last_point_seen = ChainPoint::Slot(slot);
+        self.pending.push_back(WorkUnit::Rupd(slot));
     }
 }
 
 struct Cache {
     eras: ChainSummary,
+    stability_window: u64,
+    rewards: Option<RewardMap<RupdWork>>,
 }
 
 #[derive(Clone)]
@@ -141,7 +163,11 @@ impl dolos_core::ChainLogic for CardanoLogic {
     type Delta = CardanoDelta;
     type Entity = CardanoEntity;
 
-    fn initialize<D: Domain>(config: Self::Config, state: &D::State) -> Result<Self, ChainError> {
+    fn initialize<D: Domain>(
+        config: Self::Config,
+        state: &D::State,
+        genesis: &Genesis,
+    ) -> Result<Self, ChainError> {
         let cursor = state.read_cursor()?;
 
         let work = match cursor {
@@ -151,9 +177,15 @@ impl dolos_core::ChainLogic for CardanoLogic {
 
         let eras = eras::load_era_summary::<D>(state)?;
 
+        let stability_window = utils::stability_window(genesis);
+
         Ok(Self {
             config,
-            cache: Arc::new(RwLock::new(Cache { eras })),
+            cache: Arc::new(RwLock::new(Cache {
+                eras,
+                stability_window,
+                rewards: None,
+            })),
             work: Arc::new(RwLock::new(work)),
         })
     }
@@ -169,10 +201,18 @@ impl dolos_core::ChainLogic for CardanoLogic {
 
         let cache = self.cache.read().unwrap();
 
-        let boundary = pallas_extras::epoch_boundary(&cache.eras, prev_slot, next_slot);
+        let epoch_boundary = pallas_extras::epoch_boundary(&cache.eras, prev_slot, next_slot);
 
-        if let Some(slot) = boundary {
-            work.enqueue_sweep(slot);
+        if let Some(slot) = epoch_boundary {
+            work.enqueue_ewrap(slot);
+            work.enqueue_estart(slot);
+        }
+
+        let rupd_boundary =
+            pallas_extras::rupd_boundary(cache.stability_window, &cache.eras, prev_slot, next_slot);
+
+        if let Some(slot) = rupd_boundary {
+            work.enqueue_rupd(slot);
         }
 
         let block = WorkBlock::new(block);
@@ -187,7 +227,9 @@ impl dolos_core::ChainLogic for CardanoLogic {
 
         work.pending.front().map(|work| match work {
             WorkUnit::Block(_) => WorkKind::Block,
-            WorkUnit::Sweep(_) => WorkKind::Sweep,
+            WorkUnit::EWrap(_) => WorkKind::EWrap,
+            WorkUnit::EStart(_) => WorkKind::EStart,
+            WorkUnit::Rupd(_) => WorkKind::Rupd,
             WorkUnit::Genesis => WorkKind::Genesis,
         })
     }
@@ -200,25 +242,61 @@ impl dolos_core::ChainLogic for CardanoLogic {
     fn apply_genesis<D: Domain>(
         &self,
         state: &D::State,
-        genesis: &Genesis,
+        genesis: Arc<Genesis>,
     ) -> Result<(), ChainError> {
-        genesis::execute::<D>(state, genesis)?;
+        genesis::execute::<D>(state, &genesis)?;
 
         self.refresh_cache::<D>(state)?;
 
         Ok(())
     }
 
-    fn apply_sweep<D: Domain>(
+    fn apply_ewrap<D: Domain>(
         &self,
         state: &D::State,
         archive: &D::Archive,
-        genesis: &Genesis,
+        genesis: Arc<Genesis>,
         at: BlockSlot,
     ) -> Result<(), ChainError> {
-        sweep::sweep::<D>(state, archive, at, &self.config, genesis)?;
+        let mut cache = self.cache.write().unwrap();
+
+        let rewards = cache.rewards.take().ok_or(ChainError::MissingRewards)?;
+
+        ewrap::execute::<D>(state, archive, at, &self.config, genesis, rewards)?;
+
+        drop(cache);
 
         self.refresh_cache::<D>(state)?;
+
+        Ok(())
+    }
+
+    fn apply_estart<D: Domain>(
+        &self,
+        state: &D::State,
+        archive: &D::Archive,
+        genesis: Arc<Genesis>,
+        at: BlockSlot,
+    ) -> Result<(), ChainError> {
+        estart::execute::<D>(state, archive, at, genesis)?;
+
+        self.refresh_cache::<D>(state)?;
+
+        Ok(())
+    }
+
+    fn apply_rupd<D: Domain>(
+        &self,
+        state: &D::State,
+        archive: &D::Archive,
+        genesis: Arc<Genesis>,
+        at: BlockSlot,
+    ) -> Result<(), ChainError> {
+        let rewards = rupd::execute::<D>(state, archive, at, &genesis)?;
+
+        let mut cache = self.cache.write().unwrap();
+
+        cache.rewards = Some(rewards);
 
         Ok(())
     }
@@ -230,7 +308,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
     }
 
     fn mutable_slots(domain: &impl Domain) -> BlockSlot {
-        utils::mutable_slots(domain.genesis())
+        utils::mutable_slots(&domain.genesis())
     }
 
     fn compute_delta<D: Domain>(
@@ -247,29 +325,16 @@ impl dolos_core::ChainLogic for CardanoLogic {
 }
 
 pub fn load_effective_pparams<D: Domain>(state: &D::State) -> Result<PParamsSet, ChainError> {
-    let epoch = load_mark_epoch::<D>(state)?;
+    let epoch = load_epoch::<D>(state)?;
+    let active = epoch.pparams.active();
 
-    Ok(epoch.pparams)
+    Ok(active.clone())
 }
 
-pub fn load_go_epoch<D: Domain>(state: &D::State) -> Result<Option<EpochState>, ChainError> {
-    let epoch =
-        state.read_entity_typed::<EpochState>(EpochState::NS, &EntityKey::from(EPOCH_KEY_GO))?;
-
-    Ok(epoch)
-}
-
-pub fn load_set_epoch<D: Domain>(state: &D::State) -> Result<Option<EpochState>, ChainError> {
-    let epoch =
-        state.read_entity_typed::<EpochState>(EpochState::NS, &EntityKey::from(EPOCH_KEY_SET))?;
-
-    Ok(epoch)
-}
-
-pub fn load_mark_epoch<D: Domain>(state: &D::State) -> Result<EpochState, ChainError> {
+pub fn load_epoch<D: Domain>(state: &D::State) -> Result<EpochState, ChainError> {
     let epoch = state
-        .read_entity_typed::<EpochState>(EpochState::NS, &EntityKey::from(EPOCH_KEY_MARK))?
-        .ok_or(ChainError::from(BrokenInvariant::BadBootstrap))?;
+        .read_entity_typed::<EpochState>(EpochState::NS, &EntityKey::from(CURRENT_EPOCH_KEY))?
+        .ok_or(ChainError::NoActiveEpoch)?;
 
     Ok(epoch)
 }

@@ -102,6 +102,7 @@ impl ToyDomain {
         let chain = dolos_cardano::CardanoLogic::initialize::<Self>(
             dolos_cardano::Config::default(),
             &state,
+            &genesis,
         )
         .unwrap();
 
@@ -159,8 +160,8 @@ impl dolos_core::Domain for ToyDomain {
         &self.storage_config
     }
 
-    fn genesis(&self) -> &dolos_core::Genesis {
-        &self.genesis
+    fn genesis(&self) -> Arc<dolos_core::Genesis> {
+        self.genesis.clone()
     }
 
     fn chain(&self) -> &Self::Chain {

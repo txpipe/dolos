@@ -2,7 +2,8 @@ pub mod proposals {
     pub mod preview {
         use crate::Epoch;
 
-        /// Get the enacment epoch for each proposal, indexed as transation#index, hex encoded.
+        /// Get the enacment epoch for each proposal, indexed as
+        /// transation#index, hex encoded.
         ///
         /// https://preview.gov.tools/outcomes?sort=newestFirst&status=enacted
         pub fn enactment_epoch_by_proposal_id(proposal: &str) -> Option<Epoch> {
@@ -35,7 +36,8 @@ pub mod proposals {
     pub mod preprod {
         use crate::Epoch;
 
-        /// Get the enacment epoch for each proposal, indexed as transation#index, hex encoded.
+        /// Get the enacment epoch for each proposal, indexed as
+        /// transation#index, hex encoded.
         ///
         /// https://pre-prod.gov.tools/outcomes?sort=newestFirst&status=enacted
         pub fn enactment_epoch_by_proposal_id(proposal: &str) -> Option<Epoch> {
@@ -63,7 +65,8 @@ pub mod proposals {
     pub mod mainnet {
         use crate::Epoch;
 
-        /// Get the enacment epoch for each proposal, indexed as transation#index, hex encoded.
+        /// Get the enacment epoch for each proposal, indexed as
+        /// transation#index, hex encoded.
         ///
         /// Information for this can be found here:
         /// https://gov.tools/outcomes?sort=newestFirst&status=enacted.

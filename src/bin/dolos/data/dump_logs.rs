@@ -1,7 +1,7 @@
 use std::marker::PhantomData;
 
 use comfy_table::Table;
-use dolos_cardano::{EpochState, RewardLog, StakeLog};
+use dolos_cardano::{model::RewardLog, EpochState, StakeLog};
 use miette::{Context, IntoDiagnostic};
 
 use dolos::prelude::*;
@@ -28,16 +28,17 @@ trait TableRow: Entity {
 
 impl TableRow for RewardLog {
     fn header() -> Vec<&'static str> {
-        vec!["slot", "pool", "as leader", "amount"]
+        vec!["epoch", "slot", "as leader", "amount"]
     }
 
     fn row(&self, key: &LogKey) -> Vec<String> {
         let temporal = TemporalKey::from(key.clone());
-        let temporal = u64::from_be_bytes(temporal.as_ref().try_into().unwrap());
+        let entity = EntityKey::from(key.clone());
+        let epoch = u64::from_be_bytes(temporal.as_ref().try_into().unwrap());
 
         vec![
-            format!("{}", temporal),
-            format!("{}", hex::encode(&self.pool_id)),
+            format!("{}", epoch),
+            format!("{}", hex::encode(entity.as_ref())),
             format!("{}", self.as_leader),
             format!("{}", self.amount),
         ]
@@ -49,35 +50,34 @@ impl TableRow for EpochState {
         vec![
             "number",
             "version",
+            "pot reserves",
+            "pot utxos",
+            "pot treasury",
+            "pot deposits",
+            "pot rewards",
+            "pot fees",
             "gathered fees",
-            "gathered deposits",
-            "decayed deposits",
-            "reserves",
-            "utxos",
-            "treasury",
-            "treasury tax",
-            "rewards",
-            "rewards (unspendable)",
-            "blocks minted",
             "pparams",
+            "blocks",
         ]
     }
 
     fn row(&self, _key: &LogKey) -> Vec<String> {
         vec![
             format!("{}", self.number),
-            format!("{}", self.pparams.protocol_major().unwrap_or_default()),
-            format!("{}", self.gathered_fees),
-            format!("{}", self.gathered_deposits),
-            format!("{}", self.decayed_deposits),
-            format!("{}", self.reserves),
-            format!("{}", self.utxos),
-            format!("{}", self.treasury),
-            format!("{}", self.treasury_tax.unwrap_or_default()),
-            format!("{}", self.effective_rewards.unwrap_or_default()),
-            format!("{}", self.unspendable_rewards.unwrap_or_default()),
-            format!("{}", self.blocks_minted),
-            format!("{}", self.pparams.len()),
+            format!(
+                "{}",
+                self.pparams.active().protocol_major().unwrap_or_default()
+            ),
+            format!("{}", self.initial_pots.reserves),
+            format!("{}", self.initial_pots.utxos),
+            format!("{}", self.initial_pots.treasury),
+            format!("{}", self.initial_pots.obligations()),
+            format!("{}", self.initial_pots.rewards),
+            format!("{}", self.initial_pots.fees),
+            format!("{}", self.rolling.live().gathered_fees),
+            format!("{}", self.pparams.live().len()),
+            format!("{}", self.rolling.live().blocks_minted),
         ]
     }
 }
@@ -87,36 +87,37 @@ const POOL_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("pool");
 impl TableRow for StakeLog {
     fn header() -> Vec<&'static str> {
         vec![
-            "pool hex",
+            //"pool hex",
             "pool bech32",
+            "epoch",
             "blocks minted",
             "active stake",
-            "active size",
             "delegators count",
-            "rewards",
-            "fees",
             "live pledge",
             "declared pledge",
+            "total rewards",
+            "operator share",
         ]
     }
 
     fn row(&self, key: &LogKey) -> Vec<String> {
+        let temporal = TemporalKey::from(key.clone());
+        let epoch = u64::from_be_bytes(temporal.as_ref().try_into().unwrap());
         let entity_key = EntityKey::from(key.clone());
         let pool_hash = entity_key.as_ref()[..28].try_into().unwrap();
-        let pool_hex = hex::encode(pool_hash);
         let pool_bech32 = bech32::encode::<bech32::Bech32>(POOL_HRP, pool_hash).unwrap();
 
         vec![
-            format!("{}", pool_hex),
+            //format!("{}", pool_hex),
             format!("{}", pool_bech32),
+            format!("{}", epoch),
             format!("{}", self.blocks_minted),
-            format!("{}", self.active_stake),
-            format!("{}", self.active_size),
+            format!("{}", self.total_stake),
             format!("{}", self.delegators_count),
-            format!("{}", self.rewards),
-            format!("{}", self.fees),
             format!("{}", self.live_pledge),
             format!("{}", self.declared_pledge),
+            format!("{}", self.total_rewards),
+            format!("{}", self.operator_share),
         ]
     }
 }

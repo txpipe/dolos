@@ -1,8 +1,8 @@
 use dolos_core::{ChainError, Domain, EntityKey, Genesis, StateStore as _, StateWriter as _};
 
 use crate::{
-    mutable_slots, sweep::Pots, EpochState, EraBoundary, EraSummary, Nonces, PParamsSet,
-    EPOCH_KEY_MARK,
+    mutable_slots, pots::Pots, EpochState, EpochValue, EraBoundary, EraSummary, Nonces, PParamsSet,
+    RollingStats, CURRENT_EPOCH_KEY,
 };
 
 fn get_utxo_amount(genesis: &Genesis) -> u64 {
@@ -21,8 +21,8 @@ const SHELLEY_PROTOCOL: u16 = 2;
 
 fn bootstrap_pots(
     protocol: u16,
-    genesis: &Genesis,
     pparams: &PParamsSet,
+    genesis: &Genesis,
 ) -> Result<Pots, ChainError> {
     let utxos = get_utxo_amount(genesis);
 
@@ -30,9 +30,10 @@ fn bootstrap_pots(
     // treasury, so we just return the initial utxos
     if protocol < SHELLEY_PROTOCOL {
         return Ok(Pots {
-            reserves: 0,
-            treasury: 0,
             utxos,
+            deposit_per_pool: pparams.pool_deposit_or_default(),
+            deposit_per_account: pparams.key_deposit_or_default(),
+            ..Default::default()
         });
     }
 
@@ -43,18 +44,14 @@ fn bootstrap_pots(
             "max_lovelace_supply".to_string(),
         ))?;
 
-    let initial_reserves = max_supply.saturating_sub(utxos);
-
-    let tau = pparams.ensure_tau()?;
-    let rho = pparams.ensure_rho()?;
-    let eta = num_rational::BigRational::from_integer(num_bigint::BigInt::from(1));
-
-    let pots = crate::pots::compute_pot_delta(initial_reserves, 0, &rho, &tau, eta);
+    let reserves = max_supply.saturating_sub(utxos);
 
     Ok(Pots {
-        reserves: initial_reserves - pots.incentives + pots.available_rewards,
-        treasury: pots.treasury_tax,
+        reserves,
         utxos,
+        deposit_per_pool: pparams.pool_deposit_or_default(),
+        deposit_per_account: pparams.key_deposit_or_default(),
+        ..Default::default()
     })
 }
 
@@ -74,39 +71,33 @@ pub fn bootstrap_epoch<D: Domain>(
 
     let protocol = pparams.protocol_major().unwrap_or_default();
 
-    let pots = bootstrap_pots(protocol, genesis, &pparams)?;
+    let pots = bootstrap_pots(protocol, &pparams, genesis)?;
+
+    let pparams = EpochValue::new_genesis(pparams);
 
     let epoch = EpochState {
         pparams,
-        pparams_update: PParamsSet::default(),
-        number: 0,
-        reserves: pots.reserves,
-        treasury: pots.treasury,
-        utxos: pots.utxos,
-        deposits: 0,
-        gathered_fees: 0,
-        gathered_deposits: 0,
-        decayed_deposits: 0,
-        blocks_minted: 0,
-        effective_rewards: None,
-        unspendable_rewards: None,
-        treasury_tax: None,
+        initial_pots: pots,
         largest_stable_slot: genesis.shelley.epoch_length.unwrap() as u64 - mutable_slots(genesis),
         nonces,
+        previous_nonce_tail: None,
+        number: 0,
+        rolling: EpochValue::new_genesis(RollingStats::default()),
+        end: None,
     };
 
     let writer = state.start_writer()?;
-    writer.write_entity_typed(&EntityKey::from(EPOCH_KEY_MARK), &epoch)?;
+    writer.write_entity_typed(&EntityKey::from(CURRENT_EPOCH_KEY), &epoch)?;
     writer.commit()?;
 
     Ok(epoch)
 }
 
 pub fn bootstrap_eras<D: Domain>(state: &D::State, epoch: &EpochState) -> Result<(), ChainError> {
-    let system_start = epoch.pparams.system_start().unwrap_or_default();
-    let epoch_length = epoch.pparams.epoch_length().unwrap_or_default();
-    let slot_length = epoch.pparams.slot_length().unwrap_or_default();
-    let protocol_major = epoch.pparams.protocol_major().unwrap_or_default();
+    let system_start = epoch.pparams.active().ensure_system_start()?;
+    let epoch_length = epoch.pparams.active().ensure_epoch_length()?;
+    let slot_length = epoch.pparams.active().ensure_slot_length()?;
+    let protocol_major = epoch.pparams.active().protocol_major_or_default();
 
     let era = EraSummary {
         start: EraBoundary {

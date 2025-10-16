@@ -53,22 +53,21 @@ impl IntoModel<PoolListExtendedInner> for PoolModelBuilder {
     fn into_model(self) -> Result<PoolListExtendedInner, StatusCode> {
         let pool_id = bech32_pool(self.operator)?;
 
+        // TODO: implement
+        let live_stake = "0".to_string();
+        let active_stake = "0".to_string();
+
         let out = PoolListExtendedInner {
             pool_id,
             hex: hex::encode(self.operator),
-            active_stake: self
-                .state
-                .total_stake
-                .stable
-                .unwrap_or_default()
-                .to_string(),
-            live_stake: self.state.total_stake.latest.to_string(),
+            live_stake,
+            active_stake,
             live_saturation: rational_to_f64::<3>(&self.state.live_saturation()),
             blocks_minted: self.state.blocks_minted_total as i32,
-            declared_pledge: self.state.declared_pledge.to_string(),
-            margin_cost: rational_to_f64::<6>(&self.state.margin_cost),
-            fixed_cost: self.state.fixed_cost.to_string(),
-            metadata: self.state.metadata.map(|m| {
+            declared_pledge: self.state.params.pledge.to_string(),
+            margin_cost: rational_to_f64::<6>(&self.state.params.margin),
+            fixed_cost: self.state.params.cost.to_string(),
+            metadata: self.state.params.pool_metadata.map(|m| {
                 let out = json!({
                     "url": m.url,
                     "hash": m.hash,
@@ -102,9 +101,10 @@ where
                 return Some(Err(StatusCode::INTERNAL_SERVER_ERROR));
             };
 
-            if state.is_retired {
+            if state.snapshot.live().is_retired {
                 return None;
             }
+
             let operator = Hash::<28>::from(key);
 
             let builder = PoolModelBuilder { operator, state };
@@ -167,8 +167,7 @@ where
     let filtered = iter.filter_ok(|(_, account)| {
         account
             .pool
-            .latest
-            .as_ref()
+            .live()
             .is_some_and(|f| f.as_slice() == operator.as_slice())
     });
 
@@ -225,18 +224,18 @@ where
 
     let mapped: Vec<_> = entries
         .into_iter()
-        .filter(|(_, log)| log.active_stake > 0)
+        .filter(|(_, log)| log.total_stake > 0)
         .skip(pagination.skip())
         .take(pagination.count)
         .map(|(epoch, log)| {
             Ok(PoolHistoryInner {
                 epoch: epoch as i32,
                 blocks: log.blocks_minted as i32,
-                active_stake: log.active_stake.to_string(),
-                active_size: log.active_size,
+                active_stake: log.total_stake.to_string(),
+                active_size: log.relative_size,
                 delegators_count: log.delegators_count as i32,
-                rewards: log.rewards.to_string(),
-                fees: log.fees.to_string(),
+                rewards: log.total_rewards.to_string(),
+                fees: log.operator_share.to_string(),
             })
         })
         .collect::<Result<Vec<_>, StatusCode>>()?;

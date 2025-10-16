@@ -58,7 +58,7 @@ pub async fn naked<D: Domain>(
     State(domain): State<Facade<D>>,
 ) -> Result<Json<GenesisContent>, StatusCode> {
     let model = GenesisModelBuilder {
-        genesis: domain.genesis(),
+        genesis: &domain.genesis(),
     };
 
     model.into_response()

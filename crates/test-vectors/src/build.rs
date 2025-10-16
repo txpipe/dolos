@@ -9,7 +9,7 @@ use bb8_postgres::PostgresConnectionManager;
 use chrono::NaiveDateTime;
 use dolos_cardano::{
     build_schema, include, AccountState, AssetState, DRepState, EpochState, EraBoundary,
-    EraSummary, PParamValue, PParamsSet, PoolState, EPOCH_KEY_GO, EPOCH_KEY_MARK, EPOCH_KEY_SET,
+    EraSummary, PParamValue, PParamsSet, PoolState,
 };
 use dolos_core::{EntityKey, Genesis, StateStore as _, StateWriter};
 use handlebars::Handlebars;
@@ -218,6 +218,7 @@ pub async fn handle_account_state(
             vote_delegated_at: todo!(),
             deposit: todo!(),
             deregistered_at: todo!(),
+            credential: todo!(),
         };
 
         writer
@@ -464,110 +465,7 @@ pub async fn handle_pool_state(
         .into_diagnostic()
         .context("decoding pool vrf_keyhash")?;
 
-        let pool = PoolState {
-            vrf_keyhash: key.as_slice().into(),
-            reward_account: Address::from_bech32(from_row!(row, &str, "reward_account"))
-                .map(|x| x.to_vec())
-                .into_diagnostic()
-                .context("parsing reward_account")?,
-            declared_pledge: from_row_bigint!(row, "declared_pledge"),
-            margin_cost: RationalNumber {
-                numerator: (1_f64 / from_row!(row, f64, "margin_cost")).round() as u64,
-                denominator: 1,
-            },
-            fixed_cost: from_row_bigint!(row, "fixed_cost"),
-            blocks_minted_total: from_row!(row, i64, "blocks_minted") as u32,
-            pool_owners: from_row!(row, Option<Json<serde_json::Value>>, "owners")
-                .map(|x| {
-                    x.0.as_array()
-                        .unwrap_or(&vec![])
-                        .iter()
-                        .map(|x| match Address::from_bech32(x.as_str().unwrap()) {
-                            Ok(address) => {
-                                if let Address::Stake(stake) = address {
-                                    Ok(*stake.payload().as_hash())
-                                } else {
-                                    bail!("address is not a stake address")
-                                }
-                            }
-                            Err(err) => Err(err).into_diagnostic().context("parsing address"),
-                        })
-                        .collect::<miette::Result<_>>()
-                })
-                .transpose()?
-                .unwrap_or_default(),
-            relays: from_row!(row, Option<Json<serde_json::Value>>, "relays")
-                .map(|x| {
-                    x.0.as_array()
-                        .unwrap_or(&vec![])
-                        .iter()
-                        .map(|x| {
-                            let data = x.as_object().unwrap();
-                            if let Some(Value::String(dnssrv)) = data.get("dns_srv_name") {
-                                Relay::MultiHostName(dnssrv.to_string())
-                            } else if let Some(Value::String(dns)) = data.get("dns") {
-                                Relay::SingleHostName(
-                                    if let Some(Value::Number(a)) = data.get("port") {
-                                        Some(a.as_u64().unwrap() as u32)
-                                    } else {
-                                        None
-                                    },
-                                    dns.to_string(),
-                                )
-                            } else {
-                                let port = match data.get("port") {
-                                    Some(Value::Number(x)) => Some(x.as_u64().unwrap() as u32),
-                                    _ => None,
-                                };
-                                let ipv4 = match data.get("ipv4") {
-                                    Some(Value::String(x)) => Some(
-                                        Ipv4Addr::from_str(x.as_str())
-                                            .unwrap()
-                                            .octets()
-                                            .to_vec()
-                                            .into(),
-                                    ),
-                                    _ => None,
-                                };
-                                let ipv6 = match data.get("ipv6") {
-                                    Some(Value::String(x)) => Some(
-                                        Ipv6Addr::from_str(x.as_str())
-                                            .unwrap()
-                                            .octets()
-                                            .to_vec()
-                                            .into(),
-                                    ),
-                                    _ => None,
-                                };
-
-                                Relay::SingleHostAddr(port, ipv4, ipv6)
-                            }
-                        })
-                        .collect()
-                })
-                .unwrap_or_default(),
-            metadata: match from_row!(row, Option<Json<serde_json::Value>>, "relays") {
-                Some(json) => {
-                    if let Value::Object(x) = json.0 {
-                        Some(PoolMetadata {
-                            url: x.get("url").unwrap().as_str().unwrap().to_string(),
-                            hash: hex::decode(x.get("hash").unwrap().as_str().unwrap())
-                                .unwrap()
-                                .into(),
-                        })
-                    } else {
-                        None
-                    }
-                }
-                None => None,
-            },
-            register_slot: Default::default(), // TODO: add register_slot
-            retiring_epoch: Default::default(), // TODO: add retiring_epoch
-            is_retired: Default::default(),
-            blocks_minted_epoch: Default::default(),
-            deposit: Default::default(),
-            total_stake: todo!(),
-        };
+        let pool = todo!();
 
         writer
             .write_entity_typed::<PoolState>(&EntityKey::from(key), &pool)
@@ -651,13 +549,6 @@ pub async fn handle_epoch_state(
     tracing::info!("Finished querying epochs.");
 
     let writer = state.start_writer().into_diagnostic()?;
-
-    let key_for_idx = |idx: u32| match idx {
-        0 => EntityKey::from(EPOCH_KEY_MARK),
-        1 => EntityKey::from(EPOCH_KEY_SET),
-        2 => EntityKey::from(EPOCH_KEY_GO),
-        _ => unreachable!(),
-    };
 
     for (i, row) in rows.iter().enumerate() {
         if i % 100 == 1 {
@@ -751,29 +642,7 @@ pub async fn handle_epoch_state(
         let deposits_drep: u64 = from_row_bigint!(row, "deposits_drep");
         let deposits_proposal: u64 = from_row_bigint!(row, "deposits_proposal");
 
-        let epoch_state = EpochState {
-            pparams: pp,
-            // for some reason dbsync 1-index numeration, so we subtract 1
-            deposits: deposits_stake + deposits_drep + deposits_proposal,
-            reserves: from_row_bigint!(row, "reserves"),
-            treasury: from_row_bigint!(row, "treasury"),
-            utxos: from_row_bigint!(row, "utxo"),
-            gathered_fees: from_row_bigint!(row, "fees"),
-            gathered_deposits: 0, // from_row_bigint!(row, "gathered_deposits"),
-            decayed_deposits: 0,  // from_row_bigint!(row, "decayed_deposits"),
-            largest_stable_slot: Default::default(), // todo!(),
-            nonces: Default::default(),
-            blocks_minted: Default::default(),
-            number: todo!(),
-            effective_rewards: todo!(),
-            unspendable_rewards: todo!(),
-            treasury_tax: todo!(),
-            pparams_update: todo!(),
-        };
-
-        writer
-            .write_entity_typed::<EpochState>(&key_for_idx(i as u32), &epoch_state)
-            .into_diagnostic()?;
+        let epoch_state = todo!();
     }
 
     tracing::info!("Finished processing epochs.");
@@ -845,14 +714,7 @@ pub async fn handle_drep_state(
         let last_active_slot = from_row!(row, Option<i64>, "last_active_slot").map(|x| x as u64);
         let retired = from_row!(row, bool, "retired");
 
-        let drep = DRepState {
-            initial_slot,
-            voting_power,
-            last_active_slot,
-            expired: Default::default(),
-            deposit: Default::default(),
-            unregistered_at: todo!(),
-        };
+        let drep = todo!();
 
         writer
             .write_entity_typed::<DRepState>(&EntityKey::from(drep_id), &drep)

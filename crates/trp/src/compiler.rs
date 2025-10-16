@@ -30,7 +30,7 @@ fn map_cost_models(original: CostModels) -> HashMap<u8, tx3_cardano::CostModel> 
 }
 
 fn build_pparams<D: Domain>(domain: &D) -> Result<tx3_cardano::PParams, Error> {
-    let network = network_id_from_genesis(domain.genesis()).unwrap();
+    let network = network_id_from_genesis(&domain.genesis()).unwrap();
 
     let pparams = dolos_cardano::load_effective_pparams::<D>(domain.state())
         .map_err(|_| Error::PParamsNotAvailable)?;

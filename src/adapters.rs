@@ -58,8 +58,8 @@ impl Domain for DomainAdapter {
     type Mempool = crate::mempool::Mempool;
     type TipSubscription = TipSubscription;
 
-    fn genesis(&self) -> &Genesis {
-        &self.genesis
+    fn genesis(&self) -> Arc<Genesis> {
+        self.genesis.clone()
     }
 
     fn chain(&self) -> &Self::Chain {

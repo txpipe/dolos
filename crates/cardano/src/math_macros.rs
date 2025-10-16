@@ -12,6 +12,13 @@ macro_rules! ratio {
 }
 
 #[macro_export]
+macro_rules! ibig {
+    ($x:expr) => {{
+        num_bigint::BigInt::from($x)
+    }};
+}
+
+#[macro_export]
 macro_rules! floor_int {
     ($x:expr, $ty:ty) => {
         <$ty>::try_from($x.floor().to_integer()).unwrap()

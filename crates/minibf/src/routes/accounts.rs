@@ -88,22 +88,22 @@ impl<'a> IntoModel<AccountContent> for AccountModelBuilder<'a> {
 
         let active_epoch = self
             .account_state
-            .registered_at.or(self.account_state.deregistered_at)
+            .registered_at
+            .or(self.account_state.deregistered_at)
             .map(|x| chain.slot_epoch(x))
             .map(|(x, _)| x);
 
         let pool_id = self
             .account_state
             .pool
-            .latest
-            .as_ref()
+            .live()
             .map(bech32_pool)
             .transpose()?;
 
         let drep_id = self
             .account_state
             .drep
-            .latest
+            .live()
             .as_ref()
             .map(bech32_drep)
             .transpose()?;
