@@ -260,7 +260,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
     ) -> Result<(), ChainError> {
         let mut cache = self.cache.write().unwrap();
 
-        let rewards = cache.rewards.take().ok_or(ChainError::MissingRewards)?;
+        let rewards = cache.rewards.take().unwrap_or_default();
 
         ewrap::execute::<D>(state, archive, at, &self.config, genesis, rewards)?;
 

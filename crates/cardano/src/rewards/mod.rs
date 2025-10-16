@@ -152,6 +152,18 @@ pub struct RewardMap<C: RewardsContext> {
     _phantom: PhantomData<C>,
 }
 
+impl<C: RewardsContext> Default for RewardMap<C> {
+    fn default() -> Self {
+        Self {
+            incentives: EpochIncentives::default(),
+            pending: HashMap::new(),
+            applied_effective: 0,
+            applied_unspendable: 0,
+            _phantom: PhantomData,
+        }
+    }
+}
+
 impl<C: RewardsContext> Clone for RewardMap<C> {
     fn clone(&self) -> Self {
         Self {

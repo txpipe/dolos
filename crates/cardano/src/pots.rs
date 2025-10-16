@@ -69,7 +69,7 @@ impl Pots {
     }
 }
 
-#[derive(Debug, Clone, Encode, Decode, Serialize, Deserialize)]
+#[derive(Debug, Clone, Encode, Decode, Serialize, Deserialize, Default)]
 pub struct EpochIncentives {
     #[n(0)]
     pub total: u64,
