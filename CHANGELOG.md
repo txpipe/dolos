@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.0-beta.6] - 2025-10-16
+
+### 🚀 Features
+
+- *(cardano)* Implement pixel-perfect reward calc (#757)
+
+### 🐛 Bug Fixes
+
+- *(cardano)* Don't forget about Byron pparams updates (#752)
+- *(minibf)* Offset constructor index on datums (#755)
+- *(cardano)* Make reward data optional on ewrap
+
+### ⚙️ Miscellaneous Tasks
+
+- Fix broken tests and lint warning (#753)
+- Disable publish for test-vectors crate
+- Fix failing tests and lint warnings (#754)
+- Formalize v2 as new internal storage version (#758)
+- *(cli)* Make storage v2 the default during init
+
 ## [1.0.0-beta.5] - 2025-10-06
 
 ### 🚀 Features
@@ -35,6 +55,10 @@ All notable changes to this project will be documented in this file.
 
 - Fix lint warnings across the board (#732)
 - Fix build errors on support crates
+
+### Release
+
+- V1.0.0-beta.5
 
 ## [1.0.0-beta.4] - 2025-09-29
 
