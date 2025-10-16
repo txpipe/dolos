@@ -301,9 +301,10 @@ pub struct SubmitConfig {
 #[derive(Serialize, Default, PartialEq, Clone, Debug)]
 #[serde(rename_all = "lowercase")]
 pub enum StorageVersion {
-    #[default]
     V0,
     V1,
+
+    #[default]
     V2,
 }
 

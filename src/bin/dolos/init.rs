@@ -245,7 +245,7 @@ impl Default for ConfigEditor {
                 mithril: Some(From::from(&KnownNetwork::CardanoMainnet)),
                 snapshot: Default::default(),
                 storage: dolos::core::StorageConfig {
-                    version: dolos::core::StorageVersion::V1,
+                    version: dolos::core::StorageVersion::V2,
                     ..Default::default()
                 },
                 genesis: Default::default(),
@@ -402,6 +402,7 @@ impl ConfigEditor {
     fn prompt_storage_upgrade(mut self) -> miette::Result<Self> {
         if self.0.storage.version != StorageVersion::V2 {
             self.0.storage.version = StorageVersion::V2;
+
             let delete = Confirm::new("Your storage is incompatible with current version. Do you want to delete data and bootstrap?")
                 .with_default(true)
                 .prompt()
