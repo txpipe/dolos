@@ -1,6 +1,6 @@
 use dolos_core::{ChainError, Domain, Genesis, StateStore};
 use pallas::ledger::primitives::StakeCredential;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, info, warn};
 
 use crate::{
     load_era_summary, pallas_ratio,

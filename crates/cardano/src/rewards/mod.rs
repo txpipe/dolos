@@ -11,6 +11,8 @@ use crate::{
 };
 
 mod formulas;
+
+#[cfg(test)]
 mod mocking;
 
 pub type TotalPoolRewards = u64;
@@ -96,20 +98,18 @@ impl Reward {
                 pool: from_pool,
                 value: reward_value,
             })
+        } else if as_leader {
+            Self::MultiPool(MultiPoolReward {
+                is_spendable: ctx.is_account_registered(account),
+                as_leader: HashMap::from([(from_pool, reward_value)]),
+                as_delegator: HashMap::new(),
+            })
         } else {
-            if as_leader {
-                Self::MultiPool(MultiPoolReward {
-                    is_spendable: ctx.is_account_registered(account),
-                    as_leader: HashMap::from([(from_pool, reward_value)]),
-                    as_delegator: HashMap::new(),
-                })
-            } else {
-                Self::MultiPool(MultiPoolReward {
-                    is_spendable: ctx.is_account_registered(account),
-                    as_leader: HashMap::new(),
-                    as_delegator: HashMap::from([(from_pool, reward_value)]),
-                })
-            }
+            Self::MultiPool(MultiPoolReward {
+                is_spendable: ctx.is_account_registered(account),
+                as_leader: HashMap::new(),
+                as_delegator: HashMap::from([(from_pool, reward_value)]),
+            })
         }
     }
 

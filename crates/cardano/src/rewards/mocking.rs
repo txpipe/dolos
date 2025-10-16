@@ -3,7 +3,7 @@ use std::collections::HashMap;
 
 use crate::{
     pallas_ratio,
-    pots::{EpochIncentives, PotDelta, Pots},
+    pots::{EpochIncentives, Pots},
     PParamsSet, PoolHash, PoolParams,
 };
 
@@ -238,8 +238,7 @@ impl MockContext {
 
 impl super::RewardsContext for MockContext {
     fn incentives(&self) -> &EpochIncentives {
-        &self
-            .incentives
+        self.incentives
             .as_ref()
             .expect("epoch incentives not computed")
     }

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use dolos_core::{batch::WorkDeltas, ChainError, Domain, Genesis, StateStore};
+use tracing::info;
 
 use crate::{
     ewrap::{BoundaryVisitor as _, BoundaryWork},
@@ -30,7 +31,7 @@ impl BoundaryWork {
             }
 
             if self.should_retire_pool(&pool)? {
-                tracing::error!("retiring pool");
+                info!("retiring pool");
                 self.retiring_pools.insert(pool.operator);
             }
         }
@@ -63,11 +64,10 @@ impl BoundaryWork {
         let dreps = state.iter_entities_typed::<DRepState>(DRepState::NS, None)?;
 
         for record in dreps {
-            let (id, drep) = record?;
+            let (_, drep) = record?;
 
             if self.should_expire_drep(&drep)? {
-                todo!("primitive drep struct needs to implement hash");
-                //self.expiring_dreps.insert(drep.identifier);
+                self.expiring_dreps.push(drep.identifier);
             }
         }
 
@@ -78,7 +78,7 @@ impl BoundaryWork {
         let mut visitor_retires = crate::ewrap::retires::BoundaryVisitor::default();
         let mut visitor_rewards = crate::ewrap::rewards::BoundaryVisitor::default();
         let mut visitor_govactions = crate::ewrap::govactions::BoundaryVisitor::default();
-        let mut visitor_wrapup = crate::ewrap::wrapup::BoundaryVisitor::default();
+        let mut visitor_wrapup = crate::ewrap::wrapup::BoundaryVisitor;
 
         let pools = state.iter_entities_typed::<PoolState>(PoolState::NS, None)?;
 
@@ -159,7 +159,7 @@ impl BoundaryWork {
 
         boundary.load_pool_data::<D>(state)?;
 
-        //boundary.load_drep_data::<D>(state)?;
+        boundary.load_drep_data::<D>(state)?;
 
         boundary.compute_deltas::<D>(state)?;
 

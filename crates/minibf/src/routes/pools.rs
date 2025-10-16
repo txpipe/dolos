@@ -53,11 +53,15 @@ impl IntoModel<PoolListExtendedInner> for PoolModelBuilder {
     fn into_model(self) -> Result<PoolListExtendedInner, StatusCode> {
         let pool_id = bech32_pool(self.operator)?;
 
+        // TODO: implement
+        let live_stake = "0".to_string();
+        let active_stake = "0".to_string();
+
         let out = PoolListExtendedInner {
             pool_id,
             hex: hex::encode(self.operator),
-            active_stake: todo!(),
-            live_stake: todo!(),
+            live_stake,
+            active_stake,
             live_saturation: rational_to_f64::<3>(&self.state.live_saturation()),
             blocks_minted: self.state.blocks_minted_total as i32,
             declared_pledge: self.state.params.pledge.to_string(),

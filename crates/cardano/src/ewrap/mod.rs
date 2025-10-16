@@ -1,7 +1,4 @@
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::{collections::HashSet, sync::Arc};
 
 use dolos_core::{batch::WorkDeltas, BlockSlot, ChainError, Domain, EntityKey, Genesis};
 use pallas::ledger::primitives::conway::DRep;
@@ -86,7 +83,10 @@ pub struct BoundaryWork {
     // inferred
     pub existing_pools: HashSet<PoolHash>,
     pub retiring_pools: HashSet<PoolHash>,
-    pub expiring_dreps: HashSet<DRep>,
+
+    // TODO: we use a vec instead of a HashSet because the Pallas struct doesn't implement Hash. We
+    // should turn it into a HashSet once we have the update in Pallas.
+    pub expiring_dreps: Vec<DRep>,
 
     // computed via visitors
     pub deltas: WorkDeltas<CardanoLogic>,

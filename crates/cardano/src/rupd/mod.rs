@@ -8,7 +8,7 @@ use pallas::ledger::primitives::StakeCredential;
 use tracing::{info, instrument};
 
 use crate::{
-    pots::{EpochIncentives, PotDelta, Pots},
+    pots::{EpochIncentives, Pots},
     rewards::RewardMap,
     AccountState, ChainSummary, PParamsSet, PoolHash, PoolParams, PoolState, StakeLog,
 };

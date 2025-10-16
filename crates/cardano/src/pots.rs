@@ -60,10 +60,11 @@ impl Pots {
 
     pub fn check_consistency(&self, expected_max_supply: u64) {
         if self.max_supply() != expected_max_supply {
-            dbg!(self);
+            //dbg!(self);
         }
 
         // TODO: enforce once we have confidence on full-sync success
+
         //assert_eq!(self.max_supply(), expected_max_supply);
     }
 }

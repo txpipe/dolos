@@ -1,6 +1,6 @@
 use std::ops::Deref as _;
 
-use dolos_core::{BlockSlot, Genesis};
+use dolos_core::BlockSlot;
 use pallas::crypto::hash::Hash;
 use pallas::ledger::addresses::{
     Address, Network, ShelleyAddress, ShelleyDelegationPart, StakeAddress, StakePayload,
@@ -17,7 +17,6 @@ use pallas::ledger::traverse::MultiEraCert;
 use serde::{Deserialize, Serialize};
 
 use crate::eras::ChainSummary;
-use crate::utils;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MultiEraPoolRegistration {

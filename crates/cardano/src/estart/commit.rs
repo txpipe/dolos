@@ -1,12 +1,11 @@
 use dolos_core::{
-    ArchiveStore, ArchiveWriter, BrokenInvariant, ChainError, ChainPoint, Domain, Entity,
-    EntityDelta as _, EntityKey, LogKey, NsKey, StateStore, StateWriter, TemporalKey,
+    ArchiveStore, ArchiveWriter, ChainError, ChainPoint, Domain, Entity, EntityDelta as _, LogKey,
+    NsKey, StateStore, StateWriter, TemporalKey,
 };
 use tracing::{instrument, warn};
 
 use crate::{
-    AccountState, CardanoEntity, DRepState, EpochState, EraSummary, FixedNamespace, PoolState,
-    Proposal,
+    AccountState, CardanoEntity, DRepState, EpochState, FixedNamespace, PoolState, Proposal,
 };
 
 impl super::WorkContext {

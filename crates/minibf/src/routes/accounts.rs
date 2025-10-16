@@ -14,7 +14,7 @@ use blockfrost_openapi::models::{
     address_utxo_content_inner::AddressUtxoContentInner,
 };
 
-use dolos_cardano::{model::AccountState, pallas_extras, ChainSummary, FixedNamespace, RewardLog};
+use dolos_cardano::{model::AccountState, pallas_extras, ChainSummary, RewardLog};
 use dolos_core::{ArchiveStore, Domain, EntityKey, StateStore};
 use pallas::{
     codec::minicbor,

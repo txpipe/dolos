@@ -28,7 +28,7 @@ impl EntityDelta for NonceTransition {
         entity.largest_stable_slot = self.next_slot;
     }
 
-    fn undo(&self, entity: &mut Option<Self::Entity>) {
+    fn undo(&self, _entity: &mut Option<Self::Entity>) {
         todo!()
     }
 }
@@ -37,15 +37,11 @@ fn next_largest_stable_slot(ctx: &super::WorkContext) -> BlockSlot {
     let stability_window = nonce_stability_window(ctx.active_protocol.into(), &ctx.genesis);
     let epoch_finish_slot = ctx.active_era.epoch_start(ctx.starting_epoch_no() + 1);
 
-    let largest_stable_slot = epoch_finish_slot - stability_window;
-
-    largest_stable_slot
+    epoch_finish_slot - stability_window
 }
 
 fn initial_nonces(ctx: &super::WorkContext) -> Option<Nonces> {
-    let Some(era_transition) = ctx.ended_state.era_transition() else {
-        return None;
-    };
+    let era_transition = ctx.ended_state.era_transition()?;
 
     if era_transition.entering_shelley() {
         Some(Nonces::bootstrap(ctx.genesis.shelley_hash))

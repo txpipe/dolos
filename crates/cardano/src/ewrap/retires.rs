@@ -1,4 +1,4 @@
-use dolos_core::{BlockSlot, ChainError, NsKey};
+use dolos_core::{ChainError, NsKey};
 use pallas::{
     codec::minicbor,
     ledger::primitives::{conway::DRep, StakeCredential},
@@ -139,16 +139,14 @@ impl dolos_core::EntityDelta for DRepExpiration {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DRepDelegatorDrop {
     delegator: AccountId,
-    unregistered_at: BlockSlot,
 
     // undo
     prev_drep: Option<EpochValue<Option<DRep>>>,
 }
 
 impl DRepDelegatorDrop {
-    pub fn new(delegator: AccountId, unregistered_at: BlockSlot) -> Self {
+    pub fn new(delegator: AccountId) -> Self {
         Self {
-            unregistered_at,
             delegator,
             prev_drep: None,
         }
@@ -168,17 +166,13 @@ impl dolos_core::EntityDelta for DRepDelegatorDrop {
             return;
         };
 
-        if let Some(delegated_at) = entity.vote_delegated_at {
-            if delegated_at <= self.unregistered_at {
-                debug!(delegator=%self.delegator, "dropping drep delegator");
+        debug!(delegator=%self.delegator, "dropping drep delegator");
 
-                // save undo info
-                self.prev_drep = Some(entity.drep.clone());
+        // save undo info
+        self.prev_drep = Some(entity.drep.clone());
 
-                // apply changes
-                entity.drep.replace_unchecked(None);
-            }
-        }
+        // apply changes
+        entity.drep.replace_unchecked(None);
     }
 
     fn undo(&self, entity: &mut Option<AccountState>) {
@@ -275,11 +269,9 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         }
 
         if let Some(drep) = account.drep.live() {
-            todo!("primitive drep struct needs to implement hash");
-            // if ctx.expiring_dreps.contains(drep) {
-            //     self.deltas
-            //         .push(DRepDelegatorDrop::new(id.clone(),
-            // drep.unregistered_at).into()); }
+            if ctx.expiring_dreps.contains(drep) {
+                self.change(DRepDelegatorDrop::new(id.clone()));
+            }
         }
 
         Ok(())
@@ -307,14 +299,14 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         id: &DRepId,
         drep: &DRepState,
     ) -> Result<(), ChainError> {
-        // if ctx.expiring_dreps.contains(&drep.identifier) {
-        //     self.deltas.push(
-        //         DRepExpiration {
-        //             drep_id: id.clone(),
-        //         }
-        //         .into(),
-        //     );
-        // }
+        if ctx.expiring_dreps.contains(&drep.identifier) {
+            self.deltas.push(
+                DRepExpiration {
+                    drep_id: id.clone(),
+                }
+                .into(),
+            );
+        }
 
         Ok(())
     }

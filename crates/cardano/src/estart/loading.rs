@@ -9,7 +9,7 @@ use crate::{
 
 impl super::WorkContext {
     pub fn compute_deltas<D: Domain>(&mut self, state: &D::State) -> Result<(), ChainError> {
-        let mut visitor_nonces = super::nonces::BoundaryVisitor::default();
+        let mut visitor_nonces = super::nonces::BoundaryVisitor;
         let mut visitor_reset = super::reset::BoundaryVisitor::default();
 
         let pools = state.iter_entities_typed::<PoolState>(PoolState::NS, None)?;

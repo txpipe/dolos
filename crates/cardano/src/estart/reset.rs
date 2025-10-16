@@ -117,7 +117,7 @@ impl dolos_core::EntityDelta for PoolTransition {
         );
     }
 
-    fn undo(&self, entity: &mut Option<PoolState>) {
+    fn undo(&self, _entity: &mut Option<PoolState>) {
         todo!()
     }
 }
@@ -156,7 +156,7 @@ impl dolos_core::EntityDelta for EpochTransition {
             .replace(self.next_pparams.clone(), self.next_epoch);
     }
 
-    fn undo(&self, entity: &mut Option<Self::Entity>) {
+    fn undo(&self, _entity: &mut Option<Self::Entity>) {
         todo!()
     }
 }
@@ -219,7 +219,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         &mut self,
         ctx: &mut WorkContext,
         id: &PoolId,
-        pool: &PoolState,
+        _: &PoolState,
     ) -> Result<(), ChainError> {
         self.change(PoolTransition::new(id.clone(), ctx.starting_epoch_no()));
 

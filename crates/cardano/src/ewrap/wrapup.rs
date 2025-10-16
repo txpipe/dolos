@@ -1,4 +1,4 @@
-use crate::{CardanoDelta, EndStats, EpochState, FixedNamespace as _, CURRENT_EPOCH_KEY};
+use crate::{EndStats, EpochState, FixedNamespace as _, CURRENT_EPOCH_KEY};
 use dolos_core::{ChainError, NsKey};
 use serde::{Deserialize, Serialize};
 

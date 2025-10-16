@@ -6,6 +6,7 @@ use pallas::crypto::hash::{Hash, Hasher};
 use pallas::ledger::primitives::Epoch;
 use pallas::ledger::traverse::{MultiEraBlock, MultiEraCert, MultiEraTx};
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 
 use crate::model::FixedNamespace as _;
 use crate::pallas_extras::MultiEraPoolRegistration;
@@ -67,7 +68,7 @@ impl dolos_core::EntityDelta for PoolRegistration {
 
     fn apply(&mut self, entity: &mut Option<PoolState>) {
         if let Some(entity) = entity {
-            tracing::debug!(
+            debug!(
                 slot = self.slot,
                 operator = hex::encode(self.cert.operator),
                 "updating pool registration",
@@ -75,7 +76,7 @@ impl dolos_core::EntityDelta for PoolRegistration {
 
             entity.params_update = Some(self.cert.clone().into());
         } else {
-            tracing::error!(
+            debug!(
                 slot = self.slot,
                 operator = hex::encode(self.cert.operator),
                 "applying pool registration",
@@ -181,8 +182,7 @@ impl dolos_core::EntityDelta for PoolDeRegistration {
             self.prev_retiring_epoch = entity.retiring_epoch;
             self.prev_deposit = Some(entity.deposit);
 
-            // TODO: should be debug
-            tracing::error!(
+            debug!(
                 operator = hex::encode(self.operator),
                 epoch = self.epoch,
                 "retiring pool"

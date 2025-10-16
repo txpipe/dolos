@@ -1,5 +1,4 @@
 use dolos_core::{ChainError, EntityKey, NsKey};
-use pallas::{codec::minicbor, crypto::hash::Hash, ledger::primitives::StakeCredential};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
@@ -7,18 +6,6 @@ use crate::{
     ewrap::BoundaryWork, rupd::AccountId, AccountState, CardanoDelta, CardanoEntity,
     FixedNamespace, RewardLog,
 };
-
-fn stake_cred_to_entity_key(cred: &StakeCredential) -> EntityKey {
-    let bytes = minicbor::to_vec(cred).unwrap();
-    EntityKey::from(bytes)
-}
-
-// TODO: This mapping going back to Hash<28> from an entity key is horrible. We
-// need to remove this hack once we have proper domain keys.
-fn entity_key_to_operator_hash(key: &EntityKey) -> Hash<28> {
-    let bytes: [u8; 28] = key.as_ref()[..28].try_into().unwrap();
-    Hash::<28>::new(bytes)
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssignRewards {
