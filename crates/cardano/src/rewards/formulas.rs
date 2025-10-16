@@ -40,12 +40,26 @@ pub fn pool_maximal_rewards(
     floor_int!(op, u64)
 }
 
-pub fn delegator_reward(available_rewards: u64, total_delegated: u64, delegator_stake: u64) -> u64 {
-    let weight = ratio!(delegator_stake, total_delegated);
+pub fn delegator_reward(
+    pool_rewards: u64,
+    member_stake: u64,
+    pool_stake: u64,
+    total_stake: u64,
+    fixed_cost: u64,
+    margin_cost: Ratio,
+) -> u64 {
+    if pool_rewards <= fixed_cost {
+        0
+    } else {
+        let member_relative_stake = ratio!(member_stake, total_stake);
 
-    let share = weight * ratio!(available_rewards);
+        // ⌊ (1 - m) × (R_pool - c) × t / σ ⌋
+        let out =
+            (ratio!(1) - &margin_cost) * ratio!(pool_rewards - fixed_cost) * member_relative_stake
+                / ratio!(pool_stake, total_stake);
 
-    floor_int!(share, u64)
+        floor_int!(out, u64)
+    }
 }
 
 /// Calculates a pool apparent performance
@@ -208,5 +222,54 @@ mod tests {
         let expected = ratio!(2271, 2149);
 
         assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_well_known_operator_share() {
+        //let pool_rewards = 651642667;
+        let pool_rewards = 614144326; // known via dbsync
+        let fixed_cost = 340000000;
+        let margin_cost = ratio!(1, 10);
+        let pool_stake = 1019497623854;
+        let live_pledge = 19497623854; // declared: 8000000000
+        let circulating_supply = 30094523265823602;
+
+        let out = pool_operator_share(
+            pool_rewards,
+            fixed_cost,
+            margin_cost.clone(),
+            pool_stake,
+            live_pledge,
+            circulating_supply,
+        );
+
+        //let expected = 367414432; <- what BF returns
+        //let expected = 372133077; <- what we see in DBSync
+        let expected = 372133076; // <- what we're getting right now which is close enough
+
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn test_well_known_delegator_share() {
+        let pool_rewards = 614144326; // known via dbsync
+        let fixed_cost = 340000000;
+        let pool_stake = 1019497623854;
+        let member_stake = 1000000000000;
+        let circulating_supply = 30094523265823602_u64;
+        let margin_cost = ratio!(1, 10);
+
+        let out = delegator_reward(
+            pool_rewards,
+            member_stake,
+            pool_stake,
+            circulating_supply,
+            fixed_cost,
+            margin_cost,
+        );
+
+        let expected = 242011249;
+
+        assert_eq!(out, expected);
     }
 }

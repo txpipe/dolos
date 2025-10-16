@@ -304,8 +304,9 @@ impl dolos_core::EntityDelta for StakeDeregistration {
         entity.pool.replace_unchecked(None);
         entity.drep.replace_unchecked(None);
 
-        // decayed deposits show up in the account's rewards pot
-        entity.rewards_sum += entity.deposit;
+        // decayed deposits for deregistered accounts go directly into the UTxO outputs
+        // of the de-registered transaction. This means that there's no need for manual
+        // update of any other pot.
 
         entity.deposit = 0;
     }

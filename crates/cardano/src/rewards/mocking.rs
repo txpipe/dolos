@@ -3,7 +3,7 @@ use std::collections::HashMap;
 
 use crate::{
     pallas_ratio,
-    pots::{PotDelta, Pots},
+    pots::{EpochIncentives, PotDelta, Pots},
     PParamsSet, PoolHash, PoolParams,
 };
 
@@ -177,7 +177,7 @@ pub struct MockContext {
     pool_params_converted: HashMap<String, PoolParams>,
     /// Computed pot delta for the rewards calculation
     #[serde(skip)]
-    computed_pot_delta: Option<PotDelta>,
+    incentives: Option<EpochIncentives>,
 }
 
 impl MockContext {
@@ -197,7 +197,7 @@ impl MockContext {
 
         context.pool_params_converted = converted;
 
-        context.computed_pot_delta = Some(crate::pots::delta(
+        context.incentives = Some(crate::pots::epoch_incentives(
             context.pots.reserves,
             context.epoch_fee_ss,
             pallas_ratio!(context.pparams.ensure_rho()?),
@@ -237,11 +237,11 @@ impl MockContext {
 }
 
 impl super::RewardsContext for MockContext {
-    fn pot_delta(&self) -> &PotDelta {
+    fn incentives(&self) -> &EpochIncentives {
         &self
-            .computed_pot_delta
+            .incentives
             .as_ref()
-            .expect("pot delta not computed")
+            .expect("epoch incentives not computed")
     }
 
     fn pots(&self) -> &Pots {

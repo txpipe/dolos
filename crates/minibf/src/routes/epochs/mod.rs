@@ -27,13 +27,13 @@ pub async fn latest_parameters<D: Domain>(
 
     let (epoch, _) = summary.slot_epoch(tip);
 
-    let state = dolos_cardano::load_mark_epoch::<D>(domain.state())
+    let state = dolos_cardano::load_epoch::<D>(domain.state())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let model = mapping::ParametersModelBuilder {
         epoch,
-        params: state.pparams,
-        genesis: domain.genesis(),
+        params: state.pparams.active().clone(),
+        genesis: &domain.genesis(),
         nonce: state.nonces.map(|x| x.active.to_string()),
     };
 
@@ -49,7 +49,7 @@ pub async fn by_number_parameters<D: Domain>(
     let (curr, _) = summary.slot_epoch(tip);
 
     let epoch = if epoch == curr {
-        dolos_cardano::load_mark_epoch::<D>(domain.state())
+        dolos_cardano::load_epoch::<D>(domain.state())
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     } else {
         domain
@@ -59,8 +59,8 @@ pub async fn by_number_parameters<D: Domain>(
 
     let model = mapping::ParametersModelBuilder {
         epoch: epoch.number,
-        params: epoch.pparams,
-        genesis: domain.genesis(),
+        params: epoch.pparams.active().clone(),
+        genesis: &domain.genesis(),
         nonce: epoch.nonces.map(|x| x.active.to_string()),
     };
 

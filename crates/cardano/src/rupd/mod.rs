@@ -8,7 +8,7 @@ use pallas::ledger::primitives::StakeCredential;
 use tracing::{info, instrument};
 
 use crate::{
-    pots::{PotDelta, Pots},
+    pots::{EpochIncentives, PotDelta, Pots},
     rewards::RewardMap,
     AccountState, ChainSummary, PParamsSet, PoolHash, PoolParams, PoolState, StakeLog,
 };
@@ -115,10 +115,10 @@ pub struct RupdWork {
     pub current_epoch: u64,
     pub snapshot: StakeSnapshot,
     pub pots: Pots,
-    pub pot_delta: PotDelta,
+    pub incentives: EpochIncentives,
     pub max_supply: u64,
     pub chain: ChainSummary,
-    pub pparams: PParamsSet,
+    pub pparams: Option<PParamsSet>,
 }
 
 fn log_work<D: Domain>(
@@ -142,9 +142,9 @@ fn log_work<D: Domain>(
         let pool_id = EntityKey::from(pool.as_slice());
         let pool_stake = snapshot.get_pool_stake(pool);
         let relative_size = (pool_stake as f64) / snapshot.active_stake_sum as f64;
-        let params = snapshot.pool_params.get(&pool);
+        let params = snapshot.pool_params.get(pool);
         let declared_pledge = params.map(|x| x.pledge).unwrap_or(0);
-        let delegators_count = snapshot.accounts_by_pool.count_delegators(&pool);
+        let delegators_count = snapshot.accounts_by_pool.count_delegators(pool);
 
         // TODO: implement
         //let live_pledge = snapshot.get_live_pledge(&pool);
@@ -182,16 +182,12 @@ pub fn execute<D: Domain>(
 
     let work = RupdWork::load::<D>(state, genesis)?;
 
-    dbg!(&work.snapshot);
-
     let rewards = crate::rewards::define_rewards(&work)?;
 
     // TODO: logging the snapshot at this stage is not the right place. We should
     // treat this problem as part of the epoch transition logic. We put it here for
     // the time being for simplicity.
     log_work::<D>(&work, &rewards, archive)?;
-
-    dbg!(&rewards);
 
     Ok(rewards)
 }

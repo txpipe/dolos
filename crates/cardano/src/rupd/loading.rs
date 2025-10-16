@@ -1,31 +1,26 @@
-use std::collections::HashSet;
-
 use dolos_core::{ChainError, Domain, Genesis, StateStore};
 use pallas::ledger::primitives::StakeCredential;
 use tracing::{debug, info, trace};
 
 use crate::{
     load_era_summary, pallas_ratio,
-    pots::{self, Eta, PotDelta, Pots},
+    pots::{self, EpochIncentives, Eta, Pots},
     ratio,
     rupd::{RupdWork, StakeSnapshot},
     AccountState, EpochState, FixedNamespace as _, PParamsSet, PoolHash, PoolParams, PoolState,
 };
 
-fn define_pparams(prev_epoch: Option<&EpochState>, current_epoch: &EpochState) -> PParamsSet {
-    if let Some(prev_epoch) = prev_epoch {
-        prev_epoch.pparams.clone()
-    } else {
-        current_epoch.pparams.clone()
-    }
-}
-
 fn define_eta(
     genesis: &Genesis,
     pparams: &PParamsSet,
-    epoch: Option<&EpochState>,
+    epoch: &EpochState,
 ) -> Result<Eta, ChainError> {
-    let Some(epoch) = epoch else {
+    let blocks_minted = epoch
+        .rolling
+        .snapshot_at(epoch.number - 1)
+        .map(|x| x.blocks_minted);
+
+    let Some(blocks_minted) = blocks_minted else {
         // TODO: check if returning eta = 1 on epoch 0 is what the specs says.
         return Ok(ratio!(1));
     };
@@ -41,7 +36,7 @@ fn define_eta(
     let epoch_length = pparams.ensure_epoch_length()?;
 
     let eta = pots::calculate_eta(
-        epoch.blocks_minted as u64,
+        blocks_minted as u64,
         pallas_ratio!(d_param),
         f_param,
         epoch_length,
@@ -50,38 +45,37 @@ fn define_eta(
     Ok(eta)
 }
 
-fn neutral_pot_delta() -> PotDelta {
-    PotDelta {
-        incentives: 0,
+fn neutral_incentives() -> EpochIncentives {
+    EpochIncentives {
+        total: 0,
         treasury_tax: 0,
         available_rewards: 0,
         used_fees: 0,
-        effective_rewards: None,
-        unspendable_rewards: None,
     }
 }
 
-fn define_pot_delta(
+fn define_epoch_incentives(
     genesis: &Genesis,
-    pparams: &PParamsSet,
-    epoch: Option<&EpochState>,
+    epoch: &EpochState,
     reserves: u64,
-) -> Result<PotDelta, ChainError> {
-    if pparams.is_byron() {
+) -> Result<EpochIncentives, ChainError> {
+    if epoch.pparams.active().is_byron() {
         info!("no pot changes during Byron epoch");
-        return Ok(neutral_pot_delta());
+        return Ok(neutral_incentives());
     }
 
-    let rho_param = pparams.ensure_rho()?;
-    let tau_param = pparams.ensure_tau()?;
+    let rho_param = epoch.pparams.active().ensure_rho()?;
+    let tau_param = epoch.pparams.active().ensure_tau()?;
 
-    let fee_ss = epoch.map(|e| e.gathered_fees).unwrap_or_default();
+    let fee_ss = epoch
+        .rolling
+        .snapshot_at(epoch.number - 1)
+        .map(|x| x.gathered_fees)
+        .unwrap_or_default();
 
-    let eta = define_eta(genesis, pparams, epoch)?;
+    let eta = define_eta(genesis, epoch.pparams.active(), epoch)?;
 
-    dbg!(&eta);
-
-    let pot_delta = pots::delta(
+    let incentives = pots::epoch_incentives(
         reserves,
         fee_ss,
         pallas_ratio!(rho_param),
@@ -89,7 +83,7 @@ fn define_pot_delta(
         eta,
     );
 
-    Ok(pot_delta)
+    Ok(incentives)
 }
 
 impl StakeSnapshot {
@@ -101,10 +95,10 @@ impl StakeSnapshot {
     ) -> Result<(), ChainError> {
         if let Some(pool_id) = pool_id {
             self.accounts_by_pool
-                .insert(pool_id.clone(), account.clone(), stake);
+                .insert(pool_id, account.clone(), stake);
 
             self.pool_stake
-                .entry(pool_id.clone())
+                .entry(pool_id)
                 .and_modify(|x| *x += stake)
                 .or_insert(stake);
 
@@ -122,7 +116,7 @@ impl StakeSnapshot {
 
     pub fn load<D: Domain>(
         state: &D::State,
-        snapshot_epoch: u64,
+        stake_epoch: u64,
         performance_epoch: u64,
     ) -> Result<Self, ChainError> {
         let mut snapshot = Self::default();
@@ -132,7 +126,7 @@ impl StakeSnapshot {
         for record in pools {
             let (_, pool) = record?;
 
-            let Some(pool_snapshot) = pool.snapshot.version_for(snapshot_epoch) else {
+            let Some(pool_snapshot) = pool.snapshot.snapshot_at(stake_epoch) else {
                 continue;
             };
 
@@ -146,7 +140,7 @@ impl StakeSnapshot {
 
             // for tracking blocks we switch to the performance epoch (previous epoch, the
             // one we're computing rewards for)
-            let Some(pool_snapshot) = pool.snapshot.version_for(performance_epoch) else {
+            let Some(pool_snapshot) = pool.snapshot.snapshot_at(performance_epoch) else {
                 continue;
             };
 
@@ -168,11 +162,11 @@ impl StakeSnapshot {
                     .insert(account.credential.clone());
             }
 
-            let pool = account.pool.version_for(snapshot_epoch).and_then(|x| *x);
+            let pool = account.pool.snapshot_at(stake_epoch).and_then(|x| *x);
 
             let stake = account
                 .total_stake
-                .version_for(snapshot_epoch)
+                .snapshot_at(stake_epoch)
                 .cloned()
                 .unwrap_or_default();
 
@@ -215,10 +209,9 @@ impl RupdWork {
     }
 
     pub fn load<D: Domain>(state: &D::State, genesis: &Genesis) -> Result<RupdWork, ChainError> {
-        let set_epoch = crate::load_set_epoch::<D>(state)?;
-        let mark_epoch = crate::load_mark_epoch::<D>(state)?;
+        let epoch = crate::load_epoch::<D>(state)?;
 
-        let current_epoch = mark_epoch.number;
+        let current_epoch = epoch.number;
 
         let max_supply =
             genesis
@@ -228,16 +221,14 @@ impl RupdWork {
                     "max_lovelace_supply".to_string(),
                 ))?;
 
-        let pparams = define_pparams(set_epoch.as_ref(), &mark_epoch);
+        let pots = epoch.initial_pots.clone();
 
-        let pots = mark_epoch.initial_pots.clone();
-
-        let pot_delta = define_pot_delta(genesis, &pparams, set_epoch.as_ref(), pots.reserves)?;
+        let incentives = define_epoch_incentives(genesis, &epoch, pots.reserves)?;
 
         debug!(
-            %pot_delta.incentives,
-            %pot_delta.treasury_tax,
-            %pot_delta.available_rewards,
+            %incentives.total,
+            %incentives.treasury_tax,
+            %incentives.available_rewards,
             "defined pot delta"
         );
 
@@ -247,9 +238,9 @@ impl RupdWork {
             current_epoch,
             max_supply,
             chain,
-            pparams,
+            pparams: epoch.pparams.for_rewards().cloned(),
             pots,
-            pot_delta,
+            incentives,
             snapshot: StakeSnapshot::default(),
         };
 
@@ -262,8 +253,8 @@ impl RupdWork {
 }
 
 impl crate::rewards::RewardsContext for RupdWork {
-    fn pot_delta(&self) -> &PotDelta {
-        &self.pot_delta
+    fn incentives(&self) -> &EpochIncentives {
+        &self.incentives
     }
 
     fn pots(&self) -> &Pots {
@@ -309,7 +300,9 @@ impl crate::rewards::RewardsContext for RupdWork {
     }
 
     fn pparams(&self) -> &PParamsSet {
-        &self.pparams
+        self.pparams
+            .as_ref()
+            .expect("pparams not available for rewards")
     }
 
     fn pool_blocks(&self, pool: PoolHash) -> u64 {
@@ -317,6 +310,6 @@ impl crate::rewards::RewardsContext for RupdWork {
     }
 
     fn pre_allegra(&self) -> bool {
-        self.pparams.protocol_major().unwrap_or(0) < 3
+        self.pparams().protocol_major().unwrap_or(0) < 3
     }
 }

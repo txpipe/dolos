@@ -199,7 +199,11 @@ pub async fn eras<D: Domain>(
         })
         .collect::<Result<Vec<_>, StatusCode>>()?;
 
-    let builder = ChainModelBuilder { eras, genesis, tip };
+    let builder = ChainModelBuilder {
+        eras,
+        genesis: &genesis,
+        tip,
+    };
 
     builder.into_response()
 }
@@ -219,14 +223,14 @@ impl<'a> IntoModel<Network> for NetworkModelBuilder<'a> {
         // `total_supply` for what we call `circulating`. For BF, the `circulating`
         // supply is total supply minus deposits.
         let total_supply = self.active.initial_pots.circulating();
-        let circulating = total_supply + self.active.initial_pots.deposits;
+        let circulating = total_supply + self.active.initial_pots.obligations();
 
         Ok(Network {
             supply: Box::new(NetworkSupply {
                 max: max_supply.to_string(),
                 total: total_supply.to_string(),
                 circulating: circulating.to_string(),
-                locked: self.active.initial_pots.deposits.to_string(),
+                locked: self.active.initial_pots.obligations().to_string(),
                 treasury: self.active.initial_pots.treasury.to_string(),
                 reserves: self.active.initial_pots.reserves.to_string(),
             }),
@@ -245,11 +249,13 @@ where
 {
     let genesis = domain.genesis();
 
-    let active = dolos_cardano::load_go_epoch::<D>(domain.state())
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let active = dolos_cardano::load_epoch::<D>(domain.state())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let builder = NetworkModelBuilder { genesis, active };
+    let builder = NetworkModelBuilder {
+        genesis: &genesis,
+        active,
+    };
 
     builder.into_response()
 }

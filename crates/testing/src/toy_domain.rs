@@ -160,8 +160,8 @@ impl dolos_core::Domain for ToyDomain {
         &self.storage_config
     }
 
-    fn genesis(&self) -> &dolos_core::Genesis {
-        &self.genesis
+    fn genesis(&self) -> Arc<dolos_core::Genesis> {
+        self.genesis.clone()
     }
 
     fn chain(&self) -> &Self::Chain {

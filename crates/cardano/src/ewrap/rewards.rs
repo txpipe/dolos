@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 use crate::{
-    epoch::BoundaryWork, pots::PotDelta, rupd::AccountId, AccountRewardLog, AccountState,
-    CardanoDelta, CardanoEntity, EpochState, FixedNamespace, PoolRewardLog, EPOCH_KEY_MARK,
+    ewrap::BoundaryWork, rupd::AccountId, AccountRewardLog, AccountState, CardanoDelta,
+    CardanoEntity, FixedNamespace, PoolRewardLog,
 };
 
 fn stake_cred_to_entity_key(cred: &StakeCredential) -> EntityKey {
@@ -21,12 +21,12 @@ fn entity_key_to_operator_hash(key: &EntityKey) -> Hash<28> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AssignDelegatorRewards {
+pub struct AssignRewards {
     account: AccountId,
     reward: u64,
 }
 
-impl dolos_core::EntityDelta for AssignDelegatorRewards {
+impl dolos_core::EntityDelta for AssignRewards {
     type Entity = AccountState;
 
     fn key(&self) -> NsKey {
@@ -35,72 +35,24 @@ impl dolos_core::EntityDelta for AssignDelegatorRewards {
 
     fn apply(&mut self, entity: &mut Option<Self::Entity>) {
         let Some(entity) = entity else {
-            warn!("missing delegator reward account");
+            warn!("missing reward account");
             return;
         };
 
-        debug!(account=%self.account, "assigning delegator rewards");
+        debug!(account=%self.account, "assigning rewards");
 
         entity.rewards_sum += self.reward;
     }
 
     fn undo(&self, entity: &mut Option<Self::Entity>) {
         let Some(entity) = entity else {
-            warn!("missing delegator reward account");
+            warn!("missing reward account");
             return;
         };
 
-        debug!(account=%self.account, "undoing delegator rewards");
+        debug!(account=%self.account, "undoing rewards");
 
         entity.rewards_sum = entity.rewards_sum.saturating_sub(self.reward);
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PotAdjustment {
-    pot_delta: PotDelta,
-}
-
-impl dolos_core::EntityDelta for PotAdjustment {
-    type Entity = EpochState;
-
-    fn key(&self) -> NsKey {
-        NsKey::from((EpochState::NS, EPOCH_KEY_MARK))
-    }
-
-    fn apply(&mut self, entity: &mut Option<Self::Entity>) {
-        let entity = entity.as_mut().expect("epoch should exist");
-
-        let pots = entity.initial_pots.clone();
-
-        tracing::error!(
-            %self.pot_delta.available_rewards,
-            %self.pot_delta.incentives,
-            %self.pot_delta.treasury_tax,
-            %pots.reserves,
-            %pots.treasury,
-            %pots.deposits,
-            %pots.fees,
-            "applying pot adjustment"
-        );
-
-        let pot_delta = self.pot_delta.clone();
-
-        dbg!(&pots, &pot_delta);
-
-        let new_pots = crate::pots::apply_delta(pots, &pot_delta);
-
-        dbg!(&new_pots);
-
-        entity.pot_delta = Some(pot_delta);
-        entity.final_pots = Some(new_pots.clone());
-    }
-
-    fn undo(&self, entity: &mut Option<Self::Entity>) {
-        let entity = entity.as_mut().expect("epoch should exist");
-
-        entity.pot_delta = None;
-        entity.final_pots = None;
     }
 }
 
@@ -130,7 +82,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         let rewards = ctx.rewards.take_for_apply(&account.credential);
 
         if let Some(reward) = rewards {
-            self.change(AssignDelegatorRewards {
+            self.change(AssignRewards {
                 account: id.clone(),
                 reward: reward.value(),
             });
@@ -172,12 +124,6 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         for (key, log) in self.logs.drain(..) {
             ctx.logs.push((key, log));
         }
-
-        let pots = PotAdjustment {
-            pot_delta: ctx.rewards.as_pot_delta(),
-        };
-
-        ctx.deltas.add_for_entity(pots);
 
         Ok(())
     }

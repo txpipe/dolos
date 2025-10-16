@@ -6,7 +6,6 @@ use pallas::crypto::hash::{Hash, Hasher};
 use pallas::ledger::primitives::Epoch;
 use pallas::ledger::traverse::{MultiEraBlock, MultiEraCert, MultiEraTx};
 use serde::{Deserialize, Serialize};
-use tracing::{debug, warn};
 
 use crate::model::FixedNamespace as _;
 use crate::pallas_extras::MultiEraPoolRegistration;
@@ -68,14 +67,16 @@ impl dolos_core::EntityDelta for PoolRegistration {
 
     fn apply(&mut self, entity: &mut Option<PoolState>) {
         if let Some(entity) = entity {
-            debug!(
+            tracing::debug!(
+                slot = self.slot,
                 operator = hex::encode(self.cert.operator),
                 "updating pool registration",
             );
 
             entity.params_update = Some(self.cert.clone().into());
         } else {
-            debug!(
+            tracing::error!(
+                slot = self.slot,
                 operator = hex::encode(self.cert.operator),
                 "applying pool registration",
             );
@@ -134,20 +135,14 @@ impl dolos_core::EntityDelta for MintedBlocksInc {
     fn apply(&mut self, entity: &mut Option<PoolState>) {
         if let Some(entity) = entity {
             entity.blocks_minted_total += self.count;
-
-            entity.snapshot.mutate_unchecked(|snapshot| {
-                snapshot.blocks_minted += self.count;
-            });
+            entity.snapshot.live_mut_unchecked().blocks_minted += self.count;
         }
     }
 
     fn undo(&self, entity: &mut Option<PoolState>) {
         if let Some(entity) = entity {
-            entity.blocks_minted_total = entity.blocks_minted_total.saturating_sub(self.count);
-
-            entity.snapshot.mutate_unchecked(|snapshot| {
-                snapshot.blocks_minted = snapshot.blocks_minted.saturating_sub(self.count);
-            });
+            entity.blocks_minted_total -= self.count;
+            entity.snapshot.live_mut_unchecked().blocks_minted -= self.count;
         }
     }
 }
@@ -187,7 +182,11 @@ impl dolos_core::EntityDelta for PoolDeRegistration {
             self.prev_deposit = Some(entity.deposit);
 
             // TODO: should be debug
-            warn!(operator = hex::encode(self.operator), "retiring pool");
+            tracing::error!(
+                operator = hex::encode(self.operator),
+                epoch = self.epoch,
+                "retiring pool"
+            );
 
             // apply changes
             entity.retiring_epoch = Some(self.epoch);

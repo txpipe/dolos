@@ -26,7 +26,7 @@ macro_rules! format_epoch_value {
     ($stake:expr, $pool:expr) => {
         format!(
             "{} ({})",
-            $stake.unwrap_or_default(),
+            $stake.map(|x| x.to_string()).unwrap_or_default(),
             $pool
                 .as_ref()
                 .and_then(|x| x.map(|y| hex::encode(y)[..3].to_string()))
@@ -56,15 +56,17 @@ impl TableRow for AccountState {
             format!("{}", hex::encode(key)),
             format!("{}", self.registered_at.unwrap_or_default()),
             format!("{}", self.deregistered_at.unwrap_or_default()),
-            format_epoch_value!(self.total_stake.go, self.pool.go),
-            format_epoch_value!(self.total_stake.set, self.pool.set),
-            format_epoch_value!(self.total_stake.mark, self.pool.mark),
-            format_epoch_value!(Some(self.live_stake()), Some(self.pool.live)),
+            format_epoch_value!(self.total_stake.go(), self.pool.go()),
+            format_epoch_value!(self.total_stake.set(), self.pool.set()),
+            format_epoch_value!(self.total_stake.mark(), self.pool.mark()),
+            format_epoch_value!(Some(self.live_stake()), Some(self.pool.live())),
             format!("{}", self.rewards_sum),
             format!("{}", self.withdrawals_sum),
             format!(
                 "{},{},{}",
-                self.total_stake.epoch, self.pool.epoch, self.drep.epoch,
+                self.total_stake.epoch().unwrap_or_default(),
+                self.pool.epoch().unwrap_or_default(),
+                self.drep.epoch().unwrap_or_default(),
             ),
         ]
     }
@@ -84,8 +86,6 @@ impl TableRow for EpochState {
             "delta effective rewards",
             "delta unspendable rewards",
             "gathered fees",
-            "gathered deposits",
-            "decayed deposits",
             "pparams",
             "nonce",
         ]
@@ -94,31 +94,32 @@ impl TableRow for EpochState {
     fn row(&self, _key: &EntityKey) -> Vec<String> {
         vec![
             format!("{}", self.number),
-            format!("{}", self.pparams.protocol_major().unwrap_or_default()),
+            format!(
+                "{}",
+                self.pparams.active().protocol_major().unwrap_or_default()
+            ),
             format!("{}", self.initial_pots.reserves),
             format!("{}", self.initial_pots.utxos),
             format!("{}", self.initial_pots.treasury),
-            format!("{}", self.initial_pots.deposits),
+            format!("{}", self.initial_pots.obligations()),
             format!("{}", self.initial_pots.rewards),
             format!("{}", self.initial_pots.fees),
             format!(
                 "{}",
-                self.pot_delta
+                self.end
                     .as_ref()
-                    .and_then(|x| x.effective_rewards)
+                    .map(|x| x.effective_rewards)
                     .unwrap_or_default()
             ),
             format!(
                 "{}",
-                self.pot_delta
+                self.end
                     .as_ref()
-                    .and_then(|x| x.unspendable_rewards)
+                    .map(|x| x.unspendable_rewards)
                     .unwrap_or_default()
             ),
-            format!("{}", self.gathered_fees),
-            format!("{}", self.gathered_deposits),
-            format!("{}", self.decayed_deposits),
-            format!("{}", self.pparams.len()),
+            format!("{}", self.rolling.live().gathered_fees),
+            format!("{}", self.pparams.live().len()),
             format!(
                 "{}",
                 self.nonces
@@ -189,33 +190,31 @@ impl TableRow for PoolState {
             format!(
                 "{} ({})",
                 self.snapshot
-                    .go
-                    .as_ref()
+                    .go()
                     .map(|x| x.blocks_minted)
                     .unwrap_or_default(),
-                self.snapshot.epoch - 2,
+                self.snapshot.epoch().unwrap_or_default() - 2,
             ),
             format!(
                 "{} ({})",
                 self.snapshot
-                    .set
-                    .as_ref()
+                    .set()
                     .map(|x| x.blocks_minted)
                     .unwrap_or_default(),
-                self.snapshot.epoch - 1
+                self.snapshot.epoch().unwrap_or_default() - 1
             ),
             format!(
                 "{} ({})",
                 self.snapshot
-                    .mark
-                    .as_ref()
+                    .mark()
                     .map(|x| x.blocks_minted)
                     .unwrap_or_default(),
-                self.snapshot.epoch - 1
+                self.snapshot.epoch().unwrap_or_default() - 1
             ),
             format!(
                 "{} ({})",
-                self.snapshot.live.blocks_minted, self.snapshot.epoch
+                self.snapshot.live().blocks_minted,
+                self.snapshot.epoch().unwrap_or_default()
             ),
         ]
     }

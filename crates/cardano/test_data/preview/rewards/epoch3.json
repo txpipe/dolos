@@ -3,7 +3,11 @@
     "reserves": 14964032387721723,
     "treasury": 35967613128648,
     "fees": 304233,
-    "deposits": 1506000000,
+    "pool_count": 3,
+    "account_count": 3,
+    "deposit_per_pool": 500000000,
+    "deposit_per_account": 2000000,
+    "nominal_deposits": 0,
     "utxos": 29999998492845396,
     "rewards": 0
   },
@@ -69,7 +73,9 @@
       { "DecentralizationConstant": [0, 1] },
       { "ExpansionRate": [3, 1000] },
       { "TreasuryGrowthRate": [2, 10] },
-      { "ProtocolVersion": [7, 0] }
+      { "ProtocolVersion": [7, 0] },
+      { "PoolDeposit": 500000000 },
+      { "KeyDeposit": 2000000 }
     ]
   }
 }

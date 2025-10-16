@@ -549,7 +549,8 @@ pub enum ChainError {
 pub enum WorkKind {
     Genesis,
     Block,
-    Epoch,
+    EWrap,
+    EStart,
     Rupd,
 }
 
@@ -557,7 +558,8 @@ pub enum WorkKind {
 pub enum WorkUnit<C: ChainLogic> {
     Genesis,
     Block(WorkBlock<C>),
-    Epoch(BlockSlot),
+    EWrap(BlockSlot),
+    EStart(BlockSlot),
     Rupd(BlockSlot),
 }
 
@@ -592,17 +594,28 @@ pub trait ChainLogic: Sized + Send + Sync {
     fn apply_genesis<D: Domain>(
         &self,
         state: &D::State,
-        genesis: &Genesis,
+        genesis: Arc<Genesis>,
     ) -> Result<(), ChainError>;
 
     // TODO: we should invert responsibility here. The chain logic should tell the
     // domain what to do instead of passing everything down and expecting it to do
     // the right thing.
-    fn apply_epoch<D: Domain>(
+    fn apply_ewrap<D: Domain>(
         &self,
         state: &D::State,
         archive: &D::Archive,
-        genesis: &Genesis,
+        genesis: Arc<Genesis>,
+        at: BlockSlot,
+    ) -> Result<(), ChainError>;
+
+    // TODO: we should invert responsibility here. The chain logic should tell the
+    // domain what to do instead of passing everything down and expecting it to do
+    // the right thing.
+    fn apply_estart<D: Domain>(
+        &self,
+        state: &D::State,
+        archive: &D::Archive,
+        genesis: Arc<Genesis>,
         at: BlockSlot,
     ) -> Result<(), ChainError>;
 
@@ -613,7 +626,7 @@ pub trait ChainLogic: Sized + Send + Sync {
         &self,
         state: &D::State,
         archive: &D::Archive,
-        genesis: &Genesis,
+        genesis: Arc<Genesis>,
         at: BlockSlot,
     ) -> Result<(), ChainError>;
 
@@ -687,7 +700,7 @@ pub trait Domain: Send + Sync + Clone + 'static {
     type TipSubscription: TipSubscription;
 
     fn storage_config(&self) -> &StorageConfig;
-    fn genesis(&self) -> &Genesis;
+    fn genesis(&self) -> Arc<Genesis>;
 
     fn chain(&self) -> &Self::Chain;
 

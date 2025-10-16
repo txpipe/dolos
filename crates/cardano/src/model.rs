@@ -1,4 +1,7 @@
-use std::{cmp::Ordering, collections::BTreeMap};
+use std::{
+    cmp::Ordering,
+    collections::{BTreeMap, HashSet},
+};
 
 use dolos_core::{
     BlockSlot, ChainError, EntityKey, EntityValue, Namespace, NamespaceType, NsKey, StateSchema,
@@ -18,19 +21,21 @@ use pallas::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    epoch::{
-        retires::{
-            DRepDelegatorDrop, DRepExpiration, PoolDelegatorDrop, PoolDepositRefund,
-            ProposalExpiration,
-        },
-        rewards::{AssignDelegatorRewards, PotAdjustment},
-        transition::{AccountTransition, PoolTransition, ProposalEnactment},
+    estart::{
+        nonces::NonceTransition,
+        reset::{AccountTransition, EpochTransition, PoolTransition},
+    },
+    ewrap::{
+        govactions::ProposalEnactment,
+        retires::{DRepExpiration, PoolDelegatorDrop, PoolDepositRefund, ProposalExpiration},
+        rewards::AssignRewards,
+        wrapup::EpochWrapUp,
     },
     pallas_extras::{
         self, default_cost_models, default_drep_voting_thresholds, default_ex_unit_prices,
         default_ex_units, default_nonce, default_pool_voting_thresholds, default_rational_number,
     },
-    pots::{PotDelta, Pots},
+    pots::{EpochIncentives, Pots},
     roll::{
         accounts::{
             ControlledAmountDec, ControlledAmountInc, StakeDelegation, StakeDeregistration,
@@ -44,27 +49,84 @@ use crate::{
     },
 };
 
+#[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize, PartialEq, Eq, Copy)]
+enum EpochPosition {
+    #[n(0)]
+    Genesis,
+
+    #[n(1)]
+    Epoch(#[n(0)] Epoch),
+}
+
+impl EpochPosition {
+    pub fn mark(&self) -> Option<Epoch> {
+        match self {
+            EpochPosition::Epoch(epoch) if *epoch >= 1 => Some(*epoch - 1),
+            _ => None,
+        }
+    }
+    pub fn set(&self) -> Option<Epoch> {
+        match self {
+            EpochPosition::Epoch(epoch) if *epoch >= 2 => Some(*epoch - 2),
+            _ => None,
+        }
+    }
+    pub fn go(&self) -> Option<Epoch> {
+        match self {
+            EpochPosition::Epoch(epoch) if *epoch >= 3 => Some(*epoch - 3),
+            _ => None,
+        }
+    }
+}
+
+impl PartialEq<Epoch> for EpochPosition {
+    fn eq(&self, other: &Epoch) -> bool {
+        match self {
+            EpochPosition::Genesis => false,
+            EpochPosition::Epoch(epoch) => *epoch == *other,
+        }
+    }
+}
+
+impl std::ops::Add<Epoch> for EpochPosition {
+    type Output = EpochPosition;
+
+    fn add(self, other: Epoch) -> Self::Output {
+        match self {
+            EpochPosition::Genesis if other == 0 => EpochPosition::Genesis,
+            EpochPosition::Genesis => EpochPosition::Epoch(other - 1),
+            EpochPosition::Epoch(current) => EpochPosition::Epoch(current + other),
+        }
+    }
+}
+
+impl std::ops::AddAssign<Epoch> for EpochPosition {
+    fn add_assign(&mut self, other: Epoch) {
+        *self = *self + other;
+    }
+}
+
 #[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EpochValue<T> {
     /// The epoch representing the live version of the value
     #[n(0)]
-    pub epoch: Epoch,
+    epoch: EpochPosition,
 
-    /// The current ongoing version of the value
+    /// The current, mutating version of the value
     #[n(1)]
-    pub live: T,
+    live: T,
 
     /// Epoch - 1 version of the value
     #[n(2)]
-    pub mark: Option<T>,
+    mark: Option<T>,
 
     /// Epoch - 2 version of the value
     #[n(3)]
-    pub set: Option<T>,
+    set: Option<T>,
 
     /// Epoch - 3 version of the value
     #[n(4)]
-    pub go: Option<T>,
+    go: Option<T>,
 }
 
 impl<T> EpochValue<T>
@@ -73,7 +135,7 @@ where
 {
     pub fn new(live: T, epoch: Epoch) -> Self {
         Self {
-            epoch,
+            epoch: EpochPosition::Epoch(epoch),
             live,
             mark: None,
             set: None,
@@ -81,28 +143,57 @@ where
         }
     }
 
+    pub fn new_genesis(live: T) -> Self {
+        Self {
+            epoch: EpochPosition::Epoch(0),
+            live: live.clone(),
+            mark: Some(live.clone()),
+            set: None,
+            go: None,
+        }
+    }
+
+    /// Returns the epoch of the live value
+    pub fn epoch(&self) -> Option<Epoch> {
+        match self.epoch {
+            EpochPosition::Genesis => None,
+            EpochPosition::Epoch(epoch) => Some(epoch),
+        }
+    }
+
+    /// Returns a reference to the live value that matches the ongoing epoch.
+    pub fn live(&self) -> &T {
+        &self.live
+    }
+
+    pub fn go(&self) -> Option<&T> {
+        self.go.as_ref()
+    }
+
+    pub fn set(&self) -> Option<&T> {
+        self.set.as_ref()
+    }
+
+    pub fn mark(&self) -> Option<&T> {
+        self.mark.as_ref()
+    }
+
     /// Mutates the live value for the current epoch without rotating any of
     /// the previous values
-    pub fn mutate<F>(&mut self, mutate: F, epoch: Epoch)
-    where
-        F: FnOnce(&mut T),
-    {
-        assert_eq!(epoch, self.epoch);
-        self.mutate_unchecked(mutate);
+    pub fn live_mut<F>(&mut self, epoch: Epoch) {
+        assert_eq!(self.epoch, epoch);
+        self.live_mut_unchecked();
     }
 
     /// Same as mutate, but without checking that that the epoch matches.
-    pub fn mutate_unchecked<F>(&mut self, mutate: F)
-    where
-        F: FnOnce(&mut T),
-    {
-        mutate(&mut self.live);
+    pub fn live_mut_unchecked(&mut self) -> &mut T {
+        &mut self.live
     }
 
     /// Replaces the live value for the current epoch without rotating any of
     /// the previous values
     pub fn replace(&mut self, live: T, epoch: Epoch) {
-        assert_eq!(epoch, self.epoch);
+        assert_eq!(self.epoch, epoch);
         self.live = live;
     }
 
@@ -114,7 +205,7 @@ where
     /// Transitions into the next epoch by taking a snapshot of the live value
     /// and rotating the previous ones.
     pub fn transition(&mut self, next_epoch: Epoch) {
-        assert_eq!(next_epoch, self.epoch + 1);
+        assert_eq!(self.epoch + 1, next_epoch);
         self.transition_unchecked();
     }
 
@@ -127,28 +218,44 @@ where
         self.epoch += 1;
     }
 
-    pub fn version_for(&self, epoch: Epoch) -> Option<&T> {
-        if epoch == self.epoch {
-            Some(&self.live)
-        } else if epoch == self.epoch - 1 {
+    /// Returns the value for the snapshot taken at the end of the given epoch.
+    pub fn snapshot_at(&self, ending_epoch: Epoch) -> Option<&T> {
+        if self.epoch == ending_epoch {
+            None
+        } else if self.epoch.mark() == Some(ending_epoch) {
             self.mark.as_ref()
-        } else if epoch == self.epoch - 2 {
+        } else if self.epoch.set() == Some(ending_epoch) {
             self.set.as_ref()
-        } else if epoch == self.epoch - 3 {
+        } else if self.epoch.go() == Some(ending_epoch) {
             self.go.as_ref()
         } else {
             None
         }
     }
 
-    pub fn try_version_for(&self, epoch: Epoch) -> Result<&T, ChainError> {
-        match self.version_for(epoch) {
+    pub fn try_snapshot_at(&self, epoch: Epoch) -> Result<&T, ChainError> {
+        match self.snapshot_at(epoch) {
             Some(value) => Ok(value),
             None => {
                 dbg!(self);
                 Err(ChainError::EpochValueVersionNotFound(epoch))
             }
         }
+    }
+}
+
+impl EpochValue<PParamsSet> {
+    /// PParams currently in effect, the snapshot taken at epoch boundary.
+    pub fn active(&self) -> &PParamsSet {
+        self.mark
+            .as_ref()
+            .expect("pparams not initialized correctly")
+    }
+
+    /// PParams for the version previous to the active one, usually used for
+    /// rewards calculations.
+    pub fn for_rewards(&self) -> Option<&PParamsSet> {
+        self.set.as_ref()
     }
 }
 
@@ -910,6 +1017,8 @@ impl PParamsSet {
         }
     }
 
+    ensure_pparam!(system_start, u64);
+    ensure_pparam!(slot_length, u64);
     ensure_pparam!(d, RationalNumber);
     ensure_pparam!(rho, RationalNumber);
     ensure_pparam!(tau, RationalNumber);
@@ -1023,14 +1132,9 @@ impl Nonces {
     }
 }
 
-#[derive(Debug, Encode, Decode, Clone)]
-pub struct EpochState {
-    #[n(0)]
-    pub number: Epoch,
-
-    #[n(1)]
-    pub initial_pots: Pots,
-
+/// Epoch data that is gathered as part of the block rolling process
+#[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize, Default)]
+pub struct RollingStats {
     #[n(2)]
     pub produced_utxos: u64,
 
@@ -1041,41 +1145,103 @@ pub struct EpochState {
     pub gathered_fees: u64,
 
     #[n(5)]
-    pub gathered_deposits: u64,
+    pub new_accounts: u64,
 
     #[n(6)]
-    pub decayed_deposits: u64,
-
-    #[n(14)]
-    pub gathered_withdrawals: u64,
+    pub removed_accounts: u64,
 
     #[n(7)]
-    pub pparams: PParamsSet,
+    pub withdrawals: u64,
 
     #[n(8)]
-    pub largest_stable_slot: BlockSlot,
-
-    #[n(9)]
-    pub nonces: Option<Nonces>,
-
-    #[n(10)]
-    pub blocks_minted: u32,
-
-    #[n(11)]
-    pub pparams_update: PParamsSet,
-
-    #[n(12)]
-    pub pot_delta: Option<PotDelta>,
+    pub registered_pools: HashSet<PoolHash>,
 
     #[n(13)]
-    pub final_pots: Option<Pots>,
+    pub blocks_minted: u32,
+}
+
+/// Stats that are gathered at the end of the epoch
+#[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize)]
+pub struct EndStats {
+    #[n(0)]
+    pub incentives: EpochIncentives,
+
+    #[n(1)]
+    pub effective_rewards: u64,
+
+    #[n(2)]
+    pub unspendable_rewards: u64,
+
+    #[n(3)]
+    pub new_pools: u64,
+
+    #[n(4)]
+    pub removed_pools: u64,
+}
+
+#[derive(Debug, Encode, Decode, Clone)]
+pub struct EpochState {
+    #[n(0)]
+    pub number: Epoch,
+
+    #[n(1)]
+    pub initial_pots: Pots,
+
+    #[n(2)]
+    pub rolling: EpochValue<RollingStats>,
+
+    #[n(9)]
+    pub pparams: EpochValue<PParamsSet>,
+
+    #[n(10)]
+    pub largest_stable_slot: BlockSlot,
+
+    #[n(11)]
+    pub previous_nonce_tail: Option<Hash<32>>,
+
+    #[n(12)]
+    pub nonces: Option<Nonces>,
+
+    #[n(13)]
+    pub end: Option<EndStats>,
+}
+
+#[derive(Debug)]
+pub struct EraTransition {
+    pub prev_version: EraProtocol,
+    pub new_version: EraProtocol,
+}
+
+impl EraTransition {
+    /// Check if this boundary is transitioning to shelley for the first time.
+    pub fn entering_shelley(&self) -> bool {
+        self.prev_version < 2 && self.new_version == 2
+    }
+}
+
+impl EpochState {
+    pub fn era_transition(&self) -> Option<EraTransition> {
+        let original = self.pparams.active().protocol_major_or_default();
+        let update = self.pparams.live.protocol_major();
+
+        let Some(effective) = update else {
+            return None;
+        };
+
+        if original == effective {
+            return None;
+        }
+
+        Some(EraTransition {
+            prev_version: EraProtocol::from(original),
+            new_version: EraProtocol::from(effective),
+        })
+    }
 }
 
 entity_boilerplate!(EpochState, "epochs");
 
-pub const EPOCH_KEY_GO: &[u8] = b"2";
-pub const EPOCH_KEY_SET: &[u8] = b"1";
-pub const EPOCH_KEY_MARK: &[u8] = b"0";
+pub const CURRENT_EPOCH_KEY: &[u8] = b"0";
 
 pub fn drep_to_entity_key(value: &DRep) -> EntityKey {
     let bytes = match value {
@@ -1131,6 +1297,12 @@ entity_boilerplate!(DRepState, "dreps");
 
 #[derive(Debug, Clone, Copy)]
 pub struct EraProtocol(u16);
+
+impl std::fmt::Display for EraProtocol {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
 
 impl PartialEq<u16> for EraProtocol {
     fn eq(&self, other: &u16) -> bool {
@@ -1343,12 +1515,14 @@ pub enum CardanoDelta {
     NewProposal(NewProposal),
     ProposalEnactment(ProposalEnactment),
     PoolDelegatorDrop(PoolDelegatorDrop),
-    AssignDelegatorRewards(AssignDelegatorRewards),
-    PotAdjustment(PotAdjustment),
+    AssignRewards(AssignRewards),
+    NonceTransition(NonceTransition),
     PoolTransition(PoolTransition),
     AccountTransition(AccountTransition),
     ProposalExpiration(ProposalExpiration),
     PoolDepositRefund(PoolDepositRefund),
+    EpochTransition(EpochTransition),
+    EpochWrapUp(EpochWrapUp),
 }
 
 impl CardanoDelta {
@@ -1406,12 +1580,14 @@ delta_from!(NoncesUpdate);
 delta_from!(NewProposal);
 delta_from!(ProposalEnactment);
 delta_from!(PoolDelegatorDrop);
-delta_from!(AssignDelegatorRewards);
-delta_from!(PotAdjustment);
+delta_from!(AssignRewards);
+delta_from!(NonceTransition);
 delta_from!(PoolTransition);
 delta_from!(AccountTransition);
 delta_from!(ProposalExpiration);
 delta_from!(PoolDepositRefund);
+delta_from!(EpochTransition);
+delta_from!(EpochWrapUp);
 
 impl dolos_core::EntityDelta for CardanoDelta {
     type Entity = super::model::CardanoEntity;
@@ -1438,13 +1614,15 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::NoncesUpdate(x) => x.key(),
             Self::NewProposal(x) => x.key(),
             Self::PoolDelegatorDrop(x) => x.key(),
-            Self::AssignDelegatorRewards(x) => x.key(),
-            Self::PotAdjustment(x) => x.key(),
+            Self::AssignRewards(x) => x.key(),
+            Self::NonceTransition(x) => x.key(),
             Self::PoolTransition(x) => x.key(),
             Self::AccountTransition(x) => x.key(),
             Self::ProposalExpiration(x) => x.key(),
             Self::ProposalEnactment(x) => x.key(),
             Self::PoolDepositRefund(x) => x.key(),
+            Self::EpochTransition(x) => x.key(),
+            Self::EpochWrapUp(x) => x.key(),
         }
     }
 
@@ -1470,13 +1648,15 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::NoncesUpdate(x) => Self::downcast_apply(x, entity),
             Self::NewProposal(x) => Self::downcast_apply(x, entity),
             Self::PoolDelegatorDrop(x) => Self::downcast_apply(x, entity),
-            Self::AssignDelegatorRewards(x) => Self::downcast_apply(x, entity),
-            Self::PotAdjustment(x) => Self::downcast_apply(x, entity),
+            Self::AssignRewards(x) => Self::downcast_apply(x, entity),
+            Self::NonceTransition(x) => Self::downcast_apply(x, entity),
             Self::PoolTransition(x) => Self::downcast_apply(x, entity),
             Self::AccountTransition(x) => Self::downcast_apply(x, entity),
             Self::ProposalExpiration(x) => Self::downcast_apply(x, entity),
             Self::ProposalEnactment(x) => Self::downcast_apply(x, entity),
             Self::PoolDepositRefund(x) => Self::downcast_apply(x, entity),
+            Self::EpochTransition(x) => Self::downcast_apply(x, entity),
+            Self::EpochWrapUp(x) => Self::downcast_apply(x, entity),
         }
     }
 
@@ -1502,13 +1682,15 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::NoncesUpdate(x) => Self::downcast_undo(x, entity),
             Self::NewProposal(x) => Self::downcast_undo(x, entity),
             Self::PoolDelegatorDrop(x) => Self::downcast_undo(x, entity),
-            Self::AssignDelegatorRewards(x) => Self::downcast_undo(x, entity),
-            Self::PotAdjustment(x) => Self::downcast_undo(x, entity),
+            Self::AssignRewards(x) => Self::downcast_undo(x, entity),
+            Self::NonceTransition(x) => Self::downcast_undo(x, entity),
             Self::PoolTransition(x) => Self::downcast_undo(x, entity),
             Self::AccountTransition(x) => Self::downcast_undo(x, entity),
             Self::ProposalExpiration(x) => Self::downcast_undo(x, entity),
             Self::ProposalEnactment(x) => Self::downcast_undo(x, entity),
             Self::PoolDepositRefund(x) => Self::downcast_undo(x, entity),
+            Self::EpochTransition(x) => Self::downcast_undo(x, entity),
+            Self::EpochWrapUp(x) => Self::downcast_undo(x, entity),
         }
     }
 }

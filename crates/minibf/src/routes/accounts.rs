@@ -96,15 +96,14 @@ impl<'a> IntoModel<AccountContent> for AccountModelBuilder<'a> {
         let pool_id = self
             .account_state
             .pool
-            .live
-            .as_ref()
+            .live()
             .map(bech32_pool)
             .transpose()?;
 
         let drep_id = self
             .account_state
             .drep
-            .live
+            .live()
             .as_ref()
             .map(bech32_drep)
             .transpose()?;

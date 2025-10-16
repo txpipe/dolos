@@ -88,8 +88,16 @@ fn execute_isolated_work<D: Domain>(
             domain.wal().reset_to(&ChainPoint::Origin)?;
         }
 
-        WorkUnit::Epoch(slot) => {
-            domain.chain().apply_epoch::<D>(
+        WorkUnit::EWrap(slot) => {
+            domain.chain().apply_ewrap::<D>(
+                domain.state(),
+                domain.archive(),
+                domain.genesis(),
+                slot,
+            )?;
+        }
+        WorkUnit::EStart(slot) => {
+            domain.chain().apply_estart::<D>(
                 domain.state(),
                 domain.archive(),
                 domain.genesis(),

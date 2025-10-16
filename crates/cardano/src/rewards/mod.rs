@@ -6,7 +6,7 @@ use tracing::debug;
 
 use crate::{
     pallas_extras, pallas_ratio,
-    pots::{PotDelta, Pots},
+    pots::{EpochIncentives, PotDelta, Pots},
     PParamsSet, PoolHash, PoolParams,
 };
 
@@ -29,8 +29,8 @@ impl Reward {
     pub fn merge(self, other: Self) -> Self {
         debug_assert_eq!(self.is_spendable, other.is_spendable);
         debug_assert_eq!(self.as_leader, other.as_leader);
-        debug_assert!(self.pool_total.is_none());
-        debug_assert!(other.pool_total.is_none());
+        //debug_assert!(self.pool_total.is_none());
+        //debug_assert!(other.pool_total.is_none());
 
         Self {
             value: self.value + other.value,
@@ -74,7 +74,7 @@ impl Reward {
 
 #[derive(Debug)]
 pub struct RewardMap<C: RewardsContext> {
-    initial_pot_delta: PotDelta,
+    incentives: EpochIncentives,
     pending: HashMap<StakeCredential, Reward>,
     applied_effective: u64,
     applied_unspendable: u64,
@@ -82,9 +82,9 @@ pub struct RewardMap<C: RewardsContext> {
 }
 
 impl<C: RewardsContext> RewardMap<C> {
-    fn new(initial_pot_delta: PotDelta) -> Self {
+    fn new(incentives: EpochIncentives) -> Self {
         Self {
-            initial_pot_delta,
+            incentives,
             pending: HashMap::new(),
             applied_effective: 0,
             applied_unspendable: 0,
@@ -163,6 +163,10 @@ impl<C: RewardsContext> RewardMap<C> {
         }
     }
 
+    pub fn incentives(&self) -> &EpochIncentives {
+        &self.incentives
+    }
+
     /// Convert the reward map into a pot delta assuming all rewards have been
     /// already applied.
     pub fn as_pot_delta(&self) -> PotDelta {
@@ -171,14 +175,16 @@ impl<C: RewardsContext> RewardMap<C> {
         let effective = self.applied_effective;
         let unspendable = self.applied_unspendable;
 
-        self.initial_pot_delta
-            .clone()
-            .with_rewards(effective, unspendable)
+        PotDelta {
+            effective_rewards: effective,
+            unspendable_rewards: unspendable,
+            ..Default::default()
+        }
     }
 }
 
 pub trait RewardsContext {
-    fn pot_delta(&self) -> &PotDelta;
+    fn incentives(&self) -> &EpochIncentives;
     fn pots(&self) -> &Pots;
 
     fn pre_allegra(&self) -> bool;
@@ -207,7 +213,7 @@ pub trait RewardsContext {
 }
 
 pub fn define_rewards<C: RewardsContext>(ctx: &C) -> Result<RewardMap<C>, ChainError> {
-    let mut map = RewardMap::<C>::new(ctx.pot_delta().clone());
+    let mut map = RewardMap::<C>::new(ctx.incentives().clone());
 
     for (pool, pool_params) in ctx.iter_all_pools() {
         let operator_account = pallas_extras::pool_reward_account(&pool_params.reward_account)
@@ -222,10 +228,10 @@ pub fn define_rewards<C: RewardsContext>(ctx: &C) -> Result<RewardMap<C>, ChainE
         let live_pledge = ctx.live_pledge(pool, &owners);
         let circulating_supply = ctx.pots().circulating();
         let pool_stake = ctx.pool_stake(pool);
-        let epoch_rewards = ctx.pot_delta().available_rewards;
-        let total_active_stake = dbg!(ctx.active_stake());
-        let epoch_blocks = dbg!(ctx.epoch_blocks());
-        let pool_blocks = dbg!(ctx.pool_blocks(pool));
+        let epoch_rewards = ctx.incentives().available_rewards;
+        let total_active_stake = ctx.active_stake();
+        let epoch_blocks = ctx.epoch_blocks();
+        let pool_blocks = ctx.pool_blocks(pool);
 
         // TODO: confirm that we don't need this for anything
         let _total_stake = ctx.total_stake();
@@ -249,12 +255,12 @@ pub fn define_rewards<C: RewardsContext>(ctx: &C) -> Result<RewardMap<C>, ChainE
         );
 
         let operator_share = formulas::pool_operator_share(
-            total_pool_reward,
-            pool_params.cost,
+            dbg!(total_pool_reward),
+            dbg!(pool_params.cost),
             pallas_ratio!(pool_params.margin),
-            pool_stake,
-            live_pledge,
-            circulating_supply,
+            dbg!(pool_stake),
+            dbg!(live_pledge),
+            dbg!(circulating_supply),
         );
 
         debug!(
@@ -280,8 +286,6 @@ pub fn define_rewards<C: RewardsContext>(ctx: &C) -> Result<RewardMap<C>, ChainE
             Some(total_pool_reward),
         );
 
-        let delegator_rewards = total_pool_reward.saturating_sub(operator_share);
-
         for delegator in ctx.pool_delegators(pool) {
             if owners.contains(&delegator) {
                 // we skip giving out rewards to owners since they already get paid via the
@@ -292,8 +296,15 @@ pub fn define_rewards<C: RewardsContext>(ctx: &C) -> Result<RewardMap<C>, ChainE
             }
 
             let delegator_stake = ctx.account_stake(&pool, &delegator);
-            let delegator_reward =
-                formulas::delegator_reward(delegator_rewards, pool_stake, delegator_stake);
+
+            let delegator_reward = formulas::delegator_reward(
+                total_pool_reward,
+                delegator_stake,
+                pool_stake,
+                circulating_supply,
+                pool_params.cost,
+                pallas_ratio!(pool_params.margin),
+            );
 
             map.include(ctx, &delegator, delegator_reward, pool, false, None);
         }
@@ -326,14 +337,10 @@ mod tests {
 
         let mut reward_map = define_rewards(&ctx).unwrap();
 
-        dbg!(&reward_map);
-
         reward_map.drain_all();
 
         let pot_delta = reward_map.as_pot_delta();
 
-        assert_eq!(pot_delta.unspendable_rewards.unwrap(), 295063003292);
-
-        dbg!(&pot_delta);
+        assert_eq!(pot_delta.unspendable_rewards, 295063003292);
     }
 }

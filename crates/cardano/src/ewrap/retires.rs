@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 use crate::{
-    epoch::{AccountId, BoundaryWork, DRepId, PoolId, ProposalId},
+    ewrap::{AccountId, BoundaryWork, DRepId, PoolId, ProposalId},
     pallas_extras, AccountState, CardanoDelta, DRepState, EpochValue, FixedNamespace as _,
     PoolHash, PoolState, Proposal,
 };
@@ -242,8 +242,9 @@ fn should_expire_proposal(ctx: &mut BoundaryWork, proposal: &Proposal) -> Result
     let (epoch, _) = ctx.active_era.slot_epoch(proposal.slot);
     let expiring_epoch = epoch
         + ctx
-            .ending_state
+            .ending_state()
             .pparams
+            .active()
             .ensure_governance_action_validity_period()?;
 
     Ok(expiring_epoch <= ctx.starting_epoch_no())
@@ -267,13 +268,13 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         id: &AccountId,
         account: &AccountState,
     ) -> Result<(), ChainError> {
-        if let Some(pool) = account.pool.live {
-            if ctx.retiring_pools.contains(&pool) {
+        if let Some(pool) = account.pool.live() {
+            if ctx.retiring_pools.contains(pool) {
                 self.change(PoolDelegatorDrop::new(id.clone()));
             }
         }
 
-        if let Some(drep) = account.drep.live.as_ref() {
+        if let Some(drep) = account.drep.live() {
             todo!("primitive drep struct needs to implement hash");
             // if ctx.expiring_dreps.contains(drep) {
             //     self.deltas
@@ -292,7 +293,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
     ) -> Result<(), ChainError> {
         if ctx.retiring_pools.contains(&pool.operator) {
             if let Some(account) = pallas_extras::pool_reward_account(&pool.params.reward_account) {
-                let deposit = ctx.ending_state.pparams.pool_deposit_or_default();
+                let deposit = ctx.ending_state().pparams.active().ensure_pool_deposit()?;
                 self.change(PoolDepositRefund::new(deposit, account));
             }
         }

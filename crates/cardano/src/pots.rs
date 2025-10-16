@@ -10,7 +10,7 @@ pub type PallasRatio = pallas::ledger::primitives::RationalNumber;
 
 pub type Eta = Ratio;
 
-#[derive(Debug, Clone, Encode, Decode, Serialize, Deserialize)]
+#[derive(Debug, Clone, Encode, Decode, Serialize, Deserialize, Default)]
 pub struct Pots {
     #[n(0)]
     pub reserves: u64,
@@ -19,21 +19,39 @@ pub struct Pots {
     pub treasury: u64,
 
     #[n(2)]
-    pub fees: u64,
-
-    #[n(3)]
-    pub deposits: u64,
-
-    #[n(4)]
     pub utxos: u64,
 
-    #[n(5)]
+    #[n(3)]
     pub rewards: u64,
+
+    #[n(4)]
+    pub fees: u64,
+
+    #[n(5)]
+    pub pool_count: u64,
+
+    #[n(6)]
+    pub account_count: u64,
+
+    #[n(7)]
+    pub deposit_per_pool: u64,
+
+    #[n(8)]
+    pub deposit_per_account: u64,
+
+    #[n(9)]
+    pub nominal_deposits: u64,
 }
 
 impl Pots {
+    pub fn obligations(&self) -> u64 {
+        self.nominal_deposits
+            + self.deposit_per_pool * self.pool_count
+            + self.deposit_per_account * self.account_count
+    }
+
     pub fn max_supply(&self) -> u64 {
-        self.reserves + self.treasury + self.fees + self.deposits + self.utxos + self.rewards
+        self.reserves + self.treasury + self.utxos + self.rewards + self.fees + self.obligations()
     }
 
     pub fn circulating(&self) -> u64 {
@@ -41,14 +59,18 @@ impl Pots {
     }
 
     pub fn check_consistency(&self, expected_max_supply: u64) {
-        debug_assert_eq!(self.max_supply(), expected_max_supply);
+        if self.max_supply() != expected_max_supply {
+            dbg!(self);
+        }
+
+        assert_eq!(self.max_supply(), expected_max_supply);
     }
 }
 
 #[derive(Debug, Clone, Encode, Decode, Serialize, Deserialize)]
-pub struct PotDelta {
+pub struct EpochIncentives {
     #[n(0)]
-    pub incentives: u64,
+    pub total: u64,
 
     #[n(2)]
     pub treasury_tax: u64,
@@ -58,31 +80,39 @@ pub struct PotDelta {
 
     #[n(4)]
     pub used_fees: u64,
-
-    #[n(5)]
-    pub effective_rewards: Option<u64>,
-
-    #[n(6)]
-    pub unspendable_rewards: Option<u64>,
 }
 
-impl PotDelta {
-    pub fn check_consistency(self) {
-        let effective_rewards = self.effective_rewards.unwrap_or(0);
-        let unspendable_rewards = self.unspendable_rewards.unwrap_or(0);
-        let total_rewards = effective_rewards + unspendable_rewards;
+#[derive(Debug, Clone, Encode, Decode, Serialize, Deserialize, Default)]
+pub struct PotDelta {
+    #[n(0)]
+    pub produced_utxos: u64,
 
-        assert!(self.available_rewards >= total_rewards);
-        assert_eq!(self.incentives, self.available_rewards + self.treasury_tax);
-    }
+    #[n(1)]
+    pub consumed_utxos: u64,
 
-    pub fn with_rewards(self, effective_rewards: u64, unspendable_rewards: u64) -> Self {
-        Self {
-            effective_rewards: Some(effective_rewards),
-            unspendable_rewards: Some(unspendable_rewards),
-            ..self
-        }
-    }
+    #[n(2)]
+    pub gathered_fees: u64,
+
+    #[n(3)]
+    pub new_accounts: u64,
+
+    #[n(4)]
+    pub removed_accounts: u64,
+
+    #[n(5)]
+    pub new_pools: u64,
+
+    #[n(6)]
+    pub removed_pools: u64,
+
+    #[n(7)]
+    pub withdrawals: u64,
+
+    #[n(8)]
+    pub effective_rewards: u64,
+
+    #[n(9)]
+    pub unspendable_rewards: u64,
 }
 
 /// Calculate eta using the decentralisation parameter and the formula:
@@ -159,13 +189,13 @@ pub fn calculate_eta(minted_blocks: u64, d: Ratio, f: f32, epoch_length: u64) ->
     std::cmp::min(one, eta)
 }
 
-pub fn delta(
+pub fn epoch_incentives(
     reserves: u64, // current reserves at snapshot
     fee_ss: u64,   // fee snapshot ("feeSS") for the epoch being rewarded
     rho: Ratio,    // monetaryExpansion (ρ)
     tau: Ratio,    // treasuryCut (τ)
     eta: Ratio,    // from calculate_eta (already capped to ≤ 1)
-) -> PotDelta {
+) -> EpochIncentives {
     let reserves = ratio!(reserves);
 
     // Δr1 = floor( min(1,η) * ρ * reserves )
@@ -181,37 +211,51 @@ pub fn delta(
     // R = rewardPot - Δt1
     let available_rewards = reward_pot - treasury_tax;
 
-    PotDelta {
-        incentives: delta_r1, // this is Δr1 (minted from reserves)
-        treasury_tax,         // Δt1 (to treasury)
-        available_rewards,    // R (to be distributed)
+    EpochIncentives {
+        total: delta_r1,   // this is Δr1 (minted from reserves)
+        treasury_tax,      // Δt1 (to treasury)
+        available_rewards, // R (to be distributed)
         used_fees: fee_ss,
-        effective_rewards: None,
-        unspendable_rewards: None,
     }
 }
 
-pub fn apply_delta(mut pots: Pots, delta: &PotDelta) -> Pots {
-    let effective_rewards = delta.effective_rewards.expect("reward data is missing");
-    let unspendable_rewards = delta.unspendable_rewards.expect("reward data is missing");
+pub fn apply_delta(mut pots: Pots, incentives: &EpochIncentives, delta: &PotDelta) -> Pots {
+    let used_rewards = delta.effective_rewards + delta.unspendable_rewards;
 
-    let used_rewards = effective_rewards + unspendable_rewards;
-
-    let returned_rewards = delta.available_rewards - used_rewards;
+    let returned_rewards = incentives.available_rewards - used_rewards;
 
     // reserves pot
-    pots.reserves -= delta.incentives;
+    pots.reserves -= incentives.total;
     pots.reserves += returned_rewards;
 
     // treasury pot
-    pots.treasury += delta.treasury_tax;
-    pots.treasury += unspendable_rewards;
+    pots.treasury += incentives.treasury_tax;
+    pots.treasury += delta.unspendable_rewards;
 
     // fees pot
-    pots.fees -= delta.used_fees;
+    pots.fees -= incentives.used_fees;
+    pots.fees += delta.gathered_fees;
 
     // rewards pot
-    pots.rewards += effective_rewards;
+    pots.rewards += delta.effective_rewards;
+    pots.rewards -= delta.withdrawals;
+    pots.rewards += delta.removed_pools * pots.deposit_per_pool;
+
+    // we don't need to return account deposit refunds to the rewards pot because
+    // these refunds are returned directly as utxos in the deregistration
+    // transaction.
+
+    // utxos pot
+    pots.utxos += delta.produced_utxos;
+    pots.utxos -= delta.consumed_utxos;
+
+    // pool count
+    pots.pool_count += delta.new_pools;
+    pots.pool_count -= delta.removed_pools;
+
+    // account count
+    pots.account_count += delta.new_accounts;
+    pots.account_count -= delta.removed_accounts;
 
     pots
 }
@@ -235,9 +279,13 @@ mod tests {
             reserves: 14991000000000000,
             treasury: 9000000000000,
             fees: 437793,
-            deposits: 1506000000,
             utxos: 29999998493562207,
             rewards: 0,
+            pool_count: 3,
+            account_count: 3,
+            deposit_per_pool: 500_000_000,
+            deposit_per_account: 2_000_000,
+            nominal_deposits: 0,
         };
 
         pots.check_consistency(MAX_SUPPLY);
@@ -247,16 +295,17 @@ mod tests {
         let tau = ratio!(20, 100);
         let eta = ratio!(1);
 
-        let pot_delta = delta(pots.reserves, fee_ss, rho, tau, eta).with_rewards(0, 0);
+        let incentives = epoch_incentives(pots.reserves, fee_ss, rho, tau, eta);
 
-        let pots = apply_delta(pots, &pot_delta);
+        let delta = PotDelta::default();
+        let pots = apply_delta(pots, &incentives, &delta);
 
         pots.check_consistency(MAX_SUPPLY);
 
         assert_eq!(pots.reserves, 14982005400350235);
         assert_eq!(pots.treasury, 17994600087558);
         assert_eq!(pots.fees, 0);
-        assert_eq!(pots.deposits, 1506000000);
+        assert_eq!(pots.obligations(), 1506000000);
         assert_eq!(pots.utxos, 29999998493562207);
         assert_eq!(pots.rewards, 0);
     }
@@ -267,9 +316,13 @@ mod tests {
             reserves: 14964032387721723,
             treasury: 35967613128648,
             fees: 304233,
-            deposits: 1506000000,
+            pool_count: 3,
+            account_count: 3,
+            deposit_per_pool: 500_000_000,
+            deposit_per_account: 2_000_000,
             utxos: 29999998492845396,
             rewards: 0,
+            nominal_deposits: 0,
         };
 
         pots.check_consistency(MAX_SUPPLY);
@@ -280,18 +333,21 @@ mod tests {
 
         let eta = calculate_eta(4298, ratio!(0), 0.05, 86400);
 
-        let pot_delta = delta(pots.reserves, fee_ss, rho, tau, eta).with_rewards(0, 295063003292);
+        let incentives = epoch_incentives(pots.reserves, fee_ss, rho, tau, eta);
 
-        let pots = apply_delta(pots, &pot_delta);
+        let delta = PotDelta {
+            unspendable_rewards: 295063003292,
+            ..Default::default()
+        };
+
+        let pots = apply_delta(pots, &incentives, &delta);
 
         pots.check_consistency(MAX_SUPPLY);
-
-        dbg!(pots.reserves - 14954804628961481);
 
         assert_eq!(pots.reserves, 14954804628961481);
         assert_eq!(pots.treasury, 45195372193123);
         assert_eq!(pots.fees, 0);
-        assert_eq!(pots.deposits, 1506000000);
+        assert_eq!(pots.obligations(), 1506000000);
         assert_eq!(pots.utxos, 29999998492845396);
         assert_eq!(pots.rewards, 0);
     }

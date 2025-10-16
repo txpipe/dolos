@@ -97,7 +97,7 @@ where
                 return Some(Err(StatusCode::INTERNAL_SERVER_ERROR));
             };
 
-            if state.snapshot.live.is_retired {
+            if state.snapshot.live().is_retired {
                 return None;
             }
 
@@ -163,8 +163,7 @@ where
     let filtered = iter.filter_ok(|(_, account)| {
         account
             .pool
-            .live
-            .as_ref()
+            .live()
             .is_some_and(|f| f.as_slice() == operator.as_slice())
     });
 
