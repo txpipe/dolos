@@ -106,7 +106,7 @@ impl dolos_core::EntityDelta for PoolTransition {
 
         let new_snapshot = PoolSnapshot {
             is_pending: false,
-            is_retired: is_retired,
+            is_retired,
             blocks_minted: 0,
             ..entity.snapshot.live().clone()
         };

@@ -1470,6 +1470,7 @@ pub fn build_schema() -> StateSchema {
     schema
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CardanoDelta {
     ControlledAmountInc(ControlledAmountInc),

@@ -105,7 +105,7 @@ impl dolos_core::EntityDelta for PoolRegistration {
         }
     }
 
-    fn undo(&self, entity: &mut Option<PoolState>) {
+    fn undo(&self, _entity: &mut Option<PoolState>) {
         todo!()
     }
 }
