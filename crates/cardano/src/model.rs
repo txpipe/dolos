@@ -183,9 +183,9 @@ where
 
     /// Mutates the live value for the current epoch without rotating any of
     /// the previous values
-    pub fn live_mut<F>(&mut self, epoch: Epoch) {
+    pub fn live_mut(&mut self, epoch: Epoch) -> &mut T {
         assert_eq!(self.epoch, epoch);
-        self.live_mut_unchecked();
+        self.live_mut_unchecked()
     }
 
     /// Same as mutate, but without checking that that the epoch matches.
@@ -484,17 +484,11 @@ pub struct PoolParams {
 
 #[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize)]
 pub struct PoolState {
-    #[n(0)]
-    pub params: PoolParams,
-
     #[n(1)]
     pub operator: PoolHash,
 
     #[n(2)]
     pub snapshot: EpochValue<PoolSnapshot>,
-
-    #[n(3)]
-    pub params_update: Option<PoolParams>,
 
     #[n(11)]
     pub blocks_minted_total: u32,
@@ -520,6 +514,9 @@ pub struct PoolSnapshot {
 
     #[n(2)]
     pub blocks_minted: u32,
+
+    #[n(3)]
+    pub params: PoolParams,
 }
 
 entity_boilerplate!(PoolState, "pools");
@@ -1473,6 +1470,7 @@ pub fn build_schema() -> StateSchema {
     schema
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CardanoDelta {
     ControlledAmountInc(ControlledAmountInc),

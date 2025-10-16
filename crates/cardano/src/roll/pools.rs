@@ -74,7 +74,7 @@ impl dolos_core::EntityDelta for PoolRegistration {
                 "updating pool registration",
             );
 
-            entity.params_update = Some(self.cert.clone().into());
+            entity.snapshot.live_mut_unchecked().params = self.cert.clone().into();
         } else {
             debug!(
                 slot = self.slot,
@@ -89,11 +89,10 @@ impl dolos_core::EntityDelta for PoolRegistration {
                 is_pending: true,
                 is_retired: false,
                 blocks_minted: 0,
+                params: self.cert.clone().into(),
             };
 
             let state = PoolState {
-                params: self.cert.clone().into(),
-                params_update: None,
                 register_slot: self.slot,
                 operator: self.cert.operator,
                 snapshot: EpochValue::new(snapshot, self.epoch),
@@ -106,17 +105,8 @@ impl dolos_core::EntityDelta for PoolRegistration {
         }
     }
 
-    fn undo(&self, entity: &mut Option<PoolState>) {
-        let is_new = self.is_new.expect("called with undo data");
-
-        if is_new {
-            *entity = None;
-        } else {
-            *entity = entity.take().map(|mut x| {
-                x.params_update = None;
-                x
-            });
-        }
+    fn undo(&self, _entity: &mut Option<PoolState>) {
+        todo!()
     }
 }
 

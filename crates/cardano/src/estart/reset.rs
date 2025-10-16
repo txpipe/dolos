@@ -97,9 +97,6 @@ impl dolos_core::EntityDelta for PoolTransition {
         let entity = entity.as_mut().expect("existing pool");
 
         // apply changes
-        if let Some(new_params) = entity.params_update.take() {
-            entity.params = new_params;
-        }
 
         let is_retired = entity
             .retiring_epoch
@@ -107,14 +104,14 @@ impl dolos_core::EntityDelta for PoolTransition {
 
         entity.snapshot.transition(self.starting_epoch);
 
-        entity.snapshot.replace(
-            PoolSnapshot {
-                is_pending: false,
-                is_retired,
-                blocks_minted: 0,
-            },
-            self.starting_epoch,
-        );
+        let new_snapshot = PoolSnapshot {
+            is_pending: false,
+            is_retired,
+            blocks_minted: 0,
+            ..entity.snapshot.live().clone()
+        };
+
+        entity.snapshot.replace(new_snapshot, self.starting_epoch);
     }
 
     fn undo(&self, _entity: &mut Option<PoolState>) {

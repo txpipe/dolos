@@ -284,7 +284,9 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         pool: &PoolState,
     ) -> Result<(), ChainError> {
         if ctx.retiring_pools.contains(&pool.operator) {
-            if let Some(account) = pallas_extras::pool_reward_account(&pool.params.reward_account) {
+            let params = &pool.snapshot.live().params;
+
+            if let Some(account) = pallas_extras::pool_reward_account(&params.reward_account) {
                 let deposit = ctx.ending_state().pparams.active().ensure_pool_deposit()?;
                 self.change(PoolDepositRefund::new(deposit, account));
             }
