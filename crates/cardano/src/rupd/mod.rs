@@ -126,7 +126,7 @@ fn log_work<D: Domain>(
     rewards: &RewardMap<RupdWork>,
     archive: &D::Archive,
 ) -> Result<(), ChainError> {
-    let Some(epoch) = work.performance_epoch() else {
+    let Some((_, epoch)) = work.relevant_epochs() else {
         return Ok(());
     };
 

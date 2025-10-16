@@ -57,6 +57,8 @@ impl IntoModel<PoolListExtendedInner> for PoolModelBuilder {
         let live_stake = "0".to_string();
         let active_stake = "0".to_string();
 
+        let params = self.state.snapshot.live().params.clone();
+
         let out = PoolListExtendedInner {
             pool_id,
             hex: hex::encode(self.operator),
@@ -64,10 +66,10 @@ impl IntoModel<PoolListExtendedInner> for PoolModelBuilder {
             active_stake,
             live_saturation: rational_to_f64::<3>(&self.state.live_saturation()),
             blocks_minted: self.state.blocks_minted_total as i32,
-            declared_pledge: self.state.params.pledge.to_string(),
-            margin_cost: rational_to_f64::<6>(&self.state.params.margin),
-            fixed_cost: self.state.params.cost.to_string(),
-            metadata: self.state.params.pool_metadata.map(|m| {
+            declared_pledge: params.pledge.to_string(),
+            margin_cost: rational_to_f64::<6>(&params.margin),
+            fixed_cost: params.cost.to_string(),
+            metadata: params.pool_metadata.map(|m| {
                 let out = json!({
                     "url": m.url,
                     "hash": m.hash,

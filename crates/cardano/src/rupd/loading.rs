@@ -136,15 +136,16 @@ impl StakeSnapshot {
                 continue;
             }
 
+            snapshot
+                .pool_params
+                .insert(pool.operator, pool_snapshot.params.clone());
+
             // for tracking blocks we switch to the performance epoch (previous epoch, the
             // one we're computing rewards for)
+
             let Some(pool_snapshot) = pool.snapshot.snapshot_at(performance_epoch) else {
                 continue;
             };
-
-            snapshot
-                .pool_params
-                .insert(pool.operator, pool.params.clone());
 
             snapshot
                 .pool_blocks
@@ -189,25 +190,19 @@ impl StakeSnapshot {
     }
 }
 
+pub type SnapshotEpoch = u64;
+pub type PerformanceEpoch = u64;
+
 impl RupdWork {
-    pub fn snapshot_epoch(&self) -> Option<u64> {
-        if self.current_epoch < 3 {
+    pub fn relevant_epochs(&self) -> Option<(SnapshotEpoch, PerformanceEpoch)> {
+        if self.current_epoch < 4 {
             return None;
         }
 
         let snapshot_epoch = self.current_epoch - 3;
-
-        Some(snapshot_epoch)
-    }
-
-    pub fn performance_epoch(&self) -> Option<u64> {
-        if self.current_epoch < 3 {
-            return None;
-        }
-
         let performance_epoch = self.current_epoch - 1;
 
-        Some(performance_epoch)
+        Some((snapshot_epoch, performance_epoch))
     }
 
     pub fn load<D: Domain>(state: &D::State, genesis: &Genesis) -> Result<RupdWork, ChainError> {
@@ -246,8 +241,8 @@ impl RupdWork {
             snapshot: StakeSnapshot::default(),
         };
 
-        if current_epoch >= 4 {
-            work.snapshot = StakeSnapshot::load::<D>(state, current_epoch - 3, current_epoch - 1)?;
+        if let Some((snapshot_epoch, performance_epoch)) = work.relevant_epochs() {
+            work.snapshot = StakeSnapshot::load::<D>(state, snapshot_epoch, performance_epoch)?;
         }
 
         Ok(work)
