@@ -149,7 +149,7 @@ fn log_work<D: Domain>(
         // TODO: implement
         //let live_pledge = snapshot.get_live_pledge(&pool);
 
-        let leader = rewards.find_leader(*pool);
+        let (total_rewards, operator_share) = rewards.find_pool_rewards(*pool);
 
         let log = StakeLog {
             blocks_minted: *blocks_minted,
@@ -158,8 +158,8 @@ fn log_work<D: Domain>(
             live_pledge: 0,
             declared_pledge,
             delegators_count,
-            total_rewards: leader.and_then(|leader| leader.pool_total()).unwrap_or(0),
-            operator_share: leader.map(|leader| leader.value()).unwrap_or(0),
+            total_rewards,
+            operator_share,
         };
 
         let log_key = LogKey::from((temporal_key.clone(), pool_id));
@@ -183,6 +183,10 @@ pub fn execute<D: Domain>(
     let work = RupdWork::load::<D>(state, genesis)?;
 
     let rewards = crate::rewards::define_rewards(&work)?;
+
+    let mut drained_copy = rewards.clone();
+    drained_copy.drain_all();
+    dbg!(drained_copy.as_pot_delta());
 
     // TODO: logging the snapshot at this stage is not the right place. We should
     // treat this problem as part of the epoch transition logic. We put it here for

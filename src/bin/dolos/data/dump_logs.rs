@@ -1,7 +1,7 @@
 use std::marker::PhantomData;
 
 use comfy_table::Table;
-use dolos_cardano::{AccountRewardLog, EpochState, StakeLog};
+use dolos_cardano::{model::RewardLog, EpochState, StakeLog};
 use miette::{Context, IntoDiagnostic};
 
 use dolos::prelude::*;
@@ -26,18 +26,19 @@ trait TableRow: Entity {
     fn row(&self, key: &LogKey) -> Vec<String>;
 }
 
-impl TableRow for AccountRewardLog {
+impl TableRow for RewardLog {
     fn header() -> Vec<&'static str> {
-        vec!["slot", "pool", "as leader", "amount"]
+        vec!["epoch", "slot", "as leader", "amount"]
     }
 
     fn row(&self, key: &LogKey) -> Vec<String> {
         let temporal = TemporalKey::from(key.clone());
-        let temporal = u64::from_be_bytes(temporal.as_ref().try_into().unwrap());
+        let entity = EntityKey::from(key.clone());
+        let epoch = u64::from_be_bytes(temporal.as_ref().try_into().unwrap());
 
         vec![
-            format!("{}", temporal),
-            format!("{}", hex::encode(&self.pool_id)),
+            format!("{}", epoch),
+            format!("{}", hex::encode(entity.as_ref())),
             format!("{}", self.as_leader),
             format!("{}", self.amount),
         ]
@@ -86,32 +87,37 @@ const POOL_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("pool");
 impl TableRow for StakeLog {
     fn header() -> Vec<&'static str> {
         vec![
-            "pool hex",
+            //"pool hex",
             "pool bech32",
+            "epoch",
             "blocks minted",
             "active stake",
-            "active size",
             "delegators count",
             "live pledge",
             "declared pledge",
+            "total rewards",
+            "operator share",
         ]
     }
 
     fn row(&self, key: &LogKey) -> Vec<String> {
+        let temporal = TemporalKey::from(key.clone());
+        let epoch = u64::from_be_bytes(temporal.as_ref().try_into().unwrap());
         let entity_key = EntityKey::from(key.clone());
         let pool_hash = entity_key.as_ref()[..28].try_into().unwrap();
-        let pool_hex = hex::encode(pool_hash);
         let pool_bech32 = bech32::encode::<bech32::Bech32>(POOL_HRP, pool_hash).unwrap();
 
         vec![
-            format!("{}", pool_hex),
+            //format!("{}", pool_hex),
             format!("{}", pool_bech32),
+            format!("{}", epoch),
             format!("{}", self.blocks_minted),
             format!("{}", self.total_stake),
-            format!("{}", self.relative_size),
             format!("{}", self.delegators_count),
             format!("{}", self.live_pledge),
             format!("{}", self.declared_pledge),
+            format!("{}", self.total_rewards),
+            format!("{}", self.operator_share),
         ]
     }
 }
@@ -176,9 +182,7 @@ pub fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
     let archive = crate::common::open_archive_store(config)?;
 
     match args.namespace.as_str() {
-        "account_rewards" => {
-            dump_logs::<AccountRewardLog>(&archive, "account_rewards", args.skip, args.take)?
-        }
+        "rewards" => dump_logs::<RewardLog>(&archive, "rewards", args.skip, args.take)?,
         "stakes" => dump_logs::<StakeLog>(&archive, "stakes", args.skip, args.take)?,
         "epochs" => dump_logs::<EpochState>(&archive, "epochs", args.skip, args.take)?,
         _ => todo!(),

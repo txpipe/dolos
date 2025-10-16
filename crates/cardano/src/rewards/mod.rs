@@ -16,59 +16,130 @@ mod mocking;
 pub type TotalPoolRewards = u64;
 pub type OperatorShare = u64;
 
-#[derive(Debug)]
-pub struct Reward {
-    value: u64,
+#[derive(Debug, Clone)]
+pub struct MultiPoolReward {
     is_spendable: bool,
-    last_pool: PoolHash,
-    as_leader: bool,
-    pool_total: Option<u64>,
+    as_leader: HashMap<PoolHash, u64>,
+    as_delegator: HashMap<PoolHash, u64>,
 }
 
-impl Reward {
-    pub fn merge(self, other: Self) -> Self {
-        debug_assert_eq!(self.is_spendable, other.is_spendable);
-        debug_assert_eq!(self.as_leader, other.as_leader);
-        //debug_assert!(self.pool_total.is_none());
-        //debug_assert!(other.pool_total.is_none());
+impl MultiPoolReward {
+    pub fn merge(mut self, other: Self) -> Self {
+        assert_eq!(self.is_spendable, other.is_spendable);
 
-        Self {
-            value: self.value + other.value,
-            is_spendable: self.is_spendable,
-            as_leader: self.as_leader,
-            last_pool: std::cmp::max(self.last_pool, other.last_pool),
-            pool_total: None,
-        }
+        self.as_leader.extend(other.as_leader);
+        self.as_delegator.extend(other.as_delegator);
+
+        self
     }
 
-    // during pre-allegra, if multiple rewards were assigned to the same account,
-    // only the last one would be considered. The order in which the override took
-    // place is based on the pool hash. This behavior is considered a "bug"
-    // which was later removed.
-    pub fn merge_pre_allegra(self, other: Self) -> Self {
-        if self.last_pool < other.last_pool {
+    pub fn total_value(&self) -> u64 {
+        self.as_leader.values().sum::<u64>() + self.as_delegator.values().sum::<u64>()
+    }
+
+    pub fn into_vec(&self) -> Vec<(PoolHash, u64, bool)> {
+        let leader = self
+            .as_leader
+            .iter()
+            .map(|(pool, value)| (*pool, *value, true));
+
+        let delegator = self
+            .as_delegator
+            .iter()
+            .map(|(pool, value)| (*pool, *value, false));
+
+        leader.chain(delegator).collect()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PreAllegraReward {
+    is_spendable: bool,
+    as_leader: bool,
+    pool: PoolHash,
+    value: u64,
+}
+
+impl PreAllegraReward {
+    pub fn merge(self, other: Self) -> Self {
+        if self.pool < other.pool {
             other
         } else {
             self
         }
     }
+}
 
-    pub fn value(&self) -> u64 {
-        self.value
+#[derive(Debug, Clone)]
+pub enum Reward {
+    MultiPool(MultiPoolReward),
+
+    // during pre-allegra, if multiple rewards were assigned to the same account,
+    // only the last one would be considered. The order in which the override took
+    // place is based on the pool hash. This behavior is considered a "bug"
+    // which was later removed.
+    PreAllegra(PreAllegraReward),
+}
+
+impl Reward {
+    pub fn new<C: RewardsContext>(
+        ctx: &C,
+        account: &StakeCredential,
+        reward_value: u64,
+        from_pool: PoolHash,
+        as_leader: bool,
+    ) -> Self {
+        if ctx.pre_allegra() {
+            Self::PreAllegra(PreAllegraReward {
+                is_spendable: ctx.is_account_registered(account),
+                as_leader,
+                pool: from_pool,
+                value: reward_value,
+            })
+        } else {
+            if as_leader {
+                Self::MultiPool(MultiPoolReward {
+                    is_spendable: ctx.is_account_registered(account),
+                    as_leader: HashMap::from([(from_pool, reward_value)]),
+                    as_delegator: HashMap::new(),
+                })
+            } else {
+                Self::MultiPool(MultiPoolReward {
+                    is_spendable: ctx.is_account_registered(account),
+                    as_leader: HashMap::new(),
+                    as_delegator: HashMap::from([(from_pool, reward_value)]),
+                })
+            }
+        }
     }
 
-    // TODO: support the possibility of multiple pools so that we can track
-    // individual contributions to the reward
-    pub fn pool(&self) -> PoolHash {
-        self.last_pool
+    pub fn merge(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::MultiPool(a), Self::MultiPool(b)) => Self::MultiPool(a.merge(b)),
+            (Self::PreAllegra(a), Self::PreAllegra(b)) => Self::PreAllegra(a.merge(b)),
+            _ => unreachable!("trying to merge rewards of different eras"),
+        }
     }
 
-    pub fn as_leader(&self) -> bool {
-        self.as_leader
+    pub fn is_spendable(&self) -> bool {
+        match self {
+            Self::MultiPool(r) => r.is_spendable,
+            Self::PreAllegra(r) => r.is_spendable,
+        }
     }
 
-    pub fn pool_total(&self) -> Option<u64> {
-        self.pool_total
+    pub fn total_value(&self) -> u64 {
+        match self {
+            Self::MultiPool(r) => r.total_value(),
+            Self::PreAllegra(r) => r.value,
+        }
+    }
+
+    pub fn into_vec(&self) -> Vec<(PoolHash, u64, bool)> {
+        match self {
+            Self::MultiPool(r) => r.into_vec(),
+            Self::PreAllegra(r) => vec![(r.pool, r.value, r.as_leader)],
+        }
     }
 }
 
@@ -79,6 +150,18 @@ pub struct RewardMap<C: RewardsContext> {
     applied_effective: u64,
     applied_unspendable: u64,
     _phantom: PhantomData<C>,
+}
+
+impl<C: RewardsContext> Clone for RewardMap<C> {
+    fn clone(&self) -> Self {
+        Self {
+            incentives: self.incentives.clone(),
+            pending: self.pending.clone(),
+            applied_effective: self.applied_effective,
+            applied_unspendable: self.applied_unspendable,
+            _phantom: PhantomData,
+        }
+    }
 }
 
 impl<C: RewardsContext> RewardMap<C> {
@@ -94,10 +177,22 @@ impl<C: RewardsContext> RewardMap<C> {
 
     // TODO: this is very inefficient. We should should probably revisit the data
     // structure.
-    pub fn find_leader(&self, pool: PoolHash) -> Option<&Reward> {
-        self.pending
-            .values()
-            .find(|reward| reward.pool() == pool && reward.as_leader())
+    pub fn find_pool_rewards(&self, target: PoolHash) -> (TotalPoolRewards, OperatorShare) {
+        let mut total_rewards = 0;
+        let mut operator_share = 0;
+
+        for reward in self.pending.values() {
+            for (pool, value, as_leader) in reward.into_vec() {
+                if pool == target {
+                    total_rewards += value;
+                    if as_leader {
+                        operator_share += value;
+                    }
+                }
+            }
+        }
+
+        (total_rewards, operator_share)
     }
 
     fn include(
@@ -107,22 +202,12 @@ impl<C: RewardsContext> RewardMap<C> {
         reward_value: u64,
         from_pool: PoolHash,
         as_leader: bool,
-        pool_total: Option<u64>,
     ) {
-        let new = Reward {
-            value: reward_value,
-            is_spendable: ctx.is_account_registered(account),
-            last_pool: from_pool,
-            as_leader,
-            pool_total,
-        };
+        let new = Reward::new(ctx, account, reward_value, from_pool, as_leader);
 
         let prev = self.pending.remove(account);
 
-        let is_pre_allegra = ctx.pre_allegra();
-
         let merged = match prev {
-            Some(prev) if is_pre_allegra => prev.merge_pre_allegra(new),
             Some(prev) => prev.merge(new),
             None => new,
         };
@@ -134,20 +219,20 @@ impl<C: RewardsContext> RewardMap<C> {
     pub fn take_for_apply(&mut self, account: &StakeCredential) -> Option<Reward> {
         let reward = self.pending.remove(account)?;
 
-        if reward.is_spendable {
-            self.applied_effective += reward.value;
+        if reward.is_spendable() {
+            self.applied_effective += reward.total_value();
         } else {
-            self.applied_unspendable += reward.value;
+            self.applied_unspendable += reward.total_value();
         }
 
         Some(reward)
     }
 
     pub fn drain_unspendable(&mut self) {
-        let unspendable = self.pending.extract_if(|_, reward| !reward.is_spendable);
+        let unspendable = self.pending.extract_if(|_, reward| !reward.is_spendable());
 
         for (_, reward) in unspendable {
-            self.applied_unspendable += reward.value;
+            self.applied_unspendable += reward.total_value();
         }
     }
 
@@ -155,10 +240,10 @@ impl<C: RewardsContext> RewardMap<C> {
         let all = self.pending.drain();
 
         for (_, reward) in all {
-            if reward.is_spendable {
-                self.applied_effective += reward.value;
+            if reward.is_spendable() {
+                self.applied_effective += reward.total_value();
             } else {
-                self.applied_unspendable += reward.value;
+                self.applied_unspendable += reward.total_value();
             }
         }
     }
@@ -255,12 +340,12 @@ pub fn define_rewards<C: RewardsContext>(ctx: &C) -> Result<RewardMap<C>, ChainE
         );
 
         let operator_share = formulas::pool_operator_share(
-            dbg!(total_pool_reward),
-            dbg!(pool_params.cost),
+            total_pool_reward,
+            pool_params.cost,
             pallas_ratio!(pool_params.margin),
-            dbg!(pool_stake),
-            dbg!(live_pledge),
-            dbg!(circulating_supply),
+            pool_stake,
+            live_pledge,
+            circulating_supply,
         );
 
         debug!(
@@ -277,14 +362,7 @@ pub fn define_rewards<C: RewardsContext>(ctx: &C) -> Result<RewardMap<C>, ChainE
             "computed pool rewards"
         );
 
-        map.include(
-            ctx,
-            &operator_account,
-            operator_share,
-            pool,
-            true,
-            Some(total_pool_reward),
-        );
+        map.include(ctx, &operator_account, operator_share, pool, true);
 
         for delegator in ctx.pool_delegators(pool) {
             if owners.contains(&delegator) {
@@ -306,7 +384,7 @@ pub fn define_rewards<C: RewardsContext>(ctx: &C) -> Result<RewardMap<C>, ChainE
                 pallas_ratio!(pool_params.margin),
             );
 
-            map.include(ctx, &delegator, delegator_reward, pool, false, None);
+            map.include(ctx, &delegator, delegator_reward, pool, false);
         }
     }
 

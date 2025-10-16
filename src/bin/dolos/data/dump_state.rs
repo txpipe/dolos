@@ -171,10 +171,12 @@ impl TableRow for PoolState {
         vec![
             "pool hex",
             "pool bech32",
-            "blocks (go)",
-            "blocks (set)",
-            "blocks (mark)",
-            "blocks (live)",
+            "registered at",
+            "retiring epoch",
+            "pending (go)",
+            "pending (set)",
+            "pending (mark)",
+            "pending (live)",
         ]
     }
 
@@ -187,33 +189,37 @@ impl TableRow for PoolState {
         vec![
             format!("{}", pool_hex),
             format!("{}", pool_bech32),
+            format!("{}", self.register_slot),
+            format!(
+                "{}",
+                self.retiring_epoch
+                    .map(|x| x.to_string())
+                    .unwrap_or_default()
+            ),
             format!(
                 "{} ({})",
-                self.snapshot
-                    .go()
-                    .map(|x| x.blocks_minted)
-                    .unwrap_or_default(),
-                self.snapshot.epoch().unwrap_or_default() - 2,
+                self.snapshot.go().map(|x| x.is_pending).unwrap_or_default(),
+                self.snapshot.epoch().unwrap_or_default() - 3,
             ),
             format!(
                 "{} ({})",
                 self.snapshot
                     .set()
-                    .map(|x| x.blocks_minted)
+                    .map(|x| x.is_pending)
                     .unwrap_or_default(),
-                self.snapshot.epoch().unwrap_or_default() - 1
+                self.snapshot.epoch().unwrap_or_default() - 2
             ),
             format!(
                 "{} ({})",
                 self.snapshot
                     .mark()
-                    .map(|x| x.blocks_minted)
+                    .map(|x| x.is_pending)
                     .unwrap_or_default(),
                 self.snapshot.epoch().unwrap_or_default() - 1
             ),
             format!(
                 "{} ({})",
-                self.snapshot.live().blocks_minted,
+                self.snapshot.live().is_pending,
                 self.snapshot.epoch().unwrap_or_default()
             ),
         ]

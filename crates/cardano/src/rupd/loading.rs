@@ -1,6 +1,6 @@
 use dolos_core::{ChainError, Domain, Genesis, StateStore};
 use pallas::ledger::primitives::StakeCredential;
-use tracing::{debug, info, trace};
+use tracing::{debug, info, trace, warn};
 
 use crate::{
     load_era_summary, pallas_ratio,
@@ -127,22 +127,24 @@ impl StakeSnapshot {
             let (_, pool) = record?;
 
             let Some(pool_snapshot) = pool.snapshot.snapshot_at(stake_epoch) else {
+                warn!(operator = %pool.operator, "skipping pool without stake epoch snapshot");
                 continue;
             };
 
-            if pool_snapshot.is_pending || pool_snapshot.is_retired {
+            if pool_snapshot.is_retired {
+                warn!(operator = %pool.operator, "skipping retired or pending pool are stake epoch");
                 continue;
             }
-
-            snapshot
-                .pool_params
-                .insert(pool.operator, pool.params.clone());
 
             // for tracking blocks we switch to the performance epoch (previous epoch, the
             // one we're computing rewards for)
             let Some(pool_snapshot) = pool.snapshot.snapshot_at(performance_epoch) else {
                 continue;
             };
+
+            snapshot
+                .pool_params
+                .insert(pool.operator, pool.params.clone());
 
             snapshot
                 .pool_blocks
@@ -174,7 +176,7 @@ impl StakeSnapshot {
         }
 
         for (pool_id, stake) in snapshot.pool_stake.iter() {
-            trace!(%pool_id, %stake, "pool stake");
+            debug!(%pool_id, %stake, "pool stake");
         }
 
         debug!(
@@ -244,7 +246,7 @@ impl RupdWork {
             snapshot: StakeSnapshot::default(),
         };
 
-        if current_epoch >= 3 {
+        if current_epoch >= 4 {
             work.snapshot = StakeSnapshot::load::<D>(state, current_epoch - 3, current_epoch - 1)?;
         }
 
