@@ -120,7 +120,9 @@ impl<D: Domain> Facade<D> {
             .get_epoch_log(prior_epoch, chain_summary)?
             .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
 
-        Ok(log.pparams)
+        // TODO: epoch logs should be its own structure without the excessive
+        // multi-epoch values
+        Ok(log.pparams.active().clone())
     }
 
     pub fn get_tx(&self, hash: Hash<32>) -> Result<Option<EraCbor>, StatusCode> {

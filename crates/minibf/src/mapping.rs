@@ -605,12 +605,11 @@ impl<'a> TxModelBuilder<'a> {
             .iter()
             .flat_map(|x| {
                 if pallas_extras::cert_as_stake_registration(x).is_some() {
-                    dbg!(x);
-                    return Some(dbg!(key_deposit));
+                    return Some(key_deposit);
                 }
 
                 if pallas_extras::cert_as_pool_registration(x).is_some() {
-                    return Some(dbg!(pool_deposit));
+                    return Some(pool_deposit);
                 }
 
                 if let MultiEraCert::Conway(cert) = x {
@@ -1934,7 +1933,7 @@ impl PlutusDataWrapper {
                 Ok(serde_json::Value::Object(serde_json::Map::from_iter([
                     (
                         "constructor".to_string(),
-                        serde_json::Value::Number(x.tag.into()),
+                        serde_json::Value::Number(x.constr_index().into()),
                     ),
                     ("fields".to_string(), serde_json::Value::Array(values)),
                 ])))

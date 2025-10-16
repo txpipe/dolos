@@ -118,9 +118,12 @@ pub fn setup_domain(config: &crate::Config) -> miette::Result<DomainAdapter> {
 
     let ChainConfig::Cardano(chain_config) = chain;
 
-    let chain =
-        dolos_cardano::CardanoLogic::initialize::<DomainAdapter>(chain_config, &stores.state)
-            .into_diagnostic()?;
+    let chain = dolos_cardano::CardanoLogic::initialize::<DomainAdapter>(
+        chain_config,
+        &stores.state,
+        &genesis,
+    )
+    .into_diagnostic()?;
 
     let domain = DomainAdapter {
         storage_config: Arc::new(config.storage.clone()),

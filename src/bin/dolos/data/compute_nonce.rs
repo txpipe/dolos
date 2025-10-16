@@ -48,7 +48,7 @@ pub fn compute_nonce<D: Domain>(epoch: u64, domain: &D) -> miette::Result<Hash<3
 
     let (protocol, era) = summary.protocol_and_era_for_epoch(epoch);
     let largest_stable_slot =
-        era.epoch_start(epoch) - nonce_stability_window(*protocol, domain.genesis());
+        era.epoch_start(epoch) - nonce_stability_window(*protocol, &domain.genesis());
 
     let mut nonces = Nonces::bootstrap(domain.genesis().shelley_hash);
 

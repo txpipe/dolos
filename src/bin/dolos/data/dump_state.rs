@@ -26,7 +26,7 @@ macro_rules! format_epoch_value {
     ($stake:expr, $pool:expr) => {
         format!(
             "{} ({})",
-            $stake.unwrap_or_default(),
+            $stake.map(|x| x.to_string()).unwrap_or_default(),
             $pool
                 .as_ref()
                 .and_then(|x| x.map(|y| hex::encode(y)[..3].to_string()))
@@ -41,6 +41,7 @@ impl TableRow for AccountState {
             "cred",
             "reg",
             "dereg",
+            "stake (-3)",
             "stake (-2)",
             "stake (-1)",
             "live stake",
@@ -55,14 +56,17 @@ impl TableRow for AccountState {
             format!("{}", hex::encode(key)),
             format!("{}", self.registered_at.unwrap_or_default()),
             format!("{}", self.deregistered_at.unwrap_or_default()),
-            format_epoch_value!(self.total_stake.stable, self.pool.stable),
-            format_epoch_value!(self.total_stake.previous, self.pool.previous),
-            format_epoch_value!(Some(self.live_stake()), Some(self.pool.latest)),
+            format_epoch_value!(self.total_stake.go(), self.pool.go()),
+            format_epoch_value!(self.total_stake.set(), self.pool.set()),
+            format_epoch_value!(self.total_stake.mark(), self.pool.mark()),
+            format_epoch_value!(Some(self.live_stake()), Some(self.pool.live())),
             format!("{}", self.rewards_sum),
             format!("{}", self.withdrawals_sum),
             format!(
                 "{},{},{}",
-                self.total_stake.epoch, self.pool.epoch, self.drep.epoch,
+                self.total_stake.epoch().unwrap_or_default(),
+                self.pool.epoch().unwrap_or_default(),
+                self.drep.epoch().unwrap_or_default(),
             ),
         ]
     }
@@ -73,15 +77,15 @@ impl TableRow for EpochState {
         vec![
             "number",
             "version",
+            "pot reserves",
+            "pot utxos",
+            "pot treasury",
+            "pot deposits",
+            "pot rewards",
+            "pot fees",
+            "delta effective rewards",
+            "delta unspendable rewards",
             "gathered fees",
-            "gathered deposits",
-            "decayed deposits",
-            "reserves",
-            "utxos",
-            "treasury",
-            "treasury tax",
-            "rewards",
-            "rewards (unspendable)",
             "pparams",
             "nonce",
         ]
@@ -90,17 +94,32 @@ impl TableRow for EpochState {
     fn row(&self, _key: &EntityKey) -> Vec<String> {
         vec![
             format!("{}", self.number),
-            format!("{}", self.pparams.protocol_major().unwrap_or_default()),
-            format!("{}", self.gathered_fees),
-            format!("{}", self.gathered_deposits),
-            format!("{}", self.decayed_deposits),
-            format!("{}", self.reserves),
-            format!("{}", self.utxos),
-            format!("{}", self.treasury),
-            format!("{}", self.treasury_tax.unwrap_or_default()),
-            format!("{}", self.effective_rewards.unwrap_or_default()),
-            format!("{}", self.unspendable_rewards.unwrap_or_default()),
-            format!("{}", self.pparams.len()),
+            format!(
+                "{}",
+                self.pparams.active().protocol_major().unwrap_or_default()
+            ),
+            format!("{}", self.initial_pots.reserves),
+            format!("{}", self.initial_pots.utxos),
+            format!("{}", self.initial_pots.treasury),
+            format!("{}", self.initial_pots.obligations()),
+            format!("{}", self.initial_pots.rewards),
+            format!("{}", self.initial_pots.fees),
+            format!(
+                "{}",
+                self.end
+                    .as_ref()
+                    .map(|x| x.effective_rewards)
+                    .unwrap_or_default()
+            ),
+            format!(
+                "{}",
+                self.end
+                    .as_ref()
+                    .map(|x| x.unspendable_rewards)
+                    .unwrap_or_default()
+            ),
+            format!("{}", self.rolling.live().gathered_fees),
+            format!("{}", self.pparams.live().len()),
             format!(
                 "{}",
                 self.nonces
@@ -152,12 +171,12 @@ impl TableRow for PoolState {
         vec![
             "pool hex",
             "pool bech32",
-            "margin cost",
-            "stable stake",
-            "previous stake",
-            "latest stake",
-            "stake epoch",
-            "blocks minted",
+            "registered at",
+            "retiring epoch",
+            "pending (go)",
+            "pending (set)",
+            "pending (mark)",
+            "pending (live)",
         ]
     }
 
@@ -170,15 +189,39 @@ impl TableRow for PoolState {
         vec![
             format!("{}", pool_hex),
             format!("{}", pool_bech32),
+            format!("{}", self.register_slot),
             format!(
-                "{}/{}",
-                self.margin_cost.numerator, self.margin_cost.denominator
+                "{}",
+                self.retiring_epoch
+                    .map(|x| x.to_string())
+                    .unwrap_or_default()
             ),
-            format!("{}", self.total_stake.stable.unwrap_or_default()),
-            format!("{}", self.total_stake.previous.unwrap_or_default()),
-            format!("{}", self.total_stake.latest),
-            format!("{}", self.total_stake.epoch),
-            format!("{}", self.blocks_minted_total),
+            format!(
+                "{} ({})",
+                self.snapshot.go().map(|x| x.is_pending).unwrap_or_default(),
+                self.snapshot.epoch().unwrap_or_default() - 3,
+            ),
+            format!(
+                "{} ({})",
+                self.snapshot
+                    .set()
+                    .map(|x| x.is_pending)
+                    .unwrap_or_default(),
+                self.snapshot.epoch().unwrap_or_default() - 2
+            ),
+            format!(
+                "{} ({})",
+                self.snapshot
+                    .mark()
+                    .map(|x| x.is_pending)
+                    .unwrap_or_default(),
+                self.snapshot.epoch().unwrap_or_default() - 1
+            ),
+            format!(
+                "{} ({})",
+                self.snapshot.live().is_pending,
+                self.snapshot.epoch().unwrap_or_default()
+            ),
         ]
     }
 }

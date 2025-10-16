@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use dolos_core::{batch::WorkDeltas, ChainError, NsKey};
 use pallas::{
     crypto::hash::Hash,
@@ -10,10 +12,10 @@ use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use crate::{
-    model::{EpochState, FixedNamespace as _, EPOCH_KEY_MARK},
+    model::{EpochState, FixedNamespace as _},
     pallas_extras,
     roll::BlockVisitor,
-    CardanoLogic, Nonces, PParamValue, PParamsSet,
+    CardanoLogic, Nonces, PParamValue, PParamsSet, PoolHash, CURRENT_EPOCH_KEY,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -21,77 +23,57 @@ pub struct EpochStatsUpdate {
     block_fees: u64,
     utxo_consumed: u64,
     utxo_produced: u64,
-    stake_registration_count: u64,
-    stake_deregistration_count: u64,
-    pool_registration_count: u64,
-    pool_deregistration_count: u64,
-
-    // params
-    key_deposit: u64,
-    pool_deposit: u64,
-}
-
-impl EpochStatsUpdate {
-    pub fn new(pparams: &PParamsSet) -> Result<Self, ChainError> {
-        let out = Self {
-            key_deposit: pparams.key_deposit_or_default(),
-            pool_deposit: pparams.pool_deposit_or_default(),
-            ..Default::default()
-        };
-
-        Ok(out)
-    }
+    new_accounts: u64,
+    removed_accounts: u64,
+    withdrawals: u64,
+    registered_pools: HashSet<PoolHash>,
 }
 
 impl dolos_core::EntityDelta for EpochStatsUpdate {
     type Entity = EpochState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((EpochState::NS, EPOCH_KEY_MARK))
+        NsKey::from((EpochState::NS, CURRENT_EPOCH_KEY))
     }
 
     fn apply(&mut self, entity: &mut Option<EpochState>) {
         let Some(entity) = entity else { return };
 
-        entity.gathered_fees += self.block_fees;
+        let stats = entity.rolling.live_mut_unchecked();
 
-        entity.utxos += self.utxo_produced;
-        entity.utxos = entity.utxos.saturating_sub(self.utxo_consumed);
+        stats.blocks_minted += 1;
+        stats.produced_utxos += self.utxo_produced;
+        stats.consumed_utxos += self.utxo_consumed;
+        stats.gathered_fees += self.block_fees;
+        stats.new_accounts += self.new_accounts;
+        stats.removed_accounts += self.removed_accounts;
+        stats.withdrawals += self.withdrawals;
 
-        let key_deposits = self.stake_registration_count * self.key_deposit;
-        let pool_deposits = self.pool_registration_count * self.pool_deposit;
-
-        entity.gathered_deposits += key_deposits + pool_deposits;
-
-        // TODO: this isn't accurate, we should use the deposit value stored in each
-        // entity. The question is: how do we get access to that?
-        let key_decays = self.stake_deregistration_count * self.key_deposit;
-        let pool_decays = self.pool_deregistration_count * self.pool_deposit;
-
-        entity.decayed_deposits += key_decays + pool_decays;
-
-        entity.blocks_minted += 1;
+        stats.registered_pools = stats
+            .registered_pools
+            .union(&self.registered_pools)
+            .cloned()
+            .collect();
     }
 
     fn undo(&self, entity: &mut Option<EpochState>) {
         let Some(entity) = entity else { return };
 
-        entity.gathered_fees -= self.block_fees;
+        let stats = entity.rolling.live_mut_unchecked();
 
-        entity.utxos -= self.utxo_produced;
-        entity.utxos += self.utxo_consumed;
+        stats.blocks_minted -= 1;
+        stats.produced_utxos -= self.utxo_produced;
+        stats.consumed_utxos -= self.utxo_consumed;
+        stats.gathered_fees -= self.block_fees;
+        stats.new_accounts -= self.new_accounts;
+        stats.removed_accounts -= self.removed_accounts;
+        stats.withdrawals -= self.withdrawals;
 
-        let key_deposits = self.stake_registration_count * self.key_deposit;
-        let pool_deposits = self.pool_registration_count * self.pool_deposit;
-
-        entity.gathered_deposits -= key_deposits + pool_deposits;
-
-        let key_decays = self.stake_deregistration_count * self.key_deposit;
-        let pool_decays = self.pool_deregistration_count * self.pool_deposit;
-
-        entity.decayed_deposits -= key_decays + pool_decays;
-
-        entity.blocks_minted = entity.blocks_minted.saturating_sub(1);
+        stats.registered_pools = stats
+            .registered_pools
+            .difference(&self.registered_pools)
+            .cloned()
+            .collect();
     }
 }
 
@@ -108,7 +90,7 @@ impl dolos_core::EntityDelta for NoncesUpdate {
     type Entity = EpochState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((EpochState::NS, EPOCH_KEY_MARK))
+        NsKey::from((EpochState::NS, CURRENT_EPOCH_KEY))
     }
 
     fn apply(&mut self, entity: &mut Option<EpochState>) {
@@ -137,30 +119,45 @@ pub struct PParamsUpdate {
     prev_value: Option<PParamValue>,
 }
 
+impl PParamsUpdate {
+    pub fn new(to_update: PParamValue) -> Self {
+        Self {
+            to_update,
+            prev_value: None,
+        }
+    }
+}
+
 impl dolos_core::EntityDelta for PParamsUpdate {
     type Entity = EpochState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((EpochState::NS, EPOCH_KEY_MARK))
+        NsKey::from((EpochState::NS, CURRENT_EPOCH_KEY))
     }
 
     fn apply(&mut self, entity: &mut Option<EpochState>) {
         let entity = entity.as_mut().expect("epoch state missing");
 
-        debug!(update =? self.to_update, "applying pparam update");
+        debug!(value = ?self.to_update, "applying pparam update");
 
         // undo data
-        self.prev_value = entity.pparams_update.get(self.to_update.kind()).cloned();
+        self.prev_value = entity.pparams.live().get(self.to_update.kind()).cloned();
 
-        entity.pparams_update.set(self.to_update.clone());
+        entity
+            .pparams
+            .live_mut_unchecked()
+            .set(self.to_update.clone());
     }
 
     fn undo(&self, entity: &mut Option<EpochState>) {
         if let Some(entity) = entity {
             if let Some(prev_value) = &self.prev_value {
-                entity.pparams_update.set(prev_value.clone());
+                entity.pparams.live_mut_unchecked().set(prev_value.clone());
             } else {
-                entity.pparams_update.clear(self.to_update.kind());
+                entity
+                    .pparams
+                    .live_mut_unchecked()
+                    .clear(self.to_update.kind());
             }
         }
     }
@@ -196,10 +193,10 @@ impl BlockVisitor for EpochStateVisitor {
         &mut self,
         _: &mut WorkDeltas<CardanoLogic>,
         block: &MultiEraBlock,
-        pparams: &PParamsSet,
+        _: &PParamsSet,
         _: Epoch,
     ) -> Result<(), ChainError> {
-        self.stats_delta = Some(EpochStatsUpdate::new(pparams)?);
+        self.stats_delta = Some(EpochStatsUpdate::default());
 
         // we only track nonces for Shelley and later
         if block.era() >= pallas::ledger::traverse::Era::Shelley {
@@ -260,22 +257,33 @@ impl BlockVisitor for EpochStateVisitor {
         cert: &MultiEraCert,
     ) -> Result<(), ChainError> {
         if pallas_extras::cert_as_stake_registration(cert).is_some() {
-            self.stats_delta.as_mut().unwrap().stake_registration_count += 1;
+            self.stats_delta.as_mut().unwrap().new_accounts += 1;
         }
 
         if pallas_extras::cert_as_stake_deregistration(cert).is_some() {
+            self.stats_delta.as_mut().unwrap().removed_accounts += 1;
+        }
+
+        if let Some(cert) = pallas_extras::cert_as_pool_registration(cert) {
             self.stats_delta
                 .as_mut()
                 .unwrap()
-                .stake_deregistration_count += 1;
+                .registered_pools
+                .insert(cert.operator);
         }
 
-        if pallas_extras::cert_as_pool_registration(cert).is_some() {
-            self.stats_delta.as_mut().unwrap().pool_registration_count += 1;
-        }
+        Ok(())
+    }
 
-        // TODO: decayed deposits
-
+    fn visit_withdrawal(
+        &mut self,
+        _: &mut WorkDeltas<CardanoLogic>,
+        _: &MultiEraBlock,
+        _: &MultiEraTx,
+        _: &[u8],
+        amount: u64,
+    ) -> Result<(), ChainError> {
+        self.stats_delta.as_mut().unwrap().withdrawals += amount;
         Ok(())
     }
 
@@ -328,7 +336,7 @@ impl BlockVisitor for EpochStateVisitor {
         if let Some((major, minor, _)) = update.byron_proposed_block_version() {
             deltas.add_for_entity(PParamsUpdate {
                 to_update: PParamValue::ProtocolVersion((major.into(), minor.into())),
-                prev_value: None
+                prev_value: None,
             });
         }
 
@@ -363,18 +371,21 @@ impl BlockVisitor for EpochStateVisitor {
                     prev_value: None,
                 });
             }
+
             if let Some(v2) = cm.plutus_v2 {
                 deltas.add_for_entity(PParamsUpdate {
                     to_update: PParamValue::CostModelsPlutusV2(v2),
                     prev_value: None,
                 });
             }
+
             if let Some(v3) = cm.plutus_v3 {
                 deltas.add_for_entity(PParamsUpdate {
                     to_update: PParamValue::CostModelsPlutusV3(v3),
                     prev_value: None,
                 });
             }
+
             if !cm.unknown.is_empty() {
                 deltas.add_for_entity(PParamsUpdate {
                     to_update: PParamValue::CostModelsUnknown(cm.unknown),

@@ -66,6 +66,7 @@ impl Feedback {
 impl Default for Feedback {
     fn default() -> Self {
         let multi = MultiProgress::new();
+
         Self { multi }
     }
 }

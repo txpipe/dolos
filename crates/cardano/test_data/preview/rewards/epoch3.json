@@ -1,0 +1,81 @@
+{
+  "pots": {
+    "reserves": 14964032387721723,
+    "treasury": 35967613128648,
+    "fees": 304233,
+    "pool_count": 3,
+    "account_count": 3,
+    "deposit_per_pool": 500000000,
+    "deposit_per_account": 2000000,
+    "nominal_deposits": 0,
+    "utxos": 29999998492845396,
+    "rewards": 0
+  },
+  "epoch_blocks": 4298,
+  "epoch_fee_ss": 304233,
+  "epoch_eta": [2149, 2160],
+  "pools": {
+    "d5cfc42cf67f6b637688d19fa50a4342658f63370b9e2c9e3eaf4dfe": {
+      "blocks_minted": 1465,
+      "params": {
+        "pledge": 100000000000000,
+        "cost": 500000000,
+        "margin": [1, 1],
+        "reward_account": "b96fcef3b9351af6834bd850e3a97859d7bd5b729d24bf3646aeaccf",
+        "pool_owners": [
+          "ba149e2e2379097e65f0c03f2733d3103151e7f100d36dfdb01a0b22"
+        ]
+      }
+    },
+    "38f4a58aaf3fec84f3410520c70ad75321fb651ada7ca026373ce486": {
+      "blocks_minted": 1407,
+      "params": {
+        "pledge": 100000000000000,
+        "cost": 500000000,
+        "margin": [1, 1],
+        "reward_account": "b96fcef3b9351af6834bd850e3a97859d7bd5b729d24bf3646aeaccf",
+        "pool_owners": [
+          "788cf0519348fefaf3c721c5f5bd60b195b444fa0d8fb4512dc259be"
+        ]
+      }
+    },
+    "40d806d73c8d2a0c8d9b1e95ccb9f380e40cb4d4b23ff6e403ae1456": {
+      "blocks_minted": 1426,
+      "params": {
+        "pledge": 100000000000000,
+        "cost": 500000000,
+        "margin": [1, 1],
+        "reward_account": "b96fcef3b9351af6834bd850e3a97859d7bd5b729d24bf3646aeaccf",
+        "pool_owners": [
+          "f631370cc87882bf5e14ab72534caf2655d0a2a50a9a8a3820bb6f4a"
+        ]
+      }
+    }
+  },
+  "accounts": {
+    "788cf0519348fefaf3c721c5f5bd60b195b444fa0d8fb4512dc259be": {
+      "stake": 100000000000000,
+      "pool": "38f4a58aaf3fec84f3410520c70ad75321fb651ada7ca026373ce486"
+    },
+    "ba149e2e2379097e65f0c03f2733d3103151e7f100d36dfdb01a0b22": {
+      "stake": 100000000000000,
+      "pool": "d5cfc42cf67f6b637688d19fa50a4342658f63370b9e2c9e3eaf4dfe"
+    },
+    "f631370cc87882bf5e14ab72534caf2655d0a2a50a9a8a3820bb6f4a": {
+      "stake": 100000000000000,
+      "pool": "40d806d73c8d2a0c8d9b1e95ccb9f380e40cb4d4b23ff6e403ae1456"
+    }
+  },
+  "pparams": {
+    "values": [
+      { "DesiredNumberOfStakePools": 150 },
+      { "PoolPledgeInfluence": [3, 10] },
+      { "DecentralizationConstant": [0, 1] },
+      { "ExpansionRate": [3, 1000] },
+      { "TreasuryGrowthRate": [2, 10] },
+      { "ProtocolVersion": [7, 0] },
+      { "PoolDeposit": 500000000 },
+      { "KeyDeposit": 2000000 }
+    ]
+  }
+}
