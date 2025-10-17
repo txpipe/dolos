@@ -36,7 +36,7 @@ use crate::{
         self, default_cost_models, default_drep_voting_thresholds, default_ex_unit_prices,
         default_ex_units, default_nonce, default_pool_voting_thresholds, default_rational_number,
     },
-    pots::{EpochIncentives, Pots},
+    pots::Pots,
     roll::{
         accounts::{
             ControlledAmountDec, ControlledAmountInc, StakeDelegation, StakeDeregistration,

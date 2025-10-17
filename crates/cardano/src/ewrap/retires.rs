@@ -1,15 +1,11 @@
 use dolos_core::{ChainError, NsKey};
-use pallas::{
-    codec::minicbor,
-    ledger::primitives::{conway::DRep, StakeCredential},
-};
+use pallas::ledger::primitives::conway::DRep;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 use crate::{
-    ewrap::{AccountId, BoundaryWork, DRepId, PoolId, ProposalId},
-    pallas_extras, AccountState, CardanoDelta, DRepState, EpochValue, FixedNamespace as _,
-    PoolHash, PoolState, Proposal,
+    ewrap::{AccountId, BoundaryWork, DRepId, ProposalId},
+    AccountState, CardanoDelta, DRepState, EpochValue, FixedNamespace as _, PoolHash, Proposal,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
