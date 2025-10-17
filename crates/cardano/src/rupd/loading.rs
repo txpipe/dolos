@@ -15,10 +15,7 @@ fn define_eta(
     pparams: &PParamsSet,
     epoch: &EpochState,
 ) -> Result<Eta, ChainError> {
-    let blocks_minted = epoch
-        .rolling
-        .snapshot_at(epoch.number - 1)
-        .map(|x| x.blocks_minted);
+    let blocks_minted = epoch.rolling.mark().map(|x| x.blocks_minted);
 
     let Some(blocks_minted) = blocks_minted else {
         // TODO: check if returning eta = 1 on epoch 0 is what the specs says.
@@ -69,7 +66,7 @@ fn define_epoch_incentives(
 
     let fee_ss = epoch
         .rolling
-        .snapshot_at(epoch.number - 1)
+        .mark()
         .map(|x| x.gathered_fees)
         .unwrap_or_default();
 

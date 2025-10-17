@@ -115,8 +115,6 @@ impl super::BoundaryVisitor for BoundaryVisitor {
                 reward: reward.total_value(),
             });
 
-            dbg!(&ctx.starting_epoch_no());
-
             for (pool, value, as_leader) in reward.into_vec() {
                 self.log(
                     id.clone(),
