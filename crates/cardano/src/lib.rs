@@ -258,13 +258,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
         genesis: Arc<Genesis>,
         at: BlockSlot,
     ) -> Result<(), ChainError> {
-        let mut cache = self.cache.write().unwrap();
-
-        let rewards = cache.rewards.take().unwrap_or_default();
-
-        ewrap::execute::<D>(state, archive, at, &self.config, genesis, rewards)?;
-
-        drop(cache);
+        ewrap::execute::<D>(state, archive, at, &self.config, genesis)?;
 
         self.refresh_cache::<D>(state)?;
 
@@ -278,7 +272,13 @@ impl dolos_core::ChainLogic for CardanoLogic {
         genesis: Arc<Genesis>,
         at: BlockSlot,
     ) -> Result<(), ChainError> {
-        estart::execute::<D>(state, archive, at, genesis)?;
+        let mut cache = self.cache.write().unwrap();
+
+        let rewards = cache.rewards.take().unwrap_or_default();
+
+        estart::execute::<D>(state, archive, at, genesis, rewards)?;
+
+        drop(cache);
 
         self.refresh_cache::<D>(state)?;
 

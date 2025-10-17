@@ -5,10 +5,7 @@ use tracing::info;
 
 use crate::{
     ewrap::{BoundaryVisitor as _, BoundaryWork},
-    load_active_era,
-    rewards::RewardMap,
-    rupd::RupdWork,
-    AccountState, DRepState, FixedNamespace as _, PoolState, Proposal,
+    load_active_era, AccountState, DRepState, FixedNamespace as _, PoolState, Proposal,
 };
 
 impl BoundaryWork {
@@ -76,9 +73,9 @@ impl BoundaryWork {
 
     pub fn compute_deltas<D: Domain>(&mut self, state: &D::State) -> Result<(), ChainError> {
         let mut visitor_retires = crate::ewrap::retires::BoundaryVisitor::default();
-        let mut visitor_rewards = crate::ewrap::rewards::BoundaryVisitor::default();
         let mut visitor_govactions = crate::ewrap::govactions::BoundaryVisitor::default();
         let mut visitor_wrapup = crate::ewrap::wrapup::BoundaryVisitor;
+        let mut visitor_snapshot = crate::ewrap::snapshot::BoundaryVisitor::default();
 
         let pools = state.iter_entities_typed::<PoolState>(PoolState::NS, None)?;
 
@@ -86,9 +83,9 @@ impl BoundaryWork {
             let (pool_id, pool) = pool?;
 
             visitor_retires.visit_pool(self, &pool_id, &pool)?;
-            visitor_rewards.visit_pool(self, &pool_id, &pool)?;
             visitor_govactions.visit_pool(self, &pool_id, &pool)?;
             visitor_wrapup.visit_pool(self, &pool_id, &pool)?;
+            visitor_snapshot.visit_pool(self, &pool_id, &pool)?;
         }
 
         let dreps = state.iter_entities_typed::<DRepState>(DRepState::NS, None)?;
@@ -97,9 +94,9 @@ impl BoundaryWork {
             let (drep_id, drep) = drep?;
 
             visitor_retires.visit_drep(self, &drep_id, &drep)?;
-            visitor_rewards.visit_drep(self, &drep_id, &drep)?;
             visitor_govactions.visit_drep(self, &drep_id, &drep)?;
             visitor_wrapup.visit_drep(self, &drep_id, &drep)?;
+            visitor_snapshot.visit_drep(self, &drep_id, &drep)?;
         }
 
         let accounts = state.iter_entities_typed::<AccountState>(AccountState::NS, None)?;
@@ -108,9 +105,9 @@ impl BoundaryWork {
             let (account_id, account) = account?;
 
             visitor_retires.visit_account(self, &account_id, &account)?;
-            visitor_rewards.visit_account(self, &account_id, &account)?;
             visitor_govactions.visit_account(self, &account_id, &account)?;
             visitor_wrapup.visit_account(self, &account_id, &account)?;
+            visitor_snapshot.visit_account(self, &account_id, &account)?;
         }
 
         let proposals = state.iter_entities_typed::<Proposal>(Proposal::NS, None)?;
@@ -119,15 +116,15 @@ impl BoundaryWork {
             let (proposal_id, proposal) = proposal?;
 
             visitor_retires.visit_proposal(self, &proposal_id, &proposal)?;
-            visitor_rewards.visit_proposal(self, &proposal_id, &proposal)?;
             visitor_govactions.visit_proposal(self, &proposal_id, &proposal)?;
             visitor_wrapup.visit_proposal(self, &proposal_id, &proposal)?;
+            visitor_snapshot.visit_proposal(self, &proposal_id, &proposal)?;
         }
 
         visitor_retires.flush(self)?;
-        visitor_rewards.flush(self)?;
         visitor_govactions.flush(self)?;
         visitor_wrapup.flush(self)?;
+        visitor_snapshot.flush(self)?;
 
         Ok(())
     }
@@ -135,7 +132,6 @@ impl BoundaryWork {
     pub fn load<D: Domain>(
         state: &D::State,
         genesis: Arc<Genesis>,
-        rewards: RewardMap<RupdWork>,
     ) -> Result<BoundaryWork, ChainError> {
         let ending_state = crate::load_epoch::<D>(state)?;
         let (active_protocol, active_era) = load_active_era::<D>(state)?;
@@ -144,7 +140,6 @@ impl BoundaryWork {
             ending_state,
             active_era,
             active_protocol,
-            rewards,
             genesis,
 
             // to be loaded right after

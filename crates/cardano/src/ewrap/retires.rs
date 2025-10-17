@@ -187,46 +187,6 @@ impl dolos_core::EntityDelta for DRepDelegatorDrop {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PoolDepositRefund {
-    pool_deposit: u64,
-    account: StakeCredential,
-}
-
-impl PoolDepositRefund {
-    pub fn new(pool_deposit: u64, account: StakeCredential) -> Self {
-        Self {
-            pool_deposit,
-            account,
-        }
-    }
-}
-
-impl dolos_core::EntityDelta for PoolDepositRefund {
-    type Entity = AccountState;
-
-    fn key(&self) -> NsKey {
-        let enc = minicbor::to_vec(&self.account).unwrap();
-        NsKey::from((PoolState::NS, enc))
-    }
-
-    fn apply(&mut self, entity: &mut Option<Self::Entity>) {
-        let entity = entity.as_mut().expect("existing account");
-
-        if entity.is_registered() {
-            entity.rewards_sum += self.pool_deposit;
-        }
-    }
-
-    fn undo(&self, entity: &mut Option<Self::Entity>) {
-        let entity = entity.as_mut().expect("existing account");
-
-        if entity.is_registered() {
-            entity.rewards_sum = entity.rewards_sum.saturating_sub(self.pool_deposit);
-        }
-    }
-}
-
 fn should_expire_proposal(ctx: &mut BoundaryWork, proposal: &Proposal) -> Result<bool, ChainError> {
     // Skip proposals already in a terminal state
     if proposal.expired_epoch.is_some() || proposal.enacted_epoch.is_some() {
@@ -271,24 +231,6 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         if let Some(drep) = account.drep.live() {
             if ctx.expiring_dreps.contains(drep) {
                 self.change(DRepDelegatorDrop::new(id.clone()));
-            }
-        }
-
-        Ok(())
-    }
-
-    fn visit_pool(
-        &mut self,
-        ctx: &mut BoundaryWork,
-        _: &PoolId,
-        pool: &PoolState,
-    ) -> Result<(), ChainError> {
-        if ctx.retiring_pools.contains(&pool.operator) {
-            let params = &pool.snapshot.live().params;
-
-            if let Some(account) = pallas_extras::pool_reward_account(&params.reward_account) {
-                let deposit = ctx.ending_state().pparams.active().ensure_pool_deposit()?;
-                self.change(PoolDepositRefund::new(deposit, account));
             }
         }
 

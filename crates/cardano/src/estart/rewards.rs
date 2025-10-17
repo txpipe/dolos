@@ -1,10 +1,11 @@
 use dolos_core::{ChainError, EntityKey, NsKey};
+use pallas::{codec::minicbor, ledger::primitives::StakeCredential};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 use crate::{
-    ewrap::BoundaryWork, rupd::AccountId, AccountState, CardanoDelta, CardanoEntity,
-    FixedNamespace, RewardLog,
+    estart::PoolId, pallas_extras, rupd::AccountId, AccountState, CardanoDelta, CardanoEntity,
+    FixedNamespace, PoolState, RewardLog,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,6 +44,46 @@ impl dolos_core::EntityDelta for AssignRewards {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PoolDepositRefund {
+    pool_deposit: u64,
+    account: StakeCredential,
+}
+
+impl PoolDepositRefund {
+    pub fn new(pool_deposit: u64, account: StakeCredential) -> Self {
+        Self {
+            pool_deposit,
+            account,
+        }
+    }
+}
+
+impl dolos_core::EntityDelta for PoolDepositRefund {
+    type Entity = AccountState;
+
+    fn key(&self) -> NsKey {
+        let enc = minicbor::to_vec(&self.account).unwrap();
+        NsKey::from((AccountState::NS, enc))
+    }
+
+    fn apply(&mut self, entity: &mut Option<Self::Entity>) {
+        let entity = entity.as_mut().expect("existing account");
+
+        if entity.is_registered() {
+            entity.rewards_sum += self.pool_deposit;
+        }
+    }
+
+    fn undo(&self, entity: &mut Option<Self::Entity>) {
+        let entity = entity.as_mut().expect("existing account");
+
+        if entity.is_registered() {
+            entity.rewards_sum = entity.rewards_sum.saturating_sub(self.pool_deposit);
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct BoundaryVisitor {
     pub deltas: Vec<CardanoDelta>,
@@ -62,7 +103,7 @@ impl BoundaryVisitor {
 impl super::BoundaryVisitor for BoundaryVisitor {
     fn visit_account(
         &mut self,
-        ctx: &mut BoundaryWork,
+        ctx: &mut super::WorkContext,
         id: &super::AccountId,
         account: &AccountState,
     ) -> Result<(), ChainError> {
@@ -73,6 +114,8 @@ impl super::BoundaryVisitor for BoundaryVisitor {
                 account: id.clone(),
                 reward: reward.total_value(),
             });
+
+            dbg!(&ctx.starting_epoch_no());
 
             for (pool, value, as_leader) in reward.into_vec() {
                 self.log(
@@ -89,7 +132,35 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         Ok(())
     }
 
-    fn flush(&mut self, ctx: &mut BoundaryWork) -> Result<(), ChainError> {
+    fn visit_pool(
+        &mut self,
+        ctx: &mut super::WorkContext,
+        _: &PoolId,
+        pool: &PoolState,
+    ) -> Result<(), ChainError> {
+        let end_stats = ctx
+            .ended_state()
+            .end
+            .as_ref()
+            .expect("no end stats available");
+
+        if end_stats.retired_pools.contains(&pool.operator) {
+            let deposit = ctx.ended_state().pparams.active().ensure_pool_deposit()?;
+
+            dbg!(&ctx.starting_epoch_no());
+
+            let account = &pool.snapshot.live().params.reward_account;
+
+            let account =
+                pallas_extras::pool_reward_account(account).ok_or(ChainError::InvalidPoolParams)?;
+
+            self.change(PoolDepositRefund::new(deposit, account));
+        }
+
+        Ok(())
+    }
+
+    fn flush(&mut self, ctx: &mut super::WorkContext) -> Result<(), ChainError> {
         ctx.rewards.drain_unspendable();
 
         for delta in self.deltas.drain(..) {

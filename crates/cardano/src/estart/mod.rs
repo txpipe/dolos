@@ -4,8 +4,8 @@ use dolos_core::{batch::WorkDeltas, BlockSlot, ChainError, Domain, EntityKey, Ge
 use tracing::{info, instrument};
 
 use crate::{
-    AccountState, CardanoDelta, CardanoEntity, CardanoLogic, DRepState, EpochState, EraProtocol,
-    EraSummary, PoolState, Proposal,
+    rewards::RewardMap, rupd::RupdWork, AccountState, CardanoDelta, CardanoEntity, CardanoLogic,
+    DRepState, EpochState, EraProtocol, EraSummary, PoolState, Proposal,
 };
 
 pub mod commit;
@@ -14,6 +14,7 @@ pub mod loading;
 // visitors
 pub mod nonces;
 pub mod reset;
+pub mod rewards;
 
 pub trait BoundaryVisitor {
     #[allow(unused_variables)]
@@ -70,6 +71,8 @@ pub type ProposalId = EntityKey;
 pub struct WorkContext {
     // loaded
     ended_state: EpochState,
+
+    pub rewards: RewardMap<RupdWork>,
     pub active_protocol: EraProtocol,
     pub active_era: EraSummary,
     pub genesis: Arc<Genesis>,
@@ -99,10 +102,11 @@ pub fn execute<D: Domain>(
     archive: &D::Archive,
     slot: BlockSlot,
     genesis: Arc<Genesis>,
+    rewards: RewardMap<RupdWork>,
 ) -> Result<(), ChainError> {
     info!("executing ESTART work unit");
 
-    let mut work = WorkContext::load::<D>(state, genesis)?;
+    let mut work = WorkContext::load::<D>(state, genesis, rewards)?;
 
     work.commit::<D>(state, archive)?;
 

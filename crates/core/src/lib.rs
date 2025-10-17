@@ -548,6 +548,9 @@ pub enum ChainError {
 
     #[error("missing rewards")]
     MissingRewards,
+
+    #[error("invalid pool params")]
+    InvalidPoolParams,
 }
 
 pub enum WorkKind {

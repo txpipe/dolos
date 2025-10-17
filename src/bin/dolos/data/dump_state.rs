@@ -2,6 +2,7 @@ use std::marker::PhantomData;
 
 use comfy_table::Table;
 use dolos_cardano::{model::AccountState, EpochState, EraSummary, PoolState};
+use itertools::Itertools;
 use miette::{Context, IntoDiagnostic};
 
 use dolos::prelude::*;
@@ -83,8 +84,6 @@ impl TableRow for EpochState {
             "pot deposits",
             "pot rewards",
             "pot fees",
-            "delta effective rewards",
-            "delta unspendable rewards",
             "gathered fees",
             "pparams",
             "nonce",
@@ -104,20 +103,6 @@ impl TableRow for EpochState {
             format!("{}", self.initial_pots.obligations()),
             format!("{}", self.initial_pots.rewards),
             format!("{}", self.initial_pots.fees),
-            format!(
-                "{}",
-                self.end
-                    .as_ref()
-                    .map(|x| x.effective_rewards)
-                    .unwrap_or_default()
-            ),
-            format!(
-                "{}",
-                self.end
-                    .as_ref()
-                    .map(|x| x.unspendable_rewards)
-                    .unwrap_or_default()
-            ),
             format!("{}", self.rolling.live().gathered_fees),
             format!("{}", self.pparams.live().len()),
             format!(
@@ -294,6 +279,25 @@ fn dump_state<T: TableRow>(
     Ok(())
 }
 
+fn dump_account(state: &impl StateStore, ns: Namespace, count: usize) -> miette::Result<()> {
+    let mut formatter = Formatter::<AccountState>::new_table();
+
+    state
+        .iter_entities_typed::<AccountState>(ns, None)
+        .into_diagnostic()
+        .context("iterating entities")?
+        .take(count)
+        .filter_ok(|x| x.1.pool.go().is_some())
+        .for_each(|x| match x {
+            Ok((key, value)) => formatter.write(key, value),
+            Err(e) => panic!("{e}"),
+        });
+
+    formatter.flush();
+
+    Ok(())
+}
+
 pub fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging)?;
 
@@ -302,7 +306,7 @@ pub fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
     match args.namespace.as_str() {
         "eras" => dump_state::<EraSummary>(&state, "eras", args.count)?,
         "epochs" => dump_state::<EpochState>(&state, "epochs", args.count)?,
-        "accounts" => dump_state::<AccountState>(&state, "accounts", args.count)?,
+        "accounts" => dump_account(&state, "accounts", args.count)?,
         "pools" => dump_state::<PoolState>(&state, "pools", args.count)?,
         //"rewards" => dump_state::<RewardState>(&state, "rewards", args.count)?,
         _ => todo!(),
