@@ -44,14 +44,9 @@ fn define_new_pool_count(ctx: &super::BoundaryWork) -> usize {
 }
 
 fn define_end_stats(ctx: &super::BoundaryWork) -> EndStats {
-    let rewards_delta = ctx.rewards.as_pot_delta();
-
     EndStats {
-        incentives: ctx.rewards.incentives().clone(),
-        effective_rewards: rewards_delta.effective_rewards,
-        unspendable_rewards: rewards_delta.unspendable_rewards,
         new_pools: define_new_pool_count(ctx) as u64,
-        removed_pools: ctx.retiring_pools.len() as u64,
+        retired_pools: ctx.retiring_pools.clone(),
     }
 }
 

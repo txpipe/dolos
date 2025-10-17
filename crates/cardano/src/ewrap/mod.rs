@@ -5,8 +5,8 @@ use pallas::ledger::primitives::conway::DRep;
 use tracing::{info, instrument};
 
 use crate::{
-    rewards::RewardMap, rupd::RupdWork, AccountState, CardanoDelta, CardanoEntity, CardanoLogic,
-    Config, DRepState, EpochState, EraProtocol, EraSummary, PoolHash, PoolState, Proposal,
+    AccountState, CardanoDelta, CardanoEntity, CardanoLogic, Config, DRepState, EpochState,
+    EraProtocol, EraSummary, PoolHash, PoolState, Proposal,
 };
 
 mod hacks;
@@ -17,7 +17,7 @@ pub mod loading;
 // visitors
 pub mod govactions;
 pub mod retires;
-pub mod rewards;
+pub mod snapshot;
 pub mod wrapup;
 
 pub trait BoundaryVisitor {
@@ -77,7 +77,6 @@ pub struct BoundaryWork {
     ending_state: EpochState,
     pub active_protocol: EraProtocol,
     pub active_era: EraSummary,
-    pub rewards: RewardMap<RupdWork>,
     pub genesis: Arc<Genesis>,
 
     // inferred
@@ -114,11 +113,10 @@ pub fn execute<D: Domain>(
     slot: BlockSlot,
     config: &Config,
     genesis: Arc<Genesis>,
-    rewards: RewardMap<RupdWork>,
 ) -> Result<(), ChainError> {
     info!("executing epoch work unit");
 
-    let mut boundary = BoundaryWork::load::<D>(state, genesis, rewards)?;
+    let mut boundary = BoundaryWork::load::<D>(state, genesis)?;
 
     // If we're going to stop, we need to do it before applying any changes.
     //
