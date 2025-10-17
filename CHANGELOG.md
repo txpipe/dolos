@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.0-beta.7] - 2025-10-17
+
+### 🐛 Bug Fixes
+
+- *(cardano)* Treat pool params as an epoch-dependant value (#759)
+- *(cardano)* Move reward apply after epoch snapshot (#761)
+- *(minibf)* Use inaccurate but compatible pool fees value (#762)
+- *(cardano)* Allow delegation to unregistered dreps (#763)
+- *(cardano)* Fix incentives calc on epoch 0
+
 ## [1.0.0-beta.6] - 2025-10-16
 
 ### 🚀 Features
@@ -21,6 +31,10 @@ All notable changes to this project will be documented in this file.
 - Fix failing tests and lint warnings (#754)
 - Formalize v2 as new internal storage version (#758)
 - *(cli)* Make storage v2 the default during init
+
+### Release
+
+- V1.0.0-beta.6
 
 ## [1.0.0-beta.5] - 2025-10-06
 
