@@ -154,9 +154,7 @@ impl dolos_core::EntityDelta for DRepActivity {
     }
 
     fn apply(&mut self, entity: &mut Option<DRepState>) {
-        let entity = entity
-            .as_mut()
-            .expect("can't track activity of missing drep");
+        let entity = entity.get_or_insert_with(|| DRepState::new(self.drep.clone()));
 
         // save undo info
         self.previous_last_active_slot = entity.last_active_slot;
@@ -187,8 +185,6 @@ impl BlockVisitor for DRepStateVisitor {
             return Ok(());
         };
 
-        deltas.add_for_entity(DRepActivity::new(drep.clone(), block.slot()));
-
         if let MultiEraCert::Conway(conway) = &cert {
             match conway.deref().deref() {
                 conway::Certificate::RegDRepCert(_, deposit, anchor) => {
@@ -205,6 +201,8 @@ impl BlockVisitor for DRepStateVisitor {
                 _ => (),
             }
         };
+
+        deltas.add_for_entity(DRepActivity::new(drep.clone(), block.slot()));
 
         Ok(())
     }
