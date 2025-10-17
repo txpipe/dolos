@@ -201,6 +201,40 @@ where
     Ok(Json(mapped))
 }
 
+// HACK: blockfrost dbsync version computes fees at the SQL query level using
+// the formula: `FLOOR(fee + (rewards - fee) * margin)`.
+//
+// This is not strictly correct, as the operator share has much more involved
+// formula. This method is a workaround to make the data compatible with the
+// blockfrost dbsync version.
+fn bf_compatible_fees(log: &StakeLog) -> u64 {
+    let margin = log
+        .margin_cost
+        .as_ref()
+        .map(
+            |pallas::ledger::primitives::RationalNumber {
+                 numerator,
+                 denominator,
+             }| num_rational::Rational64::new(*numerator as i64, *denominator as i64),
+        )
+        .unwrap_or(num_rational::Rational64::from_integer(0));
+
+    let rewards = num_rational::Rational64::from_integer(log.total_rewards as i64);
+    let fixed_cost = num_rational::Rational64::from_integer(log.fixed_cost as i64);
+
+    let variable_fees = (rewards - fixed_cost) * margin;
+    let fixed_fees = fixed_cost;
+
+    let fees = variable_fees + fixed_fees;
+    let fees = fees.to_integer() as u64;
+
+    if fees > log.total_rewards {
+        log.total_rewards
+    } else {
+        fees
+    }
+}
+
 pub async fn by_id_history<D: Domain>(
     Path(id): Path<String>,
     Query(params): Query<PaginationParameters>,
@@ -237,7 +271,7 @@ where
                 active_size: log.relative_size,
                 delegators_count: log.delegators_count as i32,
                 rewards: log.total_rewards.to_string(),
-                fees: log.operator_share.to_string(),
+                fees: bf_compatible_fees(&log).to_string(),
             })
         })
         .collect::<Result<Vec<_>, StatusCode>>()?;

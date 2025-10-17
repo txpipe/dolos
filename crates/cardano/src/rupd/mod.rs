@@ -145,6 +145,8 @@ fn log_work<D: Domain>(
         let params = snapshot.pool_params.get(pool);
         let declared_pledge = params.map(|x| x.pledge).unwrap_or(0);
         let delegators_count = snapshot.accounts_by_pool.count_delegators(pool);
+        let fixed_cost = params.map(|x| x.cost).unwrap_or(0);
+        let margin_cost = params.map(|x| x.margin.clone());
 
         // TODO: implement
         //let live_pledge = snapshot.get_live_pledge(&pool);
@@ -160,6 +162,8 @@ fn log_work<D: Domain>(
             delegators_count,
             total_rewards,
             operator_share,
+            fixed_cost,
+            margin_cost,
         };
 
         let log_key = LogKey::from((temporal_key.clone(), pool_id));

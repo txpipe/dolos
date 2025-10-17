@@ -332,6 +332,14 @@ pub struct StakeLog {
     /// Total fees for epoch
     #[n(9)]
     pub operator_share: u64,
+
+    /// Fixed cost
+    #[n(10)]
+    pub fixed_cost: u64,
+
+    /// Margin cost
+    #[n(11)]
+    pub margin_cost: Option<RationalNumber>,
 }
 
 entity_boilerplate!(StakeLog, "stakes");
