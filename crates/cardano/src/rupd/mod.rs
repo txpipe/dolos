@@ -4,7 +4,7 @@ use dolos_core::{
     ArchiveStore, ArchiveWriter, BlockSlot, ChainError, ChainPoint, Domain, EntityKey, Genesis,
     LogKey, TemporalKey,
 };
-use pallas::ledger::primitives::{RationalNumber, StakeCredential};
+use pallas::ledger::primitives::StakeCredential;
 use tracing::{info, instrument};
 
 use crate::{
