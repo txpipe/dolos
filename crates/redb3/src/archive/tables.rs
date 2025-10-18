@@ -1,14 +1,21 @@
+use std::io::{Read, Write};
+
+use pallas::ledger::primitives::byron::Block;
 use redb::{Range, ReadTransaction, ReadableTable as _, TableDefinition, WriteTransaction};
+use flate2::{read::ZlibDecoder, write::ZlibEncoder};
+use flate2::Compression;
 use tracing::trace;
 
 use dolos_core::{BlockBody, BlockSlot, ChainPoint, RawBlock};
 
 type Error = super::RedbArchiveError;
 
+type CompressedBlockBody = Vec<u8>;
+
 pub struct BlocksTable;
 
 impl BlocksTable {
-    pub const DEF: TableDefinition<'static, BlockSlot, BlockBody> = TableDefinition::new("blocks");
+    pub const DEF: TableDefinition<'static, BlockSlot, CompressedBlockBody> = TableDefinition::new("blocks");
 
     pub fn initialize(wx: &WriteTransaction) -> Result<(), Error> {
         wx.open_table(Self::DEF)?;
@@ -16,18 +23,34 @@ impl BlocksTable {
         Ok(())
     }
 
+    fn compress(block: BlockBody) -> std::io::Result<CompressedBlockBody> {
+        let mut e = ZlibEncoder::new(Vec::new(), Compression::best());
+        e.write_all(block.as_slice())?;
+        e.finish()
+    }
+
+    fn decompress(compressed: CompressedBlockBody) -> std::io::Result<BlockBody> {
+        let mut z = ZlibDecoder::new(compressed.as_slice());
+        let mut result = Vec::new();
+        z.read_to_end(&mut result)?;
+        Ok(result)
+    }
+
     pub fn get_tip(rx: &ReadTransaction) -> Result<Option<(BlockSlot, BlockBody)>, Error> {
         let table = rx.open_table(Self::DEF)?;
         let result = table
             .last()?
-            .map(|(slot, raw)| (slot.value(), raw.value().clone()));
-        Ok(result)
+            .map(|(slot, raw)| 
+                Ok((slot.value(), BlocksTable::decompress(raw.value().clone())?)));
+        result.transpose()
     }
 
     pub fn get_by_slot(rx: &ReadTransaction, slot: BlockSlot) -> Result<Option<BlockBody>, Error> {
         let table = rx.open_table(Self::DEF)?;
         match table.get(slot)? {
-            Some(value) => Ok(Some(value.value().clone())),
+            Some(value) => {
+                Ok(Some(BlocksTable::decompress(value.value().clone())?))
+            },
             None => Ok(None),
         }
     }
@@ -36,7 +59,7 @@ impl BlocksTable {
         let mut table = wx.open_table(Self::DEF)?;
 
         let slot = point.slot();
-        table.insert(slot, block.clone())?;
+        table.insert(slot, BlocksTable::compress(block.to_vec())?)?;
 
         Ok(())
     }
@@ -66,8 +89,8 @@ impl BlocksTable {
         let table = rx.open_table(Self::DEF)?;
         let result = table
             .first()?
-            .map(|(slot, raw)| (slot.value(), raw.value().clone()));
-        Ok(result)
+            .map(|(slot, raw)| Ok((slot.value(), BlocksTable::decompress(raw.value().clone())?)));
+        result.transpose()
     }
 
     pub fn last(rx: &ReadTransaction) -> Result<Option<(BlockSlot, BlockBody)>, Error> {

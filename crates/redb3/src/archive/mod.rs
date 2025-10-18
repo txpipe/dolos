@@ -81,6 +81,12 @@ impl From<::redb::TransactionError> for RedbArchiveError {
     }
 }
 
+impl From<std::io::Error> for RedbArchiveError {
+    fn from(value: std::io::Error) -> Self {
+        Self(ArchiveError::InternalError(value.to_string()))
+    }
+}
+
 const DEFAULT_CACHE_SIZE_MB: usize = 500;
 
 #[derive(Clone)]
