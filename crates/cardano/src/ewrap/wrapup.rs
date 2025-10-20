@@ -126,7 +126,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         // apply changes
         let should_retire = pool
             .retiring_epoch
-            .is_some_and(|e| e <= ctx.starting_epoch_no());
+            .is_some_and(|e| e == ctx.ending_state().number);
 
         if should_retire {
             self.change(PoolWrapUp::new(id.clone()));
