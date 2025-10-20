@@ -296,7 +296,6 @@ pub trait RewardsContext {
     fn pots(&self) -> &Pots;
 
     fn pre_allegra(&self) -> bool;
-    fn total_stake(&self) -> u64;
     fn active_stake(&self) -> u64;
     fn epoch_blocks(&self) -> u64;
     fn pool_blocks(&self, pool: PoolHash) -> u64;
@@ -343,9 +342,6 @@ pub fn define_rewards<C: RewardsContext>(ctx: &C) -> Result<RewardMap<C>, ChainE
         let total_active_stake = ctx.active_stake();
         let epoch_blocks = ctx.epoch_blocks();
         let pool_blocks = ctx.pool_blocks(pool);
-
-        // TODO: confirm that we don't need this for anything
-        let _total_stake = ctx.total_stake();
 
         let k = ctx.pparams().ensure_k()?;
         let a0 = ctx.pparams().ensure_a0()?;

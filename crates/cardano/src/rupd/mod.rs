@@ -10,7 +10,8 @@ use tracing::{info, instrument};
 use crate::{
     pots::{EpochIncentives, Pots},
     rewards::RewardMap,
-    AccountState, ChainSummary, PParamsSet, PoolHash, PoolParams, PoolState, StakeLog,
+    AccountState, ChainSummary, PParamsSet, PoolHash, PoolParams, PoolSnapshot, PoolState,
+    StakeLog,
 };
 
 pub mod loading;
@@ -79,12 +80,11 @@ impl DelegatorMap {
 
 #[derive(Debug, Default)]
 pub struct StakeSnapshot {
-    pub total_stake_sum: u64,
     pub active_stake_sum: u64,
     pub accounts_by_pool: DelegatorMap,
     pub registered_accounts: HashSet<StakeCredential>,
     pub pool_stake: HashMap<PoolHash, u64>,
-    pub pool_params: HashMap<PoolHash, PoolParams>,
+    pub pool_params: HashMap<PoolHash, PoolSnapshot>,
     pub pool_blocks: HashMap<PoolHash, u64>,
 }
 
@@ -129,10 +129,10 @@ fn log_work<D: Domain>(
         let pool_stake = snapshot.get_pool_stake(pool);
         let relative_size = (pool_stake as f64) / snapshot.active_stake_sum as f64;
         let params = snapshot.pool_params.get(pool);
-        let declared_pledge = params.map(|x| x.pledge).unwrap_or(0);
+        let declared_pledge = params.map(|x| x.params.pledge).unwrap_or(0);
         let delegators_count = snapshot.accounts_by_pool.count_delegators(pool);
-        let fixed_cost = params.map(|x| x.cost).unwrap_or(0);
-        let margin_cost = params.map(|x| x.margin.clone());
+        let fixed_cost = params.map(|x| x.params.cost).unwrap_or(0);
+        let margin_cost = params.map(|x| x.params.margin.clone());
 
         // TODO: implement
         //let live_pledge = snapshot.get_live_pledge(&pool);
@@ -173,8 +173,6 @@ pub fn execute<D: Domain>(
     let work = RupdWork::load::<D>(state, genesis)?;
 
     let rewards = crate::rewards::define_rewards(&work)?;
-
-    //print!("{}", &rewards);
 
     // TODO: logging the snapshot at this stage is not the right place. We should
     // treat this problem as part of the epoch transition logic. We put it here for

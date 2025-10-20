@@ -251,10 +251,6 @@ impl super::RewardsContext for MockContext {
         self.pparams.protocol_major().unwrap_or(0) < 3
     }
 
-    fn total_stake(&self) -> u64 {
-        self.pots.circulating()
-    }
-
     fn active_stake(&self) -> u64 {
         self.accounts
             .values()
