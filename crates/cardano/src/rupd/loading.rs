@@ -90,22 +90,9 @@ impl StakeSnapshot {
     fn track_stake(
         &mut self,
         account: &StakeCredential,
-        pool_id: Option<PoolHash>,
+        pool_id: PoolHash,
         stake: u64,
     ) -> Result<(), ChainError> {
-        let Some(pool_id) = pool_id else {
-            return Ok(());
-        };
-
-        let pool_snapshot = self
-            .pool_params
-            .get(&pool_id)
-            .expect("pool snapshot not found");
-
-        if pool_snapshot.is_retired {
-            return Ok(());
-        }
-
         self.accounts_by_pool
             .insert(pool_id, account.clone(), stake);
 
@@ -135,23 +122,9 @@ impl StakeSnapshot {
         for record in pools {
             let (_, pool) = record?;
 
-            if pool.snapshot.snapshot_at(stake_epoch).is_none() {
-                continue;
-            };
-
-            if let Some(pool_snapshot) = pool.snapshot.snapshot_at(stake_epoch) {
-                snapshot
-                    .pool_params
-                    .insert(pool.operator, pool_snapshot.clone());
-            };
-
-            if let Some(pool_snapshot) = pool.snapshot.snapshot_at(performance_epoch) {
-                if pool_snapshot.blocks_minted > 0 {
-                    snapshot
-                        .pool_blocks
-                        .insert(pool.operator, pool_snapshot.blocks_minted as u64);
-                }
-            };
+            if pool.snapshot.snapshot_at(stake_epoch).is_some() {
+                snapshot.pools.insert(pool.operator, pool.snapshot);
+            }
         }
 
         let accounts = state.iter_entities_typed::<AccountState>(AccountState::NS, None)?;
@@ -167,7 +140,21 @@ impl StakeSnapshot {
                     .insert(account.credential.clone());
             }
 
-            let pool = account.pool.snapshot_at(stake_epoch).map(|x| *x);
+            let Some(pool) = account.pool.snapshot_at(stake_epoch) else {
+                continue;
+            };
+
+            let Some(pool_state) = snapshot.pools.get(&pool) else {
+                continue;
+            };
+
+            let Some(stake_snapshot) = pool_state.snapshot_at(stake_epoch) else {
+                continue;
+            };
+
+            if stake_snapshot.is_retired {
+                continue;
+            }
 
             let stake = account
                 .stake
@@ -175,7 +162,7 @@ impl StakeSnapshot {
                 .map(|x| x.total())
                 .unwrap_or_default();
 
-            snapshot.track_stake(&account.credential, pool, stake)?;
+            snapshot.track_stake(&account.credential, *pool, stake)?;
         }
 
         for (pool_id, stake) in snapshot.pool_stake.iter() {
@@ -187,6 +174,12 @@ impl StakeSnapshot {
             "stake aggregation"
         );
 
+        if performance_epoch == 20 {
+            dbg!(&stake_epoch);
+            dbg!(&performance_epoch);
+            println!("{}", &snapshot);
+        }
+
         Ok(snapshot)
     }
 }
@@ -197,9 +190,11 @@ impl std::fmt::Display for StakeSnapshot {
             writeln!(f, "| {pool} | {stake} |")?;
         }
 
-        for (pool, blocks) in self.pool_blocks.iter() {
-            let snapshot = self.pool_params.get(pool).unwrap();
-            writeln!(f, "| {pool} | {blocks} | {} |", snapshot.params.pledge)?;
+        for (pool, pool_state) in self.pools.iter() {
+            let params = pool_state.go().map(|x| &x.params);
+            let pledge = params.map(|x| x.pledge).unwrap_or(0);
+            let blocks = pool_state.mark().map(|x| x.blocks_minted).unwrap_or(0) as u64;
+            writeln!(f, "| {pool} | {blocks} | {pledge} |")?;
         }
 
         Ok(())
@@ -279,7 +274,11 @@ impl crate::rewards::RewardsContext for RupdWork {
     }
 
     fn epoch_blocks(&self) -> u64 {
-        self.snapshot.pool_blocks.values().sum()
+        self.snapshot
+            .pools
+            .values()
+            .map(|x| x.mark().map(|x| x.blocks_minted).unwrap_or(0) as u64)
+            .sum()
     }
 
     fn pool_stake(&self, pool: PoolHash) -> u64 {
@@ -295,13 +294,15 @@ impl crate::rewards::RewardsContext for RupdWork {
     }
 
     fn iter_all_pools(&self) -> impl Iterator<Item = PoolHash> {
-        self.snapshot.pool_blocks.keys().cloned()
+        self.snapshot.pools.keys().cloned()
     }
 
     fn pool_params(&self, pool: PoolHash) -> &PoolParams {
         self.snapshot
-            .pool_params
+            .pools
             .get(&pool)
+            .unwrap()
+            .go()
             .map(|x| &x.params)
             .unwrap()
     }
@@ -320,7 +321,14 @@ impl crate::rewards::RewardsContext for RupdWork {
     }
 
     fn pool_blocks(&self, pool: PoolHash) -> u64 {
-        *self.snapshot.pool_blocks.get(&pool).unwrap_or(&0)
+        *self
+            .snapshot
+            .pools
+            .get(&pool)
+            .unwrap()
+            .mark()
+            .map(|x| &x.blocks_minted)
+            .unwrap() as u64
     }
 
     fn pre_allegra(&self) -> bool {
