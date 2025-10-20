@@ -17,7 +17,7 @@ impl BoundaryWork {
         writer: &W,
         state: &impl StateStore,
     ) -> Result<(), ChainError> {
-        let Some(transition) = &self.ending_state.era_transition() else {
+        let Some(transition) = &self.ending_state.pparams.era_transition() else {
             return Ok(());
         };
 
@@ -37,7 +37,7 @@ impl BoundaryWork {
             &previous,
         )?;
 
-        let pparams = self.ending_state().pparams.live();
+        let pparams = self.ending_state().pparams.unwrap_live();
 
         let new = EraSummary {
             start: previous.end.clone().unwrap(),

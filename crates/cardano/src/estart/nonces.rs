@@ -41,7 +41,7 @@ fn next_largest_stable_slot(ctx: &super::WorkContext) -> BlockSlot {
 }
 
 fn initial_nonces(ctx: &super::WorkContext) -> Option<Nonces> {
-    let era_transition = ctx.ended_state.era_transition()?;
+    let era_transition = ctx.ended_state.pparams.era_transition()?;
 
     if era_transition.entering_shelley() {
         Some(Nonces::bootstrap(ctx.genesis.shelley_hash))

@@ -27,10 +27,10 @@ macro_rules! format_epoch_value {
     ($stake:expr, $pool:expr) => {
         format!(
             "{} ({})",
-            $stake.map(|x| x.to_string()).unwrap_or_default(),
+            $stake.map(|x| x.total().to_string()).unwrap_or_default(),
             $pool
                 .as_ref()
-                .and_then(|x| x.map(|y| hex::encode(y)[..3].to_string()))
+                .map(|y| hex::encode(y)[..3].to_string())
                 .unwrap_or_default()
         )
     };
@@ -57,15 +57,24 @@ impl TableRow for AccountState {
             format!("{}", hex::encode(key)),
             format!("{}", self.registered_at.unwrap_or_default()),
             format!("{}", self.deregistered_at.unwrap_or_default()),
-            format_epoch_value!(self.total_stake.go(), self.pool.go()),
-            format_epoch_value!(self.total_stake.set(), self.pool.set()),
-            format_epoch_value!(self.total_stake.mark(), self.pool.mark()),
-            format_epoch_value!(Some(self.live_stake()), Some(self.pool.live())),
-            format!("{}", self.rewards_sum),
-            format!("{}", self.withdrawals_sum),
+            format_epoch_value!(self.stake.go(), self.pool.go()),
+            format_epoch_value!(self.stake.set(), self.pool.set()),
+            format_epoch_value!(self.stake.mark(), self.pool.mark()),
+            format_epoch_value!(self.stake.live(), self.pool.live()),
+            format!(
+                "{}",
+                self.stake.live().map(|x| x.rewards_sum).unwrap_or_default()
+            ),
+            format!(
+                "{}",
+                self.stake
+                    .live()
+                    .map(|x| x.withdrawals_sum)
+                    .unwrap_or_default()
+            ),
             format!(
                 "{},{},{}",
-                self.total_stake.epoch().unwrap_or_default(),
+                self.stake.epoch().unwrap_or_default(),
                 self.pool.epoch().unwrap_or_default(),
                 self.drep.epoch().unwrap_or_default(),
             ),
@@ -91,11 +100,16 @@ impl TableRow for EpochState {
     }
 
     fn row(&self, _key: &EntityKey) -> Vec<String> {
+        let pparams = self.pparams.live();
+
         vec![
             format!("{}", self.number),
             format!(
                 "{}",
-                self.pparams.active().protocol_major().unwrap_or_default()
+                pparams
+                    .as_ref()
+                    .and_then(|x| x.protocol_major())
+                    .unwrap_or_default()
             ),
             format!("{}", self.initial_pots.reserves),
             format!("{}", self.initial_pots.utxos),
@@ -103,8 +117,17 @@ impl TableRow for EpochState {
             format!("{}", self.initial_pots.obligations()),
             format!("{}", self.initial_pots.rewards),
             format!("{}", self.initial_pots.fees),
-            format!("{}", self.rolling.live().gathered_fees),
-            format!("{}", self.pparams.live().len()),
+            format!(
+                "{}",
+                self.rolling
+                    .live()
+                    .map(|x| x.gathered_fees)
+                    .unwrap_or_default()
+            ),
+            format!(
+                "{}",
+                self.pparams.live().map(|x| x.len()).unwrap_or_default()
+            ),
             format!(
                 "{}",
                 self.nonces
@@ -154,14 +177,14 @@ const POOL_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("pool");
 impl TableRow for PoolState {
     fn header() -> Vec<&'static str> {
         vec![
-            "pool hex",
             "pool bech32",
             "registered at",
             "retiring epoch",
-            "pending (go)",
-            "pending (set)",
-            "pending (mark)",
-            "pending (live)",
+            "pledge (go)",
+            "pledge (set)",
+            "pledge (mark)",
+            "pledge (live)",
+            "pledge (next)",
         ]
     }
 
@@ -172,7 +195,6 @@ impl TableRow for PoolState {
         let pool_bech32 = bech32::encode::<bech32::Bech32>(POOL_HRP, pool_hash).unwrap();
 
         vec![
-            format!("{}", pool_hex),
             format!("{}", pool_bech32),
             format!("{}", self.register_slot),
             format!(
@@ -183,14 +205,17 @@ impl TableRow for PoolState {
             ),
             format!(
                 "{} ({})",
-                self.snapshot.go().map(|x| x.is_pending).unwrap_or_default(),
+                self.snapshot
+                    .go()
+                    .map(|x| x.params.pledge)
+                    .unwrap_or_default(),
                 self.snapshot.epoch().unwrap_or_default() - 3,
             ),
             format!(
                 "{} ({})",
                 self.snapshot
                     .set()
-                    .map(|x| x.is_pending)
+                    .map(|x| x.params.pledge)
                     .unwrap_or_default(),
                 self.snapshot.epoch().unwrap_or_default() - 2
             ),
@@ -198,13 +223,24 @@ impl TableRow for PoolState {
                 "{} ({})",
                 self.snapshot
                     .mark()
-                    .map(|x| x.is_pending)
+                    .map(|x| x.params.pledge)
                     .unwrap_or_default(),
                 self.snapshot.epoch().unwrap_or_default() - 1
             ),
             format!(
                 "{} ({})",
-                self.snapshot.live().is_pending,
+                self.snapshot
+                    .live()
+                    .map(|x| x.params.pledge)
+                    .unwrap_or_default(),
+                self.snapshot.epoch().unwrap_or_default()
+            ),
+            format!(
+                "{} ({})",
+                self.snapshot
+                    .next()
+                    .map(|x| x.params.pledge)
+                    .unwrap_or_default(),
                 self.snapshot.epoch().unwrap_or_default()
             ),
         ]

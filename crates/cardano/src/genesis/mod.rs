@@ -1,11 +1,11 @@
 use dolos_core::{ChainError, Domain, EntityKey, Genesis, StateStore as _, StateWriter as _};
 
 use crate::{
-    mutable_slots, pots::Pots, EpochState, EpochValue, EraBoundary, EraSummary, Nonces, PParamsSet,
-    RollingStats, CURRENT_EPOCH_KEY,
+    mutable_slots, pots::Pots, EpochState, EpochValue, EraBoundary, EraSummary, Lovelace, Nonces,
+    PParamsSet, RollingStats, CURRENT_EPOCH_KEY,
 };
 
-fn get_utxo_amount(genesis: &Genesis) -> u64 {
+fn get_utxo_amount(genesis: &Genesis) -> Lovelace {
     let byron_utxo = pallas::ledger::configs::byron::genesis_utxos(&genesis.byron)
         .iter()
         .fold(0, |acc, (_, _, amount)| acc + amount);
@@ -44,7 +44,7 @@ fn bootstrap_pots(
             "max_lovelace_supply".to_string(),
         ))?;
 
-    let reserves = max_supply.saturating_sub(utxos);
+    let reserves = max_supply - utxos;
 
     Ok(Pots {
         reserves,
@@ -73,7 +73,7 @@ pub fn bootstrap_epoch<D: Domain>(
 
     let pots = bootstrap_pots(protocol, &pparams, genesis)?;
 
-    let pparams = EpochValue::new_genesis(pparams);
+    let pparams = EpochValue::with_genesis(pparams);
 
     let epoch = EpochState {
         pparams,
@@ -82,7 +82,7 @@ pub fn bootstrap_epoch<D: Domain>(
         nonces,
         previous_nonce_tail: None,
         number: 0,
-        rolling: EpochValue::new_genesis(RollingStats::default()),
+        rolling: EpochValue::with_live(0, RollingStats::default()),
         end: None,
     };
 
@@ -94,10 +94,12 @@ pub fn bootstrap_epoch<D: Domain>(
 }
 
 pub fn bootstrap_eras<D: Domain>(state: &D::State, epoch: &EpochState) -> Result<(), ChainError> {
-    let system_start = epoch.pparams.active().ensure_system_start()?;
-    let epoch_length = epoch.pparams.active().ensure_epoch_length()?;
-    let slot_length = epoch.pparams.active().ensure_slot_length()?;
-    let protocol_major = epoch.pparams.active().protocol_major_or_default();
+    let pparams = epoch.pparams.unwrap_live();
+
+    let system_start = pparams.ensure_system_start()?;
+    let epoch_length = pparams.ensure_epoch_length()?;
+    let slot_length = pparams.ensure_slot_length()?;
+    let protocol_major = pparams.protocol_major_or_default();
 
     let era = EraSummary {
         start: EraBoundary {

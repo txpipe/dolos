@@ -74,7 +74,17 @@ impl dolos_core::EntityDelta for PoolRegistration {
                 "updating pool registration",
             );
 
-            entity.snapshot.live_mut_unchecked().params = self.cert.clone().into();
+            // please note that for updates to existing pools we are scheduling the change
+            // for the next epoch. This differs from the behavior of new pools where the
+            // change applies to the live epoch.
+            entity.snapshot.schedule(
+                self.epoch,
+                Some(PoolSnapshot {
+                    is_retired: false,
+                    blocks_minted: 0,
+                    params: self.cert.clone().into(),
+                }),
+            );
         } else {
             debug!(
                 slot = self.slot,
@@ -86,7 +96,6 @@ impl dolos_core::EntityDelta for PoolRegistration {
             self.is_new = Some(true);
 
             let snapshot = PoolSnapshot {
-                is_pending: true,
                 is_retired: false,
                 blocks_minted: 0,
                 params: self.cert.clone().into(),
@@ -95,7 +104,10 @@ impl dolos_core::EntityDelta for PoolRegistration {
             let state = PoolState {
                 register_slot: self.slot,
                 operator: self.cert.operator,
-                snapshot: EpochValue::new(snapshot, self.epoch),
+                // please note that new pools will udpate its live snapshot directly. This differs
+                // from the behavior of existing pools where the change is scheduled for the next
+                // epoch.
+                snapshot: EpochValue::with_live(self.epoch, snapshot),
                 blocks_minted_total: 0,
                 retiring_epoch: None,
                 deposit: self.pool_deposit,
@@ -126,14 +138,14 @@ impl dolos_core::EntityDelta for MintedBlocksInc {
     fn apply(&mut self, entity: &mut Option<PoolState>) {
         if let Some(entity) = entity {
             entity.blocks_minted_total += self.count;
-            entity.snapshot.live_mut_unchecked().blocks_minted += self.count;
+            entity.snapshot.unwrap_live_mut().blocks_minted += self.count;
         }
     }
 
     fn undo(&self, entity: &mut Option<PoolState>) {
         if let Some(entity) = entity {
             entity.blocks_minted_total -= self.count;
-            entity.snapshot.live_mut_unchecked().blocks_minted -= self.count;
+            entity.snapshot.unwrap_live_mut().blocks_minted -= self.count;
         }
     }
 }

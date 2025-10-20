@@ -21,8 +21,11 @@ use crate::{
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct EpochStatsUpdate {
     block_fees: u64,
-    utxo_consumed: u64,
-    utxo_produced: u64,
+
+    // we need to use a delta approach instead of simple increments because the total size of moved
+    // lovelace can be higher than u64, causing overflows
+    utxo_delta: i64,
+
     new_accounts: u64,
     removed_accounts: u64,
     withdrawals: u64,
@@ -39,11 +42,16 @@ impl dolos_core::EntityDelta for EpochStatsUpdate {
     fn apply(&mut self, entity: &mut Option<EpochState>) {
         let Some(entity) = entity else { return };
 
-        let stats = entity.rolling.live_mut_unchecked();
+        let stats = entity.rolling.live_mut_unchecked().get_or_insert_default();
 
         stats.blocks_minted += 1;
-        stats.produced_utxos += self.utxo_produced;
-        stats.consumed_utxos += self.utxo_consumed;
+
+        if self.utxo_delta > 0 {
+            stats.produced_utxos += self.utxo_delta.abs() as u64;
+        } else {
+            stats.consumed_utxos += self.utxo_delta.abs() as u64;
+        }
+
         stats.gathered_fees += self.block_fees;
         stats.new_accounts += self.new_accounts;
         stats.removed_accounts += self.removed_accounts;
@@ -59,11 +67,20 @@ impl dolos_core::EntityDelta for EpochStatsUpdate {
     fn undo(&self, entity: &mut Option<EpochState>) {
         let Some(entity) = entity else { return };
 
-        let stats = entity.rolling.live_mut_unchecked();
+        let stats = entity
+            .rolling
+            .live_mut_unchecked()
+            .as_mut()
+            .expect("data to undo");
 
         stats.blocks_minted -= 1;
-        stats.produced_utxos -= self.utxo_produced;
-        stats.consumed_utxos -= self.utxo_consumed;
+
+        if self.utxo_delta > 0 {
+            stats.produced_utxos -= self.utxo_delta.abs() as u64;
+        } else {
+            stats.consumed_utxos -= self.utxo_delta.abs() as u64;
+        }
+
         stats.gathered_fees -= self.block_fees;
         stats.new_accounts -= self.new_accounts;
         stats.removed_accounts -= self.removed_accounts;
@@ -140,26 +157,16 @@ impl dolos_core::EntityDelta for PParamsUpdate {
 
         debug!(value = ?self.to_update, "applying pparam update");
 
-        // undo data
-        self.prev_value = entity.pparams.live().get(self.to_update.kind()).cloned();
+        let next = entity.pparams.scheduled_or_default();
 
-        entity
-            .pparams
-            .live_mut_unchecked()
-            .set(self.to_update.clone());
+        // undo data
+        self.prev_value = next.get(self.to_update.kind()).cloned();
+
+        next.set(self.to_update.clone());
     }
 
     fn undo(&self, entity: &mut Option<EpochState>) {
-        if let Some(entity) = entity {
-            if let Some(prev_value) = &self.prev_value {
-                entity.pparams.live_mut_unchecked().set(prev_value.clone());
-            } else {
-                entity
-                    .pparams
-                    .live_mut_unchecked()
-                    .clear(self.to_update.kind());
-            }
-        }
+        todo!()
     }
 }
 
@@ -217,7 +224,13 @@ impl BlockVisitor for EpochStateVisitor {
         _: &MultiEraBlock,
         tx: &MultiEraTx,
     ) -> Result<(), ChainError> {
-        self.stats_delta.as_mut().unwrap().block_fees += tx.fee().unwrap_or_default();
+        let fees = if !tx.is_valid() {
+            tx.total_collateral().unwrap_or_default()
+        } else {
+            tx.fee().unwrap_or_default()
+        };
+
+        self.stats_delta.as_mut().unwrap().block_fees += fees;
         Ok(())
     }
 
@@ -230,7 +243,7 @@ impl BlockVisitor for EpochStateVisitor {
         resolved: &pallas::ledger::traverse::MultiEraOutput,
     ) -> Result<(), ChainError> {
         let amount = resolved.value().coin();
-        self.stats_delta.as_mut().unwrap().utxo_consumed += amount;
+        self.stats_delta.as_mut().unwrap().utxo_delta -= amount as i64;
 
         Ok(())
     }
@@ -244,7 +257,7 @@ impl BlockVisitor for EpochStateVisitor {
         output: &pallas::ledger::traverse::MultiEraOutput,
     ) -> Result<(), ChainError> {
         let amount = output.value().coin();
-        self.stats_delta.as_mut().unwrap().utxo_produced += amount;
+        self.stats_delta.as_mut().unwrap().utxo_delta += amount as i64;
 
         Ok(())
     }

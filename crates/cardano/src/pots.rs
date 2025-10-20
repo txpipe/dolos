@@ -3,7 +3,7 @@ use pallas::codec::minicbor::{Decode, Encode};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{floor_int, ratio};
+use crate::{floor_int, ratio, Lovelace};
 
 pub type Ratio = num_rational::BigRational;
 pub type PallasRatio = pallas::ledger::primitives::RationalNumber;
@@ -13,19 +13,19 @@ pub type Eta = Ratio;
 #[derive(Debug, Clone, Encode, Decode, Serialize, Deserialize, Default)]
 pub struct Pots {
     #[n(0)]
-    pub reserves: u64,
+    pub reserves: Lovelace,
 
     #[n(1)]
-    pub treasury: u64,
+    pub treasury: Lovelace,
 
     #[n(2)]
-    pub utxos: u64,
+    pub utxos: Lovelace,
 
     #[n(3)]
-    pub rewards: u64,
+    pub rewards: Lovelace,
 
     #[n(4)]
-    pub fees: u64,
+    pub fees: Lovelace,
 
     #[n(5)]
     pub pool_count: u64,
@@ -44,28 +44,27 @@ pub struct Pots {
 }
 
 impl Pots {
-    pub fn obligations(&self) -> u64 {
-        self.nominal_deposits
-            + self.deposit_per_pool * self.pool_count
-            + self.deposit_per_account * self.account_count
+    pub fn obligations(&self) -> Lovelace {
+        let pool_deposits = self.deposit_per_pool * self.pool_count;
+        let account_deposits = self.deposit_per_account * self.account_count;
+
+        Lovelace::from(self.nominal_deposits + pool_deposits + account_deposits)
     }
 
-    pub fn max_supply(&self) -> u64 {
+    pub fn max_supply(&self) -> Lovelace {
         self.reserves + self.treasury + self.utxos + self.rewards + self.fees + self.obligations()
     }
 
-    pub fn circulating(&self) -> u64 {
+    pub fn circulating(&self) -> Lovelace {
         self.max_supply() - self.reserves
     }
 
-    pub fn check_consistency(&self, expected_max_supply: u64) {
-        if self.max_supply() != expected_max_supply {
-            //dbg!(self);
-        }
+    pub fn is_consistent(&self, expected_max_supply: Lovelace) -> bool {
+        self.max_supply() == expected_max_supply
+    }
 
-        // TODO: enforce once we have confidence on full-sync success
-
-        //assert_eq!(self.max_supply(), expected_max_supply);
+    pub fn assert_consistency(&self, expected_max_supply: Lovelace) {
+        assert_eq!(self.max_supply(), expected_max_supply);
     }
 }
 
@@ -87,10 +86,10 @@ pub struct EpochIncentives {
 #[derive(Debug, Clone, Encode, Decode, Serialize, Deserialize, Default)]
 pub struct PotDelta {
     #[n(0)]
-    pub produced_utxos: u64,
+    pub produced_utxos: Lovelace,
 
     #[n(1)]
-    pub consumed_utxos: u64,
+    pub consumed_utxos: Lovelace,
 
     #[n(2)]
     pub gathered_fees: u64,
@@ -264,6 +263,7 @@ pub fn apply_delta(mut pots: Pots, incentives: &EpochIncentives, delta: &PotDelt
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     const MAX_SUPPLY: u64 = 45000000000000000;
@@ -290,7 +290,7 @@ mod tests {
             nominal_deposits: 0,
         };
 
-        pots.check_consistency(MAX_SUPPLY);
+        pots.assert_consistency(MAX_SUPPLY);
 
         let fee_ss = 437793;
         let rho = ratio!(3, 1000);
@@ -302,7 +302,7 @@ mod tests {
         let delta = PotDelta::default();
         let pots = apply_delta(pots, &incentives, &delta);
 
-        pots.check_consistency(MAX_SUPPLY);
+        pots.assert_consistency(MAX_SUPPLY);
 
         assert_eq!(pots.reserves, 14982005400350235);
         assert_eq!(pots.treasury, 17994600087558);
@@ -327,7 +327,7 @@ mod tests {
             nominal_deposits: 0,
         };
 
-        pots.check_consistency(MAX_SUPPLY);
+        pots.assert_consistency(MAX_SUPPLY);
 
         let fee_ss = 304233;
         let rho = ratio!(3, 1000);
@@ -344,7 +344,7 @@ mod tests {
 
         let pots = apply_delta(pots, &incentives, &delta);
 
-        pots.check_consistency(MAX_SUPPLY);
+        pots.assert_consistency(MAX_SUPPLY);
 
         assert_eq!(pots.reserves, 14954804628961481);
         assert_eq!(pots.treasury, 45195372193123);

@@ -49,12 +49,14 @@ impl dolos_core::EntityDelta for ControlledAmountInc {
 
     fn apply(&mut self, entity: &mut Option<AccountState>) {
         let entity = entity.get_or_insert_with(|| AccountState::new(self.epoch, self.cred.clone()));
-        entity.controlled_amount += self.amount;
+
+        entity.stake.unwrap_live_mut().utxo_sum += self.amount;
     }
 
     fn undo(&self, entity: &mut Option<AccountState>) {
         let entity = entity.as_mut().expect("existing account");
-        entity.controlled_amount -= self.amount;
+
+        entity.stake.unwrap_live_mut().utxo_sum -= self.amount;
     }
 }
 
@@ -75,15 +77,13 @@ impl dolos_core::EntityDelta for ControlledAmountDec {
     fn apply(&mut self, entity: &mut Option<AccountState>) {
         let entity = entity.as_mut().expect("existing account");
 
-        // TODO: saturating sub shouldn't be necesary
-        //entity.controlled_amount -= self.amount;
-        entity.controlled_amount = entity.controlled_amount.saturating_sub(self.amount);
+        entity.stake.unwrap_live_mut().utxo_sum -= self.amount;
     }
 
     fn undo(&self, entity: &mut Option<AccountState>) {
         let entity = entity.as_mut().expect("existing account");
 
-        entity.controlled_amount += self.amount;
+        entity.stake.unwrap_live_mut().utxo_sum += self.amount;
     }
 }
 
@@ -128,7 +128,6 @@ impl dolos_core::EntityDelta for StakeRegistration {
         // save undo info
         self.prev_registered_at = entity.registered_at;
         self.prev_deregistered_at = entity.deregistered_at;
-        self.prev_deposit = Some(entity.deposit);
 
         tracing::debug!(
             slot = self.slot,
@@ -138,7 +137,6 @@ impl dolos_core::EntityDelta for StakeRegistration {
 
         entity.registered_at = Some(self.slot);
         entity.deregistered_at = None;
-        entity.deposit = self.deposit;
     }
 
     fn undo(&self, entity: &mut Option<AccountState>) {
@@ -146,7 +144,6 @@ impl dolos_core::EntityDelta for StakeRegistration {
 
         entity.registered_at = self.prev_registered_at;
         entity.deregistered_at = self.prev_deregistered_at;
-        entity.deposit = self.prev_deposit.unwrap_or(0);
     }
 }
 
@@ -156,7 +153,7 @@ pub struct StakeDelegation {
     pool: Hash<28>,
 
     // undo
-    prev_pool: Option<EpochValue<Option<PoolHash>>>,
+    prev_pool: Option<PoolHash>,
 }
 
 impl StakeDelegation {
@@ -183,16 +180,16 @@ impl dolos_core::EntityDelta for StakeDelegation {
         tracing::debug!(pool = hex::encode(self.pool), "applying delegation");
 
         // save undo
-        self.prev_pool = Some(entity.pool.clone());
+        self.prev_pool = entity.pool.live().cloned();
 
         // apply changes
-        entity.pool.replace_unchecked(Some(self.pool));
+        entity.pool.replace_unchecked(self.pool);
     }
 
     fn undo(&self, entity: &mut Option<AccountState>) {
         let entity = entity.as_mut().expect("existing account");
 
-        entity.pool = self.prev_pool.clone().expect("called with undo data");
+        entity.pool.reset(self.prev_pool);
     }
 }
 
@@ -203,7 +200,7 @@ pub struct VoteDelegation {
     vote_delegated_at: BlockSlot,
 
     // undo
-    prev_drep: Option<EpochValue<Option<DRep>>>,
+    prev_drep: Option<DRep>,
     prev_vote_delegated_at: Option<BlockSlot>,
 }
 
@@ -231,19 +228,19 @@ impl dolos_core::EntityDelta for VoteDelegation {
         let entity = entity.as_mut().expect("existing account");
 
         // save undo
-        self.prev_drep = Some(entity.drep.clone());
+        self.prev_drep = entity.drep.live().cloned();
         self.prev_vote_delegated_at = entity.vote_delegated_at;
 
         // apply changes
         entity.vote_delegated_at = Some(self.vote_delegated_at);
-        entity.drep.replace_unchecked(Some(self.drep.clone()));
+        entity.drep.replace_unchecked(self.drep.clone());
     }
 
     fn undo(&self, entity: &mut Option<AccountState>) {
         let entity = entity.as_mut().expect("existing account");
 
-        entity.drep = self.prev_drep.clone().expect("called with undo data");
         entity.vote_delegated_at = self.prev_vote_delegated_at;
+        entity.drep.reset(self.prev_drep.clone());
     }
 }
 
@@ -255,8 +252,8 @@ pub struct StakeDeregistration {
     // undo
     prev_registered_at: Option<u64>,
     prev_deregistered_at: Option<u64>,
-    prev_pool: Option<EpochValue<Option<PoolHash>>>,
-    prev_drep: Option<EpochValue<Option<DRep>>>,
+    prev_pool: Option<PoolHash>,
+    prev_drep: Option<DRep>,
     prev_deposit: Option<u64>,
 }
 
@@ -290,9 +287,8 @@ impl dolos_core::EntityDelta for StakeDeregistration {
         // save undo info
         self.prev_registered_at = entity.registered_at;
         self.prev_deregistered_at = entity.deregistered_at;
-        self.prev_pool = Some(entity.pool.clone());
-        self.prev_drep = Some(entity.drep.clone());
-        self.prev_deposit = Some(entity.deposit);
+        self.prev_pool = entity.pool.live().cloned();
+        self.prev_drep = entity.drep.live().cloned();
 
         // TODO: understand if we should keep the registered_at value even if the
         // account is deregistered
@@ -300,29 +296,12 @@ impl dolos_core::EntityDelta for StakeDeregistration {
 
         entity.deregistered_at = Some(self.slot);
 
-        entity.pool.replace_unchecked(None);
-        entity.drep.replace_unchecked(None);
-
-        // decayed deposits for deregistered accounts go directly into the UTxO outputs
-        // of the de-registered transaction. This means that there's no need for manual
-        // update of any other pot.
-
-        entity.deposit = 0;
+        entity.pool.clear_unchecked();
+        entity.drep.clear_unchecked();
     }
 
     fn undo(&self, entity: &mut Option<AccountState>) {
-        let entity = entity.as_mut().expect("existing account");
-
-        entity.registered_at = self.prev_registered_at;
-        entity.deregistered_at = self.prev_deregistered_at;
-
-        entity.pool = self.prev_pool.clone().expect("called with undo data");
-        entity.drep = self.prev_drep.clone().expect("called with undo data");
-
-        entity.deposit = self.prev_deposit.unwrap_or(0);
-        entity.rewards_sum = entity
-            .rewards_sum
-            .saturating_sub(self.prev_deposit.unwrap_or(0));
+        todo!()
     }
 }
 
@@ -343,13 +322,13 @@ impl dolos_core::EntityDelta for WithdrawalInc {
     fn apply(&mut self, entity: &mut Option<Self::Entity>) {
         let entity = entity.as_mut().expect("existing account");
 
-        entity.withdrawals_sum += self.amount;
+        entity.stake.unwrap_live_mut().withdrawals_sum += self.amount;
     }
 
     fn undo(&self, entity: &mut Option<Self::Entity>) {
         let entity = entity.as_mut().expect("existing account");
 
-        entity.withdrawals_sum = entity.withdrawals_sum.saturating_sub(self.amount);
+        entity.stake.unwrap_live_mut().withdrawals_sum -= self.amount;
     }
 }
 

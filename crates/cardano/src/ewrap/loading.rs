@@ -23,8 +23,10 @@ impl BoundaryWork {
         for record in pools {
             let (_, pool) = record?;
 
-            if !pool.snapshot.live().is_pending {
-                self.existing_pools.insert(pool.operator);
+            if let Some(snapshot) = pool.snapshot.mark() {
+                if !snapshot.is_retired {
+                    self.existing_pools.insert(pool.operator);
+                }
             }
 
             if self.should_retire_pool(&pool)? {
@@ -47,12 +49,9 @@ impl BoundaryWork {
 
         let (last_activity_epoch, _) = self.active_era.slot_epoch(last_activity_slot);
 
-        let expiring_epoch = last_activity_epoch
-            + self
-                .ending_state()
-                .pparams
-                .active()
-                .ensure_drep_inactivity_period()?;
+        let pparams = self.ending_state().pparams.unwrap_live();
+
+        let expiring_epoch = last_activity_epoch + pparams.ensure_drep_inactivity_period()?;
 
         Ok(expiring_epoch <= self.starting_epoch_no())
     }
@@ -74,8 +73,7 @@ impl BoundaryWork {
     pub fn compute_deltas<D: Domain>(&mut self, state: &D::State) -> Result<(), ChainError> {
         let mut visitor_retires = crate::ewrap::retires::BoundaryVisitor::default();
         let mut visitor_govactions = crate::ewrap::govactions::BoundaryVisitor::default();
-        let mut visitor_wrapup = crate::ewrap::wrapup::BoundaryVisitor;
-        let mut visitor_snapshot = crate::ewrap::snapshot::BoundaryVisitor::default();
+        let mut visitor_wrapup = crate::ewrap::wrapup::BoundaryVisitor::default();
 
         let pools = state.iter_entities_typed::<PoolState>(PoolState::NS, None)?;
 
@@ -85,7 +83,6 @@ impl BoundaryWork {
             visitor_retires.visit_pool(self, &pool_id, &pool)?;
             visitor_govactions.visit_pool(self, &pool_id, &pool)?;
             visitor_wrapup.visit_pool(self, &pool_id, &pool)?;
-            visitor_snapshot.visit_pool(self, &pool_id, &pool)?;
         }
 
         let dreps = state.iter_entities_typed::<DRepState>(DRepState::NS, None)?;
@@ -96,7 +93,6 @@ impl BoundaryWork {
             visitor_retires.visit_drep(self, &drep_id, &drep)?;
             visitor_govactions.visit_drep(self, &drep_id, &drep)?;
             visitor_wrapup.visit_drep(self, &drep_id, &drep)?;
-            visitor_snapshot.visit_drep(self, &drep_id, &drep)?;
         }
 
         let accounts = state.iter_entities_typed::<AccountState>(AccountState::NS, None)?;
@@ -107,7 +103,6 @@ impl BoundaryWork {
             visitor_retires.visit_account(self, &account_id, &account)?;
             visitor_govactions.visit_account(self, &account_id, &account)?;
             visitor_wrapup.visit_account(self, &account_id, &account)?;
-            visitor_snapshot.visit_account(self, &account_id, &account)?;
         }
 
         let proposals = state.iter_entities_typed::<Proposal>(Proposal::NS, None)?;
@@ -118,13 +113,11 @@ impl BoundaryWork {
             visitor_retires.visit_proposal(self, &proposal_id, &proposal)?;
             visitor_govactions.visit_proposal(self, &proposal_id, &proposal)?;
             visitor_wrapup.visit_proposal(self, &proposal_id, &proposal)?;
-            visitor_snapshot.visit_proposal(self, &proposal_id, &proposal)?;
         }
 
         visitor_retires.flush(self)?;
         visitor_govactions.flush(self)?;
         visitor_wrapup.flush(self)?;
-        visitor_snapshot.flush(self)?;
 
         Ok(())
     }

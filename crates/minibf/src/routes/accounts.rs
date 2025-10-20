@@ -104,22 +104,23 @@ impl<'a> IntoModel<AccountContent> for AccountModelBuilder<'a> {
             .account_state
             .drep
             .live()
-            .as_ref()
             .map(bech32_drep)
             .transpose()?;
 
         let active = active_epoch.map(|x| x < current_epoch).unwrap_or(false) && pool_id.is_some();
 
+        let stake = self.account_state.stake.live().cloned().unwrap_or_default();
+
         let out = AccountContent {
             stake_address,
             active,
             active_epoch: active_epoch.map(|x| x as i32),
-            controlled_amount: self.account_state.live_stake().to_string(),
-            rewards_sum: self.account_state.rewards_sum.to_string(),
-            withdrawals_sum: self.account_state.withdrawals_sum.to_string(),
+            controlled_amount: stake.total().to_string(),
+            rewards_sum: stake.rewards_sum.to_string(),
+            withdrawals_sum: stake.withdrawals_sum.to_string(),
             reserves_sum: self.account_state.reserves_sum.to_string(),
             treasury_sum: self.account_state.treasury_sum.to_string(),
-            withdrawable_amount: self.account_state.withdrawable_amount().to_string(),
+            withdrawable_amount: stake.withdrawable().to_string(),
             pool_id,
             drep_id,
         };
