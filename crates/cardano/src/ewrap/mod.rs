@@ -17,7 +17,6 @@ pub mod loading;
 // visitors
 pub mod govactions;
 pub mod retires;
-pub mod snapshot;
 pub mod wrapup;
 
 pub trait BoundaryVisitor {

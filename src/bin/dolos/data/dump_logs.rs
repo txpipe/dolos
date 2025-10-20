@@ -63,11 +63,17 @@ impl TableRow for EpochState {
     }
 
     fn row(&self, _key: &LogKey) -> Vec<String> {
+        let pparams = self.pparams.live();
+        let rolling = self.rolling.live();
+
         vec![
             format!("{}", self.number),
             format!(
                 "{}",
-                self.pparams.active().protocol_major().unwrap_or_default()
+                pparams
+                    .as_ref()
+                    .and_then(|x| x.protocol_major())
+                    .unwrap_or_default()
             ),
             format!("{}", self.initial_pots.reserves),
             format!("{}", self.initial_pots.utxos),
@@ -75,9 +81,21 @@ impl TableRow for EpochState {
             format!("{}", self.initial_pots.obligations()),
             format!("{}", self.initial_pots.rewards),
             format!("{}", self.initial_pots.fees),
-            format!("{}", self.rolling.live().gathered_fees),
-            format!("{}", self.pparams.live().len()),
-            format!("{}", self.rolling.live().blocks_minted),
+            format!(
+                "{}",
+                rolling
+                    .as_ref()
+                    .map(|x| x.gathered_fees)
+                    .unwrap_or_default()
+            ),
+            format!("{}", pparams.as_ref().map(|x| x.len()).unwrap_or_default()),
+            format!(
+                "{}",
+                rolling
+                    .as_ref()
+                    .map(|x| x.blocks_minted)
+                    .unwrap_or_default()
+            ),
         ]
     }
 }

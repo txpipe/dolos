@@ -29,7 +29,8 @@ impl dolos_core::EntityDelta for AssignRewards {
 
         debug!(account=%self.account, "assigning rewards");
 
-        entity.rewards_sum += self.reward;
+        let stake = entity.stake.unwrap_live_mut();
+        stake.rewards_sum += self.reward;
     }
 
     fn undo(&self, entity: &mut Option<Self::Entity>) {
@@ -40,47 +41,8 @@ impl dolos_core::EntityDelta for AssignRewards {
 
         debug!(account=%self.account, "undoing rewards");
 
-        entity.rewards_sum = entity.rewards_sum.saturating_sub(self.reward);
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PoolDepositRefund {
-    pool_deposit: u64,
-    account: StakeCredential,
-}
-
-impl PoolDepositRefund {
-    pub fn new(pool_deposit: u64, account: StakeCredential) -> Self {
-        Self {
-            pool_deposit,
-            account,
-        }
-    }
-}
-
-impl dolos_core::EntityDelta for PoolDepositRefund {
-    type Entity = AccountState;
-
-    fn key(&self) -> NsKey {
-        let enc = minicbor::to_vec(&self.account).unwrap();
-        NsKey::from((AccountState::NS, enc))
-    }
-
-    fn apply(&mut self, entity: &mut Option<Self::Entity>) {
-        let entity = entity.as_mut().expect("existing account");
-
-        if entity.is_registered() {
-            entity.rewards_sum += self.pool_deposit;
-        }
-    }
-
-    fn undo(&self, entity: &mut Option<Self::Entity>) {
-        let entity = entity.as_mut().expect("existing account");
-
-        if entity.is_registered() {
-            entity.rewards_sum = entity.rewards_sum.saturating_sub(self.pool_deposit);
-        }
+        let stake = entity.stake.unwrap_live_mut();
+        stake.rewards_sum -= self.reward;
     }
 }
 
@@ -125,34 +87,6 @@ impl super::BoundaryVisitor for BoundaryVisitor {
                     },
                 );
             }
-        }
-
-        Ok(())
-    }
-
-    fn visit_pool(
-        &mut self,
-        ctx: &mut super::WorkContext,
-        _: &PoolId,
-        pool: &PoolState,
-    ) -> Result<(), ChainError> {
-        let end_stats = ctx
-            .ended_state()
-            .end
-            .as_ref()
-            .expect("no end stats available");
-
-        if end_stats.retired_pools.contains(&pool.operator) {
-            let deposit = ctx.ended_state().pparams.active().ensure_pool_deposit()?;
-
-            dbg!(&ctx.starting_epoch_no());
-
-            let account = &pool.snapshot.live().params.reward_account;
-
-            let account =
-                pallas_extras::pool_reward_account(account).ok_or(ChainError::InvalidPoolParams)?;
-
-            self.change(PoolDepositRefund::new(deposit, account));
         }
 
         Ok(())

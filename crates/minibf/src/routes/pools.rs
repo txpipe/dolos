@@ -57,7 +57,7 @@ impl IntoModel<PoolListExtendedInner> for PoolModelBuilder {
         let live_stake = "0".to_string();
         let active_stake = "0".to_string();
 
-        let params = self.state.snapshot.live().params.clone();
+        let params = self.state.snapshot.live().map(|x| x.params.clone());
 
         let out = PoolListExtendedInner {
             pool_id,
@@ -66,17 +66,31 @@ impl IntoModel<PoolListExtendedInner> for PoolModelBuilder {
             active_stake,
             live_saturation: rational_to_f64::<3>(&self.state.live_saturation()),
             blocks_minted: self.state.blocks_minted_total as i32,
-            declared_pledge: params.pledge.to_string(),
-            margin_cost: rational_to_f64::<6>(&params.margin),
-            fixed_cost: params.cost.to_string(),
-            metadata: params.pool_metadata.map(|m| {
-                let out = json!({
-                    "url": m.url,
-                    "hash": m.hash,
-                });
+            declared_pledge: params
+                .as_ref()
+                .map(|x| x.pledge.to_string())
+                .unwrap_or_default(),
+            margin_cost: params
+                .as_ref()
+                .map(|x| rational_to_f64::<6>(&x.margin))
+                .unwrap_or_default(),
+            fixed_cost: params
+                .as_ref()
+                .map(|x| x.cost.to_string())
+                .unwrap_or_default(),
+            metadata: params
+                .as_ref()
+                .map(|x| {
+                    x.pool_metadata.as_ref().map(|m| {
+                        let out = json!({
+                            "url": m.url,
+                            "hash": m.hash,
+                        });
 
-                Box::new(out)
-            }),
+                        Box::new(out)
+                    })
+                })
+                .unwrap_or_default(),
         };
 
         Ok(out)
@@ -103,7 +117,7 @@ where
                 return Some(Err(StatusCode::INTERNAL_SERVER_ERROR));
             };
 
-            if state.snapshot.live().is_retired {
+            if state.snapshot.live().map(|x| x.is_retired).unwrap_or(false) {
                 return None;
             }
 
@@ -138,14 +152,11 @@ impl IntoModel<PoolDelegatorsInner> for PoolDelegatorModelBuilder {
             .to_bech32()
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-        let live_stake = self
-            .account
-            .map(|a| a.live_stake().to_string())
-            .unwrap_or_default();
+        let live_stake = self.account.map(|x| x.live_stake()).unwrap_or_default();
 
         Ok(PoolDelegatorsInner {
             address,
-            live_stake,
+            live_stake: live_stake.to_string(),
         })
     }
 }

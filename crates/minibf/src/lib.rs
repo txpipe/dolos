@@ -122,7 +122,7 @@ impl<D: Domain> Facade<D> {
 
         // TODO: epoch logs should be its own structure without the excessive
         // multi-epoch values
-        Ok(log.pparams.active().clone())
+        Ok(log.pparams.live().cloned().unwrap_or_default())
     }
 
     pub fn get_tx(&self, hash: Hash<32>) -> Result<Option<EraCbor>, StatusCode> {

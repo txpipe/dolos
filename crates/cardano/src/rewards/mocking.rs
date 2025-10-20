@@ -311,10 +311,16 @@ impl super::RewardsContext for MockContext {
         self.accounts.contains_key(&account_hex)
     }
 
-    fn iter_all_pools(&self) -> impl Iterator<Item = (PoolHash, &PoolParams)> {
+    fn iter_all_pools(&self) -> impl Iterator<Item = PoolHash> {
         self.pool_params_converted
-            .iter()
-            .filter_map(|(hex, params)| Self::hex_to_pool_hash(hex).ok().map(|hash| (hash, params)))
+            .keys()
+            .filter_map(|hex| Self::hex_to_pool_hash(hex).ok())
+    }
+
+    fn pool_params(&self, pool: PoolHash) -> &PoolParams {
+        self.pool_params_converted
+            .get(&hex::encode(pool.as_ref()))
+            .unwrap()
     }
 
     fn pool_delegators(&self, pool_id: PoolHash) -> impl Iterator<Item = StakeCredential> {

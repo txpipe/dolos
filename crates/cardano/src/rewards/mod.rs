@@ -152,6 +152,17 @@ pub struct RewardMap<C: RewardsContext> {
     _phantom: PhantomData<C>,
 }
 
+impl<C: RewardsContext> std::fmt::Display for RewardMap<C> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (_, reward) in self.pending.iter() {
+            if reward.is_spendable() && reward.total_value() > 0 {
+                writeln!(f, "| {} |", reward.total_value())?;
+            }
+        }
+        Ok(())
+    }
+}
+
 impl<C: RewardsContext> Default for RewardMap<C> {
     fn default() -> Self {
         Self {
@@ -292,7 +303,8 @@ pub trait RewardsContext {
     fn pool_stake(&self, pool: PoolHash) -> u64;
     fn account_stake(&self, pool: &PoolHash, account: &StakeCredential) -> u64;
     fn is_account_registered(&self, account: &StakeCredential) -> bool;
-    fn iter_all_pools(&self) -> impl Iterator<Item = (PoolHash, &PoolParams)>;
+    fn iter_all_pools(&self) -> impl Iterator<Item = PoolHash>;
+    fn pool_params(&self, pool: PoolHash) -> &PoolParams;
     fn pool_delegators(&self, pool_id: PoolHash) -> impl Iterator<Item = StakeCredential>;
     fn pparams(&self) -> &PParamsSet;
 
@@ -312,7 +324,9 @@ pub trait RewardsContext {
 pub fn define_rewards<C: RewardsContext>(ctx: &C) -> Result<RewardMap<C>, ChainError> {
     let mut map = RewardMap::<C>::new(ctx.incentives().clone());
 
-    for (pool, pool_params) in ctx.iter_all_pools() {
+    for pool in ctx.iter_all_pools() {
+        let pool_params = ctx.pool_params(pool);
+
         let operator_account = pallas_extras::pool_reward_account(&pool_params.reward_account)
             .expect("invalid pool reward account");
 
@@ -423,7 +437,7 @@ mod tests {
         let ctx = MockContext::from_json_file(test_data.to_str().unwrap())
             .expect("Failed to load mock context");
 
-        ctx.pots().check_consistency(MAX_SUPPLY);
+        ctx.pots().assert_consistency(MAX_SUPPLY);
 
         let mut reward_map = define_rewards(&ctx).unwrap();
 

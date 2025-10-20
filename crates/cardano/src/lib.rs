@@ -326,7 +326,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
 
 pub fn load_effective_pparams<D: Domain>(state: &D::State) -> Result<PParamsSet, ChainError> {
     let epoch = load_epoch::<D>(state)?;
-    let active = epoch.pparams.active();
+    let active = epoch.pparams.unwrap_live();
 
     Ok(active.clone())
 }

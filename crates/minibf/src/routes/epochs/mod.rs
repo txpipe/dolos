@@ -32,7 +32,7 @@ pub async fn latest_parameters<D: Domain>(
 
     let model = mapping::ParametersModelBuilder {
         epoch,
-        params: state.pparams.active().clone(),
+        params: state.pparams.live().cloned().unwrap_or_default(),
         genesis: &domain.genesis(),
         nonce: state.nonces.map(|x| x.active.to_string()),
     };
@@ -59,7 +59,7 @@ pub async fn by_number_parameters<D: Domain>(
 
     let model = mapping::ParametersModelBuilder {
         epoch: epoch.number,
-        params: epoch.pparams.active().clone(),
+        params: epoch.pparams.live().cloned().unwrap_or_default(),
         genesis: &domain.genesis(),
         nonce: epoch.nonces.map(|x| x.active.to_string()),
     };

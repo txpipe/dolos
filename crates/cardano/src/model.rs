@@ -23,14 +23,16 @@ use serde::{Deserialize, Serialize};
 use crate::{
     estart::{
         nonces::NonceTransition,
-        reset::EpochReset,
-        rewards::{AssignRewards, PoolDepositRefund},
+        reset::{AccountTransition, EpochTransition, PoolTransition},
+        rewards::AssignRewards,
     },
     ewrap::{
         govactions::ProposalEnactment,
-        retires::{DRepDelegatorDrop, DRepExpiration, PoolDelegatorDrop, ProposalExpiration},
-        snapshot::{AccountTransition, PoolTransition},
-        wrapup::EpochWrapUp,
+        retires::{
+            DRepDelegatorDrop, DRepExpiration, PoolDelegatorDrop, PoolDepositRefund,
+            ProposalExpiration,
+        },
+        wrapup::{EpochWrapUp, PoolWrapUp},
     },
     pallas_extras::{
         self, default_cost_models, default_drep_voting_thresholds, default_ex_unit_prices,
@@ -107,26 +109,37 @@ impl std::ops::AddAssign<Epoch> for EpochPosition {
     }
 }
 
+/// Allows implementing types to define what the default value is when
+/// transitioning to the next epoch. Some scenarios require a reset of its value
+/// and some others just a copy of the live one.
+pub trait TransitionDefault: Sized {
+    fn next_value(current: Option<&Self>) -> Option<Self>;
+}
+
 #[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EpochValue<T> {
     /// The epoch representing the live version of the value
     #[n(0)]
     epoch: EpochPosition,
 
-    /// The current, mutating version of the value
+    /// The next version of the value already scheduled for the next epoch
     #[n(1)]
-    live: T,
+    next: Option<T>,
+
+    /// The current, mutating version of the value
+    #[n(2)]
+    live: Option<T>,
 
     /// Epoch - 1 version of the value
-    #[n(2)]
+    #[n(4)]
     mark: Option<T>,
 
     /// Epoch - 2 version of the value
-    #[n(3)]
+    #[n(5)]
     set: Option<T>,
 
     /// Epoch - 3 version of the value
-    #[n(4)]
+    #[n(6)]
     go: Option<T>,
 }
 
@@ -134,23 +147,47 @@ impl<T> EpochValue<T>
 where
     T: Clone + std::fmt::Debug,
 {
-    pub fn new(live: T, epoch: Epoch) -> Self {
+    pub fn new(epoch: Epoch) -> Self {
         Self {
             epoch: EpochPosition::Epoch(epoch),
-            live,
-            mark: None,
-            set: None,
             go: None,
+            set: None,
+            mark: None,
+            live: None,
+            next: None,
         }
     }
 
-    pub fn new_genesis(live: T) -> Self {
+    pub fn with_live(epoch: Epoch, live: T) -> Self {
+        Self {
+            epoch: EpochPosition::Epoch(epoch),
+            go: None,
+            set: None,
+            mark: None,
+            live: Some(live),
+            next: None,
+        }
+    }
+
+    pub fn with_scheduled(epoch: Epoch, next: T) -> Self {
+        Self {
+            epoch: EpochPosition::Epoch(epoch),
+            go: None,
+            set: None,
+            mark: None,
+            live: None,
+            next: Some(next),
+        }
+    }
+
+    pub fn with_genesis(live: T) -> Self {
         Self {
             epoch: EpochPosition::Epoch(0),
-            live: live.clone(),
-            mark: Some(live.clone()),
-            set: None,
             go: None,
+            set: None,
+            mark: Some(live.clone()),
+            live: Some(live),
+            next: None,
         }
     }
 
@@ -163,8 +200,16 @@ where
     }
 
     /// Returns a reference to the live value that matches the ongoing epoch.
-    pub fn live(&self) -> &T {
-        &self.live
+    pub fn live(&self) -> Option<&T> {
+        self.live.as_ref()
+    }
+
+    pub fn unwrap_live(&self) -> &T {
+        self.live.as_ref().expect("live value not initialized")
+    }
+
+    pub fn unwrap_live_mut(&mut self) -> &mut T {
+        self.live.as_mut().expect("live value not initialized")
     }
 
     pub fn go(&self) -> Option<&T> {
@@ -179,28 +224,74 @@ where
         self.mark.as_ref()
     }
 
+    pub fn next(&self) -> Option<&T> {
+        self.next.as_ref()
+    }
+
+    pub fn next_mut(&mut self) -> Option<&mut T> {
+        self.next.as_mut()
+    }
+
+    /// Schedules the next value to be applied on the next epoch transition
+    pub fn schedule(&mut self, current_epoch: Epoch, next: Option<T>) {
+        assert_eq!(self.epoch, current_epoch);
+
+        self.schedule_unchecked(next)
+    }
+
+    /// Same as schedule, but without checking that that the epoch matches.
+    pub fn schedule_unchecked(&mut self, next: Option<T>) {
+        self.next = next;
+    }
+
     /// Mutates the live value for the current epoch without rotating any of
     /// the previous values
-    pub fn live_mut(&mut self, epoch: Epoch) -> &mut T {
+    pub fn live_mut(&mut self, epoch: Epoch) -> &mut Option<T> {
         assert_eq!(self.epoch, epoch);
         self.live_mut_unchecked()
     }
 
     /// Same as mutate, but without checking that that the epoch matches.
-    pub fn live_mut_unchecked(&mut self) -> &mut T {
+    pub fn live_mut_unchecked(&mut self) -> &mut Option<T> {
+        assert!(
+            self.next.is_none(),
+            "can't change live value when next value is already scheduled"
+        );
+
         &mut self.live
+    }
+
+    /// Resets the live value for the current epoch.
+    pub fn reset(&mut self, live: Option<T>) {
+        self.reset_unchecked(live);
+    }
+
+    /// Same as reset, but without checking that that the epoch matches.
+    pub fn reset_unchecked(&mut self, live: Option<T>) {
+        self.live = live;
     }
 
     /// Replaces the live value for the current epoch without rotating any of
     /// the previous values
     pub fn replace(&mut self, live: T, epoch: Epoch) {
         assert_eq!(self.epoch, epoch);
-        self.live = live;
+        self.live = Some(live);
     }
 
     /// Same as replace, but without checking that that the epoch matches.
     pub fn replace_unchecked(&mut self, live: T) {
-        self.live = live;
+        self.live = Some(live);
+    }
+
+    /// Clears the live value for the current epoch.
+    pub fn clear(&mut self, epoch: Epoch) {
+        assert_eq!(self.epoch, epoch);
+        self.clear_unchecked();
+    }
+
+    /// Clears the live value without rotating the previous ones.
+    pub fn clear_unchecked(&mut self) {
+        self.live = None;
     }
 
     /// Transitions into the next epoch by taking a snapshot of the live value
@@ -214,8 +305,13 @@ where
     pub fn transition_unchecked(&mut self) {
         self.go = self.set.clone();
         self.set = self.mark.clone();
-        self.mark = Some(self.live.clone());
-        // live remains the same
+        self.mark = self.live.clone();
+
+        self.live = match self.next.take() {
+            Some(next) => Some(next),
+            None => self.live.clone(),
+        };
+
         self.epoch += 1;
     }
 
@@ -245,18 +341,16 @@ where
     }
 }
 
-impl EpochValue<PParamsSet> {
-    /// PParams currently in effect, the snapshot taken at epoch boundary.
-    pub fn active(&self) -> &PParamsSet {
-        self.mark
-            .as_ref()
-            .expect("pparams not initialized correctly")
-    }
+impl<T> EpochValue<T>
+where
+    T: TransitionDefault,
+{
+    pub fn scheduled_or_default(&mut self) -> &mut T {
+        if self.next.is_none() {
+            self.next = T::next_value(self.live.as_ref());
+        }
 
-    /// PParams for the version previous to the active one, usually used for
-    /// rewards calculations.
-    pub fn for_rewards(&self) -> Option<&PParamsSet> {
-        self.set.as_ref()
+        self.next.as_mut().unwrap()
     }
 }
 
@@ -346,22 +440,48 @@ entity_boilerplate!(StakeLog, "stakes");
 
 pub type PoolHash = Hash<28>;
 
+#[derive(Debug, Clone, PartialEq, Eq, Decode, Encode, Default)]
+pub struct Stake {
+    #[n(0)]
+    pub utxo_sum: u64,
+
+    #[n(1)]
+    pub rewards_sum: u64,
+
+    #[n(2)]
+    pub withdrawals_sum: u64,
+}
+
+impl Stake {
+    pub fn total(&self) -> u64 {
+        let mut out = self.utxo_sum;
+        out += self.rewards_sum;
+        out -= self.withdrawals_sum;
+
+        out
+    }
+
+    pub fn withdrawable(&self) -> u64 {
+        let mut out = self.rewards_sum;
+        out -= self.withdrawals_sum;
+
+        out
+    }
+}
+
+impl TransitionDefault for Stake {
+    fn next_value(current: Option<&Self>) -> Option<Self> {
+        current.cloned()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Decode, Encode)]
 pub struct AccountState {
     #[n(0)]
     pub registered_at: Option<u64>,
 
     #[n(1)]
-    pub controlled_amount: u64,
-
-    #[n(2)]
-    pub total_stake: EpochValue<u64>,
-
-    #[n(3)]
-    pub rewards_sum: u64,
-
-    #[n(4)]
-    pub withdrawals_sum: u64,
+    pub stake: EpochValue<Stake>,
 
     #[n(5)]
     pub reserves_sum: u64,
@@ -370,16 +490,13 @@ pub struct AccountState {
     pub treasury_sum: u64,
 
     #[n(7)]
-    pub pool: EpochValue<Option<PoolHash>>,
+    pub pool: EpochValue<PoolHash>,
 
     #[n(9)]
-    pub drep: EpochValue<Option<DRep>>,
+    pub drep: EpochValue<DRep>,
 
     #[n(10)]
     pub vote_delegated_at: Option<BlockSlot>,
-
-    #[n(11)]
-    pub deposit: u64,
 
     #[n(12)]
     pub deregistered_at: Option<u64>,
@@ -395,22 +512,18 @@ impl AccountState {
         Self {
             credential,
             registered_at: None,
-            controlled_amount: 0,
-            total_stake: EpochValue::new(0, epoch),
-            rewards_sum: 0,
-            withdrawals_sum: 0,
+            stake: EpochValue::with_live(epoch, Default::default()),
             reserves_sum: 0,
             treasury_sum: 0,
-            pool: EpochValue::new(None, epoch),
-            drep: EpochValue::new(None, epoch),
+            pool: EpochValue::new(epoch),
+            drep: EpochValue::new(epoch),
             vote_delegated_at: None,
-            deposit: 0,
             deregistered_at: None,
         }
     }
 
-    pub fn withdrawable_amount(&self) -> u64 {
-        self.rewards_sum.saturating_add(self.withdrawals_sum)
+    pub fn live_stake(&self) -> u64 {
+        self.stake.live().map(|x| x.total()).unwrap_or_default()
     }
 
     pub fn is_registered(&self) -> bool {
@@ -419,16 +532,6 @@ impl AccountState {
             (Some(start), Some(end)) => start >= end,
             (None, _) => false,
         }
-    }
-
-    /// Computes the new stake from current values taking into account
-    /// registration status.
-    pub fn live_stake(&self) -> u64 {
-        let mut out = self.controlled_amount;
-        out += self.rewards_sum;
-        out = out.saturating_sub(self.withdrawals_sum);
-
-        out
     }
 }
 
@@ -512,9 +615,6 @@ pub struct PoolState {
 /// Pool state that is epoch-specific
 #[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize)]
 pub struct PoolSnapshot {
-    #[n(0)]
-    pub is_pending: bool,
-
     #[n(1)]
     pub is_retired: bool,
 
@@ -523,6 +623,18 @@ pub struct PoolSnapshot {
 
     #[n(3)]
     pub params: PoolParams,
+}
+
+impl TransitionDefault for PoolSnapshot {
+    fn next_value(current: Option<&Self>) -> Option<Self> {
+        let current = current.expect("no prior pool snapshot");
+
+        Some(PoolSnapshot {
+            is_retired: current.is_retired,
+            params: current.params.clone(),
+            blocks_minted: 0,
+        })
+    }
 }
 
 entity_boilerplate!(PoolState, "pools");
@@ -885,6 +997,29 @@ pub struct PParamsSet {
     values: Vec<PParamValue>,
 }
 
+impl TransitionDefault for PParamsSet {
+    fn next_value(current: Option<&Self>) -> Option<Self> {
+        current.cloned()
+    }
+}
+
+impl EpochValue<PParamsSet> {
+    pub fn era_transition(&self) -> Option<EraTransition> {
+        let original = self.unwrap_live().protocol_major_or_default();
+
+        let update = self.next().and_then(|p| p.protocol_major())?;
+
+        if original == update {
+            return None;
+        }
+
+        Some(EraTransition {
+            prev_version: EraProtocol::from(original),
+            new_version: EraProtocol::from(update),
+        })
+    }
+}
+
 macro_rules! pgetter {
     ($kind:ident, $ty:ty) => {
         paste::paste! {
@@ -1127,17 +1262,19 @@ impl Nonces {
     }
 }
 
+pub type Lovelace = u64;
+
 /// Epoch data that is gathered as part of the block rolling process
 #[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize, Default)]
 pub struct RollingStats {
     #[n(2)]
-    pub produced_utxos: u64,
+    pub produced_utxos: Lovelace,
 
     #[n(3)]
-    pub consumed_utxos: u64,
+    pub consumed_utxos: Lovelace,
 
     #[n(4)]
-    pub gathered_fees: u64,
+    pub gathered_fees: Lovelace,
 
     #[n(5)]
     pub new_accounts: u64,
@@ -1146,13 +1283,19 @@ pub struct RollingStats {
     pub removed_accounts: u64,
 
     #[n(7)]
-    pub withdrawals: u64,
+    pub withdrawals: Lovelace,
 
     #[n(8)]
     pub registered_pools: HashSet<PoolHash>,
 
     #[n(13)]
     pub blocks_minted: u32,
+}
+
+impl TransitionDefault for RollingStats {
+    fn next_value(_: Option<&Self>) -> Option<Self> {
+        Some(Self::default())
+    }
 }
 
 /// Stats that are gathered at the end of the epoch
@@ -1202,22 +1345,6 @@ impl EraTransition {
     /// Check if this boundary is transitioning to shelley for the first time.
     pub fn entering_shelley(&self) -> bool {
         self.prev_version < 2 && self.new_version == 2
-    }
-}
-
-impl EpochState {
-    pub fn era_transition(&self) -> Option<EraTransition> {
-        let original = self.pparams.active().protocol_major_or_default();
-        let update = self.pparams.live.protocol_major()?;
-
-        if original == update {
-            return None;
-        }
-
-        Some(EraTransition {
-            prev_version: EraProtocol::from(original),
-            new_version: EraProtocol::from(update),
-        })
     }
 }
 
@@ -1497,9 +1624,10 @@ pub enum CardanoDelta {
     AccountTransition(AccountTransition),
     ProposalExpiration(ProposalExpiration),
     PoolDepositRefund(PoolDepositRefund),
-    EpochReset(EpochReset),
+    EpochTransition(EpochTransition),
     EpochWrapUp(EpochWrapUp),
     DRepDelegatorDrop(DRepDelegatorDrop),
+    PoolWrapUp(PoolWrapUp),
 }
 
 impl CardanoDelta {
@@ -1563,9 +1691,10 @@ delta_from!(PoolTransition);
 delta_from!(AccountTransition);
 delta_from!(ProposalExpiration);
 delta_from!(PoolDepositRefund);
-delta_from!(EpochReset);
+delta_from!(EpochTransition);
 delta_from!(EpochWrapUp);
 delta_from!(DRepDelegatorDrop);
+delta_from!(PoolWrapUp);
 
 impl dolos_core::EntityDelta for CardanoDelta {
     type Entity = super::model::CardanoEntity;
@@ -1599,9 +1728,10 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::ProposalExpiration(x) => x.key(),
             Self::ProposalEnactment(x) => x.key(),
             Self::PoolDepositRefund(x) => x.key(),
-            Self::EpochReset(x) => x.key(),
+            Self::EpochTransition(x) => x.key(),
             Self::EpochWrapUp(x) => x.key(),
             Self::DRepDelegatorDrop(x) => x.key(),
+            Self::PoolWrapUp(x) => x.key(),
         }
     }
 
@@ -1634,9 +1764,10 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::ProposalExpiration(x) => Self::downcast_apply(x, entity),
             Self::ProposalEnactment(x) => Self::downcast_apply(x, entity),
             Self::PoolDepositRefund(x) => Self::downcast_apply(x, entity),
-            Self::EpochReset(x) => Self::downcast_apply(x, entity),
+            Self::EpochTransition(x) => Self::downcast_apply(x, entity),
             Self::EpochWrapUp(x) => Self::downcast_apply(x, entity),
             Self::DRepDelegatorDrop(x) => Self::downcast_apply(x, entity),
+            Self::PoolWrapUp(x) => Self::downcast_apply(x, entity),
         }
     }
 
@@ -1669,9 +1800,10 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::ProposalExpiration(x) => Self::downcast_undo(x, entity),
             Self::ProposalEnactment(x) => Self::downcast_undo(x, entity),
             Self::PoolDepositRefund(x) => Self::downcast_undo(x, entity),
-            Self::EpochReset(x) => Self::downcast_undo(x, entity),
+            Self::EpochTransition(x) => Self::downcast_undo(x, entity),
             Self::EpochWrapUp(x) => Self::downcast_undo(x, entity),
             Self::DRepDelegatorDrop(x) => Self::downcast_undo(x, entity),
+            Self::PoolWrapUp(x) => Self::downcast_undo(x, entity),
         }
     }
 }

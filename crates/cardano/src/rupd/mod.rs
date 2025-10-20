@@ -95,20 +95,6 @@ impl StakeSnapshot {
     }
 }
 
-impl std::fmt::Display for StakeSnapshot {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        for (pool, total_stake) in self.pool_stake.iter() {
-            writeln!(f, "| {pool} | {total_stake} |")?;
-
-            for (delegator, stake) in self.accounts_by_pool.iter_delegators(pool) {
-                writeln!(f, "| {delegator:?} | {stake} |")?;
-            }
-        }
-
-        Ok(())
-    }
-}
-
 #[derive(Debug)]
 pub struct RupdWork {
     // loaded
@@ -187,6 +173,8 @@ pub fn execute<D: Domain>(
     let work = RupdWork::load::<D>(state, genesis)?;
 
     let rewards = crate::rewards::define_rewards(&work)?;
+
+    //print!("{}", &rewards);
 
     // TODO: logging the snapshot at this stage is not the right place. We should
     // treat this problem as part of the epoch transition logic. We put it here for

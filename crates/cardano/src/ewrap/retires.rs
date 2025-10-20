@@ -1,11 +1,15 @@
 use dolos_core::{ChainError, NsKey};
-use pallas::ledger::primitives::conway::DRep;
+use pallas::{
+    codec::minicbor,
+    ledger::primitives::{conway::DRep, StakeCredential},
+};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 use crate::{
-    ewrap::{AccountId, BoundaryWork, DRepId, ProposalId},
-    AccountState, CardanoDelta, DRepState, EpochValue, FixedNamespace as _, PoolHash, Proposal,
+    ewrap::{AccountId, BoundaryWork, DRepId, PoolId, ProposalId},
+    pallas_extras, AccountState, CardanoDelta, DRepState, FixedNamespace as _, PoolHash, PoolState,
+    Proposal,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,7 +55,7 @@ pub struct PoolDelegatorDrop {
     delegator: AccountId,
 
     // undo
-    prev_pool: Option<EpochValue<Option<PoolHash>>>,
+    prev_pool: Option<PoolHash>,
 }
 
 impl PoolDelegatorDrop {
@@ -79,27 +83,26 @@ impl dolos_core::EntityDelta for PoolDelegatorDrop {
         debug!(delegator=%self.delegator, "dropping pool delegator");
 
         // save undo info
-        self.prev_pool = Some(entity.pool.clone());
+        self.prev_pool = entity.pool.next().cloned();
 
         // apply changes
-        entity.pool.replace_unchecked(None);
+        entity.pool.schedule_unchecked(None);
     }
 
     fn undo(&self, entity: &mut Option<AccountState>) {
-        let Some(entity) = entity else {
-            warn!("missing delegator");
-            return;
-        };
-
-        debug!(delegator=%self.delegator, "restoring pool delegator");
-
-        entity.pool = self.prev_pool.clone().expect("called with undo data");
+        todo!()
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DRepExpiration {
     drep_id: DRepId,
+}
+
+impl DRepExpiration {
+    pub fn new(drep_id: DRepId) -> Self {
+        Self { drep_id }
+    }
 }
 
 impl dolos_core::EntityDelta for DRepExpiration {
@@ -110,10 +113,7 @@ impl dolos_core::EntityDelta for DRepExpiration {
     }
 
     fn apply(&mut self, entity: &mut Option<Self::Entity>) {
-        let Some(entity) = entity else {
-            warn!("missing drep");
-            return;
-        };
+        let entity = entity.as_mut().expect("existing account");
 
         debug!(drep=%self.drep_id, "expiring drep");
 
@@ -137,7 +137,7 @@ pub struct DRepDelegatorDrop {
     delegator: AccountId,
 
     // undo
-    prev_drep: Option<EpochValue<Option<DRep>>>,
+    prev_drep: Option<DRep>,
 }
 
 impl DRepDelegatorDrop {
@@ -157,29 +157,52 @@ impl dolos_core::EntityDelta for DRepDelegatorDrop {
     }
 
     fn apply(&mut self, entity: &mut Option<AccountState>) {
-        let Some(entity) = entity else {
-            warn!("missing delegator");
-            return;
-        };
+        let entity = entity.as_mut().expect("existing account");
 
         debug!(delegator=%self.delegator, "dropping drep delegator");
 
-        // save undo info
-        self.prev_drep = Some(entity.drep.clone());
-
         // apply changes
-        entity.drep.replace_unchecked(None);
+        entity.drep.schedule_unchecked(None);
     }
 
     fn undo(&self, entity: &mut Option<AccountState>) {
-        let Some(entity) = entity else {
-            warn!("missing delegator");
-            return;
-        };
+        todo!()
+    }
+}
 
-        debug!(delegator=%self.delegator, "restoring drep delegator");
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PoolDepositRefund {
+    pool_deposit: u64,
+    account: StakeCredential,
+}
 
-        entity.drep = self.prev_drep.clone().expect("called with undo data");
+impl PoolDepositRefund {
+    pub fn new(pool_deposit: u64, account: StakeCredential) -> Self {
+        Self {
+            pool_deposit,
+            account,
+        }
+    }
+}
+
+impl dolos_core::EntityDelta for PoolDepositRefund {
+    type Entity = AccountState;
+
+    fn key(&self) -> NsKey {
+        let enc = minicbor::to_vec(&self.account).unwrap();
+        NsKey::from((AccountState::NS, enc))
+    }
+
+    fn apply(&mut self, entity: &mut Option<Self::Entity>) {
+        let entity = entity.as_mut().expect("existing account");
+
+        let stake = entity.stake.scheduled_or_default();
+
+        stake.rewards_sum += self.pool_deposit;
+    }
+
+    fn undo(&self, entity: &mut Option<Self::Entity>) {
+        todo!()
     }
 }
 
@@ -190,12 +213,10 @@ fn should_expire_proposal(ctx: &mut BoundaryWork, proposal: &Proposal) -> Result
     }
 
     let (epoch, _) = ctx.active_era.slot_epoch(proposal.slot);
-    let expiring_epoch = epoch
-        + ctx
-            .ending_state()
-            .pparams
-            .active()
-            .ensure_governance_action_validity_period()?;
+
+    let pparams = ctx.ending_state().pparams.unwrap_live();
+
+    let expiring_epoch = epoch + pparams.ensure_governance_action_validity_period()?;
 
     Ok(expiring_epoch <= ctx.starting_epoch_no())
 }
@@ -240,12 +261,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         drep: &DRepState,
     ) -> Result<(), ChainError> {
         if ctx.expiring_dreps.contains(&drep.identifier) {
-            self.deltas.push(
-                DRepExpiration {
-                    drep_id: id.clone(),
-                }
-                .into(),
-            );
+            self.change(DRepExpiration::new(id.clone()));
         }
 
         Ok(())
@@ -261,13 +277,44 @@ impl super::BoundaryVisitor for BoundaryVisitor {
             return Ok(());
         }
 
-        self.deltas.push(
-            ProposalExpiration {
-                proposal: id.clone(),
-                epoch: ctx.starting_epoch_no(),
-            }
-            .into(),
-        );
+        self.change(ProposalExpiration {
+            proposal: id.clone(),
+            epoch: ctx.starting_epoch_no(),
+        });
+
+        Ok(())
+    }
+
+    fn visit_pool(
+        &mut self,
+        ctx: &mut super::BoundaryWork,
+        _: &PoolId,
+        pool: &PoolState,
+    ) -> Result<(), ChainError> {
+        if !ctx.retiring_pools.contains(&pool.operator) {
+            return Ok(());
+        }
+
+        let deposit = ctx
+            .ending_state()
+            .pparams
+            .unwrap_live()
+            .ensure_pool_deposit()?;
+
+        let account = match &pool.snapshot.live() {
+            Some(snapshot) => &snapshot.params.reward_account,
+            // TODO: this seems like a hack, but it's the only way to get the reward account for a
+            // pool that is being retired in the same epoch as it was registered.
+            None => &pool.snapshot.next().unwrap().params.reward_account,
+        };
+
+        let account =
+            pallas_extras::pool_reward_account(account).ok_or(ChainError::InvalidPoolParams)?;
+
+        // TODO: we need to check if the account is registered, but we don't have access
+        // to the account state from the visitor. The Work loader should handle this.
+
+        self.change(PoolDepositRefund::new(deposit, account));
 
         Ok(())
     }
