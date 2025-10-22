@@ -195,7 +195,7 @@ pub async fn handle_account_state(
                 .context("getting from row")?,
         )?;
 
-        let _account = todo!();
+        todo!();
 
         // writer
         //     .write_entity_typed::<AccountState>(&EntityKey::from(key),
@@ -441,7 +441,7 @@ pub async fn handle_pool_state(
         .into_diagnostic()
         .context("decoding pool vrf_keyhash")?;
 
-        let _pool = todo!();
+        todo!();
 
         // writer
         //     .write_entity_typed::<PoolState>(&EntityKey::from(key), &pool)
@@ -618,7 +618,7 @@ pub async fn handle_epoch_state(
         let _deposits_drep: u64 = from_row_bigint!(row, "deposits_drep");
         let _deposits_proposal: u64 = from_row_bigint!(row, "deposits_proposal");
 
-        let _epoch_state = todo!();
+        todo!();
     }
 
     tracing::info!("Finished processing epochs.");
@@ -689,7 +689,7 @@ pub async fn handle_drep_state(
             .context("parsing drep voting power")?;
         let _last_active_slot = from_row!(row, Option<i64>, "last_active_slot").map(|x| x as u64);
 
-        let _drep = todo!();
+        todo!();
 
         // writer
         //     .write_entity_typed::<DRepState>(&EntityKey::from(drep_id),
