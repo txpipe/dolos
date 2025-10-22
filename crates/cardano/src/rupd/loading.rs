@@ -1,14 +1,13 @@
 use dolos_core::{ChainError, Domain, Genesis, StateStore};
 use pallas::ledger::primitives::StakeCredential;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use crate::{
     load_era_summary, pallas_ratio,
     pots::{self, EpochIncentives, Eta, Pots},
     ratio,
     rupd::{RupdWork, StakeSnapshot},
-    AccountState, EpochState, FixedNamespace as _, PParamsSet, PoolHash, PoolParams, PoolSnapshot,
-    PoolState,
+    AccountState, EpochState, FixedNamespace as _, PParamsSet, PoolHash, PoolParams, PoolState,
 };
 
 fn define_eta(
@@ -140,7 +139,7 @@ impl StakeSnapshot {
                     .insert(account.credential.clone());
             }
 
-            let Some(pool) = account.pool.snapshot_at(stake_epoch) else {
+            let Some(pool) = account.delegated_pool_at(stake_epoch) else {
                 continue;
             };
 
@@ -173,12 +172,6 @@ impl StakeSnapshot {
             active_stake = %snapshot.active_stake_sum,
             "stake aggregation"
         );
-
-        if performance_epoch == 20 {
-            dbg!(&stake_epoch);
-            dbg!(&performance_epoch);
-            println!("{}", &snapshot);
-        }
 
         Ok(snapshot)
     }

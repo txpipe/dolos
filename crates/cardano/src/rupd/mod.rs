@@ -179,14 +179,5 @@ pub fn execute<D: Domain>(
     // the time being for simplicity.
     log_work::<D>(&work, &rewards, archive)?;
 
-    let epochs = work.relevant_epochs();
-
-    if let Some((snapshot_epoch, performance_epoch)) = epochs {
-        if performance_epoch == 20 {
-            print!("{}", &rewards);
-            panic!();
-        }
-    }
-
     Ok(rewards)
 }

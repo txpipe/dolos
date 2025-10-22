@@ -8,6 +8,7 @@ use itertools::Itertools;
 use miette::{Context, IntoDiagnostic};
 
 use dolos::prelude::*;
+use pallas::ledger::primitives::Epoch;
 
 #[derive(Debug, clap::Args)]
 pub struct Args {
@@ -25,17 +26,21 @@ trait TableRow: Entity {
     fn row(&self, key: &EntityKey) -> Vec<String>;
 }
 
-macro_rules! format_epoch_value {
-    ($stake:expr, $pool:expr) => {
-        format!(
-            "{} ({})",
-            $stake.map(|x| x.total().to_string()).unwrap_or_default(),
-            $pool
-                .as_ref()
-                .map(|y| hex::encode(y)[..3].to_string())
-                .unwrap_or_default()
-        )
-    };
+fn format_stake_at(account: &AccountState, epoch: Epoch) -> String {
+    let stake = account
+        .stake
+        .snapshot_at(epoch)
+        .map(|x| x.total().to_string());
+
+    let pool = account
+        .delegated_pool_at(epoch)
+        .map(|x| hex::encode(x.as_ref())[..3].to_string());
+
+    format!(
+        "{} ({})",
+        stake.unwrap_or_else(|| "x".to_string()),
+        pool.unwrap_or_else(|| "x".to_string())
+    )
 }
 
 impl TableRow for AccountState {
@@ -55,25 +60,16 @@ impl TableRow for AccountState {
     }
 
     fn row(&self, key: &EntityKey) -> Vec<String> {
+        let epoch = self.stake.epoch().unwrap_or_default();
+
         vec![
             format!("{}", hex::encode(key)),
             format!("{}", self.registered_at.unwrap_or_default()),
             format!("{}", self.deregistered_at.unwrap_or_default()),
-            format_epoch_value!(self.stake.go(), self.pool.go()),
-            format_epoch_value!(self.stake.set(), self.pool.set()),
-            format_epoch_value!(self.stake.mark(), self.pool.mark()),
-            format_epoch_value!(self.stake.live(), self.pool.live()),
-            format!(
-                "{}",
-                self.stake.live().map(|x| x.rewards_sum).unwrap_or_default()
-            ),
-            format!(
-                "{}",
-                self.stake
-                    .live()
-                    .map(|x| x.withdrawals_sum)
-                    .unwrap_or_default()
-            ),
+            format_stake_at(self, epoch - 3),
+            format_stake_at(self, epoch - 2),
+            format_stake_at(self, epoch - 1),
+            format_stake_at(self, epoch),
             format!(
                 "{},{},{}",
                 self.stake.epoch().unwrap_or_default(),

@@ -119,7 +119,7 @@ impl BoundaryWork {
         self.apply_whole_namespace::<D, Proposal>(state, &writer)?;
         self.apply_whole_namespace::<D, EpochState>(state, &writer)?;
 
-        debug_assert!(self.deltas.entities.is_empty());
+        assert!(self.deltas.entities.is_empty());
 
         // TODO: remove this once we stop testing with full snapshots
         if !self.deltas.entities.is_empty() {

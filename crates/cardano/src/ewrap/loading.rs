@@ -1,20 +1,38 @@
 use std::sync::Arc;
 
-use dolos_core::{batch::WorkDeltas, ChainError, Domain, Genesis, StateStore};
+use dolos_core::{batch::WorkDeltas, ChainError, Domain, Genesis, NsKey, StateStore};
+use pallas::codec::minicbor;
 use tracing::info;
 
 use crate::{
     ewrap::{BoundaryVisitor as _, BoundaryWork},
-    load_active_era, AccountState, DRepState, FixedNamespace as _, PoolState, Proposal,
+    load_active_era, pallas_extras, AccountState, DRepState, FixedNamespace as _, PoolState,
+    Proposal,
 };
 
 impl BoundaryWork {
-    fn should_retire_pool(&self, pool: &PoolState) -> Result<bool, ChainError> {
-        let Some(retiring_epoch) = pool.retiring_epoch else {
-            return Ok(false);
-        };
+    fn should_retire_pool(&self, pool: &PoolState) -> bool {
+        pool.retiring_epoch
+            .is_some_and(|e| e == self.starting_epoch_no())
+    }
 
-        Ok(retiring_epoch == self.starting_epoch_no())
+    fn load_pool_reward_account<D: Domain>(
+        &self,
+        state: &D::State,
+        pool: &PoolState,
+    ) -> Result<AccountState, ChainError> {
+        let account = &pool.snapshot.unwrap_live().params.reward_account;
+
+        let account =
+            pallas_extras::pool_reward_account(&account).ok_or(ChainError::InvalidPoolParams)?;
+
+        let entity_key = minicbor::to_vec(account).unwrap();
+
+        let account = state
+            .read_entity_typed(AccountState::NS, &entity_key.into())?
+            .ok_or(ChainError::InvalidPoolParams)?;
+
+        Ok(account)
     }
 
     fn load_pool_data<D: Domain>(&mut self, state: &D::State) -> Result<(), ChainError> {
@@ -29,9 +47,9 @@ impl BoundaryWork {
                 }
             }
 
-            if self.should_retire_pool(&pool)? {
-                info!("retiring pool");
-                self.retiring_pools.insert(pool.operator);
+            if self.should_retire_pool(&pool) {
+                let account = self.load_pool_reward_account::<D>(state, &pool)?;
+                self.retiring_pools.insert(pool.operator, (pool, account));
             }
         }
 
@@ -83,6 +101,14 @@ impl BoundaryWork {
             visitor_retires.visit_pool(self, &pool_id, &pool)?;
             visitor_govactions.visit_pool(self, &pool_id, &pool)?;
             visitor_wrapup.visit_pool(self, &pool_id, &pool)?;
+        }
+
+        let retiring_pools = self.retiring_pools.clone();
+
+        for (pool_id, (pool, account)) in retiring_pools {
+            visitor_retires.visit_retiring_pool(self, pool_id, &pool, &account)?;
+            visitor_govactions.visit_retiring_pool(self, pool_id, &pool, &account)?;
+            visitor_wrapup.visit_retiring_pool(self, pool_id, &pool, &account)?;
         }
 
         let dreps = state.iter_entities_typed::<DRepState>(DRepState::NS, None)?;

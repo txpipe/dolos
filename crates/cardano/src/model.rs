@@ -306,11 +306,7 @@ where
         self.go = self.set.clone();
         self.set = self.mark.clone();
         self.mark = self.live.clone();
-
-        self.live = match self.next.take() {
-            Some(next) => Some(next),
-            None => self.live.clone(),
-        };
+        self.live = self.next.take();
 
         self.epoch += 1;
     }
@@ -318,7 +314,7 @@ where
     /// Returns the value for the snapshot taken at the end of the given epoch.
     pub fn snapshot_at(&self, ending_epoch: Epoch) -> Option<&T> {
         if self.epoch == ending_epoch {
-            None
+            self.live.as_ref()
         } else if self.epoch.mark() == Some(ending_epoch) {
             self.mark.as_ref()
         } else if self.epoch.set() == Some(ending_epoch) {
@@ -343,7 +339,7 @@ where
 
 impl<T> EpochValue<T>
 where
-    T: TransitionDefault,
+    T: TransitionDefault + std::fmt::Debug + Clone,
 {
     pub fn scheduled_or_default(&mut self) -> &mut T {
         if self.next.is_none() {
@@ -351,6 +347,17 @@ where
         }
 
         self.next.as_mut().unwrap()
+    }
+
+    /// Transitions into the next epoch using the scheduled value, falling back
+    /// to the default value if the next is not scheduled.
+    pub fn default_transition(&mut self, next_epoch: Epoch) {
+        if self.next.is_none() {
+            let next = T::next_value(self.live.as_ref());
+            self.next = next;
+        }
+
+        self.transition(next_epoch);
     }
 }
 
@@ -469,7 +476,34 @@ impl Stake {
     }
 }
 
+// HACK: seems that encoding `Some(None)` to CBOR is a lossy operation, the
+// decoding return None. To avoid dealing with this issue at the `minicbor`
+// crate, we're creating this pseud-option enum to identify the existence or
+// lack of delegation.
+#[derive(Debug, Clone, PartialEq, Eq, Decode, Encode, Serialize, Deserialize)]
+pub enum PoolDelegation {
+    #[n(0)]
+    Pool(#[n(0)] PoolHash),
+
+    #[n(1)]
+    NotDelegated,
+}
+
+pub type DRepDelegation = Option<DRep>;
+
 impl TransitionDefault for Stake {
+    fn next_value(current: Option<&Self>) -> Option<Self> {
+        current.cloned()
+    }
+}
+
+impl TransitionDefault for PoolDelegation {
+    fn next_value(current: Option<&Self>) -> Option<Self> {
+        current.cloned()
+    }
+}
+
+impl TransitionDefault for DRepDelegation {
     fn next_value(current: Option<&Self>) -> Option<Self> {
         current.cloned()
     }
@@ -483,25 +517,19 @@ pub struct AccountState {
     #[n(1)]
     pub stake: EpochValue<Stake>,
 
-    #[n(5)]
-    pub reserves_sum: u64,
+    #[n(2)]
+    pub pool: EpochValue<PoolDelegation>,
 
-    #[n(6)]
-    pub treasury_sum: u64,
+    #[n(3)]
+    pub drep: EpochValue<DRepDelegation>,
 
-    #[n(7)]
-    pub pool: EpochValue<PoolHash>,
-
-    #[n(9)]
-    pub drep: EpochValue<DRep>,
-
-    #[n(10)]
+    #[n(4)]
     pub vote_delegated_at: Option<BlockSlot>,
 
-    #[n(12)]
+    #[n(5)]
     pub deregistered_at: Option<u64>,
 
-    #[n(13)]
+    #[n(6)]
     pub credential: StakeCredential,
 }
 
@@ -513,8 +541,6 @@ impl AccountState {
             credential,
             registered_at: None,
             stake: EpochValue::with_live(epoch, Default::default()),
-            reserves_sum: 0,
-            treasury_sum: 0,
             pool: EpochValue::new(epoch),
             drep: EpochValue::new(epoch),
             vote_delegated_at: None,
@@ -532,6 +558,24 @@ impl AccountState {
             (Some(start), Some(end)) => start >= end,
             (None, _) => false,
         }
+    }
+
+    pub fn delegated_pool_at(&self, epoch: Epoch) -> Option<&PoolHash> {
+        self.pool.snapshot_at(epoch).and_then(|x| match x {
+            PoolDelegation::Pool(pool) => Some(pool),
+            _ => None,
+        })
+    }
+
+    pub fn delegated_pool_live(&self) -> Option<&PoolHash> {
+        match self.pool.live() {
+            Some(PoolDelegation::Pool(pool)) => Some(pool),
+            _ => None,
+        }
+    }
+
+    pub fn delegated_drep_at(&self, epoch: Epoch) -> Option<&DRep> {
+        self.drep.snapshot_at(epoch).and_then(|x| x.as_ref())
     }
 }
 
@@ -1302,10 +1346,13 @@ impl TransitionDefault for RollingStats {
 #[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize)]
 pub struct EndStats {
     #[n(0)]
-    pub new_pools: u64,
+    pub pool_deposit_count: u64,
 
     #[n(1)]
-    pub retired_pools: HashSet<PoolHash>,
+    pub pool_refund_count: u64,
+
+    #[n(2)]
+    pub pool_invalid_refund_count: u64,
 }
 
 #[derive(Debug, Encode, Decode, Clone)]
