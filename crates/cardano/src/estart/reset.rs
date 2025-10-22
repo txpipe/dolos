@@ -39,7 +39,7 @@ impl dolos_core::EntityDelta for AccountTransition {
         entity.drep.default_transition(self.next_epoch);
     }
 
-    fn undo(&self, entity: &mut Option<AccountState>) {
+    fn undo(&self, _entity: &mut Option<AccountState>) {
         todo!()
     }
 }
@@ -113,8 +113,8 @@ pub fn define_new_pots(ctx: &super::WorkContext) -> Pots {
     let reward_delta = ctx.rewards.as_pot_delta();
 
     let delta = PotDelta {
-        produced_utxos: rolling.produced_utxos.clone(),
-        consumed_utxos: rolling.consumed_utxos.clone(),
+        produced_utxos: rolling.produced_utxos,
+        consumed_utxos: rolling.consumed_utxos,
         gathered_fees: rolling.gathered_fees,
         new_accounts: rolling.new_accounts,
         removed_accounts: rolling.removed_accounts,

@@ -91,7 +91,7 @@ impl dolos_core::EntityDelta for PoolDelegatorDrop {
             .schedule(self.epoch, Some(PoolDelegation::NotDelegated));
     }
 
-    fn undo(&self, entity: &mut Option<AccountState>) {
+    fn undo(&self, _entity: &mut Option<AccountState>) {
         todo!()
     }
 }
@@ -169,7 +169,7 @@ impl dolos_core::EntityDelta for DRepDelegatorDrop {
         entity.drep.schedule(self.epoch, Some(None));
     }
 
-    fn undo(&self, entity: &mut Option<AccountState>) {
+    fn undo(&self, _entity: &mut Option<AccountState>) {
         todo!()
     }
 }
@@ -205,7 +205,7 @@ impl dolos_core::EntityDelta for PoolDepositRefund {
         stake.rewards_sum += self.pool_deposit;
     }
 
-    fn undo(&self, entity: &mut Option<Self::Entity>) {
+    fn undo(&self, _entity: &mut Option<Self::Entity>) {
         todo!()
     }
 }
@@ -295,7 +295,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         &mut self,
         ctx: &mut super::BoundaryWork,
         _: PoolHash,
-        pool: &PoolState,
+        _: &PoolState,
         account: &AccountState,
     ) -> Result<(), ChainError> {
         let deposit = ctx

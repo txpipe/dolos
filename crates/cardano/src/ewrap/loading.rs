@@ -1,8 +1,7 @@
 use std::sync::Arc;
 
-use dolos_core::{batch::WorkDeltas, ChainError, Domain, Genesis, NsKey, StateStore};
+use dolos_core::{batch::WorkDeltas, ChainError, Domain, Genesis, StateStore};
 use pallas::codec::minicbor;
-use tracing::info;
 
 use crate::{
     ewrap::{BoundaryVisitor as _, BoundaryWork},
@@ -24,7 +23,7 @@ impl BoundaryWork {
         let account = &pool.snapshot.unwrap_live().params.reward_account;
 
         let account =
-            pallas_extras::pool_reward_account(&account).ok_or(ChainError::InvalidPoolParams)?;
+            pallas_extras::pool_reward_account(account).ok_or(ChainError::InvalidPoolParams)?;
 
         let entity_key = minicbor::to_vec(account).unwrap();
 

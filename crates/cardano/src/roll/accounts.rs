@@ -187,7 +187,7 @@ impl dolos_core::EntityDelta for StakeDelegation {
         // apply changes
         entity
             .pool
-            .replace(PoolDelegation::Pool(self.pool.clone()), self.epoch);
+            .replace(PoolDelegation::Pool(self.pool), self.epoch);
     }
 
     fn undo(&self, entity: &mut Option<AccountState>) {
@@ -313,7 +313,7 @@ impl dolos_core::EntityDelta for StakeDeregistration {
         entity.drep.clear(self.epoch);
     }
 
-    fn undo(&self, entity: &mut Option<AccountState>) {
+    fn undo(&self, _entity: &mut Option<AccountState>) {
         todo!()
     }
 }

@@ -1,11 +1,10 @@
 use dolos_core::{ChainError, EntityKey, NsKey};
-use pallas::{codec::minicbor, ledger::primitives::StakeCredential};
+
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 use crate::{
-    estart::PoolId, pallas_extras, rupd::AccountId, AccountState, CardanoDelta, CardanoEntity,
-    FixedNamespace, PoolState, RewardLog,
+    rupd::AccountId, AccountState, CardanoDelta, CardanoEntity, FixedNamespace, RewardLog,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

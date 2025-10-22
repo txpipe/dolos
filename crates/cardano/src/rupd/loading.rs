@@ -109,11 +109,7 @@ impl StakeSnapshot {
         *self.pool_stake.get(pool).unwrap_or(&0)
     }
 
-    pub fn load<D: Domain>(
-        state: &D::State,
-        stake_epoch: u64,
-        performance_epoch: u64,
-    ) -> Result<Self, ChainError> {
+    pub fn load<D: Domain>(state: &D::State, stake_epoch: u64) -> Result<Self, ChainError> {
         let mut snapshot = Self::default();
 
         let pools = state.iter_entities_typed::<PoolState>(PoolState::NS, None)?;
@@ -143,7 +139,7 @@ impl StakeSnapshot {
                 continue;
             };
 
-            let Some(pool_state) = snapshot.pools.get(&pool) else {
+            let Some(pool_state) = snapshot.pools.get(pool) else {
                 continue;
             };
 
@@ -245,8 +241,8 @@ impl RupdWork {
             snapshot: StakeSnapshot::default(),
         };
 
-        if let Some((snapshot_epoch, performance_epoch)) = work.relevant_epochs() {
-            work.snapshot = StakeSnapshot::load::<D>(state, snapshot_epoch, performance_epoch)?;
+        if let Some((snapshot_epoch, _)) = work.relevant_epochs() {
+            work.snapshot = StakeSnapshot::load::<D>(state, snapshot_epoch)?;
         }
 
         Ok(work)
