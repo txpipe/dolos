@@ -1,11 +1,14 @@
 use std::marker::PhantomData;
 
 use comfy_table::Table;
-use dolos_cardano::{model::AccountState, EpochState, EraSummary, PoolState};
+use dolos_cardano::{
+    model::AccountState, EpochState, EpochValue, EraSummary, PoolSnapshot, PoolState,
+};
 use itertools::Itertools;
 use miette::{Context, IntoDiagnostic};
 
 use dolos::prelude::*;
+use pallas::ledger::primitives::Epoch;
 
 #[derive(Debug, clap::Args)]
 pub struct Args {
@@ -23,17 +26,21 @@ trait TableRow: Entity {
     fn row(&self, key: &EntityKey) -> Vec<String>;
 }
 
-macro_rules! format_epoch_value {
-    ($stake:expr, $pool:expr) => {
-        format!(
-            "{} ({})",
-            $stake.map(|x| x.total().to_string()).unwrap_or_default(),
-            $pool
-                .as_ref()
-                .map(|y| hex::encode(y)[..3].to_string())
-                .unwrap_or_default()
-        )
-    };
+fn format_stake_at(account: &AccountState, epoch: Epoch) -> String {
+    let stake = account
+        .stake
+        .snapshot_at(epoch)
+        .map(|x| x.total().to_string());
+
+    let pool = account
+        .delegated_pool_at(epoch)
+        .map(|x| hex::encode(x.as_ref())[..3].to_string());
+
+    format!(
+        "{} ({})",
+        stake.unwrap_or_else(|| "x".to_string()),
+        pool.unwrap_or_else(|| "x".to_string())
+    )
 }
 
 impl TableRow for AccountState {
@@ -53,25 +60,16 @@ impl TableRow for AccountState {
     }
 
     fn row(&self, key: &EntityKey) -> Vec<String> {
+        let epoch = self.stake.epoch().unwrap_or_default();
+
         vec![
             format!("{}", hex::encode(key)),
             format!("{}", self.registered_at.unwrap_or_default()),
             format!("{}", self.deregistered_at.unwrap_or_default()),
-            format_epoch_value!(self.stake.go(), self.pool.go()),
-            format_epoch_value!(self.stake.set(), self.pool.set()),
-            format_epoch_value!(self.stake.mark(), self.pool.mark()),
-            format_epoch_value!(self.stake.live(), self.pool.live()),
-            format!(
-                "{}",
-                self.stake.live().map(|x| x.rewards_sum).unwrap_or_default()
-            ),
-            format!(
-                "{}",
-                self.stake
-                    .live()
-                    .map(|x| x.withdrawals_sum)
-                    .unwrap_or_default()
-            ),
+            format_stake_at(self, epoch - 3),
+            format_stake_at(self, epoch - 2),
+            format_stake_at(self, epoch - 1),
+            format_stake_at(self, epoch),
             format!(
                 "{},{},{}",
                 self.stake.epoch().unwrap_or_default(),
@@ -174,9 +172,26 @@ impl TableRow for EraSummary {
 
 const POOL_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("pool");
 
+fn format_pool_epoch(values: &EpochValue<PoolSnapshot>, epoch_delta: u64) -> String {
+    let epoch = values
+        .epoch()
+        .unwrap_or_default()
+        .saturating_sub(epoch_delta);
+
+    let snapshot = values.snapshot_at(epoch);
+
+    format!(
+        "{} {} ({})",
+        snapshot.map(|x| x.is_retired).unwrap_or_default(),
+        snapshot.map(|x| x.blocks_minted).unwrap_or_default(),
+        epoch,
+    )
+}
+
 impl TableRow for PoolState {
     fn header() -> Vec<&'static str> {
         vec![
+            "key",
             "pool bech32",
             "registered at",
             "retiring epoch",
@@ -195,6 +210,7 @@ impl TableRow for PoolState {
         let pool_bech32 = bech32::encode::<bech32::Bech32>(POOL_HRP, pool_hash).unwrap();
 
         vec![
+            format!("{}", pool_hex),
             format!("{}", pool_bech32),
             format!("{}", self.register_slot),
             format!(
@@ -203,46 +219,10 @@ impl TableRow for PoolState {
                     .map(|x| x.to_string())
                     .unwrap_or_default()
             ),
-            format!(
-                "{} ({})",
-                self.snapshot
-                    .go()
-                    .map(|x| x.params.pledge)
-                    .unwrap_or_default(),
-                self.snapshot.epoch().unwrap_or_default() - 3,
-            ),
-            format!(
-                "{} ({})",
-                self.snapshot
-                    .set()
-                    .map(|x| x.params.pledge)
-                    .unwrap_or_default(),
-                self.snapshot.epoch().unwrap_or_default() - 2
-            ),
-            format!(
-                "{} ({})",
-                self.snapshot
-                    .mark()
-                    .map(|x| x.params.pledge)
-                    .unwrap_or_default(),
-                self.snapshot.epoch().unwrap_or_default() - 1
-            ),
-            format!(
-                "{} ({})",
-                self.snapshot
-                    .live()
-                    .map(|x| x.params.pledge)
-                    .unwrap_or_default(),
-                self.snapshot.epoch().unwrap_or_default()
-            ),
-            format!(
-                "{} ({})",
-                self.snapshot
-                    .next()
-                    .map(|x| x.params.pledge)
-                    .unwrap_or_default(),
-                self.snapshot.epoch().unwrap_or_default()
-            ),
+            format_pool_epoch(&self.snapshot, 3),
+            format_pool_epoch(&self.snapshot, 2),
+            format_pool_epoch(&self.snapshot, 1),
+            format_pool_epoch(&self.snapshot, 0),
         ]
     }
 }

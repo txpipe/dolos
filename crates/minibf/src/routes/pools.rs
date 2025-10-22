@@ -179,8 +179,7 @@ where
 
     let filtered = iter.filter_ok(|(_, account)| {
         account
-            .pool
-            .live()
+            .delegated_pool_live()
             .is_some_and(|f| f.as_slice() == operator.as_slice())
     });
 

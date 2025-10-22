@@ -1,11 +1,10 @@
 use dolos_core::{ChainError, EntityKey, NsKey};
-use pallas::{codec::minicbor, ledger::primitives::StakeCredential};
+
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 use crate::{
-    estart::PoolId, pallas_extras, rupd::AccountId, AccountState, CardanoDelta, CardanoEntity,
-    FixedNamespace, PoolState, RewardLog,
+    rupd::AccountId, AccountState, CardanoDelta, CardanoEntity, FixedNamespace, RewardLog,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,9 +68,13 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         id: &super::AccountId,
         account: &AccountState,
     ) -> Result<(), ChainError> {
-        let rewards = ctx.rewards.take_for_apply(&account.credential);
+        let rewards = ctx.rewards.take_for_apply(account);
 
         if let Some(reward) = rewards {
+            if reward.is_spendable() != account.is_registered() {
+                warn!(account=%id, "reward is spendable mismatch");
+            }
+
             self.change(AssignRewards {
                 account: id.clone(),
                 reward: reward.total_value(),

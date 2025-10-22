@@ -95,15 +95,13 @@ impl<'a> IntoModel<AccountContent> for AccountModelBuilder<'a> {
 
         let pool_id = self
             .account_state
-            .pool
-            .live()
+            .delegated_pool_at(current_epoch)
             .map(bech32_pool)
             .transpose()?;
 
         let drep_id = self
             .account_state
-            .drep
-            .live()
+            .delegated_drep_at(current_epoch)
             .map(bech32_drep)
             .transpose()?;
 
@@ -118,8 +116,8 @@ impl<'a> IntoModel<AccountContent> for AccountModelBuilder<'a> {
             controlled_amount: stake.total().to_string(),
             rewards_sum: stake.rewards_sum.to_string(),
             withdrawals_sum: stake.withdrawals_sum.to_string(),
-            reserves_sum: self.account_state.reserves_sum.to_string(),
-            treasury_sum: self.account_state.treasury_sum.to_string(),
+            reserves_sum: Default::default(),
+            treasury_sum: Default::default(),
             withdrawable_amount: stake.withdrawable().to_string(),
             pool_id,
             drep_id,

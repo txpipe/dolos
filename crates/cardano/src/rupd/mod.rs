@@ -10,7 +10,7 @@ use tracing::{info, instrument};
 use crate::{
     pots::{EpochIncentives, Pots},
     rewards::RewardMap,
-    AccountState, ChainSummary, PParamsSet, PoolHash, PoolParams, PoolSnapshot, PoolState,
+    AccountState, ChainSummary, EpochValue, PParamsSet, PoolHash, PoolSnapshot, PoolState,
     StakeLog,
 };
 
@@ -83,9 +83,8 @@ pub struct StakeSnapshot {
     pub active_stake_sum: u64,
     pub accounts_by_pool: DelegatorMap,
     pub registered_accounts: HashSet<StakeCredential>,
+    pub pools: HashMap<PoolHash, EpochValue<PoolSnapshot>>,
     pub pool_stake: HashMap<PoolHash, u64>,
-    pub pool_params: HashMap<PoolHash, PoolSnapshot>,
-    pub pool_blocks: HashMap<PoolHash, u64>,
 }
 
 impl StakeSnapshot {
@@ -124,23 +123,24 @@ fn log_work<D: Domain>(
 
     let writer = archive.start_writer()?;
 
-    for (pool, blocks_minted) in snapshot.pool_blocks.iter() {
-        let pool_id = EntityKey::from(pool.as_slice());
-        let pool_stake = snapshot.get_pool_stake(pool);
+    for (pool_hash, pool_state) in snapshot.pools.iter() {
+        let pool_id = EntityKey::from(pool_hash.as_slice());
+        let pool_stake = snapshot.get_pool_stake(pool_hash);
         let relative_size = (pool_stake as f64) / snapshot.active_stake_sum as f64;
-        let params = snapshot.pool_params.get(pool);
-        let declared_pledge = params.map(|x| x.params.pledge).unwrap_or(0);
-        let delegators_count = snapshot.accounts_by_pool.count_delegators(pool);
-        let fixed_cost = params.map(|x| x.params.cost).unwrap_or(0);
-        let margin_cost = params.map(|x| x.params.margin.clone());
+        let params = pool_state.go().map(|x| &x.params);
+        let declared_pledge = params.map(|x| x.pledge).unwrap_or(0);
+        let delegators_count = snapshot.accounts_by_pool.count_delegators(pool_hash);
+        let fixed_cost = params.map(|x| x.cost).unwrap_or(0);
+        let margin_cost = params.map(|x| x.margin.clone());
+        let blocks_minted = pool_state.mark().map(|x| x.blocks_minted).unwrap_or(0) as u64;
 
         // TODO: implement
         //let live_pledge = snapshot.get_live_pledge(&pool);
 
-        let (total_rewards, operator_share) = rewards.find_pool_rewards(*pool);
+        let (total_rewards, operator_share) = rewards.find_pool_rewards(*pool_hash);
 
         let log = StakeLog {
-            blocks_minted: *blocks_minted,
+            blocks_minted,
             total_stake: pool_stake,
             relative_size,
             live_pledge: 0,

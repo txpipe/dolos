@@ -92,7 +92,7 @@ pub struct PotDelta {
     pub consumed_utxos: Lovelace,
 
     #[n(2)]
-    pub gathered_fees: u64,
+    pub gathered_fees: Lovelace,
 
     #[n(3)]
     pub new_accounts: u64,
@@ -101,18 +101,21 @@ pub struct PotDelta {
     pub removed_accounts: u64,
 
     #[n(5)]
-    pub new_pools: u64,
+    pub pool_deposit_count: u64,
 
     #[n(6)]
-    pub removed_pools: u64,
+    pub pool_refund_count: u64,
 
     #[n(7)]
-    pub withdrawals: u64,
+    pub pool_invalid_refund_count: u64,
 
     #[n(8)]
-    pub effective_rewards: u64,
+    pub withdrawals: u64,
 
     #[n(9)]
+    pub effective_rewards: u64,
+
+    #[n(10)]
     pub unspendable_rewards: u64,
 }
 
@@ -232,6 +235,7 @@ pub fn apply_delta(mut pots: Pots, incentives: &EpochIncentives, delta: &PotDelt
     // treasury pot
     pots.treasury += incentives.treasury_tax;
     pots.treasury += delta.unspendable_rewards;
+    pots.treasury += delta.pool_invalid_refund_count * pots.deposit_per_pool;
 
     // fees pot
     pots.fees -= incentives.used_fees;
@@ -240,7 +244,7 @@ pub fn apply_delta(mut pots: Pots, incentives: &EpochIncentives, delta: &PotDelt
     // rewards pot
     pots.rewards += delta.effective_rewards;
     pots.rewards -= delta.withdrawals;
-    pots.rewards += delta.removed_pools * pots.deposit_per_pool;
+    pots.rewards += delta.pool_refund_count * pots.deposit_per_pool;
 
     // we don't need to return account deposit refunds to the rewards pot because
     // these refunds are returned directly as utxos in the deregistration
@@ -251,8 +255,9 @@ pub fn apply_delta(mut pots: Pots, incentives: &EpochIncentives, delta: &PotDelt
     pots.utxos -= delta.consumed_utxos;
 
     // pool count
-    pots.pool_count += delta.new_pools;
-    pots.pool_count -= delta.removed_pools;
+    pots.pool_count += delta.pool_deposit_count;
+    pots.pool_count -= delta.pool_refund_count;
+    pots.pool_count -= delta.pool_invalid_refund_count;
 
     // account count
     pots.account_count += delta.new_accounts;

@@ -7,7 +7,7 @@ use tracing::debug;
 use crate::{
     pallas_extras, pallas_ratio,
     pots::{EpochIncentives, PotDelta, Pots},
-    PParamsSet, PoolHash, PoolParams,
+    AccountState, PParamsSet, PoolHash, PoolParams,
 };
 
 mod formulas;
@@ -239,10 +239,14 @@ impl<C: RewardsContext> RewardMap<C> {
     }
 
     /// Remove a reward from the pending map and add it to the applied totals.
-    pub fn take_for_apply(&mut self, account: &StakeCredential) -> Option<Reward> {
-        let reward = self.pending.remove(account)?;
+    pub fn take_for_apply(&mut self, account: &AccountState) -> Option<Reward> {
+        let reward = self.pending.remove(&account.credential)?;
 
-        if reward.is_spendable() {
+        // TODO: notice that we're not checking if the rewards were spendable at the
+        // moment of RUPD (the `is_spendable` field). The field still has its purpose as
+        // a way to drain the remaining, not applied, rewards. It might be the case that
+        // for mainnet, we need to fork the logic depending on the era.
+        if account.is_registered() {
             self.applied_effective += reward.total_value();
         } else {
             self.applied_unspendable += reward.total_value();

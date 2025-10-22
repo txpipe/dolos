@@ -74,6 +74,28 @@ impl dolos_core::EntityDelta for PoolRegistration {
                 "updating pool registration",
             );
 
+            let is_currently_retired = entity.snapshot.unwrap_live().is_retired;
+
+            if is_currently_retired {
+                entity.snapshot.replace(
+                    PoolSnapshot {
+                        is_retired: false,
+                        blocks_minted: 0,
+                        params: self.cert.clone().into(),
+                    },
+                    self.epoch,
+                );
+            } else {
+                entity.snapshot.schedule(
+                    self.epoch,
+                    Some(PoolSnapshot {
+                        is_retired: false,
+                        blocks_minted: 0,
+                        params: self.cert.clone().into(),
+                    }),
+                );
+            }
+
             // please note that for updates to existing pools we are scheduling the change
             // for the next epoch. This differs from the behavior of new pools where the
             // change applies to the live epoch.

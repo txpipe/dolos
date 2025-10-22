@@ -1,25 +1,16 @@
-use std::{
-    net::{Ipv4Addr, Ipv6Addr},
-    path::PathBuf,
-    str::FromStr,
-};
+use std::{path::PathBuf, str::FromStr};
 
 use bb8::Pool;
 use bb8_postgres::PostgresConnectionManager;
 use chrono::NaiveDateTime;
 use dolos_cardano::{
-    build_schema, include, AccountState, AssetState, DRepState, EpochState, EraBoundary,
-    EraSummary, PParamValue, PParamsSet, PoolState,
+    build_schema, include, AssetState, EraBoundary, EraSummary, PParamValue, PParamsSet,
 };
 use dolos_core::{EntityKey, Genesis, StateStore as _, StateWriter};
 use handlebars::Handlebars;
 use miette::{bail, Context, IntoDiagnostic};
-use pallas::ledger::{
-    addresses::Address,
-    primitives::{ExUnitPrices, ExUnits, PoolMetadata, RationalNumber, Relay},
-};
-use serde_json::Value;
-use tokio_postgres::types::Json;
+use pallas::ledger::primitives::{ExUnitPrices, ExUnits};
+
 use tokio_postgres::NoTls;
 
 use crate::{queries::init_registry, utils::account_key};
@@ -198,32 +189,17 @@ pub async fn handle_account_state(
         if i % 1000 == 1 {
             tracing::info!(i = i, "Processing accounts...");
         }
-        let key = account_key(
+        let _key = account_key(
             row.try_get("key")
                 .into_diagnostic()
                 .context("getting from row")?,
         )?;
 
-        let account = AccountState {
-            registered_at: from_row!(row, Option<i64>, "registered_at")
-                .map(|x| x.try_into().unwrap()),
-            controlled_amount: from_row_bigint!(row, "controlled_amount"),
-            withdrawals_sum: from_row_bigint!(row, "withdrawals_sum"),
-            reserves_sum: from_row_bigint!(row, "reserves_sum"),
-            treasury_sum: from_row_bigint!(row, "treasury_sum"),
-            total_stake: todo!(),
-            rewards_sum: todo!(),
-            pool: todo!(),
-            drep: todo!(),
-            vote_delegated_at: todo!(),
-            deposit: todo!(),
-            deregistered_at: todo!(),
-            credential: todo!(),
-        };
+        todo!();
 
-        writer
-            .write_entity_typed::<AccountState>(&EntityKey::from(key), &account)
-            .into_diagnostic()?;
+        // writer
+        //     .write_entity_typed::<AccountState>(&EntityKey::from(key),
+        // &account)     .into_diagnostic()?;
     }
     tracing::info!("Finished processing accounts.");
 
@@ -457,7 +433,7 @@ pub async fn handle_pool_state(
         if i % 100 == 1 {
             tracing::info!(i = i, "Processing pools...");
         }
-        let key = hex::decode(
+        let _key = hex::decode(
             row.try_get::<_, &str>("key")
                 .into_diagnostic()
                 .context("getting from row")?,
@@ -465,11 +441,11 @@ pub async fn handle_pool_state(
         .into_diagnostic()
         .context("decoding pool vrf_keyhash")?;
 
-        let pool = todo!();
+        todo!();
 
-        writer
-            .write_entity_typed::<PoolState>(&EntityKey::from(key), &pool)
-            .into_diagnostic()?;
+        // writer
+        //     .write_entity_typed::<PoolState>(&EntityKey::from(key), &pool)
+        //     .into_diagnostic()?;
     }
 
     tracing::info!("Finished processing pools.");
@@ -638,11 +614,11 @@ pub async fn handle_epoch_state(
         //pp_col!(pp, PvtPpSecurityGroup, "pvtpp_security_group");
         //pp_col!(pp, PvtPpSecurityGroup, "pvt_p_p_security_group");
 
-        let deposits_stake: u64 = from_row_bigint!(row, "deposits_stake");
-        let deposits_drep: u64 = from_row_bigint!(row, "deposits_drep");
-        let deposits_proposal: u64 = from_row_bigint!(row, "deposits_proposal");
+        let _deposits_stake: u64 = from_row_bigint!(row, "deposits_stake");
+        let _deposits_drep: u64 = from_row_bigint!(row, "deposits_drep");
+        let _deposits_proposal: u64 = from_row_bigint!(row, "deposits_proposal");
 
-        let epoch_state = todo!();
+        todo!();
     }
 
     tracing::info!("Finished processing epochs.");
@@ -695,7 +671,7 @@ pub async fn handle_drep_state(
             tracing::info!(i = i, "Processing dreps...");
         }
 
-        let drep_id = match from_row!(row, &str, "drep_id") {
+        let _drep_id = match from_row!(row, &str, "drep_id") {
             "drep_always_abstain" => vec![0],
             "drep_always_no_confidence" => vec![1],
             drep_id => {
@@ -706,18 +682,18 @@ pub async fn handle_drep_state(
             }
         };
 
-        let initial_slot = from_row!(row, Option<i64>, "initial_slot").map(|x| x as u64);
-        let voting_power = from_row!(row, String, "voting_power")
+        let _initial_slot = from_row!(row, Option<i64>, "initial_slot").map(|x| x as u64);
+        let _voting_power = from_row!(row, String, "voting_power")
             .parse::<u64>()
             .into_diagnostic()
             .context("parsing drep voting power")?;
-        let last_active_slot = from_row!(row, Option<i64>, "last_active_slot").map(|x| x as u64);
+        let _last_active_slot = from_row!(row, Option<i64>, "last_active_slot").map(|x| x as u64);
 
-        let drep = todo!();
+        todo!();
 
-        writer
-            .write_entity_typed::<DRepState>(&EntityKey::from(drep_id), &drep)
-            .into_diagnostic()?;
+        // writer
+        //     .write_entity_typed::<DRepState>(&EntityKey::from(drep_id),
+        // &drep)     .into_diagnostic()?;
     }
 
     tracing::info!("Finished processing dreps.");

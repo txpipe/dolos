@@ -1,4 +1,7 @@
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use dolos_core::{batch::WorkDeltas, BlockSlot, ChainError, Domain, EntityKey, Genesis};
 use pallas::ledger::primitives::conway::DRep;
@@ -26,6 +29,17 @@ pub trait BoundaryVisitor {
         ctx: &mut BoundaryWork,
         id: &PoolId,
         pool: &PoolState,
+    ) -> Result<(), ChainError> {
+        Ok(())
+    }
+
+    #[allow(unused_variables)]
+    fn visit_retiring_pool(
+        &mut self,
+        ctx: &mut BoundaryWork,
+        pool_hash: PoolHash,
+        pool: &PoolState,
+        account: &AccountState,
     ) -> Result<(), ChainError> {
         Ok(())
     }
@@ -80,7 +94,7 @@ pub struct BoundaryWork {
 
     // inferred
     pub existing_pools: HashSet<PoolHash>,
-    pub retiring_pools: HashSet<PoolHash>,
+    pub retiring_pools: HashMap<PoolHash, (PoolState, AccountState)>,
 
     // TODO: we use a vec instead of a HashSet because the Pallas struct doesn't implement Hash. We
     // should turn it into a HashSet once we have the update in Pallas.

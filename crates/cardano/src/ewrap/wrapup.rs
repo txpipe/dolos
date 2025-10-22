@@ -1,20 +1,18 @@
 use crate::{
-    ewrap::{AccountId, PoolId},
-    AccountState, CardanoDelta, EndStats, EpochState, FixedNamespace as _, PParamsSet,
-    PoolSnapshot, PoolState, CURRENT_EPOCH_KEY,
+    AccountState, CardanoDelta, EndStats, EpochState, FixedNamespace as _, PParamsSet, PoolHash,
+    PoolState, CURRENT_EPOCH_KEY,
 };
 use dolos_core::{ChainError, NsKey};
-use pallas::ledger::primitives::Epoch;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PoolWrapUp {
-    pool: PoolId,
+    pool_hash: PoolHash,
 }
 
 impl PoolWrapUp {
-    pub fn new(pool: PoolId) -> Self {
-        Self { pool }
+    pub fn new(pool_hash: PoolHash) -> Self {
+        Self { pool_hash }
     }
 }
 
@@ -22,7 +20,7 @@ impl dolos_core::EntityDelta for PoolWrapUp {
     type Entity = PoolState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((PoolState::NS, self.pool.clone()))
+        NsKey::from((PoolState::NS, self.pool_hash.as_slice()))
     }
 
     fn apply(&mut self, entity: &mut Option<PoolState>) {
@@ -110,27 +108,30 @@ fn define_new_pool_count(ctx: &super::BoundaryWork) -> usize {
 }
 
 fn define_end_stats(ctx: &super::BoundaryWork) -> EndStats {
+    let pool_refund_count = ctx
+        .retiring_pools
+        .values()
+        .filter(|(_, account)| account.is_registered())
+        .count();
+
+    let pool_invalid_refund_count = ctx.retiring_pools.len() - pool_refund_count;
+
     EndStats {
-        new_pools: define_new_pool_count(ctx) as u64,
-        retired_pools: ctx.retiring_pools.clone(),
+        pool_deposit_count: define_new_pool_count(ctx) as u64,
+        pool_refund_count: pool_refund_count as u64,
+        pool_invalid_refund_count: pool_invalid_refund_count as u64,
     }
 }
 
 impl super::BoundaryVisitor for BoundaryVisitor {
-    fn visit_pool(
+    fn visit_retiring_pool(
         &mut self,
-        ctx: &mut super::BoundaryWork,
-        id: &PoolId,
-        pool: &PoolState,
+        _: &mut super::BoundaryWork,
+        pool_hash: PoolHash,
+        _: &PoolState,
+        _: &AccountState,
     ) -> Result<(), ChainError> {
-        // apply changes
-        let should_retire = pool
-            .retiring_epoch
-            .is_some_and(|e| e == ctx.ending_state().number);
-
-        if should_retire {
-            self.change(PoolWrapUp::new(id.clone()));
-        }
+        self.change(PoolWrapUp::new(pool_hash));
 
         Ok(())
     }

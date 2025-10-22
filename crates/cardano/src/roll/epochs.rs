@@ -47,9 +47,9 @@ impl dolos_core::EntityDelta for EpochStatsUpdate {
         stats.blocks_minted += 1;
 
         if self.utxo_delta > 0 {
-            stats.produced_utxos += self.utxo_delta.abs() as u64;
+            stats.produced_utxos += self.utxo_delta.unsigned_abs();
         } else {
-            stats.consumed_utxos += self.utxo_delta.abs() as u64;
+            stats.consumed_utxos += self.utxo_delta.unsigned_abs();
         }
 
         stats.gathered_fees += self.block_fees;
@@ -76,9 +76,9 @@ impl dolos_core::EntityDelta for EpochStatsUpdate {
         stats.blocks_minted -= 1;
 
         if self.utxo_delta > 0 {
-            stats.produced_utxos -= self.utxo_delta.abs() as u64;
+            stats.produced_utxos -= self.utxo_delta.unsigned_abs();
         } else {
-            stats.consumed_utxos -= self.utxo_delta.abs() as u64;
+            stats.consumed_utxos -= self.utxo_delta.unsigned_abs();
         }
 
         stats.gathered_fees -= self.block_fees;
@@ -165,7 +165,7 @@ impl dolos_core::EntityDelta for PParamsUpdate {
         next.set(self.to_update.clone());
     }
 
-    fn undo(&self, entity: &mut Option<EpochState>) {
+    fn undo(&self, _entity: &mut Option<EpochState>) {
         todo!()
     }
 }
