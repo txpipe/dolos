@@ -111,6 +111,7 @@ pub fn cert_as_vote_delegation(cert: &MultiEraCert) -> Option<MultiEraVoteDelega
     }
 }
 
+#[derive(Debug)]
 pub struct MultiEraStakeDelegation {
     pub delegator: StakeCredential,
     pub pool: Hash<28>,

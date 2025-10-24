@@ -309,8 +309,11 @@ impl dolos_core::EntityDelta for StakeDeregistration {
 
         entity.deregistered_at = Some(self.slot);
 
-        entity.pool.clear(self.epoch);
-        entity.drep.clear(self.epoch);
+        entity
+            .pool
+            .replace(PoolDelegation::NotDelegated, self.epoch);
+        
+        entity.drep.replace(None, self.epoch);
     }
 
     fn undo(&self, _entity: &mut Option<AccountState>) {

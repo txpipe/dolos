@@ -56,6 +56,7 @@ pub trait BlockVisitor {
         deltas: &mut WorkDeltas<CardanoLogic>,
         block: &MultiEraBlock,
         tx: &MultiEraTx,
+        utxos: &HashMap<TxoRef, OwnedMultiEraOutput>,
     ) -> Result<(), ChainError> {
         Ok(())
     }
@@ -246,7 +247,7 @@ impl<'a> DeltaBuilder<'a> {
         );
 
         for tx in block.txs() {
-            visit_all!(self, deltas, visit_tx, block, &tx);
+            visit_all!(self, deltas, visit_tx, block, &tx, &self.utxos);
 
             for input in tx.consumes() {
                 let txoref = TxoRef::from(&input);
