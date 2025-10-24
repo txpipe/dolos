@@ -21,10 +21,7 @@ impl dolos_core::EntityDelta for AssignRewards {
     }
 
     fn apply(&mut self, entity: &mut Option<Self::Entity>) {
-        let Some(entity) = entity else {
-            warn!("missing reward account");
-            return;
-        };
+        let entity = entity.as_mut().expect("existing account");
 
         debug!(account=%self.account, "assigning rewards");
 
@@ -72,7 +69,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
 
         if let Some(reward) = rewards {
             if reward.is_spendable() != account.is_registered() {
-                warn!(account=%id, "reward is spendable mismatch");
+                warn!(account=%id, amount=reward.total_value(), "reward is spendable mismatch");
             }
 
             self.change(AssignRewards {

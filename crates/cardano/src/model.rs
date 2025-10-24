@@ -283,17 +283,6 @@ where
         self.live = Some(live);
     }
 
-    /// Clears the live value for the current epoch.
-    pub fn clear(&mut self, epoch: Epoch) {
-        assert_eq!(self.epoch, epoch);
-        self.clear_unchecked();
-    }
-
-    /// Clears the live value without rotating the previous ones.
-    pub fn clear_unchecked(&mut self) {
-        self.live = None;
-    }
-
     /// Transitions into the next epoch by taking a snapshot of the live value
     /// and rotating the previous ones.
     pub fn transition(&mut self, next_epoch: Epoch) {

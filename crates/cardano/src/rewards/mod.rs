@@ -246,13 +246,13 @@ impl<C: RewardsContext> RewardMap<C> {
         // moment of RUPD (the `is_spendable` field). The field still has its purpose as
         // a way to drain the remaining, not applied, rewards. It might be the case that
         // for mainnet, we need to fork the logic depending on the era.
-        if account.is_registered() {
+        if account.is_registered() && reward.is_spendable() {
             self.applied_effective += reward.total_value();
+            Some(reward)
         } else {
             self.applied_unspendable += reward.total_value();
+            None
         }
-
-        Some(reward)
     }
 
     pub fn drain_unspendable(&mut self) {

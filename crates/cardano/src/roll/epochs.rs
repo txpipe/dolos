@@ -1,11 +1,11 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
-use dolos_core::{batch::WorkDeltas, ChainError, NsKey};
+use dolos_core::{batch::WorkDeltas, BrokenInvariant, ChainError, NsKey, TxoRef};
 use pallas::{
     crypto::hash::Hash,
     ledger::{
         primitives::Epoch,
-        traverse::{MultiEraBlock, MultiEraCert, MultiEraTx, MultiEraUpdate},
+        traverse::{Era, MultiEraBlock, MultiEraCert, MultiEraTx, MultiEraUpdate},
     },
 };
 use serde::{Deserialize, Serialize};
@@ -13,9 +13,10 @@ use tracing::debug;
 
 use crate::{
     model::{EpochState, FixedNamespace as _},
+    owned::OwnedMultiEraOutput,
     pallas_extras,
     roll::BlockVisitor,
-    CardanoLogic, Nonces, PParamValue, PParamsSet, PoolHash, CURRENT_EPOCH_KEY,
+    CardanoLogic, Lovelace, Nonces, PParamValue, PParamsSet, PoolHash, CURRENT_EPOCH_KEY,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -189,6 +190,43 @@ macro_rules! check_all_proposed {
     };
 }
 
+// HACK: in alonzo we don't have access direct to the total collateral, we need to compute it by looking at each of the consumed inputs.
+fn compute_alonzo_collateral(
+    tx: &MultiEraTx,
+    utxos: &HashMap<TxoRef, OwnedMultiEraOutput>,
+) -> Result<Lovelace, ChainError> {
+    debug_assert!(tx.era() == Era::Alonzo);
+    debug_assert!(!tx.is_valid());
+
+    let mut total = 0;
+
+    for input in tx.consumes() {
+        let utxo = utxos
+            .get(&TxoRef::from(&input))
+            .ok_or(ChainError::BrokenInvariant(BrokenInvariant::MissingUtxo(
+                TxoRef::from(&input),
+            )))?;
+        utxo.with_dependent(|_, utxo| {
+            total += utxo.value().coin();
+        });
+    }
+
+    Ok(total)
+}
+
+fn define_tx_fees(
+    tx: &MultiEraTx,
+    utxos: &HashMap<TxoRef, OwnedMultiEraOutput>,
+) -> Result<Lovelace, ChainError> {
+    if tx.is_valid() {
+        Ok(tx.fee().unwrap_or_default())
+    } else if let Some(collateral) = tx.total_collateral() {
+        Ok(collateral)
+    } else {
+        compute_alonzo_collateral(tx, utxos)
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct EpochStateVisitor {
     stats_delta: Option<EpochStatsUpdate>,
@@ -223,14 +261,12 @@ impl BlockVisitor for EpochStateVisitor {
         _: &mut WorkDeltas<CardanoLogic>,
         _: &MultiEraBlock,
         tx: &MultiEraTx,
+        utxos: &HashMap<TxoRef, OwnedMultiEraOutput>,
     ) -> Result<(), ChainError> {
-        let fees = if !tx.is_valid() {
-            tx.total_collateral().unwrap_or_default()
-        } else {
-            tx.fee().unwrap_or_default()
-        };
+        let fees = define_tx_fees(tx, utxos)?;
 
         self.stats_delta.as_mut().unwrap().block_fees += fees;
+
         Ok(())
     }
 

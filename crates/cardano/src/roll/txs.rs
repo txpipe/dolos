@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use dolos_core::{batch::WorkDeltas, ChainError, SlotTags, TxoRef};
 use pallas::{
     codec::{minicbor, utils::KeepRaw},
@@ -11,7 +13,7 @@ use pallas::{
     },
 };
 
-use crate::{pallas_extras, roll::BlockVisitor, CardanoLogic, PParamsSet};
+use crate::{owned::OwnedMultiEraOutput, pallas_extras, roll::BlockVisitor, CardanoLogic, PParamsSet};
 
 #[derive(Default, Clone)]
 pub struct TxLogVisitor;
@@ -100,8 +102,10 @@ impl BlockVisitor for TxLogVisitor {
         deltas: &mut WorkDeltas<CardanoLogic>,
         _: &MultiEraBlock,
         tx: &MultiEraTx,
+        _: &HashMap<TxoRef, OwnedMultiEraOutput>,
     ) -> Result<(), ChainError> {
         deltas.slot.tx_hashes.push(tx.hash().to_vec());
+
         for (k, _) in tx.metadata().collect::<Vec<_>>() {
             deltas.slot.metadata.push(k);
         }
