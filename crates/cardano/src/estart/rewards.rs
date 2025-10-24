@@ -1,6 +1,5 @@
 use dolos_core::{ChainError, EntityKey, NsKey};
 
-use pallas::ledger::primitives::StakeCredential;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 

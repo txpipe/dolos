@@ -220,12 +220,10 @@ fn define_tx_fees(
 ) -> Result<Lovelace, ChainError> {
     if tx.is_valid() {
         Ok(tx.fee().unwrap_or_default())
+    } else if let Some(collateral) = tx.total_collateral() {
+        Ok(collateral)
     } else {
-        if let Some(collateral) = tx.total_collateral() {
-            Ok(collateral)
-        } else {
-            compute_alonzo_collateral(tx, utxos)
-        }
+        compute_alonzo_collateral(tx, utxos)
     }
 }
 

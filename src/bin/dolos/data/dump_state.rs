@@ -4,7 +4,6 @@ use comfy_table::Table;
 use dolos_cardano::{
     model::AccountState, EpochState, EpochValue, EraSummary, PoolSnapshot, PoolState,
 };
-use itertools::Itertools;
 use miette::{Context, IntoDiagnostic};
 
 use dolos::prelude::*;
