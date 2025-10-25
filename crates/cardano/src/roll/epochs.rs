@@ -190,8 +190,8 @@ macro_rules! check_all_proposed {
     };
 }
 
-// HACK: in alonzo we don't have access direct to the total collateral, we need to compute it by looking at each of the consumed inputs.
-fn compute_alonzo_collateral(
+// HACK: There are txs that don't have an explicit value for total collateral and Alonzo txs don't even have the total collateral field. This is why we need to compute it by looking at collateral inputs and collateral return. Pallas hides this from us by providing the "consumes" / "produces" facade.
+fn compute_collateral_value(
     tx: &MultiEraTx,
     utxos: &HashMap<TxoRef, OwnedMultiEraOutput>,
 ) -> Result<Lovelace, ChainError> {
@@ -211,6 +211,10 @@ fn compute_alonzo_collateral(
         });
     }
 
+    for (_, output) in tx.produces() {
+        total -= output.value().coin();
+    }
+
     Ok(total)
 }
 
@@ -221,9 +225,12 @@ fn define_tx_fees(
     if tx.is_valid() {
         Ok(tx.fee().unwrap_or_default())
     } else if let Some(collateral) = tx.total_collateral() {
+        tracing::debug!(tx=%tx.hash(), collateral, "total collateral consumed");
         Ok(collateral)
     } else {
-        compute_alonzo_collateral(tx, utxos)
+        let fee = compute_collateral_value(tx, utxos)?;
+        tracing::debug!(tx=%tx.hash(), fee, "alonzo-style collateral computed");
+        Ok(fee)
     }
 }
 

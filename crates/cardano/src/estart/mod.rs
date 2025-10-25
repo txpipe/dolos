@@ -5,7 +5,7 @@ use tracing::{info, instrument};
 
 use crate::{
     rewards::RewardMap, rupd::RupdWork, AccountState, CardanoDelta, CardanoEntity, CardanoLogic,
-    DRepState, EpochState, EraProtocol, EraSummary, PoolState, Proposal,
+    Config, DRepState, EpochState, EraProtocol, EraSummary, PoolState, Proposal,
 };
 
 pub mod commit;
@@ -101,6 +101,7 @@ pub fn execute<D: Domain>(
     state: &D::State,
     archive: &D::Archive,
     slot: BlockSlot,
+    config: &Config,
     genesis: Arc<Genesis>,
     rewards: RewardMap<RupdWork>,
 ) -> Result<(), ChainError> {
@@ -108,9 +109,15 @@ pub fn execute<D: Domain>(
 
     let mut work = WorkContext::load::<D>(state, genesis, rewards)?;
 
-    work.commit::<D>(state, archive)?;
+    work.commit::<D>(state, archive, slot)?;
 
     info!("ESTART work unit committed");
+
+    if let Some(stop_epoch) = config.stop_epoch {
+        if work.ended_state.number >= stop_epoch {
+            return Err(ChainError::StopEpochReached);
+        }
+    }
 
     Ok(())
 }

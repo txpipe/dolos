@@ -36,6 +36,9 @@ pub struct Args {
 
     #[arg(long, action)]
     verbose: bool,
+
+    #[arg(long)]
+    start_from: Option<ChainPoint>,
 }
 
 impl Default for Args {
@@ -48,6 +51,7 @@ impl Default for Args {
             retain_snapshot: Default::default(),
             verbose: Default::default(),
             chunk_size: 500,
+            start_from: None,
         }
     }
 }
@@ -162,7 +166,28 @@ async fn fetch_snapshot(
     Ok(())
 }
 
+fn define_starting_point(
+    args: &Args,
+    state: &dolos_redb3::state::StateStore,
+) -> Result<pallas::network::miniprotocols::Point, miette::Error> {
+    if let Some(point) = &args.start_from {
+        Ok(point.clone().try_into().unwrap())
+    } else {
+        let cursor = state
+            .read_cursor()
+            .into_diagnostic()
+            .context("reading state cursor")?;
+
+        let point = cursor
+            .map(|c| c.try_into().unwrap())
+            .unwrap_or(pallas::network::miniprotocols::Point::Origin);
+
+        Ok(point)
+    }
+}
+
 fn import_hardano_into_domain(
+    args: &Args,
     config: &crate::Config,
     immutable_path: &Path,
     feedback: &Feedback,
@@ -175,13 +200,7 @@ fn import_hardano_into_domain(
         .context("reading immutable db tip")?
         .ok_or(miette::miette!("immutable db has no tip"))?;
 
-    let cursor = domain
-        .state()
-        .read_cursor()
-        .into_diagnostic()
-        .context("reading state cursor")?
-        .map(|c| c.try_into().unwrap())
-        .unwrap_or(pallas::network::miniprotocols::Point::Origin);
+    let cursor = define_starting_point(args, domain.state())?;
 
     let iter = pallas::storage::hardano::immutable::read_blocks_from_point(immutable_path, cursor)
         .map_err(|err| miette::miette!(err.to_string()))
@@ -246,7 +265,7 @@ pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::
 
     let immutable_path = Path::new(&args.download_dir).join("immutable");
 
-    import_hardano_into_domain(config, &immutable_path, feedback, args.chunk_size)?;
+    import_hardano_into_domain(args, config, &immutable_path, feedback, args.chunk_size)?;
 
     if !args.retain_snapshot {
         info!("deleting downloaded snapshot");

@@ -11,6 +11,10 @@ use crate::{
 
 impl BoundaryWork {
     fn should_retire_pool(&self, pool: &PoolState) -> bool {
+        if pool.snapshot.unwrap_live().is_retired {
+            return false;
+        }
+
         pool.retiring_epoch
             .is_some_and(|e| e == self.starting_epoch_no())
     }
@@ -19,7 +23,7 @@ impl BoundaryWork {
         &self,
         state: &D::State,
         pool: &PoolState,
-    ) -> Result<AccountState, ChainError> {
+    ) -> Result<Option<AccountState>, ChainError> {
         let account = &pool.snapshot.unwrap_live().params.reward_account;
 
         let account =
@@ -27,9 +31,7 @@ impl BoundaryWork {
 
         let entity_key = minicbor::to_vec(account).unwrap();
 
-        let account = state
-            .read_entity_typed(AccountState::NS, &entity_key.into())?
-            .ok_or(ChainError::InvalidPoolParams)?;
+        let account = state.read_entity_typed(AccountState::NS, &entity_key.into())?;
 
         Ok(account)
     }
@@ -40,10 +42,8 @@ impl BoundaryWork {
         for record in pools {
             let (_, pool) = record?;
 
-            if let Some(snapshot) = pool.snapshot.mark() {
-                if !snapshot.is_retired {
-                    self.existing_pools.insert(pool.operator);
-                }
+            if pool.snapshot.unwrap_live().is_new {
+                self.new_pools.insert(pool.operator);
             }
 
             if self.should_retire_pool(&pool) {
@@ -105,9 +105,9 @@ impl BoundaryWork {
         let retiring_pools = self.retiring_pools.clone();
 
         for (pool_id, (pool, account)) in retiring_pools {
-            visitor_retires.visit_retiring_pool(self, pool_id, &pool, &account)?;
-            visitor_govactions.visit_retiring_pool(self, pool_id, &pool, &account)?;
-            visitor_wrapup.visit_retiring_pool(self, pool_id, &pool, &account)?;
+            visitor_retires.visit_retiring_pool(self, pool_id, &pool, account.as_ref())?;
+            visitor_govactions.visit_retiring_pool(self, pool_id, &pool, account.as_ref())?;
+            visitor_wrapup.visit_retiring_pool(self, pool_id, &pool, account.as_ref())?;
         }
 
         let dreps = state.iter_entities_typed::<DRepState>(DRepState::NS, None)?;
@@ -161,7 +161,7 @@ impl BoundaryWork {
             genesis,
 
             // to be loaded right after
-            existing_pools: Default::default(),
+            new_pools: Default::default(),
             retiring_pools: Default::default(),
             expiring_dreps: Default::default(),
 

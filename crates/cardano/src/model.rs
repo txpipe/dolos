@@ -656,6 +656,9 @@ pub struct PoolSnapshot {
 
     #[n(3)]
     pub params: PoolParams,
+
+    #[n(4)]
+    pub is_new: bool,
 }
 
 impl TransitionDefault for PoolSnapshot {
@@ -666,6 +669,7 @@ impl TransitionDefault for PoolSnapshot {
             is_retired: current.is_retired,
             params: current.params.clone(),
             blocks_minted: 0,
+            is_new: false,
         })
     }
 }

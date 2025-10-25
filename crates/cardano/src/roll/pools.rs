@@ -80,6 +80,7 @@ impl dolos_core::EntityDelta for PoolRegistration {
                 entity.snapshot.replace(
                     PoolSnapshot {
                         is_retired: false,
+                        is_new: true,
                         blocks_minted: 0,
                         params: self.cert.clone().into(),
                     },
@@ -92,6 +93,7 @@ impl dolos_core::EntityDelta for PoolRegistration {
                         is_retired: false,
                         blocks_minted: 0,
                         params: self.cert.clone().into(),
+                        is_new: false,
                     }),
                 );
             }
@@ -105,6 +107,7 @@ impl dolos_core::EntityDelta for PoolRegistration {
                     is_retired: false,
                     blocks_minted: 0,
                     params: self.cert.clone().into(),
+                    is_new: false,
                 }),
             );
         } else {
@@ -121,6 +124,7 @@ impl dolos_core::EntityDelta for PoolRegistration {
                 is_retired: false,
                 blocks_minted: 0,
                 params: self.cert.clone().into(),
+                is_new: true,
             };
 
             let state = PoolState {

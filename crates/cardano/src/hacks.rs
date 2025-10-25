@@ -1,3 +1,31 @@
+pub mod pointers {
+    use pallas::ledger::{addresses::Pointer, primitives::StakeCredential};
+
+    pub fn pointer_to_cred(pointer: &Pointer) -> Option<StakeCredential> {
+        match (pointer.slot(), pointer.tx_idx(), pointer.cert_idx()) {
+            (2940289, 1, 0) => Some(StakeCredential::AddrKeyhash(
+                "0c90492bbe7eb33f38173255e547dc3194abcec5cd29cdf504bb4f03"
+                    .parse()
+                    .unwrap(),
+            )),
+            (100, 2, 0) => None,
+            (1, 1, 1) => None,
+            (0, 0, 0) => None,
+            (0, 1, 10000) => None,
+            (10000000, 1, 1) => None,
+            (100, 100, 1) => None,
+            (1, 1, 1000) => None,
+            (1, 1, 0) => None,
+            (50, 50, 5) => None,
+            x => {
+                dbg!(x);
+                //panic!("unknown pointer: {:?}", x);
+                None
+            }
+        }
+    }
+}
+
 pub mod proposals {
     pub mod preview {
         use crate::Epoch;

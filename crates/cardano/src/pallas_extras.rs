@@ -17,6 +17,7 @@ use pallas::ledger::traverse::MultiEraCert;
 use serde::{Deserialize, Serialize};
 
 use crate::eras::ChainSummary;
+use crate::hacks;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MultiEraPoolRegistration {
@@ -196,7 +197,8 @@ pub fn shelley_address_to_stake_cred(address: &ShelleyAddress) -> Option<StakeCr
     match address.delegation() {
         ShelleyDelegationPart::Key(x) => Some(StakeCredential::AddrKeyhash(*x)),
         ShelleyDelegationPart::Script(x) => Some(StakeCredential::ScriptHash(*x)),
-        _ => None,
+        ShelleyDelegationPart::Pointer(x) => hacks::pointers::pointer_to_cred(x),
+        ShelleyDelegationPart::Null => None,
     }
 }
 
@@ -339,6 +341,15 @@ pub fn pool_reward_account(reward_account: &[u8]) -> Option<StakeCredential> {
 
 pub fn keyhash_to_stake_cred(keyhash: Hash<28>) -> StakeCredential {
     StakeCredential::AddrKeyhash(keyhash)
+}
+
+pub fn cred_matches_hash(cred: &StakeCredential, hash: &str) -> bool {
+    let hash: Hash<28> = hash.parse().unwrap();
+
+    match cred {
+        StakeCredential::AddrKeyhash(x) => x == &hash,
+        StakeCredential::ScriptHash(x) => x == &hash,
+    }
 }
 
 #[cfg(test)]

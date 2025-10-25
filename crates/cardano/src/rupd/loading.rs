@@ -127,7 +127,6 @@ impl StakeSnapshot {
         for record in accounts {
             let (_, account) = record?;
 
-
             // TODO: check if we really need to make ths check. It might be adding noise to the data.
             if account.is_registered() {
                 snapshot

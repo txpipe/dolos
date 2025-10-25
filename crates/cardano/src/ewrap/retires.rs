@@ -296,7 +296,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         ctx: &mut super::BoundaryWork,
         _: PoolHash,
         _: &PoolState,
-        account: &AccountState,
+        account: Option<&AccountState>,
     ) -> Result<(), ChainError> {
         let deposit = ctx
             .ending_state()
@@ -304,8 +304,10 @@ impl super::BoundaryVisitor for BoundaryVisitor {
             .unwrap_live()
             .ensure_pool_deposit()?;
 
-        if account.is_registered() {
-            self.change(PoolDepositRefund::new(deposit, account.credential.clone()));
+        if let Some(account) = account {
+            if account.is_registered() {
+                self.change(PoolDepositRefund::new(deposit, account.credential.clone()));
+            }
         }
 
         Ok(())

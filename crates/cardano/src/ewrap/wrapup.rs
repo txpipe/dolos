@@ -94,30 +94,17 @@ impl BoundaryVisitor {
     }
 }
 
-fn define_new_pool_count(ctx: &super::BoundaryWork) -> usize {
-    let rolling = ctx.ending_state.rolling.unwrap_live();
-
-    // we need to know which of the registered pools are actually new pools that
-    // need deposit vs re-registration of existing pools.
-    let repeated_pools = ctx
-        .existing_pools
-        .intersection(&rolling.registered_pools)
-        .count();
-
-    rolling.registered_pools.len() - repeated_pools
-}
-
 fn define_end_stats(ctx: &super::BoundaryWork) -> EndStats {
     let pool_refund_count = ctx
         .retiring_pools
         .values()
-        .filter(|(_, account)| account.is_registered())
+        .filter(|(_, a)| a.as_ref().is_some_and(|a| a.is_registered()))
         .count();
 
     let pool_invalid_refund_count = ctx.retiring_pools.len() - pool_refund_count;
 
     EndStats {
-        pool_deposit_count: define_new_pool_count(ctx) as u64,
+        pool_deposit_count: ctx.new_pools.len() as u64,
         pool_refund_count: pool_refund_count as u64,
         pool_invalid_refund_count: pool_invalid_refund_count as u64,
     }
@@ -129,7 +116,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         _: &mut super::BoundaryWork,
         pool_hash: PoolHash,
         _: &PoolState,
-        _: &AccountState,
+        _: Option<&AccountState>,
     ) -> Result<(), ChainError> {
         self.change(PoolWrapUp::new(pool_hash));
 

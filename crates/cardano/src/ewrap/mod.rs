@@ -12,8 +12,6 @@ use crate::{
     EraProtocol, EraSummary, PoolHash, PoolState, Proposal,
 };
 
-mod hacks;
-
 pub mod commit;
 pub mod loading;
 
@@ -39,7 +37,7 @@ pub trait BoundaryVisitor {
         ctx: &mut BoundaryWork,
         pool_hash: PoolHash,
         pool: &PoolState,
-        account: &AccountState,
+        account: Option<&AccountState>,
     ) -> Result<(), ChainError> {
         Ok(())
     }
@@ -93,8 +91,8 @@ pub struct BoundaryWork {
     pub genesis: Arc<Genesis>,
 
     // inferred
-    pub existing_pools: HashSet<PoolHash>,
-    pub retiring_pools: HashMap<PoolHash, (PoolState, AccountState)>,
+    pub new_pools: HashSet<PoolHash>,
+    pub retiring_pools: HashMap<PoolHash, (PoolState, Option<AccountState>)>,
 
     // TODO: we use a vec instead of a HashSet because the Pallas struct doesn't implement Hash. We
     // should turn it into a HashSet once we have the update in Pallas.
@@ -124,23 +122,12 @@ pub fn execute<D: Domain>(
     state: &D::State,
     archive: &D::Archive,
     slot: BlockSlot,
-    config: &Config,
+    _: &Config,
     genesis: Arc<Genesis>,
 ) -> Result<(), ChainError> {
     info!("executing epoch work unit");
 
     let mut boundary = BoundaryWork::load::<D>(state, genesis)?;
-
-    // If we're going to stop, we need to do it before applying any changes.
-    //
-    // This is due to the fact that the WAL only tracks blocks, if we were to apply
-    // the changes, WAL will think it's still before the epoch boundary and
-    // re-apply everything in the next pass.
-    if let Some(stop_epoch) = config.stop_epoch {
-        if boundary.ending_state.number >= stop_epoch {
-            return Err(ChainError::StopEpochReached);
-        }
-    }
 
     boundary.commit::<D>(state, archive)?;
 
