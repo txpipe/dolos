@@ -116,6 +116,11 @@ pub fn define_new_pots(ctx: &super::WorkContext) -> Pots {
         new_accounts: rolling.new_accounts,
         removed_accounts: rolling.removed_accounts,
         withdrawals: rolling.withdrawals,
+        drep_deposits: rolling.drep_deposits,
+        proposal_deposits: rolling.proposal_deposits,
+        drep_refunds: rolling.drep_refunds,
+        proposal_refunds: rolling.proposal_refunds,
+        treasury_donations: rolling.treasury_donations,
         effective_rewards: end.effective_rewards,
         unspendable_rewards: end.unspendable_rewards,
         pool_deposit_count: end.pool_deposit_count,
@@ -124,6 +129,22 @@ pub fn define_new_pots(ctx: &super::WorkContext) -> Pots {
     };
 
     let pots = apply_delta(epoch.initial_pots.clone(), &end.epoch_incentives, &delta);
+
+    tracing::info!(
+        rewards = pots.rewards,
+        reserves = pots.reserves,
+        treasury = pots.treasury,
+        fees = pots.fees,
+        utxos = pots.utxos,
+        "pots after reset"
+    );
+
+    if !pots.is_consistent(epoch.initial_pots.max_supply()) {
+        dbg!(end);
+        dbg!(&epoch.initial_pots);
+        dbg!(&pots);
+        dbg!(delta);
+    }
 
     pots.assert_consistency(epoch.initial_pots.max_supply());
 

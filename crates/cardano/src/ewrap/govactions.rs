@@ -145,6 +145,7 @@ impl BoundaryVisitor {
 
             self.change(PParamsUpdate::new(value));
         }
+
         if let Some(updated) = update.max_block_ex_units {
             let value = PParamValue::MaxBlockExUnits(pallas::ledger::primitives::ExUnits {
                 mem: updated.mem,

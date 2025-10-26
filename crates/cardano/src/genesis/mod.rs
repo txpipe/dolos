@@ -110,6 +110,7 @@ pub fn bootstrap_eras<D: Domain>(state: &D::State, epoch: &EpochState) -> Result
         end: None,
         epoch_length,
         slot_length,
+        protocol: protocol_major,
     };
 
     let key = protocol_major.to_be_bytes();

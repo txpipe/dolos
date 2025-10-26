@@ -113,6 +113,12 @@ fn define_end_stats(ctx: &super::BoundaryWork) -> EndStats {
         epoch_incentives: incentives.clone(),
         effective_rewards: reward_delta.effective_rewards,
         unspendable_rewards: reward_delta.unspendable_rewards,
+        // TODO: compute
+        proposal_refunds: 0,
+        // TODO: deprecate
+        __proposal_deposits: 0,
+        __drep_deposits: 0,
+        __drep_refunds: 0,
     }
 }
 

@@ -439,13 +439,17 @@ pub type PoolHash = Hash<28>;
 #[derive(Debug, Clone, PartialEq, Eq, Decode, Encode, Default)]
 pub struct Stake {
     #[n(0)]
-    pub utxo_sum: u64,
+    pub utxo_sum: Lovelace,
 
     #[n(1)]
-    pub rewards_sum: u64,
+    pub rewards_sum: Lovelace,
 
     #[n(2)]
-    pub withdrawals_sum: u64,
+    pub withdrawals_sum: Lovelace,
+
+    #[n(3)]
+    #[cbor(default)]
+    pub utxo_sum_at_pointer_addresses: Lovelace,
 }
 
 impl Stake {
@@ -455,6 +459,22 @@ impl Stake {
         out -= self.withdrawals_sum;
 
         out
+    }
+
+    pub fn total_pre_conway(&self) -> u64 {
+        let mut out = self.utxo_sum;
+        out += self.utxo_sum_at_pointer_addresses;
+        out += self.rewards_sum;
+        out -= self.withdrawals_sum;
+
+        out
+    }
+
+    pub fn total_for_era(&self, era: EraProtocol) -> u64 {
+        match era {
+            x if x < 9 => self.total_pre_conway(),
+            _ => self.total(),
+        }
     }
 
     pub fn withdrawable(&self) -> u64 {
@@ -1327,6 +1347,22 @@ pub struct RollingStats {
 
     #[n(13)]
     pub blocks_minted: u32,
+
+    #[n(14)]
+    pub drep_deposits: Lovelace,
+
+    #[n(15)]
+    pub proposal_deposits: Lovelace,
+
+    #[n(16)]
+    pub drep_refunds: Lovelace,
+
+    #[n(17)]
+    pub proposal_refunds: Lovelace,
+
+    #[n(18)]
+    #[cbor(default)]
+    pub treasury_donations: Lovelace,
 }
 
 impl TransitionDefault for RollingStats {
@@ -1355,6 +1391,21 @@ pub struct EndStats {
 
     #[n(5)]
     pub unspendable_rewards: u64,
+
+    // TODO: deprecate
+    #[n(6)]
+    pub __proposal_deposits: Lovelace,
+
+    #[n(7)]
+    pub proposal_refunds: Lovelace,
+
+    // TODO: deprecate
+    #[n(8)]
+    pub __drep_deposits: Lovelace,
+
+    // TODO: deprecate
+    #[n(9)]
+    pub __drep_refunds: Lovelace,
 }
 
 #[derive(Debug, Encode, Decode, Clone)]
@@ -1524,6 +1575,10 @@ pub struct EraSummary {
 
     #[n(3)]
     pub slot_length: u64,
+
+    #[n(4)]
+    #[cbor(default)]
+    pub protocol: u16,
 }
 
 entity_boilerplate!(EraSummary, "eras");

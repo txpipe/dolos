@@ -13,11 +13,11 @@ use pallas::ledger::primitives::{
     RationalNumber, Relay, StakeCredential,
 };
 use pallas::ledger::primitives::{ExUnitPrices, ExUnits, Nonce, NonceVariant};
-use pallas::ledger::traverse::MultiEraCert;
+use pallas::ledger::traverse::{MultiEraCert, MultiEraTx};
 use serde::{Deserialize, Serialize};
 
 use crate::eras::ChainSummary;
-use crate::hacks;
+use crate::{hacks, Lovelace};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MultiEraPoolRegistration {
@@ -112,6 +112,39 @@ pub fn cert_as_vote_delegation(cert: &MultiEraCert) -> Option<MultiEraVoteDelega
     }
 }
 
+pub struct MultiEraDRepRegistration {
+    pub cred: StakeCredential,
+    pub deposit: Lovelace,
+}
+
+pub fn cert_as_drep_registration(cert: &MultiEraCert) -> Option<MultiEraDRepRegistration> {
+    match cert {
+        MultiEraCert::Conway(cow) => match cow.deref().deref() {
+            ConwayCert::RegDRepCert(cred, deposit, _) => Some(MultiEraDRepRegistration {
+                cred: cred.clone(),
+                deposit: *deposit,
+            }),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+pub type MultiEraDRepUnRegistration = MultiEraDRepRegistration;
+
+pub fn cert_as_drep_unregistration(cert: &MultiEraCert) -> Option<MultiEraDRepUnRegistration> {
+    match cert {
+        MultiEraCert::Conway(cow) => match cow.deref().deref() {
+            ConwayCert::UnRegDRepCert(cred, deposit) => Some(MultiEraDRepRegistration {
+                cred: cred.clone(),
+                deposit: *deposit,
+            }),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 #[derive(Debug)]
 pub struct MultiEraStakeDelegation {
     pub delegator: StakeCredential,
@@ -137,6 +170,10 @@ pub fn cert_as_stake_delegation(cert: &MultiEraCert) -> Option<MultiEraStakeDele
                 pool: *pool,
             }),
             ConwayCert::StakeVoteRegDeleg(delegator, pool, _, _) => Some(MultiEraStakeDelegation {
+                delegator: delegator.clone(),
+                pool: *pool,
+            }),
+            ConwayCert::StakeVoteDeleg(delegator, pool, _) => Some(MultiEraStakeDelegation {
                 delegator: delegator.clone(),
                 pool: *pool,
             }),
@@ -193,11 +230,13 @@ pub fn stake_address_to_cred(address: &StakeAddress) -> StakeCredential {
     }
 }
 
-pub fn shelley_address_to_stake_cred(address: &ShelleyAddress) -> Option<StakeCredential> {
+pub fn shelley_address_to_stake_cred(
+    address: &ShelleyAddress,
+) -> Option<(StakeCredential, IsPointer)> {
     match address.delegation() {
-        ShelleyDelegationPart::Key(x) => Some(StakeCredential::AddrKeyhash(*x)),
-        ShelleyDelegationPart::Script(x) => Some(StakeCredential::ScriptHash(*x)),
-        ShelleyDelegationPart::Pointer(x) => hacks::pointers::pointer_to_cred(x),
+        ShelleyDelegationPart::Key(x) => Some((StakeCredential::AddrKeyhash(*x), false)),
+        ShelleyDelegationPart::Script(x) => Some((StakeCredential::ScriptHash(*x), false)),
+        ShelleyDelegationPart::Pointer(x) => hacks::pointers::pointer_to_cred(x).map(|x| (x, true)),
         ShelleyDelegationPart::Null => None,
     }
 }
@@ -216,10 +255,12 @@ pub fn shelley_address_to_stake_address(address: &ShelleyAddress) -> Option<Stak
     }
 }
 
-pub fn address_as_stake_cred(address: &Address) -> Option<StakeCredential> {
+pub type IsPointer = bool;
+
+pub fn address_as_stake_cred(address: &Address) -> Option<(StakeCredential, IsPointer)> {
     match &address {
         Address::Shelley(x) => shelley_address_to_stake_cred(x),
-        Address::Stake(x) => Some(stake_address_to_cred(x)),
+        Address::Stake(x) => Some((stake_address_to_cred(x), false)),
         _ => None,
     }
 }
@@ -336,7 +377,9 @@ pub fn stake_cred_to_drep(cred: &StakeCredential) -> DRep {
 
 pub fn pool_reward_account(reward_account: &[u8]) -> Option<StakeCredential> {
     let pool_address = Address::from_bytes(reward_account).ok()?;
-    address_as_stake_cred(&pool_address)
+    let (cred, _) = address_as_stake_cred(&pool_address)?;
+
+    Some(cred)
 }
 
 pub fn keyhash_to_stake_cred(keyhash: Hash<28>) -> StakeCredential {
@@ -349,6 +392,16 @@ pub fn cred_matches_hash(cred: &StakeCredential, hash: &str) -> bool {
     match cred {
         StakeCredential::AddrKeyhash(x) => x == &hash,
         StakeCredential::ScriptHash(x) => x == &hash,
+    }
+}
+
+pub fn tx_treasury_donation(tx: &MultiEraTx) -> Option<Lovelace> {
+    match tx {
+        MultiEraTx::Conway(x) => x.transaction_body.donation.map(|x| x.into()),
+        MultiEraTx::AlonzoCompatible(..) => None,
+        MultiEraTx::Babbage(..) => None,
+        MultiEraTx::Byron(..) => None,
+        _ => panic!("unexpected tx era"),
     }
 }
 

@@ -44,6 +44,7 @@ impl BoundaryWork {
             end: None,
             epoch_length: pparams.ensure_epoch_length()?,
             slot_length: pparams.ensure_slot_length()?,
+            protocol: transition.new_version.into(),
         };
 
         writer.write_entity_typed(&EntityKey::from(transition.new_version), &new)?;
