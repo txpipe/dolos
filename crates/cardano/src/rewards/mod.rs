@@ -154,9 +154,22 @@ pub struct RewardMap<C: RewardsContext> {
 
 impl<C: RewardsContext> std::fmt::Display for RewardMap<C> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        for (_, reward) in self.pending.iter() {
-            if reward.is_spendable() && reward.total_value() > 0 {
-                writeln!(f, "| {} |", reward.total_value())?;
+        for (account, reward) in self.pending.iter() {
+            if reward.total_value() > 0 {
+                let address = pallas_extras::stake_credential_to_address(
+                    pallas::ledger::addresses::Network::Testnet,
+                    account,
+                )
+                .to_bech32()
+                .unwrap();
+
+                writeln!(
+                    f,
+                    "{},{},{}",
+                    address,
+                    reward.is_spendable(),
+                    reward.total_value()
+                )?;
             }
         }
         Ok(())
@@ -242,11 +255,18 @@ impl<C: RewardsContext> RewardMap<C> {
     pub fn take_for_apply(&mut self, account: &AccountState) -> Option<Reward> {
         let reward = self.pending.remove(&account.credential)?;
 
-        // TODO: notice that we're not checking if the rewards were spendable at the
-        // moment of RUPD (the `is_spendable` field). The field still has its purpose as
-        // a way to drain the remaining, not applied, rewards. It might be the case that
-        // for mainnet, we need to fork the logic depending on the era.
-        if account.is_registered() && reward.is_spendable() {
+        if reward.is_spendable() != account.is_registered() {
+            tracing::warn!(
+                account = ?account.credential,
+                amount = reward.total_value(),
+                "reward is spendable mismatch"
+            );
+        }
+
+        // TODO: notice that we're not checking both if the rewards was spendable at the
+        // moment of RUPD (the `is_spendable` field). This might be important on mainnet.
+
+        if account.is_registered() {
             self.applied_effective += reward.total_value();
             Some(reward)
         } else {
