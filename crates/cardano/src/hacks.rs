@@ -18,9 +18,7 @@ pub mod pointers {
             (1, 1, 0) => None,
             (50, 50, 5) => None,
             x => {
-                dbg!(x);
-                //panic!("unknown pointer: {:?}", x);
-                None
+                panic!("unknown pointer: {:?}", x);
             }
         }
     }
