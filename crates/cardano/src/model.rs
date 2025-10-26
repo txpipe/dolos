@@ -24,7 +24,6 @@ use crate::{
     estart::{
         nonces::NonceTransition,
         reset::{AccountTransition, EpochTransition, PoolTransition},
-        rewards::AssignRewards,
     },
     ewrap::{
         govactions::ProposalEnactment,
@@ -32,13 +31,14 @@ use crate::{
             DRepDelegatorDrop, DRepExpiration, PoolDelegatorDrop, PoolDepositRefund,
             ProposalExpiration,
         },
+        rewards::AssignRewards,
         wrapup::{EpochWrapUp, PoolWrapUp},
     },
     pallas_extras::{
         self, default_cost_models, default_drep_voting_thresholds, default_ex_unit_prices,
         default_ex_units, default_nonce, default_pool_voting_thresholds, default_rational_number,
     },
-    pots::Pots,
+    pots::{EpochIncentives, Pots},
     roll::{
         accounts::{
             ControlledAmountDec, ControlledAmountInc, StakeDelegation, StakeDeregistration,
@@ -465,6 +465,12 @@ impl Stake {
     }
 }
 
+impl TransitionDefault for Stake {
+    fn next_value(current: Option<&Self>) -> Option<Self> {
+        current.cloned()
+    }
+}
+
 // HACK: seems that encoding `Some(None)` to CBOR is a lossy operation, the
 // decoding return None. To avoid dealing with this issue at the `minicbor`
 // crate, we're creating this pseud-option enum to identify the existence or
@@ -479,12 +485,6 @@ pub enum PoolDelegation {
 }
 
 pub type DRepDelegation = Option<DRep>;
-
-impl TransitionDefault for Stake {
-    fn next_value(current: Option<&Self>) -> Option<Self> {
-        current.cloned()
-    }
-}
 
 impl TransitionDefault for PoolDelegation {
     fn next_value(current: Option<&Self>) -> Option<Self> {
@@ -1346,6 +1346,15 @@ pub struct EndStats {
 
     #[n(2)]
     pub pool_invalid_refund_count: u64,
+
+    #[n(3)]
+    pub epoch_incentives: EpochIncentives,
+
+    #[n(4)]
+    pub effective_rewards: u64,
+
+    #[n(5)]
+    pub unspendable_rewards: u64,
 }
 
 #[derive(Debug, Encode, Decode, Clone)]

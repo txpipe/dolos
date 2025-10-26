@@ -5,8 +5,10 @@ use pallas::codec::minicbor;
 
 use crate::{
     ewrap::{BoundaryVisitor as _, BoundaryWork},
-    load_active_era, pallas_extras, AccountState, DRepState, FixedNamespace as _, PoolState,
-    Proposal,
+    load_active_era, pallas_extras,
+    rewards::RewardMap,
+    rupd::RupdWork,
+    AccountState, DRepState, FixedNamespace as _, PoolState, Proposal,
 };
 
 impl BoundaryWork {
@@ -88,8 +90,9 @@ impl BoundaryWork {
     }
 
     pub fn compute_deltas<D: Domain>(&mut self, state: &D::State) -> Result<(), ChainError> {
-        let mut visitor_retires = crate::ewrap::retires::BoundaryVisitor::default();
         let mut visitor_govactions = crate::ewrap::govactions::BoundaryVisitor::default();
+        let mut visitor_rewards = crate::ewrap::rewards::BoundaryVisitor::default();
+        let mut visitor_retires = crate::ewrap::retires::BoundaryVisitor::default();
         let mut visitor_wrapup = crate::ewrap::wrapup::BoundaryVisitor::default();
 
         let pools = state.iter_entities_typed::<PoolState>(PoolState::NS, None)?;
@@ -97,16 +100,18 @@ impl BoundaryWork {
         for pool in pools {
             let (pool_id, pool) = pool?;
 
-            visitor_retires.visit_pool(self, &pool_id, &pool)?;
             visitor_govactions.visit_pool(self, &pool_id, &pool)?;
+            visitor_rewards.visit_pool(self, &pool_id, &pool)?;
+            visitor_retires.visit_pool(self, &pool_id, &pool)?;
             visitor_wrapup.visit_pool(self, &pool_id, &pool)?;
         }
 
         let retiring_pools = self.retiring_pools.clone();
 
         for (pool_id, (pool, account)) in retiring_pools {
-            visitor_retires.visit_retiring_pool(self, pool_id, &pool, account.as_ref())?;
             visitor_govactions.visit_retiring_pool(self, pool_id, &pool, account.as_ref())?;
+            visitor_rewards.visit_retiring_pool(self, pool_id, &pool, account.as_ref())?;
+            visitor_retires.visit_retiring_pool(self, pool_id, &pool, account.as_ref())?;
             visitor_wrapup.visit_retiring_pool(self, pool_id, &pool, account.as_ref())?;
         }
 
@@ -115,8 +120,9 @@ impl BoundaryWork {
         for drep in dreps {
             let (drep_id, drep) = drep?;
 
-            visitor_retires.visit_drep(self, &drep_id, &drep)?;
             visitor_govactions.visit_drep(self, &drep_id, &drep)?;
+            visitor_rewards.visit_drep(self, &drep_id, &drep)?;
+            visitor_retires.visit_drep(self, &drep_id, &drep)?;
             visitor_wrapup.visit_drep(self, &drep_id, &drep)?;
         }
 
@@ -125,8 +131,13 @@ impl BoundaryWork {
         for account in accounts {
             let (account_id, account) = account?;
 
-            visitor_retires.visit_account(self, &account_id, &account)?;
             visitor_govactions.visit_account(self, &account_id, &account)?;
+
+            // HACK: we need the rewards to apply before the retires. This is because the rewards will update the live value before the snapshot but the retires will schedule refuns for after the snapshot. If we switch the sequence, the rewards will be overriden by the refund schedule. If we keep this order, the refund will clone the existing live values with the rewards already applied.
+            // TODO: we should probably move the retires to ESTART after the snapshot has been taken.
+            visitor_rewards.visit_account(self, &account_id, &account)?;
+            visitor_retires.visit_account(self, &account_id, &account)?;
+
             visitor_wrapup.visit_account(self, &account_id, &account)?;
         }
 
@@ -135,13 +146,15 @@ impl BoundaryWork {
         for proposal in proposals {
             let (proposal_id, proposal) = proposal?;
 
-            visitor_retires.visit_proposal(self, &proposal_id, &proposal)?;
             visitor_govactions.visit_proposal(self, &proposal_id, &proposal)?;
+            visitor_rewards.visit_proposal(self, &proposal_id, &proposal)?;
+            visitor_retires.visit_proposal(self, &proposal_id, &proposal)?;
             visitor_wrapup.visit_proposal(self, &proposal_id, &proposal)?;
         }
 
-        visitor_retires.flush(self)?;
         visitor_govactions.flush(self)?;
+        visitor_rewards.flush(self)?;
+        visitor_retires.flush(self)?;
         visitor_wrapup.flush(self)?;
 
         Ok(())
@@ -150,6 +163,7 @@ impl BoundaryWork {
     pub fn load<D: Domain>(
         state: &D::State,
         genesis: Arc<Genesis>,
+        rewards: RewardMap<RupdWork>,
     ) -> Result<BoundaryWork, ChainError> {
         let ending_state = crate::load_epoch::<D>(state)?;
         let (active_protocol, active_era) = load_active_era::<D>(state)?;
@@ -159,6 +173,7 @@ impl BoundaryWork {
             active_era,
             active_protocol,
             genesis,
+            rewards,
 
             // to be loaded right after
             new_pools: Default::default(),

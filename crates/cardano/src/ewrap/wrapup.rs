@@ -103,10 +103,16 @@ fn define_end_stats(ctx: &super::BoundaryWork) -> EndStats {
 
     let pool_invalid_refund_count = ctx.retiring_pools.len() - pool_refund_count;
 
+    let incentives = ctx.rewards.incentives();
+    let reward_delta = ctx.rewards.as_pot_delta();
+
     EndStats {
         pool_deposit_count: ctx.new_pools.len() as u64,
         pool_refund_count: pool_refund_count as u64,
         pool_invalid_refund_count: pool_invalid_refund_count as u64,
+        epoch_incentives: incentives.clone(),
+        effective_rewards: reward_delta.effective_rewards,
+        unspendable_rewards: reward_delta.unspendable_rewards,
     }
 }
 
