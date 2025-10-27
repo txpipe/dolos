@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.0-beta.8] - 2025-10-27
+
+### 🐛 Bug Fixes
+
+- *(cardano)* Use correct timing for pool params activation (#764)
+- *(cardano)* Skip retired pools from active stake snapshot (#765)
+- *(cardano)* Treat pool retire epoch as inclusive
+- *(cardano)* Adjust multiple reward-related issues (#766)
+- *(cardano)* Fix multiple accounting details (#767)
+- *(cardano)* Make sure all staking rules are followed (#771)
+- *(cardano)* Take into account preprod pointer addresses
+- *(minibf)* Fix `/network` endpoint mappings (#773)
+
+### ⚙️ Miscellaneous Tasks
+
+- *(cardano)* Avoid panic on undo logic (#772)
+
 ## [1.0.0-beta.7] - 2025-10-17
 
 ### 🐛 Bug Fixes
@@ -11,6 +28,10 @@ All notable changes to this project will be documented in this file.
 - *(minibf)* Use inaccurate but compatible pool fees value (#762)
 - *(cardano)* Allow delegation to unregistered dreps (#763)
 - *(cardano)* Fix incentives calc on epoch 0
+
+### Release
+
+- V1.0.0-beta.7
 
 ## [1.0.0-beta.6] - 2025-10-16
 
