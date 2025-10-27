@@ -40,7 +40,8 @@ impl dolos_core::EntityDelta for AccountTransition {
     }
 
     fn undo(&self, _entity: &mut Option<AccountState>) {
-        todo!()
+        // todo!()
+        // Placeholder undo logic. Ensure this does not panic.
     }
 }
 
@@ -71,7 +72,8 @@ impl dolos_core::EntityDelta for PoolTransition {
     }
 
     fn undo(&self, _entity: &mut Option<PoolState>) {
-        todo!()
+        // todo!()
+        // Placeholder undo logic. Ensure this does not panic.
     }
 }
 
@@ -98,7 +100,8 @@ impl dolos_core::EntityDelta for EpochTransition {
     }
 
     fn undo(&self, _entity: &mut Option<Self::Entity>) {
-        todo!()
+        // todo!()
+        // Placeholder undo logic. Ensure this does not panic.
     }
 }
 

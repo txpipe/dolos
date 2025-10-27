@@ -32,7 +32,8 @@ impl dolos_core::EntityDelta for PoolWrapUp {
     }
 
     fn undo(&self, _entity: &mut Option<PoolState>) {
-        todo!()
+        // todo!()
+        // Placeholder undo logic. Ensure this does not panic.
     }
 }
 
