@@ -52,7 +52,7 @@ jobs:
           mv target/${{ matrix.target }}/release/dolos${{ matrix.ext }} dolos-${{ matrix.release_for }}${{ matrix.ext }}
 
       - name: upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: binaries-${{ matrix.release_for }}
           path: dolos-${{ matrix.release_for }}${{ matrix.ext }}
