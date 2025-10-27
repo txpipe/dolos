@@ -210,19 +210,42 @@ impl dolos_core::EntityDelta for PoolDepositRefund {
     }
 }
 
-fn should_expire_proposal(ctx: &mut BoundaryWork, proposal: &Proposal) -> Result<bool, ChainError> {
-    // Skip proposals already in a terminal state
-    if proposal.expired_epoch.is_some() || proposal.enacted_epoch.is_some() {
-        return Ok(false);
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProposalDepositRefund {
+    proposal_deposit: u64,
+    account: StakeCredential,
+}
+
+impl ProposalDepositRefund {
+    pub fn new(proposal_deposit: u64, account: StakeCredential) -> Self {
+        Self {
+            proposal_deposit,
+            account,
+        }
+    }
+}
+
+impl dolos_core::EntityDelta for ProposalDepositRefund {
+    type Entity = AccountState;
+
+    fn key(&self) -> NsKey {
+        let enc = minicbor::to_vec(&self.account).unwrap();
+        NsKey::from((AccountState::NS, enc))
     }
 
-    let (epoch, _) = ctx.active_era.slot_epoch(proposal.slot);
+    fn apply(&mut self, entity: &mut Option<Self::Entity>) {
+        let entity = entity.as_mut().expect("existing account");
 
-    let pparams = ctx.ending_state().pparams.unwrap_live();
+        tracing::error!(cred=?self.account, deposit=%self.proposal_deposit, "applying proposal deposit refund");
 
-    let expiring_epoch = epoch + pparams.ensure_governance_action_validity_period()?;
+        let stake = entity.stake.scheduled_or_default();
 
-    Ok(expiring_epoch <= ctx.starting_epoch_no())
+        stake.rewards_sum += self.proposal_deposit;
+    }
+
+    fn undo(&self, _entity: &mut Option<Self::Entity>) {
+        todo!()
+    }
 }
 
 #[derive(Default)]
@@ -273,20 +296,75 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         Ok(())
     }
 
-    fn visit_proposal(
+    fn visit_expiring_proposal(
         &mut self,
         ctx: &mut BoundaryWork,
         id: &ProposalId,
         proposal: &Proposal,
+        account: Option<&AccountState>,
     ) -> Result<(), ChainError> {
-        if !should_expire_proposal(ctx, proposal)? {
-            return Ok(());
-        }
+        tracing::error!(proposal=%id, "visiting expiring proposal");
 
         self.change(ProposalExpiration {
             proposal: id.clone(),
             epoch: ctx.starting_epoch_no(),
         });
+
+        if let Some(account) = account {
+            if account.is_registered() {
+                self.change(ProposalDepositRefund::new(
+                    proposal.proposal.deposit,
+                    account.credential.clone(),
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn visit_dropping_proposal(
+        &mut self,
+        ctx: &mut BoundaryWork,
+        id: &ProposalId,
+        proposal: &Proposal,
+        account: Option<&AccountState>,
+    ) -> Result<(), ChainError> {
+        tracing::error!(proposal=%id, "visiting dropping proposal");
+
+        self.change(ProposalExpiration {
+            proposal: id.clone(),
+            epoch: ctx.starting_epoch_no(),
+        });
+
+        if let Some(account) = account {
+            if account.is_registered() {
+                self.change(ProposalDepositRefund::new(
+                    proposal.proposal.deposit,
+                    account.credential.clone(),
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn visit_enacting_proposal(
+        &mut self,
+        _: &mut BoundaryWork,
+        id: &ProposalId,
+        proposal: &Proposal,
+        account: Option<&AccountState>,
+    ) -> Result<(), ChainError> {
+        tracing::error!(proposal=%id, "visiting enacting proposal");
+
+        if let Some(account) = account {
+            if account.is_registered() {
+                self.change(ProposalDepositRefund::new(
+                    proposal.proposal.deposit,
+                    account.credential.clone(),
+                ));
+            }
+        }
 
         Ok(())
     }
@@ -296,7 +374,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         ctx: &mut super::BoundaryWork,
         _: PoolHash,
         _: &PoolState,
-        account: &AccountState,
+        account: Option<&AccountState>,
     ) -> Result<(), ChainError> {
         let deposit = ctx
             .ending_state()
@@ -304,8 +382,10 @@ impl super::BoundaryVisitor for BoundaryVisitor {
             .unwrap_live()
             .ensure_pool_deposit()?;
 
-        if account.is_registered() {
-            self.change(PoolDepositRefund::new(deposit, account.credential.clone()));
+        if let Some(account) = account {
+            if account.is_registered() {
+                self.change(PoolDepositRefund::new(deposit, account.credential.clone()));
+            }
         }
 
         Ok(())

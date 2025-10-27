@@ -54,14 +54,16 @@ impl BlockVisitor for ProposalVisitor {
         proposal: &pallas::ledger::traverse::MultiEraProposal,
         idx: usize,
     ) -> Result<(), ChainError> {
-        if let Some(procedure) = proposal.as_conway() {
-            deltas.add_for_entity(NewProposal {
-                slot: block.slot(),
-                transaction: tx.hash(),
-                idx: idx as u32,
-                procedure: procedure.to_owned(),
-            });
-        }
+        let Some(procedure) = proposal.as_conway() else {
+            return Ok(());
+        };
+
+        deltas.add_for_entity(NewProposal {
+            slot: block.slot(),
+            transaction: tx.hash(),
+            idx: idx as u32,
+            procedure: procedure.to_owned(),
+        });
 
         Ok(())
     }

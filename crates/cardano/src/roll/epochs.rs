@@ -31,6 +31,10 @@ pub struct EpochStatsUpdate {
     removed_accounts: u64,
     withdrawals: u64,
     registered_pools: HashSet<PoolHash>,
+    drep_deposits: Lovelace,
+    proposal_deposits: Lovelace,
+    drep_refunds: Lovelace,
+    treasury_donations: Lovelace,
 }
 
 impl dolos_core::EntityDelta for EpochStatsUpdate {
@@ -57,6 +61,10 @@ impl dolos_core::EntityDelta for EpochStatsUpdate {
         stats.new_accounts += self.new_accounts;
         stats.removed_accounts += self.removed_accounts;
         stats.withdrawals += self.withdrawals;
+        stats.proposal_deposits += self.proposal_deposits;
+        stats.drep_deposits += self.drep_deposits;
+        stats.drep_refunds += self.drep_refunds;
+        stats.treasury_donations += self.treasury_donations;
 
         stats.registered_pools = stats
             .registered_pools
@@ -190,8 +198,8 @@ macro_rules! check_all_proposed {
     };
 }
 
-// HACK: in alonzo we don't have access direct to the total collateral, we need to compute it by looking at each of the consumed inputs.
-fn compute_alonzo_collateral(
+// HACK: There are txs that don't have an explicit value for total collateral and Alonzo txs don't even have the total collateral field. This is why we need to compute it by looking at collateral inputs and collateral return. Pallas hides this from us by providing the "consumes" / "produces" facade.
+fn compute_collateral_value(
     tx: &MultiEraTx,
     utxos: &HashMap<TxoRef, OwnedMultiEraOutput>,
 ) -> Result<Lovelace, ChainError> {
@@ -211,6 +219,10 @@ fn compute_alonzo_collateral(
         });
     }
 
+    for (_, output) in tx.produces() {
+        total -= output.value().coin();
+    }
+
     Ok(total)
 }
 
@@ -221,9 +233,12 @@ fn define_tx_fees(
     if tx.is_valid() {
         Ok(tx.fee().unwrap_or_default())
     } else if let Some(collateral) = tx.total_collateral() {
+        tracing::debug!(tx=%tx.hash(), collateral, "total collateral consumed");
         Ok(collateral)
     } else {
-        compute_alonzo_collateral(tx, utxos)
+        let fee = compute_collateral_value(tx, utxos)?;
+        tracing::debug!(tx=%tx.hash(), fee, "alonzo-style collateral computed");
+        Ok(fee)
     }
 }
 
@@ -266,6 +281,10 @@ impl BlockVisitor for EpochStateVisitor {
         let fees = define_tx_fees(tx, utxos)?;
 
         self.stats_delta.as_mut().unwrap().block_fees += fees;
+
+        if let Some(donation) = pallas_extras::tx_treasury_donation(tx) {
+            self.stats_delta.as_mut().unwrap().treasury_donations += donation;
+        }
 
         Ok(())
     }
@@ -320,6 +339,31 @@ impl BlockVisitor for EpochStateVisitor {
                 .registered_pools
                 .insert(cert.operator);
         }
+
+        if let Some(cert) = pallas_extras::cert_as_drep_registration(cert) {
+            tracing::debug!(cert=?cert.cred, "drep registration");
+            self.stats_delta.as_mut().unwrap().drep_deposits += cert.deposit;
+        }
+
+        if let Some(cert) = pallas_extras::cert_as_drep_unregistration(cert) {
+            tracing::debug!(cert=?cert.cred, "drep un-registration");
+            self.stats_delta.as_mut().unwrap().drep_refunds += cert.deposit;
+        }
+
+        Ok(())
+    }
+
+    fn visit_proposal(
+        &mut self,
+        _: &mut WorkDeltas<CardanoLogic>,
+        _: &MultiEraBlock,
+        _: &MultiEraTx,
+        proposal: &pallas::ledger::traverse::MultiEraProposal,
+        _: usize,
+    ) -> Result<(), ChainError> {
+        tracing::warn!(proposal=?proposal.gov_action(), deposit=proposal.deposit(), "proposal deposit");
+
+        self.stats_delta.as_mut().unwrap().proposal_deposits += proposal.deposit();
 
         Ok(())
     }

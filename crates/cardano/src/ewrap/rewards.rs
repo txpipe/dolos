@@ -61,7 +61,7 @@ impl BoundaryVisitor {
 impl super::BoundaryVisitor for BoundaryVisitor {
     fn visit_account(
         &mut self,
-        ctx: &mut super::WorkContext,
+        ctx: &mut super::BoundaryWork,
         id: &super::AccountId,
         account: &AccountState,
     ) -> Result<(), ChainError> {
@@ -92,7 +92,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         Ok(())
     }
 
-    fn flush(&mut self, ctx: &mut super::WorkContext) -> Result<(), ChainError> {
+    fn flush(&mut self, ctx: &mut super::BoundaryWork) -> Result<(), ChainError> {
         ctx.rewards.drain_unspendable();
 
         for delta in self.deltas.drain(..) {

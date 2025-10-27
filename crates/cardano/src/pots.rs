@@ -41,14 +41,24 @@ pub struct Pots {
 
     #[n(9)]
     pub nominal_deposits: u64,
+
+    #[n(10)]
+    pub drep_deposits: Lovelace,
+
+    #[n(11)]
+    pub proposal_deposits: Lovelace,
 }
 
 impl Pots {
-    pub fn obligations(&self) -> Lovelace {
+    pub fn stake_deposits(&self) -> Lovelace {
         let pool_deposits = self.deposit_per_pool * self.pool_count;
         let account_deposits = self.deposit_per_account * self.account_count;
 
-        Lovelace::from(self.nominal_deposits + pool_deposits + account_deposits)
+        pool_deposits + account_deposits
+    }
+
+    pub fn obligations(&self) -> Lovelace {
+        self.nominal_deposits + self.stake_deposits() + self.drep_deposits + self.proposal_deposits
     }
 
     pub fn max_supply(&self) -> Lovelace {
@@ -110,13 +120,33 @@ pub struct PotDelta {
     pub pool_invalid_refund_count: u64,
 
     #[n(8)]
-    pub withdrawals: u64,
+    pub withdrawals: Lovelace,
 
     #[n(9)]
-    pub effective_rewards: u64,
+    pub effective_rewards: Lovelace,
 
     #[n(10)]
-    pub unspendable_rewards: u64,
+    pub unspendable_rewards: Lovelace,
+
+    #[n(11)]
+    pub drep_deposits: Lovelace,
+
+    #[n(12)]
+    pub proposal_deposits: Lovelace,
+
+    #[n(13)]
+    pub drep_refunds: Lovelace,
+
+    #[n(14)]
+    pub proposal_refunds: Lovelace,
+
+    #[n(15)]
+    #[cbor(default)]
+    pub treasury_donations: Lovelace,
+
+    #[n(16)]
+    #[cbor(default)]
+    pub proposal_invalid_refunds: Lovelace,
 }
 
 /// Calculate eta using the decentralisation parameter and the formula:
@@ -236,6 +266,8 @@ pub fn apply_delta(mut pots: Pots, incentives: &EpochIncentives, delta: &PotDelt
     pots.treasury += incentives.treasury_tax;
     pots.treasury += delta.unspendable_rewards;
     pots.treasury += delta.pool_invalid_refund_count * pots.deposit_per_pool;
+    pots.treasury += delta.proposal_invalid_refunds;
+    pots.treasury += delta.treasury_donations;
 
     // fees pot
     pots.fees -= incentives.used_fees;
@@ -245,6 +277,7 @@ pub fn apply_delta(mut pots: Pots, incentives: &EpochIncentives, delta: &PotDelt
     pots.rewards += delta.effective_rewards;
     pots.rewards -= delta.withdrawals;
     pots.rewards += delta.pool_refund_count * pots.deposit_per_pool;
+    pots.rewards += delta.proposal_refunds;
 
     // we don't need to return account deposit refunds to the rewards pot because
     // these refunds are returned directly as utxos in the deregistration
@@ -262,6 +295,15 @@ pub fn apply_delta(mut pots: Pots, incentives: &EpochIncentives, delta: &PotDelt
     // account count
     pots.account_count += delta.new_accounts;
     pots.account_count -= delta.removed_accounts;
+
+    // for governance, since each cert contains the specific deposit amount, we deal directly with lovelace values.
+
+    pots.drep_deposits += delta.drep_deposits;
+    pots.drep_deposits -= delta.drep_refunds;
+
+    pots.proposal_deposits += delta.proposal_deposits;
+    pots.proposal_deposits -= delta.proposal_refunds;
+    pots.proposal_deposits -= delta.proposal_invalid_refunds;
 
     pots
 }
@@ -293,6 +335,8 @@ mod tests {
             deposit_per_pool: 500_000_000,
             deposit_per_account: 2_000_000,
             nominal_deposits: 0,
+            drep_deposits: 0,
+            proposal_deposits: 0,
         };
 
         pots.assert_consistency(MAX_SUPPLY);
@@ -330,6 +374,8 @@ mod tests {
             utxos: 29999998492845396,
             rewards: 0,
             nominal_deposits: 0,
+            drep_deposits: 0,
+            proposal_deposits: 0,
         };
 
         pots.assert_consistency(MAX_SUPPLY);

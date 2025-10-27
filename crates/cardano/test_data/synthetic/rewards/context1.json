@@ -9,18 +9,26 @@
     "pool_count": 1,
     "account_count": 1,
     "utxos": 30000000000000000,
-    "rewards": 0
+    "rewards": 0,
+    "drep_deposits": 0,
+    "proposal_deposits": 0
   },
   "epoch_blocks": 21600,
   "epoch_fee_ss": 250000000,
-  "epoch_eta": [1, 1],
+  "epoch_eta": [
+    1,
+    1
+  ],
   "pools": {
     "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8": {
       "blocks_minted": 150,
       "params": {
         "pledge": 50000000000000,
         "cost": 340000000,
-        "margin": [3, 100],
+        "margin": [
+          3,
+          100
+        ],
         "reward_account": "1234567890abcdef1234567890abcdef1234567890abcdef12345678",
         "pool_owners": [
           "1234567890abcdef1234567890abcdef1234567890abcdef12345678"
@@ -32,7 +40,10 @@
       "params": {
         "pledge": 10000000000000,
         "cost": 340000000,
-        "margin": [5, 100],
+        "margin": [
+          5,
+          100
+        ],
         "reward_account": "2345678901abcdef2345678901abcdef2345678901abcdef23456789",
         "pool_owners": [
           "2345678901abcdef2345678901abcdef2345678901abcdef23456789"
@@ -44,7 +55,10 @@
       "params": {
         "pledge": 100000000000000,
         "cost": 340000000,
-        "margin": [2, 100],
+        "margin": [
+          2,
+          100
+        ],
         "reward_account": "3456789012abcdef3456789012abcdef3456789012abcdef34567890",
         "pool_owners": [
           "3456789012abcdef3456789012abcdef3456789012abcdef34567890"
@@ -92,13 +106,42 @@
   },
   "pparams": {
     "values": [
-      { "DesiredNumberOfStakePools": 500 },
-      { "PoolPledgeInfluence": [3, 10] },
-      { "DecentralizationConstant": [0, 1] },
-      { "ExpansionRate": [3, 1000] },
-      { "TreasuryGrowthRate": [20, 100] },
-      { "MinPoolCost": 340000000 },
-      { "ProtocolVersion": [8, 0] }
+      {
+        "DesiredNumberOfStakePools": 500
+      },
+      {
+        "PoolPledgeInfluence": [
+          3,
+          10
+        ]
+      },
+      {
+        "DecentralizationConstant": [
+          0,
+          1
+        ]
+      },
+      {
+        "ExpansionRate": [
+          3,
+          1000
+        ]
+      },
+      {
+        "TreasuryGrowthRate": [
+          20,
+          100
+        ]
+      },
+      {
+        "MinPoolCost": 340000000
+      },
+      {
+        "ProtocolVersion": [
+          8,
+          0
+        ]
+      }
     ]
   }
 }

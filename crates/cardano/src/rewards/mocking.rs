@@ -7,48 +7,7 @@ use crate::{
     PParamsSet, PoolHash, PoolParams,
 };
 
-use serde::{Deserialize, Deserializer};
-
-/// Helper function to deserialize a PoolHash from a hex string
-fn deserialize_pool_hash<'de, D>(deserializer: D) -> Result<PoolHash, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let s: String = Deserialize::deserialize(deserializer)?;
-    let bytes = hex::decode(&s).map_err(serde::de::Error::custom)?;
-    if bytes.len() != 28 {
-        return Err(serde::de::Error::custom(format!(
-            "PoolHash must be 28 bytes, got {}",
-            bytes.len()
-        )));
-    }
-    let mut hash = [0u8; 28];
-    hash.copy_from_slice(&bytes);
-    Ok(pallas::crypto::hash::Hash::from(hash))
-}
-
-/// Helper function to deserialize a StakeCredential from a hex string
-/// Assumes all credentials are AddrKeyhash (key hash) type
-fn deserialize_stake_credential<'de, D>(deserializer: D) -> Result<StakeCredential, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let s: String = Deserialize::deserialize(deserializer)?;
-    let bytes = hex::decode(&s).map_err(serde::de::Error::custom)?;
-
-    if bytes.len() != 28 {
-        return Err(serde::de::Error::custom(format!(
-            "Key hash credential must be 28 bytes, got {}",
-            bytes.len()
-        )));
-    }
-
-    let mut hash = [0u8; 28];
-    hash.copy_from_slice(&bytes);
-    Ok(StakeCredential::AddrKeyhash(
-        pallas::crypto::hash::Hash::from(hash),
-    ))
-}
+use serde::Deserialize;
 
 /// Pool parameters with simplified reward account as hex string
 /// VRF key hash, relays, and metadata are hardcoded for testing simplicity

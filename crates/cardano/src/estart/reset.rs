@@ -109,9 +109,6 @@ pub fn define_new_pots(ctx: &super::WorkContext) -> Pots {
 
     let end = epoch.end.as_ref().expect("no end stats available");
 
-    let incentives = ctx.rewards.incentives();
-    let reward_delta = ctx.rewards.as_pot_delta();
-
     let delta = PotDelta {
         produced_utxos: rolling.produced_utxos,
         consumed_utxos: rolling.consumed_utxos,
@@ -119,14 +116,36 @@ pub fn define_new_pots(ctx: &super::WorkContext) -> Pots {
         new_accounts: rolling.new_accounts,
         removed_accounts: rolling.removed_accounts,
         withdrawals: rolling.withdrawals,
-        effective_rewards: reward_delta.effective_rewards,
-        unspendable_rewards: reward_delta.unspendable_rewards,
+        drep_deposits: rolling.drep_deposits,
+        proposal_deposits: rolling.proposal_deposits,
+        drep_refunds: rolling.drep_refunds,
+        treasury_donations: rolling.treasury_donations,
+        proposal_refunds: end.proposal_refunds,
+        proposal_invalid_refunds: end.proposal_invalid_refunds,
+        effective_rewards: end.effective_rewards,
+        unspendable_rewards: end.unspendable_rewards,
         pool_deposit_count: end.pool_deposit_count,
         pool_refund_count: end.pool_refund_count,
         pool_invalid_refund_count: end.pool_invalid_refund_count,
     };
 
-    let pots = apply_delta(epoch.initial_pots.clone(), incentives, &delta);
+    let pots = apply_delta(epoch.initial_pots.clone(), &end.epoch_incentives, &delta);
+
+    tracing::info!(
+        rewards = pots.rewards,
+        reserves = pots.reserves,
+        treasury = pots.treasury,
+        fees = pots.fees,
+        utxos = pots.utxos,
+        "pots after reset"
+    );
+
+    if !pots.is_consistent(epoch.initial_pots.max_supply()) {
+        dbg!(end);
+        dbg!(&epoch.initial_pots);
+        dbg!(&pots);
+        dbg!(delta);
+    }
 
     pots.assert_consistency(epoch.initial_pots.max_supply());
 

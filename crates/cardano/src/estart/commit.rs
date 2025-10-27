@@ -1,8 +1,8 @@
 use dolos_core::{
-    ArchiveStore, ArchiveWriter, ChainError, ChainPoint, Domain, Entity, EntityDelta as _, LogKey,
-    NsKey, StateStore, StateWriter, TemporalKey,
+    ArchiveStore, ArchiveWriter, BlockSlot, ChainError, ChainPoint, Domain, Entity,
+    EntityDelta as _, LogKey, NsKey, StateStore, StateWriter, TemporalKey,
 };
-use tracing::{instrument, warn};
+use tracing::{instrument, trace, warn};
 
 use crate::{
     AccountState, CardanoEntity, DRepState, EpochState, FixedNamespace, PoolState, Proposal,
@@ -37,7 +37,7 @@ impl super::WorkContext {
 
                 writer.save_entity_typed(E::NS, &entity_id, entity.as_ref())?;
             } else {
-                warn!(ns = E::NS, key = %entity_id, "no deltas for entity");
+                trace!(ns = E::NS, key = %entity_id, "no deltas for entity");
             }
         }
 
@@ -65,6 +65,7 @@ impl super::WorkContext {
         &mut self,
         state: &D::State,
         archive: &D::Archive,
+        slot: BlockSlot,
     ) -> Result<(), ChainError> {
         let writer = state.start_writer()?;
 
@@ -86,6 +87,8 @@ impl super::WorkContext {
         self.flush_logs::<D>(&archive_writer)?;
 
         debug_assert!(self.logs.is_empty());
+
+        writer.set_cursor(ChainPoint::Slot(slot))?;
 
         writer.commit()?;
         archive_writer.commit()?;

@@ -3,11 +3,12 @@ use pallas::ledger::primitives::StakeCredential;
 use tracing::{debug, info};
 
 use crate::{
-    load_era_summary, pallas_ratio,
+    pallas_ratio,
     pots::{self, EpochIncentives, Eta, Pots},
     ratio,
     rupd::{RupdWork, StakeSnapshot},
-    AccountState, EpochState, FixedNamespace as _, PParamsSet, PoolHash, PoolParams, PoolState,
+    AccountState, EpochState, EraProtocol, FixedNamespace as _, PParamsSet, PoolHash, PoolParams,
+    PoolState,
 };
 
 fn define_eta(
@@ -109,7 +110,11 @@ impl StakeSnapshot {
         *self.pool_stake.get(pool).unwrap_or(&0)
     }
 
-    pub fn load<D: Domain>(state: &D::State, stake_epoch: u64) -> Result<Self, ChainError> {
+    pub fn load<D: Domain>(
+        state: &D::State,
+        stake_epoch: u64,
+        protocol: EraProtocol,
+    ) -> Result<Self, ChainError> {
         let mut snapshot = Self::default();
 
         let pools = state.iter_entities_typed::<PoolState>(PoolState::NS, None)?;
@@ -126,7 +131,6 @@ impl StakeSnapshot {
 
         for record in accounts {
             let (_, account) = record?;
-
 
             // TODO: check if we really need to make ths check. It might be adding noise to the data.
             if account.is_registered() {
@@ -154,7 +158,7 @@ impl StakeSnapshot {
             let stake = account
                 .stake
                 .snapshot_at(stake_epoch)
-                .map(|x| x.total())
+                .map(|x| x.total_for_era(protocol))
                 .unwrap_or_default();
 
             snapshot.track_stake(&account.credential, *pool, stake)?;
@@ -222,6 +226,8 @@ impl RupdWork {
 
         let incentives = define_epoch_incentives(genesis, &epoch, pots.reserves)?;
 
+        let chain = crate::load_era_summary::<D>(state)?;
+
         debug!(
             %incentives.total,
             %incentives.treasury_tax,
@@ -229,12 +235,10 @@ impl RupdWork {
             "defined pot delta"
         );
 
-        let chain = load_era_summary::<D>(state)?;
-
         let mut work = RupdWork {
+            chain,
             current_epoch,
             max_supply,
-            chain,
             pparams: epoch.pparams.mark().cloned(),
             pots,
             incentives,
@@ -242,7 +246,9 @@ impl RupdWork {
         };
 
         if let Some((snapshot_epoch, _)) = work.relevant_epochs() {
-            work.snapshot = StakeSnapshot::load::<D>(state, snapshot_epoch)?;
+            let era = work.chain.era_for_epoch(snapshot_epoch);
+            let protocol = EraProtocol::from(era.protocol);
+            work.snapshot = StakeSnapshot::load::<D>(state, snapshot_epoch, protocol)?;
         }
 
         Ok(work)

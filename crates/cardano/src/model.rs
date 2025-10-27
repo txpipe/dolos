@@ -24,21 +24,21 @@ use crate::{
     estart::{
         nonces::NonceTransition,
         reset::{AccountTransition, EpochTransition, PoolTransition},
-        rewards::AssignRewards,
     },
     ewrap::{
-        govactions::ProposalEnactment,
+        enactment::ProposalEnactment,
         retires::{
             DRepDelegatorDrop, DRepExpiration, PoolDelegatorDrop, PoolDepositRefund,
-            ProposalExpiration,
+            ProposalDepositRefund, ProposalExpiration,
         },
+        rewards::AssignRewards,
         wrapup::{EpochWrapUp, PoolWrapUp},
     },
     pallas_extras::{
         self, default_cost_models, default_drep_voting_thresholds, default_ex_unit_prices,
         default_ex_units, default_nonce, default_pool_voting_thresholds, default_rational_number,
     },
-    pots::Pots,
+    pots::{EpochIncentives, Pots},
     roll::{
         accounts::{
             ControlledAmountDec, ControlledAmountInc, StakeDelegation, StakeDeregistration,
@@ -439,13 +439,17 @@ pub type PoolHash = Hash<28>;
 #[derive(Debug, Clone, PartialEq, Eq, Decode, Encode, Default)]
 pub struct Stake {
     #[n(0)]
-    pub utxo_sum: u64,
+    pub utxo_sum: Lovelace,
 
     #[n(1)]
-    pub rewards_sum: u64,
+    pub rewards_sum: Lovelace,
 
     #[n(2)]
-    pub withdrawals_sum: u64,
+    pub withdrawals_sum: Lovelace,
+
+    #[n(3)]
+    #[cbor(default)]
+    pub utxo_sum_at_pointer_addresses: Lovelace,
 }
 
 impl Stake {
@@ -457,11 +461,33 @@ impl Stake {
         out
     }
 
+    pub fn total_pre_conway(&self) -> u64 {
+        let mut out = self.utxo_sum;
+        out += self.utxo_sum_at_pointer_addresses;
+        out += self.rewards_sum;
+        out -= self.withdrawals_sum;
+
+        out
+    }
+
+    pub fn total_for_era(&self, era: EraProtocol) -> u64 {
+        match era {
+            x if x < 9 => self.total_pre_conway(),
+            _ => self.total(),
+        }
+    }
+
     pub fn withdrawable(&self) -> u64 {
         let mut out = self.rewards_sum;
         out -= self.withdrawals_sum;
 
         out
+    }
+}
+
+impl TransitionDefault for Stake {
+    fn next_value(current: Option<&Self>) -> Option<Self> {
+        current.cloned()
     }
 }
 
@@ -479,12 +505,6 @@ pub enum PoolDelegation {
 }
 
 pub type DRepDelegation = Option<DRep>;
-
-impl TransitionDefault for Stake {
-    fn next_value(current: Option<&Self>) -> Option<Self> {
-        current.cloned()
-    }
-}
 
 impl TransitionDefault for PoolDelegation {
     fn next_value(current: Option<&Self>) -> Option<Self> {
@@ -656,6 +676,9 @@ pub struct PoolSnapshot {
 
     #[n(3)]
     pub params: PoolParams,
+
+    #[n(4)]
+    pub is_new: bool,
 }
 
 impl TransitionDefault for PoolSnapshot {
@@ -666,6 +689,7 @@ impl TransitionDefault for PoolSnapshot {
             is_retired: current.is_retired,
             params: current.params.clone(),
             blocks_minted: 0,
+            is_new: false,
         })
     }
 }
@@ -1323,6 +1347,23 @@ pub struct RollingStats {
 
     #[n(13)]
     pub blocks_minted: u32,
+
+    #[n(14)]
+    pub drep_deposits: Lovelace,
+
+    #[n(15)]
+    pub proposal_deposits: Lovelace,
+
+    #[n(16)]
+    pub drep_refunds: Lovelace,
+
+    // TODO: deprecate
+    #[n(17)]
+    pub __proposal_refunds: Lovelace,
+
+    #[n(18)]
+    #[cbor(default)]
+    pub treasury_donations: Lovelace,
 }
 
 impl TransitionDefault for RollingStats {
@@ -1342,6 +1383,29 @@ pub struct EndStats {
 
     #[n(2)]
     pub pool_invalid_refund_count: u64,
+
+    #[n(3)]
+    pub epoch_incentives: EpochIncentives,
+
+    #[n(4)]
+    pub effective_rewards: u64,
+
+    #[n(5)]
+    pub unspendable_rewards: u64,
+
+    #[n(6)]
+    pub proposal_invalid_refunds: Lovelace,
+
+    #[n(7)]
+    pub proposal_refunds: Lovelace,
+
+    // TODO: deprecate
+    #[n(8)]
+    pub __drep_deposits: Lovelace,
+
+    // TODO: deprecate
+    #[n(9)]
+    pub __drep_refunds: Lovelace,
 }
 
 #[derive(Debug, Encode, Decode, Clone)]
@@ -1511,6 +1575,10 @@ pub struct EraSummary {
 
     #[n(3)]
     pub slot_length: u64,
+
+    #[n(4)]
+    #[cbor(default)]
+    pub protocol: u16,
 }
 
 entity_boilerplate!(EraSummary, "eras");
@@ -1664,6 +1732,7 @@ pub enum CardanoDelta {
     EpochWrapUp(EpochWrapUp),
     DRepDelegatorDrop(DRepDelegatorDrop),
     PoolWrapUp(PoolWrapUp),
+    ProposalDepositRefund(ProposalDepositRefund),
 }
 
 impl CardanoDelta {
@@ -1731,6 +1800,7 @@ delta_from!(EpochTransition);
 delta_from!(EpochWrapUp);
 delta_from!(DRepDelegatorDrop);
 delta_from!(PoolWrapUp);
+delta_from!(ProposalDepositRefund);
 
 impl dolos_core::EntityDelta for CardanoDelta {
     type Entity = super::model::CardanoEntity;
@@ -1768,6 +1838,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::EpochWrapUp(x) => x.key(),
             Self::DRepDelegatorDrop(x) => x.key(),
             Self::PoolWrapUp(x) => x.key(),
+            Self::ProposalDepositRefund(x) => x.key(),
         }
     }
 
@@ -1804,6 +1875,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::EpochWrapUp(x) => Self::downcast_apply(x, entity),
             Self::DRepDelegatorDrop(x) => Self::downcast_apply(x, entity),
             Self::PoolWrapUp(x) => Self::downcast_apply(x, entity),
+            Self::ProposalDepositRefund(x) => Self::downcast_apply(x, entity),
         }
     }
 
@@ -1840,6 +1912,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::EpochWrapUp(x) => Self::downcast_undo(x, entity),
             Self::DRepDelegatorDrop(x) => Self::downcast_undo(x, entity),
             Self::PoolWrapUp(x) => Self::downcast_undo(x, entity),
+            Self::ProposalDepositRefund(x) => Self::downcast_undo(x, entity),
         }
     }
 }

@@ -29,6 +29,7 @@ pub mod pallas_extras;
 // machinery
 pub mod eras;
 pub mod forks;
+pub mod hacks;
 pub mod model;
 pub mod owned;
 pub mod pots;
@@ -258,7 +259,13 @@ impl dolos_core::ChainLogic for CardanoLogic {
         genesis: Arc<Genesis>,
         at: BlockSlot,
     ) -> Result<(), ChainError> {
-        ewrap::execute::<D>(state, archive, at, &self.config, genesis)?;
+        let mut cache = self.cache.write().unwrap();
+
+        let rewards = cache.rewards.take().unwrap_or_default();
+
+        ewrap::execute::<D>(state, archive, at, &self.config, genesis, rewards)?;
+
+        drop(cache);
 
         self.refresh_cache::<D>(state)?;
 
@@ -272,13 +279,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
         genesis: Arc<Genesis>,
         at: BlockSlot,
     ) -> Result<(), ChainError> {
-        let mut cache = self.cache.write().unwrap();
-
-        let rewards = cache.rewards.take().unwrap_or_default();
-
-        estart::execute::<D>(state, archive, at, genesis, rewards)?;
-
-        drop(cache);
+        estart::execute::<D>(state, archive, at, &self.config, genesis)?;
 
         self.refresh_cache::<D>(state)?;
 

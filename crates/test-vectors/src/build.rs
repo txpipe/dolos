@@ -348,6 +348,7 @@ pub async fn handle_era_summaries(
 
             epoch_length,
             slot_length,
+            protocol: Default::default(),
         };
 
         dbg!(&era);
@@ -377,6 +378,7 @@ pub async fn handle_era_summaries(
                 end: None,
                 epoch_length,
                 slot_length,
+                protocol: Default::default(),
             };
 
             writer
