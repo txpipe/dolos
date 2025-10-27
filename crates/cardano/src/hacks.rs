@@ -3,6 +3,7 @@ pub mod pointers {
 
     pub fn pointer_to_cred(pointer: &Pointer) -> Option<StakeCredential> {
         match (pointer.slot(), pointer.tx_idx(), pointer.cert_idx()) {
+            // preview
             (2940289, 1, 0) => Some(StakeCredential::AddrKeyhash(
                 "0c90492bbe7eb33f38173255e547dc3194abcec5cd29cdf504bb4f03"
                     .parse()
@@ -17,8 +18,19 @@ pub mod pointers {
             (1, 1, 1000) => None,
             (1, 1, 0) => None,
             (50, 50, 5) => None,
+
+            // preprod
+
+            // TODO: check actual certs behind this txs
+            (82626550, 0, 0) => None,
+            (2498243, 27, 3) => None,
+            (10612742, 0, 0) => None,
+            (70549345, 1, 0) => None,
+
             x => {
-                panic!("unknown pointer: {:?}", x);
+                dbg!(x);
+                //panic!("unknown pointer: {:?}", x);
+                None
             }
         }
     }
