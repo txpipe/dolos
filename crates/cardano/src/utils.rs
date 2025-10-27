@@ -150,54 +150,49 @@ mod tests {
         assert_eq!(delta_in_hours, 36);
     }
 
-    #[cfg(test)]
-    mod tests {
-        use super::*;
+    fn assert_rational_eq(
+        result: pallas::ledger::primitives::conway::RationalNumber,
+        expected_num: u64,
+        expected_den: u64,
+        input: f32,
+    ) {
+        assert_eq!(
+            result.numerator, expected_num,
+            "Numerator mismatch for input {input}",
+        );
+        assert_eq!(
+            result.denominator, expected_den,
+            "Denominator mismatch for input {input}",
+        );
+    }
 
-        fn assert_rational_eq(
-            result: pallas::ledger::primitives::conway::RationalNumber,
-            expected_num: u64,
-            expected_den: u64,
-            input: f32,
-        ) {
-            assert_eq!(
-                result.numerator, expected_num,
-                "Numerator mismatch for input {input}",
-            );
-            assert_eq!(
-                result.denominator, expected_den,
-                "Denominator mismatch for input {input}",
-            );
+    #[test]
+    fn test_whole_number() {
+        let test_cases = [
+            (1.0, 1, 1),
+            (2.0, 2, 1),
+            (100.0, 100, 1),
+            (1000000.0, 1000000, 1),
+        ];
+
+        for &(input, expected_num, expected_den) in test_cases.iter() {
+            let result = float_to_rational(input);
+            assert_rational_eq(result, expected_num, expected_den, input);
         }
+    }
 
-        #[test]
-        fn test_whole_number() {
-            let test_cases = [
-                (1.0, 1, 1),
-                (2.0, 2, 1),
-                (100.0, 100, 1),
-                (1000000.0, 1000000, 1),
-            ];
+    #[test]
+    fn test_fractions() {
+        let test_cases = [
+            (0.5, 1, 2),
+            (0.25, 1, 4),
+            // (0.33333334, 333333343, 1000000000), // These fails due to floating point
+            // precision (0.66666669, 666666687, 1000000000),
+        ];
 
-            for &(input, expected_num, expected_den) in test_cases.iter() {
-                let result = float_to_rational(input);
-                assert_rational_eq(result, expected_num, expected_den, input);
-            }
-        }
-
-        #[test]
-        fn test_fractions() {
-            let test_cases = [
-                (0.5, 1, 2),
-                (0.25, 1, 4),
-                // (0.33333334, 333333343, 1000000000), // These fails due to floating point
-                // precision (0.66666669, 666666687, 1000000000),
-            ];
-
-            for &(input, expected_num, expected_den) in test_cases.iter() {
-                let result = float_to_rational(input);
-                assert_rational_eq(result, expected_num, expected_den, input);
-            }
+        for &(input, expected_num, expected_den) in test_cases.iter() {
+            let result = float_to_rational(input);
+            assert_rational_eq(result, expected_num, expected_den, input);
         }
     }
 }
