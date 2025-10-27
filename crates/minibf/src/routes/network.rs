@@ -6,7 +6,9 @@ use blockfrost_openapi::models::{
     network_eras_inner_start::NetworkErasInnerStart, network_stake::NetworkStake,
     network_supply::NetworkSupply,
 };
-use dolos_cardano::{model::EpochState, mutable_slots, EraProtocol, EraSummary, FixedNamespace};
+use dolos_cardano::{
+    model::EpochState, mutable_slots, AccountState, EraProtocol, EraSummary, FixedNamespace,
+};
 use dolos_core::{BlockSlot, Domain, Genesis, StateStore};
 
 use crate::{mapping::IntoModel, routes::genesis::parse_datetime_into_timestamp, Facade};
@@ -211,6 +213,8 @@ pub async fn eras<D: Domain>(
 struct NetworkModelBuilder<'a> {
     genesis: &'a Genesis,
     active: EpochState,
+    live_stake: u64,
+    active_stake: u64,
 }
 
 impl<'a> IntoModel<Network> for NetworkModelBuilder<'a> {
@@ -230,14 +234,14 @@ impl<'a> IntoModel<Network> for NetworkModelBuilder<'a> {
                 max: max_supply.to_string(),
                 total: total_supply.to_string(),
                 circulating: circulating.to_string(),
-                locked: self.active.initial_pots.obligations().to_string(),
+                locked: self.active.initial_pots.utxos.to_string(),
                 treasury: self.active.initial_pots.treasury.to_string(),
                 reserves: self.active.initial_pots.reserves.to_string(),
             }),
             // TODO: should compute snapshots as we do during sweep
             stake: Box::new(NetworkStake {
-                live: Default::default(),
-                active: Default::default(),
+                live: self.live_stake.to_string(),
+                active: self.active_stake.to_string(),
             }),
         })
     }
@@ -252,9 +256,26 @@ where
     let active = dolos_cardano::load_epoch::<D>(domain.state())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    let mut live_stake = 0;
+    let mut active_stake = 0;
+
+    let accounts = domain
+        .state()
+        .iter_entities_typed::<AccountState>(AccountState::NS, None)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    for account in accounts {
+        let (_, account) = account.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        live_stake += account.live_stake();
+        active_stake += account.active_stake();
+    }
+
     let builder = NetworkModelBuilder {
         genesis: &genesis,
         active,
+        live_stake,
+        active_stake,
     };
 
     builder.into_response()
