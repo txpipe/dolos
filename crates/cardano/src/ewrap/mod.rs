@@ -16,7 +16,7 @@ pub mod commit;
 pub mod loading;
 
 // visitors
-pub mod govactions;
+pub mod enactment;
 pub mod retires;
 pub mod rewards;
 pub mod wrapup;
@@ -74,6 +74,39 @@ pub trait BoundaryVisitor {
     }
 
     #[allow(unused_variables)]
+    fn visit_expiring_proposal(
+        &mut self,
+        ctx: &mut BoundaryWork,
+        id: &ProposalId,
+        proposal: &Proposal,
+        account: Option<&AccountState>,
+    ) -> Result<(), ChainError> {
+        Ok(())
+    }
+
+    #[allow(unused_variables)]
+    fn visit_enacting_proposal(
+        &mut self,
+        ctx: &mut BoundaryWork,
+        id: &ProposalId,
+        proposal: &Proposal,
+        account: Option<&AccountState>,
+    ) -> Result<(), ChainError> {
+        Ok(())
+    }
+
+    #[allow(unused_variables)]
+    fn visit_dropping_proposal(
+        &mut self,
+        ctx: &mut BoundaryWork,
+        id: &ProposalId,
+        proposal: &Proposal,
+        account: Option<&AccountState>,
+    ) -> Result<(), ChainError> {
+        Ok(())
+    }
+
+    #[allow(unused_variables)]
     fn flush(&mut self, ctx: &mut BoundaryWork) -> Result<(), ChainError> {
         Ok(())
     }
@@ -95,6 +128,9 @@ pub struct BoundaryWork {
     // inferred
     pub new_pools: HashSet<PoolHash>,
     pub retiring_pools: HashMap<PoolHash, (PoolState, Option<AccountState>)>,
+    pub expiring_proposals: HashMap<ProposalId, (Proposal, Option<AccountState>)>,
+    pub enacting_proposals: HashMap<ProposalId, (Proposal, Option<AccountState>)>,
+    pub dropping_proposals: HashMap<ProposalId, (Proposal, Option<AccountState>)>,
 
     // TODO: we use a vec instead of a HashSet because the Pallas struct doesn't implement Hash. We
     // should turn it into a HashSet once we have the update in Pallas.

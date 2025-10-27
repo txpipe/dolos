@@ -375,7 +375,7 @@ pub fn stake_cred_to_drep(cred: &StakeCredential) -> DRep {
     }
 }
 
-pub fn pool_reward_account(reward_account: &[u8]) -> Option<StakeCredential> {
+pub fn parse_reward_account(reward_account: &[u8]) -> Option<StakeCredential> {
     let pool_address = Address::from_bytes(reward_account).ok()?;
     let (cred, _) = address_as_stake_cred(&pool_address)?;
 
@@ -416,7 +416,7 @@ mod tests {
 
     #[test]
     fn test_pool_reward_account() {
-        let parsed = pool_reward_account(&REWARD_ACCOUNT).unwrap();
+        let parsed = parse_reward_account(&REWARD_ACCOUNT).unwrap();
         dbg!(&parsed);
     }
 }

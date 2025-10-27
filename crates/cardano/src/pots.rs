@@ -143,6 +143,10 @@ pub struct PotDelta {
     #[n(15)]
     #[cbor(default)]
     pub treasury_donations: Lovelace,
+
+    #[n(16)]
+    #[cbor(default)]
+    pub proposal_invalid_refunds: Lovelace,
 }
 
 /// Calculate eta using the decentralisation parameter and the formula:
@@ -262,6 +266,7 @@ pub fn apply_delta(mut pots: Pots, incentives: &EpochIncentives, delta: &PotDelt
     pots.treasury += incentives.treasury_tax;
     pots.treasury += delta.unspendable_rewards;
     pots.treasury += delta.pool_invalid_refund_count * pots.deposit_per_pool;
+    pots.treasury += delta.proposal_invalid_refunds;
     pots.treasury += delta.treasury_donations;
 
     // fees pot
@@ -272,6 +277,7 @@ pub fn apply_delta(mut pots: Pots, incentives: &EpochIncentives, delta: &PotDelt
     pots.rewards += delta.effective_rewards;
     pots.rewards -= delta.withdrawals;
     pots.rewards += delta.pool_refund_count * pots.deposit_per_pool;
+    pots.rewards += delta.proposal_refunds;
 
     // we don't need to return account deposit refunds to the rewards pot because
     // these refunds are returned directly as utxos in the deregistration
@@ -297,6 +303,7 @@ pub fn apply_delta(mut pots: Pots, incentives: &EpochIncentives, delta: &PotDelt
 
     pots.proposal_deposits += delta.proposal_deposits;
     pots.proposal_deposits -= delta.proposal_refunds;
+    pots.proposal_deposits -= delta.proposal_invalid_refunds;
 
     pots
 }

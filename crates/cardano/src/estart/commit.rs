@@ -1,7 +1,8 @@
 use dolos_core::{
-    ArchiveStore, ArchiveWriter, BlockSlot, ChainError, ChainPoint, Domain, Entity, EntityDelta as _, LogKey, NsKey, StateStore, StateWriter, TemporalKey
+    ArchiveStore, ArchiveWriter, BlockSlot, ChainError, ChainPoint, Domain, Entity,
+    EntityDelta as _, LogKey, NsKey, StateStore, StateWriter, TemporalKey,
 };
-use tracing::{instrument, warn};
+use tracing::{instrument, trace, warn};
 
 use crate::{
     AccountState, CardanoEntity, DRepState, EpochState, FixedNamespace, PoolState, Proposal,
@@ -36,7 +37,7 @@ impl super::WorkContext {
 
                 writer.save_entity_typed(E::NS, &entity_id, entity.as_ref())?;
             } else {
-                warn!(ns = E::NS, key = %entity_id, "no deltas for entity");
+                trace!(ns = E::NS, key = %entity_id, "no deltas for entity");
             }
         }
 

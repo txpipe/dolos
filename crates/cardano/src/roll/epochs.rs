@@ -34,7 +34,6 @@ pub struct EpochStatsUpdate {
     drep_deposits: Lovelace,
     proposal_deposits: Lovelace,
     drep_refunds: Lovelace,
-    proposal_refunds: Lovelace,
     treasury_donations: Lovelace,
 }
 
@@ -63,7 +62,6 @@ impl dolos_core::EntityDelta for EpochStatsUpdate {
         stats.removed_accounts += self.removed_accounts;
         stats.withdrawals += self.withdrawals;
         stats.proposal_deposits += self.proposal_deposits;
-        stats.proposal_refunds += self.proposal_refunds;
         stats.drep_deposits += self.drep_deposits;
         stats.drep_refunds += self.drep_refunds;
         stats.treasury_donations += self.treasury_donations;

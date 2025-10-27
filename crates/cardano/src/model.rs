@@ -26,10 +26,10 @@ use crate::{
         reset::{AccountTransition, EpochTransition, PoolTransition},
     },
     ewrap::{
-        govactions::ProposalEnactment,
+        enactment::ProposalEnactment,
         retires::{
             DRepDelegatorDrop, DRepExpiration, PoolDelegatorDrop, PoolDepositRefund,
-            ProposalExpiration,
+            ProposalDepositRefund, ProposalExpiration,
         },
         rewards::AssignRewards,
         wrapup::{EpochWrapUp, PoolWrapUp},
@@ -1357,8 +1357,9 @@ pub struct RollingStats {
     #[n(16)]
     pub drep_refunds: Lovelace,
 
+    // TODO: deprecate
     #[n(17)]
-    pub proposal_refunds: Lovelace,
+    pub __proposal_refunds: Lovelace,
 
     #[n(18)]
     #[cbor(default)]
@@ -1392,9 +1393,8 @@ pub struct EndStats {
     #[n(5)]
     pub unspendable_rewards: u64,
 
-    // TODO: deprecate
     #[n(6)]
-    pub __proposal_deposits: Lovelace,
+    pub proposal_invalid_refunds: Lovelace,
 
     #[n(7)]
     pub proposal_refunds: Lovelace,
@@ -1732,6 +1732,7 @@ pub enum CardanoDelta {
     EpochWrapUp(EpochWrapUp),
     DRepDelegatorDrop(DRepDelegatorDrop),
     PoolWrapUp(PoolWrapUp),
+    ProposalDepositRefund(ProposalDepositRefund),
 }
 
 impl CardanoDelta {
@@ -1799,6 +1800,7 @@ delta_from!(EpochTransition);
 delta_from!(EpochWrapUp);
 delta_from!(DRepDelegatorDrop);
 delta_from!(PoolWrapUp);
+delta_from!(ProposalDepositRefund);
 
 impl dolos_core::EntityDelta for CardanoDelta {
     type Entity = super::model::CardanoEntity;
@@ -1836,6 +1838,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::EpochWrapUp(x) => x.key(),
             Self::DRepDelegatorDrop(x) => x.key(),
             Self::PoolWrapUp(x) => x.key(),
+            Self::ProposalDepositRefund(x) => x.key(),
         }
     }
 
@@ -1872,6 +1875,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::EpochWrapUp(x) => Self::downcast_apply(x, entity),
             Self::DRepDelegatorDrop(x) => Self::downcast_apply(x, entity),
             Self::PoolWrapUp(x) => Self::downcast_apply(x, entity),
+            Self::ProposalDepositRefund(x) => Self::downcast_apply(x, entity),
         }
     }
 
@@ -1908,6 +1912,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::EpochWrapUp(x) => Self::downcast_undo(x, entity),
             Self::DRepDelegatorDrop(x) => Self::downcast_undo(x, entity),
             Self::PoolWrapUp(x) => Self::downcast_undo(x, entity),
+            Self::ProposalDepositRefund(x) => Self::downcast_undo(x, entity),
         }
     }
 }

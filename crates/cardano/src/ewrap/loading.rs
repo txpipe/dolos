@@ -5,7 +5,7 @@ use pallas::codec::minicbor;
 
 use crate::{
     ewrap::{BoundaryVisitor as _, BoundaryWork},
-    load_active_era, pallas_extras,
+    hacks, load_active_era, pallas_extras,
     rewards::RewardMap,
     rupd::RupdWork,
     AccountState, DRepState, FixedNamespace as _, PoolState, Proposal,
@@ -29,7 +29,7 @@ impl BoundaryWork {
         let account = &pool.snapshot.unwrap_live().params.reward_account;
 
         let account =
-            pallas_extras::pool_reward_account(account).ok_or(ChainError::InvalidPoolParams)?;
+            pallas_extras::parse_reward_account(account).ok_or(ChainError::InvalidPoolParams)?;
 
         let entity_key = minicbor::to_vec(account).unwrap();
 
@@ -89,8 +89,90 @@ impl BoundaryWork {
         Ok(())
     }
 
+    fn should_expire_proposal(&self, proposal: &Proposal) -> Result<bool, ChainError> {
+        // Skip proposals already in a terminal state
+        if proposal.expired_epoch.is_some() || proposal.enacted_epoch.is_some() {
+            return Ok(false);
+        }
+
+        let (epoch, _) = self.active_era.slot_epoch(proposal.slot);
+
+        let pparams = self.ending_state().pparams.unwrap_live();
+
+        let expiring_epoch = epoch + pparams.ensure_governance_action_validity_period()?;
+
+        Ok(expiring_epoch < self.ending_state.number)
+    }
+
+    fn should_enact_proposal(&self, proposal: &Proposal) -> bool {
+        let Some(magic) = self.genesis.shelley.network_magic else {
+            return false;
+        };
+
+        let epoch =
+            hacks::proposals::enactment_epoch_by_proposal_id(magic, &proposal.id_as_string());
+
+        let Some(epoch) = epoch else {
+            return false;
+        };
+
+        epoch == self.starting_epoch_no()
+    }
+
+    fn should_drop_proposal(&self, proposal: &Proposal) -> bool {
+        let Some(magic) = self.genesis.shelley.network_magic else {
+            return false;
+        };
+
+        let epoch = hacks::proposals::dropped_epoch_by_proposal_id(magic, &proposal.id_as_string());
+
+        let Some(epoch) = epoch else {
+            return false;
+        };
+
+        epoch == self.starting_epoch_no()
+    }
+
+    fn load_proposal_reward_account<D: Domain>(
+        &self,
+        state: &D::State,
+        proposal: &Proposal,
+    ) -> Result<Option<AccountState>, ChainError> {
+        let account = &proposal.proposal.reward_account;
+
+        let account = pallas_extras::parse_reward_account(account)
+            .ok_or(ChainError::InvalidProposalParams)?;
+
+        let entity_key = minicbor::to_vec(account).unwrap();
+
+        let account = state.read_entity_typed(AccountState::NS, &entity_key.into())?;
+
+        Ok(account)
+    }
+
+    fn load_proposal_data<D: Domain>(&mut self, state: &D::State) -> Result<(), ChainError> {
+        let proposals = state.iter_entities_typed::<Proposal>(Proposal::NS, None)?;
+
+        for record in proposals {
+            let (id, proposal) = record?;
+
+            if self.should_enact_proposal(&proposal) {
+                let account = self.load_proposal_reward_account::<D>(state, &proposal)?;
+                self.enacting_proposals.insert(id, (proposal, account));
+            } else if self.should_drop_proposal(&proposal) {
+                let account = self.load_proposal_reward_account::<D>(state, &proposal)?;
+                self.dropping_proposals.insert(id, (proposal, account));
+            } else if self.should_expire_proposal(&proposal)? {
+                let account = self.load_proposal_reward_account::<D>(state, &proposal)?;
+                self.expiring_proposals.insert(id, (proposal, account));
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn compute_deltas<D: Domain>(&mut self, state: &D::State) -> Result<(), ChainError> {
-        let mut visitor_govactions = crate::ewrap::govactions::BoundaryVisitor::default();
+        let mut visitor_enactment = crate::ewrap::enactment::BoundaryVisitor::default();
         let mut visitor_rewards = crate::ewrap::rewards::BoundaryVisitor::default();
         let mut visitor_retires = crate::ewrap::retires::BoundaryVisitor::default();
         let mut visitor_wrapup = crate::ewrap::wrapup::BoundaryVisitor::default();
@@ -100,7 +182,7 @@ impl BoundaryWork {
         for pool in pools {
             let (pool_id, pool) = pool?;
 
-            visitor_govactions.visit_pool(self, &pool_id, &pool)?;
+            visitor_enactment.visit_pool(self, &pool_id, &pool)?;
             visitor_rewards.visit_pool(self, &pool_id, &pool)?;
             visitor_retires.visit_pool(self, &pool_id, &pool)?;
             visitor_wrapup.visit_pool(self, &pool_id, &pool)?;
@@ -109,7 +191,7 @@ impl BoundaryWork {
         let retiring_pools = self.retiring_pools.clone();
 
         for (pool_id, (pool, account)) in retiring_pools {
-            visitor_govactions.visit_retiring_pool(self, pool_id, &pool, account.as_ref())?;
+            visitor_enactment.visit_retiring_pool(self, pool_id, &pool, account.as_ref())?;
             visitor_rewards.visit_retiring_pool(self, pool_id, &pool, account.as_ref())?;
             visitor_retires.visit_retiring_pool(self, pool_id, &pool, account.as_ref())?;
             visitor_wrapup.visit_retiring_pool(self, pool_id, &pool, account.as_ref())?;
@@ -120,7 +202,7 @@ impl BoundaryWork {
         for drep in dreps {
             let (drep_id, drep) = drep?;
 
-            visitor_govactions.visit_drep(self, &drep_id, &drep)?;
+            visitor_enactment.visit_drep(self, &drep_id, &drep)?;
             visitor_rewards.visit_drep(self, &drep_id, &drep)?;
             visitor_retires.visit_drep(self, &drep_id, &drep)?;
             visitor_wrapup.visit_drep(self, &drep_id, &drep)?;
@@ -131,9 +213,9 @@ impl BoundaryWork {
         for account in accounts {
             let (account_id, account) = account?;
 
-            visitor_govactions.visit_account(self, &account_id, &account)?;
+            visitor_enactment.visit_account(self, &account_id, &account)?;
 
-            // HACK: we need the rewards to apply before the retires. This is because the rewards will update the live value before the snapshot but the retires will schedule refuns for after the snapshot. If we switch the sequence, the rewards will be overriden by the refund schedule. If we keep this order, the refund will clone the existing live values with the rewards already applied.
+            // HACK: we need the rewards to apply before the retires. This is because the rewards will update the live value before the snapshot but the retires will schedule refunds for after the snapshot. If we switch the sequence, the rewards will be overriden by the refund schedule. If we keep this order, the refund will clone the existing live values with the rewards already applied.
             // TODO: we should probably move the retires to ESTART after the snapshot has been taken.
             visitor_rewards.visit_account(self, &account_id, &account)?;
             visitor_retires.visit_account(self, &account_id, &account)?;
@@ -146,13 +228,40 @@ impl BoundaryWork {
         for proposal in proposals {
             let (proposal_id, proposal) = proposal?;
 
-            visitor_govactions.visit_proposal(self, &proposal_id, &proposal)?;
+            visitor_enactment.visit_proposal(self, &proposal_id, &proposal)?;
             visitor_rewards.visit_proposal(self, &proposal_id, &proposal)?;
             visitor_retires.visit_proposal(self, &proposal_id, &proposal)?;
             visitor_wrapup.visit_proposal(self, &proposal_id, &proposal)?;
         }
 
-        visitor_govactions.flush(self)?;
+        let expiring_proposals = self.expiring_proposals.clone();
+
+        for (id, (proposal, account)) in expiring_proposals.iter() {
+            visitor_enactment.visit_expiring_proposal(self, &id, &proposal, account.as_ref())?;
+            visitor_rewards.visit_expiring_proposal(self, &id, &proposal, account.as_ref())?;
+            visitor_retires.visit_expiring_proposal(self, &id, &proposal, account.as_ref())?;
+            visitor_wrapup.visit_expiring_proposal(self, &id, &proposal, account.as_ref())?;
+        }
+
+        let enacting_proposals = self.enacting_proposals.clone();
+
+        for (id, (proposal, account)) in enacting_proposals.iter() {
+            visitor_enactment.visit_enacting_proposal(self, &id, &proposal, account.as_ref())?;
+            visitor_rewards.visit_enacting_proposal(self, &id, &proposal, account.as_ref())?;
+            visitor_retires.visit_enacting_proposal(self, &id, &proposal, account.as_ref())?;
+            visitor_wrapup.visit_enacting_proposal(self, &id, &proposal, account.as_ref())?;
+        }
+
+        let dropping_proposals = self.dropping_proposals.clone();
+
+        for (id, (proposal, account)) in dropping_proposals.iter() {
+            visitor_enactment.visit_dropping_proposal(self, &id, &proposal, account.as_ref())?;
+            visitor_rewards.visit_dropping_proposal(self, &id, &proposal, account.as_ref())?;
+            visitor_retires.visit_dropping_proposal(self, &id, &proposal, account.as_ref())?;
+            visitor_wrapup.visit_dropping_proposal(self, &id, &proposal, account.as_ref())?;
+        }
+
+        visitor_enactment.flush(self)?;
         visitor_rewards.flush(self)?;
         visitor_retires.flush(self)?;
         visitor_wrapup.flush(self)?;
@@ -179,6 +288,9 @@ impl BoundaryWork {
             new_pools: Default::default(),
             retiring_pools: Default::default(),
             expiring_dreps: Default::default(),
+            expiring_proposals: Default::default(),
+            enacting_proposals: Default::default(),
+            dropping_proposals: Default::default(),
 
             // empty until computed
             deltas: WorkDeltas::default(),
@@ -188,6 +300,8 @@ impl BoundaryWork {
         boundary.load_pool_data::<D>(state)?;
 
         boundary.load_drep_data::<D>(state)?;
+
+        boundary.load_proposal_data::<D>(state)?;
 
         boundary.compute_deltas::<D>(state)?;
 

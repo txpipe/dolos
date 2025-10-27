@@ -551,6 +551,9 @@ pub enum ChainError {
 
     #[error("invalid pool params")]
     InvalidPoolParams,
+
+    #[error("invalid proposal params")]
+    InvalidProposalParams,
 }
 
 pub enum WorkKind {

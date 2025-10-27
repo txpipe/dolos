@@ -8,27 +8,8 @@ use tracing::debug;
 
 use crate::{
     ewrap::{BoundaryWork, ProposalId},
-    hacks, CardanoDelta, CardanoEntity, FixedNamespace as _, PParamValue, Proposal,
+    AccountState, CardanoDelta, CardanoEntity, FixedNamespace as _, PParamValue, Proposal,
 };
-
-fn should_enact_proposal(ctx: &mut BoundaryWork, proposal: &Proposal) -> bool {
-    if let Some(epoch) = match ctx.genesis.shelley.network_magic {
-        Some(764824073) => {
-            hacks::proposals::mainnet::enactment_epoch_by_proposal_id(&proposal.id_as_string())
-        }
-        Some(1) => {
-            hacks::proposals::preprod::enactment_epoch_by_proposal_id(&proposal.id_as_string())
-        }
-        Some(2) => {
-            hacks::proposals::preview::enactment_epoch_by_proposal_id(&proposal.id_as_string())
-        }
-        _ => None,
-    } {
-        epoch == ctx.starting_epoch_no()
-    } else {
-        false
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProposalEnactment {
@@ -200,15 +181,14 @@ impl BoundaryVisitor {
 }
 
 impl super::BoundaryVisitor for BoundaryVisitor {
-    fn visit_proposal(
+    fn visit_enacting_proposal(
         &mut self,
         ctx: &mut BoundaryWork,
         id: &ProposalId,
         proposal: &Proposal,
+        _: Option<&AccountState>,
     ) -> Result<(), ChainError> {
-        if !should_enact_proposal(ctx, proposal) {
-            return Ok(());
-        }
+        tracing::error!(proposal=%id, "visiting enacting proposal");
 
         self.deltas
             .push(ProposalEnactment::new(id.clone(), ctx.starting_epoch_no()).into());

@@ -25,6 +25,8 @@ pub mod pointers {
 }
 
 pub mod proposals {
+    use pallas::ledger::primitives::Epoch;
+
     pub mod preview {
         use crate::Epoch;
 
@@ -54,6 +56,50 @@ pub mod proposals {
 
                 // Plutus V3 Cost Model Parameter Changes Prior to Chang#2
                 "1f47f3cf2e4f9109be2efe9182cae08307e5778bdfea2150e6903c48edca0b8f#0" => Some(736),
+                _ => None,
+            }
+        }
+
+        pub fn dropped_epoch_by_proposal_id(proposal: &str) -> Option<Epoch> {
+            match proposal {
+                "2841a581076167a0662f1b4f1a38bcc8eff386f9ce45c33ae33b1fe8289de210#0" => Some(736),
+                "95af8608dc7aaf5c73025066b509a2c11c829f2984009ac92e7053d123fbce57#0" => Some(736),
+                "3d573646d495b939ad019afc2653fbad023615b4ee5643d41fd9fa9cdb91fe29#0" => Some(994),
+                "4c7b63801d0a0f0bb3d83cf9f0951ceb0e453e1532a3f5a1f2988a8d9778a862#0" => Some(994),
+                "25a16ada4a57fd29a1ac5f62f585d923ffe3e23321512380dfd276f6c73b1451#0" => Some(1013),
+                "77cc6292907df30d4340aa389dda453ea03aae1aa18a71c1856ac10851498188#0" => Some(1013),
+                "8f6918be1e1762cae1a378882d0b4037e0e7176ce69ce4f874a170edbc4d837d#0" => Some(994),
+                "045bbfb7ec34ec5e5a4fe110a59cfe0ce799018cef0d68483ec2b704f6503b9f#0" => Some(994),
+                "4b0b84ce4a791228a9b844b70cc2cc8e19b5dc009422db062ff139abcb7a20f7#0" => Some(994),
+                "5c526a482838979d2ffc5864b0f8878593080d3cd3d6b4759c66ffac81b17402#0" => Some(994),
+                "2eb2213de142e5c95a7f2b5b5a66fbb181b19782eb3b1f5db4485ffc558da9f3#0" => Some(994),
+                "5375aedecf005d3e212795f018573ea8f31dfc1b9d98d9ee5f24ebfb93bfb83b#0" => Some(994),
+                "fad5f42e6648c04b506864a787d684ac03d54df0232473e81ccd404867af76c5#0" => Some(994),
+                "0d732b47248d70a8aa61e3560f3fddcaf3809d82c065cbdfaa36f7931db637d7#0" => Some(994),
+                "16d11d0a34d76bffbb394c71b6b04696d80373b12b8dc849ccd0d981e91c66e5#0" => Some(994),
+                "5552b8a209f9ffadc5aa583ef583caaf1776ca53bc98972165a5b583c4045328#0" => Some(994),
+                "9a0ba26ff6fcf78cc30760eded027f4a23916724307c5b8196a0e13885ecc717#0" => Some(994),
+                "eede35403b0f5d3db8e6fe80a038f24c498c5b4675817e32a67e338f29511d94#0" => Some(994),
+                "c9fd3e7b0ae40a1ac3e656931376d79a7d2b33727e5083c91d89d74b7d6ab765#0" => Some(994),
+                "1ed2479b2abab685bd0c148e880d9b4c006bf21991b0b5a0000e66df62d6ee4a#0" => Some(994),
+                "58d46770900cd81bd5529e4f8b8c2c03e6de897c5ca89f55cbc7451176fe7ac5#0" => Some(994),
+                "4f25b3fffda8ef20bc8a5ccf1fb6e9a7ab267046c49a6d70bc9e642d0d049868#0" => Some(994),
+                "7f630df922fd14374ce402ed989d928817c56fd185a4c76a359c5a8c689a676e#0" => Some(994),
+                "88f29172775d69e08b2efd09d82e5d80e2139a58d53401984f47ae1e44b4017f#0" => Some(994),
+                "90c124b693fe2bddc19b4cd0a4e7af92f4b668355e5e8607b828c753d66dbbfc#0" => Some(994),
+                "98f2ffe1c2ae6ae57cafb5ee4829e6c656c5e35ee38bce1688d8537fb4707f1e#0" => Some(994),
+                "b9dc48d2defba697dd3bdb2316808fe894167a319a678b0ee246b292a9328b10#0" => Some(994),
+                "ca61b3b660b626bfc49135ee5006555630679c20c4033642fde2f4de16d5946d#0" => Some(994),
+                "d61d08ef309dacc162507f9c3b99080f1be1fa31ea59319684e2d569f9ee4970#0" => Some(994),
+                "e7082ec2717eff54fa78c2812a28d3799f1256aa00f1657f20f03dffeb8ac55d#0" => Some(994),
+                "0176514f66026da634cfd9c37e4575645a80aca4e69ad83fe0e468be5f4b5c0c#0" => Some(1096),
+                "609896ea7a615392bdc8c9ef0df74338ecd16d581c0cd698aa539c3f782650e3#0" => Some(1096),
+                "00be4823e37a7a70875408bf9df377ee48c0fa0d02cbe118acfef8cd0b92d3f7#0" => Some(998),
+                "51e82c898ba142adefb676277b9f8f48487569c3a8528c2f68c0aaa038315519#0" => Some(998),
+                "60233953f6e9e56333bf9acbfd2a7262fecfc60b7f4487e59b0bfce79fbe749a#0" => Some(998),
+                "c3f38851329c7829eadc86c082e160f7d47e1c03e16e3281420bb741a7d438e9#0" => Some(1096),
+                "4bc0ee7f2cc3a4e47b50b38431ba813893d5f1dbb3cee42a31f8deb57934c987#0" => Some(1096),
+                "f046a88280e6c5b18dd057027964860f6b0b7918f4532d50455ad257a14a70ed#0" => Some(1096),
                 _ => None,
             }
         }
@@ -234,6 +280,25 @@ pub mod proposals {
 
                 _ => None,
             }
+        }
+    }
+
+    pub fn enactment_epoch_by_proposal_id(magic: u32, proposal: &str) -> Option<Epoch> {
+        match magic {
+            764824073 => mainnet::enactment_epoch_by_proposal_id(proposal),
+            1 => preprod::enactment_epoch_by_proposal_id(proposal),
+            2 => preview::enactment_epoch_by_proposal_id(proposal),
+            _ => None,
+        }
+    }
+
+    pub fn dropped_epoch_by_proposal_id(magic: u32, proposal: &str) -> Option<Epoch> {
+        // TODO: complete mainnet and preprod
+        match magic {
+            //764824073 => mainnet::dropped_epoch_by_proposal_id(proposal),
+            //1 => preprod::dropped_epoch_by_proposal_id(proposal),
+            2 => preview::dropped_epoch_by_proposal_id(proposal),
+            _ => None,
         }
     }
 }
