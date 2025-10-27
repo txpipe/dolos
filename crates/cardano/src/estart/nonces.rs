@@ -29,7 +29,8 @@ impl EntityDelta for NonceTransition {
     }
 
     fn undo(&self, _entity: &mut Option<Self::Entity>) {
-        todo!()
+        // todo!()
+        // Placeholder undo logic. Ensure this does not panic.
     }
 }
 

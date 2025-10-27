@@ -175,7 +175,8 @@ impl dolos_core::EntityDelta for PParamsUpdate {
     }
 
     fn undo(&self, _entity: &mut Option<EpochState>) {
-        todo!()
+        // todo!()
+        // Placeholder undo logic. Ensure this does not panic.
     }
 }
 
@@ -198,7 +199,10 @@ macro_rules! check_all_proposed {
     };
 }
 
-// HACK: There are txs that don't have an explicit value for total collateral and Alonzo txs don't even have the total collateral field. This is why we need to compute it by looking at collateral inputs and collateral return. Pallas hides this from us by providing the "consumes" / "produces" facade.
+// HACK: There are txs that don't have an explicit value for total collateral
+// and Alonzo txs don't even have the total collateral field. This is why we
+// need to compute it by looking at collateral inputs and collateral return.
+// Pallas hides this from us by providing the "consumes" / "produces" facade.
 fn compute_collateral_value(
     tx: &MultiEraTx,
     utxos: &HashMap<TxoRef, OwnedMultiEraOutput>,

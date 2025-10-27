@@ -331,7 +331,8 @@ impl dolos_core::EntityDelta for StakeDeregistration {
     }
 
     fn undo(&self, _entity: &mut Option<AccountState>) {
-        todo!()
+        // todo!()
+        // Placeholder undo logic. Ensure this does not panic.
     }
 }
 
@@ -407,7 +408,8 @@ impl dolos_core::EntityDelta for DRepRegistration {
     fn undo(&self, entity: &mut Option<AccountState>) {
         let _entity = entity.as_mut().expect("existing account");
 
-        todo!()
+        // todo!()
+        // Placeholder undo logic. Ensure this does not panic.
     }
 }
 
@@ -502,12 +504,12 @@ impl BlockVisitor for AccountVisitor {
         }
 
         // if let Some(cert) = pallas_extras::cert_as_drep_registration(cert) {
-        //     deltas.add_for_entity(DRepRegistration::new(cert.cred, cert.deposit, epoch));
-        // }
+        //     deltas.add_for_entity(DRepRegistration::new(cert.cred, cert.deposit,
+        // epoch)); }
 
         // if let Some(cert) = pallas_extras::cert_as_drep_unregistration(cert) {
-        //     deltas.add_for_entity(DRepUnRegistration::new(cert.cred, cert.deposit, epoch));
-        // }
+        //     deltas.add_for_entity(DRepUnRegistration::new(cert.cred, cert.deposit,
+        // epoch)); }
 
         if let Some(cert) = pallas_extras::cert_as_vote_delegation(cert) {
             deltas.add_for_entity(VoteDelegation::new(
