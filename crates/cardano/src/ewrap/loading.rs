@@ -237,28 +237,28 @@ impl BoundaryWork {
         let expiring_proposals = self.expiring_proposals.clone();
 
         for (id, (proposal, account)) in expiring_proposals.iter() {
-            visitor_enactment.visit_expiring_proposal(self, &id, &proposal, account.as_ref())?;
-            visitor_rewards.visit_expiring_proposal(self, &id, &proposal, account.as_ref())?;
-            visitor_retires.visit_expiring_proposal(self, &id, &proposal, account.as_ref())?;
-            visitor_wrapup.visit_expiring_proposal(self, &id, &proposal, account.as_ref())?;
+            visitor_enactment.visit_expiring_proposal(self, id, proposal, account.as_ref())?;
+            visitor_rewards.visit_expiring_proposal(self, id, proposal, account.as_ref())?;
+            visitor_retires.visit_expiring_proposal(self, id, proposal, account.as_ref())?;
+            visitor_wrapup.visit_expiring_proposal(self, id, proposal, account.as_ref())?;
         }
 
         let enacting_proposals = self.enacting_proposals.clone();
 
         for (id, (proposal, account)) in enacting_proposals.iter() {
-            visitor_enactment.visit_enacting_proposal(self, &id, &proposal, account.as_ref())?;
-            visitor_rewards.visit_enacting_proposal(self, &id, &proposal, account.as_ref())?;
-            visitor_retires.visit_enacting_proposal(self, &id, &proposal, account.as_ref())?;
-            visitor_wrapup.visit_enacting_proposal(self, &id, &proposal, account.as_ref())?;
+            visitor_enactment.visit_enacting_proposal(self, id, proposal, account.as_ref())?;
+            visitor_rewards.visit_enacting_proposal(self, id, proposal, account.as_ref())?;
+            visitor_retires.visit_enacting_proposal(self, id, proposal, account.as_ref())?;
+            visitor_wrapup.visit_enacting_proposal(self, id, proposal, account.as_ref())?;
         }
 
         let dropping_proposals = self.dropping_proposals.clone();
 
         for (id, (proposal, account)) in dropping_proposals.iter() {
-            visitor_enactment.visit_dropping_proposal(self, &id, &proposal, account.as_ref())?;
-            visitor_rewards.visit_dropping_proposal(self, &id, &proposal, account.as_ref())?;
-            visitor_retires.visit_dropping_proposal(self, &id, &proposal, account.as_ref())?;
-            visitor_wrapup.visit_dropping_proposal(self, &id, &proposal, account.as_ref())?;
+            visitor_enactment.visit_dropping_proposal(self, id, proposal, account.as_ref())?;
+            visitor_rewards.visit_dropping_proposal(self, id, proposal, account.as_ref())?;
+            visitor_retires.visit_dropping_proposal(self, id, proposal, account.as_ref())?;
+            visitor_wrapup.visit_dropping_proposal(self, id, proposal, account.as_ref())?;
         }
 
         visitor_enactment.flush(self)?;

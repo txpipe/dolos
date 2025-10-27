@@ -3,7 +3,7 @@ use pallas::ledger::primitives::StakeCredential;
 use tracing::{debug, info};
 
 use crate::{
-    load_era_summary, pallas_ratio,
+    pallas_ratio,
     pots::{self, EpochIncentives, Eta, Pots},
     ratio,
     rupd::{RupdWork, StakeSnapshot},

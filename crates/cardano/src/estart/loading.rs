@@ -3,8 +3,8 @@ use std::sync::Arc;
 use dolos_core::{batch::WorkDeltas, ChainError, Domain, Genesis, StateStore};
 
 use crate::{
-    estart::BoundaryVisitor, load_active_era, rewards::RewardMap, rupd::RupdWork, AccountState,
-    DRepState, FixedNamespace as _, PoolState, Proposal,
+    estart::BoundaryVisitor, load_active_era, AccountState, DRepState, FixedNamespace as _,
+    PoolState, Proposal,
 };
 
 impl super::WorkContext {

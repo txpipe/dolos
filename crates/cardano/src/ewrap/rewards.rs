@@ -4,8 +4,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 use crate::{
-    pallas_extras, rupd::AccountId, AccountState, CardanoDelta, CardanoEntity, FixedNamespace,
-    RewardLog,
+    rupd::AccountId, AccountState, CardanoDelta, CardanoEntity, FixedNamespace, RewardLog,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

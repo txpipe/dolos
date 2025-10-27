@@ -165,7 +165,7 @@ fn define_end_stats(ctx: &super::BoundaryWork) -> EndStats {
         effective_rewards: reward_delta.effective_rewards,
         unspendable_rewards: reward_delta.unspendable_rewards,
         proposal_refunds: proposal_valid_refunds,
-        proposal_invalid_refunds: proposal_invalid_refunds,
+        proposal_invalid_refunds,
         // TODO: deprecate
         __drep_deposits: 0,
         __drep_refunds: 0,
