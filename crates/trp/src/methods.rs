@@ -8,7 +8,7 @@ use tx3_sdk::trp::{SubmitParams, SubmitWitness};
 
 use dolos_core::{Domain, MempoolStore as _, StateStore as _};
 
-use crate::{compiler::load_compiler, utxos::UtxoStoreAdapter};
+use crate::{Facade, compiler::load_compiler, utxos::UtxoStoreAdapter};
 
 use super::{Context, Error};
 
@@ -77,7 +77,9 @@ pub async fn trp_resolve<D: Domain>(
 
     let tx = load_tx(params)?;
 
-    let mut compiler = load_compiler::<D>(&context.domain, &context.config)?;
+    let facade = Facade { inner: context.domain.clone() };
+
+    let mut compiler = load_compiler::<D>(&facade, &context.config)?;
 
     let utxos = UtxoStoreAdapter::<D>::new(context.domain.state().clone());
 

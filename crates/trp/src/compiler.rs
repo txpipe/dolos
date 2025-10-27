@@ -3,7 +3,7 @@ use std::collections::HashMap;
 
 use dolos_core::{Domain, Genesis};
 
-use crate::{Config, Error};
+use crate::{Facade, Config, Error};
 
 pub fn network_id_from_genesis(genesis: &Genesis) -> Option<tx3_cardano::Network> {
     match genesis.shelley.network_id.as_ref() {
@@ -29,36 +29,29 @@ fn map_cost_models(original: CostModels) -> HashMap<u8, tx3_cardano::CostModel> 
     HashMap::from_iter(present)
 }
 
-fn build_pparams<D: Domain>(domain: &D) -> Result<tx3_cardano::PParams, Error> {
+pub fn load_compiler<D: Domain>(
+    domain: &Facade<D>,
+    config: &Config,
+) -> Result<tx3_cardano::Compiler, Error> {
     let network = network_id_from_genesis(&domain.genesis()).unwrap();
 
-    let pparams = dolos_cardano::load_effective_pparams::<D>(domain.state())
-        .map_err(|_| Error::PParamsNotAvailable)?;
+    let pparams = domain.get_pparams()?;
 
     let costs = pparams.cost_models_for_script_languages();
 
-    let out = tx3_cardano::PParams {
-        network,
-        cost_models: map_cost_models(costs),
-        min_fee_coefficient: pparams.min_fee_a_or_default() as u64,
-        min_fee_constant: pparams.min_fee_b_or_default() as u64,
-        coins_per_utxo_byte: pparams.ada_per_utxo_byte_or_default() as u64,
-    };
+    let chain_tip = domain.get_chain_tip()?;
 
-    Ok(out)
-}
-
-pub fn load_compiler<D: Domain>(
-    domain: &D,
-    config: &Config,
-) -> Result<tx3_cardano::Compiler, Error> {
-    let pparams = build_pparams::<D>(domain)?;
+    let slot_config = domain.get_slot_config()?;
 
     let compiler = tx3_cardano::Compiler::new(
-        pparams,
         tx3_cardano::Config {
             extra_fees: config.extra_fees,
         },
+        network,
+        chain_tip,
+        pparams,
+        map_cost_models(costs),
+        slot_config,
     );
 
     Ok(compiler)
