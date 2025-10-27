@@ -561,6 +561,10 @@ impl AccountState {
         self.stake.live().map(|x| x.total()).unwrap_or_default()
     }
 
+    pub fn active_stake(&self) -> u64 {
+        self.stake.go().map(|x| x.total()).unwrap_or_default()
+    }
+
     pub fn is_registered(&self) -> bool {
         match (self.registered_at, self.deregistered_at) {
             (Some(_), None) => true,
