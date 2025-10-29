@@ -123,11 +123,12 @@ impl dolos_core::EntityDelta for NoncesUpdate {
 // and Alonzo txs don't even have the total collateral field. This is why we
 // need to compute it by looking at collateral inputs and collateral return.
 // Pallas hides this from us by providing the "consumes" / "produces" facade.
+// Note: This can be called for transactions from any era (Alonzo, Babbage, Conway)
+// when total_collateral is not set.
 fn compute_collateral_value(
     tx: &MultiEraTx,
     utxos: &HashMap<TxoRef, OwnedMultiEraOutput>,
 ) -> Result<Lovelace, ChainError> {
-    debug_assert!(tx.era() == Era::Alonzo);
     debug_assert!(!tx.is_valid());
 
     let mut total = 0;
