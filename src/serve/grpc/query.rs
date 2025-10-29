@@ -40,57 +40,55 @@ where
         Self { domain, mapper }
     }
 
-    fn point_to_u5c(&self, point: &ChainPoint) -> u5c::query::ChainPoint {
+    fn point_to_u5c(&self, point: &ChainPoint) -> Result<u5c::query::ChainPoint, Status> {
         match point {
-            ChainPoint::Origin => u5c::query::ChainPoint {
+            ChainPoint::Origin => Ok(u5c::query::ChainPoint {
                 slot: 0,
                 hash: vec![].into(),
                 height: 0,
                 timestamp: 0,
-            },
+            }),
             ChainPoint::Slot(slot) | ChainPoint::Specific(slot, _) => {
                 // Calculate height by looking up block from slot
-                let height = self.domain
+                let body = self.domain
                     .archive()
                     .get_block_by_slot(slot)
-                    .map(|block| {
-                        block.map(|body| {
-                            // Parse the block to get the height
-                            use pallas::ledger::traverse::MultiEraBlock;
-                            if let Ok(parsed_block) = MultiEraBlock::decode(&body) {
-                                parsed_block.number()
-                            } else {
-                                *slot  // Fallback to slot
-                            }
-                        }).unwrap_or(*slot)
-                    })
-                    .unwrap_or(*slot);
+                    .map_err(into_status)?
+                    .ok_or_else(|| Status::not_found(format!("Block not found at slot {}", slot)))?;
+
+                // Parse the block to get the height
+                use pallas::ledger::traverse::MultiEraBlock;
+                let parsed_block = MultiEraBlock::decode(&body)
+                    .map_err(|e| Status::internal(format!("Failed to decode block at slot {}: {}", slot, e)))?;
+
+                let height = parsed_block.number();
 
                 // Calculate timestamp from slot using proper era handling
                 // Get protocol parameter updates up to this slot
                 let updates = self.domain.state()
                     .get_pparams(*slot)
-                    .ok()
-                    .and_then(|updates| {
-                        updates.into_iter()
-                            .map(TryInto::try_into)
-                            .collect::<Result<Vec<_>, _>>()
-                            .ok()
-                    })
-                    .unwrap_or_default();
+                    .map_err(into_status)?;
+
+                let updates: Vec<_> = updates
+                    .into_iter()
+                    .map(TryInto::try_into)
+                    .collect::<Result<_, _>>()
+                    .map_err(|e: pallas::codec::minicbor::decode::Error| {
+                        Status::internal(format!("Failed to convert protocol parameters: {}", e))
+                    })?;
 
                 // Get chain summary with proper era handling
                 let summary = pparams::fold_with_hacks(self.domain.genesis(), &updates, *slot);
-                
+
                 // Calculate timestamp using the canonical function
                 let timestamp = dolos_cardano::slot_time(*slot, &summary) as u64;
 
-                u5c::query::ChainPoint {
+                Ok(u5c::query::ChainPoint {
                     slot: *slot,
                     hash: point.hash().map(|h| h.to_vec()).unwrap_or_default().into(),
                     height,
                     timestamp,
-                }
+                })
             }
         }
     }
@@ -311,7 +309,7 @@ where
                 )
                 .into(),
             }),
-            ledger_tip: tip.as_ref().map(|p| self.point_to_u5c(p)),
+            ledger_tip: Some(self.point_to_u5c(&tip)?),
         };
 
         if let Some(mask) = message.field_mask {
@@ -362,7 +360,8 @@ where
             .read_cursor()
             .map_err(|e| Status::internal(e.to_string()))?
             .as_ref()
-            .map(|p| self.point_to_u5c(p));
+            .map(|p| self.point_to_u5c(p))
+            .transpose()?;
 
         Ok(Response::new(u5c::query::ReadUtxosResponse {
             items,
@@ -409,7 +408,8 @@ where
             .read_cursor()
             .map_err(|e| Status::internal(e.to_string()))?
             .as_ref()
-            .map(|p| self.point_to_u5c(p));
+            .map(|p| self.point_to_u5c(p))
+            .transpose()?;
 
         Ok(Response::new(u5c::query::SearchUtxosResponse {
             items,
@@ -450,7 +450,8 @@ where
             .read_cursor()
             .map_err(|e| Status::internal(e.to_string()))?
             .as_ref()
-            .map(|p| self.point_to_u5c(p));
+            .map(|p| self.point_to_u5c(p))
+            .transpose()?;
 
         let mut response = u5c::query::ReadTxResponse {
             tx: Some(u5c::query::AnyChainTx {
@@ -515,15 +516,7 @@ where
             current_params,
         );
 
-        // Get genesis hash
-        let genesis_hash = if let Ok(Some(point)) = self.domain.state().cursor() {
-            match point {
-                ChainPoint::Origin | ChainPoint::Slot(_) => vec![],
-                ChainPoint::Specific(_, hash) => hash.to_vec(),
-            }
-        } else {
-            vec![]
-        };
+        let genesis_hash = genesis.shelley_hash.to_vec();
 
         let response = u5c::query::ReadGenesisResponse {
             genesis: genesis_hash.into(),
