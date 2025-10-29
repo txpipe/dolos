@@ -10,7 +10,7 @@ use pallas::{
             },
             Epoch,
         },
-        traverse::{fees::compute_byron_fee, Era, MultiEraBlock, MultiEraCert, MultiEraTx},
+        traverse::{fees::compute_byron_fee, MultiEraBlock, MultiEraCert, MultiEraTx},
     },
 };
 use serde::{Deserialize, Serialize};
