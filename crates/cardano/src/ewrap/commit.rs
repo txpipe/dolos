@@ -6,52 +6,10 @@ use tracing::{instrument, trace, warn};
 
 use crate::{
     ewrap::BoundaryWork, AccountState, CardanoEntity, DRepState, EpochState, EraSummary,
-    FixedNamespace, PoolState, Proposal,
+    FixedNamespace, PoolState, Proposal, CURRENT_EPOCH_KEY,
 };
 
 impl BoundaryWork {
-    // TODO: this is ugly, we still handle era transitions as an imperative change
-    // directly on the state. We should be able to do this with deltas.
-    fn apply_era_transition<W: StateWriter>(
-        &self,
-        writer: &W,
-        state: &impl StateStore,
-    ) -> Result<(), ChainError> {
-        let Some(transition) = &self.ending_state.pparams.era_transition() else {
-            return Ok(());
-        };
-
-        let previous = state.read_entity_typed::<EraSummary>(
-            EraSummary::NS,
-            &EntityKey::from(transition.prev_version),
-        )?;
-
-        let Some(mut previous) = previous else {
-            return Err(BrokenInvariant::BadBootstrap.into());
-        };
-
-        previous.define_end(self.starting_epoch_no());
-
-        writer.write_entity_typed::<EraSummary>(
-            &EntityKey::from(transition.prev_version),
-            &previous,
-        )?;
-
-        let pparams = self.ending_state().pparams.unwrap_live();
-
-        let new = EraSummary {
-            start: previous.end.clone().unwrap(),
-            end: None,
-            epoch_length: pparams.ensure_epoch_length()?,
-            slot_length: pparams.ensure_slot_length()?,
-            protocol: transition.new_version.into(),
-        };
-
-        writer.write_entity_typed(&EntityKey::from(transition.new_version), &new)?;
-
-        Ok(())
-    }
-
     fn apply_whole_namespace<D, E>(
         &mut self,
         state: &D::State,
@@ -132,8 +90,6 @@ impl BoundaryWork {
         self.flush_logs::<D>(&archive_writer)?;
 
         debug_assert!(self.logs.is_empty());
-
-        self.apply_era_transition(&writer, state)?;
 
         writer.commit()?;
         archive_writer.commit()?;
