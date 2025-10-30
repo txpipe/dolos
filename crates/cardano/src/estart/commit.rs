@@ -1,14 +1,63 @@
 use dolos_core::{
-    ArchiveStore, ArchiveWriter, BlockSlot, ChainError, ChainPoint, Domain, Entity,
-    EntityDelta as _, LogKey, NsKey, StateStore, StateWriter, TemporalKey,
+    ArchiveStore, ArchiveWriter, BlockSlot, BrokenInvariant, ChainError, ChainPoint, Domain,
+    Entity, EntityDelta as _, EntityKey, LogKey, NsKey, StateStore, StateWriter, TemporalKey,
 };
 use tracing::{instrument, trace, warn};
 
 use crate::{
-    AccountState, CardanoEntity, DRepState, EpochState, FixedNamespace, PoolState, Proposal,
+    AccountState, CardanoEntity, DRepState, EpochState, EraSummary, FixedNamespace, PoolState,
+    Proposal, CURRENT_EPOCH_KEY,
 };
 
 impl super::WorkContext {
+    // TODO: this is ugly, we still handle era transitions as an imperative change
+    // directly on the state. We should be able to do this with deltas.
+    fn apply_era_transition<W: StateWriter>(
+        &self,
+        writer: &W,
+        state: &impl StateStore,
+    ) -> Result<(), ChainError> {
+        let Some(transition) = self.ended_state.pparams.era_transition() else {
+            return Ok(());
+        };
+
+        tracing::warn!(from=%transition.prev_version, to=%transition.new_version, "era transition detected");
+
+        let previous = state.read_entity_typed::<EraSummary>(
+            EraSummary::NS,
+            &EntityKey::from(transition.prev_version),
+        )?;
+
+        let Some(mut previous) = previous else {
+            return Err(BrokenInvariant::BadBootstrap.into());
+        };
+
+        previous.define_end(self.starting_epoch_no());
+
+        writer.write_entity_typed::<EraSummary>(
+            &EntityKey::from(transition.prev_version),
+            &previous,
+        )?;
+
+        let pparams = self
+            .ended_state
+            .pparams
+            .next()
+            .expect("next pparams should be set");
+
+        let new = EraSummary {
+            start: previous.end.clone().unwrap(),
+            end: None,
+            epoch_length: pparams.ensure_epoch_length()?,
+            slot_length: pparams.ensure_slot_length()?,
+            protocol: transition.new_version.into(),
+        };
+
+        writer.write_entity_typed(&EntityKey::from(transition.new_version), &new)?;
+
+        Ok(())
+    }
+
     fn apply_whole_namespace<D, E>(
         &mut self,
         state: &D::State,
@@ -87,6 +136,8 @@ impl super::WorkContext {
         self.flush_logs::<D>(&archive_writer)?;
 
         debug_assert!(self.logs.is_empty());
+
+        self.apply_era_transition(&writer, state)?;
 
         writer.set_cursor(ChainPoint::Slot(slot))?;
 
