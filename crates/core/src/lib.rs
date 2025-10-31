@@ -507,6 +507,9 @@ pub trait Block: Sized + Send + Sync {
 
 #[derive(Debug, Error)]
 pub enum ChainError {
+    #[error("can't receive block until previous work is completed")]
+    CantReceiveBlock(RawBlock),
+
     #[error(transparent)]
     BrokenInvariant(#[from] BrokenInvariant),
 
@@ -558,7 +561,7 @@ pub enum ChainError {
 
 pub enum WorkKind {
     Genesis,
-    Block,
+    Blocks,
     EWrap,
     EStart,
     Rupd,
@@ -567,7 +570,7 @@ pub enum WorkKind {
 #[allow(clippy::large_enum_variant)]
 pub enum WorkUnit<C: ChainLogic> {
     Genesis,
-    Block(WorkBlock<C>),
+    Blocks(WorkBatch<C>),
     EWrap(BlockSlot),
     EStart(BlockSlot),
     Rupd(BlockSlot),
@@ -596,7 +599,9 @@ pub trait ChainLogic: Sized + Send + Sync {
     fn peek_work(&self) -> Option<WorkKind>;
     fn pop_work(&self) -> Option<WorkUnit<Self>>;
 
-    fn receive_block(&self, raw: RawBlock) -> Result<(), ChainError>;
+    fn can_receive_block(&self) -> bool;
+
+    fn receive_block(&self, raw: RawBlock) -> Result<BlockSlot, ChainError>;
 
     // TODO: we should invert responsibility here. The chain logic should tell the
     // domain what to do instead of passing everything down and expecting it to do

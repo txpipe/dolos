@@ -1,28 +1,27 @@
 use tracing::{error, info, warn};
 
 use crate::{
-    batch::WorkBatch, ArchiveStore, Block as _, BlockSlot, ChainLogic, ChainPoint, Domain,
-    DomainError, RawBlock, StateStore, TipEvent, WalStore, WorkKind, WorkUnit,
+    batch::WorkBatch, ArchiveStore, Block as _, BlockSlot, ChainError, ChainLogic, ChainPoint,
+    Domain, DomainError, RawBlock, StateStore, TipEvent, WalStore, WorkKind, WorkUnit,
 };
 
 /// Process a batch of blocks during bulk import operations, skipping the WAL
 /// and doesn't notify tip
-fn import_batch<D: Domain>(
+fn execute_batch<D: Domain>(
     domain: &D,
-    mut batch: WorkBatch<D::Chain>,
+    batch: &mut WorkBatch<D::Chain>,
+    with_wal: bool,
 ) -> Result<BlockSlot, DomainError> {
     batch.load_utxos(domain)?;
 
     batch.decode_utxos(domain.chain())?;
 
     // Chain-specific logic
-    domain
-        .chain()
-        .compute_delta::<D>(domain.state(), &mut batch)?;
+    domain.chain().compute_delta::<D>(domain.state(), batch)?;
 
-    // since we're are importing finalized blocks, we don't care about the potential
-    // for undos. This allows us to just drop the mutated delta without having to
-    // persist it in the WAL.
+    if with_wal {
+        batch.commit_wal(domain)?;
+    }
 
     batch.load_entities(domain)?;
 
@@ -35,31 +34,10 @@ fn import_batch<D: Domain>(
     Ok(batch.last_slot())
 }
 
-/// Process a batch of blocks during live operations, saving to WAL and
-/// notifying tip
-fn roll_batch<D: Domain>(
-    domain: &D,
-    mut batch: WorkBatch<D::Chain>,
-) -> Result<BlockSlot, DomainError> {
-    batch.sort_by_slot();
-    batch.load_utxos(domain)?;
-
-    batch.decode_utxos(domain.chain())?;
-
-    // Chain-specific logic
-    domain
-        .chain()
-        .compute_delta::<D>(domain.state(), &mut batch)?;
-
-    batch.commit_wal(domain)?;
-
-    batch.load_entities(domain)?;
-
-    batch.apply_entities()?;
-
-    batch.commit_state(domain)?;
-
-    batch.commit_archive(domain)?;
+fn notify_work<D: Domain>(domain: &D, work: &WorkUnit<D::Chain>) {
+    let WorkUnit::Blocks(batch) = work else {
+        return;
+    };
 
     for block in batch.iter_blocks() {
         let point = block.point();
@@ -67,17 +45,12 @@ fn roll_batch<D: Domain>(
         domain.notify_tip(TipEvent::Apply(point.clone(), raw));
         info!(%point, "roll forward");
     }
-
-    Ok(batch.last_slot())
 }
 
-/// Execute isolated work, such as genesis or sweeps.
-///
-/// Don't use this to execute blocks, those should be executed in a batch. This
-/// method can be used for both import and roll operations.
-fn execute_isolated_work<D: Domain>(
+fn execute_work<D: Domain>(
     domain: &D,
-    work: WorkUnit<D::Chain>,
+    work: &mut WorkUnit<D::Chain>,
+    with_wal: bool,
 ) -> Result<(), DomainError> {
     match work {
         WorkUnit::Genesis => {
@@ -93,7 +66,7 @@ fn execute_isolated_work<D: Domain>(
                 domain.state(),
                 domain.archive(),
                 domain.genesis(),
-                slot,
+                *slot,
             )?;
         }
         WorkUnit::EStart(slot) => {
@@ -101,7 +74,7 @@ fn execute_isolated_work<D: Domain>(
                 domain.state(),
                 domain.archive(),
                 domain.genesis(),
-                slot,
+                *slot,
             )?;
         }
         WorkUnit::Rupd(slot) => {
@@ -109,11 +82,11 @@ fn execute_isolated_work<D: Domain>(
                 domain.state(),
                 domain.archive(),
                 domain.genesis(),
-                slot,
+                *slot,
             )?;
         }
-        WorkUnit::Block(_) => {
-            unreachable!("isolated work can't be a block, only genesis or sweeps are allowed");
+        WorkUnit::Blocks(batch) => {
+            execute_batch(domain, batch, with_wal)?;
         }
     }
 
@@ -121,70 +94,35 @@ fn execute_isolated_work<D: Domain>(
 }
 
 fn drain_pending_work<D: Domain>(domain: &D) -> Result<(), DomainError> {
-    while let Some(work) = domain.chain().pop_work() {
-        execute_isolated_work(domain, work)?;
+    while !domain.chain().can_receive_block() {
+        if let Some(mut work) = domain.chain().pop_work() {
+            execute_work(domain, &mut work, false)?;
+        }
     }
 
     Ok(())
-}
-
-fn gather_batched_work<D: Domain>(domain: &D) -> Result<WorkBatch<D::Chain>, DomainError> {
-    let mut batch = WorkBatch::default();
-
-    let chain = domain.chain();
-
-    while let Some(work) = chain.peek_work() {
-        if !matches!(work, WorkKind::Block) {
-            break;
-        }
-
-        match chain.pop_work().unwrap() {
-            WorkUnit::Block(block) => {
-                batch.add_work(block);
-            }
-            _ => unreachable!("can't pop work that isn't a block"),
-        }
-    }
-
-    Ok(batch)
 }
 
 pub fn import_blocks<D: Domain>(
     domain: &D,
     mut raw: Vec<RawBlock>,
 ) -> Result<BlockSlot, DomainError> {
-    for block in raw.drain(..) {
-        domain.chain().receive_block(block)?;
-    }
-
     let mut last = 0;
 
-    while let Some(work) = domain.chain().peek_work() {
-        if matches!(work, WorkKind::Block) {
-            let batch = gather_batched_work(domain)?;
-            last = import_batch(domain, batch)?;
-        } else {
-            let work = domain.chain().pop_work().unwrap();
-            execute_isolated_work(domain, work)?;
-        }
+    for block in raw.drain(..) {
+        drain_pending_work(domain)?;
+        last = domain.chain().receive_block(block)?;
     }
 
     Ok(last)
 }
 
 pub fn roll_forward<D: Domain>(domain: &D, block: RawBlock) -> Result<BlockSlot, DomainError> {
-    domain.chain().receive_block(block)?;
+    let last = domain.chain().receive_block(block)?;
 
-    let mut last = 0;
-
-    while let Some(work) = domain.chain().peek_work() {
-        if matches!(work, WorkKind::Block) {
-            let batch = gather_batched_work(domain)?;
-            last = roll_batch(domain, batch)?;
-        } else {
-            let work = domain.chain().pop_work().unwrap();
-            execute_isolated_work(domain, work)?;
-        }
+    while let Some(mut work) = domain.chain().pop_work() {
+        execute_work(domain, &mut work, true)?;
+        notify_work(domain, &work);
     }
 
     Ok(last)

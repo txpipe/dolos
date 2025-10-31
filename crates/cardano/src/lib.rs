@@ -3,10 +3,7 @@ use pallas::ledger::{
     traverse::{MultiEraBlock, MultiEraOutput},
 };
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::VecDeque,
-    sync::{Arc, RwLock},
-};
+use std::sync::{Arc, RwLock};
 
 // re-export pallas for version compatibility downstream
 pub use pallas;
@@ -93,44 +90,178 @@ pub struct Config {
     pub stop_epoch: Option<Epoch>,
 }
 
-struct WorkBuffer {
-    pending: VecDeque<WorkUnit<CardanoLogic>>,
-    last_point_seen: ChainPoint,
+#[derive(Debug)]
+enum WorkBuffer {
+    Empty,
+    Restart(ChainPoint),
+    Genesis(OwnedMultiEraBlock),
+    OpenBatch(WorkBatch<CardanoLogic>),
+    PreRupdBoundary(WorkBatch<CardanoLogic>, OwnedMultiEraBlock),
+    RupdBoundary(OwnedMultiEraBlock),
+    PreEwrapBoundary(WorkBatch<CardanoLogic>, OwnedMultiEraBlock),
+    EwrapBoundary(OwnedMultiEraBlock),
+    EstartBoundary(OwnedMultiEraBlock),
+}
+
+impl Default for WorkBuffer {
+    fn default() -> Self {
+        Self::Empty
+    }
 }
 
 impl WorkBuffer {
     fn new_from_cursor(cursor: ChainPoint) -> Self {
-        Self {
-            pending: Default::default(),
-            last_point_seen: cursor,
+        Self::Restart(cursor)
+    }
+
+    fn peek_work(&self) -> Option<WorkKind> {
+        match self {
+            WorkBuffer::Empty => None,
+            WorkBuffer::Restart(..) => None,
+            WorkBuffer::Genesis(..) => Some(WorkKind::Genesis),
+            WorkBuffer::OpenBatch(..) => Some(WorkKind::Blocks),
+            WorkBuffer::PreRupdBoundary(..) => Some(WorkKind::Blocks),
+            WorkBuffer::RupdBoundary(..) => Some(WorkKind::Rupd),
+            WorkBuffer::PreEwrapBoundary(..) => Some(WorkKind::Blocks),
+            WorkBuffer::EwrapBoundary(..) => Some(WorkKind::EWrap),
+            WorkBuffer::EstartBoundary(..) => Some(WorkKind::EStart),
         }
     }
 
-    fn new_from_genesis() -> Self {
-        Self {
-            pending: VecDeque::from(vec![WorkUnit::Genesis]),
-            last_point_seen: ChainPoint::Origin,
+    fn last_point_seen(&self) -> ChainPoint {
+        match self {
+            WorkBuffer::Empty => ChainPoint::Origin,
+            WorkBuffer::Restart(x) => x.clone(),
+            WorkBuffer::Genesis(block) => block.point(),
+            WorkBuffer::OpenBatch(batch) => batch.last_point(),
+            WorkBuffer::PreRupdBoundary(.., block) => block.point(),
+            WorkBuffer::RupdBoundary(block) => block.point(),
+            WorkBuffer::PreEwrapBoundary(.., block) => block.point(),
+            WorkBuffer::EwrapBoundary(block) => block.point(),
+            WorkBuffer::EstartBoundary(block) => block.point(),
         }
     }
 
-    fn enqueue_block(&mut self, block: WorkBlock<CardanoLogic>) {
-        self.last_point_seen = ChainPoint::Slot(block.slot());
-        self.pending.push_back(WorkUnit::Block(block));
+    fn can_receive_block(&self) -> bool {
+        match self {
+            WorkBuffer::Empty => true,
+            WorkBuffer::Restart(..) => true,
+            WorkBuffer::OpenBatch(..) => true,
+            _ => false,
+        }
     }
 
-    fn enqueue_ewrap(&mut self, slot: BlockSlot) {
-        self.last_point_seen = ChainPoint::Slot(slot);
-        self.pending.push_back(WorkUnit::EWrap(slot));
+    fn extend_batch(self, next_block: OwnedMultiEraBlock) -> Self {
+        match self {
+            WorkBuffer::Empty => {
+                let batch = WorkBatch::for_single_block(WorkBlock::new(next_block));
+                WorkBuffer::OpenBatch(batch)
+            }
+            WorkBuffer::Restart(_) => {
+                let batch = WorkBatch::for_single_block(WorkBlock::new(next_block));
+                WorkBuffer::OpenBatch(batch)
+            }
+            WorkBuffer::OpenBatch(mut batch) => {
+                batch.add_work(WorkBlock::new(next_block));
+                WorkBuffer::OpenBatch(batch)
+            }
+            _ => unreachable!(),
+        }
     }
 
-    fn enqueue_estart(&mut self, slot: BlockSlot) {
-        self.last_point_seen = ChainPoint::Slot(slot);
-        self.pending.push_back(WorkUnit::EStart(slot));
+    fn on_genesis_boundary(self, next_block: OwnedMultiEraBlock) -> Self {
+        match self {
+            WorkBuffer::Empty => WorkBuffer::Genesis(next_block),
+            _ => unreachable!(),
+        }
     }
 
-    fn enqueue_rupd(&mut self, slot: BlockSlot) {
-        self.last_point_seen = ChainPoint::Slot(slot);
-        self.pending.push_back(WorkUnit::Rupd(slot));
+    fn on_rupd_boundary(self, next_block: OwnedMultiEraBlock) -> Self {
+        match self {
+            WorkBuffer::Restart(_) => WorkBuffer::RupdBoundary(next_block),
+            WorkBuffer::OpenBatch(batch) => WorkBuffer::PreRupdBoundary(batch, next_block),
+            _ => unreachable!(),
+        }
+    }
+
+    fn on_ewrap_boundary(self, next_block: OwnedMultiEraBlock) -> Self {
+        match self {
+            WorkBuffer::Restart(..) => WorkBuffer::EwrapBoundary(next_block),
+            WorkBuffer::OpenBatch(batch) => WorkBuffer::PreEwrapBoundary(batch, next_block),
+            _ => unreachable!(),
+        }
+    }
+
+    fn receive_block(
+        self,
+        block: OwnedMultiEraBlock,
+        eras: &ChainSummary,
+        stability_window: u64,
+    ) -> Self {
+        assert!(
+            self.can_receive_block(),
+            "can't continue until previous work is completed"
+        );
+
+        if matches!(self, WorkBuffer::Empty) {
+            return self.on_genesis_boundary(block);
+        }
+
+        let prev_slot = self.last_point_seen().slot();
+
+        let next_slot = block.slot();
+
+        let epoch_boundary = pallas_extras::epoch_boundary(eras, prev_slot, next_slot);
+
+        if epoch_boundary.is_some() {
+            return self.on_ewrap_boundary(block);
+        }
+
+        let rupd_boundary =
+            pallas_extras::rupd_boundary(stability_window, eras, prev_slot, next_slot);
+
+        if rupd_boundary.is_some() {
+            return self.on_rupd_boundary(block);
+        }
+
+        self.extend_batch(block)
+    }
+
+    fn pop_work(self) -> Option<(WorkUnit<CardanoLogic>, Self)> {
+        if matches!(self, WorkBuffer::Restart(..)) || matches!(self, WorkBuffer::Empty) {
+            return None;
+        }
+
+        let next = match self {
+            WorkBuffer::Genesis(block) => (
+                WorkUnit::Genesis,
+                Self::OpenBatch(WorkBatch::for_single_block(WorkBlock::new(block))),
+            ),
+            WorkBuffer::OpenBatch(batch) => {
+                let last_point = batch.last_point();
+                (WorkUnit::Blocks(batch), Self::Restart(last_point))
+            }
+            WorkBuffer::PreRupdBoundary(batch, block) => {
+                (WorkUnit::Blocks(batch), Self::RupdBoundary(block))
+            }
+            WorkBuffer::RupdBoundary(block) => (
+                WorkUnit::Rupd(block.slot()),
+                Self::OpenBatch(WorkBatch::for_single_block(WorkBlock::new(block))),
+            ),
+            WorkBuffer::PreEwrapBoundary(batch, block) => {
+                (WorkUnit::Blocks(batch), Self::EwrapBoundary(block))
+            }
+            WorkBuffer::EwrapBoundary(block) => {
+                (WorkUnit::EWrap(block.slot()), Self::EstartBoundary(block))
+            }
+            WorkBuffer::EstartBoundary(block) => (
+                WorkUnit::EStart(block.slot()),
+                Self::OpenBatch(WorkBatch::for_single_block(WorkBlock::new(block))),
+            ),
+            _ => unreachable!(),
+        };
+
+        Some(next)
     }
 }
 
@@ -143,7 +274,7 @@ struct Cache {
 #[derive(Clone)]
 pub struct CardanoLogic {
     config: Config,
-    work: Arc<RwLock<WorkBuffer>>,
+    work: Arc<RwLock<Box<WorkBuffer>>>,
     cache: Arc<RwLock<Cache>>,
 }
 
@@ -173,7 +304,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
 
         let work = match cursor {
             Some(cursor) => WorkBuffer::new_from_cursor(cursor),
-            None => WorkBuffer::new_from_genesis(),
+            None => WorkBuffer::Empty,
         };
 
         let eras = eras::load_era_summary::<D>(state)?;
@@ -187,57 +318,50 @@ impl dolos_core::ChainLogic for CardanoLogic {
                 stability_window,
                 rewards: None,
             })),
-            work: Arc::new(RwLock::new(work)),
+            work: Arc::new(RwLock::new(Box::new(work))),
         })
     }
 
-    fn receive_block(&self, raw: RawBlock) -> Result<(), ChainError> {
-        let block = OwnedMultiEraBlock::decode(raw)?;
+    fn can_receive_block(&self) -> bool {
+        let work = self.work.read().unwrap();
+        work.can_receive_block()
+    }
 
+    fn receive_block(&self, raw: RawBlock) -> Result<BlockSlot, ChainError> {
         let mut work = self.work.write().unwrap();
 
-        let prev_slot = work.last_point_seen.slot();
+        if !work.can_receive_block() {
+            dbg!(&work);
+            return Err(ChainError::CantReceiveBlock(raw));
+        }
 
-        let next_slot = block.slot();
+        let block = OwnedMultiEraBlock::decode(raw)?;
 
         let cache = self.cache.read().unwrap();
 
-        let epoch_boundary = pallas_extras::epoch_boundary(&cache.eras, prev_slot, next_slot);
+        // Extract the WorkBuffer from the Box, apply transformation, and put it back
+        let new_work =
+            std::mem::take(&mut **work).receive_block(block, &cache.eras, cache.stability_window);
 
-        if let Some(slot) = epoch_boundary {
-            work.enqueue_ewrap(slot);
-            work.enqueue_estart(slot);
-        }
+        *work = Box::new(new_work);
 
-        let rupd_boundary =
-            pallas_extras::rupd_boundary(cache.stability_window, &cache.eras, prev_slot, next_slot);
-
-        if let Some(slot) = rupd_boundary {
-            work.enqueue_rupd(slot);
-        }
-
-        let block = WorkBlock::new(block);
-
-        work.enqueue_block(block);
-
-        Ok(())
+        Ok(work.last_point_seen().slot())
     }
 
     fn peek_work(&self) -> Option<WorkKind> {
         let work = self.work.read().unwrap();
-
-        work.pending.front().map(|work| match work {
-            WorkUnit::Block(_) => WorkKind::Block,
-            WorkUnit::EWrap(_) => WorkKind::EWrap,
-            WorkUnit::EStart(_) => WorkKind::EStart,
-            WorkUnit::Rupd(_) => WorkKind::Rupd,
-            WorkUnit::Genesis => WorkKind::Genesis,
-        })
+        work.peek_work()
     }
 
     fn pop_work(&self) -> Option<WorkUnit<Self>> {
         let mut work = self.work.write().unwrap();
-        work.pending.pop_front()
+
+        let Some((work_unit, new_buffer)) = std::mem::take(&mut **work).pop_work() else {
+            return None;
+        };
+
+        *work = Box::new(new_buffer);
+        Some(work_unit)
     }
 
     fn apply_genesis<D: Domain>(
