@@ -4,8 +4,8 @@ use dolos_core::{batch::WorkDeltas, BlockSlot, ChainError, Domain, EntityKey, Ge
 use tracing::{info, instrument};
 
 use crate::{
-    AccountState, CardanoDelta, CardanoEntity, CardanoLogic, Config, DRepState, EpochState,
-    EraProtocol, EraSummary, PoolState, Proposal,
+    hacks, AccountState, CardanoDelta, CardanoEntity, CardanoLogic, Config, DRepState, EpochState,
+    EraProtocol, EraSummary, EraTransition, PoolState, Proposal,
 };
 
 pub mod commit;
@@ -80,6 +80,13 @@ pub struct WorkContext {
     pub logs: Vec<(EntityKey, CardanoEntity)>,
 }
 
+impl std::fmt::Debug for WorkContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "WorkContext");
+        Ok(())
+    }
+}
+
 impl WorkContext {
     pub fn ended_state(&self) -> &EpochState {
         &self.ended_state
@@ -91,6 +98,17 @@ impl WorkContext {
 
     pub fn add_delta(&mut self, delta: impl Into<CardanoDelta>) {
         self.deltas.add_for_entity(delta);
+    }
+
+    pub fn define_era_transition(&self) -> Option<EraTransition> {
+        let magic = self.genesis.network_magic();
+        let epoch = self.ended_state().number;
+
+        if let Some(x) = hacks::forks::era_transition(magic, epoch) {
+            return Some(x);
+        }
+
+        self.ended_state().pparams.era_transition()
     }
 }
 
