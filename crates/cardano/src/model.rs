@@ -1118,9 +1118,11 @@ macro_rules! ensure_pparam {
     };
 }
 
+pub const SHELLEY_PROTOCOL: u16 = 2;
+
 impl PParamsSet {
     pub fn is_byron(&self) -> bool {
-        self.protocol_major_or_default() < 2
+        self.protocol_major_or_default() < SHELLEY_PROTOCOL
     }
 
     pub fn len(&self) -> usize {
@@ -1439,9 +1441,12 @@ pub struct EpochState {
     pub end: Option<EndStats>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize)]
 pub struct EraTransition {
+    #[n(0)]
     pub prev_version: EraProtocol,
+
+    #[n(1)]
     pub new_version: EraProtocol,
 }
 
@@ -1508,8 +1513,14 @@ impl DRepState {
 
 entity_boilerplate!(DRepState, "dreps");
 
-#[derive(Debug, Clone, Copy)]
-pub struct EraProtocol(u16);
+#[derive(Debug, Clone, Copy, Encode, Decode, Serialize, Deserialize)]
+pub struct EraProtocol(#[n(0)] u16);
+
+impl EraProtocol {
+    pub fn is_shelley_or_later(&self) -> bool {
+        self.0 >= 2
+    }
+}
 
 impl std::fmt::Display for EraProtocol {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
