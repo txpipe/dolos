@@ -1,8 +1,8 @@
 use dolos_core::{ChainError, Domain, EntityKey, Genesis, StateStore as _, StateWriter as _};
 
 use crate::{
-    mutable_slots, pots::Pots, EpochState, EpochValue, EraBoundary, EraSummary, Lovelace, Nonces,
-    PParamsSet, RollingStats, CURRENT_EPOCH_KEY,
+    mutable_slots, pots::Pots, EpochState, EpochValue, EraBoundary, EraSpecificState, EraSummary,
+    Lovelace, Nonces, PParamsSet, RollingStats, CURRENT_EPOCH_KEY,
 };
 
 fn get_utxo_amount(genesis: &Genesis) -> Lovelace {
@@ -19,23 +19,8 @@ fn get_utxo_amount(genesis: &Genesis) -> Lovelace {
 
 const SHELLEY_PROTOCOL: u16 = 2;
 
-fn bootstrap_pots(
-    protocol: u16,
-    pparams: &PParamsSet,
-    genesis: &Genesis,
-) -> Result<Pots, ChainError> {
+fn bootstrap_pots(pparams: &PParamsSet, genesis: &Genesis) -> Result<Pots, ChainError> {
     let utxos = get_utxo_amount(genesis);
-
-    // for any era before shelley, we don't have the concept of reserves or
-    // treasury, so we just return the initial utxos
-    if protocol < SHELLEY_PROTOCOL {
-        return Ok(Pots {
-            utxos,
-            deposit_per_pool: pparams.pool_deposit_or_default(),
-            deposit_per_account: pparams.key_deposit_or_default(),
-            ..Default::default()
-        });
-    }
 
     let max_supply = genesis
         .shelley
@@ -69,9 +54,7 @@ pub fn bootstrap_epoch<D: Domain>(
         nonces = Some(Nonces::bootstrap(genesis.shelley_hash));
     }
 
-    let protocol = pparams.protocol_major().unwrap_or_default();
-
-    let pots = bootstrap_pots(protocol, &pparams, genesis)?;
+    let pots = bootstrap_pots(&pparams, genesis)?;
 
     let pparams = EpochValue::with_genesis(pparams);
 
