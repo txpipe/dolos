@@ -5,7 +5,9 @@ use pallas::{
     crypto::hash::Hash,
     ledger::{
         primitives::Epoch,
-        traverse::{Era, MultiEraBlock, MultiEraCert, MultiEraTx, MultiEraUpdate},
+        traverse::{
+            fees::compute_byron_fee, Era, MultiEraBlock, MultiEraCert, MultiEraTx, MultiEraUpdate,
+        },
     },
 };
 use serde::{Deserialize, Serialize};
@@ -234,7 +236,10 @@ fn define_tx_fees(
     tx: &MultiEraTx,
     utxos: &HashMap<TxoRef, OwnedMultiEraOutput>,
 ) -> Result<Lovelace, ChainError> {
-    if tx.is_valid() {
+    if let Some(byron) = tx.as_byron() {
+        let fee = compute_byron_fee(byron, None);
+        Ok(fee)
+    } else if tx.is_valid() {
         Ok(tx.fee().unwrap_or_default())
     } else if let Some(collateral) = tx.total_collateral() {
         tracing::debug!(tx=%tx.hash(), collateral, "total collateral consumed");

@@ -5,8 +5,8 @@ use dolos_core::{
 use tracing::{instrument, trace, warn};
 
 use crate::{
-    AccountState, CardanoEntity, DRepState, EpochState, EraSummary, FixedNamespace, PoolState,
-    Proposal, CURRENT_EPOCH_KEY,
+    forks, AccountState, CardanoEntity, DRepState, EpochState, EraSummary, FixedNamespace,
+    PoolState, Proposal, CURRENT_EPOCH_KEY,
 };
 
 impl super::WorkContext {
@@ -17,7 +17,7 @@ impl super::WorkContext {
         writer: &W,
         state: &impl StateStore,
     ) -> Result<(), ChainError> {
-        let Some(transition) = self.ended_state.pparams.era_transition() else {
+        let Some(transition) = self.define_era_transition() else {
             return Ok(());
         };
 
@@ -39,17 +39,13 @@ impl super::WorkContext {
             &previous,
         )?;
 
-        let pparams = self
-            .ended_state
-            .pparams
-            .next()
-            .expect("next pparams should be set");
+        let consts = forks::protocol_constants(transition.new_version.into(), &self.genesis);
 
         let new = EraSummary {
             start: previous.end.clone().unwrap(),
             end: None,
-            epoch_length: pparams.ensure_epoch_length()?,
-            slot_length: pparams.ensure_slot_length()?,
+            epoch_length: consts.epoch_length as u64,
+            slot_length: consts.slot_length as u64,
             protocol: transition.new_version.into(),
         };
 

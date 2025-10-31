@@ -72,10 +72,6 @@ impl Pots {
     pub fn is_consistent(&self, expected_max_supply: Lovelace) -> bool {
         self.max_supply() == expected_max_supply
     }
-
-    pub fn assert_consistency(&self, expected_max_supply: Lovelace) {
-        assert_eq!(self.max_supply(), expected_max_supply);
-    }
 }
 
 #[derive(Debug, Clone, Encode, Decode, Serialize, Deserialize, Default)]
@@ -147,6 +143,33 @@ pub struct PotDelta {
     #[n(16)]
     #[cbor(default)]
     pub proposal_invalid_refunds: Lovelace,
+
+    #[n(17)]
+    pub account_deposit: Lovelace,
+
+    #[n(18)]
+    pub pool_deposit: Lovelace,
+
+    #[n(19)]
+    pub protocol_version: u16,
+}
+
+impl PotDelta {
+    pub fn consumed_incentives(&self) -> Lovelace {
+        if self.protocol_version < 7 {
+            return self.effective_rewards;
+        }
+
+        self.effective_rewards + self.unspendable_rewards
+    }
+
+    pub fn incentives_back_to_treasury(&self) -> Lovelace {
+        if self.protocol_version < 7 {
+            return 0;
+        }
+
+        self.unspendable_rewards
+    }
 }
 
 /// Calculate eta using the decentralisation parameter and the formula:
@@ -254,9 +277,13 @@ pub fn epoch_incentives(
 }
 
 pub fn apply_delta(mut pots: Pots, incentives: &EpochIncentives, delta: &PotDelta) -> Pots {
-    let used_rewards = delta.effective_rewards + delta.unspendable_rewards;
+    let used_rewards = delta.consumed_incentives();
 
     let returned_rewards = incentives.available_rewards - used_rewards;
+
+    // update params
+    pots.deposit_per_pool = delta.pool_deposit;
+    pots.deposit_per_account = delta.account_deposit;
 
     // reserves pot
     pots.reserves -= incentives.total;
@@ -264,7 +291,7 @@ pub fn apply_delta(mut pots: Pots, incentives: &EpochIncentives, delta: &PotDelt
 
     // treasury pot
     pots.treasury += incentives.treasury_tax;
-    pots.treasury += delta.unspendable_rewards;
+    pots.treasury += delta.incentives_back_to_treasury();
     pots.treasury += delta.pool_invalid_refund_count * pots.deposit_per_pool;
     pots.treasury += delta.proposal_invalid_refunds;
     pots.treasury += delta.treasury_donations;
@@ -339,7 +366,7 @@ mod tests {
             proposal_deposits: 0,
         };
 
-        pots.assert_consistency(MAX_SUPPLY);
+        assert!(pots.is_consistent(MAX_SUPPLY));
 
         let fee_ss = 437793;
         let rho = ratio!(3, 1000);
@@ -351,7 +378,7 @@ mod tests {
         let delta = PotDelta::default();
         let pots = apply_delta(pots, &incentives, &delta);
 
-        pots.assert_consistency(MAX_SUPPLY);
+        assert!(pots.is_consistent(MAX_SUPPLY));
 
         assert_eq!(pots.reserves, 14982005400350235);
         assert_eq!(pots.treasury, 17994600087558);
@@ -378,7 +405,7 @@ mod tests {
             proposal_deposits: 0,
         };
 
-        pots.assert_consistency(MAX_SUPPLY);
+        assert!(pots.is_consistent(MAX_SUPPLY));
 
         let fee_ss = 304233;
         let rho = ratio!(3, 1000);
@@ -395,7 +422,7 @@ mod tests {
 
         let pots = apply_delta(pots, &incentives, &delta);
 
-        pots.assert_consistency(MAX_SUPPLY);
+        assert!(pots.is_consistent(MAX_SUPPLY));
 
         assert_eq!(pots.reserves, 14954804628961481);
         assert_eq!(pots.treasury, 45195372193123);

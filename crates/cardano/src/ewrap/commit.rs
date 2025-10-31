@@ -1,12 +1,12 @@
 use dolos_core::{
-    ArchiveStore, ArchiveWriter, BrokenInvariant, ChainError, ChainPoint, Domain, Entity,
-    EntityDelta as _, EntityKey, LogKey, NsKey, StateStore, StateWriter, TemporalKey,
+    ArchiveStore, ArchiveWriter, ChainError, ChainPoint, Domain, Entity, EntityDelta as _, LogKey,
+    NsKey, StateStore, StateWriter, TemporalKey,
 };
 use tracing::{instrument, trace, warn};
 
 use crate::{
-    ewrap::BoundaryWork, AccountState, CardanoEntity, DRepState, EpochState, EraSummary,
-    FixedNamespace, PoolState, Proposal, CURRENT_EPOCH_KEY,
+    ewrap::BoundaryWork, AccountState, CardanoEntity, DRepState, EpochState, FixedNamespace,
+    PoolState, Proposal,
 };
 
 impl BoundaryWork {

@@ -36,6 +36,37 @@ pub mod pointers {
     }
 }
 
+pub mod forks {
+    use crate::{EraProtocol, EraTransition};
+    use pallas::ledger::primitives::Epoch;
+    use pallas::network::miniprotocols::PREPROD_MAGIC;
+
+    mod preprod {
+        use super::*;
+
+        pub fn era_transition(epoch: Epoch) -> Option<EraTransition> {
+            match epoch {
+                2 => Some(EraTransition {
+                    prev_version: EraProtocol::from(0),
+                    new_version: EraProtocol::from(1),
+                }),
+                3 => Some(EraTransition {
+                    prev_version: EraProtocol::from(1),
+                    new_version: EraProtocol::from(2),
+                }),
+                _ => None,
+            }
+        }
+    }
+
+    pub fn era_transition(magic: u32, epoch: Epoch) -> Option<EraTransition> {
+        match magic as u64 {
+            PREPROD_MAGIC => preprod::era_transition(epoch),
+            _ => None,
+        }
+    }
+}
+
 pub mod proposals {
     use pallas::ledger::primitives::Epoch;
 
