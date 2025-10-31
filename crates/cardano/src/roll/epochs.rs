@@ -238,7 +238,6 @@ fn define_tx_fees(
 ) -> Result<Lovelace, ChainError> {
     if let Some(byron) = tx.as_byron() {
         let fee = compute_byron_fee(byron, None);
-        tracing::warn!(tx=%tx.hash(), fee, "byron fee computed");
         Ok(fee)
     } else if tx.is_valid() {
         Ok(tx.fee().unwrap_or_default())

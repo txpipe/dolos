@@ -80,13 +80,6 @@ pub struct WorkContext {
     pub logs: Vec<(EntityKey, CardanoEntity)>,
 }
 
-impl std::fmt::Debug for WorkContext {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "WorkContext");
-        Ok(())
-    }
-}
-
 impl WorkContext {
     pub fn ended_state(&self) -> &EpochState {
         &self.ended_state
