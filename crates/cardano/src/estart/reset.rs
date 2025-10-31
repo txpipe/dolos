@@ -1,11 +1,14 @@
-use dolos_core::{ChainError, NsKey};
+use std::sync::Arc;
+
+use dolos_core::{ChainError, Genesis, NsKey};
 use pallas::ledger::primitives::Epoch;
 use serde::{Deserialize, Serialize};
 
 use crate::{
     estart::{AccountId, PoolId, WorkContext},
     pots::{apply_delta, PotDelta, Pots},
-    AccountState, CardanoDelta, EpochState, FixedNamespace as _, PoolState, CURRENT_EPOCH_KEY,
+    AccountState, CardanoDelta, EpochState, EraTransition, FixedNamespace as _, PoolState,
+    CURRENT_EPOCH_KEY,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,10 +80,21 @@ impl dolos_core::EntityDelta for PoolTransition {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct EpochTransition {
     new_epoch: Epoch,
     new_pots: Pots,
+    era_transition: Option<EraTransition>,
+
+    #[serde(skip)]
+    genesis: Option<Arc<Genesis>>,
+}
+
+impl std::fmt::Debug for EpochTransition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "EpochTransition")?;
+        Ok(())
+    }
 }
 
 impl dolos_core::EntityDelta for EpochTransition {
@@ -93,10 +107,26 @@ impl dolos_core::EntityDelta for EpochTransition {
     fn apply(&mut self, entity: &mut Option<Self::Entity>) {
         let entity = entity.as_mut().expect("existing epoch");
 
+        debug_assert!(self
+            .new_pots
+            .is_consistent(entity.initial_pots.max_supply()));
+
         entity.number = self.new_epoch;
         entity.initial_pots = self.new_pots.clone();
         entity.rolling.default_transition(self.new_epoch);
         entity.pparams.default_transition(self.new_epoch);
+
+        // if we have an era transition, we need to migrate the pparams
+        if let Some(transition) = &self.era_transition {
+            let current = entity.pparams.unwrap_live_mut();
+
+            *current = crate::forks::migrate_pparams_version(
+                transition.prev_version.into(),
+                transition.new_version.into(),
+                &current,
+                self.genesis.as_ref().expect("genesis not set"),
+            );
+        }
     }
 
     fn undo(&self, _entity: &mut Option<Self::Entity>) {
@@ -143,6 +173,24 @@ pub fn define_new_pots(ctx: &super::WorkContext) -> Pots {
 
     let pots = apply_delta(epoch.initial_pots.clone(), &end.epoch_incentives, &delta);
 
+    tracing::info!(
+        rewards = pots.rewards,
+        reserves = pots.reserves,
+        treasury = pots.treasury,
+        fees = pots.fees,
+        utxos = pots.utxos,
+        "pots after reset"
+    );
+
+    if !pots.is_consistent(epoch.initial_pots.max_supply()) {
+        dbg!(end);
+        dbg!(&epoch.initial_pots);
+        dbg!(&pots);
+        dbg!(delta);
+    }
+
+    debug_assert!(pots.is_consistent(epoch.initial_pots.max_supply()));
+
     pots
 }
 
@@ -188,6 +236,8 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         ctx.deltas.add_for_entity(EpochTransition {
             new_epoch: ctx.starting_epoch_no(),
             new_pots: define_new_pots(ctx),
+            era_transition: ctx.define_era_transition(),
+            genesis: Some(ctx.genesis.clone()),
         });
 
         Ok(())

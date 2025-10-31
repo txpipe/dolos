@@ -1,6 +1,6 @@
 use crate::{
-    AccountState, CardanoDelta, EndStats, EpochState, FixedNamespace as _, PParamsSet, PoolHash,
-    PoolState, CURRENT_EPOCH_KEY,
+    hacks, AccountState, CardanoDelta, EndStats, EpochState, FixedNamespace as _, PParamsSet,
+    PoolHash, PoolState, CURRENT_EPOCH_KEY,
 };
 use dolos_core::{ChainError, NsKey};
 use serde::{Deserialize, Serialize};
@@ -40,7 +40,6 @@ impl dolos_core::EntityDelta for PoolWrapUp {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EpochWrapUp {
     stats: EndStats,
-    migration: Option<PParamsSet>,
 }
 
 impl dolos_core::EntityDelta for EpochWrapUp {
@@ -54,13 +53,7 @@ impl dolos_core::EntityDelta for EpochWrapUp {
         let entity = entity.as_mut().expect("existing epoch");
 
         entity.rolling.scheduled_or_default();
-
-        if let Some(migration) = &self.migration {
-            entity.pparams.schedule_unchecked(Some(migration.clone()));
-        } else {
-            entity.pparams.scheduled_or_default();
-        }
-
+        entity.pparams.scheduled_or_default();
         entity.end = Some(self.stats.clone());
     }
 
@@ -69,19 +62,6 @@ impl dolos_core::EntityDelta for EpochWrapUp {
 
         entity.end = None;
     }
-}
-
-fn define_pparams_migration(ctx: &super::BoundaryWork) -> Option<PParamsSet> {
-    let transition = ctx.ending_state().pparams.era_transition()?;
-
-    let migrated = crate::forks::migrate_pparams_version(
-        transition.prev_version.into(),
-        transition.new_version.into(),
-        ctx.ending_state().pparams.next().unwrap(),
-        &ctx.genesis,
-    );
-
-    Some(migrated)
 }
 
 #[derive(Default)]
@@ -192,9 +172,8 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         }
 
         let stats = define_end_stats(ctx);
-        let migration = define_pparams_migration(ctx);
 
-        ctx.deltas.add_for_entity(EpochWrapUp { stats, migration });
+        ctx.deltas.add_for_entity(EpochWrapUp { stats });
 
         Ok(())
     }
