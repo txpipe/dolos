@@ -457,7 +457,7 @@ mod tests {
         let ctx = MockContext::from_json_file(test_data.to_str().unwrap())
             .expect("Failed to load mock context");
 
-        ctx.pots().assert_consistency(MAX_SUPPLY);
+        assert!(ctx.pots().is_consistent(MAX_SUPPLY));
 
         let mut reward_map = define_rewards(&ctx).unwrap();
 

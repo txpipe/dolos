@@ -90,7 +90,6 @@ pub struct Config {
     pub stop_epoch: Option<Epoch>,
 }
 
-#[derive(Debug)]
 enum WorkBuffer {
     Empty,
     Restart(ChainPoint),
@@ -331,7 +330,6 @@ impl dolos_core::ChainLogic for CardanoLogic {
         let mut work = self.work.write().unwrap();
 
         if !work.can_receive_block() {
-            dbg!(&work);
             return Err(ChainError::CantReceiveBlock(raw));
         }
 
