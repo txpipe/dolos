@@ -134,6 +134,7 @@ pub fn from_shelley_genesis(shelley: &shelley::GenesisFile) -> PParamsSet {
 pub fn into_alonzo(previous: &PParamsSet, genesis: &alonzo::GenesisFile) -> PParamsSet {
     let set = previous
         .clone()
+        .with(Val::ProtocolVersion((5, 0)))
         .with(Val::AdaPerUtxoByte(genesis.lovelace_per_utxo_word))
         .with(Val::ExecutionCosts(genesis.execution_prices.clone().into()))
         .with(Val::MaxTxExUnits(from_config_exunits(
@@ -155,7 +156,7 @@ pub fn into_alonzo(previous: &PParamsSet, genesis: &alonzo::GenesisFile) -> PPar
 }
 
 pub fn into_babbage(previous: &PParamsSet, genesis: &alonzo::GenesisFile) -> PParamsSet {
-    let set = previous.clone();
+    let set = previous.clone().with(Val::ProtocolVersion((7, 0)));
 
     if let Some(v2) = from_alonzo_cost_models_map(&genesis.cost_models, &alonzo::Language::PlutusV2)
     {
@@ -173,6 +174,7 @@ pub fn into_conway(previous: &PParamsSet, genesis: &conway::GenesisFile) -> PPar
 
     previous
         .clone()
+        .with(Val::ProtocolVersion((9, 0)))
         .with(Val::AdaPerUtxoByte(ada_per_utxo_byte))
         .with(Val::CostModelsPlutusV3(
             genesis.plutus_v3_cost_model.clone(),
@@ -258,4 +260,27 @@ pub fn force_pparams_version(
     }
 
     Ok(pparams)
+}
+
+pub struct ProtocolConstants {
+    pub epoch_length: u64,
+    pub slot_length: u64,
+}
+
+pub fn protocol_constants(version: u16, genesis: &Genesis) -> ProtocolConstants {
+    match version {
+        x if x < 2 => {
+            let slot_length_in_secs = genesis.byron.block_version_data.slot_duration / 1000;
+            let epoch_length = FIVE_DAYS_IN_SECONDS / slot_length_in_secs;
+
+            ProtocolConstants {
+                epoch_length: epoch_length,
+                slot_length: slot_length_in_secs,
+            }
+        }
+        _ => ProtocolConstants {
+            epoch_length: genesis.shelley.epoch_length.unwrap_or_default() as u64,
+            slot_length: genesis.shelley.slot_length.unwrap_or_default() as u64,
+        },
+    }
 }
