@@ -11,6 +11,7 @@ use pallas::{
     },
 };
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 
 use crate::{
     model::{EpochState, FixedNamespace as _},

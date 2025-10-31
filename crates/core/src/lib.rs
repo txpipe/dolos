@@ -411,6 +411,10 @@ pub struct Genesis {
 }
 
 impl Genesis {
+    pub fn network_magic(&self) -> u32 {
+        self.shelley.network_magic.unwrap_or_default()
+    }
+
     pub fn from_file_paths(
         byron: impl AsRef<Path>,
         shelley: impl AsRef<Path>,

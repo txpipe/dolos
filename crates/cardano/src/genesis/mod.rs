@@ -1,8 +1,8 @@
 use dolos_core::{ChainError, Domain, EntityKey, Genesis, StateStore as _, StateWriter as _};
 
 use crate::{
-    mutable_slots, pots::Pots, EpochState, EpochValue, EraBoundary, EraSpecificState, EraSummary,
-    Lovelace, Nonces, PParamsSet, RollingStats, CURRENT_EPOCH_KEY,
+    mutable_slots, pots::Pots, EpochState, EpochValue, EraBoundary, EraSummary, Lovelace, Nonces,
+    PParamsSet, RollingStats, CURRENT_EPOCH_KEY,
 };
 
 fn get_utxo_amount(genesis: &Genesis) -> Lovelace {
