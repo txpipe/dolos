@@ -8,7 +8,7 @@ use crate::{
     hacks, load_active_era, pallas_extras,
     rewards::RewardMap,
     rupd::RupdWork,
-    AccountState, DRepState, FixedNamespace as _, PoolState, Proposal,
+    AccountState, DRepState, FixedNamespace as _, PoolState, ProposalState,
 };
 
 impl BoundaryWork {
@@ -89,28 +89,32 @@ impl BoundaryWork {
         Ok(())
     }
 
-    fn should_expire_proposal(&self, proposal: &Proposal) -> Result<bool, ChainError> {
-        // Skip proposals already in a terminal state
-        if proposal.expired_epoch.is_some() || proposal.enacted_epoch.is_some() {
+    fn should_expire_proposal(&self, proposal: &ProposalState) -> Result<bool, ChainError> {
+        let pparams = self.ending_state().pparams.unwrap_live();
+
+        let Some(validity) = pparams.governance_action_validity_period() else {
             return Ok(false);
-        }
+        };
 
         let (epoch, _) = self.active_era.slot_epoch(proposal.slot);
 
-        let pparams = self.ending_state().pparams.unwrap_live();
-
-        let expiring_epoch = epoch + pparams.ensure_governance_action_validity_period()?;
+        let expiring_epoch = epoch + validity;
 
         Ok(expiring_epoch < self.ending_state.number)
     }
 
-    fn should_enact_proposal(&self, proposal: &Proposal) -> bool {
+    fn should_enact_proposal(&self, proposal: &ProposalState) -> bool {
         let Some(magic) = self.genesis.shelley.network_magic else {
             return false;
         };
 
-        let epoch =
-            hacks::proposals::enactment_epoch_by_proposal_id(magic, &proposal.id_as_string());
+        let starting_epoch = self.starting_epoch_no();
+
+        let epoch = hacks::proposals::enactment_epoch_by_proposal_id(
+            magic,
+            &proposal.id_as_string(),
+            starting_epoch,
+        );
 
         let Some(epoch) = epoch else {
             return false;
@@ -119,7 +123,7 @@ impl BoundaryWork {
         epoch == self.starting_epoch_no()
     }
 
-    fn should_drop_proposal(&self, proposal: &Proposal) -> bool {
+    fn should_drop_proposal(&self, proposal: &ProposalState) -> bool {
         let Some(magic) = self.genesis.shelley.network_magic else {
             return false;
         };
@@ -136,12 +140,11 @@ impl BoundaryWork {
     fn load_proposal_reward_account<D: Domain>(
         &self,
         state: &D::State,
-        proposal: &Proposal,
+        proposal: &ProposalState,
     ) -> Result<Option<AccountState>, ChainError> {
-        let account = &proposal.proposal.reward_account;
-
-        let account = pallas_extras::parse_reward_account(account)
-            .ok_or(ChainError::InvalidProposalParams)?;
+        let Some(account) = proposal.reward_account.as_ref() else {
+            return Ok(None);
+        };
 
         let entity_key = minicbor::to_vec(account).unwrap();
 
@@ -151,10 +154,15 @@ impl BoundaryWork {
     }
 
     fn load_proposal_data<D: Domain>(&mut self, state: &D::State) -> Result<(), ChainError> {
-        let proposals = state.iter_entities_typed::<Proposal>(Proposal::NS, None)?;
+        let proposals = state.iter_entities_typed::<ProposalState>(ProposalState::NS, None)?;
 
         for record in proposals {
             let (id, proposal) = record?;
+
+            // Skip proposals already processe
+            if proposal.expired_epoch.is_some() || proposal.enacted_epoch.is_some() {
+                continue;
+            }
 
             if self.should_enact_proposal(&proposal) {
                 let account = self.load_proposal_reward_account::<D>(state, &proposal)?;
@@ -223,7 +231,7 @@ impl BoundaryWork {
             visitor_wrapup.visit_account(self, &account_id, &account)?;
         }
 
-        let proposals = state.iter_entities_typed::<Proposal>(Proposal::NS, None)?;
+        let proposals = state.iter_entities_typed::<ProposalState>(ProposalState::NS, None)?;
 
         for proposal in proposals {
             let (proposal_id, proposal) = proposal?;

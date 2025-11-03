@@ -236,7 +236,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         ctx.deltas.add_for_entity(EpochTransition {
             new_epoch: ctx.starting_epoch_no(),
             new_pots: define_new_pots(ctx),
-            era_transition: ctx.define_era_transition(),
+            era_transition: ctx.ended_state().pparams.era_transition(),
             genesis: Some(ctx.genesis.clone()),
         });
 

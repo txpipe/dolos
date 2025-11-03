@@ -6,7 +6,7 @@ use tracing::{instrument, trace, warn};
 
 use crate::{
     forks, AccountState, CardanoEntity, DRepState, EpochState, EraSummary, FixedNamespace,
-    PoolState, Proposal, CURRENT_EPOCH_KEY,
+    PoolState, ProposalState,
 };
 
 impl super::WorkContext {
@@ -17,7 +17,7 @@ impl super::WorkContext {
         writer: &W,
         state: &impl StateStore,
     ) -> Result<(), ChainError> {
-        let Some(transition) = self.define_era_transition() else {
+        let Some(transition) = self.ended_state().pparams.era_transition() else {
             return Ok(());
         };
 
@@ -117,7 +117,7 @@ impl super::WorkContext {
         self.apply_whole_namespace::<D, AccountState>(state, &writer)?;
         self.apply_whole_namespace::<D, PoolState>(state, &writer)?;
         self.apply_whole_namespace::<D, DRepState>(state, &writer)?;
-        self.apply_whole_namespace::<D, Proposal>(state, &writer)?;
+        self.apply_whole_namespace::<D, ProposalState>(state, &writer)?;
         self.apply_whole_namespace::<D, EpochState>(state, &writer)?;
 
         debug_assert!(self.deltas.entities.is_empty());

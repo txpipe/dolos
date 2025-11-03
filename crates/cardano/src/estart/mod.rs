@@ -5,7 +5,7 @@ use tracing::{info, instrument};
 
 use crate::{
     hacks, AccountState, CardanoDelta, CardanoEntity, CardanoLogic, Config, DRepState, EpochState,
-    EraProtocol, EraSummary, EraTransition, PoolState, Proposal,
+    EraProtocol, EraSummary, EraTransition, PoolState, ProposalState,
 };
 
 pub mod commit;
@@ -51,7 +51,7 @@ pub trait BoundaryVisitor {
         &mut self,
         ctx: &mut WorkContext,
         id: &ProposalId,
-        proposal: &Proposal,
+        proposal: &ProposalState,
     ) -> Result<(), ChainError> {
         Ok(())
     }
@@ -91,17 +91,6 @@ impl WorkContext {
 
     pub fn add_delta(&mut self, delta: impl Into<CardanoDelta>) {
         self.deltas.add_for_entity(delta);
-    }
-
-    pub fn define_era_transition(&self) -> Option<EraTransition> {
-        let magic = self.genesis.network_magic();
-        let epoch = self.ended_state().number;
-
-        if let Some(x) = hacks::forks::era_transition(magic, epoch) {
-            return Some(x);
-        }
-
-        self.ended_state().pparams.era_transition()
     }
 }
 

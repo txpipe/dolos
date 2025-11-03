@@ -13,7 +13,7 @@ use pallas::{
         nonce::{generate_epoch_nonce, generate_rolling_nonce},
     },
     ledger::primitives::{
-        conway::{CostModels, DRep, DRepVotingThresholds, PoolVotingThresholds, ProposalProcedure},
+        conway::{CostModels, DRep, DRepVotingThresholds, PoolVotingThresholds},
         Coin, Epoch, ExUnitPrices, ExUnits, Nonce, PoolMetadata, ProtocolVersion, RationalNumber,
         Relay, StakeCredential, UnitInterval,
     },
@@ -26,7 +26,7 @@ use crate::{
         reset::{AccountTransition, EpochTransition, PoolTransition},
     },
     ewrap::{
-        enactment::ProposalEnactment,
+        enactment::{PParamsUpdate, ProposalEnactment, TreasuryWithdrawal},
         retires::{
             DRepDelegatorDrop, DRepExpiration, PoolDelegatorDrop, PoolDepositRefund,
             ProposalDepositRefund, ProposalExpiration,
@@ -46,7 +46,7 @@ use crate::{
         },
         assets::MintStatsUpdate,
         dreps::{DRepActivity, DRepRegistration, DRepUnRegistration},
-        epochs::{EpochStatsUpdate, NoncesUpdate, PParamsUpdate},
+        epochs::{EpochStatsUpdate, NoncesUpdate},
         pools::{MintedBlocksInc, PoolDeRegistration, PoolRegistration},
         proposals::NewProposal,
     },
@@ -448,7 +448,6 @@ pub struct Stake {
     pub withdrawals_sum: Lovelace,
 
     #[n(3)]
-    #[cbor(default)]
     pub utxo_sum_at_pointer_addresses: Lovelace,
 }
 
@@ -711,18 +710,34 @@ impl PoolState {
 }
 
 #[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize)]
-pub struct Proposal {
+pub enum ProposalAction {
+    #[n(0)]
+    ParamChange(#[n(0)] PParamsSet),
+
+    #[n(1)]
+    HardFork(#[n(0)] ProtocolVersion),
+
+    #[n(2)]
+    TreasuryWithdrawal(#[n(0)] Vec<(StakeCredential, Coin)>),
+
+    /// Used to track any other proposal that isn't relevant for Dolos' purposes.
+    #[n(3)]
+    Other,
+}
+
+#[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize)]
+pub struct ProposalState {
     #[n(0)]
     pub slot: BlockSlot,
 
     #[n(1)]
-    pub transaction: Hash<32>,
+    pub tx: Hash<32>,
 
     #[n(2)]
     pub idx: u32,
 
     #[n(3)]
-    pub proposal: ProposalProcedure,
+    pub action: ProposalAction,
 
     #[n(4)]
     pub ratified_epoch: Option<Epoch>,
@@ -735,40 +750,28 @@ pub struct Proposal {
 
     #[n(7)]
     pub expired_epoch: Option<Epoch>,
+
+    #[n(8)]
+    pub deposit: Option<Lovelace>,
+
+    #[n(9)]
+    pub reward_account: Option<StakeCredential>,
 }
 
-entity_boilerplate!(Proposal, "proposals");
+entity_boilerplate!(ProposalState, "proposals");
 
-impl Proposal {
-    pub fn new(
-        slot: BlockSlot,
-        transaction: Hash<32>,
-        idx: u32,
-        proposal: ProposalProcedure,
-    ) -> Self {
-        Self {
-            slot,
-            transaction,
-            idx,
-            proposal,
-            ratified_epoch: None,
-            enacted_epoch: None,
-            dropped_epoch: None,
-            expired_epoch: None,
-        }
-    }
-
+impl ProposalState {
     pub fn key(&self) -> EntityKey {
-        Self::build_entity_key(self.transaction, self.idx)
+        Self::build_entity_key(self.tx, self.idx)
     }
 
     /// Get ID of the proposal in its string form, as found on explorers.
     pub fn id_as_string(&self) -> String {
-        format!("{}#{}", hex::encode(self.transaction), self.idx)
+        format!("{}#{}", hex::encode(self.tx), self.idx)
     }
 
-    pub fn build_entity_key(transaction: Hash<32>, idx: u32) -> EntityKey {
-        EntityKey::from([idx.to_be_bytes().as_slice(), transaction.as_slice()].concat())
+    pub fn build_entity_key(tx: Hash<32>, idx: u32) -> EntityKey {
+        EntityKey::from([idx.to_be_bytes().as_slice(), tx.as_slice()].concat())
     }
 }
 
@@ -1607,7 +1610,7 @@ pub enum CardanoEntity {
     PoolState(PoolState),
     EpochState(EpochState),
     DRepState(DRepState),
-    Proposal(Proposal),
+    ProposalState(ProposalState),
     RewardLog(RewardLog),
     StakeLog(StakeLog),
 }
@@ -1637,7 +1640,7 @@ variant_boilerplate!(AssetState);
 variant_boilerplate!(PoolState);
 variant_boilerplate!(EpochState);
 variant_boilerplate!(DRepState);
-variant_boilerplate!(Proposal);
+variant_boilerplate!(ProposalState);
 variant_boilerplate!(RewardLog);
 variant_boilerplate!(StakeLog);
 
@@ -1650,7 +1653,7 @@ impl dolos_core::Entity for CardanoEntity {
             PoolState::NS => PoolState::decode_entity(ns, value).map(Into::into),
             EpochState::NS => EpochState::decode_entity(ns, value).map(Into::into),
             DRepState::NS => DRepState::decode_entity(ns, value).map(Into::into),
-            Proposal::NS => Proposal::decode_entity(ns, value).map(Into::into),
+            ProposalState::NS => ProposalState::decode_entity(ns, value).map(Into::into),
             RewardLog::NS => RewardLog::decode_entity(ns, value).map(Into::into),
             StakeLog::NS => StakeLog::decode_entity(ns, value).map(Into::into),
             _ => Err(ChainError::InvalidNamespace(ns)),
@@ -1683,8 +1686,8 @@ impl dolos_core::Entity for CardanoEntity {
                 let (ns, enc) = DRepState::encode_entity(x);
                 (ns, enc)
             }
-            Self::Proposal(x) => {
-                let (ns, enc) = Proposal::encode_entity(x);
+            Self::ProposalState(x) => {
+                let (ns, enc) = ProposalState::encode_entity(x);
                 (ns, enc)
             }
             Self::RewardLog(x) => {
@@ -1707,7 +1710,7 @@ pub fn build_schema() -> StateSchema {
     schema.insert(PoolState::NS, NamespaceType::KeyValue);
     schema.insert(EpochState::NS, NamespaceType::KeyValue);
     schema.insert(DRepState::NS, NamespaceType::KeyValue);
-    schema.insert(Proposal::NS, NamespaceType::KeyValue);
+    schema.insert(ProposalState::NS, NamespaceType::KeyValue);
     schema.insert(RewardLog::NS, NamespaceType::KeyValue);
     schema.insert(StakeLog::NS, NamespaceType::KeyValue);
     schema
@@ -1748,6 +1751,7 @@ pub enum CardanoDelta {
     DRepDelegatorDrop(DRepDelegatorDrop),
     PoolWrapUp(PoolWrapUp),
     ProposalDepositRefund(ProposalDepositRefund),
+    TreasuryWithdrawal(TreasuryWithdrawal),
 }
 
 impl CardanoDelta {
@@ -1816,6 +1820,7 @@ delta_from!(EpochWrapUp);
 delta_from!(DRepDelegatorDrop);
 delta_from!(PoolWrapUp);
 delta_from!(ProposalDepositRefund);
+delta_from!(TreasuryWithdrawal);
 
 impl dolos_core::EntityDelta for CardanoDelta {
     type Entity = super::model::CardanoEntity;
@@ -1854,6 +1859,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::DRepDelegatorDrop(x) => x.key(),
             Self::PoolWrapUp(x) => x.key(),
             Self::ProposalDepositRefund(x) => x.key(),
+            Self::TreasuryWithdrawal(x) => x.key(),
         }
     }
 
@@ -1891,6 +1897,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::DRepDelegatorDrop(x) => Self::downcast_apply(x, entity),
             Self::PoolWrapUp(x) => Self::downcast_apply(x, entity),
             Self::ProposalDepositRefund(x) => Self::downcast_apply(x, entity),
+            Self::TreasuryWithdrawal(x) => Self::downcast_apply(x, entity),
         }
     }
 
@@ -1928,6 +1935,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::DRepDelegatorDrop(x) => Self::downcast_undo(x, entity),
             Self::PoolWrapUp(x) => Self::downcast_undo(x, entity),
             Self::ProposalDepositRefund(x) => Self::downcast_undo(x, entity),
+            Self::TreasuryWithdrawal(x) => Self::downcast_undo(x, entity),
         }
     }
 }

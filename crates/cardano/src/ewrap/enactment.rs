@@ -1,14 +1,12 @@
 use dolos_core::{ChainError, EntityKey, NsKey};
-use pallas::ledger::primitives::{
-    conway::{GovAction, ProtocolParamUpdate},
-    ExUnitPrices, RationalNumber,
-};
+use pallas::{codec::minicbor, ledger::primitives::StakeCredential};
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use crate::{
     ewrap::{BoundaryWork, ProposalId},
-    AccountState, CardanoDelta, CardanoEntity, FixedNamespace as _, PParamValue, Proposal,
+    AccountState, CardanoDelta, CardanoEntity, EpochState, FixedNamespace as _, PParamValue,
+    PParamsSet, ProposalAction, ProposalState, CURRENT_EPOCH_KEY,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,13 +22,13 @@ impl ProposalEnactment {
 }
 
 impl dolos_core::EntityDelta for ProposalEnactment {
-    type Entity = Proposal;
+    type Entity = ProposalState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((Proposal::NS, self.id.clone()))
+        NsKey::from((ProposalState::NS, self.id.clone()))
     }
 
-    fn apply(&mut self, entity: &mut Option<Proposal>) {
+    fn apply(&mut self, entity: &mut Option<ProposalState>) {
         let Some(proposal) = entity else {
             return;
         };
@@ -40,7 +38,7 @@ impl dolos_core::EntityDelta for ProposalEnactment {
         proposal.ratified_epoch = Some(self.epoch - 1);
     }
 
-    fn undo(&self, entity: &mut Option<Proposal>) {
+    fn undo(&self, entity: &mut Option<ProposalState>) {
         let Some(entity) = entity else {
             return;
         };
@@ -51,7 +49,78 @@ impl dolos_core::EntityDelta for ProposalEnactment {
     }
 }
 
-pub type PParamsUpdate = crate::roll::epochs::PParamsUpdate;
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PParamsUpdate {
+    to_update: PParamsSet,
+}
+
+impl PParamsUpdate {
+    pub fn new(to_update: PParamsSet) -> Self {
+        Self { to_update }
+    }
+}
+
+impl dolos_core::EntityDelta for PParamsUpdate {
+    type Entity = EpochState;
+
+    fn key(&self) -> NsKey {
+        NsKey::from((EpochState::NS, CURRENT_EPOCH_KEY))
+    }
+
+    fn apply(&mut self, entity: &mut Option<EpochState>) {
+        let entity = entity.as_mut().expect("epoch state missing");
+
+        debug!(value = ?self.to_update, "applying pparam update");
+
+        let next = entity.pparams.scheduled_or_default();
+
+        next.merge(self.to_update.clone());
+    }
+
+    fn undo(&self, _entity: &mut Option<EpochState>) {
+        // todo!()
+        // Placeholder undo logic. Ensure this does not panic.
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TreasuryWithdrawal {
+    account: StakeCredential,
+    amount: u64,
+}
+
+impl TreasuryWithdrawal {
+    pub fn new(account: StakeCredential, amount: u64) -> Self {
+        Self { account, amount }
+    }
+}
+
+impl dolos_core::EntityDelta for TreasuryWithdrawal {
+    type Entity = AccountState;
+
+    fn key(&self) -> NsKey {
+        let enc = minicbor::to_vec(&self.account).unwrap();
+        NsKey::from((AccountState::NS, enc))
+    }
+
+    fn apply(&mut self, entity: &mut Option<Self::Entity>) {
+        let entity = entity.as_mut().expect("existing account");
+
+        debug!(account=?self.account, amount=%self.amount, "applying treasury withdrawal");
+
+        let stake = entity.stake.unwrap_live_mut();
+        stake.rewards_sum += self.amount;
+    }
+
+    fn undo(&self, entity: &mut Option<Self::Entity>) {
+        let entity = entity.as_mut().expect("existing account");
+
+        debug!(account=?self.account, amount=%self.amount, "undoing treasury withdrawal");
+
+        let stake = entity.stake.unwrap_live_mut();
+        stake.rewards_sum -= self.amount;
+    }
+}
 
 #[derive(Default)]
 pub struct BoundaryVisitor {
@@ -59,124 +128,9 @@ pub struct BoundaryVisitor {
     logs: Vec<(EntityKey, CardanoEntity)>,
 }
 
-macro_rules! pparams_update {
-    ($update:expr, $getter:ident, $self:expr, $variant:ident) => {
-        let value = $update.$getter.clone();
-        if let Some(value) = value {
-            let value = value.try_into().expect("pparam value doesn't fit");
-            $self.change(PParamsUpdate::new(PParamValue::$variant(value)));
-        }
-    };
-}
-
-macro_rules! check_all_updates {
-    ($update:expr, $self:expr, $($getter:ident => $variant:ident),*) => {
-        $(
-            pparams_update!($update, $getter, $self, $variant);
-        )*
-    };
-}
-
 impl BoundaryVisitor {
     fn change(&mut self, delta: impl Into<CardanoDelta>) {
         self.deltas.push(delta.into());
-    }
-
-    fn visit_param_change(&mut self, update: &ProtocolParamUpdate) -> Result<(), ChainError> {
-        check_all_updates! {
-            update,
-            self,
-
-            minfee_a => MinFeeA,
-            minfee_b => MinFeeB,
-            max_block_body_size => MaxBlockBodySize,
-            max_transaction_size => MaxTransactionSize,
-            max_block_header_size => MaxBlockHeaderSize,
-            key_deposit => KeyDeposit,
-            pool_deposit => PoolDeposit,
-            desired_number_of_stake_pools => DesiredNumberOfStakePools,
-            ada_per_utxo_byte => MinUtxoValue,
-            min_pool_cost => MinPoolCost,
-            expansion_rate => ExpansionRate,
-            treasury_growth_rate => TreasuryGrowthRate,
-            maximum_epoch => MaximumEpoch,
-            pool_pledge_influence => PoolPledgeInfluence,
-            ada_per_utxo_byte => AdaPerUtxoByte,
-            max_value_size => MaxValueSize,
-            collateral_percentage => CollateralPercentage,
-            max_collateral_inputs => MaxCollateralInputs,
-            pool_voting_thresholds => PoolVotingThresholds,
-            drep_voting_thresholds => DrepVotingThresholds,
-            min_committee_size => MinCommitteeSize,
-            committee_term_limit => CommitteeTermLimit,
-            governance_action_validity_period => GovernanceActionValidityPeriod,
-            governance_action_deposit => GovernanceActionDeposit,
-            drep_deposit => DrepDeposit,
-            drep_inactivity_period => DrepInactivityPeriod
-        };
-
-        // TODO: these are special cases where we don't have automatic type mappings. We
-        // should fix this at the Pallas level.
-
-        if let Some(updated) = update.max_tx_ex_units {
-            let value = PParamValue::MaxTxExUnits(pallas::ledger::primitives::ExUnits {
-                mem: updated.mem,
-                steps: updated.steps,
-            });
-
-            self.change(PParamsUpdate::new(value));
-        }
-
-        if let Some(updated) = update.max_block_ex_units {
-            let value = PParamValue::MaxBlockExUnits(pallas::ledger::primitives::ExUnits {
-                mem: updated.mem,
-                steps: updated.steps,
-            });
-
-            self.change(PParamsUpdate::new(value));
-        }
-
-        if let Some(updated) = update.minfee_refscript_cost_per_byte.as_ref() {
-            let value = PParamValue::MinFeeRefScriptCostPerByte(RationalNumber {
-                numerator: updated.numerator,
-                denominator: updated.denominator,
-            });
-
-            self.change(PParamsUpdate::new(value));
-        }
-
-        if let Some(updated) = update.execution_costs.as_ref() {
-            let value = PParamValue::ExecutionCosts(ExUnitPrices {
-                mem_price: updated.mem_price.clone(),
-                step_price: updated.step_price.clone(),
-            });
-
-            self.change(PParamsUpdate::new(value));
-        }
-
-        if let Some(updated) = update.cost_models_for_script_languages.as_ref() {
-            if let Some(v1) = updated.plutus_v1.as_ref() {
-                let value = PParamValue::CostModelsPlutusV1(v1.clone());
-                self.change(PParamsUpdate::new(value));
-            }
-
-            if let Some(v2) = updated.plutus_v2.as_ref() {
-                let value = PParamValue::CostModelsPlutusV2(v2.clone());
-                self.change(PParamsUpdate::new(value));
-            }
-
-            if let Some(v3) = updated.plutus_v3.as_ref() {
-                let value = PParamValue::CostModelsPlutusV3(v3.clone());
-                self.change(PParamsUpdate::new(value));
-            }
-
-            if !updated.unknown.is_empty() {
-                let value = PParamValue::CostModelsUnknown(updated.unknown.clone());
-                self.change(PParamsUpdate::new(value));
-            }
-        }
-
-        Ok(())
     }
 }
 
@@ -185,7 +139,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         &mut self,
         ctx: &mut BoundaryWork,
         id: &ProposalId,
-        proposal: &Proposal,
+        proposal: &ProposalState,
         _: Option<&AccountState>,
     ) -> Result<(), ChainError> {
         tracing::error!(proposal=%id, "visiting enacting proposal");
@@ -194,20 +148,24 @@ impl super::BoundaryVisitor for BoundaryVisitor {
             .push(ProposalEnactment::new(id.clone(), ctx.starting_epoch_no()).into());
 
         // Apply proposal on ending state
-        match &proposal.proposal.gov_action {
-            GovAction::HardForkInitiation(_, version) => {
+        match &proposal.action {
+            ProposalAction::HardFork(version) => {
                 let value = PParamValue::ProtocolVersion(*version);
-                self.change(PParamsUpdate::new(value));
+                let pparams = PParamsSet::default().with(value);
+                self.change(PParamsUpdate::new(pparams));
             }
-            GovAction::ParameterChange(_, update, _) => {
-                // Special cases that must be converted by hand:
-                self.visit_param_change(update)?;
+            ProposalAction::ParamChange(pparams) => {
+                self.change(PParamsUpdate::new(pparams.clone()));
             }
-            GovAction::TreasuryWithdrawals(_, _) => {
-                // TODO: Track of this withdrawal from treasury, updating reward
-                // account as well
+            ProposalAction::TreasuryWithdrawal(withdrawals) => {
+                for (credential, amount) in withdrawals {
+                    self.change(TreasuryWithdrawal::new(credential.clone(), *amount));
+                }
             }
-            _ => {}
+            x => {
+                dbg!(x);
+                tracing::error!(proposal=%id, "don't know how to enact proposal action: {:?}", x);
+            }
         }
 
         Ok(())

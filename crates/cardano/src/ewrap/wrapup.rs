@@ -79,19 +79,19 @@ fn define_proposal_total_refunds(ctx: &super::BoundaryWork) -> u64 {
     let expiring_sum: u64 = ctx
         .expiring_proposals
         .values()
-        .map(|(p, _)| p.proposal.deposit)
+        .map(|(p, _)| p.deposit.unwrap_or_default())
         .sum();
 
     let enacting_sum: u64 = ctx
         .enacting_proposals
         .values()
-        .map(|(p, _)| p.proposal.deposit)
+        .map(|(p, _)| p.deposit.unwrap_or_default())
         .sum();
 
     let dropping_sum: u64 = ctx
         .dropping_proposals
         .values()
-        .map(|(p, _)| p.proposal.deposit)
+        .map(|(p, _)| p.deposit.unwrap_or_default())
         .sum();
 
     expiring_sum + enacting_sum + dropping_sum
@@ -102,21 +102,21 @@ fn define_proposal_valid_refunds(ctx: &super::BoundaryWork) -> u64 {
         .expiring_proposals
         .values()
         .filter(|(_, a)| a.as_ref().is_some_and(|a| a.is_registered()))
-        .map(|(p, _)| p.proposal.deposit)
+        .map(|(p, _)| p.deposit.unwrap_or_default())
         .sum();
 
     let enacting_sum: u64 = ctx
         .enacting_proposals
         .values()
         .filter(|(_, a)| a.as_ref().is_some_and(|a| a.is_registered()))
-        .map(|(p, _)| p.proposal.deposit)
+        .map(|(p, _)| p.deposit.unwrap_or_default())
         .sum();
 
     let dropping_sum: u64 = ctx
         .dropping_proposals
         .values()
         .filter(|(_, a)| a.as_ref().is_some_and(|a| a.is_registered()))
-        .map(|(p, _)| p.proposal.deposit)
+        .map(|(p, _)| p.deposit.unwrap_or_default())
         .sum();
 
     expiring_sum + enacting_sum + dropping_sum

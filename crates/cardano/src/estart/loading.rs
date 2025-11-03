@@ -4,7 +4,7 @@ use dolos_core::{batch::WorkDeltas, ChainError, Domain, Genesis, StateStore};
 
 use crate::{
     estart::BoundaryVisitor, load_active_era, AccountState, DRepState, FixedNamespace as _,
-    PoolState, Proposal,
+    PoolState, ProposalState,
 };
 
 impl super::WorkContext {
@@ -39,7 +39,7 @@ impl super::WorkContext {
             visitor_reset.visit_account(self, &account_id, &account)?;
         }
 
-        let proposals = state.iter_entities_typed::<Proposal>(Proposal::NS, None)?;
+        let proposals = state.iter_entities_typed::<ProposalState>(ProposalState::NS, None)?;
 
         for proposal in proposals {
             let (proposal_id, proposal) = proposal?;

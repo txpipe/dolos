@@ -9,7 +9,7 @@ use tracing::{debug, warn};
 use crate::{
     ewrap::{AccountId, BoundaryWork, DRepId, ProposalId},
     AccountState, CardanoDelta, DRepState, FixedNamespace as _, PoolDelegation, PoolHash,
-    PoolState, Proposal,
+    PoolState, ProposalState,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -19,13 +19,13 @@ pub struct ProposalExpiration {
 }
 
 impl dolos_core::EntityDelta for ProposalExpiration {
-    type Entity = Proposal;
+    type Entity = ProposalState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((Proposal::NS, self.proposal.clone()))
+        NsKey::from((ProposalState::NS, self.proposal.clone()))
     }
 
-    fn apply(&mut self, entity: &mut Option<Proposal>) {
+    fn apply(&mut self, entity: &mut Option<ProposalState>) {
         let Some(entity) = entity else {
             warn!("missing proposal");
             return;
@@ -37,7 +37,7 @@ impl dolos_core::EntityDelta for ProposalExpiration {
         entity.expired_epoch = Some(self.epoch);
     }
 
-    fn undo(&self, entity: &mut Option<Proposal>) {
+    fn undo(&self, entity: &mut Option<ProposalState>) {
         let Some(entity) = entity else {
             warn!("missing pool");
             return;
@@ -304,7 +304,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         &mut self,
         ctx: &mut BoundaryWork,
         id: &ProposalId,
-        proposal: &Proposal,
+        proposal: &ProposalState,
         account: Option<&AccountState>,
     ) -> Result<(), ChainError> {
         tracing::error!(proposal=%id, "visiting expiring proposal");
@@ -314,12 +314,14 @@ impl super::BoundaryVisitor for BoundaryVisitor {
             epoch: ctx.starting_epoch_no(),
         });
 
-        if let Some(account) = account {
-            if account.is_registered() {
-                self.change(ProposalDepositRefund::new(
-                    proposal.proposal.deposit,
-                    account.credential.clone(),
-                ));
+        if let Some(deposit) = proposal.deposit {
+            if let Some(account) = account {
+                if account.is_registered() {
+                    self.change(ProposalDepositRefund::new(
+                        deposit,
+                        account.credential.clone(),
+                    ));
+                }
             }
         }
 
@@ -330,7 +332,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         &mut self,
         ctx: &mut BoundaryWork,
         id: &ProposalId,
-        proposal: &Proposal,
+        proposal: &ProposalState,
         account: Option<&AccountState>,
     ) -> Result<(), ChainError> {
         tracing::error!(proposal=%id, "visiting dropping proposal");
@@ -340,12 +342,14 @@ impl super::BoundaryVisitor for BoundaryVisitor {
             epoch: ctx.starting_epoch_no(),
         });
 
-        if let Some(account) = account {
-            if account.is_registered() {
-                self.change(ProposalDepositRefund::new(
-                    proposal.proposal.deposit,
-                    account.credential.clone(),
-                ));
+        if let Some(deposit) = proposal.deposit {
+            if let Some(account) = account {
+                if account.is_registered() {
+                    self.change(ProposalDepositRefund::new(
+                        deposit,
+                        account.credential.clone(),
+                    ));
+                }
             }
         }
 
@@ -356,17 +360,19 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         &mut self,
         _: &mut BoundaryWork,
         id: &ProposalId,
-        proposal: &Proposal,
+        proposal: &ProposalState,
         account: Option<&AccountState>,
     ) -> Result<(), ChainError> {
         tracing::error!(proposal=%id, "visiting enacting proposal");
 
-        if let Some(account) = account {
-            if account.is_registered() {
-                self.change(ProposalDepositRefund::new(
-                    proposal.proposal.deposit,
-                    account.credential.clone(),
-                ));
+        if let Some(deposit) = proposal.deposit {
+            if let Some(account) = account {
+                if account.is_registered() {
+                    self.change(ProposalDepositRefund::new(
+                        deposit,
+                        account.credential.clone(),
+                    ));
+                }
             }
         }
 
