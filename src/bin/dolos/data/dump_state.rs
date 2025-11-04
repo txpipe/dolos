@@ -3,6 +3,7 @@ use std::marker::PhantomData;
 use comfy_table::Table;
 use dolos_cardano::{
     model::AccountState, EpochState, EpochValue, EraSummary, PoolSnapshot, PoolState,
+    ProposalAction, ProposalState,
 };
 use miette::{Context, IntoDiagnostic};
 
@@ -226,21 +227,69 @@ impl TableRow for PoolState {
     }
 }
 
-// impl TableRow for RewardLog {
-//     fn header() -> Vec<&'static str> {
-//         vec!["key", "epoch", "amount", "pool id", "as leader"]
-//     }
+impl TableRow for ProposalState {
+    fn header() -> Vec<&'static str> {
+        vec![
+            "key",
+            "tx",
+            "idx",
+            "action",
+            "ratified epoch",
+            "enacted epoch",
+            "dropped epoch",
+            "expired epoch",
+            "deposit",
+            "reward account",
+        ]
+    }
 
-//     fn row(&self, key: &EntityKey) -> Vec<String> {
-//         vec![
-//             format!("{}", hex::encode(key)),
-//             format!("{}", self.epoch),
-//             format!("{}", hex::encode(&self.pool_id)),
-//             format!("{}", self.amount),
-//             format!("{}", self.as_leader),
-//         ]
-//     }
-// }
+    fn row(&self, key: &EntityKey) -> Vec<String> {
+        let action = match &self.action {
+            ProposalAction::ParamChange(x) => format!("Params({})", x.len()),
+            ProposalAction::HardFork((x, _)) => {
+                format!("HardFork({:?})", x)
+            }
+            ProposalAction::TreasuryWithdrawal(x) => format!("TreasuryWithdrawal({:?})", x.len()),
+            ProposalAction::Other => format!("Other"),
+        };
+
+        vec![
+            format!("{}", hex::encode(key)),
+            format!("{}", hex::encode(self.tx)),
+            format!("{}", self.idx),
+            format!("{}", action),
+            format!(
+                "{}",
+                self.ratified_epoch
+                    .map(|x| x.to_string())
+                    .unwrap_or_default()
+            ),
+            format!(
+                "{}",
+                self.enacted_epoch
+                    .map(|x| x.to_string())
+                    .unwrap_or_default()
+            ),
+            format!(
+                "{}",
+                self.dropped_epoch
+                    .map(|x| x.to_string())
+                    .unwrap_or_default()
+            ),
+            format!(
+                "{}",
+                self.expired_epoch
+                    .map(|x| x.to_string())
+                    .unwrap_or_default()
+            ),
+            format!(
+                "{}",
+                self.deposit.map(|x| x.to_string()).unwrap_or_default()
+            ),
+            format!("{}", self.reward_account.is_some()),
+        ]
+    }
+}
 
 enum Formatter<T: TableRow> {
     Table(Table, PhantomData<T>),
@@ -294,7 +343,6 @@ fn dump_state<T: TableRow>(
     Ok(())
 }
 
-
 pub fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging)?;
 
@@ -305,7 +353,7 @@ pub fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
         "epochs" => dump_state::<EpochState>(&state, "epochs", args.count)?,
         "accounts" => dump_state::<AccountState>(&state, "accounts", args.count)?,
         "pools" => dump_state::<PoolState>(&state, "pools", args.count)?,
-        //"rewards" => dump_state::<RewardState>(&state, "rewards", args.count)?,
+        "proposals" => dump_state::<ProposalState>(&state, "proposals", args.count)?,
         _ => todo!(),
     }
 
