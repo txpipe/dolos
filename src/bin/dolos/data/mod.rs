@@ -5,6 +5,7 @@ mod compute_nonce;
 mod compute_spdd;
 mod copy_wal;
 mod dump_blocks;
+mod dump_entity;
 mod dump_logs;
 mod dump_state;
 mod dump_wal;
@@ -24,6 +25,8 @@ pub enum Command {
     DumpWal(dump_wal::Args),
     /// dumps data from the state
     DumpState(dump_state::Args),
+    /// dumps an entity from the state
+    DumpEntity(dump_entity::Args),
     /// dumps data from the logs
     DumpLogs(dump_logs::Args),
     /// dumps data from the blocks
@@ -65,6 +68,7 @@ pub fn run(
         Command::Summary(x) => summary::run(config, x)?,
         Command::DumpWal(x) => dump_wal::run(config, x)?,
         Command::DumpState(x) => dump_state::run(config, x)?,
+        Command::DumpEntity(x) => dump_entity::run(config, x)?,
         Command::DumpLogs(x) => dump_logs::run(config, x)?,
         Command::DumpBlocks(x) => dump_blocks::run(config, x)?,
         Command::ClearState(x) => clear_state::run(config, x)?,
