@@ -7,7 +7,7 @@ use tracing::debug;
 use crate::{
     pallas_extras, pallas_ratio,
     pots::{EpochIncentives, PotDelta, Pots},
-    AccountState, PParamsSet, PoolHash, PoolParams,
+    Lovelace, PParamsSet, PoolHash, PoolParams,
 };
 
 mod formulas;
@@ -252,27 +252,17 @@ impl<C: RewardsContext> RewardMap<C> {
     }
 
     /// Remove a reward from the pending map and add it to the applied totals.
-    pub fn take_for_apply(&mut self, account: &AccountState) -> Option<Reward> {
-        let reward = self.pending.remove(&account.credential)?;
+    pub fn take_for_apply(&mut self, account: &StakeCredential) -> Option<Reward> {
+        let reward = self.pending.remove(account)?;
 
-        if reward.is_spendable() != account.is_registered() {
-            tracing::warn!(
-                account = ?account.credential,
-                amount = reward.total_value(),
-                "reward is spendable mismatch"
-            );
-        }
+        self.applied_effective += reward.total_value();
 
-        // TODO: notice that we're not checking both if the rewards was spendable at the
-        // moment of RUPD (the `is_spendable` field). This might be important on mainnet.
+        Some(reward)
+    }
 
-        if account.is_registered() {
-            self.applied_effective += reward.total_value();
-            Some(reward)
-        } else {
-            self.applied_unspendable += reward.total_value();
-            None
-        }
+    pub fn return_reward(&mut self, amount: Lovelace) {
+        self.applied_effective -= amount;
+        self.applied_unspendable += amount;
     }
 
     pub fn drain_unspendable(&mut self) {

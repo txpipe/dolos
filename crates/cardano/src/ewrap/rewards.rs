@@ -65,28 +65,30 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         id: &super::AccountId,
         account: &AccountState,
     ) -> Result<(), ChainError> {
-        let rewards = ctx.rewards.take_for_apply(account);
+        let Some(reward) = ctx.rewards.take_for_apply(&account.credential) else {
+            return Ok(());
+        };
 
-        if let Some(reward) = rewards {
-            if reward.is_spendable() != account.is_registered() {
-                warn!(account=%id, amount=reward.total_value(), "reward is spendable mismatch");
-            }
+        if !account.is_registered() {
+            debug!(account=%id, amount=reward.total_value(), "reward is not spendable at ewrap");
+            ctx.rewards.return_reward(reward.total_value());
+            return Ok(());
+        }
 
-            self.change(AssignRewards {
-                account: id.clone(),
-                reward: reward.total_value(),
-            });
+        self.change(AssignRewards {
+            account: id.clone(),
+            reward: reward.total_value(),
+        });
 
-            for (pool, value, as_leader) in reward.into_vec() {
-                self.log(
-                    id.clone(),
-                    RewardLog {
-                        amount: value,
-                        pool_id: pool.to_vec(),
-                        as_leader,
-                    },
-                );
-            }
+        for (pool, value, as_leader) in reward.into_vec() {
+            self.log(
+                id.clone(),
+                RewardLog {
+                    amount: value,
+                    pool_id: pool.to_vec(),
+                    as_leader,
+                },
+            );
         }
 
         Ok(())
