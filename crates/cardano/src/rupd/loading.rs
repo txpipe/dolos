@@ -11,11 +11,11 @@ use crate::{
     PoolState,
 };
 
-fn define_eta(
-    genesis: &Genesis,
-    pparams: &PParamsSet,
-    epoch: &EpochState,
-) -> Result<Eta, ChainError> {
+fn define_eta(genesis: &Genesis, epoch: &EpochState) -> Result<Eta, ChainError> {
+    if epoch.pparams.mark().is_none_or(|x| x.is_byron()) {
+        return Ok(ratio!(1));
+    }
+
     let blocks_minted = epoch.rolling.mark().map(|x| x.blocks_minted);
 
     let Some(blocks_minted) = blocks_minted else {
@@ -30,8 +30,8 @@ fn define_eta(
             "active_slots_coeff".to_string(),
         ))?;
 
-    let d_param = pparams.ensure_d()?;
-    let epoch_length = pparams.ensure_epoch_length()?;
+    let d_param = epoch.pparams.mark().unwrap().ensure_d()?;
+    let epoch_length = epoch.pparams.mark().unwrap().ensure_epoch_length()?;
 
     let eta = pots::calculate_eta(
         blocks_minted as u64,
@@ -54,10 +54,10 @@ fn neutral_incentives() -> EpochIncentives {
 
 fn define_epoch_incentives(
     genesis: &Genesis,
-    epoch: &EpochState,
+    state: &EpochState,
     reserves: u64,
 ) -> Result<EpochIncentives, ChainError> {
-    let pparams = epoch.pparams.unwrap_live();
+    let pparams = state.pparams.unwrap_live();
 
     if pparams.is_byron() {
         info!("no pot changes during Byron epoch");
@@ -67,13 +67,12 @@ fn define_epoch_incentives(
     let rho_param = pparams.ensure_rho()?;
     let tau_param = pparams.ensure_tau()?;
 
-    let fee_ss = epoch
-        .rolling
-        .mark()
-        .map(|x| x.gathered_fees)
-        .unwrap_or_default();
+    let fee_ss = match state.rolling.mark() {
+        Some(rolling) => rolling.gathered_fees,
+        None => 0,
+    };
 
-    let eta = define_eta(genesis, pparams, epoch)?;
+    let eta = define_eta(genesis, state)?;
 
     let incentives = pots::epoch_incentives(
         reserves,
