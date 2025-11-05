@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use dolos_core::{batch::WorkDeltas, ChainError, SlotTags, TxoRef};
+use dolos_core::{batch::WorkDeltas, ChainError, Genesis, SlotTags, TxoRef};
 use pallas::{
     codec::{minicbor, utils::KeepRaw},
     ledger::{
@@ -13,7 +13,9 @@ use pallas::{
     },
 };
 
-use crate::{owned::OwnedMultiEraOutput, pallas_extras, roll::BlockVisitor, CardanoLogic, PParamsSet};
+use crate::{
+    owned::OwnedMultiEraOutput, pallas_extras, roll::BlockVisitor, CardanoLogic, PParamsSet,
+};
 
 #[derive(Default, Clone)]
 pub struct TxLogVisitor;
@@ -89,8 +91,10 @@ impl BlockVisitor for TxLogVisitor {
         &mut self,
         deltas: &mut WorkDeltas<CardanoLogic>,
         block: &MultiEraBlock,
+        _: &Genesis,
         _: &PParamsSet,
         _: Epoch,
+        _: u16,
     ) -> Result<(), ChainError> {
         deltas.slot.number = Some(block.number());
 

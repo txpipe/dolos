@@ -89,54 +89,6 @@ impl BoundaryWork {
         Ok(())
     }
 
-    fn should_expire_proposal(&self, proposal: &ProposalState) -> Result<bool, ChainError> {
-        let pparams = self.ending_state().pparams.unwrap_live();
-
-        let Some(validity) = pparams.governance_action_validity_period() else {
-            return Ok(false);
-        };
-
-        let (epoch, _) = self.active_era.slot_epoch(proposal.slot);
-
-        let expiring_epoch = epoch + validity;
-
-        Ok(expiring_epoch < self.ending_state.number)
-    }
-
-    fn should_enact_proposal(&self, proposal: &ProposalState) -> bool {
-        let Some(magic) = self.genesis.shelley.network_magic else {
-            return false;
-        };
-
-        let starting_epoch = self.starting_epoch_no();
-
-        let epoch = hacks::proposals::enactment_epoch_by_proposal_id(
-            magic,
-            &proposal.id_as_string(),
-            starting_epoch,
-        );
-
-        let Some(epoch) = epoch else {
-            return false;
-        };
-
-        epoch == self.starting_epoch_no()
-    }
-
-    fn should_drop_proposal(&self, proposal: &ProposalState) -> bool {
-        let Some(magic) = self.genesis.shelley.network_magic else {
-            return false;
-        };
-
-        let epoch = hacks::proposals::dropped_epoch_by_proposal_id(magic, &proposal.id_as_string());
-
-        let Some(epoch) = epoch else {
-            return false;
-        };
-
-        epoch == self.starting_epoch_no()
-    }
-
     fn load_proposal_reward_account<D: Domain>(
         &self,
         state: &D::State,
@@ -160,19 +112,17 @@ impl BoundaryWork {
             let (id, proposal) = record?;
 
             // Skip proposals already processe
-            if proposal.expired_epoch.is_some() || proposal.enacted_epoch.is_some() {
+            if !proposal.is_active(self.ending_state.number) {
+                tracing::warn!(proposal=%id, "skipping non-active proposal");
                 continue;
             }
 
-            if self.should_enact_proposal(&proposal) {
+            if proposal.should_enact(self.starting_epoch_no()) {
                 let account = self.load_proposal_reward_account::<D>(state, &proposal)?;
                 self.enacting_proposals.insert(id, (proposal, account));
-            } else if self.should_drop_proposal(&proposal) {
+            } else if proposal.should_drop(self.starting_epoch_no()) {
                 let account = self.load_proposal_reward_account::<D>(state, &proposal)?;
                 self.dropping_proposals.insert(id, (proposal, account));
-            } else if self.should_expire_proposal(&proposal)? {
-                let account = self.load_proposal_reward_account::<D>(state, &proposal)?;
-                self.expiring_proposals.insert(id, (proposal, account));
             }
         }
 
@@ -182,7 +132,8 @@ impl BoundaryWork {
     pub fn compute_deltas<D: Domain>(&mut self, state: &D::State) -> Result<(), ChainError> {
         let mut visitor_enactment = crate::ewrap::enactment::BoundaryVisitor::default();
         let mut visitor_rewards = crate::ewrap::rewards::BoundaryVisitor::default();
-        let mut visitor_retires = crate::ewrap::retires::BoundaryVisitor::default();
+        let mut visitor_drops = crate::ewrap::drops::BoundaryVisitor::default();
+        let mut visitor_refunds = crate::ewrap::refunds::BoundaryVisitor::default();
         let mut visitor_wrapup = crate::ewrap::wrapup::BoundaryVisitor::default();
 
         let pools = state.iter_entities_typed::<PoolState>(PoolState::NS, None)?;
@@ -192,7 +143,8 @@ impl BoundaryWork {
 
             visitor_enactment.visit_pool(self, &pool_id, &pool)?;
             visitor_rewards.visit_pool(self, &pool_id, &pool)?;
-            visitor_retires.visit_pool(self, &pool_id, &pool)?;
+            visitor_drops.visit_pool(self, &pool_id, &pool)?;
+            visitor_refunds.visit_pool(self, &pool_id, &pool)?;
             visitor_wrapup.visit_pool(self, &pool_id, &pool)?;
         }
 
@@ -201,7 +153,8 @@ impl BoundaryWork {
         for (pool_id, (pool, account)) in retiring_pools {
             visitor_enactment.visit_retiring_pool(self, pool_id, &pool, account.as_ref())?;
             visitor_rewards.visit_retiring_pool(self, pool_id, &pool, account.as_ref())?;
-            visitor_retires.visit_retiring_pool(self, pool_id, &pool, account.as_ref())?;
+            visitor_drops.visit_retiring_pool(self, pool_id, &pool, account.as_ref())?;
+            visitor_refunds.visit_retiring_pool(self, pool_id, &pool, account.as_ref())?;
             visitor_wrapup.visit_retiring_pool(self, pool_id, &pool, account.as_ref())?;
         }
 
@@ -212,7 +165,8 @@ impl BoundaryWork {
 
             visitor_enactment.visit_drep(self, &drep_id, &drep)?;
             visitor_rewards.visit_drep(self, &drep_id, &drep)?;
-            visitor_retires.visit_drep(self, &drep_id, &drep)?;
+            visitor_drops.visit_drep(self, &drep_id, &drep)?;
+            visitor_refunds.visit_drep(self, &drep_id, &drep)?;
             visitor_wrapup.visit_drep(self, &drep_id, &drep)?;
         }
 
@@ -226,7 +180,8 @@ impl BoundaryWork {
             // HACK: we need the rewards to apply before the retires. This is because the rewards will update the live value before the snapshot but the retires will schedule refunds for after the snapshot. If we switch the sequence, the rewards will be overriden by the refund schedule. If we keep this order, the refund will clone the existing live values with the rewards already applied.
             // TODO: we should probably move the retires to ESTART after the snapshot has been taken.
             visitor_rewards.visit_account(self, &account_id, &account)?;
-            visitor_retires.visit_account(self, &account_id, &account)?;
+            visitor_drops.visit_account(self, &account_id, &account)?;
+            visitor_refunds.visit_account(self, &account_id, &account)?;
 
             visitor_wrapup.visit_account(self, &account_id, &account)?;
         }
@@ -236,19 +191,13 @@ impl BoundaryWork {
         for proposal in proposals {
             let (proposal_id, proposal) = proposal?;
 
-            visitor_enactment.visit_proposal(self, &proposal_id, &proposal)?;
-            visitor_rewards.visit_proposal(self, &proposal_id, &proposal)?;
-            visitor_retires.visit_proposal(self, &proposal_id, &proposal)?;
-            visitor_wrapup.visit_proposal(self, &proposal_id, &proposal)?;
-        }
-
-        let expiring_proposals = self.expiring_proposals.clone();
-
-        for (id, (proposal, account)) in expiring_proposals.iter() {
-            visitor_enactment.visit_expiring_proposal(self, id, proposal, account.as_ref())?;
-            visitor_rewards.visit_expiring_proposal(self, id, proposal, account.as_ref())?;
-            visitor_retires.visit_expiring_proposal(self, id, proposal, account.as_ref())?;
-            visitor_wrapup.visit_expiring_proposal(self, id, proposal, account.as_ref())?;
+            if proposal.is_active(self.ending_state.number) {
+                visitor_enactment.visit_active_proposal(self, &proposal_id, &proposal)?;
+                visitor_rewards.visit_active_proposal(self, &proposal_id, &proposal)?;
+                visitor_drops.visit_active_proposal(self, &proposal_id, &proposal)?;
+                visitor_refunds.visit_active_proposal(self, &proposal_id, &proposal)?;
+                visitor_wrapup.visit_active_proposal(self, &proposal_id, &proposal)?;
+            }
         }
 
         let enacting_proposals = self.enacting_proposals.clone();
@@ -256,7 +205,8 @@ impl BoundaryWork {
         for (id, (proposal, account)) in enacting_proposals.iter() {
             visitor_enactment.visit_enacting_proposal(self, id, proposal, account.as_ref())?;
             visitor_rewards.visit_enacting_proposal(self, id, proposal, account.as_ref())?;
-            visitor_retires.visit_enacting_proposal(self, id, proposal, account.as_ref())?;
+            visitor_drops.visit_enacting_proposal(self, id, proposal, account.as_ref())?;
+            visitor_refunds.visit_enacting_proposal(self, id, proposal, account.as_ref())?;
             visitor_wrapup.visit_enacting_proposal(self, id, proposal, account.as_ref())?;
         }
 
@@ -265,13 +215,15 @@ impl BoundaryWork {
         for (id, (proposal, account)) in dropping_proposals.iter() {
             visitor_enactment.visit_dropping_proposal(self, id, proposal, account.as_ref())?;
             visitor_rewards.visit_dropping_proposal(self, id, proposal, account.as_ref())?;
-            visitor_retires.visit_dropping_proposal(self, id, proposal, account.as_ref())?;
+            visitor_drops.visit_dropping_proposal(self, id, proposal, account.as_ref())?;
+            visitor_refunds.visit_dropping_proposal(self, id, proposal, account.as_ref())?;
             visitor_wrapup.visit_dropping_proposal(self, id, proposal, account.as_ref())?;
         }
 
         visitor_enactment.flush(self)?;
         visitor_rewards.flush(self)?;
-        visitor_retires.flush(self)?;
+        visitor_drops.flush(self)?;
+        visitor_refunds.flush(self)?;
         visitor_wrapup.flush(self)?;
 
         Ok(())
@@ -296,7 +248,6 @@ impl BoundaryWork {
             new_pools: Default::default(),
             retiring_pools: Default::default(),
             expiring_dreps: Default::default(),
-            expiring_proposals: Default::default(),
             enacting_proposals: Default::default(),
             dropping_proposals: Default::default(),
 

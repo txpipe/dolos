@@ -652,6 +652,7 @@ pub trait ChainLogic: Sized + Send + Sync {
     fn compute_delta<D: Domain>(
         &self,
         state: &D::State,
+        genesis: Arc<Genesis>,
         batch: &mut WorkBatch<Self>,
     ) -> Result<(), ChainError>;
 

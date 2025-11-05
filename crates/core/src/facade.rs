@@ -17,7 +17,9 @@ fn execute_batch<D: Domain>(
     batch.decode_utxos(domain.chain())?;
 
     // Chain-specific logic
-    domain.chain().compute_delta::<D>(domain.state(), batch)?;
+    domain
+        .chain()
+        .compute_delta::<D>(domain.state(), domain.genesis(), batch)?;
 
     if with_wal {
         batch.commit_wal(domain)?;

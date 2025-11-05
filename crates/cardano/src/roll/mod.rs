@@ -1,8 +1,8 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use dolos_core::{
     batch::{WorkBatch, WorkBlock, WorkDeltas},
-    ChainError, Domain, InvariantViolation, StateError, TxoRef,
+    ChainError, Domain, Genesis, InvariantViolation, StateError, TxoRef,
 };
 use pallas::{
     codec::utils::KeepRaw,
@@ -44,8 +44,10 @@ pub trait BlockVisitor {
         &mut self,
         deltas: &mut WorkDeltas<CardanoLogic>,
         block: &MultiEraBlock,
+        genesis: &Genesis,
         pparams: &PParamsSet,
         epoch: Epoch,
+        protocol: u16,
     ) -> Result<(), ChainError> {
         Ok(())
     }
@@ -194,9 +196,11 @@ macro_rules! visit_all {
 
 pub struct DeltaBuilder<'a> {
     config: TrackConfig,
+    genesis: Arc<Genesis>,
     work: &'a mut WorkBlock<CardanoLogic>,
     active_params: &'a PParamsSet,
     epoch: Epoch,
+    protocol: u16,
     utxos: &'a HashMap<TxoRef, OwnedMultiEraOutput>,
 
     account_state: AccountVisitor,
@@ -211,6 +215,8 @@ pub struct DeltaBuilder<'a> {
 impl<'a> DeltaBuilder<'a> {
     pub fn new(
         config: TrackConfig,
+        genesis: Arc<Genesis>,
+        protocol: u16,
         active_params: &'a PParamsSet,
         epoch: Epoch,
         work: &'a mut WorkBlock<CardanoLogic>,
@@ -218,9 +224,11 @@ impl<'a> DeltaBuilder<'a> {
     ) -> Self {
         Self {
             config,
+            genesis,
             work,
             active_params,
             epoch,
+            protocol,
             utxos,
             account_state: Default::default(),
             asset_state: Default::default(),
@@ -242,8 +250,10 @@ impl<'a> DeltaBuilder<'a> {
             deltas,
             visit_root,
             block,
+            &self.genesis,
             self.active_params,
-            self.epoch
+            self.epoch,
+            self.protocol,
         );
 
         for tx in block.txs() {
@@ -318,6 +328,7 @@ impl<'a> DeltaBuilder<'a> {
 #[instrument(name = "roll", skip_all)]
 pub fn compute_delta<D: Domain>(
     config: &Config,
+    genesis: Arc<Genesis>,
     cache: &Cache,
     state: &D::State,
     batch: &mut WorkBatch<CardanoLogic>,
@@ -330,6 +341,8 @@ pub fn compute_delta<D: Domain>(
 
     let (epoch, _) = cache.eras.slot_epoch(batch.first_slot());
 
+    let (protocol, _) = cache.eras.protocol_and_era_for_epoch(epoch);
+
     info!(epoch, "current epoch");
 
     let active_params = load_effective_pparams::<D>(state)?;
@@ -337,6 +350,8 @@ pub fn compute_delta<D: Domain>(
     for block in batch.blocks.iter_mut() {
         let mut builder = DeltaBuilder::new(
             config.track.clone(),
+            genesis.clone(),
+            *protocol,
             &active_params,
             epoch,
             block,

@@ -1,5 +1,5 @@
 use dolos_core::batch::WorkDeltas;
-use dolos_core::{BlockSlot, ChainError, NsKey};
+use dolos_core::{BlockSlot, ChainError, Genesis, NsKey};
 use pallas::codec::minicbor;
 use pallas::crypto::hash::Hash;
 use pallas::ledger::primitives::conway::DRep;
@@ -10,6 +10,7 @@ use pallas::ledger::{
     traverse::{MultiEraBlock, MultiEraCert, MultiEraInput, MultiEraOutput, MultiEraTx},
 };
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 
 use crate::model::FixedNamespace as _;
 use crate::{model::AccountState, pallas_extras, roll::BlockVisitor};
@@ -54,16 +55,15 @@ impl dolos_core::EntityDelta for ControlledAmountInc {
         let stake = entity.stake.unwrap_live_mut();
 
         if self.is_pointer {
+            debug!(amount=%self.amount, "adding to pointer utxo sum");
             stake.utxo_sum_at_pointer_addresses += self.amount;
         } else {
             stake.utxo_sum += self.amount;
         }
     }
 
-    fn undo(&self, entity: &mut Option<AccountState>) {
-        let entity = entity.as_mut().expect("existing account");
-
-        entity.stake.unwrap_live_mut().utxo_sum -= self.amount;
+    fn undo(&self, _entity: &mut Option<AccountState>) {
+        // TODO: implement undo
     }
 }
 
@@ -424,8 +424,10 @@ impl BlockVisitor for AccountVisitor {
         &mut self,
         _: &mut WorkDeltas<CardanoLogic>,
         _: &MultiEraBlock,
+        _: &Genesis,
         pparams: &PParamsSet,
         epoch: Epoch,
+        _: u16,
     ) -> Result<(), ChainError> {
         self.deposit = pparams.ensure_key_deposit().ok();
         self.epoch = Some(epoch);

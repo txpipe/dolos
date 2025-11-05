@@ -10,46 +10,6 @@ use crate::{
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProposalEnactment {
-    id: ProposalId,
-    epoch: u64,
-}
-
-impl ProposalEnactment {
-    pub fn new(id: ProposalId, epoch: u64) -> Self {
-        Self { id, epoch }
-    }
-}
-
-impl dolos_core::EntityDelta for ProposalEnactment {
-    type Entity = ProposalState;
-
-    fn key(&self) -> NsKey {
-        NsKey::from((ProposalState::NS, self.id.clone()))
-    }
-
-    fn apply(&mut self, entity: &mut Option<ProposalState>) {
-        let Some(proposal) = entity else {
-            return;
-        };
-
-        debug!(proposal=%self.id, "enacting proposal");
-        proposal.enacted_epoch = Some(self.epoch);
-        proposal.ratified_epoch = Some(self.epoch - 1);
-    }
-
-    fn undo(&self, entity: &mut Option<ProposalState>) {
-        let Some(entity) = entity else {
-            return;
-        };
-
-        debug!(proposal=%self.id, "undoing enact proposal");
-        entity.enacted_epoch = None;
-        entity.ratified_epoch = None;
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PParamsUpdate {
     to_update: PParamsSet,
 }
@@ -142,10 +102,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         proposal: &ProposalState,
         _: Option<&AccountState>,
     ) -> Result<(), ChainError> {
-        tracing::error!(proposal=%id, "visiting enacting proposal");
-
-        self.deltas
-            .push(ProposalEnactment::new(id.clone(), ctx.starting_epoch_no()).into());
+        tracing::error!(proposal=%id, "visiting enacted proposal");
 
         // Apply proposal on ending state
         match &proposal.action {

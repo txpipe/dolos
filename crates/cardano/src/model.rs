@@ -26,11 +26,9 @@ use crate::{
         reset::{AccountTransition, EpochTransition, PoolTransition},
     },
     ewrap::{
-        enactment::{PParamsUpdate, ProposalEnactment, TreasuryWithdrawal},
-        retires::{
-            DRepDelegatorDrop, DRepExpiration, PoolDelegatorDrop, PoolDepositRefund,
-            ProposalDepositRefund, ProposalExpiration,
-        },
+        drops::{DRepDelegatorDrop, DRepExpiration, PoolDelegatorDrop},
+        enactment::{PParamsUpdate, TreasuryWithdrawal},
+        refunds::{PoolDepositRefund, ProposalDepositRefund},
         rewards::AssignRewards,
         wrapup::{EpochWrapUp, PoolWrapUp},
     },
@@ -318,10 +316,7 @@ where
     pub fn try_snapshot_at(&self, epoch: Epoch) -> Result<&T, ChainError> {
         match self.snapshot_at(epoch) {
             Some(value) => Ok(value),
-            None => {
-                dbg!(self);
-                Err(ChainError::EpochValueVersionNotFound(epoch))
-            }
+            None => Err(ChainError::EpochValueVersionNotFound(epoch)),
         }
     }
 }
@@ -739,22 +734,20 @@ pub struct ProposalState {
     #[n(3)]
     pub action: ProposalAction,
 
+    /// Set at the initialization of the proposal representing the last valid epoch. The existence of a value doesn't mean the proposal has expired.
     #[n(4)]
-    pub ratified_epoch: Option<Epoch>,
+    pub max_epoch: Option<Epoch>,
 
     #[n(5)]
-    pub enacted_epoch: Option<Epoch>,
+    pub ratified_epoch: Option<Epoch>,
 
     #[n(6)]
-    pub dropped_epoch: Option<Epoch>,
+    pub canceled_epoch: Option<Epoch>,
 
     #[n(7)]
-    pub expired_epoch: Option<Epoch>,
-
-    #[n(8)]
     pub deposit: Option<Lovelace>,
 
-    #[n(9)]
+    #[n(8)]
     pub reward_account: Option<StakeCredential>,
 }
 
@@ -765,13 +758,86 @@ impl ProposalState {
         Self::build_entity_key(self.tx, self.idx)
     }
 
+    /// Build the ID of the proposal in its string form, as found on explorers.
+    pub fn id(tx: Hash<32>, idx: u32) -> String {
+        format!("{}#{}", hex::encode(tx), idx)
+    }
+
     /// Get ID of the proposal in its string form, as found on explorers.
     pub fn id_as_string(&self) -> String {
-        format!("{}#{}", hex::encode(self.tx), self.idx)
+        Self::id(self.tx, self.idx)
     }
 
     pub fn build_entity_key(tx: Hash<32>, idx: u32) -> EntityKey {
         EntityKey::from([idx.to_be_bytes().as_slice(), tx.as_slice()].concat())
+    }
+
+    pub fn expires_at(&self) -> Option<Epoch> {
+        self.max_epoch.map(|x| x + 1)
+    }
+
+    pub fn has_expired(&self, current_epoch: Epoch) -> bool {
+        let expires_at = self.expires_at();
+        expires_at.is_some_and(|x| x <= current_epoch)
+    }
+
+    pub fn was_enacted(&self, current_epoch: Epoch) -> bool {
+        if let Some(ratified_epoch) = self.ratified_epoch {
+            if current_epoch > ratified_epoch + 1 {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    pub fn was_canceled(&self, current_epoch: Epoch) -> bool {
+        if let Some(canceled_epoch) = self.canceled_epoch {
+            if current_epoch > canceled_epoch {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// Returns true if the proposal is still beign evaluated. Not to confuse with `is_enacted`.
+    pub fn is_active(&self, current_epoch: Epoch) -> bool {
+        if self.was_enacted(current_epoch) {
+            return false;
+        }
+
+        if self.was_canceled(current_epoch) {
+            return false;
+        }
+
+        if let Some(expires_at) = self.expires_at() {
+            // +1 after the expiration to allow for the drop epoch
+            return current_epoch <= expires_at + 1;
+        }
+
+        true
+    }
+
+    /// Returns true if the proposal should be enacted at the starting epoch. It does a strict comparision with the ratified epoch, it will return false if asked at a later epoch.
+    pub fn should_enact(&self, starting_epoch: Epoch) -> bool {
+        self.ratified_epoch.is_some_and(|x| x + 1 == starting_epoch)
+    }
+
+    pub fn should_drop(&self, starting_epoch: Epoch) -> bool {
+        if self.ratified_epoch.is_some() {
+            return false;
+        }
+
+        if let Some(canceled_epoch) = self.canceled_epoch {
+            return starting_epoch == canceled_epoch;
+        }
+
+        if let Some(expires) = self.expires_at() {
+            return starting_epoch == expires + 1;
+        }
+
+        false
     }
 }
 
@@ -1738,13 +1804,11 @@ pub enum CardanoDelta {
     PParamsUpdate(PParamsUpdate),
     NoncesUpdate(NoncesUpdate),
     NewProposal(NewProposal),
-    ProposalEnactment(ProposalEnactment),
     PoolDelegatorDrop(PoolDelegatorDrop),
     AssignRewards(AssignRewards),
     NonceTransition(NonceTransition),
     PoolTransition(PoolTransition),
     AccountTransition(AccountTransition),
-    ProposalExpiration(ProposalExpiration),
     PoolDepositRefund(PoolDepositRefund),
     EpochTransition(EpochTransition),
     EpochWrapUp(EpochWrapUp),
@@ -1807,13 +1871,11 @@ delta_from!(VoteDelegation);
 delta_from!(PParamsUpdate);
 delta_from!(NoncesUpdate);
 delta_from!(NewProposal);
-delta_from!(ProposalEnactment);
 delta_from!(PoolDelegatorDrop);
 delta_from!(AssignRewards);
 delta_from!(NonceTransition);
 delta_from!(PoolTransition);
 delta_from!(AccountTransition);
-delta_from!(ProposalExpiration);
 delta_from!(PoolDepositRefund);
 delta_from!(EpochTransition);
 delta_from!(EpochWrapUp);
@@ -1851,8 +1913,6 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::NonceTransition(x) => x.key(),
             Self::PoolTransition(x) => x.key(),
             Self::AccountTransition(x) => x.key(),
-            Self::ProposalExpiration(x) => x.key(),
-            Self::ProposalEnactment(x) => x.key(),
             Self::PoolDepositRefund(x) => x.key(),
             Self::EpochTransition(x) => x.key(),
             Self::EpochWrapUp(x) => x.key(),
@@ -1889,8 +1949,6 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::NonceTransition(x) => Self::downcast_apply(x, entity),
             Self::PoolTransition(x) => Self::downcast_apply(x, entity),
             Self::AccountTransition(x) => Self::downcast_apply(x, entity),
-            Self::ProposalExpiration(x) => Self::downcast_apply(x, entity),
-            Self::ProposalEnactment(x) => Self::downcast_apply(x, entity),
             Self::PoolDepositRefund(x) => Self::downcast_apply(x, entity),
             Self::EpochTransition(x) => Self::downcast_apply(x, entity),
             Self::EpochWrapUp(x) => Self::downcast_apply(x, entity),
@@ -1927,8 +1985,6 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::NonceTransition(x) => Self::downcast_undo(x, entity),
             Self::PoolTransition(x) => Self::downcast_undo(x, entity),
             Self::AccountTransition(x) => Self::downcast_undo(x, entity),
-            Self::ProposalExpiration(x) => Self::downcast_undo(x, entity),
-            Self::ProposalEnactment(x) => Self::downcast_undo(x, entity),
             Self::PoolDepositRefund(x) => Self::downcast_undo(x, entity),
             Self::EpochTransition(x) => Self::downcast_undo(x, entity),
             Self::EpochWrapUp(x) => Self::downcast_undo(x, entity),

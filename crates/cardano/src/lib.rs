@@ -437,11 +437,12 @@ impl dolos_core::ChainLogic for CardanoLogic {
     fn compute_delta<D: Domain>(
         &self,
         state: &D::State,
+        genesis: Arc<Genesis>,
         batch: &mut WorkBatch<Self>,
     ) -> Result<(), ChainError> {
         let cache = self.cache.read().unwrap();
 
-        roll::compute_delta::<D>(&self.config, &cache, state, batch)?;
+        roll::compute_delta::<D>(&self.config, genesis, &cache, state, batch)?;
 
         Ok(())
     }

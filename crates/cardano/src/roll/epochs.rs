@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use dolos_core::{batch::WorkDeltas, BrokenInvariant, ChainError, NsKey, TxoRef};
+use dolos_core::{batch::WorkDeltas, BrokenInvariant, ChainError, Genesis, NsKey, TxoRef};
 use pallas::{
     crypto::hash::Hash,
     ledger::{
@@ -200,8 +200,10 @@ impl BlockVisitor for EpochStateVisitor {
         &mut self,
         _: &mut WorkDeltas<CardanoLogic>,
         block: &MultiEraBlock,
+        _: &Genesis,
         _: &PParamsSet,
         _: Epoch,
+        _: u16,
     ) -> Result<(), ChainError> {
         self.stats_delta = Some(EpochStatsUpdate::default());
 

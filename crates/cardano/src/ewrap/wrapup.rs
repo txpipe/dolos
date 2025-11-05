@@ -76,12 +76,6 @@ impl BoundaryVisitor {
 }
 
 fn define_proposal_total_refunds(ctx: &super::BoundaryWork) -> u64 {
-    let expiring_sum: u64 = ctx
-        .expiring_proposals
-        .values()
-        .map(|(p, _)| p.deposit.unwrap_or_default())
-        .sum();
-
     let enacting_sum: u64 = ctx
         .enacting_proposals
         .values()
@@ -94,17 +88,10 @@ fn define_proposal_total_refunds(ctx: &super::BoundaryWork) -> u64 {
         .map(|(p, _)| p.deposit.unwrap_or_default())
         .sum();
 
-    expiring_sum + enacting_sum + dropping_sum
+    enacting_sum + dropping_sum
 }
 
 fn define_proposal_valid_refunds(ctx: &super::BoundaryWork) -> u64 {
-    let expiring_sum: u64 = ctx
-        .expiring_proposals
-        .values()
-        .filter(|(_, a)| a.as_ref().is_some_and(|a| a.is_registered()))
-        .map(|(p, _)| p.deposit.unwrap_or_default())
-        .sum();
-
     let enacting_sum: u64 = ctx
         .enacting_proposals
         .values()
@@ -119,7 +106,7 @@ fn define_proposal_valid_refunds(ctx: &super::BoundaryWork) -> u64 {
         .map(|(p, _)| p.deposit.unwrap_or_default())
         .sum();
 
-    expiring_sum + enacting_sum + dropping_sum
+    enacting_sum + dropping_sum
 }
 
 fn define_end_stats(ctx: &super::BoundaryWork) -> EndStats {

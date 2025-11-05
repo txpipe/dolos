@@ -234,10 +234,9 @@ impl TableRow for ProposalState {
             "tx",
             "idx",
             "action",
+            "max epoch",
             "ratified epoch",
-            "enacted epoch",
-            "dropped epoch",
-            "expired epoch",
+            "canceled epoch",
             "deposit",
             "reward account",
         ]
@@ -260,25 +259,17 @@ impl TableRow for ProposalState {
             format!("{}", action),
             format!(
                 "{}",
+                self.max_epoch.map(|x| x.to_string()).unwrap_or_default()
+            ),
+            format!(
+                "{}",
                 self.ratified_epoch
                     .map(|x| x.to_string())
                     .unwrap_or_default()
             ),
             format!(
                 "{}",
-                self.enacted_epoch
-                    .map(|x| x.to_string())
-                    .unwrap_or_default()
-            ),
-            format!(
-                "{}",
-                self.dropped_epoch
-                    .map(|x| x.to_string())
-                    .unwrap_or_default()
-            ),
-            format!(
-                "{}",
-                self.expired_epoch
+                self.canceled_epoch
                     .map(|x| x.to_string())
                     .unwrap_or_default()
             ),

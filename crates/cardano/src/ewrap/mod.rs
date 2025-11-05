@@ -16,8 +16,9 @@ pub mod commit;
 pub mod loading;
 
 // visitors
+pub mod drops;
 pub mod enactment;
-pub mod retires;
+pub mod refunds;
 pub mod rewards;
 pub mod wrapup;
 
@@ -64,22 +65,11 @@ pub trait BoundaryVisitor {
     }
 
     #[allow(unused_variables)]
-    fn visit_proposal(
+    fn visit_active_proposal(
         &mut self,
         ctx: &mut BoundaryWork,
         id: &ProposalId,
         proposal: &ProposalState,
-    ) -> Result<(), ChainError> {
-        Ok(())
-    }
-
-    #[allow(unused_variables)]
-    fn visit_expiring_proposal(
-        &mut self,
-        ctx: &mut BoundaryWork,
-        id: &ProposalId,
-        proposal: &ProposalState,
-        account: Option<&AccountState>,
     ) -> Result<(), ChainError> {
         Ok(())
     }
@@ -128,7 +118,6 @@ pub struct BoundaryWork {
     // inferred
     pub new_pools: HashSet<PoolHash>,
     pub retiring_pools: HashMap<PoolHash, (PoolState, Option<AccountState>)>,
-    pub expiring_proposals: HashMap<ProposalId, (ProposalState, Option<AccountState>)>,
     pub enacting_proposals: HashMap<ProposalId, (ProposalState, Option<AccountState>)>,
     pub dropping_proposals: HashMap<ProposalId, (ProposalState, Option<AccountState>)>,
 

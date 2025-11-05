@@ -1,13 +1,13 @@
 use std::collections::BTreeMap;
 
-use dolos_core::{batch::WorkDeltas, BlockSlot, ChainError, NsKey};
+use dolos_core::{batch::WorkDeltas, BlockSlot, ChainError, Genesis, NsKey};
 use pallas::{
     codec::utils::Bytes,
     crypto::hash::Hash,
     ledger::{
         primitives::{
             conway::{GovAction, ProtocolParamUpdate},
-            ExUnitPrices, RationalNumber, StakeCredential,
+            Epoch, ExUnitPrices, RationalNumber, StakeCredential,
         },
         traverse::{MultiEraBlock, MultiEraTx, MultiEraUpdate},
     },
@@ -15,8 +15,11 @@ use pallas::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    model::FixedNamespace as _, pallas_extras, roll::BlockVisitor, CardanoLogic, Lovelace,
-    PParamValue, PParamsSet, ProposalAction, ProposalState,
+    hacks::{self, proposals::ProposalOutcome},
+    model::FixedNamespace as _,
+    pallas_extras,
+    roll::BlockVisitor,
+    CardanoLogic, Lovelace, PParamValue, PParamsSet, ProposalAction, ProposalState,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,6 +30,10 @@ pub struct NewProposal {
     action: ProposalAction,
     deposit: Option<Lovelace>,
     reward_account: Option<StakeCredential>,
+    validity_period: Option<u64>,
+    current_epoch: Epoch,
+    network_magic: u32,
+    protocol: u16,
 }
 
 impl dolos_core::EntityDelta for NewProposal {
@@ -40,18 +47,36 @@ impl dolos_core::EntityDelta for NewProposal {
     }
 
     fn apply(&mut self, entity: &mut Option<ProposalState>) {
-        let _ = entity.insert(ProposalState {
+        let id = ProposalState::id(self.tx, self.idx);
+
+        let outcome = hacks::proposals::outcome(self.network_magic, self.protocol, &id);
+
+        let max_epoch = self.validity_period.map(|x| self.current_epoch + x);
+
+        let ratified_epoch = match &outcome {
+            ProposalOutcome::Ratified(epoch) => Some(*epoch),
+            ProposalOutcome::RatifiedCurrentEpoch => Some(self.current_epoch),
+            _ => None,
+        };
+
+        let canceled_epoch = match &outcome {
+            ProposalOutcome::Canceled(epoch) => Some(*epoch),
+            _ => None,
+        };
+
+        let state = ProposalState {
             slot: self.slot,
             tx: self.tx,
             idx: self.idx,
             action: self.action.clone(),
             reward_account: self.reward_account.clone(),
             deposit: self.deposit.clone(),
-            ratified_epoch: None,
-            enacted_epoch: None,
-            dropped_epoch: None,
-            expired_epoch: None,
-        });
+            max_epoch,
+            ratified_epoch,
+            canceled_epoch,
+        };
+
+        let _ = entity.insert(state);
     }
 
     fn undo(&self, entity: &mut Option<ProposalState>) {
@@ -290,9 +315,31 @@ fn pre_conway_to_pparamset(update: &MultiEraUpdate) -> PParamsSet {
 }
 
 #[derive(Clone, Default)]
-pub struct ProposalVisitor;
+pub struct ProposalVisitor {
+    validity_period: Option<u64>,
+    current_epoch: Option<Epoch>,
+    network_magic: Option<u32>,
+    protocol: Option<u16>,
+}
 
 impl BlockVisitor for ProposalVisitor {
+    fn visit_root(
+        &mut self,
+        _: &mut WorkDeltas<CardanoLogic>,
+        _: &MultiEraBlock,
+        genesis: &Genesis,
+        pparams: &PParamsSet,
+        epoch: Epoch,
+        protocol: u16,
+    ) -> Result<(), ChainError> {
+        self.validity_period = pparams.governance_action_validity_period();
+        self.current_epoch = Some(epoch);
+        self.network_magic = Some(genesis.network_magic());
+        self.protocol = Some(protocol);
+
+        Ok(())
+    }
+
     fn visit_update(
         &mut self,
         deltas: &mut WorkDeltas<CardanoLogic>,
@@ -309,6 +356,10 @@ impl BlockVisitor for ProposalVisitor {
             action: ProposalAction::ParamChange(action),
             deposit: None,
             reward_account: None,
+            validity_period: self.validity_period,
+            current_epoch: self.current_epoch.expect("value set in root"),
+            network_magic: self.network_magic.expect("value set in root"),
+            protocol: self.protocol.expect("value set in root"),
         });
 
         Ok(())
@@ -348,6 +399,10 @@ impl BlockVisitor for ProposalVisitor {
             reward_account: Some(reward_account),
             deposit: Some(proposal.deposit),
             action,
+            validity_period: self.validity_period,
+            current_epoch: self.current_epoch.expect("value set in root"),
+            network_magic: self.network_magic.expect("value set in root"),
+            protocol: self.protocol.expect("value set in root"),
         });
 
         Ok(())

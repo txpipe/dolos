@@ -1,7 +1,7 @@
 use std::ops::Deref;
 
 use dolos_core::batch::WorkDeltas;
-use dolos_core::{BlockSlot, ChainError, NsKey};
+use dolos_core::{BlockSlot, ChainError, Genesis, NsKey};
 use pallas::crypto::hash::{Hash, Hasher};
 use pallas::ledger::primitives::Epoch;
 use pallas::ledger::traverse::{MultiEraBlock, MultiEraCert, MultiEraTx};
@@ -232,8 +232,10 @@ impl BlockVisitor for PoolStateVisitor {
         &mut self,
         deltas: &mut WorkDeltas<CardanoLogic>,
         block: &MultiEraBlock,
+        _: &Genesis,
         pparams: &PParamsSet,
         epoch: Epoch,
+        _: u16,
     ) -> Result<(), ChainError> {
         self.epoch = Some(epoch);
         self.deposit = pparams.ensure_pool_deposit().ok();
