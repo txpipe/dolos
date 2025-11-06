@@ -274,7 +274,7 @@ pub fn protocol_constants(version: u16, genesis: &Genesis) -> ProtocolConstants 
             let epoch_length = FIVE_DAYS_IN_SECONDS / slot_length_in_secs;
 
             ProtocolConstants {
-                epoch_length: epoch_length,
+                epoch_length,
                 slot_length: slot_length_in_secs,
             }
         }

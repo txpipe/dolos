@@ -4,8 +4,8 @@ use dolos_core::{batch::WorkDeltas, BlockSlot, ChainError, Domain, EntityKey, Ge
 use tracing::{info, instrument};
 
 use crate::{
-    hacks, AccountState, CardanoDelta, CardanoEntity, CardanoLogic, Config, DRepState, EpochState,
-    EraProtocol, EraSummary, EraTransition, PoolState, ProposalState,
+    AccountState, CardanoDelta, CardanoEntity, CardanoLogic, Config, DRepState, EpochState,
+    EraProtocol, EraSummary, PoolState, ProposalState,
 };
 
 pub mod commit;

@@ -788,7 +788,7 @@ impl ProposalState {
             }
         }
 
-        return false;
+        false
     }
 
     pub fn was_canceled(&self, current_epoch: Epoch) -> bool {
@@ -798,7 +798,7 @@ impl ProposalState {
             }
         }
 
-        return false;
+        false
     }
 
     /// Returns true if the proposal is still beign evaluated. Not to confuse with `is_enacted`.

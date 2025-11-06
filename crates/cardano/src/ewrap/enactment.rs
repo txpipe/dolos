@@ -97,7 +97,7 @@ impl BoundaryVisitor {
 impl super::BoundaryVisitor for BoundaryVisitor {
     fn visit_enacting_proposal(
         &mut self,
-        ctx: &mut BoundaryWork,
+        _: &mut BoundaryWork,
         id: &ProposalId,
         proposal: &ProposalState,
         _: Option<&AccountState>,

@@ -249,7 +249,7 @@ impl TableRow for ProposalState {
                 format!("HardFork({:?})", x)
             }
             ProposalAction::TreasuryWithdrawal(x) => format!("TreasuryWithdrawal({:?})", x.len()),
-            ProposalAction::Other => format!("Other"),
+            ProposalAction::Other => "Other".to_string(),
         };
 
         vec![

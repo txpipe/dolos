@@ -70,7 +70,7 @@ impl dolos_core::EntityDelta for NewProposal {
             idx: self.idx,
             action: self.action.clone(),
             reward_account: self.reward_account.clone(),
-            deposit: self.deposit.clone(),
+            deposit: self.deposit,
             max_epoch,
             ratified_epoch,
             canceled_epoch,

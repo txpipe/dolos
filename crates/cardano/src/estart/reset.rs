@@ -123,7 +123,7 @@ impl dolos_core::EntityDelta for EpochTransition {
             *current = crate::forks::migrate_pparams_version(
                 transition.prev_version.into(),
                 transition.new_version.into(),
-                &current,
+                current,
                 self.genesis.as_ref().expect("genesis not set"),
             );
         }

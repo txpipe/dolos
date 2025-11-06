@@ -5,20 +5,17 @@ use pallas::{
     crypto::hash::Hash,
     ledger::{
         primitives::Epoch,
-        traverse::{
-            fees::compute_byron_fee, Era, MultiEraBlock, MultiEraCert, MultiEraTx, MultiEraUpdate,
-        },
+        traverse::{fees::compute_byron_fee, Era, MultiEraBlock, MultiEraCert, MultiEraTx},
     },
 };
 use serde::{Deserialize, Serialize};
-use tracing::debug;
 
 use crate::{
     model::{EpochState, FixedNamespace as _},
     owned::OwnedMultiEraOutput,
     pallas_extras,
     roll::BlockVisitor,
-    CardanoLogic, Lovelace, Nonces, PParamValue, PParamsSet, PoolHash, CURRENT_EPOCH_KEY,
+    CardanoLogic, Lovelace, Nonces, PParamsSet, PoolHash, CURRENT_EPOCH_KEY,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

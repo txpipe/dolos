@@ -1,8 +1,8 @@
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 use crate::{
-    batch::WorkBatch, ArchiveStore, Block as _, BlockSlot, ChainError, ChainLogic, ChainPoint,
-    Domain, DomainError, RawBlock, StateStore, TipEvent, WalStore, WorkKind, WorkUnit,
+    batch::WorkBatch, ArchiveStore, Block as _, BlockSlot, ChainLogic, ChainPoint, Domain,
+    DomainError, RawBlock, StateStore, TipEvent, WalStore, WorkUnit,
 };
 
 /// Process a batch of blocks during bulk import operations, skipping the WAL

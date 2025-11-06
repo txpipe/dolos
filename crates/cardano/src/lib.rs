@@ -128,6 +128,7 @@ impl WorkBuffer {
         }
     }
 
+    #[allow(clippy::match_like_matches_macro)]
     fn can_receive_block(&self) -> bool {
         match self {
             WorkBuffer::Empty => true,
