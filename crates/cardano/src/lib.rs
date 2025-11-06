@@ -3,7 +3,8 @@ use pallas::ledger::{
     traverse::{MultiEraBlock, MultiEraOutput},
 };
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use tracing::info;
 
 // re-export pallas for version compatibility downstream
 pub use pallas;
@@ -113,20 +114,6 @@ impl WorkBuffer {
         Self::Restart(cursor)
     }
 
-    fn peek_work(&self) -> Option<WorkKind> {
-        match self {
-            WorkBuffer::Empty => None,
-            WorkBuffer::Restart(..) => None,
-            WorkBuffer::Genesis(..) => Some(WorkKind::Genesis),
-            WorkBuffer::OpenBatch(..) => Some(WorkKind::Blocks),
-            WorkBuffer::PreRupdBoundary(..) => Some(WorkKind::Blocks),
-            WorkBuffer::RupdBoundary(..) => Some(WorkKind::Rupd),
-            WorkBuffer::PreEwrapBoundary(..) => Some(WorkKind::Blocks),
-            WorkBuffer::EwrapBoundary(..) => Some(WorkKind::EWrap),
-            WorkBuffer::EstartBoundary(..) => Some(WorkKind::EStart),
-        }
-    }
-
     fn last_point_seen(&self) -> ChainPoint {
         match self {
             WorkBuffer::Empty => ChainPoint::Origin,
@@ -226,41 +213,40 @@ impl WorkBuffer {
         self.extend_batch(block)
     }
 
-    fn pop_work(self) -> Option<(WorkUnit<CardanoLogic>, Self)> {
+    fn pop_work(self) -> (Option<WorkUnit<CardanoLogic>>, Self) {
         if matches!(self, WorkBuffer::Restart(..)) || matches!(self, WorkBuffer::Empty) {
-            return None;
+            return (None, self);
         }
 
-        let next = match self {
+        match self {
             WorkBuffer::Genesis(block) => (
-                WorkUnit::Genesis,
+                Some(WorkUnit::Genesis),
                 Self::OpenBatch(WorkBatch::for_single_block(WorkBlock::new(block))),
             ),
             WorkBuffer::OpenBatch(batch) => {
                 let last_point = batch.last_point();
-                (WorkUnit::Blocks(batch), Self::Restart(last_point))
+                (Some(WorkUnit::Blocks(batch)), Self::Restart(last_point))
             }
             WorkBuffer::PreRupdBoundary(batch, block) => {
-                (WorkUnit::Blocks(batch), Self::RupdBoundary(block))
+                (Some(WorkUnit::Blocks(batch)), Self::RupdBoundary(block))
             }
             WorkBuffer::RupdBoundary(block) => (
-                WorkUnit::Rupd(block.slot()),
+                Some(WorkUnit::Rupd(block.slot())),
                 Self::OpenBatch(WorkBatch::for_single_block(WorkBlock::new(block))),
             ),
             WorkBuffer::PreEwrapBoundary(batch, block) => {
-                (WorkUnit::Blocks(batch), Self::EwrapBoundary(block))
+                (Some(WorkUnit::Blocks(batch)), Self::EwrapBoundary(block))
             }
-            WorkBuffer::EwrapBoundary(block) => {
-                (WorkUnit::EWrap(block.slot()), Self::EstartBoundary(block))
-            }
+            WorkBuffer::EwrapBoundary(block) => (
+                Some(WorkUnit::EWrap(block.slot())),
+                Self::EstartBoundary(block),
+            ),
             WorkBuffer::EstartBoundary(block) => (
-                WorkUnit::EStart(block.slot()),
+                Some(WorkUnit::EStart(block.slot())),
                 Self::OpenBatch(WorkBatch::for_single_block(WorkBlock::new(block))),
             ),
             _ => unreachable!(),
-        };
-
-        Some(next)
+        }
     }
 }
 
@@ -270,18 +256,15 @@ struct Cache {
     rewards: Option<RewardMap<RupdWork>>,
 }
 
-#[derive(Clone)]
 pub struct CardanoLogic {
     config: Config,
-    work: Arc<RwLock<Box<WorkBuffer>>>,
-    cache: Arc<RwLock<Cache>>,
+    work: Option<WorkBuffer>,
+    cache: Cache,
 }
 
 impl CardanoLogic {
-    fn refresh_cache<D: Domain>(&self, state: &D::State) -> Result<(), ChainError> {
-        let mut cache = self.cache.write().unwrap();
-
-        cache.eras = eras::load_era_summary::<D>(state)?;
+    fn refresh_cache<D: Domain>(&mut self, state: &D::State) -> Result<(), ChainError> {
+        self.cache.eras = eras::load_era_summary::<D>(state)?;
 
         Ok(())
     }
@@ -299,6 +282,8 @@ impl dolos_core::ChainLogic for CardanoLogic {
         state: &D::State,
         genesis: &Genesis,
     ) -> Result<Self, ChainError> {
+        info!("initializing");
+
         let cursor = state.read_cursor()?;
 
         let work = match cursor {
@@ -312,58 +297,49 @@ impl dolos_core::ChainLogic for CardanoLogic {
 
         Ok(Self {
             config,
-            cache: Arc::new(RwLock::new(Cache {
+            cache: Cache {
                 eras,
                 stability_window,
                 rewards: None,
-            })),
-            work: Arc::new(RwLock::new(Box::new(work))),
+            },
+            work: Some(work),
         })
     }
 
     fn can_receive_block(&self) -> bool {
-        let work = self.work.read().unwrap();
+        let work = self.work.as_ref().expect("work buffer is initialized");
         work.can_receive_block()
     }
 
-    fn receive_block(&self, raw: RawBlock) -> Result<BlockSlot, ChainError> {
-        let mut work = self.work.write().unwrap();
-
-        if !work.can_receive_block() {
+    fn receive_block(&mut self, raw: RawBlock) -> Result<BlockSlot, ChainError> {
+        if !self.can_receive_block() {
             return Err(ChainError::CantReceiveBlock(raw));
         }
 
         let block = OwnedMultiEraBlock::decode(raw)?;
 
-        let cache = self.cache.read().unwrap();
+        let work = self.work.take().expect("work buffer is initialized");
+        let new_work = work.receive_block(block, &self.cache.eras, self.cache.stability_window);
 
-        // Extract the WorkBuffer from the Box, apply transformation, and put it back
-        let new_work =
-            std::mem::take(&mut **work).receive_block(block, &cache.eras, cache.stability_window);
+        let last = new_work.last_point_seen().slot();
 
-        *work = Box::new(new_work);
+        self.work = Some(new_work);
 
-        Ok(work.last_point_seen().slot())
+        Ok(last)
     }
 
-    fn peek_work(&self) -> Option<WorkKind> {
-        let work = self.work.read().unwrap();
-        work.peek_work()
-    }
+    fn pop_work(&mut self) -> Option<WorkUnit<Self>> {
+        let work = self.work.take().expect("work buffer is initialized");
 
-    fn pop_work(&self) -> Option<WorkUnit<Self>> {
-        let mut work = self.work.write().unwrap();
+        let (work_unit, new_buffer) = work.pop_work();
 
-        let Some((work_unit, new_buffer)) = std::mem::take(&mut **work).pop_work() else {
-            return None;
-        };
+        self.work = Some(new_buffer);
 
-        *work = Box::new(new_buffer);
-        Some(work_unit)
+        work_unit
     }
 
     fn apply_genesis<D: Domain>(
-        &self,
+        &mut self,
         state: &D::State,
         genesis: Arc<Genesis>,
     ) -> Result<(), ChainError> {
@@ -375,19 +351,15 @@ impl dolos_core::ChainLogic for CardanoLogic {
     }
 
     fn apply_ewrap<D: Domain>(
-        &self,
+        &mut self,
         state: &D::State,
         archive: &D::Archive,
         genesis: Arc<Genesis>,
         at: BlockSlot,
     ) -> Result<(), ChainError> {
-        let mut cache = self.cache.write().unwrap();
-
-        let rewards = cache.rewards.take().unwrap_or_default();
+        let rewards = self.cache.rewards.take().unwrap_or_default();
 
         ewrap::execute::<D>(state, archive, at, &self.config, genesis, rewards)?;
-
-        drop(cache);
 
         self.refresh_cache::<D>(state)?;
 
@@ -395,7 +367,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
     }
 
     fn apply_estart<D: Domain>(
-        &self,
+        &mut self,
         state: &D::State,
         archive: &D::Archive,
         genesis: Arc<Genesis>,
@@ -409,7 +381,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
     }
 
     fn apply_rupd<D: Domain>(
-        &self,
+        &mut self,
         state: &D::State,
         archive: &D::Archive,
         genesis: Arc<Genesis>,
@@ -417,9 +389,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
     ) -> Result<(), ChainError> {
         let rewards = rupd::execute::<D>(state, archive, at, &genesis)?;
 
-        let mut cache = self.cache.write().unwrap();
-
-        cache.rewards = Some(rewards);
+        self.cache.rewards = Some(rewards);
 
         Ok(())
     }
@@ -440,9 +410,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
         genesis: Arc<Genesis>,
         batch: &mut WorkBatch<Self>,
     ) -> Result<(), ChainError> {
-        let cache = self.cache.read().unwrap();
-
-        roll::compute_delta::<D>(&self.config, genesis, &cache, state, batch)?;
+        roll::compute_delta::<D>(&self.config, genesis, &self.cache, state, batch)?;
 
         Ok(())
     }

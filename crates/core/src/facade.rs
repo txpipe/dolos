@@ -1,4 +1,4 @@
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::{
     batch::WorkBatch, ArchiveStore, Block as _, BlockSlot, ChainError, ChainLogic, ChainPoint,
@@ -8,18 +8,17 @@ use crate::{
 /// Process a batch of blocks during bulk import operations, skipping the WAL
 /// and doesn't notify tip
 fn execute_batch<D: Domain>(
+    chain: &D::Chain,
     domain: &D,
     batch: &mut WorkBatch<D::Chain>,
     with_wal: bool,
 ) -> Result<BlockSlot, DomainError> {
     batch.load_utxos(domain)?;
 
-    batch.decode_utxos(domain.chain())?;
+    batch.decode_utxos(chain)?;
 
     // Chain-specific logic
-    domain
-        .chain()
-        .compute_delta::<D>(domain.state(), domain.genesis(), batch)?;
+    chain.compute_delta::<D>(domain.state(), domain.genesis(), batch)?;
 
     if with_wal {
         batch.commit_wal(domain)?;
@@ -50,82 +49,82 @@ fn notify_work<D: Domain>(domain: &D, work: &WorkUnit<D::Chain>) {
 }
 
 fn execute_work<D: Domain>(
+    chain: &mut D::Chain,
     domain: &D,
     work: &mut WorkUnit<D::Chain>,
-    with_wal: bool,
+    live: bool,
 ) -> Result<(), DomainError> {
     match work {
         WorkUnit::Genesis => {
-            domain
-                .chain()
-                .apply_genesis::<D>(domain.state(), domain.genesis())?;
-
+            chain.apply_genesis::<D>(domain.state(), domain.genesis())?;
             domain.wal().reset_to(&ChainPoint::Origin)?;
         }
-
         WorkUnit::EWrap(slot) => {
-            domain.chain().apply_ewrap::<D>(
-                domain.state(),
-                domain.archive(),
-                domain.genesis(),
-                *slot,
-            )?;
+            chain.apply_ewrap::<D>(domain.state(), domain.archive(), domain.genesis(), *slot)?;
         }
         WorkUnit::EStart(slot) => {
-            domain.chain().apply_estart::<D>(
-                domain.state(),
-                domain.archive(),
-                domain.genesis(),
-                *slot,
-            )?;
+            chain.apply_estart::<D>(domain.state(), domain.archive(), domain.genesis(), *slot)?;
         }
         WorkUnit::Rupd(slot) => {
-            domain.chain().apply_rupd::<D>(
-                domain.state(),
-                domain.archive(),
-                domain.genesis(),
-                *slot,
-            )?;
+            chain.apply_rupd::<D>(domain.state(), domain.archive(), domain.genesis(), *slot)?;
         }
         WorkUnit::Blocks(batch) => {
-            execute_batch(domain, batch, with_wal)?;
+            execute_batch(chain, domain, batch, live)?;
         }
+    };
+
+    if live {
+        notify_work(domain, work);
     }
 
     Ok(())
 }
 
-fn drain_pending_work<D: Domain>(domain: &D) -> Result<(), DomainError> {
-    while !domain.chain().can_receive_block() {
-        if let Some(mut work) = domain.chain().pop_work() {
-            execute_work(domain, &mut work, false)?;
-        }
+async fn drain_pending_work<D: Domain>(
+    chain: &mut D::Chain,
+    domain: &D,
+    live: bool,
+) -> Result<(), DomainError> {
+    while let Some(mut work) = chain.pop_work() {
+        execute_work(chain, domain, &mut work, live)?;
     }
 
     Ok(())
 }
 
-pub fn import_blocks<D: Domain>(
+pub async fn import_blocks<D: Domain>(
     domain: &D,
     mut raw: Vec<RawBlock>,
 ) -> Result<BlockSlot, DomainError> {
     let mut last = 0;
+    let mut chain = domain.write_chain().await;
 
     for block in raw.drain(..) {
-        drain_pending_work(domain)?;
-        last = domain.chain().receive_block(block)?;
+        if !chain.can_receive_block() {
+            drain_pending_work(&mut *chain, domain, false).await?;
+        }
+
+        last = chain.receive_block(block)?;
     }
+
+    // one last drain to ensure we're up to date
+    drain_pending_work(&mut *chain, domain, false).await?;
 
     Ok(last)
 }
 
-pub fn roll_forward<D: Domain>(domain: &D, block: RawBlock) -> Result<BlockSlot, DomainError> {
-    let last = domain.chain().receive_block(block)?;
+pub async fn roll_forward<D: Domain>(
+    domain: &D,
+    block: RawBlock,
+) -> Result<BlockSlot, DomainError> {
+    let mut chain = domain.write_chain().await;
 
-    while let Some(mut work) = domain.chain().pop_work() {
-        execute_work(domain, &mut work, true)?;
-        notify_work(domain, &work);
-    }
+    // we drain first in case there's previous work that needs to be applied (eg: initialization).
+    drain_pending_work(&mut *chain, domain, true).await?;
+
+    let last = chain.receive_block(block)?;
+
+    drain_pending_work(&mut *chain, domain, true).await?;
 
     Ok(last)
 }
@@ -189,7 +188,7 @@ pub fn check_integrity<D: Domain>(domain: &D) -> Result<(), DomainError> {
     Ok(())
 }
 
-pub fn bootstrap<D: Domain>(domain: &D) -> Result<(), DomainError>
+pub async fn bootstrap<D: Domain>(domain: &D) -> Result<(), DomainError>
 where
 {
     check_integrity(domain)?;
@@ -198,7 +197,8 @@ where
     // catch_up_stores(domain)?;
 
     // drain any work that might have been defined by the initialization
-    drain_pending_work(domain)?;
+    let mut chain = domain.write_chain().await;
+    drain_pending_work(&mut *chain, domain, false).await?;
 
     Ok(())
 }

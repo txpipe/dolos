@@ -12,6 +12,9 @@ tracing.workspace = true
 futures-core.workspace = true
 rayon.workspace = true
 
+# TODO: we shouldn't need Tokio in core
+tokio.workspace = true
+
 # TODO: we shouldn't need Pallas in core
 pallas.workspace = true
 hex.workspace = true

@@ -77,9 +77,10 @@ pub fn compute_nonce<D: Domain>(epoch: u64, domain: &D) -> miette::Result<Hash<3
     Ok(nonces.active)
 }
 
-pub fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
+#[tokio::main]
+pub async fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging)?;
-    let domain = crate::common::setup_domain(config)?;
+    let domain = crate::common::setup_domain(config).await?;
 
     let nonce = compute_nonce(args.epoch, &domain)?;
     println!("{}", hex::encode(nonce.as_slice()));

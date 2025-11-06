@@ -41,7 +41,7 @@ pub struct DomainAdapter {
     pub storage_config: Arc<StorageConfig>,
     pub genesis: Arc<Genesis>,
     pub wal: WalAdapter,
-    pub chain: CardanoLogic,
+    pub chain: Arc<tokio::sync::RwLock<CardanoLogic>>,
     pub state: dolos_redb3::state::StateStore,
     pub archive: dolos_redb3::archive::ArchiveStore,
     pub mempool: crate::mempool::Mempool,
@@ -62,8 +62,12 @@ impl Domain for DomainAdapter {
         self.genesis.clone()
     }
 
-    fn chain(&self) -> &Self::Chain {
-        &self.chain
+    async fn read_chain(&self) -> tokio::sync::RwLockReadGuard<'_, Self::Chain> {
+        self.chain.read().await
+    }
+
+    async fn write_chain(&self) -> tokio::sync::RwLockWriteGuard<'_, Self::Chain> {
+        self.chain.write().await
     }
 
     fn wal(&self) -> &Self::Wal {

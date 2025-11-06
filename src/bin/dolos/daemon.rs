@@ -9,7 +9,7 @@ pub struct Args {}
 pub async fn run(config: super::Config, _args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging)?;
 
-    let domain = crate::common::setup_domain(&config)?;
+    let domain = crate::common::setup_domain(&config).await?;
 
     let exit = crate::common::hook_exit_token();
 

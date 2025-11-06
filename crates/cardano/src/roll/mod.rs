@@ -14,7 +14,7 @@ use pallas::{
         },
     },
 };
-use tracing::{info, instrument};
+use tracing::{debug, instrument};
 
 use crate::{
     load_effective_pparams, owned::OwnedMultiEraOutput, roll::proposals::ProposalVisitor, utxoset,
@@ -333,17 +333,16 @@ pub fn compute_delta<D: Domain>(
     state: &D::State,
     batch: &mut WorkBatch<CardanoLogic>,
 ) -> Result<(), ChainError> {
-    info!(
-        from = batch.first_slot(),
-        to = batch.last_slot(),
-        "computing delta"
-    );
-
     let (epoch, _) = cache.eras.slot_epoch(batch.first_slot());
 
     let (protocol, _) = cache.eras.protocol_and_era_for_epoch(epoch);
 
-    info!(epoch, "current epoch");
+    debug!(
+        from = batch.first_slot(),
+        to = batch.last_slot(),
+        epoch,
+        "computing delta"
+    );
 
     let active_params = load_effective_pparams::<D>(state)?;
 

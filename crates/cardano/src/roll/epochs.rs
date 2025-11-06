@@ -47,7 +47,7 @@ impl dolos_core::EntityDelta for EpochStatsUpdate {
     }
 
     fn apply(&mut self, entity: &mut Option<EpochState>) {
-        let Some(entity) = entity else { return };
+        let entity = entity.as_mut().expect("existing epoch");
 
         let stats = entity.rolling.live_mut_unchecked().get_or_insert_default();
 

@@ -1,6 +1,6 @@
 use dolos_core::{ChainError, Domain, Genesis, StateStore};
 use pallas::ledger::primitives::StakeCredential;
-use tracing::{debug, info};
+use tracing::{debug, info, trace};
 
 use crate::{
     pallas_ratio,
@@ -60,7 +60,7 @@ fn define_epoch_incentives(
     let pparams = state.pparams.unwrap_live();
 
     if pparams.is_byron() {
-        info!("no pot changes during Byron epoch");
+        debug!("no pot changes during Byron epoch");
         return Ok(neutral_incentives());
     }
 
@@ -164,10 +164,10 @@ impl StakeSnapshot {
         }
 
         for (pool_id, stake) in snapshot.pool_stake.iter() {
-            debug!(%pool_id, %stake, "pool stake");
+            trace!(%pool_id, %stake, "pool stake");
         }
 
-        debug!(
+        trace!(
             active_stake = %snapshot.active_stake_sum,
             "stake aggregation"
         );

@@ -593,25 +593,20 @@ pub trait ChainLogic: Sized + Send + Sync {
         genesis: &Genesis,
     ) -> Result<Self, ChainError>;
 
-    // TODO: there's a risk for potential race conditions between peek_work and
-    // pop_work. It has low probability since we use these methods in the same
-    // thread and with extra care. Regardless, we should revisit the `WorkBuffer`
-    // approach so that we have an overarching lock of the the work state.
+    // TODO: having the chain logic be mutable is a code smell. It was initially designed
+    // to be a static, central point for chain-specific logic. Making it hold shared state is ugly.
     //
     // One way to fix this is to move the WorkBuffer concept to the core crate and
     // let the domain "own" the data and let the chain borrow it for mutations.
-    fn peek_work(&self) -> Option<WorkKind>;
-    fn pop_work(&self) -> Option<WorkUnit<Self>>;
-
     fn can_receive_block(&self) -> bool;
-
-    fn receive_block(&self, raw: RawBlock) -> Result<BlockSlot, ChainError>;
+    fn receive_block(&mut self, raw: RawBlock) -> Result<BlockSlot, ChainError>;
+    fn pop_work(&mut self) -> Option<WorkUnit<Self>>;
 
     // TODO: we should invert responsibility here. The chain logic should tell the
     // domain what to do instead of passing everything down and expecting it to do
     // the right thing.
     fn apply_genesis<D: Domain>(
-        &self,
+        &mut self,
         state: &D::State,
         genesis: Arc<Genesis>,
     ) -> Result<(), ChainError>;
@@ -620,7 +615,7 @@ pub trait ChainLogic: Sized + Send + Sync {
     // domain what to do instead of passing everything down and expecting it to do
     // the right thing.
     fn apply_ewrap<D: Domain>(
-        &self,
+        &mut self,
         state: &D::State,
         archive: &D::Archive,
         genesis: Arc<Genesis>,
@@ -631,7 +626,7 @@ pub trait ChainLogic: Sized + Send + Sync {
     // domain what to do instead of passing everything down and expecting it to do
     // the right thing.
     fn apply_estart<D: Domain>(
-        &self,
+        &mut self,
         state: &D::State,
         archive: &D::Archive,
         genesis: Arc<Genesis>,
@@ -642,7 +637,7 @@ pub trait ChainLogic: Sized + Send + Sync {
     // domain what to do instead of passing everything down and expecting it to do
     // the right thing.
     fn apply_rupd<D: Domain>(
-        &self,
+        &mut self,
         state: &D::State,
         archive: &D::Archive,
         genesis: Arc<Genesis>,
@@ -707,6 +702,7 @@ pub trait TipSubscription: Send + Sync + 'static {
     async fn next_tip(&mut self) -> TipEvent;
 }
 
+#[trait_variant::make(Send)]
 pub trait Domain: Send + Sync + Clone + 'static {
     type Entity: Entity;
     type EntityDelta: EntityDelta<Entity = Self::Entity> + std::fmt::Debug;
@@ -722,7 +718,8 @@ pub trait Domain: Send + Sync + Clone + 'static {
     fn storage_config(&self) -> &StorageConfig;
     fn genesis(&self) -> Arc<Genesis>;
 
-    fn chain(&self) -> &Self::Chain;
+    async fn read_chain(&self) -> tokio::sync::RwLockReadGuard<'_, Self::Chain>;
+    async fn write_chain(&self) -> tokio::sync::RwLockWriteGuard<'_, Self::Chain>;
 
     fn wal(&self) -> &Self::Wal;
     fn state(&self) -> &Self::State;

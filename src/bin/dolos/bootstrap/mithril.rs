@@ -186,14 +186,14 @@ fn define_starting_point(
     }
 }
 
-fn import_hardano_into_domain(
+async fn import_hardano_into_domain(
     args: &Args,
     config: &crate::Config,
     immutable_path: &Path,
     feedback: &Feedback,
     chunk_size: usize,
 ) -> Result<(), miette::Error> {
-    let domain = crate::common::setup_domain(config)?;
+    let domain = crate::common::setup_domain(config).await?;
 
     let tip = pallas::storage::hardano::immutable::get_tip(immutable_path)
         .map_err(|err| miette::miette!(err.to_string()))
@@ -222,6 +222,7 @@ fn import_hardano_into_domain(
         let batch: Vec<_> = batch.into_iter().map(Arc::new).collect();
 
         let last = dolos_core::facade::import_blocks(&domain, batch)
+            .await
             .map_err(|e| miette::miette!(e.to_string()))?;
 
         progress.set_position(last);
@@ -232,7 +233,8 @@ fn import_hardano_into_domain(
     Ok(())
 }
 
-pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::Result<()> {
+#[tokio::main]
+pub async fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::Result<()> {
     if args.verbose {
         crate::common::setup_tracing(&config.logging)?;
     }
@@ -265,7 +267,7 @@ pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::
 
     let immutable_path = Path::new(&args.download_dir).join("immutable");
 
-    import_hardano_into_domain(args, config, &immutable_path, feedback, args.chunk_size)?;
+    import_hardano_into_domain(args, config, &immutable_path, feedback, args.chunk_size).await?;
 
     if !args.retain_snapshot {
         info!("deleting downloaded snapshot");

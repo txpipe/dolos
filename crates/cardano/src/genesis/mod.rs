@@ -17,8 +17,6 @@ fn get_utxo_amount(genesis: &Genesis) -> Lovelace {
     byron_utxo + shelley_utxo
 }
 
-const SHELLEY_PROTOCOL: u16 = 2;
-
 fn bootstrap_pots(pparams: &PParamsSet, genesis: &Genesis) -> Result<Pots, ChainError> {
     let utxos = get_utxo_amount(genesis);
 
