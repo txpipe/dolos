@@ -118,7 +118,7 @@ impl gasket::framework::Worker<Stage> for Worker {
     async fn bootstrap(stage: &Stage) -> Result<Self, WorkerError> {
         debug!("finding intersection candidates");
 
-        let candidates = stage
+        let mut candidates = stage
             .wal
             .intersect_candidates(5)
             .or_panic()?
@@ -126,6 +126,10 @@ impl gasket::framework::Worker<Stage> for Worker {
             .map(TryFrom::try_from)
             .filter_map(|x| x.ok())
             .collect_vec();
+
+        if candidates.is_empty() {
+            candidates.push(Point::Origin);
+        }
 
         debug!("connecting to peer");
 
