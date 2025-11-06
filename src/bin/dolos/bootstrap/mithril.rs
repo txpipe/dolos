@@ -256,9 +256,8 @@ pub async fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> mi
     }
 
     if !args.skip_download {
-        tokio::runtime::Runtime::new()
-            .unwrap()
-            .block_on(fetch_snapshot(args, mithril, feedback))
+        fetch_snapshot(args, mithril, feedback)
+            .await
             .map_err(|err| miette::miette!(err.to_string()))
             .context("fetching and validating mithril snapshot")?;
     } else {
