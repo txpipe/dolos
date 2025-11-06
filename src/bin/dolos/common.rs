@@ -109,7 +109,7 @@ pub fn setup_data_stores(config: &crate::Config) -> Result<Stores, Error> {
     }
 }
 
-pub fn setup_domain(config: &crate::Config) -> miette::Result<DomainAdapter> {
+pub async fn setup_domain(config: &crate::Config) -> miette::Result<DomainAdapter> {
     let stores = setup_data_stores(config)?;
     let genesis = Arc::new(open_genesis_files(&config.genesis)?);
     let mempool = dolos::mempool::Mempool::new();
@@ -118,14 +118,17 @@ pub fn setup_domain(config: &crate::Config) -> miette::Result<DomainAdapter> {
 
     let ChainConfig::Cardano(chain_config) = chain;
 
-    let chain =
-        dolos_cardano::CardanoLogic::initialize::<DomainAdapter>(chain_config, &stores.state)
-            .into_diagnostic()?;
+    let chain = dolos_cardano::CardanoLogic::initialize::<DomainAdapter>(
+        chain_config,
+        &stores.state,
+        &genesis,
+    )
+    .into_diagnostic()?;
 
     let domain = DomainAdapter {
         storage_config: Arc::new(config.storage.clone()),
         genesis,
-        chain,
+        chain: Arc::new(tokio::sync::RwLock::new(chain)),
         wal: stores.wal,
         state: stores.state,
         archive: stores.archive,
@@ -134,7 +137,9 @@ pub fn setup_domain(config: &crate::Config) -> miette::Result<DomainAdapter> {
     };
 
     // this will make sure the domain is correctly initialized and in a valid state.
-    dolos_core::facade::bootstrap(&domain).map_err(|x| miette::miette!("{:?}", x))?;
+    dolos_core::facade::bootstrap(&domain)
+        .await
+        .map_err(|x| miette::miette!("{:?}", x))?;
 
     Ok(domain)
 }

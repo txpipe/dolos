@@ -1,10 +1,14 @@
 use std::marker::PhantomData;
 
 use comfy_table::Table;
-use dolos_cardano::{model::AccountState, EpochState, EraSummary, PoolState};
+use dolos_cardano::{
+    model::AccountState, EpochState, EpochValue, EraSummary, PoolSnapshot, PoolState,
+    ProposalAction, ProposalState,
+};
 use miette::{Context, IntoDiagnostic};
 
 use dolos::prelude::*;
+use pallas::ledger::primitives::Epoch;
 
 #[derive(Debug, clap::Args)]
 pub struct Args {
@@ -22,42 +26,56 @@ trait TableRow: Entity {
     fn row(&self, key: &EntityKey) -> Vec<String>;
 }
 
+fn format_stake_at(account: &AccountState, epoch: Epoch) -> String {
+    let stake = account
+        .stake
+        .snapshot_at(epoch)
+        .map(|x| x.total().to_string());
+
+    let pool = account
+        .delegated_pool_at(epoch)
+        .map(|x| hex::encode(x.as_ref())[..3].to_string());
+
+    format!(
+        "{} ({})",
+        stake.unwrap_or_else(|| "x".to_string()),
+        pool.unwrap_or_else(|| "x".to_string())
+    )
+}
+
 impl TableRow for AccountState {
     fn header() -> Vec<&'static str> {
         vec![
             "cred",
-            "active stake",
-            "wait stake",
-            "rewards sum",
-            "withdrawals sum",
-            "latest pool",
-            "active pool",
-            "drep",
+            "reg",
+            "dereg",
+            "stake (-3)",
+            "stake (-2)",
+            "stake (-1)",
+            "live stake",
+            "rewards",
+            "withdrawals",
+            "epoch version",
         ]
     }
 
     fn row(&self, key: &EntityKey) -> Vec<String> {
+        let epoch = self.stake.epoch().unwrap_or_default();
+
         vec![
             format!("{}", hex::encode(key)),
-            format!("{}", self.active_stake),
-            format!("{}", self.wait_stake),
-            format!("{}", self.rewards_sum),
-            format!("{}", self.withdrawals_sum),
+            format!("{}", self.registered_at.unwrap_or_default()),
+            format!("{}", self.deregistered_at.unwrap_or_default()),
+            format_stake_at(self, epoch - 3),
+            format_stake_at(self, epoch - 2),
+            format_stake_at(self, epoch - 1),
+            format_stake_at(self, epoch),
             format!(
-                "{}",
-                self.latest_pool
-                    .as_ref()
-                    .map(hex::encode)
-                    .unwrap_or_default()
+                "{},{},{}",
+                self.stake.epoch().unwrap_or_default(),
+                self.pool.epoch().unwrap_or_default(),
+                self.drep.epoch().unwrap_or_default(),
             ),
-            format!(
-                "{}",
-                self.active_pool
-                    .as_ref()
-                    .map(hex::encode)
-                    .unwrap_or_default()
-            ),
-            format!("{}", self.latest_drep.is_some()),
         ]
     }
 }
@@ -67,30 +85,47 @@ impl TableRow for EpochState {
         vec![
             "number",
             "version",
+            "pot reserves",
+            "pot utxos",
+            "pot treasury",
+            "pot deposits",
+            "pot rewards",
+            "pot fees",
             "gathered fees",
-            "gathered deposits",
-            "decayed deposits",
-            "reserves",
-            "utxos",
-            "treasury",
-            "to treasury",
-            "to distribute",
+            "pparams",
             "nonce",
         ]
     }
 
     fn row(&self, _key: &EntityKey) -> Vec<String> {
+        let pparams = self.pparams.live();
+
         vec![
             format!("{}", self.number),
-            format!("{}", self.pparams.protocol_major().unwrap_or_default()),
-            format!("{}", self.gathered_fees),
-            format!("{}", self.gathered_deposits),
-            format!("{}", self.decayed_deposits),
-            format!("{}", self.reserves),
-            format!("{}", self.utxos),
-            format!("{}", self.treasury),
-            format!("{}", self.rewards_to_treasury.unwrap_or_default()),
-            format!("{}", self.rewards_to_distribute.unwrap_or_default()),
+            format!(
+                "{}",
+                pparams
+                    .as_ref()
+                    .and_then(|x| x.protocol_major())
+                    .unwrap_or_default()
+            ),
+            format!("{}", self.initial_pots.reserves),
+            format!("{}", self.initial_pots.utxos),
+            format!("{}", self.initial_pots.treasury),
+            format!("{}", self.initial_pots.obligations()),
+            format!("{}", self.initial_pots.rewards),
+            format!("{}", self.initial_pots.fees),
+            format!(
+                "{}",
+                self.rolling
+                    .live()
+                    .map(|x| x.gathered_fees)
+                    .unwrap_or_default()
+            ),
+            format!(
+                "{}",
+                self.pparams.live().map(|x| x.len()).unwrap_or_default()
+            ),
             format!(
                 "{}",
                 self.nonces
@@ -135,45 +170,117 @@ impl TableRow for EraSummary {
     }
 }
 
+const POOL_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("pool");
+
+fn format_pool_epoch(values: &EpochValue<PoolSnapshot>, epoch_delta: u64) -> String {
+    let epoch = values
+        .epoch()
+        .unwrap_or_default()
+        .saturating_sub(epoch_delta);
+
+    let snapshot = values.snapshot_at(epoch);
+
+    format!(
+        "{} {} ({})",
+        snapshot.map(|x| x.is_retired).unwrap_or_default(),
+        snapshot.map(|x| x.blocks_minted).unwrap_or_default(),
+        epoch,
+    )
+}
+
 impl TableRow for PoolState {
     fn header() -> Vec<&'static str> {
         vec![
             "key",
-            "vrf keyhash",
-            "reward account",
-            "active stake",
-            "wait stake",
-            "blocks minted",
+            "pool bech32",
+            "registered at",
+            "retiring epoch",
+            "pledge (go)",
+            "pledge (set)",
+            "pledge (mark)",
+            "pledge (live)",
+            "pledge (next)",
         ]
     }
 
     fn row(&self, key: &EntityKey) -> Vec<String> {
+        let entity_key = key.clone();
+        let pool_hash = entity_key.as_ref()[..28].try_into().unwrap();
+        let pool_hex = hex::encode(pool_hash);
+        let pool_bech32 = bech32::encode::<bech32::Bech32>(POOL_HRP, pool_hash).unwrap();
+
         vec![
-            format!("{}", hex::encode(key)),
-            format!("{}", self.vrf_keyhash),
-            format!("{}", hex::encode(&self.reward_account)),
-            format!("{}", self.active_stake),
-            format!("{}", self.wait_stake),
-            format!("{}", self.blocks_minted_total),
+            format!("{}", pool_hex),
+            format!("{}", pool_bech32),
+            format!("{}", self.register_slot),
+            format!(
+                "{}",
+                self.retiring_epoch
+                    .map(|x| x.to_string())
+                    .unwrap_or_default()
+            ),
+            format_pool_epoch(&self.snapshot, 3),
+            format_pool_epoch(&self.snapshot, 2),
+            format_pool_epoch(&self.snapshot, 1),
+            format_pool_epoch(&self.snapshot, 0),
         ]
     }
 }
 
-// impl TableRow for RewardLog {
-//     fn header() -> Vec<&'static str> {
-//         vec!["key", "epoch", "amount", "pool id", "as leader"]
-//     }
+impl TableRow for ProposalState {
+    fn header() -> Vec<&'static str> {
+        vec![
+            "key",
+            "tx",
+            "idx",
+            "action",
+            "max epoch",
+            "ratified epoch",
+            "canceled epoch",
+            "deposit",
+            "reward account",
+        ]
+    }
 
-//     fn row(&self, key: &EntityKey) -> Vec<String> {
-//         vec![
-//             format!("{}", hex::encode(key)),
-//             format!("{}", self.epoch),
-//             format!("{}", hex::encode(&self.pool_id)),
-//             format!("{}", self.amount),
-//             format!("{}", self.as_leader),
-//         ]
-//     }
-// }
+    fn row(&self, key: &EntityKey) -> Vec<String> {
+        let action = match &self.action {
+            ProposalAction::ParamChange(x) => format!("Params({})", x.len()),
+            ProposalAction::HardFork((x, _)) => {
+                format!("HardFork({:?})", x)
+            }
+            ProposalAction::TreasuryWithdrawal(x) => format!("TreasuryWithdrawal({:?})", x.len()),
+            ProposalAction::Other => "Other".to_string(),
+        };
+
+        vec![
+            format!("{}", hex::encode(key)),
+            format!("{}", hex::encode(self.tx)),
+            format!("{}", self.idx),
+            format!("{}", action),
+            format!(
+                "{}",
+                self.max_epoch.map(|x| x.to_string()).unwrap_or_default()
+            ),
+            format!(
+                "{}",
+                self.ratified_epoch
+                    .map(|x| x.to_string())
+                    .unwrap_or_default()
+            ),
+            format!(
+                "{}",
+                self.canceled_epoch
+                    .map(|x| x.to_string())
+                    .unwrap_or_default()
+            ),
+            format!(
+                "{}",
+                self.deposit.map(|x| x.to_string()).unwrap_or_default()
+            ),
+            format!("{}", self.reward_account.is_some()),
+        ]
+    }
+}
 
 enum Formatter<T: TableRow> {
     Table(Table, PhantomData<T>),
@@ -237,7 +344,7 @@ pub fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
         "epochs" => dump_state::<EpochState>(&state, "epochs", args.count)?,
         "accounts" => dump_state::<AccountState>(&state, "accounts", args.count)?,
         "pools" => dump_state::<PoolState>(&state, "pools", args.count)?,
-        //"rewards" => dump_state::<RewardState>(&state, "rewards", args.count)?,
+        "proposals" => dump_state::<ProposalState>(&state, "proposals", args.count)?,
         _ => todo!(),
     }
 

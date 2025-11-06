@@ -4,10 +4,9 @@ use axum::{
     Json,
 };
 use blockfrost_openapi::models::epoch_param_content::EpochParamContent;
+use pallas::ledger::{primitives::Epoch, traverse::MultiEraBlock};
 
-use dolos_cardano::{EpochState, FixedNamespace, EPOCH_KEY_SET};
-use dolos_core::{ArchiveStore, Domain, StateStore};
-use pallas::ledger::traverse::MultiEraBlock;
+use dolos_core::{ArchiveStore, Domain};
 
 use crate::{
     error::Error,
@@ -28,22 +27,14 @@ pub async fn latest_parameters<D: Domain>(
 
     let (epoch, _) = summary.slot_epoch(tip);
 
-    let params = dolos_cardano::load_mark_epoch::<D>(domain.state())
+    let state = dolos_cardano::load_epoch::<D>(domain.state())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let nonce = domain
-        .state()
-        .read_entity_typed::<EpochState>(EpochState::NS, &EPOCH_KEY_SET.into())
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?
-        .nonces
-        .map(|x| x.active.to_string());
 
     let model = mapping::ParametersModelBuilder {
         epoch,
-        params: params.pparams,
-        genesis: domain.genesis(),
-        nonce,
+        params: state.pparams.live().cloned().unwrap_or_default(),
+        genesis: &domain.genesis(),
+        nonce: state.nonces.map(|x| x.active.to_string()),
     };
 
     Ok(model.into_response()?)
@@ -51,18 +42,25 @@ pub async fn latest_parameters<D: Domain>(
 
 pub async fn by_number_parameters<D: Domain>(
     State(domain): State<Facade<D>>,
-    Path(epoch): Path<u32>,
+    Path(epoch): Path<Epoch>,
 ) -> Result<Json<EpochParamContent>, Error> {
-    let chain = domain.get_chain_summary()?;
+    let tip = domain.get_tip_slot()?;
+    let summary = domain.get_chain_summary()?;
+    let (curr, _) = summary.slot_epoch(tip);
 
-    let epoch = domain
-        .get_epoch_log(epoch, &chain)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+    let epoch = if epoch == curr {
+        dolos_cardano::load_epoch::<D>(domain.state())
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    } else {
+        domain
+            .get_epoch_log(epoch, &summary)?
+            .ok_or(StatusCode::NOT_FOUND)?
+    };
 
     let model = mapping::ParametersModelBuilder {
         epoch: epoch.number,
-        params: epoch.pparams,
-        genesis: domain.genesis(),
+        params: epoch.pparams.live().cloned().unwrap_or_default(),
+        genesis: &domain.genesis(),
         nonce: epoch.nonces.map(|x| x.active.to_string()),
     };
 

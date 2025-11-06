@@ -1,11 +1,11 @@
 use dolos_core::{ChainError, Domain, EntityKey, Genesis, StateStore as _, StateWriter as _};
 
 use crate::{
-    mutable_slots, sweep::Pots, EpochState, EraBoundary, EraSummary, Nonces, PParamsSet,
-    EPOCH_KEY_MARK,
+    mutable_slots, pots::Pots, EpochState, EpochValue, EraBoundary, EraSummary, Lovelace, Nonces,
+    PParamsSet, RollingStats, CURRENT_EPOCH_KEY,
 };
 
-fn get_utxo_amount(genesis: &Genesis) -> u64 {
+fn get_utxo_amount(genesis: &Genesis) -> Lovelace {
     let byron_utxo = pallas::ledger::configs::byron::genesis_utxos(&genesis.byron)
         .iter()
         .fold(0, |acc, (_, _, amount)| acc + amount);
@@ -17,74 +17,70 @@ fn get_utxo_amount(genesis: &Genesis) -> u64 {
     byron_utxo + shelley_utxo
 }
 
-const SHELLEY_PROTOCOL: u16 = 2;
+fn bootstrap_pots(pparams: &PParamsSet, genesis: &Genesis) -> Result<Pots, ChainError> {
+    let utxos = get_utxo_amount(genesis);
 
-fn bootstrap_pots(
-    protocol: u16,
-    genesis: &Genesis,
-    pparams: &PParamsSet,
-) -> Result<Pots, ChainError> {
-    let initial_utxos = get_utxo_amount(genesis);
+    let max_supply = genesis
+        .shelley
+        .max_lovelace_supply
+        .ok_or(ChainError::GenesisFieldMissing(
+            "max_lovelace_supply".to_string(),
+        ))?;
 
-    // for any era before shelley, we don't have the concept of reserves or
-    // treasury, so we just return the initial utxos
-    if protocol < SHELLEY_PROTOCOL {
-        return Ok(Pots {
-            reserves: 0,
-            treasury: 0,
-            utxos: initial_utxos,
-        });
-    }
+    let reserves = max_supply - utxos;
 
-    let max_supply = genesis.shelley.max_lovelace_supply.unwrap_or_default();
-    crate::sweep::compute_genesis_pots(max_supply, initial_utxos, pparams)
+    Ok(Pots {
+        reserves,
+        utxos,
+        deposit_per_pool: pparams.pool_deposit_or_default(),
+        deposit_per_account: pparams.key_deposit_or_default(),
+        ..Default::default()
+    })
 }
 
-fn bootrap_epoch<D: Domain>(state: &D::State, genesis: &Genesis) -> Result<EpochState, ChainError> {
+pub fn bootstrap_epoch<D: Domain>(
+    state: &D::State,
+    genesis: &Genesis,
+) -> Result<EpochState, ChainError> {
     let mut pparams = crate::forks::from_byron_genesis(&genesis.byron);
     let mut nonces = None;
 
     if let Some(force_protocol) = genesis.force_protocol {
-        pparams = crate::forks::evolve_pparams(&pparams, genesis, force_protocol as u16)?;
+        pparams = crate::forks::force_pparams_version(&pparams, genesis, 0, force_protocol as u16)?;
 
         // TODO: why do we set nonces only if there's a force protocol?
         nonces = Some(Nonces::bootstrap(genesis.shelley_hash));
     }
 
-    let protocol = pparams.protocol_major().unwrap_or_default();
+    let pots = bootstrap_pots(&pparams, genesis)?;
 
-    let pots = bootstrap_pots(protocol, genesis, &pparams)?;
+    let pparams = EpochValue::with_genesis(pparams);
 
     let epoch = EpochState {
         pparams,
-        number: 0,
-        reserves: pots.reserves,
-        treasury: pots.treasury,
-        utxos: pots.utxos,
-        active_stake: 0,
-        deposits: 0,
-        gathered_fees: 0,
-        gathered_deposits: 0,
-        decayed_deposits: 0,
-        blocks_minted: 0,
-        rewards_to_distribute: None,
-        rewards_to_treasury: None,
+        initial_pots: pots,
         largest_stable_slot: genesis.shelley.epoch_length.unwrap() as u64 - mutable_slots(genesis),
         nonces,
+        previous_nonce_tail: None,
+        number: 0,
+        rolling: EpochValue::with_live(0, RollingStats::default()),
+        end: None,
     };
 
     let writer = state.start_writer()?;
-    writer.write_entity_typed(&EntityKey::from(EPOCH_KEY_MARK), &epoch)?;
+    writer.write_entity_typed(&EntityKey::from(CURRENT_EPOCH_KEY), &epoch)?;
     writer.commit()?;
 
     Ok(epoch)
 }
 
-fn bootstrap_eras<D: Domain>(state: &D::State, epoch: &EpochState) -> Result<(), ChainError> {
-    let system_start = epoch.pparams.system_start().unwrap_or_default();
-    let epoch_length = epoch.pparams.epoch_length().unwrap_or_default();
-    let slot_length = epoch.pparams.slot_length().unwrap_or_default();
-    let protocol_major = epoch.pparams.protocol_major().unwrap_or_default();
+pub fn bootstrap_eras<D: Domain>(state: &D::State, epoch: &EpochState) -> Result<(), ChainError> {
+    let pparams = epoch.pparams.unwrap_live();
+
+    let system_start = pparams.ensure_system_start()?;
+    let epoch_length = pparams.ensure_epoch_length()?;
+    let slot_length = pparams.ensure_slot_length()?;
+    let protocol_major = pparams.protocol_major_or_default();
 
     let era = EraSummary {
         start: EraBoundary {
@@ -95,6 +91,7 @@ fn bootstrap_eras<D: Domain>(state: &D::State, epoch: &EpochState) -> Result<(),
         end: None,
         epoch_length,
         slot_length,
+        protocol: protocol_major,
     };
 
     let key = protocol_major.to_be_bytes();
@@ -117,7 +114,7 @@ pub fn bootstrap_utxos<D: Domain>(state: &D::State, genesis: &Genesis) -> Result
 }
 
 pub fn execute<D: Domain>(state: &D::State, genesis: &Genesis) -> Result<(), ChainError> {
-    let epoch = bootrap_epoch::<D>(state, genesis)?;
+    let epoch = bootstrap_epoch::<D>(state, genesis)?;
 
     bootstrap_eras::<D>(state, &epoch)?;
 

@@ -2,6 +2,141 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.0-rc.1] - 2025-11-06
+
+### 🚀 Features
+
+- *(cli)* Add proposal state dump command
+- *(cli)* Add single entitty dump command
+- *(cli)* Add update entity command
+
+### 🐛 Bug Fixes
+
+- *(cardano)* Move era transition to estart (#777)
+- *(cardano)* Force protocol version value on forks
+- *(cardano)* Adjust pot logic to support pre-shelley eras
+- *(cardano)* Skip nonce calc before Shelley
+- *(cardano)* Take into account Byron tx fees
+- *(cardano)* Support era transition hacks
+- *(cardano)* Assign rewards using only account state at ewrap
+- *(cardano)* Compute eta using mark pparams
+- Handle default wal log on emulator pipeline (#780)
+- Take into account empty WAL during origin sync
+- *(cli)* Remove double async runtime in bootstrap command
+
+### 🚜 Refactor
+
+- *(core)* Remove chain-specific batching from core
+- *(cardano)* Use genesis data for protocol constants instead of epoch state
+- *(cardano)* Move params migration to inside delta on estart
+- *(cardano)* Simplify genesis pot logic
+- *(cardano)* Treat pre-conway protocol updates as proposals
+- *(cardano)* Materialize proposal lifecycle as state
+- *(core)* Make chain logic safe for async runtimes
+
+### ⚙️ Miscellaneous Tasks
+
+- *(cardano)* Remove excessive logs
+- Fix lint warnings
+- Bump Pallas to latest main branch (#779)
+
+## [1.0.0-beta.8] - 2025-10-27
+
+### 🐛 Bug Fixes
+
+- *(cardano)* Use correct timing for pool params activation (#764)
+- *(cardano)* Skip retired pools from active stake snapshot (#765)
+- *(cardano)* Treat pool retire epoch as inclusive
+- *(cardano)* Adjust multiple reward-related issues (#766)
+- *(cardano)* Fix multiple accounting details (#767)
+- *(cardano)* Make sure all staking rules are followed (#771)
+- *(cardano)* Take into account preprod pointer addresses
+- *(minibf)* Fix `/network` endpoint mappings (#773)
+
+### ⚙️ Miscellaneous Tasks
+
+- *(cardano)* Avoid panic on undo logic (#772)
+
+### Release
+
+- V1.0.0-beta.8
+
+## [1.0.0-beta.7] - 2025-10-17
+
+### 🐛 Bug Fixes
+
+- *(cardano)* Treat pool params as an epoch-dependant value (#759)
+- *(cardano)* Move reward apply after epoch snapshot (#761)
+- *(minibf)* Use inaccurate but compatible pool fees value (#762)
+- *(cardano)* Allow delegation to unregistered dreps (#763)
+- *(cardano)* Fix incentives calc on epoch 0
+
+### Release
+
+- V1.0.0-beta.7
+
+## [1.0.0-beta.6] - 2025-10-16
+
+### 🚀 Features
+
+- *(cardano)* Implement pixel-perfect reward calc (#757)
+
+### 🐛 Bug Fixes
+
+- *(cardano)* Don't forget about Byron pparams updates (#752)
+- *(minibf)* Offset constructor index on datums (#755)
+- *(cardano)* Make reward data optional on ewrap
+
+### ⚙️ Miscellaneous Tasks
+
+- Fix broken tests and lint warning (#753)
+- Disable publish for test-vectors crate
+- Fix failing tests and lint warnings (#754)
+- Formalize v2 as new internal storage version (#758)
+- *(cli)* Make storage v2 the default during init
+
+### Release
+
+- V1.0.0-beta.6
+
+## [1.0.0-beta.5] - 2025-10-06
+
+### 🚀 Features
+
+- *(minibf)* Implement `/epochs/{epoch}/blocks` endpoint (#731)
+- *(minibf)* Implement `scripts/datum/{datum_hash}` endpoint (#734)
+- *(minibf)* Implement more `/assets/{asset}/*` endpoints (#735)
+- *(cardano)* Track detailed pool logs and expose via minibf  (#736)
+- *(archive)* Add index for tx metadata (#741)
+
+### 🐛 Bug Fixes
+
+- *(minibf)* Handle cost models updates from proposals (#737)
+- *(minibf)* Fetch correct epoch for params endpoints (#738)
+- *(cardano)* Avoid using push for epoch value
+- *(cardano)* Reset epoch minted blocks on boundary
+- *(cardano)* Improve reward logic accuracy (#745)
+- *(cardano)* Treat current pparams as effective (#747)
+- *(cardano)* Interpret Byron epoch length correctly (#748)
+- *(cardano)* Consider all Conway certs (#742)
+- *(cardano)* Be explicit about hardfork versions (#749)
+- *(minibf)* Avoid rounding errors on fee calc (#750)
+- *(minibf)* Skip pool history with empty stake (#751)
+
+### 🚜 Refactor
+
+- *(cardano)* Tidy up reward calculation logic (#740)
+- *(cardano)* Move reward calc into its own module (#746)
+
+### ⚙️ Miscellaneous Tasks
+
+- Fix lint warnings across the board (#732)
+- Fix build errors on support crates
+
+### Release
+
+- V1.0.0-beta.5
+
 ## [1.0.0-beta.4] - 2025-09-29
 
 ### 🚀 Features
@@ -31,6 +166,10 @@ All notable changes to this project will be documented in this file.
 - *(cardano)* Track deposits explicitly in each entity (#723)
 - *(core)* Move sweep / genesis ops inside chain logic (#724)
 - *(cardano)* Unify track & log config sections (#725)
+
+### Release
+
+- V1.0.0-beta.4
 
 ## [1.0.0-beta.3] - 2025-09-22
 

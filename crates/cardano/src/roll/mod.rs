@@ -1,20 +1,20 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use dolos_core::{
     batch::{WorkBatch, WorkBlock, WorkDeltas},
-    ChainError, Domain, InvariantViolation, StateError, TxoRef,
+    ChainError, Domain, Genesis, InvariantViolation, StateError, TxoRef,
 };
 use pallas::{
     codec::utils::KeepRaw,
     ledger::{
-        primitives::PlutusData,
+        primitives::{Epoch, PlutusData},
         traverse::{
             MultiEraBlock, MultiEraCert, MultiEraInput, MultiEraOutput, MultiEraPolicyAssets,
-            MultiEraProposal, MultiEraTx, MultiEraUpdate,
+            MultiEraProposal, MultiEraRedeemer, MultiEraTx, MultiEraUpdate,
         },
     },
 };
-use tracing::{info, instrument};
+use tracing::{debug, instrument};
 
 use crate::{
     load_effective_pparams, owned::OwnedMultiEraOutput, roll::proposals::ProposalVisitor, utxoset,
@@ -44,7 +44,10 @@ pub trait BlockVisitor {
         &mut self,
         deltas: &mut WorkDeltas<CardanoLogic>,
         block: &MultiEraBlock,
+        genesis: &Genesis,
         pparams: &PParamsSet,
+        epoch: Epoch,
+        protocol: u16,
     ) -> Result<(), ChainError> {
         Ok(())
     }
@@ -55,6 +58,7 @@ pub trait BlockVisitor {
         deltas: &mut WorkDeltas<CardanoLogic>,
         block: &MultiEraBlock,
         tx: &MultiEraTx,
+        utxos: &HashMap<TxoRef, OwnedMultiEraOutput>,
     ) -> Result<(), ChainError> {
         Ok(())
     }
@@ -154,6 +158,17 @@ pub trait BlockVisitor {
     }
 
     #[allow(unused_variables)]
+    fn visit_redeemers(
+        &mut self,
+        deltas: &mut WorkDeltas<CardanoLogic>,
+        block: &MultiEraBlock,
+        tx: &MultiEraTx,
+        proposal: &MultiEraRedeemer,
+    ) -> Result<(), ChainError> {
+        Ok(())
+    }
+
+    #[allow(unused_variables)]
     fn flush(&mut self, deltas: &mut WorkDeltas<CardanoLogic>) -> Result<(), ChainError> {
         Ok(())
     }
@@ -181,8 +196,11 @@ macro_rules! visit_all {
 
 pub struct DeltaBuilder<'a> {
     config: TrackConfig,
+    genesis: Arc<Genesis>,
     work: &'a mut WorkBlock<CardanoLogic>,
     active_params: &'a PParamsSet,
+    epoch: Epoch,
+    protocol: u16,
     utxos: &'a HashMap<TxoRef, OwnedMultiEraOutput>,
 
     account_state: AccountVisitor,
@@ -197,14 +215,20 @@ pub struct DeltaBuilder<'a> {
 impl<'a> DeltaBuilder<'a> {
     pub fn new(
         config: TrackConfig,
+        genesis: Arc<Genesis>,
+        protocol: u16,
         active_params: &'a PParamsSet,
+        epoch: Epoch,
         work: &'a mut WorkBlock<CardanoLogic>,
         utxos: &'a HashMap<TxoRef, OwnedMultiEraOutput>,
     ) -> Self {
         Self {
             config,
+            genesis,
             work,
             active_params,
+            epoch,
+            protocol,
             utxos,
             account_state: Default::default(),
             asset_state: Default::default(),
@@ -221,10 +245,19 @@ impl<'a> DeltaBuilder<'a> {
         let block = block.view();
         let mut deltas = WorkDeltas::default();
 
-        visit_all!(self, deltas, visit_root, block, self.active_params);
+        visit_all!(
+            self,
+            deltas,
+            visit_root,
+            block,
+            &self.genesis,
+            self.active_params,
+            self.epoch,
+            self.protocol,
+        );
 
         for tx in block.txs() {
-            visit_all!(self, deltas, visit_tx, block, &tx);
+            visit_all!(self, deltas, visit_tx, block, &tx, &self.utxos);
 
             for input in tx.consumes() {
                 let txoref = TxoRef::from(&input);
@@ -274,6 +307,10 @@ impl<'a> DeltaBuilder<'a> {
             for (idx, proposal) in tx.gov_proposals().iter().enumerate() {
                 visit_all!(self, deltas, visit_proposal, block, &tx, &proposal, idx);
             }
+
+            for redeemer in tx.redeemers() {
+                visit_all!(self, deltas, visit_redeemers, block, &tx, &redeemer);
+            }
         }
 
         if let Some(update) = block.update() {
@@ -291,26 +328,31 @@ impl<'a> DeltaBuilder<'a> {
 #[instrument(name = "roll", skip_all)]
 pub fn compute_delta<D: Domain>(
     config: &Config,
+    genesis: Arc<Genesis>,
     cache: &Cache,
     state: &D::State,
     batch: &mut WorkBatch<CardanoLogic>,
 ) -> Result<(), ChainError> {
-    info!(
+    let (epoch, _) = cache.eras.slot_epoch(batch.first_slot());
+
+    let (protocol, _) = cache.eras.protocol_and_era_for_epoch(epoch);
+
+    debug!(
         from = batch.first_slot(),
         to = batch.last_slot(),
+        epoch,
         "computing delta"
     );
 
-    let (epoch, _) = cache.eras.slot_epoch(batch.first_slot());
-
-    info!(epoch, "current epoch");
-
-    let active_params = load_effective_pparams::<D>(state, epoch)?;
+    let active_params = load_effective_pparams::<D>(state)?;
 
     for block in batch.blocks.iter_mut() {
         let mut builder = DeltaBuilder::new(
             config.track.clone(),
+            genesis.clone(),
+            *protocol,
             &active_params,
+            epoch,
             block,
             &batch.utxos_decoded,
         );

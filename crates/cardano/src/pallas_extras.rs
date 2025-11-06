@@ -13,10 +13,11 @@ use pallas::ledger::primitives::{
     RationalNumber, Relay, StakeCredential,
 };
 use pallas::ledger::primitives::{ExUnitPrices, ExUnits, Nonce, NonceVariant};
-use pallas::ledger::traverse::MultiEraCert;
+use pallas::ledger::traverse::{MultiEraCert, MultiEraTx};
 use serde::{Deserialize, Serialize};
 
 use crate::eras::ChainSummary;
+use crate::{hacks, Lovelace};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MultiEraPoolRegistration {
@@ -97,12 +98,54 @@ pub fn cert_as_vote_delegation(cert: &MultiEraCert) -> Option<MultiEraVoteDelega
                 delegator: delegator.clone(),
                 drep: drep.clone(),
             }),
+            ConwayCert::VoteRegDeleg(delegator, drep, _) => Some(MultiEraVoteDelegation {
+                delegator: delegator.clone(),
+                drep: drep.clone(),
+            }),
+            ConwayCert::StakeVoteRegDeleg(delegator, _, drep, _) => Some(MultiEraVoteDelegation {
+                delegator: delegator.clone(),
+                drep: drep.clone(),
+            }),
             _ => None,
         },
         _ => None,
     }
 }
 
+pub struct MultiEraDRepRegistration {
+    pub cred: StakeCredential,
+    pub deposit: Lovelace,
+}
+
+pub fn cert_as_drep_registration(cert: &MultiEraCert) -> Option<MultiEraDRepRegistration> {
+    match cert {
+        MultiEraCert::Conway(cow) => match cow.deref().deref() {
+            ConwayCert::RegDRepCert(cred, deposit, _) => Some(MultiEraDRepRegistration {
+                cred: cred.clone(),
+                deposit: *deposit,
+            }),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+pub type MultiEraDRepUnRegistration = MultiEraDRepRegistration;
+
+pub fn cert_as_drep_unregistration(cert: &MultiEraCert) -> Option<MultiEraDRepUnRegistration> {
+    match cert {
+        MultiEraCert::Conway(cow) => match cow.deref().deref() {
+            ConwayCert::UnRegDRepCert(cred, deposit) => Some(MultiEraDRepRegistration {
+                cred: cred.clone(),
+                deposit: *deposit,
+            }),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+#[derive(Debug)]
 pub struct MultiEraStakeDelegation {
     pub delegator: StakeCredential,
     pub pool: Hash<28>,
@@ -122,6 +165,18 @@ pub fn cert_as_stake_delegation(cert: &MultiEraCert) -> Option<MultiEraStakeDele
                 delegator: delegator.clone(),
                 pool: *pool,
             }),
+            ConwayCert::StakeRegDeleg(delegator, pool, _) => Some(MultiEraStakeDelegation {
+                delegator: delegator.clone(),
+                pool: *pool,
+            }),
+            ConwayCert::StakeVoteRegDeleg(delegator, pool, _, _) => Some(MultiEraStakeDelegation {
+                delegator: delegator.clone(),
+                pool: *pool,
+            }),
+            ConwayCert::StakeVoteDeleg(delegator, pool, _) => Some(MultiEraStakeDelegation {
+                delegator: delegator.clone(),
+                pool: *pool,
+            }),
             _ => None,
         },
         _ => None,
@@ -136,6 +191,10 @@ pub fn cert_as_stake_registration(cert: &MultiEraCert) -> Option<StakeCredential
         },
         MultiEraCert::Conway(cow) => match cow.deref().deref() {
             ConwayCert::StakeRegistration(credential) => Some(credential.clone()),
+            ConwayCert::Reg(cred, _) => Some(cred.clone()),
+            ConwayCert::StakeRegDeleg(cred, _, _) => Some(cred.clone()),
+            ConwayCert::VoteRegDeleg(cred, _, _) => Some(cred.clone()),
+            ConwayCert::StakeVoteRegDeleg(cred, _, _, _) => Some(cred.clone()),
             _ => None,
         },
         _ => None,
@@ -150,6 +209,7 @@ pub fn cert_as_stake_deregistration(cert: &MultiEraCert) -> Option<StakeCredenti
         },
         MultiEraCert::Conway(cow) => match cow.deref().deref() {
             ConwayCert::StakeDeregistration(credential) => Some(credential.clone()),
+            ConwayCert::UnReg(cred, _) => Some(cred.clone()),
             _ => None,
         },
         _ => None,
@@ -170,11 +230,14 @@ pub fn stake_address_to_cred(address: &StakeAddress) -> StakeCredential {
     }
 }
 
-pub fn shelley_address_to_stake_cred(address: &ShelleyAddress) -> Option<StakeCredential> {
+pub fn shelley_address_to_stake_cred(
+    address: &ShelleyAddress,
+) -> Option<(StakeCredential, IsPointer)> {
     match address.delegation() {
-        ShelleyDelegationPart::Key(x) => Some(StakeCredential::AddrKeyhash(*x)),
-        ShelleyDelegationPart::Script(x) => Some(StakeCredential::ScriptHash(*x)),
-        _ => None,
+        ShelleyDelegationPart::Key(x) => Some((StakeCredential::AddrKeyhash(*x), false)),
+        ShelleyDelegationPart::Script(x) => Some((StakeCredential::ScriptHash(*x), false)),
+        ShelleyDelegationPart::Pointer(x) => hacks::pointers::pointer_to_cred(x).map(|x| (x, true)),
+        ShelleyDelegationPart::Null => None,
     }
 }
 
@@ -192,22 +255,14 @@ pub fn shelley_address_to_stake_address(address: &ShelleyAddress) -> Option<Stak
     }
 }
 
-pub fn address_as_stake_cred(address: &Address) -> Option<StakeCredential> {
+pub type IsPointer = bool;
+
+pub fn address_as_stake_cred(address: &Address) -> Option<(StakeCredential, IsPointer)> {
     match &address {
         Address::Shelley(x) => shelley_address_to_stake_cred(x),
-        Address::Stake(x) => Some(stake_address_to_cred(x)),
+        Address::Stake(x) => Some((stake_address_to_cred(x), false)),
         _ => None,
     }
-}
-
-pub fn next_epoch_boundary(chain_summary: &ChainSummary, after: BlockSlot) -> BlockSlot {
-    let era = chain_summary.era_for_slot(after);
-    let epoch_length = era.epoch_length;
-    let (_, epoch_slot) = era.slot_epoch(after);
-
-    let missing = epoch_length - epoch_slot as u64;
-
-    after + missing
 }
 
 pub fn epoch_boundary(
@@ -219,7 +274,26 @@ pub fn epoch_boundary(
     let (next_epoch, _) = chain_summary.slot_epoch(next_slot);
 
     if prev_epoch != next_epoch {
-        let boundary = chain_summary.epoch_start(next_epoch as u64);
+        let boundary = chain_summary.epoch_start(next_epoch);
+        Some(boundary)
+    } else {
+        None
+    }
+}
+
+pub fn rupd_boundary(
+    stability_window: u64,
+    chain_summary: &ChainSummary,
+    prev_slot: BlockSlot,
+    next_slot: BlockSlot,
+) -> Option<BlockSlot> {
+    let (prev_epoch, _) = chain_summary.slot_epoch(prev_slot);
+
+    let epoch_start = chain_summary.epoch_start(prev_epoch);
+
+    let boundary = epoch_start + stability_window;
+
+    if prev_slot <= boundary && boundary < next_slot {
         Some(boundary)
     } else {
         None
@@ -301,11 +375,48 @@ pub fn stake_cred_to_drep(cred: &StakeCredential) -> DRep {
     }
 }
 
-pub fn pool_reward_account(reward_account: &[u8]) -> Option<StakeCredential> {
+pub fn parse_reward_account(reward_account: &[u8]) -> Option<StakeCredential> {
     let pool_address = Address::from_bytes(reward_account).ok()?;
-    address_as_stake_cred(&pool_address)
+    let (cred, _) = address_as_stake_cred(&pool_address)?;
+
+    Some(cred)
 }
 
 pub fn keyhash_to_stake_cred(keyhash: Hash<28>) -> StakeCredential {
     StakeCredential::AddrKeyhash(keyhash)
+}
+
+pub fn cred_matches_hash(cred: &StakeCredential, hash: &str) -> bool {
+    let hash: Hash<28> = hash.parse().unwrap();
+
+    match cred {
+        StakeCredential::AddrKeyhash(x) => x == &hash,
+        StakeCredential::ScriptHash(x) => x == &hash,
+    }
+}
+
+pub fn tx_treasury_donation(tx: &MultiEraTx) -> Option<Lovelace> {
+    match tx {
+        MultiEraTx::Conway(x) => x.transaction_body.donation.map(|x| x.into()),
+        MultiEraTx::AlonzoCompatible(..) => None,
+        MultiEraTx::Babbage(..) => None,
+        MultiEraTx::Byron(..) => None,
+        _ => panic!("unexpected tx era"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    static REWARD_ACCOUNT: [u8; 29] = [
+        224, 185, 111, 206, 243, 185, 53, 26, 246, 131, 75, 216, 80, 227, 169, 120, 89, 215, 189,
+        91, 114, 157, 36, 191, 54, 70, 174, 172, 207,
+    ];
+
+    #[test]
+    fn test_pool_reward_account() {
+        let parsed = parse_reward_account(&REWARD_ACCOUNT).unwrap();
+        dbg!(&parsed);
+    }
 }

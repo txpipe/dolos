@@ -1,7 +1,7 @@
 use pallas::ledger::primitives::conway::CostModels;
 use std::collections::HashMap;
 
-use dolos_core::{Domain, Genesis, StateStore as _};
+use dolos_core::{Domain, Genesis};
 
 use crate::{Config, Error};
 
@@ -30,24 +30,12 @@ fn map_cost_models(original: CostModels) -> HashMap<u8, tx3_cardano::CostModel> 
 }
 
 fn build_pparams<D: Domain>(domain: &D) -> Result<tx3_cardano::PParams, Error> {
-    let network = network_id_from_genesis(domain.genesis()).unwrap();
+    let network = network_id_from_genesis(&domain.genesis()).unwrap();
 
-    let tip = domain
-        .state()
-        .read_cursor()?
-        .ok_or(Error::PParamsNotAvailable)?;
-
-    let (_, era) = dolos_cardano::eras::load_active_era::<D>(domain.state())
+    let pparams = dolos_cardano::load_effective_pparams::<D>(domain.state())
         .map_err(|_| Error::PParamsNotAvailable)?;
 
-    let (epoch, _) = era.slot_epoch(tip.slot());
-
-    let pparams = dolos_cardano::load_effective_pparams::<D>(domain.state(), epoch)
-        .map_err(|_| Error::PParamsNotAvailable)?;
-
-    let costs = pparams
-        .cost_models_for_script_languages()
-        .ok_or(Error::PParamsNotAvailable)?;
+    let costs = pparams.cost_models_for_script_languages();
 
     let out = tx3_cardano::PParams {
         network,

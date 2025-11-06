@@ -7,7 +7,7 @@ use crate::{
 use blockfrost_openapi::models::epoch_param_content::EpochParamContent;
 use dolos_cardano::PParamsSet;
 use dolos_core::Genesis;
-use pallas::ledger::primitives::conway::CostModels;
+use pallas::ledger::primitives::{conway::CostModels, Epoch};
 
 fn cost_models_to_key_value(cost_models: &CostModels) -> Vec<(&'static str, &[i64])> {
     let maybe = vec![
@@ -50,7 +50,7 @@ fn map_cost_models_named(cost_models: &CostModels) -> HashMap<String, serde_json
 }
 
 pub struct ParametersModelBuilder<'a> {
-    pub epoch: u32,
+    pub epoch: Epoch,
     pub params: PParamsSet,
     pub genesis: &'a Genesis,
     pub nonce: Option<String>,
@@ -111,12 +111,12 @@ impl<'a> IntoModel<EpochParamContent> for ParametersModelBuilder<'a> {
                 .map(|x| rational_to_f64::<3>(&x)),
             drep_deposit: params.drep_deposit().map(|x| x.to_string()),
             drep_activity: params.drep_inactivity_period().map(|x| x.to_string()),
-            cost_models_raw: params
-                .cost_models_for_script_languages()
-                .map(|x| Some(map_cost_models_raw(&x))),
-            cost_models: params
-                .cost_models_for_script_languages()
-                .map(|x| map_cost_models_named(&x)),
+            cost_models_raw: Some(Some(map_cost_models_raw(
+                &params.cost_models_for_script_languages(),
+            ))),
+            cost_models: Some(map_cost_models_named(
+                &params.cost_models_for_script_languages(),
+            )),
             pvt_motion_no_confidence: params
                 .pool_voting_thresholds()
                 .map(|x| rational_to_f64::<3>(&x.motion_no_confidence)),

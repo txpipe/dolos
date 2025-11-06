@@ -17,10 +17,11 @@ pub struct Args {
     hash: String,
 }
 
-pub fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
+#[tokio::main]
+pub async fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging)?;
 
-    let domain = crate::common::setup_domain(config)?;
+    let domain = crate::common::setup_domain(config).await?;
 
     let hash: Hash<32> = Hash::from_str(&args.hash).into_diagnostic()?;
     let point = ChainPoint::Specific(args.slot, hash);

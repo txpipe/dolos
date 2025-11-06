@@ -1,44 +1,27 @@
 use dolos_core::{
-    ArchiveStore, ArchiveWriter, BrokenInvariant, ChainError, ChainPoint, Domain, Entity,
-    EntityDelta as _, EntityKey, LogKey, NsKey, StateStore, StateWriter, TemporalKey,
+    ArchiveStore, ArchiveWriter, BlockSlot, BrokenInvariant, ChainError, ChainPoint, Domain,
+    Entity, EntityDelta as _, EntityKey, LogKey, NsKey, StateStore, StateWriter, TemporalKey,
 };
-use tracing::{info, instrument, warn};
+use tracing::{instrument, trace, warn};
 
 use crate::{
-    sweep::BoundaryWork, AccountState, CardanoEntity, DRepState, EpochState, EraSummary,
-    FixedNamespace, PoolState, Proposal, EPOCH_KEY_GO, EPOCH_KEY_MARK, EPOCH_KEY_SET,
+    forks, AccountState, CardanoEntity, DRepState, EpochState, EraSummary, FixedNamespace,
+    PoolState, ProposalState,
 };
 
-impl BoundaryWork {
-    fn drop_active_epoch<W: StateWriter>(&self, writer: &W) -> Result<(), ChainError> {
-        info!("dropping active epoch");
-
-        writer.delete_entity(EpochState::NS, &EntityKey::from(EPOCH_KEY_GO))?;
-
-        Ok(())
-    }
-
-    fn start_new_epoch<W: StateWriter>(&self, writer: &W) -> Result<(), ChainError> {
-        let epoch = self
-            .starting_state
-            .clone()
-            .ok_or(ChainError::from(BrokenInvariant::EpochBoundaryIncomplete))?;
-
-        info!(number = epoch.number, "starting new epoch");
-
-        writer.write_entity_typed(&EntityKey::from(EPOCH_KEY_MARK), &epoch)?;
-
-        Ok(())
-    }
-
+impl super::WorkContext {
+    // TODO: this is ugly, we still handle era transitions as an imperative change
+    // directly on the state. We should be able to do this with deltas.
     fn apply_era_transition<W: StateWriter>(
         &self,
         writer: &W,
         state: &impl StateStore,
     ) -> Result<(), ChainError> {
-        let Some(transition) = &self.era_transition else {
+        let Some(transition) = self.ended_state().pparams.era_transition() else {
             return Ok(());
         };
+
+        tracing::warn!(from=%transition.prev_version, to=%transition.new_version, "era transition detected");
 
         let previous = state.read_entity_typed::<EraSummary>(
             EraSummary::NS,
@@ -56,41 +39,17 @@ impl BoundaryWork {
             &previous,
         )?;
 
+        let consts = forks::protocol_constants(transition.new_version.into(), &self.genesis);
+
         let new = EraSummary {
             start: previous.end.clone().unwrap(),
             end: None,
-            epoch_length: transition.new_pparams.epoch_length_or_default(),
-            slot_length: transition.new_pparams.slot_length_or_default(),
+            epoch_length: consts.epoch_length as u64,
+            slot_length: consts.slot_length as u64,
+            protocol: transition.new_version.into(),
         };
 
         writer.write_entity_typed(&EntityKey::from(transition.new_version), &new)?;
-
-        Ok(())
-    }
-
-    fn promote_waiting_epoch<W: StateWriter>(&self, writer: &W) -> Result<(), ChainError> {
-        let Some(waiting) = &self.waiting_state else {
-            // we don't have waiting state for early epochs, we just need to wait
-            if self.ending_state.number == 0 {
-                return Ok(());
-            }
-
-            return Err(ChainError::from(BrokenInvariant::EpochBoundaryIncomplete));
-        };
-
-        writer.write_entity_typed(&EntityKey::from(EPOCH_KEY_GO), waiting)?;
-        info!(number = waiting.number, "epoch promoted to active");
-
-        Ok(())
-    }
-
-    fn promote_ending_epoch<W: StateWriter>(&self, writer: &W) -> Result<(), ChainError> {
-        writer.write_entity_typed(&EntityKey::from(EPOCH_KEY_SET), &self.ending_state)?;
-
-        info!(
-            number = self.ending_state.number,
-            "epoch promoted to waiting"
-        );
 
         Ok(())
     }
@@ -122,6 +81,8 @@ impl BoundaryWork {
                 }
 
                 writer.save_entity_typed(E::NS, &entity_id, entity.as_ref())?;
+            } else {
+                trace!(ns = E::NS, key = %entity_id, "no deltas for entity");
             }
         }
 
@@ -132,7 +93,7 @@ impl BoundaryWork {
         &mut self,
         writer: &<D::Archive as ArchiveStore>::Writer,
     ) -> Result<(), ChainError> {
-        let start_of_epoch = self.active_era.epoch_start(self.ending_state.number as u64);
+        let start_of_epoch = self.active_era.epoch_start(self.starting_epoch_no());
         let start_of_epoch = ChainPoint::Slot(start_of_epoch);
         let temporal_key = TemporalKey::from(&start_of_epoch);
 
@@ -140,9 +101,6 @@ impl BoundaryWork {
             let log_key = LogKey::from((temporal_key.clone(), entity_key));
             writer.write_log_typed(&log_key, &log)?;
         }
-
-        // Log epoch state.
-        writer.write_log_typed(&temporal_key.into(), &self.ending_state)?;
 
         Ok(())
     }
@@ -152,13 +110,15 @@ impl BoundaryWork {
         &mut self,
         state: &D::State,
         archive: &D::Archive,
+        slot: BlockSlot,
     ) -> Result<(), ChainError> {
         let writer = state.start_writer()?;
 
         self.apply_whole_namespace::<D, AccountState>(state, &writer)?;
         self.apply_whole_namespace::<D, PoolState>(state, &writer)?;
         self.apply_whole_namespace::<D, DRepState>(state, &writer)?;
-        self.apply_whole_namespace::<D, Proposal>(state, &writer)?;
+        self.apply_whole_namespace::<D, ProposalState>(state, &writer)?;
+        self.apply_whole_namespace::<D, EpochState>(state, &writer)?;
 
         debug_assert!(self.deltas.entities.is_empty());
 
@@ -173,11 +133,9 @@ impl BoundaryWork {
 
         debug_assert!(self.logs.is_empty());
 
-        self.drop_active_epoch(&writer)?;
-        self.promote_waiting_epoch(&writer)?;
-        self.promote_ending_epoch(&writer)?;
         self.apply_era_transition(&writer, state)?;
-        self.start_new_epoch(&writer)?;
+
+        writer.set_cursor(ChainPoint::Slot(slot))?;
 
         writer.commit()?;
         archive_writer.commit()?;

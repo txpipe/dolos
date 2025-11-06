@@ -10,7 +10,10 @@
 
 use pallas::{
     crypto::hash::{Hash, Hasher},
-    ledger::traverse::{MultiEraInput, MultiEraOutput, MultiEraTx, MultiEraUpdate},
+    ledger::{
+        primitives::Epoch,
+        traverse::{MultiEraInput, MultiEraOutput, MultiEraTx, MultiEraUpdate},
+    },
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -65,7 +68,7 @@ pub use point::*;
 pub use state::*;
 pub use wal::*;
 
-use crate::batch::{WorkBatch, WorkBlock};
+use crate::batch::WorkBatch;
 
 #[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
 pub struct EraCbor(pub Era, pub Cbor);
@@ -298,9 +301,11 @@ pub struct SubmitConfig {
 #[derive(Serialize, Default, PartialEq, Clone, Debug)]
 #[serde(rename_all = "lowercase")]
 pub enum StorageVersion {
-    #[default]
     V0,
     V1,
+
+    #[default]
+    V2,
 }
 
 impl<'de> Deserialize<'de> for StorageVersion {
@@ -313,6 +318,7 @@ impl<'de> Deserialize<'de> for StorageVersion {
             Some(version) => match version.as_str() {
                 "v0" => Ok(StorageVersion::V0),
                 "v1" => Ok(StorageVersion::V1),
+                "v2" => Ok(StorageVersion::V2),
                 _ => Err(<D::Error as serde::de::Error>::custom("Invalid version")),
             },
             None => Ok(StorageVersion::V0),
@@ -328,6 +334,7 @@ impl Display for StorageVersion {
             match self {
                 Self::V0 => "v0",
                 Self::V1 => "v1",
+                Self::V2 => "v2",
             }
         )
     }
@@ -404,6 +411,10 @@ pub struct Genesis {
 }
 
 impl Genesis {
+    pub fn network_magic(&self) -> u32 {
+        self.shelley.network_magic.unwrap_or_default()
+    }
+
     pub fn from_file_paths(
         byron: impl AsRef<Path>,
         shelley: impl AsRef<Path>,
@@ -500,6 +511,9 @@ pub trait Block: Sized + Send + Sync {
 
 #[derive(Debug, Error)]
 pub enum ChainError {
+    #[error("can't receive block until previous work is completed")]
+    CantReceiveBlock(RawBlock),
+
     #[error(transparent)]
     BrokenInvariant(#[from] BrokenInvariant),
 
@@ -521,6 +535,9 @@ pub enum ChainError {
     #[error(transparent)]
     ArchiveError(#[from] ArchiveError),
 
+    #[error("genesis field missing: {0}")]
+    GenesisFieldMissing(String),
+
     #[error("protocol params not found: {0}")]
     PParamsNotFound(String),
 
@@ -532,19 +549,35 @@ pub enum ChainError {
 
     #[error("forced stop epoch reached")]
     StopEpochReached,
+
+    #[error("epoch value version not found for epoch {0}")]
+    EpochValueVersionNotFound(Epoch),
+
+    #[error("missing rewards")]
+    MissingRewards,
+
+    #[error("invalid pool params")]
+    InvalidPoolParams,
+
+    #[error("invalid proposal params")]
+    InvalidProposalParams,
 }
 
 pub enum WorkKind {
     Genesis,
-    Block,
-    Sweep,
+    Blocks,
+    EWrap,
+    EStart,
+    Rupd,
 }
 
 #[allow(clippy::large_enum_variant)]
 pub enum WorkUnit<C: ChainLogic> {
     Genesis,
-    Block(WorkBlock<C>),
-    Sweep(BlockSlot),
+    Blocks(WorkBatch<C>),
+    EWrap(BlockSlot),
+    EStart(BlockSlot),
+    Rupd(BlockSlot),
 }
 
 pub trait ChainLogic: Sized + Send + Sync {
@@ -554,43 +587,67 @@ pub trait ChainLogic: Sized + Send + Sync {
     type Utxo: Sized + Send + Sync;
     type Delta: EntityDelta<Entity = Self::Entity>;
 
-    fn initialize<D: Domain>(config: Self::Config, state: &D::State) -> Result<Self, ChainError>;
+    fn initialize<D: Domain>(
+        config: Self::Config,
+        state: &D::State,
+        genesis: &Genesis,
+    ) -> Result<Self, ChainError>;
 
-    // TODO: there's a risk for potential race conditions between peek_work and
-    // pop_work. It has low probability since we use these methods in the same
-    // thread and with extra care. Regardless, we should revisit the `WorkBuffer`
-    // approach so that we have an overarching lock of the the work state.
+    // TODO: having the chain logic be mutable is a code smell. It was initially designed
+    // to be a static, central point for chain-specific logic. Making it hold shared state is ugly.
     //
     // One way to fix this is to move the WorkBuffer concept to the core crate and
     // let the domain "own" the data and let the chain borrow it for mutations.
-    fn peek_work(&self) -> Option<WorkKind>;
-    fn pop_work(&self) -> Option<WorkUnit<Self>>;
-
-    fn receive_block(&self, raw: RawBlock) -> Result<(), ChainError>;
+    fn can_receive_block(&self) -> bool;
+    fn receive_block(&mut self, raw: RawBlock) -> Result<BlockSlot, ChainError>;
+    fn pop_work(&mut self) -> Option<WorkUnit<Self>>;
 
     // TODO: we should invert responsibility here. The chain logic should tell the
     // domain what to do instead of passing everything down and expecting it to do
     // the right thing.
     fn apply_genesis<D: Domain>(
-        &self,
+        &mut self,
         state: &D::State,
-        genesis: &Genesis,
+        genesis: Arc<Genesis>,
     ) -> Result<(), ChainError>;
 
     // TODO: we should invert responsibility here. The chain logic should tell the
     // domain what to do instead of passing everything down and expecting it to do
     // the right thing.
-    fn apply_sweep<D: Domain>(
-        &self,
+    fn apply_ewrap<D: Domain>(
+        &mut self,
         state: &D::State,
         archive: &D::Archive,
-        genesis: &Genesis,
+        genesis: Arc<Genesis>,
+        at: BlockSlot,
+    ) -> Result<(), ChainError>;
+
+    // TODO: we should invert responsibility here. The chain logic should tell the
+    // domain what to do instead of passing everything down and expecting it to do
+    // the right thing.
+    fn apply_estart<D: Domain>(
+        &mut self,
+        state: &D::State,
+        archive: &D::Archive,
+        genesis: Arc<Genesis>,
+        at: BlockSlot,
+    ) -> Result<(), ChainError>;
+
+    // TODO: we should invert responsibility here. The chain logic should tell the
+    // domain what to do instead of passing everything down and expecting it to do
+    // the right thing.
+    fn apply_rupd<D: Domain>(
+        &mut self,
+        state: &D::State,
+        archive: &D::Archive,
+        genesis: Arc<Genesis>,
         at: BlockSlot,
     ) -> Result<(), ChainError>;
 
     fn compute_delta<D: Domain>(
         &self,
         state: &D::State,
+        genesis: Arc<Genesis>,
         batch: &mut WorkBatch<Self>,
     ) -> Result<(), ChainError>;
 
@@ -645,6 +702,7 @@ pub trait TipSubscription: Send + Sync + 'static {
     async fn next_tip(&mut self) -> TipEvent;
 }
 
+#[trait_variant::make(Send)]
 pub trait Domain: Send + Sync + Clone + 'static {
     type Entity: Entity;
     type EntityDelta: EntityDelta<Entity = Self::Entity> + std::fmt::Debug;
@@ -658,9 +716,10 @@ pub trait Domain: Send + Sync + Clone + 'static {
     type TipSubscription: TipSubscription;
 
     fn storage_config(&self) -> &StorageConfig;
-    fn genesis(&self) -> &Genesis;
+    fn genesis(&self) -> Arc<Genesis>;
 
-    fn chain(&self) -> &Self::Chain;
+    async fn read_chain(&self) -> tokio::sync::RwLockReadGuard<'_, Self::Chain>;
+    async fn write_chain(&self) -> tokio::sync::RwLockWriteGuard<'_, Self::Chain>;
 
     fn wal(&self) -> &Self::Wal;
     fn state(&self) -> &Self::State;

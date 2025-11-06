@@ -21,6 +21,7 @@ use pallas::{
     crypto::hash::Hash,
     ledger::{
         addresses::{Address, Network, StakeAddress, StakePayload},
+        primitives::Epoch,
         traverse::{MultiEraBlock, MultiEraCert, MultiEraTx},
     },
 };
@@ -88,35 +89,36 @@ impl<'a> IntoModel<AccountContent> for AccountModelBuilder<'a> {
         let active_epoch = self
             .account_state
             .registered_at
+            .or(self.account_state.deregistered_at)
             .map(|x| chain.slot_epoch(x))
             .map(|(x, _)| x);
 
         let pool_id = self
             .account_state
-            .active_pool
-            .as_ref()
+            .delegated_pool_at(current_epoch)
             .map(bech32_pool)
             .transpose()?;
 
         let drep_id = self
             .account_state
-            .latest_drep
-            .as_ref()
+            .delegated_drep_at(current_epoch)
             .map(bech32_drep)
             .transpose()?;
 
         let active = active_epoch.map(|x| x < current_epoch).unwrap_or(false) && pool_id.is_some();
 
+        let stake = self.account_state.stake.live().cloned().unwrap_or_default();
+
         let out = AccountContent {
             stake_address,
             active,
             active_epoch: active_epoch.map(|x| x as i32),
-            controlled_amount: self.account_state.live_stake().to_string(),
-            rewards_sum: self.account_state.rewards_sum.to_string(),
-            withdrawals_sum: self.account_state.withdrawals_sum.to_string(),
-            reserves_sum: self.account_state.reserves_sum.to_string(),
-            treasury_sum: self.account_state.treasury_sum.to_string(),
-            withdrawable_amount: self.account_state.withdrawable_amount().to_string(),
+            controlled_amount: stake.total().to_string(),
+            rewards_sum: stake.rewards_sum.to_string(),
+            withdrawals_sum: stake.withdrawals_sum.to_string(),
+            reserves_sum: "0".to_string(),
+            treasury_sum: "0".to_string(),
+            withdrawable_amount: stake.withdrawable().to_string(),
             pool_id,
             drep_id,
         };
@@ -259,7 +261,7 @@ fn build_delegation(
     stake_address: &StakeAddress,
     tx: &MultiEraTx,
     cert: &MultiEraCert,
-    epoch: u32,
+    epoch: Epoch,
     network: Network,
 ) -> Result<Option<AccountDelegationContentInner>, StatusCode> {
     let (cred, pool) = match cert {
@@ -299,7 +301,7 @@ fn build_registration(
     stake_address: &StakeAddress,
     tx: &MultiEraTx,
     cert: &MultiEraCert,
-    _epoch: u32,
+    _epoch: Epoch,
     network: Network,
 ) -> Result<Option<AccountRegistrationContentInner>, StatusCode> {
     let (cred, is_registration) = match cert {
@@ -311,6 +313,10 @@ fn build_registration(
         MultiEraCert::Conway(cert) => match cert.deref().deref() {
             ConwayCert::StakeRegistration(cred) => (cred, true),
             ConwayCert::StakeDeregistration(cred) => (cred, false),
+            ConwayCert::Reg(cred, _) => (cred, true),
+            ConwayCert::UnReg(cred, _) => (cred, false),
+            ConwayCert::StakeRegDeleg(cred, _, _) => (cred, true),
+            ConwayCert::StakeVoteRegDeleg(cred, _, _, _) => (cred, true),
             _ => return Ok(None),
         },
         _ => return Ok(None),
@@ -376,7 +382,7 @@ impl<T> AccountActivityModelBuilder<T> {
 
     fn scan_block_certs<F>(
         &mut self,
-        epoch: u32,
+        epoch: Epoch,
         block: &MultiEraBlock,
         mapper: F,
     ) -> Result<(), StatusCode>
@@ -385,7 +391,7 @@ impl<T> AccountActivityModelBuilder<T> {
             &StakeAddress,
             &MultiEraTx,
             &MultiEraCert,
-            u32,
+            Epoch,
             Network,
         ) -> Result<Option<T>, StatusCode>,
     {
@@ -435,7 +441,13 @@ pub async fn by_stake_actions<D: Domain, F, T>(
 ) -> Result<Vec<T>, Error>
 where
     Option<AccountState>: From<D::Entity>,
-    F: Fn(&StakeAddress, &MultiEraTx, &MultiEraCert, u32, Network) -> Result<Option<T>, StatusCode>,
+    F: Fn(
+        &StakeAddress,
+        &MultiEraTx,
+        &MultiEraCert,
+        Epoch,
+        Network,
+    ) -> Result<Option<T>, StatusCode>,
 {
     let account_key = parse_account_key_param(stake_address)?;
 
@@ -540,6 +552,7 @@ where
 
     let mapped: Vec<_> = rewards
         .into_iter()
+        .filter(|(_, reward)| reward.amount > 0)
         .skip(pagination.skip())
         .take(pagination.count)
         .map(|(epoch, reward)| {

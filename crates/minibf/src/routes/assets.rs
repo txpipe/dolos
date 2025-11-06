@@ -1,29 +1,34 @@
 use std::{collections::HashMap, ops::Deref, time::Duration};
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     Json,
 };
 use blockfrost_openapi::models::{
     asset::{Asset, OnchainMetadataStandard},
+    asset_addresses_inner::AssetAddressesInner,
     asset_metadata::AssetMetadata as OffchainMetadata,
+    asset_transactions_inner::AssetTransactionsInner,
 };
 use crc::{Crc, CRC_8_SMBUS};
-use dolos_cardano::model::AssetState;
-use dolos_core::{ArchiveStore, Domain, EraCbor};
+use dolos_cardano::{model::AssetState, ChainSummary};
+use dolos_core::{ArchiveStore, BlockSlot, Domain, EraCbor, StateStore};
+use itertools::Itertools;
 use pallas::{
     codec::minicbor,
     ledger::{
         primitives::{BigInt, Metadatum, PlutusData},
-        traverse::MultiEraTx,
+        traverse::{MultiEraBlock, MultiEraOutput, MultiEraTx},
         validate::phase2::to_plutus_data::ToPlutusData,
     },
 };
 use serde::Deserialize;
 
 use crate::{
+    error::Error,
     mapping::{asset_fingerprint, IntoModel},
+    pagination::{Order, Pagination, PaginationParameters},
     Facade,
 };
 
@@ -508,4 +513,244 @@ where
     };
 
     Ok(Json(model.into_model().await?))
+}
+
+pub async fn by_subject_addresses<D: Domain>(
+    Path(subject): Path<String>,
+    Query(params): Query<PaginationParameters>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Vec<AssetAddressesInner>>, Error> {
+    let pagination = Pagination::try_from(params)?;
+    let asset = hex::decode(&subject).map_err(|_| Error::InvalidAsset)?;
+    let utxoset = domain
+        .state()
+        .get_utxo_by_asset(&asset)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .into_iter()
+        .collect_vec();
+
+    let utxos = domain
+        .state()
+        .get_utxos(utxoset)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let mut addresses: HashMap<String, ((BlockSlot, u32), u128)> = HashMap::new();
+    for (txoref, eracbor) in utxos {
+        let sort = (
+            domain
+                .archive()
+                .get_slot_for_tx(txoref.0.as_slice())
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?,
+            txoref.1,
+        );
+
+        let utxo = MultiEraOutput::decode(eracbor.0.try_into().unwrap(), &eracbor.1)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        let amount = utxo
+            .value()
+            .assets()
+            .iter()
+            .flat_map(|x| {
+                let subject = x.policy().to_vec();
+                x.assets()
+                    .iter()
+                    .find(|x| [subject.as_slice(), x.name()].concat() == asset.as_slice())
+                    .map(|x| x.any_coin() as u128)
+            })
+            .sum();
+
+        addresses
+            .entry(
+                utxo.address()
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                    .to_string(),
+            )
+            .and_modify(|entry| {
+                entry.0 = entry.0.min(sort);
+                entry.1 += amount;
+            })
+            .or_insert((sort, amount));
+    }
+
+    let mut items = addresses
+        .into_iter()
+        .sorted_by_key(|(_, (sort, _))| *sort)
+        .map(|(address, (_, amount))| AssetAddressesInner {
+            address,
+            quantity: amount.to_string(),
+        })
+        .collect_vec();
+
+    if matches!(pagination.order, Order::Desc) {
+        items.reverse();
+    }
+
+    let sorted = items
+        .into_iter()
+        .skip(pagination.skip())
+        .take(pagination.count)
+        .collect_vec();
+
+    Ok(Json(sorted))
+}
+
+struct TransactionWithSubjectIter<A: ArchiveStore> {
+    subject: Vec<u8>,
+    blocks: A::SparseBlockIter,
+    chain: ChainSummary,
+    pagination: Pagination,
+    archive: A,
+}
+
+impl<A: ArchiveStore> TransactionWithSubjectIter<A> {
+    fn new(
+        subject: Vec<u8>,
+        blocks: A::SparseBlockIter,
+        chain: ChainSummary,
+        pagination: Pagination,
+        archive: A,
+    ) -> Self {
+        Self {
+            subject,
+            blocks,
+            chain,
+            archive,
+            pagination,
+        }
+    }
+
+    fn subject_matches(&self, policy: &[u8], name: &[u8]) -> bool {
+        [policy, name].concat() == self.subject
+    }
+
+    fn output_has_subject(&self, output: &MultiEraOutput) -> bool {
+        for pa in output.value().assets() {
+            for asset in pa.assets() {
+                if self.subject_matches(pa.policy().as_slice(), asset.name()) {
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    fn tx_has_subject(&self, tx: &MultiEraTx) -> Result<bool, StatusCode> {
+        for (_, output) in tx.produces() {
+            if self.output_has_subject(&output) {
+                return Ok(true);
+            }
+        }
+
+        for input in tx.consumes() {
+            if let Some(EraCbor(era, cbor)) = self
+                .archive
+                .get_tx(input.hash().as_slice())
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            {
+                let parsed = MultiEraTx::decode_for_era(
+                    era.try_into()
+                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+                    &cbor,
+                )
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                if let Some(output) = parsed.produces_at(input.index() as usize) {
+                    if self.output_has_subject(&output) {
+                        return Ok(true);
+                    }
+                }
+            }
+        }
+
+        Ok(false)
+    }
+
+    fn find_txs(&self, block: &[u8]) -> Result<Vec<AssetTransactionsInner>, StatusCode> {
+        let block = MultiEraBlock::decode(block).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        let mut matches = vec![];
+
+        for (idx, tx) in block.txs().iter().enumerate() {
+            if !self.pagination.should_skip(block.number(), idx) && self.tx_has_subject(tx)? {
+                let model = AssetTransactionsInner {
+                    tx_hash: hex::encode(tx.hash().as_slice()),
+                    tx_index: idx as i32,
+                    block_height: block.number() as i32,
+                    block_time: self.chain.slot_time(block.slot()) as i32,
+                };
+
+                matches.push(model);
+            }
+        }
+
+        if matches!(self.pagination.order, Order::Desc) {
+            matches = matches.into_iter().rev().collect();
+        }
+
+        Ok(matches)
+    }
+}
+
+impl<A: ArchiveStore> Iterator for TransactionWithSubjectIter<A> {
+    type Item = Vec<Result<AssetTransactionsInner, StatusCode>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let block = match self.pagination.order {
+            Order::Asc => self.blocks.next()?,
+            Order::Desc => self.blocks.next_back()?,
+        };
+
+        if block.is_err() {
+            return Some(vec![Err(StatusCode::INTERNAL_SERVER_ERROR)]);
+        }
+
+        let (_, block) = block.unwrap();
+
+        let txs = if let Some(block) = block {
+            self.find_txs(&block)
+        } else {
+            Ok(vec![])
+        };
+
+        if txs.is_err() {
+            return Some(vec![Err(StatusCode::INTERNAL_SERVER_ERROR)]);
+        }
+
+        Some(txs.unwrap().into_iter().map(Ok).collect())
+    }
+}
+
+pub async fn by_subject_transactions<D: Domain>(
+    Path(subject): Path<String>,
+    Query(params): Query<PaginationParameters>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Vec<AssetTransactionsInner>>, Error> {
+    let pagination = Pagination::try_from(params)?;
+
+    let subject = hex::decode(&subject).map_err(|_| Error::InvalidAsset)?;
+    let blocks = domain
+        .archive()
+        .iter_blocks_with_asset(&subject)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let chain = domain
+        .get_chain_summary()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let transactions = TransactionWithSubjectIter::<D::Archive>::new(
+        subject,
+        blocks,
+        chain,
+        pagination.clone(),
+        domain.archive().clone(),
+    )
+    .flatten()
+    .skip(pagination.from())
+    .take(pagination.count)
+    .try_collect()?;
+
+    Ok(Json(transactions))
 }

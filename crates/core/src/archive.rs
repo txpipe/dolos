@@ -1,5 +1,6 @@
 use std::{marker::PhantomData, ops::Range};
 
+use pallas::{crypto::hash::Hash, ledger::primitives::PlutusData};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -187,6 +188,7 @@ pub struct SlotTags {
     pub stake_addresses: Vec<OpaqueTag>,
     pub spent_txo: Vec<OpaqueTag>,
     pub account_certs: Vec<OpaqueTag>,
+    pub metadata: Vec<u64>,
 }
 
 pub trait ArchiveWriter: Send + Sync + 'static {
@@ -293,6 +295,8 @@ pub trait ArchiveStore: Clone + Send + Sync + 'static {
 
     fn get_tx(&self, tx_hash: &[u8]) -> Result<Option<EraCbor>, ArchiveError>;
 
+    fn get_plutus_data(&self, datum_hash: &Hash<32>) -> Result<Option<PlutusData>, ArchiveError>;
+
     fn get_slot_for_tx(&self, tx_hash: &[u8]) -> Result<Option<BlockSlot>, ArchiveError>;
 
     fn get_tx_by_spent_txo(&self, spent_txo: &[u8]) -> Result<Option<TxHash>, ArchiveError>;
@@ -314,6 +318,11 @@ pub trait ArchiveStore: Clone + Send + Sync + 'static {
     fn iter_blocks_with_account_certs(
         &self,
         account: &[u8],
+    ) -> Result<Self::SparseBlockIter, ArchiveError>;
+
+    fn iter_blocks_with_metadata(
+        &self,
+        metadata: &u64,
     ) -> Result<Self::SparseBlockIter, ArchiveError>;
 
     fn get_range<'a>(

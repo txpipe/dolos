@@ -1,96 +1,104 @@
-use std::collections::BTreeMap;
+use std::collections::{HashMap, HashSet};
 
-use dolos_core::{batch::WorkDeltas, ChainError, NsKey};
+use dolos_core::{batch::WorkDeltas, BrokenInvariant, ChainError, Genesis, NsKey, TxoRef};
 use pallas::{
     crypto::hash::Hash,
-    ledger::traverse::{MultiEraBlock, MultiEraCert, MultiEraTx, MultiEraUpdate},
+    ledger::{
+        primitives::Epoch,
+        traverse::{fees::compute_byron_fee, Era, MultiEraBlock, MultiEraCert, MultiEraTx},
+    },
 };
 use serde::{Deserialize, Serialize};
-use tracing::debug;
 
 use crate::{
-    model::{EpochState, FixedNamespace as _, EPOCH_KEY_MARK},
+    model::{EpochState, FixedNamespace as _},
+    owned::OwnedMultiEraOutput,
     pallas_extras,
     roll::BlockVisitor,
-    CardanoLogic, Nonces, PParamValue, PParamsSet,
+    CardanoLogic, Lovelace, Nonces, PParamsSet, PoolHash, CURRENT_EPOCH_KEY,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct EpochStatsUpdate {
     block_fees: u64,
-    utxo_consumed: u64,
-    utxo_produced: u64,
-    stake_registration_count: u64,
-    stake_deregistration_count: u64,
-    pool_registration_count: u64,
-    pool_deregistration_count: u64,
 
-    // params
-    key_deposit: u64,
-    pool_deposit: u64,
-}
+    // we need to use a delta approach instead of simple increments because the total size of moved
+    // lovelace can be higher than u64, causing overflows
+    utxo_delta: i64,
 
-impl EpochStatsUpdate {
-    pub fn new(pparams: &PParamsSet) -> Result<Self, ChainError> {
-        let out = Self {
-            key_deposit: pparams.key_deposit_or_default(),
-            pool_deposit: pparams.pool_deposit_or_default(),
-            ..Default::default()
-        };
-
-        Ok(out)
-    }
+    new_accounts: u64,
+    removed_accounts: u64,
+    withdrawals: u64,
+    registered_pools: HashSet<PoolHash>,
+    drep_deposits: Lovelace,
+    proposal_deposits: Lovelace,
+    drep_refunds: Lovelace,
+    treasury_donations: Lovelace,
 }
 
 impl dolos_core::EntityDelta for EpochStatsUpdate {
     type Entity = EpochState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((EpochState::NS, EPOCH_KEY_MARK))
+        NsKey::from((EpochState::NS, CURRENT_EPOCH_KEY))
     }
 
     fn apply(&mut self, entity: &mut Option<EpochState>) {
-        let Some(entity) = entity else { return };
+        let entity = entity.as_mut().expect("existing epoch");
 
-        entity.gathered_fees += self.block_fees;
+        let stats = entity.rolling.live_mut_unchecked().get_or_insert_default();
 
-        entity.utxos += self.utxo_produced;
-        entity.utxos = entity.utxos.saturating_sub(self.utxo_consumed);
+        stats.blocks_minted += 1;
 
-        let key_deposits = self.stake_registration_count * self.key_deposit;
-        let pool_deposits = self.pool_registration_count * self.pool_deposit;
+        if self.utxo_delta > 0 {
+            stats.produced_utxos += self.utxo_delta.unsigned_abs();
+        } else {
+            stats.consumed_utxos += self.utxo_delta.unsigned_abs();
+        }
 
-        entity.gathered_deposits += key_deposits + pool_deposits;
+        stats.gathered_fees += self.block_fees;
+        stats.new_accounts += self.new_accounts;
+        stats.removed_accounts += self.removed_accounts;
+        stats.withdrawals += self.withdrawals;
+        stats.proposal_deposits += self.proposal_deposits;
+        stats.drep_deposits += self.drep_deposits;
+        stats.drep_refunds += self.drep_refunds;
+        stats.treasury_donations += self.treasury_donations;
 
-        // TODO: this isn't accurate, we should use the deposit value stored in each
-        // entity. The question is: how do we get access to that?
-        let key_decays = self.stake_deregistration_count * self.key_deposit;
-        let pool_decays = self.pool_deregistration_count * self.pool_deposit;
-
-        entity.decayed_deposits += key_decays + pool_decays;
-
-        entity.blocks_minted += 1;
+        stats.registered_pools = stats
+            .registered_pools
+            .union(&self.registered_pools)
+            .cloned()
+            .collect();
     }
 
     fn undo(&self, entity: &mut Option<EpochState>) {
         let Some(entity) = entity else { return };
 
-        entity.gathered_fees -= self.block_fees;
+        let stats = entity
+            .rolling
+            .live_mut_unchecked()
+            .as_mut()
+            .expect("data to undo");
 
-        entity.utxos -= self.utxo_produced;
-        entity.utxos += self.utxo_consumed;
+        stats.blocks_minted -= 1;
 
-        let key_deposits = self.stake_registration_count * self.key_deposit;
-        let pool_deposits = self.pool_registration_count * self.pool_deposit;
+        if self.utxo_delta > 0 {
+            stats.produced_utxos -= self.utxo_delta.unsigned_abs();
+        } else {
+            stats.consumed_utxos -= self.utxo_delta.unsigned_abs();
+        }
 
-        entity.gathered_deposits -= key_deposits + pool_deposits;
+        stats.gathered_fees -= self.block_fees;
+        stats.new_accounts -= self.new_accounts;
+        stats.removed_accounts -= self.removed_accounts;
+        stats.withdrawals -= self.withdrawals;
 
-        let key_decays = self.stake_deregistration_count * self.key_deposit;
-        let pool_decays = self.pool_deregistration_count * self.pool_deposit;
-
-        entity.decayed_deposits -= key_decays + pool_decays;
-
-        entity.blocks_minted = entity.blocks_minted.saturating_sub(1);
+        stats.registered_pools = stats
+            .registered_pools
+            .difference(&self.registered_pools)
+            .cloned()
+            .collect();
     }
 }
 
@@ -107,7 +115,7 @@ impl dolos_core::EntityDelta for NoncesUpdate {
     type Entity = EpochState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((EpochState::NS, EPOCH_KEY_MARK))
+        NsKey::from((EpochState::NS, CURRENT_EPOCH_KEY))
     }
 
     fn apply(&mut self, entity: &mut Option<EpochState>) {
@@ -128,53 +136,54 @@ impl dolos_core::EntityDelta for NoncesUpdate {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PParamsUpdate {
-    to_update: PParamValue,
+// HACK: There are txs that don't have an explicit value for total collateral
+// and Alonzo txs don't even have the total collateral field. This is why we
+// need to compute it by looking at collateral inputs and collateral return.
+// Pallas hides this from us by providing the "consumes" / "produces" facade.
+fn compute_collateral_value(
+    tx: &MultiEraTx,
+    utxos: &HashMap<TxoRef, OwnedMultiEraOutput>,
+) -> Result<Lovelace, ChainError> {
+    debug_assert!(tx.era() == Era::Alonzo);
+    debug_assert!(!tx.is_valid());
 
-    // undo
-    prev_value: Option<PParamValue>,
-}
+    let mut total = 0;
 
-impl dolos_core::EntityDelta for PParamsUpdate {
-    type Entity = EpochState;
-
-    fn key(&self) -> NsKey {
-        NsKey::from((EpochState::NS, EPOCH_KEY_MARK))
-    }
-
-    fn apply(&mut self, entity: &mut Option<EpochState>) {
-        let Some(entity) = entity else { return };
-        debug!(update =? self.to_update, "applying pparam update");
-        entity.pparams.set(self.to_update.clone());
-    }
-
-    fn undo(&self, entity: &mut Option<EpochState>) {
-        if let Some(entity) = entity {
-            if let Some(prev_value) = &self.prev_value {
-                entity.pparams.set(prev_value.clone());
-            }
-        }
-    }
-}
-
-macro_rules! pparams_update {
-    ($update:expr, $getter:ident, $deltas:expr, $variant:ident) => {
-        $update.$getter().iter().for_each(|value| {
-            $deltas.add_for_entity(PParamsUpdate {
-                to_update: PParamValue::$variant(value.clone().into()),
-                prev_value: None,
-            });
+    for input in tx.consumes() {
+        let utxo = utxos
+            .get(&TxoRef::from(&input))
+            .ok_or(ChainError::BrokenInvariant(BrokenInvariant::MissingUtxo(
+                TxoRef::from(&input),
+            )))?;
+        utxo.with_dependent(|_, utxo| {
+            total += utxo.value().coin();
         });
-    };
+    }
+
+    for (_, output) in tx.produces() {
+        total -= output.value().coin();
+    }
+
+    Ok(total)
 }
 
-macro_rules! check_all_proposed {
-    ($update:expr, $deltas:expr, $($getter:ident => $variant:ident),*) => {
-        $(
-            pparams_update!($update, $getter, $deltas, $variant);
-        )*
-    };
+fn define_tx_fees(
+    tx: &MultiEraTx,
+    utxos: &HashMap<TxoRef, OwnedMultiEraOutput>,
+) -> Result<Lovelace, ChainError> {
+    if let Some(byron) = tx.as_byron() {
+        let fee = compute_byron_fee(byron, None);
+        Ok(fee)
+    } else if tx.is_valid() {
+        Ok(tx.fee().unwrap_or_default())
+    } else if let Some(collateral) = tx.total_collateral() {
+        tracing::debug!(tx=%tx.hash(), collateral, "total collateral consumed");
+        Ok(collateral)
+    } else {
+        let fee = compute_collateral_value(tx, utxos)?;
+        tracing::debug!(tx=%tx.hash(), fee, "alonzo-style collateral computed");
+        Ok(fee)
+    }
 }
 
 #[derive(Clone, Default)]
@@ -188,9 +197,12 @@ impl BlockVisitor for EpochStateVisitor {
         &mut self,
         _: &mut WorkDeltas<CardanoLogic>,
         block: &MultiEraBlock,
-        pparams: &PParamsSet,
+        _: &Genesis,
+        _: &PParamsSet,
+        _: Epoch,
+        _: u16,
     ) -> Result<(), ChainError> {
-        self.stats_delta = Some(EpochStatsUpdate::new(pparams)?);
+        self.stats_delta = Some(EpochStatsUpdate::default());
 
         // we only track nonces for Shelley and later
         if block.era() >= pallas::ledger::traverse::Era::Shelley {
@@ -210,8 +222,16 @@ impl BlockVisitor for EpochStateVisitor {
         _: &mut WorkDeltas<CardanoLogic>,
         _: &MultiEraBlock,
         tx: &MultiEraTx,
+        utxos: &HashMap<TxoRef, OwnedMultiEraOutput>,
     ) -> Result<(), ChainError> {
-        self.stats_delta.as_mut().unwrap().block_fees += tx.fee().unwrap_or_default();
+        let fees = define_tx_fees(tx, utxos)?;
+
+        self.stats_delta.as_mut().unwrap().block_fees += fees;
+
+        if let Some(donation) = pallas_extras::tx_treasury_donation(tx) {
+            self.stats_delta.as_mut().unwrap().treasury_donations += donation;
+        }
+
         Ok(())
     }
 
@@ -224,7 +244,7 @@ impl BlockVisitor for EpochStateVisitor {
         resolved: &pallas::ledger::traverse::MultiEraOutput,
     ) -> Result<(), ChainError> {
         let amount = resolved.value().coin();
-        self.stats_delta.as_mut().unwrap().utxo_consumed += amount;
+        self.stats_delta.as_mut().unwrap().utxo_delta -= amount as i64;
 
         Ok(())
     }
@@ -238,7 +258,7 @@ impl BlockVisitor for EpochStateVisitor {
         output: &pallas::ledger::traverse::MultiEraOutput,
     ) -> Result<(), ChainError> {
         let amount = output.value().coin();
-        self.stats_delta.as_mut().unwrap().utxo_produced += amount;
+        self.stats_delta.as_mut().unwrap().utxo_delta += amount as i64;
 
         Ok(())
     }
@@ -251,104 +271,58 @@ impl BlockVisitor for EpochStateVisitor {
         cert: &MultiEraCert,
     ) -> Result<(), ChainError> {
         if pallas_extras::cert_as_stake_registration(cert).is_some() {
-            self.stats_delta.as_mut().unwrap().stake_registration_count += 1;
+            self.stats_delta.as_mut().unwrap().new_accounts += 1;
         }
 
         if pallas_extras::cert_as_stake_deregistration(cert).is_some() {
+            self.stats_delta.as_mut().unwrap().removed_accounts += 1;
+        }
+
+        if let Some(cert) = pallas_extras::cert_as_pool_registration(cert) {
             self.stats_delta
                 .as_mut()
                 .unwrap()
-                .stake_deregistration_count += 1;
+                .registered_pools
+                .insert(cert.operator);
         }
 
-        if pallas_extras::cert_as_pool_registration(cert).is_some() {
-            self.stats_delta.as_mut().unwrap().pool_registration_count += 1;
+        if let Some(cert) = pallas_extras::cert_as_drep_registration(cert) {
+            tracing::debug!(cert=?cert.cred, "drep registration");
+            self.stats_delta.as_mut().unwrap().drep_deposits += cert.deposit;
         }
 
-        // TODO: decayed deposits
+        if let Some(cert) = pallas_extras::cert_as_drep_unregistration(cert) {
+            tracing::debug!(cert=?cert.cred, "drep un-registration");
+            self.stats_delta.as_mut().unwrap().drep_refunds += cert.deposit;
+        }
 
         Ok(())
     }
 
-    fn visit_update(
+    fn visit_proposal(
         &mut self,
-        deltas: &mut WorkDeltas<CardanoLogic>,
+        _: &mut WorkDeltas<CardanoLogic>,
         _: &MultiEraBlock,
-        _: Option<&MultiEraTx>,
-        update: &MultiEraUpdate,
+        _: &MultiEraTx,
+        proposal: &pallas::ledger::traverse::MultiEraProposal,
+        _: usize,
     ) -> Result<(), ChainError> {
-        check_all_proposed! {
-            update,
-            deltas,
+        tracing::warn!(proposal=?proposal.gov_action(), deposit=proposal.deposit(), "proposal deposit");
 
-            all_proposed_minfee_a => MinFeeA,
-            all_proposed_minfee_b => MinFeeB,
-            all_proposed_max_block_body_size => MaxBlockBodySize,
-            all_proposed_max_transaction_size => MaxTransactionSize,
-            all_proposed_max_block_header_size => MaxBlockHeaderSize,
-            all_proposed_key_deposit => KeyDeposit,
-            all_proposed_pool_deposit => PoolDeposit,
-            all_proposed_desired_number_of_stake_pools => DesiredNumberOfStakePools,
-            all_proposed_protocol_version => ProtocolVersion,
-            all_proposed_ada_per_utxo_byte => MinUtxoValue,
-            all_proposed_min_pool_cost => MinPoolCost,
-            all_proposed_expansion_rate => ExpansionRate,
-            all_proposed_treasury_growth_rate => TreasuryGrowthRate,
-            all_proposed_maximum_epoch => MaximumEpoch,
-            all_proposed_pool_pledge_influence => PoolPledgeInfluence,
-            all_proposed_decentralization_constant => DecentralizationConstant,
-            all_proposed_extra_entropy => ExtraEntropy,
-            all_proposed_ada_per_utxo_byte => AdaPerUtxoByte,
-            all_proposed_execution_costs => ExecutionCosts,
-            all_proposed_max_tx_ex_units => MaxTxExUnits,
-            all_proposed_max_block_ex_units => MaxBlockExUnits,
-            all_proposed_max_value_size => MaxValueSize,
-            all_proposed_collateral_percentage => CollateralPercentage,
-            all_proposed_max_collateral_inputs => MaxCollateralInputs,
-            all_proposed_pool_voting_thresholds => PoolVotingThresholds,
-            all_proposed_drep_voting_thresholds => DrepVotingThresholds,
-            all_proposed_min_committee_size => MinCommitteeSize,
-            all_proposed_committee_term_limit => CommitteeTermLimit,
-            all_proposed_governance_action_validity_period => GovernanceActionValidityPeriod,
-            all_proposed_governance_action_deposit => GovernanceActionDeposit,
-            all_proposed_drep_deposit => DrepDeposit,
-            all_proposed_drep_inactivity_period => DrepInactivityPeriod,
-            all_proposed_minfee_refscript_cost_per_byte => MinFeeRefScriptCostPerByte,
-            conway_first_proposed_cost_models_for_script_languages => CostModelsForScriptLanguages
-        };
+        self.stats_delta.as_mut().unwrap().proposal_deposits += proposal.deposit();
 
-        if let Some(cm) = update.alonzo_first_proposed_cost_models_for_script_languages() {
-            dbg!(&cm);
-            deltas.add_for_entity(PParamsUpdate {
-                to_update: PParamValue::CostModelsForScriptLanguages(
-                    pallas::ledger::primitives::conway::CostModels {
-                        plutus_v1: cm
-                            .get(&pallas::ledger::primitives::alonzo::Language::PlutusV1)
-                            .cloned(),
-                        plutus_v2: None,
-                        plutus_v3: None,
-                        unknown: BTreeMap::default(),
-                    },
-                ),
-                prev_value: None,
-            });
-        }
+        Ok(())
+    }
 
-        if let Some(cm) = update.babbage_first_proposed_cost_models_for_script_languages() {
-            dbg!(&cm);
-            deltas.add_for_entity(PParamsUpdate {
-                to_update: PParamValue::CostModelsForScriptLanguages(
-                    pallas::ledger::primitives::conway::CostModels {
-                        plutus_v1: cm.plutus_v1.clone(),
-                        plutus_v2: cm.plutus_v2.clone(),
-                        plutus_v3: None,
-                        unknown: BTreeMap::default(),
-                    },
-                ),
-                prev_value: None,
-            });
-        }
-
+    fn visit_withdrawal(
+        &mut self,
+        _: &mut WorkDeltas<CardanoLogic>,
+        _: &MultiEraBlock,
+        _: &MultiEraTx,
+        _: &[u8],
+        amount: u64,
+    ) -> Result<(), ChainError> {
+        self.stats_delta.as_mut().unwrap().withdrawals += amount;
         Ok(())
     }
 
