@@ -2,6 +2,7 @@ use crate::{make_custom_utxo_delta, TestAddress, UtxoGenerator};
 use dolos_core::*;
 use futures_util::stream::StreamExt;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 
 pub fn seed_random_memory_store(utxo_generator: impl UtxoGenerator) -> impl StateStore {
     let store =
@@ -77,7 +78,7 @@ impl dolos_core::MempoolStore for Mempool {
 #[derive(Clone)]
 pub struct ToyDomain {
     wal: dolos_redb::wal::RedbWalStore<dolos_cardano::CardanoDelta>,
-    chain: dolos_cardano::CardanoLogic,
+    chain: Arc<RwLock<dolos_cardano::CardanoLogic>>,
     state: dolos_redb3::state::StateStore,
     archive: dolos_redb3::archive::ArchiveStore,
     mempool: Mempool,
@@ -88,7 +89,10 @@ pub struct ToyDomain {
 
 impl ToyDomain {
     /// Create a new MockDomain with the provided state implementation
-    pub fn new(initial_delta: Option<UtxoSetDelta>, storage_config: Option<StorageConfig>) -> Self {
+    pub async fn new(
+        initial_delta: Option<UtxoSetDelta>,
+        storage_config: Option<StorageConfig>,
+    ) -> Self {
         let state = dolos_redb3::state::StateStore::in_memory(dolos_cardano::model::build_schema())
             .unwrap();
 
@@ -106,10 +110,12 @@ impl ToyDomain {
         )
         .unwrap();
 
+        dolos_cardano::genesis::execute::<Self>(&state, &genesis).unwrap();
+
         let domain = Self {
             state,
             wal: dolos_redb::wal::RedbWalStore::memory().unwrap(),
-            chain,
+            chain: Arc::new(RwLock::new(chain)),
             archive,
             mempool: Mempool {},
             storage_config: storage_config.unwrap_or_default(),
@@ -117,7 +123,7 @@ impl ToyDomain {
             tip_broadcast,
         };
 
-        dolos_core::facade::bootstrap(&domain).unwrap();
+        dolos_core::facade::bootstrap(&domain).await.unwrap();
 
         if let Some(delta) = initial_delta {
             let writer = domain.state.start_writer().unwrap();
@@ -164,8 +170,12 @@ impl dolos_core::Domain for ToyDomain {
         self.genesis.clone()
     }
 
-    fn chain(&self) -> &Self::Chain {
-        &self.chain
+    async fn read_chain(&self) -> tokio::sync::RwLockReadGuard<'_, Self::Chain> {
+        self.chain.read().await
+    }
+
+    async fn write_chain(&self) -> tokio::sync::RwLockWriteGuard<'_, Self::Chain> {
+        self.chain.write().await
     }
 
     fn wal(&self) -> &Self::Wal {

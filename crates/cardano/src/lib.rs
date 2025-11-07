@@ -103,12 +103,6 @@ enum WorkBuffer {
     EstartBoundary(OwnedMultiEraBlock),
 }
 
-impl Default for WorkBuffer {
-    fn default() -> Self {
-        Self::Empty
-    }
-}
-
 impl WorkBuffer {
     fn new_from_cursor(cursor: ChainPoint) -> Self {
         Self::Restart(cursor)
