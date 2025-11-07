@@ -55,18 +55,25 @@ mod tests {
 
     #[tokio::test]
     async fn test_stream_waiting() {
-        let domain = ToyDomain::new(None, None);
+        let domain = ToyDomain::new(None, None).await;
 
         for i in 0..=100 {
             let (_, block) = make_conway_block(i * 10);
-            dolos_core::facade::roll_forward(&domain, block).unwrap();
+
+            dolos_core::facade::roll_forward(&domain, block)
+                .await
+                .unwrap();
         }
 
         let domain2 = domain.clone();
         let background = tokio::spawn(async move {
             for i in 101..=200 {
                 let (_, block) = make_conway_block(i * 10);
-                dolos_core::facade::roll_forward(&domain2, block).unwrap();
+
+                dolos_core::facade::roll_forward(&domain2, block)
+                    .await
+                    .unwrap();
+
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
             }
         });
