@@ -191,7 +191,7 @@ mod tests {
     const SUBJECT_PROTOCOL: &str = r#"
         party Sender;
         party Receiver;
-    
+
         tx swap(quantity: Int) {
             input source {
                 from: Sender,
