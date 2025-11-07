@@ -11,17 +11,12 @@ pub mod submit;
 
 const HOUSEKEEPING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Default)]
 pub enum SyncLimit {
-    UntilTip,
+    #[default]
     NoLimit,
+    UntilTip,
     MaxBlocks(u64),
-}
-
-impl Default for SyncLimit {
-    fn default() -> Self {
-        Self::NoLimit
-    }
 }
 
 #[derive(Serialize, Deserialize)]
