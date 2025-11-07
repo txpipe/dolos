@@ -163,7 +163,7 @@ mod tests {
 
     use super::*;
 
-    fn setup_test_context() -> Arc<Context<ToyDomain>> {
+    async fn setup_test_context() -> Arc<Context<ToyDomain>> {
         let delta = dolos_testing::make_custom_utxo_delta(
             dolos_testing::TestAddress::everyone(),
             2..4,
@@ -172,7 +172,7 @@ mod tests {
             },
         );
 
-        let domain = ToyDomain::new(Some(delta), None);
+        let domain = ToyDomain::new(Some(delta), None).await;
 
         Arc::new(Context {
             domain,
@@ -233,7 +233,7 @@ mod tests {
 
         let params = Params::new(Some(req.as_str()));
 
-        let context = setup_test_context();
+        let context = setup_test_context().await;
 
         let resolved = trp_resolve(params, context.clone()).await?;
 
