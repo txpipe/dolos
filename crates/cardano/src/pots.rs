@@ -375,7 +375,12 @@ mod tests {
 
         let incentives = epoch_incentives(pots.reserves, fee_ss, rho, tau, eta);
 
-        let delta = PotDelta::default();
+        let delta = PotDelta {
+            pool_deposit: 500_000_000,
+            account_deposit: 2_000_000,
+            ..Default::default()
+        };
+
         let pots = apply_delta(pots, &incentives, &delta);
 
         assert!(pots.is_consistent(MAX_SUPPLY));
@@ -417,6 +422,9 @@ mod tests {
 
         let delta = PotDelta {
             unspendable_rewards: 295063003292,
+            protocol_version: 7,
+            pool_deposit: 500_000_000,
+            account_deposit: 2_000_000,
             ..Default::default()
         };
 
