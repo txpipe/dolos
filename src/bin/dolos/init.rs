@@ -116,7 +116,6 @@ impl From<&KnownNetwork> for crate::GenesisConfig {
                 ..Default::default()
             },
             KnownNetwork::CardanoPreProd => crate::GenesisConfig {
-                force_protocol: Some(2), // Preprod network starts at Shelley
                 ..Default::default()
             },
             // KnownNetwork::CardanoSanchonet => todo!(),
