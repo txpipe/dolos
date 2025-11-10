@@ -1,8 +1,8 @@
 use dolos_core::{ChainError, Domain, EntityKey, Genesis, StateStore as _, StateWriter as _};
 
 use crate::{
-    mutable_slots, pots::Pots, utils::nonce_stability_window, EpochState, EpochValue, EraBoundary,
-    EraSummary, Lovelace, Nonces, PParamsSet, RollingStats, CURRENT_EPOCH_KEY,
+    pots::Pots, utils::nonce_stability_window, EpochState, EpochValue, EraBoundary, EraSummary,
+    Lovelace, Nonces, PParamsSet, RollingStats, CURRENT_EPOCH_KEY,
 };
 
 fn get_utxo_amount(genesis: &Genesis) -> Lovelace {
@@ -53,6 +53,7 @@ pub fn bootstrap_epoch<D: Domain>(
     }
 
     let pots = bootstrap_pots(&pparams, genesis)?;
+    let protocol = pparams.ensure_protocol_major()?;
 
     let pparams = EpochValue::with_genesis(pparams);
 
@@ -60,7 +61,7 @@ pub fn bootstrap_epoch<D: Domain>(
         pparams,
         initial_pots: pots,
         largest_stable_slot: genesis.shelley.epoch_length.unwrap() as u64
-            - nonce_stability_window(protocol, genesis),
+            - nonce_stability_window(protocol as u16, genesis),
         nonces,
         previous_nonce_tail: None,
         number: 0,

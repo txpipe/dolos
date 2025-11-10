@@ -1292,6 +1292,7 @@ impl PParamsSet {
     ensure_pparam!(pool_deposit, u64);
     ensure_pparam!(governance_action_validity_period, u64);
     ensure_pparam!(protocol_version, ProtocolVersion);
+    ensure_pparam!(protocol_major, u16);
 
     pgetter!(SystemStart, u64);
     pgetter!(EpochLength, u64);
