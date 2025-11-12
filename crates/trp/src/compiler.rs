@@ -49,7 +49,10 @@ fn build_pparams<D: Domain>(domain: &D) -> Result<tx3_cardano::PParams, Error> {
 }
 
 pub fn find_cursor<D: Domain>(domain: &D) -> Result<tx3_cardano::ChainPoint, Error> {
-    let cursor = domain.state().read_cursor()?.ok_or(Error::NoCursorFound)?;
+    let cursor = domain
+        .state()
+        .read_cursor()?
+        .unwrap_or(dolos_core::ChainPoint::Origin);
 
     let (_, era) = dolos_cardano::load_active_era::<D>(domain.state())?;
 
