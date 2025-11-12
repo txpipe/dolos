@@ -566,7 +566,8 @@ where
             };
 
             let out = AccountRewardContentInner {
-                epoch: epoch as i32,
+                // TODO: This should be handled on write instead of read
+                epoch: epoch as i32 - 1,
                 amount: reward.amount.to_string(),
                 pool_id,
                 r#type,
