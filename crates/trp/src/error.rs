@@ -5,8 +5,14 @@ use tx3_resolver::inputs::{CanonicalQuery, SearchSpace};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("no cursor found")]
+    NoCursorFound,
+
     #[error(transparent)]
     StateError(#[from] dolos_core::StateError),
+
+    #[error(transparent)]
+    ChainError(#[from] dolos_core::ChainError),
 
     #[error(transparent)]
     TraverseError(#[from] pallas::ledger::traverse::Error),
@@ -131,6 +137,8 @@ impl Error {
 
     pub fn code(&self) -> i32 {
         match self {
+            Error::NoCursorFound => ErrorCode::InternalError.code(),
+            Error::ChainError(_) => ErrorCode::InternalError.code(),
             Error::JsonRpcError(err) => err.code(),
             Error::InvalidTirEnvelope => ErrorCode::InvalidParams.code(),
             Error::InvalidTirBytes => ErrorCode::InvalidParams.code(),

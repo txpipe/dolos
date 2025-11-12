@@ -1,7 +1,7 @@
 use pallas::ledger::primitives::conway::CostModels;
 use std::collections::HashMap;
 
-use dolos_core::{Domain, Genesis};
+use dolos_core::{Domain, Genesis, StateStore};
 
 use crate::{Config, Error};
 
@@ -48,17 +48,35 @@ fn build_pparams<D: Domain>(domain: &D) -> Result<tx3_cardano::PParams, Error> {
     Ok(out)
 }
 
+pub fn find_cursor<D: Domain>(domain: &D) -> Result<tx3_cardano::ChainPoint, Error> {
+    let cursor = domain
+        .state()
+        .read_cursor()?
+        .unwrap_or(dolos_core::ChainPoint::Origin);
+
+    let (_, era) = dolos_cardano::load_active_era::<D>(domain.state())?;
+
+    Ok(tx3_cardano::ChainPoint {
+        slot: cursor.slot(),
+        hash: cursor.hash().map(|h| h.to_vec()).unwrap_or_default(),
+        timestamp: era.slot_time(cursor.slot()) as u128,
+    })
+}
+
 pub fn load_compiler<D: Domain>(
     domain: &D,
     config: &Config,
 ) -> Result<tx3_cardano::Compiler, Error> {
     let pparams = build_pparams::<D>(domain)?;
 
+    let cursor = find_cursor(domain)?;
+
     let compiler = tx3_cardano::Compiler::new(
         pparams,
         tx3_cardano::Config {
             extra_fees: config.extra_fees,
         },
+        cursor,
     );
 
     Ok(compiler)
