@@ -1,12 +1,19 @@
 use jsonrpsee::server::{RpcModule, Server};
 use serde::{Deserialize, Serialize};
-use std::{net::SocketAddr, sync::Arc};
+use std::{
+    net::SocketAddr,
+    sync::Arc,
+    ops::Deref,
+};
 use tokio::select;
 use tower::ServiceBuilder;
 use tower_http::cors::CorsLayer;
 use tracing::info;
 
-use dolos_core::{CancelToken, Domain, ServeError};
+use tx3_cardano::ChainPoint;
+use dolos_core::{Domain, StateStore, CancelToken, ServeError};
+use dolos_cardano::{ChainSummary, PParamsSet};
+use pallas::ledger::validate::phase2::script_context::SlotConfig;
 
 mod compiler;
 mod error;
@@ -105,5 +112,53 @@ impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
                 Ok(())
             }
         }
+    }
+}
+
+#[derive(Clone)]
+pub struct Facade<D: Domain> {
+    pub inner: D,
+}
+
+impl<D: Domain> Deref for Facade<D> {
+    type Target = D;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl<D: Domain> Facade<D> {
+    pub fn get_chain_summary(&self) -> Result<ChainSummary, error::Error> {
+        let summary = dolos_cardano::eras::load_era_summary::<D>(&self.inner.state())
+            .map_err(|e| error::Error::ChainSummaryNotResolved(e.to_string()))?;
+
+        Ok(summary)
+    }
+
+    pub fn get_slot_config(&self) -> Result<SlotConfig, error::Error> {
+        let chain = self.get_chain_summary()?;
+
+        Ok(SlotConfig {
+            slot_length: chain.edge().slot_length,
+            zero_slot: chain.edge().start.slot,
+            zero_time: chain.edge().start.timestamp,
+        })
+    }
+
+    pub fn get_chain_tip(&self) -> Result<ChainPoint, error::Error> {
+        let cursor = self.inner.state().read_cursor()?.ok_or(Error::TipNotResolved)?;
+        let slot = cursor.slot();
+        let hash = cursor.hash().map(|h| h.to_vec()).unwrap_or_default();
+        let timestamp = (slot * 1000) as u128; // TODO: check if this is the correct way to get timestamp
+
+        Ok(ChainPoint { slot, hash, timestamp })
+    }
+
+    pub fn get_pparams(&self) -> Result<PParamsSet, error::Error> {
+        let pparams = dolos_cardano::load_effective_pparams::<D>(&self.inner.state())
+            .map_err(|_| Error::PParamsNotAvailable)?;
+
+        Ok(pparams)
     }
 }
