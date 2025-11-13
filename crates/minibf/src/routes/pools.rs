@@ -1,3 +1,5 @@
+use std::{collections::HashMap, time::Duration};
+
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
@@ -9,15 +11,15 @@ use blockfrost_openapi::models::{
 };
 use dolos_cardano::{
     model::{AccountState, PoolState},
-    StakeLog,
+    FixedNamespace, PoolDelegation, StakeLog,
 };
-use dolos_core::{BlockSlot, Domain};
+use dolos_core::{ArchiveStore, BlockSlot, Domain, EntityKey, TemporalKey};
 use itertools::Itertools;
 use pallas::{
     codec::minicbor,
-    crypto::hash::Hash,
     ledger::{addresses::Network, primitives::StakeCredential},
 };
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::{
@@ -38,34 +40,142 @@ fn decode_pool_id(pool_id: &str) -> Result<Vec<u8>, Error> {
     Err(Error::Code(StatusCode::BAD_REQUEST))
 }
 
-struct PoolModelBuilder {
-    operator: Hash<28>,
-    state: dolos_cardano::model::PoolState,
-}
+async fn pool_offchain_metadata(url: &str) -> Option<PoolOffchainMetadata> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .user_agent("Dolos MiniBF")
+        .build()
+        .ok()?;
 
-impl IntoModel<PoolListExtendedInner> for PoolModelBuilder {
-    type SortKey = BlockSlot;
+    let res = client.get(url).send().await.ok()?;
 
-    fn sort_key(&self) -> Option<Self::SortKey> {
-        Some(self.state.register_slot)
+    if res.status() != StatusCode::OK {
+        return None;
     }
 
-    fn into_model(self) -> Result<PoolListExtendedInner, StatusCode> {
-        let pool_id = bech32_pool(self.operator)?;
+    res.json().await.ok()
+}
 
-        // TODO: implement
-        let live_stake = "0".to_string();
-        let active_stake = "0".to_string();
+#[derive(Serialize, Deserialize, Clone)]
+pub struct PoolOffchainMetadata {
+    pub name: String,
+    pub description: String,
+    pub ticker: String,
+    pub homepage: String,
+}
 
-        let params = self.state.snapshot.live().map(|x| x.params.clone());
+pub async fn all_extended<D: Domain>(
+    Query(params): Query<PaginationParameters>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Vec<PoolListExtendedInner>>, Error>
+where
+    Option<PoolState>: From<D::Entity>,
+    Option<AccountState>: From<D::Entity>,
+{
+    let pagination = Pagination::try_from(params)?;
+    let chain_summary = domain.get_chain_summary()?;
 
-        let out = PoolListExtendedInner {
+    let mut live_stake_map = HashMap::new();
+    for x in domain
+        .iter_cardano_entities::<AccountState>(None)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    {
+        let (_, state) = x.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        if let Some(PoolDelegation::Pool(hash)) = state.pool.live() {
+            let stake = state.stake.live().map(|x| x.total()).unwrap_or(0);
+            live_stake_map
+                .entry(*hash)
+                .and_modify(|entry| *entry += stake)
+                .or_insert(stake);
+        };
+    }
+    let circulating_supply = dolos_cardano::load_epoch::<D>(domain.state())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .initial_pots
+        .circulating();
+    let optimal = domain
+        .get_current_effective_pparams()?
+        .ensure_k()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let pools = domain
+        .iter_cardano_entities::<PoolState>(None)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .flat_map(|x| {
+            let Ok((key, state)) = x else {
+                return Some(Err(StatusCode::INTERNAL_SERVER_ERROR));
+            };
+            if state.snapshot.live().map(|x| x.is_retired).unwrap_or(false) {
+                return None;
+            }
+            Some(Ok((state.register_slot, (key, state))))
+        })
+        .collect::<Result<Vec<(BlockSlot, (EntityKey, PoolState))>, StatusCode>>()?
+        .into_iter()
+        .sorted_by(|a, b| Ord::cmp(&a.0, &b.0))
+        .map(|(_, x)| x)
+        .skip(pagination.skip())
+        .take(pagination.count)
+        .collect_vec();
+
+    let mut out = vec![];
+    for (key, pool) in pools {
+        let poolhex = hex::encode(pool.operator);
+        let pool_id = bech32_pool(pool.operator)?;
+        let params = pool.snapshot.live().map(|x| x.params.clone());
+        let metadata = match params.as_ref() {
+            Some(x) => match x.pool_metadata.as_ref() {
+                Some(y) => {
+                    let out = match pool_offchain_metadata(&y.url).await {
+                        Some(meta) => json!({
+                            "url": y.url,
+                            "hash": y.hash,
+                            "ticker": meta.ticker,
+                            "name": meta.name,
+                            "description": meta.description,
+                            "homepage": meta.homepage
+                        }),
+                        None => json!({
+                            "url": y.url,
+                            "hash": y.hash,
+                            "ticker": None::<String>,
+                            "name": None::<String>,
+                            "description": None::<String>,
+                            "homepage": None::<String>
+                        }),
+                    };
+
+                    Some(Box::new(out))
+                }
+                None => None,
+            },
+            None => None,
+        };
+
+        // Fetch live and active stake logs
+        let live = live_stake_map.get(&pool.operator).copied();
+        let Some(epoch) = pool.snapshot.epoch() else {
+            return Err(StatusCode::INTERNAL_SERVER_ERROR.into());
+        };
+        let active_slot = chain_summary.epoch_start(epoch - 1);
+        let Ok(active) = domain.archive().read_log_typed::<StakeLog>(
+            StakeLog::NS,
+            &(TemporalKey::from(active_slot), key.clone()).into(),
+        ) else {
+            return Err(StatusCode::INTERNAL_SERVER_ERROR.into());
+        };
+
+        out.push(PoolListExtendedInner {
             pool_id,
-            hex: hex::encode(self.operator),
-            live_stake,
-            active_stake,
-            live_saturation: rational_to_f64::<3>(&self.state.live_saturation()),
-            blocks_minted: self.state.blocks_minted_total as i32,
+            hex: poolhex,
+            live_stake: live.map(|x| x.to_string()).unwrap_or("0".to_string()),
+            active_stake: active
+                .map(|x| x.total_stake.to_string())
+                .unwrap_or("0".to_string()),
+            live_saturation: live
+                .map(|x| x as f64 * optimal as f64 / circulating_supply as f64)
+                .unwrap_or_default(),
+            blocks_minted: pool.blocks_minted_total as i32,
             declared_pledge: params
                 .as_ref()
                 .map(|x| x.pledge.to_string())
@@ -78,64 +188,11 @@ impl IntoModel<PoolListExtendedInner> for PoolModelBuilder {
                 .as_ref()
                 .map(|x| x.cost.to_string())
                 .unwrap_or_default(),
-            metadata: params
-                .as_ref()
-                .map(|x| {
-                    x.pool_metadata.as_ref().map(|m| {
-                        let out = json!({
-                            "url": m.url,
-                            "hash": m.hash,
-                        });
-
-                        Box::new(out)
-                    })
-                })
-                .unwrap_or_default(),
-        };
-
-        Ok(out)
+            metadata,
+        });
     }
-}
 
-pub async fn all_extended<D: Domain>(
-    Query(params): Query<PaginationParameters>,
-    State(domain): State<Facade<D>>,
-) -> Result<Json<Vec<PoolListExtendedInner>>, Error>
-where
-    Option<PoolState>: From<D::Entity>,
-{
-    let iter = domain
-        .iter_cardano_entities::<PoolState>(None)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let pagination = Pagination::try_from(params)?;
-
-    let mapped: Vec<_> = iter
-        .into_iter()
-        .flat_map(|x| {
-            let Ok((key, state)) = x else {
-                return Some(Err(StatusCode::INTERNAL_SERVER_ERROR));
-            };
-
-            if state.snapshot.live().map(|x| x.is_retired).unwrap_or(false) {
-                return None;
-            }
-
-            let operator = Hash::<28>::from(key);
-
-            let builder = PoolModelBuilder { operator, state };
-
-            Some(Ok(builder.into_model_with_sort_key()))
-        })
-        .collect::<Result<Result<Vec<(BlockSlot, PoolListExtendedInner)>, _>, StatusCode>>()??
-        .into_iter()
-        .sorted_by(|a, b| Ord::cmp(&a.0, &b.0))
-        .map(|(_, x)| x)
-        .skip(pagination.skip())
-        .take(pagination.count)
-        .collect();
-
-    Ok(Json(mapped))
+    Ok(Json(out))
 }
 
 struct PoolDelegatorModelBuilder {
