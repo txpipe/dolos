@@ -141,20 +141,3 @@ pub fn bootstrap<D: Domain>(state: &D::State, genesis: &Genesis) -> Result<(), C
 
     Ok(())
 }
-
-#[cfg(test)]
-mod tests {
-    use pallas::ledger::primitives::StakeCredential;
-
-    use super::*;
-
-    #[test]
-    fn test_a() {
-        let bytes =
-            hex::decode("d27cb9a1a408b81239b55ec03f6e004deffcc094e7252d5c45743784").unwrap();
-        let credential: StakeCredential = pallas::codec::minicbor::decode(&bytes).unwrap();
-        dbg!(&credential);
-    }
-}
-
-// d27cb9a1a408b81239b55ec03f6e 004deffcc094e7252d5c45743784
