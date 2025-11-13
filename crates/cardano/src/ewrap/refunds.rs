@@ -125,7 +125,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         proposal: &ProposalState,
         account: Option<&AccountState>,
     ) -> Result<(), ChainError> {
-        tracing::error!(proposal=%id, "visiting enacting proposal");
+        tracing::debug!(proposal=%id, "visiting enacting proposal");
 
         if let Some(deposit) = proposal.deposit {
             if let Some(account) = account {

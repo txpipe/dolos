@@ -173,7 +173,7 @@ pub fn define_new_pots(ctx: &super::WorkContext) -> Pots {
 
     let pots = apply_delta(epoch.initial_pots.clone(), &end.epoch_incentives, &delta);
 
-    tracing::info!(
+    tracing::debug!(
         rewards = pots.rewards,
         reserves = pots.reserves,
         treasury = pots.treasury,

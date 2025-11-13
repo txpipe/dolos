@@ -241,17 +241,14 @@ impl WorkBuffer {
                 Some(WorkUnit::EWrap(block.slot())),
                 Self::EstartBoundary(block, epoch + 1),
             ),
-            WorkBuffer::EstartBoundary(block, epoch) => {
-                dbg!(&stop_epoch, &epoch);
-                (
-                    Some(WorkUnit::EStart(block.slot())),
-                    if stop_epoch.is_some_and(|x| x == epoch) {
-                        Self::PreForcedStop(block)
-                    } else {
-                        Self::OpenBatch(WorkBatch::for_single_block(WorkBlock::new(block)))
-                    },
-                )
-            }
+            WorkBuffer::EstartBoundary(block, epoch) => (
+                Some(WorkUnit::EStart(block.slot())),
+                if stop_epoch.is_some_and(|x| x == epoch) {
+                    Self::PreForcedStop(block)
+                } else {
+                    Self::OpenBatch(WorkBatch::for_single_block(WorkBlock::new(block)))
+                },
+            ),
             WorkBuffer::PreForcedStop(block) => (
                 Some(WorkUnit::Blocks(WorkBatch::for_single_block(
                     WorkBlock::new(block),
