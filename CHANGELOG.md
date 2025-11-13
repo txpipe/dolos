@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.0-rc.2] - 2025-11-13
+
+### 🚀 Features
+
+- *(cardano)* Support genesis bootstrap of custom staking (#788)
+
+### 🐛 Bug Fixes
+
+- *(cli)* Remove bad force protocol in preprod init (#782)
+- *(cardano)* Make sure sync can continue after stop epoch (#786)
+- *(cardano)* Make genesis nonce aware of protocol (#783)
+- *(minibf)* Adjust conformance of pools and rewards endpoints (#784)
+- *(minibf)* Map circulating supply to BF semantics (#789)
+
+### ⚙️ Miscellaneous Tasks
+
+- Fix broken tests (#781)
+- *(trp)* Update tx3 deps to v0.12 (#785)
+- *(cardano)* Reduce excessive log levels (#787)
+
 ## [1.0.0-rc.1] - 2025-11-06
 
 ### 🚀 Features
@@ -39,6 +59,10 @@ All notable changes to this project will be documented in this file.
 - *(cardano)* Remove excessive logs
 - Fix lint warnings
 - Bump Pallas to latest main branch (#779)
+
+### Release
+
+- V1.0.0-rc.1
 
 ## [1.0.0-beta.8] - 2025-10-27
 
