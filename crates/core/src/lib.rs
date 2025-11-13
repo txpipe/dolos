@@ -547,9 +547,6 @@ pub enum ChainError {
     #[error("era not found")]
     EraNotFound,
 
-    #[error("forced stop epoch reached")]
-    StopEpochReached,
-
     #[error("epoch value version not found for epoch {0}")]
     EpochValueVersionNotFound(Epoch),
 
@@ -578,6 +575,7 @@ pub enum WorkUnit<C: ChainLogic> {
     EWrap(BlockSlot),
     EStart(BlockSlot),
     Rupd(BlockSlot),
+    ForcedStop,
 }
 
 pub trait ChainLogic: Sized + Send + Sync {
@@ -688,6 +686,9 @@ pub enum DomainError {
 
     #[error("wal is behind state: {0}")]
     WalIsBehindState(BlockSlot, BlockSlot),
+
+    #[error("forced stop epoch reached")]
+    StopEpochReached,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
