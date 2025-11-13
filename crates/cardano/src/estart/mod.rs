@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use dolos_core::{batch::WorkDeltas, BlockSlot, ChainError, Domain, EntityKey, Genesis};
-use tracing::{info, instrument};
+use tracing::{debug, info, instrument};
 
 use crate::{
     AccountState, CardanoDelta, CardanoEntity, CardanoLogic, Config, DRepState, EpochState,
@@ -108,7 +108,7 @@ pub fn execute<D: Domain>(
 
     work.commit::<D>(state, archive, slot)?;
 
-    info!("ESTART work unit committed");
+    debug!("ESTART work unit committed");
 
     Ok(())
 }

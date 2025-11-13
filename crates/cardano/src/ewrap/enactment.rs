@@ -102,7 +102,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         proposal: &ProposalState,
         _: Option<&AccountState>,
     ) -> Result<(), ChainError> {
-        tracing::error!(proposal=%id, "visiting enacted proposal");
+        tracing::debug!(proposal=%id, "visiting enacted proposal");
 
         // Apply proposal on ending state
         match &proposal.action {

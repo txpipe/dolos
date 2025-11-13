@@ -113,7 +113,7 @@ impl BoundaryWork {
 
             // Skip proposals already processe
             if !proposal.is_active(self.ending_state.number) {
-                tracing::warn!(proposal=%id, "skipping non-active proposal");
+                tracing::debug!(proposal=%id, "skipping non-active proposal");
                 continue;
             }
 

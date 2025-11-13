@@ -5,7 +5,7 @@ use std::{
 
 use dolos_core::{batch::WorkDeltas, BlockSlot, ChainError, Domain, EntityKey, Genesis};
 use pallas::ledger::primitives::conway::DRep;
-use tracing::{info, instrument};
+use tracing::{debug, info, instrument};
 
 use crate::{
     rewards::RewardMap, rupd::RupdWork, AccountState, CardanoDelta, CardanoEntity, CardanoLogic,
@@ -153,13 +153,13 @@ pub fn execute<D: Domain>(
     genesis: Arc<Genesis>,
     rewards: RewardMap<RupdWork>,
 ) -> Result<(), ChainError> {
-    info!("executing epoch work unit");
+    info!("executing EWRAP work unit");
 
     let mut boundary = BoundaryWork::load::<D>(state, genesis, rewards)?;
 
     boundary.commit::<D>(state, archive)?;
 
-    info!("epoch work unit committed");
+    debug!("EWRAP work unit committed");
 
     Ok(())
 }
