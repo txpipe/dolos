@@ -227,7 +227,7 @@ impl<'a> IntoModel<Network> for NetworkModelBuilder<'a> {
         // `total_supply` for what we call `circulating`. For BF, the `circulating`
         // supply is total supply minus deposits.
         let total_supply = self.active.initial_pots.circulating();
-        let circulating = total_supply + self.active.initial_pots.obligations();
+        let circulating = self.active.initial_pots.utxos + self.active.initial_pots.rewards;
 
         Ok(Network {
             supply: Box::new(NetworkSupply {
