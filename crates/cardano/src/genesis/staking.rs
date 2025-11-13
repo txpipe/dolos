@@ -82,7 +82,7 @@ fn find_initial_utxo_sum(credential: &StakeCredential, genesis: &Genesis) -> u64
         }
     }
 
-    return 0;
+    0
 }
 
 fn parse_delegation(account: &str, pool: &str, genesis: &Genesis) -> AccountState {

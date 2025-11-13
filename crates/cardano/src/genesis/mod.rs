@@ -2,8 +2,7 @@ use dolos_core::{ChainError, Domain, EntityKey, Genesis, StateStore as _, StateW
 
 use crate::{
     pots::Pots, utils::nonce_stability_window, EpochState, EpochValue, EraBoundary, EraSummary,
-    Lovelace, Nonces, PParamsSet, PoolParams, PoolSnapshot, PoolState, RollingStats,
-    CURRENT_EPOCH_KEY,
+    Lovelace, Nonces, PParamsSet, RollingStats, CURRENT_EPOCH_KEY,
 };
 
 mod staking;
