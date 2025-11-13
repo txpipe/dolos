@@ -12,7 +12,7 @@ use pallas::ledger::primitives::{
     alonzo::Certificate as AlonzoCert, conway::Certificate as ConwayCert, PoolMetadata,
     RationalNumber, Relay, StakeCredential,
 };
-use pallas::ledger::primitives::{ExUnitPrices, ExUnits, Nonce, NonceVariant};
+use pallas::ledger::primitives::{Epoch, ExUnitPrices, ExUnits, Nonce, NonceVariant};
 use pallas::ledger::traverse::{MultiEraCert, MultiEraTx};
 use serde::{Deserialize, Serialize};
 
@@ -269,13 +269,13 @@ pub fn epoch_boundary(
     chain_summary: &ChainSummary,
     prev_slot: BlockSlot,
     next_slot: BlockSlot,
-) -> Option<BlockSlot> {
+) -> Option<(Epoch, BlockSlot, Epoch)> {
     let (prev_epoch, _) = chain_summary.slot_epoch(prev_slot);
     let (next_epoch, _) = chain_summary.slot_epoch(next_slot);
 
     if prev_epoch != next_epoch {
         let boundary = chain_summary.epoch_start(next_epoch);
-        Some(boundary)
+        Some((prev_epoch, boundary, next_epoch))
     } else {
         None
     }

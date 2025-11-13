@@ -71,6 +71,9 @@ fn execute_work<D: Domain>(
         WorkUnit::Blocks(batch) => {
             execute_batch(chain, domain, batch, live)?;
         }
+        WorkUnit::ForcedStop => {
+            return Err(DomainError::StopEpochReached);
+        }
     };
 
     if live {

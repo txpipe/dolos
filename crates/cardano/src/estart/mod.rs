@@ -99,7 +99,7 @@ pub fn execute<D: Domain>(
     state: &D::State,
     archive: &D::Archive,
     slot: BlockSlot,
-    config: &Config,
+    _config: &Config,
     genesis: Arc<Genesis>,
 ) -> Result<(), ChainError> {
     info!("executing ESTART work unit");
@@ -109,12 +109,6 @@ pub fn execute<D: Domain>(
     work.commit::<D>(state, archive, slot)?;
 
     info!("ESTART work unit committed");
-
-    if let Some(stop_epoch) = config.stop_epoch {
-        if work.ended_state.number >= stop_epoch {
-            return Err(ChainError::StopEpochReached);
-        }
-    }
 
     Ok(())
 }

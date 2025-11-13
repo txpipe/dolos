@@ -98,9 +98,11 @@ enum WorkBuffer {
     OpenBatch(WorkBatch<CardanoLogic>),
     PreRupdBoundary(WorkBatch<CardanoLogic>, OwnedMultiEraBlock),
     RupdBoundary(OwnedMultiEraBlock),
-    PreEwrapBoundary(WorkBatch<CardanoLogic>, OwnedMultiEraBlock),
-    EwrapBoundary(OwnedMultiEraBlock),
-    EstartBoundary(OwnedMultiEraBlock),
+    PreEwrapBoundary(WorkBatch<CardanoLogic>, OwnedMultiEraBlock, Epoch),
+    EwrapBoundary(OwnedMultiEraBlock, Epoch),
+    EstartBoundary(OwnedMultiEraBlock, Epoch),
+    PreForcedStop(OwnedMultiEraBlock),
+    ForcedStop,
 }
 
 impl WorkBuffer {
@@ -114,11 +116,13 @@ impl WorkBuffer {
             WorkBuffer::Restart(x) => x.clone(),
             WorkBuffer::Genesis(block) => block.point(),
             WorkBuffer::OpenBatch(batch) => batch.last_point(),
-            WorkBuffer::PreRupdBoundary(.., block) => block.point(),
+            WorkBuffer::PreRupdBoundary(_, block) => block.point(),
             WorkBuffer::RupdBoundary(block) => block.point(),
-            WorkBuffer::PreEwrapBoundary(.., block) => block.point(),
-            WorkBuffer::EwrapBoundary(block) => block.point(),
-            WorkBuffer::EstartBoundary(block) => block.point(),
+            WorkBuffer::PreEwrapBoundary(_, block, _) => block.point(),
+            WorkBuffer::EwrapBoundary(block, _) => block.point(),
+            WorkBuffer::EstartBoundary(block, _) => block.point(),
+            WorkBuffer::PreForcedStop(block) => block.point(),
+            WorkBuffer::ForcedStop => unreachable!(),
         }
     }
 
@@ -165,10 +169,10 @@ impl WorkBuffer {
         }
     }
 
-    fn on_ewrap_boundary(self, next_block: OwnedMultiEraBlock) -> Self {
+    fn on_ewrap_boundary(self, next_block: OwnedMultiEraBlock, epoch: Epoch) -> Self {
         match self {
-            WorkBuffer::Restart(..) => WorkBuffer::EwrapBoundary(next_block),
-            WorkBuffer::OpenBatch(batch) => WorkBuffer::PreEwrapBoundary(batch, next_block),
+            WorkBuffer::Restart(..) => WorkBuffer::EwrapBoundary(next_block, epoch),
+            WorkBuffer::OpenBatch(batch) => WorkBuffer::PreEwrapBoundary(batch, next_block, epoch),
             _ => unreachable!(),
         }
     }
@@ -192,10 +196,10 @@ impl WorkBuffer {
 
         let next_slot = block.slot();
 
-        let epoch_boundary = pallas_extras::epoch_boundary(eras, prev_slot, next_slot);
+        let boundary = pallas_extras::epoch_boundary(eras, prev_slot, next_slot);
 
-        if epoch_boundary.is_some() {
-            return self.on_ewrap_boundary(block);
+        if let Some((epoch, _, _)) = boundary {
+            return self.on_ewrap_boundary(block, epoch);
         }
 
         let rupd_boundary =
@@ -208,7 +212,7 @@ impl WorkBuffer {
         self.extend_batch(block)
     }
 
-    fn pop_work(self) -> (Option<WorkUnit<CardanoLogic>>, Self) {
+    fn pop_work(self, stop_epoch: Option<Epoch>) -> (Option<WorkUnit<CardanoLogic>>, Self) {
         if matches!(self, WorkBuffer::Restart(..)) || matches!(self, WorkBuffer::Empty) {
             return (None, self);
         }
@@ -229,17 +233,32 @@ impl WorkBuffer {
                 Some(WorkUnit::Rupd(block.slot())),
                 Self::OpenBatch(WorkBatch::for_single_block(WorkBlock::new(block))),
             ),
-            WorkBuffer::PreEwrapBoundary(batch, block) => {
-                (Some(WorkUnit::Blocks(batch)), Self::EwrapBoundary(block))
-            }
-            WorkBuffer::EwrapBoundary(block) => (
+            WorkBuffer::PreEwrapBoundary(batch, block, epoch) => (
+                Some(WorkUnit::Blocks(batch)),
+                Self::EwrapBoundary(block, epoch),
+            ),
+            WorkBuffer::EwrapBoundary(block, epoch) => (
                 Some(WorkUnit::EWrap(block.slot())),
-                Self::EstartBoundary(block),
+                Self::EstartBoundary(block, epoch + 1),
             ),
-            WorkBuffer::EstartBoundary(block) => (
-                Some(WorkUnit::EStart(block.slot())),
-                Self::OpenBatch(WorkBatch::for_single_block(WorkBlock::new(block))),
+            WorkBuffer::EstartBoundary(block, epoch) => {
+                dbg!(&stop_epoch, &epoch);
+                (
+                    Some(WorkUnit::EStart(block.slot())),
+                    if stop_epoch.is_some_and(|x| x == epoch) {
+                        Self::PreForcedStop(block)
+                    } else {
+                        Self::OpenBatch(WorkBatch::for_single_block(WorkBlock::new(block)))
+                    },
+                )
+            }
+            WorkBuffer::PreForcedStop(block) => (
+                Some(WorkUnit::Blocks(WorkBatch::for_single_block(
+                    WorkBlock::new(block),
+                ))),
+                Self::ForcedStop,
             ),
+            WorkBuffer::ForcedStop => (Some(WorkUnit::ForcedStop), Self::ForcedStop),
             _ => unreachable!(),
         }
     }
@@ -314,6 +333,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
         let block = OwnedMultiEraBlock::decode(raw)?;
 
         let work = self.work.take().expect("work buffer is initialized");
+
         let new_work = work.receive_block(block, &self.cache.eras, self.cache.stability_window);
 
         let last = new_work.last_point_seen().slot();
@@ -326,7 +346,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
     fn pop_work(&mut self) -> Option<WorkUnit<Self>> {
         let work = self.work.take().expect("work buffer is initialized");
 
-        let (work_unit, new_buffer) = work.pop_work();
+        let (work_unit, new_buffer) = work.pop_work(self.config.stop_epoch);
 
         self.work = Some(new_buffer);
 
