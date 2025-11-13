@@ -2,8 +2,11 @@ use dolos_core::{ChainError, Domain, EntityKey, Genesis, StateStore as _, StateW
 
 use crate::{
     pots::Pots, utils::nonce_stability_window, EpochState, EpochValue, EraBoundary, EraSummary,
-    Lovelace, Nonces, PParamsSet, RollingStats, CURRENT_EPOCH_KEY,
+    Lovelace, Nonces, PParamsSet, PoolParams, PoolSnapshot, PoolState, RollingStats,
+    CURRENT_EPOCH_KEY,
 };
+
+mod staking;
 
 fn get_utxo_amount(genesis: &Genesis) -> Lovelace {
     let byron_utxo = pallas::ledger::configs::byron::genesis_utxos(&genesis.byron)
@@ -121,6 +124,8 @@ pub fn execute<D: Domain>(state: &D::State, genesis: &Genesis) -> Result<(), Cha
     bootstrap_eras::<D>(state, &epoch)?;
 
     bootstrap_utxos::<D>(state, genesis)?;
+
+    staking::bootstrap::<D>(state, genesis)?;
 
     Ok(())
 }
