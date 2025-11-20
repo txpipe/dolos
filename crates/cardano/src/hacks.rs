@@ -58,6 +58,9 @@ pub mod proposals {
 
         pub fn outcome(protocol: u16, proposal: &str) -> ProposalOutcome {
             match proposal {
+                "69c948cde90c6b9d7d61595e8534c106ec44132cb049ab2558399db1260c1f69#0" => {
+                    Ratified(1095)
+                }
                 "ac993231c39a4ee13bcf888e971e099809c4c08d96a7572aa3611a5ed42fa7d4#0" => {
                     Ratified(1012)
                 }
