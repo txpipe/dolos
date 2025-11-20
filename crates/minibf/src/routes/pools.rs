@@ -14,6 +14,7 @@ use dolos_cardano::{
     FixedNamespace, PoolDelegation, StakeLog,
 };
 use dolos_core::{ArchiveStore, BlockSlot, Domain, EntityKey, TemporalKey};
+use futures::future::join_all;
 use itertools::Itertools;
 use pallas::{
     codec::minicbor,
@@ -42,7 +43,7 @@ fn decode_pool_id(pool_id: &str) -> Result<Vec<u8>, Error> {
 
 async fn pool_offchain_metadata(url: &str) -> Option<PoolOffchainMetadata> {
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(5))
         .user_agent("Dolos MiniBF")
         .build()
         .ok()?;
@@ -118,15 +119,33 @@ where
         .take(pagination.count)
         .collect_vec();
 
+    let metadata_futures: Vec<_> = pools
+        .iter()
+        .map(|(_, pool)| {
+            let url = pool
+                .snapshot
+                .live()
+                .and_then(|x| x.params.pool_metadata.as_ref())
+                .map(|x| x.url.clone());
+            async move {
+                match url {
+                    Some(u) => pool_offchain_metadata(&u).await,
+                    None => None,
+                }
+            }
+        })
+        .collect();
+    let metadata_results = join_all(metadata_futures).await;
+
     let mut out = vec![];
-    for (key, pool) in pools {
+    for ((key, pool), fetched_metadata) in pools.into_iter().zip(metadata_results) {
         let poolhex = hex::encode(pool.operator);
         let pool_id = bech32_pool(pool.operator)?;
         let params = pool.snapshot.live().map(|x| x.params.clone());
         let metadata = match params.as_ref() {
             Some(x) => match x.pool_metadata.as_ref() {
                 Some(y) => {
-                    let out = match pool_offchain_metadata(&y.url).await {
+                    let out = match fetched_metadata {
                         Some(meta) => json!({
                             "url": y.url,
                             "hash": y.hash,

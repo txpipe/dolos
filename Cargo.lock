@@ -1230,6 +1230,7 @@ dependencies = [
  "crc",
  "dolos-cardano",
  "dolos-core",
+ "futures",
  "hex",
  "itertools 0.13.0",
  "num-bigint",
