@@ -77,7 +77,7 @@ impl dolos_core::MempoolStore for Mempool {
 
 #[derive(Clone)]
 pub struct ToyDomain {
-    wal: dolos_redb::wal::RedbWalStore<dolos_cardano::CardanoDelta>,
+    wal: dolos_redb3::wal::RedbWalStore<dolos_cardano::CardanoDelta>,
     chain: Arc<RwLock<dolos_cardano::CardanoLogic>>,
     state: dolos_redb3::state::StateStore,
     archive: dolos_redb3::archive::ArchiveStore,
@@ -115,7 +115,7 @@ impl ToyDomain {
 
         let domain = Self {
             state,
-            wal: dolos_redb::wal::RedbWalStore::memory().unwrap(),
+            wal: dolos_redb3::wal::RedbWalStore::memory().unwrap(),
             chain: Arc::new(RwLock::new(chain)),
             archive,
             mempool: Mempool {},
@@ -156,7 +156,7 @@ impl dolos_core::TipSubscription for TipSubscription {
 impl dolos_core::Domain for ToyDomain {
     type Entity = dolos_cardano::CardanoEntity;
     type EntityDelta = dolos_cardano::CardanoDelta;
-    type Wal = dolos_redb::wal::RedbWalStore<dolos_cardano::CardanoDelta>;
+    type Wal = dolos_redb3::wal::RedbWalStore<dolos_cardano::CardanoDelta>;
     type Archive = dolos_redb3::archive::ArchiveStore;
     type State = dolos_redb3::state::StateStore;
     type Chain = dolos_cardano::CardanoLogic;

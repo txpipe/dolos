@@ -2,7 +2,7 @@ use gasket::{framework::*, runtime::Policy};
 use tracing::{error, info};
 
 use dolos_core::PullEvent;
-use dolos_redb::wal::RedbWalStore;
+use dolos_redb3::wal::RedbWalStore;
 
 struct WitnessStage {
     input: gasket::messaging::InputPort<PullEvent>,

@@ -36,7 +36,6 @@ xxhash-rust.workspace = true
 
 dolos-core = { path = "crates/core" }
 dolos-cardano = { path = "crates/cardano", features = ["include-genesis"] }
-dolos-redb = { path = "crates/redb" }
 dolos-redb3 = { path = "crates/redb3" }
 dolos-minibf = { path = "crates/minibf", optional = true }
 dolos-trp = { path = "crates/trp", optional = true }
@@ -123,7 +122,6 @@ members = [
     "crates/core",
     "crates/testing",
     "crates/minibf",
-    "crates/redb",
     "xtask",
     "crates/redb3",
 ]
