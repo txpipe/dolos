@@ -3,7 +3,7 @@ use serde_json::json;
 #[derive(Debug, clap::Args)]
 pub struct Args {}
 
-fn stats_to_json(stats: &dolos_redb::redb::TableStats) -> serde_json::Value {
+fn stats_to_json(stats: &dolos_redb3::redb::TableStats) -> serde_json::Value {
     json!({
         "stored_bytes": stats.stored_bytes(),
         "fragmented_bytes": stats.fragmented_bytes(),

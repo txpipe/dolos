@@ -24,7 +24,7 @@ pub fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
 
     let source = crate::common::open_wal_store(config)?;
 
-    let target = dolos_redb::wal::RedbWalStore::open(&args.output, None)
+    let target = dolos_redb3::wal::RedbWalStore::open(&args.output, None)
         .into_diagnostic()
         .context("opening target WAL")?;
 

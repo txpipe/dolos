@@ -5,6 +5,9 @@ use tracing::trace;
 
 pub mod archive;
 pub mod state;
+pub mod wal;
+
+pub use redb;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

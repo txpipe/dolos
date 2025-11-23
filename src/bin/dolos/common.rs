@@ -30,7 +30,7 @@ pub fn ensure_storage_path(config: &crate::Config) -> Result<PathBuf, Error> {
 pub fn open_wal_store(config: &crate::Config) -> Result<WalAdapter, Error> {
     let root = ensure_storage_path(config)?;
 
-    let wal = dolos_redb::wal::RedbWalStore::open(root.join("wal"), config.storage.wal_cache)?;
+    let wal = dolos_redb3::wal::RedbWalStore::open(root.join("wal"), config.storage.wal_cache)?;
 
     Ok(wal)
 }
@@ -85,7 +85,7 @@ pub fn open_persistent_data_stores(config: &crate::Config) -> Result<Stores, Err
 }
 
 pub fn create_ephemeral_data_stores() -> Result<Stores, Error> {
-    let wal = dolos_redb::wal::RedbWalStore::memory()?;
+    let wal = dolos_redb3::wal::RedbWalStore::memory()?;
 
     let schema = dolos_cardano::model::build_schema();
     let state =

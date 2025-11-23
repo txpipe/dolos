@@ -1082,7 +1082,6 @@ dependencies = [
  "dolos-cardano",
  "dolos-core",
  "dolos-minibf",
- "dolos-redb",
  "dolos-redb3",
  "dolos-testing",
  "dolos-trp",
@@ -1195,26 +1194,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dolos-redb"
-version = "1.0.0-rc.2"
-dependencies = [
- "bincode",
- "dolos-core",
- "dolos-testing",
- "hex",
- "itertools 0.13.0",
- "pallas",
- "redb",
- "serde",
- "thiserror 2.0.12",
- "tokio",
- "tokio-util",
- "tower-http 0.6.6",
- "tracing",
- "xxhash-rust",
-]
-
-[[package]]
 name = "dolos-redb3"
 version = "1.0.0-rc.2"
 dependencies = [
@@ -1240,7 +1219,6 @@ version = "1.0.0-rc.2"
 dependencies = [
  "dolos-cardano",
  "dolos-core",
- "dolos-redb",
  "dolos-redb3",
  "futures-core",
  "futures-util",

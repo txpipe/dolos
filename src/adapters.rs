@@ -18,7 +18,7 @@ impl Default for ChainConfig {
 
 // we can hardcode the WAL since we don't expect multiple types of
 // implementations
-pub type WalAdapter = dolos_redb::wal::RedbWalStore<dolos_cardano::CardanoDelta>;
+pub type WalAdapter = dolos_redb3::wal::RedbWalStore<dolos_cardano::CardanoDelta>;
 
 pub struct TipSubscription {
     replay: Vec<(ChainPoint, RawBlock)>,
