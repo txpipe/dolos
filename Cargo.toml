@@ -126,7 +126,6 @@ members = [
     "crates/redb",
     "xtask",
     "crates/redb3",
-    "crates/test-vectors",
 ]
 
 [workspace.package]
