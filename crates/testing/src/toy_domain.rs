@@ -103,14 +103,15 @@ impl ToyDomain {
             dolos_redb3::archive::ArchiveStore::in_memory(dolos_cardano::model::build_schema())
                 .unwrap();
 
-        let chain = dolos_cardano::CardanoLogic::initialize::<Self>(
-            dolos_cardano::Config::default(),
-            &state,
-            &genesis,
-        )
-        .unwrap();
+        let config = dolos_cardano::Config::default();
 
-        dolos_cardano::genesis::execute::<Self>(&state, &genesis).unwrap();
+        let mut chain =
+            dolos_cardano::CardanoLogic::initialize::<Self>(config.clone(), &state, &genesis)
+                .unwrap();
+
+        chain
+            .apply_genesis::<Self>(&state, genesis.clone())
+            .unwrap();
 
         let domain = Self {
             state,

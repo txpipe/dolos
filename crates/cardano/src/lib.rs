@@ -84,11 +84,23 @@ impl Default for TrackConfig {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone)]
+pub struct CustomUtxo {
+    #[serde(rename = "ref")]
+    pub ref_: TxoRef,
+    pub era: Option<Era>,
+    pub cbor: Cbor,
+}
+
 #[derive(Serialize, Deserialize, Clone, Default)]
 pub struct Config {
     #[serde(default)]
     pub track: TrackConfig,
+
     pub stop_epoch: Option<Epoch>,
+
+    #[serde(default)]
+    pub custom_utxos: Vec<CustomUtxo>,
 }
 
 enum WorkBuffer {
@@ -355,7 +367,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
         state: &D::State,
         genesis: Arc<Genesis>,
     ) -> Result<(), ChainError> {
-        genesis::execute::<D>(state, &genesis)?;
+        genesis::execute::<D>(state, &genesis, &self.config)?;
 
         self.refresh_cache::<D>(state)?;
 

@@ -5,6 +5,7 @@ use std::sync::Arc;
 use dolos_core::*;
 
 use crate::owned::OwnedMultiEraOutput;
+use crate::Config;
 
 pub fn compute_block_dependencies(block: &MultiEraBlock, loaded: &mut RawUtxoMap) -> Vec<TxoRef> {
     let txs: HashMap<_, _> = block.txs().into_iter().map(|tx| (tx.hash(), tx)).collect();
@@ -157,6 +158,24 @@ pub fn compute_origin_delta(genesis: &Genesis) -> UtxoSetDelta {
     }
 
     delta
+}
+
+pub fn build_custom_utxos_delta(config: &Config) -> Result<UtxoSetDelta, ChainError> {
+    let mut delta = UtxoSetDelta::default();
+
+    for utxo in config.custom_utxos.iter() {
+        let era = utxo
+            .era
+            .unwrap_or(pallas::ledger::traverse::Era::Conway.into());
+
+        let eracbor = EraCbor(era, utxo.cbor.clone());
+
+        delta
+            .produced_utxo
+            .insert(utxo.ref_.clone(), Arc::new(eracbor));
+    }
+
+    Ok(delta)
 }
 
 #[cfg(test)]

@@ -1,8 +1,8 @@
 use dolos_core::{ChainError, Domain, EntityKey, Genesis, StateStore as _, StateWriter as _};
 
 use crate::{
-    pots::Pots, utils::nonce_stability_window, EpochState, EpochValue, EraBoundary, EraSummary,
-    Lovelace, Nonces, PParamsSet, RollingStats, CURRENT_EPOCH_KEY,
+    pots::Pots, utils::nonce_stability_window, Config, EpochState, EpochValue, EraBoundary,
+    EraSummary, Lovelace, Nonces, PParamsSet, RollingStats, CURRENT_EPOCH_KEY,
 };
 
 mod staking;
@@ -107,22 +107,34 @@ pub fn bootstrap_eras<D: Domain>(state: &D::State, epoch: &EpochState) -> Result
     Ok(())
 }
 
-pub fn bootstrap_utxos<D: Domain>(state: &D::State, genesis: &Genesis) -> Result<(), ChainError> {
-    let delta = crate::utxoset::compute_origin_delta(genesis);
-
+pub fn bootstrap_utxos<D: Domain>(
+    state: &D::State,
+    genesis: &Genesis,
+    config: &Config,
+) -> Result<(), ChainError> {
     let writer = state.start_writer()?;
+
+    let delta = crate::utxoset::compute_origin_delta(genesis);
     writer.apply_utxoset(&delta)?;
+
+    let delta = crate::utxoset::build_custom_utxos_delta(config)?;
+    writer.apply_utxoset(&delta)?;
+
     writer.commit()?;
 
     Ok(())
 }
 
-pub fn execute<D: Domain>(state: &D::State, genesis: &Genesis) -> Result<(), ChainError> {
+pub fn execute<D: Domain>(
+    state: &D::State,
+    genesis: &Genesis,
+    config: &Config,
+) -> Result<(), ChainError> {
     let epoch = bootstrap_epoch::<D>(state, genesis)?;
 
     bootstrap_eras::<D>(state, &epoch)?;
 
-    bootstrap_utxos::<D>(state, genesis)?;
+    bootstrap_utxos::<D>(state, genesis, config)?;
 
     staking::bootstrap::<D>(state, genesis)?;
 

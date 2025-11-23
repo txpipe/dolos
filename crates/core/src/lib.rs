@@ -20,6 +20,7 @@ use std::{
     collections::{HashMap, HashSet},
     fmt::Display,
     path::Path,
+    str::FromStr,
     sync::Arc,
 };
 use thiserror::Error;
@@ -150,6 +151,26 @@ impl From<TxoRef> for (TxHash, TxoIdx) {
 impl Display for TxoRef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}#{}", self.0, self.1)
+    }
+}
+
+impl FromStr for TxoRef {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let parts = s.split('#').collect::<Vec<_>>();
+
+        if parts.len() != 2 {
+            return Err(format!("invalid txo ref: {}", s));
+        }
+
+        let tx_hash = TxHash::from_str(parts[0]).map_err(|_| format!("invalid txo ref: {}", s))?;
+
+        let txo_idx = parts[1]
+            .parse()
+            .map_err(|_| format!("invalid txo ref: {}", s))?;
+
+        Ok(Self(tx_hash, txo_idx))
     }
 }
 
