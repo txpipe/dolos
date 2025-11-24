@@ -334,7 +334,9 @@ fn dump_state<T: TableRow>(
     Ok(())
 }
 
-pub fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
+use dolos_core::config::RootConfig;
+
+pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging)?;
 
     let state = crate::common::open_state_store(config)?;

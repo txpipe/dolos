@@ -20,7 +20,7 @@ use axum::{extract::State, http::StatusCode, Json};
 use dolos_core::Domain;
 use serde::{Deserialize, Serialize};
 
-use crate::{Config, Facade};
+use crate::{Facade, MinibfConfig};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RootResponse {
@@ -30,8 +30,8 @@ pub struct RootResponse {
     revision: Option<String>,
 }
 
-impl From<&Config> for RootResponse {
-    fn from(value: &Config) -> Self {
+impl From<&MinibfConfig> for RootResponse {
+    fn from(value: &MinibfConfig) -> Self {
         Self {
             url: value
                 .url

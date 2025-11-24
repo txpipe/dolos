@@ -1,20 +1,7 @@
 use std::sync::Arc;
 
 use dolos_cardano::CardanoLogic;
-use dolos_core::*;
-use serde::{Deserialize, Serialize};
-
-#[derive(Serialize, Deserialize, Clone)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ChainConfig {
-    Cardano(dolos_cardano::Config),
-}
-
-impl Default for ChainConfig {
-    fn default() -> Self {
-        Self::Cardano(dolos_cardano::Config::default())
-    }
-}
+use dolos_core::{config::StorageConfig, *};
 
 // we can hardcode the WAL since we don't expect multiple types of
 // implementations

@@ -1,5 +1,8 @@
 use crate::{make_custom_utxo_delta, TestAddress, UtxoGenerator};
-use dolos_core::*;
+use dolos_core::{
+    config::{CardanoConfig, StorageConfig},
+    *,
+};
 use futures_util::stream::StreamExt;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -82,7 +85,7 @@ pub struct ToyDomain {
     state: dolos_redb3::state::StateStore,
     archive: dolos_redb3::archive::ArchiveStore,
     mempool: Mempool,
-    storage_config: dolos_core::StorageConfig,
+    storage_config: StorageConfig,
     genesis: Arc<dolos_core::Genesis>,
     tip_broadcast: tokio::sync::broadcast::Sender<TipEvent>,
 }
@@ -103,7 +106,7 @@ impl ToyDomain {
             dolos_redb3::archive::ArchiveStore::in_memory(dolos_cardano::model::build_schema())
                 .unwrap();
 
-        let config = dolos_cardano::Config::default();
+        let config = CardanoConfig::default();
 
         let mut chain =
             dolos_cardano::CardanoLogic::initialize::<Self>(config.clone(), &state, &genesis)
@@ -163,7 +166,7 @@ impl dolos_core::Domain for ToyDomain {
     type TipSubscription = TipSubscription;
     type Mempool = Mempool;
 
-    fn storage_config(&self) -> &dolos_core::StorageConfig {
+    fn storage_config(&self) -> &StorageConfig {
         &self.storage_config
     }
 

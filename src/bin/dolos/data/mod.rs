@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use dolos_core::config::RootConfig;
 
 mod clear_state;
 mod compute_nonce;
@@ -60,7 +61,7 @@ pub struct Args {
 }
 
 pub fn run(
-    config: &super::Config,
+    config: &RootConfig,
     args: &Args,
     feedback: &super::feedback::Feedback,
 ) -> miette::Result<()> {

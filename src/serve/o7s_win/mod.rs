@@ -5,12 +5,6 @@ use tracing::{error, instrument};
 
 use dolos_core::{CancelToken, Domain, ServeError};
 
-#[derive(Serialize, Deserialize, Clone)]
-pub struct Config {
-    pub listen_path: PathBuf,
-    pub magic: u64,
-}
-
 pub struct Driver;
 
 impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {

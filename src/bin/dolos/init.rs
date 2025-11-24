@@ -1,7 +1,12 @@
 use clap::Parser;
-use dolos::core::StorageVersion;
 use dolos_cardano::{include, mutable_slots};
-use dolos_core::Genesis;
+use dolos_core::{
+    config::{
+        GenesisConfig, GrpcConfig, MinibfConfig, MithrilConfig, PeerConfig, RelayConfig,
+        RootConfig, StorageConfig, StorageVersion, TrpConfig, UpstreamConfig,
+    },
+    Genesis,
+};
 use inquire::{Confirm, Select, Text};
 use miette::{miette, Context as _, IntoDiagnostic};
 use std::{
@@ -80,20 +85,20 @@ impl Display for KnownNetwork {
     }
 }
 
-impl From<&KnownNetwork> for dolos::core::PeerConfig {
+impl From<&KnownNetwork> for PeerConfig {
     fn from(value: &KnownNetwork) -> Self {
         match value {
-            KnownNetwork::CardanoMainnet => dolos::core::PeerConfig {
+            KnownNetwork::CardanoMainnet => PeerConfig {
                 peer_address: "backbone.mainnet.cardanofoundation.org:3001".into(),
                 network_magic: 764824073,
                 is_testnet: false,
             },
-            KnownNetwork::CardanoPreProd => dolos::core::PeerConfig {
+            KnownNetwork::CardanoPreProd => PeerConfig {
                 peer_address: "preprod-node.world.dev.cardano.org:30000".into(),
                 network_magic: 1,
                 is_testnet: true,
             },
-            KnownNetwork::CardanoPreview => dolos::core::PeerConfig {
+            KnownNetwork::CardanoPreview => PeerConfig {
                 peer_address: "preview-node.world.dev.cardano.org:30002".into(),
                 network_magic: 2,
                 is_testnet: true,
@@ -102,42 +107,42 @@ impl From<&KnownNetwork> for dolos::core::PeerConfig {
     }
 }
 
-impl From<&KnownNetwork> for dolos::core::UpstreamConfig {
+impl From<&KnownNetwork> for UpstreamConfig {
     fn from(value: &KnownNetwork) -> Self {
-        dolos::core::UpstreamConfig::Peer(value.into())
+        UpstreamConfig::Peer(value.into())
     }
 }
 
-impl From<&KnownNetwork> for crate::GenesisConfig {
+impl From<&KnownNetwork> for GenesisConfig {
     fn from(value: &KnownNetwork) -> Self {
         match value {
-            KnownNetwork::CardanoPreview => crate::GenesisConfig {
+            KnownNetwork::CardanoPreview => GenesisConfig {
                 force_protocol: Some(6), // Preview network starts at Alonzo
                 ..Default::default()
             },
-            KnownNetwork::CardanoPreProd => crate::GenesisConfig {
+            KnownNetwork::CardanoPreProd => GenesisConfig {
                 ..Default::default()
             },
             // KnownNetwork::CardanoSanchonet => todo!(),
-            _ => crate::GenesisConfig::default(),
+            _ => GenesisConfig::default(),
         }
     }
 }
 
-impl From<&KnownNetwork> for crate::MithrilConfig {
+impl From<&KnownNetwork> for MithrilConfig {
     fn from(value: &KnownNetwork) -> Self {
         match value {
-            KnownNetwork::CardanoMainnet => crate::MithrilConfig {
+            KnownNetwork::CardanoMainnet => MithrilConfig {
                 aggregator: "https://aggregator.release-mainnet.api.mithril.network/aggregator".into(),
                 genesis_key: "5b3139312c36362c3134302c3138352c3133382c31312c3233372c3230372c3235302c3134342c32372c322c3138382c33302c31322c38312c3135352c3230342c31302c3137392c37352c32332c3133382c3139362c3231372c352c31342c32302c35372c37392c33392c3137365d".into(),
                 ancillary_key: Some("5b32332c37312c39362c3133332c34372c3235332c3232362c3133362c3233352c35372c3136342c3130362c3138362c322c32312c32392c3132302c3136332c38392c3132312c3137372c3133382c3230382c3133382c3231342c39392c35382c32322c302c35382c332c36395d".into()),
             },
-            KnownNetwork::CardanoPreProd => crate::MithrilConfig {
+            KnownNetwork::CardanoPreProd => MithrilConfig {
                 aggregator: "https://aggregator.release-preprod.api.mithril.network/aggregator".into(),
                 genesis_key: "5b3132372c37332c3132342c3136312c362c3133372c3133312c3231332c3230372c3131372c3139382c38352c3137362c3139392c3136322c3234312c36382c3132332c3131392c3134352c31332c3233322c3234332c34392c3232392c322c3234392c3230352c3230352c33392c3233352c34345d".into(),
                 ancillary_key: Some("5b3138392c3139322c3231362c3135302c3131342c3231362c3233372c3231302c34352c31382c32312c3139362c3230382c3234362c3134362c322c3235322c3234332c3235312c3139372c32382c3135372c3230342c3134352c33302c31342c3232382c3136382c3132392c38332c3133362c33365d".into()),
             },
-            KnownNetwork::CardanoPreview => crate::MithrilConfig {
+            KnownNetwork::CardanoPreview => MithrilConfig {
                 aggregator: "https://aggregator.pre-release-preview.api.mithril.network/aggregator".into(),
                 genesis_key: "5b3132372c37332c3132342c3136312c362c3133372c3133312c3231332c3230372c3131372c3139382c38352c3137362c3139392c3136322c3234312c36382c3132332c3131392c3134352c31332c3233322c3234332c34392c3232392c322c3234392c3230352c3230352c33392c3233352c34345d".into(),
                 ancillary_key: Some("5b3138392c3139322c3231362c3135302c3131342c3231362c3233372c3231302c34352c31382c32312c3139362c3230382c3234362c3134362c322c3235322c3234332c3235312c3139372c32382c3135372c3230342c3134352c33302c31342c3232382c3136382c3132392c38332c3133362c33365d".into()),
@@ -234,17 +239,17 @@ pub struct Args {
 
 type IncludeGenesisFiles = Option<KnownNetwork>;
 
-struct ConfigEditor(crate::Config, IncludeGenesisFiles);
+struct ConfigEditor(RootConfig, IncludeGenesisFiles);
 
 impl Default for ConfigEditor {
     fn default() -> Self {
         Self(
-            crate::Config {
+            RootConfig {
                 upstream: From::from(&KnownNetwork::CardanoMainnet),
                 mithril: Some(From::from(&KnownNetwork::CardanoMainnet)),
                 snapshot: Default::default(),
-                storage: dolos::core::StorageConfig {
-                    version: dolos::core::StorageVersion::V2,
+                storage: StorageConfig {
+                    version: StorageVersion::V2,
                     ..Default::default()
                 },
                 genesis: Default::default(),
@@ -298,7 +303,7 @@ impl ConfigEditor {
     fn apply_serve_grpc(mut self, value: Option<bool>) -> Self {
         if let Some(value) = value {
             if value {
-                self.0.serve.grpc = dolos::serve::grpc::Config {
+                self.0.serve.grpc = GrpcConfig {
                     listen_address: "[::]:50051".into(),
                     tls_client_ca_root: None,
                     permissive_cors: Some(true),
@@ -315,7 +320,7 @@ impl ConfigEditor {
     fn apply_serve_minibf(mut self, value: Option<bool>) -> Self {
         if let Some(value) = value {
             if value {
-                self.0.serve.minibf = dolos::serve::minibf::Config {
+                self.0.serve.minibf = MinibfConfig {
                     listen_address: "[::]:3000".parse().unwrap(),
                     permissive_cors: Some(true),
                     token_registry_url: None,
@@ -333,7 +338,7 @@ impl ConfigEditor {
     fn apply_serve_trp(mut self, value: Option<bool>) -> Self {
         if let Some(value) = value {
             if value {
-                self.0.serve.trp = dolos::serve::trp::Config {
+                self.0.serve.trp = TrpConfig {
                     listen_address: "[::]:8000".parse().unwrap(),
                     max_optimize_rounds: 10,
                     permissive_cors: Some(true),
@@ -352,7 +357,9 @@ impl ConfigEditor {
     fn apply_serve_ouroboros(mut self, value: Option<bool>) -> Self {
         if let Some(value) = value {
             if value {
-                self.0.serve.ouroboros = dolos::serve::o7s::Config {
+                use dolos_core::config::OuroborosConfig;
+
+                self.0.serve.ouroboros = OuroborosConfig {
                     listen_path: "dolos.socket".into(),
                     magic: self.0.upstream.network_magic().unwrap_or_default(),
                 }
@@ -374,7 +381,7 @@ impl ConfigEditor {
     fn apply_enable_relay(mut self, value: Option<bool>) -> Self {
         if let Some(value) = value {
             if value {
-                self.0.relay = dolos::relay::Config {
+                self.0.relay = RelayConfig {
                     listen_address: "[::]:30031".into(),
                     magic: self.0.upstream.network_magic().unwrap_or_default(),
                 }
@@ -572,7 +579,7 @@ impl ConfigEditor {
 }
 
 pub fn run(
-    config: miette::Result<super::Config>,
+    config: miette::Result<RootConfig>,
     args: &Args,
     feedback: &Feedback,
 ) -> miette::Result<()> {
@@ -586,11 +593,11 @@ pub fn run(
 
     println!("config saved to dolos.toml");
 
-    let config = super::Config::new(&None)
+    let config = crate::common::load_config(&None)
         .into_diagnostic()
         .context("parsing configuration")?;
 
-    if let dolos::core::UpstreamConfig::Peer(_) = &config.upstream {
+    if let UpstreamConfig::Peer(_) = &config.upstream {
         super::bootstrap::run(&config, &super::bootstrap::Args::default(), feedback)?;
     }
 

@@ -1,12 +1,11 @@
 use jsonrpsee::server::{RpcModule, Server};
-use serde::{Deserialize, Serialize};
-use std::{net::SocketAddr, sync::Arc};
+use std::sync::Arc;
 use tokio::select;
 use tower::ServiceBuilder;
 use tower_http::cors::CorsLayer;
 use tracing::info;
 
-use dolos_core::{CancelToken, Domain, ServeError};
+use dolos_core::{config::TrpConfig, CancelToken, Domain, ServeError};
 
 mod compiler;
 mod error;
@@ -17,25 +16,17 @@ mod utxos;
 
 pub use error::Error;
 
-#[derive(Deserialize, Serialize, Clone)]
-pub struct Config {
-    pub listen_address: SocketAddr,
-    pub max_optimize_rounds: u8,
-    pub permissive_cors: Option<bool>,
-    pub extra_fees: Option<u64>,
-}
-
 #[derive(Clone)]
 pub struct Context<D: Domain> {
     pub domain: D,
-    pub config: Arc<Config>,
+    pub config: Arc<TrpConfig>,
     pub metrics: metrics::Metrics,
 }
 
 pub struct Driver;
 
 impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
-    type Config = Config;
+    type Config = TrpConfig;
 
     async fn run(cfg: Self::Config, domain: D, cancel: C) -> Result<(), ServeError> {
         let cors_layer = if cfg.permissive_cors.unwrap_or_default() {

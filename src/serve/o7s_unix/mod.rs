@@ -1,6 +1,5 @@
+use dolos_core::config::OuroborosConfig;
 use pallas::network::facades::NodeServer;
-use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 use tokio::net::UnixListener;
 use tokio_util::task::TaskTracker;
 use tracing::{debug, info, instrument, warn};
@@ -12,12 +11,6 @@ mod chainsync;
 // TODO: fix tests
 //#[cfg(test)]
 //mod tests;
-
-#[derive(Serialize, Deserialize, Clone)]
-pub struct Config {
-    pub listen_path: PathBuf,
-    pub magic: u64,
-}
 
 async fn handle_session<D: Domain, C: CancelToken>(
     domain: D,
@@ -42,7 +35,7 @@ async fn handle_session<D: Domain, C: CancelToken>(
 
 async fn accept_client_connections<D: Domain, C: CancelToken>(
     domain: D,
-    config: &Config,
+    config: &OuroborosConfig,
     tasks: &mut TaskTracker,
     cancel: C,
 ) -> Result<(), ServeError> {
@@ -74,7 +67,7 @@ async fn accept_client_connections<D: Domain, C: CancelToken>(
 pub struct Driver;
 
 impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
-    type Config = Config;
+    type Config = OuroborosConfig;
 
     #[instrument(skip_all)]
     async fn run(cfg: Self::Config, domain: D, cancel: C) -> Result<(), ServeError> {

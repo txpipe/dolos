@@ -1,3 +1,4 @@
+use dolos_core::config::RootConfig;
 use serde_json::json;
 
 #[derive(Debug, clap::Args)]
@@ -14,7 +15,7 @@ fn stats_to_json(stats: &dolos_redb3::redb::TableStats) -> serde_json::Value {
     })
 }
 
-pub fn run(config: &crate::Config, _args: &Args) -> miette::Result<()> {
+pub fn run(config: &RootConfig, _args: &Args) -> miette::Result<()> {
     let stores = crate::common::setup_data_stores(config)?;
 
     let state = stores.state;

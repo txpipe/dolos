@@ -1,3 +1,4 @@
+use dolos_core::config::RootConfig;
 use itertools::Itertools as _;
 use miette::{Context, IntoDiagnostic};
 
@@ -10,7 +11,7 @@ pub struct Args {
     namespace: String,
 }
 
-fn clear_state(config: &crate::Config, ns: Namespace) -> miette::Result<()> {
+fn clear_state(config: &RootConfig, ns: Namespace) -> miette::Result<()> {
     let state = crate::common::open_state_store(config)?;
     let writer = state.start_writer().into_diagnostic()?;
 
@@ -30,7 +31,7 @@ fn clear_state(config: &crate::Config, ns: Namespace) -> miette::Result<()> {
     Ok(())
 }
 
-pub fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
+pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging)?;
 
     match args.namespace.as_str() {

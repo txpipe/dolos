@@ -2,6 +2,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use dolos_core::{
     batch::{WorkBatch, WorkBlock, WorkDeltas},
+    config::{CardanoConfig, TrackConfig},
     ChainError, Domain, Genesis, InvariantViolation, StateError, TxoRef,
 };
 use pallas::{
@@ -18,10 +19,8 @@ use tracing::{debug, instrument};
 
 use crate::{
     load_effective_pparams, owned::OwnedMultiEraOutput, roll::proposals::ProposalVisitor, utxoset,
-    Cache, CardanoLogic, Config, PParamsSet,
+    Cache, CardanoLogic, PParamsSet,
 };
-
-use super::TrackConfig;
 
 pub mod accounts;
 pub mod assets;
@@ -327,7 +326,7 @@ impl<'a> DeltaBuilder<'a> {
 
 #[instrument(name = "roll", skip_all)]
 pub fn compute_delta<D: Domain>(
-    config: &Config,
+    config: &CardanoConfig,
     genesis: Arc<Genesis>,
     cache: &Cache,
     state: &D::State,

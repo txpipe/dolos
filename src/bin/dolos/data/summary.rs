@@ -1,10 +1,11 @@
+use dolos_core::config::RootConfig;
 use dolos::cli::{ArchiveSummary, DataSummary, StateSummary, WalSummary};
 use dolos::prelude::*;
 
 #[derive(Debug, clap::Args)]
 pub struct Args {}
 
-pub fn run(config: &crate::Config, _args: &Args) -> miette::Result<()> {
+pub fn run(config: &RootConfig, _args: &Args) -> miette::Result<()> {
     let stores = crate::common::setup_data_stores(config)?;
 
     let wal_start = stores.wal.find_start().unwrap();

@@ -2,7 +2,6 @@ use pallas::ledger::{
     primitives::Epoch,
     traverse::{MultiEraBlock, MultiEraOutput},
 };
-use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::info;
 
@@ -11,6 +10,7 @@ pub use pallas;
 
 use dolos_core::{
     batch::{WorkBatch, WorkBlock},
+    config::CardanoConfig,
     Block as _, *,
 };
 
@@ -52,56 +52,6 @@ pub use utils::mutable_slots;
 pub type Block<'a> = MultiEraBlock<'a>;
 
 pub type UtxoBody<'a> = MultiEraOutput<'a>;
-
-#[derive(Serialize, Deserialize, Clone)]
-pub struct TrackConfig {
-    pub account_state: bool,
-    pub asset_state: bool,
-    pub pool_state: bool,
-    pub epoch_state: bool,
-    pub drep_state: bool,
-    pub proposal_logs: bool,
-    pub tx_logs: bool,
-    pub account_logs: bool,
-    pub pool_logs: bool,
-    pub epoch_logs: bool,
-}
-
-impl Default for TrackConfig {
-    fn default() -> Self {
-        Self {
-            account_state: true,
-            asset_state: true,
-            pool_state: true,
-            epoch_state: true,
-            drep_state: true,
-            tx_logs: true,
-            account_logs: true,
-            pool_logs: true,
-            epoch_logs: true,
-            proposal_logs: true,
-        }
-    }
-}
-
-#[derive(Serialize, Deserialize, Clone)]
-pub struct CustomUtxo {
-    #[serde(rename = "ref")]
-    pub ref_: TxoRef,
-    pub era: Option<Era>,
-    pub cbor: Cbor,
-}
-
-#[derive(Serialize, Deserialize, Clone, Default)]
-pub struct Config {
-    #[serde(default)]
-    pub track: TrackConfig,
-
-    pub stop_epoch: Option<Epoch>,
-
-    #[serde(default)]
-    pub custom_utxos: Vec<CustomUtxo>,
-}
 
 enum WorkBuffer {
     Empty,
@@ -280,7 +230,7 @@ struct Cache {
 }
 
 pub struct CardanoLogic {
-    config: Config,
+    config: CardanoConfig,
     work: Option<WorkBuffer>,
     cache: Cache,
 }
@@ -294,7 +244,7 @@ impl CardanoLogic {
 }
 
 impl dolos_core::ChainLogic for CardanoLogic {
-    type Config = Config;
+    type Config = CardanoConfig;
     type Block = OwnedMultiEraBlock;
     type Utxo = OwnedMultiEraOutput;
     type Delta = CardanoDelta;

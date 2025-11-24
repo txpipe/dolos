@@ -1,3 +1,4 @@
+use dolos_core::config::RootConfig;
 use miette::{Context, IntoDiagnostic};
 
 use dolos::prelude::*;
@@ -8,7 +9,7 @@ use crate::feedback::Feedback;
 pub struct Args {}
 
 #[tokio::main]
-pub async fn run(config: &crate::Config, _args: &Args, _feedback: &Feedback) -> miette::Result<()> {
+pub async fn run(config: &RootConfig, _args: &Args, _feedback: &Feedback) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging)?;
 
     let domain = crate::common::setup_domain(config).await?;

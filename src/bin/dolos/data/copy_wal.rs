@@ -1,3 +1,4 @@
+use dolos_core::config::RootConfig;
 use itertools::Itertools;
 use miette::{Context, IntoDiagnostic};
 use std::path::PathBuf;
@@ -19,7 +20,7 @@ pub struct Args {
     until: Option<BlockSlot>,
 }
 
-pub fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
+pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging)?;
 
     let source = crate::common::open_wal_store(config)?;

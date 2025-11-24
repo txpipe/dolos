@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use dolos_core::config::RootConfig;
 
 use crate::feedback::Feedback;
 
@@ -39,7 +40,7 @@ pub struct Args {
     command: Command,
 }
 
-pub fn run(config: &super::Config, args: &Args, feedback: &Feedback) -> miette::Result<()> {
+pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Result<()> {
     match &args.command {
         Command::CatchupStores(x) => catchup_stores::run(config, x, feedback)?,
         Command::ResetWal(x) => reset_wal::run(config, x, feedback)?,

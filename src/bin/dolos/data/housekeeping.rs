@@ -1,3 +1,4 @@
+use dolos_core::config::RootConfig;
 use dolos_core::Domain;
 use miette::bail;
 
@@ -12,7 +13,7 @@ pub struct Args {
 }
 
 #[tokio::main]
-pub async fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
+pub async fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging)?;
 
     let domain = setup_domain(config).await?;

@@ -1,3 +1,4 @@
+use dolos_core::config::RootConfig;
 use itertools::Itertools;
 use miette::{Context, IntoDiagnostic};
 
@@ -12,7 +13,7 @@ pub struct Args {
 }
 
 #[tokio::main]
-pub async fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::Result<()> {
+pub async fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Result<()> {
     //crate::common::setup_tracing(&config.logging)?;
 
     let progress = feedback.slot_progress_bar();

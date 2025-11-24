@@ -3,13 +3,15 @@ use std::{
     sync::Arc,
 };
 
-use dolos_core::{batch::WorkDeltas, BlockSlot, ChainError, Domain, EntityKey, Genesis};
+use dolos_core::{
+    batch::WorkDeltas, config::CardanoConfig, BlockSlot, ChainError, Domain, EntityKey, Genesis,
+};
 use pallas::ledger::primitives::conway::DRep;
 use tracing::{debug, info, instrument};
 
 use crate::{
     rewards::RewardMap, rupd::RupdWork, AccountState, CardanoDelta, CardanoEntity, CardanoLogic,
-    Config, DRepState, EpochState, EraProtocol, EraSummary, PoolHash, PoolState, ProposalState,
+    DRepState, EpochState, EraProtocol, EraSummary, PoolHash, PoolState, ProposalState,
 };
 
 pub mod commit;
@@ -149,7 +151,7 @@ pub fn execute<D: Domain>(
     state: &D::State,
     archive: &D::Archive,
     slot: BlockSlot,
-    _: &Config,
+    _: &CardanoConfig,
     genesis: Arc<Genesis>,
     rewards: RewardMap<RupdWork>,
 ) -> Result<(), ChainError> {
