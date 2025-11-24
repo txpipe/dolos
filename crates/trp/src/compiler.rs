@@ -1,9 +1,9 @@
 use pallas::ledger::primitives::conway::CostModels;
 use std::collections::HashMap;
 
-use dolos_core::{Domain, Genesis, StateStore};
+use dolos_core::{config::TrpConfig, Domain, Genesis, StateStore};
 
-use crate::{Config, Error};
+use crate::Error;
 
 pub fn network_id_from_genesis(genesis: &Genesis) -> Option<tx3_cardano::Network> {
     match genesis.shelley.network_id.as_ref() {
@@ -65,7 +65,7 @@ pub fn find_cursor<D: Domain>(domain: &D) -> Result<tx3_cardano::ChainPoint, Err
 
 pub fn load_compiler<D: Domain>(
     domain: &D,
-    config: &Config,
+    config: &TrpConfig,
 ) -> Result<tx3_cardano::Compiler, Error> {
     let pparams = build_pparams::<D>(domain)?;
 

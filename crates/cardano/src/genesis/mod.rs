@@ -1,8 +1,11 @@
-use dolos_core::{ChainError, Domain, EntityKey, Genesis, StateStore as _, StateWriter as _};
+use dolos_core::{
+    config::CardanoConfig, ChainError, Domain, EntityKey, Genesis, StateStore as _,
+    StateWriter as _,
+};
 
 use crate::{
-    pots::Pots, utils::nonce_stability_window, Config, EpochState, EpochValue, EraBoundary,
-    EraSummary, Lovelace, Nonces, PParamsSet, RollingStats, CURRENT_EPOCH_KEY,
+    pots::Pots, utils::nonce_stability_window, EpochState, EpochValue, EraBoundary, EraSummary,
+    Lovelace, Nonces, PParamsSet, RollingStats, CURRENT_EPOCH_KEY,
 };
 
 mod staking;
@@ -110,7 +113,7 @@ pub fn bootstrap_eras<D: Domain>(state: &D::State, epoch: &EpochState) -> Result
 pub fn bootstrap_utxos<D: Domain>(
     state: &D::State,
     genesis: &Genesis,
-    config: &Config,
+    config: &CardanoConfig,
 ) -> Result<(), ChainError> {
     let writer = state.start_writer()?;
 
@@ -128,7 +131,7 @@ pub fn bootstrap_utxos<D: Domain>(
 pub fn execute<D: Domain>(
     state: &D::State,
     genesis: &Genesis,
-    config: &Config,
+    config: &CardanoConfig,
 ) -> Result<(), ChainError> {
     let epoch = bootstrap_epoch::<D>(state, genesis)?;
 

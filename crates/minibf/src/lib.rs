@@ -13,10 +13,8 @@ use pallas::{
     crypto::hash::Hash,
     ledger::{addresses::Network, primitives::Epoch},
 };
-use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
-    net::SocketAddr,
     ops::{Deref, Range},
 };
 use tower::Layer;
@@ -24,8 +22,8 @@ use tower_http::{cors::CorsLayer, normalize_path::NormalizePathLayer, trace};
 use tracing::Level;
 
 use dolos_core::{
-    ArchiveStore as _, BlockSlot, CancelToken, Domain, Entity, EntityKey, EraCbor, LogKey,
-    ServeError, StateError, StateStore as _, TemporalKey, TxOrder,
+    config::MinibfConfig, ArchiveStore as _, BlockSlot, CancelToken, Domain, Entity, EntityKey,
+    EraCbor, LogKey, ServeError, StateError, StateStore as _, TemporalKey, TxOrder,
 };
 
 mod error;
@@ -33,18 +31,10 @@ pub(crate) mod mapping;
 mod pagination;
 mod routes;
 
-#[derive(Deserialize, Serialize, Clone)]
-pub struct Config {
-    pub listen_address: SocketAddr,
-    pub permissive_cors: Option<bool>,
-    pub token_registry_url: Option<String>,
-    pub url: Option<String>,
-}
-
 #[derive(Clone)]
 pub struct Facade<D: Domain> {
     pub inner: D,
-    pub config: Config,
+    pub config: MinibfConfig,
 }
 
 impl<D: Domain> Deref for Facade<D> {
@@ -234,7 +224,7 @@ where
     Option<EpochState>: From<D::Entity>,
     Option<DRepState>: From<D::Entity>,
 {
-    type Config = Config;
+    type Config = MinibfConfig;
 
     async fn run(cfg: Self::Config, domain: D, cancel: C) -> Result<(), ServeError> {
         let app = Router::new()

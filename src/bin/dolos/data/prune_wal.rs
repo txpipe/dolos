@@ -1,3 +1,4 @@
+use dolos_core::config::RootConfig;
 use miette::{bail, Context, IntoDiagnostic};
 use tracing::info;
 
@@ -14,7 +15,7 @@ pub struct Args {
     max_prune: Option<u64>,
 }
 
-pub fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
+pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging)?;
 
     let mut wal = crate::common::open_wal_store(config)?;

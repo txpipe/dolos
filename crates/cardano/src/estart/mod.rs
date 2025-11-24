@@ -1,11 +1,13 @@
 use std::sync::Arc;
 
-use dolos_core::{batch::WorkDeltas, BlockSlot, ChainError, Domain, EntityKey, Genesis};
+use dolos_core::{
+    batch::WorkDeltas, config::CardanoConfig, BlockSlot, ChainError, Domain, EntityKey, Genesis,
+};
 use tracing::{debug, info, instrument};
 
 use crate::{
-    AccountState, CardanoDelta, CardanoEntity, CardanoLogic, Config, DRepState, EpochState,
-    EraProtocol, EraSummary, PoolState, ProposalState,
+    AccountState, CardanoDelta, CardanoEntity, CardanoLogic, DRepState, EpochState, EraProtocol,
+    EraSummary, PoolState, ProposalState,
 };
 
 pub mod commit;
@@ -99,7 +101,7 @@ pub fn execute<D: Domain>(
     state: &D::State,
     archive: &D::Archive,
     slot: BlockSlot,
-    _config: &Config,
+    _config: &CardanoConfig,
     genesis: Arc<Genesis>,
 ) -> Result<(), ChainError> {
     info!("executing ESTART work unit");

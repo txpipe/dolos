@@ -6,7 +6,8 @@ use tracing::{info, warn};
 
 use dolos::prelude::*;
 
-use crate::{feedback::Feedback, MithrilConfig};
+use crate::feedback::Feedback;
+use dolos_core::config::{MithrilConfig, RootConfig};
 
 #[derive(Debug, clap::Args, Clone)]
 pub struct Args {
@@ -188,7 +189,7 @@ fn define_starting_point(
 
 async fn import_hardano_into_domain(
     args: &Args,
-    config: &crate::Config,
+    config: &RootConfig,
     immutable_path: &Path,
     feedback: &Feedback,
     chunk_size: usize,
@@ -234,7 +235,7 @@ async fn import_hardano_into_domain(
 }
 
 #[tokio::main]
-pub async fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::Result<()> {
+pub async fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Result<()> {
     if args.verbose {
         crate::common::setup_tracing(&config.logging)?;
     }

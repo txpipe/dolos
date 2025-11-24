@@ -1,3 +1,4 @@
+use dolos_core::config::RootConfig;
 use miette::{Context, IntoDiagnostic};
 use pallas::crypto::hash::Hash;
 use std::str::FromStr;
@@ -15,7 +16,7 @@ pub struct Args {
     hash: String,
 }
 
-pub fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
+pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging)?;
 
     let wal = crate::common::open_wal_store(config)?;

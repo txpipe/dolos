@@ -1,5 +1,6 @@
 use comfy_table::Table;
 use dolos_cardano::owned::OwnedMultiEraBlock;
+use dolos_core::config::RootConfig;
 use std::sync::Arc;
 
 use dolos::prelude::*;
@@ -64,7 +65,7 @@ impl Formatter {
     }
 }
 
-pub fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
+pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging)?;
 
     let archive = crate::common::open_archive_store(config)?;

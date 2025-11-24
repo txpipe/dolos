@@ -1,6 +1,5 @@
+use dolos_core::config::GrpcConfig;
 use pallas::interop::utxorpc::{spec as u5c, LedgerContext};
-use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 use tonic::transport::{Certificate, Server, ServerTlsConfig};
 use tower_http::cors::CorsLayer;
 use tracing::info;
@@ -15,13 +14,6 @@ mod submit;
 mod sync;
 mod watch;
 
-#[derive(Serialize, Deserialize, Clone)]
-pub struct Config {
-    pub listen_address: String,
-    pub tls_client_ca_root: Option<PathBuf>,
-    pub permissive_cors: Option<bool>,
-}
-
 #[derive(Clone)]
 pub struct ContextAdapter<T: dolos_core::StateStore>(T);
 
@@ -32,7 +24,7 @@ where
     D: Domain + LedgerContext,
     C: CancelToken,
 {
-    type Config = Config;
+    type Config = GrpcConfig;
 
     async fn run(cfg: Self::Config, domain: D, cancel: C) -> Result<(), ServeError> {
         let addr = cfg.listen_address.parse().unwrap();

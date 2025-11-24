@@ -1,5 +1,6 @@
 use comfy_table::Table;
 use dolos_cardano::CardanoDelta;
+use dolos_core::config::RootConfig;
 use miette::{Context, IntoDiagnostic};
 
 use dolos::prelude::*;
@@ -62,7 +63,7 @@ impl Formatter {
     }
 }
 
-pub fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
+pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging)?;
 
     let wal = crate::common::open_wal_store(config)?;

@@ -159,7 +159,7 @@ mod tests {
     use jsonrpsee::types::{ErrorCode, ErrorObjectOwned};
     use serde_json::json;
 
-    use crate::{metrics::Metrics, Config};
+    use crate::{metrics::Metrics, TrpConfig};
 
     use super::*;
 
@@ -176,7 +176,7 @@ mod tests {
 
         Arc::new(Context {
             domain,
-            config: Arc::new(Config {
+            config: Arc::new(TrpConfig {
                 max_optimize_rounds: 3,
                 extra_fees: None,
 

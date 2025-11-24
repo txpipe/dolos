@@ -4,7 +4,7 @@ use dolos::facade::DomainExt as _;
 use miette::IntoDiagnostic as _;
 use pallas::crypto::hash::Hash;
 
-use dolos_core::ChainPoint;
+use dolos_core::{config::RootConfig, ChainPoint};
 
 #[derive(Debug, clap::Args)]
 pub struct Args {
@@ -18,7 +18,7 @@ pub struct Args {
 }
 
 #[tokio::main]
-pub async fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
+pub async fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging)?;
 
     let domain = crate::common::setup_domain(config).await?;

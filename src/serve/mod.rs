@@ -1,5 +1,5 @@
+use dolos_core::config::ServeConfig;
 use futures_util::stream::FuturesUnordered;
-use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
@@ -27,20 +27,6 @@ pub use dolos_minibf as minibf;
 #[cfg(feature = "trp")]
 pub use dolos_trp as trp;
 
-#[derive(Deserialize, Serialize, Clone, Default)]
-pub struct Config {
-    pub ouroboros: Option<o7s::Config>,
-
-    #[cfg(feature = "grpc")]
-    pub grpc: Option<grpc::Config>,
-
-    #[cfg(feature = "minibf")]
-    pub minibf: Option<minibf::Config>,
-
-    #[cfg(feature = "trp")]
-    pub trp: Option<trp::Config>,
-}
-
 #[allow(unused)]
 macro_rules! feature_not_included {
     ($service_name:expr) => {
@@ -54,7 +40,7 @@ macro_rules! feature_not_included {
 
 pub fn load_drivers(
     all_drivers: &FuturesUnordered<tokio::task::JoinHandle<Result<(), ServeError>>>,
-    config: Config,
+    config: ServeConfig,
     domain: DomainAdapter,
     exit: CancellationToken,
 ) {

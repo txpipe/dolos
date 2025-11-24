@@ -1,3 +1,4 @@
+use dolos_core::config::CardanoConfig;
 use pallas::ledger::traverse::{MultiEraBlock, MultiEraOutput, MultiEraTx};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -5,7 +6,6 @@ use std::sync::Arc;
 use dolos_core::*;
 
 use crate::owned::OwnedMultiEraOutput;
-use crate::Config;
 
 pub fn compute_block_dependencies(block: &MultiEraBlock, loaded: &mut RawUtxoMap) -> Vec<TxoRef> {
     let txs: HashMap<_, _> = block.txs().into_iter().map(|tx| (tx.hash(), tx)).collect();
@@ -160,7 +160,7 @@ pub fn compute_origin_delta(genesis: &Genesis) -> UtxoSetDelta {
     delta
 }
 
-pub fn build_custom_utxos_delta(config: &Config) -> Result<UtxoSetDelta, ChainError> {
+pub fn build_custom_utxos_delta(config: &CardanoConfig) -> Result<UtxoSetDelta, ChainError> {
     let mut delta = UtxoSetDelta::default();
 
     for utxo in config.custom_utxos.iter() {

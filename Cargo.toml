@@ -46,7 +46,7 @@ gasket = { version = "^0.9", features = ["derive"] }
 
 clap = { version = "4.5.37", features = ["derive"] }
 log = "0.4.18"
-config = { version = "0.14.1", default-features = false, features = [
+config = { version = "0.15.19", default-features = false, features = [
     "toml",
     "json",
 ] }
@@ -56,7 +56,6 @@ miette = { version = "7.6.0", features = ["fancy"] }
 async-trait = "0.1.81"
 bytes = "1.9.0"
 async-stream = "0.3.5"
-serde_with = "3.8.1"
 protoc-wkt = "1.0.0"
 indicatif = "0.17.8"
 comfy-table = { version = "7.1.1", optional = true }
@@ -122,8 +121,8 @@ members = [
     "crates/core",
     "crates/testing",
     "crates/minibf",
-    "xtask",
     "crates/redb3",
+    "xtask",
 ]
 
 [workspace.package]
