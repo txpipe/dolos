@@ -6,7 +6,7 @@ use std::sync::Arc;
 use tx3_lang::ProtoTx;
 use tx3_sdk::trp::{SubmitParams, SubmitWitness};
 
-use dolos_core::{Domain, MempoolStore as _, StateStore as _};
+use dolos_core::{Domain, MempoolStore as _, StateStore as _, TxoRef};
 
 use crate::{compiler::load_compiler, utxos::UtxoStoreAdapter};
 
@@ -79,7 +79,7 @@ pub async fn trp_resolve<D: Domain>(
 
     let mut compiler = load_compiler::<D>(&context.domain, &context.config)?;
 
-    let utxos = UtxoStoreAdapter::<D>::new(context.domain.state().clone());
+    let utxos = UtxoStoreAdapter::<D>::new(context.domain.state().clone(), context.locks.clone());
 
     let resolved = tx3_resolver::resolve_tx(
         tx,
@@ -88,6 +88,27 @@ pub async fn trp_resolve<D: Domain>(
         context.config.max_optimize_rounds.into(),
     )
     .await?;
+
+    let tx_bytes = &resolved.payload;
+    let tx = pallas::ledger::traverse::MultiEraTx::decode(tx_bytes)?;
+
+    let inputs: Vec<TxoRef> = tx
+        .inputs()
+        .iter()
+        .map(|i| TxoRef(*i.hash(), i.index() as u32))
+        .collect();
+
+    let current_slot = context
+        .domain
+        .state()
+        .read_cursor()?
+        .map(|c| c.slot())
+        .unwrap_or(0);
+
+    // Lock UTXOs used in this transaction to prevent double spending
+    context
+        .locks
+        .lock(&inputs, current_slot);
 
     Ok(serde_json::json!({
         "tx": hex::encode(resolved.payload),
@@ -159,7 +180,7 @@ mod tests {
     use jsonrpsee::types::{ErrorCode, ErrorObjectOwned};
     use serde_json::json;
 
-    use crate::{metrics::Metrics, TrpConfig};
+    use crate::{metrics::Metrics, TrpConfig, UtxoLock};
 
     use super::*;
 
@@ -185,6 +206,7 @@ mod tests {
                 permissive_cors: None,
             }),
             metrics: Metrics::default(),
+            locks: Arc::new(UtxoLock::new()),
         })
     }
 
