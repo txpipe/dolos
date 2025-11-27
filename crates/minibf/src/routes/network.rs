@@ -45,18 +45,18 @@ impl<'a> IntoModel<Vec<NetworkErasInner>> for ChainModelBuilder<'a> {
 
                 NetworkErasInner {
                     start: Box::new(NetworkErasInnerStart {
-                        time: 0.0,
+                        time: 0,
                         slot: 0,
                         epoch: 0,
                     }),
                     end: Box::new(NetworkErasInnerEnd {
-                        time: (end_epoch * epoch_length * slot_length) as f64,
+                        time: end_epoch * epoch_length * slot_length,
                         slot: end_epoch * epoch_length,
                         epoch: end_epoch,
                     }),
                     parameters: Box::new(NetworkErasInnerParameters {
                         epoch_length,
-                        slot_length: slot_length as f64,
+                        slot_length,
                         safe_zone,
                     }),
                 }
@@ -69,18 +69,18 @@ impl<'a> IntoModel<Vec<NetworkErasInner>> for ChainModelBuilder<'a> {
 
                 NetworkErasInner {
                     start: Box::new(NetworkErasInnerStart {
-                        time: 0.0,
+                        time: 0,
                         slot: 0,
                         epoch: 0,
                     }),
                     end: Box::new(NetworkErasInnerEnd {
-                        time: (end_epoch * epoch_length * slot_length) as f64,
+                        time: end_epoch * epoch_length * slot_length,
                         slot: end_epoch * epoch_length,
                         epoch: end_epoch,
                     }),
                     parameters: Box::new(NetworkErasInnerParameters {
                         epoch_length,
-                        slot_length: slot_length as f64,
+                        slot_length,
                         safe_zone,
                     }),
                 }
@@ -93,18 +93,18 @@ impl<'a> IntoModel<Vec<NetworkErasInner>> for ChainModelBuilder<'a> {
 
                 out.push(NetworkErasInner {
                     start: Box::new(NetworkErasInnerStart {
-                        time: 0.0,
+                        time: 0,
                         slot: 0,
                         epoch: 0,
                     }),
                     end: Box::new(NetworkErasInnerEnd {
-                        time: (end_epoch * epoch_length * slot_length) as f64,
+                        time: end_epoch * epoch_length * slot_length,
                         slot: end_epoch * epoch_length,
                         epoch: end_epoch,
                     }),
                     parameters: Box::new(NetworkErasInnerParameters {
                         epoch_length,
-                        slot_length: slot_length as f64,
+                        slot_length,
                         safe_zone,
                     }),
                 });
@@ -112,18 +112,18 @@ impl<'a> IntoModel<Vec<NetworkErasInner>> for ChainModelBuilder<'a> {
                 // In the case of preview, we add the skipped eras
                 let other = NetworkErasInner {
                     start: Box::new(NetworkErasInnerStart {
-                        time: 0.0,
+                        time: 0,
                         slot: 0,
                         epoch: 0,
                     }),
                     end: Box::new(NetworkErasInnerEnd {
-                        time: (end_epoch * epoch_length * slot_length) as f64,
+                        time: end_epoch * epoch_length * slot_length,
                         slot: end_epoch * epoch_length,
                         epoch: end_epoch,
                     }),
                     parameters: Box::new(NetworkErasInnerParameters {
                         epoch_length: self.genesis.shelley.epoch_length.unwrap() as i32,
-                        slot_length: self.genesis.shelley.slot_length.unwrap() as f64,
+                        slot_length: self.genesis.shelley.slot_length.unwrap() as i32,
                         safe_zone: mutable_slots(self.genesis) as i32,
                     }),
                 };
@@ -151,24 +151,24 @@ impl<'a> IntoModel<Vec<NetworkErasInner>> for ChainModelBuilder<'a> {
             let end_delta = end_time - system_start;
 
             previous.end = Box::new(NetworkErasInnerEnd {
-                time: start_delta as f64,
+                time: start_delta as i32,
                 slot: era.start.slot as i32,
                 epoch: era.start.epoch as i32,
             });
             let current = NetworkErasInner {
                 start: Box::new(NetworkErasInnerStart {
-                    time: start_delta as f64,
+                    time: start_delta as i32,
                     slot: era.start.slot as i32,
                     epoch: era.start.epoch as i32,
                 }),
                 end: Box::new(NetworkErasInnerEnd {
-                    time: end_delta as f64,
+                    time: end_delta as i32,
                     slot: end_slot as i32,
                     epoch: end_epoch as i32,
                 }),
                 parameters: Box::new(NetworkErasInnerParameters {
                     epoch_length: era.epoch_length as i32,
-                    slot_length: era.slot_length as f64,
+                    slot_length: era.slot_length as i32,
                     safe_zone: dolos_cardano::mutable_slots(self.genesis) as i32,
                 }),
             };

@@ -7,7 +7,7 @@ use axum::{
 };
 use blockfrost_openapi::models::{
     pool_delegators_inner::PoolDelegatorsInner, pool_history_inner::PoolHistoryInner,
-    pool_list_extended_inner::PoolListExtendedInner,
+    pool_list_extended_inner::PoolListExtendedInner, PoolListExtendedInnerMetadata,
 };
 use dolos_cardano::{
     model::{AccountState, PoolState},
@@ -21,7 +21,6 @@ use pallas::{
     ledger::{addresses::Network, primitives::StakeCredential},
 };
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 use crate::{
     error::Error,
@@ -135,33 +134,33 @@ where
             }
         })
         .collect();
+
     let metadata_results = join_all(metadata_futures).await;
 
     let mut out = vec![];
+
     for ((key, pool), fetched_metadata) in pools.into_iter().zip(metadata_results) {
         let poolhex = hex::encode(pool.operator);
         let pool_id = bech32_pool(pool.operator)?;
         let params = pool.snapshot.live().map(|x| x.params.clone());
         let metadata = match params.as_ref() {
             Some(x) => match x.pool_metadata.as_ref() {
-                Some(y) => {
+                Some(onchain) => {
                     let out = match fetched_metadata {
-                        Some(meta) => json!({
-                            "url": y.url,
-                            "hash": y.hash,
-                            "ticker": meta.ticker,
-                            "name": meta.name,
-                            "description": meta.description,
-                            "homepage": meta.homepage
-                        }),
-                        None => json!({
-                            "url": y.url,
-                            "hash": y.hash,
-                            "ticker": None::<String>,
-                            "name": None::<String>,
-                            "description": None::<String>,
-                            "homepage": None::<String>
-                        }),
+                        Some(offchain) => PoolListExtendedInnerMetadata {
+                            url: Some(onchain.url.clone()),
+                            hash: Some(hex::encode(&*onchain.hash)),
+                            error: None,
+                            ticker: Some(offchain.ticker),
+                            name: Some(offchain.name),
+                            description: Some(offchain.description),
+                            homepage: Some(offchain.homepage),
+                        },
+                        None => PoolListExtendedInnerMetadata {
+                            url: Some(onchain.url.clone()),
+                            hash: Some(hex::encode(&*onchain.hash)),
+                            ..Default::default()
+                        },
                     };
 
                     Some(Box::new(out))
@@ -173,10 +172,13 @@ where
 
         // Fetch live and active stake logs
         let live = live_stake_map.get(&pool.operator).copied();
+
         let Some(epoch) = pool.snapshot.epoch() else {
             return Err(StatusCode::INTERNAL_SERVER_ERROR.into());
         };
+
         let active_slot = chain_summary.epoch_start(epoch - 1);
+
         let Ok(active) = domain.archive().read_log_typed::<StakeLog>(
             StakeLog::NS,
             &(TemporalKey::from(active_slot), key.clone()).into(),

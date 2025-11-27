@@ -22,7 +22,7 @@ dolos-cardano = { path = "../cardano" }
 
 axum = { version = "0.8.4", features = ["macros"] }
 bech32 = "0.11.0"
-blockfrost-openapi = "0.1.75"
+blockfrost-openapi = "0.1.83"
 crc = "3.3.0"
 futures = "0.3.31"
 hex = "0.4.3"
