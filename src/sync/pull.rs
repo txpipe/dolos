@@ -205,6 +205,9 @@ impl gasket::framework::Worker<Stage> for Worker {
                     }
                     PullBatch::Empty => (),
                 };
+                if !self.peer_session.chainsync().has_agency() {
+                    stage.quota.on_tip();
+                }
             }
             WorkUnit::Await => {
                 info!("waiting for new block");
@@ -241,9 +244,7 @@ impl gasket::framework::Worker<Stage> for Worker {
                         stage.track_tip(&tip);
                     }
                     NextResponse::Await => {
-                        info!("reached tip");
-
-                        stage.quota.on_tip();
+                        warn!("unexpected response, skipping");
                     }
                 }
             }
