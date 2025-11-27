@@ -40,12 +40,20 @@ fn raw_to_blockref<C: LedgerContext>(
     mapper: &Mapper<C>,
     body: &BlockBody,
 ) -> Option<u5c::sync::BlockRef> {
+    use pallas::ledger::traverse::MultiEraBlock;
+    
     let u5c::cardano::Block { header, .. } = mapper.map_block_cbor(body);
+    
+    // Decode the block to get the actual height
+    let height = MultiEraBlock::decode(body)
+        .ok()
+        .map(|block| block.number())
+        .unwrap_or(0);
 
     header.map(|h| u5c::sync::BlockRef {
         slot: h.slot,
         hash: h.hash,
-        height: h.height,
+        height,
     })
 }
 
@@ -98,6 +106,39 @@ where
             domain,
             mapper,
             cancel,
+        }
+    }
+
+    fn point_to_blockref(&self, point: &ChainPoint) -> u5c::sync::BlockRef {
+        use pallas::ledger::traverse::MultiEraBlock;
+
+        match point {
+            ChainPoint::Origin => u5c::sync::BlockRef {
+                slot: 0,
+                hash: vec![].into(),
+                height: 0,
+            },
+            ChainPoint::Slot(slot) | ChainPoint::Specific(slot, _) => {
+                // Try to look up the block to get the actual height
+                let height = self.domain
+                    .archive()
+                    .get_block_by_slot(slot)
+                    .ok()
+                    .and_then(|block| {
+                        block.and_then(|body| {
+                            MultiEraBlock::decode(&body)
+                                .ok()
+                                .map(|block| block.number())
+                        })
+                    })
+                    .unwrap_or(*slot); // Fallback to slot if lookup fails
+
+                u5c::sync::BlockRef {
+                    slot: *slot,
+                    hash: point.hash().map(|h| h.to_vec()).unwrap_or_default().into(),
+                    height,
+                }
+            }
         }
     }
 }
@@ -217,10 +258,35 @@ where
             .map_err(|e| Status::internal(format!("Unable to read WAL: {e:?}")))?
             .ok_or(Status::internal("chain has no data."))?;
 
+        // Calculate timestamp from slot using proper era handling
+        let timestamp = match &point {
+            ChainPoint::Origin => 0,
+            ChainPoint::Slot(slot) | ChainPoint::Specific(slot, _) => {
+                use dolos_cardano::pparams;
+                
+                // Get protocol parameter updates up to this slot
+                let updates = self.domain.state()
+                    .get_pparams(*slot)
+                    .ok()
+                    .and_then(|updates| {
+                        updates.into_iter()
+                            .map(TryInto::try_into)
+                            .collect::<Result<Vec<_>, _>>()
+                            .ok()
+                    })
+                    .unwrap_or_default();
+
+                // Get chain summary with proper era handling
+                let summary = pparams::fold_with_hacks(self.domain.genesis(), &updates, *slot);
+                
+                // Calculate timestamp using the canonical function
+                dolos_cardano::slot_time(*slot, &summary) as u64
+            }
+        };
+
         let response = u5c::sync::ReadTipResponse {
-            tip: Some(point_to_blockref(&point)),
-            // TODO: impl
-            timestamp: 0,
+            tip: Some(self.point_to_blockref(&point)),
+            timestamp,
         };
 
         Ok(Response::new(response))
