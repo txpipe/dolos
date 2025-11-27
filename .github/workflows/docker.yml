@@ -4,6 +4,7 @@ on:
     branches:
       - "main"
       - "demeter"
+      - "lts/v0"
     tags:
       - "v*"
 
