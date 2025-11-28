@@ -1,6 +1,7 @@
 use std::{collections::HashMap, marker::PhantomData, ops::Range};
 
 use itertools::Itertools;
+use pallas::crypto::hash::Hash;
 use serde::{Deserialize, Serialize};
 
 use crate::{ChainError, ChainPoint, Domain, TxoRef, UtxoMap, UtxoSet, UtxoSetDelta};
@@ -407,6 +408,8 @@ pub trait StateStore: Sized + Send + Sync + Clone {
     fn get_utxo_by_policy(&self, policy: &[u8]) -> Result<UtxoSet, StateError>;
 
     fn get_utxo_by_asset(&self, asset: &[u8]) -> Result<UtxoSet, StateError>;
+
+    fn get_datum(&self, datum_hash: &Hash<32>) -> Result<Option<Vec<u8>>, StateError>;
 }
 
 pub fn load_entity_chunk<D: Domain>(
