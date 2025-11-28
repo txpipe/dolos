@@ -1,5 +1,8 @@
 use dolos_core::{EraCbor, TxoRef, UtxoMap, UtxoSetDelta};
-use pallas::ledger::{addresses::ShelleyDelegationPart, traverse::MultiEraOutput};
+use pallas::{
+    crypto::hash::Hash,
+    ledger::{addresses::ShelleyDelegationPart, traverse::MultiEraOutput},
+};
 use redb::{
     MultimapTableDefinition, Range, ReadTransaction, ReadableDatabase, ReadableTable as _,
     ReadableTableMetadata as _, TableDefinition, TableStats, WriteTransaction,
@@ -15,6 +18,8 @@ use super::StateStore;
 
 type UtxosKey = (&'static [u8; 32], u32);
 type UtxosValue = (u16, &'static [u8]);
+type DatumKey = &'static [u8; 32];
+type DatumValue = &'static [u8];
 
 pub struct UtxosIterator(Range<'static, UtxosKey, UtxosValue>);
 
@@ -99,6 +104,22 @@ impl UtxosTable {
             table.remove(k)?;
         }
 
+        for (datum_hash, datum_value) in delta.witness_datums_add.iter() {
+            let refcount = DatumRefCountTable::increment(wx, datum_hash)?;
+
+            if refcount == 1 {
+                DatumsTable::insert(wx, datum_hash, datum_value)?;
+            }
+        }
+
+        for datum_hash in delta.witness_datums_remove.iter() {
+            let refcount = DatumRefCountTable::decrement(wx, datum_hash)?;
+
+            if refcount == 0 {
+                DatumsTable::remove(wx, datum_hash)?;
+            }
+        }
+
         Ok(())
     }
 
@@ -119,6 +140,92 @@ impl UtxosTable {
         let stats = table.stats()?;
 
         Ok(stats)
+    }
+}
+
+pub struct DatumsTable;
+
+impl DatumsTable {
+    pub const DEF: TableDefinition<'static, DatumKey, DatumValue> = TableDefinition::new("datums");
+
+    pub fn initialize(wx: &WriteTransaction) -> Result<(), Error> {
+        wx.open_table(Self::DEF)?;
+        Ok(())
+    }
+
+    pub fn get(rx: &ReadTransaction, datum_hash: &Hash<32>) -> Result<Option<Vec<u8>>, Error> {
+        let table = rx.open_table(Self::DEF)?;
+        Ok(table.get(&**datum_hash)?.map(|v| v.value().to_vec()))
+    }
+
+    pub fn insert(
+        wx: &WriteTransaction,
+        datum_hash: &Hash<32>,
+        datum_value: &[u8],
+    ) -> Result<(), Error> {
+        let mut table = wx.open_table(Self::DEF)?;
+        table.insert(&**datum_hash, datum_value)?;
+        Ok(())
+    }
+
+    pub fn remove(wx: &WriteTransaction, datum_hash: &Hash<32>) -> Result<(), Error> {
+        let mut table = wx.open_table(Self::DEF)?;
+        table.remove(&**datum_hash)?;
+        Ok(())
+    }
+
+    pub fn stats(rx: &ReadTransaction) -> Result<TableStats, Error> {
+        let table = rx.open_table(Self::DEF)?;
+        Ok(table.stats()?)
+    }
+}
+
+pub struct DatumRefCountTable;
+
+impl DatumRefCountTable {
+    pub const DEF: TableDefinition<'static, DatumKey, u64> = TableDefinition::new("datum_refcount");
+
+    pub fn initialize(wx: &WriteTransaction) -> Result<(), Error> {
+        wx.open_table(Self::DEF)?;
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    pub fn get(rx: &ReadTransaction, datum_hash: &Hash<32>) -> Result<u64, Error> {
+        let table = rx.open_table(Self::DEF)?;
+        Ok(table.get(&**datum_hash)?.map(|v| v.value()).unwrap_or(0))
+    }
+
+    pub fn increment(wx: &WriteTransaction, datum_hash: &Hash<32>) -> Result<u64, Error> {
+        let mut table = wx.open_table(Self::DEF)?;
+        let current = table.get(&**datum_hash)?.map(|v| v.value()).unwrap_or(0);
+        let new_count = current + 1;
+        table.insert(&**datum_hash, new_count)?;
+        Ok(new_count)
+    }
+
+    pub fn decrement(wx: &WriteTransaction, datum_hash: &Hash<32>) -> Result<u64, Error> {
+        let mut table = wx.open_table(Self::DEF)?;
+        let current = table.get(&**datum_hash)?.map(|v| v.value()).unwrap_or(0);
+
+        if current == 0 {
+            return Ok(0);
+        }
+
+        let new_count = current - 1;
+
+        if new_count == 0 {
+            table.remove(&**datum_hash)?;
+        } else {
+            table.insert(&**datum_hash, new_count)?;
+        }
+
+        Ok(new_count)
+    }
+
+    pub fn stats(rx: &ReadTransaction) -> Result<TableStats, Error> {
+        let table = rx.open_table(Self::DEF)?;
+        Ok(table.stats()?)
     }
 }
 
@@ -420,11 +527,24 @@ impl StateStore {
         let rx = self.db().begin_read()?;
 
         let utxos = UtxosTable::stats(&rx)?;
+        let datums = DatumsTable::stats(&rx)?;
+        let datum_refcount = DatumRefCountTable::stats(&rx)?;
         let filters = FilterIndexes::stats(&rx)?;
 
-        let all_tables = [("utxos", utxos)].into_iter().chain(filters);
+        let all_tables = [
+            ("utxos", utxos),
+            ("datums", datums),
+            ("datum_refcount", datum_refcount),
+        ]
+        .into_iter()
+        .chain(filters);
 
         Ok(HashMap::from_iter(all_tables))
+    }
+
+    pub fn get_datum(&self, datum_hash: &Hash<32>) -> Result<Option<Vec<u8>>, Error> {
+        let rx = self.db().begin_read()?;
+        DatumsTable::get(&rx, datum_hash)
     }
 }
 
