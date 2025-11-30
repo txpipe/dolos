@@ -1,89 +1,12 @@
 use dolos_core::{ChainError, Domain, Genesis, StateStore};
 use pallas::ledger::primitives::StakeCredential;
-use tracing::{debug, trace};
+use tracing::trace;
 
 use crate::{
-    pallas_ratio,
-    pots::{self, EpochIncentives, Eta, Pots},
-    ratio,
+    pots::Pots,
     rupd::{RupdWork, StakeSnapshot},
-    AccountState, EpochState, EraProtocol, FixedNamespace as _, PParamsSet, PoolHash, PoolParams,
-    PoolState,
+    AccountState, EraProtocol, FixedNamespace as _, PParamsSet, PoolHash, PoolParams, PoolState,
 };
-
-fn define_eta(genesis: &Genesis, epoch: &EpochState) -> Result<Eta, ChainError> {
-    if epoch.pparams.mark().is_none_or(|x| x.is_byron()) {
-        return Ok(ratio!(1));
-    }
-
-    let blocks_minted = epoch.rolling.mark().map(|x| x.blocks_minted);
-
-    let Some(blocks_minted) = blocks_minted else {
-        // TODO: check if returning eta = 1 on epoch 0 is what the specs says.
-        return Ok(ratio!(1));
-    };
-
-    let f_param = genesis
-        .shelley
-        .active_slots_coeff
-        .ok_or(ChainError::GenesisFieldMissing(
-            "active_slots_coeff".to_string(),
-        ))?;
-
-    let d_param = epoch.pparams.mark().unwrap().ensure_d()?;
-    let epoch_length = epoch.pparams.mark().unwrap().ensure_epoch_length()?;
-
-    let eta = pots::calculate_eta(
-        blocks_minted as u64,
-        pallas_ratio!(d_param),
-        f_param,
-        epoch_length,
-    );
-
-    Ok(eta)
-}
-
-fn neutral_incentives() -> EpochIncentives {
-    EpochIncentives {
-        total: 0,
-        treasury_tax: 0,
-        available_rewards: 0,
-        used_fees: 0,
-    }
-}
-
-fn define_epoch_incentives(
-    genesis: &Genesis,
-    state: &EpochState,
-    reserves: u64,
-) -> Result<EpochIncentives, ChainError> {
-    let pparams = state.pparams.unwrap_live();
-
-    if pparams.is_byron() {
-        debug!("no pot changes during Byron epoch");
-        return Ok(neutral_incentives());
-    }
-
-    let rho_param = pparams.ensure_rho()?;
-    let tau_param = pparams.ensure_tau()?;
-
-    let fee_ss = match state.rolling.mark() {
-        Some(rolling) => rolling.gathered_fees,
-        None => 0,
-    };
-
-    let eta = define_eta(genesis, state)?;
-
-    let incentives = pots::epoch_incentives(
-        reserves,
-        fee_ss,
-        pallas_ratio!(rho_param),
-        pallas_ratio!(tau_param),
-        eta,
-    );
-
-    Ok(incentives)
-}
 
 impl StakeSnapshot {
     fn track_stake(
@@ -223,16 +146,7 @@ impl RupdWork {
 
         let pots = epoch.initial_pots.clone();
 
-        let incentives = define_epoch_incentives(genesis, &epoch, pots.reserves)?;
-
         let chain = crate::load_era_summary::<D>(state)?;
-
-        debug!(
-            %incentives.total,
-            %incentives.treasury_tax,
-            %incentives.available_rewards,
-            "defined pot delta"
-        );
 
         let mut work = RupdWork {
             chain,
@@ -240,7 +154,7 @@ impl RupdWork {
             max_supply,
             pparams: epoch.pparams.mark().cloned(),
             pots,
-            incentives,
+            available_rewards: epoch.incentives.available_rewards,
             snapshot: StakeSnapshot::default(),
         };
 
@@ -255,8 +169,8 @@ impl RupdWork {
 }
 
 impl crate::rewards::RewardsContext for RupdWork {
-    fn incentives(&self) -> &EpochIncentives {
-        &self.incentives
+    fn available_rewards(&self) -> u64 {
+        self.available_rewards
     }
 
     fn pots(&self) -> &Pots {

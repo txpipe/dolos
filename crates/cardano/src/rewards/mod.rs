@@ -145,7 +145,6 @@ impl Reward {
 
 #[derive(Debug)]
 pub struct RewardMap<C: RewardsContext> {
-    incentives: EpochIncentives,
     pending: HashMap<StakeCredential, Reward>,
     applied_effective: u64,
     applied_unspendable: u64,
@@ -179,7 +178,6 @@ impl<C: RewardsContext> std::fmt::Display for RewardMap<C> {
 impl<C: RewardsContext> Default for RewardMap<C> {
     fn default() -> Self {
         Self {
-            incentives: EpochIncentives::default(),
             pending: HashMap::new(),
             applied_effective: 0,
             applied_unspendable: 0,
@@ -191,7 +189,6 @@ impl<C: RewardsContext> Default for RewardMap<C> {
 impl<C: RewardsContext> Clone for RewardMap<C> {
     fn clone(&self) -> Self {
         Self {
-            incentives: self.incentives.clone(),
             pending: self.pending.clone(),
             applied_effective: self.applied_effective,
             applied_unspendable: self.applied_unspendable,
@@ -201,9 +198,8 @@ impl<C: RewardsContext> Clone for RewardMap<C> {
 }
 
 impl<C: RewardsContext> RewardMap<C> {
-    fn new(incentives: EpochIncentives) -> Self {
+    fn new() -> Self {
         Self {
-            incentives,
             pending: HashMap::new(),
             applied_effective: 0,
             applied_unspendable: 0,
@@ -285,10 +281,6 @@ impl<C: RewardsContext> RewardMap<C> {
         }
     }
 
-    pub fn incentives(&self) -> &EpochIncentives {
-        &self.incentives
-    }
-
     /// Convert the reward map into a pot delta assuming all rewards have been
     /// already applied.
     pub fn as_pot_delta(&self) -> PotDelta {
@@ -306,7 +298,7 @@ impl<C: RewardsContext> RewardMap<C> {
 }
 
 pub trait RewardsContext {
-    fn incentives(&self) -> &EpochIncentives;
+    fn available_rewards(&self) -> u64;
     fn pots(&self) -> &Pots;
 
     fn pre_allegra(&self) -> bool;
@@ -335,7 +327,7 @@ pub trait RewardsContext {
 }
 
 pub fn define_rewards<C: RewardsContext>(ctx: &C) -> Result<RewardMap<C>, ChainError> {
-    let mut map = RewardMap::<C>::new(ctx.incentives().clone());
+    let mut map = RewardMap::<C>::new();
 
     for pool in ctx.iter_all_pools() {
         let pool_params = ctx.pool_params(pool);
@@ -352,7 +344,7 @@ pub fn define_rewards<C: RewardsContext>(ctx: &C) -> Result<RewardMap<C>, ChainE
         let live_pledge = ctx.live_pledge(pool, &owners);
         let circulating_supply = ctx.pots().circulating();
         let pool_stake = ctx.pool_stake(pool);
-        let epoch_rewards = ctx.incentives().available_rewards;
+        let epoch_rewards = ctx.available_rewards();
         let total_active_stake = ctx.active_stake();
         let epoch_blocks = ctx.epoch_blocks();
         let pool_blocks = ctx.pool_blocks(pool);

@@ -100,7 +100,7 @@ pub struct RupdWork {
     pub current_epoch: u64,
     pub snapshot: StakeSnapshot,
     pub pots: Pots,
-    pub incentives: EpochIncentives,
+    pub available_rewards: u64,
     pub max_supply: u64,
     pub chain: ChainSummary,
     pub pparams: Option<PParamsSet>,

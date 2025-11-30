@@ -89,6 +89,18 @@ pub struct EpochIncentives {
     pub used_fees: u64,
 }
 
+impl EpochIncentives {
+    // TODO: this and default are same, commit to one
+    pub fn neutral() -> Self {
+        Self {
+            total: 0,
+            treasury_tax: 0,
+            available_rewards: 0,
+            used_fees: 0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Encode, Decode, Serialize, Deserialize, Default)]
 pub struct PotDelta {
     #[n(0)]
@@ -276,7 +288,30 @@ pub fn epoch_incentives(
     }
 }
 
-pub fn apply_delta(mut pots: Pots, incentives: &EpochIncentives, delta: &PotDelta) -> Pots {
+pub fn apply_byron_delta(mut pots: Pots, _: &EpochIncentives, delta: &PotDelta) -> Pots {
+    // force neutral values for concepts that doesn't apply to byron
+    pots.deposit_per_pool = 0;
+    pots.deposit_per_account = 0;
+    pots.treasury = 0;
+    pots.fees = 0;
+    pots.rewards = 0;
+    pots.pool_count = 0;
+    pots.account_count = 0;
+    pots.drep_deposits = 0;
+    pots.proposal_deposits = 0;
+
+    // utxos pot
+    pots.utxos += delta.produced_utxos;
+    pots.utxos -= delta.consumed_utxos;
+
+    // we infer the reserves by looking at how the utxo pot changed
+    pots.reserves -= delta.produced_utxos;
+    pots.reserves += delta.consumed_utxos;
+
+    pots
+}
+
+pub fn apply_shelley_delta(mut pots: Pots, incentives: &EpochIncentives, delta: &PotDelta) -> Pots {
     let used_rewards = delta.consumed_incentives();
 
     let returned_rewards = incentives.available_rewards - used_rewards;
@@ -335,9 +370,15 @@ pub fn apply_delta(mut pots: Pots, incentives: &EpochIncentives, delta: &PotDelt
     pots
 }
 
+pub fn apply_delta(pots: Pots, incentives: &EpochIncentives, delta: &PotDelta) -> Pots {
+    match delta.protocol_version {
+        0 | 1 => apply_byron_delta(pots, incentives, delta),
+        2.. => apply_shelley_delta(pots, incentives, delta),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-
     use super::*;
 
     const MAX_SUPPLY: u64 = 45000000000000000;
@@ -347,6 +388,52 @@ mod tests {
         let result = calculate_eta(4298, ratio!(0), 0.05, 86400);
         let expected = ratio!(2149, 2160);
         assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_mainnet_byron_delta() {
+        let pots = Pots {
+            reserves: 13887515255000000,
+            treasury: 0,
+            fees: 0,
+            utxos: 31112484745000000,
+            rewards: 0,
+            pool_count: 0,
+            account_count: 0,
+            deposit_per_pool: 0,
+            deposit_per_account: 0,
+            nominal_deposits: 0,
+            drep_deposits: 0,
+            proposal_deposits: 0,
+        };
+
+        assert!(pots.is_consistent(MAX_SUPPLY));
+
+        let delta = PotDelta {
+            protocol_version: 0,
+            consumed_utxos: 3458053,
+            gathered_fees: 5612092,
+            ..Default::default()
+        };
+
+        let incentives = EpochIncentives {
+            total: delta.gathered_fees,
+            treasury_tax: 0,
+            available_rewards: 0,
+            used_fees: 0,
+        };
+
+        let pots = apply_delta(pots, &incentives, &delta);
+
+        dbg!(&pots);
+
+        assert!(pots.is_consistent(MAX_SUPPLY));
+
+        assert_eq!(pots.reserves, 13887515258458053);
+        assert_eq!(pots.treasury, 0);
+        assert_eq!(pots.fees, 0);
+        assert_eq!(pots.utxos, 31112484741541947);
+        assert_eq!(pots.rewards, 0);
     }
 
     #[test]

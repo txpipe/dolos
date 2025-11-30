@@ -3,11 +3,13 @@ use std::sync::Arc;
 use dolos_core::{ChainError, Genesis, NsKey};
 use pallas::ledger::primitives::Epoch;
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 
 use crate::{
     estart::{AccountId, PoolId, WorkContext},
-    pots::{apply_delta, PotDelta, Pots},
-    AccountState, CardanoDelta, EpochState, EraTransition, FixedNamespace as _, PoolState,
+    pallas_ratio,
+    pots::{self, apply_delta, EpochIncentives, Eta, PotDelta, Pots},
+    ratio, AccountState, CardanoDelta, EpochState, EraTransition, FixedNamespace as _, PoolState,
     CURRENT_EPOCH_KEY,
 };
 
@@ -84,6 +86,7 @@ impl dolos_core::EntityDelta for PoolTransition {
 pub struct EpochTransition {
     new_epoch: Epoch,
     new_pots: Pots,
+    new_incentives: EpochIncentives,
     era_transition: Option<EraTransition>,
 
     #[serde(skip)]
@@ -113,6 +116,7 @@ impl dolos_core::EntityDelta for EpochTransition {
 
         entity.number = self.new_epoch;
         entity.initial_pots = self.new_pots.clone();
+        entity.incentives = self.new_incentives.clone();
         entity.rolling.default_transition(self.new_epoch);
         entity.pparams.default_transition(self.new_epoch);
 
@@ -133,6 +137,79 @@ impl dolos_core::EntityDelta for EpochTransition {
         // todo!()
         // Placeholder undo logic. Ensure this does not panic.
     }
+}
+
+fn define_eta(genesis: &Genesis, epoch: &EpochState) -> Result<Eta, ChainError> {
+    if epoch.pparams.mark().is_none_or(|x| x.is_byron()) {
+        return Ok(ratio!(1));
+    }
+
+    let blocks_minted = epoch.rolling.mark().map(|x| x.blocks_minted);
+
+    let Some(blocks_minted) = blocks_minted else {
+        // TODO: check if returning eta = 1 on epoch 0 is what the specs says.
+        return Ok(ratio!(1));
+    };
+
+    let f_param = genesis
+        .shelley
+        .active_slots_coeff
+        .ok_or(ChainError::GenesisFieldMissing(
+            "active_slots_coeff".to_string(),
+        ))?;
+
+    let d_param = epoch.pparams.mark().unwrap().ensure_d()?;
+    let epoch_length = epoch.pparams.mark().unwrap().ensure_epoch_length()?;
+
+    let eta = pots::calculate_eta(
+        blocks_minted as u64,
+        pallas_ratio!(d_param),
+        f_param,
+        epoch_length,
+    );
+
+    Ok(eta)
+}
+
+fn define_new_incentives(
+    ctx: &WorkContext,
+    new_pots: &Pots,
+) -> Result<EpochIncentives, ChainError> {
+    let state = ctx.ended_state();
+
+    let pparams = state.pparams.unwrap_live();
+
+    if pparams.is_byron() {
+        debug!("no pot changes during Byron epoch");
+        return Ok(EpochIncentives::neutral());
+    }
+
+    let rho_param = pparams.ensure_rho()?;
+    let tau_param = pparams.ensure_tau()?;
+
+    let fee_ss = match state.rolling.mark() {
+        Some(rolling) => rolling.gathered_fees,
+        None => 0,
+    };
+
+    let eta = define_eta(&ctx.genesis, state)?;
+
+    let incentives = pots::epoch_incentives(
+        new_pots.reserves,
+        fee_ss,
+        pallas_ratio!(rho_param),
+        pallas_ratio!(tau_param),
+        eta,
+    );
+
+    debug!(
+        %incentives.total,
+        %incentives.treasury_tax,
+        %incentives.available_rewards,
+        "defined new incentives"
+    );
+
+    Ok(incentives)
 }
 
 pub fn define_new_pots(ctx: &super::WorkContext) -> Pots {
@@ -171,7 +248,7 @@ pub fn define_new_pots(ctx: &super::WorkContext) -> Pots {
             .unwrap_or(0),
     };
 
-    let pots = apply_delta(epoch.initial_pots.clone(), &end.epoch_incentives, &delta);
+    let pots = apply_delta(epoch.initial_pots.clone(), &epoch.incentives, &delta);
 
     tracing::debug!(
         rewards = pots.rewards,
@@ -179,7 +256,7 @@ pub fn define_new_pots(ctx: &super::WorkContext) -> Pots {
         treasury = pots.treasury,
         fees = pots.fees,
         utxos = pots.utxos,
-        "pots after reset"
+        "defined new pots"
     );
 
     if !pots.is_consistent(epoch.initial_pots.max_supply()) {
@@ -233,9 +310,13 @@ impl super::BoundaryVisitor for BoundaryVisitor {
             ctx.add_delta(delta);
         }
 
+        let new_pots = define_new_pots(ctx);
+        let new_incentives = define_new_incentives(ctx, &new_pots)?;
+
         ctx.deltas.add_for_entity(EpochTransition {
             new_epoch: ctx.starting_epoch_no(),
-            new_pots: define_new_pots(ctx),
+            new_pots,
+            new_incentives,
             era_transition: ctx.ended_state().pparams.era_transition(),
             genesis: Some(ctx.genesis.clone()),
         });

@@ -1460,8 +1460,9 @@ pub struct EndStats {
     #[n(2)]
     pub pool_invalid_refund_count: u64,
 
+    // TODO: deprecate
     #[n(3)]
-    pub epoch_incentives: EpochIncentives,
+    pub __epoch_incentives: EpochIncentives,
 
     #[n(4)]
     pub effective_rewards: u64,
@@ -1494,6 +1495,9 @@ pub struct EpochState {
 
     #[n(2)]
     pub rolling: EpochValue<RollingStats>,
+
+    #[n(3)]
+    pub incentives: EpochIncentives,
 
     #[n(9)]
     pub pparams: EpochValue<PParamsSet>,
