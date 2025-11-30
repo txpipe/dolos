@@ -4,8 +4,10 @@ use dolos_core::{
 };
 
 use crate::{
-    pots::Pots, utils::nonce_stability_window, EpochState, EpochValue, EraBoundary, EraSummary,
-    Lovelace, Nonces, PParamsSet, RollingStats, CURRENT_EPOCH_KEY,
+    pots::{EpochIncentives, Pots},
+    utils::nonce_stability_window,
+    EpochState, EpochValue, EraBoundary, EraSummary, Lovelace, Nonces, PParamsSet, RollingStats,
+    CURRENT_EPOCH_KEY,
 };
 
 mod staking;
@@ -71,6 +73,7 @@ pub fn bootstrap_epoch<D: Domain>(
         previous_nonce_tail: None,
         number: 0,
         rolling: EpochValue::with_live(0, RollingStats::default()),
+        incentives: EpochIncentives::default(),
         end: None,
     };
 

@@ -1,6 +1,6 @@
 use crate::{
-    AccountState, CardanoDelta, EndStats, EpochState, FixedNamespace as _, PoolHash, PoolState,
-    CURRENT_EPOCH_KEY,
+    pots::EpochIncentives, AccountState, CardanoDelta, EndStats, EpochState, FixedNamespace as _,
+    PoolHash, PoolState, CURRENT_EPOCH_KEY,
 };
 use dolos_core::{ChainError, NsKey};
 use serde::{Deserialize, Serialize};
@@ -122,13 +122,10 @@ fn define_end_stats(ctx: &super::BoundaryWork) -> EndStats {
     let proposal_valid_refunds = define_proposal_valid_refunds(ctx);
     let proposal_invalid_refunds = proposal_total_refunds - proposal_valid_refunds;
 
-    let incentives = ctx.rewards.incentives();
-
     EndStats {
         pool_deposit_count: ctx.new_pools.len() as u64,
         pool_refund_count: pool_refund_count as u64,
         pool_invalid_refund_count: pool_invalid_refund_count as u64,
-        epoch_incentives: incentives.clone(),
         effective_rewards: ctx.rewards.applied_effective(),
         unspendable_rewards: ctx.rewards.applied_unspendable(),
         proposal_refunds: proposal_valid_refunds,
@@ -136,6 +133,7 @@ fn define_end_stats(ctx: &super::BoundaryWork) -> EndStats {
         // TODO: deprecate
         __drep_deposits: 0,
         __drep_refunds: 0,
+        __epoch_incentives: EpochIncentives::default(),
     }
 }
 

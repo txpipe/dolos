@@ -89,7 +89,19 @@ pub struct EpochIncentives {
     pub used_fees: u64,
 }
 
-#[derive(Debug, Clone, Encode, Decode, Serialize, Deserialize)]
+impl EpochIncentives {
+    // TODO: this and default are same, commit to one
+    pub fn neutral() -> Self {
+        Self {
+            total: 0,
+            treasury_tax: 0,
+            available_rewards: 0,
+            used_fees: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Encode, Decode, Serialize, Deserialize, Default)]
 pub struct PotDelta {
     #[n(0)]
     pub produced_utxos: Lovelace,

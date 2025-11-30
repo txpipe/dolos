@@ -134,9 +134,9 @@ pub struct MockContext {
     /// Converted pool params for efficient lookup
     #[serde(skip)]
     pool_params_converted: HashMap<String, PoolParams>,
-    /// Computed pot delta for the rewards calculation
+    /// Computed available rewards for the epoch
     #[serde(skip)]
-    incentives: Option<EpochIncentives>,
+    available_rewards: Option<u64>,
 }
 
 impl MockContext {
@@ -156,13 +156,15 @@ impl MockContext {
 
         context.pool_params_converted = converted;
 
-        context.incentives = Some(crate::pots::epoch_incentives(
+        let incentives = crate::pots::epoch_incentives(
             context.pots.reserves,
             context.epoch_fee_ss,
             pallas_ratio!(context.pparams.ensure_rho()?),
             pallas_ratio!(context.pparams.ensure_tau()?),
             pallas_ratio!(context.epoch_eta),
-        ));
+        );
+
+        context.available_rewards = Some(incentives.available_rewards);
 
         Ok(context)
     }
@@ -196,10 +198,9 @@ impl MockContext {
 }
 
 impl super::RewardsContext for MockContext {
-    fn incentives(&self) -> &EpochIncentives {
-        self.incentives
-            .as_ref()
-            .expect("epoch incentives not computed")
+    fn available_rewards(&self) -> u64 {
+        self.available_rewards
+            .expect("available rewards not computed")
     }
 
     fn pots(&self) -> &Pots {

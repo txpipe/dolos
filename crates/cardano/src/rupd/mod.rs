@@ -8,10 +8,8 @@ use pallas::ledger::primitives::StakeCredential;
 use tracing::{info, instrument};
 
 use crate::{
-    pots::{EpochIncentives, Pots},
-    rewards::RewardMap,
-    AccountState, ChainSummary, EpochValue, PParamsSet, PoolHash, PoolSnapshot, PoolState,
-    StakeLog,
+    pots::Pots, rewards::RewardMap, AccountState, ChainSummary, EpochValue, PParamsSet, PoolHash,
+    PoolSnapshot, PoolState, StakeLog,
 };
 
 pub mod loading;
@@ -100,7 +98,7 @@ pub struct RupdWork {
     pub current_epoch: u64,
     pub snapshot: StakeSnapshot,
     pub pots: Pots,
-    pub incentives: EpochIncentives,
+    pub available_rewards: u64,
     pub max_supply: u64,
     pub chain: ChainSummary,
     pub pparams: Option<PParamsSet>,
