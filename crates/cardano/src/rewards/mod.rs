@@ -6,7 +6,7 @@ use tracing::debug;
 
 use crate::{
     pallas_extras, pallas_ratio,
-    pots::{EpochIncentives, PotDelta, Pots},
+    pots::{EpochIncentives, Pots},
     Lovelace, PParamsSet, PoolHash, PoolParams,
 };
 
@@ -289,19 +289,14 @@ impl<C: RewardsContext> RewardMap<C> {
         &self.incentives
     }
 
-    /// Convert the reward map into a pot delta assuming all rewards have been
-    /// already applied.
-    pub fn as_pot_delta(&self) -> PotDelta {
+    pub fn applied_effective(&self) -> u64 {
         assert!(self.pending.is_empty());
+        self.applied_effective
+    }
 
-        let effective = self.applied_effective;
-        let unspendable = self.applied_unspendable;
-
-        PotDelta {
-            effective_rewards: effective,
-            unspendable_rewards: unspendable,
-            ..Default::default()
-        }
+    pub fn applied_unspendable(&self) -> u64 {
+        assert!(self.pending.is_empty());
+        self.applied_unspendable
     }
 }
 
@@ -453,8 +448,8 @@ mod tests {
 
         reward_map.drain_all();
 
-        let pot_delta = reward_map.as_pot_delta();
+        let unspendable = reward_map.applied_unspendable();
 
-        assert_eq!(pot_delta.unspendable_rewards, 295063003292);
+        assert_eq!(unspendable, 295063003292);
     }
 }
