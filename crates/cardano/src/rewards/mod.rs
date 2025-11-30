@@ -4,11 +4,7 @@ use dolos_core::ChainError;
 use pallas::ledger::primitives::StakeCredential;
 use tracing::debug;
 
-use crate::{
-    pallas_extras, pallas_ratio,
-    pots::{EpochIncentives, Pots},
-    Lovelace, PParamsSet, PoolHash, PoolParams,
-};
+use crate::{pallas_extras, pallas_ratio, pots::Pots, Lovelace, PParamsSet, PoolHash, PoolParams};
 
 mod formulas;
 
