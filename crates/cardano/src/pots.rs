@@ -157,16 +157,41 @@ pub struct PotDelta {
     pub proposal_invalid_refunds: Lovelace,
 
     #[n(17)]
-    pub account_deposit: Lovelace,
+    pub deposit_per_account: Option<Lovelace>,
 
     #[n(18)]
-    pub pool_deposit: Lovelace,
+    pub deposit_per_pool: Option<Lovelace>,
 
     #[n(19)]
     pub protocol_version: u16,
 }
 
 impl PotDelta {
+    pub fn neutral(protocol_version: u16) -> Self {
+        Self {
+            protocol_version,
+            produced_utxos: 0,
+            consumed_utxos: 0,
+            gathered_fees: 0,
+            new_accounts: 0,
+            removed_accounts: 0,
+            pool_deposit_count: 0,
+            pool_refund_count: 0,
+            pool_invalid_refund_count: 0,
+            withdrawals: 0,
+            effective_rewards: 0,
+            unspendable_rewards: 0,
+            drep_deposits: 0,
+            proposal_deposits: 0,
+            drep_refunds: 0,
+            proposal_refunds: 0,
+            treasury_donations: 0,
+            proposal_invalid_refunds: 0,
+            deposit_per_account: None,
+            deposit_per_pool: None,
+        }
+    }
+
     pub fn consumed_incentives(&self) -> Lovelace {
         if self.protocol_version < 7 {
             return self.effective_rewards;
@@ -317,8 +342,13 @@ pub fn apply_shelley_delta(mut pots: Pots, incentives: &EpochIncentives, delta: 
     let returned_rewards = incentives.available_rewards - used_rewards;
 
     // update params
-    pots.deposit_per_pool = delta.pool_deposit;
-    pots.deposit_per_account = delta.account_deposit;
+    if let Some(new) = delta.deposit_per_pool {
+        pots.deposit_per_pool = new;
+    }
+
+    if let Some(new) = delta.deposit_per_account {
+        pots.deposit_per_account = new;
+    }
 
     // reserves pot
     pots.reserves -= incentives.total;
@@ -410,10 +440,9 @@ mod tests {
         assert!(pots.is_consistent(MAX_SUPPLY));
 
         let delta = PotDelta {
-            protocol_version: 0,
             consumed_utxos: 3458053,
             gathered_fees: 5612092,
-            ..Default::default()
+            ..PotDelta::neutral(0)
         };
 
         let incentives = EpochIncentives {
@@ -463,9 +492,9 @@ mod tests {
         let incentives = epoch_incentives(pots.reserves, fee_ss, rho, tau, eta);
 
         let delta = PotDelta {
-            pool_deposit: 500_000_000,
-            account_deposit: 2_000_000,
-            ..Default::default()
+            deposit_per_pool: Some(500_000_000),
+            deposit_per_account: Some(2_000_000),
+            ..PotDelta::neutral(6)
         };
 
         let pots = apply_delta(pots, &incentives, &delta);
@@ -509,10 +538,9 @@ mod tests {
 
         let delta = PotDelta {
             unspendable_rewards: 295063003292,
-            protocol_version: 7,
-            pool_deposit: 500_000_000,
-            account_deposit: 2_000_000,
-            ..Default::default()
+            deposit_per_pool: Some(500_000_000),
+            deposit_per_account: Some(2_000_000),
+            ..PotDelta::neutral(7)
         };
 
         let pots = apply_delta(pots, &incentives, &delta);
