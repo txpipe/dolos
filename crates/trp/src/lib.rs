@@ -15,14 +15,14 @@ mod metrics;
 mod utxos;
 
 pub use error::Error;
-pub use utxos::UtxoLock;
+pub use utxos::UtxoMempool;
 
 #[derive(Clone)]
 pub struct Context<D: Domain> {
     pub domain: D,
     pub config: Arc<TrpConfig>,
     pub metrics: metrics::Metrics,
-    pub locks: Arc<UtxoLock>,
+    pub locks: Arc<UtxoMempool>,
 }
 
 pub struct Driver;
@@ -48,7 +48,7 @@ impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
             domain,
             config: Arc::new(cfg.clone()),
             metrics: metrics::Metrics::new(),
-            locks: Arc::new(UtxoLock::new()),
+            locks: Arc::new(UtxoMempool::new()),
         });
 
         module
