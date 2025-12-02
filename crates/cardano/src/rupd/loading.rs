@@ -67,9 +67,11 @@ fn define_epoch_incentives(
     let rho_param = pparams.ensure_rho()?;
     let tau_param = pparams.ensure_tau()?;
 
+    let mark_is_byron = state.pparams.mark().is_some_and(|x| x.is_byron());
+
     let fee_ss = match state.rolling.mark() {
-        Some(rolling) => rolling.gathered_fees,
-        None => 0,
+        Some(rolling) if !mark_is_byron => rolling.gathered_fees,
+        _ => 0,
     };
 
     let eta = define_eta(genesis, state)?;

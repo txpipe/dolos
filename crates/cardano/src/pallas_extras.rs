@@ -5,6 +5,7 @@ use pallas::crypto::hash::Hash;
 use pallas::ledger::addresses::{
     Address, Network, ShelleyAddress, ShelleyDelegationPart, StakeAddress, StakePayload,
 };
+use pallas::ledger::primitives::alonzo::MoveInstantaneousReward;
 use pallas::ledger::primitives::conway::{
     CostModels, DRep, DRepVotingThresholds, PoolVotingThresholds,
 };
@@ -210,6 +211,16 @@ pub fn cert_as_stake_deregistration(cert: &MultiEraCert) -> Option<StakeCredenti
         MultiEraCert::Conway(cow) => match cow.deref().deref() {
             ConwayCert::StakeDeregistration(credential) => Some(credential.clone()),
             ConwayCert::UnReg(cred, _) => Some(cred.clone()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+pub fn cert_as_mir_certificate(cert: &MultiEraCert) -> Option<MoveInstantaneousReward> {
+    match cert {
+        MultiEraCert::AlonzoCompatible(cow) => match cow.deref().deref() {
+            AlonzoCert::MoveInstantaneousRewardsCert(mir) => Some(mir.clone()),
             _ => None,
         },
         _ => None,
