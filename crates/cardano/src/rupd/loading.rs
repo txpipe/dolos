@@ -131,7 +131,8 @@ impl StakeSnapshot {
         for record in accounts {
             let (_, account) = record?;
 
-            // TODO: check if we really need to make ths check. It might be adding noise to the data.
+            // TODO: check if we really need to make ths check. It might be adding noise to
+            // the data.
             if account.is_registered() {
                 snapshot
                     .registered_accounts
@@ -179,14 +180,14 @@ impl StakeSnapshot {
 impl std::fmt::Display for StakeSnapshot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         for (pool, stake) in self.pool_stake.iter() {
-            writeln!(f, "| {pool} | {stake} |")?;
+            writeln!(f, "{pool},{stake}")?;
         }
 
         for (pool, pool_state) in self.pools.iter() {
             let params = pool_state.go().map(|x| &x.params);
             let pledge = params.map(|x| x.pledge).unwrap_or(0);
             let blocks = pool_state.mark().map(|x| x.blocks_minted).unwrap_or(0) as u64;
-            writeln!(f, "| {pool} | {blocks} | {pledge} |")?;
+            writeln!(f, "{pool},{blocks},{pledge}")?;
         }
 
         Ok(())

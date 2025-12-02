@@ -1,4 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    io::Write,
+};
 
 use dolos_core::{
     ArchiveStore, ArchiveWriter, BlockSlot, ChainError, ChainPoint, Domain, EntityKey, Genesis,
@@ -8,6 +11,7 @@ use pallas::ledger::primitives::StakeCredential;
 use tracing::{info, instrument};
 
 use crate::{
+    pallas_extras,
     pots::{EpochIncentives, Pots},
     rewards::RewardMap,
     AccountState, ChainSummary, EpochValue, PParamsSet, PoolHash, PoolSnapshot, PoolState,
@@ -75,6 +79,25 @@ impl DelegatorMap {
 
     pub fn count_delegators(&self, pool: &PoolHash) -> u64 {
         self.0.get(pool).map(|x| x.len() as u64).unwrap_or(0)
+    }
+}
+
+impl std::fmt::Display for DelegatorMap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (pool, delegators) in self.0.iter() {
+            for (cred, stake) in delegators.iter() {
+                let addr = pallas_extras::stake_credential_to_address(
+                    pallas::ledger::addresses::Network::Mainnet,
+                    cred,
+                )
+                .to_bech32()
+                .unwrap();
+
+                writeln!(f, "{pool},{addr},{stake}")?;
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -178,6 +201,17 @@ pub fn execute<D: Domain>(
     // treat this problem as part of the epoch transition logic. We put it here for
     // the time being for simplicity.
     log_work::<D>(&work, &rewards, archive)?;
+
+    // save rewards to a text file using the Display implementation of RewardMap
+    let mut file = std::fs::File::create(format!("epoch_{}.rewards", work.current_epoch)).unwrap();
+    write!(file, "{}", rewards).unwrap();
+
+    let mut file = std::fs::File::create(format!("epoch_{}.snapshot", work.current_epoch)).unwrap();
+    write!(file, "{}", work.snapshot).unwrap();
+
+    let mut file =
+        std::fs::File::create(format!("epoch_{}.delegators", work.current_epoch)).unwrap();
+    write!(file, "{}", work.snapshot.accounts_by_pool).unwrap();
 
     Ok(rewards)
 }
