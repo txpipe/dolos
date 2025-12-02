@@ -20,24 +20,52 @@ pub struct UtxoMempool {
     generated: RwLock<HashMap<TxoRef, Arc<EraCbor>>>,
 }
 
+#[derive(Default)]
+pub struct SessionContext {
+    pub owned_locks: RwLock<HashSet<TxoRef>>,
+}
+
 pub struct UtxoMempoolSession<'a> {
     mempool: &'a UtxoMempool,
     current_slot: u64,
+    context: Arc<SessionContext>,
 }
 
 impl<'a> UtxoMempoolSession<'a> {
-    pub fn new(mempool: &'a UtxoMempool, current_slot: u64) -> Self {
+    pub fn new(
+        mempool: &'a UtxoMempool,
+        current_slot: u64,
+        context: Arc<SessionContext>,
+    ) -> Self {
         Self {
             mempool,
             current_slot,
+            context,
         }
     }
 }
 
 impl<'a> tx3_resolver::UtxoMempool for UtxoMempoolSession<'a> {
-    fn lock(&self, refs: &[UtxoRef]) {
+    fn lock(&self, refs: &[UtxoRef]) -> bool {
         let refs: Vec<TxoRef> = refs.iter().map(|r| from_tx3_utxoref(r.clone())).collect();
-        self.mempool.lock(&refs, self.current_slot);
+        if self.mempool.lock(&refs, self.current_slot) {
+            let mut owned = self.context.owned_locks.write().unwrap();
+            for r in refs {
+                owned.insert(r);
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    fn unlock(&self, refs: &[UtxoRef]) {
+        let refs: Vec<TxoRef> = refs.iter().map(|r| from_tx3_utxoref(r.clone())).collect();
+        self.mempool.unlock(&refs);
+        let mut owned = self.context.owned_locks.write().unwrap();
+        for r in refs {
+            owned.remove(&r);
+        }
     }
 
     fn register_outputs(&self, tx_bytes: &[u8]) {
@@ -67,15 +95,28 @@ impl UtxoMempool {
         Self::default()
     }
 
-    pub fn lock(&self, refs: &[TxoRef], current_slot: u64) {
+    pub fn lock(&self, refs: &[TxoRef], current_slot: u64) -> bool {
         let mut locks = self.locks.write().unwrap();
-        let mut generated = self.generated.write().unwrap();
 
         locks.retain(|_, expiration| *expiration > current_slot);
 
         for r in refs {
+            if locks.contains_key(r) {
+                return false;
+            }
+        }
+
+        for r in refs {
             locks.insert(r.clone(), current_slot + LOCK_DURATION_SLOTS);
-            generated.remove(r);
+        }
+
+        true
+    }
+
+    pub fn unlock(&self, refs: &[TxoRef]) {
+        let mut locks = self.locks.write().unwrap();
+        for r in refs {
+            locks.remove(r);
         }
     }
 
@@ -141,11 +182,20 @@ impl UtxoMempool {
 pub struct UtxoStoreAdapter<D: Domain> {
     state: D::State,
     mempool: Arc<UtxoMempool>,
+    context: Option<Arc<SessionContext>>,
 }
 
 impl<D: Domain> UtxoStoreAdapter<D> {
-    pub fn new(state: D::State, mempool: Arc<UtxoMempool>) -> Self {
-        Self { state, mempool }
+    pub fn new(
+        state: D::State,
+        mempool: Arc<UtxoMempool>,
+        context: Option<Arc<SessionContext>>,
+    ) -> Self {
+        Self {
+            state,
+            mempool,
+            context,
+        }
     }
 
     fn state(&self) -> &D::State {
@@ -153,6 +203,12 @@ impl<D: Domain> UtxoStoreAdapter<D> {
     }
 
     fn is_locked(&self, txo: &TxoRef) -> bool {
+        if let Some(ctx) = &self.context {
+            if ctx.owned_locks.read().unwrap().contains(txo) {
+                return false;
+            }
+        }
+
         let current_slot = self
             .state()
             .read_cursor()
@@ -268,3 +324,4 @@ impl<D: Domain> UtxoStore for UtxoStoreAdapter<D> {
         Ok(out.into_iter().collect())
     }
 }
+

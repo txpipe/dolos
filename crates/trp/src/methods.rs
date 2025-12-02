@@ -8,7 +8,10 @@ use tx3_sdk::trp::{SubmitParams, SubmitWitness};
 
 use dolos_core::{Domain, MempoolStore as _, StateStore as _};
 
-use crate::{compiler::load_compiler, utxos::{UtxoMempoolSession, UtxoStoreAdapter}};
+use crate::{
+    compiler::load_compiler,
+    utxos::{SessionContext, UtxoMempoolSession, UtxoStoreAdapter},
+};
 
 use super::{Context, Error};
 
@@ -79,7 +82,13 @@ pub async fn trp_resolve<D: Domain>(
 
     let mut compiler = load_compiler::<D>(&context.domain, &context.config)?;
 
-    let utxos = UtxoStoreAdapter::<D>::new(context.domain.state().clone(), context.locks.clone());
+    let session_context = Arc::new(SessionContext::default());
+
+    let utxos = UtxoStoreAdapter::<D>::new(
+        context.domain.state().clone(),
+        context.locks.clone(),
+        Some(session_context.clone()),
+    );
 
     let current_slot = context
         .domain
@@ -88,7 +97,7 @@ pub async fn trp_resolve<D: Domain>(
         .map(|c| c.slot())
         .unwrap_or(0);
 
-    let mempool = UtxoMempoolSession::new(&context.locks, current_slot);
+    let mempool = UtxoMempoolSession::new(&context.locks, current_slot, session_context);
 
     let resolved = tx3_resolver::resolve_tx(
         tx,
