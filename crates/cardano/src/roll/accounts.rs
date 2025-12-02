@@ -2,6 +2,7 @@ use dolos_core::batch::WorkDeltas;
 use dolos_core::{BlockSlot, ChainError, Genesis, NsKey};
 use pallas::codec::minicbor;
 use pallas::crypto::hash::Hash;
+use pallas::ledger::primitives::alonzo::{InstantaneousRewardTarget, MoveInstantaneousReward};
 use pallas::ledger::primitives::conway::DRep;
 use pallas::ledger::primitives::Epoch;
 use pallas::ledger::{
@@ -413,6 +414,39 @@ impl dolos_core::EntityDelta for DRepRegistration {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssignMirRewards {
+    epoch: Epoch,
+    account: StakeCredential,
+    reward: u64,
+}
+
+impl dolos_core::EntityDelta for AssignMirRewards {
+    type Entity = AccountState;
+
+    fn key(&self) -> NsKey {
+        let enc = minicbor::to_vec(&self.account).unwrap();
+        NsKey::from((AccountState::NS, enc))
+    }
+
+    fn apply(&mut self, entity: &mut Option<Self::Entity>) {
+        //let entity = entity.get_or_insert_with(|| AccountState::new(self.epoch, self.account.clone()));
+        let Some(entity) = entity.as_mut() else {
+            // we don't credit MIRs to unregistered accounts
+            return;
+        };
+
+        debug!(reward = self.reward, "assigning mir rewards");
+
+        let stake = entity.stake.unwrap_live_mut();
+        stake.rewards_sum += self.reward;
+    }
+
+    fn undo(&self, _entity: &mut Option<Self::Entity>) {
+        // TODO: implement undo
+    }
+}
+
 #[derive(Default, Clone)]
 pub struct AccountVisitor {
     deposit: Option<u64>,
@@ -520,6 +554,20 @@ impl BlockVisitor for AccountVisitor {
                 block.slot(),
                 epoch,
             ));
+        }
+
+        if let Some(cert) = pallas_extras::cert_as_mir_certificate(cert) {
+            let MoveInstantaneousReward { target, .. } = cert;
+
+            if let InstantaneousRewardTarget::StakeCredentials(creds) = target {
+                for (cred, amount) in creds {
+                    deltas.add_for_entity(AssignMirRewards {
+                        epoch: self.epoch.expect("value set in root"),
+                        account: cred,
+                        reward: amount.max(0) as u64,
+                    });
+                }
+            }
         }
 
         Ok(())

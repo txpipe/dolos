@@ -157,6 +157,7 @@ pub fn define_new_pots(ctx: &super::WorkContext) -> Pots {
         proposal_deposits: rolling.proposal_deposits,
         drep_refunds: rolling.drep_refunds,
         treasury_donations: rolling.treasury_donations,
+        reserve_mirs: rolling.reserve_mirs,
         proposal_refunds: end.proposal_refunds,
         proposal_invalid_refunds: end.proposal_invalid_refunds,
         effective_rewards: end.effective_rewards,
@@ -164,11 +165,7 @@ pub fn define_new_pots(ctx: &super::WorkContext) -> Pots {
         pool_deposit_count: end.pool_deposit_count,
         pool_refund_count: end.pool_refund_count,
         pool_invalid_refund_count: end.pool_invalid_refund_count,
-        protocol_version: epoch
-            .pparams
-            .mark()
-            .map(|x| x.protocol_major_or_default())
-            .unwrap_or(0),
+        protocol_version: epoch.pparams.unwrap_live().protocol_major_or_default(),
     };
 
     let pots = apply_delta(epoch.initial_pots.clone(), &end.epoch_incentives, &delta);

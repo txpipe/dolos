@@ -4,7 +4,12 @@ use dolos_core::{batch::WorkDeltas, BrokenInvariant, ChainError, Genesis, NsKey,
 use pallas::{
     crypto::hash::Hash,
     ledger::{
-        primitives::Epoch,
+        primitives::{
+            alonzo::{
+                InstantaneousRewardSource, InstantaneousRewardTarget, MoveInstantaneousReward,
+            },
+            Epoch,
+        },
         traverse::{fees::compute_byron_fee, Era, MultiEraBlock, MultiEraCert, MultiEraTx},
     },
 };
@@ -34,6 +39,7 @@ pub struct EpochStatsUpdate {
     proposal_deposits: Lovelace,
     drep_refunds: Lovelace,
     treasury_donations: Lovelace,
+    reserve_mirs: Lovelace,
 }
 
 impl dolos_core::EntityDelta for EpochStatsUpdate {
@@ -64,6 +70,7 @@ impl dolos_core::EntityDelta for EpochStatsUpdate {
         stats.drep_deposits += self.drep_deposits;
         stats.drep_refunds += self.drep_refunds;
         stats.treasury_donations += self.treasury_donations;
+        stats.reserve_mirs += self.reserve_mirs;
 
         stats.registered_pools = stats
             .registered_pools
@@ -72,33 +79,8 @@ impl dolos_core::EntityDelta for EpochStatsUpdate {
             .collect();
     }
 
-    fn undo(&self, entity: &mut Option<EpochState>) {
-        let Some(entity) = entity else { return };
-
-        let stats = entity
-            .rolling
-            .live_mut_unchecked()
-            .as_mut()
-            .expect("data to undo");
-
-        stats.blocks_minted -= 1;
-
-        if self.utxo_delta > 0 {
-            stats.produced_utxos -= self.utxo_delta.unsigned_abs();
-        } else {
-            stats.consumed_utxos -= self.utxo_delta.unsigned_abs();
-        }
-
-        stats.gathered_fees -= self.block_fees;
-        stats.new_accounts -= self.new_accounts;
-        stats.removed_accounts -= self.removed_accounts;
-        stats.withdrawals -= self.withdrawals;
-
-        stats.registered_pools = stats
-            .registered_pools
-            .difference(&self.registered_pools)
-            .cloned()
-            .collect();
+    fn undo(&self, _entity: &mut Option<EpochState>) {
+        // TODO: implement undo
     }
 }
 
@@ -294,6 +276,21 @@ impl BlockVisitor for EpochStateVisitor {
         if let Some(cert) = pallas_extras::cert_as_drep_unregistration(cert) {
             tracing::debug!(cert=?cert.cred, "drep un-registration");
             self.stats_delta.as_mut().unwrap().drep_refunds += cert.deposit;
+        }
+
+        if let Some(cert) = pallas_extras::cert_as_mir_certificate(cert) {
+            let MoveInstantaneousReward { source, target, .. } = cert;
+
+            if source == InstantaneousRewardSource::Reserves {
+                if let InstantaneousRewardTarget::StakeCredentials(creds) = target {
+                    for (_, amount) in creds {
+                        let amount = amount.max(0) as u64;
+                        self.stats_delta.as_mut().unwrap().reserve_mirs += amount;
+                    }
+                }
+            }
+
+            // TODO: track rewards from treasury (unless there's none in mainnet)
         }
 
         Ok(())
