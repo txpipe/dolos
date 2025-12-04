@@ -5,9 +5,9 @@ use pallas::ledger::primitives::StakeCredential;
 use tracing::debug;
 
 use crate::{
-    pallas_extras, pallas_ratio,
+    add, pallas_extras, pallas_ratio,
     pots::{EpochIncentives, Pots},
-    Lovelace, PParamsSet, PoolHash, PoolParams,
+    sub, Lovelace, PParamsSet, PoolHash, PoolParams,
 };
 
 mod formulas;
@@ -261,8 +261,8 @@ impl<C: RewardsContext> RewardMap<C> {
     }
 
     pub fn return_reward(&mut self, amount: Lovelace) {
-        self.applied_effective -= amount;
-        self.applied_unspendable += amount;
+        self.applied_effective = sub!(self.applied_effective, amount);
+        self.applied_unspendable = add!(self.applied_unspendable, amount);
     }
 
     pub fn drain_unspendable(&mut self) {

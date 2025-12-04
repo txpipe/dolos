@@ -3,7 +3,7 @@ use pallas::codec::minicbor::{Decode, Encode};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{floor_int, ratio, Lovelace};
+use crate::{floor_int, ratio, sub, Lovelace};
 
 pub type Ratio = num_rational::BigRational;
 pub type PallasRatio = pallas::ledger::primitives::RationalNumber;
@@ -332,7 +332,7 @@ pub fn apply_byron_delta(mut pots: Pots, _: &EpochIncentives, delta: &PotDelta) 
 pub fn apply_shelley_delta(mut pots: Pots, incentives: &EpochIncentives, delta: &PotDelta) -> Pots {
     let used_rewards = delta.consumed_incentives();
 
-    let returned_rewards = incentives.available_rewards - used_rewards;
+    let returned_rewards = sub!(incentives.available_rewards, used_rewards);
 
     // update params
     if let Some(new) = delta.deposit_per_pool {
