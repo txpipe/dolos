@@ -21,6 +21,7 @@ use pallas::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    add,
     estart::{
         nonces::NonceTransition,
         reset::{AccountTransition, EpochTransition, PoolTransition},
@@ -48,6 +49,7 @@ use crate::{
         pools::{MintedBlocksInc, PoolDeRegistration, PoolRegistration},
         proposals::NewProposal,
     },
+    sub,
 };
 
 #[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize, PartialEq, Eq, Copy)]
@@ -449,17 +451,17 @@ pub struct Stake {
 impl Stake {
     pub fn total(&self) -> u64 {
         let mut out = self.utxo_sum;
-        out += self.rewards_sum;
-        out -= self.withdrawals_sum;
+        out = add!(out, self.rewards_sum);
+        out = sub!(out, self.withdrawals_sum);
 
         out
     }
 
     pub fn total_pre_conway(&self) -> u64 {
         let mut out = self.utxo_sum;
-        out += self.utxo_sum_at_pointer_addresses;
-        out += self.rewards_sum;
-        out -= self.withdrawals_sum;
+        out = add!(out, self.utxo_sum_at_pointer_addresses);
+        out = add!(out, self.rewards_sum);
+        out = sub!(out, self.withdrawals_sum);
 
         out
     }
@@ -472,10 +474,7 @@ impl Stake {
     }
 
     pub fn withdrawable(&self) -> u64 {
-        let mut out = self.rewards_sum;
-        out -= self.withdrawals_sum;
-
-        out
+        sub!(self.rewards_sum, self.withdrawals_sum)
     }
 }
 

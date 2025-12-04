@@ -93,6 +93,7 @@ name = "smoke"
 path = "tests/external/smoke.rs"
 
 [features]
+relaxed = ["dolos-cardano/relaxed"]
 mithril = ["mithril-client"]
 utils = ["comfy-table", "inquire", "toml"]
 debug = ["console-subscriber", "tokio/tracing"]
