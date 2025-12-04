@@ -32,11 +32,7 @@ pub struct UtxoMempoolSession<'a> {
 }
 
 impl<'a> UtxoMempoolSession<'a> {
-    pub fn new(
-        mempool: &'a UtxoMempool,
-        current_slot: u64,
-        context: Arc<SessionContext>,
-    ) -> Self {
+    pub fn new(mempool: &'a UtxoMempool, current_slot: u64, context: Arc<SessionContext>) -> Self {
         Self {
             mempool,
             current_slot,
@@ -162,10 +158,12 @@ impl UtxoMempool {
                                 .assets()
                                 .iter()
                                 .any(|pa| pa.policy().as_slice() == *policy),
-                            UtxoPattern::ByAsset(policy, name) => output.value().assets().iter().any(|pa| {
-                                pa.policy().as_slice() == *policy
-                                    && pa.assets().iter().any(|a| a.name() == *name)
-                            }),
+                            UtxoPattern::ByAsset(policy, name) => {
+                                output.value().assets().iter().any(|pa| {
+                                    pa.policy().as_slice() == *policy
+                                        && pa.assets().iter().any(|a| a.name() == *name)
+                                })
+                            }
                         }
                     } else {
                         false
@@ -295,7 +293,7 @@ impl<D: Domain> UtxoStore for UtxoStoreAdapter<D> {
 
         for r in refs {
             if let Some(u) = self.mempool.get_generated(&r) {
-                let parsed = into_tx3_utxo(r, u)
+                let parsed = into_tx3_utxo(r, &u)
                     .map_err(|e| tx3_lang::backend::Error::StoreError(e.to_string()))?;
                 out.push(parsed);
             } else {
@@ -307,7 +305,7 @@ impl<D: Domain> UtxoStore for UtxoStoreAdapter<D> {
 
         let utxos = utxos
             .into_iter()
-            .map(|(txoref, utxo)| into_tx3_utxo(txoref, utxo))
+            .map(|(txoref, utxo)| into_tx3_utxo(txoref, &utxo))
             .collect::<Result<Vec<_>, _>>()?;
 
         out.extend(utxos);
@@ -315,4 +313,3 @@ impl<D: Domain> UtxoStore for UtxoStoreAdapter<D> {
         Ok(out.into_iter().collect())
     }
 }
-

@@ -5063,7 +5063,7 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 [[package]]
 name = "tx3-cardano"
 version = "0.11.5"
-source = "git+https://github.com/tx3-lang/tx3.git?branch=bookio#d8a3a7a67da58316b166070c18c7f1b9ef00bd37"
+source = "git+https://github.com/tx3-lang/tx3.git?branch=bookio#8176833820464c0789d679aa4df09c039973475a"
 dependencies = [
  "hex",
  "pallas 1.0.0-alpha.2 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -5077,7 +5077,7 @@ dependencies = [
 [[package]]
 name = "tx3-lang"
 version = "0.11.5"
-source = "git+https://github.com/tx3-lang/tx3.git?branch=bookio#d8a3a7a67da58316b166070c18c7f1b9ef00bd37"
+source = "git+https://github.com/tx3-lang/tx3.git?branch=bookio#8176833820464c0789d679aa4df09c039973475a"
 dependencies = [
  "bincode 2.0.1",
  "hex",
@@ -5092,7 +5092,7 @@ dependencies = [
 [[package]]
 name = "tx3-resolver"
 version = "0.11.5"
-source = "git+https://github.com/tx3-lang/tx3.git?branch=bookio#d8a3a7a67da58316b166070c18c7f1b9ef00bd37"
+source = "git+https://github.com/tx3-lang/tx3.git?branch=bookio#8176833820464c0789d679aa4df09c039973475a"
 dependencies = [
  "hex",
  "thiserror 2.0.12",

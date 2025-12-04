@@ -107,12 +107,12 @@ pub fn into_tx3_utxoref(txoref: TxoRef) -> tx3_lang::UtxoRef {
     }
 }
 
-pub fn into_tx3_utxo(txoref: TxoRef, utxo: EraCbor) -> Result<tx3_lang::Utxo, Error> {
+pub fn into_tx3_utxo(txoref: TxoRef, utxo: &EraCbor) -> Result<tx3_lang::Utxo, Error> {
     let r#ref = into_tx3_utxoref(txoref);
 
     let EraCbor(era, cbor) = utxo;
 
-    let era = Era::try_from(era)?;
+    let era = Era::try_from(*era)?;
 
     let parsed = MultiEraOutput::decode(era, &cbor)?;
 
