@@ -109,7 +109,7 @@ minibf = [
 trp = ["dolos-trp"]
 
 # Default features - includes all services
-default = ["mithril", "utils", "grpc", "minibf", "trp"]
+default = ["mithril", "utils", "grpc", "minibf", "trp", "relaxed"]
 
 # The profile that 'cargo dist' will build with
 [profile.dist]
