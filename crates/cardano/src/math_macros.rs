@@ -31,3 +31,31 @@ macro_rules! pallas_ratio {
         $crate::ratio!($x.numerator, $x.denominator)
     }};
 }
+
+#[macro_export]
+macro_rules! add {
+    ($a:expr, $b:expr) => {{
+        #[cfg(feature = "relaxed")]
+        {
+            $a.saturating_add($b)
+        }
+        #[cfg(not(feature = "relaxed"))]
+        {
+            $a.checked_add($b).expect("overflow in strict mode")
+        }
+    }};
+}
+
+#[macro_export]
+macro_rules! sub {
+    ($a:expr, $b:expr) => {{
+        #[cfg(feature = "relaxed")]
+        {
+            $a.saturating_sub($b)
+        }
+        #[cfg(not(feature = "relaxed"))]
+        {
+            $a.checked_sub($b).expect("overflow in strict mode")
+        }
+    }};
+}

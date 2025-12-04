@@ -1,6 +1,8 @@
 use std::cmp::min;
 
-use crate::{floor_int, ratio};
+use pallas::interop::utxorpc::spec::cardano::big_int;
+
+use crate::{floor_int, ibig, ratio, sub};
 
 pub type Ratio = num_rational::BigRational;
 
@@ -49,17 +51,27 @@ pub fn delegator_reward(
     margin_cost: Ratio,
 ) -> u64 {
     if pool_rewards <= fixed_cost {
-        0
-    } else {
-        let member_relative_stake = ratio!(member_stake, total_stake);
-
-        // ⌊ (1 - m) × (R_pool - c) × t / σ ⌋
-        let out =
-            (ratio!(1) - &margin_cost) * ratio!(pool_rewards - fixed_cost) * member_relative_stake
-                / ratio!(pool_stake, total_stake);
-
-        floor_int!(out, u64)
+        return 0;
     }
+
+    let member_relative_stake = ratio!(member_stake, total_stake);
+
+    // ⌊ (1 - m) × (R_pool - c) × t / σ ⌋
+    let after_cost = sub!(pool_rewards, fixed_cost);
+    let out = (ratio!(1) - &margin_cost) * ratio!(after_cost) * member_relative_stake
+        / ratio!(pool_stake, total_stake);
+
+    if out > ratio!(10000000000000000_u64) {
+        dbg!(
+            pool_rewards,
+            fixed_cost,
+            member_stake,
+            total_stake,
+            pool_stake
+        );
+    }
+
+    floor_int!(out, u64)
 }
 
 /// Calculates a pool apparent performance
@@ -159,7 +171,7 @@ pub fn pool_operator_share(
         return pool_rewards; // operator takes it all if rewards ≤ fixed cost
     }
 
-    let after_cost = pool_rewards - c;
+    let after_cost = sub!(pool_rewards, c);
 
     let s = ratio!(live_pledge, circulating_supply);
     let theta = ratio!(pool_stake, circulating_supply);
