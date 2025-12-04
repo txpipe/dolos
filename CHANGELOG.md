@@ -2,6 +2,41 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.0-rc.3] - 2025-12-04
+
+### 🚀 Features
+
+- *(cardano)* Introduce custom utxos via config (#796)
+- *(trp)* Implement utxo temp locking mechanism (#800)
+- Introduce relaxed arithmetic option (#809)
+- *(minibf)* Introduce metrics endpoint (#810)
+
+### 🐛 Bug Fixes
+
+- *(minibf)* Fetch pool metadata in parallel (#790)
+- Enable relaxed mode for Pallas (#792)
+- Honor until-tip sync option (#545)
+- *(cardano)* Burn fees for Byron epoch pots (#804)
+- *(cardano)* Track MIRs as part of epoch rewards (#806)
+
+### 🚜 Refactor
+
+- Adjust Mithril features to simplify build process (#795)
+- Unify all configs into single core location (#799)
+- Turn on relaxed mode by default
+
+### 📚 Documentation
+
+- Update chain config schema reference (#794)
+
+### ⚙️ Miscellaneous Tasks
+
+- *(cardano)* Update missing hack for preview network (#791)
+- Update Pallas to v1.0.0-alpha.3
+- Remove legacy test-vectors crate (#797)
+- Unify both redb crates (#798)
+- *(minibf)* Update blockfrost-openapi to v0.1.83 (#801)
+
 ## [1.0.0-rc.2] - 2025-11-13
 
 ### 🚀 Features
@@ -21,6 +56,10 @@ All notable changes to this project will be documented in this file.
 - Fix broken tests (#781)
 - *(trp)* Update tx3 deps to v0.12 (#785)
 - *(cardano)* Reduce excessive log levels (#787)
+
+### Release
+
+- V1.0.0-rc.2
 
 ## [1.0.0-rc.1] - 2025-11-06
 
