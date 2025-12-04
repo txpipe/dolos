@@ -1,8 +1,6 @@
 use std::cmp::min;
 
-use pallas::interop::utxorpc::spec::cardano::big_int;
-
-use crate::{floor_int, ibig, ratio, sub};
+use crate::{floor_int, ratio, sub};
 
 pub type Ratio = num_rational::BigRational;
 
