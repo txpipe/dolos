@@ -216,6 +216,7 @@ fn into_u5c_utxo<S: Domain + LedgerContext>(
         }),
         native_bytes: body.1.clone().into(),
         parsed_state: Some(u5c::query::any_utxo_data::ParsedState::Cardano(parsed)),
+        block_ref: None,
     })
 }
 
