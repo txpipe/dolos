@@ -5,6 +5,7 @@ on:
       - "main"
       - "demeter"
       - "lts/v0"
+      - "adhoc/*"
     tags:
       - "v*"
 
