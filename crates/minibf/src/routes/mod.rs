@@ -9,9 +9,11 @@ pub mod health;
 pub mod metadata;
 pub mod network;
 pub mod pools;
+pub mod scripts;
 pub mod tx;
 pub mod txs;
 pub mod utxos;
+pub mod metrics;
 
 use std::env;
 
@@ -19,7 +21,7 @@ use axum::{extract::State, http::StatusCode, Json};
 use dolos_core::Domain;
 use serde::{Deserialize, Serialize};
 
-use crate::{Config, Facade};
+use crate::{Facade, MinibfConfig};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RootResponse {
@@ -29,8 +31,8 @@ pub struct RootResponse {
     revision: Option<String>,
 }
 
-impl From<&Config> for RootResponse {
-    fn from(value: &Config) -> Self {
+impl From<&MinibfConfig> for RootResponse {
+    fn from(value: &MinibfConfig) -> Self {
         Self {
             url: value
                 .url

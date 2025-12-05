@@ -120,33 +120,30 @@ impl IntoModel<Vec<TxMetadataLabelCborInner>> for MetadataHistoryModelBuilder {
     }
 }
 
-const MAX_SCAN_DEPTH: usize = 1_500_000;
-
 async fn by_label<D: Domain>(
     label: &str,
     pagination: PaginationParameters,
     domain: &Facade<D>,
-    max_scan_depth: usize,
 ) -> Result<MetadataHistoryModelBuilder, Error> {
     let label: u64 = label.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
     let pagination = Pagination::try_from(pagination)?;
 
-    let mut reverse_blocks = domain
+    let mut blocks = domain
         .archive()
-        .get_range(None, None)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        //.rev()
-        .take(max_scan_depth);
+        .iter_blocks_with_metadata(&label)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let mut builder =
         MetadataHistoryModelBuilder::new(label, pagination.count, pagination.page as usize);
 
     while builder.needs_more() {
-        let Some((_, cbor)) = reverse_blocks.next() else {
-            return Err(Error::Code(StatusCode::NOT_FOUND));
+        let Some(next) = blocks.next() else {
+            break;
         };
-
-        builder.scan_block(&cbor)?;
+        let (_, maybe) = next.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        if let Some(cbor) = maybe {
+            builder.scan_block(&cbor)?;
+        }
     }
 
     Ok(builder)
@@ -157,16 +154,7 @@ pub async fn by_label_json<D: Domain>(
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<TxMetadataLabelJsonInner>>, Error> {
-    let builder = by_label(
-        &label,
-        params,
-        &domain,
-        domain
-            .config
-            .metadata_max_scan_depth
-            .unwrap_or(MAX_SCAN_DEPTH),
-    )
-    .await?;
+    let builder = by_label(&label, params, &domain).await?;
 
     Ok(builder.into_model().map(Json)?)
 }
@@ -176,16 +164,7 @@ pub async fn by_label_cbor<D: Domain>(
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<TxMetadataLabelCborInner>>, Error> {
-    let builder = by_label(
-        &label,
-        params,
-        &domain,
-        domain
-            .config
-            .metadata_max_scan_depth
-            .unwrap_or(MAX_SCAN_DEPTH),
-    )
-    .await?;
+    let builder = by_label(&label, params, &domain).await?;
 
     Ok(builder.into_model().map(Json)?)
 }

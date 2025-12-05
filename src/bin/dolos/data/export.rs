@@ -1,4 +1,5 @@
 use clap::Parser;
+use dolos_core::config::RootConfig;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use miette::IntoDiagnostic as _;
@@ -51,7 +52,7 @@ fn prepare_chain(
 }
 
 pub fn run(
-    config: &crate::Config,
+    config: &RootConfig,
     args: &Args,
     feedback: &crate::feedback::Feedback,
 ) -> miette::Result<()> {

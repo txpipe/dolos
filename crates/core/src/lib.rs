@@ -10,13 +10,17 @@
 
 use pallas::{
     crypto::hash::{Hash, Hasher},
-    ledger::traverse::{MultiEraInput, MultiEraOutput, MultiEraTx, MultiEraUpdate},
+    ledger::{
+        primitives::Epoch,
+        traverse::{MultiEraInput, MultiEraOutput, MultiEraTx, MultiEraUpdate},
+    },
 };
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     fmt::Display,
     path::Path,
+    str::FromStr,
     sync::Arc,
 };
 use thiserror::Error;
@@ -24,6 +28,7 @@ use tracing::info;
 
 pub mod archive;
 pub mod batch;
+pub mod config;
 pub mod crawl;
 pub mod facade;
 pub mod mempool;
@@ -65,7 +70,7 @@ pub use point::*;
 pub use state::*;
 pub use wal::*;
 
-use crate::batch::{WorkBatch, WorkBlock};
+use crate::batch::WorkBatch;
 
 #[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
 pub struct EraCbor(pub Era, pub Cbor);
@@ -147,6 +152,26 @@ impl From<TxoRef> for (TxHash, TxoIdx) {
 impl Display for TxoRef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}#{}", self.0, self.1)
+    }
+}
+
+impl FromStr for TxoRef {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let parts = s.split('#').collect::<Vec<_>>();
+
+        if parts.len() != 2 {
+            return Err(format!("invalid txo ref: {}", s));
+        }
+
+        let tx_hash = TxHash::from_str(parts[0]).map_err(|_| format!("invalid txo ref: {}", s))?;
+
+        let txo_idx = parts[1]
+            .parse()
+            .map_err(|_| format!("invalid txo ref: {}", s))?;
+
+        Ok(Self(tx_hash, txo_idx))
     }
 }
 
@@ -242,145 +267,6 @@ impl WalError {
     }
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum UpstreamConfig {
-    Peer(PeerConfig),
-    Emulator(EmulatorConfig),
-}
-
-impl UpstreamConfig {
-    pub fn network_magic(&self) -> Option<u64> {
-        match self {
-            Self::Peer(peer) => Some(peer.network_magic),
-            Self::Emulator(_) => None,
-        }
-    }
-
-    pub fn peer_address(&self) -> Option<&str> {
-        match self {
-            Self::Peer(peer) => Some(&peer.peer_address),
-            Self::Emulator(_) => None,
-        }
-    }
-
-    pub fn is_emulator(&self) -> bool {
-        matches!(self, Self::Emulator(_))
-    }
-
-    pub fn as_peer_mut(&mut self) -> Option<&mut PeerConfig> {
-        match self {
-            Self::Peer(peer) => Some(peer),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct EmulatorConfig {
-    pub block_production_interval: u64,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct PeerConfig {
-    pub peer_address: String,
-    pub network_magic: u64,
-
-    #[serde(default)]
-    pub is_testnet: bool,
-}
-
-#[derive(Serialize, Deserialize, Default)]
-pub struct SubmitConfig {
-    pub prune_height: Option<u64>,
-}
-
-#[derive(Serialize, Default, PartialEq, Clone, Debug)]
-#[serde(rename_all = "lowercase")]
-pub enum StorageVersion {
-    #[default]
-    V0,
-    V1,
-}
-
-impl<'de> Deserialize<'de> for StorageVersion {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let repr: Option<String> = Deserialize::deserialize(deserializer)?;
-        match repr {
-            Some(version) => match version.as_str() {
-                "v0" => Ok(StorageVersion::V0),
-                "v1" => Ok(StorageVersion::V1),
-                _ => Err(<D::Error as serde::de::Error>::custom("Invalid version")),
-            },
-            None => Ok(StorageVersion::V0),
-        }
-    }
-}
-
-impl Display for StorageVersion {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}",
-            match self {
-                Self::V0 => "v0",
-                Self::V1 => "v1",
-            }
-        )
-    }
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct StorageConfig {
-    pub version: StorageVersion,
-
-    /// Directory where to find storage. If undefined, ephemeral storage will be
-    /// used.
-    pub path: Option<std::path::PathBuf>,
-
-    /// Size (in Mb) of memory allocated for WAL caching
-    pub wal_cache: Option<usize>,
-
-    /// Size (in Mb) of memory allocated for ledger caching
-    pub ledger_cache: Option<usize>,
-
-    /// Size (in Mb) of memory allocated for chain caching
-    pub chain_cache: Option<usize>,
-
-    /// Maximum number of slots (not blocks) to keep in the WAL
-    pub max_wal_history: Option<u64>,
-
-    /// Maximum number of slots to keep in the ledger before pruning
-    pub max_ledger_history: Option<u64>,
-
-    /// Maximum number of slots (not blocks) to keep in Chain
-    pub max_chain_history: Option<u64>,
-}
-
-impl StorageConfig {
-    pub fn is_ephemeral(&self) -> bool {
-        self.path.is_none()
-    }
-}
-
-impl Default for StorageConfig {
-    fn default() -> Self {
-        Self {
-            version: Default::default(),
-            path: Some(std::path::PathBuf::from("data")),
-            wal_cache: None,
-            ledger_cache: None,
-            chain_cache: None,
-            max_wal_history: None,
-            max_ledger_history: None,
-            max_chain_history: None,
-        }
-    }
-}
-
 #[derive(Debug, Error)]
 pub enum ServeError {
     #[error("failed to bind listener")]
@@ -404,6 +290,10 @@ pub struct Genesis {
 }
 
 impl Genesis {
+    pub fn network_magic(&self) -> u32 {
+        self.shelley.network_magic.unwrap_or_default()
+    }
+
     pub fn from_file_paths(
         byron: impl AsRef<Path>,
         shelley: impl AsRef<Path>,
@@ -500,6 +390,9 @@ pub trait Block: Sized + Send + Sync {
 
 #[derive(Debug, Error)]
 pub enum ChainError {
+    #[error("can't receive block until previous work is completed")]
+    CantReceiveBlock(RawBlock),
+
     #[error(transparent)]
     BrokenInvariant(#[from] BrokenInvariant),
 
@@ -521,6 +414,9 @@ pub enum ChainError {
     #[error(transparent)]
     ArchiveError(#[from] ArchiveError),
 
+    #[error("genesis field missing: {0}")]
+    GenesisFieldMissing(String),
+
     #[error("protocol params not found: {0}")]
     PParamsNotFound(String),
 
@@ -530,21 +426,35 @@ pub enum ChainError {
     #[error("era not found")]
     EraNotFound,
 
-    #[error("forced stop epoch reached")]
-    StopEpochReached,
+    #[error("epoch value version not found for epoch {0}")]
+    EpochValueVersionNotFound(Epoch),
+
+    #[error("missing rewards")]
+    MissingRewards,
+
+    #[error("invalid pool params")]
+    InvalidPoolParams,
+
+    #[error("invalid proposal params")]
+    InvalidProposalParams,
 }
 
 pub enum WorkKind {
     Genesis,
-    Block,
-    Sweep,
+    Blocks,
+    EWrap,
+    EStart,
+    Rupd,
 }
 
 #[allow(clippy::large_enum_variant)]
 pub enum WorkUnit<C: ChainLogic> {
     Genesis,
-    Block(WorkBlock<C>),
-    Sweep(BlockSlot),
+    Blocks(WorkBatch<C>),
+    EWrap(BlockSlot),
+    EStart(BlockSlot),
+    Rupd(BlockSlot),
+    ForcedStop,
 }
 
 pub trait ChainLogic: Sized + Send + Sync {
@@ -554,43 +464,67 @@ pub trait ChainLogic: Sized + Send + Sync {
     type Utxo: Sized + Send + Sync;
     type Delta: EntityDelta<Entity = Self::Entity>;
 
-    fn initialize<D: Domain>(config: Self::Config, state: &D::State) -> Result<Self, ChainError>;
+    fn initialize<D: Domain>(
+        config: Self::Config,
+        state: &D::State,
+        genesis: &Genesis,
+    ) -> Result<Self, ChainError>;
 
-    // TODO: there's a risk for potential race conditions between peek_work and
-    // pop_work. It has low probability since we use these methods in the same
-    // thread and with extra care. Regardless, we should revisit the `WorkBuffer`
-    // approach so that we have an overarching lock of the the work state.
+    // TODO: having the chain logic be mutable is a code smell. It was initially designed
+    // to be a static, central point for chain-specific logic. Making it hold shared state is ugly.
     //
     // One way to fix this is to move the WorkBuffer concept to the core crate and
     // let the domain "own" the data and let the chain borrow it for mutations.
-    fn peek_work(&self) -> Option<WorkKind>;
-    fn pop_work(&self) -> Option<WorkUnit<Self>>;
-
-    fn receive_block(&self, raw: RawBlock) -> Result<(), ChainError>;
+    fn can_receive_block(&self) -> bool;
+    fn receive_block(&mut self, raw: RawBlock) -> Result<BlockSlot, ChainError>;
+    fn pop_work(&mut self) -> Option<WorkUnit<Self>>;
 
     // TODO: we should invert responsibility here. The chain logic should tell the
     // domain what to do instead of passing everything down and expecting it to do
     // the right thing.
     fn apply_genesis<D: Domain>(
-        &self,
+        &mut self,
         state: &D::State,
-        genesis: &Genesis,
+        genesis: Arc<Genesis>,
     ) -> Result<(), ChainError>;
 
     // TODO: we should invert responsibility here. The chain logic should tell the
     // domain what to do instead of passing everything down and expecting it to do
     // the right thing.
-    fn apply_sweep<D: Domain>(
-        &self,
+    fn apply_ewrap<D: Domain>(
+        &mut self,
         state: &D::State,
         archive: &D::Archive,
-        genesis: &Genesis,
+        genesis: Arc<Genesis>,
+        at: BlockSlot,
+    ) -> Result<(), ChainError>;
+
+    // TODO: we should invert responsibility here. The chain logic should tell the
+    // domain what to do instead of passing everything down and expecting it to do
+    // the right thing.
+    fn apply_estart<D: Domain>(
+        &mut self,
+        state: &D::State,
+        archive: &D::Archive,
+        genesis: Arc<Genesis>,
+        at: BlockSlot,
+    ) -> Result<(), ChainError>;
+
+    // TODO: we should invert responsibility here. The chain logic should tell the
+    // domain what to do instead of passing everything down and expecting it to do
+    // the right thing.
+    fn apply_rupd<D: Domain>(
+        &mut self,
+        state: &D::State,
+        archive: &D::Archive,
+        genesis: Arc<Genesis>,
         at: BlockSlot,
     ) -> Result<(), ChainError>;
 
     fn compute_delta<D: Domain>(
         &self,
         state: &D::State,
+        genesis: Arc<Genesis>,
         batch: &mut WorkBatch<Self>,
     ) -> Result<(), ChainError>;
 
@@ -631,6 +565,9 @@ pub enum DomainError {
 
     #[error("wal is behind state: {0}")]
     WalIsBehindState(BlockSlot, BlockSlot),
+
+    #[error("forced stop epoch reached")]
+    StopEpochReached,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -645,6 +582,7 @@ pub trait TipSubscription: Send + Sync + 'static {
     async fn next_tip(&mut self) -> TipEvent;
 }
 
+#[trait_variant::make(Send)]
 pub trait Domain: Send + Sync + Clone + 'static {
     type Entity: Entity;
     type EntityDelta: EntityDelta<Entity = Self::Entity> + std::fmt::Debug;
@@ -657,10 +595,11 @@ pub trait Domain: Send + Sync + Clone + 'static {
     type Mempool: MempoolStore;
     type TipSubscription: TipSubscription;
 
-    fn storage_config(&self) -> &StorageConfig;
-    fn genesis(&self) -> &Genesis;
+    fn storage_config(&self) -> &config::StorageConfig;
+    fn genesis(&self) -> Arc<Genesis>;
 
-    fn chain(&self) -> &Self::Chain;
+    async fn read_chain(&self) -> tokio::sync::RwLockReadGuard<'_, Self::Chain>;
+    async fn write_chain(&self) -> tokio::sync::RwLockWriteGuard<'_, Self::Chain>;
 
     fn wal(&self) -> &Self::Wal;
     fn state(&self) -> &Self::State;

@@ -5,12 +5,12 @@ use pallas::{
     ledger::{
         configs::{alonzo, byron, conway, shelley},
         primitives::{
-            conway::{CostModels, DRepVotingThresholds, PoolVotingThresholds},
+            conway::{DRepVotingThresholds, PoolVotingThresholds},
             CostModel, ExUnits, Nonce, NonceVariant,
         },
     },
 };
-use tracing::{debug, error, info};
+use tracing::debug;
 
 pub type Val = PParamValue;
 
@@ -75,16 +75,19 @@ fn from_conway_drep_voting_thresholds(
 }
 
 // AFAIK, Byron epoch length is a constant and not available via Genesis files.
-const BYRON_EPOCH_LENGTH: u64 = 5 * 24 * 60 * 60;
+const FIVE_DAYS_IN_SECONDS: u64 = 5 * 24 * 60 * 60;
 
 pub fn from_byron_genesis(byron: &byron::GenesisFile) -> PParamsSet {
     let version = &byron.block_version_data;
 
-    PParamsSet::new(0)
+    let slot_length_in_secs = version.slot_duration / 1000;
+    let epoch_length = FIVE_DAYS_IN_SECONDS / slot_length_in_secs;
+
+    PParamsSet::default()
         .with(Val::ProtocolVersion((0, 0)))
         .with(Val::SystemStart(byron.start_time))
-        .with(Val::SlotLength(version.slot_duration))
-        .with(Val::EpochLength(BYRON_EPOCH_LENGTH))
+        .with(Val::SlotLength(slot_length_in_secs))
+        .with(Val::EpochLength(epoch_length))
         .with(Val::MinFeeA(version.tx_fee_policy.multiplier))
         .with(Val::MinFeeB(version.tx_fee_policy.summand))
         .with(Val::MaxBlockBodySize(version.max_block_size))
@@ -101,7 +104,7 @@ pub fn from_shelley_genesis(shelley: &shelley::GenesisFile) -> PParamsSet {
     let shelley = &shelley.protocol_params;
     let version = &shelley.protocol_version;
 
-    PParamsSet::new(2)
+    PParamsSet::default()
         .with(Val::SystemStart(system_start.timestamp() as u64))
         .with(Val::ProtocolVersion(version.clone().into()))
         .with(Val::EpochLength(epoch_length as u64))
@@ -129,17 +132,10 @@ pub fn from_shelley_genesis(shelley: &shelley::GenesisFile) -> PParamsSet {
 }
 
 pub fn into_alonzo(previous: &PParamsSet, genesis: &alonzo::GenesisFile) -> PParamsSet {
-    let cost_models = CostModels {
-        plutus_v1: from_alonzo_cost_models_map(&genesis.cost_models, &alonzo::Language::PlutusV1),
-        plutus_v2: None,
-        plutus_v3: None,
-        unknown: Default::default(),
-    };
-
-    previous
-        .bump_clone()
+    let set = previous
+        .clone()
+        .with(Val::ProtocolVersion((5, 0)))
         .with(Val::AdaPerUtxoByte(genesis.lovelace_per_utxo_word))
-        .with(Val::CostModelsForScriptLanguages(cost_models))
         .with(Val::ExecutionCosts(genesis.execution_prices.clone().into()))
         .with(Val::MaxTxExUnits(from_config_exunits(
             &genesis.max_tx_ex_units,
@@ -149,53 +145,40 @@ pub fn into_alonzo(previous: &PParamsSet, genesis: &alonzo::GenesisFile) -> PPar
         )))
         .with(Val::MaxValueSize(genesis.max_value_size))
         .with(Val::CollateralPercentage(genesis.collateral_percentage))
-        .with(Val::MaxCollateralInputs(genesis.max_collateral_inputs))
+        .with(Val::MaxCollateralInputs(genesis.max_collateral_inputs));
+
+    if let Some(v1) = from_alonzo_cost_models_map(&genesis.cost_models, &alonzo::Language::PlutusV1)
+    {
+        set.with(Val::CostModelsPlutusV1(v1))
+    } else {
+        set
+    }
 }
 
 pub fn into_babbage(previous: &PParamsSet, genesis: &alonzo::GenesisFile) -> PParamsSet {
-    let cost_models = previous
-        .cost_models_for_script_languages()
-        .unwrap_or_else(|| CostModels {
-            plutus_v1: None,
-            plutus_v2: None,
-            plutus_v3: None,
-            unknown: Default::default(),
-        });
+    let set = previous.clone().with(Val::ProtocolVersion((7, 0)));
 
-    let cost_models = CostModels {
-        plutus_v2: from_alonzo_cost_models_map(&genesis.cost_models, &alonzo::Language::PlutusV2),
-        ..cost_models
-    };
-
-    previous
-        .bump_clone()
-        .with(Val::CostModelsForScriptLanguages(cost_models))
+    if let Some(v2) = from_alonzo_cost_models_map(&genesis.cost_models, &alonzo::Language::PlutusV2)
+    {
+        set.with(Val::CostModelsPlutusV2(v2))
+    } else {
+        set
+    }
 }
 
 pub fn into_conway(previous: &PParamsSet, genesis: &conway::GenesisFile) -> PParamsSet {
-    let cost_models = previous
-        .cost_models_for_script_languages()
-        .unwrap_or_else(|| CostModels {
-            plutus_v1: None,
-            plutus_v2: None,
-            plutus_v3: None,
-            unknown: Default::default(),
-        });
-
-    let cost_models = CostModels {
-        plutus_v3: Some(genesis.plutus_v3_cost_model.clone()),
-        ..cost_models
-    };
-
     // In the hardfork, the value got translated from words to bytes
     // Since the transformation from words to bytes is hardcoded, the transformation
     // here is also hardcoded
     let ada_per_utxo_byte = previous.ada_per_utxo_byte().unwrap_or_default() / 8;
 
     previous
-        .bump_clone()
+        .clone()
+        .with(Val::ProtocolVersion((9, 0)))
         .with(Val::AdaPerUtxoByte(ada_per_utxo_byte))
-        .with(Val::CostModelsForScriptLanguages(cost_models))
+        .with(Val::CostModelsPlutusV3(
+            genesis.plutus_v3_cost_model.clone(),
+        ))
         .with(Val::PoolVotingThresholds(
             from_conway_pool_voting_thresholds(&genesis.pool_voting_thresholds),
         ))
@@ -221,73 +204,83 @@ pub fn into_conway(previous: &PParamsSet, genesis: &conway::GenesisFile) -> PPar
 }
 
 /// Increments the protocol version by 1 without changing any other fields
-pub fn intra_era_hardfork(current: &PParamsSet) -> PParamsSet {
-    let version = current.version();
-
+pub fn intra_era_hardfork(current: &PParamsSet, target: u16) -> PParamsSet {
     current
-        .bump_clone()
-        .with(PParamValue::ProtocolVersion((version as u64 + 1, 0)))
+        .clone()
+        .with(PParamValue::ProtocolVersion((target as u64, 0)))
 }
 
 // Source: https://github.com/cardano-foundation/CIPs/blob/master/CIP-0059/feature-table.md
-// NOTE: part of the confusion here is that there are two versioning schemes
-// that can be easily conflated:
-// - The protocol version, negotiated in the networking layer
-// - The protocol version broadcast in the block header
-// Generally, these refer to the latter; the update proposals jump from 2 to 5,
-// because the node team decided it would be helpful to have these in sync.
-pub fn bump_pparams_version(current: &PParamsSet, genesis: &Genesis) -> PParamsSet {
-    debug!(version = current.version(), "bumping pparams version");
+pub fn migrate_pparams_version(
+    from: u16,
+    to: u16,
+    current: &PParamsSet,
+    genesis: &Genesis,
+) -> PParamsSet {
+    debug!(from, to, "migrating pparams version");
 
-    match current.version() {
+    match (from, to) {
         // Protocol starts at version 0;
         // There was one intra-era "hard fork" in byron (even though they weren't called that yet)
-        0 => intra_era_hardfork(current),
+        (0, 1) => intra_era_hardfork(current, to),
         // Protocol version 2 transitions from Byron to Shelley
-        1 => from_shelley_genesis(&genesis.shelley),
+        (1, 2) => from_shelley_genesis(&genesis.shelley),
         // Two intra-era hard forks, named Allegra (3) and Mary (4); we don't have separate types
         // for these eras
-        2 => intra_era_hardfork(current),
-        3 => intra_era_hardfork(current),
+        (2, 3) => intra_era_hardfork(current, to),
+        (3, 4) => intra_era_hardfork(current, to),
         // Protocol version 5 transitions from Shelley (Mary, technically) to Alonzo
-        4 => into_alonzo(current, &genesis.alonzo),
+        (4, 5) => into_alonzo(current, &genesis.alonzo),
         // One intra-era hard-fork in alonzo at protocol version 6
-        5 => intra_era_hardfork(current),
+        (5, 6) => intra_era_hardfork(current, to),
         // Protocol version 7 transitions from Alonzo to Babbage
-        6 => into_babbage(current, &genesis.alonzo),
+        (6, 7) => into_babbage(current, &genesis.alonzo),
         // One intra-era hard-fork in babbage at protocol version 8
-        7 => intra_era_hardfork(current),
+        (7, 8) => intra_era_hardfork(current, to),
         // Protocol version 9 transitions from Babbage to Conway
-        8 => into_conway(current, &genesis.conway),
+        (8, 9) => into_conway(current, &genesis.conway),
         // One intra-era hard-fork in conway at protocol version 10
-        9 => intra_era_hardfork(current),
-        from => {
-            unimplemented!("don't know how to bump from version {from}",)
+        (9, 10) => intra_era_hardfork(current, to),
+        (from, to) => {
+            unimplemented!("don't know how to bump from version {from} to {to}",)
         }
     }
 }
 
-pub fn evolve_pparams(
-    current: &PParamsSet,
+pub fn force_pparams_version(
+    initial: &PParamsSet,
     genesis: &Genesis,
-    target: u16,
+    from: u16,
+    to: u16,
 ) -> Result<PParamsSet, BrokenInvariant> {
-    let mut pparams = current.clone();
+    let mut pparams = initial.clone();
 
-    while pparams.version() < target {
-        let previous = pparams.version();
-
-        pparams = bump_pparams_version(&pparams, genesis);
-
-        // if the protocol major didn't increase, something went wrong and we might be
-        // stuck in a loop. We return an error to avoid infinite loops.
-        if pparams.version() <= previous {
-            error!(version = pparams.version(), previous, "stuck in a loop");
-            return Err(BrokenInvariant::InvalidGenesisConfig);
-        }
-
-        info!(protocol = pparams.version(), "forced hardfork");
+    for from in from..to {
+        pparams = migrate_pparams_version(from, from + 1, &pparams, genesis);
     }
 
     Ok(pparams)
+}
+
+pub struct ProtocolConstants {
+    pub epoch_length: u64,
+    pub slot_length: u64,
+}
+
+pub fn protocol_constants(version: u16, genesis: &Genesis) -> ProtocolConstants {
+    match version {
+        x if x < 2 => {
+            let slot_length_in_secs = genesis.byron.block_version_data.slot_duration / 1000;
+            let epoch_length = FIVE_DAYS_IN_SECONDS / slot_length_in_secs;
+
+            ProtocolConstants {
+                epoch_length,
+                slot_length: slot_length_in_secs,
+            }
+        }
+        _ => ProtocolConstants {
+            epoch_length: genesis.shelley.epoch_length.unwrap_or_default() as u64,
+            slot_length: genesis.shelley.slot_length.unwrap_or_default() as u64,
+        },
+    }
 }

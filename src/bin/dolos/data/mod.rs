@@ -1,9 +1,12 @@
 use clap::{Parser, Subcommand};
+use dolos_core::config::RootConfig;
 
 mod clear_state;
 mod compute_nonce;
 mod compute_spdd;
 mod copy_wal;
+mod dump_blocks;
+mod dump_entity;
 mod dump_logs;
 mod dump_state;
 mod dump_wal;
@@ -23,8 +26,12 @@ pub enum Command {
     DumpWal(dump_wal::Args),
     /// dumps data from the state
     DumpState(dump_state::Args),
+    /// dumps an entity from the state
+    DumpEntity(dump_entity::Args),
     /// dumps data from the logs
     DumpLogs(dump_logs::Args),
+    /// dumps data from the blocks
+    DumpBlocks(dump_blocks::Args),
     /// clears data from the state
     ClearState(clear_state::Args),
     /// computes the SPDD for the current epoch
@@ -54,7 +61,7 @@ pub struct Args {
 }
 
 pub fn run(
-    config: &super::Config,
+    config: &RootConfig,
     args: &Args,
     feedback: &super::feedback::Feedback,
 ) -> miette::Result<()> {
@@ -62,7 +69,9 @@ pub fn run(
         Command::Summary(x) => summary::run(config, x)?,
         Command::DumpWal(x) => dump_wal::run(config, x)?,
         Command::DumpState(x) => dump_state::run(config, x)?,
+        Command::DumpEntity(x) => dump_entity::run(config, x)?,
         Command::DumpLogs(x) => dump_logs::run(config, x)?,
+        Command::DumpBlocks(x) => dump_blocks::run(config, x)?,
         Command::ClearState(x) => clear_state::run(config, x)?,
         Command::ComputeSpdd(x) => compute_spdd::run(config, x)?,
         Command::ComputeNonce(x) => compute_nonce::run(config, x)?,

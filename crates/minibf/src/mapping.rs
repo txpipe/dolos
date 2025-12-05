@@ -1,5 +1,8 @@
 use axum::{http::StatusCode, Json};
 use itertools::Itertools;
+use num_bigint::BigInt;
+use num_rational::BigRational;
+use num_traits::ToPrimitive;
 use pallas::{
     codec::{minicbor, utils::Bytes},
     crypto::hash::{Hash, Hasher},
@@ -8,7 +11,7 @@ use pallas::{
         primitives::{
             alonzo::{self, Certificate as AlonzoCert},
             conway::{Certificate as ConwayCert, DRep, DatumOption, RedeemerTag, ScriptRef},
-            ExUnitPrices, StakeCredential,
+            Epoch, ExUnitPrices, ExUnits, PlutusData, StakeCredential,
         },
         traverse::{
             ComputeHash, MultiEraBlock, MultiEraCert, MultiEraHeader, MultiEraInput,
@@ -44,7 +47,7 @@ use blockfrost_openapi::models::{
     tx_content_withdrawals_inner::TxContentWithdrawalsInner,
 };
 
-use dolos_cardano::{pallas_extras, ChainSummary, Epoch, PParamsSet};
+use dolos_cardano::{pallas_extras, ChainSummary, PParamsSet};
 use dolos_core::{Domain, EraCbor, TxHash, TxOrder, TxoIdx, TxoRef};
 
 use crate::Facade;
@@ -602,12 +605,11 @@ impl<'a> TxModelBuilder<'a> {
             .iter()
             .flat_map(|x| {
                 if pallas_extras::cert_as_stake_registration(x).is_some() {
-                    dbg!(x);
-                    return Some(dbg!(key_deposit));
+                    return Some(key_deposit);
                 }
 
                 if pallas_extras::cert_as_pool_registration(x).is_some() {
-                    return Some(dbg!(pool_deposit));
+                    return Some(pool_deposit);
                 }
 
                 if let MultiEraCert::Conway(cert) = x {
@@ -1012,22 +1014,47 @@ impl TxModelBuilder<'_> {
         }
     }
 
-    fn build_redeemer_inner(
-        &self,
-        redeemer: &MultiEraRedeemer<'_>,
-        prices: &ExUnitPrices,
-    ) -> Result<TxContentRedeemersInner, StatusCode> {
+    fn compute_fee(&self, units: &ExUnits, prices: &ExUnitPrices) -> Result<u64, StatusCode> {
         let ExUnitPrices {
             mem_price,
             step_price,
         } = prices;
 
-        let unit_mem = redeemer.ex_units().mem;
-        let unit_steps = redeemer.ex_units().steps;
+        let unit_mem = BigRational::from_integer(BigInt::from(units.mem));
+        let unit_steps = BigRational::from_integer(BigInt::from(units.steps));
 
-        let fee = (unit_mem * mem_price.numerator * step_price.denominator
-            + unit_steps * step_price.numerator * mem_price.denominator)
-            / (mem_price.denominator * step_price.denominator);
+        let mem_price = BigRational::new(
+            BigInt::from(mem_price.numerator),
+            BigInt::from(mem_price.denominator),
+        );
+
+        let step_price = BigRational::new(
+            BigInt::from(step_price.numerator),
+            BigInt::from(step_price.denominator),
+        );
+
+        let mem_fee = unit_mem * mem_price;
+        let step_fee = unit_steps * step_price;
+
+        let fee = mem_fee + step_fee;
+
+        let fee: u64 = fee
+            .ceil()
+            .to_integer()
+            .try_into()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        Ok(fee)
+    }
+
+    fn build_redeemer_inner(
+        &self,
+        redeemer: &MultiEraRedeemer<'_>,
+        prices: &ExUnitPrices,
+    ) -> Result<TxContentRedeemersInner, StatusCode> {
+        let units = redeemer.ex_units();
+
+        let fee = self.compute_fee(&units, prices)?;
 
         let out = TxContentRedeemersInner {
             purpose: match redeemer.tag() {
@@ -1043,8 +1070,8 @@ impl TxModelBuilder<'_> {
             // redeemer data
             redeemer_data_hash: redeemer.data().compute_hash().to_string(),
             fee: fee.to_string(),
-            unit_mem: unit_mem.to_string(),
-            unit_steps: unit_steps.to_string(),
+            unit_mem: units.mem.to_string(),
+            unit_steps: units.steps.to_string(),
             script_hash: self
                 .find_redeemer_script(redeemer)?
                 .map(|x| x.to_string())
@@ -1169,6 +1196,12 @@ impl IntoModel<Vec<TxContentDelegationsInner>> for TxModelBuilder<'_> {
                     MultiEraCert::Conway(cert) => {
                         match &**cert {
                             ConwayCert::StakeDelegation(cred, pool) => Some(
+                                build_delegation_inner(index, cred, pool, network, active_epoch),
+                            ),
+                            ConwayCert::StakeRegDeleg(cred, pool, _) => Some(
+                                build_delegation_inner(index, cred, pool, network, active_epoch),
+                            ),
+                            ConwayCert::StakeVoteRegDeleg(cred, pool, _, _) => Some(
                                 build_delegation_inner(index, cred, pool, network, active_epoch),
                             ),
                             _ => None,
@@ -1547,6 +1580,30 @@ impl StakeCertModelBuilder {
                     cert_index,
                     network,
                 }),
+                ConwayCert::Reg(stake_credential, _) => Some(Self {
+                    stake_credential: stake_credential.clone(),
+                    is_registration: true,
+                    cert_index,
+                    network,
+                }),
+                ConwayCert::StakeRegDeleg(stake_credential, _, _) => Some(Self {
+                    stake_credential: stake_credential.clone(),
+                    is_registration: true,
+                    cert_index,
+                    network,
+                }),
+                ConwayCert::StakeVoteRegDeleg(stake_credential, _, _, _) => Some(Self {
+                    stake_credential: stake_credential.clone(),
+                    is_registration: true,
+                    cert_index,
+                    network,
+                }),
+                ConwayCert::UnReg(stake_credential, _) => Some(Self {
+                    stake_credential: stake_credential.clone(),
+                    is_registration: false,
+                    cert_index,
+                    network,
+                }),
                 _ => None,
             },
             _ => None,
@@ -1676,7 +1733,7 @@ impl<'a> BlockModelBuilder<'a> {
 
         let Some(use_bech32) = self
             .chain
-            .map(|x| x.slot_epoch(self.block.slot()).0 > x.first_shelley_epoch() as u32 + 1)
+            .map(|x| x.slot_epoch(self.block.slot()).0 > x.first_shelley_epoch() + 1)
         else {
             return Ok(None);
         };
@@ -1859,5 +1916,106 @@ impl<'a> IntoModel<Vec<BlockContentAddressesInner>> for BlockModelBuilder<'a> {
             .collect();
 
         Ok(addresses)
+    }
+}
+
+pub struct PlutusDataWrapper(pub PlutusData);
+impl PlutusDataWrapper {
+    fn as_value(&self) -> Result<serde_json::Value, StatusCode> {
+        match &self.0 {
+            PlutusData::Constr(x) => {
+                let values = x
+                    .fields
+                    .iter()
+                    .map(|d| PlutusDataWrapper(d.clone()).as_value())
+                    .collect::<Result<Vec<serde_json::Value>, _>>()?;
+
+                Ok(serde_json::Value::Object(serde_json::Map::from_iter([
+                    (
+                        "constructor".to_string(),
+                        serde_json::Value::Number(x.constr_index().into()),
+                    ),
+                    ("fields".to_string(), serde_json::Value::Array(values)),
+                ])))
+            }
+
+            PlutusData::Map(x) => {
+                let mut map = serde_json::Map::new();
+                for (k, v) in x.iter() {
+                    let key_opt = PlutusDataWrapper(k.clone())
+                        .as_value()?
+                        .as_str()
+                        .map(|s| s.to_owned());
+
+                    if let Some(key) = key_opt {
+                        map.insert(key, PlutusDataWrapper(v.clone()).as_value()?);
+                    }
+                }
+
+                Ok(serde_json::Value::Object(serde_json::Map::from_iter([(
+                    "map".to_string(),
+                    serde_json::Value::Object(map),
+                )])))
+            }
+
+            PlutusData::Array(x) => {
+                let values = x
+                    .iter()
+                    .map(|d| PlutusDataWrapper(d.clone()).as_value())
+                    .collect::<Result<Vec<serde_json::Value>, _>>()?;
+
+                Ok(serde_json::Value::Object(serde_json::Map::from_iter([(
+                    "list".to_string(),
+                    serde_json::Value::Array(values),
+                )])))
+            }
+
+            PlutusData::BigInt(x) => match x {
+                pallas::ledger::primitives::BigInt::Int(int) => {
+                    let i = Into::<i128>::into(*int);
+                    Ok(serde_json::Value::Object(serde_json::Map::from_iter([(
+                        "int".to_string(),
+                        serde_json::Value::Number((i as i64).into()),
+                    )])))
+                }
+                pallas::ledger::primitives::BigInt::BigUInt(bounded_bytes) => {
+                    let bigint = num_bigint::BigUint::from_bytes_be(bounded_bytes.as_slice());
+                    let number = serde_json::Number::from_f64(
+                        bigint.to_f64().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?,
+                    )
+                    .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+                    Ok(serde_json::Value::Object(serde_json::Map::from_iter([(
+                        "int".to_string(),
+                        serde_json::Value::Number(number),
+                    )])))
+                }
+                pallas::ledger::primitives::BigInt::BigNInt(bounded_bytes) => {
+                    let bigint = num_bigint::BigInt::from_signed_bytes_be(bounded_bytes.as_slice());
+                    let number = serde_json::Number::from_f64(
+                        bigint.to_f64().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?,
+                    )
+                    .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+                    Ok(serde_json::Value::Object(serde_json::Map::from_iter([(
+                        "int".to_string(),
+                        serde_json::Value::Number(number),
+                    )])))
+                }
+            },
+
+            PlutusData::BoundedBytes(x) => {
+                Ok(serde_json::Value::Object(serde_json::Map::from_iter([(
+                    "bytes".to_string(),
+                    serde_json::Value::String(x.to_string()),
+                )])))
+            }
+        }
+    }
+}
+impl IntoModel<HashMap<String, serde_json::Value>> for PlutusDataWrapper {
+    type SortKey = ();
+
+    fn into_model(self) -> Result<HashMap<String, serde_json::Value>, StatusCode> {
+        let value = self.as_value()?;
+        serde_json::from_value(value).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
     }
 }

@@ -1,7 +1,8 @@
 use std::marker::PhantomData;
 
 use comfy_table::Table;
-use dolos_cardano::{EpochState, RewardLog};
+use dolos_cardano::{model::RewardLog, EpochState, StakeLog};
+use dolos_core::config::RootConfig;
 use miette::{Context, IntoDiagnostic};
 
 use dolos::prelude::*;
@@ -28,16 +29,17 @@ trait TableRow: Entity {
 
 impl TableRow for RewardLog {
     fn header() -> Vec<&'static str> {
-        vec!["slot", "pool", "as leader", "amount"]
+        vec!["epoch", "slot", "as leader", "amount"]
     }
 
     fn row(&self, key: &LogKey) -> Vec<String> {
         let temporal = TemporalKey::from(key.clone());
-        let temporal = u64::from_be_bytes(temporal.as_ref().try_into().unwrap());
+        let entity = EntityKey::from(key.clone());
+        let epoch = u64::from_be_bytes(temporal.as_ref().try_into().unwrap());
 
         vec![
-            format!("{}", temporal),
-            format!("{}", hex::encode(&self.pool_id)),
+            format!("{}", epoch),
+            format!("{}", hex::encode(entity.as_ref())),
             format!("{}", self.as_leader),
             format!("{}", self.amount),
         ]
@@ -49,37 +51,96 @@ impl TableRow for EpochState {
         vec![
             "number",
             "version",
+            "pot reserves",
+            "pot utxos",
+            "pot treasury",
+            "stake deposits",
+            "drep deposits",
+            "proposal deposits",
+            "pot rewards",
+            "pot fees",
             "gathered fees",
-            "gathered deposits",
-            "decayed deposits",
-            "reserves",
-            "utxos",
-            "treasury",
-            "to treasury",
-            "to distribute",
-            "nonce",
+            "pparams",
+            "blocks",
         ]
     }
 
     fn row(&self, _key: &LogKey) -> Vec<String> {
+        let pparams = self.pparams.live();
+        let rolling = self.rolling.live();
+
         vec![
             format!("{}", self.number),
-            format!("{}", self.pparams.protocol_major().unwrap_or_default()),
-            format!("{}", self.gathered_fees),
-            format!("{}", self.gathered_deposits),
-            format!("{}", self.decayed_deposits),
-            format!("{}", self.reserves),
-            format!("{}", self.utxos),
-            format!("{}", self.treasury),
-            format!("{}", self.rewards_to_treasury.unwrap_or_default()),
-            format!("{}", self.rewards_to_distribute.unwrap_or_default()),
             format!(
                 "{}",
-                self.nonces
+                pparams
                     .as_ref()
-                    .map(|x| hex::encode(x.active))
-                    .unwrap_or("".to_string())
+                    .and_then(|x| x.protocol_major())
+                    .unwrap_or_default()
             ),
+            format!("{}", self.initial_pots.reserves),
+            format!("{}", self.initial_pots.utxos),
+            format!("{}", self.initial_pots.treasury),
+            format!("{}", self.initial_pots.stake_deposits()),
+            format!("{}", self.initial_pots.drep_deposits),
+            format!("{}", self.initial_pots.proposal_deposits),
+            format!("{}", self.initial_pots.rewards),
+            format!("{}", self.initial_pots.fees),
+            format!(
+                "{}",
+                rolling
+                    .as_ref()
+                    .map(|x| x.gathered_fees)
+                    .unwrap_or_default()
+            ),
+            format!("{}", pparams.as_ref().map(|x| x.len()).unwrap_or_default()),
+            format!(
+                "{}",
+                rolling
+                    .as_ref()
+                    .map(|x| x.blocks_minted)
+                    .unwrap_or_default()
+            ),
+        ]
+    }
+}
+
+const POOL_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("pool");
+
+impl TableRow for StakeLog {
+    fn header() -> Vec<&'static str> {
+        vec![
+            //"pool hex",
+            "pool bech32",
+            "epoch",
+            "blocks minted",
+            "active stake",
+            "delegators count",
+            "live pledge",
+            "declared pledge",
+            "total rewards",
+            "operator share",
+        ]
+    }
+
+    fn row(&self, key: &LogKey) -> Vec<String> {
+        let temporal = TemporalKey::from(key.clone());
+        let epoch = u64::from_be_bytes(temporal.as_ref().try_into().unwrap());
+        let entity_key = EntityKey::from(key.clone());
+        let pool_hash = entity_key.as_ref()[..28].try_into().unwrap();
+        let pool_bech32 = bech32::encode::<bech32::Bech32>(POOL_HRP, pool_hash).unwrap();
+
+        vec![
+            //format!("{}", pool_hex),
+            format!("{}", pool_bech32),
+            format!("{}", epoch),
+            format!("{}", self.blocks_minted),
+            format!("{}", self.total_stake),
+            format!("{}", self.delegators_count),
+            format!("{}", self.live_pledge),
+            format!("{}", self.declared_pledge),
+            format!("{}", self.total_rewards),
+            format!("{}", self.operator_share),
         ]
     }
 }
@@ -138,13 +199,15 @@ fn dump_logs<T: TableRow>(
     Ok(())
 }
 
-pub fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
+pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging)?;
 
     let archive = crate::common::open_archive_store(config)?;
 
     match args.namespace.as_str() {
         "rewards" => dump_logs::<RewardLog>(&archive, "rewards", args.skip, args.take)?,
+        "stakes" => dump_logs::<StakeLog>(&archive, "stakes", args.skip, args.take)?,
+        "epochs" => dump_logs::<EpochState>(&archive, "epochs", args.skip, args.take)?,
         _ => todo!(),
     }
 

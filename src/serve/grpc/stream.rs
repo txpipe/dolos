@@ -42,36 +42,46 @@ impl ChainStream {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use dolos_testing::blocks::make_conway_block;
     use dolos_testing::toy_domain::ToyDomain;
     use futures_util::{pin_mut, StreamExt};
-    use pallas::crypto::hash::Hash;
+    use tokio::time::timeout;
     use tokio_util::sync::CancellationToken;
 
     use super::*;
-    use crate::{facade::DomainExt as _, serve::CancelTokenImpl};
+    use crate::serve::CancelTokenImpl;
 
     #[tokio::test]
     async fn test_stream_waiting() {
-        let domain = ToyDomain::new(None, None);
+        let domain = ToyDomain::new(None, None).await;
 
         for i in 0..=100 {
             let (_, block) = make_conway_block(i * 10);
-            dolos_core::facade::roll_forward(&domain, block).unwrap();
+
+            dolos_core::facade::roll_forward(&domain, block)
+                .await
+                .unwrap();
         }
 
         let domain2 = domain.clone();
         let background = tokio::spawn(async move {
             for i in 101..=200 {
                 let (_, block) = make_conway_block(i * 10);
-                dolos_core::facade::roll_forward(&domain2, block).unwrap();
+
+                dolos_core::facade::roll_forward(&domain2, block)
+                    .await
+                    .unwrap();
+
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
             }
         });
 
+        let chain_point = make_conway_block(500).0;
         let s = ChainStream::start::<ToyDomain, CancelTokenImpl>(
             domain,
-            vec![ChainPoint::Specific(500, Hash::<32>::from([0; 32]))],
+            vec![chain_point.clone()],
             CancelTokenImpl(CancellationToken::new()),
         );
 
@@ -79,17 +89,18 @@ mod tests {
 
         let first = s.next().await.unwrap();
 
-        assert_eq!(
-            first,
-            TipEvent::Mark(ChainPoint::Specific(500, Hash::<32>::from([0; 32])))
-        );
+        assert_eq!(first, TipEvent::Mark(chain_point));
 
         for i in 51..=200 {
-            let evt = s.next().await;
+            let evt = timeout(Duration::from_secs(5), s.next())
+                .await
+                .expect("took too long");
             let value = evt.unwrap();
 
             match value {
-                TipEvent::Apply(p, _) => assert_eq!(p.slot(), i * 10),
+                TipEvent::Apply(p, _) => {
+                    assert_eq!(p.slot(), i * 10)
+                }
                 _ => panic!("unexpected log value variant"),
             }
         }

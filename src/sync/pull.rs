@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use dolos_core::config::{PeerConfig, SyncConfig, SyncLimit};
 use gasket::framework::*;
 use itertools::Itertools;
 use pallas::ledger::traverse::MultiEraHeader;
@@ -66,12 +67,12 @@ impl PullQuota {
     }
 }
 
-impl From<super::SyncLimit> for PullQuota {
-    fn from(limit: super::SyncLimit) -> Self {
+impl From<SyncLimit> for PullQuota {
+    fn from(limit: SyncLimit) -> Self {
         match limit {
-            super::SyncLimit::UntilTip => Self::WaitingTip,
-            super::SyncLimit::NoLimit => Self::Unlimited,
-            super::SyncLimit::MaxBlocks(blocks) => Self::BlockQuota(blocks),
+            SyncLimit::UntilTip => Self::WaitingTip,
+            SyncLimit::NoLimit => Self::Unlimited,
+            SyncLimit::MaxBlocks(blocks) => Self::BlockQuota(blocks),
         }
     }
 }
@@ -118,7 +119,7 @@ impl gasket::framework::Worker<Stage> for Worker {
     async fn bootstrap(stage: &Stage) -> Result<Self, WorkerError> {
         debug!("finding intersection candidates");
 
-        let candidates = stage
+        let mut candidates = stage
             .wal
             .intersect_candidates(5)
             .or_panic()?
@@ -126,6 +127,10 @@ impl gasket::framework::Worker<Stage> for Worker {
             .map(TryFrom::try_from)
             .filter_map(|x| x.ok())
             .collect_vec();
+
+        if candidates.is_empty() {
+            candidates.push(Point::Origin);
+        }
 
         debug!("connecting to peer");
 
@@ -200,6 +205,9 @@ impl gasket::framework::Worker<Stage> for Worker {
                     }
                     PullBatch::Empty => (),
                 };
+                if !self.peer_session.chainsync().has_agency() {
+                    stage.quota.on_tip();
+                }
             }
             WorkUnit::Await => {
                 info!("waiting for new block");
@@ -236,9 +244,7 @@ impl gasket::framework::Worker<Stage> for Worker {
                         stage.track_tip(&tip);
                     }
                     NextResponse::Await => {
-                        info!("reached tip");
-
-                        stage.quota.on_tip();
+                        warn!("unexpected response, skipping");
                     }
                 }
             }
@@ -267,7 +273,7 @@ pub struct Stage {
 }
 
 impl Stage {
-    pub fn new(config: &super::Config, upstream: &PeerConfig, wal: WalAdapter) -> Self {
+    pub fn new(config: &SyncConfig, upstream: &PeerConfig, wal: WalAdapter) -> Self {
         Self {
             peer_address: upstream.peer_address.clone(),
             network_magic: upstream.network_magic,

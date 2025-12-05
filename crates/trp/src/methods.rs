@@ -6,7 +6,7 @@ use std::sync::Arc;
 use tx3_lang::ProtoTx;
 use tx3_sdk::trp::{SubmitParams, SubmitWitness};
 
-use dolos_core::{Domain, MempoolStore as _, StateStore as _};
+use dolos_core::{Domain, MempoolStore as _, StateStore as _, TxoRef};
 
 use crate::{compiler::load_compiler, utxos::UtxoStoreAdapter};
 
@@ -69,6 +69,27 @@ fn load_tx(params: TrpResolveParams) -> Result<ProtoTx, Error> {
     Ok(tx)
 }
 
+fn lock_temp_utxos<D: Domain>(tx_payload: &[u8], context: &Context<D>) -> Result<(), Error> {
+    let tx = pallas::ledger::traverse::MultiEraTx::decode(tx_payload)?;
+
+    let inputs: Vec<TxoRef> = tx
+        .inputs()
+        .iter()
+        .map(|i| TxoRef(*i.hash(), i.index() as u32))
+        .collect();
+
+    let current_slot = context
+        .domain
+        .state()
+        .read_cursor()?
+        .map(|c| c.slot())
+        .unwrap_or(0);
+
+    context.locks.lock(&inputs, current_slot);
+
+    Ok(())
+}
+
 pub async fn trp_resolve<D: Domain>(
     params: Params<'_>,
     context: Arc<Context<D>>,
@@ -79,7 +100,7 @@ pub async fn trp_resolve<D: Domain>(
 
     let mut compiler = load_compiler::<D>(&context.domain, &context.config)?;
 
-    let utxos = UtxoStoreAdapter::<D>::new(context.domain.state().clone());
+    let utxos = UtxoStoreAdapter::<D>::new(context.domain.state().clone(), context.locks.clone());
 
     let resolved = tx3_resolver::resolve_tx(
         tx,
@@ -88,6 +109,9 @@ pub async fn trp_resolve<D: Domain>(
         context.config.max_optimize_rounds.into(),
     )
     .await?;
+
+    // TODO: decoding the tx is very inneficient. It would be much better if the tx3 machinery could notify the UtxoStore of recently used UTxOs.
+    lock_temp_utxos(&resolved.payload, &context)?;
 
     Ok(serde_json::json!({
         "tx": hex::encode(resolved.payload),
@@ -159,11 +183,11 @@ mod tests {
     use jsonrpsee::types::{ErrorCode, ErrorObjectOwned};
     use serde_json::json;
 
-    use crate::{metrics::Metrics, Config};
+    use crate::{metrics::Metrics, TrpConfig, UtxoLock};
 
     use super::*;
 
-    fn setup_test_context() -> Arc<Context<ToyDomain>> {
+    async fn setup_test_context() -> Arc<Context<ToyDomain>> {
         let delta = dolos_testing::make_custom_utxo_delta(
             dolos_testing::TestAddress::everyone(),
             2..4,
@@ -172,11 +196,11 @@ mod tests {
             },
         );
 
-        let domain = ToyDomain::new(Some(delta), None);
+        let domain = ToyDomain::new(Some(delta), None).await;
 
         Arc::new(Context {
             domain,
-            config: Arc::new(Config {
+            config: Arc::new(TrpConfig {
                 max_optimize_rounds: 3,
                 extra_fees: None,
 
@@ -185,6 +209,7 @@ mod tests {
                 permissive_cors: None,
             }),
             metrics: Metrics::default(),
+            locks: Arc::new(UtxoLock::new()),
         })
     }
 
@@ -233,7 +258,7 @@ mod tests {
 
         let params = Params::new(Some(req.as_str()));
 
-        let context = setup_test_context();
+        let context = setup_test_context().await;
 
         let resolved = trp_resolve(params, context.clone()).await?;
 

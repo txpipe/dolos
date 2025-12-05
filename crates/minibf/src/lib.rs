@@ -6,14 +6,15 @@ use axum::{
 };
 use dolos_cardano::{
     model::{AccountState, AssetState, DRepState, EpochState, FixedNamespace, PoolState},
-    ChainSummary, Epoch, PParamsSet,
+    ChainSummary, PParamsSet,
 };
 use itertools::Itertools;
-use pallas::{crypto::hash::Hash, ledger::addresses::Network};
-use serde::{Deserialize, Serialize};
+use pallas::{
+    crypto::hash::Hash,
+    ledger::{addresses::Network, primitives::Epoch},
+};
 use std::{
     collections::HashMap,
-    net::SocketAddr,
     ops::{Deref, Range},
 };
 use tower::Layer;
@@ -21,8 +22,8 @@ use tower_http::{cors::CorsLayer, normalize_path::NormalizePathLayer, trace};
 use tracing::Level;
 
 use dolos_core::{
-    ArchiveStore as _, BlockSlot, CancelToken, Domain, Entity, EntityKey, EraCbor, LogKey,
-    ServeError, StateError, StateStore as _, TemporalKey, TxOrder,
+    config::MinibfConfig, ArchiveStore as _, BlockSlot, CancelToken, Domain, Entity, EntityKey,
+    EraCbor, LogKey, ServeError, StateError, StateStore as _, TemporalKey, TxOrder,
 };
 
 mod error;
@@ -30,19 +31,10 @@ pub(crate) mod mapping;
 mod pagination;
 mod routes;
 
-#[derive(Deserialize, Serialize, Clone)]
-pub struct Config {
-    pub listen_address: SocketAddr,
-    pub permissive_cors: Option<bool>,
-    pub metadata_max_scan_depth: Option<usize>,
-    pub token_registry_url: Option<String>,
-    pub url: Option<String>,
-}
-
 #[derive(Clone)]
 pub struct Facade<D: Domain> {
     pub inner: D,
-    pub config: Config,
+    pub config: MinibfConfig,
 }
 
 impl<D: Domain> Deref for Facade<D> {
@@ -83,11 +75,8 @@ impl<D: Domain> Facade<D> {
         Ok(summary)
     }
 
-    pub fn get_current_effective_pparams(
-        &self,
-        caller_epoch: Epoch,
-    ) -> Result<PParamsSet, StatusCode> {
-        let pparams = dolos_cardano::load_effective_pparams::<D>(self.state(), caller_epoch)
+    pub fn get_current_effective_pparams(&self) -> Result<PParamsSet, StatusCode> {
+        let pparams = dolos_cardano::load_effective_pparams::<D>(self.state())
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
         Ok(pparams)
@@ -98,7 +87,7 @@ impl<D: Domain> Facade<D> {
         epoch: Epoch,
         chain_summary: &ChainSummary,
     ) -> Result<Option<EpochState>, StatusCode> {
-        let slot = chain_summary.epoch_start(epoch as u64);
+        let slot = chain_summary.epoch_start(epoch);
 
         let logkey = LogKey::from(TemporalKey::from(slot));
 
@@ -121,7 +110,9 @@ impl<D: Domain> Facade<D> {
             .get_epoch_log(prior_epoch, chain_summary)?
             .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
 
-        Ok(log.pparams)
+        // TODO: epoch logs should be its own structure without the excessive
+        // multi-epoch values
+        Ok(log.pparams.live().cloned().unwrap_or_default())
     }
 
     pub fn get_tx(&self, hash: Hash<32>) -> Result<Option<EraCbor>, StatusCode> {
@@ -191,7 +182,7 @@ impl<D: Domain> Facade<D> {
 
         let mut out = vec![];
         for epoch in range {
-            let slot = summary.epoch_start(epoch as u64);
+            let slot = summary.epoch_start(epoch);
             let logkey: LogKey = (TemporalKey::from(slot), key.clone()).into();
             if let Some(entity) = self
                 .archive()
@@ -233,12 +224,13 @@ where
     Option<EpochState>: From<D::Entity>,
     Option<DRepState>: From<D::Entity>,
 {
-    type Config = Config;
+    type Config = MinibfConfig;
 
     async fn run(cfg: Self::Config, domain: D, cancel: C) -> Result<(), ServeError> {
         let app = Router::new()
             .route("/", get(routes::root::<D>))
             .route("/health", get(routes::health::naked))
+            .route("/metrics", get(routes::metrics::metrics::<D>))
             .route("/health/clock", get(routes::health::clock))
             .route("/genesis", get(routes::genesis::naked::<D>))
             .route("/network", get(routes::network::naked::<D>))
@@ -318,6 +310,10 @@ where
                 "/epochs/latest/parameters",
                 get(routes::epochs::latest_parameters::<D>),
             )
+            .route(
+                "/scripts/datum/{datum_hash}",
+                get(routes::scripts::by_datum_hash::<D>),
+            )
             .route("/tx/submit", post(routes::tx::submit::route::<D>))
             .route("/txs/{tx_hash}", get(routes::txs::by_hash::<D>))
             .route("/txs/{tx_hash}/cbor", get(routes::txs::by_hash_cbor::<D>))
@@ -357,6 +353,14 @@ where
             )
             .route("/assets/{subject}", get(routes::assets::by_subject::<D>))
             .route(
+                "/assets/{subject}/addresses",
+                get(routes::assets::by_subject_addresses::<D>),
+            )
+            .route(
+                "/assets/{subject}/transactions",
+                get(routes::assets::by_subject_transactions::<D>),
+            )
+            .route(
                 "/metadata/txs/labels/{label}",
                 get(routes::metadata::by_label_json::<D>),
             )
@@ -367,6 +371,10 @@ where
             .route(
                 "/pools/{id}/delegators",
                 get(routes::pools::by_id_delegators::<D>),
+            )
+            .route(
+                "/pools/{id}/history",
+                get(routes::pools::by_id_history::<D>),
             )
             .route("/pools/extended", get(routes::pools::all_extended::<D>))
             .route(

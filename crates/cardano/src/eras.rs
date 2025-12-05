@@ -1,8 +1,8 @@
 use dolos_core::{BlockSlot, ChainError, Domain, StateStore as _};
+use pallas::ledger::primitives::Epoch;
 
 use crate::{model::EraSummary, EraBoundary, EraProtocol, FixedNamespace as _};
 
-pub type Epoch = u32;
 pub type EpochSlot = u32;
 
 impl EraSummary {

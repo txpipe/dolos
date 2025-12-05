@@ -1,3 +1,4 @@
+use dolos_core::config::CardanoConfig;
 use pallas::ledger::traverse::{MultiEraBlock, MultiEraOutput, MultiEraTx};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -159,6 +160,24 @@ pub fn compute_origin_delta(genesis: &Genesis) -> UtxoSetDelta {
     delta
 }
 
+pub fn build_custom_utxos_delta(config: &CardanoConfig) -> Result<UtxoSetDelta, ChainError> {
+    let mut delta = UtxoSetDelta::default();
+
+    for utxo in config.custom_utxos.iter() {
+        let era = utxo
+            .era
+            .unwrap_or(pallas::ledger::traverse::Era::Conway.into());
+
+        let eracbor = EraCbor(era, utxo.cbor.clone());
+
+        delta
+            .produced_utxo
+            .insert(utxo.ref_.clone(), Arc::new(eracbor));
+    }
+
+    Ok(delta)
+}
+
 #[cfg(test)]
 mod tests {
     use pallas::{
@@ -170,6 +189,15 @@ mod tests {
     use super::*;
 
     fn fake_slice_for_block(block: &MultiEraBlock) -> HashMap<TxoRef, OwnedMultiEraOutput> {
+        let valid_utxo = block
+            .txs()
+            .first()
+            .unwrap()
+            .produces()
+            .first()
+            .unwrap()
+            .1
+            .encode();
         let consumed: HashMap<_, _> = block
             .txs()
             .iter()
@@ -178,8 +206,11 @@ mod tests {
             .map(|key| {
                 (
                     key,
-                    OwnedMultiEraOutput::decode(Arc::new(EraCbor(block.era().into(), vec![])))
-                        .unwrap(),
+                    OwnedMultiEraOutput::decode(Arc::new(EraCbor(
+                        block.era().into(),
+                        valid_utxo.clone(),
+                    )))
+                    .unwrap(),
                 )
             })
             .collect();

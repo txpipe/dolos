@@ -1,5 +1,8 @@
 use crate::{make_custom_utxo_delta, TestAddress, UtxoGenerator};
-use dolos_core::*;
+use dolos_core::{
+    config::{CardanoConfig, StorageConfig},
+    *,
+};
 use futures_util::stream::StreamExt;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -77,50 +80,62 @@ impl dolos_core::MempoolStore for Mempool {
 
 #[derive(Clone)]
 pub struct ToyDomain {
-    wal: dolos_redb::wal::RedbWalStore<dolos_cardano::CardanoDelta>,
-    chain: dolos_cardano::CardanoLogic,
+    wal: dolos_redb3::wal::RedbWalStore<dolos_cardano::CardanoDelta>,
+    chain: Arc<RwLock<dolos_cardano::CardanoLogic>>,
     state: dolos_redb3::state::StateStore,
     archive: dolos_redb3::archive::ArchiveStore,
     mempool: Mempool,
-    storage_config: dolos_core::StorageConfig,
+    storage_config: StorageConfig,
     genesis: Arc<dolos_core::Genesis>,
     tip_broadcast: tokio::sync::broadcast::Sender<TipEvent>,
 }
 
 impl ToyDomain {
     /// Create a new MockDomain with the provided state implementation
-    pub fn new(initial_delta: Option<UtxoSetDelta>, storage_config: Option<StorageConfig>) -> Self {
+    pub async fn new(
+        initial_delta: Option<UtxoSetDelta>,
+        storage_config: Option<StorageConfig>,
+    ) -> Self {
         let state = dolos_redb3::state::StateStore::in_memory(dolos_cardano::model::build_schema())
             .unwrap();
 
-        if let Some(delta) = initial_delta {
-            let writer = state.start_writer().unwrap();
-            writer.apply_utxoset(&delta).unwrap();
-            writer.commit().unwrap();
-        }
-
+        let genesis = Arc::new(dolos_cardano::include::devnet::load());
         let (tip_broadcast, _) = tokio::sync::broadcast::channel(100);
 
         let archive =
             dolos_redb3::archive::ArchiveStore::in_memory(dolos_cardano::model::build_schema())
                 .unwrap();
 
-        let chain = dolos_cardano::CardanoLogic::initialize::<Self>(
-            dolos_cardano::Config::default(),
-            &state,
-        )
-        .unwrap();
+        let config = CardanoConfig::default();
 
-        Self {
+        let mut chain =
+            dolos_cardano::CardanoLogic::initialize::<Self>(config.clone(), &state, &genesis)
+                .unwrap();
+
+        chain
+            .apply_genesis::<Self>(&state, genesis.clone())
+            .unwrap();
+
+        let domain = Self {
             state,
-            wal: dolos_redb::wal::RedbWalStore::memory().unwrap(),
-            chain,
+            wal: dolos_redb3::wal::RedbWalStore::memory().unwrap(),
+            chain: Arc::new(RwLock::new(chain)),
             archive,
             mempool: Mempool {},
             storage_config: storage_config.unwrap_or_default(),
-            genesis: Arc::new(dolos_cardano::include::devnet::load()),
+            genesis,
             tip_broadcast,
+        };
+
+        dolos_core::facade::bootstrap(&domain).await.unwrap();
+
+        if let Some(delta) = initial_delta {
+            let writer = domain.state.start_writer().unwrap();
+            writer.apply_utxoset(&delta).unwrap();
+            writer.commit().unwrap();
         }
+
+        domain
     }
 }
 
@@ -133,6 +148,7 @@ impl dolos_core::TipSubscription for TipSubscription {
     async fn next_tip(&mut self) -> TipEvent {
         if !self.replay.is_empty() {
             let (point, block) = self.replay.pop().unwrap();
+            dbg!(&point, "running replay");
             return TipEvent::Apply(point, block);
         }
 
@@ -143,23 +159,27 @@ impl dolos_core::TipSubscription for TipSubscription {
 impl dolos_core::Domain for ToyDomain {
     type Entity = dolos_cardano::CardanoEntity;
     type EntityDelta = dolos_cardano::CardanoDelta;
-    type Wal = dolos_redb::wal::RedbWalStore<dolos_cardano::CardanoDelta>;
+    type Wal = dolos_redb3::wal::RedbWalStore<dolos_cardano::CardanoDelta>;
     type Archive = dolos_redb3::archive::ArchiveStore;
     type State = dolos_redb3::state::StateStore;
     type Chain = dolos_cardano::CardanoLogic;
     type TipSubscription = TipSubscription;
     type Mempool = Mempool;
 
-    fn storage_config(&self) -> &dolos_core::StorageConfig {
+    fn storage_config(&self) -> &StorageConfig {
         &self.storage_config
     }
 
-    fn genesis(&self) -> &dolos_core::Genesis {
-        &self.genesis
+    fn genesis(&self) -> Arc<dolos_core::Genesis> {
+        self.genesis.clone()
     }
 
-    fn chain(&self) -> &Self::Chain {
-        &self.chain
+    async fn read_chain(&self) -> tokio::sync::RwLockReadGuard<'_, Self::Chain> {
+        self.chain.read().await
+    }
+
+    async fn write_chain(&self) -> tokio::sync::RwLockWriteGuard<'_, Self::Chain> {
+        self.chain.write().await
     }
 
     fn wal(&self) -> &Self::Wal {
@@ -183,15 +203,18 @@ impl dolos_core::Domain for ToyDomain {
 
         let replay = self
             .wal()
-            .iter_blocks(from, None)
-            .map_err(WalError::from)?
+            .iter_blocks(from.clone(), None)?
+            .filter(|(point, _)| match from.as_ref() {
+                Some(from) => from != point,
+                None => true,
+            })
             .collect::<Vec<_>>();
 
         Ok(TipSubscription { replay, receiver })
     }
 
     fn notify_tip(&self, tip: TipEvent) {
-        if !self.tip_broadcast.receiver_count() == 0 {
+        if self.tip_broadcast.receiver_count() > 0 {
             self.tip_broadcast.send(tip).unwrap();
         }
     }

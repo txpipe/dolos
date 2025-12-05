@@ -82,11 +82,7 @@ impl Mempool {
         }
         .unwrap();
 
-        let (_, era) = dolos_cardano::eras::load_active_era::<D>(domain.state())?;
-
-        let (epoch, _) = era.slot_epoch(tip.slot());
-
-        let params = dolos_cardano::load_effective_pparams::<D>(domain.state(), epoch)?;
+        let params = dolos_cardano::load_effective_pparams::<D>(domain.state())?;
 
         let env = pallas::ledger::validate::utils::Environment {
             prot_params: dolos_cardano::utils::pparams_to_pallas(&params),
@@ -136,14 +132,7 @@ impl Mempool {
 
         let eras = dolos_cardano::eras::load_era_summary::<D>(domain.state())?;
 
-        let tip = domain
-            .state()
-            .read_cursor()?
-            .ok_or(MempoolError::PParamsNotAvailable)?;
-
-        let (epoch, _) = eras.slot_epoch(tip.slot());
-
-        let pparams = dolos_cardano::load_effective_pparams::<D>(domain.state(), epoch)?;
+        let pparams = dolos_cardano::load_effective_pparams::<D>(domain.state())?;
 
         let pparams = dolos_cardano::utils::pparams_to_pallas(&pparams);
 

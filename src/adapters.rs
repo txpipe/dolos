@@ -1,24 +1,11 @@
 use std::sync::Arc;
 
 use dolos_cardano::CardanoLogic;
-use dolos_core::*;
-use serde::{Deserialize, Serialize};
-
-#[derive(Serialize, Deserialize, Clone)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ChainConfig {
-    Cardano(dolos_cardano::Config),
-}
-
-impl Default for ChainConfig {
-    fn default() -> Self {
-        Self::Cardano(dolos_cardano::Config::default())
-    }
-}
+use dolos_core::{config::StorageConfig, *};
 
 // we can hardcode the WAL since we don't expect multiple types of
 // implementations
-pub type WalAdapter = dolos_redb::wal::RedbWalStore<dolos_cardano::CardanoDelta>;
+pub type WalAdapter = dolos_redb3::wal::RedbWalStore<dolos_cardano::CardanoDelta>;
 
 pub struct TipSubscription {
     replay: Vec<(ChainPoint, RawBlock)>,
@@ -41,7 +28,7 @@ pub struct DomainAdapter {
     pub storage_config: Arc<StorageConfig>,
     pub genesis: Arc<Genesis>,
     pub wal: WalAdapter,
-    pub chain: CardanoLogic,
+    pub chain: Arc<tokio::sync::RwLock<CardanoLogic>>,
     pub state: dolos_redb3::state::StateStore,
     pub archive: dolos_redb3::archive::ArchiveStore,
     pub mempool: crate::mempool::Mempool,
@@ -58,12 +45,16 @@ impl Domain for DomainAdapter {
     type Mempool = crate::mempool::Mempool;
     type TipSubscription = TipSubscription;
 
-    fn genesis(&self) -> &Genesis {
-        &self.genesis
+    fn genesis(&self) -> Arc<Genesis> {
+        self.genesis.clone()
     }
 
-    fn chain(&self) -> &Self::Chain {
-        &self.chain
+    async fn read_chain(&self) -> tokio::sync::RwLockReadGuard<'_, Self::Chain> {
+        self.chain.read().await
+    }
+
+    async fn write_chain(&self) -> tokio::sync::RwLockWriteGuard<'_, Self::Chain> {
+        self.chain.write().await
     }
 
     fn wal(&self) -> &Self::Wal {

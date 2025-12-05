@@ -1,17 +1,21 @@
-use dolos_core::{batch::WorkDeltas, ChainError, SlotTags, TxoRef};
+use std::collections::HashMap;
+
+use dolos_core::{batch::WorkDeltas, ChainError, Genesis, SlotTags, TxoRef};
 use pallas::{
     codec::{minicbor, utils::KeepRaw},
     ledger::{
         addresses::Address,
-        primitives::{conway::DatumOption, PlutusData},
+        primitives::{conway::DatumOption, Epoch, PlutusData},
         traverse::{
-            MultiEraBlock, MultiEraCert, MultiEraInput, MultiEraTx, MultiEraValue,
-            OriginalHash as _,
+            ComputeHash, MultiEraBlock, MultiEraCert, MultiEraInput, MultiEraRedeemer, MultiEraTx,
+            MultiEraValue, OriginalHash as _,
         },
     },
 };
 
-use crate::{pallas_extras, roll::BlockVisitor, CardanoLogic, PParamsSet};
+use crate::{
+    owned::OwnedMultiEraOutput, pallas_extras, roll::BlockVisitor, CardanoLogic, PParamsSet,
+};
 
 #[derive(Default, Clone)]
 pub struct TxLogVisitor;
@@ -87,7 +91,10 @@ impl BlockVisitor for TxLogVisitor {
         &mut self,
         deltas: &mut WorkDeltas<CardanoLogic>,
         block: &MultiEraBlock,
+        _: &Genesis,
         _: &PParamsSet,
+        _: Epoch,
+        _: u16,
     ) -> Result<(), ChainError> {
         deltas.slot.number = Some(block.number());
 
@@ -99,8 +106,13 @@ impl BlockVisitor for TxLogVisitor {
         deltas: &mut WorkDeltas<CardanoLogic>,
         _: &MultiEraBlock,
         tx: &MultiEraTx,
+        _: &HashMap<TxoRef, OwnedMultiEraOutput>,
     ) -> Result<(), ChainError> {
         deltas.slot.tx_hashes.push(tx.hash().to_vec());
+
+        for (k, _) in tx.metadata().collect::<Vec<_>>() {
+            deltas.slot.metadata.push(k);
+        }
 
         Ok(())
     }
@@ -168,6 +180,22 @@ impl BlockVisitor for TxLogVisitor {
         cert: &pallas::ledger::traverse::MultiEraCert,
     ) -> Result<(), ChainError> {
         unpack_cert(&mut deltas.slot, cert);
+
+        Ok(())
+    }
+
+    fn visit_redeemers(
+        &mut self,
+        deltas: &mut WorkDeltas<CardanoLogic>,
+        _: &MultiEraBlock,
+        _: &MultiEraTx,
+        redeemer: &MultiEraRedeemer,
+    ) -> Result<(), ChainError> {
+        // TODO: We should use a KeepRaw structure and original_hash
+        deltas
+            .slot
+            .datums
+            .push(redeemer.data().compute_hash().to_vec());
 
         Ok(())
     }

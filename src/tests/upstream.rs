@@ -1,8 +1,11 @@
 use gasket::{framework::*, runtime::Policy};
 use tracing::{error, info};
 
-use dolos_core::PullEvent;
-use dolos_redb::wal::RedbWalStore;
+use dolos_core::{
+    config::{PeerConfig, SyncConfig},
+    PullEvent,
+};
+use dolos_redb3::wal::RedbWalStore;
 
 struct WitnessStage {
     input: gasket::messaging::InputPort<PullEvent>,
@@ -56,11 +59,11 @@ fn test_mainnet_upstream() {
     let (send, receive) = gasket::messaging::tokio::mpsc_channel(200);
 
     let mut upstream = crate::sync::pull::Stage::new(
-        &crate::sync::Config {
+        &SyncConfig {
             pull_batch_size: Some(20),
             sync_limit: Default::default(),
         },
-        &crate::core::PeerConfig {
+        &PeerConfig {
             peer_address: "relays-new.cardano-mainnet.iohk.io:3001".into(),
             network_magic: 764824073,
             is_testnet: false,

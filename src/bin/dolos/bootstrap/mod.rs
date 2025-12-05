@@ -4,7 +4,6 @@ use miette::IntoDiagnostic;
 
 use crate::feedback::Feedback;
 
-
 mod mithril;
 mod relay;
 mod snapshot;
@@ -44,7 +43,9 @@ pub struct Args {
     command: Option<Command>,
 }
 
-pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::Result<()> {
+use dolos_core::config::RootConfig;
+
+pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Result<()> {
     let command = match args.command.clone() {
         Some(x) => x,
         None => Command::inquire()?,

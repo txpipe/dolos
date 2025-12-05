@@ -24,9 +24,9 @@ jsonrpsee = { version = "0.24.9", features = ["server"] }
 opentelemetry = "0.30.0"
 opentelemetry_sdk = "0.30.0"
 
-tx3-lang = "0.11.4"
-tx3-cardano = "0.11.4"
-tx3-resolver = "0.11.4"
+tx3-lang = "0.13.0"
+tx3-cardano = "0.13.0"
+tx3-resolver = "0.13.0"
 
 # tx3-lang = { path = "../../../../tx3-lang/tx3/crates/tx3-lang" }
 # tx3-cardano = { path = "../../../../tx3-lang/tx3/crates/tx3-cardano" }

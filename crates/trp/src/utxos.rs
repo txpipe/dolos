@@ -1,4 +1,5 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, RwLock};
 
 use tx3_lang::{
     backend::{UtxoPattern, UtxoStore},
@@ -12,25 +13,85 @@ use crate::{
     Error,
 };
 
-pub struct UtxoStoreAdapter<D: Domain>(D::State);
+#[derive(Default)]
+pub struct UtxoLock {
+    locks: RwLock<HashMap<TxoRef, u64>>,
+}
+
+const SLOTS_BETWEEN_BLOCKS: u64 = 20;
+const LOCK_DURATION_BLOCKS: u64 = 3;
+const LOCK_DURATION_SLOTS: u64 = SLOTS_BETWEEN_BLOCKS * LOCK_DURATION_BLOCKS;
+
+impl UtxoLock {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn lock(&self, refs: &[TxoRef], current_slot: u64) {
+        let mut locks = self.locks.write().unwrap();
+        
+        locks.retain(|_, expiration| *expiration > current_slot);
+
+        for r in refs {
+            locks.insert(r.clone(), current_slot + LOCK_DURATION_SLOTS);
+        }
+    }
+
+    pub fn is_locked(&self, txo: &TxoRef, current_slot: u64) -> bool {
+        let locks = self.locks.read().unwrap();
+        if let Some(expiration) = locks.get(txo) {
+            return *expiration > current_slot;
+        }
+        false
+    }
+}
+
+pub struct UtxoStoreAdapter<D: Domain> {
+    state: D::State,
+    locks: Arc<UtxoLock>,
+}
 
 impl<D: Domain> UtxoStoreAdapter<D> {
-    pub fn new(state: D::State) -> Self {
-        Self(state)
+    pub fn new(state: D::State, locks: Arc<UtxoLock>) -> Self {
+        Self { state, locks }
     }
 
     fn state(&self) -> &D::State {
-        &self.0
+        &self.state
+    }
+
+    fn is_locked(&self, txo: &TxoRef) -> bool {
+        let current_slot = self
+            .state()
+            .read_cursor()
+            .ok()
+            .flatten()
+            .map(|c| c.slot())
+            .unwrap_or(0);
+
+        self.locks.is_locked(txo, current_slot)
     }
 
     fn match_utxos_by_address(&self, address: &[u8]) -> Result<HashSet<TxoRef>, Error> {
         let utxos = self.state().get_utxo_by_address(address)?;
+
+        // Remove locked UTXOs
+        let utxos = utxos
+            .into_iter()
+            .filter(|u| !self.is_locked(u))
+            .collect();
 
         Ok(utxos)
     }
 
     fn match_utxos_by_asset_policy(&self, policy: &[u8]) -> Result<HashSet<TxoRef>, Error> {
         let utxos = self.state().get_utxo_by_policy(policy)?;
+
+        // Remove locked UTXOs
+        let utxos = utxos
+            .into_iter()
+            .filter(|u| !self.is_locked(u))
+            .collect();
 
         Ok(utxos)
     }
@@ -39,6 +100,12 @@ impl<D: Domain> UtxoStoreAdapter<D> {
         let subject = [policy, name].concat();
 
         let utxos = self.state().get_utxo_by_asset(&subject)?;
+
+        // Remove locked UTXOs
+        let utxos = utxos
+            .into_iter()
+            .filter(|u| !self.is_locked(u))
+            .collect();
 
         Ok(utxos)
     }

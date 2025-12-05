@@ -1,3 +1,4 @@
+use dolos_core::config::RootConfig;
 use itertools::Itertools;
 use miette::{Context, IntoDiagnostic};
 
@@ -11,13 +12,14 @@ pub struct Args {
     pub chunk: usize,
 }
 
-pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::Result<()> {
+#[tokio::main]
+pub async fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Result<()> {
     //crate::common::setup_tracing(&config.logging)?;
 
     let progress = feedback.slot_progress_bar();
     progress.set_message("rebuilding stores");
 
-    let domain = crate::common::setup_domain(config)?;
+    let domain = crate::common::setup_domain(config).await?;
 
     let (tip, _) = domain
         .wal
@@ -37,7 +39,7 @@ pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::
     for chunk in remaining.chunks(args.chunk).into_iter() {
         let collected = chunk.into_iter().map(|(_, x)| x).collect_vec();
 
-        let Ok(cursor) = dolos_core::facade::import_blocks(&domain, collected) else {
+        let Ok(cursor) = dolos_core::facade::import_blocks(&domain, collected).await else {
             miette::bail!("failed to apply block chunk");
         };
 

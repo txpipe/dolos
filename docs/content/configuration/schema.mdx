@@ -23,7 +23,7 @@ alonzo_path = "alonzo.json"
 conway_path = "conway.json"
 
 [chain]
-type = "Cardano"
+type = "cardano"
 
 [chain.track]
 seen_addresses = true
@@ -32,6 +32,7 @@ pool_state = true
 pool_delegator = true
 epoch_state = true
 account_activity = true
+drep_state = true
 
 [sync]
 pull_batch_size = 100
@@ -120,17 +121,28 @@ Dolos requires Cardano genesis data to operate. For simplicity sake, we've decid
 - `conway_path`: file path to the Conway json genesis file
 - `force_protocol`: (optional) the protocol version to force the node to start from. This is useful for networks such as `preview` which skips the Byron era.
 
-## `chain.track` section
+## `chain` section
 
-| property          | type    | default |
-| ----------------- | ------- | ------- |
-| seen_addresses    | boolean | true    |
-| asset_state       | boolean | true    |
-| pool_state        | boolean | true    |
-| pool_delegator    | boolean | true    |
-| epoch_state       | boolean | true    |
-| account_activity  | boolean | true    |
-| reward_logs       | boolean | true    |
+The `chain` section specifies the type of blockchain to connect to.
+
+| property | type   | example   |
+| -------- | ------ | --------- |
+| type     | string | "cardano" |
+
+- `type`: the type of chain network.
+
+ ## `chain.track` section
+ 
+ | property          | type    | default |
+ | ----------------- | ------- | ------- |
+ | seen_addresses    | boolean | true    |
+ | asset_state       | boolean | true    |
+ | pool_state        | boolean | true    |
+ | pool_delegator    | boolean | true    |
+ | epoch_state       | boolean | true    |
+ | account_activity  | boolean | true    |
+ | reward_logs       | boolean | true    |
+ | drep_state        | boolean | true    |
 
 - `seen_addresses`: Tracks whether addresses have been observed.
 - `asset_state`: Monitors the state of assets.
@@ -139,6 +151,7 @@ Dolos requires Cardano genesis data to operate. For simplicity sake, we've decid
 - `epoch_state`: Tracks the state of epochs.
 - `account_activity`: Monitors activity related to accounts.
 - `reward_logs`: Keeps track of rewards for each delegator in each epoch
+- `drep_state`: Keeps track of Drep registration state in each epoch
 
 ## `sync` section
 

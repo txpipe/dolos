@@ -2,27 +2,27 @@ use tracing::{error, info, warn};
 
 use crate::{
     batch::WorkBatch, ArchiveStore, Block as _, BlockSlot, ChainLogic, ChainPoint, Domain,
-    DomainError, RawBlock, StateStore, TipEvent, WalStore, WorkKind, WorkUnit,
+    DomainError, RawBlock, StateStore, TipEvent, WalStore, WorkUnit,
 };
 
 /// Process a batch of blocks during bulk import operations, skipping the WAL
 /// and doesn't notify tip
-fn import_batch<D: Domain>(
+fn execute_batch<D: Domain>(
+    chain: &D::Chain,
     domain: &D,
-    mut batch: WorkBatch<D::Chain>,
+    batch: &mut WorkBatch<D::Chain>,
+    with_wal: bool,
 ) -> Result<BlockSlot, DomainError> {
     batch.load_utxos(domain)?;
 
-    batch.decode_utxos(domain.chain())?;
+    batch.decode_utxos(chain)?;
 
     // Chain-specific logic
-    domain
-        .chain()
-        .compute_delta::<D>(domain.state(), &mut batch)?;
+    chain.compute_delta::<D>(domain.state(), domain.genesis(), batch)?;
 
-    // since we're are importing finalized blocks, we don't care about the potential
-    // for undos. This allows us to just drop the mutated delta without having to
-    // persist it in the WAL.
+    if with_wal {
+        batch.commit_wal(domain)?;
+    }
 
     batch.load_entities(domain)?;
 
@@ -35,30 +35,10 @@ fn import_batch<D: Domain>(
     Ok(batch.last_slot())
 }
 
-/// Process a batch of blocks during live operations, saving to WAL and
-/// notifying tip
-fn roll_batch<D: Domain>(
-    domain: &D,
-    mut batch: WorkBatch<D::Chain>,
-) -> Result<BlockSlot, DomainError> {
-    batch.load_utxos(domain)?;
-
-    batch.decode_utxos(domain.chain())?;
-
-    // Chain-specific logic
-    domain
-        .chain()
-        .compute_delta::<D>(domain.state(), &mut batch)?;
-
-    batch.commit_wal(domain)?;
-
-    batch.load_entities(domain)?;
-
-    batch.apply_entities()?;
-
-    batch.commit_state(domain)?;
-
-    batch.commit_archive(domain)?;
+fn notify_work<D: Domain>(domain: &D, work: &WorkUnit<D::Chain>) {
+    let WorkUnit::Blocks(batch) = work else {
+        return;
+    };
 
     for block in batch.iter_blocks() {
         let point = block.point();
@@ -66,109 +46,88 @@ fn roll_batch<D: Domain>(
         domain.notify_tip(TipEvent::Apply(point.clone(), raw));
         info!(%point, "roll forward");
     }
-
-    Ok(batch.last_slot())
 }
 
-/// Execute isolated work, such as genesis or sweeps.
-///
-/// Don't use this to execute blocks, those should be executed in a batch. This
-/// method can be used for both import and roll operations.
-fn execute_isolated_work<D: Domain>(
+fn execute_work<D: Domain>(
+    chain: &mut D::Chain,
     domain: &D,
-    work: WorkUnit<D::Chain>,
+    work: &mut WorkUnit<D::Chain>,
+    live: bool,
 ) -> Result<(), DomainError> {
     match work {
         WorkUnit::Genesis => {
-            domain
-                .chain()
-                .apply_genesis::<D>(domain.state(), domain.genesis())?;
-
+            chain.apply_genesis::<D>(domain.state(), domain.genesis())?;
             domain.wal().reset_to(&ChainPoint::Origin)?;
         }
+        WorkUnit::EWrap(slot) => {
+            chain.apply_ewrap::<D>(domain.state(), domain.archive(), domain.genesis(), *slot)?;
+        }
+        WorkUnit::EStart(slot) => {
+            chain.apply_estart::<D>(domain.state(), domain.archive(), domain.genesis(), *slot)?;
+        }
+        WorkUnit::Rupd(slot) => {
+            chain.apply_rupd::<D>(domain.state(), domain.archive(), domain.genesis(), *slot)?;
+        }
+        WorkUnit::Blocks(batch) => {
+            execute_batch(chain, domain, batch, live)?;
+        }
+        WorkUnit::ForcedStop => {
+            return Err(DomainError::StopEpochReached);
+        }
+    };
 
-        WorkUnit::Sweep(slot) => {
-            domain.chain().apply_sweep::<D>(
-                domain.state(),
-                domain.archive(),
-                domain.genesis(),
-                slot,
-            )?;
-        }
-        WorkUnit::Block(_) => {
-            unreachable!("isolated work can't be a block, only genesis or sweeps are allowed");
-        }
+    if live {
+        notify_work(domain, work);
     }
 
     Ok(())
 }
 
-fn drain_pending_work<D: Domain>(domain: &D) -> Result<(), DomainError> {
-    while let Some(work) = domain.chain().pop_work() {
-        execute_isolated_work(domain, work)?;
+async fn drain_pending_work<D: Domain>(
+    chain: &mut D::Chain,
+    domain: &D,
+    live: bool,
+) -> Result<(), DomainError> {
+    while let Some(mut work) = chain.pop_work() {
+        execute_work(chain, domain, &mut work, live)?;
     }
 
     Ok(())
 }
 
-fn gather_batched_work<D: Domain>(domain: &D) -> Result<WorkBatch<D::Chain>, DomainError> {
-    let mut batch = WorkBatch::default();
-
-    let chain = domain.chain();
-
-    while let Some(work) = chain.peek_work() {
-        if !matches!(work, WorkKind::Block) {
-            break;
-        }
-
-        match chain.pop_work().unwrap() {
-            WorkUnit::Block(block) => {
-                batch.add_work(block);
-            }
-            _ => unreachable!("can't pop work that isn't a block"),
-        }
-    }
-
-    Ok(batch)
-}
-
-pub fn import_blocks<D: Domain>(
+pub async fn import_blocks<D: Domain>(
     domain: &D,
     mut raw: Vec<RawBlock>,
 ) -> Result<BlockSlot, DomainError> {
-    for block in raw.drain(..) {
-        domain.chain().receive_block(block)?;
-    }
-
     let mut last = 0;
+    let mut chain = domain.write_chain().await;
 
-    while let Some(work) = domain.chain().peek_work() {
-        if matches!(work, WorkKind::Block) {
-            let batch = gather_batched_work(domain)?;
-            last = import_batch(domain, batch)?;
-        } else {
-            let work = domain.chain().pop_work().unwrap();
-            execute_isolated_work(domain, work)?;
+    for block in raw.drain(..) {
+        if !chain.can_receive_block() {
+            drain_pending_work(&mut *chain, domain, false).await?;
         }
+
+        last = chain.receive_block(block)?;
     }
+
+    // one last drain to ensure we're up to date
+    drain_pending_work(&mut *chain, domain, false).await?;
 
     Ok(last)
 }
 
-pub fn roll_forward<D: Domain>(domain: &D, block: RawBlock) -> Result<BlockSlot, DomainError> {
-    domain.chain().receive_block(block)?;
+pub async fn roll_forward<D: Domain>(
+    domain: &D,
+    block: RawBlock,
+) -> Result<BlockSlot, DomainError> {
+    let mut chain = domain.write_chain().await;
 
-    let mut last = 0;
+    // we drain first in case there's previous work that needs to be applied (eg: initialization).
+    drain_pending_work(&mut *chain, domain, true).await?;
 
-    while let Some(work) = domain.chain().peek_work() {
-        if matches!(work, WorkKind::Block) {
-            let batch = gather_batched_work(domain)?;
-            last = roll_batch(domain, batch)?;
-        } else {
-            let work = domain.chain().pop_work().unwrap();
-            execute_isolated_work(domain, work)?;
-        }
-    }
+    let last = chain.receive_block(block)?;
+
+    drain_pending_work(&mut *chain, domain, true).await?;
 
     Ok(last)
 }
@@ -232,7 +191,7 @@ pub fn check_integrity<D: Domain>(domain: &D) -> Result<(), DomainError> {
     Ok(())
 }
 
-pub fn bootstrap<D: Domain>(domain: &D) -> Result<(), DomainError>
+pub async fn bootstrap<D: Domain>(domain: &D) -> Result<(), DomainError>
 where
 {
     check_integrity(domain)?;
@@ -241,7 +200,8 @@ where
     // catch_up_stores(domain)?;
 
     // drain any work that might have been defined by the initialization
-    drain_pending_work(domain)?;
+    let mut chain = domain.write_chain().await;
+    drain_pending_work(&mut *chain, domain, false).await?;
 
     Ok(())
 }

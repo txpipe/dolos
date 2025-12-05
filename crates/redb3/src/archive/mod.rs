@@ -9,7 +9,13 @@ use dolos_core::{
 };
 
 use ::redb::Durability;
-use pallas::ledger::traverse::MultiEraBlock;
+use pallas::{
+    crypto::hash::Hash,
+    ledger::{
+        primitives::{conway::DatumOption, PlutusData},
+        traverse::{ComputeHash, MultiEraBlock, OriginalHash},
+    },
+};
 use redb::WriteTransaction;
 use std::sync::Arc;
 
@@ -509,6 +515,15 @@ impl ArchiveStore {
         Ok(ArchiveSparseIter(rx, range))
     }
 
+    pub fn iter_possible_blocks_with_metadata(
+        &self,
+        metadata: &u64,
+    ) -> Result<ArchiveSparseIter, RedbArchiveError> {
+        let rx = self.db().begin_read()?;
+        let range = indexes::Indexes::iter_by_metadata(&rx, metadata)?;
+        Ok(ArchiveSparseIter(rx, range))
+    }
+
     pub fn get_block_by_slot(
         &self,
         slot: &BlockSlot,
@@ -604,6 +619,44 @@ impl ArchiveStore {
                 MultiEraBlock::decode(raw.as_slice()).map_err(ArchiveError::BlockDecodingError)?;
             if let Some(tx) = block.txs().iter().find(|x| x.hash().to_vec() == tx_hash) {
                 return Ok(Some(EraCbor(block.era().into(), tx.encode())));
+            }
+        }
+
+        Ok(None)
+    }
+
+    pub fn get_plutus_data(
+        &self,
+        datum_hash: &Hash<32>,
+    ) -> Result<Option<PlutusData>, RedbArchiveError> {
+        let possible = self.get_possible_blocks_by_datum_hash(datum_hash.as_slice())?;
+
+        for raw in possible {
+            let block =
+                MultiEraBlock::decode(raw.as_slice()).map_err(ArchiveError::BlockDecodingError)?;
+            for tx in block.txs() {
+                // Check witnesses
+                if let Some(plutus_data) = tx.find_plutus_data(datum_hash) {
+                    // unwarp the KeepRaw wrapper.
+                    return Ok(Some(plutus_data.clone().unwrap()));
+                }
+
+                // Check inline
+                for (_, output) in tx.produces() {
+                    if let Some(DatumOption::Data(data)) = output.datum() {
+                        if &data.original_hash() == datum_hash {
+                            return Ok(Some(data.clone().unwrap().unwrap()));
+                        }
+                    }
+                }
+
+                // Check redeemer data
+                for redeemer in tx.redeemers() {
+                    // TODO: We should use a KeepRaw structure and original_hash
+                    if &redeemer.data().compute_hash() == datum_hash {
+                        return Ok(Some(redeemer.data().clone()));
+                    }
+                }
             }
         }
 
@@ -811,6 +864,10 @@ impl dolos_core::ArchiveStore for ArchiveStore {
         Ok(Self::get_tx(self, tx_hash)?)
     }
 
+    fn get_plutus_data(&self, datum_hash: &Hash<32>) -> Result<Option<PlutusData>, ArchiveError> {
+        Ok(Self::get_plutus_data(self, datum_hash)?)
+    }
+
     fn get_slot_for_tx(&self, tx_hash: &[u8]) -> Result<Option<BlockSlot>, ArchiveError> {
         Ok(Self::get_slot_for_tx(self, tx_hash)?)
     }
@@ -859,6 +916,16 @@ impl dolos_core::ArchiveStore for ArchiveStore {
     ) -> Result<Self::SparseBlockIter, ArchiveError> {
         // TODO: we need to filter the false positives
         let out = self.iter_possible_blocks_with_account_certs(account)?;
+
+        Ok(out)
+    }
+
+    fn iter_blocks_with_metadata(
+        &self,
+        metadata: &u64,
+    ) -> Result<Self::SparseBlockIter, ArchiveError> {
+        // TODO: we need to filter the false positives
+        let out = self.iter_possible_blocks_with_metadata(metadata)?;
 
         Ok(out)
     }

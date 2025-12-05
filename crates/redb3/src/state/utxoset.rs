@@ -433,8 +433,7 @@ mod tests {
     use std::{collections::HashSet, str::FromStr as _, sync::Arc};
 
     use dolos_core::{
-        ChainPoint, StateSchema, StateStore as _, StateWriter as _, TxoRef, UtxoMap, UtxoSet,
-        UtxoSetDelta,
+        StateSchema, StateStore as _, StateWriter as _, TxoRef, UtxoMap, UtxoSet, UtxoSetDelta,
     };
     use dolos_testing::*;
     use pallas::ledger::addresses::{Address, ShelleyDelegationPart};
@@ -486,11 +485,6 @@ mod tests {
         let bobs = get_test_address_utxos(&store, TestAddress::Bob);
         let delta = make_move_utxo_delta(bobs, 1, TestAddress::Carol);
         apply_utxoset!(store, [&delta]);
-
-        assert_eq!(
-            store.read_cursor().unwrap(),
-            Some(ChainPoint::Specific(1, slot_to_hash(1)))
-        );
 
         let bobs = get_test_address_utxos(&store, TestAddress::Bob);
         assert!(bobs.is_empty());

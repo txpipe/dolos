@@ -1,3 +1,4 @@
+use dolos_core::config::RootConfig;
 use flate2::read::GzDecoder;
 use inquire::list_option::ListOption;
 use miette::{Context, IntoDiagnostic};
@@ -44,7 +45,7 @@ impl Args {
 const DEFAULT_URL_TEMPLATE: &str =
     "https://dolos-snapshots.s3-accelerate.amazonaws.com/${VERSION}/${NETWORK}/${VARIANT}/${POINT}.tar.gz";
 
-fn define_snapshot_url(config: &crate::Config, args: &Args) -> Option<String> {
+fn define_snapshot_url(config: &RootConfig, args: &Args) -> Option<String> {
     if config.upstream.is_emulator() {
         return None;
     }
@@ -66,7 +67,7 @@ fn define_snapshot_url(config: &crate::Config, args: &Args) -> Option<String> {
     Some(snapshot_url)
 }
 
-fn fetch_snapshot(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::Result<()> {
+fn fetch_snapshot(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Result<()> {
     let root = config.storage.path.as_ref().ok_or(miette::miette!(
         "can't fetch snapshot for ephemeral storage"
     ))?;
@@ -114,7 +115,7 @@ fn fetch_snapshot(config: &crate::Config, args: &Args, feedback: &Feedback) -> m
     Ok(())
 }
 
-pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::Result<()> {
+pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Result<()> {
     fetch_snapshot(config, args, feedback)?;
 
     Ok(())

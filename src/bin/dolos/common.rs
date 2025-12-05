@@ -1,3 +1,4 @@
+use dolos_core::config::{ChainConfig, GenesisConfig, LoggingConfig, RootConfig, StorageVersion};
 use miette::{Context as _, IntoDiagnostic};
 use std::sync::Arc;
 use std::{fs, path::PathBuf, time::Duration};
@@ -5,11 +6,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
 use tracing_subscriber::{filter::Targets, prelude::*};
 
-use dolos::adapters::{ChainConfig, DomainAdapter, WalAdapter};
+use dolos::adapters::{DomainAdapter, WalAdapter};
 use dolos::core::Genesis;
 use dolos::prelude::*;
-
-use crate::{GenesisConfig, LoggingConfig};
 
 pub struct Stores {
     pub wal: WalAdapter,
@@ -17,7 +16,7 @@ pub struct Stores {
     pub archive: dolos_redb3::archive::ArchiveStore,
 }
 
-pub fn ensure_storage_path(config: &crate::Config) -> Result<PathBuf, Error> {
+pub fn ensure_storage_path(config: &RootConfig) -> Result<PathBuf, Error> {
     let root = config.storage.path.as_ref().ok_or(Error::config(
         "can't define storage path for ephemeral config",
     ))?;
@@ -27,16 +26,16 @@ pub fn ensure_storage_path(config: &crate::Config) -> Result<PathBuf, Error> {
     Ok(root.to_path_buf())
 }
 
-pub fn open_wal_store(config: &crate::Config) -> Result<WalAdapter, Error> {
+pub fn open_wal_store(config: &RootConfig) -> Result<WalAdapter, Error> {
     let root = ensure_storage_path(config)?;
 
-    let wal = dolos_redb::wal::RedbWalStore::open(root.join("wal"), config.storage.wal_cache)?;
+    let wal = dolos_redb3::wal::RedbWalStore::open(root.join("wal"), config.storage.wal_cache)?;
 
     Ok(wal)
 }
 
 pub fn open_archive_store(
-    config: &crate::Config,
+    config: &RootConfig,
 ) -> Result<dolos_redb3::archive::ArchiveStore, Error> {
     let root = ensure_storage_path(config)?;
     let schema = dolos_cardano::model::build_schema();
@@ -51,7 +50,7 @@ pub fn open_archive_store(
     Ok(archive)
 }
 
-pub fn open_state_store(config: &crate::Config) -> Result<dolos_redb3::state::StateStore, Error> {
+pub fn open_state_store(config: &RootConfig) -> Result<dolos_redb3::state::StateStore, Error> {
     let root = ensure_storage_path(config)?;
     let schema = dolos_cardano::model::build_schema();
 
@@ -65,7 +64,7 @@ pub fn open_state_store(config: &crate::Config) -> Result<dolos_redb3::state::St
     Ok(state3)
 }
 
-pub fn open_persistent_data_stores(config: &crate::Config) -> Result<Stores, Error> {
+pub fn open_persistent_data_stores(config: &RootConfig) -> Result<Stores, Error> {
     if config.storage.version == StorageVersion::V0 {
         error!("Storage should be removed and init procedure run again.");
         return Err(Error::StorageError("Invalid store version".to_string()));
@@ -85,7 +84,7 @@ pub fn open_persistent_data_stores(config: &crate::Config) -> Result<Stores, Err
 }
 
 pub fn create_ephemeral_data_stores() -> Result<Stores, Error> {
-    let wal = dolos_redb::wal::RedbWalStore::memory()?;
+    let wal = dolos_redb3::wal::RedbWalStore::memory()?;
 
     let schema = dolos_cardano::model::build_schema();
     let state =
@@ -101,7 +100,7 @@ pub fn create_ephemeral_data_stores() -> Result<Stores, Error> {
     })
 }
 
-pub fn setup_data_stores(config: &crate::Config) -> Result<Stores, Error> {
+pub fn setup_data_stores(config: &RootConfig) -> Result<Stores, Error> {
     if config.storage.is_ephemeral() {
         create_ephemeral_data_stores()
     } else {
@@ -109,7 +108,29 @@ pub fn setup_data_stores(config: &crate::Config) -> Result<Stores, Error> {
     }
 }
 
-pub fn setup_domain(config: &crate::Config) -> miette::Result<DomainAdapter> {
+pub fn load_config(
+    explicit_file: &Option<std::path::PathBuf>,
+) -> Result<RootConfig, ::config::ConfigError> {
+    let mut s = ::config::Config::builder();
+
+    // our base config will always be in /etc/dolos
+    s = s.add_source(::config::File::with_name("/etc/dolos/daemon.toml").required(false));
+
+    // but we can override it by having a file in the working dir
+    s = s.add_source(::config::File::with_name("dolos.toml").required(false));
+
+    // if an explicit file was passed, then we load it as mandatory
+    if let Some(explicit) = explicit_file.as_ref().and_then(|x| x.to_str()) {
+        s = s.add_source(::config::File::with_name(explicit).required(true));
+    }
+
+    // finally, we use env vars to make some last-step overrides
+    s = s.add_source(::config::Environment::with_prefix("DOLOS").separator("_"));
+
+    s.build()?.try_deserialize()
+}
+
+pub async fn setup_domain(config: &RootConfig) -> miette::Result<DomainAdapter> {
     let stores = setup_data_stores(config)?;
     let genesis = Arc::new(open_genesis_files(&config.genesis)?);
     let mempool = dolos::mempool::Mempool::new();
@@ -118,14 +139,17 @@ pub fn setup_domain(config: &crate::Config) -> miette::Result<DomainAdapter> {
 
     let ChainConfig::Cardano(chain_config) = chain;
 
-    let chain =
-        dolos_cardano::CardanoLogic::initialize::<DomainAdapter>(chain_config, &stores.state)
-            .into_diagnostic()?;
+    let chain = dolos_cardano::CardanoLogic::initialize::<DomainAdapter>(
+        chain_config,
+        &stores.state,
+        &genesis,
+    )
+    .into_diagnostic()?;
 
     let domain = DomainAdapter {
         storage_config: Arc::new(config.storage.clone()),
         genesis,
-        chain,
+        chain: Arc::new(tokio::sync::RwLock::new(chain)),
         wal: stores.wal,
         state: stores.state,
         archive: stores.archive,
@@ -134,7 +158,9 @@ pub fn setup_domain(config: &crate::Config) -> miette::Result<DomainAdapter> {
     };
 
     // this will make sure the domain is correctly initialized and in a valid state.
-    dolos_core::facade::bootstrap(&domain).map_err(|x| miette::miette!("{:?}", x))?;
+    dolos_core::facade::bootstrap(&domain)
+        .await
+        .map_err(|x| miette::miette!("{:?}", x))?;
 
     Ok(domain)
 }
@@ -258,7 +284,7 @@ pub async fn run_pipeline(pipeline: gasket::daemon::Daemon, exit: CancellationTo
     pipeline.teardown();
 }
 
-pub fn cleanup_data(config: &crate::Config) -> Result<(), std::io::Error> {
+pub fn cleanup_data(config: &RootConfig) -> Result<(), std::io::Error> {
     let Some(root) = &config.storage.path else {
         return Ok(());
     };

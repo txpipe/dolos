@@ -1,3 +1,4 @@
+use dolos_core::config::RootConfig;
 use itertools::*;
 use miette::{Context, IntoDiagnostic};
 use pallas::{
@@ -29,10 +30,11 @@ pub struct Args {
     network_id: u8,
 }
 
-pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
+#[tokio::main]
+pub async fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging)?;
 
-    let domain = crate::common::setup_domain(config)?;
+    let domain = crate::common::setup_domain(config).await?;
 
     let cbor = std::fs::read_to_string(&args.file)
         .into_diagnostic()
@@ -86,8 +88,7 @@ pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
     }
 
     let pparams =
-        dolos_cardano::load_effective_pparams::<DomainAdapter>(domain.state(), args.epoch as u32)
-            .into_diagnostic()?;
+        dolos_cardano::load_effective_pparams::<DomainAdapter>(domain.state()).into_diagnostic()?;
 
     let pparams = dolos_cardano::utils::pparams_to_pallas(&pparams);
 

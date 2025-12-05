@@ -232,19 +232,20 @@ mod tests {
     use dolos_testing::toy_domain::ToyDomain;
     use pallas::interop::utxorpc::spec::sync::sync_service_server::SyncService as _;
 
-    use crate::facade::DomainExt as _;
-
     use super::*;
 
     #[tokio::test]
     async fn test_dump_history_pagination() {
-        let domain = ToyDomain::new(None, None);
+        let domain = ToyDomain::new(None, None).await;
         let cancel = CancelTokenImpl::default();
 
-        for i in 0..34 {
-            let (_, block) = dolos_testing::blocks::make_conway_block(i);
-            dolos_core::facade::roll_forward(&domain, block).unwrap();
-        }
+        let batch = (0..34)
+            .map(|i| dolos_testing::blocks::make_conway_block(i).1)
+            .collect_vec();
+
+        let _ = dolos_core::facade::import_blocks(&domain, batch)
+            .await
+            .unwrap();
 
         let service = SyncServiceImpl::new(domain, cancel);
 
@@ -286,7 +287,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_dump_history_max_items() {
-        let domain = ToyDomain::new(None, None);
+        let domain = ToyDomain::new(None, None).await;
         let cancel = CancelTokenImpl::default();
 
         let service = SyncServiceImpl::new(domain, cancel);

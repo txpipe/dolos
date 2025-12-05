@@ -1,6 +1,6 @@
 use std::ops::Deref as _;
 
-use dolos_core::{batch::WorkDeltas, ChainError, NsKey};
+use dolos_core::{batch::WorkDeltas, BlockSlot, ChainError, NsKey};
 use pallas::ledger::{
     primitives::conway::{self, Anchor, DRep},
     traverse::{MultiEraBlock, MultiEraCert, MultiEraTx},
@@ -19,6 +19,7 @@ fn cert_drep(cert: &MultiEraCert) -> Option<DRep> {
             conway::Certificate::UnRegDRepCert(cert, _) => Some(stake_cred_to_drep(cert)),
             conway::Certificate::UpdateDRepCert(cert, _) => Some(stake_cred_to_drep(cert)),
             conway::Certificate::StakeVoteDeleg(_, _, drep) => Some(drep.clone()),
+            conway::Certificate::StakeVoteRegDeleg(_, _, drep, _) => Some(drep.clone()),
             conway::Certificate::VoteRegDeleg(_, drep, _) => Some(drep.clone()),
             conway::Certificate::VoteDeleg(_, drep) => Some(drep.clone()),
             _ => None,
@@ -35,7 +36,6 @@ pub struct DRepRegistration {
     anchor: Option<Anchor>,
 
     // undo
-    was_retired: bool,
     prev_deposit: Option<u64>,
 }
 
@@ -46,7 +46,6 @@ impl DRepRegistration {
             slot,
             deposit,
             anchor,
-            was_retired: false,
             prev_deposit: None,
         }
     }
@@ -56,27 +55,23 @@ impl dolos_core::EntityDelta for DRepRegistration {
     type Entity = DRepState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((DRepState::NS, drep_to_entity_key(self.drep.clone())))
+        NsKey::from((DRepState::NS, drep_to_entity_key(&self.drep)))
     }
 
     fn apply(&mut self, entity: &mut Option<DRepState>) {
-        let entity = entity.get_or_insert_default();
-
-        // save undo info
-        self.was_retired = entity.retired;
+        let entity = entity.get_or_insert_with(|| DRepState::new(self.drep.clone()));
 
         // apply changes
         entity.initial_slot = Some(self.slot);
         entity.voting_power = self.deposit;
-        entity.retired = false;
         entity.deposit = self.deposit;
     }
 
     fn undo(&self, entity: &mut Option<DRepState>) {
-        let entity = entity.get_or_insert_default();
+        let entity = entity.get_or_insert_with(|| DRepState::new(self.drep.clone()));
+
         entity.initial_slot = None;
         entity.voting_power = 0;
-        entity.retired = self.was_retired;
         entity.deposit = self.prev_deposit.unwrap_or(0);
     }
 }
@@ -84,18 +79,22 @@ impl dolos_core::EntityDelta for DRepRegistration {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DRepUnRegistration {
     drep: DRep,
+    unregistered_at: BlockSlot,
 
     // undo data
     prev_voting_power: Option<u64>,
     prev_deposit: Option<u64>,
+    prev_unregistered_at: Option<BlockSlot>,
 }
 
 impl DRepUnRegistration {
-    pub fn new(drep: DRep) -> Self {
+    pub fn new(drep: DRep, unregistered_at: BlockSlot) -> Self {
         Self {
             drep,
+            unregistered_at,
             prev_voting_power: None,
             prev_deposit: None,
+            prev_unregistered_at: None,
         }
     }
 }
@@ -104,26 +103,28 @@ impl dolos_core::EntityDelta for DRepUnRegistration {
     type Entity = DRepState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((DRepState::NS, drep_to_entity_key(self.drep.clone())))
+        NsKey::from((DRepState::NS, drep_to_entity_key(&self.drep)))
     }
 
     fn apply(&mut self, entity: &mut Option<DRepState>) {
-        let entity = entity.get_or_insert_default();
+        let entity = entity.as_mut().expect("can't unregister missing drep");
 
         // save undo data
         self.prev_voting_power = Some(entity.voting_power);
+        self.prev_unregistered_at = entity.unregistered_at;
         self.prev_deposit = Some(entity.deposit);
 
         // apply changes
         entity.voting_power = 0;
-        entity.retired = true;
+        entity.unregistered_at = Some(self.unregistered_at);
         entity.deposit = 0;
     }
 
     fn undo(&self, entity: &mut Option<DRepState>) {
-        let entity = entity.get_or_insert_default();
+        let entity = entity.as_mut().expect("can't undo missing drep");
+
         entity.voting_power = self.prev_voting_power.unwrap();
-        entity.retired = false;
+        entity.unregistered_at = self.prev_unregistered_at;
         entity.deposit = self.prev_deposit.unwrap_or(0);
     }
 }
@@ -149,11 +150,11 @@ impl dolos_core::EntityDelta for DRepActivity {
     type Entity = DRepState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((DRepState::NS, drep_to_entity_key(self.drep.clone())))
+        NsKey::from((DRepState::NS, drep_to_entity_key(&self.drep)))
     }
 
     fn apply(&mut self, entity: &mut Option<DRepState>) {
-        let entity = entity.get_or_insert_default();
+        let entity = entity.get_or_insert_with(|| DRepState::new(self.drep.clone()));
 
         // save undo info
         self.previous_last_active_slot = entity.last_active_slot;
@@ -163,7 +164,8 @@ impl dolos_core::EntityDelta for DRepActivity {
     }
 
     fn undo(&self, entity: &mut Option<DRepState>) {
-        let entity = entity.get_or_insert_default();
+        let entity = entity.as_mut().expect("can't undo missing drep");
+
         entity.last_active_slot = self.previous_last_active_slot;
     }
 }
@@ -183,8 +185,6 @@ impl BlockVisitor for DRepStateVisitor {
             return Ok(());
         };
 
-        deltas.add_for_entity(DRepActivity::new(drep.clone(), block.slot()));
-
         if let MultiEraCert::Conway(conway) = &cert {
             match conway.deref().deref() {
                 conway::Certificate::RegDRepCert(_, deposit, anchor) => {
@@ -196,11 +196,13 @@ impl BlockVisitor for DRepStateVisitor {
                     ));
                 }
                 conway::Certificate::UnRegDRepCert(_, _) => {
-                    deltas.add_for_entity(DRepUnRegistration::new(drep.clone()));
+                    deltas.add_for_entity(DRepUnRegistration::new(drep.clone(), block.slot()));
                 }
                 _ => (),
             }
         };
+
+        deltas.add_for_entity(DRepActivity::new(drep.clone(), block.slot()));
 
         Ok(())
     }
