@@ -88,7 +88,7 @@ fn tx_eval_to_u5c(
                     ..Default::default()
                 })
                 .collect(),
-            fee: 0,         // TODO
+            fee: None,      // TODO
             traces: vec![], // TODO
             ..Default::default()
         },
@@ -123,21 +123,22 @@ where
         let domain = &self.domain;
         let mempool = domain.mempool();
 
-        let mut hashes = vec![];
-        for (idx, tx_bytes) in message.tx.into_iter().flat_map(|x| x.r#type).enumerate() {
-            match tx_bytes {
-                any_chain_tx::Type::Raw(bytes) => {
-                    let hash = mempool.receive_raw(domain, bytes.as_ref()).map_err(|e| {
-                        Status::invalid_argument(
-                            format! {"could not process tx at index {idx}: {e}"},
-                        )
-                    })?;
-                    hashes.push(hash.to_vec().into());
-                }
-            }
-        }
+        let tx = message
+            .tx
+            .ok_or_else(|| Status::invalid_argument("missing tx"))?;
 
-        Ok(Response::new(SubmitTxResponse { r#ref: hashes }))
+        let tx_bytes = match tx.r#type {
+            Some(any_chain_tx::Type::Raw(bytes)) => bytes,
+            _ => return Err(Status::invalid_argument("missing or unsupported tx type")),
+        };
+
+        let hash = mempool
+            .receive_raw(domain, tx_bytes.as_ref())
+            .map_err(|e| Status::invalid_argument(format! {"could not process tx: {e}"}))?;
+
+        Ok(Response::new(SubmitTxResponse {
+            r#ref: hash.to_vec().into(),
+        }))
     }
 
     async fn wait_for_tx(
@@ -199,33 +200,25 @@ where
         &self,
         request: tonic::Request<EvalTxRequest>,
     ) -> Result<tonic::Response<EvalTxResponse>, tonic::Status> {
-        let txs_raw: Vec<Vec<u8>> = request
+        let tx = request
             .into_inner()
             .tx
-            .into_iter()
-            .map(|tx| {
-                tx.r#type
-                    .map(|tx_type| match tx_type {
-                        any_chain_tx::Type::Raw(bytes) => bytes.to_vec(),
-                    })
-                    .unwrap_or_default()
-            })
-            .collect();
+            .ok_or_else(|| Status::invalid_argument("missing tx"))?;
 
-        let eval_results: Vec<_> = txs_raw
-            .iter()
-            .map(|tx_cbor| {
-                let result = self.domain.mempool().evaluate_raw(&self.domain, tx_cbor);
-                let result = tx_eval_to_u5c(result);
+        let tx_raw = match tx.r#type {
+            Some(any_chain_tx::Type::Raw(bytes)) => bytes.to_vec(),
+            _ => return Err(Status::invalid_argument("missing or unsupported tx type")),
+        };
 
-                AnyChainEval {
-                    chain: Some(Chain::Cardano(result)),
-                }
-            })
-            .collect();
+        let result = self.domain.mempool().evaluate_raw(&self.domain, &tx_raw);
+        let result = tx_eval_to_u5c(result);
+
+        let report = AnyChainEval {
+            chain: Some(Chain::Cardano(result)),
+        };
 
         Ok(Response::new(EvalTxResponse {
-            report: eval_results,
+            report: Some(report),
         }))
     }
 }
