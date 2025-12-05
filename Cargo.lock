@@ -3535,7 +3535,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be769465445e8c1474e9c5dac2018218498557af32d9ed057325ec9a41ae81bf"
 dependencies = [
  "heck",
- "itertools 0.12.1",
+ "itertools 0.14.0",
  "log",
  "multimap",
  "once_cell",
@@ -3568,7 +3568,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.12.1",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn",
@@ -5063,7 +5063,7 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 [[package]]
 name = "tx3-cardano"
 version = "0.11.5"
-source = "git+https://github.com/tx3-lang/tx3.git?branch=bookio#cf28a546584ca962ffff7f62f787a27002a6e2b5"
+source = "git+https://github.com/tx3-lang/tx3.git?branch=bookio#8be80c9d24c88f71790279d4b5f1a7461eca2be4"
 dependencies = [
  "hex",
  "pallas 1.0.0-alpha.2 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -5077,7 +5077,7 @@ dependencies = [
 [[package]]
 name = "tx3-lang"
 version = "0.11.5"
-source = "git+https://github.com/tx3-lang/tx3.git?branch=bookio#cf28a546584ca962ffff7f62f787a27002a6e2b5"
+source = "git+https://github.com/tx3-lang/tx3.git?branch=bookio#8be80c9d24c88f71790279d4b5f1a7461eca2be4"
 dependencies = [
  "bincode 2.0.1",
  "hex",
@@ -5092,7 +5092,7 @@ dependencies = [
 [[package]]
 name = "tx3-resolver"
 version = "0.11.5"
-source = "git+https://github.com/tx3-lang/tx3.git?branch=bookio#cf28a546584ca962ffff7f62f787a27002a6e2b5"
+source = "git+https://github.com/tx3-lang/tx3.git?branch=bookio#8be80c9d24c88f71790279d4b5f1a7461eca2be4"
 dependencies = [
  "hex",
  "thiserror 2.0.12",
