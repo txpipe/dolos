@@ -9,6 +9,7 @@ use tracing_subscriber::{filter::Targets, prelude::*};
 use dolos::adapters::{DomainAdapter, WalAdapter};
 use dolos::core::Genesis;
 use dolos::prelude::*;
+use dolos::sync::apply::{is_quota_reached, is_stop_epoch_reached};
 
 pub struct Stores {
     pub wal: WalAdapter,
@@ -261,27 +262,51 @@ pub fn hook_exit_token() -> CancellationToken {
     cancel
 }
 
-pub async fn run_pipeline(pipeline: gasket::daemon::Daemon, exit: CancellationToken) {
+#[derive(Debug, PartialEq)]
+pub enum PipelineStopReason {
+    /// Pipeline stopped due to a signal (SIGINT, SIGTERM)
+    Signal,
+    /// Pipeline stopped due to reaching sync quota limits
+    QuotaReached,
+    /// Pipeline stopped due to reaching configured stop epoch
+    StopEpochReached,
+    /// Pipeline stopped for other reasons
+    Other,
+}
+
+pub async fn run_pipeline(
+    pipeline: gasket::daemon::Daemon,
+    exit: CancellationToken,
+) -> PipelineStopReason {
+    let mut stop_reason = PipelineStopReason::Other;
+
     loop {
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_secs(5)) => {
                 if pipeline.should_stop() {
-                    debug!("pipeline should stop");
-
+                    info!("pipeline is stopping gracefully - one or more stages have completed their work");
+                    if is_stop_epoch_reached() {
+                        stop_reason = PipelineStopReason::StopEpochReached;
+                    } else if is_quota_reached() {
+                        stop_reason = PipelineStopReason::QuotaReached;
+                    }
                     // trigger cancel so that stages stop early
                     exit.cancel();
                     break;
                 }
             }
             _ = exit.cancelled() => {
-                debug!("exit requested");
+                info!("exit requested, shutting down pipeline");
+                stop_reason = PipelineStopReason::Signal;
                 break;
             }
         }
     }
 
-    debug!("shutting down pipeline");
+    info!("shutting down pipeline");
     pipeline.teardown();
+
+    stop_reason
 }
 
 pub fn cleanup_data(config: &RootConfig) -> Result<(), std::io::Error> {

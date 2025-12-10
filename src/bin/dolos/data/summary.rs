@@ -1,6 +1,6 @@
-use dolos_core::config::RootConfig;
 use dolos::cli::{ArchiveSummary, DataSummary, StateSummary, WalSummary};
 use dolos::prelude::*;
+use dolos_core::config::RootConfig;
 
 #[derive(Debug, clap::Args)]
 pub struct Args {}

@@ -11,6 +11,7 @@ use pallas::network::miniprotocols::chainsync::{
 use pallas::network::miniprotocols::Point;
 use tracing::{debug, info, warn};
 
+use super::apply::set_quota_reached;
 use crate::adapters::WalAdapter;
 use crate::prelude::*;
 
@@ -40,17 +41,19 @@ pub enum PullQuota {
     WaitingTip,
     Unlimited,
     BlockQuota(u64),
-    Reached,
+    ReachedTip,
+    ReachedBlockQuota,
 }
 
 impl PullQuota {
     fn should_quit(&self) -> bool {
-        matches!(self, Self::Reached)
+        matches!(self, Self::ReachedTip | Self::ReachedBlockQuota)
     }
 
     fn on_tip(&mut self) {
         if let Self::WaitingTip = self {
-            *self = Self::Reached;
+            info!("chain tip reached, sync quota will be satisfied");
+            *self = Self::ReachedTip;
         }
     }
 
@@ -59,8 +62,13 @@ impl PullQuota {
             let new = x.saturating_sub(count);
 
             if new == 0 {
-                *self = Self::Reached;
+                info!(
+                    "block quota of {} blocks has been consumed, sync quota will be satisfied",
+                    x
+                );
+                *self = Self::ReachedBlockQuota;
             } else {
+                debug!("block quota: {} blocks remaining", new);
                 *self = Self::BlockQuota(new);
             }
         }
@@ -165,7 +173,20 @@ impl gasket::framework::Worker<Stage> for Worker {
 
     async fn schedule(&mut self, stage: &mut Stage) -> Result<WorkSchedule<WorkUnit>, WorkerError> {
         if stage.quota.should_quit() {
-            warn!("quota reached, stopping sync");
+            match stage.quota {
+                PullQuota::ReachedTip => {
+                    info!("sync quota reached: chain tip has been reached, stopping sync as configured");
+                    set_quota_reached(true);
+                }
+                PullQuota::ReachedBlockQuota => {
+                    info!("sync quota reached: maximum number of blocks has been processed, stopping sync as configured");
+                    set_quota_reached(true);
+                }
+                _ => {
+                    warn!("quota reached, stopping sync");
+                    set_quota_reached(true);
+                }
+            }
             return Ok(WorkSchedule::Done);
         }
 

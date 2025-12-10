@@ -1,7 +1,28 @@
 use gasket::{framework::*, messaging::Message};
+use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::debug;
 
 use crate::{adapters::DomainAdapter, facade::DomainExt as _, prelude::*};
+
+type WorkerError = gasket::framework::WorkerError;
+
+static STOP_EPOCH_REACHED: AtomicBool = AtomicBool::new(false);
+static QUOTA_REACHED: AtomicBool = AtomicBool::new(false);
+
+pub fn set_stop_epoch_reached(value: bool) {
+    STOP_EPOCH_REACHED.store(value, Ordering::SeqCst);
+}
+pub fn is_stop_epoch_reached() -> bool {
+    STOP_EPOCH_REACHED.load(Ordering::SeqCst)
+}
+
+pub fn set_quota_reached(value: bool) {
+    QUOTA_REACHED.store(value, Ordering::SeqCst);
+}
+
+pub fn is_quota_reached() -> bool {
+    QUOTA_REACHED.load(Ordering::SeqCst)
+}
 
 pub type UpstreamPort = gasket::messaging::InputPort<PullEvent>;
 
@@ -51,12 +72,20 @@ impl Stage {
 
     async fn on_roll_forward(&self, block: RawBlock) -> Result<(), WorkerError> {
         debug!("handling roll forward");
-
-        dolos_core::facade::roll_forward(&self.domain, block)
-            .await
-            .or_panic()?;
-
-        Ok(())
+        match dolos_core::facade::roll_forward(&self.domain, block).await {
+            Ok(_) => Ok(()),
+            Err(dolos_core::DomainError::StopEpochReached) => {
+                // indicate stop epoch was reached
+                set_stop_epoch_reached(true);
+                // Return a special error to indicate stop epoch was reached
+                Err(WorkerError::Panic)
+            }
+            Err(e) => {
+                // Convert other domain errors to worker errors
+                tracing::error!("Domain error: {:?}", e);
+                Err(WorkerError::Panic)
+            }
+        }
     }
 
     fn on_rollback(&self, point: &ChainPoint) -> Result<(), WorkerError> {
