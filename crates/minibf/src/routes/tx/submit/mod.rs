@@ -3,7 +3,7 @@ use axum::{
     extract::State,
     http::{header, HeaderMap, StatusCode},
 };
-use dolos_core::{Domain, MempoolError, MempoolStore as _};
+use dolos_core::{ChainError, Domain, DomainError, MempoolError, MempoolStore as _};
 
 use crate::Facade;
 
@@ -28,16 +28,28 @@ pub async fn route<D: Domain>(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    let hash = domain.mempool().receive_raw(&cbor).map_err(|e| match e {
-        MempoolError::Phase1Error(_) => StatusCode::BAD_REQUEST,
-        MempoolError::Phase2Error(_) => StatusCode::BAD_REQUEST,
-        MempoolError::Phase2ExplicitError(_) => StatusCode::BAD_REQUEST,
-        MempoolError::InvalidTx(_) => StatusCode::BAD_REQUEST,
-        MempoolError::TraverseError(_) => StatusCode::BAD_REQUEST,
-        MempoolError::StateError(_) => StatusCode::INTERNAL_SERVER_ERROR,
-        MempoolError::DecodeError(_) => StatusCode::BAD_REQUEST,
-        MempoolError::PlutusNotSupported => StatusCode::BAD_REQUEST,
-        MempoolError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    let result = domain.receive_tx(&cbor);
+
+    let hash = result.map_err(|e| match e {
+        DomainError::ChainError(x) => match x {
+            ChainError::BrokenInvariant(_) => StatusCode::BAD_REQUEST,
+            ChainError::DecodingError(_) => StatusCode::BAD_REQUEST,
+            ChainError::MinicborError(_) => StatusCode::BAD_REQUEST,
+            ChainError::ValidationError(_) => StatusCode::BAD_REQUEST,
+            ChainError::ValidationPhase2Error(_) => StatusCode::BAD_REQUEST,
+            ChainError::ValidationExplicitPhase2Error(_) => StatusCode::BAD_REQUEST,
+            ChainError::State3Error(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            ChainError::StateError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        },
+        DomainError::MempoolError(x) => match x {
+            MempoolError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            MempoolError::TraverseError(_) => StatusCode::BAD_REQUEST,
+            MempoolError::DecodeError(_) => StatusCode::BAD_REQUEST,
+            MempoolError::StateError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            MempoolError::PlutusNotSupported => StatusCode::BAD_REQUEST,
+            MempoolError::InvalidTx(_) => StatusCode::BAD_REQUEST,
+        },
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
     })?;
 
     Ok(hex::encode(hash))

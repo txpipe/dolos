@@ -91,6 +91,18 @@ impl ChainLogic for ChainAdapter {
             ChainAdapter::Cardano(x) => x.compute_apply_delta3(state, block, unapplied_deltas),
         }
     }
+
+    fn validate_tx<D: Domain>(
+        &self,
+        cbor: &[u8],
+        utxos: &MempoolAwareUtxoStore<D>,
+        tip: Option<ChainPoint>,
+        genesis: &Genesis,
+    ) -> Result<MempoolTx, ChainError> {
+        match self {
+            ChainAdapter::Cardano(x) => x.validate_tx(cbor, utxos, tip, genesis),
+        }
+    }
 }
 
 /// A persistent store for ledger state
