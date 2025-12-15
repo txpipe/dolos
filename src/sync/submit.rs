@@ -9,6 +9,29 @@ use tracing::{debug, info, warn};
 use crate::mempool::Mempool;
 use crate::prelude::*;
 
+// HACK: the tx era number differs from the block era number, we subtract 1 to make them match.
+fn to_n2n_era(era: u16) -> u16 {
+    era - 1
+}
+
+fn to_n2n_reply(mempool_tx: &MempoolTx) -> TxIdAndSize<EraTxId> {
+    let EraCbor(era, bytes) = &mempool_tx.payload;
+
+    let era = to_n2n_era(*era);
+
+    let id = EraTxId(era, mempool_tx.hash.to_vec());
+
+    TxIdAndSize(id, bytes.len() as u32)
+}
+
+fn to_n2n_body(mempool_tx: MempoolTx) -> EraTxBody {
+    let EraCbor(era, bytes) = mempool_tx.payload;
+
+    let era = to_n2n_era(era);
+
+    EraTxBody(era, bytes)
+}
+
 pub struct Worker {
     peer_session: PeerClient,
     unfulfilled_request: Option<usize>,
@@ -18,10 +41,7 @@ impl Worker {
     async fn propagate_txs(&mut self, txs: Vec<MempoolTx>) -> Result<(), WorkerError> {
         debug!(n = txs.len(), "propagating tx ids");
 
-        let payload = txs
-            .iter()
-            .map(|x| TxIdAndSize(EraTxId(x.era, x.hash.to_vec()), x.bytes.len() as u32))
-            .collect_vec();
+        let payload = txs.iter().map(to_n2n_reply).collect_vec();
 
         self.peer_session
             .txsubmission()
@@ -158,7 +178,7 @@ impl gasket::framework::Worker<Stage> for Worker {
                     // we omit any missing tx, we assume that this would be considered a protocol
                     // violation and rejected by the upstream.
                     .filter_map(|x| stage.mempool.find_inflight(&Hash::from(x.1.as_slice())))
-                    .map(|x| EraTxBody(x.era, x.bytes.clone()))
+                    .map(to_n2n_body)
                     .collect_vec();
 
                 let result = self.peer_session.txsubmission().reply_txs(to_send).await;

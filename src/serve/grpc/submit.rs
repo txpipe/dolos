@@ -18,7 +18,7 @@ pub struct SubmitServiceImpl<D>
 where
     D: Domain + LedgerContext,
 {
-    mempool: D::Mempool,
+    domain: D,
     _mapper: interop::Mapper<D>,
 }
 
@@ -27,10 +27,9 @@ where
     D: Domain + LedgerContext,
 {
     pub fn new(domain: D) -> Self {
-        let mempool = domain.mempool().clone();
         let _mapper = interop::Mapper::new(domain.clone());
 
-        Self { mempool, _mapper }
+        Self { domain, _mapper }
     }
 }
 
@@ -48,7 +47,7 @@ fn event_to_watch_mempool_response(event: MempoolEvent) -> WatchMempoolResponse 
     WatchMempoolResponse {
         tx: TxInMempool {
             r#ref: event.tx.hash.to_vec().into(),
-            native_bytes: event.tx.bytes.to_vec().into(),
+            native_bytes: event.tx.payload.cbor().to_vec().into(),
             stage: tx_stage_to_u5c(event.new_stage),
             parsed_state: None, // TODO
         }
@@ -63,21 +62,22 @@ fn event_to_wait_for_tx_response(event: MempoolEvent) -> WaitForTxResponse {
     }
 }
 
-fn tx_eval_to_u5c(
-    eval: Result<pallas::ledger::validate::phase2::EvalReport, MempoolError>,
-) -> u5c::spec::cardano::TxEval {
+fn tx_eval_to_u5c(eval: Result<MempoolTx, DomainError>) -> u5c::spec::cardano::TxEval {
     match eval {
-        Ok(eval) => u5c::spec::cardano::TxEval {
-            ex_units: eval
-                .iter()
-                .try_fold(u5c::spec::cardano::ExUnits::default(), |acc, eval| {
+        Ok(tx) => u5c::spec::cardano::TxEval {
+            ex_units: tx.report.iter().flatten().try_fold(
+                u5c::spec::cardano::ExUnits::default(),
+                |acc, eval| {
                     Some(ExUnits {
                         steps: acc.steps + eval.units.steps,
                         memory: acc.memory + eval.units.mem,
                     })
-                }),
-            redeemers: eval
+                },
+            ),
+            redeemers: tx
+                .report
                 .iter()
+                .flatten()
                 .map(|x| u5c::spec::cardano::Redeemer {
                     purpose: x.tag as i32,
                     index: x.index,
@@ -124,7 +124,7 @@ where
         for (idx, tx_bytes) in message.tx.into_iter().flat_map(|x| x.r#type).enumerate() {
             match tx_bytes {
                 any_chain_tx::Type::Raw(bytes) => {
-                    let hash = self.mempool.receive_raw(bytes.as_ref()).map_err(|e| {
+                    let hash = self.domain.receive_tx(bytes.as_ref()).map_err(|e| {
                         Status::invalid_argument(
                             format! {"could not process tx at index {idx}: {e}"},
                         )
@@ -152,13 +152,13 @@ where
             .iter()
             .map(|x| {
                 Result::<_, Status>::Ok(WaitForTxResponse {
-                    stage: tx_stage_to_u5c(self.mempool.check_stage(x)),
+                    stage: tx_stage_to_u5c(self.domain.mempool().check_stage(x)),
                     r#ref: x.to_vec().into(),
                 })
             })
             .collect();
 
-        let updates = self.mempool.subscribe();
+        let updates = self.domain.mempool().subscribe();
 
         let updates = UpdateFilter::<D::Mempool>::new(updates, subjects)
             .map(|x| Ok(event_to_wait_for_tx_response(x)))
@@ -180,7 +180,7 @@ where
         &self,
         _request: tonic::Request<WatchMempoolRequest>,
     ) -> Result<tonic::Response<Self::WatchMempoolStream>, tonic::Status> {
-        let updates = self.mempool.subscribe();
+        let updates = self.domain.mempool().subscribe();
 
         let stream = updates
             .map_ok(event_to_watch_mempool_response)
@@ -210,7 +210,7 @@ where
         let eval_results: Vec<_> = txs_raw
             .iter()
             .map(|tx_cbor| {
-                let result = self.mempool.evaluate_raw(tx_cbor);
+                let result = self.domain.validate_tx(tx_cbor);
                 let result = tx_eval_to_u5c(result);
 
                 AnyChainEval {

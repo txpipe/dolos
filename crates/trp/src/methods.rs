@@ -6,12 +6,9 @@ use std::sync::Arc;
 use tx3_lang::ProtoTx;
 use tx3_sdk::trp::{SubmitParams, SubmitWitness};
 
-use dolos_core::{Domain, MempoolStore as _, StateStore as _};
+use dolos_core::{Domain, DomainError, MempoolAwareUtxoStore, MempoolStore as _, StateStore as _};
 
-use crate::{
-    compiler::load_compiler,
-    utxos::{SessionContext, UtxoMempoolSession, UtxoStoreAdapter},
-};
+use crate::{compiler::load_compiler, utxos::UtxoStoreAdapter};
 
 use super::{Context, Error};
 
@@ -86,28 +83,14 @@ pub async fn trp_resolve<D: Domain>(
         &context.config,
     )?;
 
-    let session_context = Arc::new(SessionContext::default());
+    let store = MempoolAwareUtxoStore::<D>::new(context.domain.state(), context.domain.mempool());
 
-    let utxos = UtxoStoreAdapter::<D>::new(
-        context.domain.state().clone(),
-        context.locks.clone(),
-        Some(session_context.clone()),
-    );
-
-    let current_slot = context
-        .domain
-        .state()
-        .cursor()?
-        .map(|c| c.slot())
-        .unwrap_or(0);
-
-    let mempool = UtxoMempoolSession::new(&context.locks, current_slot, session_context);
+    let utxos = UtxoStoreAdapter::<D>::new(store);
 
     let resolved = tx3_resolver::resolve_tx(
         tx,
         &mut compiler,
         &utxos,
-        &mempool,
         context.config.max_optimize_rounds.into(),
     )
     .await?;
@@ -163,9 +146,9 @@ pub async fn trp_submit<D: Domain>(
         bytes = apply_witnesses(&bytes, &params.witnesses)?;
     }
 
-    let tx = context.domain.mempool().receive_raw(&bytes)?;
+    let hash = context.domain.receive_tx(&bytes)?;
 
-    Ok(serde_json::json!({ "hash": tx.to_string() }))
+    Ok(serde_json::json!({ "hash": hash.to_string() }))
 }
 
 pub fn health<D: Domain>(context: &Context<D>) -> bool {
@@ -179,7 +162,7 @@ mod tests {
     use jsonrpsee::types::{ErrorCode, ErrorObjectOwned};
     use serde_json::json;
 
-    use crate::{metrics::Metrics, Config, UtxoMempool};
+    use crate::{metrics::Metrics, Config};
 
     use super::*;
 
@@ -206,7 +189,6 @@ mod tests {
                 permissive_cors: None,
             }),
             metrics: Metrics::default(),
-            locks: Arc::new(UtxoMempool::new()),
         })
     }
 
