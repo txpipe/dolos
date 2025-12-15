@@ -48,14 +48,7 @@ impl IntoModel<PoolListExtendedInner> for PoolModelBuilder {
             declared_pledge: self.state.declared_pledge.to_string(),
             margin_cost: rational_to_f64::<6>(&self.state.margin_cost),
             fixed_cost: self.state.fixed_cost.to_string(),
-            metadata: self.state.metadata.map(|m| {
-                let out = json!({
-                    "url": m.url,
-                    "hash": m.hash,
-                });
-
-                Box::new(out)
-            }),
+            metadata: None,
         };
 
         Ok(out)

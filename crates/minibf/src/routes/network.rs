@@ -39,18 +39,18 @@ impl<'a> IntoModel<NetworkErasInner> for EraModelBuilder<'a> {
 
         let out = NetworkErasInner {
             start: Box::new(NetworkErasInnerStart {
-                time: start_delta as f64,
+                time: start_delta as i32,
                 slot: self.era.start.slot as i32,
                 epoch: self.era.start.epoch as i32,
             }),
             end: Box::new(NetworkErasInnerEnd {
-                time: end_delta as f64,
+                time: end_delta as i32,
                 slot: end.slot as i32,
                 epoch: end.epoch as i32,
             }),
             parameters: Box::new(NetworkErasInnerParameters {
                 epoch_length: self.era.pparams.epoch_length() as i32,
-                slot_length: self.era.pparams.slot_length() as f64,
+                slot_length: self.era.pparams.slot_length() as i32,
                 safe_zone: dolos_cardano::mutable_slots(self.genesis) as i32,
             }),
         };
