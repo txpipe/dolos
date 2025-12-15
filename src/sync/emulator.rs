@@ -48,7 +48,14 @@ impl Worker {
 
         for (i, tx) in txs.iter().enumerate() {
             info!(tx = hex::encode(tx.hash), "adding tx to emulated block");
-            let MultiEraTx::Conway(conway) = MultiEraTx::decode(&tx.bytes).or_panic()? else {
+
+            let EraCbor(era, cbor) = &tx.payload;
+
+            let era = pallas::ledger::traverse::Era::try_from(*era).or_panic()?;
+
+            let tx = MultiEraTx::decode_for_era(era, cbor).or_panic()?;
+
+            let Some(conway) = tx.as_conway() else {
                 return Err(WorkerError::Panic);
             };
 

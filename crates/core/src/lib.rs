@@ -48,6 +48,22 @@ pub use wal::*;
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub struct EraCbor(pub Era, pub Cbor);
 
+impl EraCbor {
+    pub fn era(&self) -> Era {
+        self.0
+    }
+
+    pub fn cbor(&self) -> &[u8] {
+        &self.1
+    }
+}
+
+impl AsRef<[u8]> for EraCbor {
+    fn as_ref(&self) -> &[u8] {
+        &self.1
+    }
+}
+
 impl From<(Era, Cbor)> for EraCbor {
     fn from(value: (Era, Cbor)) -> Self {
         Self(value.0, value.1)
@@ -101,6 +117,12 @@ impl From<&MultiEraInput<'_>> for TxoRef {
 
 #[derive(Debug, Eq, PartialEq, Hash, Clone, Serialize, Deserialize)]
 pub struct TxoRef(pub TxHash, pub TxoIdx);
+
+impl Display for TxoRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}#{}", self.0, self.1)
+    }
+}
 
 impl From<(TxHash, TxoIdx)> for TxoRef {
     fn from(value: (TxHash, TxoIdx)) -> Self {
@@ -619,15 +641,6 @@ pub enum MempoolError {
     #[error("decode error: {0}")]
     DecodeError(#[from] pallas::codec::minicbor::decode::Error),
 
-    #[error("tx validation failed during phase-1: {0}")]
-    Phase1Error(#[from] pallas::ledger::validate::utils::ValidationError),
-
-    #[error("tx evaluation failed during phase-2: {0}")]
-    Phase2Error(#[from] pallas::ledger::validate::phase2::error::Error),
-
-    #[error("phase-2 script yielded an error")]
-    Phase2ExplicitError(Phase2Log),
-
     #[error("state error: {0}")]
     StateError(#[from] StateError),
 
@@ -644,13 +657,13 @@ pub trait MempoolStore: Clone + Send + Sync + 'static {
         + Send
         + Sync;
 
-    fn receive_raw(&self, cbor: &[u8]) -> Result<TxHash, MempoolError>;
-
-    fn evaluate_raw(&self, cbor: &[u8]) -> Result<EvalReport, MempoolError>;
+    fn receive(&self, tx: mempool::MempoolTx) -> Result<(), MempoolError>;
 
     fn apply(&self, deltas: &[LedgerDelta]);
     fn check_stage(&self, tx_hash: &TxHash) -> MempoolTxStage;
     fn subscribe(&self) -> Self::Stream;
+
+    fn pending(&self) -> Vec<(TxHash, EraCbor)>;
 }
 
 #[derive(Debug, Error)]
@@ -662,7 +675,22 @@ pub enum ChainError {
     DecodingError(#[from] pallas::ledger::traverse::Error),
 
     #[error(transparent)]
+    MinicborError(#[from] pallas::codec::minicbor::decode::Error),
+
+    #[error(transparent)]
+    ValidationError(#[from] pallas::ledger::validate::utils::ValidationError),
+
+    #[error(transparent)]
+    ValidationPhase2Error(#[from] pallas::ledger::validate::phase2::error::Error),
+
+    #[error("phase-2 script yielded an error")]
+    ValidationExplicitPhase2Error(Phase2Log),
+
+    #[error(transparent)]
     State3Error(#[from] State3Error),
+
+    #[error(transparent)]
+    StateError(#[from] StateError),
 }
 
 pub trait ChainLogic {
@@ -734,6 +762,16 @@ pub trait ChainLogic {
         block: &Self::Block<'a>,
         unapplied_deltas: &[StateDelta],
     ) -> Result<StateDelta, ChainError>;
+
+    // mempool related functions
+
+    fn validate_tx<D: Domain>(
+        &self,
+        cbor: &[u8],
+        utxos: &MempoolAwareUtxoStore<D>,
+        tip: Option<ChainPoint>,
+        genesis: &Genesis,
+    ) -> Result<mempool::MempoolTx, ChainError>;
 }
 
 #[derive(Debug, Error)]
@@ -892,6 +930,28 @@ pub trait Domain: Send + Sync + Clone + 'static {
         }
 
         Ok(state_pruned && archive_pruned && wal_pruned)
+    }
+
+    fn validate_tx(&self, cbor: &[u8]) -> Result<MempoolTx, DomainError> {
+        let tip = self.state().cursor()?;
+
+        let utxos = MempoolAwareUtxoStore::<'_, Self>::new(self.state(), self.mempool());
+
+        let tx = self
+            .chain()
+            .validate_tx(cbor, &utxos, tip, self.genesis())?;
+
+        Ok(tx)
+    }
+
+    fn receive_tx(&self, cbor: &[u8]) -> Result<TxHash, DomainError> {
+        let tx = self.validate_tx(cbor)?;
+
+        let hash = tx.hash;
+
+        self.mempool().receive(tx)?;
+
+        Ok(hash)
     }
 }
 

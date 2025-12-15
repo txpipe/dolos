@@ -22,6 +22,8 @@ pub mod model;
 
 pub mod roll;
 
+pub mod validate;
+
 #[cfg(feature = "include-genesis")]
 pub mod include;
 
@@ -385,6 +387,16 @@ impl dolos_core::ChainLogic for ChainLogic {
         roll::crawl_block(block, &mut builder)?;
 
         Ok(builder.build())
+    }
+
+    fn validate_tx<D: Domain>(
+        &self,
+        cbor: &[u8],
+        utxos: &MempoolAwareUtxoStore<D>,
+        tip: Option<ChainPoint>,
+        genesis: &Genesis,
+    ) -> Result<MempoolTx, ChainError> {
+        validate::validate_tx(cbor, utxos, tip, genesis)
     }
 }
 

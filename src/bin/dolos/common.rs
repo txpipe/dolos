@@ -121,7 +121,7 @@ pub fn setup_data_stores(config: &crate::Config) -> Result<Stores, Error> {
 pub fn setup_domain(config: &crate::Config) -> miette::Result<DomainAdapter> {
     let stores = setup_data_stores(config)?;
     let genesis = Arc::new(open_genesis_files(&config.genesis)?);
-    let mempool = dolos::mempool::Mempool::new(genesis.clone(), stores.state.clone());
+    let mempool = dolos::mempool::Mempool::new();
     let chain = ChainAdapter::from(config.chain.clone().unwrap_or_default());
 
     let domain = DomainAdapter {
