@@ -1,12 +1,6 @@
 use futures_util::StreamExt;
 use itertools::Itertools;
-use pallas::ledger::{
-    primitives::{NetworkId, TransactionInput},
-    traverse::{MultiEraInput, MultiEraOutput, MultiEraTx},
-    validate::{phase1::validate_tx, utils::AccountState},
-};
 use std::{
-    borrow::Cow,
     collections::{HashMap, HashSet},
     sync::{Arc, RwLock},
 };
@@ -48,122 +42,6 @@ impl Mempool {
         if self.updates.send(MempoolEvent { new_stage, tx }).is_err() {
             debug!("no mempool update receivers");
         }
-    }
-
-    fn receive(&self, tx: MempoolTx) {
-        let mut state = self.mempool.write().unwrap();
-
-        state.pending.push(tx.clone());
-        self.notify(MempoolTxStage::Pending, tx);
-
-        debug!(
-            pending = state.pending.len(),
-            inflight = state.inflight.len(),
-            acknowledged = state.acknowledged.len(),
-            "mempool state changed"
-        );
-    }
-
-    pub fn validate<D: Domain>(&self, domain: &D, tx: &MultiEraTx) -> Result<(), MempoolError> {
-        let tip = domain
-            .state()
-            .read_cursor()?
-            .ok_or(MempoolError::PParamsNotAvailable)?;
-
-        let genesis = domain.genesis();
-
-        let network_id = match genesis.shelley.network_id.as_ref() {
-            Some(network) => match network.as_str() {
-                "Mainnet" => Some(NetworkId::Mainnet.into()),
-                "Testnet" => Some(NetworkId::Testnet.into()),
-                _ => None,
-            },
-            None => None,
-        }
-        .unwrap();
-
-        let params = dolos_cardano::load_effective_pparams::<D>(domain.state())?;
-
-        let env = pallas::ledger::validate::utils::Environment {
-            prot_params: dolos_cardano::utils::pparams_to_pallas(&params),
-            prot_magic: genesis.shelley.network_magic.unwrap(),
-            block_slot: tip.slot(),
-            network_id,
-            acnt: Some(AccountState::default()),
-        };
-
-        let input_refs = tx.requires().iter().map(From::from).collect();
-
-        let utxos = domain.state().get_utxos(input_refs)?;
-
-        let mut pallas_utxos = pallas::ledger::validate::utils::UTxOs::new();
-
-        for (txoref, eracbor) in utxos.iter() {
-            let tx_in = TransactionInput {
-                transaction_id: txoref.0,
-                index: txoref.1.into(),
-            };
-
-            let input = MultiEraInput::AlonzoCompatible(<Box<Cow<'_, TransactionInput>>>::from(
-                Cow::Owned(tx_in),
-            ));
-
-            let output = MultiEraOutput::try_from(eracbor.as_ref())?;
-            pallas_utxos.insert(input, output);
-        }
-
-        validate_tx(
-            tx,
-            0,
-            &env,
-            &pallas_utxos,
-            &mut pallas::ledger::validate::utils::CertState::default(),
-        )?;
-
-        Ok(())
-    }
-
-    pub fn evaluate<D: Domain>(
-        &self,
-        domain: &D,
-        tx: &MultiEraTx,
-    ) -> Result<pallas::ledger::validate::phase2::EvalReport, MempoolError> {
-        use dolos_core::{EraCbor, StateStore as _, TxoRef};
-
-        let eras = dolos_cardano::eras::load_era_summary::<D>(domain.state())?;
-
-        let pparams = dolos_cardano::load_effective_pparams::<D>(domain.state())?;
-
-        let pparams = dolos_cardano::utils::pparams_to_pallas(&pparams);
-
-        let slot_config = pallas::ledger::validate::phase2::script_context::SlotConfig {
-            slot_length: eras.edge().slot_length,
-            zero_slot: eras.edge().start.slot,
-            zero_time: eras.edge().start.timestamp,
-        };
-
-        let input_refs = tx.requires().iter().map(From::from).collect();
-
-        let utxos: pallas::ledger::validate::utils::UtxoMap = domain
-            .state()
-            .get_utxos(input_refs)?
-            .into_iter()
-            .map(|(txoref, eracbor)| {
-                let TxoRef(a, b) = txoref;
-                let EraCbor(c, d) = eracbor.as_ref();
-                let era = pallas::ledger::traverse::Era::try_from(*c).expect("era out of range");
-
-                (
-                    pallas::ledger::validate::utils::TxoRef::from((a, b)),
-                    pallas::ledger::validate::utils::EraCbor::from((era, d.clone())),
-                )
-            })
-            .collect();
-
-        let report =
-            pallas::ledger::validate::phase2::evaluate_tx(tx, &pparams, &utxos, &slot_config)?;
-
-        Ok(report)
     }
 
     pub fn request(&self, desired: usize) -> Vec<MempoolTx> {
@@ -230,6 +108,25 @@ impl Mempool {
 impl MempoolStore for Mempool {
     type Stream = MempoolStream;
 
+    fn receive(&self, tx: MempoolTx) -> Result<(), MempoolError> {
+        debug!(tx = %tx.hash, "receiving tx");
+
+        let mut state = self.mempool.write().unwrap();
+
+        state.pending.push(tx.clone());
+
+        self.notify(MempoolTxStage::Pending, tx);
+
+        debug!(
+            pending = state.pending.len(),
+            inflight = state.inflight.len(),
+            acknowledged = state.acknowledged.len(),
+            "mempool state changed"
+        );
+
+        Ok(())
+    }
+
     fn apply(&self, seen_txs: &[TxHash], unseen_txs: &[TxHash]) {
         let mut state = self.mempool.write().unwrap();
 
@@ -254,39 +151,6 @@ impl MempoolStore for Mempool {
         }
     }
 
-    fn evaluate_raw<D: Domain>(&self, domain: &D, cbor: &[u8]) -> Result<EvalReport, MempoolError> {
-        let tx = MultiEraTx::decode(cbor)?;
-        self.evaluate(domain, &tx)
-    }
-
-    fn receive_raw<D: Domain>(&self, domain: &D, cbor: &[u8]) -> Result<TxHash, MempoolError> {
-        let tx = MultiEraTx::decode(cbor)?;
-
-        self.validate(domain, &tx)?;
-
-        let report = self.evaluate(domain, &tx)?;
-
-        for eval in report {
-            if !eval.success {
-                return Err(MempoolError::Phase2ExplicitError(eval.logs.clone()));
-            }
-        }
-
-        let hash = tx.hash();
-
-        let tx = MempoolTx {
-            hash,
-            // TODO: this is a hack to make the era compatible with the ledger
-            era: u16::from(tx.era()) - 1,
-            bytes: cbor.into(),
-            confirmed: false,
-        };
-
-        self.receive(tx);
-
-        Ok(hash)
-    }
-
     fn check_stage(&self, tx_hash: &TxHash) -> MempoolTxStage {
         let state = self.mempool.read().unwrap();
 
@@ -309,6 +173,16 @@ impl MempoolStore for Mempool {
         MempoolStream {
             inner: BroadcastStream::new(self.updates.subscribe()),
         }
+    }
+
+    fn pending(&self) -> Vec<(TxHash, EraCbor)> {
+        let state = self.mempool.read().unwrap();
+
+        state
+            .pending
+            .iter()
+            .map(|tx| (tx.hash, tx.payload.clone()))
+            .collect()
     }
 }
 

@@ -3,7 +3,7 @@ use axum::{
     extract::State,
     http::{header, HeaderMap, StatusCode},
 };
-use dolos_core::{Domain, MempoolError, MempoolStore as _};
+use dolos_core::{facade::receive_tx, ChainError, Domain, DomainError, MempoolError};
 
 use crate::Facade;
 
@@ -28,22 +28,30 @@ pub async fn route<D: Domain>(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    let hash = domain
-        .mempool()
-        .receive_raw(&domain.inner, &cbor)
-        .map_err(|e| match e {
-            MempoolError::Phase1Error(_) => StatusCode::BAD_REQUEST,
-            MempoolError::Phase2Error(_) => StatusCode::BAD_REQUEST,
-            MempoolError::Phase2ExplicitError(_) => StatusCode::BAD_REQUEST,
-            MempoolError::InvalidTx(_) => StatusCode::BAD_REQUEST,
+    let chain = domain.read_chain().await;
+    let result = receive_tx(&domain.inner, &chain, &cbor);
+
+    let hash = result.map_err(|e| match e {
+        DomainError::ChainError(x) => match x {
+            ChainError::BrokenInvariant(_) => StatusCode::BAD_REQUEST,
+            ChainError::DecodingError(_) => StatusCode::BAD_REQUEST,
+            ChainError::CborDecodingError(_) => StatusCode::BAD_REQUEST,
+            ChainError::AddressDecoding(_) => StatusCode::BAD_REQUEST,
+            ChainError::Phase1ValidationRejected(_) => StatusCode::BAD_REQUEST,
+            ChainError::Phase2ValidationRejected(_) => StatusCode::BAD_REQUEST,
+            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        },
+        DomainError::MempoolError(x) => match x {
             MempoolError::TraverseError(_) => StatusCode::BAD_REQUEST,
-            MempoolError::StateError(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            MempoolError::ChainError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            MempoolError::InvalidTx(_) => StatusCode::BAD_REQUEST,
             MempoolError::DecodeError(_) => StatusCode::BAD_REQUEST,
             MempoolError::PlutusNotSupported => StatusCode::BAD_REQUEST,
             MempoolError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            MempoolError::StateError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             MempoolError::PParamsNotAvailable => StatusCode::INTERNAL_SERVER_ERROR,
-        })?;
+        },
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    })?;
 
     Ok(hex::encode(hash))
 }
