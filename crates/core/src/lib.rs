@@ -75,6 +75,22 @@ use crate::batch::WorkBatch;
 #[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
 pub struct EraCbor(pub Era, pub Cbor);
 
+impl EraCbor {
+    pub fn era(&self) -> Era {
+        self.0
+    }
+
+    pub fn cbor(&self) -> &[u8] {
+        &self.1
+    }
+}
+
+impl AsRef<[u8]> for EraCbor {
+    fn as_ref(&self) -> &[u8] {
+        &self.1
+    }
+}
+
 impl From<(Era, Cbor)> for EraCbor {
     fn from(value: (Era, Cbor)) -> Self {
         Self(value.0, value.1)
@@ -322,8 +338,6 @@ impl Genesis {
     }
 }
 
-pub type Phase2Log = Vec<String>;
-
 #[derive(Debug, Error)]
 pub enum MempoolError {
     #[error("internal error: {0}")]
@@ -335,20 +349,8 @@ pub enum MempoolError {
     #[error("decode error: {0}")]
     DecodeError(#[from] pallas::codec::minicbor::decode::Error),
 
-    #[error("tx validation failed during phase-1: {0}")]
-    Phase1Error(#[from] pallas::ledger::validate::utils::ValidationError),
-
-    #[error("tx evaluation failed during phase-2: {0}")]
-    Phase2Error(#[from] pallas::ledger::validate::phase2::error::Error),
-
-    #[error("phase-2 script yielded an error")]
-    Phase2ExplicitError(Phase2Log),
-
     #[error(transparent)]
     StateError(#[from] StateError),
-
-    #[error(transparent)]
-    ChainError(#[from] ChainError),
 
     #[error("plutus not supported")]
     PlutusNotSupported,
@@ -366,13 +368,13 @@ pub trait MempoolStore: Clone + Send + Sync + 'static {
         + Send
         + Sync;
 
-    fn receive_raw<D: Domain>(&self, domain: &D, cbor: &[u8]) -> Result<TxHash, MempoolError>;
-
-    fn evaluate_raw<D: Domain>(&self, domain: &D, cbor: &[u8]) -> Result<EvalReport, MempoolError>;
+    fn receive(&self, tx: mempool::MempoolTx) -> Result<(), MempoolError>;
 
     fn apply(&self, seen_txs: &[TxHash], unseen_txs: &[TxHash]);
     fn check_stage(&self, tx_hash: &TxHash) -> MempoolTxStage;
     fn subscribe(&self) -> Self::Stream;
+
+    fn pending(&self) -> Vec<(TxHash, EraCbor)>;
 }
 
 pub trait Block: Sized + Send + Sync {
@@ -387,6 +389,8 @@ pub trait Block: Sized + Send + Sync {
         ChainPoint::Specific(slot, hash)
     }
 }
+
+pub type Phase2Log = Vec<String>;
 
 #[derive(Debug, Error)]
 pub enum ChainError {
@@ -437,6 +441,15 @@ pub enum ChainError {
 
     #[error("invalid proposal params")]
     InvalidProposalParams,
+
+    #[error("phase-1 script rejected the transaction")]
+    Phase1ValidationRejected(#[from] pallas::ledger::validate::utils::ValidationError),
+
+    #[error("couldn't evaluate phase-2 script: {0}")]
+    Phase2EvaluationError(String),
+
+    #[error("phase-2 script rejected the transaction")]
+    Phase2ValidationRejected(Phase2Log),
 }
 
 pub enum WorkKind {
@@ -538,6 +551,14 @@ pub trait ChainLogic: Sized + Send + Sync {
     fn last_immutable_slot(domain: &impl Domain, tip: BlockSlot) -> BlockSlot {
         tip.saturating_sub(Self::mutable_slots(domain))
     }
+
+    fn validate_tx<D: Domain>(
+        &self,
+        cbor: &[u8],
+        utxos: &MempoolAwareUtxoStore<D>,
+        tip: Option<ChainPoint>,
+        genesis: &Genesis,
+    ) -> Result<mempool::MempoolTx, ChainError>;
 }
 
 #[derive(Debug, Error)]

@@ -1,3 +1,4 @@
+use dolos_core::{ChainError, DomainError, MempoolError};
 use jsonrpsee::types::ErrorCode;
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::{json, Value};
@@ -5,26 +6,11 @@ use tx3_resolver::inputs::{CanonicalQuery, SearchSpace};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("no cursor found")]
-    NoCursorFound,
+    #[error("internal error: {0}")]
+    InternalError(String),
 
-    #[error(transparent)]
-    StateError(#[from] dolos_core::StateError),
-
-    #[error(transparent)]
-    ChainError(#[from] dolos_core::ChainError),
-
-    #[error(transparent)]
-    TraverseError(#[from] pallas::ledger::traverse::Error),
-
-    #[error(transparent)]
-    AddressError(#[from] pallas::ledger::addresses::Error),
-
-    #[error(transparent)]
-    DecodeError(#[from] pallas::codec::minicbor::decode::Error),
-
-    #[error(transparent)]
-    MempoolError(dolos_core::MempoolError),
+    #[error("invalid cbor: {0}")]
+    InvalidCborError(String),
 
     #[error(transparent)]
     ArgsError(#[from] tx3_sdk::trp::args::Error),
@@ -56,8 +42,29 @@ pub enum Error {
     #[error("input `{0}` not resolved")]
     InputNotResolved(String, Box<CanonicalQuery>, Box<SearchSpace>),
 
+    #[error("tx was not accepted: {0}")]
+    TxNotAccepted(String),
+
     #[error("tx script returned failure")]
     TxScriptFailure(Vec<String>),
+}
+
+impl From<pallas::codec::minicbor::decode::Error> for Error {
+    fn from(error: pallas::codec::minicbor::decode::Error) -> Self {
+        Error::InvalidCborError(error.to_string())
+    }
+}
+
+impl From<pallas::ledger::traverse::Error> for Error {
+    fn from(error: pallas::ledger::traverse::Error) -> Self {
+        Error::InvalidCborError(error.to_string())
+    }
+}
+
+impl From<pallas::ledger::addresses::Error> for Error {
+    fn from(error: pallas::ledger::addresses::Error) -> Self {
+        Error::InvalidCborError(error.to_string())
+    }
 }
 
 trait IntoErrorData {
@@ -120,11 +127,37 @@ impl From<tx3_resolver::Error> for Error {
     }
 }
 
-impl From<dolos_core::MempoolError> for Error {
-    fn from(error: dolos_core::MempoolError) -> Self {
+impl From<MempoolError> for Error {
+    fn from(error: MempoolError) -> Self {
         match error {
-            dolos_core::MempoolError::Phase2ExplicitError(x) => Error::TxScriptFailure(x),
-            _ => Error::MempoolError(error),
+            MempoolError::PlutusNotSupported => {
+                Error::TxNotAccepted("Plutus not supported".to_string())
+            }
+            MempoolError::InvalidTx(x) => Error::TxNotAccepted(x.to_string()),
+            e => Error::InternalError(e.to_string()),
+        }
+    }
+}
+
+impl From<DomainError> for Error {
+    fn from(error: DomainError) -> Self {
+        match error {
+            DomainError::ChainError(e) => Error::from(e),
+            DomainError::MempoolError(e) => Error::from(e),
+            e => Error::InternalError(e.to_string()),
+        }
+    }
+}
+
+impl From<ChainError> for Error {
+    fn from(error: ChainError) -> Self {
+        match error {
+            ChainError::BrokenInvariant(x) => Error::TxNotAccepted(x.to_string()),
+            ChainError::DecodingError(x) => Error::TxNotAccepted(x.to_string()),
+            ChainError::Phase1ValidationRejected(x) => Error::TxNotAccepted(x.to_string()),
+            ChainError::Phase2ValidationRejected(x) => Error::TxScriptFailure(x),
+            ChainError::EraNotFound => Error::TxNotAccepted("era not found".to_string()),
+            e => Error::InternalError(e.to_string()),
         }
     }
 }
@@ -134,22 +167,18 @@ impl Error {
     pub const CODE_MISSING_TX_ARG: i32 = -32001;
     pub const CODE_INPUT_NOT_RESOLVED: i32 = -32002;
     pub const CODE_TX_SCRIPT_FAILURE: i32 = -32003;
+    pub const CODE_TX_NOT_ACCEPTED: i32 = -32004;
+    pub const CODE_INVALID_CBOR: i32 = -32005;
 
     pub fn code(&self) -> i32 {
         match self {
-            Error::NoCursorFound => ErrorCode::InternalError.code(),
-            Error::ChainError(_) => ErrorCode::InternalError.code(),
             Error::JsonRpcError(err) => err.code(),
             Error::InvalidTirEnvelope => ErrorCode::InvalidParams.code(),
             Error::InvalidTirBytes => ErrorCode::InvalidParams.code(),
             Error::ArgsError(_) => ErrorCode::InvalidParams.code(),
             Error::PParamsNotAvailable => ErrorCode::InternalError.code(),
             Error::UnsupportedTxEra => ErrorCode::InternalError.code(),
-            Error::StateError(_) => ErrorCode::InternalError.code(),
-            Error::TraverseError(_) => ErrorCode::InternalError.code(),
-            Error::AddressError(_) => ErrorCode::InternalError.code(),
-            Error::DecodeError(_) => ErrorCode::InternalError.code(),
-            Error::MempoolError(_) => ErrorCode::InternalError.code(),
+            Error::InternalError(_) => ErrorCode::InternalError.code(),
             Error::ResolveError(_) => ErrorCode::InternalError.code(),
 
             // custom errors
@@ -157,6 +186,8 @@ impl Error {
             Error::MissingTxArg { .. } => Self::CODE_MISSING_TX_ARG,
             Error::InputNotResolved(_, _, _) => Self::CODE_INPUT_NOT_RESOLVED,
             Error::TxScriptFailure(_) => Self::CODE_TX_SCRIPT_FAILURE,
+            Error::TxNotAccepted(_) => Self::CODE_TX_NOT_ACCEPTED,
+            Error::InvalidCborError(_) => Self::CODE_INVALID_CBOR,
         }
     }
 

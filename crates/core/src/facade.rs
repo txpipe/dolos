@@ -2,7 +2,8 @@ use tracing::{error, info, warn};
 
 use crate::{
     batch::WorkBatch, ArchiveStore, Block as _, BlockSlot, ChainLogic, ChainPoint, Domain,
-    DomainError, RawBlock, StateStore, TipEvent, WalStore, WorkUnit,
+    DomainError, MempoolAwareUtxoStore, MempoolStore, MempoolTx, RawBlock, StateStore, TipEvent,
+    TxHash, WalStore, WorkUnit,
 };
 
 /// Process a batch of blocks during bulk import operations, skipping the WAL
@@ -130,6 +131,34 @@ pub async fn roll_forward<D: Domain>(
     drain_pending_work(&mut *chain, domain, true).await?;
 
     Ok(last)
+}
+
+pub fn validate_tx<D: Domain>(
+    domain: &D,
+    chain: &D::Chain,
+    cbor: &[u8],
+) -> Result<MempoolTx, DomainError> {
+    let tip = domain.state().read_cursor()?;
+
+    let utxos = MempoolAwareUtxoStore::<'_, D>::new(domain.state(), domain.mempool());
+
+    let tx = chain.validate_tx(cbor, &utxos, tip, &domain.genesis())?;
+
+    Ok(tx)
+}
+
+pub fn receive_tx<D: Domain>(
+    domain: &D,
+    chain: &D::Chain,
+    cbor: &[u8],
+) -> Result<TxHash, DomainError> {
+    let tx = validate_tx(domain, chain, cbor)?;
+
+    let hash = tx.hash;
+
+    domain.mempool().receive(tx)?;
+
+    Ok(hash)
 }
 
 fn ensure_wal_in_sync_with_state<D: Domain>(domain: &D) -> Result<(), DomainError> {

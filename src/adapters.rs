@@ -96,7 +96,7 @@ impl Domain for DomainAdapter {
     }
 
     fn notify_tip(&self, tip: TipEvent) {
-        if !self.tip_broadcast.receiver_count() == 0 {
+        if self.tip_broadcast.receiver_count() > 0 {
             self.tip_broadcast.send(tip).unwrap();
         }
     }
