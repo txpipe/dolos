@@ -1,6 +1,5 @@
 use dolos_core::{ChainError, Domain, Genesis, StateStore};
 use pallas::ledger::primitives::StakeCredential;
-use rayon::iter::ParallelIterator;
 use tracing::{debug, trace};
 
 use crate::{

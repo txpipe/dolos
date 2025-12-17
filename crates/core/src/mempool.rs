@@ -25,7 +25,7 @@ impl Eq for MempoolTx {}
 impl Clone for MempoolTx {
     fn clone(&self) -> Self {
         Self {
-            hash: self.hash.clone(),
+            hash: self.hash,
             payload: self.payload.clone(),
             confirmed: self.confirmed,
             report: None,
@@ -161,23 +161,23 @@ impl<'a, D: Domain> MempoolAwareUtxoStore<'a, D> {
     }
 
     pub fn state(&self) -> &D::State {
-        &self.inner
+        self.inner
     }
 
     pub fn mempool(&self) -> &D::Mempool {
-        &self.mempool
+        self.mempool
     }
 
     pub fn get_utxo_by_asset(&self, asset: &[u8]) -> Result<UtxoSet, StateError> {
         let predicate = |utxo: &MultiEraOutput<'_>| utxo_asset_matches(utxo, asset);
 
-        let from_mempool = scan_mempool_utxos::<D, _>(predicate, &self.mempool);
+        let from_mempool = scan_mempool_utxos::<D, _>(predicate, self.mempool);
 
         let mut utxos = self.inner.get_utxo_by_asset(asset)?;
 
         utxos.extend(from_mempool);
 
-        exclude_inflight_stxis::<D>(&mut utxos, &self.mempool);
+        exclude_inflight_stxis::<D>(&mut utxos, self.mempool);
 
         Ok(utxos)
     }
@@ -185,13 +185,13 @@ impl<'a, D: Domain> MempoolAwareUtxoStore<'a, D> {
     pub fn get_utxo_by_policy(&self, policy: &[u8]) -> Result<UtxoSet, StateError> {
         let predicate = |utxo: &MultiEraOutput<'_>| utxo_policy_matches(utxo, policy);
 
-        let from_mempool = scan_mempool_utxos::<D, _>(predicate, &self.mempool);
+        let from_mempool = scan_mempool_utxos::<D, _>(predicate, self.mempool);
 
         let mut utxos = self.inner.get_utxo_by_policy(policy)?;
 
         utxos.extend(from_mempool);
 
-        exclude_inflight_stxis::<D>(&mut utxos, &self.mempool);
+        exclude_inflight_stxis::<D>(&mut utxos, self.mempool);
 
         Ok(utxos)
     }
@@ -199,21 +199,21 @@ impl<'a, D: Domain> MempoolAwareUtxoStore<'a, D> {
     pub fn get_utxo_by_address(&self, address: &[u8]) -> Result<UtxoSet, StateError> {
         let predicate = |utxo: &MultiEraOutput<'_>| utxo_address_matches(utxo, address);
 
-        let from_mempool = scan_mempool_utxos::<D, _>(predicate, &self.mempool);
+        let from_mempool = scan_mempool_utxos::<D, _>(predicate, self.mempool);
 
         let mut utxos = self.inner.get_utxo_by_address(address)?;
 
         utxos.extend(from_mempool);
 
-        exclude_inflight_stxis::<D>(&mut utxos, &self.mempool);
+        exclude_inflight_stxis::<D>(&mut utxos, self.mempool);
 
         Ok(utxos)
     }
 
     pub fn get_utxos(&self, mut refs: HashSet<TxoRef>) -> Result<UtxoMap, StateError> {
-        exclude_inflight_stxis::<D>(&mut refs, &self.mempool);
+        exclude_inflight_stxis::<D>(&mut refs, self.mempool);
 
-        let from_mempool = select_mempool_utxos::<D>(&mut refs, &self.mempool);
+        let from_mempool = select_mempool_utxos::<D>(&mut refs, self.mempool);
 
         let mut utxos = self.inner.get_utxos(Vec::from_iter(refs))?;
 
