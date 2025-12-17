@@ -1,7 +1,9 @@
 use std::{collections::HashMap, marker::PhantomData};
 
 use dolos_core::ChainError;
+use itertools::Itertools;
 use pallas::ledger::primitives::StakeCredential;
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use tracing::debug;
 
 use crate::{
@@ -329,94 +331,119 @@ pub trait RewardsContext {
     }
 }
 
-pub fn define_rewards<C: RewardsContext>(ctx: &C) -> Result<RewardMap<C>, ChainError> {
-    let mut map = RewardMap::<C>::new(ctx.incentives().clone());
+struct RewardUpdate {
+    account: StakeCredential,
+    amount: u64,
+    pool: PoolHash,
+    is_operator: bool,
+}
 
-    for pool in ctx.iter_all_pools() {
-        let pool_params = ctx.pool_params(pool);
+pub fn define_rewards<C: RewardsContext + Sync>(ctx: &C) -> Result<RewardMap<C>, ChainError> {
+    let incentives = ctx.incentives().clone();
 
-        let operator_account = pallas_extras::parse_reward_account(&pool_params.reward_account)
-            .expect("invalid pool reward account");
+    // Compute all reward updates in parallel
+    let updates: Vec<RewardUpdate> = ctx
+        .iter_all_pools()
+        .collect_vec()
+        .par_iter()
+        .map(|pool| {
+            let mut updates = Vec::new();
 
-        let owners = pool_params
-            .pool_owners
-            .iter()
-            .map(|owner| pallas_extras::keyhash_to_stake_cred(*owner))
-            .collect::<Vec<_>>();
+            let pool_params = ctx.pool_params(*pool);
 
-        let live_pledge = ctx.live_pledge(pool, &owners);
-        let circulating_supply = ctx.pots().circulating();
-        let pool_stake = ctx.pool_stake(pool);
-        let epoch_rewards = ctx.incentives().available_rewards;
-        let total_active_stake = ctx.active_stake();
-        let epoch_blocks = ctx.epoch_blocks();
-        let pool_blocks = ctx.pool_blocks(pool);
+            let operator_account = pallas_extras::parse_reward_account(&pool_params.reward_account)
+                .expect("invalid pool reward account");
 
-        let k = ctx.pparams().ensure_k()?;
-        let a0 = ctx.pparams().ensure_a0()?;
-        let d = ctx.pparams().ensure_d()?;
+            let owners: Vec<_> = pool_params
+                .pool_owners
+                .iter()
+                .map(|owner| pallas_extras::keyhash_to_stake_cred(*owner))
+                .collect();
 
-        let total_pool_reward = formulas::pool_rewards(
-            epoch_rewards,
-            circulating_supply,
-            total_active_stake,
-            pool_stake,
-            pool_params.pledge,
-            live_pledge,
-            k,
-            pallas_ratio!(a0),
-            pallas_ratio!(d),
-            pool_blocks,
-            epoch_blocks,
-        );
+            let live_pledge = ctx.live_pledge(*pool, &owners);
+            let circulating_supply = ctx.pots().circulating();
+            let pool_stake = ctx.pool_stake(*pool);
+            let epoch_rewards = ctx.incentives().available_rewards;
+            let total_active_stake = ctx.active_stake();
+            let epoch_blocks = ctx.epoch_blocks();
+            let pool_blocks = ctx.pool_blocks(*pool);
 
-        let operator_share = formulas::pool_operator_share(
-            total_pool_reward,
-            pool_params.cost,
-            pallas_ratio!(pool_params.margin),
-            pool_stake,
-            live_pledge,
-            circulating_supply,
-        );
+            let k = ctx.pparams().ensure_k()?;
+            let a0 = ctx.pparams().ensure_a0()?;
+            let d = ctx.pparams().ensure_d()?;
 
-        debug!(
-            %pool_blocks,
-            %epoch_blocks,
-            %total_active_stake,
-            %pool_stake,
-            %circulating_supply,
-            %k,
-            %epoch_rewards,
-            %total_pool_reward,
-            %operator_share,
-            %live_pledge,
-            "computed pool rewards"
-        );
-
-        map.include(ctx, &operator_account, operator_share, pool, true);
-
-        for delegator in ctx.pool_delegators(pool) {
-            if owners.contains(&delegator) {
-                // we skip giving out rewards to owners since they already get paid via the
-                // operator share
-                continue;
-
-                // TODO: make sure that the above statement matches the specs
-            }
-
-            let delegator_stake = ctx.account_stake(&pool, &delegator);
-
-            let delegator_reward = formulas::delegator_reward(
-                total_pool_reward,
-                delegator_stake,
-                pool_stake,
+            let total_pool_reward = formulas::pool_rewards(
+                epoch_rewards,
                 circulating_supply,
-                pool_params.cost,
-                pallas_ratio!(pool_params.margin),
+                total_active_stake,
+                pool_stake,
+                pool_params.pledge,
+                live_pledge,
+                k,
+                pallas_ratio!(a0),
+                pallas_ratio!(d),
+                pool_blocks,
+                epoch_blocks,
             );
 
-            map.include(ctx, &delegator, delegator_reward, pool, false);
-        }
+            let operator_share = formulas::pool_operator_share(
+                total_pool_reward,
+                pool_params.cost,
+                pallas_ratio!(pool_params.margin),
+                pool_stake,
+                live_pledge,
+                circulating_supply,
+            );
+
+            updates.push(RewardUpdate {
+                account: operator_account,
+                amount: operator_share,
+                pool: *pool,
+                is_operator: true,
+            });
+
+            for delegator in ctx.pool_delegators(*pool) {
+                if owners.contains(&delegator) {
+                    continue;
+                }
+
+                let delegator_stake = ctx.account_stake(&pool, &delegator);
+
+                let delegator_reward = formulas::delegator_reward(
+                    total_pool_reward,
+                    delegator_stake,
+                    pool_stake,
+                    circulating_supply,
+                    pool_params.cost,
+                    pallas_ratio!(pool_params.margin),
+                );
+
+                updates.push(RewardUpdate {
+                    account: delegator,
+                    amount: delegator_reward,
+                    pool: *pool,
+                    is_operator: false,
+                });
+            }
+
+            Ok::<_, ChainError>(updates)
+        })
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .collect();
+
+    // Apply updates sequentially
+    let mut map = RewardMap::<C>::new(incentives);
+
+    for update in updates {
+        map.include(
+            ctx,
+            &update.account,
+            update.amount,
+            update.pool,
+            update.is_operator,
+        );
     }
 
     Ok(map)
