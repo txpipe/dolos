@@ -3,10 +3,8 @@ use std::{collections::HashMap, marker::PhantomData};
 use dolos_core::ChainError;
 use itertools::Itertools;
 use pallas::ledger::primitives::StakeCredential;
-use rayon::{
-    iter::ParallelIterator,
-    slice::ParallelSlice,
-};
+use rayon::{iter::ParallelIterator, slice::ParallelSlice};
+use tracing::debug;
 
 use crate::{
     add, pallas_extras, pallas_ratio,
@@ -351,11 +349,11 @@ pub fn define_rewards<C: RewardsContext + Sync>(ctx: &C) -> Result<RewardMap<C>,
         let operator_account = pallas_extras::parse_reward_account(&pool_params.reward_account)
             .expect("invalid pool reward account");
 
-        let owners: Vec<_> = pool_params
+        let owners = pool_params
             .pool_owners
             .iter()
             .map(|owner| pallas_extras::keyhash_to_stake_cred(*owner))
-            .collect();
+            .collect_vec();
 
         let live_pledge = ctx.live_pledge(pool, &owners);
         let circulating_supply = ctx.pots().circulating();
@@ -390,6 +388,20 @@ pub fn define_rewards<C: RewardsContext + Sync>(ctx: &C) -> Result<RewardMap<C>,
             pool_stake,
             live_pledge,
             circulating_supply,
+        );
+
+        debug!(
+            %pool_blocks,
+            %epoch_blocks,
+            %total_active_stake,
+            %pool_stake,
+            %circulating_supply,
+            %k,
+            %epoch_rewards,
+            %total_pool_reward,
+            %operator_share,
+            %live_pledge,
+            "computed pool rewards"
         );
 
         updates.push(RewardUpdate {
