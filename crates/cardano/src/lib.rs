@@ -42,6 +42,8 @@ pub mod genesis;
 pub mod roll;
 pub mod rupd;
 
+pub mod validate;
+
 #[cfg(feature = "include-genesis")]
 pub mod include;
 
@@ -387,6 +389,16 @@ impl dolos_core::ChainLogic for CardanoLogic {
         roll::compute_delta::<D>(&self.config, genesis, &self.cache, state, batch)?;
 
         Ok(())
+    }
+
+    fn validate_tx<D: Domain>(
+        &self,
+        cbor: &[u8],
+        utxos: &MempoolAwareUtxoStore<D>,
+        tip: Option<ChainPoint>,
+        genesis: &Genesis,
+    ) -> Result<MempoolTx, ChainError> {
+        validate::validate_tx(cbor, utxos, tip, genesis)
     }
 }
 

@@ -1,4 +1,5 @@
 use any_chain_eval::Chain;
+use dolos_core::facade::{receive_tx, validate_tx};
 use futures_core::Stream;
 use futures_util::{StreamExt as _, TryStreamExt as _};
 use pallas::crypto::hash::Hash;
@@ -27,7 +28,6 @@ where
     D: Domain + LedgerContext,
 {
     pub fn new(domain: D) -> Self {
-        let domain = domain.clone();
         let _mapper = interop::Mapper::new(domain.clone());
 
         Self { domain, _mapper }
@@ -48,7 +48,7 @@ fn event_to_watch_mempool_response(event: MempoolEvent) -> WatchMempoolResponse 
     WatchMempoolResponse {
         tx: TxInMempool {
             r#ref: event.tx.hash.to_vec().into(),
-            native_bytes: event.tx.bytes.to_vec().into(),
+            native_bytes: event.tx.payload.cbor().to_vec().into(),
             stage: tx_stage_to_u5c(event.new_stage),
             parsed_state: None, // TODO
         }
@@ -63,21 +63,22 @@ fn event_to_wait_for_tx_response(event: MempoolEvent) -> WaitForTxResponse {
     }
 }
 
-fn tx_eval_to_u5c(
-    eval: Result<pallas::ledger::validate::phase2::EvalReport, MempoolError>,
-) -> u5c::spec::cardano::TxEval {
+fn tx_eval_to_u5c(eval: Result<MempoolTx, DomainError>) -> u5c::spec::cardano::TxEval {
     match eval {
-        Ok(eval) => u5c::spec::cardano::TxEval {
-            ex_units: eval
-                .iter()
-                .try_fold(u5c::spec::cardano::ExUnits::default(), |acc, eval| {
+        Ok(tx) => u5c::spec::cardano::TxEval {
+            ex_units: tx.report.iter().flatten().try_fold(
+                u5c::spec::cardano::ExUnits::default(),
+                |acc, eval| {
                     Some(ExUnits {
                         steps: acc.steps + eval.units.steps,
                         memory: acc.memory + eval.units.mem,
                     })
-                }),
-            redeemers: eval
+                },
+            ),
+            redeemers: tx
+                .report
                 .iter()
+                .flatten()
                 .map(|x| u5c::spec::cardano::Redeemer {
                     purpose: x.tag as i32,
                     index: x.index,
@@ -120,21 +121,18 @@ where
 
         info!("received new grpc submit tx request: {:?}", message);
 
-        let domain = &self.domain;
-        let mempool = domain.mempool();
+        let chain = self.domain.read_chain().await;
 
         let tx = message
             .tx
             .ok_or_else(|| Status::invalid_argument("missing tx"))?;
-
         let tx_bytes = match tx.r#type {
             Some(any_chain_tx::Type::Raw(bytes)) => bytes,
             _ => return Err(Status::invalid_argument("missing or unsupported tx type")),
         };
 
-        let hash = mempool
-            .receive_raw(domain, tx_bytes.as_ref())
-            .map_err(|e| Status::invalid_argument(format! {"could not process tx: {e}"}))?;
+        let hash = receive_tx(&self.domain, &chain, tx_bytes.as_ref())
+            .map_err(|e| Status::invalid_argument(format!("could not process tx: {e}")))?;
 
         Ok(Response::new(SubmitTxResponse {
             r#ref: hash.to_vec().into(),
@@ -152,19 +150,17 @@ where
             .map(|x| Hash::from(x.as_ref()))
             .collect();
 
-        let mempool = self.domain.mempool();
-
         let initial_stages: Vec<_> = subjects
             .iter()
             .map(|x| {
                 Result::<_, Status>::Ok(WaitForTxResponse {
-                    stage: tx_stage_to_u5c(mempool.check_stage(x)),
+                    stage: tx_stage_to_u5c(self.domain.mempool().check_stage(x)),
                     r#ref: x.to_vec().into(),
                 })
             })
             .collect();
 
-        let updates = mempool.subscribe();
+        let updates = self.domain.mempool().subscribe();
 
         let updates = UpdateFilter::<D::Mempool>::new(updates, subjects)
             .map(|x| Ok(event_to_wait_for_tx_response(x)))
@@ -210,7 +206,9 @@ where
             _ => return Err(Status::invalid_argument("missing or unsupported tx type")),
         };
 
-        let result = self.domain.mempool().evaluate_raw(&self.domain, &tx_raw);
+        let chain = self.domain.read_chain().await;
+
+        let result = validate_tx(&self.domain, &chain, &tx_raw);
         let result = tx_eval_to_u5c(result);
 
         let report = AnyChainEval {

@@ -31,8 +31,8 @@ fn define_gasket_policy(config: &Option<RetryConfig>) -> gasket::runtime::Policy
     };
 
     gasket::runtime::Policy {
-        //be generous with tick timeout to avoid timeout during block awaits
-        tick_timeout: std::time::Duration::from_secs(600).into(),
+        // TODO: we skip checking timeouts to avoid stalling the pipeline on slow work units. The long-term solution is to scope work units to fit within a particular quota.
+        tick_timeout: None,
         bootstrap_retry: retries.clone(),
         work_retry: retries.clone(),
         teardown_retry: retries.clone(),
