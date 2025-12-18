@@ -69,7 +69,7 @@ pub fn validate_tx<D: Domain>(
         &mut pallas::ledger::validate::utils::CertState::default(),
     )?;
 
-    let report = evaluate_tx::<D>(&cbor, &utxos)?;
+    let report = evaluate_tx::<D>(cbor, utxos)?;
 
     for eval in report.iter() {
         if !eval.success {
