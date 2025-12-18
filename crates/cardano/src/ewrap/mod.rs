@@ -126,6 +126,7 @@ pub struct BoundaryWork {
     // TODO: we use a vec instead of a HashSet because the Pallas struct doesn't implement Hash. We
     // should turn it into a HashSet once we have the update in Pallas.
     pub expiring_dreps: Vec<DRep>,
+    pub retiring_dreps: Vec<DRep>,
 
     // computed via visitors
     pub deltas: WorkDeltas<CardanoLogic>,

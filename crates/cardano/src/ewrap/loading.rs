@@ -57,6 +57,16 @@ impl BoundaryWork {
         Ok(())
     }
 
+    fn should_retire_drep(&self, drep: &DRepState) -> bool {
+        let Some(unregistered_at) = drep.unregistered_at else {
+            return false;
+        };
+
+        let (unregistered_epoch, _) = self.active_era.slot_epoch(unregistered_at);
+
+        unregistered_epoch == self.starting_epoch_no() + 1
+    }
+
     fn should_expire_drep(&self, drep: &DRepState) -> Result<bool, ChainError> {
         if drep.expired {
             return Ok(false);
@@ -82,7 +92,11 @@ impl BoundaryWork {
             let (_, drep) = record?;
 
             if self.should_expire_drep(&drep)? {
-                self.expiring_dreps.push(drep.identifier);
+                self.expiring_dreps.push(drep.identifier.clone());
+            }
+
+            if self.should_retire_drep(&drep) {
+                self.retiring_dreps.push(drep.identifier);
             }
         }
 
@@ -248,6 +262,7 @@ impl BoundaryWork {
             new_pools: Default::default(),
             retiring_pools: Default::default(),
             expiring_dreps: Default::default(),
+            retiring_dreps: Default::default(),
             enacting_proposals: Default::default(),
             dropping_proposals: Default::default(),
 

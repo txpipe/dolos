@@ -164,6 +164,10 @@ impl super::BoundaryVisitor for BoundaryVisitor {
             if ctx.expiring_dreps.contains(drep) {
                 self.change(DRepDelegatorDrop::new(id.clone(), current_epoch));
             }
+
+            if ctx.retiring_dreps.contains(drep) {
+                self.change(DRepDelegatorDrop::new(id.clone(), current_epoch));
+            }
         }
 
         Ok(())
