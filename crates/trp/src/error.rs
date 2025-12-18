@@ -13,7 +13,7 @@ pub enum Error {
     InvalidCborError(String),
 
     #[error(transparent)]
-    ArgsError(#[from] tx3_sdk::trp::args::Error),
+    ArgsError(#[from] tx3_lang::interop::json::Error),
 
     #[error(transparent)]
     ResolveError(Box<tx3_resolver::Error>),
@@ -28,7 +28,7 @@ pub enum Error {
     InvalidTirEnvelope,
 
     #[error("failed to decode IR bytes")]
-    InvalidTirBytes,
+    InvalidTirBytes(String),
 
     #[error("only txs from Conway era are supported")]
     UnsupportedTxEra,
@@ -67,6 +67,12 @@ impl From<pallas::ledger::addresses::Error> for Error {
     }
 }
 
+impl From<tx3_lang::ir::Error> for Error {
+    fn from(error: tx3_lang::ir::Error) -> Self {
+        Error::InvalidTirBytes(error.to_string())
+    }
+}
+
 trait IntoErrorData {
     type Output: Serialize + DeserializeOwned + Sized;
 
@@ -74,10 +80,10 @@ trait IntoErrorData {
 }
 
 impl IntoErrorData for tx3_resolver::inputs::CanonicalQuery {
-    type Output = tx3_sdk::trp::InputQueryDiagnostic;
+    type Output = crate::specs::InputQueryDiagnostic;
 
     fn into_error_data(self) -> Self::Output {
-        tx3_sdk::trp::InputQueryDiagnostic {
+        crate::specs::InputQueryDiagnostic {
             address: self.address.as_ref().map(hex::encode),
             min_amount: self
                 .min_amount
@@ -97,18 +103,18 @@ impl IntoErrorData for tx3_resolver::inputs::CanonicalQuery {
 }
 
 impl IntoErrorData for tx3_resolver::inputs::SearchSpace {
-    type Output = tx3_sdk::trp::SearchSpaceDiagnostic;
+    type Output = crate::specs::SearchSpaceDiagnostic;
 
     fn into_error_data(self) -> Self::Output {
-        tx3_sdk::trp::SearchSpaceDiagnostic {
+        crate::specs::SearchSpaceDiagnostic {
             matched: self
                 .take(Some(10))
                 .iter()
                 .map(ToString::to_string)
                 .collect::<Vec<_>>(),
-            by_address_count: self.by_address_count,
-            by_asset_class_count: self.by_asset_class_count,
-            by_ref_count: self.by_ref_count,
+            by_address_count: self.by_address_count.map(|x| x as i64),
+            by_asset_class_count: self.by_asset_class_count.map(|x| x as i64),
+            by_ref_count: self.by_ref_count.map(|x| x as i64),
         }
     }
 }
@@ -174,7 +180,7 @@ impl Error {
         match self {
             Error::JsonRpcError(err) => err.code(),
             Error::InvalidTirEnvelope => ErrorCode::InvalidParams.code(),
-            Error::InvalidTirBytes => ErrorCode::InvalidParams.code(),
+            Error::InvalidTirBytes(_) => ErrorCode::InvalidParams.code(),
             Error::ArgsError(_) => ErrorCode::InvalidParams.code(),
             Error::PParamsNotAvailable => ErrorCode::InternalError.code(),
             Error::UnsupportedTxEra => ErrorCode::InternalError.code(),
@@ -195,7 +201,7 @@ impl Error {
         match self {
             Error::JsonRpcError(err) => err.data().and_then(|v| serde_json::to_value(v).ok()),
             Error::UnsupportedTir { provided, expected } => {
-                let data = tx3_sdk::trp::UnsupportedTirDiagnostic {
+                let data = crate::specs::UnsupportedTirDiagnostic {
                     provided: provided.to_string(),
                     expected: expected.to_string(),
                 };
@@ -203,7 +209,7 @@ impl Error {
                 Some(json!(data))
             }
             Error::InputNotResolved(name, q, ss) => {
-                let data = tx3_sdk::trp::InputNotResolvedDiagnostic {
+                let data = crate::specs::InputNotResolvedDiagnostic {
                     name: name.to_string(),
                     query: q.clone().into_error_data(),
                     search_space: ss.clone().into_error_data(),
@@ -212,12 +218,12 @@ impl Error {
                 Some(json!(data))
             }
             Error::TxScriptFailure(x) => {
-                let data = tx3_sdk::trp::TxScriptFailureDiagnostic { logs: x.clone() };
+                let data = crate::specs::TxScriptFailureDiagnostic { logs: x.clone() };
 
                 Some(json!(data))
             }
             Error::MissingTxArg { key, ty } => {
-                let data = tx3_sdk::trp::MissingTxArgDiagnostic {
+                let data = crate::specs::MissingTxArgDiagnostic {
                     key: key.to_string(),
                     ty: format!("{ty:?}"),
                 };

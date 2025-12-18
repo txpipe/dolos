@@ -116,6 +116,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e16d2d3311acee920a9eb8d33b8cbc1787ce4a264e85f964c2404b969bdcd487"
 
 [[package]]
+name = "approx"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cab112f0a86d568ea0e627cc1d6be74a1e9cd55214684db5561995f6dad897c6"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
 name = "arrayvec"
 version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -403,9 +412,9 @@ checksum = "d86b93f97252c47b41663388e6d155714a9d0c398b99f1005cbc5f978b29f445"
 
 [[package]]
 name = "bech32"
-version = "0.11.0"
+version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d965446196e3b7decd44aa7ee49e31d630118f90ef12f97900f262eb915c951d"
+checksum = "32637268377fc7b10a8c6d51de3e7fba1ce5dd371a96e342b34e6078db558e7f"
 
 [[package]]
 name = "binary-layout"
@@ -1108,7 +1117,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "base64 0.22.1",
- "bech32 0.11.0",
+ "bech32 0.11.1",
  "bincode",
  "bytes",
  "chrono",
@@ -1207,7 +1216,7 @@ name = "dolos-minibf"
 version = "1.0.0-rc.3"
 dependencies = [
  "axum 0.8.4",
- "bech32 0.11.0",
+ "bech32 0.11.1",
  "blockfrost-openapi",
  "chrono",
  "crc",
@@ -1291,7 +1300,6 @@ dependencies = [
  "tx3-cardano",
  "tx3-lang",
  "tx3-resolver",
- "tx3-sdk",
 ]
 
 [[package]]
@@ -2643,7 +2651,7 @@ checksum = "3377e855390a51c95ec1d093bd5f760e0a0b9cf9ae022584fb158636aa2108c1"
 dependencies = [
  "anyhow",
  "async-trait",
- "bech32 0.11.0",
+ "bech32 0.11.1",
  "blake2 0.10.6",
  "chrono",
  "ciborium",
@@ -5221,8 +5229,7 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 [[package]]
 name = "tx3-cardano"
 version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e969e1c4846480e975fdaa0c2f6e19163ba74a0498fc67165deefaab20689f67"
+source = "git+https://github.com/tx3-lang/tx3.git?rev=6da7a70#6da7a70dbbd09eb88c3b71bd0aaca16d7c711edf"
 dependencies = [
  "hex",
  "pallas",
@@ -5236,15 +5243,17 @@ dependencies = [
 [[package]]
 name = "tx3-lang"
 version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4db16c6bacd60f39a287b9276a6273074cae58a70d108834f94ce3b0b5bd87b4"
+source = "git+https://github.com/tx3-lang/tx3.git?rev=6da7a70#6da7a70dbbd09eb88c3b71bd0aaca16d7c711edf"
 dependencies = [
+ "base64 0.22.1",
+ "bech32 0.11.1",
  "ciborium",
  "hex",
  "miette",
  "pest",
  "pest_derive",
  "serde",
+ "serde_json",
  "thiserror 2.0.12",
  "trait-variant",
 ]
@@ -5252,30 +5261,13 @@ dependencies = [
 [[package]]
 name = "tx3-resolver"
 version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "31b1e76b52b28376b9a920db96a612566c77ed465a82308678dd80860a288ce8"
+source = "git+https://github.com/tx3-lang/tx3.git?rev=6da7a70#6da7a70dbbd09eb88c3b71bd0aaca16d7c711edf"
 dependencies = [
+ "approx",
  "hex",
  "thiserror 2.0.12",
  "trait-variant",
  "tx3-lang",
-]
-
-[[package]]
-name = "tx3-sdk"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e249299616f099372b45ff1605900671697547bd6691ca154f0aa36dc665cbc"
-dependencies = [
- "base64 0.22.1",
- "bech32 0.11.0",
- "hex",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror 2.0.12",
- "tx3-lang",
- "uuid",
 ]
 
 [[package]]
@@ -5664,7 +5656,7 @@ version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf221c93e13a30d793f7645a0e7762c55d169dbb0a49671918a2319d289b10bb"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]

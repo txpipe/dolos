@@ -1,41 +1,20 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
 use jsonrpsee::types::Params;
 use pallas::{codec::utils::NonEmptySet, ledger::primitives::conway::VKeyWitness};
-use serde::Deserialize;
 use std::sync::Arc;
 use tx3_lang::ProtoTx;
-use tx3_sdk::trp::{SubmitParams, SubmitWitness};
 
 use dolos_core::{facade::receive_tx, Domain, MempoolAwareUtxoStore, StateStore as _};
 
-use crate::{compiler::load_compiler, utxos::UtxoStoreAdapter};
+use crate::{
+    compiler::load_compiler,
+    specs::{ResolveParams, SubmitParams, SubmitResponse, SubmitWitness, TxEnvelope},
+    utxos::UtxoStoreAdapter,
+};
 
 use super::{Context, Error};
 
-#[derive(Deserialize, Debug)]
-enum IrEncoding {
-    #[serde(rename = "base64")]
-    Base64,
-
-    #[serde(rename = "hex")]
-    Hex,
-}
-
-#[derive(Deserialize, Debug)]
-struct IrEnvelope {
-    #[allow(dead_code)]
-    pub version: String,
-    pub bytecode: String,
-    pub encoding: IrEncoding,
-}
-
-#[derive(Deserialize, Debug)]
-struct TrpResolveParams {
-    pub tir: IrEnvelope,
-    pub args: serde_json::Map<String, serde_json::Value>,
-}
-
-fn load_tx(params: TrpResolveParams) -> Result<ProtoTx, Error> {
+fn load_tx(params: ResolveParams) -> Result<ProtoTx, Error> {
     if params.tir.version != tx3_lang::ir::IR_VERSION {
         return Err(Error::UnsupportedTir {
             expected: tx3_lang::ir::IR_VERSION.to_string(),
@@ -43,16 +22,15 @@ fn load_tx(params: TrpResolveParams) -> Result<ProtoTx, Error> {
         });
     }
 
-    let tx = match params.tir.encoding {
-        IrEncoding::Base64 => STANDARD
+    let tx = match params.tir.encoding.as_str() {
+        "base64" => STANDARD
             .decode(params.tir.bytecode)
             .map_err(|_| Error::InvalidTirEnvelope)?,
-        IrEncoding::Hex => {
-            hex::decode(params.tir.bytecode).map_err(|_| Error::InvalidTirEnvelope)?
-        }
+        "hex" => hex::decode(params.tir.bytecode).map_err(|_| Error::InvalidTirEnvelope)?,
+        _ => return Err(Error::InvalidTirEnvelope),
     };
 
-    let mut tx = tx3_lang::ProtoTx::from_ir_bytes(&tx).map_err(|_| Error::InvalidTirBytes)?;
+    let mut tx = dbg!(tx3_lang::ProtoTx::from_ir_bytes(&tx))?;
 
     let tx_params = tx.find_params();
 
@@ -61,7 +39,7 @@ fn load_tx(params: TrpResolveParams) -> Result<ProtoTx, Error> {
             return Err(Error::MissingTxArg { key, ty });
         };
 
-        let arg = tx3_sdk::trp::args::from_json(arg.clone(), &ty)?;
+        let arg = tx3_lang::interop::json::from_json(arg.clone(), &ty)?;
 
         tx.set_arg(&key, arg);
     }
@@ -72,8 +50,8 @@ fn load_tx(params: TrpResolveParams) -> Result<ProtoTx, Error> {
 pub async fn trp_resolve<D: Domain>(
     params: Params<'_>,
     context: Arc<Context<D>>,
-) -> Result<serde_json::Value, Error> {
-    let params: TrpResolveParams = params.parse()?;
+) -> Result<TxEnvelope, Error> {
+    let params: ResolveParams = params.parse()?;
 
     let tx = load_tx(params)?;
 
@@ -91,10 +69,10 @@ pub async fn trp_resolve<D: Domain>(
     )
     .await?;
 
-    Ok(serde_json::json!({
-        "tx": hex::encode(resolved.payload),
-        "hash": hex::encode(resolved.hash),
-    }))
+    Ok(TxEnvelope {
+        tx: hex::encode(resolved.payload),
+        hash: hex::encode(resolved.hash),
+    })
 }
 
 fn apply_witnesses(original: &[u8], witnesses: &[SubmitWitness]) -> Result<Vec<u8>, Error> {
@@ -102,13 +80,9 @@ fn apply_witnesses(original: &[u8], witnesses: &[SubmitWitness]) -> Result<Vec<u
 
     let mut tx = tx.as_conway().ok_or(Error::UnsupportedTxEra)?.to_owned();
 
-    let map_witness = |witness: &SubmitWitness| {
-        let SubmitWitness::VKey(witness) = witness;
-
-        VKeyWitness {
-            vkey: Vec::<u8>::from(witness.key.clone()).into(),
-            signature: Vec::<u8>::from(witness.signature.clone()).into(),
-        }
+    let map_witness = |witness: &SubmitWitness| VKeyWitness {
+        vkey: Vec::<u8>::from(witness.key.clone()).into(),
+        signature: Vec::<u8>::from(witness.signature.clone()).into(),
     };
 
     let mut witness_set = tx.transaction_witness_set.unwrap();
@@ -133,7 +107,7 @@ fn apply_witnesses(original: &[u8], witnesses: &[SubmitWitness]) -> Result<Vec<u
 pub async fn trp_submit<D: Domain>(
     params: Params<'_>,
     context: Arc<Context<D>>,
-) -> Result<serde_json::Value, Error> {
+) -> Result<SubmitResponse, Error> {
     let params: SubmitParams = params.parse()?;
 
     let mut bytes = Vec::<u8>::from(params.tx);
@@ -146,7 +120,9 @@ pub async fn trp_submit<D: Domain>(
 
     let hash = receive_tx(&context.domain, &chain, &bytes)?;
 
-    Ok(serde_json::json!({ "hash": hash.to_string() }))
+    Ok(SubmitResponse {
+        hash: hash.to_string(),
+    })
 }
 
 pub fn health<D: Domain>(context: &Context<D>) -> bool {
@@ -212,9 +188,7 @@ mod tests {
         }
     "#;
 
-    async fn attempt_resolve(
-        args: &serde_json::Value,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+    async fn attempt_resolve(args: &serde_json::Value) -> Result<TxEnvelope, ErrorObjectOwned> {
         let protocol = tx3_lang::Protocol::from_string(SUBJECT_PROTOCOL.to_owned())
             .load()
             .unwrap();
@@ -252,7 +226,7 @@ mod tests {
 
         let resolved = attempt_resolve(&args).await.unwrap();
 
-        let tx = hex::decode(resolved["tx"].as_str().unwrap()).unwrap();
+        let tx = hex::decode(resolved.tx).unwrap();
 
         let _ = pallas::ledger::traverse::MultiEraTx::decode(&tx).unwrap();
     }
