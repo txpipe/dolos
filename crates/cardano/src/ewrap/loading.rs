@@ -64,7 +64,7 @@ impl BoundaryWork {
 
         let (unregistered_epoch, _) = self.active_era.slot_epoch(unregistered_at);
 
-        unregistered_epoch == self.starting_epoch_no() + 1
+        self.starting_epoch_no() == unregistered_epoch + 1
     }
 
     fn should_expire_drep(&self, drep: &DRepState) -> Result<bool, ChainError> {
