@@ -9,53 +9,6 @@ use crate::{
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PoolDelegatorDrop {
-    delegator: AccountId,
-    epoch: Epoch,
-
-    // undo
-    prev_pool: Option<PoolDelegation>,
-}
-
-impl PoolDelegatorDrop {
-    pub fn new(delegator: AccountId, epoch: Epoch) -> Self {
-        Self {
-            delegator,
-            epoch,
-            prev_pool: None,
-        }
-    }
-}
-
-impl dolos_core::EntityDelta for PoolDelegatorDrop {
-    type Entity = AccountState;
-
-    fn key(&self) -> NsKey {
-        NsKey::from((AccountState::NS, self.delegator.clone()))
-    }
-
-    fn apply(&mut self, entity: &mut Option<AccountState>) {
-        let entity = entity.as_mut().expect("account should exist");
-
-        debug!(delegator=%self.delegator, "dropping pool delegator");
-
-        // save undo info
-        self.prev_pool = entity.pool.next().cloned();
-
-        // apply changes
-
-        entity
-            .pool
-            .schedule(self.epoch, Some(PoolDelegation::NotDelegated));
-    }
-
-    fn undo(&self, _entity: &mut Option<AccountState>) {
-        // todo!()
-        // Placeholder undo logic. Ensure this does not panic.
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DRepExpiration {
     drep_id: DRepId,
 }
@@ -154,11 +107,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
     ) -> Result<(), ChainError> {
         let current_epoch = ctx.ending_state.number;
 
-        if let Some(pool) = account.delegated_pool_at(current_epoch) {
-            if ctx.retiring_pools.contains_key(pool) {
-                self.change(PoolDelegatorDrop::new(id.clone(), current_epoch));
-            }
-        }
+        // NOTICE: we're not dropping delegators from retiring pools. We've been back and forth on this decision. The understanding at this point in time is that delegation remains but it just doesn't participate in the rewards.
 
         if let Some(drep) = account.delegated_drep_at(current_epoch) {
             if ctx.expiring_dreps.contains(drep) {
