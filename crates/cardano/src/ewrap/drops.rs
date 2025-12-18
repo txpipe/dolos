@@ -5,7 +5,7 @@ use tracing::{debug, warn};
 
 use crate::{
     ewrap::{AccountId, BoundaryWork, DRepId},
-    AccountState, CardanoDelta, DRepState, FixedNamespace as _, PoolDelegation,
+    AccountState, CardanoDelta, DRepState, FixedNamespace as _,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
