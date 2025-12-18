@@ -91,12 +91,10 @@ impl BoundaryWork {
         for record in dreps {
             let (_, drep) = record?;
 
-            if self.should_expire_drep(&drep)? {
-                self.expiring_dreps.push(drep.identifier.clone());
-            }
-
             if self.should_retire_drep(&drep) {
                 self.retiring_dreps.push(drep.identifier);
+            } else if self.should_expire_drep(&drep)? {
+                self.expiring_dreps.push(drep.identifier.clone());
             }
         }
 
