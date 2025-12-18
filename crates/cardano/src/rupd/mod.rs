@@ -121,6 +121,8 @@ fn log_work<D: Domain>(
 
     let snapshot = &work.snapshot;
 
+    let pool_rewards = rewards.aggregate_pool_rewards();
+
     let writer = archive.start_writer()?;
 
     for (pool_hash, pool_state) in snapshot.pools.iter() {
@@ -137,7 +139,7 @@ fn log_work<D: Domain>(
         // TODO: implement
         //let live_pledge = snapshot.get_live_pledge(&pool);
 
-        let (total_rewards, operator_share) = rewards.find_pool_rewards(*pool_hash);
+        let (total_rewards, operator_share) = pool_rewards.get(pool_hash).unwrap_or(&(0, 0));
 
         let log = StakeLog {
             blocks_minted,
@@ -146,8 +148,8 @@ fn log_work<D: Domain>(
             live_pledge: 0,
             declared_pledge,
             delegators_count,
-            total_rewards,
-            operator_share,
+            total_rewards: *total_rewards,
+            operator_share: *operator_share,
             fixed_cost,
             margin_cost,
         };
