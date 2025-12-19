@@ -1300,7 +1300,7 @@ dependencies = [
  "tx3-cardano",
  "tx3-lang",
  "tx3-resolver",
- "tx3-tir 0.13.0 (git+https://github.com/tx3-lang/tx3.git)",
+ "tx3-tir",
 ]
 
 [[package]]
@@ -3535,7 +3535,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be769465445e8c1474e9c5dac2018218498557af32d9ed057325ec9a41ae81bf"
 dependencies = [
  "heck",
- "itertools 0.14.0",
+ "itertools 0.12.1",
  "log",
  "multimap",
  "once_cell",
@@ -3568,7 +3568,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.12.1",
  "proc-macro2",
  "quote",
  "syn",
@@ -5236,13 +5236,14 @@ dependencies = [
  "serde",
  "thiserror 2.0.12",
  "trait-variant",
- "tx3-tir 0.13.0 (git+https://github.com/tx3-lang/tx3.git)",
+ "tx3-tir",
  "utxorpc",
 ]
 
 [[package]]
 name = "tx3-lang"
 version = "0.13.0"
+source = "git+https://github.com/tx3-lang/tx3.git#0df40b455af7fb90365799d33d3fff19bc237171"
 dependencies = [
  "ciborium",
  "hex",
@@ -5252,7 +5253,7 @@ dependencies = [
  "serde",
  "thiserror 2.0.12",
  "trait-variant",
- "tx3-tir 0.13.0",
+ "tx3-tir",
 ]
 
 [[package]]
@@ -5264,20 +5265,7 @@ dependencies = [
  "hex",
  "thiserror 2.0.12",
  "trait-variant",
- "tx3-tir 0.13.0 (git+https://github.com/tx3-lang/tx3.git)",
-]
-
-[[package]]
-name = "tx3-tir"
-version = "0.13.0"
-dependencies = [
- "base64 0.22.1",
- "bech32 0.11.1",
- "ciborium",
- "hex",
- "serde",
- "serde_json",
- "thiserror 2.0.12",
+ "tx3-tir",
 ]
 
 [[package]]
@@ -5680,7 +5668,7 @@ version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf221c93e13a30d793f7645a0e7762c55d169dbb0a49671918a2319d289b10bb"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]

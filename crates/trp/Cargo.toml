@@ -40,5 +40,5 @@ tx3-tir = { git = "https://github.com/tx3-lang/tx3.git" }
 dolos-testing = { path = "../testing", features = ["toy-domain"] }
 
 # tx3-lang = "0.13.0"
-tx3-lang = { path = "../../../../tx3-lang/tx3/crates/tx3-lang" }
-# tx3-lang = { git = "https://github.com/tx3-lang/tx3-lang.git" }
+# tx3-lang = { path = "../../../../tx3-lang/tx3/crates/tx3-lang" }
+tx3-lang = { git = "https://github.com/tx3-lang/tx3.git" }
