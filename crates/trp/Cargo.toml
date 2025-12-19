@@ -24,19 +24,21 @@ jsonrpsee = { version = "0.24.9", features = ["server"] }
 opentelemetry = "0.30.0"
 opentelemetry_sdk = "0.30.0"
 
-# tx3-lang = { version = "0.13.0", features = ["interop"] }
 # tx3-cardano = "0.13.0"
 # tx3-resolver = "0.13.0"
+# tx3-tir = "0.13.0"
 
-# tx3-lang = { path = "../../../../tx3-lang/tx3/crates/tx3-lang", features = ["interop"] }
 # tx3-cardano = { path = "../../../../tx3-lang/tx3/crates/tx3-cardano" }
 # tx3-resolver = { path = "../../../../tx3-lang/tx3/crates/tx3-resolver" }
+# tx3-tir = { path = "../../../../tx3-lang/tx3/crates/tx3-tir" }
 
-tx3-cardano = { git = "https://github.com/tx3-lang/tx3.git", rev = "6da7a70" }
-tx3-resolver = { git = "https://github.com/tx3-lang/tx3.git", rev = "6da7a70" }
-tx3-lang = { git = "https://github.com/tx3-lang/tx3.git", rev = "6da7a70", features = [
-    "interop",
-] }
+tx3-cardano = { git = "https://github.com/tx3-lang/tx3.git" }
+tx3-resolver = { git = "https://github.com/tx3-lang/tx3.git" }
+tx3-tir = { git = "https://github.com/tx3-lang/tx3.git" }
 
 [dev-dependencies]
 dolos-testing = { path = "../testing", features = ["toy-domain"] }
+
+# tx3-lang = "0.13.0"
+tx3-lang = { path = "../../../../tx3-lang/tx3/crates/tx3-lang" }
+# tx3-lang = { git = "https://github.com/tx3-lang/tx3-lang.git" }

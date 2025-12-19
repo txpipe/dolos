@@ -1,50 +1,56 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
 use jsonrpsee::types::Params;
 use pallas::{codec::utils::NonEmptySet, ledger::primitives::conway::VKeyWitness};
-use std::sync::Arc;
-use tx3_lang::ProtoTx;
+use std::{collections::BTreeMap, sync::Arc};
+use tx3_tir::{interop, model::v1beta0 as tir};
 
 use dolos_core::{facade::receive_tx, Domain, MempoolAwareUtxoStore, StateStore as _};
 
 use crate::{
     compiler::load_compiler,
-    specs::{ResolveParams, SubmitParams, SubmitResponse, SubmitWitness, TxEnvelope},
+    specs::{ResolveParams, SubmitParams, SubmitResponse, SubmitWitness, TirInfo, TxEnvelope},
     utxos::UtxoStoreAdapter,
 };
 
 use super::{Context, Error};
 
-fn load_tx(params: ResolveParams) -> Result<ProtoTx, Error> {
-    if params.tir.version != tx3_lang::ir::IR_VERSION {
+fn unwrap_tir(envelope: TirInfo) -> Result<Vec<u8>, Error> {
+    match envelope.encoding.as_str() {
+        "base64" => STANDARD
+            .decode(envelope.bytecode)
+            .map_err(|_| Error::InvalidTirEnvelope),
+        "hex" => hex::decode(envelope.bytecode).map_err(|_| Error::InvalidTirEnvelope),
+        _ => return Err(Error::InvalidTirEnvelope),
+    }
+}
+
+fn load_tx(params: ResolveParams) -> Result<tir::Tx, Error> {
+    if params.tir.version != tir::IR_VERSION {
         return Err(Error::UnsupportedTir {
-            expected: tx3_lang::ir::IR_VERSION.to_string(),
+            expected: tir::IR_VERSION.to_string(),
             provided: params.tir.version,
         });
     }
 
-    let tx = match params.tir.encoding.as_str() {
-        "base64" => STANDARD
-            .decode(params.tir.bytecode)
-            .map_err(|_| Error::InvalidTirEnvelope)?,
-        "hex" => hex::decode(params.tir.bytecode).map_err(|_| Error::InvalidTirEnvelope)?,
-        _ => return Err(Error::InvalidTirEnvelope),
-    };
+    let tir = unwrap_tir(params.tir)?;
 
-    let mut tx = dbg!(tx3_lang::ProtoTx::from_ir_bytes(&tx))?;
+    let tir = interop::from_bytes(&tir)?;
 
-    let tx_params = tx.find_params();
+    let tx_params = tx3_tir::reduce::find_params(&tir);
+    let mut tx_args = BTreeMap::new();
 
     for (key, ty) in tx_params {
         let Some(arg) = params.args.get(&key) else {
             return Err(Error::MissingTxArg { key, ty });
         };
 
-        let arg = tx3_lang::interop::json::from_json(arg.clone(), &ty)?;
-
-        tx.set_arg(&key, arg);
+        let arg = interop::json::from_json(arg.clone(), &ty)?;
+        tx_args.insert(key, arg);
     }
 
-    Ok(tx)
+    let tir = tx3_tir::reduce::apply_args(tir, &tx_args)?;
+
+    Ok(tir)
 }
 
 pub async fn trp_resolve<D: Domain>(
@@ -199,11 +205,12 @@ mod tests {
 
         let req = json!({
             "tir": {
-                "version": "v1alpha8",
+                "version": "v1beta0",
                 "bytecode": hex::encode(ir),
                 "encoding": "hex"
             },
-            "args": args
+            "args": args,
+            "env": {},
         })
         .to_string();
 

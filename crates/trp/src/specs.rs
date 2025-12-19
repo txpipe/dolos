@@ -37,7 +37,7 @@ pub struct TxEnvelope {
     pub tx: String,
 }
 
-pub use tx3_lang::interop::json::BytesEnvelope;
+pub use tx3_tir::interop::json::BytesEnvelope;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MissingTxArgDiagnostic {

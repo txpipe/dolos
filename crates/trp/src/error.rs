@@ -3,6 +3,7 @@ use jsonrpsee::types::ErrorCode;
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::{json, Value};
 use tx3_resolver::inputs::{CanonicalQuery, SearchSpace};
+use tx3_tir::model::v1beta0 as tir;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -13,7 +14,10 @@ pub enum Error {
     InvalidCborError(String),
 
     #[error(transparent)]
-    ArgsError(#[from] tx3_lang::interop::json::Error),
+    ArgParsingError(#[from] tx3_tir::interop::json::Error),
+
+    #[error(transparent)]
+    ArgReduceError(#[from] tx3_tir::reduce::Error),
 
     #[error(transparent)]
     ResolveError(Box<tx3_resolver::Error>),
@@ -27,8 +31,11 @@ pub enum Error {
     #[error("invalid TIR envelope")]
     InvalidTirEnvelope,
 
+    #[error("invalid TIR: {0}")]
+    InvalidTir(String),
+
     #[error("failed to decode IR bytes")]
-    InvalidTirBytes(String),
+    InvalidTirEncoding(String),
 
     #[error("only txs from Conway era are supported")]
     UnsupportedTxEra,
@@ -37,7 +44,7 @@ pub enum Error {
     PParamsNotAvailable,
 
     #[error("missing argument `{key}` of type {ty:?}")]
-    MissingTxArg { key: String, ty: tx3_lang::ir::Type },
+    MissingTxArg { key: String, ty: tir::Type },
 
     #[error("input `{0}` not resolved")]
     InputNotResolved(String, Box<CanonicalQuery>, Box<SearchSpace>),
@@ -67,9 +74,9 @@ impl From<pallas::ledger::addresses::Error> for Error {
     }
 }
 
-impl From<tx3_lang::ir::Error> for Error {
-    fn from(error: tx3_lang::ir::Error) -> Self {
-        Error::InvalidTirBytes(error.to_string())
+impl From<tx3_tir::interop::Error> for Error {
+    fn from(error: tx3_tir::interop::Error) -> Self {
+        Error::InvalidTirEncoding(error.to_string())
     }
 }
 
@@ -121,15 +128,12 @@ impl IntoErrorData for tx3_resolver::inputs::SearchSpace {
 
 impl From<tx3_resolver::Error> for Error {
     fn from(error: tx3_resolver::Error) -> Self {
-        let tx3_resolver::Error::InputsError(error) = error else {
-            return Error::ResolveError(Box::new(error));
-        };
-
-        let tx3_resolver::inputs::Error::InputNotResolved(name, q, ss) = error else {
-            return Error::ResolveError(Box::new(error.into()));
-        };
-
-        Error::InputNotResolved(name, Box::new(q), Box::new(ss))
+        match error {
+            tx3_resolver::Error::InputNotResolved(name, q, ss) => {
+                Error::InputNotResolved(name, Box::new(q), Box::new(ss))
+            }
+            x => Error::InternalError(x.to_string()),
+        }
     }
 }
 
@@ -180,8 +184,10 @@ impl Error {
         match self {
             Error::JsonRpcError(err) => err.code(),
             Error::InvalidTirEnvelope => ErrorCode::InvalidParams.code(),
-            Error::InvalidTirBytes(_) => ErrorCode::InvalidParams.code(),
-            Error::ArgsError(_) => ErrorCode::InvalidParams.code(),
+            Error::InvalidTir(_) => ErrorCode::InvalidParams.code(),
+            Error::InvalidTirEncoding(_) => ErrorCode::InvalidParams.code(),
+            Error::ArgParsingError(_) => ErrorCode::InvalidParams.code(),
+            Error::ArgReduceError(_) => ErrorCode::InvalidParams.code(),
             Error::PParamsNotAvailable => ErrorCode::InternalError.code(),
             Error::UnsupportedTxEra => ErrorCode::InternalError.code(),
             Error::InternalError(_) => ErrorCode::InternalError.code(),
@@ -232,12 +238,6 @@ impl Error {
             }
             _ => None,
         }
-    }
-}
-
-impl From<Error> for tx3_lang::backend::Error {
-    fn from(error: Error) -> Self {
-        tx3_lang::backend::Error::StoreError(error.to_string())
     }
 }
 
