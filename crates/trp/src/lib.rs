@@ -14,6 +14,9 @@ mod methods;
 mod metrics;
 mod utxos;
 
+// TODO: this module should be replaced by a codegen crate derived from the TRP spec
+mod specs;
+
 pub use error::Error;
 
 #[derive(Clone)]
