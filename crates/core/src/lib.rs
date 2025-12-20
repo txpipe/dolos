@@ -226,6 +226,8 @@ pub struct UtxoSetDelta {
     pub consumed_utxo: HashMap<TxoRef, Arc<EraCbor>>,
     pub recovered_stxi: HashMap<TxoRef, Arc<EraCbor>>,
     pub undone_utxo: HashMap<TxoRef, Arc<EraCbor>>,
+    pub witness_datums_add: HashMap<Hash<32>, Vec<u8>>,
+    pub witness_datums_remove: HashSet<Hash<32>>,
 }
 
 #[derive(Debug, Clone)]
