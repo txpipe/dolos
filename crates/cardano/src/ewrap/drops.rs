@@ -5,7 +5,7 @@ use tracing::{debug, warn};
 
 use crate::{
     ewrap::{AccountId, BoundaryWork, DRepId},
-    AccountState, CardanoDelta, DRepState, FixedNamespace as _,
+    AccountState, CardanoDelta, DRepState, FixedNamespace as _, PoolDelegation,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,6 +43,57 @@ impl dolos_core::EntityDelta for DRepExpiration {
         debug!(drep=%self.drep_id, "restoring expired drep");
 
         entity.expired = false;
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PoolDelegatorRetire {
+    delegator: AccountId,
+    epoch: Epoch,
+
+    // undo
+    prev_pool: Option<PoolDelegation>,
+}
+
+impl PoolDelegatorRetire {
+    pub fn new(delegator: AccountId, epoch: Epoch) -> Self {
+        Self {
+            delegator,
+            epoch,
+            prev_pool: None,
+        }
+    }
+}
+
+impl dolos_core::EntityDelta for PoolDelegatorRetire {
+    type Entity = AccountState;
+
+    fn key(&self) -> NsKey {
+        NsKey::from((AccountState::NS, self.delegator.clone()))
+    }
+
+    fn apply(&mut self, entity: &mut Option<AccountState>) {
+        let entity = entity.as_mut().expect("account should exist");
+
+        debug!(delegator=%self.delegator, "retiring pool delegator");
+
+        // save undo info
+        self.prev_pool = entity.pool.live().cloned();
+
+        // apply changes
+        entity
+            .pool
+            .schedule(self.epoch, Some(PoolDelegation::NotDelegated));
+
+        let Some(PoolDelegation::Pool(pool)) = self.prev_pool else {
+            unreachable!("account delegated to pool")
+        };
+        entity.retired_pool = Some(pool);
+    }
+
+    fn undo(&self, _entity: &mut Option<AccountState>) {
+        // todo!()
+        // Placeholder undo logic. Ensure this does not panic.
     }
 }
 
@@ -106,6 +157,12 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         account: &AccountState,
     ) -> Result<(), ChainError> {
         let current_epoch = ctx.ending_state.number;
+
+        if let Some(pool) = account.delegated_pool_at(current_epoch) {
+            if ctx.retiring_pools.contains_key(pool) {
+                self.change(PoolDelegatorRetire::new(id.clone(), current_epoch));
+            }
+        }
 
         // NOTICE: we're not dropping delegators from retiring pools. We've been back and forth on this decision. The understanding at this point in time is that delegation remains but it just doesn't participate in the rewards.
 
