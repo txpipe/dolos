@@ -1,7 +1,4 @@
-use std::sync::Arc;
-
-use tx3_tir::model::assets::CanonicalAssets;
-use tx3_tir::model::v1beta0 as tir;
+use tx3_resolver::{Expression, StructExpr};
 
 use dolos_core::{EraCbor, TxoRef};
 use pallas::{
@@ -12,16 +9,18 @@ use pallas::{
     },
 };
 
-fn map_custom_asset(asset: &MultiEraAsset) -> CanonicalAssets {
+use crate::Error;
+
+fn map_custom_asset(asset: &MultiEraAsset) -> tx3_resolver::CanonicalAssets {
     let policy = asset.policy().as_slice();
     let asset_name = asset.name();
     let amount = asset.any_coin();
 
-    CanonicalAssets::from_defined_asset(policy, asset_name, amount)
+    tx3_resolver::CanonicalAssets::from_defined_asset(policy, asset_name, amount)
 }
 
-fn map_policy_assets(assets: &MultiEraPolicyAssets) -> CanonicalAssets {
-    let all = CanonicalAssets::empty();
+fn map_policy_assets(assets: &MultiEraPolicyAssets) -> tx3_resolver::CanonicalAssets {
+    let all = tx3_resolver::CanonicalAssets::empty();
 
     let all = assets
         .assets()
@@ -32,8 +31,8 @@ fn map_policy_assets(assets: &MultiEraPolicyAssets) -> CanonicalAssets {
     all
 }
 
-fn map_assets(value: &MultiEraValue<'_>) -> CanonicalAssets {
-    let naked = CanonicalAssets::from_naked_amount(value.coin() as i128);
+fn map_assets(value: &MultiEraValue<'_>) -> tx3_resolver::CanonicalAssets {
+    let naked = tx3_resolver::CanonicalAssets::from_naked_amount(value.coin() as i128);
 
     let all = value
         .assets()
@@ -95,20 +94,23 @@ fn map_datum(datum: &PlutusData) -> tir::Expression {
     }
 }
 
-pub fn from_tx3_utxoref(r#ref: tir::UtxoRef) -> TxoRef {
+pub fn from_tx3_utxoref(r#ref: tx3_resolver::UtxoRef) -> TxoRef {
     let txid = dolos_cardano::pallas::crypto::hash::Hash::from(r#ref.txid.as_slice());
 
     TxoRef(txid, r#ref.index)
 }
 
-pub fn into_tx3_utxoref(txoref: TxoRef) -> tir::UtxoRef {
-    tir::UtxoRef {
+pub fn into_tx3_utxoref(txoref: TxoRef) -> tx3_resolver::UtxoRef {
+    tx3_resolver::UtxoRef {
         txid: txoref.0.to_vec(),
         index: txoref.1,
     }
 }
 
-pub fn into_tx3_utxo(txoref: TxoRef, utxo: Arc<EraCbor>) -> Result<tir::Utxo, tx3_resolver::Error> {
+pub fn into_tx3_utxo(
+    txoref: TxoRef,
+    utxo: Arc<EraCbor>,
+) -> Result<tx3_resolver::Utxo, tx3_resolver::Error> {
     let r#ref = into_tx3_utxoref(txoref);
 
     let EraCbor(era, cbor) = utxo.as_ref();
@@ -130,7 +132,7 @@ pub fn into_tx3_utxo(txoref: TxoRef, utxo: Arc<EraCbor>) -> Result<tir::Utxo, tx
         _ => None,
     };
 
-    Ok(tir::Utxo {
+    Ok(tx3_resolver::Utxo {
         r#ref,
         address,
         datum,
