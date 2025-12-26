@@ -1,10 +1,8 @@
-use base64::{engine::general_purpose::STANDARD, Engine};
 use jsonrpsee::types::Params;
 use pallas::{codec::utils::NonEmptySet, ledger::primitives::conway::VKeyWitness};
-use serde::Deserialize;
 use std::sync::Arc;
-use tx3_lang::ProtoTx;
-use tx3_sdk::trp::{SubmitParams, SubmitWitness};
+
+use tx3_resolver::trp::{ResolveParams, SubmitParams, SubmitResponse, SubmitWitness, TxEnvelope};
 
 use dolos_core::{Domain, MempoolAwareUtxoStore, StateStore as _};
 
@@ -12,70 +10,13 @@ use crate::{compiler::load_compiler, utxos::UtxoStoreAdapter};
 
 use super::{Context, Error};
 
-#[derive(Deserialize, Debug)]
-enum IrEncoding {
-    #[serde(rename = "base64")]
-    Base64,
-
-    #[serde(rename = "hex")]
-    Hex,
-}
-
-#[derive(Deserialize, Debug)]
-struct IrEnvelope {
-    #[allow(dead_code)]
-    pub version: String,
-    pub bytecode: String,
-    pub encoding: IrEncoding,
-}
-
-#[derive(Deserialize, Debug)]
-struct TrpResolveParams {
-    pub tir: IrEnvelope,
-    pub args: serde_json::Map<String, serde_json::Value>,
-}
-
-fn load_tx(params: TrpResolveParams) -> Result<ProtoTx, Error> {
-    if params.tir.version != tx3_lang::ir::IR_VERSION {
-        return Err(Error::UnsupportedTir {
-            expected: tx3_lang::ir::IR_VERSION.to_string(),
-            provided: params.tir.version,
-        });
-    }
-
-    let tx = match params.tir.encoding {
-        IrEncoding::Base64 => STANDARD
-            .decode(params.tir.bytecode)
-            .map_err(|_| Error::InvalidTirEnvelope)?,
-        IrEncoding::Hex => {
-            hex::decode(params.tir.bytecode).map_err(|_| Error::InvalidTirEnvelope)?
-        }
-    };
-
-    let mut tx = tx3_lang::ProtoTx::from_ir_bytes(&tx).map_err(|_| Error::InvalidTirBytes)?;
-
-    let tx_params = tx.find_params();
-
-    for (key, ty) in tx_params {
-        let Some(arg) = params.args.get(&key) else {
-            return Err(Error::MissingTxArg { key, ty });
-        };
-
-        let arg = tx3_sdk::trp::args::from_json(arg.clone(), &ty)?;
-
-        tx.set_arg(&key, arg);
-    }
-
-    Ok(tx)
-}
-
 pub async fn trp_resolve<D: Domain>(
     params: Params<'_>,
     context: Arc<Context<D>>,
-) -> Result<serde_json::Value, Error> {
-    let params: TrpResolveParams = params.parse()?;
+) -> Result<TxEnvelope, Error> {
+    let params: ResolveParams = params.parse()?;
 
-    let tx = load_tx(params)?;
+    let (tx, args) = tx3_resolver::trp::parse_resolve_request(params)?;
 
     let mut compiler = load_compiler::<D>(
         context.domain.genesis(),
@@ -89,16 +30,17 @@ pub async fn trp_resolve<D: Domain>(
 
     let resolved = tx3_resolver::resolve_tx(
         tx,
+        &args,
         &mut compiler,
         &utxos,
         context.config.max_optimize_rounds.into(),
     )
     .await?;
 
-    Ok(serde_json::json!({
-        "tx": hex::encode(resolved.payload),
-        "hash": hex::encode(resolved.hash),
-    }))
+    Ok(TxEnvelope {
+        tx: hex::encode(resolved.payload),
+        hash: hex::encode(resolved.hash),
+    })
 }
 
 fn apply_witnesses(original: &[u8], witnesses: &[SubmitWitness]) -> Result<Vec<u8>, Error> {
@@ -106,13 +48,9 @@ fn apply_witnesses(original: &[u8], witnesses: &[SubmitWitness]) -> Result<Vec<u
 
     let mut tx = tx.as_conway().ok_or(Error::UnsupportedTxEra)?.to_owned();
 
-    let map_witness = |witness: &SubmitWitness| {
-        let SubmitWitness::VKey(witness) = witness;
-
-        VKeyWitness {
-            vkey: Vec::<u8>::from(witness.key.clone()).into(),
-            signature: Vec::<u8>::from(witness.signature.clone()).into(),
-        }
+    let map_witness = |witness: &SubmitWitness| VKeyWitness {
+        vkey: Vec::<u8>::from(witness.key.clone()).into(),
+        signature: Vec::<u8>::from(witness.signature.clone()).into(),
     };
 
     let mut witness_set = tx.transaction_witness_set.unwrap();
@@ -137,7 +75,7 @@ fn apply_witnesses(original: &[u8], witnesses: &[SubmitWitness]) -> Result<Vec<u
 pub async fn trp_submit<D: Domain>(
     params: Params<'_>,
     context: Arc<Context<D>>,
-) -> Result<serde_json::Value, Error> {
+) -> Result<SubmitResponse, Error> {
     let params: SubmitParams = params.parse()?;
 
     let mut bytes = Vec::<u8>::from(params.tx);
@@ -148,7 +86,9 @@ pub async fn trp_submit<D: Domain>(
 
     let hash = context.domain.receive_tx(&bytes)?;
 
-    Ok(serde_json::json!({ "hash": hash.to_string() }))
+    Ok(SubmitResponse {
+        hash: hash.to_string(),
+    })
 }
 
 pub fn health<D: Domain>(context: &Context<D>) -> bool {
@@ -166,9 +106,9 @@ mod tests {
 
     use super::*;
 
-    fn setup_test_context() -> Arc<Context<ToyDomain>> {
+    async fn setup_test_context() -> Arc<Context<ToyDomain>> {
         let delta = dolos_testing::make_custom_utxo_delta(
-            1,
+            0,
             dolos_testing::TestAddress::everyone(),
             2..4,
             |x: &dolos_testing::TestAddress| {
@@ -192,52 +132,23 @@ mod tests {
         })
     }
 
-    const SUBJECT_PROTOCOL: &str = r#"
-        party Sender;
-        party Receiver;
-    
-        tx swap(quantity: Int) {
-            input source {
-                from: Sender,
-                min_amount: Ada(quantity) + fees,
-            }
+    const SUBJECT_PROTOCOL: &str = r#"ab6466656573a1694576616c506172616d6a457870656374466565736a7265666572656e6365738066696e7075747381a3646e616d6566736f75726365657574786f73a1694576616c506172616da16b457870656374496e7075748266736f75726365a56761646472657373a1694576616c506172616da16b45787065637456616c7565826673656e64657267416464726573736a6d696e5f616d6f756e74a16b4576616c4275696c74496ea16341646482a16641737365747381a366706f6c696379644e6f6e656a61737365745f6e616d65644e6f6e6566616d6f756e74a1694576616c506172616da16b45787065637456616c756582687175616e7469747963496e74a1694576616c506172616d6a4578706563744665657363726566644e6f6e65646d616e79f46a636f6c6c61746572616cf46872656465656d6572644e6f6e65676f75747075747382a46761646472657373a1694576616c506172616da16b45787065637456616c756582687265636569766572674164647265737365646174756d644e6f6e6566616d6f756e74a16641737365747381a366706f6c696379644e6f6e656a61737365745f6e616d65644e6f6e6566616d6f756e74a1694576616c506172616da16b45787065637456616c756582687175616e7469747963496e74686f7074696f6e616cf4a46761646472657373a1694576616c506172616da16b45787065637456616c7565826673656e646572674164647265737365646174756d644e6f6e6566616d6f756e74a16b4576616c4275696c74496ea16353756282a16b4576616c4275696c74496ea16353756282a16a4576616c436f65726365a16a496e746f417373657473a1694576616c506172616da16b457870656374496e7075748266736f75726365a56761646472657373a1694576616c506172616da16b45787065637456616c7565826673656e64657267416464726573736a6d696e5f616d6f756e74a16b4576616c4275696c74496ea16341646482a16641737365747381a366706f6c696379644e6f6e656a61737365745f6e616d65644e6f6e6566616d6f756e74a1694576616c506172616da16b45787065637456616c756582687175616e7469747963496e74a1694576616c506172616d6a4578706563744665657363726566644e6f6e65646d616e79f46a636f6c6c61746572616cf4a16641737365747381a366706f6c696379644e6f6e656a61737365745f6e616d65644e6f6e6566616d6f756e74a1694576616c506172616da16b45787065637456616c756582687175616e7469747963496e74a1694576616c506172616d6a45787065637446656573686f7074696f6e616cf46876616c6964697479f6656d696e747380656275726e7380656164686f63806a636f6c6c61746572616c80677369676e657273f6686d6574616461746180"#;
 
-            output {
-                to: Receiver,
-                amount: Ada(quantity),
-            }
-
-            output {
-                to: Sender,
-                amount: source - Ada(quantity) - fees,
-            }
-        }
-    "#;
-
-    async fn attempt_resolve(
-        args: &serde_json::Value,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let protocol = tx3_lang::Protocol::from_string(SUBJECT_PROTOCOL.to_owned())
-            .load()
-            .unwrap();
-
-        let tx = protocol.new_tx("swap").unwrap();
-
-        let ir = tx.apply().unwrap().ir_bytes();
-
+    async fn attempt_resolve(args: &serde_json::Value) -> Result<TxEnvelope, ErrorObjectOwned> {
         let req = json!({
             "tir": {
-                "version": "v1alpha8",
-                "bytecode": hex::encode(ir),
+                "version": "v1beta0",
+                "content": SUBJECT_PROTOCOL,
                 "encoding": "hex"
             },
-            "args": args
+            "args": args,
+            "env": {},
         })
         .to_string();
 
         let params = Params::new(Some(req.as_str()));
 
-        let context = setup_test_context();
+        let context = setup_test_context().await;
 
         let resolved = trp_resolve(params, context.clone()).await?;
 
@@ -254,7 +165,7 @@ mod tests {
 
         let resolved = attempt_resolve(&args).await.unwrap();
 
-        let tx = hex::decode(resolved["tx"].as_str().unwrap()).unwrap();
+        let tx = hex::decode(resolved.tx).unwrap();
 
         let _ = pallas::ledger::traverse::MultiEraTx::decode(&tx).unwrap();
     }
@@ -269,7 +180,7 @@ mod tests {
 
         dbg!(&err);
 
-        assert_eq!(err.code(), Error::CODE_MISSING_TX_ARG);
+        assert_eq!(err.code(), tx3_resolver::trp::errors::CODE_MISSING_TX_ARG);
     }
 
     #[tokio::test]
@@ -286,6 +197,6 @@ mod tests {
 
         dbg!(&err);
 
-        assert_eq!(err.code(), ErrorCode::InvalidParams.code());
+        assert_eq!(err.code(), tx3_resolver::trp::errors::CODE_INTEROP_ERROR);
     }
 }
