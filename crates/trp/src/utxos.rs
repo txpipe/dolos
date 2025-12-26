@@ -1,10 +1,12 @@
 use std::collections::HashSet;
 
 use dolos_core::{Domain, MempoolAwareUtxoStore, StateError, TxoRef};
-use tx3_resolver::{Error, UtxoPattern, UtxoStore};
-use tx3_tir::model::v1beta0 as tir;
+use tx3_resolver::{Error as Tx3Error, UtxoPattern, UtxoRef, UtxoSet, UtxoStore};
 
-use crate::mapping::{from_tx3_utxoref, into_tx3_utxo, into_tx3_utxoref};
+use crate::{
+    mapping::{from_tx3_utxoref, into_tx3_utxo, into_tx3_utxoref},
+    Error,
+};
 
 fn search_state_utxos<D: Domain>(
     pattern: &UtxoPattern<'_>,
@@ -30,25 +32,19 @@ impl<'a, D: Domain> UtxoStoreAdapter<'a, D> {
     pub fn new(inner: MempoolAwareUtxoStore<'a, D>) -> Self {
         Self { inner }
     }
-}
 
-impl<'a, D: Domain> UtxoStore for UtxoStoreAdapter<'a, D> {
-    async fn narrow_refs(&self, pattern: UtxoPattern<'_>) -> Result<HashSet<tir::UtxoRef>, Error> {
-        let refs = search_state_utxos::<D>(&pattern, &self.inner)
-            .map_err(|e| Error::StoreError(e.to_string()))?;
+    async fn narrow_refs(&self, pattern: UtxoPattern<'_>) -> Result<HashSet<UtxoRef>, Error> {
+        let refs = search_state_utxos::<D>(&pattern, &self.inner)?;
 
         let mapped = refs.into_iter().map(into_tx3_utxoref).collect();
 
         Ok(mapped)
     }
 
-    async fn fetch_utxos(&self, refs: HashSet<tir::UtxoRef>) -> Result<tir::UtxoSet, Error> {
+    async fn fetch_utxos(&self, refs: HashSet<UtxoRef>) -> Result<UtxoSet, Error> {
         let refs: HashSet<_> = refs.into_iter().map(from_tx3_utxoref).collect();
 
-        let utxos = self
-            .inner
-            .get_utxos(refs)
-            .map_err(|e| Error::StoreError(e.to_string()))?;
+        let utxos = self.inner.get_utxos(refs)?;
 
         let utxos = utxos
             .into_iter()
@@ -56,5 +52,19 @@ impl<'a, D: Domain> UtxoStore for UtxoStoreAdapter<'a, D> {
             .collect::<Result<_, _>>()?;
 
         Ok(utxos)
+    }
+}
+
+impl<'a, D: Domain> UtxoStore for UtxoStoreAdapter<'a, D> {
+    async fn narrow_refs(&self, pattern: UtxoPattern<'_>) -> Result<HashSet<UtxoRef>, Tx3Error> {
+        self.narrow_refs(pattern)
+            .await
+            .map_err(|e| Tx3Error::StoreError(e.to_string()))
+    }
+
+    async fn fetch_utxos(&self, refs: HashSet<UtxoRef>) -> Result<UtxoSet, Tx3Error> {
+        self.fetch_utxos(refs)
+            .await
+            .map_err(|e| Tx3Error::StoreError(e.to_string()))
     }
 }

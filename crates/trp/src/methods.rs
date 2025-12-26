@@ -1,57 +1,14 @@
-use base64::{engine::general_purpose::STANDARD, Engine};
 use jsonrpsee::types::Params;
 use pallas::{codec::utils::NonEmptySet, ledger::primitives::conway::VKeyWitness};
-use std::{collections::BTreeMap, sync::Arc};
-use tx3_tir::{interop, model::v1beta0 as tir};
+use std::sync::Arc;
+
+use tx3_resolver::trp::{ResolveParams, SubmitParams, SubmitResponse, SubmitWitness, TxEnvelope};
 
 use dolos_core::{facade::receive_tx, Domain, MempoolAwareUtxoStore, StateStore as _};
 
-use crate::{
-    compiler::load_compiler,
-    specs::{ResolveParams, SubmitParams, SubmitResponse, SubmitWitness, TirInfo, TxEnvelope},
-    utxos::UtxoStoreAdapter,
-};
+use crate::{compiler::load_compiler, utxos::UtxoStoreAdapter};
 
 use super::{Context, Error};
-
-fn unwrap_tir(envelope: TirInfo) -> Result<Vec<u8>, Error> {
-    match envelope.encoding.as_str() {
-        "base64" => STANDARD
-            .decode(envelope.bytecode)
-            .map_err(|_| Error::InvalidTirEnvelope),
-        "hex" => hex::decode(envelope.bytecode).map_err(|_| Error::InvalidTirEnvelope),
-        _ => return Err(Error::InvalidTirEnvelope),
-    }
-}
-
-fn load_tx(params: ResolveParams) -> Result<tir::Tx, Error> {
-    if params.tir.version != tir::IR_VERSION {
-        return Err(Error::UnsupportedTir {
-            expected: tir::IR_VERSION.to_string(),
-            provided: params.tir.version,
-        });
-    }
-
-    let tir = unwrap_tir(params.tir)?;
-
-    let tir = interop::from_bytes(&tir)?;
-
-    let tx_params = tx3_tir::reduce::find_params(&tir);
-    let mut tx_args = BTreeMap::new();
-
-    for (key, ty) in tx_params {
-        let Some(arg) = params.args.get(&key) else {
-            return Err(Error::MissingTxArg { key, ty });
-        };
-
-        let arg = interop::json::from_json(arg.clone(), &ty)?;
-        tx_args.insert(key, arg);
-    }
-
-    let tir = tx3_tir::reduce::apply_args(tir, &tx_args)?;
-
-    Ok(tir)
-}
 
 pub async fn trp_resolve<D: Domain>(
     params: Params<'_>,
@@ -59,7 +16,7 @@ pub async fn trp_resolve<D: Domain>(
 ) -> Result<TxEnvelope, Error> {
     let params: ResolveParams = params.parse()?;
 
-    let tx = load_tx(params)?;
+    let (tx, args) = tx3_resolver::trp::parse_resolve_request(params)?;
 
     let mut compiler = load_compiler::<D>(&context.domain, &context.config)?;
 
@@ -69,6 +26,7 @@ pub async fn trp_resolve<D: Domain>(
 
     let resolved = tx3_resolver::resolve_tx(
         tx,
+        &args,
         &mut compiler,
         &utxos,
         context.config.max_optimize_rounds.into(),
@@ -140,7 +98,7 @@ mod tests {
     use dolos_core::config::TrpConfig;
     use dolos_testing::toy_domain::ToyDomain;
     use dolos_testing::TestAddress::{Alice, Bob};
-    use jsonrpsee::types::{ErrorCode, ErrorObjectOwned};
+    use jsonrpsee::types::ErrorObjectOwned;
     use serde_json::json;
 
     use crate::metrics::Metrics;
@@ -178,7 +136,7 @@ mod tests {
         let req = json!({
             "tir": {
                 "version": "v1beta0",
-                "bytecode": SUBJECT_PROTOCOL,
+                "content": SUBJECT_PROTOCOL,
                 "encoding": "hex"
             },
             "args": args,
@@ -220,7 +178,7 @@ mod tests {
 
         dbg!(&err);
 
-        assert_eq!(err.code(), Error::CODE_MISSING_TX_ARG);
+        assert_eq!(err.code(), tx3_resolver::trp::errors::CODE_MISSING_TX_ARG);
     }
 
     #[tokio::test]
@@ -237,6 +195,6 @@ mod tests {
 
         dbg!(&err);
 
-        assert_eq!(err.code(), ErrorCode::InvalidParams.code());
+        assert_eq!(err.code(), tx3_resolver::trp::errors::CODE_INTEROP_ERROR);
     }
 }
