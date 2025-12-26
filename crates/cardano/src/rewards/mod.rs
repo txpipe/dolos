@@ -1,4 +1,4 @@
-use std::{collections::HashMap, marker::PhantomData};
+use std::{collections::HashMap, marker::PhantomData, time::Instant};
 
 use dolos_core::ChainError;
 use pallas::ledger::primitives::StakeCredential;
@@ -331,6 +331,7 @@ pub trait RewardsContext {
 
 pub fn define_rewards<C: RewardsContext>(ctx: &C) -> Result<RewardMap<C>, ChainError> {
     let mut map = RewardMap::<C>::new(ctx.incentives().clone());
+    let start = Instant::now();
 
     for pool in ctx.iter_all_pools() {
         let pool_params = ctx.pool_params(pool);
@@ -418,6 +419,8 @@ pub fn define_rewards<C: RewardsContext>(ctx: &C) -> Result<RewardMap<C>, ChainE
             map.include(ctx, &delegator, delegator_reward, pool, false);
         }
     }
+
+    tracing::info!(elapsed =? start.elapsed(), "finished rewards calculation");
 
     Ok(map)
 }

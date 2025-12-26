@@ -1,9 +1,9 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
 use dolos_core::{
     batch::WorkDeltas, config::CardanoConfig, BlockSlot, ChainError, Domain, EntityKey, Genesis,
 };
-use tracing::{debug, info, instrument};
+use tracing::{info, instrument};
 
 use crate::{
     AccountState, CardanoDelta, CardanoEntity, CardanoLogic, DRepState, EpochState, EraProtocol,
@@ -104,13 +104,14 @@ pub fn execute<D: Domain>(
     _config: &CardanoConfig,
     genesis: Arc<Genesis>,
 ) -> Result<(), ChainError> {
+    let started = Instant::now();
     info!("executing ESTART work unit");
 
     let mut work = WorkContext::load::<D>(state, genesis)?;
 
     work.commit::<D>(state, archive, slot)?;
 
-    debug!("ESTART work unit committed");
+    info!(elapsed =? started.elapsed(), "ESTART work unit committed");
 
     Ok(())
 }

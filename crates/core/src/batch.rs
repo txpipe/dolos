@@ -298,7 +298,7 @@ impl<C: ChainLogic> WorkBatch<C> {
         // this into the entity system.
         for block in self.blocks.iter() {
             if let Some(utxo_delta) = &block.utxo_delta {
-                writer.apply_utxoset(utxo_delta)?;
+                writer.apply_utxoset(utxo_delta, false)?;
             }
         }
 

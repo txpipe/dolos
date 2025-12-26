@@ -3,6 +3,7 @@ use dolos_core::config::RootConfig;
 
 use crate::feedback::Feedback;
 
+mod build_indexes;
 mod catchup_stores;
 mod reset_wal;
 mod rollback;
@@ -32,6 +33,9 @@ pub enum Command {
 
     /// manually updates an entity in the state
     UpdateEntity(update_entity::Args),
+
+    /// catch up store data from WAL records
+    BuildIndexes(build_indexes::Args),
 }
 
 #[derive(Debug, Parser)]
@@ -42,6 +46,7 @@ pub struct Args {
 
 pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Result<()> {
     match &args.command {
+        Command::BuildIndexes(x) => build_indexes::run(config, x, feedback)?,
         Command::CatchupStores(x) => catchup_stores::run(config, x, feedback)?,
         Command::ResetWal(x) => reset_wal::run(config, x, feedback)?,
         Command::WalIntegrity(x) => wal_integrity::run(config, x)?,

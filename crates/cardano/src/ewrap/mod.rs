@@ -1,13 +1,13 @@
 use std::{
     collections::{HashMap, HashSet},
-    sync::Arc,
+    sync::Arc, time::Instant,
 };
 
 use dolos_core::{
     batch::WorkDeltas, config::CardanoConfig, BlockSlot, ChainError, Domain, EntityKey, Genesis,
 };
 use pallas::ledger::primitives::conway::DRep;
-use tracing::{debug, info, instrument};
+use tracing::{info, instrument};
 
 use crate::{
     rewards::RewardMap, rupd::RupdWork, AccountState, CardanoDelta, CardanoEntity, CardanoLogic,
@@ -156,13 +156,14 @@ pub fn execute<D: Domain>(
     genesis: Arc<Genesis>,
     rewards: RewardMap<RupdWork>,
 ) -> Result<(), ChainError> {
+    let started = Instant::now();
     info!("executing EWRAP work unit");
 
     let mut boundary = BoundaryWork::load::<D>(state, genesis, rewards)?;
 
     boundary.commit::<D>(state, archive)?;
 
-    debug!("EWRAP work unit committed");
+    info!(elapsed =? started.elapsed(), "EWRAP work unit committed");
 
     Ok(())
 }

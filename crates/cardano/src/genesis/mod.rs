@@ -118,10 +118,10 @@ pub fn bootstrap_utxos<D: Domain>(
     let writer = state.start_writer()?;
 
     let delta = crate::utxoset::compute_origin_delta(genesis);
-    writer.apply_utxoset(&delta)?;
+    writer.apply_utxoset(&delta, false)?;
 
     let delta = crate::utxoset::build_custom_utxos_delta(config)?;
-    writer.apply_utxoset(&delta)?;
+    writer.apply_utxoset(&delta, false)?;
 
     writer.commit()?;
 
