@@ -21,7 +21,7 @@ pub async fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miett
     let progress = feedback.slot_progress_bar();
     progress.set_message("building indexes");
 
-    let domain = crate::common::setup_domain(config).await?;
+    let mut domain = crate::common::setup_domain(config).await?;
 
     progress.set_length(domain.state.amount_of_utxos().into_diagnostic().context("getting amount of utxos")?);
 
@@ -39,9 +39,18 @@ pub async fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miett
 
         let writer = domain.state.start_writer().into_diagnostic().context("starting writer")?;
         writer.index_utxoset(&utxoset).into_diagnostic().context("indexing")?;
+        writer.commit().into_diagnostic().context("committing")?;
 
         progress.inc(args.chunk as u64);
     }
+
+    let db = domain.state.db_mut().unwrap();
+
+    progress.set_message("compacting");
+    db.compact().into_diagnostic().context("compacting")?;
+
+    progress.set_message("checking integrity");
+    db.check_integrity().into_diagnostic().context("checking integrity")?;
 
     Ok(())
 }

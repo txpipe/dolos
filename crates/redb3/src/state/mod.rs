@@ -112,8 +112,7 @@ impl StateStore {
         &self.db
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn db_mut(&mut self) -> Option<&mut Database> {
+    pub fn db_mut(&mut self) -> Option<&mut Database> {
         Arc::get_mut(&mut self.db)
     }
 
