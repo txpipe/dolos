@@ -1,8 +1,7 @@
 use std::{collections::HashMap, path::Path, sync::Arc};
 
 use dolos_core::{
-    ChainPoint, EntityKey, EntityValue, Namespace, StateError, StateSchema, TxoRef, UtxoMap,
-    UtxoSet,
+    ChainPoint, EntityKey, EntityValue, Namespace, StateError, StateSchema, TxoRef, UtxoMap, UtxoSet
 };
 
 use redb::{
@@ -13,7 +12,7 @@ use tracing::warn;
 
 mod utxoset;
 
-use crate::{build_tables, Error, Table};
+use crate::{build_tables, state::utxoset::UtxosIterator, Error, Table};
 
 impl From<Error> for StateError {
     fn from(error: Error) -> Self {
@@ -215,8 +214,17 @@ impl dolos_core::StateWriter for StateWriter {
         Ok(())
     }
 
-    fn apply_utxoset(&self, delta: &dolos_core::UtxoSetDelta) -> Result<(), StateError> {
+    fn apply_utxoset(&self, delta: &dolos_core::UtxoSetDelta, defer_indexes: bool) -> Result<(), StateError> {
         utxoset::UtxosTable::apply(&self.wx, delta)?;
+
+        if !defer_indexes {
+        utxoset::FilterIndexes::apply(&self.wx, delta)?;
+        }
+
+        Ok(())
+    }
+
+    fn index_utxoset(&self, delta: &dolos_core::UtxoSetDelta) -> Result<(), StateError> {
         utxoset::FilterIndexes::apply(&self.wx, delta)?;
 
         Ok(())
@@ -230,6 +238,7 @@ impl dolos_core::StateWriter for StateWriter {
 }
 
 impl dolos_core::StateStore for StateStore {
+    type UtxoIter = UtxosIterator;
     type EntityIter = EntityIter;
     type EntityValueIter = EntityValueIter;
     type Writer = StateWriter;
@@ -305,6 +314,18 @@ impl dolos_core::StateStore for StateStore {
         }
 
         Ok(out)
+    }
+
+    fn iter_utxos(&self) -> Result<Self::UtxoIter, StateError> {
+        let rx = self.db().begin_read().map_err(Error::from)?;
+
+        Ok(utxoset::UtxosTable::iter(&rx)?)
+    }
+
+    fn amount_of_utxos(&self) -> Result<u64, StateError> {
+        let rx = self.db().begin_read().map_err(Error::from)?;
+
+        Ok(utxoset::UtxosTable::len(&rx)?)
     }
 
     fn get_utxos(&self, refs: Vec<TxoRef>) -> Result<UtxoMap, StateError> {
