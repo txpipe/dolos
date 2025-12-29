@@ -51,6 +51,20 @@ fn prepare_chain(
     Ok(())
 }
 
+fn prepare_state(
+    state: &mut dolos_redb3::state::StateStore,
+    pb: &crate::feedback::ProgressBar,
+) -> miette::Result<()> {
+    let db = state.db_mut().unwrap();
+    pb.set_message("compacting state");
+    db.compact().into_diagnostic()?;
+
+    pb.set_message("checking state integrity");
+    db.check_integrity().into_diagnostic()?;
+
+    Ok(())
+}
+
 pub fn run(
     config: &RootConfig,
     args: &Args,
@@ -74,9 +88,8 @@ pub fn run(
         .append_path_with_name(&path, "wal")
         .into_diagnostic()?;
 
-    prepare_chain(&mut stores.archive, &pb)?;
-
     if args.include_chain {
+        prepare_chain(&mut stores.archive, &pb)?;
         let path = root.join("chain");
 
         archive
@@ -87,13 +100,14 @@ pub fn run(
     }
 
     if args.include_state {
+        prepare_state(&mut stores.state, &pb)?;
         let path = root.join("state");
 
         archive
             .append_path_with_name(&path, "state")
             .into_diagnostic()?;
 
-        pb.set_message("creating archive");
+        pb.set_message("creating state");
     }
 
     archive.finish().into_diagnostic()?;

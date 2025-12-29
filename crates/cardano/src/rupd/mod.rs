@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::{collections::{HashMap, HashSet}, time::Instant};
 
 use dolos_core::{
     ArchiveStore, ArchiveWriter, BlockSlot, ChainError, ChainPoint, Domain, EntityKey, Genesis,
@@ -111,6 +111,7 @@ fn log_work<D: Domain>(
     rewards: &RewardMap<RupdWork>,
     archive: &D::Archive,
 ) -> Result<(), ChainError> {
+    let started = Instant::now();
     let Some((_, epoch)) = work.relevant_epochs() else {
         return Ok(());
     };
@@ -160,6 +161,8 @@ fn log_work<D: Domain>(
 
     writer.commit()?;
 
+    info!(elapsed =? started.elapsed(), "log_work finished");
+
     Ok(())
 }
 
@@ -170,6 +173,7 @@ pub fn execute<D: Domain>(
     slot: BlockSlot,
     genesis: &Genesis,
 ) -> Result<RewardMap<RupdWork>, ChainError> {
+    let started = Instant::now();
     info!(slot, "executing rupd work unit");
 
     let work = RupdWork::load::<D>(state, genesis)?;
@@ -180,6 +184,8 @@ pub fn execute<D: Domain>(
     // treat this problem as part of the epoch transition logic. We put it here for
     // the time being for simplicity.
     log_work::<D>(&work, &rewards, archive)?;
+
+    info!(elapsed =? started.elapsed(), "finished rupd work unit");
 
     Ok(rewards)
 }

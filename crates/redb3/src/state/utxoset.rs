@@ -1,4 +1,4 @@
-use dolos_core::{EraCbor, TxoRef, UtxoMap, UtxoSetDelta};
+use dolos_core::{EraCbor, StateError, TxoRef, UtxoMap, UtxoSetDelta};
 use pallas::ledger::{addresses::ShelleyDelegationPart, traverse::MultiEraOutput};
 use redb::{
     MultimapTableDefinition, Range, ReadTransaction, ReadableDatabase, ReadableTable as _,
@@ -19,10 +19,10 @@ type UtxosValue = (u16, &'static [u8]);
 pub struct UtxosIterator(Range<'static, UtxosKey, UtxosValue>);
 
 impl Iterator for UtxosIterator {
-    type Item = Result<(TxoRef, EraCbor), ::redb::StorageError>;
+    type Item = Result<(TxoRef, EraCbor), StateError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let x = self.0.next()?;
+        let x = self.0.next()?.map_err(|err| StateError::InternalStoreError(err.to_string()));
 
         let x = x.map(|(k, v)| {
             let (hash, idx) = k.value();
@@ -50,11 +50,15 @@ impl UtxosTable {
         Ok(())
     }
 
-    #[allow(unused)]
     pub fn iter(rx: &ReadTransaction) -> Result<UtxosIterator, Error> {
         let table = rx.open_table(UtxosTable::DEF)?;
         let range = table.range::<UtxosKey>(..)?;
         Ok(UtxosIterator(range))
+    }
+
+    pub fn len(rx: &ReadTransaction) -> Result<u64, Error> {
+        let table = rx.open_table(UtxosTable::DEF)?;
+        Ok(table.len()?)
     }
 
     pub fn get_sparse(rx: &ReadTransaction, refs: Vec<TxoRef>) -> Result<UtxoMap, Error> {

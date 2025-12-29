@@ -3,7 +3,7 @@ use std::{collections::HashMap, marker::PhantomData, ops::Range};
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 
-use crate::{ChainError, ChainPoint, Domain, TxoRef, UtxoMap, UtxoSet, UtxoSetDelta};
+use crate::{ChainError, ChainPoint, Domain, EraCbor, TxoRef, UtxoMap, UtxoSet, UtxoSetDelta};
 
 pub const KEY_SIZE: usize = 32;
 
@@ -275,7 +275,10 @@ pub trait StateWriter: Sized + Send + Sync {
 
     fn delete_entity(&self, ns: Namespace, key: &EntityKey) -> Result<(), StateError>;
 
-    fn apply_utxoset(&self, delta: &UtxoSetDelta) -> Result<(), StateError>;
+    fn apply_utxoset(&self, delta: &UtxoSetDelta, defer_indexes: bool) -> Result<(), StateError>;
+
+    /// Apply utxoset delta to indexes only.
+    fn index_utxoset(&self, delta: &UtxoSetDelta) -> Result<(), StateError>;
 
     #[allow(clippy::double_must_use)]
     #[must_use]
@@ -314,6 +317,7 @@ pub trait StateWriter: Sized + Send + Sync {
 }
 
 pub trait StateStore: Sized + Send + Sync + Clone {
+    type UtxoIter: Iterator<Item = Result<(TxoRef, EraCbor), StateError>>;
     type EntityIter: Iterator<Item = Result<(EntityKey, EntityValue), StateError>>;
     type EntityValueIter: Iterator<Item = Result<EntityValue, StateError>>;
     type Writer: StateWriter;
@@ -395,6 +399,10 @@ pub trait StateStore: Sized + Send + Sync + Clone {
     // }
 
     // TODO: generalize UTxO Set into generic entity system
+
+    fn iter_utxos(&self) -> Result<Self::UtxoIter, StateError>;
+
+    fn amount_of_utxos(&self) -> Result<u64, StateError>;
 
     fn get_utxos(&self, refs: Vec<TxoRef>) -> Result<UtxoMap, StateError>;
 
