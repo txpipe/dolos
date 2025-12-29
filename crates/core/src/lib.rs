@@ -70,7 +70,7 @@ pub use point::*;
 pub use state::*;
 pub use wal::*;
 
-use crate::batch::WorkBatch;
+use crate::batch::{WorkBatch, WorkBlock};
 
 #[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
 pub struct EraCbor(pub Era, pub Cbor);
@@ -543,6 +543,8 @@ pub trait ChainLogic: Sized + Send + Sync {
 
     // TODO: remove from the interface
     fn decode_utxo(&self, utxo: Arc<EraCbor>) -> Result<Self::Utxo, ChainError>;
+
+    fn decode_block(&self, raw: Arc<BlockBody>) -> Result<Self::Block, ChainError>;
 
     // TODO: remove from the interface
     fn mutable_slots(domain: &impl Domain) -> BlockSlot;

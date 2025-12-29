@@ -1,4 +1,4 @@
-use std::{collections::HashMap, ops::RangeInclusive};
+use std::{collections::HashMap, ops::RangeInclusive, sync::Arc};
 
 use itertools::Itertools as _;
 use rayon::prelude::*;
@@ -181,6 +181,33 @@ impl<C: ChainLogic> WorkBatch<C> {
             .collect();
 
         let inputs: HashMap<_, _> = domain.state().get_utxos(all_refs)?.into_iter().collect();
+
+        self.utxos.extend(inputs);
+
+        Ok(())
+    }
+
+    pub fn load_utxos_using_archive<D>(&mut self, domain: &D) -> Result<(), DomainError>
+    where
+        D: Domain<Chain = C>,
+    {
+        // TODO: paralelize in chunks
+
+        let all_refs: Vec<_> = self
+            .blocks
+            .iter()
+            .flat_map(|x| x.depends_on(&mut self.utxos))
+            .unique()
+            .collect();
+
+        let inputs: HashMap<_, _> = all_refs
+            .into_iter()
+            .flat_map(|txoref| match domain.archive().get_utxo(&txoref) {
+                Ok(Some(eracbor)) => Some(Ok((txoref, Arc::new(eracbor)))),
+                Ok(None) => None,
+                Err(err) => Some(Err(DomainError::from(err))),
+            })
+            .collect::<Result<_, _>>()?;
 
         self.utxos.extend(inputs);
 

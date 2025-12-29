@@ -40,6 +40,10 @@ pub struct Args {
 
     #[arg(long)]
     start_from: Option<ChainPoint>,
+
+    /// Only build using archive.
+    #[arg(long, action)]
+    only_archive: bool,
 }
 
 impl Default for Args {
@@ -53,6 +57,7 @@ impl Default for Args {
             verbose: Default::default(),
             chunk_size: 500,
             start_from: None,
+            only_archive: false,
         }
     }
 }
@@ -222,9 +227,15 @@ async fn import_hardano_into_domain(
         // around throughout the pipeline
         let batch: Vec<_> = batch.into_iter().map(Arc::new).collect();
 
-        let last = dolos_core::facade::import_blocks(&domain, batch)
-            .await
-            .map_err(|e| miette::miette!(e.to_string()))?;
+        let last = if args.only_archive {
+            dolos_core::facade::import_blocks_to_archive(&domain, batch)
+                .await
+                .map_err(|e| miette::miette!(e.to_string()))?
+        } else {
+            dolos_core::facade::import_blocks(&domain, batch)
+                .await
+                .map_err(|e| miette::miette!(e.to_string()))?
+        };
 
         progress.set_position(last);
     }

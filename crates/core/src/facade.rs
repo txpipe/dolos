@@ -1,9 +1,10 @@
 use tracing::{error, info, warn};
 
 use crate::{
-    batch::WorkBatch, ArchiveStore, Block as _, BlockSlot, ChainLogic, ChainPoint, Domain,
-    DomainError, MempoolAwareUtxoStore, MempoolStore, MempoolTx, RawBlock, StateStore, TipEvent,
-    TxHash, WalStore, WorkUnit,
+    batch::{WorkBatch, WorkBlock},
+    ArchiveStore, Block as _, BlockSlot, ChainLogic, ChainPoint, Domain, DomainError,
+    MempoolAwareUtxoStore, MempoolStore, MempoolTx, RawBlock, StateStore, TipEvent, TxHash,
+    WalStore, WorkUnit,
 };
 
 /// Process a batch of blocks during bulk import operations, skipping the WAL
@@ -31,6 +32,22 @@ fn execute_batch<D: Domain>(
 
     batch.commit_state(domain)?;
 
+    batch.commit_archive(domain)?;
+
+    Ok(batch.last_slot())
+}
+
+/// Process a batch of blocks during bulk import operations into archive.
+///
+/// This will resolve the utxo batch using the same archive and skip all state related steps.
+fn execute_batch_into_archive<D: Domain>(
+    chain: &D::Chain,
+    domain: &D,
+    batch: &mut WorkBatch<D::Chain>,
+) -> Result<BlockSlot, DomainError> {
+    batch.load_utxos_using_archive(domain)?;
+    batch.decode_utxos(chain)?;
+    chain.compute_delta::<D>(domain.state(), domain.genesis(), batch)?;
     batch.commit_archive(domain)?;
 
     Ok(batch.last_slot())
@@ -113,6 +130,25 @@ pub async fn import_blocks<D: Domain>(
 
     // one last drain to ensure we're up to date
     drain_pending_work(&mut *chain, domain, false).await?;
+
+    Ok(last)
+}
+
+pub async fn import_blocks_to_archive<D: Domain>(
+    domain: &D,
+    raw: Vec<RawBlock>,
+) -> Result<BlockSlot, DomainError> {
+    let mut last = 0;
+    let mut chain = domain.write_chain().await;
+    let mut batch = WorkBatch::default();
+
+    for block in raw {
+        let decoded = chain.decode_block(block)?;
+        last = decoded.slot();
+        batch.add_work(WorkBlock::new(decoded));
+    }
+
+    execute_batch_into_archive(&mut *chain, domain, &mut batch)?;
 
     Ok(last)
 }

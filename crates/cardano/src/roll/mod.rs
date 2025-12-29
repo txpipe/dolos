@@ -183,13 +183,13 @@ macro_rules! maybe_visit {
 
 macro_rules! visit_all {
     ($self:ident, $deltas:expr, $method:ident, $($args:tt)*) => {
-        maybe_visit!($self, $deltas, account_state, $method, $($args)*);
-        maybe_visit!($self, $deltas, asset_state, $method, $($args)*);
-        maybe_visit!($self, $deltas, drep_state, $method, $($args)*);
-        maybe_visit!($self, $deltas, epoch_state, $method, $($args)*);
-        maybe_visit!($self, $deltas, pool_state, $method, $($args)*);
+        // maybe_visit!($self, $deltas, account_state, $method, $($args)*);
+        // maybe_visit!($self, $deltas, asset_state, $method, $($args)*);
+        // maybe_visit!($self, $deltas, drep_state, $method, $($args)*);
+        // maybe_visit!($self, $deltas, epoch_state, $method, $($args)*);
+        // maybe_visit!($self, $deltas, pool_state, $method, $($args)*);
         maybe_visit!($self, $deltas, tx_logs, $method, $($args)*);
-        maybe_visit!($self, $deltas, proposal_logs, $method, $($args)*);
+        // maybe_visit!($self, $deltas, proposal_logs, $method, $($args)*);
     };
 }
 
@@ -332,9 +332,11 @@ pub fn compute_delta<D: Domain>(
     state: &D::State,
     batch: &mut WorkBatch<CardanoLogic>,
 ) -> Result<(), ChainError> {
-    let (epoch, _) = cache.eras.slot_epoch(batch.first_slot());
+    // let (epoch, _) = cache.eras.slot_epoch(batch.first_slot());
+    let epoch = 1;
 
-    let (protocol, _) = cache.eras.protocol_and_era_for_epoch(epoch);
+    // let (protocol, _) = cache.eras.protocol_and_era_for_epoch(epoch);
+    let protocol = &1;
 
     debug!(
         from = batch.first_slot(),

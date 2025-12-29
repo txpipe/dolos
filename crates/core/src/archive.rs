@@ -1,12 +1,15 @@
 use std::{marker::PhantomData, ops::Range};
 
-use pallas::{crypto::hash::Hash, ledger::primitives::PlutusData};
+use pallas::{
+    crypto::hash::Hash,
+    ledger::{primitives::PlutusData, traverse::MultiEraTx},
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
     state::KEY_SIZE, BlockBody, BlockSlot, BrokenInvariant, ChainPoint, Entity, EntityKey,
-    EntityValue, EraCbor, Namespace, RawBlock, TxHash, TxOrder,
+    EntityValue, EraCbor, Namespace, RawBlock, TxHash, TxOrder, TxoRef,
 };
 
 const TEMPORAL_KEY_SIZE: usize = 8;
@@ -294,6 +297,18 @@ pub trait ArchiveStore: Clone + Send + Sync + 'static {
     ) -> Result<Option<(BlockBody, TxOrder)>, ArchiveError>;
 
     fn get_tx(&self, tx_hash: &[u8]) -> Result<Option<EraCbor>, ArchiveError>;
+
+    fn get_utxo(&self, txo_ref: &TxoRef) -> Result<Option<EraCbor>, ArchiveError> {
+        let Some(tx) = self.get_tx(txo_ref.0.as_ref())? else {
+            return Ok(None);
+        };
+        let era = tx.era();
+        let decoded = MultiEraTx::decode_for_era(tx.era().try_into().unwrap(), tx.cbor())?;
+        let Some(output) = decoded.output_at(txo_ref.1 as usize) else {
+            return Ok(None);
+        };
+        Ok(Some(EraCbor(era, output.encode())))
+    }
 
     fn get_plutus_data(&self, datum_hash: &Hash<32>) -> Result<Option<PlutusData>, ArchiveError>;
 
