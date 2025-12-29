@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.33.0] - 2025-12-29
+
+### 🚀 Features
+
+- *(trp)* Implement utxo temp locking mechanism (#800)
+- Introduce mempool-aware utxo store
+- *(trp)* Update tx3 framework to v0.14 (#824)
+
+### 🐛 Bug Fixes
+
+- Honor until-tip sync option (#545)
+- *(minibf)* Fix BF openapi dep to prior version
+
+### 🔧 Continuous Integration
+
+- Add lts/v0 to docker build branches
+
 ## [0.32.0] - 2025-09-03
 
 ### 🚀 Features
@@ -14,6 +31,10 @@ All notable changes to this project will be documented in this file.
 - *(minibf)* Compute deposits correctly on tx mappings (#659)
 - *(minibf)* Improve epoch params mappings (#660)
 - *(cardano)* Compute drep state values during roll (#658)
+
+### Release
+
+- V0.32.0
 
 ## [0.31.1] - 2025-08-25
 
