@@ -1,4 +1,4 @@
-use dolos_core::{BlockBody, BlockHash, BlockSlot, EraCbor, RawBlock, RawUtxoMap, TxoRef};
+use dolos_core::{BlockBody, BlockHash, BlockSlot, EraCbor, RawBlock, RawUtxoMap, TxoRef, UtxoMap};
 use pallas::ledger::traverse::{MultiEraBlock, MultiEraOutput};
 use self_cell::self_cell;
 use std::sync::Arc;
@@ -25,6 +25,24 @@ impl OwnedMultiEraBlock {
 impl dolos_core::Block for OwnedMultiEraBlock {
     fn depends_on(&self, loaded: &mut RawUtxoMap) -> Vec<TxoRef> {
         crate::utxoset::compute_block_dependencies(self.view(), loaded)
+    }
+
+    fn produces(&self) -> UtxoMap {
+        self.view()
+            .txs()
+            .iter()
+            .flat_map(|tx| {
+                tx.produces()
+                    .iter()
+                    .map(|(at, output)| {
+                        (
+                            TxoRef(tx.hash(), *at as u32),
+                            Arc::new(EraCbor(tx.era().into(), output.encode())),
+                        )
+                    })
+                    .collect::<Vec<(TxoRef, Arc<EraCbor>)>>()
+            })
+            .collect()
     }
 
     fn slot(&self) -> BlockSlot {

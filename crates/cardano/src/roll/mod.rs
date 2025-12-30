@@ -15,7 +15,7 @@ use pallas::{
         },
     },
 };
-use tracing::{debug, instrument};
+use tracing::{debug, instrument, warn};
 
 use crate::{
     load_effective_pparams, owned::OwnedMultiEraOutput, roll::proposals::ProposalVisitor, utxoset,
@@ -261,14 +261,17 @@ impl<'a> DeltaBuilder<'a> {
             for input in tx.consumes() {
                 let txoref = TxoRef::from(&input);
 
-                let resolved = self.utxos.get(&txoref).ok_or_else(|| {
-                    StateError::InvariantViolation(InvariantViolation::InputNotFound(txoref))
-                })?;
-
-                resolved.with_dependent(|_, resolved| {
-                    visit_all!(self, deltas, visit_input, block, &tx, &input, &resolved);
-                    Result::<_, ChainError>::Ok(())
-                })?;
+                match self.utxos.get(&txoref) {
+                    Some(resolved) => {
+                        resolved.with_dependent(|_, resolved| {
+                            visit_all!(self, deltas, visit_input, block, &tx, &input, &resolved);
+                            Result::<_, ChainError>::Ok(())
+                        })?;
+                    }
+                    None => {
+                        warn!(txoref =? txoref, "failed to resolve input");
+                    }
+                }
             }
 
             for (index, output) in tx.produces() {
@@ -345,7 +348,8 @@ pub fn compute_delta<D: Domain>(
         "computing delta"
     );
 
-    let active_params = load_effective_pparams::<D>(state)?;
+    //let active_params = load_effective_pparams::<D>(state)?;
+    let active_params = PParamsSet::default();
 
     for block in batch.blocks.iter_mut() {
         let mut builder = DeltaBuilder::new(
@@ -360,12 +364,12 @@ pub fn compute_delta<D: Domain>(
 
         builder.crawl()?;
 
-        // TODO: we treat the UTxO set differently due to tech-debt. We should migrate
-        // this into the entity system.
-        let blockd = block.decoded();
-        let blockd = blockd.view();
-        let utxos = utxoset::compute_apply_delta(blockd, &batch.utxos_decoded)?;
-        block.utxo_delta = Some(utxos);
+        // // TODO: we treat the UTxO set differently due to tech-debt. We should migrate
+        // // this into the entity system.
+        // let blockd = block.decoded();
+        // let blockd = blockd.view();
+        // let utxos = utxoset::compute_apply_delta(blockd, &batch.utxos_decoded)?;
+        // block.utxo_delta = Some(utxos);
     }
 
     Ok(())

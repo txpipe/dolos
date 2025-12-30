@@ -70,7 +70,7 @@ pub use point::*;
 pub use state::*;
 pub use wal::*;
 
-use crate::batch::{WorkBatch, WorkBlock};
+use crate::batch::WorkBatch;
 
 #[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
 pub struct EraCbor(pub Era, pub Cbor);
@@ -379,6 +379,7 @@ pub trait MempoolStore: Clone + Send + Sync + 'static {
 
 pub trait Block: Sized + Send + Sync {
     fn depends_on(&self, loaded: &mut RawUtxoMap) -> Vec<TxoRef>;
+    fn produces(&self) -> UtxoMap;
     fn slot(&self) -> BlockSlot;
     fn hash(&self) -> BlockHash;
     fn raw(&self) -> RawBlock;

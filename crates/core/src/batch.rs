@@ -6,7 +6,7 @@ use rayon::prelude::*;
 use crate::{
     ArchiveStore, ArchiveWriter as _, Block as _, BlockSlot, ChainLogic, ChainPoint, Domain,
     DomainError, EntityDelta, EntityMap, LogValue, NsKey, RawBlock, RawUtxoMap, SlotTags,
-    StateError, StateStore as _, StateWriter as _, TxoRef, UtxoSetDelta, WalStore as _,
+    StateError, StateStore as _, StateWriter as _, TxoRef, UtxoMap, UtxoSetDelta, WalStore as _,
 };
 
 #[derive(Debug)]
@@ -65,6 +65,10 @@ impl<C: ChainLogic> WorkBlock<C> {
 
     pub fn depends_on(&self, loaded: &mut RawUtxoMap) -> Vec<TxoRef> {
         self.block.depends_on(loaded)
+    }
+
+    pub fn produces(&self) -> UtxoMap {
+        self.block.produces()
     }
 
     pub fn point(&self) -> ChainPoint {
@@ -191,8 +195,6 @@ impl<C: ChainLogic> WorkBatch<C> {
     where
         D: Domain<Chain = C>,
     {
-        // TODO: paralelize in chunks
-
         let all_refs: Vec<_> = self
             .blocks
             .iter()
@@ -200,11 +202,13 @@ impl<C: ChainLogic> WorkBatch<C> {
             .unique()
             .collect();
 
+        let produced: UtxoMap = self.blocks.iter().flat_map(|x| x.produces()).collect();
+
         let inputs: HashMap<_, _> = all_refs
             .into_iter()
             .flat_map(|txoref| match domain.archive().get_utxo(&txoref) {
                 Ok(Some(eracbor)) => Some(Ok((txoref, Arc::new(eracbor)))),
-                Ok(None) => None,
+                Ok(None) => Ok(produced.get(&txoref).cloned().map(|x| (txoref, x))).transpose(),
                 Err(err) => Some(Err(DomainError::from(err))),
             })
             .collect::<Result<_, _>>()?;
