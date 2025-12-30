@@ -376,6 +376,12 @@ impl dolos_core::ChainLogic for CardanoLogic {
         Ok(out)
     }
 
+    fn decode_block(&self, raw: Arc<BlockBody>) -> Result<Self::Block, ChainError> {
+        let out = OwnedMultiEraBlock::decode(raw)?;
+
+        Ok(out)
+    }
+
     fn mutable_slots(domain: &impl Domain) -> BlockSlot {
         utils::mutable_slots(&domain.genesis())
     }
