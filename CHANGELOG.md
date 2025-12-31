@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.33.1] - 2025-12-31
+
+### ⚙️ Miscellaneous Tasks
+
+- Update tx3 deps to v0.14.2
+
 ## [0.33.0] - 2025-12-29
 
 ### 🚀 Features
@@ -18,6 +24,11 @@ All notable changes to this project will be documented in this file.
 ### 🔧 Continuous Integration
 
 - Add lts/v0 to docker build branches
+- Remove x86 apple binary build
+
+### Release
+
+- V0.33.0
 
 ## [0.32.0] - 2025-09-03
 
