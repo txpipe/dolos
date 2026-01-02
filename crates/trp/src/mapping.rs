@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use tx3_lang::ir::{Expression, StructExpr};
+use tx3_resolver::{Expression, StructExpr};
 
 use dolos_core::{EraCbor, TxoRef};
 use pallas::{
@@ -11,18 +11,16 @@ use pallas::{
     },
 };
 
-use crate::Error;
-
-fn map_custom_asset(asset: &MultiEraAsset) -> tx3_lang::CanonicalAssets {
+fn map_custom_asset(asset: &MultiEraAsset) -> tx3_resolver::CanonicalAssets {
     let policy = asset.policy().as_slice();
     let asset_name = asset.name();
     let amount = asset.any_coin();
 
-    tx3_lang::CanonicalAssets::from_defined_asset(policy, asset_name, amount)
+    tx3_resolver::CanonicalAssets::from_defined_asset(policy, asset_name, amount)
 }
 
-fn map_policy_assets(assets: &MultiEraPolicyAssets) -> tx3_lang::CanonicalAssets {
-    let all = tx3_lang::CanonicalAssets::empty();
+fn map_policy_assets(assets: &MultiEraPolicyAssets) -> tx3_resolver::CanonicalAssets {
+    let all = tx3_resolver::CanonicalAssets::empty();
 
     let all = assets
         .assets()
@@ -33,8 +31,8 @@ fn map_policy_assets(assets: &MultiEraPolicyAssets) -> tx3_lang::CanonicalAssets
     all
 }
 
-fn map_assets(value: &MultiEraValue<'_>) -> tx3_lang::CanonicalAssets {
-    let naked = tx3_lang::CanonicalAssets::from_naked_amount(value.coin() as i128);
+fn map_assets(value: &MultiEraValue<'_>) -> tx3_resolver::CanonicalAssets {
+    let naked = tx3_resolver::CanonicalAssets::from_naked_amount(value.coin() as i128);
 
     let all = value
         .assets()
@@ -96,29 +94,36 @@ fn map_datum(datum: &PlutusData) -> Expression {
     }
 }
 
-pub fn from_tx3_utxoref(r#ref: tx3_lang::UtxoRef) -> TxoRef {
+pub fn from_tx3_utxoref(r#ref: tx3_resolver::UtxoRef) -> TxoRef {
     let txid = dolos_cardano::pallas::crypto::hash::Hash::from(r#ref.txid.as_slice());
 
     TxoRef(txid, r#ref.index)
 }
 
-pub fn into_tx3_utxoref(txoref: TxoRef) -> tx3_lang::UtxoRef {
-    tx3_lang::UtxoRef {
+pub fn into_tx3_utxoref(txoref: TxoRef) -> tx3_resolver::UtxoRef {
+    tx3_resolver::UtxoRef {
         txid: txoref.0.to_vec(),
         index: txoref.1,
     }
 }
 
-pub fn into_tx3_utxo(txoref: TxoRef, utxo: Arc<EraCbor>) -> Result<tx3_lang::Utxo, Error> {
+pub fn into_tx3_utxo(
+    txoref: TxoRef,
+    utxo: Arc<EraCbor>,
+) -> Result<tx3_resolver::Utxo, tx3_resolver::Error> {
     let r#ref = into_tx3_utxoref(txoref);
 
     let EraCbor(era, cbor) = utxo.as_ref();
 
-    let era = Era::try_from(*era)?;
+    let era = Era::try_from(*era).map_err(|e| tx3_resolver::Error::StoreError(e.to_string()))?;
 
-    let parsed = MultiEraOutput::decode(era, cbor)?;
+    let parsed = MultiEraOutput::decode(era, cbor)
+        .map_err(|e| tx3_resolver::Error::StoreError(e.to_string()))?;
 
-    let address = parsed.address()?.to_vec();
+    let address = parsed
+        .address()
+        .map_err(|e| tx3_resolver::Error::StoreError(e.to_string()))?
+        .to_vec();
 
     let assets = map_assets(&parsed.value());
 
@@ -127,7 +132,7 @@ pub fn into_tx3_utxo(txoref: TxoRef, utxo: Arc<EraCbor>) -> Result<tx3_lang::Utx
         _ => None,
     };
 
-    Ok(tx3_lang::Utxo {
+    Ok(tx3_resolver::Utxo {
         r#ref,
         address,
         datum,
