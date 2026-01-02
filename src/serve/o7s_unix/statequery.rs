@@ -90,21 +90,33 @@ fn build_era_history_response(
             encoder.u8(1).map_err(|e| Error::server(e.to_string()))?;
         } else {
             // StandardSafeZone: [3, 0, safeFromTip, safeBeforeEpoch]
-            // safeFromTip = 2 * k (stability window), using a default value
+            // safeFromTip = 2 * k (stability window)
             // safeBeforeEpoch is encoded as [1, 0] for NoLowerBound
             encoder.array(3).map_err(|e| Error::server(e.to_string()))?;
             encoder.u8(0).map_err(|e| Error::server(e.to_string()))?;
-            // safeFromTip: use a reasonable default (2 * 2160 = 4320 for mainnet-like)
+
+            let k = genesis
+                .shelley
+                .security_param
+                .ok_or_else(|| Error::server("missing security param"))?;
+            let safe_from_tip = 2 * k;
+
             encoder
-                .u64(4320)
+                .u64(safe_from_tip.into())
                 .map_err(|e| Error::server(e.to_string()))?;
             // safeBeforeEpoch: NoLowerBound = [1, 0]
             encoder.array(1).map_err(|e| Error::server(e.to_string()))?;
             encoder.u8(0).map_err(|e| Error::server(e.to_string()))?;
         }
 
+        let k = genesis
+            .shelley
+            .security_param
+            .ok_or_else(|| Error::server("missing security param"))?;
+        let genesis_window = 2 * k;
+
         encoder
-            .u64(4320)
+            .u64(genesis_window.into())
             .map_err(|e| Error::server(e.to_string()))?;
     }
 
@@ -237,7 +249,7 @@ impl<D: Domain> Session<D> {
                 AnyCbor::from_encode(match point {
                     ChainPoint::Origin => OPoint::Origin,
                     ChainPoint::Specific(s, h) => OPoint::Specific(s, h.to_vec()),
-                    ChainPoint::Slot(_) => OPoint::Origin,
+                    ChainPoint::Slot(_) => OPoint::Specific(0, vec![]),
                 })
             }
             Ok(q16::Request::LedgerQuery(q16::LedgerQuery::HardForkQuery(
@@ -288,7 +300,7 @@ impl<D: Domain> Session<D> {
                 let p = match point {
                     ChainPoint::Origin => OPoint::Origin,
                     ChainPoint::Specific(s, h) => OPoint::Specific(s, h.to_vec()),
-                    ChainPoint::Slot(_) => OPoint::Origin,
+                    ChainPoint::Slot(_) => OPoint::Specific(0, vec![]),
                 };
                 AnyCbor::from_encode((p,))
             }
