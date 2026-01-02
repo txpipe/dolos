@@ -9,20 +9,83 @@ use tracing::{debug, info, warn};
 
 use crate::prelude::*;
 
-/// Build the CBOR response for GetInterpreter (EraHistory) query
-/// The format follows ouroboros-consensus Summary type:
-/// - List of EraSummary
-/// - Each EraSummary: [Bound, EraEnd, EraParams]
-/// - Bound: [RelativeTime, SlotNo, EpochNo]
-/// - EraEnd: null (unbounded) or Bound
-/// - EraParams: [epochSize, slotLength, safeZone, genesisWindow]
-/// - SafeZone: [3, 0, safeFromTip, [1, 0]] for StandardSafeZone or [1, 1] for UnsafeIndefiniteSafeZone
+struct EraHistoryResponse<'a> {
+    eras: &'a [DolosEraSummary],
+    system_start: u64,
+    security_param: u64,
+}
+
+impl<'a, C> minicbor::Encode<C> for EraHistoryResponse<'a> {
+    fn encode<W: minicbor::encode::Write>(
+        &self,
+        encoder: &mut Encoder<W>,
+        _ctx: &mut C,
+    ) -> Result<(), minicbor::encode::Error<W::Error>> {
+        encoder.array(self.eras.len() as u64)?;
+
+        for era in self.eras {
+            encoder.array(3)?;
+
+            // Start Bound
+            encoder.array(3)?;
+            let start_relative_time = era.start.timestamp.saturating_sub(self.system_start);
+            encoder.u64(start_relative_time)?;
+            encoder.u64(era.start.slot)?;
+            encoder.u64(era.start.epoch)?;
+
+            // EraEnd
+            match &era.end {
+                Some(end) => {
+                    encoder.array(3)?;
+                    let end_relative_time = end.timestamp.saturating_sub(self.system_start);
+                    encoder.u64(end_relative_time)?;
+                    encoder.u64(end.slot)?;
+                    encoder.u64(end.epoch)?;
+                }
+                None => {
+                    encoder.null()?;
+                }
+            }
+
+            // EraParams
+            encoder.array(4)?;
+            encoder.u64(era.epoch_length)?;
+            encoder.u64(era.slot_length * 1000)?;
+
+            let safe_from_tip = self.security_param * 2;
+
+            // SafeZone
+            if era.end.is_none() {
+                // UnsafeIndefiniteSafeZone: [1, 1]
+                encoder.array(1)?;
+                encoder.u8(1)?;
+            } else {
+                // StandardSafeZone: [3, 0, safeFromTip, safeBeforeEpoch]
+                // safeFromTip = 2 * k (stability window)
+                // safeBeforeEpoch is encoded as [1, 0] for NoLowerBound
+                encoder.array(3)?;
+                encoder.u8(0)?;
+
+                encoder.u64(safe_from_tip)?;
+                // safeBeforeEpoch: NoLowerBound = [1, 0]
+                encoder.array(1)?;
+                encoder.u8(0)?;
+            }
+
+            encoder.u64(safe_from_tip)?;
+        }
+
+        Ok(())
+    }
+}
+
 fn build_era_history_response(
     eras: &[DolosEraSummary],
     genesis: &Genesis,
-) -> Result<Vec<u8>, Error> {
-    let mut bytes = vec![];
-    let mut encoder = Encoder::new(&mut bytes);
+) -> Result<AnyCbor, Error> {
+    if eras.is_empty() {
+        return Err(Error::server("era summary is empty"));
+    }
 
     let system_start = genesis
         .shelley
@@ -32,95 +95,18 @@ fn build_era_history_response(
         .map(|dt| dt.timestamp() as u64)
         .ok_or_else(|| Error::server("invalid system start"))?;
 
-    encoder
-        .array(eras.len() as u64)
-        .map_err(|e| Error::server(e.to_string()))?;
+    let security_param = genesis
+        .shelley
+        .security_param
+        .ok_or_else(|| Error::server("missing security param"))?;
 
-    for era in eras {
-        encoder.array(3).map_err(|e| Error::server(e.to_string()))?;
+    let resp = EraHistoryResponse {
+        eras,
+        system_start,
+        security_param: security_param.into(),
+    };
 
-        // Start Bound
-        encoder.array(3).map_err(|e| Error::server(e.to_string()))?;
-        let start_relative_time = era.start.timestamp.saturating_sub(system_start);
-        encoder
-            .u64(start_relative_time)
-            .map_err(|e| Error::server(e.to_string()))?;
-        encoder
-            .u64(era.start.slot)
-            .map_err(|e| Error::server(e.to_string()))?;
-        encoder
-            .u64(era.start.epoch)
-            .map_err(|e| Error::server(e.to_string()))?;
-
-        // EraEnd
-        match &era.end {
-            Some(end) => {
-                encoder.array(3).map_err(|e| Error::server(e.to_string()))?;
-                let end_relative_time = end.timestamp.saturating_sub(system_start);
-                encoder
-                    .u64(end_relative_time)
-                    .map_err(|e| Error::server(e.to_string()))?;
-                encoder
-                    .u64(end.slot)
-                    .map_err(|e| Error::server(e.to_string()))?;
-                encoder
-                    .u64(end.epoch)
-                    .map_err(|e| Error::server(e.to_string()))?;
-            }
-            None => {
-                encoder.null().map_err(|e| Error::server(e.to_string()))?;
-            }
-        }
-
-        // EraParams
-        encoder.array(4).map_err(|e| Error::server(e.to_string()))?;
-
-        encoder
-            .u64(era.epoch_length)
-            .map_err(|e| Error::server(e.to_string()))?;
-
-        encoder
-            .u64(era.slot_length * 1000)
-            .map_err(|e| Error::server(e.to_string()))?;
-
-        // SafeZone
-        if era.end.is_none() {
-            // UnsafeIndefiniteSafeZone: [1, 1]
-            encoder.array(1).map_err(|e| Error::server(e.to_string()))?;
-            encoder.u8(1).map_err(|e| Error::server(e.to_string()))?;
-        } else {
-            // StandardSafeZone: [3, 0, safeFromTip, safeBeforeEpoch]
-            // safeFromTip = 2 * k (stability window)
-            // safeBeforeEpoch is encoded as [1, 0] for NoLowerBound
-            encoder.array(3).map_err(|e| Error::server(e.to_string()))?;
-            encoder.u8(0).map_err(|e| Error::server(e.to_string()))?;
-
-            let k = genesis
-                .shelley
-                .security_param
-                .ok_or_else(|| Error::server("missing security param"))?;
-            let safe_from_tip = 2 * k;
-
-            encoder
-                .u64(safe_from_tip.into())
-                .map_err(|e| Error::server(e.to_string()))?;
-            // safeBeforeEpoch: NoLowerBound = [1, 0]
-            encoder.array(1).map_err(|e| Error::server(e.to_string()))?;
-            encoder.u8(0).map_err(|e| Error::server(e.to_string()))?;
-        }
-
-        let k = genesis
-            .shelley
-            .security_param
-            .ok_or_else(|| Error::server("missing security param"))?;
-        let genesis_window = 2 * k;
-
-        encoder
-            .u64(genesis_window.into())
-            .map_err(|e| Error::server(e.to_string()))?;
-    }
-
-    Ok(bytes)
+    Ok(AnyCbor::from_encode(resp))
 }
 
 pub struct Session<D: Domain> {
@@ -131,12 +117,29 @@ pub struct Session<D: Domain> {
 
 impl<D: Domain> Session<D> {
     fn tip_cursor(&self) -> Result<ChainPoint, Error> {
-        Ok(self
+        let point = self
             .domain
             .state()
             .read_cursor()
             .map_err(Error::server)?
-            .unwrap_or(ChainPoint::Origin))
+            .unwrap_or(ChainPoint::Origin);
+
+        match point {
+            ChainPoint::Slot(slot) => {
+                let body = self
+                    .domain
+                    .archive()
+                    .get_block_by_slot(&slot)
+                    .map_err(Error::server)?
+                    .ok_or_else(|| Error::server("block not found for slot"))?;
+
+                let block =
+                    MultiEraBlock::decode(&body).map_err(|e| Error::server(e.to_string()))?;
+
+                Ok(ChainPoint::Specific(slot, block.hash()))
+            }
+            _ => Ok(point),
+        }
     }
 
     async fn send_acquired(&mut self) -> Result<(), Error> {
@@ -235,9 +238,12 @@ impl<D: Domain> Session<D> {
                     0
                 };
 
+                // Use saturating conversion to avoid silent truncation
+                let block_number = u32::try_from(number).unwrap_or(u32::MAX);
+
                 let resp = q16::ChainBlockNumber {
                     slot_timeline: 1, // 1 indicates "At" (not Origin)
-                    block_number: number as u32,
+                    block_number,
                 };
 
                 AnyCbor::from_encode(resp)
@@ -249,7 +255,7 @@ impl<D: Domain> Session<D> {
                 AnyCbor::from_encode(match point {
                     ChainPoint::Origin => OPoint::Origin,
                     ChainPoint::Specific(s, h) => OPoint::Specific(s, h.to_vec()),
-                    ChainPoint::Slot(_) => OPoint::Specific(0, vec![]),
+                    ChainPoint::Slot(_) => OPoint::Origin,
                 })
             }
             Ok(q16::Request::LedgerQuery(q16::LedgerQuery::HardForkQuery(
@@ -263,11 +269,7 @@ impl<D: Domain> Session<D> {
                 let eras: Vec<DolosEraSummary> = chain_summary.iter_all().cloned().collect();
 
                 let genesis = self.domain.genesis();
-                let bytes = build_era_history_response(&eras, &genesis)?;
-
-                let response: AnyCbor =
-                    minicbor::decode(&bytes).map_err(|e| Error::server(e.to_string()))?;
-                response
+                build_era_history_response(&eras, &genesis)?
             }
             Ok(q16::Request::LedgerQuery(q16::LedgerQuery::HardForkQuery(
                 q16::HardForkQuery::GetCurrentEra,
@@ -300,7 +302,7 @@ impl<D: Domain> Session<D> {
                 let p = match point {
                     ChainPoint::Origin => OPoint::Origin,
                     ChainPoint::Specific(s, h) => OPoint::Specific(s, h.to_vec()),
-                    ChainPoint::Slot(_) => OPoint::Specific(0, vec![]),
+                    ChainPoint::Slot(_) => OPoint::Origin,
                 };
                 AnyCbor::from_encode((p,))
             }
