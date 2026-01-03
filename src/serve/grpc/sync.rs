@@ -40,19 +40,22 @@ fn raw_to_blockref<C: LedgerContext>(
     mapper: &Mapper<C>,
     body: &BlockBody,
 ) -> Option<u5c::sync::BlockRef> {
-    let u5c::cardano::Block { header, .. } = mapper.map_block_cbor(body);
+    let block = mapper.map_block_cbor(body);
+    let header = block.header?;
 
-    header.map(|h| u5c::sync::BlockRef {
-        slot: h.slot,
-        hash: h.hash,
-        height: h.height,
+    Some(u5c::sync::BlockRef {
+        slot: header.slot,
+        hash: header.hash,
+        height: header.height,
+        timestamp: block.timestamp,
     })
 }
 
-fn point_to_blockref(point: &ChainPoint) -> u5c::sync::BlockRef {
+fn point_to_blockref(point: &ChainPoint, timestamp: u64) -> u5c::sync::BlockRef {
     BlockRef {
         hash: point.hash().map(|h| h.to_vec()).unwrap_or_default().into(),
         slot: point.slot(),
+        timestamp,
         ..Default::default()
     }
 }
@@ -61,17 +64,27 @@ fn tip_event_to_response<C: LedgerContext>(
     mapper: &Mapper<C>,
     event: &TipEvent,
 ) -> u5c::sync::FollowTipResponse {
-    u5c::sync::FollowTipResponse {
-        action: match event {
-            TipEvent::Apply(_, block) => {
-                u5c::sync::follow_tip_response::Action::Apply(raw_to_anychain(mapper, block)).into()
+    match event {
+        TipEvent::Apply(_, block) => {
+            let block_ref = raw_to_blockref(mapper, block);
+            u5c::sync::FollowTipResponse {
+                action: Some(u5c::sync::follow_tip_response::Action::Apply(
+                    raw_to_anychain(mapper, block),
+                )),
+                tip: block_ref,
             }
-            TipEvent::Undo(_, block) => {
-                u5c::sync::follow_tip_response::Action::Undo(raw_to_anychain(mapper, block)).into()
-            }
-            TipEvent::Mark(x) => {
-                u5c::sync::follow_tip_response::Action::Reset(point_to_blockref(x)).into()
-            }
+        }
+        TipEvent::Undo(_, block) => u5c::sync::FollowTipResponse {
+            action: Some(u5c::sync::follow_tip_response::Action::Undo(
+                raw_to_anychain(mapper, block),
+            )),
+            tip: None, // TODO: we don't have easy access to the new tip here
+        },
+        TipEvent::Mark(x) => u5c::sync::FollowTipResponse {
+            action: Some(u5c::sync::follow_tip_response::Action::Reset(
+                point_to_blockref(x, 0), // TODO: we don't have the timestamp here
+            )),
+            tip: Some(point_to_blockref(x, 0)),
         },
     }
 }
@@ -217,10 +230,9 @@ where
             .map_err(|e| Status::internal(format!("Unable to read WAL: {e:?}")))?
             .ok_or(Status::internal("chain has no data."))?;
 
+        let timestamp = self.domain.get_slot_timestamp(point.slot()).unwrap_or(0);
         let response = u5c::sync::ReadTipResponse {
-            tip: Some(point_to_blockref(&point)),
-            // TODO: impl
-            timestamp: 0,
+            tip: Some(point_to_blockref(&point, timestamp)),
         };
 
         Ok(Response::new(response))
