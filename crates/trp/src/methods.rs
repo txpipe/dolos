@@ -3,10 +3,9 @@ use pallas::{
     codec::utils::NonEmptySet,
     ledger::primitives::conway::{VKeyWitness, WitnessSet},
 };
-use serde::Deserialize;
 use std::sync::Arc;
 
-use tx3_resolver::{interop::BytesEnvelope, trp::{ResolveParams, SubmitResponse, SubmitWitness, TxEnvelope}};
+use tx3_resolver::{trp::{ResolveParams, SubmitResponse, SubmitParams, WitnessInput, TxEnvelope}};
 
 use dolos_core::{facade::receive_tx, Domain, MempoolAwareUtxoStore, StateStore as _};
 
@@ -41,23 +40,6 @@ pub async fn trp_resolve<D: Domain>(
         tx: hex::encode(resolved.payload),
         hash: hex::encode(resolved.hash),
     })
-}
-
-// TODO: This should be moved to tx3-resolver crate
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum WitnessInput {
-    Object(SubmitWitness),
-    Hex(String),
-}
-
-// TODO: This should be moved to tx3-resolver crate
-#[derive(Deserialize)]
-struct SubmitParamsInput {
-    #[serde(rename = "tx")]
-    pub tx: BytesEnvelope,
-    #[serde(rename = "witnesses")]
-    pub witnesses: Vec<WitnessInput>,
 }
 
 fn apply_witnesses(original: &[u8], witnesses: &[WitnessInput]) -> Result<Vec<u8>, Error> {
@@ -108,7 +90,7 @@ pub async fn trp_submit<D: Domain>(
     params: Params<'_>,
     context: Arc<Context<D>>,
 ) -> Result<SubmitResponse, Error> {
-    let params: SubmitParamsInput = params.parse()?;
+    let params: SubmitParams = params.parse()?;
 
     let mut bytes = Vec::<u8>::from(params.tx);
 
