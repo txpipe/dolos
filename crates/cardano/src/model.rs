@@ -535,6 +535,7 @@ pub struct AccountState {
     pub credential: StakeCredential,
 
     #[n(7)]
+    #[cbor(default)]
     pub retired_pool: Option<PoolHash>,
 }
 
