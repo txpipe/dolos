@@ -158,13 +158,13 @@ impl super::BoundaryVisitor for BoundaryVisitor {
     ) -> Result<(), ChainError> {
         let current_epoch = ctx.ending_state.number;
 
+        // Notice that instead of dropping delegators when a pool is retired, we're moving the data to a different field to be able to still track the relationsihp between the pool and the delegators.
+
         if let Some(pool) = account.delegated_pool_at(current_epoch) {
             if ctx.retiring_pools.contains_key(pool) {
                 self.change(PoolDelegatorRetire::new(id.clone(), current_epoch));
             }
         }
-
-        // NOTICE: we're not dropping delegators from retiring pools. We've been back and forth on this decision. The understanding at this point in time is that delegation remains but it just doesn't participate in the rewards.
 
         if let Some(drep) = account.delegated_drep_at(current_epoch) {
             if ctx.expiring_dreps.contains(drep) {
