@@ -27,7 +27,7 @@ use crate::{
         reset::{AccountTransition, EpochTransition, PoolTransition},
     },
     ewrap::{
-        drops::{DRepDelegatorDrop, DRepExpiration, PoolDelegatorDrop},
+        drops::{DRepDelegatorDrop, DRepExpiration},
         enactment::{PParamsUpdate, TreasuryWithdrawal},
         refunds::{PoolDepositRefund, ProposalDepositRefund},
         rewards::AssignRewards,
@@ -1808,7 +1808,6 @@ pub enum CardanoDelta {
     PParamsUpdate(PParamsUpdate),
     NoncesUpdate(NoncesUpdate),
     NewProposal(NewProposal),
-    PoolDelegatorDrop(PoolDelegatorDrop),
     AssignRewards(AssignRewards),
     NonceTransition(NonceTransition),
     PoolTransition(PoolTransition),
@@ -1876,7 +1875,6 @@ delta_from!(VoteDelegation);
 delta_from!(PParamsUpdate);
 delta_from!(NoncesUpdate);
 delta_from!(NewProposal);
-delta_from!(PoolDelegatorDrop);
 delta_from!(AssignRewards);
 delta_from!(NonceTransition);
 delta_from!(PoolTransition);
@@ -1914,7 +1912,6 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::PParamsUpdate(x) => x.key(),
             Self::NoncesUpdate(x) => x.key(),
             Self::NewProposal(x) => x.key(),
-            Self::PoolDelegatorDrop(x) => x.key(),
             Self::AssignRewards(x) => x.key(),
             Self::NonceTransition(x) => x.key(),
             Self::PoolTransition(x) => x.key(),
@@ -1951,7 +1948,6 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::PParamsUpdate(x) => Self::downcast_apply(x, entity),
             Self::NoncesUpdate(x) => Self::downcast_apply(x, entity),
             Self::NewProposal(x) => Self::downcast_apply(x, entity),
-            Self::PoolDelegatorDrop(x) => Self::downcast_apply(x, entity),
             Self::AssignRewards(x) => Self::downcast_apply(x, entity),
             Self::NonceTransition(x) => Self::downcast_apply(x, entity),
             Self::PoolTransition(x) => Self::downcast_apply(x, entity),
@@ -1988,7 +1984,6 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::PParamsUpdate(x) => Self::downcast_undo(x, entity),
             Self::NoncesUpdate(x) => Self::downcast_undo(x, entity),
             Self::NewProposal(x) => Self::downcast_undo(x, entity),
-            Self::PoolDelegatorDrop(x) => Self::downcast_undo(x, entity),
             Self::AssignRewards(x) => Self::downcast_undo(x, entity),
             Self::NonceTransition(x) => Self::downcast_undo(x, entity),
             Self::PoolTransition(x) => Self::downcast_undo(x, entity),

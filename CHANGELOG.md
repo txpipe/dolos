@@ -2,6 +2,29 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.0-rc.4] - 2025-12-18
+
+### 🚀 Features
+
+- Introduce mempool-aware utxo store
+
+### 🐛 Bug Fixes
+
+- Apply pending refactors to windows code
+- Remove stage timeout (#811)
+- Use correct condition for notifying tip events (#812)
+- *(cardano)* Drop delegators for retiring dreps (#817)
+- *(cardano)* Avoid dropping delegators on retired pools (#818)
+- *(cardano)* Improve speed of RUPD work log (#819)
+
+### 🔧 Continuous Integration
+
+- Include adhoc branches on docker builds
+
+### ⚙️ Miscellaneous Tasks
+
+- Fix lint warnings (#820)
+
 ## [1.0.0-rc.3] - 2025-12-04
 
 ### 🚀 Features
@@ -36,6 +59,10 @@ All notable changes to this project will be documented in this file.
 - Remove legacy test-vectors crate (#797)
 - Unify both redb crates (#798)
 - *(minibf)* Update blockfrost-openapi to v0.1.83 (#801)
+
+### Release
+
+- V1.0.0-rc.3
 
 ## [1.0.0-rc.2] - 2025-11-13
 

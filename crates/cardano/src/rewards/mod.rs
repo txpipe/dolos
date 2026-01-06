@@ -213,22 +213,22 @@ impl<C: RewardsContext> RewardMap<C> {
 
     // TODO: this is very inefficient. We should should probably revisit the data
     // structure.
-    pub fn find_pool_rewards(&self, target: PoolHash) -> (TotalPoolRewards, OperatorShare) {
-        let mut total_rewards = 0;
-        let mut operator_share = 0;
+    pub fn aggregate_pool_rewards(&self) -> HashMap<PoolHash, (TotalPoolRewards, OperatorShare)> {
+        let mut rewards = HashMap::new();
 
         for reward in self.pending.values() {
             for (pool, value, as_leader) in reward.into_vec() {
-                if pool == target {
-                    total_rewards += value;
-                    if as_leader {
-                        operator_share += value;
-                    }
+                let (total_rewards, operator_share) = rewards.entry(pool).or_insert((0, 0));
+
+                *total_rewards = add!(*total_rewards as u64, value);
+
+                if as_leader {
+                    *operator_share = add!(*operator_share as u64, value);
                 }
             }
         }
 
-        (total_rewards, operator_share)
+        rewards
     }
 
     fn include(

@@ -105,7 +105,7 @@ impl<'a> IntoModel<AccountContent> for AccountModelBuilder<'a> {
             .map(bech32_drep)
             .transpose()?;
 
-        let active = active_epoch.map(|x| x < current_epoch).unwrap_or(false) && pool_id.is_some();
+        let active = self.account_state.is_registered();
 
         let stake = self.account_state.stake.live().cloned().unwrap_or_default();
 
