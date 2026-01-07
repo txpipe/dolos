@@ -130,18 +130,46 @@ where
     ) -> Result<Response<u5c::sync::FetchBlockResponse>, Status> {
         let message = request.into_inner();
 
-        let out: Vec<_> = message
-            .r#ref
-            .iter()
-            .map(|br| {
-                self.domain
-                    .archive()
-                    .get_block_by_slot(&br.slot)
-                    .map_err(|_| Status::internal("Failed to query chain service."))?
-                    .map(|body| raw_to_anychain(&self.mapper, &body))
-                    .ok_or(Status::not_found(format!("Failed to find block: {br:?}")))
-            })
-            .collect::<Result<Vec<u5c::sync::AnyChainBlock>, Status>>()?;
+        let out: Vec<_> = {
+            let store = self.domain.archive();
+
+            let lookup = |br: &u5c::sync::BlockRef| -> Result<BlockBody, Status> {
+                if !br.hash.is_empty() {
+                    if let Some(body) = store
+                        .get_block_by_hash(&br.hash)
+                        .map_err(|_| Status::internal("Failed to query chain service."))?
+                    {
+                        return Ok(body);
+                    }
+                }
+
+                if br.height != 0 {
+                    if let Some(body) = store
+                        .get_block_by_number(&br.height)
+                        .map_err(|_| Status::internal("Failed to query chain service."))?
+                    {
+                        return Ok(body);
+                    }
+                }
+
+                if br.slot != 0 {
+                    if let Some(body) = store
+                        .get_block_by_slot(&br.slot)
+                        .map_err(|_| Status::internal("Failed to query chain service."))?
+                    {
+                        return Ok(body);
+                    }
+                }
+
+                Err(Status::not_found(format!("Failed to find block: {br:?}")))
+            };
+
+            message
+                .r#ref
+                .iter()
+                .map(|br| lookup(br).map(|body| raw_to_anychain(&self.mapper, &body)))
+                .collect::<Result<Vec<u5c::sync::AnyChainBlock>, Status>>()?
+        };
 
         let response = u5c::sync::FetchBlockResponse { block: out };
 
