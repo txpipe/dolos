@@ -2,28 +2,43 @@
 
 All notable changes to this project will be documented in this file.
 
-## [1.0.0-rc.4] - 2025-12-18
+## [1.0.0-rc.5] - 2026-01-07
 
 ### 🚀 Features
 
 - Introduce mempool-aware utxo store
+- *(trp)* Update tx3 framework to v0.14 (#824)
 
 ### 🐛 Bug Fixes
 
-- Apply pending refactors to windows code
 - Remove stage timeout (#811)
 - Use correct condition for notifying tip events (#812)
 - *(cardano)* Drop delegators for retiring dreps (#817)
 - *(cardano)* Avoid dropping delegators on retired pools (#818)
 - *(cardano)* Improve speed of RUPD work log (#819)
+- *(cardano)* Handle pool re-registrations (#822)
+
+### 🚜 Refactor
+
+- *(trp)* Remove dependency on tx3-sdk (#816)
 
 ### 🔧 Continuous Integration
 
 - Include adhoc branches on docker builds
+- Remove x86 apple binary build
+
+### 🧪 Testing
+
+- *(trp)* Use tx3 sdk just for testing (#821)
 
 ### ⚙️ Miscellaneous Tasks
 
 - Fix lint warnings (#820)
+- Update tx3 deps to v0.14.2
+
+### Release
+
+- V1.0.0-rc.4
 
 ## [1.0.0-rc.3] - 2025-12-04
 
@@ -41,6 +56,7 @@ All notable changes to this project will be documented in this file.
 - Honor until-tip sync option (#545)
 - *(cardano)* Burn fees for Byron epoch pots (#804)
 - *(cardano)* Track MIRs as part of epoch rewards (#806)
+- Apply pending refactors to windows code
 
 ### 🚜 Refactor
 
