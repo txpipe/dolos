@@ -8,6 +8,7 @@ use crate::prelude::*;
 
 mod chainsync;
 mod statequery;
+mod statequery_utils;
 
 // TODO: fix tests
 //#[cfg(test)]
