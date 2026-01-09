@@ -96,6 +96,7 @@ impl<'a> IntoModel<AccountContent> for AccountModelBuilder<'a> {
         let pool_id = self
             .account_state
             .delegated_pool_at(current_epoch)
+            .or(self.account_state.retired_pool.as_ref())
             .map(bech32_pool)
             .transpose()?;
 
