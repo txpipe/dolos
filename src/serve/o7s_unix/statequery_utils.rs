@@ -1,12 +1,28 @@
-use dolos_cardano::{load_effective_pparams, EraSummary as DolosEraSummary};
+use dolos_cardano::{
+    load_effective_pparams, EraSummary as DolosEraSummary, FixedNamespace as _, PoolState,
+};
 use dolos_core::StateStore;
-use pallas::codec::minicbor::{self, Encoder};
-use pallas::codec::utils::{AnyCbor, AnyUInt, KeyValuePairs};
+use pallas::codec::minicbor::{self, Decode, Encode, Encoder};
+use pallas::codec::utils::{AnyCbor, AnyUInt, Bytes, KeyValuePairs, Nullable};
 use pallas::ledger::traverse::{MultiEraOutput, OriginalHash};
 use pallas::network::miniprotocols::localstate::queries_v16 as q16;
+use pallas::network::miniprotocols::localtxsubmission::SMaybe;
+use std::collections::{BTreeMap, BTreeSet};
 use tracing::debug;
 
 use crate::prelude::*;
+
+#[derive(Debug, Encode, Decode, PartialEq, Clone)]
+pub struct LocalPState {
+    #[n(0)]
+    stake_pool_params: BTreeMap<Bytes, q16::PoolParams>,
+    #[n(1)]
+    future_stake_pool_params: BTreeMap<Bytes, q16::PoolParams>,
+    #[n(2)]
+    retiring: BTreeMap<Bytes, u32>,
+    #[n(3)]
+    deposits: BTreeMap<Bytes, q16::Coin>,
+}
 
 pub struct EraHistoryResponse<'a> {
     pub eras: &'a [DolosEraSummary],
@@ -353,4 +369,131 @@ pub fn build_utxo_by_address_response<D: Domain>(
     debug!(num_utxos = utxo_pairs.len(), "returning utxos");
     let response: KeyValuePairs<q16::UTxO, q16::TransactionOutput> = KeyValuePairs::Def(utxo_pairs);
     Ok(AnyCbor::from_encode((response,)))
+}
+
+fn convert_pool_params(params: &dolos_cardano::PoolParams) -> q16::PoolParams {
+    let relays: Vec<q16::Relay> = params
+        .relays
+        .iter()
+        .map(|r| match r {
+            pallas::ledger::primitives::Relay::SingleHostAddr(port, ipv4, ipv6) => {
+                q16::Relay::SingleHostAddr(
+                    port.clone().into(),
+                    ipv4.clone().into(),
+                    ipv6.clone().into(),
+                )
+            }
+            pallas::ledger::primitives::Relay::SingleHostName(port, dns) => {
+                q16::Relay::SingleHostName(port.clone().into(), dns.clone())
+            }
+            pallas::ledger::primitives::Relay::MultiHostName(dns) => {
+                q16::Relay::MultiHostName(dns.clone())
+            }
+        })
+        .collect();
+
+    let pool_metadata: Nullable<q16::PoolMetadata> = match &params.pool_metadata {
+        Some(metadata) => Nullable::Some(q16::PoolMetadata {
+            url: metadata.url.clone(),
+            hash: metadata.hash.to_vec().into(),
+        }),
+        None => Nullable::Null,
+    };
+
+    q16::PoolParams {
+        operator: params.vrf_keyhash.to_vec().into(),
+        vrf_keyhash: params.vrf_keyhash.to_vec().into(),
+        pledge: AnyUInt::U64(params.pledge),
+        cost: AnyUInt::U64(params.cost),
+        margin: q16::UnitInterval {
+            numerator: params.margin.numerator,
+            denominator: params.margin.denominator,
+        },
+        reward_account: params.reward_account.to_vec().into(),
+        pool_owners: BTreeSet::from_iter(
+            params
+                .pool_owners
+                .iter()
+                .map(|h| Bytes::from(h.to_vec()))
+                .collect::<Vec<_>>(),
+        )
+        .into(),
+        relays,
+        pool_metadata,
+    }
+}
+
+pub fn build_pool_state_response<D: Domain>(
+    domain: &D,
+    pools_filter: &SMaybe<q16::Pools>,
+) -> Result<AnyCbor, Error> {
+    let state = domain.state();
+    let pools_iter = state
+        .iter_entities_typed::<PoolState>(PoolState::NS, None)
+        .map_err(|e| Error::server(format!("failed to iterate pools: {}", e)))?;
+
+    // Extract the filter set if provided
+    let filter_set: Option<BTreeSet<Vec<u8>>> = match pools_filter {
+        SMaybe::Some(pools) => {
+            // pools is a TagWrap<BTreeSet<Bytes>, 258>, access inner via .0
+            let set: BTreeSet<Vec<u8>> = pools.0.iter().map(|p| p.to_vec()).collect();
+            Some(set)
+        }
+        SMaybe::None => None,
+    };
+
+    let mut stake_pool_params: BTreeMap<Bytes, q16::PoolParams> = BTreeMap::new();
+    let mut future_stake_pool_params: BTreeMap<Bytes, q16::PoolParams> = BTreeMap::new();
+    let mut retiring: BTreeMap<Bytes, u32> = BTreeMap::new();
+    let mut deposits: BTreeMap<Bytes, q16::Coin> = BTreeMap::new();
+
+    for record in pools_iter {
+        let (_, pool) = record.map_err(|e| Error::server(format!("failed to read pool: {}", e)))?;
+
+        let pool_id_bytes = pool.operator.to_vec();
+        if let Some(ref filter) = filter_set {
+            if !filter.contains(&pool_id_bytes) {
+                continue;
+            }
+        }
+
+        let pool_id: Bytes = pool_id_bytes.into();
+        let live_snapshot = pool.snapshot.unwrap_live();
+
+        if live_snapshot.is_retired {
+            continue;
+        }
+
+        stake_pool_params.insert(pool_id.clone(), convert_pool_params(&live_snapshot.params));
+
+        // Add future params if scheduled
+        if let Some(next_snapshot) = pool.snapshot.next() {
+            future_stake_pool_params
+                .insert(pool_id.clone(), convert_pool_params(&next_snapshot.params));
+        }
+
+        // Add retiring epoch if pool is retiring
+        if let Some(retiring_epoch) = pool.retiring_epoch {
+            retiring.insert(pool_id.clone(), retiring_epoch as u32);
+        }
+
+        // Add deposit
+        deposits.insert(pool_id, AnyUInt::U64(pool.deposit));
+    }
+
+    debug!(
+        num_pools = stake_pool_params.len(),
+        num_future = future_stake_pool_params.len(),
+        num_retiring = retiring.len(),
+        "returning pool state"
+    );
+
+    let pstate = LocalPState {
+        stake_pool_params,
+        future_stake_pool_params,
+        retiring,
+        deposits,
+    };
+
+    Ok(AnyCbor::from_encode((pstate,)))
 }
