@@ -28,24 +28,37 @@ impl<'a, C> minicbor::Encode<C> for EraHistoryResponse<'a> {
 
             // Start Bound
             encoder.array(3)?;
-            let start_relative_time = era.start.timestamp.saturating_sub(self.system_start);
-            encoder.u64(start_relative_time)?;
+            let start_relative_time = era.start.timestamp.saturating_sub(self.system_start) as u128;
+            let start_relative_picos = start_relative_time
+                .saturating_mul(1_000_000_000_000u128)
+                .min(u64::MAX as u128) as u64;
+            encoder.u64(start_relative_picos)?;
             encoder.u64(era.start.slot)?;
             encoder.u64(era.start.epoch)?;
 
             // EraEnd
-            match &era.end {
+            let era_is_open_ended = match &era.end {
                 Some(end) => {
-                    encoder.array(3)?;
-                    let end_relative_time = end.timestamp.saturating_sub(self.system_start);
-                    encoder.u64(end_relative_time)?;
-                    encoder.u64(end.slot)?;
-                    encoder.u64(end.epoch)?;
+                    let end_relative_time = end.timestamp.saturating_sub(self.system_start) as u128;
+                    let end_relative_picos =
+                        end_relative_time.saturating_mul(1_000_000_000_000u128);
+                    // If the time would overflow u64, treat this era as open-ended
+                    if end_relative_picos > u64::MAX as u128 {
+                        encoder.null()?;
+                        true
+                    } else {
+                        encoder.array(3)?;
+                        encoder.u64(end_relative_picos as u64)?;
+                        encoder.u64(end.slot)?;
+                        encoder.u64(end.epoch)?;
+                        false
+                    }
                 }
                 None => {
                     encoder.null()?;
+                    true
                 }
-            }
+            };
 
             // EraParams
             encoder.array(4)?;
@@ -55,7 +68,7 @@ impl<'a, C> minicbor::Encode<C> for EraHistoryResponse<'a> {
             let safe_from_tip = self.security_param * 2;
 
             // SafeZone
-            if era.end.is_none() {
+            if era_is_open_ended {
                 // UnsafeIndefiniteSafeZone: [1, 1]
                 encoder.array(1)?;
                 encoder.u8(1)?;
@@ -281,13 +294,14 @@ impl<D: Domain> Session<D> {
 
                 let edge = chain_summary.edge();
                 let era_index = match edge.protocol {
-                    0..=1 => 0, // Byron
-                    2 => 1,     // Shelley
-                    3 => 2,     // Allegra
-                    4 => 3,     // Mary
-                    5..=6 => 4, // Alonzo
-                    7 => 5,     // Babbage
-                    _ => 6,     // Conway
+                    0..=1 => 0,  // Byron
+                    2 => 1,      // Shelley
+                    3 => 2,      // Allegra
+                    4 => 3,      // Mary
+                    5..=6 => 4,  // Alonzo
+                    7..=8 => 5,  // Babbage
+                    9..=10 => 6, // Conway
+                    _ => 6,      // Unknown/future versions default to Conway
                 };
 
                 AnyCbor::from_encode(era_index as u16)
