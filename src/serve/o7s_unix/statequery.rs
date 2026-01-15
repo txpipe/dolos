@@ -63,7 +63,7 @@ impl<'a, C> minicbor::Encode<C> for EraHistoryResponse<'a> {
             // EraParams
             encoder.array(4)?;
             encoder.u64(era.epoch_length)?;
-            encoder.u64(era.slot_length * 1000)?;
+            encoder.u64(era.slot_length.saturating_mul(1000))?;
 
             let safe_from_tip = self.security_param * 2;
 
@@ -433,11 +433,9 @@ impl<D: Domain> Session<D> {
                 let number = if let Some((_, raw)) =
                     self.domain.archive().get_tip().map_err(Error::server)?
                 {
-                    if let Ok(block) = MultiEraBlock::decode(&raw) {
-                        block.number()
-                    } else {
-                        0
-                    }
+                    let block = MultiEraBlock::decode(&raw)
+                        .map_err(|e| Error::server(format!("failed to decode tip block: {}", e)))?;
+                    block.number()
                 } else {
                     0
                 };
