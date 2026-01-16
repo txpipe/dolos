@@ -153,10 +153,6 @@ impl<D: Domain> Session<D> {
             ))) => {
                 info!(?era, "GetCurrentPParams query");
                 let pparams = build_protocol_params(&self.domain)?;
-                dbg!(pparams.clone());
-                let a = pparams.encode_fragment().unwrap();
-                dbg!(hex::encode(&a));
-                dbg!(hex::encode(AnyCbor::from_encode((&pparams,)).raw_bytes()));
                 AnyCbor::from_encode((pparams,))
             }
             Ok(q16::Request::GetSystemStart) => {
