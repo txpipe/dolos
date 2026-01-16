@@ -8,10 +8,10 @@ use tracing::debug;
 
 use crate::prelude::*;
 
-struct EraHistoryResponse<'a> {
-    eras: &'a [DolosEraSummary],
-    system_start: u64,
-    security_param: u64,
+pub struct EraHistoryResponse<'a> {
+    pub eras: &'a [DolosEraSummary],
+    pub system_start: u64,
+    pub security_param: u64,
 }
 
 impl<'a, C> minicbor::Encode<C> for EraHistoryResponse<'a> {
