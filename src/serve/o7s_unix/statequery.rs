@@ -2,7 +2,6 @@ use chrono::{Datelike, Timelike};
 use dolos_cardano::{load_era_summary, EraSummary as DolosEraSummary};
 use dolos_core::StateStore;
 use pallas::codec::utils::AnyCbor;
-use pallas::ledger::primitives::Fragment;
 use pallas::ledger::traverse::MultiEraBlock;
 
 use pallas::codec::minicbor;
