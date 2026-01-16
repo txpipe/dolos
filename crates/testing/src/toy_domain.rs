@@ -227,4 +227,11 @@ impl pallas::interop::utxorpc::LedgerContext for ToyDomain {
     fn get_slot_timestamp(&self, _slot: u64) -> Option<u64> {
         None
     }
+
+    fn get_historical_utxos(
+        &self,
+        refs: &[pallas::interop::utxorpc::TxoRef],
+    ) -> Option<pallas::interop::utxorpc::UtxoMap> {
+        None
+    }
 }
