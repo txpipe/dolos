@@ -4,7 +4,7 @@ use pallas::interop::utxorpc::{spec as u5c, LedgerContext};
 use pallas::ledger::traverse::{MultiEraBlock, MultiEraOutput};
 use std::collections::HashSet;
 use tonic::{Request, Response, Status};
-use tracing::info;
+use tracing::{info, warn};
 
 use super::masking::apply_mask;
 use crate::prelude::*;
@@ -205,9 +205,52 @@ fn into_u5c_utxo<S: Domain + LedgerContext>(
     txo: &TxoRef,
     body: &EraCbor,
     mapper: &interop::Mapper<S>,
-) -> Result<u5c::query::AnyUtxoData, pallas::codec::minicbor::decode::Error> {
-    let parsed = MultiEraOutput::try_from(body)?;
-    let parsed = mapper.map_tx_output(&parsed, None);
+    state: &S::State,
+) -> Result<u5c::query::AnyUtxoData, Box<dyn std::error::Error>> {
+    use pallas::ledger::primitives::conway::DatumOption;
+
+    let parsed_output = MultiEraOutput::try_from(body)?;
+    let mut parsed = mapper.map_tx_output(&parsed_output, None);
+
+    // If the output has a datum hash, try to fetch the datum value from storage
+    if let Some(DatumOption::Hash(datum_hash)) = parsed_output.datum() {
+        match StateStore::get_datum(state, &datum_hash) {
+            Ok(Some(datum_bytes)) => {
+                // Decode the datum and update the parsed output
+                match pallas::codec::minicbor::decode::<pallas::ledger::primitives::conway::PlutusData>(&datum_bytes) {
+                    Ok(plutus_data) => {
+                        // Update the datum field with both hash and payload
+                        parsed.datum = Some(u5c::cardano::Datum {
+                            hash: datum_hash.to_vec().into(),
+                            payload: Some(mapper.map_plutus_datum(&plutus_data)),
+                            original_cbor: datum_bytes.into(),
+                        });
+                    }
+                    Err(e) => {
+                        warn!(
+                            datum_hash = hex::encode(datum_hash),
+                            error = %e,
+                            "Failed to decode datum value from storage"
+                        );
+                    }
+                }
+            }
+            Ok(None) => {
+                warn!(
+                    datum_hash = hex::encode(datum_hash),
+                    txo_ref = format!("{}#{}", hex::encode(txo.0), txo.1),
+                    "Datum value not found in storage for UTXO with datum hash"
+                );
+            }
+            Err(e) => {
+                warn!(
+                    datum_hash = hex::encode(datum_hash),
+                    error = %e,
+                    "Error querying datum storage"
+                );
+            }
+        }
+    }
 
     Ok(u5c::query::AnyUtxoData {
         txo_ref: Some(u5c::query::TxoRef {
@@ -230,7 +273,7 @@ where
     ) -> Result<Response<u5c::query::ReadParamsResponse>, Status> {
         let message = request.into_inner();
 
-        info!("received new grpc query");
+        info!("received new grpc query - read_params");
 
         let tip = self
             .domain
@@ -268,7 +311,7 @@ where
     ) -> Result<Response<u5c::query::ReadDataResponse>, Status> {
         let _message = request.into_inner();
 
-        info!("received new grpc query");
+        info!("received new grpc query - read_data");
 
         todo!()
     }
@@ -279,7 +322,7 @@ where
     ) -> Result<Response<u5c::query::ReadUtxosResponse>, Status> {
         let message = request.into_inner();
 
-        info!("received new grpc query");
+        info!("received new grpc query - read_utxos");
 
         let keys: Vec<_> = message
             .keys
@@ -292,7 +335,7 @@ where
 
         let items: Vec<_> = utxos
             .iter()
-            .map(|(k, v)| into_u5c_utxo(k, v, &self.mapper))
+            .map(|(k, v)| into_u5c_utxo(k, v, &self.mapper, self.domain.state()))
             .try_collect()
             .map_err(|e| Status::internal(e.to_string()))?;
 
@@ -316,7 +359,7 @@ where
     ) -> Result<Response<u5c::query::SearchUtxosResponse>, Status> {
         let message = request.into_inner();
 
-        info!("received new grpc query");
+        info!("received new grpc query - search_utxos");
 
         let set = match message.predicate {
             Some(x) => match x.r#match {
@@ -339,7 +382,7 @@ where
 
         let items: Vec<_> = utxos
             .iter()
-            .map(|(k, v)| into_u5c_utxo(k, v, &self.mapper))
+            .map(|(k, v)| into_u5c_utxo(k, v, &self.mapper, self.domain.state()))
             .try_collect()
             .map_err(|e| Status::internal(e.to_string()))?;
 
@@ -364,7 +407,7 @@ where
     ) -> Result<Response<u5c::query::ReadTxResponse>, Status> {
         let message = request.into_inner();
 
-        info!("received new grpc query");
+        info!("received new grpc query - read_tx");
 
         let tx_hash = message.hash;
 
@@ -422,7 +465,7 @@ where
     ) -> Result<Response<u5c::query::ReadGenesisResponse>, Status> {
         let _message = request.into_inner();
 
-        info!("received new grpc query");
+        info!("received new grpc query - read_genesis");
 
         todo!()
     }
@@ -433,7 +476,7 @@ where
     ) -> Result<Response<u5c::query::ReadEraSummaryResponse>, Status> {
         let _message = request.into_inner();
 
-        info!("received new grpc query");
+        info!("received new grpc query - read_era_summary");
 
         todo!()
     }

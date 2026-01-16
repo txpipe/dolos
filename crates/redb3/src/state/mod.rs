@@ -4,6 +4,7 @@ use dolos_core::{
     ChainPoint, EntityKey, EntityValue, Namespace, StateError, StateSchema, TxoRef, UtxoMap,
     UtxoSet,
 };
+use pallas::crypto::hash::Hash;
 
 use redb::{
     Database, Durability, ReadTransaction, ReadableDatabase, TableDefinition, WriteTransaction,
@@ -130,6 +131,7 @@ impl StateStore {
 
         // TODO: refactor into entities model
         utxoset::UtxosTable::initialize(&wx)?;
+        utxoset::DatumsTable::initialize(&wx)?;
         utxoset::FilterIndexes::initialize(&wx)?;
 
         wx.commit()?;
@@ -352,6 +354,13 @@ impl dolos_core::StateStore for StateStore {
     fn get_utxo_by_asset(&self, asset: &[u8]) -> Result<UtxoSet, StateError> {
         let rx = self.db().begin_read().map_err(Error::from)?;
         let out = utxoset::FilterIndexes::get_by_asset(&rx, asset)?;
+
+        Ok(out)
+    }
+
+    fn get_datum(&self, datum_hash: &Hash<32>) -> Result<Option<Vec<u8>>, StateError> {
+        let rx = self.db().begin_read().map_err(Error::from)?;
+        let out = utxoset::DatumsTable::get(&rx, datum_hash)?;
 
         Ok(out)
     }
