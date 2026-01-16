@@ -218,12 +218,12 @@ impl<C: RewardsContext> RewardMap<C> {
 
         for reward in self.pending.values() {
             for (pool, value, as_leader) in reward.into_vec() {
-                let (total_rewards, operator_share) = rewards.entry(pool).or_insert((0, 0));
+                let (total_rewards, operator_share) = rewards.entry(pool).or_insert((0u64, 0u64));
 
-                *total_rewards = add!(*total_rewards as u64, value);
+                *total_rewards = add!(*total_rewards, value);
 
                 if as_leader {
-                    *operator_share = add!(*operator_share as u64, value);
+                    *operator_share = add!(*operator_share, value);
                 }
             }
         }

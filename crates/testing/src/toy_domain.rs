@@ -230,7 +230,7 @@ impl pallas::interop::utxorpc::LedgerContext for ToyDomain {
 
     fn get_historical_utxos(
         &self,
-        refs: &[pallas::interop::utxorpc::TxoRef],
+        _refs: &[pallas::interop::utxorpc::TxoRef],
     ) -> Option<pallas::interop::utxorpc::UtxoMap> {
         None
     }

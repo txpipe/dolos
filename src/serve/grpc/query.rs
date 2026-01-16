@@ -217,7 +217,10 @@ fn into_u5c_utxo<S: Domain + LedgerContext>(
         match StateStore::get_datum(state, &datum_hash) {
             Ok(Some(datum_bytes)) => {
                 // Decode the datum and update the parsed output
-                match pallas::codec::minicbor::decode::<pallas::ledger::primitives::conway::PlutusData>(&datum_bytes) {
+                match pallas::codec::minicbor::decode::<
+                    pallas::ledger::primitives::conway::PlutusData,
+                >(&datum_bytes)
+                {
                     Ok(plutus_data) => {
                         // Update the datum field with both hash and payload
                         parsed.datum = Some(u5c::cardano::Datum {

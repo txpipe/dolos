@@ -1,9 +1,9 @@
 use dolos_core::config::CardanoConfig;
+use dolos_core::*;
+use pallas::ledger::primitives::conway::DatumOption;
 use pallas::ledger::traverse::{MultiEraBlock, MultiEraOutput, MultiEraTx, OriginalHash};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use pallas::ledger::primitives::conway::DatumOption;
-use dolos_core::*;
 
 use crate::owned::OwnedMultiEraOutput;
 

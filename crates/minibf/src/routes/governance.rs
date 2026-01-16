@@ -86,14 +86,14 @@ impl<'a> DrepModelBuilder<'a> {
         if self.is_special_case() {
             return false;
         }
-        
+
         let (current_epoch, _) = self.chain.slot_epoch(self.tip);
         match (self.state.initial_slot, self.state.unregistered_at) {
             (Some(registered), Some(unregistered)) => {
                 registered > unregistered || self.chain.slot_epoch(unregistered).0 <= current_epoch
-            },
+            }
             (Some(_), None) => false,
-            _ => false
+            _ => false,
         }
     }
 
@@ -103,7 +103,10 @@ impl<'a> DrepModelBuilder<'a> {
         }
 
         let (current_epoch, _) = self.chain.slot_epoch(self.tip);
-        self.state.unregistered_at.map(|x| self.chain.slot_epoch(x).0 > current_epoch).unwrap_or(false)
+        self.state
+            .unregistered_at
+            .map(|x| self.chain.slot_epoch(x).0 > current_epoch)
+            .unwrap_or(false)
     }
 }
 

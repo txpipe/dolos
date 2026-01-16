@@ -1,8 +1,8 @@
 use std::{collections::HashMap, sync::Arc};
 
 use dolos_core::{
-    ArchiveStore as _, ChainLogic, ChainPoint, Domain, DomainError,
-    EntityDelta as _, StateStore, StateWriter as _, TipEvent, WalStore,
+    ArchiveStore as _, ChainLogic, ChainPoint, Domain, DomainError, EntityDelta as _, StateStore,
+    StateWriter as _, TipEvent, WalStore,
 };
 use tracing::info;
 
