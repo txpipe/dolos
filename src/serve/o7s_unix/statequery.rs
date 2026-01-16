@@ -400,8 +400,49 @@ impl<D: Domain> Session<D> {
         Ok(())
     }
 
+    /// Decode cardano-cli tagged query format.
+    /// cardano-cli wraps queries like: [0, [0, [era, [era, tag(258), addresses]]]]
+    fn decode_cardano_cli_tagged_query(raw_bytes: &[u8]) -> Result<q16::Request, ()> {
+        // Look for tag marker (0xd9 = tag with 2-byte value) within array structure
+        if raw_bytes.len() >= 10 && raw_bytes[0] == 0x82 {
+            if let Some(tag_pos) = raw_bytes.iter().position(|&b| b == 0xd9) {
+                if tag_pos + 3 < raw_bytes.len() {
+                    // Extract era from position 5 (the first era byte in the structure)
+                    let era = raw_bytes.get(5).ok_or(())?.to_owned() as u16;
+
+                    let after_tag = &raw_bytes[tag_pos + 3..];
+                    if let Ok(addrs) = minicbor::decode::<q16::Addrs>(after_tag) {
+                        return Ok(q16::Request::LedgerQuery(q16::LedgerQuery::BlockQuery(
+                            era,
+                            q16::BlockQuery::GetUTxOByAddress(addrs),
+                        )));
+                    }
+                }
+            }
+        }
+        Err(())
+    }
+
+    fn decode_query_request(query: &AnyCbor) -> Result<q16::Request, minicbor::decode::Error> {
+        query.clone().into_decode().or_else(|first_err| {
+            let raw_bytes: &[u8] = query.as_ref();
+
+            let decoded = if let Ok(inner) = minicbor::decode::<Vec<u8>>(raw_bytes) {
+                minicbor::decode::<q16::Request>(&inner).ok().map(|req| {
+                    debug!("decoded query from byte string wrapper");
+                    req
+                })
+            } else {
+                None
+            }
+            .or_else(|| Self::decode_cardano_cli_tagged_query(raw_bytes).ok());
+
+            decoded.ok_or(first_err)
+        })
+    }
+
     async fn handle_query(&mut self, query: AnyCbor) -> Result<(), Error> {
-        let req: Result<q16::Request, _> = query.clone().into_decode();
+        let req = Self::decode_query_request(&query);
 
         let response = match req {
             Ok(q16::Request::GetSystemStart) => {
