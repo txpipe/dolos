@@ -43,16 +43,19 @@ fn outputs_match_asset(
     asset_pattern: &u5c::cardano::AssetPattern,
     outputs: &[u5c::cardano::TxOutput],
 ) -> bool {
-    (asset_pattern.asset_name.is_empty() && asset_pattern.policy_id.is_empty())
-        || outputs.iter().any(|o| {
-            o.assets.iter().any(|ma| {
-                ma.policy_id.eq(&asset_pattern.policy_id)
-                    && ma
-                        .assets
-                        .iter()
-                        .any(|a| a.name.eq(&asset_pattern.asset_name))
-            })
+    outputs.iter().any(|o| {
+        o.assets.iter().any(|ma| {
+            if !asset_pattern.policy_id.is_empty() && asset_pattern.policy_id.ne(&ma.policy_id) {
+                return false;
+            }
+            if asset_pattern.asset_name.is_empty() {
+                return true;
+            }
+            ma.assets
+                .iter()
+                .any(|ma| asset_pattern.asset_name.eq(&ma.name))
         })
+    })
 }
 
 fn matches_output(
