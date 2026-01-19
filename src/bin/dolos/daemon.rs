@@ -42,9 +42,21 @@ pub async fn run(config: RootConfig, _args: &Args) -> miette::Result<()> {
         }
     }
 
-    sync.await.unwrap();
+    let stop_reason = sync.await.unwrap();
 
     warn!("shutdown complete");
 
-    Ok(())
+    // Return appropriate exit code based on why the pipeline stopped
+    let exit_code = match stop_reason {
+        crate::common::PipelineStopReason::Signal => 0,
+        crate::common::PipelineStopReason::QuotaReached => 1,
+        crate::common::PipelineStopReason::StopEpochReached => 0,
+        crate::common::PipelineStopReason::Other => 2,
+    };
+
+    if exit_code == 0 {
+        Ok(())
+    } else {
+        std::process::exit(exit_code);
+    }
 }
