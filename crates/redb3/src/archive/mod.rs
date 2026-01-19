@@ -51,6 +51,12 @@ impl From<::redb::DatabaseError> for RedbArchiveError {
     }
 }
 
+impl From<redb_extras::Error> for RedbArchiveError {
+    fn from(value: redb_extras::Error) -> Self {
+        Self(ArchiveError::InternalError(value.to_string()))
+    }
+}
+
 impl From<::redb::SetDurabilityError> for RedbArchiveError {
     fn from(value: ::redb::SetDurabilityError) -> Self {
         Self(ArchiveError::InternalError(value.to_string()))
