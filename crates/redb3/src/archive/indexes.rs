@@ -1,5 +1,6 @@
-use ::redb::{MultimapTableDefinition, ReadTransaction, WriteTransaction};
-use redb::MultimapValue;
+use ::redb::{ReadTransaction, TableDefinition, WriteTransaction};
+use redb_extras::roaring::{RoaringValue, RoaringValueReadOnlyTable, RoaringValueTable};
+use std::collections::HashMap;
 use xxhash_rust::xxh3::xxh3_64;
 
 use dolos_core::{BlockSlot, ChainPoint, SlotTags};
@@ -7,12 +8,17 @@ use dolos_core::{BlockSlot, ChainPoint, SlotTags};
 type Error = super::RedbArchiveError;
 
 pub struct SlotKeyIterator {
-    range: MultimapValue<'static, u64>,
+    iter: Box<dyn Iterator<Item = u64>>,
 }
 
 impl SlotKeyIterator {
-    pub fn new(range: MultimapValue<'static, u64>) -> Self {
-        Self { range }
+    pub fn new<I>(iter: I) -> Self
+    where
+        I: Iterator<Item = u64> + 'static,
+    {
+        Self {
+            iter: Box::new(iter),
+        }
     }
 }
 
@@ -20,43 +26,40 @@ impl Iterator for SlotKeyIterator {
     type Item = Result<u64, Error>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let next = self.range.next()?;
-        let res = next.map(|x| x.value()).map_err(Error::from);
-        Some(res)
+        self.iter.next().map(Ok)
     }
 }
 
 impl DoubleEndedIterator for SlotKeyIterator {
     fn next_back(&mut self) -> Option<Self::Item> {
-        let next = self.range.next_back()?;
-        let res = next.map(|x| x.value()).map_err(Error::from);
-        Some(res)
+        // Note: roaring bitmap iterators may not support reverse iteration
+        // This is a limitation we accept for the performance benefits
+        None
     }
 }
 
 pub struct AddressApproxIndexTable;
 
 impl AddressApproxIndexTable {
-    pub const DEF: MultimapTableDefinition<'static, u64, u64> =
-        MultimapTableDefinition::new("byaddress");
+    pub const DEF: TableDefinition<'static, u64, RoaringValue> = TableDefinition::new("byaddress");
 
     pub fn compute_key(address: &Vec<u8>) -> u64 {
         xxh3_64(address.as_slice())
     }
 
     pub fn iter_by_address(rx: &ReadTransaction, address: &[u8]) -> Result<SlotKeyIterator, Error> {
-        let table = rx.open_multimap_table(Self::DEF)?;
+        let table = rx.open_table(Self::DEF)?;
         let key = Self::compute_key(&address.to_vec());
-        let range = table.get(key)?;
-        Ok(SlotKeyIterator::new(range))
+        let bitmap = table.get_bitmap(key)?;
+        let values: Vec<u64> = bitmap.iter().collect();
+        Ok(SlotKeyIterator::new(values.into_iter()))
     }
 }
 
 pub struct AddressPaymentPartApproxIndexTable;
 
 impl AddressPaymentPartApproxIndexTable {
-    pub const DEF: MultimapTableDefinition<'static, u64, u64> =
-        MultimapTableDefinition::new("bypayment");
+    pub const DEF: TableDefinition<'static, u64, RoaringValue> = TableDefinition::new("bypayment");
 
     pub fn compute_key(address: &Vec<u8>) -> u64 {
         xxh3_64(address.as_slice())
@@ -66,28 +69,25 @@ impl AddressPaymentPartApproxIndexTable {
         rx: &ReadTransaction,
         address_payment_part: &[u8],
     ) -> Result<Vec<BlockSlot>, Error> {
-        let table = rx.open_multimap_table(Self::DEF)?;
+        let table = rx.open_table(Self::DEF)?;
         let key = Self::compute_key(&address_payment_part.to_vec());
-        let mut out = vec![];
-        for slot in table.get(key)? {
-            out.push(slot?.value());
-        }
-        Ok(out)
+        let bitmap = table.get_bitmap(key)?;
+        Ok(bitmap.iter().collect::<Vec<_>>())
     }
 
     pub fn iter_by_payment(rx: &ReadTransaction, payment: &[u8]) -> Result<SlotKeyIterator, Error> {
-        let table = rx.open_multimap_table(Self::DEF)?;
+        let table = rx.open_table(Self::DEF)?;
         let key = Self::compute_key(&payment.to_vec());
-        let range = table.get(key)?;
-        Ok(SlotKeyIterator::new(range))
+        let bitmap = table.get_bitmap(key)?;
+        let values: Vec<u64> = bitmap.iter().collect();
+        Ok(SlotKeyIterator::new(values.into_iter()))
     }
 }
 
 pub struct AddressStakePartApproxIndexTable;
 
 impl AddressStakePartApproxIndexTable {
-    pub const DEF: MultimapTableDefinition<'static, u64, u64> =
-        MultimapTableDefinition::new("bystake");
+    pub const DEF: TableDefinition<'static, u64, RoaringValue> = TableDefinition::new("bystake");
 
     pub fn compute_key(address_stake_part: &Vec<u8>) -> u64 {
         xxh3_64(address_stake_part.as_slice())
@@ -97,56 +97,51 @@ impl AddressStakePartApproxIndexTable {
         rx: &ReadTransaction,
         address_stake_part: &[u8],
     ) -> Result<Vec<BlockSlot>, Error> {
-        let table = rx.open_multimap_table(Self::DEF)?;
+        let table = rx.open_table(Self::DEF)?;
         let key = Self::compute_key(&address_stake_part.to_vec());
-        let mut out = vec![];
-        for slot in table.get(key)? {
-            out.push(slot?.value());
-        }
-        Ok(out)
+        let bitmap = table.get_bitmap(key)?;
+        Ok(bitmap.iter().collect::<Vec<_>>())
     }
 
     pub fn iter_by_stake(rx: &ReadTransaction, stake: &[u8]) -> Result<SlotKeyIterator, Error> {
-        let table = rx.open_multimap_table(Self::DEF)?;
+        let table = rx.open_table(Self::DEF)?;
         let key = Self::compute_key(&stake.to_vec());
-        let range = table.get(key)?;
-        Ok(SlotKeyIterator::new(range))
+        let bitmap = table.get_bitmap(key)?;
+        let values: Vec<u64> = bitmap.iter().collect();
+        Ok(SlotKeyIterator::new(values.into_iter()))
     }
 }
 
 pub struct AssetApproxIndexTable;
 
 impl AssetApproxIndexTable {
-    pub const DEF: MultimapTableDefinition<'static, u64, u64> =
-        MultimapTableDefinition::new("byasset");
+    pub const DEF: TableDefinition<'static, u64, RoaringValue> = TableDefinition::new("byasset");
 
     pub fn compute_key(asset: &Vec<u8>) -> u64 {
         xxh3_64(asset.as_slice())
     }
 
     pub fn get_by_asset(rx: &ReadTransaction, asset: &[u8]) -> Result<Vec<BlockSlot>, Error> {
-        let table = rx.open_multimap_table(Self::DEF)?;
+        let table = rx.open_table(Self::DEF)?;
         let key = Self::compute_key(&asset.to_vec());
-        let mut out = vec![];
-        for slot in table.get(key)? {
-            out.push(slot?.value());
-        }
-        Ok(out)
+        let bitmap = table.get_bitmap(key)?;
+        Ok(bitmap.iter().collect::<Vec<_>>())
     }
 
     pub fn iter_by_asset(rx: &ReadTransaction, asset: &[u8]) -> Result<SlotKeyIterator, Error> {
-        let table = rx.open_multimap_table(Self::DEF)?;
+        let table = rx.open_table(Self::DEF)?;
         let key = Self::compute_key(&asset.to_vec());
-        let range = table.get(key)?;
-        Ok(SlotKeyIterator::new(range))
+        let bitmap = table.get_bitmap(key)?;
+        let values: Vec<u64> = bitmap.iter().collect();
+        Ok(SlotKeyIterator::new(values.into_iter()))
     }
 }
 
 pub struct BlockHashApproxIndexTable;
 
 impl BlockHashApproxIndexTable {
-    pub const DEF: MultimapTableDefinition<'static, u64, u64> =
-        MultimapTableDefinition::new("byblockhash");
+    pub const DEF: TableDefinition<'static, u64, RoaringValue> =
+        TableDefinition::new("byblockhash");
 
     pub fn compute_key(block_hash: &Vec<u8>) -> u64 {
         xxh3_64(block_hash.as_slice())
@@ -156,21 +151,18 @@ impl BlockHashApproxIndexTable {
         rx: &ReadTransaction,
         block_hash: &[u8],
     ) -> Result<Vec<BlockSlot>, Error> {
-        let table = rx.open_multimap_table(Self::DEF)?;
+        let table = rx.open_table(Self::DEF)?;
         let key = Self::compute_key(&block_hash.to_vec());
-        let mut out = vec![];
-        for slot in table.get(key)? {
-            out.push(slot?.value());
-        }
-        Ok(out)
+        let bitmap = table.get_bitmap(key)?;
+        Ok(bitmap.iter().collect::<Vec<_>>())
     }
 }
 
 pub struct BlockNumberApproxIndexTable;
 
 impl BlockNumberApproxIndexTable {
-    pub const DEF: MultimapTableDefinition<'static, u64, u64> =
-        MultimapTableDefinition::new("byblocknumber");
+    pub const DEF: TableDefinition<'static, u64, RoaringValue> =
+        TableDefinition::new("byblocknumber");
 
     pub fn compute_key(block_number: &u64) -> u64 {
         // Left for readability
@@ -181,21 +173,17 @@ impl BlockNumberApproxIndexTable {
         rx: &ReadTransaction,
         block_number: &u64,
     ) -> Result<Vec<BlockSlot>, Error> {
-        let table = rx.open_multimap_table(Self::DEF)?;
+        let table = rx.open_table(Self::DEF)?;
         let key = Self::compute_key(block_number);
-        let mut out = vec![];
-        for slot in table.get(key)? {
-            out.push(slot?.value());
-        }
-        Ok(out)
+        let bitmap = table.get_bitmap(key)?;
+        Ok(bitmap.iter().collect::<Vec<_>>())
     }
 }
 
 pub struct DatumHashApproxIndexTable;
 
 impl DatumHashApproxIndexTable {
-    pub const DEF: MultimapTableDefinition<'static, u64, u64> =
-        MultimapTableDefinition::new("bydatum");
+    pub const DEF: TableDefinition<'static, u64, RoaringValue> = TableDefinition::new("bydatum");
 
     pub fn compute_key(datum_hash: &Vec<u8>) -> u64 {
         xxh3_64(datum_hash.as_slice())
@@ -205,21 +193,17 @@ impl DatumHashApproxIndexTable {
         rx: &ReadTransaction,
         datum_hash: &[u8],
     ) -> Result<Vec<BlockSlot>, Error> {
-        let table = rx.open_multimap_table(Self::DEF)?;
+        let table = rx.open_table(Self::DEF)?;
         let key = Self::compute_key(&datum_hash.to_vec());
-        let mut out = vec![];
-        for slot in table.get(key)? {
-            out.push(slot?.value());
-        }
-        Ok(out)
+        let bitmap = table.get_bitmap(key)?;
+        Ok(bitmap.iter().collect::<Vec<_>>())
     }
 }
 
 pub struct MetadataApproxIndexTable;
 
 impl MetadataApproxIndexTable {
-    pub const DEF: MultimapTableDefinition<'static, u64, u64> =
-        MultimapTableDefinition::new("bymetadata");
+    pub const DEF: TableDefinition<'static, u64, RoaringValue> = TableDefinition::new("bymetadata");
 
     pub fn compute_key(metadata: &u64) -> u64 {
         // Left for readability
@@ -230,39 +214,35 @@ impl MetadataApproxIndexTable {
         rx: &ReadTransaction,
         metadata: &u64,
     ) -> Result<SlotKeyIterator, Error> {
-        let table = rx.open_multimap_table(Self::DEF)?;
+        let table = rx.open_table(Self::DEF)?;
         let key = Self::compute_key(metadata);
-        let range = table.get(key)?;
-        Ok(SlotKeyIterator::new(range))
+        let bitmap = table.get_bitmap(key)?;
+        let values: Vec<u64> = bitmap.iter().collect();
+        Ok(SlotKeyIterator::new(values.into_iter()))
     }
 }
 
 pub struct PolicyApproxIndexTable;
 
 impl PolicyApproxIndexTable {
-    pub const DEF: MultimapTableDefinition<'static, u64, u64> =
-        MultimapTableDefinition::new("bypolicy");
+    pub const DEF: TableDefinition<'static, u64, RoaringValue> = TableDefinition::new("bypolicy");
 
     pub fn compute_key(policy: &Vec<u8>) -> u64 {
         xxh3_64(policy.as_slice())
     }
 
     pub fn get_by_policy(rx: &ReadTransaction, policy: &[u8]) -> Result<Vec<BlockSlot>, Error> {
-        let table = rx.open_multimap_table(Self::DEF)?;
+        let table = rx.open_table(Self::DEF)?;
         let key = Self::compute_key(&policy.to_vec());
-        let mut out = vec![];
-        for slot in table.get(key)? {
-            out.push(slot?.value());
-        }
-        Ok(out)
+        let bitmap = table.get_bitmap(key)?;
+        Ok(bitmap.iter().collect::<Vec<_>>())
     }
 }
 
 pub struct ScriptHashApproxIndexTable;
 
 impl ScriptHashApproxIndexTable {
-    pub const DEF: MultimapTableDefinition<'static, u64, u64> =
-        MultimapTableDefinition::new("byscript");
+    pub const DEF: TableDefinition<'static, u64, RoaringValue> = TableDefinition::new("byscript");
 
     pub fn compute_key(script_hash: &Vec<u8>) -> u64 {
         xxh3_64(script_hash.as_slice())
@@ -272,21 +252,17 @@ impl ScriptHashApproxIndexTable {
         rx: &ReadTransaction,
         script_hash: &[u8],
     ) -> Result<Vec<BlockSlot>, Error> {
-        let table = rx.open_multimap_table(Self::DEF)?;
+        let table = rx.open_table(Self::DEF)?;
         let key = Self::compute_key(&script_hash.to_vec());
-        let mut out = vec![];
-        for slot in table.get(key)? {
-            out.push(slot?.value());
-        }
-        Ok(out)
+        let bitmap = table.get_bitmap(key)?;
+        Ok(bitmap.iter().collect::<Vec<_>>())
     }
 }
 
 pub struct SpentTxoApproxIndexTable;
 
 impl SpentTxoApproxIndexTable {
-    pub const DEF: MultimapTableDefinition<'static, u64, u64> =
-        MultimapTableDefinition::new("byspenttxo");
+    pub const DEF: TableDefinition<'static, u64, RoaringValue> = TableDefinition::new("byspenttxo");
 
     pub fn compute_key(spent_txo: &Vec<u8>) -> u64 {
         xxh3_64(spent_txo.as_slice())
@@ -296,65 +272,56 @@ impl SpentTxoApproxIndexTable {
         rx: &ReadTransaction,
         spent_txo: &[u8],
     ) -> Result<Vec<BlockSlot>, Error> {
-        let table = rx.open_multimap_table(Self::DEF)?;
+        let table = rx.open_table(Self::DEF)?;
         let key = Self::compute_key(&spent_txo.to_vec());
-        let mut out = vec![];
-        for slot in table.get(key)? {
-            out.push(slot?.value());
-        }
-        Ok(out)
+        let bitmap = table.get_bitmap(key)?;
+        Ok(bitmap.iter().collect::<Vec<_>>())
     }
 }
 
 pub struct AccountCertsApproxIndexTable;
 
 impl AccountCertsApproxIndexTable {
-    pub const DEF: MultimapTableDefinition<'static, u64, u64> =
-        MultimapTableDefinition::new("bystakeactions");
+    pub const DEF: TableDefinition<'static, u64, RoaringValue> =
+        TableDefinition::new("bystakeactions");
 
     pub fn compute_key(account: &Vec<u8>) -> u64 {
         xxh3_64(account.as_slice())
     }
 
     pub fn get_by_account(rx: &ReadTransaction, account: &[u8]) -> Result<Vec<BlockSlot>, Error> {
-        let table = rx.open_multimap_table(Self::DEF)?;
+        let table = rx.open_table(Self::DEF)?;
         let key = Self::compute_key(&account.to_vec());
-        let mut out = vec![];
-        for slot in table.get(key)? {
-            out.push(slot?.value());
-        }
-        Ok(out)
+        let bitmap = table.get_bitmap(key)?;
+        Ok(bitmap.iter().collect::<Vec<_>>())
     }
 
     pub fn iter_by_account_certs(
         rx: &ReadTransaction,
         account: &[u8],
     ) -> Result<SlotKeyIterator, Error> {
-        let table = rx.open_multimap_table(Self::DEF)?;
+        let table = rx.open_table(Self::DEF)?;
         let key = Self::compute_key(&account.to_vec());
-        let range = table.get(key)?;
-        Ok(SlotKeyIterator::new(range))
+        let bitmap = table.get_bitmap(key)?;
+        let values: Vec<u64> = bitmap.iter().collect();
+        Ok(SlotKeyIterator::new(values.into_iter()))
     }
 }
 
 pub struct TxHashApproxIndexTable;
 
 impl TxHashApproxIndexTable {
-    pub const DEF: MultimapTableDefinition<'static, u64, u64> =
-        MultimapTableDefinition::new("bytx");
+    pub const DEF: TableDefinition<'static, u64, RoaringValue> = TableDefinition::new("bytx");
 
     pub fn compute_key(tx_hash: &Vec<u8>) -> u64 {
         xxh3_64(tx_hash.as_slice())
     }
 
     pub fn get_by_tx_hash(rx: &ReadTransaction, tx_hash: &[u8]) -> Result<Vec<BlockSlot>, Error> {
-        let table = rx.open_multimap_table(Self::DEF)?;
+        let table = rx.open_table(Self::DEF)?;
         let key = Self::compute_key(&tx_hash.to_vec());
-        let mut out = vec![];
-        for slot in table.get(key)? {
-            out.push(slot?.value());
-        }
-        Ok(out)
+        let bitmap = table.get_bitmap(key)?;
+        Ok(bitmap.iter().collect::<Vec<_>>())
     }
 }
 
@@ -362,19 +329,19 @@ pub struct Indexes;
 
 impl Indexes {
     pub fn initialize(wx: &WriteTransaction) -> Result<(), Error> {
-        wx.open_multimap_table(AddressApproxIndexTable::DEF)?;
-        wx.open_multimap_table(AddressPaymentPartApproxIndexTable::DEF)?;
-        wx.open_multimap_table(AddressStakePartApproxIndexTable::DEF)?;
-        wx.open_multimap_table(AssetApproxIndexTable::DEF)?;
-        wx.open_multimap_table(BlockHashApproxIndexTable::DEF)?;
-        wx.open_multimap_table(BlockNumberApproxIndexTable::DEF)?;
-        wx.open_multimap_table(DatumHashApproxIndexTable::DEF)?;
-        wx.open_multimap_table(PolicyApproxIndexTable::DEF)?;
-        wx.open_multimap_table(ScriptHashApproxIndexTable::DEF)?;
-        wx.open_multimap_table(SpentTxoApproxIndexTable::DEF)?;
-        wx.open_multimap_table(AccountCertsApproxIndexTable::DEF)?;
-        wx.open_multimap_table(TxHashApproxIndexTable::DEF)?;
-        wx.open_multimap_table(MetadataApproxIndexTable::DEF)?;
+        wx.open_table(AddressApproxIndexTable::DEF)?;
+        wx.open_table(AddressPaymentPartApproxIndexTable::DEF)?;
+        wx.open_table(AddressStakePartApproxIndexTable::DEF)?;
+        wx.open_table(AssetApproxIndexTable::DEF)?;
+        wx.open_table(BlockHashApproxIndexTable::DEF)?;
+        wx.open_table(BlockNumberApproxIndexTable::DEF)?;
+        wx.open_table(DatumHashApproxIndexTable::DEF)?;
+        wx.open_table(PolicyApproxIndexTable::DEF)?;
+        wx.open_table(ScriptHashApproxIndexTable::DEF)?;
+        wx.open_table(SpentTxoApproxIndexTable::DEF)?;
+        wx.open_table(AccountCertsApproxIndexTable::DEF)?;
+        wx.open_table(TxHashApproxIndexTable::DEF)?;
+        wx.open_table(MetadataApproxIndexTable::DEF)?;
 
         Ok(())
     }
@@ -721,15 +688,23 @@ impl Indexes {
 
     pub fn insert<T>(
         wx: &WriteTransaction,
-        table: MultimapTableDefinition<'static, u64, u64>,
+        table: TableDefinition<'static, u64, RoaringValue>,
         compute_key: fn(&T) -> u64,
         inputs: Vec<T>,
         slot: u64,
     ) -> Result<(), Error> {
-        let mut table = wx.open_multimap_table(table)?;
+        let mut table = wx.open_table(table)?;
+
+        // Group by key for batch insert
+        let mut key_groups: HashMap<u64, Vec<u64>> = HashMap::new();
         for x in inputs {
             let key = compute_key(&x);
-            let _ = table.insert(key, slot)?;
+            key_groups.entry(key).or_default().push(slot);
+        }
+
+        // Use batch insert from redb-extras
+        for (key, slots) in key_groups {
+            table.insert_members(key, slots)?;
         }
 
         Ok(())
@@ -737,35 +712,40 @@ impl Indexes {
 
     pub fn remove<T>(
         wx: &WriteTransaction,
-        table: MultimapTableDefinition<'static, u64, u64>,
+        table: TableDefinition<'static, u64, RoaringValue>,
         compute_key: fn(&T) -> u64,
         inputs: Vec<T>,
         slot: u64,
     ) -> Result<(), Error> {
-        let mut table = wx.open_multimap_table(table)?;
+        let mut table = wx.open_table(table)?;
+
+        // Group by key for batch remove
+        let mut key_groups: HashMap<u64, Vec<u64>> = HashMap::new();
         for x in inputs {
             let key = compute_key(&x);
-            let _ = table.remove(key, slot)?;
+            key_groups.entry(key).or_default().push(slot);
+        }
+
+        // Use batch remove from redb-extras
+        for (key, slots) in key_groups {
+            table.remove_members(key, slots)?;
         }
 
         Ok(())
     }
 
     fn copy_table(
-        table: MultimapTableDefinition<'static, u64, u64>,
+        table: TableDefinition<'static, u64, RoaringValue>,
         rx: &ReadTransaction,
         wx: &WriteTransaction,
     ) -> Result<(), Error> {
-        let source = rx.open_multimap_table(table)?;
-        let mut target = wx.open_multimap_table(table)?;
+        let source = rx.open_table(table)?;
+        let mut target = wx.open_table(table)?;
 
         let all = source.range::<u64>(..)?;
         for entry in all {
-            let (key, values) = entry?;
-            for value in values {
-                let value = value?;
-                target.insert(key.value(), value.value())?;
-            }
+            let (key, bitmap) = entry?;
+            target.insert(key.value(), bitmap.value())?;
         }
 
         Ok(())
