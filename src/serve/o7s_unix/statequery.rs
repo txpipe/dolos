@@ -2,9 +2,9 @@ use chrono::{Datelike, Timelike};
 use dolos_cardano::{load_era_summary, EraSummary as DolosEraSummary};
 use dolos_core::StateStore;
 use pallas::codec::utils::AnyCbor;
-use pallas::ledger::primitives::Fragment;
 use pallas::ledger::traverse::MultiEraBlock;
 
+use pallas::codec::minicbor;
 use pallas::network::miniprotocols::{localstate, localstate::queries_v16 as q16, Point as OPoint};
 use tracing::{debug, info, warn};
 
@@ -102,8 +102,48 @@ impl<D: Domain> Session<D> {
         Ok(())
     }
 
+    /// Decode cardano-cli tagged query format.
+    /// cardano-cli wraps queries like: [0, [0, [era, [era, tag(258), addresses]]]]
+    fn decode_cardano_cli_tagged_query(raw_bytes: &[u8]) -> Result<q16::Request, ()> {
+        // Look for tag marker (0xd9 = tag with 2-byte value) within array structure
+        if raw_bytes.len() >= 10 && raw_bytes[0] == 0x82 {
+            if let Some(tag_pos) = raw_bytes.iter().position(|&b| b == 0xd9) {
+                if tag_pos + 3 < raw_bytes.len() {
+                    // Extract era from position 5 (the first era byte in the structure)
+                    let era = raw_bytes.get(5).ok_or(())?.to_owned() as u16;
+
+                    let after_tag = &raw_bytes[tag_pos + 3..];
+                    if let Ok(addrs) = minicbor::decode::<q16::Addrs>(after_tag) {
+                        return Ok(q16::Request::LedgerQuery(q16::LedgerQuery::BlockQuery(
+                            era,
+                            q16::BlockQuery::GetUTxOByAddress(addrs),
+                        )));
+                    }
+                }
+            }
+        }
+        Err(())
+    }
+
+    fn decode_query_request(query: &AnyCbor) -> Result<q16::Request, minicbor::decode::Error> {
+        query.clone().into_decode().or_else(|first_err| {
+            let raw_bytes: &[u8] = query.as_ref();
+
+            let decoded = if let Ok(inner) = minicbor::decode::<Vec<u8>>(raw_bytes) {
+                minicbor::decode::<q16::Request>(&inner).ok().inspect(|_| {
+                    debug!("decoded query from byte string wrapper");
+                })
+            } else {
+                None
+            }
+            .or_else(|| Self::decode_cardano_cli_tagged_query(raw_bytes).ok());
+
+            decoded.ok_or(first_err)
+        })
+    }
+
     async fn handle_query(&mut self, query: AnyCbor) -> Result<(), Error> {
-        let req: Result<q16::Request, _> = query.clone().into_decode();
+        let req = Self::decode_query_request(&query);
 
         let response = match req {
             Ok(q16::Request::LedgerQuery(q16::LedgerQuery::BlockQuery(
@@ -112,10 +152,6 @@ impl<D: Domain> Session<D> {
             ))) => {
                 info!(?era, "GetCurrentPParams query");
                 let pparams = build_protocol_params(&self.domain)?;
-                dbg!(pparams.clone());
-                let a = pparams.encode_fragment().unwrap();
-                dbg!(hex::encode(&a));
-                dbg!(hex::encode(AnyCbor::from_encode((&pparams,)).raw_bytes()));
                 AnyCbor::from_encode((pparams,))
             }
             Ok(q16::Request::GetSystemStart) => {
@@ -147,11 +183,9 @@ impl<D: Domain> Session<D> {
                 let number = if let Some((_, raw)) =
                     self.domain.archive().get_tip().map_err(Error::server)?
                 {
-                    if let Ok(block) = MultiEraBlock::decode(&raw) {
-                        block.number()
-                    } else {
-                        0
-                    }
+                    let block = MultiEraBlock::decode(&raw)
+                        .map_err(|e| Error::server(format!("failed to decode tip block: {}", e)))?;
+                    block.number()
                 } else {
                     0
                 };
@@ -199,13 +233,14 @@ impl<D: Domain> Session<D> {
 
                 let edge = chain_summary.edge();
                 let era_index = match edge.protocol {
-                    0..=1 => 0, // Byron
-                    2 => 1,     // Shelley
-                    3 => 2,     // Allegra
-                    4 => 3,     // Mary
-                    5..=6 => 4, // Alonzo
-                    7 => 5,     // Babbage
-                    _ => 6,     // Conway
+                    0..=1 => 0,  // Byron
+                    2 => 1,      // Shelley
+                    3 => 2,      // Allegra
+                    4 => 3,      // Mary
+                    5..=6 => 4,  // Alonzo
+                    7..=8 => 5,  // Babbage
+                    9..=10 => 6, // Conway
+                    _ => 6,      // Unknown/future versions default to Conway
                 };
 
                 AnyCbor::from_encode(era_index as u16)
