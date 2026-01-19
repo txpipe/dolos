@@ -172,16 +172,16 @@ fn convert_output_to_q16(output: &MultiEraOutput) -> Result<q16::TransactionOutp
         q16::Value::Coin(lovelace)
     };
 
-    let inline_datum = output.datum().and_then(|d| match d {
-        DatumOption::Hash(h) => Some(q16::DatumOption::Hash(h)),
-        DatumOption::Data(data) => Some(q16::DatumOption::Data(pallas::codec::utils::CborWrap(
-            convert_plutus_data(&data.0),
-        ))),
+    let inline_datum = output.datum().map(|d| match d {
+        DatumOption::Hash(h) => q16::DatumOption::Hash(h),
+        DatumOption::Data(data) => {
+            q16::DatumOption::Data(pallas::codec::utils::CborWrap(convert_plutus_data(&data.0)))
+        }
     });
 
-    let datum_hash = output.datum().and_then(|d| match d {
-        DatumOption::Hash(h) => Some(h),
-        DatumOption::Data(data) => Some(data.original_hash()),
+    let datum_hash = output.datum().map(|d| match d {
+        DatumOption::Hash(h) => h,
+        DatumOption::Data(data) => data.original_hash(),
     });
 
     if output.era() >= pallas::ledger::traverse::Era::Alonzo {
@@ -390,7 +390,7 @@ pub fn build_protocol_params<D: Domain>(domain: &D) -> Result<q16::ProtocolParam
         pool_pledge_influence: pparams.pool_pledge_influence().map(|r| to_q16_rational(&r)),
         expansion_rate: pparams.expansion_rate().map(|r| to_q16_rational(&r)),
         treasury_growth_rate: pparams.treasury_growth_rate().map(|r| to_q16_rational(&r)),
-        protocol_version: pparams.protocol_version().map(|v| (v.0 as u64, v.1 as u64)),
+        protocol_version: pparams.protocol_version().map(|v| (v.0, v.1)),
         min_pool_cost: pparams.min_pool_cost().map(AnyUInt::U64),
         ada_per_utxo_byte: pparams.ada_per_utxo_byte().map(AnyUInt::U64),
         cost_models_for_script_languages: Some(to_q16_cost_models(
@@ -425,14 +425,10 @@ fn convert_pool_params(operator: &[u8], params: &dolos_cardano::PoolParams) -> q
         .iter()
         .map(|r| match r {
             pallas::ledger::primitives::Relay::SingleHostAddr(port, ipv4, ipv6) => {
-                q16::Relay::SingleHostAddr(
-                    port.clone().into(),
-                    ipv4.clone().into(),
-                    ipv6.clone().into(),
-                )
+                q16::Relay::SingleHostAddr((*port).into(), ipv4.clone().into(), ipv6.clone().into())
             }
             pallas::ledger::primitives::Relay::SingleHostName(port, dns) => {
-                q16::Relay::SingleHostName(port.clone().into(), dns.clone())
+                q16::Relay::SingleHostName((*port).into(), dns.clone())
             }
             pallas::ledger::primitives::Relay::MultiHostName(dns) => {
                 q16::Relay::MultiHostName(dns.clone())
@@ -505,7 +501,12 @@ pub fn build_pool_state_response<D: Domain>(
         }
 
         let pool_id: Bytes = pool_id_bytes.into();
-        let live_snapshot = pool.snapshot.unwrap_live();
+
+        let live_snapshot_opt = pool.snapshot.live();
+        let live_snapshot = match live_snapshot_opt {
+            Some(ls) => ls,
+            None => continue,
+        };
 
         if live_snapshot.is_retired {
             continue;
