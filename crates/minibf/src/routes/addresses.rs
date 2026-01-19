@@ -16,7 +16,7 @@ use pallas::ledger::{
 };
 
 use dolos_cardano::ChainSummary;
-use dolos_core::{ArchiveStore, Domain, EraCbor, StateStore, TxoRef};
+use dolos_core::{ArchiveStore, BlockSlot, Domain, EraCbor, StateStore, TxoRef};
 
 use crate::{
     error::Error,
@@ -55,15 +55,19 @@ fn refs_for_address<D: Domain>(
 fn blocks_for_address<A: ArchiveStore>(
     archive: &A,
     address: &str,
+    start_slot: BlockSlot,
+    end_slot: BlockSlot,
 ) -> Result<(A::SparseBlockIter, VKeyOrAddress), Error> {
     if address.starts_with("addr_vkh") {
         let (_, addr) = bech32::decode(address).expect("failed to parse");
 
         Ok((
-            archive.iter_blocks_with_payment(&addr).map_err(|err| {
-                dbg!(err);
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?,
+            archive
+                .iter_blocks_with_payment(&addr, start_slot, end_slot)
+                .map_err(|err| {
+                    dbg!(err);
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?,
             Either::Left(addr),
         ))
     } else {
@@ -74,22 +78,27 @@ fn blocks_for_address<A: ArchiveStore>(
             })?
             .to_vec();
         Ok((
-            archive.iter_blocks_with_address(&address).map_err(|err| {
-                dbg!(err);
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?,
+            archive
+                .iter_blocks_with_address(&address, start_slot, end_slot)
+                .map_err(|err| {
+                    dbg!(err);
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?,
             Either::Right(address),
         ))
     }
 }
 
 fn is_address_in_chain<D: Domain>(domain: &Facade<D>, address: &str) -> Result<bool, Error> {
+    let end_slot = domain.get_tip_slot()?;
+    let start_slot = 0;
+
     if address.starts_with("addr_vkh") {
         let (_, addr) = bech32::decode(address).expect("failed to parse");
 
         Ok(domain
             .archive()
-            .iter_blocks_with_payment(&addr)
+            .iter_blocks_with_payment(&addr, start_slot, end_slot)
             .map_err(|err| {
                 dbg!(err);
                 StatusCode::INTERNAL_SERVER_ERROR
@@ -103,7 +112,7 @@ fn is_address_in_chain<D: Domain>(domain: &Facade<D>, address: &str) -> Result<b
         })?;
         Ok(domain
             .archive()
-            .iter_blocks_with_address(&address.to_vec())
+            .iter_blocks_with_address(&address.to_vec(), start_slot, end_slot)
             .map_err(|err| {
                 dbg!(err);
                 StatusCode::INTERNAL_SERVER_ERROR
@@ -114,9 +123,12 @@ fn is_address_in_chain<D: Domain>(domain: &Facade<D>, address: &str) -> Result<b
 }
 
 fn is_asset_in_chain<D: Domain>(domain: &Facade<D>, asset: &[u8]) -> Result<bool, Error> {
+    let end_slot = domain.get_tip_slot()?;
+    let start_slot = 0;
+
     Ok(domain
         .archive()
-        .iter_blocks_with_asset(asset)
+        .iter_blocks_with_asset(asset, start_slot, end_slot)
         .map_err(|err| {
             dbg!(err);
             StatusCode::INTERNAL_SERVER_ERROR
@@ -330,8 +342,9 @@ pub async fn transactions<D: Domain>(
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<AddressTransactionsContentInner>>, Error> {
     let pagination = Pagination::try_from(params)?;
+    let end_slot = domain.get_tip_slot()?;
 
-    let (blocks, address) = blocks_for_address(domain.archive(), &address)?;
+    let (blocks, address) = blocks_for_address(domain.archive(), &address, 0, end_slot)?;
     let chain = domain
         .get_chain_summary()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -357,8 +370,9 @@ pub async fn txs<D: Domain>(
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<String>>, Error> {
     let pagination = Pagination::try_from(params)?;
+    let end_slot = domain.get_tip_slot()?;
 
-    let (blocks, address) = blocks_for_address(domain.archive(), &address)?;
+    let (blocks, address) = blocks_for_address(domain.archive(), &address, 0, end_slot)?;
     let chain = domain
         .get_chain_summary()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
