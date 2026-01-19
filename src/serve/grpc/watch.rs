@@ -154,6 +154,7 @@ fn block_to_txs<C: LedgerContext>(
     mapper: &interop::Mapper<C>,
     request: &u5c::watch::WatchTxRequest,
 ) -> Vec<u5c::watch::AnyChainTx> {
+    let bytes = block;
     let block = MultiEraBlock::decode(block).unwrap();
     let txs = block.txs();
 
@@ -167,8 +168,12 @@ fn block_to_txs<C: LedgerContext>(
         })
         .map(|x| u5c::watch::AnyChainTx {
             chain: Some(u5c::watch::any_chain_tx::Chain::Cardano(x)),
-            // TODO(p): should it be none?
-            block: None,
+            block: Some(u5c::watch::AnyChainBlock {
+                native_bytes: bytes.to_vec().into(),
+                chain: Some(u5c::watch::any_chain_block::Chain::Cardano(
+                    mapper.map_block(&block),
+                )),
+            }),
         })
         .collect()
 }
