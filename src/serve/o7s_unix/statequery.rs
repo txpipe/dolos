@@ -103,7 +103,7 @@ impl<D: Domain> Session<D> {
     }
 
     /// Decode cardano-cli tagged query format.
-    /// cardano-cli wraps queries like: [0, [0, [era, [era, tag(258), addresses]]]]
+    /// cardano-cli wraps queries like: [0, [0, [era, [era, tag(258), data]]]]
     fn decode_cardano_cli_tagged_query(raw_bytes: &[u8]) -> Result<q16::Request, ()> {
         // Look for tag marker (0xd9 = tag with 2-byte value) within array structure
         if raw_bytes.len() >= 10 && raw_bytes[0] == 0x82 {
@@ -285,11 +285,17 @@ impl<D: Domain> Session<D> {
             }
             Ok(q16::Request::LedgerQuery(q16::LedgerQuery::BlockQuery(
                 _era,
-                q16::BlockQuery::GetPoolState(ref pools),
-            ))) => {
-                info!("GetPoolState query");
-                build_pool_state_response(&self.domain, pools)?
-            }
+                q16::BlockQuery::GetCBOR(inner),
+            ))) => match inner.as_ref() {
+                q16::BlockQuery::GetPoolState(ref pools) => {
+                    info!("GetPoolState query");
+                    build_pool_state_response(&self.domain, pools)?
+                }
+                other => {
+                    warn!(?other, "unhandled GetCBOR variant");
+                    AnyCbor::from_encode(())
+                }
+            },
             Ok(req) => {
                 warn!(?req, "unhandled known query, returning null");
                 AnyCbor::from_encode(())

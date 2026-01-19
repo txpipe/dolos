@@ -3,7 +3,7 @@ use dolos_cardano::{
 };
 use dolos_core::StateStore;
 use pallas::codec::minicbor::{self, Decode, Encode, Encoder};
-use pallas::codec::utils::{AnyCbor, AnyUInt, Bytes, KeyValuePairs, Nullable};
+use pallas::codec::utils::{AnyCbor, AnyUInt, Bytes, KeyValuePairs, Nullable, TagWrap};
 use pallas::ledger::traverse::{MultiEraOutput, OriginalHash};
 use pallas::network::miniprotocols::localstate::queries_v16 as q16;
 use pallas::network::miniprotocols::localtxsubmission::SMaybe;
@@ -419,7 +419,7 @@ pub fn build_protocol_params<D: Domain>(domain: &D) -> Result<q16::ProtocolParam
             .map(|r| to_q16_rational(&r)),
     })
 }
-fn convert_pool_params(params: &dolos_cardano::PoolParams) -> q16::PoolParams {
+fn convert_pool_params(operator: &[u8], params: &dolos_cardano::PoolParams) -> q16::PoolParams {
     let relays: Vec<q16::Relay> = params
         .relays
         .iter()
@@ -449,7 +449,7 @@ fn convert_pool_params(params: &dolos_cardano::PoolParams) -> q16::PoolParams {
     };
 
     q16::PoolParams {
-        operator: params.vrf_keyhash.to_vec().into(),
+        operator: operator.to_vec().into(),
         vrf_keyhash: params.vrf_keyhash.to_vec().into(),
         pledge: AnyUInt::U64(params.pledge),
         cost: AnyUInt::U64(params.cost),
@@ -483,7 +483,6 @@ pub fn build_pool_state_response<D: Domain>(
     // Extract the filter set if provided
     let filter_set: Option<BTreeSet<Vec<u8>>> = match pools_filter {
         SMaybe::Some(pools) => {
-            // pools is a TagWrap<BTreeSet<Bytes>, 258>, access inner via .0
             let set: BTreeSet<Vec<u8>> = pools.0.iter().map(|p| p.to_vec()).collect();
             Some(set)
         }
@@ -512,20 +511,22 @@ pub fn build_pool_state_response<D: Domain>(
             continue;
         }
 
-        stake_pool_params.insert(pool_id.clone(), convert_pool_params(&live_snapshot.params));
+        stake_pool_params.insert(
+            pool_id.clone(),
+            convert_pool_params(pool_id.as_ref(), &live_snapshot.params),
+        );
 
-        // Add future params if scheduled
         if let Some(next_snapshot) = pool.snapshot.next() {
-            future_stake_pool_params
-                .insert(pool_id.clone(), convert_pool_params(&next_snapshot.params));
+            future_stake_pool_params.insert(
+                pool_id.clone(),
+                convert_pool_params(pool_id.as_ref(), &next_snapshot.params),
+            );
         }
 
-        // Add retiring epoch if pool is retiring
         if let Some(retiring_epoch) = pool.retiring_epoch {
             retiring.insert(pool_id.clone(), retiring_epoch as u32);
         }
 
-        // Add deposit
         deposits.insert(pool_id, AnyUInt::U64(pool.deposit));
     }
 
@@ -543,5 +544,9 @@ pub fn build_pool_state_response<D: Domain>(
         deposits,
     };
 
-    Ok(AnyCbor::from_encode((pstate,)))
+    let encoded = minicbor::to_vec(pstate)
+        .map_err(|e| Error::server(format!("failed to encode pool state: {e}")))?;
+
+    let wrapped = TagWrap::<Bytes, 24>(encoded.into());
+    Ok(AnyCbor::from_encode(vec![wrapped]))
 }
