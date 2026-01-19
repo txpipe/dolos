@@ -1,6 +1,7 @@
 use ::redb::{MultimapTableDefinition, ReadTransaction, WriteTransaction};
-use redb_extras::buckets::{BucketMultimapIterExt, BucketedKey, KeyBuilder};
-use std::collections::VecDeque;
+use redb_extras::buckets::{
+    BucketMultimapIterExt, BucketRangeMultimapIterator, BucketedKey, KeyBuilder,
+};
 use xxhash_rust::xxh3::xxh3_64;
 
 use dolos_core::{BlockSlot, ChainPoint, SlotTags};
@@ -14,13 +15,21 @@ fn key_builder() -> KeyBuilder {
 }
 
 pub struct SlotKeyIterator {
-    slots: VecDeque<u64>,
+    inner: BucketRangeMultimapIterator<u64>,
+    start_slot: BlockSlot,
+    end_slot: BlockSlot,
 }
 
 impl SlotKeyIterator {
-    pub fn new(slots: Vec<u64>) -> Self {
+    pub fn new(
+        inner: BucketRangeMultimapIterator<u64>,
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
+    ) -> Self {
         Self {
-            slots: VecDeque::from(slots),
+            inner,
+            start_slot,
+            end_slot,
         }
     }
 }
@@ -29,14 +38,46 @@ impl Iterator for SlotKeyIterator {
     type Item = Result<u64, Error>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.slots.pop_front().map(Ok)
+        loop {
+            let slot = match self.inner.next()? {
+                Ok(slot) => slot,
+                Err(err) => return Some(Err(err.into())),
+            };
+
+            if slot >= self.start_slot && slot <= self.end_slot {
+                return Some(Ok(slot));
+            }
+        }
     }
 }
 
 impl DoubleEndedIterator for SlotKeyIterator {
     fn next_back(&mut self) -> Option<Self::Item> {
-        self.slots.pop_back().map(Ok)
+        loop {
+            let slot = match self.inner.next_back()? {
+                Ok(slot) => slot,
+                Err(err) => return Some(Err(err.into())),
+            };
+
+            if slot >= self.start_slot && slot <= self.end_slot {
+                return Some(Ok(slot));
+            }
+        }
     }
+}
+
+fn slot_iterator(
+    rx: &ReadTransaction,
+    table: MultimapTableDefinition<'static, BucketedKey<u64>, u64>,
+    base_key: u64,
+    start_slot: u64,
+    end_slot: u64,
+) -> Result<SlotKeyIterator, Error> {
+    let table = rx.open_multimap_table(table)?;
+    let key_builder = key_builder();
+    let iter = table.bucket_range(&key_builder, base_key, start_slot, end_slot)?;
+
+    Ok(SlotKeyIterator::new(iter, start_slot, end_slot))
 }
 
 fn collect_slots(
@@ -46,15 +87,11 @@ fn collect_slots(
     start_slot: u64,
     end_slot: u64,
 ) -> Result<Vec<BlockSlot>, Error> {
-    let table = rx.open_multimap_table(table)?;
-    let key_builder = key_builder();
+    let mut iter = slot_iterator(rx, table, base_key, start_slot, end_slot)?;
     let mut out = Vec::new();
-    let iter = table.bucket_range(&key_builder, base_key, start_slot, end_slot)?;
-    for slot in iter {
-        let slot = slot?;
-        if slot >= start_slot && slot <= end_slot {
-            out.push(slot);
-        }
+
+    while let Some(slot) = iter.next() {
+        out.push(slot?);
     }
 
     Ok(out)
@@ -77,8 +114,7 @@ impl AddressApproxIndexTable {
         end_slot: BlockSlot,
     ) -> Result<SlotKeyIterator, Error> {
         let key = Self::compute_key(&address.to_vec());
-        let slots = collect_slots(rx, Self::DEF, key, start_slot, end_slot)?;
-        Ok(SlotKeyIterator::new(slots))
+        slot_iterator(rx, Self::DEF, key, start_slot, end_slot)
     }
 }
 
@@ -109,8 +145,7 @@ impl AddressPaymentPartApproxIndexTable {
         end_slot: BlockSlot,
     ) -> Result<SlotKeyIterator, Error> {
         let key = Self::compute_key(&payment.to_vec());
-        let slots = collect_slots(rx, Self::DEF, key, start_slot, end_slot)?;
-        Ok(SlotKeyIterator::new(slots))
+        slot_iterator(rx, Self::DEF, key, start_slot, end_slot)
     }
 }
 
@@ -141,8 +176,7 @@ impl AddressStakePartApproxIndexTable {
         end_slot: BlockSlot,
     ) -> Result<SlotKeyIterator, Error> {
         let key = Self::compute_key(&stake.to_vec());
-        let slots = collect_slots(rx, Self::DEF, key, start_slot, end_slot)?;
-        Ok(SlotKeyIterator::new(slots))
+        slot_iterator(rx, Self::DEF, key, start_slot, end_slot)
     }
 }
 
@@ -173,8 +207,7 @@ impl AssetApproxIndexTable {
         end_slot: BlockSlot,
     ) -> Result<SlotKeyIterator, Error> {
         let key = Self::compute_key(&asset.to_vec());
-        let slots = collect_slots(rx, Self::DEF, key, start_slot, end_slot)?;
-        Ok(SlotKeyIterator::new(slots))
+        slot_iterator(rx, Self::DEF, key, start_slot, end_slot)
     }
 }
 
@@ -260,8 +293,7 @@ impl MetadataApproxIndexTable {
         end_slot: BlockSlot,
     ) -> Result<SlotKeyIterator, Error> {
         let key = Self::compute_key(metadata);
-        let slots = collect_slots(rx, Self::DEF, key, start_slot, end_slot)?;
-        Ok(SlotKeyIterator::new(slots))
+        slot_iterator(rx, Self::DEF, key, start_slot, end_slot)
     }
 }
 
@@ -355,8 +387,7 @@ impl AccountCertsApproxIndexTable {
         end_slot: BlockSlot,
     ) -> Result<SlotKeyIterator, Error> {
         let key = Self::compute_key(&account.to_vec());
-        let slots = collect_slots(rx, Self::DEF, key, start_slot, end_slot)?;
-        Ok(SlotKeyIterator::new(slots))
+        slot_iterator(rx, Self::DEF, key, start_slot, end_slot)
     }
 }
 
