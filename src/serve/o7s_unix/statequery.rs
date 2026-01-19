@@ -129,9 +129,8 @@ impl<D: Domain> Session<D> {
             let raw_bytes: &[u8] = query.as_ref();
 
             let decoded = if let Ok(inner) = minicbor::decode::<Vec<u8>>(raw_bytes) {
-                minicbor::decode::<q16::Request>(&inner).ok().map(|req| {
+                minicbor::decode::<q16::Request>(&inner).ok().inspect(|_| {
                     debug!("decoded query from byte string wrapper");
-                    req
                 })
             } else {
                 None
