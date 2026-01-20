@@ -1,4 +1,6 @@
-use ::redb::{MultimapTableDefinition, ReadTransaction, WriteTransaction};
+use ::redb::{
+    MultimapTableDefinition, ReadTransaction, ReadableTable as _, TableDefinition, WriteTransaction,
+};
 use redb_extras::buckets::{
     BucketMultimapIterExt, BucketRangeMultimapIterator, BucketedKey, KeyBuilder,
 };
@@ -214,43 +216,29 @@ impl AssetApproxIndexTable {
 pub struct BlockHashApproxIndexTable;
 
 impl BlockHashApproxIndexTable {
-    pub const DEF: MultimapTableDefinition<'static, BucketedKey<u64>, u64> =
-        MultimapTableDefinition::new("byblockhash");
-
-    pub fn compute_key(block_hash: &Vec<u8>) -> u64 {
-        xxh3_64(block_hash.as_slice())
-    }
+    pub const DEF: TableDefinition<'static, &'static [u8], u64> =
+        TableDefinition::new("byblockhash");
 
     pub fn get_by_block_hash(
         rx: &ReadTransaction,
         block_hash: &[u8],
-        start_slot: BlockSlot,
-        end_slot: BlockSlot,
-    ) -> Result<Vec<BlockSlot>, Error> {
-        let key = Self::compute_key(&block_hash.to_vec());
-        collect_slots(rx, Self::DEF, key, start_slot, end_slot)
+    ) -> Result<Option<BlockSlot>, Error> {
+        let table = rx.open_table(Self::DEF)?;
+        Ok(table.get(block_hash)?.map(|slot| slot.value()))
     }
 }
 
 pub struct BlockNumberApproxIndexTable;
 
 impl BlockNumberApproxIndexTable {
-    pub const DEF: MultimapTableDefinition<'static, BucketedKey<u64>, u64> =
-        MultimapTableDefinition::new("byblocknumber");
-
-    pub fn compute_key(block_number: &u64) -> u64 {
-        // Left for readability
-        *block_number
-    }
+    pub const DEF: TableDefinition<'static, u64, u64> = TableDefinition::new("byblocknumber");
 
     pub fn get_by_block_number(
         rx: &ReadTransaction,
         block_number: &u64,
-        start_slot: BlockSlot,
-        end_slot: BlockSlot,
-    ) -> Result<Vec<BlockSlot>, Error> {
-        let key = Self::compute_key(block_number);
-        collect_slots(rx, Self::DEF, key, start_slot, end_slot)
+    ) -> Result<Option<BlockSlot>, Error> {
+        let table = rx.open_table(Self::DEF)?;
+        Ok(table.get(*block_number)?.map(|slot| slot.value()))
     }
 }
 
@@ -420,8 +408,8 @@ impl Indexes {
         wx.open_multimap_table(AddressPaymentPartApproxIndexTable::DEF)?;
         wx.open_multimap_table(AddressStakePartApproxIndexTable::DEF)?;
         wx.open_multimap_table(AssetApproxIndexTable::DEF)?;
-        wx.open_multimap_table(BlockHashApproxIndexTable::DEF)?;
-        wx.open_multimap_table(BlockNumberApproxIndexTable::DEF)?;
+        wx.open_table(BlockHashApproxIndexTable::DEF)?;
+        wx.open_table(BlockNumberApproxIndexTable::DEF)?;
         wx.open_multimap_table(DatumHashApproxIndexTable::DEF)?;
         wx.open_multimap_table(PolicyApproxIndexTable::DEF)?;
         wx.open_multimap_table(ScriptHashApproxIndexTable::DEF)?;
@@ -527,19 +515,15 @@ impl Indexes {
     pub fn get_by_block_hash(
         rx: &ReadTransaction,
         block_hash: &[u8],
-        start_slot: BlockSlot,
-        end_slot: BlockSlot,
-    ) -> Result<Vec<BlockSlot>, Error> {
-        BlockHashApproxIndexTable::get_by_block_hash(rx, block_hash, start_slot, end_slot)
+    ) -> Result<Option<BlockSlot>, Error> {
+        BlockHashApproxIndexTable::get_by_block_hash(rx, block_hash)
     }
 
     pub fn get_by_block_number(
         rx: &ReadTransaction,
         block_number: &u64,
-        start_slot: BlockSlot,
-        end_slot: BlockSlot,
-    ) -> Result<Vec<BlockSlot>, Error> {
-        BlockNumberApproxIndexTable::get_by_block_number(rx, block_number, start_slot, end_slot)
+    ) -> Result<Option<BlockSlot>, Error> {
+        BlockNumberApproxIndexTable::get_by_block_number(rx, block_number)
     }
 
     pub fn get_by_datum_hash(
@@ -601,8 +585,8 @@ impl Indexes {
         Self::copy_table(AddressPaymentPartApproxIndexTable::DEF, rx, wx)?;
         Self::copy_table(AddressStakePartApproxIndexTable::DEF, rx, wx)?;
         Self::copy_table(AssetApproxIndexTable::DEF, rx, wx)?;
-        Self::copy_table(BlockHashApproxIndexTable::DEF, rx, wx)?;
-        Self::copy_table(BlockNumberApproxIndexTable::DEF, rx, wx)?;
+        Self::copy_value_table(BlockHashApproxIndexTable::DEF, rx, wx)?;
+        Self::copy_value_table(BlockNumberApproxIndexTable::DEF, rx, wx)?;
         Self::copy_table(DatumHashApproxIndexTable::DEF, rx, wx)?;
         Self::copy_table(PolicyApproxIndexTable::DEF, rx, wx)?;
         Self::copy_table(ScriptHashApproxIndexTable::DEF, rx, wx)?;
@@ -617,23 +601,13 @@ impl Indexes {
         let slot = point.slot();
 
         if let Some(hash) = point.hash() {
-            Self::insert(
-                wx,
-                BlockHashApproxIndexTable::DEF,
-                BlockHashApproxIndexTable::compute_key,
-                vec![hash.to_vec()],
-                slot,
-            )?;
+            let mut table = wx.open_table(BlockHashApproxIndexTable::DEF)?;
+            table.insert(hash.as_slice(), slot)?;
         }
 
         if let Some(number) = tags.number {
-            Self::insert(
-                wx,
-                BlockNumberApproxIndexTable::DEF,
-                BlockNumberApproxIndexTable::compute_key,
-                vec![number],
-                slot,
-            )?;
+            let mut table = wx.open_table(BlockNumberApproxIndexTable::DEF)?;
+            table.insert(number, slot)?;
         }
 
         Self::insert(
@@ -731,23 +705,13 @@ impl Indexes {
         let slot = point.slot();
 
         if let Some(hash) = point.hash() {
-            Self::insert(
-                wx,
-                BlockHashApproxIndexTable::DEF,
-                BlockHashApproxIndexTable::compute_key,
-                vec![hash.to_vec()],
-                slot,
-            )?;
+            let mut table = wx.open_table(BlockHashApproxIndexTable::DEF)?;
+            table.insert(hash.as_slice(), slot)?;
         }
 
         if let Some(number) = tags.number {
-            Self::insert(
-                wx,
-                BlockNumberApproxIndexTable::DEF,
-                BlockNumberApproxIndexTable::compute_key,
-                vec![number],
-                slot,
-            )?;
+            let mut table = wx.open_table(BlockNumberApproxIndexTable::DEF)?;
+            table.insert(number, slot)?;
         }
 
         Self::remove(
@@ -872,6 +836,22 @@ impl Indexes {
             let key = compute_key(&x);
             let bucketed_key = key_builder.bucketed_key(key, slot);
             let _ = table.remove(bucketed_key, slot)?;
+        }
+
+        Ok(())
+    }
+
+    fn copy_value_table<K: ::redb::Key, V: ::redb::Value>(
+        table: TableDefinition<K, V>,
+        rx: &ReadTransaction,
+        wx: &WriteTransaction,
+    ) -> Result<(), Error> {
+        let source = rx.open_table(table)?;
+        let mut target = wx.open_table(table)?;
+
+        for entry in source.iter()? {
+            let (key, value) = entry?;
+            target.insert(key.value(), value.value())?;
         }
 
         Ok(())
