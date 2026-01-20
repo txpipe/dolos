@@ -381,6 +381,7 @@ pub trait MempoolStore: Clone + Send + Sync + 'static {
 
 pub trait Block: Sized + Send + Sync {
     fn depends_on(&self, loaded: &mut RawUtxoMap) -> Vec<TxoRef>;
+    fn produces(&self) -> UtxoMap;
     fn slot(&self) -> BlockSlot;
     fn hash(&self) -> BlockHash;
     fn raw(&self) -> RawBlock;
@@ -545,6 +546,8 @@ pub trait ChainLogic: Sized + Send + Sync {
 
     // TODO: remove from the interface
     fn decode_utxo(&self, utxo: Arc<EraCbor>) -> Result<Self::Utxo, ChainError>;
+
+    fn decode_block(&self, raw: Arc<BlockBody>) -> Result<Self::Block, ChainError>;
 
     // TODO: remove from the interface
     fn mutable_slots(domain: &impl Domain) -> BlockSlot;

@@ -15,7 +15,7 @@ use pallas::{
         },
     },
 };
-use tracing::{debug, instrument};
+use tracing::{debug, instrument, warn};
 
 use crate::{
     load_effective_pparams, owned::OwnedMultiEraOutput, roll::proposals::ProposalVisitor, utxoset,
@@ -183,13 +183,13 @@ macro_rules! maybe_visit {
 
 macro_rules! visit_all {
     ($self:ident, $deltas:expr, $method:ident, $($args:tt)*) => {
-        maybe_visit!($self, $deltas, account_state, $method, $($args)*);
-        maybe_visit!($self, $deltas, asset_state, $method, $($args)*);
-        maybe_visit!($self, $deltas, drep_state, $method, $($args)*);
-        maybe_visit!($self, $deltas, epoch_state, $method, $($args)*);
-        maybe_visit!($self, $deltas, pool_state, $method, $($args)*);
+        // maybe_visit!($self, $deltas, account_state, $method, $($args)*);
+        // maybe_visit!($self, $deltas, asset_state, $method, $($args)*);
+        // maybe_visit!($self, $deltas, drep_state, $method, $($args)*);
+        // maybe_visit!($self, $deltas, epoch_state, $method, $($args)*);
+        // maybe_visit!($self, $deltas, pool_state, $method, $($args)*);
         maybe_visit!($self, $deltas, tx_logs, $method, $($args)*);
-        maybe_visit!($self, $deltas, proposal_logs, $method, $($args)*);
+        // maybe_visit!($self, $deltas, proposal_logs, $method, $($args)*);
     };
 }
 
@@ -261,14 +261,17 @@ impl<'a> DeltaBuilder<'a> {
             for input in tx.consumes() {
                 let txoref = TxoRef::from(&input);
 
-                let resolved = self.utxos.get(&txoref).ok_or_else(|| {
-                    StateError::InvariantViolation(InvariantViolation::InputNotFound(txoref))
-                })?;
-
-                resolved.with_dependent(|_, resolved| {
-                    visit_all!(self, deltas, visit_input, block, &tx, &input, &resolved);
-                    Result::<_, ChainError>::Ok(())
-                })?;
+                match self.utxos.get(&txoref) {
+                    Some(resolved) => {
+                        resolved.with_dependent(|_, resolved| {
+                            visit_all!(self, deltas, visit_input, block, &tx, &input, &resolved);
+                            Result::<_, ChainError>::Ok(())
+                        })?;
+                    }
+                    None => {
+                        warn!(txoref =? txoref, "failed to resolve input");
+                    }
+                }
             }
 
             for (index, output) in tx.produces() {
@@ -332,9 +335,11 @@ pub fn compute_delta<D: Domain>(
     state: &D::State,
     batch: &mut WorkBatch<CardanoLogic>,
 ) -> Result<(), ChainError> {
-    let (epoch, _) = cache.eras.slot_epoch(batch.first_slot());
+    // let (epoch, _) = cache.eras.slot_epoch(batch.first_slot());
+    let epoch = 1;
 
-    let (protocol, _) = cache.eras.protocol_and_era_for_epoch(epoch);
+    // let (protocol, _) = cache.eras.protocol_and_era_for_epoch(epoch);
+    let protocol = &1;
 
     debug!(
         from = batch.first_slot(),
@@ -343,7 +348,8 @@ pub fn compute_delta<D: Domain>(
         "computing delta"
     );
 
-    let active_params = load_effective_pparams::<D>(state)?;
+    //let active_params = load_effective_pparams::<D>(state)?;
+    let active_params = PParamsSet::default();
 
     for block in batch.blocks.iter_mut() {
         let mut builder = DeltaBuilder::new(
@@ -358,12 +364,12 @@ pub fn compute_delta<D: Domain>(
 
         builder.crawl()?;
 
-        // TODO: we treat the UTxO set differently due to tech-debt. We should migrate
-        // this into the entity system.
-        let blockd = block.decoded();
-        let blockd = blockd.view();
-        let utxos = utxoset::compute_apply_delta(blockd, &batch.utxos_decoded)?;
-        block.utxo_delta = Some(utxos);
+        // // TODO: we treat the UTxO set differently due to tech-debt. We should migrate
+        // // this into the entity system.
+        // let blockd = block.decoded();
+        // let blockd = blockd.view();
+        // let utxos = utxoset::compute_apply_delta(blockd, &batch.utxos_decoded)?;
+        // block.utxo_delta = Some(utxos);
     }
 
     Ok(())
