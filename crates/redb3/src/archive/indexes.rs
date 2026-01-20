@@ -202,9 +202,9 @@ impl AssetApproxIndexTable {
     }
 }
 
-pub struct BlockHashApproxIndexTable;
+pub struct BlockHashIndexTable;
 
-impl BlockHashApproxIndexTable {
+impl BlockHashIndexTable {
     pub const DEF: TableDefinition<'static, &'static [u8], u64> =
         TableDefinition::new("byblockhash");
 
@@ -217,9 +217,9 @@ impl BlockHashApproxIndexTable {
     }
 }
 
-pub struct BlockNumberApproxIndexTable;
+pub struct BlockNumberIndexTable;
 
-impl BlockNumberApproxIndexTable {
+impl BlockNumberIndexTable {
     pub const DEF: TableDefinition<'static, u64, u64> = TableDefinition::new("byblocknumber");
 
     pub fn get_by_block_number(
@@ -409,8 +409,8 @@ impl Indexes {
         wx.open_multimap_table(AddressPaymentPartApproxIndexTable::DEF)?;
         wx.open_multimap_table(AddressStakePartApproxIndexTable::DEF)?;
         wx.open_multimap_table(AssetApproxIndexTable::DEF)?;
-        wx.open_table(BlockHashApproxIndexTable::DEF)?;
-        wx.open_table(BlockNumberApproxIndexTable::DEF)?;
+        wx.open_table(BlockHashIndexTable::DEF)?;
+        wx.open_table(BlockNumberIndexTable::DEF)?;
         wx.open_multimap_table(DatumHashApproxIndexTable::DEF)?;
         wx.open_multimap_table(PolicyApproxIndexTable::DEF)?;
         wx.open_multimap_table(ScriptHashApproxIndexTable::DEF)?;
@@ -517,14 +517,14 @@ impl Indexes {
         rx: &ReadTransaction,
         block_hash: &[u8],
     ) -> Result<Option<BlockSlot>, Error> {
-        BlockHashApproxIndexTable::get_by_block_hash(rx, block_hash)
+        BlockHashIndexTable::get_by_block_hash(rx, block_hash)
     }
 
     pub fn get_by_block_number(
         rx: &ReadTransaction,
         block_number: &u64,
     ) -> Result<Option<BlockSlot>, Error> {
-        BlockNumberApproxIndexTable::get_by_block_number(rx, block_number)
+        BlockNumberIndexTable::get_by_block_number(rx, block_number)
     }
 
     pub fn get_by_datum_hash(
@@ -586,8 +586,8 @@ impl Indexes {
         Self::copy_table(AddressPaymentPartApproxIndexTable::DEF, rx, wx)?;
         Self::copy_table(AddressStakePartApproxIndexTable::DEF, rx, wx)?;
         Self::copy_table(AssetApproxIndexTable::DEF, rx, wx)?;
-        Self::copy_value_table(BlockHashApproxIndexTable::DEF, rx, wx)?;
-        Self::copy_value_table(BlockNumberApproxIndexTable::DEF, rx, wx)?;
+        Self::copy_value_table(BlockHashIndexTable::DEF, rx, wx)?;
+        Self::copy_value_table(BlockNumberIndexTable::DEF, rx, wx)?;
         Self::copy_table(DatumHashApproxIndexTable::DEF, rx, wx)?;
         Self::copy_table(PolicyApproxIndexTable::DEF, rx, wx)?;
         Self::copy_table(ScriptHashApproxIndexTable::DEF, rx, wx)?;
@@ -602,12 +602,12 @@ impl Indexes {
         let slot = point.slot();
 
         if let Some(hash) = point.hash() {
-            let mut table = wx.open_table(BlockHashApproxIndexTable::DEF)?;
+            let mut table = wx.open_table(BlockHashIndexTable::DEF)?;
             table.insert(hash.as_slice(), slot)?;
         }
 
         if let Some(number) = tags.number {
-            let mut table = wx.open_table(BlockNumberApproxIndexTable::DEF)?;
+            let mut table = wx.open_table(BlockNumberIndexTable::DEF)?;
             table.insert(number, slot)?;
         }
 
@@ -706,13 +706,13 @@ impl Indexes {
         let slot = point.slot();
 
         if let Some(hash) = point.hash() {
-            let mut table = wx.open_table(BlockHashApproxIndexTable::DEF)?;
-            table.insert(hash.as_slice(), slot)?;
+            let mut table = wx.open_table(BlockHashIndexTable::DEF)?;
+            table.remove(hash.as_slice())?;
         }
 
         if let Some(number) = tags.number {
-            let mut table = wx.open_table(BlockNumberApproxIndexTable::DEF)?;
-            table.insert(number, slot)?;
+            let mut table = wx.open_table(BlockNumberIndexTable::DEF)?;
+            table.remove(number)?;
         }
 
         Self::remove(
