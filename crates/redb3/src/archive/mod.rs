@@ -17,6 +17,7 @@ use pallas::{
     },
 };
 use redb::WriteTransaction;
+use redb_extras::buckets::BucketError;
 use std::sync::Arc;
 
 use crate::{build_tables, Error, Table};
@@ -77,6 +78,12 @@ impl From<::redb::StorageError> for RedbArchiveError {
 
 impl From<::redb::TransactionError> for RedbArchiveError {
     fn from(value: ::redb::TransactionError) -> Self {
+        Self(ArchiveError::InternalError(value.to_string()))
+    }
+}
+
+impl From<BucketError> for RedbArchiveError {
+    fn from(value: BucketError) -> Self {
         Self(ArchiveError::InternalError(value.to_string()))
     }
 }
@@ -212,152 +219,145 @@ impl ArchiveStore {
     pub fn get_possible_block_slots_by_address_payment_part(
         &self,
         address_payment_part: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
     ) -> Result<Vec<BlockSlot>, RedbArchiveError> {
         let rx = self.db().begin_read()?;
-        indexes::Indexes::get_by_address_payment_part(&rx, address_payment_part)
+        indexes::Indexes::get_by_address_payment_part(
+            &rx,
+            address_payment_part,
+            start_slot,
+            end_slot,
+        )
     }
 
     pub fn get_possible_block_slots_by_address_stake_part(
         &self,
         address_stake_part: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
     ) -> Result<Vec<BlockSlot>, RedbArchiveError> {
         let rx = self.db().begin_read()?;
-        indexes::Indexes::get_by_address_stake_part(&rx, address_stake_part)
+        indexes::Indexes::get_by_address_stake_part(&rx, address_stake_part, start_slot, end_slot)
     }
 
     pub fn get_possible_block_slots_by_asset(
         &self,
         asset: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
     ) -> Result<Vec<BlockSlot>, RedbArchiveError> {
         let rx = self.db().begin_read()?;
-        indexes::Indexes::get_by_asset(&rx, asset)
-    }
-
-    pub fn get_possible_block_slots_by_block_hash(
-        &self,
-        block_hash: &[u8],
-    ) -> Result<Vec<BlockSlot>, RedbArchiveError> {
-        let rx = self.db().begin_read()?;
-        indexes::Indexes::get_by_block_hash(&rx, block_hash)
-    }
-
-    pub fn get_possible_block_slots_by_block_number(
-        &self,
-        block_number: &u64,
-    ) -> Result<Vec<BlockSlot>, RedbArchiveError> {
-        let rx = self.db().begin_read()?;
-        indexes::Indexes::get_by_block_number(&rx, block_number)
+        indexes::Indexes::get_by_asset(&rx, asset, start_slot, end_slot)
     }
 
     pub fn get_possible_block_slots_by_datum_hash(
         &self,
         datum_hash: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
     ) -> Result<Vec<BlockSlot>, RedbArchiveError> {
         let rx = self.db().begin_read()?;
-        indexes::Indexes::get_by_datum_hash(&rx, datum_hash)
+        indexes::Indexes::get_by_datum_hash(&rx, datum_hash, start_slot, end_slot)
     }
 
     pub fn get_possible_block_slots_by_policy(
         &self,
         policy: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
     ) -> Result<Vec<BlockSlot>, RedbArchiveError> {
         let rx = self.db().begin_read()?;
-        indexes::Indexes::get_by_policy(&rx, policy)
+        indexes::Indexes::get_by_policy(&rx, policy, start_slot, end_slot)
     }
 
     pub fn get_possible_block_slots_by_script_hash(
         &self,
         script_hash: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
     ) -> Result<Vec<BlockSlot>, RedbArchiveError> {
         let rx = self.db().begin_read()?;
-        indexes::Indexes::get_by_script_hash(&rx, script_hash)
+        indexes::Indexes::get_by_script_hash(&rx, script_hash, start_slot, end_slot)
     }
 
     pub fn get_possible_block_slots_by_spent_txo(
         &self,
         spent_txo: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
     ) -> Result<Vec<BlockSlot>, RedbArchiveError> {
         let rx = self.db().begin_read()?;
-        indexes::Indexes::get_by_spent_txo(&rx, spent_txo)
+        indexes::Indexes::get_by_spent_txo(&rx, spent_txo, start_slot, end_slot)
     }
 
     pub fn get_possible_block_slots_by_account(
         &self,
         account: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
     ) -> Result<Vec<BlockSlot>, RedbArchiveError> {
         let rx = self.db().begin_read().map_err(Error::from)?;
-        indexes::Indexes::get_by_account(&rx, account)
+        indexes::Indexes::get_by_account(&rx, account, start_slot, end_slot)
     }
 
     pub fn get_possible_block_slots_by_tx_hash(
         &self,
         tx_hash: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
     ) -> Result<Vec<BlockSlot>, RedbArchiveError> {
         let rx = self.db().begin_read().map_err(Error::from)?;
-        indexes::Indexes::get_by_tx_hash(&rx, tx_hash)
+        indexes::Indexes::get_by_tx_hash(&rx, tx_hash, start_slot, end_slot)
     }
 
     pub fn get_possible_blocks_by_address_payment_part(
         &self,
         address_payment_part: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
     ) -> Result<Vec<BlockBody>, RedbArchiveError> {
-        self.get_possible_block_slots_by_address_payment_part(address_payment_part)?
-            .iter()
-            .flat_map(|slot| match self.get_block_by_slot(slot) {
-                Ok(Some(block)) => Some(Ok(block)),
-                Ok(None) => None,
-                Err(e) => Some(Err(e)),
-            })
-            .collect()
+        self.get_possible_block_slots_by_address_payment_part(
+            address_payment_part,
+            start_slot,
+            end_slot,
+        )?
+        .iter()
+        .flat_map(|slot| match self.get_block_by_slot(slot) {
+            Ok(Some(block)) => Some(Ok(block)),
+            Ok(None) => None,
+            Err(e) => Some(Err(e)),
+        })
+        .collect()
     }
 
     pub fn get_possible_blocks_by_address_stake_part(
         &self,
         address_stake_part: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
     ) -> Result<Vec<BlockBody>, RedbArchiveError> {
-        self.get_possible_block_slots_by_address_stake_part(address_stake_part)?
-            .iter()
-            .flat_map(|slot| match self.get_block_by_slot(slot) {
-                Ok(Some(block)) => Some(Ok(block)),
-                Ok(None) => None,
-                Err(e) => Some(Err(e)),
-            })
-            .collect()
+        self.get_possible_block_slots_by_address_stake_part(
+            address_stake_part,
+            start_slot,
+            end_slot,
+        )?
+        .iter()
+        .flat_map(|slot| match self.get_block_by_slot(slot) {
+            Ok(Some(block)) => Some(Ok(block)),
+            Ok(None) => None,
+            Err(e) => Some(Err(e)),
+        })
+        .collect()
     }
 
     pub fn get_possible_blocks_by_asset(
         &self,
         asset: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
     ) -> Result<Vec<BlockBody>, RedbArchiveError> {
-        self.get_possible_block_slots_by_asset(asset)?
-            .iter()
-            .flat_map(|slot| match self.get_block_by_slot(slot) {
-                Ok(Some(block)) => Some(Ok(block)),
-                Ok(None) => None,
-                Err(e) => Some(Err(e)),
-            })
-            .collect()
-    }
-
-    pub fn get_possible_blocks_by_block_hash(
-        &self,
-        block_hash: &[u8],
-    ) -> Result<Vec<BlockBody>, RedbArchiveError> {
-        self.get_possible_block_slots_by_block_hash(block_hash)?
-            .iter()
-            .flat_map(|slot| match self.get_block_by_slot(slot) {
-                Ok(Some(block)) => Some(Ok(block)),
-                Ok(None) => None,
-                Err(e) => Some(Err(e)),
-            })
-            .collect()
-    }
-
-    pub fn get_possible_blocks_by_block_number(
-        &self,
-        block_number: &u64,
-    ) -> Result<Vec<BlockBody>, RedbArchiveError> {
-        self.get_possible_block_slots_by_block_number(block_number)?
+        self.get_possible_block_slots_by_asset(asset, start_slot, end_slot)?
             .iter()
             .flat_map(|slot| match self.get_block_by_slot(slot) {
                 Ok(Some(block)) => Some(Ok(block)),
@@ -370,8 +370,10 @@ impl ArchiveStore {
     pub fn get_possible_blocks_by_datum_hash(
         &self,
         datum_hash: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
     ) -> Result<Vec<BlockBody>, RedbArchiveError> {
-        self.get_possible_block_slots_by_datum_hash(datum_hash)?
+        self.get_possible_block_slots_by_datum_hash(datum_hash, start_slot, end_slot)?
             .iter()
             .flat_map(|slot| match self.get_block_by_slot(slot) {
                 Ok(Some(block)) => Some(Ok(block)),
@@ -384,8 +386,10 @@ impl ArchiveStore {
     pub fn get_possible_blocks_by_policy(
         &self,
         policy: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
     ) -> Result<Vec<BlockBody>, RedbArchiveError> {
-        self.get_possible_block_slots_by_policy(policy)?
+        self.get_possible_block_slots_by_policy(policy, start_slot, end_slot)?
             .iter()
             .flat_map(|slot| match self.get_block_by_slot(slot) {
                 Ok(Some(block)) => Some(Ok(block)),
@@ -398,8 +402,10 @@ impl ArchiveStore {
     pub fn get_possible_blocks_by_script_hash(
         &self,
         script_hash: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
     ) -> Result<Vec<BlockBody>, RedbArchiveError> {
-        self.get_possible_block_slots_by_script_hash(script_hash)?
+        self.get_possible_block_slots_by_script_hash(script_hash, start_slot, end_slot)?
             .iter()
             .flat_map(|slot| match self.get_block_by_slot(slot) {
                 Ok(Some(block)) => Some(Ok(block)),
@@ -412,8 +418,10 @@ impl ArchiveStore {
     pub fn get_possible_blocks_by_spent_txo(
         &self,
         txo_ref: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
     ) -> Result<Vec<BlockBody>, RedbArchiveError> {
-        self.get_possible_block_slots_by_spent_txo(txo_ref)?
+        self.get_possible_block_slots_by_spent_txo(txo_ref, start_slot, end_slot)?
             .iter()
             .flat_map(|slot| match self.get_block_by_slot(slot) {
                 Ok(Some(block)) => Some(Ok(block)),
@@ -426,8 +434,10 @@ impl ArchiveStore {
     pub fn get_possible_blocks_by_account(
         &self,
         account: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
     ) -> Result<Vec<BlockBody>, RedbArchiveError> {
-        self.get_possible_block_slots_by_account(account)?
+        self.get_possible_block_slots_by_account(account, start_slot, end_slot)?
             .iter()
             .flat_map(|slot| match self.get_block_by_slot(slot) {
                 Ok(Some(block)) => Some(Ok(block)),
@@ -440,8 +450,10 @@ impl ArchiveStore {
     pub fn get_possible_blocks_by_tx_hash(
         &self,
         tx_hash: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
     ) -> Result<Vec<BlockBody>, RedbArchiveError> {
-        self.get_possible_block_slots_by_tx_hash(tx_hash)?
+        self.get_possible_block_slots_by_tx_hash(tx_hash, start_slot, end_slot)?
             .iter()
             .flat_map(|slot| match self.get_block_by_slot(slot) {
                 Ok(Some(block)) => Some(Ok(block)),
@@ -455,7 +467,8 @@ impl ArchiveStore {
         &self,
         tx_hash: &[u8],
     ) -> Result<Option<(BlockBody, TxOrder)>, RedbArchiveError> {
-        let possible = self.get_possible_blocks_by_tx_hash(tx_hash)?;
+        let (start_slot, end_slot) = self.index_bounds()?;
+        let possible = self.get_possible_blocks_by_tx_hash(tx_hash, start_slot, end_slot)?;
 
         for raw in possible {
             let block =
@@ -473,54 +486,66 @@ impl ArchiveStore {
     pub fn iter_possible_blocks_with_address(
         &self,
         address: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
     ) -> Result<ArchiveSparseIter, RedbArchiveError> {
         let rx = self.db().begin_read()?;
-        let range = indexes::Indexes::iter_by_address(&rx, address)?;
+        let range = indexes::Indexes::iter_by_address(&rx, address, start_slot, end_slot)?;
         Ok(ArchiveSparseIter(rx, range))
     }
 
     pub fn iter_possible_blocks_with_asset(
         &self,
         asset: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
     ) -> Result<ArchiveSparseIter, RedbArchiveError> {
         let rx = self.db().begin_read()?;
-        let range = indexes::Indexes::iter_by_asset(&rx, asset)?;
+        let range = indexes::Indexes::iter_by_asset(&rx, asset, start_slot, end_slot)?;
         Ok(ArchiveSparseIter(rx, range))
     }
 
     pub fn iter_possible_blocks_with_payment(
         &self,
         payment: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
     ) -> Result<ArchiveSparseIter, RedbArchiveError> {
         let rx = self.db().begin_read()?;
-        let range = indexes::Indexes::iter_by_payment(&rx, payment)?;
+        let range = indexes::Indexes::iter_by_payment(&rx, payment, start_slot, end_slot)?;
         Ok(ArchiveSparseIter(rx, range))
     }
 
     pub fn iter_possible_blocks_with_stake(
         &self,
         stake: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
     ) -> Result<ArchiveSparseIter, RedbArchiveError> {
         let rx = self.db().begin_read()?;
-        let range = indexes::Indexes::iter_by_stake(&rx, stake)?;
+        let range = indexes::Indexes::iter_by_stake(&rx, stake, start_slot, end_slot)?;
         Ok(ArchiveSparseIter(rx, range))
     }
 
     pub fn iter_possible_blocks_with_account_certs(
         &self,
         account: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
     ) -> Result<ArchiveSparseIter, RedbArchiveError> {
         let rx = self.db().begin_read()?;
-        let range = indexes::Indexes::iter_by_account_certs(&rx, account)?;
+        let range = indexes::Indexes::iter_by_account_certs(&rx, account, start_slot, end_slot)?;
         Ok(ArchiveSparseIter(rx, range))
     }
 
     pub fn iter_possible_blocks_with_metadata(
         &self,
         metadata: &u64,
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
     ) -> Result<ArchiveSparseIter, RedbArchiveError> {
         let rx = self.db().begin_read()?;
-        let range = indexes::Indexes::iter_by_metadata(&rx, metadata)?;
+        let range = indexes::Indexes::iter_by_metadata(&rx, metadata, start_slot, end_slot)?;
         Ok(ArchiveSparseIter(rx, range))
     }
 
@@ -536,40 +561,28 @@ impl ArchiveStore {
         &self,
         block_hash: &[u8],
     ) -> Result<Option<BlockBody>, RedbArchiveError> {
-        let possible: Vec<BlockBody> = self.get_possible_blocks_by_block_hash(block_hash)?;
-
-        for raw in possible {
-            let block =
-                MultiEraBlock::decode(raw.as_slice()).map_err(ArchiveError::BlockDecodingError)?;
-
-            if block.hash().as_slice() == block_hash {
-                return Ok(Some(raw));
-            }
+        let rx = self.db().begin_read()?;
+        match indexes::Indexes::get_by_block_hash(&rx, block_hash)? {
+            Some(slot) => tables::BlocksTable::get_by_slot(&rx, slot),
+            None => Ok(None),
         }
-
-        Ok(None)
     }
 
     pub fn get_block_by_number(
         &self,
         block_number: &u64,
     ) -> Result<Option<BlockBody>, RedbArchiveError> {
-        let possible = self.get_possible_blocks_by_block_number(block_number)?;
-
-        for raw in possible {
-            let block =
-                MultiEraBlock::decode(raw.as_slice()).map_err(ArchiveError::BlockDecodingError)?;
-
-            if block.number() == *block_number {
-                return Ok(Some(raw));
-            }
+        let rx = self.db().begin_read()?;
+        match indexes::Indexes::get_by_block_number(&rx, block_number)? {
+            Some(slot) => tables::BlocksTable::get_by_slot(&rx, slot),
+            None => Ok(None),
         }
-
-        Ok(None)
     }
 
     pub fn get_slot_for_tx(&self, tx_hash: &[u8]) -> Result<Option<BlockSlot>, RedbArchiveError> {
-        let mut possible = self.get_possible_block_slots_by_tx_hash(tx_hash)?;
+        let (start_slot, end_slot) = self.index_bounds()?;
+        let mut possible =
+            self.get_possible_block_slots_by_tx_hash(tx_hash, start_slot, end_slot)?;
         if possible.len() == 1 {
             Ok(possible.pop())
         } else {
@@ -592,7 +605,9 @@ impl ArchiveStore {
         &self,
         spent_txo: &[u8],
     ) -> Result<Option<TxHash>, RedbArchiveError> {
-        let possible: Vec<BlockBody> = self.get_possible_blocks_by_spent_txo(spent_txo)?;
+        let (start_slot, end_slot) = self.index_bounds()?;
+        let possible: Vec<BlockBody> =
+            self.get_possible_blocks_by_spent_txo(spent_txo, start_slot, end_slot)?;
 
         for raw in possible {
             let block =
@@ -612,7 +627,8 @@ impl ArchiveStore {
     }
 
     pub fn get_tx(&self, tx_hash: &[u8]) -> Result<Option<EraCbor>, RedbArchiveError> {
-        let possible = self.get_possible_blocks_by_tx_hash(tx_hash)?;
+        let (start_slot, end_slot) = self.index_bounds()?;
+        let possible = self.get_possible_blocks_by_tx_hash(tx_hash, start_slot, end_slot)?;
 
         for raw in possible {
             let block =
@@ -629,7 +645,9 @@ impl ArchiveStore {
         &self,
         datum_hash: &Hash<32>,
     ) -> Result<Option<PlutusData>, RedbArchiveError> {
-        let possible = self.get_possible_blocks_by_datum_hash(datum_hash.as_slice())?;
+        let (start_slot, end_slot) = self.index_bounds()?;
+        let possible =
+            self.get_possible_blocks_by_datum_hash(datum_hash.as_slice(), start_slot, end_slot)?;
 
         for raw in possible {
             let block =
@@ -661,6 +679,11 @@ impl ArchiveStore {
         }
 
         Ok(None)
+    }
+
+    fn index_bounds(&self) -> Result<(BlockSlot, BlockSlot), RedbArchiveError> {
+        let end_slot = self.get_tip()?.map(|(slot, _)| slot).unwrap_or_default();
+        Ok((0, end_slot))
     }
 
     pub fn get_tip(&self) -> Result<Option<(BlockSlot, BlockBody)>, RedbArchiveError> {
@@ -879,16 +902,23 @@ impl dolos_core::ArchiveStore for ArchiveStore {
     fn iter_blocks_with_address(
         &self,
         address: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
     ) -> Result<Self::SparseBlockIter, ArchiveError> {
         // TODO: we need to filter the false positives
-        let out = self.iter_possible_blocks_with_address(address)?;
+        let out = self.iter_possible_blocks_with_address(address, start_slot, end_slot)?;
 
         Ok(out)
     }
 
-    fn iter_blocks_with_asset(&self, asset: &[u8]) -> Result<Self::SparseBlockIter, ArchiveError> {
+    fn iter_blocks_with_asset(
+        &self,
+        asset: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
+    ) -> Result<Self::SparseBlockIter, ArchiveError> {
         // TODO: we need to filter the false positives
-        let out = self.iter_possible_blocks_with_asset(asset)?;
+        let out = self.iter_possible_blocks_with_asset(asset, start_slot, end_slot)?;
 
         Ok(out)
     }
@@ -896,16 +926,23 @@ impl dolos_core::ArchiveStore for ArchiveStore {
     fn iter_blocks_with_payment(
         &self,
         payment: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
     ) -> Result<Self::SparseBlockIter, ArchiveError> {
         // TODO: we need to filter the false positives
-        let out = self.iter_possible_blocks_with_payment(payment)?;
+        let out = self.iter_possible_blocks_with_payment(payment, start_slot, end_slot)?;
 
         Ok(out)
     }
 
-    fn iter_blocks_with_stake(&self, stake: &[u8]) -> Result<Self::SparseBlockIter, ArchiveError> {
+    fn iter_blocks_with_stake(
+        &self,
+        stake: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
+    ) -> Result<Self::SparseBlockIter, ArchiveError> {
         // TODO: we need to filter the false positives
-        let out = self.iter_possible_blocks_with_stake(stake)?;
+        let out = self.iter_possible_blocks_with_stake(stake, start_slot, end_slot)?;
 
         Ok(out)
     }
@@ -913,9 +950,11 @@ impl dolos_core::ArchiveStore for ArchiveStore {
     fn iter_blocks_with_account_certs(
         &self,
         account: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
     ) -> Result<Self::SparseBlockIter, ArchiveError> {
         // TODO: we need to filter the false positives
-        let out = self.iter_possible_blocks_with_account_certs(account)?;
+        let out = self.iter_possible_blocks_with_account_certs(account, start_slot, end_slot)?;
 
         Ok(out)
     }
@@ -923,9 +962,11 @@ impl dolos_core::ArchiveStore for ArchiveStore {
     fn iter_blocks_with_metadata(
         &self,
         metadata: &u64,
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
     ) -> Result<Self::SparseBlockIter, ArchiveError> {
         // TODO: we need to filter the false positives
-        let out = self.iter_possible_blocks_with_metadata(metadata)?;
+        let out = self.iter_possible_blocks_with_metadata(metadata, start_slot, end_slot)?;
 
         Ok(out)
     }

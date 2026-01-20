@@ -187,10 +187,11 @@ where
 {
     let pagination = Pagination::try_from(params)?;
     let account_key = parse_account_key_param(&stake_address)?;
+    let end_slot = domain.get_tip_slot()?;
 
     let mut blocks = domain
         .archive()
-        .iter_blocks_with_stake(&account_key.address.to_vec())
+        .iter_blocks_with_stake(&account_key.address.to_vec(), 0, end_slot)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let mut items = vec![];
@@ -466,10 +467,11 @@ where
         pagination.count,
         pagination.page as usize,
     );
+    let end_slot = domain.get_tip_slot()?;
 
     let mut blocks = domain
         .archive()
-        .iter_blocks_with_account_certs(&account_key.entity_key)
+        .iter_blocks_with_account_certs(&account_key.entity_key, 0, end_slot)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     while builder.needs_more() {

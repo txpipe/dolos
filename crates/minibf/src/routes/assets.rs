@@ -731,9 +731,10 @@ pub async fn by_subject_transactions<D: Domain>(
     let pagination = Pagination::try_from(params)?;
 
     let subject = hex::decode(&subject).map_err(|_| Error::InvalidAsset)?;
+    let end_slot = domain.get_tip_slot()?;
     let blocks = domain
         .archive()
-        .iter_blocks_with_asset(&subject)
+        .iter_blocks_with_asset(&subject, 0, end_slot)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let chain = domain

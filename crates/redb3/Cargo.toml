@@ -18,7 +18,8 @@ xxhash-rust.workspace = true
 
 dolos-core = { path = "../core" }
 
-redb = { version = "3.0.2" }
+redb = { version = "^3.1" }
+redb-extras = "0.5.0"
 
 [dev-dependencies]
 dolos-testing = { path = "../testing" }
