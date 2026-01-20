@@ -82,23 +82,6 @@ fn slot_iterator(
     Ok(SlotKeyIterator::new(iter, start_slot, end_slot))
 }
 
-fn collect_slots(
-    rx: &ReadTransaction,
-    table: MultimapTableDefinition<'static, BucketedKey<u64>, u64>,
-    base_key: u64,
-    start_slot: u64,
-    end_slot: u64,
-) -> Result<Vec<BlockSlot>, Error> {
-    let mut iter = slot_iterator(rx, table, base_key, start_slot, end_slot)?;
-    let mut out = Vec::new();
-
-    while let Some(slot) = iter.next() {
-        out.push(slot?);
-    }
-
-    Ok(out)
-}
-
 pub struct AddressApproxIndexTable;
 
 impl AddressApproxIndexTable {
@@ -137,7 +120,9 @@ impl AddressPaymentPartApproxIndexTable {
         end_slot: BlockSlot,
     ) -> Result<Vec<BlockSlot>, Error> {
         let key = Self::compute_key(&address_payment_part.to_vec());
-        collect_slots(rx, Self::DEF, key, start_slot, end_slot)
+        let iter = slot_iterator(rx, Self::DEF, key, start_slot, end_slot)?;
+
+        iter.collect::<Result<_, _>>()
     }
 
     pub fn iter_by_payment(
@@ -168,7 +153,9 @@ impl AddressStakePartApproxIndexTable {
         end_slot: BlockSlot,
     ) -> Result<Vec<BlockSlot>, Error> {
         let key = Self::compute_key(&address_stake_part.to_vec());
-        collect_slots(rx, Self::DEF, key, start_slot, end_slot)
+        let iter = slot_iterator(rx, Self::DEF, key, start_slot, end_slot)?;
+
+        iter.collect::<Result<_, _>>()
     }
 
     pub fn iter_by_stake(
@@ -199,7 +186,9 @@ impl AssetApproxIndexTable {
         end_slot: BlockSlot,
     ) -> Result<Vec<BlockSlot>, Error> {
         let key = Self::compute_key(&asset.to_vec());
-        collect_slots(rx, Self::DEF, key, start_slot, end_slot)
+        let iter = slot_iterator(rx, Self::DEF, key, start_slot, end_slot)?;
+
+        iter.collect::<Result<_, _>>()
     }
 
     pub fn iter_by_asset(
@@ -259,7 +248,9 @@ impl DatumHashApproxIndexTable {
         end_slot: BlockSlot,
     ) -> Result<Vec<BlockSlot>, Error> {
         let key = Self::compute_key(&datum_hash.to_vec());
-        collect_slots(rx, Self::DEF, key, start_slot, end_slot)
+        let iter = slot_iterator(rx, Self::DEF, key, start_slot, end_slot)?;
+
+        iter.collect::<Result<_, _>>()
     }
 }
 
@@ -302,7 +293,9 @@ impl PolicyApproxIndexTable {
         end_slot: BlockSlot,
     ) -> Result<Vec<BlockSlot>, Error> {
         let key = Self::compute_key(&policy.to_vec());
-        collect_slots(rx, Self::DEF, key, start_slot, end_slot)
+        let iter = slot_iterator(rx, Self::DEF, key, start_slot, end_slot)?;
+
+        iter.collect::<Result<_, _>>()
     }
 }
 
@@ -323,7 +316,9 @@ impl ScriptHashApproxIndexTable {
         end_slot: BlockSlot,
     ) -> Result<Vec<BlockSlot>, Error> {
         let key = Self::compute_key(&script_hash.to_vec());
-        collect_slots(rx, Self::DEF, key, start_slot, end_slot)
+        let iter = slot_iterator(rx, Self::DEF, key, start_slot, end_slot)?;
+
+        iter.collect::<Result<_, _>>()
     }
 }
 
@@ -344,7 +339,9 @@ impl SpentTxoApproxIndexTable {
         end_slot: BlockSlot,
     ) -> Result<Vec<BlockSlot>, Error> {
         let key = Self::compute_key(&spent_txo.to_vec());
-        collect_slots(rx, Self::DEF, key, start_slot, end_slot)
+        let iter = slot_iterator(rx, Self::DEF, key, start_slot, end_slot)?;
+
+        iter.collect::<Result<_, _>>()
     }
 }
 
@@ -365,7 +362,9 @@ impl AccountCertsApproxIndexTable {
         end_slot: BlockSlot,
     ) -> Result<Vec<BlockSlot>, Error> {
         let key = Self::compute_key(&account.to_vec());
-        collect_slots(rx, Self::DEF, key, start_slot, end_slot)
+        let iter = slot_iterator(rx, Self::DEF, key, start_slot, end_slot)?;
+
+        iter.collect::<Result<_, _>>()
     }
 
     pub fn iter_by_account_certs(
@@ -396,7 +395,9 @@ impl TxHashApproxIndexTable {
         end_slot: BlockSlot,
     ) -> Result<Vec<BlockSlot>, Error> {
         let key = Self::compute_key(&tx_hash.to_vec());
-        collect_slots(rx, Self::DEF, key, start_slot, end_slot)
+        let iter = slot_iterator(rx, Self::DEF, key, start_slot, end_slot)?;
+
+        iter.collect::<Result<_, _>>()
     }
 }
 
