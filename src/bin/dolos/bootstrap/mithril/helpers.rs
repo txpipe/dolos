@@ -1,61 +1,14 @@
-use itertools::Itertools;
 use miette::{Context, IntoDiagnostic};
 use mithril_client::{ClientBuilder, MessageBuilder, MithrilError, MithrilResult};
 use std::{path::Path, sync::Arc};
-use tracing::{info, warn};
+use tracing::warn;
 
 use dolos::prelude::*;
 
 use crate::feedback::Feedback;
-use dolos_core::config::{MithrilConfig, RootConfig};
+use dolos_core::config::MithrilConfig;
 
-#[derive(Debug, clap::Args, Clone)]
-pub struct Args {
-    #[arg(long, default_value = "./snapshot")]
-    download_dir: String,
-
-    /// Skip the bootstrap if there's already data in the stores
-    #[arg(long, action)]
-    skip_if_not_empty: bool,
-
-    /// Skip the Mithril certificate validation
-    #[arg(long, action)]
-    skip_validation: bool,
-
-    /// Assume the snapshot is already available in the download dir
-    #[arg(long, action)]
-    skip_download: bool,
-
-    /// Retain downloaded snapshot instead of deleting it
-    #[arg(long, action)]
-    retain_snapshot: bool,
-
-    /// Number of blocks to process in each chunk, more is faster but uses more
-    /// memory
-    #[arg(long, default_value = "500")]
-    chunk_size: usize,
-
-    #[arg(long, action)]
-    verbose: bool,
-
-    #[arg(long)]
-    start_from: Option<ChainPoint>,
-}
-
-impl Default for Args {
-    fn default() -> Self {
-        Self {
-            download_dir: "./snapshot".to_string(),
-            skip_if_not_empty: Default::default(),
-            skip_validation: Default::default(),
-            skip_download: Default::default(),
-            retain_snapshot: Default::default(),
-            verbose: Default::default(),
-            chunk_size: 500,
-            start_from: None,
-        }
-    }
-}
+use super::Args;
 
 struct MithrilFeedback {
     download_pb: indicatif::ProgressBar,
@@ -108,7 +61,7 @@ impl mithril_client::feedback::FeedbackReceiver for MithrilFeedback {
     }
 }
 
-async fn fetch_snapshot(
+pub(crate) async fn fetch_snapshot(
     args: &Args,
     config: &MithrilConfig,
     feedback: &Feedback,
@@ -167,7 +120,7 @@ async fn fetch_snapshot(
     Ok(())
 }
 
-fn define_starting_point(
+pub(crate) fn define_starting_point(
     args: &Args,
     state: &dolos_redb3::state::StateStore,
 ) -> Result<pallas::network::miniprotocols::Point, miette::Error> {
@@ -187,97 +140,28 @@ fn define_starting_point(
     }
 }
 
-async fn import_hardano_into_domain(
+pub(crate) fn define_archive_starting_point(
     args: &Args,
-    config: &RootConfig,
-    immutable_path: &Path,
-    feedback: &Feedback,
-    chunk_size: usize,
-) -> Result<(), miette::Error> {
-    let domain = crate::common::setup_domain(config).await?;
-
-    let tip = pallas::storage::hardano::immutable::get_tip(immutable_path)
-        .map_err(|err| miette::miette!(err.to_string()))
-        .context("reading immutable db tip")?
-        .ok_or(miette::miette!("immutable db has no tip"))?;
-
-    let cursor = define_starting_point(args, domain.state())?;
-
-    let iter = pallas::storage::hardano::immutable::read_blocks_from_point(immutable_path, cursor)
-        .map_err(|err| miette::miette!(err.to_string()))
-        .context("reading immutable db tip")?;
-
-    let progress = feedback.slot_progress_bar();
-
-    progress.set_message("importing immutable db");
-    progress.set_length(tip.slot_or_default());
-
-    for batch in iter.chunks(chunk_size).into_iter() {
-        let batch: Vec<_> = batch
-            .try_collect()
-            .into_diagnostic()
-            .context("reading block data")?;
-
-        // we need to wrap them on a ref counter since bytes are going to be shared
-        // around throughout the pipeline
-        let batch: Vec<_> = batch.into_iter().map(Arc::new).collect();
-
-        let last = dolos_core::facade::import_blocks(&domain, batch)
-            .await
-            .map_err(|e| miette::miette!(e.to_string()))?;
-
-        progress.set_position(last);
+    archive: &impl ArchiveStore,
+) -> Result<pallas::network::miniprotocols::Point, miette::Error> {
+    if let Some(point) = &args.start_from {
+        return Ok(point.clone().try_into().unwrap());
     }
 
-    progress.abandon_with_message("immutable db import complete");
+    let tip = archive
+        .get_tip()
+        .into_diagnostic()
+        .context("reading archive tip")?;
 
-    Ok(())
-}
+    let Some((slot, raw)) = tip else {
+        return Ok(pallas::network::miniprotocols::Point::Origin);
+    };
 
-#[tokio::main]
-pub async fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Result<()> {
-    if args.verbose {
-        crate::common::setup_tracing(&config.logging)?;
-    }
+    let block = dolos_cardano::owned::OwnedMultiEraBlock::decode(Arc::new(raw))
+        .into_diagnostic()
+        .context("decoding archive tip")?;
 
-    let mithril = config
-        .mithril
-        .as_ref()
-        .ok_or(miette::miette!("missing mithril config"))?;
+    let point = ChainPoint::Specific(slot, block.hash());
 
-    let target_directory = Path::new(&args.download_dir);
-
-    if !target_directory.exists() {
-        std::fs::create_dir_all(target_directory)
-            .map_err(|err| miette::miette!(err.to_string()))
-            .context(format!(
-                "Failed to create directory: {}",
-                target_directory.display()
-            ))?;
-    }
-
-    if !args.skip_download {
-        fetch_snapshot(args, mithril, feedback)
-            .await
-            .map_err(|err| miette::miette!(err.to_string()))
-            .context("fetching and validating mithril snapshot")?;
-    } else {
-        warn!("skipping download, assuming download dir has snapshot and it's validated")
-    }
-
-    let immutable_path = Path::new(&args.download_dir).join("immutable");
-
-    import_hardano_into_domain(args, config, &immutable_path, feedback, args.chunk_size).await?;
-
-    if !args.retain_snapshot {
-        info!("deleting downloaded snapshot");
-
-        std::fs::remove_dir_all(Path::new(&args.download_dir))
-            .into_diagnostic()
-            .context("removing downloaded snapshot")?;
-    }
-
-    println!("bootstrap complete, run `dolos daemon` to start the node");
-
-    Ok(())
+    Ok(point.try_into().unwrap())
 }
