@@ -86,7 +86,8 @@ fn unpack_cert(tags: &mut SlotTags, cert: &MultiEraCert) {
     }
 }
 
-pub fn collect_slot_tags_from_block(
+// TODO: this public method breaks all abstrations but it's an easy way to generate archive indexes in an isolated way as needed for the Mithril import process.
+pub fn _hack_collect_slot_tags_from_block(
     block: &MultiEraBlock,
     resolved_inputs: &HashMap<TxoRef, OwnedMultiEraOutput>,
     tags: &mut SlotTags,
