@@ -38,30 +38,30 @@ impl Iterator for SlotKeyIterator {
     type Item = Result<u64, Error>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            let slot = match self.inner.next()? {
-                Ok(slot) => slot,
-                Err(err) => return Some(Err(err.into())),
-            };
+        let slot = match self.inner.next()? {
+            Ok(slot) => slot,
+            Err(err) => return Some(Err(err.into())),
+        };
 
-            if slot >= self.start_slot && slot <= self.end_slot {
-                return Some(Ok(slot));
-            }
+        if slot >= self.start_slot && slot <= self.end_slot {
+            Some(Ok(slot))
+        } else {
+            None
         }
     }
 }
 
 impl DoubleEndedIterator for SlotKeyIterator {
     fn next_back(&mut self) -> Option<Self::Item> {
-        loop {
-            let slot = match self.inner.next_back()? {
-                Ok(slot) => slot,
-                Err(err) => return Some(Err(err.into())),
-            };
+        let slot = match self.inner.next_back()? {
+            Ok(slot) => slot,
+            Err(err) => return Some(Err(err.into())),
+        };
 
-            if slot >= self.start_slot && slot <= self.end_slot {
-                return Some(Ok(slot));
-            }
+        if slot >= self.start_slot && slot <= self.end_slot {
+            Some(Ok(slot))
+        } else {
+            None
         }
     }
 }
