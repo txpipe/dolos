@@ -6,7 +6,7 @@ use std::sync::Arc;
 use itertools::Itertools;
 
 use dolos::prelude::*;
-use dolos_cardano::{owned::OwnedMultiEraOutput, roll::txs::collect_slot_tags_from_block};
+use dolos_cardano::{owned::OwnedMultiEraOutput, roll::txs::_hack_collect_slot_tags_from_block};
 use pallas::ledger::traverse::MultiEraBlock;
 
 use crate::feedback::Feedback;
@@ -99,7 +99,7 @@ pub(crate) async fn import_hardano_into_archive(
             utxos.insert_block_outputs(view)?;
 
             let mut tags = SlotTags::default();
-            collect_slot_tags_from_block(view, &utxos.entries, &mut tags)
+            _hack_collect_slot_tags_from_block(view, &utxos.entries, &mut tags)
                 .into_diagnostic()
                 .context("computing block tags")?;
 
