@@ -378,26 +378,17 @@ impl AccountCertsApproxIndexTable {
     }
 }
 
-pub struct TxHashApproxIndexTable;
+pub struct TxHashIndexTable;
 
-impl TxHashApproxIndexTable {
-    pub const DEF: MultimapTableDefinition<'static, BucketedKey<u64>, u64> =
-        MultimapTableDefinition::new("bytx");
-
-    pub fn compute_key(tx_hash: &Vec<u8>) -> u64 {
-        xxh3_64(tx_hash.as_slice())
-    }
+impl TxHashIndexTable {
+    pub const DEF: TableDefinition<'static, &'static [u8], u64> = TableDefinition::new("bytx");
 
     pub fn get_by_tx_hash(
         rx: &ReadTransaction,
         tx_hash: &[u8],
-        start_slot: BlockSlot,
-        end_slot: BlockSlot,
-    ) -> Result<Vec<BlockSlot>, Error> {
-        let key = Self::compute_key(&tx_hash.to_vec());
-        let iter = slot_iterator(rx, Self::DEF, key, start_slot, end_slot)?;
-
-        iter.collect::<Result<_, _>>()
+    ) -> Result<Option<BlockSlot>, Error> {
+        let table = rx.open_table(Self::DEF)?;
+        Ok(table.get(tx_hash)?.map(|slot| slot.value()))
     }
 }
 
@@ -416,7 +407,7 @@ impl Indexes {
         wx.open_multimap_table(ScriptHashApproxIndexTable::DEF)?;
         wx.open_multimap_table(SpentTxoApproxIndexTable::DEF)?;
         wx.open_multimap_table(AccountCertsApproxIndexTable::DEF)?;
-        wx.open_multimap_table(TxHashApproxIndexTable::DEF)?;
+        wx.open_table(TxHashIndexTable::DEF)?;
         wx.open_multimap_table(MetadataApproxIndexTable::DEF)?;
 
         Ok(())
@@ -575,10 +566,8 @@ impl Indexes {
     pub fn get_by_tx_hash(
         rx: &ReadTransaction,
         tx_hash: &[u8],
-        start_slot: BlockSlot,
-        end_slot: BlockSlot,
-    ) -> Result<Vec<BlockSlot>, Error> {
-        TxHashApproxIndexTable::get_by_tx_hash(rx, tx_hash, start_slot, end_slot)
+    ) -> Result<Option<BlockSlot>, Error> {
+        TxHashIndexTable::get_by_tx_hash(rx, tx_hash)
     }
 
     pub fn copy(rx: &ReadTransaction, wx: &WriteTransaction) -> Result<(), Error> {
@@ -593,7 +582,7 @@ impl Indexes {
         Self::copy_table(ScriptHashApproxIndexTable::DEF, rx, wx)?;
         Self::copy_table(SpentTxoApproxIndexTable::DEF, rx, wx)?;
         Self::copy_table(AccountCertsApproxIndexTable::DEF, rx, wx)?;
-        Self::copy_table(TxHashApproxIndexTable::DEF, rx, wx)?;
+        Self::copy_value_table(TxHashIndexTable::DEF, rx, wx)?;
 
         Ok(())
     }
@@ -611,13 +600,12 @@ impl Indexes {
             table.insert(number, slot)?;
         }
 
-        Self::insert(
-            wx,
-            TxHashApproxIndexTable::DEF,
-            TxHashApproxIndexTable::compute_key,
-            tags.tx_hashes.clone(),
-            slot,
-        )?;
+        if !tags.tx_hashes.is_empty() {
+            let mut table = wx.open_table(TxHashIndexTable::DEF)?;
+            for tx_hash in &tags.tx_hashes {
+                table.insert(tx_hash.as_slice(), slot)?;
+            }
+        }
 
         Self::insert(
             wx,
@@ -715,13 +703,12 @@ impl Indexes {
             table.remove(number)?;
         }
 
-        Self::remove(
-            wx,
-            TxHashApproxIndexTable::DEF,
-            TxHashApproxIndexTable::compute_key,
-            tags.tx_hashes.clone(),
-            slot,
-        )?;
+        if !tags.tx_hashes.is_empty() {
+            let mut table = wx.open_table(TxHashIndexTable::DEF)?;
+            for tx_hash in &tags.tx_hashes {
+                table.remove(tx_hash.as_slice())?;
+            }
+        }
 
         Self::remove(
             wx,
