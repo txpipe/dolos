@@ -47,12 +47,20 @@ pub(crate) async fn import_hardano(
         // around throughout the pipeline
         let batch: Vec<_> = batch.into_iter().map(Arc::new).collect();
 
-        let last = dolos_core::facade::import_blocks_state_only(&domain, batch)
+        let last = dolos_core::facade::import_blocks_state_only(&domain, batch, false)
             .await
             .map_err(|e| miette::miette!(e.to_string()))?;
 
         progress.set_position(last);
     }
+
+    import_result?;
+
+    domain
+        .state()
+        .rebuild_utxo_indexes()
+        .map_err(|err| miette::miette!(format!("{err:?}")))
+        .context("rebuilding state indexes")?;
 
     progress.abandon_with_message("immutable db state import complete");
 

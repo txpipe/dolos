@@ -17,7 +17,8 @@ pub fn seed_random_memory_store(utxo_generator: impl UtxoGenerator) -> impl Stat
     let delta = make_custom_utxo_delta(everyone, utxos_per_address, utxo_generator);
 
     let writer = store.start_writer().unwrap();
-    writer.apply_utxoset(&delta).unwrap();
+    writer.apply_utxoset(&delta, true).unwrap();
+
     writer.commit().unwrap();
 
     store
@@ -127,7 +128,8 @@ impl ToyDomain {
 
         if let Some(delta) = initial_delta {
             let writer = domain.state.start_writer().unwrap();
-            writer.apply_utxoset(&delta).unwrap();
+            writer.apply_utxoset(&delta, true).unwrap();
+
             writer.commit().unwrap();
         }
 

@@ -4,8 +4,8 @@ use pallas::{
     ledger::{addresses::ShelleyDelegationPart, traverse::MultiEraOutput},
 };
 use redb::{
-    MultimapTableDefinition, Range, ReadTransaction, ReadableDatabase, ReadableTable as _,
-    ReadableTableMetadata as _, TableDefinition, TableStats, WriteTransaction,
+    MultimapTable, MultimapTableDefinition, Range, ReadTransaction, ReadableDatabase,
+    ReadableTable as _, ReadableTableMetadata as _, TableDefinition, TableStats, WriteTransaction,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -344,6 +344,86 @@ impl FilterIndexes {
         }
     }
 
+    fn index_output(
+        address_table: &mut MultimapTable<&[u8], UtxosKey>,
+        payment_table: &mut MultimapTable<&[u8], UtxosKey>,
+        stake_table: &mut MultimapTable<&[u8], UtxosKey>,
+        policy_table: &mut MultimapTable<&[u8], UtxosKey>,
+        asset_table: &mut MultimapTable<&[u8], UtxosKey>,
+        utxo: (&[u8; 32], u32),
+        body: &MultiEraOutput,
+    ) -> Result<(), Error> {
+        let SplitAddressResult(addr, pay, stake) = Self::split_address(body)?;
+
+        if let Some(k) = addr {
+            address_table.insert(k.as_slice(), utxo)?;
+        }
+
+        if let Some(k) = pay {
+            payment_table.insert(k.as_slice(), utxo)?;
+        }
+
+        if let Some(k) = stake {
+            stake_table.insert(k.as_slice(), utxo)?;
+        }
+
+        let value = body.value();
+        let assets = value.assets();
+
+        for batch in assets {
+            policy_table.insert(batch.policy().as_slice(), utxo)?;
+
+            for asset in batch.assets() {
+                let mut subject = asset.policy().to_vec();
+                subject.extend(asset.name());
+
+                asset_table.insert(subject.as_slice(), utxo)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn unindex_output(
+        address_table: &mut MultimapTable<&[u8], UtxosKey>,
+        payment_table: &mut MultimapTable<&[u8], UtxosKey>,
+        stake_table: &mut MultimapTable<&[u8], UtxosKey>,
+        policy_table: &mut MultimapTable<&[u8], UtxosKey>,
+        asset_table: &mut MultimapTable<&[u8], UtxosKey>,
+        utxo: (&[u8; 32], u32),
+        body: &MultiEraOutput,
+    ) -> Result<(), Error> {
+        let SplitAddressResult(addr, pay, stake) = Self::split_address(body)?;
+
+        if let Some(k) = addr {
+            address_table.remove(k.as_slice(), utxo)?;
+        }
+
+        if let Some(k) = pay {
+            payment_table.remove(k.as_slice(), utxo)?;
+        }
+
+        if let Some(k) = stake {
+            stake_table.remove(k.as_slice(), utxo)?;
+        }
+
+        let value = body.value();
+        let assets = value.assets();
+
+        for batch in assets {
+            policy_table.remove(batch.policy().as_slice(), utxo)?;
+
+            for asset in batch.assets() {
+                let mut subject = asset.policy().to_vec();
+                subject.extend(asset.name());
+
+                asset_table.remove(subject.as_slice(), utxo)?;
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn apply(wx: &WriteTransaction, delta: &UtxoSetDelta) -> Result<(), Error> {
         let mut address_table = wx.open_multimap_table(Self::BY_ADDRESS)?;
         let mut payment_table = wx.open_multimap_table(Self::BY_PAYMENT)?;
@@ -361,33 +441,16 @@ impl FilterIndexes {
 
             // TODO: decoding here is very inefficient
             let body = MultiEraOutput::try_from(body.as_ref()).unwrap();
-            let SplitAddressResult(addr, pay, stake) = Self::split_address(&body)?;
 
-            if let Some(k) = addr {
-                address_table.insert(k.as_slice(), v)?;
-            }
-
-            if let Some(k) = pay {
-                payment_table.insert(k.as_slice(), v)?;
-            }
-
-            if let Some(k) = stake {
-                stake_table.insert(k.as_slice(), v)?;
-            }
-
-            let value = body.value();
-            let assets = value.assets();
-
-            for batch in assets {
-                policy_table.insert(batch.policy().as_slice(), v)?;
-
-                for asset in batch.assets() {
-                    let mut subject = asset.policy().to_vec();
-                    subject.extend(asset.name());
-
-                    asset_table.insert(subject.as_slice(), v)?;
-                }
-            }
+            Self::index_output(
+                &mut address_table,
+                &mut payment_table,
+                &mut stake_table,
+                &mut policy_table,
+                &mut asset_table,
+                v,
+                &body,
+            )?;
         }
 
         let forgettable = delta.consumed_utxo.iter().chain(delta.undone_utxo.iter());
@@ -398,33 +461,15 @@ impl FilterIndexes {
             // TODO: decoding here is very inefficient
             let body = MultiEraOutput::try_from(body.as_ref()).unwrap();
 
-            let SplitAddressResult(addr, pay, stake) = Self::split_address(&body)?;
-
-            if let Some(k) = addr {
-                address_table.remove(k.as_slice(), v)?;
-            }
-
-            if let Some(k) = pay {
-                payment_table.remove(k.as_slice(), v)?;
-            }
-
-            if let Some(k) = stake {
-                stake_table.remove(k.as_slice(), v)?;
-            }
-
-            let value = body.value();
-            let assets = value.assets();
-
-            for batch in assets {
-                policy_table.remove(batch.policy().as_slice(), v)?;
-
-                for asset in batch.assets() {
-                    let mut subject = asset.policy().to_vec();
-                    subject.extend(asset.name());
-
-                    asset_table.remove(subject.as_slice(), v)?;
-                }
-            }
+            Self::unindex_output(
+                &mut address_table,
+                &mut payment_table,
+                &mut stake_table,
+                &mut policy_table,
+                &mut asset_table,
+                v,
+                &body,
+            )?;
         }
 
         Ok(())
@@ -503,6 +548,48 @@ impl StateStore {
         Ok(HashMap::from_iter(all_tables))
     }
 
+    pub fn rebuild_utxo_indexes(&self) -> Result<(), Error> {
+        let rx = self.db().begin_read()?;
+        let wx = self.db().begin_write()?;
+
+        {
+            let _ = wx.delete_multimap_table(FilterIndexes::BY_ADDRESS)?;
+            let _ = wx.delete_multimap_table(FilterIndexes::BY_PAYMENT)?;
+            let _ = wx.delete_multimap_table(FilterIndexes::BY_STAKE)?;
+            let _ = wx.delete_multimap_table(FilterIndexes::BY_POLICY)?;
+            let _ = wx.delete_multimap_table(FilterIndexes::BY_ASSET)?;
+
+            let mut address_table = wx.open_multimap_table(FilterIndexes::BY_ADDRESS)?;
+            let mut payment_table = wx.open_multimap_table(FilterIndexes::BY_PAYMENT)?;
+            let mut stake_table = wx.open_multimap_table(FilterIndexes::BY_STAKE)?;
+            let mut policy_table = wx.open_multimap_table(FilterIndexes::BY_POLICY)?;
+            let mut asset_table = wx.open_multimap_table(FilterIndexes::BY_ASSET)?;
+
+            let utxos = UtxosTable::iter(&rx)?;
+
+            for entry in utxos {
+                let (utxo, body) = entry.map_err(Error::from)?;
+                let output =
+                    MultiEraOutput::try_from(&body).map_err(|_| Error::InvalidOperation)?;
+                let key: (&[u8; 32], u32) = (&utxo.0, utxo.1);
+
+                FilterIndexes::index_output(
+                    &mut address_table,
+                    &mut payment_table,
+                    &mut stake_table,
+                    &mut policy_table,
+                    &mut asset_table,
+                    key,
+                    &output,
+                )?;
+            }
+        }
+
+        wx.commit()?;
+
+        Ok(())
+    }
+
     pub fn get_datum(&self, datum_hash: &Hash<32>) -> Result<Option<Vec<u8>>, Error> {
         let rx = self.db().begin_read()?;
         DatumsTable::get(&rx, datum_hash)
@@ -530,7 +617,7 @@ mod tests {
         ($store:expr, $deltas:expr) => {
             let writer = $store.start_writer().unwrap();
             for delta in $deltas.iter() {
-                writer.apply_utxoset(&delta).unwrap();
+                writer.apply_utxoset(&delta, true).unwrap();
             }
             writer.commit().unwrap();
         };

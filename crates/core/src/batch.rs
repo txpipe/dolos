@@ -283,7 +283,7 @@ impl<C: ChainLogic> WorkBatch<C> {
         Ok(())
     }
 
-    pub fn commit_state<D>(&mut self, domain: &D) -> Result<(), DomainError>
+    pub fn commit_state<D>(&mut self, domain: &D, update_indexes: bool) -> Result<(), DomainError>
     where
         D: Domain<Chain = C>,
     {
@@ -298,7 +298,7 @@ impl<C: ChainLogic> WorkBatch<C> {
         // this into the entity system.
         for block in self.blocks.iter() {
             if let Some(utxo_delta) = &block.utxo_delta {
-                writer.apply_utxoset(utxo_delta)?;
+                writer.apply_utxoset(utxo_delta, update_indexes)?;
             }
         }
 

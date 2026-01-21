@@ -61,7 +61,7 @@ where
             let utxo_undo = dolos_cardano::utxoset::compute_undo_delta(blockd, &inputs)
                 .map_err(dolos_core::ChainError::from)?;
 
-            writer.apply_utxoset(&utxo_undo)?;
+            writer.apply_utxoset(&utxo_undo, true)?;
 
             // TODO: we should differ notifications until the we commit the writers
             self.notify_tip(TipEvent::Undo(point.clone(), block));

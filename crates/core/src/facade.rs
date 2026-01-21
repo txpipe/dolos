@@ -29,7 +29,7 @@ fn execute_batch<D: Domain>(
 
     batch.apply_entities()?;
 
-    batch.commit_state(domain)?;
+    batch.commit_state(domain, true)?;
 
     batch.commit_archive(domain)?;
 
@@ -41,6 +41,7 @@ fn execute_batch_state_only<D: Domain>(
     domain: &D,
     batch: &mut WorkBatch<D::Chain>,
     with_wal: bool,
+    update_indexes: bool,
 ) -> Result<BlockSlot, DomainError> {
     batch.load_utxos(domain)?;
 
@@ -57,7 +58,7 @@ fn execute_batch_state_only<D: Domain>(
 
     batch.apply_entities()?;
 
-    batch.commit_state(domain)?;
+    batch.commit_state(domain, update_indexes)?;
 
     Ok(batch.last_slot())
 }
@@ -115,6 +116,7 @@ fn execute_work_state_only<D: Domain>(
     domain: &D,
     work: &mut WorkUnit<D::Chain>,
     live: bool,
+    update_indexes: bool,
 ) -> Result<(), DomainError> {
     match work {
         WorkUnit::Genesis => {
@@ -131,7 +133,7 @@ fn execute_work_state_only<D: Domain>(
             chain.apply_rupd::<D>(domain.state(), domain.archive(), domain.genesis(), *slot)?;
         }
         WorkUnit::Blocks(batch) => {
-            execute_batch_state_only(chain, domain, batch, live)?;
+            execute_batch_state_only(chain, domain, batch, live, update_indexes)?;
         }
         WorkUnit::ForcedStop => {
             return Err(DomainError::StopEpochReached);
@@ -161,9 +163,10 @@ async fn drain_pending_work_state_only<D: Domain>(
     chain: &mut D::Chain,
     domain: &D,
     live: bool,
+    update_indexes: bool,
 ) -> Result<(), DomainError> {
     while let Some(mut work) = chain.pop_work() {
-        execute_work_state_only(chain, domain, &mut work, live)?;
+        execute_work_state_only(chain, domain, &mut work, live, update_indexes)?;
     }
 
     Ok(())
@@ -193,20 +196,21 @@ pub async fn import_blocks<D: Domain>(
 pub async fn import_blocks_state_only<D: Domain>(
     domain: &D,
     mut raw: Vec<RawBlock>,
+    update_indexes: bool,
 ) -> Result<BlockSlot, DomainError> {
     let mut last = 0;
     let mut chain = domain.write_chain().await;
 
     for block in raw.drain(..) {
         if !chain.can_receive_block() {
-            drain_pending_work_state_only(&mut *chain, domain, false).await?;
+            drain_pending_work_state_only(&mut *chain, domain, false, update_indexes).await?;
         }
 
         last = chain.receive_block(block)?;
     }
 
     // one last drain to ensure we're up to date
-    drain_pending_work_state_only(&mut *chain, domain, false).await?;
+    drain_pending_work_state_only(&mut *chain, domain, false, update_indexes).await?;
 
     Ok(last)
 }
