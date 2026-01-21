@@ -12,7 +12,7 @@ use dolos_core::config::RootConfig;
 use super::helpers::define_starting_point;
 use super::Args;
 
-pub(crate) async fn import_hardano_into_state(
+pub(crate) async fn import_hardano(
     args: &Args,
     config: &RootConfig,
     immutable_path: &Path,

@@ -1,53 +1,20 @@
 use miette::{Context, IntoDiagnostic};
-use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
 use itertools::Itertools;
 
 use dolos::prelude::*;
-use dolos_cardano::{owned::OwnedMultiEraOutput, roll::txs::_hack_collect_slot_tags_from_block};
-use pallas::ledger::traverse::MultiEraBlock;
+use dolos_cardano::roll::txs::collect_slot_tags_from_block;
 
 use crate::feedback::Feedback;
 use dolos_core::config::RootConfig;
 
 use super::helpers::define_archive_starting_point;
+use super::utxo_cache::UtxoCache;
 use super::Args;
 
-#[derive(Default)]
-struct UtxoCache {
-    entries: HashMap<TxoRef, OwnedMultiEraOutput>,
-}
-
-impl UtxoCache {
-    fn insert_block_outputs(&mut self, block: &MultiEraBlock) -> miette::Result<()> {
-        for tx in block.txs() {
-            let tx_hash = tx.hash();
-
-            for (idx, output) in tx.produces() {
-                let txo_ref = TxoRef(tx_hash, idx as u32);
-                let eracbor: EraCbor = output.into();
-                let resolved = OwnedMultiEraOutput::decode(Arc::new(eracbor)).into_diagnostic()?;
-
-                self.entries.insert(txo_ref, resolved);
-            }
-        }
-
-        Ok(())
-    }
-
-    fn remove_block_inputs(&mut self, block: &MultiEraBlock) {
-        for tx in block.txs() {
-            for input in tx.consumes() {
-                let txo_ref: TxoRef = (&input).into();
-                self.entries.remove(&txo_ref);
-            }
-        }
-    }
-}
-
-pub(crate) async fn import_hardano_into_archive(
+pub(crate) async fn import_hardano(
     args: &Args,
     config: &RootConfig,
     immutable_path: &Path,
@@ -72,7 +39,7 @@ pub(crate) async fn import_hardano_into_archive(
     progress.set_message("importing immutable db (archive)");
     progress.set_length(tip.slot_or_default());
 
-    let mut utxos = UtxoCache::default();
+    let utxos = UtxoCache::in_memory().context("initializing in-memory utxo cache")?;
 
     for batch in iter.chunks(chunk_size).into_iter() {
         let batch: Vec<_> = batch
@@ -96,10 +63,16 @@ pub(crate) async fn import_hardano_into_archive(
             let point = block.point();
             let view = block.view();
 
-            utxos.insert_block_outputs(view)?;
+            utxos
+                .insert_block_outputs(view)
+                .context("caching block outputs")?;
+
+            let resolved_inputs = utxos
+                .resolve_block_inputs(view)
+                .context("resolving block inputs")?;
 
             let mut tags = SlotTags::default();
-            _hack_collect_slot_tags_from_block(view, &utxos.entries, &mut tags)
+            collect_slot_tags_from_block(view, &resolved_inputs, &mut tags)
                 .into_diagnostic()
                 .context("computing block tags")?;
 
@@ -108,7 +81,9 @@ pub(crate) async fn import_hardano_into_archive(
                 .map_err(|err| miette::miette!(format!("{err:?}")))
                 .context("writing archive block")?;
 
-            utxos.remove_block_inputs(view);
+            utxos
+                .remove_block_inputs(view)
+                .context("evicting block inputs")?;
 
             last_slot = Some(point.slot());
         }

@@ -10,6 +10,7 @@ use dolos_core::config::RootConfig;
 mod archive;
 mod helpers;
 mod state;
+mod utxo_cache;
 
 #[derive(Debug, clap::Args, Clone)]
 pub struct Args {
@@ -110,19 +111,11 @@ pub async fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miett
     let immutable_path = Path::new(&args.download_dir).join("immutable");
 
     if run_state {
-        state::import_hardano_into_state(args, config, &immutable_path, feedback, args.chunk_size)
-            .await?;
+        state::import_hardano(args, config, &immutable_path, feedback, args.chunk_size).await?;
     }
 
     if run_archive {
-        archive::import_hardano_into_archive(
-            args,
-            config,
-            &immutable_path,
-            feedback,
-            args.chunk_size,
-        )
-        .await?;
+        archive::import_hardano(args, config, &immutable_path, feedback, args.chunk_size).await?;
     }
 
     if !args.retain_snapshot {
