@@ -3904,9 +3904,9 @@ dependencies = [
 
 [[package]]
 name = "redb-extras"
-version = "0.5.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b8b7ee3853b815271ae1d8861f4f80cec745fd398021513295c15ede039920bb"
+checksum = "ba3a0913835a509dd3f308cfe2379b9884f7bcc8d1ff856513eeab1ec450923f"
 dependencies = [
  "redb",
  "roaring",

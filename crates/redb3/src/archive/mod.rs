@@ -301,16 +301,6 @@ impl ArchiveStore {
         indexes::Indexes::get_by_account(&rx, account, start_slot, end_slot)
     }
 
-    pub fn get_possible_block_slots_by_tx_hash(
-        &self,
-        tx_hash: &[u8],
-        start_slot: BlockSlot,
-        end_slot: BlockSlot,
-    ) -> Result<Vec<BlockSlot>, RedbArchiveError> {
-        let rx = self.db().begin_read().map_err(Error::from)?;
-        indexes::Indexes::get_by_tx_hash(&rx, tx_hash, start_slot, end_slot)
-    }
-
     pub fn get_possible_blocks_by_address_payment_part(
         &self,
         address_payment_part: &[u8],
@@ -447,36 +437,24 @@ impl ArchiveStore {
             .collect()
     }
 
-    pub fn get_possible_blocks_by_tx_hash(
-        &self,
-        tx_hash: &[u8],
-        start_slot: BlockSlot,
-        end_slot: BlockSlot,
-    ) -> Result<Vec<BlockBody>, RedbArchiveError> {
-        self.get_possible_block_slots_by_tx_hash(tx_hash, start_slot, end_slot)?
-            .iter()
-            .flat_map(|slot| match self.get_block_by_slot(slot) {
-                Ok(Some(block)) => Some(Ok(block)),
-                Ok(None) => None,
-                Err(e) => Some(Err(e)),
-            })
-            .collect()
-    }
-
     pub fn get_block_with_tx(
         &self,
         tx_hash: &[u8],
     ) -> Result<Option<(BlockBody, TxOrder)>, RedbArchiveError> {
-        let (start_slot, end_slot) = self.index_bounds()?;
-        let possible = self.get_possible_blocks_by_tx_hash(tx_hash, start_slot, end_slot)?;
+        let rx = self.db().begin_read()?;
+        let Some(slot) = indexes::Indexes::get_by_tx_hash(&rx, tx_hash)? else {
+            return Ok(None);
+        };
 
-        for raw in possible {
-            let block =
-                MultiEraBlock::decode(raw.as_slice()).map_err(ArchiveError::BlockDecodingError)?;
-            for (idx, tx) in block.txs().iter().enumerate() {
-                if tx.hash().to_vec() == tx_hash {
-                    return Ok(Some((raw, idx)));
-                }
+        let Some(raw) = tables::BlocksTable::get_by_slot(&rx, slot)? else {
+            return Ok(None);
+        };
+
+        let block =
+            MultiEraBlock::decode(raw.as_slice()).map_err(ArchiveError::BlockDecodingError)?;
+        for (idx, tx) in block.txs().iter().enumerate() {
+            if tx.hash().to_vec() == tx_hash {
+                return Ok(Some((raw, idx)));
             }
         }
 
@@ -580,25 +558,8 @@ impl ArchiveStore {
     }
 
     pub fn get_slot_for_tx(&self, tx_hash: &[u8]) -> Result<Option<BlockSlot>, RedbArchiveError> {
-        let (start_slot, end_slot) = self.index_bounds()?;
-        let mut possible =
-            self.get_possible_block_slots_by_tx_hash(tx_hash, start_slot, end_slot)?;
-        if possible.len() == 1 {
-            Ok(possible.pop())
-        } else {
-            for slot in possible {
-                let block = self.get_block_by_slot(&slot)?;
-
-                if let Some(raw) = block {
-                    let block =
-                        MultiEraBlock::decode(&raw).map_err(ArchiveError::BlockDecodingError)?;
-                    if block.txs().iter().any(|x| x.hash().to_vec() == tx_hash) {
-                        return Ok(Some(slot));
-                    }
-                }
-            }
-            Ok(None)
-        }
+        let rx = self.db().begin_read()?;
+        indexes::Indexes::get_by_tx_hash(&rx, tx_hash)
     }
 
     pub fn get_tx_by_spent_txo(
@@ -627,15 +588,19 @@ impl ArchiveStore {
     }
 
     pub fn get_tx(&self, tx_hash: &[u8]) -> Result<Option<EraCbor>, RedbArchiveError> {
-        let (start_slot, end_slot) = self.index_bounds()?;
-        let possible = self.get_possible_blocks_by_tx_hash(tx_hash, start_slot, end_slot)?;
+        let rx = self.db().begin_read()?;
+        let Some(slot) = indexes::Indexes::get_by_tx_hash(&rx, tx_hash)? else {
+            return Ok(None);
+        };
 
-        for raw in possible {
-            let block =
-                MultiEraBlock::decode(raw.as_slice()).map_err(ArchiveError::BlockDecodingError)?;
-            if let Some(tx) = block.txs().iter().find(|x| x.hash().to_vec() == tx_hash) {
-                return Ok(Some(EraCbor(block.era().into(), tx.encode())));
-            }
+        let Some(raw) = tables::BlocksTable::get_by_slot(&rx, slot)? else {
+            return Ok(None);
+        };
+
+        let block =
+            MultiEraBlock::decode(raw.as_slice()).map_err(ArchiveError::BlockDecodingError)?;
+        if let Some(tx) = block.txs().iter().find(|x| x.hash().to_vec() == tx_hash) {
+            return Ok(Some(EraCbor(block.era().into(), tx.encode())));
         }
 
         Ok(None)
