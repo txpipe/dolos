@@ -467,6 +467,37 @@ fn convert_pool_params(operator: &[u8], params: &dolos_cardano::PoolParams) -> q
     }
 }
 
+pub fn build_stake_pools_response<D: Domain>(domain: &D) -> Result<AnyCbor, Error> {
+    let state = domain.state();
+    let pools_iter = state
+        .iter_entities_typed::<PoolState>(PoolState::NS, None)
+        .map_err(|e| Error::server(format!("failed to iterate pools: {}", e)))?;
+
+    let mut pool_ids: BTreeSet<Bytes> = BTreeSet::new();
+
+    for record in pools_iter {
+        let (_, pool) = record.map_err(|e| Error::server(format!("failed to read pool: {}", e)))?;
+
+        let live_snapshot_opt = pool.snapshot.live();
+        let live_snapshot = match live_snapshot_opt {
+            Some(ls) => ls,
+            None => continue,
+        };
+
+        if live_snapshot.is_retired {
+            continue;
+        }
+
+        let pool_id: Bytes = pool.operator.to_vec().into();
+        pool_ids.insert(pool_id);
+    }
+
+    debug!(num_pools = pool_ids.len(), "returning stake pools");
+
+    let pools_response: q16::Pools = TagWrap(pool_ids);
+    Ok(AnyCbor::from_encode((pools_response,)))
+}
+
 pub fn build_pool_state_response<D: Domain>(
     domain: &D,
     pools_filter: &SMaybe<q16::Pools>,

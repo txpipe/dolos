@@ -12,7 +12,7 @@ use crate::prelude::*;
 use crate::serve::o7s_unix::statequery_utils;
 use statequery_utils::{
     build_era_history_response, build_pool_state_response, build_protocol_params,
-    build_utxo_by_address_response,
+    build_stake_pools_response, build_utxo_by_address_response,
 };
 
 pub struct Session<D: Domain> {
@@ -282,6 +282,13 @@ impl<D: Domain> Session<D> {
             ))) => {
                 info!(num_addrs = addrs.len(), "GetUTxOByAddress query");
                 build_utxo_by_address_response(&self.domain, addrs)?
+            }
+            Ok(q16::Request::LedgerQuery(q16::LedgerQuery::BlockQuery(
+                _era,
+                q16::BlockQuery::GetStakePools,
+            ))) => {
+                info!("GetStakePools query");
+                build_stake_pools_response(&self.domain)?
             }
             Ok(q16::Request::LedgerQuery(q16::LedgerQuery::BlockQuery(
                 _era,
