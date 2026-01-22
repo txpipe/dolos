@@ -20,6 +20,7 @@ dolos-core = { path = "../core" }
 
 redb = { version = "^3.1" }
 redb-extras = "0.6.1"
+roaring = "0.10.12"
 
 [dev-dependencies]
 dolos-testing = { path = "../testing" }

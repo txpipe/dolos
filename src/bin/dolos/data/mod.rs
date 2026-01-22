@@ -35,7 +35,7 @@ pub enum Command {
     DumpBlocks(dump_blocks::Args),
     /// clears data from the state
     ClearState(clear_state::Args),
-    /// shows multimap cardinality stats for archive
+    /// shows roaring cardinality stats for archive
     CardinalityStats(cardinality_stats::Args),
     /// computes the SPDD for the current epoch
     ComputeSpdd(compute_spdd::Args),

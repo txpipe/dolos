@@ -1,8 +1,9 @@
 use comfy_table::Table;
 use dolos_core::config::RootConfig;
-use dolos_redb3::redb::{MultimapTableDefinition, ReadableDatabase, ReadableMultimapTable as _};
+use dolos_redb3::redb::{ReadableDatabase, ReadableTable as _, TableDefinition};
 use miette::{bail, Context, IntoDiagnostic};
 use redb_extras::buckets::BucketedKey;
+use redb_extras::roaring::RoaringValue;
 use std::cmp::{Ordering, Reverse};
 use std::collections::BinaryHeap;
 
@@ -22,14 +23,14 @@ const DEFAULT_TABLES: [&str; 10] = [
 #[derive(Clone, Copy)]
 struct TableSpec {
     name: &'static str,
-    def: MultimapTableDefinition<'static, BucketedKey<u64>, u64>,
+    def: TableDefinition<'static, BucketedKey<u64>, RoaringValue>,
 }
 
 impl TableSpec {
     fn new(name: &'static str) -> Self {
         Self {
             name,
-            def: MultimapTableDefinition::new(name),
+            def: TableDefinition::new(name),
         }
     }
 }
@@ -64,7 +65,7 @@ pub struct Args {
     #[arg(long, default_value_t = 20)]
     top: usize,
 
-    /// archive multimap tables to scan (comma-separated or repeated)
+    /// archive roaring tables to scan (comma-separated or repeated)
     #[arg(long, value_delimiter = ',')]
     tables: Vec<String>,
 }
@@ -130,14 +131,14 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     for spec in selected_tables {
         let mut heap = BinaryHeap::new();
         let store = rx
-            .open_multimap_table(spec.def)
+            .open_table(spec.def)
             .into_diagnostic()
-            .with_context(|| format!("opening multimap table {}", spec.name))?;
+            .with_context(|| format!("opening roaring table {}", spec.name))?;
 
         for entry in store.iter().into_diagnostic()? {
-            let (key, values) = entry.into_diagnostic()?;
+            let (key, value) = entry.into_diagnostic()?;
             let key = key.value();
-            let count = values.len();
+            let count = value.value().len();
 
             push_top(
                 &mut heap,
