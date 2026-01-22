@@ -853,7 +853,9 @@ impl IntoModel<serde_json::Value> for alonzo::Metadatum {
 
     fn into_model(self) -> Result<serde_json::Value, StatusCode> {
         let out = match self {
-            alonzo::Metadatum::Int(x) => serde_json::Value::String(x.to_string()),
+            alonzo::Metadatum::Int(x) => serde_json::Number::from_i128(x.into())
+                .map(serde_json::Value::Number)
+                .unwrap_or(serde_json::Value::String(x.to_string())),
             alonzo::Metadatum::Text(x) => serde_json::Value::String(x.to_string()),
             alonzo::Metadatum::Bytes(x) => {
                 let hex_str = format!("0x{}", hex::encode(x.as_slice()));
