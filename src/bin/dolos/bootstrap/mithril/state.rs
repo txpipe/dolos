@@ -54,8 +54,6 @@ pub(crate) async fn import_hardano(
         progress.set_position(last);
     }
 
-    import_result?;
-
     domain
         .state()
         .rebuild_utxo_indexes()
