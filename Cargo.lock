@@ -1150,6 +1150,7 @@ dependencies = [
  "paste",
  "protoc-wkt",
  "rayon",
+ "redb-extras",
  "reqwest",
  "serde",
  "serde_json",

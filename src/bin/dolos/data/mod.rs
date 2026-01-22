@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 use dolos_core::config::RootConfig;
 
+mod cardinality_stats;
 mod clear_state;
 mod compute_nonce;
 mod compute_spdd;
@@ -34,6 +35,8 @@ pub enum Command {
     DumpBlocks(dump_blocks::Args),
     /// clears data from the state
     ClearState(clear_state::Args),
+    /// shows multimap cardinality stats for archive
+    CardinalityStats(cardinality_stats::Args),
     /// computes the SPDD for the current epoch
     ComputeSpdd(compute_spdd::Args),
     /// computes the nonce for a epoch
@@ -73,6 +76,7 @@ pub fn run(
         Command::DumpLogs(x) => dump_logs::run(config, x)?,
         Command::DumpBlocks(x) => dump_blocks::run(config, x)?,
         Command::ClearState(x) => clear_state::run(config, x)?,
+        Command::CardinalityStats(x) => cardinality_stats::run(config, x)?,
         Command::ComputeSpdd(x) => compute_spdd::run(config, x)?,
         Command::ComputeNonce(x) => compute_nonce::run(config, x)?,
         Command::FindSeq(x) => find_seq::run(config, x)?,
