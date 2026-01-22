@@ -217,9 +217,16 @@ impl dolos_core::StateWriter for StateWriter {
         Ok(())
     }
 
-    fn apply_utxoset(&self, delta: &dolos_core::UtxoSetDelta) -> Result<(), StateError> {
+    fn apply_utxoset(
+        &self,
+        delta: &dolos_core::UtxoSetDelta,
+        update_indexes: bool,
+    ) -> Result<(), StateError> {
         utxoset::UtxosTable::apply(&self.wx, delta)?;
-        utxoset::FilterIndexes::apply(&self.wx, delta)?;
+
+        if update_indexes {
+            utxoset::FilterIndexes::apply(&self.wx, delta)?;
+        }
 
         Ok(())
     }

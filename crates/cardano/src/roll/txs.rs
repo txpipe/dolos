@@ -86,6 +86,78 @@ fn unpack_cert(tags: &mut SlotTags, cert: &MultiEraCert) {
     }
 }
 
+// TODO: this public method breaks all abstrations but it's an easy way to generate archive indexes in an isolated way as needed for the Mithril import process.
+pub fn collect_slot_tags_from_block(
+    block: &MultiEraBlock,
+    resolved_inputs: &HashMap<TxoRef, OwnedMultiEraOutput>,
+    tags: &mut SlotTags,
+) -> Result<(), ChainError> {
+    _hack_collect_slot_tags_from_block(block, resolved_inputs, tags)
+}
+
+fn _hack_collect_slot_tags_from_block(
+    block: &MultiEraBlock,
+    resolved_inputs: &HashMap<TxoRef, OwnedMultiEraOutput>,
+    tags: &mut SlotTags,
+) -> Result<(), ChainError> {
+    tags.number = Some(block.number());
+
+    for tx in block.txs() {
+        tags.tx_hashes.push(tx.hash().to_vec());
+
+        for (key, _) in tx.metadata().collect::<Vec<_>>() {
+            tags.metadata.push(key);
+        }
+
+        for input in tx.consumes() {
+            let txoref: TxoRef = (&input).into();
+            tags.spent_txo.push(txoref.clone().into());
+
+            if let Some(resolved) = resolved_inputs.get(&txoref) {
+                resolved.with_dependent(|_, resolved| {
+                    if let Ok(address) = resolved.address() {
+                        unpack_address(tags, &address);
+                    }
+
+                    unpack_assets(tags, &resolved.value());
+
+                    if let Some(datum) = resolved.datum() {
+                        unpack_datum(tags, &datum);
+                    }
+
+                    Result::<_, ChainError>::Ok(())
+                })?;
+            }
+        }
+
+        for (_, output) in tx.produces() {
+            if let Ok(address) = output.address() {
+                unpack_address(tags, &address);
+            }
+
+            unpack_assets(tags, &output.value());
+
+            if let Some(datum) = output.datum() {
+                unpack_datum(tags, &datum);
+            }
+        }
+
+        for datum in tx.plutus_data() {
+            tags.datums.push(datum.original_hash().to_vec());
+        }
+
+        for cert in tx.certs() {
+            unpack_cert(tags, &cert);
+        }
+
+        for redeemer in tx.redeemers() {
+            tags.datums.push(redeemer.data().compute_hash().to_vec());
+        }
+    }
+
+    Ok(())
+}
+
 impl BlockVisitor for TxLogVisitor {
     fn visit_root(
         &mut self,

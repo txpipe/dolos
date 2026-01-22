@@ -276,7 +276,7 @@ pub trait StateWriter: Sized + Send + Sync {
 
     fn delete_entity(&self, ns: Namespace, key: &EntityKey) -> Result<(), StateError>;
 
-    fn apply_utxoset(&self, delta: &UtxoSetDelta) -> Result<(), StateError>;
+    fn apply_utxoset(&self, delta: &UtxoSetDelta, update_indexes: bool) -> Result<(), StateError>;
 
     #[allow(clippy::double_must_use)]
     #[must_use]
