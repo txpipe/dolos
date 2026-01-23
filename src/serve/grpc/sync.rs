@@ -131,11 +131,12 @@ where
         let message = request.into_inner();
 
         let out: Vec<_> = {
-            let store = self.domain.archive();
+            let archive = self.domain.archive();
+            let indexes = self.domain.indexes();
 
             let lookup = |br: &u5c::sync::BlockRef| -> Result<BlockBody, Status> {
                 if !br.hash.is_empty() {
-                    if let Some(body) = store
+                    if let Some(body) = indexes
                         .get_block_by_hash(&br.hash)
                         .map_err(|_| Status::internal("Failed to query chain service."))?
                     {
@@ -144,7 +145,7 @@ where
                 }
 
                 if br.height != 0 {
-                    if let Some(body) = store
+                    if let Some(body) = indexes
                         .get_block_by_number(&br.height)
                         .map_err(|_| Status::internal("Failed to query chain service."))?
                     {
@@ -153,7 +154,7 @@ where
                 }
 
                 if br.slot != 0 {
-                    if let Some(body) = store
+                    if let Some(body) = archive
                         .get_block_by_slot(&br.slot)
                         .map_err(|_| Status::internal("Failed to query chain service."))?
                     {

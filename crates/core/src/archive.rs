@@ -1,12 +1,11 @@
 use std::{marker::PhantomData, ops::Range};
 
-use pallas::{crypto::hash::Hash, ledger::primitives::PlutusData};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
     state::KEY_SIZE, BlockBody, BlockSlot, BrokenInvariant, ChainPoint, Entity, EntityKey,
-    EntityValue, EraCbor, Namespace, RawBlock, TxHash, TxOrder,
+    EntityValue, Namespace, RawBlock,
 };
 
 const TEMPORAL_KEY_SIZE: usize = 8;
@@ -219,8 +218,6 @@ pub trait ArchiveWriter: Send + Sync + 'static {
 
 pub trait ArchiveStore: Clone + Send + Sync + 'static {
     type BlockIter<'a>: Iterator<Item = (BlockSlot, BlockBody)> + DoubleEndedIterator + 'a;
-    type SparseBlockIter: Iterator<Item = Result<(BlockSlot, Option<BlockBody>), ArchiveError>>
-        + DoubleEndedIterator;
     type Writer: ArchiveWriter;
     type LogIter: Iterator<Item = Result<(LogKey, EntityValue), ArchiveError>>;
     type EntityValueIter: Iterator<Item = Result<EntityValue, ArchiveError>>;
@@ -281,68 +278,7 @@ pub trait ArchiveStore: Clone + Send + Sync + 'static {
         Ok(LogIterTyped::<Self, E>::new(inner, ns))
     }
 
-    // TODO: Generalize blocks in archive using log mechanism
-    fn get_block_by_hash(&self, block_hash: &[u8]) -> Result<Option<BlockBody>, ArchiveError>;
-
     fn get_block_by_slot(&self, slot: &BlockSlot) -> Result<Option<BlockBody>, ArchiveError>;
-
-    fn get_block_by_number(&self, number: &u64) -> Result<Option<BlockBody>, ArchiveError>;
-
-    fn get_block_with_tx(
-        &self,
-        tx_hash: &[u8],
-    ) -> Result<Option<(BlockBody, TxOrder)>, ArchiveError>;
-
-    fn get_tx(&self, tx_hash: &[u8]) -> Result<Option<EraCbor>, ArchiveError>;
-
-    fn get_plutus_data(&self, datum_hash: &Hash<32>) -> Result<Option<PlutusData>, ArchiveError>;
-
-    fn get_slot_for_tx(&self, tx_hash: &[u8]) -> Result<Option<BlockSlot>, ArchiveError>;
-
-    fn get_tx_by_spent_txo(&self, spent_txo: &[u8]) -> Result<Option<TxHash>, ArchiveError>;
-
-    fn iter_blocks_with_address(
-        &self,
-        address: &[u8],
-        start_slot: BlockSlot,
-        end_slot: BlockSlot,
-    ) -> Result<Self::SparseBlockIter, ArchiveError>;
-
-    fn iter_blocks_with_asset(
-        &self,
-        asset: &[u8],
-        start_slot: BlockSlot,
-        end_slot: BlockSlot,
-    ) -> Result<Self::SparseBlockIter, ArchiveError>;
-
-    fn iter_blocks_with_payment(
-        &self,
-        payment: &[u8],
-        start_slot: BlockSlot,
-        end_slot: BlockSlot,
-    ) -> Result<Self::SparseBlockIter, ArchiveError>;
-
-    fn iter_blocks_with_stake(
-        &self,
-        stake: &[u8],
-        start_slot: BlockSlot,
-        end_slot: BlockSlot,
-    ) -> Result<Self::SparseBlockIter, ArchiveError>;
-
-    fn iter_blocks_with_account_certs(
-        &self,
-        account: &[u8],
-        start_slot: BlockSlot,
-        end_slot: BlockSlot,
-    ) -> Result<Self::SparseBlockIter, ArchiveError>;
-
-    fn iter_blocks_with_metadata(
-        &self,
-        metadata: &u64,
-        start_slot: BlockSlot,
-        end_slot: BlockSlot,
-    ) -> Result<Self::SparseBlockIter, ArchiveError>;
-
     fn get_range<'a>(
         &self,
         from: Option<BlockSlot>,

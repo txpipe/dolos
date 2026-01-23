@@ -5,7 +5,7 @@ use axum::{
 };
 use blockfrost_openapi::models::block_content::BlockContent;
 use dolos_cardano::ChainSummary;
-use dolos_core::{ArchiveStore as _, BlockBody, Domain};
+use dolos_core::{ArchiveStore as _, BlockBody, Domain, IndexStore as _};
 use itertools::Either;
 use pallas::ledger::{
     configs::{byron, shelley},
@@ -88,7 +88,7 @@ fn load_block_by_hash_or_number<D: Domain>(
 ) -> Result<BlockBody, Error> {
     match hash_or_number {
         Either::Left(hash) => Ok(domain
-            .archive()
+            .indexes()
             .get_block_by_hash(hash)
             .map_err(|_| Error::InvalidBlockHash)?
             .ok_or(StatusCode::NOT_FOUND)?),
@@ -104,7 +104,7 @@ fn load_block_by_hash_or_number<D: Domain>(
             }
 
             Ok(domain
-                .archive()
+                .indexes()
                 .get_block_by_number(number)
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
                 .ok_or(StatusCode::NOT_FOUND)?)
@@ -124,7 +124,7 @@ fn build_block_model<D: Domain>(
 
     let maybe_previous = if let Some(prev_hash) = previous_hash {
         domain
-            .archive()
+            .indexes()
             .get_block_by_hash(prev_hash.as_ref())
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     } else {
@@ -136,7 +136,7 @@ fn build_block_model<D: Domain>(
     }
 
     let maybe_next = domain
-        .archive()
+        .indexes()
         .get_block_by_number(&builder.next_number())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 

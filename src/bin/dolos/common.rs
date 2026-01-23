@@ -146,6 +146,9 @@ pub async fn setup_domain(config: &RootConfig) -> miette::Result<DomainAdapter> 
     )
     .into_diagnostic()?;
 
+    let indexes =
+        dolos_redb3::indexes::IndexStore::new(stores.state.clone(), stores.archive.clone());
+
     let domain = DomainAdapter {
         storage_config: Arc::new(config.storage.clone()),
         genesis,
@@ -153,6 +156,7 @@ pub async fn setup_domain(config: &RootConfig) -> miette::Result<DomainAdapter> 
         wal: stores.wal,
         state: stores.state,
         archive: stores.archive,
+        indexes,
         mempool,
         tip_broadcast,
     };

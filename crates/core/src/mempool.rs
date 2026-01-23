@@ -50,6 +50,7 @@ pub struct MempoolEvent {
 
 pub struct MempoolAwareUtxoStore<'a, D: Domain> {
     inner: &'a D::State,
+    indexes: &'a D::Indexes,
     mempool: &'a D::Mempool,
 }
 
@@ -156,8 +157,12 @@ fn select_mempool_utxos<D: Domain>(refs: &mut HashSet<TxoRef>, mempool: &D::Memp
 }
 
 impl<'a, D: Domain> MempoolAwareUtxoStore<'a, D> {
-    pub fn new(inner: &'a D::State, mempool: &'a D::Mempool) -> Self {
-        Self { inner, mempool }
+    pub fn new(inner: &'a D::State, indexes: &'a D::Indexes, mempool: &'a D::Mempool) -> Self {
+        Self {
+            inner,
+            indexes,
+            mempool,
+        }
     }
 
     pub fn state(&self) -> &D::State {
@@ -168,12 +173,16 @@ impl<'a, D: Domain> MempoolAwareUtxoStore<'a, D> {
         self.mempool
     }
 
+    pub fn indexes(&self) -> &D::Indexes {
+        self.indexes
+    }
+
     pub fn get_utxo_by_asset(&self, asset: &[u8]) -> Result<UtxoSet, StateError> {
         let predicate = |utxo: &MultiEraOutput<'_>| utxo_asset_matches(utxo, asset);
 
         let from_mempool = scan_mempool_utxos::<D, _>(predicate, self.mempool);
 
-        let mut utxos = self.inner.get_utxo_by_asset(asset)?;
+        let mut utxos = self.indexes.get_utxo_by_asset(asset)?;
 
         utxos.extend(from_mempool);
 
@@ -187,7 +196,7 @@ impl<'a, D: Domain> MempoolAwareUtxoStore<'a, D> {
 
         let from_mempool = scan_mempool_utxos::<D, _>(predicate, self.mempool);
 
-        let mut utxos = self.inner.get_utxo_by_policy(policy)?;
+        let mut utxos = self.indexes.get_utxo_by_policy(policy)?;
 
         utxos.extend(from_mempool);
 
@@ -201,7 +210,7 @@ impl<'a, D: Domain> MempoolAwareUtxoStore<'a, D> {
 
         let from_mempool = scan_mempool_utxos::<D, _>(predicate, self.mempool);
 
-        let mut utxos = self.inner.get_utxo_by_address(address)?;
+        let mut utxos = self.indexes.get_utxo_by_address(address)?;
 
         utxos.extend(from_mempool);
 

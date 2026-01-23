@@ -13,7 +13,7 @@ use blockfrost_openapi::models::{
 };
 use crc::{Crc, CRC_8_SMBUS};
 use dolos_cardano::{model::AssetState, ChainSummary};
-use dolos_core::{ArchiveStore, BlockSlot, Domain, EraCbor, StateStore};
+use dolos_core::{BlockSlot, Domain, EraCbor, IndexStore, StateStore as _};
 use itertools::Itertools;
 use pallas::{
     codec::minicbor,
@@ -497,7 +497,7 @@ where
 
     let initial_tx = if let Some(initial_tx) = asset_state.initial_tx {
         domain
-            .archive()
+            .indexes()
             .get_tx(initial_tx.as_slice())
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     } else {
@@ -523,7 +523,7 @@ pub async fn by_subject_addresses<D: Domain>(
     let pagination = Pagination::try_from(params)?;
     let asset = hex::decode(&subject).map_err(|_| Error::InvalidAsset)?;
     let utxoset = domain
-        .state()
+        .indexes()
         .get_utxo_by_asset(&asset)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .into_iter()
@@ -538,7 +538,7 @@ pub async fn by_subject_addresses<D: Domain>(
     for (txoref, eracbor) in utxos {
         let sort = (
             domain
-                .archive()
+                .indexes()
                 .get_slot_for_tx(txoref.0.as_slice())
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
                 .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?,
@@ -596,27 +596,27 @@ pub async fn by_subject_addresses<D: Domain>(
     Ok(Json(sorted))
 }
 
-struct TransactionWithSubjectIter<A: ArchiveStore> {
+struct TransactionWithSubjectIter<I: IndexStore> {
     subject: Vec<u8>,
-    blocks: A::SparseBlockIter,
+    blocks: I::SparseBlockIter,
     chain: ChainSummary,
     pagination: Pagination,
-    archive: A,
+    indexes: I,
 }
 
-impl<A: ArchiveStore> TransactionWithSubjectIter<A> {
+impl<I: IndexStore> TransactionWithSubjectIter<I> {
     fn new(
         subject: Vec<u8>,
-        blocks: A::SparseBlockIter,
+        blocks: I::SparseBlockIter,
         chain: ChainSummary,
         pagination: Pagination,
-        archive: A,
+        indexes: I,
     ) -> Self {
         Self {
             subject,
             blocks,
             chain,
-            archive,
+            indexes,
             pagination,
         }
     }
@@ -647,7 +647,7 @@ impl<A: ArchiveStore> TransactionWithSubjectIter<A> {
 
         for input in tx.consumes() {
             if let Some(EraCbor(era, cbor)) = self
-                .archive
+                .indexes
                 .get_tx(input.hash().as_slice())
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
             {
@@ -694,7 +694,7 @@ impl<A: ArchiveStore> TransactionWithSubjectIter<A> {
     }
 }
 
-impl<A: ArchiveStore> Iterator for TransactionWithSubjectIter<A> {
+impl<I: IndexStore> Iterator for TransactionWithSubjectIter<I> {
     type Item = Vec<Result<AssetTransactionsInner, StatusCode>>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -733,7 +733,7 @@ pub async fn by_subject_transactions<D: Domain>(
     let subject = hex::decode(&subject).map_err(|_| Error::InvalidAsset)?;
     let end_slot = domain.get_tip_slot()?;
     let blocks = domain
-        .archive()
+        .indexes()
         .iter_blocks_with_asset(&subject, 0, end_slot)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -741,12 +741,12 @@ pub async fn by_subject_transactions<D: Domain>(
         .get_chain_summary()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let transactions = TransactionWithSubjectIter::<D::Archive>::new(
+    let transactions = TransactionWithSubjectIter::<D::Indexes>::new(
         subject,
         blocks,
         chain,
         pagination.clone(),
-        domain.archive().clone(),
+        domain.indexes().clone(),
     )
     .flatten()
     .skip(pagination.from())

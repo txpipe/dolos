@@ -4,6 +4,7 @@ use std::{collections::HashMap, ops::Range};
 use tracing::trace;
 
 pub mod archive;
+pub mod indexes;
 pub mod state;
 pub mod wal;
 

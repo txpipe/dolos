@@ -80,6 +80,7 @@ pub struct ToyDomain {
     chain: Arc<RwLock<dolos_cardano::CardanoLogic>>,
     state: dolos_redb3::state::StateStore,
     archive: dolos_redb3::archive::ArchiveStore,
+    indexes: dolos_redb3::indexes::IndexStore,
     mempool: Mempool,
     storage_config: StorageConfig,
     genesis: Arc<dolos_core::Genesis>,
@@ -102,6 +103,8 @@ impl ToyDomain {
             dolos_redb3::archive::ArchiveStore::in_memory(dolos_cardano::model::build_schema())
                 .unwrap();
 
+        let indexes = dolos_redb3::indexes::IndexStore::new(state.clone(), archive.clone());
+
         let config = CardanoConfig::default();
 
         let mut chain =
@@ -117,6 +120,7 @@ impl ToyDomain {
             wal: dolos_redb3::wal::RedbWalStore::memory().unwrap(),
             chain: Arc::new(RwLock::new(chain)),
             archive,
+            indexes,
             mempool: Mempool {},
             storage_config: storage_config.unwrap_or_default(),
             genesis,
@@ -160,6 +164,7 @@ impl dolos_core::Domain for ToyDomain {
     type State = dolos_redb3::state::StateStore;
     type Chain = dolos_cardano::CardanoLogic;
     type TipSubscription = TipSubscription;
+    type Indexes = dolos_redb3::indexes::IndexStore;
     type Mempool = Mempool;
 
     fn storage_config(&self) -> &StorageConfig {
@@ -188,6 +193,10 @@ impl dolos_core::Domain for ToyDomain {
 
     fn archive(&self) -> &Self::Archive {
         &self.archive
+    }
+
+    fn indexes(&self) -> &Self::Indexes {
+        &self.indexes
     }
 
     fn mempool(&self) -> &Self::Mempool {

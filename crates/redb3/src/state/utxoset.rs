@@ -514,15 +514,25 @@ mod tests {
     use std::{collections::HashSet, str::FromStr as _, sync::Arc};
 
     use dolos_core::{
-        StateSchema, StateStore as _, StateWriter as _, TxoRef, UtxoMap, UtxoSet, UtxoSetDelta,
+        IndexStore as _, StateSchema, StateStore as _, StateWriter as _, TxoRef, UtxoMap, UtxoSet,
+        UtxoSetDelta,
     };
     use dolos_testing::*;
     use pallas::ledger::addresses::{Address, ShelleyDelegationPart};
 
     use crate::state::StateStore;
 
-    fn get_test_address_utxos(store: &StateStore, address: TestAddress) -> UtxoMap {
-        let bobs = store.get_utxo_by_address(&address.to_bytes()).unwrap();
+    fn build_indexes(store: &StateStore) -> crate::indexes::IndexStore {
+        let archive = crate::archive::ArchiveStore::in_memory(StateSchema::default()).unwrap();
+        crate::indexes::IndexStore::new(store.clone(), archive)
+    }
+
+    fn get_test_address_utxos(
+        store: &StateStore,
+        indexes: &crate::indexes::IndexStore,
+        address: TestAddress,
+    ) -> UtxoMap {
+        let bobs = indexes.get_utxo_by_address(&address.to_bytes()).unwrap();
         store.get_utxos(bobs.into_iter().collect()).unwrap()
     }
 
@@ -539,6 +549,7 @@ mod tests {
     #[test]
     fn test_apply_genesis() {
         let store = StateStore::in_memory(StateSchema::default()).unwrap();
+        let indexes = build_indexes(&store);
 
         let genesis = fake_genesis_delta(1_000_000_000);
         apply_utxoset!(store, [&genesis]);
@@ -547,11 +558,11 @@ mod tests {
         // need to fix this in the next breaking change version.
         //assert_eq!(store.cursor().unwrap(), Some(ChainPoint::Origin));
 
-        let bobs = get_test_address_utxos(&store, TestAddress::Bob);
+        let bobs = get_test_address_utxos(&store, &indexes, TestAddress::Bob);
         assert_eq!(bobs.len(), 1);
         assert_utxo_map_address_and_value(&bobs, TestAddress::Bob, 1_000_000_000);
 
-        let carols = get_test_address_utxos(&store, TestAddress::Carol);
+        let carols = get_test_address_utxos(&store, &indexes, TestAddress::Carol);
         assert_eq!(carols.len(), 1);
         assert_utxo_map_address_and_value(&carols, TestAddress::Carol, 1_000_000_000);
     }
@@ -559,19 +570,20 @@ mod tests {
     #[test]
     fn test_apply_forward_block() {
         let store = StateStore::in_memory(StateSchema::default()).unwrap();
+        let indexes = build_indexes(&store);
 
         let genesis = fake_genesis_delta(1_000_000_000);
         apply_utxoset!(store, [genesis]);
 
-        let bobs = get_test_address_utxos(&store, TestAddress::Bob);
+        let bobs = get_test_address_utxos(&store, &indexes, TestAddress::Bob);
         let delta = make_move_utxo_delta(bobs, 1, TestAddress::Carol);
         apply_utxoset!(store, [&delta]);
 
-        let bobs = get_test_address_utxos(&store, TestAddress::Bob);
+        let bobs = get_test_address_utxos(&store, &indexes, TestAddress::Bob);
         assert!(bobs.is_empty());
         assert_utxo_map_address_and_value(&bobs, TestAddress::Bob, 1_000_000_000);
 
-        let carols = get_test_address_utxos(&store, TestAddress::Carol);
+        let carols = get_test_address_utxos(&store, &indexes, TestAddress::Carol);
         assert_eq!(carols.len(), 2);
         assert_utxo_map_address_and_value(&carols, TestAddress::Carol, 1_000_000_000);
     }
@@ -579,11 +591,12 @@ mod tests {
     #[test]
     fn test_apply_undo_block() {
         let store = StateStore::in_memory(StateSchema::default()).unwrap();
+        let indexes = build_indexes(&store);
 
         let genesis = fake_genesis_delta(1_000_000_000);
         apply_utxoset!(store, [&genesis]);
 
-        let bobs = get_test_address_utxos(&store, TestAddress::Bob);
+        let bobs = get_test_address_utxos(&store, &indexes, TestAddress::Bob);
         let forward = make_move_utxo_delta(bobs, 1, TestAddress::Carol);
         apply_utxoset!(store, [&forward]);
 
@@ -594,11 +607,11 @@ mod tests {
         // empty. We should fix this in the next breaking change version.
         assert_eq!(store.read_cursor().unwrap(), None);
 
-        let bobs = get_test_address_utxos(&store, TestAddress::Bob);
+        let bobs = get_test_address_utxos(&store, &indexes, TestAddress::Bob);
         assert_eq!(bobs.len(), 1);
         assert_utxo_map_address_and_value(&bobs, TestAddress::Bob, 1_000_000_000);
 
-        let carols = get_test_address_utxos(&store, TestAddress::Carol);
+        let carols = get_test_address_utxos(&store, &indexes, TestAddress::Carol);
         assert_eq!(carols.len(), 1);
         assert_utxo_map_address_and_value(&carols, TestAddress::Carol, 1_000_000_000);
     }
@@ -610,12 +623,13 @@ mod tests {
         // first we do a step-by-step apply to use as reference. We keep the deltas in a
         // vector to apply them in batch later.
         let store = StateStore::in_memory(StateSchema::default()).unwrap();
+        let indexes = build_indexes(&store);
 
         let genesis = fake_genesis_delta(1_000_000_000);
         apply_utxoset!(store, [&genesis]);
         batch.push(genesis);
 
-        let bobs = get_test_address_utxos(&store, TestAddress::Bob);
+        let bobs = get_test_address_utxos(&store, &indexes, TestAddress::Bob);
         let forward = make_move_utxo_delta(bobs, 1, TestAddress::Carol);
         apply_utxoset!(store, [&forward]);
         batch.push(forward.clone());
@@ -626,13 +640,14 @@ mod tests {
 
         // now we apply the batch in one go.
         let store = StateStore::in_memory(StateSchema::default()).unwrap();
+        let indexes = build_indexes(&store);
         apply_utxoset!(store, batch);
 
-        let bobs = get_test_address_utxos(&store, TestAddress::Bob);
+        let bobs = get_test_address_utxos(&store, &indexes, TestAddress::Bob);
         assert_eq!(bobs.len(), 1);
         assert_utxo_map_address_and_value(&bobs, TestAddress::Bob, 1_000_000_000);
 
-        let carols = get_test_address_utxos(&store, TestAddress::Carol);
+        let carols = get_test_address_utxos(&store, &indexes, TestAddress::Carol);
         assert_eq!(carols.len(), 1);
         assert_utxo_map_address_and_value(&carols, TestAddress::Carol, 1_000_000_000);
     }
@@ -640,6 +655,7 @@ mod tests {
     #[test]
     fn test_query_by_address() {
         let store = StateStore::in_memory(StateSchema::default()).unwrap();
+        let indexes = build_indexes(&store);
 
         let addresses: Vec<_> = TestAddress::everyone().into_iter().enumerate().collect();
 
@@ -676,29 +692,31 @@ mod tests {
 
             match address.clone() {
                 Address::Byron(x) => {
-                    let utxos = store.get_utxo_by_address(&x.to_vec()).unwrap();
+                    let utxos = indexes.get_utxo_by_address(&x.to_vec()).unwrap();
                     assertion(utxos, &address, ordinal);
                 }
                 Address::Shelley(x) => {
-                    let utxos = store.get_utxo_by_address(&x.to_vec()).unwrap();
+                    let utxos = indexes.get_utxo_by_address(&x.to_vec()).unwrap();
                     assertion(utxos, &address, ordinal);
 
-                    let utxos = store.get_utxo_by_payment(&x.payment().to_vec()).unwrap();
+                    let utxos = indexes.get_utxo_by_payment(&x.payment().to_vec()).unwrap();
                     assertion(utxos, &address, ordinal);
 
                     match x.delegation() {
                         ShelleyDelegationPart::Key(..) | ShelleyDelegationPart::Script(..) => {
-                            let utxos = store.get_utxo_by_stake(&x.delegation().to_vec()).unwrap();
+                            let utxos =
+                                indexes.get_utxo_by_stake(&x.delegation().to_vec()).unwrap();
                             assertion(utxos, &address, ordinal);
                         }
                         _ => {
-                            let utxos = store.get_utxo_by_stake(&x.delegation().to_vec()).unwrap();
+                            let utxos =
+                                indexes.get_utxo_by_stake(&x.delegation().to_vec()).unwrap();
                             assert!(utxos.is_empty());
                         }
                     }
                 }
                 Address::Stake(x) => {
-                    let utxos = store.get_utxo_by_stake(&x.to_vec()).unwrap();
+                    let utxos = indexes.get_utxo_by_stake(&x.to_vec()).unwrap();
                     assertion(utxos, &address, ordinal);
                 }
             };

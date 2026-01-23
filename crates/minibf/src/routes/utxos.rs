@@ -4,7 +4,7 @@ use itertools::Itertools;
 use pallas::ledger::traverse::{MultiEraBlock, MultiEraOutput};
 use std::collections::{HashMap, HashSet};
 
-use dolos_core::{ArchiveStore, Domain, StateStore, TxoRef};
+use dolos_core::{Domain, IndexStore as _, StateStore as _, TxoRef};
 
 use crate::{
     mapping::{IntoModel, UtxoOutputModelBuilder},
@@ -78,7 +78,7 @@ pub fn load_utxo_models<D: Domain>(
         .map(|builder| {
             let key: Vec<u8> = builder.txo_ref().into();
             let builder = if let Some(consumed_by) = domain
-                .archive()
+                .indexes()
                 .get_tx_by_spent_txo(&key)
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
             {

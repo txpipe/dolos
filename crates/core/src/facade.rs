@@ -140,7 +140,8 @@ pub fn validate_tx<D: Domain>(
 ) -> Result<MempoolTx, DomainError> {
     let tip = domain.state().read_cursor()?;
 
-    let utxos = MempoolAwareUtxoStore::<'_, D>::new(domain.state(), domain.mempool());
+    let utxos =
+        MempoolAwareUtxoStore::<'_, D>::new(domain.state(), domain.indexes(), domain.mempool());
 
     let tx = chain.validate_tx(cbor, &utxos, tip, &domain.genesis())?;
 

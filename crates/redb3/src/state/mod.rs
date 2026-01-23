@@ -2,7 +2,6 @@ use std::{collections::HashMap, path::Path, sync::Arc};
 
 use dolos_core::{
     ChainPoint, EntityKey, EntityValue, Namespace, StateError, StateSchema, TxoRef, UtxoMap,
-    UtxoSet,
 };
 use pallas::crypto::hash::Hash;
 
@@ -12,7 +11,7 @@ use redb::{
 
 use tracing::warn;
 
-mod utxoset;
+pub(crate) mod utxoset;
 
 use crate::{build_tables, Error, Table};
 
@@ -318,42 +317,6 @@ impl dolos_core::StateStore for StateStore {
         let rx = self.db().begin_read().map_err(Error::from)?;
 
         let out = utxoset::UtxosTable::get_sparse(&rx, refs)?;
-
-        Ok(out)
-    }
-
-    fn get_utxo_by_address(&self, address: &[u8]) -> Result<UtxoSet, StateError> {
-        let rx = self.db().begin_read().map_err(Error::from)?;
-
-        let out = utxoset::FilterIndexes::get_by_address(&rx, address)?;
-
-        Ok(out)
-    }
-
-    fn get_utxo_by_payment(&self, payment: &[u8]) -> Result<UtxoSet, StateError> {
-        let rx = self.db().begin_read().map_err(Error::from)?;
-        let out = utxoset::FilterIndexes::get_by_payment(&rx, payment)?;
-
-        Ok(out)
-    }
-
-    fn get_utxo_by_stake(&self, stake: &[u8]) -> Result<UtxoSet, StateError> {
-        let rx = self.db().begin_read().map_err(Error::from)?;
-        let out = utxoset::FilterIndexes::get_by_stake(&rx, stake)?;
-
-        Ok(out)
-    }
-
-    fn get_utxo_by_policy(&self, policy: &[u8]) -> Result<UtxoSet, StateError> {
-        let rx = self.db().begin_read().map_err(Error::from)?;
-        let out = utxoset::FilterIndexes::get_by_policy(&rx, policy)?;
-
-        Ok(out)
-    }
-
-    fn get_utxo_by_asset(&self, asset: &[u8]) -> Result<UtxoSet, StateError> {
-        let rx = self.db().begin_read().map_err(Error::from)?;
-        let out = utxoset::FilterIndexes::get_by_asset(&rx, asset)?;
 
         Ok(out)
     }

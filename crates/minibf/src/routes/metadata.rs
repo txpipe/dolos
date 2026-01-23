@@ -7,7 +7,7 @@ use blockfrost_openapi::models::{
     tx_metadata_label_cbor_inner::TxMetadataLabelCborInner,
     tx_metadata_label_json_inner::TxMetadataLabelJsonInner,
 };
-use dolos_core::{ArchiveStore as _, Domain};
+use dolos_core::{Domain, IndexStore as _};
 use pallas::{
     codec::minicbor,
     crypto::hash::Hash,
@@ -130,7 +130,7 @@ async fn by_label<D: Domain>(
     let end_slot = domain.get_tip_slot()?;
 
     let mut blocks = domain
-        .archive()
+        .indexes()
         .iter_blocks_with_metadata(&label, 0, end_slot)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 

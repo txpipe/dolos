@@ -15,7 +15,7 @@ use blockfrost_openapi::models::{
     tx_content_withdrawals_inner::TxContentWithdrawalsInner,
 };
 
-use dolos_core::{ArchiveStore, Domain};
+use dolos_core::{Domain, IndexStore as _};
 
 use crate::{
     mapping::{IntoModel as _, TxModelBuilder},
@@ -29,7 +29,7 @@ pub async fn by_hash<D: Domain>(
     let hash = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
 
     let (raw, order) = domain
-        .archive()
+        .indexes()
         .get_block_with_tx(&hash)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
@@ -50,7 +50,7 @@ pub async fn by_hash_cbor<D: Domain>(
     let hash = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
 
     let (raw, order) = domain
-        .archive()
+        .indexes()
         .get_block_with_tx(hash.as_slice())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
@@ -67,7 +67,7 @@ pub async fn by_hash_utxos<D: Domain>(
     let hash = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
 
     let (raw, order) = domain
-        .archive()
+        .indexes()
         .get_block_with_tx(hash.as_slice())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
@@ -80,7 +80,7 @@ pub async fn by_hash_utxos<D: Domain>(
         .filter_map(|x| {
             let bytes: Vec<u8> = x.clone().into();
             domain
-                .archive()
+                .indexes()
                 .get_tx_by_spent_txo(&bytes)
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
                 .transpose()
@@ -108,7 +108,7 @@ pub async fn by_hash_metadata<D: Domain>(
     let hash = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
 
     let (raw, order) = domain
-        .archive()
+        .indexes()
         .get_block_with_tx(hash.as_slice())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
@@ -125,7 +125,7 @@ pub async fn by_hash_metadata_cbor<D: Domain>(
     let hash = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
 
     let (raw, order) = domain
-        .archive()
+        .indexes()
         .get_block_with_tx(hash.as_slice())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
@@ -142,7 +142,7 @@ pub async fn by_hash_redeemers<D: Domain>(
     let hash = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
 
     let (raw, order) = domain
-        .archive()
+        .indexes()
         .get_block_with_tx(hash.as_slice())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
@@ -172,7 +172,7 @@ pub async fn by_hash_withdrawals<D: Domain>(
     let hash = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
 
     let (raw, order) = domain
-        .archive()
+        .indexes()
         .get_block_with_tx(hash.as_slice())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
@@ -189,7 +189,7 @@ pub async fn by_hash_delegations<D: Domain>(
     let hash = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
 
     let (raw, order) = domain
-        .archive()
+        .indexes()
         .get_block_with_tx(hash.as_slice())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
@@ -211,7 +211,7 @@ pub async fn by_hash_mirs<D: Domain>(
     let hash = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
 
     let (raw, order) = domain
-        .archive()
+        .indexes()
         .get_block_with_tx(hash.as_slice())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
@@ -230,7 +230,7 @@ pub async fn by_hash_pool_retires<D: Domain>(
     let hash = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
 
     let (raw, order) = domain
-        .archive()
+        .indexes()
         .get_block_with_tx(hash.as_slice())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
@@ -249,7 +249,7 @@ pub async fn by_hash_pool_updates<D: Domain>(
     let network = domain.get_network_id()?;
 
     let (raw, order) = domain
-        .archive()
+        .indexes()
         .get_block_with_tx(hash.as_slice())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
@@ -271,7 +271,7 @@ pub async fn by_hash_stakes<D: Domain>(
     let network = domain.get_network_id()?;
 
     let (raw, order) = domain
-        .archive()
+        .indexes()
         .get_block_with_tx(hash.as_slice())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;

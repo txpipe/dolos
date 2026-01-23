@@ -31,6 +31,7 @@ pub mod batch;
 pub mod config;
 pub mod crawl;
 pub mod facade;
+pub mod indexes;
 pub mod mempool;
 pub mod point;
 pub mod state;
@@ -65,6 +66,7 @@ pub type ChainTip = pallas::network::miniprotocols::chainsync::Tip;
 pub type LogSeq = u64;
 
 pub use archive::*;
+pub use indexes::*;
 pub use mempool::*;
 pub use point::*;
 pub use state::*;
@@ -615,6 +617,7 @@ pub trait Domain: Send + Sync + Clone + 'static {
     type Wal: WalStore<Delta = Self::EntityDelta>;
     type State: StateStore;
     type Archive: ArchiveStore;
+    type Indexes: IndexStore;
     type Mempool: MempoolStore;
     type TipSubscription: TipSubscription;
 
@@ -627,6 +630,7 @@ pub trait Domain: Send + Sync + Clone + 'static {
     fn wal(&self) -> &Self::Wal;
     fn state(&self) -> &Self::State;
     fn archive(&self) -> &Self::Archive;
+    fn indexes(&self) -> &Self::Indexes;
     fn mempool(&self) -> &Self::Mempool;
 
     fn watch_tip(&self, from: Option<ChainPoint>) -> Result<Self::TipSubscription, DomainError>;

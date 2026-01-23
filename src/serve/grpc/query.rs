@@ -41,16 +41,16 @@ fn into_status(err: impl std::error::Error) -> Status {
 }
 
 trait IntoSet {
-    fn into_set<S: StateStore>(self, ledger: &S) -> Result<HashSet<TxoRef>, Status>;
+    fn into_set<S: IndexStore>(self, indexes: &S) -> Result<HashSet<TxoRef>, Status>;
 }
 
-fn intersect<S: StateStore>(
-    ledger: &S,
+fn intersect<S: IndexStore>(
+    indexes: &S,
     a: impl IntoSet,
     b: impl IntoSet,
 ) -> Result<HashSet<TxoRef>, Status> {
-    let a = a.into_set(ledger)?;
-    let b = b.into_set(ledger)?;
+    let a = a.into_set(indexes)?;
+    let b = b.into_set(indexes)?;
 
     Ok(a.intersection(&b).cloned().collect())
 }
@@ -68,8 +68,8 @@ impl ByAddressQuery {
 }
 
 impl IntoSet for ByAddressQuery {
-    fn into_set<S: StateStore>(self, ledger: &S) -> Result<HashSet<TxoRef>, Status> {
-        ledger.get_utxo_by_address(&self.0).map_err(into_status)
+    fn into_set<S: IndexStore>(self, indexes: &S) -> Result<HashSet<TxoRef>, Status> {
+        indexes.get_utxo_by_address(&self.0).map_err(into_status)
     }
 }
 
@@ -86,8 +86,8 @@ impl ByPaymentQuery {
 }
 
 impl IntoSet for ByPaymentQuery {
-    fn into_set<S: StateStore>(self, ledger: &S) -> Result<HashSet<TxoRef>, Status> {
-        ledger.get_utxo_by_payment(&self.0).map_err(into_status)
+    fn into_set<S: IndexStore>(self, indexes: &S) -> Result<HashSet<TxoRef>, Status> {
+        indexes.get_utxo_by_payment(&self.0).map_err(into_status)
     }
 }
 
@@ -104,22 +104,22 @@ impl ByDelegationQuery {
 }
 
 impl IntoSet for ByDelegationQuery {
-    fn into_set<S: StateStore>(self, ledger: &S) -> Result<HashSet<TxoRef>, Status> {
-        ledger.get_utxo_by_stake(&self.0).map_err(into_status)
+    fn into_set<S: IndexStore>(self, indexes: &S) -> Result<HashSet<TxoRef>, Status> {
+        indexes.get_utxo_by_stake(&self.0).map_err(into_status)
     }
 }
 
 impl IntoSet for u5c::cardano::AddressPattern {
-    fn into_set<S: StateStore>(self, ledger: &S) -> Result<HashSet<TxoRef>, Status> {
+    fn into_set<S: IndexStore>(self, indexes: &S) -> Result<HashSet<TxoRef>, Status> {
         let exact = ByAddressQuery::maybe_from(self.exact_address);
         let payment = ByPaymentQuery::maybe_from(self.payment_part);
         let delegation = ByDelegationQuery::maybe_from(self.delegation_part);
 
         match (exact, payment, delegation) {
-            (Some(x), None, None) => x.into_set(ledger),
-            (None, Some(x), None) => x.into_set(ledger),
-            (None, None, Some(x)) => x.into_set(ledger),
-            (None, Some(a), Some(b)) => intersect(ledger, a, b),
+            (Some(x), None, None) => x.into_set(indexes),
+            (None, Some(x), None) => x.into_set(indexes),
+            (None, None, Some(x)) => x.into_set(indexes),
+            (None, Some(a), Some(b)) => intersect(indexes, a, b),
             (None, None, None) => Ok(HashSet::default()),
             _ => Err(Status::invalid_argument("conflicting address criteria")),
         }
@@ -139,8 +139,8 @@ impl ByPolicyQuery {
 }
 
 impl IntoSet for ByPolicyQuery {
-    fn into_set<S: StateStore>(self, ledger: &S) -> Result<HashSet<TxoRef>, Status> {
-        ledger.get_utxo_by_policy(&self.0).map_err(into_status)
+    fn into_set<S: IndexStore>(self, indexes: &S) -> Result<HashSet<TxoRef>, Status> {
+        indexes.get_utxo_by_policy(&self.0).map_err(into_status)
     }
 }
 
@@ -157,19 +157,19 @@ impl ByAssetQuery {
 }
 
 impl IntoSet for ByAssetQuery {
-    fn into_set<S: StateStore>(self, ledger: &S) -> Result<HashSet<TxoRef>, Status> {
-        ledger.get_utxo_by_asset(&self.0).map_err(into_status)
+    fn into_set<S: IndexStore>(self, indexes: &S) -> Result<HashSet<TxoRef>, Status> {
+        indexes.get_utxo_by_asset(&self.0).map_err(into_status)
     }
 }
 
 impl IntoSet for u5c::cardano::AssetPattern {
-    fn into_set<S: StateStore>(self, ledger: &S) -> Result<HashSet<TxoRef>, Status> {
+    fn into_set<S: IndexStore>(self, indexes: &S) -> Result<HashSet<TxoRef>, Status> {
         let by_policy = ByPolicyQuery::maybe_from(self.policy_id);
         let by_asset = ByAssetQuery::maybe_from(self.asset_name);
 
         match (by_policy, by_asset) {
-            (Some(x), None) => x.into_set(ledger),
-            (None, Some(x)) => x.into_set(ledger),
+            (Some(x), None) => x.into_set(indexes),
+            (None, Some(x)) => x.into_set(indexes),
             (None, None) => Ok(HashSet::default()),
             _ => Err(Status::invalid_argument("conflicting asset criteria")),
         }
@@ -177,20 +177,20 @@ impl IntoSet for u5c::cardano::AssetPattern {
 }
 
 impl IntoSet for u5c::cardano::TxOutputPattern {
-    fn into_set<S: StateStore>(self, ledger: &S) -> Result<HashSet<TxoRef>, Status> {
+    fn into_set<S: IndexStore>(self, indexes: &S) -> Result<HashSet<TxoRef>, Status> {
         match (self.address, self.asset) {
-            (None, Some(x)) => x.into_set(ledger),
-            (Some(x), None) => x.into_set(ledger),
-            (Some(a), Some(b)) => intersect(ledger, a, b),
+            (None, Some(x)) => x.into_set(indexes),
+            (Some(x), None) => x.into_set(indexes),
+            (Some(a), Some(b)) => intersect(indexes, a, b),
             (None, None) => Ok(HashSet::default()),
         }
     }
 }
 
 impl IntoSet for u5c::query::AnyUtxoPattern {
-    fn into_set<S: StateStore>(self, ledger: &S) -> Result<HashSet<TxoRef>, Status> {
+    fn into_set<S: IndexStore>(self, indexes: &S) -> Result<HashSet<TxoRef>, Status> {
         match self.utxo_pattern {
-            Some(UtxoPattern::Cardano(x)) => x.into_set(ledger),
+            Some(UtxoPattern::Cardano(x)) => x.into_set(indexes),
             _ => Ok(HashSet::new()),
         }
     }
@@ -367,7 +367,7 @@ where
 
         let set = match message.predicate {
             Some(x) => match x.r#match {
-                Some(x) => x.into_set(self.domain.state())?,
+                Some(x) => x.into_set(self.domain.indexes())?,
                 _ => {
                     return Err(Status::invalid_argument(
                         "only 'match' predicate is supported by Dolos",
@@ -416,7 +416,7 @@ where
         let tx_hash = message.hash;
 
         let (block_bytes, tx_index) =
-            ArchiveStore::get_block_with_tx(self.domain.archive(), &tx_hash)
+            IndexStore::get_block_with_tx(self.domain.indexes(), &tx_hash)
                 .map_err(|e| Status::internal(e.to_string()))?
                 .ok_or_else(|| Status::not_found("tx hash not found"))?;
 

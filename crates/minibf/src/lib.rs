@@ -23,7 +23,8 @@ use tracing::Level;
 
 use dolos_core::{
     config::MinibfConfig, ArchiveStore as _, BlockSlot, CancelToken, Domain, Entity, EntityKey,
-    EraCbor, LogKey, ServeError, StateError, StateStore as _, TemporalKey, TxOrder,
+    EraCbor, IndexStore as _, LogKey, ServeError, StateError, StateStore as _, TemporalKey,
+    TxOrder,
 };
 
 mod error;
@@ -117,7 +118,7 @@ impl<D: Domain> Facade<D> {
 
     pub fn get_tx(&self, hash: Hash<32>) -> Result<Option<EraCbor>, StatusCode> {
         let tx = self
-            .archive()
+            .indexes()
             .get_tx(hash.as_slice())
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -143,7 +144,7 @@ impl<D: Domain> Facade<D> {
         let blocks = hashes
             .into_iter()
             .map(|h| {
-                self.archive()
+                self.indexes()
                     .get_block_with_tx(h.as_slice())
                     .map(|x| (h, x))
             })
