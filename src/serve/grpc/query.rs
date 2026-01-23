@@ -415,10 +415,11 @@ where
 
         let tx_hash = message.hash;
 
-        let (block_bytes, tx_index) =
-            IndexStore::get_block_with_tx(self.domain.indexes(), &tx_hash)
-                .map_err(|e| Status::internal(e.to_string()))?
-                .ok_or_else(|| Status::not_found("tx hash not found"))?;
+        let (block_bytes, tx_index) = self
+            .domain
+            .block_with_tx(&tx_hash)
+            .map_err(|e| Status::internal(e.to_string()))?
+            .ok_or_else(|| Status::not_found("tx hash not found"))?;
 
         let block = MultiEraBlock::decode(&block_bytes)
             .map_err(|e| Status::internal(format!("failed to decode block: {e}")))?;

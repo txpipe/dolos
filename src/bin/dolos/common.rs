@@ -51,18 +51,12 @@ pub fn open_archive_store(
     Ok(archive)
 }
 
-pub fn open_index_store(
-    config: &RootConfig,
-    archive: dolos_redb3::archive::ArchiveStore,
-) -> Result<dolos_redb3::indexes::IndexStore, Error> {
+pub fn open_index_store(config: &RootConfig) -> Result<dolos_redb3::indexes::IndexStore, Error> {
     let root = ensure_storage_path(config)?;
 
-    let indexes = dolos_redb3::indexes::IndexStore::open(
-        root.join("index"),
-        config.storage.chain_cache,
-        archive,
-    )
-    .map_err(IndexError::from)?;
+    let indexes =
+        dolos_redb3::indexes::IndexStore::open(root.join("index"), config.storage.chain_cache)
+            .map_err(IndexError::from)?;
 
     Ok(indexes)
 }
@@ -93,7 +87,7 @@ pub fn open_persistent_data_stores(config: &RootConfig) -> Result<Stores, Error>
 
     let archive = open_archive_store(config)?;
 
-    let indexes = open_index_store(config, archive.clone())?;
+    let indexes = open_index_store(config)?;
 
     Ok(Stores {
         wal,
@@ -113,8 +107,7 @@ pub fn create_ephemeral_data_stores() -> Result<Stores, Error> {
     let archive =
         dolos_redb3::archive::ArchiveStore::in_memory(schema).map_err(ArchiveError::from)?;
 
-    let indexes =
-        dolos_redb3::indexes::IndexStore::in_memory(archive.clone()).map_err(IndexError::from)?;
+    let indexes = dolos_redb3::indexes::IndexStore::in_memory().map_err(IndexError::from)?;
 
     Ok(Stores {
         wal,

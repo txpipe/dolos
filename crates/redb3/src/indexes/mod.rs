@@ -1,15 +1,8 @@
 use std::{collections::HashMap, path::Path, sync::Arc};
 
 use dolos_core::{
-    BlockBody, BlockSlot, ChainPoint, EraCbor, IndexError, IndexStore as CoreIndexStore, SlotTags,
-    TxHash, TxOrder, UtxoSet, UtxoSetDelta,
-};
-use pallas::{
-    crypto::hash::Hash,
-    ledger::{
-        primitives::conway::PlutusData,
-        traverse::{ComputeHash, MultiEraBlock, OriginalHash},
-    },
+    BlockSlot, ChainPoint, IndexError, IndexStore as CoreIndexStore, SlotTags, UtxoSet,
+    UtxoSetDelta,
 };
 use redb::{Database, Durability, ReadTransaction, ReadableDatabase, TableStats};
 use tracing::warn;
@@ -20,10 +13,6 @@ const DEFAULT_CACHE_SIZE_MB: usize = 500;
 
 fn map_db_error(error: impl std::fmt::Display) -> IndexError {
     IndexError::DbError(error.to_string())
-}
-
-fn map_codec_error(error: impl std::fmt::Display) -> IndexError {
-    IndexError::CodecError(error.to_string())
 }
 
 impl From<Error> for IndexError {
@@ -41,15 +30,10 @@ impl From<archive::RedbArchiveError> for IndexError {
 #[derive(Clone)]
 pub struct IndexStore {
     db: Arc<Database>,
-    archive: archive::ArchiveStore,
 }
 
 impl IndexStore {
-    pub fn open(
-        path: impl AsRef<Path>,
-        cache_size: Option<usize>,
-        archive: archive::ArchiveStore,
-    ) -> Result<Self, Error> {
+    pub fn open(path: impl AsRef<Path>, cache_size: Option<usize>) -> Result<Self, Error> {
         let db = Database::builder()
             .set_repair_callback(|x| {
                 warn!(progress = x.progress() * 100f64, "index db is repairing")
@@ -57,24 +41,18 @@ impl IndexStore {
             .set_cache_size(1024 * 1024 * cache_size.unwrap_or(DEFAULT_CACHE_SIZE_MB))
             .create(path)?;
 
-        let store = Self {
-            db: db.into(),
-            archive,
-        };
+        let store = Self { db: db.into() };
 
         store.initialize_schema_internal()?;
 
         Ok(store)
     }
 
-    pub fn in_memory(archive: archive::ArchiveStore) -> Result<Self, Error> {
+    pub fn in_memory() -> Result<Self, Error> {
         let db =
             Database::builder().create_with_backend(::redb::backends::InMemoryBackend::new())?;
 
-        let store = Self {
-            db: db.into(),
-            archive,
-        };
+        let store = Self { db: db.into() };
 
         store.initialize_schema_internal()?;
 
@@ -122,62 +100,32 @@ impl IndexStore {
 
         Ok(())
     }
-
-    fn archive_blocks(&self) -> Result<ReadTransaction, IndexError> {
-        self.archive.db().begin_read().map_err(map_db_error)
-    }
-
-    fn index_bounds(&self) -> Result<(BlockSlot, BlockSlot), IndexError> {
-        let end_slot = self
-            .archive
-            .get_tip()
-            .map_err(map_db_error)?
-            .map(|(slot, _)| slot)
-            .unwrap_or_default();
-        Ok((0, end_slot))
-    }
 }
 
-pub struct IndexSparseIter {
-    _index_rx: ReadTransaction,
-    archive_rx: ReadTransaction,
+/// Iterator that yields slot values from the index.
+pub struct SlotIter {
+    _rx: ReadTransaction,
     range: archive::indexes::SlotKeyIterator,
 }
 
-impl Iterator for IndexSparseIter {
-    type Item = Result<(BlockSlot, Option<BlockBody>), IndexError>;
+impl Iterator for SlotIter {
+    type Item = Result<BlockSlot, IndexError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let next = self.range.next()?;
-
-        let Ok(slot) = next else {
-            return Some(Err(map_db_error(next.err().unwrap())));
-        };
-
-        let block =
-            archive::tables::BlocksTable::get_by_slot(&self.archive_rx, slot).map_err(map_db_error);
-
-        Some(block.map(|body| (slot, body)))
+        Some(next.map_err(map_db_error))
     }
 }
 
-impl DoubleEndedIterator for IndexSparseIter {
+impl DoubleEndedIterator for SlotIter {
     fn next_back(&mut self) -> Option<Self::Item> {
         let next = self.range.next_back()?;
-
-        let Ok(slot) = next else {
-            return Some(Err(map_db_error(next.err().unwrap())));
-        };
-
-        let block =
-            archive::tables::BlocksTable::get_by_slot(&self.archive_rx, slot).map_err(map_db_error);
-
-        Some(block.map(|body| (slot, body)))
+        Some(next.map_err(map_db_error))
     }
 }
 
 impl CoreIndexStore for IndexStore {
-    type SparseBlockIter = IndexSparseIter;
+    type SlotIter = SlotIter;
 
     fn initialize_schema(&self) -> Result<(), IndexError> {
         self.initialize_schema_internal().map_err(IndexError::from)
@@ -246,254 +194,108 @@ impl CoreIndexStore for IndexStore {
         Ok(out)
     }
 
-    fn get_block_by_hash(&self, block_hash: &[u8]) -> Result<Option<BlockBody>, IndexError> {
+    fn slot_for_block_hash(&self, block_hash: &[u8]) -> Result<Option<BlockSlot>, IndexError> {
         let rx = self.db.begin_read().map_err(map_db_error)?;
-        match archive::indexes::Indexes::get_by_block_hash(&rx, block_hash)? {
-            Some(slot) => self.archive.get_block_by_slot(&slot).map_err(map_db_error),
-            None => Ok(None),
-        }
+        archive::indexes::Indexes::get_by_block_hash(&rx, block_hash).map_err(IndexError::from)
     }
 
-    fn get_block_by_number(&self, number: &u64) -> Result<Option<BlockBody>, IndexError> {
+    fn slot_for_block_number(&self, number: &u64) -> Result<Option<BlockSlot>, IndexError> {
         let rx = self.db.begin_read().map_err(map_db_error)?;
-        match archive::indexes::Indexes::get_by_block_number(&rx, number)? {
-            Some(slot) => self.archive.get_block_by_slot(&slot).map_err(map_db_error),
-            None => Ok(None),
-        }
+        archive::indexes::Indexes::get_by_block_number(&rx, number).map_err(IndexError::from)
     }
 
-    fn get_block_with_tx(
-        &self,
-        tx_hash: &[u8],
-    ) -> Result<Option<(BlockBody, TxOrder)>, IndexError> {
-        let rx = self.db.begin_read().map_err(map_db_error)?;
-        let Some(slot) = archive::indexes::Indexes::get_by_tx_hash(&rx, tx_hash)? else {
-            return Ok(None);
-        };
-
-        let Some(raw) = self
-            .archive
-            .get_block_by_slot(&slot)
-            .map_err(map_db_error)?
-        else {
-            return Ok(None);
-        };
-
-        let block = MultiEraBlock::decode(raw.as_slice()).map_err(map_codec_error)?;
-        if let Some((idx, _)) = block
-            .txs()
-            .iter()
-            .enumerate()
-            .find(|(_, tx)| tx.hash().to_vec() == tx_hash)
-        {
-            return Ok(Some((raw, idx)));
-        }
-
-        Ok(None)
-    }
-
-    fn get_tx(&self, tx_hash: &[u8]) -> Result<Option<EraCbor>, IndexError> {
-        let rx = self.db.begin_read().map_err(map_db_error)?;
-        let Some(slot) = archive::indexes::Indexes::get_by_tx_hash(&rx, tx_hash)? else {
-            return Ok(None);
-        };
-
-        let Some(raw) = self
-            .archive
-            .get_block_by_slot(&slot)
-            .map_err(map_db_error)?
-        else {
-            return Ok(None);
-        };
-
-        let block = MultiEraBlock::decode(raw.as_slice()).map_err(map_codec_error)?;
-        if let Some(tx) = block.txs().iter().find(|x| x.hash().to_vec() == tx_hash) {
-            return Ok(Some(EraCbor(block.era().into(), tx.encode())));
-        }
-
-        Ok(None)
-    }
-
-    fn get_plutus_data(&self, datum_hash: &Hash<32>) -> Result<Option<PlutusData>, IndexError> {
-        use pallas::ledger::primitives::conway::DatumOption;
-
-        let (start_slot, end_slot) = self.index_bounds()?;
-        let rx = self.db.begin_read().map_err(map_db_error)?;
-        let slots = archive::indexes::Indexes::get_by_datum_hash(
-            &rx,
-            datum_hash.as_slice(),
-            start_slot,
-            end_slot,
-        )?;
-
-        for slot in slots {
-            let Some(raw) = self
-                .archive
-                .get_block_by_slot(&slot)
-                .map_err(map_db_error)?
-            else {
-                continue;
-            };
-
-            let block = MultiEraBlock::decode(raw.as_slice()).map_err(map_codec_error)?;
-            for tx in block.txs() {
-                if let Some(plutus_data) = tx.find_plutus_data(datum_hash) {
-                    return Ok(Some(plutus_data.clone().unwrap()));
-                }
-
-                for (_, output) in tx.produces() {
-                    if let Some(DatumOption::Data(data)) = output.datum() {
-                        if &data.original_hash() == datum_hash {
-                            return Ok(Some(data.clone().unwrap().unwrap()));
-                        }
-                    }
-                }
-
-                for redeemer in tx.redeemers() {
-                    if &redeemer.data().compute_hash() == datum_hash {
-                        return Ok(Some(redeemer.data().clone()));
-                    }
-                }
-            }
-        }
-
-        Ok(None)
-    }
-
-    fn get_slot_for_tx(&self, tx_hash: &[u8]) -> Result<Option<BlockSlot>, IndexError> {
+    fn slot_for_tx_hash(&self, tx_hash: &[u8]) -> Result<Option<BlockSlot>, IndexError> {
         let rx = self.db.begin_read().map_err(map_db_error)?;
         archive::indexes::Indexes::get_by_tx_hash(&rx, tx_hash).map_err(IndexError::from)
     }
 
-    fn get_tx_by_spent_txo(&self, spent_txo: &[u8]) -> Result<Option<TxHash>, IndexError> {
-        let (start_slot, end_slot) = self.index_bounds()?;
+    fn slots_for_datum_hash(
+        &self,
+        datum_hash: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
+    ) -> Result<Vec<BlockSlot>, IndexError> {
         let rx = self.db.begin_read().map_err(map_db_error)?;
-        let slots =
-            archive::indexes::Indexes::get_by_spent_txo(&rx, spent_txo, start_slot, end_slot)?;
-
-        for slot in slots {
-            let Some(raw) = self
-                .archive
-                .get_block_by_slot(&slot)
-                .map_err(map_db_error)?
-            else {
-                continue;
-            };
-
-            let block = MultiEraBlock::decode(raw.as_slice()).map_err(map_codec_error)?;
-            for tx in block.txs().iter() {
-                for input in tx.inputs() {
-                    let bytes: Vec<u8> = dolos_core::TxoRef::from(&input).into();
-                    if bytes.as_slice() == spent_txo {
-                        return Ok(Some(tx.hash()));
-                    }
-                }
-            }
-        }
-
-        Ok(None)
+        archive::indexes::Indexes::get_by_datum_hash(&rx, datum_hash, start_slot, end_slot)
+            .map_err(IndexError::from)
     }
 
-    fn iter_blocks_with_address(
+    fn slots_for_spent_txo(
+        &self,
+        spent_txo: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
+    ) -> Result<Vec<BlockSlot>, IndexError> {
+        let rx = self.db.begin_read().map_err(map_db_error)?;
+        archive::indexes::Indexes::get_by_spent_txo(&rx, spent_txo, start_slot, end_slot)
+            .map_err(IndexError::from)
+    }
+
+    fn slots_with_address(
         &self,
         address: &[u8],
         start_slot: BlockSlot,
         end_slot: BlockSlot,
-    ) -> Result<Self::SparseBlockIter, IndexError> {
-        let index_rx = self.db.begin_read().map_err(map_db_error)?;
-        let archive_rx = self.archive_blocks()?;
-        let range =
-            archive::indexes::Indexes::iter_by_address(&index_rx, address, start_slot, end_slot)?;
-        Ok(IndexSparseIter {
-            _index_rx: index_rx,
-            archive_rx,
-            range,
-        })
+    ) -> Result<Self::SlotIter, IndexError> {
+        let rx = self.db.begin_read().map_err(map_db_error)?;
+        let range = archive::indexes::Indexes::iter_by_address(&rx, address, start_slot, end_slot)?;
+        Ok(SlotIter { _rx: rx, range })
     }
 
-    fn iter_blocks_with_asset(
+    fn slots_with_asset(
         &self,
         asset: &[u8],
         start_slot: BlockSlot,
         end_slot: BlockSlot,
-    ) -> Result<Self::SparseBlockIter, IndexError> {
-        let index_rx = self.db.begin_read().map_err(map_db_error)?;
-        let archive_rx = self.archive_blocks()?;
-        let range =
-            archive::indexes::Indexes::iter_by_asset(&index_rx, asset, start_slot, end_slot)?;
-        Ok(IndexSparseIter {
-            _index_rx: index_rx,
-            archive_rx,
-            range,
-        })
+    ) -> Result<Self::SlotIter, IndexError> {
+        let rx = self.db.begin_read().map_err(map_db_error)?;
+        let range = archive::indexes::Indexes::iter_by_asset(&rx, asset, start_slot, end_slot)?;
+        Ok(SlotIter { _rx: rx, range })
     }
 
-    fn iter_blocks_with_payment(
+    fn slots_with_payment(
         &self,
         payment: &[u8],
         start_slot: BlockSlot,
         end_slot: BlockSlot,
-    ) -> Result<Self::SparseBlockIter, IndexError> {
-        let index_rx = self.db.begin_read().map_err(map_db_error)?;
-        let archive_rx = self.archive_blocks()?;
-        let range =
-            archive::indexes::Indexes::iter_by_payment(&index_rx, payment, start_slot, end_slot)?;
-        Ok(IndexSparseIter {
-            _index_rx: index_rx,
-            archive_rx,
-            range,
-        })
+    ) -> Result<Self::SlotIter, IndexError> {
+        let rx = self.db.begin_read().map_err(map_db_error)?;
+        let range = archive::indexes::Indexes::iter_by_payment(&rx, payment, start_slot, end_slot)?;
+        Ok(SlotIter { _rx: rx, range })
     }
 
-    fn iter_blocks_with_stake(
+    fn slots_with_stake(
         &self,
         stake: &[u8],
         start_slot: BlockSlot,
         end_slot: BlockSlot,
-    ) -> Result<Self::SparseBlockIter, IndexError> {
-        let index_rx = self.db.begin_read().map_err(map_db_error)?;
-        let archive_rx = self.archive_blocks()?;
-        let range =
-            archive::indexes::Indexes::iter_by_stake(&index_rx, stake, start_slot, end_slot)?;
-        Ok(IndexSparseIter {
-            _index_rx: index_rx,
-            archive_rx,
-            range,
-        })
+    ) -> Result<Self::SlotIter, IndexError> {
+        let rx = self.db.begin_read().map_err(map_db_error)?;
+        let range = archive::indexes::Indexes::iter_by_stake(&rx, stake, start_slot, end_slot)?;
+        Ok(SlotIter { _rx: rx, range })
     }
 
-    fn iter_blocks_with_account_certs(
+    fn slots_with_account_certs(
         &self,
         account: &[u8],
         start_slot: BlockSlot,
         end_slot: BlockSlot,
-    ) -> Result<Self::SparseBlockIter, IndexError> {
-        let index_rx = self.db.begin_read().map_err(map_db_error)?;
-        let archive_rx = self.archive_blocks()?;
-        let range = archive::indexes::Indexes::iter_by_account_certs(
-            &index_rx, account, start_slot, end_slot,
-        )?;
-        Ok(IndexSparseIter {
-            _index_rx: index_rx,
-            archive_rx,
-            range,
-        })
+    ) -> Result<Self::SlotIter, IndexError> {
+        let rx = self.db.begin_read().map_err(map_db_error)?;
+        let range =
+            archive::indexes::Indexes::iter_by_account_certs(&rx, account, start_slot, end_slot)?;
+        Ok(SlotIter { _rx: rx, range })
     }
 
-    fn iter_blocks_with_metadata(
+    fn slots_with_metadata(
         &self,
         metadata: &u64,
         start_slot: BlockSlot,
         end_slot: BlockSlot,
-    ) -> Result<Self::SparseBlockIter, IndexError> {
-        let index_rx = self.db.begin_read().map_err(map_db_error)?;
-        let archive_rx = self.archive_blocks()?;
+    ) -> Result<Self::SlotIter, IndexError> {
+        let rx = self.db.begin_read().map_err(map_db_error)?;
         let range =
-            archive::indexes::Indexes::iter_by_metadata(&index_rx, metadata, start_slot, end_slot)?;
-        Ok(IndexSparseIter {
-            _index_rx: index_rx,
-            archive_rx,
-            range,
-        })
+            archive::indexes::Indexes::iter_by_metadata(&rx, metadata, start_slot, end_slot)?;
+        Ok(SlotIter { _rx: rx, range })
     }
 }

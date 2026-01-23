@@ -34,6 +34,7 @@ pub mod facade;
 pub mod indexes;
 pub mod mempool;
 pub mod point;
+pub mod query;
 pub mod state;
 pub mod wal;
 
@@ -69,6 +70,7 @@ pub use archive::*;
 pub use indexes::*;
 pub use mempool::*;
 pub use point::*;
+pub use query::*;
 pub use state::*;
 pub use wal::*;
 

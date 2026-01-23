@@ -103,7 +103,7 @@ impl ToyDomain {
             dolos_redb3::archive::ArchiveStore::in_memory(dolos_cardano::model::build_schema())
                 .unwrap();
 
-        let indexes = dolos_redb3::indexes::IndexStore::in_memory(archive.clone()).unwrap();
+        let indexes = dolos_redb3::indexes::IndexStore::in_memory().unwrap();
 
         let config = CardanoConfig::default();
 
