@@ -20,6 +20,24 @@ pub enum IndexError {
     SchemaError(String),
 }
 
+/// Writer for batched index operations.
+///
+/// This trait provides transactional write operations for indexes. Multiple
+/// operations can be batched together and committed atomically.
+pub trait IndexWriter: Send + Sync + 'static {
+    /// Apply UTxO set changes to the filter indexes.
+    fn apply_utxoset(&self, delta: &UtxoSetDelta) -> Result<(), IndexError>;
+
+    /// Apply archive indexes for a block.
+    fn apply_archive(&self, point: &ChainPoint, tags: &SlotTags) -> Result<(), IndexError>;
+
+    /// Undo archive indexes for a block (rollback).
+    fn undo_archive(&self, point: &ChainPoint, tags: &SlotTags) -> Result<(), IndexError>;
+
+    /// Commit the batched operations.
+    fn commit(self) -> Result<(), IndexError>;
+}
+
 /// Index store trait for cross-cutting indexes.
 ///
 /// This trait provides pure index lookups that return primitive values like
@@ -27,23 +45,20 @@ pub enum IndexError {
 /// fetch block data, use the `QueryHelpers` trait.
 #[trait_variant::make(Send)]
 pub trait IndexStore: Clone + Send + Sync + 'static {
+    /// Writer type for batched write operations.
+    type Writer: IndexWriter;
+
     /// Iterator type for sparse slot queries.
     type SlotIter: Iterator<Item = Result<BlockSlot, IndexError>> + DoubleEndedIterator;
+
+    /// Start a new writer for batched operations.
+    fn start_writer(&self) -> Result<Self::Writer, IndexError>;
 
     /// Initialize the index schema (create tables, etc.).
     fn initialize_schema(&self) -> Result<(), IndexError>;
 
     /// Copy all index data to another store.
     fn copy(&self, target: &Self) -> Result<(), IndexError>;
-
-    /// Apply UTxO set changes to the filter indexes.
-    fn apply_utxoset(&self, delta: &UtxoSetDelta) -> Result<(), IndexError>;
-
-    /// Apply archive indexes for a block.
-    fn apply_archive_indexes(&self, point: &ChainPoint, tags: &SlotTags) -> Result<(), IndexError>;
-
-    /// Undo archive indexes for a block (rollback).
-    fn undo_archive_indexes(&self, point: &ChainPoint, tags: &SlotTags) -> Result<(), IndexError>;
 
     // UTxO filter index queries (these return UTxO sets, not slots)
 

@@ -33,6 +33,8 @@ fn execute_batch<D: Domain>(
 
     batch.commit_archive(domain)?;
 
+    batch.commit_indexes(domain)?;
+
     Ok(batch.last_slot())
 }
 

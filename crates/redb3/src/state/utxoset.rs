@@ -498,17 +498,16 @@ mod tests {
     use std::{collections::HashSet, str::FromStr as _, sync::Arc};
 
     use dolos_core::{
-        IndexStore as _, StateSchema, StateStore as _, StateWriter as _, TxoRef, UtxoMap, UtxoSet,
-        UtxoSetDelta,
+        IndexStore as _, IndexWriter as _, StateSchema, StateStore as _, StateWriter as _, TxoRef,
+        UtxoMap, UtxoSet, UtxoSetDelta,
     };
     use dolos_testing::*;
     use pallas::ledger::addresses::{Address, ShelleyDelegationPart};
 
     use crate::state::StateStore;
 
-    fn build_indexes(store: &StateStore) -> crate::indexes::IndexStore {
-        let archive = crate::archive::ArchiveStore::in_memory(StateSchema::default()).unwrap();
-        crate::indexes::IndexStore::in_memory(archive).unwrap()
+    fn build_indexes(_store: &StateStore) -> crate::indexes::IndexStore {
+        crate::indexes::IndexStore::in_memory().unwrap()
     }
 
     fn get_test_address_utxos(
@@ -523,11 +522,13 @@ mod tests {
     macro_rules! apply_utxoset {
         ($store:expr, $indexes:expr, $deltas:expr) => {
             let writer = $store.start_writer().unwrap();
+            let index_writer = $indexes.start_writer().unwrap();
             for delta in $deltas.iter() {
                 writer.apply_utxoset(&delta).unwrap();
-                $indexes.apply_utxoset(&delta).unwrap();
+                index_writer.apply_utxoset(&delta).unwrap();
             }
             writer.commit().unwrap();
+            index_writer.commit().unwrap();
         };
     }
 

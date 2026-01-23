@@ -1,6 +1,6 @@
 use dolos_core::{
     config::CardanoConfig, ChainError, Domain, EntityKey, Genesis, IndexStore as _,
-    StateStore as _, StateWriter as _,
+    IndexWriter as _, StateStore as _, StateWriter as _,
 };
 
 use crate::{
@@ -117,16 +117,18 @@ pub fn bootstrap_utxos<D: Domain>(
     config: &CardanoConfig,
 ) -> Result<(), ChainError> {
     let writer = state.start_writer()?;
+    let index_writer = indexes.start_writer()?;
 
     let delta = crate::utxoset::compute_origin_delta(genesis);
     writer.apply_utxoset(&delta)?;
-    indexes.apply_utxoset(&delta)?;
+    index_writer.apply_utxoset(&delta)?;
 
     let delta = crate::utxoset::build_custom_utxos_delta(config)?;
     writer.apply_utxoset(&delta)?;
-    indexes.apply_utxoset(&delta)?;
+    index_writer.apply_utxoset(&delta)?;
 
     writer.commit()?;
+    index_writer.commit()?;
 
     Ok(())
 }

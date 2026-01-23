@@ -1,7 +1,7 @@
 use crate::{make_custom_utxo_delta, TestAddress, UtxoGenerator};
 use dolos_core::{
     config::{CardanoConfig, StorageConfig},
-    *,
+    IndexWriter as _, *,
 };
 use futures_util::stream::StreamExt;
 use std::sync::Arc;
@@ -131,9 +131,11 @@ impl ToyDomain {
 
         if let Some(delta) = initial_delta {
             let writer = domain.state.start_writer().unwrap();
+            let index_writer = domain.indexes.start_writer().unwrap();
             writer.apply_utxoset(&delta).unwrap();
-            domain.indexes.apply_utxoset(&delta).unwrap();
+            index_writer.apply_utxoset(&delta).unwrap();
             writer.commit().unwrap();
+            index_writer.commit().unwrap();
         }
 
         domain

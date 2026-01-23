@@ -1,10 +1,10 @@
 use std::{collections::HashMap, path::Path, sync::Arc};
 
 use dolos_core::{
-    BlockSlot, ChainPoint, IndexError, IndexStore as CoreIndexStore, SlotTags, UtxoSet,
-    UtxoSetDelta,
+    BlockSlot, ChainPoint, IndexError, IndexStore as CoreIndexStore,
+    IndexWriter as CoreIndexWriter, SlotTags, UtxoSet, UtxoSetDelta,
 };
-use redb::{Database, Durability, ReadTransaction, ReadableDatabase, TableStats};
+use redb::{Database, Durability, ReadTransaction, ReadableDatabase, TableStats, WriteTransaction};
 use tracing::warn;
 
 use crate::{archive, state, Error};
@@ -102,6 +102,36 @@ impl IndexStore {
     }
 }
 
+/// Writer for batched index operations.
+///
+/// Holds a write transaction that is committed when `commit()` is called,
+/// allowing multiple index operations to be batched together.
+pub struct IndexStoreWriter {
+    wx: WriteTransaction,
+}
+
+impl CoreIndexWriter for IndexStoreWriter {
+    fn apply_utxoset(&self, delta: &UtxoSetDelta) -> Result<(), IndexError> {
+        state::utxoset::FilterIndexes::apply(&self.wx, delta).map_err(IndexError::from)?;
+        Ok(())
+    }
+
+    fn apply_archive(&self, point: &ChainPoint, tags: &SlotTags) -> Result<(), IndexError> {
+        archive::indexes::Indexes::apply(&self.wx, point, tags).map_err(IndexError::from)?;
+        Ok(())
+    }
+
+    fn undo_archive(&self, point: &ChainPoint, tags: &SlotTags) -> Result<(), IndexError> {
+        archive::indexes::Indexes::undo(&self.wx, point, tags).map_err(IndexError::from)?;
+        Ok(())
+    }
+
+    fn commit(self) -> Result<(), IndexError> {
+        self.wx.commit().map_err(map_db_error)?;
+        Ok(())
+    }
+}
+
 /// Iterator that yields slot values from the index.
 pub struct SlotIter {
     _rx: ReadTransaction,
@@ -125,7 +155,16 @@ impl DoubleEndedIterator for SlotIter {
 }
 
 impl CoreIndexStore for IndexStore {
+    type Writer = IndexStoreWriter;
     type SlotIter = SlotIter;
+
+    fn start_writer(&self) -> Result<Self::Writer, IndexError> {
+        let mut wx = self.db.begin_write().map_err(map_db_error)?;
+        wx.set_durability(Durability::Immediate)
+            .map_err(map_db_error)?;
+        wx.set_quick_repair(true);
+        Ok(IndexStoreWriter { wx })
+    }
 
     fn initialize_schema(&self) -> Result<(), IndexError> {
         self.initialize_schema_internal().map_err(IndexError::from)
@@ -140,27 +179,6 @@ impl CoreIndexStore for IndexStore {
 
         wx.commit().map_err(map_db_error)?;
 
-        Ok(())
-    }
-
-    fn apply_utxoset(&self, delta: &UtxoSetDelta) -> Result<(), IndexError> {
-        let wx = self.db.begin_write().map_err(map_db_error)?;
-        state::utxoset::FilterIndexes::apply(&wx, delta).map_err(IndexError::from)?;
-        wx.commit().map_err(map_db_error)?;
-        Ok(())
-    }
-
-    fn apply_archive_indexes(&self, point: &ChainPoint, tags: &SlotTags) -> Result<(), IndexError> {
-        let wx = self.db.begin_write().map_err(map_db_error)?;
-        archive::indexes::Indexes::apply(&wx, point, tags).map_err(IndexError::from)?;
-        wx.commit().map_err(map_db_error)?;
-        Ok(())
-    }
-
-    fn undo_archive_indexes(&self, point: &ChainPoint, tags: &SlotTags) -> Result<(), IndexError> {
-        let wx = self.db.begin_write().map_err(map_db_error)?;
-        archive::indexes::Indexes::undo(&wx, point, tags).map_err(IndexError::from)?;
-        wx.commit().map_err(map_db_error)?;
         Ok(())
     }
 
