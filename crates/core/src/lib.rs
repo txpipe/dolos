@@ -356,6 +356,9 @@ pub enum MempoolError {
     #[error(transparent)]
     StateError(#[from] StateError),
 
+    #[error(transparent)]
+    IndexError(#[from] IndexError),
+
     #[error("plutus not supported")]
     PlutusNotSupported,
 
@@ -418,6 +421,9 @@ pub enum ChainError {
 
     #[error(transparent)]
     StateError(#[from] StateError),
+
+    #[error(transparent)]
+    IndexError(#[from] IndexError),
 
     #[error(transparent)]
     ArchiveError(#[from] ArchiveError),
@@ -502,6 +508,7 @@ pub trait ChainLogic: Sized + Send + Sync {
     fn apply_genesis<D: Domain>(
         &mut self,
         state: &D::State,
+        indexes: &D::Indexes,
         genesis: Arc<Genesis>,
     ) -> Result<(), ChainError>;
 
@@ -578,6 +585,9 @@ pub enum DomainError {
 
     #[error("archive error: {0}")]
     ArchiveError(#[from] ArchiveError),
+
+    #[error("index error: {0}")]
+    IndexError(#[from] IndexError),
 
     #[error("mempool error: {0}")]
     MempoolError(#[from] MempoolError),

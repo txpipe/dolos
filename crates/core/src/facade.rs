@@ -57,7 +57,7 @@ fn execute_work<D: Domain>(
 ) -> Result<(), DomainError> {
     match work {
         WorkUnit::Genesis => {
-            chain.apply_genesis::<D>(domain.state(), domain.genesis())?;
+            chain.apply_genesis::<D>(domain.state(), domain.indexes(), domain.genesis())?;
             domain.wal().reset_to(&ChainPoint::Origin)?;
         }
         WorkUnit::EWrap(slot) => {

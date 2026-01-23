@@ -14,6 +14,7 @@ pub struct Stores {
     pub wal: WalAdapter,
     pub state: dolos_redb3::state::StateStore,
     pub archive: dolos_redb3::archive::ArchiveStore,
+    pub indexes: dolos_redb3::indexes::IndexStore,
 }
 
 pub fn ensure_storage_path(config: &RootConfig) -> Result<PathBuf, Error> {
@@ -50,6 +51,22 @@ pub fn open_archive_store(
     Ok(archive)
 }
 
+pub fn open_index_store(
+    config: &RootConfig,
+    archive: dolos_redb3::archive::ArchiveStore,
+) -> Result<dolos_redb3::indexes::IndexStore, Error> {
+    let root = ensure_storage_path(config)?;
+
+    let indexes = dolos_redb3::indexes::IndexStore::open(
+        root.join("index"),
+        config.storage.chain_cache,
+        archive,
+    )
+    .map_err(IndexError::from)?;
+
+    Ok(indexes)
+}
+
 pub fn open_state_store(config: &RootConfig) -> Result<dolos_redb3::state::StateStore, Error> {
     let root = ensure_storage_path(config)?;
     let schema = dolos_cardano::model::build_schema();
@@ -76,10 +93,13 @@ pub fn open_persistent_data_stores(config: &RootConfig) -> Result<Stores, Error>
 
     let archive = open_archive_store(config)?;
 
+    let indexes = open_index_store(config, archive.clone())?;
+
     Ok(Stores {
         wal,
         state,
         archive,
+        indexes,
     })
 }
 
@@ -93,10 +113,14 @@ pub fn create_ephemeral_data_stores() -> Result<Stores, Error> {
     let archive =
         dolos_redb3::archive::ArchiveStore::in_memory(schema).map_err(ArchiveError::from)?;
 
+    let indexes =
+        dolos_redb3::indexes::IndexStore::in_memory(archive.clone()).map_err(IndexError::from)?;
+
     Ok(Stores {
         wal,
         archive,
         state,
+        indexes,
     })
 }
 
@@ -146,9 +170,6 @@ pub async fn setup_domain(config: &RootConfig) -> miette::Result<DomainAdapter> 
     )
     .into_diagnostic()?;
 
-    let indexes =
-        dolos_redb3::indexes::IndexStore::new(stores.state.clone(), stores.archive.clone());
-
     let domain = DomainAdapter {
         storage_config: Arc::new(config.storage.clone()),
         genesis,
@@ -156,7 +177,7 @@ pub async fn setup_domain(config: &RootConfig) -> miette::Result<DomainAdapter> 
         wal: stores.wal,
         state: stores.state,
         archive: stores.archive,
-        indexes,
+        indexes: stores.indexes,
         mempool,
         tip_broadcast,
     };

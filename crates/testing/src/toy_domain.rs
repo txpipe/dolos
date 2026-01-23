@@ -103,7 +103,7 @@ impl ToyDomain {
             dolos_redb3::archive::ArchiveStore::in_memory(dolos_cardano::model::build_schema())
                 .unwrap();
 
-        let indexes = dolos_redb3::indexes::IndexStore::new(state.clone(), archive.clone());
+        let indexes = dolos_redb3::indexes::IndexStore::in_memory(archive.clone()).unwrap();
 
         let config = CardanoConfig::default();
 
@@ -112,7 +112,7 @@ impl ToyDomain {
                 .unwrap();
 
         chain
-            .apply_genesis::<Self>(&state, genesis.clone())
+            .apply_genesis::<Self>(&state, &indexes, genesis.clone())
             .unwrap();
 
         let domain = Self {
@@ -132,6 +132,7 @@ impl ToyDomain {
         if let Some(delta) = initial_delta {
             let writer = domain.state.start_writer().unwrap();
             writer.apply_utxoset(&delta).unwrap();
+            domain.indexes.apply_utxoset(&delta).unwrap();
             writer.commit().unwrap();
         }
 

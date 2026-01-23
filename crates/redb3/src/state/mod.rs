@@ -131,7 +131,6 @@ impl StateStore {
         // TODO: refactor into entities model
         utxoset::UtxosTable::initialize(&wx)?;
         utxoset::DatumsTable::initialize(&wx)?;
-        utxoset::FilterIndexes::initialize(&wx)?;
 
         wx.commit()?;
 
@@ -156,7 +155,6 @@ impl StateStore {
         let wx = target.db().begin_write()?;
 
         utxoset::UtxosTable::copy(&rx, &wx)?;
-        utxoset::FilterIndexes::copy(&rx, &wx)?;
 
         wx.commit()?;
 
@@ -218,7 +216,6 @@ impl dolos_core::StateWriter for StateWriter {
 
     fn apply_utxoset(&self, delta: &dolos_core::UtxoSetDelta) -> Result<(), StateError> {
         utxoset::UtxosTable::apply(&self.wx, delta)?;
-        utxoset::FilterIndexes::apply(&self.wx, delta)?;
 
         Ok(())
     }

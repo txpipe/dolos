@@ -86,7 +86,7 @@ pub struct AddressApproxIndexTable;
 
 impl AddressApproxIndexTable {
     pub const DEF: MultimapTableDefinition<'static, BucketedKey<u64>, u64> =
-        MultimapTableDefinition::new("byaddress");
+        MultimapTableDefinition::new("archive-byaddress");
 
     pub fn compute_key(address: &Vec<u8>) -> u64 {
         xxh3_64(address.as_slice())
@@ -107,7 +107,7 @@ pub struct AddressPaymentPartApproxIndexTable;
 
 impl AddressPaymentPartApproxIndexTable {
     pub const DEF: MultimapTableDefinition<'static, BucketedKey<u64>, u64> =
-        MultimapTableDefinition::new("bypayment");
+        MultimapTableDefinition::new("archive-bypayment");
 
     pub fn compute_key(address: &Vec<u8>) -> u64 {
         xxh3_64(address.as_slice())
@@ -140,7 +140,7 @@ pub struct AddressStakePartApproxIndexTable;
 
 impl AddressStakePartApproxIndexTable {
     pub const DEF: MultimapTableDefinition<'static, BucketedKey<u64>, u64> =
-        MultimapTableDefinition::new("bystake");
+        MultimapTableDefinition::new("archive-bystake");
 
     pub fn compute_key(address_stake_part: &Vec<u8>) -> u64 {
         xxh3_64(address_stake_part.as_slice())
@@ -173,7 +173,7 @@ pub struct AssetApproxIndexTable;
 
 impl AssetApproxIndexTable {
     pub const DEF: MultimapTableDefinition<'static, BucketedKey<u64>, u64> =
-        MultimapTableDefinition::new("byasset");
+        MultimapTableDefinition::new("archive-byasset");
 
     pub fn compute_key(asset: &Vec<u8>) -> u64 {
         xxh3_64(asset.as_slice())
@@ -206,7 +206,7 @@ pub struct BlockHashIndexTable;
 
 impl BlockHashIndexTable {
     pub const DEF: TableDefinition<'static, &'static [u8], u64> =
-        TableDefinition::new("byblockhash");
+        TableDefinition::new("archive-byblockhash");
 
     pub fn get_by_block_hash(
         rx: &ReadTransaction,
@@ -220,7 +220,8 @@ impl BlockHashIndexTable {
 pub struct BlockNumberIndexTable;
 
 impl BlockNumberIndexTable {
-    pub const DEF: TableDefinition<'static, u64, u64> = TableDefinition::new("byblocknumber");
+    pub const DEF: TableDefinition<'static, u64, u64> =
+        TableDefinition::new("archive-byblocknumber");
 
     pub fn get_by_block_number(
         rx: &ReadTransaction,
@@ -235,7 +236,7 @@ pub struct DatumHashApproxIndexTable;
 
 impl DatumHashApproxIndexTable {
     pub const DEF: MultimapTableDefinition<'static, BucketedKey<u64>, u64> =
-        MultimapTableDefinition::new("bydatum");
+        MultimapTableDefinition::new("archive-bydatum");
 
     pub fn compute_key(datum_hash: &Vec<u8>) -> u64 {
         xxh3_64(datum_hash.as_slice())
@@ -258,7 +259,7 @@ pub struct MetadataApproxIndexTable;
 
 impl MetadataApproxIndexTable {
     pub const DEF: MultimapTableDefinition<'static, BucketedKey<u64>, u64> =
-        MultimapTableDefinition::new("bymetadata");
+        MultimapTableDefinition::new("archive-bymetadata");
 
     pub fn compute_key(metadata: &u64) -> u64 {
         // Left for readability
@@ -280,7 +281,7 @@ pub struct PolicyApproxIndexTable;
 
 impl PolicyApproxIndexTable {
     pub const DEF: MultimapTableDefinition<'static, BucketedKey<u64>, u64> =
-        MultimapTableDefinition::new("bypolicy");
+        MultimapTableDefinition::new("archive-bypolicy");
 
     pub fn compute_key(policy: &Vec<u8>) -> u64 {
         xxh3_64(policy.as_slice())
@@ -303,7 +304,7 @@ pub struct ScriptHashApproxIndexTable;
 
 impl ScriptHashApproxIndexTable {
     pub const DEF: MultimapTableDefinition<'static, BucketedKey<u64>, u64> =
-        MultimapTableDefinition::new("byscript");
+        MultimapTableDefinition::new("archive-byscript");
 
     pub fn compute_key(script_hash: &Vec<u8>) -> u64 {
         xxh3_64(script_hash.as_slice())
@@ -326,7 +327,7 @@ pub struct SpentTxoApproxIndexTable;
 
 impl SpentTxoApproxIndexTable {
     pub const DEF: MultimapTableDefinition<'static, BucketedKey<u64>, u64> =
-        MultimapTableDefinition::new("byspenttxo");
+        MultimapTableDefinition::new("archive-byspenttxo");
 
     pub fn compute_key(spent_txo: &Vec<u8>) -> u64 {
         xxh3_64(spent_txo.as_slice())
@@ -349,7 +350,7 @@ pub struct AccountCertsApproxIndexTable;
 
 impl AccountCertsApproxIndexTable {
     pub const DEF: MultimapTableDefinition<'static, BucketedKey<u64>, u64> =
-        MultimapTableDefinition::new("bystakeactions");
+        MultimapTableDefinition::new("archive-bystakeactions");
 
     pub fn compute_key(account: &Vec<u8>) -> u64 {
         xxh3_64(account.as_slice())
@@ -381,7 +382,8 @@ impl AccountCertsApproxIndexTable {
 pub struct TxHashIndexTable;
 
 impl TxHashIndexTable {
-    pub const DEF: TableDefinition<'static, &'static [u8], u64> = TableDefinition::new("bytx");
+    pub const DEF: TableDefinition<'static, &'static [u8], u64> =
+        TableDefinition::new("archive-bytx");
 
     pub fn get_by_tx_hash(
         rx: &ReadTransaction,

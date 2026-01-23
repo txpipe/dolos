@@ -5,8 +5,8 @@ use rayon::prelude::*;
 
 use crate::{
     ArchiveStore, ArchiveWriter as _, Block as _, BlockSlot, ChainLogic, ChainPoint, Domain,
-    DomainError, EntityDelta, EntityMap, LogValue, NsKey, RawBlock, RawUtxoMap, SlotTags,
-    StateError, StateStore as _, StateWriter as _, TxoRef, UtxoSetDelta, WalStore as _,
+    DomainError, EntityDelta, EntityMap, IndexStore as _, LogValue, NsKey, RawBlock, RawUtxoMap,
+    SlotTags, StateError, StateStore as _, StateWriter as _, TxoRef, UtxoSetDelta, WalStore as _,
 };
 
 #[derive(Debug)]
@@ -299,6 +299,7 @@ impl<C: ChainLogic> WorkBatch<C> {
         for block in self.blocks.iter() {
             if let Some(utxo_delta) = &block.utxo_delta {
                 writer.apply_utxoset(utxo_delta)?;
+                domain.indexes().apply_utxoset(utxo_delta)?;
             }
         }
 
@@ -321,6 +322,7 @@ impl<C: ChainLogic> WorkBatch<C> {
             let tags = &block.deltas.slot;
 
             writer.apply(&point, &raw, tags)?;
+            domain.indexes().apply_archive_indexes(&point, tags)?;
         }
 
         writer.commit()?;

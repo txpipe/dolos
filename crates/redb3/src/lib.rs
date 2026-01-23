@@ -36,6 +36,9 @@ pub enum Error {
     #[error("invalid operation")]
     InvalidOperation,
 
+    #[error("archive error: {0}")]
+    ArchiveError(String),
+
     // TODO: remove this once we generalize opaque filters
     #[error(transparent)]
     AddressError(#[from] pallas::ledger::addresses::Error),
@@ -50,6 +53,12 @@ impl From<::redb::SetDurabilityError> for Error {
 impl From<::redb::TransactionError> for Error {
     fn from(error: ::redb::TransactionError) -> Self {
         Error::TransactionError(Box::new(error))
+    }
+}
+
+impl From<crate::archive::RedbArchiveError> for Error {
+    fn from(error: crate::archive::RedbArchiveError) -> Self {
+        Error::ArchiveError(error.to_string())
     }
 }
 

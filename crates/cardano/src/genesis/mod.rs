@@ -1,6 +1,6 @@
 use dolos_core::{
-    config::CardanoConfig, ChainError, Domain, EntityKey, Genesis, StateStore as _,
-    StateWriter as _,
+    config::CardanoConfig, ChainError, Domain, EntityKey, Genesis, IndexStore as _,
+    StateStore as _, StateWriter as _,
 };
 
 use crate::{
@@ -112,6 +112,7 @@ pub fn bootstrap_eras<D: Domain>(state: &D::State, epoch: &EpochState) -> Result
 
 pub fn bootstrap_utxos<D: Domain>(
     state: &D::State,
+    indexes: &D::Indexes,
     genesis: &Genesis,
     config: &CardanoConfig,
 ) -> Result<(), ChainError> {
@@ -119,9 +120,11 @@ pub fn bootstrap_utxos<D: Domain>(
 
     let delta = crate::utxoset::compute_origin_delta(genesis);
     writer.apply_utxoset(&delta)?;
+    indexes.apply_utxoset(&delta)?;
 
     let delta = crate::utxoset::build_custom_utxos_delta(config)?;
     writer.apply_utxoset(&delta)?;
+    indexes.apply_utxoset(&delta)?;
 
     writer.commit()?;
 
@@ -130,6 +133,7 @@ pub fn bootstrap_utxos<D: Domain>(
 
 pub fn execute<D: Domain>(
     state: &D::State,
+    indexes: &D::Indexes,
     genesis: &Genesis,
     config: &CardanoConfig,
 ) -> Result<(), ChainError> {
@@ -137,7 +141,7 @@ pub fn execute<D: Domain>(
 
     bootstrap_eras::<D>(state, &epoch)?;
 
-    bootstrap_utxos::<D>(state, genesis, config)?;
+    bootstrap_utxos::<D>(state, indexes, genesis, config)?;
 
     staking::bootstrap::<D>(state, genesis)?;
 

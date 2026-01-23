@@ -177,7 +177,7 @@ impl<'a, D: Domain> MempoolAwareUtxoStore<'a, D> {
         self.indexes
     }
 
-    pub fn get_utxo_by_asset(&self, asset: &[u8]) -> Result<UtxoSet, StateError> {
+    pub fn get_utxo_by_asset(&self, asset: &[u8]) -> Result<UtxoSet, IndexError> {
         let predicate = |utxo: &MultiEraOutput<'_>| utxo_asset_matches(utxo, asset);
 
         let from_mempool = scan_mempool_utxos::<D, _>(predicate, self.mempool);
@@ -191,7 +191,7 @@ impl<'a, D: Domain> MempoolAwareUtxoStore<'a, D> {
         Ok(utxos)
     }
 
-    pub fn get_utxo_by_policy(&self, policy: &[u8]) -> Result<UtxoSet, StateError> {
+    pub fn get_utxo_by_policy(&self, policy: &[u8]) -> Result<UtxoSet, IndexError> {
         let predicate = |utxo: &MultiEraOutput<'_>| utxo_policy_matches(utxo, policy);
 
         let from_mempool = scan_mempool_utxos::<D, _>(predicate, self.mempool);
@@ -205,7 +205,7 @@ impl<'a, D: Domain> MempoolAwareUtxoStore<'a, D> {
         Ok(utxos)
     }
 
-    pub fn get_utxo_by_address(&self, address: &[u8]) -> Result<UtxoSet, StateError> {
+    pub fn get_utxo_by_address(&self, address: &[u8]) -> Result<UtxoSet, IndexError> {
         let predicate = |utxo: &MultiEraOutput<'_>| utxo_address_matches(utxo, address);
 
         let from_mempool = scan_mempool_utxos::<D, _>(predicate, self.mempool);

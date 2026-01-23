@@ -23,10 +23,18 @@ use std::sync::Arc;
 use crate::{build_tables, Error, Table};
 
 pub(crate) mod indexes;
-mod tables;
+pub(crate) mod tables;
 
 #[derive(Debug)]
 pub struct RedbArchiveError(ArchiveError);
+
+impl std::fmt::Display for RedbArchiveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::error::Error for RedbArchiveError {}
 
 impl From<Error> for RedbArchiveError {
     fn from(error: Error) -> Self {
@@ -143,7 +151,6 @@ impl ArchiveStore {
             table.initialize(&mut wx)?;
         }
 
-        indexes::Indexes::initialize(&wx)?;
         tables::BlocksTable::initialize(&wx)?;
 
         wx.commit()?;
@@ -163,7 +170,6 @@ impl ArchiveStore {
         let rx = self.db().begin_read()?;
         let wx = target.db().begin_write()?;
 
-        indexes::Indexes::copy(&rx, &wx)?;
         tables::BlocksTable::copy(&rx, &wx)?;
 
         wx.commit()?;
@@ -743,16 +749,14 @@ impl dolos_core::ArchiveWriter for ArchiveStoreWriter {
         &self,
         point: &ChainPoint,
         block: &RawBlock,
-        tags: &SlotTags,
+        _tags: &SlotTags,
     ) -> Result<(), ArchiveError> {
-        indexes::Indexes::apply(&self.wx, point, tags)?;
         tables::BlocksTable::apply(&self.wx, point, block)?;
 
         Ok(())
     }
 
-    fn undo(&self, point: &ChainPoint, tags: &SlotTags) -> Result<(), ArchiveError> {
-        indexes::Indexes::undo(&self.wx, point, tags)?;
+    fn undo(&self, point: &ChainPoint, _tags: &SlotTags) -> Result<(), ArchiveError> {
         tables::BlocksTable::undo(&self.wx, point)?;
 
         Ok(())

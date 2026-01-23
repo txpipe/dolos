@@ -27,6 +27,12 @@ pub enum Error {
     UnsupportedEra { era: String },
 }
 
+impl From<dolos_core::IndexError> for Error {
+    fn from(error: dolos_core::IndexError) -> Self {
+        Error::InternalError(error.to_string())
+    }
+}
+
 impl From<dolos_core::StateError> for Error {
     fn from(error: dolos_core::StateError) -> Self {
         Error::InternalError(error.to_string())

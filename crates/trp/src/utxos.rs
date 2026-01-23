@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use dolos_core::{Domain, MempoolAwareUtxoStore, StateError, TxoRef};
+use dolos_core::{Domain, IndexError, MempoolAwareUtxoStore, TxoRef};
 use tx3_resolver::{Error as Tx3Error, UtxoPattern, UtxoRef, UtxoSet, UtxoStore};
 
 use crate::{
@@ -11,7 +11,7 @@ use crate::{
 fn search_state_utxos<D: Domain>(
     pattern: &UtxoPattern<'_>,
     store: &MempoolAwareUtxoStore<D>,
-) -> Result<HashSet<TxoRef>, StateError> {
+) -> Result<HashSet<TxoRef>, IndexError> {
     let refs = match pattern {
         UtxoPattern::ByAddress(address) => store.get_utxo_by_address(address)?,
         UtxoPattern::ByAssetPolicy(policy) => store.get_utxo_by_policy(policy)?,

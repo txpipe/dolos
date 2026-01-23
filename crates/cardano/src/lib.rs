@@ -317,9 +317,10 @@ impl dolos_core::ChainLogic for CardanoLogic {
     fn apply_genesis<D: Domain>(
         &mut self,
         state: &D::State,
+        indexes: &D::Indexes,
         genesis: Arc<Genesis>,
     ) -> Result<(), ChainError> {
-        genesis::execute::<D>(state, &genesis, &self.config)?;
+        genesis::execute::<D>(state, indexes, &genesis, &self.config)?;
 
         self.refresh_cache::<D>(state)?;
 

@@ -1,8 +1,8 @@
 use std::{collections::HashMap, sync::Arc};
 
 use dolos_core::{
-    ArchiveStore as _, ChainLogic, ChainPoint, Domain, DomainError, EntityDelta as _, StateStore,
-    StateWriter as _, TipEvent, WalStore,
+    ArchiveStore as _, ChainLogic, ChainPoint, Domain, DomainError, EntityDelta as _,
+    IndexStore as _, StateStore, StateWriter as _, TipEvent, WalStore,
 };
 use tracing::info;
 
@@ -62,6 +62,7 @@ where
                 .map_err(dolos_core::ChainError::from)?;
 
             writer.apply_utxoset(&utxo_undo)?;
+            self.indexes().apply_utxoset(&utxo_undo)?;
 
             // TODO: we should differ notifications until the we commit the writers
             self.notify_tip(TipEvent::Undo(point.clone(), block));

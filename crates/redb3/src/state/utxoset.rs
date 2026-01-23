@@ -479,28 +479,12 @@ impl FilterIndexes {
 }
 
 impl StateStore {
-    pub fn count_utxo_by_address(&self, address: &[u8]) -> Result<u64, Error> {
-        let rx = self.db().begin_read()?;
-        FilterIndexes::count_within_key(&rx, FilterIndexes::BY_ADDRESS, address)
-    }
-
-    pub fn iter_utxo_by_address(&self, address: &[u8]) -> Result<UtxoKeyIterator, Error> {
-        let rx = self.db().begin_read()?;
-        FilterIndexes::iter_within_key(&rx, FilterIndexes::BY_ADDRESS, address)
-    }
-
     pub fn utxoset_stats(&self) -> Result<HashMap<&str, TableStats>, Error> {
         let rx = self.db().begin_read()?;
 
         let utxos = UtxosTable::stats(&rx)?;
         let datums = DatumsTable::stats(&rx)?;
-        let filters = FilterIndexes::stats(&rx)?;
-
-        let all_tables = [("utxos", utxos), ("datums", datums)]
-            .into_iter()
-            .chain(filters);
-
-        Ok(HashMap::from_iter(all_tables))
+        Ok(HashMap::from_iter([("utxos", utxos), ("datums", datums)]))
     }
 
     pub fn get_datum(&self, datum_hash: &Hash<32>) -> Result<Option<Vec<u8>>, Error> {
@@ -524,7 +508,7 @@ mod tests {
 
     fn build_indexes(store: &StateStore) -> crate::indexes::IndexStore {
         let archive = crate::archive::ArchiveStore::in_memory(StateSchema::default()).unwrap();
-        crate::indexes::IndexStore::new(store.clone(), archive)
+        crate::indexes::IndexStore::in_memory(archive).unwrap()
     }
 
     fn get_test_address_utxos(
@@ -537,10 +521,11 @@ mod tests {
     }
 
     macro_rules! apply_utxoset {
-        ($store:expr, $deltas:expr) => {
+        ($store:expr, $indexes:expr, $deltas:expr) => {
             let writer = $store.start_writer().unwrap();
             for delta in $deltas.iter() {
                 writer.apply_utxoset(&delta).unwrap();
+                $indexes.apply_utxoset(&delta).unwrap();
             }
             writer.commit().unwrap();
         };
@@ -552,7 +537,7 @@ mod tests {
         let indexes = build_indexes(&store);
 
         let genesis = fake_genesis_delta(1_000_000_000);
-        apply_utxoset!(store, [&genesis]);
+        apply_utxoset!(store, &indexes, [&genesis]);
 
         // TODO: the store is not persisting the cursor unless it's a specific point. We
         // need to fix this in the next breaking change version.
@@ -573,11 +558,11 @@ mod tests {
         let indexes = build_indexes(&store);
 
         let genesis = fake_genesis_delta(1_000_000_000);
-        apply_utxoset!(store, [genesis]);
+        apply_utxoset!(store, &indexes, [genesis]);
 
         let bobs = get_test_address_utxos(&store, &indexes, TestAddress::Bob);
         let delta = make_move_utxo_delta(bobs, 1, TestAddress::Carol);
-        apply_utxoset!(store, [&delta]);
+        apply_utxoset!(store, &indexes, [&delta]);
 
         let bobs = get_test_address_utxos(&store, &indexes, TestAddress::Bob);
         assert!(bobs.is_empty());
@@ -594,14 +579,14 @@ mod tests {
         let indexes = build_indexes(&store);
 
         let genesis = fake_genesis_delta(1_000_000_000);
-        apply_utxoset!(store, [&genesis]);
+        apply_utxoset!(store, &indexes, [&genesis]);
 
         let bobs = get_test_address_utxos(&store, &indexes, TestAddress::Bob);
         let forward = make_move_utxo_delta(bobs, 1, TestAddress::Carol);
-        apply_utxoset!(store, [&forward]);
+        apply_utxoset!(store, &indexes, [&forward]);
 
         let undo = revert_delta(forward);
-        apply_utxoset!(store, [&undo]);
+        apply_utxoset!(store, &indexes, [&undo]);
 
         // TODO: the store is not persisting the origin cursor, instead it's keeping it
         // empty. We should fix this in the next breaking change version.
@@ -626,22 +611,22 @@ mod tests {
         let indexes = build_indexes(&store);
 
         let genesis = fake_genesis_delta(1_000_000_000);
-        apply_utxoset!(store, [&genesis]);
+        apply_utxoset!(store, &indexes, [&genesis]);
         batch.push(genesis);
 
         let bobs = get_test_address_utxos(&store, &indexes, TestAddress::Bob);
         let forward = make_move_utxo_delta(bobs, 1, TestAddress::Carol);
-        apply_utxoset!(store, [&forward]);
+        apply_utxoset!(store, &indexes, [&forward]);
         batch.push(forward.clone());
 
         let undo = revert_delta(forward);
-        apply_utxoset!(store, [&undo]);
+        apply_utxoset!(store, &indexes, [&undo]);
         batch.push(undo);
 
         // now we apply the batch in one go.
         let store = StateStore::in_memory(StateSchema::default()).unwrap();
         let indexes = build_indexes(&store);
-        apply_utxoset!(store, batch);
+        apply_utxoset!(store, &indexes, batch);
 
         let bobs = get_test_address_utxos(&store, &indexes, TestAddress::Bob);
         assert_eq!(bobs.len(), 1);
@@ -673,7 +658,7 @@ mod tests {
             ..Default::default()
         };
 
-        apply_utxoset!(store, [&delta]);
+        apply_utxoset!(store, &indexes, [&delta]);
 
         let assertion = |utxos: UtxoSet, address: &Address, ordinal: usize| {
             let utxos = store.get_utxos(utxos.into_iter().collect()).unwrap();
@@ -726,12 +711,13 @@ mod tests {
     #[test]
     fn test_count_utxos_by_address() {
         let store = StateStore::in_memory(StateSchema::default()).unwrap();
+        let indexes = build_indexes(&store);
 
         let utxo_generator = |x: &TestAddress| utxo_with_random_amount(x, 1_000_000..1_500_000);
 
         let delta = make_custom_utxo_delta(TestAddress::everyone(), 10..11, utxo_generator);
 
-        apply_utxoset!(store, [&delta]);
+        apply_utxoset!(store, &indexes, [&delta]);
 
         for address in TestAddress::everyone().iter() {
             let expected = delta
@@ -741,7 +727,7 @@ mod tests {
                 .filter(|(addr, _)| addr == address.to_bytes().as_slice())
                 .count();
 
-            let count = store
+            let count = indexes
                 .count_utxo_by_address(address.to_bytes().as_slice())
                 .unwrap();
 
@@ -752,12 +738,13 @@ mod tests {
     #[test]
     fn test_iter_within_key() {
         let store = StateStore::in_memory(StateSchema::default()).unwrap();
+        let indexes = build_indexes(&store);
 
         let utxo_generator = |x: &TestAddress| utxo_with_random_amount(x, 1_000_000..1_500_000);
 
         let delta = make_custom_utxo_delta(TestAddress::everyone(), 10..11, utxo_generator);
 
-        apply_utxoset!(store, [&delta]);
+        apply_utxoset!(store, &indexes, [&delta]);
 
         for address in TestAddress::everyone().iter() {
             let mut expected: HashSet<TxoRef> = delta
@@ -773,7 +760,7 @@ mod tests {
                 })
                 .collect();
 
-            let iterator = store
+            let iterator = indexes
                 .iter_utxo_by_address(address.to_bytes().as_slice())
                 .unwrap();
 
