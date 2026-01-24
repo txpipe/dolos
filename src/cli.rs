@@ -21,8 +21,14 @@ pub struct StateSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexSummary {
+    pub tip_slot: Option<BlockSlot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DataSummary {
     pub wal: WalSummary,
     pub archive: ArchiveSummary,
     pub state: StateSummary,
+    pub indexes: IndexSummary,
 }

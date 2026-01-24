@@ -1,4 +1,4 @@
-use dolos::cli::{ArchiveSummary, DataSummary, StateSummary, WalSummary};
+use dolos::cli::{ArchiveSummary, DataSummary, IndexSummary, StateSummary, WalSummary};
 use dolos::prelude::*;
 use dolos_core::config::RootConfig;
 
@@ -24,10 +24,15 @@ pub fn run(config: &RootConfig, _args: &Args) -> miette::Result<()> {
         tip_slot: stores.state.read_cursor().unwrap().map(|x| x.slot()),
     };
 
+    let index_summary = IndexSummary {
+        tip_slot: stores.indexes.read_cursor().unwrap().map(|x| x.slot()),
+    };
+
     let summary = DataSummary {
         wal: wal_summary,
         archive: archive_summary,
         state: state_summary,
+        indexes: index_summary,
     };
 
     println!("{}", serde_json::to_string_pretty(&summary).unwrap());

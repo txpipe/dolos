@@ -34,6 +34,13 @@ pub trait IndexWriter: Send + Sync + 'static {
     /// Undo archive indexes for a block (rollback).
     fn undo_archive(&self, point: &ChainPoint, tags: &SlotTags) -> Result<(), IndexError>;
 
+    /// Set the cursor position after applying indexes.
+    ///
+    /// This should be called after all index operations for a batch are complete,
+    /// before committing. The cursor tracks the last applied chain point for
+    /// synchronization with other stores.
+    fn set_cursor(&self, cursor: ChainPoint) -> Result<(), IndexError>;
+
     /// Commit the batched operations.
     fn commit(self) -> Result<(), IndexError>;
 }
@@ -59,6 +66,13 @@ pub trait IndexStore: Clone + Send + Sync + 'static {
 
     /// Copy all index data to another store.
     fn copy(&self, target: &Self) -> Result<(), IndexError>;
+
+    /// Read the current cursor position.
+    ///
+    /// Returns the last chain point that was indexed, or None if no indexes
+    /// have been applied yet. This is used for synchronization verification
+    /// with other stores (state, archive).
+    fn read_cursor(&self) -> Result<Option<ChainPoint>, IndexError>;
 
     // UTxO filter index queries (these return UTxO sets, not slots)
 

@@ -19,6 +19,7 @@ where
         for (point, mut log) in undo_blocks.rev() {
             if point == *to {
                 writer.set_cursor(point.clone())?;
+                index_writer.set_cursor(point.clone())?;
                 break;
             }
 

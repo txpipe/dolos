@@ -350,6 +350,9 @@ impl<C: ChainLogic> WorkBatch<C> {
             writer.apply_archive(&point, tags)?;
         }
 
+        // Set cursor to track last indexed point
+        writer.set_cursor(self.last_point())?;
+
         writer.commit()?;
 
         Ok(())

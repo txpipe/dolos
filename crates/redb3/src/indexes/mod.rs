@@ -4,12 +4,22 @@ use dolos_core::{
     BlockSlot, ChainPoint, IndexError, IndexStore as CoreIndexStore,
     IndexWriter as CoreIndexWriter, SlotTags, UtxoSet, UtxoSetDelta,
 };
-use redb::{Database, Durability, ReadTransaction, ReadableDatabase, TableStats, WriteTransaction};
+use redb::{
+    Database, Durability, ReadTransaction, ReadableDatabase, TableDefinition, TableStats,
+    WriteTransaction,
+};
 use tracing::warn;
 
 use crate::{archive, state, Error};
 
 const DEFAULT_CACHE_SIZE_MB: usize = 500;
+
+/// Key for the single cursor entry in the cursor table.
+pub const CURRENT_CURSOR_KEY: u16 = 0;
+
+/// Table storing the index cursor position.
+pub const CURSOR_TABLE: TableDefinition<'static, u16, Vec<u8>> =
+    TableDefinition::new("index-cursor");
 
 fn map_db_error(error: impl std::fmt::Display) -> IndexError {
     IndexError::DbError(error.to_string())
@@ -93,12 +103,26 @@ impl IndexStore {
         let mut wx = self.db.begin_write()?;
         wx.set_durability(Durability::Immediate)?;
 
+        let _ = wx.open_table(CURSOR_TABLE)?;
         state::utxoset::FilterIndexes::initialize(&wx)?;
         archive::indexes::Indexes::initialize(&wx)?;
 
         wx.commit()?;
 
         Ok(())
+    }
+
+    fn read_cursor_internal(rx: &ReadTransaction) -> Result<Option<ChainPoint>, Error> {
+        let table = rx.open_table(CURSOR_TABLE)?;
+        let value = table.get(CURRENT_CURSOR_KEY)?.map(|x| x.value());
+
+        let Some(value) = value else {
+            return Ok(None);
+        };
+
+        let point = bincode::deserialize(&value).map_err(|_| Error::InvalidCursor)?;
+
+        Ok(Some(point))
     }
 }
 
@@ -123,6 +147,15 @@ impl CoreIndexWriter for IndexStoreWriter {
 
     fn undo_archive(&self, point: &ChainPoint, tags: &SlotTags) -> Result<(), IndexError> {
         archive::indexes::Indexes::undo(&self.wx, point, tags).map_err(IndexError::from)?;
+        Ok(())
+    }
+
+    fn set_cursor(&self, cursor: ChainPoint) -> Result<(), IndexError> {
+        let mut table = self.wx.open_table(CURSOR_TABLE).map_err(map_db_error)?;
+        let point = bincode::serialize(&cursor).unwrap();
+        table
+            .insert(CURRENT_CURSOR_KEY, &point)
+            .map_err(map_db_error)?;
         Ok(())
     }
 
@@ -174,12 +207,26 @@ impl CoreIndexStore for IndexStore {
         let rx = self.db.begin_read().map_err(map_db_error)?;
         let wx = target.db.begin_write().map_err(map_db_error)?;
 
+        // Copy cursor
+        if let Some(cursor) = Self::read_cursor_internal(&rx).map_err(IndexError::from)? {
+            let mut cursor_table = wx.open_table(CURSOR_TABLE).map_err(map_db_error)?;
+            let point = bincode::serialize(&cursor).unwrap();
+            cursor_table
+                .insert(CURRENT_CURSOR_KEY, &point)
+                .map_err(map_db_error)?;
+        }
+
         state::utxoset::FilterIndexes::copy(&rx, &wx).map_err(IndexError::from)?;
         archive::indexes::Indexes::copy(&rx, &wx).map_err(IndexError::from)?;
 
         wx.commit().map_err(map_db_error)?;
 
         Ok(())
+    }
+
+    fn read_cursor(&self) -> Result<Option<ChainPoint>, IndexError> {
+        let rx = self.db.begin_read().map_err(map_db_error)?;
+        Self::read_cursor_internal(&rx).map_err(IndexError::from)
     }
 
     fn get_utxo_by_address(&self, address: &[u8]) -> Result<UtxoSet, IndexError> {
