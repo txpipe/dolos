@@ -3,8 +3,9 @@ type = "emulator"
 
 [storage]
 path = "data"
-max_wal_history = 10000
-ephemeral = true
+
+[storage.wal]
+max_history = 10000
 
 [genesis]
 type = "inline"

@@ -16,7 +16,6 @@ mod find_seq;
 mod housekeeping;
 mod prune_chain;
 mod prune_wal;
-#[cfg(all(feature = "index-redb", not(feature = "index-fjall")))]
 mod stats;
 mod summary;
 
@@ -52,10 +51,9 @@ pub enum Command {
     PruneWal(prune_wal::Args),
     /// removes blocks from the chain before a given slot
     PruneChain(prune_chain::Args),
-    /// shows statistics about the data for Redb stores (redb backend only)
-    #[cfg(all(feature = "index-redb", not(feature = "index-fjall")))]
+    /// shows statistics about the data (redb backend only)
     Stats(stats::Args),
-    /// shows statistics about the data for Redb stores
+    /// runs housekeeping tasks
     Housekeeping(housekeeping::Args),
 }
 
@@ -86,7 +84,6 @@ pub fn run(
         Command::CopyWal(x) => copy_wal::run(config, x)?,
         Command::PruneWal(x) => prune_wal::run(config, x)?,
         Command::PruneChain(x) => prune_chain::run(config, x)?,
-        #[cfg(all(feature = "index-redb", not(feature = "index-fjall")))]
         Command::Stats(x) => stats::run(config, x)?,
         Command::Housekeeping(x) => housekeeping::run(config, x)?,
     }

@@ -3,16 +3,11 @@ use std::sync::Arc;
 use dolos_cardano::CardanoLogic;
 use dolos_core::{config::StorageConfig, *};
 
-// we can hardcode the WAL since we don't expect multiple types of
+use crate::storage::{IndexStoreBackend, StateStoreBackend};
+
+// We can hardcode the WAL since we don't expect multiple types of
 // implementations
 pub type WalAdapter = dolos_redb3::wal::RedbWalStore<dolos_cardano::CardanoDelta>;
-
-// Index store type selection based on feature flags
-#[cfg(all(feature = "index-redb", not(feature = "index-fjall")))]
-pub type IndexStoreType = dolos_redb3::indexes::IndexStore;
-
-#[cfg(feature = "index-fjall")]
-pub type IndexStoreType = dolos_fjall::IndexStore;
 
 pub struct TipSubscription {
     replay: Vec<(ChainPoint, RawBlock)>,
@@ -36,9 +31,9 @@ pub struct DomainAdapter {
     pub genesis: Arc<Genesis>,
     pub wal: WalAdapter,
     pub chain: Arc<tokio::sync::RwLock<CardanoLogic>>,
-    pub state: dolos_redb3::state::StateStore,
+    pub state: StateStoreBackend,
     pub archive: dolos_redb3::archive::ArchiveStore,
-    pub indexes: IndexStoreType,
+    pub indexes: IndexStoreBackend,
     pub mempool: crate::mempool::Mempool,
     pub tip_broadcast: tokio::sync::broadcast::Sender<TipEvent>,
 }
@@ -49,9 +44,9 @@ impl Domain for DomainAdapter {
     type Chain = CardanoLogic;
     type WorkUnit = dolos_cardano::CardanoWorkUnit;
     type Wal = WalAdapter;
-    type State = dolos_redb3::state::StateStore;
+    type State = StateStoreBackend;
     type Archive = dolos_redb3::archive::ArchiveStore;
-    type Indexes = IndexStoreType;
+    type Indexes = IndexStoreBackend;
     type Mempool = crate::mempool::Mempool;
     type TipSubscription = TipSubscription;
 

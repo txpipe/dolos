@@ -5,6 +5,7 @@ pub mod mempool;
 pub mod prelude;
 pub mod relay;
 pub mod serve;
+pub mod storage;
 pub mod sync;
 
 pub use dolos_cardano as cardano;

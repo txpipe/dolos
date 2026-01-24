@@ -1,4 +1,6 @@
-use dolos_core::config::{ChainConfig, GenesisConfig, LoggingConfig, RootConfig, StorageVersion};
+use dolos_core::config::{
+    ChainConfig, GenesisConfig, LoggingConfig, RootConfig, StorageBackend, StorageVersion,
+};
 use dolos_core::BootstrapExt;
 use miette::{Context as _, IntoDiagnostic};
 use std::sync::Arc;
@@ -7,15 +9,16 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
 use tracing_subscriber::{filter::Targets, prelude::*};
 
-use dolos::adapters::{DomainAdapter, IndexStoreType, WalAdapter};
+use dolos::adapters::{DomainAdapter, WalAdapter};
 use dolos::core::Genesis;
 use dolos::prelude::*;
+use dolos::storage::{IndexStoreBackend, StateStoreBackend};
 
 pub struct Stores {
     pub wal: WalAdapter,
-    pub state: dolos_redb3::state::StateStore,
+    pub state: StateStoreBackend,
     pub archive: dolos_redb3::archive::ArchiveStore,
-    pub indexes: IndexStoreType,
+    pub indexes: IndexStoreBackend,
 }
 
 pub fn ensure_storage_path(config: &RootConfig) -> Result<PathBuf, Error> {
@@ -31,7 +34,7 @@ pub fn ensure_storage_path(config: &RootConfig) -> Result<PathBuf, Error> {
 pub fn open_wal_store(config: &RootConfig) -> Result<WalAdapter, Error> {
     let root = ensure_storage_path(config)?;
 
-    let wal = dolos_redb3::wal::RedbWalStore::open(root.join("wal"), config.storage.wal_cache)?;
+    let wal = dolos_redb3::wal::RedbWalStore::open(root.join("wal"), config.storage.wal.cache)?;
 
     Ok(wal)
 }
@@ -42,55 +45,86 @@ pub fn open_archive_store(
     let root = ensure_storage_path(config)?;
     let schema = dolos_cardano::model::build_schema();
 
+    // Check backend - currently only redb is supported for archive
+    if config.storage.archive.backend == StorageBackend::Fjall {
+        return Err(Error::config(
+            "fjall backend is not yet supported for archive store",
+        ));
+    }
+
     let archive = dolos_redb3::archive::ArchiveStore::open(
         schema,
         root.join("chain"),
-        config.storage.chain_cache,
+        config.storage.archive.cache,
     )
     .map_err(ArchiveError::from)?;
 
     Ok(archive)
 }
 
-#[cfg(all(feature = "index-redb", not(feature = "index-fjall")))]
-pub fn open_index_store(config: &RootConfig) -> Result<IndexStoreType, Error> {
+pub fn open_index_store(config: &RootConfig) -> Result<IndexStoreBackend, Error> {
     let root = ensure_storage_path(config)?;
 
-    let indexes =
-        dolos_redb3::indexes::IndexStore::open(root.join("index"), config.storage.index_cache)
+    match config.storage.index.backend {
+        StorageBackend::Redb => {
+            let store = dolos_redb3::indexes::IndexStore::open(
+                root.join("index"),
+                config.storage.index.cache,
+            )
             .map_err(IndexError::from)?;
-
-    Ok(indexes)
+            Ok(IndexStoreBackend::Redb(store))
+        }
+        StorageBackend::Fjall => {
+            let store =
+                dolos_fjall::IndexStore::open(root.join("index"), config.storage.index.cache)
+                    .map_err(IndexError::from)?;
+            Ok(IndexStoreBackend::Fjall(store))
+        }
+    }
 }
 
-#[cfg(feature = "index-fjall")]
-pub fn open_index_store(config: &RootConfig) -> Result<IndexStoreType, Error> {
-    let root = ensure_storage_path(config)?;
-
-    let indexes = dolos_fjall::IndexStore::open(root.join("index"), config.storage.index_cache)
-        .map_err(IndexError::from)?;
-
-    Ok(indexes)
-}
-
-pub fn open_state_store(config: &RootConfig) -> Result<dolos_redb3::state::StateStore, Error> {
+pub fn open_state_store(config: &RootConfig) -> Result<StateStoreBackend, Error> {
     let root = ensure_storage_path(config)?;
     let schema = dolos_cardano::model::build_schema();
 
-    let state3 = dolos_redb3::state::StateStore::open(
-        schema,
-        root.join("state"),
-        config.storage.ledger_cache,
-    )
-    .map_err(StateError::from)?;
-
-    Ok(state3)
+    match config.storage.state.backend {
+        StorageBackend::Redb => {
+            let store = dolos_redb3::state::StateStore::open(
+                schema,
+                root.join("state"),
+                config.storage.state.cache,
+            )
+            .map_err(StateError::from)?;
+            Ok(StateStoreBackend::Redb(store))
+        }
+        StorageBackend::Fjall => {
+            let store = dolos_fjall::StateStore::open(
+                schema,
+                root.join("state"),
+                config.storage.state.cache,
+            )
+            .map_err(StateError::from)?;
+            Ok(StateStoreBackend::Fjall(store))
+        }
+    }
 }
 
 pub fn open_persistent_data_stores(config: &RootConfig) -> Result<Stores, Error> {
-    if config.storage.version == StorageVersion::V0 {
-        error!("Storage should be removed and init procedure run again.");
-        return Err(Error::StorageError("Invalid store version".to_string()));
+    match config.storage.version {
+        StorageVersion::V0 => {
+            error!("Storage version V0 is no longer supported. Please remove storage and run init procedure again.");
+            return Err(Error::StorageError("Invalid store version V0".to_string()));
+        }
+        StorageVersion::V1 | StorageVersion::V2 => {
+            error!("Storage version {:?} uses old config format. Please update your config to V3 format with nested storage sections.", config.storage.version);
+            return Err(Error::StorageError(format!(
+                "Storage version {:?} requires config migration to V3",
+                config.storage.version
+            )));
+        }
+        StorageVersion::V3 => {
+            // Current version, proceed normally
+        }
     }
 
     let wal = open_wal_store(config)?;
@@ -109,8 +143,24 @@ pub fn open_persistent_data_stores(config: &RootConfig) -> Result<Stores, Error>
     })
 }
 
-#[cfg(all(feature = "index-redb", not(feature = "index-fjall")))]
-pub fn create_ephemeral_data_stores() -> Result<Stores, Error> {
+pub fn create_ephemeral_data_stores(config: &RootConfig) -> Result<Stores, Error> {
+    // Fjall does not support in-memory mode
+    if config.storage.state.backend == StorageBackend::Fjall {
+        return Err(Error::config(
+            "fjall backend does not support ephemeral storage for state store",
+        ));
+    }
+    if config.storage.index.backend == StorageBackend::Fjall {
+        return Err(Error::config(
+            "fjall backend does not support ephemeral storage for index store",
+        ));
+    }
+    if config.storage.archive.backend == StorageBackend::Fjall {
+        return Err(Error::config(
+            "fjall backend does not support ephemeral storage for archive store",
+        ));
+    }
+
     let wal = dolos_redb3::wal::RedbWalStore::memory()?;
 
     let schema = dolos_cardano::model::build_schema();
@@ -125,22 +175,14 @@ pub fn create_ephemeral_data_stores() -> Result<Stores, Error> {
     Ok(Stores {
         wal,
         archive,
-        state,
-        indexes,
+        state: StateStoreBackend::Redb(state),
+        indexes: IndexStoreBackend::Redb(indexes),
     })
-}
-
-#[cfg(feature = "index-fjall")]
-pub fn create_ephemeral_data_stores() -> Result<Stores, Error> {
-    // fjall does not support in-memory mode, ephemeral stores are not available
-    Err(Error::config(
-        "ephemeral storage is not supported with fjall index backend",
-    ))
 }
 
 pub fn setup_data_stores(config: &RootConfig) -> Result<Stores, Error> {
     if config.storage.is_ephemeral() {
-        create_ephemeral_data_stores()
+        create_ephemeral_data_stores(config)
     } else {
         open_persistent_data_stores(config)
     }

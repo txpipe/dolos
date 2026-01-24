@@ -37,7 +37,7 @@ xxhash-rust.workspace = true
 dolos-core = { path = "crates/core" }
 dolos-cardano = { path = "crates/cardano", features = ["include-genesis"] }
 dolos-redb3 = { path = "crates/redb3" }
-dolos-fjall = { path = "crates/fjall", optional = true }
+dolos-fjall = { path = "crates/fjall" }
 dolos-minibf = { path = "crates/minibf", optional = true }
 dolos-trp = { path = "crates/trp", optional = true }
 
@@ -100,10 +100,6 @@ mithril = ["mithril-client"]
 utils = ["comfy-table", "inquire", "toml"]
 debug = ["console-subscriber", "tokio/tracing"]
 
-# Index store backends
-index-redb = []
-index-fjall = ["dolos-fjall"]
-
 # Service features
 grpc = ["tonic", "tonic-web", "tonic-reflection", "tower-http/cors"]
 minibf = [
@@ -115,7 +111,7 @@ minibf = [
 trp = ["dolos-trp"]
 
 # Default features - includes all services
-default = ["index-redb", "mithril", "utils", "grpc", "minibf", "trp", "relaxed"]
+default = ["mithril", "utils", "grpc", "minibf", "trp", "relaxed"]
 
 # The profile that 'cargo dist' will build with
 [profile.dist]

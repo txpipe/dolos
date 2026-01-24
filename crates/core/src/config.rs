@@ -89,9 +89,10 @@ pub struct SubmitConfig {
 pub enum StorageVersion {
     V0,
     V1,
+    V2,
 
     #[default]
-    V2,
+    V3,
 }
 
 impl<'de> Deserialize<'de> for StorageVersion {
@@ -105,6 +106,7 @@ impl<'de> Deserialize<'de> for StorageVersion {
                 "v0" => Ok(StorageVersion::V0),
                 "v1" => Ok(StorageVersion::V1),
                 "v2" => Ok(StorageVersion::V2),
+                "v3" => Ok(StorageVersion::V3),
                 _ => Err(<D::Error as serde::de::Error>::custom("Invalid version")),
             },
             None => Ok(StorageVersion::V0),
@@ -121,11 +123,66 @@ impl Display for StorageVersion {
                 Self::V0 => "v0",
                 Self::V1 => "v1",
                 Self::V2 => "v2",
+                Self::V3 => "v3",
             }
         )
     }
 }
 
+/// Storage backend selection for stores that support multiple implementations.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum StorageBackend {
+    #[default]
+    Redb,
+    Fjall,
+}
+
+/// WAL store configuration.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct WalStoreConfig {
+    /// Size (in MB) of memory allocated for caching.
+    pub cache: Option<usize>,
+    /// Maximum number of slots to keep in the WAL.
+    pub max_history: Option<u64>,
+}
+
+/// State store configuration.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct StateStoreConfig {
+    /// Backend implementation (default: redb).
+    #[serde(default)]
+    pub backend: StorageBackend,
+    /// Size (in MB) of memory allocated for caching.
+    pub cache: Option<usize>,
+    /// Maximum number of slots to keep before pruning.
+    pub max_history: Option<u64>,
+}
+
+/// Archive store configuration.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct ArchiveStoreConfig {
+    /// Backend implementation (default: redb).
+    /// Note: Currently only redb is supported.
+    #[serde(default)]
+    pub backend: StorageBackend,
+    /// Size (in MB) of memory allocated for caching.
+    pub cache: Option<usize>,
+    /// Maximum number of slots to keep.
+    pub max_history: Option<u64>,
+}
+
+/// Index store configuration.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct IndexStoreConfig {
+    /// Backend implementation (default: redb).
+    #[serde(default)]
+    pub backend: StorageBackend,
+    /// Size (in MB) of memory allocated for caching.
+    pub cache: Option<usize>,
+}
+
+/// Storage configuration with nested per-store settings.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct StorageConfig {
     pub version: StorageVersion,
@@ -134,26 +191,21 @@ pub struct StorageConfig {
     /// used.
     pub path: Option<std::path::PathBuf>,
 
-    /// Size (in Mb) of memory allocated for WAL caching
-    pub wal_cache: Option<usize>,
+    /// WAL store configuration.
+    #[serde(default)]
+    pub wal: WalStoreConfig,
 
-    /// Size (in Mb) of memory allocated for ledger caching
-    pub ledger_cache: Option<usize>,
+    /// State store configuration.
+    #[serde(default)]
+    pub state: StateStoreConfig,
 
-    /// Size (in Mb) of memory allocated for chain caching
-    pub chain_cache: Option<usize>,
+    /// Archive store configuration.
+    #[serde(default)]
+    pub archive: ArchiveStoreConfig,
 
-    /// Size (in Mb) of memory allocated for index caching
-    pub index_cache: Option<usize>,
-
-    /// Maximum number of slots (not blocks) to keep in the WAL
-    pub max_wal_history: Option<u64>,
-
-    /// Maximum number of slots to keep in the ledger before pruning
-    pub max_ledger_history: Option<u64>,
-
-    /// Maximum number of slots (not blocks) to keep in Chain
-    pub max_chain_history: Option<u64>,
+    /// Index store configuration.
+    #[serde(default)]
+    pub index: IndexStoreConfig,
 }
 
 impl StorageConfig {
@@ -167,13 +219,10 @@ impl Default for StorageConfig {
         Self {
             version: Default::default(),
             path: Some(std::path::PathBuf::from("data")),
-            wal_cache: None,
-            ledger_cache: None,
-            chain_cache: None,
-            index_cache: None,
-            max_wal_history: None,
-            max_ledger_history: None,
-            max_chain_history: None,
+            wal: WalStoreConfig::default(),
+            state: StateStoreConfig::default(),
+            archive: ArchiveStoreConfig::default(),
+            index: IndexStoreConfig::default(),
         }
     }
 }

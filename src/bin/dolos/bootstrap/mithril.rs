@@ -169,8 +169,10 @@ async fn fetch_snapshot(
 
 fn define_starting_point(
     args: &Args,
-    state: &dolos_redb3::state::StateStore,
+    state: &dolos::storage::StateStoreBackend,
 ) -> Result<pallas::network::miniprotocols::Point, miette::Error> {
+    use dolos_core::StateStore;
+
     if let Some(point) = &args.start_from {
         Ok(point.clone().try_into().unwrap())
     } else {
