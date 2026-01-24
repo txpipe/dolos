@@ -1,7 +1,7 @@
 use crate::{make_custom_utxo_delta, TestAddress, UtxoGenerator};
 use dolos_core::{
     config::{CardanoConfig, StorageConfig},
-    *,
+    IndexWriter as _, *,
 };
 use futures_util::stream::StreamExt;
 use std::sync::Arc;
@@ -80,6 +80,7 @@ pub struct ToyDomain {
     chain: Arc<RwLock<dolos_cardano::CardanoLogic>>,
     state: dolos_redb3::state::StateStore,
     archive: dolos_redb3::archive::ArchiveStore,
+    indexes: dolos_redb3::indexes::IndexStore,
     mempool: Mempool,
     storage_config: StorageConfig,
     genesis: Arc<dolos_core::Genesis>,
@@ -102,6 +103,8 @@ impl ToyDomain {
             dolos_redb3::archive::ArchiveStore::in_memory(dolos_cardano::model::build_schema())
                 .unwrap();
 
+        let indexes = dolos_redb3::indexes::IndexStore::in_memory().unwrap();
+
         let config = CardanoConfig::default();
 
         let mut chain =
@@ -109,7 +112,7 @@ impl ToyDomain {
                 .unwrap();
 
         chain
-            .apply_genesis::<Self>(&state, genesis.clone())
+            .apply_genesis::<Self>(&state, &indexes, genesis.clone())
             .unwrap();
 
         let domain = Self {
@@ -117,6 +120,7 @@ impl ToyDomain {
             wal: dolos_redb3::wal::RedbWalStore::memory().unwrap(),
             chain: Arc::new(RwLock::new(chain)),
             archive,
+            indexes,
             mempool: Mempool {},
             storage_config: storage_config.unwrap_or_default(),
             genesis,
@@ -127,8 +131,11 @@ impl ToyDomain {
 
         if let Some(delta) = initial_delta {
             let writer = domain.state.start_writer().unwrap();
+            let index_writer = domain.indexes.start_writer().unwrap();
             writer.apply_utxoset(&delta).unwrap();
+            index_writer.apply_utxoset(&delta).unwrap();
             writer.commit().unwrap();
+            index_writer.commit().unwrap();
         }
 
         domain
@@ -160,6 +167,7 @@ impl dolos_core::Domain for ToyDomain {
     type State = dolos_redb3::state::StateStore;
     type Chain = dolos_cardano::CardanoLogic;
     type TipSubscription = TipSubscription;
+    type Indexes = dolos_redb3::indexes::IndexStore;
     type Mempool = Mempool;
 
     fn storage_config(&self) -> &StorageConfig {
@@ -188,6 +196,10 @@ impl dolos_core::Domain for ToyDomain {
 
     fn archive(&self) -> &Self::Archive {
         &self.archive
+    }
+
+    fn indexes(&self) -> &Self::Indexes {
+        &self.indexes
     }
 
     fn mempool(&self) -> &Self::Mempool {

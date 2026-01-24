@@ -31,8 +31,10 @@ pub mod batch;
 pub mod config;
 pub mod crawl;
 pub mod facade;
+pub mod indexes;
 pub mod mempool;
 pub mod point;
+pub mod query;
 pub mod state;
 pub mod wal;
 
@@ -65,8 +67,10 @@ pub type ChainTip = pallas::network::miniprotocols::chainsync::Tip;
 pub type LogSeq = u64;
 
 pub use archive::*;
+pub use indexes::*;
 pub use mempool::*;
 pub use point::*;
+pub use query::*;
 pub use state::*;
 pub use wal::*;
 
@@ -354,6 +358,9 @@ pub enum MempoolError {
     #[error(transparent)]
     StateError(#[from] StateError),
 
+    #[error(transparent)]
+    IndexError(#[from] IndexError),
+
     #[error("plutus not supported")]
     PlutusNotSupported,
 
@@ -416,6 +423,9 @@ pub enum ChainError {
 
     #[error(transparent)]
     StateError(#[from] StateError),
+
+    #[error(transparent)]
+    IndexError(#[from] IndexError),
 
     #[error(transparent)]
     ArchiveError(#[from] ArchiveError),
@@ -500,6 +510,7 @@ pub trait ChainLogic: Sized + Send + Sync {
     fn apply_genesis<D: Domain>(
         &mut self,
         state: &D::State,
+        indexes: &D::Indexes,
         genesis: Arc<Genesis>,
     ) -> Result<(), ChainError>;
 
@@ -577,6 +588,9 @@ pub enum DomainError {
     #[error("archive error: {0}")]
     ArchiveError(#[from] ArchiveError),
 
+    #[error("index error: {0}")]
+    IndexError(#[from] IndexError),
+
     #[error("mempool error: {0}")]
     MempoolError(#[from] MempoolError),
 
@@ -615,6 +629,7 @@ pub trait Domain: Send + Sync + Clone + 'static {
     type Wal: WalStore<Delta = Self::EntityDelta>;
     type State: StateStore;
     type Archive: ArchiveStore;
+    type Indexes: IndexStore;
     type Mempool: MempoolStore;
     type TipSubscription: TipSubscription;
 
@@ -627,6 +642,7 @@ pub trait Domain: Send + Sync + Clone + 'static {
     fn wal(&self) -> &Self::Wal;
     fn state(&self) -> &Self::State;
     fn archive(&self) -> &Self::Archive;
+    fn indexes(&self) -> &Self::Indexes;
     fn mempool(&self) -> &Self::Mempool;
 
     fn watch_tip(&self, from: Option<ChainPoint>) -> Result<Self::TipSubscription, DomainError>;

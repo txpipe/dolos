@@ -1,8 +1,8 @@
 use std::{collections::HashMap, sync::Arc};
 
 use dolos_core::{
-    ArchiveStore as _, ChainLogic, ChainPoint, Domain, DomainError, EntityDelta as _, StateStore,
-    StateWriter as _, TipEvent, WalStore,
+    ArchiveStore as _, ChainLogic, ChainPoint, Domain, DomainError, EntityDelta as _,
+    IndexStore as _, IndexWriter as _, StateStore, StateWriter as _, TipEvent, WalStore,
 };
 use tracing::info;
 
@@ -14,10 +14,12 @@ where
         let undo_blocks = self.wal().iter_logs(Some(to.clone()), None)?;
 
         let writer = self.state().start_writer()?;
+        let index_writer = self.indexes().start_writer()?;
 
         for (point, mut log) in undo_blocks.rev() {
             if point == *to {
                 writer.set_cursor(point.clone())?;
+                index_writer.set_cursor(point.clone())?;
                 break;
             }
 
@@ -62,6 +64,7 @@ where
                 .map_err(dolos_core::ChainError::from)?;
 
             writer.apply_utxoset(&utxo_undo)?;
+            index_writer.apply_utxoset(&utxo_undo)?;
 
             // TODO: we should differ notifications until the we commit the writers
             self.notify_tip(TipEvent::Undo(point.clone(), block));
@@ -69,6 +72,7 @@ where
         }
 
         writer.commit()?;
+        index_writer.commit()?;
 
         self.archive().truncate_front(to)?;
 

@@ -22,11 +22,19 @@ use std::sync::Arc;
 
 use crate::{build_tables, Error, Table};
 
-mod indexes;
-mod tables;
+pub(crate) mod indexes;
+pub(crate) mod tables;
 
 #[derive(Debug)]
 pub struct RedbArchiveError(ArchiveError);
+
+impl std::fmt::Display for RedbArchiveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::error::Error for RedbArchiveError {}
 
 impl From<Error> for RedbArchiveError {
     fn from(error: Error) -> Self {
@@ -143,7 +151,6 @@ impl ArchiveStore {
             table.initialize(&mut wx)?;
         }
 
-        indexes::Indexes::initialize(&wx)?;
         tables::BlocksTable::initialize(&wx)?;
 
         wx.commit()?;
@@ -163,7 +170,6 @@ impl ArchiveStore {
         let rx = self.db().begin_read()?;
         let wx = target.db().begin_write()?;
 
-        indexes::Indexes::copy(&rx, &wx)?;
         tables::BlocksTable::copy(&rx, &wx)?;
 
         wx.commit()?;
@@ -743,16 +749,14 @@ impl dolos_core::ArchiveWriter for ArchiveStoreWriter {
         &self,
         point: &ChainPoint,
         block: &RawBlock,
-        tags: &SlotTags,
+        _tags: &SlotTags,
     ) -> Result<(), ArchiveError> {
-        indexes::Indexes::apply(&self.wx, point, tags)?;
         tables::BlocksTable::apply(&self.wx, point, block)?;
 
         Ok(())
     }
 
-    fn undo(&self, point: &ChainPoint, tags: &SlotTags) -> Result<(), ArchiveError> {
-        indexes::Indexes::undo(&self.wx, point, tags)?;
+    fn undo(&self, point: &ChainPoint, _tags: &SlotTags) -> Result<(), ArchiveError> {
         tables::BlocksTable::undo(&self.wx, point)?;
 
         Ok(())
@@ -820,7 +824,6 @@ impl Iterator for EntityValueIter {
 
 impl dolos_core::ArchiveStore for ArchiveStore {
     type BlockIter<'a> = ArchiveRangeIter;
-    type SparseBlockIter = ArchiveSparseIter;
     type Writer = ArchiveStoreWriter;
     type LogIter = LogIter;
     type EntityValueIter = EntityValueIter;
@@ -829,113 +832,9 @@ impl dolos_core::ArchiveStore for ArchiveStore {
         Ok(Self::start_writer(self)?)
     }
 
-    fn get_block_by_hash(&self, block_hash: &[u8]) -> Result<Option<BlockBody>, ArchiveError> {
-        Ok(Self::get_block_by_hash(self, block_hash)?)
-    }
-
     fn get_block_by_slot(&self, slot: &BlockSlot) -> Result<Option<BlockBody>, ArchiveError> {
         Ok(Self::get_block_by_slot(self, slot)?)
     }
-
-    fn get_block_by_number(&self, number: &u64) -> Result<Option<BlockBody>, ArchiveError> {
-        Ok(Self::get_block_by_number(self, number)?)
-    }
-
-    fn get_block_with_tx(
-        &self,
-        tx_hash: &[u8],
-    ) -> Result<Option<(BlockBody, TxOrder)>, ArchiveError> {
-        Ok(Self::get_block_with_tx(self, tx_hash)?)
-    }
-
-    fn get_tx(&self, tx_hash: &[u8]) -> Result<Option<EraCbor>, ArchiveError> {
-        Ok(Self::get_tx(self, tx_hash)?)
-    }
-
-    fn get_plutus_data(&self, datum_hash: &Hash<32>) -> Result<Option<PlutusData>, ArchiveError> {
-        Ok(Self::get_plutus_data(self, datum_hash)?)
-    }
-
-    fn get_slot_for_tx(&self, tx_hash: &[u8]) -> Result<Option<BlockSlot>, ArchiveError> {
-        Ok(Self::get_slot_for_tx(self, tx_hash)?)
-    }
-
-    fn get_tx_by_spent_txo(&self, spent_txo: &[u8]) -> Result<Option<TxHash>, ArchiveError> {
-        Ok(Self::get_tx_by_spent_txo(self, spent_txo)?)
-    }
-
-    fn iter_blocks_with_address(
-        &self,
-        address: &[u8],
-        start_slot: BlockSlot,
-        end_slot: BlockSlot,
-    ) -> Result<Self::SparseBlockIter, ArchiveError> {
-        // TODO: we need to filter the false positives
-        let out = self.iter_possible_blocks_with_address(address, start_slot, end_slot)?;
-
-        Ok(out)
-    }
-
-    fn iter_blocks_with_asset(
-        &self,
-        asset: &[u8],
-        start_slot: BlockSlot,
-        end_slot: BlockSlot,
-    ) -> Result<Self::SparseBlockIter, ArchiveError> {
-        // TODO: we need to filter the false positives
-        let out = self.iter_possible_blocks_with_asset(asset, start_slot, end_slot)?;
-
-        Ok(out)
-    }
-
-    fn iter_blocks_with_payment(
-        &self,
-        payment: &[u8],
-        start_slot: BlockSlot,
-        end_slot: BlockSlot,
-    ) -> Result<Self::SparseBlockIter, ArchiveError> {
-        // TODO: we need to filter the false positives
-        let out = self.iter_possible_blocks_with_payment(payment, start_slot, end_slot)?;
-
-        Ok(out)
-    }
-
-    fn iter_blocks_with_stake(
-        &self,
-        stake: &[u8],
-        start_slot: BlockSlot,
-        end_slot: BlockSlot,
-    ) -> Result<Self::SparseBlockIter, ArchiveError> {
-        // TODO: we need to filter the false positives
-        let out = self.iter_possible_blocks_with_stake(stake, start_slot, end_slot)?;
-
-        Ok(out)
-    }
-
-    fn iter_blocks_with_account_certs(
-        &self,
-        account: &[u8],
-        start_slot: BlockSlot,
-        end_slot: BlockSlot,
-    ) -> Result<Self::SparseBlockIter, ArchiveError> {
-        // TODO: we need to filter the false positives
-        let out = self.iter_possible_blocks_with_account_certs(account, start_slot, end_slot)?;
-
-        Ok(out)
-    }
-
-    fn iter_blocks_with_metadata(
-        &self,
-        metadata: &u64,
-        start_slot: BlockSlot,
-        end_slot: BlockSlot,
-    ) -> Result<Self::SparseBlockIter, ArchiveError> {
-        // TODO: we need to filter the false positives
-        let out = self.iter_possible_blocks_with_metadata(metadata, start_slot, end_slot)?;
-
-        Ok(out)
-    }
-
     fn get_range<'a>(
         &self,
         from: Option<BlockSlot>,

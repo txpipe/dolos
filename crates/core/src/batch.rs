@@ -5,8 +5,9 @@ use rayon::prelude::*;
 
 use crate::{
     ArchiveStore, ArchiveWriter as _, Block as _, BlockSlot, ChainLogic, ChainPoint, Domain,
-    DomainError, EntityDelta, EntityMap, LogValue, NsKey, RawBlock, RawUtxoMap, SlotTags,
-    StateError, StateStore as _, StateWriter as _, TxoRef, UtxoSetDelta, WalStore as _,
+    DomainError, EntityDelta, EntityMap, IndexStore as _, IndexWriter as _, LogValue, NsKey,
+    RawBlock, RawUtxoMap, SlotTags, StateError, StateStore as _, StateWriter as _, TxoRef,
+    UtxoSetDelta, WalStore as _,
 };
 
 #[derive(Debug)]
@@ -322,6 +323,35 @@ impl<C: ChainLogic> WorkBatch<C> {
 
             writer.apply(&point, &raw, tags)?;
         }
+
+        writer.commit()?;
+
+        Ok(())
+    }
+
+    pub fn commit_indexes<D>(&mut self, domain: &D) -> Result<(), DomainError>
+    where
+        D: Domain<Chain = C>,
+    {
+        let writer = domain.indexes().start_writer()?;
+
+        // UTxO filter indexes
+        for block in self.blocks.iter() {
+            if let Some(utxo_delta) = &block.utxo_delta {
+                writer.apply_utxoset(utxo_delta)?;
+            }
+        }
+
+        // Archive indexes
+        for block in self.blocks.iter() {
+            let point = block.point();
+            let tags = &block.deltas.slot;
+
+            writer.apply_archive(&point, tags)?;
+        }
+
+        // Set cursor to track last indexed point
+        writer.set_cursor(self.last_point())?;
 
         writer.commit()?;
 

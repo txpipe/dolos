@@ -19,8 +19,11 @@ pub fn run(config: &RootConfig, _args: &Args) -> miette::Result<()> {
     let stores = crate::common::setup_data_stores(config)?;
 
     let state = stores.state;
+    let indexes = stores.indexes;
 
-    let stats = state.utxoset_stats().unwrap();
+    let mut stats = state.utxoset_stats().unwrap();
+    let index_stats = indexes.utxo_index_stats().unwrap();
+    stats.extend(index_stats);
 
     let mut json = serde_json::Map::new();
 

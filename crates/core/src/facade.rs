@@ -2,8 +2,8 @@ use tracing::{error, info, warn};
 
 use crate::{
     batch::WorkBatch, ArchiveStore, Block as _, BlockSlot, ChainLogic, ChainPoint, Domain,
-    DomainError, MempoolAwareUtxoStore, MempoolStore, MempoolTx, RawBlock, StateStore, TipEvent,
-    TxHash, WalStore, WorkUnit,
+    DomainError, IndexStore, MempoolAwareUtxoStore, MempoolStore, MempoolTx, RawBlock, StateStore,
+    TipEvent, TxHash, WalStore, WorkUnit,
 };
 
 /// Process a batch of blocks during bulk import operations, skipping the WAL
@@ -33,6 +33,8 @@ fn execute_batch<D: Domain>(
 
     batch.commit_archive(domain)?;
 
+    batch.commit_indexes(domain)?;
+
     Ok(batch.last_slot())
 }
 
@@ -57,7 +59,7 @@ fn execute_work<D: Domain>(
 ) -> Result<(), DomainError> {
     match work {
         WorkUnit::Genesis => {
-            chain.apply_genesis::<D>(domain.state(), domain.genesis())?;
+            chain.apply_genesis::<D>(domain.state(), domain.indexes(), domain.genesis())?;
             domain.wal().reset_to(&ChainPoint::Origin)?;
         }
         WorkUnit::EWrap(slot) => {
@@ -140,7 +142,8 @@ pub fn validate_tx<D: Domain>(
 ) -> Result<MempoolTx, DomainError> {
     let tip = domain.state().read_cursor()?;
 
-    let utxos = MempoolAwareUtxoStore::<'_, D>::new(domain.state(), domain.mempool());
+    let utxos =
+        MempoolAwareUtxoStore::<'_, D>::new(domain.state(), domain.indexes(), domain.mempool());
 
     let tx = chain.validate_tx(cbor, &utxos, tip, &domain.genesis())?;
 
@@ -213,9 +216,32 @@ fn check_archive_in_sync_with_state<D: Domain>(domain: &D) -> Result<(), DomainE
     Ok(())
 }
 
+fn check_indexes_in_sync_with_state<D: Domain>(domain: &D) -> Result<(), DomainError> {
+    let indexes = domain.indexes().read_cursor()?.map(|x| x.slot());
+    let state = domain.state().read_cursor()?.map(|x| x.slot());
+
+    match (indexes, state) {
+        (Some(indexes), Some(state)) => {
+            if indexes != state {
+                warn!(%indexes, %state, "indexes are out of sync");
+            }
+        }
+        (None, Some(_)) => {
+            warn!("index cursor is missing");
+        }
+        (Some(_), None) => {
+            warn!("found index cursor but no state");
+        }
+        (None, None) => (),
+    }
+
+    Ok(())
+}
+
 pub fn check_integrity<D: Domain>(domain: &D) -> Result<(), DomainError> {
     ensure_wal_in_sync_with_state(domain)?;
     check_archive_in_sync_with_state(domain)?;
+    check_indexes_in_sync_with_state(domain)?;
 
     Ok(())
 }

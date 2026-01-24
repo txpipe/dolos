@@ -48,6 +48,7 @@ pub async fn route<D: Domain>(
             MempoolError::PlutusNotSupported => StatusCode::BAD_REQUEST,
             MempoolError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
             MempoolError::StateError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            MempoolError::IndexError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             MempoolError::PParamsNotAvailable => StatusCode::INTERNAL_SERVER_ERROR,
         },
         _ => StatusCode::INTERNAL_SERVER_ERROR,

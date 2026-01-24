@@ -13,7 +13,9 @@ use blockfrost_openapi::models::{
 };
 use crc::{Crc, CRC_8_SMBUS};
 use dolos_cardano::{model::AssetState, ChainSummary};
-use dolos_core::{ArchiveStore, BlockSlot, Domain, EraCbor, StateStore};
+use dolos_core::{
+    BlockSlot, Domain, EraCbor, IndexStore, QueryHelpers as _, SparseBlockIter, StateStore as _,
+};
 use itertools::Itertools;
 use pallas::{
     codec::minicbor,
@@ -497,8 +499,8 @@ where
 
     let initial_tx = if let Some(initial_tx) = asset_state.initial_tx {
         domain
-            .archive()
-            .get_tx(initial_tx.as_slice())
+            .inner
+            .tx_cbor(initial_tx.as_slice())
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     } else {
         None
@@ -523,7 +525,7 @@ pub async fn by_subject_addresses<D: Domain>(
     let pagination = Pagination::try_from(params)?;
     let asset = hex::decode(&subject).map_err(|_| Error::InvalidAsset)?;
     let utxoset = domain
-        .state()
+        .indexes()
         .get_utxo_by_asset(&asset)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .into_iter()
@@ -538,8 +540,8 @@ pub async fn by_subject_addresses<D: Domain>(
     for (txoref, eracbor) in utxos {
         let sort = (
             domain
-                .archive()
-                .get_slot_for_tx(txoref.0.as_slice())
+                .indexes()
+                .slot_for_tx_hash(txoref.0.as_slice())
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
                 .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?,
             txoref.1,
@@ -596,27 +598,27 @@ pub async fn by_subject_addresses<D: Domain>(
     Ok(Json(sorted))
 }
 
-struct TransactionWithSubjectIter<A: ArchiveStore> {
+struct TransactionWithSubjectIter<D: Domain> {
     subject: Vec<u8>,
-    blocks: A::SparseBlockIter,
+    blocks: SparseBlockIter<D::Indexes, D::Archive>,
     chain: ChainSummary,
     pagination: Pagination,
-    archive: A,
+    domain: D,
 }
 
-impl<A: ArchiveStore> TransactionWithSubjectIter<A> {
+impl<D: Domain> TransactionWithSubjectIter<D> {
     fn new(
         subject: Vec<u8>,
-        blocks: A::SparseBlockIter,
+        blocks: SparseBlockIter<D::Indexes, D::Archive>,
         chain: ChainSummary,
         pagination: Pagination,
-        archive: A,
+        domain: D,
     ) -> Self {
         Self {
             subject,
             blocks,
             chain,
-            archive,
+            domain,
             pagination,
         }
     }
@@ -647,8 +649,8 @@ impl<A: ArchiveStore> TransactionWithSubjectIter<A> {
 
         for input in tx.consumes() {
             if let Some(EraCbor(era, cbor)) = self
-                .archive
-                .get_tx(input.hash().as_slice())
+                .domain
+                .tx_cbor(input.hash().as_slice())
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
             {
                 let parsed = MultiEraTx::decode_for_era(
@@ -694,7 +696,7 @@ impl<A: ArchiveStore> TransactionWithSubjectIter<A> {
     }
 }
 
-impl<A: ArchiveStore> Iterator for TransactionWithSubjectIter<A> {
+impl<D: Domain> Iterator for TransactionWithSubjectIter<D> {
     type Item = Vec<Result<AssetTransactionsInner, StatusCode>>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -733,20 +735,20 @@ pub async fn by_subject_transactions<D: Domain>(
     let subject = hex::decode(&subject).map_err(|_| Error::InvalidAsset)?;
     let end_slot = domain.get_tip_slot()?;
     let blocks = domain
-        .archive()
-        .iter_blocks_with_asset(&subject, 0, end_slot)
+        .inner
+        .blocks_with_asset(&subject, 0, end_slot)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let chain = domain
         .get_chain_summary()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let transactions = TransactionWithSubjectIter::<D::Archive>::new(
+    let transactions = TransactionWithSubjectIter::<D>::new(
         subject,
         blocks,
         chain,
         pagination.clone(),
-        domain.archive().clone(),
+        domain.inner.clone(),
     )
     .flatten()
     .skip(pagination.from())

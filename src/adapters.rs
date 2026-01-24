@@ -31,6 +31,7 @@ pub struct DomainAdapter {
     pub chain: Arc<tokio::sync::RwLock<CardanoLogic>>,
     pub state: dolos_redb3::state::StateStore,
     pub archive: dolos_redb3::archive::ArchiveStore,
+    pub indexes: dolos_redb3::indexes::IndexStore,
     pub mempool: crate::mempool::Mempool,
     pub tip_broadcast: tokio::sync::broadcast::Sender<TipEvent>,
 }
@@ -42,6 +43,7 @@ impl Domain for DomainAdapter {
     type Wal = WalAdapter;
     type State = dolos_redb3::state::StateStore;
     type Archive = dolos_redb3::archive::ArchiveStore;
+    type Indexes = dolos_redb3::indexes::IndexStore;
     type Mempool = crate::mempool::Mempool;
     type TipSubscription = TipSubscription;
 
@@ -67,6 +69,10 @@ impl Domain for DomainAdapter {
 
     fn archive(&self) -> &Self::Archive {
         &self.archive
+    }
+
+    fn indexes(&self) -> &Self::Indexes {
+        &self.indexes
     }
 
     fn mempool(&self) -> &Self::Mempool {

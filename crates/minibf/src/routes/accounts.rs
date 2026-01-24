@@ -15,7 +15,7 @@ use blockfrost_openapi::models::{
 };
 
 use dolos_cardano::{model::AccountState, pallas_extras, ChainSummary, RewardLog};
-use dolos_core::{ArchiveStore, Domain, EntityKey, StateStore};
+use dolos_core::{ArchiveStore as _, Domain, EntityKey, IndexStore as _, QueryHelpers as _};
 use pallas::{
     codec::minicbor,
     crypto::hash::Hash,
@@ -190,8 +190,8 @@ where
     let end_slot = domain.get_tip_slot()?;
 
     let mut blocks = domain
-        .archive()
-        .iter_blocks_with_stake(&account_key.address.to_vec(), 0, end_slot)
+        .inner
+        .blocks_with_stake(&account_key.address.to_vec(), 0, end_slot)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let mut items = vec![];
@@ -250,7 +250,7 @@ pub async fn by_stake_utxos<D: Domain>(
     };
 
     let refs = domain
-        .state()
+        .indexes()
         .get_utxo_by_stake(payload)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -470,8 +470,8 @@ where
     let end_slot = domain.get_tip_slot()?;
 
     let mut blocks = domain
-        .archive()
-        .iter_blocks_with_account_certs(&account_key.entity_key, 0, end_slot)
+        .inner
+        .blocks_with_account_certs(&account_key.entity_key, 0, end_slot)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     while builder.needs_more() {

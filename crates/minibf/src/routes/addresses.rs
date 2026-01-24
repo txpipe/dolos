@@ -16,7 +16,9 @@ use pallas::ledger::{
 };
 
 use dolos_cardano::ChainSummary;
-use dolos_core::{ArchiveStore, BlockSlot, Domain, EraCbor, StateStore, TxoRef};
+use dolos_core::{
+    BlockSlot, Domain, EraCbor, IndexStore, QueryHelpers as _, SparseBlockIter, TxoRef,
+};
 
 use crate::{
     error::Error,
@@ -33,7 +35,7 @@ fn refs_for_address<D: Domain>(
     if address.starts_with("addr_vkh") {
         let (_, addr) = bech32::decode(address).expect("failed to parse");
 
-        Ok(domain.state().get_utxo_by_payment(&addr).map_err(|err| {
+        Ok(domain.indexes().get_utxo_by_payment(&addr).map_err(|err| {
             dbg!(err);
             StatusCode::INTERNAL_SERVER_ERROR
         })?)
@@ -43,7 +45,7 @@ fn refs_for_address<D: Domain>(
             Error::InvalidAddress
         })?;
         Ok(domain
-            .state()
+            .indexes()
             .get_utxo_by_address(&address.to_vec())
             .map_err(|err| {
                 dbg!(err);
@@ -52,18 +54,18 @@ fn refs_for_address<D: Domain>(
     }
 }
 
-fn blocks_for_address<A: ArchiveStore>(
-    archive: &A,
+fn blocks_for_address<D: Domain>(
+    domain: &D,
     address: &str,
     start_slot: BlockSlot,
     end_slot: BlockSlot,
-) -> Result<(A::SparseBlockIter, VKeyOrAddress), Error> {
+) -> Result<(SparseBlockIter<D::Indexes, D::Archive>, VKeyOrAddress), Error> {
     if address.starts_with("addr_vkh") {
         let (_, addr) = bech32::decode(address).expect("failed to parse");
 
         Ok((
-            archive
-                .iter_blocks_with_payment(&addr, start_slot, end_slot)
+            domain
+                .blocks_with_payment(&addr, start_slot, end_slot)
                 .map_err(|err| {
                     dbg!(err);
                     StatusCode::INTERNAL_SERVER_ERROR
@@ -78,8 +80,8 @@ fn blocks_for_address<A: ArchiveStore>(
             })?
             .to_vec();
         Ok((
-            archive
-                .iter_blocks_with_address(&address, start_slot, end_slot)
+            domain
+                .blocks_with_address(&address, start_slot, end_slot)
                 .map_err(|err| {
                     dbg!(err);
                     StatusCode::INTERNAL_SERVER_ERROR
@@ -97,8 +99,8 @@ fn is_address_in_chain<D: Domain>(domain: &Facade<D>, address: &str) -> Result<b
         let (_, addr) = bech32::decode(address).expect("failed to parse");
 
         Ok(domain
-            .archive()
-            .iter_blocks_with_payment(&addr, start_slot, end_slot)
+            .inner
+            .blocks_with_payment(&addr, start_slot, end_slot)
             .map_err(|err| {
                 dbg!(err);
                 StatusCode::INTERNAL_SERVER_ERROR
@@ -111,8 +113,8 @@ fn is_address_in_chain<D: Domain>(domain: &Facade<D>, address: &str) -> Result<b
             Error::InvalidAddress
         })?;
         Ok(domain
-            .archive()
-            .iter_blocks_with_address(&address.to_vec(), start_slot, end_slot)
+            .inner
+            .blocks_with_address(&address.to_vec(), start_slot, end_slot)
             .map_err(|err| {
                 dbg!(err);
                 StatusCode::INTERNAL_SERVER_ERROR
@@ -127,8 +129,8 @@ fn is_asset_in_chain<D: Domain>(domain: &Facade<D>, asset: &[u8]) -> Result<bool
     let start_slot = 0;
 
     Ok(domain
-        .archive()
-        .iter_blocks_with_asset(asset, start_slot, end_slot)
+        .inner
+        .blocks_with_asset(asset, start_slot, end_slot)
         .map_err(|err| {
             dbg!(err);
             StatusCode::INTERNAL_SERVER_ERROR
@@ -174,7 +176,7 @@ pub async fn utxos_with_asset<D: Domain>(
         let refs = refs_for_address(&domain, &address)?;
         let asset = hex::decode(asset).map_err(|_| Error::InvalidAsset)?;
         let asset_refs = domain
-            .state()
+            .indexes()
             .get_utxo_by_asset(&asset)
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -205,27 +207,27 @@ pub async fn utxos_with_asset<D: Domain>(
     Ok(Json(utxos))
 }
 
-struct TransactionWithAddressIter<A: ArchiveStore> {
+struct TransactionWithAddressIter<D: Domain> {
     address: VKeyOrAddress,
-    blocks: A::SparseBlockIter,
+    blocks: SparseBlockIter<D::Indexes, D::Archive>,
     chain: ChainSummary,
     pagination: Pagination,
-    archive: A,
+    domain: D,
 }
 
-impl<A: ArchiveStore> TransactionWithAddressIter<A> {
+impl<D: Domain> TransactionWithAddressIter<D> {
     fn new(
         address: VKeyOrAddress,
-        blocks: A::SparseBlockIter,
+        blocks: SparseBlockIter<D::Indexes, D::Archive>,
         chain: ChainSummary,
         pagination: Pagination,
-        archive: A,
+        domain: D,
     ) -> Self {
         Self {
             address,
             blocks,
             chain,
-            archive,
+            domain,
             pagination,
         }
     }
@@ -256,8 +258,8 @@ impl<A: ArchiveStore> TransactionWithAddressIter<A> {
 
         for input in tx.consumes() {
             if let Some(EraCbor(era, cbor)) = self
-                .archive
-                .get_tx(input.hash().as_slice())
+                .domain
+                .tx_cbor(input.hash().as_slice())
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
             {
                 let parsed = MultiEraTx::decode_for_era(
@@ -307,7 +309,7 @@ impl<A: ArchiveStore> TransactionWithAddressIter<A> {
     }
 }
 
-impl<A: ArchiveStore> Iterator for TransactionWithAddressIter<A> {
+impl<D: Domain> Iterator for TransactionWithAddressIter<D> {
     type Item = Vec<Result<AddressTransactionsContentInner, StatusCode>>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -344,17 +346,17 @@ pub async fn transactions<D: Domain>(
     let pagination = Pagination::try_from(params)?;
     let end_slot = domain.get_tip_slot()?;
 
-    let (blocks, address) = blocks_for_address(domain.archive(), &address, 0, end_slot)?;
+    let (blocks, address) = blocks_for_address(&domain.inner, &address, 0, end_slot)?;
     let chain = domain
         .get_chain_summary()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let transactions = TransactionWithAddressIter::<D::Archive>::new(
+    let transactions = TransactionWithAddressIter::<D>::new(
         address,
         blocks,
         chain,
         pagination.clone(),
-        domain.archive().clone(),
+        domain.inner.clone(),
     )
     .flatten()
     .skip(pagination.from())
@@ -372,17 +374,17 @@ pub async fn txs<D: Domain>(
     let pagination = Pagination::try_from(params)?;
     let end_slot = domain.get_tip_slot()?;
 
-    let (blocks, address) = blocks_for_address(domain.archive(), &address, 0, end_slot)?;
+    let (blocks, address) = blocks_for_address(&domain.inner, &address, 0, end_slot)?;
     let chain = domain
         .get_chain_summary()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let transactions = TransactionWithAddressIter::<D::Archive>::new(
+    let transactions = TransactionWithAddressIter::<D>::new(
         address,
         blocks,
         chain,
         pagination.clone(),
-        domain.archive().clone(),
+        domain.inner.clone(),
     )
     .flatten()
     .skip(pagination.from())
