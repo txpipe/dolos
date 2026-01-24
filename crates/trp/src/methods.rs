@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use tx3_resolver::trp::{ResolveParams, SubmitParams, SubmitResponse, SubmitWitness, TxEnvelope};
 
-use dolos_core::{facade::receive_tx, Domain, MempoolAwareUtxoStore, StateStore as _};
+use dolos_core::{Domain, MempoolAwareUtxoStore, StateStore as _, SubmitExt};
 
 use crate::{compiler::load_compiler, utxos::UtxoStoreAdapter};
 
@@ -86,7 +86,7 @@ pub async fn trp_submit<D: Domain>(
 
     let chain = context.domain.read_chain().await;
 
-    let hash = receive_tx(&context.domain, &chain, &bytes)?;
+    let hash = context.domain.receive_tx(&chain, &bytes)?;
 
     Ok(SubmitResponse {
         hash: hash.to_string(),

@@ -1,8 +1,8 @@
 use crate::{make_custom_utxo_delta, TestAddress, UtxoGenerator};
 use dolos_core::{
     config::{CardanoConfig, StorageConfig},
-    executor::execute_work_unit,
-    *,
+    sync::execute_work_unit,
+    BootstrapExt, *,
 };
 use futures_util::stream::StreamExt;
 use std::sync::Arc;
@@ -132,17 +132,23 @@ impl ToyDomain {
             tip_broadcast,
         };
 
-        // Apply genesis state using the work unit pattern
-        let mut genesis_work = dolos_cardano::genesis::GenesisWorkUnit::new(config, genesis);
+        // Apply genesis state using the work unit pattern.
+        // Note: We're bypassing the normal pop_work flow here, so we need to
+        // manually trigger the cache refresh that would normally happen.
+        let mut genesis_work = dolos_cardano::CardanoWorkUnit::Genesis(
+            dolos_cardano::genesis::GenesisWorkUnit::new(config, genesis),
+        );
         execute_work_unit(&domain, &mut genesis_work).unwrap();
 
-        // Refresh the chain cache after genesis (eras are now in state)
+        // Manually refresh the chain cache after genesis since we bypassed pop_work.
+        // In normal operation, the cache refresh happens automatically via the
+        // needs_cache_refresh flag in CardanoLogic::pop_work.
         {
             let mut chain = domain.chain.write().await;
             chain.refresh_cache::<Self>(&domain.state).unwrap();
         }
 
-        dolos_core::facade::bootstrap(&domain).await.unwrap();
+        domain.bootstrap().await.unwrap();
 
         if let Some(delta) = initial_delta {
             let writer = domain.state.start_writer().unwrap();
@@ -181,6 +187,7 @@ impl dolos_core::Domain for ToyDomain {
     type Archive = dolos_redb3::archive::ArchiveStore;
     type State = dolos_redb3::state::StateStore;
     type Chain = dolos_cardano::CardanoLogic;
+    type WorkUnit = dolos_cardano::CardanoWorkUnit;
     type TipSubscription = TipSubscription;
     type Indexes = dolos_redb3::indexes::IndexStore;
     type Mempool = Mempool;

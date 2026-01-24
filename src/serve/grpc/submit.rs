@@ -1,5 +1,5 @@
 use any_chain_eval::Chain;
-use dolos_core::facade::{receive_tx, validate_tx};
+use dolos_core::SubmitExt;
 use futures_core::Stream;
 use futures_util::{StreamExt as _, TryStreamExt as _};
 use pallas::crypto::hash::Hash;
@@ -131,7 +131,9 @@ where
             _ => return Err(Status::invalid_argument("missing or unsupported tx type")),
         };
 
-        let hash = receive_tx(&self.domain, &chain, tx_bytes.as_ref())
+        let hash = self
+            .domain
+            .receive_tx(&chain, tx_bytes.as_ref())
             .map_err(|e| Status::invalid_argument(format!("could not process tx: {e}")))?;
 
         Ok(Response::new(SubmitTxResponse {
@@ -208,7 +210,7 @@ where
 
         let chain = self.domain.read_chain().await;
 
-        let result = validate_tx(&self.domain, &chain, &tx_raw);
+        let result = self.domain.validate_tx(&chain, &tx_raw);
         let result = tx_eval_to_u5c(result);
 
         let report = AnyChainEval {

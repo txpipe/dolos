@@ -1,4 +1,5 @@
 use dolos_core::config::{ChainConfig, GenesisConfig, LoggingConfig, RootConfig, StorageVersion};
+use dolos_core::BootstrapExt;
 use miette::{Context as _, IntoDiagnostic};
 use std::sync::Arc;
 use std::{fs, path::PathBuf, time::Duration};
@@ -176,7 +177,8 @@ pub async fn setup_domain(config: &RootConfig) -> miette::Result<DomainAdapter> 
     };
 
     // this will make sure the domain is correctly initialized and in a valid state.
-    dolos_core::facade::bootstrap(&domain)
+    domain
+        .bootstrap()
         .await
         .map_err(|x| miette::miette!("{:?}", x))?;
 

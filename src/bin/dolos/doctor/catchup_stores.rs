@@ -1,4 +1,5 @@
 use dolos_core::config::RootConfig;
+use dolos_core::ImportExt;
 use itertools::Itertools;
 use miette::{Context, IntoDiagnostic};
 
@@ -39,7 +40,7 @@ pub async fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miett
     for chunk in remaining.chunks(args.chunk).into_iter() {
         let collected = chunk.into_iter().map(|(_, x)| x).collect_vec();
 
-        let Ok(cursor) = dolos_core::facade::import_blocks(&domain, collected).await else {
+        let Ok(cursor) = domain.import_blocks(collected).await else {
             miette::bail!("failed to apply block chunk");
         };
 

@@ -27,18 +27,23 @@ use thiserror::Error;
 use tracing::info;
 
 pub mod archive;
+pub mod bootstrap;
 pub mod config;
 pub mod crawl;
-pub mod executor;
-pub mod facade;
-pub mod indexes;
+pub mod import;
 pub mod mempool;
 pub mod point;
 pub mod query;
 pub mod state;
+pub mod submit;
+pub mod sync;
 pub mod wal;
 pub mod work_unit;
 
+pub use bootstrap::BootstrapExt;
+pub use import::ImportExt;
+pub use submit::SubmitExt;
+pub use sync::SyncExt;
 pub use work_unit::WorkUnit;
 
 pub type Era = u16;
@@ -484,6 +489,9 @@ pub trait ChainLogic: Sized + Send + Sync {
     type Utxo: Sized + Send + Sync;
     type Delta: EntityDelta<Entity = Self::Entity>;
 
+    /// The concrete work unit type produced by this chain logic.
+    type WorkUnit<D: Domain<Chain = Self, Entity = Self::Entity, EntityDelta = Self::Delta>>: WorkUnit<D>;
+
     /// Initialize the chain logic with configuration and state.
     fn initialize<D: Domain>(
         config: Self::Config,
@@ -505,11 +513,11 @@ pub trait ChainLogic: Sized + Send + Sync {
 
     /// Pop the next work unit to execute.
     ///
-    /// Returns a boxed work unit implementing the `WorkUnit` trait,
-    /// or `None` if no work is currently ready.
+    /// Returns the next work unit to execute, or `None` if no work is
+    /// currently ready.
     ///
     /// The returned work unit should be executed using `executor::execute_work_unit()`.
-    fn pop_work<D: Domain>(&mut self, domain: &D) -> Option<Box<dyn WorkUnit<D>>>
+    fn pop_work<D: Domain>(&mut self, domain: &D) -> Option<Self::WorkUnit<D>>
     where
         D: Domain<Chain = Self, Entity = Self::Entity, EntityDelta = Self::Delta>;
 
@@ -584,7 +592,15 @@ pub trait Domain: Send + Sync + Clone + 'static {
     type Entity: Entity;
     type EntityDelta: EntityDelta<Entity = Self::Entity> + std::fmt::Debug;
 
-    type Chain: ChainLogic<Delta = Self::EntityDelta, Entity = Self::Entity>;
+    type Chain: ChainLogic<
+        Delta = Self::EntityDelta,
+        Entity = Self::Entity,
+        WorkUnit<Self> = Self::WorkUnit,
+    >;
+
+    /// The concrete work unit type for this domain.
+    /// This should be an enum containing all possible work unit variants.
+    type WorkUnit: WorkUnit<Self>;
 
     type Wal: WalStore<Delta = Self::EntityDelta>;
     type State: StateStore;

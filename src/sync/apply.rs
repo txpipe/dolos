@@ -1,3 +1,4 @@
+use dolos_core::SyncExt;
 use gasket::{framework::*, messaging::Message};
 use tracing::debug;
 
@@ -52,9 +53,7 @@ impl Stage {
     async fn on_roll_forward(&self, block: RawBlock) -> Result<(), WorkerError> {
         debug!("handling roll forward");
 
-        dolos_core::facade::roll_forward(&self.domain, block)
-            .await
-            .or_panic()?;
+        self.domain.roll_forward(block).await.or_panic()?;
 
         Ok(())
     }
