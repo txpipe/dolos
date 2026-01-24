@@ -1,21 +1,22 @@
 use std::sync::Arc;
 
-use dolos_core::{
-    batch::WorkDeltas, config::CardanoConfig, BlockSlot, ChainError, Domain, EntityKey, Genesis,
-};
+use dolos_core::{config::CardanoConfig, BlockSlot, ChainError, Domain, EntityKey, Genesis};
 use tracing::{debug, info, instrument};
 
 use crate::{
-    AccountState, CardanoDelta, CardanoEntity, CardanoLogic, DRepState, EpochState, EraProtocol,
-    EraSummary, PoolState, ProposalState,
+    roll::WorkDeltas, AccountState, CardanoDelta, CardanoEntity, DRepState, EpochState,
+    EraProtocol, EraSummary, PoolState, ProposalState,
 };
 
 pub mod commit;
 pub mod loading;
+pub mod work_unit;
 
 // visitors
 pub mod nonces;
 pub mod reset;
+
+pub use work_unit::EstartWorkUnit;
 
 pub trait BoundaryVisitor {
     #[allow(unused_variables)]
@@ -78,7 +79,7 @@ pub struct WorkContext {
     pub genesis: Arc<Genesis>,
 
     // computed via visitors
-    pub deltas: WorkDeltas<CardanoLogic>,
+    pub deltas: WorkDeltas,
     pub logs: Vec<(EntityKey, CardanoEntity)>,
 }
 

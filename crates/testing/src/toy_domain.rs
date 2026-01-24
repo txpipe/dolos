@@ -1,7 +1,8 @@
 use crate::{make_custom_utxo_delta, TestAddress, UtxoGenerator};
 use dolos_core::{
     config::{CardanoConfig, StorageConfig},
-    IndexWriter as _, *,
+    executor::execute_work_unit,
+    *,
 };
 use futures_util::stream::StreamExt;
 use std::sync::Arc;
@@ -107,14 +108,18 @@ impl ToyDomain {
 
         let config = CardanoConfig::default();
 
-        let mut chain =
+        let chain =
             dolos_cardano::CardanoLogic::initialize::<Self>(config.clone(), &state, &genesis)
                 .unwrap();
 
+<<<<<<< HEAD
         chain
             .apply_genesis::<Self>(&state, &indexes, genesis.clone())
             .unwrap();
 
+=======
+        // Create the domain first (genesis work unit needs it for execution)
+>>>>>>> e0aaca7 (introduce work units)
         let domain = Self {
             state,
             wal: dolos_redb3::wal::RedbWalStore::memory().unwrap(),
@@ -123,9 +128,19 @@ impl ToyDomain {
             indexes,
             mempool: Mempool {},
             storage_config: storage_config.unwrap_or_default(),
-            genesis,
+            genesis: genesis.clone(),
             tip_broadcast,
         };
+
+        // Apply genesis state using the work unit pattern
+        let mut genesis_work = dolos_cardano::genesis::GenesisWorkUnit::new(config, genesis);
+        execute_work_unit(&domain, &mut genesis_work).unwrap();
+
+        // Refresh the chain cache after genesis (eras are now in state)
+        {
+            let mut chain = domain.chain.write().await;
+            chain.refresh_cache::<Self>(&domain.state).unwrap();
+        }
 
         dolos_core::facade::bootstrap(&domain).await.unwrap();
 

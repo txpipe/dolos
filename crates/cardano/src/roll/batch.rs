@@ -1,22 +1,30 @@
+//! Batch processing types for block roll work units.
+//!
+//! This module contains the types used to batch and process blocks during
+//! the "roll" phase of chain synchronization.
+
 use std::{collections::HashMap, ops::RangeInclusive};
 
 use itertools::Itertools as _;
 use rayon::prelude::*;
 
-use crate::{
+use dolos_core::{
     ArchiveStore, ArchiveWriter as _, Block as _, BlockSlot, ChainLogic, ChainPoint, Domain,
     DomainError, EntityDelta, EntityMap, IndexStore as _, IndexWriter as _, LogValue, NsKey,
     RawBlock, RawUtxoMap, SlotTags, StateError, StateStore as _, StateWriter as _, TxoRef,
     UtxoSetDelta, WalStore as _,
 };
 
+use crate::{CardanoDelta, CardanoEntity, CardanoLogic, OwnedMultiEraBlock, OwnedMultiEraOutput};
+
+/// Container for entity deltas computed during block processing.
 #[derive(Debug)]
-pub struct WorkDeltas<C: ChainLogic> {
-    pub entities: HashMap<NsKey, Vec<C::Delta>>,
+pub struct WorkDeltas {
+    pub entities: HashMap<NsKey, Vec<CardanoDelta>>,
     pub slot: SlotTags,
 }
 
-impl<C: ChainLogic> Default for WorkDeltas<C> {
+impl Default for WorkDeltas {
     fn default() -> Self {
         Self {
             entities: HashMap::new(),
@@ -25,8 +33,8 @@ impl<C: ChainLogic> Default for WorkDeltas<C> {
     }
 }
 
-impl<C: ChainLogic> WorkDeltas<C> {
-    pub fn add_for_entity(&mut self, delta: impl Into<C::Delta>) {
+impl WorkDeltas {
+    pub fn add_for_entity(&mut self, delta: impl Into<CardanoDelta>) {
         let delta = delta.into();
         let key = delta.key();
         let group = self.entities.entry(key).or_default();
@@ -34,17 +42,17 @@ impl<C: ChainLogic> WorkDeltas<C> {
     }
 }
 
-#[derive(Debug)]
-pub struct WorkBlock<C: ChainLogic> {
-    pub block: C::Block,
+/// A single block with its computed deltas.
+pub struct WorkBlock {
+    pub block: OwnedMultiEraBlock,
 
     // computed afterwards
-    pub deltas: WorkDeltas<C>,
+    pub deltas: WorkDeltas,
     pub utxo_delta: Option<UtxoSetDelta>,
 }
 
-impl<C: ChainLogic> WorkBlock<C> {
-    pub fn new(block: C::Block) -> Self {
+impl WorkBlock {
+    pub fn new(block: OwnedMultiEraBlock) -> Self {
         Self {
             block,
             deltas: WorkDeltas::default(),
@@ -56,7 +64,7 @@ impl<C: ChainLogic> WorkBlock<C> {
         self.block.slot()
     }
 
-    pub fn decoded(&self) -> &C::Block {
+    pub fn decoded(&self) -> &OwnedMultiEraBlock {
         &self.block
     }
 
@@ -76,31 +84,19 @@ impl<C: ChainLogic> WorkBlock<C> {
     }
 }
 
-pub struct WorkBatch<C: ChainLogic> {
-    pub blocks: Vec<WorkBlock<C>>,
+/// A batch of blocks to be processed together.
+pub struct WorkBatch {
+    pub blocks: Vec<WorkBlock>,
     pub utxos: RawUtxoMap,
-    pub utxos_decoded: HashMap<TxoRef, C::Utxo>,
+    pub utxos_decoded: HashMap<TxoRef, OwnedMultiEraOutput>,
 
-    entities: EntityMap<C::Entity>,
+    entities: EntityMap<CardanoEntity>,
 
     // internal checks
     is_sorted: bool,
 }
 
-// impl<C: ChainLogic> std::ops::AddAssign<Self> for WorkBatch<C> {
-//     fn add_assign(&mut self, rhs: Self) {
-//         for (key, deltas) in rhs.deltas {
-//             let entry = self.deltas.entry(key).or_default();
-//             entry.extend(deltas);
-//         }
-
-//         self.entities.extend(rhs.entities);
-
-//         self.new_cursor = self.new_cursor.max(rhs.new_cursor);
-//     }
-// }
-
-impl<C: ChainLogic> Default for WorkBatch<C> {
+impl Default for WorkBatch {
     fn default() -> Self {
         Self {
             blocks: Vec::new(),
@@ -112,8 +108,8 @@ impl<C: ChainLogic> Default for WorkBatch<C> {
     }
 }
 
-impl<C: ChainLogic> WorkBatch<C> {
-    pub fn for_single_block(block: WorkBlock<C>) -> Self {
+impl WorkBatch {
+    pub fn for_single_block(block: WorkBlock) -> Self {
         let mut batch = Self::default();
         batch.add_work(block);
         batch.is_sorted = true;
@@ -125,12 +121,12 @@ impl<C: ChainLogic> WorkBatch<C> {
         self.is_sorted = true;
     }
 
-    pub fn add_work(&mut self, work: WorkBlock<C>) {
+    pub fn add_work(&mut self, work: WorkBlock) {
         self.blocks.push(work);
         self.is_sorted = false;
     }
 
-    pub fn iter_blocks(&self) -> impl Iterator<Item = &C::Block> {
+    pub fn iter_blocks(&self) -> impl Iterator<Item = &OwnedMultiEraBlock> {
         self.blocks.iter().map(|x| &x.block)
     }
 
@@ -170,7 +166,7 @@ impl<C: ChainLogic> WorkBatch<C> {
 
     pub fn load_utxos<D>(&mut self, domain: &D) -> Result<(), DomainError>
     where
-        D: Domain<Chain = C>,
+        D: Domain<Chain = CardanoLogic>,
     {
         // TODO: paralelize in chunks
 
@@ -188,7 +184,7 @@ impl<C: ChainLogic> WorkBatch<C> {
         Ok(())
     }
 
-    pub fn decode_utxos(&mut self, chain: &C) -> Result<(), DomainError> {
+    pub fn decode_utxos(&mut self, chain: &CardanoLogic) -> Result<(), DomainError> {
         let pairs: Vec<_> = self
             .utxos
             .iter()
@@ -208,7 +204,7 @@ impl<C: ChainLogic> WorkBatch<C> {
 
     pub fn commit_wal<D>(&self, domain: &D) -> Result<(), DomainError>
     where
-        D: Domain<Chain = C, EntityDelta = C::Delta>,
+        D: Domain<Chain = CardanoLogic, EntityDelta = CardanoDelta>,
     {
         debug_assert!(self.is_sorted);
 
@@ -247,7 +243,7 @@ impl<C: ChainLogic> WorkBatch<C> {
     /// that are close to each other (eg: disk block reads)
     pub fn load_entities<D>(&mut self, domain: &D) -> Result<(), StateError>
     where
-        D: Domain<Chain = C, Entity = C::Entity>,
+        D: Domain<Chain = CardanoLogic, Entity = CardanoEntity>,
     {
         // TODO: semantics for starting a read transaction
 
@@ -257,7 +253,7 @@ impl<C: ChainLogic> WorkBatch<C> {
 
         let result = keys
             .par_chunks(Self::LOAD_CHUNK_SIZE)
-            .map(|chunk| crate::state::load_entity_chunk::<D>(chunk, domain.state()))
+            .map(|chunk| dolos_core::state::load_entity_chunk::<D>(chunk, domain.state()))
             .try_reduce(EntityMap::new, |mut acc, x| {
                 acc.extend(x);
                 Ok(acc)
@@ -286,7 +282,7 @@ impl<C: ChainLogic> WorkBatch<C> {
 
     pub fn commit_state<D>(&mut self, domain: &D) -> Result<(), DomainError>
     where
-        D: Domain<Chain = C>,
+        D: Domain<Chain = CardanoLogic>,
     {
         let writer = domain.state().start_writer()?;
 
@@ -312,7 +308,7 @@ impl<C: ChainLogic> WorkBatch<C> {
 
     pub fn commit_archive<D>(&mut self, domain: &D) -> Result<(), DomainError>
     where
-        D: Domain<Chain = C>,
+        D: Domain<Chain = CardanoLogic>,
     {
         let writer = domain.archive().start_writer()?;
 

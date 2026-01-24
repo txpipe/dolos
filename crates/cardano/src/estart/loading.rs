@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
-use dolos_core::{batch::WorkDeltas, ChainError, Domain, Genesis, StateStore};
+use dolos_core::{ChainError, Domain, Genesis, StateStore};
 
 use crate::{
-    estart::BoundaryVisitor, load_active_era, AccountState, DRepState, FixedNamespace as _,
-    PoolState, ProposalState,
+    estart::BoundaryVisitor, load_active_era, roll::WorkDeltas, AccountState, DRepState,
+    FixedNamespace as _, PoolState, ProposalState,
 };
 
 impl super::WorkContext {

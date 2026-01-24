@@ -27,9 +27,9 @@ use thiserror::Error;
 use tracing::info;
 
 pub mod archive;
-pub mod batch;
 pub mod config;
 pub mod crawl;
+pub mod executor;
 pub mod facade;
 pub mod indexes;
 pub mod mempool;
@@ -37,6 +37,9 @@ pub mod point;
 pub mod query;
 pub mod state;
 pub mod wal;
+pub mod work_unit;
+
+pub use work_unit::WorkUnit;
 
 pub type Era = u16;
 
@@ -73,8 +76,6 @@ pub use point::*;
 pub use query::*;
 pub use state::*;
 pub use wal::*;
-
-use crate::batch::WorkBatch;
 
 #[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
 pub struct EraCbor(pub Era, pub Cbor);
@@ -464,24 +465,18 @@ pub enum ChainError {
     Phase2ValidationRejected(Phase2Log),
 }
 
-pub enum WorkKind {
-    Genesis,
-    Blocks,
-    EWrap,
-    EStart,
-    Rupd,
-}
+// Note: The WorkUnit trait is now defined in work_unit.rs
+// Chain-specific work unit implementations live in their respective crates
+// (e.g., dolos-cardano for Cardano work units)
 
-#[allow(clippy::large_enum_variant)]
-pub enum WorkUnit<C: ChainLogic> {
-    Genesis,
-    Blocks(WorkBatch<C>),
-    EWrap(BlockSlot),
-    EStart(BlockSlot),
-    Rupd(BlockSlot),
-    ForcedStop,
-}
-
+/// Trait for blockchain-specific logic.
+///
+/// This trait defines the interface between the generic node infrastructure
+/// and chain-specific implementations. It handles block reception, work unit
+/// production, and transaction validation.
+///
+/// Work units are produced by the chain logic and executed by the generic
+/// executor. This separation allows the core crate to remain chain-agnostic.
 pub trait ChainLogic: Sized + Send + Sync {
     type Config: Clone;
     type Block: Block + Send + Sync;
@@ -489,82 +484,47 @@ pub trait ChainLogic: Sized + Send + Sync {
     type Utxo: Sized + Send + Sync;
     type Delta: EntityDelta<Entity = Self::Entity>;
 
+    /// Initialize the chain logic with configuration and state.
     fn initialize<D: Domain>(
         config: Self::Config,
         state: &D::State,
         genesis: &Genesis,
     ) -> Result<Self, ChainError>;
 
-    // TODO: having the chain logic be mutable is a code smell. It was initially designed
-    // to be a static, central point for chain-specific logic. Making it hold shared state is ugly.
-    //
-    // One way to fix this is to move the WorkBuffer concept to the core crate and
-    // let the domain "own" the data and let the chain borrow it for mutations.
+    /// Check if the chain logic can receive a new block.
+    ///
+    /// Returns false if there is pending work that must be processed
+    /// before new blocks can be received.
     fn can_receive_block(&self) -> bool;
+
+    /// Receive a raw block for processing.
+    ///
+    /// The block is queued for processing. Call `pop_work()` to get
+    /// work units that should be executed.
     fn receive_block(&mut self, raw: RawBlock) -> Result<BlockSlot, ChainError>;
-    fn pop_work(&mut self) -> Option<WorkUnit<Self>>;
 
-    // TODO: we should invert responsibility here. The chain logic should tell the
-    // domain what to do instead of passing everything down and expecting it to do
-    // the right thing.
-    fn apply_genesis<D: Domain>(
-        &mut self,
-        state: &D::State,
-        indexes: &D::Indexes,
-        genesis: Arc<Genesis>,
-    ) -> Result<(), ChainError>;
+    /// Pop the next work unit to execute.
+    ///
+    /// Returns a boxed work unit implementing the `WorkUnit` trait,
+    /// or `None` if no work is currently ready.
+    ///
+    /// The returned work unit should be executed using `executor::execute_work_unit()`.
+    fn pop_work<D: Domain>(&mut self, domain: &D) -> Option<Box<dyn WorkUnit<D>>>
+    where
+        D: Domain<Chain = Self, Entity = Self::Entity, EntityDelta = Self::Delta>;
 
-    // TODO: we should invert responsibility here. The chain logic should tell the
-    // domain what to do instead of passing everything down and expecting it to do
-    // the right thing.
-    fn apply_ewrap<D: Domain>(
-        &mut self,
-        state: &D::State,
-        archive: &D::Archive,
-        genesis: Arc<Genesis>,
-        at: BlockSlot,
-    ) -> Result<(), ChainError>;
-
-    // TODO: we should invert responsibility here. The chain logic should tell the
-    // domain what to do instead of passing everything down and expecting it to do
-    // the right thing.
-    fn apply_estart<D: Domain>(
-        &mut self,
-        state: &D::State,
-        archive: &D::Archive,
-        genesis: Arc<Genesis>,
-        at: BlockSlot,
-    ) -> Result<(), ChainError>;
-
-    // TODO: we should invert responsibility here. The chain logic should tell the
-    // domain what to do instead of passing everything down and expecting it to do
-    // the right thing.
-    fn apply_rupd<D: Domain>(
-        &mut self,
-        state: &D::State,
-        archive: &D::Archive,
-        genesis: Arc<Genesis>,
-        at: BlockSlot,
-    ) -> Result<(), ChainError>;
-
-    fn compute_delta<D: Domain>(
-        &self,
-        state: &D::State,
-        genesis: Arc<Genesis>,
-        batch: &mut WorkBatch<Self>,
-    ) -> Result<(), ChainError>;
-
-    // TODO: remove from the interface
+    // TODO: remove from the interface - this is Cardano-specific
     fn decode_utxo(&self, utxo: Arc<EraCbor>) -> Result<Self::Utxo, ChainError>;
 
-    // TODO: remove from the interface
+    // TODO: remove from the interface - this is Cardano-specific
     fn mutable_slots(domain: &impl Domain) -> BlockSlot;
 
-    // TODO: remove from the interface
+    // TODO: remove from the interface - this is Cardano-specific
     fn last_immutable_slot(domain: &impl Domain, tip: BlockSlot) -> BlockSlot {
         tip.saturating_sub(Self::mutable_slots(domain))
     }
 
+    /// Validate a transaction against the current ledger state.
     fn validate_tx<D: Domain>(
         &self,
         cbor: &[u8],

@@ -1,12 +1,13 @@
 use std::sync::Arc;
 
-use dolos_core::{batch::WorkDeltas, ChainError, Domain, Genesis, StateStore};
+use dolos_core::{ChainError, Domain, Genesis, StateStore};
 use pallas::codec::minicbor;
 
 use crate::{
     ewrap::{BoundaryVisitor as _, BoundaryWork},
     load_active_era, pallas_extras,
     rewards::RewardMap,
+    roll::WorkDeltas,
     rupd::RupdWork,
     AccountState, DRepState, FixedNamespace as _, PoolState, ProposalState,
 };

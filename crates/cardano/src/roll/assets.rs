@@ -1,12 +1,11 @@
-use dolos_core::batch::WorkDeltas;
 use dolos_core::{ChainError, NsKey};
 use pallas::crypto::hash::Hash;
 use pallas::ledger::traverse::{MultiEraBlock, MultiEraPolicyAssets, MultiEraTx};
 use serde::{Deserialize, Serialize};
 use tracing::trace;
 
+use super::WorkDeltas;
 use crate::model::FixedNamespace as _;
-use crate::CardanoLogic;
 use crate::{model::AssetState, roll::BlockVisitor};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,7 +64,7 @@ pub struct AssetStateVisitor;
 impl BlockVisitor for AssetStateVisitor {
     fn visit_mint(
         &mut self,
-        deltas: &mut WorkDeltas<CardanoLogic>,
+        deltas: &mut WorkDeltas,
         block: &MultiEraBlock,
         tx: &MultiEraTx,
         mint: &MultiEraPolicyAssets,
