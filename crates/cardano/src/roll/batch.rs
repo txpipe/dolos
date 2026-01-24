@@ -327,7 +327,7 @@ impl WorkBatch {
 
     pub fn commit_indexes<D>(&mut self, domain: &D) -> Result<(), DomainError>
     where
-        D: Domain<Chain = C>,
+        D: Domain<Chain = CardanoLogic>,
     {
         let writer = domain.indexes().start_writer()?;
 

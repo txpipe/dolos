@@ -112,14 +112,7 @@ impl ToyDomain {
             dolos_cardano::CardanoLogic::initialize::<Self>(config.clone(), &state, &genesis)
                 .unwrap();
 
-<<<<<<< HEAD
-        chain
-            .apply_genesis::<Self>(&state, &indexes, genesis.clone())
-            .unwrap();
-
-=======
         // Create the domain first (genesis work unit needs it for execution)
->>>>>>> e0aaca7 (introduce work units)
         let domain = Self {
             state,
             wal: dolos_redb3::wal::RedbWalStore::memory().unwrap(),

@@ -31,6 +31,7 @@ pub mod bootstrap;
 pub mod config;
 pub mod crawl;
 pub mod import;
+pub mod indexes;
 pub mod mempool;
 pub mod point;
 pub mod query;

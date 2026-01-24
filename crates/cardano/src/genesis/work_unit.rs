@@ -54,7 +54,12 @@ where
         info!("bootstrapping chain from genesis");
 
         // Execute the genesis bootstrap
-        super::execute::<D>(domain.state(), &self.genesis, &self.config)?;
+        super::execute::<D>(
+            domain.state(),
+            domain.indexes(),
+            &self.genesis,
+            &self.config,
+        )?;
 
         debug!("genesis bootstrap complete");
         Ok(())

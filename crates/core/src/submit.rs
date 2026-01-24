@@ -48,7 +48,8 @@ impl<D: Domain> SubmitExt for D {
     fn validate_tx(&self, chain: &Self::Chain, cbor: &[u8]) -> Result<MempoolTx, DomainError> {
         let tip = self.state().read_cursor()?;
 
-        let utxos = MempoolAwareUtxoStore::<'_, D>::new(self.state(), self.mempool());
+        let utxos =
+            MempoolAwareUtxoStore::<'_, D>::new(self.state(), self.indexes(), self.mempool());
 
         let tx = chain.validate_tx(cbor, &utxos, tip, &self.genesis())?;
 
