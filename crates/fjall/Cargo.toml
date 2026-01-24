@@ -1,0 +1,16 @@
+[package]
+name = "dolos-fjall"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+dolos-core = { path = "../core" }
+fjall = "3.0"
+tracing.workspace = true
+thiserror.workspace = true
+bincode.workspace = true
+xxhash-rust.workspace = true
+pallas.workspace = true
+
+[dev-dependencies]
+dolos-testing = { path = "../testing" }

@@ -7,6 +7,13 @@ use dolos_core::{config::StorageConfig, *};
 // implementations
 pub type WalAdapter = dolos_redb3::wal::RedbWalStore<dolos_cardano::CardanoDelta>;
 
+// Index store type selection based on feature flags
+#[cfg(all(feature = "index-redb", not(feature = "index-fjall")))]
+pub type IndexStoreType = dolos_redb3::indexes::IndexStore;
+
+#[cfg(feature = "index-fjall")]
+pub type IndexStoreType = dolos_fjall::IndexStore;
+
 pub struct TipSubscription {
     replay: Vec<(ChainPoint, RawBlock)>,
     receiver: tokio::sync::broadcast::Receiver<TipEvent>,
@@ -31,7 +38,7 @@ pub struct DomainAdapter {
     pub chain: Arc<tokio::sync::RwLock<CardanoLogic>>,
     pub state: dolos_redb3::state::StateStore,
     pub archive: dolos_redb3::archive::ArchiveStore,
-    pub indexes: dolos_redb3::indexes::IndexStore,
+    pub indexes: IndexStoreType,
     pub mempool: crate::mempool::Mempool,
     pub tip_broadcast: tokio::sync::broadcast::Sender<TipEvent>,
 }
@@ -44,7 +51,7 @@ impl Domain for DomainAdapter {
     type Wal = WalAdapter;
     type State = dolos_redb3::state::StateStore;
     type Archive = dolos_redb3::archive::ArchiveStore;
-    type Indexes = dolos_redb3::indexes::IndexStore;
+    type Indexes = IndexStoreType;
     type Mempool = crate::mempool::Mempool;
     type TipSubscription = TipSubscription;
 
