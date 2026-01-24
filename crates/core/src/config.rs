@@ -143,6 +143,9 @@ pub struct StorageConfig {
     /// Size (in Mb) of memory allocated for chain caching
     pub chain_cache: Option<usize>,
 
+    /// Size (in Mb) of memory allocated for index caching
+    pub index_cache: Option<usize>,
+
     /// Maximum number of slots (not blocks) to keep in the WAL
     pub max_wal_history: Option<u64>,
 
@@ -167,6 +170,7 @@ impl Default for StorageConfig {
             wal_cache: None,
             ledger_cache: None,
             chain_cache: None,
+            index_cache: None,
             max_wal_history: None,
             max_ledger_history: None,
             max_chain_history: None,

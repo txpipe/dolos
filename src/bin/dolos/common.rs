@@ -7,7 +7,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
 use tracing_subscriber::{filter::Targets, prelude::*};
 
-use dolos::adapters::{DomainAdapter, WalAdapter};
+use dolos::adapters::{DomainAdapter, IndexStoreType, WalAdapter};
 use dolos::core::Genesis;
 use dolos::prelude::*;
 
@@ -15,7 +15,7 @@ pub struct Stores {
     pub wal: WalAdapter,
     pub state: dolos_redb3::state::StateStore,
     pub archive: dolos_redb3::archive::ArchiveStore,
-    pub indexes: dolos_redb3::indexes::IndexStore,
+    pub indexes: IndexStoreType,
 }
 
 pub fn ensure_storage_path(config: &RootConfig) -> Result<PathBuf, Error> {
@@ -52,12 +52,23 @@ pub fn open_archive_store(
     Ok(archive)
 }
 
-pub fn open_index_store(config: &RootConfig) -> Result<dolos_redb3::indexes::IndexStore, Error> {
+#[cfg(all(feature = "index-redb", not(feature = "index-fjall")))]
+pub fn open_index_store(config: &RootConfig) -> Result<IndexStoreType, Error> {
     let root = ensure_storage_path(config)?;
 
     let indexes =
-        dolos_redb3::indexes::IndexStore::open(root.join("index"), config.storage.chain_cache)
+        dolos_redb3::indexes::IndexStore::open(root.join("index"), config.storage.index_cache)
             .map_err(IndexError::from)?;
+
+    Ok(indexes)
+}
+
+#[cfg(feature = "index-fjall")]
+pub fn open_index_store(config: &RootConfig) -> Result<IndexStoreType, Error> {
+    let root = ensure_storage_path(config)?;
+
+    let indexes = dolos_fjall::IndexStore::open(root.join("index"), config.storage.index_cache)
+        .map_err(IndexError::from)?;
 
     Ok(indexes)
 }
@@ -98,6 +109,7 @@ pub fn open_persistent_data_stores(config: &RootConfig) -> Result<Stores, Error>
     })
 }
 
+#[cfg(all(feature = "index-redb", not(feature = "index-fjall")))]
 pub fn create_ephemeral_data_stores() -> Result<Stores, Error> {
     let wal = dolos_redb3::wal::RedbWalStore::memory()?;
 
@@ -116,6 +128,14 @@ pub fn create_ephemeral_data_stores() -> Result<Stores, Error> {
         state,
         indexes,
     })
+}
+
+#[cfg(feature = "index-fjall")]
+pub fn create_ephemeral_data_stores() -> Result<Stores, Error> {
+    // fjall does not support in-memory mode, ephemeral stores are not available
+    Err(Error::config(
+        "ephemeral storage is not supported with fjall index backend",
+    ))
 }
 
 pub fn setup_data_stores(config: &RootConfig) -> Result<Stores, Error> {
