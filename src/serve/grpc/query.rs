@@ -1,3 +1,4 @@
+use dolos_cardano::indexes::CardanoIndexExt;
 use itertools::Itertools as _;
 use pallas::interop::utxorpc::{self as interop, spec::query::any_utxo_pattern::UtxoPattern};
 use pallas::interop::utxorpc::{spec as u5c, LedgerContext};
@@ -41,10 +42,10 @@ fn into_status(err: impl std::error::Error) -> Status {
 }
 
 trait IntoSet {
-    fn into_set<S: IndexStore>(self, indexes: &S) -> Result<HashSet<TxoRef>, Status>;
+    fn into_set<S: CardanoIndexExt>(self, indexes: &S) -> Result<HashSet<TxoRef>, Status>;
 }
 
-fn intersect<S: IndexStore>(
+fn intersect<S: CardanoIndexExt>(
     indexes: &S,
     a: impl IntoSet,
     b: impl IntoSet,
@@ -68,8 +69,8 @@ impl ByAddressQuery {
 }
 
 impl IntoSet for ByAddressQuery {
-    fn into_set<S: IndexStore>(self, indexes: &S) -> Result<HashSet<TxoRef>, Status> {
-        indexes.get_utxo_by_address(&self.0).map_err(into_status)
+    fn into_set<S: CardanoIndexExt>(self, indexes: &S) -> Result<HashSet<TxoRef>, Status> {
+        indexes.utxos_by_address(&self.0).map_err(into_status)
     }
 }
 
@@ -86,8 +87,8 @@ impl ByPaymentQuery {
 }
 
 impl IntoSet for ByPaymentQuery {
-    fn into_set<S: IndexStore>(self, indexes: &S) -> Result<HashSet<TxoRef>, Status> {
-        indexes.get_utxo_by_payment(&self.0).map_err(into_status)
+    fn into_set<S: CardanoIndexExt>(self, indexes: &S) -> Result<HashSet<TxoRef>, Status> {
+        indexes.utxos_by_payment(&self.0).map_err(into_status)
     }
 }
 
@@ -104,13 +105,13 @@ impl ByDelegationQuery {
 }
 
 impl IntoSet for ByDelegationQuery {
-    fn into_set<S: IndexStore>(self, indexes: &S) -> Result<HashSet<TxoRef>, Status> {
-        indexes.get_utxo_by_stake(&self.0).map_err(into_status)
+    fn into_set<S: CardanoIndexExt>(self, indexes: &S) -> Result<HashSet<TxoRef>, Status> {
+        indexes.utxos_by_stake(&self.0).map_err(into_status)
     }
 }
 
 impl IntoSet for u5c::cardano::AddressPattern {
-    fn into_set<S: IndexStore>(self, indexes: &S) -> Result<HashSet<TxoRef>, Status> {
+    fn into_set<S: CardanoIndexExt>(self, indexes: &S) -> Result<HashSet<TxoRef>, Status> {
         let exact = ByAddressQuery::maybe_from(self.exact_address);
         let payment = ByPaymentQuery::maybe_from(self.payment_part);
         let delegation = ByDelegationQuery::maybe_from(self.delegation_part);
@@ -139,8 +140,8 @@ impl ByPolicyQuery {
 }
 
 impl IntoSet for ByPolicyQuery {
-    fn into_set<S: IndexStore>(self, indexes: &S) -> Result<HashSet<TxoRef>, Status> {
-        indexes.get_utxo_by_policy(&self.0).map_err(into_status)
+    fn into_set<S: CardanoIndexExt>(self, indexes: &S) -> Result<HashSet<TxoRef>, Status> {
+        indexes.utxos_by_policy(&self.0).map_err(into_status)
     }
 }
 
@@ -157,13 +158,13 @@ impl ByAssetQuery {
 }
 
 impl IntoSet for ByAssetQuery {
-    fn into_set<S: IndexStore>(self, indexes: &S) -> Result<HashSet<TxoRef>, Status> {
-        indexes.get_utxo_by_asset(&self.0).map_err(into_status)
+    fn into_set<S: CardanoIndexExt>(self, indexes: &S) -> Result<HashSet<TxoRef>, Status> {
+        indexes.utxos_by_asset(&self.0).map_err(into_status)
     }
 }
 
 impl IntoSet for u5c::cardano::AssetPattern {
-    fn into_set<S: IndexStore>(self, indexes: &S) -> Result<HashSet<TxoRef>, Status> {
+    fn into_set<S: CardanoIndexExt>(self, indexes: &S) -> Result<HashSet<TxoRef>, Status> {
         let by_policy = ByPolicyQuery::maybe_from(self.policy_id);
         let by_asset = ByAssetQuery::maybe_from(self.asset_name);
 
@@ -177,7 +178,7 @@ impl IntoSet for u5c::cardano::AssetPattern {
 }
 
 impl IntoSet for u5c::cardano::TxOutputPattern {
-    fn into_set<S: IndexStore>(self, indexes: &S) -> Result<HashSet<TxoRef>, Status> {
+    fn into_set<S: CardanoIndexExt>(self, indexes: &S) -> Result<HashSet<TxoRef>, Status> {
         match (self.address, self.asset) {
             (None, Some(x)) => x.into_set(indexes),
             (Some(x), None) => x.into_set(indexes),
@@ -188,7 +189,7 @@ impl IntoSet for u5c::cardano::TxOutputPattern {
 }
 
 impl IntoSet for u5c::query::AnyUtxoPattern {
-    fn into_set<S: IndexStore>(self, indexes: &S) -> Result<HashSet<TxoRef>, Status> {
+    fn into_set<S: CardanoIndexExt>(self, indexes: &S) -> Result<HashSet<TxoRef>, Status> {
         match self.utxo_pattern {
             Some(UtxoPattern::Cardano(x)) => x.into_set(indexes),
             _ => Ok(HashSet::new()),

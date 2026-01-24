@@ -4,7 +4,8 @@ use itertools::Itertools;
 use pallas::ledger::traverse::{MultiEraBlock, MultiEraOutput};
 use std::collections::{HashMap, HashSet};
 
-use dolos_core::{Domain, QueryHelpers as _, StateStore as _, TxoRef};
+use dolos_cardano::indexes::CardanoQueryExt;
+use dolos_core::{Domain, StateStore as _, TxoRef};
 
 use crate::{
     mapping::{IntoModel, UtxoOutputModelBuilder},

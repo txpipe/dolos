@@ -1,5 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
+use dolos_cardano::indexes::index_delta_from_utxo_delta;
 use dolos_core::{
     ArchiveStore as _, ChainLogic, ChainPoint, Domain, DomainError, EntityDelta as _,
     IndexStore as _, IndexWriter as _, StateStore, StateWriter as _, TipEvent, WalStore,
@@ -18,8 +19,13 @@ where
 
         for (point, mut log) in undo_blocks.rev() {
             if point == *to {
+                // Final cursor update - build an empty delta with just the cursor
+                let empty_delta = dolos_core::IndexDelta {
+                    cursor: point.clone(),
+                    ..Default::default()
+                };
+                index_writer.apply(&empty_delta)?;
                 writer.set_cursor(point.clone())?;
-                index_writer.set_cursor(point.clone())?;
                 break;
             }
 
@@ -63,8 +69,12 @@ where
             let utxo_undo = dolos_cardano::utxoset::compute_undo_delta(blockd, &inputs)
                 .map_err(dolos_core::ChainError::from)?;
 
+            // Apply UTxO undo to state
             writer.apply_utxoset(&utxo_undo)?;
-            index_writer.apply_utxoset(&utxo_undo)?;
+
+            // Build and apply index delta for the undo
+            let index_delta = index_delta_from_utxo_delta(point.clone(), &utxo_undo);
+            index_writer.undo(&index_delta)?;
 
             // TODO: we should differ notifications until the we commit the writers
             self.notify_tip(TipEvent::Undo(point.clone(), block));

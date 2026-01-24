@@ -1,4 +1,5 @@
 use super::*;
+use crate::TagDimension;
 
 pub use pallas::ledger::validate::phase2::EvalReport;
 use tracing::{debug, warn};
@@ -52,37 +53,6 @@ pub struct MempoolAwareUtxoStore<'a, D: Domain> {
     inner: &'a D::State,
     indexes: &'a D::Indexes,
     mempool: &'a D::Mempool,
-}
-
-fn utxo_address_matches(utxo: &MultiEraOutput<'_>, expected: &[u8]) -> bool {
-    let Ok(address) = utxo.address() else {
-        return false;
-    };
-
-    address.to_vec() == expected
-}
-
-fn utxo_policy_matches(utxo: &MultiEraOutput<'_>, expected_policy: &[u8]) -> bool {
-    for ma in utxo.value().assets() {
-        if ma.policy() == expected_policy {
-            return true;
-        }
-    }
-
-    false
-}
-
-fn utxo_asset_matches(utxo: &MultiEraOutput<'_>, expected_subject: &[u8]) -> bool {
-    for ma in utxo.value().assets() {
-        for asset in ma.assets() {
-            let subject = [ma.policy().as_slice(), asset.name()].concat();
-            if subject == expected_subject {
-                return true;
-            }
-        }
-    }
-
-    false
 }
 
 fn scan_mempool_utxos<D: Domain, F>(predicate: F, mempool: &D::Mempool) -> HashSet<TxoRef>
@@ -177,40 +147,22 @@ impl<'a, D: Domain> MempoolAwareUtxoStore<'a, D> {
         self.indexes
     }
 
-    pub fn get_utxo_by_asset(&self, asset: &[u8]) -> Result<UtxoSet, IndexError> {
-        let predicate = |utxo: &MultiEraOutput<'_>| utxo_asset_matches(utxo, asset);
-
+    /// Get UTxOs by a tag dimension and key, merging results from both the index
+    /// and the mempool.
+    ///
+    /// The `predicate` is used to filter mempool UTxOs that match the query criteria.
+    pub fn get_utxos_by_tag<F>(
+        &self,
+        dimension: TagDimension,
+        key: &[u8],
+        predicate: F,
+    ) -> Result<UtxoSet, IndexError>
+    where
+        F: Fn(&MultiEraOutput<'_>) -> bool,
+    {
         let from_mempool = scan_mempool_utxos::<D, _>(predicate, self.mempool);
 
-        let mut utxos = self.indexes.get_utxo_by_asset(asset)?;
-
-        utxos.extend(from_mempool);
-
-        exclude_inflight_stxis::<D>(&mut utxos, self.mempool);
-
-        Ok(utxos)
-    }
-
-    pub fn get_utxo_by_policy(&self, policy: &[u8]) -> Result<UtxoSet, IndexError> {
-        let predicate = |utxo: &MultiEraOutput<'_>| utxo_policy_matches(utxo, policy);
-
-        let from_mempool = scan_mempool_utxos::<D, _>(predicate, self.mempool);
-
-        let mut utxos = self.indexes.get_utxo_by_policy(policy)?;
-
-        utxos.extend(from_mempool);
-
-        exclude_inflight_stxis::<D>(&mut utxos, self.mempool);
-
-        Ok(utxos)
-    }
-
-    pub fn get_utxo_by_address(&self, address: &[u8]) -> Result<UtxoSet, IndexError> {
-        let predicate = |utxo: &MultiEraOutput<'_>| utxo_address_matches(utxo, address);
-
-        let from_mempool = scan_mempool_utxos::<D, _>(predicate, self.mempool);
-
-        let mut utxos = self.indexes.get_utxo_by_address(address)?;
+        let mut utxos = self.indexes.utxos_by_tag(dimension, key)?;
 
         utxos.extend(from_mempool);
 

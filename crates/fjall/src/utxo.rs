@@ -6,66 +6,11 @@
 
 use std::collections::HashSet;
 
-use dolos_core::{TxoRef, UtxoSet, UtxoSetDelta};
+use dolos_core::{IndexDelta, TxoRef, UtxoSet};
 use fjall::{Keyspace, OwnedWriteBatch};
-use pallas::ledger::{addresses::ShelleyDelegationPart, traverse::MultiEraOutput};
 
 use crate::keys::{decode_txo_ref_from_suffix, utxo_composite_key, TXO_REF_SIZE};
-use crate::Error;
-
-/// Result of splitting an address into its components
-struct SplitAddressResult {
-    /// Full address bytes
-    address: Option<Vec<u8>>,
-    /// Payment credential bytes
-    payment: Option<Vec<u8>>,
-    /// Stake credential bytes
-    stake: Option<Vec<u8>>,
-}
-
-/// Split an address into its components (full address, payment, stake)
-fn split_address(utxo: &MultiEraOutput) -> Result<SplitAddressResult, Error> {
-    use pallas::ledger::addresses::Address;
-
-    match utxo.address() {
-        Ok(address) => match &address {
-            Address::Shelley(x) => {
-                let address = x.to_vec();
-                let payment = x.payment().to_vec();
-
-                let stake = match x.delegation() {
-                    ShelleyDelegationPart::Key(..)
-                    | ShelleyDelegationPart::Script(..)
-                    | ShelleyDelegationPart::Pointer(..) => Some(x.delegation().to_vec()),
-                    ShelleyDelegationPart::Null => None,
-                };
-
-                Ok(SplitAddressResult {
-                    address: Some(address),
-                    payment: Some(payment),
-                    stake,
-                })
-            }
-            Address::Stake(x) => {
-                let addr = x.to_vec();
-                Ok(SplitAddressResult {
-                    address: Some(addr.clone()),
-                    payment: None,
-                    stake: Some(addr),
-                })
-            }
-            Address::Byron(x) => {
-                let addr = x.to_vec();
-                Ok(SplitAddressResult {
-                    address: Some(addr),
-                    payment: None,
-                    stake: None,
-                })
-            }
-        },
-        Err(err) => Err(Error::Codec(err.to_string())),
-    }
-}
+use crate::{utxo_dimensions, Error};
 
 /// References to all UTxO filter keyspaces
 pub struct UtxoKeyspaces<'a> {
@@ -74,6 +19,20 @@ pub struct UtxoKeyspaces<'a> {
     pub stake: &'a Keyspace,
     pub policy: &'a Keyspace,
     pub asset: &'a Keyspace,
+}
+
+impl<'a> UtxoKeyspaces<'a> {
+    /// Get keyspace for a tag dimension
+    fn keyspace_for_dimension(&self, dimension: &str) -> Option<&'a Keyspace> {
+        match dimension {
+            utxo_dimensions::ADDRESS => Some(self.address),
+            utxo_dimensions::PAYMENT => Some(self.payment),
+            utxo_dimensions::STAKE => Some(self.stake),
+            utxo_dimensions::POLICY => Some(self.policy),
+            utxo_dimensions::ASSET => Some(self.asset),
+            _ => None,
+        }
+    }
 }
 
 /// Insert a UTxO entry into a keyspace
@@ -88,93 +47,53 @@ fn remove_entry(batch: &mut OwnedWriteBatch, keyspace: &Keyspace, key: &[u8], tx
     batch.remove(keyspace, composite);
 }
 
-/// Apply UTxO set delta to the filter indexes
+/// Apply UTxO filter changes from an IndexDelta
 pub fn apply(
     batch: &mut OwnedWriteBatch,
     keyspaces: &UtxoKeyspaces,
-    delta: &UtxoSetDelta,
+    delta: &IndexDelta,
 ) -> Result<(), Error> {
-    // Process produced and recovered UTxOs (add to indexes)
-    let trackable = delta
-        .produced_utxo
-        .iter()
-        .chain(delta.recovered_stxi.iter());
-
-    for (txo_ref, body) in trackable {
-        let body =
-            MultiEraOutput::try_from(body.as_ref()).map_err(|e| Error::Codec(e.to_string()))?;
-
-        let SplitAddressResult {
-            address,
-            payment,
-            stake,
-        } = split_address(&body)?;
-
-        if let Some(addr) = address {
-            insert_entry(batch, keyspaces.address, &addr, txo_ref);
-        }
-
-        if let Some(pay) = payment {
-            insert_entry(batch, keyspaces.payment, &pay, txo_ref);
-        }
-
-        if let Some(stk) = stake {
-            insert_entry(batch, keyspaces.stake, &stk, txo_ref);
-        }
-
-        // Index by policy and asset
-        let value = body.value();
-        let assets = value.assets();
-
-        for policy_assets in assets {
-            let policy = policy_assets.policy();
-            insert_entry(batch, keyspaces.policy, policy.as_slice(), txo_ref);
-
-            for asset in policy_assets.assets() {
-                let mut subject = asset.policy().to_vec();
-                subject.extend(asset.name());
-                insert_entry(batch, keyspaces.asset, &subject, txo_ref);
+    // Insert produced UTxOs
+    for (txo_ref, tags) in &delta.utxo.produced {
+        for tag in tags {
+            if let Some(keyspace) = keyspaces.keyspace_for_dimension(tag.dimension) {
+                insert_entry(batch, keyspace, &tag.key, txo_ref);
             }
         }
     }
 
-    // Process consumed and undone UTxOs (remove from indexes)
-    let forgettable = delta.consumed_utxo.iter().chain(delta.undone_utxo.iter());
-
-    for (txo_ref, body) in forgettable {
-        let body =
-            MultiEraOutput::try_from(body.as_ref()).map_err(|e| Error::Codec(e.to_string()))?;
-
-        let SplitAddressResult {
-            address,
-            payment,
-            stake,
-        } = split_address(&body)?;
-
-        if let Some(addr) = address {
-            remove_entry(batch, keyspaces.address, &addr, txo_ref);
+    // Remove consumed UTxOs
+    for (txo_ref, tags) in &delta.utxo.consumed {
+        for tag in tags {
+            if let Some(keyspace) = keyspaces.keyspace_for_dimension(tag.dimension) {
+                remove_entry(batch, keyspace, &tag.key, txo_ref);
+            }
         }
+    }
 
-        if let Some(pay) = payment {
-            remove_entry(batch, keyspaces.payment, &pay, txo_ref);
+    Ok(())
+}
+
+/// Undo UTxO filter changes from an IndexDelta (for rollback)
+pub fn undo(
+    batch: &mut OwnedWriteBatch,
+    keyspaces: &UtxoKeyspaces,
+    delta: &IndexDelta,
+) -> Result<(), Error> {
+    // Remove produced UTxOs (undo insertion)
+    for (txo_ref, tags) in &delta.utxo.produced {
+        for tag in tags {
+            if let Some(keyspace) = keyspaces.keyspace_for_dimension(tag.dimension) {
+                remove_entry(batch, keyspace, &tag.key, txo_ref);
+            }
         }
+    }
 
-        if let Some(stk) = stake {
-            remove_entry(batch, keyspaces.stake, &stk, txo_ref);
-        }
-
-        // Remove from policy and asset indexes
-        let value = body.value();
-        let assets = value.assets();
-
-        for policy_assets in assets {
-            let policy = policy_assets.policy();
-            remove_entry(batch, keyspaces.policy, policy.as_slice(), txo_ref);
-
-            for asset in policy_assets.assets() {
-                let mut subject = asset.policy().to_vec();
-                subject.extend(asset.name());
-                remove_entry(batch, keyspaces.asset, &subject, txo_ref);
+    // Restore consumed UTxOs (undo removal)
+    for (txo_ref, tags) in &delta.utxo.consumed {
+        for tag in tags {
+            if let Some(keyspace) = keyspaces.keyspace_for_dimension(tag.dimension) {
+                insert_entry(batch, keyspace, &tag.key, txo_ref);
             }
         }
     }

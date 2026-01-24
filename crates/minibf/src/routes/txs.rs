@@ -15,7 +15,8 @@ use blockfrost_openapi::models::{
     tx_content_withdrawals_inner::TxContentWithdrawalsInner,
 };
 
-use dolos_core::{Domain, QueryHelpers as _};
+use dolos_cardano::indexes::CardanoQueryExt;
+use dolos_core::{Domain, QueryHelpers};
 
 use crate::{
     mapping::{IntoModel as _, TxModelBuilder},

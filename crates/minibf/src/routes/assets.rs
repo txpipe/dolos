@@ -12,9 +12,13 @@ use blockfrost_openapi::models::{
     asset_transactions_inner::AssetTransactionsInner,
 };
 use crc::{Crc, CRC_8_SMBUS};
-use dolos_cardano::{model::AssetState, ChainSummary};
+use dolos_cardano::{
+    indexes::{CardanoIndexExt, CardanoQueryExt},
+    model::AssetState,
+    ChainSummary,
+};
 use dolos_core::{
-    BlockSlot, Domain, EraCbor, IndexStore, QueryHelpers as _, SparseBlockIter, StateStore as _,
+    BlockSlot, Domain, EraCbor, IndexStore as _, QueryHelpers, SparseBlockIter, StateStore as _,
 };
 use itertools::Itertools;
 use pallas::{
@@ -526,7 +530,7 @@ pub async fn by_subject_addresses<D: Domain>(
     let asset = hex::decode(&subject).map_err(|_| Error::InvalidAsset)?;
     let utxoset = domain
         .indexes()
-        .get_utxo_by_asset(&asset)
+        .utxos_by_asset(&asset)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .into_iter()
         .collect_vec();
@@ -541,7 +545,7 @@ pub async fn by_subject_addresses<D: Domain>(
         let sort = (
             domain
                 .indexes()
-                .slot_for_tx_hash(txoref.0.as_slice())
+                .slot_by_tx_hash(txoref.0.as_slice())
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
                 .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?,
             txoref.1,
@@ -736,7 +740,7 @@ pub async fn by_subject_transactions<D: Domain>(
     let end_slot = domain.get_tip_slot()?;
     let blocks = domain
         .inner
-        .blocks_with_asset(&subject, 0, end_slot)
+        .blocks_by_asset(&subject, 0, end_slot)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let chain = domain

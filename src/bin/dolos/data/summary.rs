@@ -25,7 +25,7 @@ pub fn run(config: &RootConfig, _args: &Args) -> miette::Result<()> {
     };
 
     let index_summary = IndexSummary {
-        tip_slot: stores.indexes.read_cursor().unwrap().map(|x| x.slot()),
+        tip_slot: stores.indexes.cursor().unwrap().map(|x| x.slot()),
     };
 
     let summary = DataSummary {

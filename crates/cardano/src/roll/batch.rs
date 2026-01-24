@@ -10,27 +10,18 @@ use rayon::prelude::*;
 
 use dolos_core::{
     ArchiveStore, ArchiveWriter as _, Block as _, BlockSlot, ChainLogic, ChainPoint, Domain,
-    DomainError, EntityDelta, EntityMap, IndexStore as _, IndexWriter as _, LogValue, NsKey,
-    RawBlock, RawUtxoMap, SlotTags, StateError, StateStore as _, StateWriter as _, TxoRef,
+    DomainError, EntityDelta, EntityMap, IndexDelta, IndexStore as _, IndexWriter as _, LogValue,
+    NsKey, RawBlock, RawUtxoMap, StateError, StateStore as _, StateWriter as _, TxoRef,
     UtxoSetDelta, WalStore as _,
 };
 
+use crate::indexes::CardanoIndexDeltaBuilder;
 use crate::{CardanoDelta, CardanoEntity, CardanoLogic, OwnedMultiEraBlock, OwnedMultiEraOutput};
 
 /// Container for entity deltas computed during block processing.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct WorkDeltas {
     pub entities: HashMap<NsKey, Vec<CardanoDelta>>,
-    pub slot: SlotTags,
-}
-
-impl Default for WorkDeltas {
-    fn default() -> Self {
-        Self {
-            entities: HashMap::new(),
-            slot: SlotTags::default(),
-        }
-    }
 }
 
 impl WorkDeltas {
@@ -315,9 +306,8 @@ impl WorkBatch {
         for block in self.blocks.iter() {
             let point = block.point();
             let raw = block.raw();
-            let tags = &block.deltas.slot;
 
-            writer.apply(&point, &raw, tags)?;
+            writer.apply(&point, &raw)?;
         }
 
         writer.commit()?;
@@ -325,30 +315,127 @@ impl WorkBatch {
         Ok(())
     }
 
+    /// Build the IndexDelta for this batch.
+    ///
+    /// This traverses all blocks and extracts index tags using the
+    /// CardanoIndexDeltaBuilder.
+    pub fn build_index_delta(&self) -> IndexDelta {
+        use pallas::ledger::traverse::{MultiEraBlock, MultiEraOutput};
+
+        let mut builder = CardanoIndexDeltaBuilder::new(self.last_point());
+
+        for work_block in self.blocks.iter() {
+            let point = work_block.point();
+            let raw = work_block.raw();
+
+            // Decode block for tag extraction
+            let Ok(block) = MultiEraBlock::decode(&raw) else {
+                continue;
+            };
+
+            // Start archive delta for this block
+            builder.start_block(point.slot(), block.hash().to_vec(), Some(block.number()));
+
+            // Process UTxO delta for filter indexes
+            if let Some(utxo_delta) = &work_block.utxo_delta {
+                // Produced UTxOs
+                for (txo_ref, body) in &utxo_delta.produced_utxo {
+                    if let Ok(output) = MultiEraOutput::try_from(body.as_ref()) {
+                        builder.add_produced_utxo(txo_ref.clone(), &output);
+                    }
+                }
+
+                // Consumed UTxOs
+                for (txo_ref, body) in &utxo_delta.consumed_utxo {
+                    if let Ok(output) = MultiEraOutput::try_from(body.as_ref()) {
+                        builder.add_consumed_utxo(txo_ref.clone(), &output);
+                    }
+                }
+
+                // Recovered stxis (for rollback support)
+                for (txo_ref, body) in &utxo_delta.recovered_stxi {
+                    if let Ok(output) = MultiEraOutput::try_from(body.as_ref()) {
+                        builder.add_produced_utxo(txo_ref.clone(), &output);
+                    }
+                }
+
+                // Undone UTxOs (for rollback support)
+                for (txo_ref, body) in &utxo_delta.undone_utxo {
+                    if let Ok(output) = MultiEraOutput::try_from(body.as_ref()) {
+                        builder.add_consumed_utxo(txo_ref.clone(), &output);
+                    }
+                }
+            }
+
+            // Process transactions for archive indexes
+            for tx in block.txs() {
+                builder.add_tx_hash(tx.hash().to_vec());
+
+                // Metadata labels
+                for (label, _) in tx.metadata().collect::<Vec<_>>() {
+                    builder.add_metadata_label(label);
+                }
+
+                // Inputs (spent UTxOs)
+                for input in tx.inputs() {
+                    builder.add_spent_input(&input);
+
+                    // Try to get resolved input for address/asset tags
+                    let txo_ref: TxoRef = (&input).into();
+                    if let Some(resolved) = self.utxos_decoded.get(&txo_ref) {
+                        resolved.with_dependent(|_, output| {
+                            if let Ok(addr) = output.address() {
+                                builder.add_address(&addr);
+                            }
+                            builder.add_assets(&output.value());
+                            if let Some(datum) = output.datum() {
+                                builder.add_datum(&datum);
+                            }
+                        });
+                    }
+                }
+
+                // Outputs
+                for (_, output) in tx.produces() {
+                    if let Ok(addr) = output.address() {
+                        builder.add_address(&addr);
+                    }
+                    builder.add_assets(&output.value());
+                    if let Some(datum) = output.datum() {
+                        builder.add_datum(&datum);
+                    }
+                }
+
+                // Witness datums
+                for datum in tx.plutus_data() {
+                    use pallas::ledger::traverse::OriginalHash;
+                    builder.add_datum_hash(datum.original_hash().to_vec());
+                }
+
+                // Certificates
+                for cert in tx.certs() {
+                    builder.add_cert(&cert);
+                }
+
+                // Redeemers
+                for redeemer in tx.redeemers() {
+                    use pallas::ledger::traverse::ComputeHash;
+                    builder.add_datum_hash(redeemer.data().compute_hash().to_vec());
+                }
+            }
+        }
+
+        builder.build()
+    }
+
     pub fn commit_indexes<D>(&mut self, domain: &D) -> Result<(), DomainError>
     where
         D: Domain<Chain = CardanoLogic>,
     {
+        let delta = self.build_index_delta();
+
         let writer = domain.indexes().start_writer()?;
-
-        // UTxO filter indexes
-        for block in self.blocks.iter() {
-            if let Some(utxo_delta) = &block.utxo_delta {
-                writer.apply_utxoset(utxo_delta)?;
-            }
-        }
-
-        // Archive indexes
-        for block in self.blocks.iter() {
-            let point = block.point();
-            let tags = &block.deltas.slot;
-
-            writer.apply_archive(&point, tags)?;
-        }
-
-        // Set cursor to track last indexed point
-        writer.set_cursor(self.last_point())?;
-
+        writer.apply(&delta)?;
         writer.commit()?;
 
         Ok(())

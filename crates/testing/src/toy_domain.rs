@@ -1,4 +1,5 @@
 use crate::{make_custom_utxo_delta, TestAddress, UtxoGenerator};
+use dolos_cardano::indexes::index_delta_from_utxo_delta;
 use dolos_core::{
     config::{CardanoConfig, StorageConfig},
     sync::execute_work_unit,
@@ -147,7 +148,16 @@ impl ToyDomain {
             let writer = domain.state.start_writer().unwrap();
             let index_writer = domain.indexes.start_writer().unwrap();
             writer.apply_utxoset(&delta).unwrap();
-            index_writer.apply_utxoset(&delta).unwrap();
+
+            // Build index delta from UTxO delta using Cardano-specific helper
+            let cursor = domain
+                .state
+                .read_cursor()
+                .unwrap()
+                .unwrap_or(ChainPoint::Origin);
+            let index_delta = index_delta_from_utxo_delta(cursor, &delta);
+            index_writer.apply(&index_delta).unwrap();
+
             writer.commit().unwrap();
             index_writer.commit().unwrap();
         }

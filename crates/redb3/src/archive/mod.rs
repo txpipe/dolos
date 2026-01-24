@@ -5,7 +5,7 @@ use tracing::{debug, info, warn};
 
 use dolos_core::{
     ArchiveError, BlockBody, BlockSlot, ChainPoint, EntityValue, EraCbor, LogKey, Namespace,
-    RawBlock, SlotTags, StateSchema, TxHash, TxOrder, TxoRef,
+    RawBlock, StateSchema, TxHash, TxOrder, TxoRef,
 };
 
 use ::redb::Durability;
@@ -745,18 +745,13 @@ pub struct ArchiveStoreWriter {
 }
 
 impl dolos_core::ArchiveWriter for ArchiveStoreWriter {
-    fn apply(
-        &self,
-        point: &ChainPoint,
-        block: &RawBlock,
-        _tags: &SlotTags,
-    ) -> Result<(), ArchiveError> {
+    fn apply(&self, point: &ChainPoint, block: &RawBlock) -> Result<(), ArchiveError> {
         tables::BlocksTable::apply(&self.wx, point, block)?;
 
         Ok(())
     }
 
-    fn undo(&self, point: &ChainPoint, _tags: &SlotTags) -> Result<(), ArchiveError> {
+    fn undo(&self, point: &ChainPoint) -> Result<(), ArchiveError> {
         tables::BlocksTable::undo(&self.wx, point)?;
 
         Ok(())

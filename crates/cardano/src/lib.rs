@@ -29,6 +29,7 @@ pub mod pallas_extras;
 pub mod eras;
 pub mod forks;
 pub mod hacks;
+pub mod indexes;
 pub mod model;
 pub mod owned;
 pub mod pots;

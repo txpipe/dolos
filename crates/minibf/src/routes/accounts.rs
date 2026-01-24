@@ -14,8 +14,12 @@ use blockfrost_openapi::models::{
     address_utxo_content_inner::AddressUtxoContentInner,
 };
 
-use dolos_cardano::{model::AccountState, pallas_extras, ChainSummary, RewardLog};
-use dolos_core::{ArchiveStore as _, Domain, EntityKey, IndexStore as _, QueryHelpers as _};
+use dolos_cardano::{
+    indexes::{CardanoIndexExt, CardanoQueryExt},
+    model::AccountState,
+    pallas_extras, ChainSummary, RewardLog,
+};
+use dolos_core::{ArchiveStore as _, Domain, EntityKey};
 use pallas::{
     codec::minicbor,
     crypto::hash::Hash,
@@ -191,7 +195,7 @@ where
 
     let mut blocks = domain
         .inner
-        .blocks_with_stake(&account_key.address.to_vec(), 0, end_slot)
+        .blocks_by_stake(&account_key.address.to_vec(), 0, end_slot)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let mut items = vec![];
@@ -251,7 +255,7 @@ pub async fn by_stake_utxos<D: Domain>(
 
     let refs = domain
         .indexes()
-        .get_utxo_by_stake(payload)
+        .utxos_by_stake(payload)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let utxos = super::utxos::load_utxo_models(&domain, refs, pagination)?;
@@ -471,7 +475,7 @@ where
 
     let mut blocks = domain
         .inner
-        .blocks_with_account_certs(&account_key.entity_key, 0, end_slot)
+        .blocks_by_account_certs(&account_key.entity_key, 0, end_slot)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     while builder.needs_more() {

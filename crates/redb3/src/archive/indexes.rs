@@ -6,13 +6,13 @@ use redb_extras::buckets::{
 };
 use xxhash_rust::xxh3::xxh3_64;
 
-use dolos_core::{BlockSlot, ChainPoint, SlotTags};
+use dolos_core::BlockSlot;
 
 type Error = super::RedbArchiveError;
 
 const BUCKET_SIZE: u64 = 432_000;
 
-fn key_builder() -> KeyBuilder {
+pub fn key_builder() -> KeyBuilder {
     KeyBuilder::new(BUCKET_SIZE).expect("bucket size must be positive")
 }
 
@@ -253,6 +253,16 @@ impl DatumHashApproxIndexTable {
 
         iter.collect::<Result<_, _>>()
     }
+
+    pub fn iter_by_datum(
+        rx: &ReadTransaction,
+        datum_hash: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
+    ) -> Result<SlotKeyIterator, Error> {
+        let key = Self::compute_key(&datum_hash.to_vec());
+        slot_iterator(rx, Self::DEF, key, start_slot, end_slot)
+    }
 }
 
 pub struct MetadataApproxIndexTable;
@@ -298,6 +308,16 @@ impl PolicyApproxIndexTable {
 
         iter.collect::<Result<_, _>>()
     }
+
+    pub fn iter_by_policy(
+        rx: &ReadTransaction,
+        policy: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
+    ) -> Result<SlotKeyIterator, Error> {
+        let key = Self::compute_key(&policy.to_vec());
+        slot_iterator(rx, Self::DEF, key, start_slot, end_slot)
+    }
 }
 
 pub struct ScriptHashApproxIndexTable;
@@ -321,6 +341,16 @@ impl ScriptHashApproxIndexTable {
 
         iter.collect::<Result<_, _>>()
     }
+
+    pub fn iter_by_script(
+        rx: &ReadTransaction,
+        script_hash: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
+    ) -> Result<SlotKeyIterator, Error> {
+        let key = Self::compute_key(&script_hash.to_vec());
+        slot_iterator(rx, Self::DEF, key, start_slot, end_slot)
+    }
 }
 
 pub struct SpentTxoApproxIndexTable;
@@ -343,6 +373,16 @@ impl SpentTxoApproxIndexTable {
         let iter = slot_iterator(rx, Self::DEF, key, start_slot, end_slot)?;
 
         iter.collect::<Result<_, _>>()
+    }
+
+    pub fn iter_by_spent_txo(
+        rx: &ReadTransaction,
+        spent_txo: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
+    ) -> Result<SlotKeyIterator, Error> {
+        let key = Self::compute_key(&spent_txo.to_vec());
+        slot_iterator(rx, Self::DEF, key, start_slot, end_slot)
     }
 }
 
@@ -469,6 +509,42 @@ impl Indexes {
         AccountCertsApproxIndexTable::iter_by_account_certs(rx, account, start_slot, end_slot)
     }
 
+    pub fn iter_by_policy(
+        rx: &ReadTransaction,
+        policy: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
+    ) -> Result<SlotKeyIterator, Error> {
+        PolicyApproxIndexTable::iter_by_policy(rx, policy, start_slot, end_slot)
+    }
+
+    pub fn iter_by_datum(
+        rx: &ReadTransaction,
+        datum_hash: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
+    ) -> Result<SlotKeyIterator, Error> {
+        DatumHashApproxIndexTable::iter_by_datum(rx, datum_hash, start_slot, end_slot)
+    }
+
+    pub fn iter_by_spent_txo(
+        rx: &ReadTransaction,
+        spent_txo: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
+    ) -> Result<SlotKeyIterator, Error> {
+        SpentTxoApproxIndexTable::iter_by_spent_txo(rx, spent_txo, start_slot, end_slot)
+    }
+
+    pub fn iter_by_script(
+        rx: &ReadTransaction,
+        script_hash: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
+    ) -> Result<SlotKeyIterator, Error> {
+        ScriptHashApproxIndexTable::iter_by_script(rx, script_hash, start_slot, end_slot)
+    }
+
     pub fn get_by_address_payment_part(
         rx: &ReadTransaction,
         address_payment_part: &[u8],
@@ -585,248 +661,6 @@ impl Indexes {
         Self::copy_table(SpentTxoApproxIndexTable::DEF, rx, wx)?;
         Self::copy_table(AccountCertsApproxIndexTable::DEF, rx, wx)?;
         Self::copy_value_table(TxHashIndexTable::DEF, rx, wx)?;
-
-        Ok(())
-    }
-
-    pub fn apply(wx: &WriteTransaction, point: &ChainPoint, tags: &SlotTags) -> Result<(), Error> {
-        let slot = point.slot();
-
-        if let Some(hash) = point.hash() {
-            let mut table = wx.open_table(BlockHashIndexTable::DEF)?;
-            table.insert(hash.as_slice(), slot)?;
-        }
-
-        if let Some(number) = tags.number {
-            let mut table = wx.open_table(BlockNumberIndexTable::DEF)?;
-            table.insert(number, slot)?;
-        }
-
-        if !tags.tx_hashes.is_empty() {
-            let mut table = wx.open_table(TxHashIndexTable::DEF)?;
-            for tx_hash in &tags.tx_hashes {
-                table.insert(tx_hash.as_slice(), slot)?;
-            }
-        }
-
-        Self::insert(
-            wx,
-            ScriptHashApproxIndexTable::DEF,
-            ScriptHashApproxIndexTable::compute_key,
-            tags.scripts.clone(),
-            slot,
-        )?;
-
-        Self::insert(
-            wx,
-            DatumHashApproxIndexTable::DEF,
-            DatumHashApproxIndexTable::compute_key,
-            tags.datums.clone(),
-            slot,
-        )?;
-
-        Self::insert(
-            wx,
-            AddressPaymentPartApproxIndexTable::DEF,
-            AddressPaymentPartApproxIndexTable::compute_key,
-            tags.payment_addresses.clone(),
-            slot,
-        )?;
-
-        Self::insert(
-            wx,
-            AddressStakePartApproxIndexTable::DEF,
-            AddressStakePartApproxIndexTable::compute_key,
-            tags.stake_addresses.clone(),
-            slot,
-        )?;
-
-        Self::insert(
-            wx,
-            AddressApproxIndexTable::DEF,
-            AddressApproxIndexTable::compute_key,
-            tags.full_addresses.clone(),
-            slot,
-        )?;
-
-        Self::insert(
-            wx,
-            PolicyApproxIndexTable::DEF,
-            PolicyApproxIndexTable::compute_key,
-            tags.policies.clone(),
-            slot,
-        )?;
-
-        Self::insert(
-            wx,
-            AssetApproxIndexTable::DEF,
-            AssetApproxIndexTable::compute_key,
-            tags.assets.clone(),
-            slot,
-        )?;
-
-        Self::insert(
-            wx,
-            SpentTxoApproxIndexTable::DEF,
-            SpentTxoApproxIndexTable::compute_key,
-            tags.spent_txo.clone(),
-            slot,
-        )?;
-
-        Self::insert(
-            wx,
-            AccountCertsApproxIndexTable::DEF,
-            AccountCertsApproxIndexTable::compute_key,
-            tags.account_certs.clone(),
-            slot,
-        )?;
-
-        Self::insert(
-            wx,
-            MetadataApproxIndexTable::DEF,
-            MetadataApproxIndexTable::compute_key,
-            tags.metadata.clone(),
-            slot,
-        )?;
-
-        Ok(())
-    }
-
-    pub fn undo(wx: &WriteTransaction, point: &ChainPoint, tags: &SlotTags) -> Result<(), Error> {
-        let slot = point.slot();
-
-        if let Some(hash) = point.hash() {
-            let mut table = wx.open_table(BlockHashIndexTable::DEF)?;
-            table.remove(hash.as_slice())?;
-        }
-
-        if let Some(number) = tags.number {
-            let mut table = wx.open_table(BlockNumberIndexTable::DEF)?;
-            table.remove(number)?;
-        }
-
-        if !tags.tx_hashes.is_empty() {
-            let mut table = wx.open_table(TxHashIndexTable::DEF)?;
-            for tx_hash in &tags.tx_hashes {
-                table.remove(tx_hash.as_slice())?;
-            }
-        }
-
-        Self::remove(
-            wx,
-            ScriptHashApproxIndexTable::DEF,
-            ScriptHashApproxIndexTable::compute_key,
-            tags.scripts.clone(),
-            slot,
-        )?;
-
-        Self::remove(
-            wx,
-            DatumHashApproxIndexTable::DEF,
-            DatumHashApproxIndexTable::compute_key,
-            tags.datums.clone(),
-            slot,
-        )?;
-
-        Self::remove(
-            wx,
-            AddressApproxIndexTable::DEF,
-            AddressApproxIndexTable::compute_key,
-            tags.full_addresses.clone(),
-            slot,
-        )?;
-
-        Self::remove(
-            wx,
-            AddressPaymentPartApproxIndexTable::DEF,
-            AddressPaymentPartApproxIndexTable::compute_key,
-            tags.payment_addresses.clone(),
-            slot,
-        )?;
-
-        Self::remove(
-            wx,
-            AddressStakePartApproxIndexTable::DEF,
-            AddressStakePartApproxIndexTable::compute_key,
-            tags.stake_addresses.clone(),
-            slot,
-        )?;
-
-        Self::remove(
-            wx,
-            PolicyApproxIndexTable::DEF,
-            PolicyApproxIndexTable::compute_key,
-            tags.policies.clone(),
-            slot,
-        )?;
-
-        Self::remove(
-            wx,
-            AssetApproxIndexTable::DEF,
-            AssetApproxIndexTable::compute_key,
-            tags.assets.clone(),
-            slot,
-        )?;
-
-        Self::remove(
-            wx,
-            SpentTxoApproxIndexTable::DEF,
-            SpentTxoApproxIndexTable::compute_key,
-            tags.spent_txo.clone(),
-            slot,
-        )?;
-
-        Self::remove(
-            wx,
-            AccountCertsApproxIndexTable::DEF,
-            AccountCertsApproxIndexTable::compute_key,
-            tags.account_certs.clone(),
-            slot,
-        )?;
-
-        Self::remove(
-            wx,
-            MetadataApproxIndexTable::DEF,
-            MetadataApproxIndexTable::compute_key,
-            tags.metadata.clone(),
-            slot,
-        )?;
-
-        Ok(())
-    }
-
-    pub fn insert<T>(
-        wx: &WriteTransaction,
-        table: MultimapTableDefinition<'static, BucketedKey<u64>, u64>,
-        compute_key: fn(&T) -> u64,
-        inputs: Vec<T>,
-        slot: u64,
-    ) -> Result<(), Error> {
-        let mut table = wx.open_multimap_table(table)?;
-        let key_builder = key_builder();
-        for x in inputs {
-            let key = compute_key(&x);
-            let bucketed_key = key_builder.bucketed_key(key, slot);
-            let _ = table.insert(bucketed_key, slot)?;
-        }
-
-        Ok(())
-    }
-
-    pub fn remove<T>(
-        wx: &WriteTransaction,
-        table: MultimapTableDefinition<'static, BucketedKey<u64>, u64>,
-        compute_key: fn(&T) -> u64,
-        inputs: Vec<T>,
-        slot: u64,
-    ) -> Result<(), Error> {
-        let mut table = wx.open_multimap_table(table)?;
-        let key_builder = key_builder();
-        for x in inputs {
-            let key = compute_key(&x);
-            let bucketed_key = key_builder.bucketed_key(key, slot);
-            let _ = table.remove(bucketed_key, slot)?;
-        }
 
         Ok(())
     }

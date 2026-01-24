@@ -15,10 +15,11 @@ use pallas::ledger::{
     traverse::{MultiEraBlock, MultiEraTx},
 };
 
-use dolos_cardano::ChainSummary;
-use dolos_core::{
-    BlockSlot, Domain, EraCbor, IndexStore, QueryHelpers as _, SparseBlockIter, TxoRef,
+use dolos_cardano::{
+    indexes::{CardanoIndexExt, CardanoQueryExt},
+    ChainSummary,
 };
+use dolos_core::{BlockSlot, Domain, EraCbor, QueryHelpers, SparseBlockIter, TxoRef};
 
 use crate::{
     error::Error,
@@ -35,7 +36,7 @@ fn refs_for_address<D: Domain>(
     if address.starts_with("addr_vkh") {
         let (_, addr) = bech32::decode(address).expect("failed to parse");
 
-        Ok(domain.indexes().get_utxo_by_payment(&addr).map_err(|err| {
+        Ok(domain.indexes().utxos_by_payment(&addr).map_err(|err| {
             dbg!(err);
             StatusCode::INTERNAL_SERVER_ERROR
         })?)
@@ -46,7 +47,7 @@ fn refs_for_address<D: Domain>(
         })?;
         Ok(domain
             .indexes()
-            .get_utxo_by_address(&address.to_vec())
+            .utxos_by_address(&address.to_vec())
             .map_err(|err| {
                 dbg!(err);
                 StatusCode::INTERNAL_SERVER_ERROR
@@ -65,7 +66,7 @@ fn blocks_for_address<D: Domain>(
 
         Ok((
             domain
-                .blocks_with_payment(&addr, start_slot, end_slot)
+                .blocks_by_payment(&addr, start_slot, end_slot)
                 .map_err(|err| {
                     dbg!(err);
                     StatusCode::INTERNAL_SERVER_ERROR
@@ -81,7 +82,7 @@ fn blocks_for_address<D: Domain>(
             .to_vec();
         Ok((
             domain
-                .blocks_with_address(&address, start_slot, end_slot)
+                .blocks_by_address(&address, start_slot, end_slot)
                 .map_err(|err| {
                     dbg!(err);
                     StatusCode::INTERNAL_SERVER_ERROR
@@ -100,7 +101,7 @@ fn is_address_in_chain<D: Domain>(domain: &Facade<D>, address: &str) -> Result<b
 
         Ok(domain
             .inner
-            .blocks_with_payment(&addr, start_slot, end_slot)
+            .blocks_by_payment(&addr, start_slot, end_slot)
             .map_err(|err| {
                 dbg!(err);
                 StatusCode::INTERNAL_SERVER_ERROR
@@ -114,7 +115,7 @@ fn is_address_in_chain<D: Domain>(domain: &Facade<D>, address: &str) -> Result<b
         })?;
         Ok(domain
             .inner
-            .blocks_with_address(&address.to_vec(), start_slot, end_slot)
+            .blocks_by_address(&address.to_vec(), start_slot, end_slot)
             .map_err(|err| {
                 dbg!(err);
                 StatusCode::INTERNAL_SERVER_ERROR
@@ -130,7 +131,7 @@ fn is_asset_in_chain<D: Domain>(domain: &Facade<D>, asset: &[u8]) -> Result<bool
 
     Ok(domain
         .inner
-        .blocks_with_asset(asset, start_slot, end_slot)
+        .blocks_by_asset(asset, start_slot, end_slot)
         .map_err(|err| {
             dbg!(err);
             StatusCode::INTERNAL_SERVER_ERROR
@@ -177,7 +178,7 @@ pub async fn utxos_with_asset<D: Domain>(
         let asset = hex::decode(asset).map_err(|_| Error::InvalidAsset)?;
         let asset_refs = domain
             .indexes()
-            .get_utxo_by_asset(&asset)
+            .utxos_by_asset(&asset)
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
         if asset_refs.is_empty() {

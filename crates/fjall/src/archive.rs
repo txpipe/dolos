@@ -7,14 +7,14 @@
 //! For approximate lookups, variable-length data is hashed to u64 using xxh3.
 //! Slots are stored as part of the key (big-endian) for efficient range queries.
 
-use dolos_core::{BlockSlot, ChainPoint, IndexError, SlotTags};
+use dolos_core::{ArchiveIndexDelta, BlockSlot, IndexDelta, IndexError, Tag};
 use fjall::{Keyspace, OwnedWriteBatch};
 
 use crate::keys::{
     archive_composite_key, archive_prefix, decode_slot_from_suffix, encode_slot, encode_u64,
     hash_key, HASH_KEY_SIZE, SLOT_SIZE,
 };
-use crate::Error;
+use crate::{archive_dimensions, Error};
 
 /// References to all archive index keyspaces
 pub struct ArchiveKeyspaces<'a> {
@@ -27,10 +27,31 @@ pub struct ArchiveKeyspaces<'a> {
     pub payment: &'a Keyspace,
     pub stake: &'a Keyspace,
     pub asset: &'a Keyspace,
+    pub policy: &'a Keyspace,
     pub datum: &'a Keyspace,
     pub spenttxo: &'a Keyspace,
     pub account: &'a Keyspace,
     pub metadata: &'a Keyspace,
+    pub script: &'a Keyspace,
+}
+
+impl<'a> ArchiveKeyspaces<'a> {
+    /// Get keyspace for a tag dimension
+    fn keyspace_for_dimension(&self, dimension: &str) -> Option<&'a Keyspace> {
+        match dimension {
+            archive_dimensions::ADDRESS => Some(self.address),
+            archive_dimensions::PAYMENT => Some(self.payment),
+            archive_dimensions::STAKE => Some(self.stake),
+            archive_dimensions::ASSET => Some(self.asset),
+            archive_dimensions::POLICY => Some(self.policy),
+            archive_dimensions::DATUM => Some(self.datum),
+            archive_dimensions::SPENT_TXO => Some(self.spenttxo),
+            archive_dimensions::ACCOUNT_CERTS => Some(self.account),
+            archive_dimensions::METADATA => Some(self.metadata),
+            archive_dimensions::SCRIPT => Some(self.script),
+            _ => None,
+        }
+    }
 }
 
 /// Insert an approximate index entry (multimap style)
@@ -69,122 +90,130 @@ fn remove_approx_hashed(
     batch.remove(keyspace, key);
 }
 
-/// Apply archive indexes for a block
-pub fn apply(
+/// Insert a tag into the appropriate keyspace
+fn insert_tag(
     batch: &mut OwnedWriteBatch,
     keyspaces: &ArchiveKeyspaces,
-    point: &ChainPoint,
-    tags: &SlotTags,
+    tag: &Tag,
+    slot: BlockSlot,
+) {
+    // Metadata is special - the key is already the u64 hash value
+    if tag.dimension == archive_dimensions::METADATA {
+        if let Ok(hash_bytes) = tag.key.as_slice().try_into() {
+            let hash = u64::from_be_bytes(hash_bytes);
+            insert_approx_hashed(batch, keyspaces.metadata, hash, slot);
+        }
+        return;
+    }
+
+    if let Some(keyspace) = keyspaces.keyspace_for_dimension(tag.dimension) {
+        insert_approx(batch, keyspace, &tag.key, slot);
+    }
+}
+
+/// Remove a tag from the appropriate keyspace
+fn remove_tag(
+    batch: &mut OwnedWriteBatch,
+    keyspaces: &ArchiveKeyspaces,
+    tag: &Tag,
+    slot: BlockSlot,
+) {
+    // Metadata is special - the key is already the u64 hash value
+    if tag.dimension == archive_dimensions::METADATA {
+        if let Ok(hash_bytes) = tag.key.as_slice().try_into() {
+            let hash = u64::from_be_bytes(hash_bytes);
+            remove_approx_hashed(batch, keyspaces.metadata, hash, slot);
+        }
+        return;
+    }
+
+    if let Some(keyspace) = keyspaces.keyspace_for_dimension(tag.dimension) {
+        remove_approx(batch, keyspace, &tag.key, slot);
+    }
+}
+
+/// Apply archive indexes for a single block delta
+fn apply_block(
+    batch: &mut OwnedWriteBatch,
+    keyspaces: &ArchiveKeyspaces,
+    block: &ArchiveIndexDelta,
 ) -> Result<(), Error> {
-    let slot = point.slot();
+    let slot = block.slot;
 
     // Exact lookup: block hash -> slot
-    if let Some(hash) = point.hash() {
-        batch.insert(keyspaces.blockhash, hash.as_slice(), encode_slot(slot));
+    if !block.block_hash.is_empty() {
+        batch.insert(keyspaces.blockhash, &block.block_hash, encode_slot(slot));
     }
 
     // Exact lookup: block number -> slot
-    if let Some(number) = tags.number {
+    if let Some(number) = block.block_number {
         batch.insert(keyspaces.blocknum, encode_u64(number), encode_slot(slot));
     }
 
     // Exact lookup: tx hashes -> slot
-    for tx_hash in &tags.tx_hashes {
+    for tx_hash in &block.tx_hashes {
         batch.insert(keyspaces.txhash, tx_hash.as_slice(), encode_slot(slot));
     }
 
-    // Approximate lookups for various tag types
-    for addr in &tags.full_addresses {
-        insert_approx(batch, keyspaces.address, addr, slot);
-    }
-
-    for payment in &tags.payment_addresses {
-        insert_approx(batch, keyspaces.payment, payment, slot);
-    }
-
-    for stake in &tags.stake_addresses {
-        insert_approx(batch, keyspaces.stake, stake, slot);
-    }
-
-    for asset in &tags.assets {
-        insert_approx(batch, keyspaces.asset, asset, slot);
-    }
-
-    for datum in &tags.datums {
-        insert_approx(batch, keyspaces.datum, datum, slot);
-    }
-
-    for spent in &tags.spent_txo {
-        insert_approx(batch, keyspaces.spenttxo, spent, slot);
-    }
-
-    for account in &tags.account_certs {
-        insert_approx(batch, keyspaces.account, account, slot);
-    }
-
-    // Metadata labels are already u64, use them directly as hash
-    for label in &tags.metadata {
-        insert_approx_hashed(batch, keyspaces.metadata, *label, slot);
+    // Tag-based approximate lookups
+    for tag in &block.tags {
+        insert_tag(batch, keyspaces, tag, slot);
     }
 
     Ok(())
 }
 
-/// Undo archive indexes for a block (rollback)
-pub fn undo(
+/// Undo archive indexes for a single block delta (rollback)
+fn undo_block(
     batch: &mut OwnedWriteBatch,
     keyspaces: &ArchiveKeyspaces,
-    point: &ChainPoint,
-    tags: &SlotTags,
+    block: &ArchiveIndexDelta,
 ) -> Result<(), Error> {
-    let slot = point.slot();
+    let slot = block.slot;
 
     // Remove exact lookups
-    if let Some(hash) = point.hash() {
-        batch.remove(keyspaces.blockhash, hash.as_slice());
+    if !block.block_hash.is_empty() {
+        batch.remove(keyspaces.blockhash, &block.block_hash);
     }
 
-    if let Some(number) = tags.number {
+    if let Some(number) = block.block_number {
         batch.remove(keyspaces.blocknum, encode_u64(number));
     }
 
-    for tx_hash in &tags.tx_hashes {
+    for tx_hash in &block.tx_hashes {
         batch.remove(keyspaces.txhash, tx_hash.as_slice());
     }
 
     // Remove approximate lookups
-    for addr in &tags.full_addresses {
-        remove_approx(batch, keyspaces.address, addr, slot);
+    for tag in &block.tags {
+        remove_tag(batch, keyspaces, tag, slot);
     }
 
-    for payment in &tags.payment_addresses {
-        remove_approx(batch, keyspaces.payment, payment, slot);
-    }
+    Ok(())
+}
 
-    for stake in &tags.stake_addresses {
-        remove_approx(batch, keyspaces.stake, stake, slot);
+/// Apply archive indexes from an IndexDelta
+pub fn apply(
+    batch: &mut OwnedWriteBatch,
+    keyspaces: &ArchiveKeyspaces,
+    delta: &IndexDelta,
+) -> Result<(), Error> {
+    for block in &delta.archive {
+        apply_block(batch, keyspaces, block)?;
     }
+    Ok(())
+}
 
-    for asset in &tags.assets {
-        remove_approx(batch, keyspaces.asset, asset, slot);
+/// Undo archive indexes from an IndexDelta (rollback)
+pub fn undo(
+    batch: &mut OwnedWriteBatch,
+    keyspaces: &ArchiveKeyspaces,
+    delta: &IndexDelta,
+) -> Result<(), Error> {
+    // Undo in reverse order
+    for block in delta.archive.iter().rev() {
+        undo_block(batch, keyspaces, block)?;
     }
-
-    for datum in &tags.datums {
-        remove_approx(batch, keyspaces.datum, datum, slot);
-    }
-
-    for spent in &tags.spent_txo {
-        remove_approx(batch, keyspaces.spenttxo, spent, slot);
-    }
-
-    for account in &tags.account_certs {
-        remove_approx(batch, keyspaces.account, account, slot);
-    }
-
-    for label in &tags.metadata {
-        remove_approx_hashed(batch, keyspaces.metadata, *label, slot);
-    }
-
     Ok(())
 }
 

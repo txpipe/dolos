@@ -3,7 +3,8 @@ use axum::{
     Json,
 };
 use blockfrost_openapi::models::script_datum::ScriptDatum;
-use dolos_core::{Domain, QueryHelpers as _};
+use dolos_cardano::indexes::CardanoQueryExt;
+use dolos_core::Domain;
 use pallas::crypto::hash::Hash;
 use reqwest::StatusCode;
 

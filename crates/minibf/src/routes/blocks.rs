@@ -105,7 +105,7 @@ fn load_block_by_hash_or_number<D: Domain>(
 
             Ok(domain
                 .inner
-                .block_by_number(number)
+                .block_by_number(*number)
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
                 .ok_or(StatusCode::NOT_FOUND)?)
         }
@@ -137,7 +137,7 @@ fn build_block_model<D: Domain>(
 
     let maybe_next = domain
         .inner
-        .block_by_number(&builder.next_number())
+        .block_by_number(builder.next_number())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     if let Some(next) = maybe_next.as_ref() {

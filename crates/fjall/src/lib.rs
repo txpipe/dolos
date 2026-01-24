@@ -16,8 +16,8 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use dolos_core::{
-    BlockSlot, ChainPoint, IndexError, IndexStore as CoreIndexStore,
-    IndexWriter as CoreIndexWriter, SlotTags, UtxoSet, UtxoSetDelta,
+    BlockSlot, ChainPoint, IndexDelta, IndexError, IndexStore as CoreIndexStore,
+    IndexWriter as CoreIndexWriter, TagDimension, UtxoSet,
 };
 use fjall::{Database, Keyspace, KeyspaceCreateOptions, OwnedWriteBatch, PersistMode};
 
@@ -49,10 +49,35 @@ mod keyspace_names {
     pub const ARCHIVE_PAYMENT: &str = "archive-payment";
     pub const ARCHIVE_STAKE: &str = "archive-stake";
     pub const ARCHIVE_ASSET: &str = "archive-asset";
+    pub const ARCHIVE_POLICY: &str = "archive-policy";
     pub const ARCHIVE_DATUM: &str = "archive-datum";
     pub const ARCHIVE_SPENTTXO: &str = "archive-spenttxo";
     pub const ARCHIVE_ACCOUNT: &str = "archive-account";
     pub const ARCHIVE_METADATA: &str = "archive-metadata";
+    pub const ARCHIVE_SCRIPT: &str = "archive-script";
+}
+
+/// UTxO filter dimension constants (must match dolos-cardano dimensions).
+pub mod utxo_dimensions {
+    pub const ADDRESS: &str = "address";
+    pub const PAYMENT: &str = "payment";
+    pub const STAKE: &str = "stake";
+    pub const POLICY: &str = "policy";
+    pub const ASSET: &str = "asset";
+}
+
+/// Archive index dimension constants (must match dolos-cardano dimensions).
+pub mod archive_dimensions {
+    pub const ADDRESS: &str = "address";
+    pub const PAYMENT: &str = "payment";
+    pub const STAKE: &str = "stake";
+    pub const POLICY: &str = "policy";
+    pub const ASSET: &str = "asset";
+    pub const DATUM: &str = "datum";
+    pub const SPENT_TXO: &str = "spent_txo";
+    pub const ACCOUNT_CERTS: &str = "account_certs";
+    pub const METADATA: &str = "metadata";
+    pub const SCRIPT: &str = "script";
 }
 
 /// Error type for fjall index store operations
@@ -66,6 +91,9 @@ pub enum Error {
 
     #[error("lock poisoned")]
     LockPoisoned,
+
+    #[error("invalid dimension: {0}")]
+    InvalidDimension(String),
 }
 
 impl From<Error> for IndexError {
@@ -98,10 +126,12 @@ pub struct IndexStore {
     archive_payment: Keyspace,
     archive_stake: Keyspace,
     archive_asset: Keyspace,
+    archive_policy: Keyspace,
     archive_datum: Keyspace,
     archive_spenttxo: Keyspace,
     archive_account: Keyspace,
     archive_metadata: Keyspace,
+    archive_script: Keyspace,
 }
 
 impl IndexStore {
@@ -139,10 +169,12 @@ impl IndexStore {
         let archive_payment = db.keyspace(keyspace_names::ARCHIVE_PAYMENT, opts)?;
         let archive_stake = db.keyspace(keyspace_names::ARCHIVE_STAKE, opts)?;
         let archive_asset = db.keyspace(keyspace_names::ARCHIVE_ASSET, opts)?;
+        let archive_policy = db.keyspace(keyspace_names::ARCHIVE_POLICY, opts)?;
         let archive_datum = db.keyspace(keyspace_names::ARCHIVE_DATUM, opts)?;
         let archive_spenttxo = db.keyspace(keyspace_names::ARCHIVE_SPENTTXO, opts)?;
         let archive_account = db.keyspace(keyspace_names::ARCHIVE_ACCOUNT, opts)?;
         let archive_metadata = db.keyspace(keyspace_names::ARCHIVE_METADATA, opts)?;
+        let archive_script = db.keyspace(keyspace_names::ARCHIVE_SCRIPT, opts)?;
 
         Ok(Self {
             db: Arc::new(db),
@@ -159,10 +191,12 @@ impl IndexStore {
             archive_payment,
             archive_stake,
             archive_asset,
+            archive_policy,
             archive_datum,
             archive_spenttxo,
             archive_account,
             archive_metadata,
+            archive_script,
         })
     }
 
@@ -187,10 +221,41 @@ impl IndexStore {
             payment: &self.archive_payment,
             stake: &self.archive_stake,
             asset: &self.archive_asset,
+            policy: &self.archive_policy,
             datum: &self.archive_datum,
             spenttxo: &self.archive_spenttxo,
             account: &self.archive_account,
             metadata: &self.archive_metadata,
+            script: &self.archive_script,
+        }
+    }
+
+    /// Get UTxO keyspace for a given dimension
+    fn utxo_keyspace_for_dimension(&self, dimension: TagDimension) -> Option<&Keyspace> {
+        match dimension {
+            utxo_dimensions::ADDRESS => Some(&self.utxo_address),
+            utxo_dimensions::PAYMENT => Some(&self.utxo_payment),
+            utxo_dimensions::STAKE => Some(&self.utxo_stake),
+            utxo_dimensions::POLICY => Some(&self.utxo_policy),
+            utxo_dimensions::ASSET => Some(&self.utxo_asset),
+            _ => None,
+        }
+    }
+
+    /// Get archive keyspace for a given dimension
+    fn archive_keyspace_for_dimension(&self, dimension: TagDimension) -> Option<&Keyspace> {
+        match dimension {
+            archive_dimensions::ADDRESS => Some(&self.archive_address),
+            archive_dimensions::PAYMENT => Some(&self.archive_payment),
+            archive_dimensions::STAKE => Some(&self.archive_stake),
+            archive_dimensions::ASSET => Some(&self.archive_asset),
+            archive_dimensions::POLICY => Some(&self.archive_policy),
+            archive_dimensions::DATUM => Some(&self.archive_datum),
+            archive_dimensions::SPENT_TXO => Some(&self.archive_spenttxo),
+            archive_dimensions::ACCOUNT_CERTS => Some(&self.archive_account),
+            archive_dimensions::METADATA => Some(&self.archive_metadata),
+            archive_dimensions::SCRIPT => Some(&self.archive_script),
+            _ => None,
         }
     }
 }
@@ -206,27 +271,34 @@ pub struct IndexStoreWriter {
 }
 
 impl CoreIndexWriter for IndexStoreWriter {
-    fn apply_utxoset(&self, delta: &UtxoSetDelta) -> Result<(), IndexError> {
+    fn apply(&self, delta: &IndexDelta) -> Result<(), IndexError> {
         let mut batch = self.batch.lock().map_err(|_| Error::LockPoisoned)?;
-        utxo::apply(&mut batch, &self.store.utxo_keyspaces(), delta).map_err(IndexError::from)
-    }
 
-    fn apply_archive(&self, point: &ChainPoint, tags: &SlotTags) -> Result<(), IndexError> {
-        let mut batch = self.batch.lock().map_err(|_| Error::LockPoisoned)?;
-        archive::apply(&mut batch, &self.store.archive_keyspaces(), point, tags)
-            .map_err(IndexError::from)
-    }
+        // Apply UTxO filter changes
+        utxo::apply(&mut batch, &self.store.utxo_keyspaces(), delta).map_err(IndexError::from)?;
 
-    fn undo_archive(&self, point: &ChainPoint, tags: &SlotTags) -> Result<(), IndexError> {
-        let mut batch = self.batch.lock().map_err(|_| Error::LockPoisoned)?;
-        archive::undo(&mut batch, &self.store.archive_keyspaces(), point, tags)
-            .map_err(IndexError::from)
-    }
+        // Apply archive index changes
+        archive::apply(&mut batch, &self.store.archive_keyspaces(), delta)
+            .map_err(IndexError::from)?;
 
-    fn set_cursor(&self, cursor: ChainPoint) -> Result<(), IndexError> {
-        let mut batch = self.batch.lock().map_err(|_| Error::LockPoisoned)?;
-        let cursor_bytes = bincode::serialize(&cursor).map_err(|e| Error::Codec(e.to_string()))?;
+        // Set cursor
+        let cursor_bytes =
+            bincode::serialize(&delta.cursor).map_err(|e| Error::Codec(e.to_string()))?;
         batch.insert(&self.store.cursor, CURSOR_KEY, cursor_bytes);
+
+        Ok(())
+    }
+
+    fn undo(&self, delta: &IndexDelta) -> Result<(), IndexError> {
+        let mut batch = self.batch.lock().map_err(|_| Error::LockPoisoned)?;
+
+        // Undo UTxO filter changes
+        utxo::undo(&mut batch, &self.store.utxo_keyspaces(), delta).map_err(IndexError::from)?;
+
+        // Undo archive index changes
+        archive::undo(&mut batch, &self.store.archive_keyspaces(), delta)
+            .map_err(IndexError::from)?;
+
         Ok(())
     }
 
@@ -263,7 +335,7 @@ impl CoreIndexStore for IndexStore {
         todo!("copy not implemented for fjall index store")
     }
 
-    fn read_cursor(&self) -> Result<Option<ChainPoint>, IndexError> {
+    fn cursor(&self) -> Result<Option<ChainPoint>, IndexError> {
         match self.cursor.get(CURSOR_KEY).map_err(Error::from)? {
             Some(value) => {
                 let point: ChainPoint =
@@ -274,113 +346,45 @@ impl CoreIndexStore for IndexStore {
         }
     }
 
-    fn get_utxo_by_address(&self, address: &[u8]) -> Result<UtxoSet, IndexError> {
-        utxo::get_by_key(&self.utxo_address, address).map_err(IndexError::from)
+    fn utxos_by_tag(&self, dimension: TagDimension, key: &[u8]) -> Result<UtxoSet, IndexError> {
+        let keyspace = self
+            .utxo_keyspace_for_dimension(dimension)
+            .ok_or_else(|| IndexError::DimensionNotFound(dimension.to_string()))?;
+        utxo::get_by_key(keyspace, key).map_err(IndexError::from)
     }
 
-    fn get_utxo_by_payment(&self, payment: &[u8]) -> Result<UtxoSet, IndexError> {
-        utxo::get_by_key(&self.utxo_payment, payment).map_err(IndexError::from)
-    }
-
-    fn get_utxo_by_stake(&self, stake: &[u8]) -> Result<UtxoSet, IndexError> {
-        utxo::get_by_key(&self.utxo_stake, stake).map_err(IndexError::from)
-    }
-
-    fn get_utxo_by_policy(&self, policy: &[u8]) -> Result<UtxoSet, IndexError> {
-        utxo::get_by_key(&self.utxo_policy, policy).map_err(IndexError::from)
-    }
-
-    fn get_utxo_by_asset(&self, asset: &[u8]) -> Result<UtxoSet, IndexError> {
-        utxo::get_by_key(&self.utxo_asset, asset).map_err(IndexError::from)
-    }
-
-    fn slot_for_block_hash(&self, block_hash: &[u8]) -> Result<Option<BlockSlot>, IndexError> {
+    fn slot_by_block_hash(&self, block_hash: &[u8]) -> Result<Option<BlockSlot>, IndexError> {
         archive::get_by_block_hash(&self.archive_blockhash, block_hash).map_err(IndexError::from)
     }
 
-    fn slot_for_block_number(&self, number: &u64) -> Result<Option<BlockSlot>, IndexError> {
-        archive::get_by_block_number(&self.archive_blocknum, *number).map_err(IndexError::from)
+    fn slot_by_block_number(&self, number: u64) -> Result<Option<BlockSlot>, IndexError> {
+        archive::get_by_block_number(&self.archive_blocknum, number).map_err(IndexError::from)
     }
 
-    fn slot_for_tx_hash(&self, tx_hash: &[u8]) -> Result<Option<BlockSlot>, IndexError> {
+    fn slot_by_tx_hash(&self, tx_hash: &[u8]) -> Result<Option<BlockSlot>, IndexError> {
         archive::get_by_tx_hash(&self.archive_txhash, tx_hash).map_err(IndexError::from)
     }
 
-    fn slots_for_datum_hash(
+    fn slots_by_tag(
         &self,
-        datum_hash: &[u8],
-        start_slot: BlockSlot,
-        end_slot: BlockSlot,
-    ) -> Result<Vec<BlockSlot>, IndexError> {
-        archive::get_slots_by_key(&self.archive_datum, datum_hash, start_slot, end_slot)
-            .map_err(IndexError::from)
-    }
-
-    fn slots_for_spent_txo(
-        &self,
-        spent_txo: &[u8],
-        start_slot: BlockSlot,
-        end_slot: BlockSlot,
-    ) -> Result<Vec<BlockSlot>, IndexError> {
-        archive::get_slots_by_key(&self.archive_spenttxo, spent_txo, start_slot, end_slot)
-            .map_err(IndexError::from)
-    }
-
-    fn slots_with_address(
-        &self,
-        address: &[u8],
-        start_slot: BlockSlot,
-        end_slot: BlockSlot,
+        dimension: TagDimension,
+        key: &[u8],
+        start: BlockSlot,
+        end: BlockSlot,
     ) -> Result<Self::SlotIter, IndexError> {
-        SlotIter::new(&self.archive_address, address, start_slot, end_slot)
-            .map_err(IndexError::from)
-    }
+        // For metadata, key is already the u64 encoded as bytes
+        if dimension == archive_dimensions::METADATA {
+            let metadata =
+                u64::from_be_bytes(key.try_into().map_err(|_| {
+                    IndexError::CodecError("metadata key must be 8 bytes".to_string())
+                })?);
+            return SlotIter::from_hash(&self.archive_metadata, metadata, start, end)
+                .map_err(IndexError::from);
+        }
 
-    fn slots_with_asset(
-        &self,
-        asset: &[u8],
-        start_slot: BlockSlot,
-        end_slot: BlockSlot,
-    ) -> Result<Self::SlotIter, IndexError> {
-        SlotIter::new(&self.archive_asset, asset, start_slot, end_slot).map_err(IndexError::from)
-    }
-
-    fn slots_with_payment(
-        &self,
-        payment: &[u8],
-        start_slot: BlockSlot,
-        end_slot: BlockSlot,
-    ) -> Result<Self::SlotIter, IndexError> {
-        SlotIter::new(&self.archive_payment, payment, start_slot, end_slot)
-            .map_err(IndexError::from)
-    }
-
-    fn slots_with_stake(
-        &self,
-        stake: &[u8],
-        start_slot: BlockSlot,
-        end_slot: BlockSlot,
-    ) -> Result<Self::SlotIter, IndexError> {
-        SlotIter::new(&self.archive_stake, stake, start_slot, end_slot).map_err(IndexError::from)
-    }
-
-    fn slots_with_account_certs(
-        &self,
-        account: &[u8],
-        start_slot: BlockSlot,
-        end_slot: BlockSlot,
-    ) -> Result<Self::SlotIter, IndexError> {
-        SlotIter::new(&self.archive_account, account, start_slot, end_slot)
-            .map_err(IndexError::from)
-    }
-
-    fn slots_with_metadata(
-        &self,
-        metadata: &u64,
-        start_slot: BlockSlot,
-        end_slot: BlockSlot,
-    ) -> Result<Self::SlotIter, IndexError> {
-        SlotIter::from_hash(&self.archive_metadata, *metadata, start_slot, end_slot)
-            .map_err(IndexError::from)
+        let keyspace = self
+            .archive_keyspace_for_dimension(dimension)
+            .ok_or_else(|| IndexError::DimensionNotFound(dimension.to_string()))?;
+        SlotIter::new(keyspace, key, start, end).map_err(IndexError::from)
     }
 }

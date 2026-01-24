@@ -1,6 +1,5 @@
 use std::{marker::PhantomData, ops::Range};
 
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
@@ -172,31 +171,8 @@ pub enum ArchiveError {
     NamespaceNotFound(Namespace),
 }
 
-pub type OpaqueTag = Vec<u8>;
-
-#[derive(Debug, Default, Serialize, Deserialize)]
-pub struct SlotTags {
-    pub number: Option<u64>,
-    pub tx_hashes: Vec<OpaqueTag>,
-    pub scripts: Vec<OpaqueTag>,
-    pub datums: Vec<OpaqueTag>,
-    pub policies: Vec<OpaqueTag>,
-    pub assets: Vec<OpaqueTag>,
-    pub full_addresses: Vec<OpaqueTag>,
-    pub payment_addresses: Vec<OpaqueTag>,
-    pub stake_addresses: Vec<OpaqueTag>,
-    pub spent_txo: Vec<OpaqueTag>,
-    pub account_certs: Vec<OpaqueTag>,
-    pub metadata: Vec<u64>,
-}
-
 pub trait ArchiveWriter: Send + Sync + 'static {
-    fn apply(
-        &self,
-        point: &ChainPoint,
-        block: &RawBlock,
-        tags: &SlotTags,
-    ) -> Result<(), ArchiveError>;
+    fn apply(&self, point: &ChainPoint, block: &RawBlock) -> Result<(), ArchiveError>;
 
     fn write_log(
         &self,
@@ -211,7 +187,7 @@ pub trait ArchiveWriter: Send + Sync + 'static {
         self.write_log(ns, key, &raw)
     }
 
-    fn undo(&self, point: &ChainPoint, tags: &SlotTags) -> Result<(), ArchiveError>;
+    fn undo(&self, point: &ChainPoint) -> Result<(), ArchiveError>;
 
     fn commit(self) -> Result<(), ArchiveError>;
 }

@@ -39,6 +39,9 @@ pub enum Error {
     #[error("archive error: {0}")]
     ArchiveError(String),
 
+    #[error("invalid dimension: {0}")]
+    InvalidDimension(String),
+
     // TODO: remove this once we generalize opaque filters
     #[error(transparent)]
     AddressError(#[from] pallas::ledger::addresses::Error),

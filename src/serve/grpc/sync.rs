@@ -147,7 +147,7 @@ where
                 if br.height != 0 {
                     if let Some(body) = self
                         .domain
-                        .block_by_number(&br.height)
+                        .block_by_number(br.height)
                         .map_err(|_| Status::internal("Failed to query chain service."))?
                     {
                         return Ok(body);
