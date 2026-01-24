@@ -3,19 +3,19 @@ use std::{
     sync::Arc,
 };
 
-use dolos_core::{
-    batch::WorkDeltas, config::CardanoConfig, BlockSlot, ChainError, Domain, EntityKey, Genesis,
-};
+use dolos_core::{config::CardanoConfig, BlockSlot, ChainError, Domain, EntityKey, Genesis};
 use pallas::ledger::primitives::conway::DRep;
 use tracing::{debug, info, instrument};
 
 use crate::{
-    rewards::RewardMap, rupd::RupdWork, AccountState, CardanoDelta, CardanoEntity, CardanoLogic,
-    DRepState, EpochState, EraProtocol, EraSummary, PoolHash, PoolState, ProposalState,
+    rewards::RewardMap, roll::WorkDeltas, rupd::RupdWork, AccountState, CardanoDelta,
+    CardanoEntity, DRepState, EpochState, EraProtocol, EraSummary, PoolHash, PoolState,
+    ProposalState,
 };
 
 pub mod commit;
 pub mod loading;
+pub mod work_unit;
 
 // visitors
 pub mod drops;
@@ -23,6 +23,8 @@ pub mod enactment;
 pub mod refunds;
 pub mod rewards;
 pub mod wrapup;
+
+pub use work_unit::EwrapWorkUnit;
 
 pub trait BoundaryVisitor {
     #[allow(unused_variables)]
@@ -129,7 +131,7 @@ pub struct BoundaryWork {
     pub retiring_dreps: Vec<DRep>,
 
     // computed via visitors
-    pub deltas: WorkDeltas<CardanoLogic>,
+    pub deltas: WorkDeltas,
     pub logs: Vec<(EntityKey, CardanoEntity)>,
 }
 

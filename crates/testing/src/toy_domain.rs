@@ -1,7 +1,8 @@
 use crate::{make_custom_utxo_delta, TestAddress, UtxoGenerator};
 use dolos_core::{
     config::{CardanoConfig, StorageConfig},
-    IndexWriter as _, *,
+    sync::execute_work_unit,
+    BootstrapExt, *,
 };
 use futures_util::stream::StreamExt;
 use std::sync::Arc;
@@ -107,14 +108,11 @@ impl ToyDomain {
 
         let config = CardanoConfig::default();
 
-        let mut chain =
+        let chain =
             dolos_cardano::CardanoLogic::initialize::<Self>(config.clone(), &state, &genesis)
                 .unwrap();
 
-        chain
-            .apply_genesis::<Self>(&state, &indexes, genesis.clone())
-            .unwrap();
-
+        // Create the domain first (genesis work unit needs it for execution)
         let domain = Self {
             state,
             wal: dolos_redb3::wal::RedbWalStore::memory().unwrap(),
@@ -123,11 +121,27 @@ impl ToyDomain {
             indexes,
             mempool: Mempool {},
             storage_config: storage_config.unwrap_or_default(),
-            genesis,
+            genesis: genesis.clone(),
             tip_broadcast,
         };
 
-        dolos_core::facade::bootstrap(&domain).await.unwrap();
+        // Apply genesis state using the work unit pattern.
+        // Note: We're bypassing the normal pop_work flow here, so we need to
+        // manually trigger the cache refresh that would normally happen.
+        let mut genesis_work = dolos_cardano::CardanoWorkUnit::Genesis(
+            dolos_cardano::genesis::GenesisWorkUnit::new(config, genesis),
+        );
+        execute_work_unit(&domain, &mut genesis_work).unwrap();
+
+        // Manually refresh the chain cache after genesis since we bypassed pop_work.
+        // In normal operation, the cache refresh happens automatically via the
+        // needs_cache_refresh flag in CardanoLogic::pop_work.
+        {
+            let mut chain = domain.chain.write().await;
+            chain.refresh_cache::<Self>(&domain.state).unwrap();
+        }
+
+        domain.bootstrap().await.unwrap();
 
         if let Some(delta) = initial_delta {
             let writer = domain.state.start_writer().unwrap();
@@ -166,6 +180,7 @@ impl dolos_core::Domain for ToyDomain {
     type Archive = dolos_redb3::archive::ArchiveStore;
     type State = dolos_redb3::state::StateStore;
     type Chain = dolos_cardano::CardanoLogic;
+    type WorkUnit = dolos_cardano::CardanoWorkUnit;
     type TipSubscription = TipSubscription;
     type Indexes = dolos_redb3::indexes::IndexStore;
     type Mempool = Mempool;

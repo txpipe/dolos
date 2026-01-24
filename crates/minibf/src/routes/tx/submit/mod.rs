@@ -3,7 +3,7 @@ use axum::{
     extract::State,
     http::{header, HeaderMap, StatusCode},
 };
-use dolos_core::{facade::receive_tx, ChainError, Domain, DomainError, MempoolError};
+use dolos_core::{ChainError, Domain, DomainError, MempoolError, SubmitExt};
 
 use crate::Facade;
 
@@ -29,7 +29,7 @@ pub async fn route<D: Domain>(
     }
 
     let chain = domain.read_chain().await;
-    let result = receive_tx(&domain.inner, &chain, &cbor);
+    let result = domain.inner.receive_tx(&chain, &cbor);
 
     let hash = result.map_err(|e| match e {
         DomainError::ChainError(x) => match x {

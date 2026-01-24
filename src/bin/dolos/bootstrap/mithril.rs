@@ -1,13 +1,13 @@
+use dolos_core::config::{MithrilConfig, RootConfig};
+use dolos_core::ImportExt;
 use itertools::Itertools;
 use miette::{Context, IntoDiagnostic};
 use mithril_client::{ClientBuilder, MessageBuilder, MithrilError, MithrilResult};
 use std::{path::Path, sync::Arc};
 use tracing::{info, warn};
 
-use dolos::prelude::*;
-
 use crate::feedback::Feedback;
-use dolos_core::config::{MithrilConfig, RootConfig};
+use dolos::prelude::*;
 
 #[derive(Debug, clap::Args, Clone)]
 pub struct Args {
@@ -222,7 +222,8 @@ async fn import_hardano_into_domain(
         // around throughout the pipeline
         let batch: Vec<_> = batch.into_iter().map(Arc::new).collect();
 
-        let last = dolos_core::facade::import_blocks(&domain, batch)
+        let last = domain
+            .import_blocks(batch)
             .await
             .map_err(|e| miette::miette!(e.to_string()))?;
 

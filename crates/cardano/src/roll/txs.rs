@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use dolos_core::{batch::WorkDeltas, ChainError, Genesis, SlotTags, TxoRef};
+use dolos_core::{ChainError, Genesis, SlotTags, TxoRef};
 use pallas::{
     codec::{minicbor, utils::KeepRaw},
     ledger::{
@@ -13,9 +13,8 @@ use pallas::{
     },
 };
 
-use crate::{
-    owned::OwnedMultiEraOutput, pallas_extras, roll::BlockVisitor, CardanoLogic, PParamsSet,
-};
+use super::WorkDeltas;
+use crate::{owned::OwnedMultiEraOutput, pallas_extras, roll::BlockVisitor, PParamsSet};
 
 #[derive(Default, Clone)]
 pub struct TxLogVisitor;
@@ -89,7 +88,7 @@ fn unpack_cert(tags: &mut SlotTags, cert: &MultiEraCert) {
 impl BlockVisitor for TxLogVisitor {
     fn visit_root(
         &mut self,
-        deltas: &mut WorkDeltas<CardanoLogic>,
+        deltas: &mut WorkDeltas,
         block: &MultiEraBlock,
         _: &Genesis,
         _: &PParamsSet,
@@ -103,7 +102,7 @@ impl BlockVisitor for TxLogVisitor {
 
     fn visit_tx(
         &mut self,
-        deltas: &mut WorkDeltas<CardanoLogic>,
+        deltas: &mut WorkDeltas,
         _: &MultiEraBlock,
         tx: &MultiEraTx,
         _: &HashMap<TxoRef, OwnedMultiEraOutput>,
@@ -119,7 +118,7 @@ impl BlockVisitor for TxLogVisitor {
 
     fn visit_input(
         &mut self,
-        deltas: &mut WorkDeltas<CardanoLogic>,
+        deltas: &mut WorkDeltas,
         _: &MultiEraBlock,
         _: &MultiEraTx,
         input: &MultiEraInput,
@@ -141,7 +140,7 @@ impl BlockVisitor for TxLogVisitor {
 
     fn visit_output(
         &mut self,
-        deltas: &mut WorkDeltas<CardanoLogic>,
+        deltas: &mut WorkDeltas,
         _: &MultiEraBlock,
         _: &MultiEraTx,
         _: u32,
@@ -162,7 +161,7 @@ impl BlockVisitor for TxLogVisitor {
 
     fn visit_datums(
         &mut self,
-        deltas: &mut WorkDeltas<CardanoLogic>,
+        deltas: &mut WorkDeltas,
         _: &MultiEraBlock,
         _: &MultiEraTx,
         datum: &KeepRaw<'_, PlutusData>,
@@ -174,7 +173,7 @@ impl BlockVisitor for TxLogVisitor {
 
     fn visit_cert(
         &mut self,
-        deltas: &mut WorkDeltas<CardanoLogic>,
+        deltas: &mut WorkDeltas,
         _: &MultiEraBlock,
         _: &MultiEraTx,
         cert: &pallas::ledger::traverse::MultiEraCert,
@@ -186,7 +185,7 @@ impl BlockVisitor for TxLogVisitor {
 
     fn visit_redeemers(
         &mut self,
-        deltas: &mut WorkDeltas<CardanoLogic>,
+        deltas: &mut WorkDeltas,
         _: &MultiEraBlock,
         _: &MultiEraTx,
         redeemer: &MultiEraRedeemer,

@@ -9,6 +9,9 @@ use crate::{
 };
 
 mod staking;
+pub mod work_unit;
+
+pub use work_unit::GenesisWorkUnit;
 
 fn get_utxo_amount(genesis: &Genesis) -> Lovelace {
     let byron_utxo = pallas::ledger::configs::byron::genesis_utxos(&genesis.byron)

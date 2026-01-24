@@ -285,9 +285,8 @@ mod tests {
             .map(|i| dolos_testing::blocks::make_conway_block(i).1)
             .collect_vec();
 
-        let _ = dolos_core::facade::import_blocks(&domain, batch)
-            .await
-            .unwrap();
+        use dolos_core::ImportExt;
+        domain.import_blocks(batch).await.unwrap();
 
         let service = SyncServiceImpl::new(domain, cancel);
 

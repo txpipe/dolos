@@ -40,6 +40,7 @@ impl Domain for DomainAdapter {
     type Entity = dolos_cardano::CardanoEntity;
     type EntityDelta = dolos_cardano::CardanoDelta;
     type Chain = CardanoLogic;
+    type WorkUnit = dolos_cardano::CardanoWorkUnit;
     type Wal = WalAdapter;
     type State = dolos_redb3::state::StateStore;
     type Archive = dolos_redb3::archive::ArchiveStore;

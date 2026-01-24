@@ -15,6 +15,9 @@ use crate::{
 };
 
 pub mod loading;
+pub mod work_unit;
+
+pub use work_unit::RupdWorkUnit;
 
 pub trait RupdVisitor: Default {
     #[allow(unused_variables)]
