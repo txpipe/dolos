@@ -1,6 +1,6 @@
-//! Archive index operations for fjall.
+//! Historical index operations for fjall.
 //!
-//! Archive indexes support two patterns:
+//! These indexes support queries over archived block data:
 //! 1. Exact lookups: block_hash -> slot, tx_hash -> slot, block_number -> slot
 //! 2. Approximate lookups: xxh3(data) ++ slot -> [] (multimap via prefix scan)
 //!
@@ -14,10 +14,24 @@ use crate::keys::{
     archive_composite_key, archive_prefix, decode_slot_from_suffix, encode_slot, encode_u64,
     hash_key, HASH_KEY_SIZE, SLOT_SIZE,
 };
-use crate::{archive_dimensions, Error};
+use crate::Error;
 
-/// References to all archive index keyspaces
-pub struct ArchiveKeyspaces<'a> {
+/// Historical index dimension constants (must match dolos-cardano dimensions).
+pub mod dimensions {
+    pub const ADDRESS: &str = "address";
+    pub const PAYMENT: &str = "payment";
+    pub const STAKE: &str = "stake";
+    pub const POLICY: &str = "policy";
+    pub const ASSET: &str = "asset";
+    pub const DATUM: &str = "datum";
+    pub const SPENT_TXO: &str = "spent_txo";
+    pub const ACCOUNT_CERTS: &str = "account_certs";
+    pub const METADATA: &str = "metadata";
+    pub const SCRIPT: &str = "script";
+}
+
+/// References to all historical index keyspaces
+pub struct HistoryKeyspaces<'a> {
     // Exact lookups
     pub blockhash: &'a Keyspace,
     pub blocknum: &'a Keyspace,
@@ -35,20 +49,20 @@ pub struct ArchiveKeyspaces<'a> {
     pub script: &'a Keyspace,
 }
 
-impl<'a> ArchiveKeyspaces<'a> {
+impl<'a> HistoryKeyspaces<'a> {
     /// Get keyspace for a tag dimension
-    fn keyspace_for_dimension(&self, dimension: &str) -> Option<&'a Keyspace> {
+    pub fn keyspace_for_dimension(&self, dimension: &str) -> Option<&'a Keyspace> {
         match dimension {
-            archive_dimensions::ADDRESS => Some(self.address),
-            archive_dimensions::PAYMENT => Some(self.payment),
-            archive_dimensions::STAKE => Some(self.stake),
-            archive_dimensions::ASSET => Some(self.asset),
-            archive_dimensions::POLICY => Some(self.policy),
-            archive_dimensions::DATUM => Some(self.datum),
-            archive_dimensions::SPENT_TXO => Some(self.spenttxo),
-            archive_dimensions::ACCOUNT_CERTS => Some(self.account),
-            archive_dimensions::METADATA => Some(self.metadata),
-            archive_dimensions::SCRIPT => Some(self.script),
+            dimensions::ADDRESS => Some(self.address),
+            dimensions::PAYMENT => Some(self.payment),
+            dimensions::STAKE => Some(self.stake),
+            dimensions::ASSET => Some(self.asset),
+            dimensions::POLICY => Some(self.policy),
+            dimensions::DATUM => Some(self.datum),
+            dimensions::SPENT_TXO => Some(self.spenttxo),
+            dimensions::ACCOUNT_CERTS => Some(self.account),
+            dimensions::METADATA => Some(self.metadata),
+            dimensions::SCRIPT => Some(self.script),
             _ => None,
         }
     }
@@ -93,12 +107,12 @@ fn remove_approx_hashed(
 /// Insert a tag into the appropriate keyspace
 fn insert_tag(
     batch: &mut OwnedWriteBatch,
-    keyspaces: &ArchiveKeyspaces,
+    keyspaces: &HistoryKeyspaces,
     tag: &Tag,
     slot: BlockSlot,
 ) {
     // Metadata is special - the key is already the u64 hash value
-    if tag.dimension == archive_dimensions::METADATA {
+    if tag.dimension == dimensions::METADATA {
         if let Ok(hash_bytes) = tag.key.as_slice().try_into() {
             let hash = u64::from_be_bytes(hash_bytes);
             insert_approx_hashed(batch, keyspaces.metadata, hash, slot);
@@ -114,12 +128,12 @@ fn insert_tag(
 /// Remove a tag from the appropriate keyspace
 fn remove_tag(
     batch: &mut OwnedWriteBatch,
-    keyspaces: &ArchiveKeyspaces,
+    keyspaces: &HistoryKeyspaces,
     tag: &Tag,
     slot: BlockSlot,
 ) {
     // Metadata is special - the key is already the u64 hash value
-    if tag.dimension == archive_dimensions::METADATA {
+    if tag.dimension == dimensions::METADATA {
         if let Ok(hash_bytes) = tag.key.as_slice().try_into() {
             let hash = u64::from_be_bytes(hash_bytes);
             remove_approx_hashed(batch, keyspaces.metadata, hash, slot);
@@ -135,7 +149,7 @@ fn remove_tag(
 /// Apply archive indexes for a single block delta
 fn apply_block(
     batch: &mut OwnedWriteBatch,
-    keyspaces: &ArchiveKeyspaces,
+    keyspaces: &HistoryKeyspaces,
     block: &ArchiveIndexDelta,
 ) -> Result<(), Error> {
     let slot = block.slot;
@@ -166,7 +180,7 @@ fn apply_block(
 /// Undo archive indexes for a single block delta (rollback)
 fn undo_block(
     batch: &mut OwnedWriteBatch,
-    keyspaces: &ArchiveKeyspaces,
+    keyspaces: &HistoryKeyspaces,
     block: &ArchiveIndexDelta,
 ) -> Result<(), Error> {
     let slot = block.slot;
@@ -195,7 +209,7 @@ fn undo_block(
 /// Apply archive indexes from an IndexDelta
 pub fn apply(
     batch: &mut OwnedWriteBatch,
-    keyspaces: &ArchiveKeyspaces,
+    keyspaces: &HistoryKeyspaces,
     delta: &IndexDelta,
 ) -> Result<(), Error> {
     for block in &delta.archive {
@@ -207,7 +221,7 @@ pub fn apply(
 /// Undo archive indexes from an IndexDelta (rollback)
 pub fn undo(
     batch: &mut OwnedWriteBatch,
-    keyspaces: &ArchiveKeyspaces,
+    keyspaces: &HistoryKeyspaces,
     delta: &IndexDelta,
 ) -> Result<(), Error> {
     // Undo in reverse order
@@ -272,44 +286,6 @@ pub fn get_by_tx_hash(keyspace: &Keyspace, tx_hash: &[u8]) -> Result<Option<Bloc
     }
 }
 
-/// Get slots for a given lookup key (approximate, filtered by slot range)
-pub fn get_slots_by_key(
-    keyspace: &Keyspace,
-    data: &[u8],
-    start_slot: BlockSlot,
-    end_slot: BlockSlot,
-) -> Result<Vec<BlockSlot>, Error> {
-    let hash = hash_key(data);
-    get_slots_by_hash(keyspace, hash, start_slot, end_slot)
-}
-
-/// Get slots for a given hash (for metadata labels which are already u64)
-pub fn get_slots_by_hash(
-    keyspace: &Keyspace,
-    hash: u64,
-    start_slot: BlockSlot,
-    end_slot: BlockSlot,
-) -> Result<Vec<BlockSlot>, Error> {
-    let prefix = archive_prefix(hash);
-    let mut slots = Vec::new();
-
-    // fjall's prefix() returns an iterator of Guard items
-    // Guard::key() consumes the guard and returns Result<UserKey>
-    for guard in keyspace.prefix(prefix) {
-        let key = guard.key()?;
-
-        if key.len() >= HASH_KEY_SIZE + SLOT_SIZE {
-            let slot = decode_slot_from_suffix(&key);
-
-            if slot >= start_slot && slot <= end_slot {
-                slots.push(slot);
-            }
-        }
-    }
-
-    Ok(slots)
-}
-
 /// Slot iterator for archive index queries.
 /// Wraps a fjall prefix iterator and filters by slot range.
 pub struct SlotIterator {
@@ -343,8 +319,6 @@ impl SlotIterator {
         let prefix = archive_prefix(hash);
         let mut slots = Vec::new();
 
-        // fjall's prefix() returns an iterator of Guard items
-        // Guard::key() consumes the guard and returns Result<UserKey>
         for guard in keyspace.prefix(prefix) {
             let key = guard.key()?;
 

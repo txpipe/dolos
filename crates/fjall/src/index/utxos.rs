@@ -10,7 +10,16 @@ use dolos_core::{IndexDelta, TxoRef, UtxoSet};
 use fjall::{Keyspace, OwnedWriteBatch};
 
 use crate::keys::{decode_txo_ref_from_suffix, utxo_composite_key, TXO_REF_SIZE};
-use crate::{utxo_dimensions, Error};
+use crate::Error;
+
+/// UTxO filter dimension constants (must match dolos-cardano dimensions).
+pub mod dimensions {
+    pub const ADDRESS: &str = "address";
+    pub const PAYMENT: &str = "payment";
+    pub const STAKE: &str = "stake";
+    pub const POLICY: &str = "policy";
+    pub const ASSET: &str = "asset";
+}
 
 /// References to all UTxO filter keyspaces
 pub struct UtxoKeyspaces<'a> {
@@ -23,13 +32,13 @@ pub struct UtxoKeyspaces<'a> {
 
 impl<'a> UtxoKeyspaces<'a> {
     /// Get keyspace for a tag dimension
-    fn keyspace_for_dimension(&self, dimension: &str) -> Option<&'a Keyspace> {
+    pub fn keyspace_for_dimension(&self, dimension: &str) -> Option<&'a Keyspace> {
         match dimension {
-            utxo_dimensions::ADDRESS => Some(self.address),
-            utxo_dimensions::PAYMENT => Some(self.payment),
-            utxo_dimensions::STAKE => Some(self.stake),
-            utxo_dimensions::POLICY => Some(self.policy),
-            utxo_dimensions::ASSET => Some(self.asset),
+            dimensions::ADDRESS => Some(self.address),
+            dimensions::PAYMENT => Some(self.payment),
+            dimensions::STAKE => Some(self.stake),
+            dimensions::POLICY => Some(self.policy),
+            dimensions::ASSET => Some(self.asset),
             _ => None,
         }
     }
@@ -106,8 +115,6 @@ pub fn get_by_key(keyspace: &Keyspace, lookup_key: &[u8]) -> Result<UtxoSet, Err
     let mut result = HashSet::new();
 
     // Prefix scan: all keys starting with lookup_key
-    // fjall's prefix() returns an iterator of Guard items
-    // Guard::key() consumes the guard and returns Result<UserKey>
     for guard in keyspace.prefix(lookup_key) {
         let key = guard.key()?;
 

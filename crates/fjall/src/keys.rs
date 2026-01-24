@@ -1,9 +1,21 @@
-//! Key encoding utilities for fjall index store.
+//! Key and value encoding utilities for fjall storage.
 //!
 //! All multi-byte integers are encoded as big-endian to ensure correct
 //! lexicographic ordering in the LSM tree.
+//!
+//! ## Index Store Keys
+//!
+//! - **UTxO filter**: `lookup_key ++ txo_ref` (variable + 36 bytes)
+//! - **History exact**: direct key (hash, number, etc.)
+//! - **History approx**: `xxh3_hash ++ slot` (16 bytes)
+//!
+//! ## State Store Keys
+//!
+//! - **UTxOs**: `txhash[32] ++ idx[4]` (36 bytes) -> `era[2] ++ cbor[...]`
+//! - **Datums**: `hash[32]` -> `refcount[8] ++ bytes[...]`
+//! - **Entities**: `key[32]` -> value bytes
 
-use dolos_core::TxoRef;
+use dolos_core::{Era, TxoRef};
 use xxhash_rust::xxh3::xxh3_64;
 
 /// Size of encoded TxoRef: 32-byte tx hash + 4-byte index
@@ -100,6 +112,52 @@ pub fn archive_prefix(hash: u64) -> [u8; HASH_KEY_SIZE] {
     hash.to_be_bytes()
 }
 
+// ============================================================================
+// State Store Encodings
+// ============================================================================
+
+/// Size of era encoding: 2-byte u16
+pub const ERA_SIZE: usize = 2;
+
+/// Size of datum reference count: 8-byte u64
+pub const REFCOUNT_SIZE: usize = 8;
+
+/// Encode a UTxO value: era (2 bytes BE) + cbor
+pub fn encode_utxo_value(era: Era, cbor: &[u8]) -> Vec<u8> {
+    let mut value = Vec::with_capacity(ERA_SIZE + cbor.len());
+    value.extend_from_slice(&era.to_be_bytes());
+    value.extend_from_slice(cbor);
+    value
+}
+
+/// Decode a UTxO value into (era, cbor)
+pub fn decode_utxo_value(bytes: &[u8]) -> Option<(Era, Vec<u8>)> {
+    if bytes.len() < ERA_SIZE {
+        return None;
+    }
+    let era = u16::from_be_bytes(bytes[..ERA_SIZE].try_into().ok()?);
+    let cbor = bytes[ERA_SIZE..].to_vec();
+    Some((era, cbor))
+}
+
+/// Encode a datum value: refcount (8 bytes BE) + datum bytes
+pub fn encode_datum_value(refcount: u64, datum_bytes: &[u8]) -> Vec<u8> {
+    let mut value = Vec::with_capacity(REFCOUNT_SIZE + datum_bytes.len());
+    value.extend_from_slice(&refcount.to_be_bytes());
+    value.extend_from_slice(datum_bytes);
+    value
+}
+
+/// Decode a datum value into (refcount, datum_bytes)
+pub fn decode_datum_value(bytes: &[u8]) -> Option<(u64, Vec<u8>)> {
+    if bytes.len() < REFCOUNT_SIZE {
+        return None;
+    }
+    let refcount = u64::from_be_bytes(bytes[..REFCOUNT_SIZE].try_into().ok()?);
+    let datum_bytes = bytes[REFCOUNT_SIZE..].to_vec();
+    Some((refcount, datum_bytes))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,5 +211,36 @@ mod tests {
         let decoded_txo = decode_txo_ref_from_suffix(&key);
         assert_eq!(txo.0, decoded_txo.0);
         assert_eq!(txo.1, decoded_txo.1);
+    }
+
+    #[test]
+    fn test_utxo_value_roundtrip() {
+        let era: Era = 6;
+        let cbor = vec![0x82, 0x00, 0x01, 0x02, 0x03];
+        let encoded = encode_utxo_value(era, &cbor);
+        let (decoded_era, decoded_cbor) = decode_utxo_value(&encoded).unwrap();
+        assert_eq!(era, decoded_era);
+        assert_eq!(cbor, decoded_cbor);
+    }
+
+    #[test]
+    fn test_datum_value_roundtrip() {
+        let refcount = 42u64;
+        let datum_bytes = vec![0xd8, 0x79, 0x9f, 0x01, 0x02, 0xff];
+        let encoded = encode_datum_value(refcount, &datum_bytes);
+        let (decoded_refcount, decoded_bytes) = decode_datum_value(&encoded).unwrap();
+        assert_eq!(refcount, decoded_refcount);
+        assert_eq!(datum_bytes, decoded_bytes);
+    }
+
+    #[test]
+    fn test_empty_cbor_utxo_value() {
+        let era: Era = 1;
+        let cbor: Vec<u8> = vec![];
+        let encoded = encode_utxo_value(era, &cbor);
+        assert_eq!(encoded.len(), ERA_SIZE);
+        let (decoded_era, decoded_cbor) = decode_utxo_value(&encoded).unwrap();
+        assert_eq!(era, decoded_era);
+        assert!(decoded_cbor.is_empty());
     }
 }

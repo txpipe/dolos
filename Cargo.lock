@@ -1264,6 +1264,7 @@ dependencies = [
  "dolos-testing",
  "fjall",
  "pallas 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=ab27006)",
+ "tempfile",
  "thiserror 2.0.12",
  "tracing",
  "xxhash-rust",
