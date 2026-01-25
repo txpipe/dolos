@@ -189,15 +189,15 @@ fn define_starting_point(
     }
 }
 
-fn import_hardano_into_domain(
+/// Inner import function that can return errors.
+/// The outer function ensures shutdown is called regardless of success/failure.
+fn do_import(
+    domain: &dolos::adapters::DomainAdapter,
     args: &Args,
-    config: &RootConfig,
     immutable_path: &Path,
     feedback: &Feedback,
     chunk_size: usize,
 ) -> Result<(), miette::Error> {
-    let domain = crate::common::setup_domain(config)?;
-
     let tip = pallas::storage::hardano::immutable::get_tip(immutable_path)
         .map_err(|err| miette::miette!(err.to_string()))
         .context("reading immutable db tip")?
@@ -234,6 +234,26 @@ fn import_hardano_into_domain(
     progress.abandon_with_message("immutable db import complete");
 
     Ok(())
+}
+
+fn import_hardano_into_domain(
+    args: &Args,
+    config: &RootConfig,
+    immutable_path: &Path,
+    feedback: &Feedback,
+    chunk_size: usize,
+) -> Result<(), miette::Error> {
+    let domain = crate::common::setup_domain(config)?;
+
+    let result = do_import(&domain, args, immutable_path, feedback, chunk_size);
+
+    // Always shutdown the domain before it goes out of scope, regardless of
+    // whether import succeeded or failed.
+    if let Err(e) = domain.shutdown() {
+        tracing::error!("error during domain shutdown: {}", e);
+    }
+
+    result
 }
 
 pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Result<()> {

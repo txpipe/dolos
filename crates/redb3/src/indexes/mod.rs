@@ -584,6 +584,14 @@ pub struct IndexStore {
 }
 
 impl IndexStore {
+    /// Gracefully shutdown the index store.
+    ///
+    /// For Redb, this is a no-op since Redb handles cleanup automatically
+    /// during drop without blocking issues.
+    pub fn shutdown(&self) -> Result<(), Error> {
+        Ok(())
+    }
+
     pub fn open(path: impl AsRef<Path>, cache_size: Option<usize>) -> Result<Self, Error> {
         let db = Database::builder()
             .set_repair_callback(|x| {

@@ -262,6 +262,14 @@ impl<T> RedbWalStore<T>
 where
     T: EntityDelta + Serialize + DeserializeOwned + Send + Sync + 'static,
 {
+    /// Gracefully shutdown the WAL store.
+    ///
+    /// For Redb, this is a no-op since Redb handles cleanup automatically
+    /// during drop without blocking issues.
+    pub fn shutdown(&self) -> Result<(), RedbWalError> {
+        Ok(())
+    }
+
     pub fn is_empty(&self) -> Result<bool, RedbWalError> {
         let wr = self.db.begin_read()?;
 

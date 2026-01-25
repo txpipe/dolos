@@ -123,6 +123,47 @@ impl StateStore {
     pub fn database(&self) -> &Database {
         &self.db
     }
+
+    /// Gracefully shutdown the state store.
+    ///
+    /// This method ensures all pending work is completed before the database
+    /// is dropped, preventing hangs in Fjall's drop implementation when the
+    /// worker channel is full.
+    ///
+    /// Call this method before the StateStore goes out of scope, especially
+    /// after heavy write operations like bulk imports.
+    pub fn shutdown(&self) -> Result<(), Error> {
+        use std::time::Duration;
+
+        tracing::info!("state store: starting graceful shutdown");
+
+        // First, persist all data to ensure durability
+        self.db.persist(PersistMode::SyncAll)?;
+        tracing::debug!("state store: persist complete");
+
+        // Wait for outstanding flushes to complete
+        let mut wait_count = 0;
+        while self.db.outstanding_flushes() > 0 {
+            std::thread::sleep(Duration::from_millis(10));
+            wait_count += 1;
+            if wait_count % 100 == 0 {
+                tracing::debug!(
+                    "state store: waiting for {} outstanding flushes",
+                    self.db.outstanding_flushes()
+                );
+            }
+            // Safety timeout after 60 seconds
+            if wait_count > 6000 {
+                tracing::warn!(
+                    "state store: timeout waiting for flushes, proceeding with shutdown"
+                );
+                break;
+            }
+        }
+
+        tracing::info!("state store: graceful shutdown complete");
+        Ok(())
+    }
 }
 
 /// Writer for batched state operations.

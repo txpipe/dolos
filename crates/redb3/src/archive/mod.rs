@@ -105,6 +105,14 @@ pub struct ArchiveStore {
 }
 
 impl ArchiveStore {
+    /// Gracefully shutdown the archive store.
+    ///
+    /// For Redb, this is a no-op since Redb handles cleanup automatically
+    /// during drop without blocking issues.
+    pub fn shutdown(&self) -> Result<(), RedbArchiveError> {
+        Ok(())
+    }
+
     pub fn open(
         schema: StateSchema,
         path: impl AsRef<Path>,

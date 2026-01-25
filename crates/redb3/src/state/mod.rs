@@ -68,6 +68,14 @@ pub struct StateStore {
 }
 
 impl StateStore {
+    /// Gracefully shutdown the state store.
+    ///
+    /// For Redb, this is a no-op since Redb handles cleanup automatically
+    /// during drop without blocking issues.
+    pub fn shutdown(&self) -> Result<(), Error> {
+        Ok(())
+    }
+
     pub fn open(
         schema: StateSchema,
         path: impl AsRef<Path>,

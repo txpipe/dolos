@@ -33,6 +33,20 @@ impl StateStoreBackend {
     pub fn is_fjall(&self) -> bool {
         matches!(self, Self::Fjall(_))
     }
+
+    /// Gracefully shutdown the state store.
+    ///
+    /// This ensures all pending work is completed before the store is dropped.
+    pub fn shutdown(&self) -> Result<(), StateError> {
+        match self {
+            Self::Redb(s) => s
+                .shutdown()
+                .map_err(|e| StateError::InternalStoreError(e.to_string())),
+            Self::Fjall(s) => s
+                .shutdown()
+                .map_err(|e| StateError::InternalStoreError(e.to_string())),
+        }
+    }
 }
 
 // ============================================================================

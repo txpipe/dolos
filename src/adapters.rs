@@ -38,6 +38,30 @@ pub struct DomainAdapter {
     pub tip_broadcast: tokio::sync::broadcast::Sender<TipEvent>,
 }
 
+impl DomainAdapter {
+    /// Gracefully shutdown all storage backends.
+    ///
+    /// This method should be called before the DomainAdapter goes out of scope,
+    /// especially after heavy write operations like bulk imports. This ensures
+    /// that storage backends complete any pending background work before being
+    /// dropped.
+    pub fn shutdown(&self) -> Result<(), DomainError> {
+        tracing::info!("domain adapter: starting graceful shutdown");
+
+        self.wal
+            .shutdown()
+            .map_err(|e| DomainError::WalError(e.into()))?;
+        self.state.shutdown().map_err(DomainError::StateError)?;
+        self.archive
+            .shutdown()
+            .map_err(|e| DomainError::ArchiveError(e.into()))?;
+        self.indexes.shutdown().map_err(DomainError::IndexError)?;
+
+        tracing::info!("domain adapter: graceful shutdown complete");
+        Ok(())
+    }
+}
+
 impl Domain for DomainAdapter {
     type Entity = dolos_cardano::CardanoEntity;
     type EntityDelta = dolos_cardano::CardanoDelta;
