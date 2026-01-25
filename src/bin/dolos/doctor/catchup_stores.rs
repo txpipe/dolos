@@ -13,14 +13,13 @@ pub struct Args {
     pub chunk: usize,
 }
 
-#[tokio::main]
-pub async fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Result<()> {
+pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Result<()> {
     //crate::common::setup_tracing(&config.logging)?;
 
     let progress = feedback.slot_progress_bar();
     progress.set_message("rebuilding stores");
 
-    let domain = crate::common::setup_domain(config).await?;
+    let domain = crate::common::setup_domain(config)?;
 
     let (tip, _) = domain
         .wal
@@ -40,7 +39,7 @@ pub async fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miett
     for chunk in remaining.chunks(args.chunk).into_iter() {
         let collected = chunk.into_iter().map(|(_, x)| x).collect_vec();
 
-        let Ok(cursor) = domain.import_blocks(collected).await else {
+        let Ok(cursor) = domain.import_blocks(collected) else {
             miette::bail!("failed to apply block chunk");
         };
 

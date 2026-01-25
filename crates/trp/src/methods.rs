@@ -84,7 +84,7 @@ pub async fn trp_submit<D: Domain>(
         bytes = apply_witnesses(&bytes, &params.witnesses)?;
     }
 
-    let chain = context.domain.read_chain().await;
+    let chain = context.domain.read_chain();
 
     let hash = context.domain.receive_tx(&chain, &bytes)?;
 
@@ -118,7 +118,7 @@ mod tests {
             },
         );
 
-        let domain = ToyDomain::new(Some(delta), None).await;
+        let domain = ToyDomain::new(Some(delta), None);
 
         Arc::new(Context {
             domain,

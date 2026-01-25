@@ -7,7 +7,7 @@ use dolos_core::{
 };
 use futures_util::stream::StreamExt;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use std::sync::RwLock;
 
 pub fn seed_random_memory_store(utxo_generator: impl UtxoGenerator) -> impl StateStore {
     let store =
@@ -91,10 +91,7 @@ pub struct ToyDomain {
 
 impl ToyDomain {
     /// Create a new MockDomain with the provided state implementation
-    pub async fn new(
-        initial_delta: Option<UtxoSetDelta>,
-        storage_config: Option<StorageConfig>,
-    ) -> Self {
+    pub fn new(initial_delta: Option<UtxoSetDelta>, storage_config: Option<StorageConfig>) -> Self {
         let state = dolos_redb3::state::StateStore::in_memory(dolos_cardano::model::build_schema())
             .unwrap();
 
@@ -138,11 +135,11 @@ impl ToyDomain {
         // In normal operation, the cache refresh happens automatically via the
         // needs_cache_refresh flag in CardanoLogic::pop_work.
         {
-            let mut chain = domain.chain.write().await;
+            let mut chain = domain.chain.write().expect("chain lock poisoned");
             chain.refresh_cache::<Self>(&domain.state).unwrap();
         }
 
-        domain.bootstrap().await.unwrap();
+        domain.bootstrap().unwrap();
 
         if let Some(delta) = initial_delta {
             let writer = domain.state.start_writer().unwrap();
@@ -203,12 +200,12 @@ impl dolos_core::Domain for ToyDomain {
         self.genesis.clone()
     }
 
-    async fn read_chain(&self) -> tokio::sync::RwLockReadGuard<'_, Self::Chain> {
-        self.chain.read().await
+    fn read_chain(&self) -> std::sync::RwLockReadGuard<'_, Self::Chain> {
+        self.chain.read().expect("chain lock poisoned")
     }
 
-    async fn write_chain(&self) -> tokio::sync::RwLockWriteGuard<'_, Self::Chain> {
-        self.chain.write().await
+    fn write_chain(&self) -> std::sync::RwLockWriteGuard<'_, Self::Chain> {
+        self.chain.write().expect("chain lock poisoned")
     }
 
     fn wal(&self) -> &Self::Wal {

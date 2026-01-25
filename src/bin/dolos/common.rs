@@ -211,7 +211,7 @@ pub fn load_config(
     s.build()?.try_deserialize()
 }
 
-pub async fn setup_domain(config: &RootConfig) -> miette::Result<DomainAdapter> {
+pub fn setup_domain(config: &RootConfig) -> miette::Result<DomainAdapter> {
     let stores = setup_data_stores(config)?;
     let genesis = Arc::new(open_genesis_files(&config.genesis)?);
     let mempool = dolos::mempool::Mempool::new();
@@ -230,7 +230,7 @@ pub async fn setup_domain(config: &RootConfig) -> miette::Result<DomainAdapter> 
     let domain = DomainAdapter {
         storage_config: Arc::new(config.storage.clone()),
         genesis,
-        chain: Arc::new(tokio::sync::RwLock::new(chain)),
+        chain: Arc::new(std::sync::RwLock::new(chain)),
         wal: stores.wal,
         state: stores.state,
         archive: stores.archive,
@@ -240,10 +240,7 @@ pub async fn setup_domain(config: &RootConfig) -> miette::Result<DomainAdapter> 
     };
 
     // this will make sure the domain is correctly initialized and in a valid state.
-    domain
-        .bootstrap()
-        .await
-        .map_err(|x| miette::miette!("{:?}", x))?;
+    domain.bootstrap().map_err(|x| miette::miette!("{:?}", x))?;
 
     Ok(domain)
 }

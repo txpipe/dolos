@@ -14,7 +14,6 @@ use crate::{
 ///
 /// This trait extends any `Domain` implementation with methods for
 /// initializing and verifying domain integrity at startup.
-#[trait_variant::make(Send)]
 pub trait BootstrapExt: Domain {
     /// Check domain integrity.
     ///
@@ -27,7 +26,7 @@ pub trait BootstrapExt: Domain {
     /// Performs integrity checks and drains any pending initialization work.
     /// Uses the full sync lifecycle (WAL + tip notifications) since after
     /// bootstrap the node is considered "live".
-    async fn bootstrap(&self) -> Result<(), DomainError>;
+    fn bootstrap(&self) -> Result<(), DomainError>;
 }
 
 impl<D: Domain> BootstrapExt for D {
@@ -38,7 +37,7 @@ impl<D: Domain> BootstrapExt for D {
         Ok(())
     }
 
-    async fn bootstrap(&self) -> Result<(), DomainError> {
+    fn bootstrap(&self) -> Result<(), DomainError> {
         self.check_integrity()?;
 
         // TODO: we should probably catch up stores here
@@ -46,7 +45,7 @@ impl<D: Domain> BootstrapExt for D {
 
         // Drain any work that might have been defined by the initialization
         // using the sync lifecycle (full WAL + tip notifications)
-        let mut chain = self.write_chain().await;
+        let mut chain = self.write_chain();
         drain_pending_work(&mut *chain, self)?;
 
         Ok(())

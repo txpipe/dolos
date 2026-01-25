@@ -189,14 +189,14 @@ fn define_starting_point(
     }
 }
 
-async fn import_hardano_into_domain(
+fn import_hardano_into_domain(
     args: &Args,
     config: &RootConfig,
     immutable_path: &Path,
     feedback: &Feedback,
     chunk_size: usize,
 ) -> Result<(), miette::Error> {
-    let domain = crate::common::setup_domain(config).await?;
+    let domain = crate::common::setup_domain(config)?;
 
     let tip = pallas::storage::hardano::immutable::get_tip(immutable_path)
         .map_err(|err| miette::miette!(err.to_string()))
@@ -226,7 +226,6 @@ async fn import_hardano_into_domain(
 
         let last = domain
             .import_blocks(batch)
-            .await
             .map_err(|e| miette::miette!(e.to_string()))?;
 
         progress.set_position(last);
@@ -237,8 +236,7 @@ async fn import_hardano_into_domain(
     Ok(())
 }
 
-#[tokio::main]
-pub async fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Result<()> {
+pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Result<()> {
     if args.verbose {
         crate::common::setup_tracing(&config.logging)?;
     }
@@ -260,8 +258,12 @@ pub async fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miett
     }
 
     if !args.skip_download {
-        fetch_snapshot(args, mithril, feedback)
-            .await
+        // Spawn a temporary Tokio runtime just for the async download
+        let rt = tokio::runtime::Runtime::new()
+            .into_diagnostic()
+            .context("creating tokio runtime for download")?;
+
+        rt.block_on(fetch_snapshot(args, mithril, feedback))
             .map_err(|err| miette::miette!(err.to_string()))
             .context("fetching and validating mithril snapshot")?;
     } else {
@@ -270,7 +272,8 @@ pub async fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miett
 
     let immutable_path = Path::new(&args.download_dir).join("immutable");
 
-    import_hardano_into_domain(args, config, &immutable_path, feedback, args.chunk_size).await?;
+    // Import is now fully sync - no Tokio runtime needed
+    import_hardano_into_domain(args, config, &immutable_path, feedback, args.chunk_size)?;
 
     if !args.retain_snapshot {
         info!("deleting downloaded snapshot");

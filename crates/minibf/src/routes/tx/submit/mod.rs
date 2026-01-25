@@ -28,7 +28,7 @@ pub async fn route<D: Domain>(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    let chain = domain.read_chain().await;
+    let chain = domain.read_chain();
     let result = domain.inner.receive_tx(&chain, &cbor);
 
     let hash = result.map_err(|e| match e {

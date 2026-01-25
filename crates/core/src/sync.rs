@@ -17,7 +17,6 @@ use crate::{BlockSlot, ChainLogic, Domain, DomainError, RawBlock, WorkUnit};
 ///
 /// This trait extends any `Domain` implementation with methods for
 /// processing blocks received from the network during live sync.
-#[trait_variant::make(Send)]
 pub trait SyncExt: Domain {
     /// Process a single block during live synchronization.
     ///
@@ -32,12 +31,12 @@ pub trait SyncExt: Domain {
     /// # Returns
     ///
     /// The slot of the processed block.
-    async fn roll_forward(&self, block: RawBlock) -> Result<BlockSlot, DomainError>;
+    fn roll_forward(&self, block: RawBlock) -> Result<BlockSlot, DomainError>;
 }
 
 impl<D: Domain> SyncExt for D {
-    async fn roll_forward(&self, block: RawBlock) -> Result<BlockSlot, DomainError> {
-        let mut chain = self.write_chain().await;
+    fn roll_forward(&self, block: RawBlock) -> Result<BlockSlot, DomainError> {
+        let mut chain = self.write_chain();
 
         // Drain first in case there's previous work that needs to be applied (eg: initialization)
         drain_pending_work::<D>(&mut *chain, self)?;

@@ -121,7 +121,7 @@ where
 
         info!("received new grpc submit tx request: {:?}", message);
 
-        let chain = self.domain.read_chain().await;
+        let chain = self.domain.read_chain();
 
         let tx = message
             .tx
@@ -208,7 +208,7 @@ where
             _ => return Err(Status::invalid_argument("missing or unsupported tx type")),
         };
 
-        let chain = self.domain.read_chain().await;
+        let chain = self.domain.read_chain();
 
         let result = self.domain.validate_tx(&chain, &tx_raw);
         let result = tx_eval_to_u5c(result);

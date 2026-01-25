@@ -611,8 +611,8 @@ pub trait Domain: Send + Sync + Clone + 'static {
     fn storage_config(&self) -> &config::StorageConfig;
     fn genesis(&self) -> Arc<Genesis>;
 
-    async fn read_chain(&self) -> tokio::sync::RwLockReadGuard<'_, Self::Chain>;
-    async fn write_chain(&self) -> tokio::sync::RwLockWriteGuard<'_, Self::Chain>;
+    fn read_chain(&self) -> std::sync::RwLockReadGuard<'_, Self::Chain>;
+    fn write_chain(&self) -> std::sync::RwLockWriteGuard<'_, Self::Chain>;
 
     fn wal(&self) -> &Self::Wal;
     fn state(&self) -> &Self::State;

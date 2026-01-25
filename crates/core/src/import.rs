@@ -17,7 +17,6 @@ use crate::{BlockSlot, ChainLogic, Domain, DomainError, RawBlock, WorkUnit};
 ///
 /// This trait extends any `Domain` implementation with methods for
 /// efficiently importing blocks from trusted, immutable sources.
-#[trait_variant::make(Send)]
 pub trait ImportExt: Domain {
     /// Import a batch of blocks during bulk import operations.
     ///
@@ -32,13 +31,13 @@ pub trait ImportExt: Domain {
     /// # Returns
     ///
     /// The slot of the last imported block.
-    async fn import_blocks(&self, raw: Vec<RawBlock>) -> Result<BlockSlot, DomainError>;
+    fn import_blocks(&self, raw: Vec<RawBlock>) -> Result<BlockSlot, DomainError>;
 }
 
 impl<D: Domain> ImportExt for D {
-    async fn import_blocks(&self, mut raw: Vec<RawBlock>) -> Result<BlockSlot, DomainError> {
+    fn import_blocks(&self, mut raw: Vec<RawBlock>) -> Result<BlockSlot, DomainError> {
         let mut last = 0;
-        let mut chain = self.write_chain().await;
+        let mut chain = self.write_chain();
 
         for block in raw.drain(..) {
             if !chain.can_receive_block() {

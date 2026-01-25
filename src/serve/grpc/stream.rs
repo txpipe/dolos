@@ -55,13 +55,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_stream_waiting() {
-        let domain = ToyDomain::new(None, None).await;
+        let domain = ToyDomain::new(None, None);
 
         for i in 0..=100 {
             let (_, block) = make_conway_block(i * 10);
 
             use dolos_core::SyncExt;
-            domain.roll_forward(block).await.unwrap();
+            domain.roll_forward(block).unwrap();
         }
 
         let domain2 = domain.clone();
@@ -70,7 +70,7 @@ mod tests {
                 let (_, block) = make_conway_block(i * 10);
 
                 use dolos_core::SyncExt;
-                domain2.roll_forward(block).await.unwrap();
+                domain2.roll_forward(block).unwrap();
 
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
             }
