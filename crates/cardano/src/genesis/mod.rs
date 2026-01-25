@@ -76,6 +76,7 @@ pub fn bootstrap_epoch<D: Domain>(
         number: 0,
         rolling: EpochValue::with_live(0, RollingStats::default()),
         end: None,
+        incentives: None,
     };
 
     let writer = state.start_writer()?;

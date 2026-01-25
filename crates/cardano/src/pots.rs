@@ -344,8 +344,8 @@ pub fn apply_shelley_delta(mut pots: Pots, incentives: &EpochIncentives, delta: 
     }
 
     // reserves pot
-    pots.reserves -= incentives.total;
-    pots.reserves -= delta.reserve_mirs;
+    pots.reserves = sub!(pots.reserves, incentives.total);
+    pots.reserves = sub!(pots.reserves, delta.reserve_mirs);
     pots.reserves += returned_rewards;
 
     // treasury pot
@@ -356,12 +356,12 @@ pub fn apply_shelley_delta(mut pots: Pots, incentives: &EpochIncentives, delta: 
     pots.treasury += delta.treasury_donations;
 
     // fees pot
-    pots.fees -= incentives.used_fees;
+    pots.fees = sub!(pots.fees, incentives.used_fees);
     pots.fees += delta.gathered_fees;
 
     // rewards pot
     pots.rewards += delta.effective_rewards;
-    pots.rewards -= delta.withdrawals;
+    pots.rewards = sub!(pots.rewards, delta.withdrawals);
     pots.rewards += delta.pool_refund_count * pots.deposit_per_pool;
     pots.rewards += delta.proposal_refunds;
     pots.rewards += delta.reserve_mirs;

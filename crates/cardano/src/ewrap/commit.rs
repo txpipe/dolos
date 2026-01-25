@@ -2,11 +2,11 @@ use dolos_core::{
     ArchiveStore, ArchiveWriter, ChainError, ChainPoint, Domain, Entity, EntityDelta as _, LogKey,
     NsKey, StateStore, StateWriter, TemporalKey,
 };
-use tracing::{instrument, trace, warn};
+use tracing::{info, instrument, trace, warn};
 
 use crate::{
-    ewrap::BoundaryWork, AccountState, CardanoEntity, DRepState, EpochState, FixedNamespace,
-    PoolState, ProposalState,
+    ewrap::BoundaryWork, rupd::credential_to_key, AccountState, CardanoEntity, DRepState,
+    EpochState, FixedNamespace, PendingRewardState, PoolState, ProposalState,
 };
 
 impl BoundaryWork {
@@ -64,6 +64,40 @@ impl BoundaryWork {
         Ok(())
     }
 
+    /// Delete all pending reward entries that were applied during this epoch wrap.
+    fn delete_applied_rewards<D: Domain>(
+        &mut self,
+        writer: &<D::State as StateStore>::Writer,
+    ) -> Result<(), ChainError>
+    where
+        D: Domain,
+    {
+        info!(
+            count = self.applied_reward_credentials.len(),
+            "deleting applied pending rewards"
+        );
+
+        for credential in self.applied_reward_credentials.drain(..) {
+            let key = credential_to_key(&credential);
+            writer.delete_entity(PendingRewardState::NS, &key)?;
+        }
+
+        // Also delete any remaining pending rewards that weren't applied
+        // (unspendable rewards that were drained)
+        if !self.rewards.is_empty() {
+            warn!(
+                remaining = self.rewards.len(),
+                "draining remaining unspendable rewards"
+            );
+            for (credential, _) in self.rewards.iter_pending() {
+                let key = credential_to_key(credential);
+                writer.delete_entity(PendingRewardState::NS, &key)?;
+            }
+        }
+
+        Ok(())
+    }
+
     #[instrument(skip_all)]
     pub fn commit<D: Domain>(
         &mut self,
@@ -77,6 +111,9 @@ impl BoundaryWork {
         self.apply_whole_namespace::<D, DRepState>(state, &writer)?;
         self.apply_whole_namespace::<D, ProposalState>(state, &writer)?;
         self.apply_whole_namespace::<D, EpochState>(state, &writer)?;
+
+        // Delete pending rewards that were applied
+        self.delete_applied_rewards::<D>(&writer)?;
 
         assert!(self.deltas.entities.is_empty());
 

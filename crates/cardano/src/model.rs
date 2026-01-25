@@ -30,7 +30,7 @@ use crate::{
         drops::{DRepDelegatorDrop, DRepExpiration, PoolDelegatorRetire},
         enactment::{PParamsUpdate, TreasuryWithdrawal},
         refunds::{PoolDepositRefund, ProposalDepositRefund},
-        rewards::AssignRewards,
+        rewards::{AssignRewards, DequeueReward},
         wrapup::{EpochWrapUp, PoolWrapUp},
     },
     pallas_extras::{
@@ -49,6 +49,7 @@ use crate::{
         pools::{MintedBlocksInc, PoolDeRegistration, PoolRegistration},
         proposals::NewProposal,
     },
+    rupd::{EnqueueReward, SetEpochIncentives},
     sub,
 };
 
@@ -1517,6 +1518,11 @@ pub struct EpochState {
 
     #[n(13)]
     pub end: Option<EndStats>,
+
+    /// Epoch incentives computed during RUPD, used for pot calculations at epoch boundary.
+    #[n(14)]
+    #[cbor(default)]
+    pub incentives: Option<EpochIncentives>,
 }
 
 #[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize)]
@@ -1616,6 +1622,41 @@ impl DatumState {
 
 entity_boilerplate!(DatumState, "datums");
 
+/// Pending reward for a single account, waiting to be applied at epoch boundary.
+/// Created by RUPD, consumed by EWRAP.
+#[derive(Debug, Clone, Encode, Decode, Serialize, Deserialize)]
+pub struct PendingRewardState {
+    #[n(0)]
+    pub credential: StakeCredential,
+
+    #[n(1)]
+    pub is_spendable: bool,
+
+    /// Rewards earned as pool operator (pool_hash, amount)
+    #[n(2)]
+    pub as_leader: Vec<(PoolHash, u64)>,
+
+    /// Rewards earned as delegator (pool_hash, amount)
+    #[n(3)]
+    pub as_delegator: Vec<(PoolHash, u64)>,
+}
+
+impl PendingRewardState {
+    pub fn total_value(&self) -> u64 {
+        self.as_leader.iter().map(|(_, v)| v).sum::<u64>()
+            + self.as_delegator.iter().map(|(_, v)| v).sum::<u64>()
+    }
+
+    /// Convert to a list of (pool_hash, amount, as_leader) tuples for logging.
+    pub fn into_log_entries(&self) -> Vec<(PoolHash, u64, bool)> {
+        let leader = self.as_leader.iter().map(|(p, v)| (*p, *v, true));
+        let delegator = self.as_delegator.iter().map(|(p, v)| (*p, *v, false));
+        leader.chain(delegator).collect()
+    }
+}
+
+entity_boilerplate!(PendingRewardState, "pending_rewards");
+
 #[derive(Debug, Clone, Copy, Encode, Decode, Serialize, Deserialize)]
 pub struct EraProtocol(#[n(0)] u16);
 
@@ -1714,6 +1755,7 @@ pub enum CardanoEntity {
     RewardLog(RewardLog),
     StakeLog(StakeLog),
     DatumState(DatumState),
+    PendingRewardState(PendingRewardState),
 }
 
 macro_rules! variant_boilerplate {
@@ -1745,6 +1787,7 @@ variant_boilerplate!(ProposalState);
 variant_boilerplate!(RewardLog);
 variant_boilerplate!(StakeLog);
 variant_boilerplate!(DatumState);
+variant_boilerplate!(PendingRewardState);
 
 impl dolos_core::Entity for CardanoEntity {
     fn decode_entity(ns: Namespace, value: &EntityValue) -> Result<Self, ChainError> {
@@ -1759,6 +1802,7 @@ impl dolos_core::Entity for CardanoEntity {
             RewardLog::NS => RewardLog::decode_entity(ns, value).map(Into::into),
             StakeLog::NS => StakeLog::decode_entity(ns, value).map(Into::into),
             DatumState::NS => DatumState::decode_entity(ns, value).map(Into::into),
+            PendingRewardState::NS => PendingRewardState::decode_entity(ns, value).map(Into::into),
             _ => Err(ChainError::InvalidNamespace(ns)),
         }
     }
@@ -1805,6 +1849,10 @@ impl dolos_core::Entity for CardanoEntity {
                 let (ns, enc) = DatumState::encode_entity(x);
                 (ns, enc)
             }
+            Self::PendingRewardState(x) => {
+                let (ns, enc) = PendingRewardState::encode_entity(x);
+                (ns, enc)
+            }
         }
     }
 }
@@ -1821,6 +1869,7 @@ pub fn build_schema() -> StateSchema {
     schema.insert(RewardLog::NS, NamespaceType::KeyValue);
     schema.insert(StakeLog::NS, NamespaceType::KeyValue);
     schema.insert(DatumState::NS, NamespaceType::KeyValue);
+    schema.insert(PendingRewardState::NS, NamespaceType::KeyValue);
     schema
 }
 
@@ -1861,6 +1910,9 @@ pub enum CardanoDelta {
     AssignMirRewards(AssignMirRewards),
     DatumRefIncrement(crate::roll::datums::DatumRefIncrement),
     DatumRefDecrement(crate::roll::datums::DatumRefDecrement),
+    EnqueueReward(EnqueueReward),
+    SetEpochIncentives(SetEpochIncentives),
+    DequeueReward(DequeueReward),
 }
 
 impl CardanoDelta {
@@ -1929,6 +1981,9 @@ delta_from!(PoolWrapUp);
 delta_from!(ProposalDepositRefund);
 delta_from!(TreasuryWithdrawal);
 delta_from!(AssignMirRewards);
+delta_from!(EnqueueReward);
+delta_from!(SetEpochIncentives);
+delta_from!(DequeueReward);
 
 // Special From implementations for datum deltas since they're in a different module
 impl From<crate::roll::datums::DatumRefIncrement> for CardanoDelta {
@@ -1982,6 +2037,9 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::AssignMirRewards(x) => x.key(),
             Self::DatumRefIncrement(x) => x.key(),
             Self::DatumRefDecrement(x) => x.key(),
+            Self::EnqueueReward(x) => x.key(),
+            Self::SetEpochIncentives(x) => x.key(),
+            Self::DequeueReward(x) => x.key(),
         }
     }
 
@@ -2021,6 +2079,9 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::AssignMirRewards(x) => Self::downcast_apply(x, entity),
             Self::DatumRefIncrement(x) => Self::downcast_apply(x, entity),
             Self::DatumRefDecrement(x) => Self::downcast_apply(x, entity),
+            Self::EnqueueReward(x) => Self::downcast_apply(x, entity),
+            Self::SetEpochIncentives(x) => Self::downcast_apply(x, entity),
+            Self::DequeueReward(x) => Self::downcast_apply(x, entity),
         }
     }
 
@@ -2060,6 +2121,9 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::AssignMirRewards(x) => Self::downcast_undo(x, entity),
             Self::DatumRefIncrement(x) => Self::downcast_undo(x, entity),
             Self::DatumRefDecrement(x) => Self::downcast_undo(x, entity),
+            Self::EnqueueReward(x) => Self::downcast_undo(x, entity),
+            Self::SetEpochIncentives(x) => Self::downcast_undo(x, entity),
+            Self::DequeueReward(x) => Self::downcast_undo(x, entity),
         }
     }
 }

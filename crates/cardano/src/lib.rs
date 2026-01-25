@@ -16,9 +16,7 @@ use dolos_core::{
 
 use crate::{
     owned::{OwnedMultiEraBlock, OwnedMultiEraOutput},
-    rewards::RewardMap,
     roll::{WorkBatch, WorkBlock},
-    rupd::RupdWork,
 };
 
 // staging zone
@@ -201,6 +199,28 @@ enum WorkBuffer {
     ForcedStop,
 }
 
+impl std::fmt::Debug for WorkBuffer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Empty => write!(f, "Empty"),
+            Self::Restart(arg0) => f.debug_tuple("Restart").field(arg0).finish(),
+            Self::Genesis(arg0) => f.debug_tuple("Genesis").finish(),
+            Self::OpenBatch(arg0) => f.debug_tuple("OpenBatch").finish(),
+            Self::PreRupdBoundary(arg0, arg1) => f.debug_tuple("PreRupdBoundary").finish(),
+            Self::RupdBoundary(arg0) => f.debug_tuple("RupdBoundary").finish(),
+            Self::PreEwrapBoundary(arg0, arg1, arg2) => {
+                f.debug_tuple("PreEwrapBoundary").field(arg2).finish()
+            }
+            Self::EwrapBoundary(arg0, arg1) => f.debug_tuple("EwrapBoundary").field(arg1).finish(),
+            Self::EstartBoundary(arg0, arg1) => {
+                f.debug_tuple("EstartBoundary").field(arg1).finish()
+            }
+            Self::PreForcedStop(arg0) => f.debug_tuple("PreForcedStop").finish(),
+            Self::ForcedStop => write!(f, "ForcedStop"),
+        }
+    }
+}
+
 impl WorkBuffer {
     fn new_from_cursor(cursor: ChainPoint) -> Self {
         Self::Restart(cursor)
@@ -279,6 +299,10 @@ impl WorkBuffer {
         eras: &ChainSummary,
         stability_window: u64,
     ) -> Self {
+        if !self.can_receive_block() {
+            dbg!(&self);
+        }
+
         assert!(
             self.can_receive_block(),
             "can't continue until previous work is completed"
@@ -364,7 +388,6 @@ impl WorkBuffer {
 pub(crate) struct Cache {
     pub eras: ChainSummary,
     pub stability_window: u64,
-    pub rewards: Option<RewardMap<RupdWork>>,
 }
 
 pub struct CardanoLogic {
@@ -418,7 +441,6 @@ impl dolos_core::ChainLogic for CardanoLogic {
             cache: Cache {
                 eras,
                 stability_window,
-                rewards: None,
             },
             work: Some(work),
             needs_cache_refresh: false,
@@ -514,13 +536,11 @@ impl dolos_core::ChainLogic for CardanoLogic {
                 domain.genesis(),
             ))),
             InternalWorkUnit::EWrap(slot) => {
-                // Take rewards from cache (set by rupd)
-                let rewards = self.cache.rewards.take().unwrap_or_default();
+                // Rewards are loaded from state store during EWRAP load phase
                 Some(CardanoWorkUnit::Ewrap(ewrap::EwrapWorkUnit::new(
                     slot,
                     self.config.clone(),
                     domain.genesis(),
-                    rewards,
                 )))
             }
             InternalWorkUnit::EStart(slot) => {

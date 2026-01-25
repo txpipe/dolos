@@ -1,16 +1,20 @@
 //! Rupd (Reward Update) work unit implementation.
 //!
 //! The rupd work unit computes rewards at the stability window boundary
-//! (4k slots before epoch end).
+//! (4k slots before epoch end). Computed rewards are persisted to state store
+//! as PendingRewardState entities, to be consumed by EWRAP.
 
 use std::sync::Arc;
 
-use dolos_core::{BlockSlot, Domain, DomainError, Genesis, WorkUnit};
+use dolos_core::{BlockSlot, Domain, DomainError, Genesis, StateStore, StateWriter, WorkUnit};
 use tracing::{debug, info};
 
-use crate::{rewards::RewardMap, CardanoLogic};
+use crate::{
+    rewards::{Reward, RewardMap},
+    CardanoLogic, FixedNamespace, PendingRewardState,
+};
 
-use super::RupdWork;
+use super::{credential_to_key, RupdWork};
 
 /// Work unit for computing rewards at the stability window.
 pub struct RupdWorkUnit {
@@ -33,11 +37,6 @@ impl RupdWorkUnit {
             work: None,
             rewards: None,
         }
-    }
-
-    /// Get the computed rewards (to be stored in cache for ewrap).
-    pub fn take_rewards(&mut self) -> Option<RewardMap<RupdWork>> {
-        self.rewards.take()
     }
 }
 
@@ -68,18 +67,81 @@ where
 
         let rewards = crate::rewards::define_rewards(work)?;
 
+        info!(pending_count = rewards.len(), "rewards computed");
+
         self.rewards = Some(rewards);
 
         debug!("rewards computed");
         Ok(())
     }
 
-    fn commit_state(&mut self, _domain: &D) -> Result<(), DomainError> {
-        // Rupd stores rewards in the chain logic cache for ewrap to consume
-        // This is handled by the pop_work logic in CardanoLogic
-        //
-        // TODO: Consider using state store for inter-work-unit data flow
-        // for a cleaner architecture
+    fn commit_state(&mut self, domain: &D) -> Result<(), DomainError> {
+        let _work = self
+            .work
+            .as_ref()
+            .ok_or_else(|| DomainError::InconsistentState("rupd work not loaded".to_string()))?;
+
+        let rewards = self
+            .rewards
+            .as_ref()
+            .ok_or_else(|| DomainError::InconsistentState("rewards not computed".to_string()))?;
+
+        info!(
+            pending_count = rewards.len(),
+            "persisting pending rewards to state"
+        );
+
+        let writer = domain.state().start_writer()?;
+
+        // Persist each pending reward as a PendingRewardState entity
+        for (credential, reward) in rewards.iter_pending() {
+            let key = credential_to_key(credential);
+
+            // Convert Reward to PendingRewardState
+            let (as_leader, as_delegator) = match reward {
+                Reward::MultiPool(r) => (
+                    r.leader_rewards().collect(),
+                    r.delegator_rewards().collect(),
+                ),
+                Reward::PreAllegra(r) => {
+                    let (pool, value) = r.pool_and_value();
+                    if r.is_leader() {
+                        (vec![(pool, value)], vec![])
+                    } else {
+                        (vec![], vec![(pool, value)])
+                    }
+                }
+            };
+
+            let state = PendingRewardState {
+                credential: credential.clone(),
+                is_spendable: reward.is_spendable(),
+                as_leader,
+                as_delegator,
+            };
+
+            writer.write_entity_typed(&key, &state)?;
+        }
+
+        // Also update the epoch state with incentives
+        let incentives = rewards.incentives().clone();
+
+        // Load current epoch state
+        let epoch_key = dolos_core::EntityKey::from(crate::model::CURRENT_EPOCH_KEY);
+        if let Some(mut epoch_state) = domain
+            .state()
+            .read_entity_typed::<crate::EpochState>(crate::EpochState::NS, &epoch_key)?
+        {
+            // Update incentives
+            epoch_state.incentives = Some(incentives);
+
+            // Write back
+            writer.write_entity_typed(&epoch_key, &epoch_state)?;
+        }
+
+        writer.commit()?;
+
+        debug!("rupd state committed");
         Ok(())
     }
 

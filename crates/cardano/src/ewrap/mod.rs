@@ -4,7 +4,7 @@ use std::{
 };
 
 use dolos_core::{config::CardanoConfig, BlockSlot, ChainError, Domain, EntityKey, Genesis};
-use pallas::ledger::primitives::conway::DRep;
+use pallas::ledger::primitives::{conway::DRep, StakeCredential};
 use tracing::{debug, info, instrument};
 
 use crate::{
@@ -133,6 +133,9 @@ pub struct BoundaryWork {
     // computed via visitors
     pub deltas: WorkDeltas,
     pub logs: Vec<(EntityKey, CardanoEntity)>,
+
+    /// Credentials whose rewards were applied (need to be dequeued from state).
+    pub applied_reward_credentials: Vec<StakeCredential>,
 }
 
 impl BoundaryWork {
@@ -156,11 +159,10 @@ pub fn execute<D: Domain>(
     slot: BlockSlot,
     _: &CardanoConfig,
     genesis: Arc<Genesis>,
-    rewards: RewardMap<RupdWork>,
 ) -> Result<(), ChainError> {
     info!("executing EWRAP work unit");
 
-    let mut boundary = BoundaryWork::load::<D>(state, genesis, rewards)?;
+    let mut boundary = BoundaryWork::load::<D>(state, genesis)?;
 
     boundary.commit::<D>(state, archive)?;
 

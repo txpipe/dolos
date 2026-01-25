@@ -1,10 +1,12 @@
 use dolos_core::{ChainError, EntityKey, NsKey};
 
+use pallas::ledger::primitives::StakeCredential;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 use crate::{
-    rupd::AccountId, AccountState, CardanoDelta, CardanoEntity, FixedNamespace, RewardLog,
+    rupd::{credential_to_key, AccountId},
+    AccountState, CardanoDelta, CardanoEntity, FixedNamespace, PendingRewardState, RewardLog,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,6 +44,42 @@ impl dolos_core::EntityDelta for AssignRewards {
     }
 }
 
+/// Delta to dequeue (consume) a pending reward after applying it.
+/// Applied by EWRAP after rewards are assigned to accounts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DequeueReward {
+    pub credential: StakeCredential,
+    /// Previous state stored for rollback
+    prev: Option<PendingRewardState>,
+}
+
+impl DequeueReward {
+    pub fn new(credential: StakeCredential) -> Self {
+        Self {
+            credential,
+            prev: None,
+        }
+    }
+}
+
+impl dolos_core::EntityDelta for DequeueReward {
+    type Entity = PendingRewardState;
+
+    fn key(&self) -> NsKey {
+        NsKey::from((PendingRewardState::NS, credential_to_key(&self.credential)))
+    }
+
+    fn apply(&mut self, entity: &mut Option<Self::Entity>) {
+        // Store previous state for undo, then remove the entity
+        self.prev = entity.take();
+    }
+
+    fn undo(&self, entity: &mut Option<Self::Entity>) {
+        // Restore the previous state
+        *entity = self.prev.clone();
+    }
+}
+
 #[derive(Default)]
 pub struct BoundaryVisitor {
     pub deltas: Vec<CardanoDelta>,
@@ -68,6 +106,10 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         let Some(reward) = ctx.rewards.take_for_apply(&account.credential) else {
             return Ok(());
         };
+
+        // Track that we need to dequeue this reward from state
+        ctx.applied_reward_credentials
+            .push(account.credential.clone());
 
         if !account.is_registered() {
             debug!(account=%id, amount=reward.total_value(), "reward is not spendable at ewrap");

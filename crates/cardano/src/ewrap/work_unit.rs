@@ -1,7 +1,7 @@
 //! Ewrap (Epoch Wrap) work unit implementation.
 //!
 //! The ewrap work unit handles epoch boundary processing including:
-//! - Applying rewards to accounts
+//! - Applying rewards to accounts (loaded from pending_rewards state)
 //! - Processing pool retirements
 //! - Handling governance proposal enactment
 //! - DRep expiration
@@ -11,7 +11,7 @@ use std::sync::Arc;
 use dolos_core::{config::CardanoConfig, BlockSlot, Domain, DomainError, Genesis, WorkUnit};
 use tracing::{debug, info};
 
-use crate::{rewards::RewardMap, rupd::RupdWork, CardanoLogic};
+use crate::CardanoLogic;
 
 use super::BoundaryWork;
 
@@ -21,7 +21,6 @@ pub struct EwrapWorkUnit {
     #[allow(dead_code)]
     config: CardanoConfig,
     genesis: Arc<Genesis>,
-    rewards: RewardMap<RupdWork>,
 
     // Loaded
     boundary: Option<BoundaryWork>,
@@ -29,17 +28,12 @@ pub struct EwrapWorkUnit {
 
 impl EwrapWorkUnit {
     /// Create a new ewrap work unit.
-    pub fn new(
-        slot: BlockSlot,
-        config: CardanoConfig,
-        genesis: Arc<Genesis>,
-        rewards: RewardMap<RupdWork>,
-    ) -> Self {
+    /// Rewards are loaded from state store during load phase.
+    pub fn new(slot: BlockSlot, config: CardanoConfig, genesis: Arc<Genesis>) -> Self {
         Self {
             slot,
             config,
             genesis,
-            rewards,
             boundary: None,
         }
     }
@@ -56,12 +50,10 @@ where
     fn load(&mut self, domain: &D) -> Result<(), DomainError> {
         info!(slot = self.slot, "loading ewrap boundary context");
 
-        let rewards = std::mem::take(&mut self.rewards);
-
+        // Load rewards from state store (persisted by RUPD)
         self.boundary = Some(BoundaryWork::load::<D>(
             domain.state(),
             self.genesis.clone(),
-            rewards,
         )?);
 
         debug!("ewrap boundary context loaded");

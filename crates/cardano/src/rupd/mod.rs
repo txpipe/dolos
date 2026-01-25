@@ -14,9 +14,11 @@ use crate::{
     StakeLog,
 };
 
+pub mod deltas;
 pub mod loading;
 pub mod work_unit;
 
+pub use deltas::{credential_to_key, EnqueueReward, SetEpochIncentives};
 pub use work_unit::RupdWorkUnit;
 
 pub trait RupdVisitor: Default {
