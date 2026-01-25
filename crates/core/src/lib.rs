@@ -629,14 +629,14 @@ pub trait Domain: Send + Sync + Clone + 'static {
         let max_ledger_slots = self
             .storage_config()
             .state
-            .max_history
+            .max_history()
             .unwrap_or(Self::Chain::mutable_slots(self));
 
         info!(max_ledger_slots, "pruning ledger for excess history");
 
         let mut archive_pruned = true;
 
-        if let Some(max_slots) = self.storage_config().archive.max_history {
+        if let Some(max_slots) = self.storage_config().archive.max_history() {
             info!(max_slots, "pruning archive for excess history");
 
             archive_pruned = self
@@ -646,7 +646,7 @@ pub trait Domain: Send + Sync + Clone + 'static {
 
         let mut wal_pruned = true;
 
-        if let Some(max_slots) = self.storage_config().wal.max_history {
+        if let Some(max_slots) = self.storage_config().wal.max_history() {
             info!(max_slots, "pruning wal for excess history");
 
             wal_pruned = self

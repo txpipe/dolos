@@ -1,5 +1,6 @@
 use dolos_core::config::{
-    ChainConfig, GenesisConfig, LoggingConfig, RootConfig, StorageBackend, StorageVersion,
+    ArchiveStoreConfig, ChainConfig, GenesisConfig, IndexStoreConfig, LoggingConfig, RootConfig,
+    StateStoreConfig, StorageVersion, WalStoreConfig,
 };
 use dolos_core::BootstrapExt;
 use miette::{Context as _, IntoDiagnostic};
@@ -34,9 +35,12 @@ pub fn ensure_storage_path(config: &RootConfig) -> Result<PathBuf, Error> {
 pub fn open_wal_store(config: &RootConfig) -> Result<WalAdapter, Error> {
     let root = ensure_storage_path(config)?;
 
-    let wal = dolos_redb3::wal::RedbWalStore::open(root.join("wal"), config.storage.wal.cache)?;
-
-    Ok(wal)
+    match &config.storage.wal {
+        WalStoreConfig::Redb { cache, .. } => {
+            let wal = dolos_redb3::wal::RedbWalStore::open(root.join("wal"), *cache)?;
+            Ok(wal)
+        }
+    }
 }
 
 pub fn open_archive_store(
@@ -45,39 +49,37 @@ pub fn open_archive_store(
     let root = ensure_storage_path(config)?;
     let schema = dolos_cardano::model::build_schema();
 
-    // Check backend - currently only redb is supported for archive
-    if config.storage.archive.backend == StorageBackend::Fjall {
-        return Err(Error::config(
-            "fjall backend is not yet supported for archive store",
-        ));
+    match &config.storage.archive {
+        ArchiveStoreConfig::Redb { cache, .. } => {
+            let archive =
+                dolos_redb3::archive::ArchiveStore::open(schema, root.join("chain"), *cache)
+                    .map_err(ArchiveError::from)?;
+            Ok(archive)
+        }
     }
-
-    let archive = dolos_redb3::archive::ArchiveStore::open(
-        schema,
-        root.join("chain"),
-        config.storage.archive.cache,
-    )
-    .map_err(ArchiveError::from)?;
-
-    Ok(archive)
 }
 
 pub fn open_index_store(config: &RootConfig) -> Result<IndexStoreBackend, Error> {
     let root = ensure_storage_path(config)?;
 
-    match config.storage.index.backend {
-        StorageBackend::Redb => {
-            let store = dolos_redb3::indexes::IndexStore::open(
-                root.join("index"),
-                config.storage.index.cache,
-            )
-            .map_err(IndexError::from)?;
+    match &config.storage.index {
+        IndexStoreConfig::Redb { cache } => {
+            let store = dolos_redb3::indexes::IndexStore::open(root.join("index"), *cache)
+                .map_err(IndexError::from)?;
             Ok(IndexStoreBackend::Redb(store))
         }
-        StorageBackend::Fjall => {
-            let store =
-                dolos_fjall::IndexStore::open(root.join("index"), config.storage.index.cache)
-                    .map_err(IndexError::from)?;
+        IndexStoreConfig::Fjall {
+            cache,
+            max_journal_size,
+            flush_on_commit,
+        } => {
+            let store = dolos_fjall::IndexStore::open(
+                root.join("index"),
+                *cache,
+                *max_journal_size,
+                *flush_on_commit,
+            )
+            .map_err(IndexError::from)?;
             Ok(IndexStoreBackend::Fjall(store))
         }
     }
@@ -87,21 +89,24 @@ pub fn open_state_store(config: &RootConfig) -> Result<StateStoreBackend, Error>
     let root = ensure_storage_path(config)?;
     let schema = dolos_cardano::model::build_schema();
 
-    match config.storage.state.backend {
-        StorageBackend::Redb => {
-            let store = dolos_redb3::state::StateStore::open(
-                schema,
-                root.join("state"),
-                config.storage.state.cache,
-            )
-            .map_err(StateError::from)?;
+    match &config.storage.state {
+        StateStoreConfig::Redb { cache, .. } => {
+            let store = dolos_redb3::state::StateStore::open(schema, root.join("state"), *cache)
+                .map_err(StateError::from)?;
             Ok(StateStoreBackend::Redb(store))
         }
-        StorageBackend::Fjall => {
+        StateStoreConfig::Fjall {
+            cache,
+            max_journal_size,
+            flush_on_commit,
+            ..
+        } => {
             let store = dolos_fjall::StateStore::open(
                 schema,
                 root.join("state"),
-                config.storage.state.cache,
+                *cache,
+                *max_journal_size,
+                *flush_on_commit,
             )
             .map_err(StateError::from)?;
             Ok(StateStoreBackend::Fjall(store))
@@ -145,21 +150,17 @@ pub fn open_persistent_data_stores(config: &RootConfig) -> Result<Stores, Error>
 
 pub fn create_ephemeral_data_stores(config: &RootConfig) -> Result<Stores, Error> {
     // Fjall does not support in-memory mode
-    if config.storage.state.backend == StorageBackend::Fjall {
+    if config.storage.state.is_fjall() {
         return Err(Error::config(
             "fjall backend does not support ephemeral storage for state store",
         ));
     }
-    if config.storage.index.backend == StorageBackend::Fjall {
+    if config.storage.index.is_fjall() {
         return Err(Error::config(
             "fjall backend does not support ephemeral storage for index store",
         ));
     }
-    if config.storage.archive.backend == StorageBackend::Fjall {
-        return Err(Error::config(
-            "fjall backend does not support ephemeral storage for archive store",
-        ));
-    }
+    // Note: archive only has Redb variant currently, so no need to check
 
     let wal = dolos_redb3::wal::RedbWalStore::memory()?;
 

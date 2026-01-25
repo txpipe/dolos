@@ -35,6 +35,12 @@ pub use history::SlotIterator as SlotIter;
 /// Default cache size in MB
 const DEFAULT_CACHE_SIZE_MB: usize = 500;
 
+/// Default max journal size in MB (2 GiB)
+const DEFAULT_MAX_JOURNAL_SIZE_MB: usize = 2048;
+
+/// Default flush on commit setting
+const DEFAULT_FLUSH_ON_COMMIT: bool = true;
+
 /// Keyspace names for index store
 mod keyspace_names {
     pub const CURSOR: &str = "index-cursor";
@@ -91,23 +97,36 @@ pub struct IndexStore {
     history_account: Keyspace,
     history_metadata: Keyspace,
     history_script: Keyspace,
+    // Configuration
+    flush_on_commit: bool,
 }
 
 impl IndexStore {
     /// Open or create an index store at the given path
-    pub fn open(path: impl AsRef<Path>, cache_size_mb: Option<usize>) -> Result<Self, Error> {
+    pub fn open(
+        path: impl AsRef<Path>,
+        cache_size_mb: Option<usize>,
+        max_journal_size_mb: Option<usize>,
+        flush_on_commit: Option<bool>,
+    ) -> Result<Self, Error> {
         let cache_size = cache_size_mb.unwrap_or(DEFAULT_CACHE_SIZE_MB);
         let cache_bytes = (cache_size * 1024 * 1024) as u64;
 
+        let max_journal = max_journal_size_mb.unwrap_or(DEFAULT_MAX_JOURNAL_SIZE_MB);
+        let max_journal_bytes = (max_journal as u64) * 1024 * 1024;
+
+        let flush = flush_on_commit.unwrap_or(DEFAULT_FLUSH_ON_COMMIT);
+
         let db = Database::builder(path.as_ref())
             .cache_size(cache_bytes)
+            .max_journaling_size(max_journal_bytes)
             .open()?;
 
-        Self::from_database(db)
+        Self::from_database(db, flush)
     }
 
     /// Create an index store from an existing database
-    fn from_database(db: Database) -> Result<Self, Error> {
+    fn from_database(db: Database, flush_on_commit: bool) -> Result<Self, Error> {
         // Helper closure to create default keyspace options
         let opts = || KeyspaceCreateOptions::default();
 
@@ -156,6 +175,7 @@ impl IndexStore {
             history_account,
             history_metadata,
             history_script,
+            flush_on_commit,
         })
     }
 
@@ -254,7 +274,16 @@ impl CoreIndexWriter for IndexStoreWriter {
             .map_err(|_| Error::LockPoisoned)?
             .durability(Some(PersistMode::Buffer));
 
-        batch.commit().map_err(|e| Error::Fjall(e))?;
+        batch.commit().map_err(Error::Fjall)?;
+
+        // Flush journal if configured to prevent accumulation
+        if self.store.flush_on_commit {
+            self.store
+                .db
+                .persist(PersistMode::Buffer)
+                .map_err(Error::Fjall)?;
+        }
+
         Ok(())
     }
 }

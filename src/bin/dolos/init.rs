@@ -276,7 +276,10 @@ impl ConfigEditor {
 
             // Add max wal history for network from Genesis.
             let genesis = network.load_included_genesis();
-            self.0.storage.wal.max_history = Some(mutable_slots(&genesis));
+            self.0
+                .storage
+                .wal
+                .set_max_history(Some(mutable_slots(&genesis)));
         }
 
         self
@@ -295,7 +298,7 @@ impl ConfigEditor {
     }
 
     fn apply_history_pruning(mut self, value: HistoryPrunningOptions) -> Self {
-        self.0.storage.archive.max_history = value.into();
+        self.0.storage.archive.set_max_history(value.into());
 
         self
     }

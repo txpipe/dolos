@@ -129,57 +129,189 @@ impl Display for StorageVersion {
     }
 }
 
-/// Storage backend selection for stores that support multiple implementations.
-#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum StorageBackend {
-    #[default]
-    Redb,
-    Fjall,
+/// WAL store configuration.
+/// Note: WAL only supports Redb backend currently.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(tag = "backend", rename_all = "lowercase")]
+pub enum WalStoreConfig {
+    Redb {
+        /// Size (in MB) of memory allocated for caching.
+        #[serde(default)]
+        cache: Option<usize>,
+        /// Maximum number of slots to keep in the WAL.
+        #[serde(default)]
+        max_history: Option<u64>,
+    },
 }
 
-/// WAL store configuration.
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
-pub struct WalStoreConfig {
-    /// Size (in MB) of memory allocated for caching.
-    pub cache: Option<usize>,
-    /// Maximum number of slots to keep in the WAL.
-    pub max_history: Option<u64>,
+impl Default for WalStoreConfig {
+    fn default() -> Self {
+        Self::Redb {
+            cache: None,
+            max_history: None,
+        }
+    }
+}
+
+impl WalStoreConfig {
+    pub fn cache(&self) -> Option<usize> {
+        match self {
+            Self::Redb { cache, .. } => *cache,
+        }
+    }
+
+    pub fn max_history(&self) -> Option<u64> {
+        match self {
+            Self::Redb { max_history, .. } => *max_history,
+        }
+    }
+
+    pub fn set_max_history(&mut self, value: Option<u64>) {
+        match self {
+            Self::Redb { max_history, .. } => *max_history = value,
+        }
+    }
 }
 
 /// State store configuration.
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
-pub struct StateStoreConfig {
-    /// Backend implementation (default: redb).
-    #[serde(default)]
-    pub backend: StorageBackend,
-    /// Size (in MB) of memory allocated for caching.
-    pub cache: Option<usize>,
-    /// Maximum number of slots to keep before pruning.
-    pub max_history: Option<u64>,
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(tag = "backend", rename_all = "lowercase")]
+pub enum StateStoreConfig {
+    Redb {
+        /// Size (in MB) of memory allocated for caching.
+        #[serde(default)]
+        cache: Option<usize>,
+        /// Maximum number of slots to keep before pruning.
+        #[serde(default)]
+        max_history: Option<u64>,
+    },
+    Fjall {
+        /// Size (in MB) of memory allocated for caching.
+        #[serde(default)]
+        cache: Option<usize>,
+        /// Maximum number of slots to keep before pruning.
+        #[serde(default)]
+        max_history: Option<u64>,
+        /// Maximum journal size in MB (default: 2048 = 2 GiB).
+        #[serde(default)]
+        max_journal_size: Option<usize>,
+        /// Flush journal after each commit (default: true).
+        /// Prevents journal accumulation at cost of some performance.
+        #[serde(default)]
+        flush_on_commit: Option<bool>,
+    },
+}
+
+impl Default for StateStoreConfig {
+    fn default() -> Self {
+        Self::Redb {
+            cache: None,
+            max_history: None,
+        }
+    }
+}
+
+impl StateStoreConfig {
+    pub fn cache(&self) -> Option<usize> {
+        match self {
+            Self::Redb { cache, .. } | Self::Fjall { cache, .. } => *cache,
+        }
+    }
+
+    pub fn max_history(&self) -> Option<u64> {
+        match self {
+            Self::Redb { max_history, .. } | Self::Fjall { max_history, .. } => *max_history,
+        }
+    }
+
+    pub fn is_fjall(&self) -> bool {
+        matches!(self, Self::Fjall { .. })
+    }
 }
 
 /// Archive store configuration.
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
-pub struct ArchiveStoreConfig {
-    /// Backend implementation (default: redb).
-    /// Note: Currently only redb is supported.
-    #[serde(default)]
-    pub backend: StorageBackend,
-    /// Size (in MB) of memory allocated for caching.
-    pub cache: Option<usize>,
-    /// Maximum number of slots to keep.
-    pub max_history: Option<u64>,
+/// Note: Archive only supports Redb backend currently.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(tag = "backend", rename_all = "lowercase")]
+pub enum ArchiveStoreConfig {
+    Redb {
+        /// Size (in MB) of memory allocated for caching.
+        #[serde(default)]
+        cache: Option<usize>,
+        /// Maximum number of slots to keep.
+        #[serde(default)]
+        max_history: Option<u64>,
+    },
+}
+
+impl Default for ArchiveStoreConfig {
+    fn default() -> Self {
+        Self::Redb {
+            cache: None,
+            max_history: None,
+        }
+    }
+}
+
+impl ArchiveStoreConfig {
+    pub fn cache(&self) -> Option<usize> {
+        match self {
+            Self::Redb { cache, .. } => *cache,
+        }
+    }
+
+    pub fn max_history(&self) -> Option<u64> {
+        match self {
+            Self::Redb { max_history, .. } => *max_history,
+        }
+    }
+
+    pub fn set_max_history(&mut self, value: Option<u64>) {
+        match self {
+            Self::Redb { max_history, .. } => *max_history = value,
+        }
+    }
 }
 
 /// Index store configuration.
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
-pub struct IndexStoreConfig {
-    /// Backend implementation (default: redb).
-    #[serde(default)]
-    pub backend: StorageBackend,
-    /// Size (in MB) of memory allocated for caching.
-    pub cache: Option<usize>,
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(tag = "backend", rename_all = "lowercase")]
+pub enum IndexStoreConfig {
+    Redb {
+        /// Size (in MB) of memory allocated for caching.
+        #[serde(default)]
+        cache: Option<usize>,
+    },
+    Fjall {
+        /// Size (in MB) of memory allocated for caching.
+        #[serde(default)]
+        cache: Option<usize>,
+        /// Maximum journal size in MB (default: 2048 = 2 GiB).
+        #[serde(default)]
+        max_journal_size: Option<usize>,
+        /// Flush journal after each commit (default: true).
+        /// Prevents journal accumulation at cost of some performance.
+        #[serde(default)]
+        flush_on_commit: Option<bool>,
+    },
+}
+
+impl Default for IndexStoreConfig {
+    fn default() -> Self {
+        Self::Redb { cache: None }
+    }
+}
+
+impl IndexStoreConfig {
+    pub fn cache(&self) -> Option<usize> {
+        match self {
+            Self::Redb { cache, .. } | Self::Fjall { cache, .. } => *cache,
+        }
+    }
+
+    pub fn is_fjall(&self) -> bool {
+        matches!(self, Self::Fjall { .. })
+    }
 }
 
 /// Storage configuration with nested per-store settings.
