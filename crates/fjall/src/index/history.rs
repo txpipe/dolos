@@ -1,177 +1,147 @@
-//! Historical index operations for fjall.
+//! Historical index operations for fjall (chain-agnostic).
 //!
 //! These indexes support queries over archived block data:
-//! 1. Exact lookups: block_hash -> slot, tx_hash -> slot, block_number -> slot
-//! 2. Approximate lookups: xxh3(data) ++ slot -> [] (multimap via prefix scan)
+//! 1. Exact lookups (in `index-exact` keyspace): block_hash -> slot, tx_hash -> slot, block_number -> slot
+//! 2. Block tags (in `index-tags` keyspace): xxh3(data) ++ slot -> [] (multimap via prefix scan)
 //!
-//! For approximate lookups, variable-length data is hashed to u64 using xxh3.
-//! Slots are stored as part of the key (big-endian) for efficient range queries.
+//! All keys use dimension hashing for chain-agnostic storage:
+//! - Exact lookups: `[dim_hash:8][key_data:var]` -> `[slot:8]`
+//! - Block tags: `[dim_hash:8][xxh3(tag_key):8][slot:8]` -> empty
 
 use dolos_core::{ArchiveIndexDelta, BlockSlot, IndexDelta, IndexError, Tag};
 use fjall::{Keyspace, OwnedWriteBatch, Readable};
 
-use crate::keys::{
-    archive_composite_key, archive_prefix, decode_slot_from_suffix, encode_slot, encode_u64,
-    hash_key, HASH_KEY_SIZE, SLOT_SIZE,
+use super::exact_keys::{
+    build_exact_key, build_exact_key_blocknum, decode_slot_value, encode_slot_value,
+    DIM_BLOCK_HASH, DIM_TX_HASH,
 };
+use super::tag_keys::{
+    build_block_tag_key, build_block_tag_key_hashed, build_block_tag_prefix_hashed,
+    decode_block_tag_slot, BLOCK_TAG_KEY_SIZE,
+};
+use crate::keys::hash_key;
 use crate::Error;
 
-/// Historical index dimension constants (must match dolos-cardano dimensions).
-pub mod dimensions {
-    pub const ADDRESS: &str = "address";
-    pub const PAYMENT: &str = "payment";
-    pub const STAKE: &str = "stake";
-    pub const POLICY: &str = "policy";
-    pub const ASSET: &str = "asset";
-    pub const DATUM: &str = "datum";
-    pub const SPENT_TXO: &str = "spent_txo";
-    pub const ACCOUNT_CERTS: &str = "account_certs";
-    pub const METADATA: &str = "metadata";
-    pub const SCRIPT: &str = "script";
-}
+// ============================================================================
+// Block Tag Operations (index-tags keyspace)
+// ============================================================================
 
-/// References to all historical index keyspaces
-pub struct HistoryKeyspaces<'a> {
-    // Exact lookups
-    pub blockhash: &'a Keyspace,
-    pub blocknum: &'a Keyspace,
-    pub txhash: &'a Keyspace,
-    // Approximate lookups (multimap)
-    pub address: &'a Keyspace,
-    pub payment: &'a Keyspace,
-    pub stake: &'a Keyspace,
-    pub asset: &'a Keyspace,
-    pub policy: &'a Keyspace,
-    pub datum: &'a Keyspace,
-    pub spenttxo: &'a Keyspace,
-    pub account: &'a Keyspace,
-    pub metadata: &'a Keyspace,
-    pub script: &'a Keyspace,
-}
-
-impl<'a> HistoryKeyspaces<'a> {
-    /// Get keyspace for a tag dimension
-    pub fn keyspace_for_dimension(&self, dimension: &str) -> Option<&'a Keyspace> {
-        match dimension {
-            dimensions::ADDRESS => Some(self.address),
-            dimensions::PAYMENT => Some(self.payment),
-            dimensions::STAKE => Some(self.stake),
-            dimensions::ASSET => Some(self.asset),
-            dimensions::POLICY => Some(self.policy),
-            dimensions::DATUM => Some(self.datum),
-            dimensions::SPENT_TXO => Some(self.spenttxo),
-            dimensions::ACCOUNT_CERTS => Some(self.account),
-            dimensions::METADATA => Some(self.metadata),
-            dimensions::SCRIPT => Some(self.script),
-            _ => None,
-        }
-    }
-}
-
-/// Insert an approximate index entry (multimap style)
-fn insert_approx(batch: &mut OwnedWriteBatch, keyspace: &Keyspace, data: &[u8], slot: BlockSlot) {
-    let hash = hash_key(data);
-    let key = archive_composite_key(hash, slot);
-    batch.insert(keyspace, key, []);
-}
-
-/// Insert an approximate index entry with pre-hashed key
-fn insert_approx_hashed(
+/// Insert a block tag entry (multimap style)
+fn insert_block_tag(
     batch: &mut OwnedWriteBatch,
-    keyspace: &Keyspace,
+    tags_keyspace: &Keyspace,
+    dimension: &str,
+    data: &[u8],
+    slot: BlockSlot,
+) {
+    let key = build_block_tag_key(dimension, data, slot);
+    batch.insert(tags_keyspace, key, []);
+}
+
+/// Insert a block tag entry with pre-hashed key
+fn insert_block_tag_hashed(
+    batch: &mut OwnedWriteBatch,
+    tags_keyspace: &Keyspace,
+    dimension: &str,
     hash: u64,
     slot: BlockSlot,
 ) {
-    let key = archive_composite_key(hash, slot);
-    batch.insert(keyspace, key, []);
+    let key = build_block_tag_key_hashed(dimension, hash, slot);
+    batch.insert(tags_keyspace, key, []);
 }
 
-/// Remove an approximate index entry (multimap style)
-fn remove_approx(batch: &mut OwnedWriteBatch, keyspace: &Keyspace, data: &[u8], slot: BlockSlot) {
-    let hash = hash_key(data);
-    let key = archive_composite_key(hash, slot);
-    batch.remove(keyspace, key);
-}
-
-/// Remove an approximate index entry with pre-hashed key
-fn remove_approx_hashed(
+/// Remove a block tag entry (multimap style)
+fn remove_block_tag(
     batch: &mut OwnedWriteBatch,
-    keyspace: &Keyspace,
+    tags_keyspace: &Keyspace,
+    dimension: &str,
+    data: &[u8],
+    slot: BlockSlot,
+) {
+    let key = build_block_tag_key(dimension, data, slot);
+    batch.remove(tags_keyspace, key);
+}
+
+/// Remove a block tag entry with pre-hashed key
+fn remove_block_tag_hashed(
+    batch: &mut OwnedWriteBatch,
+    tags_keyspace: &Keyspace,
+    dimension: &str,
     hash: u64,
     slot: BlockSlot,
 ) {
-    let key = archive_composite_key(hash, slot);
-    batch.remove(keyspace, key);
+    let key = build_block_tag_key_hashed(dimension, hash, slot);
+    batch.remove(tags_keyspace, key);
 }
 
-/// Insert a tag into the appropriate keyspace
-fn insert_tag(
-    batch: &mut OwnedWriteBatch,
-    keyspaces: &HistoryKeyspaces,
-    tag: &Tag,
-    slot: BlockSlot,
-) {
+/// Insert a tag into the tags keyspace.
+///
+/// For "metadata" dimension, the key is already the u64 hash value (8 bytes).
+/// For all other dimensions, the key is hashed internally.
+fn insert_tag(batch: &mut OwnedWriteBatch, tags_keyspace: &Keyspace, tag: &Tag, slot: BlockSlot) {
     // Metadata is special - the key is already the u64 hash value
-    if tag.dimension == dimensions::METADATA {
+    if tag.dimension == "metadata" {
         if let Ok(hash_bytes) = tag.key.as_slice().try_into() {
             let hash = u64::from_be_bytes(hash_bytes);
-            insert_approx_hashed(batch, keyspaces.metadata, hash, slot);
+            insert_block_tag_hashed(batch, tags_keyspace, tag.dimension, hash, slot);
         }
         return;
     }
 
-    if let Some(keyspace) = keyspaces.keyspace_for_dimension(tag.dimension) {
-        insert_approx(batch, keyspace, &tag.key, slot);
-    }
+    insert_block_tag(batch, tags_keyspace, tag.dimension, &tag.key, slot);
 }
 
-/// Remove a tag from the appropriate keyspace
-fn remove_tag(
-    batch: &mut OwnedWriteBatch,
-    keyspaces: &HistoryKeyspaces,
-    tag: &Tag,
-    slot: BlockSlot,
-) {
+/// Remove a tag from the tags keyspace.
+///
+/// For "metadata" dimension, the key is already the u64 hash value (8 bytes).
+/// For all other dimensions, the key is hashed internally.
+fn remove_tag(batch: &mut OwnedWriteBatch, tags_keyspace: &Keyspace, tag: &Tag, slot: BlockSlot) {
     // Metadata is special - the key is already the u64 hash value
-    if tag.dimension == dimensions::METADATA {
+    if tag.dimension == "metadata" {
         if let Ok(hash_bytes) = tag.key.as_slice().try_into() {
             let hash = u64::from_be_bytes(hash_bytes);
-            remove_approx_hashed(batch, keyspaces.metadata, hash, slot);
+            remove_block_tag_hashed(batch, tags_keyspace, tag.dimension, hash, slot);
         }
         return;
     }
 
-    if let Some(keyspace) = keyspaces.keyspace_for_dimension(tag.dimension) {
-        remove_approx(batch, keyspace, &tag.key, slot);
-    }
+    remove_block_tag(batch, tags_keyspace, tag.dimension, &tag.key, slot);
 }
+
+// ============================================================================
+// Block Processing
+// ============================================================================
 
 /// Apply archive indexes for a single block delta
 fn apply_block(
     batch: &mut OwnedWriteBatch,
-    keyspaces: &HistoryKeyspaces,
+    exact_keyspace: &Keyspace,
+    tags_keyspace: &Keyspace,
     block: &ArchiveIndexDelta,
 ) -> Result<(), Error> {
     let slot = block.slot;
 
-    // Exact lookup: block hash -> slot
+    // Exact lookup: block hash -> slot (in exact keyspace)
     if !block.block_hash.is_empty() {
-        batch.insert(keyspaces.blockhash, &block.block_hash, encode_slot(slot));
+        let key = build_exact_key(DIM_BLOCK_HASH, &block.block_hash);
+        batch.insert(exact_keyspace, key, encode_slot_value(slot));
     }
 
-    // Exact lookup: block number -> slot
+    // Exact lookup: block number -> slot (in exact keyspace)
     if let Some(number) = block.block_number {
-        batch.insert(keyspaces.blocknum, encode_u64(number), encode_slot(slot));
+        let key = build_exact_key_blocknum(number);
+        batch.insert(exact_keyspace, key, encode_slot_value(slot));
     }
 
-    // Exact lookup: tx hashes -> slot
+    // Exact lookup: tx hashes -> slot (in exact keyspace)
     for tx_hash in &block.tx_hashes {
-        batch.insert(keyspaces.txhash, tx_hash.as_slice(), encode_slot(slot));
+        let key = build_exact_key(DIM_TX_HASH, tx_hash.as_slice());
+        batch.insert(exact_keyspace, key, encode_slot_value(slot));
     }
 
-    // Tag-based approximate lookups
+    // Block tags (in tags keyspace)
     for tag in &block.tags {
-        insert_tag(batch, keyspaces, tag, slot);
+        insert_tag(batch, tags_keyspace, tag, slot);
     }
 
     Ok(())
@@ -180,27 +150,31 @@ fn apply_block(
 /// Undo archive indexes for a single block delta (rollback)
 fn undo_block(
     batch: &mut OwnedWriteBatch,
-    keyspaces: &HistoryKeyspaces,
+    exact_keyspace: &Keyspace,
+    tags_keyspace: &Keyspace,
     block: &ArchiveIndexDelta,
 ) -> Result<(), Error> {
     let slot = block.slot;
 
-    // Remove exact lookups
+    // Remove exact lookups (from exact keyspace)
     if !block.block_hash.is_empty() {
-        batch.remove(keyspaces.blockhash, &block.block_hash);
+        let key = build_exact_key(DIM_BLOCK_HASH, &block.block_hash);
+        batch.remove(exact_keyspace, key);
     }
 
     if let Some(number) = block.block_number {
-        batch.remove(keyspaces.blocknum, encode_u64(number));
+        let key = build_exact_key_blocknum(number);
+        batch.remove(exact_keyspace, key);
     }
 
     for tx_hash in &block.tx_hashes {
-        batch.remove(keyspaces.txhash, tx_hash.as_slice());
+        let key = build_exact_key(DIM_TX_HASH, tx_hash.as_slice());
+        batch.remove(exact_keyspace, key);
     }
 
-    // Remove approximate lookups
+    // Remove block tags (from tags keyspace)
     for tag in &block.tags {
-        remove_tag(batch, keyspaces, tag, slot);
+        remove_tag(batch, tags_keyspace, tag, slot);
     }
 
     Ok(())
@@ -209,11 +183,12 @@ fn undo_block(
 /// Apply archive indexes from an IndexDelta
 pub fn apply(
     batch: &mut OwnedWriteBatch,
-    keyspaces: &HistoryKeyspaces,
+    exact_keyspace: &Keyspace,
+    tags_keyspace: &Keyspace,
     delta: &IndexDelta,
 ) -> Result<(), Error> {
     for block in &delta.archive {
-        apply_block(batch, keyspaces, block)?;
+        apply_block(batch, exact_keyspace, tags_keyspace, block)?;
     }
     Ok(())
 }
@@ -221,36 +196,34 @@ pub fn apply(
 /// Undo archive indexes from an IndexDelta (rollback)
 pub fn undo(
     batch: &mut OwnedWriteBatch,
-    keyspaces: &HistoryKeyspaces,
+    exact_keyspace: &Keyspace,
+    tags_keyspace: &Keyspace,
     delta: &IndexDelta,
 ) -> Result<(), Error> {
     // Undo in reverse order
     for block in delta.archive.iter().rev() {
-        undo_block(batch, keyspaces, block)?;
+        undo_block(batch, exact_keyspace, tags_keyspace, block)?;
     }
     Ok(())
 }
 
+// ============================================================================
+// Exact Lookup Queries (index-exact keyspace)
+// ============================================================================
+
 /// Get slot by block hash (exact lookup).
-///
-/// Uses the `Readable` trait to support both direct keyspace access and snapshot-based
-/// reads. Snapshot-based reads avoid potential deadlocks with concurrent writes.
 pub fn get_by_block_hash<R: Readable>(
     readable: &R,
-    keyspace: &Keyspace,
+    exact_keyspace: &Keyspace,
     block_hash: &[u8],
 ) -> Result<Option<BlockSlot>, Error> {
+    let key = build_exact_key(DIM_BLOCK_HASH, block_hash);
     match readable
-        .get(keyspace, block_hash)
+        .get(exact_keyspace, key)
         .map_err(|e| Error::Fjall(e.into()))?
     {
         Some(value) => {
-            let slot = u64::from_be_bytes(
-                value
-                    .as_ref()
-                    .try_into()
-                    .map_err(|_| Error::Codec("invalid slot encoding".to_string()))?,
-            );
+            let slot = decode_slot_value(value.as_ref());
             Ok(Some(slot))
         }
         None => Ok(None),
@@ -258,26 +231,18 @@ pub fn get_by_block_hash<R: Readable>(
 }
 
 /// Get slot by block number (exact lookup).
-///
-/// Uses the `Readable` trait to support both direct keyspace access and snapshot-based
-/// reads. Snapshot-based reads avoid potential deadlocks with concurrent writes.
 pub fn get_by_block_number<R: Readable>(
     readable: &R,
-    keyspace: &Keyspace,
+    exact_keyspace: &Keyspace,
     number: u64,
 ) -> Result<Option<BlockSlot>, Error> {
-    let key = encode_u64(number);
+    let key = build_exact_key_blocknum(number);
     match readable
-        .get(keyspace, key)
+        .get(exact_keyspace, key)
         .map_err(|e| Error::Fjall(e.into()))?
     {
         Some(value) => {
-            let slot = u64::from_be_bytes(
-                value
-                    .as_ref()
-                    .try_into()
-                    .map_err(|_| Error::Codec("invalid slot encoding".to_string()))?,
-            );
+            let slot = decode_slot_value(value.as_ref());
             Ok(Some(slot))
         }
         None => Ok(None),
@@ -285,37 +250,30 @@ pub fn get_by_block_number<R: Readable>(
 }
 
 /// Get slot by tx hash (exact lookup).
-///
-/// Uses the `Readable` trait to support both direct keyspace access and snapshot-based
-/// reads. Snapshot-based reads avoid potential deadlocks with concurrent writes.
 pub fn get_by_tx_hash<R: Readable>(
     readable: &R,
-    keyspace: &Keyspace,
+    exact_keyspace: &Keyspace,
     tx_hash: &[u8],
 ) -> Result<Option<BlockSlot>, Error> {
+    let key = build_exact_key(DIM_TX_HASH, tx_hash);
     match readable
-        .get(keyspace, tx_hash)
+        .get(exact_keyspace, key)
         .map_err(|e| Error::Fjall(e.into()))?
     {
         Some(value) => {
-            let slot = u64::from_be_bytes(
-                value
-                    .as_ref()
-                    .try_into()
-                    .map_err(|_| Error::Codec("invalid slot encoding".to_string()))?,
-            );
+            let slot = decode_slot_value(value.as_ref());
             Ok(Some(slot))
         }
         None => Ok(None),
     }
 }
 
-/// Slot iterator for archive index queries.
+// ============================================================================
+// Block Tag Iterator (index-tags keyspace)
+// ============================================================================
+
+/// Slot iterator for block tag queries.
 /// Wraps a fjall prefix iterator and filters by slot range.
-///
-/// Uses the `Readable` trait to support both direct keyspace access and snapshot-based
-/// reads. Snapshot-based reads avoid potential deadlocks with concurrent writes by using
-/// MVCC (Multi-Version Concurrency Control).
 pub struct SlotIterator {
     /// Collected slots from prefix scan
     slots: Vec<BlockSlot>,
@@ -326,39 +284,48 @@ pub struct SlotIterator {
 }
 
 impl SlotIterator {
-    /// Create a new slot iterator from a keyspace prefix scan.
+    /// Create a new slot iterator from a tags keyspace prefix scan.
     ///
-    /// Uses the `Readable` trait to support snapshot-based iteration.
+    /// The dimension string is passed directly (chain-agnostic).
     pub fn new<R: Readable>(
         readable: &R,
-        keyspace: &Keyspace,
+        tags_keyspace: &Keyspace,
+        dimension: &str,
         data: &[u8],
         start_slot: BlockSlot,
         end_slot: BlockSlot,
     ) -> Result<Self, Error> {
         let hash = hash_key(data);
-        Self::from_hash(readable, keyspace, hash, start_slot, end_slot)
+        Self::from_hash(
+            readable,
+            tags_keyspace,
+            dimension,
+            hash,
+            start_slot,
+            end_slot,
+        )
     }
 
     /// Create from a pre-computed hash (for metadata labels).
     ///
-    /// Uses the `Readable` trait to support snapshot-based iteration.
+    /// The dimension string is passed directly (chain-agnostic).
     pub fn from_hash<R: Readable>(
         readable: &R,
-        keyspace: &Keyspace,
+        tags_keyspace: &Keyspace,
+        dimension: &str,
         hash: u64,
         start_slot: BlockSlot,
         end_slot: BlockSlot,
     ) -> Result<Self, Error> {
-        let prefix = archive_prefix(hash);
+        let prefix = build_block_tag_prefix_hashed(dimension, hash);
         let mut slots = Vec::new();
 
         // Using Readable::prefix() enables snapshot-based iteration
-        for guard in readable.prefix(keyspace, prefix) {
+        for guard in readable.prefix(tags_keyspace, prefix) {
             let key = guard.key()?;
 
-            if key.len() >= HASH_KEY_SIZE + SLOT_SIZE {
-                let slot = decode_slot_from_suffix(&key);
+            if key.len() >= BLOCK_TAG_KEY_SIZE {
+                let slot = decode_block_tag_slot(&key);
 
                 if slot >= start_slot && slot <= end_slot {
                     slots.push(slot);

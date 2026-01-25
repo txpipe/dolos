@@ -5,18 +5,19 @@
 //!
 //! ## Index Store Keys
 //!
-//! - **UTxO filter**: `lookup_key ++ txo_ref` (variable + 36 bytes)
-//! - **History exact**: direct key (hash, number, etc.)
-//! - **History approx**: `xxh3_hash ++ slot` (16 bytes)
+//! All index keys use dimension hashing for chain-agnostic storage:
+//! - **UTxO tag**: `[dim_hash:8][lookup_key:var][txo_ref:36]`
+//! - **Block tag**: `[dim_hash:8][xxh3(tag_key):8][slot:8]`
+//! - **Exact lookup**: `[dim_hash:8][key_data:var]`
 //!
 //! ## State Store Keys
 //!
 //! - **UTxOs**: `txhash[32] ++ idx[4]` (36 bytes) -> `era[2] ++ cbor[...]`
-//! - **Datums**: `hash[32]` -> `refcount[8] ++ bytes[...]`
-//! - **Entities**: `key[32]` -> value bytes
+//! - **Entities**: `[ns_hash:8][key:32]` (40 bytes) -> value bytes
 
 use dolos_core::{Era, TxoRef};
-use xxhash_rust::xxh3::xxh3_64;
+use std::hash::Hasher;
+use xxhash_rust::xxh3::{xxh3_64, Xxh3};
 
 /// Size of encoded TxoRef: 32-byte tx hash + 4-byte index
 pub const TXO_REF_SIZE: usize = 36;
@@ -26,6 +27,47 @@ pub const SLOT_SIZE: usize = 8;
 
 /// Size of encoded hash key: 8-byte u64
 pub const HASH_KEY_SIZE: usize = 8;
+
+/// Size of dimension hash: 8 bytes
+pub const DIM_HASH_SIZE: usize = 8;
+
+// ============================================================================
+// Dimension Hashing (Chain-Agnostic Index Keys)
+// ============================================================================
+
+/// Internal dimension prefix constants for index store.
+///
+/// These prefixes are combined with dimension strings to create unique
+/// hashes that distinguish between different index types (UTxO tags,
+/// block tags, exact lookups) even when they share the same dimension name.
+pub mod dim_prefix {
+    /// Prefix for UTxO tag dimensions (current state filters)
+    pub const UTXO: &str = "utxo";
+    /// Prefix for block tag dimensions (historical approximate lookups)
+    pub const BLOCK: &str = "block";
+    /// Prefix for exact lookup dimensions (point queries)
+    pub const EXACT: &str = "exact";
+}
+
+/// Hash a qualified dimension string to 8 bytes.
+///
+/// Combines prefix and dimension with ":" separator, then hashes with xxh3.
+/// This ensures dimensions with the same name but different types don't collide.
+///
+/// # Examples
+///
+/// ```ignore
+/// // These produce different hashes:
+/// hash_dimension("utxo", "address")   // hashes "utxo:address"
+/// hash_dimension("block", "address")  // hashes "block:address"
+/// ```
+pub fn hash_dimension(prefix: &str, dim: &str) -> [u8; DIM_HASH_SIZE] {
+    let mut hasher = Xxh3::new();
+    hasher.write(prefix.as_bytes());
+    hasher.write(b":");
+    hasher.write(dim.as_bytes());
+    hasher.finish().to_be_bytes()
+}
 
 /// Encode a TxoRef as 36 bytes: tx_hash (32) + index_be (4)
 pub fn encode_txo_ref(txo: &TxoRef) -> [u8; TXO_REF_SIZE] {
@@ -242,5 +284,33 @@ mod tests {
         let (decoded_era, decoded_cbor) = decode_utxo_value(&encoded).unwrap();
         assert_eq!(era, decoded_era);
         assert!(decoded_cbor.is_empty());
+    }
+
+    #[test]
+    fn test_hash_dimension_deterministic() {
+        let hash1 = hash_dimension("utxo", "address");
+        let hash2 = hash_dimension("utxo", "address");
+        assert_eq!(hash1, hash2);
+    }
+
+    #[test]
+    fn test_hash_dimension_different_dims() {
+        let hash1 = hash_dimension("utxo", "address");
+        let hash2 = hash_dimension("utxo", "payment");
+        assert_ne!(hash1, hash2);
+    }
+
+    #[test]
+    fn test_hash_dimension_different_prefixes() {
+        // Same dimension name, different prefix -> different hash
+        let utxo_hash = hash_dimension("utxo", "address");
+        let block_hash = hash_dimension("block", "address");
+        assert_ne!(utxo_hash, block_hash);
+    }
+
+    #[test]
+    fn test_hash_dimension_size() {
+        let hash = hash_dimension("exact", "block_hash");
+        assert_eq!(hash.len(), DIM_HASH_SIZE);
     }
 }

@@ -1,136 +1,118 @@
-//! UTxO filter index operations for fjall.
+//! UTxO tag index operations for fjall (chain-agnostic).
 //!
 //! These indexes map lookup keys (addresses, policies, assets) to sets of TxoRefs.
-//! Each entry is stored as a composite key: `lookup_key ++ txo_ref` with an empty value.
+//! All entries are stored in the `index-tags` keyspace with dimension hash prefixes.
+//! Key format: `[dim_hash:8][lookup_key:var][txo_ref:36]` with empty value.
 //! Queries use prefix scanning to find all TxoRefs for a given lookup key.
+//!
+//! The dimension hash is computed as `xxh3("utxo:" + dimension)`, making the
+//! storage layer fully chain-agnostic.
 
 use std::collections::HashSet;
 
 use dolos_core::{IndexDelta, TxoRef, UtxoSet};
 use fjall::{Keyspace, OwnedWriteBatch, Readable};
 
-use crate::keys::{decode_txo_ref_from_suffix, utxo_composite_key, TXO_REF_SIZE};
+use super::tag_keys::{build_utxo_tag_key, build_utxo_tag_prefix, decode_utxo_tag_txo};
+use crate::keys::{DIM_HASH_SIZE, TXO_REF_SIZE};
 use crate::Error;
 
-/// UTxO filter dimension constants (must match dolos-cardano dimensions).
-pub mod dimensions {
-    pub const ADDRESS: &str = "address";
-    pub const PAYMENT: &str = "payment";
-    pub const STAKE: &str = "stake";
-    pub const POLICY: &str = "policy";
-    pub const ASSET: &str = "asset";
+/// Insert a UTxO tag entry into the tags keyspace
+fn insert_entry(
+    batch: &mut OwnedWriteBatch,
+    tags_keyspace: &Keyspace,
+    dimension: &str,
+    lookup_key: &[u8],
+    txo: &TxoRef,
+) {
+    let key = build_utxo_tag_key(dimension, lookup_key, txo);
+    batch.insert(tags_keyspace, key, []);
 }
 
-/// References to all UTxO filter keyspaces
-pub struct UtxoKeyspaces<'a> {
-    pub address: &'a Keyspace,
-    pub payment: &'a Keyspace,
-    pub stake: &'a Keyspace,
-    pub policy: &'a Keyspace,
-    pub asset: &'a Keyspace,
+/// Remove a UTxO tag entry from the tags keyspace
+fn remove_entry(
+    batch: &mut OwnedWriteBatch,
+    tags_keyspace: &Keyspace,
+    dimension: &str,
+    lookup_key: &[u8],
+    txo: &TxoRef,
+) {
+    let key = build_utxo_tag_key(dimension, lookup_key, txo);
+    batch.remove(tags_keyspace, key);
 }
 
-impl<'a> UtxoKeyspaces<'a> {
-    /// Get keyspace for a tag dimension
-    pub fn keyspace_for_dimension(&self, dimension: &str) -> Option<&'a Keyspace> {
-        match dimension {
-            dimensions::ADDRESS => Some(self.address),
-            dimensions::PAYMENT => Some(self.payment),
-            dimensions::STAKE => Some(self.stake),
-            dimensions::POLICY => Some(self.policy),
-            dimensions::ASSET => Some(self.asset),
-            _ => None,
-        }
-    }
-}
-
-/// Insert a UTxO entry into a keyspace
-fn insert_entry(batch: &mut OwnedWriteBatch, keyspace: &Keyspace, key: &[u8], txo: &TxoRef) {
-    let composite = utxo_composite_key(key, txo);
-    batch.insert(keyspace, composite, []);
-}
-
-/// Remove a UTxO entry from a keyspace
-fn remove_entry(batch: &mut OwnedWriteBatch, keyspace: &Keyspace, key: &[u8], txo: &TxoRef) {
-    let composite = utxo_composite_key(key, txo);
-    batch.remove(keyspace, composite);
-}
-
-/// Apply UTxO filter changes from an IndexDelta
+/// Apply UTxO tag changes from an IndexDelta to the tags keyspace
 pub fn apply(
     batch: &mut OwnedWriteBatch,
-    keyspaces: &UtxoKeyspaces,
+    tags_keyspace: &Keyspace,
     delta: &IndexDelta,
 ) -> Result<(), Error> {
     // Insert produced UTxOs
     for (txo_ref, tags) in &delta.utxo.produced {
         for tag in tags {
-            if let Some(keyspace) = keyspaces.keyspace_for_dimension(tag.dimension) {
-                insert_entry(batch, keyspace, &tag.key, txo_ref);
-            }
+            insert_entry(batch, tags_keyspace, tag.dimension, &tag.key, txo_ref);
         }
     }
 
     // Remove consumed UTxOs
     for (txo_ref, tags) in &delta.utxo.consumed {
         for tag in tags {
-            if let Some(keyspace) = keyspaces.keyspace_for_dimension(tag.dimension) {
-                remove_entry(batch, keyspace, &tag.key, txo_ref);
-            }
+            remove_entry(batch, tags_keyspace, tag.dimension, &tag.key, txo_ref);
         }
     }
 
     Ok(())
 }
 
-/// Undo UTxO filter changes from an IndexDelta (for rollback)
+/// Undo UTxO tag changes from an IndexDelta (for rollback)
 pub fn undo(
     batch: &mut OwnedWriteBatch,
-    keyspaces: &UtxoKeyspaces,
+    tags_keyspace: &Keyspace,
     delta: &IndexDelta,
 ) -> Result<(), Error> {
     // Remove produced UTxOs (undo insertion)
     for (txo_ref, tags) in &delta.utxo.produced {
         for tag in tags {
-            if let Some(keyspace) = keyspaces.keyspace_for_dimension(tag.dimension) {
-                remove_entry(batch, keyspace, &tag.key, txo_ref);
-            }
+            remove_entry(batch, tags_keyspace, tag.dimension, &tag.key, txo_ref);
         }
     }
 
     // Restore consumed UTxOs (undo removal)
     for (txo_ref, tags) in &delta.utxo.consumed {
         for tag in tags {
-            if let Some(keyspace) = keyspaces.keyspace_for_dimension(tag.dimension) {
-                insert_entry(batch, keyspace, &tag.key, txo_ref);
-            }
+            insert_entry(batch, tags_keyspace, tag.dimension, &tag.key, txo_ref);
         }
     }
 
     Ok(())
 }
 
-/// Get all TxoRefs for a given lookup key using prefix scanning.
+/// Get all TxoRefs for a given dimension and lookup key using prefix scanning.
+///
+/// The dimension string is passed directly (chain-agnostic).
 ///
 /// Uses the `Readable` trait to support both direct keyspace access and snapshot-based
 /// reads. Snapshot-based reads avoid potential deadlocks with concurrent writes by using
 /// MVCC (Multi-Version Concurrency Control).
 pub fn get_by_key<R: Readable>(
     readable: &R,
-    keyspace: &Keyspace,
+    tags_keyspace: &Keyspace,
+    dimension: &str,
     lookup_key: &[u8],
 ) -> Result<UtxoSet, Error> {
     let mut result = HashSet::new();
 
-    // Prefix scan: all keys starting with lookup_key
-    // Using Readable::prefix() enables snapshot-based iteration
-    for guard in readable.prefix(keyspace, lookup_key) {
+    // Build prefix: [dim_hash:8][lookup_key]
+    let prefix = build_utxo_tag_prefix(dimension, lookup_key);
+
+    // Prefix scan: all keys starting with prefix
+    for guard in readable.prefix(tags_keyspace, prefix) {
         let key = guard.key()?;
 
-        // Key format: lookup_key ++ txo_ref
-        // We need to extract txo_ref from the suffix
-        if key.len() >= lookup_key.len() + TXO_REF_SIZE {
-            let txo_ref = decode_txo_ref_from_suffix(&key);
+        // Key format: [dim_hash:8][lookup_key:var][txo_ref:36]
+        // Minimum length: DIM_HASH_SIZE + lookup_key.len() + TXO_REF_SIZE
+        if key.len() >= DIM_HASH_SIZE + lookup_key.len() + TXO_REF_SIZE {
+            let txo_ref = decode_utxo_tag_txo(&key);
             result.insert(txo_ref);
         }
     }

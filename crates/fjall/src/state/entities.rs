@@ -1,32 +1,37 @@
 //! Generic entity table operations for fjall state store.
 //!
-//! Entities are simple key-value pairs stored in namespace-specific keyspaces.
-//! Keys are 32-byte EntityKeys, values are arbitrary byte sequences.
+//! All entity types share a single keyspace (`state-entities`) with namespace
+//! hash prefixes. Keys are 40 bytes: `[ns_hash:8][entity_key:32]`.
+//!
+//! This design reduces the number of LSM-tree segment files compared to
+//! separate keyspaces per entity type.
 
 use std::ops::Range;
 
-use dolos_core::{EntityKey, EntityValue, StateError};
+use dolos_core::{EntityKey, EntityValue, Namespace, StateError};
 use fjall::{Keyspace, OwnedWriteBatch, Readable};
 
+use super::entity_keys::{
+    build_entity_key, build_range_end, build_range_start, decode_entity_key, PREFIXED_KEY_SIZE,
+};
 use crate::Error;
 
-/// Size of entity keys: 32 bytes
-pub const ENTITY_KEY_SIZE: usize = 32;
-
-/// Read multiple entities by keys from a namespace keyspace.
+/// Read multiple entities by keys from the unified entities keyspace.
 ///
 /// Uses the `Readable` trait to support both direct keyspace access and snapshot-based
 /// reads. Snapshot-based reads avoid potential deadlocks with concurrent writes.
 pub fn read_entities<R: Readable>(
     readable: &R,
     keyspace: &Keyspace,
+    ns: Namespace,
     keys: &[&EntityKey],
 ) -> Result<Vec<Option<EntityValue>>, Error> {
     let mut results = Vec::with_capacity(keys.len());
 
     for key in keys {
+        let prefixed_key = build_entity_key(ns, key);
         let value = readable
-            .get(keyspace, key.as_ref())
+            .get(keyspace, prefixed_key)
             .map_err(|e| Error::Fjall(e.into()))?;
         results.push(value.map(|v| v.as_ref().to_vec()));
     }
@@ -34,22 +39,30 @@ pub fn read_entities<R: Readable>(
     Ok(results)
 }
 
-/// Write an entity to a namespace keyspace
+/// Write an entity to the unified entities keyspace
 pub fn write_entity(
     batch: &mut OwnedWriteBatch,
     keyspace: &Keyspace,
+    ns: Namespace,
     key: &EntityKey,
     value: &EntityValue,
 ) {
-    batch.insert(keyspace, key.as_ref(), value.as_slice());
+    let prefixed_key = build_entity_key(ns, key);
+    batch.insert(keyspace, prefixed_key, value.as_slice());
 }
 
-/// Delete an entity from a namespace keyspace
-pub fn delete_entity(batch: &mut OwnedWriteBatch, keyspace: &Keyspace, key: &EntityKey) {
-    batch.remove(keyspace, key.as_ref());
+/// Delete an entity from the unified entities keyspace
+pub fn delete_entity(
+    batch: &mut OwnedWriteBatch,
+    keyspace: &Keyspace,
+    ns: Namespace,
+    key: &EntityKey,
+) {
+    let prefixed_key = build_entity_key(ns, key);
+    batch.remove(keyspace, prefixed_key);
 }
 
-/// Iterator over entities in a key range.
+/// Iterator over entities in a key range within a namespace.
 ///
 /// This collects all matching entities upfront since fjall's iterators
 /// have complex lifetime requirements.
@@ -67,28 +80,30 @@ pub struct EntityIterator {
 impl EntityIterator {
     /// Create a new entity iterator from a keyspace range scan.
     ///
+    /// The range is within a single namespace - both start and end keys are
+    /// prefixed with the namespace hash before scanning.
+    ///
     /// Uses the `Readable` trait to support snapshot-based iteration.
     pub fn new<R: Readable>(
         readable: &R,
         keyspace: &Keyspace,
+        ns: Namespace,
         range: Range<EntityKey>,
     ) -> Result<Self, Error> {
         let mut entities = Vec::new();
 
-        // Use range scan with start..end keys
-        let start = range.start.as_ref();
-        let end = range.end.as_ref();
+        // Build prefixed range keys
+        let start = build_range_start(ns, &range.start);
+        let end = build_range_end(ns, &range.end);
 
         // Using Readable::range() enables snapshot-based iteration
-        for guard in readable.range(keyspace, start..end) {
+        for guard in readable.range(keyspace, start.as_slice()..end.as_slice()) {
             // fjall's Guard::into_inner() gives us both key and value
-            let (key_bytes, value_bytes) = guard.into_inner().map_err(|e| Error::Fjall(e))?;
+            let (key_bytes, value_bytes) = guard.into_inner().map_err(Error::Fjall)?;
 
-            // Convert key bytes to EntityKey
-            if key_bytes.len() == ENTITY_KEY_SIZE {
-                let mut key_array = [0u8; ENTITY_KEY_SIZE];
-                key_array.copy_from_slice(&key_bytes);
-                let entity_key = EntityKey::from(&key_array);
+            // Decode entity key from prefixed key
+            if key_bytes.len() >= PREFIXED_KEY_SIZE {
+                let entity_key = decode_entity_key(&key_bytes);
                 let entity_value = value_bytes.to_vec();
                 entities.push((entity_key, entity_value));
             }

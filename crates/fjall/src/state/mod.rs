@@ -3,24 +3,36 @@
 //! This module provides an implementation of the `StateStore` trait using fjall,
 //! an LSM-tree based embedded database.
 //!
-//! ## Keyspaces
+//! ## Three Keyspace Design
 //!
-//! - `state-cursor`: Chain position (single key-value)
-//! - `state-utxos`: UTxO set storage
-//! - `state-entity-{namespace}`: Dynamic entity tables (including datums)
+//! State is organized into three keyspaces based on access patterns:
+//!
+//! 1. **`state-cursor`**: Chain position tracking (single key-value)
+//!
+//! 2. **`state-utxos`**: UTxO set storage
+//!    Key: `[tx_hash:32][index:4]` (36 bytes)
+//!    Value: `[era:2][cbor:...]`
+//!
+//! 3. **`state-entities`**: All entity types with namespace hash prefix
+//!    Key: `[ns_hash:8][entity_key:32]` (40 bytes)
+//!    Value: entity CBOR bytes
+//!
+//! This design reduces the number of LSM-tree segment files compared to using
+//! separate keyspaces per entity type, avoiding "too many open files" errors
+//! during heavy compaction.
 
-use std::collections::HashMap;
 use std::ops::Range;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use dolos_core::{
-    ChainPoint, EntityKey, EntityValue, Namespace, StateError, StateSchema,
-    StateStore as CoreStateStore, StateWriter as CoreStateWriter, TxoRef, UtxoMap, UtxoSetDelta,
+    ChainPoint, EntityKey, EntityValue, Namespace, StateError, StateStore as CoreStateStore,
+    StateWriter as CoreStateWriter, TxoRef, UtxoMap, UtxoSetDelta,
 };
 use fjall::{Database, Keyspace, KeyspaceCreateOptions, OwnedWriteBatch, PersistMode, Readable};
 
 pub mod entities;
+pub mod entity_keys;
 pub mod utxos;
 
 use crate::Error;
@@ -36,32 +48,39 @@ const DEFAULT_FLUSH_ON_COMMIT: bool = true;
 
 /// Keyspace names for state store
 mod keyspace_names {
+    /// Cursor keyspace (chain position)
     pub const CURSOR: &str = "state-cursor";
+    /// UTxO set keyspace
     pub const UTXOS: &str = "state-utxos";
-
-    /// Generate entity keyspace name from namespace
-    pub fn entity_keyspace(ns: &str) -> String {
-        format!("state-entity-{}", ns)
-    }
+    /// Unified entities keyspace (all entity types with namespace prefix)
+    pub const ENTITIES: &str = "state-entities";
 }
 
 /// Key for the cursor entry
 const CURSOR_KEY: &[u8] = &[0u8];
 
-/// Fjall-based state store implementation
+/// Fjall-based state store implementation with unified entities keyspace.
+///
+/// Uses 3 keyspaces:
+/// - `cursor`: Chain position tracking
+/// - `utxos`: UTxO set storage
+/// - `entities`: All entity types with namespace hash prefixes
 #[derive(Clone)]
 pub struct StateStore {
-    db: Arc<Database>,
+    db: Database,
+    /// Cursor keyspace (chain position)
     cursor: Keyspace,
+    /// UTxO set keyspace
     utxos: Keyspace,
-    entities: HashMap<Namespace, Keyspace>,
+    /// Unified entities keyspace (all entity types)
+    entities: Keyspace,
+    /// Configuration
     flush_on_commit: bool,
 }
 
 impl StateStore {
     /// Open or create a state store at the given path
     pub fn open(
-        schema: StateSchema,
         path: impl AsRef<Path>,
         cache_size_mb: Option<usize>,
         max_journal_size_mb: Option<usize>,
@@ -80,33 +99,20 @@ impl StateStore {
             .max_journaling_size(max_journal_bytes)
             .open()?;
 
-        Self::from_database(db, schema, flush)
+        Self::from_database(db, flush)
     }
 
     /// Create a state store from an existing database
-    fn from_database(
-        db: Database,
-        schema: StateSchema,
-        flush_on_commit: bool,
-    ) -> Result<Self, Error> {
+    fn from_database(db: Database, flush_on_commit: bool) -> Result<Self, Error> {
         let opts = || KeyspaceCreateOptions::default();
 
-        // Core keyspaces
+        // 3 keyspaces: cursor, utxos, entities
         let cursor = db.keyspace(keyspace_names::CURSOR, opts)?;
         let utxos = db.keyspace(keyspace_names::UTXOS, opts)?;
-
-        // Entity keyspaces from schema
-        let mut entities = HashMap::new();
-        for (ns, _ns_type) in schema.iter() {
-            let ks_name = keyspace_names::entity_keyspace(ns);
-            // We need to leak the string to get a 'static str for fjall
-            let ks_name_static: &'static str = Box::leak(ks_name.into_boxed_str());
-            let keyspace = db.keyspace(ks_name_static, opts)?;
-            entities.insert(*ns, keyspace);
-        }
+        let entities = db.keyspace(keyspace_names::ENTITIES, opts)?;
 
         Ok(Self {
-            db: Arc::new(db),
+            db,
             cursor,
             utxos,
             entities,
@@ -114,14 +120,14 @@ impl StateStore {
         })
     }
 
-    /// Get entity keyspace by namespace
-    fn entity_keyspace(&self, ns: Namespace) -> Option<&Keyspace> {
-        self.entities.get(ns)
-    }
-
     /// Get a reference to the underlying database
     pub fn database(&self) -> &Database {
         &self.db
+    }
+
+    /// Get a reference to the entities keyspace
+    pub fn entities_keyspace(&self) -> &Keyspace {
+        &self.entities
     }
 
     /// Gracefully shutdown the state store.
@@ -190,12 +196,7 @@ impl CoreStateWriter for StateWriter {
     ) -> Result<(), StateError> {
         let mut batch = self.batch.lock().map_err(|_| Error::LockPoisoned)?;
 
-        let keyspace = self
-            .store
-            .entity_keyspace(ns)
-            .ok_or_else(|| Error::KeyspaceNotFound(ns.to_string()))?;
-
-        entities::write_entity(&mut batch, keyspace, key, value);
+        entities::write_entity(&mut batch, &self.store.entities, ns, key, value);
 
         Ok(())
     }
@@ -203,12 +204,7 @@ impl CoreStateWriter for StateWriter {
     fn delete_entity(&self, ns: Namespace, key: &EntityKey) -> Result<(), StateError> {
         let mut batch = self.batch.lock().map_err(|_| Error::LockPoisoned)?;
 
-        let keyspace = self
-            .store
-            .entity_keyspace(ns)
-            .ok_or_else(|| Error::KeyspaceNotFound(ns.to_string()))?;
-
-        entities::delete_entity(&mut batch, keyspace, key);
+        entities::delete_entity(&mut batch, &self.store.entities, ns, key);
 
         Ok(())
     }
@@ -269,13 +265,9 @@ impl CoreStateStore for StateStore {
         ns: Namespace,
         keys: &[&EntityKey],
     ) -> Result<Vec<Option<EntityValue>>, StateError> {
-        let keyspace = self
-            .entity_keyspace(ns)
-            .ok_or_else(|| Error::KeyspaceNotFound(ns.to_string()))?;
-
         // Use snapshot for MVCC reads to avoid deadlocks with concurrent writes
         let snapshot = self.db.snapshot();
-        entities::read_entities(&snapshot, keyspace, keys).map_err(StateError::from)
+        entities::read_entities(&snapshot, &self.entities, ns, keys).map_err(StateError::from)
     }
 
     fn start_writer(&self) -> Result<Self::Writer, StateError> {
@@ -291,13 +283,10 @@ impl CoreStateStore for StateStore {
         ns: Namespace,
         range: Range<EntityKey>,
     ) -> Result<Self::EntityIter, StateError> {
-        let keyspace = self
-            .entity_keyspace(ns)
-            .ok_or_else(|| Error::KeyspaceNotFound(ns.to_string()))?;
-
         // Use snapshot for MVCC reads to avoid deadlocks with concurrent writes
         let snapshot = self.db.snapshot();
-        entities::EntityIterator::new(&snapshot, keyspace, range).map_err(StateError::from)
+        entities::EntityIterator::new(&snapshot, &self.entities, ns, range)
+            .map_err(StateError::from)
     }
 
     fn iter_entity_values(

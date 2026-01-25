@@ -87,10 +87,10 @@ pub fn open_index_store(config: &RootConfig) -> Result<IndexStoreBackend, Error>
 
 pub fn open_state_store(config: &RootConfig) -> Result<StateStoreBackend, Error> {
     let root = ensure_storage_path(config)?;
-    let schema = dolos_cardano::model::build_schema();
 
     match &config.storage.state {
         StateStoreConfig::Redb { cache, .. } => {
+            let schema = dolos_cardano::model::build_schema();
             let store = dolos_redb3::state::StateStore::open(schema, root.join("state"), *cache)
                 .map_err(StateError::from)?;
             Ok(StateStoreBackend::Redb(store))
@@ -101,8 +101,9 @@ pub fn open_state_store(config: &RootConfig) -> Result<StateStoreBackend, Error>
             flush_on_commit,
             ..
         } => {
+            // Fjall uses a unified entities keyspace with namespace hash prefixes,
+            // so it doesn't need the schema to pre-create keyspaces
             let store = dolos_fjall::StateStore::open(
-                schema,
                 root.join("state"),
                 *cache,
                 *max_journal_size,
