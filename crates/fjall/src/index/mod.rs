@@ -19,7 +19,7 @@ use dolos_core::{
     BlockSlot, ChainPoint, IndexDelta, IndexError, IndexStore as CoreIndexStore,
     IndexWriter as CoreIndexWriter, TagDimension, UtxoSet,
 };
-use fjall::{Database, Keyspace, KeyspaceCreateOptions, OwnedWriteBatch, PersistMode};
+use fjall::{Database, Keyspace, KeyspaceCreateOptions, OwnedWriteBatch, PersistMode, Readable};
 
 pub mod history;
 pub mod utxos;
@@ -310,7 +310,12 @@ impl CoreIndexStore for IndexStore {
     }
 
     fn cursor(&self) -> Result<Option<ChainPoint>, IndexError> {
-        match self.cursor.get(CURSOR_KEY).map_err(Error::from)? {
+        // Use snapshot for MVCC reads to avoid deadlocks with concurrent writes
+        let snapshot = self.db.snapshot();
+        match snapshot
+            .get(&self.cursor, CURSOR_KEY)
+            .map_err(Error::from)?
+        {
             Some(value) => {
                 let point: ChainPoint =
                     bincode::deserialize(&value).map_err(|e| Error::Codec(e.to_string()))?;
@@ -324,19 +329,29 @@ impl CoreIndexStore for IndexStore {
         let keyspace = self
             .utxo_keyspace_for_dimension(dimension)
             .ok_or_else(|| IndexError::DimensionNotFound(dimension.to_string()))?;
-        utxos::get_by_key(keyspace, key).map_err(IndexError::from)
+        // Use snapshot for MVCC reads to avoid deadlocks with concurrent writes
+        let snapshot = self.db.snapshot();
+        utxos::get_by_key(&snapshot, keyspace, key).map_err(IndexError::from)
     }
 
     fn slot_by_block_hash(&self, block_hash: &[u8]) -> Result<Option<BlockSlot>, IndexError> {
-        history::get_by_block_hash(&self.history_blockhash, block_hash).map_err(IndexError::from)
+        // Use snapshot for MVCC reads to avoid deadlocks with concurrent writes
+        let snapshot = self.db.snapshot();
+        history::get_by_block_hash(&snapshot, &self.history_blockhash, block_hash)
+            .map_err(IndexError::from)
     }
 
     fn slot_by_block_number(&self, number: u64) -> Result<Option<BlockSlot>, IndexError> {
-        history::get_by_block_number(&self.history_blocknum, number).map_err(IndexError::from)
+        // Use snapshot for MVCC reads to avoid deadlocks with concurrent writes
+        let snapshot = self.db.snapshot();
+        history::get_by_block_number(&snapshot, &self.history_blocknum, number)
+            .map_err(IndexError::from)
     }
 
     fn slot_by_tx_hash(&self, tx_hash: &[u8]) -> Result<Option<BlockSlot>, IndexError> {
-        history::get_by_tx_hash(&self.history_txhash, tx_hash).map_err(IndexError::from)
+        // Use snapshot for MVCC reads to avoid deadlocks with concurrent writes
+        let snapshot = self.db.snapshot();
+        history::get_by_tx_hash(&snapshot, &self.history_txhash, tx_hash).map_err(IndexError::from)
     }
 
     fn slots_by_tag(
@@ -346,19 +361,22 @@ impl CoreIndexStore for IndexStore {
         start: BlockSlot,
         end: BlockSlot,
     ) -> Result<Self::SlotIter, IndexError> {
+        // Use snapshot for MVCC reads to avoid deadlocks with concurrent writes
+        let snapshot = self.db.snapshot();
+
         // For metadata, key is already the u64 encoded as bytes
         if dimension == history::dimensions::METADATA {
             let metadata =
                 u64::from_be_bytes(key.try_into().map_err(|_| {
                     IndexError::CodecError("metadata key must be 8 bytes".to_string())
                 })?);
-            return SlotIter::from_hash(&self.history_metadata, metadata, start, end)
+            return SlotIter::from_hash(&snapshot, &self.history_metadata, metadata, start, end)
                 .map_err(IndexError::from);
         }
 
         let keyspace = self
             .history_keyspace_for_dimension(dimension)
             .ok_or_else(|| IndexError::DimensionNotFound(dimension.to_string()))?;
-        SlotIter::new(keyspace, key, start, end).map_err(IndexError::from)
+        SlotIter::new(&snapshot, keyspace, key, start, end).map_err(IndexError::from)
     }
 }

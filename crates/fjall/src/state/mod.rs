@@ -18,7 +18,7 @@ use dolos_core::{
     ChainPoint, EntityKey, EntityValue, Namespace, StateError, StateSchema,
     StateStore as CoreStateStore, StateWriter as CoreStateWriter, TxoRef, UtxoMap, UtxoSetDelta,
 };
-use fjall::{Database, Keyspace, KeyspaceCreateOptions, OwnedWriteBatch, PersistMode};
+use fjall::{Database, Keyspace, KeyspaceCreateOptions, OwnedWriteBatch, PersistMode, Readable};
 
 pub mod entities;
 pub mod utxos;
@@ -208,7 +208,12 @@ impl CoreStateStore for StateStore {
     type Writer = StateWriter;
 
     fn read_cursor(&self) -> Result<Option<ChainPoint>, StateError> {
-        match self.cursor.get(CURSOR_KEY).map_err(Error::from)? {
+        // Use snapshot for MVCC reads to avoid deadlocks with concurrent writes
+        let snapshot = self.db.snapshot();
+        match snapshot
+            .get(&self.cursor, CURSOR_KEY)
+            .map_err(Error::from)?
+        {
             Some(value) => {
                 let point: ChainPoint =
                     bincode::deserialize(&value).map_err(|e| Error::Codec(e.to_string()))?;
@@ -227,7 +232,9 @@ impl CoreStateStore for StateStore {
             .entity_keyspace(ns)
             .ok_or_else(|| Error::KeyspaceNotFound(ns.to_string()))?;
 
-        entities::read_entities(keyspace, keys).map_err(StateError::from)
+        // Use snapshot for MVCC reads to avoid deadlocks with concurrent writes
+        let snapshot = self.db.snapshot();
+        entities::read_entities(&snapshot, keyspace, keys).map_err(StateError::from)
     }
 
     fn start_writer(&self) -> Result<Self::Writer, StateError> {
@@ -247,7 +254,9 @@ impl CoreStateStore for StateStore {
             .entity_keyspace(ns)
             .ok_or_else(|| Error::KeyspaceNotFound(ns.to_string()))?;
 
-        entities::EntityIterator::new(keyspace, range).map_err(StateError::from)
+        // Use snapshot for MVCC reads to avoid deadlocks with concurrent writes
+        let snapshot = self.db.snapshot();
+        entities::EntityIterator::new(&snapshot, keyspace, range).map_err(StateError::from)
     }
 
     fn iter_entity_values(
@@ -262,6 +271,8 @@ impl CoreStateStore for StateStore {
     }
 
     fn get_utxos(&self, refs: Vec<TxoRef>) -> Result<UtxoMap, StateError> {
-        utxos::get_utxos(&self.utxos, &refs).map_err(StateError::from)
+        // Use snapshot for MVCC reads to avoid deadlocks with concurrent writes
+        let snapshot = self.db.snapshot();
+        utxos::get_utxos(&snapshot, &self.utxos, &refs).map_err(StateError::from)
     }
 }

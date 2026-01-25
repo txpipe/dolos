@@ -7,7 +7,7 @@
 use std::collections::HashSet;
 
 use dolos_core::{IndexDelta, TxoRef, UtxoSet};
-use fjall::{Keyspace, OwnedWriteBatch};
+use fjall::{Keyspace, OwnedWriteBatch, Readable};
 
 use crate::keys::{decode_txo_ref_from_suffix, utxo_composite_key, TXO_REF_SIZE};
 use crate::Error;
@@ -110,12 +110,21 @@ pub fn undo(
     Ok(())
 }
 
-/// Get all TxoRefs for a given lookup key using prefix scanning
-pub fn get_by_key(keyspace: &Keyspace, lookup_key: &[u8]) -> Result<UtxoSet, Error> {
+/// Get all TxoRefs for a given lookup key using prefix scanning.
+///
+/// Uses the `Readable` trait to support both direct keyspace access and snapshot-based
+/// reads. Snapshot-based reads avoid potential deadlocks with concurrent writes by using
+/// MVCC (Multi-Version Concurrency Control).
+pub fn get_by_key<R: Readable>(
+    readable: &R,
+    keyspace: &Keyspace,
+    lookup_key: &[u8],
+) -> Result<UtxoSet, Error> {
     let mut result = HashSet::new();
 
     // Prefix scan: all keys starting with lookup_key
-    for guard in keyspace.prefix(lookup_key) {
+    // Using Readable::prefix() enables snapshot-based iteration
+    for guard in readable.prefix(keyspace, lookup_key) {
         let key = guard.key()?;
 
         // Key format: lookup_key ++ txo_ref

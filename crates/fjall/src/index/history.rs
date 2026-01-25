@@ -8,7 +8,7 @@
 //! Slots are stored as part of the key (big-endian) for efficient range queries.
 
 use dolos_core::{ArchiveIndexDelta, BlockSlot, IndexDelta, IndexError, Tag};
-use fjall::{Keyspace, OwnedWriteBatch};
+use fjall::{Keyspace, OwnedWriteBatch, Readable};
 
 use crate::keys::{
     archive_composite_key, archive_prefix, decode_slot_from_suffix, encode_slot, encode_u64,
@@ -231,13 +231,17 @@ pub fn undo(
     Ok(())
 }
 
-/// Get slot by block hash (exact lookup)
-pub fn get_by_block_hash(
+/// Get slot by block hash (exact lookup).
+///
+/// Uses the `Readable` trait to support both direct keyspace access and snapshot-based
+/// reads. Snapshot-based reads avoid potential deadlocks with concurrent writes.
+pub fn get_by_block_hash<R: Readable>(
+    readable: &R,
     keyspace: &Keyspace,
     block_hash: &[u8],
 ) -> Result<Option<BlockSlot>, Error> {
-    match keyspace
-        .get(block_hash)
+    match readable
+        .get(keyspace, block_hash)
         .map_err(|e| Error::Fjall(e.into()))?
     {
         Some(value) => {
@@ -253,10 +257,20 @@ pub fn get_by_block_hash(
     }
 }
 
-/// Get slot by block number (exact lookup)
-pub fn get_by_block_number(keyspace: &Keyspace, number: u64) -> Result<Option<BlockSlot>, Error> {
+/// Get slot by block number (exact lookup).
+///
+/// Uses the `Readable` trait to support both direct keyspace access and snapshot-based
+/// reads. Snapshot-based reads avoid potential deadlocks with concurrent writes.
+pub fn get_by_block_number<R: Readable>(
+    readable: &R,
+    keyspace: &Keyspace,
+    number: u64,
+) -> Result<Option<BlockSlot>, Error> {
     let key = encode_u64(number);
-    match keyspace.get(key).map_err(|e| Error::Fjall(e.into()))? {
+    match readable
+        .get(keyspace, key)
+        .map_err(|e| Error::Fjall(e.into()))?
+    {
         Some(value) => {
             let slot = u64::from_be_bytes(
                 value
@@ -270,9 +284,19 @@ pub fn get_by_block_number(keyspace: &Keyspace, number: u64) -> Result<Option<Bl
     }
 }
 
-/// Get slot by tx hash (exact lookup)
-pub fn get_by_tx_hash(keyspace: &Keyspace, tx_hash: &[u8]) -> Result<Option<BlockSlot>, Error> {
-    match keyspace.get(tx_hash).map_err(|e| Error::Fjall(e.into()))? {
+/// Get slot by tx hash (exact lookup).
+///
+/// Uses the `Readable` trait to support both direct keyspace access and snapshot-based
+/// reads. Snapshot-based reads avoid potential deadlocks with concurrent writes.
+pub fn get_by_tx_hash<R: Readable>(
+    readable: &R,
+    keyspace: &Keyspace,
+    tx_hash: &[u8],
+) -> Result<Option<BlockSlot>, Error> {
+    match readable
+        .get(keyspace, tx_hash)
+        .map_err(|e| Error::Fjall(e.into()))?
+    {
         Some(value) => {
             let slot = u64::from_be_bytes(
                 value
@@ -288,6 +312,10 @@ pub fn get_by_tx_hash(keyspace: &Keyspace, tx_hash: &[u8]) -> Result<Option<Bloc
 
 /// Slot iterator for archive index queries.
 /// Wraps a fjall prefix iterator and filters by slot range.
+///
+/// Uses the `Readable` trait to support both direct keyspace access and snapshot-based
+/// reads. Snapshot-based reads avoid potential deadlocks with concurrent writes by using
+/// MVCC (Multi-Version Concurrency Control).
 pub struct SlotIterator {
     /// Collected slots from prefix scan
     slots: Vec<BlockSlot>,
@@ -298,19 +326,25 @@ pub struct SlotIterator {
 }
 
 impl SlotIterator {
-    /// Create a new slot iterator from a keyspace prefix scan
-    pub fn new(
+    /// Create a new slot iterator from a keyspace prefix scan.
+    ///
+    /// Uses the `Readable` trait to support snapshot-based iteration.
+    pub fn new<R: Readable>(
+        readable: &R,
         keyspace: &Keyspace,
         data: &[u8],
         start_slot: BlockSlot,
         end_slot: BlockSlot,
     ) -> Result<Self, Error> {
         let hash = hash_key(data);
-        Self::from_hash(keyspace, hash, start_slot, end_slot)
+        Self::from_hash(readable, keyspace, hash, start_slot, end_slot)
     }
 
-    /// Create from a pre-computed hash (for metadata labels)
-    pub fn from_hash(
+    /// Create from a pre-computed hash (for metadata labels).
+    ///
+    /// Uses the `Readable` trait to support snapshot-based iteration.
+    pub fn from_hash<R: Readable>(
+        readable: &R,
         keyspace: &Keyspace,
         hash: u64,
         start_slot: BlockSlot,
@@ -319,7 +353,8 @@ impl SlotIterator {
         let prefix = archive_prefix(hash);
         let mut slots = Vec::new();
 
-        for guard in keyspace.prefix(prefix) {
+        // Using Readable::prefix() enables snapshot-based iteration
+        for guard in readable.prefix(keyspace, prefix) {
             let key = guard.key()?;
 
             if key.len() >= HASH_KEY_SIZE + SLOT_SIZE {

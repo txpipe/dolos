@@ -6,23 +6,27 @@
 use std::ops::Range;
 
 use dolos_core::{EntityKey, EntityValue, StateError};
-use fjall::{Keyspace, OwnedWriteBatch};
+use fjall::{Keyspace, OwnedWriteBatch, Readable};
 
 use crate::Error;
 
 /// Size of entity keys: 32 bytes
 pub const ENTITY_KEY_SIZE: usize = 32;
 
-/// Read multiple entities by keys from a namespace keyspace
-pub fn read_entities(
+/// Read multiple entities by keys from a namespace keyspace.
+///
+/// Uses the `Readable` trait to support both direct keyspace access and snapshot-based
+/// reads. Snapshot-based reads avoid potential deadlocks with concurrent writes.
+pub fn read_entities<R: Readable>(
+    readable: &R,
     keyspace: &Keyspace,
     keys: &[&EntityKey],
 ) -> Result<Vec<Option<EntityValue>>, Error> {
     let mut results = Vec::with_capacity(keys.len());
 
     for key in keys {
-        let value = keyspace
-            .get(key.as_ref())
+        let value = readable
+            .get(keyspace, key.as_ref())
             .map_err(|e| Error::Fjall(e.into()))?;
         results.push(value.map(|v| v.as_ref().to_vec()));
     }
@@ -49,6 +53,10 @@ pub fn delete_entity(batch: &mut OwnedWriteBatch, keyspace: &Keyspace, key: &Ent
 ///
 /// This collects all matching entities upfront since fjall's iterators
 /// have complex lifetime requirements.
+///
+/// Uses the `Readable` trait to support both direct keyspace access and snapshot-based
+/// reads. Snapshot-based reads avoid potential deadlocks with concurrent writes by using
+/// MVCC (Multi-Version Concurrency Control).
 pub struct EntityIterator {
     /// Collected entities from range scan
     entities: Vec<(EntityKey, EntityValue)>,
@@ -57,15 +65,22 @@ pub struct EntityIterator {
 }
 
 impl EntityIterator {
-    /// Create a new entity iterator from a keyspace range scan
-    pub fn new(keyspace: &Keyspace, range: Range<EntityKey>) -> Result<Self, Error> {
+    /// Create a new entity iterator from a keyspace range scan.
+    ///
+    /// Uses the `Readable` trait to support snapshot-based iteration.
+    pub fn new<R: Readable>(
+        readable: &R,
+        keyspace: &Keyspace,
+        range: Range<EntityKey>,
+    ) -> Result<Self, Error> {
         let mut entities = Vec::new();
 
         // Use range scan with start..end keys
         let start = range.start.as_ref();
         let end = range.end.as_ref();
 
-        for guard in keyspace.range(start..end) {
+        // Using Readable::range() enables snapshot-based iteration
+        for guard in readable.range(keyspace, start..end) {
             // fjall's Guard::into_inner() gives us both key and value
             let (key_bytes, value_bytes) = guard.into_inner().map_err(|e| Error::Fjall(e))?;
 

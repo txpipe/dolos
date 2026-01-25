@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use dolos_core::{EraCbor, TxoRef, UtxoMap, UtxoSetDelta};
-use fjall::{Keyspace, OwnedWriteBatch};
+use fjall::{Keyspace, OwnedWriteBatch, Readable};
 
 use crate::keys::{
     decode_txo_ref, decode_utxo_value, encode_txo_ref, encode_utxo_value, TXO_REF_SIZE,
@@ -55,13 +55,23 @@ pub fn apply_delta(
 /// Batch lookup UTxOs by refs.
 ///
 /// Returns a map of found UTxOs. Missing UTxOs are silently skipped.
-pub fn get_utxos(keyspace: &Keyspace, refs: &[TxoRef]) -> Result<UtxoMap, Error> {
+///
+/// Uses the `Readable` trait to support both direct keyspace access and snapshot-based
+/// reads. Snapshot-based reads avoid potential deadlocks with concurrent writes.
+pub fn get_utxos<R: Readable>(
+    readable: &R,
+    keyspace: &Keyspace,
+    refs: &[TxoRef],
+) -> Result<UtxoMap, Error> {
     let mut result = HashMap::new();
 
     for txo_ref in refs {
         let key = encode_txo_ref(txo_ref);
 
-        if let Some(value) = keyspace.get(key).map_err(|e| Error::Fjall(e.into()))? {
+        if let Some(value) = readable
+            .get(keyspace, key)
+            .map_err(|e| Error::Fjall(e.into()))?
+        {
             if let Some((era, cbor)) = decode_utxo_value(&value) {
                 result.insert(txo_ref.clone(), Arc::new(EraCbor(era, cbor)));
             }
@@ -72,6 +82,10 @@ pub fn get_utxos(keyspace: &Keyspace, refs: &[TxoRef]) -> Result<UtxoMap, Error>
 }
 
 /// Iterator over all UTxOs in the keyspace.
+///
+/// Uses the `Readable` trait to support both direct keyspace access and snapshot-based
+/// reads. Snapshot-based reads avoid potential deadlocks with concurrent writes by using
+/// MVCC (Multi-Version Concurrency Control).
 pub struct UtxosIterator {
     /// Collected UTxOs from scan
     utxos: Vec<(TxoRef, Arc<EraCbor>)>,
@@ -80,12 +94,15 @@ pub struct UtxosIterator {
 }
 
 impl UtxosIterator {
-    /// Create a new iterator over all UTxOs
-    pub fn new(keyspace: &Keyspace) -> Result<Self, Error> {
+    /// Create a new iterator over all UTxOs.
+    ///
+    /// Uses the `Readable` trait to support snapshot-based iteration.
+    pub fn new<R: Readable>(readable: &R, keyspace: &Keyspace) -> Result<Self, Error> {
         let mut utxos = Vec::new();
 
         // Scan all entries in the keyspace
-        for guard in keyspace.iter() {
+        // Using Readable::iter() enables snapshot-based iteration
+        for guard in readable.iter(keyspace) {
             // fjall's Guard::into_inner() gives us both key and value
             let (key_bytes, value_bytes) = guard.into_inner().map_err(|e| Error::Fjall(e))?;
 
