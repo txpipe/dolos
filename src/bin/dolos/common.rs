@@ -250,7 +250,10 @@ pub fn setup_tracing(config: &LoggingConfig) -> miette::Result<()> {
 
     let mut filter = Targets::new()
         .with_target("dolos", level)
-        .with_target("gasket", level);
+        .with_target("gasket", level)
+        // Include fjall and lsm_tree for storage backend debugging
+        .with_target("fjall", level)
+        .with_target("lsm_tree", level);
 
     if config.include_tokio {
         filter = filter
@@ -290,6 +293,11 @@ pub fn setup_tracing(config: &LoggingConfig) -> miette::Result<()> {
             .with(filter)
             .init();
     }
+
+    // Initialize the log-to-tracing bridge AFTER the tracing subscriber is set up.
+    // This allows crates using the `log` crate (like fjall) to have their messages
+    // forwarded to the tracing subscriber.
+    tracing_log::LogTracer::init().ok();
 
     Ok(())
 }

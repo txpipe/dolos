@@ -53,6 +53,7 @@ config = { version = "0.15.19", default-features = false, features = [
 ] }
 lazy_static = "1.4.0"
 tracing-subscriber = "0.3.17"
+tracing-log = "0.2"
 miette = { version = "7.6.0", features = ["fancy"] }
 async-trait = "0.1.81"
 bytes = "1.9.0"

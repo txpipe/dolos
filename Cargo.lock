@@ -1210,6 +1210,7 @@ dependencies = [
  "tower 0.4.13",
  "tower-http 0.6.6",
  "tracing",
+ "tracing-log",
  "tracing-subscriber",
  "trait-variant",
  "xxhash-rust",
