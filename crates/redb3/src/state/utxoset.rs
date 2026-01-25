@@ -1,5 +1,4 @@
 use dolos_core::{EraCbor, TxoRef, UtxoMap, UtxoSetDelta};
-use pallas::crypto::hash::Hash;
 use redb::{
     Range, ReadTransaction, ReadableDatabase, ReadableTable as _, ReadableTableMetadata as _,
     TableDefinition, TableStats, WriteTransaction,
@@ -12,8 +11,6 @@ use super::StateStore;
 
 type UtxosKey = (&'static [u8; 32], u32);
 type UtxosValue = (u16, &'static [u8]);
-type DatumKey = &'static [u8; 32];
-type DatumValue = (u64, &'static [u8]);
 
 pub struct UtxosIterator(Range<'static, UtxosKey, UtxosValue>);
 
@@ -98,14 +95,6 @@ impl UtxosTable {
             table.remove(k)?;
         }
 
-        for (datum_hash, datum_value) in delta.witness_datums_add.iter() {
-            DatumsTable::increment(wx, datum_hash, datum_value)?;
-        }
-
-        for datum_hash in delta.witness_datums_remove.iter() {
-            DatumsTable::decrement(wx, datum_hash)?;
-        }
-
         Ok(())
     }
 
@@ -129,78 +118,12 @@ impl UtxosTable {
     }
 }
 
-pub struct DatumsTable;
-
-impl DatumsTable {
-    pub const DEF: TableDefinition<'static, DatumKey, DatumValue> = TableDefinition::new("datums");
-
-    pub fn initialize(wx: &WriteTransaction) -> Result<(), Error> {
-        wx.open_table(Self::DEF)?;
-        Ok(())
-    }
-
-    pub fn get(rx: &ReadTransaction, datum_hash: &Hash<32>) -> Result<Option<Vec<u8>>, Error> {
-        let table = rx.open_table(Self::DEF)?;
-        Ok(table.get(&**datum_hash)?.map(|v| v.value().1.to_vec()))
-    }
-
-    pub fn increment(
-        wx: &WriteTransaction,
-        datum_hash: &Hash<32>,
-        datum_value: &[u8],
-    ) -> Result<u64, Error> {
-        let mut table = wx.open_table(Self::DEF)?;
-
-        let current_count = table
-            .get(&**datum_hash)?
-            .map(|entry| entry.value().0)
-            .unwrap_or(0);
-
-        let new_count = current_count + 1;
-        table.insert(&**datum_hash, (new_count, datum_value))?;
-        Ok(new_count)
-    }
-
-    pub fn decrement(wx: &WriteTransaction, datum_hash: &Hash<32>) -> Result<u64, Error> {
-        let mut table = wx.open_table(Self::DEF)?;
-
-        let entry_data: Option<(u64, Vec<u8>)> = table.get(&**datum_hash)?.map(|entry| {
-            let (count, bytes) = entry.value();
-            (count, bytes.to_vec())
-        });
-
-        let Some((count, bytes)) = entry_data else {
-            return Ok(0);
-        };
-
-        if count <= 1 {
-            table.remove(&**datum_hash)?;
-            return Ok(0);
-        }
-
-        let new_count = count - 1;
-        table.insert(&**datum_hash, (new_count, bytes.as_slice()))?;
-        Ok(new_count)
-    }
-
-    pub fn stats(rx: &ReadTransaction) -> Result<TableStats, Error> {
-        let table = rx.open_table(Self::DEF)?;
-        Ok(table.stats()?)
-    }
-}
-
 impl StateStore {
     pub fn utxoset_stats(&self) -> Result<HashMap<&str, TableStats>, Error> {
         let rx = self.db().begin_read()?;
 
         let utxos = UtxosTable::stats(&rx)?;
-        let datums = DatumsTable::stats(&rx)?;
-        Ok(HashMap::from_iter([("utxos", utxos), ("datums", datums)]))
-    }
-
-    pub fn get_datum(&self, datum_hash: &Hash<32>) -> Result<Option<Vec<u8>>, Error> {
-        let rx = self.db().begin_read()?;
-        DatumsTable::get(&rx, datum_hash)
+        Ok(HashMap::from_iter([("utxos", utxos)]))
     }
 }
 

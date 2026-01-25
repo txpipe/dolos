@@ -9,7 +9,6 @@ use dolos_core::{
     ChainPoint, EntityKey, EntityValue, Namespace, StateError, StateStore as CoreStateStore,
     StateWriter as CoreStateWriter, TxoRef, UtxoMap, UtxoSetDelta,
 };
-use pallas::crypto::hash::Hash;
 
 // ============================================================================
 // StateStoreBackend - Main enum wrapper
@@ -194,13 +193,6 @@ impl CoreStateStore for StateStoreBackend {
         match self {
             Self::Redb(s) => s.get_utxos(refs),
             Self::Fjall(s) => s.get_utxos(refs),
-        }
-    }
-
-    fn get_datum(&self, datum_hash: &Hash<32>) -> Result<Option<Vec<u8>>, StateError> {
-        match self {
-            Self::Redb(s) => CoreStateStore::get_datum(s, datum_hash),
-            Self::Fjall(s) => CoreStateStore::get_datum(s, datum_hash),
         }
     }
 }

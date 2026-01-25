@@ -1,7 +1,6 @@
 use std::{collections::HashMap, marker::PhantomData, ops::Range};
 
 use itertools::Itertools;
-use pallas::crypto::hash::Hash;
 use serde::{Deserialize, Serialize};
 
 use crate::{ChainError, ChainPoint, Domain, TxoRef, UtxoMap, UtxoSetDelta};
@@ -398,8 +397,6 @@ pub trait StateStore: Sized + Send + Sync + Clone {
     // TODO: generalize UTxO Set into generic entity system
 
     fn get_utxos(&self, refs: Vec<TxoRef>) -> Result<UtxoMap, StateError>;
-
-    fn get_datum(&self, datum_hash: &Hash<32>) -> Result<Option<Vec<u8>>, StateError>;
 }
 
 pub fn load_entity_chunk<D: Domain>(

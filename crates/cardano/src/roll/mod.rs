@@ -25,6 +25,7 @@ use crate::{
 pub mod accounts;
 pub mod assets;
 pub mod batch;
+pub mod datums;
 pub mod dreps;
 pub mod epochs;
 pub mod pools;
@@ -38,6 +39,7 @@ pub use work_unit::RollWorkUnit;
 
 use accounts::AccountVisitor;
 use assets::AssetStateVisitor;
+use datums::DatumVisitor;
 use dreps::DRepStateVisitor;
 use epochs::EpochStateVisitor;
 use pools::PoolStateVisitor;
@@ -191,6 +193,7 @@ macro_rules! visit_all {
     ($self:ident, $deltas:expr, $method:ident, $($args:tt)*) => {
         maybe_visit!($self, $deltas, account_state, $method, $($args)*);
         maybe_visit!($self, $deltas, asset_state, $method, $($args)*);
+        maybe_visit!($self, $deltas, datum_state, $method, $($args)*);
         maybe_visit!($self, $deltas, drep_state, $method, $($args)*);
         maybe_visit!($self, $deltas, epoch_state, $method, $($args)*);
         maybe_visit!($self, $deltas, pool_state, $method, $($args)*);
@@ -210,6 +213,7 @@ pub struct DeltaBuilder<'a> {
 
     account_state: AccountVisitor,
     asset_state: AssetStateVisitor,
+    datum_state: DatumVisitor,
     drep_state: DRepStateVisitor,
     epoch_state: EpochStateVisitor,
     pool_state: PoolStateVisitor,
@@ -237,6 +241,7 @@ impl<'a> DeltaBuilder<'a> {
             utxos,
             account_state: Default::default(),
             asset_state: Default::default(),
+            datum_state: Default::default(),
             drep_state: Default::default(),
             epoch_state: Default::default(),
             pool_state: Default::default(),

@@ -1,7 +1,6 @@
 use dolos_core::config::CardanoConfig;
 use dolos_core::*;
-use pallas::ledger::primitives::conway::DatumOption;
-use pallas::ledger::traverse::{MultiEraBlock, MultiEraOutput, MultiEraTx, OriginalHash};
+use pallas::ledger::traverse::{MultiEraBlock, MultiEraOutput, MultiEraTx};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -58,24 +57,8 @@ pub fn compute_apply_delta(
     let txs: HashMap<_, _> = block.txs().into_iter().map(|tx| (tx.hash(), tx)).collect();
 
     for (tx_hash, tx) in txs.iter() {
-        let mut witness_datums_map: HashMap<_, _> = HashMap::new();
-        for datum in tx.plutus_data() {
-            let datum_hash = datum.original_hash();
-            let datum_bytes = datum.raw_cbor().to_vec();
-            witness_datums_map.insert(datum_hash, datum_bytes);
-        }
-
         for (idx, produced) in tx.produces() {
             let uxto_ref = TxoRef(*tx_hash, idx as u32);
-
-            if let Some(DatumOption::Hash(datum_hash)) = produced.datum() {
-                if let Some(datum_bytes) = witness_datums_map.get(&datum_hash) {
-                    delta
-                        .witness_datums_add
-                        .insert(datum_hash, datum_bytes.clone());
-                }
-            }
-
             delta
                 .produced_utxo
                 .insert(uxto_ref, Arc::new(produced.into()));
@@ -89,13 +72,6 @@ pub fn compute_apply_delta(
                 .ok_or_else(|| BrokenInvariant::MissingUtxo(stxi_ref.clone()))?;
 
             let stxi_body_arc = stxi_body.borrow_owner().clone();
-
-            stxi_body.with_dependent(|_, output| {
-                if let Some(DatumOption::Hash(datum_hash)) = output.datum() {
-                    delta.witness_datums_remove.insert(datum_hash);
-                }
-                Result::<_, BrokenInvariant>::Ok(())
-            })?;
 
             delta.consumed_utxo.insert(stxi_ref, stxi_body_arc);
         }
@@ -115,23 +91,11 @@ pub fn compute_undo_delta(
     for (tx_hash, tx) in txs.iter() {
         for (idx, body) in tx.produces() {
             let utxo_ref = TxoRef(*tx_hash, idx as u32);
-
-            if let Some(DatumOption::Hash(datum_hash)) = body.datum() {
-                delta.witness_datums_remove.insert(datum_hash);
-            }
-
             delta.undone_utxo.insert(utxo_ref, Arc::new(body.into()));
         }
     }
 
     for (_, tx) in txs.iter() {
-        let mut witness_datums_map: HashMap<_, _> = HashMap::new();
-        for datum in tx.plutus_data() {
-            let datum_hash = datum.original_hash();
-            let datum_bytes = datum.raw_cbor().to_vec();
-            witness_datums_map.insert(datum_hash, datum_bytes);
-        }
-
         for consumed in tx.consumes() {
             let stxi_ref = TxoRef(*consumed.hash(), consumed.index() as u32);
 
@@ -140,18 +104,6 @@ pub fn compute_undo_delta(
                 .ok_or_else(|| BrokenInvariant::MissingUtxo(stxi_ref.clone()))?;
 
             let stxi_body_arc = stxi_body.borrow_owner().clone();
-
-            stxi_body.with_dependent(|_, output| {
-                if let Some(DatumOption::Hash(datum_hash)) = output.datum() {
-                    // Try to get datum value from witness set if available
-                    if let Some(datum_bytes) = witness_datums_map.get(&datum_hash) {
-                        delta
-                            .witness_datums_add
-                            .insert(datum_hash, datum_bytes.clone());
-                    }
-                }
-                Result::<_, BrokenInvariant>::Ok(())
-            })?;
 
             delta.recovered_stxi.insert(stxi_ref, stxi_body_arc);
         }

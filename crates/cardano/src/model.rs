@@ -1591,6 +1591,31 @@ impl DRepState {
 
 entity_boilerplate!(DRepState, "dreps");
 
+/// Namespace for datum entities in the state store.
+pub const DATUM_NS: &str = "datums";
+
+/// State of a witness datum with reference counting.
+///
+/// Datums are keyed by their hash (32 bytes) and store:
+/// - `refcount`: Number of UTxOs currently referencing this datum
+/// - `bytes`: The raw CBOR-encoded datum bytes
+#[derive(Debug, Clone, Encode, Decode, Serialize, Deserialize)]
+pub struct DatumState {
+    #[n(0)]
+    pub refcount: u64,
+    #[n(1)]
+    #[cbor(with = "minicbor::bytes")]
+    pub bytes: Vec<u8>,
+}
+
+impl DatumState {
+    pub fn new(bytes: Vec<u8>) -> Self {
+        Self { refcount: 1, bytes }
+    }
+}
+
+entity_boilerplate!(DatumState, "datums");
+
 #[derive(Debug, Clone, Copy, Encode, Decode, Serialize, Deserialize)]
 pub struct EraProtocol(#[n(0)] u16);
 
@@ -1688,6 +1713,7 @@ pub enum CardanoEntity {
     ProposalState(ProposalState),
     RewardLog(RewardLog),
     StakeLog(StakeLog),
+    DatumState(DatumState),
 }
 
 macro_rules! variant_boilerplate {
@@ -1718,6 +1744,7 @@ variant_boilerplate!(DRepState);
 variant_boilerplate!(ProposalState);
 variant_boilerplate!(RewardLog);
 variant_boilerplate!(StakeLog);
+variant_boilerplate!(DatumState);
 
 impl dolos_core::Entity for CardanoEntity {
     fn decode_entity(ns: Namespace, value: &EntityValue) -> Result<Self, ChainError> {
@@ -1731,6 +1758,7 @@ impl dolos_core::Entity for CardanoEntity {
             ProposalState::NS => ProposalState::decode_entity(ns, value).map(Into::into),
             RewardLog::NS => RewardLog::decode_entity(ns, value).map(Into::into),
             StakeLog::NS => StakeLog::decode_entity(ns, value).map(Into::into),
+            DatumState::NS => DatumState::decode_entity(ns, value).map(Into::into),
             _ => Err(ChainError::InvalidNamespace(ns)),
         }
     }
@@ -1773,6 +1801,10 @@ impl dolos_core::Entity for CardanoEntity {
                 let (ns, enc) = StakeLog::encode_entity(x);
                 (ns, enc)
             }
+            Self::DatumState(x) => {
+                let (ns, enc) = DatumState::encode_entity(x);
+                (ns, enc)
+            }
         }
     }
 }
@@ -1788,6 +1820,7 @@ pub fn build_schema() -> StateSchema {
     schema.insert(ProposalState::NS, NamespaceType::KeyValue);
     schema.insert(RewardLog::NS, NamespaceType::KeyValue);
     schema.insert(StakeLog::NS, NamespaceType::KeyValue);
+    schema.insert(DatumState::NS, NamespaceType::KeyValue);
     schema
 }
 
@@ -1826,6 +1859,8 @@ pub enum CardanoDelta {
     ProposalDepositRefund(ProposalDepositRefund),
     TreasuryWithdrawal(TreasuryWithdrawal),
     AssignMirRewards(AssignMirRewards),
+    DatumRefIncrement(crate::roll::datums::DatumRefIncrement),
+    DatumRefDecrement(crate::roll::datums::DatumRefDecrement),
 }
 
 impl CardanoDelta {
@@ -1895,6 +1930,19 @@ delta_from!(ProposalDepositRefund);
 delta_from!(TreasuryWithdrawal);
 delta_from!(AssignMirRewards);
 
+// Special From implementations for datum deltas since they're in a different module
+impl From<crate::roll::datums::DatumRefIncrement> for CardanoDelta {
+    fn from(value: crate::roll::datums::DatumRefIncrement) -> Self {
+        Self::DatumRefIncrement(value)
+    }
+}
+
+impl From<crate::roll::datums::DatumRefDecrement> for CardanoDelta {
+    fn from(value: crate::roll::datums::DatumRefDecrement) -> Self {
+        Self::DatumRefDecrement(value)
+    }
+}
+
 impl dolos_core::EntityDelta for CardanoDelta {
     type Entity = super::model::CardanoEntity;
 
@@ -1932,6 +1980,8 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::ProposalDepositRefund(x) => x.key(),
             Self::TreasuryWithdrawal(x) => x.key(),
             Self::AssignMirRewards(x) => x.key(),
+            Self::DatumRefIncrement(x) => x.key(),
+            Self::DatumRefDecrement(x) => x.key(),
         }
     }
 
@@ -1969,6 +2019,8 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::ProposalDepositRefund(x) => Self::downcast_apply(x, entity),
             Self::TreasuryWithdrawal(x) => Self::downcast_apply(x, entity),
             Self::AssignMirRewards(x) => Self::downcast_apply(x, entity),
+            Self::DatumRefIncrement(x) => Self::downcast_apply(x, entity),
+            Self::DatumRefDecrement(x) => Self::downcast_apply(x, entity),
         }
     }
 
@@ -2006,6 +2058,8 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::ProposalDepositRefund(x) => Self::downcast_undo(x, entity),
             Self::TreasuryWithdrawal(x) => Self::downcast_undo(x, entity),
             Self::AssignMirRewards(x) => Self::downcast_undo(x, entity),
+            Self::DatumRefIncrement(x) => Self::downcast_undo(x, entity),
+            Self::DatumRefDecrement(x) => Self::downcast_undo(x, entity),
         }
     }
 }

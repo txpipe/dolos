@@ -7,8 +7,7 @@
 //!
 //! - `state-cursor`: Chain position (single key-value)
 //! - `state-utxos`: UTxO set storage
-//! - `state-datums`: Witness datums with reference counting
-//! - `state-entity-{namespace}`: Dynamic entity tables
+//! - `state-entity-{namespace}`: Dynamic entity tables (including datums)
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -20,9 +19,7 @@ use dolos_core::{
     StateStore as CoreStateStore, StateWriter as CoreStateWriter, TxoRef, UtxoMap, UtxoSetDelta,
 };
 use fjall::{Database, Keyspace, KeyspaceCreateOptions, OwnedWriteBatch, PersistMode};
-use pallas::crypto::hash::Hash;
 
-pub mod datums;
 pub mod entities;
 pub mod utxos;
 
@@ -35,7 +32,6 @@ const DEFAULT_CACHE_SIZE_MB: usize = 500;
 mod keyspace_names {
     pub const CURSOR: &str = "state-cursor";
     pub const UTXOS: &str = "state-utxos";
-    pub const DATUMS: &str = "state-datums";
 
     /// Generate entity keyspace name from namespace
     pub fn entity_keyspace(ns: &str) -> String {
@@ -52,7 +48,6 @@ pub struct StateStore {
     db: Arc<Database>,
     cursor: Keyspace,
     utxos: Keyspace,
-    datums: Keyspace,
     entities: HashMap<Namespace, Keyspace>,
 }
 
@@ -80,7 +75,6 @@ impl StateStore {
         // Core keyspaces
         let cursor = db.keyspace(keyspace_names::CURSOR, opts)?;
         let utxos = db.keyspace(keyspace_names::UTXOS, opts)?;
-        let datums = db.keyspace(keyspace_names::DATUMS, opts)?;
 
         // Entity keyspaces from schema
         let mut entities = HashMap::new();
@@ -96,7 +90,6 @@ impl StateStore {
             db: Arc::new(db),
             cursor,
             utxos,
-            datums,
             entities,
         })
     }
@@ -164,15 +157,6 @@ impl CoreStateWriter for StateWriter {
 
         // Apply UTxO changes
         utxos::apply_delta(&mut batch, &self.store.utxos, delta)?;
-
-        // Apply datum changes
-        for (datum_hash, datum_bytes) in &delta.witness_datums_add {
-            datums::increment(&mut batch, &self.store.datums, datum_hash, datum_bytes)?;
-        }
-
-        for datum_hash in &delta.witness_datums_remove {
-            datums::decrement(&mut batch, &self.store.datums, datum_hash)?;
-        }
 
         Ok(())
     }
@@ -250,9 +234,5 @@ impl CoreStateStore for StateStore {
 
     fn get_utxos(&self, refs: Vec<TxoRef>) -> Result<UtxoMap, StateError> {
         utxos::get_utxos(&self.utxos, &refs).map_err(StateError::from)
-    }
-
-    fn get_datum(&self, datum_hash: &Hash<32>) -> Result<Option<Vec<u8>>, StateError> {
-        datums::get_datum(&self.datums, datum_hash).map_err(StateError::from)
     }
 }

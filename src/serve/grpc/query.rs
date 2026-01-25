@@ -206,8 +206,9 @@ fn into_u5c_utxo<S: Domain + LedgerContext>(
     txo: &TxoRef,
     body: &EraCbor,
     mapper: &interop::Mapper<S>,
-    state: &S::State,
+    domain: &S,
 ) -> Result<u5c::query::AnyUtxoData, Box<dyn std::error::Error>> {
+    use dolos_cardano::indexes::CardanoQueryExt as _;
     use pallas::ledger::primitives::conway::DatumOption;
 
     let parsed_output = MultiEraOutput::try_from(body)?;
@@ -215,7 +216,7 @@ fn into_u5c_utxo<S: Domain + LedgerContext>(
 
     // If the output has a datum hash, try to fetch the datum value from storage
     if let Some(DatumOption::Hash(datum_hash)) = parsed_output.datum() {
-        match StateStore::get_datum(state, &datum_hash) {
+        match domain.get_datum(&datum_hash) {
             Ok(Some(datum_bytes)) => {
                 // Decode the datum and update the parsed output
                 match pallas::codec::minicbor::decode::<
@@ -340,7 +341,7 @@ where
 
         let items: Vec<_> = utxos
             .iter()
-            .map(|(k, v)| into_u5c_utxo(k, v, &self.mapper, self.domain.state()))
+            .map(|(k, v)| into_u5c_utxo(k, v, &self.mapper, &self.domain))
             .try_collect()
             .map_err(|e| Status::internal(e.to_string()))?;
 
@@ -387,7 +388,7 @@ where
 
         let items: Vec<_> = utxos
             .iter()
-            .map(|(k, v)| into_u5c_utxo(k, v, &self.mapper, self.domain.state()))
+            .map(|(k, v)| into_u5c_utxo(k, v, &self.mapper, &self.domain))
             .try_collect()
             .map_err(|e| Status::internal(e.to_string()))?;
 

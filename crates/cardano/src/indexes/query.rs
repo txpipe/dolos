@@ -12,8 +12,11 @@ use pallas::{
 };
 
 use dolos_core::{
-    ArchiveStore, BlockSlot, ChainError, DomainError, QueryHelpers, SparseBlockIter, TxHash, TxoRef,
+    ArchiveStore, BlockSlot, ChainError, DomainError, EntityKey, QueryHelpers, SparseBlockIter,
+    StateStore as _, TxHash, TxoRef,
 };
+
+use crate::model::{DatumState, DATUM_NS};
 
 use super::dimensions::archive;
 use super::CardanoIndexExt;
@@ -154,6 +157,17 @@ pub trait CardanoQueryExt: QueryHelpers {
         }
 
         Ok(None)
+    }
+
+    /// Get witness datum bytes by hash from the state store.
+    ///
+    /// Returns the raw CBOR datum bytes if the datum exists in the state.
+    /// Only witness datums (those referenced by `DatumOption::Hash`) are stored;
+    /// inline datums are not tracked.
+    fn get_datum(&self, datum_hash: &Hash<32>) -> Result<Option<Vec<u8>>, DomainError> {
+        let key = EntityKey::from(*datum_hash);
+        let datum_state: Option<DatumState> = self.state().read_entity_typed(DATUM_NS, &key)?;
+        Ok(datum_state.map(|s| s.bytes))
     }
 
     /// Get the transaction hash that spent a given UTxO.
