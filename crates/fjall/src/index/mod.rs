@@ -23,13 +23,16 @@
 //! All multi-byte integers are big-endian encoded for correct lexicographic ordering.
 
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use dolos_core::{
     BlockSlot, ChainPoint, IndexDelta, IndexError, IndexStore as CoreIndexStore,
     IndexWriter as CoreIndexWriter, TagDimension, UtxoSet,
 };
-use fjall::{Database, Keyspace, KeyspaceCreateOptions, OwnedWriteBatch, PersistMode, Readable};
+use fjall::{
+    compaction::Leveled, Database, Keyspace, KeyspaceCreateOptions, OwnedWriteBatch, PersistMode,
+    Readable,
+};
 
 pub mod exact_keys;
 pub mod history;
@@ -43,12 +46,6 @@ pub use history::SlotIterator as SlotIter;
 
 /// Default cache size in MB
 const DEFAULT_CACHE_SIZE_MB: usize = 500;
-
-/// Default max journal size in MB (2 GiB)
-const DEFAULT_MAX_JOURNAL_SIZE_MB: usize = 2048;
-
-/// Default flush on commit setting
-const DEFAULT_FLUSH_ON_COMMIT: bool = true;
 
 /// Keyspace names for index store
 mod keyspace_names {
@@ -84,36 +81,77 @@ pub struct IndexStore {
 
 impl IndexStore {
     /// Open or create an index store at the given path
+    ///
+    /// # Parameters
+    /// - `path`: Directory path for the database
+    /// - `cache_size_mb`: Size of memory cache in MB (default: 500)
+    /// - `max_journal_size_mb`: Maximum journal size in MB (default: Fjall's 512)
+    /// - `flush_on_commit`: Whether to flush after each commit (default: Fjall's false)
+    /// - `worker_threads`: Number of background compaction workers (default: Fjall's min(cores, 4))
+    /// - `l0_threshold`: L0 compaction threshold (default: 4, lower = more aggressive)
+    /// - `memtable_size_mb`: Memtable size in MB before flush (default: 64)
     pub fn open(
         path: impl AsRef<Path>,
         cache_size_mb: Option<usize>,
         max_journal_size_mb: Option<usize>,
         flush_on_commit: Option<bool>,
+        worker_threads: Option<usize>,
+        l0_threshold: Option<u8>,
+        memtable_size_mb: Option<usize>,
     ) -> Result<Self, Error> {
         let cache_size = cache_size_mb.unwrap_or(DEFAULT_CACHE_SIZE_MB);
         let cache_bytes = (cache_size * 1024 * 1024) as u64;
 
-        let max_journal = max_journal_size_mb.unwrap_or(DEFAULT_MAX_JOURNAL_SIZE_MB);
-        let max_journal_bytes = (max_journal as u64) * 1024 * 1024;
+        let mut builder = Database::builder(path.as_ref()).cache_size(cache_bytes);
 
-        let flush = flush_on_commit.unwrap_or(DEFAULT_FLUSH_ON_COMMIT);
+        // Apply optional max journal size (otherwise use Fjall default of 512 MiB)
+        if let Some(journal_mb) = max_journal_size_mb {
+            builder = builder.max_journaling_size((journal_mb as u64) * 1024 * 1024);
+        }
 
-        let db = Database::builder(path.as_ref())
-            .cache_size(cache_bytes)
-            .max_journaling_size(max_journal_bytes)
-            .open()?;
+        // Apply optional worker threads (otherwise use Fjall default of min(cores, 4))
+        if let Some(threads) = worker_threads {
+            builder = builder.worker_threads(threads);
+        }
 
-        Self::from_database(db, flush)
+        let db = builder.open()?;
+
+        // Use Fjall default (false) if not specified
+        let flush = flush_on_commit.unwrap_or(false);
+
+        Self::from_database(db, flush, l0_threshold, memtable_size_mb)
     }
 
     /// Create an index store from an existing database
-    fn from_database(db: Database, flush_on_commit: bool) -> Result<Self, Error> {
-        let opts = || KeyspaceCreateOptions::default();
+    fn from_database(
+        db: Database,
+        flush_on_commit: bool,
+        l0_threshold: Option<u8>,
+        memtable_size_mb: Option<usize>,
+    ) -> Result<Self, Error> {
+        // Build keyspace options with compaction settings
+        let build_opts = || {
+            let mut opts = KeyspaceCreateOptions::default();
+
+            // Apply L0 threshold for more aggressive compaction if specified
+            if let Some(threshold) = l0_threshold {
+                opts = opts
+                    .compaction_strategy(Arc::new(Leveled::default().with_l0_threshold(threshold)));
+            }
+
+            // Apply memtable size if specified
+            if let Some(size_mb) = memtable_size_mb {
+                opts = opts.max_memtable_size((size_mb as u64) * 1024 * 1024);
+            }
+
+            opts
+        };
 
         // 3 keyspaces: cursor, exact, tags
-        let cursor = db.keyspace(keyspace_names::CURSOR, opts)?;
-        let exact = db.keyspace(keyspace_names::EXACT, opts)?;
-        let tags = db.keyspace(keyspace_names::TAGS, opts)?;
+        // db.keyspace expects a closure that returns KeyspaceCreateOptions
+        let cursor = db.keyspace(keyspace_names::CURSOR, &build_opts)?;
+        let exact = db.keyspace(keyspace_names::EXACT, &build_opts)?;
+        let tags = db.keyspace(keyspace_names::TAGS, &build_opts)?;
 
         Ok(Self {
             db,

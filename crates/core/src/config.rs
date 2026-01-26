@@ -192,13 +192,21 @@ pub enum StateStoreConfig {
         /// Maximum number of slots to keep before pruning.
         #[serde(default)]
         max_history: Option<u64>,
-        /// Maximum journal size in MB (default: 2048 = 2 GiB).
+        /// Maximum journal size in MB.
         #[serde(default)]
         max_journal_size: Option<usize>,
-        /// Flush journal after each commit (default: true).
-        /// Prevents journal accumulation at cost of some performance.
+        /// Flush journal after each commit.
         #[serde(default)]
         flush_on_commit: Option<bool>,
+        /// L0 compaction threshold (default: 4, lower = more aggressive).
+        #[serde(default)]
+        l0_threshold: Option<u8>,
+        /// Number of background compaction worker threads.
+        #[serde(default)]
+        worker_threads: Option<usize>,
+        /// Memtable size in MB before flush (default: 64).
+        #[serde(default)]
+        memtable_size_mb: Option<usize>,
     },
 }
 
@@ -286,13 +294,21 @@ pub enum IndexStoreConfig {
         /// Size (in MB) of memory allocated for caching.
         #[serde(default)]
         cache: Option<usize>,
-        /// Maximum journal size in MB (default: 2048 = 2 GiB).
+        /// Maximum journal size in MB.
         #[serde(default)]
         max_journal_size: Option<usize>,
-        /// Flush journal after each commit (default: true).
-        /// Prevents journal accumulation at cost of some performance.
+        /// Flush journal after each commit.
         #[serde(default)]
         flush_on_commit: Option<bool>,
+        /// L0 compaction threshold (default: 4, lower = more aggressive).
+        #[serde(default)]
+        l0_threshold: Option<u8>,
+        /// Number of background compaction worker threads.
+        #[serde(default)]
+        worker_threads: Option<usize>,
+        /// Memtable size in MB before flush (default: 64).
+        #[serde(default)]
+        memtable_size_mb: Option<usize>,
     },
 }
 

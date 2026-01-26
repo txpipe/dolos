@@ -72,12 +72,18 @@ pub fn open_index_store(config: &RootConfig) -> Result<IndexStoreBackend, Error>
             cache,
             max_journal_size,
             flush_on_commit,
+            l0_threshold,
+            worker_threads,
+            memtable_size_mb,
         } => {
             let store = dolos_fjall::IndexStore::open(
                 root.join("index"),
                 *cache,
                 *max_journal_size,
                 *flush_on_commit,
+                *worker_threads,
+                *l0_threshold,
+                *memtable_size_mb,
             )
             .map_err(IndexError::from)?;
             Ok(IndexStoreBackend::Fjall(store))
@@ -99,6 +105,9 @@ pub fn open_state_store(config: &RootConfig) -> Result<StateStoreBackend, Error>
             cache,
             max_journal_size,
             flush_on_commit,
+            l0_threshold,
+            worker_threads,
+            memtable_size_mb,
             ..
         } => {
             // Fjall uses a unified entities keyspace with namespace hash prefixes,
@@ -108,6 +117,9 @@ pub fn open_state_store(config: &RootConfig) -> Result<StateStoreBackend, Error>
                 *cache,
                 *max_journal_size,
                 *flush_on_commit,
+                *worker_threads,
+                *l0_threshold,
+                *memtable_size_mb,
             )
             .map_err(StateError::from)?;
             Ok(StateStoreBackend::Fjall(store))
