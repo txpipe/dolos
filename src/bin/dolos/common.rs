@@ -33,11 +33,15 @@ pub fn ensure_storage_path(config: &RootConfig) -> Result<PathBuf, Error> {
 }
 
 pub fn open_wal_store(config: &RootConfig) -> Result<WalAdapter, Error> {
-    let root = ensure_storage_path(config)?;
+    let path = config.storage.wal_path().ok_or(Error::config(
+        "can't define storage path for ephemeral config",
+    ))?;
+
+    std::fs::create_dir_all(path.parent().unwrap_or(&path))?;
 
     match &config.storage.wal {
         WalStoreConfig::Redb { cache, .. } => {
-            let wal = dolos_redb3::wal::RedbWalStore::open(root.join("wal"), *cache)?;
+            let wal = dolos_redb3::wal::RedbWalStore::open(path, *cache)?;
             Ok(wal)
         }
     }
@@ -46,26 +50,34 @@ pub fn open_wal_store(config: &RootConfig) -> Result<WalAdapter, Error> {
 pub fn open_archive_store(
     config: &RootConfig,
 ) -> Result<dolos_redb3::archive::ArchiveStore, Error> {
-    let root = ensure_storage_path(config)?;
+    let path = config.storage.archive_path().ok_or(Error::config(
+        "can't define storage path for ephemeral config",
+    ))?;
+
+    std::fs::create_dir_all(path.parent().unwrap_or(&path))?;
+
     let schema = dolos_cardano::model::build_schema();
 
     match &config.storage.archive {
         ArchiveStoreConfig::Redb { cache, .. } => {
-            let archive =
-                dolos_redb3::archive::ArchiveStore::open(schema, root.join("chain"), *cache)
-                    .map_err(ArchiveError::from)?;
+            let archive = dolos_redb3::archive::ArchiveStore::open(schema, path, *cache)
+                .map_err(ArchiveError::from)?;
             Ok(archive)
         }
     }
 }
 
 pub fn open_index_store(config: &RootConfig) -> Result<IndexStoreBackend, Error> {
-    let root = ensure_storage_path(config)?;
+    let path = config.storage.index_path().ok_or(Error::config(
+        "can't define storage path for ephemeral config",
+    ))?;
+
+    std::fs::create_dir_all(path.parent().unwrap_or(&path))?;
 
     match &config.storage.index {
-        IndexStoreConfig::Redb { cache } => {
-            let store = dolos_redb3::indexes::IndexStore::open(root.join("index"), *cache)
-                .map_err(IndexError::from)?;
+        IndexStoreConfig::Redb { cache, .. } => {
+            let store =
+                dolos_redb3::indexes::IndexStore::open(path, *cache).map_err(IndexError::from)?;
             Ok(IndexStoreBackend::Redb(store))
         }
         IndexStoreConfig::Fjall {
@@ -75,9 +87,10 @@ pub fn open_index_store(config: &RootConfig) -> Result<IndexStoreBackend, Error>
             l0_threshold,
             worker_threads,
             memtable_size_mb,
+            ..
         } => {
             let store = dolos_fjall::IndexStore::open(
-                root.join("index"),
+                path,
                 *cache,
                 *max_journal_size,
                 *flush_on_commit,
@@ -92,12 +105,16 @@ pub fn open_index_store(config: &RootConfig) -> Result<IndexStoreBackend, Error>
 }
 
 pub fn open_state_store(config: &RootConfig) -> Result<StateStoreBackend, Error> {
-    let root = ensure_storage_path(config)?;
+    let path = config.storage.state_path().ok_or(Error::config(
+        "can't define storage path for ephemeral config",
+    ))?;
+
+    std::fs::create_dir_all(path.parent().unwrap_or(&path))?;
 
     match &config.storage.state {
         StateStoreConfig::Redb { cache, .. } => {
             let schema = dolos_cardano::model::build_schema();
-            let store = dolos_redb3::state::StateStore::open(schema, root.join("state"), *cache)
+            let store = dolos_redb3::state::StateStore::open(schema, path, *cache)
                 .map_err(StateError::from)?;
             Ok(StateStoreBackend::Redb(store))
         }
@@ -113,7 +130,7 @@ pub fn open_state_store(config: &RootConfig) -> Result<StateStoreBackend, Error>
             // Fjall uses a unified entities keyspace with namespace hash prefixes,
             // so it doesn't need the schema to pre-create keyspaces
             let store = dolos_fjall::StateStore::open(
-                root.join("state"),
+                path,
                 *cache,
                 *max_journal_size,
                 *flush_on_commit,

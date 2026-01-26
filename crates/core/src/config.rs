@@ -135,6 +135,10 @@ impl Display for StorageVersion {
 #[serde(tag = "backend", rename_all = "lowercase")]
 pub enum WalStoreConfig {
     Redb {
+        /// Optional path override. If relative, resolved from storage root.
+        /// If not specified, defaults to `<storage.path>/wal`.
+        #[serde(default)]
+        path: Option<PathBuf>,
         /// Size (in MB) of memory allocated for caching.
         #[serde(default)]
         cache: Option<usize>,
@@ -147,6 +151,7 @@ pub enum WalStoreConfig {
 impl Default for WalStoreConfig {
     fn default() -> Self {
         Self::Redb {
+            path: None,
             cache: None,
             max_history: None,
         }
@@ -154,6 +159,12 @@ impl Default for WalStoreConfig {
 }
 
 impl WalStoreConfig {
+    pub fn path(&self) -> Option<&PathBuf> {
+        match self {
+            Self::Redb { path, .. } => path.as_ref(),
+        }
+    }
+
     pub fn cache(&self) -> Option<usize> {
         match self {
             Self::Redb { cache, .. } => *cache,
@@ -178,6 +189,10 @@ impl WalStoreConfig {
 #[serde(tag = "backend", rename_all = "lowercase")]
 pub enum StateStoreConfig {
     Redb {
+        /// Optional path override. If relative, resolved from storage root.
+        /// If not specified, defaults to `<storage.path>/state`.
+        #[serde(default)]
+        path: Option<PathBuf>,
         /// Size (in MB) of memory allocated for caching.
         #[serde(default)]
         cache: Option<usize>,
@@ -186,6 +201,10 @@ pub enum StateStoreConfig {
         max_history: Option<u64>,
     },
     Fjall {
+        /// Optional path override. If relative, resolved from storage root.
+        /// If not specified, defaults to `<storage.path>/state`.
+        #[serde(default)]
+        path: Option<PathBuf>,
         /// Size (in MB) of memory allocated for caching.
         #[serde(default)]
         cache: Option<usize>,
@@ -213,6 +232,7 @@ pub enum StateStoreConfig {
 impl Default for StateStoreConfig {
     fn default() -> Self {
         Self::Redb {
+            path: None,
             cache: None,
             max_history: None,
         }
@@ -220,6 +240,12 @@ impl Default for StateStoreConfig {
 }
 
 impl StateStoreConfig {
+    pub fn path(&self) -> Option<&PathBuf> {
+        match self {
+            Self::Redb { path, .. } | Self::Fjall { path, .. } => path.as_ref(),
+        }
+    }
+
     pub fn cache(&self) -> Option<usize> {
         match self {
             Self::Redb { cache, .. } | Self::Fjall { cache, .. } => *cache,
@@ -243,6 +269,10 @@ impl StateStoreConfig {
 #[serde(tag = "backend", rename_all = "lowercase")]
 pub enum ArchiveStoreConfig {
     Redb {
+        /// Optional path override. If relative, resolved from storage root.
+        /// If not specified, defaults to `<storage.path>/chain`.
+        #[serde(default)]
+        path: Option<PathBuf>,
         /// Size (in MB) of memory allocated for caching.
         #[serde(default)]
         cache: Option<usize>,
@@ -255,6 +285,7 @@ pub enum ArchiveStoreConfig {
 impl Default for ArchiveStoreConfig {
     fn default() -> Self {
         Self::Redb {
+            path: None,
             cache: None,
             max_history: None,
         }
@@ -262,6 +293,12 @@ impl Default for ArchiveStoreConfig {
 }
 
 impl ArchiveStoreConfig {
+    pub fn path(&self) -> Option<&PathBuf> {
+        match self {
+            Self::Redb { path, .. } => path.as_ref(),
+        }
+    }
+
     pub fn cache(&self) -> Option<usize> {
         match self {
             Self::Redb { cache, .. } => *cache,
@@ -286,11 +323,19 @@ impl ArchiveStoreConfig {
 #[serde(tag = "backend", rename_all = "lowercase")]
 pub enum IndexStoreConfig {
     Redb {
+        /// Optional path override. If relative, resolved from storage root.
+        /// If not specified, defaults to `<storage.path>/index`.
+        #[serde(default)]
+        path: Option<PathBuf>,
         /// Size (in MB) of memory allocated for caching.
         #[serde(default)]
         cache: Option<usize>,
     },
     Fjall {
+        /// Optional path override. If relative, resolved from storage root.
+        /// If not specified, defaults to `<storage.path>/index`.
+        #[serde(default)]
+        path: Option<PathBuf>,
         /// Size (in MB) of memory allocated for caching.
         #[serde(default)]
         cache: Option<usize>,
@@ -314,11 +359,20 @@ pub enum IndexStoreConfig {
 
 impl Default for IndexStoreConfig {
     fn default() -> Self {
-        Self::Redb { cache: None }
+        Self::Redb {
+            path: None,
+            cache: None,
+        }
     }
 }
 
 impl IndexStoreConfig {
+    pub fn path(&self) -> Option<&PathBuf> {
+        match self {
+            Self::Redb { path, .. } | Self::Fjall { path, .. } => path.as_ref(),
+        }
+    }
+
     pub fn cache(&self) -> Option<usize> {
         match self {
             Self::Redb { cache, .. } | Self::Fjall { cache, .. } => *cache,
@@ -359,6 +413,52 @@ pub struct StorageConfig {
 impl StorageConfig {
     pub fn is_ephemeral(&self) -> bool {
         self.path.is_none()
+    }
+
+    /// Resolves a store path based on an optional override and a default subdirectory.
+    ///
+    /// If `override_path` is `Some`:
+    /// - Absolute paths are used as-is
+    /// - Relative paths are resolved from the storage root
+    ///
+    /// If `override_path` is `None`, returns `<storage.path>/<default_subdir>`.
+    ///
+    /// Returns `None` if storage is ephemeral (no root path configured).
+    fn resolve_store_path(
+        &self,
+        override_path: Option<&PathBuf>,
+        default_subdir: &str,
+    ) -> Option<PathBuf> {
+        let root = self.path.as_ref()?;
+        match override_path {
+            Some(p) if p.is_absolute() => Some(p.clone()),
+            Some(p) => Some(root.join(p)),
+            None => Some(root.join(default_subdir)),
+        }
+    }
+
+    /// Returns the resolved path for the WAL store.
+    /// Uses the configured override path if set, otherwise defaults to `<storage.path>/wal`.
+    pub fn wal_path(&self) -> Option<PathBuf> {
+        self.resolve_store_path(self.wal.path(), "wal")
+    }
+
+    /// Returns the resolved path for the state store.
+    /// Uses the configured override path if set, otherwise defaults to `<storage.path>/state`.
+    pub fn state_path(&self) -> Option<PathBuf> {
+        self.resolve_store_path(self.state.path(), "state")
+    }
+
+    /// Returns the resolved path for the archive store.
+    /// Uses the configured override path if set, otherwise defaults to `<storage.path>/chain`.
+    pub fn archive_path(&self) -> Option<PathBuf> {
+        self.resolve_store_path(self.archive.path(), "chain")
+    }
+
+    /// Returns the resolved path for the index store.
+    /// Uses the configured override path if set, otherwise defaults to `<storage.path>/index`.
+    pub fn index_path(&self) -> Option<PathBuf> {
+        self.resolve_store_path(self.index.path(), "index")
     }
 }
 
