@@ -4,8 +4,8 @@ use dolos_core::{config::CardanoConfig, BlockSlot, ChainError, Domain, EntityKey
 use tracing::{debug, info, instrument};
 
 use crate::{
-    roll::WorkDeltas, AccountState, CardanoDelta, CardanoEntity, DRepState, EpochState,
-    EraProtocol, EraSummary, PoolState, ProposalState,
+    eras::ChainSummary, roll::WorkDeltas, AccountState, CardanoDelta, CardanoEntity, DRepState,
+    EpochState, EraProtocol, PoolState, ProposalState,
 };
 
 pub mod commit;
@@ -75,7 +75,7 @@ pub struct WorkContext {
     ended_state: EpochState,
 
     pub active_protocol: EraProtocol,
-    pub active_era: EraSummary,
+    pub chain_summary: ChainSummary,
     pub genesis: Arc<Genesis>,
 
     // computed via visitors
