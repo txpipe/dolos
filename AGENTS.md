@@ -153,6 +153,35 @@ dolos (main binary)
 3. **Service Layer** (`dolos-minibf`, `dolos-trp`): API services
 4. **Application Layer** (`dolos`): Main binary and CLI
 
+### Work Unit Pipeline
+
+Dolos processes blockchain data through a pipeline of **work units**. Each work unit functions as a mini-ETL job that extracts data from storage, transforms it using chain-specific logic, and loads results into the appropriate stores (state, archive, index).
+
+#### WorkUnit Trait
+
+The `WorkUnit<D: Domain>` trait (`dolos-core/src/work_unit.rs`) defines the contract for all processing units. An **executor** component manages each work unit's lifecycle by calling methods in a specific sequence:
+
+1. `load()` - Extract required data from storage (UTxOs, entities)
+2. `compute()` - Perform chain-specific transformations
+3. `commit_wal()` - Write to WAL for crash recovery
+4. `commit_state()` - Persist state changes to StateStore
+5. `commit_archive()` - Persist block data to ArchiveStore
+6. `commit_indexes()` - Update IndexStore
+
+The executor implementations live in `dolos-core/src/sync.rs` (full lifecycle) and `dolos-core/src/import.rs` (bulk import, skips WAL).
+
+#### Cardano Work Units
+
+The `CardanoWorkUnit` enum (`dolos-cardano/src/lib.rs`) defines Cardano-specific work unit variants:
+
+- `GenesisWorkUnit` - Bootstrap chain from genesis configuration
+- `RollWorkUnit` - Process block batches (primary work unit)
+- `RupdWorkUnit` - Compute rewards at stability window
+- `EwrapWorkUnit` - Apply computed rewards at epoch end
+- `EstartWorkUnit` - Handle era transitions at epoch start
+
+Each variant implements `WorkUnit` and determines which stores it modifies during its commit phases.
+
 ### Domain Trait
 The `Domain` trait is the central abstraction that ties all components together:
 
@@ -215,21 +244,6 @@ pub trait EntityDelta {
 - Deltas describe changes, not final states
 - `apply()` can store "before" values for later `undo()`
 - Enables efficient rollbacks without full state snapshots
-
-### Batch Processing Pipeline
-Block processing follows a defined pipeline in `WorkBatch`:
-
-```
-1. load_utxos()      - Fetch required UTxOs from state (parallel)
-2. decode_utxos()    - Decode raw UTxOs (parallel via Rayon)
-3. compute_delta()   - Chain-specific delta computation
-4. commit_wal()      - Append to write-ahead log
-5. load_entities()   - Load entities that will be modified (parallel)
-6. apply_entities()  - Apply deltas to entities in memory
-7. commit_state()    - Persist state changes atomically
-8. commit_archive()  - Persist blocks atomically
-9. commit_indexes()  - Update all indexes atomically
-```
 
 ### QueryHelpers and Lazy Iteration
 The `QueryHelpers` trait (auto-implemented for all `Domain` types) joins index lookups with archive fetches:

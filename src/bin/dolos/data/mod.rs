@@ -14,6 +14,7 @@ mod dump_wal;
 mod export;
 mod find_seq;
 mod housekeeping;
+mod import_archive;
 mod prune_chain;
 mod prune_wal;
 mod stats;
@@ -55,6 +56,8 @@ pub enum Command {
     Stats(stats::Args),
     /// runs housekeeping tasks
     Housekeeping(housekeeping::Args),
+    /// imports blocks from immutable DB into archive store only
+    ImportArchive(import_archive::Args),
 }
 
 #[derive(Debug, Parser)]
@@ -86,6 +89,7 @@ pub fn run(
         Command::PruneChain(x) => prune_chain::run(config, x)?,
         Command::Stats(x) => stats::run(config, x)?,
         Command::Housekeeping(x) => housekeeping::run(config, x)?,
+        Command::ImportArchive(x) => import_archive::run(config, x, feedback)?,
     }
 
     Ok(())
