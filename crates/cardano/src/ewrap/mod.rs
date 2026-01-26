@@ -8,8 +8,8 @@ use pallas::ledger::primitives::{conway::DRep, StakeCredential};
 use tracing::{debug, info, instrument};
 
 use crate::{
-    rewards::RewardMap, roll::WorkDeltas, rupd::RupdWork, AccountState, CardanoDelta,
-    CardanoEntity, DRepState, EpochState, EraProtocol, EraSummary, PoolHash, PoolState,
+    eras::ChainSummary, rewards::RewardMap, roll::WorkDeltas, rupd::RupdWork, AccountState,
+    CardanoDelta, CardanoEntity, DRepState, EpochState, EraProtocol, PoolHash, PoolState,
     ProposalState,
 };
 
@@ -115,7 +115,7 @@ pub struct BoundaryWork {
     // loaded
     ending_state: EpochState,
     pub active_protocol: EraProtocol,
-    pub active_era: EraSummary,
+    pub chain_summary: ChainSummary,
     pub genesis: Arc<Genesis>,
     pub rewards: RewardMap<RupdWork>,
 

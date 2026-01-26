@@ -6,12 +6,13 @@ use tracing::info;
 
 use crate::{
     ewrap::{BoundaryVisitor as _, BoundaryWork},
-    load_active_era, pallas_extras,
+    load_era_summary, pallas_extras,
     pots::EpochIncentives,
     rewards::{Reward, RewardMap},
     roll::WorkDeltas,
     rupd::RupdWork,
-    AccountState, DRepState, FixedNamespace as _, PendingRewardState, PoolState, ProposalState,
+    AccountState, DRepState, EraProtocol, FixedNamespace as _, PendingRewardState, PoolState,
+    ProposalState,
 };
 
 impl BoundaryWork {
@@ -65,7 +66,7 @@ impl BoundaryWork {
             return false;
         };
 
-        let (unregistered_epoch, _) = self.active_era.slot_epoch(unregistered_at);
+        let (unregistered_epoch, _) = self.chain_summary.slot_epoch(unregistered_at);
 
         self.starting_epoch_no() == unregistered_epoch + 1
     }
@@ -79,7 +80,7 @@ impl BoundaryWork {
             .last_active_slot
             .unwrap_or(drep.initial_slot.unwrap_or_default());
 
-        let (last_activity_epoch, _) = self.active_era.slot_epoch(last_activity_slot);
+        let (last_activity_epoch, _) = self.chain_summary.slot_epoch(last_activity_slot);
 
         let pparams = self.ending_state().pparams.unwrap_live();
 
@@ -274,7 +275,8 @@ impl BoundaryWork {
         genesis: Arc<Genesis>,
     ) -> Result<BoundaryWork, ChainError> {
         let ending_state = crate::load_epoch::<D>(state)?;
-        let (active_protocol, active_era) = load_active_era::<D>(state)?;
+        let chain_summary = load_era_summary::<D>(state)?;
+        let active_protocol = EraProtocol::from(chain_summary.edge().protocol);
 
         // Load incentives from epoch state (set by RUPD)
         let incentives = ending_state.incentives.clone().unwrap_or_default();
@@ -284,7 +286,7 @@ impl BoundaryWork {
 
         let mut boundary = BoundaryWork {
             ending_state,
-            active_era,
+            chain_summary,
             active_protocol,
             genesis,
             rewards,

@@ -125,7 +125,7 @@ impl super::WorkContext {
     ///
     /// Returns the temporal key and collected logs ready for writing.
     fn prepare_logs(&mut self) -> (TemporalKey, Vec<(EntityKey, CardanoEntity)>) {
-        let start_of_epoch = self.active_era.epoch_start(self.starting_epoch_no());
+        let start_of_epoch = self.chain_summary.epoch_start(self.starting_epoch_no());
         let start_of_epoch = ChainPoint::Slot(start_of_epoch);
         let temporal_key = TemporalKey::from(&start_of_epoch);
 
