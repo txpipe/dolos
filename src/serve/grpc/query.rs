@@ -419,7 +419,7 @@ where
 
         let (block_bytes, tx_index) = self
             .domain
-            .block_with_tx(&tx_hash)
+            .block_by_tx_hash(&tx_hash)
             .map_err(|e| Status::internal(e.to_string()))?
             .ok_or_else(|| Status::not_found("tx hash not found"))?;
 

@@ -32,6 +32,13 @@ pub(crate) mod mapping;
 mod pagination;
 mod routes;
 
+pub(crate) fn log_and_500<E: std::fmt::Debug>(context: &str) -> impl Fn(E) -> StatusCode + '_ {
+    move |err| {
+        tracing::error!(error = ?err, "{context}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    }
+}
+
 #[derive(Clone)]
 pub struct Facade<D: Domain> {
     pub inner: D,
@@ -51,11 +58,18 @@ pub type BlockWithTx = (Vec<u8>, TxOrder);
 pub type BlockWithTxMap = HashMap<Hash<32>, BlockWithTx>;
 
 impl<D: Domain> Facade<D> {
+    pub fn get_block_by_tx_hash(&self, tx_hash: &[u8]) -> Result<(Vec<u8>, TxOrder), StatusCode> {
+        self.inner
+            .block_by_tx_hash(tx_hash)
+            .map_err(log_and_500("failed to query block by tx hash"))?
+            .ok_or(StatusCode::NOT_FOUND)
+    }
+
     pub fn get_tip_slot(&self) -> Result<BlockSlot, StatusCode> {
         let tip = self
             .state()
             .read_cursor()
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .map_err(log_and_500("failed to read cursor from state"))?
             .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
 
         Ok(tip.slot())
@@ -71,14 +85,14 @@ impl<D: Domain> Facade<D> {
 
     pub fn get_chain_summary(&self) -> Result<ChainSummary, StatusCode> {
         let summary = dolos_cardano::eras::load_era_summary::<D>(self.state())
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .map_err(log_and_500("failed to load era summary"))?;
 
         Ok(summary)
     }
 
     pub fn get_current_effective_pparams(&self) -> Result<PParamsSet, StatusCode> {
         let pparams = dolos_cardano::load_effective_pparams::<D>(self.state())
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .map_err(log_and_500("failed to load effective pparams"))?;
 
         Ok(pparams)
     }
@@ -95,7 +109,7 @@ impl<D: Domain> Facade<D> {
         let log = self
             .archive()
             .read_log_typed::<EpochState>(EpochState::NS, &logkey)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .map_err(log_and_500("failed to read epoch log from archive"))?;
 
         Ok(log)
     }
@@ -109,7 +123,10 @@ impl<D: Domain> Facade<D> {
 
         let log = self
             .get_epoch_log(prior_epoch, chain_summary)?
-            .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+            .ok_or_else(|| {
+                tracing::error!(epoch = prior_epoch, "epoch log not found for prior epoch");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
 
         // TODO: epoch logs should be its own structure without the excessive
         // multi-epoch values
@@ -120,7 +137,7 @@ impl<D: Domain> Facade<D> {
         let tx = self
             .inner
             .tx_cbor(hash.as_slice())
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .map_err(log_and_500("failed to fetch tx cbor"))?;
 
         Ok(tx)
     }
@@ -143,10 +160,10 @@ impl<D: Domain> Facade<D> {
     ) -> Result<BlockWithTxMap, StatusCode> {
         let blocks = hashes
             .into_iter()
-            .map(|h| self.inner.block_with_tx(h.as_slice()).map(|x| (h, x)))
+            .map(|h| self.inner.block_by_tx_hash(h.as_slice()).map(|x| (h, x)))
             .filter_map_ok(|(k, v)| v.map(|x| (k, x)))
             .try_collect()
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .map_err(log_and_500("failed to fetch block_with_tx batch"))?;
 
         Ok(blocks)
     }
@@ -162,7 +179,7 @@ impl<D: Domain> Facade<D> {
         let mapped = self
             .state()
             .iter_entities_typed(T::NS, range)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .map_err(log_and_500("failed to iterate cardano entities"))?;
 
         Ok(mapped)
     }
@@ -184,7 +201,7 @@ impl<D: Domain> Facade<D> {
             if let Some(entity) = self
                 .archive()
                 .read_log_typed::<T>(T::NS, &logkey)
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                .map_err(log_and_500("failed to read log for epoch iteration"))?
             {
                 out.push((epoch, entity));
             }
@@ -203,7 +220,7 @@ impl<D: Domain> Facade<D> {
         let entity = self
             .state()
             .read_entity_typed(T::NS, &key)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .map_err(log_and_500("failed to read cardano entity"))?;
 
         let downcast = entity.and_then(Option::<T>::from);
 

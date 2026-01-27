@@ -54,9 +54,10 @@ use crate::Facade;
 
 macro_rules! try_into_or_500 {
     ($expr:expr) => {
-        $expr
-            .try_into()
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        $expr.try_into().map_err(|err| {
+            tracing::error!(error = ?err, expr = stringify!($expr), "numeric conversion failed");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
     };
 }
 
@@ -479,7 +480,10 @@ pub struct TxModelBuilder<'a> {
 
 impl<'a> TxModelBuilder<'a> {
     pub fn new(block: &'a [u8], order: TxOrder) -> Result<Self, StatusCode> {
-        let block = MultiEraBlock::decode(block).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let block = MultiEraBlock::decode(block).map_err(|err| {
+            tracing::error!(error = ?err, "failed to decode block in TxModelBuilder");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
         Ok(Self {
             block,
@@ -544,13 +548,17 @@ impl<'a> TxModelBuilder<'a> {
     }
 
     fn chain_or_500(&self) -> Result<&ChainSummary, StatusCode> {
-        self.chain.as_ref().ok_or(StatusCode::INTERNAL_SERVER_ERROR)
+        self.chain.as_ref().ok_or_else(|| {
+            tracing::error!("chain summary not set on TxModelBuilder");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })
     }
 
     fn pparams_or_500(&self) -> Result<&PParamsSet, StatusCode> {
-        self.pparams
-            .as_ref()
-            .ok_or(StatusCode::INTERNAL_SERVER_ERROR)
+        self.pparams.as_ref().ok_or_else(|| {
+            tracing::error!("pparams not set on TxModelBuilder");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })
     }
 
     fn tx_epoch(&self) -> Result<Epoch, StatusCode> {

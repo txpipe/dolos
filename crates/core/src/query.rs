@@ -32,11 +32,6 @@ pub trait QueryHelpers: Domain {
     fn block_by_tx_hash(&self, tx_hash: &[u8])
         -> Result<Option<(BlockBody, TxOrder)>, DomainError>;
 
-    /// Alias for `block_by_tx_hash` (backward compatibility).
-    fn block_with_tx(&self, tx_hash: &[u8]) -> Result<Option<(BlockBody, TxOrder)>, DomainError> {
-        self.block_by_tx_hash(tx_hash)
-    }
-
     /// Get a transaction's CBOR encoding by its hash.
     fn tx_cbor(&self, tx_hash: &[u8]) -> Result<Option<EraCbor>, DomainError>;
 
