@@ -38,6 +38,8 @@ impl<'a, C> minicbor::Encode<C> for EraHistoryResponse<'a> {
     ) -> Result<(), minicbor::encode::Error<W::Error>> {
         encoder.array(self.eras.len() as u64)?;
 
+        const PICOSECONDS_PER_SECOND: u128 = 1_000_000_000_000;
+
         for era in self.eras {
             encoder.array(3)?;
 
@@ -45,7 +47,7 @@ impl<'a, C> minicbor::Encode<C> for EraHistoryResponse<'a> {
             encoder.array(3)?;
             let start_relative_time = era.start.timestamp.saturating_sub(self.system_start) as u128;
             let start_relative_picos = start_relative_time
-                .saturating_mul(1_000_000_000_000u128)
+                .saturating_mul(PICOSECONDS_PER_SECOND)
                 .min(u64::MAX as u128) as u64;
             encoder.u64(start_relative_picos)?;
             encoder.u64(era.start.slot)?;
@@ -56,7 +58,7 @@ impl<'a, C> minicbor::Encode<C> for EraHistoryResponse<'a> {
                 Some(end) => {
                     let end_relative_time = end.timestamp.saturating_sub(self.system_start) as u128;
                     let end_relative_picos =
-                        end_relative_time.saturating_mul(1_000_000_000_000u128);
+                        end_relative_time.saturating_mul(PICOSECONDS_PER_SECOND);
                     // If the time would overflow u64, treat this era as open-ended
                     if end_relative_picos > u64::MAX as u128 {
                         encoder.null()?;
@@ -78,7 +80,10 @@ impl<'a, C> minicbor::Encode<C> for EraHistoryResponse<'a> {
             // EraParams
             encoder.array(4)?;
             encoder.u64(era.epoch_length)?;
-            encoder.u64(era.slot_length.saturating_mul(1000))?;
+            let slot_length_picos = (era.slot_length as u128)
+                .saturating_mul(PICOSECONDS_PER_SECOND)
+                .min(u64::MAX as u128) as u64;
+            encoder.u64(slot_length_picos)?;
 
             let safe_from_tip = self.security_param * 2;
 
