@@ -1,13 +1,13 @@
 //! Commit logic for epoch start (estart) work unit.
 //!
-//! This module uses a "collect first, write last" pattern to avoid potential
-//! deadlocks with LSM-tree storage backends like Fjall. All reads are performed
-//! before any writers are created, ensuring no read-write lock contention.
+//! This module uses a streaming pattern that writes entities one-by-one during
+//! iteration, avoiding the need to collect all entities in memory. This is safe
+//! with Redb's MVCC: read iterators see the pre-commit snapshot while writes
+//! are isolated until commit.
 
 use dolos_core::{
     ArchiveStore, ArchiveWriter, BlockSlot, BrokenInvariant, ChainError, ChainPoint, Domain,
-    Entity, EntityDelta as _, EntityKey, LogKey, Namespace, NsKey, StateStore, StateWriter,
-    TemporalKey,
+    Entity, EntityDelta as _, EntityKey, LogKey, NsKey, StateStore, StateWriter, TemporalKey,
 };
 use tracing::{info, instrument, trace, warn};
 
@@ -15,14 +15,6 @@ use crate::{
     forks, AccountState, CardanoEntity, DRepState, EpochState, EraSummary, FixedNamespace,
     PoolState, ProposalState,
 };
-
-/// Collected entity data ready for writing.
-/// Contains the namespace, key, and the processed entity value.
-struct CollectedEntity {
-    ns: Namespace,
-    key: EntityKey,
-    value: Option<CardanoEntity>,
-}
 
 /// Era transition data collected from state.
 struct EraTransitionData {
@@ -36,6 +28,7 @@ impl super::WorkContext {
     /// Collect era transition data from state (reads only).
     ///
     /// Returns None if no era transition is needed.
+    /// This reads only 1-2 entities, so no streaming needed here.
     fn collect_era_transition(
         &self,
         state: &impl StateStore,
@@ -75,27 +68,31 @@ impl super::WorkContext {
         }))
     }
 
-    /// Collect all entities from a namespace and apply deltas in memory.
+    /// Stream entities from a namespace, apply deltas, and write immediately.
     ///
-    /// This method reads all entities upfront (before any writer exists) and
-    /// applies the relevant deltas, returning the processed entities ready for writing.
-    fn collect_and_apply_namespace<D, E>(
+    /// Unlike the previous collect-then-write pattern, this method processes
+    /// entities one at a time without accumulating them in memory. This is safe
+    /// with Redb's MVCC: the read iterator sees the snapshot at transaction start,
+    /// while writes are isolated until commit.
+    ///
+    /// # Arguments
+    /// * `state` - The state store to read from
+    /// * `writer` - The state writer to write to (must be created before calling)
+    fn stream_and_apply_namespace<D, E>(
         &mut self,
         state: &D::State,
-    ) -> Result<Vec<CollectedEntity>, ChainError>
+        writer: &<D::State as StateStore>::Writer,
+    ) -> Result<(), ChainError>
     where
         D: Domain,
         E: Entity + FixedNamespace + Into<CardanoEntity>,
     {
-        let mut collected = Vec::new();
+        let records = state.iter_entities_typed::<E>(E::NS, None)?;
 
-        // COLLECT PHASE: Read all entities from state (no writer exists yet)
-        let records: Vec<_> = state
-            .iter_entities_typed::<E>(E::NS, None)?
-            .collect::<Result<Vec<_>, _>>()?;
+        for record in records {
+            let (entity_id, entity) = record?;
 
-        // APPLY PHASE: Process deltas in memory
-        for (entity_id, entity) in records {
+            // Check if this entity has deltas to apply
             let to_apply = self
                 .deltas
                 .entities
@@ -108,30 +105,14 @@ impl super::WorkContext {
                     delta.apply(&mut entity);
                 }
 
-                collected.push(CollectedEntity {
-                    ns: E::NS,
-                    key: entity_id,
-                    value: entity,
-                });
+                // Write immediately - don't collect!
+                writer.save_entity_typed(E::NS, &entity_id, entity.as_ref())?;
             } else {
                 trace!(ns = E::NS, key = %entity_id, "no deltas for entity");
             }
         }
 
-        Ok(collected)
-    }
-
-    /// Prepare archive log data for writing.
-    ///
-    /// Returns the temporal key and collected logs ready for writing.
-    fn prepare_logs(&mut self) -> (TemporalKey, Vec<(EntityKey, CardanoEntity)>) {
-        let start_of_epoch = self.chain_summary.epoch_start(self.starting_epoch_no());
-        let start_of_epoch = ChainPoint::Slot(start_of_epoch);
-        let temporal_key = TemporalKey::from(&start_of_epoch);
-
-        let logs: Vec<_> = self.logs.drain(..).collect();
-
-        (temporal_key, logs)
+        Ok(())
     }
 
     #[instrument(skip_all)]
@@ -141,51 +122,37 @@ impl super::WorkContext {
         archive: &D::Archive,
         slot: BlockSlot,
     ) -> Result<(), ChainError> {
-        // ========================================
-        // PHASE 1: COLLECT (all reads happen here, no writers yet)
-        // ========================================
+        info!("committing estart changes (streaming mode)");
 
-        info!("collecting entities for estart commit");
-
-        // Collect and apply deltas for each namespace
-        let account_entities = self.collect_and_apply_namespace::<D, AccountState>(state)?;
-        let pool_entities = self.collect_and_apply_namespace::<D, PoolState>(state)?;
-        let drep_entities = self.collect_and_apply_namespace::<D, DRepState>(state)?;
-        let proposal_entities = self.collect_and_apply_namespace::<D, ProposalState>(state)?;
-        let epoch_entities = self.collect_and_apply_namespace::<D, EpochState>(state)?;
-
-        // Collect era transition data (if any)
+        // Collect era transition data first (only 1-2 entities, not a memory concern)
         let era_transition = self.collect_era_transition(state)?;
 
-        // Prepare archive logs
-        let (temporal_key, logs) = self.prepare_logs();
+        // Prepare archive logs (still accumulated during compute_deltas)
+        let start_of_epoch = self.chain_summary.epoch_start(self.starting_epoch_no());
+        let temporal_key = TemporalKey::from(&ChainPoint::Slot(start_of_epoch));
 
-        // Verify all deltas were processed
-        if !self.deltas.entities.is_empty() {
-            warn!(quantity = %self.deltas.entities.len(), "uncommitted deltas");
-        }
-
-        // ========================================
-        // PHASE 2: WRITE (all writes happen here, no more reads)
-        // ========================================
-
-        info!("writing estart changes to storage");
-
-        // Create state writer and write all collected entities
+        // Create writers FIRST - this breaks the old "collect then write" pattern
+        // but is safe with Redb's MVCC: reads see pre-commit snapshot
         let writer = state.start_writer()?;
+        let archive_writer = archive.start_writer()?;
 
-        // Write all entity updates
-        for entity in account_entities
-            .into_iter()
-            .chain(pool_entities)
-            .chain(drep_entities)
-            .chain(proposal_entities)
-            .chain(epoch_entities)
-        {
-            writer.save_entity_typed(entity.ns, &entity.key, entity.value.as_ref())?;
-        }
+        // Stream each namespace - entities are read, processed, and written one at a time
+        info!("streaming account entities");
+        self.stream_and_apply_namespace::<D, AccountState>(state, &writer)?;
 
-        // Write era transition if needed
+        info!("streaming pool entities");
+        self.stream_and_apply_namespace::<D, PoolState>(state, &writer)?;
+
+        info!("streaming drep entities");
+        self.stream_and_apply_namespace::<D, DRepState>(state, &writer)?;
+
+        info!("streaming proposal entities");
+        self.stream_and_apply_namespace::<D, ProposalState>(state, &writer)?;
+
+        info!("streaming epoch entities");
+        self.stream_and_apply_namespace::<D, EpochState>(state, &writer)?;
+
+        // Write era transition if needed (only 2 entities)
         if let Some(transition) = era_transition {
             writer
                 .write_entity_typed::<EraSummary>(&transition.prev_key, &transition.prev_summary)?;
@@ -193,18 +160,22 @@ impl super::WorkContext {
                 .write_entity_typed::<EraSummary>(&transition.new_key, &transition.new_summary)?;
         }
 
-        // Create archive writer and write logs
-        let archive_writer = archive.start_writer()?;
-
-        for (entity_key, log) in logs {
+        // Write archive logs (still accumulated during compute_deltas, but much smaller than entities)
+        info!(log_count = self.logs.len(), "writing archive logs");
+        for (entity_key, log) in self.logs.drain(..) {
             let log_key = LogKey::from((temporal_key.clone(), entity_key));
             archive_writer.write_log_typed(&log_key, &log)?;
+        }
+
+        // Verify all deltas were processed
+        if !self.deltas.entities.is_empty() {
+            warn!(quantity = %self.deltas.entities.len(), "uncommitted deltas");
         }
 
         // Set cursor
         writer.set_cursor(ChainPoint::Slot(slot))?;
 
-        // Commit both writers
+        // Commit both writers atomically
         writer.commit()?;
         archive_writer.commit()?;
 
