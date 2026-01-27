@@ -1,12 +1,12 @@
 //! Commit logic for epoch wrap (ewrap) work unit.
 //!
-//! This module uses a "collect first, write last" pattern to avoid potential
-//! deadlocks with LSM-tree storage backends like Fjall. All reads are performed
-//! before any writers are created, ensuring no read-write lock contention.
+//! This module uses a streaming pattern that processes entities one-by-one,
+//! applying deltas and writing immediately without accumulating all entities
+//! in memory.
 
 use dolos_core::{
-    ArchiveStore, ArchiveWriter, ChainError, ChainPoint, Domain, Entity, EntityDelta as _,
-    EntityKey, LogKey, Namespace, NsKey, StateStore, StateWriter, TemporalKey,
+    ArchiveStore, ArchiveWriter, ChainError, ChainPoint, Domain, Entity, EntityDelta as _, LogKey,
+    NsKey, StateStore, StateWriter, TemporalKey,
 };
 use tracing::{info, instrument, trace, warn};
 
@@ -15,44 +15,26 @@ use crate::{
     EpochState, FixedNamespace, PendingRewardState, PoolState, ProposalState,
 };
 
-// Note: ewrap logs are Vec<(EntityKey, CardanoEntity)> - entity snapshots for archive
-
-/// Collected entity data ready for writing.
-/// Contains the namespace, key, and the processed entity value.
-struct CollectedEntity {
-    ns: Namespace,
-    key: EntityKey,
-    value: Option<CardanoEntity>,
-}
-
-/// Keys of entities to delete.
-struct EntityToDelete {
-    ns: Namespace,
-    key: EntityKey,
-}
-
 impl BoundaryWork {
-    /// Collect all entities from a namespace and apply deltas in memory.
+    /// Stream entities from a namespace, apply deltas, and write immediately.
     ///
-    /// This method reads all entities upfront (before any writer exists) and
-    /// applies the relevant deltas, returning the processed entities ready for writing.
-    fn collect_and_apply_namespace<D, E>(
+    /// Processes entities one at a time without accumulating them in memory,
+    /// reducing peak memory usage during epoch boundary commits.
+    fn stream_and_apply_namespace<D, E>(
         &mut self,
         state: &D::State,
-    ) -> Result<Vec<CollectedEntity>, ChainError>
+        writer: &<D::State as StateStore>::Writer,
+    ) -> Result<(), ChainError>
     where
         D: Domain,
         E: Entity + FixedNamespace + Into<CardanoEntity>,
     {
-        let mut collected = Vec::new();
+        let records = state.iter_entities_typed::<E>(E::NS, None)?;
 
-        // COLLECT PHASE: Read all entities from state (no writer exists yet)
-        let records: Vec<_> = state
-            .iter_entities_typed::<E>(E::NS, None)?
-            .collect::<Result<Vec<_>, _>>()?;
+        for record in records {
+            let (entity_id, entity) = record?;
 
-        // APPLY PHASE: Process deltas in memory
-        for (entity_id, entity) in records {
+            // Check if this entity has deltas to apply
             let to_apply = self
                 .deltas
                 .entities
@@ -65,63 +47,14 @@ impl BoundaryWork {
                     delta.apply(&mut entity);
                 }
 
-                collected.push(CollectedEntity {
-                    ns: E::NS,
-                    key: entity_id,
-                    value: entity,
-                });
+                // Write immediately - don't collect!
+                writer.save_entity_typed(E::NS, &entity_id, entity.as_ref())?;
             } else {
                 trace!(ns = E::NS, key = %entity_id, "no deltas for entity");
             }
         }
 
-        Ok(collected)
-    }
-
-    /// Collect all pending reward keys to delete.
-    ///
-    /// This method collects the keys upfront so we don't iterate while a writer exists.
-    fn collect_reward_deletions(&mut self) -> Vec<EntityToDelete> {
-        let mut deletions = Vec::new();
-
-        // Collect applied reward credentials
-        for credential in self.applied_reward_credentials.drain(..) {
-            let key = credential_to_key(&credential);
-            deletions.push(EntityToDelete {
-                ns: PendingRewardState::NS,
-                key,
-            });
-        }
-
-        // Collect remaining unspendable rewards
-        if !self.rewards.is_empty() {
-            warn!(
-                remaining = self.rewards.len(),
-                "draining remaining unspendable rewards"
-            );
-            for (credential, _) in self.rewards.iter_pending() {
-                let key = credential_to_key(credential);
-                deletions.push(EntityToDelete {
-                    ns: PendingRewardState::NS,
-                    key,
-                });
-            }
-        }
-
-        deletions
-    }
-
-    /// Prepare archive log data for writing.
-    ///
-    /// Returns the temporal key and collected logs ready for writing.
-    fn prepare_logs(&mut self) -> (TemporalKey, Vec<(EntityKey, CardanoEntity)>) {
-        let start_of_epoch = self.chain_summary.epoch_start(self.ending_state.number);
-        let start_of_epoch = ChainPoint::Slot(start_of_epoch);
-        let temporal_key = TemporalKey::from(&start_of_epoch);
-
-        let logs: Vec<_> = self.logs.drain(..).collect();
-
-        (temporal_key, logs)
+        Ok(())
     }
 
     #[instrument(skip_all)]
@@ -130,74 +63,68 @@ impl BoundaryWork {
         state: &D::State,
         archive: &D::Archive,
     ) -> Result<(), ChainError> {
-        // ========================================
-        // PHASE 1: COLLECT (all reads happen here, no writers yet)
-        // ========================================
+        info!("committing ewrap changes (streaming mode)");
 
-        info!("collecting entities for ewrap commit");
+        let writer = state.start_writer()?;
+        let archive_writer = archive.start_writer()?;
 
-        // Collect and apply deltas for each namespace
-        let account_entities = self.collect_and_apply_namespace::<D, AccountState>(state)?;
-        let pool_entities = self.collect_and_apply_namespace::<D, PoolState>(state)?;
-        let drep_entities = self.collect_and_apply_namespace::<D, DRepState>(state)?;
-        let proposal_entities = self.collect_and_apply_namespace::<D, ProposalState>(state)?;
-        let epoch_entities = self.collect_and_apply_namespace::<D, EpochState>(state)?;
+        // Stream each namespace - entities are read, processed, and written one at a time
+        info!("streaming account entities");
+        self.stream_and_apply_namespace::<D, AccountState>(state, &writer)?;
 
-        // Collect reward deletions
-        let reward_deletions = self.collect_reward_deletions();
+        info!("streaming pool entities");
+        self.stream_and_apply_namespace::<D, PoolState>(state, &writer)?;
 
+        info!("streaming drep entities");
+        self.stream_and_apply_namespace::<D, DRepState>(state, &writer)?;
+
+        info!("streaming proposal entities");
+        self.stream_and_apply_namespace::<D, ProposalState>(state, &writer)?;
+
+        info!("streaming epoch entities");
+        self.stream_and_apply_namespace::<D, EpochState>(state, &writer)?;
+
+        // Delete applied pending rewards
         info!(
             count = self.applied_reward_credentials.len(),
-            deletions = reward_deletions.len(),
-            "collected pending reward deletions"
+            "deleting applied pending rewards"
         );
+        for credential in self.applied_reward_credentials.drain(..) {
+            let key = credential_to_key(&credential);
+            writer.delete_entity(PendingRewardState::NS, &key)?;
+        }
 
-        // Prepare archive logs
-        let (temporal_key, logs) = self.prepare_logs();
-        let ending_state = self.ending_state.clone();
+        // Drain remaining unspendable rewards
+        if !self.rewards.is_empty() {
+            warn!(
+                remaining = self.rewards.len(),
+                "draining remaining unspendable rewards"
+            );
+            for (credential, _) in self.rewards.iter_pending() {
+                let key = credential_to_key(credential);
+                writer.delete_entity(PendingRewardState::NS, &key)?;
+            }
+        }
+
+        // Write archive logs (still accumulated during compute_deltas, but much smaller than entities)
+        let start_of_epoch = self.chain_summary.epoch_start(self.ending_state.number);
+        let temporal_key = TemporalKey::from(&ChainPoint::Slot(start_of_epoch));
+
+        info!(log_count = self.logs.len(), "writing archive logs");
+        for (entity_key, log) in self.logs.drain(..) {
+            let log_key = LogKey::from((temporal_key.clone(), entity_key));
+            archive_writer.write_log_typed(&log_key, &log)?;
+        }
+
+        // Write epoch state to archive
+        archive_writer.write_log_typed(&temporal_key.clone().into(), &self.ending_state)?;
 
         // Verify all deltas were processed
         if !self.deltas.entities.is_empty() {
             warn!(quantity = %self.deltas.entities.len(), "uncommitted deltas");
         }
 
-        // ========================================
-        // PHASE 2: WRITE (all writes happen here, no more reads)
-        // ========================================
-
-        info!("writing ewrap changes to storage");
-
-        // Create state writer and write all collected entities
-        let writer = state.start_writer()?;
-
-        // Write all entity updates
-        for entity in account_entities
-            .into_iter()
-            .chain(pool_entities)
-            .chain(drep_entities)
-            .chain(proposal_entities)
-            .chain(epoch_entities)
-        {
-            writer.save_entity_typed(entity.ns, &entity.key, entity.value.as_ref())?;
-        }
-
-        // Delete pending rewards
-        for deletion in reward_deletions {
-            writer.delete_entity(deletion.ns, &deletion.key)?;
-        }
-
-        // Create archive writer and write logs
-        let archive_writer = archive.start_writer()?;
-
-        for (entity_key, log) in logs {
-            let log_key = LogKey::from((temporal_key.clone(), entity_key));
-            archive_writer.write_log_typed(&log_key, &log)?;
-        }
-
-        // Log epoch state
-        archive_writer.write_log_typed(&temporal_key.clone().into(), &ending_state)?;
-
-        // Commit both writers
+        // Commit both writers atomically
         writer.commit()?;
         archive_writer.commit()?;
 
