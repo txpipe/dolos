@@ -12,7 +12,7 @@ use crate::prelude::*;
 use crate::serve::o7s_unix::statequery_utils;
 use statequery_utils::{
     build_era_history_response, build_pool_state_response, build_protocol_params,
-    build_stake_pools_response, build_utxo_by_address_response,
+    build_stake_pools_response, build_stake_snapshots_response, build_utxo_by_address_response,
 };
 
 pub struct Session<D: Domain> {
@@ -297,6 +297,10 @@ impl<D: Domain> Session<D> {
                 q16::BlockQuery::GetPoolState(ref pools) => {
                     info!("GetPoolState query");
                     build_pool_state_response(&self.domain, pools)?
+                }
+                q16::BlockQuery::GetStakeSnapshots(ref pools) => {
+                    info!("GetStakeSnapshots query");
+                    build_stake_snapshots_response(&self.domain, pools)?
                 }
                 other => {
                     warn!(?other, "unhandled GetCBOR variant");
