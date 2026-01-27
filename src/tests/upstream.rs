@@ -6,7 +6,7 @@ use dolos_core::{
     PullEvent,
 };
 
-use crate::storage::WalStoreBackend;
+use crate::adapters::storage::WalStoreBackend;
 
 struct WitnessStage {
     input: gasket::messaging::InputPort<PullEvent>,

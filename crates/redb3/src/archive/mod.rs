@@ -4,8 +4,8 @@ use std::{collections::HashMap, path::Path};
 use tracing::{debug, info, warn};
 
 use dolos_core::{
-    ArchiveError, BlockBody, BlockSlot, ChainPoint, EntityValue, EraCbor, LogKey, Namespace,
-    RawBlock, StateSchema, TxHash, TxOrder, TxoRef,
+    config::RedbArchiveConfig, ArchiveError, BlockBody, BlockSlot, ChainPoint, EntityValue,
+    EraCbor, LogKey, Namespace, RawBlock, StateSchema, TxHash, TxOrder, TxoRef,
 };
 
 use ::redb::Durability;
@@ -116,13 +116,13 @@ impl ArchiveStore {
     pub fn open(
         schema: StateSchema,
         path: impl AsRef<Path>,
-        cache_size: Option<usize>,
+        config: &RedbArchiveConfig,
     ) -> Result<Self, RedbArchiveError> {
         let db = Database::builder()
             .set_repair_callback(|x| {
                 warn!(progress = x.progress() * 100f64, "archive db is repairing")
             })
-            .set_cache_size(1024 * 1024 * cache_size.unwrap_or(DEFAULT_CACHE_SIZE_MB))
+            .set_cache_size(1024 * 1024 * config.cache.unwrap_or(DEFAULT_CACHE_SIZE_MB))
             .create(path)?;
 
         let tables = build_tables(schema);

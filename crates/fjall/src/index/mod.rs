@@ -26,8 +26,8 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use dolos_core::{
-    BlockSlot, ChainPoint, IndexDelta, IndexError, IndexStore as CoreIndexStore,
-    IndexWriter as CoreIndexWriter, TagDimension, UtxoSet,
+    config::FjallIndexConfig, BlockSlot, ChainPoint, IndexDelta, IndexError,
+    IndexStore as CoreIndexStore, IndexWriter as CoreIndexWriter, TagDimension, UtxoSet,
 };
 use fjall::{
     compaction::Leveled, Database, Keyspace, KeyspaceCreateOptions, OwnedWriteBatch, PersistMode,
@@ -84,42 +84,29 @@ impl IndexStore {
     ///
     /// # Parameters
     /// - `path`: Directory path for the database
-    /// - `cache_size_mb`: Size of memory cache in MB (default: 500)
-    /// - `max_journal_size_mb`: Maximum journal size in MB (default: Fjall's 512)
-    /// - `flush_on_commit`: Whether to flush after each commit (default: Fjall's false)
-    /// - `worker_threads`: Number of background compaction workers (default: Fjall's min(cores, 4))
-    /// - `l0_threshold`: L0 compaction threshold (default: 4, lower = more aggressive)
-    /// - `memtable_size_mb`: Memtable size in MB before flush (default: 64)
-    pub fn open(
-        path: impl AsRef<Path>,
-        cache_size_mb: Option<usize>,
-        max_journal_size_mb: Option<usize>,
-        flush_on_commit: Option<bool>,
-        worker_threads: Option<usize>,
-        l0_threshold: Option<u8>,
-        memtable_size_mb: Option<usize>,
-    ) -> Result<Self, Error> {
-        let cache_size = cache_size_mb.unwrap_or(DEFAULT_CACHE_SIZE_MB);
+    /// - `config`: Fjall index configuration
+    pub fn open(path: impl AsRef<Path>, config: &FjallIndexConfig) -> Result<Self, Error> {
+        let cache_size = config.cache.unwrap_or(DEFAULT_CACHE_SIZE_MB);
         let cache_bytes = (cache_size * 1024 * 1024) as u64;
 
         let mut builder = Database::builder(path.as_ref()).cache_size(cache_bytes);
 
         // Apply optional max journal size (otherwise use Fjall default of 512 MiB)
-        if let Some(journal_mb) = max_journal_size_mb {
+        if let Some(journal_mb) = config.max_journal_size {
             builder = builder.max_journaling_size((journal_mb as u64) * 1024 * 1024);
         }
 
         // Apply optional worker threads (otherwise use Fjall default of min(cores, 4))
-        if let Some(threads) = worker_threads {
+        if let Some(threads) = config.worker_threads {
             builder = builder.worker_threads(threads);
         }
 
         let db = builder.open()?;
 
         // Use Fjall default (false) if not specified
-        let flush = flush_on_commit.unwrap_or(false);
+        let flush = config.flush_on_commit.unwrap_or(false);
 
-        Self::from_database(db, flush, l0_threshold, memtable_size_mb)
+        Self::from_database(db, flush, config.l0_threshold, config.memtable_size_mb)
     }
 
     /// Create an index store from an existing database

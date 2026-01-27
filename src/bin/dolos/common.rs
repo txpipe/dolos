@@ -1,7 +1,4 @@
-use dolos_core::config::{
-    ChainConfig, GenesisConfig, IndexStoreConfig, LoggingConfig, RootConfig, StateStoreConfig,
-    StorageVersion,
-};
+use dolos_core::config::{ChainConfig, GenesisConfig, LoggingConfig, RootConfig, StorageVersion};
 use dolos_core::BootstrapExt;
 use miette::{Context as _, IntoDiagnostic};
 use std::sync::Arc;
@@ -22,102 +19,75 @@ pub struct Stores {
     pub indexes: IndexStoreBackend,
 }
 
+/// Ensure the storage root directory exists.
 pub fn ensure_storage_path(config: &RootConfig) -> Result<PathBuf, Error> {
-    let root = config.storage.path.as_ref().ok_or(Error::config(
-        "can't define storage path for ephemeral config",
-    ))?;
+    std::fs::create_dir_all(&config.storage.path)?;
+    Ok(config.storage.path.clone())
+}
 
-    std::fs::create_dir_all(root)?;
+fn check_storage_version(config: &RootConfig) -> Result<(), Error> {
+    if config.storage.version != StorageVersion::V3 {
+        error!(
+            "Storage version {:?} is not supported. Only V3 is supported.",
+            config.storage.version
+        );
+        return Err(Error::StorageError(format!(
+            "unsupported storage version {:?}, only V3 is supported",
+            config.storage.version
+        )));
+    }
+    Ok(())
+}
 
-    Ok(root.to_path_buf())
+/// Ensure directory exists for a store path.
+fn ensure_store_path(path: &std::path::Path) -> Result<(), Error> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    Ok(())
 }
 
 pub fn open_wal_store(config: &RootConfig) -> Result<WalAdapter, Error> {
-    Ok(WalStoreBackend::open(&config.storage)?)
+    let path = config.storage.wal_path().unwrap_or_default();
+    ensure_store_path(&path)?;
+    Ok(WalStoreBackend::open(&path, &config.storage.wal)?)
 }
 
 pub fn open_archive_store(config: &RootConfig) -> Result<ArchiveStoreBackend, Error> {
-    let schema = dolos_cardano::model::build_schema();
-    Ok(ArchiveStoreBackend::open(&config.storage, schema)?)
+    let path = config.storage.archive_path().unwrap_or_default();
+    ensure_store_path(&path)?;
+    Ok(ArchiveStoreBackend::open(
+        &path,
+        dolos_cardano::model::build_schema(),
+        &config.storage.archive,
+    )?)
 }
 
 pub fn open_index_store(config: &RootConfig) -> Result<IndexStoreBackend, Error> {
-    Ok(IndexStoreBackend::open(&config.storage)?)
+    let path = config.storage.index_path().unwrap_or_default();
+    ensure_store_path(&path)?;
+    Ok(IndexStoreBackend::open(&path, &config.storage.index)?)
 }
 
 pub fn open_state_store(config: &RootConfig) -> Result<StateStoreBackend, Error> {
-    let schema = dolos_cardano::model::build_schema();
-    Ok(StateStoreBackend::open(&config.storage, schema)?)
+    let path = config.storage.state_path().unwrap_or_default();
+    ensure_store_path(&path)?;
+    Ok(StateStoreBackend::open(
+        &path,
+        dolos_cardano::model::build_schema(),
+        &config.storage.state,
+    )?)
 }
 
-pub fn open_persistent_data_stores(config: &RootConfig) -> Result<Stores, Error> {
-    match config.storage.version {
-        StorageVersion::V0 => {
-            error!("Storage version V0 is no longer supported. Please remove storage and run init procedure again.");
-            return Err(Error::StorageError("Invalid store version V0".to_string()));
-        }
-        StorageVersion::V1 | StorageVersion::V2 => {
-            error!("Storage version {:?} uses old config format. Please update your config to V3 format with nested storage sections.", config.storage.version);
-            return Err(Error::StorageError(format!(
-                "Storage version {:?} requires config migration to V3",
-                config.storage.version
-            )));
-        }
-        StorageVersion::V3 => {
-            // Current version, proceed normally
-        }
-    }
-
-    let wal = open_wal_store(config)?;
-
-    let state = open_state_store(config)?;
-
-    let archive = open_archive_store(config)?;
-
-    let indexes = open_index_store(config)?;
+pub fn open_data_stores(config: &RootConfig) -> Result<Stores, Error> {
+    check_storage_version(config)?;
 
     Ok(Stores {
-        wal,
-        state,
-        archive,
-        indexes,
+        wal: open_wal_store(config)?,
+        state: open_state_store(config)?,
+        archive: open_archive_store(config)?,
+        indexes: open_index_store(config)?,
     })
-}
-
-pub fn create_ephemeral_data_stores(config: &RootConfig) -> Result<Stores, Error> {
-    // Fjall does not support in-memory mode
-    if matches!(config.storage.state, StateStoreConfig::Fjall(_)) {
-        return Err(Error::config(
-            "fjall backend does not support ephemeral storage for state store",
-        ));
-    }
-    if matches!(config.storage.index, IndexStoreConfig::Fjall(_)) {
-        return Err(Error::config(
-            "fjall backend does not support ephemeral storage for index store",
-        ));
-    }
-
-    let schema = dolos_cardano::model::build_schema();
-
-    let wal = WalStoreBackend::in_memory()?;
-    let state = StateStoreBackend::in_memory(schema.clone())?;
-    let archive = ArchiveStoreBackend::in_memory(schema)?;
-    let indexes = IndexStoreBackend::in_memory()?;
-
-    Ok(Stores {
-        wal,
-        state,
-        archive,
-        indexes,
-    })
-}
-
-pub fn setup_data_stores(config: &RootConfig) -> Result<Stores, Error> {
-    if config.storage.is_ephemeral() {
-        create_ephemeral_data_stores(config)
-    } else {
-        open_persistent_data_stores(config)
-    }
 }
 
 pub fn load_config(
@@ -143,7 +113,7 @@ pub fn load_config(
 }
 
 pub fn setup_domain(config: &RootConfig) -> miette::Result<DomainAdapter> {
-    let stores = setup_data_stores(config)?;
+    let stores = open_data_stores(config)?;
     let genesis = Arc::new(open_genesis_files(&config.genesis)?);
     let mempool = dolos::mempool::Mempool::new();
     let (tip_broadcast, _) = tokio::sync::broadcast::channel(100);
@@ -304,9 +274,7 @@ pub async fn run_pipeline(pipeline: gasket::daemon::Daemon, exit: CancellationTo
 }
 
 pub fn cleanup_data(config: &RootConfig) -> Result<(), std::io::Error> {
-    let Some(root) = &config.storage.path else {
-        return Ok(());
-    };
+    let root = &config.storage.path;
 
     if root.is_dir() {
         for entry_result in fs::read_dir(root)? {

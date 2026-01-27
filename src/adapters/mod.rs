@@ -1,9 +1,11 @@
+pub mod storage;
+
 use std::sync::Arc;
 
 use dolos_cardano::CardanoLogic;
 use dolos_core::{config::StorageConfig, *};
 
-use crate::storage::{ArchiveStoreBackend, IndexStoreBackend, StateStoreBackend, WalStoreBackend};
+pub use storage::{ArchiveStoreBackend, IndexStoreBackend, StateStoreBackend, WalStoreBackend};
 
 /// Type alias for the WAL store specialized for Cardano.
 pub type WalAdapter = WalStoreBackend<dolos_cardano::CardanoDelta>;

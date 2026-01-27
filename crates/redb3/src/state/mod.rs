@@ -1,7 +1,8 @@
 use std::{collections::HashMap, path::Path, sync::Arc};
 
 use dolos_core::{
-    ChainPoint, EntityKey, EntityValue, Namespace, StateError, StateSchema, TxoRef, UtxoMap,
+    config::RedbStateConfig, ChainPoint, EntityKey, EntityValue, Namespace, StateError,
+    StateSchema, TxoRef, UtxoMap,
 };
 
 use redb::{
@@ -79,13 +80,13 @@ impl StateStore {
     pub fn open(
         schema: StateSchema,
         path: impl AsRef<Path>,
-        cache_size: Option<usize>,
+        config: &RedbStateConfig,
     ) -> Result<Self, Error> {
         let db = ::redb::Database::builder()
             .set_repair_callback(|x| {
                 warn!(progress = x.progress() * 100f64, "state3 db is repairing")
             })
-            .set_cache_size(1024 * 1024 * cache_size.unwrap_or(DEFAULT_CACHE_SIZE_MB))
+            .set_cache_size(1024 * 1024 * config.cache.unwrap_or(DEFAULT_CACHE_SIZE_MB))
             .create(path)?;
 
         let tables = build_tables(schema);

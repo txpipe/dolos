@@ -410,9 +410,8 @@ impl IndexStoreConfig {
 pub struct StorageConfig {
     pub version: StorageVersion,
 
-    /// Directory where to find storage. If undefined, ephemeral storage will be
-    /// used.
-    pub path: Option<std::path::PathBuf>,
+    /// Root directory for storage files.
+    pub path: std::path::PathBuf,
 
     /// WAL store configuration.
     #[serde(default)]
@@ -432,46 +431,67 @@ pub struct StorageConfig {
 }
 
 impl StorageConfig {
-    pub fn is_ephemeral(&self) -> bool {
-        self.path.is_none()
-    }
-
-    /// Resolve a store-specific path, using the config override or default subdir.
-    ///
-    /// If the store config has a path override, that is used (resolved relative to root if relative).
-    /// Otherwise, the default subdir under the storage root is used.
-    fn resolve_store_path(
+    /// Resolve path with a default subdir for backends that don't specify a custom path.
+    fn resolve_store_path_with_default(
         &self,
         config_path: Option<&PathBuf>,
         default_subdir: &str,
-    ) -> Option<PathBuf> {
-        let root = self.path.as_ref()?;
-
+    ) -> PathBuf {
         match config_path {
-            Some(p) if p.is_absolute() => Some(p.clone()),
-            Some(p) => Some(root.join(p)),
-            None => Some(root.join(default_subdir)),
+            Some(p) if p.is_absolute() => p.clone(),
+            Some(p) => self.path.join(p),
+            None => self.path.join(default_subdir),
         }
     }
 
     /// Get the resolved path for the WAL store.
+    /// Returns `None` for in-memory backends.
     pub fn wal_path(&self) -> Option<PathBuf> {
-        self.resolve_store_path(self.wal.path(), "wal")
+        match &self.wal {
+            WalStoreConfig::InMemory => None,
+            WalStoreConfig::Redb(cfg) => {
+                Some(self.resolve_store_path_with_default(cfg.path.as_ref(), "wal"))
+            }
+        }
     }
 
     /// Get the resolved path for the state store.
+    /// Returns `None` for in-memory backends.
     pub fn state_path(&self) -> Option<PathBuf> {
-        self.resolve_store_path(self.state.path(), "state")
+        match &self.state {
+            StateStoreConfig::InMemory => None,
+            StateStoreConfig::Redb(cfg) => {
+                Some(self.resolve_store_path_with_default(cfg.path.as_ref(), "state"))
+            }
+            StateStoreConfig::Fjall(cfg) => {
+                Some(self.resolve_store_path_with_default(cfg.path.as_ref(), "state"))
+            }
+        }
     }
 
     /// Get the resolved path for the archive store.
+    /// Returns `None` for in-memory or no-op backends.
     pub fn archive_path(&self) -> Option<PathBuf> {
-        self.resolve_store_path(self.archive.path(), "chain")
+        match &self.archive {
+            ArchiveStoreConfig::InMemory | ArchiveStoreConfig::NoOp => None,
+            ArchiveStoreConfig::Redb(cfg) => {
+                Some(self.resolve_store_path_with_default(cfg.path.as_ref(), "chain"))
+            }
+        }
     }
 
     /// Get the resolved path for the index store.
+    /// Returns `None` for in-memory or no-op backends.
     pub fn index_path(&self) -> Option<PathBuf> {
-        self.resolve_store_path(self.index.path(), "index")
+        match &self.index {
+            IndexStoreConfig::InMemory | IndexStoreConfig::NoOp => None,
+            IndexStoreConfig::Redb(cfg) => {
+                Some(self.resolve_store_path_with_default(cfg.path.as_ref(), "index"))
+            }
+            IndexStoreConfig::Fjall(cfg) => {
+                Some(self.resolve_store_path_with_default(cfg.path.as_ref(), "index"))
+            }
+        }
     }
 }
 
@@ -479,7 +499,7 @@ impl Default for StorageConfig {
     fn default() -> Self {
         Self {
             version: Default::default(),
-            path: Some(std::path::PathBuf::from("data")),
+            path: std::path::PathBuf::from("data"),
             wal: WalStoreConfig::default(),
             state: StateStoreConfig::default(),
             archive: ArchiveStoreConfig::default(),
