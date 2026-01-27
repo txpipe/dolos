@@ -1,9 +1,8 @@
 //! Commit logic for epoch wrap (ewrap) work unit.
 //!
-//! This module uses a streaming pattern that writes entities one-by-one during
-//! iteration, avoiding the need to collect all entities in memory. This is safe
-//! with Redb's MVCC: read iterators see the pre-commit snapshot while writes
-//! are isolated until commit.
+//! This module uses a streaming pattern that processes entities one-by-one,
+//! applying deltas and writing immediately without accumulating all entities
+//! in memory.
 
 use dolos_core::{
     ArchiveStore, ArchiveWriter, ChainError, ChainPoint, Domain, Entity, EntityDelta as _, LogKey,
@@ -19,14 +18,8 @@ use crate::{
 impl BoundaryWork {
     /// Stream entities from a namespace, apply deltas, and write immediately.
     ///
-    /// Unlike the previous collect-then-write pattern, this method processes
-    /// entities one at a time without accumulating them in memory. This is safe
-    /// with Redb's MVCC: the read iterator sees the snapshot at transaction start,
-    /// while writes are isolated until commit.
-    ///
-    /// # Arguments
-    /// * `state` - The state store to read from
-    /// * `writer` - The state writer to write to (must be created before calling)
+    /// Processes entities one at a time without accumulating them in memory,
+    /// reducing peak memory usage during epoch boundary commits.
     fn stream_and_apply_namespace<D, E>(
         &mut self,
         state: &D::State,

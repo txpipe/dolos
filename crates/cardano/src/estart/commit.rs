@@ -1,9 +1,8 @@
 //! Commit logic for epoch start (estart) work unit.
 //!
-//! This module uses a streaming pattern that writes entities one-by-one during
-//! iteration, avoiding the need to collect all entities in memory. This is safe
-//! with Redb's MVCC: read iterators see the pre-commit snapshot while writes
-//! are isolated until commit.
+//! This module uses a streaming pattern that processes entities one-by-one,
+//! applying deltas and writing immediately without accumulating all entities
+//! in memory.
 
 use dolos_core::{
     ArchiveStore, ArchiveWriter, BlockSlot, BrokenInvariant, ChainError, ChainPoint, Domain,
