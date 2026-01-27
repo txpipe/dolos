@@ -1,6 +1,6 @@
 use dolos_core::config::{
-    ArchiveStoreConfig, ChainConfig, GenesisConfig, IndexStoreConfig, LoggingConfig, RootConfig,
-    StateStoreConfig, StorageVersion, WalStoreConfig,
+    ChainConfig, GenesisConfig, IndexStoreConfig, LoggingConfig, RootConfig, StateStoreConfig,
+    StorageVersion,
 };
 use dolos_core::BootstrapExt;
 use miette::{Context as _, IntoDiagnostic};
@@ -13,12 +13,12 @@ use tracing_subscriber::{filter::Targets, prelude::*};
 use dolos::adapters::{DomainAdapter, WalAdapter};
 use dolos::core::Genesis;
 use dolos::prelude::*;
-use dolos::storage::{IndexStoreBackend, StateStoreBackend};
+use dolos::storage::{ArchiveStoreBackend, IndexStoreBackend, StateStoreBackend, WalStoreBackend};
 
 pub struct Stores {
     pub wal: WalAdapter,
     pub state: StateStoreBackend,
-    pub archive: dolos_redb3::archive::ArchiveStore,
+    pub archive: ArchiveStoreBackend,
     pub indexes: IndexStoreBackend,
 }
 
@@ -33,115 +33,21 @@ pub fn ensure_storage_path(config: &RootConfig) -> Result<PathBuf, Error> {
 }
 
 pub fn open_wal_store(config: &RootConfig) -> Result<WalAdapter, Error> {
-    let path = config.storage.wal_path().ok_or(Error::config(
-        "can't define storage path for ephemeral config",
-    ))?;
-
-    std::fs::create_dir_all(path.parent().unwrap_or(&path))?;
-
-    match &config.storage.wal {
-        WalStoreConfig::Redb { cache, .. } => {
-            let wal = dolos_redb3::wal::RedbWalStore::open(path, *cache)?;
-            Ok(wal)
-        }
-    }
+    Ok(WalStoreBackend::open(&config.storage)?)
 }
 
-pub fn open_archive_store(
-    config: &RootConfig,
-) -> Result<dolos_redb3::archive::ArchiveStore, Error> {
-    let path = config.storage.archive_path().ok_or(Error::config(
-        "can't define storage path for ephemeral config",
-    ))?;
-
-    std::fs::create_dir_all(path.parent().unwrap_or(&path))?;
-
+pub fn open_archive_store(config: &RootConfig) -> Result<ArchiveStoreBackend, Error> {
     let schema = dolos_cardano::model::build_schema();
-
-    match &config.storage.archive {
-        ArchiveStoreConfig::Redb { cache, .. } => {
-            let archive = dolos_redb3::archive::ArchiveStore::open(schema, path, *cache)
-                .map_err(ArchiveError::from)?;
-            Ok(archive)
-        }
-    }
+    Ok(ArchiveStoreBackend::open(&config.storage, schema)?)
 }
 
 pub fn open_index_store(config: &RootConfig) -> Result<IndexStoreBackend, Error> {
-    let path = config.storage.index_path().ok_or(Error::config(
-        "can't define storage path for ephemeral config",
-    ))?;
-
-    std::fs::create_dir_all(path.parent().unwrap_or(&path))?;
-
-    match &config.storage.index {
-        IndexStoreConfig::Redb { cache, .. } => {
-            let store =
-                dolos_redb3::indexes::IndexStore::open(path, *cache).map_err(IndexError::from)?;
-            Ok(IndexStoreBackend::Redb(store))
-        }
-        IndexStoreConfig::Fjall {
-            cache,
-            max_journal_size,
-            flush_on_commit,
-            l0_threshold,
-            worker_threads,
-            memtable_size_mb,
-            ..
-        } => {
-            let store = dolos_fjall::IndexStore::open(
-                path,
-                *cache,
-                *max_journal_size,
-                *flush_on_commit,
-                *worker_threads,
-                *l0_threshold,
-                *memtable_size_mb,
-            )
-            .map_err(IndexError::from)?;
-            Ok(IndexStoreBackend::Fjall(store))
-        }
-    }
+    Ok(IndexStoreBackend::open(&config.storage)?)
 }
 
 pub fn open_state_store(config: &RootConfig) -> Result<StateStoreBackend, Error> {
-    let path = config.storage.state_path().ok_or(Error::config(
-        "can't define storage path for ephemeral config",
-    ))?;
-
-    std::fs::create_dir_all(path.parent().unwrap_or(&path))?;
-
-    match &config.storage.state {
-        StateStoreConfig::Redb { cache, .. } => {
-            let schema = dolos_cardano::model::build_schema();
-            let store = dolos_redb3::state::StateStore::open(schema, path, *cache)
-                .map_err(StateError::from)?;
-            Ok(StateStoreBackend::Redb(store))
-        }
-        StateStoreConfig::Fjall {
-            cache,
-            max_journal_size,
-            flush_on_commit,
-            l0_threshold,
-            worker_threads,
-            memtable_size_mb,
-            ..
-        } => {
-            // Fjall uses a unified entities keyspace with namespace hash prefixes,
-            // so it doesn't need the schema to pre-create keyspaces
-            let store = dolos_fjall::StateStore::open(
-                path,
-                *cache,
-                *max_journal_size,
-                *flush_on_commit,
-                *worker_threads,
-                *l0_threshold,
-                *memtable_size_mb,
-            )
-            .map_err(StateError::from)?;
-            Ok(StateStoreBackend::Fjall(store))
-        }
-    }
+    let schema = dolos_cardano::model::build_schema();
+    Ok(StateStoreBackend::open(&config.storage, schema)?)
 }
 
 pub fn open_persistent_data_stores(config: &RootConfig) -> Result<Stores, Error> {
@@ -180,34 +86,29 @@ pub fn open_persistent_data_stores(config: &RootConfig) -> Result<Stores, Error>
 
 pub fn create_ephemeral_data_stores(config: &RootConfig) -> Result<Stores, Error> {
     // Fjall does not support in-memory mode
-    if config.storage.state.is_fjall() {
+    if matches!(config.storage.state, StateStoreConfig::Fjall(_)) {
         return Err(Error::config(
             "fjall backend does not support ephemeral storage for state store",
         ));
     }
-    if config.storage.index.is_fjall() {
+    if matches!(config.storage.index, IndexStoreConfig::Fjall(_)) {
         return Err(Error::config(
             "fjall backend does not support ephemeral storage for index store",
         ));
     }
-    // Note: archive only has Redb variant currently, so no need to check
-
-    let wal = dolos_redb3::wal::RedbWalStore::memory()?;
 
     let schema = dolos_cardano::model::build_schema();
-    let state =
-        dolos_redb3::state::StateStore::in_memory(schema.clone()).map_err(StateError::from)?;
 
-    let archive =
-        dolos_redb3::archive::ArchiveStore::in_memory(schema).map_err(ArchiveError::from)?;
-
-    let indexes = dolos_redb3::indexes::IndexStore::in_memory().map_err(IndexError::from)?;
+    let wal = WalStoreBackend::in_memory()?;
+    let state = StateStoreBackend::in_memory(schema.clone())?;
+    let archive = ArchiveStoreBackend::in_memory(schema)?;
+    let indexes = IndexStoreBackend::in_memory()?;
 
     Ok(Stores {
         wal,
+        state,
         archive,
-        state: StateStoreBackend::Redb(state),
-        indexes: IndexStoreBackend::Redb(indexes),
+        indexes,
     })
 }
 

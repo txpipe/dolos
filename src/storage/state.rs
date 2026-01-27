@@ -6,8 +6,9 @@
 use std::ops::Range;
 
 use dolos_core::{
-    ChainPoint, EntityKey, EntityValue, Namespace, StateError, StateStore as CoreStateStore,
-    StateWriter as CoreStateWriter, TxoRef, UtxoMap, UtxoSetDelta,
+    config::{StateStoreConfig, StorageConfig},
+    ChainPoint, EntityKey, EntityValue, Namespace, StateError, StateSchema,
+    StateStore as CoreStateStore, StateWriter as CoreStateWriter, TxoRef, UtxoMap, UtxoSetDelta,
 };
 
 // ============================================================================
@@ -24,14 +25,59 @@ pub enum StateStoreBackend {
 }
 
 impl StateStoreBackend {
-    /// Check if this is the redb backend
-    pub fn is_redb(&self) -> bool {
-        matches!(self, Self::Redb(_))
+    /// Open a state store based on the configuration.
+    ///
+    /// The path is resolved from the storage config using the `state_path()` helper.
+    /// The schema is required for redb backends to initialize the entity tables.
+    pub fn open(config: &StorageConfig, schema: StateSchema) -> Result<Self, StateError> {
+        match &config.state {
+            StateStoreConfig::Redb(cfg) => {
+                let path = config.state_path().ok_or_else(|| {
+                    StateError::InternalStoreError(
+                        "cannot determine state path for ephemeral config".to_string(),
+                    )
+                })?;
+
+                std::fs::create_dir_all(path.parent().unwrap_or(&path))
+                    .map_err(|e| StateError::InternalStoreError(e.to_string()))?;
+
+                let store = dolos_redb3::state::StateStore::open(schema, &path, cfg.cache)?;
+                Ok(Self::Redb(store))
+            }
+            StateStoreConfig::InMemory => {
+                let store = dolos_redb3::state::StateStore::in_memory(schema)?;
+                Ok(Self::Redb(store))
+            }
+            StateStoreConfig::Fjall(cfg) => {
+                let path = config.state_path().ok_or_else(|| {
+                    StateError::InternalStoreError(
+                        "cannot determine state path for ephemeral config".to_string(),
+                    )
+                })?;
+
+                std::fs::create_dir_all(path.parent().unwrap_or(&path))
+                    .map_err(|e| StateError::InternalStoreError(e.to_string()))?;
+
+                // Fjall uses a unified entities keyspace with namespace hash prefixes,
+                // so it doesn't need the schema to pre-create keyspaces
+                let store = dolos_fjall::StateStore::open(
+                    &path,
+                    cfg.cache,
+                    cfg.max_journal_size,
+                    cfg.flush_on_commit,
+                    cfg.worker_threads,
+                    cfg.l0_threshold,
+                    cfg.memtable_size_mb,
+                )?;
+                Ok(Self::Fjall(store))
+            }
+        }
     }
 
-    /// Check if this is the fjall backend
-    pub fn is_fjall(&self) -> bool {
-        matches!(self, Self::Fjall(_))
+    /// Open an in-memory state store directly.
+    pub fn in_memory(schema: StateSchema) -> Result<Self, StateError> {
+        let store = dolos_redb3::state::StateStore::in_memory(schema)?;
+        Ok(Self::Redb(store))
     }
 
     /// Gracefully shutdown the state store.

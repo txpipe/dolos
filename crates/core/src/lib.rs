@@ -28,6 +28,7 @@ use tracing::info;
 
 pub mod archive;
 pub mod bootstrap;
+pub mod builtin;
 pub mod config;
 pub mod crawl;
 pub mod import;

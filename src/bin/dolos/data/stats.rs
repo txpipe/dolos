@@ -33,6 +33,9 @@ pub fn run(config: &RootConfig, _args: &Args) -> miette::Result<()> {
         IndexStoreBackend::Fjall(_) => {
             bail!("stats command is only available for redb index backend")
         }
+        IndexStoreBackend::NoOp(_) => {
+            bail!("stats command is not available for noop index backend")
+        }
     };
 
     let mut stats = state.utxoset_stats().unwrap();

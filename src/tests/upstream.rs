@@ -5,7 +5,8 @@ use dolos_core::{
     config::{PeerConfig, SyncConfig},
     PullEvent,
 };
-use dolos_redb3::wal::RedbWalStore;
+
+use crate::storage::WalStoreBackend;
 
 struct WitnessStage {
     input: gasket::messaging::InputPort<PullEvent>,
@@ -54,7 +55,7 @@ fn test_mainnet_upstream() {
     )
     .unwrap();
 
-    let wal = RedbWalStore::memory().unwrap();
+    let wal = WalStoreBackend::in_memory().unwrap();
 
     let (send, receive) = gasket::messaging::tokio::mpsc_channel(200);
 

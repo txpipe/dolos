@@ -1,5 +1,5 @@
 use dolos_core::config::RootConfig;
-use dolos_core::{ArchiveWriter, ChainPoint};
+use dolos_core::{ArchiveStore, ArchiveWriter, ChainPoint};
 use itertools::Itertools;
 use miette::{Context, IntoDiagnostic};
 use pallas::crypto::hash::Hash;

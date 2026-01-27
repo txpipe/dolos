@@ -1,8 +1,9 @@
 use clap::Parser;
+use dolos::storage::ArchiveStoreBackend;
 use dolos_core::config::RootConfig;
 use flate2::write::GzEncoder;
 use flate2::Compression;
-use miette::IntoDiagnostic as _;
+use miette::{bail, IntoDiagnostic as _};
 use std::fs::File;
 use std::path::PathBuf;
 use tar::Builder;
@@ -74,7 +75,13 @@ pub fn run(
         .append_path_with_name(&path, "wal")
         .into_diagnostic()?;
 
-    prepare_chain(&mut stores.archive, &pb)?;
+    // prepare_chain requires direct redb access
+    match &mut stores.archive {
+        ArchiveStoreBackend::Redb(s) => prepare_chain(s, &pb)?,
+        ArchiveStoreBackend::NoOp(_) => {
+            bail!("export command is not available for noop archive backend")
+        }
+    }
 
     if args.include_chain {
         let path = root.join("chain");
