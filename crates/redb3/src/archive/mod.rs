@@ -1,6 +1,10 @@
-use ::redb::{Database, Range, ReadableDatabase};
+use ::redb::{Database, ReadableDatabase};
 use redb::ReadTransaction;
-use std::{collections::HashMap, path::Path};
+use std::{
+    collections::HashMap,
+    path::Path,
+    sync::{Arc, Mutex},
+};
 use tracing::{debug, info, warn};
 
 use dolos_core::{
@@ -18,12 +22,15 @@ use pallas::{
 };
 use redb::WriteTransaction;
 use redb_extras::buckets::BucketError;
-use std::sync::Arc;
 
 use crate::{build_tables, Error, Table};
 
+pub(crate) mod flatfiles;
 pub(crate) mod indexes;
 pub(crate) mod tables;
+
+#[cfg(test)]
+mod tests;
 
 #[derive(Debug)]
 pub struct RedbArchiveError(ArchiveError);
@@ -35,6 +42,12 @@ impl std::fmt::Display for RedbArchiveError {
 }
 
 impl std::error::Error for RedbArchiveError {}
+
+impl RedbArchiveError {
+    pub fn from_io(e: std::io::Error) -> Self {
+        Self(ArchiveError::InternalError(e.to_string()))
+    }
+}
 
 impl From<Error> for RedbArchiveError {
     fn from(error: Error) -> Self {
@@ -102,33 +115,52 @@ const DEFAULT_CACHE_SIZE_MB: usize = 500;
 pub struct ArchiveStore {
     db: Arc<Database>,
     tables: HashMap<Namespace, Table>,
+    flatfiles: Arc<flatfiles::FlatFileStore>,
+    _tempdir: Option<Arc<tempfile::TempDir>>,
 }
 
 impl ArchiveStore {
     /// Gracefully shutdown the archive store.
-    ///
-    /// For Redb, this is a no-op since Redb handles cleanup automatically
-    /// during drop without blocking issues.
     pub fn shutdown(&self) -> Result<(), RedbArchiveError> {
         Ok(())
     }
 
+    /// Open an archive store.
+    ///
+    /// `path` is the archive **directory** (e.g. `<storage.path>/archive/`).
+    /// The redb index is stored at `<path>/index`.
+    /// Segment files are stored in `config.blocks_path` if set, otherwise in `<path>/`.
     pub fn open(
         schema: StateSchema,
         path: impl AsRef<Path>,
         config: &RedbArchiveConfig,
     ) -> Result<Self, RedbArchiveError> {
+        let path = path.as_ref();
+        std::fs::create_dir_all(path).map_err(|e| RedbArchiveError::from_io(e))?;
+
+        let index_path = path.join("index");
         let db = Database::builder()
             .set_repair_callback(|x| {
                 warn!(progress = x.progress() * 100f64, "archive db is repairing")
             })
             .set_cache_size(1024 * 1024 * config.cache.unwrap_or(DEFAULT_CACHE_SIZE_MB))
-            .create(path)?;
+            .create(index_path)?;
+
+        let segments_dir = config
+            .blocks_path
+            .as_ref()
+            .map(|p| p.clone())
+            .unwrap_or_else(|| path.to_path_buf());
+
+        let flatfiles =
+            flatfiles::FlatFileStore::new(segments_dir).map_err(RedbArchiveError::from_io)?;
 
         let tables = build_tables(schema);
         let store = Self {
             db: db.into(),
             tables: HashMap::from_iter(tables),
+            flatfiles: Arc::new(flatfiles),
+            _tempdir: None,
         };
 
         store.initialize()?;
@@ -140,10 +172,15 @@ impl ArchiveStore {
         let db = ::redb::Database::builder()
             .create_with_backend(::redb::backends::InMemoryBackend::new())?;
 
+        let (tempdir, flatfiles) =
+            flatfiles::FlatFileStore::for_tempdir().map_err(RedbArchiveError::from_io)?;
+
         let tables = build_tables(schema);
         let store = Self {
             db: db.into(),
             tables: HashMap::from_iter(tables),
+            flatfiles: Arc::new(flatfiles),
+            _tempdir: Some(Arc::new(tempdir)),
         };
 
         store.initialize()?;
@@ -174,15 +211,8 @@ impl ArchiveStore {
         Arc::get_mut(&mut self.db).unwrap()
     }
 
-    pub fn copy(&self, target: &Self) -> Result<(), RedbArchiveError> {
-        let rx = self.db().begin_read()?;
-        let wx = target.db().begin_write()?;
-
-        tables::BlocksTable::copy(&rx, &wx)?;
-
-        wx.commit()?;
-
-        Ok(())
+    pub fn flatfiles(&self) -> &Arc<flatfiles::FlatFileStore> {
+        &self.flatfiles
     }
 
     pub fn get_range(
@@ -192,7 +222,10 @@ impl ArchiveStore {
     ) -> Result<ArchiveRangeIter, RedbArchiveError> {
         let rx = self.db().begin_read()?;
         let range = tables::BlocksTable::get_range(&rx, from, to)?;
-        Ok(ArchiveRangeIter(range))
+        Ok(ArchiveRangeIter {
+            range,
+            flatfiles: self.flatfiles.clone(),
+        })
     }
 
     pub fn start_writer(&self) -> Result<ArchiveStoreWriter, RedbArchiveError> {
@@ -203,6 +236,8 @@ impl ArchiveStore {
         Ok(ArchiveStoreWriter {
             wx,
             tables: self.tables.clone(),
+            flatfiles: self.flatfiles.clone(),
+            pending_blocks: Mutex::new(Vec::new()),
         })
     }
 
@@ -217,7 +252,7 @@ impl ArchiveStore {
                 return Ok(Some(ChainPoint::Origin));
             };
 
-            if let Some(body) = tables::BlocksTable::get_by_slot(&rx, *slot)? {
+            if let Some(body) = tables::BlocksTable::get_by_slot(&rx, &self.flatfiles, *slot)? {
                 let decoded =
                     MultiEraBlock::decode(&body).map_err(ArchiveError::BlockDecodingError)?;
 
@@ -460,7 +495,7 @@ impl ArchiveStore {
             return Ok(None);
         };
 
-        let Some(raw) = tables::BlocksTable::get_by_slot(&rx, slot)? else {
+        let Some(raw) = tables::BlocksTable::get_by_slot(&rx, &self.flatfiles, slot)? else {
             return Ok(None);
         };
 
@@ -483,7 +518,7 @@ impl ArchiveStore {
     ) -> Result<ArchiveSparseIter, RedbArchiveError> {
         let rx = self.db().begin_read()?;
         let range = indexes::Indexes::iter_by_address(&rx, address, start_slot, end_slot)?;
-        Ok(ArchiveSparseIter(rx, range))
+        Ok(ArchiveSparseIter(rx, range, self.flatfiles.clone()))
     }
 
     pub fn iter_possible_blocks_with_asset(
@@ -494,7 +529,7 @@ impl ArchiveStore {
     ) -> Result<ArchiveSparseIter, RedbArchiveError> {
         let rx = self.db().begin_read()?;
         let range = indexes::Indexes::iter_by_asset(&rx, asset, start_slot, end_slot)?;
-        Ok(ArchiveSparseIter(rx, range))
+        Ok(ArchiveSparseIter(rx, range, self.flatfiles.clone()))
     }
 
     pub fn iter_possible_blocks_with_payment(
@@ -505,7 +540,7 @@ impl ArchiveStore {
     ) -> Result<ArchiveSparseIter, RedbArchiveError> {
         let rx = self.db().begin_read()?;
         let range = indexes::Indexes::iter_by_payment(&rx, payment, start_slot, end_slot)?;
-        Ok(ArchiveSparseIter(rx, range))
+        Ok(ArchiveSparseIter(rx, range, self.flatfiles.clone()))
     }
 
     pub fn iter_possible_blocks_with_stake(
@@ -516,7 +551,7 @@ impl ArchiveStore {
     ) -> Result<ArchiveSparseIter, RedbArchiveError> {
         let rx = self.db().begin_read()?;
         let range = indexes::Indexes::iter_by_stake(&rx, stake, start_slot, end_slot)?;
-        Ok(ArchiveSparseIter(rx, range))
+        Ok(ArchiveSparseIter(rx, range, self.flatfiles.clone()))
     }
 
     pub fn iter_possible_blocks_with_account_certs(
@@ -527,7 +562,7 @@ impl ArchiveStore {
     ) -> Result<ArchiveSparseIter, RedbArchiveError> {
         let rx = self.db().begin_read()?;
         let range = indexes::Indexes::iter_by_account_certs(&rx, account, start_slot, end_slot)?;
-        Ok(ArchiveSparseIter(rx, range))
+        Ok(ArchiveSparseIter(rx, range, self.flatfiles.clone()))
     }
 
     pub fn iter_possible_blocks_with_metadata(
@@ -538,7 +573,7 @@ impl ArchiveStore {
     ) -> Result<ArchiveSparseIter, RedbArchiveError> {
         let rx = self.db().begin_read()?;
         let range = indexes::Indexes::iter_by_metadata(&rx, metadata, start_slot, end_slot)?;
-        Ok(ArchiveSparseIter(rx, range))
+        Ok(ArchiveSparseIter(rx, range, self.flatfiles.clone()))
     }
 
     pub fn get_block_by_slot(
@@ -546,7 +581,7 @@ impl ArchiveStore {
         slot: &BlockSlot,
     ) -> Result<Option<BlockBody>, RedbArchiveError> {
         let rx = self.db().begin_read()?;
-        tables::BlocksTable::get_by_slot(&rx, *slot)
+        tables::BlocksTable::get_by_slot(&rx, &self.flatfiles, *slot)
     }
 
     pub fn get_block_by_hash(
@@ -555,7 +590,7 @@ impl ArchiveStore {
     ) -> Result<Option<BlockBody>, RedbArchiveError> {
         let rx = self.db().begin_read()?;
         match indexes::Indexes::get_by_block_hash(&rx, block_hash)? {
-            Some(slot) => tables::BlocksTable::get_by_slot(&rx, slot),
+            Some(slot) => tables::BlocksTable::get_by_slot(&rx, &self.flatfiles, slot),
             None => Ok(None),
         }
     }
@@ -566,7 +601,7 @@ impl ArchiveStore {
     ) -> Result<Option<BlockBody>, RedbArchiveError> {
         let rx = self.db().begin_read()?;
         match indexes::Indexes::get_by_block_number(&rx, block_number)? {
-            Some(slot) => tables::BlocksTable::get_by_slot(&rx, slot),
+            Some(slot) => tables::BlocksTable::get_by_slot(&rx, &self.flatfiles, slot),
             None => Ok(None),
         }
     }
@@ -607,7 +642,7 @@ impl ArchiveStore {
             return Ok(None);
         };
 
-        let Some(raw) = tables::BlocksTable::get_by_slot(&rx, slot)? else {
+        let Some(raw) = tables::BlocksTable::get_by_slot(&rx, &self.flatfiles, slot)? else {
             return Ok(None);
         };
 
@@ -667,7 +702,7 @@ impl ArchiveStore {
 
     pub fn get_tip(&self) -> Result<Option<(BlockSlot, BlockBody)>, RedbArchiveError> {
         let rx = self.db().begin_read()?;
-        tables::BlocksTable::get_tip(&rx)
+        tables::BlocksTable::get_tip(&rx, &self.flatfiles)
     }
 
     pub fn prune_history(
@@ -691,6 +726,7 @@ impl ArchiveStore {
                 return Ok(true);
             }
         };
+        drop(rx);
 
         let delta = last.saturating_sub(start);
         let excess = delta.saturating_sub(max_slots);
@@ -717,7 +753,7 @@ impl ArchiveStore {
         let mut wx = self.db().begin_write()?;
         wx.set_quick_repair(true);
 
-        tables::BlocksTable::remove_before(&wx, prune_before)?;
+        tables::BlocksTable::remove_before(&wx, &self.flatfiles, prune_before)?;
         let temporal = prune_before.into();
         self.tables.values().try_for_each(|x| {
             x.remove_before(&wx, &temporal)
@@ -733,7 +769,7 @@ impl ArchiveStore {
         let mut wx = self.db().begin_write()?;
         wx.set_quick_repair(true);
 
-        tables::BlocksTable::remove_after(&wx, after.slot())?;
+        tables::BlocksTable::remove_after(&wx, &self.flatfiles, after.slot())?;
 
         let temporal = after.into();
         self.tables.values().try_for_each(|x| {
@@ -750,24 +786,34 @@ impl ArchiveStore {
 pub struct ArchiveStoreWriter {
     wx: WriteTransaction,
     tables: HashMap<Namespace, Table>,
+    flatfiles: Arc<flatfiles::FlatFileStore>,
+    pending_blocks: Mutex<Vec<(ChainPoint, RawBlock)>>,
 }
 
 impl dolos_core::ArchiveWriter for ArchiveStoreWriter {
     fn apply(&self, point: &ChainPoint, block: &RawBlock) -> Result<(), ArchiveError> {
-        tables::BlocksTable::apply(&self.wx, point, block)?;
-
+        self.pending_blocks
+            .lock()
+            .unwrap()
+            .push((point.clone(), block.clone()));
         Ok(())
     }
 
     fn undo(&self, point: &ChainPoint) -> Result<(), ArchiveError> {
-        tables::BlocksTable::undo(&self.wx, point)?;
-
+        tables::BlocksTable::undo(&self.wx, &self.flatfiles, point)?;
         Ok(())
     }
 
     fn commit(self) -> Result<(), ArchiveError> {
-        self.wx.commit().map_err(RedbArchiveError::from)?;
+        // 1. Batch-append all pending blocks to flat files (fsync inside).
+        // 2. Insert all index entries into redb.
+        // 3. Commit redb transaction.
+        let pending = self.pending_blocks.into_inner().unwrap();
+        if !pending.is_empty() {
+            tables::BlocksTable::apply_batch(&self.wx, &self.flatfiles, &pending)?;
+        }
 
+        self.wx.commit().map_err(RedbArchiveError::from)?;
         Ok(())
     }
 
@@ -911,29 +957,45 @@ impl dolos_core::ArchiveStore for ArchiveStore {
     }
 }
 
-pub struct ArchiveRangeIter(Range<'static, BlockSlot, BlockBody>);
+/// Iterator over a range of blocks, reading lazily from flat files.
+pub struct ArchiveRangeIter {
+    range: redb::Range<'static, BlockSlot, &'static [u8]>,
+    flatfiles: Arc<flatfiles::FlatFileStore>,
+}
 
 impl Iterator for ArchiveRangeIter {
     type Item = (BlockSlot, BlockBody);
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.0
-            .next()
-            .map(|x| x.unwrap())
-            .map(|(k, v)| (k.value(), v.value()))
+        loop {
+            let (slot, loc_bytes) = self.range.next()?.ok()?;
+            let loc = flatfiles::BlockLocation::from_bytes(loc_bytes.value());
+            match self.flatfiles.read(&loc) {
+                Ok(data) => return Some((slot.value(), data)),
+                Err(_) => continue, // skip unreadable blocks
+            }
+        }
     }
 }
 
 impl DoubleEndedIterator for ArchiveRangeIter {
     fn next_back(&mut self) -> Option<Self::Item> {
-        self.0
-            .next_back()
-            .map(|x| x.unwrap())
-            .map(|(k, v)| (k.value(), v.value()))
+        loop {
+            let (slot, loc_bytes) = self.range.next_back()?.ok()?;
+            let loc = flatfiles::BlockLocation::from_bytes(loc_bytes.value());
+            match self.flatfiles.read(&loc) {
+                Ok(data) => return Some((slot.value(), data)),
+                Err(_) => continue,
+            }
+        }
     }
 }
 
-pub struct ArchiveSparseIter(ReadTransaction, indexes::SlotKeyIterator);
+pub struct ArchiveSparseIter(
+    ReadTransaction,
+    indexes::SlotKeyIterator,
+    Arc<flatfiles::FlatFileStore>,
+);
 
 impl Iterator for ArchiveSparseIter {
     type Item = Result<(BlockSlot, Option<BlockBody>), ArchiveError>;
@@ -945,7 +1007,7 @@ impl Iterator for ArchiveSparseIter {
             return Some(Err(next.err().unwrap().into()));
         };
 
-        let block = tables::BlocksTable::get_by_slot(&self.0, slot);
+        let block = tables::BlocksTable::get_by_slot(&self.0, &self.2, slot);
 
         let Ok(block) = block else {
             return Some(Err(block.err().unwrap().into()));
@@ -963,7 +1025,7 @@ impl DoubleEndedIterator for ArchiveSparseIter {
             return Some(Err(next.err().unwrap().into()));
         };
 
-        let block = tables::BlocksTable::get_by_slot(&self.0, slot);
+        let block = tables::BlocksTable::get_by_slot(&self.0, &self.2, slot);
 
         let Ok(block) = block else {
             return Some(Err(block.err().unwrap().into()));
