@@ -24,7 +24,7 @@ use pallas::{
     codec::minicbor,
     crypto::hash::Hash,
     ledger::{
-        addresses::{Address, Network, StakeAddress, StakePayload},
+        addresses::{Address, Network, StakeAddress},
         primitives::Epoch,
         traverse::{MultiEraBlock, MultiEraCert, MultiEraTx},
     },
@@ -110,7 +110,7 @@ impl<'a> IntoModel<AccountContent> for AccountModelBuilder<'a> {
             .map(bech32_drep)
             .transpose()?;
 
-        let active = self.account_state.is_registered();
+        let active = pool_id.is_some();
 
         let stake = self.account_state.stake.live().cloned().unwrap_or_default();
 
@@ -248,14 +248,9 @@ pub async fn by_stake_utxos<D: Domain>(
 
     let account_key = parse_account_key_param(&address)?;
 
-    let payload = match account_key.address.payload() {
-        StakePayload::Stake(payload) => payload.as_slice(),
-        StakePayload::Script(payload) => payload.as_slice(),
-    };
-
     let refs = domain
         .indexes()
-        .utxos_by_stake(payload)
+        .utxos_by_stake(&account_key.address.to_vec())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let utxos = super::utxos::load_utxo_models(&domain, refs, pagination)?;

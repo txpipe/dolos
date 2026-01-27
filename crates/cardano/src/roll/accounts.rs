@@ -288,6 +288,7 @@ pub struct StakeDeregistration {
     prev_pool: Option<PoolDelegation>,
     prev_drep: Option<DRepDelegation>,
     prev_deposit: Option<u64>,
+    prev_retired_pool: Option<PoolHash>,
 }
 
 impl StakeDeregistration {
@@ -301,6 +302,7 @@ impl StakeDeregistration {
             prev_pool: None,
             prev_drep: None,
             prev_deposit: None,
+            prev_retired_pool: None,
         }
     }
 }
@@ -323,16 +325,16 @@ impl dolos_core::EntityDelta for StakeDeregistration {
         self.prev_deregistered_at = entity.deregistered_at;
         self.prev_pool = entity.pool.live().cloned();
         self.prev_drep = entity.drep.live().cloned();
+        self.prev_retired_pool = entity.retired_pool;
 
         // TODO: understand if we should keep the registered_at value even if the
         // account is deregistered
         entity.registered_at = None;
-
         entity.deregistered_at = Some(self.slot);
-
         entity
             .pool
             .replace(PoolDelegation::NotDelegated, self.epoch);
+        entity.retired_pool = None;
 
         entity.drep.replace(None, self.epoch);
     }
