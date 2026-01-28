@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use dolos_core::{config::CardanoConfig, BlockSlot, ChainError, Domain, EntityKey, Genesis};
-use tracing::{debug, info, instrument};
+use tracing::{debug, instrument};
 
 use crate::{
     eras::ChainSummary, roll::WorkDeltas, AccountState, CardanoDelta, CardanoEntity, DRepState,
@@ -105,7 +105,7 @@ pub fn execute<D: Domain>(
     _config: &CardanoConfig,
     genesis: Arc<Genesis>,
 ) -> Result<(), ChainError> {
-    info!("executing ESTART work unit");
+    debug!("executing ESTART work unit");
 
     let mut work = WorkContext::load::<D>(state, genesis)?;
 

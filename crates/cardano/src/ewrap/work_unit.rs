@@ -9,7 +9,7 @@
 use std::sync::Arc;
 
 use dolos_core::{config::CardanoConfig, BlockSlot, Domain, DomainError, Genesis, WorkUnit};
-use tracing::{debug, info};
+use tracing::debug;
 
 use crate::CardanoLogic;
 
@@ -48,7 +48,7 @@ where
     }
 
     fn load(&mut self, domain: &D) -> Result<(), DomainError> {
-        info!(slot = self.slot, "loading ewrap boundary context");
+        debug!(slot = self.slot, "loading ewrap boundary context");
 
         // Load rewards from state store (persisted by RUPD)
         self.boundary = Some(BoundaryWork::load::<D>(
@@ -68,7 +68,7 @@ where
     }
 
     fn commit_state(&mut self, domain: &D) -> Result<(), DomainError> {
-        info!(slot = self.slot, "committing ewrap state changes");
+        debug!(slot = self.slot, "committing ewrap state changes");
 
         let boundary = self.boundary.as_mut().ok_or_else(|| {
             DomainError::InconsistentState("ewrap boundary not loaded".to_string())

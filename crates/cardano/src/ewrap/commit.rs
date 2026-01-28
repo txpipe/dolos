@@ -8,7 +8,7 @@ use dolos_core::{
     ArchiveStore, ArchiveWriter, ChainError, ChainPoint, Domain, Entity, EntityDelta as _, LogKey,
     NsKey, StateStore, StateWriter, TemporalKey,
 };
-use tracing::{info, instrument, trace, warn};
+use tracing::{debug, instrument, trace, warn};
 
 use crate::{
     ewrap::BoundaryWork, rupd::credential_to_key, AccountState, CardanoEntity, DRepState,
@@ -63,29 +63,29 @@ impl BoundaryWork {
         state: &D::State,
         archive: &D::Archive,
     ) -> Result<(), ChainError> {
-        info!("committing ewrap changes (streaming mode)");
+        debug!("committing ewrap changes (streaming mode)");
 
         let writer = state.start_writer()?;
         let archive_writer = archive.start_writer()?;
 
         // Stream each namespace - entities are read, processed, and written one at a time
-        info!("streaming account entities");
+        debug!("streaming account entities");
         self.stream_and_apply_namespace::<D, AccountState>(state, &writer)?;
 
-        info!("streaming pool entities");
+        debug!("streaming pool entities");
         self.stream_and_apply_namespace::<D, PoolState>(state, &writer)?;
 
-        info!("streaming drep entities");
+        debug!("streaming drep entities");
         self.stream_and_apply_namespace::<D, DRepState>(state, &writer)?;
 
-        info!("streaming proposal entities");
+        debug!("streaming proposal entities");
         self.stream_and_apply_namespace::<D, ProposalState>(state, &writer)?;
 
-        info!("streaming epoch entities");
+        debug!("streaming epoch entities");
         self.stream_and_apply_namespace::<D, EpochState>(state, &writer)?;
 
         // Delete applied pending rewards
-        info!(
+        debug!(
             count = self.applied_reward_credentials.len(),
             "deleting applied pending rewards"
         );
@@ -110,7 +110,7 @@ impl BoundaryWork {
         let start_of_epoch = self.chain_summary.epoch_start(self.ending_state.number);
         let temporal_key = TemporalKey::from(&ChainPoint::Slot(start_of_epoch));
 
-        info!(log_count = self.logs.len(), "writing archive logs");
+        debug!(log_count = self.logs.len(), "writing archive logs");
         for (entity_key, log) in self.logs.drain(..) {
             let log_key = LogKey::from((temporal_key.clone(), entity_key));
             archive_writer.write_log_typed(&log_key, &log)?;
@@ -128,7 +128,7 @@ impl BoundaryWork {
         writer.commit()?;
         archive_writer.commit()?;
 
-        info!("ewrap commit complete");
+        debug!("ewrap commit complete");
 
         Ok(())
     }

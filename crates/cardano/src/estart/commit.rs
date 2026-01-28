@@ -8,7 +8,7 @@ use dolos_core::{
     ArchiveStore, ArchiveWriter, BlockSlot, BrokenInvariant, ChainError, ChainPoint, Domain,
     Entity, EntityDelta as _, EntityKey, LogKey, NsKey, StateStore, StateWriter, TemporalKey,
 };
-use tracing::{info, instrument, trace, warn};
+use tracing::{debug, instrument, trace, warn};
 
 use crate::{
     forks, AccountState, CardanoEntity, DRepState, EpochState, EraSummary, FixedNamespace,
@@ -115,7 +115,7 @@ impl super::WorkContext {
         archive: &D::Archive,
         slot: BlockSlot,
     ) -> Result<(), ChainError> {
-        info!("committing estart changes (streaming mode)");
+        debug!("committing estart changes (streaming mode)");
 
         // Collect era transition data first (only 1-2 entities, not a memory concern)
         let era_transition = self.collect_era_transition(state)?;
@@ -128,19 +128,19 @@ impl super::WorkContext {
         let archive_writer = archive.start_writer()?;
 
         // Stream each namespace - entities are read, processed, and written one at a time
-        info!("streaming account entities");
+        debug!("streaming account entities");
         self.stream_and_apply_namespace::<D, AccountState>(state, &writer)?;
 
-        info!("streaming pool entities");
+        debug!("streaming pool entities");
         self.stream_and_apply_namespace::<D, PoolState>(state, &writer)?;
 
-        info!("streaming drep entities");
+        debug!("streaming drep entities");
         self.stream_and_apply_namespace::<D, DRepState>(state, &writer)?;
 
-        info!("streaming proposal entities");
+        debug!("streaming proposal entities");
         self.stream_and_apply_namespace::<D, ProposalState>(state, &writer)?;
 
-        info!("streaming epoch entities");
+        debug!("streaming epoch entities");
         self.stream_and_apply_namespace::<D, EpochState>(state, &writer)?;
 
         // Write era transition if needed (only 2 entities)
@@ -152,7 +152,7 @@ impl super::WorkContext {
         }
 
         // Write archive logs (still accumulated during compute_deltas, but much smaller than entities)
-        info!(log_count = self.logs.len(), "writing archive logs");
+        debug!(log_count = self.logs.len(), "writing archive logs");
         for (entity_key, log) in self.logs.drain(..) {
             let log_key = LogKey::from((temporal_key.clone(), entity_key));
             archive_writer.write_log_typed(&log_key, &log)?;
@@ -170,7 +170,7 @@ impl super::WorkContext {
         writer.commit()?;
         archive_writer.commit()?;
 
-        info!("estart commit complete");
+        debug!("estart commit complete");
 
         Ok(())
     }

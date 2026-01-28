@@ -248,7 +248,7 @@ pub enum StateStoreConfig {
 
 impl Default for StateStoreConfig {
     fn default() -> Self {
-        Self::Redb(RedbStateConfig::default())
+        Self::Fjall(FjallStateConfig::default())
     }
 }
 
@@ -392,7 +392,7 @@ pub enum IndexStoreConfig {
 
 impl Default for IndexStoreConfig {
     fn default() -> Self {
-        Self::Redb(RedbIndexConfig::default())
+        Self::Fjall(FjallIndexConfig::default())
     }
 }
 

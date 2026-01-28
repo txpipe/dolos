@@ -60,7 +60,7 @@ where
     }
 
     fn compute(&mut self) -> Result<(), DomainError> {
-        info!(
+        debug!(
             first_slot = self.batch.first_slot(),
             last_slot = self.batch.last_slot(),
             blocks = self.batch.blocks.len(),
