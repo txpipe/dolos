@@ -10,8 +10,6 @@ use tonic::{Request, Response, Status};
 
 use crate::prelude::*;
 
-const MAX_DUMP_HISTORY_ITEMS: u32 = 100;
-
 fn u5c_to_chain_point(block_ref: u5c::sync::BlockRef) -> Result<ChainPoint, Status> {
     Ok(ChainPoint::Specific(
         block_ref.slot,
@@ -97,6 +95,7 @@ where
     domain: D,
     mapper: interop::Mapper<D>,
     cancel: C,
+    max_history_items: u32,
 }
 
 impl<D, C> SyncServiceImpl<D, C>
@@ -104,13 +103,14 @@ where
     D: Domain + LedgerContext,
     C: CancelToken,
 {
-    pub fn new(domain: D, cancel: C) -> Self {
+    pub fn new(domain: D, cancel: C, max_history_items: u32) -> Self {
         let mapper = Mapper::new(domain.clone());
 
         Self {
             domain,
             mapper,
             cancel,
+            max_history_items,
         }
     }
 }
@@ -186,9 +186,10 @@ where
 
         let from = msg.start_token.map(|x| x.slot);
 
-        if msg.max_items > MAX_DUMP_HISTORY_ITEMS {
+        if msg.max_items > self.max_history_items {
             return Err(Status::invalid_argument(format!(
-                "max_items must be less than or equal to {MAX_DUMP_HISTORY_ITEMS}"
+                "max_items must be less than or equal to {}",
+                self.max_history_items
             )));
         }
 
@@ -288,7 +289,7 @@ mod tests {
         use dolos_core::ImportExt;
         domain.import_blocks(batch).unwrap();
 
-        let service = SyncServiceImpl::new(domain, cancel);
+        let service = SyncServiceImpl::new(domain, cancel, 100);
 
         let mut start_token = None;
 
@@ -331,11 +332,13 @@ mod tests {
         let domain = ToyDomain::new(None, None);
         let cancel = CancelTokenImpl::default();
 
-        let service = SyncServiceImpl::new(domain, cancel);
+        let max_configurable = 10;
+
+        let service = SyncServiceImpl::new(domain, cancel, max_configurable);
 
         let request = u5c::sync::DumpHistoryRequest {
             start_token: None,
-            max_items: MAX_DUMP_HISTORY_ITEMS + 1,
+            max_items: max_configurable + 1,
             field_mask: None,
         };
 
