@@ -266,6 +266,8 @@ fn import_hardano_into_domain(
 pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Result<()> {
     if args.verbose {
         crate::common::setup_tracing(&config.logging)?;
+    } else {
+        crate::common::setup_tracing_error_only()?;
     }
 
     let mithril = config

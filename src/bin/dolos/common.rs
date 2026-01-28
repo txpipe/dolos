@@ -146,6 +146,19 @@ pub fn setup_domain(config: &RootConfig) -> miette::Result<DomainAdapter> {
     Ok(domain)
 }
 
+pub fn setup_tracing_error_only() -> miette::Result<()> {
+    let filter = Targets::new().with_default(tracing::Level::ERROR);
+
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer())
+        .with(filter)
+        .init();
+
+    tracing_log::LogTracer::init().ok();
+
+    Ok(())
+}
+
 pub fn setup_tracing(config: &LoggingConfig) -> miette::Result<()> {
     let level = config.max_level;
 
