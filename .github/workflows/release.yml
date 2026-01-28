@@ -61,12 +61,12 @@ jobs:
           persist-credentials: false
           submodules: recursive
       - name: Install Rust
-        run: rustup update "1.89" --no-self-update && rustup default "1.89"
+        run: rustup update "1.91" --no-self-update && rustup default "1.91"
       - name: Install dist
         # we specify bash to get pipefail; it guards against the `curl` command
         # failing. otherwise `sh` won't catch that `curl` returned non-0
         shell: bash
-        run: "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.30.3/cargo-dist-installer.sh | sh"
+        run: "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.29.0/cargo-dist-installer.sh | sh"
       - name: Cache dist
         uses: actions/upload-artifact@v4
         with:
@@ -130,7 +130,7 @@ jobs:
             echo "$HOME/.cargo/bin" >> $GITHUB_PATH
           fi
       - name: Use rustup to set correct Rust version
-        run: rustup update "1.89" --no-self-update && rustup default "1.89"
+        run: rustup update "1.91" --no-self-update && rustup default "1.91"
       - name: Install dist
         run: ${{ matrix.install_dist.run }}
       # Get the dist-manifest
@@ -184,7 +184,7 @@ jobs:
           persist-credentials: false
           submodules: recursive
       - name: Install Rust
-        run: rustup update "1.89" --no-self-update && rustup default "1.89"
+        run: rustup update "1.91" --no-self-update && rustup default "1.91"
       - name: Install cached dist
         uses: actions/download-artifact@v4
         with:
@@ -223,8 +223,8 @@ jobs:
       - plan
       - build-local-artifacts
       - build-global-artifacts
-    # Only run if we're "publishing", and only if plan, local and global didn't fail (skipped is fine)
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') }}
+    # Only run if we're "publishing", and only if local and global didn't fail (skipped is fine)
+    if: ${{ always() && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     runs-on: "ubuntu-22.04"
@@ -236,7 +236,7 @@ jobs:
           persist-credentials: false
           submodules: recursive
       - name: Install Rust
-        run: rustup update "1.89" --no-self-update && rustup default "1.89"
+        run: rustup update "1.91" --no-self-update && rustup default "1.91"
       - name: Install cached dist
         uses: actions/download-artifact@v4
         with:
