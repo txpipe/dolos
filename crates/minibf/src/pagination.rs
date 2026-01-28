@@ -16,6 +16,7 @@ pub enum PaginationError {
     PageNotAnInteger,
     OrderNotAllowed,
     InvalidFromTo,
+    ScanLimitExceeded,
 }
 
 impl IntoResponse for PaginationError {
@@ -32,6 +33,9 @@ impl IntoResponse for PaginationError {
             }
             PaginationError::InvalidFromTo => {
                 "Invalid (malformed or out of range) from/to parameter(s)."
+            }
+            PaginationError::ScanLimitExceeded => {
+                "pagination scan limit exceeded, reduce page number or count"
             }
         };
         let body = Json(json!({
@@ -178,7 +182,23 @@ impl TryFrom<PaginationParameters> for Pagination {
     }
 }
 
+/// Temporary workaround: maximum number of items that can be scanned via
+/// page-based pagination. Endpoints that require decoding every block in the
+/// result set (sub-block pagination) are capped to this limit until we refactor
+/// the underlying data storage to support efficient offset-based access.
+const MAX_SCAN_ITEMS: u64 = 1_000;
+
 impl Pagination {
+    /// Reject requests that would require scanning too many items. Call this
+    /// on endpoints where each result requires decoding block data (sub-block
+    /// element iteration) and efficient skipping is not yet supported.
+    pub fn enforce_max_scan_limit(&self) -> Result<(), PaginationError> {
+        if self.page * self.count as u64 > MAX_SCAN_ITEMS {
+            return Err(PaginationError::ScanLimitExceeded);
+        }
+        Ok(())
+    }
+
     pub fn from(&self) -> usize {
         ((self.page - 1) * self.count as u64) as usize
     }

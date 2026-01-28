@@ -556,6 +556,22 @@ impl DoubleEndedIterator for ArchiveBlockIterBackend {
     }
 }
 
+impl dolos_core::archive::Skippable for ArchiveBlockIterBackend {
+    fn skip_forward(&mut self, n: usize) {
+        match self {
+            Self::Redb(iter) => iter.skip_forward(n),
+            Self::NoOp(iter) => iter.skip_forward(n),
+        }
+    }
+
+    fn skip_backward(&mut self, n: usize) {
+        match self {
+            Self::Redb(iter) => iter.skip_backward(n),
+            Self::NoOp(iter) => iter.skip_backward(n),
+        }
+    }
+}
+
 pub enum ArchiveLogIterBackend {
     Redb(<dolos_redb3::archive::ArchiveStore as CoreArchiveStore>::LogIter),
     NoOp(EmptyLogIter),
