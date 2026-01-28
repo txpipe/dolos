@@ -990,7 +990,6 @@ impl TxModelBuilder<'_> {
         match redeemer.tag() {
             RedeemerTag::Spend => {
                 let inputs = tx.inputs_sorted_set();
-
                 let Some(input) = inputs.get(index) else {
                     return Ok(None);
                 };
@@ -1011,7 +1010,10 @@ impl TxModelBuilder<'_> {
                     _ => Ok(None),
                 }
             }
-
+            RedeemerTag::Mint => {
+                let mints = tx.mints();
+                Ok(mints.get(index).map(|x| x.policy()).cloned())
+            }
             _ => Ok(None),
         }
     }
