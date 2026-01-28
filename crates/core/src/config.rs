@@ -277,10 +277,15 @@ impl StateStoreConfig {
 /// Configuration for the Redb archive backend.
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct RedbArchiveConfig {
-    /// Optional path override. If relative, resolved from storage root.
-    /// If not specified, defaults to `<storage.path>/chain`.
+    /// Optional path override for the archive directory.
+    /// If relative, resolved from storage root.
+    /// If not specified, defaults to `<storage.path>/archive`.
     #[serde(default)]
     pub path: Option<PathBuf>,
+    /// Optional path override for block segment files.
+    /// If not specified, segment files are stored in the archive directory.
+    #[serde(default)]
+    pub blocks_path: Option<PathBuf>,
     /// Size (in MB) of memory allocated for caching.
     #[serde(default)]
     pub cache: Option<usize>,
@@ -475,7 +480,7 @@ impl StorageConfig {
         match &self.archive {
             ArchiveStoreConfig::InMemory | ArchiveStoreConfig::NoOp => None,
             ArchiveStoreConfig::Redb(cfg) => {
-                Some(self.resolve_store_path_with_default(cfg.path.as_ref(), "chain"))
+                Some(self.resolve_store_path_with_default(cfg.path.as_ref(), "archive"))
             }
         }
     }

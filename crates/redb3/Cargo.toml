@@ -15,6 +15,7 @@ bincode.workspace = true
 hex.workspace = true
 thiserror.workspace = true
 xxhash-rust.workspace = true
+tempfile = "3"
 
 dolos-core = { path = "../core" }
 
