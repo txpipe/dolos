@@ -6,7 +6,7 @@ use axum::{
 use blockfrost_openapi::models::epoch_param_content::EpochParamContent;
 use pallas::ledger::{primitives::Epoch, traverse::MultiEraBlock};
 
-use dolos_core::{ArchiveStore, Domain};
+use dolos_core::{archive::Skippable as _, ArchiveStore, Domain};
 
 use crate::{
     error::Error,
@@ -77,24 +77,31 @@ pub async fn by_number_blocks<D: Domain>(
     let start = chain.epoch_start(epoch);
     let end = chain.epoch_start(epoch + 1) - 1;
 
-    let iter = domain
+    let mut iter = domain
         .archive()
         .get_range(Some(start), Some(end))
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .map(|(_, x)| {
-            let block = MultiEraBlock::decode(&x).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            Ok(block.hash().to_string())
-        });
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Skip past pages using key-only traversal (no block data read).
+    match pagination.order {
+        Order::Asc => iter.skip_forward(pagination.skip()),
+        Order::Desc => iter.skip_backward(pagination.skip()),
+    }
+
+    let decode = |(_slot, body): (_, Vec<u8>)| -> Result<String, StatusCode> {
+        let block = MultiEraBlock::decode(&body).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        Ok(block.hash().to_string())
+    };
 
     Ok(Json(match pagination.order {
         Order::Asc => iter
-            .skip(pagination.skip())
             .take(pagination.count)
+            .map(decode)
             .collect::<Result<_, StatusCode>>()?,
         Order::Desc => iter
             .rev()
-            .skip(pagination.skip())
             .take(pagination.count)
+            .map(decode)
             .collect::<Result<_, _>>()?,
     }))
 }

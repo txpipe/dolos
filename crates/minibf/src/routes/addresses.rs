@@ -345,6 +345,7 @@ pub async fn transactions<D: Domain>(
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<AddressTransactionsContentInner>>, Error> {
     let pagination = Pagination::try_from(params)?;
+    pagination.enforce_max_scan_limit()?;
     let end_slot = domain.get_tip_slot()?;
 
     let (blocks, address) = blocks_for_address(&domain.inner, &address, 0, end_slot)?;
@@ -373,6 +374,7 @@ pub async fn txs<D: Domain>(
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<String>>, Error> {
     let pagination = Pagination::try_from(params)?;
+    pagination.enforce_max_scan_limit()?;
     let end_slot = domain.get_tip_slot()?;
 
     let (blocks, address) = blocks_for_address(&domain.inner, &address, 0, end_slot)?;

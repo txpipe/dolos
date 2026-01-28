@@ -991,6 +991,24 @@ impl DoubleEndedIterator for ArchiveRangeIter {
     }
 }
 
+impl dolos_core::archive::Skippable for ArchiveRangeIter {
+    fn skip_forward(&mut self, n: usize) {
+        for _ in 0..n {
+            if self.range.next().is_none() {
+                break;
+            }
+        }
+    }
+
+    fn skip_backward(&mut self, n: usize) {
+        for _ in 0..n {
+            if self.range.next_back().is_none() {
+                break;
+            }
+        }
+    }
+}
+
 pub struct ArchiveSparseIter(
     ReadTransaction,
     indexes::SlotKeyIterator,

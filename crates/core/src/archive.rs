@@ -192,8 +192,23 @@ pub trait ArchiveWriter: Send + Sync + 'static {
     fn commit(self) -> Result<(), ArchiveError>;
 }
 
+/// An iterator that supports efficient skipping without materializing items.
+///
+/// Storage backends can implement this to skip entries by traversing only index
+/// keys, avoiding expensive data reads for items that will be discarded during
+/// pagination.
+pub trait Skippable {
+    /// Advance the iterator forward by `n` entries without reading item data.
+    fn skip_forward(&mut self, n: usize);
+    /// Advance the iterator backward by `n` entries without reading item data.
+    fn skip_backward(&mut self, n: usize);
+}
+
 pub trait ArchiveStore: Clone + Send + Sync + 'static {
-    type BlockIter<'a>: Iterator<Item = (BlockSlot, BlockBody)> + DoubleEndedIterator + 'a;
+    type BlockIter<'a>: Iterator<Item = (BlockSlot, BlockBody)>
+        + DoubleEndedIterator
+        + Skippable
+        + 'a;
     type Writer: ArchiveWriter;
     type LogIter: Iterator<Item = Result<(LogKey, EntityValue), ArchiveError>>;
     type EntityValueIter: Iterator<Item = Result<EntityValue, ArchiveError>>;

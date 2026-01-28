@@ -128,6 +128,7 @@ async fn by_label<D: Domain>(
 ) -> Result<MetadataHistoryModelBuilder, Error> {
     let label: u64 = label.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
     let pagination = Pagination::try_from(pagination)?;
+    pagination.enforce_max_scan_limit()?;
     let end_slot = domain.get_tip_slot()?;
 
     let mut blocks = domain

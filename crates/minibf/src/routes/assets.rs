@@ -735,6 +735,7 @@ pub async fn by_subject_transactions<D: Domain>(
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<AssetTransactionsInner>>, Error> {
     let pagination = Pagination::try_from(params)?;
+    pagination.enforce_max_scan_limit()?;
 
     let subject = hex::decode(&subject).map_err(|_| Error::InvalidAsset)?;
     let end_slot = domain.get_tip_slot()?;

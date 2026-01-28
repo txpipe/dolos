@@ -190,6 +190,7 @@ where
     Option<AccountState>: From<D::Entity>,
 {
     let pagination = Pagination::try_from(params)?;
+    pagination.enforce_max_scan_limit()?;
     let account_key = parse_account_key_param(&stake_address)?;
     let end_slot = domain.get_tip_slot()?;
 
@@ -506,6 +507,7 @@ where
     Option<AccountState>: From<D::Entity>,
 {
     let pagination = Pagination::try_from(params)?;
+    pagination.enforce_max_scan_limit()?;
 
     let items = by_stake_actions::<D, _, AccountDelegationContentInner>(
         &stake_address,
@@ -527,6 +529,7 @@ where
     Option<AccountState>: From<D::Entity>,
 {
     let pagination = Pagination::try_from(params)?;
+    pagination.enforce_max_scan_limit()?;
 
     let items = by_stake_actions::<D, _, AccountRegistrationContentInner>(
         &stake_address,

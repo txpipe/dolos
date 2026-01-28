@@ -174,6 +174,11 @@ impl DoubleEndedIterator for EmptyBlockIter {
     }
 }
 
+impl crate::archive::Skippable for EmptyBlockIter {
+    fn skip_forward(&mut self, _n: usize) {}
+    fn skip_backward(&mut self, _n: usize) {}
+}
+
 /// Empty iterator for log queries.
 pub struct EmptyLogIter;
 
