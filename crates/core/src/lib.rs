@@ -27,14 +27,15 @@ use thiserror::Error;
 use tracing::info;
 
 pub mod archive;
+pub mod async_query;
 pub mod bootstrap;
+pub mod builtin;
 pub mod config;
 pub mod crawl;
 pub mod import;
 pub mod indexes;
 pub mod mempool;
 pub mod point;
-pub mod query;
 pub mod state;
 pub mod submit;
 pub mod sync;
@@ -76,10 +77,10 @@ pub type ChainTip = pallas::network::miniprotocols::chainsync::Tip;
 pub type LogSeq = u64;
 
 pub use archive::*;
+pub use async_query::*;
 pub use indexes::*;
 pub use mempool::*;
 pub use point::*;
-pub use query::*;
 pub use state::*;
 pub use wal::*;
 

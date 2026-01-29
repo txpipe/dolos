@@ -129,269 +129,294 @@ impl Display for StorageVersion {
     }
 }
 
+// ============================================================================
+// WAL Store Configuration
+// ============================================================================
+
+/// Configuration for the Redb WAL backend.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct RedbWalConfig {
+    /// Optional path override. If relative, resolved from storage root.
+    /// If not specified, defaults to `<storage.path>/wal`.
+    #[serde(default)]
+    pub path: Option<PathBuf>,
+    /// Size (in MB) of memory allocated for caching.
+    #[serde(default)]
+    pub cache: Option<usize>,
+    /// Maximum number of slots to keep in the WAL.
+    #[serde(default)]
+    pub max_history: Option<u64>,
+}
+
 /// WAL store configuration.
-/// Note: WAL only supports Redb backend currently.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "backend", rename_all = "lowercase")]
 pub enum WalStoreConfig {
-    Redb {
-        /// Optional path override. If relative, resolved from storage root.
-        /// If not specified, defaults to `<storage.path>/wal`.
-        #[serde(default)]
-        path: Option<PathBuf>,
-        /// Size (in MB) of memory allocated for caching.
-        #[serde(default)]
-        cache: Option<usize>,
-        /// Maximum number of slots to keep in the WAL.
-        #[serde(default)]
-        max_history: Option<u64>,
-    },
+    Redb(RedbWalConfig),
+    /// In-memory backend (ephemeral, data lost on restart).
+    #[serde(rename = "in_memory")]
+    InMemory,
 }
 
 impl Default for WalStoreConfig {
     fn default() -> Self {
-        Self::Redb {
-            path: None,
-            cache: None,
-            max_history: None,
-        }
+        Self::Redb(RedbWalConfig::default())
     }
 }
 
 impl WalStoreConfig {
     pub fn path(&self) -> Option<&PathBuf> {
         match self {
-            Self::Redb { path, .. } => path.as_ref(),
-        }
-    }
-
-    pub fn cache(&self) -> Option<usize> {
-        match self {
-            Self::Redb { cache, .. } => *cache,
+            Self::Redb(cfg) => cfg.path.as_ref(),
+            Self::InMemory => None,
         }
     }
 
     pub fn max_history(&self) -> Option<u64> {
         match self {
-            Self::Redb { max_history, .. } => *max_history,
+            Self::Redb(cfg) => cfg.max_history,
+            Self::InMemory => None,
         }
     }
 
     pub fn set_max_history(&mut self, value: Option<u64>) {
-        match self {
-            Self::Redb { max_history, .. } => *max_history = value,
+        if let Self::Redb(cfg) = self {
+            cfg.max_history = value;
         }
     }
+}
+
+// ============================================================================
+// State Store Configuration
+// ============================================================================
+
+/// Configuration for the Redb state backend.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct RedbStateConfig {
+    /// Optional path override. If relative, resolved from storage root.
+    /// If not specified, defaults to `<storage.path>/state`.
+    #[serde(default)]
+    pub path: Option<PathBuf>,
+    /// Size (in MB) of memory allocated for caching.
+    #[serde(default)]
+    pub cache: Option<usize>,
+    /// Maximum number of slots to keep before pruning.
+    #[serde(default)]
+    pub max_history: Option<u64>,
+}
+
+/// Configuration for the Fjall state backend.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct FjallStateConfig {
+    /// Optional path override. If relative, resolved from storage root.
+    /// If not specified, defaults to `<storage.path>/state`.
+    #[serde(default)]
+    pub path: Option<PathBuf>,
+    /// Size (in MB) of memory allocated for caching.
+    #[serde(default)]
+    pub cache: Option<usize>,
+    /// Maximum number of slots to keep before pruning.
+    #[serde(default)]
+    pub max_history: Option<u64>,
+    /// Maximum journal size in MB.
+    #[serde(default)]
+    pub max_journal_size: Option<usize>,
+    /// Flush journal after each commit.
+    #[serde(default)]
+    pub flush_on_commit: Option<bool>,
+    /// L0 compaction threshold (default: 4, lower = more aggressive).
+    #[serde(default)]
+    pub l0_threshold: Option<u8>,
+    /// Number of background compaction worker threads.
+    #[serde(default)]
+    pub worker_threads: Option<usize>,
+    /// Memtable size in MB before flush (default: 64).
+    #[serde(default)]
+    pub memtable_size_mb: Option<usize>,
 }
 
 /// State store configuration.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "backend", rename_all = "lowercase")]
 pub enum StateStoreConfig {
-    Redb {
-        /// Optional path override. If relative, resolved from storage root.
-        /// If not specified, defaults to `<storage.path>/state`.
-        #[serde(default)]
-        path: Option<PathBuf>,
-        /// Size (in MB) of memory allocated for caching.
-        #[serde(default)]
-        cache: Option<usize>,
-        /// Maximum number of slots to keep before pruning.
-        #[serde(default)]
-        max_history: Option<u64>,
-    },
-    Fjall {
-        /// Optional path override. If relative, resolved from storage root.
-        /// If not specified, defaults to `<storage.path>/state`.
-        #[serde(default)]
-        path: Option<PathBuf>,
-        /// Size (in MB) of memory allocated for caching.
-        #[serde(default)]
-        cache: Option<usize>,
-        /// Maximum number of slots to keep before pruning.
-        #[serde(default)]
-        max_history: Option<u64>,
-        /// Maximum journal size in MB.
-        #[serde(default)]
-        max_journal_size: Option<usize>,
-        /// Flush journal after each commit.
-        #[serde(default)]
-        flush_on_commit: Option<bool>,
-        /// L0 compaction threshold (default: 4, lower = more aggressive).
-        #[serde(default)]
-        l0_threshold: Option<u8>,
-        /// Number of background compaction worker threads.
-        #[serde(default)]
-        worker_threads: Option<usize>,
-        /// Memtable size in MB before flush (default: 64).
-        #[serde(default)]
-        memtable_size_mb: Option<usize>,
-    },
+    Redb(RedbStateConfig),
+    /// In-memory backend (ephemeral, data lost on restart).
+    #[serde(rename = "in_memory")]
+    InMemory,
+    Fjall(FjallStateConfig),
 }
 
 impl Default for StateStoreConfig {
     fn default() -> Self {
-        Self::Redb {
-            path: None,
-            cache: None,
-            max_history: None,
-        }
+        Self::Fjall(FjallStateConfig::default())
     }
 }
 
 impl StateStoreConfig {
     pub fn path(&self) -> Option<&PathBuf> {
         match self {
-            Self::Redb { path, .. } | Self::Fjall { path, .. } => path.as_ref(),
-        }
-    }
-
-    pub fn cache(&self) -> Option<usize> {
-        match self {
-            Self::Redb { cache, .. } | Self::Fjall { cache, .. } => *cache,
+            Self::Redb(cfg) => cfg.path.as_ref(),
+            Self::Fjall(cfg) => cfg.path.as_ref(),
+            Self::InMemory => None,
         }
     }
 
     pub fn max_history(&self) -> Option<u64> {
         match self {
-            Self::Redb { max_history, .. } | Self::Fjall { max_history, .. } => *max_history,
+            Self::Redb(cfg) => cfg.max_history,
+            Self::Fjall(cfg) => cfg.max_history,
+            Self::InMemory => None,
         }
-    }
-
-    pub fn is_fjall(&self) -> bool {
-        matches!(self, Self::Fjall { .. })
     }
 }
 
+// ============================================================================
+// Archive Store Configuration
+// ============================================================================
+
+/// Configuration for the Redb archive backend.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct RedbArchiveConfig {
+    /// Optional path override for the archive directory.
+    /// If relative, resolved from storage root.
+    /// If not specified, defaults to `<storage.path>/archive`.
+    #[serde(default)]
+    pub path: Option<PathBuf>,
+    /// Optional path override for block segment files.
+    /// If not specified, segment files are stored in the archive directory.
+    #[serde(default)]
+    pub blocks_path: Option<PathBuf>,
+    /// Size (in MB) of memory allocated for caching.
+    #[serde(default)]
+    pub cache: Option<usize>,
+    /// Maximum number of slots to keep.
+    #[serde(default)]
+    pub max_history: Option<u64>,
+}
+
 /// Archive store configuration.
-/// Note: Archive only supports Redb backend currently.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "backend", rename_all = "lowercase")]
 pub enum ArchiveStoreConfig {
-    Redb {
-        /// Optional path override. If relative, resolved from storage root.
-        /// If not specified, defaults to `<storage.path>/chain`.
-        #[serde(default)]
-        path: Option<PathBuf>,
-        /// Size (in MB) of memory allocated for caching.
-        #[serde(default)]
-        cache: Option<usize>,
-        /// Maximum number of slots to keep.
-        #[serde(default)]
-        max_history: Option<u64>,
-    },
+    Redb(RedbArchiveConfig),
+    /// In-memory backend (ephemeral, data lost on restart).
+    #[serde(rename = "in_memory")]
+    InMemory,
+    /// No-op backend that discards all writes and returns empty results.
+    NoOp,
 }
 
 impl Default for ArchiveStoreConfig {
     fn default() -> Self {
-        Self::Redb {
-            path: None,
-            cache: None,
-            max_history: None,
-        }
+        Self::Redb(RedbArchiveConfig::default())
     }
 }
 
 impl ArchiveStoreConfig {
     pub fn path(&self) -> Option<&PathBuf> {
         match self {
-            Self::Redb { path, .. } => path.as_ref(),
-        }
-    }
-
-    pub fn cache(&self) -> Option<usize> {
-        match self {
-            Self::Redb { cache, .. } => *cache,
+            Self::Redb(cfg) => cfg.path.as_ref(),
+            Self::InMemory | Self::NoOp => None,
         }
     }
 
     pub fn max_history(&self) -> Option<u64> {
         match self {
-            Self::Redb { max_history, .. } => *max_history,
+            Self::Redb(cfg) => cfg.max_history,
+            Self::InMemory | Self::NoOp => None,
         }
     }
 
     pub fn set_max_history(&mut self, value: Option<u64>) {
-        match self {
-            Self::Redb { max_history, .. } => *max_history = value,
+        if let Self::Redb(cfg) = self {
+            cfg.max_history = value;
         }
     }
+}
+
+// ============================================================================
+// Index Store Configuration
+// ============================================================================
+
+/// Configuration for the Redb index backend.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct RedbIndexConfig {
+    /// Optional path override. If relative, resolved from storage root.
+    /// If not specified, defaults to `<storage.path>/index`.
+    #[serde(default)]
+    pub path: Option<PathBuf>,
+    /// Size (in MB) of memory allocated for caching.
+    #[serde(default)]
+    pub cache: Option<usize>,
+}
+
+/// Configuration for the Fjall index backend.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct FjallIndexConfig {
+    /// Optional path override. If relative, resolved from storage root.
+    /// If not specified, defaults to `<storage.path>/index`.
+    #[serde(default)]
+    pub path: Option<PathBuf>,
+    /// Size (in MB) of memory allocated for caching.
+    #[serde(default)]
+    pub cache: Option<usize>,
+    /// Maximum journal size in MB.
+    #[serde(default)]
+    pub max_journal_size: Option<usize>,
+    /// Flush journal after each commit.
+    #[serde(default)]
+    pub flush_on_commit: Option<bool>,
+    /// L0 compaction threshold (default: 4, lower = more aggressive).
+    #[serde(default)]
+    pub l0_threshold: Option<u8>,
+    /// Number of background compaction worker threads.
+    #[serde(default)]
+    pub worker_threads: Option<usize>,
+    /// Memtable size in MB before flush (default: 64).
+    #[serde(default)]
+    pub memtable_size_mb: Option<usize>,
 }
 
 /// Index store configuration.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "backend", rename_all = "lowercase")]
 pub enum IndexStoreConfig {
-    Redb {
-        /// Optional path override. If relative, resolved from storage root.
-        /// If not specified, defaults to `<storage.path>/index`.
-        #[serde(default)]
-        path: Option<PathBuf>,
-        /// Size (in MB) of memory allocated for caching.
-        #[serde(default)]
-        cache: Option<usize>,
-    },
-    Fjall {
-        /// Optional path override. If relative, resolved from storage root.
-        /// If not specified, defaults to `<storage.path>/index`.
-        #[serde(default)]
-        path: Option<PathBuf>,
-        /// Size (in MB) of memory allocated for caching.
-        #[serde(default)]
-        cache: Option<usize>,
-        /// Maximum journal size in MB.
-        #[serde(default)]
-        max_journal_size: Option<usize>,
-        /// Flush journal after each commit.
-        #[serde(default)]
-        flush_on_commit: Option<bool>,
-        /// L0 compaction threshold (default: 4, lower = more aggressive).
-        #[serde(default)]
-        l0_threshold: Option<u8>,
-        /// Number of background compaction worker threads.
-        #[serde(default)]
-        worker_threads: Option<usize>,
-        /// Memtable size in MB before flush (default: 64).
-        #[serde(default)]
-        memtable_size_mb: Option<usize>,
-    },
+    Redb(RedbIndexConfig),
+    /// In-memory backend (ephemeral, data lost on restart).
+    #[serde(rename = "in_memory")]
+    InMemory,
+    Fjall(FjallIndexConfig),
+    /// No-op backend that discards all writes and returns empty results.
+    NoOp,
 }
 
 impl Default for IndexStoreConfig {
     fn default() -> Self {
-        Self::Redb {
-            path: None,
-            cache: None,
-        }
+        Self::Fjall(FjallIndexConfig::default())
     }
 }
 
 impl IndexStoreConfig {
     pub fn path(&self) -> Option<&PathBuf> {
         match self {
-            Self::Redb { path, .. } | Self::Fjall { path, .. } => path.as_ref(),
+            Self::Redb(cfg) => cfg.path.as_ref(),
+            Self::Fjall(cfg) => cfg.path.as_ref(),
+            Self::InMemory | Self::NoOp => None,
         }
-    }
-
-    pub fn cache(&self) -> Option<usize> {
-        match self {
-            Self::Redb { cache, .. } | Self::Fjall { cache, .. } => *cache,
-        }
-    }
-
-    pub fn is_fjall(&self) -> bool {
-        matches!(self, Self::Fjall { .. })
     }
 }
+
+// ============================================================================
+// Storage Configuration
+// ============================================================================
 
 /// Storage configuration with nested per-store settings.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct StorageConfig {
     pub version: StorageVersion,
 
-    /// Directory where to find storage. If undefined, ephemeral storage will be
-    /// used.
-    pub path: Option<std::path::PathBuf>,
+    /// Root directory for storage files.
+    pub path: std::path::PathBuf,
 
     /// WAL store configuration.
     #[serde(default)]
@@ -411,54 +436,67 @@ pub struct StorageConfig {
 }
 
 impl StorageConfig {
-    pub fn is_ephemeral(&self) -> bool {
-        self.path.is_none()
-    }
-
-    /// Resolves a store path based on an optional override and a default subdirectory.
-    ///
-    /// If `override_path` is `Some`:
-    /// - Absolute paths are used as-is
-    /// - Relative paths are resolved from the storage root
-    ///
-    /// If `override_path` is `None`, returns `<storage.path>/<default_subdir>`.
-    ///
-    /// Returns `None` if storage is ephemeral (no root path configured).
-    fn resolve_store_path(
+    /// Resolve path with a default subdir for backends that don't specify a custom path.
+    fn resolve_store_path_with_default(
         &self,
-        override_path: Option<&PathBuf>,
+        config_path: Option<&PathBuf>,
         default_subdir: &str,
-    ) -> Option<PathBuf> {
-        let root = self.path.as_ref()?;
-        match override_path {
-            Some(p) if p.is_absolute() => Some(p.clone()),
-            Some(p) => Some(root.join(p)),
-            None => Some(root.join(default_subdir)),
+    ) -> PathBuf {
+        match config_path {
+            Some(p) if p.is_absolute() => p.clone(),
+            Some(p) => self.path.join(p),
+            None => self.path.join(default_subdir),
         }
     }
 
-    /// Returns the resolved path for the WAL store.
-    /// Uses the configured override path if set, otherwise defaults to `<storage.path>/wal`.
+    /// Get the resolved path for the WAL store.
+    /// Returns `None` for in-memory backends.
     pub fn wal_path(&self) -> Option<PathBuf> {
-        self.resolve_store_path(self.wal.path(), "wal")
+        match &self.wal {
+            WalStoreConfig::InMemory => None,
+            WalStoreConfig::Redb(cfg) => {
+                Some(self.resolve_store_path_with_default(cfg.path.as_ref(), "wal"))
+            }
+        }
     }
 
-    /// Returns the resolved path for the state store.
-    /// Uses the configured override path if set, otherwise defaults to `<storage.path>/state`.
+    /// Get the resolved path for the state store.
+    /// Returns `None` for in-memory backends.
     pub fn state_path(&self) -> Option<PathBuf> {
-        self.resolve_store_path(self.state.path(), "state")
+        match &self.state {
+            StateStoreConfig::InMemory => None,
+            StateStoreConfig::Redb(cfg) => {
+                Some(self.resolve_store_path_with_default(cfg.path.as_ref(), "state"))
+            }
+            StateStoreConfig::Fjall(cfg) => {
+                Some(self.resolve_store_path_with_default(cfg.path.as_ref(), "state"))
+            }
+        }
     }
 
-    /// Returns the resolved path for the archive store.
-    /// Uses the configured override path if set, otherwise defaults to `<storage.path>/chain`.
+    /// Get the resolved path for the archive store.
+    /// Returns `None` for in-memory or no-op backends.
     pub fn archive_path(&self) -> Option<PathBuf> {
-        self.resolve_store_path(self.archive.path(), "chain")
+        match &self.archive {
+            ArchiveStoreConfig::InMemory | ArchiveStoreConfig::NoOp => None,
+            ArchiveStoreConfig::Redb(cfg) => {
+                Some(self.resolve_store_path_with_default(cfg.path.as_ref(), "archive"))
+            }
+        }
     }
 
-    /// Returns the resolved path for the index store.
-    /// Uses the configured override path if set, otherwise defaults to `<storage.path>/index`.
+    /// Get the resolved path for the index store.
+    /// Returns `None` for in-memory or no-op backends.
     pub fn index_path(&self) -> Option<PathBuf> {
-        self.resolve_store_path(self.index.path(), "index")
+        match &self.index {
+            IndexStoreConfig::InMemory | IndexStoreConfig::NoOp => None,
+            IndexStoreConfig::Redb(cfg) => {
+                Some(self.resolve_store_path_with_default(cfg.path.as_ref(), "index"))
+            }
+            IndexStoreConfig::Fjall(cfg) => {
+                Some(self.resolve_store_path_with_default(cfg.path.as_ref(), "index"))
+            }
+        }
     }
 }
 
@@ -466,7 +504,7 @@ impl Default for StorageConfig {
     fn default() -> Self {
         Self {
             version: Default::default(),
-            path: Some(std::path::PathBuf::from("data")),
+            path: std::path::PathBuf::from("data"),
             wal: WalStoreConfig::default(),
             state: StateStoreConfig::default(),
             archive: ArchiveStoreConfig::default(),
@@ -474,6 +512,10 @@ impl Default for StorageConfig {
         }
     }
 }
+
+// ============================================================================
+// Other Configuration Types
+// ============================================================================
 
 #[derive(Serialize, Deserialize)]
 pub struct GenesisConfig {

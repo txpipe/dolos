@@ -1,7 +1,4 @@
-use dolos_core::config::{
-    ArchiveStoreConfig, ChainConfig, GenesisConfig, IndexStoreConfig, LoggingConfig, RootConfig,
-    StateStoreConfig, StorageVersion, WalStoreConfig,
-};
+use dolos_core::config::{ChainConfig, GenesisConfig, LoggingConfig, RootConfig, StorageVersion};
 use dolos_core::BootstrapExt;
 use miette::{Context as _, IntoDiagnostic};
 use std::sync::Arc;
@@ -13,210 +10,84 @@ use tracing_subscriber::{filter::Targets, prelude::*};
 use dolos::adapters::{DomainAdapter, WalAdapter};
 use dolos::core::Genesis;
 use dolos::prelude::*;
-use dolos::storage::{IndexStoreBackend, StateStoreBackend};
+use dolos::storage::{ArchiveStoreBackend, IndexStoreBackend, StateStoreBackend, WalStoreBackend};
 
 pub struct Stores {
     pub wal: WalAdapter,
     pub state: StateStoreBackend,
-    pub archive: dolos_redb3::archive::ArchiveStore,
+    pub archive: ArchiveStoreBackend,
     pub indexes: IndexStoreBackend,
 }
 
+/// Ensure the storage root directory exists.
 pub fn ensure_storage_path(config: &RootConfig) -> Result<PathBuf, Error> {
-    let root = config.storage.path.as_ref().ok_or(Error::config(
-        "can't define storage path for ephemeral config",
-    ))?;
+    std::fs::create_dir_all(&config.storage.path)?;
+    Ok(config.storage.path.clone())
+}
 
-    std::fs::create_dir_all(root)?;
+fn check_storage_version(config: &RootConfig) -> Result<(), Error> {
+    if config.storage.version != StorageVersion::V3 {
+        error!(
+            "Storage version {:?} is not supported. Only V3 is supported.",
+            config.storage.version
+        );
+        return Err(Error::StorageError(format!(
+            "unsupported storage version {:?}, only V3 is supported",
+            config.storage.version
+        )));
+    }
+    Ok(())
+}
 
-    Ok(root.to_path_buf())
+/// Ensure directory exists for a store path.
+fn ensure_store_path(path: &std::path::Path) -> Result<(), Error> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    Ok(())
 }
 
 pub fn open_wal_store(config: &RootConfig) -> Result<WalAdapter, Error> {
-    let path = config.storage.wal_path().ok_or(Error::config(
-        "can't define storage path for ephemeral config",
-    ))?;
-
-    std::fs::create_dir_all(path.parent().unwrap_or(&path))?;
-
-    match &config.storage.wal {
-        WalStoreConfig::Redb { cache, .. } => {
-            let wal = dolos_redb3::wal::RedbWalStore::open(path, *cache)?;
-            Ok(wal)
-        }
-    }
+    let path = config.storage.wal_path().unwrap_or_default();
+    ensure_store_path(&path)?;
+    Ok(WalStoreBackend::open(&path, &config.storage.wal)?)
 }
 
-pub fn open_archive_store(
-    config: &RootConfig,
-) -> Result<dolos_redb3::archive::ArchiveStore, Error> {
-    let path = config.storage.archive_path().ok_or(Error::config(
-        "can't define storage path for ephemeral config",
-    ))?;
-
-    std::fs::create_dir_all(path.parent().unwrap_or(&path))?;
-
-    let schema = dolos_cardano::model::build_schema();
-
-    match &config.storage.archive {
-        ArchiveStoreConfig::Redb { cache, .. } => {
-            let archive = dolos_redb3::archive::ArchiveStore::open(schema, path, *cache)
-                .map_err(ArchiveError::from)?;
-            Ok(archive)
-        }
-    }
+pub fn open_archive_store(config: &RootConfig) -> Result<ArchiveStoreBackend, Error> {
+    let path = config.storage.archive_path().unwrap_or_default();
+    ensure_store_path(&path)?;
+    Ok(ArchiveStoreBackend::open(
+        &path,
+        dolos_cardano::model::build_schema(),
+        &config.storage.archive,
+    )?)
 }
 
 pub fn open_index_store(config: &RootConfig) -> Result<IndexStoreBackend, Error> {
-    let path = config.storage.index_path().ok_or(Error::config(
-        "can't define storage path for ephemeral config",
-    ))?;
-
-    std::fs::create_dir_all(path.parent().unwrap_or(&path))?;
-
-    match &config.storage.index {
-        IndexStoreConfig::Redb { cache, .. } => {
-            let store =
-                dolos_redb3::indexes::IndexStore::open(path, *cache).map_err(IndexError::from)?;
-            Ok(IndexStoreBackend::Redb(store))
-        }
-        IndexStoreConfig::Fjall {
-            cache,
-            max_journal_size,
-            flush_on_commit,
-            l0_threshold,
-            worker_threads,
-            memtable_size_mb,
-            ..
-        } => {
-            let store = dolos_fjall::IndexStore::open(
-                path,
-                *cache,
-                *max_journal_size,
-                *flush_on_commit,
-                *worker_threads,
-                *l0_threshold,
-                *memtable_size_mb,
-            )
-            .map_err(IndexError::from)?;
-            Ok(IndexStoreBackend::Fjall(store))
-        }
-    }
+    let path = config.storage.index_path().unwrap_or_default();
+    ensure_store_path(&path)?;
+    Ok(IndexStoreBackend::open(&path, &config.storage.index)?)
 }
 
 pub fn open_state_store(config: &RootConfig) -> Result<StateStoreBackend, Error> {
-    let path = config.storage.state_path().ok_or(Error::config(
-        "can't define storage path for ephemeral config",
-    ))?;
-
-    std::fs::create_dir_all(path.parent().unwrap_or(&path))?;
-
-    match &config.storage.state {
-        StateStoreConfig::Redb { cache, .. } => {
-            let schema = dolos_cardano::model::build_schema();
-            let store = dolos_redb3::state::StateStore::open(schema, path, *cache)
-                .map_err(StateError::from)?;
-            Ok(StateStoreBackend::Redb(store))
-        }
-        StateStoreConfig::Fjall {
-            cache,
-            max_journal_size,
-            flush_on_commit,
-            l0_threshold,
-            worker_threads,
-            memtable_size_mb,
-            ..
-        } => {
-            // Fjall uses a unified entities keyspace with namespace hash prefixes,
-            // so it doesn't need the schema to pre-create keyspaces
-            let store = dolos_fjall::StateStore::open(
-                path,
-                *cache,
-                *max_journal_size,
-                *flush_on_commit,
-                *worker_threads,
-                *l0_threshold,
-                *memtable_size_mb,
-            )
-            .map_err(StateError::from)?;
-            Ok(StateStoreBackend::Fjall(store))
-        }
-    }
+    let path = config.storage.state_path().unwrap_or_default();
+    ensure_store_path(&path)?;
+    Ok(StateStoreBackend::open(
+        &path,
+        dolos_cardano::model::build_schema(),
+        &config.storage.state,
+    )?)
 }
 
-pub fn open_persistent_data_stores(config: &RootConfig) -> Result<Stores, Error> {
-    match config.storage.version {
-        StorageVersion::V0 => {
-            error!("Storage version V0 is no longer supported. Please remove storage and run init procedure again.");
-            return Err(Error::StorageError("Invalid store version V0".to_string()));
-        }
-        StorageVersion::V1 | StorageVersion::V2 => {
-            error!("Storage version {:?} uses old config format. Please update your config to V3 format with nested storage sections.", config.storage.version);
-            return Err(Error::StorageError(format!(
-                "Storage version {:?} requires config migration to V3",
-                config.storage.version
-            )));
-        }
-        StorageVersion::V3 => {
-            // Current version, proceed normally
-        }
-    }
-
-    let wal = open_wal_store(config)?;
-
-    let state = open_state_store(config)?;
-
-    let archive = open_archive_store(config)?;
-
-    let indexes = open_index_store(config)?;
+pub fn open_data_stores(config: &RootConfig) -> Result<Stores, Error> {
+    check_storage_version(config)?;
 
     Ok(Stores {
-        wal,
-        state,
-        archive,
-        indexes,
+        wal: open_wal_store(config)?,
+        state: open_state_store(config)?,
+        archive: open_archive_store(config)?,
+        indexes: open_index_store(config)?,
     })
-}
-
-pub fn create_ephemeral_data_stores(config: &RootConfig) -> Result<Stores, Error> {
-    // Fjall does not support in-memory mode
-    if config.storage.state.is_fjall() {
-        return Err(Error::config(
-            "fjall backend does not support ephemeral storage for state store",
-        ));
-    }
-    if config.storage.index.is_fjall() {
-        return Err(Error::config(
-            "fjall backend does not support ephemeral storage for index store",
-        ));
-    }
-    // Note: archive only has Redb variant currently, so no need to check
-
-    let wal = dolos_redb3::wal::RedbWalStore::memory()?;
-
-    let schema = dolos_cardano::model::build_schema();
-    let state =
-        dolos_redb3::state::StateStore::in_memory(schema.clone()).map_err(StateError::from)?;
-
-    let archive =
-        dolos_redb3::archive::ArchiveStore::in_memory(schema).map_err(ArchiveError::from)?;
-
-    let indexes = dolos_redb3::indexes::IndexStore::in_memory().map_err(IndexError::from)?;
-
-    Ok(Stores {
-        wal,
-        archive,
-        state: StateStoreBackend::Redb(state),
-        indexes: IndexStoreBackend::Redb(indexes),
-    })
-}
-
-pub fn setup_data_stores(config: &RootConfig) -> Result<Stores, Error> {
-    if config.storage.is_ephemeral() {
-        create_ephemeral_data_stores(config)
-    } else {
-        open_persistent_data_stores(config)
-    }
 }
 
 pub fn load_config(
@@ -242,7 +113,7 @@ pub fn load_config(
 }
 
 pub fn setup_domain(config: &RootConfig) -> miette::Result<DomainAdapter> {
-    let stores = setup_data_stores(config)?;
+    let stores = open_data_stores(config)?;
     let genesis = Arc::new(open_genesis_files(&config.genesis)?);
     let mempool = dolos::mempool::Mempool::new();
     let (tip_broadcast, _) = tokio::sync::broadcast::channel(100);
@@ -273,6 +144,19 @@ pub fn setup_domain(config: &RootConfig) -> miette::Result<DomainAdapter> {
     domain.bootstrap().map_err(|x| miette::miette!("{:?}", x))?;
 
     Ok(domain)
+}
+
+pub fn setup_tracing_error_only() -> miette::Result<()> {
+    let filter = Targets::new().with_default(tracing::Level::ERROR);
+
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer())
+        .with(filter)
+        .init();
+
+    tracing_log::LogTracer::init().ok();
+
+    Ok(())
 }
 
 pub fn setup_tracing(config: &LoggingConfig) -> miette::Result<()> {
@@ -403,9 +287,7 @@ pub async fn run_pipeline(pipeline: gasket::daemon::Daemon, exit: CancellationTo
 }
 
 pub fn cleanup_data(config: &RootConfig) -> Result<(), std::io::Error> {
-    let Some(root) = &config.storage.path else {
-        return Ok(());
-    };
+    let root = &config.storage.path;
 
     if root.is_dir() {
         for entry_result in fs::read_dir(root)? {

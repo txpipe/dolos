@@ -1,13 +1,14 @@
+pub mod storage;
+
 use std::sync::Arc;
 
 use dolos_cardano::CardanoLogic;
 use dolos_core::{config::StorageConfig, *};
 
-use crate::storage::{IndexStoreBackend, StateStoreBackend};
+pub use storage::{ArchiveStoreBackend, IndexStoreBackend, StateStoreBackend, WalStoreBackend};
 
-// We can hardcode the WAL since we don't expect multiple types of
-// implementations
-pub type WalAdapter = dolos_redb3::wal::RedbWalStore<dolos_cardano::CardanoDelta>;
+/// Type alias for the WAL store specialized for Cardano.
+pub type WalAdapter = WalStoreBackend<dolos_cardano::CardanoDelta>;
 
 pub struct TipSubscription {
     replay: Vec<(ChainPoint, RawBlock)>,
@@ -32,7 +33,7 @@ pub struct DomainAdapter {
     pub wal: WalAdapter,
     pub chain: Arc<std::sync::RwLock<CardanoLogic>>,
     pub state: StateStoreBackend,
-    pub archive: dolos_redb3::archive::ArchiveStore,
+    pub archive: ArchiveStoreBackend,
     pub indexes: IndexStoreBackend,
     pub mempool: crate::mempool::Mempool,
     pub tip_broadcast: tokio::sync::broadcast::Sender<TipEvent>,
@@ -52,9 +53,7 @@ impl DomainAdapter {
             .shutdown()
             .map_err(|e| DomainError::WalError(e.into()))?;
         self.state.shutdown().map_err(DomainError::StateError)?;
-        self.archive
-            .shutdown()
-            .map_err(|e| DomainError::ArchiveError(e.into()))?;
+        self.archive.shutdown().map_err(DomainError::ArchiveError)?;
         self.indexes.shutdown().map_err(DomainError::IndexError)?;
 
         tracing::info!("domain adapter: graceful shutdown complete");
@@ -69,7 +68,7 @@ impl Domain for DomainAdapter {
     type WorkUnit = dolos_cardano::CardanoWorkUnit;
     type Wal = WalAdapter;
     type State = StateStoreBackend;
-    type Archive = dolos_redb3::archive::ArchiveStore;
+    type Archive = ArchiveStoreBackend;
     type Indexes = IndexStoreBackend;
     type Mempool = crate::mempool::Mempool;
     type TipSubscription = TipSubscription;

@@ -1154,7 +1154,7 @@ checksum = "fea41bba32d969b513997752735605054bc0dfa92b4c56bf1189f2e174be7a10"
 
 [[package]]
 name = "dolos"
-version = "1.0.0-rc.5"
+version = "1.0.0-rc.6"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1183,7 +1183,7 @@ dependencies = [
  "hyper 1.6.0",
  "indicatif",
  "inquire",
- "itertools 0.13.0",
+ "itertools 0.14.0",
  "lazy_static",
  "log",
  "miette",
@@ -1218,12 +1218,12 @@ dependencies = [
 
 [[package]]
 name = "dolos-cardano"
-version = "1.0.0-rc.5"
+version = "1.0.0-rc.6"
 dependencies = [
+ "async-trait",
  "chrono",
  "dolos-core",
  "hex",
- "itertools 0.13.0",
  "itertools 0.14.0",
  "num-bigint",
  "num-rational",
@@ -1239,11 +1239,11 @@ dependencies = [
 
 [[package]]
 name = "dolos-core"
-version = "1.0.0-rc.5"
+version = "1.0.0-rc.6"
 dependencies = [
  "futures-core",
  "hex",
- "itertools 0.13.0",
+ "itertools 0.14.0",
  "pallas 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=ab27006)",
  "proptest",
  "rayon",
@@ -1258,7 +1258,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-fjall"
-version = "1.0.0-rc.5"
+version = "1.0.0-rc.6"
 dependencies = [
  "bincode",
  "dolos-core",
@@ -1273,7 +1273,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-minibf"
-version = "1.0.0-rc.5"
+version = "1.0.0-rc.6"
 dependencies = [
  "axum 0.8.4",
  "bech32 0.11.1",
@@ -1284,7 +1284,7 @@ dependencies = [
  "dolos-core",
  "futures",
  "hex",
- "itertools 0.13.0",
+ "itertools 0.14.0",
  "num-bigint",
  "num-rational",
  "num-traits",
@@ -1301,17 +1301,18 @@ dependencies = [
 
 [[package]]
 name = "dolos-redb3"
-version = "1.0.0-rc.5"
+version = "1.0.0-rc.6"
 dependencies = [
  "bincode",
  "dolos-core",
  "dolos-testing",
  "hex",
- "itertools 0.13.0",
+ "itertools 0.14.0",
  "pallas 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=ab27006)",
  "redb",
  "redb-extras",
  "serde",
+ "tempfile",
  "thiserror 2.0.12",
  "tokio",
  "tokio-util",
@@ -1322,7 +1323,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-testing"
-version = "1.0.0-rc.5"
+version = "1.0.0-rc.6"
 dependencies = [
  "dolos-cardano",
  "dolos-core",
@@ -1337,7 +1338,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-trp"
-version = "1.0.0-rc.5"
+version = "1.0.0-rc.6"
 dependencies = [
  "base64 0.22.1",
  "bincode",
@@ -1345,7 +1346,7 @@ dependencies = [
  "dolos-core",
  "dolos-testing",
  "hex",
- "itertools 0.13.0",
+ "itertools 0.14.0",
  "jsonrpsee",
  "opentelemetry",
  "opentelemetry_sdk",

@@ -68,9 +68,7 @@ fn define_snapshot_url(config: &RootConfig, args: &Args) -> Option<String> {
 }
 
 fn fetch_snapshot(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Result<()> {
-    let root = config.storage.path.as_ref().ok_or(miette::miette!(
-        "can't fetch snapshot for ephemeral storage"
-    ))?;
+    let root = &config.storage.path;
 
     std::fs::create_dir_all(root)
         .into_diagnostic()

@@ -8,7 +8,6 @@ use dolos_cardano::{
     model::{AccountState, AssetState, DRepState, EpochState, FixedNamespace, PoolState},
     ChainSummary, PParamsSet,
 };
-use itertools::Itertools;
 use pallas::{
     crypto::hash::Hash,
     ledger::{addresses::Network, primitives::Epoch},
@@ -22,8 +21,8 @@ use tower_http::{cors::CorsLayer, normalize_path::NormalizePathLayer, trace};
 use tracing::Level;
 
 use dolos_core::{
-    config::MinibfConfig, ArchiveStore as _, BlockSlot, CancelToken, Domain, Entity, EntityKey,
-    EraCbor, LogKey, QueryHelpers as _, ServeError, StateError, StateStore as _, TemporalKey,
+    config::MinibfConfig, ArchiveStore as _, AsyncQueryFacade, BlockSlot, CancelToken, Domain,
+    Entity, EntityKey, EraCbor, LogKey, ServeError, StateError, StateStore as _, TemporalKey,
     TxOrder,
 };
 
@@ -31,6 +30,13 @@ mod error;
 pub(crate) mod mapping;
 mod pagination;
 mod routes;
+
+pub(crate) fn log_and_500<E: std::fmt::Debug>(context: &str) -> impl Fn(E) -> StatusCode + '_ {
+    move |err| {
+        tracing::error!(error = ?err, "{context}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    }
+}
 
 #[derive(Clone)]
 pub struct Facade<D: Domain> {
@@ -51,11 +57,32 @@ pub type BlockWithTx = (Vec<u8>, TxOrder);
 pub type BlockWithTxMap = HashMap<Hash<32>, BlockWithTx>;
 
 impl<D: Domain> Facade<D> {
+    pub fn query(&self) -> AsyncQueryFacade<D>
+    where
+        D: Clone + Send + Sync + 'static,
+    {
+        AsyncQueryFacade::new(self.inner.clone())
+    }
+
+    pub async fn get_block_by_tx_hash(
+        &self,
+        tx_hash: &[u8],
+    ) -> Result<(Vec<u8>, TxOrder), StatusCode>
+    where
+        D: Clone + Send + Sync + 'static,
+    {
+        self.query()
+            .block_by_tx_hash(tx_hash.to_vec())
+            .await
+            .map_err(log_and_500("failed to query block by tx hash"))?
+            .ok_or(StatusCode::NOT_FOUND)
+    }
+
     pub fn get_tip_slot(&self) -> Result<BlockSlot, StatusCode> {
         let tip = self
             .state()
             .read_cursor()
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .map_err(log_and_500("failed to read cursor from state"))?
             .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
 
         Ok(tip.slot())
@@ -71,14 +98,14 @@ impl<D: Domain> Facade<D> {
 
     pub fn get_chain_summary(&self) -> Result<ChainSummary, StatusCode> {
         let summary = dolos_cardano::eras::load_era_summary::<D>(self.state())
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .map_err(log_and_500("failed to load era summary"))?;
 
         Ok(summary)
     }
 
     pub fn get_current_effective_pparams(&self) -> Result<PParamsSet, StatusCode> {
         let pparams = dolos_cardano::load_effective_pparams::<D>(self.state())
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .map_err(log_and_500("failed to load effective pparams"))?;
 
         Ok(pparams)
     }
@@ -95,7 +122,7 @@ impl<D: Domain> Facade<D> {
         let log = self
             .archive()
             .read_log_typed::<EpochState>(EpochState::NS, &logkey)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .map_err(log_and_500("failed to read epoch log from archive"))?;
 
         Ok(log)
     }
@@ -109,46 +136,65 @@ impl<D: Domain> Facade<D> {
 
         let log = self
             .get_epoch_log(prior_epoch, chain_summary)?
-            .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+            .ok_or_else(|| {
+                tracing::error!(epoch = prior_epoch, "epoch log not found for prior epoch");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
 
         // TODO: epoch logs should be its own structure without the excessive
         // multi-epoch values
         Ok(log.pparams.live().cloned().unwrap_or_default())
     }
 
-    pub fn get_tx(&self, hash: Hash<32>) -> Result<Option<EraCbor>, StatusCode> {
+    pub async fn get_tx(&self, hash: Hash<32>) -> Result<Option<EraCbor>, StatusCode>
+    where
+        D: Clone + Send + Sync + 'static,
+    {
         let tx = self
-            .inner
-            .tx_cbor(hash.as_slice())
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .query()
+            .tx_cbor(hash.as_slice().to_vec())
+            .await
+            .map_err(log_and_500("failed to fetch tx cbor"))?;
 
         Ok(tx)
     }
 
-    pub fn get_tx_batch(
+    pub async fn get_tx_batch(
         &self,
         hashes: impl IntoIterator<Item = Hash<32>>,
-    ) -> Result<TxMap, StatusCode> {
-        let txs = hashes
-            .into_iter()
-            .map(|h| self.get_tx(h).map(|tx| (h, tx)))
-            .try_collect()?;
+    ) -> Result<TxMap, StatusCode>
+    where
+        D: Clone + Send + Sync + 'static,
+    {
+        let mut out = TxMap::new();
+        for hash in hashes.into_iter() {
+            let tx = self.get_tx(hash).await?;
+            out.insert(hash, tx);
+        }
 
-        Ok(txs)
+        Ok(out)
     }
 
-    pub fn get_block_with_tx_batch(
+    pub async fn get_block_with_tx_batch(
         &self,
         hashes: impl IntoIterator<Item = Hash<32>>,
-    ) -> Result<BlockWithTxMap, StatusCode> {
-        let blocks = hashes
-            .into_iter()
-            .map(|h| self.inner.block_with_tx(h.as_slice()).map(|x| (h, x)))
-            .filter_map_ok(|(k, v)| v.map(|x| (k, x)))
-            .try_collect()
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    ) -> Result<BlockWithTxMap, StatusCode>
+    where
+        D: Clone + Send + Sync + 'static,
+    {
+        let mut out = BlockWithTxMap::new();
+        for hash in hashes.into_iter() {
+            let block = self
+                .query()
+                .block_by_tx_hash(hash.as_slice().to_vec())
+                .await
+                .map_err(log_and_500("failed to fetch block_with_tx batch"))?;
+            if let Some(block) = block {
+                out.insert(hash, block);
+            }
+        }
 
-        Ok(blocks)
+        Ok(out)
     }
 
     pub fn iter_cardano_entities<T>(
@@ -162,7 +208,7 @@ impl<D: Domain> Facade<D> {
         let mapped = self
             .state()
             .iter_entities_typed(T::NS, range)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .map_err(log_and_500("failed to iterate cardano entities"))?;
 
         Ok(mapped)
     }
@@ -184,7 +230,7 @@ impl<D: Domain> Facade<D> {
             if let Some(entity) = self
                 .archive()
                 .read_log_typed::<T>(T::NS, &logkey)
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                .map_err(log_and_500("failed to read log for epoch iteration"))?
             {
                 out.push((epoch, entity));
             }
@@ -203,7 +249,7 @@ impl<D: Domain> Facade<D> {
         let entity = self
             .state()
             .read_entity_typed(T::NS, &key)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .map_err(log_and_500("failed to read cardano entity"))?;
 
         let downcast = entity.and_then(Option::<T>::from);
 
@@ -215,6 +261,7 @@ pub struct Driver;
 
 impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver
 where
+    D: Clone + Send + Sync + 'static,
     Option<AccountState>: From<D::Entity>,
     Option<PoolState>: From<D::Entity>,
     Option<AssetState>: From<D::Entity>,

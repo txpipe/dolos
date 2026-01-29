@@ -1,9 +1,10 @@
 use dolos_core::config::RootConfig;
-use dolos_core::{ArchiveWriter, ChainPoint};
+use dolos_core::{ArchiveStore, ArchiveWriter, ChainPoint};
 use itertools::Itertools;
 use miette::{Context, IntoDiagnostic};
 use pallas::crypto::hash::Hash;
 use pallas::ledger::traverse::MultiEraBlock;
+use pallas::network::miniprotocols::Point;
 use rayon::prelude::*;
 use std::path::Path;
 use std::sync::Arc;
@@ -16,10 +17,6 @@ pub struct Args {
     /// Path to the immutable DB directory
     #[arg(long)]
     source: String,
-
-    /// Slot to start importing from (default: continue from archive tip, or 0)
-    #[arg(long)]
-    from: Option<u64>,
 
     /// Slot to stop importing at (default: immutable DB tip)
     #[arg(long)]
@@ -44,6 +41,8 @@ struct DecodedBlock {
 pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Result<()> {
     if args.verbose {
         crate::common::setup_tracing(&config.logging)?;
+    } else {
+        crate::common::setup_tracing_error_only()?;
     }
 
     let source_path = Path::new(&args.source);
@@ -60,50 +59,49 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
         .map_err(|e| miette::miette!("failed to read immutable DB tip: {}", e))?
         .ok_or_else(|| miette::miette!("immutable DB has no tip"))?;
 
-    let immutable_tip_slot = immutable_tip.slot_or_default();
+    let end_slot = args.to.unwrap_or(immutable_tip.slot_or_default());
 
-    // Determine starting point
-    let start_slot = match args.from {
-        Some(slot) => slot,
-        None => {
-            // Continue from archive tip if it exists
-            archive
-                .get_tip()
+    // Determine starting cursor from archive tip
+    let cursor = match archive
+        .get_tip()
+        .into_diagnostic()
+        .context("reading archive tip")?
+    {
+        Some((_, body)) => {
+            let block = MultiEraBlock::decode(&body)
                 .into_diagnostic()
-                .context("reading archive tip")?
-                .map(|(slot, _)| slot + 1)
-                .unwrap_or(0)
+                .context("decoding archive tip block")?;
+
+            Point::Specific(block.slot(), block.hash().to_vec())
         }
+        None => Point::Origin,
     };
 
-    let end_slot = args.to.unwrap_or(immutable_tip_slot);
-
-    if start_slot > end_slot {
-        info!(
-            start_slot,
-            end_slot, "archive is already up to date, nothing to import"
-        );
+    if cursor.slot_or_default() >= end_slot {
+        info!("archive is already up to date, nothing to import");
         return Ok(());
     }
 
     info!(
-        start_slot,
-        end_slot, immutable_tip_slot, "starting archive import"
+        cursor_slot = cursor.slot_or_default(),
+        end_slot, "starting archive import"
     );
 
-    // Create cursor for reading from immutable DB
-    // We start from origin and filter by slot during iteration
-    let cursor = pallas::network::miniprotocols::Point::Origin;
+    let mut iter =
+        pallas::storage::hardano::immutable::read_blocks_from_point(source_path, cursor.clone())
+            .map_err(|e| miette::miette!("failed to open immutable DB: {}", e))?;
 
-    let iter = pallas::storage::hardano::immutable::read_blocks_from_point(source_path, cursor)
-        .map_err(|e| miette::miette!("failed to open immutable DB: {}", e))?;
+    // When resuming, skip the first block since the cursor points at the last
+    // processed block, not the next one.
+    if cursor != Point::Origin {
+        iter.next();
+    }
 
     let progress = feedback.slot_progress_bar();
     progress.set_message("importing to archive");
     progress.set_length(end_slot);
-    progress.set_position(start_slot);
+    progress.set_position(cursor.slot_or_default());
 
-    let mut total_imported = 0u64;
     let mut reached_end = false;
 
     for chunk in iter.chunks(args.chunk_size).into_iter() {
@@ -141,15 +139,7 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
             .into_diagnostic()
             .context("starting archive writer")?;
 
-        let mut chunk_imported = 0u64;
-        let mut last_slot = start_slot;
-
         for block in decoded {
-            // Skip blocks before start_slot
-            if block.slot < start_slot {
-                continue;
-            }
-
             // Stop if we've passed end_slot
             if block.slot > end_slot {
                 reached_end = true;
@@ -163,22 +153,16 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
                 .into_diagnostic()
                 .context("applying block to archive")?;
 
-            chunk_imported += 1;
-            last_slot = block.slot;
+            progress.set_position(block.slot);
         }
 
         writer
             .commit()
             .into_diagnostic()
             .context("committing archive batch")?;
-
-        total_imported += chunk_imported;
-        progress.set_position(last_slot);
     }
 
     progress.finish_with_message("archive import complete");
-
-    info!(total_imported, "archive import finished");
 
     Ok(())
 }

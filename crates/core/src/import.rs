@@ -77,7 +77,7 @@ fn drain_pending_work<D: Domain>(chain: &mut D::Chain, domain: &D) -> Result<(),
 /// - `notify_tip()` - No subscribers during bulk import
 #[instrument(skip_all, fields(work_unit = %work.name()))]
 fn execute_work_unit<D: Domain>(domain: &D, work: &mut D::WorkUnit) -> Result<(), DomainError> {
-    info!("executing work unit (import)");
+    debug!("executing work unit (import)");
 
     work.load(domain)?;
     debug!("load phase complete");
@@ -100,7 +100,7 @@ fn execute_work_unit<D: Domain>(domain: &D, work: &mut D::WorkUnit) -> Result<()
     // Skip tip notifications for import - no live subscribers
     debug!("skipping tip notifications (import mode)");
 
-    info!("work unit completed (import)");
+    debug!("work unit completed (import)");
     Ok(())
 }
 

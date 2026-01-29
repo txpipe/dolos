@@ -7,7 +7,8 @@ use thiserror::Error;
 use tracing::{debug, event_enabled, info, trace, warn, Level};
 
 use dolos_core::{
-    BlockSlot, ChainPoint, EntityDelta, LogEntry, LogValue, RawBlock, WalError, WalStore,
+    config::RedbWalConfig, BlockSlot, ChainPoint, EntityDelta, LogEntry, LogValue, RawBlock,
+    WalError, WalStore,
 };
 
 #[derive(Debug, Error)]
@@ -303,10 +304,10 @@ where
         Ok(out)
     }
 
-    pub fn open(path: impl AsRef<Path>, cache_size: Option<usize>) -> Result<Self, WalError> {
+    pub fn open(path: impl AsRef<Path>, config: &RedbWalConfig) -> Result<Self, WalError> {
         let inner = redb::Database::builder()
             .set_repair_callback(|x| warn!(progress = x.progress() * 100f64, "wal db is repairing"))
-            .set_cache_size(1024 * 1024 * cache_size.unwrap_or(DEFAULT_CACHE_SIZE_MB))
+            .set_cache_size(1024 * 1024 * config.cache.unwrap_or(DEFAULT_CACHE_SIZE_MB))
             .create(path)
             .map_err(WalError::internal)?;
 

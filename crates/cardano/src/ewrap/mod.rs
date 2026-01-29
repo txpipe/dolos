@@ -5,7 +5,7 @@ use std::{
 
 use dolos_core::{config::CardanoConfig, BlockSlot, ChainError, Domain, EntityKey, Genesis};
 use pallas::ledger::primitives::{conway::DRep, StakeCredential};
-use tracing::{debug, info, instrument};
+use tracing::{debug, instrument};
 
 use crate::{
     eras::ChainSummary, rewards::RewardMap, roll::WorkDeltas, rupd::RupdWork, AccountState,
@@ -160,7 +160,7 @@ pub fn execute<D: Domain>(
     _: &CardanoConfig,
     genesis: Arc<Genesis>,
 ) -> Result<(), ChainError> {
-    info!("executing EWRAP work unit");
+    debug!("executing EWRAP work unit");
 
     let mut boundary = BoundaryWork::load::<D>(state, genesis)?;
 

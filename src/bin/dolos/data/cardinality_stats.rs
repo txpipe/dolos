@@ -1,4 +1,5 @@
 use comfy_table::Table;
+use dolos::storage::ArchiveStoreBackend;
 use dolos_core::config::RootConfig;
 use dolos_redb3::redb::{MultimapTableDefinition, ReadableDatabase, ReadableMultimapTable as _};
 use miette::{bail, Context, IntoDiagnostic};
@@ -97,6 +98,15 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging)?;
 
     let archive = crate::common::open_archive_store(config)?;
+
+    // This command requires direct redb access
+    let archive = match archive {
+        ArchiveStoreBackend::Redb(s) => s,
+        ArchiveStoreBackend::NoOp(_) => {
+            bail!("cardinality-stats command is not available for noop archive backend")
+        }
+    };
+
     let rx = archive
         .db()
         .begin_read()

@@ -11,8 +11,9 @@ use std::{
 };
 
 use dolos_core::{
-    ArchiveIndexDelta, BlockSlot, ChainPoint, IndexDelta, IndexError, IndexStore as CoreIndexStore,
-    IndexWriter as CoreIndexWriter, Tag, TagDimension, TxoRef, UtxoSet,
+    config::RedbIndexConfig, ArchiveIndexDelta, BlockSlot, ChainPoint, IndexDelta, IndexError,
+    IndexStore as CoreIndexStore, IndexWriter as CoreIndexWriter, Tag, TagDimension, TxoRef,
+    UtxoSet,
 };
 use redb::{
     Database, Durability, MultimapTableDefinition, ReadTransaction, ReadableDatabase,
@@ -592,12 +593,12 @@ impl IndexStore {
         Ok(())
     }
 
-    pub fn open(path: impl AsRef<Path>, cache_size: Option<usize>) -> Result<Self, Error> {
+    pub fn open(path: impl AsRef<Path>, config: &RedbIndexConfig) -> Result<Self, Error> {
         let db = Database::builder()
             .set_repair_callback(|x| {
                 warn!(progress = x.progress() * 100f64, "index db is repairing")
             })
-            .set_cache_size(1024 * 1024 * cache_size.unwrap_or(DEFAULT_CACHE_SIZE_MB))
+            .set_cache_size(1024 * 1024 * config.cache.unwrap_or(DEFAULT_CACHE_SIZE_MB))
             .create(path)?;
 
         let store = Self { db: db.into() };

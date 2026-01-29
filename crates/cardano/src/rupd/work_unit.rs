@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use dolos_core::{BlockSlot, Domain, DomainError, Genesis, StateStore, StateWriter, WorkUnit};
-use tracing::{debug, info};
+use tracing::debug;
 
 use crate::{
     rewards::{Reward, RewardMap},
@@ -49,7 +49,7 @@ where
     }
 
     fn load(&mut self, domain: &D) -> Result<(), DomainError> {
-        info!(slot = self.slot, "loading rupd work context");
+        debug!(slot = self.slot, "loading rupd work context");
 
         self.work = Some(RupdWork::load::<D>(domain.state(), &self.genesis)?);
 
@@ -58,7 +58,7 @@ where
     }
 
     fn compute(&mut self) -> Result<(), DomainError> {
-        info!(slot = self.slot, "computing rewards");
+        debug!(slot = self.slot, "computing rewards");
 
         let work = self
             .work
@@ -67,7 +67,7 @@ where
 
         let rewards = crate::rewards::define_rewards(work)?;
 
-        info!(pending_count = rewards.len(), "rewards computed");
+        debug!(pending_count = rewards.len(), "rewards computed");
 
         self.rewards = Some(rewards);
 
@@ -86,7 +86,7 @@ where
             .as_ref()
             .ok_or_else(|| DomainError::InconsistentState("rewards not computed".to_string()))?;
 
-        info!(
+        debug!(
             pending_count = rewards.len(),
             "persisting pending rewards to state"
         );

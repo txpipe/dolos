@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use dolos_core::{ChainError, Domain, Genesis, StateStore};
 use pallas::{codec::minicbor, ledger::primitives::StakeCredential};
-use tracing::info;
+use tracing::debug;
 
 use crate::{
     ewrap::{BoundaryVisitor as _, BoundaryWork},
@@ -262,7 +262,7 @@ impl BoundaryWork {
             pending.insert(credential, reward);
         }
 
-        info!(
+        debug!(
             pending_count = pending.len(),
             "loaded pending rewards from state"
         );

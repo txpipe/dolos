@@ -18,7 +18,7 @@ fn stats_to_json(stats: &dolos_redb3::redb::TableStats) -> serde_json::Value {
 }
 
 pub fn run(config: &RootConfig, _args: &Args) -> miette::Result<()> {
-    let stores = crate::common::setup_data_stores(config)?;
+    let stores = crate::common::open_data_stores(config)?;
 
     // Stats command only works with redb backends
     let state = match &stores.state {
@@ -32,6 +32,9 @@ pub fn run(config: &RootConfig, _args: &Args) -> miette::Result<()> {
         IndexStoreBackend::Redb(s) => s,
         IndexStoreBackend::Fjall(_) => {
             bail!("stats command is only available for redb index backend")
+        }
+        IndexStoreBackend::NoOp(_) => {
+            bail!("stats command is not available for noop index backend")
         }
     };
 

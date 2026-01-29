@@ -6,7 +6,7 @@ use dolos_core::config::RootConfig;
 pub struct Args {}
 
 pub fn run(config: &RootConfig, _args: &Args) -> miette::Result<()> {
-    let stores = crate::common::setup_data_stores(config)?;
+    let stores = crate::common::open_data_stores(config)?;
 
     let wal_start = stores.wal.find_start().unwrap();
     let wal_tip = stores.wal.find_tip().unwrap();
