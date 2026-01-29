@@ -62,9 +62,13 @@ impl<'a, C> minicbor::Encode<C> for EraHistoryResponse<'a> {
                         end_relative_time.saturating_mul(PICOSECONDS_PER_SECOND);
                     // If the time would overflow u64, treat this era as open-ended
                     if end_relative_picos > u64::MAX as u128 {
+                        // EraUnbounded: Null
                         encoder.null()?;
                         true
                     } else {
+                        // EraEnd Bound: Bound
+                        // Bound: [RelativeTime, Slot, Epoch]
+                        // Note: we encode Bound directly, not wrapped in [1, Bound]
                         encoder.array(3)?;
                         encoder.u64(end_relative_picos as u64)?;
                         encoder.u64(end.slot)?;
@@ -73,12 +77,16 @@ impl<'a, C> minicbor::Encode<C> for EraHistoryResponse<'a> {
                     }
                 }
                 None => {
+                    // EraUnbounded: Null
                     encoder.null()?;
                     true
                 }
             };
 
-            // EraParams
+            let safe_from_tip = self.security_param * 2;
+            let genesis_window = self.security_param * 2;
+
+            // EraParams: [EpochSize, SlotLength, SafeZone, GenesisWindow]
             encoder.array(4)?;
             encoder.u64(era.epoch_length)?;
             let slot_length_picos = (era.slot_length as u128)
@@ -86,21 +94,25 @@ impl<'a, C> minicbor::Encode<C> for EraHistoryResponse<'a> {
                 .min(u64::MAX as u128) as u64;
             encoder.u64(slot_length_picos)?;
 
-            let safe_from_tip = self.security_param * 2;
-
             // SafeZone
             if era_is_open_ended {
-                // UnsafeIndefiniteSafeZone: [1, 1]
+                // UnsafeIndefiniteSafeZone: [1]
                 encoder.array(1)?;
                 encoder.u8(1)?;
             } else {
+                // StandardSafeZone: [0, Word64, SafeBeforeEpoch]
+                // SafeBeforeEpoch: [0] (Legacy/Backwards compatibility)
                 encoder.array(3)?;
                 encoder.u8(0)?;
                 encoder.u64(safe_from_tip)?;
+
+                // SafeBeforeEpoch: [0]
                 encoder.array(1)?;
                 encoder.u8(0)?;
             }
-            encoder.u64(safe_from_tip)?;
+
+            // GenesisWindow
+            encoder.u64(genesis_window)?;
         }
         Ok(())
     }
