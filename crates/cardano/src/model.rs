@@ -1742,20 +1742,19 @@ pub struct EraSummary {
 
 entity_boilerplate!(EraSummary, "eras");
 
-#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum CardanoEntity {
-    EraSummary(EraSummary),
-    AccountState(AccountState),
-    AssetState(AssetState),
-    PoolState(PoolState),
-    EpochState(EpochState),
-    DRepState(DRepState),
-    ProposalState(ProposalState),
-    RewardLog(RewardLog),
-    StakeLog(StakeLog),
-    DatumState(DatumState),
-    PendingRewardState(PendingRewardState),
+    EraSummary(Box<EraSummary>),
+    AccountState(Box<AccountState>),
+    AssetState(Box<AssetState>),
+    PoolState(Box<PoolState>),
+    EpochState(Box<EpochState>),
+    DRepState(Box<DRepState>),
+    ProposalState(Box<ProposalState>),
+    RewardLog(Box<RewardLog>),
+    StakeLog(Box<StakeLog>),
+    DatumState(Box<DatumState>),
+    PendingRewardState(Box<PendingRewardState>),
 }
 
 macro_rules! variant_boilerplate {
@@ -1763,7 +1762,7 @@ macro_rules! variant_boilerplate {
         impl From<CardanoEntity> for Option<$variant> {
             fn from(value: CardanoEntity) -> Self {
                 match value {
-                    CardanoEntity::$variant(x) => Some(x),
+                    CardanoEntity::$variant(x) => Some(*x),
                     _ => None,
                 }
             }
@@ -1771,7 +1770,7 @@ macro_rules! variant_boilerplate {
 
         impl From<$variant> for CardanoEntity {
             fn from(value: $variant) -> Self {
-                CardanoEntity::$variant(value)
+                CardanoEntity::$variant(Box::new(value))
             }
         }
     };
@@ -1873,46 +1872,45 @@ pub fn build_schema() -> StateSchema {
     schema
 }
 
-#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CardanoDelta {
-    ControlledAmountInc(ControlledAmountInc),
-    ControlledAmountDec(ControlledAmountDec),
-    StakeRegistration(StakeRegistration),
-    StakeDelegation(StakeDelegation),
-    StakeDeregistration(StakeDeregistration),
-    PoolRegistration(PoolRegistration),
-    PoolDeRegistration(PoolDeRegistration),
-    MintedBlocksInc(MintedBlocksInc),
-    MintStatsUpdate(MintStatsUpdate),
-    EpochStatsUpdate(EpochStatsUpdate),
-    DRepRegistration(DRepRegistration),
-    DRepUnRegistration(DRepUnRegistration),
-    DRepActivity(DRepActivity),
-    DRepExpiration(DRepExpiration),
-    WithdrawalInc(WithdrawalInc),
-    VoteDelegation(VoteDelegation),
-    PParamsUpdate(PParamsUpdate),
-    NoncesUpdate(NoncesUpdate),
-    NewProposal(NewProposal),
-    AssignRewards(AssignRewards),
-    NonceTransition(NonceTransition),
-    PoolTransition(PoolTransition),
-    AccountTransition(AccountTransition),
-    PoolDepositRefund(PoolDepositRefund),
-    EpochTransition(EpochTransition),
-    EpochWrapUp(EpochWrapUp),
-    DRepDelegatorDrop(DRepDelegatorDrop),
-    PoolDelegatorRetire(PoolDelegatorRetire),
-    PoolWrapUp(PoolWrapUp),
-    ProposalDepositRefund(ProposalDepositRefund),
-    TreasuryWithdrawal(TreasuryWithdrawal),
-    AssignMirRewards(AssignMirRewards),
-    DatumRefIncrement(crate::roll::datums::DatumRefIncrement),
-    DatumRefDecrement(crate::roll::datums::DatumRefDecrement),
-    EnqueueReward(EnqueueReward),
-    SetEpochIncentives(SetEpochIncentives),
-    DequeueReward(DequeueReward),
+    ControlledAmountInc(Box<ControlledAmountInc>),
+    ControlledAmountDec(Box<ControlledAmountDec>),
+    StakeRegistration(Box<StakeRegistration>),
+    StakeDelegation(Box<StakeDelegation>),
+    StakeDeregistration(Box<StakeDeregistration>),
+    PoolRegistration(Box<PoolRegistration>),
+    PoolDeRegistration(Box<PoolDeRegistration>),
+    MintedBlocksInc(Box<MintedBlocksInc>),
+    MintStatsUpdate(Box<MintStatsUpdate>),
+    EpochStatsUpdate(Box<EpochStatsUpdate>),
+    DRepRegistration(Box<DRepRegistration>),
+    DRepUnRegistration(Box<DRepUnRegistration>),
+    DRepActivity(Box<DRepActivity>),
+    DRepExpiration(Box<DRepExpiration>),
+    WithdrawalInc(Box<WithdrawalInc>),
+    VoteDelegation(Box<VoteDelegation>),
+    PParamsUpdate(Box<PParamsUpdate>),
+    NoncesUpdate(Box<NoncesUpdate>),
+    NewProposal(Box<NewProposal>),
+    AssignRewards(Box<AssignRewards>),
+    NonceTransition(Box<NonceTransition>),
+    PoolTransition(Box<PoolTransition>),
+    AccountTransition(Box<AccountTransition>),
+    PoolDepositRefund(Box<PoolDepositRefund>),
+    EpochTransition(Box<EpochTransition>),
+    EpochWrapUp(Box<EpochWrapUp>),
+    DRepDelegatorDrop(Box<DRepDelegatorDrop>),
+    PoolDelegatorRetire(Box<PoolDelegatorRetire>),
+    PoolWrapUp(Box<PoolWrapUp>),
+    ProposalDepositRefund(Box<ProposalDepositRefund>),
+    TreasuryWithdrawal(Box<TreasuryWithdrawal>),
+    AssignMirRewards(Box<AssignMirRewards>),
+    DatumRefIncrement(Box<crate::roll::datums::DatumRefIncrement>),
+    DatumRefDecrement(Box<crate::roll::datums::DatumRefDecrement>),
+    EnqueueReward(Box<EnqueueReward>),
+    SetEpochIncentives(Box<SetEpochIncentives>),
+    DequeueReward(Box<DequeueReward>),
 }
 
 impl CardanoDelta {
@@ -1943,7 +1941,7 @@ macro_rules! delta_from {
     ($type:ident) => {
         impl From<$type> for CardanoDelta {
             fn from(value: $type) -> Self {
-                Self::$type(value)
+                Self::$type(Box::new(value))
             }
         }
     };
@@ -1988,13 +1986,13 @@ delta_from!(DequeueReward);
 // Special From implementations for datum deltas since they're in a different module
 impl From<crate::roll::datums::DatumRefIncrement> for CardanoDelta {
     fn from(value: crate::roll::datums::DatumRefIncrement) -> Self {
-        Self::DatumRefIncrement(value)
+        Self::DatumRefIncrement(Box::new(value))
     }
 }
 
 impl From<crate::roll::datums::DatumRefDecrement> for CardanoDelta {
     fn from(value: crate::roll::datums::DatumRefDecrement) -> Self {
-        Self::DatumRefDecrement(value)
+        Self::DatumRefDecrement(Box::new(value))
     }
 }
 
@@ -2045,85 +2043,85 @@ impl dolos_core::EntityDelta for CardanoDelta {
 
     fn apply(&mut self, entity: &mut Option<Self::Entity>) {
         match self {
-            Self::ControlledAmountInc(x) => Self::downcast_apply(x, entity),
-            Self::ControlledAmountDec(x) => Self::downcast_apply(x, entity),
-            Self::StakeRegistration(x) => Self::downcast_apply(x, entity),
-            Self::StakeDelegation(x) => Self::downcast_apply(x, entity),
-            Self::StakeDeregistration(x) => Self::downcast_apply(x, entity),
-            Self::PoolRegistration(x) => Self::downcast_apply(x, entity),
-            Self::PoolDeRegistration(x) => Self::downcast_apply(x, entity),
-            Self::MintedBlocksInc(x) => Self::downcast_apply(x, entity),
-            Self::MintStatsUpdate(x) => Self::downcast_apply(x, entity),
-            Self::EpochStatsUpdate(x) => Self::downcast_apply(x, entity),
-            Self::DRepRegistration(x) => Self::downcast_apply(x, entity),
-            Self::DRepUnRegistration(x) => Self::downcast_apply(x, entity),
-            Self::DRepActivity(x) => Self::downcast_apply(x, entity),
-            Self::DRepExpiration(x) => Self::downcast_apply(x, entity),
-            Self::WithdrawalInc(x) => Self::downcast_apply(x, entity),
-            Self::VoteDelegation(x) => Self::downcast_apply(x, entity),
-            Self::PParamsUpdate(x) => Self::downcast_apply(x, entity),
-            Self::NoncesUpdate(x) => Self::downcast_apply(x, entity),
-            Self::NewProposal(x) => Self::downcast_apply(x, entity),
-            Self::AssignRewards(x) => Self::downcast_apply(x, entity),
-            Self::NonceTransition(x) => Self::downcast_apply(x, entity),
-            Self::PoolTransition(x) => Self::downcast_apply(x, entity),
-            Self::AccountTransition(x) => Self::downcast_apply(x, entity),
-            Self::PoolDepositRefund(x) => Self::downcast_apply(x, entity),
-            Self::EpochTransition(x) => Self::downcast_apply(x, entity),
-            Self::EpochWrapUp(x) => Self::downcast_apply(x, entity),
-            Self::DRepDelegatorDrop(x) => Self::downcast_apply(x, entity),
-            Self::PoolDelegatorRetire(x) => Self::downcast_apply(x, entity),
-            Self::PoolWrapUp(x) => Self::downcast_apply(x, entity),
-            Self::ProposalDepositRefund(x) => Self::downcast_apply(x, entity),
-            Self::TreasuryWithdrawal(x) => Self::downcast_apply(x, entity),
-            Self::AssignMirRewards(x) => Self::downcast_apply(x, entity),
-            Self::DatumRefIncrement(x) => Self::downcast_apply(x, entity),
-            Self::DatumRefDecrement(x) => Self::downcast_apply(x, entity),
-            Self::EnqueueReward(x) => Self::downcast_apply(x, entity),
-            Self::SetEpochIncentives(x) => Self::downcast_apply(x, entity),
-            Self::DequeueReward(x) => Self::downcast_apply(x, entity),
+            Self::ControlledAmountInc(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::ControlledAmountDec(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::StakeRegistration(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::StakeDelegation(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::StakeDeregistration(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::PoolRegistration(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::PoolDeRegistration(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::MintedBlocksInc(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::MintStatsUpdate(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::EpochStatsUpdate(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::DRepRegistration(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::DRepUnRegistration(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::DRepActivity(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::DRepExpiration(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::WithdrawalInc(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::VoteDelegation(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::PParamsUpdate(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::NoncesUpdate(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::NewProposal(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::AssignRewards(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::NonceTransition(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::PoolTransition(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::AccountTransition(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::PoolDepositRefund(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::EpochTransition(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::EpochWrapUp(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::DRepDelegatorDrop(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::PoolDelegatorRetire(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::PoolWrapUp(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::ProposalDepositRefund(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::TreasuryWithdrawal(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::AssignMirRewards(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::DatumRefIncrement(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::DatumRefDecrement(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::EnqueueReward(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::SetEpochIncentives(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::DequeueReward(x) => Self::downcast_apply(x.as_mut(), entity),
         }
     }
 
     fn undo(&self, entity: &mut Option<Self::Entity>) {
         match self {
-            Self::ControlledAmountInc(x) => Self::downcast_undo(x, entity),
-            Self::ControlledAmountDec(x) => Self::downcast_undo(x, entity),
-            Self::StakeRegistration(x) => Self::downcast_undo(x, entity),
-            Self::StakeDelegation(x) => Self::downcast_undo(x, entity),
-            Self::StakeDeregistration(x) => Self::downcast_undo(x, entity),
-            Self::PoolRegistration(x) => Self::downcast_undo(x, entity),
-            Self::PoolDeRegistration(x) => Self::downcast_undo(x, entity),
-            Self::MintedBlocksInc(x) => Self::downcast_undo(x, entity),
-            Self::MintStatsUpdate(x) => Self::downcast_undo(x, entity),
-            Self::EpochStatsUpdate(x) => Self::downcast_undo(x, entity),
-            Self::DRepRegistration(x) => Self::downcast_undo(x, entity),
-            Self::DRepUnRegistration(x) => Self::downcast_undo(x, entity),
-            Self::DRepActivity(x) => Self::downcast_undo(x, entity),
-            Self::DRepExpiration(x) => Self::downcast_undo(x, entity),
-            Self::WithdrawalInc(x) => Self::downcast_undo(x, entity),
-            Self::VoteDelegation(x) => Self::downcast_undo(x, entity),
-            Self::PParamsUpdate(x) => Self::downcast_undo(x, entity),
-            Self::NoncesUpdate(x) => Self::downcast_undo(x, entity),
-            Self::NewProposal(x) => Self::downcast_undo(x, entity),
-            Self::AssignRewards(x) => Self::downcast_undo(x, entity),
-            Self::NonceTransition(x) => Self::downcast_undo(x, entity),
-            Self::PoolTransition(x) => Self::downcast_undo(x, entity),
-            Self::AccountTransition(x) => Self::downcast_undo(x, entity),
-            Self::PoolDepositRefund(x) => Self::downcast_undo(x, entity),
-            Self::EpochTransition(x) => Self::downcast_undo(x, entity),
-            Self::EpochWrapUp(x) => Self::downcast_undo(x, entity),
-            Self::DRepDelegatorDrop(x) => Self::downcast_undo(x, entity),
-            Self::PoolDelegatorRetire(x) => Self::downcast_undo(x, entity),
-            Self::PoolWrapUp(x) => Self::downcast_undo(x, entity),
-            Self::ProposalDepositRefund(x) => Self::downcast_undo(x, entity),
-            Self::TreasuryWithdrawal(x) => Self::downcast_undo(x, entity),
-            Self::AssignMirRewards(x) => Self::downcast_undo(x, entity),
-            Self::DatumRefIncrement(x) => Self::downcast_undo(x, entity),
-            Self::DatumRefDecrement(x) => Self::downcast_undo(x, entity),
-            Self::EnqueueReward(x) => Self::downcast_undo(x, entity),
-            Self::SetEpochIncentives(x) => Self::downcast_undo(x, entity),
-            Self::DequeueReward(x) => Self::downcast_undo(x, entity),
+            Self::ControlledAmountInc(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::ControlledAmountDec(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::StakeRegistration(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::StakeDelegation(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::StakeDeregistration(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::PoolRegistration(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::PoolDeRegistration(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::MintedBlocksInc(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::MintStatsUpdate(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::EpochStatsUpdate(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::DRepRegistration(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::DRepUnRegistration(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::DRepActivity(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::DRepExpiration(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::WithdrawalInc(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::VoteDelegation(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::PParamsUpdate(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::NoncesUpdate(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::NewProposal(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::AssignRewards(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::NonceTransition(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::PoolTransition(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::AccountTransition(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::PoolDepositRefund(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::EpochTransition(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::EpochWrapUp(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::DRepDelegatorDrop(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::PoolDelegatorRetire(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::PoolWrapUp(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::ProposalDepositRefund(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::TreasuryWithdrawal(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::AssignMirRewards(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::DatumRefIncrement(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::DatumRefDecrement(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::EnqueueReward(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::SetEpochIncentives(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::DequeueReward(x) => Self::downcast_undo(x.as_ref(), entity),
         }
     }
 }

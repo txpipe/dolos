@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{hash_map::Entry, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
@@ -19,7 +19,7 @@ pub struct BlockLocation {
 pub const BLOCK_LOCATION_SIZE: usize = 16;
 
 impl BlockLocation {
-    pub fn to_bytes(&self) -> [u8; BLOCK_LOCATION_SIZE] {
+    pub fn to_bytes(self) -> [u8; BLOCK_LOCATION_SIZE] {
         let mut buf = [0u8; BLOCK_LOCATION_SIZE];
         buf[0..4].copy_from_slice(&self.segment_id.to_be_bytes());
         buf[4..12].copy_from_slice(&self.offset.to_be_bytes());
@@ -75,12 +75,12 @@ impl FlatFileStore {
     /// Get or create an append-mode file handle for a segment.
     fn get_writer(&self, segment_id: u32) -> io::Result<()> {
         let mut writers = self.writers.lock().unwrap();
-        if !writers.contains_key(&segment_id) {
+        if let Entry::Vacant(entry) = writers.entry(segment_id) {
             let file = OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(self.segment_path(segment_id))?;
-            writers.insert(segment_id, file);
+            entry.insert(file);
         }
         Ok(())
     }
@@ -117,7 +117,7 @@ impl FlatFileStore {
         }
 
         // Fsync all touched segments.
-        for segment_id in touched_segments.keys() {
+        for &segment_id in touched_segments.keys() {
             if let Some(file) = writers.get(&segment_id) {
                 file.sync_data()?;
             }

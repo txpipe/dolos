@@ -30,9 +30,7 @@ pub fn read_entities<R: Readable>(
 
     for key in keys {
         let prefixed_key = build_entity_key(ns, key);
-        let value = readable
-            .get(keyspace, prefixed_key)
-            .map_err(|e| Error::Fjall(e.into()))?;
+        let value = readable.get(keyspace, prefixed_key).map_err(Error::Fjall)?;
         results.push(value.map(|v| v.as_ref().to_vec()));
     }
 

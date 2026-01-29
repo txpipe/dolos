@@ -9,7 +9,7 @@
 //!
 //! Use this for initial sync or catch-up from trusted data sources.
 
-use tracing::{debug, info, instrument};
+use tracing::{debug, instrument};
 
 use crate::{BlockSlot, ChainLogic, Domain, DomainError, RawBlock, WorkUnit};
 

@@ -83,12 +83,12 @@ fn parse_hash_or_number(hash_or_number: &str) -> Result<HashOrNumber, Error> {
     }
 }
 
-async fn load_block_by_hash_or_number<D: Domain>(
+async fn load_block_by_hash_or_number<D>(
     domain: &Facade<D>,
     hash_or_number: &HashOrNumber,
 ) -> Result<BlockBody, Error>
 where
-    D: Clone + Send + Sync + 'static,
+    D: Domain + Clone + Send + Sync + 'static,
 {
     match hash_or_number {
         Either::Left(hash) => Ok(domain
@@ -118,14 +118,14 @@ where
     }
 }
 
-async fn build_block_model<D: Domain>(
+async fn build_block_model<D>(
     domain: &Facade<D>,
     block: &BlockBody,
     tip: &BlockBody,
     chain: &ChainSummary,
 ) -> Result<BlockContent, StatusCode>
 where
-    D: Clone + Send + Sync + 'static,
+    D: Domain + Clone + Send + Sync + 'static,
 {
     let mut builder = BlockModelBuilder::new(block)?;
 
@@ -162,12 +162,12 @@ where
     builder.into_model()
 }
 
-pub async fn by_hash_or_number<D: Domain>(
+pub async fn by_hash_or_number<D>(
     Path(hash_or_number): Path<String>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<BlockContent>, Error>
 where
-    D: Clone + Send + Sync + 'static,
+    D: Domain + Clone + Send + Sync + 'static,
 {
     let hash_or_number = parse_hash_or_number(&hash_or_number)?;
 
@@ -191,13 +191,13 @@ where
     Ok(Json(model))
 }
 
-pub async fn by_hash_or_number_previous<D: Domain>(
+pub async fn by_hash_or_number_previous<D>(
     Path(hash_or_number): Path<String>,
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<BlockContent>>, Error>
 where
-    D: Clone + Send + Sync + 'static,
+    D: Domain + Clone + Send + Sync + 'static,
 {
     let pagination = Pagination::try_from(params)?;
 
@@ -258,13 +258,13 @@ where
     Ok(Json(output))
 }
 
-pub async fn by_hash_or_number_next<D: Domain>(
+pub async fn by_hash_or_number_next<D>(
     Path(hash_or_number): Path<String>,
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<BlockContent>>, Error>
 where
-    D: Clone + Send + Sync + 'static,
+    D: Domain + Clone + Send + Sync + 'static,
 {
     let pagination = Pagination::try_from(params)?;
 
@@ -313,11 +313,9 @@ where
     Ok(Json(output))
 }
 
-pub async fn latest<D: Domain>(
-    State(domain): State<Facade<D>>,
-) -> Result<Json<BlockContent>, StatusCode>
+pub async fn latest<D>(State(domain): State<Facade<D>>) -> Result<Json<BlockContent>, StatusCode>
 where
-    D: Clone + Send + Sync + 'static,
+    D: Domain + Clone + Send + Sync + 'static,
 {
     let (_, tip) = domain
         .archive()
@@ -332,12 +330,12 @@ where
     Ok(Json(model))
 }
 
-pub async fn by_slot<D: Domain>(
+pub async fn by_slot<D>(
     Path(slot_number): Path<u64>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<BlockContent>, StatusCode>
 where
-    D: Clone + Send + Sync + 'static,
+    D: Domain + Clone + Send + Sync + 'static,
 {
     let block = domain
         .archive()
@@ -358,13 +356,13 @@ where
     Ok(Json(model))
 }
 
-pub async fn by_hash_or_number_txs<D: Domain>(
+pub async fn by_hash_or_number_txs<D>(
     Path(hash_or_number): Path<String>,
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<String>>, Error>
 where
-    D: Clone + Send + Sync + 'static,
+    D: Domain + Clone + Send + Sync + 'static,
 {
     let pagination = Pagination::try_from(params)?;
     let hash_or_number = parse_hash_or_number(&hash_or_number)?;
@@ -386,13 +384,13 @@ where
     ))
 }
 
-pub async fn by_hash_or_number_addresses<D: Domain>(
+pub async fn by_hash_or_number_addresses<D>(
     Path(hash_or_number): Path<String>,
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<String>>, Error>
 where
-    D: Clone + Send + Sync + 'static,
+    D: Domain + Clone + Send + Sync + 'static,
 {
     let pagination = Pagination::try_from(params)?;
     let hash_or_number = parse_hash_or_number(&hash_or_number)?;
@@ -414,12 +412,12 @@ where
     ))
 }
 
-pub async fn latest_txs<D: Domain>(
+pub async fn latest_txs<D>(
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<String>>, Error>
 where
-    D: Clone + Send + Sync + 'static,
+    D: Domain + Clone + Send + Sync + 'static,
 {
     let pagination = Pagination::try_from(params)?;
     let (_, tip) = domain

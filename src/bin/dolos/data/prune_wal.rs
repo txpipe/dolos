@@ -31,7 +31,6 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     info!(max_slots, "prunning to max slots");
 
     wal.prune_history(max_slots, args.max_prune)
-        .map_err(WalError::from)
         .into_diagnostic()
         .context("removing range from WAL")?;
 
