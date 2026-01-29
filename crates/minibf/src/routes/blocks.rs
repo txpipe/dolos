@@ -5,9 +5,8 @@ use axum::{
 };
 use blockfrost_openapi::models::block_content::BlockContent;
 use dolos_cardano::ChainSummary;
-use dolos_core::{
-    archive::Skippable as _, ArchiveStore as _, BlockBody, Domain, QueryHelpers as _,
-};
+use dolos_core::{archive::Skippable as _, ArchiveStore as _, BlockBody, Domain};
+use futures::future::try_join_all;
 use itertools::Either;
 use pallas::ledger::{
     configs::{byron, shelley},
@@ -84,14 +83,18 @@ fn parse_hash_or_number(hash_or_number: &str) -> Result<HashOrNumber, Error> {
     }
 }
 
-fn load_block_by_hash_or_number<D: Domain>(
+async fn load_block_by_hash_or_number<D: Domain>(
     domain: &Facade<D>,
     hash_or_number: &HashOrNumber,
-) -> Result<BlockBody, Error> {
+) -> Result<BlockBody, Error>
+where
+    D: Clone + Send + Sync + 'static,
+{
     match hash_or_number {
         Either::Left(hash) => Ok(domain
-            .inner
-            .block_by_hash(hash)
+            .query()
+            .block_by_hash(hash.clone())
+            .await
             .map_err(|_| Error::InvalidBlockHash)?
             .ok_or(StatusCode::NOT_FOUND)?),
         Either::Right(number) => {
@@ -106,28 +109,33 @@ fn load_block_by_hash_or_number<D: Domain>(
             }
 
             Ok(domain
-                .inner
+                .query()
                 .block_by_number(*number)
+                .await
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
                 .ok_or(StatusCode::NOT_FOUND)?)
         }
     }
 }
 
-fn build_block_model<D: Domain>(
+async fn build_block_model<D: Domain>(
     domain: &Facade<D>,
     block: &BlockBody,
     tip: &BlockBody,
     chain: &ChainSummary,
-) -> Result<BlockContent, StatusCode> {
+) -> Result<BlockContent, StatusCode>
+where
+    D: Clone + Send + Sync + 'static,
+{
     let mut builder = BlockModelBuilder::new(block)?;
 
     let previous_hash = builder.previous_hash();
 
     let maybe_previous = if let Some(prev_hash) = previous_hash {
         domain
-            .inner
-            .block_by_hash(prev_hash.as_ref())
+            .query()
+            .block_by_hash(prev_hash.as_ref().to_vec())
+            .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     } else {
         None
@@ -138,8 +146,9 @@ fn build_block_model<D: Domain>(
     }
 
     let maybe_next = domain
-        .inner
+        .query()
         .block_by_number(builder.next_number())
+        .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     if let Some(next) = maybe_next.as_ref() {
@@ -156,7 +165,10 @@ fn build_block_model<D: Domain>(
 pub async fn by_hash_or_number<D: Domain>(
     Path(hash_or_number): Path<String>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<BlockContent>, Error> {
+) -> Result<Json<BlockContent>, Error>
+where
+    D: Clone + Send + Sync + 'static,
+{
     let hash_or_number = parse_hash_or_number(&hash_or_number)?;
 
     // Very special case only for preview.
@@ -164,7 +176,7 @@ pub async fn by_hash_or_number<D: Domain>(
         return Ok(Json(block_0_preview(&domain)?));
     }
 
-    let block = load_block_by_hash_or_number(&domain, &hash_or_number)?;
+    let block = load_block_by_hash_or_number(&domain, &hash_or_number).await?;
 
     let (_, tip) = domain
         .archive()
@@ -174,7 +186,7 @@ pub async fn by_hash_or_number<D: Domain>(
 
     let chain = domain.get_chain_summary()?;
 
-    let model = build_block_model(&domain, &block, &tip, &chain)?;
+    let model = build_block_model(&domain, &block, &tip, &chain).await?;
 
     Ok(Json(model))
 }
@@ -183,21 +195,33 @@ pub async fn by_hash_or_number_previous<D: Domain>(
     Path(hash_or_number): Path<String>,
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<Vec<BlockContent>>, Error> {
+) -> Result<Json<Vec<BlockContent>>, Error>
+where
+    D: Clone + Send + Sync + 'static,
+{
     let pagination = Pagination::try_from(params)?;
 
     let hash_or_number = parse_hash_or_number(&hash_or_number)?;
-    let curr = load_block_by_hash_or_number(&domain, &hash_or_number)?;
+    let curr = load_block_by_hash_or_number(&domain, &hash_or_number).await?;
 
     let curr = MultiEraBlock::decode(&curr).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let mut iter = domain
-        .archive()
-        .get_range(None, Some(curr.slot()))
-        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    let bodies = {
+        let mut iter = domain
+            .archive()
+            .get_range(None, Some(curr.slot()))
+            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
 
-    // Skip past pages we don't need using key-only traversal (no block data read).
-    iter.skip_backward(pagination.from());
+        // Skip past pages we don't need using key-only traversal (no block data read).
+        iter.skip_backward(pagination.from());
+
+        iter.rev()
+            .take(pagination.count)
+            .map(|(_, body)| body)
+            .collect::<Vec<_>>()
+    };
+
+    drop(curr);
 
     let (_, tip) = domain
         .archive()
@@ -207,12 +231,10 @@ pub async fn by_hash_or_number_previous<D: Domain>(
 
     let chain = domain.get_chain_summary()?;
 
-    let mut output = vec![];
-
-    for (_, body) in iter.rev().take(pagination.count) {
-        let model = build_block_model(&domain, &body, &tip, &chain)?;
-        output.push(model);
-    }
+    let futures = bodies
+        .iter()
+        .map(|body| build_block_model(&domain, body, &tip, &chain));
+    let mut output = try_join_all(futures).await?;
 
     // Insert block 0 only in preview
     if output.len() < pagination.count
@@ -220,7 +242,7 @@ pub async fn by_hash_or_number_previous<D: Domain>(
         && output.last().map(|x| x.height == Some(0)).unwrap_or(false)
     {
         let mut block_1 = output.pop().unwrap();
-        let mut block_0 = block_0_preview(&domain)?;
+        let mut block_0 = block_0_preview(&domain).map_err(Error::Code)?;
 
         block_1.previous_block = Some(block_0.hash.clone());
         block_0.next_block = Some(block_1.hash.clone());
@@ -240,24 +262,36 @@ pub async fn by_hash_or_number_next<D: Domain>(
     Path(hash_or_number): Path<String>,
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<Vec<BlockContent>>, Error> {
+) -> Result<Json<Vec<BlockContent>>, Error>
+where
+    D: Clone + Send + Sync + 'static,
+{
     let pagination = Pagination::try_from(params)?;
 
     let hash_or_number = parse_hash_or_number(&hash_or_number)?;
-    let curr = load_block_by_hash_or_number(&domain, &hash_or_number)?;
+    let curr = load_block_by_hash_or_number(&domain, &hash_or_number).await?;
 
     let curr = MultiEraBlock::decode(&curr).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let mut iterator = domain
-        .archive()
-        .get_range(Some(curr.slot()), None)
-        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    let bodies = {
+        let mut iterator = domain
+            .archive()
+            .get_range(Some(curr.slot()), None)
+            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
 
-    // Discard first block (the reference block itself).
-    iterator.skip_forward(1);
+        // Discard first block (the reference block itself).
+        iterator.skip_forward(1);
 
-    // Skip past pages we don't need using key-only traversal (no block data read).
-    iterator.skip_forward(pagination.from());
+        // Skip past pages we don't need using key-only traversal (no block data read).
+        iterator.skip_forward(pagination.from());
+
+        iterator
+            .take(pagination.count)
+            .map(|(_, body)| body)
+            .collect::<Vec<_>>()
+    };
+
+    drop(curr);
 
     let (_, tip) = domain
         .archive()
@@ -267,12 +301,10 @@ pub async fn by_hash_or_number_next<D: Domain>(
 
     let chain = domain.get_chain_summary()?;
 
-    let mut output = vec![];
-
-    for (_, body) in iterator.take(pagination.count) {
-        let model = build_block_model(&domain, &body, &tip, &chain)?;
-        output.push(model);
-    }
+    let futures = bodies
+        .iter()
+        .map(|body| build_block_model(&domain, body, &tip, &chain));
+    let output = try_join_all(futures).await?;
     let output = match pagination.order {
         Order::Asc => output,
         Order::Desc => output.into_iter().rev().collect(),
@@ -283,7 +315,10 @@ pub async fn by_hash_or_number_next<D: Domain>(
 
 pub async fn latest<D: Domain>(
     State(domain): State<Facade<D>>,
-) -> Result<Json<BlockContent>, StatusCode> {
+) -> Result<Json<BlockContent>, StatusCode>
+where
+    D: Clone + Send + Sync + 'static,
+{
     let (_, tip) = domain
         .archive()
         .get_tip()
@@ -292,7 +327,7 @@ pub async fn latest<D: Domain>(
 
     let chain = domain.get_chain_summary()?;
 
-    let model = build_block_model(&domain, &tip, &tip, &chain)?;
+    let model = build_block_model(&domain, &tip, &tip, &chain).await?;
 
     Ok(Json(model))
 }
@@ -300,7 +335,10 @@ pub async fn latest<D: Domain>(
 pub async fn by_slot<D: Domain>(
     Path(slot_number): Path<u64>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<BlockContent>, StatusCode> {
+) -> Result<Json<BlockContent>, StatusCode>
+where
+    D: Clone + Send + Sync + 'static,
+{
     let block = domain
         .archive()
         .get_block_by_slot(&slot_number)
@@ -315,7 +353,7 @@ pub async fn by_slot<D: Domain>(
 
     let chain = domain.get_chain_summary()?;
 
-    let model = build_block_model(&domain, &block, &tip, &chain)?;
+    let model = build_block_model(&domain, &block, &tip, &chain).await?;
 
     Ok(Json(model))
 }
@@ -324,10 +362,13 @@ pub async fn by_hash_or_number_txs<D: Domain>(
     Path(hash_or_number): Path<String>,
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<Vec<String>>, Error> {
+) -> Result<Json<Vec<String>>, Error>
+where
+    D: Clone + Send + Sync + 'static,
+{
     let pagination = Pagination::try_from(params)?;
     let hash_or_number = parse_hash_or_number(&hash_or_number)?;
-    let block = load_block_by_hash_or_number(&domain, &hash_or_number)?;
+    let block = load_block_by_hash_or_number(&domain, &hash_or_number).await?;
 
     let model = BlockModelBuilder::new(&block)?;
 
@@ -349,10 +390,13 @@ pub async fn by_hash_or_number_addresses<D: Domain>(
     Path(hash_or_number): Path<String>,
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<Vec<String>>, Error> {
+) -> Result<Json<Vec<String>>, Error>
+where
+    D: Clone + Send + Sync + 'static,
+{
     let pagination = Pagination::try_from(params)?;
     let hash_or_number = parse_hash_or_number(&hash_or_number)?;
-    let block = load_block_by_hash_or_number(&domain, &hash_or_number)?;
+    let block = load_block_by_hash_or_number(&domain, &hash_or_number).await?;
 
     let model = BlockModelBuilder::new(&block)?;
 
@@ -373,7 +417,10 @@ pub async fn by_hash_or_number_addresses<D: Domain>(
 pub async fn latest_txs<D: Domain>(
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<Vec<String>>, Error> {
+) -> Result<Json<Vec<String>>, Error>
+where
+    D: Clone + Send + Sync + 'static,
+{
     let pagination = Pagination::try_from(params)?;
     let (_, tip) = domain
         .archive()
