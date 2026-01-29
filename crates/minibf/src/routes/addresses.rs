@@ -33,7 +33,7 @@ fn refs_for_address<D: Domain>(
     domain: &Facade<D>,
     address: &str,
 ) -> Result<HashSet<TxoRef>, Error> {
-    if address.starts_with("addr_vkh") {
+    if address.starts_with("addr_vkh") || address.starts_with("script") {
         let (_, addr) = bech32::decode(address).expect("failed to parse");
 
         Ok(domain.indexes().utxos_by_payment(&addr).map_err(|err| {
@@ -64,7 +64,7 @@ async fn blocks_for_address<D: Domain>(
 where
     D: Clone + Send + Sync + 'static,
 {
-    if address.starts_with("addr_vkh") {
+    if address.starts_with("addr_vkh") || address.starts_with("script") {
         let (_, addr) = bech32::decode(address).expect("failed to parse");
 
         Ok((
@@ -106,7 +106,7 @@ where
     let end_slot = domain.get_tip_slot()?;
     let start_slot = 0;
 
-    if address.starts_with("addr_vkh") {
+    if address.starts_with("addr_vkh") || address.starts_with("script") {
         let (_, addr) = bech32::decode(address).expect("failed to parse");
 
         Ok(domain
