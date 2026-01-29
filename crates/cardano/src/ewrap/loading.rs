@@ -1,14 +1,18 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
-use dolos_core::{batch::WorkDeltas, ChainError, Domain, Genesis, StateStore};
-use pallas::codec::minicbor;
+use dolos_core::{ChainError, Domain, Genesis, StateStore};
+use pallas::{codec::minicbor, ledger::primitives::StakeCredential};
+use tracing::debug;
 
 use crate::{
     ewrap::{BoundaryVisitor as _, BoundaryWork},
-    load_active_era, pallas_extras,
-    rewards::RewardMap,
+    load_era_summary, pallas_extras,
+    pots::EpochIncentives,
+    rewards::{Reward, RewardMap},
+    roll::WorkDeltas,
     rupd::RupdWork,
-    AccountState, DRepState, FixedNamespace as _, PoolState, ProposalState,
+    AccountState, DRepState, EraProtocol, FixedNamespace as _, PendingRewardState, PoolState,
+    ProposalState,
 };
 
 impl BoundaryWork {
@@ -62,7 +66,7 @@ impl BoundaryWork {
             return false;
         };
 
-        let (unregistered_epoch, _) = self.active_era.slot_epoch(unregistered_at);
+        let (unregistered_epoch, _) = self.chain_summary.slot_epoch(unregistered_at);
 
         self.starting_epoch_no() == unregistered_epoch + 1
     }
@@ -76,7 +80,7 @@ impl BoundaryWork {
             .last_active_slot
             .unwrap_or(drep.initial_slot.unwrap_or_default());
 
-        let (last_activity_epoch, _) = self.active_era.slot_epoch(last_activity_slot);
+        let (last_activity_epoch, _) = self.chain_summary.slot_epoch(last_activity_slot);
 
         let pparams = self.ending_state().pparams.unwrap_live();
 
@@ -241,17 +245,48 @@ impl BoundaryWork {
         Ok(())
     }
 
+    /// Load pending rewards from state store (persisted by RUPD).
+    fn load_pending_rewards<D: Domain>(
+        state: &D::State,
+        incentives: EpochIncentives,
+    ) -> Result<RewardMap<RupdWork>, ChainError> {
+        let pending_iter =
+            state.iter_entities_typed::<PendingRewardState>(PendingRewardState::NS, None)?;
+
+        let mut pending: HashMap<StakeCredential, Reward> = HashMap::new();
+
+        for record in pending_iter {
+            let (_, pending_state) = record?;
+            let credential = pending_state.credential.clone();
+            let reward = Reward::from_pending_state(&pending_state);
+            pending.insert(credential, reward);
+        }
+
+        debug!(
+            pending_count = pending.len(),
+            "loaded pending rewards from state"
+        );
+
+        Ok(RewardMap::from_pending(pending, incentives))
+    }
+
     pub fn load<D: Domain>(
         state: &D::State,
         genesis: Arc<Genesis>,
-        rewards: RewardMap<RupdWork>,
     ) -> Result<BoundaryWork, ChainError> {
         let ending_state = crate::load_epoch::<D>(state)?;
-        let (active_protocol, active_era) = load_active_era::<D>(state)?;
+        let chain_summary = load_era_summary::<D>(state)?;
+        let active_protocol = EraProtocol::from(chain_summary.edge().protocol);
+
+        // Load incentives from epoch state (set by RUPD)
+        let incentives = ending_state.incentives.clone().unwrap_or_default();
+
+        // Load pending rewards from state store
+        let rewards = Self::load_pending_rewards::<D>(state, incentives)?;
 
         let mut boundary = BoundaryWork {
             ending_state,
-            active_era,
+            chain_summary,
             active_protocol,
             genesis,
             rewards,
@@ -267,6 +302,7 @@ impl BoundaryWork {
             // empty until computed
             deltas: WorkDeltas::default(),
             logs: Default::default(),
+            applied_reward_credentials: Default::default(),
         };
 
         boundary.load_pool_data::<D>(state)?;

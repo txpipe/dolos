@@ -110,7 +110,7 @@ pub fn into_tx3_utxoref(txoref: TxoRef) -> tx3_resolver::UtxoRef {
 pub fn into_tx3_utxo(
     txoref: TxoRef,
     utxo: Arc<EraCbor>,
-) -> Result<tx3_resolver::Utxo, tx3_resolver::Error> {
+) -> Result<tx3_resolver::Utxo, Box<tx3_resolver::Error>> {
     let r#ref = into_tx3_utxoref(txoref);
 
     let EraCbor(era, cbor) = utxo.as_ref();

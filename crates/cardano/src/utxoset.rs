@@ -1,16 +1,15 @@
 use dolos_core::config::CardanoConfig;
+use dolos_core::*;
 use pallas::ledger::traverse::{MultiEraBlock, MultiEraOutput, MultiEraTx};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-
-use dolos_core::*;
 
 use crate::owned::OwnedMultiEraOutput;
 
 pub fn compute_block_dependencies(block: &MultiEraBlock, loaded: &mut RawUtxoMap) -> Vec<TxoRef> {
     let txs: HashMap<_, _> = block.txs().into_iter().map(|tx| (tx.hash(), tx)).collect();
 
-    // TODO: turn this into "referenced utxos" intead of just consumed.
+    // TODO: turn this into "referenced utxos" instead of just consumed.
 
     // add all produced utxos to the loaded map
     for (tx_hash, tx) in txs.iter() {
@@ -60,7 +59,6 @@ pub fn compute_apply_delta(
     for (tx_hash, tx) in txs.iter() {
         for (idx, produced) in tx.produces() {
             let uxto_ref = TxoRef(*tx_hash, idx as u32);
-
             delta
                 .produced_utxo
                 .insert(uxto_ref, Arc::new(produced.into()));
@@ -73,8 +71,9 @@ pub fn compute_apply_delta(
                 .get(&stxi_ref)
                 .ok_or_else(|| BrokenInvariant::MissingUtxo(stxi_ref.clone()))?;
 
-            let stxi_body = stxi_body.borrow_owner().clone();
-            delta.consumed_utxo.insert(stxi_ref, stxi_body);
+            let stxi_body_arc = stxi_body.borrow_owner().clone();
+
+            delta.consumed_utxo.insert(stxi_ref, stxi_body_arc);
         }
     }
 
@@ -104,8 +103,9 @@ pub fn compute_undo_delta(
                 .get(&stxi_ref)
                 .ok_or_else(|| BrokenInvariant::MissingUtxo(stxi_ref.clone()))?;
 
-            let stxi_body = stxi_body.borrow_owner().clone();
-            delta.recovered_stxi.insert(stxi_ref, stxi_body);
+            let stxi_body_arc = stxi_body.borrow_owner().clone();
+
+            delta.recovered_stxi.insert(stxi_ref, stxi_body_arc);
         }
     }
 

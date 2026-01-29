@@ -4,10 +4,14 @@ network_magic = 764824073
 is_testnet = false
 
 [storage]
-version = "v1"
+version = "v3"
 path = "data"
-max_wal_history = 129600
-max_chain_history = 2592000
+
+[storage.wal]
+max_history = 129600
+
+[storage.archive]
+max_history = 2592000
 
 [genesis]
 byron_path = "byron.json"

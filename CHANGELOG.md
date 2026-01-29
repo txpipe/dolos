@@ -2,12 +2,96 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.0-rc.6] - 2026-01-28
+
+### 🚀 Features
+
+- Track and ref-count witness-set datum values (#807)
+- *(grpc)* Upgrade u5c server to 0.18.1 specs (#813)
+- *(redb3)* Use bucketed keys for indexes (#836)
+- *(redb3)* Turn tx index into single value table (#837)
+- *(bin)* Add cardinality stats command
+- Introduce LSM engine just for indexes (#843)
+- Introduce LSM engine for state store
+- Support storage backend switch via config
+- Support fjall-specific storage configs
+- *(fjall)* Expose engine settings via config (#845)
+- Support per-store location paths
+- *(cli)* Add command to import archive from immutable db
+- Support no-op stores for index and archive
+- *(redb)* Off-load block data to flat files (#848)
+- *(bin)* Force warn+ logs on mithril bootstrap
+
+### 🐛 Bug Fixes
+
+- *(minibf)* Map metadata numeric values to json numbers
+- *(fjall)* Use snapshot for reads instead of direct keyspace access
+- *(cardano)* Avoid write-during-iter in estart and ewrap
+- Add graceful domain shutdown procedure
+- Make sure fjall logs show up on tracing output
+- *(fjall)* Reduce number of keyspaces by using prefixed keys
+- *(cardano)* Use whole chain summary for epoch calculation (#844)
+- *(cli)* Skip starting point when resuming Mithril import
+- *(cardano)* Use entity streaming for mem-heavy work units (#846)
+- *(minibf)* Show logs on internal 500 errors
+- *(cli)* Avoid scanning the skipped epoch during archive import
+- *(minibf)* Add max scan limit for paginated endpoints (#849)
+- Reduce level of excesive traces
+
+### 🚜 Refactor
+
+- Isolate indexes into its own storage (#841)
+- Formalize work unit concept (#842)
+- Make index interface chain-agnostic
+- Turn datum state trackig into an entity
+- Use persistent state for sharing reward data
+- Remove async from domain trait
+- Simplify adapter boilerplate
+
+### 📚 Documentation
+
+- Introduce basic AGENTS.md
+
+### 🧪 Testing
+
+- Fix toy domain implementation
+
+### ⚙️ Miscellaneous Tasks
+
+- Fix lint warnings
+- Gitignore opencode files
+
 ## [1.0.0-rc.5] - 2026-01-07
 
 ### 🚀 Features
 
-- Introduce mempool-aware utxo store
 - *(trp)* Update tx3 framework to v0.14 (#824)
+
+### 🐛 Bug Fixes
+
+- *(cardano)* Handle pool re-registrations (#822)
+
+### 🚜 Refactor
+
+- *(trp)* Remove dependency on tx3-sdk (#816)
+
+### 🧪 Testing
+
+- *(trp)* Use tx3 sdk just for testing (#821)
+
+### ⚙️ Miscellaneous Tasks
+
+- Update tx3 deps to v0.14.2
+
+### Release
+
+- V1.0.0-rc.5
+
+## [1.0.0-rc.4] - 2025-12-18
+
+### 🚀 Features
+
+- Introduce mempool-aware utxo store
 
 ### 🐛 Bug Fixes
 
@@ -16,25 +100,15 @@ All notable changes to this project will be documented in this file.
 - *(cardano)* Drop delegators for retiring dreps (#817)
 - *(cardano)* Avoid dropping delegators on retired pools (#818)
 - *(cardano)* Improve speed of RUPD work log (#819)
-- *(cardano)* Handle pool re-registrations (#822)
-
-### 🚜 Refactor
-
-- *(trp)* Remove dependency on tx3-sdk (#816)
 
 ### 🔧 Continuous Integration
 
 - Include adhoc branches on docker builds
 - Remove x86 apple binary build
 
-### 🧪 Testing
-
-- *(trp)* Use tx3 sdk just for testing (#821)
-
 ### ⚙️ Miscellaneous Tasks
 
 - Fix lint warnings (#820)
-- Update tx3 deps to v0.14.2
 
 ### Release
 

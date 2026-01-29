@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
-use dolos_core::{batch::WorkDeltas, ChainError, Domain, Genesis, StateStore};
+use dolos_core::{ChainError, Domain, Genesis, StateStore};
 
 use crate::{
-    estart::BoundaryVisitor, load_active_era, AccountState, DRepState, FixedNamespace as _,
-    PoolState, ProposalState,
+    estart::BoundaryVisitor, load_era_summary, roll::WorkDeltas, AccountState, DRepState,
+    EraProtocol, FixedNamespace as _, PoolState, ProposalState,
 };
 
 impl super::WorkContext {
@@ -56,11 +56,12 @@ impl super::WorkContext {
 
     pub fn load<D: Domain>(state: &D::State, genesis: Arc<Genesis>) -> Result<Self, ChainError> {
         let ended_state = crate::load_epoch::<D>(state)?;
-        let (active_protocol, active_era) = load_active_era::<D>(state)?;
+        let chain_summary = load_era_summary::<D>(state)?;
+        let active_protocol = EraProtocol::from(chain_summary.edge().protocol);
 
         let mut boundary = Self {
             ended_state,
-            active_era,
+            chain_summary,
             active_protocol,
             genesis,
 

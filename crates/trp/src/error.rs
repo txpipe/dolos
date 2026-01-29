@@ -15,7 +15,7 @@ pub enum Error {
     TraverseError(#[from] pallas::ledger::traverse::Error),
 
     #[error(transparent)]
-    Tx3Error(#[from] tx3_resolver::Error),
+    Tx3Error(#[from] Box<tx3_resolver::Error>),
 
     #[error(transparent)]
     JsonRpcError(#[from] jsonrpsee::types::ErrorObjectOwned),
@@ -25,6 +25,12 @@ pub enum Error {
 
     #[error("node can't resolve txs while running at era {era}")]
     UnsupportedEra { era: String },
+}
+
+impl From<dolos_core::IndexError> for Error {
+    fn from(error: dolos_core::IndexError) -> Self {
+        Error::InternalError(error.to_string())
+    }
 }
 
 impl From<dolos_core::StateError> for Error {
@@ -51,11 +57,13 @@ impl Error {
     }
 
     fn tx_not_accepted(msg: impl std::fmt::Display) -> Self {
-        Error::Tx3Error(tx3_resolver::Error::TxNotAccepted(msg.to_string()))
+        Error::Tx3Error(Box::new(tx3_resolver::Error::TxNotAccepted(
+            msg.to_string(),
+        )))
     }
 
     fn tx_script_failure(logs: Vec<String>) -> Self {
-        Error::Tx3Error(tx3_resolver::Error::TxScriptFailure(logs))
+        Error::Tx3Error(Box::new(tx3_resolver::Error::TxScriptFailure(logs)))
     }
 
     fn internal(error: impl std::fmt::Display) -> Self {
@@ -95,6 +103,12 @@ impl From<DomainError> for Error {
             dolos_core::DomainError::MempoolError(e) => Error::from(e),
             _ => Error::internal(error),
         }
+    }
+}
+
+impl From<tx3_resolver::Error> for Error {
+    fn from(error: tx3_resolver::Error) -> Self {
+        Error::Tx3Error(Box::new(error))
     }
 }
 

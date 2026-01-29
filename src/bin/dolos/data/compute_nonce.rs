@@ -80,7 +80,7 @@ pub fn compute_nonce<D: Domain>(epoch: u64, domain: &D) -> miette::Result<Hash<3
 #[tokio::main]
 pub async fn run(config: &dolos_core::config::RootConfig, args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging)?;
-    let domain = crate::common::setup_domain(config).await?;
+    let domain = crate::common::setup_domain(config)?;
 
     let nonce = compute_nonce(args.epoch, &domain)?;
     println!("{}", hex::encode(nonce.as_slice()));

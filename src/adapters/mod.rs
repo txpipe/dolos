@@ -1,11 +1,14 @@
+pub mod storage;
+
 use std::sync::Arc;
 
 use dolos_cardano::CardanoLogic;
 use dolos_core::{config::StorageConfig, *};
 
-// we can hardcode the WAL since we don't expect multiple types of
-// implementations
-pub type WalAdapter = dolos_redb3::wal::RedbWalStore<dolos_cardano::CardanoDelta>;
+pub use storage::{ArchiveStoreBackend, IndexStoreBackend, StateStoreBackend, WalStoreBackend};
+
+/// Type alias for the WAL store specialized for Cardano.
+pub type WalAdapter = WalStoreBackend<dolos_cardano::CardanoDelta>;
 
 pub struct TipSubscription {
     replay: Vec<(ChainPoint, RawBlock)>,
@@ -28,20 +31,45 @@ pub struct DomainAdapter {
     pub storage_config: Arc<StorageConfig>,
     pub genesis: Arc<Genesis>,
     pub wal: WalAdapter,
-    pub chain: Arc<tokio::sync::RwLock<CardanoLogic>>,
-    pub state: dolos_redb3::state::StateStore,
-    pub archive: dolos_redb3::archive::ArchiveStore,
+    pub chain: Arc<std::sync::RwLock<CardanoLogic>>,
+    pub state: StateStoreBackend,
+    pub archive: ArchiveStoreBackend,
+    pub indexes: IndexStoreBackend,
     pub mempool: crate::mempool::Mempool,
     pub tip_broadcast: tokio::sync::broadcast::Sender<TipEvent>,
+}
+
+impl DomainAdapter {
+    /// Gracefully shutdown all storage backends.
+    ///
+    /// This method should be called before the DomainAdapter goes out of scope,
+    /// especially after heavy write operations like bulk imports. This ensures
+    /// that storage backends complete any pending background work before being
+    /// dropped.
+    pub fn shutdown(&self) -> Result<(), DomainError> {
+        tracing::info!("domain adapter: starting graceful shutdown");
+
+        self.wal
+            .shutdown()
+            .map_err(|e| DomainError::WalError(e.into()))?;
+        self.state.shutdown().map_err(DomainError::StateError)?;
+        self.archive.shutdown().map_err(DomainError::ArchiveError)?;
+        self.indexes.shutdown().map_err(DomainError::IndexError)?;
+
+        tracing::info!("domain adapter: graceful shutdown complete");
+        Ok(())
+    }
 }
 
 impl Domain for DomainAdapter {
     type Entity = dolos_cardano::CardanoEntity;
     type EntityDelta = dolos_cardano::CardanoDelta;
     type Chain = CardanoLogic;
+    type WorkUnit = dolos_cardano::CardanoWorkUnit;
     type Wal = WalAdapter;
-    type State = dolos_redb3::state::StateStore;
-    type Archive = dolos_redb3::archive::ArchiveStore;
+    type State = StateStoreBackend;
+    type Archive = ArchiveStoreBackend;
+    type Indexes = IndexStoreBackend;
     type Mempool = crate::mempool::Mempool;
     type TipSubscription = TipSubscription;
 
@@ -49,12 +77,12 @@ impl Domain for DomainAdapter {
         self.genesis.clone()
     }
 
-    async fn read_chain(&self) -> tokio::sync::RwLockReadGuard<'_, Self::Chain> {
-        self.chain.read().await
+    fn read_chain(&self) -> std::sync::RwLockReadGuard<'_, Self::Chain> {
+        self.chain.read().expect("chain lock poisoned")
     }
 
-    async fn write_chain(&self) -> tokio::sync::RwLockWriteGuard<'_, Self::Chain> {
-        self.chain.write().await
+    fn write_chain(&self) -> std::sync::RwLockWriteGuard<'_, Self::Chain> {
+        self.chain.write().expect("chain lock poisoned")
     }
 
     fn wal(&self) -> &Self::Wal {
@@ -67,6 +95,10 @@ impl Domain for DomainAdapter {
 
     fn archive(&self) -> &Self::Archive {
         &self.archive
+    }
+
+    fn indexes(&self) -> &Self::Indexes {
+        &self.indexes
     }
 
     fn mempool(&self) -> &Self::Mempool {
@@ -119,6 +151,39 @@ impl pallas::interop::utxorpc::LedgerContext for DomainAdapter {
             .collect();
 
         Some(some)
+    }
+
+    fn get_historical_utxos(
+        &self,
+        refs: &[pallas::interop::utxorpc::TxoRef],
+    ) -> Option<pallas::interop::utxorpc::UtxoMap> {
+        if refs.is_empty() {
+            return Some(Default::default());
+        }
+
+        let mut result = std::collections::HashMap::new();
+        let refs_set: std::collections::HashSet<_> =
+            refs.iter().copied().map(TxoRef::from).collect();
+
+        let iter = self.wal().iter_logs(None, None).ok()?;
+        for (_, log) in iter.rev() {
+            for (txo_ref, era_cbor) in &log.inputs {
+                if refs_set.contains(txo_ref) {
+                    let era = era_cbor.0.try_into().expect("era out of range");
+                    result.insert(txo_ref.clone().into(), (era, era_cbor.1.clone()));
+                }
+            }
+
+            if result.len() == refs.len() {
+                break;
+            }
+        }
+
+        if result.is_empty() {
+            None
+        } else {
+            Some(result)
+        }
     }
 
     fn get_slot_timestamp(&self, slot: u64) -> Option<u64> {

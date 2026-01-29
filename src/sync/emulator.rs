@@ -30,15 +30,17 @@ impl Worker {
         current: Option<RawBlock>,
     ) -> Result<(Tip, RawBlock), WorkerError> {
         let (block_number, slot, prev_hash) = match current {
-            Some(raw) => if raw.is_empty() {
-                (1, self.block_production_interval_seconds, None)
-            } else {
-                let block = MultiEraBlock::decode(&raw).unwrap();
-                (
-                    block.number() + 1,
-                    block.slot() + self.block_production_interval_seconds,
-                    Some(block.hash()),
-                )
+            Some(raw) => {
+                if raw.is_empty() {
+                    (1, self.block_production_interval_seconds, None)
+                } else {
+                    let block = MultiEraBlock::decode(&raw).unwrap();
+                    (
+                        block.number() + 1,
+                        block.slot() + self.block_production_interval_seconds,
+                        Some(block.hash()),
+                    )
+                }
             }
             None => (1, self.block_production_interval_seconds, None),
         };

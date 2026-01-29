@@ -1,14 +1,18 @@
 use dolos_core::{
-    config::CardanoConfig, ChainError, Domain, EntityKey, Genesis, StateStore as _,
-    StateWriter as _,
+    config::CardanoConfig, ChainError, ChainPoint, Domain, EntityKey, Genesis, IndexStore as _,
+    IndexWriter as _, StateStore as _, StateWriter as _,
 };
 
 use crate::{
-    pots::Pots, utils::nonce_stability_window, EpochState, EpochValue, EraBoundary, EraSummary,
-    Lovelace, Nonces, PParamsSet, RollingStats, CURRENT_EPOCH_KEY,
+    indexes::index_delta_from_utxo_delta, pots::Pots, utils::nonce_stability_window, EpochState,
+    EpochValue, EraBoundary, EraSummary, Lovelace, Nonces, PParamsSet, RollingStats,
+    CURRENT_EPOCH_KEY,
 };
 
 mod staking;
+pub mod work_unit;
+
+pub use work_unit::GenesisWorkUnit;
 
 fn get_utxo_amount(genesis: &Genesis) -> Lovelace {
     let byron_utxo = pallas::ledger::configs::byron::genesis_utxos(&genesis.byron)
@@ -72,6 +76,7 @@ pub fn bootstrap_epoch<D: Domain>(
         number: 0,
         rolling: EpochValue::with_live(0, RollingStats::default()),
         end: None,
+        incentives: None,
     };
 
     let writer = state.start_writer()?;
@@ -112,24 +117,36 @@ pub fn bootstrap_eras<D: Domain>(state: &D::State, epoch: &EpochState) -> Result
 
 pub fn bootstrap_utxos<D: Domain>(
     state: &D::State,
+    indexes: &D::Indexes,
     genesis: &Genesis,
     config: &CardanoConfig,
 ) -> Result<(), ChainError> {
-    let writer = state.start_writer()?;
+    let state_writer = state.start_writer()?;
+    let index_writer = indexes.start_writer()?;
 
-    let delta = crate::utxoset::compute_origin_delta(genesis);
-    writer.apply_utxoset(&delta)?;
+    // Genesis UTxOs from Byron and Shelley genesis files
+    let origin_delta = crate::utxoset::compute_origin_delta(genesis);
+    state_writer.apply_utxoset(&origin_delta)?;
 
-    let delta = crate::utxoset::build_custom_utxos_delta(config)?;
-    writer.apply_utxoset(&delta)?;
+    let origin_index_delta = index_delta_from_utxo_delta(ChainPoint::Origin, &origin_delta);
+    index_writer.apply(&origin_index_delta)?;
 
-    writer.commit()?;
+    // Custom UTxOs from config (e.g., for testing)
+    let custom_delta = crate::utxoset::build_custom_utxos_delta(config)?;
+    state_writer.apply_utxoset(&custom_delta)?;
+
+    let custom_index_delta = index_delta_from_utxo_delta(ChainPoint::Origin, &custom_delta);
+    index_writer.apply(&custom_index_delta)?;
+
+    state_writer.commit()?;
+    index_writer.commit()?;
 
     Ok(())
 }
 
 pub fn execute<D: Domain>(
     state: &D::State,
+    indexes: &D::Indexes,
     genesis: &Genesis,
     config: &CardanoConfig,
 ) -> Result<(), ChainError> {
@@ -137,7 +154,7 @@ pub fn execute<D: Domain>(
 
     bootstrap_eras::<D>(state, &epoch)?;
 
-    bootstrap_utxos::<D>(state, genesis, config)?;
+    bootstrap_utxos::<D>(state, indexes, genesis, config)?;
 
     staking::bootstrap::<D>(state, genesis)?;
 
