@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use dolos_core::{batch::WorkDeltas, BrokenInvariant, ChainError, Genesis, NsKey, TxoRef};
+use dolos_core::{BrokenInvariant, ChainError, Genesis, NsKey, TxoRef};
 use pallas::{
     crypto::hash::Hash,
     ledger::{
@@ -15,12 +15,13 @@ use pallas::{
 };
 use serde::{Deserialize, Serialize};
 
+use super::WorkDeltas;
 use crate::{
     model::{EpochState, FixedNamespace as _},
     owned::OwnedMultiEraOutput,
     pallas_extras,
     roll::BlockVisitor,
-    CardanoLogic, Lovelace, Nonces, PParamsSet, PoolHash, CURRENT_EPOCH_KEY,
+    Lovelace, Nonces, PParamsSet, PoolHash, CURRENT_EPOCH_KEY,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -177,7 +178,7 @@ pub struct EpochStateVisitor {
 impl BlockVisitor for EpochStateVisitor {
     fn visit_root(
         &mut self,
-        _: &mut WorkDeltas<CardanoLogic>,
+        _: &mut WorkDeltas,
         block: &MultiEraBlock,
         _: &Genesis,
         _: &PParamsSet,
@@ -201,7 +202,7 @@ impl BlockVisitor for EpochStateVisitor {
 
     fn visit_tx(
         &mut self,
-        _: &mut WorkDeltas<CardanoLogic>,
+        _: &mut WorkDeltas,
         _: &MultiEraBlock,
         tx: &MultiEraTx,
         utxos: &HashMap<TxoRef, OwnedMultiEraOutput>,
@@ -219,7 +220,7 @@ impl BlockVisitor for EpochStateVisitor {
 
     fn visit_input(
         &mut self,
-        _: &mut WorkDeltas<CardanoLogic>,
+        _: &mut WorkDeltas,
         _: &MultiEraBlock,
         _: &MultiEraTx,
         _: &pallas::ledger::traverse::MultiEraInput,
@@ -233,7 +234,7 @@ impl BlockVisitor for EpochStateVisitor {
 
     fn visit_output(
         &mut self,
-        _: &mut WorkDeltas<CardanoLogic>,
+        _: &mut WorkDeltas,
         _: &MultiEraBlock,
         _: &MultiEraTx,
         _: u32,
@@ -247,7 +248,7 @@ impl BlockVisitor for EpochStateVisitor {
 
     fn visit_cert(
         &mut self,
-        _: &mut WorkDeltas<CardanoLogic>,
+        _: &mut WorkDeltas,
         _: &MultiEraBlock,
         _: &MultiEraTx,
         cert: &MultiEraCert,
@@ -298,7 +299,7 @@ impl BlockVisitor for EpochStateVisitor {
 
     fn visit_proposal(
         &mut self,
-        _: &mut WorkDeltas<CardanoLogic>,
+        _: &mut WorkDeltas,
         _: &MultiEraBlock,
         _: &MultiEraTx,
         proposal: &pallas::ledger::traverse::MultiEraProposal,
@@ -313,7 +314,7 @@ impl BlockVisitor for EpochStateVisitor {
 
     fn visit_withdrawal(
         &mut self,
-        _: &mut WorkDeltas<CardanoLogic>,
+        _: &mut WorkDeltas,
         _: &MultiEraBlock,
         _: &MultiEraTx,
         _: &[u8],
@@ -323,7 +324,7 @@ impl BlockVisitor for EpochStateVisitor {
         Ok(())
     }
 
-    fn flush(&mut self, deltas: &mut WorkDeltas<CardanoLogic>) -> Result<(), ChainError> {
+    fn flush(&mut self, deltas: &mut WorkDeltas) -> Result<(), ChainError> {
         if let Some(delta) = self.stats_delta.take() {
             deltas.add_for_entity(delta);
         }

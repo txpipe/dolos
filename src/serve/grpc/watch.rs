@@ -170,17 +170,44 @@ fn block_to_txs<C: LedgerContext>(
         .collect()
 }
 
+fn raw_to_blockref<C: LedgerContext>(
+    mapper: &interop::Mapper<C>,
+    raw: &[u8],
+) -> Option<u5c::watch::BlockRef> {
+    let block = mapper.map_block_cbor(raw);
+    let header = block.header?;
+
+    Some(u5c::watch::BlockRef {
+        slot: header.slot,
+        hash: header.hash,
+        height: header.height,
+    })
+}
+
 fn roll_to_watch_response<C: LedgerContext>(
     mapper: &interop::Mapper<C>,
     log: &TipEvent,
     request: &u5c::watch::WatchTxRequest,
 ) -> impl Stream<Item = u5c::watch::WatchTxResponse> {
     let txs: Vec<_> = match log {
-        TipEvent::Apply(_, block) => block_to_txs(block, mapper, request)
-            .into_iter()
-            .map(u5c::watch::watch_tx_response::Action::Apply)
-            .map(|x| u5c::watch::WatchTxResponse { action: Some(x) })
-            .collect(),
+        TipEvent::Apply(_, block) => {
+            let txs = block_to_txs(block, mapper, request);
+            if txs.is_empty() {
+                let block_ref = raw_to_blockref(mapper, block);
+                if let Some(r) = block_ref {
+                    vec![u5c::watch::WatchTxResponse {
+                        action: Some(u5c::watch::watch_tx_response::Action::Idle(r)),
+                    }]
+                } else {
+                    vec![]
+                }
+            } else {
+                txs.into_iter()
+                    .map(u5c::watch::watch_tx_response::Action::Apply)
+                    .map(|x| u5c::watch::WatchTxResponse { action: Some(x) })
+                    .collect()
+            }
+        }
         TipEvent::Undo(_, block) => block_to_txs(block, mapper, request)
             .into_iter()
             .map(u5c::watch::watch_tx_response::Action::Undo)

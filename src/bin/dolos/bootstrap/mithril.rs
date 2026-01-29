@@ -1,13 +1,13 @@
+use dolos_core::config::{MithrilConfig, RootConfig};
+use dolos_core::ImportExt;
 use itertools::Itertools;
 use miette::{Context, IntoDiagnostic};
 use mithril_client::{ClientBuilder, MessageBuilder, MithrilError, MithrilResult};
 use std::{path::Path, sync::Arc};
 use tracing::{info, warn};
 
-use dolos::prelude::*;
-
 use crate::feedback::Feedback;
-use dolos_core::config::{MithrilConfig, RootConfig};
+use dolos::prelude::*;
 
 #[derive(Debug, clap::Args, Clone)]
 pub struct Args {
@@ -169,8 +169,10 @@ async fn fetch_snapshot(
 
 fn define_starting_point(
     args: &Args,
-    state: &dolos_redb3::state::StateStore,
+    state: &dolos::storage::StateStoreBackend,
 ) -> Result<pallas::network::miniprotocols::Point, miette::Error> {
+    use dolos_core::StateStore;
+
     if let Some(point) = &args.start_from {
         Ok(point.clone().try_into().unwrap())
     } else {
@@ -187,15 +189,15 @@ fn define_starting_point(
     }
 }
 
-async fn import_hardano_into_domain(
+/// Inner import function that can return errors.
+/// The outer function ensures shutdown is called regardless of success/failure.
+fn do_import(
+    domain: &dolos::adapters::DomainAdapter,
     args: &Args,
-    config: &RootConfig,
     immutable_path: &Path,
     feedback: &Feedback,
     chunk_size: usize,
 ) -> Result<(), miette::Error> {
-    let domain = crate::common::setup_domain(config).await?;
-
     let tip = pallas::storage::hardano::immutable::get_tip(immutable_path)
         .map_err(|err| miette::miette!(err.to_string()))
         .context("reading immutable db tip")?
@@ -203,9 +205,16 @@ async fn import_hardano_into_domain(
 
     let cursor = define_starting_point(args, domain.state())?;
 
-    let iter = pallas::storage::hardano::immutable::read_blocks_from_point(immutable_path, cursor)
-        .map_err(|err| miette::miette!(err.to_string()))
-        .context("reading immutable db tip")?;
+    let mut iter =
+        pallas::storage::hardano::immutable::read_blocks_from_point(immutable_path, cursor.clone())
+            .map_err(|err| miette::miette!(err.to_string()))
+            .context("reading immutable db tip")?;
+
+    // unless we're starting from the origin of the chain, we need to skip the first result since
+    // the iterator will be standing in the last slot already processed, we don't want to import it twice.
+    if cursor != pallas::network::miniprotocols::Point::Origin {
+        iter.next();
+    }
 
     let progress = feedback.slot_progress_bar();
 
@@ -222,8 +231,8 @@ async fn import_hardano_into_domain(
         // around throughout the pipeline
         let batch: Vec<_> = batch.into_iter().map(Arc::new).collect();
 
-        let last = dolos_core::facade::import_blocks(&domain, batch)
-            .await
+        let last = domain
+            .import_blocks(batch)
             .map_err(|e| miette::miette!(e.to_string()))?;
 
         progress.set_position(last);
@@ -234,10 +243,31 @@ async fn import_hardano_into_domain(
     Ok(())
 }
 
-#[tokio::main]
-pub async fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Result<()> {
+fn import_hardano_into_domain(
+    args: &Args,
+    config: &RootConfig,
+    immutable_path: &Path,
+    feedback: &Feedback,
+    chunk_size: usize,
+) -> Result<(), miette::Error> {
+    let domain = crate::common::setup_domain(config)?;
+
+    let result = do_import(&domain, args, immutable_path, feedback, chunk_size);
+
+    // Always shutdown the domain before it goes out of scope, regardless of
+    // whether import succeeded or failed.
+    if let Err(e) = domain.shutdown() {
+        tracing::error!("error during domain shutdown: {}", e);
+    }
+
+    result
+}
+
+pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Result<()> {
     if args.verbose {
         crate::common::setup_tracing(&config.logging)?;
+    } else {
+        crate::common::setup_tracing_error_only()?;
     }
 
     let mithril = config
@@ -257,8 +287,12 @@ pub async fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miett
     }
 
     if !args.skip_download {
-        fetch_snapshot(args, mithril, feedback)
-            .await
+        // Spawn a temporary Tokio runtime just for the async download
+        let rt = tokio::runtime::Runtime::new()
+            .into_diagnostic()
+            .context("creating tokio runtime for download")?;
+
+        rt.block_on(fetch_snapshot(args, mithril, feedback))
             .map_err(|err| miette::miette!(err.to_string()))
             .context("fetching and validating mithril snapshot")?;
     } else {
@@ -267,7 +301,8 @@ pub async fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miett
 
     let immutable_path = Path::new(&args.download_dir).join("immutable");
 
-    import_hardano_into_domain(args, config, &immutable_path, feedback, args.chunk_size).await?;
+    // Import is now fully sync - no Tokio runtime needed
+    import_hardano_into_domain(args, config, &immutable_path, feedback, args.chunk_size)?;
 
     if !args.retain_snapshot {
         info!("deleting downloaded snapshot");

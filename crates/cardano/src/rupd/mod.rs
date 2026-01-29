@@ -5,7 +5,7 @@ use dolos_core::{
     LogKey, TemporalKey,
 };
 use pallas::ledger::primitives::StakeCredential;
-use tracing::{info, instrument};
+use tracing::{debug, instrument};
 
 use crate::{
     pots::{EpochIncentives, Pots},
@@ -14,7 +14,12 @@ use crate::{
     StakeLog,
 };
 
+pub mod deltas;
 pub mod loading;
+pub mod work_unit;
+
+pub use deltas::{credential_to_key, EnqueueReward, SetEpochIncentives};
+pub use work_unit::RupdWorkUnit;
 
 pub trait RupdVisitor: Default {
     #[allow(unused_variables)]
@@ -170,7 +175,7 @@ pub fn execute<D: Domain>(
     slot: BlockSlot,
     genesis: &Genesis,
 ) -> Result<RewardMap<RupdWork>, ChainError> {
-    info!(slot, "executing rupd work unit");
+    debug!(slot, "executing rupd work unit");
 
     let work = RupdWork::load::<D>(state, genesis)?;
 

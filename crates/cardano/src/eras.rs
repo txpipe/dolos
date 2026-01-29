@@ -8,6 +8,10 @@ pub type EpochSlot = u32;
 impl EraSummary {
     /// Resolve epoch and sub-epoch slot from a slot number and a chain summary.
     pub fn slot_epoch(&self, slot: u64) -> (Epoch, EpochSlot) {
+        if slot < self.start.slot {
+            panic!("can't compute epoch for slot {slot} since it's prior to this era")
+        }
+
         let era_slot = slot - self.start.slot;
         let era_epoch = era_slot / self.epoch_length;
         let epoch = self.start.epoch + era_epoch;

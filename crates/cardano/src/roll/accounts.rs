@@ -1,5 +1,6 @@
-use dolos_core::batch::WorkDeltas;
 use dolos_core::{BlockSlot, ChainError, Genesis, NsKey};
+
+use super::WorkDeltas;
 use pallas::codec::minicbor;
 use pallas::crypto::hash::Hash;
 use pallas::ledger::primitives::alonzo::{InstantaneousRewardTarget, MoveInstantaneousReward};
@@ -15,7 +16,7 @@ use tracing::debug;
 
 use crate::model::FixedNamespace as _;
 use crate::{model::AccountState, pallas_extras, roll::BlockVisitor};
-use crate::{CardanoLogic, DRepDelegation, PParamsSet, PoolDelegation, PoolHash};
+use crate::{DRepDelegation, PParamsSet, PoolDelegation, PoolHash};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrackSeenAddresses {
@@ -287,6 +288,7 @@ pub struct StakeDeregistration {
     prev_pool: Option<PoolDelegation>,
     prev_drep: Option<DRepDelegation>,
     prev_deposit: Option<u64>,
+    prev_retired_pool: Option<PoolHash>,
 }
 
 impl StakeDeregistration {
@@ -300,6 +302,7 @@ impl StakeDeregistration {
             prev_pool: None,
             prev_drep: None,
             prev_deposit: None,
+            prev_retired_pool: None,
         }
     }
 }
@@ -322,16 +325,16 @@ impl dolos_core::EntityDelta for StakeDeregistration {
         self.prev_deregistered_at = entity.deregistered_at;
         self.prev_pool = entity.pool.live().cloned();
         self.prev_drep = entity.drep.live().cloned();
+        self.prev_retired_pool = entity.retired_pool;
 
         // TODO: understand if we should keep the registered_at value even if the
         // account is deregistered
         entity.registered_at = None;
-
         entity.deregistered_at = Some(self.slot);
-
         entity
             .pool
             .replace(PoolDelegation::NotDelegated, self.epoch);
+        entity.retired_pool = None;
 
         entity.drep.replace(None, self.epoch);
     }
@@ -461,7 +464,7 @@ pub struct AccountVisitor {
 impl BlockVisitor for AccountVisitor {
     fn visit_root(
         &mut self,
-        _: &mut WorkDeltas<CardanoLogic>,
+        _: &mut WorkDeltas,
         _: &MultiEraBlock,
         _: &Genesis,
         pparams: &PParamsSet,
@@ -475,7 +478,7 @@ impl BlockVisitor for AccountVisitor {
 
     fn visit_input(
         &mut self,
-        deltas: &mut WorkDeltas<CardanoLogic>,
+        deltas: &mut WorkDeltas,
         _: &MultiEraBlock,
         _: &MultiEraTx,
         _: &MultiEraInput,
@@ -498,7 +501,7 @@ impl BlockVisitor for AccountVisitor {
 
     fn visit_output(
         &mut self,
-        deltas: &mut WorkDeltas<CardanoLogic>,
+        deltas: &mut WorkDeltas,
         _: &MultiEraBlock,
         _: &MultiEraTx,
         _: u32,
@@ -523,7 +526,7 @@ impl BlockVisitor for AccountVisitor {
 
     fn visit_cert(
         &mut self,
-        deltas: &mut WorkDeltas<CardanoLogic>,
+        deltas: &mut WorkDeltas,
         block: &MultiEraBlock,
         _: &MultiEraTx,
         cert: &MultiEraCert,
@@ -580,7 +583,7 @@ impl BlockVisitor for AccountVisitor {
 
     fn visit_withdrawal(
         &mut self,
-        deltas: &mut WorkDeltas<CardanoLogic>,
+        deltas: &mut WorkDeltas,
         _: &MultiEraBlock,
         _: &MultiEraTx,
         account: &[u8],

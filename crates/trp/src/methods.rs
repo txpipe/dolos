@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use tx3_resolver::trp::{ResolveParams, SubmitParams, SubmitResponse, SubmitWitness, TxEnvelope};
 
-use dolos_core::{facade::receive_tx, Domain, MempoolAwareUtxoStore, StateStore as _};
+use dolos_core::{Domain, MempoolAwareUtxoStore, StateStore as _, SubmitExt};
 
 use crate::{compiler::load_compiler, utxos::UtxoStoreAdapter};
 
@@ -20,7 +20,11 @@ pub async fn trp_resolve<D: Domain>(
 
     let mut compiler = load_compiler::<D>(&context.domain, &context.config)?;
 
-    let store = MempoolAwareUtxoStore::<D>::new(context.domain.state(), context.domain.mempool());
+    let store = MempoolAwareUtxoStore::<D>::new(
+        context.domain.state(),
+        context.domain.indexes(),
+        context.domain.mempool(),
+    );
 
     let utxos = UtxoStoreAdapter::<D>::new(store);
 
@@ -80,9 +84,9 @@ pub async fn trp_submit<D: Domain>(
         bytes = apply_witnesses(&bytes, &params.witnesses)?;
     }
 
-    let chain = context.domain.read_chain().await;
+    let chain = context.domain.read_chain();
 
-    let hash = receive_tx(&context.domain, &chain, &bytes)?;
+    let hash = context.domain.receive_tx(&chain, &bytes)?;
 
     Ok(SubmitResponse {
         hash: hash.to_string(),
@@ -114,7 +118,7 @@ mod tests {
             },
         );
 
-        let domain = ToyDomain::new(Some(delta), None).await;
+        let domain = ToyDomain::new(Some(delta), None);
 
         Arc::new(Context {
             domain,

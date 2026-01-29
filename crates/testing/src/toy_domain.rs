@@ -1,11 +1,13 @@
 use crate::{make_custom_utxo_delta, TestAddress, UtxoGenerator};
+use dolos_cardano::indexes::index_delta_from_utxo_delta;
 use dolos_core::{
     config::{CardanoConfig, StorageConfig},
-    *,
+    sync::execute_work_unit,
+    BootstrapExt, *,
 };
 use futures_util::stream::StreamExt;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use std::sync::RwLock;
 
 pub fn seed_random_memory_store(utxo_generator: impl UtxoGenerator) -> impl StateStore {
     let store =
@@ -80,6 +82,7 @@ pub struct ToyDomain {
     chain: Arc<RwLock<dolos_cardano::CardanoLogic>>,
     state: dolos_redb3::state::StateStore,
     archive: dolos_redb3::archive::ArchiveStore,
+    indexes: dolos_redb3::indexes::IndexStore,
     mempool: Mempool,
     storage_config: StorageConfig,
     genesis: Arc<dolos_core::Genesis>,
@@ -88,10 +91,7 @@ pub struct ToyDomain {
 
 impl ToyDomain {
     /// Create a new MockDomain with the provided state implementation
-    pub async fn new(
-        initial_delta: Option<UtxoSetDelta>,
-        storage_config: Option<StorageConfig>,
-    ) -> Self {
+    pub fn new(initial_delta: Option<UtxoSetDelta>, storage_config: Option<StorageConfig>) -> Self {
         let state = dolos_redb3::state::StateStore::in_memory(dolos_cardano::model::build_schema())
             .unwrap();
 
@@ -102,33 +102,61 @@ impl ToyDomain {
             dolos_redb3::archive::ArchiveStore::in_memory(dolos_cardano::model::build_schema())
                 .unwrap();
 
+        let indexes = dolos_redb3::indexes::IndexStore::in_memory().unwrap();
+
         let config = CardanoConfig::default();
 
-        let mut chain =
+        let chain =
             dolos_cardano::CardanoLogic::initialize::<Self>(config.clone(), &state, &genesis)
                 .unwrap();
 
-        chain
-            .apply_genesis::<Self>(&state, genesis.clone())
-            .unwrap();
-
+        // Create the domain first (genesis work unit needs it for execution)
         let domain = Self {
             state,
             wal: dolos_redb3::wal::RedbWalStore::memory().unwrap(),
             chain: Arc::new(RwLock::new(chain)),
             archive,
+            indexes,
             mempool: Mempool {},
             storage_config: storage_config.unwrap_or_default(),
-            genesis,
+            genesis: genesis.clone(),
             tip_broadcast,
         };
 
-        dolos_core::facade::bootstrap(&domain).await.unwrap();
+        // Apply genesis state using the work unit pattern.
+        // Note: We're bypassing the normal pop_work flow here, so we need to
+        // manually trigger the cache refresh that would normally happen.
+        let mut genesis_work = dolos_cardano::CardanoWorkUnit::Genesis(
+            dolos_cardano::genesis::GenesisWorkUnit::new(config, genesis),
+        );
+        execute_work_unit(&domain, &mut genesis_work).unwrap();
+
+        // Manually refresh the chain cache after genesis since we bypassed pop_work.
+        // In normal operation, the cache refresh happens automatically via the
+        // needs_cache_refresh flag in CardanoLogic::pop_work.
+        {
+            let mut chain = domain.chain.write().expect("chain lock poisoned");
+            chain.refresh_cache::<Self>(&domain.state).unwrap();
+        }
+
+        domain.bootstrap().unwrap();
 
         if let Some(delta) = initial_delta {
             let writer = domain.state.start_writer().unwrap();
+            let index_writer = domain.indexes.start_writer().unwrap();
             writer.apply_utxoset(&delta).unwrap();
+
+            // Build index delta from UTxO delta using Cardano-specific helper
+            let cursor = domain
+                .state
+                .read_cursor()
+                .unwrap()
+                .unwrap_or(ChainPoint::Origin);
+            let index_delta = index_delta_from_utxo_delta(cursor, &delta);
+            index_writer.apply(&index_delta).unwrap();
+
             writer.commit().unwrap();
+            index_writer.commit().unwrap();
         }
 
         domain
@@ -159,7 +187,9 @@ impl dolos_core::Domain for ToyDomain {
     type Archive = dolos_redb3::archive::ArchiveStore;
     type State = dolos_redb3::state::StateStore;
     type Chain = dolos_cardano::CardanoLogic;
+    type WorkUnit = dolos_cardano::CardanoWorkUnit;
     type TipSubscription = TipSubscription;
+    type Indexes = dolos_redb3::indexes::IndexStore;
     type Mempool = Mempool;
 
     fn storage_config(&self) -> &StorageConfig {
@@ -170,12 +200,12 @@ impl dolos_core::Domain for ToyDomain {
         self.genesis.clone()
     }
 
-    async fn read_chain(&self) -> tokio::sync::RwLockReadGuard<'_, Self::Chain> {
-        self.chain.read().await
+    fn read_chain(&self) -> std::sync::RwLockReadGuard<'_, Self::Chain> {
+        self.chain.read().expect("chain lock poisoned")
     }
 
-    async fn write_chain(&self) -> tokio::sync::RwLockWriteGuard<'_, Self::Chain> {
-        self.chain.write().await
+    fn write_chain(&self) -> std::sync::RwLockWriteGuard<'_, Self::Chain> {
+        self.chain.write().expect("chain lock poisoned")
     }
 
     fn wal(&self) -> &Self::Wal {
@@ -188,6 +218,10 @@ impl dolos_core::Domain for ToyDomain {
 
     fn archive(&self) -> &Self::Archive {
         &self.archive
+    }
+
+    fn indexes(&self) -> &Self::Indexes {
+        &self.indexes
     }
 
     fn mempool(&self) -> &Self::Mempool {
@@ -225,6 +259,13 @@ impl pallas::interop::utxorpc::LedgerContext for ToyDomain {
     }
 
     fn get_slot_timestamp(&self, _slot: u64) -> Option<u64> {
+        None
+    }
+
+    fn get_historical_utxos(
+        &self,
+        _refs: &[pallas::interop::utxorpc::TxoRef],
+    ) -> Option<pallas::interop::utxorpc::UtxoMap> {
         None
     }
 }

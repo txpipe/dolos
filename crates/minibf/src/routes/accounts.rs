@@ -14,13 +14,17 @@ use blockfrost_openapi::models::{
     address_utxo_content_inner::AddressUtxoContentInner,
 };
 
-use dolos_cardano::{model::AccountState, pallas_extras, ChainSummary, RewardLog};
-use dolos_core::{ArchiveStore, Domain, EntityKey, StateStore};
+use dolos_cardano::{
+    indexes::{AsyncCardanoQueryExt, CardanoIndexExt},
+    model::AccountState,
+    pallas_extras, ChainSummary, RewardLog,
+};
+use dolos_core::{ArchiveStore as _, Domain, EntityKey};
 use pallas::{
     codec::minicbor,
     crypto::hash::Hash,
     ledger::{
-        addresses::{Address, Network, StakeAddress, StakePayload},
+        addresses::{Address, Network, StakeAddress},
         primitives::Epoch,
         traverse::{MultiEraBlock, MultiEraCert, MultiEraTx},
     },
@@ -106,7 +110,7 @@ impl<'a> IntoModel<AccountContent> for AccountModelBuilder<'a> {
             .map(bech32_drep)
             .transpose()?;
 
-        let active = self.account_state.is_registered();
+        let active = pool_id.is_some();
 
         let stake = self.account_state.stake.live().cloned().unwrap_or_default();
 
@@ -147,6 +151,7 @@ pub async fn by_stake<D: Domain>(
 ) -> Result<Json<AccountContent>, StatusCode>
 where
     Option<AccountState>: From<D::Entity>,
+    D: Clone + Send + Sync + 'static,
 {
     let account_key = parse_account_key_param(&stake_address)?;
 
@@ -184,25 +189,29 @@ pub async fn by_stake_addresses<D: Domain>(
 ) -> Result<Json<Vec<AccountAddressesContentInner>>, Error>
 where
     Option<AccountState>: From<D::Entity>,
+    D: Clone + Send + Sync + 'static,
 {
     let pagination = Pagination::try_from(params)?;
+    pagination.enforce_max_scan_limit()?;
     let account_key = parse_account_key_param(&stake_address)?;
+    let end_slot = domain.get_tip_slot()?;
 
-    let mut blocks = domain
-        .archive()
-        .iter_blocks_with_stake(&account_key.address.to_vec())
+    let blocks = domain
+        .query()
+        .blocks_by_stake(&account_key.address.to_vec(), 0, end_slot)
+        .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let mut items = vec![];
     let mut skipped = 0;
     let mut seen = BTreeSet::new();
 
-    while items.len() < pagination.count {
-        let Some(block) = blocks.next() else {
+    for (_slot, block) in blocks {
+        if items.len() >= pagination.count {
             break;
-        };
-        let Ok((_, Some(block))) = block else {
-            return Err(StatusCode::INTERNAL_SERVER_ERROR.into());
+        }
+        let Some(block) = block else {
+            continue;
         };
 
         let block = MultiEraBlock::decode(&block).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -238,22 +247,20 @@ pub async fn by_stake_utxos<D: Domain>(
     Path(address): Path<String>,
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<Vec<AddressUtxoContentInner>>, Error> {
+) -> Result<Json<Vec<AddressUtxoContentInner>>, Error>
+where
+    D: Clone + Send + Sync + 'static,
+{
     let pagination = Pagination::try_from(params)?;
 
     let account_key = parse_account_key_param(&address)?;
 
-    let payload = match account_key.address.payload() {
-        StakePayload::Stake(payload) => payload.as_slice(),
-        StakePayload::Script(payload) => payload.as_slice(),
-    };
-
     let refs = domain
-        .state()
-        .get_utxo_by_stake(payload)
+        .indexes()
+        .utxos_by_stake(&account_key.address.to_vec())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let utxos = super::utxos::load_utxo_models(&domain, refs, pagination)?;
+    let utxos = super::utxos::load_utxo_models(&domain, refs, pagination).await?;
 
     Ok(Json(utxos))
 }
@@ -449,6 +456,7 @@ where
         Epoch,
         Network,
     ) -> Result<Option<T>, StatusCode>,
+    D: Clone + Send + Sync + 'static,
 {
     let account_key = parse_account_key_param(stake_address)?;
 
@@ -466,19 +474,21 @@ where
         pagination.count,
         pagination.page as usize,
     );
+    let end_slot = domain.get_tip_slot()?;
 
-    let mut blocks = domain
-        .archive()
-        .iter_blocks_with_account_certs(&account_key.entity_key)
+    let blocks = domain
+        .query()
+        .blocks_by_account_certs(&account_key.entity_key, 0, end_slot)
+        .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    while builder.needs_more() {
-        let Some(block) = blocks.next() else {
+    for (slot, block) in blocks {
+        if !builder.needs_more() {
             break;
-        };
+        }
 
-        let Ok((slot, Some(block))) = block else {
-            return Err(StatusCode::INTERNAL_SERVER_ERROR.into());
+        let Some(block) = block else {
+            continue;
         };
 
         let (epoch, _) = chain.slot_epoch(slot);
@@ -498,8 +508,10 @@ pub async fn by_stake_delegations<D: Domain>(
 ) -> Result<Json<Vec<AccountDelegationContentInner>>, Error>
 where
     Option<AccountState>: From<D::Entity>,
+    D: Clone + Send + Sync + 'static,
 {
     let pagination = Pagination::try_from(params)?;
+    pagination.enforce_max_scan_limit()?;
 
     let items = by_stake_actions::<D, _, AccountDelegationContentInner>(
         &stake_address,
@@ -519,8 +531,10 @@ pub async fn by_stake_registrations<D: Domain>(
 ) -> Result<Json<Vec<AccountRegistrationContentInner>>, Error>
 where
     Option<AccountState>: From<D::Entity>,
+    D: Clone + Send + Sync + 'static,
 {
     let pagination = Pagination::try_from(params)?;
+    pagination.enforce_max_scan_limit()?;
 
     let items = by_stake_actions::<D, _, AccountRegistrationContentInner>(
         &stake_address,
@@ -540,6 +554,7 @@ pub async fn by_stake_rewards<D: Domain>(
 ) -> Result<Json<Vec<AccountRewardContentInner>>, Error>
 where
     Option<AccountState>: From<D::Entity>,
+    D: Clone + Send + Sync + 'static,
 {
     let pagination = Pagination::try_from(params)?;
     let account_key = parse_account_key_param(&stake_address)?;
