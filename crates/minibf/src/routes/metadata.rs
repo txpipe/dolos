@@ -7,7 +7,7 @@ use blockfrost_openapi::models::{
     tx_metadata_label_cbor_inner::TxMetadataLabelCborInner,
     tx_metadata_label_json_inner::TxMetadataLabelJsonInner,
 };
-use dolos_cardano::indexes::CardanoQueryExt;
+use dolos_cardano::indexes::AsyncCardanoQueryExt;
 use dolos_core::Domain;
 use pallas::{
     codec::minicbor,
@@ -125,25 +125,28 @@ async fn by_label<D: Domain>(
     label: &str,
     pagination: PaginationParameters,
     domain: &Facade<D>,
-) -> Result<MetadataHistoryModelBuilder, Error> {
+) -> Result<MetadataHistoryModelBuilder, Error>
+where
+    D: Clone + Send + Sync + 'static,
+{
     let label: u64 = label.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
     let pagination = Pagination::try_from(pagination)?;
     pagination.enforce_max_scan_limit()?;
     let end_slot = domain.get_tip_slot()?;
 
-    let mut blocks = domain
-        .inner
+    let blocks = domain
+        .query()
         .blocks_by_metadata(label, 0, end_slot)
+        .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let mut builder =
         MetadataHistoryModelBuilder::new(label, pagination.count, pagination.page as usize);
 
-    while builder.needs_more() {
-        let Some(next) = blocks.next() else {
+    for (_slot, maybe) in blocks {
+        if !builder.needs_more() {
             break;
-        };
-        let (_, maybe) = next.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        }
         if let Some(cbor) = maybe {
             builder.scan_block(&cbor)?;
         }
@@ -156,7 +159,10 @@ pub async fn by_label_json<D: Domain>(
     Path(label): Path<String>,
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<Vec<TxMetadataLabelJsonInner>>, Error> {
+) -> Result<Json<Vec<TxMetadataLabelJsonInner>>, Error>
+where
+    D: Clone + Send + Sync + 'static,
+{
     let builder = by_label(&label, params, &domain).await?;
 
     Ok(builder.into_model().map(Json)?)
@@ -166,7 +172,10 @@ pub async fn by_label_cbor<D: Domain>(
     Path(label): Path<String>,
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<Vec<TxMetadataLabelCborInner>>, Error> {
+) -> Result<Json<Vec<TxMetadataLabelCborInner>>, Error>
+where
+    D: Clone + Send + Sync + 'static,
+{
     let builder = by_label(&label, params, &domain).await?;
 
     Ok(builder.into_model().map(Json)?)

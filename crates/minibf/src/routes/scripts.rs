@@ -3,7 +3,7 @@ use axum::{
     Json,
 };
 use blockfrost_openapi::models::script_datum::ScriptDatum;
-use dolos_cardano::indexes::CardanoQueryExt;
+use dolos_cardano::indexes::AsyncCardanoQueryExt;
 use dolos_core::Domain;
 use pallas::crypto::hash::Hash;
 use reqwest::StatusCode;
@@ -17,7 +17,10 @@ use crate::{
 pub async fn by_datum_hash<D: Domain>(
     Path(datum_hash): Path<String>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<ScriptDatum>, Error> {
+) -> Result<Json<ScriptDatum>, Error>
+where
+    D: Clone + Send + Sync + 'static,
+{
     if datum_hash.len() != 64 {
         // Oficial blockfrost returns this instead of bad request.
         return Err(StatusCode::NOT_FOUND.into());
@@ -29,8 +32,9 @@ pub async fn by_datum_hash<D: Domain>(
     );
 
     let datum = domain
-        .inner
+        .query()
         .plutus_data(&datum_hash)
+        .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 

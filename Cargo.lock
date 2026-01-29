@@ -1220,6 +1220,7 @@ dependencies = [
 name = "dolos-cardano"
 version = "1.0.0-rc.6"
 dependencies = [
+ "async-trait",
  "chrono",
  "dolos-core",
  "hex",

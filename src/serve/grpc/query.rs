@@ -9,6 +9,7 @@ use tracing::{info, warn};
 
 use super::masking::apply_mask;
 use crate::prelude::*;
+use dolos_cardano::indexes::AsyncCardanoQueryExt;
 
 pub fn point_to_u5c<T: LedgerContext>(_ledger: &T, point: &ChainPoint) -> u5c::query::ChainPoint {
     u5c::query::ChainPoint {
@@ -202,21 +203,22 @@ fn from_u5c_txoref(txo: u5c::query::TxoRef) -> Result<TxoRef, Status> {
     Ok(TxoRef(hash, txo.index))
 }
 
-fn into_u5c_utxo<S: Domain + LedgerContext>(
+async fn into_u5c_utxo<S: Domain + LedgerContext>(
     txo: &TxoRef,
     body: &EraCbor,
     mapper: &interop::Mapper<S>,
     domain: &S,
 ) -> Result<u5c::query::AnyUtxoData, Box<dyn std::error::Error>> {
-    use dolos_cardano::indexes::CardanoQueryExt as _;
     use pallas::ledger::primitives::conway::DatumOption;
+
+    let query = dolos_core::AsyncQueryFacade::new(domain.clone());
 
     let parsed_output = MultiEraOutput::try_from(body)?;
     let mut parsed = mapper.map_tx_output(&parsed_output, None);
 
     // If the output has a datum hash, try to fetch the datum value from storage
     if let Some(DatumOption::Hash(datum_hash)) = parsed_output.datum() {
-        match domain.get_datum(&datum_hash) {
+        match query.get_datum(&datum_hash).await {
             Ok(Some(datum_bytes)) => {
                 // Decode the datum and update the parsed output
                 match pallas::codec::minicbor::decode::<
@@ -339,11 +341,14 @@ where
         let utxos = StateStore::get_utxos(self.domain.state(), keys)
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        let items: Vec<_> = utxos
-            .iter()
-            .map(|(k, v)| into_u5c_utxo(k, v, &self.mapper, &self.domain))
-            .try_collect()
-            .map_err(|e| Status::internal(e.to_string()))?;
+        let mut items = Vec::new();
+        for (k, v) in utxos.iter() {
+            items.push(
+                into_u5c_utxo(k, v, &self.mapper, &self.domain)
+                    .await
+                    .map_err(|e| Status::internal(e.to_string()))?,
+            );
+        }
 
         let cursor = self
             .domain
@@ -386,11 +391,14 @@ where
         let utxos = StateStore::get_utxos(self.domain.state(), set.into_iter().collect_vec())
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        let items: Vec<_> = utxos
-            .iter()
-            .map(|(k, v)| into_u5c_utxo(k, v, &self.mapper, &self.domain))
-            .try_collect()
-            .map_err(|e| Status::internal(e.to_string()))?;
+        let mut items = Vec::new();
+        for (k, v) in utxos.iter() {
+            items.push(
+                into_u5c_utxo(k, v, &self.mapper, &self.domain)
+                    .await
+                    .map_err(|e| Status::internal(e.to_string()))?,
+            );
+        }
 
         let cursor = self
             .domain
@@ -417,9 +425,10 @@ where
 
         let tx_hash = message.hash;
 
-        let (block_bytes, tx_index) = self
-            .domain
-            .block_by_tx_hash(&tx_hash)
+        let query = dolos_core::AsyncQueryFacade::new(self.domain.clone());
+        let (block_bytes, tx_index) = query
+            .block_by_tx_hash(tx_hash.to_vec())
+            .await
             .map_err(|e| Status::internal(e.to_string()))?
             .ok_or_else(|| Status::not_found("tx hash not found"))?;
 
