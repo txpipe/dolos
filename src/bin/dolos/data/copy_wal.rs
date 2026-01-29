@@ -1,4 +1,4 @@
-use dolos_core::config::RootConfig;
+use dolos_core::config::{RedbWalConfig, RootConfig};
 use itertools::Itertools;
 use miette::{Context, IntoDiagnostic};
 use std::path::PathBuf;
@@ -25,7 +25,7 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
 
     let source = crate::common::open_wal_store(config)?;
 
-    let target = dolos_redb3::wal::RedbWalStore::open(&args.output, None)
+    let target = dolos_redb3::wal::RedbWalStore::open(&args.output, &RedbWalConfig::default())
         .into_diagnostic()
         .context("opening target WAL")?;
 

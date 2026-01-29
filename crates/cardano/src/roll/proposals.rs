@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use dolos_core::{batch::WorkDeltas, BlockSlot, ChainError, Genesis, NsKey};
+use dolos_core::{BlockSlot, ChainError, Genesis, NsKey};
 use pallas::{
     codec::utils::Bytes,
     crypto::hash::Hash,
@@ -14,12 +14,13 @@ use pallas::{
 };
 use serde::{Deserialize, Serialize};
 
+use super::WorkDeltas;
 use crate::{
     hacks::{self, proposals::ProposalOutcome},
     model::FixedNamespace as _,
     pallas_extras,
     roll::BlockVisitor,
-    CardanoLogic, Lovelace, PParamValue, PParamsSet, ProposalAction, ProposalState,
+    Lovelace, PParamValue, PParamsSet, ProposalAction, ProposalState,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -325,7 +326,7 @@ pub struct ProposalVisitor {
 impl BlockVisitor for ProposalVisitor {
     fn visit_root(
         &mut self,
-        _: &mut WorkDeltas<CardanoLogic>,
+        _: &mut WorkDeltas,
         _: &MultiEraBlock,
         genesis: &Genesis,
         pparams: &PParamsSet,
@@ -342,7 +343,7 @@ impl BlockVisitor for ProposalVisitor {
 
     fn visit_update(
         &mut self,
-        deltas: &mut WorkDeltas<CardanoLogic>,
+        deltas: &mut WorkDeltas,
         block: &MultiEraBlock,
         tx: Option<&MultiEraTx>,
         update: &MultiEraUpdate,
@@ -367,7 +368,7 @@ impl BlockVisitor for ProposalVisitor {
 
     fn visit_proposal(
         &mut self,
-        deltas: &mut WorkDeltas<CardanoLogic>,
+        deltas: &mut WorkDeltas,
         block: &MultiEraBlock,
         tx: &MultiEraTx,
         proposal: &pallas::ledger::traverse::MultiEraProposal,

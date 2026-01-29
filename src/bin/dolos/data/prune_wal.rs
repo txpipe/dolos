@@ -22,7 +22,7 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
 
     let max_slots = match args.max_slots {
         Some(x) => x,
-        None => match config.storage.max_wal_history {
+        None => match config.storage.wal.max_history() {
             Some(x) => x,
             None => bail!("neither args or config provided for max_slots"),
         },

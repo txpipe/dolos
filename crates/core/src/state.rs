@@ -3,7 +3,7 @@ use std::{collections::HashMap, marker::PhantomData, ops::Range};
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 
-use crate::{ChainError, ChainPoint, Domain, TxoRef, UtxoMap, UtxoSet, UtxoSetDelta};
+use crate::{ChainError, ChainPoint, Domain, TxoRef, UtxoMap, UtxoSetDelta};
 
 pub const KEY_SIZE: usize = 32;
 
@@ -397,16 +397,6 @@ pub trait StateStore: Sized + Send + Sync + Clone {
     // TODO: generalize UTxO Set into generic entity system
 
     fn get_utxos(&self, refs: Vec<TxoRef>) -> Result<UtxoMap, StateError>;
-
-    fn get_utxo_by_address(&self, address: &[u8]) -> Result<UtxoSet, StateError>;
-
-    fn get_utxo_by_payment(&self, payment: &[u8]) -> Result<UtxoSet, StateError>;
-
-    fn get_utxo_by_stake(&self, stake: &[u8]) -> Result<UtxoSet, StateError>;
-
-    fn get_utxo_by_policy(&self, policy: &[u8]) -> Result<UtxoSet, StateError>;
-
-    fn get_utxo_by_asset(&self, asset: &[u8]) -> Result<UtxoSet, StateError>;
 }
 
 pub fn load_entity_chunk<D: Domain>(

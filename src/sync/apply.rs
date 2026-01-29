@@ -1,3 +1,4 @@
+use dolos_core::SyncExt;
 use gasket::{framework::*, messaging::Message};
 use tracing::debug;
 
@@ -49,12 +50,10 @@ impl Stage {
         }
     }
 
-    async fn on_roll_forward(&self, block: RawBlock) -> Result<(), WorkerError> {
+    fn on_roll_forward(&self, block: RawBlock) -> Result<(), WorkerError> {
         debug!("handling roll forward");
 
-        dolos_core::facade::roll_forward(&self.domain, block)
-            .await
-            .or_panic()?;
+        self.domain.roll_forward(block).or_panic()?;
 
         Ok(())
     }
@@ -96,7 +95,7 @@ impl gasket::framework::Worker<Stage> for Worker {
     async fn execute(&mut self, unit: &WorkUnit, stage: &mut Stage) -> Result<(), WorkerError> {
         match unit {
             WorkUnit::PullEvent(evt) => match evt {
-                PullEvent::RollForward(x) => stage.on_roll_forward(x.clone()).await?,
+                PullEvent::RollForward(x) => stage.on_roll_forward(x.clone())?,
                 PullEvent::Rollback(x) => stage.on_rollback(x)?,
             },
             WorkUnit::Housekeeping => {

@@ -40,19 +40,22 @@ fn raw_to_blockref<C: LedgerContext>(
     mapper: &Mapper<C>,
     body: &BlockBody,
 ) -> Option<u5c::sync::BlockRef> {
-    let u5c::cardano::Block { header, .. } = mapper.map_block_cbor(body);
+    let block = mapper.map_block_cbor(body);
+    let header = block.header?;
 
-    header.map(|h| u5c::sync::BlockRef {
-        slot: h.slot,
-        hash: h.hash,
-        height: h.height,
+    Some(u5c::sync::BlockRef {
+        slot: header.slot,
+        hash: header.hash,
+        height: header.height,
+        timestamp: block.timestamp,
     })
 }
 
-fn point_to_blockref(point: &ChainPoint) -> u5c::sync::BlockRef {
+fn point_to_blockref(point: &ChainPoint, timestamp: u64) -> u5c::sync::BlockRef {
     BlockRef {
         hash: point.hash().map(|h| h.to_vec()).unwrap_or_default().into(),
         slot: point.slot(),
+        timestamp,
         ..Default::default()
     }
 }
@@ -61,17 +64,27 @@ fn tip_event_to_response<C: LedgerContext>(
     mapper: &Mapper<C>,
     event: &TipEvent,
 ) -> u5c::sync::FollowTipResponse {
-    u5c::sync::FollowTipResponse {
-        action: match event {
-            TipEvent::Apply(_, block) => {
-                u5c::sync::follow_tip_response::Action::Apply(raw_to_anychain(mapper, block)).into()
+    match event {
+        TipEvent::Apply(_, block) => {
+            let block_ref = raw_to_blockref(mapper, block);
+            u5c::sync::FollowTipResponse {
+                action: Some(u5c::sync::follow_tip_response::Action::Apply(
+                    raw_to_anychain(mapper, block),
+                )),
+                tip: block_ref,
             }
-            TipEvent::Undo(_, block) => {
-                u5c::sync::follow_tip_response::Action::Undo(raw_to_anychain(mapper, block)).into()
-            }
-            TipEvent::Mark(x) => {
-                u5c::sync::follow_tip_response::Action::Reset(point_to_blockref(x)).into()
-            }
+        }
+        TipEvent::Undo(_, block) => u5c::sync::FollowTipResponse {
+            action: Some(u5c::sync::follow_tip_response::Action::Undo(
+                raw_to_anychain(mapper, block),
+            )),
+            tip: None, // TODO: we don't have easy access to the new tip here
+        },
+        TipEvent::Mark(x) => u5c::sync::FollowTipResponse {
+            action: Some(u5c::sync::follow_tip_response::Action::Reset(
+                point_to_blockref(x, 0), // TODO: we don't have the timestamp here
+            )),
+            tip: Some(point_to_blockref(x, 0)),
         },
     }
 }
@@ -117,18 +130,39 @@ where
     ) -> Result<Response<u5c::sync::FetchBlockResponse>, Status> {
         let message = request.into_inner();
 
-        let out: Vec<_> = message
-            .r#ref
-            .iter()
-            .map(|br| {
-                self.domain
-                    .archive()
-                    .get_block_by_slot(&br.slot)
-                    .map_err(|_| Status::internal("Failed to query chain service."))?
-                    .map(|body| raw_to_anychain(&self.mapper, &body))
-                    .ok_or(Status::not_found(format!("Failed to find block: {br:?}")))
-            })
-            .collect::<Result<Vec<u5c::sync::AnyChainBlock>, Status>>()?;
+        let query = dolos_core::AsyncQueryFacade::new(self.domain.clone());
+
+        let mut out = Vec::new();
+        for br in message.r#ref.iter() {
+            let mut body: Option<BlockBody> = None;
+
+            if !br.hash.is_empty() {
+                body = query
+                    .block_by_hash(br.hash.to_vec())
+                    .await
+                    .map_err(|_| Status::internal("Failed to query chain service."))?;
+            }
+
+            if body.is_none() && br.height != 0 {
+                body = query
+                    .block_by_number(br.height)
+                    .await
+                    .map_err(|_| Status::internal("Failed to query chain service."))?;
+            }
+
+            if body.is_none() && br.slot != 0 {
+                body = query
+                    .block_by_slot(br.slot)
+                    .await
+                    .map_err(|_| Status::internal("Failed to query chain service."))?;
+            }
+
+            let Some(body) = body else {
+                return Err(Status::not_found(format!("Failed to find block: {br:?}")));
+            };
+
+            out.push(raw_to_anychain(&self.mapper, &body));
+        }
 
         let response = u5c::sync::FetchBlockResponse { block: out };
 
@@ -217,10 +251,9 @@ where
             .map_err(|e| Status::internal(format!("Unable to read WAL: {e:?}")))?
             .ok_or(Status::internal("chain has no data."))?;
 
+        let timestamp = self.domain.get_slot_timestamp(point.slot()).unwrap_or(0);
         let response = u5c::sync::ReadTipResponse {
-            tip: Some(point_to_blockref(&point)),
-            // TODO: impl
-            timestamp: 0,
+            tip: Some(point_to_blockref(&point, timestamp)),
         };
 
         Ok(Response::new(response))
@@ -236,16 +269,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_dump_history_pagination() {
-        let domain = ToyDomain::new(None, None).await;
+        let domain = ToyDomain::new(None, None);
         let cancel = CancelTokenImpl::default();
 
         let batch = (0..34)
             .map(|i| dolos_testing::blocks::make_conway_block(i).1)
             .collect_vec();
 
-        let _ = dolos_core::facade::import_blocks(&domain, batch)
-            .await
-            .unwrap();
+        use dolos_core::ImportExt;
+        domain.import_blocks(batch).unwrap();
 
         let service = SyncServiceImpl::new(domain, cancel);
 
@@ -287,7 +319,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_dump_history_max_items() {
-        let domain = ToyDomain::new(None, None).await;
+        let domain = ToyDomain::new(None, None);
         let cancel = CancelTokenImpl::default();
 
         let service = SyncServiceImpl::new(domain, cancel);

@@ -1,15 +1,16 @@
 use std::ops::Deref as _;
 
-use dolos_core::{batch::WorkDeltas, BlockSlot, ChainError, NsKey};
+use dolos_core::{BlockSlot, ChainError, NsKey};
 use pallas::ledger::{
     primitives::conway::{self, Anchor, DRep},
     traverse::{MultiEraBlock, MultiEraCert, MultiEraTx},
 };
 use serde::{Deserialize, Serialize};
 
+use super::WorkDeltas;
 use crate::{
     drep_to_entity_key, model::DRepState, pallas_extras::stake_cred_to_drep, roll::BlockVisitor,
-    CardanoLogic, FixedNamespace as _,
+    FixedNamespace as _,
 };
 
 fn cert_drep(cert: &MultiEraCert) -> Option<DRep> {
@@ -176,7 +177,7 @@ pub struct DRepStateVisitor;
 impl BlockVisitor for DRepStateVisitor {
     fn visit_cert(
         &mut self,
-        deltas: &mut WorkDeltas<CardanoLogic>,
+        deltas: &mut WorkDeltas,
         block: &MultiEraBlock,
         _: &MultiEraTx,
         cert: &MultiEraCert,

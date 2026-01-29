@@ -1,21 +1,22 @@
 use std::sync::Arc;
 
-use dolos_core::{
-    batch::WorkDeltas, config::CardanoConfig, BlockSlot, ChainError, Domain, EntityKey, Genesis,
-};
-use tracing::{debug, info, instrument};
+use dolos_core::{config::CardanoConfig, BlockSlot, ChainError, Domain, EntityKey, Genesis};
+use tracing::{debug, instrument};
 
 use crate::{
-    AccountState, CardanoDelta, CardanoEntity, CardanoLogic, DRepState, EpochState, EraProtocol,
-    EraSummary, PoolState, ProposalState,
+    eras::ChainSummary, roll::WorkDeltas, AccountState, CardanoDelta, CardanoEntity, DRepState,
+    EpochState, EraProtocol, PoolState, ProposalState,
 };
 
 pub mod commit;
 pub mod loading;
+pub mod work_unit;
 
 // visitors
 pub mod nonces;
 pub mod reset;
+
+pub use work_unit::EstartWorkUnit;
 
 pub trait BoundaryVisitor {
     #[allow(unused_variables)]
@@ -74,11 +75,11 @@ pub struct WorkContext {
     ended_state: EpochState,
 
     pub active_protocol: EraProtocol,
-    pub active_era: EraSummary,
+    pub chain_summary: ChainSummary,
     pub genesis: Arc<Genesis>,
 
     // computed via visitors
-    pub deltas: WorkDeltas<CardanoLogic>,
+    pub deltas: WorkDeltas,
     pub logs: Vec<(EntityKey, CardanoEntity)>,
 }
 
@@ -104,7 +105,7 @@ pub fn execute<D: Domain>(
     _config: &CardanoConfig,
     genesis: Arc<Genesis>,
 ) -> Result<(), ChainError> {
-    info!("executing ESTART work unit");
+    debug!("executing ESTART work unit");
 
     let mut work = WorkContext::load::<D>(state, genesis)?;
 

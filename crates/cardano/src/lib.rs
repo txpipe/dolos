@@ -9,15 +9,14 @@ use tracing::info;
 pub use pallas;
 
 use dolos_core::{
-    batch::{WorkBatch, WorkBlock},
-    config::CardanoConfig,
-    Block as _, *,
+    config::CardanoConfig, Block as _, BlockSlot, ChainError, ChainPoint, Domain, DomainError,
+    EntityKey, EraCbor, Genesis, MempoolAwareUtxoStore, MempoolTx, RawBlock, StateStore, TipEvent,
+    WorkUnit,
 };
 
 use crate::{
     owned::{OwnedMultiEraBlock, OwnedMultiEraOutput},
-    rewards::RewardMap,
-    rupd::RupdWork,
+    roll::{WorkBatch, WorkBlock},
 };
 
 // staging zone
@@ -28,6 +27,7 @@ pub mod pallas_extras;
 pub mod eras;
 pub mod forks;
 pub mod hacks;
+pub mod indexes;
 pub mod model;
 pub mod owned;
 pub mod pots;
@@ -55,14 +55,144 @@ pub type Block<'a> = MultiEraBlock<'a>;
 
 pub type UtxoBody<'a> = MultiEraOutput<'a>;
 
+/// Cardano-specific work unit variants.
+///
+/// This enum represents all possible work units that can be produced
+/// by the Cardano chain logic. Each variant wraps a concrete work unit
+/// implementation.
+pub enum CardanoWorkUnit {
+    /// Bootstrap chain from genesis configuration.
+    Genesis(genesis::GenesisWorkUnit),
+    /// Process a batch of blocks (roll forward).
+    Roll(roll::RollWorkUnit),
+    /// Compute rewards at stability window boundary.
+    Rupd(rupd::RupdWorkUnit),
+    /// Handle epoch boundary wrap-up processing.
+    Ewrap(ewrap::EwrapWorkUnit),
+    /// Handle epoch start processing.
+    Estart(estart::EstartWorkUnit),
+    /// Signal forced stop at configured epoch.
+    ForcedStop,
+}
+
+impl<D> WorkUnit<D> for CardanoWorkUnit
+where
+    D: Domain<Chain = CardanoLogic, Entity = CardanoEntity, EntityDelta = CardanoDelta>,
+{
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Genesis(w) => <genesis::GenesisWorkUnit as WorkUnit<D>>::name(w),
+            Self::Roll(w) => <roll::RollWorkUnit as WorkUnit<D>>::name(w),
+            Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::name(w),
+            Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::name(w),
+            Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::name(w),
+            Self::ForcedStop => "forced_stop",
+        }
+    }
+
+    fn load(&mut self, domain: &D) -> Result<(), DomainError> {
+        match self {
+            Self::Genesis(w) => <genesis::GenesisWorkUnit as WorkUnit<D>>::load(w, domain),
+            Self::Roll(w) => <roll::RollWorkUnit as WorkUnit<D>>::load(w, domain),
+            Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::load(w, domain),
+            Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::load(w, domain),
+            Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::load(w, domain),
+            Self::ForcedStop => Ok(()),
+        }
+    }
+
+    fn compute(&mut self) -> Result<(), DomainError> {
+        match self {
+            Self::Genesis(w) => <genesis::GenesisWorkUnit as WorkUnit<D>>::compute(w),
+            Self::Roll(w) => <roll::RollWorkUnit as WorkUnit<D>>::compute(w),
+            Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::compute(w),
+            Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::compute(w),
+            Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::compute(w),
+            Self::ForcedStop => Ok(()),
+        }
+    }
+
+    fn commit_wal(&mut self, domain: &D) -> Result<(), DomainError> {
+        match self {
+            Self::Genesis(w) => <genesis::GenesisWorkUnit as WorkUnit<D>>::commit_wal(w, domain),
+            Self::Roll(w) => <roll::RollWorkUnit as WorkUnit<D>>::commit_wal(w, domain),
+            Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::commit_wal(w, domain),
+            Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::commit_wal(w, domain),
+            Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::commit_wal(w, domain),
+            Self::ForcedStop => Ok(()),
+        }
+    }
+
+    fn commit_state(&mut self, domain: &D) -> Result<(), DomainError> {
+        match self {
+            Self::Genesis(w) => <genesis::GenesisWorkUnit as WorkUnit<D>>::commit_state(w, domain),
+            Self::Roll(w) => <roll::RollWorkUnit as WorkUnit<D>>::commit_state(w, domain),
+            Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::commit_state(w, domain),
+            Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::commit_state(w, domain),
+            Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::commit_state(w, domain),
+            Self::ForcedStop => Err(DomainError::StopEpochReached),
+        }
+    }
+
+    fn commit_archive(&mut self, domain: &D) -> Result<(), DomainError> {
+        match self {
+            Self::Genesis(w) => {
+                <genesis::GenesisWorkUnit as WorkUnit<D>>::commit_archive(w, domain)
+            }
+            Self::Roll(w) => <roll::RollWorkUnit as WorkUnit<D>>::commit_archive(w, domain),
+            Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::commit_archive(w, domain),
+            Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::commit_archive(w, domain),
+            Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::commit_archive(w, domain),
+            Self::ForcedStop => Ok(()),
+        }
+    }
+
+    fn commit_indexes(&mut self, domain: &D) -> Result<(), DomainError> {
+        match self {
+            Self::Genesis(w) => {
+                <genesis::GenesisWorkUnit as WorkUnit<D>>::commit_indexes(w, domain)
+            }
+            Self::Roll(w) => <roll::RollWorkUnit as WorkUnit<D>>::commit_indexes(w, domain),
+            Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::commit_indexes(w, domain),
+            Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::commit_indexes(w, domain),
+            Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::commit_indexes(w, domain),
+            Self::ForcedStop => Ok(()),
+        }
+    }
+
+    fn tip_events(&self) -> Vec<TipEvent> {
+        match self {
+            Self::Genesis(w) => <genesis::GenesisWorkUnit as WorkUnit<D>>::tip_events(w),
+            Self::Roll(w) => <roll::RollWorkUnit as WorkUnit<D>>::tip_events(w),
+            Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::tip_events(w),
+            Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::tip_events(w),
+            Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::tip_events(w),
+            Self::ForcedStop => Vec::new(),
+        }
+    }
+}
+
+/// Internal work unit marker used by the WorkBuffer state machine.
+///
+/// These markers tell `CardanoLogic::pop_work` what kind of work unit to construct.
+/// The actual work unit instances are created in `pop_work` with the necessary context.
+enum InternalWorkUnit {
+    Genesis,
+    Blocks(WorkBatch),
+    EWrap(BlockSlot),
+    EStart(BlockSlot),
+    Rupd(BlockSlot),
+    ForcedStop,
+}
+
 enum WorkBuffer {
     Empty,
     Restart(ChainPoint),
     Genesis(OwnedMultiEraBlock),
-    OpenBatch(WorkBatch<CardanoLogic>),
-    PreRupdBoundary(WorkBatch<CardanoLogic>, OwnedMultiEraBlock),
+    OpenBatch(WorkBatch),
+    PreRupdBoundary(WorkBatch, OwnedMultiEraBlock),
     RupdBoundary(OwnedMultiEraBlock),
-    PreEwrapBoundary(WorkBatch<CardanoLogic>, OwnedMultiEraBlock, Epoch),
+    PreEwrapBoundary(WorkBatch, OwnedMultiEraBlock, Epoch),
     EwrapBoundary(OwnedMultiEraBlock, Epoch),
     EstartBoundary(OwnedMultiEraBlock, Epoch),
     PreForcedStop(OwnedMultiEraBlock),
@@ -176,37 +306,41 @@ impl WorkBuffer {
         self.extend_batch(block)
     }
 
-    fn pop_work(self, stop_epoch: Option<Epoch>) -> (Option<WorkUnit<CardanoLogic>>, Self) {
+    fn pop_work(self, stop_epoch: Option<Epoch>) -> (Option<InternalWorkUnit>, Self) {
         if matches!(self, WorkBuffer::Restart(..)) || matches!(self, WorkBuffer::Empty) {
             return (None, self);
         }
 
         match self {
             WorkBuffer::Genesis(block) => (
-                Some(WorkUnit::Genesis),
+                Some(InternalWorkUnit::Genesis),
                 Self::OpenBatch(WorkBatch::for_single_block(WorkBlock::new(block))),
             ),
             WorkBuffer::OpenBatch(batch) => {
                 let last_point = batch.last_point();
-                (Some(WorkUnit::Blocks(batch)), Self::Restart(last_point))
+                (
+                    Some(InternalWorkUnit::Blocks(batch)),
+                    Self::Restart(last_point),
+                )
             }
-            WorkBuffer::PreRupdBoundary(batch, block) => {
-                (Some(WorkUnit::Blocks(batch)), Self::RupdBoundary(block))
-            }
+            WorkBuffer::PreRupdBoundary(batch, block) => (
+                Some(InternalWorkUnit::Blocks(batch)),
+                Self::RupdBoundary(block),
+            ),
             WorkBuffer::RupdBoundary(block) => (
-                Some(WorkUnit::Rupd(block.slot())),
+                Some(InternalWorkUnit::Rupd(block.slot())),
                 Self::OpenBatch(WorkBatch::for_single_block(WorkBlock::new(block))),
             ),
             WorkBuffer::PreEwrapBoundary(batch, block, epoch) => (
-                Some(WorkUnit::Blocks(batch)),
+                Some(InternalWorkUnit::Blocks(batch)),
                 Self::EwrapBoundary(block, epoch),
             ),
             WorkBuffer::EwrapBoundary(block, epoch) => (
-                Some(WorkUnit::EWrap(block.slot())),
+                Some(InternalWorkUnit::EWrap(block.slot())),
                 Self::EstartBoundary(block, epoch + 1),
             ),
             WorkBuffer::EstartBoundary(block, epoch) => (
-                Some(WorkUnit::EStart(block.slot())),
+                Some(InternalWorkUnit::EStart(block.slot())),
                 if stop_epoch.is_some_and(|x| x == epoch) {
                     Self::PreForcedStop(block)
                 } else {
@@ -214,31 +348,35 @@ impl WorkBuffer {
                 },
             ),
             WorkBuffer::PreForcedStop(block) => (
-                Some(WorkUnit::Blocks(WorkBatch::for_single_block(
+                Some(InternalWorkUnit::Blocks(WorkBatch::for_single_block(
                     WorkBlock::new(block),
                 ))),
                 Self::ForcedStop,
             ),
-            WorkBuffer::ForcedStop => (Some(WorkUnit::ForcedStop), Self::ForcedStop),
+            WorkBuffer::ForcedStop => (Some(InternalWorkUnit::ForcedStop), Self::ForcedStop),
             _ => unreachable!(),
         }
     }
 }
 
-struct Cache {
-    eras: ChainSummary,
-    stability_window: u64,
-    rewards: Option<RewardMap<RupdWork>>,
+pub(crate) struct Cache {
+    pub eras: ChainSummary,
+    pub stability_window: u64,
 }
 
 pub struct CardanoLogic {
     config: CardanoConfig,
     work: Option<WorkBuffer>,
-    cache: Cache,
+    pub(crate) cache: Cache,
+    /// Flag indicating the cache needs refresh after a work unit that modifies eras.
+    /// Set after Genesis or EStart work units are popped, cleared at next pop_work call.
+    needs_cache_refresh: bool,
 }
 
 impl CardanoLogic {
-    fn refresh_cache<D: Domain>(&mut self, state: &D::State) -> Result<(), ChainError> {
+    /// Refresh the cached era summary from state.
+    /// Called after work units that may change era information (like genesis).
+    pub fn refresh_cache<D: Domain>(&mut self, state: &D::State) -> Result<(), ChainError> {
         self.cache.eras = eras::load_era_summary::<D>(state)?;
 
         Ok(())
@@ -251,6 +389,8 @@ impl dolos_core::ChainLogic for CardanoLogic {
     type Utxo = OwnedMultiEraOutput;
     type Delta = CardanoDelta;
     type Entity = CardanoEntity;
+    type WorkUnit<D: Domain<Chain = Self, Entity = Self::Entity, EntityDelta = Self::Delta>> =
+        CardanoWorkUnit;
 
     fn initialize<D: Domain>(
         config: Self::Config,
@@ -275,9 +415,9 @@ impl dolos_core::ChainLogic for CardanoLogic {
             cache: Cache {
                 eras,
                 stability_window,
-                rewards: None,
             },
             work: Some(work),
+            needs_cache_refresh: false,
         })
     }
 
@@ -304,70 +444,90 @@ impl dolos_core::ChainLogic for CardanoLogic {
         Ok(last)
     }
 
-    fn pop_work(&mut self) -> Option<WorkUnit<Self>> {
+    fn pop_work<D: Domain>(&mut self, domain: &D) -> Option<CardanoWorkUnit>
+    where
+        D: Domain<Chain = Self, Entity = CardanoEntity, EntityDelta = CardanoDelta>,
+    {
+        // Refresh cache if needed (after previous genesis or estart execution)
+        if self.needs_cache_refresh {
+            if let Err(e) = self.refresh_cache::<D>(domain.state()) {
+                tracing::error!(error = %e, "failed to refresh cache after era-modifying work unit");
+            }
+            self.needs_cache_refresh = false;
+        }
+
         let work = self.work.take().expect("work buffer is initialized");
 
         let (work_unit, new_buffer) = work.pop_work(self.config.stop_epoch);
 
         self.work = Some(new_buffer);
 
-        work_unit
-    }
+        let work_unit = work_unit?;
 
-    fn apply_genesis<D: Domain>(
-        &mut self,
-        state: &D::State,
-        genesis: Arc<Genesis>,
-    ) -> Result<(), ChainError> {
-        genesis::execute::<D>(state, &genesis, &self.config)?;
+        // Convert internal work unit marker to concrete CardanoWorkUnit
+        match work_unit {
+            InternalWorkUnit::Genesis => {
+                // Genesis modifies era summaries, schedule cache refresh
+                self.needs_cache_refresh = true;
+                Some(CardanoWorkUnit::Genesis(genesis::GenesisWorkUnit::new(
+                    self.config.clone(),
+                    domain.genesis(),
+                )))
+            }
+            InternalWorkUnit::Blocks(mut batch) => {
+                // Load and decode UTxOs before computing deltas
+                // This is done here because it needs access to domain and chain
+                if let Err(e) = batch.load_utxos(domain) {
+                    tracing::error!(error = %e, "failed to load UTxOs for roll batch");
+                    return None;
+                }
 
-        self.refresh_cache::<D>(state)?;
+                if let Err(e) = batch.decode_utxos(self) {
+                    tracing::error!(error = %e, "failed to decode UTxOs for roll batch");
+                    return None;
+                }
 
-        Ok(())
-    }
+                // Compute deltas using the visitor pattern
+                if let Err(e) = roll::compute_delta::<D>(
+                    &self.config,
+                    domain.genesis(),
+                    &self.cache,
+                    domain.state(),
+                    &mut batch,
+                ) {
+                    tracing::error!(error = %e, "failed to compute roll deltas");
+                    return None;
+                }
 
-    fn apply_ewrap<D: Domain>(
-        &mut self,
-        state: &D::State,
-        archive: &D::Archive,
-        genesis: Arc<Genesis>,
-        at: BlockSlot,
-    ) -> Result<(), ChainError> {
-        let rewards = self.cache.rewards.take().unwrap_or_default();
-
-        ewrap::execute::<D>(state, archive, at, &self.config, genesis, rewards)?;
-
-        self.refresh_cache::<D>(state)?;
-
-        Ok(())
-    }
-
-    fn apply_estart<D: Domain>(
-        &mut self,
-        state: &D::State,
-        archive: &D::Archive,
-        genesis: Arc<Genesis>,
-        at: BlockSlot,
-    ) -> Result<(), ChainError> {
-        estart::execute::<D>(state, archive, at, &self.config, genesis)?;
-
-        self.refresh_cache::<D>(state)?;
-
-        Ok(())
-    }
-
-    fn apply_rupd<D: Domain>(
-        &mut self,
-        state: &D::State,
-        archive: &D::Archive,
-        genesis: Arc<Genesis>,
-        at: BlockSlot,
-    ) -> Result<(), ChainError> {
-        let rewards = rupd::execute::<D>(state, archive, at, &genesis)?;
-
-        self.cache.rewards = Some(rewards);
-
-        Ok(())
+                Some(CardanoWorkUnit::Roll(roll::RollWorkUnit::new(
+                    batch,
+                    domain.genesis(),
+                    true, // live mode
+                )))
+            }
+            InternalWorkUnit::Rupd(slot) => Some(CardanoWorkUnit::Rupd(rupd::RupdWorkUnit::new(
+                slot,
+                domain.genesis(),
+            ))),
+            InternalWorkUnit::EWrap(slot) => {
+                // Rewards are loaded from state store during EWRAP load phase
+                Some(CardanoWorkUnit::Ewrap(ewrap::EwrapWorkUnit::new(
+                    slot,
+                    self.config.clone(),
+                    domain.genesis(),
+                )))
+            }
+            InternalWorkUnit::EStart(slot) => {
+                // EStart may trigger era transitions, schedule cache refresh
+                self.needs_cache_refresh = true;
+                Some(CardanoWorkUnit::Estart(estart::EstartWorkUnit::new(
+                    slot,
+                    self.config.clone(),
+                    domain.genesis(),
+                )))
+            }
+            InternalWorkUnit::ForcedStop => Some(CardanoWorkUnit::ForcedStop),
+        }
     }
 
     fn decode_utxo(&self, utxo: Arc<EraCbor>) -> Result<Self::Utxo, ChainError> {
@@ -378,17 +538,6 @@ impl dolos_core::ChainLogic for CardanoLogic {
 
     fn mutable_slots(domain: &impl Domain) -> BlockSlot {
         utils::mutable_slots(&domain.genesis())
-    }
-
-    fn compute_delta<D: Domain>(
-        &self,
-        state: &D::State,
-        genesis: Arc<Genesis>,
-        batch: &mut WorkBatch<Self>,
-    ) -> Result<(), ChainError> {
-        roll::compute_delta::<D>(&self.config, genesis, &self.cache, state, batch)?;
-
-        Ok(())
     }
 
     fn validate_tx<D: Domain>(
