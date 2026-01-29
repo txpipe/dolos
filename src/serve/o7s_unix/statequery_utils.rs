@@ -2,7 +2,7 @@ use dolos_cardano::{
     load_effective_pparams, load_epoch, load_era_summary, AccountState, EraProtocol,
     EraSummary as DolosEraSummary, FixedNamespace as _, PoolState,
 };
-use dolos_core::StateStore;
+use dolos_core::{IndexStore, StateStore};
 use pallas::codec::minicbor::{self, Decode, Encode, Encoder};
 use pallas::codec::utils::{AnyCbor, AnyUInt, Bytes, KeyValuePairs, Nullable, TagWrap};
 use pallas::ledger::traverse::{MultiEraOutput, OriginalHash};
@@ -269,8 +269,8 @@ pub fn build_utxo_by_address_response<D: Domain>(
         debug!(addr_len = addr_bytes.len(), addr_hex = %hex::encode(addr_bytes), "looking up utxos for address");
 
         let mut refs = domain
-            .state()
-            .get_utxo_by_address(addr_bytes)
+            .indexes()
+            .utxos_by_tag("address", addr_bytes)
             .map_err(|e| Error::server(format!("failed to get utxos by address: {}", e)))?;
 
         debug!(num_refs = refs.len(), "found utxo refs by full address");
@@ -280,8 +280,8 @@ pub fn build_utxo_by_address_response<D: Domain>(
                 let payment_bytes = shelley_addr.payment().to_vec();
                 debug!(payment_hex = %hex::encode(&payment_bytes), "trying payment credential lookup");
                 refs = domain
-                    .state()
-                    .get_utxo_by_payment(&payment_bytes)
+                    .indexes()
+                    .utxos_by_tag("payment", &payment_bytes)
                     .map_err(|e| Error::server(format!("failed to get utxos by payment: {}", e)))?;
                 debug!(
                     num_refs = refs.len(),

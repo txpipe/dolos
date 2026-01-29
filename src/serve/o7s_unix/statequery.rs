@@ -82,10 +82,10 @@ impl<D: Domain> Session<D> {
 
         let exists = match &chain_point {
             ChainPoint::Origin => true,
-            ChainPoint::Specific(_slot, hash) => self
+            ChainPoint::Specific(slot, _hash) => self
                 .domain
                 .archive()
-                .get_block_by_hash(hash.as_slice())
+                .get_block_by_slot(slot)
                 .map_err(Error::server)?
                 .is_some(),
             ChainPoint::Slot(_) => true,
