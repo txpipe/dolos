@@ -11,4 +11,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1.0"
 clap = { version = "4.4", features = ["derive"] }
+serde = { workspace = true, features = ["derive"] }
+toml = "0.8.13"
 xshell = "0.2"
+dolos-core = { path = "../crates/core" }
