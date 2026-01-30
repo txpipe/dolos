@@ -245,9 +245,10 @@ where
     let (raw, order) = domain.get_block_by_tx_hash(&hash).await?;
 
     let chain = domain.get_chain_summary()?;
-    let tx = TxModelBuilder::new(&raw, order)?
+    let mut tx = TxModelBuilder::new(&raw, order)?
         .with_network(network)
         .with_chain(chain);
+    tx.fetch_pool_metadata().await?;
 
     tx.into_response()
 }

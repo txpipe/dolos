@@ -65,6 +65,49 @@ fn block_0_preview<D: Domain>(domain: &Facade<D>) -> Result<BlockContent, Status
     })
 }
 
+fn block_0_preprod<D: Domain>(domain: &Facade<D>) -> Result<BlockContent, StatusCode> {
+    let confirmations = MultiEraBlock::decode(
+        &domain
+            .archive()
+            .get_tip()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?
+            .1,
+    )
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .header()
+    .number() as i32;
+
+    let byron_utxos = byron::genesis_utxos(&domain.genesis().byron);
+    let shelley_utxos = shelley::shelley_utxos(&domain.genesis().shelley);
+
+    Ok(BlockContent {
+        time: 1654041600,
+        height: None,
+        hash: "d4b8de7a11d929a323373cbab6c1a9bdc931beffff11db111cf9d57356ee1937".to_string(),
+        slot: None,
+        epoch: None,
+        epoch_slot: None,
+        slot_leader: "Genesis slot leader".to_string(),
+        size: 0,
+        tx_count: (byron_utxos.len() + shelley_utxos.len()) as i32,
+        output: Some(
+            (byron_utxos.iter().map(|(_, _, x)| *x).sum::<u64>()
+                + shelley_utxos.iter().map(|(_, _, x)| *x).sum::<u64>())
+            .to_string(),
+        ),
+        fees: Some("0".to_string()),
+        block_vrf: None,
+        op_cert: None,
+        op_cert_counter: None,
+        previous_block: None,
+        next_block: Some(
+            "9ad7ff320c9cf74e0f5ee78d22a85ce42bb0a487d0506bf60cfb5a91ea4497d2".to_string(),
+        ),
+        confirmations,
+    })
+}
+
 fn parse_hash_or_number(hash_or_number: &str) -> Result<HashOrNumber, Error> {
     if hash_or_number.is_empty() {
         return Err(Error::InvalidBlockHash);
@@ -171,10 +214,10 @@ where
 {
     let hash_or_number = parse_hash_or_number(&hash_or_number)?;
 
-    // Very special case only for preview.
-    if Either::Right(0) == hash_or_number && domain.genesis().shelley.network_magic == Some(2) {
-        return Ok(Json(block_0_preview(&domain)?));
-    }
+    if Either::Right(0) == hash_or_number
+        && domain.genesis().shelley.network_magic == Some(1) {
+            return Ok(Json(block_0_preprod(&domain)?));
+        }
 
     let block = load_block_by_hash_or_number(&domain, &hash_or_number).await?;
 
@@ -238,11 +281,14 @@ where
 
     // Insert block 0 only in preview
     if output.len() < pagination.count
-        && domain.genesis().shelley.network_magic == Some(2)
         && output.last().map(|x| x.height == Some(0)).unwrap_or(false)
     {
+        let mut block_0 = match domain.genesis().shelley.network_magic {
+            Some(1) => block_0_preprod(&domain).map_err(Error::Code)?,
+            Some(2) => block_0_preview(&domain).map_err(Error::Code)?,
+            _ => todo!(),
+        };
         let mut block_1 = output.pop().unwrap();
-        let mut block_0 = block_0_preview(&domain).map_err(Error::Code)?;
 
         block_1.previous_block = Some(block_0.hash.clone());
         block_0.next_block = Some(block_1.hash.clone());
