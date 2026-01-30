@@ -1493,7 +1493,8 @@ pub struct EndStats {
     pub __drep_refunds: Lovelace,
 }
 
-#[derive(Debug, Encode, Decode, Clone)]
+#[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct EpochState {
     #[n(0)]
     pub number: Epoch,
@@ -1523,6 +1524,22 @@ pub struct EpochState {
     #[n(14)]
     #[cbor(default)]
     pub incentives: Option<EpochIncentives>,
+}
+
+impl Default for EpochState {
+    fn default() -> Self {
+        Self {
+            number: 0,
+            initial_pots: Pots::default(),
+            rolling: EpochValue::new(0),
+            pparams: EpochValue::new(0),
+            largest_stable_slot: 0,
+            previous_nonce_tail: None,
+            nonces: None,
+            end: None,
+            incentives: None,
+        }
+    }
 }
 
 #[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize)]
@@ -1721,7 +1738,7 @@ pub struct EraBoundary {
     pub timestamp: u64,
 }
 
-#[derive(Debug, Encode, Decode, Clone)]
+#[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize)]
 pub struct EraSummary {
     #[n(0)]
     pub start: EraBoundary,

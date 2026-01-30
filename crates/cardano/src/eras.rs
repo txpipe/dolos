@@ -74,7 +74,7 @@ impl ChainSummary {
         era.slot_time(slot)
     }
 
-    pub(crate) fn append_era(&mut self, protocol: u16, era: EraSummary) {
+    pub fn append_era(&mut self, protocol: u16, era: EraSummary) {
         if let Some(edge) = self.edge.take() {
             self.past.push(edge);
         }

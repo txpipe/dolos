@@ -8,7 +8,32 @@ If `cargo xtask` isn't available yet, install the helper once:
 cargo install --path xtask
 ```
 
-## Bootstrap local Mithril snapshot
+## Create test instances
+
+Create a test instance and ground-truth fixtures in one step.
+
+Example usage:
+
+```
+cargo xtask create-test-instance --network mainnet --epoch 512
+cargo xtask create-test-instance --network preview --epoch 233
+cargo xtask create-test-instance --network preprod --epoch 98
+```
+
+Notes:
+
+- Instances are created under `<instances_root>/test-{network}-{epoch}`.
+- If the instance directory already exists, the command fails. Use `delete-test-instance` first.
+- Add `--skip-ground-truth` to run bootstrap only.
+- Add `--skip-bootstrap` to regenerate ground truth only (instance must exist).
+
+## Delete test instances
+
+```
+cargo xtask delete-test-instance --network preview --epoch 233 --yes
+```
+
+## Bootstrap local Mithril snapshot (advanced)
 
 Bootstrap a local Mithril snapshot into a named Dolos instance using repo-local defaults.
 
@@ -29,11 +54,20 @@ Example usage:
 
 ```
 cargo xtask bootstrap-mithril-local --network mainnet --stop-epoch 512
-cargo xtask bootstrap-mithril-local --network preview --stop-epoch 233 --name preview-233
+cargo xtask bootstrap-mithril-local --network preview --stop-epoch 233
 cargo xtask bootstrap-mithril-local --network preprod --stop-epoch 98
 ```
 
 Notes:
 
-- If `--name` is omitted, the instance name defaults to `{network}-{epoch}`.
-- The instance config is written to `<instances_root>/<name>/dolos.toml` with storage rooted at `<instances_root>/<name>/data`.
+- The instance name defaults to `test-{network}-{epoch}`.
+- The instance config is written to `<instances_root>/test-{network}-{epoch}/dolos.toml` with storage rooted at `<instances_root>/test-{network}-{epoch}/data`.
+- Genesis files are written into the instance root (byron.json, shelley.json, alonzo.json, conway.json).
+
+## Generate ground-truth fixtures (advanced)
+
+```
+cargo xtask cardano-ground-truth --network mainnet --epoch 512
+```
+
+This command expects the instance directory to already exist.

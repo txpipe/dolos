@@ -87,6 +87,8 @@ mithril-client = { version = "0.12.2", optional = true, default-features = false
 ] }
 
 [dev-dependencies]
+anyhow = "1.0"
+comfy-table = "7.1.1"
 nix = { version = "0.30.1", features = ["signal"] }
 tempfile = "3.20.0"
 dolos-testing = { path = "crates/testing", features = ["toy-domain"] }
