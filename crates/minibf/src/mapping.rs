@@ -1652,9 +1652,7 @@ impl IntoModel<Vec<TxContentPoolCertsInner>> for TxModelBuilder<'_> {
             .filter_map(|(cert_index, cert)| {
                 let builder = PoolUpdateModelBuilder::new(cert, cert_index, network, epoch as i32);
                 builder.map(|mut x| {
-                    let meta = self.pool_metadata.get(&x.operator).cloned();
-                    dbg!(&meta);
-                    x.with_offchain(meta);
+                    x.with_offchain(self.pool_metadata.get(&x.operator).cloned());
                     x
                 })
             })
