@@ -11,4 +11,11 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1.0"
 clap = { version = "4.4", features = ["derive"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+toml = "0.8.13"
 xshell = "0.2"
+dolos-core = { path = "../crates/core" }
+dolos-cardano = { path = "../crates/cardano", features = ["include-genesis"] }
+postgres = "0.19"
+postgres-native-tls = "0.5"
