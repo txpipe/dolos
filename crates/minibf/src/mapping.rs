@@ -1,4 +1,5 @@
 use axum::{http::StatusCode, Json};
+use futures::future::join_all;
 use itertools::Itertools;
 use num_bigint::BigInt;
 use num_rational::BigRational;
@@ -19,7 +20,8 @@ use pallas::{
         },
     },
 };
-use std::{collections::HashMap, ops::Deref};
+use serde::{Deserialize, Serialize};
+use std::{collections::HashMap, ops::Deref, time::Duration};
 
 use blockfrost_openapi::models::{
     address_utxo_content_inner::AddressUtxoContentInner,
@@ -38,8 +40,7 @@ use blockfrost_openapi::models::{
     tx_content_pool_certs_inner_metadata::TxContentPoolCertsInnerMetadata,
     tx_content_pool_certs_inner_relays_inner::TxContentPoolCertsInnerRelaysInner,
     tx_content_pool_retires_inner::TxContentPoolRetiresInner,
-    tx_content_redeemers_inner::Purpose,
-    tx_content_redeemers_inner::TxContentRedeemersInner,
+    tx_content_redeemers_inner::{Purpose, TxContentRedeemersInner},
     tx_content_stake_addr_inner::TxContentStakeAddrInner,
     tx_content_utxo::TxContentUtxo,
     tx_content_utxo_inputs_inner::TxContentUtxoInputsInner,
@@ -47,7 +48,7 @@ use blockfrost_openapi::models::{
     tx_content_withdrawals_inner::TxContentWithdrawalsInner,
 };
 
-use dolos_cardano::{pallas_extras, ChainSummary, PParamsSet};
+use dolos_cardano::{pallas_extras, ChainSummary, PParamsSet, PoolHash};
 use dolos_core::{Domain, EraCbor, TxHash, TxOrder, TxoIdx, TxoRef};
 
 use crate::Facade;
@@ -122,6 +123,30 @@ pub fn stake_cred_to_address(cred: &StakeCredential, network: Network) -> StakeA
 
 pub fn vkey_to_stake_address(vkey: Hash<28>, network: Network) -> StakeAddress {
     StakeAddress::new(network, StakePayload::Stake(vkey))
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct PoolOffchainMetadata {
+    pub name: String,
+    pub description: String,
+    pub ticker: String,
+    pub homepage: String,
+}
+
+pub async fn pool_offchain_metadata(url: &str) -> Option<PoolOffchainMetadata> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .user_agent("Dolos MiniBF")
+        .build()
+        .ok()?;
+
+    let res = client.get(url).send().await.ok()?;
+
+    if res.status() != StatusCode::OK {
+        return None;
+    }
+
+    res.json().await.ok()
 }
 
 pub trait IntoModel<T>
@@ -349,7 +374,13 @@ impl<'a> IntoModel<TxContentUtxoOutputsInner> for UtxoOutputModelBuilder<'a> {
     fn into_model(self) -> Result<TxContentUtxoOutputsInner, StatusCode> {
         let out = TxContentUtxoOutputsInner {
             address: self.output.address().into_model()?,
-            amount: self.output.value().into_model()?,
+            amount: self
+                .output
+                .value()
+                .into_model()?
+                .into_iter()
+                .filter(|x| x.unit == "lovelace" || !self.is_collateral)
+                .collect(),
             output_index: try_into_or_500!(self.txo_ref.1),
             consumed_by_tx: Some(self.consumed_by_tx.map(|x| x.to_string())),
             data_hash: self.output.datum().map(|x| match x {
@@ -447,7 +478,12 @@ impl<'a> IntoModel<TxContentUtxoInputsInner> for UtxoInputModelBuilder<'a> {
         if let Some(o) = self.as_output {
             out = TxContentUtxoInputsInner {
                 address: o.address().into_model()?,
-                amount: o.value().into_model()?,
+                amount: o
+                    .value()
+                    .into_model()?
+                    .into_iter()
+                    .filter(|x| x.unit == "lovelace" || !self.is_collateral)
+                    .collect(),
                 reference_script_hash: o.script_ref().map(|h| h.into_model()).transpose()?,
                 data_hash: o.datum().map(|x| match x {
                     DatumOption::Hash(x) => x.to_string(),
@@ -476,6 +512,7 @@ pub struct TxModelBuilder<'a> {
     order: TxOrder,
     deps: HashMap<TxHash, MultiEraTx<'a>>,
     consumed_deps: HashMap<TxoRef, TxHash>,
+    pool_metadata: HashMap<PoolHash, PoolOffchainMetadata>,
 }
 
 impl<'a> TxModelBuilder<'a> {
@@ -493,6 +530,7 @@ impl<'a> TxModelBuilder<'a> {
             network: None,
             deps: HashMap::new(),
             consumed_deps: HashMap::new(),
+            pool_metadata: HashMap::new(),
         })
     }
 
@@ -534,6 +572,59 @@ impl<'a> TxModelBuilder<'a> {
             consumed_deps,
             ..self
         }
+    }
+
+    pub async fn fetch_pool_metadata(&mut self) -> Result<(), StatusCode> {
+        let pool_registrations = self
+            .tx()?
+            .certs()
+            .iter()
+            .filter_map(|cert| match cert {
+                MultiEraCert::AlonzoCompatible(cow) => {
+                    if let AlonzoCert::PoolRegistration {
+                        operator,
+                        ref pool_metadata,
+                        ..
+                    } = *(**cow).clone()
+                    {
+                        pool_metadata
+                            .as_ref()
+                            .map(|meta| (operator, meta.url.clone()))
+                    } else {
+                        None
+                    }
+                }
+                MultiEraCert::Conway(cow) => {
+                    if let ConwayCert::PoolRegistration {
+                        operator,
+                        ref pool_metadata,
+                        ..
+                    } = *(**cow).clone()
+                    {
+                        pool_metadata
+                            .as_ref()
+                            .map(|meta| (operator, meta.url.clone()))
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            })
+            .collect_vec();
+
+        self.pool_metadata = join_all(pool_registrations.iter().map(
+            |(pool_hash, url)| async move {
+                pool_offchain_metadata(url)
+                    .await
+                    .map(|meta| (*pool_hash, meta))
+            },
+        ))
+        .await
+        .into_iter()
+        .flatten()
+        .collect();
+
+        Ok(())
     }
 
     fn tx(&self) -> Result<MultiEraTx<'_>, StatusCode> {
@@ -1380,6 +1471,7 @@ struct PoolUpdateModelBuilder {
     pool_owners: Vec<Hash<28>>,
     relays: Vec<alonzo::Relay>,
     pool_metadata: Option<alonzo::PoolMetadata>,
+    offchain_pool_metadata: Option<PoolOffchainMetadata>,
     cert_index: usize,
     network: Network,
     current_epoch: i32,
@@ -1420,6 +1512,7 @@ impl PoolUpdateModelBuilder {
             cert_index,
             network,
             current_epoch,
+            offchain_pool_metadata: None,
         })
     }
 
@@ -1457,6 +1550,7 @@ impl PoolUpdateModelBuilder {
             cert_index,
             network,
             current_epoch,
+            offchain_pool_metadata: None,
         })
     }
 
@@ -1475,6 +1569,10 @@ impl PoolUpdateModelBuilder {
             }
             _ => None,
         }
+    }
+
+    fn with_offchain(&mut self, offchain_pool_metadata: Option<PoolOffchainMetadata>) {
+        self.offchain_pool_metadata = offchain_pool_metadata
     }
 }
 
@@ -1508,10 +1606,19 @@ impl IntoModel<TxContentPoolCertsInner> for PoolUpdateModelBuilder {
             metadata: Some(Box::new(TxContentPoolCertsInnerMetadata {
                 url: self.pool_metadata.as_ref().map(|x| x.url.clone()),
                 hash: self.pool_metadata.as_ref().map(|x| x.hash.to_string()),
-                ticker: None,
-                name: None,
-                description: None,
-                homepage: None,
+                ticker: self
+                    .offchain_pool_metadata
+                    .as_ref()
+                    .map(|x| x.ticker.clone()),
+                name: self.offchain_pool_metadata.as_ref().map(|x| x.name.clone()),
+                description: self
+                    .offchain_pool_metadata
+                    .as_ref()
+                    .map(|x| x.description.clone()),
+                homepage: self
+                    .offchain_pool_metadata
+                    .as_ref()
+                    .map(|x| x.homepage.clone()),
             })),
             relays: self
                 .relays
@@ -1532,20 +1639,24 @@ impl IntoModel<Vec<TxContentPoolCertsInner>> for TxModelBuilder<'_> {
         let tx = self.tx()?;
 
         let network = self.network.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        let epoch = self
+        let chain = self
             .chain
             .as_ref()
-            .map(|c| c.slot_epoch(self.block.slot()))
-            .map(|(a, _)| a)
             .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
 
+        let epoch = chain.slot_epoch(self.block.slot()).0;
         let items = tx
             .certs()
             .into_iter()
             .enumerate()
             .filter_map(|(cert_index, cert)| {
-                PoolUpdateModelBuilder::new(cert, cert_index, network, epoch as i32)
+                let builder = PoolUpdateModelBuilder::new(cert, cert_index, network, epoch as i32);
+                builder.map(|mut x| {
+                    let meta = self.pool_metadata.get(&x.operator).cloned();
+                    dbg!(&meta);
+                    x.with_offchain(meta);
+                    x
+                })
             })
             .map(|builder| builder.into_model())
             .try_collect()?;
