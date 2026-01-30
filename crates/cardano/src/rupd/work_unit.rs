@@ -159,6 +159,12 @@ where
         // Log stake snapshot data to archive
         super::log_work::<D>(work, rewards, domain.archive())?;
 
+        #[cfg(feature = "rupd-snapshot-dump")]
+        {
+            let out_dir = domain.storage_config().path.join("rupd-snapshot");
+            super::dump_snapshot_csv(work, self.genesis.as_ref(), &out_dir);
+        }
+
         debug!("rupd archive logs committed");
         Ok(())
     }

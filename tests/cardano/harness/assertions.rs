@@ -35,6 +35,41 @@ pub(crate) fn format_mismatch(
     )
 }
 
+fn format_u64_with_commas(value: u64) -> String {
+    let digits = value.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (idx, ch) in digits.chars().enumerate() {
+        if idx > 0 && (digits.len() - idx) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn format_i128_with_commas(value: i128) -> String {
+    let sign = if value < 0 { "-" } else { "" };
+    let abs = value.unsigned_abs() as u64;
+    format!("{}{}", sign, format_u64_with_commas(abs))
+}
+
+pub(crate) fn format_pot_mismatch(
+    context: &str,
+    field: &str,
+    expected: u64,
+    actual: u64,
+) -> String {
+    let delta = actual as i128 - expected as i128;
+    format!(
+        "{} {} expected {} got {} delta {}",
+        context,
+        field,
+        format_u64_with_commas(expected),
+        format_u64_with_commas(actual),
+        format_i128_with_commas(delta)
+    )
+}
+
 #[macro_export]
 macro_rules! compare_fields {
     ($context:expr, $expected:expr, $actual:expr, $report:expr, [$(($field:expr, $expected_field:expr, $actual_field:expr)),+ $(,)?]) => {{

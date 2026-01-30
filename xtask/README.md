@@ -63,6 +63,7 @@ Notes:
 - The instance name defaults to `test-{network}-{epoch}`.
 - The instance config is written to `<instances_root>/test-{network}-{epoch}/dolos.toml` with storage rooted at `<instances_root>/test-{network}-{epoch}/data`.
 - Genesis files are written into the instance root (byron.json, shelley.json, alonzo.json, conway.json).
+- Bootstrap runs with the `rupd-snapshot-dump` feature enabled and writes CSVs to `<storage.path>/rupd-snapshot/{epoch}-pools.csv` and `{epoch}-accounts.csv`.
 
 ## Generate ground-truth fixtures (advanced)
 
@@ -71,3 +72,27 @@ cargo xtask cardano-ground-truth --network mainnet --epoch 512
 ```
 
 This command expects the instance directory to already exist.
+
+## DBSync stake queries (advanced)
+
+Extract total delegation per pool for a given epoch:
+
+```
+cargo xtask dbsync-pool-delegation --network preview --epoch 550
+```
+
+Extract stake amount per account for a given epoch:
+
+```
+cargo xtask dbsync-account-stake --network preview --epoch 550
+```
+
+Accounts output fields: stake,pool,lovelace
+
+## Compare RUPD snapshot with DBSync
+
+Compare the on-disk RUPD snapshot CSVs with DBSync output for a specific epoch:
+
+```
+cargo xtask compare-rupd-dbsync --network preview --epoch 10 --instance-epoch 550
+```

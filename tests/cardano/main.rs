@@ -187,27 +187,39 @@ fn compare_epochs(
             && expected_pots.fees == 0;
 
         if !pots_missing {
-            compare_fields!(
-                context,
-                expected,
-                actual,
-                report,
-                [
-                    (
-                        "pots.reserves",
-                        expected_pots.reserves,
-                        actual_pots.reserves
-                    ),
-                    (
-                        "pots.treasury",
-                        expected_pots.treasury,
-                        actual_pots.treasury
-                    ),
-                    ("pots.utxos", expected_pots.utxos, actual_pots.utxos),
-                    ("pots.rewards", expected_pots.rewards, actual_pots.rewards),
-                    ("pots.fees", expected_pots.fees, actual_pots.fees),
-                ]
-            )?;
+            let pot_fields = [
+                (
+                    "pots.reserves",
+                    expected_pots.reserves,
+                    actual_pots.reserves,
+                ),
+                (
+                    "pots.treasury",
+                    expected_pots.treasury,
+                    actual_pots.treasury,
+                ),
+                ("pots.utxos", expected_pots.utxos, actual_pots.utxos),
+                ("pots.rewards", expected_pots.rewards, actual_pots.rewards),
+                ("pots.fees", expected_pots.fees, actual_pots.fees),
+            ];
+
+            for (field, expected_value, actual_value) in pot_fields {
+                if expected_value != actual_value {
+                    report.mismatches += 1;
+                    if report.mismatch_samples.len() < 20 {
+                        report.mismatch_samples.push(
+                            crate::harness::assertions::format_pot_mismatch(
+                                &context,
+                                field,
+                                expected_value,
+                                actual_value,
+                            ),
+                        );
+                    }
+                } else {
+                    report.matches += 1;
+                }
+            }
         }
 
         if let (Some(expected_nonces), Some(actual_nonces)) = (&expected.nonces, &actual.nonces) {

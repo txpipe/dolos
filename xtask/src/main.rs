@@ -3,8 +3,10 @@ use clap::{Parser, Subcommand};
 use xshell::{cmd, Shell};
 
 mod bootstrap;
+mod compare_rupd_dbsync;
 mod config;
 mod create_test_instance;
+mod dbsync_query;
 mod delete_test_instance;
 mod ground_truth;
 mod util;
@@ -33,6 +35,15 @@ enum Commands {
 
     /// Delete a test instance directory
     DeleteTestInstance(delete_test_instance::DeleteTestInstanceArgs),
+
+    /// Query DBSync: total delegation per pool for an epoch
+    DbsyncPoolDelegation(dbsync_query::PoolDelegationArgs),
+
+    /// Query DBSync: stake amount per account for an epoch
+    DbsyncAccountStake(dbsync_query::AccountStakeArgs),
+
+    /// Compare RUPD snapshot CSVs with DBSync for an epoch
+    CompareRupdDbsync(compare_rupd_dbsync::CompareArgs),
 }
 
 fn main() -> Result<()> {
@@ -48,6 +59,9 @@ fn main() -> Result<()> {
         Commands::CardanoGroundTruth(args) => ground_truth::run(&args)?,
         Commands::CreateTestInstance(args) => create_test_instance::run(&sh, &args)?,
         Commands::DeleteTestInstance(args) => delete_test_instance::run(&args)?,
+        Commands::DbsyncPoolDelegation(args) => dbsync_query::run_pool_delegation(&args)?,
+        Commands::DbsyncAccountStake(args) => dbsync_query::run_account_stake(&args)?,
+        Commands::CompareRupdDbsync(args) => compare_rupd_dbsync::run(&args)?,
     }
 
     Ok(())
