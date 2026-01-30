@@ -13,13 +13,13 @@ use crate::{
     Facade,
 };
 
-pub async fn load_utxo_models<D: Domain>(
+pub async fn load_utxo_models<D>(
     domain: &Facade<D>,
     refs: HashSet<TxoRef>,
     pagination: Pagination,
 ) -> Result<Vec<AddressUtxoContentInner>, StatusCode>
 where
-    D: Clone + Send + Sync + 'static,
+    D: Domain + Clone + Send + Sync + 'static,
 {
     let utxos = domain
         .state()

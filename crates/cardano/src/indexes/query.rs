@@ -244,7 +244,7 @@ where
     }
 }
 
-async fn blocks_by_tag<D: Domain>(
+async fn blocks_by_tag<D>(
     facade: &AsyncQueryFacade<D>,
     dimension: TagDimension,
     key: &[u8],
@@ -252,7 +252,7 @@ async fn blocks_by_tag<D: Domain>(
     end_slot: BlockSlot,
 ) -> Result<Vec<(BlockSlot, Option<BlockBody>)>, DomainError>
 where
-    D: Clone + Send + Sync + 'static,
+    D: Domain + Clone + Send + Sync + 'static,
 {
     let slots = facade
         .slots_by_tag(dimension, key.to_vec(), start_slot, end_slot)

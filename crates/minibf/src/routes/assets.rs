@@ -482,13 +482,13 @@ impl AssetModelBuilder {
     }
 }
 
-pub async fn by_subject<D: Domain>(
+pub async fn by_subject<D>(
     Path(unit): Path<String>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Asset>, StatusCode>
 where
     Option<AssetState>: From<D::Entity>,
-    D: Clone + Send + Sync + 'static,
+    D: Domain + Clone + Send + Sync + 'static,
 {
     let subject = hex::decode(&unit).map_err(|_| StatusCode::BAD_REQUEST)?;
     let entity_key = pallas::crypto::hash::Hasher::<256>::hash(subject.as_slice());
@@ -521,13 +521,13 @@ where
     Ok(Json(model.into_model().await?))
 }
 
-pub async fn by_subject_addresses<D: Domain>(
+pub async fn by_subject_addresses<D>(
     Path(subject): Path<String>,
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<AssetAddressesInner>>, Error>
 where
-    D: Clone + Send + Sync + 'static,
+    D: Domain + Clone + Send + Sync + 'static,
 {
     let pagination = Pagination::try_from(params)?;
     let asset = hex::decode(&subject).map_err(|_| Error::InvalidAsset)?;
@@ -620,13 +620,13 @@ fn output_has_subject(subject: &[u8], output: &MultiEraOutput) -> bool {
     false
 }
 
-async fn tx_has_subject<D: Domain>(
+async fn tx_has_subject<D>(
     domain: &Facade<D>,
     subject: &[u8],
     tx: &MultiEraTx<'_>,
 ) -> Result<bool, StatusCode>
 where
-    D: Clone + Send + Sync + 'static,
+    D: Domain + Clone + Send + Sync + 'static,
 {
     for (_, output) in tx.produces() {
         if output_has_subject(subject, &output) {
@@ -658,7 +658,7 @@ where
     Ok(false)
 }
 
-async fn find_txs<D: Domain>(
+async fn find_txs<D>(
     domain: &Facade<D>,
     subject: &[u8],
     chain: &ChainSummary,
@@ -666,7 +666,7 @@ async fn find_txs<D: Domain>(
     block: &[u8],
 ) -> Result<Vec<AssetTransactionsInner>, StatusCode>
 where
-    D: Clone + Send + Sync + 'static,
+    D: Domain + Clone + Send + Sync + 'static,
 {
     let block = MultiEraBlock::decode(block).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -694,13 +694,13 @@ where
     Ok(matches)
 }
 
-pub async fn by_subject_transactions<D: Domain>(
+pub async fn by_subject_transactions<D>(
     Path(subject): Path<String>,
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<AssetTransactionsInner>>, Error>
 where
-    D: Clone + Send + Sync + 'static,
+    D: Domain + Clone + Send + Sync + 'static,
 {
     let pagination = Pagination::try_from(params)?;
     pagination.enforce_max_scan_limit()?;
