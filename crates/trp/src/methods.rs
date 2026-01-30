@@ -1,8 +1,11 @@
 use jsonrpsee::types::Params;
-use pallas::{codec::utils::NonEmptySet, ledger::primitives::conway::VKeyWitness};
+use pallas::{
+    codec::utils::NonEmptySet,
+    ledger::primitives::conway::{VKeyWitness, WitnessSet},
+};
 use std::sync::Arc;
 
-use tx3_resolver::trp::{ResolveParams, SubmitParams, SubmitResponse, SubmitWitness, TxEnvelope};
+use tx3_resolver::{trp::{ResolveParams, SubmitResponse, SubmitParams, WitnessInput, TxEnvelope}};
 
 use dolos_core::{Domain, MempoolAwareUtxoStore, StateStore as _, SubmitExt};
 
@@ -43,15 +46,32 @@ pub async fn trp_resolve<D: Domain>(
     })
 }
 
-fn apply_witnesses(original: &[u8], witnesses: &[SubmitWitness]) -> Result<Vec<u8>, Error> {
+fn apply_witnesses(original: &[u8], witnesses: &[WitnessInput]) -> Result<Vec<u8>, Error> {
     let tx = pallas::ledger::traverse::MultiEraTx::decode(original)?;
 
     let mut tx = tx.as_conway().ok_or(Error::UnsupportedTxEra)?.to_owned();
 
-    let map_witness = |witness: &SubmitWitness| VKeyWitness {
-        vkey: Vec::<u8>::from(witness.key.clone()).into(),
-        signature: Vec::<u8>::from(witness.signature.clone()).into(),
-    };
+    let mut new_vkeys = Vec::new();
+
+    for witness in witnesses {
+        match witness {
+            WitnessInput::Object(w) => {
+                new_vkeys.push(VKeyWitness {
+                    vkey: Vec::<u8>::from(w.key.clone()).into(),
+                    signature: Vec::<u8>::from(w.signature.clone()).into(),
+                });
+            }
+            WitnessInput::Hex(h) => {
+                let bytes = hex::decode(h).map_err(|_| Error::InternalError("Invalid witness hex".into()))?;
+                let witness_set: WitnessSet = pallas::codec::minicbor::decode(&bytes)
+                    .map_err(|_| Error::InternalError("Invalid witness set cbor".into()))?;
+
+                if let Some(vkeys) = witness_set.vkeywitness {
+                    new_vkeys.extend(vkeys.to_vec());
+                }
+            }
+        }
+    }
 
     let mut witness_set = tx.transaction_witness_set.unwrap();
 
@@ -61,9 +81,7 @@ fn apply_witnesses(original: &[u8], witnesses: &[SubmitWitness]) -> Result<Vec<u
         .flat_map(|x| x.iter())
         .cloned();
 
-    let new = witnesses.iter().map(map_witness);
-
-    let all: Vec<_> = old.chain(new).collect();
+    let all: Vec<_> = old.chain(new_vkeys).collect();
 
     witness_set.vkeywitness = NonEmptySet::from_vec(all);
 
