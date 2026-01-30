@@ -51,6 +51,7 @@ impl TableRow for EpochState {
         vec![
             "number",
             "version",
+            "nonce",
             "pot reserves",
             "pot utxos",
             "pot treasury",
@@ -78,6 +79,7 @@ impl TableRow for EpochState {
                     .and_then(|x| x.protocol_major())
                     .unwrap_or_default()
             ),
+            format_nonce(&self.nonces),
             format!("{}", self.initial_pots.reserves),
             format!("{}", self.initial_pots.utxos),
             format!("{}", self.initial_pots.treasury),
@@ -103,6 +105,17 @@ impl TableRow for EpochState {
             ),
         ]
     }
+}
+
+fn format_nonce(nonces: &Option<dolos_cardano::Nonces>) -> String {
+    let Some(nonces) = nonces else {
+        return "-".to_string();
+    };
+
+    let hex = hex::encode(nonces.active.as_slice());
+    let prefix = &hex[..4];
+    let suffix = &hex[hex.len() - 3..];
+    format!("{prefix}...{suffix}")
 }
 
 const POOL_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("pool");

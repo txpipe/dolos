@@ -217,9 +217,9 @@ fn compare_epochs(
                 actual,
                 report,
                 [(
-                    "nonces.candidate",
-                    expected_nonces.candidate,
-                    actual_nonces.candidate
+                    "nonces.active",
+                    expected_nonces.active,
+                    actual_nonces.active
                 )]
             )?;
         }

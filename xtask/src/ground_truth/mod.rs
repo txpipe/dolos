@@ -252,9 +252,9 @@ fn fetch_epochs_from_dbsync(dbsync_url: &str, max_epoch: u64) -> Result<Vec<Epoc
         let epoch_nonce = epoch_nonce.unwrap_or_else(|| vec![0u8; 32]);
         let nonce_hash = epoch_nonce.try_into().unwrap_or([0u8; 32]);
         let nonces = Nonces {
-            active: [0u8; 32].into(),
+            active: nonce_hash.into(),
             evolving: [0u8; 32].into(),
-            candidate: nonce_hash.into(),
+            candidate: [0u8; 32].into(),
             tail: None,
         };
 
