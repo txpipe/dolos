@@ -4,9 +4,8 @@ use xshell::{cmd, Shell};
 
 mod bootstrap;
 mod config;
-mod create_test_instance;
-mod delete_test_instance;
 mod ground_truth;
+mod test_instance;
 mod util;
 
 #[derive(Parser)]
@@ -25,14 +24,13 @@ enum Commands {
     /// Bootstrap a local Mithril snapshot into an instance
     BootstrapMithrilLocal(bootstrap::BootstrapArgs),
 
-    /// Generate ground-truth fixtures from cardano-db-sync
-    CardanoGroundTruth(ground_truth::GroundTruthArgs),
+    /// Ground-truth fixture commands (generate, compare, query)
+    #[command(subcommand)]
+    GroundTruth(ground_truth::GroundTruthCmd),
 
-    /// Create a test instance and ground-truth fixtures
-    CreateTestInstance(create_test_instance::CreateTestInstanceArgs),
-
-    /// Delete a test instance directory
-    DeleteTestInstance(delete_test_instance::DeleteTestInstanceArgs),
+    /// Test instance management commands (create, delete)
+    #[command(subcommand)]
+    TestInstance(test_instance::TestInstanceCmd),
 }
 
 fn main() -> Result<()> {
@@ -45,9 +43,8 @@ fn main() -> Result<()> {
             cmd!(sh, "cargo test --test smoke -- --ignored --nocapture").run()?;
         }
         Commands::BootstrapMithrilLocal(args) => bootstrap::run(&sh, &args)?,
-        Commands::CardanoGroundTruth(args) => ground_truth::run(&args)?,
-        Commands::CreateTestInstance(args) => create_test_instance::run(&sh, &args)?,
-        Commands::DeleteTestInstance(args) => delete_test_instance::run(&args)?,
+        Commands::GroundTruth(cmd) => ground_truth::run(cmd)?,
+        Commands::TestInstance(cmd) => test_instance::run(&sh, cmd)?,
     }
 
     Ok(())

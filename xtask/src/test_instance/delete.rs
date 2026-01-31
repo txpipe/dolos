@@ -1,4 +1,4 @@
-//! delete-test-instance command implementation.
+//! delete test-instance command implementation.
 
 use anyhow::{bail, Context, Result};
 use clap::Args;
@@ -6,9 +6,9 @@ use clap::Args;
 use crate::config::{load_xtask_config, Network};
 use crate::util::resolve_path;
 
-/// Arguments for the delete-test-instance command.
+/// Arguments for the delete test-instance command.
 #[derive(Debug, Args)]
-pub struct DeleteTestInstanceArgs {
+pub struct DeleteArgs {
     /// Target network
     #[arg(long, value_enum)]
     pub network: Network,
@@ -22,8 +22,8 @@ pub struct DeleteTestInstanceArgs {
     pub yes: bool,
 }
 
-/// Run the delete-test-instance command.
-pub fn run(args: &DeleteTestInstanceArgs) -> Result<()> {
+/// Run the delete test-instance command.
+pub fn run(args: &DeleteArgs) -> Result<()> {
     if !args.yes {
         bail!("refusing to delete without --yes");
     }

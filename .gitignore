@@ -6,3 +6,4 @@ benches
 .opencode
 opencode.json
 xtask.toml
+CLAUDE.md
