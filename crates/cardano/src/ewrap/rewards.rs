@@ -142,7 +142,8 @@ impl super::BoundaryVisitor for BoundaryVisitor {
     }
 
     fn flush(&mut self, ctx: &mut super::BoundaryWork) -> Result<(), ChainError> {
-        ctx.rewards.drain_unspendable();
+        let drained = ctx.rewards.drain_unspendable();
+        ctx.applied_reward_credentials.extend(drained);
 
         for delta in self.deltas.drain(..) {
             ctx.add_delta(delta);
