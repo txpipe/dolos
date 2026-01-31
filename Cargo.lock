@@ -6577,8 +6577,6 @@ dependencies = [
  "anyhow",
  "bech32 0.11.1",
  "clap",
- "csv",
- "csv-diff",
  "dolos",
  "dolos-cardano",
  "dolos-core",

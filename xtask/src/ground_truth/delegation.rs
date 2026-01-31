@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use std::fs::File;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 #[derive(Debug, Clone)]
 pub(super) struct PoolDelegationRow {
@@ -57,8 +57,4 @@ pub(super) fn write_csv(path: &Path, rows: &[PoolDelegationRow]) -> Result<()> {
         )?;
     }
     Ok(())
-}
-
-pub(super) fn dolos_csv_path(rupd_dir: &Path, earned_epoch: u64) -> PathBuf {
-    rupd_dir.join(format!("delegation-{}.csv", earned_epoch))
 }
