@@ -49,7 +49,7 @@ pub mod include;
 
 pub use eras::*;
 pub use model::*;
-pub use utils::mutable_slots;
+pub use utils::{mutable_slots, network_from_genesis};
 
 pub type Block<'a> = MultiEraBlock<'a>;
 

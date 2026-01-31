@@ -1,3 +1,4 @@
+use clap::ValueEnum;
 use clap::{Parser, Subcommand};
 use dolos_core::config::RootConfig;
 
@@ -19,6 +20,12 @@ mod prune_chain;
 mod prune_wal;
 mod stats;
 mod summary;
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum OutputFormat {
+    Default,
+    Dbsync,
+}
 
 #[derive(Debug, Subcommand)]
 pub enum Command {

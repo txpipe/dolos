@@ -78,9 +78,7 @@ pub fn run(sh: &Shell, args: &BootstrapArgs) -> Result<()> {
 
     config.storage.path = data_dir.clone();
 
-    let mut chain_config = match config.chain {
-        ChainConfig::Cardano(cardano) => cardano,
-    };
+    let ChainConfig::Cardano(mut chain_config) = config.chain;
 
     chain_config.stop_epoch = Some(args.stop_epoch as _);
     config.chain = ChainConfig::Cardano(chain_config);
@@ -113,7 +111,7 @@ pub fn run(sh: &Shell, args: &BootstrapArgs) -> Result<()> {
 
     cmd!(
         sh,
-        "cargo run --release --bin dolos -- --config {config_path} bootstrap mithril --skip-download --skip-validation --retain-snapshot --download-dir {snapshot_dir}"
+        "cargo run --release --bin dolos --features rupd-snapshot-dump -- --config {config_path} bootstrap mithril --skip-download --skip-validation --retain-snapshot --download-dir {snapshot_dir}"
     )
     .run()?;
 

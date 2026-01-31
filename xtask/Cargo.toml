@@ -15,7 +15,13 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 toml = "0.8.13"
 xshell = "0.2"
+dolos = { path = "..", default-features = false }
 dolos-core = { path = "../crates/core" }
 dolos-cardano = { path = "../crates/cardano", features = ["include-genesis"] }
+hex = { workspace = true }
 postgres = "0.19"
 postgres-native-tls = "0.5"
+bech32 = { workspace = true }
+pallas = { workspace = true }
+csv-diff = "0.1"
+csv = "1"
