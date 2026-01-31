@@ -161,7 +161,9 @@ where
 
         #[cfg(feature = "rupd-snapshot-dump")]
         {
-            let out_dir = domain.storage_config().path.join("rupd-snapshot");
+            let storage_path = &domain.storage_config().path;
+            let instance_root = storage_path.parent().unwrap_or(storage_path);
+            let out_dir = instance_root.join("dumps");
             super::dump_snapshot_csv(work, self.genesis.as_ref(), &out_dir);
         }
 

@@ -71,7 +71,22 @@ Notes:
 cargo xtask cardano-ground-truth --network mainnet --epoch 512
 ```
 
-This command expects the instance directory to already exist.
+This command expects the instance directory to already exist. It overwrites CSV fixtures in `<instance>/ground-truth/`.
+
+Generated files:
+
+- `ground-truth/eras.csv`
+- `ground-truth/epochs.csv`
+
+## Compare ground-truth CSVs
+
+Requires `csvdiff` (install with `cargo install csvdiff`).
+
+Compare DBSync CSV fixtures with Dolos CSV output for a specific instance epoch:
+
+```
+cargo xtask compare-ground-truth-csv --network preview --epoch 550
+```
 
 ## DBSync stake queries (advanced)
 
@@ -89,9 +104,21 @@ cargo xtask dbsync-account-stake --network preview --epoch 550
 
 Accounts output fields: stake,pool,lovelace
 
+## DBSync rewards query (advanced)
+
+Extract rewards for an earned epoch:
+
+```
+cargo xtask dbsync-rewards --network preview --epoch 550
+```
+
+Rewards output fields: stake,pool,amount,type,earned_epoch
+
 ## Compare RUPD snapshot with DBSync
 
-Compare the on-disk RUPD snapshot CSVs with DBSync output for a specific epoch:
+Requires `csvdiff` (install with `cargo install csvdiff`).
+
+Compare the on-disk RUPD snapshot CSVs (pools/accounts) and reward logs with DBSync output for a specific earned epoch:
 
 ```
 cargo xtask compare-rupd-dbsync --network preview --epoch 10 --instance-epoch 550

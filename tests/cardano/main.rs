@@ -1,374 +1,180 @@
-//! Cardano integration tests for Dolos.
-//!
-//! These tests validate Dolos's internal state mutations against ground-truth
-//! data from cardano-db-sync using pre-bootstrapped instances.
-//!
-//! # Setup
-//!
-//! 1. Create test instances for the target networks/epochs:
-//!    ```bash
-//!    cargo xtask create-test-instance --network mainnet --epoch 20
-//!    cargo xtask create-test-instance --network mainnet --epoch 50
-//!    cargo xtask create-test-instance --network mainnet --epoch 100
-//!    # ... same for preview and preprod
-//!    ```
-//!
-//! 2. Generate ground-truth from DBSync (optional if you used create-test-instance):
-//!    ```bash
-//!    cargo xtask cardano-ground-truth --network mainnet --epoch 20
-//!    cargo xtask cardano-ground-truth --network mainnet --epoch 50
-//!    cargo xtask cardano-ground-truth --network mainnet --epoch 100
-//!    # ... same for preview and preprod
-//!    ```
-//!
-//! 3. Run tests:
-//!    ```bash
-//!    # Run all tests
-//!    cargo test --test cardano
-//!
-//!    # Show the report table
-//!    cargo test --test cardano -- --nocapture
-//!    ```
-//!
-//! # File Layout (via xtask.toml)
-//!
-//! ```text
-//! xtask/instances/test-<network>-<epoch>/
-//! ├── dolos.toml
-//! └── data/
-//!     ├── state/
-//!     ├── chain/
-//!     └── ...
-//!
-//! xtask/ground-truth/<network>-<epoch>/
-//! ├── eras.json      # Vec<EraSummary>
-//! └── epochs.json    # Vec<EpochState>
-//! ```
-//!
-//! # Test Matrix
-//!
-//! Networks: mainnet, preview, preprod
-//! Epochs: 20, 50, 100
-//!
-//! Tests run sequentially in a single test function to avoid parallel
-//! access to the same instance.
-
 mod harness;
 
-use crate::harness::{
-    instances_root, load_epoch_from_archive, load_epochs_fixture, load_eras_fixture,
-    InstanceHandle, TestPaths,
-};
-use anyhow::Result;
-use comfy_table::{presets::UTF8_FULL, Cell, Table};
-use dolos_cardano::{EraSummary, FixedNamespace};
-use dolos_core::StateStore;
-use std::path::PathBuf;
+use harness::compare::compare_csvs;
+use harness::config::{load_xtask_config, resolve_path};
+use harness::dump;
 
-struct InstanceReport {
-    name: String,
-    display_name: String,
-    matches: usize,
-    mismatches: usize,
-    errors: Vec<String>,
-    mismatch_samples: Vec<String>,
-}
+#[test]
+fn compare_ground_truth_instances() {
+    let repo_root = std::env::current_dir().expect("detecting repo root");
+    let xtask_config = load_xtask_config(&repo_root).expect("loading xtask.toml");
+    let instances_root = resolve_path(&repo_root, &xtask_config.instances_root);
 
-impl InstanceReport {
-    fn new(name: String) -> Self {
-        let display_name = name.strip_prefix("test-").unwrap_or(&name).to_string();
-        Self {
-            name,
-            display_name,
-            matches: 0,
-            mismatches: 0,
-            errors: Vec::new(),
-            mismatch_samples: Vec::new(),
+    if !instances_root.exists() {
+        eprintln!(
+            "instances root does not exist: {}, skipping",
+            instances_root.display()
+        );
+        return;
+    }
+
+    let mut entries: Vec<_> = std::fs::read_dir(&instances_root)
+        .expect("reading instances root")
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            name.starts_with("test-") && e.path().is_dir()
+        })
+        .collect();
+
+    entries.sort_by_key(|e| e.file_name());
+
+    if entries.is_empty() {
+        eprintln!("no test-* instances found, skipping");
+        return;
+    }
+
+    let mut all_failures: Vec<String> = Vec::new();
+
+    for entry in &entries {
+        let dir_name = entry.file_name().to_string_lossy().to_string();
+        let instance_dir = entry.path();
+
+        // Parse test-{network}-{epoch}
+        let parts: Vec<&str> = dir_name.splitn(3, '-').collect();
+        if parts.len() < 3 {
+            eprintln!("skipping instance with unexpected name format: {}", dir_name);
+            continue;
         }
-    }
-}
-
-fn compare_eras(
-    name: &str,
-    instance: &InstanceHandle,
-    paths: &TestPaths,
-    report: &mut InstanceReport,
-) -> Result<()> {
-    let expected_eras = load_eras_fixture(&paths.eras_fixture())
-        .map_err(|e| anyhow::anyhow!("Failed to load eras fixture for {name}: {e}"))?;
-
-    let actual_eras: Vec<EraSummary> = instance
-        .state
-        .iter_entities_typed(EraSummary::NS, None)?
-        .map(|r| r.map(|(_, era)| era))
-        .collect::<std::result::Result<_, _>>()?;
-
-    if actual_eras.is_empty() {
-        report.errors.push("no eras found in state".to_string());
-        return Ok(());
-    }
-
-    let mut actual_by_protocol = std::collections::HashMap::new();
-    for era in &actual_eras {
-        actual_by_protocol.insert(era.protocol, era);
-    }
-
-    for (index, expected) in expected_eras.iter().enumerate() {
-        let context = format!("eras[{index}]");
-        let actual = match actual_by_protocol.get(&expected.protocol) {
-            Some(actual) => *actual,
-            None => {
-                report
-                    .errors
-                    .push(format!("missing era for protocol {}", expected.protocol));
+        let network = parts[1];
+        let stop_epoch: u64 = match parts[2].parse() {
+            Ok(e) => e,
+            Err(_) => {
+                eprintln!("skipping instance with non-numeric epoch: {}", dir_name);
                 continue;
             }
         };
 
-        compare_fields!(
-            context,
-            expected,
-            actual,
-            report,
-            [
-                ("protocol", expected.protocol, actual.protocol),
-                ("epoch_length", expected.epoch_length, actual.epoch_length),
-                ("slot_length", expected.slot_length, actual.slot_length),
-            ]
-        )?;
-    }
+        let subject_epoch = stop_epoch.saturating_sub(2);
+        let config_path = instance_dir.join("dolos.toml");
+        if !config_path.exists() {
+            eprintln!("skipping {}: no dolos.toml", dir_name);
+            continue;
+        }
 
-    Ok(())
-}
+        let ground_truth_dir = instance_dir.join("ground-truth");
+        let dumps_dir = instance_dir.join("dumps");
+        std::fs::create_dir_all(&dumps_dir).expect("creating dumps dir");
 
-fn compare_epochs(
-    name: &str,
-    instance: &InstanceHandle,
-    paths: &TestPaths,
-    report: &mut InstanceReport,
-) -> Result<()> {
-    let era_count: usize = instance
-        .state
-        .iter_entities_typed::<EraSummary>(EraSummary::NS, None)?
-        .count();
+        eprintln!("\n=== Instance: {} (network={}, stop_epoch={}, subject_epoch={}) ===",
+            dir_name, network, stop_epoch, subject_epoch);
 
-    if era_count == 0 {
-        report
-            .errors
-            .push("no eras found in state; skipping epochs".to_string());
-        return Ok(());
-    }
+        let mut instance_failures = Vec::new();
 
-    let eras = instance
-        .load_chain_summary()
-        .map_err(|e| anyhow::anyhow!("chain summary: {e}"))?;
+        // Eras
+        {
+            let dolos_path = dumps_dir.join("eras.csv");
+            let gt_path = ground_truth_dir.join("eras.csv");
+            eprintln!("\nComparing eras (full state)");
+            if let Err(e) = dump::dump_eras(&config_path, &dolos_path) {
+                instance_failures.push(format!("{}:eras dump failed: {}", dir_name, e));
+            } else if gt_path.exists() {
+                match compare_csvs(&dolos_path, &gt_path, &[0], 20) {
+                    Ok(n) if n > 0 => instance_failures.push(format!("{}:eras ({} diffs)", dir_name, n)),
+                    Err(e) => instance_failures.push(format!("{}:eras compare failed: {}", dir_name, e)),
+                    _ => {}
+                }
+            } else {
+                eprintln!("  ground-truth file missing, skipping: {}", gt_path.display());
+            }
+        }
 
-    let expected_epochs = load_epochs_fixture(&paths.epochs_fixture())
-        .map_err(|e| anyhow::anyhow!("Failed to load epochs fixture for {name}: {e}"))?;
+        // Epochs
+        {
+            let dolos_path = dumps_dir.join("epochs.csv");
+            let gt_path = ground_truth_dir.join("epochs.csv");
+            eprintln!("\nComparing epochs (stop epoch {})", stop_epoch);
+            if let Err(e) = dump::dump_epochs(&config_path, stop_epoch, &dolos_path) {
+                instance_failures.push(format!("{}:epochs dump failed: {}", dir_name, e));
+            } else if gt_path.exists() {
+                match compare_csvs(&dolos_path, &gt_path, &[0], 20) {
+                    Ok(n) if n > 0 => instance_failures.push(format!("{}:epochs ({} diffs)", dir_name, n)),
+                    Err(e) => instance_failures.push(format!("{}:epochs compare failed: {}", dir_name, e)),
+                    _ => {}
+                }
+            } else {
+                eprintln!("  ground-truth file missing, skipping: {}", gt_path.display());
+            }
+        }
 
-    for expected in expected_epochs {
-        let actual = load_epoch_from_archive(&instance.archive, &eras, expected.number)?;
-        let context = format!("epoch {}", expected.number);
-
-        compare_fields!(
-            context,
-            expected,
-            actual,
-            report,
-            [("number", expected.number, actual.number)]
-        )?;
-
-        let expected_pots = &expected.initial_pots;
-        let actual_pots = &actual.initial_pots;
-        let pots_missing = expected_pots.reserves == 0
-            && expected_pots.treasury == 0
-            && expected_pots.rewards == 0
-            && expected_pots.utxos == 0
-            && expected_pots.fees == 0;
-
-        if !pots_missing {
-            let pot_fields = [
-                (
-                    "pots.reserves",
-                    expected_pots.reserves,
-                    actual_pots.reserves,
-                ),
-                (
-                    "pots.treasury",
-                    expected_pots.treasury,
-                    actual_pots.treasury,
-                ),
-                ("pots.utxos", expected_pots.utxos, actual_pots.utxos),
-                ("pots.rewards", expected_pots.rewards, actual_pots.rewards),
-                ("pots.fees", expected_pots.fees, actual_pots.fees),
-            ];
-
-            for (field, expected_value, actual_value) in pot_fields {
-                if expected_value != actual_value {
-                    report.mismatches += 1;
-                    if report.mismatch_samples.len() < 20 {
-                        report.mismatch_samples.push(
-                            crate::harness::assertions::format_pot_mismatch(
-                                &context,
-                                field,
-                                expected_value,
-                                actual_value,
-                            ),
-                        );
-                    }
-                } else {
-                    report.matches += 1;
+        // Delegation
+        {
+            let dolos_path = dump::delegation_csv_path(&dumps_dir, subject_epoch);
+            let gt_path = ground_truth_dir.join(format!("delegation-{}.csv", subject_epoch));
+            eprintln!("\nComparing delegation (subject epoch {})", subject_epoch);
+            if dolos_path.exists() && gt_path.exists() {
+                match compare_csvs(&dolos_path, &gt_path, &[0], 20) {
+                    Ok(n) if n > 0 => instance_failures.push(format!("{}:delegation ({} diffs)", dir_name, n)),
+                    Err(e) => instance_failures.push(format!("{}:delegation compare failed: {}", dir_name, e)),
+                    _ => {}
+                }
+            } else {
+                if !dolos_path.exists() {
+                    eprintln!("  dolos dump missing, skipping: {}", dolos_path.display());
+                }
+                if !gt_path.exists() {
+                    eprintln!("  ground-truth file missing, skipping: {}", gt_path.display());
                 }
             }
         }
 
-        if let (Some(expected_nonces), Some(actual_nonces)) = (&expected.nonces, &actual.nonces) {
-            compare_fields!(
-                context,
-                expected,
-                actual,
-                report,
-                [(
-                    "nonces.active",
-                    expected_nonces.active,
-                    actual_nonces.active
-                )]
-            )?;
-        }
-    }
-
-    Ok(())
-}
-
-fn ground_truth_compare(name: &str, paths: &TestPaths) -> InstanceReport {
-    let mut report = InstanceReport::new(name.to_string());
-    let dolos_config = paths.dolos_config();
-    let eras_fixture = paths.eras_fixture();
-    let epochs_fixture = paths.epochs_fixture();
-
-    if !dolos_config.exists() {
-        report.errors.push("missing dolos.toml".to_string());
-        return report;
-    }
-
-    if !eras_fixture.exists() || !epochs_fixture.exists() {
-        report
-            .errors
-            .push("ground-truth fixtures not found".to_string());
-        return report;
-    }
-
-    let instance = match InstanceHandle::open(paths) {
-        Ok(instance) => instance,
-        Err(e) => {
-            report.errors.push(format!("failed to open instance: {e}"));
-            return report;
-        }
-    };
-
-    if let Err(e) = compare_eras(name, &instance, paths, &mut report) {
-        report.errors.push(format!("era compare failed: {e}"));
-    }
-
-    if let Err(e) = compare_epochs(name, &instance, paths, &mut report) {
-        report.errors.push(format!("epoch compare failed: {e}"));
-    }
-
-    report
-}
-
-fn find_test_instances() -> Result<Vec<PathBuf>> {
-    let root = instances_root()?;
-    let mut instances = Vec::new();
-
-    for entry in std::fs::read_dir(&root)? {
-        let entry = entry?;
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
+        // Stake
+        {
+            let dolos_path = dump::stake_csv_path(&dumps_dir, subject_epoch);
+            let gt_path = ground_truth_dir.join(format!("stake-{}.csv", subject_epoch));
+            eprintln!("\nComparing stake (subject epoch {})", subject_epoch);
+            if dolos_path.exists() && gt_path.exists() {
+                match compare_csvs(&dolos_path, &gt_path, &[0, 1], 20) {
+                    Ok(n) if n > 0 => instance_failures.push(format!("{}:stake ({} diffs)", dir_name, n)),
+                    Err(e) => instance_failures.push(format!("{}:stake compare failed: {}", dir_name, e)),
+                    _ => {}
+                }
+            } else {
+                if !dolos_path.exists() {
+                    eprintln!("  dolos dump missing, skipping: {}", dolos_path.display());
+                }
+                if !gt_path.exists() {
+                    eprintln!("  ground-truth file missing, skipping: {}", gt_path.display());
+                }
+            }
         }
 
-        let name = match path.file_name().and_then(|v| v.to_str()) {
-            Some(name) => name,
-            None => continue,
-        };
-
-        if name.starts_with("test-") {
-            instances.push(path);
-        }
-    }
-
-    instances.sort();
-    Ok(instances)
-}
-
-#[test]
-fn cardano_ground_truth_instances() {
-    let instances = find_test_instances().unwrap();
-
-    if instances.is_empty() {
-        println!("[INFO] No test-* instances found");
-        return;
-    }
-
-    println!("[INFO] Found {} test instance(s):", instances.len());
-    for instance in &instances {
-        if let Some(name) = instance.file_name().and_then(|v| v.to_str()) {
-            println!("  - {}", name);
-        } else {
-            println!("  - {}", instance.display());
-        }
-    }
-
-    let mut reports = Vec::new();
-    for instance_root in instances {
-        let name = instance_root
-            .file_name()
-            .and_then(|v| v.to_str())
-            .unwrap_or("<unknown>")
-            .to_string();
-        let paths = TestPaths { instance_root };
-        reports.push(ground_truth_compare(&name, &paths));
-    }
-
-    let mut table = Table::new();
-    table.load_preset(UTF8_FULL);
-    table.set_header(vec!["Instance", "Matches", "Mismatches", "Errors"]);
-
-    table.set_header(vec!["Instance", "M", "X", "E"]);
-
-    for report in &reports {
-        table.add_row(vec![
-            Cell::new(&report.display_name),
-            Cell::new(report.matches),
-            Cell::new(report.mismatches),
-            Cell::new(report.errors.len()),
-        ]);
-    }
-
-    println!("{table}");
-
-    for report in &reports {
-        if report.mismatch_samples.is_empty() && report.errors.is_empty() {
-            continue;
+        // Rewards
+        {
+            let dolos_path = dumps_dir.join("rewards.csv");
+            let gt_path = ground_truth_dir.join("rewards.csv");
+            eprintln!("\nComparing rewards (subject epoch {})", subject_epoch);
+            if let Err(e) = dump::dump_rewards(&config_path, subject_epoch, &dolos_path) {
+                instance_failures.push(format!("{}:rewards dump failed: {}", dir_name, e));
+            } else if gt_path.exists() {
+                match compare_csvs(&dolos_path, &gt_path, &[0, 1, 3, 4], 20) {
+                    Ok(n) if n > 0 => instance_failures.push(format!("{}:rewards ({} diffs)", dir_name, n)),
+                    Err(e) => instance_failures.push(format!("{}:rewards compare failed: {}", dir_name, e)),
+                    _ => {}
+                }
+            } else {
+                eprintln!("  ground-truth file missing, skipping: {}", gt_path.display());
+            }
         }
 
-        println!("[DETAIL] {}", report.display_name);
-        for mismatch in &report.mismatch_samples {
-            println!("  - {mismatch}");
-        }
-        for error in &report.errors {
-            println!("  - ERROR: {error}");
-        }
+        all_failures.extend(instance_failures);
     }
 
-    let total_mismatches: usize = reports.iter().map(|r| r.mismatches).sum();
-    let total_errors: usize = reports.iter().map(|r| r.errors.len()).sum();
-
-    if total_mismatches > 0 || total_errors > 0 {
+    if !all_failures.is_empty() {
         panic!(
-            "Ground-truth validation failed: {} mismatches, {} errors",
-            total_mismatches, total_errors
+            "\n{} ground-truth comparison(s) failed:\n  - {}",
+            all_failures.len(),
+            all_failures.join("\n  - ")
         );
     }
 }

@@ -4,16 +4,10 @@ use std::path::Path;
 use dolos_core::Genesis;
 use pallas::ledger::addresses::Network;
 
+use crate::network_from_genesis;
 use crate::pallas_extras;
 
 use super::{PoolHash, RupdWork, StakeSnapshot};
-
-fn network_from_genesis(genesis: &Genesis) -> Network {
-    match genesis.shelley.network_id.as_deref() {
-        Some("Mainnet") => Network::Mainnet,
-        _ => Network::Testnet,
-    }
-}
 
 fn bech32_pool(pool: &PoolHash) -> std::io::Result<String> {
     let hrp = bech32::Hrp::parse_unchecked("pool");
@@ -22,7 +16,7 @@ fn bech32_pool(pool: &PoolHash) -> std::io::Result<String> {
 }
 
 pub fn dump_snapshot_csv(work: &RupdWork, genesis: &Genesis, out_dir: &Path) {
-    let Some((snapshot_epoch, _)) = work.relevant_epochs() else {
+    let Some((_, earned_epoch)) = work.relevant_epochs() else {
         return;
     };
 
@@ -33,8 +27,8 @@ pub fn dump_snapshot_csv(work: &RupdWork, genesis: &Genesis, out_dir: &Path) {
         return;
     }
 
-    let pools_path = out_dir.join(format!("{}-pools.csv", snapshot_epoch));
-    let accounts_path = out_dir.join(format!("{}-accounts.csv", snapshot_epoch));
+    let pools_path = out_dir.join(format!("delegation-{}.csv", earned_epoch));
+    let accounts_path = out_dir.join(format!("stake-{}.csv", earned_epoch));
 
     if let Err(err) = dump_pools_csv(&work.snapshot, &pools_path) {
         tracing::warn!(

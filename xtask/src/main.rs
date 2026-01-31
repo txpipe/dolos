@@ -3,12 +3,9 @@ use clap::{Parser, Subcommand};
 use xshell::{cmd, Shell};
 
 mod bootstrap;
-mod compare_rupd_dbsync;
 mod config;
-mod create_test_instance;
-mod dbsync_query;
-mod delete_test_instance;
 mod ground_truth;
+mod test_instance;
 mod util;
 
 #[derive(Parser)]
@@ -27,23 +24,13 @@ enum Commands {
     /// Bootstrap a local Mithril snapshot into an instance
     BootstrapMithrilLocal(bootstrap::BootstrapArgs),
 
-    /// Generate ground-truth fixtures from cardano-db-sync
-    CardanoGroundTruth(ground_truth::GroundTruthArgs),
+    /// Ground-truth fixture commands (generate, compare, query)
+    #[command(subcommand)]
+    GroundTruth(ground_truth::GroundTruthCmd),
 
-    /// Create a test instance and ground-truth fixtures
-    CreateTestInstance(create_test_instance::CreateTestInstanceArgs),
-
-    /// Delete a test instance directory
-    DeleteTestInstance(delete_test_instance::DeleteTestInstanceArgs),
-
-    /// Query DBSync: total delegation per pool for an epoch
-    DbsyncPoolDelegation(dbsync_query::PoolDelegationArgs),
-
-    /// Query DBSync: stake amount per account for an epoch
-    DbsyncAccountStake(dbsync_query::AccountStakeArgs),
-
-    /// Compare RUPD snapshot CSVs with DBSync for an epoch
-    CompareRupdDbsync(compare_rupd_dbsync::CompareArgs),
+    /// Test instance management commands (create, delete)
+    #[command(subcommand)]
+    TestInstance(test_instance::TestInstanceCmd),
 }
 
 fn main() -> Result<()> {
@@ -56,12 +43,8 @@ fn main() -> Result<()> {
             cmd!(sh, "cargo test --test smoke -- --ignored --nocapture").run()?;
         }
         Commands::BootstrapMithrilLocal(args) => bootstrap::run(&sh, &args)?,
-        Commands::CardanoGroundTruth(args) => ground_truth::run(&args)?,
-        Commands::CreateTestInstance(args) => create_test_instance::run(&sh, &args)?,
-        Commands::DeleteTestInstance(args) => delete_test_instance::run(&args)?,
-        Commands::DbsyncPoolDelegation(args) => dbsync_query::run_pool_delegation(&args)?,
-        Commands::DbsyncAccountStake(args) => dbsync_query::run_account_stake(&args)?,
-        Commands::CompareRupdDbsync(args) => compare_rupd_dbsync::run(&args)?,
+        Commands::GroundTruth(cmd) => ground_truth::run(cmd)?,
+        Commands::TestInstance(cmd) => test_instance::run(&sh, cmd)?,
     }
 
     Ok(())
