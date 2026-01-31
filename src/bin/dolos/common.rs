@@ -29,10 +29,6 @@ pub fn open_archive_store(config: &RootConfig) -> Result<storage::ArchiveStoreBa
     storage::open_archive_store(config)
 }
 
-pub fn open_index_store(config: &RootConfig) -> Result<storage::IndexStoreBackend, Error> {
-    storage::open_index_store(config)
-}
-
 pub fn open_state_store(config: &RootConfig) -> Result<storage::StateStoreBackend, Error> {
     storage::open_state_store(config)
 }

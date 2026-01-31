@@ -301,6 +301,7 @@ impl<T: TableRow> Formatter<T> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn dump_logs<T: TableRow>(
     archive: &impl ArchiveStore,
     ns: Namespace,
