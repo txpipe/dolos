@@ -55,14 +55,14 @@ fn refs_for_address<D: Domain>(
     }
 }
 
-async fn blocks_for_address<D: Domain>(
+async fn blocks_for_address<D>(
     domain: &Facade<D>,
     address: &str,
     start_slot: BlockSlot,
     end_slot: BlockSlot,
 ) -> Result<(Vec<(BlockSlot, Option<Vec<u8>>)>, VKeyOrAddress), Error>
 where
-    D: Clone + Send + Sync + 'static,
+    D: Domain + Clone + Send + Sync + 'static,
 {
     if address.starts_with("addr_vkh") || address.starts_with("script") {
         let (_, addr) = bech32::decode(address).expect("failed to parse");
@@ -99,9 +99,9 @@ where
     }
 }
 
-async fn is_address_in_chain<D: Domain>(domain: &Facade<D>, address: &str) -> Result<bool, Error>
+async fn is_address_in_chain<D>(domain: &Facade<D>, address: &str) -> Result<bool, Error>
 where
-    D: Clone + Send + Sync + 'static,
+    D: Domain + Clone + Send + Sync + 'static,
 {
     let end_slot = domain.get_tip_slot()?;
     let start_slot = 0;
@@ -137,9 +137,9 @@ where
     }
 }
 
-async fn is_asset_in_chain<D: Domain>(domain: &Facade<D>, asset: &[u8]) -> Result<bool, Error>
+async fn is_asset_in_chain<D>(domain: &Facade<D>, asset: &[u8]) -> Result<bool, Error>
 where
-    D: Clone + Send + Sync + 'static,
+    D: Domain + Clone + Send + Sync + 'static,
 {
     let end_slot = domain.get_tip_slot()?;
     let start_slot = 0;
@@ -156,13 +156,13 @@ where
         .any(|(_, block)| block.is_some()))
 }
 
-pub async fn utxos<D: Domain>(
+pub async fn utxos<D>(
     Path(address): Path<String>,
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<AddressUtxoContentInner>>, Error>
 where
-    D: Clone + Send + Sync + 'static,
+    D: Domain + Clone + Send + Sync + 'static,
 {
     let pagination = Pagination::try_from(params)?;
 
@@ -181,13 +181,13 @@ where
     Ok(Json(utxos))
 }
 
-pub async fn utxos_with_asset<D: Domain>(
+pub async fn utxos_with_asset<D>(
     Path((address, asset)): Path<(String, String)>,
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<AddressUtxoContentInner>>, Error>
 where
-    D: Clone + Send + Sync + 'static,
+    D: Domain + Clone + Send + Sync + 'static,
 {
     let pagination = Pagination::try_from(params)?;
 
@@ -243,13 +243,13 @@ fn address_matches(address: &VKeyOrAddress, candidate: &Address) -> bool {
     }
 }
 
-async fn has_address<D: Domain>(
+async fn has_address<D>(
     domain: &Facade<D>,
     address: &VKeyOrAddress,
     tx: &MultiEraTx<'_>,
 ) -> Result<bool, StatusCode>
 where
-    D: Clone + Send + Sync + 'static,
+    D: Domain + Clone + Send + Sync + 'static,
 {
     for (_, output) in tx.produces() {
         let candidate = output
@@ -289,7 +289,7 @@ where
     Ok(false)
 }
 
-async fn find_txs<D: Domain>(
+async fn find_txs<D>(
     domain: &Facade<D>,
     address: &VKeyOrAddress,
     chain: &ChainSummary,
@@ -297,7 +297,7 @@ async fn find_txs<D: Domain>(
     block: &[u8],
 ) -> Result<Vec<AddressTransactionsContentInner>, StatusCode>
 where
-    D: Clone + Send + Sync + 'static,
+    D: Domain + Clone + Send + Sync + 'static,
 {
     let block = MultiEraBlock::decode(block).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -323,13 +323,13 @@ where
     Ok(matches)
 }
 
-pub async fn transactions<D: Domain>(
+pub async fn transactions<D>(
     Path(address): Path<String>,
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<AddressTransactionsContentInner>>, Error>
 where
-    D: Clone + Send + Sync + 'static,
+    D: Domain + Clone + Send + Sync + 'static,
 {
     let pagination = Pagination::try_from(params)?;
     pagination.enforce_max_scan_limit()?;
@@ -370,13 +370,13 @@ where
     Ok(Json(transactions))
 }
 
-pub async fn txs<D: Domain>(
+pub async fn txs<D>(
     Path(address): Path<String>,
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<String>>, Error>
 where
-    D: Clone + Send + Sync + 'static,
+    D: Domain + Clone + Send + Sync + 'static,
 {
     let pagination = Pagination::try_from(params)?;
     pagination.enforce_max_scan_limit()?;

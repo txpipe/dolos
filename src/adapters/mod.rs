@@ -49,9 +49,7 @@ impl DomainAdapter {
     pub fn shutdown(&self) -> Result<(), DomainError> {
         tracing::info!("domain adapter: starting graceful shutdown");
 
-        self.wal
-            .shutdown()
-            .map_err(|e| DomainError::WalError(e.into()))?;
+        self.wal.shutdown().map_err(DomainError::WalError)?;
         self.state.shutdown().map_err(DomainError::StateError)?;
         self.archive.shutdown().map_err(DomainError::ArchiveError)?;
         self.indexes.shutdown().map_err(DomainError::IndexError)?;
