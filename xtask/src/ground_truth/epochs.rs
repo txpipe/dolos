@@ -1,10 +1,7 @@
 //! Epoch dataset: fetch from DBSync and write to CSV.
 
 use anyhow::{Context, Result};
-use std::fs::File;
 use std::io::Write;
-use std::path::Path;
-use std::process::{Command, Stdio};
 
 pub(super) struct EpochRow {
     pub epoch_no: i64,
@@ -96,43 +93,6 @@ pub(super) fn write_csv(path: &std::path::Path, epochs: &[EpochRow]) -> Result<(
             epoch.fees,
             epoch.nonce
         )?;
-    }
-
-    Ok(())
-}
-
-pub(super) fn dump_dolos_csv(config_path: &Path, epoch: u64, output_path: &Path) -> Result<()> {
-    let file = File::create(output_path)
-        .with_context(|| format!("writing epochs csv: {}", output_path.display()))?;
-
-    let status = Command::new("cargo")
-        .arg("run")
-        .arg("-p")
-        .arg("dolos")
-        .arg("--features")
-        .arg("utils")
-        .arg("--")
-        .arg("data")
-        .arg("dump-logs")
-        .arg("--namespace")
-        .arg("epochs")
-        .arg("--format")
-        .arg("dbsync")
-        .arg("--epoch-start")
-        .arg("1")
-        .arg("--epoch-end")
-        .arg(epoch.to_string())
-        .arg("--take")
-        .arg("0")
-        .arg("--config")
-        .arg(config_path)
-        .stdout(Stdio::from(file))
-        .stderr(Stdio::inherit())
-        .status()
-        .context("running dolos dump-logs for epochs")?;
-
-    if !status.success() {
-        anyhow::bail!("dolos dump-logs failed for epochs");
     }
 
     Ok(())

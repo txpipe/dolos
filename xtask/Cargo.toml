@@ -23,5 +23,3 @@ postgres = "0.19"
 postgres-native-tls = "0.5"
 bech32 = { workspace = true }
 pallas = { workspace = true }
-csv-diff = "0.1"
-csv = "1"

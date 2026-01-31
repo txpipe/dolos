@@ -1,10 +1,7 @@
 //! Era dataset: fetch from DBSync and write to CSV.
 
 use anyhow::{Context, Result};
-use std::fs::File;
 use std::io::Write;
-use std::path::Path;
-use std::process::{Command, Stdio};
 
 use crate::config::Network;
 
@@ -104,39 +101,6 @@ pub(super) fn write_csv(path: &std::path::Path, eras: &[EraRow]) -> Result<()> {
             "{},{},{},{},{}",
             era.protocol, era.start_epoch, end_epoch, era.epoch_length, era.slot_length
         )?;
-    }
-
-    Ok(())
-}
-
-pub(super) fn dump_dolos_csv(config_path: &Path, output_path: &Path) -> Result<()> {
-    let file = File::create(output_path)
-        .with_context(|| format!("writing eras csv: {}", output_path.display()))?;
-
-    let status = Command::new("cargo")
-        .arg("run")
-        .arg("-p")
-        .arg("dolos")
-        .arg("--features")
-        .arg("utils")
-        .arg("--")
-        .arg("data")
-        .arg("dump-state")
-        .arg("--namespace")
-        .arg("eras")
-        .arg("--format")
-        .arg("dbsync")
-        .arg("--count")
-        .arg("0")
-        .arg("--config")
-        .arg(config_path)
-        .stdout(Stdio::from(file))
-        .stderr(Stdio::inherit())
-        .status()
-        .context("running dolos dump-state for eras")?;
-
-    if !status.success() {
-        anyhow::bail!("dolos dump-state failed for eras");
     }
 
     Ok(())
