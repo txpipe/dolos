@@ -167,9 +167,10 @@ pub struct PotDelta {
 }
 
 impl PotDelta {
-    pub fn neutral(protocol_version: u16) -> Self {
+    pub fn neutral(protocol_version: u16, mark_protocol_version: u16) -> Self {
         Self {
             protocol_version,
+            mark_protocol_version,
             produced_utxos: 0,
             consumed_utxos: 0,
             gathered_fees: 0,
@@ -190,7 +191,6 @@ impl PotDelta {
             proposal_invalid_refunds: 0,
             deposit_per_account: None,
             deposit_per_pool: None,
-            mark_protocol_version: 0,
         }
     }
 
@@ -446,7 +446,7 @@ mod tests {
         let delta = PotDelta {
             consumed_utxos: 3458053,
             gathered_fees: 5612092,
-            ..PotDelta::neutral(0)
+            ..PotDelta::neutral(0, 0)
         };
 
         let incentives = EpochIncentives {
@@ -498,7 +498,7 @@ mod tests {
         let delta = PotDelta {
             deposit_per_pool: Some(500_000_000),
             deposit_per_account: Some(2_000_000),
-            ..PotDelta::neutral(6)
+            ..PotDelta::neutral(6, 6)
         };
 
         let pots = apply_delta(pots, &incentives, &delta);
@@ -544,7 +544,7 @@ mod tests {
             unspendable_rewards: 295063003292,
             deposit_per_pool: Some(500_000_000),
             deposit_per_account: Some(2_000_000),
-            ..PotDelta::neutral(7)
+            ..PotDelta::neutral(7, 7)
         };
 
         let pots = apply_delta(pots, &incentives, &delta);
