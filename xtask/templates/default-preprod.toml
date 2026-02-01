@@ -11,6 +11,20 @@ path = "./data"
 backend = "redb"
 max_history = 129600
 
+[storage.state]
+backend = "fjall"
+
+[storage.archive]
+backend = "redb"
+
+[storage.index]
+backend = "fjall"
+
+[genesis]
+byron_path = "byron.json"
+shelley_path = "shelley.json"
+alonzo_path = "alonzo.json"
+conway_path = "conway.json"
 [sync]
 pull_batch_size = 200
 

@@ -81,6 +81,12 @@ pub fn run(args: &GenerateArgs) -> Result<()> {
     super::epochs::write_csv(&epochs_path, &epochs).with_context(|| "writing epochs csv")?;
     println!(" Wrote: {}", epochs_path.display());
 
+    // Write pparams.csv
+    let pparams = super::pparams::fetch(dbsync_url, epoch_limit)?;
+    let pparams_path = output_dir.join("pparams.csv");
+    super::pparams::write_csv(&pparams_path, &pparams).with_context(|| "writing pparams csv")?;
+    println!("  Wrote: {}", pparams_path.display());
+
     // Fetch and write pools, accounts, rewards for earned_epoch (= epoch - 1)
     let subject_epoch = args.epoch.saturating_sub(2);
 

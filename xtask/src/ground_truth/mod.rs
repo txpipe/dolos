@@ -8,6 +8,7 @@ mod delegation;
 mod epochs;
 mod eras;
 pub mod generate;
+mod pparams;
 mod query;
 mod rewards;
 mod stake;

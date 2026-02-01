@@ -1,6 +1,7 @@
 mod harness;
 
-use harness::compare::compare_csvs;
+use csv_diff::diff_row::DiffByteRecord;
+use harness::compare::{compare_csvs, compare_csvs_with_ignore};
 use harness::config::{load_xtask_config, resolve_path};
 use harness::dump;
 
@@ -43,7 +44,10 @@ fn compare_ground_truth_instances() {
         // Parse test-{network}-{epoch}
         let parts: Vec<&str> = dir_name.splitn(3, '-').collect();
         if parts.len() < 3 {
-            eprintln!("skipping instance with unexpected name format: {}", dir_name);
+            eprintln!(
+                "skipping instance with unexpected name format: {}",
+                dir_name
+            );
             continue;
         }
         let network = parts[1];
@@ -66,8 +70,10 @@ fn compare_ground_truth_instances() {
         let dumps_dir = instance_dir.join("dumps");
         std::fs::create_dir_all(&dumps_dir).expect("creating dumps dir");
 
-        eprintln!("\n=== Instance: {} (network={}, stop_epoch={}, subject_epoch={}) ===",
-            dir_name, network, stop_epoch, subject_epoch);
+        eprintln!(
+            "\n=== Instance: {} (network={}, stop_epoch={}, subject_epoch={}) ===",
+            dir_name, network, stop_epoch, subject_epoch
+        );
 
         let mut instance_failures = Vec::new();
 
@@ -79,13 +85,34 @@ fn compare_ground_truth_instances() {
             if let Err(e) = dump::dump_eras(&config_path, &dolos_path) {
                 instance_failures.push(format!("{}:eras dump failed: {}", dir_name, e));
             } else if gt_path.exists() {
-                match compare_csvs(&dolos_path, &gt_path, &[0], 20) {
-                    Ok(n) if n > 0 => instance_failures.push(format!("{}:eras ({} diffs)", dir_name, n)),
-                    Err(e) => instance_failures.push(format!("{}:eras compare failed: {}", dir_name, e)),
+                match compare_csvs_with_ignore(&dolos_path, &gt_path, &[0], 20, |diff| {
+                    // Ignore Byron-era rows (protocol < 2) — no DBSync ground truth
+                    let record = match diff {
+                        DiffByteRecord::Add(info) | DiffByteRecord::Delete(info) => {
+                            info.byte_record()
+                        }
+                        DiffByteRecord::Modify { add, .. } => add.byte_record(),
+                    };
+                    record
+                        .get(0)
+                        .and_then(|v| std::str::from_utf8(v).ok())
+                        .and_then(|v| v.parse::<u16>().ok())
+                        .map(|p| p < 2)
+                        .unwrap_or(false)
+                }) {
+                    Ok(n) if n > 0 => {
+                        instance_failures.push(format!("{}:eras ({} diffs)", dir_name, n))
+                    }
+                    Err(e) => {
+                        instance_failures.push(format!("{}:eras compare failed: {}", dir_name, e))
+                    }
                     _ => {}
                 }
             } else {
-                eprintln!("  ground-truth file missing, skipping: {}", gt_path.display());
+                eprintln!(
+                    "  ground-truth file missing, skipping: {}",
+                    gt_path.display()
+                );
             }
         }
 
@@ -97,13 +124,70 @@ fn compare_ground_truth_instances() {
             if let Err(e) = dump::dump_epochs(&config_path, stop_epoch, &dolos_path) {
                 instance_failures.push(format!("{}:epochs dump failed: {}", dir_name, e));
             } else if gt_path.exists() {
-                match compare_csvs(&dolos_path, &gt_path, &[0], 20) {
-                    Ok(n) if n > 0 => instance_failures.push(format!("{}:epochs ({} diffs)", dir_name, n)),
-                    Err(e) => instance_failures.push(format!("{}:epochs compare failed: {}", dir_name, e)),
+                match compare_csvs_with_ignore(&dolos_path, &gt_path, &[0], 20, |diff| {
+                    let record = match diff {
+                        DiffByteRecord::Add(info) | DiffByteRecord::Delete(info) => {
+                            info.byte_record()
+                        }
+                        DiffByteRecord::Modify { add, .. } => add.byte_record(),
+                    };
+                    record
+                        .get(1)
+                        .and_then(|v| std::str::from_utf8(v).ok())
+                        .and_then(|v| v.parse::<u16>().ok())
+                        .map(|p| p < 2)
+                        .unwrap_or(false)
+                }) {
+                    Ok(n) if n > 0 => {
+                        instance_failures.push(format!("{}:epochs ({} diffs)", dir_name, n))
+                    }
+                    Err(e) => {
+                        instance_failures.push(format!("{}:epochs compare failed: {}", dir_name, e))
+                    }
                     _ => {}
                 }
             } else {
-                eprintln!("  ground-truth file missing, skipping: {}", gt_path.display());
+                eprintln!(
+                    "  ground-truth file missing, skipping: {}",
+                    gt_path.display()
+                );
+            }
+        }
+
+        // PParams
+        {
+            let dolos_path = dumps_dir.join("pparams.csv");
+            let gt_path = ground_truth_dir.join("pparams.csv");
+            eprintln!("\nComparing pparams (stop epoch {})", stop_epoch);
+            if let Err(e) = dump::dump_pparams(&config_path, stop_epoch, &dolos_path) {
+                instance_failures.push(format!("{}:pparams dump failed: {}", dir_name, e));
+            } else if gt_path.exists() {
+                match compare_csvs_with_ignore(&dolos_path, &gt_path, &[0], 20, |diff| {
+                    let record = match diff {
+                        DiffByteRecord::Add(info) | DiffByteRecord::Delete(info) => {
+                            info.byte_record()
+                        }
+                        DiffByteRecord::Modify { add, .. } => add.byte_record(),
+                    };
+                    record
+                        .get(1)
+                        .and_then(|v| std::str::from_utf8(v).ok())
+                        .and_then(|v| v.parse::<u16>().ok())
+                        .map(|p| p < 2)
+                        .unwrap_or(false)
+                }) {
+                    Ok(n) if n > 0 => {
+                        instance_failures.push(format!("{}:pparams ({} diffs)", dir_name, n))
+                    }
+                    Err(e) => instance_failures
+                        .push(format!("{}:pparams compare failed: {}", dir_name, e)),
+                    _ => {}
+                }
+            } else {
+                eprintln!(
+                    "  ground-truth file missing, skipping: {}",
+                    gt_path.display()
+                );
             }
         }
 
@@ -114,8 +198,11 @@ fn compare_ground_truth_instances() {
             eprintln!("\nComparing delegation (subject epoch {})", subject_epoch);
             if dolos_path.exists() && gt_path.exists() {
                 match compare_csvs(&dolos_path, &gt_path, &[0], 20) {
-                    Ok(n) if n > 0 => instance_failures.push(format!("{}:delegation ({} diffs)", dir_name, n)),
-                    Err(e) => instance_failures.push(format!("{}:delegation compare failed: {}", dir_name, e)),
+                    Ok(n) if n > 0 => {
+                        instance_failures.push(format!("{}:delegation ({} diffs)", dir_name, n))
+                    }
+                    Err(e) => instance_failures
+                        .push(format!("{}:delegation compare failed: {}", dir_name, e)),
                     _ => {}
                 }
             } else {
@@ -123,7 +210,10 @@ fn compare_ground_truth_instances() {
                     eprintln!("  dolos dump missing, skipping: {}", dolos_path.display());
                 }
                 if !gt_path.exists() {
-                    eprintln!("  ground-truth file missing, skipping: {}", gt_path.display());
+                    eprintln!(
+                        "  ground-truth file missing, skipping: {}",
+                        gt_path.display()
+                    );
                 }
             }
         }
@@ -135,8 +225,12 @@ fn compare_ground_truth_instances() {
             eprintln!("\nComparing stake (subject epoch {})", subject_epoch);
             if dolos_path.exists() && gt_path.exists() {
                 match compare_csvs(&dolos_path, &gt_path, &[0, 1], 20) {
-                    Ok(n) if n > 0 => instance_failures.push(format!("{}:stake ({} diffs)", dir_name, n)),
-                    Err(e) => instance_failures.push(format!("{}:stake compare failed: {}", dir_name, e)),
+                    Ok(n) if n > 0 => {
+                        instance_failures.push(format!("{}:stake ({} diffs)", dir_name, n))
+                    }
+                    Err(e) => {
+                        instance_failures.push(format!("{}:stake compare failed: {}", dir_name, e))
+                    }
                     _ => {}
                 }
             } else {
@@ -144,7 +238,10 @@ fn compare_ground_truth_instances() {
                     eprintln!("  dolos dump missing, skipping: {}", dolos_path.display());
                 }
                 if !gt_path.exists() {
-                    eprintln!("  ground-truth file missing, skipping: {}", gt_path.display());
+                    eprintln!(
+                        "  ground-truth file missing, skipping: {}",
+                        gt_path.display()
+                    );
                 }
             }
         }
@@ -158,12 +255,18 @@ fn compare_ground_truth_instances() {
                 instance_failures.push(format!("{}:rewards dump failed: {}", dir_name, e));
             } else if gt_path.exists() {
                 match compare_csvs(&dolos_path, &gt_path, &[0, 1, 3, 4], 20) {
-                    Ok(n) if n > 0 => instance_failures.push(format!("{}:rewards ({} diffs)", dir_name, n)),
-                    Err(e) => instance_failures.push(format!("{}:rewards compare failed: {}", dir_name, e)),
+                    Ok(n) if n > 0 => {
+                        instance_failures.push(format!("{}:rewards ({} diffs)", dir_name, n))
+                    }
+                    Err(e) => instance_failures
+                        .push(format!("{}:rewards compare failed: {}", dir_name, e)),
                     _ => {}
                 }
             } else {
-                eprintln!("  ground-truth file missing, skipping: {}", gt_path.display());
+                eprintln!(
+                    "  ground-truth file missing, skipping: {}",
+                    gt_path.display()
+                );
             }
         }
 
