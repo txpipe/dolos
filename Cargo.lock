@@ -1229,7 +1229,7 @@ dependencies = [
  "miette",
  "mithril-client",
  "nix",
- "pallas 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=ab27006)",
+ "pallas 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=4986428)",
  "paste",
  "protoc-wkt",
  "rayon",
@@ -1268,7 +1268,7 @@ dependencies = [
  "itertools 0.14.0",
  "num-bigint",
  "num-rational",
- "pallas 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=ab27006)",
+ "pallas 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=4986428)",
  "paste",
  "rayon",
  "self_cell",
@@ -1285,7 +1285,7 @@ dependencies = [
  "futures-core",
  "hex",
  "itertools 0.14.0",
- "pallas 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=ab27006)",
+ "pallas 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=4986428)",
  "proptest",
  "rayon",
  "regex",
@@ -1305,7 +1305,7 @@ dependencies = [
  "dolos-core",
  "dolos-testing",
  "fjall",
- "pallas 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=ab27006)",
+ "pallas 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=4986428)",
  "tempfile",
  "thiserror 2.0.12",
  "tracing",
@@ -1329,7 +1329,7 @@ dependencies = [
  "num-bigint",
  "num-rational",
  "num-traits",
- "pallas 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=ab27006)",
+ "pallas 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=4986428)",
  "reqwest",
  "serde",
  "serde_json",
@@ -1349,7 +1349,7 @@ dependencies = [
  "dolos-testing",
  "hex",
  "itertools 0.14.0",
- "pallas 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=ab27006)",
+ "pallas 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=4986428)",
  "redb",
  "redb-extras",
  "serde",
@@ -1371,7 +1371,7 @@ dependencies = [
  "dolos-redb3",
  "futures-core",
  "futures-util",
- "pallas 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=ab27006)",
+ "pallas 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=4986428)",
  "rand 0.9.1",
  "tokio",
  "tokio-stream",
@@ -1391,7 +1391,7 @@ dependencies = [
  "jsonrpsee",
  "opentelemetry",
  "opentelemetry_sdk",
- "pallas 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=ab27006)",
+ "pallas 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=4986428)",
  "serde",
  "serde_json",
  "thiserror 2.0.12",
@@ -3194,19 +3194,19 @@ dependencies = [
 [[package]]
 name = "pallas"
 version = "1.0.0-alpha.3"
-source = "git+https://github.com/txpipe/pallas.git?rev=ab27006#ab27006d0b94acfedae4fb7e852bce30533d90c5"
+source = "git+https://github.com/txpipe/pallas.git?rev=4986428#498642871c9f04b28dc54d312538e8271139f9f1"
 dependencies = [
- "pallas-addresses 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=ab27006)",
- "pallas-codec 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=ab27006)",
- "pallas-configs 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=ab27006)",
- "pallas-crypto 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=ab27006)",
+ "pallas-addresses 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=4986428)",
+ "pallas-codec 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=4986428)",
+ "pallas-configs 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=4986428)",
+ "pallas-crypto 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=4986428)",
  "pallas-hardano",
- "pallas-network 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=ab27006)",
- "pallas-primitives 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=ab27006)",
- "pallas-traverse 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=ab27006)",
- "pallas-txbuilder 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=ab27006)",
- "pallas-utxorpc 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=ab27006)",
- "pallas-validate 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=ab27006)",
+ "pallas-network 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=4986428)",
+ "pallas-primitives 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=4986428)",
+ "pallas-traverse 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=4986428)",
+ "pallas-txbuilder 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=4986428)",
+ "pallas-utxorpc 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=4986428)",
+ "pallas-validate 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=4986428)",
 ]
 
 [[package]]
@@ -3244,15 +3244,15 @@ dependencies = [
 [[package]]
 name = "pallas-addresses"
 version = "1.0.0-alpha.3"
-source = "git+https://github.com/txpipe/pallas.git?rev=ab27006#ab27006d0b94acfedae4fb7e852bce30533d90c5"
+source = "git+https://github.com/txpipe/pallas.git?rev=4986428#498642871c9f04b28dc54d312538e8271139f9f1"
 dependencies = [
  "base58",
  "bech32 0.9.1",
  "crc",
  "cryptoxide",
  "hex",
- "pallas-codec 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=ab27006)",
- "pallas-crypto 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=ab27006)",
+ "pallas-codec 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=4986428)",
+ "pallas-crypto 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=4986428)",
  "thiserror 1.0.69",
 ]
 
@@ -3283,7 +3283,7 @@ dependencies = [
 [[package]]
 name = "pallas-codec"
 version = "1.0.0-alpha.3"
-source = "git+https://github.com/txpipe/pallas.git?rev=ab27006#ab27006d0b94acfedae4fb7e852bce30533d90c5"
+source = "git+https://github.com/txpipe/pallas.git?rev=4986428#498642871c9f04b28dc54d312538e8271139f9f1"
 dependencies = [
  "hex",
  "minicbor 0.26.4",
@@ -3310,13 +3310,13 @@ dependencies = [
 [[package]]
 name = "pallas-configs"
 version = "1.0.0-alpha.3"
-source = "git+https://github.com/txpipe/pallas.git?rev=ab27006#ab27006d0b94acfedae4fb7e852bce30533d90c5"
+source = "git+https://github.com/txpipe/pallas.git?rev=4986428#498642871c9f04b28dc54d312538e8271139f9f1"
 dependencies = [
  "base64 0.22.1",
  "num-rational",
- "pallas-addresses 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=ab27006)",
- "pallas-crypto 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=ab27006)",
- "pallas-primitives 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=ab27006)",
+ "pallas-addresses 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=4986428)",
+ "pallas-crypto 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=4986428)",
+ "pallas-primitives 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=4986428)",
  "serde",
  "serde_json",
  "serde_with 3.16.0",
@@ -3354,11 +3354,11 @@ dependencies = [
 [[package]]
 name = "pallas-crypto"
 version = "1.0.0-alpha.3"
-source = "git+https://github.com/txpipe/pallas.git?rev=ab27006#ab27006d0b94acfedae4fb7e852bce30533d90c5"
+source = "git+https://github.com/txpipe/pallas.git?rev=4986428#498642871c9f04b28dc54d312538e8271139f9f1"
 dependencies = [
  "cryptoxide",
  "hex",
- "pallas-codec 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=ab27006)",
+ "pallas-codec 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=4986428)",
  "rand_core 0.9.3",
  "serde",
  "thiserror 1.0.69",
@@ -3367,15 +3367,15 @@ dependencies = [
 [[package]]
 name = "pallas-hardano"
 version = "1.0.0-alpha.3"
-source = "git+https://github.com/txpipe/pallas.git?rev=ab27006#ab27006d0b94acfedae4fb7e852bce30533d90c5"
+source = "git+https://github.com/txpipe/pallas.git?rev=4986428#498642871c9f04b28dc54d312538e8271139f9f1"
 dependencies = [
  "binary-layout",
  "hex",
- "pallas-addresses 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=ab27006)",
- "pallas-codec 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=ab27006)",
- "pallas-crypto 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=ab27006)",
- "pallas-network 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=ab27006)",
- "pallas-traverse 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=ab27006)",
+ "pallas-addresses 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=4986428)",
+ "pallas-codec 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=4986428)",
+ "pallas-crypto 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=4986428)",
+ "pallas-network 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=4986428)",
+ "pallas-traverse 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=4986428)",
  "serde",
  "serde_json",
  "serde_with 3.16.0",
@@ -3423,13 +3423,13 @@ dependencies = [
 [[package]]
 name = "pallas-network"
 version = "1.0.0-alpha.3"
-source = "git+https://github.com/txpipe/pallas.git?rev=ab27006#ab27006d0b94acfedae4fb7e852bce30533d90c5"
+source = "git+https://github.com/txpipe/pallas.git?rev=4986428#498642871c9f04b28dc54d312538e8271139f9f1"
 dependencies = [
  "byteorder",
  "hex",
  "itertools 0.13.0",
- "pallas-codec 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=ab27006)",
- "pallas-crypto 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=ab27006)",
+ "pallas-codec 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=4986428)",
+ "pallas-crypto 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=4986428)",
  "rand 0.8.5",
  "socket2 0.5.9",
  "thiserror 1.0.69",
@@ -3469,11 +3469,11 @@ dependencies = [
 [[package]]
 name = "pallas-primitives"
 version = "1.0.0-alpha.3"
-source = "git+https://github.com/txpipe/pallas.git?rev=ab27006#ab27006d0b94acfedae4fb7e852bce30533d90c5"
+source = "git+https://github.com/txpipe/pallas.git?rev=4986428#498642871c9f04b28dc54d312538e8271139f9f1"
 dependencies = [
  "hex",
- "pallas-codec 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=ab27006)",
- "pallas-crypto 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=ab27006)",
+ "pallas-codec 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=4986428)",
+ "pallas-crypto 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=4986428)",
  "serde",
  "serde_json",
 ]
@@ -3515,14 +3515,14 @@ dependencies = [
 [[package]]
 name = "pallas-traverse"
 version = "1.0.0-alpha.3"
-source = "git+https://github.com/txpipe/pallas.git?rev=ab27006#ab27006d0b94acfedae4fb7e852bce30533d90c5"
+source = "git+https://github.com/txpipe/pallas.git?rev=4986428#498642871c9f04b28dc54d312538e8271139f9f1"
 dependencies = [
  "hex",
  "itertools 0.13.0",
- "pallas-addresses 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=ab27006)",
- "pallas-codec 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=ab27006)",
- "pallas-crypto 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=ab27006)",
- "pallas-primitives 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=ab27006)",
+ "pallas-addresses 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=4986428)",
+ "pallas-codec 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=4986428)",
+ "pallas-crypto 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=4986428)",
+ "pallas-primitives 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=4986428)",
  "paste",
  "serde",
  "thiserror 1.0.69",
@@ -3548,14 +3548,14 @@ dependencies = [
 [[package]]
 name = "pallas-txbuilder"
 version = "1.0.0-alpha.3"
-source = "git+https://github.com/txpipe/pallas.git?rev=ab27006#ab27006d0b94acfedae4fb7e852bce30533d90c5"
+source = "git+https://github.com/txpipe/pallas.git?rev=4986428#498642871c9f04b28dc54d312538e8271139f9f1"
 dependencies = [
  "hex",
- "pallas-addresses 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=ab27006)",
- "pallas-codec 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=ab27006)",
- "pallas-crypto 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=ab27006)",
- "pallas-primitives 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=ab27006)",
- "pallas-traverse 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=ab27006)",
+ "pallas-addresses 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=4986428)",
+ "pallas-codec 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=4986428)",
+ "pallas-crypto 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=4986428)",
+ "pallas-primitives 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=4986428)",
+ "pallas-traverse 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=4986428)",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -3597,13 +3597,13 @@ dependencies = [
 [[package]]
 name = "pallas-utxorpc"
 version = "1.0.0-alpha.3"
-source = "git+https://github.com/txpipe/pallas.git?rev=ab27006#ab27006d0b94acfedae4fb7e852bce30533d90c5"
+source = "git+https://github.com/txpipe/pallas.git?rev=4986428#498642871c9f04b28dc54d312538e8271139f9f1"
 dependencies = [
- "pallas-codec 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=ab27006)",
- "pallas-crypto 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=ab27006)",
- "pallas-primitives 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=ab27006)",
- "pallas-traverse 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=ab27006)",
- "pallas-validate 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=ab27006)",
+ "pallas-codec 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=4986428)",
+ "pallas-crypto 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=4986428)",
+ "pallas-primitives 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=4986428)",
+ "pallas-traverse 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=4986428)",
+ "pallas-validate 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=4986428)",
  "prost-types 0.13.5",
  "utxorpc-spec 0.18.1",
 ]
@@ -3630,16 +3630,16 @@ dependencies = [
 [[package]]
 name = "pallas-validate"
 version = "1.0.0-alpha.3"
-source = "git+https://github.com/txpipe/pallas.git?rev=ab27006#ab27006d0b94acfedae4fb7e852bce30533d90c5"
+source = "git+https://github.com/txpipe/pallas.git?rev=4986428#498642871c9f04b28dc54d312538e8271139f9f1"
 dependencies = [
  "chrono",
  "hex",
  "itertools 0.14.0",
- "pallas-addresses 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=ab27006)",
- "pallas-codec 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=ab27006)",
- "pallas-crypto 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=ab27006)",
- "pallas-primitives 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=ab27006)",
- "pallas-traverse 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=ab27006)",
+ "pallas-addresses 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=4986428)",
+ "pallas-codec 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=4986428)",
+ "pallas-crypto 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=4986428)",
+ "pallas-primitives 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=4986428)",
+ "pallas-traverse 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=4986428)",
  "pallas-uplc",
  "serde",
  "thiserror 1.0.69",
@@ -6581,7 +6581,7 @@ dependencies = [
  "dolos-cardano",
  "dolos-core",
  "hex",
- "pallas 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=ab27006)",
+ "pallas 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=4986428)",
  "postgres",
  "postgres-native-tls",
  "serde",

@@ -152,7 +152,7 @@ readme = "README.md"
 authors = ["TxPipe <hello@txpipe.io>"]
 
 [workspace.dependencies]
-pallas = { git = "https://github.com/txpipe/pallas.git", rev = "ab27006", features = ["hardano", "phase2"] }
+pallas = { git = "https://github.com/txpipe/pallas.git", rev = "4986428", features = ["hardano", "phase2"] }
 # pallas = { version = "1.0.0-alpha.3", features = ["hardano", "phase2"] }
 # pallas = { path = "../pallas/pallas", features = ["hardano", "phase2"] }
 
