@@ -233,6 +233,7 @@ where
     let filtered = iter.filter_ok(|(_, account)| {
         account
             .delegated_pool_live()
+            .or(account.retired_pool.as_ref())
             .is_some_and(|f| f.as_slice() == operator.as_slice())
     });
 
