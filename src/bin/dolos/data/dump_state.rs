@@ -163,7 +163,6 @@ impl TableRow for EraSummary {
             return vec![
                 "protocol",
                 "start_epoch",
-                "end_epoch",
                 "epoch_length",
                 "slot_length",
             ];
@@ -186,10 +185,6 @@ impl TableRow for EraSummary {
             return vec![
                 self.protocol.to_string(),
                 self.start.epoch.to_string(),
-                self.end
-                    .as_ref()
-                    .map(|x| x.epoch.to_string())
-                    .unwrap_or_default(),
                 self.epoch_length.to_string(),
                 self.slot_length.to_string(),
             ];

@@ -2,7 +2,8 @@ use std::marker::PhantomData;
 
 use comfy_table::Table;
 use dolos_cardano::{
-    eras::load_chain_summary_from_state, eras::log_epoch_range_to_key_range, model::RewardLog,
+    eras::load_chain_summary_from_state, eras::log_epoch_range_to_key_range,
+    model::{PParamKind, RewardLog},
     ChainSummary, EpochState, StakeLog,
 };
 use dolos_core::config::RootConfig;
@@ -121,9 +122,12 @@ impl TableRow for EpochState {
                 "gathered fees",
                 "pparams",
                 "blocks",
+                "effective_rewards",
+                "unspendable_rewards",
             ],
             OutputFormat::Dbsync => vec![
                 "epoch_no",
+                "protocol_major",
                 "treasury",
                 "reserves",
                 "rewards",
@@ -131,6 +135,7 @@ impl TableRow for EpochState {
                 "deposits_stake",
                 "fees",
                 "nonce",
+                "block_count",
             ],
         }
     }
@@ -174,6 +179,20 @@ impl TableRow for EpochState {
                             .map(|x| x.blocks_minted)
                             .unwrap_or_default()
                     ),
+                    format!(
+                        "{}",
+                        self.end
+                            .as_ref()
+                            .map(|e| e.effective_rewards)
+                            .unwrap_or_default()
+                    ),
+                    format!(
+                        "{}",
+                        self.end
+                            .as_ref()
+                            .map(|e| e.unspendable_rewards)
+                            .unwrap_or_default()
+                    ),
                 ]
             }
             OutputFormat::Dbsync => {
@@ -183,8 +202,17 @@ impl TableRow for EpochState {
                     .map(|x| hex::encode(x.active))
                     .unwrap_or_default();
 
+                let rolling = self.rolling.live();
+
+                let pparams = self.pparams.live();
+                let protocol_major = pparams
+                    .as_ref()
+                    .and_then(|x| x.protocol_major())
+                    .unwrap_or_default();
+
                 vec![
                     self.number.to_string(),
+                    protocol_major.to_string(),
                     self.initial_pots.treasury.to_string(),
                     self.initial_pots.reserves.to_string(),
                     self.initial_pots.rewards.to_string(),
@@ -192,6 +220,7 @@ impl TableRow for EpochState {
                     self.initial_pots.stake_deposits().to_string(),
                     self.initial_pots.fees.to_string(),
                     nonce,
+                    rolling.map(|x| x.blocks_minted).unwrap_or_default().to_string(),
                 ]
             }
         }
@@ -251,6 +280,92 @@ impl TableRow for StakeLog {
             format!("{}", self.declared_pledge),
             format!("{}", self.total_rewards),
             format!("{}", self.operator_share),
+        ]
+    }
+}
+
+/// Wrapper around EpochState that outputs protocol parameters as CSV columns.
+struct EpochPParams(EpochState);
+
+impl Entity for EpochPParams {
+    fn decode_entity(ns: Namespace, value: &EntityValue) -> Result<Self, dolos_core::ChainError> {
+        EpochState::decode_entity(ns, value).map(EpochPParams)
+    }
+
+    fn encode_entity(value: &Self) -> (Namespace, EntityValue) {
+        EpochState::encode_entity(&value.0)
+    }
+}
+
+impl TableRow for EpochPParams {
+    fn header(format: OutputFormat) -> Vec<&'static str> {
+        match format {
+            OutputFormat::Default | OutputFormat::Dbsync => vec![
+                "epoch_no",
+                "protocol_major",
+                "protocol_minor",
+                "min_fee_a",
+                "min_fee_b",
+                "key_deposit",
+                "pool_deposit",
+                "expansion_rate",
+                "treasury_growth_rate",
+                "decentralisation",
+                "desired_pool_number",
+                "min_pool_cost",
+                "influence",
+            ],
+        }
+    }
+
+    fn row(&self, _key: &LogKey, _ctx: &RowContext) -> Vec<String> {
+        let pparams = self.0.pparams.live();
+        let pparams = match pparams.as_ref() {
+            Some(p) => p,
+            None => return Vec::new(),
+        };
+
+        let (major, minor) = pparams.protocol_version().unwrap_or((0, 0));
+
+        fn rational_to_f64(r: &pallas::ledger::primitives::RationalNumber) -> f64 {
+            if r.denominator == 0 {
+                0.0
+            } else {
+                r.numerator as f64 / r.denominator as f64
+            }
+        }
+
+        fn get_rational(pparams: &dolos_cardano::model::PParamsSet, kind: PParamKind) -> f64 {
+            match pparams.get(kind) {
+                Some(v) => match v {
+                    dolos_cardano::model::PParamValue::ExpansionRate(r)
+                    | dolos_cardano::model::PParamValue::TreasuryGrowthRate(r)
+                    | dolos_cardano::model::PParamValue::DecentralizationConstant(r) => {
+                        rational_to_f64(r)
+                    }
+                    dolos_cardano::model::PParamValue::PoolPledgeInfluence(r) => {
+                        rational_to_f64(r)
+                    }
+                    _ => 0.0,
+                },
+                None => 0.0,
+            }
+        }
+
+        vec![
+            self.0.number.to_string(),
+            major.to_string(),
+            minor.to_string(),
+            pparams.min_fee_a().unwrap_or(0).to_string(),
+            pparams.min_fee_b().unwrap_or(0).to_string(),
+            pparams.key_deposit().unwrap_or(0).to_string(),
+            pparams.pool_deposit().unwrap_or(0).to_string(),
+            get_rational(pparams, PParamKind::ExpansionRate).to_string(),
+            get_rational(pparams, PParamKind::TreasuryGrowthRate).to_string(),
+            get_rational(pparams, PParamKind::DecentralizationConstant).to_string(),
+            pparams.desired_number_of_stake_pools().unwrap_or(0).to_string(),
+            pparams.min_pool_cost().unwrap_or(0).to_string(),
+            get_rational(pparams, PParamKind::PoolPledgeInfluence).to_string(),
         ]
     }
 }
@@ -412,6 +527,9 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
             range.clone(),
         )?,
         "epochs" => dump_logs::<EpochState>(
+            &archive, "epochs", args.skip, args.take, &ctx, start_slot, end_slot, range,
+        )?,
+        "epochs/pparams" => dump_logs::<EpochPParams>(
             &archive, "epochs", args.skip, args.take, &ctx, start_slot, end_slot, range,
         )?,
         _ => todo!(),

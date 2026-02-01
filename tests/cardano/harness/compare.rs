@@ -11,6 +11,16 @@ pub fn compare_csvs(
     key_columns: &[usize],
     max_rows: usize,
 ) -> Result<usize> {
+    compare_csvs_with_ignore(file1, file2, key_columns, max_rows, |_| false)
+}
+
+pub fn compare_csvs_with_ignore(
+    file1: &Path,
+    file2: &Path,
+    key_columns: &[usize],
+    max_rows: usize,
+    ignore: impl Fn(&DiffByteRecord) -> bool,
+) -> Result<usize> {
     let total_rows = {
         let mut rdr = csv::ReaderBuilder::new()
             .has_headers(true)
@@ -46,7 +56,31 @@ pub fn compare_csvs(
     let mut count = 0usize;
     let mut total = 0usize;
 
+    let mut ignored = 0usize;
+
     for record in diff_results.as_slice() {
+        if ignore(&record) {
+            ignored += 1;
+            if count < max_rows || max_rows == 0 {
+                let prefix = match &record {
+                    DiffByteRecord::Add(info) => {
+                        let fields: Vec<String> = info.byte_record().iter().map(|f| String::from_utf8_lossy(f).to_string()).collect();
+                        format!("  + [Ignored][Add] {}", format_record(&headers, &fields))
+                    }
+                    DiffByteRecord::Delete(info) => {
+                        let fields: Vec<String> = info.byte_record().iter().map(|f| String::from_utf8_lossy(f).to_string()).collect();
+                        format!("  - [Ignored][Delete] {}", format_record(&headers, &fields))
+                    }
+                    DiffByteRecord::Modify { add, .. } => {
+                        let fields: Vec<String> = add.byte_record().iter().map(|f| String::from_utf8_lossy(f).to_string()).collect();
+                        format!("  ~ [Ignored][Modify] {}", format_record(&headers, &fields))
+                    }
+                };
+                eprintln!("{}", prefix);
+            }
+            continue;
+        }
+
         total += 1;
         if count >= max_rows && max_rows > 0 {
             continue;
@@ -107,8 +141,12 @@ pub fn compare_csvs(
         );
     }
 
-    let matched = total_rows.saturating_sub(total);
-    eprintln!("  {} rows matched, {} differences", matched, total);
+    if ignored > 0 {
+        eprintln!("  {} differences ignored by predicate", ignored);
+    }
+
+    let matched = total_rows.saturating_sub(total + ignored);
+    eprintln!("  {} rows matched, {} differences, {} ignored", matched, total, ignored);
 
     Ok(total)
 }
