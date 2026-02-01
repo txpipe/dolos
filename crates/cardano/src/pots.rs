@@ -156,6 +156,14 @@ pub struct PotDelta {
     #[n(20)]
     #[cbor(default)]
     pub reserve_mirs: Lovelace,
+
+    /// Protocol version from the mark (E-1) pparams, used to determine
+    /// whether unspendable rewards go to treasury (>= 7) or reserves (< 7).
+    /// This differs from `protocol_version` (live) which determines the
+    /// Byron vs Shelley delta path.
+    #[n(21)]
+    #[cbor(default)]
+    pub mark_protocol_version: u16,
 }
 
 impl PotDelta {
@@ -182,11 +190,12 @@ impl PotDelta {
             proposal_invalid_refunds: 0,
             deposit_per_account: None,
             deposit_per_pool: None,
+            mark_protocol_version: 0,
         }
     }
 
     pub fn consumed_incentives(&self) -> Lovelace {
-        if self.protocol_version < 7 {
+        if self.mark_protocol_version < 7 {
             return self.effective_rewards;
         }
 
@@ -194,7 +203,7 @@ impl PotDelta {
     }
 
     pub fn incentives_back_to_treasury(&self) -> Lovelace {
-        if self.protocol_version < 7 {
+        if self.mark_protocol_version < 7 {
             return 0;
         }
 
