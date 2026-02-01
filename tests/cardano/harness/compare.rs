@@ -59,20 +59,32 @@ pub fn compare_csvs_with_ignore(
     let mut ignored = 0usize;
 
     for record in diff_results.as_slice() {
-        if ignore(&record) {
+        if ignore(record) {
             ignored += 1;
             if count < max_rows || max_rows == 0 {
                 let prefix = match &record {
                     DiffByteRecord::Add(info) => {
-                        let fields: Vec<String> = info.byte_record().iter().map(|f| String::from_utf8_lossy(f).to_string()).collect();
+                        let fields: Vec<String> = info
+                            .byte_record()
+                            .iter()
+                            .map(|f| String::from_utf8_lossy(f).to_string())
+                            .collect();
                         format!("  + [Ignored][Add] {}", format_record(&headers, &fields))
                     }
                     DiffByteRecord::Delete(info) => {
-                        let fields: Vec<String> = info.byte_record().iter().map(|f| String::from_utf8_lossy(f).to_string()).collect();
+                        let fields: Vec<String> = info
+                            .byte_record()
+                            .iter()
+                            .map(|f| String::from_utf8_lossy(f).to_string())
+                            .collect();
                         format!("  - [Ignored][Delete] {}", format_record(&headers, &fields))
                     }
                     DiffByteRecord::Modify { add, .. } => {
-                        let fields: Vec<String> = add.byte_record().iter().map(|f| String::from_utf8_lossy(f).to_string()).collect();
+                        let fields: Vec<String> = add
+                            .byte_record()
+                            .iter()
+                            .map(|f| String::from_utf8_lossy(f).to_string())
+                            .collect();
                         format!("  ~ [Ignored][Modify] {}", format_record(&headers, &fields))
                     }
                 };
@@ -146,7 +158,10 @@ pub fn compare_csvs_with_ignore(
     }
 
     let matched = total_rows.saturating_sub(total + ignored);
-    eprintln!("  {} rows matched, {} differences, {} ignored", matched, total, ignored);
+    eprintln!(
+        "  {} rows matched, {} differences, {} ignored",
+        matched, total, ignored
+    );
 
     Ok(total)
 }
