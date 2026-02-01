@@ -30,16 +30,19 @@ fn parse_drep_id(drep_id: &str) -> Result<(String, Vec<u8>, bool, bool), StatusC
 
                     Ok((drep_id.to_string(), payload, false, false))
                 }
-                ("drep", 28) | ("drep_vkh", 28) => {
-                    let new_payload = [vec![pallas_extras::DREP_KEY_PREFIX], payload].concat();
-                    Ok((
-                        bech32(bech32::Hrp::parse("drep").unwrap(), &new_payload)
-                            .map_err(|_| StatusCode::BAD_REQUEST)?,
-                        new_payload,
-                        true,
-                        false,
-                    ))
-                }
+                ("drep", 28) => Ok((
+                    drep_id.to_string(),
+                    [vec![pallas_extras::DREP_KEY_PREFIX], payload].concat(),
+                    true,
+                    false,
+                )),
+                ("drep_vkh", 28) => Ok((
+                    bech32(bech32::Hrp::parse("drep").unwrap(), &payload)
+                        .map_err(|_| StatusCode::BAD_REQUEST)?,
+                    [vec![pallas_extras::DREP_KEY_PREFIX], payload].concat(),
+                    true,
+                    false,
+                )),
                 ("drep_script", 28) => Ok((
                     bech32(bech32::Hrp::parse("drep").unwrap(), &payload)
                         .map_err(|_| StatusCode::BAD_REQUEST)?,

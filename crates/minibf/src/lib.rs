@@ -132,12 +132,10 @@ impl<D: Domain> Facade<D> {
         effective_in_epoch: Epoch,
         chain_summary: &ChainSummary,
     ) -> Result<PParamsSet, StatusCode> {
-        let prior_epoch = effective_in_epoch.saturating_sub(1);
-
         let log = self
-            .get_epoch_log(prior_epoch, chain_summary)?
+            .get_epoch_log(effective_in_epoch, chain_summary)?
             .ok_or_else(|| {
-                tracing::error!(epoch = prior_epoch, "epoch log not found for prior epoch");
+                tracing::error!(epoch = effective_in_epoch, "epoch log not found for epoch");
                 StatusCode::INTERNAL_SERVER_ERROR
             })?;
 
