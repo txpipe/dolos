@@ -61,23 +61,6 @@ pub fn compare_csvs_with_ignore(
     for record in diff_results.as_slice() {
         if ignore(&record) {
             ignored += 1;
-            if count < max_rows || max_rows == 0 {
-                let prefix = match &record {
-                    DiffByteRecord::Add(info) => {
-                        let fields: Vec<String> = info.byte_record().iter().map(|f| String::from_utf8_lossy(f).to_string()).collect();
-                        format!("  + [Ignored][Add] {}", format_record(&headers, &fields))
-                    }
-                    DiffByteRecord::Delete(info) => {
-                        let fields: Vec<String> = info.byte_record().iter().map(|f| String::from_utf8_lossy(f).to_string()).collect();
-                        format!("  - [Ignored][Delete] {}", format_record(&headers, &fields))
-                    }
-                    DiffByteRecord::Modify { add, .. } => {
-                        let fields: Vec<String> = add.byte_record().iter().map(|f| String::from_utf8_lossy(f).to_string()).collect();
-                        format!("  ~ [Ignored][Modify] {}", format_record(&headers, &fields))
-                    }
-                };
-                eprintln!("{}", prefix);
-            }
             continue;
         }
 
@@ -141,12 +124,8 @@ pub fn compare_csvs_with_ignore(
         );
     }
 
-    if ignored > 0 {
-        eprintln!("  {} differences ignored by predicate", ignored);
-    }
-
     let matched = total_rows.saturating_sub(total + ignored);
-    eprintln!("  {} rows matched, {} differences, {} ignored", matched, total, ignored);
+    eprintln!("  {} rows matched, {} differences", matched, total);
 
     Ok(total)
 }
