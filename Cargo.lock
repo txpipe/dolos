@@ -1368,9 +1368,11 @@ version = "1.0.0-rc.6"
 dependencies = [
  "dolos-cardano",
  "dolos-core",
+ "dolos-fjall",
  "dolos-redb3",
  "futures-core",
  "futures-util",
+ "itertools 0.14.0",
  "pallas 1.0.0-alpha.3 (git+https://github.com/txpipe/pallas.git?rev=ab27006)",
  "rand 0.9.1",
  "tokio",
