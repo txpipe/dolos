@@ -1852,25 +1852,43 @@ impl<'a> BlockModelBuilder<'a> {
     fn format_slot_leader(&self) -> Result<Option<String>, StatusCode> {
         let header = self.block.header();
 
-        let Some(use_bech32) = self
-            .chain
-            .map(|x| x.slot_epoch(self.block.slot()).0 > x.first_shelley_epoch() + 1)
-        else {
+        if header.number() == 0 {
+            return Ok(Some("Epoch boundary slot leader".to_string()));
+        }
+
+        let Some(use_bech32) = self.chain.map(|x| {
+            let epoch = x.slot_epoch(self.block.slot()).0;
+            epoch > x.first_shelley_epoch()
+        }) else {
             return Ok(None);
         };
 
-        let Some(key) = header.issuer_vkey() else {
-            return Ok(None);
-        };
-        let hash: Hash<28> = Hasher::<224>::hash(key);
+        match header.issuer_vkey() {
+            Some(key) => {
+                let hash: Hash<28> = Hasher::<224>::hash(key);
 
-        if use_bech32 {
-            Ok(Some(bech32_pool(hash)?))
-        } else {
-            Ok(Some(format!(
-                "ShelleyGenesis-{}",
-                hex::encode(hash.as_slice().first_chunk::<8>().unwrap())
-            )))
+                if use_bech32 {
+                    Ok(Some(bech32_pool(hash)?))
+                } else {
+                    Ok(Some(format!(
+                        "ShelleyGenesis-{}",
+                        hex::encode(hash.as_slice().first_chunk::<8>().unwrap())
+                    )))
+                }
+            }
+            None => match header {
+                MultiEraHeader::Byron(byron_header) => {
+                    let hash: Hash<32> =
+                        Hasher::<256>::hash(&byron_header.consensus_data.1.as_slice()[..32]);
+
+                    Ok(Some(format!(
+                        "ByronGenesis-{}",
+                        hex::encode(hash.as_slice().first_chunk::<8>().unwrap())
+                    )))
+                }
+                MultiEraHeader::EpochBoundary(_) => Ok(Some("Epoch boundary".to_string())),
+                _ => unreachable!(), // Covered on Some case
+            },
         }
     }
 
@@ -1967,12 +1985,21 @@ impl<'a> IntoModel<BlockContent> for BlockModelBuilder<'a> {
             next_block,
             previous_block,
             epoch: epoch.map(|x| x as i32),
-            epoch_slot: epoch_slot.map(|x| x as i32),
+            epoch_slot: match epoch_slot.map(|x| x as i32) {
+                Some(0) => None,
+                x => x,
+            },
             time: block_time.unwrap_or_default(),
-            slot: Some(block.slot() as i32),
-            height: Some(block.number() as i32),
+            slot: match block.slot() as i32 {
+                0 => None,
+                x => Some(x),
+            },
+            height: match block.number() as i32 {
+                0 => None,
+                x => Some(x),
+            },
             tx_count: block.txs().len() as i32,
-            size: block.body_size().unwrap_or_default() as i32,
+            size: block.body_size().unwrap_or(block.size()) as i32,
             confirmations,
             slot_leader,
             block_vrf,
