@@ -3,7 +3,7 @@ use axum::{
     extract::State,
     http::{header, HeaderMap, StatusCode},
 };
-use dolos_core::{facade::receive_tx, ChainError, Domain, DomainError, MempoolError};
+use dolos_core::{ChainError, Domain, DomainError, MempoolError, SubmitExt};
 
 use crate::Facade;
 
@@ -28,8 +28,8 @@ pub async fn route<D: Domain>(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    let chain = domain.read_chain().await;
-    let result = receive_tx(&domain.inner, &chain, &cbor);
+    let chain = domain.read_chain();
+    let result = domain.inner.receive_tx(&chain, &cbor);
 
     let hash = result.map_err(|e| match e {
         DomainError::ChainError(x) => match x {
@@ -48,6 +48,7 @@ pub async fn route<D: Domain>(
             MempoolError::PlutusNotSupported => StatusCode::BAD_REQUEST,
             MempoolError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
             MempoolError::StateError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            MempoolError::IndexError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             MempoolError::PParamsNotAvailable => StatusCode::INTERNAL_SERVER_ERROR,
         },
         _ => StatusCode::INTERNAL_SERVER_ERROR,

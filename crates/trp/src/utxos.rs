@@ -1,6 +1,8 @@
 use std::collections::HashSet;
 
-use dolos_core::{Domain, MempoolAwareUtxoStore, StateError, TxoRef};
+use dolos_cardano::indexes::utxo_dimensions;
+use dolos_core::{Domain, IndexError, MempoolAwareUtxoStore, TxoRef};
+use pallas::ledger::traverse::MultiEraOutput;
 use tx3_resolver::{Error as Tx3Error, UtxoPattern, UtxoRef, UtxoSet, UtxoStore};
 
 use crate::{
@@ -11,13 +13,20 @@ use crate::{
 fn search_state_utxos<D: Domain>(
     pattern: &UtxoPattern<'_>,
     store: &MempoolAwareUtxoStore<D>,
-) -> Result<HashSet<TxoRef>, StateError> {
+) -> Result<HashSet<TxoRef>, IndexError> {
+    // Dummy filter that always returns true (we want all UTxOs matching the index)
+    let no_filter = |_: &MultiEraOutput<'_>| true;
+
     let refs = match pattern {
-        UtxoPattern::ByAddress(address) => store.get_utxo_by_address(address)?,
-        UtxoPattern::ByAssetPolicy(policy) => store.get_utxo_by_policy(policy)?,
+        UtxoPattern::ByAddress(address) => {
+            store.get_utxos_by_tag(utxo_dimensions::ADDRESS, address, no_filter)?
+        }
+        UtxoPattern::ByAssetPolicy(policy) => {
+            store.get_utxos_by_tag(utxo_dimensions::POLICY, policy, no_filter)?
+        }
         UtxoPattern::ByAsset(policy, name) => {
             let subject = [*policy, *name].concat();
-            store.get_utxo_by_asset(&subject)?
+            store.get_utxos_by_tag(utxo_dimensions::ASSET, &subject, no_filter)?
         }
     };
 

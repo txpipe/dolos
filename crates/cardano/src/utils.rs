@@ -1,8 +1,16 @@
 use chrono::DateTime;
 use dolos_core::*;
+use pallas::ledger::addresses::Network;
 use pallas::ledger::validate::utils::{ConwayProtParams, MultiEraProtocolParameters};
 
 use crate::PParamsSet;
+
+pub fn network_from_genesis(genesis: &Genesis) -> Network {
+    match genesis.shelley.network_id.as_deref() {
+        Some("Mainnet") => Network::Mainnet,
+        _ => Network::Testnet,
+    }
+}
 
 /// Computes the amount of mutable slots in chain.
 ///

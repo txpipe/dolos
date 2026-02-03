@@ -1,16 +1,9 @@
 use dolos_core::{EraCbor, TxoRef, UtxoMap, UtxoSetDelta};
-use pallas::{
-    crypto::hash::Hash,
-    ledger::{addresses::ShelleyDelegationPart, traverse::MultiEraOutput},
-};
 use redb::{
-    MultimapTableDefinition, Range, ReadTransaction, ReadableDatabase, ReadableTable as _,
-    ReadableTableMetadata as _, TableDefinition, TableStats, WriteTransaction,
+    Range, ReadTransaction, ReadableDatabase, ReadableTable as _, ReadableTableMetadata as _,
+    TableDefinition, TableStats, WriteTransaction,
 };
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 
 use crate::Error;
 
@@ -18,8 +11,6 @@ use super::StateStore;
 
 type UtxosKey = (&'static [u8; 32], u32);
 type UtxosValue = (u16, &'static [u8]);
-type DatumKey = &'static [u8; 32];
-type DatumValue = (u64, &'static [u8]);
 
 pub struct UtxosIterator(Range<'static, UtxosKey, UtxosValue>);
 
@@ -104,14 +95,6 @@ impl UtxosTable {
             table.remove(k)?;
         }
 
-        for (datum_hash, datum_value) in delta.witness_datums_add.iter() {
-            DatumsTable::increment(wx, datum_hash, datum_value)?;
-        }
-
-        for datum_hash in delta.witness_datums_remove.iter() {
-            DatumsTable::decrement(wx, datum_hash)?;
-        }
-
         Ok(())
     }
 
@@ -135,377 +118,12 @@ impl UtxosTable {
     }
 }
 
-pub struct DatumsTable;
-
-impl DatumsTable {
-    pub const DEF: TableDefinition<'static, DatumKey, DatumValue> = TableDefinition::new("datums");
-
-    pub fn initialize(wx: &WriteTransaction) -> Result<(), Error> {
-        wx.open_table(Self::DEF)?;
-        Ok(())
-    }
-
-    pub fn get(rx: &ReadTransaction, datum_hash: &Hash<32>) -> Result<Option<Vec<u8>>, Error> {
-        let table = rx.open_table(Self::DEF)?;
-        Ok(table.get(&**datum_hash)?.map(|v| v.value().1.to_vec()))
-    }
-
-    pub fn increment(
-        wx: &WriteTransaction,
-        datum_hash: &Hash<32>,
-        datum_value: &[u8],
-    ) -> Result<u64, Error> {
-        let mut table = wx.open_table(Self::DEF)?;
-
-        let current_count = table
-            .get(&**datum_hash)?
-            .map(|entry| entry.value().0)
-            .unwrap_or(0);
-
-        let new_count = current_count + 1;
-        table.insert(&**datum_hash, (new_count, datum_value))?;
-        Ok(new_count)
-    }
-
-    pub fn decrement(wx: &WriteTransaction, datum_hash: &Hash<32>) -> Result<u64, Error> {
-        let mut table = wx.open_table(Self::DEF)?;
-
-        let entry_data: Option<(u64, Vec<u8>)> = table.get(&**datum_hash)?.map(|entry| {
-            let (count, bytes) = entry.value();
-            (count, bytes.to_vec())
-        });
-
-        let Some((count, bytes)) = entry_data else {
-            return Ok(0);
-        };
-
-        if count <= 1 {
-            table.remove(&**datum_hash)?;
-            return Ok(0);
-        }
-
-        let new_count = count - 1;
-        table.insert(&**datum_hash, (new_count, bytes.as_slice()))?;
-        Ok(new_count)
-    }
-
-    pub fn stats(rx: &ReadTransaction) -> Result<TableStats, Error> {
-        let table = rx.open_table(Self::DEF)?;
-        Ok(table.stats()?)
-    }
-}
-
-pub struct UtxoKeyIterator(redb::MultimapValue<'static, UtxosKey>);
-
-impl Iterator for UtxoKeyIterator {
-    type Item = Result<TxoRef, Error>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let item = self.0.next()?;
-
-        let out = item
-            .map(|item| {
-                let (hash, idx) = item.value();
-                TxoRef((*hash).into(), idx)
-            })
-            .map_err(Error::from);
-
-        Some(out)
-    }
-}
-
-pub struct FilterIndexes;
-
-struct SplitAddressResult(Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>);
-
-impl FilterIndexes {
-    pub const BY_ADDRESS: MultimapTableDefinition<'static, &'static [u8], UtxosKey> =
-        MultimapTableDefinition::new("byaddress");
-
-    pub const BY_PAYMENT: MultimapTableDefinition<'static, &'static [u8], UtxosKey> =
-        MultimapTableDefinition::new("bypayment");
-
-    pub const BY_STAKE: MultimapTableDefinition<'static, &'static [u8], UtxosKey> =
-        MultimapTableDefinition::new("bystake");
-
-    pub const BY_POLICY: MultimapTableDefinition<'static, &'static [u8], UtxosKey> =
-        MultimapTableDefinition::new("bypolicy");
-
-    pub const BY_ASSET: MultimapTableDefinition<'static, &'static [u8], UtxosKey> =
-        MultimapTableDefinition::new("byasset");
-
-    pub fn initialize(wx: &WriteTransaction) -> Result<(), Error> {
-        wx.open_multimap_table(Self::BY_ADDRESS)?;
-        wx.open_multimap_table(Self::BY_PAYMENT)?;
-        wx.open_multimap_table(Self::BY_STAKE)?;
-        wx.open_multimap_table(Self::BY_POLICY)?;
-        wx.open_multimap_table(Self::BY_ASSET)?;
-
-        Ok(())
-    }
-
-    fn get_by_key(
-        rx: &ReadTransaction,
-        table_def: MultimapTableDefinition<&[u8], UtxosKey>,
-        key: &[u8],
-    ) -> Result<HashSet<TxoRef>, Error> {
-        let table = rx.open_multimap_table(table_def)?;
-
-        let mut out = HashSet::new();
-
-        for item in table.get(key)? {
-            let item = item?;
-            let (hash, idx) = item.value();
-            out.insert(TxoRef((*hash).into(), idx));
-        }
-
-        Ok(out)
-    }
-
-    pub fn count_within_key(
-        rx: &ReadTransaction,
-        table_def: MultimapTableDefinition<&[u8], UtxosKey>,
-        key: &[u8],
-    ) -> Result<u64, Error> {
-        let table = rx.open_multimap_table(table_def)?;
-
-        let count = table.get(key)?.len();
-
-        Ok(count)
-    }
-
-    pub fn iter_within_key(
-        rx: &ReadTransaction,
-        table_def: MultimapTableDefinition<&[u8], UtxosKey>,
-        key: &[u8],
-    ) -> Result<UtxoKeyIterator, Error> {
-        let table = rx.open_multimap_table(table_def)?;
-
-        let inner = table.get(key)?;
-
-        Ok(UtxoKeyIterator(inner))
-    }
-
-    pub fn get_by_address(
-        rx: &ReadTransaction,
-        exact_address: &[u8],
-    ) -> Result<HashSet<TxoRef>, Error> {
-        Self::get_by_key(rx, Self::BY_ADDRESS, exact_address)
-    }
-
-    pub fn get_by_payment(
-        rx: &ReadTransaction,
-        payment_part: &[u8],
-    ) -> Result<HashSet<TxoRef>, Error> {
-        Self::get_by_key(rx, Self::BY_PAYMENT, payment_part)
-    }
-
-    pub fn get_by_stake(rx: &ReadTransaction, stake_part: &[u8]) -> Result<HashSet<TxoRef>, Error> {
-        Self::get_by_key(rx, Self::BY_STAKE, stake_part)
-    }
-
-    pub fn get_by_policy(rx: &ReadTransaction, policy: &[u8]) -> Result<HashSet<TxoRef>, Error> {
-        Self::get_by_key(rx, Self::BY_POLICY, policy)
-    }
-
-    pub fn get_by_asset(rx: &ReadTransaction, asset: &[u8]) -> Result<HashSet<TxoRef>, Error> {
-        Self::get_by_key(rx, Self::BY_ASSET, asset)
-    }
-
-    fn split_address(utxo: &MultiEraOutput) -> Result<SplitAddressResult, Error> {
-        use pallas::ledger::addresses::Address;
-
-        match utxo.address() {
-            Ok(address) => match &address {
-                Address::Shelley(x) => {
-                    let a = x.to_vec();
-                    let b = x.payment().to_vec();
-
-                    let c = match x.delegation() {
-                        ShelleyDelegationPart::Key(..) => Some(x.delegation().to_vec()),
-                        ShelleyDelegationPart::Script(..) => Some(x.delegation().to_vec()),
-                        ShelleyDelegationPart::Pointer(..) => Some(x.delegation().to_vec()),
-                        ShelleyDelegationPart::Null => None,
-                    };
-
-                    Ok(SplitAddressResult(Some(a), Some(b), c))
-                }
-                Address::Stake(x) => {
-                    let a = x.to_vec();
-                    let c = x.to_vec();
-                    Ok(SplitAddressResult(Some(a), None, Some(c)))
-                }
-                Address::Byron(x) => {
-                    let a = x.to_vec();
-                    Ok(SplitAddressResult(Some(a), None, None))
-                }
-            },
-            Err(err) => Err(Error::from(err)),
-        }
-    }
-
-    pub fn apply(wx: &WriteTransaction, delta: &UtxoSetDelta) -> Result<(), Error> {
-        let mut address_table = wx.open_multimap_table(Self::BY_ADDRESS)?;
-        let mut payment_table = wx.open_multimap_table(Self::BY_PAYMENT)?;
-        let mut stake_table = wx.open_multimap_table(Self::BY_STAKE)?;
-        let mut policy_table = wx.open_multimap_table(Self::BY_POLICY)?;
-        let mut asset_table = wx.open_multimap_table(Self::BY_ASSET)?;
-
-        let trackable = delta
-            .produced_utxo
-            .iter()
-            .chain(delta.recovered_stxi.iter());
-
-        for (utxo, body) in trackable {
-            let v: (&[u8; 32], u32) = (&utxo.0, utxo.1);
-
-            // TODO: decoding here is very inefficient
-            let body = MultiEraOutput::try_from(body.as_ref()).unwrap();
-            let SplitAddressResult(addr, pay, stake) = Self::split_address(&body)?;
-
-            if let Some(k) = addr {
-                address_table.insert(k.as_slice(), v)?;
-            }
-
-            if let Some(k) = pay {
-                payment_table.insert(k.as_slice(), v)?;
-            }
-
-            if let Some(k) = stake {
-                stake_table.insert(k.as_slice(), v)?;
-            }
-
-            let value = body.value();
-            let assets = value.assets();
-
-            for batch in assets {
-                policy_table.insert(batch.policy().as_slice(), v)?;
-
-                for asset in batch.assets() {
-                    let mut subject = asset.policy().to_vec();
-                    subject.extend(asset.name());
-
-                    asset_table.insert(subject.as_slice(), v)?;
-                }
-            }
-        }
-
-        let forgettable = delta.consumed_utxo.iter().chain(delta.undone_utxo.iter());
-
-        for (stxi, body) in forgettable {
-            let v: (&[u8; 32], u32) = (&stxi.0, stxi.1);
-
-            // TODO: decoding here is very inefficient
-            let body = MultiEraOutput::try_from(body.as_ref()).unwrap();
-
-            let SplitAddressResult(addr, pay, stake) = Self::split_address(&body)?;
-
-            if let Some(k) = addr {
-                address_table.remove(k.as_slice(), v)?;
-            }
-
-            if let Some(k) = pay {
-                payment_table.remove(k.as_slice(), v)?;
-            }
-
-            if let Some(k) = stake {
-                stake_table.remove(k.as_slice(), v)?;
-            }
-
-            let value = body.value();
-            let assets = value.assets();
-
-            for batch in assets {
-                policy_table.remove(batch.policy().as_slice(), v)?;
-
-                for asset in batch.assets() {
-                    let mut subject = asset.policy().to_vec();
-                    subject.extend(asset.name());
-
-                    asset_table.remove(subject.as_slice(), v)?;
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    fn copy_table<K: ::redb::Key, V: ::redb::Key + ::redb::Value>(
-        rx: &ReadTransaction,
-        wx: &WriteTransaction,
-        def: MultimapTableDefinition<K, V>,
-    ) -> Result<(), Error> {
-        let source = rx.open_multimap_table(def)?;
-        let mut target = wx.open_multimap_table(def)?;
-
-        let all = source.range::<K::SelfType<'static>>(..)?;
-
-        for entry in all {
-            let (key, values) = entry?;
-            for value in values {
-                let value = value?;
-                target.insert(key.value(), value.value())?;
-            }
-        }
-
-        Ok(())
-    }
-
-    pub fn copy(rx: &ReadTransaction, wx: &WriteTransaction) -> Result<(), Error> {
-        Self::copy_table(rx, wx, Self::BY_ADDRESS)?;
-        Self::copy_table(rx, wx, Self::BY_PAYMENT)?;
-        Self::copy_table(rx, wx, Self::BY_STAKE)?;
-        Self::copy_table(rx, wx, Self::BY_POLICY)?;
-        Self::copy_table(rx, wx, Self::BY_ASSET)?;
-
-        Ok(())
-    }
-
-    pub fn stats(rx: &ReadTransaction) -> Result<HashMap<&'static str, redb::TableStats>, Error> {
-        let address = rx.open_multimap_table(Self::BY_ADDRESS)?;
-        let payment = rx.open_multimap_table(Self::BY_PAYMENT)?;
-        let stake = rx.open_multimap_table(Self::BY_STAKE)?;
-        let policy = rx.open_multimap_table(Self::BY_POLICY)?;
-        let asset = rx.open_multimap_table(Self::BY_ASSET)?;
-
-        Ok(HashMap::from_iter([
-            ("address", address.stats()?),
-            ("payment", payment.stats()?),
-            ("stake", stake.stats()?),
-            ("policy", policy.stats()?),
-            ("asset", asset.stats()?),
-        ]))
-    }
-}
-
 impl StateStore {
-    pub fn count_utxo_by_address(&self, address: &[u8]) -> Result<u64, Error> {
-        let rx = self.db().begin_read()?;
-        FilterIndexes::count_within_key(&rx, FilterIndexes::BY_ADDRESS, address)
-    }
-
-    pub fn iter_utxo_by_address(&self, address: &[u8]) -> Result<UtxoKeyIterator, Error> {
-        let rx = self.db().begin_read()?;
-        FilterIndexes::iter_within_key(&rx, FilterIndexes::BY_ADDRESS, address)
-    }
-
     pub fn utxoset_stats(&self) -> Result<HashMap<&str, TableStats>, Error> {
         let rx = self.db().begin_read()?;
 
         let utxos = UtxosTable::stats(&rx)?;
-        let datums = DatumsTable::stats(&rx)?;
-        let filters = FilterIndexes::stats(&rx)?;
-
-        let all_tables = [("utxos", utxos), ("datums", datums)]
-            .into_iter()
-            .chain(filters);
-
-        Ok(HashMap::from_iter(all_tables))
-    }
-
-    pub fn get_datum(&self, datum_hash: &Hash<32>) -> Result<Option<Vec<u8>>, Error> {
-        let rx = self.db().begin_read()?;
-        DatumsTable::get(&rx, datum_hash)
+        Ok(HashMap::from_iter([("utxos", utxos)]))
     }
 }
 
@@ -514,44 +132,162 @@ mod tests {
     use std::{collections::HashSet, str::FromStr as _, sync::Arc};
 
     use dolos_core::{
-        StateSchema, StateStore as _, StateWriter as _, TxoRef, UtxoMap, UtxoSet, UtxoSetDelta,
+        ChainPoint, IndexDelta, IndexStore as _, IndexWriter as _, StateSchema, StateStore as _,
+        StateWriter as _, Tag, TxoRef, UtxoIndexDelta, UtxoMap, UtxoSet, UtxoSetDelta,
     };
     use dolos_testing::*;
-    use pallas::ledger::addresses::{Address, ShelleyDelegationPart};
+    use pallas::ledger::{
+        addresses::{Address, ShelleyDelegationPart},
+        traverse::MultiEraOutput,
+    };
 
     use crate::state::StateStore;
 
-    fn get_test_address_utxos(store: &StateStore, address: TestAddress) -> UtxoMap {
-        let bobs = store.get_utxo_by_address(&address.to_bytes()).unwrap();
+    // Define dimension constants locally for tests (matching dolos_cardano::indexes::dimensions)
+    mod dimensions {
+        pub const ADDRESS: &str = "address";
+        pub const PAYMENT: &str = "payment";
+        pub const STAKE: &str = "stake";
+        pub const POLICY: &str = "policy";
+        pub const ASSET: &str = "asset";
+    }
+
+    fn build_indexes(_store: &StateStore) -> crate::indexes::IndexStore {
+        crate::indexes::IndexStore::in_memory().unwrap()
+    }
+
+    fn get_test_address_utxos(
+        store: &StateStore,
+        indexes: &crate::indexes::IndexStore,
+        address: TestAddress,
+    ) -> UtxoMap {
+        let bobs = indexes
+            .utxos_by_tag(dimensions::ADDRESS, &address.to_bytes())
+            .unwrap();
         store.get_utxos(bobs.into_iter().collect()).unwrap()
     }
 
+    /// Build an IndexDelta from a UtxoSetDelta for testing.
+    /// This is a simplified version that extracts address tags from UTxO outputs.
+    /// Handles both forward (produced/consumed) and rollback (recovered/undone) cases.
+    fn build_index_delta_from_utxo_delta(
+        cursor: ChainPoint,
+        utxo_delta: &UtxoSetDelta,
+    ) -> IndexDelta {
+        let mut produced = Vec::new();
+        let mut consumed = Vec::new();
+
+        // Handle forward operations: produced_utxo -> add to index, consumed_utxo -> remove from index
+        for (txo_ref, era_cbor) in utxo_delta.produced_utxo.iter() {
+            if let Ok(output) = MultiEraOutput::try_from(era_cbor.as_ref()) {
+                let tags = extract_utxo_tags(&output);
+                produced.push((txo_ref.clone(), tags));
+            }
+        }
+
+        for (txo_ref, era_cbor) in utxo_delta.consumed_utxo.iter() {
+            if let Ok(output) = MultiEraOutput::try_from(era_cbor.as_ref()) {
+                let tags = extract_utxo_tags(&output);
+                consumed.push((txo_ref.clone(), tags));
+            }
+        }
+
+        // Handle rollback operations: recovered_stxi -> restore to index (add), undone_utxo -> remove from index
+        // recovered_stxi: UTxOs that were previously consumed, now being restored
+        for (txo_ref, era_cbor) in utxo_delta.recovered_stxi.iter() {
+            if let Ok(output) = MultiEraOutput::try_from(era_cbor.as_ref()) {
+                let tags = extract_utxo_tags(&output);
+                produced.push((txo_ref.clone(), tags));
+            }
+        }
+
+        // undone_utxo: UTxOs that were previously produced, now being removed
+        for (txo_ref, era_cbor) in utxo_delta.undone_utxo.iter() {
+            if let Ok(output) = MultiEraOutput::try_from(era_cbor.as_ref()) {
+                let tags = extract_utxo_tags(&output);
+                consumed.push((txo_ref.clone(), tags));
+            }
+        }
+
+        IndexDelta {
+            cursor,
+            utxo: UtxoIndexDelta { produced, consumed },
+            archive: Vec::new(),
+        }
+    }
+
+    fn extract_utxo_tags(output: &MultiEraOutput) -> Vec<Tag> {
+        let mut tags = Vec::new();
+
+        if let Ok(addr) = output.address() {
+            match addr {
+                Address::Shelley(x) => {
+                    tags.push(Tag::new(dimensions::ADDRESS, x.to_vec()));
+                    tags.push(Tag::new(dimensions::PAYMENT, x.payment().to_vec()));
+                    // Extract stake address if present
+                    match x.delegation() {
+                        ShelleyDelegationPart::Key(..) | ShelleyDelegationPart::Script(..) => {
+                            tags.push(Tag::new(dimensions::STAKE, x.delegation().to_vec()));
+                        }
+                        _ => {}
+                    }
+                }
+                Address::Stake(x) => {
+                    tags.push(Tag::new(dimensions::ADDRESS, x.to_vec()));
+                    tags.push(Tag::new(dimensions::STAKE, x.to_vec()));
+                }
+                Address::Byron(x) => {
+                    tags.push(Tag::new(dimensions::ADDRESS, x.to_vec()));
+                }
+            }
+        }
+
+        // Asset tags
+        for ma in output.value().assets() {
+            tags.push(Tag::new(dimensions::POLICY, ma.policy().to_vec()));
+            for asset in ma.assets() {
+                let mut subject = asset.policy().to_vec();
+                subject.extend(asset.name());
+                tags.push(Tag::new(dimensions::ASSET, subject));
+            }
+        }
+
+        tags
+    }
+
     macro_rules! apply_utxoset {
-        ($store:expr, $deltas:expr) => {
+        ($store:expr, $indexes:expr, $deltas:expr) => {
             let writer = $store.start_writer().unwrap();
+            let index_writer = $indexes.start_writer().unwrap();
             for delta in $deltas.iter() {
                 writer.apply_utxoset(&delta).unwrap();
+                // Build index delta from UTxO delta
+                let cursor = $store.read_cursor().unwrap().unwrap_or(ChainPoint::Origin);
+                let index_delta = build_index_delta_from_utxo_delta(cursor, &delta);
+                index_writer.apply(&index_delta).unwrap();
             }
             writer.commit().unwrap();
+            index_writer.commit().unwrap();
         };
     }
 
     #[test]
     fn test_apply_genesis() {
         let store = StateStore::in_memory(StateSchema::default()).unwrap();
+        let indexes = build_indexes(&store);
 
         let genesis = fake_genesis_delta(1_000_000_000);
-        apply_utxoset!(store, [&genesis]);
+        apply_utxoset!(store, &indexes, [&genesis]);
 
         // TODO: the store is not persisting the cursor unless it's a specific point. We
         // need to fix this in the next breaking change version.
         //assert_eq!(store.cursor().unwrap(), Some(ChainPoint::Origin));
 
-        let bobs = get_test_address_utxos(&store, TestAddress::Bob);
+        let bobs = get_test_address_utxos(&store, &indexes, TestAddress::Bob);
         assert_eq!(bobs.len(), 1);
         assert_utxo_map_address_and_value(&bobs, TestAddress::Bob, 1_000_000_000);
 
-        let carols = get_test_address_utxos(&store, TestAddress::Carol);
+        let carols = get_test_address_utxos(&store, &indexes, TestAddress::Carol);
         assert_eq!(carols.len(), 1);
         assert_utxo_map_address_and_value(&carols, TestAddress::Carol, 1_000_000_000);
     }
@@ -559,19 +295,20 @@ mod tests {
     #[test]
     fn test_apply_forward_block() {
         let store = StateStore::in_memory(StateSchema::default()).unwrap();
+        let indexes = build_indexes(&store);
 
         let genesis = fake_genesis_delta(1_000_000_000);
-        apply_utxoset!(store, [genesis]);
+        apply_utxoset!(store, &indexes, [genesis]);
 
-        let bobs = get_test_address_utxos(&store, TestAddress::Bob);
+        let bobs = get_test_address_utxos(&store, &indexes, TestAddress::Bob);
         let delta = make_move_utxo_delta(bobs, 1, TestAddress::Carol);
-        apply_utxoset!(store, [&delta]);
+        apply_utxoset!(store, &indexes, [&delta]);
 
-        let bobs = get_test_address_utxos(&store, TestAddress::Bob);
+        let bobs = get_test_address_utxos(&store, &indexes, TestAddress::Bob);
         assert!(bobs.is_empty());
         assert_utxo_map_address_and_value(&bobs, TestAddress::Bob, 1_000_000_000);
 
-        let carols = get_test_address_utxos(&store, TestAddress::Carol);
+        let carols = get_test_address_utxos(&store, &indexes, TestAddress::Carol);
         assert_eq!(carols.len(), 2);
         assert_utxo_map_address_and_value(&carols, TestAddress::Carol, 1_000_000_000);
     }
@@ -579,26 +316,27 @@ mod tests {
     #[test]
     fn test_apply_undo_block() {
         let store = StateStore::in_memory(StateSchema::default()).unwrap();
+        let indexes = build_indexes(&store);
 
         let genesis = fake_genesis_delta(1_000_000_000);
-        apply_utxoset!(store, [&genesis]);
+        apply_utxoset!(store, &indexes, [&genesis]);
 
-        let bobs = get_test_address_utxos(&store, TestAddress::Bob);
+        let bobs = get_test_address_utxos(&store, &indexes, TestAddress::Bob);
         let forward = make_move_utxo_delta(bobs, 1, TestAddress::Carol);
-        apply_utxoset!(store, [&forward]);
+        apply_utxoset!(store, &indexes, [&forward]);
 
         let undo = revert_delta(forward);
-        apply_utxoset!(store, [&undo]);
+        apply_utxoset!(store, &indexes, [&undo]);
 
         // TODO: the store is not persisting the origin cursor, instead it's keeping it
         // empty. We should fix this in the next breaking change version.
         assert_eq!(store.read_cursor().unwrap(), None);
 
-        let bobs = get_test_address_utxos(&store, TestAddress::Bob);
+        let bobs = get_test_address_utxos(&store, &indexes, TestAddress::Bob);
         assert_eq!(bobs.len(), 1);
         assert_utxo_map_address_and_value(&bobs, TestAddress::Bob, 1_000_000_000);
 
-        let carols = get_test_address_utxos(&store, TestAddress::Carol);
+        let carols = get_test_address_utxos(&store, &indexes, TestAddress::Carol);
         assert_eq!(carols.len(), 1);
         assert_utxo_map_address_and_value(&carols, TestAddress::Carol, 1_000_000_000);
     }
@@ -610,29 +348,31 @@ mod tests {
         // first we do a step-by-step apply to use as reference. We keep the deltas in a
         // vector to apply them in batch later.
         let store = StateStore::in_memory(StateSchema::default()).unwrap();
+        let indexes = build_indexes(&store);
 
         let genesis = fake_genesis_delta(1_000_000_000);
-        apply_utxoset!(store, [&genesis]);
+        apply_utxoset!(store, &indexes, [&genesis]);
         batch.push(genesis);
 
-        let bobs = get_test_address_utxos(&store, TestAddress::Bob);
+        let bobs = get_test_address_utxos(&store, &indexes, TestAddress::Bob);
         let forward = make_move_utxo_delta(bobs, 1, TestAddress::Carol);
-        apply_utxoset!(store, [&forward]);
+        apply_utxoset!(store, &indexes, [&forward]);
         batch.push(forward.clone());
 
         let undo = revert_delta(forward);
-        apply_utxoset!(store, [&undo]);
+        apply_utxoset!(store, &indexes, [&undo]);
         batch.push(undo);
 
         // now we apply the batch in one go.
         let store = StateStore::in_memory(StateSchema::default()).unwrap();
-        apply_utxoset!(store, batch);
+        let indexes = build_indexes(&store);
+        apply_utxoset!(store, &indexes, batch);
 
-        let bobs = get_test_address_utxos(&store, TestAddress::Bob);
+        let bobs = get_test_address_utxos(&store, &indexes, TestAddress::Bob);
         assert_eq!(bobs.len(), 1);
         assert_utxo_map_address_and_value(&bobs, TestAddress::Bob, 1_000_000_000);
 
-        let carols = get_test_address_utxos(&store, TestAddress::Carol);
+        let carols = get_test_address_utxos(&store, &indexes, TestAddress::Carol);
         assert_eq!(carols.len(), 1);
         assert_utxo_map_address_and_value(&carols, TestAddress::Carol, 1_000_000_000);
     }
@@ -640,6 +380,7 @@ mod tests {
     #[test]
     fn test_query_by_address() {
         let store = StateStore::in_memory(StateSchema::default()).unwrap();
+        let indexes = build_indexes(&store);
 
         let addresses: Vec<_> = TestAddress::everyone().into_iter().enumerate().collect();
 
@@ -657,7 +398,7 @@ mod tests {
             ..Default::default()
         };
 
-        apply_utxoset!(store, [&delta]);
+        apply_utxoset!(store, &indexes, [&delta]);
 
         let assertion = |utxos: UtxoSet, address: &Address, ordinal: usize| {
             let utxos = store.get_utxos(utxos.into_iter().collect()).unwrap();
@@ -676,29 +417,41 @@ mod tests {
 
             match address.clone() {
                 Address::Byron(x) => {
-                    let utxos = store.get_utxo_by_address(&x.to_vec()).unwrap();
+                    let utxos = indexes
+                        .utxos_by_tag(dimensions::ADDRESS, &x.to_vec())
+                        .unwrap();
                     assertion(utxos, &address, ordinal);
                 }
                 Address::Shelley(x) => {
-                    let utxos = store.get_utxo_by_address(&x.to_vec()).unwrap();
+                    let utxos = indexes
+                        .utxos_by_tag(dimensions::ADDRESS, &x.to_vec())
+                        .unwrap();
                     assertion(utxos, &address, ordinal);
 
-                    let utxos = store.get_utxo_by_payment(&x.payment().to_vec()).unwrap();
+                    let utxos = indexes
+                        .utxos_by_tag(dimensions::PAYMENT, &x.payment().to_vec())
+                        .unwrap();
                     assertion(utxos, &address, ordinal);
 
                     match x.delegation() {
                         ShelleyDelegationPart::Key(..) | ShelleyDelegationPart::Script(..) => {
-                            let utxos = store.get_utxo_by_stake(&x.delegation().to_vec()).unwrap();
+                            let utxos = indexes
+                                .utxos_by_tag(dimensions::STAKE, &x.delegation().to_vec())
+                                .unwrap();
                             assertion(utxos, &address, ordinal);
                         }
                         _ => {
-                            let utxos = store.get_utxo_by_stake(&x.delegation().to_vec()).unwrap();
+                            let utxos = indexes
+                                .utxos_by_tag(dimensions::STAKE, &x.delegation().to_vec())
+                                .unwrap();
                             assert!(utxos.is_empty());
                         }
                     }
                 }
                 Address::Stake(x) => {
-                    let utxos = store.get_utxo_by_stake(&x.to_vec()).unwrap();
+                    let utxos = indexes
+                        .utxos_by_tag(dimensions::STAKE, &x.to_vec())
+                        .unwrap();
                     assertion(utxos, &address, ordinal);
                 }
             };
@@ -708,12 +461,13 @@ mod tests {
     #[test]
     fn test_count_utxos_by_address() {
         let store = StateStore::in_memory(StateSchema::default()).unwrap();
+        let indexes = build_indexes(&store);
 
         let utxo_generator = |x: &TestAddress| utxo_with_random_amount(x, 1_000_000..1_500_000);
 
         let delta = make_custom_utxo_delta(TestAddress::everyone(), 10..11, utxo_generator);
 
-        apply_utxoset!(store, [&delta]);
+        apply_utxoset!(store, &indexes, [&delta]);
 
         for address in TestAddress::everyone().iter() {
             let expected = delta
@@ -723,7 +477,7 @@ mod tests {
                 .filter(|(addr, _)| addr == address.to_bytes().as_slice())
                 .count();
 
-            let count = store
+            let count = indexes
                 .count_utxo_by_address(address.to_bytes().as_slice())
                 .unwrap();
 
@@ -734,12 +488,13 @@ mod tests {
     #[test]
     fn test_iter_within_key() {
         let store = StateStore::in_memory(StateSchema::default()).unwrap();
+        let indexes = build_indexes(&store);
 
         let utxo_generator = |x: &TestAddress| utxo_with_random_amount(x, 1_000_000..1_500_000);
 
         let delta = make_custom_utxo_delta(TestAddress::everyone(), 10..11, utxo_generator);
 
-        apply_utxoset!(store, [&delta]);
+        apply_utxoset!(store, &indexes, [&delta]);
 
         for address in TestAddress::everyone().iter() {
             let mut expected: HashSet<TxoRef> = delta
@@ -755,7 +510,7 @@ mod tests {
                 })
                 .collect();
 
-            let iterator = store
+            let iterator = indexes
                 .iter_utxo_by_address(address.to_bytes().as_slice())
                 .unwrap();
 

@@ -249,7 +249,7 @@ impl Default for ConfigEditor {
                 mithril: Some(From::from(&KnownNetwork::CardanoMainnet)),
                 snapshot: Default::default(),
                 storage: StorageConfig {
-                    version: StorageVersion::V2,
+                    version: StorageVersion::V3,
                     ..Default::default()
                 },
                 genesis: Default::default(),
@@ -274,9 +274,12 @@ impl ConfigEditor {
             self.0.mithril = Some(network.into());
             self.1 = Some(network.clone());
 
-            // Add max wall history for network from Genesis.
+            // Add max wal history for network from Genesis.
             let genesis = network.load_included_genesis();
-            self.0.storage.max_wal_history = Some(mutable_slots(&genesis));
+            self.0
+                .storage
+                .wal
+                .set_max_history(Some(mutable_slots(&genesis)));
         }
 
         self
@@ -295,7 +298,7 @@ impl ConfigEditor {
     }
 
     fn apply_history_pruning(mut self, value: HistoryPrunningOptions) -> Self {
-        self.0.storage.max_chain_history = value.into();
+        self.0.storage.archive.set_max_history(value.into());
 
         self
     }
@@ -406,8 +409,8 @@ impl ConfigEditor {
     }
 
     fn prompt_storage_upgrade(mut self) -> miette::Result<Self> {
-        if self.0.storage.version != StorageVersion::V2 {
-            self.0.storage.version = StorageVersion::V2;
+        if self.0.storage.version != StorageVersion::V3 {
+            self.0.storage.version = StorageVersion::V3;
 
             let delete = Confirm::new("Your storage is incompatible with current version. Do you want to delete data and bootstrap?")
                 .with_default(true)

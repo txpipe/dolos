@@ -2,3 +2,8 @@
 tmp
 benches
 /data
+.env
+.opencode
+opencode.json
+xtask.toml
+CLAUDE.md

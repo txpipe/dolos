@@ -37,6 +37,7 @@ xxhash-rust.workspace = true
 dolos-core = { path = "crates/core" }
 dolos-cardano = { path = "crates/cardano", features = ["include-genesis"] }
 dolos-redb3 = { path = "crates/redb3" }
+dolos-fjall = { path = "crates/fjall" }
 dolos-minibf = { path = "crates/minibf", optional = true }
 dolos-trp = { path = "crates/trp", optional = true }
 
@@ -52,6 +53,7 @@ config = { version = "0.15.19", default-features = false, features = [
 ] }
 lazy_static = "1.4.0"
 tracing-subscriber = "0.3.17"
+tracing-log = "0.2"
 miette = { version = "7.6.0", features = ["fancy"] }
 async-trait = "0.1.81"
 bytes = "1.9.0"
@@ -65,6 +67,7 @@ console-subscriber = { version = "0.3.0", optional = true }
 flate2 = "1.0.34"
 tar = "0.4.41"
 paste = "1.0.15"
+redb-extras = "0.6.1"
 
 
 # gRPC dependencies
@@ -84,16 +87,27 @@ mithril-client = { version = "0.12.2", optional = true, default-features = false
 ] }
 
 [dev-dependencies]
+anyhow = "1.0"
+comfy-table = "7.1.1"
+csv = "1"
+csv-diff = "0.1"
 nix = { version = "0.30.1", features = ["signal"] }
+serde = { workspace = true }
 tempfile = "3.20.0"
+toml = "0.8.13"
 dolos-testing = { path = "crates/testing", features = ["toy-domain"] }
 
 [[test]]
 name = "smoke"
 path = "tests/external/smoke.rs"
 
+[[test]]
+name = "cardano"
+path = "tests/cardano/main.rs"
+
 [features]
 relaxed = ["dolos-cardano/relaxed"]
+rupd-snapshot-dump = ["dolos-cardano/rupd-snapshot-dump"]
 mithril = ["mithril-client"]
 utils = ["comfy-table", "inquire", "toml"]
 debug = ["console-subscriber", "tokio/tracing"]
@@ -120,6 +134,7 @@ lto = "thin"
 members = [
     "crates/cardano",
     "crates/core",
+    "crates/fjall",
     "crates/testing",
     "crates/minibf",
     "crates/redb3",
@@ -127,7 +142,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.0.0-rc.5"
+version = "1.0.0-rc.6"
 edition = "2021"
 repository = "https://github.com/txpipe/dolos"
 homepage = "https://github.com/txpipe/dolos"
@@ -145,7 +160,7 @@ thiserror = "2.0.12"
 hex = "0.4.3"
 regex = "1.10.0"
 tracing = "0.1.37"
-itertools = "0.13.0"
+itertools = "0.14.0"
 bincode = "1.3.3"
 futures-core = "0.3.31"
 futures-util = "0.3.28"

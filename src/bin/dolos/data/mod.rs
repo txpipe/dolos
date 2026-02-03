@@ -1,6 +1,8 @@
+use clap::ValueEnum;
 use clap::{Parser, Subcommand};
 use dolos_core::config::RootConfig;
 
+mod cardinality_stats;
 mod clear_state;
 mod compute_nonce;
 mod compute_spdd;
@@ -13,10 +15,17 @@ mod dump_wal;
 mod export;
 mod find_seq;
 mod housekeeping;
+mod import_archive;
 mod prune_chain;
 mod prune_wal;
 mod stats;
 mod summary;
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum OutputFormat {
+    Default,
+    Dbsync,
+}
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
@@ -34,6 +43,8 @@ pub enum Command {
     DumpBlocks(dump_blocks::Args),
     /// clears data from the state
     ClearState(clear_state::Args),
+    /// shows multimap cardinality stats for archive
+    CardinalityStats(cardinality_stats::Args),
     /// computes the SPDD for the current epoch
     ComputeSpdd(compute_spdd::Args),
     /// computes the nonce for a epoch
@@ -48,10 +59,12 @@ pub enum Command {
     PruneWal(prune_wal::Args),
     /// removes blocks from the chain before a given slot
     PruneChain(prune_chain::Args),
-    /// shows statistics about the data for Redb stores
+    /// shows statistics about the data (redb backend only)
     Stats(stats::Args),
-    /// shows statistics about the data for Redb stores
+    /// runs housekeeping tasks
     Housekeeping(housekeeping::Args),
+    /// imports blocks from immutable DB into archive store only
+    ImportArchive(import_archive::Args),
 }
 
 #[derive(Debug, Parser)]
@@ -73,6 +86,7 @@ pub fn run(
         Command::DumpLogs(x) => dump_logs::run(config, x)?,
         Command::DumpBlocks(x) => dump_blocks::run(config, x)?,
         Command::ClearState(x) => clear_state::run(config, x)?,
+        Command::CardinalityStats(x) => cardinality_stats::run(config, x)?,
         Command::ComputeSpdd(x) => compute_spdd::run(config, x)?,
         Command::ComputeNonce(x) => compute_nonce::run(config, x)?,
         Command::FindSeq(x) => find_seq::run(config, x)?,
@@ -82,6 +96,7 @@ pub fn run(
         Command::PruneChain(x) => prune_chain::run(config, x)?,
         Command::Stats(x) => stats::run(config, x)?,
         Command::Housekeeping(x) => housekeeping::run(config, x)?,
+        Command::ImportArchive(x) => import_archive::run(config, x, feedback)?,
     }
 
     Ok(())

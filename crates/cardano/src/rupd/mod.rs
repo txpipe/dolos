@@ -5,7 +5,7 @@ use dolos_core::{
     LogKey, TemporalKey,
 };
 use pallas::ledger::primitives::StakeCredential;
-use tracing::{info, instrument};
+use tracing::{debug, instrument};
 
 use crate::{
     pots::{EpochIncentives, Pots},
@@ -14,7 +14,17 @@ use crate::{
     StakeLog,
 };
 
+pub mod deltas;
 pub mod loading;
+pub mod work_unit;
+
+#[cfg(feature = "rupd-snapshot-dump")]
+pub mod dump;
+
+pub use deltas::{credential_to_key, EnqueueReward, SetEpochIncentives};
+#[cfg(feature = "rupd-snapshot-dump")]
+pub use dump::dump_snapshot_csv;
+pub use work_unit::RupdWorkUnit;
 
 pub trait RupdVisitor: Default {
     #[allow(unused_variables)]
@@ -76,6 +86,14 @@ impl DelegatorMap {
     pub fn count_delegators(&self, pool: &PoolHash) -> u64 {
         self.0.get(pool).map(|x| x.len() as u64).unwrap_or(0)
     }
+
+    pub fn iter_all(&self) -> impl Iterator<Item = (&PoolHash, &StakeCredential, &u64)> {
+        self.0.iter().flat_map(|(pool, delegators)| {
+            delegators
+                .iter()
+                .map(move |(cred, stake)| (pool, cred, stake))
+        })
+    }
 }
 
 #[derive(Debug, Default)]
@@ -91,6 +109,10 @@ impl StakeSnapshot {
     // alias just for semantic clarity
     pub fn empty() -> Self {
         Self::default()
+    }
+
+    pub fn iter_accounts(&self) -> impl Iterator<Item = (&PoolHash, &StakeCredential, &u64)> {
+        self.accounts_by_pool.iter_all()
     }
 }
 
@@ -170,7 +192,7 @@ pub fn execute<D: Domain>(
     slot: BlockSlot,
     genesis: &Genesis,
 ) -> Result<RewardMap<RupdWork>, ChainError> {
-    info!(slot, "executing rupd work unit");
+    debug!(slot, "executing rupd work unit");
 
     let work = RupdWork::load::<D>(state, genesis)?;
 

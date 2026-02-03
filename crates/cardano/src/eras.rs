@@ -1,4 +1,4 @@
-use dolos_core::{BlockSlot, ChainError, Domain, StateStore as _};
+use dolos_core::{BlockSlot, ChainError, Domain, LogKey, StateStore, TemporalKey};
 use pallas::ledger::primitives::Epoch;
 
 use crate::{model::EraSummary, EraBoundary, EraProtocol, FixedNamespace as _};
@@ -8,6 +8,10 @@ pub type EpochSlot = u32;
 impl EraSummary {
     /// Resolve epoch and sub-epoch slot from a slot number and a chain summary.
     pub fn slot_epoch(&self, slot: u64) -> (Epoch, EpochSlot) {
+        if slot < self.start.slot {
+            panic!("can't compute epoch for slot {slot} since it's prior to this era")
+        }
+
         let era_slot = slot - self.start.slot;
         let era_epoch = era_slot / self.epoch_length;
         let epoch = self.start.epoch + era_epoch;
@@ -70,7 +74,7 @@ impl ChainSummary {
         era.slot_time(slot)
     }
 
-    pub(crate) fn append_era(&mut self, protocol: u16, era: EraSummary) {
+    pub fn append_era(&mut self, protocol: u16, era: EraSummary) {
         if let Some(edge) = self.edge.take() {
             self.past.push(edge);
         }
@@ -195,6 +199,42 @@ pub fn load_era_summary<D: Domain>(state: &D::State) -> Result<ChainSummary, Cha
     }
 
     Ok(chain)
+}
+
+pub fn load_chain_summary_from_state(state: &impl StateStore) -> Result<ChainSummary, ChainError> {
+    let eras = state.iter_entities_typed(EraSummary::NS, None)?;
+
+    let mut chain = ChainSummary::default();
+
+    for result in eras {
+        let (key, era) = result?;
+        let protocol = EraProtocol::from(key);
+        chain.append_era(protocol.into(), era);
+    }
+
+    Ok(chain)
+}
+
+pub fn log_epoch_range_to_key_range(
+    summary: &ChainSummary,
+    start_epoch: Option<u64>,
+    end_epoch: Option<u64>,
+) -> (Option<u64>, Option<u64>, Option<std::ops::Range<LogKey>>) {
+    let start_slot = start_epoch.map(|epoch| summary.epoch_start(epoch));
+    let end_slot = end_epoch.map(|epoch| summary.epoch_start(epoch));
+    let range = match (start_slot, end_slot) {
+        (Some(start), Some(end)) => {
+            let start_key = LogKey::from(TemporalKey::from(start));
+            let end_key = LogKey::from(TemporalKey::from(end));
+            Some(std::ops::Range {
+                start: start_key,
+                end: end_key,
+            })
+        }
+        _ => None,
+    };
+
+    (start_slot, end_slot, range)
 }
 
 pub fn load_active_era<D: Domain>(

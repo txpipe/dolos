@@ -3,19 +3,19 @@ use std::{
     sync::Arc,
 };
 
-use dolos_core::{
-    batch::WorkDeltas, config::CardanoConfig, BlockSlot, ChainError, Domain, EntityKey, Genesis,
-};
-use pallas::ledger::primitives::conway::DRep;
-use tracing::{debug, info, instrument};
+use dolos_core::{config::CardanoConfig, BlockSlot, ChainError, Domain, EntityKey, Genesis};
+use pallas::ledger::primitives::{conway::DRep, StakeCredential};
+use tracing::{debug, instrument};
 
 use crate::{
-    rewards::RewardMap, rupd::RupdWork, AccountState, CardanoDelta, CardanoEntity, CardanoLogic,
-    DRepState, EpochState, EraProtocol, EraSummary, PoolHash, PoolState, ProposalState,
+    eras::ChainSummary, rewards::RewardMap, roll::WorkDeltas, rupd::RupdWork, AccountState,
+    CardanoDelta, CardanoEntity, DRepState, EpochState, EraProtocol, PoolHash, PoolState,
+    ProposalState,
 };
 
 pub mod commit;
 pub mod loading;
+pub mod work_unit;
 
 // visitors
 pub mod drops;
@@ -23,6 +23,8 @@ pub mod enactment;
 pub mod refunds;
 pub mod rewards;
 pub mod wrapup;
+
+pub use work_unit::EwrapWorkUnit;
 
 pub trait BoundaryVisitor {
     #[allow(unused_variables)]
@@ -113,7 +115,7 @@ pub struct BoundaryWork {
     // loaded
     ending_state: EpochState,
     pub active_protocol: EraProtocol,
-    pub active_era: EraSummary,
+    pub chain_summary: ChainSummary,
     pub genesis: Arc<Genesis>,
     pub rewards: RewardMap<RupdWork>,
 
@@ -129,8 +131,11 @@ pub struct BoundaryWork {
     pub retiring_dreps: Vec<DRep>,
 
     // computed via visitors
-    pub deltas: WorkDeltas<CardanoLogic>,
+    pub deltas: WorkDeltas,
     pub logs: Vec<(EntityKey, CardanoEntity)>,
+
+    /// Credentials whose rewards were applied (need to be dequeued from state).
+    pub applied_reward_credentials: Vec<StakeCredential>,
 }
 
 impl BoundaryWork {
@@ -154,11 +159,10 @@ pub fn execute<D: Domain>(
     slot: BlockSlot,
     _: &CardanoConfig,
     genesis: Arc<Genesis>,
-    rewards: RewardMap<RupdWork>,
 ) -> Result<(), ChainError> {
-    info!("executing EWRAP work unit");
+    debug!("executing EWRAP work unit");
 
-    let mut boundary = BoundaryWork::load::<D>(state, genesis, rewards)?;
+    let mut boundary = BoundaryWork::load::<D>(state, genesis)?;
 
     boundary.commit::<D>(state, archive)?;
 

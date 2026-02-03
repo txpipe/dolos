@@ -1,10 +1,9 @@
 use std::{collections::HashMap, path::Path, sync::Arc};
 
 use dolos_core::{
-    ChainPoint, EntityKey, EntityValue, Namespace, StateError, StateSchema, TxoRef, UtxoMap,
-    UtxoSet,
+    config::RedbStateConfig, ChainPoint, EntityKey, EntityValue, Namespace, StateError,
+    StateSchema, TxoRef, UtxoMap,
 };
-use pallas::crypto::hash::Hash;
 
 use redb::{
     Database, Durability, ReadTransaction, ReadableDatabase, TableDefinition, WriteTransaction,
@@ -12,7 +11,7 @@ use redb::{
 
 use tracing::warn;
 
-mod utxoset;
+pub(crate) mod utxoset;
 
 use crate::{build_tables, Error, Table};
 
@@ -70,16 +69,24 @@ pub struct StateStore {
 }
 
 impl StateStore {
+    /// Gracefully shutdown the state store.
+    ///
+    /// For Redb, this is a no-op since Redb handles cleanup automatically
+    /// during drop without blocking issues.
+    pub fn shutdown(&self) -> Result<(), Error> {
+        Ok(())
+    }
+
     pub fn open(
         schema: StateSchema,
         path: impl AsRef<Path>,
-        cache_size: Option<usize>,
+        config: &RedbStateConfig,
     ) -> Result<Self, Error> {
         let db = ::redb::Database::builder()
             .set_repair_callback(|x| {
                 warn!(progress = x.progress() * 100f64, "state3 db is repairing")
             })
-            .set_cache_size(1024 * 1024 * cache_size.unwrap_or(DEFAULT_CACHE_SIZE_MB))
+            .set_cache_size(1024 * 1024 * config.cache.unwrap_or(DEFAULT_CACHE_SIZE_MB))
             .create(path)?;
 
         let tables = build_tables(schema);
@@ -131,8 +138,6 @@ impl StateStore {
 
         // TODO: refactor into entities model
         utxoset::UtxosTable::initialize(&wx)?;
-        utxoset::DatumsTable::initialize(&wx)?;
-        utxoset::FilterIndexes::initialize(&wx)?;
 
         wx.commit()?;
 
@@ -157,7 +162,6 @@ impl StateStore {
         let wx = target.db().begin_write()?;
 
         utxoset::UtxosTable::copy(&rx, &wx)?;
-        utxoset::FilterIndexes::copy(&rx, &wx)?;
 
         wx.commit()?;
 
@@ -219,7 +223,6 @@ impl dolos_core::StateWriter for StateWriter {
 
     fn apply_utxoset(&self, delta: &dolos_core::UtxoSetDelta) -> Result<(), StateError> {
         utxoset::UtxosTable::apply(&self.wx, delta)?;
-        utxoset::FilterIndexes::apply(&self.wx, delta)?;
 
         Ok(())
     }
@@ -318,49 +321,6 @@ impl dolos_core::StateStore for StateStore {
         let rx = self.db().begin_read().map_err(Error::from)?;
 
         let out = utxoset::UtxosTable::get_sparse(&rx, refs)?;
-
-        Ok(out)
-    }
-
-    fn get_utxo_by_address(&self, address: &[u8]) -> Result<UtxoSet, StateError> {
-        let rx = self.db().begin_read().map_err(Error::from)?;
-
-        let out = utxoset::FilterIndexes::get_by_address(&rx, address)?;
-
-        Ok(out)
-    }
-
-    fn get_utxo_by_payment(&self, payment: &[u8]) -> Result<UtxoSet, StateError> {
-        let rx = self.db().begin_read().map_err(Error::from)?;
-        let out = utxoset::FilterIndexes::get_by_payment(&rx, payment)?;
-
-        Ok(out)
-    }
-
-    fn get_utxo_by_stake(&self, stake: &[u8]) -> Result<UtxoSet, StateError> {
-        let rx = self.db().begin_read().map_err(Error::from)?;
-        let out = utxoset::FilterIndexes::get_by_stake(&rx, stake)?;
-
-        Ok(out)
-    }
-
-    fn get_utxo_by_policy(&self, policy: &[u8]) -> Result<UtxoSet, StateError> {
-        let rx = self.db().begin_read().map_err(Error::from)?;
-        let out = utxoset::FilterIndexes::get_by_policy(&rx, policy)?;
-
-        Ok(out)
-    }
-
-    fn get_utxo_by_asset(&self, asset: &[u8]) -> Result<UtxoSet, StateError> {
-        let rx = self.db().begin_read().map_err(Error::from)?;
-        let out = utxoset::FilterIndexes::get_by_asset(&rx, asset)?;
-
-        Ok(out)
-    }
-
-    fn get_datum(&self, datum_hash: &Hash<32>) -> Result<Option<Vec<u8>>, StateError> {
-        let rx = self.db().begin_read().map_err(Error::from)?;
-        let out = utxoset::DatumsTable::get(&rx, datum_hash)?;
 
         Ok(out)
     }

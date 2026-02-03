@@ -1,6 +1,5 @@
 use std::ops::Deref;
 
-use dolos_core::batch::WorkDeltas;
 use dolos_core::{BlockSlot, ChainError, Genesis, NsKey};
 use pallas::crypto::hash::{Hash, Hasher};
 use pallas::ledger::primitives::Epoch;
@@ -8,10 +7,11 @@ use pallas::ledger::traverse::{MultiEraBlock, MultiEraCert, MultiEraTx};
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
+use super::WorkDeltas;
 use crate::model::FixedNamespace as _;
 use crate::pallas_extras::MultiEraPoolRegistration;
 use crate::{model::PoolState, pallas_extras, roll::BlockVisitor};
-use crate::{CardanoLogic, EpochValue, PParamsSet, PoolParams, PoolSnapshot};
+use crate::{EpochValue, PParamsSet, PoolParams, PoolSnapshot};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PoolRegistration {
@@ -230,7 +230,7 @@ pub struct PoolStateVisitor {
 impl BlockVisitor for PoolStateVisitor {
     fn visit_root(
         &mut self,
-        deltas: &mut WorkDeltas<CardanoLogic>,
+        deltas: &mut WorkDeltas,
         block: &MultiEraBlock,
         _: &Genesis,
         pparams: &PParamsSet,
@@ -250,7 +250,7 @@ impl BlockVisitor for PoolStateVisitor {
 
     fn visit_cert(
         &mut self,
-        deltas: &mut WorkDeltas<CardanoLogic>,
+        deltas: &mut WorkDeltas,
         block: &MultiEraBlock,
         _: &MultiEraTx,
         cert: &MultiEraCert,

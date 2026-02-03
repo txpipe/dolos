@@ -4,7 +4,8 @@ use itertools::Itertools;
 use pallas::ledger::traverse::{MultiEraBlock, MultiEraOutput};
 use std::collections::{HashMap, HashSet};
 
-use dolos_core::{ArchiveStore, Domain, StateStore, TxoRef};
+use dolos_cardano::indexes::AsyncCardanoQueryExt;
+use dolos_core::{Domain, StateStore as _, TxoRef};
 
 use crate::{
     mapping::{IntoModel, UtxoOutputModelBuilder},
@@ -12,11 +13,14 @@ use crate::{
     Facade,
 };
 
-pub fn load_utxo_models<D: Domain>(
+pub async fn load_utxo_models<D>(
     domain: &Facade<D>,
     refs: HashSet<TxoRef>,
     pagination: Pagination,
-) -> Result<Vec<AddressUtxoContentInner>, StatusCode> {
+) -> Result<Vec<AddressUtxoContentInner>, StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
     let utxos = domain
         .state()
         .get_utxos(refs.into_iter().collect())
@@ -31,7 +35,7 @@ pub fn load_utxo_models<D: Domain>(
 
     let tx_deps: Vec<_> = utxos.keys().map(|txoref| txoref.0).unique().collect();
 
-    let block_deps = domain.get_block_with_tx_batch(tx_deps)?;
+    let block_deps = domain.get_block_with_tx_batch(tx_deps).await?;
 
     // decoded
     let blocks_deps: HashMap<_, _> = block_deps
@@ -70,25 +74,27 @@ pub fn load_utxo_models<D: Domain>(
         }
     }
 
-    let models = models
-        .into_iter()
-        .map(|(_, builder)| builder)
-        .enumerate()
-        .filter_map(|(i, builder)| pagination.as_included_item(i, builder))
-        .map(|builder| {
-            let key: Vec<u8> = builder.txo_ref().into();
-            let builder = if let Some(consumed_by) = domain
-                .archive()
-                .get_tx_by_spent_txo(&key)
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-            {
-                builder.with_consumed_by(consumed_by)
-            } else {
-                builder
-            };
-            builder.into_model()
-        })
-        .try_collect()?;
+    let mut out = Vec::new();
+    for (i, builder) in models.into_iter().map(|(_, builder)| builder).enumerate() {
+        let Some(builder) = pagination.as_included_item(i, builder) else {
+            continue;
+        };
 
-    Ok(models)
+        let key: Vec<u8> = builder.txo_ref().into();
+        let consumed_by = domain
+            .query()
+            .tx_by_spent_txo(&key)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        let builder = if let Some(consumed_by) = consumed_by {
+            builder.with_consumed_by(consumed_by)
+        } else {
+            builder
+        };
+
+        out.push(builder.into_model()?);
+    }
+
+    Ok(out)
 }

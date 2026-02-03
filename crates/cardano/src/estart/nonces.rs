@@ -36,7 +36,7 @@ impl EntityDelta for NonceTransition {
 
 fn next_largest_stable_slot(ctx: &super::WorkContext) -> BlockSlot {
     let stability_window = nonce_stability_window(ctx.active_protocol.into(), &ctx.genesis);
-    let epoch_finish_slot = ctx.active_era.epoch_start(ctx.starting_epoch_no() + 1);
+    let epoch_finish_slot = ctx.chain_summary.epoch_start(ctx.starting_epoch_no() + 1);
 
     epoch_finish_slot - stability_window
 }
@@ -66,10 +66,6 @@ pub struct BoundaryVisitor;
 
 impl super::BoundaryVisitor for BoundaryVisitor {
     fn flush(&mut self, ctx: &mut super::WorkContext) -> Result<(), ChainError> {
-        if !ctx.active_protocol.is_shelley_or_later() {
-            return Ok(());
-        }
-
         let next_slot = next_largest_stable_slot(ctx);
         let next_nonce = next_nonce(ctx);
 

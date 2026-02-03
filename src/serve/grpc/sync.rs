@@ -130,46 +130,39 @@ where
     ) -> Result<Response<u5c::sync::FetchBlockResponse>, Status> {
         let message = request.into_inner();
 
-        let out: Vec<_> = {
-            let store = self.domain.archive();
+        let query = dolos_core::AsyncQueryFacade::new(self.domain.clone());
 
-            let lookup = |br: &u5c::sync::BlockRef| -> Result<BlockBody, Status> {
-                if !br.hash.is_empty() {
-                    if let Some(body) = store
-                        .get_block_by_hash(&br.hash)
-                        .map_err(|_| Status::internal("Failed to query chain service."))?
-                    {
-                        return Ok(body);
-                    }
-                }
+        let mut out = Vec::new();
+        for br in message.r#ref.iter() {
+            let mut body: Option<BlockBody> = None;
 
-                if br.height != 0 {
-                    if let Some(body) = store
-                        .get_block_by_number(&br.height)
-                        .map_err(|_| Status::internal("Failed to query chain service."))?
-                    {
-                        return Ok(body);
-                    }
-                }
+            if !br.hash.is_empty() {
+                body = query
+                    .block_by_hash(br.hash.to_vec())
+                    .await
+                    .map_err(|_| Status::internal("Failed to query chain service."))?;
+            }
 
-                if br.slot != 0 {
-                    if let Some(body) = store
-                        .get_block_by_slot(&br.slot)
-                        .map_err(|_| Status::internal("Failed to query chain service."))?
-                    {
-                        return Ok(body);
-                    }
-                }
+            if body.is_none() && br.height != 0 {
+                body = query
+                    .block_by_number(br.height)
+                    .await
+                    .map_err(|_| Status::internal("Failed to query chain service."))?;
+            }
 
-                Err(Status::not_found(format!("Failed to find block: {br:?}")))
+            if body.is_none() && br.slot != 0 {
+                body = query
+                    .block_by_slot(br.slot)
+                    .await
+                    .map_err(|_| Status::internal("Failed to query chain service."))?;
+            }
+
+            let Some(body) = body else {
+                return Err(Status::not_found(format!("Failed to find block: {br:?}")));
             };
 
-            message
-                .r#ref
-                .iter()
-                .map(|br| lookup(br).map(|body| raw_to_anychain(&self.mapper, &body)))
-                .collect::<Result<Vec<u5c::sync::AnyChainBlock>, Status>>()?
-        };
+            out.push(raw_to_anychain(&self.mapper, &body));
+        }
 
         let response = u5c::sync::FetchBlockResponse { block: out };
 
@@ -276,16 +269,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_dump_history_pagination() {
-        let domain = ToyDomain::new(None, None).await;
+        let domain = ToyDomain::new(None, None);
         let cancel = CancelTokenImpl::default();
 
         let batch = (0..34)
             .map(|i| dolos_testing::blocks::make_conway_block(i).1)
             .collect_vec();
 
-        let _ = dolos_core::facade::import_blocks(&domain, batch)
-            .await
-            .unwrap();
+        use dolos_core::ImportExt;
+        domain.import_blocks(batch).unwrap();
 
         let service = SyncServiceImpl::new(domain, cancel);
 
@@ -327,7 +319,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_dump_history_max_items() {
-        let domain = ToyDomain::new(None, None).await;
+        let domain = ToyDomain::new(None, None);
         let cancel = CancelTokenImpl::default();
 
         let service = SyncServiceImpl::new(domain, cancel);

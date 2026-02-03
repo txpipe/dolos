@@ -1,4 +1,6 @@
+use dolos::storage::{IndexStoreBackend, StateStoreBackend};
 use dolos_core::config::RootConfig;
+use miette::bail;
 use serde_json::json;
 
 #[derive(Debug, clap::Args)]
@@ -16,11 +18,29 @@ fn stats_to_json(stats: &dolos_redb3::redb::TableStats) -> serde_json::Value {
 }
 
 pub fn run(config: &RootConfig, _args: &Args) -> miette::Result<()> {
-    let stores = crate::common::setup_data_stores(config)?;
+    let stores = crate::common::open_data_stores(config)?;
 
-    let state = stores.state;
+    // Stats command only works with redb backends
+    let state = match &stores.state {
+        StateStoreBackend::Redb(s) => s,
+        StateStoreBackend::Fjall(_) => {
+            bail!("stats command is only available for redb state backend")
+        }
+    };
 
-    let stats = state.utxoset_stats().unwrap();
+    let indexes = match &stores.indexes {
+        IndexStoreBackend::Redb(s) => s,
+        IndexStoreBackend::Fjall(_) => {
+            bail!("stats command is only available for redb index backend")
+        }
+        IndexStoreBackend::NoOp(_) => {
+            bail!("stats command is not available for noop index backend")
+        }
+    };
+
+    let mut stats = state.utxoset_stats().unwrap();
+    let index_stats = indexes.utxo_index_stats().unwrap();
+    stats.extend(index_stats);
 
     let mut json = serde_json::Map::new();
 

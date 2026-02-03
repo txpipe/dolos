@@ -52,6 +52,16 @@ impl MultiPoolReward {
 
         leader.chain(delegator).collect()
     }
+
+    /// Get pools and values for leader rewards.
+    pub fn leader_rewards(&self) -> impl Iterator<Item = (PoolHash, u64)> + '_ {
+        self.as_leader.iter().map(|(p, v)| (*p, *v))
+    }
+
+    /// Get pools and values for delegator rewards.
+    pub fn delegator_rewards(&self) -> impl Iterator<Item = (PoolHash, u64)> + '_ {
+        self.as_delegator.iter().map(|(p, v)| (*p, *v))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -69,6 +79,16 @@ impl PreAllegraReward {
         } else {
             self
         }
+    }
+
+    /// Get the pool and value for this pre-allegra reward.
+    pub fn pool_and_value(&self) -> (PoolHash, u64) {
+        (self.pool, self.value)
+    }
+
+    /// Whether this reward was earned as a pool leader.
+    pub fn is_leader(&self) -> bool {
+        self.as_leader
     }
 }
 
@@ -140,6 +160,17 @@ impl Reward {
             Self::MultiPool(r) => r.into_vec(),
             Self::PreAllegra(r) => vec![(r.pool, r.value, r.as_leader)],
         }
+    }
+
+    /// Create a Reward from a PendingRewardState.
+    /// Since we only persist MultiPool rewards (PreAllegra is historical),
+    /// this always creates a MultiPool variant.
+    pub fn from_pending_state(state: &crate::PendingRewardState) -> Self {
+        Self::MultiPool(MultiPoolReward {
+            is_spendable: state.is_spendable,
+            as_leader: state.as_leader.iter().cloned().collect(),
+            as_delegator: state.as_delegator.iter().cloned().collect(),
+        })
     }
 }
 
@@ -265,12 +296,20 @@ impl<C: RewardsContext> RewardMap<C> {
         self.applied_unspendable = add!(self.applied_unspendable, amount);
     }
 
-    pub fn drain_unspendable(&mut self) {
-        let unspendable = self.pending.extract_if(|_, reward| !reward.is_spendable());
+    pub fn drain_unspendable(&mut self) -> Vec<StakeCredential> {
+        let unspendable: Vec<_> = self
+            .pending
+            .extract_if(|_, reward| !reward.is_spendable())
+            .collect();
 
-        for (_, reward) in unspendable {
+        let mut credentials = Vec::with_capacity(unspendable.len());
+
+        for (credential, reward) in unspendable {
             self.applied_unspendable += reward.total_value();
+            credentials.push(credential);
         }
+
+        credentials
     }
 
     pub fn drain_all(&mut self) {
@@ -297,6 +336,38 @@ impl<C: RewardsContext> RewardMap<C> {
     pub fn applied_unspendable(&self) -> u64 {
         assert!(self.pending.is_empty());
         self.applied_unspendable
+    }
+
+    /// Iterate over all pending rewards (for persistence).
+    pub fn iter_pending(&self) -> impl Iterator<Item = (&StakeCredential, &Reward)> {
+        self.pending.iter()
+    }
+
+    /// Check if there are any pending rewards.
+    pub fn is_empty(&self) -> bool {
+        self.pending.is_empty()
+    }
+
+    /// Get the count of pending rewards.
+    pub fn len(&self) -> usize {
+        self.pending.len()
+    }
+}
+
+impl<C: RewardsContext> RewardMap<C> {
+    /// Create a RewardMap from pre-loaded pending rewards and incentives.
+    /// Used by EWRAP to reconstruct the reward map from state store.
+    pub fn from_pending(
+        pending: HashMap<StakeCredential, Reward>,
+        incentives: EpochIncentives,
+    ) -> Self {
+        Self {
+            incentives,
+            pending,
+            applied_effective: 0,
+            applied_unspendable: 0,
+            _phantom: PhantomData,
+        }
     }
 }
 
