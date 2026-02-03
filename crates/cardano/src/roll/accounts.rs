@@ -438,11 +438,8 @@ impl dolos_core::EntityDelta for AssignMirRewards {
     }
 
     fn apply(&mut self, entity: &mut Option<Self::Entity>) {
-        //let entity = entity.get_or_insert_with(|| AccountState::new(self.epoch, self.account.clone()));
-        let Some(entity) = entity.as_mut() else {
-            // we don't credit MIRs to unregistered accounts
-            return;
-        };
+        let entity =
+            entity.get_or_insert_with(|| AccountState::new(self.epoch, self.account.clone()));
 
         debug!(reward = self.reward, "assigning mir rewards");
 
