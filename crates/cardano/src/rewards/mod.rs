@@ -73,11 +73,24 @@ pub struct PreAllegraReward {
 }
 
 impl PreAllegraReward {
+    /// Merge two pre-Allegra rewards, keeping the minimum per Haskell Ord instance.
+    /// The Haskell Ord for Reward is:
+    ///   1. LeaderReward < MemberReward (leader takes priority)
+    ///   2. Same type → smaller pool ID wins
+    /// We keep the minimum because Set.deleteFindMin keeps the min element.
     pub fn merge(self, other: Self) -> Self {
-        if self.pool < other.pool {
-            other
-        } else {
-            self
+        // Leader rewards take priority over member rewards
+        match (self.as_leader, other.as_leader) {
+            (true, false) => self,   // self is leader, wins
+            (false, true) => other,  // other is leader, wins
+            _ => {
+                // Same type (both leader or both member): keep smaller pool ID
+                if self.pool <= other.pool {
+                    self
+                } else {
+                    other
+                }
+            }
         }
     }
 
@@ -423,6 +436,13 @@ pub fn define_rewards<C: RewardsContext>(ctx: &C) -> Result<RewardMap<C>, ChainE
         let epoch_blocks = ctx.epoch_blocks();
         let pool_blocks = ctx.pool_blocks(pool);
 
+        // Pools that made no blocks this epoch get no rewards.
+        // This matches the Haskell ledger behavior in mkPoolRewardInfo where
+        // pools not in BlocksMade return Left (for ranking only, no rewards).
+        if pool_blocks == 0 {
+            continue;
+        }
+
         let k = ctx.pparams().ensure_k()?;
         let a0 = ctx.pparams().ensure_a0()?;
         let d = ctx.pparams().ensure_d()?;
@@ -464,7 +484,17 @@ pub fn define_rewards<C: RewardsContext>(ctx: &C) -> Result<RewardMap<C>, ChainE
             "computed pool rewards"
         );
 
-        map.include(ctx, &operator_account, operator_share, pool, true);
+        // Leader rewards are only computed if:
+        // 1. Protocol >= 7 (Babbage hardfork removes prefilter), OR
+        // 2. The operator's reward account is registered
+        // This matches the Haskell ledger's hardforkBabbageForgoRewardPrefilter check.
+        let protocol_major = ctx.pparams().protocol_major().unwrap_or(0);
+        let babbage_or_later = protocol_major >= 7;
+        let is_operator_registered = ctx.is_account_registered(&operator_account);
+
+        if babbage_or_later || is_operator_registered {
+            map.include(ctx, &operator_account, operator_share, pool, true);
+        }
 
         for delegator in ctx.pool_delegators(pool) {
             if owners.contains(&delegator) {
@@ -473,6 +503,14 @@ pub fn define_rewards<C: RewardsContext>(ctx: &C) -> Result<RewardMap<C>, ChainE
                 continue;
 
                 // TODO: make sure that the above statement matches the specs
+            }
+
+            // Member rewards are only computed if:
+            // 1. Protocol >= 7 (Babbage hardfork removes prefilter), OR
+            // 2. The delegator account is registered
+            // This matches the Haskell ledger's prefilter in rewardOnePoolMember.
+            if !babbage_or_later && !ctx.is_account_registered(&delegator) {
+                continue;
             }
 
             let delegator_stake = ctx.account_stake(&pool, &delegator);

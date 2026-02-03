@@ -378,6 +378,54 @@ mod fixtures {
         pub const STAKE: &str = include_str!("fixtures/mainnet-213/stake-211.csv");
         pub const REWARDS: &str = include_str!("fixtures/mainnet-213/rewards.csv");
     }
+    pub mod mainnet_214 {
+        pub const EPOCHS: &str = include_str!("fixtures/mainnet-214/epochs.csv");
+        pub const PPARAMS: &str = include_str!("fixtures/mainnet-214/pparams.csv");
+        pub const ERAS: &str = include_str!("fixtures/mainnet-214/eras.csv");
+        pub const DELEGATION: &str = include_str!("fixtures/mainnet-214/delegation-212.csv");
+        pub const STAKE: &str = include_str!("fixtures/mainnet-214/stake-212.csv");
+        pub const REWARDS: &str = include_str!("fixtures/mainnet-214/rewards.csv");
+    }
+    pub mod mainnet_215 {
+        pub const EPOCHS: &str = include_str!("fixtures/mainnet-215/epochs.csv");
+        pub const PPARAMS: &str = include_str!("fixtures/mainnet-215/pparams.csv");
+        pub const ERAS: &str = include_str!("fixtures/mainnet-215/eras.csv");
+        pub const DELEGATION: &str = include_str!("fixtures/mainnet-215/delegation-213.csv");
+        pub const STAKE: &str = include_str!("fixtures/mainnet-215/stake-213.csv");
+        pub const REWARDS: &str = include_str!("fixtures/mainnet-215/rewards.csv");
+    }
+    pub mod mainnet_220 {
+        pub const EPOCHS: &str = include_str!("fixtures/mainnet-220/epochs.csv");
+        pub const PPARAMS: &str = include_str!("fixtures/mainnet-220/pparams.csv");
+        pub const ERAS: &str = include_str!("fixtures/mainnet-220/eras.csv");
+        pub const DELEGATION: &str = include_str!("fixtures/mainnet-220/delegation-218.csv");
+        pub const STAKE: &str = include_str!("fixtures/mainnet-220/stake-218.csv");
+        pub const REWARDS: &str = include_str!("fixtures/mainnet-220/rewards.csv");
+    }
+    pub mod mainnet_235 {
+        pub const EPOCHS: &str = include_str!("fixtures/mainnet-235/epochs.csv");
+        pub const PPARAMS: &str = include_str!("fixtures/mainnet-235/pparams.csv");
+        pub const ERAS: &str = include_str!("fixtures/mainnet-235/eras.csv");
+        pub const DELEGATION: &str = include_str!("fixtures/mainnet-235/delegation-233.csv");
+        pub const STAKE: &str = include_str!("fixtures/mainnet-235/stake-233.csv");
+        pub const REWARDS: &str = include_str!("fixtures/mainnet-235/rewards.csv");
+    }
+    pub mod mainnet_240 {
+        pub const EPOCHS: &str = include_str!("fixtures/mainnet-240/epochs.csv");
+        pub const PPARAMS: &str = include_str!("fixtures/mainnet-240/pparams.csv");
+        pub const ERAS: &str = include_str!("fixtures/mainnet-240/eras.csv");
+        pub const DELEGATION: &str = include_str!("fixtures/mainnet-240/delegation-238.csv");
+        pub const STAKE: &str = include_str!("fixtures/mainnet-240/stake-238.csv");
+        pub const REWARDS: &str = include_str!("fixtures/mainnet-240/rewards.csv");
+    }
+    pub mod mainnet_300 {
+        pub const EPOCHS: &str = include_str!("fixtures/mainnet-300/epochs.csv");
+        pub const PPARAMS: &str = include_str!("fixtures/mainnet-300/pparams.csv");
+        pub const ERAS: &str = include_str!("fixtures/mainnet-300/eras.csv");
+        pub const DELEGATION: &str = include_str!("fixtures/mainnet-300/delegation-298.csv");
+        pub const STAKE: &str = include_str!("fixtures/mainnet-300/stake-298.csv");
+        pub const REWARDS: &str = include_str!("fixtures/mainnet-300/rewards.csv");
+    }
     pub mod preview_550 {
         pub const EPOCHS: &str = include_str!("fixtures/preview-550/epochs.csv");
         pub const PPARAMS: &str = include_str!("fixtures/preview-550/pparams.csv");
@@ -683,6 +731,102 @@ fn test_mainnet_213() {
         fixtures::mainnet_213::DELEGATION,
         fixtures::mainnet_213::STAKE,
         fixtures::mainnet_213::REWARDS,
+    )
+    .unwrap();
+}
+
+#[test]
+fn test_mainnet_214() {
+    init_tracing();
+    run_epoch_pots_test(
+        "mainnet",
+        214,
+        fixtures::mainnet_214::EPOCHS,
+        fixtures::mainnet_214::PPARAMS,
+        fixtures::mainnet_214::ERAS,
+        fixtures::mainnet_214::DELEGATION,
+        fixtures::mainnet_214::STAKE,
+        fixtures::mainnet_214::REWARDS,
+    )
+    .unwrap();
+}
+
+#[test]
+fn test_mainnet_215() {
+    init_tracing();
+    run_epoch_pots_test(
+        "mainnet",
+        215,
+        fixtures::mainnet_215::EPOCHS,
+        fixtures::mainnet_215::PPARAMS,
+        fixtures::mainnet_215::ERAS,
+        fixtures::mainnet_215::DELEGATION,
+        fixtures::mainnet_215::STAKE,
+        fixtures::mainnet_215::REWARDS,
+    )
+    .unwrap();
+}
+
+#[test]
+fn test_mainnet_220() {
+    init_tracing();
+    run_epoch_pots_test(
+        "mainnet",
+        220,
+        fixtures::mainnet_220::EPOCHS,
+        fixtures::mainnet_220::PPARAMS,
+        fixtures::mainnet_220::ERAS,
+        fixtures::mainnet_220::DELEGATION,
+        fixtures::mainnet_220::STAKE,
+        fixtures::mainnet_220::REWARDS,
+    )
+    .unwrap();
+}
+
+#[test]
+fn test_mainnet_235() {
+    init_tracing();
+    run_epoch_pots_test(
+        "mainnet",
+        235,
+        fixtures::mainnet_235::EPOCHS,
+        fixtures::mainnet_235::PPARAMS,
+        fixtures::mainnet_235::ERAS,
+        fixtures::mainnet_235::DELEGATION,
+        fixtures::mainnet_235::STAKE,
+        fixtures::mainnet_235::REWARDS,
+    )
+    .unwrap();
+}
+
+#[test]
+fn test_mainnet_240() {
+    init_tracing();
+    run_epoch_pots_test(
+        "mainnet",
+        240,
+        fixtures::mainnet_240::EPOCHS,
+        fixtures::mainnet_240::PPARAMS,
+        fixtures::mainnet_240::ERAS,
+        fixtures::mainnet_240::DELEGATION,
+        fixtures::mainnet_240::STAKE,
+        fixtures::mainnet_240::REWARDS,
+    )
+    .unwrap();
+}
+
+#[test]
+fn test_mainnet_300() {
+    init_tracing();
+    run_epoch_pots_test(
+        "mainnet",
+        300,
+        fixtures::mainnet_300::EPOCHS,
+        fixtures::mainnet_300::PPARAMS,
+        fixtures::mainnet_300::ERAS,
+        fixtures::mainnet_300::DELEGATION,
+        fixtures::mainnet_300::STAKE,
+        fixtures::mainnet_300::REWARDS,
     )
     .unwrap();
 }

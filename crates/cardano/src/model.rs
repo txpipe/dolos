@@ -1952,6 +1952,22 @@ impl CardanoDelta {
         delta.undo(&mut sub_entity);
         *entity = sub_entity.map(|x| x.into());
     }
+
+    /// Returns a priority for ordering delta application within the same entity.
+    /// Lower values are applied first. This ensures registration happens before
+    /// MIR rewards, etc.
+    pub fn priority(&self) -> i32 {
+        match self {
+            // Registration must happen first so accounts exist for subsequent deltas
+            CardanoDelta::StakeRegistration(_) => 0,
+            CardanoDelta::PoolRegistration(_) => 0,
+            CardanoDelta::DRepRegistration(_) => 0,
+            // MIR rewards need accounts to exist
+            CardanoDelta::AssignMirRewards(_) => 10,
+            // Everything else uses default priority
+            _ => 5,
+        }
+    }
 }
 
 macro_rules! delta_from {

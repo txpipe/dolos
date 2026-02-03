@@ -438,8 +438,17 @@ impl dolos_core::EntityDelta for AssignMirRewards {
     }
 
     fn apply(&mut self, entity: &mut Option<Self::Entity>) {
-        let entity =
-            entity.get_or_insert_with(|| AccountState::new(self.epoch, self.account.clone()));
+        let Some(entity) = entity.as_mut() else {
+            // MIR to unregistered account - this shouldn't happen if deltas are
+            // ordered correctly (registration before MIR). Log a warning.
+            tracing::warn!(
+                account = hex::encode(minicbor::to_vec(&self.account).unwrap()),
+                reward = self.reward,
+                epoch = self.epoch,
+                "MIR skipped: account not registered"
+            );
+            return;
+        };
 
         debug!(reward = self.reward, "assigning mir rewards");
 
