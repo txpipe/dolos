@@ -33,6 +33,29 @@ pub mod pointers {
             (82626550, 0, 0) => None,
             (2498243, 27, 3) => None,
 
+            // mainnet
+            (4495800, 11, 0) => Some(StakeCredential::AddrKeyhash(
+                "e11332d859dd71f5b1089052a049690d81f7367eac9fafaef80b4da395"
+                    .parse()
+                    .unwrap(),
+            )),
+            (20095460, 2, 0) => Some(StakeCredential::AddrKeyhash(
+                "e1bc1597ad71c55d2d009a9274b3831ded155118dd769f5376decc1369"
+                    .parse()
+                    .unwrap(),
+            )),
+
+            // Add all unmapped pointers from analysis as None
+            (12, 12, 12) => None,
+            (62, 96, 105) => None,
+            (116, 49, 0) => None,
+            (124, 21, 3807) => None,
+            (13005, 15312, 1878946283) => None,
+            (13200, 526450, 149104513) => None,
+            (222624, 45784521, 167387965) => None,
+            (16292793057, 1011302, 20) => None,
+            (18446744073709551615, 1221092, 2) => None,
+
             x => {
                 dbg!(x);
                 //panic!("unknown pointer: {:?}", x);
@@ -195,6 +218,20 @@ pub mod proposals {
                 }
                 "f046a88280e6c5b18dd057027964860f6b0b7918f4532d50455ad257a14a70ed#0" => {
                     Canceled(1096)
+                }
+                // v7→v8 hard fork proposals (epoch 20, 2-epoch lag: effect at 22)
+                "cbc14ec74b2a20d6c4cc307e73b5a2465eb6cd68df64704f7bc844dac6018500#0" => {
+                    Ratified(21)
+                }
+                "7722b914ab9ccab873cd70cb5c39e7ce3bb0f5daf72de8ece56dbc06807b5486#0" => {
+                    Ratified(21)
+                }
+                // v8→v9 hard fork proposals (quorum not reached until epoch 645)
+                "99c48b116cf5536bbdd8f9fe0d5a4e7894309a6b5f0b984a264ce497bd61b351#0" => {
+                    Ratified(645)
+                }
+                "4fa27875bc4d00a1f40eae2b50b791d48fca4a0f8af4d44f0ceeb6c7662f689c#0" => {
+                    Ratified(645)
                 }
                 _ => match protocol {
                     0..=8 => RatifiedCurrentEpoch,
@@ -458,6 +495,19 @@ pub mod proposals {
                 // Plutus V3 Cost Model Parameter Changes Prior to Chang#2
                 "b2a591ac219ce6dcca5847e0248015209c7cb0436aa6bd6863d0c1f152a60bc5#0" => {
                     Ratified(525)
+                }
+
+                // Decentralisation updates submitted one epoch before their target epoch.
+                // RatifiedCurrentEpoch would enact these one epoch too early; use target
+                // epoch so they enact at target_epoch + 1, matching the ppup/fpup pipeline.
+                "a6713824eeef48508bd35e851bcf4021a93b5995127feb9910b1e1b88de2c225#0" => {
+                    Ratified(214)
+                }
+                "3da44150612379b337f0865bbe1c210e8f34a9d02280803e9ea90173d3361574#0" => {
+                    Ratified(215)
+                }
+                "319c8b8865bdc6ce896f3722aa54da9d9fd125429a7e05af1955004f69217eca#0" => {
+                    Ratified(219)
                 }
 
                 _ => match protocol {
