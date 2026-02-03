@@ -127,7 +127,6 @@ fn compute_collateral_value(
     tx: &MultiEraTx,
     utxos: &HashMap<TxoRef, OwnedMultiEraOutput>,
 ) -> Result<Lovelace, ChainError> {
-    debug_assert!(tx.era() == Era::Alonzo);
     debug_assert!(!tx.is_valid());
 
     let mut total = 0;
