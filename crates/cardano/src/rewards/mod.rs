@@ -192,7 +192,10 @@ pub struct RewardMap<C: RewardsContext> {
     incentives: EpochIncentives,
     pending: HashMap<StakeCredential, Reward>,
     applied_effective: u64,
-    applied_unspendable: u64,
+    /// Unspendable rewards that go to treasury (accounts that deregistered late after RUPD).
+    applied_unspendable_to_treasury: u64,
+    /// Unspendable rewards that return to reserves (accounts that deregistered soon after RUPD).
+    applied_unspendable_to_reserves: u64,
     _phantom: PhantomData<C>,
 }
 
@@ -226,7 +229,8 @@ impl<C: RewardsContext> Default for RewardMap<C> {
             incentives: EpochIncentives::default(),
             pending: HashMap::new(),
             applied_effective: 0,
-            applied_unspendable: 0,
+            applied_unspendable_to_treasury: 0,
+            applied_unspendable_to_reserves: 0,
             _phantom: PhantomData,
         }
     }
@@ -238,7 +242,8 @@ impl<C: RewardsContext> Clone for RewardMap<C> {
             incentives: self.incentives.clone(),
             pending: self.pending.clone(),
             applied_effective: self.applied_effective,
-            applied_unspendable: self.applied_unspendable,
+            applied_unspendable_to_treasury: self.applied_unspendable_to_treasury,
+            applied_unspendable_to_reserves: self.applied_unspendable_to_reserves,
             _phantom: PhantomData,
         }
     }
@@ -250,7 +255,8 @@ impl<C: RewardsContext> RewardMap<C> {
             incentives,
             pending: HashMap::new(),
             applied_effective: 0,
-            applied_unspendable: 0,
+            applied_unspendable_to_treasury: 0,
+            applied_unspendable_to_reserves: 0,
             _phantom: PhantomData,
         }
     }
@@ -304,12 +310,22 @@ impl<C: RewardsContext> RewardMap<C> {
         Some(reward)
     }
 
-    pub fn return_reward(&mut self, amount: Lovelace) {
+    /// Return an unspendable reward to treasury (for accounts that deregistered late after RUPD).
+    pub fn return_reward_to_treasury(&mut self, amount: Lovelace) {
         self.applied_effective = sub!(self.applied_effective, amount);
-        self.applied_unspendable = add!(self.applied_unspendable, amount);
+        self.applied_unspendable_to_treasury = add!(self.applied_unspendable_to_treasury, amount);
     }
 
-    pub fn drain_unspendable(&mut self) -> Vec<StakeCredential> {
+    /// Return an unspendable reward to reserves (for accounts that deregistered soon after RUPD).
+    pub fn return_reward_to_reserves(&mut self, amount: Lovelace) {
+        self.applied_effective = sub!(self.applied_effective, amount);
+        self.applied_unspendable_to_reserves = add!(self.applied_unspendable_to_reserves, amount);
+    }
+
+    /// Drain rewards marked as unspendable at RUPD time (is_spendable: false).
+    /// Pre-Babbage: all unspendable returns to reserves.
+    /// Post-Babbage: all unspendable goes to treasury.
+    pub fn drain_unspendable(&mut self, to_reserves: bool) -> Vec<StakeCredential> {
         let unspendable: Vec<_> = self
             .pending
             .extract_if(|_, reward| !reward.is_spendable())
@@ -318,7 +334,11 @@ impl<C: RewardsContext> RewardMap<C> {
         let mut credentials = Vec::with_capacity(unspendable.len());
 
         for (credential, reward) in unspendable {
-            self.applied_unspendable += reward.total_value();
+            if to_reserves {
+                self.applied_unspendable_to_reserves += reward.total_value();
+            } else {
+                self.applied_unspendable_to_treasury += reward.total_value();
+            }
             credentials.push(credential);
         }
 
@@ -332,7 +352,8 @@ impl<C: RewardsContext> RewardMap<C> {
             if reward.is_spendable() {
                 self.applied_effective += reward.total_value();
             } else {
-                self.applied_unspendable += reward.total_value();
+                // RUPD-time unspendable goes to treasury
+                self.applied_unspendable_to_treasury += reward.total_value();
             }
         }
     }
@@ -346,9 +367,22 @@ impl<C: RewardsContext> RewardMap<C> {
         self.applied_effective
     }
 
+    /// Get unspendable rewards that go to treasury.
+    pub fn applied_unspendable_to_treasury(&self) -> u64 {
+        assert!(self.pending.is_empty());
+        self.applied_unspendable_to_treasury
+    }
+
+    /// Get unspendable rewards that return to reserves.
+    pub fn applied_unspendable_to_reserves(&self) -> u64 {
+        assert!(self.pending.is_empty());
+        self.applied_unspendable_to_reserves
+    }
+
+    /// Get total unspendable rewards (both treasury and reserves).
     pub fn applied_unspendable(&self) -> u64 {
         assert!(self.pending.is_empty());
-        self.applied_unspendable
+        self.applied_unspendable_to_treasury + self.applied_unspendable_to_reserves
     }
 
     /// Iterate over all pending rewards (for persistence).
@@ -378,7 +412,8 @@ impl<C: RewardsContext> RewardMap<C> {
             incentives,
             pending,
             applied_effective: 0,
-            applied_unspendable: 0,
+            applied_unspendable_to_treasury: 0,
+            applied_unspendable_to_reserves: 0,
             _phantom: PhantomData,
         }
     }
@@ -510,7 +545,8 @@ pub fn define_rewards<C: RewardsContext>(ctx: &C) -> Result<RewardMap<C>, ChainE
             // 1. Protocol >= 7 (Babbage hardfork removes prefilter), OR
             // 2. The delegator account is registered
             // This matches the Haskell ledger's prefilter in rewardOnePoolMember.
-            if !babbage_or_later && !ctx.is_account_registered(&delegator) {
+            let delegator_registered = ctx.is_account_registered(&delegator);
+            if !babbage_or_later && !delegator_registered {
                 continue;
             }
 

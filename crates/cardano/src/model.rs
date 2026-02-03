@@ -572,6 +572,27 @@ impl AccountState {
         }
     }
 
+    /// Check if the account was registered at a specific slot.
+    /// Used for RUPD-time filtering where we need registration status at the RUPD slot,
+    /// not the current chain tip.
+    ///
+    /// Note: When an account deregisters, `registered_at` is cleared to `None`.
+    /// So we handle the case where `deregistered_at` is set but `registered_at` is not:
+    /// if the deregistration slot is after the target slot, the account was registered.
+    pub fn is_registered_at(&self, slot: u64) -> bool {
+        match (self.registered_at, self.deregistered_at) {
+            // Never registered and never deregistered
+            (None, None) => false,
+            // Deregistered but registered_at was cleared - account was registered
+            // until the deregistration slot. Check if target slot is before deregistration.
+            (None, Some(dereg)) => dereg > slot,
+            // Currently registered, never deregistered - check if registered by target slot
+            (Some(reg), None) => reg <= slot,
+            // Both set (re-registration case) - check if registered and not yet deregistered
+            (Some(reg), Some(dereg)) => reg <= slot && dereg > slot,
+        }
+    }
+
     pub fn delegated_pool_at(&self, epoch: Epoch) -> Option<&PoolHash> {
         self.pool.snapshot_at(epoch).and_then(|x| match x {
             PoolDelegation::Pool(pool) => Some(pool),
@@ -1475,8 +1496,14 @@ pub struct EndStats {
     #[n(4)]
     pub effective_rewards: u64,
 
+    /// Unspendable rewards that go to treasury.
     #[n(5)]
-    pub unspendable_rewards: u64,
+    pub unspendable_to_treasury: u64,
+
+    /// Unspendable rewards that return to reserves.
+    #[n(10)]
+    #[cbor(default)]
+    pub unspendable_to_reserves: u64,
 
     #[n(6)]
     pub proposal_invalid_refunds: Lovelace,

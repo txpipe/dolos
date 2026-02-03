@@ -303,6 +303,7 @@ impl BoundaryWork {
             deltas: WorkDeltas::default(),
             logs: Default::default(),
             applied_reward_credentials: Default::default(),
+            applied_rewards: Default::default(),
         };
 
         boundary.load_pool_data::<D>(state)?;

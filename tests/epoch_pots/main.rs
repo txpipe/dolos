@@ -14,8 +14,8 @@ use dolos_cardano::model::{
     EpochState, EraSummary, FixedNamespace, PParamKind, PParamValue, PParamsSet,
 };
 use dolos_cardano::pallas_extras;
-use dolos_cardano::rewards::{Reward, RewardMap};
-use dolos_cardano::rupd::{RupdWork, StakeSnapshot};
+use dolos_cardano::rupd::StakeSnapshot;
+use dolos_cardano::ewrap::AppliedReward;
 use dolos_cardano::CardanoWorkUnit;
 use dolos_cardano::PoolHash;
 use dolos_core::{config::CardanoConfig, Domain, StateStore};
@@ -88,7 +88,7 @@ fn load_xtask_config() -> Result<XtaskConfig> {
 
 fn init_tracing() {
     let _ = tracing_subscriber::fmt()
-        .with_env_filter("dolos_cardano=info")
+        .with_env_filter("dolos_cardano=info,dolos_cardano::rupd::loading=debug")
         .with_writer(std::io::stderr)
         .try_init();
 }
@@ -158,8 +158,10 @@ fn dump_stake_csv(
     Ok(())
 }
 
-fn dump_rewards_csv(
-    rewards: &RewardMap<RupdWork>,
+/// Dump rewards that were actually applied (spendable) at EWRAP time.
+/// This filters out rewards for accounts that deregistered between RUPD and EWRAP.
+fn dump_applied_rewards_csv(
+    applied_rewards: &[AppliedReward],
     network: Network,
     out_dir: &Path,
     epoch: u64,
@@ -171,32 +173,17 @@ fn dump_rewards_csv(
     writeln!(writer, "stake,pool,amount,type,earned_epoch")?;
 
     let mut rows = Vec::new();
-    for (credential, reward) in rewards.iter_pending() {
-        let address = pallas_extras::stake_credential_to_address(network, credential);
-        let stake_address = address.to_bech32().map_err(std::io::Error::other)?;
-
-        match reward {
-            Reward::MultiPool(r) => {
-                for (pool, value) in r.leader_rewards() {
-                    if value == 0 { continue; }
-                    let pool_bech32 = bech32_pool(&pool)?;
-                    rows.push((stake_address.clone(), pool_bech32, value, "leader", epoch));
-                }
-                for (pool, value) in r.delegator_rewards() {
-                    if value == 0 { continue; }
-                    let pool_bech32 = bech32_pool(&pool)?;
-                    rows.push((stake_address.clone(), pool_bech32, value, "member", epoch));
-                }
-            }
-            Reward::PreAllegra(r) => {
-                let (pool, value) = r.pool_and_value();
-                if value > 0 {
-                    let pool_bech32 = bech32_pool(&pool)?;
-                    let rtype = if r.is_leader() { "leader" } else { "member" };
-                    rows.push((stake_address.clone(), pool_bech32, value, rtype, epoch));
-                }
-            }
+    for reward in applied_rewards {
+        if reward.amount == 0 {
+            continue;
         }
+
+        let address = pallas_extras::stake_credential_to_address(network, &reward.credential);
+        let stake_address = address.to_bech32().map_err(std::io::Error::other)?;
+        let pool_bech32 = bech32_pool(&reward.pool)?;
+        let rtype = if reward.as_leader { "leader" } else { "member" };
+
+        rows.push((stake_address, pool_bech32, reward.amount, rtype, epoch));
     }
 
     rows.sort_by(|a, b| (&a.0, &a.1, &a.3).cmp(&(&b.0, &b.1, &b.3)));
@@ -394,6 +381,38 @@ mod fixtures {
         pub const STAKE: &str = include_str!("fixtures/mainnet-215/stake-213.csv");
         pub const REWARDS: &str = include_str!("fixtures/mainnet-215/rewards.csv");
     }
+    pub mod mainnet_216 {
+        pub const EPOCHS: &str = include_str!("fixtures/mainnet-216/epochs.csv");
+        pub const PPARAMS: &str = include_str!("fixtures/mainnet-216/pparams.csv");
+        pub const ERAS: &str = include_str!("fixtures/mainnet-216/eras.csv");
+        pub const DELEGATION: &str = include_str!("fixtures/mainnet-216/delegation-214.csv");
+        pub const STAKE: &str = include_str!("fixtures/mainnet-216/stake-214.csv");
+        pub const REWARDS: &str = include_str!("fixtures/mainnet-216/rewards.csv");
+    }
+    pub mod mainnet_217 {
+        pub const EPOCHS: &str = include_str!("fixtures/mainnet-217/epochs.csv");
+        pub const PPARAMS: &str = include_str!("fixtures/mainnet-217/pparams.csv");
+        pub const ERAS: &str = include_str!("fixtures/mainnet-217/eras.csv");
+        pub const DELEGATION: &str = include_str!("fixtures/mainnet-217/delegation-215.csv");
+        pub const STAKE: &str = include_str!("fixtures/mainnet-217/stake-215.csv");
+        pub const REWARDS: &str = include_str!("fixtures/mainnet-217/rewards.csv");
+    }
+    pub mod mainnet_218 {
+        pub const EPOCHS: &str = include_str!("fixtures/mainnet-218/epochs.csv");
+        pub const PPARAMS: &str = include_str!("fixtures/mainnet-218/pparams.csv");
+        pub const ERAS: &str = include_str!("fixtures/mainnet-218/eras.csv");
+        pub const DELEGATION: &str = include_str!("fixtures/mainnet-218/delegation-216.csv");
+        pub const STAKE: &str = include_str!("fixtures/mainnet-218/stake-216.csv");
+        pub const REWARDS: &str = include_str!("fixtures/mainnet-218/rewards.csv");
+    }
+    pub mod mainnet_219 {
+        pub const EPOCHS: &str = include_str!("fixtures/mainnet-219/epochs.csv");
+        pub const PPARAMS: &str = include_str!("fixtures/mainnet-219/pparams.csv");
+        pub const ERAS: &str = include_str!("fixtures/mainnet-219/eras.csv");
+        pub const DELEGATION: &str = include_str!("fixtures/mainnet-219/delegation-217.csv");
+        pub const STAKE: &str = include_str!("fixtures/mainnet-219/stake-217.csv");
+        pub const REWARDS: &str = include_str!("fixtures/mainnet-219/rewards.csv");
+    }
     pub mod mainnet_220 {
         pub const EPOCHS: &str = include_str!("fixtures/mainnet-220/epochs.csv");
         pub const PPARAMS: &str = include_str!("fixtures/mainnet-220/pparams.csv");
@@ -532,7 +551,8 @@ fn run_epoch_pots_test(
                     }
                 }
                 CardanoWorkUnit::Rupd(rupd) => {
-                    if let (Some(w), Some(r)) = (rupd.work(), rupd.rewards()) {
+                    // Dump delegation and stake from RUPD (snapshot-based data)
+                    if let Some(w) = rupd.work() {
                         if let Some((_, performance_epoch)) = w.relevant_epochs() {
                             if let Err(e) =
                                 dump_delegation_csv(&w.snapshot, &dumps_dir, performance_epoch)
@@ -544,9 +564,23 @@ fn run_epoch_pots_test(
                             {
                                 eprintln!("failed to dump stake csv: {e}");
                             }
-                            if let Err(e) =
-                                dump_rewards_csv(r, cardano_network, &dumps_dir, performance_epoch)
-                            {
+                        }
+                    }
+                }
+                CardanoWorkUnit::Ewrap(ewrap) => {
+                    // Dump rewards from EWRAP (only actually applied/spendable rewards)
+                    if let Some(boundary) = ewrap.boundary() {
+                        // performance_epoch = ending_epoch - 1
+                        // For epoch 214 ending, rewards are for performance_epoch 213
+                        let ending_epoch = boundary.ending_state().number;
+                        if ending_epoch >= 1 {
+                            let performance_epoch = ending_epoch - 1;
+                            if let Err(e) = dump_applied_rewards_csv(
+                                &boundary.applied_rewards,
+                                cardano_network,
+                                &dumps_dir,
+                                performance_epoch,
+                            ) {
                                 eprintln!("failed to dump rewards csv: {e}");
                             }
                         }
@@ -763,6 +797,70 @@ fn test_mainnet_215() {
         fixtures::mainnet_215::DELEGATION,
         fixtures::mainnet_215::STAKE,
         fixtures::mainnet_215::REWARDS,
+    )
+    .unwrap();
+}
+
+#[test]
+fn test_mainnet_216() {
+    init_tracing();
+    run_epoch_pots_test(
+        "mainnet",
+        216,
+        fixtures::mainnet_216::EPOCHS,
+        fixtures::mainnet_216::PPARAMS,
+        fixtures::mainnet_216::ERAS,
+        fixtures::mainnet_216::DELEGATION,
+        fixtures::mainnet_216::STAKE,
+        fixtures::mainnet_216::REWARDS,
+    )
+    .unwrap();
+}
+
+#[test]
+fn test_mainnet_217() {
+    init_tracing();
+    run_epoch_pots_test(
+        "mainnet",
+        217,
+        fixtures::mainnet_217::EPOCHS,
+        fixtures::mainnet_217::PPARAMS,
+        fixtures::mainnet_217::ERAS,
+        fixtures::mainnet_217::DELEGATION,
+        fixtures::mainnet_217::STAKE,
+        fixtures::mainnet_217::REWARDS,
+    )
+    .unwrap();
+}
+
+#[test]
+fn test_mainnet_218() {
+    init_tracing();
+    run_epoch_pots_test(
+        "mainnet",
+        218,
+        fixtures::mainnet_218::EPOCHS,
+        fixtures::mainnet_218::PPARAMS,
+        fixtures::mainnet_218::ERAS,
+        fixtures::mainnet_218::DELEGATION,
+        fixtures::mainnet_218::STAKE,
+        fixtures::mainnet_218::REWARDS,
+    )
+    .unwrap();
+}
+
+#[test]
+fn test_mainnet_219() {
+    init_tracing();
+    run_epoch_pots_test(
+        "mainnet",
+        219,
+        fixtures::mainnet_219::EPOCHS,
+        fixtures::mainnet_219::PPARAMS,
+        fixtures::mainnet_219::ERAS,
+        fixtures::mainnet_219::DELEGATION,
+        fixtures::mainnet_219::STAKE,
+        fixtures::mainnet_219::REWARDS,
     )
     .unwrap();
 }

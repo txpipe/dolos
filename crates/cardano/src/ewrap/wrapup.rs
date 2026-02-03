@@ -130,7 +130,8 @@ fn define_end_stats(ctx: &super::BoundaryWork) -> EndStats {
         pool_invalid_refund_count: pool_invalid_refund_count as u64,
         epoch_incentives: incentives.clone(),
         effective_rewards: ctx.rewards.applied_effective(),
-        unspendable_rewards: ctx.rewards.applied_unspendable(),
+        unspendable_to_treasury: ctx.rewards.applied_unspendable_to_treasury(),
+        unspendable_to_reserves: ctx.rewards.applied_unspendable_to_reserves(),
         proposal_refunds: proposal_valid_refunds,
         proposal_invalid_refunds,
         // TODO: deprecate

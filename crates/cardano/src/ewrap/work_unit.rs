@@ -37,6 +37,11 @@ impl EwrapWorkUnit {
             boundary: None,
         }
     }
+
+    /// Access the loaded boundary work context.
+    pub fn boundary(&self) -> Option<&BoundaryWork> {
+        self.boundary.as_ref()
+    }
 }
 
 impl<D> WorkUnit<D> for EwrapWorkUnit

@@ -135,10 +135,19 @@ impl StakeSnapshot {
         *self.pool_stake.get(pool).unwrap_or(&0)
     }
 
+    /// Load stake snapshot for reward calculation.
+    ///
+    /// # Arguments
+    /// * `state` - Current state store
+    /// * `stake_epoch` - Epoch for stake/delegation snapshot (E-3)
+    /// * `protocol` - Era protocol for stake calculation
+    /// * `rupd_slot` - The RUPD boundary slot, used to determine registration status.
+    ///   Pre-Babbage filtering requires knowing which accounts were registered at RUPD time.
     pub fn load<D: Domain>(
         state: &D::State,
         stake_epoch: u64,
         protocol: EraProtocol,
+        rupd_slot: u64,
     ) -> Result<Self, ChainError> {
         let mut snapshot = Self::default();
 
@@ -165,8 +174,13 @@ impl StakeSnapshot {
         for record in accounts {
             let (_, account) = record?;
 
-            // TODO: check if we really need to make ths check. It might be adding noise to the data.
-            if account.is_registered() {
+            // Check registration status AT the RUPD slot, not current status.
+            // Pre-Babbage (protocol < 7) filters rewards based on registration at RUPD time.
+            // Accounts that deregister AFTER RUPD but BEFORE EWRAP are handled differently:
+            // their rewards are calculated (because registered at RUPD) but filtered at EWRAP.
+            let is_reg = account.is_registered_at(rupd_slot);
+
+            if is_reg {
                 snapshot
                     .registered_accounts
                     .insert(account.credential.clone());
@@ -281,6 +295,7 @@ impl RupdWork {
         };
 
         debug!(
+            %current_epoch,
             %pool_blocks,
             total_blocks = ?epoch.rolling.mark().map(|x| x.blocks_minted),
             "pool blocks for eta calculation"
@@ -315,7 +330,16 @@ impl RupdWork {
             // address UTxOs from stake).
             let era = work.chain.era_for_epoch(snapshot_epoch + 1);
             let protocol = EraProtocol::from(era.protocol);
-            work.snapshot = StakeSnapshot::load::<D>(state, snapshot_epoch, protocol)?;
+
+            // Calculate the RUPD slot (epoch_start + randomness_stability_window).
+            // The Haskell ledger's startStep runs at randomnessStabilisationWindow (4k/f)
+            // slots into the epoch, capturing addrsRew (registered accounts) at that point.
+            // Pre-Babbage pre-filtering uses this to exclude unregistered accounts from
+            // reward computation.
+            let rupd_slot =
+                work.chain.epoch_start(current_epoch) + crate::utils::randomness_stability_window(genesis);
+
+            work.snapshot = StakeSnapshot::load::<D>(state, snapshot_epoch, protocol, rupd_slot)?;
 
             debug!(
                 %current_epoch,

@@ -121,8 +121,14 @@ pub struct PotDelta {
     #[n(9)]
     pub effective_rewards: Lovelace,
 
+    /// Unspendable rewards that go to treasury (accounts deregistered late after RUPD).
     #[n(10)]
-    pub unspendable_rewards: Lovelace,
+    pub unspendable_to_treasury: Lovelace,
+
+    /// Unspendable rewards that return to reserves (accounts deregistered soon after RUPD).
+    #[n(22)]
+    #[cbor(default)]
+    pub unspendable_to_reserves: Lovelace,
 
     #[n(11)]
     pub drep_deposits: Lovelace,
@@ -181,7 +187,8 @@ impl PotDelta {
             pool_invalid_refund_count: 0,
             withdrawals: 0,
             effective_rewards: 0,
-            unspendable_rewards: 0,
+            unspendable_to_treasury: 0,
+            unspendable_to_reserves: 0,
             drep_deposits: 0,
             proposal_deposits: 0,
             drep_refunds: 0,
@@ -194,20 +201,22 @@ impl PotDelta {
         }
     }
 
+    /// Total rewards consumed from the available incentives pool.
+    /// Includes effective (applied) and unspendable rewards that go to treasury.
+    /// Unspendable rewards that return to reserves are NOT consumed (they stay in reserves).
     pub fn consumed_incentives(&self) -> Lovelace {
-        if self.mark_protocol_version < 7 {
-            return self.effective_rewards;
-        }
-
-        self.effective_rewards + self.unspendable_rewards
+        self.effective_rewards + self.unspendable_to_treasury
     }
 
+    /// Unspendable rewards that go to treasury.
+    /// These are rewards for accounts that deregistered late after RUPD.
     pub fn incentives_back_to_treasury(&self) -> Lovelace {
-        if self.mark_protocol_version < 7 {
-            return 0;
-        }
+        self.unspendable_to_treasury
+    }
 
-        self.unspendable_rewards
+    /// Total unspendable rewards (both treasury and reserves).
+    pub fn total_unspendable(&self) -> Lovelace {
+        self.unspendable_to_treasury + self.unspendable_to_reserves
     }
 }
 
@@ -541,7 +550,7 @@ mod tests {
         let incentives = epoch_incentives(pots.reserves, fee_ss, rho, tau, eta);
 
         let delta = PotDelta {
-            unspendable_rewards: 295063003292,
+            unspendable_to_treasury: 295063003292,
             deposit_per_pool: Some(500_000_000),
             deposit_per_account: Some(2_000_000),
             ..PotDelta::neutral(7, 7)

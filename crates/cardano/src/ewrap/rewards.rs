@@ -5,8 +5,10 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 use crate::{
+    ewrap::AppliedReward,
     rupd::{credential_to_key, AccountId},
-    AccountState, CardanoDelta, CardanoEntity, FixedNamespace, PendingRewardState, RewardLog,
+    AccountState, CardanoDelta, CardanoEntity, FixedNamespace, PendingRewardState, PoolHash,
+    RewardLog,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,13 +114,24 @@ impl super::BoundaryVisitor for BoundaryVisitor {
             .push(account.credential.clone());
 
         if !account.is_registered() {
+            let total = reward.total_value();
+
+            // Accounts that were registered at RUPD startStep time but deregistered
+            // before EWRAP. Their rewards go to treasury per the Haskell ledger's
+            // applyRUpdFiltered (frTotalUnregistered → casTreasury).
+            //
+            // Note: accounts deregistered BEFORE the RUPD startStep slot
+            // (epoch_start + randomness_stability_window) are pre-filtered during
+            // reward computation and never appear here. Their share stays in reserves
+            // implicitly through returned_rewards.
             warn!(
                 account=%id,
                 credential=?account.credential,
-                amount=reward.total_value(),
+                amount=total,
                 "reward not applied (unregistered account)"
             );
-            ctx.rewards.return_reward(reward.total_value());
+
+            ctx.rewards.return_reward_to_treasury(total);
             return Ok(());
         }
 
@@ -128,6 +141,14 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         });
 
         for (pool, value, as_leader) in reward.into_vec() {
+            // Track applied reward for test harness consumption
+            ctx.applied_rewards.push(AppliedReward {
+                credential: account.credential.clone(),
+                pool: PoolHash::from(pool.as_slice()),
+                amount: value,
+                as_leader,
+            });
+
             self.log(
                 id.clone(),
                 RewardLog {
@@ -142,7 +163,15 @@ impl super::BoundaryVisitor for BoundaryVisitor {
     }
 
     fn flush(&mut self, ctx: &mut super::BoundaryWork) -> Result<(), ChainError> {
-        let drained = ctx.rewards.drain_unspendable();
+        let mark_protocol = ctx
+            .ending_state()
+            .pparams
+            .mark()
+            .and_then(|p| p.protocol_major())
+            .unwrap_or(0);
+        let pre_babbage = mark_protocol < 7;
+
+        let drained = ctx.rewards.drain_unspendable(pre_babbage);
         ctx.applied_reward_credentials.extend(drained);
 
         for delta in self.deltas.drain(..) {
