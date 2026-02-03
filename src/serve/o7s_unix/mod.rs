@@ -38,13 +38,13 @@ async fn handle_session<D: Domain, C: CancelToken>(
         cancel.clone(),
     ));
 
-    let result = tokio::try_join!(chainsync_task, statequery_task)
-        .map_err(|e| ServeError::Internal(e.into()))?;
-
-    result.0?;
-    result.1?;
-
+    let result = tokio::try_join!(chainsync_task, statequery_task);
     plexer.abort().await;
+
+    let (chainsync_res, statequery_res) = result.map_err(|e| ServeError::Internal(e.into()))?;
+
+    chainsync_res?;
+    statequery_res?;
 
     Ok(())
 }

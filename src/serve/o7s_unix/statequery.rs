@@ -82,12 +82,20 @@ impl<D: Domain> Session<D> {
 
         let exists = match &chain_point {
             ChainPoint::Origin => true,
-            ChainPoint::Specific(slot, _hash) => self
-                .domain
-                .archive()
-                .get_block_by_slot(slot)
-                .map_err(Error::server)?
-                .is_some(),
+            ChainPoint::Specific(slot, hash) => {
+                if let Some(raw) = self
+                    .domain
+                    .archive()
+                    .get_block_by_slot(slot)
+                    .map_err(Error::server)?
+                {
+                    let block =
+                        MultiEraBlock::decode(&raw).map_err(|e| Error::server(e.to_string()))?;
+                    block.hash().as_ref() == hash.as_ref()
+                } else {
+                    false
+                }
+            }
             ChainPoint::Slot(_) => true,
         };
 

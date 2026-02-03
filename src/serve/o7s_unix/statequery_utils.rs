@@ -629,11 +629,13 @@ pub fn build_stake_snapshots_response<D: Domain>(
         EraProtocol::from(era.protocol)
     };
 
+    type StakeSnapshotArg = (BTreeSet<Vec<u8>>, HashMap<Vec<u8>, u64>, u64);
+
     let gather_for_epoch = |stake_epoch: u64,
                             protocol: EraProtocol,
                             filter_set: &Option<BTreeSet<Vec<u8>>>,
                             state: &D::State|
-     -> Result<(BTreeSet<Vec<u8>>, HashMap<Vec<u8>, u64>, u64), Error> {
+     -> Result<StakeSnapshotArg, Error> {
         let mut active_pools: BTreeSet<Vec<u8>> = BTreeSet::new();
         let mut pool_stakes: HashMap<Vec<u8>, u64> = HashMap::new();
         let mut total_active: u64 = 0;
