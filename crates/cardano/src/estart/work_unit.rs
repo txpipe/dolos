@@ -37,6 +37,11 @@ impl EstartWorkUnit {
             context: None,
         }
     }
+
+    /// Access the ended (completed) epoch state, available after load.
+    pub fn ended_state(&self) -> Option<&crate::EpochState> {
+        self.context.as_ref().map(|ctx| ctx.ended_state())
+    }
 }
 
 impl<D> WorkUnit<D> for EstartWorkUnit

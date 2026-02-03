@@ -18,12 +18,7 @@ pub mod deltas;
 pub mod loading;
 pub mod work_unit;
 
-#[cfg(feature = "rupd-snapshot-dump")]
-pub mod dump;
-
 pub use deltas::{credential_to_key, EnqueueReward, SetEpochIncentives};
-#[cfg(feature = "rupd-snapshot-dump")]
-pub use dump::dump_snapshot_csv;
 pub use work_unit::RupdWorkUnit;
 
 pub trait RupdVisitor: Default {

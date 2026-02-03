@@ -38,6 +38,16 @@ impl RupdWorkUnit {
             rewards: None,
         }
     }
+
+    /// Access the loaded RUPD work context.
+    pub fn work(&self) -> Option<&RupdWork> {
+        self.work.as_ref()
+    }
+
+    /// Access the computed rewards.
+    pub fn rewards(&self) -> Option<&RewardMap<RupdWork>> {
+        self.rewards.as_ref()
+    }
 }
 
 impl<D> WorkUnit<D> for RupdWorkUnit
@@ -158,14 +168,6 @@ where
 
         // Log stake snapshot data to archive
         super::log_work::<D>(work, rewards, domain.archive())?;
-
-        #[cfg(feature = "rupd-snapshot-dump")]
-        {
-            let storage_path = &domain.storage_config().path;
-            let instance_root = storage_path.parent().unwrap_or(storage_path);
-            let out_dir = instance_root.join("dumps");
-            super::dump_snapshot_csv(work, self.genesis.as_ref(), &out_dir);
-        }
 
         debug!("rupd archive logs committed");
         Ok(())
