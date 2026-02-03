@@ -21,7 +21,11 @@ use pallas::{
     },
 };
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, ops::Deref, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    ops::Deref,
+    time::Duration,
+};
 
 use blockfrost_openapi::models::{
     address_utxo_content_inner::AddressUtxoContentInner,
@@ -48,7 +52,9 @@ use blockfrost_openapi::models::{
     tx_content_withdrawals_inner::TxContentWithdrawalsInner,
 };
 
-use dolos_cardano::{pallas_extras, ChainSummary, PParamsSet, PoolHash};
+use dolos_cardano::{
+    pallas_extras, AccountState, ChainSummary, DRepState, PParamsSet, PoolHash, PoolState,
+};
 use dolos_core::{Domain, EraCbor, TxHash, TxOrder, TxoIdx, TxoRef};
 
 use crate::Facade;
@@ -513,6 +519,7 @@ pub struct TxModelBuilder<'a> {
     deps: HashMap<TxHash, MultiEraTx<'a>>,
     consumed_deps: HashMap<TxoRef, TxHash>,
     pool_metadata: HashMap<PoolHash, PoolOffchainMetadata>,
+    deposit: Option<i64>,
 }
 
 impl<'a> TxModelBuilder<'a> {
@@ -531,6 +538,7 @@ impl<'a> TxModelBuilder<'a> {
             deps: HashMap::new(),
             consumed_deps: HashMap::new(),
             pool_metadata: HashMap::new(),
+            deposit: None,
         })
     }
 
@@ -627,6 +635,75 @@ impl<'a> TxModelBuilder<'a> {
         Ok(())
     }
 
+    pub fn compute_deposit<D>(&mut self, facade: &Facade<D>) -> Result<(), StatusCode>
+    where
+        D: Domain + Clone + Send + Sync + 'static,
+        Option<AccountState>: From<D::Entity>,
+        Option<PoolState>: From<D::Entity>,
+        Option<DRepState>: From<D::Entity>,
+    {
+        let pparms = self.pparams_or_500()?;
+
+        let key_deposit = pparms.key_deposit().unwrap_or_default() as i64;
+        let pool_deposit = pparms.pool_deposit().unwrap_or_default() as i64;
+
+        let mut repeated = HashSet::new();
+        let mut out = 0;
+
+        for cert in self.tx()?.certs() {
+            if let Some(reg) = pallas_extras::cert_as_stake_registration(&cert) {
+                dbg!(&reg);
+                let key = minicbor::to_vec(&reg).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                if repeated.insert((0, key.clone())) {
+                    out += key_deposit;
+                }
+            }
+
+            if let Some(reg) = pallas_extras::cert_as_pool_registration(&cert) {
+                if repeated.insert((1, reg.operator.to_vec())) {
+                    match facade
+                        .read_cardano_entity::<PoolState>(reg.operator.as_slice())
+                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                    {
+                        Some(pool) => {
+                            if self.block.slot() <= pool.register_slot {
+                                out += pool_deposit
+                            }
+                        }
+                        None => out += pool_deposit,
+                    }
+                }
+            }
+
+            if let Some(reg) = pallas_extras::cert_as_drep_registration(&cert) {
+                let key =
+                    minicbor::to_vec(&reg.cred).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                if repeated.insert((2, key)) {
+                    out += reg.deposit as i64;
+                }
+            }
+
+            if let Some(reg) = pallas_extras::cert_as_stake_deregistration(&cert) {
+                let key = minicbor::to_vec(&reg).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                if repeated.insert((3, key.clone())) {
+                    out -= key_deposit;
+                }
+            }
+
+            if let Some(reg) = pallas_extras::cert_as_drep_unregistration(&cert) {
+                let key =
+                    minicbor::to_vec(&reg.cred).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                if repeated.insert((4, key)) {
+                    out -= reg.deposit as i64;
+                }
+            }
+        }
+
+        self.deposit = Some(out);
+
+        Ok(())
+    }
+
     fn tx(&self) -> Result<MultiEraTx<'_>, StatusCode> {
         let tx = self
             .block
@@ -689,39 +766,6 @@ impl<'a> TxModelBuilder<'a> {
         }
 
         Ok(deps)
-    }
-
-    pub fn deposit(&self) -> Result<u64, StatusCode> {
-        let pparms = self.pparams_or_500()?;
-
-        let key_deposit = pparms.key_deposit().unwrap_or_default();
-        let pool_deposit = pparms.pool_deposit().unwrap_or_default();
-        let drep_deposit = pparms.drep_deposit().unwrap_or_default();
-
-        let out = self
-            .tx()?
-            .certs()
-            .iter()
-            .flat_map(|x| {
-                if pallas_extras::cert_as_stake_registration(x).is_some() {
-                    return Some(key_deposit);
-                }
-
-                if pallas_extras::cert_as_pool_registration(x).is_some() {
-                    return Some(pool_deposit);
-                }
-
-                if let MultiEraCert::Conway(cert) = x {
-                    if let ConwayCert::RegDRepCert(..) = cert.deref().deref() {
-                        return Some(drep_deposit);
-                    }
-                }
-
-                None
-            })
-            .sum();
-
-        Ok(out)
     }
 
     pub fn load_dep(&mut self, key: TxHash, cbor: &'a EraCbor) -> Result<(), StatusCode> {
@@ -882,7 +926,7 @@ impl IntoModel<TxContent> for TxModelBuilder<'_> {
         let block = &self.block;
         let order = self.order;
         let txin = tx.inputs();
-        let txouts = tx.outputs();
+        let txouts = tx.produces();
         let chain = self.chain_or_500()?;
 
         let block_time = chain.slot_time(block.slot());
@@ -893,13 +937,21 @@ impl IntoModel<TxContent> for TxModelBuilder<'_> {
             block_height: try_into_or_500!(block.number()),
             slot: try_into_or_500!(block.slot()),
             index: try_into_or_500!(order),
-            output_amount: list_assets(txouts.iter()),
-            fees: tx.fee().map(|f| f.to_string()).unwrap_or_default(),
+            output_amount: list_assets(txouts.iter().map(|(_, x)| x)),
+            fees: if tx.is_valid() {
+                tx.fee().unwrap_or_default().to_string()
+            } else {
+                tx.total_collateral().unwrap_or_default().to_string()
+            },
             size: try_into_or_500!(tx.size()),
             invalid_before: tx.validity_start().map(|v| v.to_string()),
             invalid_hereafter: tx.ttl().map(|v| v.to_string()),
             utxo_count: try_into_or_500!(txin.len() + txouts.len()),
-            redeemer_count: try_into_or_500!(tx.redeemers().len()),
+            redeemer_count: try_into_or_500!(if tx.is_valid() {
+                tx.redeemers().len()
+            } else {
+                0
+            }),
             valid_contract: tx.is_valid(),
             block_time: try_into_or_500!(block_time),
             withdrawal_count: tx.withdrawals().collect::<Vec<_>>().len() as i32,
@@ -909,7 +961,7 @@ impl IntoModel<TxContent> for TxModelBuilder<'_> {
             pool_update_count: count_certs!(tx, PoolRegistration) as i32,
             pool_retire_count: count_certs!(tx, PoolRetirement) as i32,
             asset_mint_or_burn_count: tx.mints().iter().flat_map(|x| x.assets()).count() as i32,
-            deposit: self.deposit()?.to_string(),
+            deposit: self.deposit.unwrap_or_default().to_string(),
         };
 
         Ok(tx)
@@ -1922,7 +1974,13 @@ impl<'a> BlockModelBuilder<'a> {
         let txs = self.block.txs();
 
         txs.iter()
-            .map(|tx| tx.fee().unwrap_or(0))
+            .map(|tx| {
+                if tx.is_valid() {
+                    tx.fee().unwrap_or_default()
+                } else {
+                    tx.total_collateral().unwrap_or_default()
+                }
+            })
             .sum::<u64>()
             .to_string()
     }
@@ -1931,7 +1989,12 @@ impl<'a> BlockModelBuilder<'a> {
         let txs = self.block.txs();
 
         txs.iter()
-            .map(|tx| tx.outputs().iter().map(|o| o.value().coin()).sum::<u64>())
+            .map(|tx| {
+                tx.produces()
+                    .iter()
+                    .map(|(_, o)| o.value().coin())
+                    .sum::<u64>()
+            })
             .sum::<u64>()
             .to_string()
     }

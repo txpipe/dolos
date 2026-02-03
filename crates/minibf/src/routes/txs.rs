@@ -15,7 +15,7 @@ use blockfrost_openapi::models::{
     tx_content_withdrawals_inner::TxContentWithdrawalsInner,
 };
 
-use dolos_cardano::indexes::AsyncCardanoQueryExt;
+use dolos_cardano::{indexes::AsyncCardanoQueryExt, AccountState, DRepState, PoolState};
 use dolos_core::Domain;
 
 use crate::{
@@ -30,6 +30,9 @@ pub async fn by_hash<D>(
 ) -> Result<Json<TxContent>, StatusCode>
 where
     D: Domain + Clone + Send + Sync + 'static,
+    Option<AccountState>: From<D::Entity>,
+    Option<PoolState>: From<D::Entity>,
+    Option<DRepState>: From<D::Entity>,
 {
     let hash = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
 
@@ -37,9 +40,11 @@ where
 
     let chain = domain.get_chain_summary()?;
 
-    let builder = TxModelBuilder::new(&raw, order)?
+    let mut builder = TxModelBuilder::new(&raw, order)?
         .with_chain(chain)
         .with_historical_pparams::<D>(&domain)?;
+
+    builder.compute_deposit(&domain)?;
 
     builder.into_response()
 }
