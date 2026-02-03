@@ -30,7 +30,16 @@ impl BoundaryWork {
         state: &D::State,
         pool: &PoolState,
     ) -> Result<Option<AccountState>, ChainError> {
-        let account = &pool.snapshot.unwrap_live().params.reward_account;
+        // Use scheduled (next) params if available, matching the Haskell ledger's
+        // SNAP → POOLREAP ordering where future pool params become current before
+        // pool reaping. This ensures the deposit refund goes to the correct reward
+        // account when a pool is re-registered with a new reward account and then
+        // retired in the same epoch.
+        let snapshot = pool
+            .snapshot
+            .next()
+            .unwrap_or_else(|| pool.snapshot.unwrap_live());
+        let account = &snapshot.params.reward_account;
 
         let account =
             pallas_extras::parse_reward_account(account).ok_or(ChainError::InvalidPoolParams)?;
