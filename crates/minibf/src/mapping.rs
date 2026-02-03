@@ -1852,10 +1852,6 @@ impl<'a> BlockModelBuilder<'a> {
     fn format_slot_leader(&self) -> Result<Option<String>, StatusCode> {
         let header = self.block.header();
 
-        if header.number() == 0 {
-            return Ok(Some("Epoch boundary slot leader".to_string()));
-        }
-
         let Some(use_bech32) = self.chain.map(|x| {
             let epoch = x.slot_epoch(self.block.slot()).0;
             epoch > x.first_shelley_epoch()
@@ -1886,7 +1882,9 @@ impl<'a> BlockModelBuilder<'a> {
                         hex::encode(hash.as_slice().first_chunk::<8>().unwrap())
                     )))
                 }
-                MultiEraHeader::EpochBoundary(_) => Ok(Some("Epoch boundary".to_string())),
+                MultiEraHeader::EpochBoundary(_) => {
+                    Ok(Some("Epoch boundary slot leader".to_string()))
+                }
                 _ => unreachable!(), // Covered on Some case
             },
         }
@@ -1986,16 +1984,43 @@ impl<'a> IntoModel<BlockContent> for BlockModelBuilder<'a> {
             previous_block,
             epoch: epoch.map(|x| x as i32),
             epoch_slot: match epoch_slot.map(|x| x as i32) {
-                Some(0) => None,
+                Some(0) => {
+                    if matches!(
+                        self.block,
+                        MultiEraBlock::EpochBoundary(_) | MultiEraBlock::Byron(_)
+                    ) {
+                        None
+                    } else {
+                        Some(0)
+                    }
+                }
                 x => x,
             },
             time: block_time.unwrap_or_default(),
             slot: match block.slot() as i32 {
-                0 => None,
+                0 => {
+                    if matches!(
+                        self.block,
+                        MultiEraBlock::EpochBoundary(_) | MultiEraBlock::Byron(_)
+                    ) {
+                        None
+                    } else {
+                        Some(0)
+                    }
+                }
                 x => Some(x),
             },
             height: match block.number() as i32 {
-                0 => None,
+                0 => {
+                    if matches!(
+                        self.block,
+                        MultiEraBlock::EpochBoundary(_) | MultiEraBlock::Byron(_)
+                    ) {
+                        None
+                    } else {
+                        Some(0)
+                    }
+                }
                 x => Some(x),
             },
             tx_count: block.txs().len() as i32,

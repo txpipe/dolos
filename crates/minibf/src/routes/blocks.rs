@@ -126,21 +126,31 @@ where
 {
     let hash_or_number = parse_hash_or_number(&hash_or_number)?;
 
-    if Either::Right(0) == hash_or_number {
-        if let Some(block) = hacks::genesis_block_for_domain(&domain).map_err(Error::Code)? {
-            return Ok(Json(block));
-        }
-    }
-
-    if let Either::Left(hash) = &hash_or_number {
-        if hacks::is_genesis_hash_for_domain(&domain, hash).map_err(Error::Code)? {
-            if let Some(block) = hacks::genesis_block_for_domain(&domain).map_err(Error::Code)? {
-                return Ok(Json(block));
+    let block = match load_block_by_hash_or_number(&domain, &hash_or_number).await {
+        Ok(block) => block,
+        Err(Error::Code(StatusCode::NOT_FOUND)) => {
+            if Either::Right(0) == hash_or_number {
+                if let Some(block) =
+                    hacks::genesis_block_for_domain(&domain).map_err(Error::Code)?
+                {
+                    return Ok(Json(block));
+                }
             }
-        }
-    }
 
-    let block = load_block_by_hash_or_number(&domain, &hash_or_number).await?;
+            if let Either::Left(hash) = &hash_or_number {
+                if hacks::is_genesis_hash_for_domain(&domain, hash).map_err(Error::Code)? {
+                    if let Some(block) =
+                        hacks::genesis_block_for_domain(&domain).map_err(Error::Code)?
+                    {
+                        return Ok(Json(block));
+                    }
+                }
+            }
+
+            return Err(Error::Code(StatusCode::NOT_FOUND));
+        }
+        Err(e) => return Err(e),
+    };
 
     let (_, tip) = domain
         .archive()

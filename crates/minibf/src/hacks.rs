@@ -133,7 +133,7 @@ pub fn genesis_block_preprod<D: Domain>(domain: &Facade<D>) -> Result<BlockConte
 }
 
 pub fn maybe_set_genesis_previous_block<D: Domain>(domain: &Facade<D>, block: &mut BlockContent) {
-    if block.height.is_some() {
+    if block.height.is_some_and(|x| x > 1) {
         return;
     }
 
