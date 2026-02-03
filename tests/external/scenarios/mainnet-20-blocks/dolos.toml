@@ -23,7 +23,7 @@ conway_path = "conway.json"
 
 [sync]
 pull_batch_size = 25
-sync_limit = { MaxBlocks = 25 }
+sync_limit = { MaxBlocks = 50 }
 
 [submit]
 
