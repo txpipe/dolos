@@ -207,6 +207,14 @@ impl RupdWork {
         let snapshot_epoch = self.current_epoch - 3;
         let performance_epoch = self.current_epoch - 1;
 
+        // The Cardano node doesn't compute rewards until the snapshot epoch is
+        // past the first Shelley epoch. The genesis-initialized snapshot at the
+        // first Shelley epoch itself is not used for reward computation.
+        let first_shelley = self.chain.first_shelley_epoch();
+        if snapshot_epoch <= first_shelley {
+            return None;
+        }
+
         Some((snapshot_epoch, performance_epoch))
     }
 
@@ -247,7 +255,12 @@ impl RupdWork {
         };
 
         if let Some((snapshot_epoch, _)) = work.relevant_epochs() {
-            let era = work.chain.era_for_epoch(snapshot_epoch);
+            // The snapshot data was "live" at snapshot_epoch and becomes the "mark"
+            // snapshot at snapshot_epoch + 1. The Haskell ledger computes the mark
+            // snapshot under the entering epoch's protocol rules, so we use
+            // snapshot_epoch + 1 to determine the era (e.g., Conway excludes pointer
+            // address UTxOs from stake).
+            let era = work.chain.era_for_epoch(snapshot_epoch + 1);
             let protocol = EraProtocol::from(era.protocol);
             work.snapshot = StakeSnapshot::load::<D>(state, snapshot_epoch, protocol)?;
         }
