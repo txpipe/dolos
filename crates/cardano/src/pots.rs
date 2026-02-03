@@ -302,7 +302,7 @@ pub fn epoch_incentives(
     let reward_pot = fee_ss + delta_r1;
 
     // Δt1 = floor( τ * rewardPot )
-    let treasury_tax = floor_int!(tau * ratio!(reward_pot), u64);
+    let treasury_tax = floor_int!(tau.clone() * ratio!(reward_pot), u64);
 
     // R = rewardPot - Δt1
     let available_rewards = reward_pot - treasury_tax;

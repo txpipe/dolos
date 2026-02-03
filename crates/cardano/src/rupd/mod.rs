@@ -98,6 +98,10 @@ pub struct StakeSnapshot {
     pub registered_accounts: HashSet<StakeCredential>,
     pub pools: HashMap<PoolHash, EpochValue<PoolSnapshot>>,
     pub pool_stake: HashMap<PoolHash, u64>,
+    /// Total blocks minted by ALL pools in the performance epoch (mark snapshot).
+    /// This includes blocks from pools created after the stake snapshot epoch.
+    /// Used for the `epoch_blocks` denominator in apparent performance calculation.
+    pub performance_epoch_pool_blocks: u64,
 }
 
 impl StakeSnapshot {

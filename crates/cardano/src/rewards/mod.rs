@@ -484,6 +484,7 @@ pub fn define_rewards<C: RewardsContext>(ctx: &C) -> Result<RewardMap<C>, ChainE
             "computed pool rewards"
         );
 
+
         // Leader rewards are only computed if:
         // 1. Protocol >= 7 (Babbage hardfork removes prefilter), OR
         // 2. The operator's reward account is registered
