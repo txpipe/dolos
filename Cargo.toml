@@ -95,7 +95,13 @@ nix = { version = "0.30.1", features = ["signal"] }
 serde = { workspace = true }
 tempfile = "3.20.0"
 toml = "0.8.13"
-dolos-testing = { path = "crates/testing", features = ["toy-domain"] }
+dolos-cardano = { path = "crates/cardano" }
+dolos-core = { path = "crates/core" }
+dolos-testing = { path = "crates/testing", features = ["toy-domain", "ledger-harness"] }
+bech32 = { workspace = true }
+hex = { workspace = true }
+pallas = { workspace = true }
+tracing-subscriber = { version = "0.3.17", features = ["env-filter"] }
 
 [[test]]
 name = "smoke"
@@ -105,9 +111,12 @@ path = "tests/external/smoke.rs"
 name = "cardano"
 path = "tests/cardano/main.rs"
 
+[[test]]
+name = "epoch_pots"
+path = "tests/epoch_pots/main.rs"
+
 [features]
 relaxed = ["dolos-cardano/relaxed"]
-rupd-snapshot-dump = ["dolos-cardano/rupd-snapshot-dump"]
 mithril = ["mithril-client"]
 utils = ["comfy-table", "inquire", "toml"]
 debug = ["console-subscriber", "tokio/tracing"]

@@ -22,6 +22,9 @@ pub mod blocks;
 #[cfg(feature = "toy-domain")]
 pub mod toy_domain;
 
+#[cfg(feature = "ledger-harness")]
+pub mod harness;
+
 pub trait UtxoGenerator {
     fn generate(&self, address: &TestAddress) -> EraCbor;
 }

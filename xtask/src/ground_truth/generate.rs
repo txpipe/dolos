@@ -2,11 +2,12 @@
 //!
 //! Generates ground-truth fixtures from cardano-db-sync for integration tests.
 
-use anyhow::{bail, Context, Result};
+use std::path::PathBuf;
+
+use anyhow::{Context, Result};
 use clap::Args;
 
 use crate::config::{load_xtask_config, Network};
-use crate::util::resolve_path;
 
 /// Arguments for cardano-ground-truth command.
 #[derive(Debug, Args)]
@@ -15,9 +16,13 @@ pub struct GenerateArgs {
     #[arg(long, value_enum)]
     pub network: Network,
 
-    /// Generate ground-truth from origin up to this epoch (inclusive)
+    /// Subject epoch: the epoch being analyzed (ground-truth covers epochs 1..=subject_epoch)
     #[arg(long)]
-    pub epoch: u64,
+    pub subject_epoch: u64,
+
+    /// Output directory for generated CSV files
+    #[arg(long)]
+    pub output_dir: PathBuf,
 
     /// Overwrite existing ground-truth files
     #[arg(long, action)]
@@ -29,8 +34,6 @@ pub fn run(args: &GenerateArgs) -> Result<()> {
     let repo_root = std::env::current_dir().context("detecting repo root")?;
     let xtask_config = load_xtask_config(&repo_root)?;
 
-    let instances_root = resolve_path(&repo_root, &xtask_config.instances_root);
-
     let dbsync_url = xtask_config
         .dbsync
         .url_for_network(&args.network)
@@ -41,35 +44,22 @@ pub fn run(args: &GenerateArgs) -> Result<()> {
             )
         })?;
 
-    // Ground-truth goes inside the instance folder
-    let instance_name = format!("test-{}-{}", args.network.as_str(), args.epoch);
-    let instance_dir = instances_root.join(&instance_name);
-    let output_dir = instance_dir.join("ground-truth");
+    let output_dir = &args.output_dir;
 
-    if !instance_dir.exists() {
-        bail!(
-            "instance not found: {}\n       Run: cargo xtask test-instance create --network {} --epoch {}",
-            instance_dir.display(),
-            args.network.as_str(),
-            args.epoch
-        );
-    }
-
-    std::fs::create_dir_all(&output_dir)
+    std::fs::create_dir_all(output_dir)
         .with_context(|| format!("creating output dir: {}", output_dir.display()))?;
 
     println!(
-        "Generating ground-truth for {} epoch {} from DBSync...",
+        "Generating ground-truth for {} subject_epoch {} from DBSync...",
         args.network.as_str(),
-        args.epoch
+        args.subject_epoch
     );
     println!(" DBSync URL: {}", dbsync_url);
     println!("  Output dir: {}", output_dir.display());
 
     // Fetch data from DBSync
-    let eras = super::eras::fetch(dbsync_url, args.epoch, &args.network)?;
-    let epoch_limit = args.epoch.saturating_sub(1);
-    let epochs = super::epochs::fetch(dbsync_url, epoch_limit)?;
+    let eras = super::eras::fetch(dbsync_url, args.subject_epoch, &args.network)?;
+    let epochs = super::epochs::fetch(dbsync_url, args.subject_epoch)?;
 
     // Write eras.csv
     let eras_path = output_dir.join("eras.csv");
@@ -82,26 +72,28 @@ pub fn run(args: &GenerateArgs) -> Result<()> {
     println!(" Wrote: {}", epochs_path.display());
 
     // Write pparams.csv
-    let pparams = super::pparams::fetch(dbsync_url, epoch_limit)?;
+    let pparams = super::pparams::fetch(dbsync_url, args.subject_epoch)?;
     let pparams_path = output_dir.join("pparams.csv");
     super::pparams::write_csv(&pparams_path, &pparams).with_context(|| "writing pparams csv")?;
     println!("  Wrote: {}", pparams_path.display());
 
-    // Fetch and write pools, accounts, rewards for earned_epoch (= epoch - 1)
-    let subject_epoch = args.epoch.saturating_sub(2);
+    // performance_epoch = subject_epoch - 2: the epoch where rewards were earned.
+    // RUPD at subject_epoch uses the mark snapshot (subject - 1) to compute rewards
+    // for performance done in subject - 2.
+    let performance_epoch = args.subject_epoch.saturating_sub(2);
 
-    let delegation_rows = super::delegation::fetch(dbsync_url, subject_epoch)?;
-    let delegation_path = output_dir.join(format!("delegation-{}.csv", subject_epoch));
+    let delegation_rows = super::delegation::fetch(dbsync_url, performance_epoch)?;
+    let delegation_path = output_dir.join(format!("delegation-{}.csv", performance_epoch));
     super::delegation::write_csv(&delegation_path, &delegation_rows)
         .with_context(|| "writing delegation csv")?;
     println!("  Wrote: {}", delegation_path.display());
 
-    let stake_rows = super::stake::fetch(dbsync_url, subject_epoch)?;
-    let stake_path = output_dir.join(format!("stake-{}.csv", subject_epoch));
+    let stake_rows = super::stake::fetch(dbsync_url, performance_epoch)?;
+    let stake_path = output_dir.join(format!("stake-{}.csv", performance_epoch));
     super::stake::write_csv(&stake_path, &stake_rows).with_context(|| "writing stake csv")?;
     println!("  Wrote: {}", stake_path.display());
 
-    let reward_rows = super::rewards::fetch(dbsync_url, subject_epoch)?;
+    let reward_rows = super::rewards::fetch(dbsync_url, performance_epoch)?;
     let rewards_path = output_dir.join("rewards.csv");
     super::rewards::write_csv(&rewards_path, &reward_rows)
         .with_context(|| "writing rewards csv")?;

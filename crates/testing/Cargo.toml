@@ -11,11 +11,13 @@ rand = "0.9.1"
 # optional dependencies for toy domain
 dolos-redb3 = { path = "../redb3", optional = true }
 dolos-cardano = { path = "../cardano", optional = true }
+dolos-fjall = { path = "../fjall", optional = true }
 
 tokio = { workspace = true, optional = true }
 tokio-stream = { workspace = true, optional = true }
 futures-core = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
+itertools = { workspace = true, optional = true }
 
 
 [features]
@@ -27,4 +29,12 @@ toy-domain = [
     "tokio-stream",
     "futures-core",
     "futures-util",
+]
+ledger-harness = [
+    "dolos-redb3",
+    "dolos-cardano",
+    "dolos-fjall",
+    "tokio",
+    "futures-core",
+    "itertools",
 ]

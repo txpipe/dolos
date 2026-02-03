@@ -1261,7 +1261,6 @@ name = "dolos-cardano"
 version = "1.0.0-rc.6"
 dependencies = [
  "async-trait",
- "bech32 0.11.1",
  "chrono",
  "dolos-core",
  "hex",
