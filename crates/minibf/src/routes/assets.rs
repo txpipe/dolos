@@ -212,14 +212,14 @@ impl IntoModel<serde_json::Value> for CIP25Metadata {
 
 async fn datum_from_hash<D>(
     domain: &Facade<D>,
-    hash: &Hash<32>,
+    hash: Hash<32>,
 ) -> Result<Option<PlutusData>, StatusCode>
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
     let Some(bytes) = domain
         .query()
-        .get_datum(hash)
+        .get_datum(&hash)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     else {
@@ -228,6 +228,71 @@ where
 
     let datum = minicbor::decode(&bytes).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Some(datum))
+}
+
+fn cip68_reference_from_unit(
+    unit: &str,
+) -> Result<Option<(String, Cip68TokenStandard)>, StatusCode> {
+    if unit.len() < 56 {
+        return Ok(None);
+    }
+
+    let policy_id = &unit[..56];
+    let asset_name = &unit[56..];
+    cip_68_reference_asset(policy_id, asset_name).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+fn decode_era_tx(era: u16, cbor: &[u8]) -> Result<MultiEraTx<'_>, StatusCode> {
+    let era = pallas::ledger::traverse::Era::try_from(era)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    MultiEraTx::decode_for_era(era, cbor).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+async fn metadata_from_datum_option<D>(
+    domain: &Facade<D>,
+    datum_option: &pallas::ledger::primitives::conway::DatumOption<'_>,
+    standard: Cip68TokenStandard,
+) -> Result<Option<OnchainMetadata>, StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    match datum_option {
+        pallas::ledger::primitives::conway::DatumOption::Hash(hash) => {
+            let Some(plutus_data) = datum_from_hash(domain, *hash).await? else {
+                return Ok(None);
+            };
+            OnchainMetadata::from_plutus_data(plutus_data, standard)
+        }
+        pallas::ledger::primitives::conway::DatumOption::Data(cbor_wrap) => {
+            OnchainMetadata::from_plutus_data(cbor_wrap.to_plutus_data(), standard)
+        }
+    }
+}
+
+async fn last_cip68_metadata_from_tx<D>(
+    domain: &Facade<D>,
+    tx: &MultiEraTx<'_>,
+    ref_asset_bytes: &[u8],
+    standard: Cip68TokenStandard,
+) -> Result<Option<OnchainMetadata>, StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    let mut last_metadata = None;
+
+    for output in tx.outputs().iter() {
+        if !output_has_subject(ref_asset_bytes, output) {
+            continue;
+        }
+
+        if let Some(datum_option) = output.datum() {
+            if let Some(out) = metadata_from_datum_option(domain, &datum_option, standard).await? {
+                last_metadata = Some(out);
+            }
+        }
+    }
+
+    Ok(last_metadata)
 }
 
 struct AssetModelBuilder {
@@ -247,18 +312,16 @@ impl AssetModelBuilder {
         D: Domain + Clone + Send + Sync + 'static,
         Option<AssetState>: From<D::Entity>,
     {
-        let cip68_reference = if self.unit.len() >= 56 {
-            let policy_id = &self.unit[..56];
-            let asset_name = &self.unit[56..];
-            cip_68_reference_asset(policy_id, asset_name)
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        } else {
-            None
+        let cip68_reference = match cip68_reference_from_unit(&self.unit)? {
+            Some((ref_asset, standard)) => {
+                let bytes =
+                    hex::decode(&ref_asset).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                Some((ref_asset, standard, bytes))
+            }
+            None => None,
         };
 
-        if let Some((ref_asset, standard)) = cip68_reference {
-            let ref_asset_bytes =
-                hex::decode(&ref_asset).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        if let Some((_, standard, ref_asset_bytes)) = &cip68_reference {
             let entity_key = pallas::crypto::hash::Hasher::<256>::hash(ref_asset_bytes.as_slice());
             let ref_state = domain
                 .read_cardano_entity::<AssetState>(entity_key.as_slice())
@@ -271,114 +334,24 @@ impl AssetModelBuilder {
                     .await
                     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
                 {
-                    let era = pallas::ledger::traverse::Era::try_from(era)
-                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-                    let tx = MultiEraTx::decode_for_era(era, &cbor)
-                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-                    let mut last_metadata = None;
-
-                    for output in tx.outputs().iter() {
-                        let has_ref_asset = output.value().assets().iter().any(|multi_asset| {
-                            multi_asset.assets().iter().any(|asset| {
-                                let mut unit = multi_asset.policy().to_vec();
-                                unit.extend(asset.name());
-                                unit == ref_asset_bytes
-                            })
-                        });
-
-                        if !has_ref_asset {
-                            continue;
-                        }
-
-                        if let Some(datum_option) = output.datum() {
-                            let out = match datum_option {
-                                pallas::ledger::primitives::conway::DatumOption::Hash(hash) => {
-                                    if let Some(plutus_data) =
-                                        datum_from_hash(domain, &hash).await?
-                                    {
-                                        OnchainMetadata::from_plutus_data(plutus_data, standard)?
-                                    } else {
-                                        None
-                                    }
-                                }
-                                pallas::ledger::primitives::conway::DatumOption::Data(
-                                    cbor_wrap,
-                                ) => OnchainMetadata::from_plutus_data(
-                                    cbor_wrap.to_plutus_data(),
-                                    standard,
-                                )?,
-                            };
-
-                            if out.is_some() {
-                                last_metadata = out;
-                            }
-                        }
-                    }
-
-                    if last_metadata.is_some() {
-                        return Ok(last_metadata);
+                    let tx = decode_era_tx(era, &cbor)?;
+                    if let Some(metadata) =
+                        last_cip68_metadata_from_tx(domain, &tx, ref_asset_bytes, *standard).await?
+                    {
+                        return Ok(Some(metadata));
                     }
                 }
             }
         }
 
         if let Some(EraCbor(era, cbor)) = &self.initial_tx {
-            let era = pallas::ledger::traverse::Era::try_from(*era)
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            let tx = MultiEraTx::decode_for_era(era, cbor)
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            let tx = decode_era_tx(*era, cbor)?;
 
-            let cip68_reference = if self.unit.len() >= 56 {
-                let policy_id = &self.unit[..56];
-                let asset_name = &self.unit[56..];
-                cip_68_reference_asset(policy_id, asset_name)
-                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-            } else {
-                None
-            };
-
-            if let Some((ref_asset, standard)) = cip68_reference {
-                let mut last_metadata = None;
-
-                for output in tx.outputs().iter() {
-                    let has_ref_asset = output.value().assets().iter().any(|multi_asset| {
-                        multi_asset.assets().iter().any(|asset| {
-                            let mut unit = multi_asset.policy().to_vec();
-                            unit.extend(asset.name());
-                            let unit = hex::encode(unit);
-                            ref_asset == unit
-                        })
-                    });
-
-                    if !has_ref_asset {
-                        continue;
-                    }
-
-                    if let Some(datum_option) = output.datum() {
-                        let out = match datum_option {
-                            pallas::ledger::primitives::conway::DatumOption::Hash(hash) => {
-                                if let Some(plutus_data) = datum_from_hash(domain, &hash).await? {
-                                    OnchainMetadata::from_plutus_data(plutus_data, standard)?
-                                } else {
-                                    None
-                                }
-                            }
-                            pallas::ledger::primitives::conway::DatumOption::Data(cbor_wrap) => {
-                                OnchainMetadata::from_plutus_data(
-                                    cbor_wrap.to_plutus_data(),
-                                    standard,
-                                )?
-                            }
-                        };
-
-                        if out.is_some() {
-                            last_metadata = out;
-                        }
-                    }
-                }
-
-                if last_metadata.is_some() {
-                    return Ok(last_metadata);
+            if let Some((_, standard, ref_asset_bytes)) = &cip68_reference {
+                if let Some(metadata) =
+                    last_cip68_metadata_from_tx(domain, &tx, ref_asset_bytes, *standard).await?
+                {
+                    return Ok(Some(metadata));
                 }
             }
 
