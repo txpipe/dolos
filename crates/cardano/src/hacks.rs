@@ -509,6 +509,76 @@ pub mod proposals {
                 "319c8b8865bdc6ce896f3722aa54da9d9fd125429a7e05af1955004f69217eca#0" => {
                     Ratified(219)
                 }
+                "e67064c5e85b74062a13a0ed9290f8f7d6c81440e39be081a334e33b57ec810d#0" => {
+                    Ratified(221)
+                }
+                "32c8bdd8791fee095c9074f7163410cc41eb05f5d6632afd96ab8578ad9ca215#0" => {
+                    Ratified(222)
+                }
+                "f10937dfd495061cdb3c6ae56af6d522391205f39318acf9098969224b97d1e8#0" => {
+                    Ratified(224)
+                }
+                "1d29f276d893e72183969dc39594c1cabadace86e8add3ce71af470c7c475b9d#0" => {
+                    Ratified(225)
+                }
+                "05d1302ff8d070d4e7545415f81c7d824d7601694d92053026c5cd7d58a7814a#0" => {
+                    Ratified(228)
+                }
+                "5bd9fa498676741dcf990ceb98512d91bfd0481093839827bea5abe1bbd89136#0" => {
+                    Ratified(229)
+                }
+                "db2be7716618fb6aa775c6052a39a9efe67f6a235ca42c8c28a681094aab82ec#0" => {
+                    Ratified(232)
+                }
+                "8fd8ea3d1933e05f6d474d315e1ff0d60e567a79f73fd3cec98b9cdac54ba75a#0" => {
+                    Ratified(242)
+                }
+                "f6334261e19a6a4ff028684b1cad38b4f9c03290e5c24ce2ac11d6e9a33fe0b5#0" => {
+                    Ratified(245)
+                }
+                "3dd110c031c23f9187441464edc8b84d4f9cd62df6cc3a04bf62fde5359ebd5a#0" => {
+                    Ratified(246)
+                }
+                "42362f1aea613711dfe527541f5a8de71579e6980d9887a1d4db29ef1b601863#0" => {
+                    Ratified(247)
+                }
+                "054257a09038d69832949b07b8d97a24687919a777e967933d85469480777e2e#0" => {
+                    Ratified(248)
+                }
+                "abbbf81e0fb1e4de222df18a9ca5fdfe3e9b9e2efc0cde6c42552789746c9852#0" => {
+                    Ratified(249)
+                }
+                "1bd8310b660c3086530763e67edae7087654a8642c981b3bc4ea89f33f3ed67c#0" => {
+                    Ratified(250)
+                }
+                "ee4876fa27951d12b17b647dbbc46f303b7b0e2dd416d92e88a6da7a58c6851e#0" => {
+                    Ratified(252)
+                }
+                "e2e52847e2b1d47032cee3b91419ec0f5078b7d31fa5e939bde6a77e97a9f04b#0" => {
+                    Ratified(253)
+                }
+                "956fb654686351da5367f326902e33b1200448624d756ca3ad7cf77db4c1bf52#0" => {
+                    Ratified(255)
+                }
+                "f7902182392800c8ea0b6fa048100263ae522fe5ee2fb1388f881921018dd6fc#0" => {
+                    Ratified(256)
+                }
+                // Non-d-parameter proposals submitted one epoch before target
+                "51fa37794d2107d7d8705cd69594c5162ced13f922235a99d06aff20c64656b6#0" => {
+                    Ratified(289)
+                }
+                "8230f33cd7ad3f8601e94ea2b18abdc591187e190ea8ebecc25e20fc66200f13#0" => {
+                    Ratified(364)
+                }
+                "3abda97c78c71e8a21473529aca94d78d364dfa1a866ef8245885e18085b4e4c#0" => {
+                    Ratified(364)
+                }
+                "a83f479c5635e1e563a19f6e72a1be59fb082bbf31de90cc176850ee799b08ac#0" => {
+                    Ratified(393)
+                }
+                "62c3c13187423c47f629e6187f36fbd61a9ba1d05d101588340cfbfdf47b22d2#0" => {
+                    Ratified(393)
+                }
 
                 _ => match protocol {
                     0..=8 => RatifiedCurrentEpoch,
