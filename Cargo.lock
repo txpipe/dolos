@@ -1265,6 +1265,7 @@ dependencies = [
  "async-trait",
  "bech32 0.11.1",
  "chrono",
+ "crc",
  "dolos-core",
  "hex",
  "itertools 0.14.0",

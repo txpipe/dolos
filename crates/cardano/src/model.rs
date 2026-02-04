@@ -43,7 +43,7 @@ use crate::{
             AssignMirRewards, ControlledAmountDec, ControlledAmountInc, StakeDelegation,
             StakeDeregistration, StakeRegistration, VoteDelegation, WithdrawalInc,
         },
-        assets::MintStatsUpdate,
+        assets::{MetadataTxUpdate, MintStatsUpdate},
         dreps::{DRepActivity, DRepRegistration, DRepUnRegistration},
         epochs::{EpochStatsUpdate, NoncesUpdate},
         pools::{MintedBlocksInc, PoolDeRegistration, PoolRegistration},
@@ -604,6 +604,9 @@ pub struct AssetState {
 
     #[n(3)]
     pub mint_tx_count: u64,
+
+    #[n(4)]
+    pub metadata_tx: Option<Hash<32>>,
 }
 
 entity_boilerplate!(AssetState, "assets");
@@ -1900,6 +1903,7 @@ pub enum CardanoDelta {
     PoolDeRegistration(Box<PoolDeRegistration>),
     MintedBlocksInc(Box<MintedBlocksInc>),
     MintStatsUpdate(Box<MintStatsUpdate>),
+    MetadataTxUpdate(Box<MetadataTxUpdate>),
     EpochStatsUpdate(Box<EpochStatsUpdate>),
     DRepRegistration(Box<DRepRegistration>),
     DRepUnRegistration(Box<DRepUnRegistration>),
@@ -1973,6 +1977,7 @@ delta_from!(PoolRegistration);
 delta_from!(PoolDeRegistration);
 delta_from!(MintedBlocksInc);
 delta_from!(MintStatsUpdate);
+delta_from!(MetadataTxUpdate);
 delta_from!(EpochStatsUpdate);
 delta_from!(DRepRegistration);
 delta_from!(DRepUnRegistration);
@@ -2027,6 +2032,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::PoolDeRegistration(x) => x.key(),
             Self::MintedBlocksInc(x) => x.key(),
             Self::MintStatsUpdate(x) => x.key(),
+            Self::MetadataTxUpdate(x) => x.key(),
             Self::EpochStatsUpdate(x) => x.key(),
             Self::DRepRegistration(x) => x.key(),
             Self::DRepActivity(x) => x.key(),
@@ -2069,6 +2075,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::PoolDeRegistration(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::MintedBlocksInc(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::MintStatsUpdate(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::MetadataTxUpdate(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::EpochStatsUpdate(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::DRepRegistration(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::DRepUnRegistration(x) => Self::downcast_apply(x.as_mut(), entity),
@@ -2111,6 +2118,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::PoolDeRegistration(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::MintedBlocksInc(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::MintStatsUpdate(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::MetadataTxUpdate(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::EpochStatsUpdate(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::DRepRegistration(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::DRepUnRegistration(x) => Self::downcast_undo(x.as_ref(), entity),

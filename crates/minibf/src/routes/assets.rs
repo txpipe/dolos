@@ -522,82 +522,70 @@ impl AssetModelBuilder {
     ) -> Result<Option<OnchainMetadata>, StatusCode>
     where
         D: Domain + Clone + Send + Sync + 'static,
+        Option<AssetState>: From<D::Entity>,
     {
         if let Some((ref_asset, standard)) = self.cip_68_reference_asset() {
             let ref_asset_bytes =
                 hex::decode(&ref_asset).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            let utxoset = domain
-                .indexes()
-                .utxos_by_asset(&ref_asset_bytes)
+            let entity_key = pallas::crypto::hash::Hasher::<256>::hash(ref_asset_bytes.as_slice());
+            let ref_state = domain
+                .read_cardano_entity::<AssetState>(entity_key.as_slice())
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            let utxoset = utxoset.into_iter().collect_vec();
-            let mut utxos_with_slot = Vec::with_capacity(utxoset.len());
-            for txoref in utxoset {
-                let slot = domain
-                    .indexes()
-                    .slot_by_tx_hash(txoref.0.as_slice())
+
+            if let Some(metadata_tx) = ref_state.and_then(|state| state.metadata_tx) {
+                if let Some(EraCbor(era, cbor)) = domain
+                    .query()
+                    .tx_cbor(metadata_tx.as_slice().to_vec())
+                    .await
                     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-                    .unwrap_or(0);
-                utxos_with_slot.push((slot, txoref));
-            }
-            utxos_with_slot.sort_by(|(slot_a, ref_a), (slot_b, ref_b)| {
-                slot_a
-                    .cmp(slot_b)
-                    .then_with(|| ref_a.0.as_slice().cmp(ref_b.0.as_slice()))
-                    .then_with(|| ref_a.1.cmp(&ref_b.1))
-            });
-            utxos_with_slot.reverse();
-            let utxoset = utxos_with_slot
-                .into_iter()
-                .map(|(_, txoref)| txoref)
-                .collect_vec();
-
-            if !utxoset.is_empty() {
-                let utxos = domain
-                    .state()
-                    .get_utxos(utxoset)
-                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-                let mut best_metadata: Option<OnchainMetadata> = None;
-                let mut best_len = 0usize;
-
-                for (_txoref, eracbor) in utxos {
-                    let output = MultiEraOutput::decode(eracbor.0.try_into().unwrap(), &eracbor.1)
+                {
+                    let era = pallas::ledger::traverse::Era::try_from(era)
                         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                    let tx = MultiEraTx::decode_for_era(era, &cbor)
+                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                    let mut last_metadata = None;
 
-                    if let Some(datum_option) = output.datum() {
-                        match datum_option {
-                            pallas::ledger::primitives::conway::DatumOption::Hash(hash) => {
-                                if let Some(plutus_data) = datum_from_hash(domain, &hash).await? {
-                                    if let Some(out) =
-                                        OnchainMetadata::from_plutus_data(plutus_data, standard)?
+                    for output in tx.outputs().iter() {
+                        let has_ref_asset = output.value().assets().iter().any(|multi_asset| {
+                            multi_asset.assets().iter().any(|asset| {
+                                let mut unit = multi_asset.policy().to_vec();
+                                unit.extend(asset.name());
+                                unit == ref_asset_bytes
+                            })
+                        });
+
+                        if !has_ref_asset {
+                            continue;
+                        }
+
+                        if let Some(datum_option) = output.datum() {
+                            let out = match datum_option {
+                                pallas::ledger::primitives::conway::DatumOption::Hash(hash) => {
+                                    if let Some(plutus_data) =
+                                        datum_from_hash(domain, &hash).await?
                                     {
-                                        let len = out.metadata.len();
-                                        if len > best_len {
-                                            best_len = len;
-                                            best_metadata = Some(out);
-                                        }
+                                        OnchainMetadata::from_plutus_data(plutus_data, standard)?
+                                    } else {
+                                        None
                                     }
                                 }
-                            }
-                            pallas::ledger::primitives::conway::DatumOption::Data(cbor_wrap) => {
-                                if let Some(out) = OnchainMetadata::from_plutus_data(
+                                pallas::ledger::primitives::conway::DatumOption::Data(
+                                    cbor_wrap,
+                                ) => OnchainMetadata::from_plutus_data(
                                     cbor_wrap.to_plutus_data(),
                                     standard,
-                                )? {
-                                    let len = out.metadata.len();
-                                    if len > best_len {
-                                        best_len = len;
-                                        best_metadata = Some(out);
-                                    }
-                                }
-                            }
-                        };
-                    }
-                }
+                                )?,
+                            };
 
-                if best_metadata.is_some() {
-                    return Ok(best_metadata);
+                            if out.is_some() {
+                                last_metadata = out;
+                            }
+                        }
+                    }
+
+                    if last_metadata.is_some() {
+                        return Ok(last_metadata);
+                    }
                 }
             }
         }
@@ -609,42 +597,47 @@ impl AssetModelBuilder {
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
             if let Some((ref_asset, standard)) = self.cip_68_reference_asset() {
-                let ref_asset_output = tx
-                    .outputs()
-                    .iter()
-                    .find(|o| {
-                        o.value().assets().iter().any(|multi_asset| {
-                            multi_asset.assets().iter().any(|asset| {
-                                let mut unit = multi_asset.policy().to_vec();
-                                unit.extend(asset.name());
-                                let unit = hex::encode(unit);
-                                ref_asset == unit
-                            })
-                        })
-                    })
-                    .cloned();
+                let mut last_metadata = None;
 
-                if let Some(ref_asset_output) = ref_asset_output {
-                    if let Some(datum_option) = ref_asset_output.datum() {
-                        match datum_option {
+                for output in tx.outputs().iter() {
+                    let has_ref_asset = output.value().assets().iter().any(|multi_asset| {
+                        multi_asset.assets().iter().any(|asset| {
+                            let mut unit = multi_asset.policy().to_vec();
+                            unit.extend(asset.name());
+                            let unit = hex::encode(unit);
+                            ref_asset == unit
+                        })
+                    });
+
+                    if !has_ref_asset {
+                        continue;
+                    }
+
+                    if let Some(datum_option) = output.datum() {
+                        let out = match datum_option {
                             pallas::ledger::primitives::conway::DatumOption::Hash(hash) => {
-                                if let Some(cbor_wrap) = tx.find_plutus_data(&hash) {
-                                    let out = OnchainMetadata::from_plutus_data(
-                                        cbor_wrap.to_plutus_data(),
-                                        standard,
-                                    )?;
-                                    return Ok(out);
+                                if let Some(plutus_data) = datum_from_hash(domain, &hash).await? {
+                                    OnchainMetadata::from_plutus_data(plutus_data, standard)?
+                                } else {
+                                    None
                                 }
                             }
                             pallas::ledger::primitives::conway::DatumOption::Data(cbor_wrap) => {
-                                let out = OnchainMetadata::from_plutus_data(
+                                OnchainMetadata::from_plutus_data(
                                     cbor_wrap.to_plutus_data(),
                                     standard,
-                                )?;
-                                return Ok(out);
+                                )?
                             }
                         };
+
+                        if out.is_some() {
+                            last_metadata = out;
+                        }
                     }
+                }
+
+                if last_metadata.is_some() {
+                    return Ok(last_metadata);
                 }
             }
 
@@ -700,6 +693,7 @@ impl AssetModelBuilder {
     async fn into_model<D>(self, domain: &Facade<D>) -> Result<Asset, StatusCode>
     where
         D: Domain + Clone + Send + Sync + 'static,
+        Option<AssetState>: From<D::Entity>,
     {
         let policy = self.subject[..28].to_vec();
         let asset = self.subject[28..].to_vec();
