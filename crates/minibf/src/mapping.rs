@@ -103,7 +103,8 @@ pub fn bech32_drep(drep: &DRep) -> Result<String, StatusCode> {
             payload[..1].copy_from_slice(&script_prefix);
             payload[1..].copy_from_slice(key.as_slice());
         }
-        _ => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+        DRep::Abstain => return Ok("drep_always_abstain".to_string()),
+        DRep::NoConfidence => return Ok("drep_always_no_confidence".to_string()),
     };
 
     bech32(DREP_HRP, payload)
@@ -652,7 +653,6 @@ impl<'a> TxModelBuilder<'a> {
 
         for cert in self.tx()?.certs() {
             if let Some(reg) = pallas_extras::cert_as_stake_registration(&cert) {
-                dbg!(&reg);
                 let key = minicbor::to_vec(&reg).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
                 if repeated.insert((0, key.clone())) {
                     out += key_deposit;
