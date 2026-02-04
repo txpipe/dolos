@@ -156,7 +156,15 @@ pub fn into_alonzo(previous: &PParamsSet, genesis: &alonzo::GenesisFile) -> PPar
 }
 
 pub fn into_babbage(previous: &PParamsSet, genesis: &alonzo::GenesisFile) -> PParamsSet {
-    let set = previous.clone().with(Val::ProtocolVersion((7, 0)));
+    // In the hardfork, the value got translated from words to bytes
+    // Since the transformation from words to bytes is hardcoded, the transformation
+    // here is also hardcoded
+    let ada_per_utxo_byte = previous.ada_per_utxo_byte().unwrap_or_default() / 8;
+
+    let set = previous
+        .clone()
+        .with(Val::ProtocolVersion((7, 0)))
+        .with(Val::AdaPerUtxoByte(ada_per_utxo_byte));
 
     if let Some(v2) = from_alonzo_cost_models_map(&genesis.cost_models, &alonzo::Language::PlutusV2)
     {
@@ -167,15 +175,9 @@ pub fn into_babbage(previous: &PParamsSet, genesis: &alonzo::GenesisFile) -> PPa
 }
 
 pub fn into_conway(previous: &PParamsSet, genesis: &conway::GenesisFile) -> PParamsSet {
-    // In the hardfork, the value got translated from words to bytes
-    // Since the transformation from words to bytes is hardcoded, the transformation
-    // here is also hardcoded
-    let ada_per_utxo_byte = previous.ada_per_utxo_byte().unwrap_or_default() / 8;
-
     previous
         .clone()
         .with(Val::ProtocolVersion((9, 0)))
-        .with(Val::AdaPerUtxoByte(ada_per_utxo_byte))
         .with(Val::CostModelsPlutusV3(
             genesis.plutus_v3_cost_model.clone(),
         ))

@@ -1,4 +1,4 @@
-use std::{collections::HashMap, time::Duration};
+use std::collections::HashMap;
 
 use axum::{
     extract::{Path, Query, State},
@@ -20,11 +20,10 @@ use pallas::{
     codec::minicbor,
     ledger::{addresses::Network, primitives::StakeCredential},
 };
-use serde::{Deserialize, Serialize};
 
 use crate::{
     error::Error,
-    mapping::{bech32_pool, rational_to_f64, IntoModel},
+    mapping::{bech32_pool, pool_offchain_metadata, rational_to_f64, IntoModel},
     pagination::{Pagination, PaginationParameters},
     Facade,
 };
@@ -38,30 +37,6 @@ fn decode_pool_id(pool_id: &str) -> Result<Vec<u8>, Error> {
     }
 
     Err(Error::Code(StatusCode::BAD_REQUEST))
-}
-
-async fn pool_offchain_metadata(url: &str) -> Option<PoolOffchainMetadata> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .user_agent("Dolos MiniBF")
-        .build()
-        .ok()?;
-
-    let res = client.get(url).send().await.ok()?;
-
-    if res.status() != StatusCode::OK {
-        return None;
-    }
-
-    res.json().await.ok()
-}
-
-#[derive(Serialize, Deserialize, Clone)]
-pub struct PoolOffchainMetadata {
-    pub name: String,
-    pub description: String,
-    pub ticker: String,
-    pub homepage: String,
 }
 
 pub async fn all_extended<D: Domain>(
@@ -258,6 +233,7 @@ where
     let filtered = iter.filter_ok(|(_, account)| {
         account
             .delegated_pool_live()
+            .or(account.retired_pool.as_ref())
             .is_some_and(|f| f.as_slice() == operator.as_slice())
     });
 
