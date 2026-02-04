@@ -21,6 +21,7 @@ use dolos_core::{BlockSlot, Domain, EraCbor, IndexStore as _, StateStore as _};
 use itertools::Itertools;
 use pallas::{
     codec::minicbor,
+    crypto::hash::Hash,
     ledger::{
         primitives::{BigInt, Metadatum, PlutusData},
         traverse::{MultiEraBlock, MultiEraOutput, MultiEraTx},
@@ -42,37 +43,41 @@ struct OnchainMetadata {
     extra: Option<String>,
 }
 impl OnchainMetadata {
-    fn from_plutus_data(plutus_data: PlutusData) -> Result<Option<Self>, StatusCode> {
-        let value = CIP68Metadata(plutus_data.clone()).into_model()?;
-        if !value.is_array() {
+    fn from_plutus_data(
+        plutus_data: PlutusData,
+        standard: Cip68TokenStandard,
+    ) -> Result<Option<Self>, StatusCode> {
+        let PlutusData::Constr(constr) = plutus_data else {
+            return Ok(None);
+        };
+
+        if constr.fields.len() < 2 {
             return Ok(None);
         }
 
-        let array = value.as_array().unwrap();
-        let Some(metadata) = array.first() else {
+        let PlutusData::Map(map) = &constr.fields[0] else {
             return Ok(None);
         };
-        if metadata.is_null() || !metadata.is_object() {
-            return Ok(None);
-        }
-        let metadata = metadata.as_object().unwrap().clone().into_iter().collect();
 
-        let version = array
-            .get(1)
-            .and_then(|v| v.as_number())
-            .and_then(|n| n.as_i64())
-            .and_then(|n| match n {
-                1 => Some(OnchainMetadataStandard::Cip68v1),
-                2 => Some(OnchainMetadataStandard::Cip68v2),
-                3 => Some(OnchainMetadataStandard::Cip68v3),
-                _ => None,
-            });
-
-        let extra = if let PlutusData::Constr(constr) = plutus_data {
-            constr.fields.get(2).map(encode_to_hex).transpose()?
-        } else {
-            None
+        let version = match &constr.fields[1] {
+            PlutusData::BigInt(BigInt::Int(int)) => i64::try_from(*int.deref()).ok(),
+            _ => None,
         };
+
+        let Some(version) = version else {
+            return Ok(None);
+        };
+
+        let metadata = parse_cip68_metadata_map(map.as_slice(), standard)?;
+
+        let version = match version {
+            1 => Some(OnchainMetadataStandard::Cip68v1),
+            2 => Some(OnchainMetadataStandard::Cip68v2),
+            3 => Some(OnchainMetadataStandard::Cip68v3),
+            _ => None,
+        };
+
+        let extra = constr.fields.get(2).map(encode_to_hex).transpose()?;
 
         Ok(Some(Self {
             metadata,
@@ -127,18 +132,6 @@ impl OnchainMetadata {
     }
 }
 
-const CIP68_FIELDS: &[&str] = &[
-    "name",
-    "description",
-    "image",
-    "mediaType",
-    "files",
-    "ticker",
-    "url",
-    "logo",
-    "decimals",
-    "src",
-];
 const CRC8_ALGO: Crc<u8> = Crc::<u8>::new(&CRC_8_SMBUS);
 #[derive(Debug, Clone)]
 enum CIP68Label {
@@ -174,6 +167,64 @@ impl CIP68Label {
         format!("0{number_hex}{checksum}0")
     }
 }
+
+#[derive(Debug, Clone, Copy)]
+enum Cip68TokenStandard {
+    Nft,
+    Ft,
+    Rft,
+}
+
+impl Cip68TokenStandard {
+    fn from_label(label: CIP68Label) -> Option<Self> {
+        match label {
+            CIP68Label::Nft => Some(Self::Nft),
+            CIP68Label::Ft => Some(Self::Ft),
+            CIP68Label::Rft => Some(Self::Rft),
+            CIP68Label::ReferenceNft => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PropertyKind {
+    Bytestring,
+    Number,
+    Array,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PropertyScheme {
+    kind: PropertyKind,
+    items: Option<&'static [(&'static str, PropertyScheme)]>,
+}
+
+const fn bytestring_scheme() -> PropertyScheme {
+    PropertyScheme {
+        kind: PropertyKind::Bytestring,
+        items: None,
+    }
+}
+
+const fn number_scheme() -> PropertyScheme {
+    PropertyScheme {
+        kind: PropertyKind::Number,
+        items: None,
+    }
+}
+
+const fn array_scheme(items: &'static [(&'static str, PropertyScheme)]) -> PropertyScheme {
+    PropertyScheme {
+        kind: PropertyKind::Array,
+        items: Some(items),
+    }
+}
+
+const FILES_ITEM_SCHEMA: &[(&str, PropertyScheme)] = &[
+    ("name", bytestring_scheme()),
+    ("mediaType", bytestring_scheme()),
+    ("src", bytestring_scheme()),
+];
 
 #[derive(Debug, Deserialize)]
 pub struct TokenRegistryValue<T> {
@@ -247,78 +298,194 @@ impl IntoModel<serde_json::Value> for CIP25Metadata {
     }
 }
 
+fn to_utf8_or_hex(bytes: &[u8]) -> String {
+    match std::str::from_utf8(bytes) {
+        Ok(value) => value.to_string(),
+        Err(_) => hex::encode(bytes),
+    }
+}
+
 fn encode_to_hex<T: minicbor::Encode<()>>(value: &T) -> Result<String, StatusCode> {
     let mut buf = Vec::new();
     minicbor::encode(value, &mut buf).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(hex::encode(buf))
 }
 
-struct CIP68Metadata(PlutusData);
-impl IntoModel<serde_json::Value> for CIP68Metadata {
-    type SortKey = ();
+async fn datum_from_hash<D>(
+    domain: &Facade<D>,
+    hash: &Hash<32>,
+) -> Result<Option<PlutusData>, StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    let Some(bytes) = domain
+        .query()
+        .get_datum(hash)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    else {
+        return Ok(None);
+    };
 
-    fn into_model(self) -> Result<serde_json::Value, StatusCode> {
-        Ok(match self.0 {
-            PlutusData::Constr(x) => {
-                let values = x
-                    .fields
-                    .iter()
-                    .map(|d| CIP68Metadata(d.clone()).into_model())
-                    .collect::<Result<Vec<serde_json::Value>, _>>()?;
+    let datum = minicbor::decode(&bytes).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Some(datum))
+}
 
-                serde_json::Value::Array(values)
-            }
-
-            PlutusData::Map(x) => {
-                let mut map = serde_json::Map::new();
-                for (k, v) in x.iter() {
-                    let key_opt = CIP68Metadata(k.clone())
-                        .into_model()?
-                        .as_str()
-                        .map(|s| s.to_owned());
-
-                    if let Some(key) = key_opt {
-                        if CIP68_FIELDS.contains(&key.as_str()) {
-                            map.insert(key, CIP68Metadata(v.clone()).into_model()?);
-                        } else {
-                            map.insert(key, serde_json::Value::String(encode_to_hex(&v)?));
-                        }
-                    }
-                }
-                serde_json::Value::Object(map)
-            }
-
-            PlutusData::Array(x) => {
-                let values = x
-                    .iter()
-                    .map(|d| CIP68Metadata(d.clone()).into_model())
-                    .collect::<Result<Vec<serde_json::Value>, _>>()?;
-
-                serde_json::Value::Array(values)
-            }
-
-            PlutusData::BigInt(x) => match x {
-                BigInt::Int(int) => match i64::try_from(*int.deref()) {
-                    Ok(num) => serde_json::Value::Number(num.into()),
-                    Err(_) => {
-                        let hex_str = hex::encode(i128::from(*int.deref()).to_be_bytes());
-                        serde_json::Value::String(hex_str)
-                    }
-                },
-                BigInt::BigUInt(bounded_bytes) => {
-                    serde_json::Value::String(hex::encode(bounded_bytes.as_slice()))
-                }
-                BigInt::BigNInt(bounded_bytes) => {
-                    serde_json::Value::String(hex::encode(bounded_bytes.as_slice()))
-                }
-            },
-
-            PlutusData::BoundedBytes(x) => match String::from_utf8(x.to_vec()) {
-                Ok(s) => serde_json::Value::String(s),
-                Err(_) => serde_json::Value::String(hex::encode(x.as_slice())),
-            },
-        })
+fn parse_cip67_label(label: &str) -> Option<u32> {
+    if label.len() != 8 || !(label.starts_with('0') && label.ends_with('0')) {
+        return None;
     }
+
+    let number_hex = &label[1..5];
+    let checksum_hex = &label[5..7];
+    let bytes = hex::decode(number_hex).ok()?;
+    let checksum = format!("{:02x}", CRC8_ALGO.checksum(&bytes));
+    if !checksum_hex.eq_ignore_ascii_case(&checksum) {
+        return None;
+    }
+
+    u32::from_str_radix(number_hex, 16).ok()
+}
+
+fn property_scheme_for_key(standard: Cip68TokenStandard, key: &str) -> Option<PropertyScheme> {
+    match standard {
+        Cip68TokenStandard::Ft => match key {
+            "name" => Some(bytestring_scheme()),
+            "description" => Some(bytestring_scheme()),
+            "ticker" => Some(bytestring_scheme()),
+            "url" => Some(bytestring_scheme()),
+            "logo" => Some(bytestring_scheme()),
+            "decimals" => Some(number_scheme()),
+            _ => None,
+        },
+        Cip68TokenStandard::Nft => match key {
+            "name" => Some(bytestring_scheme()),
+            "image" => Some(bytestring_scheme()),
+            "mediaType" => Some(bytestring_scheme()),
+            "description" => Some(bytestring_scheme()),
+            "files" => Some(array_scheme(FILES_ITEM_SCHEMA)),
+            _ => None,
+        },
+        Cip68TokenStandard::Rft => match key {
+            "name" => Some(bytestring_scheme()),
+            "image" => Some(bytestring_scheme()),
+            "mediaType" => Some(bytestring_scheme()),
+            "description" => Some(bytestring_scheme()),
+            "decimals" => Some(number_scheme()),
+            "files" => Some(array_scheme(FILES_ITEM_SCHEMA)),
+            _ => None,
+        },
+    }
+}
+
+fn map_schema_lookup(
+    schema: &'static [(&'static str, PropertyScheme)],
+    key: &str,
+) -> Option<PropertyScheme> {
+    schema
+        .iter()
+        .find(|(name, _)| *name == key)
+        .map(|(_, scheme)| *scheme)
+}
+
+fn convert_bytestring_value(value: &PlutusData) -> Option<serde_json::Value> {
+    match value {
+        PlutusData::BoundedBytes(bytes) => {
+            Some(serde_json::Value::String(to_utf8_or_hex(bytes.as_slice())))
+        }
+        PlutusData::Array(items) => {
+            let mut buffer = Vec::new();
+            for item in items.iter() {
+                match item {
+                    PlutusData::BoundedBytes(bytes) => buffer.extend_from_slice(bytes.as_slice()),
+                    _ => return None,
+                }
+            }
+            Some(serde_json::Value::String(to_utf8_or_hex(&buffer)))
+        }
+        _ => None,
+    }
+}
+
+fn convert_number_value(value: &PlutusData) -> Option<serde_json::Value> {
+    match value {
+        PlutusData::BigInt(BigInt::Int(int)) => {
+            let num = i64::try_from(*int.deref()).ok()?;
+            Some(serde_json::Value::Number(num.into()))
+        }
+        _ => None,
+    }
+}
+
+fn convert_map_value(
+    value: &PlutusData,
+    schema: &'static [(&'static str, PropertyScheme)],
+) -> Option<serde_json::Value> {
+    let PlutusData::Map(map) = value else {
+        return None;
+    };
+
+    let mut object = serde_json::Map::new();
+    for (key, value) in map.iter() {
+        let key_str = match key {
+            PlutusData::BoundedBytes(bytes) => to_utf8_or_hex(bytes.as_slice()),
+            PlutusData::BigInt(BigInt::Int(int)) => int.deref().to_string(),
+            _ => return None,
+        };
+        let value_schema = map_schema_lookup(schema, &key_str)?;
+        let converted = convert_datum_value(value, value_schema)?;
+        object.insert(key_str, converted);
+    }
+
+    Some(serde_json::Value::Object(object))
+}
+
+fn convert_datum_value(value: &PlutusData, schema: PropertyScheme) -> Option<serde_json::Value> {
+    match schema.kind {
+        PropertyKind::Bytestring => convert_bytestring_value(value),
+        PropertyKind::Number => convert_number_value(value),
+        PropertyKind::Array => {
+            let PlutusData::Array(items) = value else {
+                return None;
+            };
+            let items_schema = schema.items?;
+            let mut converted = Vec::new();
+            for item in items.iter() {
+                let value = convert_map_value(item, items_schema)?;
+                converted.push(value);
+            }
+            Some(serde_json::Value::Array(converted))
+        }
+    }
+}
+
+fn convert_metadata_key(key: &PlutusData) -> Result<String, StatusCode> {
+    Ok(match key {
+        PlutusData::BoundedBytes(bytes) => to_utf8_or_hex(bytes.as_slice()),
+        PlutusData::BigInt(BigInt::Int(int)) => int.deref().to_string(),
+        PlutusData::BigInt(BigInt::BigUInt(bytes)) => hex::encode(bytes.as_slice()),
+        PlutusData::BigInt(BigInt::BigNInt(bytes)) => hex::encode(bytes.as_slice()),
+        _ => encode_to_hex(key)?,
+    })
+}
+
+fn parse_cip68_metadata_map(
+    map: &[(PlutusData, PlutusData)],
+    standard: Cip68TokenStandard,
+) -> Result<HashMap<String, serde_json::Value>, StatusCode> {
+    let mut metadata = HashMap::new();
+    for (key, value) in map.iter() {
+        let key_str = convert_metadata_key(key)?;
+        if let Some(schema) = property_scheme_for_key(standard, &key_str) {
+            let parsed = convert_datum_value(value, schema);
+            let entry = parsed.unwrap_or(serde_json::Value::String(encode_to_hex(value)?));
+            metadata.insert(key_str, entry);
+        } else {
+            metadata.insert(key_str, serde_json::Value::String(encode_to_hex(value)?));
+        }
+    }
+
+    Ok(metadata)
 }
 
 struct AssetModelBuilder {
@@ -330,83 +497,168 @@ struct AssetModelBuilder {
 }
 
 impl AssetModelBuilder {
-    fn cip_68_reference_asset(&self) -> Option<String> {
+    fn cip_68_reference_asset(&self) -> Option<(String, Cip68TokenStandard)> {
         let policy_id = &self.unit[..56];
         let asset_name = &self.unit[56..];
 
         let label = asset_name.get(0..8)?;
-        if !(label.starts_with('0') && label.ends_with('0')) {
-            return None;
-        }
-
-        let number = u32::from_str_radix(&label[1..5], 16).ok()?;
+        let number = parse_cip67_label(label)?;
         let asset_name_without_label_prefix = &asset_name[8..];
 
-        CIP68Label::from_u32(number).and_then(|label| match label {
-            CIP68Label::ReferenceNft => None,
-            _ => Some(format!(
-                "{}{}{}",
-                policy_id,
-                CIP68Label::ReferenceNft.to_label(),
-                asset_name_without_label_prefix
-            )),
-        })
+        let label = CIP68Label::from_u32(number)?;
+        let standard = Cip68TokenStandard::from_label(label)?;
+        let reference = format!(
+            "{}{}{}",
+            policy_id,
+            CIP68Label::ReferenceNft.to_label(),
+            asset_name_without_label_prefix
+        );
+        Some((reference, standard))
     }
 
-    fn onchain_metadata(&self) -> Result<Option<OnchainMetadata>, StatusCode> {
-        let Some(EraCbor(era, cbor)) = &self.initial_tx else {
-            return Ok(None);
-        };
+    async fn onchain_metadata<D>(
+        &self,
+        domain: &Facade<D>,
+    ) -> Result<Option<OnchainMetadata>, StatusCode>
+    where
+        D: Domain + Clone + Send + Sync + 'static,
+    {
+        if let Some((ref_asset, standard)) = self.cip_68_reference_asset() {
+            let ref_asset_bytes =
+                hex::decode(&ref_asset).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            let utxoset = domain
+                .indexes()
+                .utxos_by_asset(&ref_asset_bytes)
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            let utxoset = utxoset.into_iter().collect_vec();
+            let mut utxos_with_slot = Vec::with_capacity(utxoset.len());
+            for txoref in utxoset {
+                let slot = domain
+                    .indexes()
+                    .slot_by_tx_hash(txoref.0.as_slice())
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                    .unwrap_or(0);
+                utxos_with_slot.push((slot, txoref));
+            }
+            utxos_with_slot.sort_by(|(slot_a, ref_a), (slot_b, ref_b)| {
+                slot_a
+                    .cmp(slot_b)
+                    .then_with(|| ref_a.0.as_slice().cmp(ref_b.0.as_slice()))
+                    .then_with(|| ref_a.1.cmp(&ref_b.1))
+            });
+            utxos_with_slot.reverse();
+            let utxoset = utxos_with_slot
+                .into_iter()
+                .map(|(_, txoref)| txoref)
+                .collect_vec();
 
-        let era = pallas::ledger::traverse::Era::try_from(*era)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        let tx =
-            MultiEraTx::decode_for_era(era, cbor).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            if !utxoset.is_empty() {
+                let utxos = domain
+                    .state()
+                    .get_utxos(utxoset)
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-        if let Some(ref_asset) = self.cip_68_reference_asset() {
-            let ref_asset_output = tx
-                .outputs()
-                .iter()
-                .find(|o| {
-                    o.value().assets().iter().any(|multi_asset| {
-                        multi_asset.assets().iter().any(|asset| {
-                            let mut unit = multi_asset.policy().to_vec();
-                            unit.extend(asset.name());
-                            let unit = hex::encode(unit);
-                            ref_asset == unit
-                        })
-                    })
-                })
-                .cloned();
+                let mut best_metadata: Option<OnchainMetadata> = None;
+                let mut best_len = 0usize;
 
-            if let Some(ref_asset_output) = ref_asset_output {
-                if let Some(datum_option) = ref_asset_output.datum() {
-                    match datum_option {
-                        pallas::ledger::primitives::conway::DatumOption::Hash(hash) => {
-                            if let Some(cbor_wrap) = tx.find_plutus_data(&hash) {
-                                let out =
-                                    OnchainMetadata::from_plutus_data(cbor_wrap.to_plutus_data())?;
-                                return Ok(out);
+                for (_txoref, eracbor) in utxos {
+                    let output = MultiEraOutput::decode(eracbor.0.try_into().unwrap(), &eracbor.1)
+                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+                    if let Some(datum_option) = output.datum() {
+                        match datum_option {
+                            pallas::ledger::primitives::conway::DatumOption::Hash(hash) => {
+                                if let Some(plutus_data) = datum_from_hash(domain, &hash).await? {
+                                    if let Some(out) =
+                                        OnchainMetadata::from_plutus_data(plutus_data, standard)?
+                                    {
+                                        let len = out.metadata.len();
+                                        if len > best_len {
+                                            best_len = len;
+                                            best_metadata = Some(out);
+                                        }
+                                    }
+                                }
                             }
-                        }
-                        pallas::ledger::primitives::conway::DatumOption::Data(cbor_wrap) => {
-                            let out =
-                                OnchainMetadata::from_plutus_data(cbor_wrap.to_plutus_data())?;
-                            return Ok(out);
-                        }
-                    };
+                            pallas::ledger::primitives::conway::DatumOption::Data(cbor_wrap) => {
+                                if let Some(out) = OnchainMetadata::from_plutus_data(
+                                    cbor_wrap.to_plutus_data(),
+                                    standard,
+                                )? {
+                                    let len = out.metadata.len();
+                                    if len > best_len {
+                                        best_len = len;
+                                        best_metadata = Some(out);
+                                    }
+                                }
+                            }
+                        };
+                    }
+                }
+
+                if best_metadata.is_some() {
+                    return Ok(best_metadata);
                 }
             }
         }
 
-        let out = tx
-            .metadata()
-            .find(721)
-            .map(|metadatum| OnchainMetadata::from_metadatum(&self.unit, metadatum.clone()))
-            .transpose()?
-            .flatten();
+        if let Some(EraCbor(era, cbor)) = &self.initial_tx {
+            let era = pallas::ledger::traverse::Era::try_from(*era)
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            let tx = MultiEraTx::decode_for_era(era, cbor)
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-        Ok(out)
+            if let Some((ref_asset, standard)) = self.cip_68_reference_asset() {
+                let ref_asset_output = tx
+                    .outputs()
+                    .iter()
+                    .find(|o| {
+                        o.value().assets().iter().any(|multi_asset| {
+                            multi_asset.assets().iter().any(|asset| {
+                                let mut unit = multi_asset.policy().to_vec();
+                                unit.extend(asset.name());
+                                let unit = hex::encode(unit);
+                                ref_asset == unit
+                            })
+                        })
+                    })
+                    .cloned();
+
+                if let Some(ref_asset_output) = ref_asset_output {
+                    if let Some(datum_option) = ref_asset_output.datum() {
+                        match datum_option {
+                            pallas::ledger::primitives::conway::DatumOption::Hash(hash) => {
+                                if let Some(cbor_wrap) = tx.find_plutus_data(&hash) {
+                                    let out = OnchainMetadata::from_plutus_data(
+                                        cbor_wrap.to_plutus_data(),
+                                        standard,
+                                    )?;
+                                    return Ok(out);
+                                }
+                            }
+                            pallas::ledger::primitives::conway::DatumOption::Data(cbor_wrap) => {
+                                let out = OnchainMetadata::from_plutus_data(
+                                    cbor_wrap.to_plutus_data(),
+                                    standard,
+                                )?;
+                                return Ok(out);
+                            }
+                        };
+                    }
+                }
+            }
+
+            let out = tx
+                .metadata()
+                .find(721)
+                .map(|metadatum| OnchainMetadata::from_metadatum(&self.unit, metadatum.clone()))
+                .transpose()?
+                .flatten();
+
+            return Ok(out);
+        }
+
+        Ok(None)
     }
 
     async fn offchain_metadata(&self, asset: &str) -> Result<Option<OffchainMetadata>, StatusCode> {
@@ -445,11 +697,14 @@ impl AssetModelBuilder {
         Ok(Some(metadata.into()))
     }
 
-    async fn into_model(self) -> Result<Asset, StatusCode> {
+    async fn into_model<D>(self, domain: &Facade<D>) -> Result<Asset, StatusCode>
+    where
+        D: Domain + Clone + Send + Sync + 'static,
+    {
         let policy = self.subject[..28].to_vec();
         let asset = self.subject[28..].to_vec();
 
-        let metadata = self.onchain_metadata()?;
+        let metadata = self.onchain_metadata(domain).await?;
 
         let onchain_metadata_standard = Some(metadata.as_ref().and_then(|m| m.version));
         let onchain_metadata = metadata.as_ref().map(|m| m.metadata.clone());
@@ -518,7 +773,7 @@ where
         registry_url,
     };
 
-    Ok(Json(model.into_model().await?))
+    Ok(Json(model.into_model(&domain).await?))
 }
 
 pub async fn by_subject_addresses<D>(

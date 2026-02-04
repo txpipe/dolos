@@ -721,7 +721,7 @@ pub fn build_stake_snapshots_response<D: Domain>(
         .union(&set_active_pools)
         .cloned()
         .collect();
-    all_pools.extend(go_active_pools.into_iter());
+    all_pools.extend(go_active_pools);
 
     let mark_total = mark_total_active;
     let set_total = set_total_active;
