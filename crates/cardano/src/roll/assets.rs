@@ -1,4 +1,3 @@
-use crc::{Crc, CRC_8_SMBUS};
 use dolos_core::{ChainError, NsKey};
 use pallas::crypto::hash::Hash;
 use pallas::ledger::traverse::{MultiEraBlock, MultiEraOutput, MultiEraPolicyAssets, MultiEraTx};
@@ -6,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use tracing::trace;
 
 use super::WorkDeltas;
+use crate::cip68::parse_cip67_label_from_asset_name;
 use crate::model::FixedNamespace as _;
 use crate::{model::AssetState, roll::BlockVisitor};
 
@@ -104,29 +104,6 @@ impl dolos_core::EntityDelta for MetadataTxUpdate {
     }
 }
 
-const CRC8_ALGO: Crc<u8> = Crc::<u8>::new(&CRC_8_SMBUS);
-
-fn parse_cip67_label(asset_name: &[u8]) -> Option<u32> {
-    if asset_name.len() < 4 {
-        return None;
-    }
-
-    let label_hex = hex::encode(&asset_name[..4]);
-    if !label_hex.starts_with('0') || !label_hex.ends_with('0') {
-        return None;
-    }
-
-    let number_hex = &label_hex[1..5];
-    let checksum_hex = &label_hex[5..7];
-    let bytes = hex::decode(number_hex).ok()?;
-    let checksum = format!("{:02x}", CRC8_ALGO.checksum(&bytes));
-    if !checksum_hex.eq_ignore_ascii_case(&checksum) {
-        return None;
-    }
-
-    u32::from_str_radix(number_hex, 16).ok()
-}
-
 #[derive(Default, Clone)]
 pub struct AssetStateVisitor;
 
@@ -171,7 +148,7 @@ impl BlockVisitor for AssetStateVisitor {
         for multi_asset in output.value().assets() {
             let policy = multi_asset.policy();
             for asset in multi_asset.assets() {
-                let Some(label) = parse_cip67_label(asset.name()) else {
+                let Some(label) = parse_cip67_label_from_asset_name(asset.name()) else {
                     continue;
                 };
 
