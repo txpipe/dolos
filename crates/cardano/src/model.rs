@@ -606,6 +606,7 @@ pub struct AssetState {
     pub mint_tx_count: u64,
 
     #[n(4)]
+    #[cbor(default)]
     pub metadata_tx: Option<Hash<32>>,
 }
 
