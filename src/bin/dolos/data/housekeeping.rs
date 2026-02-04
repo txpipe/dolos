@@ -33,7 +33,7 @@ pub async fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
         rounds += 1;
 
         if let Some(max) = args.max_rounds {
-            done = rounds >= max;
+            done = done || rounds >= max;
         }
     }
 
