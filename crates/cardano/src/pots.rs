@@ -170,6 +170,12 @@ pub struct PotDelta {
     #[n(21)]
     #[cbor(default)]
     pub mark_protocol_version: u16,
+
+    /// Unredeemed AVVM UTxOs reclaimed at the Shelley→Allegra boundary.
+    /// Value is moved from UTxO pot to reserves.
+    #[n(23)]
+    #[cbor(default)]
+    pub avvm_reclamation: Lovelace,
 }
 
 impl PotDelta {
@@ -198,6 +204,7 @@ impl PotDelta {
             proposal_invalid_refunds: 0,
             deposit_per_account: None,
             deposit_per_pool: None,
+            avvm_reclamation: 0,
         }
     }
 
@@ -391,6 +398,11 @@ pub fn apply_shelley_delta(mut pots: Pots, incentives: &EpochIncentives, delta: 
     // utxos pot
     pots.utxos += delta.produced_utxos;
     pots.utxos -= delta.consumed_utxos;
+
+    // AVVM reclamation at Shelley→Allegra boundary: unredeemed AVVM UTxOs
+    // are removed from the UTxO set and their value returned to reserves.
+    pots.utxos -= delta.avvm_reclamation;
+    pots.reserves += delta.avvm_reclamation;
 
     // pool count
     pots.pool_count += delta.pool_deposit_count;

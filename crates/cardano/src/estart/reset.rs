@@ -172,6 +172,7 @@ pub fn define_new_pots(ctx: &super::WorkContext) -> Pots {
             .mark()
             .map(|p| p.protocol_major_or_default())
             .unwrap_or_else(|| epoch.pparams.unwrap_live().protocol_major_or_default()),
+        avvm_reclamation: ctx.avvm_reclamation,
     };
 
     tracing::warn!(
@@ -191,6 +192,12 @@ pub fn define_new_pots(ctx: &super::WorkContext) -> Pots {
         pool_invalid_refund_count = end.pool_invalid_refund_count,
         proposal_invalid_refunds = end.proposal_invalid_refunds,
         treasury_donations = rolling.treasury_donations,
+        produced_utxos = delta.produced_utxos,
+        consumed_utxos = delta.consumed_utxos,
+        initial_utxos = epoch.initial_pots.utxos,
+        withdrawals = delta.withdrawals,
+        gathered_fees = delta.gathered_fees,
+        avvm_reclamation = delta.avvm_reclamation,
         protocol_version = delta.protocol_version,
         mark_protocol_version = delta.mark_protocol_version,
         "pot delta components for ESTART"

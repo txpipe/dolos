@@ -461,6 +461,22 @@ mod fixtures {
         pub const STAKE: &str = include_str!("fixtures/mainnet-235/stake-233.csv");
         pub const REWARDS: &str = include_str!("fixtures/mainnet-235/rewards.csv");
     }
+    pub mod mainnet_236 {
+        pub const EPOCHS: &str = include_str!("fixtures/mainnet-236/epochs.csv");
+        pub const PPARAMS: &str = include_str!("fixtures/mainnet-236/pparams.csv");
+        pub const ERAS: &str = include_str!("fixtures/mainnet-236/eras.csv");
+        pub const DELEGATION: &str = include_str!("fixtures/mainnet-236/delegation-234.csv");
+        pub const STAKE: &str = include_str!("fixtures/mainnet-236/stake-234.csv");
+        pub const REWARDS: &str = include_str!("fixtures/mainnet-236/rewards.csv");
+    }
+    pub mod mainnet_238 {
+        pub const EPOCHS: &str = include_str!("fixtures/mainnet-238/epochs.csv");
+        pub const PPARAMS: &str = include_str!("fixtures/mainnet-238/pparams.csv");
+        pub const ERAS: &str = include_str!("fixtures/mainnet-238/eras.csv");
+        pub const DELEGATION: &str = include_str!("fixtures/mainnet-238/delegation-236.csv");
+        pub const STAKE: &str = include_str!("fixtures/mainnet-238/stake-236.csv");
+        pub const REWARDS: &str = include_str!("fixtures/mainnet-238/rewards.csv");
+    }
     pub mod mainnet_240 {
         pub const EPOCHS: &str = include_str!("fixtures/mainnet-240/epochs.csv");
         pub const PPARAMS: &str = include_str!("fixtures/mainnet-240/pparams.csv");
@@ -989,6 +1005,38 @@ fn test_mainnet_235() {
         fixtures::mainnet_235::DELEGATION,
         fixtures::mainnet_235::STAKE,
         fixtures::mainnet_235::REWARDS,
+    )
+    .unwrap();
+}
+
+#[test]
+fn test_mainnet_236() {
+    init_tracing();
+    run_epoch_pots_test(
+        "mainnet",
+        236,
+        fixtures::mainnet_236::EPOCHS,
+        fixtures::mainnet_236::PPARAMS,
+        fixtures::mainnet_236::ERAS,
+        fixtures::mainnet_236::DELEGATION,
+        fixtures::mainnet_236::STAKE,
+        fixtures::mainnet_236::REWARDS,
+    )
+    .unwrap();
+}
+
+#[test]
+fn test_mainnet_238() {
+    init_tracing();
+    run_epoch_pots_test(
+        "mainnet",
+        238,
+        fixtures::mainnet_238::EPOCHS,
+        fixtures::mainnet_238::PPARAMS,
+        fixtures::mainnet_238::ERAS,
+        fixtures::mainnet_238::DELEGATION,
+        fixtures::mainnet_238::STAKE,
+        fixtures::mainnet_238::REWARDS,
     )
     .unwrap();
 }

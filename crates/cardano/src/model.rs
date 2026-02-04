@@ -1583,6 +1583,12 @@ impl EraTransition {
     pub fn entering_shelley(&self) -> bool {
         self.prev_version < 2 && self.new_version == 2
     }
+
+    /// Check if this boundary is transitioning from Shelley to Allegra.
+    /// At this boundary, unredeemed AVVM UTxOs are reclaimed to reserves.
+    pub fn entering_allegra(&self) -> bool {
+        self.prev_version == 2 && self.new_version == 3
+    }
 }
 
 entity_boilerplate!(EpochState, "epochs");
