@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     estart::{AccountId, PoolId, WorkContext},
     pots::{apply_delta, PotDelta, Pots},
+    utils::network_from_genesis,
     AccountState, CardanoDelta, EpochState, EraTransition, FixedNamespace as _, PoolState,
     CURRENT_EPOCH_KEY,
 };
@@ -206,6 +207,11 @@ pub fn define_new_pots(ctx: &super::WorkContext) -> Pots {
     );
 
     let pots = apply_delta(epoch.initial_pots.clone(), &end.epoch_incentives, &delta);
+    let pots = crate::hacks::pots::adjust_pots(
+        network_from_genesis(&ctx.genesis),
+        ctx.starting_epoch_no(),
+        pots,
+    );
 
     tracing::debug!(
         rewards = pots.rewards,

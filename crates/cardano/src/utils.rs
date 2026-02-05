@@ -18,8 +18,9 @@ pub fn network_from_genesis(genesis: &Genesis) -> Network {
 /// guarantee formula from consensus to calculate the latest slot that can be
 /// considered immutable.
 pub fn mutable_slots(genesis: &Genesis) -> u64 {
-    ((3.0 * genesis.byron.protocol_consts.k as f32) / (genesis.shelley.active_slots_coeff.unwrap()))
-        as u64
+    let k = genesis.byron.protocol_consts.k as f64;
+    let f = genesis.shelley.active_slots_coeff.unwrap() as f64;
+    ((3.0 * k) / f).ceil() as u64
 }
 
 /// Computes the amount of mutable slots in chain.
@@ -37,8 +38,9 @@ pub fn stability_window(genesis: &Genesis) -> u64 {
 /// Similar to `mutable_slots` but with 4 instead of 3 as the constant. See the following issue for
 /// refference: https://github.com/IntersectMBO/cardano-ledger/issues/1914
 pub fn randomness_stability_window(genesis: &Genesis) -> u64 {
-    ((4.0 * genesis.byron.protocol_consts.k as f32) / (genesis.shelley.active_slots_coeff.unwrap()))
-        as u64
+    let k = genesis.byron.protocol_consts.k as f64;
+    let f = genesis.shelley.active_slots_coeff.unwrap() as f64;
+    ((4.0 * k) / f).ceil() as u64
 }
 
 /// Get the window of slots used to calculate eta_h for epoch nonce calculation.
