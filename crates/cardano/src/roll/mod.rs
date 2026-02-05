@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use dolos_core::{
     config::{CardanoConfig, TrackConfig},
-    ChainError, Domain, Genesis, InvariantViolation, StateError, TxoRef,
+    ChainError, Domain, Genesis, InvariantViolation, StateError, TxOrder, TxoRef,
 };
 use pallas::{
     codec::utils::KeepRaw,
@@ -111,6 +111,7 @@ pub trait BlockVisitor {
         deltas: &mut WorkDeltas,
         block: &MultiEraBlock,
         tx: &MultiEraTx,
+        order: &TxOrder,
         cert: &MultiEraCert,
     ) -> Result<(), ChainError> {
         Ok(())
@@ -266,7 +267,7 @@ impl<'a> DeltaBuilder<'a> {
             self.protocol,
         );
 
-        for tx in block.txs() {
+        for (order, tx) in block.txs().iter().enumerate() {
             visit_all!(self, deltas, visit_tx, block, &tx, &self.utxos);
 
             for input in tx.consumes() {
@@ -299,7 +300,7 @@ impl<'a> DeltaBuilder<'a> {
             }
 
             for cert in tx.certs() {
-                visit_all!(self, deltas, visit_cert, block, &tx, &cert,);
+                visit_all!(self, deltas, visit_cert, block, &tx, &order, &cert,);
             }
 
             for (account, amount) in tx.withdrawals().collect::<Vec<_>>() {
@@ -307,7 +308,7 @@ impl<'a> DeltaBuilder<'a> {
             }
 
             if let Some(update) = tx.update() {
-                visit_all!(self, deltas, visit_update, block, Some(&tx), &update);
+                visit_all!(self, deltas, visit_update, block, Some(tx), &update);
             }
 
             for datum in tx.plutus_data() {

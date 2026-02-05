@@ -16,7 +16,7 @@ use blockfrost_openapi::models::{
 
 use dolos_cardano::{
     indexes::{AsyncCardanoQueryExt, CardanoIndexExt, SlotOrder},
-    model::AccountState,
+    model::{AccountState, DRepState},
     pallas_extras, ChainSummary, RewardLog,
 };
 use dolos_core::{ArchiveStore as _, Domain, EntityKey};
@@ -152,6 +152,7 @@ pub async fn by_stake<D>(
 ) -> Result<Json<AccountContent>, StatusCode>
 where
     Option<AccountState>: From<D::Entity>,
+    Option<DRepState>: From<D::Entity>,
     D: Domain + Clone + Send + Sync + 'static,
 {
     let account_key = parse_account_key_param(&stake_address)?;

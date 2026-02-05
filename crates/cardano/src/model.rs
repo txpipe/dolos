@@ -5,6 +5,7 @@ use std::{
 
 use dolos_core::{
     BlockSlot, ChainError, EntityKey, EntityValue, Namespace, NamespaceType, NsKey, StateSchema,
+    TxOrder,
 };
 use pallas::{
     codec::minicbor::{self, Decode, Encode},
@@ -498,7 +499,14 @@ pub enum PoolDelegation {
     NotDelegated,
 }
 
-pub type DRepDelegation = Option<DRep>;
+#[derive(Debug, Clone, PartialEq, Eq, Decode, Encode, Serialize, Deserialize)]
+pub enum DRepDelegation {
+    #[n(0)]
+    Delegated(#[n(0)] DRep),
+
+    #[n(1)]
+    NotDelegated,
+}
 
 impl TransitionDefault for PoolDelegation {
     fn next_value(current: Option<&Self>) -> Option<Self> {
@@ -527,7 +535,7 @@ pub struct AccountState {
     pub drep: EpochValue<DRepDelegation>,
 
     #[n(4)]
-    pub vote_delegated_at: Option<BlockSlot>,
+    pub vote_delegated_at: Option<(BlockSlot, TxOrder)>,
 
     #[n(5)]
     pub deregistered_at: Option<u64>,
@@ -587,7 +595,10 @@ impl AccountState {
     }
 
     pub fn delegated_drep_at(&self, epoch: Epoch) -> Option<&DRep> {
-        self.drep.snapshot_at(epoch).and_then(|x| x.as_ref())
+        self.drep.snapshot_at(epoch).and_then(|x| match x {
+            DRepDelegation::Delegated(drep) => Some(drep),
+            _ => None,
+        })
     }
 }
 
@@ -1581,7 +1592,7 @@ pub fn drep_to_entity_key(value: &DRep) -> EntityKey {
 #[derive(Debug, Encode, Decode, Clone)]
 pub struct DRepState {
     #[n(0)]
-    pub initial_slot: Option<u64>,
+    pub registered_at: Option<(BlockSlot, TxOrder)>,
 
     #[n(1)]
     pub voting_power: u64,
@@ -1590,7 +1601,7 @@ pub struct DRepState {
     pub last_active_slot: Option<u64>,
 
     #[n(3)]
-    pub unregistered_at: Option<BlockSlot>,
+    pub unregistered_at: Option<(BlockSlot, TxOrder)>,
 
     #[n(4)]
     pub expired: bool,
@@ -1605,7 +1616,7 @@ pub struct DRepState {
 impl DRepState {
     pub fn new(identifier: DRep) -> Self {
         Self {
-            initial_slot: None,
+            registered_at: None,
             voting_power: 0,
             last_active_slot: None,
             unregistered_at: None,
