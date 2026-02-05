@@ -7,7 +7,7 @@ Total Failures: **23**
 | Category | Count | Status |
 |----------|-------|--------|
 | Addresses | 8 | Pending |
-| Pools | 6 | Mixed (4 Won't Fix, 2 Pending) |
+| Pools | 6 | Mixed (3 Won't Fix, 3 Pending) |
 | Accounts | 4 | Pending |
 | Assets | 4 | Mixed (3 Won't Fix, 1 Pending) |
 | Txs | 1 | Pending |
@@ -55,19 +55,6 @@ The following failures are documented but will not be addressed in this release:
 - `pools/:pool_id/history BF pool history`
 
 **Error:** `active_epoch` value mismatch and pool history data format issues
-
-**Reason:** Not part of endpoints included in scope of work for this release. Will be addressed in open-source effort after delivery date.
-
-**Priority:** Low
-
----
-
-### pools/:pool_id/delegators Endpoint
-
-**Affected Tests:**
-- `pools/:pool_id/delegators BF pool`
-
-**Error:** Delegator data mismatch
 
 **Reason:** Not part of endpoints included in scope of work for this release. Will be addressed in open-source effort after delivery date.
 
@@ -158,6 +145,10 @@ The following failures are documented but will not be addressed in this release:
 - **Endpoint:** `pools/extended?count=1&page=1`
 - **Error:** Response code 404 (Not Found) or data mismatch
 
+**Test:** pools/:pool_id/delegators BF pool
+- **Endpoint:** `pools/pool1wnf630f6gv92ues5gq8dl2wuxe0hc6trkj8w30jvxhcr5y3w7jj/delegators`
+- **Error:** Delegator data mismatch
+
 ---
 
 ### TXS
@@ -187,11 +178,12 @@ This suggests a performance/caching issue with the address transaction streaming
 
 **Note:** Asset history (assets/:asset/history) and policy (assets/policy/:policy_id) endpoints are documented as Won't Fix (out of scope for this release).
 
-### Pools (2 pending failures)
+### Pools (3 pending failures)
 - pools/extended endpoint 404 errors (needs to be fixed - in scope)
+- pools/:pool_id/delegators data mismatch (needs to be fixed - in scope)
 - Pool history format issues (won't fix - out of scope)
 
-**Note:** pools/:pool_id/updates, pools/:pool_id/metadata, pools/:pool_id/history, and pools/:pool_id/delegators are documented as Won't Fix (out of scope for this release).
+**Note:** pools/:pool_id/updates, pools/:pool_id/metadata, and pools/:pool_id/history are documented as Won't Fix (out of scope for this release).
 
 ### Txs (1 failure)
 - Transaction metadata format issue
@@ -208,9 +200,9 @@ This suggests a performance/caching issue with the address transaction streaming
 6. **Priority 6:** CIP68 metadata handling (1 failure)
 
 **Note:** The following endpoints are out of scope and documented as Won't Fix:
-- pools/:pool_id/updates, pools/:pool_id/metadata, pools/:pool_id/history, pools/:pool_id/delegators (4 endpoints)
+- pools/:pool_id/updates, pools/:pool_id/metadata, pools/:pool_id/history (3 endpoints)
 - assets/:asset/history, assets/policy/:policy_id (2 endpoints)
 
-**Total Priority 1-3 (Critical - In Scope):** 11 failures  
-**Total Priority 4-6 (Medium - In Scope):** 4 failures  
-**Total Won't Fix (Out of Scope):** 6 endpoints
+**Total Priority 1-3 (Critical - In Scope):** 11 failures
+**Total Priority 4-6 (Medium - In Scope):** 4 failures
+**Total Won't Fix (Out of Scope):** 5 endpoints
