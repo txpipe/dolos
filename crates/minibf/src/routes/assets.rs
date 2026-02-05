@@ -13,11 +13,12 @@ use blockfrost_openapi::models::{
 };
 use dolos_cardano::{
     cip68::{cip_68_reference_asset, encode_to_hex, parse_cip68_metadata_map, Cip68TokenStandard},
-    indexes::{AsyncCardanoQueryExt, CardanoIndexExt},
+    indexes::{AsyncCardanoQueryExt, CardanoIndexExt, SlotOrder},
     model::AssetState,
     ChainSummary,
 };
 use dolos_core::{BlockSlot, Domain, EraCbor, IndexStore as _, StateStore as _};
+use futures_util::StreamExt;
 use itertools::Itertools;
 use pallas::{
     codec::minicbor,
@@ -670,23 +671,23 @@ where
 
     let subject = hex::decode(&subject).map_err(|_| Error::InvalidAsset)?;
     let end_slot = domain.get_tip_slot()?;
-    let blocks = domain
-        .query()
-        .blocks_by_asset(&subject, 0, end_slot)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let stream = domain.query().blocks_by_asset_stream(
+        &subject,
+        0,
+        end_slot,
+        SlotOrder::from(pagination.order),
+    );
 
     let chain = domain
         .get_chain_summary()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let mut blocks = blocks;
-    if matches!(pagination.order, Order::Desc) {
-        blocks.reverse();
-    }
-
     let mut matches = Vec::new();
-    for (_slot, block) in blocks {
+    let mut stream = Box::pin(stream);
+
+    while let Some(res) = stream.next().await {
+        let (_slot, block) = res.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
         let Some(block) = block else {
             continue;
         };

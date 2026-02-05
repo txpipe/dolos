@@ -207,7 +207,8 @@ pub async fn eras<D: Domain>(
         tip,
     };
 
-    builder.into_response()
+    let model = builder.into_model()?;
+    Ok(Json(model))
 }
 
 struct NetworkModelBuilder<'a> {
@@ -247,7 +248,7 @@ impl<'a> IntoModel<Network> for NetworkModelBuilder<'a> {
     }
 }
 
-pub async fn naked<D: Domain>(State(domain): State<Facade<D>>) -> Result<Json<Network>, StatusCode>
+fn compute_network_sync<D: Domain>(domain: Facade<D>) -> Result<Network, StatusCode>
 where
     Option<EpochState>: From<D::Entity>,
 {
@@ -278,5 +279,30 @@ where
         active_stake,
     };
 
-    builder.into_response()
+    builder.into_model()
+}
+
+pub async fn naked<D>(State(domain): State<Facade<D>>) -> Result<Json<Network>, StatusCode>
+where
+    Option<EpochState>: From<D::Entity>,
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    const TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+    let domain_clone = domain.clone();
+    let fetcher = move || compute_network_sync(domain_clone);
+
+    let res = domain
+        .cache
+        .get_or_fetch_blocking(TTL, fetcher)
+        .await
+        .map_err(|e| match e {
+            crate::cache::CacheError::Inner(status) => status,
+            crate::cache::CacheError::JoinError(e) => {
+                tracing::error!("cache refresh task failed: {:?}", e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+        })?;
+
+    Ok(Json(res))
 }

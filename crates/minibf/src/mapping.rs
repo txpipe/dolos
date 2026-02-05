@@ -521,6 +521,7 @@ pub struct TxModelBuilder<'a> {
     consumed_deps: HashMap<TxoRef, TxHash>,
     pool_metadata: HashMap<PoolHash, PoolOffchainMetadata>,
     deposit: Option<i64>,
+    affected_pools: HashMap<Hash<28>, PoolState>,
 }
 
 impl<'a> TxModelBuilder<'a> {
@@ -537,6 +538,7 @@ impl<'a> TxModelBuilder<'a> {
             pparams: None,
             network: None,
             deps: HashMap::new(),
+            affected_pools: HashMap::new(),
             consumed_deps: HashMap::new(),
             pool_metadata: HashMap::new(),
             deposit: None,
@@ -581,6 +583,44 @@ impl<'a> TxModelBuilder<'a> {
             consumed_deps,
             ..self
         }
+    }
+
+    pub async fn set_affected_pools<D>(&mut self, facade: &Facade<D>) -> Result<(), StatusCode>
+    where
+        D: Domain + Clone + Send + Sync + 'static,
+        Option<PoolState>: From<D::Entity>,
+    {
+        self.affected_pools = self
+            .tx()?
+            .certs()
+            .iter()
+            .filter_map(|cert| match cert {
+                MultiEraCert::AlonzoCompatible(cow) => {
+                    if let AlonzoCert::PoolRegistration { operator, .. } = *(**cow).clone() {
+                        Some(operator)
+                    } else {
+                        None
+                    }
+                }
+                MultiEraCert::Conway(cow) => {
+                    if let ConwayCert::PoolRegistration { operator, .. } = *(**cow).clone() {
+                        Some(operator)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            })
+            .filter_map(|operator| {
+                match facade.read_cardano_entity::<PoolState>(operator.as_slice()) {
+                    Ok(Some(state)) => Some(Ok((operator, state))),
+                    Ok(None) => None,
+                    Err(_) => Some(Err(StatusCode::INTERNAL_SERVER_ERROR)),
+                }
+            })
+            .collect::<Result<_, _>>()?;
+
+        Ok(())
     }
 
     pub async fn fetch_pool_metadata(&mut self) -> Result<(), StatusCode> {
@@ -704,7 +744,7 @@ impl<'a> TxModelBuilder<'a> {
         Ok(())
     }
 
-    fn tx(&self) -> Result<MultiEraTx<'_>, StatusCode> {
+    pub fn tx(&self) -> Result<MultiEraTx<'_>, StatusCode> {
         let tx = self
             .block
             .txs()
@@ -1527,14 +1567,29 @@ struct PoolUpdateModelBuilder {
     cert_index: usize,
     network: Network,
     current_epoch: i32,
+    is_registration: bool,
 }
 
 impl PoolUpdateModelBuilder {
+    pub fn extract_operator(cert: &MultiEraCert) -> Option<Hash<28>> {
+        match cert {
+            MultiEraCert::AlonzoCompatible(cow) => match *(**cow).clone() {
+                AlonzoCert::PoolRegistration { operator, .. } => Some(operator),
+                _ => None,
+            },
+            MultiEraCert::Conway(cow) => match *(**cow).clone() {
+                ConwayCert::PoolRegistration { operator, .. } => Some(operator),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
     fn new_from_alonzo(
         cert: AlonzoCert,
         cert_index: usize,
         network: Network,
         current_epoch: i32,
+        is_registration: bool,
     ) -> Option<Self> {
         let AlonzoCert::PoolRegistration {
             operator,
@@ -1565,6 +1620,7 @@ impl PoolUpdateModelBuilder {
             network,
             current_epoch,
             offchain_pool_metadata: None,
+            is_registration,
         })
     }
 
@@ -1573,6 +1629,7 @@ impl PoolUpdateModelBuilder {
         cert_index: usize,
         network: Network,
         current_epoch: i32,
+        is_registration: bool,
     ) -> Option<Self> {
         let ConwayCert::PoolRegistration {
             operator,
@@ -1603,6 +1660,7 @@ impl PoolUpdateModelBuilder {
             network,
             current_epoch,
             offchain_pool_metadata: None,
+            is_registration,
         })
     }
 
@@ -1611,14 +1669,23 @@ impl PoolUpdateModelBuilder {
         cert_index: usize,
         network: Network,
         current_epoch: i32,
+        is_registration: bool,
     ) -> Option<Self> {
         match cert {
-            MultiEraCert::AlonzoCompatible(cow) => {
-                Self::new_from_alonzo((**cow).clone(), cert_index, network, current_epoch)
-            }
-            MultiEraCert::Conway(cow) => {
-                Self::new_from_conway((**cow).clone(), cert_index, network, current_epoch)
-            }
+            MultiEraCert::AlonzoCompatible(cow) => Self::new_from_alonzo(
+                (**cow).clone(),
+                cert_index,
+                network,
+                current_epoch,
+                is_registration,
+            ),
+            MultiEraCert::Conway(cow) => Self::new_from_conway(
+                (**cow).clone(),
+                cert_index,
+                network,
+                current_epoch,
+                is_registration,
+            ),
             _ => None,
         }
     }
@@ -1679,7 +1746,7 @@ impl IntoModel<TxContentPoolCertsInner> for PoolUpdateModelBuilder {
                 .try_collect()?,
             cert_index: self.cert_index as i32,
             pool_id: bech32_pool(self.operator.as_slice())?,
-            active_epoch: self.current_epoch + 2,
+            active_epoch: self.current_epoch + if self.is_registration { 2 } else { 3 },
         })
     }
 }
@@ -1702,7 +1769,21 @@ impl IntoModel<Vec<TxContentPoolCertsInner>> for TxModelBuilder<'_> {
             .into_iter()
             .enumerate()
             .filter_map(|(cert_index, cert)| {
-                let builder = PoolUpdateModelBuilder::new(cert, cert_index, network, epoch as i32);
+                let is_registration = PoolUpdateModelBuilder::extract_operator(&cert)
+                    .map(|operator| {
+                        self.affected_pools
+                            .get(&operator)
+                            .map(|state| state.register_slot == self.block.slot())
+                            .unwrap_or(true)
+                    })
+                    .unwrap_or(true);
+                let builder = PoolUpdateModelBuilder::new(
+                    cert,
+                    cert_index,
+                    network,
+                    epoch as i32,
+                    is_registration,
+                );
                 builder.map(|mut x| {
                     x.with_offchain(self.pool_metadata.get(&x.operator).cloned());
                     x
