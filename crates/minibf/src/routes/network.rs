@@ -282,10 +282,10 @@ where
     builder.into_model()
 }
 
-pub async fn naked<D: Domain>(State(domain): State<Facade<D>>) -> Result<Json<Network>, StatusCode>
+pub async fn naked<D>(State(domain): State<Facade<D>>) -> Result<Json<Network>, StatusCode>
 where
     Option<EpochState>: From<D::Entity>,
-    D: Clone + Send + Sync + 'static,
+    D: Domain + Clone + Send + Sync + 'static,
 {
     const TTL: std::time::Duration = std::time::Duration::from_secs(30);
 
