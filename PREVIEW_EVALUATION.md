@@ -1,123 +1,91 @@
-# Preview Conformance Failures - Evaluation Report
+# Preview Conformance Evaluation
 
 ## Executive Summary
 
-Total Failures: **10**
+| Category | In Scope | Passing | Failing | Won't Fix |
+|----------|----------|---------|---------|-----------|
+| accounts | 33 | 31 | 2 | 0 |
+| addresses | 82 | 82 | 0 | 0 |
+| assets | 24 | 24 | 0 | 0 |
+| blocks | 69 | 69 | 0 | 0 |
+| epochs | 3 | 2 | 1 | 0 |
+| genesis | 1 | 1 | 0 | 0 |
+| governance | 6 | 6 | 0 | 0 |
+| metadata | 18 | 18 | 0 | 0 |
+| network | 2 | 1 | 1 | 0 |
+| pools | 15 | 9 | 6 | 0 |
+| txs | 33 | 33 | 0 | 0 |
+| **Total** | **286** | **276** | **10** | **0** |
 
-| Category | Count | Status |
-|----------|-------|--------|
-| Pools | 6 | Mixed (3 Won't Fix, 3 Pending) |
-| Accounts | 2 | Pending |
-| Epochs | 1 | Pending |
-| Network | 1 | Pending |
-
-**Legend:**
-- **Pending**: Requires fix (Mapping or Data Model).
-- **Won't Fix**: Documented but out of scope.
-
----
-
+**Passing Rate:** 96.5% (276/286)
 ## Won't Fix
 
-The following failures are documented but will not be addressed in this release:
+*No endpoints currently marked as Won't Fix.*
 
-### pools/:pool_id/updates Endpoint
+To add Won't Fix items, edit the `preview_wontfix.json` file.
 
-**Affected Tests:**
-- `pools/:pool_id/updates metadata mismatch - status field`
-
-**Error:** `status` field mismatch - expected "registered" vs "active"
-
-**Reason:** Not part of endpoints included in scope of work for this release. Will be addressed in open-source effort after delivery date.
-
-**Priority:** Low
-
----
-
-### pools/:pool_id/metadata Endpoint
-
-**Affected Tests:**
-- `pools/:pool_id/metadata offchain metadata - homepage field`
-
-**Error:** `homepage` field has unexpected value format
-
-**Reason:** Not part of endpoints included in scope of work for this release. Will be addressed in open-source effort after delivery date.
-
-**Priority:** Low
-
----
-
-### pools/:pool_id/history Endpoint
-
-**Affected Tests:**
-- `pools/:pool_id/history active_epoch` (epoch boundary issues)
-
-**Error:** `active_epoch` value mismatch (off by one epoch)
-
-**Reason:** Not part of endpoints included in scope of work for this release. Will be addressed in open-source effort after delivery date.
-
-**Priority:** Low
-
----
-
-## Outstanding Failures (Preview)
+## Outstanding Failures (Needs Fix)
 
 ### ACCOUNTS
 
-**Test:** accounts/:stake_address retired drep
-- **Endpoint:** `accounts/stake_test1uq70zpxr7jdqxdlj895x9lvnwn9lrcknwpx8cswlld7x76gtzvrjp`
-- **Error:** `drep_id` field should be null for retired DRep but shows a value
+#### /accounts/{stake_address} (2 failures)
 
-**Test:** accounts/:stake_address when DRep is retired all delegators to that DRep should have their drep_id cleared
-- **Endpoint:** `accounts/stake_test1uq70zpxr7jdqxdlj895x9lvnwn9lrcknwpx8cswlld7x76gtzvrjp`
-- **Error:** DRep clearing logic not implemented
+**URL:** `accounts/stake_test1uq3f3kt99hu4e3vt7cnx6uya88qjjw52yexh56qcknqkj9qa0awyd`
+- **Test:** accounts/:stake_address when DRep is retired all delegators to that DRep should have their drep_id cleared.
+- **Issue:** DRep clearing logic not implemented - drep_id should be null for retired DReps
+
+**URL:** `accounts/stake_test1upvjras0sny422fesgr9yhq0cjnqjmzk8as08qsjvlr37ng796phq`
+- **Test:** accounts/:stake_address retire and register drep after voting. should have their drep_id cleared.
+- **Issue:** DRep clearing logic not implemented - drep_id should be null for retired DReps
 
 ---
 
 ### EPOCHS
 
-**Test:** epochs/:number/parameters epoch 300 params
-- **Endpoint:** `epochs/300/parameters`
-- **Error:** `nonce` field is empty (`""`) but expected to have a value
+#### /epochs/{number}/parameters (1 failures)
+
+**URL:** `epochs/4/parameters`
+- **Test:** epochs/:number/parameters epoch - costModels.PlutusV1
+- **Issue:** Test expectation mismatch
 
 ---
 
 ### NETWORK
 
-**Test:** network test
-- **Endpoint:** `network`
-- **Error:** Test timed out in 15000ms
+#### /network/eras (1 failures)
+
+**URL:** `network/eras`
+- **Test:** network eras
+- **Issue:** Network eras boundary issue
 
 ---
 
 ### POOLS
 
-**Test:** pools/extended output matches data returned from /pools/:pool_id and /pools/:pool_id/metadata
-- **Endpoint:** `pools/extended?count=1&page=1`
-- **Error:** Response code 404 (Not Found) or data mismatch
+#### /pools/extended (6 failures)
+
+**URL:** `pools/extended?count=1&page=1`
+- **Test:** pools/extended output matches data returned from /pools/:pool_id and /pools/:pool_id/metadata
+- **Issue:** Extended pool data endpoint issue
+
+**URL:** `pools/extended?count=1&page=2`
+- **Test:** pools/extended output matches data returned from /pools/:pool_id and /pools/:pool_id/metadata
+- **Issue:** Extended pool data endpoint issue
+
+**URL:** `pools/extended?count=3&page=4`
+- **Test:** pools/extended output matches data returned from /pools/:pool_id and /pools/:pool_id/metadata
+- **Issue:** Extended pool data endpoint issue
+
+**URL:** `pools/extended?count=3&page=3`
+- **Test:** pools/extended output matches data returned from /pools/:pool_id and /pools/:pool_id/metadata
+- **Issue:** Extended pool data endpoint issue
+
+**URL:** `pools/extended?count=5&page=3&order=asc`
+- **Test:** pools/extended?queryparams
+- **Issue:** Test expectation mismatch
+
+**URL:** `pools/extended?count=5&page=3`
+- **Test:** pools/extended?queryparams
+- **Issue:** Test expectation mismatch
 
 ---
-
-## Summary by Category
-
-### Accounts (2 failures)
-Both failures relate to DRep handling when DReps are retired. The system does not properly clear the `drep_id` field for accounts that were delegated to a retired DRep.
-
-### Epochs (1 failure)
-Single failure related to epoch parameters where the `nonce` field is missing/empty for epoch 300.
-
-### Network (1 failure)
-Timeout issue on the network endpoint, likely related to the same stake calculation caching issue seen in mainnet.
-
-### Pools (3 pending failures)
-- pools/extended endpoint 404 errors (needs to be fixed - in scope)
-- Epoch boundary issues in pool history (won't fix - out of scope)
-
----
-
-## Recommendations
-
-1. **Priority 1:** Fix network endpoint timeout (cache stake calculations)
-2. **Priority 2:** Implement DRep clearing logic for retired DReps
-3. **Priority 3:** Fix epoch parameter nonce field
-4. **Priority 4:** Pool metadata/status field alignment
