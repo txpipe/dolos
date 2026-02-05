@@ -27,31 +27,60 @@ use crate::{
     Facade,
 };
 
+/// Represents a parsed address parameter
 type VKeyOrAddress = Either<Vec<u8>, Vec<u8>>;
+
+enum ParsedAddress {
+    Payment(Vec<u8>),
+    Full(Vec<u8>),
+}
+
+/// Parse an address string into bytes for querying.
+/// Supports:
+/// - Payment credentials (addr_vkh*, script*) via bech32
+/// - Shelley/stake addresses via bech32
+/// - Byron addresses via base58
+fn parse_address(address: &str) -> Result<ParsedAddress, Error> {
+    // Payment credentials
+    if address.starts_with("addr_vkh") || address.starts_with("script") {
+        let (_, addr) = bech32::decode(address).map_err(|_| Error::InvalidAddress)?;
+        return Ok(ParsedAddress::Payment(addr));
+    }
+
+    // Try Shelley/stake bech32
+    if let Ok(addr) = pallas::ledger::addresses::Address::from_bech32(address) {
+        return Ok(ParsedAddress::Full(addr.to_vec()));
+    }
+
+    // Try Byron base58
+    if let Ok(decoded) = base58::FromBase58::from_base58(address) {
+        if let Ok(addr) = pallas::ledger::addresses::Address::from_bytes(&decoded) {
+            if matches!(addr, Address::Byron(_)) {
+                return Ok(ParsedAddress::Full(addr.to_vec()));
+            }
+        }
+    }
+
+    Err(Error::InvalidAddress)
+}
 
 fn refs_for_address<D: Domain>(
     domain: &Facade<D>,
     address: &str,
 ) -> Result<HashSet<TxoRef>, Error> {
-    if address.starts_with("addr_vkh") || address.starts_with("script") {
-        let (_, addr) = bech32::decode(address).expect("failed to parse");
-
-        Ok(domain.indexes().utxos_by_payment(&addr).map_err(|err| {
-            dbg!(err);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?)
-    } else {
-        let address = pallas::ledger::addresses::Address::from_bech32(address).map_err(|err| {
-            dbg!(err);
-            Error::InvalidAddress
-        })?;
-        Ok(domain
-            .indexes()
-            .utxos_by_address(&address.to_vec())
-            .map_err(|err| {
-                dbg!(err);
+    match parse_address(address)? {
+        ParsedAddress::Payment(addr) => {
+            Ok(domain.indexes().utxos_by_payment(&addr).map_err(|err| {
+                tracing::error!(?err);
                 StatusCode::INTERNAL_SERVER_ERROR
             })?)
+        }
+        ParsedAddress::Full(addr) => {
+            Ok(domain.indexes().utxos_by_address(&addr).map_err(|err| {
+                tracing::error!(?err);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?)
+        }
     }
 }
 
@@ -64,38 +93,29 @@ async fn blocks_for_address<D>(
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
-    if address.starts_with("addr_vkh") || address.starts_with("script") {
-        let (_, addr) = bech32::decode(address).expect("failed to parse");
-
-        Ok((
+    match parse_address(address)? {
+        ParsedAddress::Payment(addr) => Ok((
             domain
                 .query()
                 .blocks_by_payment(&addr, start_slot, end_slot)
                 .await
                 .map_err(|err| {
-                    dbg!(err);
+                    tracing::error!(?err);
                     StatusCode::INTERNAL_SERVER_ERROR
                 })?,
             Either::Left(addr),
-        ))
-    } else {
-        let address = pallas::ledger::addresses::Address::from_bech32(address)
-            .map_err(|err| {
-                dbg!(err);
-                Error::InvalidAddress
-            })?
-            .to_vec();
-        Ok((
+        )),
+        ParsedAddress::Full(addr) => Ok((
             domain
                 .query()
-                .blocks_by_address(&address, start_slot, end_slot)
+                .blocks_by_address(&addr, start_slot, end_slot)
                 .await
                 .map_err(|err| {
-                    dbg!(err);
+                    tracing::error!(?err);
                     StatusCode::INTERNAL_SERVER_ERROR
                 })?,
-            Either::Right(address),
-        ))
+            Either::Right(addr),
+        )),
     }
 }
 
@@ -106,34 +126,27 @@ where
     let end_slot = domain.get_tip_slot()?;
     let start_slot = 0;
 
-    if address.starts_with("addr_vkh") || address.starts_with("script") {
-        let (_, addr) = bech32::decode(address).expect("failed to parse");
-
-        Ok(domain
+    match parse_address(address)? {
+        ParsedAddress::Payment(addr) => Ok(domain
             .query()
             .blocks_by_payment(&addr, start_slot, end_slot)
             .await
             .map_err(|err| {
-                dbg!(err);
+                tracing::error!(?err);
                 StatusCode::INTERNAL_SERVER_ERROR
             })?
             .iter()
-            .any(|(_, block)| block.is_some()))
-    } else {
-        let address = pallas::ledger::addresses::Address::from_bech32(address).map_err(|err| {
-            dbg!(err);
-            Error::InvalidAddress
-        })?;
-        Ok(domain
+            .any(|(_, block)| block.is_some())),
+        ParsedAddress::Full(addr) => Ok(domain
             .query()
-            .blocks_by_address(&address.to_vec(), start_slot, end_slot)
+            .blocks_by_address(&addr, start_slot, end_slot)
             .await
             .map_err(|err| {
-                dbg!(err);
+                tracing::error!(?err);
                 StatusCode::INTERNAL_SERVER_ERROR
             })?
             .iter()
-            .any(|(_, block)| block.is_some()))
+            .any(|(_, block)| block.is_some())),
     }
 }
 
@@ -149,7 +162,7 @@ where
         .blocks_by_asset(asset, start_slot, end_slot)
         .await
         .map_err(|err| {
-            dbg!(err);
+            tracing::error!(?err);
             StatusCode::INTERNAL_SERVER_ERROR
         })?
         .iter()
@@ -416,4 +429,38 @@ where
         .collect();
 
     Ok(Json(transactions))
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_address_payment() {
+        let addr = "addr_vkh1h7wl3l3w6heru0us8mdc3v3jlahq79w49cpypsuvgjhdwp5apep";
+        let parsed = parse_address(addr);
+        assert!(matches!(parsed, Ok(ParsedAddress::Payment(_))));
+    }
+
+    #[test]
+    fn test_parse_address_shelley() {
+        let addr = "addr1q9dhugez3ka82k2kgh7r2lg0j7aztr8uell46kydfwu3vk6n8w2cdu8mn2ha278q6q25a9rc6gmpfeekavuargcd32vsvxhl7e";
+        let parsed = parse_address(addr);
+        assert!(matches!(parsed, Ok(ParsedAddress::Full(_))));
+    }
+
+    #[test]
+    fn test_parse_address_byron() {
+        let addr = "37btjrVyb4KDXBNC4haBVPCrro8AQPHwvCMp3RFhhSVWwfFmZ6wwzSK6JK1hY6wHNmtrpTf1kdbva8TCneM2YsiXT7mrzT21EacHnPpz5YyUdj64na";
+        let parsed = parse_address(addr);
+        assert!(matches!(parsed, Ok(ParsedAddress::Full(_))));
+    }
+
+    #[test]
+    fn test_parse_address_invalid() {
+        let addr = "invalid_address";
+        let parsed = parse_address(addr);
+        assert!(matches!(parsed, Err(Error::InvalidAddress)));
+    }
 }

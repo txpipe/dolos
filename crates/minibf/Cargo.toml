@@ -21,6 +21,7 @@ dolos-core = { path = "../core" }
 dolos-cardano = { path = "../cardano" }
 
 axum = { version = "0.8.4", features = ["macros"] }
+base58 = "0.2.0"
 bech32 = "0.11.0"
 blockfrost-openapi = "0.1.83"
 crc = "3.3.0"
