@@ -207,7 +207,8 @@ pub async fn eras<D: Domain>(
         tip,
     };
 
-    builder.into_response()
+    let model = builder.into_model()?;
+    Ok(Json(model))
 }
 
 struct NetworkModelBuilder<'a> {
@@ -247,7 +248,7 @@ impl<'a> IntoModel<Network> for NetworkModelBuilder<'a> {
     }
 }
 
-pub async fn naked<D: Domain>(State(domain): State<Facade<D>>) -> Result<Json<Network>, StatusCode>
+fn compute_network_sync<D: Domain>(domain: Facade<D>) -> Result<Network, StatusCode>
 where
     Option<EpochState>: From<D::Entity>,
 {
@@ -278,5 +279,21 @@ where
         active_stake,
     };
 
-    builder.into_response()
+    builder.into_model()
+}
+
+const CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+pub async fn naked<D: Domain>(State(domain): State<Facade<D>>) -> Result<Json<Network>, StatusCode>
+where
+    Option<EpochState>: From<D::Entity>,
+    D: Clone + Send + Sync + 'static,
+{
+
+    let domain_clone = domain.clone();
+    let fetcher = move || compute_network_sync(domain_clone);
+
+    let res = domain.cache.get_or_fetch_blocking(CACHE_TTL, fetcher).await?;
+
+    Ok(Json(res))
 }
