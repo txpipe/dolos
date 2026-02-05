@@ -331,6 +331,7 @@ impl RupdWork {
                 active_stake = %work.snapshot.active_stake_sum,
                 "RUPD epoch info"
             );
+
         }
 
         Ok(work)

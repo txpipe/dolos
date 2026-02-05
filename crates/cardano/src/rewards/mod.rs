@@ -450,7 +450,6 @@ pub trait RewardsContext {
 
 pub fn define_rewards<C: RewardsContext>(ctx: &C) -> Result<RewardMap<C>, ChainError> {
     let mut map = RewardMap::<C>::new(ctx.incentives().clone());
-
     for pool in ctx.iter_all_pools() {
         let pool_params = ctx.pool_params(pool);
 
