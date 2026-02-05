@@ -44,6 +44,38 @@ pub trait AsyncCardanoQueryExt<D: Domain> {
         order: SlotOrder,
     ) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError>> + Send + 'static;
 
+    fn blocks_by_stake_stream(
+        &self,
+        stake: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
+        order: SlotOrder,
+    ) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError>> + Send + 'static;
+
+    fn blocks_by_asset_stream(
+        &self,
+        asset: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
+        order: SlotOrder,
+    ) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError>> + Send + 'static;
+
+    fn blocks_by_account_certs_stream(
+        &self,
+        account: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
+        order: SlotOrder,
+    ) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError>> + Send + 'static;
+
+    fn blocks_by_metadata_stream(
+        &self,
+        label: u64,
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
+        order: SlotOrder,
+    ) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError>> + Send + 'static;
+
     async fn blocks_by_address(
         &self,
         address: &[u8],
@@ -107,7 +139,7 @@ where
     ) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError>> + Send + 'static
     {
         blocks_by_tag_stream(
-            self.clone(),
+            (*self).clone(),
             archive::ADDRESS,
             address.to_vec(),
             start_slot,
@@ -125,9 +157,81 @@ where
     ) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError>> + Send + 'static
     {
         blocks_by_tag_stream(
-            self.clone(),
+            (*self).clone(),
             archive::PAYMENT,
             payment.to_vec(),
+            start_slot,
+            end_slot,
+            order,
+        )
+    }
+
+    fn blocks_by_stake_stream(
+        &self,
+        stake: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
+        order: SlotOrder,
+    ) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError>> + Send + 'static
+    {
+        blocks_by_tag_stream(
+            (*self).clone(),
+            archive::STAKE,
+            stake.to_vec(),
+            start_slot,
+            end_slot,
+            order,
+        )
+    }
+
+    fn blocks_by_asset_stream(
+        &self,
+        asset: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
+        order: SlotOrder,
+    ) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError>> + Send + 'static
+    {
+        blocks_by_tag_stream(
+            (*self).clone(),
+            archive::ASSET,
+            asset.to_vec(),
+            start_slot,
+            end_slot,
+            order,
+        )
+    }
+
+    fn blocks_by_account_certs_stream(
+        &self,
+        account: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
+        order: SlotOrder,
+    ) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError>> + Send + 'static
+    {
+        blocks_by_tag_stream(
+            (*self).clone(),
+            archive::ACCOUNT_CERTS,
+            account.to_vec(),
+            start_slot,
+            end_slot,
+            order,
+        )
+    }
+
+    fn blocks_by_metadata_stream(
+        &self,
+        label: u64,
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
+        order: SlotOrder,
+    ) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError>> + Send + 'static
+    {
+        blocks_by_tag_stream(
+            (*self).clone(),
+            archive::METADATA,
+            label.to_be_bytes().to_vec(),
             start_slot,
             end_slot,
             order,

@@ -7,8 +7,9 @@ use blockfrost_openapi::models::{
     tx_metadata_label_cbor_inner::TxMetadataLabelCborInner,
     tx_metadata_label_json_inner::TxMetadataLabelJsonInner,
 };
-use dolos_cardano::indexes::AsyncCardanoQueryExt;
+use dolos_cardano::indexes::{AsyncCardanoQueryExt, SlotOrder};
 use dolos_core::Domain;
+use futures_util::StreamExt;
 use pallas::{
     codec::minicbor,
     crypto::hash::Hash,
@@ -134,19 +135,25 @@ where
     pagination.enforce_max_scan_limit()?;
     let end_slot = domain.get_tip_slot()?;
 
-    let blocks = domain
-        .query()
-        .blocks_by_metadata(label, 0, end_slot)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let stream = domain.query().blocks_by_metadata_stream(
+        label,
+        0,
+        end_slot,
+        SlotOrder::from(pagination.order),
+    );
 
     let mut builder =
         MetadataHistoryModelBuilder::new(label, pagination.count, pagination.page as usize);
 
-    for (_slot, maybe) in blocks {
+    let mut stream = Box::pin(stream);
+
+    while let Some(res) = stream.next().await {
         if !builder.needs_more() {
             break;
         }
+
+        let (_slot, maybe) = res.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
         if let Some(cbor) = maybe {
             builder.scan_block(&cbor)?;
         }

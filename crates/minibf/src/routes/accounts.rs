@@ -15,11 +15,12 @@ use blockfrost_openapi::models::{
 };
 
 use dolos_cardano::{
-    indexes::{AsyncCardanoQueryExt, CardanoIndexExt},
+    indexes::{AsyncCardanoQueryExt, CardanoIndexExt, SlotOrder},
     model::AccountState,
     pallas_extras, ChainSummary, RewardLog,
 };
 use dolos_core::{ArchiveStore as _, Domain, EntityKey};
+use futures_util::StreamExt;
 use pallas::{
     codec::minicbor,
     crypto::hash::Hash,
@@ -196,20 +197,26 @@ where
     let account_key = parse_account_key_param(&stake_address)?;
     let end_slot = domain.get_tip_slot()?;
 
-    let blocks = domain
-        .query()
-        .blocks_by_stake(&account_key.address.to_vec(), 0, end_slot)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let stream = domain.query().blocks_by_stake_stream(
+        &account_key.address.to_vec(),
+        0,
+        end_slot,
+        SlotOrder::from(pagination.order),
+    );
 
     let mut items = vec![];
     let mut skipped = 0;
     let mut seen = BTreeSet::new();
 
-    for (_slot, block) in blocks {
+    let mut stream = Box::pin(stream);
+
+    while let Some(res) = stream.next().await {
         if items.len() >= pagination.count {
             break;
         }
+
+        let (_slot, block) = res.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
         let Some(block) = block else {
             continue;
         };
@@ -476,16 +483,21 @@ where
     );
     let end_slot = domain.get_tip_slot()?;
 
-    let blocks = domain
-        .query()
-        .blocks_by_account_certs(&account_key.entity_key, 0, end_slot)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let stream = domain.query().blocks_by_account_certs_stream(
+        &account_key.entity_key,
+        0,
+        end_slot,
+        SlotOrder::from(pagination.order),
+    );
 
-    for (slot, block) in blocks {
+    let mut stream = Box::pin(stream);
+
+    while let Some(res) = stream.next().await {
         if !builder.needs_more() {
             break;
         }
+
+        let (slot, block) = res.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
         let Some(block) = block else {
             continue;
