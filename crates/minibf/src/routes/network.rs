@@ -282,18 +282,27 @@ where
     builder.into_model()
 }
 
-const CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
-
 pub async fn naked<D: Domain>(State(domain): State<Facade<D>>) -> Result<Json<Network>, StatusCode>
 where
     Option<EpochState>: From<D::Entity>,
     D: Clone + Send + Sync + 'static,
 {
+    const TTL: std::time::Duration = std::time::Duration::from_secs(30);
 
     let domain_clone = domain.clone();
     let fetcher = move || compute_network_sync(domain_clone);
 
-    let res = domain.cache.get_or_fetch_blocking(CACHE_TTL, fetcher).await?;
+    let res = domain
+        .cache
+        .get_or_fetch_blocking(TTL, fetcher)
+        .await
+        .map_err(|e| match e {
+            crate::cache::CacheError::Inner(status) => status,
+            crate::cache::CacheError::JoinError(e) => {
+                tracing::error!("cache refresh task failed: {:?}", e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+        })?;
 
     Ok(Json(res))
 }

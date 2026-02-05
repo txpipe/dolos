@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, RwLock};
 
+/// Internal cache entry holding a value and its metadata.
 struct Entry<T> {
     value: Option<T>,
     cached_at: Option<Instant>,
@@ -20,21 +21,70 @@ impl<T> Default for Entry<T> {
     }
 }
 
+/// A type-safe cache service that supports stale-while-revalidate semantics.
 #[derive(Clone, Default)]
 pub struct CacheService {
     map: Arc<RwLock<HashMap<TypeId, Box<dyn Any + Send + Sync>>>>,
 }
 
+/// Errors that can occur when fetching from the cache.
+#[derive(Debug)]
+pub enum CacheError<E> {
+    /// Error from the fetcher function.
+    Inner(E),
+    /// Error when joining the background task.
+    JoinError(tokio::task::JoinError),
+}
+
 impl CacheService {
-    pub async fn get_or_fetch_blocking<T, E, F>(&self, ttl: Duration, fetcher: F) -> Result<T, E>
+    /// Gets a value from the cache or fetches it using the provided function.
+    ///
+    /// If the value is fresh (within TTL), returns it immediately.
+    /// If stale, returns the stale value and refreshes in the background.
+    /// If missing, fetches synchronously and populates the cache.
+    pub async fn get_or_fetch_blocking<T, E, F>(
+        &self,
+        ttl: Duration,
+        fetcher: F,
+    ) -> Result<T, CacheError<E>>
     where
         T: Clone + Send + Sync + 'static,
         E: std::fmt::Debug + Send + 'static,
         F: FnOnce() -> Result<T, E> + Send + 'static,
     {
         let entry = self.get_entry::<T>().await;
-        let mut guard = entry.lock().await;
+        let entry_clone = entry.clone();
+        let guard = entry.lock().await;
 
+        // Check if we have a fresh cached value
+        if let Some(value) = Self::get_fresh_value(&guard, ttl) {
+            return Ok(value);
+        }
+
+        let value_opt = guard.value.clone();
+        let is_refreshing = guard.refreshing;
+
+        if is_refreshing {
+            // Another task is already refreshing
+            return Self::handle_concurrent_refresh(entry_clone, guard, value_opt, fetcher).await;
+        }
+
+        // No refresh in progress, we need to handle it
+        if let Some(stale_value) = value_opt {
+            // Return stale value and refresh in background
+            Self::spawn_background_refresh(entry_clone, guard, stale_value.clone(), fetcher);
+            Ok(stale_value)
+        } else {
+            // No value at all, must fetch synchronously
+            Self::fetch_and_store_sync(entry_clone, guard, fetcher).await
+        }
+    }
+
+    /// Checks if there's a fresh cached value (within TTL).
+    fn get_fresh_value<T: Clone>(
+        guard: &tokio::sync::MutexGuard<'_, Entry<T>>,
+        ttl: Duration,
+    ) -> Option<T> {
         let now = Instant::now();
         let is_fresh = guard
             .cached_at
@@ -42,79 +92,118 @@ impl CacheService {
             .unwrap_or(false);
 
         if is_fresh {
-            if let Some(v) = &guard.value {
-                return Ok(v.clone());
-            }
+            guard.value.clone()
+        } else {
+            None
         }
+    }
 
-        let val_opt = guard.value.clone();
+    /// Spawns a background task to refresh the cache.
+    fn spawn_background_refresh<T, E, F>(
+        entry: Arc<Mutex<Entry<T>>>,
+        mut guard: tokio::sync::MutexGuard<'_, Entry<T>>,
+        _stale_value: T,
+        fetcher: F,
+    ) where
+        T: Clone + Send + Sync + 'static,
+        E: std::fmt::Debug + Send + 'static,
+        F: FnOnce() -> Result<T, E> + Send + 'static,
+    {
+        guard.refreshing = true;
+        drop(guard);
 
-        if !guard.refreshing {
-            if let Some(val) = val_opt {
-                // Stale-while-revalidate
-                guard.refreshing = true;
-                let entry_clone = entry.clone();
+        tokio::spawn(async move {
+            let res = tokio::task::spawn_blocking(fetcher).await;
 
-                tokio::spawn(async move {
-                    let res = tokio::task::spawn_blocking(fetcher).await;
+            let mut g = entry.lock().await;
+            g.refreshing = false;
 
-                    let mut g = entry_clone.lock().await;
-                    g.refreshing = false;
-                    match res {
-                        Ok(Ok(v)) => {
-                            g.value = Some(v);
-                            g.cached_at = Some(Instant::now());
-                        }
-                        Ok(Err(e)) => {
-                            tracing::error!("background refresh failed: {:?}", e);
-                        }
-                        Err(e) => {
-                            tracing::error!("background task join failed: {:?}", e);
-                        }
-                    }
-                });
-
-                Ok(val)
-            } else {
-                // No value, must wait
-                guard.refreshing = true;
-                drop(guard);
-
-                let res = tokio::task::spawn_blocking(fetcher).await;
-
-                // Re-acquire lock
-                let mut guard = entry.lock().await;
-                guard.refreshing = false;
-
-                match res {
-                    Ok(Ok(v)) => {
-                        guard.value = Some(v.clone());
-                        guard.cached_at = Some(Instant::now());
-                        Ok(v)
-                    }
-                    Ok(Err(e)) => Err(e),
-                    Err(e) => {
-                        tracing::error!("tokio task join error: {:?}", e);
-                        panic!("tokio task join error: {:?}", e);
-                    }
+            match res {
+                Ok(Ok(v)) => {
+                    g.value = Some(v);
+                    g.cached_at = Some(Instant::now());
+                }
+                Ok(Err(e)) => {
+                    tracing::error!("background refresh failed: {:?}", e);
+                }
+                Err(e) => {
+                    tracing::error!("background task join failed: {:?}", e);
                 }
             }
-        } else {
-            // Already refreshing
-            if let Some(v) = val_opt {
+        });
+    }
+
+    /// Fetches data synchronously and stores it in the cache.
+    async fn fetch_and_store_sync<T, E, F>(
+        entry: Arc<Mutex<Entry<T>>>,
+        mut guard: tokio::sync::MutexGuard<'_, Entry<T>>,
+        fetcher: F,
+    ) -> Result<T, CacheError<E>>
+    where
+        T: Clone + Send + Sync + 'static,
+        E: std::fmt::Debug + Send + 'static,
+        F: FnOnce() -> Result<T, E> + Send + 'static,
+    {
+        guard.refreshing = true;
+        drop(guard);
+
+        let res = tokio::task::spawn_blocking(fetcher).await;
+
+        // Re-acquire lock
+        let mut guard = entry.lock().await;
+        guard.refreshing = false;
+
+        match res {
+            Ok(Ok(v)) => {
+                guard.value = Some(v.clone());
+                guard.cached_at = Some(Instant::now());
                 Ok(v)
-            } else {
-                drop(guard);
-                let res = tokio::task::spawn_blocking(fetcher).await;
-                match res {
-                    Ok(Ok(v)) => Ok(v),
-                    Ok(Err(e)) => Err(e),
-                    Err(e) => panic!("tokio task join error: {:?}", e),
+            }
+            Ok(Err(e)) => Err(CacheError::Inner(e)),
+            Err(e) => {
+                tracing::error!("tokio task join error: {:?}", e);
+                Err(CacheError::JoinError(e))
+            }
+        }
+    }
+
+    /// Handles the case when another task is already refreshing the cache.
+    async fn handle_concurrent_refresh<T, E, F>(
+        entry: Arc<Mutex<Entry<T>>>,
+        guard: tokio::sync::MutexGuard<'_, Entry<T>>,
+        value_opt: Option<T>,
+        fetcher: F,
+    ) -> Result<T, CacheError<E>>
+    where
+        T: Clone + Send + Sync + 'static,
+        E: std::fmt::Debug + Send + 'static,
+        F: FnOnce() -> Result<T, E> + Send + 'static,
+    {
+        if let Some(v) = value_opt {
+            // We have a stale value, return it
+            Ok(v)
+        } else {
+            // No value and already refreshing - fetch and populate cache
+            drop(guard);
+            let res = tokio::task::spawn_blocking(fetcher).await;
+
+            match res {
+                Ok(Ok(v)) => {
+                    let mut g = entry.lock().await;
+                    g.value = Some(v.clone());
+                    g.cached_at = Some(Instant::now());
+                    Ok(v)
+                }
+                Ok(Err(e)) => Err(CacheError::Inner(e)),
+                Err(e) => {
+                    tracing::error!("tokio task join error: {:?}", e);
+                    Err(CacheError::JoinError(e))
                 }
             }
         }
     }
 
+    /// Gets or creates a cache entry for type T.
     async fn get_entry<T: Send + Sync + 'static>(&self) -> Arc<Mutex<Entry<T>>> {
         let type_id = TypeId::of::<T>();
 
@@ -139,7 +228,6 @@ impl CacheService {
             }
         }
 
-        // eprintln!("CacheService: creating new entry for type {:?}", type_id);
         let entry = Arc::new(Mutex::new(Entry::<T>::default()));
         map.insert(type_id, Box::new(entry.clone()));
         entry
@@ -156,7 +244,7 @@ mod tests {
         let cache = CacheService::default();
         let ttl = Duration::from_secs(1);
 
-        let res: Result<String, ()> = cache
+        let res: Result<String, CacheError<()>> = cache
             .get_or_fetch_blocking(ttl, || Ok("hello".to_string()))
             .await;
 
@@ -177,7 +265,7 @@ mod tests {
             Ok("initial".to_string())
         };
 
-        let res: Result<String, ()> = cache.get_or_fetch_blocking(ttl, fetcher).await;
+        let res: Result<String, CacheError<()>> = cache.get_or_fetch_blocking(ttl, fetcher).await;
         assert_eq!(res.unwrap(), "initial");
         assert_eq!(counter.load(Ordering::SeqCst), 1);
 
@@ -191,14 +279,14 @@ mod tests {
             Ok("updated".to_string())
         };
 
-        let res: Result<String, ()> = cache.get_or_fetch_blocking(ttl, fetcher).await;
+        let res: Result<String, CacheError<()>> = cache.get_or_fetch_blocking(ttl, fetcher).await;
         assert_eq!(res.unwrap(), "initial"); // Returns stale!
 
         // 4. Wait for background refresh to finish
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // 5. Fetch again - should return "updated"
-        let res: Result<String, ()> = cache
+        let res: Result<String, CacheError<()>> = cache
             .get_or_fetch_blocking(ttl, || Ok("should not run".to_string()))
             .await;
         assert_eq!(res.unwrap(), "updated");
