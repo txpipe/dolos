@@ -16,8 +16,6 @@ mod export;
 mod find_seq;
 mod housekeeping;
 mod import_archive;
-#[cfg(feature = "minibf")]
-mod minibf_query;
 mod prune_chain;
 mod prune_wal;
 mod stats;
@@ -67,9 +65,6 @@ pub enum Command {
     Housekeeping(housekeeping::Args),
     /// imports blocks from immutable DB into archive store only
     ImportArchive(import_archive::Args),
-    /// runs a minibf query in-process
-    #[cfg(feature = "minibf")]
-    MinibfQuery(minibf_query::Args),
 }
 
 #[derive(Debug, Parser)]
@@ -102,8 +97,6 @@ pub fn run(
         Command::Stats(x) => stats::run(config, x)?,
         Command::Housekeeping(x) => housekeeping::run(config, x)?,
         Command::ImportArchive(x) => import_archive::run(config, x, feedback)?,
-        #[cfg(feature = "minibf")]
-        Command::MinibfQuery(x) => minibf_query::run(config, x)?,
     }
 
     Ok(())
