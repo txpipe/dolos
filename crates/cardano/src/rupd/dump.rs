@@ -11,8 +11,7 @@ use super::{PoolHash, RupdWork, StakeSnapshot};
 
 fn bech32_pool(pool: &PoolHash) -> std::io::Result<String> {
     let hrp = bech32::Hrp::parse_unchecked("pool");
-    bech32::encode::<bech32::Bech32>(hrp, pool.as_slice())
-        .map_err(std::io::Error::other)
+    bech32::encode::<bech32::Bech32>(hrp, pool.as_slice()).map_err(std::io::Error::other)
 }
 
 pub fn dump_snapshot_csv(work: &RupdWork, genesis: &Genesis, out_dir: &Path) {
@@ -84,9 +83,7 @@ fn dump_accounts_csv(
 
     for (pool, credential, stake) in snapshot.iter_accounts() {
         let address = pallas_extras::stake_credential_to_address(network, credential);
-        let stake_address = address
-            .to_bech32()
-            .map_err(std::io::Error::other)?;
+        let stake_address = address.to_bech32().map_err(std::io::Error::other)?;
         let pool_bech32 = bech32_pool(pool)?;
         rows.push((stake_address, pool_bech32, *stake));
     }

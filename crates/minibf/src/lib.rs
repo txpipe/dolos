@@ -16,7 +16,6 @@ use std::{
     collections::HashMap,
     ops::{Deref, Range},
 };
-use tower::Layer;
 use tower_http::{cors::CorsLayer, normalize_path::NormalizePathLayer, trace};
 use tracing::Level;
 
@@ -260,6 +259,187 @@ impl<D: Domain> Facade<D> {
 
 pub struct Driver;
 
+pub fn build_router<D>(cfg: MinibfConfig, domain: D) -> Router
+where
+    D: Domain + Clone + Send + Sync + 'static,
+    Option<AccountState>: From<D::Entity>,
+    Option<PoolState>: From<D::Entity>,
+    Option<AssetState>: From<D::Entity>,
+    Option<EpochState>: From<D::Entity>,
+    Option<DRepState>: From<D::Entity>,
+{
+    let app = Router::new()
+        .route("/", get(routes::root::<D>))
+        .route("/health", get(routes::health::naked))
+        .route("/metrics", get(routes::metrics::metrics::<D>))
+        .route("/health/clock", get(routes::health::clock))
+        .route("/genesis", get(routes::genesis::naked::<D>))
+        .route("/network", get(routes::network::naked::<D>))
+        .route("/network/eras", get(routes::network::eras::<D>))
+        .route(
+            "/accounts/{stake_address}",
+            get(routes::accounts::by_stake::<D>),
+        )
+        .route(
+            "/accounts/{stake_address}/registrations",
+            get(routes::accounts::by_stake_registrations::<D>),
+        )
+        .route(
+            "/accounts/{stake_address}/delegations",
+            get(routes::accounts::by_stake_delegations::<D>),
+        )
+        .route(
+            "/accounts/{stake_address}/addresses",
+            get(routes::accounts::by_stake_addresses::<D>),
+        )
+        .route(
+            "/accounts/{stake_address}/utxos",
+            get(routes::accounts::by_stake_utxos::<D>),
+        )
+        .route(
+            "/accounts/{stake_address}/rewards",
+            get(routes::accounts::by_stake_rewards::<D>),
+        )
+        .route(
+            "/addresses/{address}/utxos",
+            get(routes::addresses::utxos::<D>),
+        )
+        .route(
+            "/addresses/{address}/utxos/{asset}",
+            get(routes::addresses::utxos_with_asset::<D>),
+        )
+        .route(
+            "/addresses/{address}/transactions",
+            get(routes::addresses::transactions::<D>),
+        )
+        .route("/addresses/{address}/txs", get(routes::addresses::txs::<D>))
+        .route("/blocks/latest", get(routes::blocks::latest::<D>))
+        .route("/blocks/latest/txs", get(routes::blocks::latest_txs::<D>))
+        .route(
+            "/blocks/{hash_or_number}",
+            get(routes::blocks::by_hash_or_number::<D>),
+        )
+        .route(
+            "/blocks/{hash_or_number}/next",
+            get(routes::blocks::by_hash_or_number_next::<D>),
+        )
+        .route(
+            "/blocks/{hash_or_number}/previous",
+            get(routes::blocks::by_hash_or_number_previous::<D>),
+        )
+        .route(
+            "/blocks/{hash_or_number}/txs",
+            get(routes::blocks::by_hash_or_number_txs::<D>),
+        )
+        .route(
+            "/blocks/{hash_or_number}/addresses",
+            get(routes::blocks::by_hash_or_number_addresses::<D>),
+        )
+        .route(
+            "/blocks/slot/{slot_number}",
+            get(routes::blocks::by_slot::<D>),
+        )
+        .route(
+            "/epochs/{epoch}/blocks",
+            get(routes::epochs::by_number_blocks::<D>),
+        )
+        .route(
+            "/epochs/{epoch}/parameters",
+            get(routes::epochs::by_number_parameters::<D>),
+        )
+        .route(
+            "/epochs/latest/parameters",
+            get(routes::epochs::latest_parameters::<D>),
+        )
+        .route(
+            "/scripts/datum/{datum_hash}",
+            get(routes::scripts::by_datum_hash::<D>),
+        )
+        .route("/tx/submit", post(routes::tx::submit::route::<D>))
+        .route("/txs/{tx_hash}", get(routes::txs::by_hash::<D>))
+        .route("/txs/{tx_hash}/cbor", get(routes::txs::by_hash_cbor::<D>))
+        .route("/txs/{tx_hash}/utxos", get(routes::txs::by_hash_utxos::<D>))
+        .route(
+            "/txs/{tx_hash}/metadata",
+            get(routes::txs::by_hash_metadata::<D>),
+        )
+        .route(
+            "/txs/{tx_hash}/metadata/cbor",
+            get(routes::txs::by_hash_metadata_cbor::<D>),
+        )
+        .route(
+            "/txs/{tx_hash}/redeemers",
+            get(routes::txs::by_hash_redeemers::<D>),
+        )
+        .route(
+            "/txs/{tx_hash}/withdrawals",
+            get(routes::txs::by_hash_withdrawals::<D>),
+        )
+        .route(
+            "/txs/{tx_hash}/delegations",
+            get(routes::txs::by_hash_delegations::<D>),
+        )
+        .route("/txs/{tx_hash}/mirs", get(routes::txs::by_hash_mirs::<D>))
+        .route(
+            "/txs/{tx_hash}/pool_updates",
+            get(routes::txs::by_hash_pool_updates::<D>),
+        )
+        .route(
+            "/txs/{tx_hash}/pool_retires",
+            get(routes::txs::by_hash_pool_retires::<D>),
+        )
+        .route(
+            "/txs/{tx_hash}/stakes",
+            get(routes::txs::by_hash_stakes::<D>),
+        )
+        .route("/assets/{subject}", get(routes::assets::by_subject::<D>))
+        .route(
+            "/assets/{subject}/addresses",
+            get(routes::assets::by_subject_addresses::<D>),
+        )
+        .route(
+            "/assets/{subject}/transactions",
+            get(routes::assets::by_subject_transactions::<D>),
+        )
+        .route(
+            "/metadata/txs/labels/{label}",
+            get(routes::metadata::by_label_json::<D>),
+        )
+        .route(
+            "/metadata/txs/labels/{label}/cbor",
+            get(routes::metadata::by_label_cbor::<D>),
+        )
+        .route(
+            "/pools/{id}/delegators",
+            get(routes::pools::by_id_delegators::<D>),
+        )
+        .route(
+            "/pools/{id}/history",
+            get(routes::pools::by_id_history::<D>),
+        )
+        .route("/pools/extended", get(routes::pools::all_extended::<D>))
+        .route(
+            "/governance/dreps/{drep_id}",
+            get(routes::governance::drep_by_id::<D>),
+        )
+        .with_state(Facade::<D> {
+            inner: domain,
+            config: cfg.clone(),
+            cache: cache::CacheService::default(),
+        })
+        .layer(
+            trace::TraceLayer::new_for_http()
+                .make_span_with(trace::DefaultMakeSpan::new().level(Level::INFO))
+                .on_response(trace::DefaultOnResponse::new().level(Level::INFO)),
+        )
+        .layer(if cfg.permissive_cors.unwrap_or_default() {
+            CorsLayer::permissive()
+        } else {
+            CorsLayer::new()
+        });
+    app.layer(NormalizePathLayer::trim_trailing_slash())
+}
+
 impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver
 where
     D: Clone + Send + Sync + 'static,
@@ -272,176 +452,7 @@ where
     type Config = MinibfConfig;
 
     async fn run(cfg: Self::Config, domain: D, cancel: C) -> Result<(), ServeError> {
-        let app = Router::new()
-            .route("/", get(routes::root::<D>))
-            .route("/health", get(routes::health::naked))
-            .route("/metrics", get(routes::metrics::metrics::<D>))
-            .route("/health/clock", get(routes::health::clock))
-            .route("/genesis", get(routes::genesis::naked::<D>))
-            .route("/network", get(routes::network::naked::<D>))
-            .route("/network/eras", get(routes::network::eras::<D>))
-            .route(
-                "/accounts/{stake_address}",
-                get(routes::accounts::by_stake::<D>),
-            )
-            .route(
-                "/accounts/{stake_address}/registrations",
-                get(routes::accounts::by_stake_registrations::<D>),
-            )
-            .route(
-                "/accounts/{stake_address}/delegations",
-                get(routes::accounts::by_stake_delegations::<D>),
-            )
-            .route(
-                "/accounts/{stake_address}/addresses",
-                get(routes::accounts::by_stake_addresses::<D>),
-            )
-            .route(
-                "/accounts/{stake_address}/utxos",
-                get(routes::accounts::by_stake_utxos::<D>),
-            )
-            .route(
-                "/accounts/{stake_address}/rewards",
-                get(routes::accounts::by_stake_rewards::<D>),
-            )
-            .route(
-                "/addresses/{address}/utxos",
-                get(routes::addresses::utxos::<D>),
-            )
-            .route(
-                "/addresses/{address}/utxos/{asset}",
-                get(routes::addresses::utxos_with_asset::<D>),
-            )
-            .route(
-                "/addresses/{address}/transactions",
-                get(routes::addresses::transactions::<D>),
-            )
-            .route("/addresses/{address}/txs", get(routes::addresses::txs::<D>))
-            .route("/blocks/latest", get(routes::blocks::latest::<D>))
-            .route("/blocks/latest/txs", get(routes::blocks::latest_txs::<D>))
-            .route(
-                "/blocks/{hash_or_number}",
-                get(routes::blocks::by_hash_or_number::<D>),
-            )
-            .route(
-                "/blocks/{hash_or_number}/next",
-                get(routes::blocks::by_hash_or_number_next::<D>),
-            )
-            .route(
-                "/blocks/{hash_or_number}/previous",
-                get(routes::blocks::by_hash_or_number_previous::<D>),
-            )
-            .route(
-                "/blocks/{hash_or_number}/txs",
-                get(routes::blocks::by_hash_or_number_txs::<D>),
-            )
-            .route(
-                "/blocks/{hash_or_number}/addresses",
-                get(routes::blocks::by_hash_or_number_addresses::<D>),
-            )
-            .route(
-                "/blocks/slot/{slot_number}",
-                get(routes::blocks::by_slot::<D>),
-            )
-            .route(
-                "/epochs/{epoch}/blocks",
-                get(routes::epochs::by_number_blocks::<D>),
-            )
-            .route(
-                "/epochs/{epoch}/parameters",
-                get(routes::epochs::by_number_parameters::<D>),
-            )
-            .route(
-                "/epochs/latest/parameters",
-                get(routes::epochs::latest_parameters::<D>),
-            )
-            .route(
-                "/scripts/datum/{datum_hash}",
-                get(routes::scripts::by_datum_hash::<D>),
-            )
-            .route("/tx/submit", post(routes::tx::submit::route::<D>))
-            .route("/txs/{tx_hash}", get(routes::txs::by_hash::<D>))
-            .route("/txs/{tx_hash}/cbor", get(routes::txs::by_hash_cbor::<D>))
-            .route("/txs/{tx_hash}/utxos", get(routes::txs::by_hash_utxos::<D>))
-            .route(
-                "/txs/{tx_hash}/metadata",
-                get(routes::txs::by_hash_metadata::<D>),
-            )
-            .route(
-                "/txs/{tx_hash}/metadata/cbor",
-                get(routes::txs::by_hash_metadata_cbor::<D>),
-            )
-            .route(
-                "/txs/{tx_hash}/redeemers",
-                get(routes::txs::by_hash_redeemers::<D>),
-            )
-            .route(
-                "/txs/{tx_hash}/withdrawals",
-                get(routes::txs::by_hash_withdrawals::<D>),
-            )
-            .route(
-                "/txs/{tx_hash}/delegations",
-                get(routes::txs::by_hash_delegations::<D>),
-            )
-            .route("/txs/{tx_hash}/mirs", get(routes::txs::by_hash_mirs::<D>))
-            .route(
-                "/txs/{tx_hash}/pool_updates",
-                get(routes::txs::by_hash_pool_updates::<D>),
-            )
-            .route(
-                "/txs/{tx_hash}/pool_retires",
-                get(routes::txs::by_hash_pool_retires::<D>),
-            )
-            .route(
-                "/txs/{tx_hash}/stakes",
-                get(routes::txs::by_hash_stakes::<D>),
-            )
-            .route("/assets/{subject}", get(routes::assets::by_subject::<D>))
-            .route(
-                "/assets/{subject}/addresses",
-                get(routes::assets::by_subject_addresses::<D>),
-            )
-            .route(
-                "/assets/{subject}/transactions",
-                get(routes::assets::by_subject_transactions::<D>),
-            )
-            .route(
-                "/metadata/txs/labels/{label}",
-                get(routes::metadata::by_label_json::<D>),
-            )
-            .route(
-                "/metadata/txs/labels/{label}/cbor",
-                get(routes::metadata::by_label_cbor::<D>),
-            )
-            .route(
-                "/pools/{id}/delegators",
-                get(routes::pools::by_id_delegators::<D>),
-            )
-            .route(
-                "/pools/{id}/history",
-                get(routes::pools::by_id_history::<D>),
-            )
-            .route("/pools/extended", get(routes::pools::all_extended::<D>))
-            .route(
-                "/governance/dreps/{drep_id}",
-                get(routes::governance::drep_by_id::<D>),
-            )
-            .with_state(Facade::<D> {
-                inner: domain,
-                config: cfg.clone(),
-                cache: cache::CacheService::default(),
-            })
-            .layer(
-                trace::TraceLayer::new_for_http()
-                    .make_span_with(trace::DefaultMakeSpan::new().level(Level::INFO))
-                    .on_response(trace::DefaultOnResponse::new().level(Level::INFO)),
-            )
-            .layer(if cfg.permissive_cors.unwrap_or_default() {
-                CorsLayer::permissive()
-            } else {
-                CorsLayer::new()
-            });
-        let app = NormalizePathLayer::trim_trailing_slash().layer(app);
+        let app = build_router(cfg.clone(), domain);
 
         let listener = tokio::net::TcpListener::bind(cfg.listen_address)
             .await

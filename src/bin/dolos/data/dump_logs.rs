@@ -2,7 +2,8 @@ use std::marker::PhantomData;
 
 use comfy_table::Table;
 use dolos_cardano::{
-    eras::load_chain_summary_from_state, eras::log_epoch_range_to_key_range,
+    eras::load_chain_summary_from_state,
+    eras::log_epoch_range_to_key_range,
     model::{PParamKind, RewardLog},
     ChainSummary, EpochState, StakeLog,
 };
@@ -220,7 +221,10 @@ impl TableRow for EpochState {
                     self.initial_pots.stake_deposits().to_string(),
                     self.initial_pots.fees.to_string(),
                     nonce,
-                    rolling.map(|x| x.blocks_minted).unwrap_or_default().to_string(),
+                    rolling
+                        .map(|x| x.blocks_minted)
+                        .unwrap_or_default()
+                        .to_string(),
                 ]
             }
         }
@@ -343,9 +347,7 @@ impl TableRow for EpochPParams {
                     | dolos_cardano::model::PParamValue::DecentralizationConstant(r) => {
                         rational_to_f64(r)
                     }
-                    dolos_cardano::model::PParamValue::PoolPledgeInfluence(r) => {
-                        rational_to_f64(r)
-                    }
+                    dolos_cardano::model::PParamValue::PoolPledgeInfluence(r) => rational_to_f64(r),
                     _ => 0.0,
                 },
                 None => 0.0,
@@ -363,7 +365,10 @@ impl TableRow for EpochPParams {
             get_rational(pparams, PParamKind::ExpansionRate).to_string(),
             get_rational(pparams, PParamKind::TreasuryGrowthRate).to_string(),
             get_rational(pparams, PParamKind::DecentralizationConstant).to_string(),
-            pparams.desired_number_of_stake_pools().unwrap_or(0).to_string(),
+            pparams
+                .desired_number_of_stake_pools()
+                .unwrap_or(0)
+                .to_string(),
             pparams.min_pool_cost().unwrap_or(0).to_string(),
             get_rational(pparams, PParamKind::PoolPledgeInfluence).to_string(),
         ]
