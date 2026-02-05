@@ -15,8 +15,9 @@ use blockfrost_openapi::models::{
 };
 
 use dolos_cardano::{
+    drep_to_entity_key,
     indexes::{AsyncCardanoQueryExt, CardanoIndexExt, SlotOrder},
-    model::AccountState,
+    model::{AccountState, DRepState},
     pallas_extras, ChainSummary, RewardLog,
 };
 use dolos_core::{ArchiveStore as _, Domain, EntityKey};
@@ -73,6 +74,7 @@ struct AccountModelBuilder<'a> {
     stake_address: Option<StakeAddress>,
     tip_slot: Option<u64>,
     chain: Option<&'a ChainSummary>,
+    drep: Option<DRepState>,
 }
 
 impl<'a> IntoModel<AccountContent> for AccountModelBuilder<'a> {
@@ -104,6 +106,24 @@ impl<'a> IntoModel<AccountContent> for AccountModelBuilder<'a> {
             .or(self.account_state.retired_pool.as_ref())
             .map(bech32_pool)
             .transpose()?;
+
+        // let drep_id = match self.drep {
+        //     Some(x) => match (self.account_state.vote_delegated_at, x.registrated_at) {
+        //         (Some(delegated_at), Some(registrated_at)) => {
+        //             if registrated_at >= delegated_at {
+        //                 None
+        //             } else {
+        //                 Some(bech32_drep(&x.identifier)?)
+        //             }
+        //         }
+        //         _ => None,
+        //     },
+        //     _ => self
+        //         .account_state
+        //         .delegated_drep_at(current_epoch)
+        //         .map(bech32_drep)
+        //         .transpose()?, // Special drep.,
+        // };
 
         let drep_id = self
             .account_state
@@ -152,6 +172,7 @@ pub async fn by_stake<D>(
 ) -> Result<Json<AccountContent>, StatusCode>
 where
     Option<AccountState>: From<D::Entity>,
+    Option<DRepState>: From<D::Entity>,
     D: Domain + Clone + Send + Sync + 'static,
 {
     let account_key = parse_account_key_param(&stake_address)?;
@@ -172,11 +193,20 @@ where
         .get_chain_summary()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    let (current_epoch, _) = chain.slot_epoch(tip_slot);
+    let drep = match state.delegated_drep_at(current_epoch) {
+        Some(x) => domain
+            .read_cardano_entity::<DRepState>(drep_to_entity_key(x))
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+        None => None,
+    };
+
     let model = AccountModelBuilder {
         account_state: state,
         stake_address: Some(account_key.address),
         tip_slot: Some(tip_slot),
         chain: Some(&chain),
+        drep,
     }
     .into_model()?;
 

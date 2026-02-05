@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
-use dolos_core::{ChainError, Domain, Genesis, StateStore};
+use dolos_core::{BlockSlot, ChainError, Domain, Genesis, StateStore, TxOrder};
 use pallas::{codec::minicbor, ledger::primitives::StakeCredential};
 use tracing::debug;
 
@@ -62,7 +62,7 @@ impl BoundaryWork {
     }
 
     fn should_retire_drep(&self, drep: &DRepState) -> bool {
-        let Some(unregistered_at) = drep.unregistered_at else {
+        let Some((unregistered_at, _)) = drep.unregistered_at else {
             return false;
         };
 
@@ -78,7 +78,7 @@ impl BoundaryWork {
 
         let last_activity_slot = drep
             .last_active_slot
-            .unwrap_or(drep.initial_slot.unwrap_or_default());
+            .unwrap_or(drep.registrated_at.map(|x| x.0).unwrap_or_default());
 
         let (last_activity_epoch, _) = self.chain_summary.slot_epoch(last_activity_slot);
 
@@ -87,6 +87,16 @@ impl BoundaryWork {
         let expiring_epoch = last_activity_epoch + pparams.ensure_drep_inactivity_period()?;
 
         Ok(expiring_epoch <= self.starting_epoch_no())
+    }
+
+    fn is_reregistering_drep(&self, drep: &DRepState) -> Option<(BlockSlot, TxOrder)> {
+        let registered_at = drep.registrated_at?;
+        let (registered_epoch, _) = self.chain_summary.slot_epoch(registered_at.0);
+
+        if self.starting_epoch_no() == registered_epoch + 1 {
+            return Some(registered_at);
+        }
+        None
     }
 
     fn load_drep_data<D: Domain>(&mut self, state: &D::State) -> Result<(), ChainError> {
@@ -99,6 +109,9 @@ impl BoundaryWork {
                 self.retiring_dreps.push(drep.identifier);
             } else if self.should_expire_drep(&drep)? {
                 self.expiring_dreps.push(drep.identifier.clone());
+            } else if let Some(registered_at) = self.is_reregistering_drep(&drep) {
+                self.reregistrating_dreps
+                    .push((drep.identifier.clone(), registered_at));
             }
         }
 
@@ -296,6 +309,7 @@ impl BoundaryWork {
             retiring_pools: Default::default(),
             expiring_dreps: Default::default(),
             retiring_dreps: Default::default(),
+            reregistrating_dreps: Default::default(),
             enacting_proposals: Default::default(),
             dropping_proposals: Default::default(),
 

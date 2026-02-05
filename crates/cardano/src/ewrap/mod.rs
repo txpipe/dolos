@@ -3,7 +3,9 @@ use std::{
     sync::Arc,
 };
 
-use dolos_core::{config::CardanoConfig, BlockSlot, ChainError, Domain, EntityKey, Genesis};
+use dolos_core::{
+    config::CardanoConfig, BlockSlot, ChainError, Domain, EntityKey, Genesis, TxOrder,
+};
 use pallas::ledger::primitives::{conway::DRep, StakeCredential};
 use tracing::{debug, instrument};
 
@@ -129,6 +131,7 @@ pub struct BoundaryWork {
     // should turn it into a HashSet once we have the update in Pallas.
     pub expiring_dreps: Vec<DRep>,
     pub retiring_dreps: Vec<DRep>,
+    pub reregistrating_dreps: Vec<(DRep, (BlockSlot, TxOrder))>,
 
     // computed via visitors
     pub deltas: WorkDeltas,
