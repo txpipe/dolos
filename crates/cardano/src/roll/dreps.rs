@@ -1,16 +1,16 @@
-use std::ops::Deref as _;
+use std::{collections::HashMap, ops::Deref as _};
 
-use dolos_core::{BlockSlot, ChainError, NsKey};
+use dolos_core::{BlockSlot, ChainError, NsKey, TxoRef};
 use pallas::ledger::{
-    primitives::conway::{self, Anchor, DRep},
+    primitives::conway::{self, Anchor, DRep, Voter},
     traverse::{MultiEraBlock, MultiEraCert, MultiEraTx},
 };
 use serde::{Deserialize, Serialize};
 
 use super::WorkDeltas;
 use crate::{
-    drep_to_entity_key, model::DRepState, pallas_extras::stake_cred_to_drep, roll::BlockVisitor,
-    FixedNamespace as _,
+    drep_to_entity_key, model::DRepState, owned::OwnedMultiEraOutput,
+    pallas_extras::stake_cred_to_drep, roll::BlockVisitor, FixedNamespace as _,
 };
 
 fn cert_drep(cert: &MultiEraCert) -> Option<DRep> {
@@ -19,10 +19,6 @@ fn cert_drep(cert: &MultiEraCert) -> Option<DRep> {
             conway::Certificate::RegDRepCert(cert, _, _) => Some(stake_cred_to_drep(cert)),
             conway::Certificate::UnRegDRepCert(cert, _) => Some(stake_cred_to_drep(cert)),
             conway::Certificate::UpdateDRepCert(cert, _) => Some(stake_cred_to_drep(cert)),
-            conway::Certificate::StakeVoteDeleg(_, _, drep) => Some(drep.clone()),
-            conway::Certificate::StakeVoteRegDeleg(_, _, drep, _) => Some(drep.clone()),
-            conway::Certificate::VoteRegDeleg(_, drep, _) => Some(drep.clone()),
-            conway::Certificate::VoteDeleg(_, drep) => Some(drep.clone()),
             _ => None,
         },
         _ => None,
@@ -175,6 +171,34 @@ impl dolos_core::EntityDelta for DRepActivity {
 pub struct DRepStateVisitor;
 
 impl BlockVisitor for DRepStateVisitor {
+    fn visit_tx(
+        &mut self,
+        deltas: &mut WorkDeltas,
+        block: &MultiEraBlock,
+        tx: &MultiEraTx,
+        _: &HashMap<TxoRef, OwnedMultiEraOutput>,
+    ) -> Result<(), ChainError> {
+        let MultiEraTx::Conway(conway_tx) = tx else {
+            return Ok(());
+        };
+
+        let Some(voting_procedures) = &conway_tx.transaction_body.voting_procedures else {
+            return Ok(());
+        };
+
+        for (voter, _) in voting_procedures.iter() {
+            let drep = match voter {
+                Voter::DRepKey(hash) => DRep::Key(*hash),
+                Voter::DRepScript(hash) => DRep::Script(*hash),
+                _ => continue,
+            };
+
+            deltas.add_for_entity(DRepActivity::new(drep, block.slot()));
+        }
+
+        Ok(())
+    }
+
     fn visit_cert(
         &mut self,
         deltas: &mut WorkDeltas,

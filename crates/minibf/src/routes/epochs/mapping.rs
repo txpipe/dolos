@@ -22,31 +22,47 @@ fn cost_models_to_key_value(cost_models: &CostModels) -> Vec<(&'static str, &[i6
         .collect()
 }
 
-fn map_cost_models_raw(cost_models: &CostModels) -> HashMap<String, serde_json::Value> {
-    cost_models_to_key_value(cost_models)
-        .into_iter()
-        .map(|(k, v)| (k.to_string(), serde_json::to_value(v).unwrap()))
-        .collect()
+fn map_cost_models_raw(
+    cost_models: &CostModels,
+) -> Option<Option<HashMap<String, serde_json::Value>>> {
+    let as_vec = cost_models_to_key_value(cost_models);
+    if as_vec.is_empty() {
+        None
+    } else {
+        Some(Some(
+            as_vec
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), serde_json::to_value(v).unwrap()))
+                .collect(),
+        ))
+    }
 }
 
-fn map_cost_models_named(cost_models: &CostModels) -> HashMap<String, serde_json::Value> {
-    cost_models_to_key_value(cost_models)
-        .into_iter()
-        .map(|(k, v)| {
-            (
-                k.to_string(),
-                get_named_cost_model(
-                    match k {
-                        "PlutusV1" => 1,
-                        "PlutusV2" => 2,
-                        "PlutusV3" => 3,
-                        _ => unreachable!(),
-                    },
-                    v,
-                ),
-            )
-        })
-        .collect()
+fn map_cost_models_named(cost_models: &CostModels) -> Option<HashMap<String, serde_json::Value>> {
+    let as_vec = cost_models_to_key_value(cost_models);
+    if as_vec.is_empty() {
+        None
+    } else {
+        Some(
+            as_vec
+                .into_iter()
+                .map(|(k, v)| {
+                    (
+                        k.to_string(),
+                        get_named_cost_model(
+                            match k {
+                                "PlutusV1" => 1,
+                                "PlutusV2" => 2,
+                                "PlutusV3" => 3,
+                                _ => unreachable!(),
+                            },
+                            v,
+                        ),
+                    )
+                })
+                .collect(),
+        )
+    }
 }
 
 pub struct ParametersModelBuilder<'a> {
@@ -76,7 +92,10 @@ impl<'a> IntoModel<EpochParamContent> for ParametersModelBuilder<'a> {
             max_block_header_size: params.max_block_header_size_or_default() as i32,
             min_fee_a: params.min_fee_a_or_default() as i32,
             min_fee_b: params.min_fee_b_or_default() as i32,
-            min_utxo: params.ada_per_utxo_byte_or_default().to_string(),
+            min_utxo: params
+                .ada_per_utxo_byte()
+                .unwrap_or(genesis.shelley.protocol_params.min_utxo_value)
+                .to_string(),
             coins_per_utxo_size: params.ada_per_utxo_byte().map(|x| x.to_string()),
             coins_per_utxo_word: params.ada_per_utxo_byte().map(|x| x.to_string()),
             key_deposit: params.key_deposit_or_default().to_string(),
@@ -111,12 +130,8 @@ impl<'a> IntoModel<EpochParamContent> for ParametersModelBuilder<'a> {
                 .map(|x| rational_to_f64::<3>(&x)),
             drep_deposit: params.drep_deposit().map(|x| x.to_string()),
             drep_activity: params.drep_inactivity_period().map(|x| x.to_string()),
-            cost_models_raw: Some(Some(map_cost_models_raw(
-                &params.cost_models_for_script_languages(),
-            ))),
-            cost_models: Some(map_cost_models_named(
-                &params.cost_models_for_script_languages(),
-            )),
+            cost_models_raw: map_cost_models_raw(&params.cost_models_for_script_languages()),
+            cost_models: map_cost_models_named(&params.cost_models_for_script_languages()),
             pvt_motion_no_confidence: params
                 .pool_voting_thresholds()
                 .map(|x| rational_to_f64::<3>(&x.motion_no_confidence)),
@@ -173,7 +188,9 @@ impl<'a> IntoModel<EpochParamContent> for ParametersModelBuilder<'a> {
                 .map(|x| rational_to_f64::<3>(&x.security_voting_threshold)),
             nonce: nonce.unwrap_or_default(),
             extra_entropy: None,
-            ..Default::default()
+            decentralisation_param: rational_to_f64::<3>(
+                &params.decentralization_constant_or_default(),
+            ),
         };
 
         Ok(out)

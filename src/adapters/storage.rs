@@ -8,7 +8,7 @@
 //! implementations, passing through the backend-specific config struct. All path
 //! resolution and directory creation is handled by the caller.
 
-use std::{ops::Range, path::Path};
+use std::{ops::Range, path::Path, path::PathBuf};
 
 use dolos_core::{
     archive::{
@@ -20,8 +20,8 @@ use dolos_core::{
     },
     config::{
         ArchiveStoreConfig, FjallIndexConfig, FjallStateConfig, IndexStoreConfig,
-        RedbArchiveConfig, RedbIndexConfig, RedbStateConfig, RedbWalConfig, StateStoreConfig,
-        WalStoreConfig,
+        RedbArchiveConfig, RedbIndexConfig, RedbStateConfig, RedbWalConfig, RootConfig,
+        StateStoreConfig, StorageVersion, WalStoreConfig,
     },
     BlockBody, BlockSlot, ChainPoint, EntityDelta, EntityKey, EntityValue, IndexDelta, IndexError,
     IndexStore as CoreIndexStore, IndexWriter as CoreIndexWriter, LogEntry, LogValue, Namespace,
@@ -30,6 +30,91 @@ use dolos_core::{
     WalStore,
 };
 use serde::{de::DeserializeOwned, Serialize};
+
+use crate::prelude::Error;
+
+pub struct Stores<D>
+where
+    D: EntityDelta + Serialize + DeserializeOwned + Send + Sync + 'static,
+{
+    pub wal: WalStoreBackend<D>,
+    pub state: StateStoreBackend,
+    pub archive: ArchiveStoreBackend,
+    pub indexes: IndexStoreBackend,
+}
+
+/// Ensure the storage root directory exists.
+pub fn ensure_storage_path(config: &RootConfig) -> Result<PathBuf, Error> {
+    std::fs::create_dir_all(&config.storage.path)?;
+    Ok(config.storage.path.clone())
+}
+
+fn check_storage_version(config: &RootConfig) -> Result<(), Error> {
+    if config.storage.version != StorageVersion::V3 {
+        return Err(Error::StorageError(format!(
+            "unsupported storage version {:?}, only V3 is supported",
+            config.storage.version
+        )));
+    }
+    Ok(())
+}
+
+/// Ensure directory exists for a store path.
+fn ensure_store_path(path: &Path) -> Result<(), Error> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    Ok(())
+}
+
+pub fn open_wal_store<D>(config: &RootConfig) -> Result<WalStoreBackend<D>, Error>
+where
+    D: EntityDelta + Serialize + DeserializeOwned + Send + Sync + 'static,
+{
+    let path = config.storage.wal_path().unwrap_or_default();
+    ensure_store_path(&path)?;
+    Ok(WalStoreBackend::open(&path, &config.storage.wal)?)
+}
+
+pub fn open_archive_store(config: &RootConfig) -> Result<ArchiveStoreBackend, Error> {
+    let path = config.storage.archive_path().unwrap_or_default();
+    ensure_store_path(&path)?;
+    Ok(ArchiveStoreBackend::open(
+        &path,
+        dolos_cardano::model::build_schema(),
+        &config.storage.archive,
+    )?)
+}
+
+pub fn open_index_store(config: &RootConfig) -> Result<IndexStoreBackend, Error> {
+    let path = config.storage.index_path().unwrap_or_default();
+    ensure_store_path(&path)?;
+    Ok(IndexStoreBackend::open(&path, &config.storage.index)?)
+}
+
+pub fn open_state_store(config: &RootConfig) -> Result<StateStoreBackend, Error> {
+    let path = config.storage.state_path().unwrap_or_default();
+    ensure_store_path(&path)?;
+    Ok(StateStoreBackend::open(
+        &path,
+        dolos_cardano::model::build_schema(),
+        &config.storage.state,
+    )?)
+}
+
+pub fn open_data_stores<D>(config: &RootConfig) -> Result<Stores<D>, Error>
+where
+    D: EntityDelta + Serialize + DeserializeOwned + Send + Sync + 'static,
+{
+    check_storage_version(config)?;
+
+    Ok(Stores {
+        wal: open_wal_store(config)?,
+        state: open_state_store(config)?,
+        archive: open_archive_store(config)?,
+        indexes: open_index_store(config)?,
+    })
+}
 
 // ============================================================================
 // WAL Store Backend
@@ -288,7 +373,7 @@ impl StateStoreBackend {
 }
 
 pub enum StateWriterBackend {
-    Redb(<dolos_redb3::state::StateStore as CoreStateStore>::Writer),
+    Redb(Box<<dolos_redb3::state::StateStore as CoreStateStore>::Writer>),
     Fjall(<dolos_fjall::StateStore as CoreStateStore>::Writer),
 }
 
@@ -328,7 +413,7 @@ impl CoreStateWriter for StateWriterBackend {
 
     fn commit(self) -> Result<(), StateError> {
         match self {
-            Self::Redb(w) => w.commit(),
+            Self::Redb(w) => (*w).commit(),
             Self::Fjall(w) => w.commit(),
         }
     }
@@ -350,7 +435,7 @@ impl Iterator for StateEntityIterBackend {
 }
 
 pub enum StateEntityValueIterBackend {
-    Redb(<dolos_redb3::state::StateStore as CoreStateStore>::EntityValueIter),
+    Redb(Box<<dolos_redb3::state::StateStore as CoreStateStore>::EntityValueIter>),
     Fjall(<dolos_fjall::StateStore as CoreStateStore>::EntityValueIter),
 }
 
@@ -389,7 +474,9 @@ impl CoreStateStore for StateStoreBackend {
 
     fn start_writer(&self) -> Result<Self::Writer, StateError> {
         match self {
-            Self::Redb(s) => s.start_writer().map(StateWriterBackend::Redb),
+            Self::Redb(s) => s
+                .start_writer()
+                .map(|writer| StateWriterBackend::Redb(Box::new(writer))),
             Self::Fjall(s) => s.start_writer().map(StateWriterBackend::Fjall),
         }
     }
@@ -415,7 +502,7 @@ impl CoreStateStore for StateStoreBackend {
         match self {
             Self::Redb(s) => s
                 .iter_entity_values(ns, key)
-                .map(StateEntityValueIterBackend::Redb),
+                .map(|iter| StateEntityValueIterBackend::Redb(Box::new(iter))),
             Self::Fjall(s) => s
                 .iter_entity_values(ns, key)
                 .map(StateEntityValueIterBackend::Fjall),
@@ -455,7 +542,7 @@ impl ArchiveStoreBackend {
 
     /// Create a no-op archive store that discards all writes.
     pub fn noop() -> Self {
-        Self::NoOp(NoOpArchiveStore::default())
+        Self::NoOp(NoOpArchiveStore)
     }
 
     /// Create an in-memory archive store.
@@ -493,7 +580,7 @@ impl ArchiveStoreBackend {
 }
 
 pub enum ArchiveWriterBackend {
-    Redb(<dolos_redb3::archive::ArchiveStore as CoreArchiveStore>::Writer),
+    Redb(Box<<dolos_redb3::archive::ArchiveStore as CoreArchiveStore>::Writer>),
     NoOp(NoOpArchiveWriter),
 }
 
@@ -526,14 +613,14 @@ impl CoreArchiveWriter for ArchiveWriterBackend {
 
     fn commit(self) -> Result<(), ArchiveError> {
         match self {
-            Self::Redb(w) => w.commit(),
+            Self::Redb(w) => (*w).commit(),
             Self::NoOp(w) => w.commit(),
         }
     }
 }
 
 pub enum ArchiveBlockIterBackend {
-    Redb(<dolos_redb3::archive::ArchiveStore as CoreArchiveStore>::BlockIter<'static>),
+    Redb(Box<<dolos_redb3::archive::ArchiveStore as CoreArchiveStore>::BlockIter<'static>>),
     NoOp(EmptyBlockIter),
 }
 
@@ -573,7 +660,7 @@ impl dolos_core::archive::Skippable for ArchiveBlockIterBackend {
 }
 
 pub enum ArchiveLogIterBackend {
-    Redb(<dolos_redb3::archive::ArchiveStore as CoreArchiveStore>::LogIter),
+    Redb(Box<<dolos_redb3::archive::ArchiveStore as CoreArchiveStore>::LogIter>),
     NoOp(EmptyLogIter),
 }
 
@@ -588,7 +675,7 @@ impl Iterator for ArchiveLogIterBackend {
 }
 
 pub enum ArchiveEntityValueIterBackend {
-    Redb(<dolos_redb3::archive::ArchiveStore as CoreArchiveStore>::EntityValueIter),
+    Redb(Box<<dolos_redb3::archive::ArchiveStore as CoreArchiveStore>::EntityValueIter>),
     NoOp(dolos_core::builtin::EmptyEntityValueIter),
 }
 
@@ -610,7 +697,8 @@ impl CoreArchiveStore for ArchiveStoreBackend {
 
     fn start_writer(&self) -> Result<Self::Writer, ArchiveError> {
         match self {
-            Self::Redb(s) => CoreArchiveStore::start_writer(s).map(ArchiveWriterBackend::Redb),
+            Self::Redb(s) => CoreArchiveStore::start_writer(s)
+                .map(|writer| ArchiveWriterBackend::Redb(Box::new(writer))),
             Self::NoOp(s) => CoreArchiveStore::start_writer(s).map(ArchiveWriterBackend::NoOp),
         }
     }
@@ -632,9 +720,8 @@ impl CoreArchiveStore for ArchiveStoreBackend {
         range: Range<LogKey>,
     ) -> Result<Self::LogIter, ArchiveError> {
         match self {
-            Self::Redb(s) => {
-                CoreArchiveStore::iter_logs(s, ns, range).map(ArchiveLogIterBackend::Redb)
-            }
+            Self::Redb(s) => CoreArchiveStore::iter_logs(s, ns, range)
+                .map(|iter| ArchiveLogIterBackend::Redb(Box::new(iter))),
             Self::NoOp(s) => {
                 CoreArchiveStore::iter_logs(s, ns, range).map(ArchiveLogIterBackend::NoOp)
             }
@@ -654,9 +741,8 @@ impl CoreArchiveStore for ArchiveStoreBackend {
         to: Option<BlockSlot>,
     ) -> Result<Self::BlockIter<'a>, ArchiveError> {
         match self {
-            Self::Redb(s) => {
-                CoreArchiveStore::get_range(s, from, to).map(ArchiveBlockIterBackend::Redb)
-            }
+            Self::Redb(s) => CoreArchiveStore::get_range(s, from, to)
+                .map(|iter| ArchiveBlockIterBackend::Redb(Box::new(iter))),
             Self::NoOp(s) => {
                 CoreArchiveStore::get_range(s, from, to).map(ArchiveBlockIterBackend::NoOp)
             }
@@ -722,7 +808,7 @@ impl IndexStoreBackend {
 
     /// Create a no-op index store that discards all writes.
     pub fn noop() -> Self {
-        Self::NoOp(NoOpIndexStore::default())
+        Self::NoOp(NoOpIndexStore)
     }
 
     /// Create an in-memory index store.
@@ -754,7 +840,7 @@ impl IndexStoreBackend {
 }
 
 pub enum IndexWriterBackend {
-    Redb(<dolos_redb3::indexes::IndexStore as CoreIndexStore>::Writer),
+    Redb(Box<<dolos_redb3::indexes::IndexStore as CoreIndexStore>::Writer>),
     Fjall(<dolos_fjall::IndexStore as CoreIndexStore>::Writer),
     NoOp(NoOpIndexWriter),
 }
@@ -778,7 +864,7 @@ impl CoreIndexWriter for IndexWriterBackend {
 
     fn commit(self) -> Result<(), IndexError> {
         match self {
-            Self::Redb(w) => w.commit(),
+            Self::Redb(w) => (*w).commit(),
             Self::Fjall(w) => w.commit(),
             Self::NoOp(w) => w.commit(),
         }
@@ -786,7 +872,7 @@ impl CoreIndexWriter for IndexWriterBackend {
 }
 
 pub enum IndexSlotIterBackend {
-    Redb(<dolos_redb3::indexes::IndexStore as CoreIndexStore>::SlotIter),
+    Redb(Box<<dolos_redb3::indexes::IndexStore as CoreIndexStore>::SlotIter>),
     Fjall(<dolos_fjall::IndexStore as CoreIndexStore>::SlotIter),
     NoOp(EmptySlotIter),
 }
@@ -818,7 +904,9 @@ impl CoreIndexStore for IndexStoreBackend {
 
     fn start_writer(&self) -> Result<Self::Writer, IndexError> {
         match self {
-            Self::Redb(s) => s.start_writer().map(IndexWriterBackend::Redb),
+            Self::Redb(s) => s
+                .start_writer()
+                .map(|writer| IndexWriterBackend::Redb(Box::new(writer))),
             Self::Fjall(s) => s.start_writer().map(IndexWriterBackend::Fjall),
             Self::NoOp(s) => s.start_writer().map(IndexWriterBackend::NoOp),
         }
@@ -893,7 +981,7 @@ impl CoreIndexStore for IndexStoreBackend {
         match self {
             Self::Redb(s) => s
                 .slots_by_tag(dimension, key, start, end)
-                .map(IndexSlotIterBackend::Redb),
+                .map(|iter| IndexSlotIterBackend::Redb(Box::new(iter))),
             Self::Fjall(s) => s
                 .slots_by_tag(dimension, key, start, end)
                 .map(IndexSlotIterBackend::Fjall),

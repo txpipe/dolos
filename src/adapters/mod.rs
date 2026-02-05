@@ -49,15 +49,46 @@ impl DomainAdapter {
     pub fn shutdown(&self) -> Result<(), DomainError> {
         tracing::info!("domain adapter: starting graceful shutdown");
 
-        self.wal
-            .shutdown()
-            .map_err(|e| DomainError::WalError(e.into()))?;
+        self.wal.shutdown().map_err(DomainError::WalError)?;
         self.state.shutdown().map_err(DomainError::StateError)?;
         self.archive.shutdown().map_err(DomainError::ArchiveError)?;
         self.indexes.shutdown().map_err(DomainError::IndexError)?;
 
         tracing::info!("domain adapter: graceful shutdown complete");
         Ok(())
+    }
+
+    pub fn get_historical_utxos(
+        &self,
+        refs: &[pallas::interop::utxorpc::TxoRef],
+    ) -> Option<pallas::interop::utxorpc::UtxoMap> {
+        if refs.is_empty() {
+            return Some(Default::default());
+        }
+
+        let mut result = std::collections::HashMap::new();
+        let refs_set: std::collections::HashSet<_> =
+            refs.iter().copied().map(TxoRef::from).collect();
+
+        let iter = self.wal().iter_logs(None, None).ok()?;
+        for (_, log) in iter.rev() {
+            for (txo_ref, era_cbor) in &log.inputs {
+                if refs_set.contains(txo_ref) {
+                    let era = era_cbor.0.try_into().expect("era out of range");
+                    result.insert(txo_ref.clone().into(), (era, era_cbor.1.clone()));
+                }
+            }
+
+            if result.len() == refs.len() {
+                break;
+            }
+        }
+
+        if result.is_empty() {
+            None
+        } else {
+            Some(result)
+        }
     }
 }
 
@@ -151,39 +182,6 @@ impl pallas::interop::utxorpc::LedgerContext for DomainAdapter {
             .collect();
 
         Some(some)
-    }
-
-    fn get_historical_utxos(
-        &self,
-        refs: &[pallas::interop::utxorpc::TxoRef],
-    ) -> Option<pallas::interop::utxorpc::UtxoMap> {
-        if refs.is_empty() {
-            return Some(Default::default());
-        }
-
-        let mut result = std::collections::HashMap::new();
-        let refs_set: std::collections::HashSet<_> =
-            refs.iter().copied().map(TxoRef::from).collect();
-
-        let iter = self.wal().iter_logs(None, None).ok()?;
-        for (_, log) in iter.rev() {
-            for (txo_ref, era_cbor) in &log.inputs {
-                if refs_set.contains(txo_ref) {
-                    let era = era_cbor.0.try_into().expect("era out of range");
-                    result.insert(txo_ref.clone().into(), (era, era_cbor.1.clone()));
-                }
-            }
-
-            if result.len() == refs.len() {
-                break;
-            }
-        }
-
-        if result.is_empty() {
-            None
-        } else {
-            Some(result)
-        }
     }
 
     fn get_slot_timestamp(&self, slot: u64) -> Option<u64> {

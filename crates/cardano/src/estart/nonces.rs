@@ -66,10 +66,6 @@ pub struct BoundaryVisitor;
 
 impl super::BoundaryVisitor for BoundaryVisitor {
     fn flush(&mut self, ctx: &mut super::WorkContext) -> Result<(), ChainError> {
-        if !ctx.active_protocol.is_shelley_or_later() {
-            return Ok(());
-        }
-
         let next_slot = next_largest_stable_slot(ctx);
         let next_nonce = next_nonce(ctx);
 

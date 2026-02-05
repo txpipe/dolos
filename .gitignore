@@ -5,3 +5,5 @@ benches
 .env
 .opencode
 opencode.json
+xtask.toml
+CLAUDE.md

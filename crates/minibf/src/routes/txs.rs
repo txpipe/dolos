@@ -15,7 +15,7 @@ use blockfrost_openapi::models::{
     tx_content_withdrawals_inner::TxContentWithdrawalsInner,
 };
 
-use dolos_cardano::indexes::AsyncCardanoQueryExt;
+use dolos_cardano::{indexes::AsyncCardanoQueryExt, AccountState, DRepState, PoolState};
 use dolos_core::Domain;
 
 use crate::{
@@ -24,12 +24,15 @@ use crate::{
     Facade,
 };
 
-pub async fn by_hash<D: Domain>(
+pub async fn by_hash<D>(
     Path(tx_hash): Path<String>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<TxContent>, StatusCode>
 where
-    D: Clone + Send + Sync + 'static,
+    D: Domain + Clone + Send + Sync + 'static,
+    Option<AccountState>: From<D::Entity>,
+    Option<PoolState>: From<D::Entity>,
+    Option<DRepState>: From<D::Entity>,
 {
     let hash = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
 
@@ -37,19 +40,21 @@ where
 
     let chain = domain.get_chain_summary()?;
 
-    let builder = TxModelBuilder::new(&raw, order)?
+    let mut builder = TxModelBuilder::new(&raw, order)?
         .with_chain(chain)
         .with_historical_pparams::<D>(&domain)?;
+
+    builder.compute_deposit(&domain)?;
 
     builder.into_response()
 }
 
-pub async fn by_hash_cbor<D: Domain>(
+pub async fn by_hash_cbor<D>(
     Path(tx_hash): Path<String>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<TxContentCbor>, StatusCode>
 where
-    D: Clone + Send + Sync + 'static,
+    D: Domain + Clone + Send + Sync + 'static,
 {
     let hash = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
 
@@ -60,12 +65,12 @@ where
     tx.into_response()
 }
 
-pub async fn by_hash_utxos<D: Domain>(
+pub async fn by_hash_utxos<D>(
     Path(tx_hash): Path<String>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<TxContentUtxo>, StatusCode>
 where
-    D: Clone + Send + Sync + 'static,
+    D: Domain + Clone + Send + Sync + 'static,
 {
     let hash = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
 
@@ -99,12 +104,12 @@ where
     builder.into_response()
 }
 
-pub async fn by_hash_metadata<D: Domain>(
+pub async fn by_hash_metadata<D>(
     Path(tx_hash): Path<String>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<TxContentMetadataInner>>, StatusCode>
 where
-    D: Clone + Send + Sync + 'static,
+    D: Domain + Clone + Send + Sync + 'static,
 {
     let hash = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
 
@@ -115,12 +120,12 @@ where
     tx.into_response()
 }
 
-pub async fn by_hash_metadata_cbor<D: Domain>(
+pub async fn by_hash_metadata_cbor<D>(
     Path(tx_hash): Path<String>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<TxContentMetadataCborInner>>, StatusCode>
 where
-    D: Clone + Send + Sync + 'static,
+    D: Domain + Clone + Send + Sync + 'static,
 {
     let hash = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
 
@@ -131,12 +136,12 @@ where
     builder.into_response()
 }
 
-pub async fn by_hash_redeemers<D: Domain>(
+pub async fn by_hash_redeemers<D>(
     Path(tx_hash): Path<String>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<TxContentRedeemersInner>>, StatusCode>
 where
-    D: Clone + Send + Sync + 'static,
+    D: Domain + Clone + Send + Sync + 'static,
 {
     let hash = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
 
@@ -160,12 +165,12 @@ where
     builder.into_response()
 }
 
-pub async fn by_hash_withdrawals<D: Domain>(
+pub async fn by_hash_withdrawals<D>(
     Path(tx_hash): Path<String>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<TxContentWithdrawalsInner>>, StatusCode>
 where
-    D: Clone + Send + Sync + 'static,
+    D: Domain + Clone + Send + Sync + 'static,
 {
     let hash = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
 
@@ -176,12 +181,12 @@ where
     tx.into_response()
 }
 
-pub async fn by_hash_delegations<D: Domain>(
+pub async fn by_hash_delegations<D>(
     Path(tx_hash): Path<String>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<TxContentDelegationsInner>>, StatusCode>
 where
-    D: Clone + Send + Sync + 'static,
+    D: Domain + Clone + Send + Sync + 'static,
 {
     let hash = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
 
@@ -197,12 +202,12 @@ where
     tx.into_response()
 }
 
-pub async fn by_hash_mirs<D: Domain>(
+pub async fn by_hash_mirs<D>(
     Path(tx_hash): Path<String>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<TxContentMirsInner>>, StatusCode>
 where
-    D: Clone + Send + Sync + 'static,
+    D: Domain + Clone + Send + Sync + 'static,
 {
     let hash = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
 
@@ -215,12 +220,12 @@ where
     tx.into_response()
 }
 
-pub async fn by_hash_pool_retires<D: Domain>(
+pub async fn by_hash_pool_retires<D>(
     Path(tx_hash): Path<String>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<TxContentPoolRetiresInner>>, StatusCode>
 where
-    D: Clone + Send + Sync + 'static,
+    D: Domain + Clone + Send + Sync + 'static,
 {
     let hash = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
 
@@ -231,12 +236,12 @@ where
     tx.into_response()
 }
 
-pub async fn by_hash_pool_updates<D: Domain>(
+pub async fn by_hash_pool_updates<D>(
     Path(tx_hash): Path<String>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<TxContentPoolCertsInner>>, StatusCode>
 where
-    D: Clone + Send + Sync + 'static,
+    D: Domain + Clone + Send + Sync + 'static,
 {
     let hash = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
 
@@ -245,19 +250,20 @@ where
     let (raw, order) = domain.get_block_by_tx_hash(&hash).await?;
 
     let chain = domain.get_chain_summary()?;
-    let tx = TxModelBuilder::new(&raw, order)?
+    let mut tx = TxModelBuilder::new(&raw, order)?
         .with_network(network)
         .with_chain(chain);
+    tx.fetch_pool_metadata().await?;
 
     tx.into_response()
 }
 
-pub async fn by_hash_stakes<D: Domain>(
+pub async fn by_hash_stakes<D>(
     Path(tx_hash): Path<String>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<TxContentStakeAddrInner>>, StatusCode>
 where
-    D: Clone + Send + Sync + 'static,
+    D: Domain + Clone + Send + Sync + 'static,
 {
     let hash = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
 

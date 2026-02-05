@@ -126,9 +126,9 @@ impl ToyDomain {
         // Apply genesis state using the work unit pattern.
         // Note: We're bypassing the normal pop_work flow here, so we need to
         // manually trigger the cache refresh that would normally happen.
-        let mut genesis_work = dolos_cardano::CardanoWorkUnit::Genesis(
+        let mut genesis_work = dolos_cardano::CardanoWorkUnit::Genesis(Box::new(
             dolos_cardano::genesis::GenesisWorkUnit::new(config, genesis),
-        );
+        ));
         execute_work_unit(&domain, &mut genesis_work).unwrap();
 
         // Manually refresh the chain cache after genesis since we bypassed pop_work.
@@ -259,13 +259,6 @@ impl pallas::interop::utxorpc::LedgerContext for ToyDomain {
     }
 
     fn get_slot_timestamp(&self, _slot: u64) -> Option<u64> {
-        None
-    }
-
-    fn get_historical_utxos(
-        &self,
-        _refs: &[pallas::interop::utxorpc::TxoRef],
-    ) -> Option<pallas::interop::utxorpc::UtxoMap> {
         None
     }
 }

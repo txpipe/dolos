@@ -145,13 +145,13 @@ impl<'a> IntoModel<Vec<AccountAddressesContentInner>> for AccountModelBuilder<'a
     }
 }
 
-pub async fn by_stake<D: Domain>(
+pub async fn by_stake<D>(
     Path(stake_address): Path<String>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<AccountContent>, StatusCode>
 where
     Option<AccountState>: From<D::Entity>,
-    D: Clone + Send + Sync + 'static,
+    D: Domain + Clone + Send + Sync + 'static,
 {
     let account_key = parse_account_key_param(&stake_address)?;
 
@@ -182,14 +182,14 @@ where
     Ok(Json(model))
 }
 
-pub async fn by_stake_addresses<D: Domain>(
+pub async fn by_stake_addresses<D>(
     Path(stake_address): Path<String>,
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<AccountAddressesContentInner>>, Error>
 where
     Option<AccountState>: From<D::Entity>,
-    D: Clone + Send + Sync + 'static,
+    D: Domain + Clone + Send + Sync + 'static,
 {
     let pagination = Pagination::try_from(params)?;
     pagination.enforce_max_scan_limit()?;
@@ -243,13 +243,13 @@ where
     Ok(Json(items))
 }
 
-pub async fn by_stake_utxos<D: Domain>(
+pub async fn by_stake_utxos<D>(
     Path(address): Path<String>,
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<AddressUtxoContentInner>>, Error>
 where
-    D: Clone + Send + Sync + 'static,
+    D: Domain + Clone + Send + Sync + 'static,
 {
     let pagination = Pagination::try_from(params)?;
 
@@ -441,7 +441,7 @@ impl IntoModel<Vec<AccountAddressesContentInner>>
     }
 }
 
-pub async fn by_stake_actions<D: Domain, F, T>(
+pub async fn by_stake_actions<D, F, T>(
     stake_address: &str,
     pagination: Pagination,
     domain: Facade<D>,
@@ -456,7 +456,7 @@ where
         Epoch,
         Network,
     ) -> Result<Option<T>, StatusCode>,
-    D: Clone + Send + Sync + 'static,
+    D: Domain + Clone + Send + Sync + 'static,
 {
     let account_key = parse_account_key_param(stake_address)?;
 
@@ -501,14 +501,14 @@ where
     Ok(builder.items)
 }
 
-pub async fn by_stake_delegations<D: Domain>(
+pub async fn by_stake_delegations<D>(
     Path(stake_address): Path<String>,
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<AccountDelegationContentInner>>, Error>
 where
     Option<AccountState>: From<D::Entity>,
-    D: Clone + Send + Sync + 'static,
+    D: Domain + Clone + Send + Sync + 'static,
 {
     let pagination = Pagination::try_from(params)?;
     pagination.enforce_max_scan_limit()?;
@@ -524,14 +524,14 @@ where
     Ok(Json(items))
 }
 
-pub async fn by_stake_registrations<D: Domain>(
+pub async fn by_stake_registrations<D>(
     Path(stake_address): Path<String>,
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<AccountRegistrationContentInner>>, Error>
 where
     Option<AccountState>: From<D::Entity>,
-    D: Clone + Send + Sync + 'static,
+    D: Domain + Clone + Send + Sync + 'static,
 {
     let pagination = Pagination::try_from(params)?;
     pagination.enforce_max_scan_limit()?;
@@ -547,14 +547,14 @@ where
     Ok(Json(items))
 }
 
-pub async fn by_stake_rewards<D: Domain>(
+pub async fn by_stake_rewards<D>(
     Path(stake_address): Path<String>,
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<AccountRewardContentInner>>, Error>
 where
     Option<AccountState>: From<D::Entity>,
-    D: Clone + Send + Sync + 'static,
+    D: Domain + Clone + Send + Sync + 'static,
 {
     let pagination = Pagination::try_from(params)?;
     let account_key = parse_account_key_param(&stake_address)?;

@@ -23,6 +23,7 @@ rayon = "1.11.0"
 
 serde_json = { workspace = true, optional = true }
 self_cell = "1.2.0"
+bech32 = { workspace = true, optional = true }
 
 
 [dev-dependencies]
@@ -32,3 +33,4 @@ serde_json = "1.0.140"
 [features]
 include-genesis = ["serde_json"]
 relaxed = []
+rupd-snapshot-dump = ["bech32"]

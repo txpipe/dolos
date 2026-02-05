@@ -49,7 +49,7 @@ pub mod include;
 
 pub use eras::*;
 pub use model::*;
-pub use utils::mutable_slots;
+pub use utils::{mutable_slots, network_from_genesis};
 
 pub type Block<'a> = MultiEraBlock<'a>;
 
@@ -62,15 +62,15 @@ pub type UtxoBody<'a> = MultiEraOutput<'a>;
 /// implementation.
 pub enum CardanoWorkUnit {
     /// Bootstrap chain from genesis configuration.
-    Genesis(genesis::GenesisWorkUnit),
+    Genesis(Box<genesis::GenesisWorkUnit>),
     /// Process a batch of blocks (roll forward).
-    Roll(roll::RollWorkUnit),
+    Roll(Box<roll::RollWorkUnit>),
     /// Compute rewards at stability window boundary.
-    Rupd(rupd::RupdWorkUnit),
+    Rupd(Box<rupd::RupdWorkUnit>),
     /// Handle epoch boundary wrap-up processing.
-    Ewrap(ewrap::EwrapWorkUnit),
+    Ewrap(Box<ewrap::EwrapWorkUnit>),
     /// Handle epoch start processing.
-    Estart(estart::EstartWorkUnit),
+    Estart(Box<estart::EstartWorkUnit>),
     /// Signal forced stop at configured epoch.
     ForcedStop,
 }
@@ -444,7 +444,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
         Ok(last)
     }
 
-    fn pop_work<D: Domain>(&mut self, domain: &D) -> Option<CardanoWorkUnit>
+    fn pop_work<D>(&mut self, domain: &D) -> Option<CardanoWorkUnit>
     where
         D: Domain<Chain = Self, Entity = CardanoEntity, EntityDelta = CardanoDelta>,
     {
@@ -469,9 +469,8 @@ impl dolos_core::ChainLogic for CardanoLogic {
             InternalWorkUnit::Genesis => {
                 // Genesis modifies era summaries, schedule cache refresh
                 self.needs_cache_refresh = true;
-                Some(CardanoWorkUnit::Genesis(genesis::GenesisWorkUnit::new(
-                    self.config.clone(),
-                    domain.genesis(),
+                Some(CardanoWorkUnit::Genesis(Box::new(
+                    genesis::GenesisWorkUnit::new(self.config.clone(), domain.genesis()),
                 )))
             }
             InternalWorkUnit::Blocks(mut batch) => {
@@ -499,31 +498,28 @@ impl dolos_core::ChainLogic for CardanoLogic {
                     return None;
                 }
 
-                Some(CardanoWorkUnit::Roll(roll::RollWorkUnit::new(
+                Some(CardanoWorkUnit::Roll(Box::new(roll::RollWorkUnit::new(
                     batch,
                     domain.genesis(),
                     true, // live mode
-                )))
+                ))))
             }
-            InternalWorkUnit::Rupd(slot) => Some(CardanoWorkUnit::Rupd(rupd::RupdWorkUnit::new(
-                slot,
-                domain.genesis(),
+            InternalWorkUnit::Rupd(slot) => Some(CardanoWorkUnit::Rupd(Box::new(
+                rupd::RupdWorkUnit::new(slot, domain.genesis()),
             ))),
             InternalWorkUnit::EWrap(slot) => {
                 // Rewards are loaded from state store during EWRAP load phase
-                Some(CardanoWorkUnit::Ewrap(ewrap::EwrapWorkUnit::new(
+                Some(CardanoWorkUnit::Ewrap(Box::new(ewrap::EwrapWorkUnit::new(
                     slot,
                     self.config.clone(),
                     domain.genesis(),
-                )))
+                ))))
             }
             InternalWorkUnit::EStart(slot) => {
                 // EStart may trigger era transitions, schedule cache refresh
                 self.needs_cache_refresh = true;
-                Some(CardanoWorkUnit::Estart(estart::EstartWorkUnit::new(
-                    slot,
-                    self.config.clone(),
-                    domain.genesis(),
+                Some(CardanoWorkUnit::Estart(Box::new(
+                    estart::EstartWorkUnit::new(slot, self.config.clone(), domain.genesis()),
                 )))
             }
             InternalWorkUnit::ForcedStop => Some(CardanoWorkUnit::ForcedStop),

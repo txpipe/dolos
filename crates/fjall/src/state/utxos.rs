@@ -38,13 +38,13 @@ pub fn apply_delta(
     }
 
     // Remove consumed UTxOs
-    for (txo_ref, _) in &delta.consumed_utxo {
+    for txo_ref in delta.consumed_utxo.keys() {
         let key = encode_txo_ref(txo_ref);
         batch.remove(keyspace, key);
     }
 
     // Remove undone UTxOs (rollback: remove previously produced)
-    for (txo_ref, _) in &delta.undone_utxo {
+    for txo_ref in delta.undone_utxo.keys() {
         let key = encode_txo_ref(txo_ref);
         batch.remove(keyspace, key);
     }
@@ -68,10 +68,7 @@ pub fn get_utxos<R: Readable>(
     for txo_ref in refs {
         let key = encode_txo_ref(txo_ref);
 
-        if let Some(value) = readable
-            .get(keyspace, key)
-            .map_err(|e| Error::Fjall(e.into()))?
-        {
+        if let Some(value) = readable.get(keyspace, key).map_err(Error::Fjall)? {
             if let Some((era, cbor)) = decode_utxo_value(&value) {
                 result.insert(txo_ref.clone(), Arc::new(EraCbor(era, cbor)));
             }
@@ -104,7 +101,7 @@ impl UtxosIterator {
         // Using Readable::iter() enables snapshot-based iteration
         for guard in readable.iter(keyspace) {
             // fjall's Guard::into_inner() gives us both key and value
-            let (key_bytes, value_bytes) = guard.into_inner().map_err(|e| Error::Fjall(e))?;
+            let (key_bytes, value_bytes) = guard.into_inner().map_err(Error::Fjall)?;
 
             if key_bytes.len() == TXO_REF_SIZE {
                 let txo_ref = decode_txo_ref(&key_bytes);

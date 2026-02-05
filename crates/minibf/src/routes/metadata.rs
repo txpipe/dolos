@@ -121,13 +121,13 @@ impl IntoModel<Vec<TxMetadataLabelCborInner>> for MetadataHistoryModelBuilder {
     }
 }
 
-async fn by_label<D: Domain>(
+async fn by_label<D>(
     label: &str,
     pagination: PaginationParameters,
     domain: &Facade<D>,
 ) -> Result<MetadataHistoryModelBuilder, Error>
 where
-    D: Clone + Send + Sync + 'static,
+    D: Domain + Clone + Send + Sync + 'static,
 {
     let label: u64 = label.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
     let pagination = Pagination::try_from(pagination)?;
@@ -155,26 +155,26 @@ where
     Ok(builder)
 }
 
-pub async fn by_label_json<D: Domain>(
+pub async fn by_label_json<D>(
     Path(label): Path<String>,
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<TxMetadataLabelJsonInner>>, Error>
 where
-    D: Clone + Send + Sync + 'static,
+    D: Domain + Clone + Send + Sync + 'static,
 {
     let builder = by_label(&label, params, &domain).await?;
 
     Ok(builder.into_model().map(Json)?)
 }
 
-pub async fn by_label_cbor<D: Domain>(
+pub async fn by_label_cbor<D>(
     Path(label): Path<String>,
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<TxMetadataLabelCborInner>>, Error>
 where
-    D: Clone + Send + Sync + 'static,
+    D: Domain + Clone + Send + Sync + 'static,
 {
     let builder = by_label(&label, params, &domain).await?;
 

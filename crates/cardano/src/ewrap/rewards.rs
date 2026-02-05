@@ -112,7 +112,12 @@ impl super::BoundaryVisitor for BoundaryVisitor {
             .push(account.credential.clone());
 
         if !account.is_registered() {
-            debug!(account=%id, amount=reward.total_value(), "reward is not spendable at ewrap");
+            warn!(
+                account=%id,
+                credential=?account.credential,
+                amount=reward.total_value(),
+                "reward not applied (unregistered account)"
+            );
             ctx.rewards.return_reward(reward.total_value());
             return Ok(());
         }
@@ -137,7 +142,8 @@ impl super::BoundaryVisitor for BoundaryVisitor {
     }
 
     fn flush(&mut self, ctx: &mut super::BoundaryWork) -> Result<(), ChainError> {
-        ctx.rewards.drain_unspendable();
+        let drained = ctx.rewards.drain_unspendable();
+        ctx.applied_reward_credentials.extend(drained);
 
         for delta in self.deltas.drain(..) {
             ctx.add_delta(delta);
