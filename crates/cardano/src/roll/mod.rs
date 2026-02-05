@@ -54,6 +54,7 @@ pub trait BlockVisitor {
         genesis: &Genesis,
         pparams: &PParamsSet,
         epoch: Epoch,
+        epoch_start: u64,
         protocol: u16,
     ) -> Result<(), ChainError> {
         Ok(())
@@ -208,6 +209,7 @@ pub struct DeltaBuilder<'a> {
     work: &'a mut WorkBlock,
     active_params: &'a PParamsSet,
     epoch: Epoch,
+    epoch_start: u64,
     protocol: u16,
     utxos: &'a HashMap<TxoRef, OwnedMultiEraOutput>,
 
@@ -228,6 +230,7 @@ impl<'a> DeltaBuilder<'a> {
         protocol: u16,
         active_params: &'a PParamsSet,
         epoch: Epoch,
+        epoch_start: u64,
         work: &'a mut WorkBlock,
         utxos: &'a HashMap<TxoRef, OwnedMultiEraOutput>,
     ) -> Self {
@@ -237,6 +240,7 @@ impl<'a> DeltaBuilder<'a> {
             work,
             active_params,
             epoch,
+            epoch_start,
             protocol,
             utxos,
             account_state: Default::default(),
@@ -263,6 +267,7 @@ impl<'a> DeltaBuilder<'a> {
             &self.genesis,
             self.active_params,
             self.epoch,
+            self.epoch_start,
             self.protocol,
         );
 
@@ -346,6 +351,7 @@ pub fn compute_delta<D: Domain>(
     let (epoch, _) = cache.eras.slot_epoch(batch.first_slot());
 
     let (protocol, _) = cache.eras.protocol_and_era_for_epoch(epoch);
+    let epoch_start = cache.eras.epoch_start(epoch as u64);
 
     debug!(
         from = batch.first_slot(),
@@ -363,6 +369,7 @@ pub fn compute_delta<D: Domain>(
             *protocol,
             &active_params,
             epoch,
+            epoch_start,
             block,
             &batch.utxos_decoded,
         );

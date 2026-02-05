@@ -8,9 +8,10 @@ use pallas::{
             alonzo::{
                 InstantaneousRewardSource, InstantaneousRewardTarget, MoveInstantaneousReward,
             },
+            conway::RationalNumber,
             Epoch,
         },
-        traverse::{fees::compute_byron_fee, Era, MultiEraBlock, MultiEraCert, MultiEraTx},
+        traverse::{fees::compute_byron_fee, MultiEraBlock, MultiEraCert, MultiEraTx},
     },
 };
 use serde::{Deserialize, Serialize};
@@ -41,6 +42,7 @@ pub struct EpochStatsUpdate {
     drep_refunds: Lovelace,
     treasury_donations: Lovelace,
     reserve_mirs: Lovelace,
+    non_overlay_blocks_minted: u32,
 }
 
 impl dolos_core::EntityDelta for EpochStatsUpdate {
@@ -72,6 +74,7 @@ impl dolos_core::EntityDelta for EpochStatsUpdate {
         stats.drep_refunds += self.drep_refunds;
         stats.treasury_donations += self.treasury_donations;
         stats.reserve_mirs += self.reserve_mirs;
+        stats.non_overlay_blocks_minted += self.non_overlay_blocks_minted;
 
         stats.registered_pools = stats
             .registered_pools
@@ -174,18 +177,42 @@ pub struct EpochStateVisitor {
     nonces_delta: Option<NoncesUpdate>,
 }
 
+fn is_overlay_slot(first_slot: u64, d: &RationalNumber, slot: u64) -> bool {
+    let s = slot.saturating_sub(first_slot) as u128;
+    let numer = d.numerator as u128;
+    let denom = d.denominator as u128;
+
+    if denom == 0 {
+        return false;
+    }
+
+    let step = |x: u128| (x.saturating_mul(numer).saturating_add(denom - 1)) / denom;
+
+    step(s) < step(s + 1)
+}
+
 impl BlockVisitor for EpochStateVisitor {
     fn visit_root(
         &mut self,
         _: &mut WorkDeltas,
         block: &MultiEraBlock,
         _: &Genesis,
-        _: &PParamsSet,
+        pparams: &PParamsSet,
         _: Epoch,
+        epoch_start: u64,
         _: u16,
     ) -> Result<(), ChainError> {
         self.stats_delta = Some(EpochStatsUpdate::default());
+        if let Some(stats) = self.stats_delta.as_mut() {
+            let is_overlay = match pparams.ensure_d().ok() {
+                Some(d) => is_overlay_slot(epoch_start, &d, block.header().slot()),
+                None => false,
+            };
 
+            if !is_overlay {
+                stats.non_overlay_blocks_minted += 1;
+            }
+        }
         // we only track nonces for Shelley and later
         if block.era() >= pallas::ledger::traverse::Era::Shelley {
             self.nonces_delta = Some(NoncesUpdate {

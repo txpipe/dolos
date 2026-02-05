@@ -331,6 +331,7 @@ impl BlockVisitor for ProposalVisitor {
         genesis: &Genesis,
         pparams: &PParamsSet,
         epoch: Epoch,
+        _: u64,
         protocol: u16,
     ) -> Result<(), ChainError> {
         self.validity_period = pparams.governance_action_validity_period();

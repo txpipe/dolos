@@ -74,7 +74,9 @@ impl SnapshotConfig {
 // ---------------------------------------------------------------------------
 
 fn load_xtask_config() -> Result<XtaskConfig> {
-    let repo_root = std::env::current_dir().context("detecting repo root")?;
+    let repo_root = std::env::var("CARGO_MANIFEST_DIR")
+        .map(PathBuf::from)
+        .or_else(|_| std::env::current_dir().context("detecting repo root"))?;
     let config_path = repo_root.join("xtask.toml");
     let raw = std::fs::read_to_string(&config_path)
         .with_context(|| format!("reading {}", config_path.display()))?;
@@ -477,6 +479,14 @@ mod fixtures {
         pub const STAKE: &str = include_str!("fixtures/mainnet-238/stake-236.csv");
         pub const REWARDS: &str = include_str!("fixtures/mainnet-238/rewards.csv");
     }
+    pub mod mainnet_239 {
+        pub const EPOCHS: &str = include_str!("fixtures/mainnet-239/epochs.csv");
+        pub const PPARAMS: &str = include_str!("fixtures/mainnet-239/pparams.csv");
+        pub const ERAS: &str = include_str!("fixtures/mainnet-239/eras.csv");
+        pub const DELEGATION: &str = include_str!("fixtures/mainnet-239/delegation-237.csv");
+        pub const STAKE: &str = include_str!("fixtures/mainnet-239/stake-237.csv");
+        pub const REWARDS: &str = include_str!("fixtures/mainnet-239/rewards.csv");
+    }
     pub mod mainnet_240 {
         pub const EPOCHS: &str = include_str!("fixtures/mainnet-240/epochs.csv");
         pub const PPARAMS: &str = include_str!("fixtures/mainnet-240/pparams.csv");
@@ -555,17 +565,31 @@ fn run_epoch_pots_test(
         other => anyhow::bail!("unsupported network: {other}"),
     };
 
-    let tmp = tempfile::tempdir().context("creating temp dir")?;
-    let work_state_dir = tmp.path().join("state");
+    let keep_dir = std::env::var("EPOCH_POTS_KEEP_DIR")
+        .map(|v| !v.is_empty() && v != "0" && v.to_lowercase() != "false")
+        .unwrap_or(false);
+
+    let tmp = tempfile::Builder::new()
+        .prefix("epoch_pots_")
+        .tempdir()
+        .context("creating temp dir")?;
+    let tmp_path = tmp.path().to_path_buf();
+
+    if keep_dir {
+        let _ = tmp.keep();
+    }
+
+    let work_state_dir = tmp_path.join("state");
     copy_dir_recursive(&seed_dir.join("state"), &work_state_dir)
         .context("copying seed state")?;
 
     eprintln!(
-        "running epoch_pots test: network={}, subject_epoch={}, stop_epoch={}, work_dir={}",
+        "running epoch_pots test: network={}, subject_epoch={}, stop_epoch={}, work_dir={}{}",
         network,
         subject_epoch,
         stop_epoch,
-        tmp.path().display()
+        tmp_path.display(),
+        if keep_dir { " (KEEP)" } else { "" }
     );
 
     let harness = LedgerHarness::new(Config {
@@ -579,7 +603,7 @@ fn run_epoch_pots_test(
     })
     .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    let dumps_dir = tmp.path().join("dumps");
+    let dumps_dir = tmp_path.join("dumps");
     std::fs::create_dir_all(&dumps_dir)?;
 
     let cardano_network = dolos_cardano::network_from_genesis(&harness.domain().genesis());
@@ -644,7 +668,7 @@ fn run_epoch_pots_test(
 
     eprintln!("captured completed epoch {} from estart callback", epoch.number);
 
-    let gt_dir = tmp.path().join("ground-truth");
+    let gt_dir = tmp_path.join("ground-truth");
     std::fs::create_dir_all(&gt_dir)?;
 
     let mut failures = Vec::new();
@@ -1037,6 +1061,22 @@ fn test_mainnet_238() {
         fixtures::mainnet_238::DELEGATION,
         fixtures::mainnet_238::STAKE,
         fixtures::mainnet_238::REWARDS,
+    )
+    .unwrap();
+}
+
+#[test]
+fn test_mainnet_239() {
+    init_tracing();
+    run_epoch_pots_test(
+        "mainnet",
+        239,
+        fixtures::mainnet_239::EPOCHS,
+        fixtures::mainnet_239::PPARAMS,
+        fixtures::mainnet_239::ERAS,
+        fixtures::mainnet_239::DELEGATION,
+        fixtures::mainnet_239::STAKE,
+        fixtures::mainnet_239::REWARDS,
     )
     .unwrap();
 }

@@ -1470,6 +1470,12 @@ pub struct RollingStats {
     #[n(19)]
     #[cbor(default)]
     pub reserve_mirs: Lovelace,
+
+    /// Blocks minted in non-overlay slots (includes pools + genesis delegates).
+    #[n(20)]
+    #[cbor(default)]
+    pub non_overlay_blocks_minted: u32,
+
 }
 
 impl TransitionDefault for RollingStats {

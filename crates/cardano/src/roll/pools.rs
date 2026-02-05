@@ -155,7 +155,9 @@ impl dolos_core::EntityDelta for MintedBlocksInc {
     fn apply(&mut self, entity: &mut Option<PoolState>) {
         if let Some(entity) = entity {
             entity.blocks_minted_total += self.count;
-            entity.snapshot.unwrap_live_mut().blocks_minted += self.count;
+            let live = entity.snapshot.unwrap_live_mut();
+            live.blocks_minted += self.count;
+
         }
     }
 
@@ -235,6 +237,7 @@ impl BlockVisitor for PoolStateVisitor {
         _: &Genesis,
         pparams: &PParamsSet,
         epoch: Epoch,
+        _: u64,
         _: u16,
     ) -> Result<(), ChainError> {
         self.epoch = Some(epoch);

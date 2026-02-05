@@ -475,6 +475,7 @@ impl BlockVisitor for AccountVisitor {
         _: &Genesis,
         pparams: &PParamsSet,
         epoch: Epoch,
+        _: u64,
         _: u16,
     ) -> Result<(), ChainError> {
         self.deposit = pparams.ensure_key_deposit().ok();

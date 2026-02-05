@@ -122,6 +122,7 @@ pub struct RupdWork {
     pub snapshot: StakeSnapshot,
     pub pots: Pots,
     pub incentives: EpochIncentives,
+    pub blocks_made_total: u64,
     pub max_supply: u64,
     pub chain: ChainSummary,
     pub pparams: Option<PParamsSet>,

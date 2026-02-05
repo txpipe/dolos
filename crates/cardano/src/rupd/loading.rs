@@ -59,22 +59,6 @@ fn neutral_incentives() -> EpochIncentives {
     }
 }
 
-/// Count total pool blocks from the mark snapshot (previous epoch's pool block production).
-///
-/// This matches the Haskell ledger's BlocksMade which only tracks pool-produced blocks,
-/// not federated/overlay blocks. The count is used in the eta calculation.
-fn count_pool_blocks<D: Domain>(state: &D::State) -> Result<u64, ChainError> {
-    let pools = state.iter_entities_typed::<PoolState>(PoolState::NS, None)?;
-    let mut total = 0u64;
-    for record in pools {
-        let (_, pool) = record?;
-        if let Some(mark_snapshot) = pool.snapshot.mark() {
-            total += mark_snapshot.blocks_minted as u64;
-        }
-    }
-    Ok(total)
-}
-
 fn define_epoch_incentives(
     genesis: &Genesis,
     state: &EpochState,
@@ -284,24 +268,20 @@ impl RupdWork {
 
         let pots = epoch.initial_pots.clone();
 
-        // Count pool blocks from mark() snapshots for eta calculation.
-        // This must use POOL blocks only (not total blocks including federated),
-        // matching the Haskell ledger's BlocksMade map behavior.
-        let pool_blocks = count_pool_blocks::<D>(state)?;
-        let pool_blocks_opt = if pool_blocks > 0 {
-            Some(pool_blocks)
+        // Use non-overlay block count for eta calculation (matches ledger BlocksMade total).
+        let blocks_made_total = epoch
+            .rolling
+            .mark()
+            .map(|x| x.non_overlay_blocks_minted as u64)
+            .unwrap_or(0);
+        let blocks_made_opt = if blocks_made_total > 0 {
+            Some(blocks_made_total)
         } else {
             None
         };
 
-        debug!(
-            %current_epoch,
-            %pool_blocks,
-            total_blocks = ?epoch.rolling.mark().map(|x| x.blocks_minted),
-            "pool blocks for eta calculation"
-        );
-
-        let incentives = define_epoch_incentives(genesis, &epoch, pots.reserves, pool_blocks_opt)?;
+        let incentives =
+            define_epoch_incentives(genesis, &epoch, pots.reserves, blocks_made_opt)?;
 
         let chain = crate::load_era_summary::<D>(state)?;
 
@@ -320,6 +300,7 @@ impl RupdWork {
             pots,
             incentives,
             snapshot: StakeSnapshot::default(),
+            blocks_made_total,
         };
 
         if let Some((snapshot_epoch, performance_epoch)) = work.relevant_epochs() {
@@ -370,10 +351,7 @@ impl crate::rewards::RewardsContext for RupdWork {
     }
 
     fn epoch_blocks(&self) -> u64 {
-        // Total pool blocks in the performance epoch (mark). This includes
-        // blocks from ALL pools, not just those in the stake snapshot.
-        // This correctly handles pools created after the stake snapshot epoch.
-        self.snapshot.performance_epoch_pool_blocks
+        self.blocks_made_total
     }
 
     fn pool_stake(&self, pool: PoolHash) -> u64 {
