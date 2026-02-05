@@ -11,15 +11,39 @@ use pallas::{
 
 use dolos_core::{
     archive::ArchiveStore, AsyncQueryFacade, BlockBody, BlockSlot, ChainError, Domain, DomainError,
-    EntityKey, StateStore as _, TagDimension, TxHash, TxoRef,
+    EntityKey, IndexStore, StateStore as _, TagDimension, TxHash, TxoRef,
 };
 
 use crate::indexes::dimensions::archive;
 use crate::indexes::ext::CardanoIndexExt;
 use crate::model::{DatumState, DATUM_NS};
 
+use futures_core::Stream;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlotOrder {
+    Asc,
+    Desc,
+}
+
 #[async_trait::async_trait]
 pub trait AsyncCardanoQueryExt<D: Domain> {
+    fn blocks_by_address_stream(
+        &self,
+        address: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
+        order: SlotOrder,
+    ) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError>> + Send + 'static;
+
+    fn blocks_by_payment_stream(
+        &self,
+        payment: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
+        order: SlotOrder,
+    ) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError>> + Send + 'static;
+
     async fn blocks_by_address(
         &self,
         address: &[u8],
@@ -74,6 +98,42 @@ impl<D: Domain> AsyncCardanoQueryExt<D> for AsyncQueryFacade<D>
 where
     D: Clone + Send + Sync + 'static,
 {
+    fn blocks_by_address_stream(
+        &self,
+        address: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
+        order: SlotOrder,
+    ) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError>> + Send + 'static
+    {
+        blocks_by_tag_stream(
+            self.clone(),
+            archive::ADDRESS,
+            address.to_vec(),
+            start_slot,
+            end_slot,
+            order,
+        )
+    }
+
+    fn blocks_by_payment_stream(
+        &self,
+        payment: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
+        order: SlotOrder,
+    ) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError>> + Send + 'static
+    {
+        blocks_by_tag_stream(
+            self.clone(),
+            archive::PAYMENT,
+            payment.to_vec(),
+            start_slot,
+            end_slot,
+            order,
+        )
+    }
+
     async fn blocks_by_address(
         &self,
         address: &[u8],
@@ -265,4 +325,61 @@ where
     }
 
     Ok(out)
+}
+
+fn blocks_by_tag_stream<D>(
+    facade: AsyncQueryFacade<D>,
+    dimension: TagDimension,
+    key: Vec<u8>,
+    mut start_slot: BlockSlot,
+    mut end_slot: BlockSlot,
+    order: SlotOrder,
+) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError>> + Send + 'static
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    async_stream::try_stream! {
+        loop {
+            // we fetch slots in chunks to avoid holding the index read transaction for too long
+            // and to avoid loading all slots into memory at once
+            let slots: Vec<BlockSlot> = facade
+                .run_blocking({
+                    let key = key.clone();
+                    move |domain| {
+                        let iter = domain
+                            .indexes()
+                            .slots_by_tag(dimension, &key, start_slot, end_slot)?;
+
+                        let slots = match order {
+                            SlotOrder::Asc => iter.take(512).collect::<Result<Vec<_>, _>>()?,
+                            SlotOrder::Desc => iter.rev().take(512).collect::<Result<Vec<_>, _>>()?,
+                        };
+
+                        Ok(slots)
+                    }
+                })
+                .await?;
+
+            if slots.is_empty() {
+                break;
+            }
+
+            for slot in slots {
+                // update bounds to avoid re-fetching same slots in next iteration
+                match order {
+                    SlotOrder::Asc => start_slot = slot + 1,
+                    SlotOrder::Desc => end_slot = slot.saturating_sub(1),
+                }
+
+                let block = facade.block_by_slot(slot).await?;
+                yield (slot, block);
+            }
+
+            match order {
+                SlotOrder::Asc if start_slot > end_slot => break,
+                SlotOrder::Desc if end_slot < start_slot => break,
+                _ => {}
+            }
+        }
+    }
 }

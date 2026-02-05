@@ -9,6 +9,7 @@ use blockfrost_openapi::models::{
     address_transactions_content_inner::AddressTransactionsContentInner,
     address_utxo_content_inner::AddressUtxoContentInner,
 };
+use futures_util::{Stream, StreamExt};
 use itertools::Either;
 use pallas::ledger::{
     addresses::Address,
@@ -16,10 +17,10 @@ use pallas::ledger::{
 };
 
 use dolos_cardano::{
-    indexes::{AsyncCardanoQueryExt, CardanoIndexExt},
+    indexes::{AsyncCardanoQueryExt, CardanoIndexExt, SlotOrder},
     ChainSummary,
 };
-use dolos_core::{BlockSlot, Domain, EraCbor, TxoRef};
+use dolos_core::{BlockBody, BlockSlot, Domain, EraCbor, TxoRef};
 
 use crate::{
     error::Error,
@@ -27,8 +28,22 @@ use crate::{
     Facade,
 };
 
+impl From<Order> for SlotOrder {
+    fn from(order: Order) -> Self {
+        match order {
+            Order::Asc => SlotOrder::Asc,
+            Order::Desc => SlotOrder::Desc,
+        }
+    }
+}
+
 /// Represents a parsed address parameter
 type VKeyOrAddress = Either<Vec<u8>, Vec<u8>>;
+
+/// Stream of blocks returned by address queries
+type BlockStream = std::pin::Pin<
+    Box<dyn Stream<Item = Result<(BlockSlot, Option<BlockBody>), dolos_core::DomainError>> + Send>,
+>;
 
 enum ParsedAddress {
     Payment(Vec<u8>),
@@ -84,36 +99,31 @@ fn refs_for_address<D: Domain>(
     }
 }
 
-async fn blocks_for_address<D>(
+fn blocks_for_address_stream<D>(
     domain: &Facade<D>,
     address: &str,
     start_slot: BlockSlot,
     end_slot: BlockSlot,
-) -> Result<(Vec<(BlockSlot, Option<Vec<u8>>)>, VKeyOrAddress), Error>
+    order: SlotOrder,
+) -> Result<(BlockStream, VKeyOrAddress), Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
     match parse_address(address)? {
         ParsedAddress::Payment(addr) => Ok((
-            domain
-                .query()
-                .blocks_by_payment(&addr, start_slot, end_slot)
-                .await
-                .map_err(|err| {
-                    tracing::error!(?err);
-                    StatusCode::INTERNAL_SERVER_ERROR
-                })?,
+            Box::pin(
+                domain
+                    .query()
+                    .blocks_by_payment_stream(&addr, start_slot, end_slot, order),
+            ),
             Either::Left(addr),
         )),
         ParsedAddress::Full(addr) => Ok((
-            domain
-                .query()
-                .blocks_by_address(&addr, start_slot, end_slot)
-                .await
-                .map_err(|err| {
-                    tracing::error!(?err);
-                    StatusCode::INTERNAL_SERVER_ERROR
-                })?,
+            Box::pin(
+                domain
+                    .query()
+                    .blocks_by_address_stream(&addr, start_slot, end_slot, order),
+            ),
             Either::Right(addr),
         )),
     }
@@ -126,28 +136,21 @@ where
     let end_slot = domain.get_tip_slot()?;
     let start_slot = 0;
 
-    match parse_address(address)? {
-        ParsedAddress::Payment(addr) => Ok(domain
-            .query()
-            .blocks_by_payment(&addr, start_slot, end_slot)
-            .await
-            .map_err(|err| {
+    let (mut stream, _) =
+        blocks_for_address_stream(domain, address, start_slot, end_slot, SlotOrder::Asc)?;
+
+    while let Some(res) = stream.next().await {
+        match res {
+            Ok((_, Some(_))) => return Ok(true),
+            Err(err) => {
                 tracing::error!(?err);
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?
-            .iter()
-            .any(|(_, block)| block.is_some())),
-        ParsedAddress::Full(addr) => Ok(domain
-            .query()
-            .blocks_by_address(&addr, start_slot, end_slot)
-            .await
-            .map_err(|err| {
-                tracing::error!(?err);
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?
-            .iter()
-            .any(|(_, block)| block.is_some())),
+                return Err(StatusCode::INTERNAL_SERVER_ERROR.into());
+            }
+            _ => continue,
+        }
     }
+
+    Ok(false)
 }
 
 async fn is_asset_in_chain<D>(domain: &Facade<D>, asset: &[u8]) -> Result<bool, Error>
@@ -348,18 +351,26 @@ where
     pagination.enforce_max_scan_limit()?;
     let end_slot = domain.get_tip_slot()?;
 
-    let (blocks, address) = blocks_for_address(&domain, &address, 0, end_slot).await?;
+    let (stream, address) = blocks_for_address_stream(
+        &domain,
+        &address,
+        0,
+        end_slot,
+        SlotOrder::from(pagination.order),
+    )?;
     let chain = domain
         .get_chain_summary()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let mut blocks = blocks;
-    if matches!(pagination.order, Order::Desc) {
-        blocks.reverse();
-    }
-
     let mut matches = Vec::new();
-    for (_slot, block) in blocks {
+
+    let mut stream = Box::pin(stream);
+    while let Some(res) = stream.next().await {
+        let (_slot, block) = res.map_err(|err| {
+            tracing::error!(?err);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
         let Some(block) = block else {
             continue;
         };
@@ -395,18 +406,26 @@ where
     pagination.enforce_max_scan_limit()?;
     let end_slot = domain.get_tip_slot()?;
 
-    let (blocks, address) = blocks_for_address(&domain, &address, 0, end_slot).await?;
+    let (stream, address) = blocks_for_address_stream(
+        &domain,
+        &address,
+        0,
+        end_slot,
+        SlotOrder::from(pagination.order),
+    )?;
     let chain = domain
         .get_chain_summary()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let mut blocks = blocks;
-    if matches!(pagination.order, Order::Desc) {
-        blocks.reverse();
-    }
-
     let mut matches = Vec::new();
-    for (_slot, block) in blocks {
+
+    let mut stream = Box::pin(stream);
+    while let Some(res) = stream.next().await {
+        let (_slot, block) = res.map_err(|err| {
+            tracing::error!(?err);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
         let Some(block) = block else {
             continue;
         };
@@ -430,7 +449,6 @@ where
 
     Ok(Json(transactions))
 }
-
 
 #[cfg(test)]
 mod tests {
