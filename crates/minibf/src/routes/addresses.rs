@@ -383,13 +383,46 @@ where
     Ok(Json(transactions))
 }
 
-pub async fn txs<D: Domain>(
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_address_payment() {
+        let addr = "addr_vkh1h7wl3l3w6heru0us8mdc3v3jlahq79w49cpypsuvgjhdwp5apep";
+        let parsed = parse_address(addr);
+        assert!(matches!(parsed, Ok(ParsedAddress::Payment(_))));
+    }
+
+    #[test]
+    fn test_parse_address_shelley() {
+        let addr = "addr1q9dhugez3ka82k2kgh7r2lg0j7aztr8uell46kydfwu3vk6n8w2cdu8mn2ha278q6q25a9rc6gmpfeekavuargcd32vsvxhl7e";
+        let parsed = parse_address(addr);
+        assert!(matches!(parsed, Ok(ParsedAddress::Full(_))));
+    }
+
+    #[test]
+    fn test_parse_address_byron() {
+        let addr = "37btjrVyb4KDXBNC4haBVPCrro8AQPHwvCMp3RFhhSVWwfFmZ6wwzSK6JK1hY6wHNmtrpTf1kdbva8TCneM2YsiXT7mrzT21EacHnPpz5YyUdj64na";
+        let parsed = parse_address(addr);
+        assert!(matches!(parsed, Ok(ParsedAddress::Full(_))));
+    }
+
+    #[test]
+    fn test_parse_address_invalid() {
+        let addr = "invalid_address";
+        let parsed = parse_address(addr);
+        assert!(matches!(parsed, Err(Error::InvalidAddress)));
+    }
+}
+
+pub async fn txs<D>(
     Path(address): Path<String>,
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<String>>, Error>
 where
-    D: Clone + Send + Sync + 'static,
+    D: Domain + Clone + Send + Sync + 'static,
 {
     let pagination = Pagination::try_from(params)?;
     pagination.enforce_max_scan_limit()?;
