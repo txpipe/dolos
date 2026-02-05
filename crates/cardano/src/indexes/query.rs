@@ -469,14 +469,19 @@ where
             }
 
             for slot in slots {
+                let block = facade.block_by_slot(slot).await?;
+                yield (slot, block);
+
                 // update bounds to avoid re-fetching same slots in next iteration
                 match order {
                     SlotOrder::Asc => start_slot = slot + 1,
-                    SlotOrder::Desc => end_slot = slot.saturating_sub(1),
+                    SlotOrder::Desc => {
+                        if slot == 0 {
+                            return;
+                        }
+                        end_slot = slot - 1;
+                    }
                 }
-
-                let block = facade.block_by_slot(slot).await?;
-                yield (slot, block);
             }
 
             match order {
