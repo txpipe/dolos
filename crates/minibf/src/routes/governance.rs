@@ -78,7 +78,7 @@ impl<'a> DrepModelBuilder<'a> {
 
         self.state
             .as_ref()?
-            .registrated_at
+            .registered_at
             .map(|x| self.chain.slot_epoch(x.0).0)
     }
 
@@ -120,7 +120,7 @@ impl<'a> DrepModelBuilder<'a> {
             return false;
         };
 
-        match (state.registrated_at, state.unregistered_at) {
+        match (state.registered_at, state.unregistered_at) {
             (Some(registered), Some(unregistered)) => unregistered > registered,
             (Some(_), None) => false,
             _ => false,

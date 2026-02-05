@@ -67,7 +67,7 @@ impl dolos_core::EntityDelta for DRepRegistration {
         let entity = entity.get_or_insert_with(|| DRepState::new(self.drep.clone()));
 
         // apply changes
-        entity.registrated_at = Some((self.slot, self.txorder));
+        entity.registered_at = Some((self.slot, self.txorder));
         entity.voting_power = self.deposit;
         entity.deposit = self.deposit;
     }
@@ -75,7 +75,7 @@ impl dolos_core::EntityDelta for DRepRegistration {
     fn undo(&self, entity: &mut Option<DRepState>) {
         let entity = entity.get_or_insert_with(|| DRepState::new(self.drep.clone()));
 
-        entity.registrated_at = None;
+        entity.registered_at = None;
         entity.voting_power = 0;
         entity.deposit = self.prev_deposit.unwrap_or(0);
     }

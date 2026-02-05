@@ -78,7 +78,7 @@ impl BoundaryWork {
 
         let last_activity_slot = drep
             .last_active_slot
-            .unwrap_or(drep.registrated_at.map(|x| x.0).unwrap_or_default());
+            .unwrap_or(drep.registered_at.map(|x| x.0).unwrap_or_default());
 
         let (last_activity_epoch, _) = self.chain_summary.slot_epoch(last_activity_slot);
 
@@ -90,7 +90,7 @@ impl BoundaryWork {
     }
 
     fn is_reregistering_drep(&self, drep: &DRepState) -> Option<(BlockSlot, TxOrder)> {
-        let registered_at = drep.registrated_at?;
+        let registered_at = drep.registered_at?;
         let (registered_epoch, _) = self.chain_summary.slot_epoch(registered_at.0);
 
         if self.starting_epoch_no() == registered_epoch + 1 {

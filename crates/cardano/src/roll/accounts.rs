@@ -377,56 +377,6 @@ impl dolos_core::EntityDelta for WithdrawalInc {
     }
 }
 
-// #[derive(Debug, Clone, Serialize, Deserialize)]
-// pub struct DRepRegistration {
-//     cred: StakeCredential,
-//     slot: u64,
-//     epoch: Epoch,
-//     deposit: u64,
-// }
-
-// impl DRepRegistration {
-//     pub fn new(cred: StakeCredential, slot: u64, epoch: Epoch, deposit: u64) -> Self {
-//         Self {
-//             cred,
-//             slot,
-//             epoch,
-//             deposit,
-//         }
-//     }
-// }
-
-// impl dolos_core::EntityDelta for DRepRegistration {
-//     type Entity = AccountState;
-
-//     fn key(&self) -> NsKey {
-//         let enc = minicbor::to_vec(&self.cred).unwrap();
-//         NsKey::from((AccountState::NS, enc))
-//     }
-
-//     fn apply(&mut self, entity: &mut Option<AccountState>) {
-//         let _entity =
-//             entity.get_or_insert_with(|| AccountState::new(self.epoch, self.cred.clone()));
-
-//         tracing::debug!(
-//             slot = self.slot,
-//             account = hex::encode(minicbor::to_vec(&self.cred).unwrap()),
-//             "applying drep registration"
-//         );
-
-//         // TODO: track drep registration slot
-
-//         // TODO: find out if we need to auto-delegate to self
-//     }
-
-//     fn undo(&self, entity: &mut Option<AccountState>) {
-//         let _entity = entity.as_mut().expect("existing account");
-
-//         // todo!()
-//         // Placeholder undo logic. Ensure this does not panic.
-//     }
-// }
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssignMirRewards {
     epoch: Epoch,

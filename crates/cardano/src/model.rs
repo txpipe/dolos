@@ -1592,7 +1592,7 @@ pub fn drep_to_entity_key(value: &DRep) -> EntityKey {
 #[derive(Debug, Encode, Decode, Clone)]
 pub struct DRepState {
     #[n(0)]
-    pub registrated_at: Option<(BlockSlot, TxOrder)>,
+    pub registered_at: Option<(BlockSlot, TxOrder)>,
 
     #[n(1)]
     pub voting_power: u64,
@@ -1616,7 +1616,7 @@ pub struct DRepState {
 impl DRepState {
     pub fn new(identifier: DRep) -> Self {
         Self {
-            registrated_at: None,
+            registered_at: None,
             voting_power: 0,
             last_active_slot: None,
             unregistered_at: None,
