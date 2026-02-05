@@ -242,6 +242,7 @@ pub async fn by_hash_pool_updates<D>(
 ) -> Result<Json<Vec<TxContentPoolCertsInner>>, StatusCode>
 where
     D: Domain + Clone + Send + Sync + 'static,
+    Option<PoolState>: From<D::Entity>,
 {
     let hash = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
 
@@ -250,10 +251,12 @@ where
     let (raw, order) = domain.get_block_by_tx_hash(&hash).await?;
 
     let chain = domain.get_chain_summary()?;
+
     let mut tx = TxModelBuilder::new(&raw, order)?
         .with_network(network)
         .with_chain(chain);
     tx.fetch_pool_metadata().await?;
+    tx.set_affected_pools(&domain).await?;
 
     tx.into_response()
 }
