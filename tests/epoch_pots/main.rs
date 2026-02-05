@@ -495,6 +495,62 @@ mod fixtures {
         pub const STAKE: &str = include_str!("fixtures/mainnet-240/stake-238.csv");
         pub const REWARDS: &str = include_str!("fixtures/mainnet-240/rewards.csv");
     }
+    pub mod mainnet_241 {
+        pub const EPOCHS: &str = include_str!("fixtures/mainnet-241/epochs.csv");
+        pub const PPARAMS: &str = include_str!("fixtures/mainnet-241/pparams.csv");
+        pub const ERAS: &str = include_str!("fixtures/mainnet-241/eras.csv");
+        pub const DELEGATION: &str = include_str!("fixtures/mainnet-241/delegation-239.csv");
+        pub const STAKE: &str = include_str!("fixtures/mainnet-241/stake-239.csv");
+        pub const REWARDS: &str = include_str!("fixtures/mainnet-241/rewards.csv");
+    }
+    pub mod mainnet_242 {
+        pub const EPOCHS: &str = include_str!("fixtures/mainnet-242/epochs.csv");
+        pub const PPARAMS: &str = include_str!("fixtures/mainnet-242/pparams.csv");
+        pub const ERAS: &str = include_str!("fixtures/mainnet-242/eras.csv");
+        pub const DELEGATION: &str = include_str!("fixtures/mainnet-242/delegation-240.csv");
+        pub const STAKE: &str = include_str!("fixtures/mainnet-242/stake-240.csv");
+        pub const REWARDS: &str = include_str!("fixtures/mainnet-242/rewards.csv");
+    }
+    pub mod mainnet_243 {
+        pub const EPOCHS: &str = include_str!("fixtures/mainnet-243/epochs.csv");
+        pub const PPARAMS: &str = include_str!("fixtures/mainnet-243/pparams.csv");
+        pub const ERAS: &str = include_str!("fixtures/mainnet-243/eras.csv");
+        pub const DELEGATION: &str = include_str!("fixtures/mainnet-243/delegation-241.csv");
+        pub const STAKE: &str = include_str!("fixtures/mainnet-243/stake-241.csv");
+        pub const REWARDS: &str = include_str!("fixtures/mainnet-243/rewards.csv");
+    }
+    pub mod mainnet_246 {
+        pub const EPOCHS: &str = include_str!("fixtures/mainnet-246/epochs.csv");
+        pub const PPARAMS: &str = include_str!("fixtures/mainnet-246/pparams.csv");
+        pub const ERAS: &str = include_str!("fixtures/mainnet-246/eras.csv");
+        pub const DELEGATION: &str = include_str!("fixtures/mainnet-246/delegation-244.csv");
+        pub const STAKE: &str = include_str!("fixtures/mainnet-246/stake-244.csv");
+        pub const REWARDS: &str = include_str!("fixtures/mainnet-246/rewards.csv");
+    }
+    pub mod mainnet_247 {
+        pub const EPOCHS: &str = include_str!("fixtures/mainnet-247/epochs.csv");
+        pub const PPARAMS: &str = include_str!("fixtures/mainnet-247/pparams.csv");
+        pub const ERAS: &str = include_str!("fixtures/mainnet-247/eras.csv");
+        pub const DELEGATION: &str = include_str!("fixtures/mainnet-247/delegation-245.csv");
+        pub const STAKE: &str = include_str!("fixtures/mainnet-247/stake-245.csv");
+        pub const REWARDS: &str = include_str!("fixtures/mainnet-247/rewards.csv");
+    }
+    pub mod mainnet_248 {
+        pub const EPOCHS: &str = include_str!("fixtures/mainnet-248/epochs.csv");
+        pub const PPARAMS: &str = include_str!("fixtures/mainnet-248/pparams.csv");
+        pub const ERAS: &str = include_str!("fixtures/mainnet-248/eras.csv");
+        pub const DELEGATION: &str = include_str!("fixtures/mainnet-248/delegation-246.csv");
+        pub const STAKE: &str = include_str!("fixtures/mainnet-248/stake-246.csv");
+        pub const REWARDS: &str = include_str!("fixtures/mainnet-248/rewards.csv");
+    }
+    pub mod mainnet_250 {
+        pub const EPOCHS: &str = include_str!("fixtures/mainnet-250/epochs.csv");
+        pub const PPARAMS: &str = include_str!("fixtures/mainnet-250/pparams.csv");
+        pub const ERAS: &str = include_str!("fixtures/mainnet-250/eras.csv");
+        pub const DELEGATION: &str = include_str!("fixtures/mainnet-250/delegation-248.csv");
+        pub const STAKE: &str = include_str!("fixtures/mainnet-250/stake-248.csv");
+        pub const REWARDS: &str = include_str!("fixtures/mainnet-250/rewards.csv");
+    }
     pub mod mainnet_300 {
         pub const EPOCHS: &str = include_str!("fixtures/mainnet-300/epochs.csv");
         pub const PPARAMS: &str = include_str!("fixtures/mainnet-300/pparams.csv");
@@ -1093,6 +1149,118 @@ fn test_mainnet_240() {
         fixtures::mainnet_240::DELEGATION,
         fixtures::mainnet_240::STAKE,
         fixtures::mainnet_240::REWARDS,
+    )
+    .unwrap();
+}
+
+#[test]
+fn test_mainnet_241() {
+    init_tracing();
+    run_epoch_pots_test(
+        "mainnet",
+        241,
+        fixtures::mainnet_241::EPOCHS,
+        fixtures::mainnet_241::PPARAMS,
+        fixtures::mainnet_241::ERAS,
+        fixtures::mainnet_241::DELEGATION,
+        fixtures::mainnet_241::STAKE,
+        fixtures::mainnet_241::REWARDS,
+    )
+    .unwrap();
+}
+
+#[test]
+fn test_mainnet_242() {
+    init_tracing();
+    run_epoch_pots_test(
+        "mainnet",
+        242,
+        fixtures::mainnet_242::EPOCHS,
+        fixtures::mainnet_242::PPARAMS,
+        fixtures::mainnet_242::ERAS,
+        fixtures::mainnet_242::DELEGATION,
+        fixtures::mainnet_242::STAKE,
+        fixtures::mainnet_242::REWARDS,
+    )
+    .unwrap();
+}
+
+#[test]
+fn test_mainnet_243() {
+    init_tracing();
+    run_epoch_pots_test(
+        "mainnet",
+        243,
+        fixtures::mainnet_243::EPOCHS,
+        fixtures::mainnet_243::PPARAMS,
+        fixtures::mainnet_243::ERAS,
+        fixtures::mainnet_243::DELEGATION,
+        fixtures::mainnet_243::STAKE,
+        fixtures::mainnet_243::REWARDS,
+    )
+    .unwrap();
+}
+
+#[test]
+fn test_mainnet_246() {
+    init_tracing();
+    run_epoch_pots_test(
+        "mainnet",
+        246,
+        fixtures::mainnet_246::EPOCHS,
+        fixtures::mainnet_246::PPARAMS,
+        fixtures::mainnet_246::ERAS,
+        fixtures::mainnet_246::DELEGATION,
+        fixtures::mainnet_246::STAKE,
+        fixtures::mainnet_246::REWARDS,
+    )
+    .unwrap();
+}
+
+#[test]
+fn test_mainnet_247() {
+    init_tracing();
+    run_epoch_pots_test(
+        "mainnet",
+        247,
+        fixtures::mainnet_247::EPOCHS,
+        fixtures::mainnet_247::PPARAMS,
+        fixtures::mainnet_247::ERAS,
+        fixtures::mainnet_247::DELEGATION,
+        fixtures::mainnet_247::STAKE,
+        fixtures::mainnet_247::REWARDS,
+    )
+    .unwrap();
+}
+
+#[test]
+fn test_mainnet_248() {
+    init_tracing();
+    run_epoch_pots_test(
+        "mainnet",
+        248,
+        fixtures::mainnet_248::EPOCHS,
+        fixtures::mainnet_248::PPARAMS,
+        fixtures::mainnet_248::ERAS,
+        fixtures::mainnet_248::DELEGATION,
+        fixtures::mainnet_248::STAKE,
+        fixtures::mainnet_248::REWARDS,
+    )
+    .unwrap();
+}
+
+#[test]
+fn test_mainnet_250() {
+    init_tracing();
+    run_epoch_pots_test(
+        "mainnet",
+        250,
+        fixtures::mainnet_250::EPOCHS,
+        fixtures::mainnet_250::PPARAMS,
+        fixtures::mainnet_250::ERAS,
+        fixtures::mainnet_250::DELEGATION,
+        fixtures::mainnet_250::STAKE,
+        fixtures::mainnet_250::REWARDS,
     )
     .unwrap();
 }

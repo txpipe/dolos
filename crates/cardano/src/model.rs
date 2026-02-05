@@ -1476,6 +1476,11 @@ pub struct RollingStats {
     #[cbor(default)]
     pub non_overlay_blocks_minted: u32,
 
+    /// MIR sourced from treasury.
+    #[n(21)]
+    #[cbor(default)]
+    pub treasury_mirs: Lovelace,
+
 }
 
 impl TransitionDefault for RollingStats {
@@ -1510,6 +1515,11 @@ pub struct EndStats {
     #[n(10)]
     #[cbor(default)]
     pub unspendable_to_reserves: u64,
+
+    /// MIR sourced from treasury.
+    #[n(11)]
+    #[cbor(default)]
+    pub treasury_mirs: Lovelace,
 
     #[n(6)]
     pub proposal_invalid_refunds: Lovelace,

@@ -42,6 +42,7 @@ pub struct EpochStatsUpdate {
     drep_refunds: Lovelace,
     treasury_donations: Lovelace,
     reserve_mirs: Lovelace,
+    treasury_mirs: Lovelace,
     non_overlay_blocks_minted: u32,
 }
 
@@ -74,6 +75,7 @@ impl dolos_core::EntityDelta for EpochStatsUpdate {
         stats.drep_refunds += self.drep_refunds;
         stats.treasury_donations += self.treasury_donations;
         stats.reserve_mirs += self.reserve_mirs;
+        stats.treasury_mirs += self.treasury_mirs;
         stats.non_overlay_blocks_minted += self.non_overlay_blocks_minted;
 
         stats.registered_pools = stats
@@ -308,16 +310,21 @@ impl BlockVisitor for EpochStateVisitor {
         if let Some(cert) = pallas_extras::cert_as_mir_certificate(cert) {
             let MoveInstantaneousReward { source, target, .. } = cert;
 
-            if source == InstantaneousRewardSource::Reserves {
-                if let InstantaneousRewardTarget::StakeCredentials(creds) = target {
+            match (source, target) {
+                (InstantaneousRewardSource::Reserves, InstantaneousRewardTarget::StakeCredentials(creds)) => {
                     for (_, amount) in creds {
                         let amount = amount.max(0) as u64;
                         self.stats_delta.as_mut().unwrap().reserve_mirs += amount;
                     }
                 }
+                (InstantaneousRewardSource::Treasury, InstantaneousRewardTarget::StakeCredentials(creds)) => {
+                    for (_, amount) in creds {
+                        let amount = amount.max(0) as u64;
+                        self.stats_delta.as_mut().unwrap().treasury_mirs += amount;
+                    }
+                }
+                _ => {}
             }
-
-            // TODO: track rewards from treasury (unless there's none in mainnet)
         }
 
         Ok(())

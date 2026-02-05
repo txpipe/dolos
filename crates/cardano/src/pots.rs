@@ -176,6 +176,11 @@ pub struct PotDelta {
     #[n(23)]
     #[cbor(default)]
     pub avvm_reclamation: Lovelace,
+
+    /// MIR sourced from treasury.
+    #[n(24)]
+    #[cbor(default)]
+    pub treasury_mirs: Lovelace,
 }
 
 impl PotDelta {
@@ -205,6 +210,7 @@ impl PotDelta {
             deposit_per_account: None,
             deposit_per_pool: None,
             avvm_reclamation: 0,
+            treasury_mirs: 0,
         }
     }
 
@@ -379,6 +385,7 @@ pub fn apply_shelley_delta(mut pots: Pots, incentives: &EpochIncentives, delta: 
     pots.treasury += delta.pool_invalid_refund_count * pots.deposit_per_pool;
     pots.treasury += delta.proposal_invalid_refunds;
     pots.treasury += delta.treasury_donations;
+    pots.treasury = sub!(pots.treasury, delta.treasury_mirs);
 
     // fees pot
     pots.fees = sub!(pots.fees, incentives.used_fees);
@@ -390,6 +397,7 @@ pub fn apply_shelley_delta(mut pots: Pots, incentives: &EpochIncentives, delta: 
     pots.rewards += delta.pool_refund_count * pots.deposit_per_pool;
     pots.rewards += delta.proposal_refunds;
     pots.rewards += delta.reserve_mirs;
+    pots.rewards += delta.treasury_mirs;
 
     // we don't need to return account deposit refunds to the rewards pot because
     // these refunds are returned directly as utxos in the deregistration

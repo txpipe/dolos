@@ -123,6 +123,11 @@ fn define_end_stats(ctx: &super::BoundaryWork) -> EndStats {
     let proposal_invalid_refunds = proposal_total_refunds - proposal_valid_refunds;
 
     let incentives = ctx.rewards.incentives();
+    let treasury_mirs = ctx
+        .ending_state()
+        .rolling
+        .unwrap_live()
+        .treasury_mirs;
 
     EndStats {
         pool_deposit_count: ctx.new_pools.len() as u64,
@@ -132,6 +137,7 @@ fn define_end_stats(ctx: &super::BoundaryWork) -> EndStats {
         effective_rewards: ctx.rewards.applied_effective(),
         unspendable_to_treasury: ctx.rewards.applied_unspendable_to_treasury(),
         unspendable_to_reserves: ctx.rewards.applied_unspendable_to_reserves(),
+        treasury_mirs,
         proposal_refunds: proposal_valid_refunds,
         proposal_invalid_refunds,
         // TODO: deprecate
