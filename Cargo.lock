@@ -1260,10 +1260,12 @@ dependencies = [
 name = "dolos-cardano"
 version = "1.0.0-rc.7"
 dependencies = [
+ "async-stream",
  "async-trait",
  "bech32 0.11.1",
  "chrono",
  "dolos-core",
+ "futures-core",
  "hex",
  "itertools 0.14.0",
  "num-bigint",
@@ -1325,6 +1327,8 @@ dependencies = [
  "dolos-cardano",
  "dolos-core",
  "futures",
+ "futures-core",
+ "futures-util",
  "hex",
  "itertools 0.14.0",
  "num-bigint",

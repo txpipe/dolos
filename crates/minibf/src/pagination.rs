@@ -48,7 +48,7 @@ impl IntoResponse for PaginationError {
     }
 }
 
-#[derive(Default, Debug, Clone, Deserialize)]
+#[derive(Default, Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Order {
     #[default]
