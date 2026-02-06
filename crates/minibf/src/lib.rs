@@ -437,7 +437,13 @@ where
         } else {
             CorsLayer::new()
         });
-    app.layer(NormalizePathLayer::trim_trailing_slash())
+    
+    // Optionally nest all routes under base_path
+    if let Some(base_path) = &cfg.base_path {
+        Router::new().nest(base_path, app).layer(NormalizePathLayer::trim_trailing_slash())
+    } else {
+        app.layer(NormalizePathLayer::trim_trailing_slash())
+    }
 }
 
 impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver
