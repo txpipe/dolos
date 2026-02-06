@@ -3,8 +3,11 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use dolos_core::{BlockSlot, Domain};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+
+use crate::{error::Error, Facade};
 
 #[derive(Debug, Serialize)]
 pub enum PaginationError {
@@ -251,6 +254,32 @@ impl Pagination {
         };
 
         false
+    }
+
+    pub async fn start_and_end_slots<D: Domain>(
+        &self,
+        domain: &Facade<D>,
+    ) -> Result<(BlockSlot, BlockSlot), Error> {
+        let start_slot = match self.from.as_ref() {
+            Some(x) => domain
+                .query()
+                .slot_by_number(x.number)
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                .ok_or(StatusCode::BAD_REQUEST)?,
+            None => 0,
+        };
+        let end_slot = match self.to.as_ref() {
+            Some(x) => domain
+                .query()
+                .slot_by_number(x.number)
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                .ok_or(StatusCode::BAD_REQUEST)?,
+            None => domain.get_tip_slot()?,
+        };
+
+        Ok((start_slot, end_slot))
     }
 }
 
