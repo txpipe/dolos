@@ -18,7 +18,7 @@ use dolos_cardano::{
     indexes::{AsyncCardanoQueryExt, CardanoIndexExt, SlotOrder},
     model::{AccountState, DRepState},
     pallas_extras, ChainSummary, FixedNamespace, LeaderRewardLog, MemberRewardLog,
-    PoolDepositRefundRewardLog,
+    PoolDepositRefundLog,
 };
 use dolos_core::{ArchiveStore as _, Domain, EntityKey, LogKey, TemporalKey};
 use futures_util::StreamExt;
@@ -564,7 +564,7 @@ where
 enum AccountRewardWrapper {
     Leader((Epoch, LeaderRewardLog)),
     Member((Epoch, MemberRewardLog)),
-    PoolDepositRefund((Epoch, PoolDepositRefundRewardLog)),
+    PoolDepositRefund((Epoch, PoolDepositRefundLog)),
 }
 
 impl From<(Epoch, LeaderRewardLog)> for AccountRewardWrapper {
@@ -579,8 +579,8 @@ impl From<(Epoch, MemberRewardLog)> for AccountRewardWrapper {
     }
 }
 
-impl From<(Epoch, PoolDepositRefundRewardLog)> for AccountRewardWrapper {
-    fn from(value: (Epoch, PoolDepositRefundRewardLog)) -> Self {
+impl From<(Epoch, PoolDepositRefundLog)> for AccountRewardWrapper {
+    fn from(value: (Epoch, PoolDepositRefundLog)) -> Self {
         AccountRewardWrapper::PoolDepositRefund(value)
     }
 }
@@ -687,7 +687,7 @@ where
 
         let pool_deposit_refund = domain
             .archive()
-            .read_log_typed::<PoolDepositRefundRewardLog>(PoolDepositRefundRewardLog::NS, &log_key)
+            .read_log_typed::<PoolDepositRefundLog>(PoolDepositRefundLog::NS, &log_key)
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
         if let Some(reward) = pool_deposit_refund.filter(|reward| reward.amount > 0) {

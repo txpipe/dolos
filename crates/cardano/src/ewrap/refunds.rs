@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 use crate::{
     ewrap::{BoundaryWork, ProposalId},
     rupd::credential_to_key,
-    AccountState, CardanoDelta, CardanoEntity, FixedNamespace as _, PoolDepositRefundRewardLog,
-    PoolHash, PoolState, ProposalState,
+    AccountState, CardanoDelta, CardanoEntity, FixedNamespace as _, PoolDepositRefundLog, PoolHash,
+    PoolState, ProposalState,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -167,7 +167,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
 
                 self.log(
                     credential_to_key(&account.credential),
-                    PoolDepositRefundRewardLog {
+                    PoolDepositRefundLog {
                         amount: deposit,
                         pool_id: pool_id.to_vec(),
                     },

@@ -397,7 +397,7 @@ pub struct MemberRewardLog {
 entity_boilerplate!(MemberRewardLog, "member-rewards");
 
 #[derive(Debug, Clone, PartialEq, Eq, Decode, Encode, Default)]
-pub struct PoolDepositRefundRewardLog {
+pub struct PoolDepositRefundLog {
     #[n(0)]
     pub amount: u64,
 
@@ -405,7 +405,7 @@ pub struct PoolDepositRefundRewardLog {
     pub pool_id: Vec<u8>,
 }
 
-entity_boilerplate!(PoolDepositRefundRewardLog, "pool-deposit-refund-rewards");
+entity_boilerplate!(PoolDepositRefundLog, "pool-deposit-refunds");
 
 #[derive(Debug, Clone, PartialEq, Decode, Encode, Default)]
 pub struct StakeLog {
@@ -1804,7 +1804,7 @@ pub enum CardanoEntity {
     ProposalState(Box<ProposalState>),
     LeaderRewardLog(Box<LeaderRewardLog>),
     MemberRewardLog(Box<MemberRewardLog>),
-    PoolDepositRefundRewardLog(Box<PoolDepositRefundRewardLog>),
+    PoolDepositRefundLog(Box<PoolDepositRefundLog>),
     StakeLog(Box<StakeLog>),
     DatumState(Box<DatumState>),
     PendingRewardState(Box<PendingRewardState>),
@@ -1838,7 +1838,7 @@ variant_boilerplate!(DRepState);
 variant_boilerplate!(ProposalState);
 variant_boilerplate!(LeaderRewardLog);
 variant_boilerplate!(MemberRewardLog);
-variant_boilerplate!(PoolDepositRefundRewardLog);
+variant_boilerplate!(PoolDepositRefundLog);
 variant_boilerplate!(StakeLog);
 variant_boilerplate!(DatumState);
 variant_boilerplate!(PendingRewardState);
@@ -1855,8 +1855,8 @@ impl dolos_core::Entity for CardanoEntity {
             ProposalState::NS => ProposalState::decode_entity(ns, value).map(Into::into),
             LeaderRewardLog::NS => LeaderRewardLog::decode_entity(ns, value).map(Into::into),
             MemberRewardLog::NS => MemberRewardLog::decode_entity(ns, value).map(Into::into),
-            PoolDepositRefundRewardLog::NS => {
-                PoolDepositRefundRewardLog::decode_entity(ns, value).map(Into::into)
+            PoolDepositRefundLog::NS => {
+                PoolDepositRefundLog::decode_entity(ns, value).map(Into::into)
             }
             StakeLog::NS => StakeLog::decode_entity(ns, value).map(Into::into),
             DatumState::NS => DatumState::decode_entity(ns, value).map(Into::into),
@@ -1903,8 +1903,8 @@ impl dolos_core::Entity for CardanoEntity {
                 let (ns, enc) = MemberRewardLog::encode_entity(x);
                 (ns, enc)
             }
-            Self::PoolDepositRefundRewardLog(x) => {
-                let (ns, enc) = PoolDepositRefundRewardLog::encode_entity(x);
+            Self::PoolDepositRefundLog(x) => {
+                let (ns, enc) = PoolDepositRefundLog::encode_entity(x);
                 (ns, enc)
             }
 
@@ -1935,7 +1935,7 @@ pub fn build_schema() -> StateSchema {
     schema.insert(ProposalState::NS, NamespaceType::KeyValue);
     schema.insert(LeaderRewardLog::NS, NamespaceType::KeyValue);
     schema.insert(MemberRewardLog::NS, NamespaceType::KeyValue);
-    schema.insert(PoolDepositRefundRewardLog::NS, NamespaceType::KeyValue);
+    schema.insert(PoolDepositRefundLog::NS, NamespaceType::KeyValue);
     schema.insert(StakeLog::NS, NamespaceType::KeyValue);
     schema.insert(DatumState::NS, NamespaceType::KeyValue);
     schema.insert(PendingRewardState::NS, NamespaceType::KeyValue);
