@@ -189,7 +189,7 @@ impl TryFrom<PaginationParameters> for Pagination {
 /// page-based pagination. Endpoints that require decoding every block in the
 /// result set (sub-block pagination) are capped to this limit until we refactor
 /// the underlying data storage to support efficient offset-based access.
-const MAX_SCAN_ITEMS: u64 = 1_000;
+const MAX_SCAN_ITEMS: u64 = 110_000;
 
 impl Pagination {
     /// Reject requests that would require scanning too many items. Call this
