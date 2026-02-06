@@ -55,7 +55,7 @@ use blockfrost_openapi::models::{
 use dolos_cardano::{
     pallas_extras, AccountState, ChainSummary, DRepState, PParamsSet, PoolHash, PoolState,
 };
-use dolos_core::{Domain, EraCbor, TxHash, TxOrder, TxoIdx, TxoRef};
+use dolos_core::{BlockSlot, Domain, EraCbor, TxHash, TxOrder, TxoIdx, TxoRef};
 
 use crate::Facade;
 
@@ -311,12 +311,36 @@ impl<'a> IntoModel<String> for ScriptRef<'a> {
     }
 }
 
+#[derive(Clone)]
+pub struct UtxoBlockData {
+    pub block_slot: BlockSlot,
+    pub block_hash: Hash<32>,
+    pub tx_hash: Hash<32>,
+    pub tx_order: TxOrder,
+}
+
+impl TryFrom<(MultiEraBlock<'_>, TxOrder)> for UtxoBlockData {
+    type Error = StatusCode;
+    fn try_from(value: (MultiEraBlock<'_>, TxOrder)) -> Result<Self, Self::Error> {
+        Ok(Self {
+            block_slot: value.0.slot(),
+            block_hash: value.0.hash(),
+            tx_hash: value
+                .0
+                .txs()
+                .get(value.1)
+                .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?
+                .hash(),
+            tx_order: value.1,
+        })
+    }
+}
+
 pub struct UtxoOutputModelBuilder<'a> {
     txo_ref: TxoRef,
     output: MultiEraOutput<'a>,
     is_collateral: bool,
-    block: Option<MultiEraBlock<'a>>,
-    tx_order: Option<TxOrder>,
+    block_data: Option<UtxoBlockData>,
     consumed_by_tx: Option<TxHash>,
 }
 
@@ -330,8 +354,7 @@ impl<'a> UtxoOutputModelBuilder<'a> {
             txo_ref: TxoRef(tx_hash, tx_index),
             output,
             is_collateral: false,
-            block: None,
-            tx_order: None,
+            block_data: None,
             consumed_by_tx: None,
         }
     }
@@ -346,25 +369,16 @@ impl<'a> UtxoOutputModelBuilder<'a> {
             txo_ref: TxoRef(tx_hash, (output_count + collateral_idx as usize) as u32),
             output,
             is_collateral: true,
-            block: None,
-            tx_order: None,
+            block_data: None,
             consumed_by_tx: None,
         }
     }
 
-    pub fn with_block_data(self, block: MultiEraBlock<'a>, tx_order: TxOrder) -> Self {
+    pub fn with_block_data(self, block_data: UtxoBlockData) -> Self {
         Self {
-            block: Some(block),
-            tx_order: Some(tx_order),
+            block_data: Some(block_data),
             ..self
         }
-    }
-
-    pub fn find_tx(&self) -> Option<MultiEraTx<'_>> {
-        let txs = self.block.as_ref()?.txs();
-        let order = self.tx_order?;
-
-        txs.get(order).cloned()
     }
 
     pub fn with_consumed_by(self, tx: TxHash) -> Self {
@@ -418,23 +432,23 @@ impl<'a> IntoModel<AddressUtxoContentInner> for UtxoOutputModelBuilder<'a> {
     type SortKey = (u64, usize, u32);
 
     fn sort_key(&self) -> Option<Self::SortKey> {
-        match (self.block.as_ref(), self.tx_order.as_ref()) {
-            (Some(block), Some(txorder)) => Some((block.slot(), *txorder, self.txo_ref.1)),
-            _ => None,
-        }
+        self.block_data
+            .as_ref()
+            .map(|data| (data.block_slot, data.tx_order, self.txo_ref.1))
     }
 
     fn into_model(self) -> Result<AddressUtxoContentInner, StatusCode> {
         let out = AddressUtxoContentInner {
             address: self.output.address().into_model()?,
             tx_hash: self
-                .find_tx()
-                .map(|tx| tx.hash().to_string())
+                .block_data
+                .as_ref()
+                .map(|data| data.tx_hash.to_string())
                 .unwrap_or_default(),
             block: self
-                .block
+                .block_data
                 .as_ref()
-                .map(|b| b.hash().to_string())
+                .map(|b| b.block_hash.to_string())
                 .unwrap_or_default(),
             output_index: try_into_or_500!(self.txo_ref.1),
             amount: self.output.value().into_model()?,
