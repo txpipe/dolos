@@ -196,6 +196,7 @@ pub mod proposals {
                 "f046a88280e6c5b18dd057027964860f6b0b7918f4532d50455ad257a14a70ed#0" => {
                     Canceled(1096)
                 }
+                "edb991bbbfcb05dbccaea6660db60bbfe25c52dec086273cf131a6c21e923ed2#0" => Unknown,
                 _ => match protocol {
                     0..=8 => RatifiedCurrentEpoch,
                     _ => Unknown,
