@@ -196,11 +196,11 @@ where
     let pagination = Pagination::try_from(params)?;
     pagination.enforce_max_scan_limit()?;
     let account_key = parse_account_key_param(&stake_address)?;
-    let end_slot = domain.get_tip_slot()?;
 
+    let (start_slot, end_slot) = pagination.start_and_end_slots(&domain).await?;
     let stream = domain.query().blocks_by_stake_stream(
         &account_key.address.to_vec(),
-        0,
+        start_slot,
         end_slot,
         SlotOrder::from(pagination.order),
     );
@@ -482,11 +482,11 @@ where
         pagination.count,
         pagination.page as usize,
     );
-    let end_slot = domain.get_tip_slot()?;
 
+    let (start_slot, end_slot) = pagination.start_and_end_slots(&domain).await?;
     let stream = domain.query().blocks_by_account_certs_stream(
         &account_key.entity_key,
-        0,
+        start_slot,
         end_slot,
         SlotOrder::from(pagination.order),
     );

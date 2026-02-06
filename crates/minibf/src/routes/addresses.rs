@@ -349,12 +349,12 @@ where
 {
     let pagination = Pagination::try_from(params)?;
     pagination.enforce_max_scan_limit()?;
-    let end_slot = domain.get_tip_slot()?;
 
+    let (start_slot, end_slot) = pagination.start_and_end_slots(&domain).await?;
     let (stream, address) = blocks_for_address_stream(
         &domain,
         &address,
-        0,
+        start_slot,
         end_slot,
         SlotOrder::from(pagination.order),
     )?;
@@ -404,12 +404,12 @@ where
 {
     let pagination = Pagination::try_from(params)?;
     pagination.enforce_max_scan_limit()?;
-    let end_slot = domain.get_tip_slot()?;
 
+    let (start_slot, end_slot) = pagination.start_and_end_slots(&domain).await?;
     let (stream, address) = blocks_for_address_stream(
         &domain,
         &address,
-        0,
+        start_slot,
         end_slot,
         SlotOrder::from(pagination.order),
     )?;

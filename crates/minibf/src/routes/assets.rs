@@ -670,10 +670,11 @@ where
     pagination.enforce_max_scan_limit()?;
 
     let subject = hex::decode(&subject).map_err(|_| Error::InvalidAsset)?;
-    let end_slot = domain.get_tip_slot()?;
+
+    let (start_slot, end_slot) = pagination.start_and_end_slots(&domain).await?;
     let stream = domain.query().blocks_by_asset_stream(
         &subject,
-        0,
+        start_slot,
         end_slot,
         SlotOrder::from(pagination.order),
     );
