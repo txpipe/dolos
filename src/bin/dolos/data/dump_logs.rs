@@ -4,7 +4,7 @@ use comfy_table::Table;
 use dolos_cardano::{
     eras::load_chain_summary_from_state,
     eras::log_epoch_range_to_key_range,
-    model::{PParamKind, RewardLog},
+    model::{LeaderRewardLog, MemberRewardLog, PParamKind},
     ChainSummary, EpochState, StakeLog,
 };
 use dolos_core::config::RootConfig;
@@ -56,7 +56,7 @@ trait TableRow: Entity {
     fn row(&self, key: &LogKey, ctx: &RowContext) -> Vec<String>;
 }
 
-impl TableRow for RewardLog {
+impl TableRow for LeaderRewardLog {
     fn header(format: OutputFormat) -> Vec<&'static str> {
         match format {
             OutputFormat::Default => vec!["epoch", "slot", "as leader", "amount"],
@@ -73,7 +73,7 @@ impl TableRow for RewardLog {
             OutputFormat::Default => vec![
                 format!("{}", slot),
                 format!("{}", hex::encode(entity.as_ref())),
-                format!("{}", self.as_leader),
+                "true".to_string(),
                 format!("{}", self.amount),
             ],
             OutputFormat::Dbsync => {
@@ -87,7 +87,56 @@ impl TableRow for RewardLog {
                     .unwrap_or_else(|_| "<invalid>".to_string());
                 let pool_id = bech32::encode::<bech32::Bech32>(POOL_HRP, &self.pool_id)
                     .unwrap_or_else(|_| "<invalid>".to_string());
-                let reward_type = if self.as_leader { "leader" } else { "member" };
+                let reward_type = "leader";
+                let earned_epoch = match ctx.summary.as_ref() {
+                    Some(summary) => summary.slot_epoch(slot).0.saturating_sub(1),
+                    None => slot.saturating_sub(1),
+                };
+
+                vec![
+                    stake,
+                    pool_id,
+                    self.amount.to_string(),
+                    reward_type.to_string(),
+                    earned_epoch.to_string(),
+                ]
+            }
+        }
+    }
+}
+
+impl TableRow for MemberRewardLog {
+    fn header(format: OutputFormat) -> Vec<&'static str> {
+        match format {
+            OutputFormat::Default => vec!["epoch", "slot", "as leader", "amount"],
+            OutputFormat::Dbsync => vec!["stake", "pool", "amount", "type", "earned_epoch"],
+        }
+    }
+
+    fn row(&self, key: &LogKey, ctx: &RowContext) -> Vec<String> {
+        let temporal = TemporalKey::from(key.clone());
+        let entity = EntityKey::from(key.clone());
+        let slot = u64::from_be_bytes(temporal.as_ref().try_into().unwrap());
+
+        match ctx.format {
+            OutputFormat::Default => vec![
+                format!("{}", slot),
+                format!("{}", hex::encode(entity.as_ref())),
+                "false".to_string(),
+                format!("{}", self.amount),
+            ],
+            OutputFormat::Dbsync => {
+                if self.amount == 0 {
+                    return Vec::new();
+                }
+                let credential = decode_stake_credential(&entity)
+                    .unwrap_or_else(|_| StakeCredential::AddrKeyhash([0; 28].into()));
+                let stake = pallas_extras::stake_credential_to_address(ctx.network, &credential)
+                    .to_bech32()
+                    .unwrap_or_else(|_| "<invalid>".to_string());
+                let pool_id = bech32::encode::<bech32::Bech32>(POOL_HRP, &self.pool_id)
+                    .unwrap_or_else(|_| "<invalid>".to_string());
+                let reward_type = "member";
                 let earned_epoch = match ctx.summary.as_ref() {
                     Some(summary) => summary.slot_epoch(slot).0.saturating_sub(1),
                     None => slot.saturating_sub(1),
@@ -511,9 +560,19 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     };
 
     match args.namespace.as_str() {
-        "rewards" => dump_logs::<RewardLog>(
+        "leader-rewards" => dump_logs::<LeaderRewardLog>(
             &archive,
-            "rewards",
+            "leader-rewards",
+            args.skip,
+            args.take,
+            &ctx,
+            start_slot,
+            end_slot,
+            range.clone(),
+        )?,
+        "member-rewards" => dump_logs::<MemberRewardLog>(
+            &archive,
+            "member-rewards",
             args.skip,
             args.take,
             &ctx,
