@@ -6,7 +6,8 @@ use tracing::{debug, warn};
 
 use crate::{
     rupd::{credential_to_key, AccountId},
-    AccountState, CardanoDelta, CardanoEntity, FixedNamespace, PendingRewardState, RewardLog,
+    AccountState, CardanoDelta, CardanoEntity, FixedNamespace, LeaderRewardLog, MemberRewardLog,
+    PendingRewardState,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -128,14 +129,23 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         });
 
         for (pool, value, as_leader) in reward.into_vec() {
-            self.log(
-                id.clone(),
-                RewardLog {
-                    amount: value,
-                    pool_id: pool.to_vec(),
-                    as_leader,
-                },
-            );
+            if as_leader {
+                self.log(
+                    id.clone(),
+                    LeaderRewardLog {
+                        amount: value,
+                        pool_id: pool.to_vec(),
+                    },
+                );
+            } else {
+                self.log(
+                    id.clone(),
+                    MemberRewardLog {
+                        amount: value,
+                        pool_id: pool.to_vec(),
+                    },
+                );
+            }
         }
 
         Ok(())

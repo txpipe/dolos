@@ -375,18 +375,37 @@ macro_rules! entity_boilerplate {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Decode, Encode, Default)]
-pub struct RewardLog {
+pub struct LeaderRewardLog {
     #[n(0)]
     pub amount: u64,
 
     #[n(1)]
     pub pool_id: Vec<u8>,
-
-    #[n(2)]
-    pub as_leader: bool,
 }
 
-entity_boilerplate!(RewardLog, "rewards");
+entity_boilerplate!(LeaderRewardLog, "leader-rewards");
+
+#[derive(Debug, Clone, PartialEq, Eq, Decode, Encode, Default)]
+pub struct MemberRewardLog {
+    #[n(0)]
+    pub amount: u64,
+
+    #[n(1)]
+    pub pool_id: Vec<u8>,
+}
+
+entity_boilerplate!(MemberRewardLog, "member-rewards");
+
+#[derive(Debug, Clone, PartialEq, Eq, Decode, Encode, Default)]
+pub struct PoolDepositRefundLog {
+    #[n(0)]
+    pub amount: u64,
+
+    #[n(1)]
+    pub pool_id: Vec<u8>,
+}
+
+entity_boilerplate!(PoolDepositRefundLog, "pool-deposit-refunds");
 
 #[derive(Debug, Clone, PartialEq, Decode, Encode, Default)]
 pub struct StakeLog {
@@ -1783,7 +1802,9 @@ pub enum CardanoEntity {
     EpochState(Box<EpochState>),
     DRepState(Box<DRepState>),
     ProposalState(Box<ProposalState>),
-    RewardLog(Box<RewardLog>),
+    LeaderRewardLog(Box<LeaderRewardLog>),
+    MemberRewardLog(Box<MemberRewardLog>),
+    PoolDepositRefundLog(Box<PoolDepositRefundLog>),
     StakeLog(Box<StakeLog>),
     DatumState(Box<DatumState>),
     PendingRewardState(Box<PendingRewardState>),
@@ -1815,7 +1836,9 @@ variant_boilerplate!(PoolState);
 variant_boilerplate!(EpochState);
 variant_boilerplate!(DRepState);
 variant_boilerplate!(ProposalState);
-variant_boilerplate!(RewardLog);
+variant_boilerplate!(LeaderRewardLog);
+variant_boilerplate!(MemberRewardLog);
+variant_boilerplate!(PoolDepositRefundLog);
 variant_boilerplate!(StakeLog);
 variant_boilerplate!(DatumState);
 variant_boilerplate!(PendingRewardState);
@@ -1830,7 +1853,11 @@ impl dolos_core::Entity for CardanoEntity {
             EpochState::NS => EpochState::decode_entity(ns, value).map(Into::into),
             DRepState::NS => DRepState::decode_entity(ns, value).map(Into::into),
             ProposalState::NS => ProposalState::decode_entity(ns, value).map(Into::into),
-            RewardLog::NS => RewardLog::decode_entity(ns, value).map(Into::into),
+            LeaderRewardLog::NS => LeaderRewardLog::decode_entity(ns, value).map(Into::into),
+            MemberRewardLog::NS => MemberRewardLog::decode_entity(ns, value).map(Into::into),
+            PoolDepositRefundLog::NS => {
+                PoolDepositRefundLog::decode_entity(ns, value).map(Into::into)
+            }
             StakeLog::NS => StakeLog::decode_entity(ns, value).map(Into::into),
             DatumState::NS => DatumState::decode_entity(ns, value).map(Into::into),
             PendingRewardState::NS => PendingRewardState::decode_entity(ns, value).map(Into::into),
@@ -1868,10 +1895,19 @@ impl dolos_core::Entity for CardanoEntity {
                 let (ns, enc) = ProposalState::encode_entity(x);
                 (ns, enc)
             }
-            Self::RewardLog(x) => {
-                let (ns, enc) = RewardLog::encode_entity(x);
+            Self::LeaderRewardLog(x) => {
+                let (ns, enc) = LeaderRewardLog::encode_entity(x);
                 (ns, enc)
             }
+            Self::MemberRewardLog(x) => {
+                let (ns, enc) = MemberRewardLog::encode_entity(x);
+                (ns, enc)
+            }
+            Self::PoolDepositRefundLog(x) => {
+                let (ns, enc) = PoolDepositRefundLog::encode_entity(x);
+                (ns, enc)
+            }
+
             Self::StakeLog(x) => {
                 let (ns, enc) = StakeLog::encode_entity(x);
                 (ns, enc)
@@ -1897,7 +1933,9 @@ pub fn build_schema() -> StateSchema {
     schema.insert(EpochState::NS, NamespaceType::KeyValue);
     schema.insert(DRepState::NS, NamespaceType::KeyValue);
     schema.insert(ProposalState::NS, NamespaceType::KeyValue);
-    schema.insert(RewardLog::NS, NamespaceType::KeyValue);
+    schema.insert(LeaderRewardLog::NS, NamespaceType::KeyValue);
+    schema.insert(MemberRewardLog::NS, NamespaceType::KeyValue);
+    schema.insert(PoolDepositRefundLog::NS, NamespaceType::KeyValue);
     schema.insert(StakeLog::NS, NamespaceType::KeyValue);
     schema.insert(DatumState::NS, NamespaceType::KeyValue);
     schema.insert(PendingRewardState::NS, NamespaceType::KeyValue);

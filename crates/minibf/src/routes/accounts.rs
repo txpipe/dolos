@@ -17,9 +17,10 @@ use blockfrost_openapi::models::{
 use dolos_cardano::{
     indexes::{AsyncCardanoQueryExt, CardanoIndexExt, SlotOrder},
     model::{AccountState, DRepState},
-    pallas_extras, ChainSummary, RewardLog,
+    pallas_extras, ChainSummary, FixedNamespace, LeaderRewardLog, MemberRewardLog,
+    PoolDepositRefundLog,
 };
-use dolos_core::{ArchiveStore as _, Domain, EntityKey};
+use dolos_core::{ArchiveStore as _, Domain, EntityKey, LogKey, TemporalKey};
 use futures_util::StreamExt;
 use pallas::{
     codec::minicbor,
@@ -560,6 +561,72 @@ where
     Ok(Json(items))
 }
 
+enum AccountRewardWrapper {
+    Leader((Epoch, LeaderRewardLog)),
+    Member((Epoch, MemberRewardLog)),
+    PoolDepositRefund((Epoch, PoolDepositRefundLog)),
+}
+
+impl From<(Epoch, LeaderRewardLog)> for AccountRewardWrapper {
+    fn from(value: (Epoch, LeaderRewardLog)) -> Self {
+        AccountRewardWrapper::Leader(value)
+    }
+}
+
+impl From<(Epoch, MemberRewardLog)> for AccountRewardWrapper {
+    fn from(value: (Epoch, MemberRewardLog)) -> Self {
+        AccountRewardWrapper::Member(value)
+    }
+}
+
+impl From<(Epoch, PoolDepositRefundLog)> for AccountRewardWrapper {
+    fn from(value: (Epoch, PoolDepositRefundLog)) -> Self {
+        AccountRewardWrapper::PoolDepositRefund(value)
+    }
+}
+
+impl TryFrom<AccountRewardWrapper> for AccountRewardContentInner {
+    type Error = StatusCode;
+
+    fn try_from(value: AccountRewardWrapper) -> Result<Self, Self::Error> {
+        match value {
+            AccountRewardWrapper::Leader((epoch, x)) => {
+                let operator = Hash::<28>::from(EntityKey::from(x.pool_id));
+                let pool_id = mapping::bech32_pool(operator)?;
+
+                Ok(AccountRewardContentInner {
+                    epoch: epoch as i32 - 1,
+                    amount: x.amount.to_string(),
+                    pool_id,
+                    r#type: blockfrost_openapi::models::account_reward_content_inner::Type::Leader,
+                })
+            }
+            AccountRewardWrapper::Member((epoch, x)) => {
+                let operator = Hash::<28>::from(EntityKey::from(x.pool_id));
+                let pool_id = mapping::bech32_pool(operator)?;
+
+                Ok(AccountRewardContentInner {
+                    epoch: epoch as i32 - 1,
+                    amount: x.amount.to_string(),
+                    pool_id,
+                    r#type: blockfrost_openapi::models::account_reward_content_inner::Type::Member,
+                })
+            }
+            AccountRewardWrapper::PoolDepositRefund((epoch, x)) => {
+                let operator = Hash::<28>::from(EntityKey::from(x.pool_id));
+                let pool_id = mapping::bech32_pool(operator)?;
+
+                Ok(AccountRewardContentInner {
+                    epoch: epoch as i32 - 1,
+                    amount: x.amount.to_string(),
+                    pool_id,
+                    r#type: blockfrost_openapi::models::account_reward_content_inner::Type::PoolDepositRefund,
+                })
+            }
+        }
+    }
+}
+
 pub async fn by_stake_rewards<D>(
     Path(stake_address): Path<String>,
     Query(params): Query<PaginationParameters>,
@@ -575,36 +642,66 @@ where
     let summary = domain.get_chain_summary()?;
     let (epoch, _) = summary.slot_epoch(tip);
 
-    let rewards = domain
-        .iter_cardano_logs_per_epoch::<RewardLog>(account_key.entity_key.into(), 0..epoch)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let entity_key: EntityKey = account_key.entity_key.into();
+    let mut items = Vec::new();
+    let mut skipped = 0;
+    let skip = pagination.skip();
 
-    let mapped: Vec<_> = rewards
-        .into_iter()
-        .filter(|(_, reward)| reward.amount > 0)
-        .skip(pagination.skip())
-        .take(pagination.count)
-        .map(|(epoch, reward)| {
-            let operator = Hash::<28>::from(EntityKey::from(reward.pool_id));
-            let pool_id = mapping::bech32_pool(operator)?;
+    for reward_epoch in 0..epoch {
+        let slot = summary.epoch_start(reward_epoch);
+        let log_key: LogKey = (TemporalKey::from(slot), entity_key.clone()).into();
 
-            let r#type = if reward.as_leader {
-                blockfrost_openapi::models::account_reward_content_inner::Type::Leader
+        let leader = domain
+            .archive()
+            .read_log_typed::<LeaderRewardLog>(LeaderRewardLog::NS, &log_key)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        if let Some(reward) = leader.filter(|reward| reward.amount > 0) {
+            if skipped < skip {
+                skipped += 1;
             } else {
-                blockfrost_openapi::models::account_reward_content_inner::Type::Member
-            };
+                items.push(AccountRewardWrapper::from((reward_epoch, reward)).try_into()?);
+            }
+        }
 
-            let out = AccountRewardContentInner {
-                // TODO: This should be handled on write instead of read
-                epoch: epoch as i32 - 1,
-                amount: reward.amount.to_string(),
-                pool_id,
-                r#type,
-            };
+        if items.len() >= pagination.count {
+            break;
+        }
 
-            Ok(out)
-        })
-        .collect::<Result<Vec<_>, StatusCode>>()?;
+        let member = domain
+            .archive()
+            .read_log_typed::<MemberRewardLog>(MemberRewardLog::NS, &log_key)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    Ok(Json(mapped))
+        if let Some(reward) = member.filter(|reward| reward.amount > 0) {
+            if skipped < skip {
+                skipped += 1;
+            } else {
+                items.push(AccountRewardWrapper::from((reward_epoch, reward)).try_into()?);
+            }
+        }
+
+        if items.len() >= pagination.count {
+            break;
+        }
+
+        let pool_deposit_refund = domain
+            .archive()
+            .read_log_typed::<PoolDepositRefundLog>(PoolDepositRefundLog::NS, &log_key)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        if let Some(reward) = pool_deposit_refund.filter(|reward| reward.amount > 0) {
+            if skipped < skip {
+                skipped += 1;
+            } else {
+                items.push(AccountRewardWrapper::from((reward_epoch, reward)).try_into()?);
+            }
+        }
+
+        if items.len() >= pagination.count {
+            break;
+        }
+    }
+
+    Ok(Json(items))
 }
