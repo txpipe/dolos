@@ -457,7 +457,7 @@ mod tests {
         address_transactions_content_inner::AddressTransactionsContentInner,
         address_utxo_content_inner::AddressUtxoContentInner,
     };
-    use crate::test_support::{TestApp, TestFault, ADDRESS};
+    use crate::test_support::{TestApp, TestFault};
 
     fn invalid_address() -> &'static str {
         "not-an-address"
@@ -480,7 +480,8 @@ mod tests {
     #[tokio::test]
     async fn addresses_transactions_happy_path() {
         let app = TestApp::new();
-        let path = format!("/addresses/{ADDRESS}/transactions?page=999999");
+        let address = app.vectors().address.as_str();
+        let path = format!("/addresses/{address}/transactions?page=1");
         let (status, bytes) = app.get_bytes(&path).await;
 
         assert_eq!(
@@ -510,14 +511,16 @@ mod tests {
     #[tokio::test]
     async fn addresses_transactions_internal_error() {
         let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
-        let path = format!("/addresses/{ADDRESS}/transactions");
+        let address = app.vectors().address.as_str();
+        let path = format!("/addresses/{address}/transactions");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 
     #[tokio::test]
     async fn addresses_utxos_happy_path() {
         let app = TestApp::new();
-        let path = format!("/addresses/{ADDRESS}/utxos?page=999999");
+        let address = app.vectors().address.as_str();
+        let path = format!("/addresses/{address}/utxos?page=1");
         let (status, bytes) = app.get_bytes(&path).await;
 
         assert_eq!(
@@ -547,7 +550,8 @@ mod tests {
     #[tokio::test]
     async fn addresses_utxos_internal_error() {
         let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
-        let path = format!("/addresses/{ADDRESS}/utxos");
+        let address = app.vectors().address.as_str();
+        let path = format!("/addresses/{address}/utxos");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 

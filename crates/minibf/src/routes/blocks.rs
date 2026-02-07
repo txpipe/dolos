@@ -463,9 +463,7 @@ where
 mod tests {
     use super::*;
     use blockfrost_openapi::models::block_content::BlockContent;
-    use crate::test_support::{
-        TestApp, TestFault, BLOCK_HASH_OR_NUMBER,
-    };
+    use crate::test_support::{TestApp, TestFault};
 
     fn invalid_block() -> &'static str {
         "not-a-hash"
@@ -509,7 +507,8 @@ mod tests {
     #[tokio::test]
     async fn blocks_by_hash_or_number_happy_path() {
         let app = TestApp::new();
-        let path = format!("/blocks/{BLOCK_HASH_OR_NUMBER}");
+        let block_hash = app.vectors().block_hash.as_str();
+        let path = format!("/blocks/{block_hash}");
         let (status, bytes) = app.get_bytes(&path).await;
 
         assert_eq!(
@@ -539,7 +538,8 @@ mod tests {
     #[tokio::test]
     async fn blocks_by_hash_or_number_internal_error() {
         let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
-        let path = format!("/blocks/{BLOCK_HASH_OR_NUMBER}");
+        let block_hash = app.vectors().block_hash.as_str();
+        let path = format!("/blocks/{block_hash}");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 }

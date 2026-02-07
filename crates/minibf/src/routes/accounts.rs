@@ -716,9 +716,7 @@ mod tests {
         account_registration_content_inner::AccountRegistrationContentInner,
         account_reward_content_inner::AccountRewardContentInner,
     };
-    use crate::test_support::{
-        TestApp, TestFault, STAKE_ADDRESS,
-    };
+    use crate::test_support::{TestApp, TestFault};
 
     fn invalid_stake_address() -> &'static str {
         "not-a-stake"
@@ -741,7 +739,8 @@ mod tests {
     #[tokio::test]
     async fn accounts_by_stake_happy_path() {
         let app = TestApp::new();
-        let path = format!("/accounts/{STAKE_ADDRESS}");
+        let stake_address = app.vectors().stake_address.as_str();
+        let path = format!("/accounts/{stake_address}");
         let (status, bytes) = app.get_bytes(&path).await;
 
         assert_eq!(
@@ -771,14 +770,16 @@ mod tests {
     #[tokio::test]
     async fn accounts_by_stake_internal_error() {
         let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
-        let path = format!("/accounts/{STAKE_ADDRESS}");
+        let stake_address = app.vectors().stake_address.as_str();
+        let path = format!("/accounts/{stake_address}");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 
     #[tokio::test]
     async fn accounts_by_stake_addresses_happy_path() {
         let app = TestApp::new();
-        let path = format!("/accounts/{STAKE_ADDRESS}/addresses?page=999999");
+        let stake_address = app.vectors().stake_address.as_str();
+        let path = format!("/accounts/{stake_address}/addresses?page=1");
         let (status, bytes) = app.get_bytes(&path).await;
 
         assert_eq!(
@@ -808,14 +809,16 @@ mod tests {
     #[tokio::test]
     async fn accounts_by_stake_addresses_internal_error() {
         let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
-        let path = format!("/accounts/{STAKE_ADDRESS}/addresses");
+        let stake_address = app.vectors().stake_address.as_str();
+        let path = format!("/accounts/{stake_address}/addresses");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 
     #[tokio::test]
     async fn accounts_by_stake_delegations_happy_path() {
         let app = TestApp::new();
-        let path = format!("/accounts/{STAKE_ADDRESS}/delegations?page=999999");
+        let stake_address = app.vectors().stake_address.as_str();
+        let path = format!("/accounts/{stake_address}/delegations?page=1");
         let (status, bytes) = app.get_bytes(&path).await;
 
         assert_eq!(
@@ -845,14 +848,16 @@ mod tests {
     #[tokio::test]
     async fn accounts_by_stake_delegations_internal_error() {
         let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
-        let path = format!("/accounts/{STAKE_ADDRESS}/delegations");
+        let stake_address = app.vectors().stake_address.as_str();
+        let path = format!("/accounts/{stake_address}/delegations");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 
     #[tokio::test]
     async fn accounts_by_stake_registrations_happy_path() {
         let app = TestApp::new();
-        let path = format!("/accounts/{STAKE_ADDRESS}/registrations?page=999999");
+        let stake_address = app.vectors().stake_address.as_str();
+        let path = format!("/accounts/{stake_address}/registrations?page=1");
         let (status, bytes) = app.get_bytes(&path).await;
 
         assert_eq!(
@@ -882,14 +887,16 @@ mod tests {
     #[tokio::test]
     async fn accounts_by_stake_registrations_internal_error() {
         let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
-        let path = format!("/accounts/{STAKE_ADDRESS}/registrations");
+        let stake_address = app.vectors().stake_address.as_str();
+        let path = format!("/accounts/{stake_address}/registrations");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 
     #[tokio::test]
     async fn accounts_by_stake_rewards_happy_path() {
         let app = TestApp::new();
-        let path = format!("/accounts/{STAKE_ADDRESS}/rewards?page=999999");
+        let stake_address = app.vectors().stake_address.as_str();
+        let path = format!("/accounts/{stake_address}/rewards?page=1");
         let (status, bytes) = app.get_bytes(&path).await;
 
         assert_eq!(
@@ -919,7 +926,8 @@ mod tests {
     #[tokio::test]
     async fn accounts_by_stake_rewards_internal_error() {
         let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
-        let path = format!("/accounts/{STAKE_ADDRESS}/rewards");
+        let stake_address = app.vectors().stake_address.as_str();
+        let path = format!("/accounts/{stake_address}/rewards");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 }

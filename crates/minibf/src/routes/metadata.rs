@@ -195,7 +195,7 @@ mod tests {
         tx_metadata_label_cbor_inner::TxMetadataLabelCborInner,
         tx_metadata_label_json_inner::TxMetadataLabelJsonInner,
     };
-    use crate::test_support::{TestApp, TestFault, METADATA_LABEL};
+    use crate::test_support::{TestApp, TestFault};
 
     fn invalid_label() -> &'static str {
         "not-a-number"
@@ -218,7 +218,8 @@ mod tests {
     #[tokio::test]
     async fn metadata_label_json_happy_path() {
         let app = TestApp::new();
-        let path = format!("/metadata/txs/labels/{METADATA_LABEL}?page=999999");
+        let label = app.vectors().metadata_label.as_str();
+        let path = format!("/metadata/txs/labels/{label}?page=1");
         let (status, bytes) = app.get_bytes(&path).await;
 
         assert_eq!(
@@ -248,14 +249,16 @@ mod tests {
     #[tokio::test]
     async fn metadata_label_json_internal_error() {
         let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
-        let path = format!("/metadata/txs/labels/{METADATA_LABEL}");
+        let label = app.vectors().metadata_label.as_str();
+        let path = format!("/metadata/txs/labels/{label}");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 
     #[tokio::test]
     async fn metadata_label_cbor_happy_path() {
         let app = TestApp::new();
-        let path = format!("/metadata/txs/labels/{METADATA_LABEL}/cbor?page=999999");
+        let label = app.vectors().metadata_label.as_str();
+        let path = format!("/metadata/txs/labels/{label}/cbor?page=1");
         let (status, bytes) = app.get_bytes(&path).await;
 
         assert_eq!(
@@ -285,7 +288,8 @@ mod tests {
     #[tokio::test]
     async fn metadata_label_cbor_internal_error() {
         let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
-        let path = format!("/metadata/txs/labels/{METADATA_LABEL}/cbor");
+        let label = app.vectors().metadata_label.as_str();
+        let path = format!("/metadata/txs/labels/{label}/cbor");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 }

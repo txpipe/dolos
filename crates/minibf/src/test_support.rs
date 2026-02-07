@@ -1,4 +1,4 @@
-use std::{ops::Range, sync::Arc};
+use std::sync::Arc;
 
 use axum::{
     body::Body,
@@ -7,7 +7,7 @@ use axum::{
 };
 use dolos_core::{config::MinibfConfig, import::ImportExt as _};
 use dolos_testing::{
-    fixtures::hardano::{load_immutable_blocks, IMMUTABLE_BLOCK_RANGE},
+    synthetic::{build_synthetic_blocks, SyntheticBlockConfig, SyntheticVectors},
     toy_domain::ToyDomain,
 };
 use http_body_util::BodyExt;
@@ -15,49 +15,36 @@ use tower::util::ServiceExt;
 
 use crate::{build_router_with_facade, Facade};
 
-pub use dolos_testing::fixtures::hardano::KNOWN_TX_HASH;
-
 pub use dolos_testing::faults::TestFault;
-pub const STAKE_ADDRESS: &str = "REPLACE_ME_STAKE_ADDRESS";
-pub const ADDRESS: &str = "REPLACE_ME_ADDRESS";
-pub const ASSET: &str = "REPLACE_ME_ASSET";
-pub const BLOCK_HASH_OR_NUMBER: &str = "REPLACE_ME_BLOCK_HASH_OR_NUMBER";
-pub const METADATA_LABEL: &str = "REPLACE_ME_METADATA_LABEL";
-pub const POOL_ID: &str = "REPLACE_ME_POOL_ID";
+pub use dolos_testing::synthetic::SyntheticVectors as TestVectors;
 
 pub struct TestDomainBuilder {
     domain: ToyDomain,
+    vectors: SyntheticVectors,
 }
 
 impl TestDomainBuilder {
-    pub fn new() -> Self {
-        Self {
-            domain: ToyDomain::new_with_genesis(
-                Arc::new(dolos_cardano::include::preview::load()),
-                None,
-                None,
-            ),
-        }
-    }
+    pub fn new_with_synthetic(cfg: SyntheticBlockConfig) -> Self {
+        let genesis = Arc::new(dolos_cardano::include::preview::load());
+        let (blocks, vectors, chain_config) = build_synthetic_blocks(cfg);
 
-    pub fn with_immutable(self, range: Range<u64>) -> Self {
-        let blocks = load_immutable_blocks(range);
-        let domain = self.domain;
+        let domain = ToyDomain::new_with_genesis_and_config(genesis, chain_config, None, None);
         domain
             .import_blocks(blocks.clone())
-            .expect("failed to import fixture blocks");
+            .expect("failed to import synthetic blocks");
 
-        Self { domain }
+        Self { domain, vectors }
     }
 
-    pub fn finish(self) -> ToyDomain {
-        self.domain
+    pub fn finish(self) -> (ToyDomain, SyntheticVectors) {
+        (self.domain, self.vectors)
     }
 }
 
 pub struct TestApp {
     router: Router,
     _domain: dolos_testing::faults::FaultyToyDomain,
+    vectors: SyntheticVectors,
 }
 
 impl TestApp {
@@ -66,9 +53,8 @@ impl TestApp {
     }
 
     pub fn new_with_fault(fault: Option<TestFault>) -> Self {
-        let domain = TestDomainBuilder::new()
-            .with_immutable(IMMUTABLE_BLOCK_RANGE.clone())
-            .finish();
+        let (domain, vectors) =
+            TestDomainBuilder::new_with_synthetic(SyntheticBlockConfig::default()).finish();
 
         let domain = match fault {
             Some(fault) => dolos_testing::faults::FaultyToyDomain::new(domain, fault),
@@ -90,7 +76,11 @@ impl TestApp {
 
         let router = build_router_with_facade(facade);
 
-        Self { router, _domain: domain }
+        Self {
+            router,
+            _domain: domain,
+            vectors,
+        }
     }
 
     pub async fn get_bytes(&self, path: &str) -> (StatusCode, Vec<u8>) {
@@ -115,5 +105,9 @@ impl TestApp {
             .expect("failed to read response body")
             .to_bytes();
         (status, bytes.to_vec())
+    }
+
+    pub fn vectors(&self) -> &SyntheticVectors {
+        &self.vectors
     }
 }

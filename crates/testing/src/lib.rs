@@ -18,8 +18,8 @@ use rand::Rng;
 use dolos_core::*;
 
 pub mod blocks;
-pub mod fixtures;
 pub mod faults;
+pub mod synthetic;
 
 #[cfg(feature = "toy-domain")]
 pub mod toy_domain;

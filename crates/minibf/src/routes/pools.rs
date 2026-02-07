@@ -350,7 +350,7 @@ mod tests {
         pool_delegators_inner::PoolDelegatorsInner,
         pool_list_extended_inner::PoolListExtendedInner,
     };
-    use crate::test_support::{TestApp, TestFault, POOL_ID};
+    use crate::test_support::{TestApp, TestFault};
 
     fn invalid_pool_id() -> &'static str {
         "not-a-pool"
@@ -401,7 +401,8 @@ mod tests {
     #[tokio::test]
     async fn pools_delegators_happy_path() {
         let app = TestApp::new();
-        let path = format!("/pools/{POOL_ID}/delegators?page=999999");
+        let pool_id = app.vectors().pool_id.as_str();
+        let path = format!("/pools/{pool_id}/delegators?page=999999");
         let (status, bytes) = app.get_bytes(&path).await;
 
         assert_eq!(
@@ -431,7 +432,8 @@ mod tests {
     #[tokio::test]
     async fn pools_delegators_internal_error() {
         let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
-        let path = format!("/pools/{POOL_ID}/delegators");
+        let pool_id = app.vectors().pool_id.as_str();
+        let path = format!("/pools/{pool_id}/delegators");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 }

@@ -110,6 +110,20 @@ impl ToyDomain {
         initial_delta: Option<UtxoSetDelta>,
         storage_config: Option<StorageConfig>,
     ) -> Self {
+        Self::new_with_genesis_and_config(
+            genesis,
+            CardanoConfig::default(),
+            initial_delta,
+            storage_config,
+        )
+    }
+
+    pub fn new_with_genesis_and_config(
+        genesis: Arc<dolos_core::Genesis>,
+        config: CardanoConfig,
+        initial_delta: Option<UtxoSetDelta>,
+        storage_config: Option<StorageConfig>,
+    ) -> Self {
         let state = dolos_redb3::state::StateStore::in_memory(dolos_cardano::model::build_schema())
             .unwrap();
 
@@ -120,8 +134,6 @@ impl ToyDomain {
                 .unwrap();
 
         let indexes = dolos_redb3::indexes::IndexStore::in_memory().unwrap();
-
-        let config = CardanoConfig::default();
 
         let chain =
             dolos_cardano::CardanoLogic::initialize::<Self>(config.clone(), &state, &genesis)

@@ -716,7 +716,7 @@ where
 mod tests {
     use super::*;
     use blockfrost_openapi::models::asset::Asset;
-    use crate::test_support::{TestApp, TestFault, ASSET};
+    use crate::test_support::{TestApp, TestFault};
 
     fn invalid_asset() -> &'static str {
         "not-hex-asset"
@@ -739,7 +739,8 @@ mod tests {
     #[tokio::test]
     async fn assets_by_subject_happy_path() {
         let app = TestApp::new();
-        let path = format!("/assets/{ASSET}");
+        let asset = app.vectors().asset_unit.as_str();
+        let path = format!("/assets/{asset}");
         let (status, bytes) = app.get_bytes(&path).await;
 
         assert_eq!(
@@ -768,7 +769,8 @@ mod tests {
     #[tokio::test]
     async fn assets_by_subject_internal_error() {
         let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
-        let path = format!("/assets/{ASSET}");
+        let asset = app.vectors().asset_unit.as_str();
+        let path = format!("/assets/{asset}");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 }
