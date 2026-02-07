@@ -31,6 +31,8 @@ pub(crate) mod hacks;
 pub(crate) mod mapping;
 mod pagination;
 mod routes;
+#[cfg(test)]
+mod test_support;
 
 pub(crate) fn log_and_500<E: std::fmt::Debug>(context: &str) -> impl Fn(E) -> StatusCode + '_ {
     move |err| {

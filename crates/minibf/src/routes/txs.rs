@@ -278,3 +278,29 @@ where
 
     tx.into_response()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use blockfrost_openapi::models::tx_content::TxContent;
+    use crate::test_support::{KNOWN_TX_HASH, TestApp};
+
+    #[tokio::test]
+    async fn txs_by_hash_happy_path() {
+        let app = TestApp::new();
+        let path = format!("/txs/{KNOWN_TX_HASH}");
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let parsed: TxContent =
+            serde_json::from_slice(&bytes).expect("failed to parse tx content");
+        assert_eq!(parsed.hash, KNOWN_TX_HASH);
+        assert!(!parsed.block.is_empty());
+        assert!(parsed.block_height > 0);
+    }
+}
