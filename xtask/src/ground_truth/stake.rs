@@ -12,7 +12,7 @@ pub(super) struct AccountStakeRow {
     pub lovelace: String,
 }
 
-const PAGE_SIZE: i64 = 50_000;
+const PAGE_SIZE: i64 = 2_000;
 
 pub(super) fn fetch(dbsync_url: &str, epoch: u64) -> Result<Vec<AccountStakeRow>> {
     let mut client = super::connect_to_dbsync(dbsync_url)?;
@@ -36,6 +36,7 @@ pub(super) fn fetch(dbsync_url: &str, epoch: u64) -> Result<Vec<AccountStakeRow>
     let mut offset: i64 = 0;
 
     loop {
+        eprintln!("  stake page offset={offset} limit={PAGE_SIZE}");
         let rows = client
             .query(query, &[&epoch, &PAGE_SIZE, &offset])
             .with_context(|| format!("failed to query account stake (offset {})", offset))?;

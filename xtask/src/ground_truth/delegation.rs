@@ -13,7 +13,7 @@ pub(super) struct PoolDelegationRow {
     pub total_lovelace: String,
 }
 
-const PAGE_SIZE: i64 = 50_000;
+const PAGE_SIZE: i64 = 2_000;
 
 pub(super) fn fetch(dbsync_url: &str, epoch: u64) -> Result<Vec<PoolDelegationRow>> {
     let mut client = super::connect_to_dbsync(dbsync_url)?;
@@ -38,6 +38,7 @@ pub(super) fn fetch(dbsync_url: &str, epoch: u64) -> Result<Vec<PoolDelegationRo
     let mut offset: i64 = 0;
 
     loop {
+        eprintln!("  delegation page offset={offset} limit={PAGE_SIZE}");
         let rows = client
             .query(query, &[&epoch, &PAGE_SIZE, &offset])
             .with_context(|| format!("failed to query pool delegation (offset {})", offset))?;
