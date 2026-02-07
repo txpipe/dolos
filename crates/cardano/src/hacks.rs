@@ -1,5 +1,6 @@
 pub mod pointers {
     use pallas::ledger::{addresses::Pointer, primitives::StakeCredential};
+    use tracing::warn;
 
     pub fn pointer_to_cred(pointer: &Pointer) -> Option<StakeCredential> {
         match (pointer.slot(), pointer.tx_idx(), pointer.cert_idx()) {
@@ -35,12 +36,12 @@ pub mod pointers {
 
             // mainnet
             (4495800, 11, 0) => Some(StakeCredential::AddrKeyhash(
-                "e11332d859dd71f5b1089052a049690d81f7367eac9fafaef80b4da395"
+                "e1bc1597ad71c55d2d009a9274b3831ded155118dd769f5376decc1369"
                     .parse()
                     .unwrap(),
             )),
             (20095460, 2, 0) => Some(StakeCredential::AddrKeyhash(
-                "e1bc1597ad71c55d2d009a9274b3831ded155118dd769f5376decc1369"
+                "e11332d859dd71f5b1089052a049690d81f7367eac9fafaef80b4da395"
                     .parse()
                     .unwrap(),
             )),
@@ -56,9 +57,8 @@ pub mod pointers {
             (16292793057, 1011302, 20) => None,
             (18446744073709551615, 1221092, 2) => None,
 
-            x => {
-                dbg!(x);
-                //panic!("unknown pointer: {:?}", x);
+            (slot, tx_idx, cert_idx) => {
+                warn!(slot, tx_idx, cert_idx, "missing pointer mapping");
                 None
             }
         }
