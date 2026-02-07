@@ -283,7 +283,7 @@ where
 mod tests {
     use super::*;
     use blockfrost_openapi::models::tx_content::TxContent;
-    use crate::test_support::{KNOWN_TX_HASH, TestApp};
+    use crate::test_support::{KNOWN_TX_HASH, TestApp, TestFault};
 
     #[tokio::test]
     async fn txs_by_hash_happy_path() {
@@ -302,5 +302,49 @@ mod tests {
         assert_eq!(parsed.hash, KNOWN_TX_HASH);
         assert!(!parsed.block.is_empty());
         assert!(parsed.block_height > 0);
+    }
+
+    #[tokio::test]
+    async fn txs_by_hash_not_found() {
+        let app = TestApp::new();
+        let missing_hash =
+            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+        let path = format!("/txs/{missing_hash}");
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+    }
+
+    #[tokio::test]
+    async fn txs_by_hash_bad_request() {
+        let app = TestApp::new();
+        let path = "/txs/not-a-hash";
+        let (status, bytes) = app.get_bytes(path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+    }
+
+    #[tokio::test]
+    async fn txs_by_hash_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
+        let path = format!("/txs/{KNOWN_TX_HASH}");
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
     }
 }

@@ -13,9 +13,11 @@ use dolos_testing::{
 use http_body_util::BodyExt;
 use tower::util::ServiceExt;
 
-use crate::build_router;
+use crate::{build_router_with_facade, Facade};
 
 pub use dolos_testing::fixtures::hardano::KNOWN_TX_HASH;
+
+pub use dolos_testing::faults::TestFault;
 
 pub struct TestDomainBuilder {
     domain: ToyDomain,
@@ -49,14 +51,23 @@ impl TestDomainBuilder {
 
 pub struct TestApp {
     router: Router,
-    _domain: ToyDomain,
+    _domain: dolos_testing::faults::FaultyToyDomain,
 }
 
 impl TestApp {
     pub fn new() -> Self {
+        Self::new_with_fault(None)
+    }
+
+    pub fn new_with_fault(fault: Option<TestFault>) -> Self {
         let domain = TestDomainBuilder::new()
             .with_immutable(IMMUTABLE_BLOCK_RANGE.clone())
             .finish();
+
+        let domain = match fault {
+            Some(fault) => dolos_testing::faults::FaultyToyDomain::new(domain, fault),
+            None => dolos_testing::faults::FaultyToyDomain::new(domain, TestFault::None),
+        };
 
         let cfg = MinibfConfig {
             listen_address: "[::]:0".parse().expect("invalid listen address"),
@@ -65,12 +76,15 @@ impl TestApp {
             url: None,
         };
 
-        let router = build_router(cfg, domain.clone());
+        let facade = Facade {
+            inner: domain.clone(),
+            config: cfg,
+            cache: crate::cache::CacheService::default(),
+        };
 
-        Self {
-            router,
-            _domain: domain,
-        }
+        let router = build_router_with_facade(facade);
+
+        Self { router, _domain: domain }
     }
 
     pub async fn get_bytes(&self, path: &str) -> (StatusCode, Vec<u8>) {

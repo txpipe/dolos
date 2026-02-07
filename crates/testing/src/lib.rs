@@ -19,6 +19,7 @@ use dolos_core::*;
 
 pub mod blocks;
 pub mod fixtures;
+pub mod faults;
 
 #[cfg(feature = "toy-domain")]
 pub mod toy_domain;

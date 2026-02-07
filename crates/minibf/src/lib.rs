@@ -270,6 +270,23 @@ where
     Option<EpochState>: From<D::Entity>,
     Option<DRepState>: From<D::Entity>,
 {
+    build_router_with_facade(Facade::<D> {
+        inner: domain,
+        config: cfg,
+        cache: cache::CacheService::default(),
+    })
+}
+
+pub(crate) fn build_router_with_facade<D>(facade: Facade<D>) -> Router
+where
+    D: Domain + Clone + Send + Sync + 'static,
+    Option<AccountState>: From<D::Entity>,
+    Option<PoolState>: From<D::Entity>,
+    Option<AssetState>: From<D::Entity>,
+    Option<EpochState>: From<D::Entity>,
+    Option<DRepState>: From<D::Entity>,
+{
+    let permissive_cors = facade.config.permissive_cors.unwrap_or_default();
     let app = Router::new()
         .route("/", get(routes::root::<D>))
         .route("/health", get(routes::health::naked))
@@ -424,17 +441,13 @@ where
             "/governance/dreps/{drep_id}",
             get(routes::governance::drep_by_id::<D>),
         )
-        .with_state(Facade::<D> {
-            inner: domain,
-            config: cfg.clone(),
-            cache: cache::CacheService::default(),
-        })
+        .with_state(facade)
         .layer(
             trace::TraceLayer::new_for_http()
                 .make_span_with(trace::DefaultMakeSpan::new().level(Level::INFO))
                 .on_response(trace::DefaultOnResponse::new().level(Level::INFO)),
         )
-        .layer(if cfg.permissive_cors.unwrap_or_default() {
+        .layer(if permissive_cors {
             CorsLayer::permissive()
         } else {
             CorsLayer::new()
