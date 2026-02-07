@@ -121,6 +121,26 @@ Guidelines:
 - Always remove instrumentation after the hypothesis is tested.
 - Avoid noisy logs that make the test output unusable.
 
+## How to Handle Missing Pointer Addresses
+
+- When stake/rewards/delegation mismatches appear, missing pointer address mappings are a common root cause.
+- The pointer mapping lookup in `crates/cardano/src/hacks.rs` emits a warning like `missing pointer mapping` with `slot`, `tx_idx`, and `cert_idx`. 
+- Use those three numbers directly in the DBSync query below to resolve the correct stake credential hash.
+- The correct field is `stake_address.hash_raw` (not `stake_address.view`, and not any address text).
+
+```sql
+SELECT encode(sa.hash_raw, 'hex') AS stake_hash
+FROM stake_registration sr
+JOIN tx ON sr.tx_id = tx.id
+JOIN block ON tx.block_id = block.id
+JOIN stake_address sa ON sr.addr_id = sa.id
+WHERE block.slot_no = <SLOT>
+  AND tx.block_index = <TX_IDX>
+  AND sr.cert_index = <CERT_IDX>;
+```
+
+If the query returns no row, treat the mapping as missing (use `None`). Otherwise, update `crates/cardano/src/hacks.rs` → `pointers::pointer_to_cred` by adding or adjusting the tuple `(slot, tx_idx, cert_idx)` and setting the value to the `stake_hash` returned by DBSync.
+
 ## Epoch Nomenclature
 
 We use the following terms:
