@@ -342,3 +342,48 @@ where
 
     Ok(Json(mapped))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use blockfrost_openapi::models::pool_list_extended_inner::PoolListExtendedInner;
+    use crate::test_support::{TestApp, TestFault};
+
+    async fn assert_status(app: &TestApp, path: &str, expected: StatusCode) {
+        let (status, bytes) = app.get_bytes(path).await;
+        assert_eq!(
+            status,
+            expected,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+    }
+
+    #[tokio::test]
+    async fn pools_extended_happy_path() {
+        let app = TestApp::new();
+        let (status, bytes) = app.get_bytes("/pools/extended?page=999999").await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let _: Vec<PoolListExtendedInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse pool list extended");
+    }
+
+    #[tokio::test]
+    async fn pools_extended_bad_request() {
+        let app = TestApp::new();
+        let path = "/pools/extended?count=invalid";
+        assert_status(&app, path, StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn pools_extended_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
+        assert_status(&app, "/pools/extended", StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+}

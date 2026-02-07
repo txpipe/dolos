@@ -16,11 +16,13 @@ pub enum TestFault {
     ArchiveStoreError,
     IndexStoreError,
     WalStoreError,
+    GenesisError,
 }
 
 #[derive(Clone)]
 pub struct FaultyToyDomain {
     inner: ToyDomain,
+    genesis_override: Option<Arc<dolos_core::Genesis>>,
     state: FaultyStateStore,
     archive: FaultyArchiveStore,
     indexes: FaultyIndexStore,
@@ -33,8 +35,17 @@ impl FaultyToyDomain {
         let archive = FaultyArchiveStore::new(inner.archive().clone(), fault);
         let indexes = FaultyIndexStore::new(inner.indexes().clone(), fault);
         let wal = FaultyWalStore::new(inner.wal().clone(), fault);
+        let genesis_override = match fault {
+            TestFault::GenesisError => {
+                let mut genesis = (*inner.genesis()).clone();
+                genesis.shelley.system_start = Some("invalid-date".to_string());
+                Some(Arc::new(genesis))
+            }
+            _ => None,
+        };
         Self {
             inner,
+            genesis_override,
             state,
             archive,
             indexes,
@@ -454,7 +465,10 @@ impl Domain for FaultyToyDomain {
     }
 
     fn genesis(&self) -> Arc<dolos_core::Genesis> {
-        self.inner.genesis()
+        self.genesis_override
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(|| self.inner.genesis())
     }
 
     fn read_chain(&self) -> std::sync::RwLockReadGuard<'_, Self::Chain> {
