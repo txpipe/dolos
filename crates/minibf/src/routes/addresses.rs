@@ -453,6 +453,103 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use blockfrost_openapi::models::{
+        address_transactions_content_inner::AddressTransactionsContentInner,
+        address_utxo_content_inner::AddressUtxoContentInner,
+    };
+    use crate::test_support::{TestApp, TestFault, ADDRESS};
+
+    fn invalid_address() -> &'static str {
+        "not-an-address"
+    }
+
+    fn missing_address() -> &'static str {
+        "addr_test1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"
+    }
+
+    async fn assert_status(app: &TestApp, path: &str, expected: StatusCode) {
+        let (status, bytes) = app.get_bytes(path).await;
+        assert_eq!(
+            status,
+            expected,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+    }
+
+    #[tokio::test]
+    async fn addresses_transactions_happy_path() {
+        let app = TestApp::new();
+        let path = format!("/addresses/{ADDRESS}/transactions?page=999999");
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let _: Vec<AddressTransactionsContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse address transactions");
+    }
+
+    #[tokio::test]
+    async fn addresses_transactions_bad_request() {
+        let app = TestApp::new();
+        let path = format!("/addresses/{}/transactions", invalid_address());
+        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn addresses_transactions_not_found() {
+        let app = TestApp::new();
+        let path = format!("/addresses/{}/transactions", missing_address());
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+    }
+
+    #[tokio::test]
+    async fn addresses_transactions_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let path = format!("/addresses/{ADDRESS}/transactions");
+        assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    #[tokio::test]
+    async fn addresses_utxos_happy_path() {
+        let app = TestApp::new();
+        let path = format!("/addresses/{ADDRESS}/utxos?page=999999");
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let _: Vec<AddressUtxoContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse address utxos");
+    }
+
+    #[tokio::test]
+    async fn addresses_utxos_bad_request() {
+        let app = TestApp::new();
+        let path = format!("/addresses/{}/utxos", invalid_address());
+        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn addresses_utxos_not_found() {
+        let app = TestApp::new();
+        let path = format!("/addresses/{}/utxos", missing_address());
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+    }
+
+    #[tokio::test]
+    async fn addresses_utxos_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let path = format!("/addresses/{ADDRESS}/utxos");
+        assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
 
     #[test]
     fn test_parse_address_payment() {

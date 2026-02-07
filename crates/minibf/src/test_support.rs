@@ -18,6 +18,12 @@ use crate::{build_router_with_facade, Facade};
 pub use dolos_testing::fixtures::hardano::KNOWN_TX_HASH;
 
 pub use dolos_testing::faults::TestFault;
+pub const STAKE_ADDRESS: &str = "REPLACE_ME_STAKE_ADDRESS";
+pub const ADDRESS: &str = "REPLACE_ME_ADDRESS";
+pub const ASSET: &str = "REPLACE_ME_ASSET";
+pub const BLOCK_HASH_OR_NUMBER: &str = "REPLACE_ME_BLOCK_HASH_OR_NUMBER";
+pub const METADATA_LABEL: &str = "REPLACE_ME_METADATA_LABEL";
+pub const POOL_ID: &str = "REPLACE_ME_POOL_ID";
 
 pub struct TestDomainBuilder {
     domain: ToyDomain,

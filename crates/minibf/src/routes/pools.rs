@@ -346,8 +346,19 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blockfrost_openapi::models::pool_list_extended_inner::PoolListExtendedInner;
-    use crate::test_support::{TestApp, TestFault};
+    use blockfrost_openapi::models::{
+        pool_delegators_inner::PoolDelegatorsInner,
+        pool_list_extended_inner::PoolListExtendedInner,
+    };
+    use crate::test_support::{TestApp, TestFault, POOL_ID};
+
+    fn invalid_pool_id() -> &'static str {
+        "not-a-pool"
+    }
+
+    fn missing_pool_id() -> &'static str {
+        "pool1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"
+    }
 
     async fn assert_status(app: &TestApp, path: &str, expected: StatusCode) {
         let (status, bytes) = app.get_bytes(path).await;
@@ -385,5 +396,42 @@ mod tests {
     async fn pools_extended_internal_error() {
         let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
         assert_status(&app, "/pools/extended", StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    #[tokio::test]
+    async fn pools_delegators_happy_path() {
+        let app = TestApp::new();
+        let path = format!("/pools/{POOL_ID}/delegators?page=999999");
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let _: Vec<PoolDelegatorsInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse pool delegators");
+    }
+
+    #[tokio::test]
+    async fn pools_delegators_bad_request() {
+        let app = TestApp::new();
+        let path = format!("/pools/{}/delegators", invalid_pool_id());
+        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn pools_delegators_not_found() {
+        let app = TestApp::new();
+        let path = format!("/pools/{}/delegators", missing_pool_id());
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+    }
+
+    #[tokio::test]
+    async fn pools_delegators_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
+        let path = format!("/pools/{POOL_ID}/delegators");
+        assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 }
