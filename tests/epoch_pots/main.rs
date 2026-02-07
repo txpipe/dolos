@@ -21,6 +21,41 @@ use dolos_cardano::PoolHash;
 use dolos_core::{config::CardanoConfig, Domain, StateStore};
 use dolos_testing::harness::cardano::{copy_dir_recursive, Config, LedgerHarness};
 
+macro_rules! epoch_test {
+    ($test_name:ident, $fixture_mod:ident, $network:literal, $epoch:literal, $snapshot:literal) => {
+        #[test]
+        fn $test_name() {
+            init_tracing();
+            let seed_dir = seed_dir_for($network, $epoch);
+            let fixtures_dir = fixtures_dir($network, $epoch);
+
+            let epochs = read_fixture(&fixtures_dir.join("epochs.csv")).unwrap();
+            let pparams = read_fixture(&fixtures_dir.join("pparams.csv")).unwrap();
+            let eras = read_fixture(&fixtures_dir.join("eras.csv")).unwrap();
+            let delegation = read_fixture(
+                &fixtures_dir.join(format!("delegation-{}.csv", $snapshot)),
+            )
+            .unwrap();
+            let stake =
+                read_fixture(&fixtures_dir.join(format!("stake-{}.csv", $snapshot))).unwrap();
+            let rewards = read_fixture(&fixtures_dir.join("rewards.csv")).unwrap();
+
+            run_epoch_pots_test(
+                $network,
+                $epoch,
+                &seed_dir,
+                &epochs,
+                &pparams,
+                &eras,
+                &delegation,
+                &stake,
+                &rewards,
+            )
+            .unwrap();
+        }
+    };
+}
+
 // ---------------------------------------------------------------------------
 // Minimal xtask config structs (avoid pulling in the full xtask crate)
 // ---------------------------------------------------------------------------
@@ -347,53 +382,6 @@ fn dump_eras(state: &impl StateStore, path: &Path) -> Result<()> {
 
 
 // ---------------------------------------------------------------------------
-// Fixtures (compile-time embedded)
-// ---------------------------------------------------------------------------
-
-mod fixtures {
-    pub mod mainnet_250 {
-        pub const EPOCHS: &str = include_str!("fixtures/mainnet-250/epochs.csv");
-        pub const PPARAMS: &str = include_str!("fixtures/mainnet-250/pparams.csv");
-        pub const ERAS: &str = include_str!("fixtures/mainnet-250/eras.csv");
-        pub const DELEGATION: &str = include_str!("fixtures/mainnet-250/delegation-248.csv");
-        pub const STAKE: &str = include_str!("fixtures/mainnet-250/stake-248.csv");
-        pub const REWARDS: &str = include_str!("fixtures/mainnet-250/rewards.csv");
-    }
-    pub mod mainnet_300 {
-        pub const EPOCHS: &str = include_str!("fixtures/mainnet-300/epochs.csv");
-        pub const PPARAMS: &str = include_str!("fixtures/mainnet-300/pparams.csv");
-        pub const ERAS: &str = include_str!("fixtures/mainnet-300/eras.csv");
-        pub const DELEGATION: &str = include_str!("fixtures/mainnet-300/delegation-298.csv");
-        pub const STAKE: &str = include_str!("fixtures/mainnet-300/stake-298.csv");
-        pub const REWARDS: &str = include_str!("fixtures/mainnet-300/rewards.csv");
-    }
-    pub mod preview_550 {
-        pub const EPOCHS: &str = include_str!("fixtures/preview-550/epochs.csv");
-        pub const PPARAMS: &str = include_str!("fixtures/preview-550/pparams.csv");
-        pub const ERAS: &str = include_str!("fixtures/preview-550/eras.csv");
-        pub const DELEGATION: &str = include_str!("fixtures/preview-550/delegation-548.csv");
-        pub const STAKE: &str = include_str!("fixtures/preview-550/stake-548.csv");
-        pub const REWARDS: &str = include_str!("fixtures/preview-550/rewards.csv");
-    }
-    pub mod preview_649 {
-        pub const EPOCHS: &str = include_str!("fixtures/preview-649/epochs.csv");
-        pub const PPARAMS: &str = include_str!("fixtures/preview-649/pparams.csv");
-        pub const ERAS: &str = include_str!("fixtures/preview-649/eras.csv");
-        pub const DELEGATION: &str = include_str!("fixtures/preview-649/delegation-647.csv");
-        pub const STAKE: &str = include_str!("fixtures/preview-649/stake-647.csv");
-        pub const REWARDS: &str = include_str!("fixtures/preview-649/rewards.csv");
-    }
-    pub mod preview_700 {
-        pub const EPOCHS: &str = include_str!("fixtures/preview-700/epochs.csv");
-        pub const PPARAMS: &str = include_str!("fixtures/preview-700/pparams.csv");
-        pub const ERAS: &str = include_str!("fixtures/preview-700/eras.csv");
-        pub const DELEGATION: &str = include_str!("fixtures/preview-700/delegation-698.csv");
-        pub const STAKE: &str = include_str!("fixtures/preview-700/stake-698.csv");
-        pub const REWARDS: &str = include_str!("fixtures/preview-700/rewards.csv");
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Core test runner
 // ---------------------------------------------------------------------------
 
@@ -695,92 +683,27 @@ fn seed_dir_for(network: &str, subject_epoch: u64) -> std::path::PathBuf {
     std::path::Path::new(&base).join(format!("{network}-{seed_epoch}"))
 }
 
-#[test]
-fn test_mainnet_250() {
-    init_tracing();
-    let seed_dir = seed_dir_for("mainnet", 250);
-    run_epoch_pots_test(
-        "mainnet",
-        250,
-        &seed_dir,
-        fixtures::mainnet_250::EPOCHS,
-        fixtures::mainnet_250::PPARAMS,
-        fixtures::mainnet_250::ERAS,
-        fixtures::mainnet_250::DELEGATION,
-        fixtures::mainnet_250::STAKE,
-        fixtures::mainnet_250::REWARDS,
-    )
-    .unwrap();
+fn fixtures_dir(network: &str, epoch: u64) -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/epoch_pots/fixtures")
+        .join(format!("{network}-{epoch}"))
 }
 
-#[test]
-fn test_mainnet_300() {
-    init_tracing();
-    let seed_dir = seed_dir_for("mainnet", 300);
-    run_epoch_pots_test(
-        "mainnet",
-        300,
-        &seed_dir,
-        fixtures::mainnet_300::EPOCHS,
-        fixtures::mainnet_300::PPARAMS,
-        fixtures::mainnet_300::ERAS,
-        fixtures::mainnet_300::DELEGATION,
-        fixtures::mainnet_300::STAKE,
-        fixtures::mainnet_300::REWARDS,
-    )
-    .unwrap();
+fn read_fixture(path: &Path) -> Result<String> {
+    std::fs::read_to_string(path).with_context(|| format!("reading fixture {}", path.display()))
 }
 
-#[test]
-fn test_preview_550() {
-    init_tracing();
-    let seed_dir = seed_dir_for("preview", 550);
-    run_epoch_pots_test(
-        "preview",
-        550,
-        &seed_dir,
-        fixtures::preview_550::EPOCHS,
-        fixtures::preview_550::PPARAMS,
-        fixtures::preview_550::ERAS,
-        fixtures::preview_550::DELEGATION,
-        fixtures::preview_550::STAKE,
-        fixtures::preview_550::REWARDS,
-    )
-    .unwrap();
-}
-
-#[test]
-fn test_preview_649() {
-    init_tracing();
-    let seed_dir = seed_dir_for("preview", 649);
-    run_epoch_pots_test(
-        "preview",
-        649,
-        &seed_dir,
-        fixtures::preview_649::EPOCHS,
-        fixtures::preview_649::PPARAMS,
-        fixtures::preview_649::ERAS,
-        fixtures::preview_649::DELEGATION,
-        fixtures::preview_649::STAKE,
-        fixtures::preview_649::REWARDS,
-    )
-    .unwrap();
-}
-
-#[test]
-fn test_preview_700() {
-    init_tracing();
-    let seed_dir = seed_dir_for("preview", 700);
-    run_epoch_pots_test(
-        "preview",
-        700,
-        &seed_dir,
-        fixtures::preview_700::EPOCHS,
-        fixtures::preview_700::PPARAMS,
-        fixtures::preview_700::ERAS,
-        fixtures::preview_700::DELEGATION,
-        fixtures::preview_700::STAKE,
-        fixtures::preview_700::REWARDS,
-    )
-    .unwrap();
-}
+epoch_test!(test_mainnet_250, fixtures_mainnet_250, "mainnet", 250, 248);
+epoch_test!(test_mainnet_278, fixtures_mainnet_278, "mainnet", 278, 276);
+epoch_test!(test_mainnet_279, fixtures_mainnet_279, "mainnet", 279, 277);
+epoch_test!(test_mainnet_280, fixtures_mainnet_280, "mainnet", 280, 278);
+epoch_test!(test_mainnet_285, fixtures_mainnet_285, "mainnet", 285, 283);
+epoch_test!(test_mainnet_286, fixtures_mainnet_286, "mainnet", 286, 284);
+epoch_test!(test_mainnet_287, fixtures_mainnet_287, "mainnet", 287, 285);
+epoch_test!(test_mainnet_288, fixtures_mainnet_288, "mainnet", 288, 286);
+epoch_test!(test_mainnet_289, fixtures_mainnet_289, "mainnet", 289, 287);
+epoch_test!(test_mainnet_290, fixtures_mainnet_290, "mainnet", 290, 288);
+epoch_test!(test_mainnet_300, fixtures_mainnet_300, "mainnet", 300, 298);
+epoch_test!(test_preview_550, fixtures_preview_550, "preview", 550, 548);
+epoch_test!(test_preview_649, fixtures_preview_649, "preview", 649, 647);
+epoch_test!(test_preview_700, fixtures_preview_700, "preview", 700, 698);
