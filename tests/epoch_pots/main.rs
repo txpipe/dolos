@@ -657,7 +657,7 @@ fn run_epoch_pots_test(
 // Test functions
 // ---------------------------------------------------------------------------
 
-const MAINNET_SEED_EPOCHS: &[u64] = &[200, 270];
+const MAINNET_SEED_EPOCHS: &[u64] = &[200, 270, 300];
 const PREVIEW_SEED_EPOCHS: &[u64] = &[500, 700];
 const PREPROD_SEED_EPOCHS: &[u64] = &[200];
 
@@ -707,6 +707,9 @@ epoch_test!(test_mainnet_288, fixtures_mainnet_288, "mainnet", 288, 286);
 epoch_test!(test_mainnet_289, fixtures_mainnet_289, "mainnet", 289, 287);
 epoch_test!(test_mainnet_290, fixtures_mainnet_290, "mainnet", 290, 288);
 epoch_test!(test_mainnet_300, fixtures_mainnet_300, "mainnet", 300, 298);
+epoch_test!(test_mainnet_325, fixtures_mainnet_325, "mainnet", 325, 323);
+epoch_test!(test_mainnet_350, fixtures_mainnet_350, "mainnet", 350, 348);
+epoch_test!(test_mainnet_375, fixtures_mainnet_375, "mainnet", 375, 373);
 epoch_test!(test_preview_550, fixtures_preview_550, "preview", 550, 548);
 epoch_test!(test_preview_649, fixtures_preview_649, "preview", 649, 647);
 epoch_test!(test_preview_700, fixtures_preview_700, "preview", 700, 698);
