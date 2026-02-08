@@ -24,7 +24,7 @@ use pallas::{
             AddrKeyhash, Bytes, NonEmptySet, NonZeroInt, PositiveCoin, Set, StakeCredential,
             TransactionInput, VrfKeyhash,
         },
-        traverse::{ComputeHash, MultiEraBlock},
+        traverse::ComputeHash,
     },
 };
 use pallas::crypto::{hash::Hasher, key::ed25519::SecretKeyExtended};

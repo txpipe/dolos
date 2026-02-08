@@ -45,13 +45,13 @@ impl futures_core::Stream for EmptyMempoolStream {
 impl dolos_core::MempoolStore for Mempool {
     type Stream = EmptyMempoolStream;
 
-    fn receive(&self, _tx: MempoolTx) -> Result<(), MempoolError> {
+    fn receive(&self, tx: MempoolTx) -> Result<(), MempoolError> {
         let mut pending = self.pending.write().map_err(|_| {
             MempoolError::Internal(Box::new(std::io::Error::other(
                 "mempool lock poisoned",
             )))
         })?;
-        pending.push(_tx);
+        pending.push(tx);
         Ok(())
     }
 
@@ -59,10 +59,10 @@ impl dolos_core::MempoolStore for Mempool {
         // do nothing for now
     }
 
-    fn check_stage(&self, _tx_hash: &TxHash) -> MempoolTxStage {
+    fn check_stage(&self, tx_hash: &TxHash) -> MempoolTxStage {
         let pending = self.pending.read();
         if let Ok(pending) = pending {
-            if pending.iter().any(|tx| &tx.hash == _tx_hash) {
+            if pending.iter().any(|tx| &tx.hash == tx_hash) {
                 return MempoolTxStage::Pending;
             }
         }

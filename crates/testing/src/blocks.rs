@@ -64,13 +64,13 @@ pub fn make_conway_block(slot: BlockSlot) -> (ChainPoint, RawBlock) {
 }
 
 pub fn make_conway_block_with_tx(
-    _slot: BlockSlot,
-    _tx_body: pallas::ledger::primitives::conway::TransactionBody<'static>,
+    slot: BlockSlot,
+    tx_body: pallas::ledger::primitives::conway::TransactionBody<'static>,
     auxiliary_data: Option<alonzo::AuxiliaryData>,
 ) -> (ChainPoint, RawBlock) {
     let header_body = HeaderBody {
         block_number: 1,
-        slot: 10,
+        slot,
         prev_hash: Some(Hash::from([9u8; 32])),
         issuer_vkey: Bytes::from(vec![0x10, 0x11]),
         vrf_vkey: Bytes::from(vec![0x12, 0x13]),
@@ -91,7 +91,7 @@ pub fn make_conway_block_with_tx(
         body_signature: Bytes::from(vec![0x18]),
     };
 
-    let body = _tx_body;
+    let body = tx_body;
     let witness_set = WitnessSet {
         vkeywitness: None,
         native_script: None,
@@ -123,7 +123,7 @@ pub fn make_conway_block_with_tx(
     let wrapper = (Era::Conway as u16, block);
 
     let raw_bytes = pallas::codec::minicbor::to_vec(&wrapper).unwrap();
-    let chain_point = ChainPoint::Specific(10, hash);
+    let chain_point = ChainPoint::Specific(slot, hash);
 
     (chain_point, Arc::new(raw_bytes))
 }
