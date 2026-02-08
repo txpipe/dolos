@@ -197,6 +197,9 @@ where
     let pagination = Pagination::try_from(params)?;
     pagination.enforce_max_scan_limit()?;
     let account_key = parse_account_key_param(&stake_address)?;
+    if !domain.cardano_entity_exists::<AccountState>(account_key.entity_key.as_slice())? {
+        return Err(StatusCode::NOT_FOUND.into());
+    }
 
     let (start_slot, end_slot) = pagination.start_and_end_slots(&domain).await?;
     let stream = domain.query().blocks_by_stake_stream(
@@ -469,6 +472,10 @@ where
 {
     let account_key = parse_account_key_param(stake_address)?;
 
+    if !domain.cardano_entity_exists::<AccountState>(account_key.entity_key.as_slice())? {
+        return Err(StatusCode::NOT_FOUND.into());
+    }
+
     let chain = domain
         .get_chain_summary()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -638,6 +645,9 @@ where
 {
     let pagination = Pagination::try_from(params)?;
     let account_key = parse_account_key_param(&stake_address)?;
+    if !domain.cardano_entity_exists::<AccountState>(account_key.entity_key.as_slice())? {
+        return Err(StatusCode::NOT_FOUND.into());
+    }
     let tip = domain.get_tip_slot()?;
     let summary = domain.get_chain_summary()?;
     let (epoch, _) = summary.slot_epoch(tip);
@@ -704,4 +714,230 @@ where
     }
 
     Ok(Json(items))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{TestApp, TestFault};
+    use blockfrost_openapi::models::{
+        account_addresses_content_inner::AccountAddressesContentInner,
+        account_content::AccountContent,
+        account_delegation_content_inner::AccountDelegationContentInner,
+        account_registration_content_inner::AccountRegistrationContentInner,
+        account_reward_content_inner::AccountRewardContentInner,
+    };
+
+    fn invalid_stake_address() -> &'static str {
+        "not-a-stake"
+    }
+
+    fn missing_stake_address() -> &'static str {
+        "stake_test1uqysjzgfpyysjzgfpyysjzgfpyysjzgfpyysjzgfpyysjzgeeww5k"
+    }
+
+    async fn assert_status(app: &TestApp, path: &str, expected: StatusCode) {
+        let (status, bytes) = app.get_bytes(path).await;
+        assert_eq!(
+            status,
+            expected,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_happy_path() {
+        let app = TestApp::new();
+        let stake_address = app.vectors().stake_address.as_str();
+        let path = format!("/accounts/{stake_address}");
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let _: AccountContent =
+            serde_json::from_slice(&bytes).expect("failed to parse account content");
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_bad_request() {
+        let app = TestApp::new();
+        let path = format!("/accounts/{}", invalid_stake_address());
+        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_not_found() {
+        let app = TestApp::new();
+        let path = format!("/accounts/{}", missing_stake_address());
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
+        let stake_address = app.vectors().stake_address.as_str();
+        let path = format!("/accounts/{stake_address}");
+        assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_addresses_happy_path() {
+        let app = TestApp::new();
+        let stake_address = app.vectors().stake_address.as_str();
+        let path = format!("/accounts/{stake_address}/addresses?page=1");
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let _: Vec<AccountAddressesContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse account addresses");
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_addresses_bad_request() {
+        let app = TestApp::new();
+        let path = format!("/accounts/{}/addresses", invalid_stake_address());
+        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_addresses_not_found() {
+        let app = TestApp::new();
+        let path = format!("/accounts/{}/addresses", missing_stake_address());
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_addresses_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let stake_address = app.vectors().stake_address.as_str();
+        let path = format!("/accounts/{stake_address}/addresses");
+        assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_delegations_happy_path() {
+        let app = TestApp::new();
+        let stake_address = app.vectors().stake_address.as_str();
+        let path = format!("/accounts/{stake_address}/delegations?page=1");
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let _: Vec<AccountDelegationContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse account delegations");
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_delegations_bad_request() {
+        let app = TestApp::new();
+        let path = format!("/accounts/{}/delegations", invalid_stake_address());
+        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_delegations_not_found() {
+        let app = TestApp::new();
+        let path = format!("/accounts/{}/delegations", missing_stake_address());
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_delegations_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let stake_address = app.vectors().stake_address.as_str();
+        let path = format!("/accounts/{stake_address}/delegations");
+        assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_registrations_happy_path() {
+        let app = TestApp::new();
+        let stake_address = app.vectors().stake_address.as_str();
+        let path = format!("/accounts/{stake_address}/registrations?page=1");
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let _: Vec<AccountRegistrationContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse account registrations");
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_registrations_bad_request() {
+        let app = TestApp::new();
+        let path = format!("/accounts/{}/registrations", invalid_stake_address());
+        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_registrations_not_found() {
+        let app = TestApp::new();
+        let path = format!("/accounts/{}/registrations", missing_stake_address());
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_registrations_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let stake_address = app.vectors().stake_address.as_str();
+        let path = format!("/accounts/{stake_address}/registrations");
+        assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_rewards_happy_path() {
+        let app = TestApp::new();
+        let stake_address = app.vectors().stake_address.as_str();
+        let path = format!("/accounts/{stake_address}/rewards?page=1");
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let _: Vec<AccountRewardContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse account rewards");
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_rewards_bad_request() {
+        let app = TestApp::new();
+        let path = format!("/accounts/{}/rewards", invalid_stake_address());
+        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_rewards_not_found() {
+        let app = TestApp::new();
+        let path = format!("/accounts/{}/rewards", missing_stake_address());
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_rewards_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
+        let stake_address = app.vectors().stake_address.as_str();
+        let path = format!("/accounts/{stake_address}/rewards");
+        assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
 }

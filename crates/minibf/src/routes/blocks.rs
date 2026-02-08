@@ -458,3 +458,87 @@ where
             .collect(),
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use blockfrost_openapi::models::block_content::BlockContent;
+    use crate::test_support::{TestApp, TestFault};
+
+    fn invalid_block() -> &'static str {
+        "not-a-hash"
+    }
+
+    fn missing_block() -> &'static str {
+        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    }
+
+    async fn assert_status(app: &TestApp, path: &str, expected: StatusCode) {
+        let (status, bytes) = app.get_bytes(path).await;
+        assert_eq!(
+            status,
+            expected,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+    }
+
+    #[tokio::test]
+    async fn blocks_latest_happy_path() {
+        let app = TestApp::new();
+        let (status, bytes) = app.get_bytes("/blocks/latest").await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let _: BlockContent =
+            serde_json::from_slice(&bytes).expect("failed to parse block content");
+    }
+
+    #[tokio::test]
+    async fn blocks_latest_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
+        assert_status(&app, "/blocks/latest", StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    #[tokio::test]
+    async fn blocks_by_hash_or_number_happy_path() {
+        let app = TestApp::new();
+        let block_hash = app.vectors().block_hash.as_str();
+        let path = format!("/blocks/{block_hash}");
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let _: BlockContent =
+            serde_json::from_slice(&bytes).expect("failed to parse block content");
+    }
+
+    #[tokio::test]
+    async fn blocks_by_hash_or_number_bad_request() {
+        let app = TestApp::new();
+        let path = format!("/blocks/{}", invalid_block());
+        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn blocks_by_hash_or_number_not_found() {
+        let app = TestApp::new();
+        let path = format!("/blocks/{}", missing_block());
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+    }
+
+    #[tokio::test]
+    async fn blocks_by_hash_or_number_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
+        let path = "/blocks/1".to_string();
+        assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+}

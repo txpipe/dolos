@@ -7,6 +7,8 @@ edition.workspace = true
 pallas.workspace = true
 dolos-core = { path = "../core" }
 rand = "0.9.1"
+hex = "0.4.3"
+bech32 = "0.9.1"
 
 # optional dependencies for toy domain
 dolos-redb3 = { path = "../redb3", optional = true }

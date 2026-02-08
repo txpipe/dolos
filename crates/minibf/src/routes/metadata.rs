@@ -153,7 +153,6 @@ where
         }
 
         let (_slot, maybe) = res.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
         if let Some(cbor) = maybe {
             builder.scan_block(&cbor)?;
         }
@@ -172,7 +171,12 @@ where
 {
     let builder = by_label(&label, params, &domain).await?;
 
-    Ok(builder.into_model().map(Json)?)
+    let model: Vec<TxMetadataLabelJsonInner> = builder.into_model()?;
+    if model.is_empty() {
+        return Err(StatusCode::NOT_FOUND.into());
+    }
+
+    Ok(Json(model))
 }
 
 pub async fn by_label_cbor<D>(
@@ -185,5 +189,116 @@ where
 {
     let builder = by_label(&label, params, &domain).await?;
 
-    Ok(builder.into_model().map(Json)?)
+    let model: Vec<TxMetadataLabelCborInner> = builder.into_model()?;
+    if model.is_empty() {
+        return Err(StatusCode::NOT_FOUND.into());
+    }
+
+    Ok(Json(model))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use blockfrost_openapi::models::{
+        tx_metadata_label_cbor_inner::TxMetadataLabelCborInner,
+        tx_metadata_label_json_inner::TxMetadataLabelJsonInner,
+    };
+    use crate::test_support::{TestApp, TestFault};
+
+    fn invalid_label() -> &'static str {
+        "not-a-number"
+    }
+
+    fn missing_label() -> &'static str {
+        "9999999999"
+    }
+
+    async fn assert_status(app: &TestApp, path: &str, expected: StatusCode) {
+        let (status, bytes) = app.get_bytes(path).await;
+        assert_eq!(
+            status,
+            expected,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+    }
+
+    #[tokio::test]
+    async fn metadata_label_json_happy_path() {
+        let app = TestApp::new();
+        let label = app.vectors().metadata_label.as_str();
+        let path = format!("/metadata/txs/labels/{label}?page=1");
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let _: Vec<TxMetadataLabelJsonInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse metadata json");
+    }
+
+    #[tokio::test]
+    async fn metadata_label_json_bad_request() {
+        let app = TestApp::new();
+        let path = format!("/metadata/txs/labels/{}", invalid_label());
+        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn metadata_label_json_not_found() {
+        let app = TestApp::new();
+        let path = format!("/metadata/txs/labels/{}", missing_label());
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+    }
+
+    #[tokio::test]
+    async fn metadata_label_json_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let label = app.vectors().metadata_label.as_str();
+        let path = format!("/metadata/txs/labels/{label}");
+        assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    #[tokio::test]
+    async fn metadata_label_cbor_happy_path() {
+        let app = TestApp::new();
+        let label = app.vectors().metadata_label.as_str();
+        let path = format!("/metadata/txs/labels/{label}/cbor?page=1");
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let _: Vec<TxMetadataLabelCborInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse metadata cbor");
+    }
+
+    #[tokio::test]
+    async fn metadata_label_cbor_bad_request() {
+        let app = TestApp::new();
+        let path = format!("/metadata/txs/labels/{}/cbor", invalid_label());
+        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn metadata_label_cbor_not_found() {
+        let app = TestApp::new();
+        let path = format!("/metadata/txs/labels/{}/cbor", missing_label());
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+    }
+
+    #[tokio::test]
+    async fn metadata_label_cbor_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let label = app.vectors().metadata_label.as_str();
+        let path = format!("/metadata/txs/labels/{label}/cbor");
+        assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
 }

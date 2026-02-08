@@ -1329,10 +1329,12 @@ dependencies = [
  "crc",
  "dolos-cardano",
  "dolos-core",
+ "dolos-testing",
  "futures",
  "futures-core",
  "futures-util",
  "hex",
+ "http-body-util",
  "itertools 0.14.0",
  "num-bigint",
  "num-rational",
@@ -1374,11 +1376,13 @@ dependencies = [
 name = "dolos-testing"
 version = "1.0.0-rc.8"
 dependencies = [
+ "bech32 0.9.1",
  "dolos-cardano",
  "dolos-core",
  "dolos-redb3",
  "futures-core",
  "futures-util",
+ "hex",
  "pallas",
  "rand 0.9.1",
  "tokio",

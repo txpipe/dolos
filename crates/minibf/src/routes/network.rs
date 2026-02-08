@@ -306,3 +306,62 @@ where
 
     Ok(Json(res))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use blockfrost_openapi::models::{network::Network, network_eras_inner::NetworkErasInner};
+    use crate::test_support::{TestApp, TestFault};
+
+    async fn assert_status(app: &TestApp, path: &str, expected: StatusCode) {
+        let (status, bytes) = app.get_bytes(path).await;
+        assert_eq!(
+            status,
+            expected,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+    }
+
+    #[tokio::test]
+    async fn network_happy_path() {
+        let app = TestApp::new();
+        let (status, bytes) = app.get_bytes("/network").await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let _: Network =
+            serde_json::from_slice(&bytes).expect("failed to parse network response");
+    }
+
+    #[tokio::test]
+    async fn network_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
+        assert_status(&app, "/network", StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    #[tokio::test]
+    async fn network_eras_happy_path() {
+        let app = TestApp::new();
+        let (status, bytes) = app.get_bytes("/network/eras").await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let _: Vec<NetworkErasInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse network eras");
+    }
+
+    #[tokio::test]
+    async fn network_eras_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
+        assert_status(&app, "/network/eras", StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+}

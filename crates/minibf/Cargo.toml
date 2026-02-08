@@ -9,7 +9,7 @@ serde.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 pallas.workspace = true
-tower.workspace = true
+tower = { workspace = true, features = ["util"] }
 tower-http.workspace = true
 itertools.workspace = true
 chrono.workspace = true
@@ -31,3 +31,7 @@ num-traits = "0.2.19"
 serde_json = "1.0.140"
 futures-core.workspace = true
 futures-util.workspace = true
+
+[dev-dependencies]
+dolos-testing = { path = "../testing", features = ["toy-domain"] }
+http-body-util = "0.1.2"

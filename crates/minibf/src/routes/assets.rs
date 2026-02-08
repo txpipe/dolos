@@ -324,9 +324,7 @@ impl AssetModelBuilder {
 
         if let Some((_, standard, ref_asset_bytes)) = &cip68_reference {
             let entity_key = pallas::crypto::hash::Hasher::<256>::hash(ref_asset_bytes.as_slice());
-            let ref_state = domain
-                .read_cardano_entity::<AssetState>(entity_key.as_slice())
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            let ref_state = domain.read_cardano_entity::<AssetState>(entity_key.as_slice())?;
 
             if let Some(metadata_tx) = ref_state.and_then(|state| state.metadata_tx) {
                 if let Some(EraCbor(era, cbor)) = domain
@@ -460,8 +458,7 @@ where
     let registry_url = domain.config.token_registry_url.clone();
 
     let asset_state = domain
-        .read_cardano_entity::<AssetState>(entity_key.as_slice())
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .read_cardano_entity::<AssetState>(entity_key.as_slice())?
         .ok_or(StatusCode::NOT_FOUND)?;
 
     let initial_tx = if let Some(initial_tx) = asset_state.initial_tx {
@@ -710,4 +707,67 @@ where
         .collect();
 
     Ok(Json(transactions))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use blockfrost_openapi::models::asset::Asset;
+    use crate::test_support::{TestApp, TestFault};
+
+    fn invalid_asset() -> &'static str {
+        "not-hex-asset"
+    }
+
+    fn missing_asset() -> &'static str {
+        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    }
+
+    async fn assert_status(app: &TestApp, path: &str, expected: StatusCode) {
+        let (status, bytes) = app.get_bytes(path).await;
+        assert_eq!(
+            status,
+            expected,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+    }
+
+    #[tokio::test]
+    async fn assets_by_subject_happy_path() {
+        let app = TestApp::new();
+        let asset = app.vectors().asset_unit.as_str();
+        let path = format!("/assets/{asset}");
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let _: Asset = serde_json::from_slice(&bytes).expect("failed to parse asset");
+    }
+
+    #[tokio::test]
+    async fn assets_by_subject_bad_request() {
+        let app = TestApp::new();
+        let path = format!("/assets/{}", invalid_asset());
+        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn assets_by_subject_not_found() {
+        let app = TestApp::new();
+        let path = format!("/assets/{}", missing_asset());
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+    }
+
+    #[tokio::test]
+    async fn assets_by_subject_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
+        let asset = app.vectors().asset_unit.as_str();
+        let path = format!("/assets/{asset}");
+        assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
 }
