@@ -541,4 +541,47 @@ mod tests {
         let path = "/blocks/1".to_string();
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
     }
+
+    #[tokio::test]
+    async fn blocks_by_hash_or_number_txs_order() {
+        let app = TestApp::new();
+        let block = app.vectors().blocks.first().expect("missing block vectors");
+        let path_asc = format!("/blocks/{}/txs?order=asc", block.block_hash);
+        let path_desc = format!("/blocks/{}/txs?order=desc", block.block_hash);
+
+        let (status_asc, bytes_asc) = app.get_bytes(&path_asc).await;
+        let (status_desc, bytes_desc) = app.get_bytes(&path_desc).await;
+        assert_eq!(status_asc, StatusCode::OK);
+        assert_eq!(status_desc, StatusCode::OK);
+
+        let txs_asc: Vec<String> =
+            serde_json::from_slice(&bytes_asc).expect("failed to parse asc txs");
+        let txs_desc: Vec<String> =
+            serde_json::from_slice(&bytes_desc).expect("failed to parse desc txs");
+
+        assert_eq!(txs_asc, block.tx_hashes);
+        let mut reversed = block.tx_hashes.clone();
+        reversed.reverse();
+        assert_eq!(txs_desc, reversed);
+    }
+
+    #[tokio::test]
+    async fn blocks_latest_txs_order() {
+        let app = TestApp::new();
+        let block = app.vectors().blocks.last().expect("missing block vectors");
+        let (status_asc, bytes_asc) = app.get_bytes("/blocks/latest/txs?order=asc").await;
+        let (status_desc, bytes_desc) = app.get_bytes("/blocks/latest/txs?order=desc").await;
+        assert_eq!(status_asc, StatusCode::OK);
+        assert_eq!(status_desc, StatusCode::OK);
+
+        let txs_asc: Vec<String> =
+            serde_json::from_slice(&bytes_asc).expect("failed to parse asc txs");
+        let txs_desc: Vec<String> =
+            serde_json::from_slice(&bytes_desc).expect("failed to parse desc txs");
+
+        assert_eq!(txs_asc, block.tx_hashes);
+        let mut reversed = block.tx_hashes.clone();
+        reversed.reverse();
+        assert_eq!(txs_desc, reversed);
+    }
 }
