@@ -27,7 +27,7 @@ use pallas::{
         traverse::{ComputeHash, MultiEraBlock},
     },
 };
-use pallas_crypto::{hash::Hasher, key::ed25519::SecretKeyExtended};
+use pallas::crypto::{hash::Hasher, key::ed25519::SecretKeyExtended};
 use bech32::{FromBase32, ToBase32, Variant};
 
 #[derive(Clone, Debug)]

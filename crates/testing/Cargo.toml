@@ -5,7 +5,6 @@ edition.workspace = true
 
 [dependencies]
 pallas.workspace = true
-pallas-crypto = "1.0.0-alpha.4"
 dolos-core = { path = "../core" }
 rand = "0.9.1"
 hex = "0.4.3"
