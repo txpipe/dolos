@@ -242,6 +242,110 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn metadata_label_json_slot_constrained() {
+        let app = TestApp::new();
+        let label = app.vectors().metadata_label.as_str();
+        let block = app
+            .vectors()
+            .blocks
+            .first()
+            .expect("missing block vectors");
+        let path = format!(
+            "/metadata/txs/labels/{label}?from={}&to={}",
+            block.block_number, block.block_number
+        );
+        let (status, bytes) = app.get_bytes(&path).await;
+        assert_eq!(status, StatusCode::OK);
+        let items: Vec<TxMetadataLabelJsonInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse metadata json");
+        for item in items {
+            assert!(block.tx_hashes.contains(&item.tx_hash));
+        }
+    }
+
+    #[tokio::test]
+    async fn metadata_label_json_paginated() {
+        let app = TestApp::new();
+        let label = app.vectors().metadata_label.as_str();
+        let path_page_1 = format!("/metadata/txs/labels/{label}?page=1&count=1");
+        let path_page_2 = format!("/metadata/txs/labels/{label}?page=2&count=1");
+
+        let (status_1, bytes_1) = app.get_bytes(&path_page_1).await;
+        let (status_2, bytes_2) = app.get_bytes(&path_page_2).await;
+
+        assert_eq!(status_1, StatusCode::OK);
+        assert_eq!(status_2, StatusCode::OK);
+
+        let page_1: Vec<TxMetadataLabelJsonInner> =
+            serde_json::from_slice(&bytes_1).expect("failed to parse metadata json page 1");
+        let page_2: Vec<TxMetadataLabelJsonInner> =
+            serde_json::from_slice(&bytes_2).expect("failed to parse metadata json page 2");
+
+        assert_eq!(page_1.len(), 1);
+        assert_eq!(page_2.len(), 1);
+        assert_ne!(page_1[0].tx_hash, page_2[0].tx_hash);
+    }
+
+    #[tokio::test]
+    async fn metadata_label_json_order_asc() {
+        let app = TestApp::new();
+        let label = app.vectors().metadata_label.as_str();
+        let path = format!("/metadata/txs/labels/{label}?order=asc&count=5");
+        let (status, bytes) = app.get_bytes(&path).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let asc: Vec<TxMetadataLabelJsonInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse metadata json asc");
+        if asc.is_empty() {
+            return;
+        }
+        let tx_pos = |hash: &str| {
+            app.vectors()
+                .blocks
+                .iter()
+                .find_map(|block| {
+                    block
+                        .tx_hashes
+                        .iter()
+                        .position(|x| x == hash)
+                        .map(|idx| (block.block_number, idx))
+                })
+                .expect("missing tx hash in vectors")
+        };
+        let asc_pos: Vec<_> = asc.iter().map(|x| tx_pos(&x.tx_hash)).collect();
+        assert!(asc_pos.windows(2).all(|w| w[0] <= w[1]));
+    }
+
+    #[tokio::test]
+    async fn metadata_label_json_order_desc() {
+        let app = TestApp::new();
+        let label = app.vectors().metadata_label.as_str();
+        let path = format!("/metadata/txs/labels/{label}?order=desc&count=5");
+        let (status, bytes) = app.get_bytes(&path).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let desc: Vec<TxMetadataLabelJsonInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse metadata json desc");
+        if desc.is_empty() {
+            return;
+        }
+        let tx_pos = |hash: &str| {
+            app.vectors()
+                .blocks
+                .iter()
+                .find_map(|block| {
+                    block
+                        .tx_hashes
+                        .iter()
+                        .position(|x| x == hash)
+                        .map(|idx| (block.block_number, idx))
+                })
+                .expect("missing tx hash in vectors")
+        };
+        let desc_pos: Vec<_> = desc.iter().map(|x| tx_pos(&x.tx_hash)).collect();
+        assert!(desc_pos.windows(2).all(|w| w[0] >= w[1]));
+    }
+    #[tokio::test]
     async fn metadata_label_json_bad_request() {
         let app = TestApp::new();
         let path = format!("/metadata/txs/labels/{}", invalid_label());
@@ -280,6 +384,87 @@ mod tests {
             serde_json::from_slice(&bytes).expect("failed to parse metadata cbor");
     }
 
+    #[tokio::test]
+    async fn metadata_label_cbor_slot_constrained() {
+        let app = TestApp::new();
+        let label = app.vectors().metadata_label.as_str();
+        let block = app
+            .vectors()
+            .blocks
+            .first()
+            .expect("missing block vectors");
+        let path = format!(
+            "/metadata/txs/labels/{label}/cbor?from={}&to={}",
+            block.block_number, block.block_number
+        );
+        let (status, bytes) = app.get_bytes(&path).await;
+        assert_eq!(status, StatusCode::OK);
+        let items: Vec<TxMetadataLabelCborInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse metadata cbor");
+        for item in items {
+            assert!(block.tx_hashes.contains(&item.tx_hash));
+        }
+    }
+
+    #[tokio::test]
+    async fn metadata_label_cbor_order_asc() {
+        let app = TestApp::new();
+        let label = app.vectors().metadata_label.as_str();
+        let path = format!("/metadata/txs/labels/{label}/cbor?order=asc&count=5");
+        let (status, bytes) = app.get_bytes(&path).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let asc: Vec<TxMetadataLabelCborInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse metadata cbor asc");
+        if asc.is_empty() {
+            return;
+        }
+        let tx_pos = |hash: &str| {
+            app.vectors()
+                .blocks
+                .iter()
+                .find_map(|block| {
+                    block
+                        .tx_hashes
+                        .iter()
+                        .position(|x| x == hash)
+                        .map(|idx| (block.block_number, idx))
+                })
+                .expect("missing tx hash in vectors")
+        };
+        let asc_pos: Vec<_> = asc.iter().map(|x| tx_pos(&x.tx_hash)).collect();
+        assert!(asc_pos.windows(2).all(|w| w[0] <= w[1]));
+    }
+
+    #[tokio::test]
+    async fn metadata_label_cbor_order_desc() {
+        let app = TestApp::new();
+        let label = app.vectors().metadata_label.as_str();
+        let path = format!("/metadata/txs/labels/{label}/cbor?order=desc&count=5");
+        let (status, bytes) = app.get_bytes(&path).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let desc: Vec<TxMetadataLabelCborInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse metadata cbor desc");
+        if desc.is_empty() {
+            return;
+        }
+        let tx_pos = |hash: &str| {
+            app.vectors()
+                .blocks
+                .iter()
+                .find_map(|block| {
+                    block
+                        .tx_hashes
+                        .iter()
+                        .position(|x| x == hash)
+                        .map(|idx| (block.block_number, idx))
+                })
+                .expect("missing tx hash in vectors")
+        };
+        let desc_pos: Vec<_> = desc.iter().map(|x| tx_pos(&x.tx_hash)).collect();
+        assert!(desc_pos.windows(2).all(|w| w[0] >= w[1]));
+    }
     #[tokio::test]
     async fn metadata_label_cbor_bad_request() {
         let app = TestApp::new();

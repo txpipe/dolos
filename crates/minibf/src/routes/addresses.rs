@@ -504,6 +504,98 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn addresses_transactions_slot_constrained() {
+        let app = TestApp::new();
+        let address = app.vectors().address.as_str();
+        let block = app
+            .vectors()
+            .blocks
+            .first()
+            .expect("missing block vectors");
+        let path = format!(
+            "/addresses/{address}/transactions?from={}&to={}",
+            block.block_number, block.block_number
+        );
+        let (status, bytes) = app.get_bytes(&path).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let items: Vec<AddressTransactionsContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse address transactions");
+        assert!(!items.is_empty());
+        for item in items {
+            assert!(block.tx_hashes.contains(&item.tx_hash));
+        }
+    }
+
+    #[tokio::test]
+    async fn addresses_transactions_paginated() {
+        let app = TestApp::new();
+        let address = app.vectors().address.as_str();
+        let path_page_1 = format!("/addresses/{address}/transactions?page=1&count=2");
+        let path_page_2 = format!("/addresses/{address}/transactions?page=2&count=2");
+
+        let (status_1, bytes_1) = app.get_bytes(&path_page_1).await;
+        let (status_2, bytes_2) = app.get_bytes(&path_page_2).await;
+
+        assert_eq!(status_1, StatusCode::OK);
+        assert_eq!(status_2, StatusCode::OK);
+
+        let page_1: Vec<AddressTransactionsContentInner> =
+            serde_json::from_slice(&bytes_1).expect("failed to parse transactions page 1");
+        let page_2: Vec<AddressTransactionsContentInner> =
+            serde_json::from_slice(&bytes_2).expect("failed to parse transactions page 2");
+
+        assert_eq!(page_1.len(), 2);
+        assert_eq!(page_2.len(), 2);
+
+        let page_1_hashes: std::collections::HashSet<_> =
+            page_1.into_iter().map(|x| x.tx_hash).collect();
+        let page_2_hashes: std::collections::HashSet<_> =
+            page_2.into_iter().map(|x| x.tx_hash).collect();
+        assert!(page_1_hashes.is_disjoint(&page_2_hashes));
+    }
+
+    #[tokio::test]
+    async fn addresses_transactions_order_asc() {
+        let app = TestApp::new();
+        let address = app.vectors().address.as_str();
+        let path = format!("/addresses/{address}/transactions?order=asc&count=5");
+        let (status, bytes) = app.get_bytes(&path).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let asc: Vec<AddressTransactionsContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse transactions asc");
+        if asc.is_empty() {
+            return;
+        }
+        let asc_pos: Vec<_> = asc
+            .iter()
+            .map(|x| (x.block_height, x.tx_index))
+            .collect();
+        assert!(asc_pos.windows(2).all(|w| w[0] <= w[1]));
+    }
+
+    #[tokio::test]
+    async fn addresses_transactions_order_desc() {
+        let app = TestApp::new();
+        let address = app.vectors().address.as_str();
+        let path = format!("/addresses/{address}/transactions?order=desc&count=5");
+        let (status, bytes) = app.get_bytes(&path).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let desc: Vec<AddressTransactionsContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse transactions desc");
+        if desc.is_empty() {
+            return;
+        }
+        let desc_pos: Vec<_> = desc
+            .iter()
+            .map(|x| (x.block_height, x.tx_index))
+            .collect();
+        assert!(desc_pos.windows(2).all(|w| w[0] >= w[1]));
+    }
+
+    #[tokio::test]
     async fn addresses_transactions_bad_request() {
         let app = TestApp::new();
         let path = format!("/addresses/{}/transactions", invalid_address());
@@ -540,6 +632,84 @@ mod tests {
         );
         let _: Vec<AddressUtxoContentInner> =
             serde_json::from_slice(&bytes).expect("failed to parse address utxos");
+    }
+
+    #[tokio::test]
+    async fn addresses_utxos_paginated() {
+        let app = TestApp::new();
+        let address = app.vectors().address.as_str();
+        let path_page_1 = format!("/addresses/{address}/utxos?page=1&count=2");
+        let path_page_2 = format!("/addresses/{address}/utxos?page=2&count=2");
+
+        let (status_1, bytes_1) = app.get_bytes(&path_page_1).await;
+        let (status_2, bytes_2) = app.get_bytes(&path_page_2).await;
+
+        assert_eq!(status_1, StatusCode::OK);
+        assert_eq!(status_2, StatusCode::OK);
+
+        let page_1: Vec<AddressUtxoContentInner> =
+            serde_json::from_slice(&bytes_1).expect("failed to parse utxos page 1");
+        let page_2: Vec<AddressUtxoContentInner> =
+            serde_json::from_slice(&bytes_2).expect("failed to parse utxos page 2");
+
+        assert_eq!(page_1.len(), 2);
+        assert_eq!(page_2.len(), 2);
+
+        let page_1_hashes: std::collections::HashSet<_> = page_1
+            .into_iter()
+            .map(|x| format!("{}#{}", x.tx_hash, x.output_index))
+            .collect();
+        let page_2_hashes: std::collections::HashSet<_> = page_2
+            .into_iter()
+            .map(|x| format!("{}#{}", x.tx_hash, x.output_index))
+            .collect();
+        assert!(page_1_hashes.is_disjoint(&page_2_hashes));
+    }
+
+    #[tokio::test]
+    async fn addresses_utxos_order_asc() {
+        let app = TestApp::new();
+        let address = app.vectors().address.as_str();
+        let path = format!("/addresses/{address}/utxos?order=asc&count=5");
+        let (status, bytes) = app.get_bytes(&path).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let asc: Vec<AddressUtxoContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse utxos asc");
+        if asc.is_empty() {
+            return;
+        }
+        let asc_pos: Vec<_> = asc
+            .iter()
+            .map(|x| {
+                let (block_number, tx_index) = app.vectors().tx_position(&x.tx_hash);
+                (block_number, tx_index, x.output_index)
+            })
+            .collect();
+        assert!(asc_pos.windows(2).all(|w| w[0] <= w[1]));
+    }
+
+    #[tokio::test]
+    async fn addresses_utxos_order_desc() {
+        let app = TestApp::new();
+        let address = app.vectors().address.as_str();
+        let path = format!("/addresses/{address}/utxos?order=desc&count=5");
+        let (status, bytes) = app.get_bytes(&path).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let desc: Vec<AddressUtxoContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse utxos desc");
+        if desc.is_empty() {
+            return;
+        }
+        let desc_pos: Vec<_> = desc
+            .iter()
+            .map(|x| {
+                let (block_number, tx_index) = app.vectors().tx_position(&x.tx_hash);
+                (block_number, tx_index, x.output_index)
+            })
+            .collect();
+        assert!(desc_pos.windows(2).all(|w| w[0] >= w[1]));
     }
 
     #[tokio::test]

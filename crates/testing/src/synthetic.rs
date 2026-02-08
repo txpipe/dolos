@@ -87,6 +87,9 @@ pub struct SyntheticVectors {
     pub block_hash: String,
     pub tx_hash: String,
     pub blocks: Vec<BlockVectors>,
+    pub account_addresses: Vec<String>,
+    pub account_address_blocks: Vec<(String, u64)>,
+    pub account_address_bounds: Vec<(String, u64, u64)>,
     pub pool_id: String,
     pub drep_id: String,
     pub tx_cbor: Vec<u8>,
@@ -98,6 +101,21 @@ pub struct BlockVectors {
     pub slot: u64,
     pub block_hash: String,
     pub tx_hashes: Vec<String>,
+}
+
+impl SyntheticVectors {
+    pub fn tx_position(&self, hash: &str) -> (u64, usize) {
+        self.blocks
+            .iter()
+            .find_map(|block| {
+                block
+                    .tx_hashes
+                    .iter()
+                    .position(|x| x == hash)
+                    .map(|idx| (block.block_number, idx))
+            })
+            .expect("missing tx hash in vectors")
+    }
 }
 
 pub fn build_synthetic_blocks(
@@ -121,6 +139,13 @@ pub fn build_synthetic_blocks(
     let address_bytes = Address::from_bech32(&cfg.address)
         .expect("invalid synthetic address")
         .to_vec();
+    let network = Address::from_bech32(&cfg.address)
+        .ok()
+        .and_then(|addr| match addr {
+            Address::Shelley(shelley) => Some(shelley.network()),
+            Address::Stake(_) | Address::Byron(_) => None,
+        })
+        .unwrap_or(Network::Testnet);
     let metadata_label = cfg.metadata_label;
 
     let policy_id = Hash::from(cfg.policy_id);
@@ -144,6 +169,11 @@ pub fn build_synthetic_blocks(
     let mut block_vectors = Vec::with_capacity(cfg.block_count.max(1));
     let mut first_block_hash = None;
     let mut first_tx_hash = None;
+    let mut account_addresses = Vec::new();
+    let mut account_address_blocks = Vec::new();
+    let mut account_addresses_seen = std::collections::HashSet::new();
+    let mut account_address_bounds: std::collections::HashMap<String, (u64, u64)> =
+        std::collections::HashMap::new();
 
     let block_count = cfg.block_count.max(1);
     let txs_per_block = cfg.txs_per_block.max(1);
@@ -187,8 +217,33 @@ pub fn build_synthetic_blocks(
                 cbor: seed_cbor,
             });
 
+            let output_address = if tx_offset == 0 {
+                address_bytes.clone()
+            } else {
+                let byte = 0x20u8
+                    .wrapping_add(offset as u8)
+                    .wrapping_add(tx_offset as u8);
+                address_with_stake_cred(&stake_cred, network, Hash::from([byte; 28]))
+            };
+
+            if let Ok(addr) = Address::from_bytes(&output_address) {
+                if let Ok(bech32) = addr.to_bech32() {
+                    if account_addresses_seen.insert(bech32.clone()) {
+                        account_addresses.push(bech32.clone());
+                        account_address_blocks.push((bech32.clone(), block_number));
+                    }
+                    account_address_bounds
+                        .entry(bech32)
+                        .and_modify(|bounds| {
+                            bounds.0 = bounds.0.min(block_number);
+                            bounds.1 = bounds.1.max(block_number);
+                        })
+                        .or_insert((block_number, block_number));
+                }
+            }
+
             tx_bodies.push(sample_transaction_body(
-                Bytes::from(address_bytes.clone()),
+                Bytes::from(output_address),
                 cfg.lovelace,
                 seed_tx_hash,
                 policy_id,
@@ -260,6 +315,12 @@ pub fn build_synthetic_blocks(
         &submit_sk,
     );
 
+    let mut account_address_bounds = account_address_bounds
+        .into_iter()
+        .map(|(address, (min, max))| (address, min, max))
+        .collect::<Vec<_>>();
+    account_address_bounds.sort_by(|a, b| a.0.cmp(&b.0));
+
     let vectors = SyntheticVectors {
         address: cfg.address,
         stake_address,
@@ -268,12 +329,29 @@ pub fn build_synthetic_blocks(
         block_hash: hex::encode(first_block_hash.expect("missing block hash").as_ref()),
         tx_hash: hex::encode(first_tx_hash.expect("missing tx hash").as_ref()),
         blocks: block_vectors,
+        account_addresses,
+        account_address_blocks,
+        account_address_bounds,
         pool_id,
         drep_id,
         tx_cbor,
     };
 
     (raw_blocks, vectors, chain_config)
+}
+
+fn address_with_stake_cred(
+    stake_cred: &StakeCredential,
+    network: Network,
+    payment_hash: Hash<28>,
+) -> Vec<u8> {
+    let payment = ShelleyPaymentPart::Key(payment_hash);
+    let delegation = match stake_cred {
+        StakeCredential::AddrKeyhash(hash) => ShelleyDelegationPart::Key(*hash),
+        StakeCredential::ScriptHash(hash) => ShelleyDelegationPart::Script(*hash),
+    };
+
+    ShelleyAddress::new(network, payment, delegation).to_vec()
 }
 
 #[allow(clippy::too_many_arguments)]

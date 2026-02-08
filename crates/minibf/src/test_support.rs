@@ -51,8 +51,18 @@ impl TestApp {
     }
 
     pub fn new_with_fault(fault: Option<TestFault>) -> Self {
-        let (domain, vectors) =
-            TestDomainBuilder::new_with_synthetic(SyntheticBlockConfig::default()).finish();
+        let mut cfg = SyntheticBlockConfig::default();
+        cfg.block_count = 5;
+        cfg.txs_per_block = 3;
+        Self::new_with_cfg_and_fault(cfg, fault)
+    }
+
+    pub fn new_with_cfg(cfg: SyntheticBlockConfig) -> Self {
+        Self::new_with_cfg_and_fault(cfg, None)
+    }
+
+    pub fn new_with_cfg_and_fault(cfg: SyntheticBlockConfig, fault: Option<TestFault>) -> Self {
+        let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
 
         let domain = match fault {
             Some(fault) => dolos_testing::faults::FaultyToyDomain::new(domain, fault),
