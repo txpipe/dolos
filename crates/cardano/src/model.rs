@@ -40,8 +40,8 @@ use crate::{
     pots::{EpochIncentives, Pots},
     roll::{
         accounts::{
-            AssignMirRewards, ControlledAmountDec, ControlledAmountInc, StakeDelegation,
-            StakeDeregistration, StakeRegistration, VoteDelegation, WithdrawalInc,
+            ControlledAmountDec, ControlledAmountInc, StakeDelegation, StakeDeregistration,
+            StakeRegistration, VoteDelegation, WithdrawalInc,
         },
         assets::MintStatsUpdate,
         dreps::{DRepActivity, DRepRegistration, DRepUnRegistration},
@@ -49,7 +49,7 @@ use crate::{
         pools::{MintedBlocksInc, PoolDeRegistration, PoolRegistration},
         proposals::NewProposal,
     },
-    rupd::{EnqueueReward, SetEpochIncentives},
+    rupd::{DequeueMir, EnqueueMir, EnqueueReward, SetEpochIncentives},
     sub,
 };
 
@@ -1516,10 +1516,25 @@ pub struct EndStats {
     #[cbor(default)]
     pub unspendable_to_reserves: u64,
 
-    /// MIR sourced from treasury.
+    /// Effective MIR sourced from treasury (only to registered accounts).
     #[n(11)]
     #[cbor(default)]
     pub treasury_mirs: Lovelace,
+
+    /// Effective MIR sourced from reserves (only to registered accounts).
+    #[n(12)]
+    #[cbor(default)]
+    pub reserve_mirs: Lovelace,
+
+    /// MIRs to unregistered accounts (stays in treasury, not transferred).
+    #[n(13)]
+    #[cbor(default)]
+    pub invalid_treasury_mirs: Lovelace,
+
+    /// MIRs to unregistered accounts (stays in reserves, not transferred).
+    #[n(14)]
+    #[cbor(default)]
+    pub invalid_reserve_mirs: Lovelace,
 
     #[n(6)]
     pub proposal_invalid_refunds: Lovelace,
@@ -1723,6 +1738,35 @@ impl PendingRewardState {
 
 entity_boilerplate!(PendingRewardState, "pending_rewards");
 
+/// Pending MIR (Move Instantaneous Reward) for a single account, waiting to be
+/// applied at epoch boundary. Created during block roll when MIR certificates
+/// are processed, consumed by EWRAP.
+///
+/// Unlike regular rewards, MIRs come from either reserves or treasury.
+/// At EWRAP, MIRs are only applied to registered accounts - MIRs to unregistered
+/// accounts stay in their source pot (no transfer occurs).
+#[derive(Debug, Clone, Encode, Decode, Serialize, Deserialize)]
+pub struct PendingMirState {
+    #[n(0)]
+    pub credential: StakeCredential,
+
+    /// Amount from reserves
+    #[n(1)]
+    pub from_reserves: u64,
+
+    /// Amount from treasury
+    #[n(2)]
+    pub from_treasury: u64,
+}
+
+impl PendingMirState {
+    pub fn total_value(&self) -> u64 {
+        self.from_reserves + self.from_treasury
+    }
+}
+
+entity_boilerplate!(PendingMirState, "pending_mirs");
+
 #[derive(Debug, Clone, Copy, Encode, Decode, Serialize, Deserialize)]
 pub struct EraProtocol(#[n(0)] u16);
 
@@ -1821,6 +1865,7 @@ pub enum CardanoEntity {
     StakeLog(Box<StakeLog>),
     DatumState(Box<DatumState>),
     PendingRewardState(Box<PendingRewardState>),
+    PendingMirState(Box<PendingMirState>),
 }
 
 macro_rules! variant_boilerplate {
@@ -1853,6 +1898,7 @@ variant_boilerplate!(RewardLog);
 variant_boilerplate!(StakeLog);
 variant_boilerplate!(DatumState);
 variant_boilerplate!(PendingRewardState);
+variant_boilerplate!(PendingMirState);
 
 impl dolos_core::Entity for CardanoEntity {
     fn decode_entity(ns: Namespace, value: &EntityValue) -> Result<Self, ChainError> {
@@ -1868,6 +1914,7 @@ impl dolos_core::Entity for CardanoEntity {
             StakeLog::NS => StakeLog::decode_entity(ns, value).map(Into::into),
             DatumState::NS => DatumState::decode_entity(ns, value).map(Into::into),
             PendingRewardState::NS => PendingRewardState::decode_entity(ns, value).map(Into::into),
+            PendingMirState::NS => PendingMirState::decode_entity(ns, value).map(Into::into),
             _ => Err(ChainError::InvalidNamespace(ns)),
         }
     }
@@ -1918,6 +1965,10 @@ impl dolos_core::Entity for CardanoEntity {
                 let (ns, enc) = PendingRewardState::encode_entity(x);
                 (ns, enc)
             }
+            Self::PendingMirState(x) => {
+                let (ns, enc) = PendingMirState::encode_entity(x);
+                (ns, enc)
+            }
         }
     }
 }
@@ -1935,6 +1986,7 @@ pub fn build_schema() -> StateSchema {
     schema.insert(StakeLog::NS, NamespaceType::KeyValue);
     schema.insert(DatumState::NS, NamespaceType::KeyValue);
     schema.insert(PendingRewardState::NS, NamespaceType::KeyValue);
+    schema.insert(PendingMirState::NS, NamespaceType::KeyValue);
     schema
 }
 
@@ -1971,7 +2023,8 @@ pub enum CardanoDelta {
     PoolWrapUp(Box<PoolWrapUp>),
     ProposalDepositRefund(Box<ProposalDepositRefund>),
     TreasuryWithdrawal(Box<TreasuryWithdrawal>),
-    AssignMirRewards(Box<AssignMirRewards>),
+    EnqueueMir(Box<EnqueueMir>),
+    DequeueMir(Box<DequeueMir>),
     DatumRefIncrement(Box<crate::roll::datums::DatumRefIncrement>),
     DatumRefDecrement(Box<crate::roll::datums::DatumRefDecrement>),
     EnqueueReward(Box<EnqueueReward>),
@@ -2011,8 +2064,8 @@ impl CardanoDelta {
             CardanoDelta::StakeRegistration(_) => 0,
             CardanoDelta::PoolRegistration(_) => 0,
             CardanoDelta::DRepRegistration(_) => 0,
-            // MIR rewards need accounts to exist
-            CardanoDelta::AssignMirRewards(_) => 10,
+            // Pending MIRs don't need accounts to exist (they're just stored)
+            CardanoDelta::EnqueueMir(_) => 5,
             // Everything else uses default priority
             _ => 5,
         }
@@ -2060,7 +2113,8 @@ delta_from!(PoolDelegatorRetire);
 delta_from!(PoolWrapUp);
 delta_from!(ProposalDepositRefund);
 delta_from!(TreasuryWithdrawal);
-delta_from!(AssignMirRewards);
+delta_from!(EnqueueMir);
+delta_from!(DequeueMir);
 delta_from!(EnqueueReward);
 delta_from!(SetEpochIncentives);
 delta_from!(DequeueReward);
@@ -2114,7 +2168,8 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::PoolWrapUp(x) => x.key(),
             Self::ProposalDepositRefund(x) => x.key(),
             Self::TreasuryWithdrawal(x) => x.key(),
-            Self::AssignMirRewards(x) => x.key(),
+            Self::EnqueueMir(x) => x.key(),
+            Self::DequeueMir(x) => x.key(),
             Self::DatumRefIncrement(x) => x.key(),
             Self::DatumRefDecrement(x) => x.key(),
             Self::EnqueueReward(x) => x.key(),
@@ -2156,7 +2211,8 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::PoolWrapUp(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::ProposalDepositRefund(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::TreasuryWithdrawal(x) => Self::downcast_apply(x.as_mut(), entity),
-            Self::AssignMirRewards(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::EnqueueMir(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::DequeueMir(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::DatumRefIncrement(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::DatumRefDecrement(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::EnqueueReward(x) => Self::downcast_apply(x.as_mut(), entity),
@@ -2198,7 +2254,8 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::PoolWrapUp(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::ProposalDepositRefund(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::TreasuryWithdrawal(x) => Self::downcast_undo(x.as_ref(), entity),
-            Self::AssignMirRewards(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::EnqueueMir(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::DequeueMir(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::DatumRefIncrement(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::DatumRefDecrement(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::EnqueueReward(x) => Self::downcast_undo(x.as_ref(), entity),

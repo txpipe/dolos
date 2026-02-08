@@ -17,6 +17,12 @@ pub struct AssignRewards {
     reward: u64,
 }
 
+impl AssignRewards {
+    pub fn new(account: AccountId, reward: u64) -> Self {
+        Self { account, reward }
+    }
+}
+
 impl dolos_core::EntityDelta for AssignRewards {
     type Entity = AccountState;
 
@@ -109,9 +115,24 @@ impl super::BoundaryVisitor for BoundaryVisitor {
             return Ok(());
         };
 
+        let reward_total = reward.total_value();
+        let was_spendable = reward.is_spendable();
+
         // Track that we need to dequeue this reward from state
         ctx.applied_reward_credentials
             .push(account.credential.clone());
+
+        // Debug: log accounts with both registered_at and deregistered_at
+        if account.registered_at.is_some() && account.deregistered_at.is_some() {
+            tracing::info!(
+                account=%id,
+                registered_at=?account.registered_at,
+                deregistered_at=?account.deregistered_at,
+                is_registered=%account.is_registered(),
+                amount=reward_total,
+                "account with both reg/dereg slots"
+            );
+        }
 
         if !account.is_registered() {
             let total = reward.total_value();
@@ -128,7 +149,8 @@ impl super::BoundaryVisitor for BoundaryVisitor {
                 account=%id,
                 credential=?account.credential,
                 amount=total,
-                "reward not applied (unregistered account)"
+                was_spendable=%was_spendable,
+                "reward not applied (unregistered account) -> treasury"
             );
 
             ctx.rewards.return_reward_to_treasury(total);
@@ -171,8 +193,55 @@ impl super::BoundaryVisitor for BoundaryVisitor {
             .unwrap_or(0);
         let pre_babbage = mark_protocol < 7;
 
+        let pending_before_drain = ctx.rewards.len();
+
+        // Log any remaining pending rewards before draining (spendable rewards for accounts not visited)
+        if pending_before_drain > 0 {
+            let pending_spendable: u64 = ctx.rewards.iter_pending()
+                .filter(|(_, r)| r.is_spendable())
+                .map(|(_, r)| r.total_value())
+                .sum();
+            let pending_unspendable: u64 = ctx.rewards.iter_pending()
+                .filter(|(_, r)| !r.is_spendable())
+                .map(|(_, r)| r.total_value())
+                .sum();
+
+            tracing::warn!(
+                epoch = ctx.ending_state().number,
+                %pending_before_drain,
+                %pending_spendable,
+                %pending_unspendable,
+                "rewards remaining before drain - check for missing accounts"
+            );
+        }
+
         let drained = ctx.rewards.drain_unspendable(pre_babbage);
+        let drained_count = drained.len();
         ctx.applied_reward_credentials.extend(drained);
+
+        // Check for any remaining rewards after draining unspendable
+        let remaining_after_drain = ctx.rewards.len();
+        if remaining_after_drain > 0 {
+            let remaining_total: u64 = ctx.rewards.iter_pending()
+                .map(|(_, r)| r.total_value())
+                .sum();
+            tracing::error!(
+                epoch = ctx.ending_state().number,
+                %remaining_after_drain,
+                %remaining_total,
+                "SPENDABLE REWARDS LEFT UNPROCESSED - accounts with rewards not in state?"
+            );
+        }
+
+        debug!(
+            epoch = ctx.ending_state().number,
+            %mark_protocol,
+            %pre_babbage,
+            %pending_before_drain,
+            %drained_count,
+            applied_credentials_count = ctx.applied_reward_credentials.len(),
+            "rewards flush stats"
+        );
 
         for delta in self.deltas.drain(..) {
             ctx.add_delta(delta);

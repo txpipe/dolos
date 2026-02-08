@@ -693,6 +693,9 @@ fn read_fixture(path: &Path) -> Result<String> {
     std::fs::read_to_string(path).with_context(|| format!("reading fixture {}", path.display()))
 }
 
+epoch_test!(test_mainnet_242, fixtures_mainnet_242, "mainnet", 242, 240);
+epoch_test!(test_mainnet_243, fixtures_mainnet_243, "mainnet", 243, 241);
+epoch_test!(test_mainnet_245, fixtures_mainnet_245, "mainnet", 245, 243);
 epoch_test!(test_mainnet_250, fixtures_mainnet_250, "mainnet", 250, 248);
 epoch_test!(test_mainnet_278, fixtures_mainnet_278, "mainnet", 278, 276);
 epoch_test!(test_mainnet_279, fixtures_mainnet_279, "mainnet", 279, 277);

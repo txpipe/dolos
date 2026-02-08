@@ -150,6 +150,21 @@ pub struct BoundaryWork {
     /// Rewards that were actually applied (spendable) at EWRAP time.
     /// This is populated during the reward visitor phase and survives commit.
     pub applied_rewards: Vec<AppliedReward>,
+
+    /// Effective MIRs from treasury (applied to registered accounts).
+    pub effective_treasury_mirs: u64,
+
+    /// Effective MIRs from reserves (applied to registered accounts).
+    pub effective_reserve_mirs: u64,
+
+    /// MIRs from treasury to unregistered accounts (stays in treasury).
+    pub invalid_treasury_mirs: u64,
+
+    /// MIRs from reserves to unregistered accounts (stays in reserves).
+    pub invalid_reserve_mirs: u64,
+
+    /// Credentials whose pending MIRs were processed (need to be dequeued from state).
+    pub applied_mir_credentials: Vec<StakeCredential>,
 }
 
 impl BoundaryWork {

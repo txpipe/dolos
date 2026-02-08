@@ -36,12 +36,12 @@ pub mod pointers {
 
             // mainnet
             (4495800, 11, 0) => Some(StakeCredential::AddrKeyhash(
-                "e1bc1597ad71c55d2d009a9274b3831ded155118dd769f5376decc1369"
+                "bc1597ad71c55d2d009a9274b3831ded155118dd769f5376decc1369"
                     .parse()
                     .unwrap(),
             )),
             (20095460, 2, 0) => Some(StakeCredential::AddrKeyhash(
-                "e11332d859dd71f5b1089052a049690d81f7367eac9fafaef80b4da395"
+                "1332d859dd71f5b1089052a049690d81f7367eac9fafaef80b4da395"
                     .parse()
                     .unwrap(),
             )),
@@ -59,7 +59,7 @@ pub mod pointers {
 
             (slot, tx_idx, cert_idx) => {
                 warn!(slot, tx_idx, cert_idx, "missing pointer mapping");
-                None
+                panic!()
             }
         }
     }
@@ -604,77 +604,15 @@ pub mod pots {
     use crate::pots::Pots;
 
     pub fn adjust_pots(network: Network, epoch: u64, mut pots: Pots) -> Pots {
-        // Mainnet epoch 243: adjust the rewards/treasury pots to match ground truth.
-        // Current theory: a pending reward entry is computed with an incorrect value and
-        // marked unspendable, so EWRAP routes the excess to treasury. We don't have a
-        // dataset of unspendable rewards to pinpoint the source, so we apply a guarded
-        // correction here to keep pots aligned while we keep investigating.
-        const MAINNET_EPOCH_243: u64 = 243;
-        const TREASURY_REWARD_ADJUSTMENT: u64 = 10_884_788;
-        const EXPECTED_TREASURY_AFTER: u64 = 268_861_912_841_117;
-        const EXPECTED_REWARDS_AFTER: u64 = 241_624_641_170_201;
-
-        if matches!(network, Network::Mainnet)
-            && epoch == MAINNET_EPOCH_243
-            && pots.treasury.saturating_add(TREASURY_REWARD_ADJUSTMENT) == EXPECTED_TREASURY_AFTER
-            && pots.rewards >= TREASURY_REWARD_ADJUSTMENT
-            && pots
-                .rewards
-                .saturating_sub(TREASURY_REWARD_ADJUSTMENT)
-                == EXPECTED_REWARDS_AFTER
-        {
-            pots.treasury += TREASURY_REWARD_ADJUSTMENT;
-            pots.rewards = pots.rewards.saturating_sub(TREASURY_REWARD_ADJUSTMENT);
-        }
-
-        // Mainnet epoch 279: adjust the rewards/treasury pots to match ground truth.
-        // Mirrors the guarded correction used for epoch 243.
-        const MAINNET_EPOCH_279: u64 = 279;
-        const TREASURY_REWARD_ADJUSTMENT_279: u64 = 197_622;
-        const EXPECTED_TREASURY_AFTER_279: u64 = 530_611_692_658_077;
-        const EXPECTED_REWARDS_AFTER_279: u64 = 443_904_928_595_174;
-
-        if matches!(network, Network::Mainnet)
-            && epoch == MAINNET_EPOCH_279
-            && pots
-                .treasury
-                .saturating_add(TREASURY_REWARD_ADJUSTMENT_279)
-                == EXPECTED_TREASURY_AFTER_279
-            && pots.rewards >= TREASURY_REWARD_ADJUSTMENT_279
-            && pots
-                .rewards
-                .saturating_sub(TREASURY_REWARD_ADJUSTMENT_279)
-                == EXPECTED_REWARDS_AFTER_279
-        {
-            pots.treasury += TREASURY_REWARD_ADJUSTMENT_279;
-            pots.rewards = pots
-                .rewards
-                .saturating_sub(TREASURY_REWARD_ADJUSTMENT_279);
-        }
-
-        // Mainnet epoch 286: adjust the reserves/rewards pots to match ground truth.
-        const MAINNET_EPOCH_286: u64 = 286;
-        const RESERVE_REWARD_ADJUSTMENT_286: u64 = 106_994_072_281;
-        const EXPECTED_RESERVES_AFTER_286: u64 = 11_949_345_585_782_632;
-        const EXPECTED_REWARDS_AFTER_286: u64 = 472_950_701_847_062;
-
-        if matches!(network, Network::Mainnet)
-            && epoch == MAINNET_EPOCH_286
-            && pots
-                .reserves
-                .saturating_add(RESERVE_REWARD_ADJUSTMENT_286)
-                == EXPECTED_RESERVES_AFTER_286
-            && pots.rewards >= RESERVE_REWARD_ADJUSTMENT_286
-            && pots
-                .rewards
-                .saturating_sub(RESERVE_REWARD_ADJUSTMENT_286)
-                == EXPECTED_REWARDS_AFTER_286
-        {
-            pots.reserves += RESERVE_REWARD_ADJUSTMENT_286;
-            pots.rewards = pots
-                .rewards
-                .saturating_sub(RESERVE_REWARD_ADJUSTMENT_286);
-        }
+        // NOTE: All pot adjustment hacks have been removed to debug the root cause.
+        // Previously there were hacks for epochs 243, 279, and 286 that moved lovelace
+        // between pots to match ground truth. These masked underlying issues that
+        // cascade to affect later epochs.
+        //
+        // Removed hacks:
+        // - Epoch 243: 10,884,788 lovelace (rewards → treasury)
+        // - Epoch 279: 197,622 lovelace (rewards → treasury)
+        // - Epoch 286: 106,994,072,281 lovelace (rewards → reserves)
 
         pots
     }

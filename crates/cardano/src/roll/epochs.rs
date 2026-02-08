@@ -312,15 +312,38 @@ impl BlockVisitor for EpochStateVisitor {
 
             match (source, target) {
                 (InstantaneousRewardSource::Reserves, InstantaneousRewardTarget::StakeCredentials(creds)) => {
-                    for (_, amount) in creds {
+                    for (cred, amount) in creds {
+                        if amount < 0 {
+                            tracing::warn!(
+                                source = "reserves",
+                                credential = ?cred,
+                                amount = amount,
+                                "NEGATIVE MIR amount detected - clamping to 0"
+                            );
+                        }
                         let amount = amount.max(0) as u64;
                         self.stats_delta.as_mut().unwrap().reserve_mirs += amount;
                     }
                 }
                 (InstantaneousRewardSource::Treasury, InstantaneousRewardTarget::StakeCredentials(creds)) => {
-                    for (_, amount) in creds {
-                        let amount = amount.max(0) as u64;
-                        self.stats_delta.as_mut().unwrap().treasury_mirs += amount;
+                    for (cred, amount) in creds {
+                        if amount < 0 {
+                            tracing::warn!(
+                                source = "treasury",
+                                credential = ?cred,
+                                amount = amount,
+                                "NEGATIVE MIR amount detected - clamping to 0"
+                            );
+                        }
+                        let amount_u64 = amount.max(0) as u64;
+                        tracing::info!(
+                            source = "treasury",
+                            credential = ?cred,
+                            amount = amount,
+                            amount_u64 = amount_u64,
+                            "processing treasury MIR"
+                        );
+                        self.stats_delta.as_mut().unwrap().treasury_mirs += amount_u64;
                     }
                 }
                 _ => {}

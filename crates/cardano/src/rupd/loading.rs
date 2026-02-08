@@ -158,11 +158,7 @@ impl StakeSnapshot {
         for record in accounts {
             let (_, account) = record?;
 
-            // Check registration status AT the RUPD slot, not current status.
-            // Pre-Babbage (protocol < 7) filters rewards based on registration at RUPD time.
-            // Accounts that deregister AFTER RUPD but BEFORE EWRAP are handled differently:
-            // their rewards are calculated (because registered at RUPD) but filtered at EWRAP.
-            let is_reg = account.is_registered_at(rupd_slot);
+            let is_reg = account.is_registered();
 
             if is_reg {
                 snapshot
