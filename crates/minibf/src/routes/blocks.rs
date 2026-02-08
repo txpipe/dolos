@@ -538,8 +538,7 @@ mod tests {
     #[tokio::test]
     async fn blocks_by_hash_or_number_internal_error() {
         let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
-        let block_hash = app.vectors().block_hash.as_str();
-        let path = format!("/blocks/{block_hash}");
+        let path = "/blocks/1".to_string();
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 }

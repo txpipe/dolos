@@ -153,7 +153,6 @@ where
         }
 
         let (_slot, maybe) = res.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
         if let Some(cbor) = maybe {
             builder.scan_block(&cbor)?;
         }
@@ -172,7 +171,12 @@ where
 {
     let builder = by_label(&label, params, &domain).await?;
 
-    Ok(builder.into_model().map(Json)?)
+    let model: Vec<TxMetadataLabelJsonInner> = builder.into_model()?;
+    if model.is_empty() {
+        return Err(StatusCode::NOT_FOUND.into());
+    }
+
+    Ok(Json(model))
 }
 
 pub async fn by_label_cbor<D>(
@@ -185,7 +189,12 @@ where
 {
     let builder = by_label(&label, params, &domain).await?;
 
-    Ok(builder.into_model().map(Json)?)
+    let model: Vec<TxMetadataLabelCborInner> = builder.into_model()?;
+    if model.is_empty() {
+        return Err(StatusCode::NOT_FOUND.into());
+    }
+
+    Ok(Json(model))
 }
 
 #[cfg(test)]

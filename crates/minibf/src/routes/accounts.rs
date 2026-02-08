@@ -197,6 +197,9 @@ where
     let pagination = Pagination::try_from(params)?;
     pagination.enforce_max_scan_limit()?;
     let account_key = parse_account_key_param(&stake_address)?;
+    if !domain.cardano_entity_exists::<AccountState>(account_key.entity_key.as_slice())? {
+        return Err(StatusCode::NOT_FOUND.into());
+    }
 
     let (start_slot, end_slot) = pagination.start_and_end_slots(&domain).await?;
     let stream = domain.query().blocks_by_stake_stream(
@@ -469,6 +472,10 @@ where
 {
     let account_key = parse_account_key_param(stake_address)?;
 
+    if !domain.cardano_entity_exists::<AccountState>(account_key.entity_key.as_slice())? {
+        return Err(StatusCode::NOT_FOUND.into());
+    }
+
     let chain = domain
         .get_chain_summary()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -638,6 +645,9 @@ where
 {
     let pagination = Pagination::try_from(params)?;
     let account_key = parse_account_key_param(&stake_address)?;
+    if !domain.cardano_entity_exists::<AccountState>(account_key.entity_key.as_slice())? {
+        return Err(StatusCode::NOT_FOUND.into());
+    }
     let tip = domain.get_tip_slot()?;
     let summary = domain.get_chain_summary()?;
     let (epoch, _) = summary.slot_epoch(tip);
@@ -709,6 +719,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{TestApp, TestFault};
     use blockfrost_openapi::models::{
         account_addresses_content_inner::AccountAddressesContentInner,
         account_content::AccountContent,
@@ -716,14 +727,13 @@ mod tests {
         account_registration_content_inner::AccountRegistrationContentInner,
         account_reward_content_inner::AccountRewardContentInner,
     };
-    use crate::test_support::{TestApp, TestFault};
 
     fn invalid_stake_address() -> &'static str {
         "not-a-stake"
     }
 
     fn missing_stake_address() -> &'static str {
-        "stake1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"
+        "stake_test1uqysjzgfpyysjzgfpyysjzgfpyysjzgfpyysjzgfpyysjzgeeww5k"
     }
 
     async fn assert_status(app: &TestApp, path: &str, expected: StatusCode) {
@@ -925,7 +935,7 @@ mod tests {
 
     #[tokio::test]
     async fn accounts_by_stake_rewards_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
+        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
         let stake_address = app.vectors().stake_address.as_str();
         let path = format!("/accounts/{stake_address}/rewards");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;

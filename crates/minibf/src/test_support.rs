@@ -16,8 +16,6 @@ use tower::util::ServiceExt;
 use crate::{build_router_with_facade, Facade};
 
 pub use dolos_testing::faults::TestFault;
-pub use dolos_testing::synthetic::SyntheticVectors as TestVectors;
-
 pub struct TestDomainBuilder {
     domain: ToyDomain,
     vectors: SyntheticVectors,
@@ -88,6 +86,36 @@ impl TestApp {
             .method(Method::GET)
             .uri(path)
             .body(Body::empty())
+            .expect("failed to build request");
+
+        let res = self
+            .router
+            .clone()
+            .oneshot(req)
+            .await
+            .expect("request failed");
+
+        let status = res.status();
+        let bytes = res
+            .into_body()
+            .collect()
+            .await
+            .expect("failed to read response body")
+            .to_bytes();
+        (status, bytes.to_vec())
+    }
+
+    pub async fn post_bytes(
+        &self,
+        path: &str,
+        content_type: &str,
+        body: Vec<u8>,
+    ) -> (StatusCode, Vec<u8>) {
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri(path)
+            .header("content-type", content_type)
+            .body(Body::from(body))
             .expect("failed to build request");
 
         let res = self

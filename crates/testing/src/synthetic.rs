@@ -2,16 +2,20 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use dolos_core::{
     config::{CardanoConfig, CustomUtxo},
-    ChainPoint, RawBlock, TxoRef,
+    RawBlock, TxoRef,
 };
 
 use crate::{tx_sequence_to_hash, utxo_with_value};
 
 use pallas::codec::{minicbor, utils::KeepRaw};
+use pallas::codec::utils::Nullable;
 use pallas::{
     crypto::hash::Hash,
     ledger::{
-        addresses::Address,
+        addresses::{
+            Address, Network, ShelleyAddress, ShelleyDelegationPart, ShelleyPaymentPart,
+            StakeAddress, StakePayload,
+        },
         primitives::{
             alonzo,
             conway::{
@@ -20,10 +24,11 @@ use pallas::{
             AddrKeyhash, Bytes, NonEmptySet, NonZeroInt, PositiveCoin, Set, StakeCredential,
             TransactionInput, VrfKeyhash,
         },
-        traverse::ComputeHash,
+        traverse::{ComputeHash, MultiEraBlock},
     },
 };
-use bech32::{FromBase32, ToBase32};
+use pallas_crypto::{hash::Hasher, key::ed25519::SecretKeyExtended};
+use bech32::{FromBase32, ToBase32, Variant};
 
 #[derive(Clone, Debug)]
 pub struct SyntheticBlockConfig {
@@ -39,6 +44,8 @@ pub struct SyntheticBlockConfig {
     pub mint_amount: i64,
     pub seed_amount: u64,
     pub pool_id: String,
+    pub drep_keyhash: [u8; 28],
+    pub drep_deposit: u64,
 }
 
 impl Default for SyntheticBlockConfig {
@@ -59,6 +66,8 @@ impl Default for SyntheticBlockConfig {
             seed_amount: crate::MIN_UTXO_AMOUNT,
             pool_id: "pool1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"
                 .to_string(),
+            drep_keyhash: [7u8; 28],
+            drep_deposit: 1000,
         }
     }
 }
@@ -72,6 +81,8 @@ pub struct SyntheticVectors {
     pub block_hash: String,
     pub tx_hash: String,
     pub pool_id: String,
+    pub drep_id: String,
+    pub tx_cbor: Vec<u8>,
 }
 
 pub fn build_synthetic_blocks(
@@ -79,9 +90,25 @@ pub fn build_synthetic_blocks(
 ) -> (Vec<RawBlock>, SyntheticVectors, CardanoConfig) {
     let seed_tx_hash = tx_sequence_to_hash(1);
     let seed_ref = TxoRef(seed_tx_hash, 0);
+    let submit_tx_hash = tx_sequence_to_hash(2);
+    let submit_ref = TxoRef(submit_tx_hash, 0);
 
     let seed_utxo = utxo_with_value(cfg.seed_address.clone(), Value::Coin(cfg.seed_amount));
     let crate::EraCbor(_, seed_cbor) = seed_utxo;
+    let submit_sk = unsafe { SecretKeyExtended::from_bytes_unchecked([3u8; 64]) };
+    let submit_pk = submit_sk.public_key();
+    let submit_keyhash = keyhash_from_pubkey(submit_pk.as_ref());
+    let submit_address = ShelleyAddress::new(
+        Network::Testnet,
+        ShelleyPaymentPart::key_hash(submit_keyhash),
+        ShelleyDelegationPart::Null,
+    )
+    .to_bech32()
+    .expect("failed to encode submit address");
+    let submit_amount = cfg.lovelace * 10;
+    let submit_output = cfg.lovelace * 5;
+    let submit_utxo = utxo_with_value(submit_address.clone(), Value::Coin(submit_amount));
+    let crate::EraCbor(_, submit_cbor) = submit_utxo;
 
     let mut chain_config = CardanoConfig::default();
     chain_config.custom_utxos.push(CustomUtxo {
@@ -89,22 +116,28 @@ pub fn build_synthetic_blocks(
         era: Some(pallas::ledger::traverse::Era::Conway.into()),
         cbor: seed_cbor,
     });
+    chain_config.custom_utxos.push(CustomUtxo {
+        ref_: submit_ref.clone(),
+        era: Some(pallas::ledger::traverse::Era::Conway.into()),
+        cbor: submit_cbor,
+    });
 
     let address_bytes = Address::from_bech32(&cfg.address)
         .expect("invalid synthetic address")
         .to_vec();
+    let metadata_label = cfg.metadata_label;
     let metadata: alonzo::Metadata = vec![(
-        cfg.metadata_label,
+        metadata_label,
         alonzo::Metadatum::Text(cfg.metadata_value.clone()),
     )]
     .into_iter()
     .collect();
 
-    let aux_data = alonzo::AuxiliaryData::PostAlonzo(alonzo::PostAlonzoAuxiliaryData {
-        metadata: Some(metadata),
-        native_scripts: None,
-        plutus_scripts: None,
+    let aux_data = alonzo::AuxiliaryData::ShelleyMa(alonzo::ShelleyMaAuxiliaryData {
+        transaction_metadata: metadata,
+        auxiliary_scripts: None,
     });
+    let aux_hash = aux_data.compute_hash();
 
     let policy_id = Hash::from(cfg.policy_id);
     let asset_name = Bytes::from(cfg.asset_name.as_bytes().to_vec());
@@ -134,6 +167,9 @@ pub fn build_synthetic_blocks(
         cfg.mint_amount,
         stake_cred,
         pool_keyhash,
+        cfg.drep_keyhash,
+        cfg.drep_deposit,
+        Some(aux_hash),
         Some(aux_data),
     );
 
@@ -141,7 +177,6 @@ pub fn build_synthetic_blocks(
     let wrapper = (7, block);
 
     let raw_block = Arc::new(minicbor::to_vec(wrapper).unwrap());
-
     let asset_unit = format!(
         "{}{}",
         hex::encode(cfg.policy_id),
@@ -158,19 +193,33 @@ pub fn build_synthetic_blocks(
         _ => String::new(),
     };
 
+    let drep_id = drep_id_from_keyhash(Hash::from(cfg.drep_keyhash));
+    let tx_cbor = build_submit_tx_cbor(
+        submit_ref,
+        submit_amount,
+        submit_output,
+        Address::from_bech32(&submit_address)
+            .expect("invalid submit address")
+            .to_vec(),
+        &submit_sk,
+    );
+
     let vectors = SyntheticVectors {
         address: cfg.address,
         stake_address,
         asset_unit,
-        metadata_label: cfg.metadata_label.to_string(),
-        block_hash: block_hash.to_string(),
-        tx_hash: tx_hash.to_string(),
+        metadata_label: metadata_label.to_string(),
+        block_hash: hex::encode(block_hash.as_ref()),
+        tx_hash: hex::encode(tx_hash.as_ref()),
         pool_id,
+        drep_id,
+        tx_cbor,
     };
 
     (vec![raw_block], vectors, chain_config)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn sample_transaction_body(
     address: Bytes,
     lovelace: u64,
@@ -181,6 +230,9 @@ fn sample_transaction_body(
     mint_amount: i64,
     stake_cred: StakeCredential,
     pool_keyhash: Hash<28>,
+    drep_keyhash: [u8; 28],
+    drep_deposit: u64,
+    auxiliary_data_hash: Option<Hash<32>>,
 ) -> TransactionBody<'static> {
     let input = TransactionInput {
         transaction_id: tx_hash,
@@ -211,6 +263,11 @@ fn sample_transaction_body(
     let vrf_keyhash = VrfKeyhash::from([1u8; 32]);
     let pool_owner = AddrKeyhash::from([2u8; 28]);
     let pool_metadata = None;
+    let reward_payload = match stake_cred {
+        StakeCredential::AddrKeyhash(hash) => StakePayload::Stake(hash),
+        StakeCredential::ScriptHash(hash) => StakePayload::Script(hash),
+    };
+    let reward_account = StakeAddress::new(Network::Testnet, reward_payload);
     let pool_cert = Certificate::PoolRegistration {
         operator: pool_keyhash,
         vrf_keyhash,
@@ -220,7 +277,7 @@ fn sample_transaction_body(
             numerator: 0,
             denominator: 1,
         },
-        reward_account: Bytes::from(vec![0u8]),
+        reward_account: Bytes::from(reward_account.to_vec()),
         pool_owners: Set::from(vec![pool_owner]),
         relays: vec![],
         pool_metadata,
@@ -229,7 +286,10 @@ fn sample_transaction_body(
     let delegation = Certificate::StakeDelegation(stake_cred.clone(), pool_keyhash);
     let registration = Certificate::StakeRegistration(stake_cred);
 
-    let certificates = NonEmptySet::try_from(vec![registration, delegation, pool_cert])
+    let drep_cred = StakeCredential::AddrKeyhash(AddrKeyhash::from(drep_keyhash));
+    let drep_cert = Certificate::RegDRepCert(drep_cred, drep_deposit, None);
+
+    let certificates = NonEmptySet::try_from(vec![registration, delegation, pool_cert, drep_cert])
         .expect("non-empty certificates");
 
     TransactionBody {
@@ -239,7 +299,7 @@ fn sample_transaction_body(
         ttl: Some(10),
         certificates: Some(certificates),
         withdrawals: None,
-        auxiliary_data_hash: None,
+        auxiliary_data_hash,
         validity_interval_start: Some(5),
         mint: Some(mint),
         script_data_hash: None,
@@ -256,6 +316,7 @@ fn sample_transaction_body(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn sample_block(
     slot: u64,
     address: Bytes,
@@ -267,6 +328,9 @@ fn sample_block(
     mint_amount: i64,
     stake_cred: StakeCredential,
     pool_keyhash: Hash<28>,
+    drep_keyhash: [u8; 28],
+    drep_deposit: u64,
+    auxiliary_data_hash: Option<Hash<32>>,
     aux_data: Option<alonzo::AuxiliaryData>,
 ) -> (pallas::ledger::primitives::conway::Block<'static>, Hash<32>) {
     let header_body = pallas::ledger::primitives::conway::HeaderBody {
@@ -305,6 +369,9 @@ fn sample_block(
         mint_amount,
         stake_cred,
         pool_keyhash,
+        drep_keyhash,
+        drep_deposit,
+        auxiliary_data_hash,
     );
     let body_hash = body.compute_hash();
     let witness_set = pallas::ledger::primitives::conway::WitnessSet {
@@ -351,6 +418,100 @@ fn pool_id_from_keyhash(hash: Hash<28>) -> String {
         .expect("failed to encode pool id")
 }
 
+fn drep_id_from_keyhash(hash: Hash<28>) -> String {
+    let mut payload = Vec::with_capacity(29);
+    payload.push(0b00100010);
+    payload.extend_from_slice(hash.as_ref());
+    bech32::encode("drep", payload.to_base32(), Variant::Bech32)
+        .expect("failed to encode drep id")
+}
+
+fn keyhash_from_pubkey(pubkey: &[u8]) -> Hash<28> {
+    let mut hasher = Hasher::<224>::new();
+    hasher.input(pubkey);
+    hasher.finalize()
+}
+
+fn build_submit_tx_cbor(
+    input: TxoRef,
+    input_amount: u64,
+    output_amount: u64,
+    output_address: Vec<u8>,
+    signing_key: &SecretKeyExtended,
+) -> Vec<u8> {
+    let input = TransactionInput {
+        transaction_id: input.0,
+        index: input.1.into(),
+    };
+
+    let output = PostAlonzoTransactionOutput {
+        address: Bytes::from(output_address),
+        value: Value::Coin(output_amount),
+        datum_option: None,
+        script_ref: None,
+    };
+
+    let fee = input_amount
+        .checked_sub(output_amount)
+        .expect("submit output exceeds input");
+    let fee = fee.max(200_000);
+
+    let body = TransactionBody {
+        inputs: Set::from(vec![input]),
+        outputs: vec![TransactionOutput::PostAlonzo(KeepRaw::from(output))],
+        fee,
+        ttl: Some(10),
+        certificates: None,
+        withdrawals: None,
+        auxiliary_data_hash: None,
+        validity_interval_start: None,
+        mint: None,
+        script_data_hash: None,
+        collateral: None,
+        required_signers: None,
+        network_id: None,
+        collateral_return: None,
+        total_collateral: None,
+        reference_inputs: None,
+        voting_procedures: None,
+        proposal_procedures: None,
+        treasury_value: None,
+        donation: None,
+    };
+
+    let body_cbor = minicbor::to_vec(&body).expect("failed to encode submit body");
+    let body_hash = Hasher::<256>::hash(&body_cbor);
+    let body_keep = minicbor::decode::<KeepRaw<'_, TransactionBody<'_>>>(&body_cbor)
+        .expect("failed to decode submit body")
+        .to_owned();
+    let signature = signing_key.sign(body_hash.as_ref());
+    let vkey_witness = pallas::ledger::primitives::alonzo::VKeyWitness {
+        vkey: Bytes::from(signing_key.public_key().as_ref().to_vec()),
+        signature: Bytes::from(signature.as_ref().to_vec()),
+    };
+    let witness_set = pallas::ledger::primitives::conway::WitnessSet {
+        vkeywitness: Some(
+            NonEmptySet::try_from(vec![vkey_witness]).expect("non-empty vkeywitness"),
+        ),
+        native_script: None,
+        bootstrap_witness: None,
+        plutus_v1_script: None,
+        plutus_data: None,
+        redeemer: None,
+        plutus_v2_script: None,
+        plutus_v3_script: None,
+    };
+
+    let tx = pallas::ledger::primitives::conway::Tx {
+        transaction_body: body_keep,
+        transaction_witness_set: KeepRaw::from(witness_set),
+        success: true,
+        auxiliary_data: Nullable::Null,
+    };
+
+    minicbor::to_vec(tx).expect("failed to encode submit tx")
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -360,11 +521,16 @@ mod tests {
 
     #[test]
     fn synthetic_block_decodes() {
-        let (blocks, _vectors, _cfg) = build_synthetic_blocks(SyntheticBlockConfig::default());
+        let (blocks, vectors, _cfg) = build_synthetic_blocks(SyntheticBlockConfig::default());
         let block = blocks.first().expect("missing synthetic block");
         let raw = block.as_ref();
-        if let Err(err) = MultiEraBlock::decode(raw) {
-            panic!("failed to decode synthetic block: {err:?}");
-        }
+        let block = MultiEraBlock::decode(raw).expect("failed to decode synthetic block");
+        let label: u64 = vectors
+            .metadata_label
+            .parse()
+            .expect("invalid metadata label");
+        let txs = block.txs();
+        let found = txs.iter().any(|tx| tx.metadata().find(label).is_some());
+        assert!(found, "synthetic metadata label was not found in block");
     }
 }

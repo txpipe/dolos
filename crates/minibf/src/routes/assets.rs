@@ -324,9 +324,7 @@ impl AssetModelBuilder {
 
         if let Some((_, standard, ref_asset_bytes)) = &cip68_reference {
             let entity_key = pallas::crypto::hash::Hasher::<256>::hash(ref_asset_bytes.as_slice());
-            let ref_state = domain
-                .read_cardano_entity::<AssetState>(entity_key.as_slice())
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            let ref_state = domain.read_cardano_entity::<AssetState>(entity_key.as_slice())?;
 
             if let Some(metadata_tx) = ref_state.and_then(|state| state.metadata_tx) {
                 if let Some(EraCbor(era, cbor)) = domain
@@ -460,8 +458,7 @@ where
     let registry_url = domain.config.token_registry_url.clone();
 
     let asset_state = domain
-        .read_cardano_entity::<AssetState>(entity_key.as_slice())
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .read_cardano_entity::<AssetState>(entity_key.as_slice())?
         .ok_or(StatusCode::NOT_FOUND)?;
 
     let initial_tx = if let Some(initial_tx) = asset_state.initial_tx {

@@ -221,8 +221,12 @@ pub async fn by_id_delegators<D: Domain>(
 ) -> Result<Json<Vec<PoolDelegatorsInner>>, Error>
 where
     Option<AccountState>: From<D::Entity>,
+    Option<PoolState>: From<D::Entity>,
 {
     let operator = decode_pool_id(&id)?;
+    if !domain.cardano_entity_exists::<PoolState>(operator.as_slice())? {
+        return Err(StatusCode::NOT_FOUND.into());
+    }
 
     let network = domain.get_network_id()?;
 
@@ -357,7 +361,7 @@ mod tests {
     }
 
     fn missing_pool_id() -> &'static str {
-        "pool1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"
+        "pool1qurswpc8qurswpc8qurswpc8qurswpc8qurswpc8qursw2w89e2"
     }
 
     async fn assert_status(app: &TestApp, path: &str, expected: StatusCode) {

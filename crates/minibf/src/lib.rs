@@ -257,6 +257,14 @@ impl<D: Domain> Facade<D> {
 
         Ok(downcast)
     }
+
+    pub fn cardano_entity_exists<T>(&self, key: impl Into<EntityKey>) -> Result<bool, StatusCode>
+    where
+        T: FixedNamespace,
+        Option<T>: From<D::Entity>,
+    {
+        Ok(self.read_cardano_entity::<T>(key)?.is_some())
+    }
 }
 
 pub struct Driver;

@@ -1384,6 +1384,7 @@ dependencies = [
  "futures-util",
  "hex",
  "pallas",
+ "pallas-crypto 1.0.0-alpha.4",
  "rand 0.9.1",
  "tokio",
  "tokio-stream",

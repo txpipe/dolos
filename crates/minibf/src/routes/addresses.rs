@@ -351,6 +351,7 @@ where
     pagination.enforce_max_scan_limit()?;
 
     let (start_slot, end_slot) = pagination.start_and_end_slots(&domain).await?;
+    let address_str = address.clone();
     let (stream, address) = blocks_for_address_stream(
         &domain,
         &address,
@@ -385,11 +386,19 @@ where
         }
     }
 
-    let transactions = matches
+    let transactions: Vec<AddressTransactionsContentInner> = matches
         .into_iter()
         .skip(pagination.from())
         .take(pagination.count)
         .collect();
+
+    if transactions.is_empty() {
+        let exists = is_address_in_chain(&domain, &address_str).await?;
+
+        if !exists {
+            return Err(StatusCode::NOT_FOUND.into());
+        }
+    }
 
     Ok(Json(transactions))
 }
@@ -453,18 +462,18 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{TestApp, TestFault};
     use blockfrost_openapi::models::{
         address_transactions_content_inner::AddressTransactionsContentInner,
         address_utxo_content_inner::AddressUtxoContentInner,
     };
-    use crate::test_support::{TestApp, TestFault};
 
     fn invalid_address() -> &'static str {
         "not-an-address"
     }
 
     fn missing_address() -> &'static str {
-        "addr_test1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"
+        "addr_test1qqrswpc8qurswpc8qurswpc8qurswpc8qurswpc8qurswpcgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyq3w9hxq"
     }
 
     async fn assert_status(app: &TestApp, path: &str, expected: StatusCode) {
