@@ -429,6 +429,10 @@ impl dolos_core::EntityDelta for DRepRegistration {
 pub struct AccountVisitor {
     deposit: Option<u64>,
     epoch: Option<Epoch>,
+    /// Protocol version for determining MIR accumulation behavior.
+    /// Pre-Alonzo (< 5): MIRs overwrite previous values.
+    /// Alonzo+ (>= 5): MIRs accumulate.
+    protocol_version: Option<u16>,
 }
 
 impl BlockVisitor for AccountVisitor {
@@ -444,6 +448,7 @@ impl BlockVisitor for AccountVisitor {
     ) -> Result<(), ChainError> {
         self.deposit = pparams.ensure_key_deposit().ok();
         self.epoch = Some(epoch);
+        self.protocol_version = pparams.protocol_major();
         Ok(())
     }
 
@@ -539,6 +544,10 @@ impl BlockVisitor for AccountVisitor {
             let MoveInstantaneousReward { source, target, .. } = cert;
 
             if let InstantaneousRewardTarget::StakeCredentials(creds) = target {
+                // Pre-Alonzo (protocol < 5): MIRs overwrite previous values (Map.union semantics)
+                // Alonzo+ (protocol >= 5): MIRs accumulate (Map.unionWith (<>) semantics)
+                let overwrite = self.protocol_version.unwrap_or(0) < 5;
+
                 for (cred, amount) in creds {
                     let amount = amount.max(0) as u64;
                     // Store pending MIR to be applied at EWRAP (not immediately)
@@ -546,10 +555,10 @@ impl BlockVisitor for AccountVisitor {
                     // registered at epoch boundary, matching the Cardano ledger.
                     match source {
                         InstantaneousRewardSource::Reserves => {
-                            deltas.add_for_entity(EnqueueMir::from_reserves(cred, amount));
+                            deltas.add_for_entity(EnqueueMir::from_reserves(cred, amount, overwrite));
                         }
                         InstantaneousRewardSource::Treasury => {
-                            deltas.add_for_entity(EnqueueMir::from_treasury(cred, amount));
+                            deltas.add_for_entity(EnqueueMir::from_treasury(cred, amount, overwrite));
                         }
                     }
                 }

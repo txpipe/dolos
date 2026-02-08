@@ -102,29 +102,41 @@ impl dolos_core::EntityDelta for SetEpochIncentives {
 
 /// Delta to enqueue a pending MIR (Move Instantaneous Reward) for an account.
 /// Created during block roll when MIR certificates are processed.
-/// MIRs are accumulated per credential and applied at EWRAP.
+///
+/// Behavior varies by protocol version:
+/// - Pre-Alonzo (protocol < 5): MIRs OVERWRITE previous values for the same credential.
+/// - Alonzo+ (protocol >= 5): MIRs ACCUMULATE for the same credential.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnqueueMir {
     pub credential: StakeCredential,
     pub from_reserves: u64,
     pub from_treasury: u64,
+    /// If true, overwrite previous MIR values (pre-Alonzo behavior).
+    /// If false, accumulate MIR values (Alonzo+ behavior).
+    pub overwrite: bool,
 }
 
 impl EnqueueMir {
-    pub fn new(credential: StakeCredential, from_reserves: u64, from_treasury: u64) -> Self {
+    pub fn new(
+        credential: StakeCredential,
+        from_reserves: u64,
+        from_treasury: u64,
+        overwrite: bool,
+    ) -> Self {
         Self {
             credential,
             from_reserves,
             from_treasury,
+            overwrite,
         }
     }
 
-    pub fn from_reserves(credential: StakeCredential, amount: u64) -> Self {
-        Self::new(credential, amount, 0)
+    pub fn from_reserves(credential: StakeCredential, amount: u64, overwrite: bool) -> Self {
+        Self::new(credential, amount, 0, overwrite)
     }
 
-    pub fn from_treasury(credential: StakeCredential, amount: u64) -> Self {
-        Self::new(credential, 0, amount)
+    pub fn from_treasury(credential: StakeCredential, amount: u64, overwrite: bool) -> Self {
+        Self::new(credential, 0, amount, overwrite)
     }
 }
 
@@ -136,8 +148,18 @@ impl dolos_core::EntityDelta for EnqueueMir {
     }
 
     fn apply(&mut self, entity: &mut Option<Self::Entity>) {
-        // Accumulate MIRs for the same credential (multiple MIR certs can target same account)
-        if let Some(existing) = entity.as_mut() {
+        // Behavior depends on overwrite flag (determined by protocol version):
+        // - Pre-Alonzo (overwrite=true): Later MIRs overwrite earlier ones (Map.union semantics)
+        // - Alonzo+ (overwrite=false): MIRs accumulate (Map.unionWith (<>) semantics)
+        if self.overwrite {
+            // Pre-Alonzo: overwrite with new values
+            *entity = Some(PendingMirState {
+                credential: self.credential.clone(),
+                from_reserves: self.from_reserves,
+                from_treasury: self.from_treasury,
+            });
+        } else if let Some(existing) = entity.as_mut() {
+            // Alonzo+: accumulate
             existing.from_reserves += self.from_reserves;
             existing.from_treasury += self.from_treasury;
         } else {
