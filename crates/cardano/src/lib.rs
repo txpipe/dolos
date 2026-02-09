@@ -24,6 +24,7 @@ pub mod math_macros;
 pub mod pallas_extras;
 
 // machinery
+pub mod cip25;
 pub mod cip68;
 pub mod eras;
 pub mod forks;

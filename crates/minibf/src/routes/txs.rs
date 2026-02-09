@@ -19,7 +19,7 @@ use dolos_cardano::{indexes::AsyncCardanoQueryExt, AccountState, DRepState, Pool
 use dolos_core::Domain;
 
 use crate::{
-    log_and_500,
+    hacks, log_and_500,
     mapping::{IntoModel as _, TxModelBuilder},
     Facade,
 };
@@ -36,7 +36,13 @@ where
 {
     let hash = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
 
-    let (raw, order) = domain.get_block_by_tx_hash(&hash).await?;
+    let (raw, order) = match domain.get_block_by_tx_hash(&hash).await {
+        Ok(block) => block,
+        Err(StatusCode::NOT_FOUND) => {
+            return Ok(Json(hacks::genesis_tx_content_for_hash(&domain, &hash)?));
+        }
+        Err(err) => return Err(err),
+    };
 
     let chain = domain.get_chain_summary()?;
 
@@ -74,7 +80,15 @@ where
 {
     let hash = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
 
-    let (raw, order) = domain.get_block_by_tx_hash(&hash).await?;
+    let (raw, order) = match domain.get_block_by_tx_hash(&hash).await {
+        Ok(block) => block,
+        Err(StatusCode::NOT_FOUND) => {
+            return Ok(Json(
+                hacks::genesis_tx_utxos_for_hash(&domain, &hash).await?,
+            ));
+        }
+        Err(err) => return Err(err),
+    };
 
     let mut builder = TxModelBuilder::new(&raw, order)?;
 
