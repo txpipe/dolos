@@ -33,6 +33,10 @@ pub struct BootstrapArgs {
     /// Enable verbose output
     #[arg(long, action)]
     pub verbose: bool,
+
+    /// Skip using the seed and bootstrap from scratch
+    #[arg(long, action)]
+    pub skip_seed: bool,
 }
 
 /// Run the bootstrap-mithril-local command.
@@ -111,20 +115,29 @@ pub fn run(sh: &Shell, args: &BootstrapArgs) -> Result<()> {
     std::fs::write(&config_path, serialized)
         .with_context(|| format!("writing config: {}", config_path.display()))?;
 
-    if let Some(ref seed) = seed_path {
-        if seed.exists() {
-            println!("Copying seed data: {}", seed.display());
-            copy_dir_recursive(seed, &data_dir)?;
-        } else {
-            bail!("seed directory not found: {}", seed.display());
+    // Only use seed if not skipped and configured
+    if !args.skip_seed {
+        if let Some(ref seed) = seed_path {
+            if seed.exists() {
+                println!("Copying seed data: {}", seed.display());
+                copy_dir_recursive(seed, &data_dir)?;
+            } else {
+                bail!("seed directory not found: {}", seed.display());
+            }
         }
+    } else {
+        println!("Skipping seed (--skip-seed specified), bootstrapping from scratch");
     }
 
     println!("Bootstrapping instance: {}", instance_name);
     println!("  Config: {}", config_path.display());
     println!("  Snapshot: {}", snapshot_dir.display());
     if let Some(ref seed) = seed_path {
-        println!("  Seed: {}", seed.display());
+        if !args.skip_seed {
+            println!("  Seed: {}", seed.display());
+        } else {
+            println!("  Seed: (skipped)");
+        }
     }
 
     let sh = sh.clone();

@@ -22,6 +22,10 @@ pub struct CreateArgs {
     /// Enable verbose output for the bootstrap command
     #[arg(long, action)]
     pub verbose: bool,
+
+    /// Skip using the seed and bootstrap from scratch
+    #[arg(long, action)]
+    pub skip_seed: bool,
 }
 
 /// Run the create test-instance command.
@@ -48,6 +52,7 @@ pub fn run(sh: &Shell, args: &CreateArgs) -> Result<()> {
         name: None,
         force: false,
         verbose: args.verbose,
+        skip_seed: args.skip_seed,
     };
 
     bootstrap::run(sh, &bootstrap_args)?;
