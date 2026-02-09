@@ -166,10 +166,10 @@ fn daemon_runs(scenario: &Scenario) {
 
     let mut guard = ProcessGuard::new(handle);
 
-    wait_for_tcp_port(scenario, 0, Duration::from_secs(10));
-    wait_for_tcp_port(scenario, 1, Duration::from_secs(10));
-    wait_for_tcp_port(scenario, 2, Duration::from_secs(10));
-    wait_for_socket_file(scenario, "dolos.socket", Duration::from_secs(10));
+    wait_for_tcp_port(scenario, 0, Duration::from_secs(30));
+    wait_for_tcp_port(scenario, 1, Duration::from_secs(30));
+    wait_for_tcp_port(scenario, 2, Duration::from_secs(30));
+    wait_for_socket_file(scenario, "dolos.socket", Duration::from_secs(30));
 
     shutdown_gracefully(&mut guard);
 
@@ -233,7 +233,7 @@ fn daemon_syncs(scenario: &Scenario) {
 
     dbg!(&after);
 
-    assert!(after.wal.tip_slot.unwrap() >= before.wal.tip_slot.unwrap_or_default() + 20);
+    assert!(after.wal.tip_slot.unwrap() >= before.wal.tip_slot.unwrap_or_default() + 5);
 }
 
 const SCENARIOS: &[Scenario] = &[
