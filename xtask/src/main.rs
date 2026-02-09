@@ -5,6 +5,7 @@ use xshell::{cmd, Shell};
 mod bootstrap;
 mod config;
 mod ground_truth;
+mod minibf_bench;
 mod test_instance;
 mod util;
 
@@ -31,6 +32,9 @@ enum Commands {
     /// Test instance management commands (create, delete)
     #[command(subcommand)]
     TestInstance(test_instance::TestInstanceCmd),
+
+    /// Benchmark minibf endpoints
+    MinibfBench(minibf_bench::args::BenchArgs),
 }
 
 fn main() -> Result<()> {
@@ -45,6 +49,7 @@ fn main() -> Result<()> {
         Commands::BootstrapMithrilLocal(args) => bootstrap::run(&sh, &args)?,
         Commands::GroundTruth(cmd) => ground_truth::run(cmd)?,
         Commands::TestInstance(cmd) => test_instance::run(&sh, cmd)?,
+        Commands::MinibfBench(args) => minibf_bench::run(&sh, &args)?,
     }
 
     Ok(())

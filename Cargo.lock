@@ -1902,6 +1902,7 @@ checksum = "765c9198f173dd59ce26ff9f95ef0aafd0a0fe01fb9d72841bc5066a4c06511d"
 dependencies = [
  "base64 0.21.7",
  "byteorder",
+ "crossbeam-channel",
  "flate2",
  "nom 7.1.3",
  "num-traits",
@@ -6409,16 +6410,20 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bech32 0.11.1",
+ "chrono",
  "clap",
  "dolos",
  "dolos-cardano",
  "dolos-core",
+ "hdrhistogram",
  "hex",
  "pallas",
  "postgres",
  "postgres-native-tls",
+ "reqwest",
  "serde",
  "serde_json",
+ "tokio",
  "toml 0.8.20",
  "xshell",
 ]
