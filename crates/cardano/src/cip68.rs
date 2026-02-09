@@ -3,10 +3,16 @@ use std::{collections::HashMap, ops::Deref};
 use crc::{Crc, CRC_8_SMBUS};
 use pallas::codec::minicbor;
 use pallas::ledger::primitives::{BigInt, PlutusData};
+use pallas::ledger::traverse::MultiEraTx;
 use serde_json::Value as JsonValue;
 use thiserror::Error;
 
 const CRC8_ALGO: Crc<u8> = Crc::<u8>::new(&CRC_8_SMBUS);
+const CIP25_METADATA_LABEL: u64 = 721;
+
+pub fn has_cip25_metadata(tx: &MultiEraTx) -> bool {
+    tx.metadata().find(CIP25_METADATA_LABEL).is_some()
+}
 
 #[derive(Debug, Error)]
 pub enum Cip68Error {
