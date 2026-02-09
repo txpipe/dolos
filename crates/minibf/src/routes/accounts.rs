@@ -247,8 +247,14 @@ where
                     items.push(AccountAddressesContentInner {
                         address: address.to_string(),
                     });
+                    if items.len() >= pagination.count {
+                        break;
+                    }
                 }
             }
+        }
+        if items.len() >= pagination.count {
+            break;
         }
     }
 
@@ -803,6 +809,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn accounts_by_stake_addresses_paginated() {
+        let app = TestApp::new();
+        let stake_address = app.vectors().stake_address.as_str();
+        let path_page_1 = format!("/accounts/{stake_address}/addresses?page=1&count=1");
+        let path_page_2 = format!("/accounts/{stake_address}/addresses?page=2&count=1");
+
+        let (status_1, bytes_1) = app.get_bytes(&path_page_1).await;
+        let (status_2, bytes_2) = app.get_bytes(&path_page_2).await;
+
+        assert_eq!(status_1, StatusCode::OK);
+        assert_eq!(status_2, StatusCode::OK);
+
+        let page_1: Vec<AccountAddressesContentInner> =
+            serde_json::from_slice(&bytes_1).expect("failed to parse account addresses page 1");
+        let page_2: Vec<AccountAddressesContentInner> =
+            serde_json::from_slice(&bytes_2).expect("failed to parse account addresses page 2");
+
+        assert_eq!(page_1.len(), 1);
+        assert_eq!(page_2.len(), 1);
+        assert_ne!(page_1[0].address, page_2[0].address);
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_addresses_order_asc() {
+        let app = TestApp::new();
+        let stake_address = app.vectors().stake_address.as_str();
+        let path = format!("/accounts/{stake_address}/addresses?order=asc&count=5");
+        let (status, bytes) = app.get_bytes(&path).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let asc: Vec<AccountAddressesContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse addresses asc");
+        if asc.is_empty() {
+            return;
+        }
+        let address_bounds = |addr: &str| {
+            app.vectors()
+                .account_address_bounds
+                .iter()
+                .find_map(|(known, min, max)| (known == addr).then_some((*min, *max)))
+                .expect("missing address in vectors")
+        };
+
+        let asc_blocks: Vec<_> = asc
+            .iter()
+            .map(|x| address_bounds(&x.address).0)
+            .collect();
+
+        assert!(asc_blocks.windows(2).all(|w| w[0] <= w[1]));
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_addresses_order_desc() {
+        let app = TestApp::new();
+        let stake_address = app.vectors().stake_address.as_str();
+        let path = format!("/accounts/{stake_address}/addresses?order=desc&count=5");
+        let (status, bytes) = app.get_bytes(&path).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let desc: Vec<AccountAddressesContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse addresses desc");
+        if desc.is_empty() {
+            return;
+        }
+        let address_bounds = |addr: &str| {
+            app.vectors()
+                .account_address_bounds
+                .iter()
+                .find_map(|(known, min, max)| (known == addr).then_some((*min, *max)))
+                .expect("missing address in vectors")
+        };
+
+        let desc_blocks: Vec<_> = desc
+            .iter()
+            .map(|x| address_bounds(&x.address).1)
+            .collect();
+
+        assert!(desc_blocks.windows(2).all(|w| w[0] >= w[1]));
+    }
+
+    #[tokio::test]
     async fn accounts_by_stake_addresses_bad_request() {
         let app = TestApp::new();
         let path = format!("/accounts/{}/addresses", invalid_stake_address());
@@ -839,6 +926,89 @@ mod tests {
         );
         let _: Vec<AccountDelegationContentInner> =
             serde_json::from_slice(&bytes).expect("failed to parse account delegations");
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_delegations_slot_constrained() {
+        let app = TestApp::new();
+        let stake_address = app.vectors().stake_address.as_str();
+        let block = app
+            .vectors()
+            .blocks
+            .first()
+            .expect("missing block vectors");
+        let path = format!(
+            "/accounts/{stake_address}/delegations?from={}&to={}",
+            block.block_number, block.block_number
+        );
+        let (status, bytes) = app.get_bytes(&path).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let items: Vec<AccountDelegationContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse account delegations");
+        for item in items {
+            assert!(block.tx_hashes.contains(&item.tx_hash));
+        }
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_delegations_order_asc() {
+        let app = TestApp::new();
+        let stake_address = app.vectors().stake_address.as_str();
+        let path = format!("/accounts/{stake_address}/delegations?order=asc&count=5");
+        let (status, bytes) = app.get_bytes(&path).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let asc: Vec<AccountDelegationContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse delegations asc");
+        if asc.len() < 2 {
+            return;
+        }
+        let tx_pos = |hash: &str| {
+            app.vectors()
+                .blocks
+                .iter()
+                .find_map(|block| {
+                    block
+                        .tx_hashes
+                        .iter()
+                        .position(|x| x == hash)
+                        .map(|idx| (block.block_number, idx))
+                })
+                .expect("missing tx hash in vectors")
+        };
+        let asc_pos: Vec<_> = asc.iter().map(|x| tx_pos(&x.tx_hash)).collect();
+        assert!(asc_pos.windows(2).all(|w| w[0] <= w[1]));
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_delegations_order_desc() {
+        let app = TestApp::new();
+        let stake_address = app.vectors().stake_address.as_str();
+        let path = format!("/accounts/{stake_address}/delegations?order=desc&count=5");
+        let (status, bytes) = app.get_bytes(&path).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let desc: Vec<AccountDelegationContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse delegations desc");
+        if desc.len() < 2 {
+            return;
+        }
+        let tx_pos = |hash: &str| {
+            app.vectors()
+                .blocks
+                .iter()
+                .find_map(|block| {
+                    block
+                        .tx_hashes
+                        .iter()
+                        .position(|x| x == hash)
+                        .map(|idx| (block.block_number, idx))
+                })
+                .expect("missing tx hash in vectors")
+        };
+        let desc_pos: Vec<_> = desc.iter().map(|x| tx_pos(&x.tx_hash)).collect();
+        assert!(desc_pos.windows(2).all(|w| w[0] >= w[1]));
     }
 
     #[tokio::test]
@@ -881,6 +1051,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn accounts_by_stake_registrations_slot_constrained() {
+        let app = TestApp::new();
+        let stake_address = app.vectors().stake_address.as_str();
+        let block = app
+            .vectors()
+            .blocks
+            .first()
+            .expect("missing block vectors");
+        let path = format!(
+            "/accounts/{stake_address}/registrations?from={}&to={}",
+            block.block_number, block.block_number
+        );
+        let (status, bytes) = app.get_bytes(&path).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let items: Vec<AccountRegistrationContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse account registrations");
+        for item in items {
+            assert!(block.tx_hashes.contains(&item.tx_hash));
+        }
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_registrations_order_asc() {
+        let app = TestApp::new();
+        let stake_address = app.vectors().stake_address.as_str();
+        let path = format!("/accounts/{stake_address}/registrations?order=asc&count=5");
+        let (status, bytes) = app.get_bytes(&path).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let asc: Vec<AccountRegistrationContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse registrations asc");
+        if asc.len() < 2 {
+            return;
+        }
+        let tx_pos = |hash: &str| {
+            app.vectors()
+                .blocks
+                .iter()
+                .find_map(|block| {
+                    block
+                        .tx_hashes
+                        .iter()
+                        .position(|x| x == hash)
+                        .map(|idx| (block.block_number, idx))
+                })
+                .expect("missing tx hash in vectors")
+        };
+        let asc_pos: Vec<_> = asc.iter().map(|x| tx_pos(&x.tx_hash)).collect();
+        assert!(asc_pos.windows(2).all(|w| w[0] <= w[1]));
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_registrations_order_desc() {
+        let app = TestApp::new();
+        let stake_address = app.vectors().stake_address.as_str();
+        let path = format!("/accounts/{stake_address}/registrations?order=desc&count=5");
+        let (status, bytes) = app.get_bytes(&path).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let desc: Vec<AccountRegistrationContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse registrations desc");
+        if desc.len() < 2 {
+            return;
+        }
+        let tx_pos = |hash: &str| {
+            app.vectors()
+                .blocks
+                .iter()
+                .find_map(|block| {
+                    block
+                        .tx_hashes
+                        .iter()
+                        .position(|x| x == hash)
+                        .map(|idx| (block.block_number, idx))
+                })
+                .expect("missing tx hash in vectors")
+        };
+        let desc_pos: Vec<_> = desc.iter().map(|x| tx_pos(&x.tx_hash)).collect();
+        assert!(desc_pos.windows(2).all(|w| w[0] >= w[1]));
+    }
+
+    #[tokio::test]
     async fn accounts_by_stake_registrations_bad_request() {
         let app = TestApp::new();
         let path = format!("/accounts/{}/registrations", invalid_stake_address());
@@ -917,6 +1170,29 @@ mod tests {
         );
         let _: Vec<AccountRewardContentInner> =
             serde_json::from_slice(&bytes).expect("failed to parse account rewards");
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_rewards_paginated() {
+        let app = TestApp::new();
+        let stake_address = app.vectors().stake_address.as_str();
+        let path_page_1 = format!("/accounts/{stake_address}/rewards?page=1&count=1");
+        let path_page_2 = format!("/accounts/{stake_address}/rewards?page=2&count=1");
+
+        let (status_1, bytes_1) = app.get_bytes(&path_page_1).await;
+        let (status_2, bytes_2) = app.get_bytes(&path_page_2).await;
+
+        assert_eq!(status_1, StatusCode::OK);
+        assert_eq!(status_2, StatusCode::OK);
+
+        let page_1: Vec<AccountRewardContentInner> =
+            serde_json::from_slice(&bytes_1).expect("failed to parse account rewards page 1");
+        let page_2: Vec<AccountRewardContentInner> =
+            serde_json::from_slice(&bytes_2).expect("failed to parse account rewards page 2");
+
+        assert_eq!(page_1.len(), 1);
+        assert_eq!(page_2.len(), 1);
+        assert_ne!(page_1[0].epoch, page_2[0].epoch);
     }
 
     #[tokio::test]

@@ -152,6 +152,10 @@ where
             return Err(StatusCode::INTERNAL_SERVER_ERROR.into());
         };
 
+        if epoch == 0 {
+            return Err(StatusCode::BAD_REQUEST.into());
+        }
+
         let active_slot = chain_summary.epoch_start(epoch - 1);
 
         let Ok(active) = domain.archive().read_log_typed::<StakeLog>(
@@ -350,11 +354,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blockfrost_openapi::models::{
-        pool_delegators_inner::PoolDelegatorsInner,
-        pool_list_extended_inner::PoolListExtendedInner,
-    };
     use crate::test_support::{TestApp, TestFault};
+    use blockfrost_openapi::models::{
+        pool_delegators_inner::PoolDelegatorsInner, pool_list_extended_inner::PoolListExtendedInner,
+    };
+    use dolos_testing::synthetic::SyntheticBlockConfig;
 
     fn invalid_pool_id() -> &'static str {
         "not-a-pool"
@@ -390,6 +394,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pools_extended_paginated() {
+        let mut cfg = SyntheticBlockConfig::default();
+        cfg.slot = 500_000;
+        let app = TestApp::new_with_cfg(cfg);
+        let (status_1, bytes_1) = app.get_bytes("/pools/extended?page=1&count=1").await;
+        let (status_2, bytes_2) = app.get_bytes("/pools/extended?page=2&count=1").await;
+
+        assert_eq!(status_1, StatusCode::OK);
+        assert_eq!(status_2, StatusCode::OK);
+
+        let page_1: Vec<PoolListExtendedInner> =
+            serde_json::from_slice(&bytes_1).expect("failed to parse pool list extended page 1");
+        let page_2: Vec<PoolListExtendedInner> =
+            serde_json::from_slice(&bytes_2).expect("failed to parse pool list extended page 2");
+
+        assert_eq!(page_1.len(), 1);
+        assert_eq!(page_2.len(), 0);
+    }
+    #[tokio::test]
     async fn pools_extended_bad_request() {
         let app = TestApp::new();
         let path = "/pools/extended?count=invalid";
@@ -419,6 +442,27 @@ mod tests {
             serde_json::from_slice(&bytes).expect("failed to parse pool delegators");
     }
 
+    #[tokio::test]
+    async fn pools_delegators_paginated() {
+        let app = TestApp::new();
+        let pool_id = app.vectors().pool_id.as_str();
+        let path_page_1 = format!("/pools/{pool_id}/delegators?page=1&count=1");
+        let path_page_2 = format!("/pools/{pool_id}/delegators?page=2&count=1");
+
+        let (status_1, bytes_1) = app.get_bytes(&path_page_1).await;
+        let (status_2, bytes_2) = app.get_bytes(&path_page_2).await;
+
+        assert_eq!(status_1, StatusCode::OK);
+        assert_eq!(status_2, StatusCode::OK);
+
+        let page_1: Vec<PoolDelegatorsInner> =
+            serde_json::from_slice(&bytes_1).expect("failed to parse delegators page 1");
+        let page_2: Vec<PoolDelegatorsInner> =
+            serde_json::from_slice(&bytes_2).expect("failed to parse delegators page 2");
+
+        assert_eq!(page_1.len(), 1);
+        assert_eq!(page_2.len(), 0);
+    }
     #[tokio::test]
     async fn pools_delegators_bad_request() {
         let app = TestApp::new();

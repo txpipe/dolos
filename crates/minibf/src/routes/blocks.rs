@@ -541,4 +541,62 @@ mod tests {
         let path = "/blocks/1".to_string();
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
     }
+
+    #[tokio::test]
+    async fn blocks_by_hash_or_number_txs_order_asc() {
+        let app = TestApp::new();
+        let block = app.vectors().blocks.first().expect("missing block vectors");
+        let path = format!("/blocks/{}/txs?order=asc", block.block_hash);
+        let (status, bytes) = app.get_bytes(&path).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let txs: Vec<String> =
+            serde_json::from_slice(&bytes).expect("failed to parse asc txs");
+
+        assert_eq!(txs, block.tx_hashes);
+    }
+
+    #[tokio::test]
+    async fn blocks_by_hash_or_number_txs_order_desc() {
+        let app = TestApp::new();
+        let block = app.vectors().blocks.first().expect("missing block vectors");
+        let path = format!("/blocks/{}/txs?order=desc", block.block_hash);
+        let (status, bytes) = app.get_bytes(&path).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let txs: Vec<String> =
+            serde_json::from_slice(&bytes).expect("failed to parse desc txs");
+
+        let mut reversed = block.tx_hashes.clone();
+        reversed.reverse();
+        assert_eq!(txs, reversed);
+    }
+
+    #[tokio::test]
+    async fn blocks_latest_txs_order_asc() {
+        let app = TestApp::new();
+        let block = app.vectors().blocks.last().expect("missing block vectors");
+        let (status, bytes) = app.get_bytes("/blocks/latest/txs?order=asc").await;
+        assert_eq!(status, StatusCode::OK);
+
+        let txs: Vec<String> =
+            serde_json::from_slice(&bytes).expect("failed to parse asc txs");
+
+        assert_eq!(txs, block.tx_hashes);
+    }
+
+    #[tokio::test]
+    async fn blocks_latest_txs_order_desc() {
+        let app = TestApp::new();
+        let block = app.vectors().blocks.last().expect("missing block vectors");
+        let (status, bytes) = app.get_bytes("/blocks/latest/txs?order=desc").await;
+        assert_eq!(status, StatusCode::OK);
+
+        let txs: Vec<String> =
+            serde_json::from_slice(&bytes).expect("failed to parse desc txs");
+
+        let mut reversed = block.tx_hashes.clone();
+        reversed.reverse();
+        assert_eq!(txs, reversed);
+    }
 }
