@@ -19,7 +19,7 @@ use dolos_cardano::{indexes::AsyncCardanoQueryExt, AccountState, DRepState, Pool
 use dolos_core::Domain;
 
 use crate::{
-    log_and_500,
+    hacks, log_and_500,
     mapping::{IntoModel as _, TxModelBuilder},
     Facade,
 };
@@ -36,7 +36,13 @@ where
 {
     let hash = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
 
-    let (raw, order) = domain.get_block_by_tx_hash(&hash).await?;
+    let (raw, order) = match domain.get_block_by_tx_hash(&hash).await {
+        Ok(block) => block,
+        Err(StatusCode::NOT_FOUND) => {
+            return Ok(Json(hacks::genesis_tx_content_for_hash(&domain, &hash)?));
+        }
+        Err(err) => return Err(err),
+    };
 
     let chain = domain.get_chain_summary()?;
 
@@ -74,7 +80,15 @@ where
 {
     let hash = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
 
-    let (raw, order) = domain.get_block_by_tx_hash(&hash).await?;
+    let (raw, order) = match domain.get_block_by_tx_hash(&hash).await {
+        Ok(block) => block,
+        Err(StatusCode::NOT_FOUND) => {
+            return Ok(Json(
+                hacks::genesis_tx_utxos_for_hash(&domain, &hash).await?,
+            ));
+        }
+        Err(err) => return Err(err),
+    };
 
     let mut builder = TxModelBuilder::new(&raw, order)?;
 
@@ -282,18 +296,19 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{TestApp, TestFault};
     use blockfrost_openapi::models::{
         tx_content::TxContent, tx_content_cbor::TxContentCbor,
         tx_content_delegations_inner::TxContentDelegationsInner,
         tx_content_metadata_cbor_inner::TxContentMetadataCborInner,
-        tx_content_metadata_inner::TxContentMetadataInner, tx_content_mirs_inner::TxContentMirsInner,
+        tx_content_metadata_inner::TxContentMetadataInner,
+        tx_content_mirs_inner::TxContentMirsInner,
         tx_content_pool_certs_inner::TxContentPoolCertsInner,
         tx_content_pool_retires_inner::TxContentPoolRetiresInner,
         tx_content_redeemers_inner::TxContentRedeemersInner,
         tx_content_stake_addr_inner::TxContentStakeAddrInner, tx_content_utxo::TxContentUtxo,
         tx_content_withdrawals_inner::TxContentWithdrawalsInner,
     };
-    use crate::test_support::{TestApp, TestFault};
 
     fn missing_hash() -> &'static str {
         "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
@@ -326,8 +341,7 @@ mod tests {
             "unexpected status {status} with body: {}",
             String::from_utf8_lossy(&bytes)
         );
-        let parsed: TxContent =
-            serde_json::from_slice(&bytes).expect("failed to parse tx content");
+        let parsed: TxContent = serde_json::from_slice(&bytes).expect("failed to parse tx content");
         assert_eq!(parsed.hash, tx_hash);
         assert!(!parsed.block.is_empty());
         assert!(parsed.block_height > 0);
@@ -549,7 +563,6 @@ mod tests {
         let path = format!("/txs/{tx_hash}/redeemers");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
     }
-
 
     #[tokio::test]
     async fn txs_by_hash_delegations_happy_path() {
