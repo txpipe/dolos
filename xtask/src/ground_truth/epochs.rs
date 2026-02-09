@@ -59,9 +59,7 @@ pub(super) fn fetch(dbsync_url: &str, max_epoch: u64) -> Result<Vec<EpochRow>> {
         let fees: Option<String> = row.get(8);
         let block_count: Option<String> = row.get(9);
 
-        let nonce = epoch_nonce
-            .map(|b| hex::encode(&b))
-            .unwrap_or_default();
+        let nonce = epoch_nonce.map(|b| hex::encode(&b)).unwrap_or_default();
 
         epochs.push(EpochRow {
             epoch_no,

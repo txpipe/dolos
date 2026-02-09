@@ -462,8 +462,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blockfrost_openapi::models::block_content::BlockContent;
     use crate::test_support::{TestApp, TestFault};
+    use blockfrost_openapi::models::block_content::BlockContent;
 
     fn invalid_block() -> &'static str {
         "not-a-hash"
@@ -550,8 +550,7 @@ mod tests {
         let (status, bytes) = app.get_bytes(&path).await;
         assert_eq!(status, StatusCode::OK);
 
-        let txs: Vec<String> =
-            serde_json::from_slice(&bytes).expect("failed to parse asc txs");
+        let txs: Vec<String> = serde_json::from_slice(&bytes).expect("failed to parse asc txs");
 
         assert_eq!(txs, block.tx_hashes);
     }
@@ -564,8 +563,7 @@ mod tests {
         let (status, bytes) = app.get_bytes(&path).await;
         assert_eq!(status, StatusCode::OK);
 
-        let txs: Vec<String> =
-            serde_json::from_slice(&bytes).expect("failed to parse desc txs");
+        let txs: Vec<String> = serde_json::from_slice(&bytes).expect("failed to parse desc txs");
 
         let mut reversed = block.tx_hashes.clone();
         reversed.reverse();
@@ -579,8 +577,7 @@ mod tests {
         let (status, bytes) = app.get_bytes("/blocks/latest/txs?order=asc").await;
         assert_eq!(status, StatusCode::OK);
 
-        let txs: Vec<String> =
-            serde_json::from_slice(&bytes).expect("failed to parse asc txs");
+        let txs: Vec<String> = serde_json::from_slice(&bytes).expect("failed to parse asc txs");
 
         assert_eq!(txs, block.tx_hashes);
     }
@@ -592,8 +589,7 @@ mod tests {
         let (status, bytes) = app.get_bytes("/blocks/latest/txs?order=desc").await;
         assert_eq!(status, StatusCode::OK);
 
-        let txs: Vec<String> =
-            serde_json::from_slice(&bytes).expect("failed to parse desc txs");
+        let txs: Vec<String> = serde_json::from_slice(&bytes).expect("failed to parse desc txs");
 
         let mut reversed = block.tx_hashes.clone();
         reversed.reverse();

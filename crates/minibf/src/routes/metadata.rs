@@ -200,11 +200,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{TestApp, TestFault};
     use blockfrost_openapi::models::{
         tx_metadata_label_cbor_inner::TxMetadataLabelCborInner,
         tx_metadata_label_json_inner::TxMetadataLabelJsonInner,
     };
-    use crate::test_support::{TestApp, TestFault};
 
     fn invalid_label() -> &'static str {
         "not-a-number"
@@ -245,11 +245,7 @@ mod tests {
     async fn metadata_label_json_slot_constrained() {
         let app = TestApp::new();
         let label = app.vectors().metadata_label.as_str();
-        let block = app
-            .vectors()
-            .blocks
-            .first()
-            .expect("missing block vectors");
+        let block = app.vectors().blocks.first().expect("missing block vectors");
         let path = format!(
             "/metadata/txs/labels/{label}?from={}&to={}",
             block.block_number, block.block_number
@@ -388,11 +384,7 @@ mod tests {
     async fn metadata_label_cbor_slot_constrained() {
         let app = TestApp::new();
         let label = app.vectors().metadata_label.as_str();
-        let block = app
-            .vectors()
-            .blocks
-            .first()
-            .expect("missing block vectors");
+        let block = app.vectors().blocks.first().expect("missing block vectors");
         let path = format!(
             "/metadata/txs/labels/{label}/cbor?from={}&to={}",
             block.block_number, block.block_number

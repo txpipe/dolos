@@ -6,27 +6,12 @@ edition.workspace = true
 [dependencies]
 pallas.workspace = true
 dolos-core = { path = "../core" }
+dolos-redb3 = { path = "../redb3" }
+dolos-cardano = { path = "../cardano", features=["include-genesis"] }
 rand = "0.9.1"
 hex = "0.4.3"
 bech32 = "0.9.1"
-
-# optional dependencies for toy domain
-dolos-redb3 = { path = "../redb3", optional = true }
-dolos-cardano = { path = "../cardano", optional = true }
-
-tokio = { workspace = true, optional = true }
-tokio-stream = { workspace = true, optional = true }
-futures-core = { workspace = true, optional = true }
-futures-util = { workspace = true, optional = true }
-
-
-[features]
-default = []
-toy-domain = [
-    "dolos-redb3",
-    "dolos-cardano/include-genesis",
-    "tokio",
-    "tokio-stream",
-    "futures-core",
-    "futures-util",
-]
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+futures-core = { workspace = true }
+futures-util = { workspace = true }
