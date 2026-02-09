@@ -12,6 +12,7 @@ use blockfrost_openapi::models::{
     asset_transactions_inner::AssetTransactionsInner,
 };
 use dolos_cardano::{
+    cip25::{cip25_metadata_is_valid, Cip25MetadataVersion},
     cip68::{cip_68_reference_asset, encode_to_hex, parse_cip68_metadata_map, Cip68TokenStandard},
     indexes::{AsyncCardanoQueryExt, CardanoIndexExt, SlotOrder},
     model::AssetState,
@@ -124,10 +125,19 @@ impl OnchainMetadata {
             _ => (HashMap::new(), None),
         };
 
-        let version = Some(match version {
-            Some(2) => OnchainMetadataStandard::Cip25v2,
-            _ => OnchainMetadataStandard::Cip25v1,
-        });
+        let version = match version {
+            Some(2) => Cip25MetadataVersion::V2,
+            _ => Cip25MetadataVersion::V1,
+        };
+
+        let version = if cip25_metadata_is_valid(&metadata, version) {
+            Some(match version {
+                Cip25MetadataVersion::V2 => OnchainMetadataStandard::Cip25v2,
+                Cip25MetadataVersion::V1 => OnchainMetadataStandard::Cip25v1,
+            })
+        } else {
+            None
+        };
 
         let extra = None;
 
