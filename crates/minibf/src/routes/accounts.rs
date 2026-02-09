@@ -1190,8 +1190,9 @@ mod tests {
         let page_2: Vec<AccountRewardContentInner> =
             serde_json::from_slice(&bytes_2).expect("failed to parse account rewards page 2");
 
-        assert_eq!(page_1.len(), 0);
-        assert_eq!(page_2.len(), 0);
+        assert_eq!(page_1.len(), 1);
+        assert_eq!(page_2.len(), 1);
+        assert_ne!(page_1[0].epoch, page_2[0].epoch);
     }
 
     #[tokio::test]

@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use dolos_core::{
     config::{CardanoConfig, CustomUtxo},
-    RawBlock, TxoRef,
+    ArchiveStore, ArchiveWriter, ChainError, Domain, LogKey, RawBlock, TemporalKey, TxoRef,
 };
 
 use crate::{tx_sequence_to_hash, utxo_with_value};
@@ -29,6 +29,8 @@ use pallas::{
 };
 use pallas::crypto::{hash::Hasher, key::ed25519::SecretKeyExtended};
 use bech32::{FromBase32, ToBase32, Variant};
+use dolos_cardano::model::MemberRewardLog;
+use dolos_cardano::rupd::credential_to_key;
 
 #[derive(Clone, Debug)]
 pub struct SyntheticBlockConfig {
@@ -340,6 +342,57 @@ pub fn build_synthetic_blocks(
     (raw_blocks, vectors, chain_config)
 }
 
+pub fn seed_reward_logs<D: Domain>(
+    domain: &D,
+    stake_address: &str,
+    pool_id: &str,
+    epochs: &[u64],
+) -> Result<(), ChainError> {
+    let address = Address::from_bech32(stake_address)?;
+    let (stake_cred, _) = dolos_cardano::pallas_extras::address_as_stake_cred(&address)
+        .ok_or(ChainError::InvalidPoolParams)?;
+    let entity_key = credential_to_key(&stake_cred);
+    let pool_keyhash =
+        pool_keyhash_from_bech32(pool_id).map_err(|_| ChainError::InvalidPoolParams)?;
+
+    let summary = dolos_cardano::eras::load_era_summary::<D>(domain.state())?;
+    let writer = domain.archive().start_writer()?;
+
+    for epoch in epochs {
+        let slot = summary.epoch_start(*epoch);
+        let log_key: LogKey = (TemporalKey::from(slot), entity_key.clone()).into();
+        let log = MemberRewardLog {
+            amount: 42,
+            pool_id: pool_keyhash.as_ref().to_vec(),
+        };
+        writer
+            .write_log_typed(&log_key, &log)
+            .map_err(ChainError::from)?;
+    }
+
+    writer.commit().map_err(ChainError::from)?;
+    Ok(())
+}
+
+pub fn seed_epoch_logs<D: Domain>(domain: &D, epochs: &[u64]) -> Result<(), ChainError> {
+    let summary = dolos_cardano::eras::load_era_summary::<D>(domain.state())?;
+    let base = dolos_cardano::load_epoch::<D>(domain.state())?;
+
+    let writer = domain.archive().start_writer()?;
+
+    for epoch in epochs {
+        let slot = summary.epoch_start(*epoch);
+        let log_key = LogKey::from(TemporalKey::from(slot));
+        let mut state = base.clone();
+        state.number = *epoch;
+        state.largest_stable_slot = slot;
+        writer.write_log_typed(&log_key, &state)?;
+    }
+
+    writer.commit()?;
+    Ok(())
+}
+
 fn address_with_stake_cred(
     stake_cred: &StakeCredential,
     network: Network,
@@ -573,7 +626,7 @@ fn build_submit_tx_cbor(
         inputs: Set::from(vec![input]),
         outputs: vec![TransactionOutput::PostAlonzo(KeepRaw::from(output))],
         fee,
-        ttl: Some(10),
+        ttl: None,
         certificates: None,
         withdrawals: None,
         auxiliary_data_hash: None,
