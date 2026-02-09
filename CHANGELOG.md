@@ -2,6 +2,54 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.0-rc.9] - 2026-02-09
+
+### 🐛 Bug Fixes
+
+- *(minibf)* Add guard for inconsistent range params (#879)
+
+### 🔧 Continuous Integration
+
+- Enable automatic publishing to npm (#873)
+
+### 🧪 Testing
+
+- *(minibf)* Implement endpoint unit test full coverage via synthetic data (#877)
+- *(minibf)* Include pagination, range and order in unit tests (#878)
+- Relax constraints of smoke test to avoid flaky results (#880)
+
+### ⚙️ Miscellaneous Tasks
+
+- Remove toy-domain feature flag (#885)
+
+## [1.0.0-rc.8] - 2026-02-07
+
+### 🐛 Bug Fixes
+
+- *(minibf)* Support parsing of byron addresses when required (#863)
+- *(minibf)* Add memory cache for heavy network query (#865)
+- *(minibf)* Improve active epoch logic on pool_updates mapping (#862)
+- *(minibf)* Add mainnet genesis block (#867)
+- *(minibf)* Parse complex onchain metadata for assets (#860)
+- *(minibf)* Track drep drop on account when retires (#868)
+- *(minibf)* Skip invalid plutus-v1 proposal preview (#871)
+- *(cardano)* Separate reward log types into different namespaces (#875)
+
+### 🚜 Refactor
+
+- Introduce block streaming query extensions (#864)
+- *(minibf)* Improve mem of first-by-tag type of queries (#866)
+- *(minibf)* Improve memory usage on utxo queries (#869)
+- *(minibf)* Relax max pagination limit (#876)
+
+### ⚙️ Miscellaneous Tasks
+
+- *(minibf)* Make better use of from/to pagination filters (#870)
+
+### Release
+
+- V1.0.0-rc.8
+
 ## [1.0.0-rc.7] - 2026-02-04
 
 ### 🚀 Features
@@ -30,6 +78,10 @@ All notable changes to this project will be documented in this file.
 - Fix clippy warnings across the board (#851)
 - Tidy up xtask for shared use (#856)
 - Update pallas v1.0.0-alpha.4 (#859)
+
+### Release
+
+- V1.0.0-rc.7
 
 ## [1.0.0-rc.6] - 2026-01-28
 
