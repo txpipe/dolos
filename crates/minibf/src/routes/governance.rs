@@ -76,6 +76,15 @@ impl<'a> DrepModelBuilder<'a> {
             return None;
         }
 
+        if self
+            .state
+            .as_ref()
+            .map(|x| x.is_unregistered())
+            .unwrap_or(true)
+        {
+            return None;
+        }
+
         self.state
             .as_ref()?
             .registered_at
@@ -95,6 +104,10 @@ impl<'a> DrepModelBuilder<'a> {
 
     fn is_drep_expired(&self) -> bool {
         if self.is_special_case() {
+            return false;
+        }
+
+        if self.is_drep_retired() {
             return false;
         }
 
