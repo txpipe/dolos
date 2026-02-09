@@ -67,8 +67,8 @@ pub async fn naked<D: Domain>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blockfrost_openapi::models::genesis_content::GenesisContent;
     use crate::test_support::{TestApp, TestFault};
+    use blockfrost_openapi::models::genesis_content::GenesisContent;
 
     async fn assert_status(app: &TestApp, path: &str, expected: StatusCode) {
         let (status, bytes) = app.get_bytes(path).await;

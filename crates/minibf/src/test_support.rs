@@ -51,8 +51,8 @@ impl TestDomainBuilder {
         domain
             .import_blocks(blocks.clone())
             .expect("failed to import synthetic blocks");
-        let summary =
-            dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state()).expect("era summary");
+        let summary = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state())
+            .expect("era summary");
         let tip_slot = domain
             .state()
             .read_cursor()

@@ -46,8 +46,8 @@ pub(super) fn fetch(dbsync_url: &str, epoch: u64) -> Result<Vec<PoolDelegationRo
 }
 
 pub(super) fn write_csv(path: &Path, rows: &[PoolDelegationRow]) -> Result<()> {
-    let mut file = File::create(path)
-        .with_context(|| format!("writing pools csv: {}", path.display()))?;
+    let mut file =
+        File::create(path).with_context(|| format!("writing pools csv: {}", path.display()))?;
     writeln!(file, "pool_bech32,pool_hash,total_lovelace")?;
     for row in rows {
         writeln!(

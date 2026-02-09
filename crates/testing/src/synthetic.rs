@@ -7,8 +7,12 @@ use dolos_core::{
 
 use crate::{tx_sequence_to_hash, utxo_with_value};
 
-use pallas::codec::{minicbor, utils::KeepRaw};
+use bech32::{FromBase32, ToBase32, Variant};
+use dolos_cardano::model::MemberRewardLog;
+use dolos_cardano::rupd::credential_to_key;
 use pallas::codec::utils::Nullable;
+use pallas::codec::{minicbor, utils::KeepRaw};
+use pallas::crypto::{hash::Hasher, key::ed25519::SecretKeyExtended};
 use pallas::{
     crypto::hash::Hash,
     ledger::{
@@ -27,10 +31,6 @@ use pallas::{
         traverse::ComputeHash,
     },
 };
-use pallas::crypto::{hash::Hasher, key::ed25519::SecretKeyExtended};
-use bech32::{FromBase32, ToBase32, Variant};
-use dolos_cardano::model::MemberRewardLog;
-use dolos_cardano::rupd::credential_to_key;
 
 #[derive(Clone, Debug)]
 pub struct SyntheticBlockConfig {
@@ -260,12 +260,7 @@ pub fn build_synthetic_blocks(
             ));
         }
 
-        let (block, hashes) = sample_block(
-            block_number,
-            slot,
-            tx_bodies,
-            Some(aux_data),
-        );
+        let (block, hashes) = sample_block(block_number, slot, tx_bodies, Some(aux_data));
 
         for hash in &hashes {
             tx_hashes.push(hex::encode(hash.as_ref()));
@@ -427,15 +422,13 @@ fn sample_transaction_body(
         index: 0,
     };
 
-    let mint_amount =
-        NonZeroInt::try_from(mint_amount).expect("mint amount must be non-zero");
+    let mint_amount = NonZeroInt::try_from(mint_amount).expect("mint amount must be non-zero");
     let mut mint_assets = BTreeMap::new();
     mint_assets.insert(asset_name.clone(), mint_amount);
     let mut mint = BTreeMap::new();
     mint.insert(policy_id, mint_assets);
 
-    let asset_amount =
-        PositiveCoin::try_from(asset_amount).expect("asset amount must be non-zero");
+    let asset_amount = PositiveCoin::try_from(asset_amount).expect("asset amount must be non-zero");
     let mut output_assets = BTreeMap::new();
     output_assets.insert(asset_name.clone(), asset_amount);
     let mut output_multiasset = BTreeMap::new();
@@ -510,7 +503,10 @@ fn sample_block(
     slot: u64,
     tx_bodies: Vec<TransactionBody<'static>>,
     aux_data: Option<alonzo::AuxiliaryData>,
-) -> (pallas::ledger::primitives::conway::Block<'static>, Vec<Hash<32>>) {
+) -> (
+    pallas::ledger::primitives::conway::Block<'static>,
+    Vec<Hash<32>>,
+) {
     let header_body = pallas::ledger::primitives::conway::HeaderBody {
         block_number,
         slot,
@@ -588,8 +584,7 @@ fn drep_id_from_keyhash(hash: Hash<28>) -> String {
     let mut payload = Vec::with_capacity(29);
     payload.push(0b00100010);
     payload.extend_from_slice(hash.as_ref());
-    bech32::encode("drep", payload.to_base32(), Variant::Bech32)
-        .expect("failed to encode drep id")
+    bech32::encode("drep", payload.to_base32(), Variant::Bech32).expect("failed to encode drep id")
 }
 
 fn keyhash_from_pubkey(pubkey: &[u8]) -> Hash<28> {

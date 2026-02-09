@@ -46,7 +46,10 @@ pub fn run(args: &QueryArgs) -> Result<()> {
             let rows = super::delegation::fetch(dbsync_url, args.epoch)?;
             println!("pool_bech32,pool_hash,total_lovelace");
             for row in rows {
-                println!("{},{},{}", row.pool_bech32, row.pool_hash, row.total_lovelace);
+                println!(
+                    "{},{},{}",
+                    row.pool_bech32, row.pool_hash, row.total_lovelace
+                );
             }
         }
         QueryEntity::Accounts => {
