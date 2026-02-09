@@ -2071,7 +2071,7 @@ impl<'a> BlockModelBuilder<'a> {
         txs.iter()
             .map(|tx| {
                 if tx.is_valid() {
-                    tx.fee().unwrap_or_default()
+                    tx.fee_or_compute()
                 } else {
                     tx.total_collateral().unwrap_or_default()
                 }
