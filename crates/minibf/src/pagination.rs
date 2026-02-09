@@ -165,15 +165,28 @@ impl TryFrom<PaginationParameters> for Pagination {
             None => Default::default(),
         };
 
-        let from = match value.from {
+        let from: Option<PaginationNumberAndIndex> = match value.from {
             Some(x) => Some(x.try_into()?),
             None => None,
         };
 
-        let to = match value.to {
+        let to: Option<PaginationNumberAndIndex> = match value.to {
             Some(x) => Some(x.try_into()?),
             None => None,
         };
+
+        if let (Some(from), Some(to)) = (from.as_ref(), to.as_ref()) {
+            if from.number > to.number {
+                return Err(PaginationError::InvalidFromTo);
+            }
+            if from.number == to.number {
+                if let (Some(from_idx), Some(to_idx)) = (from.index, to.index) {
+                    if from_idx > to_idx {
+                        return Err(PaginationError::InvalidFromTo);
+                    }
+                }
+            }
+        }
 
         Ok(Self {
             count,
@@ -286,6 +299,7 @@ impl Pagination {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use http_body_util::BodyExt;
 
     #[test]
     fn test_should_skip() {
@@ -305,5 +319,23 @@ mod tests {
         assert!(!pagination.should_skip(124, 1));
         assert!(!pagination.should_skip(124, 3));
         assert!(pagination.should_skip(124, 4));
+    }
+
+    #[tokio::test]
+    async fn test_invalid_from_to_message() {
+        let err = PaginationError::InvalidFromTo;
+        let response = err.into_response();
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("failed to read response body")
+            .to_bytes();
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&body).expect("failed to parse json");
+        assert_eq!(
+            parsed["message"],
+            "Invalid (malformed or out of range) from/to parameter(s)."
+        );
     }
 }
