@@ -10,16 +10,34 @@ use serde::Deserialize;
 
 use compare::{compare_csvs_with_ignore, extract_row_from_csv, has_data, write_fixture};
 
+use dolos_cardano::ewrap::AppliedReward;
 use dolos_cardano::model::{
     EpochState, EraSummary, FixedNamespace, PParamKind, PParamValue, PParamsSet,
 };
 use dolos_cardano::pallas_extras;
 use dolos_cardano::rupd::StakeSnapshot;
-use dolos_cardano::ewrap::AppliedReward;
 use dolos_cardano::CardanoWorkUnit;
 use dolos_cardano::PoolHash;
-use dolos_core::{config::CardanoConfig, Domain, StateStore};
+use dolos_core::{
+    config::{CardanoConfig, FjallStateConfig},
+    Domain, StateStore,
+};
 use dolos_testing::harness::cardano::{copy_dir_recursive, Config, LedgerHarness};
+
+/// High-performance fjall configuration for epoch tests.
+/// Optimized for maximum speed with 2GB cache.
+fn fast_fjall_config() -> FjallStateConfig {
+    FjallStateConfig {
+        cache: Some(2048),            // 2GB cache for hot UTxO data
+        memtable_size_mb: Some(128),  // 2x default - fewer flushes
+        l0_threshold: Some(8),        // 2x default - less compaction pressure
+        worker_threads: Some(4),      // Sufficient for tests
+        max_journal_size: Some(512),  // Moderate - test data is ephemeral
+        flush_on_commit: Some(false), // Async writes for speed
+        path: None,
+        max_history: None,
+    }
+}
 
 macro_rules! epoch_test {
     ($test_name:ident, $fixture_mod:ident, $network:literal, $epoch:literal, $snapshot:literal) => {
@@ -32,10 +50,8 @@ macro_rules! epoch_test {
             let epochs = read_fixture(&fixtures_dir.join("epochs.csv")).unwrap();
             let pparams = read_fixture(&fixtures_dir.join("pparams.csv")).unwrap();
             let eras = read_fixture(&fixtures_dir.join("eras.csv")).unwrap();
-            let delegation = read_fixture(
-                &fixtures_dir.join(format!("delegation-{}.csv", $snapshot)),
-            )
-            .unwrap();
+            let delegation =
+                read_fixture(&fixtures_dir.join(format!("delegation-{}.csv", $snapshot))).unwrap();
             let stake =
                 read_fixture(&fixtures_dir.join(format!("stake-{}.csv", $snapshot))).unwrap();
             let rewards = read_fixture(&fixtures_dir.join("rewards.csv")).unwrap();
@@ -117,7 +133,6 @@ fn load_xtask_config() -> Result<XtaskConfig> {
         .with_context(|| format!("reading {}", config_path.display()))?;
     toml::from_str(&raw).context("parsing xtask.toml")
 }
-
 
 // ---------------------------------------------------------------------------
 // Tracing
@@ -258,8 +273,8 @@ fn get_rational(pparams: &PParamsSet, kind: PParamKind) -> f64 {
 
 /// Write a single-row epochs CSV from an EpochState.
 fn write_epoch_row(epoch: &EpochState, path: &Path) -> Result<()> {
-    let mut wtr = csv::Writer::from_path(path)
-        .with_context(|| format!("creating {}", path.display()))?;
+    let mut wtr =
+        csv::Writer::from_path(path).with_context(|| format!("creating {}", path.display()))?;
 
     wtr.write_record([
         "epoch_no",
@@ -309,8 +324,8 @@ fn write_epoch_row(epoch: &EpochState, path: &Path) -> Result<()> {
 
 /// Write a single-row pparams CSV from an EpochState.
 fn write_pparam_row(epoch: &EpochState, path: &Path) -> Result<()> {
-    let mut wtr = csv::Writer::from_path(path)
-        .with_context(|| format!("creating {}", path.display()))?;
+    let mut wtr =
+        csv::Writer::from_path(path).with_context(|| format!("creating {}", path.display()))?;
 
     wtr.write_record([
         "epoch_no",
@@ -357,8 +372,8 @@ fn write_pparam_row(epoch: &EpochState, path: &Path) -> Result<()> {
 }
 
 fn dump_eras(state: &impl StateStore, path: &Path) -> Result<()> {
-    let mut wtr = csv::Writer::from_path(path)
-        .with_context(|| format!("creating {}", path.display()))?;
+    let mut wtr =
+        csv::Writer::from_path(path).with_context(|| format!("creating {}", path.display()))?;
 
     wtr.write_record(["protocol", "start_epoch", "epoch_length", "slot_length"])?;
 
@@ -379,7 +394,6 @@ fn dump_eras(state: &impl StateStore, path: &Path) -> Result<()> {
     wtr.flush()?;
     Ok(())
 }
-
 
 // ---------------------------------------------------------------------------
 // Core test runner
@@ -428,8 +442,7 @@ fn run_epoch_pots_test(
     }
 
     let work_state_dir = tmp_path.join("state");
-    copy_dir_recursive(&seed_dir.join("state"), &work_state_dir)
-        .context("copying seed state")?;
+    copy_dir_recursive(&seed_dir.join("state"), &work_state_dir).context("copying seed state")?;
 
     eprintln!(
         "running epoch_pots test: network={}, subject_epoch={}, stop_epoch={}, work_dir={}{}",
@@ -448,6 +461,7 @@ fn run_epoch_pots_test(
             stop_epoch: Some(stop_epoch),
             ..Default::default()
         },
+        fjall_config: fast_fjall_config(),
     })
     .map_err(|e| anyhow::anyhow!("{e}"))?;
 
@@ -479,9 +493,12 @@ fn run_epoch_pots_test(
                             {
                                 eprintln!("failed to dump delegation csv: {e}");
                             }
-                            if let Err(e) =
-                                dump_stake_csv(&w.snapshot, cardano_network, &dumps_dir, performance_epoch)
-                            {
+                            if let Err(e) = dump_stake_csv(
+                                &w.snapshot,
+                                cardano_network,
+                                &dumps_dir,
+                                performance_epoch,
+                            ) {
                                 eprintln!("failed to dump stake csv: {e}");
                             }
                         }
@@ -514,7 +531,10 @@ fn run_epoch_pots_test(
     let epoch = captured_epoch
         .with_context(|| format!("epoch {subject_epoch} was never completed during the run"))?;
 
-    eprintln!("captured completed epoch {} from estart callback", epoch.number);
+    eprintln!(
+        "captured completed epoch {} from estart callback",
+        epoch.number
+    );
 
     let gt_dir = tmp_path.join("ground-truth");
     std::fs::create_dir_all(&gt_dir)?;
@@ -565,9 +585,7 @@ fn run_epoch_pots_test(
 
         match compare_csvs_with_ignore(&dolos_path, &gt_path, &[0], 20, |diff| {
             let record = match diff {
-                DiffByteRecord::Add(info) | DiffByteRecord::Delete(info) => {
-                    info.byte_record()
-                }
+                DiffByteRecord::Add(info) | DiffByteRecord::Delete(info) => info.byte_record(),
                 DiffByteRecord::Modify { add, .. } => add.byte_record(),
             };
             record
@@ -601,7 +619,10 @@ fn run_epoch_pots_test(
                 _ => {}
             }
         } else {
-            eprintln!("\nSkipping delegation (epoch {}): no data", performance_epoch);
+            eprintln!(
+                "\nSkipping delegation (epoch {}): no data",
+                performance_epoch
+            );
         }
     }
 

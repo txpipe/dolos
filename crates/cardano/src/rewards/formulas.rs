@@ -98,7 +98,6 @@ pub fn pool_apparent_performance(
 
     let d_less_than_08 = d.clone() < eight_tenths;
 
-
     if d_less_than_08 {
         beta / sigma_a
     } else {

@@ -3,9 +3,9 @@ use std::sync::{Arc, RwLock};
 
 use dolos_cardano::{CardanoDelta, CardanoLogic, CardanoWorkUnit};
 use dolos_core::{
-    config::{CardanoConfig, StorageConfig},
-    BootstrapExt, ChainLogic, Domain, DomainError, Genesis, MempoolError,
-    MempoolEvent, MempoolStore, MempoolTx, MempoolTxStage, StateStore as CoreStateStore, TipEvent,
+    config::{CardanoConfig, FjallStateConfig, StorageConfig},
+    BootstrapExt, ChainLogic, Domain, DomainError, Genesis, MempoolError, MempoolEvent,
+    MempoolStore, MempoolTx, MempoolTxStage, StateStore as CoreStateStore, TipEvent,
     TipSubscription as CoreTipSubscription, *,
 };
 
@@ -22,6 +22,8 @@ pub struct Config {
     pub genesis: Genesis,
     /// Cardano chain config (stop_epoch, track, etc).
     pub chain: CardanoConfig,
+    /// Fjall state store configuration.
+    pub fjall_config: FjallStateConfig,
 }
 
 // ---------------------------------------------------------------------------
@@ -162,14 +164,12 @@ pub struct LedgerHarness {
 
 impl LedgerHarness {
     pub fn new(config: Config) -> Result<Self, Box<dyn std::error::Error>> {
-        // 1. Open fjall StateStore from provided dir
-        let fjall_config = dolos_core::config::FjallStateConfig::default();
-        let state = dolos_fjall::StateStore::open(&config.state_dir, &fjall_config)?;
+        // 1. Open fjall StateStore from provided dir with custom config
+        let state = dolos_fjall::StateStore::open(&config.state_dir, &config.fjall_config)?;
 
         // 3. Initialize chain logic
         let genesis = Arc::new(config.genesis);
-        let chain =
-            CardanoLogic::initialize::<HarnessDomain>(config.chain, &state, &genesis)?;
+        let chain = CardanoLogic::initialize::<HarnessDomain>(config.chain, &state, &genesis)?;
 
         // 4. Assemble domain
         let domain = HarnessDomain {
@@ -194,7 +194,11 @@ impl LedgerHarness {
 
     /// Process blocks from the immutable DB, calling `on_work` after each work
     /// unit is executed. Uses the import lifecycle (skips WAL, no tip events).
-    pub fn run<F>(&self, chunk_size: usize, mut on_work: F) -> Result<(), Box<dyn std::error::Error>>
+    pub fn run<F>(
+        &self,
+        chunk_size: usize,
+        mut on_work: F,
+    ) -> Result<(), Box<dyn std::error::Error>>
     where
         F: FnMut(&HarnessDomain, &CardanoWorkUnit),
     {
@@ -241,10 +245,7 @@ impl LedgerHarness {
         Ok(())
     }
 
-    fn drain_with_callback<F>(
-        &self,
-        on_work: &mut F,
-    ) -> Result<bool, Box<dyn std::error::Error>>
+    fn drain_with_callback<F>(&self, on_work: &mut F) -> Result<bool, Box<dyn std::error::Error>>
     where
         F: FnMut(&HarnessDomain, &CardanoWorkUnit),
     {

@@ -2,6 +2,7 @@ use std::{collections::HashMap, marker::PhantomData};
 
 use dolos_core::ChainError;
 use pallas::ledger::primitives::StakeCredential;
+use rayon::prelude::*;
 use tracing::debug;
 
 use crate::{
@@ -81,8 +82,8 @@ impl PreAllegraReward {
     pub fn merge(self, other: Self) -> Self {
         // Leader rewards take priority over member rewards
         match (self.as_leader, other.as_leader) {
-            (true, false) => self,   // self is leader, wins
-            (false, true) => other,  // other is leader, wins
+            (true, false) => self,  // self is leader, wins
+            (false, true) => other, // other is leader, wins
             _ => {
                 // Same type (both leader or both member): keep smaller pool ID
                 if self.pool <= other.pool {
@@ -419,7 +420,7 @@ impl<C: RewardsContext> RewardMap<C> {
     }
 }
 
-pub trait RewardsContext {
+pub trait RewardsContext: Sync {
     fn incentives(&self) -> &EpochIncentives;
     fn pots(&self) -> &Pots;
 
@@ -448,19 +449,70 @@ pub trait RewardsContext {
     }
 }
 
+/// Chunk size for parallel delegator processing.
+const DELEGATOR_CHUNK_SIZE: usize = 25;
+
+/// Compute delegator rewards for a chunk of delegators.
+/// This is a pure function that can be executed in parallel.
+fn compute_delegator_chunk<C: RewardsContext>(
+    ctx: &C,
+    pool: PoolHash,
+    total_pool_reward: u64,
+    pool_stake: u64,
+    circulating_supply: u64,
+    pool_cost: u64,
+    pool_margin: formulas::Ratio,
+    owners: &[StakeCredential],
+    babbage_or_later: bool,
+    chunk: &[StakeCredential],
+) -> Vec<(StakeCredential, u64)> {
+    chunk
+        .iter()
+        .filter_map(|delegator| {
+            // Skip owners - they already get paid via operator share
+            if owners.contains(delegator) {
+                return None;
+            }
+
+            // Member rewards are only computed if:
+            // 1. Protocol >= 7 (Babbage hardfork removes prefilter), OR
+            // 2. The delegator account is registered
+            let delegator_registered = ctx.is_account_registered(delegator);
+            if !babbage_or_later && !delegator_registered {
+                return None;
+            }
+
+            let delegator_stake = ctx.account_stake(&pool, delegator);
+
+            let delegator_reward = formulas::delegator_reward(
+                total_pool_reward,
+                delegator_stake,
+                pool_stake,
+                circulating_supply,
+                pool_cost,
+                pool_margin.clone(),
+            );
+
+            Some((delegator.clone(), delegator_reward))
+        })
+        .collect()
+}
+
 pub fn define_rewards<C: RewardsContext>(ctx: &C) -> Result<RewardMap<C>, ChainError> {
     let mut map = RewardMap::<C>::new(ctx.incentives().clone());
+
+    // Sequential pool iteration with parallel delegator processing
     for pool in ctx.iter_all_pools() {
         let pool_params = ctx.pool_params(pool);
 
         let operator_account = pallas_extras::parse_reward_account(&pool_params.reward_account)
             .expect("invalid pool reward account");
 
-        let owners = pool_params
+        let owners: Vec<_> = pool_params
             .pool_owners
             .iter()
             .map(|owner| pallas_extras::keyhash_to_stake_cred(*owner))
-            .collect::<Vec<_>>();
+            .collect();
 
         let live_pledge = ctx.live_pledge(pool, &owners);
         let circulating_supply = ctx.pots().circulating();
@@ -471,8 +523,6 @@ pub fn define_rewards<C: RewardsContext>(ctx: &C) -> Result<RewardMap<C>, ChainE
         let pool_blocks = ctx.pool_blocks(pool);
 
         // Pools that made no blocks this epoch get no rewards.
-        // This matches the Haskell ledger behavior in mkPoolRewardInfo where
-        // pools not in BlocksMade return Left (for ranking only, no rewards).
         if pool_blocks == 0 {
             continue;
         }
@@ -518,11 +568,9 @@ pub fn define_rewards<C: RewardsContext>(ctx: &C) -> Result<RewardMap<C>, ChainE
             "computed pool rewards"
         );
 
-
         // Leader rewards are only computed if:
         // 1. Protocol >= 7 (Babbage hardfork removes prefilter), OR
         // 2. The operator's reward account is registered
-        // This matches the Haskell ledger's hardforkBabbageForgoRewardPrefilter check.
         let protocol_major = ctx.pparams().protocol_major().unwrap_or(0);
         let babbage_or_later = protocol_major >= 7;
         let is_operator_registered = ctx.is_account_registered(&operator_account);
@@ -531,36 +579,33 @@ pub fn define_rewards<C: RewardsContext>(ctx: &C) -> Result<RewardMap<C>, ChainE
             map.include(ctx, &operator_account, operator_share, pool, true);
         }
 
-        for delegator in ctx.pool_delegators(pool) {
-            if owners.contains(&delegator) {
-                // we skip giving out rewards to owners since they already get paid via the
-                // operator share
-                continue;
+        // Collect delegators and process in parallel chunks
+        let delegators: Vec<_> = ctx.pool_delegators(pool).collect();
+        let pool_margin = pallas_ratio!(pool_params.margin);
 
-                // TODO: make sure that the above statement matches the specs
-            }
+        // Parallel processing of delegator chunks
+        let delegator_rewards: Vec<_> = delegators
+            .par_chunks(DELEGATOR_CHUNK_SIZE)
+            .map(|chunk| {
+                compute_delegator_chunk(
+                    ctx,
+                    pool,
+                    total_pool_reward,
+                    pool_stake,
+                    circulating_supply,
+                    pool_params.cost,
+                    pool_margin.clone(),
+                    &owners,
+                    babbage_or_later,
+                    chunk,
+                )
+            })
+            .flatten()
+            .collect();
 
-            // Member rewards are only computed if:
-            // 1. Protocol >= 7 (Babbage hardfork removes prefilter), OR
-            // 2. The delegator account is registered
-            // This matches the Haskell ledger's prefilter in rewardOnePoolMember.
-            let delegator_registered = ctx.is_account_registered(&delegator);
-            if !babbage_or_later && !delegator_registered {
-                continue;
-            }
-
-            let delegator_stake = ctx.account_stake(&pool, &delegator);
-
-            let delegator_reward = formulas::delegator_reward(
-                total_pool_reward,
-                delegator_stake,
-                pool_stake,
-                circulating_supply,
-                pool_params.cost,
-                pallas_ratio!(pool_params.margin),
-            );
-
-            map.include(ctx, &delegator, delegator_reward, pool, false);
+        // Sequential merge of results
+        for (delegator, reward) in delegator_rewards {
+            map.include(ctx, &delegator, reward, pool, false);
         }
     }
 

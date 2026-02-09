@@ -137,8 +137,8 @@ pub fn extract_row_from_csv(csv_content: &str, key_value: &str, path: &Path) -> 
 
     let headers = rdr.headers().context("reading headers")?.clone();
 
-    let mut wtr = csv::Writer::from_path(path)
-        .with_context(|| format!("creating {}", path.display()))?;
+    let mut wtr =
+        csv::Writer::from_path(path).with_context(|| format!("creating {}", path.display()))?;
 
     wtr.write_record(headers.iter())?;
 
