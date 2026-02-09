@@ -10,7 +10,7 @@ const CRC8_ALGO: Crc<u8> = Crc::<u8>::new(&CRC_8_SMBUS);
 const CIP25_REQUIRED_KEYS: &[&str] = &["name", "image"];
 const CIP25_STRING_KEYS: &[&str] = &["name", "mediaType"];
 const CIP25_STRING_OR_STRING_ARRAY_KEYS: &[&str] = &["image", "description"];
-const CIP25_FILES_REQUIRED_KEYS: &[&str] = &["mediaType", "src"];
+const CIP25_FILES_REQUIRED_KEYS: &[&str] = &["name", "mediaType", "src"];
 const CIP25_FILES_STRING_KEYS: &[&str] = &["name", "mediaType"];
 const CIP25_FILES_STRING_OR_STRING_ARRAY_KEYS: &[&str] = &["src"];
 
