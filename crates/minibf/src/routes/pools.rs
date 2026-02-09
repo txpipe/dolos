@@ -152,7 +152,7 @@ where
             return Err(StatusCode::INTERNAL_SERVER_ERROR.into());
         };
 
-        if epoch <= 0 {
+        if epoch == 0 {
             return Err(StatusCode::BAD_REQUEST.into());
         }
 
@@ -354,11 +354,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blockfrost_openapi::models::{
-        pool_delegators_inner::PoolDelegatorsInner,
-        pool_list_extended_inner::PoolListExtendedInner,
-    };
     use crate::test_support::{TestApp, TestFault};
+    use blockfrost_openapi::models::{
+        pool_delegators_inner::PoolDelegatorsInner, pool_list_extended_inner::PoolListExtendedInner,
+    };
     use dolos_testing::synthetic::SyntheticBlockConfig;
 
     fn invalid_pool_id() -> &'static str {
