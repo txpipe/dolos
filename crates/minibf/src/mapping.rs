@@ -143,6 +143,7 @@ pub struct PoolOffchainMetadata {
 pub async fn pool_offchain_metadata(url: &str) -> Option<PoolOffchainMetadata> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
+        .redirect(reqwest::redirect::Policy::limited(3))
         .user_agent("Dolos MiniBF")
         .build()
         .ok()?;
