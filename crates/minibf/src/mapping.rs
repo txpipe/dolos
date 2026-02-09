@@ -993,7 +993,7 @@ impl IntoModel<TxContent> for TxModelBuilder<'_> {
             index: try_into_or_500!(order),
             output_amount: list_assets(txouts.iter().map(|(_, x)| x)),
             fees: if tx.is_valid() {
-                tx.fee().unwrap_or_default().to_string()
+                tx.fee_or_compute().to_string()
             } else {
                 tx.total_collateral().unwrap_or_default().to_string()
             },

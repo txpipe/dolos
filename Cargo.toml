@@ -157,7 +157,7 @@ authors = ["TxPipe <hello@txpipe.io>"]
 
 [workspace.dependencies]
 # pallas = { git = "https://github.com/txpipe/pallas.git", rev = "4986428", features = ["hardano", "phase2"] }
-pallas = { version = "1.0.0-alpha.4", features = ["hardano", "phase2"] }
+pallas = { version = "1.0.0-alpha.4", features = ["hardano", "phase2", "unstable"] }
 # pallas = { path = "../pallas/pallas", features = ["hardano", "phase2"] }
 
 thiserror = "2.0.12"
