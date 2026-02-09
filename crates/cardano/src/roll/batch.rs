@@ -250,10 +250,9 @@ impl WorkBatch {
                 let to_apply = block.deltas.entities.get_mut(key);
 
                 if let Some(to_apply) = to_apply {
-                    // Sort deltas by priority to ensure correct ordering
-                    // (e.g., registration before MIR rewards)
-                    to_apply.sort_by_key(|d| d.priority());
-
+                    // Deltas are applied in their natural order from block traversal.
+                    // This matches the Haskell ledger which processes certificates
+                    // sequentially in the order they appear (no priority logic).
                     for delta in to_apply {
                         delta.apply(entity);
                     }
