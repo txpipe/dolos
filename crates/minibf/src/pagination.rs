@@ -165,12 +165,12 @@ impl TryFrom<PaginationParameters> for Pagination {
             None => Default::default(),
         };
 
-        let from = match value.from {
+        let from: Option<PaginationNumberAndIndex> = match value.from {
             Some(x) => Some(x.try_into()?),
             None => None,
         };
 
-        let to = match value.to {
+        let to: Option<PaginationNumberAndIndex> = match value.to {
             Some(x) => Some(x.try_into()?),
             None => None,
         };
