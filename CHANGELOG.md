@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.0-rc.9] - 2026-02-09
+
+### 🐛 Bug Fixes
+
+- *(minibf)* Add guard for inconsistent range params (#879)
+
+### 🔧 Continuous Integration
+
+- Enable automatic publishing to npm (#873)
+
+### 🧪 Testing
+
+- *(minibf)* Implement endpoint unit test full coverage via synthetic data (#877)
+- *(minibf)* Include pagination, range and order in unit tests (#878)
+- Relax constraints of smoke test to avoid flaky results (#880)
+
+### ⚙️ Miscellaneous Tasks
+
+- Remove toy-domain feature flag (#885)
+
 ## [1.0.0-rc.8] - 2026-02-07
 
 ### 🐛 Bug Fixes
@@ -25,6 +45,10 @@ All notable changes to this project will be documented in this file.
 ### ⚙️ Miscellaneous Tasks
 
 - *(minibf)* Make better use of from/to pagination filters (#870)
+
+### Release
+
+- V1.0.0-rc.8
 
 ## [1.0.0-rc.7] - 2026-02-04
 

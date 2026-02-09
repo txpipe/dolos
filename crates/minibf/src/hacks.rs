@@ -170,7 +170,9 @@ pub fn genesis_block_mainnet<D: Domain>(domain: &Facade<D>) -> Result<BlockConte
         op_cert: None,
         op_cert_counter: None,
         previous_block: None,
-        next_block: Some("89d9b5a5b8ddc8d7e5a6795e9774d97faf1efea59b2caf7eaf9f8c5b32059df4".to_string()),
+        next_block: Some(
+            "89d9b5a5b8ddc8d7e5a6795e9774d97faf1efea59b2caf7eaf9f8c5b32059df4".to_string(),
+        ),
         confirmations,
     })
 }

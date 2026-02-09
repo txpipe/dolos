@@ -282,18 +282,19 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{TestApp, TestFault};
     use blockfrost_openapi::models::{
         tx_content::TxContent, tx_content_cbor::TxContentCbor,
         tx_content_delegations_inner::TxContentDelegationsInner,
         tx_content_metadata_cbor_inner::TxContentMetadataCborInner,
-        tx_content_metadata_inner::TxContentMetadataInner, tx_content_mirs_inner::TxContentMirsInner,
+        tx_content_metadata_inner::TxContentMetadataInner,
+        tx_content_mirs_inner::TxContentMirsInner,
         tx_content_pool_certs_inner::TxContentPoolCertsInner,
         tx_content_pool_retires_inner::TxContentPoolRetiresInner,
         tx_content_redeemers_inner::TxContentRedeemersInner,
         tx_content_stake_addr_inner::TxContentStakeAddrInner, tx_content_utxo::TxContentUtxo,
         tx_content_withdrawals_inner::TxContentWithdrawalsInner,
     };
-    use crate::test_support::{TestApp, TestFault};
 
     fn missing_hash() -> &'static str {
         "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
@@ -326,8 +327,7 @@ mod tests {
             "unexpected status {status} with body: {}",
             String::from_utf8_lossy(&bytes)
         );
-        let parsed: TxContent =
-            serde_json::from_slice(&bytes).expect("failed to parse tx content");
+        let parsed: TxContent = serde_json::from_slice(&bytes).expect("failed to parse tx content");
         assert_eq!(parsed.hash, tx_hash);
         assert!(!parsed.block.is_empty());
         assert!(parsed.block_height > 0);
@@ -549,7 +549,6 @@ mod tests {
         let path = format!("/txs/{tx_hash}/redeemers");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
     }
-
 
     #[tokio::test]
     async fn txs_by_hash_delegations_happy_path() {

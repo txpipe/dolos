@@ -724,8 +724,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blockfrost_openapi::models::asset::Asset;
     use crate::test_support::{TestApp, TestFault};
+    use blockfrost_openapi::models::asset::Asset;
 
     fn invalid_asset() -> &'static str {
         "not-hex-asset"
