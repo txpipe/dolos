@@ -35,7 +35,7 @@ tx3-resolver = "0.14.2"
 
 
 [dev-dependencies]
-dolos-testing = { path = "../testing", features = ["toy-domain"] }
+dolos-testing = { path = "../testing" }
 
 # tx3-sdk = "0.13.0"
 # tx3-sdk = { path = "../../../../rust-sdk" }

@@ -507,11 +507,7 @@ mod tests {
     async fn addresses_transactions_slot_constrained() {
         let app = TestApp::new();
         let address = app.vectors().address.as_str();
-        let block = app
-            .vectors()
-            .blocks
-            .first()
-            .expect("missing block vectors");
+        let block = app.vectors().blocks.first().expect("missing block vectors");
         let path = format!(
             "/addresses/{address}/transactions?from={}&to={}",
             block.block_number, block.block_number
@@ -568,10 +564,7 @@ mod tests {
         if asc.is_empty() {
             return;
         }
-        let asc_pos: Vec<_> = asc
-            .iter()
-            .map(|x| (x.block_height, x.tx_index))
-            .collect();
+        let asc_pos: Vec<_> = asc.iter().map(|x| (x.block_height, x.tx_index)).collect();
         assert!(asc_pos.windows(2).all(|w| w[0] <= w[1]));
     }
 
@@ -588,10 +581,7 @@ mod tests {
         if desc.is_empty() {
             return;
         }
-        let desc_pos: Vec<_> = desc
-            .iter()
-            .map(|x| (x.block_height, x.tx_index))
-            .collect();
+        let desc_pos: Vec<_> = desc.iter().map(|x| (x.block_height, x.tx_index)).collect();
         assert!(desc_pos.windows(2).all(|w| w[0] >= w[1]));
     }
 

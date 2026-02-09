@@ -159,12 +159,10 @@ impl FaultyArchiveStore {
 }
 
 impl ArchiveStore for FaultyArchiveStore {
-    type BlockIter<'a> =
-        <dolos_redb3::archive::ArchiveStore as ArchiveStore>::BlockIter<'a>;
+    type BlockIter<'a> = <dolos_redb3::archive::ArchiveStore as ArchiveStore>::BlockIter<'a>;
     type Writer = <dolos_redb3::archive::ArchiveStore as ArchiveStore>::Writer;
     type LogIter = <dolos_redb3::archive::ArchiveStore as ArchiveStore>::LogIter;
-    type EntityValueIter =
-        <dolos_redb3::archive::ArchiveStore as ArchiveStore>::EntityValueIter;
+    type EntityValueIter = <dolos_redb3::archive::ArchiveStore as ArchiveStore>::EntityValueIter;
 
     fn start_writer(&self) -> Result<Self::Writer, ArchiveError> {
         if self.should_fault() {
@@ -300,7 +298,11 @@ impl IndexStore for FaultyIndexStore {
         self.inner.cursor()
     }
 
-    fn utxos_by_tag(&self, dimension: TagDimension, key: &[u8]) -> Result<dolos_core::UtxoSet, IndexError> {
+    fn utxos_by_tag(
+        &self,
+        dimension: TagDimension,
+        key: &[u8],
+    ) -> Result<dolos_core::UtxoSet, IndexError> {
         if self.should_fault() {
             return Err(self.fault_err());
         }
@@ -370,7 +372,9 @@ impl WalStore for FaultyWalStore {
     type LogIterator<'a> =
         <dolos_redb3::wal::RedbWalStore<dolos_cardano::CardanoDelta> as WalStore>::LogIterator<'a>;
     type BlockIterator<'a> =
-        <dolos_redb3::wal::RedbWalStore<dolos_cardano::CardanoDelta> as WalStore>::BlockIterator<'a>;
+        <dolos_redb3::wal::RedbWalStore<dolos_cardano::CardanoDelta> as WalStore>::BlockIterator<
+            'a,
+        >;
 
     fn reset_to(&self, point: &ChainPoint) -> Result<(), WalError> {
         if self.should_fault() {
@@ -435,9 +439,7 @@ impl WalStore for FaultyWalStore {
         if self.should_fault() {
             return Err(self.fault_err());
         }
-        self.inner
-            .append_entries(&logs)
-            .map_err(WalError::from)
+        self.inner.append_entries(&logs).map_err(WalError::from)
     }
 
     fn remove_entries(&mut self, after: &ChainPoint) -> Result<(), WalError> {

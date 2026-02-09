@@ -47,9 +47,7 @@ impl dolos_core::MempoolStore for Mempool {
 
     fn receive(&self, tx: MempoolTx) -> Result<(), MempoolError> {
         let mut pending = self.pending.write().map_err(|_| {
-            MempoolError::Internal(Box::new(std::io::Error::other(
-                "mempool lock poisoned",
-            )))
+            MempoolError::Internal(Box::new(std::io::Error::other("mempool lock poisoned")))
         })?;
         pending.push(tx);
         Ok(())
