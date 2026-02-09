@@ -5,6 +5,7 @@ use std::{
 
 use dolos_core::{
     BlockSlot, ChainError, EntityKey, EntityValue, Namespace, NamespaceType, NsKey, StateSchema,
+    TxOrder,
 };
 use pallas::{
     codec::minicbor::{self, Decode, Encode},
@@ -43,7 +44,7 @@ use crate::{
             AssignMirRewards, ControlledAmountDec, ControlledAmountInc, StakeDelegation,
             StakeDeregistration, StakeRegistration, VoteDelegation, WithdrawalInc,
         },
-        assets::MintStatsUpdate,
+        assets::{MetadataTxUpdate, MintStatsUpdate},
         dreps::{DRepActivity, DRepRegistration, DRepUnRegistration},
         epochs::{EpochStatsUpdate, NoncesUpdate},
         pools::{MintedBlocksInc, PoolDeRegistration, PoolRegistration},
@@ -374,18 +375,37 @@ macro_rules! entity_boilerplate {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Decode, Encode, Default)]
-pub struct RewardLog {
+pub struct LeaderRewardLog {
     #[n(0)]
     pub amount: u64,
 
     #[n(1)]
     pub pool_id: Vec<u8>,
-
-    #[n(2)]
-    pub as_leader: bool,
 }
 
-entity_boilerplate!(RewardLog, "rewards");
+entity_boilerplate!(LeaderRewardLog, "leader-rewards");
+
+#[derive(Debug, Clone, PartialEq, Eq, Decode, Encode, Default)]
+pub struct MemberRewardLog {
+    #[n(0)]
+    pub amount: u64,
+
+    #[n(1)]
+    pub pool_id: Vec<u8>,
+}
+
+entity_boilerplate!(MemberRewardLog, "member-rewards");
+
+#[derive(Debug, Clone, PartialEq, Eq, Decode, Encode, Default)]
+pub struct PoolDepositRefundLog {
+    #[n(0)]
+    pub amount: u64,
+
+    #[n(1)]
+    pub pool_id: Vec<u8>,
+}
+
+entity_boilerplate!(PoolDepositRefundLog, "pool-deposit-refunds");
 
 #[derive(Debug, Clone, PartialEq, Decode, Encode, Default)]
 pub struct StakeLog {
@@ -498,7 +518,14 @@ pub enum PoolDelegation {
     NotDelegated,
 }
 
-pub type DRepDelegation = Option<DRep>;
+#[derive(Debug, Clone, PartialEq, Eq, Decode, Encode, Serialize, Deserialize)]
+pub enum DRepDelegation {
+    #[n(0)]
+    Delegated(#[n(0)] DRep),
+
+    #[n(1)]
+    NotDelegated,
+}
 
 impl TransitionDefault for PoolDelegation {
     fn next_value(current: Option<&Self>) -> Option<Self> {
@@ -527,7 +554,7 @@ pub struct AccountState {
     pub drep: EpochValue<DRepDelegation>,
 
     #[n(4)]
-    pub vote_delegated_at: Option<BlockSlot>,
+    pub vote_delegated_at: Option<(BlockSlot, TxOrder)>,
 
     #[n(5)]
     pub deregistered_at: Option<u64>,
@@ -587,7 +614,10 @@ impl AccountState {
     }
 
     pub fn delegated_drep_at(&self, epoch: Epoch) -> Option<&DRep> {
-        self.drep.snapshot_at(epoch).and_then(|x| x.as_ref())
+        self.drep.snapshot_at(epoch).and_then(|x| match x {
+            DRepDelegation::Delegated(drep) => Some(drep),
+            _ => None,
+        })
     }
 }
 
@@ -604,6 +634,10 @@ pub struct AssetState {
 
     #[n(3)]
     pub mint_tx_count: u64,
+
+    #[n(4)]
+    #[cbor(default)]
+    pub metadata_tx: Option<Hash<32>>,
 }
 
 entity_boilerplate!(AssetState, "assets");
@@ -1577,7 +1611,7 @@ pub fn drep_to_entity_key(value: &DRep) -> EntityKey {
 #[derive(Debug, Encode, Decode, Clone)]
 pub struct DRepState {
     #[n(0)]
-    pub initial_slot: Option<u64>,
+    pub registered_at: Option<(BlockSlot, TxOrder)>,
 
     #[n(1)]
     pub voting_power: u64,
@@ -1586,7 +1620,7 @@ pub struct DRepState {
     pub last_active_slot: Option<u64>,
 
     #[n(3)]
-    pub unregistered_at: Option<BlockSlot>,
+    pub unregistered_at: Option<(BlockSlot, TxOrder)>,
 
     #[n(4)]
     pub expired: bool,
@@ -1601,7 +1635,7 @@ pub struct DRepState {
 impl DRepState {
     pub fn new(identifier: DRep) -> Self {
         Self {
-            initial_slot: None,
+            registered_at: None,
             voting_power: 0,
             last_active_slot: None,
             unregistered_at: None,
@@ -1768,7 +1802,9 @@ pub enum CardanoEntity {
     EpochState(Box<EpochState>),
     DRepState(Box<DRepState>),
     ProposalState(Box<ProposalState>),
-    RewardLog(Box<RewardLog>),
+    LeaderRewardLog(Box<LeaderRewardLog>),
+    MemberRewardLog(Box<MemberRewardLog>),
+    PoolDepositRefundLog(Box<PoolDepositRefundLog>),
     StakeLog(Box<StakeLog>),
     DatumState(Box<DatumState>),
     PendingRewardState(Box<PendingRewardState>),
@@ -1800,7 +1836,9 @@ variant_boilerplate!(PoolState);
 variant_boilerplate!(EpochState);
 variant_boilerplate!(DRepState);
 variant_boilerplate!(ProposalState);
-variant_boilerplate!(RewardLog);
+variant_boilerplate!(LeaderRewardLog);
+variant_boilerplate!(MemberRewardLog);
+variant_boilerplate!(PoolDepositRefundLog);
 variant_boilerplate!(StakeLog);
 variant_boilerplate!(DatumState);
 variant_boilerplate!(PendingRewardState);
@@ -1815,7 +1853,11 @@ impl dolos_core::Entity for CardanoEntity {
             EpochState::NS => EpochState::decode_entity(ns, value).map(Into::into),
             DRepState::NS => DRepState::decode_entity(ns, value).map(Into::into),
             ProposalState::NS => ProposalState::decode_entity(ns, value).map(Into::into),
-            RewardLog::NS => RewardLog::decode_entity(ns, value).map(Into::into),
+            LeaderRewardLog::NS => LeaderRewardLog::decode_entity(ns, value).map(Into::into),
+            MemberRewardLog::NS => MemberRewardLog::decode_entity(ns, value).map(Into::into),
+            PoolDepositRefundLog::NS => {
+                PoolDepositRefundLog::decode_entity(ns, value).map(Into::into)
+            }
             StakeLog::NS => StakeLog::decode_entity(ns, value).map(Into::into),
             DatumState::NS => DatumState::decode_entity(ns, value).map(Into::into),
             PendingRewardState::NS => PendingRewardState::decode_entity(ns, value).map(Into::into),
@@ -1853,10 +1895,19 @@ impl dolos_core::Entity for CardanoEntity {
                 let (ns, enc) = ProposalState::encode_entity(x);
                 (ns, enc)
             }
-            Self::RewardLog(x) => {
-                let (ns, enc) = RewardLog::encode_entity(x);
+            Self::LeaderRewardLog(x) => {
+                let (ns, enc) = LeaderRewardLog::encode_entity(x);
                 (ns, enc)
             }
+            Self::MemberRewardLog(x) => {
+                let (ns, enc) = MemberRewardLog::encode_entity(x);
+                (ns, enc)
+            }
+            Self::PoolDepositRefundLog(x) => {
+                let (ns, enc) = PoolDepositRefundLog::encode_entity(x);
+                (ns, enc)
+            }
+
             Self::StakeLog(x) => {
                 let (ns, enc) = StakeLog::encode_entity(x);
                 (ns, enc)
@@ -1882,7 +1933,9 @@ pub fn build_schema() -> StateSchema {
     schema.insert(EpochState::NS, NamespaceType::KeyValue);
     schema.insert(DRepState::NS, NamespaceType::KeyValue);
     schema.insert(ProposalState::NS, NamespaceType::KeyValue);
-    schema.insert(RewardLog::NS, NamespaceType::KeyValue);
+    schema.insert(LeaderRewardLog::NS, NamespaceType::KeyValue);
+    schema.insert(MemberRewardLog::NS, NamespaceType::KeyValue);
+    schema.insert(PoolDepositRefundLog::NS, NamespaceType::KeyValue);
     schema.insert(StakeLog::NS, NamespaceType::KeyValue);
     schema.insert(DatumState::NS, NamespaceType::KeyValue);
     schema.insert(PendingRewardState::NS, NamespaceType::KeyValue);
@@ -1900,6 +1953,7 @@ pub enum CardanoDelta {
     PoolDeRegistration(Box<PoolDeRegistration>),
     MintedBlocksInc(Box<MintedBlocksInc>),
     MintStatsUpdate(Box<MintStatsUpdate>),
+    MetadataTxUpdate(Box<MetadataTxUpdate>),
     EpochStatsUpdate(Box<EpochStatsUpdate>),
     DRepRegistration(Box<DRepRegistration>),
     DRepUnRegistration(Box<DRepUnRegistration>),
@@ -1973,6 +2027,7 @@ delta_from!(PoolRegistration);
 delta_from!(PoolDeRegistration);
 delta_from!(MintedBlocksInc);
 delta_from!(MintStatsUpdate);
+delta_from!(MetadataTxUpdate);
 delta_from!(EpochStatsUpdate);
 delta_from!(DRepRegistration);
 delta_from!(DRepUnRegistration);
@@ -2027,6 +2082,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::PoolDeRegistration(x) => x.key(),
             Self::MintedBlocksInc(x) => x.key(),
             Self::MintStatsUpdate(x) => x.key(),
+            Self::MetadataTxUpdate(x) => x.key(),
             Self::EpochStatsUpdate(x) => x.key(),
             Self::DRepRegistration(x) => x.key(),
             Self::DRepActivity(x) => x.key(),
@@ -2069,6 +2125,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::PoolDeRegistration(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::MintedBlocksInc(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::MintStatsUpdate(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::MetadataTxUpdate(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::EpochStatsUpdate(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::DRepRegistration(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::DRepUnRegistration(x) => Self::downcast_apply(x.as_mut(), entity),
@@ -2111,6 +2168,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::PoolDeRegistration(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::MintedBlocksInc(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::MintStatsUpdate(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::MetadataTxUpdate(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::EpochStatsUpdate(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::DRepRegistration(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::DRepUnRegistration(x) => Self::downcast_undo(x.as_ref(), entity),

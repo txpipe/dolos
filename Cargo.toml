@@ -33,6 +33,8 @@ tower.workspace = true
 tracing.workspace = true
 trait-variant.workspace = true
 xxhash-rust.workspace = true
+axum = { version = "0.8.4", optional = true }
+http-body-util = { version = "0.1.2", optional = true }
 
 dolos-core = { path = "crates/core" }
 dolos-cardano = { path = "crates/cardano", features = ["include-genesis"] }
@@ -116,6 +118,8 @@ debug = ["console-subscriber", "tokio/tracing"]
 grpc = ["tonic", "tonic-web", "tonic-reflection", "tower-http/cors"]
 minibf = [
     "dolos-minibf",
+    "axum",
+    "http-body-util",
     "tower-http/cors",
     "tower-http/trace",
     "tower-http/normalize-path",
@@ -142,7 +146,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.0.0-rc.6"
+version = "1.0.0-rc.8"
 edition = "2021"
 repository = "https://github.com/txpipe/dolos"
 homepage = "https://github.com/txpipe/dolos"

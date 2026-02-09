@@ -23,7 +23,6 @@ Testing utilities and mock implementations for the Dolos Cardano data node.
 ### Utilities
 - **Test Harness**: Common setup/teardown procedures
 - **Assertions**: Dolos-specific test assertions
-- **Fixtures**: Reusable test data fixtures
 - **Properties**: Property-based testing support
 
 ## Dependencies

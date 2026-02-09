@@ -15,4 +15,4 @@ mod query;
 pub use delta::{index_delta_from_utxo_delta, CardanoIndexDeltaBuilder};
 pub use dimensions::{archive as archive_dimensions, utxo as utxo_dimensions};
 pub use ext::CardanoIndexExt;
-pub use query::AsyncCardanoQueryExt;
+pub use query::{AsyncCardanoQueryExt, SlotOrder};

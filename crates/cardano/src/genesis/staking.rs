@@ -4,8 +4,8 @@ use pallas::ledger::addresses::{Address, Network, StakeAddress, StakePayload};
 use pallas::ledger::primitives::StakeCredential;
 
 use crate::{
-    pallas_extras, AccountState, EpochValue, PoolDelegation, PoolHash, PoolParams, PoolSnapshot,
-    PoolState, Stake,
+    pallas_extras, AccountState, DRepDelegation, EpochValue, PoolDelegation, PoolHash, PoolParams,
+    PoolSnapshot, PoolState, Stake,
 };
 
 use pallas::crypto::hash::Hash;
@@ -101,7 +101,7 @@ fn parse_delegation(account: &str, pool: &str, genesis: &Genesis) -> AccountStat
     AccountState {
         credential,
         pool: EpochValue::with_live(0, PoolDelegation::Pool(pool)),
-        drep: EpochValue::with_live(0, None),
+        drep: EpochValue::with_live(0, DRepDelegation::NotDelegated),
         registered_at: Some(0),
         vote_delegated_at: None,
         deregistered_at: None,

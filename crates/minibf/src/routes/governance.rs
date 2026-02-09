@@ -78,8 +78,8 @@ impl<'a> DrepModelBuilder<'a> {
 
         self.state
             .as_ref()?
-            .initial_slot
-            .map(|x| self.chain.slot_epoch(x).0)
+            .registered_at
+            .map(|x| self.chain.slot_epoch(x.0).0)
     }
 
     fn last_active_epoch(&self) -> Option<Epoch> {
@@ -120,7 +120,7 @@ impl<'a> DrepModelBuilder<'a> {
             return false;
         };
 
-        match (state.initial_slot, state.unregistered_at) {
+        match (state.registered_at, state.unregistered_at) {
             (Some(registered), Some(unregistered)) => unregistered > registered,
             (Some(_), None) => false,
             _ => false,
@@ -179,8 +179,7 @@ where
     } else {
         Some(
             domain
-                .read_cardano_entity::<DRepState>(drep_bytes.clone())
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                .read_cardano_entity::<DRepState>(drep_bytes.clone())?
                 .ok_or(StatusCode::NOT_FOUND)?,
         )
     };
@@ -208,4 +207,62 @@ where
     };
 
     model.into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{TestApp, TestFault};
+    use bech32::{Bech32, Hrp};
+
+    fn invalid_drep() -> &'static str {
+        "not-a-drep"
+    }
+
+    fn missing_drep() -> String {
+        let mut payload = Vec::with_capacity(29);
+        payload.push(0b00100010);
+        payload.extend_from_slice(&[8u8; 28]);
+        let hrp = Hrp::parse_unchecked("drep");
+        bech32::encode::<Bech32>(hrp, &payload).expect("failed to encode missing drep")
+    }
+
+    async fn assert_status(app: &TestApp, path: &str, expected: StatusCode) {
+        let (status, _body) = app.get_bytes(path).await;
+        assert_eq!(status, expected);
+    }
+
+    #[tokio::test]
+    async fn governance_drep_happy_path() {
+        let app = TestApp::new();
+        let drep = &app.vectors().drep_id;
+        let path = format!("/governance/dreps/{drep}");
+        let (status, body) = app.get_bytes(&path).await;
+        assert_eq!(status, StatusCode::OK);
+        let _model: blockfrost_openapi::models::drep::Drep =
+            serde_json::from_slice(&body).expect("failed to parse drep model");
+    }
+
+    #[tokio::test]
+    async fn governance_drep_bad_request() {
+        let app = TestApp::new();
+        let path = format!("/governance/dreps/{}", invalid_drep());
+        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn governance_drep_not_found() {
+        let app = TestApp::new();
+        let missing = missing_drep();
+        let path = format!("/governance/dreps/{missing}");
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+    }
+
+    #[tokio::test]
+    async fn governance_drep_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
+        let drep = &app.vectors().drep_id;
+        let path = format!("/governance/dreps/{drep}");
+        assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
 }

@@ -2,6 +2,63 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.0-rc.8] - 2026-02-07
+
+### 🐛 Bug Fixes
+
+- *(minibf)* Support parsing of byron addresses when required (#863)
+- *(minibf)* Add memory cache for heavy network query (#865)
+- *(minibf)* Improve active epoch logic on pool_updates mapping (#862)
+- *(minibf)* Add mainnet genesis block (#867)
+- *(minibf)* Parse complex onchain metadata for assets (#860)
+- *(minibf)* Track drep drop on account when retires (#868)
+- *(minibf)* Skip invalid plutus-v1 proposal preview (#871)
+- *(cardano)* Separate reward log types into different namespaces (#875)
+
+### 🚜 Refactor
+
+- Introduce block streaming query extensions (#864)
+- *(minibf)* Improve mem of first-by-tag type of queries (#866)
+- *(minibf)* Improve memory usage on utxo queries (#869)
+- *(minibf)* Relax max pagination limit (#876)
+
+### ⚙️ Miscellaneous Tasks
+
+- *(minibf)* Make better use of from/to pagination filters (#870)
+
+## [1.0.0-rc.7] - 2026-02-04
+
+### 🚀 Features
+
+- *(o7s)* Implement many missing LocalState queries to support cardano cli (#858)
+
+### 🐛 Bug Fixes
+
+- Introduce async query facade to avoid starving the runtime
+- *(minibf)* Improve conformance tests coverage (#847)
+- *(cardano)* Take into account drained rewards in epoch state (#855)
+- *(cardano)* Use mark protocol version for babbage pot calc (#857)
+- *(cardano)* Bootstrap nonce in genesis if chain starts on Shelley
+- Improve conformance tests coverage (#853)
+- *(minibf)* Format special dreps on accounts (#861)
+
+### 🧪 Testing
+
+- Add comprehensive flow for cardano integration tests (#852)
+- Fix nonce ground-truth checks
+- Revisit cardano integration tests to include stake, delegation and rewards (#854)
+- *(cardano)* Remove many false positives from ground-truth checks
+
+### ⚙️ Miscellaneous Tasks
+
+- Fix clippy warnings across the board (#851)
+- Tidy up xtask for shared use (#856)
+- Update pallas v1.0.0-alpha.4 (#859)
+
+### Release
+
+- V1.0.0-rc.7
+
 ## [1.0.0-rc.6] - 2026-01-28
 
 ### 🚀 Features
@@ -60,6 +117,10 @@ All notable changes to this project will be documented in this file.
 
 - Fix lint warnings
 - Gitignore opencode files
+
+### Release
+
+- V1.0.0-rc.6
 
 ## [1.0.0-rc.5] - 2026-01-07
 

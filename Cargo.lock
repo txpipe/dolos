@@ -1191,11 +1191,12 @@ checksum = "fea41bba32d969b513997752735605054bc0dfa92b4c56bf1189f2e174be7a10"
 
 [[package]]
 name = "dolos"
-version = "1.0.0-rc.6"
+version = "1.0.0-rc.8"
 dependencies = [
  "anyhow",
  "async-stream",
  "async-trait",
+ "axum 0.8.4",
  "base64 0.22.1",
  "bech32 0.11.1",
  "bincode",
@@ -1220,6 +1221,7 @@ dependencies = [
  "gasket",
  "hex",
  "http 1.3.1",
+ "http-body-util",
  "hyper 1.6.0",
  "indicatif",
  "inquire",
@@ -1258,12 +1260,15 @@ dependencies = [
 
 [[package]]
 name = "dolos-cardano"
-version = "1.0.0-rc.6"
+version = "1.0.0-rc.8"
 dependencies = [
+ "async-stream",
  "async-trait",
  "bech32 0.11.1",
  "chrono",
+ "crc",
  "dolos-core",
+ "futures-core",
  "hex",
  "itertools 0.14.0",
  "num-bigint",
@@ -1280,7 +1285,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-core"
-version = "1.0.0-rc.6"
+version = "1.0.0-rc.8"
 dependencies = [
  "futures-core",
  "hex",
@@ -1299,7 +1304,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-fjall"
-version = "1.0.0-rc.6"
+version = "1.0.0-rc.8"
 dependencies = [
  "bincode",
  "dolos-core",
@@ -1314,17 +1319,22 @@ dependencies = [
 
 [[package]]
 name = "dolos-minibf"
-version = "1.0.0-rc.6"
+version = "1.0.0-rc.8"
 dependencies = [
  "axum 0.8.4",
+ "base58",
  "bech32 0.11.1",
  "blockfrost-openapi",
  "chrono",
  "crc",
  "dolos-cardano",
  "dolos-core",
+ "dolos-testing",
  "futures",
+ "futures-core",
+ "futures-util",
  "hex",
+ "http-body-util",
  "itertools 0.14.0",
  "num-bigint",
  "num-rational",
@@ -1342,7 +1352,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-redb3"
-version = "1.0.0-rc.6"
+version = "1.0.0-rc.8"
 dependencies = [
  "bincode",
  "dolos-core",
@@ -1364,13 +1374,15 @@ dependencies = [
 
 [[package]]
 name = "dolos-testing"
-version = "1.0.0-rc.6"
+version = "1.0.0-rc.8"
 dependencies = [
+ "bech32 0.9.1",
  "dolos-cardano",
  "dolos-core",
  "dolos-redb3",
  "futures-core",
  "futures-util",
+ "hex",
  "pallas",
  "rand 0.9.1",
  "tokio",
@@ -1379,7 +1391,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-trp"
-version = "1.0.0-rc.6"
+version = "1.0.0-rc.8"
 dependencies = [
  "base64 0.22.1",
  "bincode",
