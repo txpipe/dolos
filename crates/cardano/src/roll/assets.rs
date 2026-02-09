@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use tracing::trace;
 
 use super::WorkDeltas;
+use crate::cip25::{cip25_metadata_for_tx, cip25_metadata_has_asset};
 use crate::cip68::{has_cip25_metadata, parse_cip67_label_from_asset_name};
 use crate::model::FixedNamespace as _;
 use crate::{model::AssetState, roll::BlockVisitor};
@@ -117,6 +118,11 @@ impl BlockVisitor for AssetStateVisitor {
     ) -> Result<(), ChainError> {
         let policy = mint.policy();
         let has_metadata = has_cip25_metadata(tx);
+        let cip25_metadata = if has_metadata {
+            cip25_metadata_for_tx(tx)
+        } else {
+            None
+        };
 
         for asset in mint.assets() {
             trace!(%policy, asset = %hex::encode(asset.name()), "detected mint");
@@ -132,12 +138,16 @@ impl BlockVisitor for AssetStateVisitor {
                 is_first_mint: None,
             });
 
-            if has_metadata && quantity > 0 {
-                deltas.add_for_entity(MetadataTxUpdate::new(
-                    *policy,
-                    asset.name().to_vec(),
-                    tx.hash(),
-                ));
+            if quantity > 0 {
+                if let Some(metadata) = cip25_metadata.as_ref() {
+                    if cip25_metadata_has_asset(metadata, policy, asset.name()) {
+                        deltas.add_for_entity(MetadataTxUpdate::new(
+                            *policy,
+                            asset.name().to_vec(),
+                            tx.hash(),
+                        ));
+                    }
+                }
             }
         }
 
