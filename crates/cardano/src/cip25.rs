@@ -1,5 +1,8 @@
 use std::collections::HashMap;
 
+use pallas::crypto::hash::Hash;
+use pallas::ledger::primitives::Metadatum;
+use pallas::ledger::traverse::MultiEraTx;
 use serde_json::Value as JsonValue;
 
 const CIP25_REQUIRED_KEYS: &[&str] = &["name", "image"];
@@ -8,6 +11,7 @@ const CIP25_STRING_OR_STRING_ARRAY_KEYS: &[&str] = &["image", "description"];
 const CIP25_FILES_REQUIRED_KEYS: &[&str] = &["name", "mediaType", "src"];
 const CIP25_FILES_STRING_KEYS: &[&str] = &["name", "mediaType"];
 const CIP25_FILES_STRING_OR_STRING_ARRAY_KEYS: &[&str] = &["src"];
+const CIP25_METADATA_LABEL: u64 = 721;
 
 #[derive(Debug, Clone, Copy)]
 pub enum Cip25MetadataVersion {
@@ -40,6 +44,68 @@ pub fn cip25_metadata_is_valid(
     }
 
     true
+}
+
+pub fn cip25_metadata_for_tx(tx: &MultiEraTx) -> Option<Metadatum> {
+    tx.metadata().find(CIP25_METADATA_LABEL).cloned()
+}
+
+pub fn cip25_metadata_has_asset(
+    metadata: &Metadatum,
+    policy: &Hash<28>,
+    asset_name: &[u8],
+) -> bool {
+    let Metadatum::Map(policies) = metadata else {
+        return false;
+    };
+
+    let policy_hex = hex::encode(policy.as_slice());
+    let asset_hex = hex::encode(asset_name);
+    let asset_utf8 = std::str::from_utf8(asset_name).ok();
+
+    let policy_entry = policies
+        .iter()
+        .find(|(key, _)| key_matches_policy(key, policy.as_slice(), &policy_hex));
+
+    let Some((_, policy_metadata)) = policy_entry else {
+        return false;
+    };
+
+    let Metadatum::Map(assets) = policy_metadata else {
+        return false;
+    };
+
+    assets
+        .iter()
+        .any(|(key, _)| key_matches_asset(key, asset_name, asset_utf8, &asset_hex))
+}
+
+fn key_matches_policy(key: &Metadatum, policy_bytes: &[u8], policy_hex: &str) -> bool {
+    match key {
+        Metadatum::Bytes(bytes) => bytes.as_slice() == policy_bytes,
+        Metadatum::Text(text) => text.eq_ignore_ascii_case(policy_hex),
+        _ => false,
+    }
+}
+
+fn key_matches_asset(
+    key: &Metadatum,
+    asset_bytes: &[u8],
+    asset_utf8: Option<&str>,
+    asset_hex: &str,
+) -> bool {
+    match key {
+        Metadatum::Bytes(bytes) => bytes.as_slice() == asset_bytes,
+        Metadatum::Text(text) => {
+            if let Some(asset_utf8) = asset_utf8 {
+                if text == asset_utf8 {
+                    return true;
+                }
+            }
+            text.eq_ignore_ascii_case(asset_hex)
+        }
+        _ => false,
+    }
 }
 
 fn cip25_required_keys_present(metadata: &HashMap<String, JsonValue>) -> bool {

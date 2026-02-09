@@ -353,7 +353,21 @@ impl AssetModelBuilder {
             }
         }
 
-        if let Some(EraCbor(era, cbor)) = &self.initial_tx {
+        let mut cip25_tx = self.initial_tx.clone();
+        if let Some(metadata_tx) = self.asset_state.metadata_tx {
+            if Some(metadata_tx) != self.asset_state.initial_tx {
+                let metadata_cbor = domain
+                    .query()
+                    .tx_cbor(metadata_tx.as_slice().to_vec())
+                    .await
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                if metadata_cbor.is_some() {
+                    cip25_tx = metadata_cbor;
+                }
+            }
+        }
+
+        if let Some(EraCbor(era, cbor)) = &cip25_tx {
             let tx = decode_era_tx(*era, cbor)?;
 
             if let Some((_, standard, ref_asset_bytes)) = &cip68_reference {
