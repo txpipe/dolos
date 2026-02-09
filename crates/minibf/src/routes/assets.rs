@@ -12,10 +12,8 @@ use blockfrost_openapi::models::{
     asset_transactions_inner::AssetTransactionsInner,
 };
 use dolos_cardano::{
-    cip68::{
-        cip25_metadata_is_valid, cip_68_reference_asset, encode_to_hex, parse_cip68_metadata_map,
-        Cip25MetadataVersion, Cip68TokenStandard,
-    },
+    cip25::{cip25_metadata_is_valid, Cip25MetadataVersion},
+    cip68::{cip_68_reference_asset, encode_to_hex, parse_cip68_metadata_map, Cip68TokenStandard},
     indexes::{AsyncCardanoQueryExt, CardanoIndexExt, SlotOrder},
     model::AssetState,
     ChainSummary,
