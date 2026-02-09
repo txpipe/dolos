@@ -33,5 +33,5 @@ futures-core.workspace = true
 futures-util.workspace = true
 
 [dev-dependencies]
-dolos-testing = { path = "../testing", features = ["toy-domain"] }
+dolos-testing = { path = "../testing" }
 http-body-util = "0.1.2"

@@ -18,6 +18,10 @@ All notable changes to this project will be documented in this file.
 - *(minibf)* Include pagination, range and order in unit tests (#878)
 - Relax constraints of smoke test to avoid flaky results (#880)
 
+### ⚙️ Miscellaneous Tasks
+
+- Remove toy-domain feature flag (#885)
+
 ## [1.0.0-rc.8] - 2026-02-07
 
 ### 🐛 Bug Fixes

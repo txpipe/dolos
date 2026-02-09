@@ -852,10 +852,7 @@ mod tests {
                 .expect("missing address in vectors")
         };
 
-        let asc_blocks: Vec<_> = asc
-            .iter()
-            .map(|x| address_bounds(&x.address).0)
-            .collect();
+        let asc_blocks: Vec<_> = asc.iter().map(|x| address_bounds(&x.address).0).collect();
 
         assert!(asc_blocks.windows(2).all(|w| w[0] <= w[1]));
     }
@@ -881,10 +878,7 @@ mod tests {
                 .expect("missing address in vectors")
         };
 
-        let desc_blocks: Vec<_> = desc
-            .iter()
-            .map(|x| address_bounds(&x.address).1)
-            .collect();
+        let desc_blocks: Vec<_> = desc.iter().map(|x| address_bounds(&x.address).1).collect();
 
         assert!(desc_blocks.windows(2).all(|w| w[0] >= w[1]));
     }
@@ -932,11 +926,7 @@ mod tests {
     async fn accounts_by_stake_delegations_slot_constrained() {
         let app = TestApp::new();
         let stake_address = app.vectors().stake_address.as_str();
-        let block = app
-            .vectors()
-            .blocks
-            .first()
-            .expect("missing block vectors");
+        let block = app.vectors().blocks.first().expect("missing block vectors");
         let path = format!(
             "/accounts/{stake_address}/delegations?from={}&to={}",
             block.block_number, block.block_number
@@ -1054,11 +1044,7 @@ mod tests {
     async fn accounts_by_stake_registrations_slot_constrained() {
         let app = TestApp::new();
         let stake_address = app.vectors().stake_address.as_str();
-        let block = app
-            .vectors()
-            .blocks
-            .first()
-            .expect("missing block vectors");
+        let block = app.vectors().blocks.first().expect("missing block vectors");
         let path = format!(
             "/accounts/{stake_address}/registrations?from={}&to={}",
             block.block_number, block.block_number
