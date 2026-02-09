@@ -310,8 +310,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blockfrost_openapi::models::{network::Network, network_eras_inner::NetworkErasInner};
     use crate::test_support::{TestApp, TestFault};
+    use blockfrost_openapi::models::{network::Network, network_eras_inner::NetworkErasInner};
 
     async fn assert_status(app: &TestApp, path: &str, expected: StatusCode) {
         let (status, bytes) = app.get_bytes(path).await;
@@ -334,8 +334,7 @@ mod tests {
             "unexpected status {status} with body: {}",
             String::from_utf8_lossy(&bytes)
         );
-        let _: Network =
-            serde_json::from_slice(&bytes).expect("failed to parse network response");
+        let _: Network = serde_json::from_slice(&bytes).expect("failed to parse network response");
     }
 
     #[tokio::test]

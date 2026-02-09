@@ -109,8 +109,8 @@ pub async fn by_number_blocks<D: Domain>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blockfrost_openapi::models::epoch_param_content::EpochParamContent;
     use crate::test_support::{TestApp, TestFault};
+    use blockfrost_openapi::models::epoch_param_content::EpochParamContent;
 
     async fn assert_status(app: &TestApp, path: &str, expected: StatusCode) {
         let (status, bytes) = app.get_bytes(path).await;
