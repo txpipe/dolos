@@ -76,6 +76,10 @@ impl BoundaryWork {
             return Ok(false);
         }
 
+        if drep.is_unregistered() {
+            return Ok(false);
+        }
+
         let last_activity_slot = drep
             .last_active_slot
             .unwrap_or(drep.registered_at.map(|x| x.0).unwrap_or_default());

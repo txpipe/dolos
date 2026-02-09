@@ -1644,6 +1644,14 @@ impl DRepState {
             identifier,
         }
     }
+
+    pub fn is_unregistered(&self) -> bool {
+        match (self.registered_at, self.unregistered_at) {
+            (Some(registered_at), Some(unregistered_at)) => registered_at < unregistered_at,
+            (_, None) => false,
+            (_, Some(_)) => unreachable!("registration should always preceed unregistration"),
+        }
+    }
 }
 
 entity_boilerplate!(DRepState, "dreps");
