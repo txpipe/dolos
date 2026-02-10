@@ -221,32 +221,39 @@ pub fn migrate_pparams_version(
 ) -> PParamsSet {
     debug!(from, to, "migrating pparams version");
 
-    match (from, to) {
-        // Protocol starts at version 0;
-        // There was one intra-era "hard fork" in byron (even though they weren't called that yet)
-        (0, 1) => intra_era_hardfork(current, to),
-        // Protocol version 2 transitions from Byron to Shelley
-        (1, 2) => from_shelley_genesis(&genesis.shelley),
-        // Two intra-era hard forks, named Allegra (3) and Mary (4); we don't have separate types
-        // for these eras
-        (2, 3) => intra_era_hardfork(current, to),
-        (3, 4) => intra_era_hardfork(current, to),
-        // Protocol version 5 transitions from Shelley (Mary, technically) to Alonzo
-        (4, 5) => into_alonzo(current, &genesis.alonzo),
-        // One intra-era hard-fork in alonzo at protocol version 6
-        (5, 6) => intra_era_hardfork(current, to),
-        // Protocol version 7 transitions from Alonzo to Babbage
-        (6, 7) => into_babbage(current, &genesis.alonzo),
-        // One intra-era hard-fork in babbage at protocol version 8
-        (7, 8) => intra_era_hardfork(current, to),
-        // Protocol version 9 transitions from Babbage to Conway
-        (8, 9) => into_conway(current, &genesis.conway),
-        // One intra-era hard-fork in conway at protocol version 10
-        (9, 10) => intra_era_hardfork(current, to),
-        (from, to) => {
-            unimplemented!("don't know how to bump from version {from} to {to}",)
-        }
+    let mut params = current.clone();
+    let mut v = from;
+
+    while v < to {
+        let next = v + 1;
+
+        params = match (v, next) {
+            // Protocol starts at version 0;
+            // There was one intra-era "hard fork" in byron (even though they weren't called that yet)
+            (0, 1) => intra_era_hardfork(&params, next),
+            // Protocol version 2 transitions from Byron to Shelley
+            (1, 2) => from_shelley_genesis(&genesis.shelley),
+            // Two intra-era hard forks, named Allegra (3) and Mary (4); we don't have separate types
+            // for these eras
+            (2, 3) => intra_era_hardfork(&params, next),
+            (3, 4) => intra_era_hardfork(&params, next),
+            // Protocol version 5 transitions from Shelley (Mary, technically) to Alonzo
+            (4, 5) => into_alonzo(&params, &genesis.alonzo),
+            // One intra-era hard-fork in alonzo at protocol version 6
+            (5, 6) => intra_era_hardfork(&params, next),
+            // Protocol version 7 transitions from Alonzo to Babbage
+            (6, 7) => into_babbage(&params, &genesis.alonzo), // Babbage uses Alonzo genesis
+            // One intra-era hard-fork in babbage at protocol version 8
+            (7, 8) => intra_era_hardfork(&params, next),
+            // Protocol version 9 transitions from Babbage to Conway
+            (8, 9) => into_conway(&params, &genesis.conway),
+            // One intra-era hard-fork in conway at protocol version 10
+            (9, 10) => intra_era_hardfork(&params, next),
+            (_, target) => intra_era_hardfork(&params, target),
+        };
+        v = next;
     }
+    params
 }
 
 pub fn force_pparams_version(
