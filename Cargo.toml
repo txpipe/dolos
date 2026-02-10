@@ -97,7 +97,7 @@ nix = { version = "0.30.1", features = ["signal"] }
 serde = { workspace = true }
 tempfile = "3.20.0"
 toml = "0.8.13"
-dolos-testing = { path = "crates/testing", features = ["toy-domain"] }
+dolos-testing = { path = "crates/testing" }
 
 [[test]]
 name = "smoke"
@@ -146,7 +146,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.0.0-rc.8"
+version = "1.0.0-rc.9"
 edition = "2021"
 repository = "https://github.com/txpipe/dolos"
 homepage = "https://github.com/txpipe/dolos"
@@ -157,7 +157,7 @@ authors = ["TxPipe <hello@txpipe.io>"]
 
 [workspace.dependencies]
 # pallas = { git = "https://github.com/txpipe/pallas.git", rev = "4986428", features = ["hardano", "phase2"] }
-pallas = { version = "1.0.0-alpha.4", features = ["hardano", "phase2"] }
+pallas = { version = "1.0.0-alpha.4", features = ["hardano", "phase2", "unstable"] }
 # pallas = { path = "../pallas/pallas", features = ["hardano", "phase2"] }
 
 thiserror = "2.0.12"

@@ -12,6 +12,7 @@ use blockfrost_openapi::models::{
     asset_transactions_inner::AssetTransactionsInner,
 };
 use dolos_cardano::{
+    cip25::{cip25_metadata_is_valid, Cip25MetadataVersion},
     cip68::{cip_68_reference_asset, encode_to_hex, parse_cip68_metadata_map, Cip68TokenStandard},
     indexes::{AsyncCardanoQueryExt, CardanoIndexExt, SlotOrder},
     model::AssetState,
@@ -124,10 +125,19 @@ impl OnchainMetadata {
             _ => (HashMap::new(), None),
         };
 
-        let version = Some(match version {
-            Some(2) => OnchainMetadataStandard::Cip25v2,
-            _ => OnchainMetadataStandard::Cip25v1,
-        });
+        let version = match version {
+            Some(2) => Cip25MetadataVersion::V2,
+            _ => Cip25MetadataVersion::V1,
+        };
+
+        let version = if cip25_metadata_is_valid(&metadata, version) {
+            Some(match version {
+                Cip25MetadataVersion::V2 => OnchainMetadataStandard::Cip25v2,
+                Cip25MetadataVersion::V1 => OnchainMetadataStandard::Cip25v1,
+            })
+        } else {
+            None
+        };
 
         let extra = None;
 
@@ -343,7 +353,21 @@ impl AssetModelBuilder {
             }
         }
 
-        if let Some(EraCbor(era, cbor)) = &self.initial_tx {
+        let mut cip25_tx = self.initial_tx.clone();
+        if let Some(metadata_tx) = self.asset_state.metadata_tx {
+            if Some(metadata_tx) != self.asset_state.initial_tx {
+                let metadata_cbor = domain
+                    .query()
+                    .tx_cbor(metadata_tx.as_slice().to_vec())
+                    .await
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                if metadata_cbor.is_some() {
+                    cip25_tx = metadata_cbor;
+                }
+            }
+        }
+
+        if let Some(EraCbor(era, cbor)) = &cip25_tx {
             let tx = decode_era_tx(*era, cbor)?;
 
             if let Some((_, standard, ref_asset_bytes)) = &cip68_reference {
@@ -712,8 +736,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blockfrost_openapi::models::asset::Asset;
     use crate::test_support::{TestApp, TestFault};
+    use blockfrost_openapi::models::asset::Asset;
 
     fn invalid_asset() -> &'static str {
         "not-hex-asset"

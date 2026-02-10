@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 use tracing::trace;
 
 use super::WorkDeltas;
-use crate::cip68::parse_cip67_label_from_asset_name;
+use crate::cip25::{cip25_metadata_for_tx, cip25_metadata_has_asset};
+use crate::cip68::{has_cip25_metadata, parse_cip67_label_from_asset_name};
 use crate::model::FixedNamespace as _;
 use crate::{model::AssetState, roll::BlockVisitor};
 
@@ -116,18 +117,38 @@ impl BlockVisitor for AssetStateVisitor {
         mint: &MultiEraPolicyAssets,
     ) -> Result<(), ChainError> {
         let policy = mint.policy();
+        let has_metadata = has_cip25_metadata(tx);
+        let cip25_metadata = if has_metadata {
+            cip25_metadata_for_tx(tx)
+        } else {
+            None
+        };
 
         for asset in mint.assets() {
             trace!(%policy, asset = %hex::encode(asset.name()), "detected mint");
 
+            let quantity: i128 = asset.mint_coin().unwrap_or_default().into();
+
             deltas.add_for_entity(MintStatsUpdate {
                 policy: *policy,
                 asset: asset.name().to_vec(),
-                quantity: asset.mint_coin().unwrap_or_default().into(),
+                quantity,
                 seen_in_tx: tx.hash(),
                 seen_in_slot: block.slot(),
                 is_first_mint: None,
             });
+
+            if quantity > 0 {
+                if let Some(metadata) = cip25_metadata.as_ref() {
+                    if cip25_metadata_has_asset(metadata, policy, asset.name()) {
+                        deltas.add_for_entity(MetadataTxUpdate::new(
+                            *policy,
+                            asset.name().to_vec(),
+                            tx.hash(),
+                        ));
+                    }
+                }
+            }
         }
 
         Ok(())

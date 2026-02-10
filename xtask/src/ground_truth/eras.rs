@@ -81,10 +81,7 @@ pub(super) fn fetch(dbsync_url: &str, max_epoch: u64, network: &Network) -> Resu
 pub(super) fn write_csv(path: &std::path::Path, eras: &[EraRow]) -> Result<()> {
     let mut file = std::fs::File::create(path)
         .with_context(|| format!("creating eras csv: {}", path.display()))?;
-    writeln!(
-        file,
-        "protocol,start_epoch,epoch_length,slot_length"
-    )?;
+    writeln!(file, "protocol,start_epoch,epoch_length,slot_length")?;
 
     for era in eras {
         writeln!(

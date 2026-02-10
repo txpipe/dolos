@@ -20,6 +20,7 @@ use pallas::{
     },
 };
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 use crate::{
     add,
@@ -1642,6 +1643,21 @@ impl DRepState {
             expired: false,
             deposit: 0,
             identifier,
+        }
+    }
+
+    pub fn is_unregistered(&self) -> bool {
+        match (self.registered_at, self.unregistered_at) {
+            (Some(registered_at), Some(unregistered_at)) => registered_at < unregistered_at,
+            (_, None) => false,
+            (None, Some(unregistered_at)) => {
+                warn!(
+                    drep = ?self.identifier,
+                    unregistered_at = ?unregistered_at,
+                    "unexpected drep unregistration without registration"
+                );
+                false
+            }
         }
     }
 }

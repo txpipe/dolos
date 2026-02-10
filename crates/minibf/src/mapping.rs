@@ -143,6 +143,7 @@ pub struct PoolOffchainMetadata {
 pub async fn pool_offchain_metadata(url: &str) -> Option<PoolOffchainMetadata> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
+        .redirect(reqwest::redirect::Policy::limited(3))
         .user_agent("Dolos MiniBF")
         .build()
         .ok()?;
@@ -993,7 +994,7 @@ impl IntoModel<TxContent> for TxModelBuilder<'_> {
             index: try_into_or_500!(order),
             output_amount: list_assets(txouts.iter().map(|(_, x)| x)),
             fees: if tx.is_valid() {
-                tx.fee().unwrap_or_default().to_string()
+                tx.fee_or_compute().to_string()
             } else {
                 tx.total_collateral().unwrap_or_default().to_string()
             },
@@ -2071,7 +2072,7 @@ impl<'a> BlockModelBuilder<'a> {
         txs.iter()
             .map(|tx| {
                 if tx.is_valid() {
-                    tx.fee().unwrap_or_default()
+                    tx.fee_or_compute()
                 } else {
                     tx.total_collateral().unwrap_or_default()
                 }
