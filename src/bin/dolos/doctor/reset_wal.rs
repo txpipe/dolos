@@ -10,7 +10,7 @@ pub struct Args {}
 
 #[tokio::main]
 pub async fn run(config: &RootConfig, _args: &Args, _feedback: &Feedback) -> miette::Result<()> {
-    crate::common::setup_tracing(&config.logging)?;
+    crate::common::setup_tracing(&config.logging, &config.telemetry)?;
 
     let domain = crate::common::setup_domain(config)?;
 

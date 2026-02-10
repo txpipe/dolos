@@ -35,6 +35,10 @@ trait-variant.workspace = true
 xxhash-rust.workspace = true
 axum = { version = "0.8.4", optional = true }
 http-body-util = { version = "0.1.2", optional = true }
+opentelemetry.workspace = true
+opentelemetry_sdk.workspace = true
+opentelemetry-otlp.workspace = true
+tracing-opentelemetry.workspace = true
 
 dolos-core = { path = "crates/core" }
 dolos-cardano = { path = "crates/cardano", features = ["include-genesis"] }
@@ -191,6 +195,10 @@ rayon = "1.11.0"
 xxhash-rust = { version = "0.8.15", features = ["xxh3", "const_xxh3"] }
 num-rational = "0.4.2"
 num-bigint = "0.4.6"
+opentelemetry = "0.30.0"
+opentelemetry_sdk = { version = "0.30.0", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.30.0", features = ["grpc-tonic"] }
+tracing-opentelemetry = "0.31"
 
 [workspace.metadata.release]
 push = false

@@ -622,6 +622,34 @@ impl Default for LoggingConfig {
     }
 }
 
+fn default_otlp_endpoint() -> String {
+    "http://localhost:4317".to_string()
+}
+
+fn default_service_name() -> String {
+    "dolos".to_string()
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct TelemetryConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_otlp_endpoint")]
+    pub otlp_endpoint: String,
+    #[serde(default = "default_service_name")]
+    pub service_name: String,
+}
+
+impl Default for TelemetryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            otlp_endpoint: default_otlp_endpoint(),
+            service_name: default_service_name(),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct TrackConfig {
     pub account_state: bool,
@@ -719,4 +747,7 @@ pub struct RootConfig {
 
     #[serde(default)]
     pub logging: LoggingConfig,
+
+    #[serde(default)]
+    pub telemetry: TelemetryConfig,
 }

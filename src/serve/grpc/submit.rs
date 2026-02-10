@@ -1,5 +1,5 @@
 use any_chain_eval::Chain;
-use dolos_core::SubmitExt;
+use dolos_core::{MempoolStore, SubmitExt};
 use futures_core::Stream;
 use futures_util::{StreamExt as _, TryStreamExt as _};
 use pallas::crypto::hash::Hash;
@@ -12,7 +12,6 @@ use std::pin::Pin;
 use tonic::{Request, Response, Status};
 use tracing::info;
 
-use crate::mempool::UpdateFilter;
 use crate::prelude::*;
 
 pub struct SubmitServiceImpl<D>
@@ -131,10 +130,17 @@ where
             _ => return Err(Status::invalid_argument("missing or unsupported tx type")),
         };
 
-        let hash = self
+        let tx = self
             .domain
-            .receive_tx(&chain, tx_bytes.as_ref())
+            .validate_tx(&chain, tx_bytes.as_ref())
             .map_err(|e| Status::invalid_argument(format!("could not process tx: {e}")))?;
+
+        let hash = tx.hash;
+
+        self.domain
+            .mempool()
+            .submit_tx("grpc", tx)
+            .map_err(|e| Status::internal(format!("mempool error: {e}")))?;
 
         Ok(Response::new(SubmitTxResponse {
             r#ref: hash.to_vec().into(),

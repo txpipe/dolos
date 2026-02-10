@@ -9,11 +9,14 @@ thiserror.workspace = true
 trait-variant.workspace = true
 itertools.workspace = true
 tracing.workspace = true
+opentelemetry.workspace = true
+tracing-opentelemetry.workspace = true
 futures-core.workspace = true
 rayon.workspace = true
 
 # TODO: we shouldn't need Tokio in core
 tokio.workspace = true
+tokio-stream.workspace = true
 
 # TODO: we shouldn't need Pallas in core
 pallas.workspace = true

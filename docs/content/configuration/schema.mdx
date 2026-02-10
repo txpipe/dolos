@@ -63,6 +63,11 @@ max_level = "INFO"
 include_tokio = false
 include_pallas = false
 include_grpc = false
+
+[telemetry]
+enabled = false
+otlp_endpoint = "http://localhost:4317"
+service_name = "dolos"
 ```
 
 Each section of the toml controls a different aspect of Dolos' processes. The rest of this document describes in detail each of these sections.
@@ -222,3 +227,13 @@ The `logging` section controls the logging options to define the level of detail
 | max_level      | option | "debug" / "info" / "warn" / "error"            |
 | include_pallas | option | wheter to include logs from the Pallas library |
 | include_tonic  | option | wheter to include logs from the Tonic library  |
+
+## `telemetry` section
+
+The `telemetry` section controls OpenTelemetry trace export for mempool transaction lifecycle tracking. When enabled, Dolos sends per-transaction traces to an OTLP-compatible collector (e.g. Jaeger, Grafana Tempo). See the [tracing guide](../running/tracing) for a full walkthrough.
+
+| property        | type    | default                   | description                              |
+| --------------- | ------- | ------------------------- | ---------------------------------------- |
+| `enabled`       | boolean | `false`                   | Enable OpenTelemetry trace export        |
+| `otlp_endpoint` | string  | `"http://localhost:4317"` | gRPC endpoint of the OTLP collector      |
+| `service_name`  | string  | `"dolos"`                 | Service name reported in exported traces |

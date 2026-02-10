@@ -81,12 +81,7 @@ pub fn validate_tx<D: Domain>(
     let era = u16::from(tx.era());
     let payload = EraCbor(era, cbor.into());
 
-    let tx = MempoolTx {
-        hash,
-        payload,
-        confirmed: false,
-        report: Some(report),
-    };
+    let tx = MempoolTx::new(hash, payload, report);
 
     Ok(tx)
 }
