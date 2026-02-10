@@ -9,8 +9,8 @@ use pallas::network::miniprotocols::{localstate, localstate::queries_v16 as q16,
 use tracing::{debug, info, warn};
 
 use crate::prelude::*;
-use crate::serve::o7s_unix::statequery_utils;
-use statequery_utils::{
+use crate::serve::o7s_unix::utils;
+use utils::{
     build_era_history_response, build_pool_state_response, build_protocol_params,
     build_stake_pools_response, build_stake_snapshots_response, build_utxo_by_address_response,
 };
