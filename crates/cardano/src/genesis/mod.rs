@@ -57,8 +57,10 @@ pub fn bootstrap_epoch<D: Domain>(
     if let Some(force_protocol) = genesis.force_protocol {
         pparams = crate::forks::force_pparams_version(&pparams, genesis, 0, force_protocol as u16)?;
 
-        // TODO: why do we set nonces only if there's a force protocol?
-        nonces = Some(Nonces::bootstrap(genesis.shelley_hash));
+        if force_protocol >= 2 {
+            // When we start on Shelley or beyond, we need to bootstrap the nonces.
+            nonces = Some(Nonces::bootstrap(genesis.shelley_hash));
+        }
     }
 
     let pots = bootstrap_pots(&pparams, genesis)?;

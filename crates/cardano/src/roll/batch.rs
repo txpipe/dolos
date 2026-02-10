@@ -76,6 +76,7 @@ impl WorkBlock {
 }
 
 /// A batch of blocks to be processed together.
+#[derive(Default)]
 pub struct WorkBatch {
     pub blocks: Vec<WorkBlock>,
     pub utxos: RawUtxoMap,
@@ -85,18 +86,6 @@ pub struct WorkBatch {
 
     // internal checks
     is_sorted: bool,
-}
-
-impl Default for WorkBatch {
-    fn default() -> Self {
-        Self {
-            blocks: Vec::new(),
-            entities: HashMap::new(),
-            utxos: HashMap::new(),
-            utxos_decoded: HashMap::new(),
-            is_sorted: false,
-        }
-    }
 }
 
 impl WorkBatch {

@@ -7,6 +7,8 @@ use tracing::{debug, info, instrument, warn};
 use crate::prelude::*;
 
 mod chainsync;
+mod statequery;
+mod statequery_utils;
 
 // TODO: fix tests
 //#[cfg(test)]
@@ -18,17 +20,31 @@ async fn handle_session<D: Domain, C: CancelToken>(
     cancel: C,
 ) -> Result<(), ServeError> {
     let NodeServer {
-        plexer, chainsync, ..
+        plexer,
+        chainsync,
+        statequery,
+        ..
     } = connection;
 
-    // leaving this here since there's more threads to come
-    let l1 = tokio::spawn(chainsync::handle_session(domain.clone(), chainsync, cancel));
+    let chainsync_task = tokio::spawn(chainsync::handle_session(
+        domain.clone(),
+        chainsync,
+        cancel.clone(),
+    ));
 
-    let (l1,) = tokio::try_join!(l1).map_err(|e| ServeError::Internal(e.into()))?;
+    let statequery_task = tokio::spawn(statequery::handle_session(
+        domain.clone(),
+        statequery,
+        cancel.clone(),
+    ));
 
-    l1?;
-
+    let result = tokio::try_join!(chainsync_task, statequery_task);
     plexer.abort().await;
+
+    let (chainsync_res, statequery_res) = result.map_err(|e| ServeError::Internal(e.into()))?;
+
+    chainsync_res?;
+    statequery_res?;
 
     Ok(())
 }

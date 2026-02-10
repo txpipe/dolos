@@ -18,6 +18,9 @@ mod data;
 #[cfg(feature = "mithril")]
 mod bootstrap;
 
+#[cfg(feature = "minibf")]
+mod minibf;
+
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Initialize the node configuration
@@ -46,6 +49,10 @@ enum Command {
     /// Bootstrap the node using Mithril
     #[cfg(feature = "mithril")]
     Bootstrap(bootstrap::Args),
+
+    /// runs a minibf query in-process
+    #[cfg(feature = "minibf")]
+    Minibf(minibf::Args),
 }
 
 #[derive(Debug, Parser)]
@@ -87,6 +94,9 @@ fn main() -> Result<()> {
 
         #[cfg(feature = "mithril")]
         (Ok(config), Command::Bootstrap(args)) => bootstrap::run(&config, &args, &feedback),
+
+        #[cfg(feature = "minibf")]
+        (Ok(config), Command::Minibf(x)) => minibf::run(&config, &x),
 
         (Err(x), _) => Err(x),
     }

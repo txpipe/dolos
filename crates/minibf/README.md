@@ -54,6 +54,33 @@ host = "0.0.0.0"
 - **tokio**: Async runtime
 - **serde**: JSON serialization/deserialization
 
+## Testing Strategy
+
+`dolos-minibf` uses a layered test harness so we can validate Blockfrost compatibility
+without running a full node:
+
+- **Synthetic data**: Tests use `dolos-testing` to generate small, deterministic
+  Conway blocks and transactions. These blocks are imported into a `ToyDomain`
+  during test setup, so the endpoints exercise the same storage paths as real data.
+- **Mocked domain**: The test harness builds a `ToyDomain` with a synthetic
+  `CardanoConfig` and imports blocks via the core import pipeline.
+- **Happy path coverage**: Each endpoint has a “200” test that deserializes the
+  response into the corresponding `blockfrost-openapi` model to ensure schema
+  compatibility.
+- **Fault injection**: The harness can wrap the domain with `TestFault` to
+  force store errors (State/Archive/WAL/Index). This drives consistent **500**
+  responses without modifying production code.
+- **Client-side validation**: Tests use a shared `TestApp` helper to call routes
+  without starting an HTTP server, ensuring fast and deterministic execution.
+- **404/400 behavior**: Where the OpenAPI spec requires “not found” or “bad
+  request,” tests assert those codes to keep API behavior aligned with the spec.
+
+Key modules:
+
+- `crates/minibf/src/test_support.rs` – test harness + synthetic vectors
+- `crates/testing/src/synthetic.rs` – synthetic block/tx generator
+- `crates/testing/src/faults.rs` – fault injection used by tests
+
 ## Performance
 
 - **Low Latency**: Sub-millisecond response times for cached data

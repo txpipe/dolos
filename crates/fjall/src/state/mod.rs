@@ -132,9 +132,9 @@ impl StateStore {
 
         // 3 keyspaces: cursor, utxos, entities
         // db.keyspace expects a closure that returns KeyspaceCreateOptions
-        let cursor = db.keyspace(keyspace_names::CURSOR, &build_opts)?;
-        let utxos = db.keyspace(keyspace_names::UTXOS, &build_opts)?;
-        let entities = db.keyspace(keyspace_names::ENTITIES, &build_opts)?;
+        let cursor = db.keyspace(keyspace_names::CURSOR, build_opts)?;
+        let utxos = db.keyspace(keyspace_names::UTXOS, build_opts)?;
+        let entities = db.keyspace(keyspace_names::ENTITIES, build_opts)?;
 
         Ok(Self {
             db,

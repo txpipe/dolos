@@ -8,9 +8,11 @@ version = "v3"
 path = "data"
 
 [storage.wal]
+backend = "redb"
 max_history = 129600
 
 [storage.archive]
+backend = "redb"
 max_history = 86400
 
 [genesis]

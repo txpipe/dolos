@@ -156,12 +156,21 @@ pub struct PotDelta {
     #[n(20)]
     #[cbor(default)]
     pub reserve_mirs: Lovelace,
+
+    /// Protocol version from the mark (E-1) pparams, used to determine
+    /// whether unspendable rewards go to treasury (>= 7) or reserves (< 7).
+    /// This differs from `protocol_version` (live) which determines the
+    /// Byron vs Shelley delta path.
+    #[n(21)]
+    #[cbor(default)]
+    pub mark_protocol_version: u16,
 }
 
 impl PotDelta {
-    pub fn neutral(protocol_version: u16) -> Self {
+    pub fn neutral(protocol_version: u16, mark_protocol_version: u16) -> Self {
         Self {
             protocol_version,
+            mark_protocol_version,
             produced_utxos: 0,
             consumed_utxos: 0,
             gathered_fees: 0,
@@ -186,7 +195,7 @@ impl PotDelta {
     }
 
     pub fn consumed_incentives(&self) -> Lovelace {
-        if self.protocol_version < 7 {
+        if self.mark_protocol_version < 7 {
             return self.effective_rewards;
         }
 
@@ -194,7 +203,7 @@ impl PotDelta {
     }
 
     pub fn incentives_back_to_treasury(&self) -> Lovelace {
-        if self.protocol_version < 7 {
+        if self.mark_protocol_version < 7 {
             return 0;
         }
 
@@ -437,7 +446,7 @@ mod tests {
         let delta = PotDelta {
             consumed_utxos: 3458053,
             gathered_fees: 5612092,
-            ..PotDelta::neutral(0)
+            ..PotDelta::neutral(0, 0)
         };
 
         let incentives = EpochIncentives {
@@ -489,7 +498,7 @@ mod tests {
         let delta = PotDelta {
             deposit_per_pool: Some(500_000_000),
             deposit_per_account: Some(2_000_000),
-            ..PotDelta::neutral(6)
+            ..PotDelta::neutral(6, 6)
         };
 
         let pots = apply_delta(pots, &incentives, &delta);
@@ -535,7 +544,7 @@ mod tests {
             unspendable_rewards: 295063003292,
             deposit_per_pool: Some(500_000_000),
             deposit_per_account: Some(2_000_000),
-            ..PotDelta::neutral(7)
+            ..PotDelta::neutral(7, 7)
         };
 
         let pots = apply_delta(pots, &incentives, &delta);

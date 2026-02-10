@@ -14,12 +14,12 @@ use crate::{
     Facade,
 };
 
-pub async fn by_datum_hash<D: Domain>(
+pub async fn by_datum_hash<D>(
     Path(datum_hash): Path<String>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<ScriptDatum>, Error>
 where
-    D: Clone + Send + Sync + 'static,
+    D: Domain + Clone + Send + Sync + 'static,
 {
     if datum_hash.len() != 64 {
         // Oficial blockfrost returns this instead of bad request.

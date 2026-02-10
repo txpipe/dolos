@@ -166,6 +166,11 @@ pub fn define_new_pots(ctx: &super::WorkContext) -> Pots {
         pool_refund_count: end.pool_refund_count,
         pool_invalid_refund_count: end.pool_invalid_refund_count,
         protocol_version: epoch.pparams.unwrap_live().protocol_major_or_default(),
+        mark_protocol_version: epoch
+            .pparams
+            .mark()
+            .map(|p| p.protocol_major_or_default())
+            .unwrap_or_else(|| epoch.pparams.unwrap_live().protocol_major_or_default()),
     };
 
     let pots = apply_delta(epoch.initial_pots.clone(), &end.epoch_incentives, &delta);

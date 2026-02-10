@@ -136,9 +136,9 @@ impl IndexStore {
 
         // 3 keyspaces: cursor, exact, tags
         // db.keyspace expects a closure that returns KeyspaceCreateOptions
-        let cursor = db.keyspace(keyspace_names::CURSOR, &build_opts)?;
-        let exact = db.keyspace(keyspace_names::EXACT, &build_opts)?;
-        let tags = db.keyspace(keyspace_names::TAGS, &build_opts)?;
+        let cursor = db.keyspace(keyspace_names::CURSOR, build_opts)?;
+        let exact = db.keyspace(keyspace_names::EXACT, build_opts)?;
+        let tags = db.keyspace(keyspace_names::TAGS, build_opts)?;
 
         Ok(Self {
             db,

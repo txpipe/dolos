@@ -6,7 +6,8 @@ use tracing::{debug, warn};
 
 use crate::{
     rupd::{credential_to_key, AccountId},
-    AccountState, CardanoDelta, CardanoEntity, FixedNamespace, PendingRewardState, RewardLog,
+    AccountState, CardanoDelta, CardanoEntity, FixedNamespace, LeaderRewardLog, MemberRewardLog,
+    PendingRewardState,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,7 +113,12 @@ impl super::BoundaryVisitor for BoundaryVisitor {
             .push(account.credential.clone());
 
         if !account.is_registered() {
-            debug!(account=%id, amount=reward.total_value(), "reward is not spendable at ewrap");
+            warn!(
+                account=%id,
+                credential=?account.credential,
+                amount=reward.total_value(),
+                "reward not applied (unregistered account)"
+            );
             ctx.rewards.return_reward(reward.total_value());
             return Ok(());
         }
@@ -123,21 +129,31 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         });
 
         for (pool, value, as_leader) in reward.into_vec() {
-            self.log(
-                id.clone(),
-                RewardLog {
-                    amount: value,
-                    pool_id: pool.to_vec(),
-                    as_leader,
-                },
-            );
+            if as_leader {
+                self.log(
+                    id.clone(),
+                    LeaderRewardLog {
+                        amount: value,
+                        pool_id: pool.to_vec(),
+                    },
+                );
+            } else {
+                self.log(
+                    id.clone(),
+                    MemberRewardLog {
+                        amount: value,
+                        pool_id: pool.to_vec(),
+                    },
+                );
+            }
         }
 
         Ok(())
     }
 
     fn flush(&mut self, ctx: &mut super::BoundaryWork) -> Result<(), ChainError> {
-        ctx.rewards.drain_unspendable();
+        let drained = ctx.rewards.drain_unspendable();
+        ctx.applied_reward_credentials.extend(drained);
 
         for delta in self.deltas.drain(..) {
             ctx.add_delta(delta);

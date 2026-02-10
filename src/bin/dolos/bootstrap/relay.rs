@@ -1,8 +1,6 @@
 use dolos_core::config::RootConfig;
 use miette::{bail, Context, IntoDiagnostic};
 
-use dolos::prelude::*;
-
 use crate::feedback::Feedback;
 
 #[derive(Debug, clap::Args, Default, Clone)]
@@ -11,7 +9,7 @@ pub struct Args {}
 fn ensure_empty_wal(config: &RootConfig) -> miette::Result<()> {
     let wal = crate::common::open_wal_store(config)?;
 
-    let is_empty = wal.is_empty().map_err(WalError::from).into_diagnostic()?;
+    let is_empty = wal.is_empty().into_diagnostic()?;
 
     if !is_empty {
         bail!("can't continue with data already available");

@@ -218,10 +218,7 @@ pub fn get_by_block_hash<R: Readable>(
     block_hash: &[u8],
 ) -> Result<Option<BlockSlot>, Error> {
     let key = build_exact_key(DIM_BLOCK_HASH, block_hash);
-    match readable
-        .get(exact_keyspace, key)
-        .map_err(|e| Error::Fjall(e.into()))?
-    {
+    match readable.get(exact_keyspace, key).map_err(Error::Fjall)? {
         Some(value) => {
             let slot = decode_slot_value(value.as_ref());
             Ok(Some(slot))
@@ -237,10 +234,7 @@ pub fn get_by_block_number<R: Readable>(
     number: u64,
 ) -> Result<Option<BlockSlot>, Error> {
     let key = build_exact_key_blocknum(number);
-    match readable
-        .get(exact_keyspace, key)
-        .map_err(|e| Error::Fjall(e.into()))?
-    {
+    match readable.get(exact_keyspace, key).map_err(Error::Fjall)? {
         Some(value) => {
             let slot = decode_slot_value(value.as_ref());
             Ok(Some(slot))
@@ -256,10 +250,7 @@ pub fn get_by_tx_hash<R: Readable>(
     tx_hash: &[u8],
 ) -> Result<Option<BlockSlot>, Error> {
     let key = build_exact_key(DIM_TX_HASH, tx_hash);
-    match readable
-        .get(exact_keyspace, key)
-        .map_err(|e| Error::Fjall(e.into()))?
-    {
+    match readable.get(exact_keyspace, key).map_err(Error::Fjall)? {
         Some(value) => {
             let slot = decode_slot_value(value.as_ref());
             Ok(Some(slot))

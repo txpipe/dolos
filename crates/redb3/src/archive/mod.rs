@@ -136,7 +136,7 @@ impl ArchiveStore {
         config: &RedbArchiveConfig,
     ) -> Result<Self, RedbArchiveError> {
         let path = path.as_ref();
-        std::fs::create_dir_all(path).map_err(|e| RedbArchiveError::from_io(e))?;
+        std::fs::create_dir_all(path).map_err(RedbArchiveError::from_io)?;
 
         let index_path = path.join("index");
         let db = Database::builder()
@@ -148,8 +148,7 @@ impl ArchiveStore {
 
         let segments_dir = config
             .blocks_path
-            .as_ref()
-            .map(|p| p.clone())
+            .clone()
             .unwrap_or_else(|| path.to_path_buf());
 
         let flatfiles =

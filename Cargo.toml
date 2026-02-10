@@ -33,6 +33,8 @@ tower.workspace = true
 tracing.workspace = true
 trait-variant.workspace = true
 xxhash-rust.workspace = true
+axum = { version = "0.8.4", optional = true }
+http-body-util = { version = "0.1.2", optional = true }
 
 dolos-core = { path = "crates/core" }
 dolos-cardano = { path = "crates/cardano", features = ["include-genesis"] }
@@ -87,16 +89,27 @@ mithril-client = { version = "0.12.2", optional = true, default-features = false
 ] }
 
 [dev-dependencies]
+anyhow = "1.0"
+comfy-table = "7.1.1"
+csv = "1"
+csv-diff = "0.1"
 nix = { version = "0.30.1", features = ["signal"] }
+serde = { workspace = true }
 tempfile = "3.20.0"
-dolos-testing = { path = "crates/testing", features = ["toy-domain"] }
+toml = "0.8.13"
+dolos-testing = { path = "crates/testing" }
 
 [[test]]
 name = "smoke"
 path = "tests/external/smoke.rs"
 
+[[test]]
+name = "cardano"
+path = "tests/cardano/main.rs"
+
 [features]
 relaxed = ["dolos-cardano/relaxed"]
+rupd-snapshot-dump = ["dolos-cardano/rupd-snapshot-dump"]
 mithril = ["mithril-client"]
 utils = ["comfy-table", "inquire", "toml"]
 debug = ["console-subscriber", "tokio/tracing"]
@@ -105,6 +118,8 @@ debug = ["console-subscriber", "tokio/tracing"]
 grpc = ["tonic", "tonic-web", "tonic-reflection", "tower-http/cors"]
 minibf = [
     "dolos-minibf",
+    "axum",
+    "http-body-util",
     "tower-http/cors",
     "tower-http/trace",
     "tower-http/normalize-path",
@@ -131,7 +146,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.0.0-rc.6"
+version = "1.0.0-rc.9"
 edition = "2021"
 repository = "https://github.com/txpipe/dolos"
 homepage = "https://github.com/txpipe/dolos"
@@ -141,8 +156,8 @@ readme = "README.md"
 authors = ["TxPipe <hello@txpipe.io>"]
 
 [workspace.dependencies]
-pallas = { git = "https://github.com/txpipe/pallas.git", rev = "ab27006", features = ["hardano", "phase2"] }
-# pallas = { version = "1.0.0-alpha.3", features = ["hardano", "phase2"] }
+# pallas = { git = "https://github.com/txpipe/pallas.git", rev = "4986428", features = ["hardano", "phase2"] }
+pallas = { version = "1.0.0-alpha.4", features = ["hardano", "phase2", "unstable"] }
 # pallas = { path = "../pallas/pallas", features = ["hardano", "phase2"] }
 
 thiserror = "2.0.12"

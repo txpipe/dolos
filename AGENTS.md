@@ -45,7 +45,7 @@ Dolos uses four distinct storage backends, each serving a specific purpose:
 └── index    # Consolidated index database
 ```
 
-Each database is a separate Redb file with independent configuration for cache size and durability.
+Each database is a separate Redb or Fjall file with independent configuration for cache size and durability, depending on the chosen storage backend.
 
 ## Crate Architecture
 
@@ -102,6 +102,25 @@ The project follows a modular workspace architecture with clear separation of co
     - Archive indexes (by block hash, tx hash, address, asset, datum, etc.)
 - **Role**: Persistence layer implementing the core storage traits
 
+#### `dolos-fjall` (Alternative Storage Backend)
+- **Purpose**: Alternative storage backend implementation using the Fjall LSM-tree embedded database
+- **Design Philosophy**: Optimized for write-heavy workloads with many keys, ideal for blockchain data
+- **Components**:
+  - `state`: `StateStore` implementation with three-keyspace design:
+    - **`state-cursor`**: Chain position tracking (single key-value)
+    - **`state-utxos`**: UTxO set storage with `[tx_hash:32][index:4]` keys
+    - **`state-entities`**: All entity types with `[ns_hash:8][entity_key:32]` keys
+  - `index`: `IndexStore` implementation with three-keyspace design:
+    - **`index-cursor`**: Chain position tracking
+    - **`index-exact`**: Exact-match lookups with `[dim_hash:8][key_data:var]` -> `[slot:8]`
+    - **`index-tags`**: Tag-based prefix scans for UTxO and block tags
+  - `keys`: Shared key encoding utilities
+- **Key Advantages**:
+  - Reduced segment files compared to per-entity keyspaces
+  - Chain-agnostic design using dimension hashing
+  - LSM-tree optimization for high-write blockchain workloads
+- **Role**: Alternative persistence layer implementing `StateStore` and `IndexStore` traits
+
 ### Service Crates
 
 #### `dolos-minibf` (Blockfrost API)
@@ -140,6 +159,7 @@ dolos (main binary)
 ├── dolos-core (foundation)
 ├── dolos-cardano (Cardano logic) → dolos-core
 ├── dolos-redb3 (storage) → dolos-core
+├── dolos-fjall (storage) → dolos-core
 ├── dolos-minibf (API) → dolos-core + dolos-cardano
 ├── dolos-trp (TX resolver) → dolos-core + dolos-cardano (Tx3 integration)
 └── dolos-testing (dev) → dolos-core + dolos-cardano + dolos-redb3
@@ -149,7 +169,7 @@ dolos (main binary)
 
 ### Layered Architecture
 1. **Core Layer** (`dolos-core`): Abstract traits and interfaces
-2. **Implementation Layer** (`dolos-cardano`, `dolos-redb3`): Concrete implementations
+2. **Implementation Layer** (`dolos-cardano`, `dolos-redb3`, `dolos-fjall`): Concrete implementations
 3. **Service Layer** (`dolos-minibf`, `dolos-trp`): API services
 4. **Application Layer** (`dolos`): Main binary and CLI
 
@@ -274,3 +294,33 @@ fn blocks_with_address(&self, address, start, end) -> SparseBlockIter;
 - **Future Extensibility**: Architecture supports planned P2P features and light consensus validation
 
 This crate organization enables Dolos to serve as a lightweight, efficient Cardano data node while maintaining flexibility for different use cases and future enhancements.
+
+## Agent Development Guidelines
+
+### Code Verification Requirements
+
+All agents working on this repository must verify their modifications by running the following checks before considering any changes complete:
+
+1. **Clippy Linting**: Run `cargo clippy` and ensure no warnings appear
+   ```bash
+   cargo clippy --workspace --all-targets --all-features
+   ```
+
+2. **Clean Build**: Ensure the project builds without warnings
+   ```bash
+   cargo build --workspace --all-targets --all-features
+   ```
+
+3. **Testing**: Run tests to verify functionality
+   ```bash
+   cargo test --workspace --all-features
+   ```
+
+### Code Quality Standards
+
+- All warnings from `cargo clippy` must be resolved before committing changes
+- Code should follow existing Rust conventions and patterns established in the codebase
+- New implementations should follow the trait-based architecture patterns
+- Storage implementations should maintain consistency between backends (redb3 and fjall)
+
+These verification steps ensure code quality, maintain consistency across storage backends, and prevent introducing technical debt into the codebase.

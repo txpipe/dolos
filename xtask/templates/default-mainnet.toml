@@ -1,0 +1,51 @@
+[upstream]
+peer_address = "backbone.mainnet.cardanofoundation.org:3001"
+network_magic = 764824073
+is_testnet = false
+
+[storage]
+version = "v3"
+path = "data"
+
+[storage.wal]
+backend = "redb"
+max_history = 129600
+
+[storage.state]
+backend = "fjall"
+
+[storage.index]
+backend = "fjall"
+
+[storage.archive]
+backend = "redb"
+
+[genesis]
+byron_path = "byron.json"
+shelley_path = "shelley.json"
+alonzo_path = "alonzo.json"
+conway_path = "conway.json"
+
+[sync]
+pull_batch_size = 100
+
+[submit]
+prune_height = 200
+
+[serve.grpc]
+listen_address = "[::]:50051"
+permissive_cors = true
+
+[serve.ouroboros]
+listen_path = "dolos.socket"
+magic = 764824073
+
+[mithril]
+aggregator = "https://aggregator.release-mainnet.api.mithril.network/aggregator"
+genesis_key = "5b3139312c36362c3134302c3138352c3133382c31312c3233372c3230372c3235302c3134342c32372c322c3138382c33302c31322c38312c3135352c3230342c31302c3137392c37352c32332c3133382c3139362c3231372c352c31342c32302c35372c37392c33392c3137365d"
+
+[logging]
+max_level = "INFO"
+include_tokio = false
+include_pallas = false
+include_grpc = false

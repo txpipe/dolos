@@ -1,4 +1,5 @@
 use axum::{http::StatusCode, Json};
+use futures::future::join_all;
 use itertools::Itertools;
 use num_bigint::BigInt;
 use num_rational::BigRational;
@@ -19,7 +20,12 @@ use pallas::{
         },
     },
 };
-use std::{collections::HashMap, ops::Deref};
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::{HashMap, HashSet},
+    ops::Deref,
+    time::Duration,
+};
 
 use blockfrost_openapi::models::{
     address_utxo_content_inner::AddressUtxoContentInner,
@@ -38,8 +44,7 @@ use blockfrost_openapi::models::{
     tx_content_pool_certs_inner_metadata::TxContentPoolCertsInnerMetadata,
     tx_content_pool_certs_inner_relays_inner::TxContentPoolCertsInnerRelaysInner,
     tx_content_pool_retires_inner::TxContentPoolRetiresInner,
-    tx_content_redeemers_inner::Purpose,
-    tx_content_redeemers_inner::TxContentRedeemersInner,
+    tx_content_redeemers_inner::{Purpose, TxContentRedeemersInner},
     tx_content_stake_addr_inner::TxContentStakeAddrInner,
     tx_content_utxo::TxContentUtxo,
     tx_content_utxo_inputs_inner::TxContentUtxoInputsInner,
@@ -47,8 +52,10 @@ use blockfrost_openapi::models::{
     tx_content_withdrawals_inner::TxContentWithdrawalsInner,
 };
 
-use dolos_cardano::{pallas_extras, ChainSummary, PParamsSet};
-use dolos_core::{Domain, EraCbor, TxHash, TxOrder, TxoIdx, TxoRef};
+use dolos_cardano::{
+    pallas_extras, AccountState, ChainSummary, DRepState, PParamsSet, PoolHash, PoolState,
+};
+use dolos_core::{BlockSlot, Domain, EraCbor, TxHash, TxOrder, TxoIdx, TxoRef};
 
 use crate::Facade;
 
@@ -96,7 +103,8 @@ pub fn bech32_drep(drep: &DRep) -> Result<String, StatusCode> {
             payload[..1].copy_from_slice(&script_prefix);
             payload[1..].copy_from_slice(key.as_slice());
         }
-        _ => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+        DRep::Abstain => return Ok("drep_always_abstain".to_string()),
+        DRep::NoConfidence => return Ok("drep_always_no_confidence".to_string()),
     };
 
     bech32(DREP_HRP, payload)
@@ -122,6 +130,31 @@ pub fn stake_cred_to_address(cred: &StakeCredential, network: Network) -> StakeA
 
 pub fn vkey_to_stake_address(vkey: Hash<28>, network: Network) -> StakeAddress {
     StakeAddress::new(network, StakePayload::Stake(vkey))
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct PoolOffchainMetadata {
+    pub name: String,
+    pub description: String,
+    pub ticker: String,
+    pub homepage: String,
+}
+
+pub async fn pool_offchain_metadata(url: &str) -> Option<PoolOffchainMetadata> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .redirect(reqwest::redirect::Policy::limited(3))
+        .user_agent("Dolos MiniBF")
+        .build()
+        .ok()?;
+
+    let res = client.get(url).send().await.ok()?;
+
+    if res.status() != StatusCode::OK {
+        return None;
+    }
+
+    res.json().await.ok()
 }
 
 pub trait IntoModel<T>
@@ -279,12 +312,36 @@ impl<'a> IntoModel<String> for ScriptRef<'a> {
     }
 }
 
+#[derive(Clone)]
+pub struct UtxoBlockData {
+    pub block_slot: BlockSlot,
+    pub block_hash: Hash<32>,
+    pub tx_hash: Hash<32>,
+    pub tx_order: TxOrder,
+}
+
+impl TryFrom<(MultiEraBlock<'_>, TxOrder)> for UtxoBlockData {
+    type Error = StatusCode;
+    fn try_from(value: (MultiEraBlock<'_>, TxOrder)) -> Result<Self, Self::Error> {
+        Ok(Self {
+            block_slot: value.0.slot(),
+            block_hash: value.0.hash(),
+            tx_hash: value
+                .0
+                .txs()
+                .get(value.1)
+                .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?
+                .hash(),
+            tx_order: value.1,
+        })
+    }
+}
+
 pub struct UtxoOutputModelBuilder<'a> {
     txo_ref: TxoRef,
     output: MultiEraOutput<'a>,
     is_collateral: bool,
-    block: Option<MultiEraBlock<'a>>,
-    tx_order: Option<TxOrder>,
+    block_data: Option<UtxoBlockData>,
     consumed_by_tx: Option<TxHash>,
 }
 
@@ -298,8 +355,7 @@ impl<'a> UtxoOutputModelBuilder<'a> {
             txo_ref: TxoRef(tx_hash, tx_index),
             output,
             is_collateral: false,
-            block: None,
-            tx_order: None,
+            block_data: None,
             consumed_by_tx: None,
         }
     }
@@ -314,25 +370,16 @@ impl<'a> UtxoOutputModelBuilder<'a> {
             txo_ref: TxoRef(tx_hash, (output_count + collateral_idx as usize) as u32),
             output,
             is_collateral: true,
-            block: None,
-            tx_order: None,
+            block_data: None,
             consumed_by_tx: None,
         }
     }
 
-    pub fn with_block_data(self, block: MultiEraBlock<'a>, tx_order: TxOrder) -> Self {
+    pub fn with_block_data(self, block_data: UtxoBlockData) -> Self {
         Self {
-            block: Some(block),
-            tx_order: Some(tx_order),
+            block_data: Some(block_data),
             ..self
         }
-    }
-
-    pub fn find_tx(&self) -> Option<MultiEraTx<'_>> {
-        let txs = self.block.as_ref()?.txs();
-        let order = self.tx_order?;
-
-        txs.get(order).cloned()
     }
 
     pub fn with_consumed_by(self, tx: TxHash) -> Self {
@@ -349,7 +396,13 @@ impl<'a> IntoModel<TxContentUtxoOutputsInner> for UtxoOutputModelBuilder<'a> {
     fn into_model(self) -> Result<TxContentUtxoOutputsInner, StatusCode> {
         let out = TxContentUtxoOutputsInner {
             address: self.output.address().into_model()?,
-            amount: self.output.value().into_model()?,
+            amount: self
+                .output
+                .value()
+                .into_model()?
+                .into_iter()
+                .filter(|x| x.unit == "lovelace" || !self.is_collateral)
+                .collect(),
             output_index: try_into_or_500!(self.txo_ref.1),
             consumed_by_tx: Some(self.consumed_by_tx.map(|x| x.to_string())),
             data_hash: self.output.datum().map(|x| match x {
@@ -380,23 +433,23 @@ impl<'a> IntoModel<AddressUtxoContentInner> for UtxoOutputModelBuilder<'a> {
     type SortKey = (u64, usize, u32);
 
     fn sort_key(&self) -> Option<Self::SortKey> {
-        match (self.block.as_ref(), self.tx_order.as_ref()) {
-            (Some(block), Some(txorder)) => Some((block.slot(), *txorder, self.txo_ref.1)),
-            _ => None,
-        }
+        self.block_data
+            .as_ref()
+            .map(|data| (data.block_slot, data.tx_order, self.txo_ref.1))
     }
 
     fn into_model(self) -> Result<AddressUtxoContentInner, StatusCode> {
         let out = AddressUtxoContentInner {
             address: self.output.address().into_model()?,
             tx_hash: self
-                .find_tx()
-                .map(|tx| tx.hash().to_string())
+                .block_data
+                .as_ref()
+                .map(|data| data.tx_hash.to_string())
                 .unwrap_or_default(),
             block: self
-                .block
+                .block_data
                 .as_ref()
-                .map(|b| b.hash().to_string())
+                .map(|b| b.block_hash.to_string())
                 .unwrap_or_default(),
             output_index: try_into_or_500!(self.txo_ref.1),
             amount: self.output.value().into_model()?,
@@ -447,7 +500,12 @@ impl<'a> IntoModel<TxContentUtxoInputsInner> for UtxoInputModelBuilder<'a> {
         if let Some(o) = self.as_output {
             out = TxContentUtxoInputsInner {
                 address: o.address().into_model()?,
-                amount: o.value().into_model()?,
+                amount: o
+                    .value()
+                    .into_model()?
+                    .into_iter()
+                    .filter(|x| x.unit == "lovelace" || !self.is_collateral)
+                    .collect(),
                 reference_script_hash: o.script_ref().map(|h| h.into_model()).transpose()?,
                 data_hash: o.datum().map(|x| match x {
                     DatumOption::Hash(x) => x.to_string(),
@@ -476,6 +534,9 @@ pub struct TxModelBuilder<'a> {
     order: TxOrder,
     deps: HashMap<TxHash, MultiEraTx<'a>>,
     consumed_deps: HashMap<TxoRef, TxHash>,
+    pool_metadata: HashMap<PoolHash, PoolOffchainMetadata>,
+    deposit: Option<i64>,
+    affected_pools: HashMap<Hash<28>, PoolState>,
 }
 
 impl<'a> TxModelBuilder<'a> {
@@ -492,7 +553,10 @@ impl<'a> TxModelBuilder<'a> {
             pparams: None,
             network: None,
             deps: HashMap::new(),
+            affected_pools: HashMap::new(),
             consumed_deps: HashMap::new(),
+            pool_metadata: HashMap::new(),
+            deposit: None,
         })
     }
 
@@ -536,7 +600,166 @@ impl<'a> TxModelBuilder<'a> {
         }
     }
 
-    fn tx(&self) -> Result<MultiEraTx<'_>, StatusCode> {
+    pub async fn set_affected_pools<D>(&mut self, facade: &Facade<D>) -> Result<(), StatusCode>
+    where
+        D: Domain + Clone + Send + Sync + 'static,
+        Option<PoolState>: From<D::Entity>,
+    {
+        self.affected_pools = self
+            .tx()?
+            .certs()
+            .iter()
+            .filter_map(|cert| match cert {
+                MultiEraCert::AlonzoCompatible(cow) => {
+                    if let AlonzoCert::PoolRegistration { operator, .. } = *(**cow).clone() {
+                        Some(operator)
+                    } else {
+                        None
+                    }
+                }
+                MultiEraCert::Conway(cow) => {
+                    if let ConwayCert::PoolRegistration { operator, .. } = *(**cow).clone() {
+                        Some(operator)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            })
+            .filter_map(|operator| {
+                match facade.read_cardano_entity::<PoolState>(operator.as_slice()) {
+                    Ok(Some(state)) => Some(Ok((operator, state))),
+                    Ok(None) => None,
+                    Err(_) => Some(Err(StatusCode::INTERNAL_SERVER_ERROR)),
+                }
+            })
+            .collect::<Result<_, _>>()?;
+
+        Ok(())
+    }
+
+    pub async fn fetch_pool_metadata(&mut self) -> Result<(), StatusCode> {
+        let pool_registrations = self
+            .tx()?
+            .certs()
+            .iter()
+            .filter_map(|cert| match cert {
+                MultiEraCert::AlonzoCompatible(cow) => {
+                    if let AlonzoCert::PoolRegistration {
+                        operator,
+                        ref pool_metadata,
+                        ..
+                    } = *(**cow).clone()
+                    {
+                        pool_metadata
+                            .as_ref()
+                            .map(|meta| (operator, meta.url.clone()))
+                    } else {
+                        None
+                    }
+                }
+                MultiEraCert::Conway(cow) => {
+                    if let ConwayCert::PoolRegistration {
+                        operator,
+                        ref pool_metadata,
+                        ..
+                    } = *(**cow).clone()
+                    {
+                        pool_metadata
+                            .as_ref()
+                            .map(|meta| (operator, meta.url.clone()))
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            })
+            .collect_vec();
+
+        self.pool_metadata = join_all(pool_registrations.iter().map(
+            |(pool_hash, url)| async move {
+                pool_offchain_metadata(url)
+                    .await
+                    .map(|meta| (*pool_hash, meta))
+            },
+        ))
+        .await
+        .into_iter()
+        .flatten()
+        .collect();
+
+        Ok(())
+    }
+
+    pub fn compute_deposit<D>(&mut self, facade: &Facade<D>) -> Result<(), StatusCode>
+    where
+        D: Domain + Clone + Send + Sync + 'static,
+        Option<AccountState>: From<D::Entity>,
+        Option<PoolState>: From<D::Entity>,
+        Option<DRepState>: From<D::Entity>,
+    {
+        let pparms = self.pparams_or_500()?;
+
+        let key_deposit = pparms.key_deposit().unwrap_or_default() as i64;
+        let pool_deposit = pparms.pool_deposit().unwrap_or_default() as i64;
+
+        let mut repeated = HashSet::new();
+        let mut out = 0;
+
+        for cert in self.tx()?.certs() {
+            if let Some(reg) = pallas_extras::cert_as_stake_registration(&cert) {
+                let key = minicbor::to_vec(&reg).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                if repeated.insert((0, key.clone())) {
+                    out += key_deposit;
+                }
+            }
+
+            if let Some(reg) = pallas_extras::cert_as_pool_registration(&cert) {
+                if repeated.insert((1, reg.operator.to_vec())) {
+                    match facade
+                        .read_cardano_entity::<PoolState>(reg.operator.as_slice())
+                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                    {
+                        Some(pool) => {
+                            if self.block.slot() <= pool.register_slot {
+                                out += pool_deposit
+                            }
+                        }
+                        None => out += pool_deposit,
+                    }
+                }
+            }
+
+            if let Some(reg) = pallas_extras::cert_as_drep_registration(&cert) {
+                let key =
+                    minicbor::to_vec(&reg.cred).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                if repeated.insert((2, key)) {
+                    out += reg.deposit as i64;
+                }
+            }
+
+            if let Some(reg) = pallas_extras::cert_as_stake_deregistration(&cert) {
+                let key = minicbor::to_vec(&reg).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                if repeated.insert((3, key.clone())) {
+                    out -= key_deposit;
+                }
+            }
+
+            if let Some(reg) = pallas_extras::cert_as_drep_unregistration(&cert) {
+                let key =
+                    minicbor::to_vec(&reg.cred).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                if repeated.insert((4, key)) {
+                    out -= reg.deposit as i64;
+                }
+            }
+        }
+
+        self.deposit = Some(out);
+
+        Ok(())
+    }
+
+    pub fn tx(&self) -> Result<MultiEraTx<'_>, StatusCode> {
         let tx = self
             .block
             .txs()
@@ -598,39 +821,6 @@ impl<'a> TxModelBuilder<'a> {
         }
 
         Ok(deps)
-    }
-
-    pub fn deposit(&self) -> Result<u64, StatusCode> {
-        let pparms = self.pparams_or_500()?;
-
-        let key_deposit = pparms.key_deposit().unwrap_or_default();
-        let pool_deposit = pparms.pool_deposit().unwrap_or_default();
-        let drep_deposit = pparms.drep_deposit().unwrap_or_default();
-
-        let out = self
-            .tx()?
-            .certs()
-            .iter()
-            .flat_map(|x| {
-                if pallas_extras::cert_as_stake_registration(x).is_some() {
-                    return Some(key_deposit);
-                }
-
-                if pallas_extras::cert_as_pool_registration(x).is_some() {
-                    return Some(pool_deposit);
-                }
-
-                if let MultiEraCert::Conway(cert) = x {
-                    if let ConwayCert::RegDRepCert(..) = cert.deref().deref() {
-                        return Some(drep_deposit);
-                    }
-                }
-
-                None
-            })
-            .sum();
-
-        Ok(out)
     }
 
     pub fn load_dep(&mut self, key: TxHash, cbor: &'a EraCbor) -> Result<(), StatusCode> {
@@ -791,7 +981,7 @@ impl IntoModel<TxContent> for TxModelBuilder<'_> {
         let block = &self.block;
         let order = self.order;
         let txin = tx.inputs();
-        let txouts = tx.outputs();
+        let txouts = tx.produces();
         let chain = self.chain_or_500()?;
 
         let block_time = chain.slot_time(block.slot());
@@ -802,13 +992,21 @@ impl IntoModel<TxContent> for TxModelBuilder<'_> {
             block_height: try_into_or_500!(block.number()),
             slot: try_into_or_500!(block.slot()),
             index: try_into_or_500!(order),
-            output_amount: list_assets(txouts.iter()),
-            fees: tx.fee().map(|f| f.to_string()).unwrap_or_default(),
+            output_amount: list_assets(txouts.iter().map(|(_, x)| x)),
+            fees: if tx.is_valid() {
+                tx.fee_or_compute().to_string()
+            } else {
+                tx.total_collateral().unwrap_or_default().to_string()
+            },
             size: try_into_or_500!(tx.size()),
             invalid_before: tx.validity_start().map(|v| v.to_string()),
             invalid_hereafter: tx.ttl().map(|v| v.to_string()),
             utxo_count: try_into_or_500!(txin.len() + txouts.len()),
-            redeemer_count: try_into_or_500!(tx.redeemers().len()),
+            redeemer_count: try_into_or_500!(if tx.is_valid() {
+                tx.redeemers().len()
+            } else {
+                0
+            }),
             valid_contract: tx.is_valid(),
             block_time: try_into_or_500!(block_time),
             withdrawal_count: tx.withdrawals().collect::<Vec<_>>().len() as i32,
@@ -818,7 +1016,7 @@ impl IntoModel<TxContent> for TxModelBuilder<'_> {
             pool_update_count: count_certs!(tx, PoolRegistration) as i32,
             pool_retire_count: count_certs!(tx, PoolRetirement) as i32,
             asset_mint_or_burn_count: tx.mints().iter().flat_map(|x| x.assets()).count() as i32,
-            deposit: self.deposit()?.to_string(),
+            deposit: self.deposit.unwrap_or_default().to_string(),
         };
 
         Ok(tx)
@@ -1380,17 +1578,33 @@ struct PoolUpdateModelBuilder {
     pool_owners: Vec<Hash<28>>,
     relays: Vec<alonzo::Relay>,
     pool_metadata: Option<alonzo::PoolMetadata>,
+    offchain_pool_metadata: Option<PoolOffchainMetadata>,
     cert_index: usize,
     network: Network,
     current_epoch: i32,
+    is_registration: bool,
 }
 
 impl PoolUpdateModelBuilder {
+    pub fn extract_operator(cert: &MultiEraCert) -> Option<Hash<28>> {
+        match cert {
+            MultiEraCert::AlonzoCompatible(cow) => match *(**cow).clone() {
+                AlonzoCert::PoolRegistration { operator, .. } => Some(operator),
+                _ => None,
+            },
+            MultiEraCert::Conway(cow) => match *(**cow).clone() {
+                ConwayCert::PoolRegistration { operator, .. } => Some(operator),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
     fn new_from_alonzo(
         cert: AlonzoCert,
         cert_index: usize,
         network: Network,
         current_epoch: i32,
+        is_registration: bool,
     ) -> Option<Self> {
         let AlonzoCert::PoolRegistration {
             operator,
@@ -1420,6 +1634,8 @@ impl PoolUpdateModelBuilder {
             cert_index,
             network,
             current_epoch,
+            offchain_pool_metadata: None,
+            is_registration,
         })
     }
 
@@ -1428,6 +1644,7 @@ impl PoolUpdateModelBuilder {
         cert_index: usize,
         network: Network,
         current_epoch: i32,
+        is_registration: bool,
     ) -> Option<Self> {
         let ConwayCert::PoolRegistration {
             operator,
@@ -1457,6 +1674,8 @@ impl PoolUpdateModelBuilder {
             cert_index,
             network,
             current_epoch,
+            offchain_pool_metadata: None,
+            is_registration,
         })
     }
 
@@ -1465,16 +1684,29 @@ impl PoolUpdateModelBuilder {
         cert_index: usize,
         network: Network,
         current_epoch: i32,
+        is_registration: bool,
     ) -> Option<Self> {
         match cert {
-            MultiEraCert::AlonzoCompatible(cow) => {
-                Self::new_from_alonzo((**cow).clone(), cert_index, network, current_epoch)
-            }
-            MultiEraCert::Conway(cow) => {
-                Self::new_from_conway((**cow).clone(), cert_index, network, current_epoch)
-            }
+            MultiEraCert::AlonzoCompatible(cow) => Self::new_from_alonzo(
+                (**cow).clone(),
+                cert_index,
+                network,
+                current_epoch,
+                is_registration,
+            ),
+            MultiEraCert::Conway(cow) => Self::new_from_conway(
+                (**cow).clone(),
+                cert_index,
+                network,
+                current_epoch,
+                is_registration,
+            ),
             _ => None,
         }
+    }
+
+    fn with_offchain(&mut self, offchain_pool_metadata: Option<PoolOffchainMetadata>) {
+        self.offchain_pool_metadata = offchain_pool_metadata
     }
 }
 
@@ -1508,10 +1740,19 @@ impl IntoModel<TxContentPoolCertsInner> for PoolUpdateModelBuilder {
             metadata: Some(Box::new(TxContentPoolCertsInnerMetadata {
                 url: self.pool_metadata.as_ref().map(|x| x.url.clone()),
                 hash: self.pool_metadata.as_ref().map(|x| x.hash.to_string()),
-                ticker: None,
-                name: None,
-                description: None,
-                homepage: None,
+                ticker: self
+                    .offchain_pool_metadata
+                    .as_ref()
+                    .map(|x| x.ticker.clone()),
+                name: self.offchain_pool_metadata.as_ref().map(|x| x.name.clone()),
+                description: self
+                    .offchain_pool_metadata
+                    .as_ref()
+                    .map(|x| x.description.clone()),
+                homepage: self
+                    .offchain_pool_metadata
+                    .as_ref()
+                    .map(|x| x.homepage.clone()),
             })),
             relays: self
                 .relays
@@ -1520,7 +1761,7 @@ impl IntoModel<TxContentPoolCertsInner> for PoolUpdateModelBuilder {
                 .try_collect()?,
             cert_index: self.cert_index as i32,
             pool_id: bech32_pool(self.operator.as_slice())?,
-            active_epoch: self.current_epoch + 2,
+            active_epoch: self.current_epoch + if self.is_registration { 2 } else { 3 },
         })
     }
 }
@@ -1532,20 +1773,36 @@ impl IntoModel<Vec<TxContentPoolCertsInner>> for TxModelBuilder<'_> {
         let tx = self.tx()?;
 
         let network = self.network.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        let epoch = self
+        let chain = self
             .chain
             .as_ref()
-            .map(|c| c.slot_epoch(self.block.slot()))
-            .map(|(a, _)| a)
             .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
 
+        let epoch = chain.slot_epoch(self.block.slot()).0;
         let items = tx
             .certs()
             .into_iter()
             .enumerate()
             .filter_map(|(cert_index, cert)| {
-                PoolUpdateModelBuilder::new(cert, cert_index, network, epoch as i32)
+                let is_registration = PoolUpdateModelBuilder::extract_operator(&cert)
+                    .map(|operator| {
+                        self.affected_pools
+                            .get(&operator)
+                            .map(|state| state.register_slot == self.block.slot())
+                            .unwrap_or(true)
+                    })
+                    .unwrap_or(true);
+                let builder = PoolUpdateModelBuilder::new(
+                    cert,
+                    cert_index,
+                    network,
+                    epoch as i32,
+                    is_registration,
+                );
+                builder.map(|mut x| {
+                    x.with_offchain(self.pool_metadata.get(&x.operator).cloned());
+                    x
+                })
             })
             .map(|builder| builder.into_model())
             .try_collect()?;
@@ -1743,25 +2000,41 @@ impl<'a> BlockModelBuilder<'a> {
     fn format_slot_leader(&self) -> Result<Option<String>, StatusCode> {
         let header = self.block.header();
 
-        let Some(use_bech32) = self
-            .chain
-            .map(|x| x.slot_epoch(self.block.slot()).0 > x.first_shelley_epoch() + 1)
-        else {
+        let Some(use_bech32) = self.chain.map(|x| {
+            let epoch = x.slot_epoch(self.block.slot()).0;
+            epoch > x.first_shelley_epoch()
+        }) else {
             return Ok(None);
         };
 
-        let Some(key) = header.issuer_vkey() else {
-            return Ok(None);
-        };
-        let hash: Hash<28> = Hasher::<224>::hash(key);
+        match header.issuer_vkey() {
+            Some(key) => {
+                let hash: Hash<28> = Hasher::<224>::hash(key);
 
-        if use_bech32 {
-            Ok(Some(bech32_pool(hash)?))
-        } else {
-            Ok(Some(format!(
-                "ShelleyGenesis-{}",
-                hex::encode(hash.as_slice().first_chunk::<8>().unwrap())
-            )))
+                if use_bech32 {
+                    Ok(Some(bech32_pool(hash)?))
+                } else {
+                    Ok(Some(format!(
+                        "ShelleyGenesis-{}",
+                        hex::encode(hash.as_slice().first_chunk::<8>().unwrap())
+                    )))
+                }
+            }
+            None => match header {
+                MultiEraHeader::Byron(byron_header) => {
+                    let hash: Hash<32> =
+                        Hasher::<256>::hash(&byron_header.consensus_data.1.as_slice()[..32]);
+
+                    Ok(Some(format!(
+                        "ByronGenesis-{}",
+                        hex::encode(hash.as_slice().first_chunk::<8>().unwrap())
+                    )))
+                }
+                MultiEraHeader::EpochBoundary(_) => {
+                    Ok(Some("Epoch boundary slot leader".to_string()))
+                }
+                _ => unreachable!(), // Covered on Some case
+            },
         }
     }
 
@@ -1797,7 +2070,13 @@ impl<'a> BlockModelBuilder<'a> {
         let txs = self.block.txs();
 
         txs.iter()
-            .map(|tx| tx.fee().unwrap_or(0))
+            .map(|tx| {
+                if tx.is_valid() {
+                    tx.fee_or_compute()
+                } else {
+                    tx.total_collateral().unwrap_or_default()
+                }
+            })
             .sum::<u64>()
             .to_string()
     }
@@ -1806,7 +2085,12 @@ impl<'a> BlockModelBuilder<'a> {
         let txs = self.block.txs();
 
         txs.iter()
-            .map(|tx| tx.outputs().iter().map(|o| o.value().coin()).sum::<u64>())
+            .map(|tx| {
+                tx.produces()
+                    .iter()
+                    .map(|(_, o)| o.value().coin())
+                    .sum::<u64>()
+            })
             .sum::<u64>()
             .to_string()
     }
@@ -1858,12 +2142,48 @@ impl<'a> IntoModel<BlockContent> for BlockModelBuilder<'a> {
             next_block,
             previous_block,
             epoch: epoch.map(|x| x as i32),
-            epoch_slot: epoch_slot.map(|x| x as i32),
+            epoch_slot: match epoch_slot.map(|x| x as i32) {
+                Some(0) => {
+                    if matches!(
+                        self.block,
+                        MultiEraBlock::EpochBoundary(_) | MultiEraBlock::Byron(_)
+                    ) {
+                        None
+                    } else {
+                        Some(0)
+                    }
+                }
+                x => x,
+            },
             time: block_time.unwrap_or_default(),
-            slot: Some(block.slot() as i32),
-            height: Some(block.number() as i32),
+            slot: match block.slot() as i32 {
+                0 => {
+                    if matches!(
+                        self.block,
+                        MultiEraBlock::EpochBoundary(_) | MultiEraBlock::Byron(_)
+                    ) {
+                        None
+                    } else {
+                        Some(0)
+                    }
+                }
+                x => Some(x),
+            },
+            height: match block.number() as i32 {
+                0 => {
+                    if matches!(
+                        self.block,
+                        MultiEraBlock::EpochBoundary(_) | MultiEraBlock::Byron(_)
+                    ) {
+                        None
+                    } else {
+                        Some(0)
+                    }
+                }
+                x => Some(x),
+            },
             tx_count: block.txs().len() as i32,
-            size: block.body_size().unwrap_or_default() as i32,
+            size: block.body_size().unwrap_or(block.size()) as i32,
             confirmations,
             slot_leader,
             block_vrf,

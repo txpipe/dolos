@@ -296,12 +296,20 @@ impl<C: RewardsContext> RewardMap<C> {
         self.applied_unspendable = add!(self.applied_unspendable, amount);
     }
 
-    pub fn drain_unspendable(&mut self) {
-        let unspendable = self.pending.extract_if(|_, reward| !reward.is_spendable());
+    pub fn drain_unspendable(&mut self) -> Vec<StakeCredential> {
+        let unspendable: Vec<_> = self
+            .pending
+            .extract_if(|_, reward| !reward.is_spendable())
+            .collect();
 
-        for (_, reward) in unspendable {
+        let mut credentials = Vec::with_capacity(unspendable.len());
+
+        for (credential, reward) in unspendable {
             self.applied_unspendable += reward.total_value();
+            credentials.push(credential);
         }
+
+        credentials
     }
 
     pub fn drain_all(&mut self) {
