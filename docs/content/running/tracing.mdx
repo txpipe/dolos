@@ -84,7 +84,7 @@ The default `otlp_endpoint` (`http://localhost:4317`) matches both setups above,
 2. Submit a transaction via gRPC or TRP.
 3. Open the collector UI (Jaeger at `http://localhost:16686`, or Grafana at `http://localhost:3000`) and search for the **dolos** service.
 
-A healthy trace shows a single root span named `mempool_tx` with lifecycle events listed in chronological order — from `tx_validated` through `tx_stage_changed` stages all the way to `confirmed`.
+A healthy trace shows a root span named `mempool_tx` with child spans nested underneath — `tx_validated`, `tx_submitted`, `tx_pending`, and so on through to `tx_confirmed`.
 
 ### Troubleshooting
 
@@ -96,11 +96,11 @@ Dolos logs an error at startup if the OTLP exporter cannot reach the configured 
 
 ## Span Schema
 
-Each submitted transaction gets a single root span that lives for the duration of the transaction's time in the mempool:
+Each submitted transaction gets a root span that anchors the trace. Lifecycle child spans are nested underneath it:
 
-| span name    | description                                           |
-| ------------ | ----------------------------------------------------- |
-| `mempool_tx` | Root span tracking one transaction through the mempool |
+| span name    | description                                             |
+| ------------ | ------------------------------------------------------- |
+| `mempool_tx` | Root span anchoring the trace for one transaction       |
 
 The span carries the following attributes:
 
@@ -111,18 +111,21 @@ The span carries the following attributes:
 | `tx.size_bytes` | integer | Size of the transaction CBOR payload in bytes    |
 | `tx.has_plutus` | boolean | Whether the transaction contains Plutus scripts  |
 
-## Lifecycle Events
+## Child Spans
 
-Events are recorded on the `mempool_tx` span as the transaction progresses through the mempool. They appear in roughly chronological order:
+Each lifecycle transition creates a child span under the `mempool_tx` root. They appear in roughly chronological order:
 
-| event                  | fields                              | description                                           |
-| ---------------------- | ----------------------------------- | ----------------------------------------------------- |
-| `tx_validated`         | `phase1`, `phase2`, `redeemer_count` | Transaction passed Phase 1 and Phase 2 validation     |
-| `tx_submitted`         | `source` (`grpc` / `trp`)           | Transaction received from a client                    |
-| `tx_stage_changed`     | `stage` (`pending` / `inflight` / `acknowledged` / `confirmed`) | Transaction moved to a new mempool stage |
-| `tx_ids_sent_to_peer`  | —                                   | Transaction ID propagated to upstream peer             |
-| `tx_body_sent_to_peer` | —                                   | Transaction body sent to upstream peer                 |
-| `tx_stage_reverted`    | `stage`                             | Transaction reverted to a previous stage               |
+| span                   | fields                               | description                                       |
+| ---------------------- | ------------------------------------ | ------------------------------------------------- |
+| `tx_validated`         | `phase1`, `phase2`, `redeemer_count` | Transaction passed Phase 1 and Phase 2 validation |
+| `tx_submitted`         | `source` (`grpc` / `trp`)           | Transaction received from a client                |
+| `tx_pending`           | —                                    | Transaction entered the pending queue             |
+| `tx_inflight`          | —                                    | Transaction picked up for submission to peer      |
+| `tx_acknowledged`      | —                                    | Peer acknowledged the transaction                 |
+| `tx_confirmed`         | —                                    | Transaction confirmed on-chain                    |
+| `tx_unconfirmed`       | —                                    | Transaction reverted from confirmed state         |
+| `tx_ids_sent_to_peer`  | —                                    | Transaction ID propagated to upstream peer        |
+| `tx_body_sent_to_peer` | —                                    | Transaction body sent to upstream peer            |
 
 ## Relation to Logging
 
