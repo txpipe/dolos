@@ -84,7 +84,7 @@ The default `otlp_endpoint` (`http://localhost:4317`) matches both setups above,
 2. Submit a transaction via gRPC or TRP.
 3. Open the collector UI (Jaeger at `http://localhost:16686`, or Grafana at `http://localhost:3000`) and search for the **dolos** service.
 
-A healthy trace shows a root span named `mempool_tx` with child spans nested underneath — `tx_validated`, `tx_submitted`, `tx_pending`, and so on through to `tx_confirmed`.
+A healthy trace shows a root span with child spans nested underneath, representing the different lifecycle stages of the transaction.
 
 ### Troubleshooting
 
@@ -93,39 +93,6 @@ A healthy trace shows a root span named `mempool_tx` with child spans nested und
 - **Firewall** — If running the collector on a different host, ensure your firewall allows inbound gRPC traffic on the configured port.
 
 Dolos logs an error at startup if the OTLP exporter cannot reach the configured endpoint, which is the quickest way to confirm connectivity.
-
-## Span Schema
-
-Each submitted transaction gets a root span that anchors the trace. Lifecycle child spans are nested underneath it:
-
-| span name    | description                                             |
-| ------------ | ------------------------------------------------------- |
-| `mempool_tx` | Root span anchoring the trace for one transaction       |
-
-The span carries the following attributes:
-
-| attribute       | type    | description                                      |
-| --------------- | ------- | ------------------------------------------------ |
-| `tx.hash`       | string  | Hex-encoded transaction hash                     |
-| `tx.era`        | integer | Numeric Cardano era of the transaction           |
-| `tx.size_bytes` | integer | Size of the transaction CBOR payload in bytes    |
-| `tx.has_plutus` | boolean | Whether the transaction contains Plutus scripts  |
-
-## Child Spans
-
-Each lifecycle transition creates a child span under the `mempool_tx` root. They appear in roughly chronological order:
-
-| span                   | fields                               | description                                       |
-| ---------------------- | ------------------------------------ | ------------------------------------------------- |
-| `tx_validated`         | `phase1`, `phase2`, `redeemer_count` | Transaction passed Phase 1 and Phase 2 validation |
-| `tx_submitted`         | `source` (`grpc` / `trp`)           | Transaction received from a client                |
-| `tx_pending`           | —                                    | Transaction entered the pending queue             |
-| `tx_inflight`          | —                                    | Transaction picked up for submission to peer      |
-| `tx_acknowledged`      | —                                    | Peer acknowledged the transaction                 |
-| `tx_confirmed`         | —                                    | Transaction confirmed on-chain                    |
-| `tx_unconfirmed`       | —                                    | Transaction reverted from confirmed state         |
-| `tx_ids_sent_to_peer`  | —                                    | Transaction ID propagated to upstream peer        |
-| `tx_body_sent_to_peer` | —                                    | Transaction body sent to upstream peer            |
 
 ## Relation to Logging
 
