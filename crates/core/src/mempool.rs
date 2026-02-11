@@ -114,6 +114,7 @@ impl Mempool {
     pub fn request_exact(&self, count: usize) -> Vec<MempoolTx> {
         let mut state = self.mempool.write().unwrap();
 
+        let count = count.min(state.inflight.len());
         let selected = state.pending.drain(..count).collect_vec();
 
         for tx in selected.iter() {
@@ -137,6 +138,7 @@ impl Mempool {
 
         let mut state = self.mempool.write().unwrap();
 
+        let count = count.min(state.inflight.len());
         let selected = state.inflight.drain(..count).collect_vec();
 
         for tx in selected {
