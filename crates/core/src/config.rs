@@ -607,6 +607,12 @@ pub struct LoggingConfig {
 
     #[serde(default)]
     pub include_minibf: bool,
+
+    #[serde(default)]
+    pub include_otlp: bool,
+
+    #[serde(default)]
+    pub include_fjall: bool,
 }
 
 impl Default for LoggingConfig {

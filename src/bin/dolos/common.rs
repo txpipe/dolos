@@ -113,12 +113,7 @@ pub fn setup_tracing(config: &LoggingConfig, telemetry: &TelemetryConfig) -> mie
 
     let mut filter = Targets::new()
         .with_target("dolos", level)
-        .with_target("gasket", level)
-        // Include fjall and lsm_tree for storage backend debugging
-        .with_target("fjall", level)
-        .with_target("lsm_tree", level)
-        // Include OpenTelemetry internal diagnostics when telemetry is enabled
-        .with_target("opentelemetry", level);
+        .with_target("gasket", level);
 
     if config.include_tokio {
         filter = filter
@@ -140,6 +135,16 @@ pub fn setup_tracing(config: &LoggingConfig, telemetry: &TelemetryConfig) -> mie
 
     if config.include_minibf {
         filter = filter.with_target("tower_http", level);
+    }
+
+    if config.include_fjall {
+        filter = filger
+            .with_target("fjall", level)
+            .with_target("lsm_tree", level);
+    }
+
+    if config.include_otlp {
+        filter = filter.with_target("opentelemetry", level);
     }
 
     let otel_layer = if telemetry.enabled {
