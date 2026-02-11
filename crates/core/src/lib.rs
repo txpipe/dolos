@@ -385,11 +385,6 @@ pub trait MempoolStore: Clone + Send + Sync + 'static {
 
     fn receive(&self, tx: mempool::MempoolTx) -> Result<(), MempoolError>;
 
-    fn submit_tx(&self, source: &str, tx: mempool::MempoolTx) -> Result<(), MempoolError> {
-        tx.record_submitted(source);
-        self.receive(tx)
-    }
-
     fn apply(&self, seen_txs: &[TxHash], unseen_txs: &[TxHash]);
     fn check_stage(&self, tx_hash: &TxHash) -> MempoolTxStage;
     fn subscribe(&self) -> Self::Stream;

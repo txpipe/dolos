@@ -1,5 +1,5 @@
 use any_chain_eval::Chain;
-use dolos_core::{MempoolStore, SubmitExt};
+use dolos_core::SubmitExt;
 use futures_core::Stream;
 use futures_util::{StreamExt as _, TryStreamExt as _};
 use pallas::crypto::hash::Hash;
@@ -130,17 +130,10 @@ where
             _ => return Err(Status::invalid_argument("missing or unsupported tx type")),
         };
 
-        let tx = self
+        let hash = self
             .domain
-            .validate_tx(&chain, tx_bytes.as_ref())
+            .receive_tx("grpc", &chain, tx_bytes.as_ref())
             .map_err(|e| Status::invalid_argument(format!("could not process tx: {e}")))?;
-
-        let hash = tx.hash;
-
-        self.domain
-            .mempool()
-            .submit_tx("grpc", tx)
-            .map_err(|e| Status::internal(format!("mempool error: {e}")))?;
 
         Ok(Response::new(SubmitTxResponse {
             r#ref: hash.to_vec().into(),

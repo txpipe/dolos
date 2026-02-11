@@ -9,9 +9,7 @@ use std::pin::Pin;
 use std::sync::RwLock;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
-use opentelemetry::Context as OtelContext;
 use tracing::{debug, info, warn};
-use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 #[derive(Debug)]
 pub struct MempoolTx {
@@ -22,8 +20,6 @@ pub struct MempoolTx {
 
     // this might be empty if the tx is cloned
     pub report: Option<EvalReport>,
-
-    otel_context: OtelContext,
 }
 
 impl PartialEq for MempoolTx {
@@ -41,119 +37,18 @@ impl Clone for MempoolTx {
             payload: self.payload.clone(),
             confirmed: self.confirmed,
             report: None,
-            otel_context: self.otel_context.clone(),
         }
     }
 }
 
 impl MempoolTx {
     pub fn new(hash: TxHash, payload: EraCbor, report: EvalReport) -> Self {
-        let report_len = report.len();
-
-        let root_span = tracing::info_span!(
-            "mempool_tx",
-            tx.hash = %hash,
-            tx.era = ?payload.era(),
-            tx.size_bytes = payload.cbor().len(),
-            tx.has_plutus = !report.is_empty(),
-        );
-        let otel_context = root_span.context();
-        drop(root_span);
-
-        let tx = Self {
+        Self {
             hash,
             payload,
             confirmed: false,
             report: Some(report),
-            otel_context,
-        };
-        tx.record_validated(report_len);
-        tx
-    }
-
-    pub(crate) fn record_validated(&self, redeemer_count: usize) {
-        let span = tracing::info_span!(
-            "tx_validated",
-            tx.hash = %self.hash,
-            phase1 = true,
-            phase2 = true,
-            redeemer_count,
-        );
-        span.set_parent(self.otel_context.clone());
-        let _entered = span.entered();
-    }
-
-    pub(crate) fn record_submitted(&self, source: &str) {
-        let span = tracing::info_span!(
-            "tx_submitted",
-            tx.hash = %self.hash,
-            source,
-        );
-        span.set_parent(self.otel_context.clone());
-        let _entered = span.entered();
-    }
-
-    pub(crate) fn record_pending(&self) {
-        let span = tracing::info_span!(
-            "tx_pending",
-            tx.hash = %self.hash,
-        );
-        span.set_parent(self.otel_context.clone());
-        let _entered = span.entered();
-    }
-
-    pub(crate) fn record_inflight(&self) {
-        let span = tracing::info_span!(
-            "tx_inflight",
-            tx.hash = %self.hash,
-        );
-        span.set_parent(self.otel_context.clone());
-        let _entered = span.entered();
-    }
-
-    pub(crate) fn record_acknowledged(&self) {
-        let span = tracing::info_span!(
-            "tx_acknowledged",
-            tx.hash = %self.hash,
-        );
-        span.set_parent(self.otel_context.clone());
-        let _entered = span.entered();
-    }
-
-    pub(crate) fn record_confirmed(&self) {
-        let span = tracing::info_span!(
-            "tx_confirmed",
-            tx.hash = %self.hash,
-        );
-        span.set_parent(self.otel_context.clone());
-        let _entered = span.entered();
-    }
-
-    pub(crate) fn record_unconfirmed(&self) {
-        let span = tracing::info_span!(
-            "tx_unconfirmed",
-            tx.hash = %self.hash,
-        );
-        span.set_parent(self.otel_context.clone());
-        let _entered = span.entered();
-    }
-
-    pub(crate) fn record_ids_sent_to_peer(&self) {
-        let span = tracing::info_span!(
-            "tx_ids_sent_to_peer",
-            tx.hash = %self.hash,
-        );
-        span.set_parent(self.otel_context.clone());
-        let _entered = span.entered();
-    }
-
-    pub(crate) fn record_body_sent_to_peer(&self) {
-        let span = tracing::info_span!(
-            "tx_body_sent_to_peer",
-            tx.hash = %self.hash,
-        );
-        span.set_parent(self.otel_context.clone());
-        let _entered = span.entered();
+        }
     }
 }
 
@@ -163,6 +58,7 @@ pub enum MempoolTxStage {
     Inflight,
     Acknowledged,
     Confirmed,
+    RolledBack,
     Unknown,
 }
 
@@ -221,7 +117,7 @@ impl Mempool {
         let selected = state.pending.drain(..count).collect_vec();
 
         for tx in selected.iter() {
-            tx.record_inflight();
+            info!(tx.hash = %tx.hash, "tx inflight");
             state.inflight.push(tx.clone());
             self.notify(MempoolTxStage::Inflight, tx.clone());
         }
@@ -244,7 +140,7 @@ impl Mempool {
         let selected = state.inflight.drain(..count).collect_vec();
 
         for tx in selected {
-            tx.record_acknowledged();
+            info!(tx.hash = %tx.hash, "tx acknowledged");
             state.acknowledged.insert(tx.hash, tx.clone());
             self.notify(MempoolTxStage::Acknowledged, tx.clone());
         }
@@ -274,13 +170,13 @@ impl Mempool {
 
     pub fn mark_ids_propagated(&self, txs: &[MempoolTx]) {
         for tx in txs {
-            tx.record_ids_sent_to_peer();
+            info!(tx.hash = %tx.hash, "tx id propagated");
         }
     }
 
     pub fn mark_bodies_sent(&self, txs: &[MempoolTx]) {
         for tx in txs {
-            tx.record_body_sent_to_peer();
+            info!(tx.hash = %tx.hash, "tx body propagated");
         }
     }
 }
@@ -289,9 +185,7 @@ impl MempoolStore for Mempool {
     type Stream = MempoolStream;
 
     fn receive(&self, tx: MempoolTx) -> Result<(), MempoolError> {
-        debug!(tx = %tx.hash, "receiving tx");
-
-        tx.record_pending();
+        info!(tx.hash = %tx.hash, "tx received");
 
         let mut state = self.mempool.write().unwrap();
 
@@ -317,20 +211,18 @@ impl MempoolStore for Mempool {
         }
 
         for tx_hash in seen_txs.iter() {
-            if let Some(acknowledged_tx) = state.acknowledged.get_mut(tx_hash) {
-                acknowledged_tx.record_confirmed();
-                acknowledged_tx.confirmed = true;
-                self.notify(MempoolTxStage::Confirmed, acknowledged_tx.clone());
-                debug!(%tx_hash, "confirming tx");
+            if let Some(tx) = state.acknowledged.get_mut(tx_hash) {
+                tx.confirmed = true;
+                self.notify(MempoolTxStage::Confirmed, tx.clone());
+                info!(tx.hash = %tx.hash, "tx confirmed");
             }
         }
 
         for tx_hash in unseen_txs.iter() {
-            if let Some(acknowledged_tx) = state.acknowledged.get_mut(tx_hash) {
-                acknowledged_tx.record_unconfirmed();
-                acknowledged_tx.confirmed = false;
-                self.notify(MempoolTxStage::Acknowledged, acknowledged_tx.clone());
-                debug!(%tx_hash, "un-confirming tx");
+            if let Some(tx) = state.acknowledged.get_mut(tx_hash) {
+                tx.confirmed = false;
+                self.notify(MempoolTxStage::RolledBack, tx.clone());
+                info!(tx.hash = %tx.hash, "tx confirmed roll-back");
             }
         }
     }
