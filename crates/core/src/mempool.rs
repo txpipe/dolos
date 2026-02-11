@@ -224,7 +224,7 @@ impl MempoolStore for Mempool {
             if let Some(tx) = state.acknowledged.get_mut(tx_hash) {
                 tx.confirmed = false;
                 self.notify(MempoolTxStage::RolledBack, tx.clone());
-                info!(tx.hash = %tx.hash, "tx confirmed roll-back");
+                info!(tx.hash = %tx.hash, "tx rollback");
             }
         }
     }
