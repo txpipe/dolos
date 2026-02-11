@@ -138,7 +138,7 @@ pub fn setup_tracing(config: &LoggingConfig, telemetry: &TelemetryConfig) -> mie
     }
 
     if config.include_fjall {
-        filter = filger
+        filter = filter
             .with_target("fjall", level)
             .with_target("lsm_tree", level);
     }

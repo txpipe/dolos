@@ -624,6 +624,8 @@ impl Default for LoggingConfig {
             include_grpc: Default::default(),
             include_trp: Default::default(),
             include_minibf: Default::default(),
+            include_fjall: Default::default(),
+            include_otlp: Default::default(),
         }
     }
 }
