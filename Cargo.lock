@@ -1291,6 +1291,7 @@ dependencies = [
 name = "dolos-core"
 version = "1.0.0-rc.9"
 dependencies = [
+ "dolos-testing",
  "futures-core",
  "hex",
  "itertools 0.14.0",
