@@ -21,8 +21,8 @@ use tracing::Level;
 
 use dolos_core::{
     config::MinibfConfig, ArchiveStore as _, AsyncQueryFacade, BlockSlot, CancelToken, Domain,
-    Entity, EntityKey, EraCbor, LogKey, ServeError, StateError, StateStore as _, TemporalKey,
-    TxOrder,
+    Entity, EntityKey, EraCbor, LogKey, ServeError, StateError, StateStore as _, SubmitExt,
+    TemporalKey, TxOrder,
 };
 
 mod cache;
@@ -271,7 +271,7 @@ pub struct Driver;
 
 pub fn build_router<D>(cfg: MinibfConfig, domain: D) -> Router
 where
-    D: Domain + Clone + Send + Sync + 'static,
+    D: Domain + SubmitExt + Clone + Send + Sync + 'static,
     Option<AccountState>: From<D::Entity>,
     Option<PoolState>: From<D::Entity>,
     Option<AssetState>: From<D::Entity>,
@@ -287,7 +287,7 @@ where
 
 pub(crate) fn build_router_with_facade<D>(facade: Facade<D>) -> Router
 where
-    D: Domain + Clone + Send + Sync + 'static,
+    D: Domain + SubmitExt + Clone + Send + Sync + 'static,
     Option<AccountState>: From<D::Entity>,
     Option<PoolState>: From<D::Entity>,
     Option<AssetState>: From<D::Entity>,
@@ -463,7 +463,7 @@ where
     app.layer(NormalizePathLayer::trim_trailing_slash())
 }
 
-impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver
+impl<D: Domain + SubmitExt, C: CancelToken> dolos_core::Driver<D, C> for Driver
 where
     D: Clone + Send + Sync + 'static,
     Option<AccountState>: From<D::Entity>,

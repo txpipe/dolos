@@ -32,7 +32,7 @@ fn clear_state(config: &RootConfig, ns: Namespace) -> miette::Result<()> {
 }
 
 pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
-    crate::common::setup_tracing(&config.logging)?;
+    crate::common::setup_tracing(&config.logging, &config.telemetry)?;
 
     match args.namespace.as_str() {
         "eras" => clear_state(config, "eras")?,

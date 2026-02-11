@@ -9,7 +9,6 @@ use pallas::network::miniprotocols::chainsync::Tip;
 use tracing::info;
 
 use crate::adapters::WalAdapter;
-use crate::mempool::Mempool;
 use crate::prelude::*;
 
 pub type DownstreamPort = gasket::messaging::OutputPort<PullEvent>;

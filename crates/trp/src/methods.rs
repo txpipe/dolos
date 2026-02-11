@@ -72,7 +72,7 @@ fn apply_witnesses(original: &[u8], witnesses: &[SubmitWitness]) -> Result<Vec<u
     Ok(pallas::codec::minicbor::to_vec(&tx).unwrap())
 }
 
-pub async fn trp_submit<D: Domain>(
+pub async fn trp_submit<D: Domain + SubmitExt>(
     params: Params<'_>,
     context: Arc<Context<D>>,
 ) -> Result<SubmitResponse, Error> {
@@ -86,7 +86,7 @@ pub async fn trp_submit<D: Domain>(
 
     let chain = context.domain.read_chain();
 
-    let hash = context.domain.receive_tx(&chain, &bytes)?;
+    let hash = context.domain.receive_tx("trp", &chain, &bytes)?;
 
     Ok(SubmitResponse {
         hash: hash.to_string(),

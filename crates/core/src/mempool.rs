@@ -2,7 +2,14 @@ use super::*;
 use crate::TagDimension;
 
 pub use pallas::ledger::validate::phase2::EvalReport;
-use tracing::{debug, warn};
+
+use futures_core::Stream;
+use itertools::Itertools;
+use std::pin::Pin;
+use std::sync::RwLock;
+use tokio::sync::broadcast;
+use tokio_stream::wrappers::BroadcastStream;
+use tracing::{debug, info, warn};
 
 #[derive(Debug)]
 pub struct MempoolTx {
@@ -34,12 +41,24 @@ impl Clone for MempoolTx {
     }
 }
 
+impl MempoolTx {
+    pub fn new(hash: TxHash, payload: EraCbor, report: EvalReport) -> Self {
+        Self {
+            hash,
+            payload,
+            confirmed: false,
+            report: Some(report),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub enum MempoolTxStage {
     Pending,
     Inflight,
     Acknowledged,
     Confirmed,
+    RolledBack,
     Unknown,
 }
 
@@ -48,6 +67,267 @@ pub struct MempoolEvent {
     pub new_stage: MempoolTxStage,
     pub tx: MempoolTx,
 }
+
+// ---------------------------------------------------------------------------
+// Mempool implementation
+// ---------------------------------------------------------------------------
+
+#[derive(Default)]
+struct MempoolState {
+    pending: Vec<MempoolTx>,
+    inflight: Vec<MempoolTx>,
+    acknowledged: HashMap<TxHash, MempoolTx>,
+}
+
+/// A very basic, FIFO, single consumer mempool
+#[derive(Clone)]
+pub struct Mempool {
+    mempool: Arc<RwLock<MempoolState>>,
+    updates: broadcast::Sender<MempoolEvent>,
+}
+
+impl Default for Mempool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Mempool {
+    pub fn new() -> Self {
+        let mempool = Arc::new(RwLock::new(MempoolState::default()));
+        let (updates, _) = broadcast::channel(16);
+
+        Self { mempool, updates }
+    }
+
+    pub fn notify(&self, new_stage: MempoolTxStage, tx: MempoolTx) {
+        if self.updates.send(MempoolEvent { new_stage, tx }).is_err() {
+            debug!("no mempool update receivers");
+        }
+    }
+
+    pub fn request(&self, desired: usize) -> Vec<MempoolTx> {
+        let available = self.pending_total();
+        self.request_exact(std::cmp::min(desired, available))
+    }
+
+    pub fn request_exact(&self, count: usize) -> Vec<MempoolTx> {
+        let mut state = self.mempool.write().unwrap();
+
+        let selected = state.pending.drain(..count).collect_vec();
+
+        for tx in selected.iter() {
+            info!(tx.hash = %tx.hash, "tx inflight");
+            state.inflight.push(tx.clone());
+            self.notify(MempoolTxStage::Inflight, tx.clone());
+        }
+
+        debug!(
+            pending = state.pending.len(),
+            inflight = state.inflight.len(),
+            acknowledged = state.acknowledged.len(),
+            "mempool state changed"
+        );
+
+        selected
+    }
+
+    pub fn acknowledge(&self, count: usize) {
+        debug!(n = count, "acknowledging txs");
+
+        let mut state = self.mempool.write().unwrap();
+
+        let count = count.min(state.inflight.len());
+        let selected = state.inflight.drain(..count).collect_vec();
+
+        for tx in selected {
+            info!(tx.hash = %tx.hash, "tx acknowledged");
+            state.acknowledged.insert(tx.hash, tx.clone());
+            self.notify(MempoolTxStage::Acknowledged, tx.clone());
+        }
+
+        debug!(
+            pending = state.pending.len(),
+            inflight = state.inflight.len(),
+            acknowledged = state.acknowledged.len(),
+            "mempool state changed"
+        );
+    }
+
+    pub fn find_inflight(&self, tx_hash: &TxHash) -> Option<MempoolTx> {
+        let state = self.mempool.read().unwrap();
+        state.inflight.iter().find(|x| x.hash.eq(tx_hash)).cloned()
+    }
+
+    pub fn find_pending(&self, tx_hash: &TxHash) -> Option<MempoolTx> {
+        let state = self.mempool.read().unwrap();
+        state.pending.iter().find(|x| x.hash.eq(tx_hash)).cloned()
+    }
+
+    pub fn pending_total(&self) -> usize {
+        let state = self.mempool.read().unwrap();
+        state.pending.len()
+    }
+
+    pub fn mark_ids_propagated(&self, txs: &[MempoolTx]) {
+        for tx in txs {
+            info!(tx.hash = %tx.hash, "tx id propagated");
+        }
+    }
+
+    pub fn mark_bodies_sent(&self, txs: &[MempoolTx]) {
+        for tx in txs {
+            info!(tx.hash = %tx.hash, "tx body propagated");
+        }
+    }
+}
+
+impl MempoolStore for Mempool {
+    type Stream = MempoolStream;
+
+    fn receive(&self, tx: MempoolTx) -> Result<(), MempoolError> {
+        info!(tx.hash = %tx.hash, "tx received");
+
+        let mut state = self.mempool.write().unwrap();
+
+        state.pending.push(tx.clone());
+
+        self.notify(MempoolTxStage::Pending, tx);
+
+        debug!(
+            pending = state.pending.len(),
+            inflight = state.inflight.len(),
+            acknowledged = state.acknowledged.len(),
+            "mempool state changed"
+        );
+
+        Ok(())
+    }
+
+    fn apply(&self, seen_txs: &[TxHash], unseen_txs: &[TxHash]) {
+        let mut state = self.mempool.write().unwrap();
+
+        if state.acknowledged.is_empty() {
+            return;
+        }
+
+        for tx_hash in seen_txs.iter() {
+            if let Some(tx) = state.acknowledged.get_mut(tx_hash) {
+                tx.confirmed = true;
+                self.notify(MempoolTxStage::Confirmed, tx.clone());
+                info!(tx.hash = %tx.hash, "tx confirmed");
+            }
+        }
+
+        for tx_hash in unseen_txs.iter() {
+            if let Some(tx) = state.acknowledged.get_mut(tx_hash) {
+                tx.confirmed = false;
+                self.notify(MempoolTxStage::RolledBack, tx.clone());
+                info!(tx.hash = %tx.hash, "tx rollback");
+            }
+        }
+    }
+
+    fn check_stage(&self, tx_hash: &TxHash) -> MempoolTxStage {
+        let state = self.mempool.read().unwrap();
+
+        if let Some(tx) = state.acknowledged.get(tx_hash) {
+            if tx.confirmed {
+                MempoolTxStage::Confirmed
+            } else {
+                MempoolTxStage::Acknowledged
+            }
+        } else if state.inflight.iter().any(|x| x.hash.eq(tx_hash)) {
+            MempoolTxStage::Inflight
+        } else if state.pending.iter().any(|x| x.hash.eq(tx_hash)) {
+            MempoolTxStage::Pending
+        } else {
+            MempoolTxStage::Unknown
+        }
+    }
+
+    fn subscribe(&self) -> Self::Stream {
+        MempoolStream {
+            inner: BroadcastStream::new(self.updates.subscribe()),
+        }
+    }
+
+    fn pending(&self) -> Vec<(TxHash, EraCbor)> {
+        let state = self.mempool.read().unwrap();
+
+        state
+            .pending
+            .iter()
+            .map(|tx| (tx.hash, tx.payload.clone()))
+            .collect()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Streams
+// ---------------------------------------------------------------------------
+
+pub struct MempoolStream {
+    inner: BroadcastStream<MempoolEvent>,
+}
+
+impl Stream for MempoolStream {
+    type Item = Result<MempoolEvent, MempoolError>;
+
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        match Pin::new(&mut self.inner).poll_next(cx) {
+            std::task::Poll::Ready(Some(x)) => match x {
+                Ok(x) => std::task::Poll::Ready(Some(Ok(x))),
+                Err(err) => {
+                    std::task::Poll::Ready(Some(Err(MempoolError::Internal(Box::new(err)))))
+                }
+            },
+            std::task::Poll::Ready(None) => std::task::Poll::Ready(None),
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
+    }
+}
+
+pub struct UpdateFilter<M: MempoolStore> {
+    inner: M::Stream,
+    subjects: HashSet<TxHash>,
+}
+
+impl<M: MempoolStore> UpdateFilter<M> {
+    pub fn new(inner: M::Stream, subjects: HashSet<TxHash>) -> Self {
+        Self { inner, subjects }
+    }
+}
+
+impl<M: MempoolStore> Stream for UpdateFilter<M> {
+    type Item = MempoolEvent;
+
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        loop {
+            match Pin::new(&mut self.inner).poll_next(cx) {
+                std::task::Poll::Ready(None) => return std::task::Poll::Ready(None),
+                std::task::Poll::Ready(Some(Ok(x))) => {
+                    if self.subjects.contains(&x.tx.hash) {
+                        return std::task::Poll::Ready(Some(x));
+                    }
+                    // Non-matching item: continue polling the inner stream
+                }
+                std::task::Poll::Ready(Some(Err(_))) => return std::task::Poll::Ready(None),
+                std::task::Poll::Pending => return std::task::Poll::Pending,
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Mempool-aware UTxO store
+// ---------------------------------------------------------------------------
 
 pub struct MempoolAwareUtxoStore<'a, D: Domain> {
     inner: &'a D::State,
@@ -181,5 +461,273 @@ impl<'a, D: Domain> MempoolAwareUtxoStore<'a, D> {
         utxos.extend(from_mempool);
 
         Ok(utxos)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    use dolos_testing::streams::{noop_waker, ScriptedStream};
+    use dolos_testing::tx_sequence_to_hash;
+
+    type MockStream = ScriptedStream<Result<MempoolEvent, MempoolError>>;
+
+    fn test_hash(n: u8) -> TxHash {
+        tx_sequence_to_hash(n as u64)
+    }
+
+    fn test_event(hash: TxHash) -> MempoolEvent {
+        MempoolEvent {
+            new_stage: MempoolTxStage::Pending,
+            tx: MempoolTx::new(hash, EraCbor(7, vec![0x80]), vec![]),
+        }
+    }
+
+    // MockStore must live here (not in dolos-testing) to implement the local
+    // MempoolStore trait and avoid the two-copies-of-dolos-core problem.
+    #[derive(Clone)]
+    struct MockStore;
+
+    impl MempoolStore for MockStore {
+        type Stream = MockStream;
+
+        fn receive(&self, _tx: MempoolTx) -> Result<(), MempoolError> {
+            Ok(())
+        }
+
+        fn apply(&self, _seen: &[TxHash], _unseen: &[TxHash]) {}
+
+        fn check_stage(&self, _hash: &TxHash) -> MempoolTxStage {
+            MempoolTxStage::Unknown
+        }
+
+        fn subscribe(&self) -> Self::Stream {
+            ScriptedStream::empty()
+        }
+
+        fn pending(&self) -> Vec<(TxHash, EraCbor)> {
+            vec![]
+        }
+    }
+
+    /// Drive the filter stream to completion, collecting all emitted events.
+    fn collect_sync(mut filter: UpdateFilter<MockStore>) -> Vec<MempoolEvent> {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut out = Vec::new();
+        loop {
+            match Pin::new(&mut filter).poll_next(&mut cx) {
+                Poll::Ready(Some(ev)) => out.push(ev),
+                Poll::Ready(None) => break,
+                Poll::Pending => break,
+            }
+        }
+        out
+    }
+
+    /// Helper that returns the next single poll result from the filter.
+    fn poll_once(
+        filter: &mut UpdateFilter<MockStore>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<MempoolEvent>> {
+        Pin::new(filter).poll_next(cx)
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn yields_matching_events() {
+        let h1 = test_hash(1);
+        let h2 = test_hash(2);
+
+        let inner = MockStream::new(vec![
+            Poll::Ready(Some(Ok(test_event(h1)))),
+            Poll::Ready(Some(Ok(test_event(h2)))),
+            Poll::Ready(None),
+        ]);
+
+        let subjects = HashSet::from([h1, h2]);
+        let filter = UpdateFilter::<MockStore>::new(inner, subjects);
+        let events = collect_sync(filter);
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].tx.hash, h1);
+        assert_eq!(events[1].tx.hash, h2);
+    }
+
+    #[test]
+    fn filters_out_non_matching_events() {
+        let h1 = test_hash(1);
+        let h2 = test_hash(2);
+        let h3 = test_hash(3);
+
+        let inner = MockStream::new(vec![
+            Poll::Ready(Some(Ok(test_event(h1)))),
+            Poll::Ready(Some(Ok(test_event(h2)))),
+            Poll::Ready(Some(Ok(test_event(h3)))),
+            Poll::Ready(None),
+        ]);
+
+        let subjects = HashSet::from([h1, h3]);
+        let filter = UpdateFilter::<MockStore>::new(inner, subjects);
+        let events = collect_sync(filter);
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].tx.hash, h1);
+        assert_eq!(events[1].tx.hash, h3);
+    }
+
+    #[test]
+    fn skips_non_matching_and_reaches_pending() {
+        // The filter must skip non-matching Ready items and propagate Pending
+        // only when the inner stream itself returns Pending.
+        let h1 = test_hash(1);
+        let h_other = test_hash(99);
+
+        let inner = MockStream::new(vec![
+            Poll::Ready(Some(Ok(test_event(h_other)))),
+            Poll::Ready(Some(Ok(test_event(h_other)))),
+            Poll::Pending,
+        ]);
+
+        let subjects = HashSet::from([h1]);
+        let mut filter = UpdateFilter::<MockStore>::new(inner, subjects);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        // Should skip both non-matching items and return Pending from the inner stream.
+        let result = poll_once(&mut filter, &mut cx);
+        assert!(result.is_pending());
+    }
+
+    #[test]
+    fn skips_non_matching_then_yields_matching() {
+        let h_skip = test_hash(10);
+        let h_want = test_hash(20);
+
+        let inner = MockStream::new(vec![
+            Poll::Ready(Some(Ok(test_event(h_skip)))),
+            Poll::Ready(Some(Ok(test_event(h_skip)))),
+            Poll::Ready(Some(Ok(test_event(h_want)))),
+            Poll::Ready(None),
+        ]);
+
+        let subjects = HashSet::from([h_want]);
+        let mut filter = UpdateFilter::<MockStore>::new(inner, subjects);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        // Should skip two non-matching and return the matching one.
+        match poll_once(&mut filter, &mut cx) {
+            Poll::Ready(Some(ev)) => assert_eq!(ev.tx.hash, h_want),
+            Poll::Ready(None) => panic!("expected Ready(Some), got Ready(None)"),
+            Poll::Pending => panic!("expected Ready(Some), got Pending"),
+        }
+    }
+
+    #[test]
+    fn error_terminates_stream() {
+        let h1 = test_hash(1);
+        let err = MempoolError::Internal("test".into());
+
+        let inner = MockStream::new(vec![
+            Poll::Ready(Some(Ok(test_event(h1)))),
+            Poll::Ready(Some(Err(err))),
+            // items after error should never be reached
+            Poll::Ready(Some(Ok(test_event(h1)))),
+        ]);
+
+        let subjects = HashSet::from([h1]);
+        let filter = UpdateFilter::<MockStore>::new(inner, subjects);
+        let events = collect_sync(filter);
+
+        // First event yielded, then error terminates the stream.
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].tx.hash, h1);
+    }
+
+    #[test]
+    fn empty_stream_returns_none() {
+        let inner = MockStream::new(vec![Poll::Ready(None)]);
+
+        let subjects = HashSet::from([test_hash(1)]);
+        let mut filter = UpdateFilter::<MockStore>::new(inner, subjects);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(matches!(poll_once(&mut filter, &mut cx), Poll::Ready(None)));
+    }
+
+    #[test]
+    fn empty_subjects_yields_nothing() {
+        let h1 = test_hash(1);
+
+        let inner = MockStream::new(vec![
+            Poll::Ready(Some(Ok(test_event(h1)))),
+            Poll::Ready(Some(Ok(test_event(h1)))),
+            Poll::Ready(None),
+        ]);
+
+        let subjects = HashSet::new();
+        let filter = UpdateFilter::<MockStore>::new(inner, subjects);
+        let events = collect_sync(filter);
+
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn pending_propagated_immediately() {
+        let inner = MockStream::new(vec![Poll::Pending]);
+
+        let subjects = HashSet::from([test_hash(1)]);
+        let mut filter = UpdateFilter::<MockStore>::new(inner, subjects);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(poll_once(&mut filter, &mut cx).is_pending());
+    }
+
+    #[test]
+    fn interleaved_pending_and_events() {
+        let h1 = test_hash(1);
+        let h2 = test_hash(2);
+
+        let inner = MockStream::new(vec![
+            Poll::Ready(Some(Ok(test_event(h1)))),
+            Poll::Pending,
+            Poll::Ready(Some(Ok(test_event(h2)))),
+            Poll::Ready(None),
+        ]);
+
+        let subjects = HashSet::from([h1, h2]);
+        let mut filter = UpdateFilter::<MockStore>::new(inner, subjects);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        // First poll: yields h1.
+        match poll_once(&mut filter, &mut cx) {
+            Poll::Ready(Some(ev)) => assert_eq!(ev.tx.hash, h1),
+            Poll::Ready(None) => panic!("expected Ready(Some(h1)), got Ready(None)"),
+            Poll::Pending => panic!("expected Ready(Some(h1)), got Pending"),
+        }
+
+        // Second poll: inner returns Pending.
+        assert!(poll_once(&mut filter, &mut cx).is_pending());
+
+        // Third poll: yields h2.
+        match poll_once(&mut filter, &mut cx) {
+            Poll::Ready(Some(ev)) => assert_eq!(ev.tx.hash, h2),
+            Poll::Ready(None) => panic!("expected Ready(Some(h2)), got Ready(None)"),
+            Poll::Pending => panic!("expected Ready(Some(h2)), got Pending"),
+        }
+
+        // Fourth poll: stream done.
+        assert!(matches!(poll_once(&mut filter, &mut cx), Poll::Ready(None)));
     }
 }

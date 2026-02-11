@@ -19,7 +19,7 @@ fn is_valid_cbor_content_type(headers: &HeaderMap) -> bool {
     content_type == "application/cbor"
 }
 
-pub async fn route<D: Domain>(
+pub async fn route<D: Domain + SubmitExt>(
     State(domain): State<Facade<D>>,
     headers: HeaderMap,
     cbor: Bytes,
@@ -29,7 +29,7 @@ pub async fn route<D: Domain>(
     }
 
     let chain = domain.read_chain();
-    let result = domain.inner.receive_tx(&chain, &cbor);
+    let result = domain.inner.receive_tx("minibf", &chain, &cbor);
 
     let hash = result.map_err(|e| match e {
         DomainError::ChainError(x) => match x {

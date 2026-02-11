@@ -6,7 +6,6 @@ use pallas::network::miniprotocols::txsubmission::{EraTxBody, EraTxId, Request, 
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
-use crate::mempool::Mempool;
 use crate::prelude::*;
 
 // HACK: the tx era number differs from the block era number, we subtract 1 to make them match.
@@ -38,8 +37,14 @@ pub struct Worker {
 }
 
 impl Worker {
-    async fn propagate_txs(&mut self, txs: Vec<MempoolTx>) -> Result<(), WorkerError> {
+    async fn propagate_txs(
+        &mut self,
+        mempool: &Mempool,
+        txs: Vec<MempoolTx>,
+    ) -> Result<(), WorkerError> {
         debug!(n = txs.len(), "propagating tx ids");
+
+        mempool.mark_ids_propagated(&txs);
 
         let payload = txs.iter().map(to_n2n_reply).collect_vec();
 
@@ -156,7 +161,7 @@ impl gasket::framework::Worker<Stage> for Worker {
 
                 if available > 0 {
                     let txs = stage.mempool.request(req);
-                    self.propagate_txs(txs).await?;
+                    self.propagate_txs(&stage.mempool, txs).await?;
                 } else {
                     debug!(req, available, "not enough txs to fulfill request");
                     self.unfulfilled_request = Some(req);
@@ -168,18 +173,19 @@ impl gasket::framework::Worker<Stage> for Worker {
                 stage.mempool.acknowledge(*ack as usize);
 
                 let txs = stage.mempool.request(*req as usize);
-                self.propagate_txs(txs).await?;
+                self.propagate_txs(&stage.mempool, txs).await?;
             }
             Request::Txs(ids) => {
                 info!("tx batch request");
 
-                let to_send = ids
+                let found: Vec<MempoolTx> = ids
                     .iter()
-                    // we omit any missing tx, we assume that this would be considered a protocol
-                    // violation and rejected by the upstream.
                     .filter_map(|x| stage.mempool.find_inflight(&Hash::from(x.1.as_slice())))
-                    .map(to_n2n_body)
                     .collect_vec();
+
+                stage.mempool.mark_bodies_sent(&found);
+
+                let to_send = found.into_iter().map(to_n2n_body).collect_vec();
 
                 let result = self.peer_session.txsubmission().reply_txs(to_send).await;
 

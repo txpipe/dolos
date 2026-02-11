@@ -35,7 +35,7 @@ pub struct DomainAdapter {
     pub state: StateStoreBackend,
     pub archive: ArchiveStoreBackend,
     pub indexes: IndexStoreBackend,
-    pub mempool: crate::mempool::Mempool,
+    pub mempool: Mempool,
     pub tip_broadcast: tokio::sync::broadcast::Sender<TipEvent>,
 }
 
@@ -101,7 +101,7 @@ impl Domain for DomainAdapter {
     type State = StateStoreBackend;
     type Archive = ArchiveStoreBackend;
     type Indexes = IndexStoreBackend;
-    type Mempool = crate::mempool::Mempool;
+    type Mempool = Mempool;
     type TipSubscription = TipSubscription;
 
     fn genesis(&self) -> Arc<Genesis> {

@@ -40,7 +40,7 @@ struct DecodedBlock {
 
 pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Result<()> {
     if args.verbose {
-        crate::common::setup_tracing(&config.logging)?;
+        crate::common::setup_tracing(&config.logging, &config.telemetry)?;
     } else {
         crate::common::setup_tracing_error_only()?;
     }

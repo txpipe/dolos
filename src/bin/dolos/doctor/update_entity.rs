@@ -24,7 +24,7 @@ pub struct Args {
 }
 
 pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
-    crate::common::setup_tracing(&config.logging)?;
+    crate::common::setup_tracing(&config.logging, &config.telemetry)?;
 
     let state = crate::common::open_state_store(config)?;
 
