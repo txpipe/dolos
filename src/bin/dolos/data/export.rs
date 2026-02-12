@@ -131,13 +131,13 @@ pub fn run(
 
     let mut stores = crate::common::open_data_stores(config)?;
 
-    prepare_wal(stores.wal, &pb)?;
+    // prepare_wal(stores.wal, &pb)?;
 
     let root = crate::common::ensure_storage_path(config)?;
 
-    let path = root.join("wal");
+    // let path = root.join("wal");
 
-    append_path_filtered(&mut archive, &path, Path::new("wal"))?;
+    // append_path_filtered(&mut archive, &path, Path::new("wal"))?;
 
     // prepare_archive requires direct redb access
     match &mut stores.archive {
