@@ -54,8 +54,28 @@ pub mod pointers {
             (13005, 15312, 1878946283) => None,
             (13200, 526450, 149104513) => None,
             (222624, 45784521, 167387965) => None,
+            (105, 13146, 24) => None,
             (16292793057, 1011302, 20) => None,
-            (18446744073709551615, 1221092, 2) => None,
+            (18446744073709551615, 1221092, 2) => Some(StakeCredential::AddrKeyhash(
+                "1332d859dd71f5b1089052a049690d81f7367eac9fafaef80b4da395"
+                    .parse()
+                    .unwrap(),
+            )),
+            (53004562, 9, 0) => Some(StakeCredential::AddrKeyhash(
+                "e46c33afa9ca60cfeb3b7452a415c271772020b3f57ac90c496a6127"
+                    .parse()
+                    .unwrap(),
+            )),
+            (156960568, 15, 0) => Some(StakeCredential::AddrKeyhash(
+                "a3d3ba720c11bb6b7364bb0ee2abfca79ec135aaafe0bd0b89f24121"
+                    .parse()
+                    .unwrap(),
+            )),
+            (78312587, 5, 0) => Some(StakeCredential::AddrKeyhash(
+                "a773914d934899b3656f7f4edc3293c5804dc288faa468f6587f05e6"
+                    .parse()
+                    .unwrap(),
+            )),
 
             (slot, tx_idx, cert_idx) => {
                 warn!(slot, tx_idx, cert_idx, "missing pointer mapping");
@@ -578,6 +598,22 @@ pub mod proposals {
                 }
                 "62c3c13187423c47f629e6187f36fbd61a9ba1d05d101588340cfbfdf47b22d2#0" => {
                     Ratified(393)
+                }
+                // Treasury Withdrawal for Catalyst Fund 14
+                "03f671791fd97011f30e4d6b76c9a91f4f6bcfb60ee37e5399b9545bb3f2757a#0" => {
+                    Ratified(597)
+                }
+                // Replace Constitutional Committee (2nd replacement)
+                "4dab331457b61b824bbc6ba4b9d9be4750e25c0b5dd42207aeb63c7431a6b704#0" => {
+                    Ratified(601)
+                }
+                // Treasury Withdrawal
+                "f8393f1ff814d3d52336a97712361fed933d9ef9e8d0909e1d31536a549fd22f#0" => {
+                    Ratified(605)
+                }
+                // New Constitution
+                "91a79f5c934b7c91e3027736d565080c2b6611fb8484b1156fdf16121fcfb410#0" => {
+                    Ratified(608)
                 }
 
                 _ => match protocol {
