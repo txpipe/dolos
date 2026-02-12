@@ -47,6 +47,7 @@ use txs::TxLogVisitor;
 
 pub trait BlockVisitor {
     #[allow(unused_variables)]
+    #[allow(clippy::too_many_arguments)]
     fn visit_root(
         &mut self,
         deltas: &mut WorkDeltas,
@@ -224,6 +225,7 @@ pub struct DeltaBuilder<'a> {
 }
 
 impl<'a> DeltaBuilder<'a> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: TrackConfig,
         genesis: Arc<Genesis>,
@@ -351,7 +353,7 @@ pub fn compute_delta<D: Domain>(
     let (epoch, _) = cache.eras.slot_epoch(batch.first_slot());
 
     let (protocol, _) = cache.eras.protocol_and_era_for_epoch(epoch);
-    let epoch_start = cache.eras.epoch_start(epoch as u64);
+    let epoch_start = cache.eras.epoch_start(epoch);
 
     debug!(
         from = batch.first_slot(),

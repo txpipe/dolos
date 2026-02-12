@@ -633,23 +633,3 @@ pub mod proposals {
         }
     }
 }
-
-pub mod pots {
-    use pallas::ledger::addresses::Network;
-
-    use crate::pots::Pots;
-
-    pub fn adjust_pots(network: Network, epoch: u64, mut pots: Pots) -> Pots {
-        // NOTE: All pot adjustment hacks have been removed to debug the root cause.
-        // Previously there were hacks for epochs 243, 279, and 286 that moved lovelace
-        // between pots to match ground truth. These masked underlying issues that
-        // cascade to affect later epochs.
-        //
-        // Removed hacks:
-        // - Epoch 243: 10,884,788 lovelace (rewards → treasury)
-        // - Epoch 279: 197,622 lovelace (rewards → treasury)
-        // - Epoch 286: 106,994,072,281 lovelace (rewards → reserves)
-
-        pots
-    }
-}

@@ -75,9 +75,11 @@ pub struct PreAllegraReward {
 
 impl PreAllegraReward {
     /// Merge two pre-Allegra rewards, keeping the minimum per Haskell Ord instance.
+    ///
     /// The Haskell Ord for Reward is:
     ///   1. LeaderReward < MemberReward (leader takes priority)
     ///   2. Same type → smaller pool ID wins
+    ///
     /// We keep the minimum because Set.deleteFindMin keeps the min element.
     pub fn merge(self, other: Self) -> Self {
         // Leader rewards take priority over member rewards
@@ -454,6 +456,7 @@ const DELEGATOR_CHUNK_SIZE: usize = 25;
 
 /// Compute delegator rewards for a chunk of delegators.
 /// This is a pure function that can be executed in parallel.
+#[allow(clippy::too_many_arguments)]
 fn compute_delegator_chunk<C: RewardsContext>(
     ctx: &C,
     pool: PoolHash,
