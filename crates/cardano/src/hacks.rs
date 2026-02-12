@@ -293,6 +293,9 @@ pub mod proposals {
                 "49578eba0c840e822e0688b09112f3f9baaeb51dd0e346c5a4f9d03d2cbc1953#0" => {
                     Ratified(232)
                 }
+                "158ef6b249b7c3ec219c62d11f0b8e766a356472d023bd7b1e736efed977f3c6#0" => {
+                    Ratified(251)
+                }
                 _ => match protocol {
                     0..=8 => RatifiedCurrentEpoch,
                     _ => Unknown,

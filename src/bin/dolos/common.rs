@@ -1,6 +1,8 @@
-use dolos_core::config::{ChainConfig, GenesisConfig, LoggingConfig, RootConfig};
+use dolos_core::config::{ChainConfig, GenesisConfig, LoggingConfig, RootConfig, TelemetryConfig};
 use dolos_core::BootstrapExt;
 use miette::{Context as _, IntoDiagnostic};
+use opentelemetry::trace::TracerProvider as _;
+use opentelemetry_otlp::WithExportConfig as _;
 use std::sync::Arc;
 use std::{fs, path::PathBuf, time::Duration};
 use tokio_util::sync::CancellationToken;
@@ -62,7 +64,7 @@ pub fn load_config(
 pub fn setup_domain(config: &RootConfig) -> miette::Result<DomainAdapter> {
     let stores = open_data_stores(config)?;
     let genesis = Arc::new(open_genesis_files(&config.genesis)?);
-    let mempool = dolos::mempool::Mempool::new();
+    let mempool = dolos_core::Mempool::new();
     let (tip_broadcast, _) = tokio::sync::broadcast::channel(100);
     let chain = config.chain.clone();
 
@@ -106,15 +108,12 @@ pub fn setup_tracing_error_only() -> miette::Result<()> {
     Ok(())
 }
 
-pub fn setup_tracing(config: &LoggingConfig) -> miette::Result<()> {
+pub fn setup_tracing(config: &LoggingConfig, telemetry: &TelemetryConfig) -> miette::Result<()> {
     let level = config.max_level;
 
     let mut filter = Targets::new()
         .with_target("dolos", level)
-        .with_target("gasket", level)
-        // Include fjall and lsm_tree for storage backend debugging
-        .with_target("fjall", level)
-        .with_target("lsm_tree", level);
+        .with_target("gasket", level);
 
     if config.include_tokio {
         filter = filter
@@ -138,10 +137,46 @@ pub fn setup_tracing(config: &LoggingConfig) -> miette::Result<()> {
         filter = filter.with_target("tower_http", level);
     }
 
+    if config.include_fjall {
+        filter = filter
+            .with_target("fjall", level)
+            .with_target("lsm_tree", level);
+    }
+
+    if config.include_otlp {
+        filter = filter.with_target("opentelemetry", level);
+    }
+
+    let otel_layer = if telemetry.enabled {
+        let exporter = opentelemetry_otlp::SpanExporter::builder()
+            .with_tonic()
+            .with_endpoint(&telemetry.otlp_endpoint)
+            .build()
+            .into_diagnostic()
+            .context("building OTLP span exporter")?;
+
+        let tracer = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+            .with_batch_exporter(exporter)
+            .with_resource(
+                opentelemetry_sdk::Resource::builder()
+                    .with_service_name(telemetry.service_name.clone())
+                    .build(),
+            )
+            .build();
+
+        opentelemetry::global::set_tracer_provider(tracer.clone());
+
+        let layer = tracing_opentelemetry::layer().with_tracer(tracer.tracer("dolos"));
+        Some(layer)
+    } else {
+        None
+    };
+
     #[cfg(not(feature = "debug"))]
     {
         tracing_subscriber::registry()
             .with(tracing_subscriber::fmt::layer())
+            .with(otel_layer)
             .with(filter)
             .init();
     }
@@ -151,6 +186,7 @@ pub fn setup_tracing(config: &LoggingConfig) -> miette::Result<()> {
         tracing_subscriber::registry()
             .with(tracing_subscriber::fmt::layer())
             .with(console_subscriber::spawn())
+            .with(otel_layer)
             .with(filter)
             .init();
     }

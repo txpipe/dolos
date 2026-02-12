@@ -1,24 +1,20 @@
 [upstream]
-type = "emulator"
+block_production_interval = 10
 
 [storage]
+version = "v3"
 path = "data"
 
 [storage.wal]
+backend = "redb"
 max_history = 10000
 
 [genesis]
-type = "inline"
-
-[[genesis.accounts]]
-name = "Alice"
-address = "addr_test1qx234567890123456789012345678901234567890123456789012345678901234567890123456789"
-initial_balance = 1000000000000000000
-
-[[genesis.accounts]]
-name = "Bob"
-address = "addr_test1qx234567890123456789012345678901234567890123456789012345678901234567890123456789"
-initial_balance = 1000000000000000000
+byron_path = "byron.json"
+shelley_path = "shelley.json"
+alonzo_path = "alonzo.json"
+conway_path = "conway.json"
+force_protocol = 6
 
 [sync]
 pull_batch_size = 100
@@ -33,6 +29,16 @@ permissive_cors = true
 [serve.ouroboros]
 listen_path = "dolos.socket"
 magic = 2
+
+[serve.trp]
+listen_address = "[::]:8000"
+max_optimize_rounds = 10
+permissive_cors = true
+
+[telemetry]
+enabled = true
+otlp_endpoint = "http://localhost:4317"
+service_name = "dolos"
 
 [logging]
 max_level = "DEBUG"

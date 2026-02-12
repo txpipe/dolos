@@ -62,7 +62,14 @@ pub fn dump_eras(config_path: &Path, output_path: &Path) -> Result<()> {
         config_path,
         file,
         &[
-            "data", "dump-state", "--namespace", "eras", "--format", "dbsync", "--count", "0",
+            "data",
+            "dump-state",
+            "--namespace",
+            "eras",
+            "--format",
+            "dbsync",
+            "--count",
+            "0",
         ],
     )?;
 

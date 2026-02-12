@@ -12,7 +12,6 @@ use std::pin::Pin;
 use tonic::{Request, Response, Status};
 use tracing::info;
 
-use crate::mempool::UpdateFilter;
 use crate::prelude::*;
 
 pub struct SubmitServiceImpl<D>
@@ -133,7 +132,7 @@ where
 
         let hash = self
             .domain
-            .receive_tx(&chain, tx_bytes.as_ref())
+            .receive_tx("grpc", &chain, tx_bytes.as_ref())
             .map_err(|e| Status::invalid_argument(format!("could not process tx: {e}")))?;
 
         Ok(Response::new(SubmitTxResponse {

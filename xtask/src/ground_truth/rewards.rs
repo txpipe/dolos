@@ -78,8 +78,8 @@ pub(super) fn fetch(dbsync_url: &str, epoch: u64) -> Result<Vec<RewardRow>> {
 }
 
 pub(super) fn write_csv(path: &Path, rows: &[RewardRow]) -> Result<()> {
-    let mut file = File::create(path)
-        .with_context(|| format!("writing rewards csv: {}", path.display()))?;
+    let mut file =
+        File::create(path).with_context(|| format!("writing rewards csv: {}", path.display()))?;
     writeln!(file, "stake,pool,amount,type,earned_epoch")?;
     for row in rows {
         writeln!(

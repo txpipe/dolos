@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use dolos_core::{BrokenInvariant, ChainError, Genesis, NsKey, TxoRef};
+use dolos_core::{BrokenInvariant, ChainError, Genesis, NsKey, TxOrder, TxoRef};
 use pallas::{
     crypto::hash::Hash,
     ledger::{
@@ -279,6 +279,7 @@ impl BlockVisitor for EpochStateVisitor {
         _: &mut WorkDeltas,
         _: &MultiEraBlock,
         _: &MultiEraTx,
+        _: &TxOrder,
         cert: &MultiEraCert,
     ) -> Result<(), ChainError> {
         if pallas_extras::cert_as_stake_registration(cert).is_some() {

@@ -443,9 +443,18 @@ fn insert_archive_tag(wx: &WriteTransaction, tag: &Tag, slot: BlockSlot) -> Resu
     use archive::indexes::*;
     use xxhash_rust::xxh3::xxh3_64;
 
-    let key = xxh3_64(&tag.key);
     let key_builder = archive::indexes::key_builder();
-    let bucketed_key = key_builder.bucketed_key(key, slot);
+    let bucketed_key =
+        if tag.dimension == archive_dimensions::METADATA {
+            let metadata =
+                u64::from_be_bytes(tag.key.as_slice().try_into().map_err(|_| {
+                    Error::ArchiveError("metadata key must be 8 bytes".to_string())
+                })?);
+            key_builder.bucketed_key(metadata, slot)
+        } else {
+            let key = xxh3_64(&tag.key);
+            key_builder.bucketed_key(key, slot)
+        };
 
     match tag.dimension {
         archive_dimensions::ADDRESS => {
@@ -499,9 +508,18 @@ fn remove_archive_tag(wx: &WriteTransaction, tag: &Tag, slot: BlockSlot) -> Resu
     use archive::indexes::*;
     use xxhash_rust::xxh3::xxh3_64;
 
-    let key = xxh3_64(&tag.key);
     let key_builder = archive::indexes::key_builder();
-    let bucketed_key = key_builder.bucketed_key(key, slot);
+    let bucketed_key =
+        if tag.dimension == archive_dimensions::METADATA {
+            let metadata =
+                u64::from_be_bytes(tag.key.as_slice().try_into().map_err(|_| {
+                    Error::ArchiveError("metadata key must be 8 bytes".to_string())
+                })?);
+            key_builder.bucketed_key(metadata, slot)
+        } else {
+            let key = xxh3_64(&tag.key);
+            key_builder.bucketed_key(key, slot)
+        };
 
     match tag.dimension {
         archive_dimensions::ADDRESS => {

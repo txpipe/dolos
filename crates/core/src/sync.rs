@@ -35,6 +35,7 @@ pub trait SyncExt: Domain {
 }
 
 impl<D: Domain> SyncExt for D {
+    #[instrument(skip_all)]
     fn roll_forward(&self, block: RawBlock) -> Result<BlockSlot, DomainError> {
         let mut chain = self.write_chain();
 

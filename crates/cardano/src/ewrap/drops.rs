@@ -5,7 +5,7 @@ use tracing::{debug, warn};
 
 use crate::{
     ewrap::{AccountId, BoundaryWork, DRepId},
-    AccountState, CardanoDelta, DRepState, FixedNamespace as _, PoolDelegation,
+    AccountState, CardanoDelta, DRepDelegation, DRepState, FixedNamespace as _, PoolDelegation,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -129,7 +129,9 @@ impl dolos_core::EntityDelta for DRepDelegatorDrop {
         debug!(delegator=%self.delegator, "dropping drep delegator");
 
         // apply changes
-        entity.drep.schedule(self.epoch, Some(None));
+        entity
+            .drep
+            .schedule(self.epoch, Some(DRepDelegation::NotDelegated));
     }
 
     fn undo(&self, _entity: &mut Option<AccountState>) {
@@ -167,11 +169,22 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         }
 
         if let Some(drep) = account.delegated_drep_at(current_epoch) {
-            if ctx.expiring_dreps.contains(drep) {
-                self.change(DRepDelegatorDrop::new(id.clone(), current_epoch));
+            let mut should_drop = ctx.retiring_dreps.contains(drep);
+
+            // Check for reregistrations
+            if !should_drop {
+                if let Some((_, registered_at)) =
+                    ctx.reregistrating_dreps.iter().find(|(x, _)| x == drep)
+                {
+                    if let Some(vote_delegated_at) = account.vote_delegated_at {
+                        if vote_delegated_at < *registered_at {
+                            should_drop = true;
+                        }
+                    }
+                }
             }
 
-            if ctx.retiring_dreps.contains(drep) {
+            if should_drop {
                 self.change(DRepDelegatorDrop::new(id.clone(), current_epoch));
             }
         }

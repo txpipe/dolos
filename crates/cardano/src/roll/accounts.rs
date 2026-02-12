@@ -1,4 +1,4 @@
-use dolos_core::{BlockSlot, ChainError, Genesis, NsKey};
+use dolos_core::{BlockSlot, ChainError, Genesis, NsKey, TxOrder};
 
 use super::WorkDeltas;
 use pallas::codec::minicbor;
@@ -225,25 +225,26 @@ impl dolos_core::EntityDelta for StakeDelegation {
 pub struct VoteDelegation {
     cred: StakeCredential,
     drep: DRep,
-    vote_delegated_at: BlockSlot,
+    vote_delegated_at: (BlockSlot, TxOrder),
     epoch: Epoch,
 
     // undo
     prev_drep: Option<DRepDelegation>,
-    prev_vote_delegated_at: Option<BlockSlot>,
+    prev_vote_delegated_at: Option<(BlockSlot, TxOrder)>,
 }
 
 impl VoteDelegation {
     pub fn new(
         cred: StakeCredential,
         drep: DRep,
-        vote_delegated_at: BlockSlot,
+        slot: BlockSlot,
+        order: TxOrder,
         epoch: Epoch,
     ) -> Self {
         Self {
             cred,
             drep,
-            vote_delegated_at,
+            vote_delegated_at: (slot, order),
             epoch,
             prev_drep: None,
             prev_vote_delegated_at: None,
@@ -268,7 +269,9 @@ impl dolos_core::EntityDelta for VoteDelegation {
 
         // apply changes
         entity.vote_delegated_at = Some(self.vote_delegated_at);
-        entity.drep.replace(Some(self.drep.clone()), self.epoch);
+        entity
+            .drep
+            .replace(DRepDelegation::Delegated(self.drep.clone()), self.epoch);
     }
 
     fn undo(&self, entity: &mut Option<AccountState>) {
@@ -339,7 +342,9 @@ impl dolos_core::EntityDelta for StakeDeregistration {
             .replace(PoolDelegation::NotDelegated, self.epoch);
         entity.retired_pool = None;
 
-        entity.drep.replace(None, self.epoch);
+        entity
+            .drep
+            .replace(DRepDelegation::NotDelegated, self.epoch);
     }
 
     fn undo(&self, _entity: &mut Option<AccountState>) {
@@ -372,56 +377,6 @@ impl dolos_core::EntityDelta for WithdrawalInc {
         let entity = entity.as_mut().expect("existing account");
 
         entity.stake.unwrap_live_mut().withdrawals_sum -= self.amount;
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DRepRegistration {
-    cred: StakeCredential,
-    slot: u64,
-    epoch: Epoch,
-    deposit: u64,
-}
-
-impl DRepRegistration {
-    pub fn new(cred: StakeCredential, slot: u64, epoch: Epoch, deposit: u64) -> Self {
-        Self {
-            cred,
-            slot,
-            epoch,
-            deposit,
-        }
-    }
-}
-
-impl dolos_core::EntityDelta for DRepRegistration {
-    type Entity = AccountState;
-
-    fn key(&self) -> NsKey {
-        let enc = minicbor::to_vec(&self.cred).unwrap();
-        NsKey::from((AccountState::NS, enc))
-    }
-
-    fn apply(&mut self, entity: &mut Option<AccountState>) {
-        let _entity =
-            entity.get_or_insert_with(|| AccountState::new(self.epoch, self.cred.clone()));
-
-        tracing::debug!(
-            slot = self.slot,
-            account = hex::encode(minicbor::to_vec(&self.cred).unwrap()),
-            "applying drep registration"
-        );
-
-        // TODO: track drep registration slot
-
-        // TODO: find out if we need to auto-delegate to self
-    }
-
-    fn undo(&self, entity: &mut Option<AccountState>) {
-        let _entity = entity.as_mut().expect("existing account");
-
-        // todo!()
-        // Placeholder undo logic. Ensure this does not panic.
     }
 }
 
@@ -505,6 +460,7 @@ impl BlockVisitor for AccountVisitor {
         deltas: &mut WorkDeltas,
         block: &MultiEraBlock,
         _: &MultiEraTx,
+        order: &TxOrder,
         cert: &MultiEraCert,
     ) -> Result<(), ChainError> {
         let epoch = self.epoch.expect("value set in root");
@@ -523,19 +479,12 @@ impl BlockVisitor for AccountVisitor {
             deltas.add_for_entity(StakeDeregistration::new(cred, block.slot(), epoch));
         }
 
-        // if let Some(cert) = pallas_extras::cert_as_drep_registration(cert) {
-        //     deltas.add_for_entity(DRepRegistration::new(cert.cred, cert.deposit,
-        // epoch)); }
-
-        // if let Some(cert) = pallas_extras::cert_as_drep_unregistration(cert) {
-        //     deltas.add_for_entity(DRepUnRegistration::new(cert.cred, cert.deposit,
-        // epoch)); }
-
         if let Some(cert) = pallas_extras::cert_as_vote_delegation(cert) {
             deltas.add_for_entity(VoteDelegation::new(
                 cert.delegator,
                 cert.drep,
                 block.slot(),
+                *order,
                 epoch,
             ));
         }

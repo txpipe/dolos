@@ -15,14 +15,18 @@ itertools.workspace = true
 num-rational.workspace = true
 num-bigint.workspace = true
 async-trait = "0.1.81"
+crc = "3.3.0"
 
 paste = "1.0.15"
 
 # TODO: remove rayon once we've moved parallel processing of inputs to the core crate
 rayon = "1.11.0"
 
-serde_json = { workspace = true, optional = true }
+serde_json = { workspace = true }
 self_cell = "1.2.0"
+bech32 = { workspace = true, optional = true }
+async-stream = "0.3.6"
+futures-core.workspace = true
 
 
 [dev-dependencies]
@@ -30,5 +34,5 @@ hex = "0.4.3"
 serde_json = "1.0.140"
 
 [features]
-include-genesis = ["serde_json"]
+include-genesis = []
 relaxed = []

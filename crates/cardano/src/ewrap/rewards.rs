@@ -7,8 +7,8 @@ use tracing::{debug, warn};
 use crate::{
     ewrap::AppliedReward,
     rupd::{credential_to_key, AccountId},
-    AccountState, CardanoDelta, CardanoEntity, FixedNamespace, PendingRewardState, PoolHash,
-    RewardLog,
+    AccountState, CardanoDelta, CardanoEntity, FixedNamespace, LeaderRewardLog, MemberRewardLog,
+    PendingRewardState,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -163,22 +163,30 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         });
 
         for (pool, value, as_leader) in reward.into_vec() {
-            // Track applied reward for test harness consumption
             ctx.applied_rewards.push(AppliedReward {
                 credential: account.credential.clone(),
-                pool: PoolHash::from(pool.as_slice()),
+                pool,
                 amount: value,
                 as_leader,
             });
 
-            self.log(
-                id.clone(),
-                RewardLog {
-                    amount: value,
-                    pool_id: pool.to_vec(),
-                    as_leader,
-                },
-            );
+            if as_leader {
+                self.log(
+                    id.clone(),
+                    LeaderRewardLog {
+                        amount: value,
+                        pool_id: pool.to_vec(),
+                    },
+                );
+            } else {
+                self.log(
+                    id.clone(),
+                    MemberRewardLog {
+                        amount: value,
+                        pool_id: pool.to_vec(),
+                    },
+                );
+            }
         }
 
         Ok(())
@@ -197,11 +205,15 @@ impl super::BoundaryVisitor for BoundaryVisitor {
 
         // Log any remaining pending rewards before draining (spendable rewards for accounts not visited)
         if pending_before_drain > 0 {
-            let pending_spendable: u64 = ctx.rewards.iter_pending()
+            let pending_spendable: u64 = ctx
+                .rewards
+                .iter_pending()
                 .filter(|(_, r)| r.is_spendable())
                 .map(|(_, r)| r.total_value())
                 .sum();
-            let pending_unspendable: u64 = ctx.rewards.iter_pending()
+            let pending_unspendable: u64 = ctx
+                .rewards
+                .iter_pending()
                 .filter(|(_, r)| !r.is_spendable())
                 .map(|(_, r)| r.total_value())
                 .sum();
@@ -222,7 +234,9 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         // Check for any remaining rewards after draining unspendable
         let remaining_after_drain = ctx.rewards.len();
         if remaining_after_drain > 0 {
-            let remaining_total: u64 = ctx.rewards.iter_pending()
+            let remaining_total: u64 = ctx
+                .rewards
+                .iter_pending()
                 .map(|(_, r)| r.total_value())
                 .sum();
             tracing::error!(
