@@ -131,7 +131,7 @@ impl StakeSnapshot {
         state: &D::State,
         stake_epoch: u64,
         protocol: EraProtocol,
-        rupd_slot: u64,
+        _rupd_slot: u64,
     ) -> Result<Self, ChainError> {
         let mut snapshot = Self::default();
 
@@ -182,11 +182,11 @@ impl StakeSnapshot {
                 continue;
             }
 
-            let stake = account
-                .stake
-                .snapshot_at(stake_epoch)
+            let stake_value = account.stake.snapshot_at(stake_epoch);
+            let stake = stake_value
                 .map(|x| x.total_for_era(protocol))
                 .unwrap_or_default();
+
 
             snapshot.track_stake(&account.credential, *pool, stake)?;
         }

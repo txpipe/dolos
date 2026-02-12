@@ -17,8 +17,8 @@ use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use crate::model::FixedNamespace as _;
-use crate::{model::AccountState, pallas_extras, roll::BlockVisitor};
 use crate::rupd::EnqueueMir;
+use crate::{model::AccountState, pallas_extras, roll::BlockVisitor};
 use crate::{DRepDelegation, PParamsSet, PoolDelegation, PoolHash};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -546,6 +546,7 @@ impl BlockVisitor for AccountVisitor {
             if let InstantaneousRewardTarget::StakeCredentials(creds) = target {
                 // Pre-Alonzo (protocol < 5): MIRs overwrite previous values (Map.union semantics)
                 // Alonzo+ (protocol >= 5): MIRs accumulate (Map.unionWith (<>) semantics)
+                // TODO: move this logic out of the visitor and into a module more ledger-related.
                 let overwrite = self.protocol_version.unwrap_or(0) < 5;
 
                 for (cred, amount) in creds {
@@ -555,10 +556,12 @@ impl BlockVisitor for AccountVisitor {
                     // registered at epoch boundary, matching the Cardano ledger.
                     match source {
                         InstantaneousRewardSource::Reserves => {
-                            deltas.add_for_entity(EnqueueMir::from_reserves(cred, amount, overwrite));
+                            deltas
+                                .add_for_entity(EnqueueMir::from_reserves(cred, amount, overwrite));
                         }
                         InstantaneousRewardSource::Treasury => {
-                            deltas.add_for_entity(EnqueueMir::from_treasury(cred, amount, overwrite));
+                            deltas
+                                .add_for_entity(EnqueueMir::from_treasury(cred, amount, overwrite));
                         }
                     }
                 }
