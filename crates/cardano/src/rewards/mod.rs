@@ -2,6 +2,7 @@ use std::{collections::HashMap, marker::PhantomData};
 
 use dolos_core::ChainError;
 use pallas::ledger::primitives::StakeCredential;
+use rayon::prelude::*;
 use tracing::debug;
 
 use crate::{
@@ -73,11 +74,26 @@ pub struct PreAllegraReward {
 }
 
 impl PreAllegraReward {
+    /// Merge two pre-Allegra rewards, keeping the minimum per Haskell Ord instance.
+    ///
+    /// The Haskell Ord for Reward is:
+    ///   1. LeaderReward < MemberReward (leader takes priority)
+    ///   2. Same type → smaller pool ID wins
+    ///
+    /// We keep the minimum because Set.deleteFindMin keeps the min element.
     pub fn merge(self, other: Self) -> Self {
-        if self.pool < other.pool {
-            other
-        } else {
-            self
+        // Leader rewards take priority over member rewards
+        match (self.as_leader, other.as_leader) {
+            (true, false) => self,  // self is leader, wins
+            (false, true) => other, // other is leader, wins
+            _ => {
+                // Same type (both leader or both member): keep smaller pool ID
+                if self.pool <= other.pool {
+                    self
+                } else {
+                    other
+                }
+            }
         }
     }
 
@@ -179,7 +195,10 @@ pub struct RewardMap<C: RewardsContext> {
     incentives: EpochIncentives,
     pending: HashMap<StakeCredential, Reward>,
     applied_effective: u64,
-    applied_unspendable: u64,
+    /// Unspendable rewards that go to treasury (accounts that deregistered late after RUPD).
+    applied_unspendable_to_treasury: u64,
+    /// Unspendable rewards that return to reserves (accounts that deregistered soon after RUPD).
+    applied_unspendable_to_reserves: u64,
     _phantom: PhantomData<C>,
 }
 
@@ -213,7 +232,8 @@ impl<C: RewardsContext> Default for RewardMap<C> {
             incentives: EpochIncentives::default(),
             pending: HashMap::new(),
             applied_effective: 0,
-            applied_unspendable: 0,
+            applied_unspendable_to_treasury: 0,
+            applied_unspendable_to_reserves: 0,
             _phantom: PhantomData,
         }
     }
@@ -225,7 +245,8 @@ impl<C: RewardsContext> Clone for RewardMap<C> {
             incentives: self.incentives.clone(),
             pending: self.pending.clone(),
             applied_effective: self.applied_effective,
-            applied_unspendable: self.applied_unspendable,
+            applied_unspendable_to_treasury: self.applied_unspendable_to_treasury,
+            applied_unspendable_to_reserves: self.applied_unspendable_to_reserves,
             _phantom: PhantomData,
         }
     }
@@ -237,7 +258,8 @@ impl<C: RewardsContext> RewardMap<C> {
             incentives,
             pending: HashMap::new(),
             applied_effective: 0,
-            applied_unspendable: 0,
+            applied_unspendable_to_treasury: 0,
+            applied_unspendable_to_reserves: 0,
             _phantom: PhantomData,
         }
     }
@@ -291,12 +313,22 @@ impl<C: RewardsContext> RewardMap<C> {
         Some(reward)
     }
 
-    pub fn return_reward(&mut self, amount: Lovelace) {
+    /// Return an unspendable reward to treasury (for accounts that deregistered late after RUPD).
+    pub fn return_reward_to_treasury(&mut self, amount: Lovelace) {
         self.applied_effective = sub!(self.applied_effective, amount);
-        self.applied_unspendable = add!(self.applied_unspendable, amount);
+        self.applied_unspendable_to_treasury = add!(self.applied_unspendable_to_treasury, amount);
     }
 
-    pub fn drain_unspendable(&mut self) -> Vec<StakeCredential> {
+    /// Return an unspendable reward to reserves (for accounts that deregistered soon after RUPD).
+    pub fn return_reward_to_reserves(&mut self, amount: Lovelace) {
+        self.applied_effective = sub!(self.applied_effective, amount);
+        self.applied_unspendable_to_reserves = add!(self.applied_unspendable_to_reserves, amount);
+    }
+
+    /// Drain rewards marked as unspendable at RUPD time (is_spendable: false).
+    /// Pre-Babbage: all unspendable returns to reserves.
+    /// Post-Babbage: all unspendable goes to treasury.
+    pub fn drain_unspendable(&mut self, to_reserves: bool) -> Vec<StakeCredential> {
         let unspendable: Vec<_> = self
             .pending
             .extract_if(|_, reward| !reward.is_spendable())
@@ -305,7 +337,11 @@ impl<C: RewardsContext> RewardMap<C> {
         let mut credentials = Vec::with_capacity(unspendable.len());
 
         for (credential, reward) in unspendable {
-            self.applied_unspendable += reward.total_value();
+            if to_reserves {
+                self.applied_unspendable_to_reserves += reward.total_value();
+            } else {
+                self.applied_unspendable_to_treasury += reward.total_value();
+            }
             credentials.push(credential);
         }
 
@@ -319,7 +355,8 @@ impl<C: RewardsContext> RewardMap<C> {
             if reward.is_spendable() {
                 self.applied_effective += reward.total_value();
             } else {
-                self.applied_unspendable += reward.total_value();
+                // RUPD-time unspendable goes to treasury
+                self.applied_unspendable_to_treasury += reward.total_value();
             }
         }
     }
@@ -333,9 +370,22 @@ impl<C: RewardsContext> RewardMap<C> {
         self.applied_effective
     }
 
+    /// Get unspendable rewards that go to treasury.
+    pub fn applied_unspendable_to_treasury(&self) -> u64 {
+        assert!(self.pending.is_empty());
+        self.applied_unspendable_to_treasury
+    }
+
+    /// Get unspendable rewards that return to reserves.
+    pub fn applied_unspendable_to_reserves(&self) -> u64 {
+        assert!(self.pending.is_empty());
+        self.applied_unspendable_to_reserves
+    }
+
+    /// Get total unspendable rewards (both treasury and reserves).
     pub fn applied_unspendable(&self) -> u64 {
         assert!(self.pending.is_empty());
-        self.applied_unspendable
+        self.applied_unspendable_to_treasury + self.applied_unspendable_to_reserves
     }
 
     /// Iterate over all pending rewards (for persistence).
@@ -365,13 +415,14 @@ impl<C: RewardsContext> RewardMap<C> {
             incentives,
             pending,
             applied_effective: 0,
-            applied_unspendable: 0,
+            applied_unspendable_to_treasury: 0,
+            applied_unspendable_to_reserves: 0,
             _phantom: PhantomData,
         }
     }
 }
 
-pub trait RewardsContext {
+pub trait RewardsContext: Sync {
     fn incentives(&self) -> &EpochIncentives;
     fn pots(&self) -> &Pots;
 
@@ -400,20 +451,71 @@ pub trait RewardsContext {
     }
 }
 
+/// Chunk size for parallel delegator processing.
+const DELEGATOR_CHUNK_SIZE: usize = 25;
+
+/// Compute delegator rewards for a chunk of delegators.
+/// This is a pure function that can be executed in parallel.
+#[allow(clippy::too_many_arguments)]
+fn compute_delegator_chunk<C: RewardsContext>(
+    ctx: &C,
+    pool: PoolHash,
+    total_pool_reward: u64,
+    pool_stake: u64,
+    circulating_supply: u64,
+    pool_cost: u64,
+    pool_margin: formulas::Ratio,
+    owners: &[StakeCredential],
+    babbage_or_later: bool,
+    chunk: &[StakeCredential],
+) -> Vec<(StakeCredential, u64)> {
+    chunk
+        .iter()
+        .filter_map(|delegator| {
+            // Skip owners - they already get paid via operator share
+            if owners.contains(delegator) {
+                return None;
+            }
+
+            // Member rewards are only computed if:
+            // 1. Protocol >= 7 (Babbage hardfork removes prefilter), OR
+            // 2. The delegator account is registered
+            let delegator_registered = ctx.is_account_registered(delegator);
+            if !babbage_or_later && !delegator_registered {
+                return None;
+            }
+
+            let delegator_stake = ctx.account_stake(&pool, delegator);
+
+            let delegator_reward = formulas::delegator_reward(
+                total_pool_reward,
+                delegator_stake,
+                pool_stake,
+                circulating_supply,
+                pool_cost,
+                pool_margin.clone(),
+            );
+
+            Some((delegator.clone(), delegator_reward))
+        })
+        .collect()
+}
+
 pub fn define_rewards<C: RewardsContext>(ctx: &C) -> Result<RewardMap<C>, ChainError> {
     let mut map = RewardMap::<C>::new(ctx.incentives().clone());
 
+    // Sequential pool iteration with parallel delegator processing
     for pool in ctx.iter_all_pools() {
         let pool_params = ctx.pool_params(pool);
 
         let operator_account = pallas_extras::parse_reward_account(&pool_params.reward_account)
             .expect("invalid pool reward account");
 
-        let owners = pool_params
+        let owners: Vec<_> = pool_params
             .pool_owners
             .iter()
             .map(|owner| pallas_extras::keyhash_to_stake_cred(*owner))
-            .collect::<Vec<_>>();
+            .collect();
 
         let live_pledge = ctx.live_pledge(pool, &owners);
         let circulating_supply = ctx.pots().circulating();
@@ -422,6 +524,11 @@ pub fn define_rewards<C: RewardsContext>(ctx: &C) -> Result<RewardMap<C>, ChainE
         let total_active_stake = ctx.active_stake();
         let epoch_blocks = ctx.epoch_blocks();
         let pool_blocks = ctx.pool_blocks(pool);
+
+        // Pools that made no blocks this epoch get no rewards.
+        if pool_blocks == 0 {
+            continue;
+        }
 
         let k = ctx.pparams().ensure_k()?;
         let a0 = ctx.pparams().ensure_a0()?;
@@ -464,29 +571,44 @@ pub fn define_rewards<C: RewardsContext>(ctx: &C) -> Result<RewardMap<C>, ChainE
             "computed pool rewards"
         );
 
-        map.include(ctx, &operator_account, operator_share, pool, true);
+        // Leader rewards are only computed if:
+        // 1. Protocol >= 7 (Babbage hardfork removes prefilter), OR
+        // 2. The operator's reward account is registered
+        let protocol_major = ctx.pparams().protocol_major().unwrap_or(0);
+        let babbage_or_later = protocol_major >= 7;
+        let is_operator_registered = ctx.is_account_registered(&operator_account);
 
-        for delegator in ctx.pool_delegators(pool) {
-            if owners.contains(&delegator) {
-                // we skip giving out rewards to owners since they already get paid via the
-                // operator share
-                continue;
+        if babbage_or_later || is_operator_registered {
+            map.include(ctx, &operator_account, operator_share, pool, true);
+        }
 
-                // TODO: make sure that the above statement matches the specs
-            }
+        // Collect delegators and process in parallel chunks
+        let delegators: Vec<_> = ctx.pool_delegators(pool).collect();
+        let pool_margin = pallas_ratio!(pool_params.margin);
 
-            let delegator_stake = ctx.account_stake(&pool, &delegator);
+        // Parallel processing of delegator chunks
+        let delegator_rewards: Vec<_> = delegators
+            .par_chunks(DELEGATOR_CHUNK_SIZE)
+            .map(|chunk| {
+                compute_delegator_chunk(
+                    ctx,
+                    pool,
+                    total_pool_reward,
+                    pool_stake,
+                    circulating_supply,
+                    pool_params.cost,
+                    pool_margin.clone(),
+                    &owners,
+                    babbage_or_later,
+                    chunk,
+                )
+            })
+            .flatten()
+            .collect();
 
-            let delegator_reward = formulas::delegator_reward(
-                total_pool_reward,
-                delegator_stake,
-                pool_stake,
-                circulating_supply,
-                pool_params.cost,
-                pallas_ratio!(pool_params.margin),
-            );
-
-            map.include(ctx, &delegator, delegator_reward, pool, false);
+        // Sequential merge of results
+        for (delegator, reward) in delegator_rewards {
+            map.include(ctx, &delegator, reward, pool, false);
         }
     }
 

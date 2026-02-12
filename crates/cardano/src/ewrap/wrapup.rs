@@ -124,13 +124,70 @@ fn define_end_stats(ctx: &super::BoundaryWork) -> EndStats {
 
     let incentives = ctx.rewards.incentives();
 
+    // Use effective MIR amounts (only applied to registered accounts)
+    // instead of total from rolling stats (which includes MIRs to unregistered accounts)
+    let treasury_mirs = ctx.effective_treasury_mirs;
+    let reserve_mirs = ctx.effective_reserve_mirs;
+    let invalid_treasury_mirs = ctx.invalid_treasury_mirs;
+    let invalid_reserve_mirs = ctx.invalid_reserve_mirs;
+
+    // Log comparison with rolling stats for debugging
+    let rolling_treasury_mirs = ctx
+        .ending_state()
+        .rolling
+        .unwrap_live()
+        .treasury_mirs;
+    if treasury_mirs != rolling_treasury_mirs {
+        tracing::info!(
+            epoch = ctx.ending_state().number,
+            %treasury_mirs,
+            %rolling_treasury_mirs,
+            %invalid_treasury_mirs,
+            "treasury MIRs: effective != rolling (MIRs to unregistered accounts)"
+        );
+    }
+
+    let effective = ctx.rewards.applied_effective();
+    let to_treasury = ctx.rewards.applied_unspendable_to_treasury();
+    let to_reserves = ctx.rewards.applied_unspendable_to_reserves();
+
+    // Sum of applied_rewards should match effective
+    let applied_rewards_sum: u64 = ctx.applied_rewards.iter().map(|r| r.amount).sum();
+
+    assert!(
+        effective == applied_rewards_sum,
+        "EWRAP epoch {}: effective_rewards ({}) != applied_rewards_sum ({}), diff = {}",
+        ctx.ending_state().number,
+        effective,
+        applied_rewards_sum,
+        effective as i64 - applied_rewards_sum as i64
+    );
+
+    tracing::info!(
+        epoch = ctx.ending_state().number,
+        available_rewards = %incentives.available_rewards,
+        %effective,
+        %to_treasury,
+        %to_reserves,
+        consumed = %(effective + to_treasury),
+        returned = %(incentives.available_rewards.saturating_sub(effective + to_treasury)),
+        %applied_rewards_sum,
+        applied_rewards_count = ctx.applied_rewards.len(),
+        "EWRAP reward classification"
+    );
+
     EndStats {
         pool_deposit_count: ctx.new_pools.len() as u64,
         pool_refund_count: pool_refund_count as u64,
         pool_invalid_refund_count: pool_invalid_refund_count as u64,
         epoch_incentives: incentives.clone(),
-        effective_rewards: ctx.rewards.applied_effective(),
-        unspendable_rewards: ctx.rewards.applied_unspendable(),
+        effective_rewards: effective,
+        unspendable_to_treasury: to_treasury,
+        unspendable_to_reserves: to_reserves,
+        treasury_mirs,
+        reserve_mirs,
+        invalid_treasury_mirs,
+        invalid_reserve_mirs,
         proposal_refunds: proposal_valid_refunds,
         proposal_invalid_refunds,
         // TODO: deprecate

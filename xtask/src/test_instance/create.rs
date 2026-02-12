@@ -18,6 +18,14 @@ pub struct CreateArgs {
     /// Stop syncing at the beginning of this epoch
     #[arg(long)]
     pub epoch: u64,
+
+    /// Enable verbose output for the bootstrap command
+    #[arg(long, action)]
+    pub verbose: bool,
+
+    /// Skip using the seed and bootstrap from scratch
+    #[arg(long, action)]
+    pub skip_seed: bool,
 }
 
 /// Run the create test-instance command.
@@ -43,6 +51,8 @@ pub fn run(sh: &Shell, args: &CreateArgs) -> Result<()> {
         stop_epoch: args.epoch,
         name: None,
         force: false,
+        verbose: args.verbose,
+        skip_seed: args.skip_seed,
     };
 
     bootstrap::run(sh, &bootstrap_args)?;

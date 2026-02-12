@@ -78,6 +78,9 @@ pub struct WorkContext {
     pub chain_summary: ChainSummary,
     pub genesis: Arc<Genesis>,
 
+    /// Unredeemed AVVM UTxOs reclaimed at the Shelley→Allegra boundary.
+    pub avvm_reclamation: u64,
+
     // computed via visitors
     pub deltas: WorkDeltas,
     pub logs: Vec<(EntityKey, CardanoEntity)>,

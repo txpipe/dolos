@@ -3,7 +3,9 @@ use dolos_core::{BlockSlot, ChainError, Genesis, NsKey, TxOrder};
 use super::WorkDeltas;
 use pallas::codec::minicbor;
 use pallas::crypto::hash::Hash;
-use pallas::ledger::primitives::alonzo::{InstantaneousRewardTarget, MoveInstantaneousReward};
+use pallas::ledger::primitives::alonzo::{
+    InstantaneousRewardSource, InstantaneousRewardTarget, MoveInstantaneousReward,
+};
 use pallas::ledger::primitives::conway::DRep;
 use pallas::ledger::primitives::Epoch;
 use pallas::ledger::{
@@ -15,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use crate::model::FixedNamespace as _;
+use crate::rupd::EnqueueMir;
 use crate::{model::AccountState, pallas_extras, roll::BlockVisitor};
 use crate::{DRepDelegation, PParamsSet, PoolDelegation, PoolHash};
 
@@ -377,43 +380,14 @@ impl dolos_core::EntityDelta for WithdrawalInc {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AssignMirRewards {
-    epoch: Epoch,
-    account: StakeCredential,
-    reward: u64,
-}
-
-impl dolos_core::EntityDelta for AssignMirRewards {
-    type Entity = AccountState;
-
-    fn key(&self) -> NsKey {
-        let enc = minicbor::to_vec(&self.account).unwrap();
-        NsKey::from((AccountState::NS, enc))
-    }
-
-    fn apply(&mut self, entity: &mut Option<Self::Entity>) {
-        //let entity = entity.get_or_insert_with(|| AccountState::new(self.epoch, self.account.clone()));
-        let Some(entity) = entity.as_mut() else {
-            // we don't credit MIRs to unregistered accounts
-            return;
-        };
-
-        debug!(reward = self.reward, "assigning mir rewards");
-
-        let stake = entity.stake.unwrap_live_mut();
-        stake.rewards_sum += self.reward;
-    }
-
-    fn undo(&self, _entity: &mut Option<Self::Entity>) {
-        // TODO: implement undo
-    }
-}
-
 #[derive(Default, Clone)]
 pub struct AccountVisitor {
     deposit: Option<u64>,
     epoch: Option<Epoch>,
+    /// Protocol version for determining MIR accumulation behavior.
+    /// Pre-Alonzo (< 5): MIRs overwrite previous values.
+    /// Alonzo+ (>= 5): MIRs accumulate.
+    protocol_version: Option<u16>,
 }
 
 impl BlockVisitor for AccountVisitor {
@@ -424,10 +398,12 @@ impl BlockVisitor for AccountVisitor {
         _: &Genesis,
         pparams: &PParamsSet,
         epoch: Epoch,
+        _: u64,
         _: u16,
     ) -> Result<(), ChainError> {
         self.deposit = pparams.ensure_key_deposit().ok();
         self.epoch = Some(epoch);
+        self.protocol_version = pparams.protocol_major();
         Ok(())
     }
 
@@ -514,15 +490,29 @@ impl BlockVisitor for AccountVisitor {
         }
 
         if let Some(cert) = pallas_extras::cert_as_mir_certificate(cert) {
-            let MoveInstantaneousReward { target, .. } = cert;
+            let MoveInstantaneousReward { source, target, .. } = cert;
 
             if let InstantaneousRewardTarget::StakeCredentials(creds) = target {
+                // Pre-Alonzo (protocol < 5): MIRs overwrite previous values (Map.union semantics)
+                // Alonzo+ (protocol >= 5): MIRs accumulate (Map.unionWith (<>) semantics)
+                // TODO: move this logic out of the visitor and into a module more ledger-related.
+                let overwrite = self.protocol_version.unwrap_or(0) < 5;
+
                 for (cred, amount) in creds {
-                    deltas.add_for_entity(AssignMirRewards {
-                        epoch: self.epoch.expect("value set in root"),
-                        account: cred,
-                        reward: amount.max(0) as u64,
-                    });
+                    let amount = amount.max(0) as u64;
+                    // Store pending MIR to be applied at EWRAP (not immediately)
+                    // This ensures MIRs are only applied to accounts that are
+                    // registered at epoch boundary, matching the Cardano ledger.
+                    match source {
+                        InstantaneousRewardSource::Reserves => {
+                            deltas
+                                .add_for_entity(EnqueueMir::from_reserves(cred, amount, overwrite));
+                        }
+                        InstantaneousRewardSource::Treasury => {
+                            deltas
+                                .add_for_entity(EnqueueMir::from_treasury(cred, amount, overwrite));
+                        }
+                    }
                 }
             }
         }

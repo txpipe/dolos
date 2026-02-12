@@ -250,6 +250,9 @@ impl WorkBatch {
                 let to_apply = block.deltas.entities.get_mut(key);
 
                 if let Some(to_apply) = to_apply {
+                    // Deltas are applied in their natural order from block traversal.
+                    // This matches the Haskell ledger which processes certificates
+                    // sequentially in the order they appear (no priority logic).
                     for delta in to_apply {
                         delta.apply(entity);
                     }

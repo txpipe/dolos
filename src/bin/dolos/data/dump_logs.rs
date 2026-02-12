@@ -240,7 +240,7 @@ impl TableRow for EpochState {
                         "{}",
                         self.end
                             .as_ref()
-                            .map(|e| e.unspendable_rewards)
+                            .map(|e| e.unspendable_to_treasury + e.unspendable_to_reserves)
                             .unwrap_or_default()
                     ),
                 ]

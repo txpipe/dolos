@@ -33,6 +33,7 @@ impl BlockVisitor for TxLogVisitor {
         _: &Genesis,
         _: &PParamsSet,
         _: Epoch,
+        _: u64,
         _: u16,
     ) -> Result<(), ChainError> {
         // Index tag extraction moved to CardanoIndexDeltaBuilder

@@ -23,6 +23,7 @@ pub mod synthetic;
 
 pub mod toy_domain;
 
+pub mod harness;
 pub mod mempool;
 pub mod streams;
 

@@ -121,8 +121,14 @@ pub struct PotDelta {
     #[n(9)]
     pub effective_rewards: Lovelace,
 
+    /// Unspendable rewards that go to treasury (accounts deregistered late after RUPD).
     #[n(10)]
-    pub unspendable_rewards: Lovelace,
+    pub unspendable_to_treasury: Lovelace,
+
+    /// Unspendable rewards that return to reserves (accounts deregistered soon after RUPD).
+    #[n(22)]
+    #[cbor(default)]
+    pub unspendable_to_reserves: Lovelace,
 
     #[n(11)]
     pub drep_deposits: Lovelace,
@@ -164,6 +170,17 @@ pub struct PotDelta {
     #[n(21)]
     #[cbor(default)]
     pub mark_protocol_version: u16,
+
+    /// Unredeemed AVVM UTxOs reclaimed at the Shelley→Allegra boundary.
+    /// Value is moved from UTxO pot to reserves.
+    #[n(23)]
+    #[cbor(default)]
+    pub avvm_reclamation: Lovelace,
+
+    /// MIR sourced from treasury.
+    #[n(24)]
+    #[cbor(default)]
+    pub treasury_mirs: Lovelace,
 }
 
 impl PotDelta {
@@ -181,7 +198,8 @@ impl PotDelta {
             pool_invalid_refund_count: 0,
             withdrawals: 0,
             effective_rewards: 0,
-            unspendable_rewards: 0,
+            unspendable_to_treasury: 0,
+            unspendable_to_reserves: 0,
             drep_deposits: 0,
             proposal_deposits: 0,
             drep_refunds: 0,
@@ -191,23 +209,27 @@ impl PotDelta {
             proposal_invalid_refunds: 0,
             deposit_per_account: None,
             deposit_per_pool: None,
+            avvm_reclamation: 0,
+            treasury_mirs: 0,
         }
     }
 
+    /// Total rewards consumed from the available incentives pool.
+    /// Includes effective (applied) and unspendable rewards that go to treasury.
+    /// Unspendable rewards that return to reserves are NOT consumed (they stay in reserves).
     pub fn consumed_incentives(&self) -> Lovelace {
-        if self.mark_protocol_version < 7 {
-            return self.effective_rewards;
-        }
-
-        self.effective_rewards + self.unspendable_rewards
+        self.effective_rewards + self.unspendable_to_treasury
     }
 
+    /// Unspendable rewards that go to treasury.
+    /// These are rewards for accounts that deregistered late after RUPD.
     pub fn incentives_back_to_treasury(&self) -> Lovelace {
-        if self.mark_protocol_version < 7 {
-            return 0;
-        }
+        self.unspendable_to_treasury
+    }
 
-        self.unspendable_rewards
+    /// Total unspendable rewards (both treasury and reserves).
+    pub fn total_unspendable(&self) -> Lovelace {
+        self.unspendable_to_treasury + self.unspendable_to_reserves
     }
 }
 
@@ -302,7 +324,7 @@ pub fn epoch_incentives(
     let reward_pot = fee_ss + delta_r1;
 
     // Δt1 = floor( τ * rewardPot )
-    let treasury_tax = floor_int!(tau * ratio!(reward_pot), u64);
+    let treasury_tax = floor_int!(tau.clone() * ratio!(reward_pot), u64);
 
     // R = rewardPot - Δt1
     let available_rewards = reward_pot - treasury_tax;
@@ -363,6 +385,7 @@ pub fn apply_shelley_delta(mut pots: Pots, incentives: &EpochIncentives, delta: 
     pots.treasury += delta.pool_invalid_refund_count * pots.deposit_per_pool;
     pots.treasury += delta.proposal_invalid_refunds;
     pots.treasury += delta.treasury_donations;
+    pots.treasury = sub!(pots.treasury, delta.treasury_mirs);
 
     // fees pot
     pots.fees = sub!(pots.fees, incentives.used_fees);
@@ -374,6 +397,7 @@ pub fn apply_shelley_delta(mut pots: Pots, incentives: &EpochIncentives, delta: 
     pots.rewards += delta.pool_refund_count * pots.deposit_per_pool;
     pots.rewards += delta.proposal_refunds;
     pots.rewards += delta.reserve_mirs;
+    pots.rewards += delta.treasury_mirs;
 
     // we don't need to return account deposit refunds to the rewards pot because
     // these refunds are returned directly as utxos in the deregistration
@@ -382,6 +406,11 @@ pub fn apply_shelley_delta(mut pots: Pots, incentives: &EpochIncentives, delta: 
     // utxos pot
     pots.utxos += delta.produced_utxos;
     pots.utxos -= delta.consumed_utxos;
+
+    // AVVM reclamation at Shelley→Allegra boundary: unredeemed AVVM UTxOs
+    // are removed from the UTxO set and their value returned to reserves.
+    pots.utxos -= delta.avvm_reclamation;
+    pots.reserves += delta.avvm_reclamation;
 
     // pool count
     pots.pool_count += delta.pool_deposit_count;
@@ -541,7 +570,7 @@ mod tests {
         let incentives = epoch_incentives(pots.reserves, fee_ss, rho, tau, eta);
 
         let delta = PotDelta {
-            unspendable_rewards: 295063003292,
+            unspendable_to_treasury: 295063003292,
             deposit_per_pool: Some(500_000_000),
             deposit_per_account: Some(2_000_000),
             ..PotDelta::neutral(7, 7)

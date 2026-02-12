@@ -410,7 +410,12 @@ impl dolos_core::ChainLogic for CardanoLogic {
 
         let eras = eras::load_era_summary::<D>(state)?;
 
-        let stability_window = utils::stability_window(genesis);
+        // Use randomness_stability_window (4k/f) for the RUPD trigger boundary.
+        // The Haskell ledger's startStep fires at randomnessStabilisationWindow
+        // into the epoch, capturing addrsRew (registered accounts) for the pre-Babbage
+        // prefilter. Using 4k/f instead of 3k/f ensures the state at RUPD time includes
+        // all deregistrations up to the correct threshold.
+        let stability_window = utils::randomness_stability_window(genesis);
 
         Ok(Self {
             config,

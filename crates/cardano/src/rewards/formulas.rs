@@ -96,7 +96,9 @@ pub fn pool_apparent_performance(
     // if d < 0.8 then β/σ_a else 1
     let eight_tenths = ratio!(4, 5);
 
-    if d < eight_tenths {
+    let d_less_than_08 = d.clone() < eight_tenths;
+
+    if d_less_than_08 {
         beta / sigma_a
     } else {
         ratio!(1)
