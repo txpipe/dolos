@@ -89,21 +89,6 @@ fn append_dir_filtered(
     Ok(())
 }
 
-fn prepare_wal(
-    mut wal: dolos::adapters::WalAdapter,
-    pb: &crate::feedback::ProgressBar,
-) -> miette::Result<()> {
-    let db = wal.db_mut().unwrap();
-
-    pb.set_message("compacting wal");
-    db.compact().into_diagnostic()?;
-
-    pb.set_message("checking wal integrity");
-    db.check_integrity().into_diagnostic()?;
-
-    Ok(())
-}
-
 fn prepare_archive(
     archive: &mut dolos_redb3::archive::ArchiveStore,
     pb: &crate::feedback::ProgressBar,
@@ -130,14 +115,7 @@ pub fn run(
     let mut archive = Builder::new(encoder);
 
     let mut stores = crate::common::open_data_stores(config)?;
-
-    // prepare_wal(stores.wal, &pb)?;
-
     let root = crate::common::ensure_storage_path(config)?;
-
-    // let path = root.join("wal");
-
-    // append_path_filtered(&mut archive, &path, Path::new("wal"))?;
 
     // prepare_archive requires direct redb access
     match &mut stores.archive {
