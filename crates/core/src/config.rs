@@ -421,6 +421,38 @@ impl IndexStoreConfig {
 }
 
 // ============================================================================
+// Mempool Store Configuration
+// ============================================================================
+
+/// Configuration for the Redb mempool backend.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct RedbMempoolConfig {
+    /// Optional path override. If relative, resolved from storage root.
+    /// If not specified, defaults to `<storage.path>/mempool`.
+    #[serde(default)]
+    pub path: Option<PathBuf>,
+    /// Size (in MB) of memory allocated for caching.
+    #[serde(default)]
+    pub cache: Option<usize>,
+}
+
+/// Mempool store configuration.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(tag = "backend", rename_all = "lowercase")]
+pub enum MempoolStoreConfig {
+    Redb(RedbMempoolConfig),
+    /// In-memory backend (ephemeral, data lost on restart).
+    #[serde(rename = "in_memory")]
+    InMemory,
+}
+
+impl Default for MempoolStoreConfig {
+    fn default() -> Self {
+        Self::InMemory
+    }
+}
+
+// ============================================================================
 // Storage Configuration
 // ============================================================================
 
@@ -447,6 +479,10 @@ pub struct StorageConfig {
     /// Index store configuration.
     #[serde(default)]
     pub index: IndexStoreConfig,
+
+    /// Mempool store configuration.
+    #[serde(default)]
+    pub mempool: MempoolStoreConfig,
 }
 
 impl StorageConfig {
@@ -512,6 +548,17 @@ impl StorageConfig {
             }
         }
     }
+
+    /// Get the resolved path for the mempool store.
+    /// Returns `None` for in-memory backends.
+    pub fn mempool_path(&self) -> Option<PathBuf> {
+        match &self.mempool {
+            MempoolStoreConfig::InMemory => None,
+            MempoolStoreConfig::Redb(cfg) => {
+                Some(self.resolve_store_path_with_default(cfg.path.as_ref(), "mempool"))
+            }
+        }
+    }
 }
 
 impl Default for StorageConfig {
@@ -523,6 +570,7 @@ impl Default for StorageConfig {
             state: StateStoreConfig::default(),
             archive: ArchiveStoreConfig::default(),
             index: IndexStoreConfig::default(),
+            mempool: MempoolStoreConfig::default(),
         }
     }
 }

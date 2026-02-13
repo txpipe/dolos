@@ -9,7 +9,7 @@ use pallas::network::miniprotocols::chainsync::Tip;
 use tracing::info;
 
 use crate::adapters::WalAdapter;
-use dolos_core::builtin::EphemeralMempool;
+use crate::adapters::storage::MempoolBackend;
 use crate::prelude::*;
 
 pub type DownstreamPort = gasket::messaging::OutputPort<PullEvent>;
@@ -21,7 +21,7 @@ pub fn empty_bytes() -> Bytes {
 pub struct Worker {
     block_production_interval_seconds: u64,
     block_production_timer: tokio::time::Interval,
-    mempool: EphemeralMempool,
+    mempool: MempoolBackend,
 }
 
 impl Worker {
@@ -175,7 +175,7 @@ pub struct Stage {
     // block_production_interval: std::time::Duration,
     block_production_interval: u64,
     wal: WalAdapter,
-    mempool: EphemeralMempool,
+    mempool: MempoolBackend,
 
     pub downstream: DownstreamPort,
 
@@ -187,7 +187,7 @@ pub struct Stage {
 }
 
 impl Stage {
-    pub fn new(wal: WalAdapter, mempool: EphemeralMempool, block_production_interval: u64) -> Self {
+    pub fn new(wal: WalAdapter, mempool: MempoolBackend, block_production_interval: u64) -> Self {
         Self {
             downstream: Default::default(),
             block_count: Default::default(),

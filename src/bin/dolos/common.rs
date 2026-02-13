@@ -64,7 +64,7 @@ pub fn load_config(
 pub fn setup_domain(config: &RootConfig) -> miette::Result<DomainAdapter> {
     let stores = open_data_stores(config)?;
     let genesis = Arc::new(open_genesis_files(&config.genesis)?);
-    let mempool = dolos_core::builtin::EphemeralMempool::new();
+    let mempool = stores.mempool.clone();
     let (tip_broadcast, _) = tokio::sync::broadcast::channel(100);
     let chain = config.chain.clone();
 

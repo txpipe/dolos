@@ -5,6 +5,7 @@ use tracing::trace;
 
 pub mod archive;
 pub mod indexes;
+pub mod mempool;
 pub mod state;
 pub mod wal;
 

@@ -36,6 +36,9 @@ pub enum Error {
     #[error("index error: {0}")]
     IndexError(#[from] IndexError),
 
+    #[error("mempool error: {0}")]
+    MempoolError(#[from] MempoolError),
+
     #[error("{0}")]
     Message(String),
 

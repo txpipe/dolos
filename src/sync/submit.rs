@@ -8,7 +8,7 @@ use pallas::network::miniprotocols::txsubmission::{EraTxBody, EraTxId, Request, 
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
-use dolos_core::builtin::EphemeralMempool;
+use crate::adapters::storage::MempoolBackend;
 use crate::prelude::*;
 
 // HACK: the tx era number differs from the block era number, we subtract 1 to make them match.
@@ -45,7 +45,7 @@ pub struct Worker {
 impl Worker {
     async fn propagate_txs(
         &mut self,
-        mempool: &EphemeralMempool,
+        mempool: &MempoolBackend,
         txs: Vec<MempoolTx>,
     ) -> Result<(), WorkerError> {
         debug!(n = txs.len(), "propagating tx ids");
@@ -67,7 +67,7 @@ impl Worker {
     }
 
     /// Drain the first `count` propagated hashes and mark them as acknowledged.
-    fn acknowledge_propagated(&mut self, mempool: &EphemeralMempool, count: usize) {
+    fn acknowledge_propagated(&mut self, mempool: &MempoolBackend, count: usize) {
         let drain_count = count.min(self.propagated_hashes.len());
         if drain_count == 0 {
             return;
@@ -217,11 +217,11 @@ impl gasket::framework::Worker<Stage> for Worker {
 pub struct Stage {
     peer_address: String,
     network_magic: u64,
-    mempool: EphemeralMempool,
+    mempool: MempoolBackend,
 }
 
 impl Stage {
-    pub fn new(peer_address: String, network_magic: u64, mempool: EphemeralMempool) -> Self {
+    pub fn new(peer_address: String, network_magic: u64, mempool: MempoolBackend) -> Self {
         Self {
             peer_address,
             network_magic,
