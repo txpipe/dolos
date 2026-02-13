@@ -25,7 +25,7 @@ pub use o7s_win as o7s;
 pub use dolos_minibf as minibf;
 
 #[cfg(feature = "kupo")]
-pub use kupo;
+pub use dolos_kupo as kupo;
 
 #[cfg(feature = "trp")]
 pub use dolos_trp as trp;

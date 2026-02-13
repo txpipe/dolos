@@ -45,7 +45,7 @@ dolos-cardano = { path = "crates/cardano", features = ["include-genesis"] }
 dolos-redb3 = { path = "crates/redb3" }
 dolos-fjall = { path = "crates/fjall" }
 dolos-minibf = { path = "crates/minibf", optional = true }
-kupo = { path = "crates/kupo", optional = true }
+dolos-kupo = { path = "crates/kupo", optional = true }
 dolos-trp = { path = "crates/trp", optional = true }
 
 # gasket = { git = "https://github.com/construkts/gasket-rs.git", features = ["derive"] }
@@ -139,7 +139,7 @@ minibf = [
     "tower-http/normalize-path",
 ]
 kupo = [
-    "dep:kupo",
+    "dolos-kupo",
     "axum",
     "http-body-util",
     "tower-http/cors",

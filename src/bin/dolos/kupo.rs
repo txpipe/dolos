@@ -34,7 +34,7 @@ pub async fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
         .into_diagnostic()
         .context("invalid kupo path")?;
 
-    let app = kupo::build_router(kupo.clone(), domain);
+    let app = dolos_kupo::build_router(kupo.clone(), domain);
 
     let request = Request::builder()
         .method("GET")
