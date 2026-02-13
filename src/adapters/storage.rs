@@ -1098,6 +1098,13 @@ impl MempoolStore for MempoolBackend {
         }
     }
 
+    fn finalize(&self, threshold: u32) {
+        match self {
+            Self::Ephemeral(s) => s.finalize(threshold),
+            Self::Redb(s) => s.finalize(threshold),
+        }
+    }
+
     fn check_stage(&self, tx_hash: &TxHash) -> MempoolTxStage {
         match self {
             Self::Ephemeral(s) => s.check_stage(tx_hash),

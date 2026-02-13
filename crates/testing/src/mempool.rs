@@ -45,6 +45,8 @@ impl MempoolStore for MockMempoolStore {
 
     fn apply(&self, _seen: &[TxHash], _unseen: &[TxHash]) {}
 
+    fn finalize(&self, _threshold: u32) {}
+
     fn check_stage(&self, _hash: &TxHash) -> MempoolTxStage {
         MempoolTxStage::Unknown
     }

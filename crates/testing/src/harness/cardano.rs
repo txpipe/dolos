@@ -75,6 +75,8 @@ impl MempoolStore for Mempool {
 
     fn apply(&self, _seen_txs: &[TxHash], _unseen_txs: &[TxHash]) {}
 
+    fn finalize(&self, _threshold: u32) {}
+
     fn check_stage(&self, _tx_hash: &TxHash) -> MempoolTxStage {
         MempoolTxStage::Unknown
     }

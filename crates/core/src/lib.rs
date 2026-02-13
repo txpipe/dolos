@@ -9,6 +9,7 @@
 //!    processing.
 
 use pallas::{
+    codec::minicbor::{self, Decode, Encode},
     crypto::hash::{Hash, Hasher},
     ledger::{
         primitives::Epoch,
@@ -84,8 +85,8 @@ pub use point::*;
 pub use state::*;
 pub use wal::*;
 
-#[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
-pub struct EraCbor(pub Era, pub Cbor);
+#[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize, Encode, Decode)]
+pub struct EraCbor(#[n(0)] pub Era, #[cbor(n(1), with = "minicbor::bytes")] pub Cbor);
 
 impl EraCbor {
     pub fn era(&self) -> Era {
@@ -401,6 +402,9 @@ pub trait MempoolStore: Clone + Send + Sync + 'static {
     // --- on-chain confirmation ---
     fn apply(&self, seen_txs: &[TxHash], unseen_txs: &[TxHash]);
 
+    // --- finalization ---
+    fn finalize(&self, threshold: u32);
+
     // --- monitoring ---
     fn check_stage(&self, tx_hash: &TxHash) -> MempoolTxStage;
     fn subscribe(&self) -> Self::Stream;
@@ -667,6 +671,11 @@ pub trait Domain: Send + Sync + Clone + 'static {
             wal_pruned = self
                 .wal()
                 .prune_history(max_slots, Some(Self::MAX_PRUNE_SLOTS_PER_HOUSEKEEPING))?;
+        }
+
+        if let Some(threshold) = self.storage_config().mempool_finalization_threshold {
+            info!(threshold, "finalizing mempool txs past threshold");
+            self.mempool().finalize(threshold);
         }
 
         Ok(archive_pruned && wal_pruned)

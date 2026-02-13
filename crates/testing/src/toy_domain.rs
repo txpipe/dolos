@@ -90,6 +90,8 @@ impl dolos_core::MempoolStore for Mempool {
         // do nothing for now
     }
 
+    fn finalize(&self, _threshold: u32) {}
+
     fn check_stage(&self, tx_hash: &TxHash) -> MempoolTxStage {
         let pending = self.pending.read();
         if let Ok(pending) = pending {

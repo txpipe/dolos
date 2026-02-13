@@ -21,6 +21,8 @@ struct MempoolState {
     pending: Vec<MempoolTx>,
     inflight: Vec<MempoolTx>,
     acknowledged: HashMap<TxHash, MempoolTx>,
+    finalized: HashSet<TxHash>,
+    confirmations: HashMap<TxHash, u32>,
 }
 
 /// A basic, FIFO, in-memory mempool.
@@ -181,16 +183,45 @@ impl MempoolStore for EphemeralMempool {
         for tx_hash in seen_txs.iter() {
             if let Some(tx) = state.acknowledged.get_mut(tx_hash) {
                 tx.confirmed = true;
-                self.notify(MempoolTxStage::Confirmed, tx.clone());
-                info!(tx.hash = %tx.hash, "tx confirmed");
+                let tx_clone = tx.clone();
+                *state.confirmations.entry(*tx_hash).or_insert(0) += 1;
+                self.notify(MempoolTxStage::Confirmed, tx_clone);
+                info!(tx.hash = %tx_hash, "tx confirmed");
             }
         }
 
         for tx_hash in unseen_txs.iter() {
             if let Some(tx) = state.acknowledged.get_mut(tx_hash) {
                 tx.confirmed = false;
-                self.notify(MempoolTxStage::RolledBack, tx.clone());
-                info!(tx.hash = %tx.hash, "tx rollback");
+                let tx_clone = tx.clone();
+                state.confirmations.remove(tx_hash);
+                self.notify(MempoolTxStage::RolledBack, tx_clone);
+                info!(tx.hash = %tx_hash, "tx rollback");
+            }
+        }
+    }
+
+    fn finalize(&self, threshold: u32) {
+        let mut state = self.state.write().unwrap();
+
+        let to_finalize: Vec<TxHash> = state
+            .acknowledged
+            .keys()
+            .filter(|hash| {
+                state
+                    .confirmations
+                    .get(hash)
+                    .map_or(false, |&c| c >= threshold)
+            })
+            .copied()
+            .collect();
+
+        for hash in to_finalize {
+            if let Some(tx) = state.acknowledged.remove(&hash) {
+                state.confirmations.remove(&hash);
+                state.finalized.insert(hash);
+                info!(tx.hash = %tx.hash, "tx finalized");
+                self.notify(MempoolTxStage::Finalized, tx);
             }
         }
     }
@@ -204,6 +235,8 @@ impl MempoolStore for EphemeralMempool {
             } else {
                 MempoolTxStage::Acknowledged
             }
+        } else if state.finalized.contains(tx_hash) {
+            MempoolTxStage::Finalized
         } else if state.inflight.iter().any(|x| x.hash.eq(tx_hash)) {
             MempoolTxStage::Inflight
         } else if state.pending.iter().any(|x| x.hash.eq(tx_hash)) {

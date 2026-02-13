@@ -483,6 +483,11 @@ pub struct StorageConfig {
     /// Mempool store configuration.
     #[serde(default)]
     pub mempool: MempoolStoreConfig,
+
+    /// Number of confirmations before a mempool tx is finalized.
+    /// If not set, finalization is disabled.
+    #[serde(default)]
+    pub mempool_finalization_threshold: Option<u32>,
 }
 
 impl StorageConfig {
@@ -571,6 +576,7 @@ impl Default for StorageConfig {
             archive: ArchiveStoreConfig::default(),
             index: IndexStoreConfig::default(),
             mempool: MempoolStoreConfig::default(),
+            mempool_finalization_threshold: None,
         }
     }
 }

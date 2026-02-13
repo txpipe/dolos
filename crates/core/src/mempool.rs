@@ -54,6 +54,7 @@ pub enum MempoolTxStage {
     Inflight,
     Acknowledged,
     Confirmed,
+    Finalized,
     RolledBack,
     Unknown,
 }
@@ -297,6 +298,8 @@ mod tests {
         }
 
         fn apply(&self, _seen: &[TxHash], _unseen: &[TxHash]) {}
+
+        fn finalize(&self, _threshold: u32) {}
 
         fn check_stage(&self, _hash: &TxHash) -> MempoolTxStage {
             MempoolTxStage::Unknown

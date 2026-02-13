@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
+use pallas::codec::minicbor::{self, Decode, Encode};
 use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
+use thiserror::Error;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
 use tracing::{debug, info, warn};
@@ -10,17 +12,134 @@ use dolos_core::{
     MempoolTxStage, TxHash,
 };
 
+// ── Error newtype (mirrors wal/mod.rs pattern) ──────────────────────────
+
+#[derive(Debug, Error)]
+#[error(transparent)]
+struct RedbMempoolError(#[from] MempoolError);
+
+impl From<redb::Error> for RedbMempoolError {
+    fn from(value: redb::Error) -> Self {
+        Self(MempoolError::Internal(Box::new(value)))
+    }
+}
+
+impl From<RedbMempoolError> for MempoolError {
+    fn from(value: RedbMempoolError) -> Self {
+        value.0
+    }
+}
+
+impl From<redb::DatabaseError> for RedbMempoolError {
+    fn from(value: redb::DatabaseError) -> Self {
+        Self(MempoolError::Internal(Box::new(redb::Error::from(value))))
+    }
+}
+
+impl From<redb::TableError> for RedbMempoolError {
+    fn from(value: redb::TableError) -> Self {
+        Self(MempoolError::Internal(Box::new(redb::Error::from(value))))
+    }
+}
+
+impl From<redb::CommitError> for RedbMempoolError {
+    fn from(value: redb::CommitError) -> Self {
+        Self(MempoolError::Internal(Box::new(redb::Error::from(value))))
+    }
+}
+
+impl From<redb::StorageError> for RedbMempoolError {
+    fn from(value: redb::StorageError) -> Self {
+        Self(MempoolError::Internal(Box::new(redb::Error::from(value))))
+    }
+}
+
+impl From<redb::TransactionError> for RedbMempoolError {
+    fn from(value: redb::TransactionError) -> Self {
+        Self(MempoolError::Internal(Box::new(redb::Error::from(value))))
+    }
+}
+
+// ── Table definitions ───────────────────────────────────────────────────
+
 const DEFAULT_CACHE_SIZE_MB: usize = 32;
 
-// Table definitions:
 // PENDING: key = [8-byte seq BE ++ 32-byte tx_hash], value = era(u16 LE) ++ cbor bytes
 const PENDING_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("pending");
-// INFLIGHT: key = 32-byte tx_hash, value = era(u16 LE) ++ cbor bytes
-const INFLIGHT_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("inflight");
-// ACKNOWLEDGED: key = 32-byte tx_hash, value = [1-byte confirmed flag] ++ era(u16 LE) ++ cbor bytes
-const ACKNOWLEDGED_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("acknowledged");
+// TRACKING: key = 32-byte tx_hash, value = bincode(TrackingRecord)
+const TRACKING_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("tracking");
 // SEQ: singleton counter for the next pending sequence number
 const SEQ_TABLE: TableDefinition<(), u64> = TableDefinition::new("seq");
+// FINALIZED: key = 32-byte tx_hash, value = () (lightweight record of finalized txs)
+const FINALIZED_TABLE: TableDefinition<&[u8], ()> = TableDefinition::new("finalized");
+
+// ── Tracking record ─────────────────────────────────────────────────────
+
+#[derive(Encode, Decode, PartialEq)]
+enum TrackingStage {
+    #[n(0)]
+    Inflight,
+    #[n(1)]
+    Acknowledged,
+    #[n(2)]
+    Confirmed,
+}
+
+#[derive(Encode, Decode)]
+struct TrackingRecord {
+    #[n(0)]
+    stage: TrackingStage,
+    #[n(1)]
+    confirmations: u32,
+    #[n(2)]
+    payload: EraCbor,
+}
+
+impl TrackingRecord {
+    fn new(payload: EraCbor) -> Self {
+        Self {
+            stage: TrackingStage::Inflight,
+            confirmations: 0,
+            payload,
+        }
+    }
+
+    fn serialize(&self) -> Vec<u8> {
+        minicbor::to_vec(self).unwrap()
+    }
+
+    fn deserialize(bytes: &[u8]) -> Self {
+        minicbor::decode(bytes).unwrap()
+    }
+
+    fn to_mempool_tx(&self, hash: TxHash) -> MempoolTx {
+        MempoolTx {
+            hash,
+            payload: self.payload.clone(),
+            confirmed: self.stage == TrackingStage::Confirmed,
+            report: None,
+        }
+    }
+
+    fn read(
+        table: &redb::Table<'_, &[u8], &[u8]>,
+        hash: &TxHash,
+    ) -> Result<Option<Self>, RedbMempoolError> {
+        let entry = table.get(hash.as_ref())?;
+        Ok(entry.map(|e| Self::deserialize(e.value())))
+    }
+
+    fn write(
+        &self,
+        table: &mut redb::Table<'_, &[u8], &[u8]>,
+        hash: &TxHash,
+    ) -> Result<(), RedbMempoolError> {
+        table.insert(hash.as_ref(), self.serialize().as_slice())?;
+        Ok(())
+    }
+}
+
+// ── Helpers ─────────────────────────────────────────────────────────────
 
 fn encode_era_cbor(ec: &EraCbor) -> Vec<u8> {
     let EraCbor(era, cbor) = ec;
@@ -48,6 +167,8 @@ fn hash_from_pending_key(key: &[u8]) -> TxHash {
     h.copy_from_slice(&key[8..40]);
     TxHash::from(h)
 }
+
+// ── RedbMempool ─────────────────────────────────────────────────────────
 
 #[derive(Clone)]
 pub struct RedbMempool {
@@ -82,7 +203,10 @@ impl futures_core::Stream for RedbMempoolStream {
 }
 
 impl RedbMempool {
-    pub fn open(path: impl AsRef<std::path::Path>, config: &RedbMempoolConfig) -> Result<Self, MempoolError> {
+    pub fn open(
+        path: impl AsRef<std::path::Path>,
+        config: &RedbMempoolConfig,
+    ) -> Result<Self, MempoolError> {
         let db = redb::Database::builder()
             .set_repair_callback(|x| {
                 warn!(progress = x.progress() * 100f64, "mempool db is repairing")
@@ -91,8 +215,7 @@ impl RedbMempool {
             .create(path)
             .map_err(|e| MempoolError::Internal(Box::new(e)))?;
 
-        let out = Self::from_db(db)?;
-        Ok(out)
+        Self::from_db(db)
     }
 
     pub fn in_memory() -> Result<Self, MempoolError> {
@@ -100,8 +223,7 @@ impl RedbMempool {
             .create_with_backend(redb::backends::InMemoryBackend::new())
             .map_err(|e| MempoolError::Internal(Box::new(e)))?;
 
-        let out = Self::from_db(db)?;
-        Ok(out)
+        Self::from_db(db)
     }
 
     fn from_db(db: redb::Database) -> Result<Self, MempoolError> {
@@ -116,51 +238,27 @@ impl RedbMempool {
         Ok(out)
     }
 
-    fn ensure_initialized(&self) -> Result<(), MempoolError> {
-        let wx = self
-            .db
-            .begin_write()
-            .map_err(|e| MempoolError::Internal(Box::new(e)))?;
-
-        wx.open_table(PENDING_TABLE)
-            .map_err(|e| MempoolError::Internal(Box::new(e)))?;
-        wx.open_table(INFLIGHT_TABLE)
-            .map_err(|e| MempoolError::Internal(Box::new(e)))?;
-        wx.open_table(ACKNOWLEDGED_TABLE)
-            .map_err(|e| MempoolError::Internal(Box::new(e)))?;
+    fn ensure_initialized(&self) -> Result<(), RedbMempoolError> {
+        let wx = self.db.begin_write()?;
+        wx.open_table(PENDING_TABLE)?;
+        wx.open_table(TRACKING_TABLE)?;
+        wx.open_table(FINALIZED_TABLE)?;
 
         {
-            let mut seq_table = wx
-                .open_table(SEQ_TABLE)
-                .map_err(|e| MempoolError::Internal(Box::new(e)))?;
-            if seq_table
-                .get(())
-                .map_err(|e| MempoolError::Internal(Box::new(e)))?
-                .is_none()
-            {
-                seq_table
-                    .insert((), 0u64)
-                    .map_err(|e| MempoolError::Internal(Box::new(e)))?;
+            let mut seq_table = wx.open_table(SEQ_TABLE)?;
+            if seq_table.get(())?.is_none() {
+                seq_table.insert((), 0u64)?;
             }
         }
 
-        wx.commit()
-            .map_err(|e| MempoolError::Internal(Box::new(e)))?;
+        wx.commit()?;
         Ok(())
     }
 
-    fn next_seq(wx: &redb::WriteTransaction) -> Result<u64, MempoolError> {
-        let mut seq_table = wx
-            .open_table(SEQ_TABLE)
-            .map_err(|e| MempoolError::Internal(Box::new(e)))?;
-        let current = seq_table
-            .get(())
-            .map_err(|e| MempoolError::Internal(Box::new(e)))?
-            .map(|v| v.value())
-            .unwrap_or(0);
-        seq_table
-            .insert((), current + 1)
-            .map_err(|e| MempoolError::Internal(Box::new(e)))?;
+    fn next_seq(wx: &redb::WriteTransaction) -> Result<u64, RedbMempoolError> {
+        let mut seq_table = wx.open_table(SEQ_TABLE)?;
+        let current = seq_table.get(())?.map(|v| v.value()).unwrap_or(0);
+        seq_table.insert((), current + 1)?;
         Ok(current)
     }
 
@@ -169,6 +267,55 @@ impl RedbMempool {
             debug!("no mempool update receivers");
         }
     }
+
+    fn with_write_tx<F>(&self, op_name: &str, f: F)
+    where
+        F: FnOnce(
+            &redb::WriteTransaction,
+        ) -> Result<Vec<(MempoolTxStage, MempoolTx)>, RedbMempoolError>,
+    {
+        let wx = match self.db.begin_write() {
+            Ok(wx) => wx,
+            Err(e) => {
+                warn!(error = %e, "failed to begin write for {}", op_name);
+                return;
+            }
+        };
+
+        let events = match f(&wx) {
+            Ok(events) => events,
+            Err(e) => {
+                let e: MempoolError = e.into();
+                warn!(error = %e, "failed to execute {}", op_name);
+                return;
+            }
+        };
+
+        if let Err(e) = wx.commit() {
+            warn!(error = %e, "failed to commit {}", op_name);
+            return;
+        }
+
+        for (stage, tx) in events {
+            self.notify(stage, tx);
+        }
+    }
+
+    fn receive_inner(&self, tx: MempoolTx) -> Result<(), RedbMempoolError> {
+        let wx = self.db.begin_write()?;
+
+        {
+            let seq = Self::next_seq(&wx)?;
+            let key = pending_key(seq, &tx.hash);
+            let value = encode_era_cbor(&tx.payload);
+            let mut table = wx.open_table(PENDING_TABLE)?;
+            table.insert(key.as_slice(), value.as_slice())?;
+        }
+
+        wx.commit()?;
+        self.notify(MempoolTxStage::Pending, tx);
+        Ok(())
+    }
 }
 
 impl MempoolStore for RedbMempool {
@@ -176,36 +323,12 @@ impl MempoolStore for RedbMempool {
 
     fn receive(&self, tx: MempoolTx) -> Result<(), MempoolError> {
         info!(tx.hash = %tx.hash, "tx received (redb)");
-
-        let wx = self
-            .db
-            .begin_write()
-            .map_err(|e| MempoolError::Internal(Box::new(e)))?;
-
-        {
-            let seq = Self::next_seq(&wx)?;
-            let key = pending_key(seq, &tx.hash);
-            let value = encode_era_cbor(&tx.payload);
-            let mut table = wx
-                .open_table(PENDING_TABLE)
-                .map_err(|e| MempoolError::Internal(Box::new(e)))?;
-            table
-                .insert(key.as_slice(), value.as_slice())
-                .map_err(|e| MempoolError::Internal(Box::new(e)))?;
-        }
-
-        wx.commit()
-            .map_err(|e| MempoolError::Internal(Box::new(e)))?;
-
-        self.notify(MempoolTxStage::Pending, tx);
+        self.receive_inner(tx)?;
         Ok(())
     }
 
     fn has_pending(&self) -> bool {
-        let rx = match self
-            .db
-            .begin_read()
-        {
+        let rx = match self.db.begin_read() {
             Ok(rx) => rx,
             Err(_) => return false,
         };
@@ -283,38 +406,16 @@ impl MempoolStore for RedbMempool {
     fn mark_inflight(&self, hashes: &[TxHash]) {
         let hash_set: std::collections::HashSet<TxHash> = hashes.iter().copied().collect();
 
-        let wx = match self
-            .db
-            .begin_write()
-        {
-            Ok(wx) => wx,
-            Err(e) => {
-                warn!(error = %e, "failed to begin write for mark_inflight");
-                return;
-            }
-        };
-
-        let mut moved = Vec::new();
-
-        {
-            let mut pending = match wx.open_table(PENDING_TABLE) {
-                Ok(t) => t,
-                Err(_) => return,
-            };
-            let mut inflight = match wx.open_table(INFLIGHT_TABLE) {
-                Ok(t) => t,
-                Err(_) => return,
-            };
+        self.with_write_tx("mark_inflight", |wx| {
+            let mut pending = wx.open_table(PENDING_TABLE)?;
+            let mut tracking = wx.open_table(TRACKING_TABLE)?;
 
             // Collect keys to remove first (can't mutate while iterating)
             let mut keys_to_remove: Vec<([u8; 40], Vec<u8>)> = Vec::new();
             {
-                let iter = match pending.iter() {
-                    Ok(it) => it,
-                    Err(_) => return,
-                };
+                let iter = pending.iter()?;
                 for entry in iter {
-                    let Ok(entry) = entry else { break };
+                    let entry = entry?;
                     let key_bytes = entry.0.value();
                     let value_bytes = entry.1.value();
                     let hash = hash_from_pending_key(key_bytes);
@@ -326,178 +427,119 @@ impl MempoolStore for RedbMempool {
                 }
             }
 
-            for (pkey, value) in keys_to_remove {
+            let mut events = Vec::new();
+            for (pkey, era_cbor_bytes) in keys_to_remove {
                 let hash = hash_from_pending_key(&pkey);
-                let _ = pending.remove(pkey.as_slice());
-                let _ = inflight.insert(hash.as_ref(), value.as_slice());
-                let payload = decode_era_cbor(&value);
-                moved.push(MempoolTx {
-                    hash,
-                    payload,
-                    confirmed: false,
-                    report: None,
-                });
+                pending.remove(pkey.as_slice())?;
+                let payload = decode_era_cbor(&era_cbor_bytes);
+                let record = TrackingRecord::new(payload);
+                let tx = record.to_mempool_tx(hash);
+                record.write(&mut tracking, &hash)?;
+                info!(tx.hash = %tx.hash, "tx inflight (redb)");
+                events.push((MempoolTxStage::Inflight, tx));
             }
-        }
 
-        if let Err(e) = wx.commit() {
-            warn!(error = %e, "failed to commit mark_inflight");
-            return;
-        }
-
-        for tx in moved {
-            info!(tx.hash = %tx.hash, "tx inflight (redb)");
-            self.notify(MempoolTxStage::Inflight, tx);
-        }
+            Ok(events)
+        });
     }
 
     fn mark_acknowledged(&self, hashes: &[TxHash]) {
-        let hash_set: std::collections::HashSet<TxHash> = hashes.iter().copied().collect();
+        self.with_write_tx("mark_acknowledged", |wx| {
+            let mut tracking = wx.open_table(TRACKING_TABLE)?;
+            let mut events = Vec::new();
 
-        let wx = match self
-            .db
-            .begin_write()
-        {
-            Ok(wx) => wx,
-            Err(e) => {
-                warn!(error = %e, "failed to begin write for mark_acknowledged");
-                return;
-            }
-        };
-
-        let mut moved = Vec::new();
-
-        {
-            let mut inflight = match wx.open_table(INFLIGHT_TABLE) {
-                Ok(t) => t,
-                Err(_) => return,
-            };
-            let mut acknowledged = match wx.open_table(ACKNOWLEDGED_TABLE) {
-                Ok(t) => t,
-                Err(_) => return,
-            };
-
-            for hash in &hash_set {
-                if let Ok(Some(entry)) = inflight.remove(hash.as_ref()) {
-                    let era_cbor_bytes = entry.value().to_vec();
-                    // Acknowledged value: [confirmed=0] ++ era_cbor
-                    let mut ack_value = Vec::with_capacity(1 + era_cbor_bytes.len());
-                    ack_value.push(0u8); // not confirmed
-                    ack_value.extend_from_slice(&era_cbor_bytes);
-                    let _ = acknowledged.insert(hash.as_ref(), ack_value.as_slice());
-                    let payload = decode_era_cbor(&era_cbor_bytes);
-                    moved.push(MempoolTx {
-                        hash: *hash,
-                        payload,
-                        confirmed: false,
-                        report: None,
-                    });
+            for hash in hashes {
+                if let Some(mut record) = TrackingRecord::read(&tracking, hash)? {
+                    if record.stage == TrackingStage::Inflight {
+                        record.stage = TrackingStage::Acknowledged;
+                        let tx = record.to_mempool_tx(*hash);
+                        record.write(&mut tracking, hash)?;
+                        info!(tx.hash = %tx.hash, "tx acknowledged (redb)");
+                        events.push((MempoolTxStage::Acknowledged, tx));
+                    }
                 }
             }
-        }
 
-        if let Err(e) = wx.commit() {
-            warn!(error = %e, "failed to commit mark_acknowledged");
-            return;
-        }
-
-        for tx in moved {
-            info!(tx.hash = %tx.hash, "tx acknowledged (redb)");
-            self.notify(MempoolTxStage::Acknowledged, tx);
-        }
+            Ok(events)
+        });
     }
 
     fn get_inflight(&self, tx_hash: &TxHash) -> Option<MempoolTx> {
         let rx = self.db.begin_read().ok()?;
-        let table = rx.open_table(INFLIGHT_TABLE).ok()?;
+        let table = rx.open_table(TRACKING_TABLE).ok()?;
         let entry = table.get(tx_hash.as_ref()).ok()??;
-        let value = entry.value();
-        let payload = decode_era_cbor(value);
-        Some(MempoolTx {
-            hash: *tx_hash,
-            payload,
-            confirmed: false,
-            report: None,
-        })
+        let record = TrackingRecord::deserialize(entry.value());
+        if record.stage != TrackingStage::Inflight {
+            return None;
+        }
+        Some(record.to_mempool_tx(*tx_hash))
     }
 
     fn apply(&self, seen_txs: &[TxHash], unseen_txs: &[TxHash]) {
-        let wx = match self
-            .db
-            .begin_write()
-        {
-            Ok(wx) => wx,
-            Err(e) => {
-                warn!(error = %e, "failed to begin write for apply");
-                return;
-            }
-        };
-
-        let mut events = Vec::new();
-
-        {
-            let mut acknowledged = match wx.open_table(ACKNOWLEDGED_TABLE) {
-                Ok(t) => t,
-                Err(_) => return,
-            };
+        self.with_write_tx("apply", |wx| {
+            let mut tracking = wx.open_table(TRACKING_TABLE)?;
+            let mut events = Vec::new();
 
             for tx_hash in seen_txs {
-                let existing = acknowledged
-                    .get(tx_hash.as_ref())
-                    .ok()
-                    .flatten()
-                    .map(|entry| entry.value().to_vec());
-
-                if let Some(mut value) = existing {
-                    if !value.is_empty() {
-                        value[0] = 1; // confirmed = true
-                        let _ = acknowledged.insert(tx_hash.as_ref(), value.as_slice());
-                        let payload = decode_era_cbor(&value[1..]);
-                        let tx = MempoolTx {
-                            hash: *tx_hash,
-                            payload,
-                            confirmed: true,
-                            report: None,
-                        };
-                        info!(tx.hash = %tx.hash, "tx confirmed (redb)");
-                        events.push((MempoolTxStage::Confirmed, tx));
-                    }
+                if let Some(mut record) = TrackingRecord::read(&tracking, tx_hash)? {
+                    record.stage = TrackingStage::Confirmed;
+                    record.confirmations += 1;
+                    let tx = record.to_mempool_tx(*tx_hash);
+                    record.write(&mut tracking, tx_hash)?;
+                    info!(tx.hash = %tx.hash, "tx confirmed (redb)");
+                    events.push((MempoolTxStage::Confirmed, tx));
                 }
             }
 
             for tx_hash in unseen_txs {
-                let existing = acknowledged
-                    .get(tx_hash.as_ref())
-                    .ok()
-                    .flatten()
-                    .map(|entry| entry.value().to_vec());
+                if let Some(mut record) = TrackingRecord::read(&tracking, tx_hash)? {
+                    record.stage = TrackingStage::Acknowledged;
+                    record.confirmations = 0;
+                    let tx = record.to_mempool_tx(*tx_hash);
+                    record.write(&mut tracking, tx_hash)?;
+                    info!(tx.hash = %tx.hash, "tx rollback (redb)");
+                    events.push((MempoolTxStage::RolledBack, tx));
+                }
+            }
 
-                if let Some(mut value) = existing {
-                    if !value.is_empty() {
-                        value[0] = 0; // confirmed = false
-                        let _ = acknowledged.insert(tx_hash.as_ref(), value.as_slice());
-                        let payload = decode_era_cbor(&value[1..]);
-                        let tx = MempoolTx {
-                            hash: *tx_hash,
-                            payload,
-                            confirmed: false,
-                            report: None,
-                        };
-                        info!(tx.hash = %tx.hash, "tx rollback (redb)");
-                        events.push((MempoolTxStage::RolledBack, tx));
+            Ok(events)
+        });
+    }
+
+    fn finalize(&self, threshold: u32) {
+        self.with_write_tx("finalize", |wx| {
+            let mut tracking = wx.open_table(TRACKING_TABLE)?;
+            let mut fin_table = wx.open_table(FINALIZED_TABLE)?;
+
+            // Collect entries to finalize first (can't mutate while iterating)
+            let mut to_finalize: Vec<(Vec<u8>, MempoolTx)> = Vec::new();
+            {
+                let iter = tracking.iter()?;
+                for entry in iter {
+                    let entry = entry?;
+                    let key = entry.0.value().to_vec();
+                    let record = TrackingRecord::deserialize(entry.1.value());
+                    if record.stage == TrackingStage::Confirmed && record.confirmations >= threshold
+                    {
+                        let mut hash_bytes = [0u8; 32];
+                        hash_bytes.copy_from_slice(&key);
+                        let hash = TxHash::from(hash_bytes);
+                        let tx = record.to_mempool_tx(hash);
+                        to_finalize.push((key, tx));
                     }
                 }
             }
-        }
 
-        if let Err(e) = wx.commit() {
-            warn!(error = %e, "failed to commit apply");
-            return;
-        }
+            let mut events = Vec::new();
+            for (key, tx) in to_finalize {
+                tracking.remove(key.as_slice())?;
+                fin_table.insert(key.as_slice(), ())?;
+                info!(tx.hash = %tx.hash, "tx finalized (redb)");
+                events.push((MempoolTxStage::Finalized, tx));
+            }
 
-        for (stage, tx) in events {
-            self.notify(stage, tx);
-        }
+            Ok(events)
+        });
     }
 
     fn check_stage(&self, tx_hash: &TxHash) -> MempoolTxStage {
@@ -506,21 +548,22 @@ impl MempoolStore for RedbMempool {
             Err(_) => return MempoolTxStage::Unknown,
         };
 
-        // Check acknowledged first
-        if let Ok(table) = rx.open_table(ACKNOWLEDGED_TABLE) {
+        // Check tracking table first
+        if let Ok(table) = rx.open_table(TRACKING_TABLE) {
             if let Ok(Some(entry)) = table.get(tx_hash.as_ref()) {
-                let value = entry.value();
-                if !value.is_empty() && value[0] == 1 {
-                    return MempoolTxStage::Confirmed;
-                }
-                return MempoolTxStage::Acknowledged;
+                let record = TrackingRecord::deserialize(entry.value());
+                return match record.stage {
+                    TrackingStage::Inflight => MempoolTxStage::Inflight,
+                    TrackingStage::Acknowledged => MempoolTxStage::Acknowledged,
+                    TrackingStage::Confirmed => MempoolTxStage::Confirmed,
+                };
             }
         }
 
-        // Check inflight
-        if let Ok(table) = rx.open_table(INFLIGHT_TABLE) {
+        // Check finalized table
+        if let Ok(table) = rx.open_table(FINALIZED_TABLE) {
             if let Ok(Some(_)) = table.get(tx_hash.as_ref()) {
-                return MempoolTxStage::Inflight;
+                return MempoolTxStage::Finalized;
             }
         }
 
