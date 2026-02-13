@@ -16,6 +16,26 @@ pub struct Datum {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Script {
+    #[serde(rename = "language")]
+    pub language: ScriptLanguage,
+    #[serde(rename = "script")]
+    pub script: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
+pub enum ScriptLanguage {
+    #[serde(rename = "native")]
+    Native,
+    #[serde(rename = "plutus:v1")]
+    PlutusV1,
+    #[serde(rename = "plutus:v2")]
+    PlutusV2,
+    #[serde(rename = "plutus:v3")]
+    PlutusV3,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Metadata {
     pub hash: String,
     pub raw: String,

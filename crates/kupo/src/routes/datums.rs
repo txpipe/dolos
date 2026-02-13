@@ -7,7 +7,7 @@ use axum::{
 use dolos_cardano::{model::DatumState, FixedNamespace as _};
 use dolos_core::{Domain, EntityKey, StateStore as _};
 
-use crate::{types::Datum, Facade};
+use crate::{bad_request, types::Datum, Facade};
 
 pub async fn by_hash<D: Domain>(
     State(facade): State<Facade<D>>,
@@ -42,13 +42,6 @@ fn parse_datum_hash(value: &str) -> Result<Vec<u8>, StatusCode> {
 
     let bytes = hex::decode(value).map_err(|_| StatusCode::BAD_REQUEST)?;
     Ok(bytes)
-}
-
-fn bad_request(hint: impl Into<String>) -> Response {
-    let body = crate::types::BadRequest {
-        hint: Some(hint.into()),
-    };
-    (StatusCode::BAD_REQUEST, Json(body)).into_response()
 }
 
 fn datum_hash_hint() -> String {

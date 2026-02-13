@@ -4,8 +4,14 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use dolos_cardano::{indexes::CardanoIndexExt, network_from_genesis, pallas_extras};
+use dolos_cardano::{
+    indexes::{
+        AsyncCardanoQueryExt, CardanoIndexExt, ScriptData, ScriptLanguage as CardanoLanguage,
+    },
+    network_from_genesis, pallas_extras,
+};
 use dolos_core::{Domain, EraCbor, IndexStore as _, StateStore as _, TxoRef, UtxoSet};
+use pallas::codec::minicbor;
 use pallas::ledger::{
     addresses::{Address, StakeAddress},
     primitives::{conway::DatumOption, conway::ScriptRef, StakeCredential},
@@ -51,7 +57,7 @@ pub async fn by_pattern<D: Domain>(
         Err(err) => return bad_request(err.to_string()),
     };
 
-    let matches = match build_matches(&facade, refs, filter).await {
+    let matches = match build_matches(&facade, refs, filter, filters.resolve_hashes).await {
         Ok(matches) => matches,
         Err(err) => return err.into_response(),
     };
@@ -140,6 +146,7 @@ struct MatchesFilters {
     asset_name: Option<String>,
     transaction_id: Option<String>,
     output_index: Option<u32>,
+    resolve_hashes: bool,
 }
 
 impl MatchesFilters {
@@ -147,7 +154,7 @@ impl MatchesFilters {
         query: MatchesQuery,
         facade: &Facade<D>,
     ) -> Result<Self, MatchError> {
-        let _ = query.resolve_hashes;
+        let resolve_hashes = query.resolve_hashes.is_some();
         let _ = query.unspent;
         if query.spent.is_some() || query.spent_after.is_some() || query.spent_before.is_some() {
             return Err(MatchError::BadRequest(spent_hint()));
@@ -209,6 +216,7 @@ impl MatchesFilters {
             asset_name,
             transaction_id,
             output_index,
+            resolve_hashes,
         })
     }
 }
@@ -422,6 +430,7 @@ async fn build_matches<D: Domain>(
     facade: &Facade<D>,
     refs: UtxoSet,
     filter: OutputFilter,
+    resolve_hashes: bool,
 ) -> Result<Vec<MatchResponse>, MatchError> {
     let utxos = facade
         .state()
@@ -492,6 +501,14 @@ async fn build_matches<D: Domain>(
                 ScriptRef::PlutusV3Script(x) => x.compute_hash(),
             });
 
+        let (datum, script) = if resolve_hashes {
+            let datum = resolve_datum(facade, output.datum()).await?;
+            let script = resolve_script(facade, script_hash).await?;
+            (Some(datum), Some(script))
+        } else {
+            (None, None)
+        };
+
         out.push(MatchResponse {
             transaction_index: block_info
                 .tx_index
@@ -502,10 +519,10 @@ async fn build_matches<D: Domain>(
             address: address.to_string(),
             value: map_value(output.value()),
             datum_hash,
-            datum: None,
+            datum,
             datum_type,
             script_hash: script_hash.map(|hash: pallas::crypto::hash::Hash<28>| hash.to_string()),
-            script: None,
+            script,
             created_at: PointResponse {
                 slot_no: block_info.slot_no,
                 header_hash: block_info.header_hash.to_string(),
@@ -557,6 +574,68 @@ fn map_value(value: MultiEraValue<'_>) -> ValueResponse {
         coins: value.coin(),
         assets,
     }
+}
+
+async fn resolve_datum<D: Domain>(
+    facade: &Facade<D>,
+    datum: Option<DatumOption<'_>>,
+) -> Result<serde_json::Value, MatchError> {
+    let Some(datum) = datum else {
+        return Ok(serde_json::Value::Null);
+    };
+
+    match datum {
+        DatumOption::Data(data) => minicbor::to_vec(&data.0)
+            .map(hex::encode)
+            .map(serde_json::Value::String)
+            .map_err(|_| MatchError::Internal),
+        DatumOption::Hash(hash) => {
+            let resolved = facade
+                .query()
+                .get_datum(&hash)
+                .await
+                .map_err(|_| MatchError::Internal)?;
+            Ok(resolved
+                .map(hex::encode)
+                .map(serde_json::Value::String)
+                .unwrap_or(serde_json::Value::Null))
+        }
+    }
+}
+
+async fn resolve_script<D: Domain>(
+    facade: &Facade<D>,
+    script_hash: Option<pallas::crypto::hash::Hash<28>>,
+) -> Result<serde_json::Value, MatchError> {
+    let Some(script_hash) = script_hash else {
+        return Ok(serde_json::Value::Null);
+    };
+
+    let script = facade
+        .query()
+        .script_by_hash(&script_hash)
+        .await
+        .map_err(|_| MatchError::Internal)?;
+
+    Ok(script
+        .map(map_script_json)
+        .unwrap_or(serde_json::Value::Null))
+}
+
+fn map_script_json(data: ScriptData) -> serde_json::Value {
+    let language = match data.language {
+        CardanoLanguage::Native => crate::types::ScriptLanguage::Native,
+        CardanoLanguage::PlutusV1 => crate::types::ScriptLanguage::PlutusV1,
+        CardanoLanguage::PlutusV2 => crate::types::ScriptLanguage::PlutusV2,
+        CardanoLanguage::PlutusV3 => crate::types::ScriptLanguage::PlutusV3,
+    };
+
+    let script = crate::types::Script {
+        language,
+        script: hex::encode(data.script),
+    };
+
+    serde_json::to_value(script).unwrap_or(serde_json::Value::Null)
 }
 
 fn apply_filters(mut matches: Vec<MatchResponse>, filters: &MatchesFilters) -> Vec<MatchResponse> {
