@@ -4,7 +4,7 @@
 use pallas::{
     crypto::hash::Hash,
     ledger::{
-        primitives::conway::{DatumOption, PlutusData},
+        primitives::conway::{DatumOption, PlutusData, ScriptRef},
         traverse::{ComputeHash, MultiEraBlock, OriginalHash},
     },
 };
@@ -26,6 +26,20 @@ const SLOT_CHUNK_SIZE: usize = 512;
 pub enum SlotOrder {
     Asc,
     Desc,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScriptLanguage {
+    Native,
+    PlutusV1,
+    PlutusV2,
+    PlutusV3,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScriptData {
+    pub language: ScriptLanguage,
+    pub script: Vec<u8>,
 }
 
 #[async_trait::async_trait]
@@ -123,6 +137,11 @@ pub trait AsyncCardanoQueryExt<D: Domain> {
     async fn plutus_data(&self, datum_hash: &Hash<32>) -> Result<Option<PlutusData>, DomainError>;
 
     async fn get_datum(&self, datum_hash: &Hash<32>) -> Result<Option<Vec<u8>>, DomainError>;
+
+    async fn script_by_hash(
+        &self,
+        script_hash: &Hash<28>,
+    ) -> Result<Option<ScriptData>, DomainError>;
 
     async fn tx_by_spent_txo(&self, spent_txo: &[u8]) -> Result<Option<TxHash>, DomainError>;
 }
@@ -353,6 +372,110 @@ where
                 domain.state().read_entity_typed(DATUM_NS, &key)?;
             Ok(datum_state.map(|s| s.bytes))
         })
+        .await
+    }
+
+    async fn script_by_hash(
+        &self,
+        script_hash: &Hash<28>,
+    ) -> Result<Option<ScriptData>, DomainError> {
+        let end_slot = self
+            .run_blocking(move |domain| {
+                Ok(domain
+                    .archive()
+                    .get_tip()?
+                    .map(|(slot, _)| slot)
+                    .unwrap_or_default())
+            })
+            .await?;
+
+        let script_hash = *script_hash;
+        find_first_by_tag(
+            self,
+            archive::SCRIPT,
+            script_hash.as_slice().to_vec(),
+            0,
+            end_slot,
+            |block| {
+                for tx in block.txs() {
+                    for script in tx.native_scripts() {
+                        if script.original_hash() == script_hash {
+                            return Some(ScriptData {
+                                language: ScriptLanguage::Native,
+                                script: script.raw_cbor().to_vec(),
+                            });
+                        }
+                    }
+
+                    for script in tx.plutus_v1_scripts() {
+                        if script.compute_hash() == script_hash {
+                            return Some(ScriptData {
+                                language: ScriptLanguage::PlutusV1,
+                                script: script.as_ref().to_vec(),
+                            });
+                        }
+                    }
+
+                    for script in tx.plutus_v2_scripts() {
+                        if script.compute_hash() == script_hash {
+                            return Some(ScriptData {
+                                language: ScriptLanguage::PlutusV2,
+                                script: script.as_ref().to_vec(),
+                            });
+                        }
+                    }
+
+                    for script in tx.plutus_v3_scripts() {
+                        if script.compute_hash() == script_hash {
+                            return Some(ScriptData {
+                                language: ScriptLanguage::PlutusV3,
+                                script: script.as_ref().to_vec(),
+                            });
+                        }
+                    }
+
+                    for (_, output) in tx.produces() {
+                        if let Some(script_ref) = output.script_ref() {
+                            match script_ref {
+                                ScriptRef::NativeScript(script) => {
+                                    if script.original_hash() == script_hash {
+                                        return Some(ScriptData {
+                                            language: ScriptLanguage::Native,
+                                            script: script.raw_cbor().to_vec(),
+                                        });
+                                    }
+                                }
+                                ScriptRef::PlutusV1Script(script) => {
+                                    if script.compute_hash() == script_hash {
+                                        return Some(ScriptData {
+                                            language: ScriptLanguage::PlutusV1,
+                                            script: script.as_ref().to_vec(),
+                                        });
+                                    }
+                                }
+                                ScriptRef::PlutusV2Script(script) => {
+                                    if script.compute_hash() == script_hash {
+                                        return Some(ScriptData {
+                                            language: ScriptLanguage::PlutusV2,
+                                            script: script.as_ref().to_vec(),
+                                        });
+                                    }
+                                }
+                                ScriptRef::PlutusV3Script(script) => {
+                                    if script.compute_hash() == script_hash {
+                                        return Some(ScriptData {
+                                            language: ScriptLanguage::PlutusV3,
+                                            script: script.as_ref().to_vec(),
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                None
+            },
+        )
         .await
     }
 
