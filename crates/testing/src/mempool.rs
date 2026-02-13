@@ -27,6 +27,22 @@ impl MempoolStore for MockMempoolStore {
         Ok(())
     }
 
+    fn has_pending(&self) -> bool {
+        false
+    }
+
+    fn peek_pending(&self, _limit: usize) -> Vec<MempoolTx> {
+        vec![]
+    }
+
+    fn mark_inflight(&self, _hashes: &[TxHash]) {}
+
+    fn mark_acknowledged(&self, _hashes: &[TxHash]) {}
+
+    fn get_inflight(&self, _tx_hash: &TxHash) -> Option<MempoolTx> {
+        None
+    }
+
     fn apply(&self, _seen: &[TxHash], _unseen: &[TxHash]) {}
 
     fn check_stage(&self, _hash: &TxHash) -> MempoolTxStage {

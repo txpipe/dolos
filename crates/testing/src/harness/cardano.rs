@@ -53,6 +53,26 @@ impl MempoolStore for Mempool {
         Ok(())
     }
 
+    fn has_pending(&self) -> bool {
+        false
+    }
+
+    fn peek_pending(&self, _limit: usize) -> Vec<MempoolTx> {
+        vec![]
+    }
+
+    fn pending(&self) -> Vec<(TxHash, EraCbor)> {
+        vec![]
+    }
+
+    fn mark_inflight(&self, _hashes: &[TxHash]) {}
+
+    fn mark_acknowledged(&self, _hashes: &[TxHash]) {}
+
+    fn get_inflight(&self, _tx_hash: &TxHash) -> Option<MempoolTx> {
+        None
+    }
+
     fn apply(&self, _seen_txs: &[TxHash], _unseen_txs: &[TxHash]) {}
 
     fn check_stage(&self, _tx_hash: &TxHash) -> MempoolTxStage {
@@ -61,10 +81,6 @@ impl MempoolStore for Mempool {
 
     fn subscribe(&self) -> Self::Stream {
         MempoolStream
-    }
-
-    fn pending(&self) -> Vec<(TxHash, EraCbor)> {
-        vec![]
     }
 }
 

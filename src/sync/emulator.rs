@@ -9,6 +9,7 @@ use pallas::network::miniprotocols::chainsync::Tip;
 use tracing::info;
 
 use crate::adapters::WalAdapter;
+use dolos_core::builtin::EphemeralMempool;
 use crate::prelude::*;
 
 pub type DownstreamPort = gasket::messaging::OutputPort<PullEvent>;
@@ -20,7 +21,7 @@ pub fn empty_bytes() -> Bytes {
 pub struct Worker {
     block_production_interval_seconds: u64,
     block_production_timer: tokio::time::Interval,
-    mempool: Mempool,
+    mempool: EphemeralMempool,
 }
 
 impl Worker {
@@ -48,7 +49,7 @@ impl Worker {
         let mut transaction_witness_sets = vec![];
         let mut auxiliary_data_set = BTreeMap::new();
 
-        let txs = self.mempool.request(10);
+        let txs = self.mempool.peek_pending(10);
 
         for (i, tx) in txs.iter().enumerate() {
             info!(tx = hex::encode(tx.hash), "adding tx to emulated block");
@@ -57,7 +58,7 @@ impl Worker {
 
             let era = pallas::ledger::traverse::Era::try_from(*era).or_panic()?;
 
-            let tx = MultiEraTx::decode_for_era(era, cbor).or_panic()?;
+            let tx = MultiEraTx::decode_for_era(era, &cbor).or_panic()?;
 
             let Some(conway) = tx.as_conway() else {
                 return Err(WorkerError::Panic);
@@ -71,7 +72,9 @@ impl Worker {
             }
         }
 
-        self.mempool.acknowledge(transaction_bodies.len());
+        let hashes: Vec<TxHash> = txs.iter().map(|tx| tx.hash).collect();
+        self.mempool.mark_inflight(&hashes);
+        self.mempool.mark_acknowledged(&hashes);
 
         let block = pallas::ledger::primitives::conway::Block {
             header: pallas::ledger::primitives::babbage::Header {
@@ -172,7 +175,7 @@ pub struct Stage {
     // block_production_interval: std::time::Duration,
     block_production_interval: u64,
     wal: WalAdapter,
-    mempool: Mempool,
+    mempool: EphemeralMempool,
 
     pub downstream: DownstreamPort,
 
@@ -184,7 +187,7 @@ pub struct Stage {
 }
 
 impl Stage {
-    pub fn new(wal: WalAdapter, mempool: Mempool, block_production_interval: u64) -> Self {
+    pub fn new(wal: WalAdapter, mempool: EphemeralMempool, block_production_interval: u64) -> Self {
         Self {
             downstream: Default::default(),
             block_count: Default::default(),

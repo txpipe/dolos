@@ -4,11 +4,7 @@ use crate::TagDimension;
 pub use pallas::ledger::validate::phase2::EvalReport;
 
 use futures_core::Stream;
-use itertools::Itertools;
 use std::pin::Pin;
-use std::sync::RwLock;
-use tokio::sync::broadcast;
-use tokio_stream::wrappers::BroadcastStream;
 use tracing::{debug, info, warn};
 
 #[derive(Debug)]
@@ -69,227 +65,8 @@ pub struct MempoolEvent {
 }
 
 // ---------------------------------------------------------------------------
-// Mempool implementation
-// ---------------------------------------------------------------------------
-
-#[derive(Default)]
-struct MempoolState {
-    pending: Vec<MempoolTx>,
-    inflight: Vec<MempoolTx>,
-    acknowledged: HashMap<TxHash, MempoolTx>,
-}
-
-/// A very basic, FIFO, single consumer mempool
-#[derive(Clone)]
-pub struct Mempool {
-    mempool: Arc<RwLock<MempoolState>>,
-    updates: broadcast::Sender<MempoolEvent>,
-}
-
-impl Default for Mempool {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Mempool {
-    pub fn new() -> Self {
-        let mempool = Arc::new(RwLock::new(MempoolState::default()));
-        let (updates, _) = broadcast::channel(16);
-
-        Self { mempool, updates }
-    }
-
-    pub fn notify(&self, new_stage: MempoolTxStage, tx: MempoolTx) {
-        if self.updates.send(MempoolEvent { new_stage, tx }).is_err() {
-            debug!("no mempool update receivers");
-        }
-    }
-
-    pub fn request(&self, desired: usize) -> Vec<MempoolTx> {
-        let available = self.pending_total();
-        self.request_exact(std::cmp::min(desired, available))
-    }
-
-    pub fn request_exact(&self, count: usize) -> Vec<MempoolTx> {
-        let mut state = self.mempool.write().unwrap();
-
-        let selected = state.pending.drain(..count).collect_vec();
-
-        for tx in selected.iter() {
-            info!(tx.hash = %tx.hash, "tx inflight");
-            state.inflight.push(tx.clone());
-            self.notify(MempoolTxStage::Inflight, tx.clone());
-        }
-
-        debug!(
-            pending = state.pending.len(),
-            inflight = state.inflight.len(),
-            acknowledged = state.acknowledged.len(),
-            "mempool state changed"
-        );
-
-        selected
-    }
-
-    pub fn acknowledge(&self, count: usize) {
-        debug!(n = count, "acknowledging txs");
-
-        let mut state = self.mempool.write().unwrap();
-
-        let count = count.min(state.inflight.len());
-        let selected = state.inflight.drain(..count).collect_vec();
-
-        for tx in selected {
-            info!(tx.hash = %tx.hash, "tx acknowledged");
-            state.acknowledged.insert(tx.hash, tx.clone());
-            self.notify(MempoolTxStage::Acknowledged, tx.clone());
-        }
-
-        debug!(
-            pending = state.pending.len(),
-            inflight = state.inflight.len(),
-            acknowledged = state.acknowledged.len(),
-            "mempool state changed"
-        );
-    }
-
-    pub fn find_inflight(&self, tx_hash: &TxHash) -> Option<MempoolTx> {
-        let state = self.mempool.read().unwrap();
-        state.inflight.iter().find(|x| x.hash.eq(tx_hash)).cloned()
-    }
-
-    pub fn find_pending(&self, tx_hash: &TxHash) -> Option<MempoolTx> {
-        let state = self.mempool.read().unwrap();
-        state.pending.iter().find(|x| x.hash.eq(tx_hash)).cloned()
-    }
-
-    pub fn pending_total(&self) -> usize {
-        let state = self.mempool.read().unwrap();
-        state.pending.len()
-    }
-
-    pub fn mark_ids_propagated(&self, txs: &[MempoolTx]) {
-        for tx in txs {
-            info!(tx.hash = %tx.hash, "tx id propagated");
-        }
-    }
-
-    pub fn mark_bodies_sent(&self, txs: &[MempoolTx]) {
-        for tx in txs {
-            info!(tx.hash = %tx.hash, "tx body propagated");
-        }
-    }
-}
-
-impl MempoolStore for Mempool {
-    type Stream = MempoolStream;
-
-    fn receive(&self, tx: MempoolTx) -> Result<(), MempoolError> {
-        info!(tx.hash = %tx.hash, "tx received");
-
-        let mut state = self.mempool.write().unwrap();
-
-        state.pending.push(tx.clone());
-
-        self.notify(MempoolTxStage::Pending, tx);
-
-        debug!(
-            pending = state.pending.len(),
-            inflight = state.inflight.len(),
-            acknowledged = state.acknowledged.len(),
-            "mempool state changed"
-        );
-
-        Ok(())
-    }
-
-    fn apply(&self, seen_txs: &[TxHash], unseen_txs: &[TxHash]) {
-        let mut state = self.mempool.write().unwrap();
-
-        if state.acknowledged.is_empty() {
-            return;
-        }
-
-        for tx_hash in seen_txs.iter() {
-            if let Some(tx) = state.acknowledged.get_mut(tx_hash) {
-                tx.confirmed = true;
-                self.notify(MempoolTxStage::Confirmed, tx.clone());
-                info!(tx.hash = %tx.hash, "tx confirmed");
-            }
-        }
-
-        for tx_hash in unseen_txs.iter() {
-            if let Some(tx) = state.acknowledged.get_mut(tx_hash) {
-                tx.confirmed = false;
-                self.notify(MempoolTxStage::RolledBack, tx.clone());
-                info!(tx.hash = %tx.hash, "tx rollback");
-            }
-        }
-    }
-
-    fn check_stage(&self, tx_hash: &TxHash) -> MempoolTxStage {
-        let state = self.mempool.read().unwrap();
-
-        if let Some(tx) = state.acknowledged.get(tx_hash) {
-            if tx.confirmed {
-                MempoolTxStage::Confirmed
-            } else {
-                MempoolTxStage::Acknowledged
-            }
-        } else if state.inflight.iter().any(|x| x.hash.eq(tx_hash)) {
-            MempoolTxStage::Inflight
-        } else if state.pending.iter().any(|x| x.hash.eq(tx_hash)) {
-            MempoolTxStage::Pending
-        } else {
-            MempoolTxStage::Unknown
-        }
-    }
-
-    fn subscribe(&self) -> Self::Stream {
-        MempoolStream {
-            inner: BroadcastStream::new(self.updates.subscribe()),
-        }
-    }
-
-    fn pending(&self) -> Vec<(TxHash, EraCbor)> {
-        let state = self.mempool.read().unwrap();
-
-        state
-            .pending
-            .iter()
-            .map(|tx| (tx.hash, tx.payload.clone()))
-            .collect()
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Streams
 // ---------------------------------------------------------------------------
-
-pub struct MempoolStream {
-    inner: BroadcastStream<MempoolEvent>,
-}
-
-impl Stream for MempoolStream {
-    type Item = Result<MempoolEvent, MempoolError>;
-
-    fn poll_next(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        match Pin::new(&mut self.inner).poll_next(cx) {
-            std::task::Poll::Ready(Some(x)) => match x {
-                Ok(x) => std::task::Poll::Ready(Some(Ok(x))),
-                Err(err) => {
-                    std::task::Poll::Ready(Some(Err(MempoolError::Internal(Box::new(err)))))
-                }
-            },
-            std::task::Poll::Ready(None) => std::task::Poll::Ready(None),
-            std::task::Poll::Pending => std::task::Poll::Pending,
-        }
-    }
-}
 
 pub struct UpdateFilter<M: MempoolStore> {
     inner: M::Stream,
@@ -499,6 +276,26 @@ mod tests {
             Ok(())
         }
 
+        fn has_pending(&self) -> bool {
+            false
+        }
+
+        fn peek_pending(&self, _limit: usize) -> Vec<MempoolTx> {
+            vec![]
+        }
+
+        fn pending(&self) -> Vec<(TxHash, EraCbor)> {
+            vec![]
+        }
+
+        fn mark_inflight(&self, _hashes: &[TxHash]) {}
+
+        fn mark_acknowledged(&self, _hashes: &[TxHash]) {}
+
+        fn get_inflight(&self, _tx_hash: &TxHash) -> Option<MempoolTx> {
+            None
+        }
+
         fn apply(&self, _seen: &[TxHash], _unseen: &[TxHash]) {}
 
         fn check_stage(&self, _hash: &TxHash) -> MempoolTxStage {
@@ -507,10 +304,6 @@ mod tests {
 
         fn subscribe(&self) -> Self::Stream {
             ScriptedStream::empty()
-        }
-
-        fn pending(&self) -> Vec<(TxHash, EraCbor)> {
-            vec![]
         }
     }
 

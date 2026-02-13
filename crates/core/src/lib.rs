@@ -383,13 +383,27 @@ pub trait MempoolStore: Clone + Send + Sync + 'static {
         + Send
         + Sync;
 
+    // --- ingest ---
     fn receive(&self, tx: mempool::MempoolTx) -> Result<(), MempoolError>;
 
+    // --- ordered queue (pending) ---
+    fn has_pending(&self) -> bool;
+    fn peek_pending(&self, limit: usize) -> Vec<MempoolTx>;
+    fn pending(&self) -> Vec<(TxHash, EraCbor)>;
+
+    // --- lifecycle transitions ---
+    fn mark_inflight(&self, hashes: &[TxHash]);
+    fn mark_acknowledged(&self, hashes: &[TxHash]);
+
+    // --- lookup ---
+    fn get_inflight(&self, tx_hash: &TxHash) -> Option<MempoolTx>;
+
+    // --- on-chain confirmation ---
     fn apply(&self, seen_txs: &[TxHash], unseen_txs: &[TxHash]);
+
+    // --- monitoring ---
     fn check_stage(&self, tx_hash: &TxHash) -> MempoolTxStage;
     fn subscribe(&self) -> Self::Stream;
-
-    fn pending(&self) -> Vec<(TxHash, EraCbor)>;
 }
 
 pub trait Block: Sized + Send + Sync {

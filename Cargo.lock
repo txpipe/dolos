@@ -1293,6 +1293,7 @@ version = "1.0.0-rc.9"
 dependencies = [
  "dolos-testing",
  "futures-core",
+ "futures-util",
  "hex",
  "itertools 0.14.0",
  "opentelemetry",

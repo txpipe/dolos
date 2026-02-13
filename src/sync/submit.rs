@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use gasket::framework::*;
 use itertools::Itertools as _;
 use pallas::crypto::hash::Hash;
@@ -6,6 +8,7 @@ use pallas::network::miniprotocols::txsubmission::{EraTxBody, EraTxId, Request, 
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
+use dolos_core::builtin::EphemeralMempool;
 use crate::prelude::*;
 
 // HACK: the tx era number differs from the block era number, we subtract 1 to make them match.
@@ -34,17 +37,22 @@ fn to_n2n_body(mempool_tx: MempoolTx) -> EraTxBody {
 pub struct Worker {
     peer_session: PeerClient,
     unfulfilled_request: Option<usize>,
+    /// Tracks the hashes of tx IDs we've propagated to the peer, in order.
+    /// Used to map the protocol's positional ack count to specific tx hashes.
+    propagated_hashes: VecDeque<TxHash>,
 }
 
 impl Worker {
     async fn propagate_txs(
         &mut self,
-        mempool: &Mempool,
+        mempool: &EphemeralMempool,
         txs: Vec<MempoolTx>,
     ) -> Result<(), WorkerError> {
         debug!(n = txs.len(), "propagating tx ids");
 
-        mempool.mark_ids_propagated(&txs);
+        let hashes: Vec<TxHash> = txs.iter().map(|tx| tx.hash).collect();
+        mempool.mark_inflight(&hashes);
+        self.propagated_hashes.extend(hashes);
 
         let payload = txs.iter().map(to_n2n_reply).collect_vec();
 
@@ -58,32 +66,38 @@ impl Worker {
         Ok(())
     }
 
+    /// Drain the first `count` propagated hashes and mark them as acknowledged.
+    fn acknowledge_propagated(&mut self, mempool: &EphemeralMempool, count: usize) {
+        let drain_count = count.min(self.propagated_hashes.len());
+        if drain_count == 0 {
+            return;
+        }
+
+        let acked: Vec<TxHash> = self.propagated_hashes.drain(..drain_count).collect();
+        mempool.mark_acknowledged(&acked);
+    }
+
     async fn schedule_unfulfilled(
         &mut self,
         stage: &mut Stage,
         request: usize,
     ) -> Result<WorkSchedule<Request<EraTxId>>, WorkerError> {
-        let available = stage.mempool.pending_total();
+        if stage.mempool.has_pending() {
+            debug!(request, "found txs to fulfill request");
 
-        if available > 0 {
-            debug!(request, available, "found enough txs to fulfill request");
-
-            // we have all the tx we need to we process the work unit as a new one. We don't
+            // we have txs available so we process the work unit as a new one. We don't
             // acknowledge anything because that already happened on the initial attempt to
-            // fullfil the request.
+            // fulfill the request.
             Ok(WorkSchedule::Unit(Request::TxIds(0, request as u16)))
         } else {
-            debug!(
-                request,
-                available, "still not enough txs to fulfill request"
-            );
+            debug!(request, "still not enough txs to fulfill request");
 
             // we wait a few secs to avoid turning this stage into a hot loop.
             // TODO: we need to watch the mempool and abort the wait if there's a change in
             // the list of available txs.
             tokio::time::sleep(Duration::from_secs(10)).await;
 
-            // we store the request again so that the next schedule know we're still waiting
+            // we store the request again so that the next schedule knows we're still waiting
             // for new transactions.
             self.unfulfilled_request = Some(request);
 
@@ -127,6 +141,7 @@ impl gasket::framework::Worker<Stage> for Worker {
         let worker = Self {
             peer_session,
             unfulfilled_request: Default::default(),
+            propagated_hashes: VecDeque::new(),
         };
 
         Ok(worker)
@@ -155,24 +170,22 @@ impl gasket::framework::Worker<Stage> for Worker {
 
                 info!(req, ack, "blocking tx ids request");
 
-                stage.mempool.acknowledge(ack);
+                self.acknowledge_propagated(&stage.mempool, ack);
 
-                let available = stage.mempool.pending_total();
-
-                if available > 0 {
-                    let txs = stage.mempool.request(req);
+                if stage.mempool.has_pending() {
+                    let txs = stage.mempool.peek_pending(req);
                     self.propagate_txs(&stage.mempool, txs).await?;
                 } else {
-                    debug!(req, available, "not enough txs to fulfill request");
+                    debug!(req, "not enough txs to fulfill request");
                     self.unfulfilled_request = Some(req);
                 }
             }
             Request::TxIdsNonBlocking(ack, req) => {
                 info!(req, ack, "non-blocking tx ids request");
 
-                stage.mempool.acknowledge(*ack as usize);
+                self.acknowledge_propagated(&stage.mempool, *ack as usize);
 
-                let txs = stage.mempool.request(*req as usize);
+                let txs = stage.mempool.peek_pending(*req as usize);
                 self.propagate_txs(&stage.mempool, txs).await?;
             }
             Request::Txs(ids) => {
@@ -180,10 +193,8 @@ impl gasket::framework::Worker<Stage> for Worker {
 
                 let found: Vec<MempoolTx> = ids
                     .iter()
-                    .filter_map(|x| stage.mempool.find_inflight(&Hash::from(x.1.as_slice())))
+                    .filter_map(|x| stage.mempool.get_inflight(&Hash::from(x.1.as_slice())))
                     .collect_vec();
-
-                stage.mempool.mark_bodies_sent(&found);
 
                 let to_send = found.into_iter().map(to_n2n_body).collect_vec();
 
@@ -206,11 +217,11 @@ impl gasket::framework::Worker<Stage> for Worker {
 pub struct Stage {
     peer_address: String,
     network_magic: u64,
-    mempool: Mempool,
+    mempool: EphemeralMempool,
 }
 
 impl Stage {
-    pub fn new(peer_address: String, network_magic: u64, mempool: Mempool) -> Self {
+    pub fn new(peer_address: String, network_magic: u64, mempool: EphemeralMempool) -> Self {
         Self {
             peer_address,
             network_magic,

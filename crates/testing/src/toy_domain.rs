@@ -53,6 +53,39 @@ impl dolos_core::MempoolStore for Mempool {
         Ok(())
     }
 
+    fn has_pending(&self) -> bool {
+        self.pending
+            .read()
+            .map(|p| !p.is_empty())
+            .unwrap_or(false)
+    }
+
+    fn peek_pending(&self, limit: usize) -> Vec<MempoolTx> {
+        self.pending
+            .read()
+            .map(|p| p.iter().take(limit).cloned().collect())
+            .unwrap_or_default()
+    }
+
+    fn pending(&self) -> Vec<(TxHash, EraCbor)> {
+        if let Ok(pending) = self.pending.read() {
+            return pending
+                .iter()
+                .map(|tx| (tx.hash, tx.payload.clone()))
+                .collect();
+        }
+
+        Vec::new()
+    }
+
+    fn mark_inflight(&self, _hashes: &[TxHash]) {}
+
+    fn mark_acknowledged(&self, _hashes: &[TxHash]) {}
+
+    fn get_inflight(&self, _tx_hash: &TxHash) -> Option<MempoolTx> {
+        None
+    }
+
     fn apply(&self, _seen_txs: &[TxHash], _unseen_txs: &[TxHash]) {
         // do nothing for now
     }
@@ -69,17 +102,6 @@ impl dolos_core::MempoolStore for Mempool {
 
     fn subscribe(&self) -> Self::Stream {
         EmptyMempoolStream
-    }
-
-    fn pending(&self) -> Vec<(TxHash, EraCbor)> {
-        if let Ok(pending) = self.pending.read() {
-            return pending
-                .iter()
-                .map(|tx| (tx.hash, tx.payload.clone()))
-                .collect();
-        }
-
-        Vec::new()
     }
 }
 
