@@ -10,6 +10,12 @@ pub struct BadRequest {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Datum {
+    #[serde(rename = "datum")]
+    pub datum: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Metadata {
     pub hash: String,
     pub raw: String,
