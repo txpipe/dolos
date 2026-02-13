@@ -1226,6 +1226,7 @@ dependencies = [
  "indicatif",
  "inquire",
  "itertools 0.14.0",
+ "kupo",
  "lazy_static",
  "log",
  "miette",
@@ -2583,6 +2584,24 @@ dependencies = [
  "serde",
  "serde_with 2.3.3",
  "zeroize",
+]
+
+[[package]]
+name = "kupo"
+version = "1.0.0-rc.9"
+dependencies = [
+ "axum 0.8.4",
+ "base58",
+ "bech32 0.11.1",
+ "dolos-cardano",
+ "dolos-core",
+ "hex",
+ "pallas",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower-http 0.6.6",
+ "tracing",
 ]
 
 [[package]]

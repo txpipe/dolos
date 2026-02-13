@@ -45,6 +45,7 @@ dolos-cardano = { path = "crates/cardano", features = ["include-genesis"] }
 dolos-redb3 = { path = "crates/redb3" }
 dolos-fjall = { path = "crates/fjall" }
 dolos-minibf = { path = "crates/minibf", optional = true }
+kupo = { path = "crates/kupo", optional = true }
 dolos-trp = { path = "crates/trp", optional = true }
 
 # gasket = { git = "https://github.com/construkts/gasket-rs.git", features = ["derive"] }
@@ -137,10 +138,18 @@ minibf = [
     "tower-http/trace",
     "tower-http/normalize-path",
 ]
+kupo = [
+    "dep:kupo",
+    "axum",
+    "http-body-util",
+    "tower-http/cors",
+    "tower-http/trace",
+    "tower-http/normalize-path",
+]
 trp = ["dolos-trp"]
 
 # Default features - includes all services
-default = ["mithril", "utils", "grpc", "minibf", "trp", "relaxed"]
+default = ["mithril", "utils", "grpc", "minibf", "kupo", "trp", "relaxed"]
 
 # The profile that 'cargo dist' will build with
 [profile.dist]
@@ -155,7 +164,7 @@ members = [
     "crates/testing",
     "crates/minibf",
     "crates/redb3",
-    "xtask",
+    "xtask", "crates/kupo",
 ]
 
 [workspace.package]

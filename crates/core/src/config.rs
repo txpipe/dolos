@@ -586,6 +586,12 @@ pub struct MinibfConfig {
 }
 
 #[derive(Deserialize, Serialize, Clone)]
+pub struct KupoConfig {
+    pub listen_address: SocketAddr,
+    pub permissive_cors: Option<bool>,
+}
+
+#[derive(Deserialize, Serialize, Clone)]
 pub struct TrpConfig {
     pub listen_address: SocketAddr,
     pub max_optimize_rounds: u8,
@@ -598,6 +604,7 @@ pub struct ServeConfig {
     pub ouroboros: Option<OuroborosConfig>,
     pub grpc: Option<GrpcConfig>,
     pub minibf: Option<MinibfConfig>,
+    pub kupo: Option<KupoConfig>,
     pub trp: Option<TrpConfig>,
 }
 
