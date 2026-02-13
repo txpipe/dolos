@@ -12,8 +12,8 @@ use crate::prelude::*;
 use crate::serve::o7s_unix::utils;
 use utils::{
     build_account_state_response, build_era_history_response, build_pool_state_response,
-    build_protocol_params, build_stake_pools_response, build_stake_snapshots_response,
-    build_utxo_by_address_response,
+    build_protocol_params, build_stake_pool_params_response, build_stake_pools_response,
+    build_stake_snapshots_response, build_utxo_by_address_response,
 };
 
 pub struct Session<D: Domain> {
@@ -298,6 +298,13 @@ impl<D: Domain> Session<D> {
             ))) => {
                 info!("GetStakePools query");
                 build_stake_pools_response(&self.domain)?
+            }
+            Ok(q16::Request::LedgerQuery(q16::LedgerQuery::BlockQuery(
+                _era,
+                q16::BlockQuery::GetStakePoolParams(ref pools),
+            ))) => {
+                info!("GetStakePoolParams query");
+                build_stake_pool_params_response(&self.domain, pools)?
             }
             Ok(q16::Request::LedgerQuery(q16::LedgerQuery::BlockQuery(
                 _era,

@@ -1,6 +1,6 @@
 use crate::prelude::*;
-use dolos_cardano::{PoolParams, PoolState};
 use dolos_cardano::FixedNamespace as _;
+use dolos_cardano::{PoolParams, PoolState};
 use dolos_core::StateStore;
 use pallas::codec::minicbor::{self, Decode, Encode};
 use pallas::codec::utils::{AnyCbor, AnyUInt, Bytes, Nullable, TagWrap};
@@ -21,6 +21,46 @@ pub struct LocalPState {
     retiring: BTreeMap<Bytes, u32>,
     #[n(3)]
     deposits: BTreeMap<Bytes, q16::Coin>,
+}
+
+pub fn build_stake_pool_params_response<D: Domain>(
+    domain: &D,
+    pool_ids: &q16::Pools,
+) -> Result<AnyCbor, Error> {
+    let state = domain.state();
+    let pools_iter = state
+        .iter_entities_typed::<PoolState>(PoolState::NS, None)
+        .map_err(|e| Error::server(format!("failed to iterate pools: {}", e)))?;
+
+    let filter_set: BTreeSet<Vec<u8>> = pool_ids.0.iter().map(|p| p.to_vec()).collect();
+
+    let mut result: BTreeMap<Bytes, q16::PoolParams> = BTreeMap::new();
+
+    for record in pools_iter {
+        let (_, pool) = record.map_err(|e| Error::server(format!("failed to read pool: {}", e)))?;
+
+        let pool_id_bytes = pool.operator.to_vec();
+        if !filter_set.contains(&pool_id_bytes) {
+            continue;
+        }
+
+        let pool_id: Bytes = pool_id_bytes.into();
+
+        let live_snapshot_opt = pool.snapshot.live();
+        let live_snapshot = match live_snapshot_opt {
+            Some(ls) => ls,
+            None => continue,
+        };
+
+        result.insert(
+            pool_id.clone(),
+            convert_pool_params(pool_id.as_ref(), &live_snapshot.params),
+        );
+    }
+
+    debug!(num_pools = result.len(), "returning stake pool params");
+
+    Ok(AnyCbor::from_encode((result,)))
 }
 
 pub fn build_stake_pools_response<D: Domain>(domain: &D) -> Result<AnyCbor, Error> {
