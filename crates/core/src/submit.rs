@@ -29,11 +29,7 @@ pub trait SubmitExt: Domain {
     ///
     /// The validated mempool transaction if valid.
     #[instrument(skip_all)]
-    fn validate_tx(
-        &self,
-        chain: &Self::Chain,
-        cbor: &[u8],
-    ) -> Result<MempoolTx, DomainError> {
+    fn validate_tx(&self, chain: &Self::Chain, cbor: &[u8]) -> Result<MempoolTx, DomainError> {
         let tip = self.state().read_cursor()?;
 
         let utxos =

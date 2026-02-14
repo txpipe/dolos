@@ -8,6 +8,7 @@ use dolos_core::{
     MempoolStore, MempoolTx, MempoolTxStage, StateStore as CoreStateStore, TipEvent,
     TipSubscription as CoreTipSubscription, *,
 };
+use itertools::Itertools;
 
 // ---------------------------------------------------------------------------
 // Config
@@ -94,6 +95,7 @@ pub struct HarnessDomain {
     mempool: Mempool,
     storage_config: StorageConfig,
     genesis: Arc<Genesis>,
+    health: Health,
 }
 
 impl Domain for HarnessDomain {
@@ -144,6 +146,10 @@ impl Domain for HarnessDomain {
         &self.mempool
     }
 
+    fn health(&self) -> &Health {
+        &self.health
+    }
+
     fn watch_tip(&self, _from: Option<ChainPoint>) -> Result<Self::TipSubscription, DomainError> {
         Ok(StubTipSubscription)
     }
@@ -181,6 +187,7 @@ impl LedgerHarness {
             mempool: Mempool {},
             storage_config: StorageConfig::default(),
             genesis,
+            health: Health::default(),
         };
 
         // 5. Bootstrap (integrity check + drain pending work)
@@ -208,7 +215,7 @@ impl LedgerHarness {
             .domain
             .state
             .read_cursor()?
-            .map(|c| c.try_into().unwrap())
+            .map(|c| Point::try_from(c).unwrap())
             .unwrap_or(Point::Origin);
 
         let mut iter = pallas::storage::hardano::immutable::read_blocks_from_point(
@@ -221,18 +228,16 @@ impl LedgerHarness {
             iter.next();
         }
 
-        for chunk in itertools::Itertools::chunks(iter, chunk_size).into_iter() {
-            let raw_blocks: Vec<_> = chunk.collect::<Result<Vec<_>, _>>()?;
+        for chunk in iter.chunks(chunk_size).into_iter() {
+            let raw_blocks: Vec<Vec<u8>> = chunk.collect::<Result<Vec<_>, _>>()?;
             let raw_blocks: Vec<_> = raw_blocks.into_iter().map(Arc::new).collect();
 
             // Feed blocks and process work units one at a time for callback
             for block in raw_blocks {
                 {
                     let mut chain = self.domain.write_chain();
-                    if !chain.can_receive_block() {
-                        if self.drain_with_callback(&mut on_work)? {
-                            return Ok(());
-                        }
+                    if !chain.can_receive_block() && self.drain_with_callback(&mut on_work)? {
+                        return Ok(());
                     }
                     chain.receive_block(block)?;
                 }

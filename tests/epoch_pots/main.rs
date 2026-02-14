@@ -84,6 +84,7 @@ struct XtaskConfig {
     snapshots: SnapshotConfig,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct SeedConfig {
     mainnet: Option<PathBuf>,
@@ -92,6 +93,7 @@ struct SeedConfig {
 }
 
 impl SeedConfig {
+    #[allow(dead_code)]
     fn get(&self, network: &str) -> Option<&PathBuf> {
         match network {
             "mainnet" => self.mainnet.as_ref(),
@@ -399,6 +401,7 @@ fn dump_eras(state: &impl StateStore, path: &Path) -> Result<()> {
 // Core test runner
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn run_epoch_pots_test(
     network: &str,
     subject_epoch: u64,

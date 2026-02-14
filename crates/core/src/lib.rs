@@ -32,6 +32,7 @@ pub mod bootstrap;
 pub mod builtin;
 pub mod config;
 pub mod crawl;
+pub mod health;
 pub mod import;
 pub mod indexes;
 pub mod mempool;
@@ -78,6 +79,7 @@ pub type LogSeq = u64;
 
 pub use archive::*;
 pub use async_query::*;
+pub use health::*;
 pub use indexes::*;
 pub use mempool::*;
 pub use point::*;
@@ -620,6 +622,7 @@ pub trait Domain: Send + Sync + Clone + 'static {
     fn archive(&self) -> &Self::Archive;
     fn indexes(&self) -> &Self::Indexes;
     fn mempool(&self) -> &Self::Mempool;
+    fn health(&self) -> &Health;
 
     fn watch_tip(&self, from: Option<ChainPoint>) -> Result<Self::TipSubscription, DomainError>;
     fn notify_tip(&self, tip: TipEvent);

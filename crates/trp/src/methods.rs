@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use tx3_resolver::trp::{ResolveParams, SubmitParams, SubmitResponse, SubmitWitness, TxEnvelope};
 
-use dolos_core::{Domain, MempoolAwareUtxoStore, StateStore as _, SubmitExt};
+use dolos_core::{Domain, MempoolAwareUtxoStore, SubmitExt};
 
 use crate::{compiler::load_compiler, utxos::UtxoStoreAdapter};
 
@@ -94,7 +94,7 @@ pub async fn trp_submit<D: Domain + SubmitExt>(
 }
 
 pub fn health<D: Domain>(context: &Context<D>) -> bool {
-    context.domain.state().read_cursor().is_ok()
+    context.domain.health().synced()
 }
 
 #[cfg(test)]
