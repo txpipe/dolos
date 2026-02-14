@@ -491,14 +491,18 @@ impl MempoolStore for RedbMempool {
                 }
             }
 
+            let mut pending = wx.open_table(PENDING_TABLE)?;
+
             for tx_hash in unseen_txs {
-                if let Some(mut record) = TrackingRecord::read(&tracking, tx_hash)? {
-                    record.stage = TrackingStage::Acknowledged;
-                    record.confirmations = 0;
+                if let Some(record) = TrackingRecord::read(&tracking, tx_hash)? {
+                    tracking.remove(tx_hash.as_ref())?;
+                    let seq = Self::next_seq(wx)?;
+                    let key = pending_key(seq, tx_hash);
+                    let value = encode_era_cbor(&record.payload);
+                    pending.insert(key.as_slice(), value.as_slice())?;
                     let tx = record.to_mempool_tx(*tx_hash);
-                    record.write(&mut tracking, tx_hash)?;
-                    info!(tx.hash = %tx.hash, "tx rollback (redb)");
-                    events.push((MempoolTxStage::RolledBack, tx));
+                    info!(tx.hash = %tx.hash, "tx rollback to pending (redb)");
+                    events.push((MempoolTxStage::Pending, tx));
                 }
             }
 
@@ -588,5 +592,172 @@ impl MempoolStore for RedbMempool {
         RedbMempoolStream {
             inner: BroadcastStream::new(self.updates.subscribe()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_store() -> RedbMempool {
+        RedbMempool::in_memory().unwrap()
+    }
+
+    fn test_hash(n: u8) -> TxHash {
+        dolos_testing::tx_sequence_to_hash(n as u64)
+    }
+
+    fn test_tx(n: u8) -> MempoolTx {
+        dolos_testing::mempool::make_test_mempool_tx(test_hash(n))
+    }
+
+    #[test]
+    fn test_empty_store() {
+        let store = test_store();
+        assert!(!store.has_pending());
+        assert!(store.peek_pending(10).is_empty());
+        assert!(store.pending().is_empty());
+    }
+
+    #[test]
+    fn test_receive_and_has_pending() {
+        let store = test_store();
+        let tx = test_tx(1);
+        let hash = tx.hash;
+        let payload = tx.payload.clone();
+
+        store.receive(tx).unwrap();
+
+        assert!(store.has_pending());
+
+        let peeked = store.peek_pending(10);
+        assert_eq!(peeked.len(), 1);
+        assert_eq!(peeked[0].hash, hash);
+
+        let pending = store.pending();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].0, hash);
+        assert_eq!(pending[0].1, payload);
+    }
+
+    #[test]
+    fn test_peek_pending_respects_limit() {
+        let store = test_store();
+        for n in 0..3 {
+            store.receive(test_tx(n)).unwrap();
+        }
+
+        let peeked = store.peek_pending(2);
+        assert_eq!(peeked.len(), 2);
+    }
+
+    #[test]
+    fn test_receive_duplicate_hash() {
+        let store = test_store();
+        let tx = test_tx(1);
+        store.receive(tx.clone()).unwrap();
+        store.receive(tx).unwrap();
+
+        assert_eq!(store.peek_pending(10).len(), 2);
+    }
+
+    #[test]
+    fn test_mark_inflight() {
+        let store = test_store();
+        let tx = test_tx(1);
+        let hash = tx.hash;
+
+        store.receive(tx).unwrap();
+        store.mark_inflight(&[hash]);
+
+        assert!(!store.has_pending());
+        assert!(matches!(store.check_stage(&hash), MempoolTxStage::Inflight));
+        assert!(store.get_inflight(&hash).is_some());
+    }
+
+    #[test]
+    fn test_mark_acknowledged() {
+        let store = test_store();
+        let tx = test_tx(1);
+        let hash = tx.hash;
+
+        store.receive(tx).unwrap();
+        store.mark_inflight(&[hash]);
+        store.mark_acknowledged(&[hash]);
+
+        assert!(matches!(store.check_stage(&hash), MempoolTxStage::Acknowledged));
+        assert!(store.get_inflight(&hash).is_none());
+    }
+
+    #[test]
+    fn test_apply_seen() {
+        let store = test_store();
+        let tx = test_tx(1);
+        let hash = tx.hash;
+
+        store.receive(tx).unwrap();
+        store.mark_inflight(&[hash]);
+        store.mark_acknowledged(&[hash]);
+        store.apply(&[hash], &[]);
+
+        assert!(matches!(store.check_stage(&hash), MempoolTxStage::Confirmed));
+    }
+
+    #[test]
+    fn test_apply_unseen_rollback() {
+        let store = test_store();
+        let tx = test_tx(1);
+        let hash = tx.hash;
+
+        store.receive(tx).unwrap();
+        store.mark_inflight(&[hash]);
+        store.mark_acknowledged(&[hash]);
+        store.apply(&[hash], &[]);
+        store.apply(&[], &[hash]);
+
+        assert!(matches!(store.check_stage(&hash), MempoolTxStage::Pending));
+        assert!(store.has_pending());
+        let peeked = store.peek_pending(10);
+        assert_eq!(peeked.len(), 1);
+        assert_eq!(peeked[0].hash, hash);
+    }
+
+    #[test]
+    fn test_finalize() {
+        let store = test_store();
+        let tx = test_tx(1);
+        let hash = tx.hash;
+
+        store.receive(tx).unwrap();
+        store.mark_inflight(&[hash]);
+        store.mark_acknowledged(&[hash]);
+        store.apply(&[hash], &[]);
+        store.apply(&[hash], &[]);
+        store.finalize(2);
+
+        assert!(matches!(store.check_stage(&hash), MempoolTxStage::Finalized));
+    }
+
+    #[test]
+    fn test_finalize_below_threshold() {
+        let store = test_store();
+        let tx = test_tx(1);
+        let hash = tx.hash;
+
+        store.receive(tx).unwrap();
+        store.mark_inflight(&[hash]);
+        store.mark_acknowledged(&[hash]);
+        store.apply(&[hash], &[]);
+        store.finalize(2);
+
+        assert!(matches!(store.check_stage(&hash), MempoolTxStage::Confirmed));
+    }
+
+    #[test]
+    fn test_check_stage_unknown() {
+        let store = test_store();
+        let hash = test_hash(99);
+
+        assert!(matches!(store.check_stage(&hash), MempoolTxStage::Unknown));
     }
 }

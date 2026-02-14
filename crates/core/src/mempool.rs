@@ -48,7 +48,7 @@ impl MempoolTx {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum MempoolTxStage {
     Pending,
     Inflight,
@@ -63,6 +63,123 @@ pub enum MempoolTxStage {
 pub struct MempoolEvent {
     pub new_stage: MempoolTxStage,
     pub tx: MempoolTx,
+}
+
+#[derive(Debug, Error)]
+pub enum MempoolError {
+    #[error("internal error: {0}")]
+    Internal(#[from] Box<dyn std::error::Error + Send + Sync>),
+
+    #[error("traverse error: {0}")]
+    TraverseError(#[from] pallas::ledger::traverse::Error),
+
+    #[error("decode error: {0}")]
+    DecodeError(#[from] pallas::codec::minicbor::decode::Error),
+
+    #[error(transparent)]
+    StateError(#[from] StateError),
+
+    #[error(transparent)]
+    IndexError(#[from] IndexError),
+
+    #[error("plutus not supported")]
+    PlutusNotSupported,
+
+    #[error("invalid tx: {0}")]
+    InvalidTx(String),
+
+    #[error("pparams not available")]
+    PParamsNotAvailable,
+}
+
+/// Durable storage for the transaction submission lifecycle.
+///
+/// A `MempoolStore` tracks transactions through a linear state machine with
+/// one rollback edge:
+///
+/// ```text
+///   Pending → Inflight → Acknowledged → Confirmed → Finalized
+///                                           ↓
+///                                        Pending   (rollback via `apply(unseen)`)
+/// ```
+///
+/// - **Pending** — received but not yet submitted to a peer.
+/// - **Inflight** — sent to a peer, awaiting acknowledgement.
+/// - **Acknowledged** — the peer accepted the transaction.
+/// - **Confirmed** — observed on-chain; confirmation counter tracks depth.
+/// - **Finalized** — enough confirmations accumulated; no longer actively tracked.
+///
+/// Implementors must be thread-safe (`Clone + Send + Sync`) and persist state
+/// durably so that a restart does not lose in-progress transactions.
+pub trait MempoolStore: Clone + Send + Sync + 'static {
+    type Stream: futures_core::Stream<Item = Result<MempoolEvent, MempoolError>>
+        + Unpin
+        + Send
+        + Sync;
+
+    /// Append a transaction to the pending queue.
+    ///
+    /// Implementors must persist the transaction and emit a `Pending` event
+    /// via [`subscribe`](Self::subscribe). Duplicate hashes are allowed — each
+    /// call creates a separate pending entry.
+    fn receive(&self, tx: MempoolTx) -> Result<(), MempoolError>;
+
+    /// Returns `true` if there is at least one transaction in the pending queue.
+    fn has_pending(&self) -> bool;
+
+    /// Returns up to `limit` transactions from the pending queue in insertion
+    /// order. Does not remove them.
+    fn peek_pending(&self, limit: usize) -> Vec<MempoolTx>;
+
+    /// Returns all pending transactions as `(hash, payload)` pairs.
+    ///
+    /// Used by downstream code (e.g., `MempoolAwareUtxoStore`) to scan mempool
+    /// UTxOs.
+    fn pending(&self) -> Vec<(TxHash, EraCbor)>;
+
+    /// Moves matching transactions from pending to the `Inflight` stage.
+    ///
+    /// Implementors must remove them from the pending queue and begin tracking
+    /// them as inflight. Hashes not found in pending are silently ignored.
+    fn mark_inflight(&self, hashes: &[TxHash]);
+
+    /// Transitions `Inflight` transactions to `Acknowledged`.
+    ///
+    /// Only transitions transactions currently in `Inflight`; other stages are
+    /// silently skipped.
+    fn mark_acknowledged(&self, hashes: &[TxHash]);
+
+    /// Returns the transaction if it is currently in the `Inflight` stage,
+    /// `None` otherwise.
+    ///
+    /// Used to retrieve the payload for re-submission checks.
+    fn get_inflight(&self, tx_hash: &TxHash) -> Option<MempoolTx>;
+
+    /// Called after each chain-sync event.
+    ///
+    /// For `seen_txs`: transitions to `Confirmed` and increments the
+    /// confirmation counter. For `unseen_txs` (rollback): moves the
+    /// transaction back to the pending queue so it can be re-submitted.
+    /// Hashes not currently tracked are silently ignored.
+    fn apply(&self, seen_txs: &[TxHash], unseen_txs: &[TxHash]);
+
+    /// Removes transactions whose confirmation count meets `threshold` from
+    /// the tracking table and records them as `Finalized`.
+    ///
+    /// Finalized transactions are no longer actively tracked but can still be
+    /// looked up via [`check_stage`](Self::check_stage).
+    fn finalize(&self, threshold: u32);
+
+    /// Returns the current lifecycle stage of a transaction.
+    ///
+    /// Returns [`MempoolTxStage::Unknown`] for hashes that were never received
+    /// or have been garbage-collected.
+    fn check_stage(&self, tx_hash: &TxHash) -> MempoolTxStage;
+
+    /// Returns a stream of lifecycle events.
+    ///
+    /// Implementors should emit an event for every stage transition.
+    fn subscribe(&self) -> Self::Stream;
 }
 
 // ---------------------------------------------------------------------------

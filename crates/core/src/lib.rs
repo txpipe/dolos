@@ -351,65 +351,6 @@ impl Genesis {
     }
 }
 
-#[derive(Debug, Error)]
-pub enum MempoolError {
-    #[error("internal error: {0}")]
-    Internal(#[from] Box<dyn std::error::Error + Send + Sync>),
-
-    #[error("traverse error: {0}")]
-    TraverseError(#[from] pallas::ledger::traverse::Error),
-
-    #[error("decode error: {0}")]
-    DecodeError(#[from] pallas::codec::minicbor::decode::Error),
-
-    #[error(transparent)]
-    StateError(#[from] StateError),
-
-    #[error(transparent)]
-    IndexError(#[from] IndexError),
-
-    #[error("plutus not supported")]
-    PlutusNotSupported,
-
-    #[error("invalid tx: {0}")]
-    InvalidTx(String),
-
-    #[error("pparams not available")]
-    PParamsNotAvailable,
-}
-
-pub trait MempoolStore: Clone + Send + Sync + 'static {
-    type Stream: futures_core::Stream<Item = Result<MempoolEvent, MempoolError>>
-        + Unpin
-        + Send
-        + Sync;
-
-    // --- ingest ---
-    fn receive(&self, tx: mempool::MempoolTx) -> Result<(), MempoolError>;
-
-    // --- ordered queue (pending) ---
-    fn has_pending(&self) -> bool;
-    fn peek_pending(&self, limit: usize) -> Vec<MempoolTx>;
-    fn pending(&self) -> Vec<(TxHash, EraCbor)>;
-
-    // --- lifecycle transitions ---
-    fn mark_inflight(&self, hashes: &[TxHash]);
-    fn mark_acknowledged(&self, hashes: &[TxHash]);
-
-    // --- lookup ---
-    fn get_inflight(&self, tx_hash: &TxHash) -> Option<MempoolTx>;
-
-    // --- on-chain confirmation ---
-    fn apply(&self, seen_txs: &[TxHash], unseen_txs: &[TxHash]);
-
-    // --- finalization ---
-    fn finalize(&self, threshold: u32);
-
-    // --- monitoring ---
-    fn check_stage(&self, tx_hash: &TxHash) -> MempoolTxStage;
-    fn subscribe(&self) -> Self::Stream;
-}
-
 pub trait Block: Sized + Send + Sync {
     fn depends_on(&self, loaded: &mut RawUtxoMap) -> Vec<TxoRef>;
     fn slot(&self) -> BlockSlot;
