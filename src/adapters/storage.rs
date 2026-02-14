@@ -23,11 +23,11 @@ use dolos_core::{
         MempoolStoreConfig, RedbArchiveConfig, RedbIndexConfig, RedbStateConfig, RedbWalConfig,
         RootConfig, StateStoreConfig, StorageVersion, WalStoreConfig,
     },
-    BlockBody, BlockSlot, ChainPoint, EntityDelta, EntityKey, EntityValue, EraCbor, IndexDelta,
-    IndexError, IndexStore as CoreIndexStore, IndexWriter as CoreIndexWriter, LogEntry, LogValue,
-    MempoolError, MempoolEvent, MempoolStore, MempoolTx, MempoolTxStage, Namespace, RawBlock,
-    StateError, StateSchema, StateStore as CoreStateStore, StateWriter as CoreStateWriter,
-    TagDimension, TxHash, TxoRef, UtxoMap, UtxoSet, UtxoSetDelta, WalError, WalStore,
+    BlockBody, BlockSlot, ChainPoint, EntityDelta, EntityKey, EntityValue, EraCbor, FinalizedTx,
+    IndexDelta, IndexError, IndexStore as CoreIndexStore, IndexWriter as CoreIndexWriter, LogEntry,
+    LogValue, MempoolError, MempoolEvent, MempoolStore, MempoolTx, MempoolTxStage, Namespace,
+    RawBlock, StateError, StateSchema, StateStore as CoreStateStore, StateWriter as CoreStateWriter,
+    TagDimension, TxHash, TxStatus, TxoRef, UtxoMap, UtxoSet, UtxoSetDelta, WalError, WalStore,
 };
 use serde::{de::DeserializeOwned, Serialize};
 
@@ -1091,10 +1091,10 @@ impl MempoolStore for MempoolBackend {
         }
     }
 
-    fn apply(&self, seen_txs: &[TxHash], unseen_txs: &[TxHash]) {
+    fn apply(&self, point: &ChainPoint, seen_txs: &[TxHash], unseen_txs: &[TxHash]) {
         match self {
-            Self::Ephemeral(s) => s.apply(seen_txs, unseen_txs),
-            Self::Redb(s) => s.apply(seen_txs, unseen_txs),
+            Self::Ephemeral(s) => s.apply(point, seen_txs, unseen_txs),
+            Self::Redb(s) => s.apply(point, seen_txs, unseen_txs),
         }
     }
 
@@ -1109,6 +1109,20 @@ impl MempoolStore for MempoolBackend {
         match self {
             Self::Ephemeral(s) => s.check_stage(tx_hash),
             Self::Redb(s) => s.check_stage(tx_hash),
+        }
+    }
+
+    fn get_tx_status(&self, tx_hash: &TxHash) -> TxStatus {
+        match self {
+            Self::Ephemeral(s) => s.get_tx_status(tx_hash),
+            Self::Redb(s) => s.get_tx_status(tx_hash),
+        }
+    }
+
+    fn read_finalized_log(&self, cursor: u64, limit: usize) -> (Vec<FinalizedTx>, Option<u64>) {
+        match self {
+            Self::Ephemeral(s) => s.read_finalized_log(cursor, limit),
+            Self::Redb(s) => s.read_finalized_log(cursor, limit),
         }
     }
 

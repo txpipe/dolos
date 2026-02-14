@@ -65,6 +65,18 @@ pub struct MempoolEvent {
     pub tx: MempoolTx,
 }
 
+pub struct TxStatus {
+    pub stage: MempoolTxStage,
+    pub confirmations: u32,
+    pub confirmed_at: Option<ChainPoint>,
+}
+
+pub struct FinalizedTx {
+    pub hash: TxHash,
+    pub confirmations: u32,
+    pub confirmed_at: Option<ChainPoint>,
+}
+
 #[derive(Debug, Error)]
 pub enum MempoolError {
     #[error("internal error: {0}")]
@@ -161,7 +173,10 @@ pub trait MempoolStore: Clone + Send + Sync + 'static {
     /// confirmation counter. For `unseen_txs` (rollback): moves the
     /// transaction back to the pending queue so it can be re-submitted.
     /// Hashes not currently tracked are silently ignored.
-    fn apply(&self, seen_txs: &[TxHash], unseen_txs: &[TxHash]);
+    ///
+    /// `point` is the block's chain point. On first confirmation, it is
+    /// stored as `confirmed_at`. On rollback (unseen), it is cleared.
+    fn apply(&self, point: &ChainPoint, seen_txs: &[TxHash], unseen_txs: &[TxHash]);
 
     /// Removes transactions whose confirmation count meets `threshold` from
     /// the tracking table and records them as `Finalized`.
@@ -175,6 +190,16 @@ pub trait MempoolStore: Clone + Send + Sync + 'static {
     /// Returns [`MempoolTxStage::Unknown`] for hashes that were never received
     /// or have been garbage-collected.
     fn check_stage(&self, tx_hash: &TxHash) -> MempoolTxStage;
+
+    /// Returns the full status of a transaction including stage,
+    /// confirmation count, and the chain point where it was first confirmed.
+    fn get_tx_status(&self, tx_hash: &TxHash) -> TxStatus;
+
+    /// Paginate through finalized transactions.
+    ///
+    /// Returns entries starting at `cursor` (a sequence number assigned at
+    /// finalization time) and the next cursor (`None` if exhausted).
+    fn read_finalized_log(&self, cursor: u64, limit: usize) -> (Vec<FinalizedTx>, Option<u64>);
 
     /// Returns a stream of lifecycle events.
     ///
@@ -414,12 +439,24 @@ mod tests {
             None
         }
 
-        fn apply(&self, _seen: &[TxHash], _unseen: &[TxHash]) {}
+        fn apply(&self, _point: &ChainPoint, _seen: &[TxHash], _unseen: &[TxHash]) {}
 
         fn finalize(&self, _threshold: u32) {}
 
         fn check_stage(&self, _hash: &TxHash) -> MempoolTxStage {
             MempoolTxStage::Unknown
+        }
+
+        fn get_tx_status(&self, _hash: &TxHash) -> TxStatus {
+            TxStatus {
+                stage: MempoolTxStage::Unknown,
+                confirmations: 0,
+                confirmed_at: None,
+            }
+        }
+
+        fn read_finalized_log(&self, _cursor: u64, _limit: usize) -> (Vec<FinalizedTx>, Option<u64>) {
+            (vec![], None)
         }
 
         fn subscribe(&self) -> Self::Stream {

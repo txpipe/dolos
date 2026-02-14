@@ -1,10 +1,12 @@
 use jsonrpsee::types::Params;
 use pallas::{codec::utils::NonEmptySet, ledger::primitives::conway::VKeyWitness};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use tx3_resolver::trp::{ResolveParams, SubmitParams, SubmitResponse, SubmitWitness, TxEnvelope};
 
-use dolos_core::{Domain, MempoolAwareUtxoStore, StateStore as _, SubmitExt};
+use dolos_core::{Domain, MempoolAwareUtxoStore, MempoolStore as _, StateStore as _, SubmitExt};
 
 use crate::{compiler::load_compiler, utxos::UtxoStoreAdapter};
 
@@ -92,6 +94,177 @@ pub async fn trp_submit<D: Domain + SubmitExt>(
         hash: hash.to_string(),
     })
 }
+
+// ── trp.getTxStatus ─────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct GetTxStatusParams {
+    hashes: Vec<String>,
+}
+
+#[derive(Clone, Serialize)]
+pub(crate) struct TxStatusInfo {
+    stage: String,
+    confirmations: u32,
+    confirmed_at: Option<(u64, String)>,
+}
+
+#[derive(Clone, Serialize)]
+pub(crate) struct GetTxStatusResponse {
+    statuses: HashMap<String, TxStatusInfo>,
+}
+
+fn stage_to_string(stage: &dolos_core::MempoolTxStage) -> &'static str {
+    match stage {
+        dolos_core::MempoolTxStage::Pending => "pending",
+        dolos_core::MempoolTxStage::Inflight => "inflight",
+        dolos_core::MempoolTxStage::Acknowledged => "acknowledged",
+        dolos_core::MempoolTxStage::Confirmed => "confirmed",
+        dolos_core::MempoolTxStage::Finalized => "finalized",
+        dolos_core::MempoolTxStage::RolledBack => "pending",
+        dolos_core::MempoolTxStage::Unknown => "unknown",
+    }
+}
+
+fn chain_point_to_tuple(point: &dolos_core::ChainPoint) -> (u64, String) {
+    (
+        point.slot(),
+        point
+            .hash()
+            .map(|h| hex::encode(h.as_ref()))
+            .unwrap_or_default(),
+    )
+}
+
+pub async fn trp_get_tx_status<D: Domain>(
+    params: Params<'_>,
+    context: Arc<Context<D>>,
+) -> Result<GetTxStatusResponse, Error> {
+    let params: GetTxStatusParams = params.parse()?;
+
+    let mempool = context.domain.mempool();
+    let mut statuses = HashMap::new();
+
+    for hash_hex in &params.hashes {
+        let hash_bytes = hex::decode(hash_hex)
+            .map_err(|e| Error::InvalidParams(format!("invalid hex hash: {e}")))?;
+
+        if hash_bytes.len() != 32 {
+            return Err(Error::InvalidParams(format!(
+                "hash must be 32 bytes, got {}",
+                hash_bytes.len()
+            )));
+        }
+
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&hash_bytes);
+        let tx_hash = dolos_core::TxHash::from(arr);
+
+        let status = mempool.get_tx_status(&tx_hash);
+
+        statuses.insert(
+            hash_hex.clone(),
+            TxStatusInfo {
+                stage: stage_to_string(&status.stage).to_string(),
+                confirmations: status.confirmations,
+                confirmed_at: status.confirmed_at.as_ref().map(chain_point_to_tuple),
+            },
+        );
+    }
+
+    Ok(GetTxStatusResponse { statuses })
+}
+
+// ── trp.readLogs ────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct ReadLogsParams {
+    cursor: Option<u64>,
+    limit: Option<usize>,
+}
+
+#[derive(Clone, Serialize)]
+pub(crate) struct LogEntry {
+    hash: String,
+    confirmations: u32,
+    confirmed_at: Option<(u64, String)>,
+}
+
+#[derive(Clone, Serialize)]
+pub(crate) struct ReadLogsResponse {
+    entries: Vec<LogEntry>,
+    next_cursor: Option<u64>,
+}
+
+pub async fn trp_read_logs<D: Domain>(
+    params: Params<'_>,
+    context: Arc<Context<D>>,
+) -> Result<ReadLogsResponse, Error> {
+    let params: ReadLogsParams = params.parse()?;
+
+    let cursor = params.cursor.unwrap_or(0);
+    let limit = params.limit.unwrap_or(50);
+
+    let mempool = context.domain.mempool();
+    let (entries, next_cursor) = mempool.read_finalized_log(cursor, limit);
+
+    let entries = entries
+        .iter()
+        .map(|e| LogEntry {
+            hash: hex::encode(e.hash.as_ref()),
+            confirmations: e.confirmations,
+            confirmed_at: e.confirmed_at.as_ref().map(chain_point_to_tuple),
+        })
+        .collect();
+
+    Ok(ReadLogsResponse {
+        entries,
+        next_cursor,
+    })
+}
+
+// ── trp.peekMempool ─────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct PeekMempoolParams {
+    limit: Option<usize>,
+}
+
+#[derive(Clone, Serialize)]
+struct PendingTxInfo {
+    hash: String,
+}
+
+#[derive(Clone, Serialize)]
+pub(crate) struct PeekMempoolResponse {
+    pending: Vec<PendingTxInfo>,
+    has_more: bool,
+}
+
+pub async fn trp_peek_mempool<D: Domain>(
+    params: Params<'_>,
+    context: Arc<Context<D>>,
+) -> Result<PeekMempoolResponse, Error> {
+    let params: PeekMempoolParams = params.parse()?;
+
+    let limit = params.limit.unwrap_or(50);
+
+    let mempool = context.domain.mempool();
+    let peeked = mempool.peek_pending(limit + 1);
+
+    let has_more = peeked.len() > limit;
+    let pending = peeked
+        .iter()
+        .take(limit)
+        .map(|tx| PendingTxInfo {
+            hash: hex::encode(tx.hash.as_ref()),
+        })
+        .collect();
+
+    Ok(PeekMempoolResponse { pending, has_more })
+}
+
+// ── health ──────────────────────────────────────────────────────────────
 
 pub fn health<D: Domain>(context: &Context<D>) -> bool {
     context.domain.state().read_cursor().is_ok()
@@ -200,5 +373,100 @@ mod tests {
         dbg!(&err);
 
         assert_eq!(err.code(), tx3_resolver::trp::errors::CODE_INTEROP_ERROR);
+    }
+
+    // ── trp.getTxStatus tests ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_get_tx_status_unknown() {
+        let context = setup_test_context().await;
+        let random_hash = hex::encode([0xABu8; 32]);
+        let req = json!({ "hashes": [random_hash] }).to_string();
+        let params = Params::new(Some(req.as_str()));
+
+        let response = trp_get_tx_status(params, context).await.unwrap();
+
+        let status = response.statuses.get(&random_hash).unwrap();
+        assert_eq!(status.stage, "unknown");
+        assert_eq!(status.confirmations, 0);
+        assert!(status.confirmed_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_get_tx_status_after_receive() {
+        let context = setup_test_context().await;
+
+        let hash = dolos_testing::tx_sequence_to_hash(42);
+        let tx = dolos_testing::mempool::make_test_mempool_tx(hash);
+        let hash_hex = hex::encode(hash.as_ref());
+
+        dolos_core::MempoolStore::receive(context.domain.mempool(), tx).unwrap();
+
+        let req = json!({ "hashes": [hash_hex] }).to_string();
+        let params = Params::new(Some(req.as_str()));
+
+        let response = trp_get_tx_status(params, context).await.unwrap();
+
+        let status = response.statuses.get(&hash_hex).unwrap();
+        assert_eq!(status.stage, "pending");
+        assert_eq!(status.confirmations, 0);
+        assert!(status.confirmed_at.is_none());
+    }
+
+    // ── trp.peekMempool tests ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_peek_mempool_empty() {
+        let context = setup_test_context().await;
+        let req = json!({}).to_string();
+        let params = Params::new(Some(req.as_str()));
+
+        let response = trp_peek_mempool(params, context).await.unwrap();
+
+        assert!(response.pending.is_empty());
+        assert!(!response.has_more);
+    }
+
+    #[tokio::test]
+    async fn test_peek_mempool_with_items() {
+        let context = setup_test_context().await;
+
+        for n in 0..3u64 {
+            let hash = dolos_testing::tx_sequence_to_hash(n);
+            let tx = dolos_testing::mempool::make_test_mempool_tx(hash);
+            dolos_core::MempoolStore::receive(context.domain.mempool(), tx).unwrap();
+        }
+
+        // Peek with limit 2 — should get 2 items and has_more = true
+        let req = json!({ "limit": 2 }).to_string();
+        let params = Params::new(Some(req.as_str()));
+
+        let response = trp_peek_mempool(params, context.clone()).await.unwrap();
+
+        assert_eq!(response.pending.len(), 2);
+        assert!(response.has_more);
+
+        // Peek with default limit — should get all 3
+        let req = json!({}).to_string();
+        let params = Params::new(Some(req.as_str()));
+
+        let response = trp_peek_mempool(params, context).await.unwrap();
+
+        assert_eq!(response.pending.len(), 3);
+        assert!(!response.has_more);
+    }
+
+    // ── trp.readLogs tests ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_read_logs_empty() {
+        let context = setup_test_context().await;
+        let req = json!({}).to_string();
+        let params = Params::new(Some(req.as_str()));
+
+        let response = trp_read_logs(params, context).await.unwrap();
+
+        assert!(response.entries.is_empty());
+        assert!(response.next_cursor.is_none());
     }
 }

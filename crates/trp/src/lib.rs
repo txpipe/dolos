@@ -81,6 +81,54 @@ impl<D: Domain + SubmitExt, C: CancelToken> dolos_core::Driver<D, C> for Driver 
             .map_err(|_| ServeError::Internal("failed to register trp.submit".into()))?;
 
         module
+            .register_async_method("trp.getTxStatus", |params, context, _| async move {
+                let response = methods::trp_get_tx_status(params, context.clone()).await;
+
+                context.metrics.track_request(
+                    "trp-get-tx-status",
+                    match response.as_ref() {
+                        Ok(_) => 200,
+                        Err(err) => err.code(),
+                    },
+                );
+
+                response
+            })
+            .map_err(|_| ServeError::Internal("failed to register trp.getTxStatus".into()))?;
+
+        module
+            .register_async_method("trp.readLogs", |params, context, _| async move {
+                let response = methods::trp_read_logs(params, context.clone()).await;
+
+                context.metrics.track_request(
+                    "trp-read-logs",
+                    match response.as_ref() {
+                        Ok(_) => 200,
+                        Err(err) => err.code(),
+                    },
+                );
+
+                response
+            })
+            .map_err(|_| ServeError::Internal("failed to register trp.readLogs".into()))?;
+
+        module
+            .register_async_method("trp.peekMempool", |params, context, _| async move {
+                let response = methods::trp_peek_mempool(params, context.clone()).await;
+
+                context.metrics.track_request(
+                    "trp-peek-mempool",
+                    match response.as_ref() {
+                        Ok(_) => 200,
+                        Err(err) => err.code(),
+                    },
+                );
+
+                response
+            })
+            .map_err(|_| ServeError::Internal("failed to register trp.peekMempool".into()))?;
+
+        module
             .register_method("health", |_, context, _| methods::health(context))
             .map_err(|_| ServeError::Internal("failed to register health".into()))?;
 

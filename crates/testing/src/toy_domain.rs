@@ -86,7 +86,7 @@ impl dolos_core::MempoolStore for Mempool {
         None
     }
 
-    fn apply(&self, _seen_txs: &[TxHash], _unseen_txs: &[TxHash]) {
+    fn apply(&self, _point: &ChainPoint, _seen_txs: &[TxHash], _unseen_txs: &[TxHash]) {
         // do nothing for now
     }
 
@@ -100,6 +100,18 @@ impl dolos_core::MempoolStore for Mempool {
             }
         }
         MempoolTxStage::Unknown
+    }
+
+    fn get_tx_status(&self, tx_hash: &TxHash) -> TxStatus {
+        TxStatus {
+            stage: self.check_stage(tx_hash),
+            confirmations: 0,
+            confirmed_at: None,
+        }
+    }
+
+    fn read_finalized_log(&self, _cursor: u64, _limit: usize) -> (Vec<FinalizedTx>, Option<u64>) {
+        (vec![], None)
     }
 
     fn subscribe(&self) -> Self::Stream {

@@ -1,5 +1,5 @@
 use dolos_core::mempool::{MempoolEvent, MempoolTx, MempoolTxStage};
-use dolos_core::{EraCbor, MempoolError, MempoolStore, TxHash};
+use dolos_core::{ChainPoint, EraCbor, FinalizedTx, MempoolError, MempoolStore, TxHash, TxStatus};
 
 use crate::streams::ScriptedStream;
 
@@ -43,12 +43,24 @@ impl MempoolStore for MockMempoolStore {
         None
     }
 
-    fn apply(&self, _seen: &[TxHash], _unseen: &[TxHash]) {}
+    fn apply(&self, _point: &ChainPoint, _seen: &[TxHash], _unseen: &[TxHash]) {}
 
     fn finalize(&self, _threshold: u32) {}
 
     fn check_stage(&self, _hash: &TxHash) -> MempoolTxStage {
         MempoolTxStage::Unknown
+    }
+
+    fn get_tx_status(&self, _hash: &TxHash) -> TxStatus {
+        TxStatus {
+            stage: MempoolTxStage::Unknown,
+            confirmations: 0,
+            confirmed_at: None,
+        }
+    }
+
+    fn read_finalized_log(&self, _cursor: u64, _limit: usize) -> (Vec<FinalizedTx>, Option<u64>) {
+        (vec![], None)
     }
 
     fn subscribe(&self) -> Self::Stream {

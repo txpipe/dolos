@@ -73,12 +73,24 @@ impl MempoolStore for Mempool {
         None
     }
 
-    fn apply(&self, _seen_txs: &[TxHash], _unseen_txs: &[TxHash]) {}
+    fn apply(&self, _point: &ChainPoint, _seen_txs: &[TxHash], _unseen_txs: &[TxHash]) {}
 
     fn finalize(&self, _threshold: u32) {}
 
     fn check_stage(&self, _tx_hash: &TxHash) -> MempoolTxStage {
         MempoolTxStage::Unknown
+    }
+
+    fn get_tx_status(&self, _tx_hash: &TxHash) -> TxStatus {
+        TxStatus {
+            stage: MempoolTxStage::Unknown,
+            confirmations: 0,
+            confirmed_at: None,
+        }
+    }
+
+    fn read_finalized_log(&self, _cursor: u64, _limit: usize) -> (Vec<FinalizedTx>, Option<u64>) {
+        (vec![], None)
     }
 
     fn subscribe(&self) -> Self::Stream {
