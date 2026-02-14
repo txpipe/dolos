@@ -13,7 +13,6 @@ pub struct RootResponse {
 pub async fn naked<D: Domain>(
     State(facade): State<Facade<D>>,
 ) -> Result<Json<RootResponse>, StatusCode> {
-    dbg!(facade.health());
     Ok(Json(RootResponse {
         is_healthy: facade.health().synced(),
     }))
