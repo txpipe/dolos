@@ -93,6 +93,7 @@ pub struct ToyDomain {
     mempool: Mempool,
     storage_config: StorageConfig,
     genesis: Arc<dolos_core::Genesis>,
+    health: Health,
     tip_broadcast: tokio::sync::broadcast::Sender<TipEvent>,
 }
 
@@ -149,6 +150,7 @@ impl ToyDomain {
             },
             storage_config: storage_config.unwrap_or_default(),
             genesis: genesis.clone(),
+            health: Health::default(),
             tip_broadcast,
         };
 
@@ -264,6 +266,10 @@ impl dolos_core::Domain for ToyDomain {
 
     fn mempool(&self) -> &Self::Mempool {
         &self.mempool
+    }
+
+    fn health(&self) -> &Health {
+        &self.health
     }
 
     fn watch_tip(&self, from: Option<ChainPoint>) -> Result<Self::TipSubscription, DomainError> {

@@ -86,6 +86,7 @@ pub fn setup_domain(config: &RootConfig) -> miette::Result<DomainAdapter> {
         archive: stores.archive,
         indexes: stores.indexes,
         mempool,
+        health: Health::default(),
         tip_broadcast,
     };
 

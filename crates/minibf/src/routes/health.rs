@@ -1,15 +1,22 @@
-use axum::{http::StatusCode, Json};
+use axum::{extract::State, http::StatusCode, Json};
+use dolos_core::Domain;
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::Facade;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RootResponse {
     pub is_healthy: bool,
 }
 
-pub async fn naked() -> Result<Json<RootResponse>, StatusCode> {
-    // TODO: Relate this value to sync status. If not in tip, then unhealthy.
-    Ok(Json(RootResponse { is_healthy: true }))
+pub async fn naked<D: Domain>(
+    State(facade): State<Facade<D>>,
+) -> Result<Json<RootResponse>, StatusCode> {
+    dbg!(facade.health());
+    Ok(Json(RootResponse {
+        is_healthy: facade.health().synced(),
+    }))
 }
 
 #[derive(Debug, Serialize, Deserialize)]

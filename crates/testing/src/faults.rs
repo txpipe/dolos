@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use dolos_core::{
-    ArchiveError, ArchiveStore, BlockBody, BlockSlot, ChainPoint, Domain, DomainError, IndexError,
-    IndexStore, LogEntry, LogKey, LogValue, Namespace, StateError, StateStore, TagDimension,
-    TipEvent, WalError, WalStore,
+    ArchiveError, ArchiveStore, BlockBody, BlockSlot, ChainPoint, Domain, DomainError, Health,
+    IndexError, IndexStore, LogEntry, LogKey, LogValue, Namespace, StateError, StateStore,
+    TagDimension, TipEvent, WalError, WalStore,
 };
 
 use crate::toy_domain::{Mempool, TipSubscription, ToyDomain};
@@ -499,6 +499,10 @@ impl Domain for FaultyToyDomain {
 
     fn mempool(&self) -> &Self::Mempool {
         self.inner.mempool()
+    }
+
+    fn health(&self) -> &Health {
+        self.inner.health()
     }
 
     fn watch_tip(&self, from: Option<ChainPoint>) -> Result<Self::TipSubscription, DomainError> {

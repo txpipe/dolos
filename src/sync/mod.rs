@@ -59,7 +59,8 @@ pub fn sync(
     domain: DomainAdapter,
     retries: &Option<RetryConfig>,
 ) -> Result<Vec<gasket::runtime::Tether>, Error> {
-    let mut pull = pull::Stage::new(config, upstream, domain.wal().clone());
+    let health = domain.health().clone();
+    let mut pull = pull::Stage::new(config, upstream, domain.wal().clone(), health.clone());
 
     let mut apply = apply::Stage::new(domain.clone(), HOUSEKEEPING_INTERVAL);
 
@@ -91,10 +92,12 @@ pub fn devnet(
     domain: DomainAdapter,
     retries: &Option<RetryConfig>,
 ) -> Result<Vec<gasket::runtime::Tether>, Error> {
+    let health = domain.health().clone();
     let mut emulator = emulator::Stage::new(
         domain.wal().clone(),
         domain.mempool().clone(),
         emulator_cfg.block_production_interval,
+        health,
     );
 
     let mut apply = apply::Stage::new(domain.clone(), HOUSEKEEPING_INTERVAL);

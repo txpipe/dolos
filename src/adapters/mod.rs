@@ -36,6 +36,7 @@ pub struct DomainAdapter {
     pub archive: ArchiveStoreBackend,
     pub indexes: IndexStoreBackend,
     pub mempool: Mempool,
+    pub health: Health,
     pub tip_broadcast: tokio::sync::broadcast::Sender<TipEvent>,
 }
 
@@ -134,6 +135,10 @@ impl Domain for DomainAdapter {
 
     fn mempool(&self) -> &Self::Mempool {
         &self.mempool
+    }
+
+    fn health(&self) -> &Health {
+        &self.health
     }
 
     fn storage_config(&self) -> &StorageConfig {
