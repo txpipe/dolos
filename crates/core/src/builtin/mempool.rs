@@ -195,29 +195,27 @@ impl MempoolStore for EphemeralMempool {
             return;
         }
 
-        for tx_hash in seen_txs.iter() {
-            if let Some(tx) = state.acknowledged.get_mut(tx_hash) {
-                tx.stage = MempoolTxStage::Confirmed;
-                tx.confirmations += 1;
-                if tx.confirmed_at.is_none() {
-                    tx.confirmed_at = Some(point.clone());
-                }
-                let tx_clone = tx.clone();
-                self.notify(tx_clone);
+        let seen_set: HashSet<&TxHash> = seen_txs.iter().collect();
+        let unseen_set: HashSet<&TxHash> = unseen_txs.iter().collect();
+
+        let hashes: Vec<TxHash> = state.acknowledged.keys().copied().collect();
+
+        for tx_hash in hashes {
+            let tx = state.acknowledged.get_mut(&tx_hash).unwrap();
+
+            if seen_set.contains(&tx_hash) {
+                tx.confirm(point);
+                self.notify(tx.clone());
                 info!(tx.hash = %tx_hash, "tx confirmed");
-            }
-        }
+            } else if unseen_set.contains(&tx_hash) {
+                let mut event_tx = tx.clone();
+                event_tx.stage = MempoolTxStage::RolledBack;
+                self.notify(event_tx);
 
-        for tx_hash in unseen_txs.iter() {
-            if let Some(tx) = state.acknowledged.get_mut(tx_hash) {
-                let mut rollback_tx = tx.clone();
-                rollback_tx.stage = MempoolTxStage::RolledBack;
-                self.notify(rollback_tx);
-
-                tx.stage = MempoolTxStage::Acknowledged;
-                tx.confirmations = 0;
-                tx.confirmed_at = None;
-                info!(tx.hash = %tx_hash, "tx rollback");
+                tx.retry();
+                info!(tx.hash = %tx_hash, "retry tx");
+            } else {
+                tx.mark_stale();
             }
         }
     }
@@ -262,24 +260,28 @@ impl MempoolStore for EphemeralMempool {
             TxStatus {
                 stage: tx.stage.clone(),
                 confirmations: tx.confirmations,
+                non_confirmations: tx.non_confirmations,
                 confirmed_at: tx.confirmed_at.clone(),
             }
         } else if let Some(tx) = state.inflight.iter().find(|x| x.hash.eq(tx_hash)) {
             TxStatus {
                 stage: tx.stage.clone(),
                 confirmations: 0,
+                non_confirmations: 0,
                 confirmed_at: None,
             }
         } else if state.pending.iter().any(|x| x.hash.eq(tx_hash)) {
             TxStatus {
                 stage: MempoolTxStage::Pending,
                 confirmations: 0,
+                non_confirmations: 0,
                 confirmed_at: None,
             }
         } else {
             TxStatus {
                 stage: MempoolTxStage::Unknown,
                 confirmations: 0,
+                non_confirmations: 0,
                 confirmed_at: None,
             }
         }

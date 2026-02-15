@@ -106,6 +106,7 @@ struct CheckStatusParams {
 pub(crate) struct TxStatusInfo {
     stage: String,
     confirmations: u32,
+    non_confirmations: u32,
     confirmed_at: Option<(u64, String)>,
 }
 
@@ -167,6 +168,7 @@ pub async fn trp_check_status<D: Domain>(
             TxStatusInfo {
                 stage: stage_to_string(&status.stage).to_string(),
                 confirmations: status.confirmations,
+                non_confirmations: status.non_confirmations,
                 confirmed_at: status.confirmed_at.as_ref().map(chain_point_to_tuple),
             },
         );
@@ -297,6 +299,7 @@ struct PeekInflightParams {
 struct InflightTxInfo {
     hash: String,
     stage: String,
+    non_confirmations: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     payload: Option<String>,
 }
@@ -327,6 +330,7 @@ pub async fn trp_peek_inflight<D: Domain>(
         .map(|tx| InflightTxInfo {
             hash: hex::encode(tx.hash.as_ref()),
             stage: stage_to_string(&tx.stage).to_string(),
+            non_confirmations: tx.non_confirmations,
             payload: if include_payload {
                 Some(hex::encode(&tx.payload.1))
             } else {

@@ -99,6 +99,7 @@ impl dolos_core::MempoolStore for Mempool {
         TxStatus {
             stage,
             confirmations: 0,
+            non_confirmations: 0,
             confirmed_at: None,
         }
     }

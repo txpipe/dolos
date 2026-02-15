@@ -13,6 +13,7 @@ pub struct MempoolTx {
     pub payload: EraCbor,
     pub stage: MempoolTxStage,
     pub confirmations: u32,
+    pub non_confirmations: u32,
     pub confirmed_at: Option<ChainPoint>,
 
     // this might be empty if the tx is cloned
@@ -34,6 +35,7 @@ impl Clone for MempoolTx {
             payload: self.payload.clone(),
             stage: self.stage.clone(),
             confirmations: self.confirmations,
+            non_confirmations: self.non_confirmations,
             confirmed_at: self.confirmed_at.clone(),
             report: None,
         }
@@ -47,9 +49,30 @@ impl MempoolTx {
             payload,
             stage: MempoolTxStage::Pending,
             confirmations: 0,
+            non_confirmations: 0,
             confirmed_at: None,
             report: Some(report),
         }
+    }
+
+    pub fn confirm(&mut self, point: &ChainPoint) {
+        self.stage = MempoolTxStage::Confirmed;
+        self.confirmations += 1;
+        self.non_confirmations = 0;
+        if self.confirmed_at.is_none() {
+            self.confirmed_at = Some(point.clone());
+        }
+    }
+
+    pub fn retry(&mut self) {
+        self.stage = MempoolTxStage::Pending;
+        self.confirmations = 0;
+        self.non_confirmations = 0;
+        self.confirmed_at = None;
+    }
+
+    pub fn mark_stale(&mut self) {
+        self.non_confirmations += 1;
     }
 }
 
@@ -72,6 +95,7 @@ pub struct MempoolEvent {
 pub struct TxStatus {
     pub stage: MempoolTxStage,
     pub confirmations: u32,
+    pub non_confirmations: u32,
     pub confirmed_at: Option<ChainPoint>,
 }
 
@@ -453,6 +477,7 @@ mod tests {
             TxStatus {
                 stage: MempoolTxStage::Unknown,
                 confirmations: 0,
+                non_confirmations: 0,
                 confirmed_at: None,
             }
         }

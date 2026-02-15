@@ -93,6 +93,8 @@ struct InflightRecord {
     payload: EraCbor,
     #[cbor(n(3), with = "minicbor::bytes")]
     confirmed_at: Option<Vec<u8>>,
+    #[n(4)]
+    non_confirmations: u32,
 }
 
 /// Entry stored in FINALIZED_LOG_TABLE for pagination.
@@ -125,6 +127,7 @@ impl FinalizedLogEntry {
             payload: self.payload.unwrap_or(EraCbor(0, vec![])),
             stage: MempoolTxStage::Finalized,
             confirmations: self.confirmations,
+            non_confirmations: 0,
             confirmed_at: self.confirmed_at.map(|b| {
                 ChainPoint::from_bytes(b[..].try_into().unwrap())
             }),
@@ -140,6 +143,7 @@ impl InflightRecord {
             confirmations: 0,
             payload,
             confirmed_at: None,
+            non_confirmations: 0,
         }
     }
 
@@ -163,9 +167,18 @@ impl InflightRecord {
     fn confirm(&mut self, point: &ChainPoint) {
         self.stage = InflightStage::Confirmed;
         self.confirmations += 1;
+        self.non_confirmations = 0;
         if self.confirmed_at.is_none() {
             self.confirmed_at = Some(point.clone().into_bytes().to_vec());
         }
+    }
+
+    fn retry(&mut self) {
+        self.confirmed_at = None;
+    }
+
+    fn mark_stale(&mut self) {
+        self.non_confirmations += 1;
     }
 
     fn is_finalizable(&self, threshold: u32) -> bool {
@@ -181,6 +194,7 @@ impl InflightRecord {
         TxStatus {
             stage,
             confirmations: self.confirmations,
+            non_confirmations: self.non_confirmations,
             confirmed_at: self.confirmed_at.as_ref().map(|b| {
                 ChainPoint::from_bytes(b[..].try_into().unwrap())
             }),
@@ -207,6 +221,7 @@ impl InflightRecord {
             payload: self.payload.clone(),
             stage,
             confirmations: self.confirmations,
+            non_confirmations: self.non_confirmations,
             confirmed_at: self.confirmed_at.as_ref().map(|b| {
                 ChainPoint::from_bytes(b[..].try_into().unwrap())
             }),
@@ -474,6 +489,7 @@ impl MempoolStore for RedbMempool {
                 payload,
                 stage: MempoolTxStage::Pending,
                 confirmations: 0,
+                non_confirmations: 0,
                 confirmed_at: None,
                 report: None,
             });
@@ -581,34 +597,52 @@ impl MempoolStore for RedbMempool {
         let point = point.clone();
         self.with_write_tx("confirm", |wx| {
             let mut tracking = wx.open_table(INFLIGHT_TABLE)?;
+            let mut pending = wx.open_table(PENDING_TABLE)?;
             let mut events = Vec::new();
 
-            for tx_hash in seen_txs {
-                if let Some(mut record) = InflightRecord::read(&tracking, tx_hash)? {
+            let seen_set: std::collections::HashSet<TxHash> = seen_txs.iter().copied().collect();
+            let unseen_set: std::collections::HashSet<TxHash> =
+                unseen_txs.iter().copied().collect();
+
+            // Collect all inflight entries in a single pass
+            let entries: Vec<(Vec<u8>, InflightRecord)> = {
+                let iter = tracking.iter()?;
+                let mut v = Vec::new();
+                for entry in iter {
+                    let entry = entry?;
+                    v.push((
+                        entry.0.value().to_vec(),
+                        InflightRecord::deserialize(entry.1.value()),
+                    ));
+                }
+                v
+            };
+
+            for (key_bytes, mut record) in entries {
+                let mut hash_bytes = [0u8; 32];
+                hash_bytes.copy_from_slice(&key_bytes);
+                let tx_hash = TxHash::from(hash_bytes);
+
+                if seen_set.contains(&tx_hash) {
                     record.confirm(&point);
-                    let tx = record.to_mempool_tx(*tx_hash);
-                    record.write(&mut tracking, tx_hash)?;
+                    let tx = record.to_mempool_tx(tx_hash);
+                    record.write(&mut tracking, &tx_hash)?;
                     info!(tx.hash = %tx.hash, "tx confirmed (redb)");
                     events.push(tx);
-                }
-            }
-
-            let mut pending = wx.open_table(PENDING_TABLE)?;
-
-            for tx_hash in unseen_txs {
-                if let Some(mut record) = InflightRecord::read(&tracking, tx_hash)? {
-                    record.confirmed_at = None;
+                } else if unseen_set.contains(&tx_hash) {
+                    record.retry();
                     tracking.remove(tx_hash.as_ref())?;
                     let seq = PendingKey::next_seq(&pending)?;
-                    let key = PendingKey::new(seq, tx_hash);
+                    let key = PendingKey::new(seq, &tx_hash);
                     let value = minicbor::to_vec(&record.payload).unwrap();
                     pending.insert(key.as_bytes(), value.as_slice())?;
-                    let mut tx = record.to_mempool_tx(*tx_hash);
-                    tx.stage = MempoolTxStage::Pending;
-                    tx.confirmations = 0;
-                    tx.confirmed_at = None;
-                    info!(tx.hash = %tx.hash, "tx rollback to pending (redb)");
+                    let mut tx = record.to_mempool_tx(tx_hash);
+                    tx.retry();
+                    info!(tx.hash = %tx.hash, "retry tx (redb)");
                     events.push(tx);
+                } else {
+                    record.mark_stale();
+                    record.write(&mut tracking, &tx_hash)?;
                 }
             }
 
@@ -664,6 +698,7 @@ impl MempoolStore for RedbMempool {
                 return TxStatus {
                     stage: MempoolTxStage::Unknown,
                     confirmations: 0,
+                    non_confirmations: 0,
                     confirmed_at: None,
                 }
             }
@@ -687,6 +722,7 @@ impl MempoolStore for RedbMempool {
                         return TxStatus {
                             stage: MempoolTxStage::Pending,
                             confirmations: 0,
+                            non_confirmations: 0,
                             confirmed_at: None,
                         };
                     }
@@ -697,6 +733,7 @@ impl MempoolStore for RedbMempool {
         TxStatus {
             stage: MempoolTxStage::Unknown,
             confirmations: 0,
+            non_confirmations: 0,
             confirmed_at: None,
         }
     }

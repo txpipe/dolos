@@ -54,6 +54,7 @@ impl MempoolStore for MockMempoolStore {
         TxStatus {
             stage: MempoolTxStage::Unknown,
             confirmations: 0,
+            non_confirmations: 0,
             confirmed_at: None,
         }
     }
