@@ -61,27 +61,23 @@ impl MempoolStore for Mempool {
         vec![]
     }
 
-    fn pending(&self) -> Vec<(TxHash, EraCbor)> {
-        vec![]
-    }
-
     fn mark_inflight(&self, _hashes: &[TxHash]) {}
 
     fn mark_acknowledged(&self, _hashes: &[TxHash]) {}
 
-    fn get_inflight(&self, _tx_hash: &TxHash) -> Option<MempoolTx> {
+    fn find_inflight(&self, _tx_hash: &TxHash) -> Option<MempoolTx> {
         None
     }
 
-    fn apply(&self, _point: &ChainPoint, _seen_txs: &[TxHash], _unseen_txs: &[TxHash]) {}
+    fn peek_inflight(&self, _limit: usize) -> Vec<MempoolTx> {
+        vec![]
+    }
+
+    fn confirm(&self, _point: &ChainPoint, _seen_txs: &[TxHash], _unseen_txs: &[TxHash]) {}
 
     fn finalize(&self, _threshold: u32) {}
 
-    fn check_stage(&self, _tx_hash: &TxHash) -> MempoolTxStage {
-        MempoolTxStage::Unknown
-    }
-
-    fn get_tx_status(&self, _tx_hash: &TxHash) -> TxStatus {
+    fn check_status(&self, _tx_hash: &TxHash) -> TxStatus {
         TxStatus {
             stage: MempoolTxStage::Unknown,
             confirmations: 0,
@@ -89,8 +85,8 @@ impl MempoolStore for Mempool {
         }
     }
 
-    fn read_finalized_log(&self, _cursor: u64, _limit: usize) -> (Vec<FinalizedTx>, Option<u64>) {
-        (vec![], None)
+    fn dump_finalized(&self, _cursor: u64, _limit: usize) -> dolos_core::MempoolPage {
+        dolos_core::MempoolPage { items: vec![], next_cursor: None }
     }
 
     fn subscribe(&self) -> Self::Stream {

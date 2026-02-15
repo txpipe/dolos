@@ -67,51 +67,44 @@ impl dolos_core::MempoolStore for Mempool {
             .unwrap_or_default()
     }
 
-    fn pending(&self) -> Vec<(TxHash, EraCbor)> {
-        if let Ok(pending) = self.pending.read() {
-            return pending
-                .iter()
-                .map(|tx| (tx.hash, tx.payload.clone()))
-                .collect();
-        }
-
-        Vec::new()
-    }
-
     fn mark_inflight(&self, _hashes: &[TxHash]) {}
 
     fn mark_acknowledged(&self, _hashes: &[TxHash]) {}
 
-    fn get_inflight(&self, _tx_hash: &TxHash) -> Option<MempoolTx> {
+    fn find_inflight(&self, _tx_hash: &TxHash) -> Option<MempoolTx> {
         None
     }
 
-    fn apply(&self, _point: &ChainPoint, _seen_txs: &[TxHash], _unseen_txs: &[TxHash]) {
+    fn peek_inflight(&self, _limit: usize) -> Vec<MempoolTx> {
+        vec![]
+    }
+
+    fn confirm(&self, _point: &ChainPoint, _seen_txs: &[TxHash], _unseen_txs: &[TxHash]) {
         // do nothing for now
     }
 
     fn finalize(&self, _threshold: u32) {}
 
-    fn check_stage(&self, tx_hash: &TxHash) -> MempoolTxStage {
-        let pending = self.pending.read();
-        if let Ok(pending) = pending {
+    fn check_status(&self, tx_hash: &TxHash) -> TxStatus {
+        let stage = if let Ok(pending) = self.pending.read() {
             if pending.iter().any(|tx| &tx.hash == tx_hash) {
-                return MempoolTxStage::Pending;
+                MempoolTxStage::Pending
+            } else {
+                MempoolTxStage::Unknown
             }
-        }
-        MempoolTxStage::Unknown
-    }
+        } else {
+            MempoolTxStage::Unknown
+        };
 
-    fn get_tx_status(&self, tx_hash: &TxHash) -> TxStatus {
         TxStatus {
-            stage: self.check_stage(tx_hash),
+            stage,
             confirmations: 0,
             confirmed_at: None,
         }
     }
 
-    fn read_finalized_log(&self, _cursor: u64, _limit: usize) -> (Vec<FinalizedTx>, Option<u64>) {
-        (vec![], None)
+    fn dump_finalized(&self, _cursor: u64, _limit: usize) -> dolos_core::MempoolPage {
+        dolos_core::MempoolPage { items: vec![], next_cursor: None }
     }
 
     fn subscribe(&self) -> Self::Stream {

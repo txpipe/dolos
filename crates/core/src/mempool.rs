@@ -11,8 +11,9 @@ use tracing::{debug, info, warn};
 pub struct MempoolTx {
     pub hash: TxHash,
     pub payload: EraCbor,
-    // TODO: we'll improve this to track number of confirmations in further iterations.
-    pub confirmed: bool,
+    pub stage: MempoolTxStage,
+    pub confirmations: u32,
+    pub confirmed_at: Option<ChainPoint>,
 
     // this might be empty if the tx is cloned
     pub report: Option<EvalReport>,
@@ -31,7 +32,9 @@ impl Clone for MempoolTx {
         Self {
             hash: self.hash,
             payload: self.payload.clone(),
-            confirmed: self.confirmed,
+            stage: self.stage.clone(),
+            confirmations: self.confirmations,
+            confirmed_at: self.confirmed_at.clone(),
             report: None,
         }
     }
@@ -42,16 +45,18 @@ impl MempoolTx {
         Self {
             hash,
             payload,
-            confirmed: false,
+            stage: MempoolTxStage::Pending,
+            confirmations: 0,
+            confirmed_at: None,
             report: Some(report),
         }
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MempoolTxStage {
     Pending,
-    Inflight,
+    Propagated,
     Acknowledged,
     Confirmed,
     Finalized,
@@ -61,7 +66,6 @@ pub enum MempoolTxStage {
 
 #[derive(Clone)]
 pub struct MempoolEvent {
-    pub new_stage: MempoolTxStage,
     pub tx: MempoolTx,
 }
 
@@ -71,10 +75,9 @@ pub struct TxStatus {
     pub confirmed_at: Option<ChainPoint>,
 }
 
-pub struct FinalizedTx {
-    pub hash: TxHash,
-    pub confirmations: u32,
-    pub confirmed_at: Option<ChainPoint>,
+pub struct MempoolPage {
+    pub items: Vec<MempoolTx>,
+    pub next_cursor: Option<u64>,
 }
 
 #[derive(Debug, Error)]
@@ -110,16 +113,19 @@ pub enum MempoolError {
 /// one rollback edge:
 ///
 /// ```text
-///   Pending → Inflight → Acknowledged → Confirmed → Finalized
-///                                           ↓
-///                                        Pending   (rollback via `apply(unseen)`)
+///   Pending → Propagated → Acknowledged → Confirmed → Finalized
+///                                             ↓
+///                                          Pending   (rollback via `confirm(unseen)`)
 /// ```
 ///
 /// - **Pending** — received but not yet submitted to a peer.
-/// - **Inflight** — sent to a peer, awaiting acknowledgement.
+/// - **Propagated** — sent to a peer, awaiting acknowledgement.
 /// - **Acknowledged** — the peer accepted the transaction.
 /// - **Confirmed** — observed on-chain; confirmation counter tracks depth.
 /// - **Finalized** — enough confirmations accumulated; no longer actively tracked.
+///
+/// The "inflight" umbrella covers all post-pending, pre-finalized stages
+/// (Propagated, Acknowledged, Confirmed).
 ///
 /// Implementors must be thread-safe (`Clone + Send + Sync`) and persist state
 /// durably so that a restart does not lose in-progress transactions.
@@ -143,29 +149,28 @@ pub trait MempoolStore: Clone + Send + Sync + 'static {
     /// order. Does not remove them.
     fn peek_pending(&self, limit: usize) -> Vec<MempoolTx>;
 
-    /// Returns all pending transactions as `(hash, payload)` pairs.
-    ///
-    /// Used by downstream code (e.g., `MempoolAwareUtxoStore`) to scan mempool
-    /// UTxOs.
-    fn pending(&self) -> Vec<(TxHash, EraCbor)>;
-
-    /// Moves matching transactions from pending to the `Inflight` stage.
+    /// Moves matching transactions from pending to the inflight table
+    /// (initial sub-stage: `Propagated`).
     ///
     /// Implementors must remove them from the pending queue and begin tracking
     /// them as inflight. Hashes not found in pending are silently ignored.
     fn mark_inflight(&self, hashes: &[TxHash]);
 
-    /// Transitions `Inflight` transactions to `Acknowledged`.
+    /// Transitions `Propagated` transactions to `Acknowledged`.
     ///
-    /// Only transitions transactions currently in `Inflight`; other stages are
+    /// Only transitions transactions currently in `Propagated`; other stages are
     /// silently skipped.
     fn mark_acknowledged(&self, hashes: &[TxHash]);
 
-    /// Returns the transaction if it is currently in the `Inflight` stage,
-    /// `None` otherwise.
+    /// Returns the transaction if it is currently in any inflight sub-stage
+    /// (Propagated, Acknowledged, or Confirmed), `None` otherwise.
     ///
     /// Used to retrieve the payload for re-submission checks.
-    fn get_inflight(&self, tx_hash: &TxHash) -> Option<MempoolTx>;
+    fn find_inflight(&self, tx_hash: &TxHash) -> Option<MempoolTx>;
+
+    /// Returns up to `limit` inflight transactions (Propagated, Acknowledged,
+    /// or Confirmed) in arbitrary order. Does not remove them.
+    fn peek_inflight(&self, limit: usize) -> Vec<MempoolTx>;
 
     /// Called after each chain-sync event.
     ///
@@ -176,30 +181,24 @@ pub trait MempoolStore: Clone + Send + Sync + 'static {
     ///
     /// `point` is the block's chain point. On first confirmation, it is
     /// stored as `confirmed_at`. On rollback (unseen), it is cleared.
-    fn apply(&self, point: &ChainPoint, seen_txs: &[TxHash], unseen_txs: &[TxHash]);
+    fn confirm(&self, point: &ChainPoint, seen_txs: &[TxHash], unseen_txs: &[TxHash]);
 
     /// Removes transactions whose confirmation count meets `threshold` from
-    /// the tracking table and records them as `Finalized`.
+    /// the inflight table and records them as `Finalized`.
     ///
     /// Finalized transactions are no longer actively tracked but can still be
-    /// looked up via [`check_stage`](Self::check_stage).
+    /// looked up via [`check_status`](Self::check_status).
     fn finalize(&self, threshold: u32);
-
-    /// Returns the current lifecycle stage of a transaction.
-    ///
-    /// Returns [`MempoolTxStage::Unknown`] for hashes that were never received
-    /// or have been garbage-collected.
-    fn check_stage(&self, tx_hash: &TxHash) -> MempoolTxStage;
 
     /// Returns the full status of a transaction including stage,
     /// confirmation count, and the chain point where it was first confirmed.
-    fn get_tx_status(&self, tx_hash: &TxHash) -> TxStatus;
+    fn check_status(&self, tx_hash: &TxHash) -> TxStatus;
 
     /// Paginate through finalized transactions.
     ///
-    /// Returns entries starting at `cursor` (a sequence number assigned at
-    /// finalization time) and the next cursor (`None` if exhausted).
-    fn read_finalized_log(&self, cursor: u64, limit: usize) -> (Vec<FinalizedTx>, Option<u64>);
+    /// `cursor` is a sequence number assigned at finalization time. Returns a
+    /// [`MempoolPage`] with the next cursor (`None` if exhausted).
+    fn dump_finalized(&self, cursor: u64, limit: usize) -> MempoolPage;
 
     /// Returns a stream of lifecycle events.
     ///
@@ -261,8 +260,9 @@ where
 {
     let mut refs = HashSet::new();
 
-    for (_, era_cbor) in mempool.pending() {
-        let Some(tx) = MultiEraTx::try_from(&era_cbor).ok() else {
+    for mtx in mempool.peek_pending(usize::MAX) {
+        let era_cbor = &mtx.payload;
+        let Some(tx) = MultiEraTx::try_from(era_cbor).ok() else {
             continue;
         };
 
@@ -283,8 +283,9 @@ where
 fn exclude_inflight_stxis<D: Domain>(refs: &mut HashSet<TxoRef>, mempool: &D::Mempool) {
     debug!("excluding inflight stxis");
 
-    for (_, era_cbor) in mempool.pending() {
-        let Some(tx) = MultiEraTx::try_from(&era_cbor).ok() else {
+    for mtx in mempool.peek_pending(usize::MAX) {
+        let era_cbor = &mtx.payload;
+        let Some(tx) = MultiEraTx::try_from(era_cbor).ok() else {
             warn!("invalid inflight tx");
             continue;
         };
@@ -303,8 +304,9 @@ fn exclude_inflight_stxis<D: Domain>(refs: &mut HashSet<TxoRef>, mempool: &D::Me
 fn select_mempool_utxos<D: Domain>(refs: &mut HashSet<TxoRef>, mempool: &D::Mempool) -> UtxoMap {
     let mut map = HashMap::new();
 
-    for (_, era_cbor) in mempool.pending() {
-        let Some(tx) = MultiEraTx::try_from(&era_cbor).ok() else {
+    for mtx in mempool.peek_pending(usize::MAX) {
+        let era_cbor = &mtx.payload;
+        let Some(tx) = MultiEraTx::try_from(era_cbor).ok() else {
             continue;
         };
 
@@ -402,7 +404,6 @@ mod tests {
 
     fn test_event(hash: TxHash) -> MempoolEvent {
         MempoolEvent {
-            new_stage: MempoolTxStage::Pending,
             tx: MempoolTx::new(hash, EraCbor(7, vec![0x80]), vec![]),
         }
     }
@@ -427,27 +428,23 @@ mod tests {
             vec![]
         }
 
-        fn pending(&self) -> Vec<(TxHash, EraCbor)> {
-            vec![]
-        }
-
         fn mark_inflight(&self, _hashes: &[TxHash]) {}
 
         fn mark_acknowledged(&self, _hashes: &[TxHash]) {}
 
-        fn get_inflight(&self, _tx_hash: &TxHash) -> Option<MempoolTx> {
+        fn find_inflight(&self, _tx_hash: &TxHash) -> Option<MempoolTx> {
             None
         }
 
-        fn apply(&self, _point: &ChainPoint, _seen: &[TxHash], _unseen: &[TxHash]) {}
+        fn peek_inflight(&self, _limit: usize) -> Vec<MempoolTx> {
+            vec![]
+        }
+
+        fn confirm(&self, _point: &ChainPoint, _seen: &[TxHash], _unseen: &[TxHash]) {}
 
         fn finalize(&self, _threshold: u32) {}
 
-        fn check_stage(&self, _hash: &TxHash) -> MempoolTxStage {
-            MempoolTxStage::Unknown
-        }
-
-        fn get_tx_status(&self, _hash: &TxHash) -> TxStatus {
+        fn check_status(&self, _hash: &TxHash) -> TxStatus {
             TxStatus {
                 stage: MempoolTxStage::Unknown,
                 confirmations: 0,
@@ -455,8 +452,8 @@ mod tests {
             }
         }
 
-        fn read_finalized_log(&self, _cursor: u64, _limit: usize) -> (Vec<FinalizedTx>, Option<u64>) {
-            (vec![], None)
+        fn dump_finalized(&self, _cursor: u64, _limit: usize) -> MempoolPage {
+            MempoolPage { items: vec![], next_cursor: None }
         }
 
         fn subscribe(&self) -> Self::Stream {

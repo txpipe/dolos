@@ -8,7 +8,7 @@ use tokio_stream::wrappers::BroadcastStream;
 use tracing::{debug, info, warn};
 
 use dolos_core::{
-    config::RedbMempoolConfig, ChainPoint, EraCbor, FinalizedTx, MempoolError, MempoolEvent,
+    config::RedbMempoolConfig, ChainPoint, EraCbor, MempoolError, MempoolEvent, MempoolPage,
     MempoolStore, MempoolTx, MempoolTxStage, TxHash, TxStatus,
 };
 
@@ -66,17 +66,17 @@ const DEFAULT_CACHE_SIZE_MB: usize = 32;
 
 // PENDING: key = [8-byte seq BE ++ 32-byte tx_hash], value = era(u16 LE) ++ cbor bytes
 const PENDING_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("pending");
-// TRACKING: key = 32-byte tx_hash, value = bincode(TrackingRecord)
-const TRACKING_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("tracking");
+// INFLIGHT: key = 32-byte tx_hash, value = cbor(InflightRecord)  (table name stays "tracking" to avoid migration)
+const INFLIGHT_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("tracking");
 // FINALIZED_LOG: key = u64 sequence number, value = bincode(FinalizedLogEntry)
 const FINALIZED_LOG_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("finalized_log");
 
-// ── Tracking record ─────────────────────────────────────────────────────
+// ── Inflight record ─────────────────────────────────────────────────────
 
 #[derive(Encode, Decode, PartialEq)]
-enum TrackingStage {
+enum InflightStage {
     #[n(0)]
-    Inflight,
+    Propagated,
     #[n(1)]
     Acknowledged,
     #[n(2)]
@@ -84,9 +84,9 @@ enum TrackingStage {
 }
 
 #[derive(Encode, Decode)]
-struct TrackingRecord {
+struct InflightRecord {
     #[n(0)]
-    stage: TrackingStage,
+    stage: InflightStage,
     #[n(1)]
     confirmations: u32,
     #[n(2)]
@@ -104,6 +104,8 @@ struct FinalizedLogEntry {
     confirmations: u32,
     #[cbor(n(2), with = "minicbor::bytes")]
     confirmed_at: Option<Vec<u8>>,
+    #[n(3)]
+    payload: Option<EraCbor>,
 }
 
 impl FinalizedLogEntry {
@@ -115,23 +117,26 @@ impl FinalizedLogEntry {
         minicbor::decode(bytes).unwrap()
     }
 
-    fn to_finalized_tx(self) -> FinalizedTx {
+    fn to_mempool_tx(self) -> MempoolTx {
         let mut hash_bytes = [0u8; 32];
         hash_bytes.copy_from_slice(&self.hash);
-        FinalizedTx {
+        MempoolTx {
             hash: TxHash::from(hash_bytes),
+            payload: self.payload.unwrap_or(EraCbor(0, vec![])),
+            stage: MempoolTxStage::Finalized,
             confirmations: self.confirmations,
             confirmed_at: self.confirmed_at.map(|b| {
                 ChainPoint::from_bytes(b[..].try_into().unwrap())
             }),
+            report: None,
         }
     }
 }
 
-impl TrackingRecord {
+impl InflightRecord {
     fn new(payload: EraCbor) -> Self {
         Self {
-            stage: TrackingStage::Inflight,
+            stage: InflightStage::Propagated,
             confirmations: 0,
             payload,
             confirmed_at: None,
@@ -147,8 +152,8 @@ impl TrackingRecord {
     }
 
     fn acknowledge(&mut self) -> bool {
-        if self.stage == TrackingStage::Inflight {
-            self.stage = TrackingStage::Acknowledged;
+        if self.stage == InflightStage::Propagated {
+            self.stage = InflightStage::Acknowledged;
             true
         } else {
             false
@@ -156,7 +161,7 @@ impl TrackingRecord {
     }
 
     fn confirm(&mut self, point: &ChainPoint) {
-        self.stage = TrackingStage::Confirmed;
+        self.stage = InflightStage::Confirmed;
         self.confirmations += 1;
         if self.confirmed_at.is_none() {
             self.confirmed_at = Some(point.clone().into_bytes().to_vec());
@@ -164,14 +169,14 @@ impl TrackingRecord {
     }
 
     fn is_finalizable(&self, threshold: u32) -> bool {
-        self.stage == TrackingStage::Confirmed && self.confirmations >= threshold
+        self.stage == InflightStage::Confirmed && self.confirmations >= threshold
     }
 
     fn to_tx_status(&self) -> TxStatus {
         let stage = match self.stage {
-            TrackingStage::Inflight => MempoolTxStage::Inflight,
-            TrackingStage::Acknowledged => MempoolTxStage::Acknowledged,
-            TrackingStage::Confirmed => MempoolTxStage::Confirmed,
+            InflightStage::Propagated => MempoolTxStage::Propagated,
+            InflightStage::Acknowledged => MempoolTxStage::Acknowledged,
+            InflightStage::Confirmed => MempoolTxStage::Confirmed,
         };
         TxStatus {
             stage,
@@ -187,14 +192,24 @@ impl TrackingRecord {
             hash: hash.to_vec(),
             confirmations: self.confirmations,
             confirmed_at: self.confirmed_at,
+            payload: Some(self.payload),
         }
     }
 
     fn to_mempool_tx(&self, hash: TxHash) -> MempoolTx {
+        let stage = match self.stage {
+            InflightStage::Propagated => MempoolTxStage::Propagated,
+            InflightStage::Acknowledged => MempoolTxStage::Acknowledged,
+            InflightStage::Confirmed => MempoolTxStage::Confirmed,
+        };
         MempoolTx {
             hash,
             payload: self.payload.clone(),
-            confirmed: self.stage == TrackingStage::Confirmed,
+            stage,
+            confirmations: self.confirmations,
+            confirmed_at: self.confirmed_at.as_ref().map(|b| {
+                ChainPoint::from_bytes(b[..].try_into().unwrap())
+            }),
             report: None,
         }
     }
@@ -337,15 +352,15 @@ impl RedbMempool {
     fn ensure_initialized(&self) -> Result<(), RedbMempoolError> {
         let wx = self.db.begin_write()?;
         wx.open_table(PENDING_TABLE)?;
-        wx.open_table(TRACKING_TABLE)?;
+        wx.open_table(INFLIGHT_TABLE)?;
         wx.open_table(FINALIZED_LOG_TABLE)?;
 
         wx.commit()?;
         Ok(())
     }
 
-    fn notify(&self, new_stage: MempoolTxStage, tx: MempoolTx) {
-        if self.updates.send(MempoolEvent { new_stage, tx }).is_err() {
+    fn notify(&self, tx: MempoolTx) {
+        if self.updates.send(MempoolEvent { tx }).is_err() {
             debug!("no mempool update receivers");
         }
     }
@@ -354,7 +369,7 @@ impl RedbMempool {
     where
         F: FnOnce(
             &redb::WriteTransaction,
-        ) -> Result<Vec<(MempoolTxStage, MempoolTx)>, RedbMempoolError>,
+        ) -> Result<Vec<MempoolTx>, RedbMempoolError>,
     {
         let wx = match self.db.begin_write() {
             Ok(wx) => wx,
@@ -378,8 +393,8 @@ impl RedbMempool {
             return;
         }
 
-        for (stage, tx) in events {
-            self.notify(stage, tx);
+        for tx in events {
+            self.notify(tx);
         }
     }
 
@@ -395,7 +410,7 @@ impl RedbMempool {
         }
 
         wx.commit()?;
-        self.notify(MempoolTxStage::Pending, tx);
+        self.notify(tx);
         Ok(())
     }
 }
@@ -447,35 +462,11 @@ impl MempoolStore for RedbMempool {
             result.push(MempoolTx {
                 hash: key.hash(),
                 payload,
-                confirmed: false,
+                stage: MempoolTxStage::Pending,
+                confirmations: 0,
+                confirmed_at: None,
                 report: None,
             });
-        }
-
-        result
-    }
-
-    fn pending(&self) -> Vec<(TxHash, EraCbor)> {
-        let rx = match self.db.begin_read() {
-            Ok(rx) => rx,
-            Err(_) => return vec![],
-        };
-        let table = match rx.open_table(PENDING_TABLE) {
-            Ok(t) => t,
-            Err(_) => return vec![],
-        };
-
-        let iter = match table.iter() {
-            Ok(it) => it,
-            Err(_) => return vec![],
-        };
-
-        let mut result = Vec::new();
-        for entry in iter {
-            let Ok(entry) = entry else { break };
-            let key = PendingKey::from_bytes(entry.0.value());
-            let payload: EraCbor = minicbor::decode(entry.1.value()).unwrap();
-            result.push((key.hash(), payload));
         }
 
         result
@@ -486,7 +477,7 @@ impl MempoolStore for RedbMempool {
 
         self.with_write_tx("mark_inflight", |wx| {
             let mut pending = wx.open_table(PENDING_TABLE)?;
-            let mut tracking = wx.open_table(TRACKING_TABLE)?;
+            let mut tracking = wx.open_table(INFLIGHT_TABLE)?;
 
             // Collect keys to remove first (can't mutate while iterating)
             let mut keys_to_remove: Vec<(PendingKey, Vec<u8>)> = Vec::new();
@@ -506,11 +497,11 @@ impl MempoolStore for RedbMempool {
                 let hash = pkey.hash();
                 pending.remove(pkey.as_bytes())?;
                 let payload = minicbor::decode(&era_cbor_bytes).unwrap();
-                let record = TrackingRecord::new(payload);
+                let record = InflightRecord::new(payload);
                 let tx = record.to_mempool_tx(hash);
                 record.write(&mut tracking, &hash)?;
                 info!(tx.hash = %tx.hash, "tx inflight (redb)");
-                events.push((MempoolTxStage::Inflight, tx));
+                events.push(tx);
             }
 
             Ok(events)
@@ -519,16 +510,16 @@ impl MempoolStore for RedbMempool {
 
     fn mark_acknowledged(&self, hashes: &[TxHash]) {
         self.with_write_tx("mark_acknowledged", |wx| {
-            let mut tracking = wx.open_table(TRACKING_TABLE)?;
+            let mut tracking = wx.open_table(INFLIGHT_TABLE)?;
             let mut events = Vec::new();
 
             for hash in hashes {
-                if let Some(mut record) = TrackingRecord::read(&tracking, hash)? {
+                if let Some(mut record) = InflightRecord::read(&tracking, hash)? {
                     if record.acknowledge() {
                         let tx = record.to_mempool_tx(*hash);
                         record.write(&mut tracking, hash)?;
                         info!(tx.hash = %tx.hash, "tx acknowledged (redb)");
-                        events.push((MempoolTxStage::Acknowledged, tx));
+                        events.push(tx);
                     }
                 }
             }
@@ -537,46 +528,77 @@ impl MempoolStore for RedbMempool {
         });
     }
 
-    fn get_inflight(&self, tx_hash: &TxHash) -> Option<MempoolTx> {
+    fn find_inflight(&self, tx_hash: &TxHash) -> Option<MempoolTx> {
         let rx = self.db.begin_read().ok()?;
-        let table = rx.open_table(TRACKING_TABLE).ok()?;
+        let table = rx.open_table(INFLIGHT_TABLE).ok()?;
         let entry = table.get(tx_hash.as_ref()).ok()??;
-        let record = TrackingRecord::deserialize(entry.value());
-        if record.stage != TrackingStage::Inflight {
-            return None;
-        }
+        let record = InflightRecord::deserialize(entry.value());
         Some(record.to_mempool_tx(*tx_hash))
     }
 
-    fn apply(&self, point: &ChainPoint, seen_txs: &[TxHash], unseen_txs: &[TxHash]) {
+    fn peek_inflight(&self, limit: usize) -> Vec<MempoolTx> {
+        let rx = match self.db.begin_read() {
+            Ok(rx) => rx,
+            Err(_) => return vec![],
+        };
+        let table = match rx.open_table(INFLIGHT_TABLE) {
+            Ok(t) => t,
+            Err(_) => return vec![],
+        };
+        let iter = match table.iter() {
+            Ok(it) => it,
+            Err(_) => return vec![],
+        };
+
+        let mut result = Vec::new();
+        for entry in iter {
+            if result.len() >= limit {
+                break;
+            }
+            let Ok(entry) = entry else { break };
+            let key_bytes = entry.0.value();
+            let mut hash_bytes = [0u8; 32];
+            hash_bytes.copy_from_slice(key_bytes);
+            let hash = TxHash::from(hash_bytes);
+            let record = InflightRecord::deserialize(entry.1.value());
+            result.push(record.to_mempool_tx(hash));
+        }
+
+        result
+    }
+
+    fn confirm(&self, point: &ChainPoint, seen_txs: &[TxHash], unseen_txs: &[TxHash]) {
         let point = point.clone();
-        self.with_write_tx("apply", |wx| {
-            let mut tracking = wx.open_table(TRACKING_TABLE)?;
+        self.with_write_tx("confirm", |wx| {
+            let mut tracking = wx.open_table(INFLIGHT_TABLE)?;
             let mut events = Vec::new();
 
             for tx_hash in seen_txs {
-                if let Some(mut record) = TrackingRecord::read(&tracking, tx_hash)? {
+                if let Some(mut record) = InflightRecord::read(&tracking, tx_hash)? {
                     record.confirm(&point);
                     let tx = record.to_mempool_tx(*tx_hash);
                     record.write(&mut tracking, tx_hash)?;
                     info!(tx.hash = %tx.hash, "tx confirmed (redb)");
-                    events.push((MempoolTxStage::Confirmed, tx));
+                    events.push(tx);
                 }
             }
 
             let mut pending = wx.open_table(PENDING_TABLE)?;
 
             for tx_hash in unseen_txs {
-                if let Some(mut record) = TrackingRecord::read(&tracking, tx_hash)? {
+                if let Some(mut record) = InflightRecord::read(&tracking, tx_hash)? {
                     record.confirmed_at = None;
                     tracking.remove(tx_hash.as_ref())?;
                     let seq = PendingKey::next_seq(&pending)?;
                     let key = PendingKey::new(seq, tx_hash);
                     let value = minicbor::to_vec(&record.payload).unwrap();
                     pending.insert(key.as_bytes(), value.as_slice())?;
-                    let tx = record.to_mempool_tx(*tx_hash);
+                    let mut tx = record.to_mempool_tx(*tx_hash);
+                    tx.stage = MempoolTxStage::Pending;
+                    tx.confirmations = 0;
+                    tx.confirmed_at = None;
                     info!(tx.hash = %tx.hash, "tx rollback to pending (redb)");
-                    events.push((MempoolTxStage::Pending, tx));
+                    events.push(tx);
                 }
             }
 
@@ -586,17 +608,17 @@ impl MempoolStore for RedbMempool {
 
     fn finalize(&self, threshold: u32) {
         self.with_write_tx("finalize", |wx| {
-            let mut tracking = wx.open_table(TRACKING_TABLE)?;
+            let mut tracking = wx.open_table(INFLIGHT_TABLE)?;
             let mut fin_log = wx.open_table(FINALIZED_LOG_TABLE)?;
 
             // Collect entries to finalize first (can't mutate while iterating)
-            let mut to_finalize: Vec<(Vec<u8>, TrackingRecord)> = Vec::new();
+            let mut to_finalize: Vec<(Vec<u8>, InflightRecord)> = Vec::new();
             {
                 let iter = tracking.iter()?;
                 for entry in iter {
                     let entry = entry?;
                     let key = entry.0.value().to_vec();
-                    let record = TrackingRecord::deserialize(entry.1.value());
+                    let record = InflightRecord::deserialize(entry.1.value());
                     if record.is_finalizable(threshold) {
                         to_finalize.push((key, record));
                     }
@@ -608,7 +630,7 @@ impl MempoolStore for RedbMempool {
                 let mut hash_bytes = [0u8; 32];
                 hash_bytes.copy_from_slice(&key);
                 let hash = TxHash::from(hash_bytes);
-                let tx = record.to_mempool_tx(hash);
+                let mut tx = record.to_mempool_tx(hash);
                 let log_entry = record.to_finalized_log_entry(hash);
 
                 tracking.remove(key.as_slice())?;
@@ -616,19 +638,16 @@ impl MempoolStore for RedbMempool {
                 let fin_seq = next_finalized_seq(&fin_log)?;
                 fin_log.insert(fin_seq, log_entry.serialize().as_slice())?;
 
+                tx.stage = MempoolTxStage::Finalized;
                 info!(tx.hash = %tx.hash, "tx finalized (redb)");
-                events.push((MempoolTxStage::Finalized, tx));
+                events.push(tx);
             }
 
             Ok(events)
         });
     }
 
-    fn check_stage(&self, tx_hash: &TxHash) -> MempoolTxStage {
-        self.get_tx_status(tx_hash).stage
-    }
-
-    fn get_tx_status(&self, tx_hash: &TxHash) -> TxStatus {
+    fn check_status(&self, tx_hash: &TxHash) -> TxStatus {
         let rx = match self.db.begin_read() {
             Ok(rx) => rx,
             Err(_) => {
@@ -641,9 +660,9 @@ impl MempoolStore for RedbMempool {
         };
 
         // Check tracking table first
-        if let Ok(table) = rx.open_table(TRACKING_TABLE) {
+        if let Ok(table) = rx.open_table(INFLIGHT_TABLE) {
             if let Ok(Some(entry)) = table.get(tx_hash.as_ref()) {
-                let record = TrackingRecord::deserialize(entry.value());
+                let record = InflightRecord::deserialize(entry.value());
                 return record.to_tx_status();
             }
         }
@@ -672,43 +691,43 @@ impl MempoolStore for RedbMempool {
         }
     }
 
-    fn read_finalized_log(&self, cursor: u64, limit: usize) -> (Vec<FinalizedTx>, Option<u64>) {
+    fn dump_finalized(&self, cursor: u64, limit: usize) -> MempoolPage {
         let rx = match self.db.begin_read() {
             Ok(rx) => rx,
-            Err(_) => return (vec![], None),
+            Err(_) => return MempoolPage { items: vec![], next_cursor: None },
         };
 
         let table = match rx.open_table(FINALIZED_LOG_TABLE) {
             Ok(t) => t,
-            Err(_) => return (vec![], None),
+            Err(_) => return MempoolPage { items: vec![], next_cursor: None },
         };
 
         let iter = match table.range(cursor..) {
             Ok(it) => it,
-            Err(_) => return (vec![], None),
+            Err(_) => return MempoolPage { items: vec![], next_cursor: None },
         };
 
-        let mut entries = Vec::with_capacity(limit);
+        let mut items = Vec::with_capacity(limit);
         let mut last_seq = None;
 
         for entry in iter {
-            if entries.len() >= limit {
+            if items.len() >= limit {
                 break;
             }
             let Ok(entry) = entry else { break };
             let seq = entry.0.value();
             let log_entry = FinalizedLogEntry::deserialize(entry.1.value());
-            entries.push(log_entry.to_finalized_tx());
+            items.push(log_entry.to_mempool_tx());
             last_seq = Some(seq);
         }
 
-        let next_cursor = if entries.len() >= limit {
+        let next_cursor = if items.len() >= limit {
             last_seq.map(|s| s + 1)
         } else {
             None
         };
 
-        (entries, next_cursor)
+        MempoolPage { items, next_cursor }
     }
 
     fn subscribe(&self) -> Self::Stream {
@@ -747,7 +766,6 @@ mod tests {
         let store = test_store();
         assert!(!store.has_pending());
         assert!(store.peek_pending(10).is_empty());
-        assert!(store.pending().is_empty());
     }
 
     #[test]
@@ -764,11 +782,7 @@ mod tests {
         let peeked = store.peek_pending(10);
         assert_eq!(peeked.len(), 1);
         assert_eq!(peeked[0].hash, hash);
-
-        let pending = store.pending();
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].0, hash);
-        assert_eq!(pending[0].1, payload);
+        assert_eq!(peeked[0].payload, payload);
     }
 
     #[test]
@@ -802,8 +816,8 @@ mod tests {
         store.mark_inflight(&[hash]);
 
         assert!(!store.has_pending());
-        assert!(matches!(store.check_stage(&hash), MempoolTxStage::Inflight));
-        assert!(store.get_inflight(&hash).is_some());
+        assert!(matches!(store.check_status(&hash).stage, MempoolTxStage::Propagated));
+        assert!(store.find_inflight(&hash).is_some());
     }
 
     #[test]
@@ -816,8 +830,9 @@ mod tests {
         store.mark_inflight(&[hash]);
         store.mark_acknowledged(&[hash]);
 
-        assert!(matches!(store.check_stage(&hash), MempoolTxStage::Acknowledged));
-        assert!(store.get_inflight(&hash).is_none());
+        assert!(matches!(store.check_status(&hash).stage, MempoolTxStage::Acknowledged));
+        // find_inflight now returns any inflight sub-stage (Propagated, Acknowledged, Confirmed)
+        assert!(store.find_inflight(&hash).is_some());
     }
 
     #[test]
@@ -829,9 +844,9 @@ mod tests {
         store.receive(tx).unwrap();
         store.mark_inflight(&[hash]);
         store.mark_acknowledged(&[hash]);
-        store.apply(&test_point(), &[hash], &[]);
+        store.confirm(&test_point(), &[hash], &[]);
 
-        assert!(matches!(store.check_stage(&hash), MempoolTxStage::Confirmed));
+        assert!(matches!(store.check_status(&hash).stage, MempoolTxStage::Confirmed));
     }
 
     #[test]
@@ -843,10 +858,10 @@ mod tests {
         store.receive(tx).unwrap();
         store.mark_inflight(&[hash]);
         store.mark_acknowledged(&[hash]);
-        store.apply(&test_point(), &[hash], &[]);
-        store.apply(&test_point_2(), &[], &[hash]);
+        store.confirm(&test_point(), &[hash], &[]);
+        store.confirm(&test_point_2(), &[], &[hash]);
 
-        assert!(matches!(store.check_stage(&hash), MempoolTxStage::Pending));
+        assert!(matches!(store.check_status(&hash).stage, MempoolTxStage::Pending));
         assert!(store.has_pending());
         let peeked = store.peek_pending(10);
         assert_eq!(peeked.len(), 1);
@@ -862,11 +877,11 @@ mod tests {
         store.receive(tx).unwrap();
         store.mark_inflight(&[hash]);
         store.mark_acknowledged(&[hash]);
-        store.apply(&test_point(), &[hash], &[]);
-        store.apply(&test_point_2(), &[hash], &[]);
+        store.confirm(&test_point(), &[hash], &[]);
+        store.confirm(&test_point_2(), &[hash], &[]);
         store.finalize(2);
 
-        assert!(matches!(store.check_stage(&hash), MempoolTxStage::Unknown));
+        assert!(matches!(store.check_status(&hash).stage, MempoolTxStage::Unknown));
     }
 
     #[test]
@@ -878,18 +893,18 @@ mod tests {
         store.receive(tx).unwrap();
         store.mark_inflight(&[hash]);
         store.mark_acknowledged(&[hash]);
-        store.apply(&test_point(), &[hash], &[]);
+        store.confirm(&test_point(), &[hash], &[]);
         store.finalize(2);
 
-        assert!(matches!(store.check_stage(&hash), MempoolTxStage::Confirmed));
+        assert!(matches!(store.check_status(&hash).stage, MempoolTxStage::Confirmed));
     }
 
     #[test]
-    fn test_check_stage_unknown() {
+    fn test_stage_unknown() {
         let store = test_store();
         let hash = test_hash(99);
 
-        assert!(matches!(store.check_stage(&hash), MempoolTxStage::Unknown));
+        assert!(matches!(store.check_status(&hash).stage, MempoolTxStage::Unknown));
     }
 
     #[test]
@@ -900,50 +915,50 @@ mod tests {
         let point = test_point();
 
         // Unknown
-        let status = store.get_tx_status(&hash);
+        let status = store.check_status(&hash);
         assert!(matches!(status.stage, MempoolTxStage::Unknown));
         assert_eq!(status.confirmations, 0);
         assert!(status.confirmed_at.is_none());
 
         // Pending
         store.receive(tx).unwrap();
-        let status = store.get_tx_status(&hash);
+        let status = store.check_status(&hash);
         assert!(matches!(status.stage, MempoolTxStage::Pending));
         assert_eq!(status.confirmations, 0);
         assert!(status.confirmed_at.is_none());
 
-        // Inflight
+        // Propagated
         store.mark_inflight(&[hash]);
-        let status = store.get_tx_status(&hash);
-        assert!(matches!(status.stage, MempoolTxStage::Inflight));
+        let status = store.check_status(&hash);
+        assert!(matches!(status.stage, MempoolTxStage::Propagated));
         assert_eq!(status.confirmations, 0);
         assert!(status.confirmed_at.is_none());
 
         // Acknowledged
         store.mark_acknowledged(&[hash]);
-        let status = store.get_tx_status(&hash);
+        let status = store.check_status(&hash);
         assert!(matches!(status.stage, MempoolTxStage::Acknowledged));
         assert_eq!(status.confirmations, 0);
         assert!(status.confirmed_at.is_none());
 
         // Confirmed (1st confirmation)
-        store.apply(&point, &[hash], &[]);
-        let status = store.get_tx_status(&hash);
+        store.confirm(&point, &[hash], &[]);
+        let status = store.check_status(&hash);
         assert!(matches!(status.stage, MempoolTxStage::Confirmed));
         assert_eq!(status.confirmations, 1);
         assert!(status.confirmed_at.is_some());
         assert_eq!(status.confirmed_at.as_ref().unwrap().slot(), point.slot());
 
         // Confirmed (2nd confirmation — confirmed_at stays the same)
-        store.apply(&test_point_2(), &[hash], &[]);
-        let status = store.get_tx_status(&hash);
+        store.confirm(&test_point_2(), &[hash], &[]);
+        let status = store.check_status(&hash);
         assert!(matches!(status.stage, MempoolTxStage::Confirmed));
         assert_eq!(status.confirmations, 2);
         assert_eq!(status.confirmed_at.as_ref().unwrap().slot(), point.slot());
 
-        // Finalized — no longer tracked by get_tx_status, returns Unknown
+        // Finalized — no longer tracked by check_status, returns Unknown
         store.finalize(2);
-        let status = store.get_tx_status(&hash);
+        let status = store.check_status(&hash);
         assert!(matches!(status.stage, MempoolTxStage::Unknown));
         assert_eq!(status.confirmations, 0);
         assert!(status.confirmed_at.is_none());
@@ -952,9 +967,9 @@ mod tests {
     #[test]
     fn test_read_finalized_log_empty() {
         let store = test_store();
-        let (entries, next) = store.read_finalized_log(0, 50);
-        assert!(entries.is_empty());
-        assert!(next.is_none());
+        let page = store.dump_finalized(0, 50);
+        assert!(page.items.is_empty());
+        assert!(page.next_cursor.is_none());
     }
 
     #[test]
@@ -969,28 +984,69 @@ mod tests {
             store.receive(tx).unwrap();
             store.mark_inflight(&[hash]);
             store.mark_acknowledged(&[hash]);
-            store.apply(&point, &[hash], &[]);
-            store.apply(&test_point_2(), &[hash], &[]);
+            store.confirm(&point, &[hash], &[]);
+            store.confirm(&test_point_2(), &[hash], &[]);
         }
         store.finalize(2);
 
         // Read all
-        let (entries, next) = store.read_finalized_log(0, 50);
-        assert_eq!(entries.len(), 3);
-        assert!(next.is_none());
-        for entry in &entries {
+        let page = store.dump_finalized(0, 50);
+        assert_eq!(page.items.len(), 3);
+        assert!(page.next_cursor.is_none());
+        for entry in &page.items {
             assert_eq!(entry.confirmations, 2);
             assert!(entry.confirmed_at.is_some());
+            assert!(!entry.payload.1.is_empty(), "finalized entry should include payload");
         }
 
         // Read with limit
-        let (entries, next) = store.read_finalized_log(0, 2);
-        assert_eq!(entries.len(), 2);
-        assert!(next.is_some());
+        let page = store.dump_finalized(0, 2);
+        assert_eq!(page.items.len(), 2);
+        assert!(page.next_cursor.is_some());
 
         // Read remainder
-        let (entries2, next2) = store.read_finalized_log(next.unwrap(), 50);
-        assert_eq!(entries2.len(), 1);
-        assert!(next2.is_none());
+        let page2 = store.dump_finalized(page.next_cursor.unwrap(), 50);
+        assert_eq!(page2.items.len(), 1);
+        assert!(page2.next_cursor.is_none());
+    }
+
+    #[test]
+    fn test_inflight_listing() {
+        let store = test_store();
+        let h1 = test_hash(1);
+        let h2 = test_hash(2);
+        let h3 = test_hash(3);
+
+        store.receive(test_tx(1)).unwrap();
+        store.receive(test_tx(2)).unwrap();
+        store.receive(test_tx(3)).unwrap();
+
+        store.mark_inflight(&[h1, h2, h3]);
+
+        // All three start as Propagated
+        let listing = store.peek_inflight(usize::MAX);
+        assert_eq!(listing.len(), 3);
+        assert!(listing.iter().all(|tx| tx.stage == MempoolTxStage::Propagated));
+
+        // Acknowledge h2
+        store.mark_acknowledged(&[h2]);
+        let listing = store.peek_inflight(usize::MAX);
+        assert_eq!(listing.len(), 3);
+        let h2_stage = listing.iter().find(|tx| tx.hash == h2).unwrap().stage.clone();
+        assert_eq!(h2_stage, MempoolTxStage::Acknowledged);
+
+        // Confirm h2
+        store.confirm(&test_point(), &[h2], &[]);
+        let listing = store.peek_inflight(usize::MAX);
+        assert_eq!(listing.len(), 3);
+        let h2_stage = listing.iter().find(|tx| tx.hash == h2).unwrap().stage.clone();
+        assert_eq!(h2_stage, MempoolTxStage::Confirmed);
+
+        // Finalize h2 — should drop from listing
+        store.confirm(&test_point_2(), &[h2], &[]);
+        store.finalize(2);
+        let listing = store.peek_inflight(usize::MAX);
+        assert_eq!(listing.len(), 2);
+        assert!(!listing.iter().any(|tx| tx.hash == h2));
     }
 }

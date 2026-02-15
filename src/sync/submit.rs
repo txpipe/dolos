@@ -193,7 +193,7 @@ impl gasket::framework::Worker<Stage> for Worker {
 
                 let found: Vec<MempoolTx> = ids
                     .iter()
-                    .filter_map(|x| stage.mempool.get_inflight(&Hash::from(x.1.as_slice())))
+                    .filter_map(|x| stage.mempool.find_inflight(&Hash::from(x.1.as_slice())))
                     .collect_vec();
 
                 let to_send = found.into_iter().map(to_n2n_body).collect_vec();

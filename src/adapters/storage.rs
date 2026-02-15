@@ -23,9 +23,9 @@ use dolos_core::{
         MempoolStoreConfig, RedbArchiveConfig, RedbIndexConfig, RedbStateConfig, RedbWalConfig,
         RootConfig, StateStoreConfig, StorageVersion, WalStoreConfig,
     },
-    BlockBody, BlockSlot, ChainPoint, EntityDelta, EntityKey, EntityValue, EraCbor, FinalizedTx,
+    BlockBody, BlockSlot, ChainPoint, EntityDelta, EntityKey, EntityValue,
     IndexDelta, IndexError, IndexStore as CoreIndexStore, IndexWriter as CoreIndexWriter, LogEntry,
-    LogValue, MempoolError, MempoolEvent, MempoolStore, MempoolTx, MempoolTxStage, Namespace,
+    LogValue, MempoolError, MempoolEvent, MempoolStore, MempoolTx, Namespace,
     RawBlock, StateError, StateSchema, StateStore as CoreStateStore, StateWriter as CoreStateWriter,
     TagDimension, TxHash, TxStatus, TxoRef, UtxoMap, UtxoSet, UtxoSetDelta, WalError, WalStore,
 };
@@ -1063,13 +1063,6 @@ impl MempoolStore for MempoolBackend {
         }
     }
 
-    fn pending(&self) -> Vec<(TxHash, EraCbor)> {
-        match self {
-            Self::Ephemeral(s) => s.pending(),
-            Self::Redb(s) => s.pending(),
-        }
-    }
-
     fn mark_inflight(&self, hashes: &[TxHash]) {
         match self {
             Self::Ephemeral(s) => s.mark_inflight(hashes),
@@ -1084,17 +1077,24 @@ impl MempoolStore for MempoolBackend {
         }
     }
 
-    fn get_inflight(&self, tx_hash: &TxHash) -> Option<MempoolTx> {
+    fn find_inflight(&self, tx_hash: &TxHash) -> Option<MempoolTx> {
         match self {
-            Self::Ephemeral(s) => s.get_inflight(tx_hash),
-            Self::Redb(s) => s.get_inflight(tx_hash),
+            Self::Ephemeral(s) => s.find_inflight(tx_hash),
+            Self::Redb(s) => s.find_inflight(tx_hash),
         }
     }
 
-    fn apply(&self, point: &ChainPoint, seen_txs: &[TxHash], unseen_txs: &[TxHash]) {
+    fn peek_inflight(&self, limit: usize) -> Vec<MempoolTx> {
         match self {
-            Self::Ephemeral(s) => s.apply(point, seen_txs, unseen_txs),
-            Self::Redb(s) => s.apply(point, seen_txs, unseen_txs),
+            Self::Ephemeral(s) => s.peek_inflight(limit),
+            Self::Redb(s) => s.peek_inflight(limit),
+        }
+    }
+
+    fn confirm(&self, point: &ChainPoint, seen_txs: &[TxHash], unseen_txs: &[TxHash]) {
+        match self {
+            Self::Ephemeral(s) => s.confirm(point, seen_txs, unseen_txs),
+            Self::Redb(s) => s.confirm(point, seen_txs, unseen_txs),
         }
     }
 
@@ -1105,24 +1105,17 @@ impl MempoolStore for MempoolBackend {
         }
     }
 
-    fn check_stage(&self, tx_hash: &TxHash) -> MempoolTxStage {
+    fn check_status(&self, tx_hash: &TxHash) -> TxStatus {
         match self {
-            Self::Ephemeral(s) => s.check_stage(tx_hash),
-            Self::Redb(s) => s.check_stage(tx_hash),
+            Self::Ephemeral(s) => s.check_status(tx_hash),
+            Self::Redb(s) => s.check_status(tx_hash),
         }
     }
 
-    fn get_tx_status(&self, tx_hash: &TxHash) -> TxStatus {
+    fn dump_finalized(&self, cursor: u64, limit: usize) -> dolos_core::MempoolPage {
         match self {
-            Self::Ephemeral(s) => s.get_tx_status(tx_hash),
-            Self::Redb(s) => s.get_tx_status(tx_hash),
-        }
-    }
-
-    fn read_finalized_log(&self, cursor: u64, limit: usize) -> (Vec<FinalizedTx>, Option<u64>) {
-        match self {
-            Self::Ephemeral(s) => s.read_finalized_log(cursor, limit),
-            Self::Redb(s) => s.read_finalized_log(cursor, limit),
+            Self::Ephemeral(s) => s.dump_finalized(cursor, limit),
+            Self::Redb(s) => s.dump_finalized(cursor, limit),
         }
     }
 
