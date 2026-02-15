@@ -58,7 +58,7 @@ impl Worker {
 
             let era = pallas::ledger::traverse::Era::try_from(*era).or_panic()?;
 
-            let tx = MultiEraTx::decode_for_era(era, &cbor).or_panic()?;
+            let tx = MultiEraTx::decode_for_era(era, cbor).or_panic()?;
 
             let Some(conway) = tx.as_conway() else {
                 return Err(WorkerError::Panic);

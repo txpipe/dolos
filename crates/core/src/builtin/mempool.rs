@@ -226,7 +226,7 @@ impl MempoolStore for EphemeralMempool {
                 state
                     .acknowledged
                     .get(hash)
-                    .map_or(false, |tx| tx.confirmations >= threshold)
+                    .is_some_and(|tx| tx.confirmations >= threshold)
             })
             .copied()
             .collect();
@@ -283,10 +283,7 @@ impl MempoolStore for EphemeralMempool {
         }
 
         let end = (start + limit).min(state.finalized_log.len());
-        let items: Vec<MempoolTx> = state.finalized_log[start..end]
-            .iter()
-            .cloned()
-            .collect();
+        let items: Vec<MempoolTx> = state.finalized_log[start..end].to_vec();
 
         let next_cursor = if end < state.finalized_log.len() {
             Some(end as u64)

@@ -117,7 +117,7 @@ impl FinalizedLogEntry {
         minicbor::decode(bytes).unwrap()
     }
 
-    fn to_mempool_tx(self) -> MempoolTx {
+    fn into_mempool_tx(self) -> MempoolTx {
         let mut hash_bytes = [0u8; 32];
         hash_bytes.copy_from_slice(&self.hash);
         MempoolTx {
@@ -187,7 +187,7 @@ impl InflightRecord {
         }
     }
 
-    fn to_finalized_log_entry(self, hash: TxHash) -> FinalizedLogEntry {
+    fn into_finalized_log_entry(self, hash: TxHash) -> FinalizedLogEntry {
         FinalizedLogEntry {
             hash: hash.to_vec(),
             confirmations: self.confirmations,
@@ -631,7 +631,7 @@ impl MempoolStore for RedbMempool {
                 hash_bytes.copy_from_slice(&key);
                 let hash = TxHash::from(hash_bytes);
                 let mut tx = record.to_mempool_tx(hash);
-                let log_entry = record.to_finalized_log_entry(hash);
+                let log_entry = record.into_finalized_log_entry(hash);
 
                 tracking.remove(key.as_slice())?;
 
@@ -717,7 +717,7 @@ impl MempoolStore for RedbMempool {
             let Ok(entry) = entry else { break };
             let seq = entry.0.value();
             let log_entry = FinalizedLogEntry::deserialize(entry.1.value());
-            items.push(log_entry.to_mempool_tx());
+            items.push(log_entry.into_mempool_tx());
             last_seq = Some(seq);
         }
 

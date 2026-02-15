@@ -437,19 +437,14 @@ pub struct RedbMempoolConfig {
 }
 
 /// Mempool store configuration.
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(tag = "backend", rename_all = "lowercase")]
 pub enum MempoolStoreConfig {
     Redb(RedbMempoolConfig),
     /// In-memory backend (ephemeral, data lost on restart).
     #[serde(rename = "in_memory")]
+    #[default]
     InMemory,
-}
-
-impl Default for MempoolStoreConfig {
-    fn default() -> Self {
-        Self::InMemory
-    }
 }
 
 // ============================================================================
