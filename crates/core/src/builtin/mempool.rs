@@ -5,7 +5,7 @@
 //! deployments and development/testing.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     sync::{Arc, RwLock},
 };
 use tokio::sync::broadcast;
@@ -22,8 +22,10 @@ struct MempoolState {
     pending: Vec<MempoolTx>,
     inflight: Vec<MempoolTx>,
     acknowledged: HashMap<TxHash, MempoolTx>,
-    finalized_log: Vec<MempoolTx>,
+    finalized_log: VecDeque<MempoolTx>,
 }
+
+const MAX_FINALIZED_LOG: usize = 1000;
 
 /// A basic, FIFO, in-memory mempool.
 #[derive(Clone)]
@@ -92,9 +94,13 @@ impl MempoolStore for EphemeralMempool {
     type Stream = EphemeralMempoolStream;
 
     fn receive(&self, tx: MempoolTx) -> Result<(), MempoolError> {
-        info!(tx.hash = %tx.hash, "tx received");
-
         let mut state = self.state.write().unwrap();
+
+        if state.pending.iter().any(|p| p.hash == tx.hash) {
+            return Err(MempoolError::DuplicateTx);
+        }
+
+        info!(tx.hash = %tx.hash, "tx received");
         state.pending.push(tx.clone());
         self.notify(tx);
         self.log_state(&state);
@@ -235,12 +241,17 @@ impl MempoolStore for EphemeralMempool {
             if let Some(tx) = state.acknowledged.remove(&hash) {
                 let mut finalized = tx.clone();
                 finalized.stage = MempoolTxStage::Finalized;
-                state.finalized_log.push(finalized);
+                state.finalized_log.push_back(finalized);
                 let mut event_tx = tx.clone();
                 event_tx.stage = MempoolTxStage::Finalized;
                 info!(tx.hash = %tx.hash, "tx finalized");
                 self.notify(event_tx);
             }
+        }
+
+        if state.finalized_log.len() > MAX_FINALIZED_LOG {
+            let excess = state.finalized_log.len() - MAX_FINALIZED_LOG;
+            state.finalized_log.drain(..excess);
         }
     }
 
@@ -278,13 +289,15 @@ impl MempoolStore for EphemeralMempool {
         let state = self.state.read().unwrap();
         let start = cursor as usize;
 
-        if start >= state.finalized_log.len() {
-            return MempoolPage { items: vec![], next_cursor: None };
-        }
+        let items: Vec<MempoolTx> = state
+            .finalized_log
+            .iter()
+            .skip(start)
+            .take(limit)
+            .cloned()
+            .collect();
 
-        let end = (start + limit).min(state.finalized_log.len());
-        let items: Vec<MempoolTx> = state.finalized_log[start..end].to_vec();
-
+        let end = start + items.len();
         let next_cursor = if end < state.finalized_log.len() {
             Some(end as u64)
         } else {

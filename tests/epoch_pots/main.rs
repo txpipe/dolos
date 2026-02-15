@@ -5,9 +5,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use compare::{compare_csvs_with_ignore, extract_row_from_csv, has_data, write_fixture};
 use csv_diff::diff_row::DiffByteRecord;
 use pallas::ledger::addresses::Network;
-use compare::{compare_csvs_with_ignore, extract_row_from_csv, has_data, write_fixture};
 
 use dolos_cardano::ewrap::AppliedReward;
 use dolos_cardano::model::{
@@ -39,7 +39,6 @@ fn fast_fjall_config() -> FjallStateConfig {
 }
 
 fn discover_ground_truths(base: &Path) -> Vec<(String, u64)> {
-
     let entries = match std::fs::read_dir(base) {
         Ok(entries) => entries,
         Err(_) => return Vec::new(),
@@ -721,7 +720,8 @@ fn seed_dir_for(
 }
 
 fn read_ground_truth(path: &Path) -> Result<String> {
-    std::fs::read_to_string(path).with_context(|| format!("reading ground truth {}", path.display()))
+    std::fs::read_to_string(path)
+        .with_context(|| format!("reading ground truth {}", path.display()))
 }
 
 #[test]
@@ -780,14 +780,14 @@ fn epoch_tests() {
                 continue;
             }
         };
-        let delegation =
-            match read_ground_truth(&gt_dir.join(format!("delegation-{snapshot}.csv"))) {
-                Ok(v) => v,
-                Err(e) => {
-                    failures.push(format!("{network}-{epoch}: {e}"));
-                    continue;
-                }
-            };
+        let delegation = match read_ground_truth(&gt_dir.join(format!("delegation-{snapshot}.csv")))
+        {
+            Ok(v) => v,
+            Err(e) => {
+                failures.push(format!("{network}-{epoch}: {e}"));
+                continue;
+            }
+        };
         let stake = match read_ground_truth(&gt_dir.join(format!("stake-{snapshot}.csv"))) {
             Ok(v) => v,
             Err(e) => {
@@ -820,9 +820,6 @@ fn epoch_tests() {
     }
 
     if !failures.is_empty() {
-        panic!(
-            "\nEpoch test failures:\n  - {}",
-            failures.join("\n  - ")
-        );
+        panic!("\nEpoch test failures:\n  - {}", failures.join("\n  - "));
     }
 }

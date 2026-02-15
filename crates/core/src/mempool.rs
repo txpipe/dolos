@@ -105,6 +105,9 @@ pub enum MempoolError {
 
     #[error("pparams not available")]
     PParamsNotAvailable,
+
+    #[error("duplicate tx")]
+    DuplicateTx,
 }
 
 /// Durable storage for the transaction submission lifecycle.
@@ -138,8 +141,9 @@ pub trait MempoolStore: Clone + Send + Sync + 'static {
     /// Append a transaction to the pending queue.
     ///
     /// Implementors must persist the transaction and emit a `Pending` event
-    /// via [`subscribe`](Self::subscribe). Duplicate hashes are allowed — each
-    /// call creates a separate pending entry.
+    /// via [`subscribe`](Self::subscribe). Returns
+    /// [`DuplicateTx`](MempoolError::DuplicateTx) if a transaction with the
+    /// same hash is already pending.
     fn receive(&self, tx: MempoolTx) -> Result<(), MempoolError>;
 
     /// Returns `true` if there is at least one transaction in the pending queue.
@@ -186,8 +190,9 @@ pub trait MempoolStore: Clone + Send + Sync + 'static {
     /// Removes transactions whose confirmation count meets `threshold` from
     /// the inflight table and records them as `Finalized`.
     ///
-    /// Finalized transactions are no longer actively tracked but can still be
-    /// looked up via [`check_status`](Self::check_status).
+    /// Finalized transactions are no longer returned by
+    /// [`check_status`](Self::check_status) but can be listed via
+    /// [`dump_finalized`](Self::dump_finalized).
     fn finalize(&self, threshold: u32);
 
     /// Returns the full status of a transaction including stage,

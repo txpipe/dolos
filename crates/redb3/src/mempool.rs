@@ -403,6 +403,16 @@ impl RedbMempool {
 
         {
             let mut table = wx.open_table(PENDING_TABLE)?;
+
+            // Check for duplicate hash in pending queue
+            for entry in table.iter()? {
+                let entry = entry?;
+                let key = PendingKey::from_bytes(entry.0.value());
+                if key.hash() == tx.hash {
+                    return Err(MempoolError::DuplicateTx.into());
+                }
+            }
+
             let seq = PendingKey::next_seq(&table)?;
             let key = PendingKey::new(seq, &tx.hash);
             let value = minicbor::to_vec(&tx.payload).unwrap();
@@ -801,9 +811,10 @@ mod tests {
         let store = test_store();
         let tx = test_tx(1);
         store.receive(tx.clone()).unwrap();
-        store.receive(tx).unwrap();
 
-        assert_eq!(store.peek_pending(10).len(), 2);
+        let err = store.receive(tx).unwrap_err();
+        assert!(matches!(err, MempoolError::DuplicateTx));
+        assert_eq!(store.peek_pending(10).len(), 1);
     }
 
     #[test]
