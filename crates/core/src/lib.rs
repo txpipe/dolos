@@ -614,10 +614,9 @@ pub trait Domain: Send + Sync + Clone + 'static {
                 .prune_history(max_slots, Some(Self::MAX_PRUNE_SLOTS_PER_HOUSEKEEPING))?;
         }
 
-        if let Some(threshold) = self.storage_config().mempool_finalization_threshold {
-            info!(threshold, "finalizing mempool txs past threshold");
-            self.mempool().finalize(threshold);
-        }
+        const MEMPOOL_FINALIZATION_THRESHOLD: u32 = 10;
+        info!(threshold = MEMPOOL_FINALIZATION_THRESHOLD, "finalizing mempool txs past threshold");
+        self.mempool().finalize(MEMPOOL_FINALIZATION_THRESHOLD);
 
         Ok(archive_pruned && wal_pruned)
     }
