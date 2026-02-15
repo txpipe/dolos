@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use pallas::codec::minicbor::{self, Decode, Encode};
@@ -60,20 +61,151 @@ impl From<redb::TransactionError> for RedbMempoolError {
     }
 }
 
-// ── Table definitions ───────────────────────────────────────────────────
-
 const DEFAULT_CACHE_SIZE_MB: usize = 32;
 
-// PENDING: key = [8-byte seq BE ++ 32-byte tx_hash], value = era(u16 LE) ++ cbor bytes
-const PENDING_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("pending");
-// INFLIGHT: key = 32-byte tx_hash, value = cbor(InflightRecord)  (table name stays "tracking" to avoid migration)
-const INFLIGHT_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("tracking");
-// FINALIZED_LOG: key = u64 sequence number, value = bincode(FinalizedLogEntry)
-const FINALIZED_LOG_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("finalized_log");
+// ── Layer 1: redb key/value types ───────────────────────────────────────
+
+/// Composite key for pending table: `[8-byte seq BE ++ 32-byte tx_hash]`.
+#[derive(Debug)]
+struct DbPendingKey([u8; 40]);
+
+impl DbPendingKey {
+    fn new(seq: u64, hash: &TxHash) -> Self {
+        let mut key = [0u8; 40];
+        key[..8].copy_from_slice(&seq.to_be_bytes());
+        key[8..].copy_from_slice(hash.as_ref());
+        Self(key)
+    }
+
+    fn seq(&self) -> u64 {
+        u64::from_be_bytes(self.0[..8].try_into().unwrap())
+    }
+
+    fn hash(&self) -> TxHash {
+        let mut h = [0u8; 32];
+        h.copy_from_slice(&self.0[8..40]);
+        TxHash::from(h)
+    }
+}
+
+impl redb::Value for DbPendingKey {
+    type SelfType<'a> = Self where Self: 'a;
+    type AsBytes<'a> = &'a [u8; 40] where Self: 'a;
+
+    fn fixed_width() -> Option<usize> {
+        Some(40)
+    }
+
+    fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
+    where
+        Self: 'a,
+    {
+        let inner = <[u8; 40]>::try_from(data).unwrap();
+        Self(inner)
+    }
+
+    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
+    where
+        Self: 'b,
+    {
+        &value.0
+    }
+
+    fn type_name() -> redb::TypeName {
+        redb::TypeName::new("mempool_pending_key")
+    }
+}
+
+impl redb::Key for DbPendingKey {
+    fn compare(data1: &[u8], data2: &[u8]) -> std::cmp::Ordering {
+        data1.cmp(data2)
+    }
+}
+
+/// 32-byte tx hash key for the inflight table.
+#[derive(Debug)]
+struct DbTxHash([u8; 32]);
+
+impl DbTxHash {
+    fn from_tx_hash(hash: &TxHash) -> Self {
+        let mut inner = [0u8; 32];
+        inner.copy_from_slice(hash.as_ref());
+        Self(inner)
+    }
+
+    fn to_tx_hash(&self) -> TxHash {
+        TxHash::from(self.0)
+    }
+}
+
+impl redb::Value for DbTxHash {
+    type SelfType<'a> = Self where Self: 'a;
+    type AsBytes<'a> = &'a [u8; 32] where Self: 'a;
+
+    fn fixed_width() -> Option<usize> {
+        Some(32)
+    }
+
+    fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
+    where
+        Self: 'a,
+    {
+        let inner = <[u8; 32]>::try_from(data).unwrap();
+        Self(inner)
+    }
+
+    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
+    where
+        Self: 'b,
+    {
+        &value.0
+    }
+
+    fn type_name() -> redb::TypeName {
+        redb::TypeName::new("mempool_tx_hash")
+    }
+}
+
+impl redb::Key for DbTxHash {
+    fn compare(data1: &[u8], data2: &[u8]) -> std::cmp::Ordering {
+        data1.cmp(data2)
+    }
+}
+
+/// Newtype wrapping `EraCbor` for the pending table value (foreign type).
+#[derive(Debug)]
+struct DbEraCbor(EraCbor);
+
+impl redb::Value for DbEraCbor {
+    type SelfType<'a> = Self where Self: 'a;
+    type AsBytes<'a> = Vec<u8> where Self: 'a;
+
+    fn fixed_width() -> Option<usize> {
+        None
+    }
+
+    fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
+    where
+        Self: 'a,
+    {
+        Self(minicbor::decode(data).unwrap())
+    }
+
+    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
+    where
+        Self: 'b,
+    {
+        minicbor::to_vec(&value.0).unwrap()
+    }
+
+    fn type_name() -> redb::TypeName {
+        redb::TypeName::new("mempool_era_cbor")
+    }
+}
 
 // ── Inflight record ─────────────────────────────────────────────────────
 
-#[derive(Encode, Decode, PartialEq)]
+#[derive(Clone, Debug, Encode, Decode, PartialEq)]
 enum InflightStage {
     #[n(0)]
     Propagated,
@@ -83,7 +215,7 @@ enum InflightStage {
     Confirmed,
 }
 
-#[derive(Encode, Decode)]
+#[derive(Clone, Debug, Encode, Decode)]
 struct InflightRecord {
     #[n(0)]
     stage: InflightStage,
@@ -97,8 +229,35 @@ struct InflightRecord {
     non_confirmations: u32,
 }
 
-/// Entry stored in FINALIZED_LOG_TABLE for pagination.
-#[derive(Encode, Decode)]
+impl redb::Value for InflightRecord {
+    type SelfType<'a> = Self where Self: 'a;
+    type AsBytes<'a> = Vec<u8> where Self: 'a;
+
+    fn fixed_width() -> Option<usize> {
+        None
+    }
+
+    fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
+    where
+        Self: 'a,
+    {
+        minicbor::decode(data).unwrap()
+    }
+
+    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
+    where
+        Self: 'b,
+    {
+        minicbor::to_vec(value).unwrap()
+    }
+
+    fn type_name() -> redb::TypeName {
+        redb::TypeName::new("mempool_inflight_record")
+    }
+}
+
+/// Entry stored in finalized log table for pagination.
+#[derive(Debug, Encode, Decode)]
 struct FinalizedLogEntry {
     #[cbor(n(0), with = "minicbor::bytes")]
     hash: Vec<u8>,
@@ -110,15 +269,34 @@ struct FinalizedLogEntry {
     payload: Option<EraCbor>,
 }
 
+impl redb::Value for FinalizedLogEntry {
+    type SelfType<'a> = Self where Self: 'a;
+    type AsBytes<'a> = Vec<u8> where Self: 'a;
+
+    fn fixed_width() -> Option<usize> {
+        None
+    }
+
+    fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
+    where
+        Self: 'a,
+    {
+        minicbor::decode(data).unwrap()
+    }
+
+    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
+    where
+        Self: 'b,
+    {
+        minicbor::to_vec(value).unwrap()
+    }
+
+    fn type_name() -> redb::TypeName {
+        redb::TypeName::new("mempool_finalized_log_entry")
+    }
+}
+
 impl FinalizedLogEntry {
-    fn serialize(&self) -> Vec<u8> {
-        minicbor::to_vec(self).unwrap()
-    }
-
-    fn deserialize(bytes: &[u8]) -> Self {
-        minicbor::decode(bytes).unwrap()
-    }
-
     fn into_mempool_tx(self) -> MempoolTx {
         let mut hash_bytes = [0u8; 32];
         hash_bytes.copy_from_slice(&self.hash);
@@ -145,14 +323,6 @@ impl InflightRecord {
             confirmed_at: None,
             non_confirmations: 0,
         }
-    }
-
-    fn serialize(&self) -> Vec<u8> {
-        minicbor::to_vec(self).unwrap()
-    }
-
-    fn deserialize(bytes: &[u8]) -> Self {
-        minicbor::decode(bytes).unwrap()
     }
 
     fn acknowledge(&mut self) -> bool {
@@ -228,73 +398,246 @@ impl InflightRecord {
             report: None,
         }
     }
+}
+
+// ── Layer 2: table wrapper structs ──────────────────────────────────────
+
+struct PendingTable;
+
+impl PendingTable {
+    const DEF: TableDefinition<'static, DbPendingKey, DbEraCbor> =
+        TableDefinition::new("pending");
+
+    fn initialize(wx: &redb::WriteTransaction) -> Result<(), RedbMempoolError> {
+        wx.open_table(Self::DEF)?;
+        Ok(())
+    }
+
+    fn has_any(rx: &redb::ReadTransaction) -> Result<bool, RedbMempoolError> {
+        let table = rx.open_table(Self::DEF)?;
+        Ok(table.len()? > 0)
+    }
+
+    fn peek(rx: &redb::ReadTransaction, limit: usize) -> Result<Vec<MempoolTx>, RedbMempoolError> {
+        let table = rx.open_table(Self::DEF)?;
+        let iter = table.iter()?;
+        let mut result = Vec::with_capacity(limit);
+        for entry in iter {
+            if result.len() >= limit {
+                break;
+            }
+            let entry = entry?;
+            let key = entry.0.value();
+            let payload = entry.1.value().0;
+            result.push(MempoolTx {
+                hash: key.hash(),
+                payload,
+                stage: MempoolTxStage::Pending,
+                confirmations: 0,
+                non_confirmations: 0,
+                confirmed_at: None,
+                report: None,
+            });
+        }
+        Ok(result)
+    }
+
+    fn contains(wx: &redb::WriteTransaction, tx_hash: &TxHash) -> Result<bool, RedbMempoolError> {
+        let table = wx.open_table(Self::DEF)?;
+        for entry in table.iter()? {
+            let entry = entry?;
+            if entry.0.value().hash() == *tx_hash {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn contains_hash(
+        rx: &redb::ReadTransaction,
+        tx_hash: &TxHash,
+    ) -> Result<bool, RedbMempoolError> {
+        let table = rx.open_table(Self::DEF)?;
+        for entry in table.iter()? {
+            let entry = entry?;
+            if entry.0.value().hash() == *tx_hash {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn insert(
+        wx: &redb::WriteTransaction,
+        hash: &TxHash,
+        payload: &EraCbor,
+    ) -> Result<(), RedbMempoolError> {
+        let mut table = wx.open_table(Self::DEF)?;
+        let seq = match table.last()? {
+            Some(entry) => entry.0.value().seq() + 1,
+            None => 0,
+        };
+        let key = DbPendingKey::new(seq, hash);
+        table.insert(key, DbEraCbor(payload.clone()))?;
+        Ok(())
+    }
+
+    fn drain_by_hashes(
+        wx: &redb::WriteTransaction,
+        hashes: &HashSet<TxHash>,
+    ) -> Result<Vec<(TxHash, EraCbor)>, RedbMempoolError> {
+        let mut table = wx.open_table(Self::DEF)?;
+        let mut to_remove = Vec::new();
+        for entry in table.iter()? {
+            let entry = entry?;
+            let key = entry.0.value();
+            if hashes.contains(&key.hash()) {
+                to_remove.push((key.0, key.hash(), entry.1.value().0));
+            }
+        }
+        let mut result = Vec::with_capacity(to_remove.len());
+        for (raw_key, hash, payload) in to_remove {
+            table.remove(DbPendingKey(raw_key))?;
+            result.push((hash, payload));
+        }
+        Ok(result)
+    }
+}
+
+struct InflightTable;
+
+impl InflightTable {
+    const DEF: TableDefinition<'static, DbTxHash, InflightRecord> =
+        TableDefinition::new("tracking");
+
+    fn initialize(wx: &redb::WriteTransaction) -> Result<(), RedbMempoolError> {
+        wx.open_table(Self::DEF)?;
+        Ok(())
+    }
+
+    fn get(
+        rx: &redb::ReadTransaction,
+        hash: &TxHash,
+    ) -> Result<Option<InflightRecord>, RedbMempoolError> {
+        let table = rx.open_table(Self::DEF)?;
+        let key = DbTxHash::from_tx_hash(hash);
+        let result = table.get(key)?.map(|e| e.value());
+        Ok(result)
+    }
 
     fn read(
-        table: &redb::Table<'_, &[u8], &[u8]>,
+        wx: &redb::WriteTransaction,
         hash: &TxHash,
-    ) -> Result<Option<Self>, RedbMempoolError> {
-        let entry = table.get(hash.as_ref())?;
-        Ok(entry.map(|e| Self::deserialize(e.value())))
+    ) -> Result<Option<InflightRecord>, RedbMempoolError> {
+        let table = wx.open_table(Self::DEF)?;
+        let key = DbTxHash::from_tx_hash(hash);
+        let result = table.get(key)?.map(|e| e.value());
+        Ok(result)
     }
 
     fn write(
-        &self,
-        table: &mut redb::Table<'_, &[u8], &[u8]>,
+        wx: &redb::WriteTransaction,
         hash: &TxHash,
+        record: &InflightRecord,
     ) -> Result<(), RedbMempoolError> {
-        table.insert(hash.as_ref(), self.serialize().as_slice())?;
+        let mut table = wx.open_table(Self::DEF)?;
+        table.insert(DbTxHash::from_tx_hash(hash), record.clone())?;
         Ok(())
     }
-}
 
-// ── Key types ────────────────────────────────────────────────────────────
-
-/// Composite key for PENDING_TABLE: `[8-byte seq BE ++ 32-byte tx_hash]`.
-struct PendingKey([u8; 40]);
-
-impl PendingKey {
-    fn new(seq: u64, hash: &TxHash) -> Self {
-        let mut key = [0u8; 40];
-        key[..8].copy_from_slice(&seq.to_be_bytes());
-        key[8..].copy_from_slice(hash.as_ref());
-        Self(key)
+    fn remove(wx: &redb::WriteTransaction, hash: &TxHash) -> Result<(), RedbMempoolError> {
+        let mut table = wx.open_table(Self::DEF)?;
+        table.remove(DbTxHash::from_tx_hash(hash))?;
+        Ok(())
     }
 
-    fn from_bytes(bytes: &[u8]) -> Self {
-        let mut key = [0u8; 40];
-        key.copy_from_slice(bytes);
-        Self(key)
-    }
-
-    fn hash(&self) -> TxHash {
-        let mut h = [0u8; 32];
-        h.copy_from_slice(&self.0[8..40]);
-        TxHash::from(h)
-    }
-
-    fn as_bytes(&self) -> &[u8] {
-        &self.0
-    }
-
-    fn next_seq(table: &redb::Table<'_, &[u8], &[u8]>) -> Result<u64, RedbMempoolError> {
-        match table.last()? {
-            Some(entry) => {
-                let key = Self::from_bytes(entry.0.value());
-                Ok(u64::from_be_bytes(key.0[..8].try_into().unwrap()) + 1)
-            }
-            None => Ok(0),
+    fn collect_all(
+        wx: &redb::WriteTransaction,
+    ) -> Result<Vec<(TxHash, InflightRecord)>, RedbMempoolError> {
+        let table = wx.open_table(Self::DEF)?;
+        let mut entries = Vec::new();
+        for entry in table.iter()? {
+            let entry = entry?;
+            entries.push((entry.0.value().to_tx_hash(), entry.1.value()));
         }
+        Ok(entries)
+    }
+
+    fn peek(
+        rx: &redb::ReadTransaction,
+        limit: usize,
+    ) -> Result<Vec<MempoolTx>, RedbMempoolError> {
+        let table = rx.open_table(Self::DEF)?;
+        let mut result = Vec::new();
+        for entry in table.iter()? {
+            if result.len() >= limit {
+                break;
+            }
+            let entry = entry?;
+            let hash = entry.0.value().to_tx_hash();
+            let record = entry.1.value();
+            result.push(record.to_mempool_tx(hash));
+        }
+        Ok(result)
     }
 }
 
-fn next_finalized_seq(table: &redb::Table<'_, u64, &[u8]>) -> Result<u64, RedbMempoolError> {
-    match table.last()? {
-        Some(entry) => Ok(entry.0.value() + 1),
-        None => Ok(0),
+struct FinalizedLogTable;
+
+impl FinalizedLogTable {
+    const DEF: TableDefinition<'static, u64, FinalizedLogEntry> =
+        TableDefinition::new("finalized_log");
+
+    fn initialize(wx: &redb::WriteTransaction) -> Result<(), RedbMempoolError> {
+        wx.open_table(Self::DEF)?;
+        Ok(())
+    }
+
+    fn append(
+        wx: &redb::WriteTransaction,
+        entry: FinalizedLogEntry,
+    ) -> Result<(), RedbMempoolError> {
+        let mut table = wx.open_table(Self::DEF)?;
+        let seq = match table.last()? {
+            Some(e) => e.0.value() + 1,
+            None => 0,
+        };
+        table.insert(seq, entry)?;
+        Ok(())
+    }
+
+    fn paginate(
+        rx: &redb::ReadTransaction,
+        cursor: u64,
+        limit: usize,
+    ) -> Result<MempoolPage, RedbMempoolError> {
+        let table = rx.open_table(Self::DEF)?;
+        let iter = table.range(cursor..)?;
+        let mut items = Vec::with_capacity(limit);
+        let mut last_seq = None;
+
+        for entry in iter {
+            if items.len() >= limit {
+                break;
+            }
+            let entry = entry?;
+            let seq = entry.0.value();
+            let log_entry = entry.1.value();
+            items.push(log_entry.into_mempool_tx());
+            last_seq = Some(seq);
+        }
+
+        let next_cursor = if items.len() >= limit {
+            last_seq.map(|s| s + 1)
+        } else {
+            None
+        };
+
+        Ok(MempoolPage { items, next_cursor })
     }
 }
 
-// ── RedbMempool ─────────────────────────────────────────────────────────
+// ── Layer 3: RedbMempool orchestration ──────────────────────────────────
 
 #[derive(Clone)]
 pub struct RedbMempool {
@@ -366,10 +709,9 @@ impl RedbMempool {
 
     fn ensure_initialized(&self) -> Result<(), RedbMempoolError> {
         let wx = self.db.begin_write()?;
-        wx.open_table(PENDING_TABLE)?;
-        wx.open_table(INFLIGHT_TABLE)?;
-        wx.open_table(FINALIZED_LOG_TABLE)?;
-
+        PendingTable::initialize(&wx)?;
+        InflightTable::initialize(&wx)?;
+        FinalizedLogTable::initialize(&wx)?;
         wx.commit()?;
         Ok(())
     }
@@ -415,25 +757,10 @@ impl RedbMempool {
 
     fn receive_inner(&self, tx: MempoolTx) -> Result<(), RedbMempoolError> {
         let wx = self.db.begin_write()?;
-
-        {
-            let mut table = wx.open_table(PENDING_TABLE)?;
-
-            // Check for duplicate hash in pending queue
-            for entry in table.iter()? {
-                let entry = entry?;
-                let key = PendingKey::from_bytes(entry.0.value());
-                if key.hash() == tx.hash {
-                    return Err(MempoolError::DuplicateTx.into());
-                }
-            }
-
-            let seq = PendingKey::next_seq(&table)?;
-            let key = PendingKey::new(seq, &tx.hash);
-            let value = minicbor::to_vec(&tx.payload).unwrap();
-            table.insert(key.as_bytes(), value.as_slice())?;
+        if PendingTable::contains(&wx, &tx.hash)? {
+            return Err(MempoolError::DuplicateTx.into());
         }
-
+        PendingTable::insert(&wx, &tx.hash, &tx.payload)?;
         wx.commit()?;
         self.notify(tx);
         Ok(())
@@ -454,11 +781,7 @@ impl MempoolStore for RedbMempool {
             Ok(rx) => rx,
             Err(_) => return false,
         };
-        let table = match rx.open_table(PENDING_TABLE) {
-            Ok(t) => t,
-            Err(_) => return false,
-        };
-        table.len().unwrap_or(0) > 0
+        PendingTable::has_any(&rx).unwrap_or(false)
     }
 
     fn peek_pending(&self, limit: usize) -> Vec<MempoolTx> {
@@ -466,99 +789,46 @@ impl MempoolStore for RedbMempool {
             Ok(rx) => rx,
             Err(_) => return vec![],
         };
-        let table = match rx.open_table(PENDING_TABLE) {
-            Ok(t) => t,
-            Err(_) => return vec![],
-        };
-
-        let iter = match table.iter() {
-            Ok(it) => it,
-            Err(_) => return vec![],
-        };
-
-        let mut result = Vec::with_capacity(limit);
-        for entry in iter {
-            if result.len() >= limit {
-                break;
-            }
-            let Ok(entry) = entry else { break };
-            let key = PendingKey::from_bytes(entry.0.value());
-            let payload: EraCbor = minicbor::decode(entry.1.value()).unwrap();
-            result.push(MempoolTx {
-                hash: key.hash(),
-                payload,
-                stage: MempoolTxStage::Pending,
-                confirmations: 0,
-                non_confirmations: 0,
-                confirmed_at: None,
-                report: None,
-            });
-        }
-
-        result
+        PendingTable::peek(&rx, limit).unwrap_or_default()
     }
 
     fn mark_inflight(&self, hashes: &[TxHash]) {
-        let hash_set: std::collections::HashSet<TxHash> = hashes.iter().copied().collect();
+        let hash_set: HashSet<TxHash> = hashes.iter().copied().collect();
 
         self.with_write_tx("mark_inflight", |wx| {
-            let mut pending = wx.open_table(PENDING_TABLE)?;
-            let mut tracking = wx.open_table(INFLIGHT_TABLE)?;
-
-            // Collect keys to remove first (can't mutate while iterating)
-            let mut keys_to_remove: Vec<(PendingKey, Vec<u8>)> = Vec::new();
-            {
-                let iter = pending.iter()?;
-                for entry in iter {
-                    let entry = entry?;
-                    let key = PendingKey::from_bytes(entry.0.value());
-                    if hash_set.contains(&key.hash()) {
-                        keys_to_remove.push((key, entry.1.value().to_vec()));
-                    }
-                }
-            }
-
+            let drained = PendingTable::drain_by_hashes(wx, &hash_set)?;
             let mut events = Vec::new();
-            for (pkey, era_cbor_bytes) in keys_to_remove {
-                let hash = pkey.hash();
-                pending.remove(pkey.as_bytes())?;
-                let payload = minicbor::decode(&era_cbor_bytes).unwrap();
+            for (hash, payload) in drained {
                 let record = InflightRecord::new(payload);
                 let tx = record.to_mempool_tx(hash);
-                record.write(&mut tracking, &hash)?;
+                InflightTable::write(wx, &hash, &record)?;
                 info!(tx.hash = %tx.hash, "tx inflight (redb)");
                 events.push(tx);
             }
-
             Ok(events)
         });
     }
 
     fn mark_acknowledged(&self, hashes: &[TxHash]) {
         self.with_write_tx("mark_acknowledged", |wx| {
-            let mut tracking = wx.open_table(INFLIGHT_TABLE)?;
             let mut events = Vec::new();
-
             for hash in hashes {
-                if let Some(mut record) = InflightRecord::read(&tracking, hash)? {
+                if let Some(mut record) = InflightTable::read(wx, hash)? {
                     if record.acknowledge() {
                         let tx = record.to_mempool_tx(*hash);
-                        record.write(&mut tracking, hash)?;
+                        InflightTable::write(wx, hash, &record)?;
                         info!(tx.hash = %tx.hash, "tx acknowledged (redb)");
                         events.push(tx);
                     }
                 }
             }
-
             Ok(events)
         });
     }
 
     fn find_inflight(&self, tx_hash: &TxHash) -> Option<MempoolTx> {
         let rx = self.db.begin_read().ok()?;
-        let table = rx.open_table(INFLIGHT_TABLE).ok()?;
-        let entry = table.get(tx_hash.as_ref()).ok()??;
-        let record = InflightRecord::deserialize(entry.value());
+        let record = InflightTable::get(&rx, tx_hash).ok()??;
         Some(record.to_mempool_tx(*tx_hash))
     }
 
@@ -567,82 +837,35 @@ impl MempoolStore for RedbMempool {
             Ok(rx) => rx,
             Err(_) => return vec![],
         };
-        let table = match rx.open_table(INFLIGHT_TABLE) {
-            Ok(t) => t,
-            Err(_) => return vec![],
-        };
-        let iter = match table.iter() {
-            Ok(it) => it,
-            Err(_) => return vec![],
-        };
-
-        let mut result = Vec::new();
-        for entry in iter {
-            if result.len() >= limit {
-                break;
-            }
-            let Ok(entry) = entry else { break };
-            let key_bytes = entry.0.value();
-            let mut hash_bytes = [0u8; 32];
-            hash_bytes.copy_from_slice(key_bytes);
-            let hash = TxHash::from(hash_bytes);
-            let record = InflightRecord::deserialize(entry.1.value());
-            result.push(record.to_mempool_tx(hash));
-        }
-
-        result
+        InflightTable::peek(&rx, limit).unwrap_or_default()
     }
 
     fn confirm(&self, point: &ChainPoint, seen_txs: &[TxHash], unseen_txs: &[TxHash]) {
         let point = point.clone();
         self.with_write_tx("confirm", |wx| {
-            let mut tracking = wx.open_table(INFLIGHT_TABLE)?;
-            let mut pending = wx.open_table(PENDING_TABLE)?;
+            let seen_set: HashSet<TxHash> = seen_txs.iter().copied().collect();
+            let unseen_set: HashSet<TxHash> = unseen_txs.iter().copied().collect();
+            let entries = InflightTable::collect_all(wx)?;
             let mut events = Vec::new();
 
-            let seen_set: std::collections::HashSet<TxHash> = seen_txs.iter().copied().collect();
-            let unseen_set: std::collections::HashSet<TxHash> =
-                unseen_txs.iter().copied().collect();
-
-            // Collect all inflight entries in a single pass
-            let entries: Vec<(Vec<u8>, InflightRecord)> = {
-                let iter = tracking.iter()?;
-                let mut v = Vec::new();
-                for entry in iter {
-                    let entry = entry?;
-                    v.push((
-                        entry.0.value().to_vec(),
-                        InflightRecord::deserialize(entry.1.value()),
-                    ));
-                }
-                v
-            };
-
-            for (key_bytes, mut record) in entries {
-                let mut hash_bytes = [0u8; 32];
-                hash_bytes.copy_from_slice(&key_bytes);
-                let tx_hash = TxHash::from(hash_bytes);
-
+            for (tx_hash, mut record) in entries {
                 if seen_set.contains(&tx_hash) {
                     record.confirm(&point);
+                    InflightTable::write(wx, &tx_hash, &record)?;
                     let tx = record.to_mempool_tx(tx_hash);
-                    record.write(&mut tracking, &tx_hash)?;
                     info!(tx.hash = %tx.hash, "tx confirmed (redb)");
                     events.push(tx);
                 } else if unseen_set.contains(&tx_hash) {
                     record.retry();
-                    tracking.remove(tx_hash.as_ref())?;
-                    let seq = PendingKey::next_seq(&pending)?;
-                    let key = PendingKey::new(seq, &tx_hash);
-                    let value = minicbor::to_vec(&record.payload).unwrap();
-                    pending.insert(key.as_bytes(), value.as_slice())?;
+                    InflightTable::remove(wx, &tx_hash)?;
+                    PendingTable::insert(wx, &tx_hash, &record.payload)?;
                     let mut tx = record.to_mempool_tx(tx_hash);
                     tx.retry();
                     info!(tx.hash = %tx.hash, "retry tx (redb)");
                     events.push(tx);
                 } else {
                     record.mark_stale();
-                    record.write(&mut tracking, &tx_hash)?;
+                    InflightTable::write(wx, &tx_hash, &record)?;
                 }
             }
 
@@ -652,39 +875,19 @@ impl MempoolStore for RedbMempool {
 
     fn finalize(&self, threshold: u32) {
         self.with_write_tx("finalize", |wx| {
-            let mut tracking = wx.open_table(INFLIGHT_TABLE)?;
-            let mut fin_log = wx.open_table(FINALIZED_LOG_TABLE)?;
-
-            // Collect entries to finalize first (can't mutate while iterating)
-            let mut to_finalize: Vec<(Vec<u8>, InflightRecord)> = Vec::new();
-            {
-                let iter = tracking.iter()?;
-                for entry in iter {
-                    let entry = entry?;
-                    let key = entry.0.value().to_vec();
-                    let record = InflightRecord::deserialize(entry.1.value());
-                    if record.is_finalizable(threshold) {
-                        to_finalize.push((key, record));
-                    }
-                }
-            }
-
+            let entries = InflightTable::collect_all(wx)?;
             let mut events = Vec::new();
-            for (key, record) in to_finalize {
-                let mut hash_bytes = [0u8; 32];
-                hash_bytes.copy_from_slice(&key);
-                let hash = TxHash::from(hash_bytes);
-                let mut tx = record.to_mempool_tx(hash);
-                let log_entry = record.into_finalized_log_entry(hash);
 
-                tracking.remove(key.as_slice())?;
-
-                let fin_seq = next_finalized_seq(&fin_log)?;
-                fin_log.insert(fin_seq, log_entry.serialize().as_slice())?;
-
-                tx.stage = MempoolTxStage::Finalized;
-                info!(tx.hash = %tx.hash, "tx finalized (redb)");
-                events.push(tx);
+            for (hash, record) in entries {
+                if record.is_finalizable(threshold) {
+                    let mut tx = record.to_mempool_tx(hash);
+                    let log_entry = record.into_finalized_log_entry(hash);
+                    InflightTable::remove(wx, &hash)?;
+                    FinalizedLogTable::append(wx, log_entry)?;
+                    tx.stage = MempoolTxStage::Finalized;
+                    info!(tx.hash = %tx.hash, "tx finalized (redb)");
+                    events.push(tx);
+                }
             }
 
             Ok(events)
@@ -704,30 +907,17 @@ impl MempoolStore for RedbMempool {
             }
         };
 
-        // Check tracking table first
-        if let Ok(table) = rx.open_table(INFLIGHT_TABLE) {
-            if let Ok(Some(entry)) = table.get(tx_hash.as_ref()) {
-                let record = InflightRecord::deserialize(entry.value());
-                return record.to_tx_status();
-            }
+        if let Ok(Some(record)) = InflightTable::get(&rx, tx_hash) {
+            return record.to_tx_status();
         }
 
-        // Check pending
-        if let Ok(table) = rx.open_table(PENDING_TABLE) {
-            if let Ok(iter) = table.iter() {
-                for entry in iter {
-                    let Ok(entry) = entry else { break };
-                    let hash = PendingKey::from_bytes(entry.0.value()).hash();
-                    if hash == *tx_hash {
-                        return TxStatus {
-                            stage: MempoolTxStage::Pending,
-                            confirmations: 0,
-                            non_confirmations: 0,
-                            confirmed_at: None,
-                        };
-                    }
-                }
-            }
+        if let Ok(true) = PendingTable::contains_hash(&rx, tx_hash) {
+            return TxStatus {
+                stage: MempoolTxStage::Pending,
+                confirmations: 0,
+                non_confirmations: 0,
+                confirmed_at: None,
+            };
         }
 
         TxStatus {
@@ -743,38 +933,8 @@ impl MempoolStore for RedbMempool {
             Ok(rx) => rx,
             Err(_) => return MempoolPage { items: vec![], next_cursor: None },
         };
-
-        let table = match rx.open_table(FINALIZED_LOG_TABLE) {
-            Ok(t) => t,
-            Err(_) => return MempoolPage { items: vec![], next_cursor: None },
-        };
-
-        let iter = match table.range(cursor..) {
-            Ok(it) => it,
-            Err(_) => return MempoolPage { items: vec![], next_cursor: None },
-        };
-
-        let mut items = Vec::with_capacity(limit);
-        let mut last_seq = None;
-
-        for entry in iter {
-            if items.len() >= limit {
-                break;
-            }
-            let Ok(entry) = entry else { break };
-            let seq = entry.0.value();
-            let log_entry = FinalizedLogEntry::deserialize(entry.1.value());
-            items.push(log_entry.into_mempool_tx());
-            last_seq = Some(seq);
-        }
-
-        let next_cursor = if items.len() >= limit {
-            last_seq.map(|s| s + 1)
-        } else {
-            None
-        };
-
-        MempoolPage { items, next_cursor }
+        FinalizedLogTable::paginate(&rx, cursor, limit)
+            .unwrap_or(MempoolPage { items: vec![], next_cursor: None })
     }
 
     fn subscribe(&self) -> Self::Stream {
