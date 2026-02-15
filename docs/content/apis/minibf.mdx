@@ -112,17 +112,20 @@ The endpoints required for most tx builders to work are supported. Libraries lik
 
 The `serve.minibf` section controls the options for the MiniBF endpoint that can be used by clients.
 
-| property       | type   | example      |
-| -------------- | ------ | ------------ |
-| listen_address | string | "[::]:3000" |
+| property       | type   | example      | description                                                |
+| -------------- | ------ | ------------ | ---------------------------------------------------------- |
+| listen_address | string | "[::]:3000" | Local address to listen for incoming connections           |
+| base_path      | string | "/api/v0"   | Optional base path for API endpoints (Blockfrost spec compliance) |
 
 - `listen_address`: the local address (`IP:PORT`) to listen for incoming connections (`[::]` represents any IP address).
+- `base_path`: optional base path prefix for all endpoints. Set to `"/api/v0"` for full Blockfrost OpenAPI specification compliance. When configured, **all routes** (including health and metrics) will be available under this prefix (e.g., `/api/v0/blocks/latest`, `/api/v0/health`, `/api/v0/metrics`). If omitted, endpoints are served at the root (default behavior for backward compatibility).
 
 This is an example of the `serve.minibf` fragment with a `dolos.toml` configuration file.
 
 ```toml
 [serve.minibf]
 listen_address = "[::]:3000"
+# base_path = "/api/v0"  # Uncomment for Blockfrost OpenAPI spec compliance
 ```
 
 Some of the endpoints require extra data to be tracked by Dolos. We disable tracking all data by default since it can heavily affect the storage requirements for running Dolos.

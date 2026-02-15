@@ -329,6 +329,7 @@ impl ConfigEditor {
                     permissive_cors: Some(true),
                     token_registry_url: None,
                     url: None,
+                    base_path: None,
                 }
                 .into();
             } else {

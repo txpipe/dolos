@@ -583,6 +583,10 @@ pub struct MinibfConfig {
     pub permissive_cors: Option<bool>,
     pub token_registry_url: Option<String>,
     pub url: Option<String>,
+    /// Optional base path for all Blockfrost API endpoints (e.g., "/api/v0").
+    /// When set, all API routes will be nested under this path, while /health and /metrics remain at root.
+    /// Set to "/api/v0" for full Blockfrost OpenAPI specification compliance.
+    pub base_path: Option<String>,
 }
 
 #[derive(Deserialize, Serialize, Clone)]
