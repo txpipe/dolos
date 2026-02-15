@@ -438,15 +438,21 @@ where
             CorsLayer::new()
         });
     
-    // Optionally nest all routes under base_path
-    if let Some(base_path) = &cfg.base_path {
-        if base_path.is_empty() || base_path == "/" {
-            panic!("base_path must not be empty or \"/\"");
-        }
-        Router::new().nest(base_path, app).layer(NormalizePathLayer::trim_trailing_slash())
-    } else {
-        app.layer(NormalizePathLayer::trim_trailing_slash())
-    }
+        // Optionally nest all routes under base_path
+        if let Some(base_path) = &cfg.base_path {
+            // Validate before using
+            if base_path.is_empty() || base_path == "/" || !base_path.starts_with('/') || base_path.contains('*') {
+                panic!(
+                    "base_path must start with '/', must not be just '/', and must not contain wildcards; got: \"{}\"",
+                    base_path
+                );
+            }
+            // Only reach here if valid
+            Router::new().nest(base_path, app).layer(NormalizePathLayer::trim_trailing_slash())
+        } else {
+            // No base_path configured
+            app.layer(NormalizePathLayer::trim_trailing_slash())
+}
 }
 
 impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver
