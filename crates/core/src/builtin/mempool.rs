@@ -201,20 +201,23 @@ impl MempoolStore for EphemeralMempool {
         let hashes: Vec<TxHash> = state.acknowledged.keys().copied().collect();
 
         for tx_hash in hashes {
-            let tx = state.acknowledged.get_mut(&tx_hash).unwrap();
-
             if seen_set.contains(&tx_hash) {
+                let tx = state.acknowledged.get_mut(&tx_hash).unwrap();
                 tx.confirm(point);
                 self.notify(tx.clone());
                 info!(tx.hash = %tx_hash, "tx confirmed");
             } else if unseen_set.contains(&tx_hash) {
+                let mut tx = state.acknowledged.remove(&tx_hash).unwrap();
+
                 let mut event_tx = tx.clone();
                 event_tx.stage = MempoolTxStage::RolledBack;
                 self.notify(event_tx);
 
                 tx.retry();
+                state.pending.push(tx);
                 info!(tx.hash = %tx_hash, "retry tx");
             } else {
+                let tx = state.acknowledged.get_mut(&tx_hash).unwrap();
                 tx.mark_stale();
             }
         }
