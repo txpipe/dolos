@@ -47,7 +47,7 @@ pub use bootstrap::BootstrapExt;
 pub use import::ImportExt;
 pub use submit::SubmitExt;
 pub use sync::SyncExt;
-pub use work_unit::WorkUnit;
+pub use work_unit::{MempoolUpdate, WorkUnit};
 
 pub type Era = u16;
 
