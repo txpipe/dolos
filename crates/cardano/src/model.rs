@@ -237,7 +237,7 @@ where
 
     /// Schedules the next value to be applied on the next epoch transition
     pub fn schedule(&mut self, current_epoch: Epoch, next: Option<T>) {
-        #[cfg(not(feature = "relaxed"))]
+        #[cfg(feature = "strict")]
         assert_eq!(self.epoch, current_epoch);
         let _ = current_epoch;
 
@@ -247,7 +247,7 @@ where
     /// Mutates the live value for the current epoch without rotating any of
     /// the previous values
     pub fn live_mut(&mut self, epoch: Epoch) -> &mut Option<T> {
-        #[cfg(not(feature = "relaxed"))]
+        #[cfg(feature = "strict")]
         assert_eq!(self.epoch, epoch);
         let _ = epoch;
 
@@ -267,7 +267,7 @@ where
     /// Replaces the live value for the current epoch without rotating any of
     /// the previous values
     pub fn replace(&mut self, live: T, epoch: Epoch) {
-        #[cfg(not(feature = "relaxed"))]
+        #[cfg(feature = "strict")]
         assert_eq!(self.epoch, epoch);
         let _ = epoch;
 
@@ -277,7 +277,7 @@ where
     /// Transitions into the next epoch by taking a snapshot of the live value
     /// and rotating the previous ones.
     pub fn transition(&mut self, next_epoch: Epoch) {
-        #[cfg(not(feature = "relaxed"))]
+        #[cfg(feature = "strict")]
         assert_eq!(self.epoch + 1, next_epoch);
         let _ = next_epoch;
 
