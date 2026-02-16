@@ -1272,6 +1272,7 @@ dependencies = [
  "chrono",
  "crc",
  "dolos-core",
+ "dolos-testing",
  "futures-core",
  "hex",
  "itertools 0.14.0",

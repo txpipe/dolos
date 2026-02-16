@@ -32,6 +32,7 @@ futures-core.workspace = true
 [dev-dependencies]
 hex = "0.4.3"
 serde_json = "1.0.140"
+dolos-testing = { path = "../testing" }
 
 [features]
 include-genesis = []

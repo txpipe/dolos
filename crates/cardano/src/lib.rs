@@ -1,7 +1,4 @@
-use pallas::ledger::{
-    primitives::Epoch,
-    traverse::{MultiEraBlock, MultiEraOutput},
-};
+use pallas::ledger::traverse::{MultiEraBlock, MultiEraOutput};
 use std::sync::Arc;
 use tracing::info;
 
@@ -9,14 +6,14 @@ use tracing::info;
 pub use pallas;
 
 use dolos_core::{
-    config::CardanoConfig, Block as _, BlockSlot, ChainError, ChainPoint, Domain, DomainError,
+    config::CardanoConfig, BlockSlot, ChainError, ChainPoint, Domain, DomainError,
     EntityKey, EraCbor, Genesis, MempoolAwareUtxoStore, MempoolTx, RawBlock, StateStore, TipEvent,
     WorkUnit,
 };
 
 use crate::{
     owned::{OwnedMultiEraBlock, OwnedMultiEraOutput},
-    roll::{WorkBatch, WorkBlock},
+    work::{InternalWorkUnit, WorkBuffer},
 };
 
 // staging zone
@@ -43,6 +40,7 @@ pub mod ewrap;
 pub mod genesis;
 pub mod roll;
 pub mod rupd;
+mod work;
 
 pub mod validate;
 
@@ -170,193 +168,6 @@ where
             Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::tip_events(w),
             Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::tip_events(w),
             Self::ForcedStop => Vec::new(),
-        }
-    }
-}
-
-/// Internal work unit marker used by the WorkBuffer state machine.
-///
-/// These markers tell `CardanoLogic::pop_work` what kind of work unit to construct.
-/// The actual work unit instances are created in `pop_work` with the necessary context.
-enum InternalWorkUnit {
-    Genesis,
-    Blocks(WorkBatch),
-    EWrap(BlockSlot),
-    EStart(BlockSlot),
-    Rupd(BlockSlot),
-    ForcedStop,
-}
-
-enum WorkBuffer {
-    Empty,
-    Restart(ChainPoint),
-    Genesis(OwnedMultiEraBlock),
-    OpenBatch(WorkBatch),
-    PreRupdBoundary(WorkBatch, OwnedMultiEraBlock),
-    RupdBoundary(OwnedMultiEraBlock),
-    PreEwrapBoundary(WorkBatch, OwnedMultiEraBlock, Epoch),
-    EwrapBoundary(OwnedMultiEraBlock, Epoch),
-    EstartBoundary(OwnedMultiEraBlock, Epoch),
-    PreForcedStop(OwnedMultiEraBlock),
-    ForcedStop,
-}
-
-impl WorkBuffer {
-    fn new_from_cursor(cursor: ChainPoint) -> Self {
-        Self::Restart(cursor)
-    }
-
-    fn last_point_seen(&self) -> ChainPoint {
-        match self {
-            WorkBuffer::Empty => ChainPoint::Origin,
-            WorkBuffer::Restart(x) => x.clone(),
-            WorkBuffer::Genesis(block) => block.point(),
-            WorkBuffer::OpenBatch(batch) => batch.last_point(),
-            WorkBuffer::PreRupdBoundary(_, block) => block.point(),
-            WorkBuffer::RupdBoundary(block) => block.point(),
-            WorkBuffer::PreEwrapBoundary(_, block, _) => block.point(),
-            WorkBuffer::EwrapBoundary(block, _) => block.point(),
-            WorkBuffer::EstartBoundary(block, _) => block.point(),
-            WorkBuffer::PreForcedStop(block) => block.point(),
-            WorkBuffer::ForcedStop => unreachable!(),
-        }
-    }
-
-    #[allow(clippy::match_like_matches_macro)]
-    fn can_receive_block(&self) -> bool {
-        match self {
-            WorkBuffer::Empty => true,
-            WorkBuffer::Restart(..) => true,
-            WorkBuffer::OpenBatch(..) => true,
-            _ => false,
-        }
-    }
-
-    fn extend_batch(self, next_block: OwnedMultiEraBlock) -> Self {
-        match self {
-            WorkBuffer::Empty => {
-                let batch = WorkBatch::for_single_block(WorkBlock::new(next_block));
-                WorkBuffer::OpenBatch(batch)
-            }
-            WorkBuffer::Restart(_) => {
-                let batch = WorkBatch::for_single_block(WorkBlock::new(next_block));
-                WorkBuffer::OpenBatch(batch)
-            }
-            WorkBuffer::OpenBatch(mut batch) => {
-                batch.add_work(WorkBlock::new(next_block));
-                WorkBuffer::OpenBatch(batch)
-            }
-            _ => unreachable!(),
-        }
-    }
-
-    fn on_genesis_boundary(self, next_block: OwnedMultiEraBlock) -> Self {
-        match self {
-            WorkBuffer::Empty => WorkBuffer::Genesis(next_block),
-            _ => unreachable!(),
-        }
-    }
-
-    fn on_rupd_boundary(self, next_block: OwnedMultiEraBlock) -> Self {
-        match self {
-            WorkBuffer::Restart(_) => WorkBuffer::RupdBoundary(next_block),
-            WorkBuffer::OpenBatch(batch) => WorkBuffer::PreRupdBoundary(batch, next_block),
-            _ => unreachable!(),
-        }
-    }
-
-    fn on_ewrap_boundary(self, next_block: OwnedMultiEraBlock, epoch: Epoch) -> Self {
-        match self {
-            WorkBuffer::Restart(..) => WorkBuffer::EwrapBoundary(next_block, epoch),
-            WorkBuffer::OpenBatch(batch) => WorkBuffer::PreEwrapBoundary(batch, next_block, epoch),
-            _ => unreachable!(),
-        }
-    }
-
-    fn receive_block(
-        self,
-        block: OwnedMultiEraBlock,
-        eras: &ChainSummary,
-        stability_window: u64,
-    ) -> Self {
-        assert!(
-            self.can_receive_block(),
-            "can't continue until previous work is completed"
-        );
-
-        if matches!(self, WorkBuffer::Empty) {
-            return self.on_genesis_boundary(block);
-        }
-
-        let prev_slot = self.last_point_seen().slot();
-
-        let next_slot = block.slot();
-
-        let boundary = pallas_extras::epoch_boundary(eras, prev_slot, next_slot);
-
-        if let Some((epoch, _, _)) = boundary {
-            return self.on_ewrap_boundary(block, epoch);
-        }
-
-        let rupd_boundary =
-            pallas_extras::rupd_boundary(stability_window, eras, prev_slot, next_slot);
-
-        if rupd_boundary.is_some() {
-            return self.on_rupd_boundary(block);
-        }
-
-        self.extend_batch(block)
-    }
-
-    fn pop_work(self, stop_epoch: Option<Epoch>) -> (Option<InternalWorkUnit>, Self) {
-        if matches!(self, WorkBuffer::Restart(..)) || matches!(self, WorkBuffer::Empty) {
-            return (None, self);
-        }
-
-        match self {
-            WorkBuffer::Genesis(block) => (
-                Some(InternalWorkUnit::Genesis),
-                Self::OpenBatch(WorkBatch::for_single_block(WorkBlock::new(block))),
-            ),
-            WorkBuffer::OpenBatch(batch) => {
-                let last_point = batch.last_point();
-                (
-                    Some(InternalWorkUnit::Blocks(batch)),
-                    Self::Restart(last_point),
-                )
-            }
-            WorkBuffer::PreRupdBoundary(batch, block) => (
-                Some(InternalWorkUnit::Blocks(batch)),
-                Self::RupdBoundary(block),
-            ),
-            WorkBuffer::RupdBoundary(block) => (
-                Some(InternalWorkUnit::Rupd(block.slot())),
-                Self::OpenBatch(WorkBatch::for_single_block(WorkBlock::new(block))),
-            ),
-            WorkBuffer::PreEwrapBoundary(batch, block, epoch) => (
-                Some(InternalWorkUnit::Blocks(batch)),
-                Self::EwrapBoundary(block, epoch),
-            ),
-            WorkBuffer::EwrapBoundary(block, epoch) => (
-                Some(InternalWorkUnit::EWrap(block.slot())),
-                Self::EstartBoundary(block, epoch + 1),
-            ),
-            WorkBuffer::EstartBoundary(block, epoch) => (
-                Some(InternalWorkUnit::EStart(block.slot())),
-                if stop_epoch.is_some_and(|x| x == epoch) {
-                    Self::PreForcedStop(block)
-                } else {
-                    Self::OpenBatch(WorkBatch::for_single_block(WorkBlock::new(block)))
-                },
-            ),
-            WorkBuffer::PreForcedStop(block) => (
-                Some(InternalWorkUnit::Blocks(WorkBatch::for_single_block(
-                    WorkBlock::new(block),
-                ))),
-                Self::ForcedStop,
-            ),
-            WorkBuffer::ForcedStop => (Some(InternalWorkUnit::ForcedStop), Self::ForcedStop),
-            _ => unreachable!(),
         }
     }
 }
