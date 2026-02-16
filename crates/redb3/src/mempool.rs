@@ -89,8 +89,14 @@ impl DbPendingKey {
 }
 
 impl redb::Value for DbPendingKey {
-    type SelfType<'a> = Self where Self: 'a;
-    type AsBytes<'a> = &'a [u8; 40] where Self: 'a;
+    type SelfType<'a>
+        = Self
+    where
+        Self: 'a;
+    type AsBytes<'a>
+        = &'a [u8; 40]
+    where
+        Self: 'a;
 
     fn fixed_width() -> Option<usize> {
         Some(40)
@@ -139,8 +145,14 @@ impl DbTxHash {
 }
 
 impl redb::Value for DbTxHash {
-    type SelfType<'a> = Self where Self: 'a;
-    type AsBytes<'a> = &'a [u8; 32] where Self: 'a;
+    type SelfType<'a>
+        = Self
+    where
+        Self: 'a;
+    type AsBytes<'a>
+        = &'a [u8; 32]
+    where
+        Self: 'a;
 
     fn fixed_width() -> Option<usize> {
         Some(32)
@@ -177,8 +189,14 @@ impl redb::Key for DbTxHash {
 struct DbEraCbor(EraCbor);
 
 impl redb::Value for DbEraCbor {
-    type SelfType<'a> = Self where Self: 'a;
-    type AsBytes<'a> = Vec<u8> where Self: 'a;
+    type SelfType<'a>
+        = Self
+    where
+        Self: 'a;
+    type AsBytes<'a>
+        = Vec<u8>
+    where
+        Self: 'a;
 
     fn fixed_width() -> Option<usize> {
         None
@@ -230,8 +248,14 @@ struct InflightRecord {
 }
 
 impl redb::Value for InflightRecord {
-    type SelfType<'a> = Self where Self: 'a;
-    type AsBytes<'a> = Vec<u8> where Self: 'a;
+    type SelfType<'a>
+        = Self
+    where
+        Self: 'a;
+    type AsBytes<'a>
+        = Vec<u8>
+    where
+        Self: 'a;
 
     fn fixed_width() -> Option<usize> {
         None
@@ -270,8 +294,14 @@ struct FinalizedEntry {
 }
 
 impl redb::Value for FinalizedEntry {
-    type SelfType<'a> = Self where Self: 'a;
-    type AsBytes<'a> = Vec<u8> where Self: 'a;
+    type SelfType<'a>
+        = Self
+    where
+        Self: 'a;
+    type AsBytes<'a>
+        = Vec<u8>
+    where
+        Self: 'a;
 
     fn fixed_width() -> Option<usize> {
         None
@@ -306,9 +336,9 @@ impl FinalizedEntry {
             stage: MempoolTxStage::Finalized,
             confirmations: self.confirmations,
             non_confirmations: 0,
-            confirmed_at: self.confirmed_at.map(|b| {
-                ChainPoint::from_bytes(b[..].try_into().unwrap())
-            }),
+            confirmed_at: self
+                .confirmed_at
+                .map(|b| ChainPoint::from_bytes(b[..].try_into().unwrap())),
             report: None,
         }
     }
@@ -365,9 +395,10 @@ impl InflightRecord {
             stage,
             confirmations: self.confirmations,
             non_confirmations: self.non_confirmations,
-            confirmed_at: self.confirmed_at.as_ref().map(|b| {
-                ChainPoint::from_bytes(b[..].try_into().unwrap())
-            }),
+            confirmed_at: self
+                .confirmed_at
+                .as_ref()
+                .map(|b| ChainPoint::from_bytes(b[..].try_into().unwrap())),
         }
     }
 
@@ -392,9 +423,10 @@ impl InflightRecord {
             stage,
             confirmations: self.confirmations,
             non_confirmations: self.non_confirmations,
-            confirmed_at: self.confirmed_at.as_ref().map(|b| {
-                ChainPoint::from_bytes(b[..].try_into().unwrap())
-            }),
+            confirmed_at: self
+                .confirmed_at
+                .as_ref()
+                .map(|b| ChainPoint::from_bytes(b[..].try_into().unwrap())),
             report: None,
         }
     }
@@ -405,8 +437,7 @@ impl InflightRecord {
 struct PendingTable;
 
 impl PendingTable {
-    const DEF: TableDefinition<'static, DbPendingKey, DbEraCbor> =
-        TableDefinition::new("pending");
+    const DEF: TableDefinition<'static, DbPendingKey, DbEraCbor> = TableDefinition::new("pending");
 
     fn initialize(wx: &redb::WriteTransaction) -> Result<(), RedbMempoolError> {
         wx.open_table(Self::DEF)?;
@@ -501,7 +532,7 @@ struct InflightTable;
 
 impl InflightTable {
     const DEF: TableDefinition<'static, DbTxHash, InflightRecord> =
-        TableDefinition::new("tracking");
+        TableDefinition::new("inflight");
 
     fn initialize(wx: &redb::WriteTransaction) -> Result<(), RedbMempoolError> {
         wx.open_table(Self::DEF)?;
@@ -556,10 +587,7 @@ impl InflightTable {
         Ok(entries)
     }
 
-    fn peek(
-        rx: &redb::ReadTransaction,
-        limit: usize,
-    ) -> Result<Vec<MempoolTx>, RedbMempoolError> {
+    fn peek(rx: &redb::ReadTransaction, limit: usize) -> Result<Vec<MempoolTx>, RedbMempoolError> {
         let table = rx.open_table(Self::DEF)?;
         let mut result = Vec::new();
         for entry in table.iter()? {
@@ -578,18 +606,14 @@ impl InflightTable {
 struct FinalizedTable;
 
 impl FinalizedTable {
-    const DEF: TableDefinition<'static, u64, FinalizedEntry> =
-        TableDefinition::new("finalized_log");
+    const DEF: TableDefinition<'static, u64, FinalizedEntry> = TableDefinition::new("finalized");
 
     fn initialize(wx: &redb::WriteTransaction) -> Result<(), RedbMempoolError> {
         wx.open_table(Self::DEF)?;
         Ok(())
     }
 
-    fn append(
-        wx: &redb::WriteTransaction,
-        entry: FinalizedEntry,
-    ) -> Result<(), RedbMempoolError> {
+    fn append(wx: &redb::WriteTransaction, entry: FinalizedEntry) -> Result<(), RedbMempoolError> {
         let mut table = wx.open_table(Self::DEF)?;
         let seq = match table.last()? {
             Some(e) => e.0.value() + 1,
@@ -717,9 +741,7 @@ impl RedbMempool {
 
     fn with_write_tx<F>(&self, op_name: &str, f: F)
     where
-        F: FnOnce(
-            &redb::WriteTransaction,
-        ) -> Result<Vec<MempoolTx>, RedbMempoolError>,
+        F: FnOnce(&redb::WriteTransaction) -> Result<Vec<MempoolTx>, RedbMempoolError>,
     {
         let wx = match self.db.begin_write() {
             Ok(wx) => wx,
@@ -924,10 +946,17 @@ impl MempoolStore for RedbMempool {
     fn dump_finalized(&self, cursor: u64, limit: usize) -> MempoolPage {
         let rx = match self.db.begin_read() {
             Ok(rx) => rx,
-            Err(_) => return MempoolPage { items: vec![], next_cursor: None },
+            Err(_) => {
+                return MempoolPage {
+                    items: vec![],
+                    next_cursor: None,
+                }
+            }
         };
-        FinalizedTable::paginate(&rx, cursor, limit)
-            .unwrap_or(MempoolPage { items: vec![], next_cursor: None })
+        FinalizedTable::paginate(&rx, cursor, limit).unwrap_or(MempoolPage {
+            items: vec![],
+            next_cursor: None,
+        })
     }
 
     fn subscribe(&self) -> Self::Stream {
@@ -1017,7 +1046,10 @@ mod tests {
         store.mark_inflight(&[hash]);
 
         assert!(!store.has_pending());
-        assert!(matches!(store.check_status(&hash).stage, MempoolTxStage::Propagated));
+        assert!(matches!(
+            store.check_status(&hash).stage,
+            MempoolTxStage::Propagated
+        ));
         assert!(store.find_inflight(&hash).is_some());
     }
 
@@ -1031,7 +1063,10 @@ mod tests {
         store.mark_inflight(&[hash]);
         store.mark_acknowledged(&[hash]);
 
-        assert!(matches!(store.check_status(&hash).stage, MempoolTxStage::Acknowledged));
+        assert!(matches!(
+            store.check_status(&hash).stage,
+            MempoolTxStage::Acknowledged
+        ));
         // find_inflight now returns any inflight sub-stage (Propagated, Acknowledged, Confirmed)
         assert!(store.find_inflight(&hash).is_some());
     }
@@ -1047,7 +1082,10 @@ mod tests {
         store.mark_acknowledged(&[hash]);
         store.confirm(&test_point(), &[hash], &[]);
 
-        assert!(matches!(store.check_status(&hash).stage, MempoolTxStage::Confirmed));
+        assert!(matches!(
+            store.check_status(&hash).stage,
+            MempoolTxStage::Confirmed
+        ));
     }
 
     #[test]
@@ -1062,7 +1100,10 @@ mod tests {
         store.confirm(&test_point(), &[hash], &[]);
         store.confirm(&test_point_2(), &[], &[hash]);
 
-        assert!(matches!(store.check_status(&hash).stage, MempoolTxStage::Pending));
+        assert!(matches!(
+            store.check_status(&hash).stage,
+            MempoolTxStage::Pending
+        ));
         assert!(store.has_pending());
         let peeked = store.peek_pending(10);
         assert_eq!(peeked.len(), 1);
@@ -1082,7 +1123,10 @@ mod tests {
         store.confirm(&test_point_2(), &[hash], &[]);
         store.finalize(2);
 
-        assert!(matches!(store.check_status(&hash).stage, MempoolTxStage::Unknown));
+        assert!(matches!(
+            store.check_status(&hash).stage,
+            MempoolTxStage::Unknown
+        ));
     }
 
     #[test]
@@ -1097,7 +1141,10 @@ mod tests {
         store.confirm(&test_point(), &[hash], &[]);
         store.finalize(2);
 
-        assert!(matches!(store.check_status(&hash).stage, MempoolTxStage::Confirmed));
+        assert!(matches!(
+            store.check_status(&hash).stage,
+            MempoolTxStage::Confirmed
+        ));
     }
 
     #[test]
@@ -1105,7 +1152,10 @@ mod tests {
         let store = test_store();
         let hash = test_hash(99);
 
-        assert!(matches!(store.check_status(&hash).stage, MempoolTxStage::Unknown));
+        assert!(matches!(
+            store.check_status(&hash).stage,
+            MempoolTxStage::Unknown
+        ));
     }
 
     #[test]
@@ -1197,7 +1247,10 @@ mod tests {
         for entry in &page.items {
             assert_eq!(entry.confirmations, 2);
             assert!(entry.confirmed_at.is_some());
-            assert!(!entry.payload.1.is_empty(), "finalized entry should include payload");
+            assert!(
+                !entry.payload.1.is_empty(),
+                "finalized entry should include payload"
+            );
         }
 
         // Read with limit
@@ -1227,20 +1280,32 @@ mod tests {
         // All three start as Propagated
         let listing = store.peek_inflight(usize::MAX);
         assert_eq!(listing.len(), 3);
-        assert!(listing.iter().all(|tx| tx.stage == MempoolTxStage::Propagated));
+        assert!(listing
+            .iter()
+            .all(|tx| tx.stage == MempoolTxStage::Propagated));
 
         // Acknowledge h2
         store.mark_acknowledged(&[h2]);
         let listing = store.peek_inflight(usize::MAX);
         assert_eq!(listing.len(), 3);
-        let h2_stage = listing.iter().find(|tx| tx.hash == h2).unwrap().stage.clone();
+        let h2_stage = listing
+            .iter()
+            .find(|tx| tx.hash == h2)
+            .unwrap()
+            .stage
+            .clone();
         assert_eq!(h2_stage, MempoolTxStage::Acknowledged);
 
         // Confirm h2
         store.confirm(&test_point(), &[h2], &[]);
         let listing = store.peek_inflight(usize::MAX);
         assert_eq!(listing.len(), 3);
-        let h2_stage = listing.iter().find(|tx| tx.hash == h2).unwrap().stage.clone();
+        let h2_stage = listing
+            .iter()
+            .find(|tx| tx.hash == h2)
+            .unwrap()
+            .stage
+            .clone();
         assert_eq!(h2_stage, MempoolTxStage::Confirmed);
 
         // Finalize h2 — should drop from listing

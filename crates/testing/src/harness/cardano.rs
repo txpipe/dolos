@@ -254,15 +254,13 @@ impl LedgerHarness {
 
             // Feed blocks and process work units one at a time for callback
             for block in raw_blocks {
-                {
-                    let mut chain = self.domain.write_chain();
-                    if !chain.can_receive_block()
-                        && self.drain_with_callback(&mut on_work)?
-                    {
-                        return Ok(());
-                    }
-                    chain.receive_block(block)?;
+                // Check capacity under a short-lived lock, then drop before
+                // calling drain_with_callback which re-acquires the same lock.
+                let can_receive = self.domain.write_chain().can_receive_block();
+                if !can_receive && self.drain_with_callback(&mut on_work)? {
+                    return Ok(());
                 }
+                self.domain.write_chain().receive_block(block)?;
                 if self.drain_with_callback(&mut on_work)? {
                     return Ok(());
                 }
