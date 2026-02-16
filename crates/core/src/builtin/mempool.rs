@@ -118,7 +118,7 @@ impl MempoolStore for EphemeralMempool {
         state.pending.iter().take(limit).cloned().collect()
     }
 
-    fn mark_inflight(&self, hashes: &[TxHash]) {
+    fn mark_inflight(&self, hashes: &[TxHash]) -> Result<(), MempoolError> {
         let hash_set: HashSet<_> = hashes.iter().collect();
         let mut state = self.state.write().unwrap();
 
@@ -140,9 +140,10 @@ impl MempoolStore for EphemeralMempool {
         }
 
         self.log_state(&state);
+        Ok(())
     }
 
-    fn mark_acknowledged(&self, hashes: &[TxHash]) {
+    fn mark_acknowledged(&self, hashes: &[TxHash]) -> Result<(), MempoolError> {
         let hash_set: HashSet<_> = hashes.iter().collect();
         let mut state = self.state.write().unwrap();
 
@@ -164,6 +165,7 @@ impl MempoolStore for EphemeralMempool {
         }
 
         self.log_state(&state);
+        Ok(())
     }
 
     fn find_inflight(&self, tx_hash: &TxHash) -> Option<MempoolTx> {
@@ -188,11 +190,11 @@ impl MempoolStore for EphemeralMempool {
             .collect()
     }
 
-    fn confirm(&self, point: &ChainPoint, seen_txs: &[TxHash], unseen_txs: &[TxHash]) {
+    fn confirm(&self, point: &ChainPoint, seen_txs: &[TxHash], unseen_txs: &[TxHash]) -> Result<(), MempoolError> {
         let mut state = self.state.write().unwrap();
 
         if state.acknowledged.is_empty() {
-            return;
+            return Ok(());
         }
 
         let seen_set: HashSet<&TxHash> = seen_txs.iter().collect();
@@ -221,9 +223,11 @@ impl MempoolStore for EphemeralMempool {
                 tx.mark_stale();
             }
         }
+
+        Ok(())
     }
 
-    fn finalize(&self, threshold: u32) {
+    fn finalize(&self, threshold: u32) -> Result<(), MempoolError> {
         let mut state = self.state.write().unwrap();
 
         let to_finalize: Vec<TxHash> = state
@@ -254,6 +258,8 @@ impl MempoolStore for EphemeralMempool {
             let excess = state.finalized_log.len() - MAX_FINALIZED_LOG;
             state.finalized_log.drain(..excess);
         }
+
+        Ok(())
     }
 
     fn check_status(&self, tx_hash: &TxHash) -> TxStatus {

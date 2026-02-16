@@ -1063,14 +1063,14 @@ impl MempoolStore for MempoolBackend {
         }
     }
 
-    fn mark_inflight(&self, hashes: &[TxHash]) {
+    fn mark_inflight(&self, hashes: &[TxHash]) -> Result<(), MempoolError> {
         match self {
             Self::Ephemeral(s) => s.mark_inflight(hashes),
             Self::Redb(s) => s.mark_inflight(hashes),
         }
     }
 
-    fn mark_acknowledged(&self, hashes: &[TxHash]) {
+    fn mark_acknowledged(&self, hashes: &[TxHash]) -> Result<(), MempoolError> {
         match self {
             Self::Ephemeral(s) => s.mark_acknowledged(hashes),
             Self::Redb(s) => s.mark_acknowledged(hashes),
@@ -1091,14 +1091,14 @@ impl MempoolStore for MempoolBackend {
         }
     }
 
-    fn confirm(&self, point: &ChainPoint, seen_txs: &[TxHash], unseen_txs: &[TxHash]) {
+    fn confirm(&self, point: &ChainPoint, seen_txs: &[TxHash], unseen_txs: &[TxHash]) -> Result<(), MempoolError> {
         match self {
             Self::Ephemeral(s) => s.confirm(point, seen_txs, unseen_txs),
             Self::Redb(s) => s.confirm(point, seen_txs, unseen_txs),
         }
     }
 
-    fn finalize(&self, threshold: u32) {
+    fn finalize(&self, threshold: u32) -> Result<(), MempoolError> {
         match self {
             Self::Ephemeral(s) => s.finalize(threshold),
             Self::Redb(s) => s.finalize(threshold),

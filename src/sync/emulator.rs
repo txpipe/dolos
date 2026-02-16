@@ -73,8 +73,8 @@ impl Worker {
         }
 
         let hashes: Vec<TxHash> = txs.iter().map(|tx| tx.hash).collect();
-        self.mempool.mark_inflight(&hashes);
-        self.mempool.mark_acknowledged(&hashes);
+        self.mempool.mark_inflight(&hashes).or_panic()?;
+        self.mempool.mark_acknowledged(&hashes).or_panic()?;
 
         let block = pallas::ledger::primitives::conway::Block {
             header: pallas::ledger::primitives::babbage::Header {

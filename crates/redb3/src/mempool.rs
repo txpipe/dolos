@@ -739,35 +739,19 @@ impl RedbMempool {
         }
     }
 
-    fn with_write_tx<F>(&self, op_name: &str, f: F)
+    fn with_write_tx<F>(&self, f: F) -> Result<(), RedbMempoolError>
     where
         F: FnOnce(&redb::WriteTransaction) -> Result<Vec<MempoolTx>, RedbMempoolError>,
     {
-        let wx = match self.db.begin_write() {
-            Ok(wx) => wx,
-            Err(e) => {
-                warn!(error = %e, "failed to begin write for {}", op_name);
-                return;
-            }
-        };
-
-        let events = match f(&wx) {
-            Ok(events) => events,
-            Err(e) => {
-                let e: MempoolError = e.into();
-                warn!(error = %e, "failed to execute {}", op_name);
-                return;
-            }
-        };
-
-        if let Err(e) = wx.commit() {
-            warn!(error = %e, "failed to commit {}", op_name);
-            return;
-        }
+        let wx = self.db.begin_write()?;
+        let events = f(&wx)?;
+        wx.commit()?;
 
         for tx in events {
             self.notify(tx);
         }
+
+        Ok(())
     }
 
     fn receive_inner(&self, tx: MempoolTx) -> Result<(), RedbMempoolError> {
@@ -807,10 +791,10 @@ impl MempoolStore for RedbMempool {
         PendingTable::peek(&rx, limit).unwrap_or_default()
     }
 
-    fn mark_inflight(&self, hashes: &[TxHash]) {
+    fn mark_inflight(&self, hashes: &[TxHash]) -> Result<(), MempoolError> {
         let hash_set: HashSet<TxHash> = hashes.iter().copied().collect();
 
-        self.with_write_tx("mark_inflight", |wx| {
+        self.with_write_tx(|wx| {
             let drained = PendingTable::drain_by_hashes(wx, &hash_set)?;
             let mut events = Vec::new();
             for (hash, payload) in drained {
@@ -821,11 +805,13 @@ impl MempoolStore for RedbMempool {
                 events.push(tx);
             }
             Ok(events)
-        });
+        })?;
+
+        Ok(())
     }
 
-    fn mark_acknowledged(&self, hashes: &[TxHash]) {
-        self.with_write_tx("mark_acknowledged", |wx| {
+    fn mark_acknowledged(&self, hashes: &[TxHash]) -> Result<(), MempoolError> {
+        self.with_write_tx(|wx| {
             let mut events = Vec::new();
             for hash in hashes {
                 if let Some(mut record) = InflightTable::read(wx, hash)? {
@@ -838,7 +824,9 @@ impl MempoolStore for RedbMempool {
                 }
             }
             Ok(events)
-        });
+        })?;
+
+        Ok(())
     }
 
     fn find_inflight(&self, tx_hash: &TxHash) -> Option<MempoolTx> {
@@ -855,9 +843,14 @@ impl MempoolStore for RedbMempool {
         InflightTable::peek(&rx, limit).unwrap_or_default()
     }
 
-    fn confirm(&self, point: &ChainPoint, seen_txs: &[TxHash], unseen_txs: &[TxHash]) {
+    fn confirm(
+        &self,
+        point: &ChainPoint,
+        seen_txs: &[TxHash],
+        unseen_txs: &[TxHash],
+    ) -> Result<(), MempoolError> {
         let point = point.clone();
-        self.with_write_tx("confirm", |wx| {
+        self.with_write_tx(|wx| {
             let seen_set: HashSet<TxHash> = seen_txs.iter().copied().collect();
             let unseen_set: HashSet<TxHash> = unseen_txs.iter().copied().collect();
             let entries = InflightTable::collect_all(wx)?;
@@ -885,11 +878,13 @@ impl MempoolStore for RedbMempool {
             }
 
             Ok(events)
-        });
+        })?;
+
+        Ok(())
     }
 
-    fn finalize(&self, threshold: u32) {
-        self.with_write_tx("finalize", |wx| {
+    fn finalize(&self, threshold: u32) -> Result<(), MempoolError> {
+        self.with_write_tx(|wx| {
             let entries = InflightTable::collect_all(wx)?;
             let mut events = Vec::new();
 
@@ -906,7 +901,9 @@ impl MempoolStore for RedbMempool {
             }
 
             Ok(events)
-        });
+        })?;
+
+        Ok(())
     }
 
     fn check_status(&self, tx_hash: &TxHash) -> TxStatus {
@@ -1043,7 +1040,7 @@ mod tests {
         let hash = tx.hash;
 
         store.receive(tx).unwrap();
-        store.mark_inflight(&[hash]);
+        store.mark_inflight(&[hash]).unwrap();
 
         assert!(!store.has_pending());
         assert!(matches!(
@@ -1060,8 +1057,8 @@ mod tests {
         let hash = tx.hash;
 
         store.receive(tx).unwrap();
-        store.mark_inflight(&[hash]);
-        store.mark_acknowledged(&[hash]);
+        store.mark_inflight(&[hash]).unwrap();
+        store.mark_acknowledged(&[hash]).unwrap();
 
         assert!(matches!(
             store.check_status(&hash).stage,
@@ -1078,9 +1075,9 @@ mod tests {
         let hash = tx.hash;
 
         store.receive(tx).unwrap();
-        store.mark_inflight(&[hash]);
-        store.mark_acknowledged(&[hash]);
-        store.confirm(&test_point(), &[hash], &[]);
+        store.mark_inflight(&[hash]).unwrap();
+        store.mark_acknowledged(&[hash]).unwrap();
+        store.confirm(&test_point(), &[hash], &[]).unwrap();
 
         assert!(matches!(
             store.check_status(&hash).stage,
@@ -1095,10 +1092,10 @@ mod tests {
         let hash = tx.hash;
 
         store.receive(tx).unwrap();
-        store.mark_inflight(&[hash]);
-        store.mark_acknowledged(&[hash]);
-        store.confirm(&test_point(), &[hash], &[]);
-        store.confirm(&test_point_2(), &[], &[hash]);
+        store.mark_inflight(&[hash]).unwrap();
+        store.mark_acknowledged(&[hash]).unwrap();
+        store.confirm(&test_point(), &[hash], &[]).unwrap();
+        store.confirm(&test_point_2(), &[], &[hash]).unwrap();
 
         assert!(matches!(
             store.check_status(&hash).stage,
@@ -1117,11 +1114,11 @@ mod tests {
         let hash = tx.hash;
 
         store.receive(tx).unwrap();
-        store.mark_inflight(&[hash]);
-        store.mark_acknowledged(&[hash]);
-        store.confirm(&test_point(), &[hash], &[]);
-        store.confirm(&test_point_2(), &[hash], &[]);
-        store.finalize(2);
+        store.mark_inflight(&[hash]).unwrap();
+        store.mark_acknowledged(&[hash]).unwrap();
+        store.confirm(&test_point(), &[hash], &[]).unwrap();
+        store.confirm(&test_point_2(), &[hash], &[]).unwrap();
+        store.finalize(2).unwrap();
 
         assert!(matches!(
             store.check_status(&hash).stage,
@@ -1136,10 +1133,10 @@ mod tests {
         let hash = tx.hash;
 
         store.receive(tx).unwrap();
-        store.mark_inflight(&[hash]);
-        store.mark_acknowledged(&[hash]);
-        store.confirm(&test_point(), &[hash], &[]);
-        store.finalize(2);
+        store.mark_inflight(&[hash]).unwrap();
+        store.mark_acknowledged(&[hash]).unwrap();
+        store.confirm(&test_point(), &[hash], &[]).unwrap();
+        store.finalize(2).unwrap();
 
         assert!(matches!(
             store.check_status(&hash).stage,
@@ -1179,21 +1176,21 @@ mod tests {
         assert!(status.confirmed_at.is_none());
 
         // Propagated
-        store.mark_inflight(&[hash]);
+        store.mark_inflight(&[hash]).unwrap();
         let status = store.check_status(&hash);
         assert!(matches!(status.stage, MempoolTxStage::Propagated));
         assert_eq!(status.confirmations, 0);
         assert!(status.confirmed_at.is_none());
 
         // Acknowledged
-        store.mark_acknowledged(&[hash]);
+        store.mark_acknowledged(&[hash]).unwrap();
         let status = store.check_status(&hash);
         assert!(matches!(status.stage, MempoolTxStage::Acknowledged));
         assert_eq!(status.confirmations, 0);
         assert!(status.confirmed_at.is_none());
 
         // Confirmed (1st confirmation)
-        store.confirm(&point, &[hash], &[]);
+        store.confirm(&point, &[hash], &[]).unwrap();
         let status = store.check_status(&hash);
         assert!(matches!(status.stage, MempoolTxStage::Confirmed));
         assert_eq!(status.confirmations, 1);
@@ -1201,14 +1198,14 @@ mod tests {
         assert_eq!(status.confirmed_at.as_ref().unwrap().slot(), point.slot());
 
         // Confirmed (2nd confirmation — confirmed_at stays the same)
-        store.confirm(&test_point_2(), &[hash], &[]);
+        store.confirm(&test_point_2(), &[hash], &[]).unwrap();
         let status = store.check_status(&hash);
         assert!(matches!(status.stage, MempoolTxStage::Confirmed));
         assert_eq!(status.confirmations, 2);
         assert_eq!(status.confirmed_at.as_ref().unwrap().slot(), point.slot());
 
         // Finalized — no longer tracked by check_status, returns Unknown
-        store.finalize(2);
+        store.finalize(2).unwrap();
         let status = store.check_status(&hash);
         assert!(matches!(status.stage, MempoolTxStage::Unknown));
         assert_eq!(status.confirmations, 0);
@@ -1233,12 +1230,12 @@ mod tests {
             let tx = test_tx(n);
             let hash = tx.hash;
             store.receive(tx).unwrap();
-            store.mark_inflight(&[hash]);
-            store.mark_acknowledged(&[hash]);
-            store.confirm(&point, &[hash], &[]);
-            store.confirm(&test_point_2(), &[hash], &[]);
+            store.mark_inflight(&[hash]).unwrap();
+            store.mark_acknowledged(&[hash]).unwrap();
+            store.confirm(&point, &[hash], &[]).unwrap();
+            store.confirm(&test_point_2(), &[hash], &[]).unwrap();
         }
-        store.finalize(2);
+        store.finalize(2).unwrap();
 
         // Read all
         let page = store.dump_finalized(0, 50);
@@ -1275,7 +1272,7 @@ mod tests {
         store.receive(test_tx(2)).unwrap();
         store.receive(test_tx(3)).unwrap();
 
-        store.mark_inflight(&[h1, h2, h3]);
+        store.mark_inflight(&[h1, h2, h3]).unwrap();
 
         // All three start as Propagated
         let listing = store.peek_inflight(usize::MAX);
@@ -1285,7 +1282,7 @@ mod tests {
             .all(|tx| tx.stage == MempoolTxStage::Propagated));
 
         // Acknowledge h2
-        store.mark_acknowledged(&[h2]);
+        store.mark_acknowledged(&[h2]).unwrap();
         let listing = store.peek_inflight(usize::MAX);
         assert_eq!(listing.len(), 3);
         let h2_stage = listing
@@ -1297,7 +1294,7 @@ mod tests {
         assert_eq!(h2_stage, MempoolTxStage::Acknowledged);
 
         // Confirm h2
-        store.confirm(&test_point(), &[h2], &[]);
+        store.confirm(&test_point(), &[h2], &[]).unwrap();
         let listing = store.peek_inflight(usize::MAX);
         assert_eq!(listing.len(), 3);
         let h2_stage = listing
@@ -1309,8 +1306,8 @@ mod tests {
         assert_eq!(h2_stage, MempoolTxStage::Confirmed);
 
         // Finalize h2 — should drop from listing
-        store.confirm(&test_point_2(), &[h2], &[]);
-        store.finalize(2);
+        store.confirm(&test_point_2(), &[h2], &[]).unwrap();
+        store.finalize(2).unwrap();
         let listing = store.peek_inflight(usize::MAX);
         assert_eq!(listing.len(), 2);
         assert!(!listing.iter().any(|tx| tx.hash == h2));

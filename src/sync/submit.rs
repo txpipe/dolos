@@ -51,7 +51,7 @@ impl Worker {
         debug!(n = txs.len(), "propagating tx ids");
 
         let hashes: Vec<TxHash> = txs.iter().map(|tx| tx.hash).collect();
-        mempool.mark_inflight(&hashes);
+        mempool.mark_inflight(&hashes).or_restart()?;
         self.propagated_hashes.extend(hashes);
 
         let payload = txs.iter().map(to_n2n_reply).collect_vec();
@@ -67,14 +67,19 @@ impl Worker {
     }
 
     /// Drain the first `count` propagated hashes and mark them as acknowledged.
-    fn acknowledge_propagated(&mut self, mempool: &MempoolBackend, count: usize) {
+    fn acknowledge_propagated(
+        &mut self,
+        mempool: &MempoolBackend,
+        count: usize,
+    ) -> Result<(), WorkerError> {
         let drain_count = count.min(self.propagated_hashes.len());
         if drain_count == 0 {
-            return;
+            return Ok(());
         }
 
         let acked: Vec<TxHash> = self.propagated_hashes.drain(..drain_count).collect();
-        mempool.mark_acknowledged(&acked);
+        mempool.mark_acknowledged(&acked).or_restart()?;
+        Ok(())
     }
 
     async fn schedule_unfulfilled(
@@ -170,7 +175,7 @@ impl gasket::framework::Worker<Stage> for Worker {
 
                 info!(req, ack, "blocking tx ids request");
 
-                self.acknowledge_propagated(&stage.mempool, ack);
+                self.acknowledge_propagated(&stage.mempool, ack)?;
 
                 if stage.mempool.has_pending() {
                     let txs = stage.mempool.peek_pending(req);
@@ -183,7 +188,7 @@ impl gasket::framework::Worker<Stage> for Worker {
             Request::TxIdsNonBlocking(ack, req) => {
                 info!(req, ack, "non-blocking tx ids request");
 
-                self.acknowledge_propagated(&stage.mempool, *ack as usize);
+                self.acknowledge_propagated(&stage.mempool, *ack as usize)?;
 
                 let txs = stage.mempool.peek_pending(*req as usize);
                 self.propagate_txs(&stage.mempool, txs).await?;

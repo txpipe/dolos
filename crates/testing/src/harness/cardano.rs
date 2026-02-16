@@ -61,9 +61,13 @@ impl MempoolStore for Mempool {
         vec![]
     }
 
-    fn mark_inflight(&self, _hashes: &[TxHash]) {}
+    fn mark_inflight(&self, _hashes: &[TxHash]) -> Result<(), MempoolError> {
+        Ok(())
+    }
 
-    fn mark_acknowledged(&self, _hashes: &[TxHash]) {}
+    fn mark_acknowledged(&self, _hashes: &[TxHash]) -> Result<(), MempoolError> {
+        Ok(())
+    }
 
     fn find_inflight(&self, _tx_hash: &TxHash) -> Option<MempoolTx> {
         None
@@ -73,9 +77,13 @@ impl MempoolStore for Mempool {
         vec![]
     }
 
-    fn confirm(&self, _point: &ChainPoint, _seen_txs: &[TxHash], _unseen_txs: &[TxHash]) {}
+    fn confirm(&self, _point: &ChainPoint, _seen_txs: &[TxHash], _unseen_txs: &[TxHash]) -> Result<(), MempoolError> {
+        Ok(())
+    }
 
-    fn finalize(&self, _threshold: u32) {}
+    fn finalize(&self, _threshold: u32) -> Result<(), MempoolError> {
+        Ok(())
+    }
 
     fn check_status(&self, _tx_hash: &TxHash) -> TxStatus {
         TxStatus {

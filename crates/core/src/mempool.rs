@@ -182,13 +182,13 @@ pub trait MempoolStore: Clone + Send + Sync + 'static {
     ///
     /// Implementors must remove them from the pending queue and begin tracking
     /// them as inflight. Hashes not found in pending are silently ignored.
-    fn mark_inflight(&self, hashes: &[TxHash]);
+    fn mark_inflight(&self, hashes: &[TxHash]) -> Result<(), MempoolError>;
 
     /// Transitions `Propagated` transactions to `Acknowledged`.
     ///
     /// Only transitions transactions currently in `Propagated`; other stages are
     /// silently skipped.
-    fn mark_acknowledged(&self, hashes: &[TxHash]);
+    fn mark_acknowledged(&self, hashes: &[TxHash]) -> Result<(), MempoolError>;
 
     /// Returns the transaction if it is currently in any inflight sub-stage
     /// (Propagated, Acknowledged, or Confirmed), `None` otherwise.
@@ -209,7 +209,12 @@ pub trait MempoolStore: Clone + Send + Sync + 'static {
     ///
     /// `point` is the block's chain point. On first confirmation, it is
     /// stored as `confirmed_at`. On rollback (unseen), it is cleared.
-    fn confirm(&self, point: &ChainPoint, seen_txs: &[TxHash], unseen_txs: &[TxHash]);
+    fn confirm(
+        &self,
+        point: &ChainPoint,
+        seen_txs: &[TxHash],
+        unseen_txs: &[TxHash],
+    ) -> Result<(), MempoolError>;
 
     /// Removes transactions whose confirmation count meets `threshold` from
     /// the inflight table and records them as `Finalized`.
@@ -217,7 +222,7 @@ pub trait MempoolStore: Clone + Send + Sync + 'static {
     /// Finalized transactions are no longer returned by
     /// [`check_status`](Self::check_status) but can be listed via
     /// [`dump_finalized`](Self::dump_finalized).
-    fn finalize(&self, threshold: u32);
+    fn finalize(&self, threshold: u32) -> Result<(), MempoolError>;
 
     /// Returns the full status of a transaction including stage,
     /// confirmation count, and the chain point where it was first confirmed.
@@ -457,9 +462,13 @@ mod tests {
             vec![]
         }
 
-        fn mark_inflight(&self, _hashes: &[TxHash]) {}
+        fn mark_inflight(&self, _hashes: &[TxHash]) -> Result<(), MempoolError> {
+            Ok(())
+        }
 
-        fn mark_acknowledged(&self, _hashes: &[TxHash]) {}
+        fn mark_acknowledged(&self, _hashes: &[TxHash]) -> Result<(), MempoolError> {
+            Ok(())
+        }
 
         fn find_inflight(&self, _tx_hash: &TxHash) -> Option<MempoolTx> {
             None
@@ -469,9 +478,13 @@ mod tests {
             vec![]
         }
 
-        fn confirm(&self, _point: &ChainPoint, _seen: &[TxHash], _unseen: &[TxHash]) {}
+        fn confirm(&self, _point: &ChainPoint, _seen: &[TxHash], _unseen: &[TxHash]) -> Result<(), MempoolError> {
+            Ok(())
+        }
 
-        fn finalize(&self, _threshold: u32) {}
+        fn finalize(&self, _threshold: u32) -> Result<(), MempoolError> {
+            Ok(())
+        }
 
         fn check_status(&self, _hash: &TxHash) -> TxStatus {
             TxStatus {

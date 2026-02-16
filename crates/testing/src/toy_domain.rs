@@ -67,9 +67,13 @@ impl dolos_core::MempoolStore for Mempool {
             .unwrap_or_default()
     }
 
-    fn mark_inflight(&self, _hashes: &[TxHash]) {}
+    fn mark_inflight(&self, _hashes: &[TxHash]) -> Result<(), MempoolError> {
+        Ok(())
+    }
 
-    fn mark_acknowledged(&self, _hashes: &[TxHash]) {}
+    fn mark_acknowledged(&self, _hashes: &[TxHash]) -> Result<(), MempoolError> {
+        Ok(())
+    }
 
     fn find_inflight(&self, _tx_hash: &TxHash) -> Option<MempoolTx> {
         None
@@ -79,11 +83,13 @@ impl dolos_core::MempoolStore for Mempool {
         vec![]
     }
 
-    fn confirm(&self, _point: &ChainPoint, _seen_txs: &[TxHash], _unseen_txs: &[TxHash]) {
-        // do nothing for now
+    fn confirm(&self, _point: &ChainPoint, _seen_txs: &[TxHash], _unseen_txs: &[TxHash]) -> Result<(), MempoolError> {
+        Ok(())
     }
 
-    fn finalize(&self, _threshold: u32) {}
+    fn finalize(&self, _threshold: u32) -> Result<(), MempoolError> {
+        Ok(())
+    }
 
     fn check_status(&self, tx_hash: &TxHash) -> TxStatus {
         let stage = if let Ok(pending) = self.pending.read() {
