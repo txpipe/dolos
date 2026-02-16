@@ -487,20 +487,13 @@ impl PendingTable {
         hashes: &HashSet<TxHash>,
     ) -> Result<Vec<(TxHash, EraCbor)>, RedbMempoolError> {
         let mut table = wx.open_table(Self::DEF)?;
-        let mut to_remove = Vec::new();
-        for entry in table.iter()? {
-            let entry = entry?;
-            let key = entry.0.value();
-            if hashes.contains(&key.hash()) {
-                to_remove.push((key.0, key.hash(), entry.1.value().0));
-            }
-        }
-        let mut result = Vec::with_capacity(to_remove.len());
-        for (raw_key, hash, payload) in to_remove {
-            table.remove(DbPendingKey(raw_key))?;
-            result.push((hash, payload));
-        }
-        Ok(result)
+        let extracted = table.extract_if(|key, _value| hashes.contains(&key.hash()))?;
+        extracted
+            .map(|entry| {
+                let (key, value) = entry?;
+                Ok((key.value().hash(), value.value().0))
+            })
+            .collect()
     }
 }
 
