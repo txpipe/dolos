@@ -53,33 +53,65 @@ impl dolos_core::MempoolStore for Mempool {
         Ok(())
     }
 
-    fn apply(&self, _seen_txs: &[TxHash], _unseen_txs: &[TxHash]) {
-        // do nothing for now
+    fn has_pending(&self) -> bool {
+        self.pending
+            .read()
+            .map(|p| !p.is_empty())
+            .unwrap_or(false)
     }
 
-    fn check_stage(&self, tx_hash: &TxHash) -> MempoolTxStage {
-        let pending = self.pending.read();
-        if let Ok(pending) = pending {
+    fn peek_pending(&self, limit: usize) -> Vec<MempoolTx> {
+        self.pending
+            .read()
+            .map(|p| p.iter().take(limit).cloned().collect())
+            .unwrap_or_default()
+    }
+
+    fn mark_inflight(&self, _hashes: &[TxHash]) -> Result<(), MempoolError> {
+        Ok(())
+    }
+
+    fn mark_acknowledged(&self, _hashes: &[TxHash]) -> Result<(), MempoolError> {
+        Ok(())
+    }
+
+    fn find_inflight(&self, _tx_hash: &TxHash) -> Option<MempoolTx> {
+        None
+    }
+
+    fn peek_inflight(&self, _limit: usize) -> Vec<MempoolTx> {
+        vec![]
+    }
+
+    fn confirm(&self, _point: &ChainPoint, _seen_txs: &[TxHash], _unseen_txs: &[TxHash], _finalize_threshold: u32, _drop_threshold: u32) -> Result<(), MempoolError> {
+        Ok(())
+    }
+
+    fn check_status(&self, tx_hash: &TxHash) -> TxStatus {
+        let stage = if let Ok(pending) = self.pending.read() {
             if pending.iter().any(|tx| &tx.hash == tx_hash) {
-                return MempoolTxStage::Pending;
+                MempoolTxStage::Pending
+            } else {
+                MempoolTxStage::Unknown
             }
+        } else {
+            MempoolTxStage::Unknown
+        };
+
+        TxStatus {
+            stage,
+            confirmations: 0,
+            non_confirmations: 0,
+            confirmed_at: None,
         }
-        MempoolTxStage::Unknown
+    }
+
+    fn dump_finalized(&self, _cursor: u64, _limit: usize) -> dolos_core::MempoolPage {
+        dolos_core::MempoolPage { items: vec![], next_cursor: None }
     }
 
     fn subscribe(&self) -> Self::Stream {
         EmptyMempoolStream
-    }
-
-    fn pending(&self) -> Vec<(TxHash, EraCbor)> {
-        if let Ok(pending) = self.pending.read() {
-            return pending
-                .iter()
-                .map(|tx| (tx.hash, tx.payload.clone()))
-                .collect();
-        }
-
-        Vec::new()
     }
 }
 

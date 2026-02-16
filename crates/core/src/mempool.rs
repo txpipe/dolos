@@ -4,19 +4,17 @@ use crate::TagDimension;
 pub use pallas::ledger::validate::phase2::EvalReport;
 
 use futures_core::Stream;
-use itertools::Itertools;
 use std::pin::Pin;
-use std::sync::RwLock;
-use tokio::sync::broadcast;
-use tokio_stream::wrappers::BroadcastStream;
 use tracing::{debug, info, warn};
 
 #[derive(Debug)]
 pub struct MempoolTx {
     pub hash: TxHash,
     pub payload: EraCbor,
-    // TODO: we'll improve this to track number of confirmations in further iterations.
-    pub confirmed: bool,
+    pub stage: MempoolTxStage,
+    pub confirmations: u32,
+    pub non_confirmations: u32,
+    pub confirmed_at: Option<ChainPoint>,
 
     // this might be empty if the tx is cloned
     pub report: Option<EvalReport>,
@@ -35,7 +33,10 @@ impl Clone for MempoolTx {
         Self {
             hash: self.hash,
             payload: self.payload.clone(),
-            confirmed: self.confirmed,
+            stage: self.stage.clone(),
+            confirmations: self.confirmations,
+            non_confirmations: self.non_confirmations,
+            confirmed_at: self.confirmed_at.clone(),
             report: None,
         }
     }
@@ -46,250 +47,203 @@ impl MempoolTx {
         Self {
             hash,
             payload,
-            confirmed: false,
+            stage: MempoolTxStage::Pending,
+            confirmations: 0,
+            non_confirmations: 0,
+            confirmed_at: None,
             report: Some(report),
         }
     }
+
+    pub fn confirm(&mut self, point: &ChainPoint) {
+        self.stage = MempoolTxStage::Confirmed;
+        self.confirmations += 1;
+        self.non_confirmations = 0;
+        if self.confirmed_at.is_none() {
+            self.confirmed_at = Some(point.clone());
+        }
+    }
+
+    pub fn retry(&mut self) {
+        self.stage = MempoolTxStage::Pending;
+        self.confirmations = 0;
+        self.non_confirmations = 0;
+        self.confirmed_at = None;
+    }
+
+    pub fn mark_stale(&mut self) {
+        self.non_confirmations += 1;
+    }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MempoolTxStage {
     Pending,
-    Inflight,
+    Propagated,
     Acknowledged,
     Confirmed,
+    Finalized,
+    Dropped,
     RolledBack,
     Unknown,
 }
 
 #[derive(Clone)]
 pub struct MempoolEvent {
-    pub new_stage: MempoolTxStage,
     pub tx: MempoolTx,
 }
 
-// ---------------------------------------------------------------------------
-// Mempool implementation
-// ---------------------------------------------------------------------------
-
-#[derive(Default)]
-struct MempoolState {
-    pending: Vec<MempoolTx>,
-    inflight: Vec<MempoolTx>,
-    acknowledged: HashMap<TxHash, MempoolTx>,
+pub struct TxStatus {
+    pub stage: MempoolTxStage,
+    pub confirmations: u32,
+    pub non_confirmations: u32,
+    pub confirmed_at: Option<ChainPoint>,
 }
 
-/// A very basic, FIFO, single consumer mempool
-#[derive(Clone)]
-pub struct Mempool {
-    mempool: Arc<RwLock<MempoolState>>,
-    updates: broadcast::Sender<MempoolEvent>,
+pub struct MempoolPage {
+    pub items: Vec<MempoolTx>,
+    pub next_cursor: Option<u64>,
 }
 
-impl Default for Mempool {
-    fn default() -> Self {
-        Self::new()
-    }
+#[derive(Debug, Error)]
+pub enum MempoolError {
+    #[error("internal error: {0}")]
+    Internal(#[from] Box<dyn std::error::Error + Send + Sync>),
+
+    #[error("traverse error: {0}")]
+    TraverseError(#[from] pallas::ledger::traverse::Error),
+
+    #[error("decode error: {0}")]
+    DecodeError(#[from] pallas::codec::minicbor::decode::Error),
+
+    #[error(transparent)]
+    StateError(#[from] StateError),
+
+    #[error(transparent)]
+    IndexError(#[from] IndexError),
+
+    #[error("plutus not supported")]
+    PlutusNotSupported,
+
+    #[error("invalid tx: {0}")]
+    InvalidTx(String),
+
+    #[error("pparams not available")]
+    PParamsNotAvailable,
+
+    #[error("duplicate tx")]
+    DuplicateTx,
 }
 
-impl Mempool {
-    pub fn new() -> Self {
-        let mempool = Arc::new(RwLock::new(MempoolState::default()));
-        let (updates, _) = broadcast::channel(16);
+/// Durable storage for the transaction submission lifecycle.
+///
+/// A `MempoolStore` tracks transactions through a linear state machine with
+/// one rollback edge:
+///
+/// ```text
+///   Pending → Propagated → Acknowledged → Confirmed → Finalized
+///                                             ↓
+///                                          Pending   (rollback via `confirm(unseen)`)
+/// ```
+///
+/// - **Pending** — received but not yet submitted to a peer.
+/// - **Propagated** — sent to a peer, awaiting acknowledgement.
+/// - **Acknowledged** — the peer accepted the transaction.
+/// - **Confirmed** — observed on-chain; confirmation counter tracks depth.
+/// - **Finalized** — enough confirmations accumulated; no longer actively tracked.
+///
+/// The "inflight" umbrella covers all post-pending, pre-finalized stages
+/// (Propagated, Acknowledged, Confirmed).
+///
+/// Implementors must be thread-safe (`Clone + Send + Sync`) and persist state
+/// durably so that a restart does not lose in-progress transactions.
+pub trait MempoolStore: Clone + Send + Sync + 'static {
+    type Stream: futures_core::Stream<Item = Result<MempoolEvent, MempoolError>>
+        + Unpin
+        + Send
+        + Sync;
 
-        Self { mempool, updates }
-    }
+    /// Append a transaction to the pending queue.
+    ///
+    /// Implementors must persist the transaction and emit a `Pending` event
+    /// via [`subscribe`](Self::subscribe). Returns
+    /// [`DuplicateTx`](MempoolError::DuplicateTx) if a transaction with the
+    /// same hash is already pending.
+    fn receive(&self, tx: MempoolTx) -> Result<(), MempoolError>;
 
-    pub fn notify(&self, new_stage: MempoolTxStage, tx: MempoolTx) {
-        if self.updates.send(MempoolEvent { new_stage, tx }).is_err() {
-            debug!("no mempool update receivers");
-        }
-    }
+    /// Returns `true` if there is at least one transaction in the pending queue.
+    fn has_pending(&self) -> bool;
 
-    pub fn request(&self, desired: usize) -> Vec<MempoolTx> {
-        let available = self.pending_total();
-        self.request_exact(std::cmp::min(desired, available))
-    }
+    /// Returns up to `limit` transactions from the pending queue in insertion
+    /// order. Does not remove them.
+    fn peek_pending(&self, limit: usize) -> Vec<MempoolTx>;
 
-    pub fn request_exact(&self, count: usize) -> Vec<MempoolTx> {
-        let mut state = self.mempool.write().unwrap();
+    /// Moves matching transactions from pending to the inflight table
+    /// (initial sub-stage: `Propagated`).
+    ///
+    /// Implementors must remove them from the pending queue and begin tracking
+    /// them as inflight. Hashes not found in pending are silently ignored.
+    fn mark_inflight(&self, hashes: &[TxHash]) -> Result<(), MempoolError>;
 
-        let selected = state.pending.drain(..count).collect_vec();
+    /// Transitions `Propagated` transactions to `Acknowledged`.
+    ///
+    /// Only transitions transactions currently in `Propagated`; other stages are
+    /// silently skipped.
+    fn mark_acknowledged(&self, hashes: &[TxHash]) -> Result<(), MempoolError>;
 
-        for tx in selected.iter() {
-            info!(tx.hash = %tx.hash, "tx inflight");
-            state.inflight.push(tx.clone());
-            self.notify(MempoolTxStage::Inflight, tx.clone());
-        }
+    /// Returns the transaction if it is currently in any inflight sub-stage
+    /// (Propagated, Acknowledged, or Confirmed), `None` otherwise.
+    ///
+    /// Used to retrieve the payload for re-submission checks.
+    fn find_inflight(&self, tx_hash: &TxHash) -> Option<MempoolTx>;
 
-        debug!(
-            pending = state.pending.len(),
-            inflight = state.inflight.len(),
-            acknowledged = state.acknowledged.len(),
-            "mempool state changed"
-        );
+    /// Returns up to `limit` inflight transactions (Propagated, Acknowledged,
+    /// or Confirmed) in arbitrary order. Does not remove them.
+    fn peek_inflight(&self, limit: usize) -> Vec<MempoolTx>;
 
-        selected
-    }
+    /// Called after each chain-sync event.
+    ///
+    /// For `seen_txs`: transitions to `Confirmed` and increments the
+    /// confirmation counter. For `unseen_txs` (rollback): moves the
+    /// transaction back to the pending queue so it can be re-submitted.
+    /// Hashes not currently tracked are silently ignored.
+    ///
+    /// `point` is the block's chain point. On first confirmation, it is
+    /// stored as `confirmed_at`. On rollback (unseen), it is cleared.
+    ///
+    /// After processing seen/unseen, transactions with
+    /// `confirmations >= finalize_threshold` are moved to the finalized log
+    /// as `Finalized`, and transactions with
+    /// `non_confirmations >= drop_threshold` are moved to the finalized log
+    /// as `Dropped`.
+    fn confirm(
+        &self,
+        point: &ChainPoint,
+        seen_txs: &[TxHash],
+        unseen_txs: &[TxHash],
+        finalize_threshold: u32,
+        drop_threshold: u32,
+    ) -> Result<(), MempoolError>;
 
-    pub fn acknowledge(&self, count: usize) {
-        debug!(n = count, "acknowledging txs");
+    /// Returns the full status of a transaction including stage,
+    /// confirmation count, and the chain point where it was first confirmed.
+    fn check_status(&self, tx_hash: &TxHash) -> TxStatus;
 
-        let mut state = self.mempool.write().unwrap();
+    /// Paginate through finalized transactions.
+    ///
+    /// `cursor` is a sequence number assigned at finalization time. Returns a
+    /// [`MempoolPage`] with the next cursor (`None` if exhausted).
+    fn dump_finalized(&self, cursor: u64, limit: usize) -> MempoolPage;
 
-        let count = count.min(state.inflight.len());
-        let selected = state.inflight.drain(..count).collect_vec();
-
-        for tx in selected {
-            info!(tx.hash = %tx.hash, "tx acknowledged");
-            state.acknowledged.insert(tx.hash, tx.clone());
-            self.notify(MempoolTxStage::Acknowledged, tx.clone());
-        }
-
-        debug!(
-            pending = state.pending.len(),
-            inflight = state.inflight.len(),
-            acknowledged = state.acknowledged.len(),
-            "mempool state changed"
-        );
-    }
-
-    pub fn find_inflight(&self, tx_hash: &TxHash) -> Option<MempoolTx> {
-        let state = self.mempool.read().unwrap();
-        state.inflight.iter().find(|x| x.hash.eq(tx_hash)).cloned()
-    }
-
-    pub fn find_pending(&self, tx_hash: &TxHash) -> Option<MempoolTx> {
-        let state = self.mempool.read().unwrap();
-        state.pending.iter().find(|x| x.hash.eq(tx_hash)).cloned()
-    }
-
-    pub fn pending_total(&self) -> usize {
-        let state = self.mempool.read().unwrap();
-        state.pending.len()
-    }
-
-    pub fn mark_ids_propagated(&self, txs: &[MempoolTx]) {
-        for tx in txs {
-            info!(tx.hash = %tx.hash, "tx id propagated");
-        }
-    }
-
-    pub fn mark_bodies_sent(&self, txs: &[MempoolTx]) {
-        for tx in txs {
-            info!(tx.hash = %tx.hash, "tx body propagated");
-        }
-    }
-}
-
-impl MempoolStore for Mempool {
-    type Stream = MempoolStream;
-
-    fn receive(&self, tx: MempoolTx) -> Result<(), MempoolError> {
-        info!(tx.hash = %tx.hash, "tx received");
-
-        let mut state = self.mempool.write().unwrap();
-
-        state.pending.push(tx.clone());
-
-        self.notify(MempoolTxStage::Pending, tx);
-
-        debug!(
-            pending = state.pending.len(),
-            inflight = state.inflight.len(),
-            acknowledged = state.acknowledged.len(),
-            "mempool state changed"
-        );
-
-        Ok(())
-    }
-
-    fn apply(&self, seen_txs: &[TxHash], unseen_txs: &[TxHash]) {
-        let mut state = self.mempool.write().unwrap();
-
-        if state.acknowledged.is_empty() {
-            return;
-        }
-
-        for tx_hash in seen_txs.iter() {
-            if let Some(tx) = state.acknowledged.get_mut(tx_hash) {
-                tx.confirmed = true;
-                self.notify(MempoolTxStage::Confirmed, tx.clone());
-                info!(tx.hash = %tx.hash, "tx confirmed");
-            }
-        }
-
-        for tx_hash in unseen_txs.iter() {
-            if let Some(tx) = state.acknowledged.get_mut(tx_hash) {
-                tx.confirmed = false;
-                self.notify(MempoolTxStage::RolledBack, tx.clone());
-                info!(tx.hash = %tx.hash, "tx rollback");
-            }
-        }
-    }
-
-    fn check_stage(&self, tx_hash: &TxHash) -> MempoolTxStage {
-        let state = self.mempool.read().unwrap();
-
-        if let Some(tx) = state.acknowledged.get(tx_hash) {
-            if tx.confirmed {
-                MempoolTxStage::Confirmed
-            } else {
-                MempoolTxStage::Acknowledged
-            }
-        } else if state.inflight.iter().any(|x| x.hash.eq(tx_hash)) {
-            MempoolTxStage::Inflight
-        } else if state.pending.iter().any(|x| x.hash.eq(tx_hash)) {
-            MempoolTxStage::Pending
-        } else {
-            MempoolTxStage::Unknown
-        }
-    }
-
-    fn subscribe(&self) -> Self::Stream {
-        MempoolStream {
-            inner: BroadcastStream::new(self.updates.subscribe()),
-        }
-    }
-
-    fn pending(&self) -> Vec<(TxHash, EraCbor)> {
-        let state = self.mempool.read().unwrap();
-
-        state
-            .pending
-            .iter()
-            .map(|tx| (tx.hash, tx.payload.clone()))
-            .collect()
-    }
+    /// Returns a stream of lifecycle events.
+    ///
+    /// Implementors should emit an event for every stage transition.
+    fn subscribe(&self) -> Self::Stream;
 }
 
 // ---------------------------------------------------------------------------
 // Streams
 // ---------------------------------------------------------------------------
-
-pub struct MempoolStream {
-    inner: BroadcastStream<MempoolEvent>,
-}
-
-impl Stream for MempoolStream {
-    type Item = Result<MempoolEvent, MempoolError>;
-
-    fn poll_next(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        match Pin::new(&mut self.inner).poll_next(cx) {
-            std::task::Poll::Ready(Some(x)) => match x {
-                Ok(x) => std::task::Poll::Ready(Some(Ok(x))),
-                Err(err) => {
-                    std::task::Poll::Ready(Some(Err(MempoolError::Internal(Box::new(err)))))
-                }
-            },
-            std::task::Poll::Ready(None) => std::task::Poll::Ready(None),
-            std::task::Poll::Pending => std::task::Poll::Pending,
-        }
-    }
-}
 
 pub struct UpdateFilter<M: MempoolStore> {
     inner: M::Stream,
@@ -341,8 +295,9 @@ where
 {
     let mut refs = HashSet::new();
 
-    for (_, era_cbor) in mempool.pending() {
-        let Some(tx) = MultiEraTx::try_from(&era_cbor).ok() else {
+    for mtx in mempool.peek_pending(usize::MAX) {
+        let era_cbor = &mtx.payload;
+        let Some(tx) = MultiEraTx::try_from(era_cbor).ok() else {
             continue;
         };
 
@@ -363,8 +318,9 @@ where
 fn exclude_inflight_stxis<D: Domain>(refs: &mut HashSet<TxoRef>, mempool: &D::Mempool) {
     debug!("excluding inflight stxis");
 
-    for (_, era_cbor) in mempool.pending() {
-        let Some(tx) = MultiEraTx::try_from(&era_cbor).ok() else {
+    for mtx in mempool.peek_pending(usize::MAX) {
+        let era_cbor = &mtx.payload;
+        let Some(tx) = MultiEraTx::try_from(era_cbor).ok() else {
             warn!("invalid inflight tx");
             continue;
         };
@@ -383,8 +339,9 @@ fn exclude_inflight_stxis<D: Domain>(refs: &mut HashSet<TxoRef>, mempool: &D::Me
 fn select_mempool_utxos<D: Domain>(refs: &mut HashSet<TxoRef>, mempool: &D::Mempool) -> UtxoMap {
     let mut map = HashMap::new();
 
-    for (_, era_cbor) in mempool.pending() {
-        let Some(tx) = MultiEraTx::try_from(&era_cbor).ok() else {
+    for mtx in mempool.peek_pending(usize::MAX) {
+        let era_cbor = &mtx.payload;
+        let Some(tx) = MultiEraTx::try_from(era_cbor).ok() else {
             continue;
         };
 
@@ -482,7 +439,6 @@ mod tests {
 
     fn test_event(hash: TxHash) -> MempoolEvent {
         MempoolEvent {
-            new_stage: MempoolTxStage::Pending,
             tx: MempoolTx::new(hash, EraCbor(7, vec![0x80]), vec![]),
         }
     }
@@ -499,18 +455,49 @@ mod tests {
             Ok(())
         }
 
-        fn apply(&self, _seen: &[TxHash], _unseen: &[TxHash]) {}
+        fn has_pending(&self) -> bool {
+            false
+        }
 
-        fn check_stage(&self, _hash: &TxHash) -> MempoolTxStage {
-            MempoolTxStage::Unknown
+        fn peek_pending(&self, _limit: usize) -> Vec<MempoolTx> {
+            vec![]
+        }
+
+        fn mark_inflight(&self, _hashes: &[TxHash]) -> Result<(), MempoolError> {
+            Ok(())
+        }
+
+        fn mark_acknowledged(&self, _hashes: &[TxHash]) -> Result<(), MempoolError> {
+            Ok(())
+        }
+
+        fn find_inflight(&self, _tx_hash: &TxHash) -> Option<MempoolTx> {
+            None
+        }
+
+        fn peek_inflight(&self, _limit: usize) -> Vec<MempoolTx> {
+            vec![]
+        }
+
+        fn confirm(&self, _point: &ChainPoint, _seen: &[TxHash], _unseen: &[TxHash], _finalize_threshold: u32, _drop_threshold: u32) -> Result<(), MempoolError> {
+            Ok(())
+        }
+
+        fn check_status(&self, _hash: &TxHash) -> TxStatus {
+            TxStatus {
+                stage: MempoolTxStage::Unknown,
+                confirmations: 0,
+                non_confirmations: 0,
+                confirmed_at: None,
+            }
+        }
+
+        fn dump_finalized(&self, _cursor: u64, _limit: usize) -> MempoolPage {
+            MempoolPage { items: vec![], next_cursor: None }
         }
 
         fn subscribe(&self) -> Self::Stream {
             ScriptedStream::empty()
-        }
-
-        fn pending(&self) -> Vec<(TxHash, EraCbor)> {
-            vec![]
         }
     }
 

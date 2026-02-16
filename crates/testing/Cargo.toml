@@ -16,4 +16,4 @@ tokio = { workspace = true }
 tokio-stream = { workspace = true }
 futures-core = { workspace = true }
 futures-util = { workspace = true }
-itertools.workspace = true
+itertools = { workspace = true }

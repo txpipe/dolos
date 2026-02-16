@@ -81,6 +81,70 @@ impl<D: Domain + SubmitExt, C: CancelToken> dolos_core::Driver<D, C> for Driver 
             .map_err(|_| ServeError::Internal("failed to register trp.submit".into()))?;
 
         module
+            .register_async_method("trp.checkStatus", |params, context, _| async move {
+                let response = methods::trp_check_status(params, context.clone()).await;
+
+                context.metrics.track_request(
+                    "trp-check-status",
+                    match response.as_ref() {
+                        Ok(_) => 200,
+                        Err(err) => err.code(),
+                    },
+                );
+
+                response
+            })
+            .map_err(|_| ServeError::Internal("failed to register trp.checkStatus".into()))?;
+
+        module
+            .register_async_method("trp.dumpLogs", |params, context, _| async move {
+                let response = methods::trp_dump_logs(params, context.clone()).await;
+
+                context.metrics.track_request(
+                    "trp-dump-logs",
+                    match response.as_ref() {
+                        Ok(_) => 200,
+                        Err(err) => err.code(),
+                    },
+                );
+
+                response
+            })
+            .map_err(|_| ServeError::Internal("failed to register trp.dumpLogs".into()))?;
+
+        module
+            .register_async_method("trp.peekPending", |params, context, _| async move {
+                let response = methods::trp_peek_pending(params, context.clone()).await;
+
+                context.metrics.track_request(
+                    "trp-peek-pending",
+                    match response.as_ref() {
+                        Ok(_) => 200,
+                        Err(err) => err.code(),
+                    },
+                );
+
+                response
+            })
+            .map_err(|_| ServeError::Internal("failed to register trp.peekPending".into()))?;
+
+        module
+            .register_async_method("trp.peekInflight", |params, context, _| async move {
+                let response = methods::trp_peek_inflight(params, context.clone()).await;
+
+                context.metrics.track_request(
+                    "trp-peek-inflight",
+                    match response.as_ref() {
+                        Ok(_) => 200,
+                        Err(err) => err.code(),
+                    },
+                );
+
+                response
+            })
+            .map_err(|_| ServeError::Internal("failed to register trp.peekInflight".into()))?;
+
+        module
             .register_method("health", |_, context, _| methods::health(context))
             .map_err(|_| ServeError::Internal("failed to register health".into()))?;
 

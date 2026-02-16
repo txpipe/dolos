@@ -53,18 +53,49 @@ impl MempoolStore for Mempool {
         Ok(())
     }
 
-    fn apply(&self, _seen_txs: &[TxHash], _unseen_txs: &[TxHash]) {}
+    fn has_pending(&self) -> bool {
+        false
+    }
 
-    fn check_stage(&self, _tx_hash: &TxHash) -> MempoolTxStage {
-        MempoolTxStage::Unknown
+    fn peek_pending(&self, _limit: usize) -> Vec<MempoolTx> {
+        vec![]
+    }
+
+    fn mark_inflight(&self, _hashes: &[TxHash]) -> Result<(), MempoolError> {
+        Ok(())
+    }
+
+    fn mark_acknowledged(&self, _hashes: &[TxHash]) -> Result<(), MempoolError> {
+        Ok(())
+    }
+
+    fn find_inflight(&self, _tx_hash: &TxHash) -> Option<MempoolTx> {
+        None
+    }
+
+    fn peek_inflight(&self, _limit: usize) -> Vec<MempoolTx> {
+        vec![]
+    }
+
+    fn confirm(&self, _point: &ChainPoint, _seen_txs: &[TxHash], _unseen_txs: &[TxHash], _finalize_threshold: u32, _drop_threshold: u32) -> Result<(), MempoolError> {
+        Ok(())
+    }
+
+    fn check_status(&self, _tx_hash: &TxHash) -> TxStatus {
+        TxStatus {
+            stage: MempoolTxStage::Unknown,
+            confirmations: 0,
+            non_confirmations: 0,
+            confirmed_at: None,
+        }
+    }
+
+    fn dump_finalized(&self, _cursor: u64, _limit: usize) -> dolos_core::MempoolPage {
+        dolos_core::MempoolPage { items: vec![], next_cursor: None }
     }
 
     fn subscribe(&self) -> Self::Stream {
         MempoolStream
-    }
-
-    fn pending(&self) -> Vec<(TxHash, EraCbor)> {
-        vec![]
     }
 }
 
@@ -227,15 +258,13 @@ impl LedgerHarness {
 
             // Feed blocks and process work units one at a time for callback
             for block in raw_blocks {
-                {
-                    let mut chain = self.domain.write_chain();
-                    if !chain.can_receive_block()
-                        && self.drain_with_callback(&mut on_work)?
-                    {
-                        return Ok(());
-                    }
-                    chain.receive_block(block)?;
+                // Check capacity under a short-lived lock, then drop before
+                // calling drain_with_callback which re-acquires the same lock.
+                let can_receive = self.domain.write_chain().can_receive_block();
+                if !can_receive && self.drain_with_callback(&mut on_work)? {
+                    return Ok(());
                 }
+                self.domain.write_chain().receive_block(block)?;
                 if self.drain_with_callback(&mut on_work)? {
                     return Ok(());
                 }
