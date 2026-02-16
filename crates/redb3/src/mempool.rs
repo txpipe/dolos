@@ -759,6 +759,9 @@ impl RedbMempool {
         if PendingTable::contains(&wx, &tx.hash)? {
             return Err(MempoolError::DuplicateTx.into());
         }
+        if InflightTable::read(&wx, &tx.hash)?.is_some() {
+            return Err(MempoolError::DuplicateTx.into());
+        }
         PendingTable::insert(&wx, &tx.hash, &tx.payload)?;
         wx.commit()?;
         self.notify(tx);
