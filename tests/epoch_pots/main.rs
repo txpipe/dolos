@@ -1,13 +1,12 @@
 mod compare;
 
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use csv_diff::diff_row::DiffByteRecord;
 use pallas::ledger::addresses::Network;
-use serde::Deserialize;
-
 use compare::{compare_csvs_with_ignore, extract_row_from_csv, has_data, write_fixture};
 
 use dolos_cardano::ewrap::AppliedReward;
@@ -39,99 +38,92 @@ fn fast_fjall_config() -> FjallStateConfig {
     }
 }
 
-macro_rules! epoch_test {
-    ($test_name:ident, $fixture_mod:ident, $network:literal, $epoch:literal, $snapshot:literal) => {
-        #[test]
-        fn $test_name() {
-            init_tracing();
-            let seed_dir = seed_dir_for($network, $epoch);
-            let fixtures_dir = fixtures_dir($network, $epoch);
+fn discover_ground_truths(base: &Path) -> Vec<(String, u64)> {
 
-            let epochs = read_fixture(&fixtures_dir.join("epochs.csv")).unwrap();
-            let pparams = read_fixture(&fixtures_dir.join("pparams.csv")).unwrap();
-            let eras = read_fixture(&fixtures_dir.join("eras.csv")).unwrap();
-            let delegation =
-                read_fixture(&fixtures_dir.join(format!("delegation-{}.csv", $snapshot))).unwrap();
-            let stake =
-                read_fixture(&fixtures_dir.join(format!("stake-{}.csv", $snapshot))).unwrap();
-            let rewards = read_fixture(&fixtures_dir.join("rewards.csv")).unwrap();
-
-            run_epoch_pots_test(
-                $network,
-                $epoch,
-                &seed_dir,
-                &epochs,
-                &pparams,
-                &eras,
-                &delegation,
-                &stake,
-                &rewards,
-            )
-            .unwrap();
-        }
+    let entries = match std::fs::read_dir(base) {
+        Ok(entries) => entries,
+        Err(_) => return Vec::new(),
     };
-}
 
-// ---------------------------------------------------------------------------
-// Minimal xtask config structs (avoid pulling in the full xtask crate)
-// ---------------------------------------------------------------------------
+    let mut results = Vec::new();
 
-#[allow(dead_code)]
-#[derive(Debug, Deserialize)]
-struct XtaskConfig {
-    instances_root: PathBuf,
-    seeds: SeedConfig,
-    snapshots: SnapshotConfig,
-}
+    for entry in entries.flatten() {
+        if !entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+            continue;
+        }
 
-#[derive(Debug, Deserialize)]
-struct SeedConfig {
-    mainnet: Option<PathBuf>,
-    preview: Option<PathBuf>,
-    preprod: Option<PathBuf>,
-}
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
 
-impl SeedConfig {
-    fn get(&self, network: &str) -> Option<&PathBuf> {
-        match network {
-            "mainnet" => self.mainnet.as_ref(),
-            "preview" => self.preview.as_ref(),
-            "preprod" => self.preprod.as_ref(),
-            _ => None,
+        // Split on last '-' to get network and epoch
+        if let Some(pos) = name.rfind('-') {
+            let network = &name[..pos];
+            if let Ok(epoch) = name[pos + 1..].parse::<u64>() {
+                results.push((network.to_string(), epoch));
+            }
         }
     }
+
+    results.sort_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)));
+    results
 }
 
-#[derive(Debug, Deserialize)]
-struct SnapshotConfig {
-    mainnet: PathBuf,
-    preview: PathBuf,
-    preprod: PathBuf,
-}
+// ---------------------------------------------------------------------------
+// Upstream discovery
+// ---------------------------------------------------------------------------
 
-impl SnapshotConfig {
-    fn get(&self, network: &str) -> Option<&PathBuf> {
-        match network {
-            "mainnet" => Some(&self.mainnet),
-            "preview" => Some(&self.preview),
-            "preprod" => Some(&self.preprod),
-            _ => None,
+fn discover_upstreams(base: &Path) -> HashMap<String, Vec<(u64, u64, PathBuf)>> {
+    let entries = match std::fs::read_dir(base) {
+        Ok(entries) => entries,
+        Err(_) => return HashMap::new(),
+    };
+
+    let mut upstreams: HashMap<String, Vec<(u64, u64, PathBuf)>> = HashMap::new();
+
+    for entry in entries.flatten() {
+        if !entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+            continue;
+        }
+
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+
+        // Parse "{network}-{start}-{end}" by splitting on '-'
+        let parts: Vec<&str> = name.rsplitn(3, '-').collect();
+        if parts.len() == 3 {
+            if let (Ok(end), Ok(start)) = (parts[0].parse::<u64>(), parts[1].parse::<u64>()) {
+                let network = parts[2].to_string();
+                upstreams
+                    .entry(network)
+                    .or_default()
+                    .push((start, end, entry.path()));
+            }
         }
     }
+
+    for ranges in upstreams.values_mut() {
+        ranges.sort_by_key(|(start, end, _)| (*start, *end));
+    }
+
+    upstreams
 }
 
-// ---------------------------------------------------------------------------
-// Config loading
-// ---------------------------------------------------------------------------
+fn upstream_dir_for(
+    upstreams: &HashMap<String, Vec<(u64, u64, PathBuf)>>,
+    network: &str,
+    epoch: u64,
+) -> PathBuf {
+    let ranges = upstreams
+        .get(network)
+        .unwrap_or_else(|| panic!("no upstream directories found for network {network}"));
 
-fn load_xtask_config() -> Result<XtaskConfig> {
-    let repo_root = std::env::var("CARGO_MANIFEST_DIR")
-        .map(PathBuf::from)
-        .or_else(|_| std::env::current_dir().context("detecting repo root"))?;
-    let config_path = repo_root.join("xtask.toml");
-    let raw = std::fs::read_to_string(&config_path)
-        .with_context(|| format!("reading {}", config_path.display()))?;
-    toml::from_str(&raw).context("parsing xtask.toml")
+    ranges
+        .iter()
+        .find(|(start, end, _)| *start <= epoch && epoch <= *end)
+        .map(|(_, _, path)| path.clone())
+        .unwrap_or_else(|| {
+            panic!("no upstream directory covers epoch {epoch} for network {network}")
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -399,10 +391,12 @@ fn dump_eras(state: &impl StateStore, path: &Path) -> Result<()> {
 // Core test runner
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn run_epoch_pots_test(
     network: &str,
     subject_epoch: u64,
     seed_dir: &Path,
+    upstream_dir: &Path,
     performance_epochs: &str,
     gt_pparams: &str,
     gt_eras: &str,
@@ -410,13 +404,6 @@ fn run_epoch_pots_test(
     gt_stake: &str,
     gt_rewards: &str,
 ) -> Result<()> {
-    let config = load_xtask_config()?;
-
-    let snapshot_dir = config
-        .snapshots
-        .get(network)
-        .with_context(|| format!("no snapshot configured for network {network}"))?;
-
     // stop_epoch = subject + 1 so the subject epoch completes fully
     let stop_epoch = subject_epoch + 1;
 
@@ -455,7 +442,7 @@ fn run_epoch_pots_test(
 
     let harness = LedgerHarness::new(Config {
         state_dir: work_state_dir,
-        immutable_dir: snapshot_dir.join("immutable"),
+        immutable_dir: upstream_dir.join("immutable"),
         genesis,
         chain: CardanoConfig {
             stop_epoch: Some(stop_epoch),
@@ -678,9 +665,36 @@ fn run_epoch_pots_test(
 // Test functions
 // ---------------------------------------------------------------------------
 
-const MAINNET_SEED_EPOCHS: &[u64] = &[200, 270, 300, 340];
-const PREVIEW_SEED_EPOCHS: &[u64] = &[500, 700];
-const PREPROD_SEED_EPOCHS: &[u64] = &[200];
+fn discover_seeds(base: &Path) -> HashMap<String, Vec<u64>> {
+    let entries = match std::fs::read_dir(base) {
+        Ok(entries) => entries,
+        Err(_) => return HashMap::new(),
+    };
+
+    let mut seeds: HashMap<String, Vec<u64>> = HashMap::new();
+
+    for entry in entries.flatten() {
+        if !entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+            continue;
+        }
+
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+
+        if let Some(pos) = name.rfind('-') {
+            let network = &name[..pos];
+            if let Ok(epoch) = name[pos + 1..].parse::<u64>() {
+                seeds.entry(network.to_string()).or_default().push(epoch);
+            }
+        }
+    }
+
+    for epochs in seeds.values_mut() {
+        epochs.sort();
+    }
+
+    seeds
+}
 
 fn nearest_lower_seed(available: &[u64], subject_epoch: u64, network: &str) -> u64 {
     available
@@ -691,49 +705,124 @@ fn nearest_lower_seed(available: &[u64], subject_epoch: u64, network: &str) -> u
         .unwrap_or_else(|| panic!("no seed available for {network} <= {subject_epoch}"))
 }
 
-fn seed_dir_for(network: &str, subject_epoch: u64) -> std::path::PathBuf {
-    let base = std::env::var("DOLOS_SEED_DIR").expect("DOLOS_SEED_DIR must be set");
+fn seed_dir_for(
+    base: &Path,
+    seeds: &HashMap<String, Vec<u64>>,
+    network: &str,
+    subject_epoch: u64,
+) -> PathBuf {
+    let available = seeds
+        .get(network)
+        .unwrap_or_else(|| panic!("no seed directories found for network {network}"));
 
-    let seed_epoch = match network {
-        "mainnet" => nearest_lower_seed(MAINNET_SEED_EPOCHS, subject_epoch, network),
-        "preview" => nearest_lower_seed(PREVIEW_SEED_EPOCHS, subject_epoch, network),
-        "preprod" => nearest_lower_seed(PREPROD_SEED_EPOCHS, subject_epoch, network),
-        other => panic!("unsupported network: {other}"),
+    let seed_epoch = nearest_lower_seed(available, subject_epoch, network);
+
+    base.join(format!("{network}-{seed_epoch}"))
+}
+
+fn read_ground_truth(path: &Path) -> Result<String> {
+    std::fs::read_to_string(path).with_context(|| format!("reading ground truth {}", path.display()))
+}
+
+#[test]
+fn epoch_tests() {
+    let fixture_base = match std::env::var("DOLOS_FIXTURE_DIR") {
+        Ok(v) => PathBuf::from(v),
+        Err(_) => {
+            eprintln!("DOLOS_FIXTURE_DIR not set, skipping epoch tests");
+            return;
+        }
     };
+    let gt_base = fixture_base.join("ground-truth");
+    let seed_base = fixture_base.join("seeds");
+    let upstream_base = fixture_base.join("upstream");
 
-    std::path::Path::new(&base).join(format!("{network}-{seed_epoch}"))
+    let ground_truths = discover_ground_truths(&gt_base);
+
+    if ground_truths.is_empty() {
+        eprintln!("no ground-truth directories found, skipping epoch tests");
+        return;
+    }
+
+    init_tracing();
+
+    let seeds = discover_seeds(&seed_base);
+    let upstreams = discover_upstreams(&upstream_base);
+
+    let mut failures = Vec::new();
+
+    for (network, epoch) in &ground_truths {
+        eprintln!("\n=== Running epoch test: {network}-{epoch} ===\n");
+
+        let snapshot = epoch - 2;
+        let seed_dir = seed_dir_for(&seed_base, &seeds, network, *epoch);
+        let upstream_dir = upstream_dir_for(&upstreams, network, *epoch);
+        let gt_dir = gt_base.join(format!("{network}-{epoch}"));
+
+        let epochs = match read_ground_truth(&gt_dir.join("epochs.csv")) {
+            Ok(v) => v,
+            Err(e) => {
+                failures.push(format!("{network}-{epoch}: {e}"));
+                continue;
+            }
+        };
+        let pparams = match read_ground_truth(&gt_dir.join("pparams.csv")) {
+            Ok(v) => v,
+            Err(e) => {
+                failures.push(format!("{network}-{epoch}: {e}"));
+                continue;
+            }
+        };
+        let eras = match read_ground_truth(&gt_dir.join("eras.csv")) {
+            Ok(v) => v,
+            Err(e) => {
+                failures.push(format!("{network}-{epoch}: {e}"));
+                continue;
+            }
+        };
+        let delegation =
+            match read_ground_truth(&gt_dir.join(format!("delegation-{snapshot}.csv"))) {
+                Ok(v) => v,
+                Err(e) => {
+                    failures.push(format!("{network}-{epoch}: {e}"));
+                    continue;
+                }
+            };
+        let stake = match read_ground_truth(&gt_dir.join(format!("stake-{snapshot}.csv"))) {
+            Ok(v) => v,
+            Err(e) => {
+                failures.push(format!("{network}-{epoch}: {e}"));
+                continue;
+            }
+        };
+        let rewards = match read_ground_truth(&gt_dir.join("rewards.csv")) {
+            Ok(v) => v,
+            Err(e) => {
+                failures.push(format!("{network}-{epoch}: {e}"));
+                continue;
+            }
+        };
+
+        if let Err(e) = run_epoch_pots_test(
+            network,
+            *epoch,
+            &seed_dir,
+            &upstream_dir,
+            &epochs,
+            &pparams,
+            &eras,
+            &delegation,
+            &stake,
+            &rewards,
+        ) {
+            failures.push(format!("{network}-{epoch}: {e}"));
+        }
+    }
+
+    if !failures.is_empty() {
+        panic!(
+            "\nEpoch test failures:\n  - {}",
+            failures.join("\n  - ")
+        );
+    }
 }
-
-fn fixtures_dir(network: &str, epoch: u64) -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/epoch_pots/fixtures")
-        .join(format!("{network}-{epoch}"))
-}
-
-fn read_fixture(path: &Path) -> Result<String> {
-    std::fs::read_to_string(path).with_context(|| format!("reading fixture {}", path.display()))
-}
-
-epoch_test!(test_mainnet_242, fixtures_mainnet_242, "mainnet", 242, 240);
-epoch_test!(test_mainnet_243, fixtures_mainnet_243, "mainnet", 243, 241);
-epoch_test!(test_mainnet_245, fixtures_mainnet_245, "mainnet", 245, 243);
-epoch_test!(test_mainnet_250, fixtures_mainnet_250, "mainnet", 250, 248);
-epoch_test!(test_mainnet_278, fixtures_mainnet_278, "mainnet", 278, 276);
-epoch_test!(test_mainnet_279, fixtures_mainnet_279, "mainnet", 279, 277);
-epoch_test!(test_mainnet_280, fixtures_mainnet_280, "mainnet", 280, 278);
-epoch_test!(test_mainnet_285, fixtures_mainnet_285, "mainnet", 285, 283);
-epoch_test!(test_mainnet_286, fixtures_mainnet_286, "mainnet", 286, 284);
-epoch_test!(test_mainnet_287, fixtures_mainnet_287, "mainnet", 287, 285);
-epoch_test!(test_mainnet_288, fixtures_mainnet_288, "mainnet", 288, 286);
-epoch_test!(test_mainnet_289, fixtures_mainnet_289, "mainnet", 289, 287);
-epoch_test!(test_mainnet_290, fixtures_mainnet_290, "mainnet", 290, 288);
-epoch_test!(test_mainnet_300, fixtures_mainnet_300, "mainnet", 300, 298);
-epoch_test!(test_mainnet_325, fixtures_mainnet_325, "mainnet", 325, 323);
-epoch_test!(test_mainnet_326, fixtures_mainnet_326, "mainnet", 326, 324);
-epoch_test!(test_mainnet_350, fixtures_mainnet_350, "mainnet", 350, 348);
-epoch_test!(test_mainnet_352, fixtures_mainnet_352, "mainnet", 352, 350);
-epoch_test!(test_mainnet_375, fixtures_mainnet_375, "mainnet", 375, 373);
-epoch_test!(test_mainnet_400, fixtures_mainnet_400, "mainnet", 400, 398);
-epoch_test!(test_preview_550, fixtures_preview_550, "preview", 550, 548);
-epoch_test!(test_preview_649, fixtures_preview_649, "preview", 649, 647);
-epoch_test!(test_preview_700, fixtures_preview_700, "preview", 700, 698);
