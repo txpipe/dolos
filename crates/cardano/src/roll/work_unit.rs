@@ -8,7 +8,10 @@ use std::sync::Arc;
 use dolos_core::{Domain, DomainError, Genesis, RawBlock, TipEvent, WorkUnit};
 use tracing::{debug, info};
 
-use crate::{roll::batch::WorkBatch, CardanoDelta, CardanoEntity, CardanoLogic};
+use dolos_core::config::CardanoConfig;
+
+use crate::roll::batch::WorkBatch;
+use crate::{roll, Cache, CardanoDelta, CardanoEntity, CardanoLogic};
 
 /// Work unit for processing a batch of blocks ("rolling" the chain forward).
 pub struct RollWorkUnit {
@@ -16,28 +19,34 @@ pub struct RollWorkUnit {
     batch: WorkBatch,
 
     /// Genesis configuration
-    #[allow(dead_code)]
     genesis: Arc<Genesis>,
 
     /// Whether this is live mode (emit tip notifications)
     live_mode: bool,
+
+    /// Chain config needed for delta computation
+    config: CardanoConfig,
+
+    /// Cached era info needed for delta computation
+    cache: Cache,
 }
 
 impl RollWorkUnit {
     /// Create a new roll work unit.
-    pub fn new(batch: WorkBatch, genesis: Arc<Genesis>, live_mode: bool) -> Self {
+    pub(crate) fn new(
+        batch: WorkBatch,
+        genesis: Arc<Genesis>,
+        live_mode: bool,
+        config: CardanoConfig,
+        cache: Cache,
+    ) -> Self {
         Self {
             batch,
             genesis,
             live_mode,
+            config,
+            cache,
         }
-    }
-
-    /// Decode UTxOs using the provided chain logic.
-    /// This must be called after load_utxos and before compute.
-    pub fn decode_utxos(&mut self, chain: &CardanoLogic) -> Result<(), DomainError> {
-        self.batch.decode_utxos(chain)?;
-        Ok(())
     }
 }
 
@@ -49,29 +58,29 @@ where
         "roll"
     }
 
-    fn load(&mut self, _domain: &D) -> Result<(), DomainError> {
-        // UTxO loading and decoding is done in CardanoLogic::pop_work
-        // because it requires access to both domain and chain logic
+    fn load(&mut self, domain: &D) -> Result<(), DomainError> {
         debug!(
             blocks = self.batch.blocks.len(),
-            "roll batch already loaded"
+            "loading roll batch UTxOs"
         );
+
+        self.batch.load_utxos(domain)?;
+        self.batch.decode_utxos()?;
+
+        roll::compute_delta::<D>(
+            &self.config,
+            self.genesis.clone(),
+            &self.cache,
+            domain.state(),
+            &mut self.batch,
+        )?;
+
+        debug!("roll batch loaded and deltas computed");
         Ok(())
     }
 
     fn compute(&mut self) -> Result<(), DomainError> {
-        debug!(
-            first_slot = self.batch.first_slot(),
-            last_slot = self.batch.last_slot(),
-            blocks = self.batch.blocks.len(),
-            "computing roll deltas"
-        );
-
-        // Note: The actual delta computation happens in pop_work in CardanoLogic
-        // because it needs access to the chain logic via the domain.
-        // This is a slight deviation from the pure compute model, but
-        // necessary due to how the visitor pattern works.
-
+        // Deltas are computed during load() since they require state access.
         Ok(())
     }
 

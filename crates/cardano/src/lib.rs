@@ -361,6 +361,7 @@ impl WorkBuffer {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct Cache {
     pub eras: ChainSummary,
     pub stability_window: u64,
@@ -480,35 +481,13 @@ impl dolos_core::ChainLogic for CardanoLogic {
                     genesis::GenesisWorkUnit::new(self.config.clone(), domain.genesis()),
                 )))
             }
-            InternalWorkUnit::Blocks(mut batch) => {
-                // Load and decode UTxOs before computing deltas
-                // This is done here because it needs access to domain and chain
-                if let Err(e) = batch.load_utxos(domain) {
-                    tracing::error!(error = %e, "failed to load UTxOs for roll batch");
-                    return None;
-                }
-
-                if let Err(e) = batch.decode_utxos(self) {
-                    tracing::error!(error = %e, "failed to decode UTxOs for roll batch");
-                    return None;
-                }
-
-                // Compute deltas using the visitor pattern
-                if let Err(e) = roll::compute_delta::<D>(
-                    &self.config,
-                    domain.genesis(),
-                    &self.cache,
-                    domain.state(),
-                    &mut batch,
-                ) {
-                    tracing::error!(error = %e, "failed to compute roll deltas");
-                    return None;
-                }
-
+            InternalWorkUnit::Blocks(batch) => {
                 Some(CardanoWorkUnit::Roll(Box::new(roll::RollWorkUnit::new(
                     batch,
                     domain.genesis(),
                     true, // live mode
+                    self.config.clone(),
+                    self.cache.clone(),
                 ))))
             }
             InternalWorkUnit::Rupd(slot) => Some(CardanoWorkUnit::Rupd(Box::new(

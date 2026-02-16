@@ -9,7 +9,7 @@ use itertools::Itertools as _;
 use rayon::prelude::*;
 
 use dolos_core::{
-    ArchiveStore, ArchiveWriter as _, Block as _, BlockSlot, ChainLogic, ChainPoint, Domain,
+    ArchiveStore, ArchiveWriter as _, Block as _, BlockSlot, ChainError, ChainPoint, Domain,
     DomainError, EntityDelta, EntityMap, IndexDelta, IndexStore as _, IndexWriter as _, LogValue,
     NsKey, RawBlock, RawUtxoMap, StateError, StateStore as _, StateWriter as _, TxoRef,
     UtxoSetDelta, WalStore as _,
@@ -164,7 +164,7 @@ impl WorkBatch {
         Ok(())
     }
 
-    pub fn decode_utxos(&mut self, chain: &CardanoLogic) -> Result<(), DomainError> {
+    pub fn decode_utxos(&mut self) -> Result<(), DomainError> {
         let pairs: Vec<_> = self
             .utxos
             .iter()
@@ -174,8 +174,12 @@ impl WorkBatch {
         let decoded: HashMap<_, _> = pairs
             .par_chunks(100)
             .flatten_iter()
-            .map(|(k, v)| chain.decode_utxo(v.clone()).map(|x| (k.clone(), x)))
-            .collect::<Result<_, _>>()?;
+            .map(|(k, v)| {
+                OwnedMultiEraOutput::decode(v.clone())
+                    .map(|x| (k.clone(), x))
+                    .map_err(ChainError::from)
+            })
+            .collect::<Result<_, ChainError>>()?;
 
         self.utxos_decoded = decoded;
 
