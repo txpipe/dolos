@@ -229,10 +229,10 @@ impl LedgerHarness {
             for block in raw_blocks {
                 {
                     let mut chain = self.domain.write_chain();
-                    if !chain.can_receive_block() {
-                        if self.drain_with_callback(&mut on_work)? {
-                            return Ok(());
-                        }
+                    if !chain.can_receive_block()
+                        && self.drain_with_callback(&mut on_work)?
+                    {
+                        return Ok(());
                     }
                     chain.receive_block(block)?;
                 }

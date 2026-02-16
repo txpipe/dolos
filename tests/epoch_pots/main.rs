@@ -391,6 +391,7 @@ fn dump_eras(state: &impl StateStore, path: &Path) -> Result<()> {
 // Core test runner
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn run_epoch_pots_test(
     network: &str,
     subject_epoch: u64,
