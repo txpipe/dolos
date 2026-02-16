@@ -83,6 +83,7 @@ pub enum MempoolTxStage {
     Acknowledged,
     Confirmed,
     Finalized,
+    Dropped,
     RolledBack,
     Unknown,
 }
@@ -209,20 +210,20 @@ pub trait MempoolStore: Clone + Send + Sync + 'static {
     ///
     /// `point` is the block's chain point. On first confirmation, it is
     /// stored as `confirmed_at`. On rollback (unseen), it is cleared.
+    ///
+    /// After processing seen/unseen, transactions with
+    /// `confirmations >= finalize_threshold` are moved to the finalized log
+    /// as `Finalized`, and transactions with
+    /// `non_confirmations >= drop_threshold` are moved to the finalized log
+    /// as `Dropped`.
     fn confirm(
         &self,
         point: &ChainPoint,
         seen_txs: &[TxHash],
         unseen_txs: &[TxHash],
+        finalize_threshold: u32,
+        drop_threshold: u32,
     ) -> Result<(), MempoolError>;
-
-    /// Removes transactions whose confirmation count meets `threshold` from
-    /// the inflight table and records them as `Finalized`.
-    ///
-    /// Finalized transactions are no longer returned by
-    /// [`check_status`](Self::check_status) but can be listed via
-    /// [`dump_finalized`](Self::dump_finalized).
-    fn finalize(&self, threshold: u32) -> Result<(), MempoolError>;
 
     /// Returns the full status of a transaction including stage,
     /// confirmation count, and the chain point where it was first confirmed.
@@ -478,11 +479,7 @@ mod tests {
             vec![]
         }
 
-        fn confirm(&self, _point: &ChainPoint, _seen: &[TxHash], _unseen: &[TxHash]) -> Result<(), MempoolError> {
-            Ok(())
-        }
-
-        fn finalize(&self, _threshold: u32) -> Result<(), MempoolError> {
+        fn confirm(&self, _point: &ChainPoint, _seen: &[TxHash], _unseen: &[TxHash], _finalize_threshold: u32, _drop_threshold: u32) -> Result<(), MempoolError> {
             Ok(())
         }
 

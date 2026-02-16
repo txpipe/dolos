@@ -291,6 +291,8 @@ struct FinalizedEntry {
     confirmed_at: Option<Vec<u8>>,
     #[n(3)]
     payload: Option<EraCbor>,
+    #[n(4)]
+    dropped: Option<bool>,
 }
 
 impl redb::Value for FinalizedEntry {
@@ -330,10 +332,15 @@ impl FinalizedEntry {
     fn into_mempool_tx(self) -> MempoolTx {
         let mut hash_bytes = [0u8; 32];
         hash_bytes.copy_from_slice(&self.hash);
+        let stage = if self.dropped.unwrap_or(false) {
+            MempoolTxStage::Dropped
+        } else {
+            MempoolTxStage::Finalized
+        };
         MempoolTx {
             hash: TxHash::from(hash_bytes),
             payload: self.payload.unwrap_or(EraCbor(0, vec![])),
-            stage: MempoolTxStage::Finalized,
+            stage,
             confirmations: self.confirmations,
             non_confirmations: 0,
             confirmed_at: self
@@ -385,6 +392,10 @@ impl InflightRecord {
         self.stage == InflightStage::Confirmed && self.confirmations >= threshold
     }
 
+    fn is_droppable(&self, threshold: u32) -> bool {
+        self.non_confirmations >= threshold
+    }
+
     fn to_tx_status(&self) -> TxStatus {
         let stage = match self.stage {
             InflightStage::Propagated => MempoolTxStage::Propagated,
@@ -408,6 +419,17 @@ impl InflightRecord {
             confirmations: self.confirmations,
             confirmed_at: self.confirmed_at,
             payload: Some(self.payload),
+            dropped: Some(false),
+        }
+    }
+
+    fn into_dropped_entry(self, hash: TxHash) -> FinalizedEntry {
+        FinalizedEntry {
+            hash: hash.to_vec(),
+            confirmations: self.confirmations,
+            confirmed_at: self.confirmed_at,
+            payload: Some(self.payload),
+            dropped: Some(true),
         }
     }
 
@@ -851,6 +873,8 @@ impl MempoolStore for RedbMempool {
         point: &ChainPoint,
         seen_txs: &[TxHash],
         unseen_txs: &[TxHash],
+        finalize_threshold: u32,
+        drop_threshold: u32,
     ) -> Result<(), MempoolError> {
         let point = point.clone();
         self.with_write_tx(|wx| {
@@ -862,10 +886,21 @@ impl MempoolStore for RedbMempool {
             for (tx_hash, mut record) in entries {
                 if seen_set.contains(&tx_hash) {
                     record.confirm(&point);
-                    InflightTable::write(wx, &tx_hash, &record)?;
-                    let tx = record.to_mempool_tx(tx_hash);
-                    info!(tx.hash = %tx.hash, "tx confirmed (redb)");
-                    events.push(tx);
+                    // Check if this tx is now finalizable
+                    if record.is_finalizable(finalize_threshold) {
+                        let mut tx = record.to_mempool_tx(tx_hash);
+                        let log_entry = record.into_finalized_entry(tx_hash);
+                        InflightTable::remove(wx, &tx_hash)?;
+                        FinalizedTable::append(wx, log_entry)?;
+                        tx.stage = MempoolTxStage::Finalized;
+                        info!(tx.hash = %tx.hash, "tx finalized (redb)");
+                        events.push(tx);
+                    } else {
+                        InflightTable::write(wx, &tx_hash, &record)?;
+                        let tx = record.to_mempool_tx(tx_hash);
+                        info!(tx.hash = %tx.hash, "tx confirmed (redb)");
+                        events.push(tx);
+                    }
                 } else if unseen_set.contains(&tx_hash) {
                     record.retry();
                     InflightTable::remove(wx, &tx_hash)?;
@@ -876,30 +911,18 @@ impl MempoolStore for RedbMempool {
                     events.push(tx);
                 } else {
                     record.mark_stale();
-                    InflightTable::write(wx, &tx_hash, &record)?;
-                }
-            }
-
-            Ok(events)
-        })?;
-
-        Ok(())
-    }
-
-    fn finalize(&self, threshold: u32) -> Result<(), MempoolError> {
-        self.with_write_tx(|wx| {
-            let entries = InflightTable::collect_all(wx)?;
-            let mut events = Vec::new();
-
-            for (hash, record) in entries {
-                if record.is_finalizable(threshold) {
-                    let mut tx = record.to_mempool_tx(hash);
-                    let log_entry = record.into_finalized_entry(hash);
-                    InflightTable::remove(wx, &hash)?;
-                    FinalizedTable::append(wx, log_entry)?;
-                    tx.stage = MempoolTxStage::Finalized;
-                    info!(tx.hash = %tx.hash, "tx finalized (redb)");
-                    events.push(tx);
+                    // Check if this tx should be dropped
+                    if record.is_droppable(drop_threshold) {
+                        let mut tx = record.to_mempool_tx(tx_hash);
+                        let log_entry = record.into_dropped_entry(tx_hash);
+                        InflightTable::remove(wx, &tx_hash)?;
+                        FinalizedTable::append(wx, log_entry)?;
+                        tx.stage = MempoolTxStage::Dropped;
+                        info!(tx.hash = %tx.hash, "tx dropped (redb)");
+                        events.push(tx);
+                    } else {
+                        InflightTable::write(wx, &tx_hash, &record)?;
+                    }
                 }
             }
 
@@ -1080,7 +1103,7 @@ mod tests {
         store.receive(tx).unwrap();
         store.mark_inflight(&[hash]).unwrap();
         store.mark_acknowledged(&[hash]).unwrap();
-        store.confirm(&test_point(), &[hash], &[]).unwrap();
+        store.confirm(&test_point(), &[hash], &[], u32::MAX, u32::MAX).unwrap();
 
         assert!(matches!(
             store.check_status(&hash).stage,
@@ -1097,8 +1120,8 @@ mod tests {
         store.receive(tx).unwrap();
         store.mark_inflight(&[hash]).unwrap();
         store.mark_acknowledged(&[hash]).unwrap();
-        store.confirm(&test_point(), &[hash], &[]).unwrap();
-        store.confirm(&test_point_2(), &[], &[hash]).unwrap();
+        store.confirm(&test_point(), &[hash], &[], u32::MAX, u32::MAX).unwrap();
+        store.confirm(&test_point_2(), &[], &[hash], u32::MAX, u32::MAX).unwrap();
 
         assert!(matches!(
             store.check_status(&hash).stage,
@@ -1119,9 +1142,9 @@ mod tests {
         store.receive(tx).unwrap();
         store.mark_inflight(&[hash]).unwrap();
         store.mark_acknowledged(&[hash]).unwrap();
-        store.confirm(&test_point(), &[hash], &[]).unwrap();
-        store.confirm(&test_point_2(), &[hash], &[]).unwrap();
-        store.finalize(2).unwrap();
+        store.confirm(&test_point(), &[hash], &[], u32::MAX, u32::MAX).unwrap();
+        // Second confirm with finalize_threshold=2 triggers finalization
+        store.confirm(&test_point_2(), &[hash], &[], 2, u32::MAX).unwrap();
 
         assert!(matches!(
             store.check_status(&hash).stage,
@@ -1138,8 +1161,8 @@ mod tests {
         store.receive(tx).unwrap();
         store.mark_inflight(&[hash]).unwrap();
         store.mark_acknowledged(&[hash]).unwrap();
-        store.confirm(&test_point(), &[hash], &[]).unwrap();
-        store.finalize(2).unwrap();
+        // Only 1 confirmation, finalize_threshold=2 — should stay Confirmed
+        store.confirm(&test_point(), &[hash], &[], 2, u32::MAX).unwrap();
 
         assert!(matches!(
             store.check_status(&hash).stage,
@@ -1193,7 +1216,7 @@ mod tests {
         assert!(status.confirmed_at.is_none());
 
         // Confirmed (1st confirmation)
-        store.confirm(&point, &[hash], &[]).unwrap();
+        store.confirm(&point, &[hash], &[], u32::MAX, u32::MAX).unwrap();
         let status = store.check_status(&hash);
         assert!(matches!(status.stage, MempoolTxStage::Confirmed));
         assert_eq!(status.confirmations, 1);
@@ -1201,14 +1224,14 @@ mod tests {
         assert_eq!(status.confirmed_at.as_ref().unwrap().slot(), point.slot());
 
         // Confirmed (2nd confirmation — confirmed_at stays the same)
-        store.confirm(&test_point_2(), &[hash], &[]).unwrap();
+        store.confirm(&test_point_2(), &[hash], &[], u32::MAX, u32::MAX).unwrap();
         let status = store.check_status(&hash);
         assert!(matches!(status.stage, MempoolTxStage::Confirmed));
         assert_eq!(status.confirmations, 2);
         assert_eq!(status.confirmed_at.as_ref().unwrap().slot(), point.slot());
 
-        // Finalized — no longer tracked by check_status, returns Unknown
-        store.finalize(2).unwrap();
+        // Finalized — trigger via confirm with finalize_threshold=2
+        store.confirm(&test_point(), &[hash], &[], 2, u32::MAX).unwrap();
         let status = store.check_status(&hash);
         assert!(matches!(status.stage, MempoolTxStage::Unknown));
         assert_eq!(status.confirmations, 0);
@@ -1235,10 +1258,10 @@ mod tests {
             store.receive(tx).unwrap();
             store.mark_inflight(&[hash]).unwrap();
             store.mark_acknowledged(&[hash]).unwrap();
-            store.confirm(&point, &[hash], &[]).unwrap();
-            store.confirm(&test_point_2(), &[hash], &[]).unwrap();
+            store.confirm(&point, &[hash], &[], u32::MAX, u32::MAX).unwrap();
+            // Second confirm with finalize_threshold=2 triggers finalization
+            store.confirm(&test_point_2(), &[hash], &[], 2, u32::MAX).unwrap();
         }
-        store.finalize(2).unwrap();
 
         // Read all
         let page = store.dump_finalized(0, 50);
@@ -1297,7 +1320,7 @@ mod tests {
         assert_eq!(h2_stage, MempoolTxStage::Acknowledged);
 
         // Confirm h2
-        store.confirm(&test_point(), &[h2], &[]).unwrap();
+        store.confirm(&test_point(), &[h2], &[], u32::MAX, u32::MAX).unwrap();
         let listing = store.peek_inflight(usize::MAX);
         assert_eq!(listing.len(), 3);
         let h2_stage = listing
@@ -1308,11 +1331,49 @@ mod tests {
             .clone();
         assert_eq!(h2_stage, MempoolTxStage::Confirmed);
 
-        // Finalize h2 — should drop from listing
-        store.confirm(&test_point_2(), &[h2], &[]).unwrap();
-        store.finalize(2).unwrap();
+        // Finalize h2 — second confirm with finalize_threshold=2
+        store.confirm(&test_point_2(), &[h2], &[], 2, u32::MAX).unwrap();
         let listing = store.peek_inflight(usize::MAX);
         assert_eq!(listing.len(), 2);
         assert!(!listing.iter().any(|tx| tx.hash == h2));
+    }
+
+    #[test]
+    fn test_drop_by_non_confirmations() {
+        let store = test_store();
+        let tx = test_tx(1);
+        let hash = tx.hash;
+
+        // Move tx through pending → inflight → acknowledged
+        store.receive(tx).unwrap();
+        store.mark_inflight(&[hash]).unwrap();
+        store.mark_acknowledged(&[hash]).unwrap();
+
+        // Accumulate non-confirmations: tx is neither seen nor unseen
+        let drop_threshold = 3;
+        for _ in 0..(drop_threshold - 1) {
+            store.confirm(&test_point(), &[], &[], u32::MAX, u32::MAX).unwrap();
+        }
+
+        // Still inflight (non_confirmations = 2, threshold = 3)
+        assert!(matches!(
+            store.check_status(&hash).stage,
+            MempoolTxStage::Acknowledged
+        ));
+
+        // One more non-confirmation with drop_threshold=3 triggers drop
+        store.confirm(&test_point(), &[], &[], u32::MAX, drop_threshold).unwrap();
+
+        // Should be gone from inflight
+        assert!(matches!(
+            store.check_status(&hash).stage,
+            MempoolTxStage::Unknown
+        ));
+
+        // Should appear in finalized log as Dropped
+        let page = store.dump_finalized(0, 50);
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].hash, hash);
+        assert_eq!(page.items[0].stage, MempoolTxStage::Dropped);
     }
 }

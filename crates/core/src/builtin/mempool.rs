@@ -190,7 +190,7 @@ impl MempoolStore for EphemeralMempool {
             .collect()
     }
 
-    fn confirm(&self, point: &ChainPoint, seen_txs: &[TxHash], unseen_txs: &[TxHash]) -> Result<(), MempoolError> {
+    fn confirm(&self, point: &ChainPoint, seen_txs: &[TxHash], unseen_txs: &[TxHash], finalize_threshold: u32, drop_threshold: u32) -> Result<(), MempoolError> {
         let mut state = self.state.write().unwrap();
 
         if state.acknowledged.is_empty() {
@@ -206,8 +206,18 @@ impl MempoolStore for EphemeralMempool {
             if seen_set.contains(&tx_hash) {
                 let tx = state.acknowledged.get_mut(&tx_hash).unwrap();
                 tx.confirm(point);
-                self.notify(tx.clone());
-                info!(tx.hash = %tx_hash, "tx confirmed");
+                // Check if finalizable
+                if tx.confirmations >= finalize_threshold {
+                    let mut finalized = tx.clone();
+                    finalized.stage = MempoolTxStage::Finalized;
+                    state.finalized_log.push_back(finalized.clone());
+                    state.acknowledged.remove(&tx_hash);
+                    info!(tx.hash = %tx_hash, "tx finalized");
+                    self.notify(finalized);
+                } else {
+                    self.notify(tx.clone());
+                    info!(tx.hash = %tx_hash, "tx confirmed");
+                }
             } else if unseen_set.contains(&tx_hash) {
                 let mut tx = state.acknowledged.remove(&tx_hash).unwrap();
 
@@ -221,36 +231,15 @@ impl MempoolStore for EphemeralMempool {
             } else {
                 let tx = state.acknowledged.get_mut(&tx_hash).unwrap();
                 tx.mark_stale();
-            }
-        }
-
-        Ok(())
-    }
-
-    fn finalize(&self, threshold: u32) -> Result<(), MempoolError> {
-        let mut state = self.state.write().unwrap();
-
-        let to_finalize: Vec<TxHash> = state
-            .acknowledged
-            .keys()
-            .filter(|hash| {
-                state
-                    .acknowledged
-                    .get(hash)
-                    .is_some_and(|tx| tx.confirmations >= threshold)
-            })
-            .copied()
-            .collect();
-
-        for hash in to_finalize {
-            if let Some(tx) = state.acknowledged.remove(&hash) {
-                let mut finalized = tx.clone();
-                finalized.stage = MempoolTxStage::Finalized;
-                state.finalized_log.push_back(finalized);
-                let mut event_tx = tx.clone();
-                event_tx.stage = MempoolTxStage::Finalized;
-                info!(tx.hash = %tx.hash, "tx finalized");
-                self.notify(event_tx);
+                // Check if droppable
+                if tx.non_confirmations >= drop_threshold {
+                    let mut dropped = tx.clone();
+                    dropped.stage = MempoolTxStage::Dropped;
+                    state.finalized_log.push_back(dropped.clone());
+                    state.acknowledged.remove(&tx_hash);
+                    info!(tx.hash = %tx_hash, "tx dropped");
+                    self.notify(dropped);
+                }
             }
         }
 

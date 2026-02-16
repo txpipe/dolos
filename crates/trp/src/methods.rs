@@ -122,6 +122,7 @@ fn stage_to_string(stage: &dolos_core::MempoolTxStage) -> &'static str {
         dolos_core::MempoolTxStage::Acknowledged => "acknowledged",
         dolos_core::MempoolTxStage::Confirmed => "confirmed",
         dolos_core::MempoolTxStage::Finalized => "finalized",
+        dolos_core::MempoolTxStage::Dropped => "dropped",
         dolos_core::MempoolTxStage::RolledBack => "pending",
         dolos_core::MempoolTxStage::Unknown => "unknown",
     }

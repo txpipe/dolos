@@ -77,11 +77,7 @@ impl MempoolStore for Mempool {
         vec![]
     }
 
-    fn confirm(&self, _point: &ChainPoint, _seen_txs: &[TxHash], _unseen_txs: &[TxHash]) -> Result<(), MempoolError> {
-        Ok(())
-    }
-
-    fn finalize(&self, _threshold: u32) -> Result<(), MempoolError> {
+    fn confirm(&self, _point: &ChainPoint, _seen_txs: &[TxHash], _unseen_txs: &[TxHash], _finalize_threshold: u32, _drop_threshold: u32) -> Result<(), MempoolError> {
         Ok(())
     }
 

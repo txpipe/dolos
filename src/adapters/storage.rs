@@ -1091,17 +1091,10 @@ impl MempoolStore for MempoolBackend {
         }
     }
 
-    fn confirm(&self, point: &ChainPoint, seen_txs: &[TxHash], unseen_txs: &[TxHash]) -> Result<(), MempoolError> {
+    fn confirm(&self, point: &ChainPoint, seen_txs: &[TxHash], unseen_txs: &[TxHash], finalize_threshold: u32, drop_threshold: u32) -> Result<(), MempoolError> {
         match self {
-            Self::Ephemeral(s) => s.confirm(point, seen_txs, unseen_txs),
-            Self::Redb(s) => s.confirm(point, seen_txs, unseen_txs),
-        }
-    }
-
-    fn finalize(&self, threshold: u32) -> Result<(), MempoolError> {
-        match self {
-            Self::Ephemeral(s) => s.finalize(threshold),
-            Self::Redb(s) => s.finalize(threshold),
+            Self::Ephemeral(s) => s.confirm(point, seen_txs, unseen_txs, finalize_threshold, drop_threshold),
+            Self::Redb(s) => s.confirm(point, seen_txs, unseen_txs, finalize_threshold, drop_threshold),
         }
     }
 
