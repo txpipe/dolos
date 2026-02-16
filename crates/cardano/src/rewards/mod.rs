@@ -28,6 +28,7 @@ pub struct MultiPoolReward {
 
 impl MultiPoolReward {
     pub fn merge(mut self, other: Self) -> Self {
+        #[cfg(feature = "strict")]
         assert_eq!(self.is_spendable, other.is_spendable);
 
         self.as_leader.extend(other.as_leader);
@@ -366,24 +367,28 @@ impl<C: RewardsContext> RewardMap<C> {
     }
 
     pub fn applied_effective(&self) -> u64 {
+        #[cfg(feature = "strict")]
         assert!(self.pending.is_empty());
         self.applied_effective
     }
 
     /// Get unspendable rewards that go to treasury.
     pub fn applied_unspendable_to_treasury(&self) -> u64 {
+        #[cfg(feature = "strict")]
         assert!(self.pending.is_empty());
         self.applied_unspendable_to_treasury
     }
 
     /// Get unspendable rewards that return to reserves.
     pub fn applied_unspendable_to_reserves(&self) -> u64 {
+        #[cfg(feature = "strict")]
         assert!(self.pending.is_empty());
         self.applied_unspendable_to_reserves
     }
 
     /// Get total unspendable rewards (both treasury and reserves).
     pub fn applied_unspendable(&self) -> u64 {
+        #[cfg(feature = "strict")]
         assert!(self.pending.is_empty());
         self.applied_unspendable_to_treasury + self.applied_unspendable_to_reserves
     }

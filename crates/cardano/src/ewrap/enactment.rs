@@ -4,8 +4,9 @@ use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use crate::{
+    add,
     ewrap::{BoundaryWork, ProposalId},
-    AccountState, CardanoDelta, CardanoEntity, EpochState, FixedNamespace as _, PParamValue,
+    sub, AccountState, CardanoDelta, CardanoEntity, EpochState, FixedNamespace as _, PParamValue,
     PParamsSet, ProposalAction, ProposalState, CURRENT_EPOCH_KEY,
 };
 
@@ -69,7 +70,7 @@ impl dolos_core::EntityDelta for TreasuryWithdrawal {
         debug!(account=?self.account, amount=%self.amount, "applying treasury withdrawal");
 
         let stake = entity.stake.unwrap_live_mut();
-        stake.rewards_sum += self.amount;
+        stake.rewards_sum = add!(stake.rewards_sum, self.amount);
     }
 
     fn undo(&self, entity: &mut Option<Self::Entity>) {
@@ -78,7 +79,7 @@ impl dolos_core::EntityDelta for TreasuryWithdrawal {
         debug!(account=?self.account, amount=%self.amount, "undoing treasury withdrawal");
 
         let stake = entity.stake.unwrap_live_mut();
-        stake.rewards_sum -= self.amount;
+        stake.rewards_sum = sub!(stake.rewards_sum, self.amount);
     }
 }
 

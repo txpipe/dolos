@@ -3,7 +3,7 @@ use pallas::codec::minicbor::{Decode, Encode};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{floor_int, ratio, sub, Lovelace};
+use crate::{add, floor_int, ratio, sub, Lovelace};
 
 pub type Ratio = num_rational::BigRational;
 pub type PallasRatio = pallas::ledger::primitives::RationalNumber;
@@ -350,12 +350,12 @@ pub fn apply_byron_delta(mut pots: Pots, _: &EpochIncentives, delta: &PotDelta) 
     pots.proposal_deposits = 0;
 
     // utxos pot
-    pots.utxos += delta.produced_utxos;
-    pots.utxos -= delta.consumed_utxos;
+    pots.utxos = add!(pots.utxos, delta.produced_utxos);
+    pots.utxos = sub!(pots.utxos, delta.consumed_utxos);
 
     // we infer the reserves by looking at how the utxo pot changed
-    pots.reserves -= delta.produced_utxos;
-    pots.reserves += delta.consumed_utxos;
+    pots.reserves = sub!(pots.reserves, delta.produced_utxos);
+    pots.reserves = add!(pots.reserves, delta.consumed_utxos);
 
     pots
 }
@@ -377,58 +377,58 @@ pub fn apply_shelley_delta(mut pots: Pots, incentives: &EpochIncentives, delta: 
     // reserves pot
     pots.reserves = sub!(pots.reserves, incentives.total);
     pots.reserves = sub!(pots.reserves, delta.reserve_mirs);
-    pots.reserves += returned_rewards;
+    pots.reserves = add!(pots.reserves, returned_rewards);
 
     // treasury pot
-    pots.treasury += incentives.treasury_tax;
-    pots.treasury += delta.incentives_back_to_treasury();
-    pots.treasury += delta.pool_invalid_refund_count * pots.deposit_per_pool;
-    pots.treasury += delta.proposal_invalid_refunds;
-    pots.treasury += delta.treasury_donations;
+    pots.treasury = add!(pots.treasury, incentives.treasury_tax);
+    pots.treasury = add!(pots.treasury, delta.incentives_back_to_treasury());
+    pots.treasury = add!(pots.treasury, delta.pool_invalid_refund_count * pots.deposit_per_pool);
+    pots.treasury = add!(pots.treasury, delta.proposal_invalid_refunds);
+    pots.treasury = add!(pots.treasury, delta.treasury_donations);
     pots.treasury = sub!(pots.treasury, delta.treasury_mirs);
 
     // fees pot
     pots.fees = sub!(pots.fees, incentives.used_fees);
-    pots.fees += delta.gathered_fees;
+    pots.fees = add!(pots.fees, delta.gathered_fees);
 
     // rewards pot
-    pots.rewards += delta.effective_rewards;
+    pots.rewards = add!(pots.rewards, delta.effective_rewards);
     pots.rewards = sub!(pots.rewards, delta.withdrawals);
-    pots.rewards += delta.pool_refund_count * pots.deposit_per_pool;
-    pots.rewards += delta.proposal_refunds;
-    pots.rewards += delta.reserve_mirs;
-    pots.rewards += delta.treasury_mirs;
+    pots.rewards = add!(pots.rewards, delta.pool_refund_count * pots.deposit_per_pool);
+    pots.rewards = add!(pots.rewards, delta.proposal_refunds);
+    pots.rewards = add!(pots.rewards, delta.reserve_mirs);
+    pots.rewards = add!(pots.rewards, delta.treasury_mirs);
 
     // we don't need to return account deposit refunds to the rewards pot because
     // these refunds are returned directly as utxos in the deregistration
     // transaction.
 
     // utxos pot
-    pots.utxos += delta.produced_utxos;
-    pots.utxos -= delta.consumed_utxos;
+    pots.utxos = add!(pots.utxos, delta.produced_utxos);
+    pots.utxos = sub!(pots.utxos, delta.consumed_utxos);
 
     // AVVM reclamation at Shelley→Allegra boundary: unredeemed AVVM UTxOs
     // are removed from the UTxO set and their value returned to reserves.
-    pots.utxos -= delta.avvm_reclamation;
-    pots.reserves += delta.avvm_reclamation;
+    pots.utxos = sub!(pots.utxos, delta.avvm_reclamation);
+    pots.reserves = add!(pots.reserves, delta.avvm_reclamation);
 
     // pool count
-    pots.pool_count += delta.pool_deposit_count;
-    pots.pool_count -= delta.pool_refund_count;
-    pots.pool_count -= delta.pool_invalid_refund_count;
+    pots.pool_count = add!(pots.pool_count, delta.pool_deposit_count);
+    pots.pool_count = sub!(pots.pool_count, delta.pool_refund_count);
+    pots.pool_count = sub!(pots.pool_count, delta.pool_invalid_refund_count);
 
     // account count
-    pots.account_count += delta.new_accounts;
-    pots.account_count -= delta.removed_accounts;
+    pots.account_count = add!(pots.account_count, delta.new_accounts);
+    pots.account_count = sub!(pots.account_count, delta.removed_accounts);
 
     // for governance, since each cert contains the specific deposit amount, we deal directly with lovelace values.
 
-    pots.drep_deposits += delta.drep_deposits;
-    pots.drep_deposits -= delta.drep_refunds;
+    pots.drep_deposits = add!(pots.drep_deposits, delta.drep_deposits);
+    pots.drep_deposits = sub!(pots.drep_deposits, delta.drep_refunds);
 
-    pots.proposal_deposits += delta.proposal_deposits;
-    pots.proposal_deposits -= delta.proposal_refunds;
-    pots.proposal_deposits -= delta.proposal_invalid_refunds;
+    pots.proposal_deposits = add!(pots.proposal_deposits, delta.proposal_deposits);
+    pots.proposal_deposits = sub!(pots.proposal_deposits, delta.proposal_refunds);
+    pots.proposal_deposits = sub!(pots.proposal_deposits, delta.proposal_invalid_refunds);
 
     pots
 }

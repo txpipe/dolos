@@ -237,25 +237,20 @@ where
 
     /// Schedules the next value to be applied on the next epoch transition
     pub fn schedule(&mut self, current_epoch: Epoch, next: Option<T>) {
+        #[cfg(feature = "strict")]
         assert_eq!(self.epoch, current_epoch);
+        let _ = current_epoch;
 
-        self.schedule_unchecked(next)
-    }
-
-    /// Same as schedule, but without checking that that the epoch matches.
-    pub fn schedule_unchecked(&mut self, next: Option<T>) {
         self.next = next;
     }
 
     /// Mutates the live value for the current epoch without rotating any of
     /// the previous values
     pub fn live_mut(&mut self, epoch: Epoch) -> &mut Option<T> {
+        #[cfg(feature = "strict")]
         assert_eq!(self.epoch, epoch);
-        self.live_mut_unchecked()
-    }
+        let _ = epoch;
 
-    /// Same as mutate, but without checking that that the epoch matches.
-    pub fn live_mut_unchecked(&mut self) -> &mut Option<T> {
         assert!(
             self.next.is_none(),
             "can't change live value when next value is already scheduled"
@@ -266,35 +261,26 @@ where
 
     /// Resets the live value for the current epoch.
     pub fn reset(&mut self, live: Option<T>) {
-        self.reset_unchecked(live);
-    }
-
-    /// Same as reset, but without checking that that the epoch matches.
-    pub fn reset_unchecked(&mut self, live: Option<T>) {
         self.live = live;
     }
 
     /// Replaces the live value for the current epoch without rotating any of
     /// the previous values
     pub fn replace(&mut self, live: T, epoch: Epoch) {
+        #[cfg(feature = "strict")]
         assert_eq!(self.epoch, epoch);
-        self.live = Some(live);
-    }
+        let _ = epoch;
 
-    /// Same as replace, but without checking that that the epoch matches.
-    pub fn replace_unchecked(&mut self, live: T) {
         self.live = Some(live);
     }
 
     /// Transitions into the next epoch by taking a snapshot of the live value
     /// and rotating the previous ones.
     pub fn transition(&mut self, next_epoch: Epoch) {
+        #[cfg(feature = "strict")]
         assert_eq!(self.epoch + 1, next_epoch);
-        self.transition_unchecked();
-    }
+        let _ = next_epoch;
 
-    /// Same as transition, but without checking that that the epoch matches.
-    pub fn transition_unchecked(&mut self) {
         self.go = self.set.clone();
         self.set = self.mark.clone();
         self.mark = self.live.clone();

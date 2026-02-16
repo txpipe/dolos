@@ -27,6 +27,7 @@ use crate::{
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct EpochStatsUpdate {
+    epoch: Epoch,
     block_fees: u64,
 
     // we need to use a delta approach instead of simple increments because the total size of moved
@@ -56,7 +57,7 @@ impl dolos_core::EntityDelta for EpochStatsUpdate {
     fn apply(&mut self, entity: &mut Option<EpochState>) {
         let entity = entity.as_mut().expect("existing epoch");
 
-        let stats = entity.rolling.live_mut_unchecked().get_or_insert_default();
+        let stats = entity.rolling.live_mut(self.epoch).get_or_insert_default();
 
         stats.blocks_minted += 1;
 
@@ -200,11 +201,11 @@ impl BlockVisitor for EpochStateVisitor {
         block: &MultiEraBlock,
         _: &Genesis,
         pparams: &PParamsSet,
-        _: Epoch,
+        epoch: Epoch,
         epoch_start: u64,
         _: u16,
     ) -> Result<(), ChainError> {
-        self.stats_delta = Some(EpochStatsUpdate::default());
+        self.stats_delta = Some(EpochStatsUpdate { epoch, ..Default::default() });
         if let Some(stats) = self.stats_delta.as_mut() {
             let is_overlay = match pparams.ensure_d().ok() {
                 Some(d) => is_overlay_slot(epoch_start, &d, block.header().slot()),

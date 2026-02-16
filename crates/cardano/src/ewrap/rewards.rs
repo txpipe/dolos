@@ -5,10 +5,11 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 use crate::{
+    add,
     ewrap::AppliedReward,
     rupd::{credential_to_key, AccountId},
-    AccountState, CardanoDelta, CardanoEntity, FixedNamespace, LeaderRewardLog, MemberRewardLog,
-    PendingRewardState,
+    sub, AccountState, CardanoDelta, CardanoEntity, FixedNamespace, LeaderRewardLog,
+    MemberRewardLog, PendingRewardState,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,7 +37,7 @@ impl dolos_core::EntityDelta for AssignRewards {
         debug!(account=%self.account, "assigning rewards");
 
         let stake = entity.stake.unwrap_live_mut();
-        stake.rewards_sum += self.reward;
+        stake.rewards_sum = add!(stake.rewards_sum, self.reward);
     }
 
     fn undo(&self, entity: &mut Option<Self::Entity>) {
@@ -48,7 +49,7 @@ impl dolos_core::EntityDelta for AssignRewards {
         debug!(account=%self.account, "undoing rewards");
 
         let stake = entity.stake.unwrap_live_mut();
-        stake.rewards_sum -= self.reward;
+        stake.rewards_sum = sub!(stake.rewards_sum, self.reward);
     }
 }
 
