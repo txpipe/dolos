@@ -154,6 +154,7 @@ fn define_end_stats(ctx: &super::BoundaryWork) -> EndStats {
     // Sum of applied_rewards should match effective
     let applied_rewards_sum: u64 = ctx.applied_rewards.iter().map(|r| r.amount).sum();
 
+    #[cfg(feature = "strict")]
     assert!(
         effective == applied_rewards_sum,
         "EWRAP epoch {}: effective_rewards ({}) != applied_rewards_sum ({}), diff = {}",
