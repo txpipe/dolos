@@ -258,7 +258,7 @@ impl redb::Value for InflightRecord {
 
 /// Entry stored in finalized log table for pagination.
 #[derive(Debug, Encode, Decode)]
-struct FinalizedLogEntry {
+struct FinalizedEntry {
     #[cbor(n(0), with = "minicbor::bytes")]
     hash: Vec<u8>,
     #[n(1)]
@@ -269,7 +269,7 @@ struct FinalizedLogEntry {
     payload: Option<EraCbor>,
 }
 
-impl redb::Value for FinalizedLogEntry {
+impl redb::Value for FinalizedEntry {
     type SelfType<'a> = Self where Self: 'a;
     type AsBytes<'a> = Vec<u8> where Self: 'a;
 
@@ -296,7 +296,7 @@ impl redb::Value for FinalizedLogEntry {
     }
 }
 
-impl FinalizedLogEntry {
+impl FinalizedEntry {
     fn into_mempool_tx(self) -> MempoolTx {
         let mut hash_bytes = [0u8; 32];
         hash_bytes.copy_from_slice(&self.hash);
@@ -371,8 +371,8 @@ impl InflightRecord {
         }
     }
 
-    fn into_finalized_log_entry(self, hash: TxHash) -> FinalizedLogEntry {
-        FinalizedLogEntry {
+    fn into_finalized_entry(self, hash: TxHash) -> FinalizedEntry {
+        FinalizedEntry {
             hash: hash.to_vec(),
             confirmations: self.confirmations,
             confirmed_at: self.confirmed_at,
@@ -582,10 +582,10 @@ impl InflightTable {
     }
 }
 
-struct FinalizedLogTable;
+struct FinalizedTable;
 
-impl FinalizedLogTable {
-    const DEF: TableDefinition<'static, u64, FinalizedLogEntry> =
+impl FinalizedTable {
+    const DEF: TableDefinition<'static, u64, FinalizedEntry> =
         TableDefinition::new("finalized_log");
 
     fn initialize(wx: &redb::WriteTransaction) -> Result<(), RedbMempoolError> {
@@ -595,7 +595,7 @@ impl FinalizedLogTable {
 
     fn append(
         wx: &redb::WriteTransaction,
-        entry: FinalizedLogEntry,
+        entry: FinalizedEntry,
     ) -> Result<(), RedbMempoolError> {
         let mut table = wx.open_table(Self::DEF)?;
         let seq = match table.last()? {
@@ -711,7 +711,7 @@ impl RedbMempool {
         let wx = self.db.begin_write()?;
         PendingTable::initialize(&wx)?;
         InflightTable::initialize(&wx)?;
-        FinalizedLogTable::initialize(&wx)?;
+        FinalizedTable::initialize(&wx)?;
         wx.commit()?;
         Ok(())
     }
@@ -881,9 +881,9 @@ impl MempoolStore for RedbMempool {
             for (hash, record) in entries {
                 if record.is_finalizable(threshold) {
                     let mut tx = record.to_mempool_tx(hash);
-                    let log_entry = record.into_finalized_log_entry(hash);
+                    let log_entry = record.into_finalized_entry(hash);
                     InflightTable::remove(wx, &hash)?;
-                    FinalizedLogTable::append(wx, log_entry)?;
+                    FinalizedTable::append(wx, log_entry)?;
                     tx.stage = MempoolTxStage::Finalized;
                     info!(tx.hash = %tx.hash, "tx finalized (redb)");
                     events.push(tx);
@@ -933,7 +933,7 @@ impl MempoolStore for RedbMempool {
             Ok(rx) => rx,
             Err(_) => return MempoolPage { items: vec![], next_cursor: None },
         };
-        FinalizedLogTable::paginate(&rx, cursor, limit)
+        FinalizedTable::paginate(&rx, cursor, limit)
             .unwrap_or(MempoolPage { items: vec![], next_cursor: None })
     }
 
