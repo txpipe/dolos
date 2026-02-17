@@ -2,6 +2,44 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.0-rc.10] - 2026-02-17
+
+### 🚀 Features
+
+- Introduce OTLP integration with focus on mempool (#891)
+- Introduce comprehensive mempool support (#901)
+- *(cli)* Improve flags for the bootstrap command (#909)
+- *(minibf)* Adjust max scan limit via config (#911)
+
+### 🐛 Bug Fixes
+
+- Unregistered dreps should not figure as expired (#887)
+- *(minibf)* Follow redirects for pool offchain metadata (#888)
+- *(minbf)* Compute Byron tx fees during mapping (#886)
+- *(cardano)* Add strict metadata checks for CIP25 (#882)
+- *(minibf)* Improve handling of tx metadata on AssetState (#881)
+- *(index)* Fine-tune fjall default for expected write throughput (#896)
+- Adapt data export command to new storage structure (#892)
+- *(cardano)* Apply mainnet-specific historical edge-cases (#895)
+- *(cli)* Remove wal from snapshot (#897)
+- Hook mempool confirm in sync pipeline (#904)
+- Avoid excessive mem increase during boundary (#905)
+- *(trp)* Adjust interface to match available mempool data (#910)
+
+### 🚜 Refactor
+
+- Formalize `strict` feature flag (ex `relaxed`) (#902)
+- Move rollback logic to core (#907)
+
+### 🧪 Testing
+
+- Treat epoch tests as best-effort (#903)
+
+### ⚙️ Miscellaneous Tasks
+
+- *(minibf)* Fallback to genesis tx if hash not found (#884)
+- Bump fjall to v3.0.2 (#906)
+
 ## [1.0.0-rc.9] - 2026-02-09
 
 ### 🐛 Bug Fixes
@@ -21,6 +59,10 @@ All notable changes to this project will be documented in this file.
 ### ⚙️ Miscellaneous Tasks
 
 - Remove toy-domain feature flag (#885)
+
+### Release
+
+- V1.0.0-rc.9
 
 ## [1.0.0-rc.8] - 2026-02-07
 
@@ -54,39 +96,6 @@ All notable changes to this project will be documented in this file.
 
 ### 🚀 Features
 
-- *(o7s)* Implement many missing LocalState queries to support cardano cli (#858)
-
-### 🐛 Bug Fixes
-
-- Introduce async query facade to avoid starving the runtime
-- *(minibf)* Improve conformance tests coverage (#847)
-- *(cardano)* Take into account drained rewards in epoch state (#855)
-- *(cardano)* Use mark protocol version for babbage pot calc (#857)
-- *(cardano)* Bootstrap nonce in genesis if chain starts on Shelley
-- Improve conformance tests coverage (#853)
-- *(minibf)* Format special dreps on accounts (#861)
-
-### 🧪 Testing
-
-- Add comprehensive flow for cardano integration tests (#852)
-- Fix nonce ground-truth checks
-- Revisit cardano integration tests to include stake, delegation and rewards (#854)
-- *(cardano)* Remove many false positives from ground-truth checks
-
-### ⚙️ Miscellaneous Tasks
-
-- Fix clippy warnings across the board (#851)
-- Tidy up xtask for shared use (#856)
-- Update pallas v1.0.0-alpha.4 (#859)
-
-### Release
-
-- V1.0.0-rc.7
-
-## [1.0.0-rc.6] - 2026-01-28
-
-### 🚀 Features
-
 - Track and ref-count witness-set datum values (#807)
 - *(grpc)* Upgrade u5c server to 0.18.1 specs (#813)
 - *(redb3)* Use bucketed keys for indexes (#836)
@@ -102,6 +111,7 @@ All notable changes to this project will be documented in this file.
 - Support no-op stores for index and archive
 - *(redb)* Off-load block data to flat files (#848)
 - *(bin)* Force warn+ logs on mithril bootstrap
+- *(o7s)* Implement many missing LocalState queries to support cardano cli (#858)
 
 ### 🐛 Bug Fixes
 
@@ -118,6 +128,13 @@ All notable changes to this project will be documented in this file.
 - *(cli)* Avoid scanning the skipped epoch during archive import
 - *(minibf)* Add max scan limit for paginated endpoints (#849)
 - Reduce level of excesive traces
+- Introduce async query facade to avoid starving the runtime
+- *(minibf)* Improve conformance tests coverage (#847)
+- *(cardano)* Take into account drained rewards in epoch state (#855)
+- *(cardano)* Use mark protocol version for babbage pot calc (#857)
+- *(cardano)* Bootstrap nonce in genesis if chain starts on Shelley
+- Improve conformance tests coverage (#853)
+- *(minibf)* Format special dreps on accounts (#861)
 
 ### 🚜 Refactor
 
@@ -136,15 +153,23 @@ All notable changes to this project will be documented in this file.
 ### 🧪 Testing
 
 - Fix toy domain implementation
+- Add comprehensive flow for cardano integration tests (#852)
+- Fix nonce ground-truth checks
+- Revisit cardano integration tests to include stake, delegation and rewards (#854)
+- *(cardano)* Remove many false positives from ground-truth checks
 
 ### ⚙️ Miscellaneous Tasks
 
 - Fix lint warnings
 - Gitignore opencode files
+- Fix clippy warnings across the board (#851)
+- Tidy up xtask for shared use (#856)
+- Update pallas v1.0.0-alpha.4 (#859)
 
 ### Release
 
 - V1.0.0-rc.6
+- V1.0.0-rc.7
 
 ## [1.0.0-rc.5] - 2026-01-07
 

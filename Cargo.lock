@@ -1191,7 +1191,7 @@ checksum = "fea41bba32d969b513997752735605054bc0dfa92b4c56bf1189f2e174be7a10"
 
 [[package]]
 name = "dolos"
-version = "1.0.0-rc.9"
+version = "1.0.0-rc.10"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1265,7 +1265,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-cardano"
-version = "1.0.0-rc.9"
+version = "1.0.0-rc.10"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1291,7 +1291,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-core"
-version = "1.0.0-rc.9"
+version = "1.0.0-rc.10"
 dependencies = [
  "dolos-testing",
  "futures-core",
@@ -1315,7 +1315,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-fjall"
-version = "1.0.0-rc.9"
+version = "1.0.0-rc.10"
 dependencies = [
  "bincode",
  "dolos-core",
@@ -1330,7 +1330,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-minibf"
-version = "1.0.0-rc.9"
+version = "1.0.0-rc.10"
 dependencies = [
  "axum 0.8.4",
  "base58",
@@ -1363,7 +1363,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-redb3"
-version = "1.0.0-rc.9"
+version = "1.0.0-rc.10"
 dependencies = [
  "bincode",
  "dolos-core",
@@ -1388,7 +1388,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-testing"
-version = "1.0.0-rc.9"
+version = "1.0.0-rc.10"
 dependencies = [
  "bech32 0.9.1",
  "dolos-cardano",
@@ -1407,7 +1407,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-trp"
-version = "1.0.0-rc.9"
+version = "1.0.0-rc.10"
 dependencies = [
  "base64 0.22.1",
  "bincode",
