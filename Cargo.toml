@@ -108,6 +108,7 @@ bech32 = { workspace = true }
 hex = { workspace = true }
 pallas = { workspace = true }
 tracing-subscriber = { version = "0.3.17", features = ["env-filter"] }
+stats_alloc = "0.1"
 
 [[test]]
 name = "smoke"
@@ -116,6 +117,10 @@ path = "tests/external/smoke.rs"
 [[test]]
 name = "epoch_pots"
 path = "tests/epoch_pots/main.rs"
+
+[[test]]
+name = "memory"
+path = "tests/memory.rs"
 
 [features]
 strict = ["dolos-cardano/strict"]

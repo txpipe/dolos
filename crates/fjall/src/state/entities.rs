@@ -60,54 +60,35 @@ pub fn delete_entity(
     batch.remove(keyspace, prefixed_key);
 }
 
-/// Iterator over entities in a key range within a namespace.
+/// Lazy streaming iterator over entities in a key range within a namespace.
 ///
-/// This collects all matching entities upfront since fjall's iterators
-/// have complex lifetime requirements.
-///
-/// Uses the `Readable` trait to support both direct keyspace access and snapshot-based
-/// reads. Snapshot-based reads avoid potential deadlocks with concurrent writes by using
-/// MVCC (Multi-Version Concurrency Control).
+/// Wraps a `fjall::Iter` which is an owned iterator holding a `SnapshotNonce`
+/// and a `Box<dyn DoubleEndedIterator + Send + 'static>`. Items are decoded
+/// one at a time in `next()`, keeping memory usage O(1) regardless of entity count.
 pub struct EntityIterator {
-    /// Collected entities from range scan
-    entities: Vec<(EntityKey, EntityValue)>,
-    /// Current position
-    pos: usize,
+    inner: fjall::Iter,
 }
 
 impl EntityIterator {
-    /// Create a new entity iterator from a keyspace range scan.
+    /// Create a new lazy entity iterator from a keyspace range scan.
     ///
     /// The range is within a single namespace - both start and end keys are
     /// prefixed with the namespace hash before scanning.
     ///
-    /// Uses the `Readable` trait to support snapshot-based iteration.
+    /// This returns immediately without reading any data. Items are fetched
+    /// lazily as `next()` is called.
     pub fn new<R: Readable>(
         readable: &R,
         keyspace: &Keyspace,
         ns: Namespace,
         range: Range<EntityKey>,
     ) -> Result<Self, Error> {
-        let mut entities = Vec::new();
-
-        // Build prefixed range keys
         let start = build_range_start(ns, &range.start);
         let end = build_range_end(ns, &range.end);
 
-        // Using Readable::range() enables snapshot-based iteration
-        for guard in readable.range(keyspace, start.as_slice()..end.as_slice()) {
-            // fjall's Guard::into_inner() gives us both key and value
-            let (key_bytes, value_bytes) = guard.into_inner().map_err(Error::Fjall)?;
+        let inner = readable.range(keyspace, start.as_slice()..end.as_slice());
 
-            // Decode entity key from prefixed key
-            if key_bytes.len() >= PREFIXED_KEY_SIZE {
-                let entity_key = decode_entity_key(&key_bytes);
-                let entity_value = value_bytes.to_vec();
-                entities.push((entity_key, entity_value));
-            }
-        }
-
-        Ok(Self { entities, pos: 0 })
+        Ok(Self { inner })
     }
 }
 
@@ -115,13 +96,20 @@ impl Iterator for EntityIterator {
     type Item = Result<(EntityKey, EntityValue), StateError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.pos < self.entities.len() {
-            let item = self.entities[self.pos].clone();
-            self.pos += 1;
-            Some(Ok(item))
-        } else {
-            None
+        for guard in self.inner.by_ref() {
+            match guard.into_inner() {
+                Ok((key_bytes, value_bytes)) => {
+                    if key_bytes.len() >= PREFIXED_KEY_SIZE {
+                        let entity_key = decode_entity_key(&key_bytes);
+                        let entity_value = value_bytes.to_vec();
+                        return Some(Ok((entity_key, entity_value)));
+                    }
+                    // Skip malformed keys (too short), continue to next
+                }
+                Err(e) => return Some(Err(Error::Fjall(e).into())),
+            }
         }
+        None
     }
 }
 
