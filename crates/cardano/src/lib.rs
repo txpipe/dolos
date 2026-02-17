@@ -6,7 +6,7 @@ use tracing::info;
 pub use pallas;
 
 use dolos_core::{
-    config::CardanoConfig, Block as _, BlockSlot, ChainError, ChainPoint, Domain, DomainError,
+    config::CardanoConfig, BlockSlot, ChainError, ChainPoint, Domain, DomainError,
     EntityKey, EraCbor, Genesis, MempoolAwareUtxoStore, MempoolTx, MempoolUpdate, RawBlock,
     StateStore, TipEvent, WorkUnit,
 };

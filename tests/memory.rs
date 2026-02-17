@@ -33,14 +33,14 @@ fn assert_lazy_iter<S: CoreStateStore>(store: &S) {
         written = batch_end;
     }
 
-    let reg = Region::new(&GLOBAL);
+    let reg = Region::new(GLOBAL);
 
     let iter = store
         .iter_entities(NS, EntityKey::full_range())
         .expect("iter_entities failed");
 
     let stats = reg.change();
-    let heap_delta = stats.bytes_allocated as usize;
+    let heap_delta = stats.bytes_allocated;
 
     let threshold = 10 * 1024 * 1024; // 10 MB
     assert!(
