@@ -9,9 +9,12 @@
 //!
 //! Use this for processing blocks from network peers during live operation.
 
-use tracing::{debug, info, instrument};
+use tracing::{debug, info, instrument, warn};
 
-use crate::{BlockSlot, ChainLogic, Domain, DomainError, RawBlock, WorkUnit};
+use crate::{BlockSlot, ChainLogic, Domain, DomainError, MempoolStore, RawBlock, WorkUnit};
+
+const MEMPOOL_FINALIZE_THRESHOLD: u32 = 6;
+const MEMPOOL_DROP_THRESHOLD: u32 = 2;
 
 /// Extension trait for live block synchronization.
 ///
@@ -97,6 +100,8 @@ pub fn execute_work_unit<D: Domain>(domain: &D, work: &mut D::WorkUnit) -> Resul
     work.commit_indexes(domain)?;
     debug!("index commit complete");
 
+    update_mempool(domain, work);
+
     // Notify tip events to subscribers
     for event in work.tip_events() {
         domain.notify_tip(event);
@@ -104,6 +109,20 @@ pub fn execute_work_unit<D: Domain>(domain: &D, work: &mut D::WorkUnit) -> Resul
 
     info!("work unit completed");
     Ok(())
+}
+
+fn update_mempool<D: Domain>(domain: &D, work: &D::WorkUnit) {
+    for update in work.mempool_updates() {
+        if let Err(e) = domain.mempool().confirm(
+            &update.point,
+            &update.seen_txs,
+            &[],
+            MEMPOOL_FINALIZE_THRESHOLD,
+            MEMPOOL_DROP_THRESHOLD,
+        ) {
+            warn!(?e, point = %update.point, "mempool confirm failed");
+        }
+    }
 }
 
 #[cfg(test)]

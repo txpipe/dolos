@@ -6,9 +6,9 @@ use tracing::info;
 pub use pallas;
 
 use dolos_core::{
-    config::CardanoConfig, BlockSlot, ChainError, ChainPoint, Domain, DomainError,
-    EntityKey, EraCbor, Genesis, MempoolAwareUtxoStore, MempoolTx, RawBlock, StateStore, TipEvent,
-    WorkUnit,
+    config::CardanoConfig, Block as _, BlockSlot, ChainError, ChainPoint, Domain, DomainError,
+    EntityKey, EraCbor, Genesis, MempoolAwareUtxoStore, MempoolTx, MempoolUpdate, RawBlock,
+    StateStore, TipEvent, WorkUnit,
 };
 
 use crate::{
@@ -168,6 +168,13 @@ where
             Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::tip_events(w),
             Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::tip_events(w),
             Self::ForcedStop => Vec::new(),
+        }
+    }
+
+    fn mempool_updates(&self) -> Vec<MempoolUpdate> {
+        match self {
+            Self::Roll(w) => <roll::RollWorkUnit as WorkUnit<D>>::mempool_updates(w),
+            _ => Vec::new(),
         }
     }
 }

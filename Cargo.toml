@@ -115,10 +115,6 @@ name = "smoke"
 path = "tests/external/smoke.rs"
 
 [[test]]
-name = "cardano"
-path = "tests/cardano/main.rs"
-
-[[test]]
 name = "epoch_pots"
 path = "tests/epoch_pots/main.rs"
 

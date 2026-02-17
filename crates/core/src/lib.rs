@@ -9,6 +9,7 @@
 //!    processing.
 
 use pallas::{
+    codec::minicbor::{self, Decode, Encode},
     crypto::hash::{Hash, Hasher},
     ledger::{
         primitives::Epoch,
@@ -46,7 +47,7 @@ pub use bootstrap::BootstrapExt;
 pub use import::ImportExt;
 pub use submit::SubmitExt;
 pub use sync::SyncExt;
-pub use work_unit::WorkUnit;
+pub use work_unit::{MempoolUpdate, WorkUnit};
 
 pub type Era = u16;
 
@@ -84,8 +85,8 @@ pub use point::*;
 pub use state::*;
 pub use wal::*;
 
-#[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
-pub struct EraCbor(pub Era, pub Cbor);
+#[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize, Encode, Decode)]
+pub struct EraCbor(#[n(0)] pub Era, #[cbor(n(1), with = "minicbor::bytes")] pub Cbor);
 
 impl EraCbor {
     pub fn era(&self) -> Era {
@@ -348,48 +349,6 @@ impl Genesis {
             shelley_hash,
         })
     }
-}
-
-#[derive(Debug, Error)]
-pub enum MempoolError {
-    #[error("internal error: {0}")]
-    Internal(#[from] Box<dyn std::error::Error + Send + Sync>),
-
-    #[error("traverse error: {0}")]
-    TraverseError(#[from] pallas::ledger::traverse::Error),
-
-    #[error("decode error: {0}")]
-    DecodeError(#[from] pallas::codec::minicbor::decode::Error),
-
-    #[error(transparent)]
-    StateError(#[from] StateError),
-
-    #[error(transparent)]
-    IndexError(#[from] IndexError),
-
-    #[error("plutus not supported")]
-    PlutusNotSupported,
-
-    #[error("invalid tx: {0}")]
-    InvalidTx(String),
-
-    #[error("pparams not available")]
-    PParamsNotAvailable,
-}
-
-pub trait MempoolStore: Clone + Send + Sync + 'static {
-    type Stream: futures_core::Stream<Item = Result<MempoolEvent, MempoolError>>
-        + Unpin
-        + Send
-        + Sync;
-
-    fn receive(&self, tx: mempool::MempoolTx) -> Result<(), MempoolError>;
-
-    fn apply(&self, seen_txs: &[TxHash], unseen_txs: &[TxHash]);
-    fn check_stage(&self, tx_hash: &TxHash) -> MempoolTxStage;
-    fn subscribe(&self) -> Self::Stream;
-
-    fn pending(&self) -> Vec<(TxHash, EraCbor)>;
 }
 
 pub trait Block: Sized + Send + Sync {

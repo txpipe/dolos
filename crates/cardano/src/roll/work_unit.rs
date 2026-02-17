@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use dolos_core::{Domain, DomainError, Genesis, RawBlock, TipEvent, WorkUnit};
+use dolos_core::{Domain, DomainError, Genesis, MempoolUpdate, RawBlock, TipEvent, WorkUnit};
 use tracing::{debug, info};
 
 use dolos_core::config::CardanoConfig;
@@ -141,6 +141,21 @@ where
                 let raw: RawBlock = block.raw();
                 info!(%point, "roll forward");
                 TipEvent::Apply(point, raw)
+            })
+            .collect()
+    }
+
+    fn mempool_updates(&self) -> Vec<MempoolUpdate> {
+        if !self.live_mode {
+            return Vec::new();
+        }
+
+        self.batch
+            .blocks
+            .iter()
+            .map(|block| MempoolUpdate {
+                point: block.point(),
+                seen_txs: block.block.view().txs().iter().map(|tx| tx.hash()).collect(),
             })
             .collect()
     }

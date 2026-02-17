@@ -5,7 +5,9 @@ use std::sync::Arc;
 use dolos_cardano::CardanoLogic;
 use dolos_core::{config::StorageConfig, *};
 
-pub use storage::{ArchiveStoreBackend, IndexStoreBackend, StateStoreBackend, WalStoreBackend};
+pub use storage::{
+    ArchiveStoreBackend, IndexStoreBackend, MempoolBackend, StateStoreBackend, WalStoreBackend,
+};
 
 /// Type alias for the WAL store specialized for Cardano.
 pub type WalAdapter = WalStoreBackend<dolos_cardano::CardanoDelta>;
@@ -35,7 +37,7 @@ pub struct DomainAdapter {
     pub state: StateStoreBackend,
     pub archive: ArchiveStoreBackend,
     pub indexes: IndexStoreBackend,
-    pub mempool: Mempool,
+    pub mempool: MempoolBackend,
     pub tip_broadcast: tokio::sync::broadcast::Sender<TipEvent>,
 }
 
@@ -101,7 +103,7 @@ impl Domain for DomainAdapter {
     type State = StateStoreBackend;
     type Archive = ArchiveStoreBackend;
     type Indexes = IndexStoreBackend;
-    type Mempool = Mempool;
+    type Mempool = MempoolBackend;
     type TipSubscription = TipSubscription;
 
     fn genesis(&self) -> Arc<Genesis> {
