@@ -9,9 +9,14 @@
 //!
 //! Use this for processing blocks from network peers during live operation.
 
+use std::sync::Arc;
 use tracing::{debug, info, instrument, warn};
 
-use crate::{BlockSlot, ChainLogic, Domain, DomainError, MempoolStore, RawBlock, WorkUnit};
+use crate::{
+    ArchiveStore as _, BlockSlot, ChainLogic, ChainPoint, Domain, DomainError, EntityDelta as _,
+    IndexStore as _, IndexWriter as _, MempoolStore, RawBlock, StateStore, StateWriter as _,
+    TipEvent, WalStore, WorkUnit,
+};
 
 const MEMPOOL_FINALIZE_THRESHOLD: u32 = 6;
 const MEMPOOL_DROP_THRESHOLD: u32 = 2;
@@ -35,6 +40,12 @@ pub trait SyncExt: Domain {
     ///
     /// The slot of the processed block.
     fn roll_forward(&self, block: RawBlock) -> Result<BlockSlot, DomainError>;
+
+    /// Roll back the chain to a previous point.
+    ///
+    /// Iterates WAL entries after the target point in reverse order,
+    /// undoing each block's effects on state, UTxOs, and indexes.
+    fn rollback(&self, to: &ChainPoint) -> Result<(), DomainError>;
 }
 
 impl<D: Domain> SyncExt for D {
@@ -50,6 +61,80 @@ impl<D: Domain> SyncExt for D {
         drain_pending_work::<D>(&mut *chain, self)?;
 
         Ok(last)
+    }
+
+    #[instrument(skip_all, fields(rollback_to = %to))]
+    fn rollback(&self, to: &ChainPoint) -> Result<(), DomainError> {
+        let undo_blocks = self.wal().iter_logs(Some(to.clone()), None)?;
+
+        let writer = self.state().start_writer()?;
+        let index_writer = self.indexes().start_writer()?;
+
+        for (point, mut log) in undo_blocks.rev() {
+            if point == *to {
+                // Final cursor update - build an empty delta with just the cursor
+                let empty_delta = crate::IndexDelta {
+                    cursor: point.clone(),
+                    ..Default::default()
+                };
+                index_writer.apply(&empty_delta)?;
+                writer.set_cursor(point.clone())?;
+                break;
+            }
+
+            let entities = log
+                .delta
+                .iter()
+                .map(|delta| delta.key())
+                .collect::<Vec<_>>();
+
+            let mut entities =
+                crate::state::load_entity_chunk::<Self>(entities.as_slice(), self.state())?;
+
+            for (key, entity) in entities.iter_mut() {
+                for delta in log.delta.iter_mut() {
+                    if delta.key() == *key {
+                        delta.undo(entity);
+                    }
+                }
+            }
+
+            let block = Arc::new(log.block);
+
+            let undo_data =
+                D::Chain::compute_undo(&block, &log.inputs, point.clone())?;
+
+            // Apply UTxO undo to state
+            writer.apply_utxoset(&undo_data.utxo_delta)?;
+
+            // Apply index delta for the undo
+            index_writer.undo(&undo_data.index_delta)?;
+
+            // TODO: we should differ notifications until we commit the writers
+            self.notify_tip(TipEvent::Undo(point.clone(), block));
+
+            // Move rolled-back transactions back to pending in mempool
+            if let Err(e) = self.mempool().confirm(
+                &point,
+                &[],
+                &undo_data.tx_hashes,
+                MEMPOOL_FINALIZE_THRESHOLD,
+                MEMPOOL_DROP_THRESHOLD,
+            ) {
+                warn!(?e, %point, "mempool rollback confirm failed");
+            }
+
+            info!(%point, "block undone");
+        }
+
+        writer.commit()?;
+        index_writer.commit()?;
+
+        self.archive().truncate_front(to)?;
+
+        self.wal().truncate_front(to)?;
+
+        Ok(())
     }
 }
 
