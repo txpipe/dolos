@@ -42,19 +42,19 @@ impl Command {
 #[derive(Debug, Parser, Default)]
 pub struct Args {
     /// Clear existing data before bootstrapping
-    #[arg(long)]
+    #[arg(long, global = true)]
     force: bool,
 
     /// Skip bootstrap if data already exists (exit 0)
-    #[arg(long, alias = "skip-if-not-empty")]
+    #[arg(long, alias = "skip-if-not-empty", global = true)]
     skip_if_data: bool,
 
     /// Continue bootstrap even if data exists, trusting the subcommand to handle resumption
-    #[arg(long, alias = "resume")]
+    #[arg(long, alias = "resume", global = true)]
     r#continue: bool,
 
     /// Enable verbose logging output
-    #[arg(long, action)]
+    #[arg(long, action, global = true)]
     verbose: bool,
 
     #[command(subcommand)]
