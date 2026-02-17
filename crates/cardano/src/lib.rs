@@ -540,6 +540,37 @@ impl dolos_core::ChainLogic for CardanoLogic {
         }
     }
 
+    fn compute_undo(
+        block: &dolos_core::Cbor,
+        inputs: &std::collections::HashMap<dolos_core::TxoRef, Arc<EraCbor>>,
+        point: ChainPoint,
+    ) -> Result<dolos_core::UndoBlockData, ChainError> {
+        let block_arc = Arc::new(block.clone());
+        let blockd = OwnedMultiEraBlock::decode(block_arc)?;
+        let blockv = blockd.view();
+
+        let decoded_inputs: std::collections::HashMap<_, _> = inputs
+            .iter()
+            .map(|(k, v)| {
+                let out = (k.clone(), OwnedMultiEraOutput::decode(v.clone())?);
+                Result::<_, ChainError>::Ok(out)
+            })
+            .collect::<Result<_, _>>()?;
+
+        let utxo_delta =
+            crate::utxoset::compute_undo_delta(blockv, &decoded_inputs).map_err(ChainError::from)?;
+
+        let index_delta = crate::indexes::index_delta_from_utxo_delta(point, &utxo_delta);
+
+        let tx_hashes = blockv.txs().iter().map(|tx| tx.hash()).collect();
+
+        Ok(dolos_core::UndoBlockData {
+            utxo_delta,
+            index_delta,
+            tx_hashes,
+        })
+    }
+
     fn decode_utxo(&self, utxo: Arc<EraCbor>) -> Result<Self::Utxo, ChainError> {
         let out = OwnedMultiEraOutput::decode(utxo)?;
 

@@ -72,6 +72,16 @@ pub type BlockEra = pallas::ledger::traverse::Era;
 pub type BlockHash = Hash<32>;
 pub type BlockHeader = Cbor;
 pub type TxHash = Hash<32>;
+
+/// Data needed to undo a block during rollback.
+///
+/// Chain-specific implementations compute this from the raw block CBOR
+/// and the resolved inputs stored in the WAL.
+pub struct UndoBlockData {
+    pub utxo_delta: UtxoSetDelta,
+    pub index_delta: IndexDelta,
+    pub tx_hashes: Vec<TxHash>,
+}
 pub type OutputIdx = u64;
 pub type UtxoBody = (u16, Cbor);
 pub type ChainTip = pallas::network::miniprotocols::chainsync::Tip;
@@ -479,6 +489,17 @@ pub trait ChainLogic: Sized + Send + Sync {
     fn pop_work<D>(&mut self, domain: &D) -> Option<Self::WorkUnit<D>>
     where
         D: Domain<Chain = Self, Entity = Self::Entity, EntityDelta = Self::Delta>;
+
+    /// Compute undo data for a block during rollback.
+    ///
+    /// Given the raw block CBOR and the resolved inputs from the WAL,
+    /// returns the UTxO delta, index delta, and transaction hashes needed
+    /// to reverse the block's effects.
+    fn compute_undo(
+        block: &Cbor,
+        inputs: &HashMap<TxoRef, Arc<EraCbor>>,
+        point: ChainPoint,
+    ) -> Result<UndoBlockData, ChainError>;
 
     // TODO: remove from the interface - this is Cardano-specific
     fn decode_utxo(&self, utxo: Arc<EraCbor>) -> Result<Self::Utxo, ChainError>;

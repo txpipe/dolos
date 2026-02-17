@@ -1,6 +1,6 @@
 use std::str::FromStr;
 
-use dolos::facade::DomainExt as _;
+use dolos_core::sync::SyncExt as _;
 use miette::IntoDiagnostic as _;
 use pallas::crypto::hash::Hash;
 

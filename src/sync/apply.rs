@@ -2,7 +2,7 @@ use dolos_core::SyncExt;
 use gasket::{framework::*, messaging::Message};
 use tracing::debug;
 
-use crate::{adapters::DomainAdapter, facade::DomainExt as _, prelude::*};
+use crate::{adapters::DomainAdapter, prelude::*};
 
 pub type UpstreamPort = gasket::messaging::InputPort<PullEvent>;
 
