@@ -14,10 +14,6 @@ pub struct Args {
     #[arg(long, default_value = "./snapshot")]
     download_dir: String,
 
-    /// Skip the bootstrap if there's already data in the stores
-    #[arg(long, action)]
-    skip_if_not_empty: bool,
-
     /// Skip the Mithril certificate validation
     #[arg(long, action)]
     skip_validation: bool,
@@ -35,9 +31,6 @@ pub struct Args {
     #[arg(long, default_value = "500")]
     chunk_size: usize,
 
-    #[arg(long, action)]
-    verbose: bool,
-
     #[arg(long)]
     start_from: Option<ChainPoint>,
 }
@@ -46,11 +39,9 @@ impl Default for Args {
     fn default() -> Self {
         Self {
             download_dir: "./snapshot".to_string(),
-            skip_if_not_empty: Default::default(),
             skip_validation: Default::default(),
             skip_download: Default::default(),
             retain_snapshot: Default::default(),
-            verbose: Default::default(),
             chunk_size: 500,
             start_from: None,
         }
@@ -264,12 +255,6 @@ fn import_hardano_into_domain(
 }
 
 pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Result<()> {
-    if args.verbose {
-        crate::common::setup_tracing(&config.logging, &config.telemetry)?;
-    } else {
-        crate::common::setup_tracing_error_only()?;
-    }
-
     let mithril = config
         .mithril
         .as_ref()
@@ -312,7 +297,7 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
             .context("removing downloaded snapshot")?;
     }
 
-    println!("bootstrap complete, run `dolos daemon` to start the node");
+    info!("bootstrap complete, run `dolos daemon` to start the node");
 
     Ok(())
 }
