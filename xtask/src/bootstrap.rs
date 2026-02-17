@@ -147,7 +147,7 @@ pub fn run(sh: &Shell, args: &BootstrapArgs) -> Result<()> {
 
     cmd!(
         sh,
-        "cargo run --release --bin dolos -- --config {config_path} bootstrap mithril --skip-download --skip-validation --retain-snapshot --download-dir {snapshot_dir} {verbose_flag...}"
+        "cargo run --release --bin dolos -- --config {config_path} bootstrap {verbose_flag...} mithril --skip-download --skip-validation --retain-snapshot --download-dir {snapshot_dir}"
     )
     .run()?;
 
