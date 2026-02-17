@@ -15,4 +15,3 @@ pallas.workspace = true
 [dev-dependencies]
 dolos-testing = { path = "../testing" }
 tempfile = "3"
-stats_alloc = "0.1"
