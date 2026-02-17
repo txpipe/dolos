@@ -638,16 +638,16 @@ mod tests {
             let replay_slots: Vec<_> = [90u64, 110, 130]
                 .iter()
                 .copied()
-                .filter(|&s| s > cursor.slot())
+                .filter(|&s| s >= cursor.slot())
                 .collect();
 
             let restart_tags =
                 feed_and_drain(restart_buf, &replay_slots, &eras, stability_window, None);
 
-            // The boundary block (110) should appear in a Blocks work unit
+            // The boundary block (110) should be the start of a Blocks work unit
             assert!(
-                restart_tags.iter().any(|t| matches!(t, WorkTag::Blocks { .. })),
-                "Boundary block should replay as Blocks after restart from EStart. Got: {:?}",
+                restart_tags.iter().any(|t| matches!(t, WorkTag::Blocks { first, .. } if *first == 110)),
+                "Boundary block 110 should be the start of a Blocks unit after restart from EStart. Got: {:?}",
                 restart_tags
             );
         }
