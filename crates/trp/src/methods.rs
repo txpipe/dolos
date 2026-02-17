@@ -123,7 +123,7 @@ fn stage_to_string(stage: &dolos_core::MempoolTxStage) -> &'static str {
         dolos_core::MempoolTxStage::Confirmed => "confirmed",
         dolos_core::MempoolTxStage::Finalized => "finalized",
         dolos_core::MempoolTxStage::Dropped => "dropped",
-        dolos_core::MempoolTxStage::RolledBack => "pending",
+        dolos_core::MempoolTxStage::RolledBack => "rolled_back",
         dolos_core::MempoolTxStage::Unknown => "unknown",
     }
 }
@@ -190,9 +190,11 @@ struct DumpLogsParams {
 #[derive(Clone, Serialize)]
 pub(crate) struct LogEntry {
     hash: String,
+    stage: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     payload: Option<String>,
     confirmations: u32,
+    non_confirmations: u32,
     confirmed_at: Option<(u64, String)>,
 }
 
@@ -221,12 +223,14 @@ pub async fn trp_dump_logs<D: Domain>(
         .iter()
         .map(|e| LogEntry {
             hash: hex::encode(e.hash.as_ref()),
+            stage: stage_to_string(&e.stage).to_string(),
             payload: if include_payload {
                 Some(hex::encode(&e.payload.1))
             } else {
                 None
             },
             confirmations: e.confirmations,
+            non_confirmations: e.non_confirmations,
             confirmed_at: e.confirmed_at.as_ref().map(chain_point_to_tuple),
         })
         .collect();
@@ -300,7 +304,9 @@ struct PeekInflightParams {
 struct InflightTxInfo {
     hash: String,
     stage: String,
+    confirmations: u32,
     non_confirmations: u32,
+    confirmed_at: Option<(u64, String)>,
     #[serde(skip_serializing_if = "Option::is_none")]
     payload: Option<String>,
 }
@@ -331,7 +337,9 @@ pub async fn trp_peek_inflight<D: Domain>(
         .map(|tx| InflightTxInfo {
             hash: hex::encode(tx.hash.as_ref()),
             stage: stage_to_string(&tx.stage).to_string(),
+            confirmations: tx.confirmations,
             non_confirmations: tx.non_confirmations,
+            confirmed_at: tx.confirmed_at.as_ref().map(chain_point_to_tuple),
             payload: if include_payload {
                 Some(hex::encode(&tx.payload.1))
             } else {
