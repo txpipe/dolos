@@ -198,18 +198,19 @@ impl TryFrom<PaginationParameters> for Pagination {
     }
 }
 
-/// Temporary workaround: maximum number of items that can be scanned via
-/// page-based pagination. Endpoints that require decoding every block in the
-/// result set (sub-block pagination) are capped to this limit until we refactor
-/// the underlying data storage to support efficient offset-based access.
-const MAX_SCAN_ITEMS: u64 = 110_000;
+/// Default maximum number of items that can be scanned via page-based
+/// pagination. Endpoints that require decoding every block in the result set
+/// (sub-block pagination) are capped to this limit until we refactor the
+/// underlying data storage to support efficient offset-based access.
+pub const DEFAULT_MAX_SCAN_ITEMS: u64 = 3_000;
 
 impl Pagination {
     /// Reject requests that would require scanning too many items. Call this
     /// on endpoints where each result requires decoding block data (sub-block
     /// element iteration) and efficient skipping is not yet supported.
-    pub fn enforce_max_scan_limit(&self) -> Result<(), PaginationError> {
-        if self.page * self.count as u64 > MAX_SCAN_ITEMS {
+    pub fn enforce_max_scan_limit(&self, max_scan_items: Option<u64>) -> Result<(), PaginationError> {
+        let limit = max_scan_items.unwrap_or(DEFAULT_MAX_SCAN_ITEMS);
+        if self.page * self.count as u64 > limit {
             return Err(PaginationError::ScanLimitExceeded);
         }
         Ok(())
