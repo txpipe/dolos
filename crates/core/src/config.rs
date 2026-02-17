@@ -626,6 +626,7 @@ pub struct MinibfConfig {
     pub permissive_cors: Option<bool>,
     pub token_registry_url: Option<String>,
     pub url: Option<String>,
+    pub max_scan_items: Option<u64>,
 }
 
 #[derive(Deserialize, Serialize, Clone)]
