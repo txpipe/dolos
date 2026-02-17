@@ -5,7 +5,7 @@ edition.workspace = true
 
 [dependencies]
 dolos-core = { path = "../core" }
-fjall = "3.0"
+fjall = "3.0.2"
 tracing.workspace = true
 thiserror.workspace = true
 bincode.workspace = true
