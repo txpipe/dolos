@@ -99,7 +99,6 @@ struct MatchResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     script: Option<serde_json::Value>,
     created_at: PointResponse,
-    #[serde(skip_serializing_if = "Option::is_none")]
     spent_at: Option<serde_json::Value>,
 }
 
