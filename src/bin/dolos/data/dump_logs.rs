@@ -240,7 +240,7 @@ impl TableRow for EpochState {
                         "{}",
                         self.end
                             .as_ref()
-                            .map(|e| e.unspendable_rewards)
+                            .map(|e| e.unspendable_to_treasury + e.unspendable_to_reserves)
                             .unwrap_or_default()
                     ),
                 ]
@@ -616,7 +616,7 @@ fn setup_tracing_for_format(config: &RootConfig, format: OutputFormat) -> miette
         return Ok(());
     }
 
-    crate::common::setup_tracing(&config.logging)
+    crate::common::setup_tracing(&config.logging, &config.telemetry)
 }
 
 fn decode_stake_credential(key: &EntityKey) -> Result<StakeCredential, dolos_core::ChainError> {

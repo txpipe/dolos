@@ -157,11 +157,15 @@ pub fn define_new_pots(ctx: &super::WorkContext) -> Pots {
         proposal_deposits: rolling.proposal_deposits,
         drep_refunds: rolling.drep_refunds,
         treasury_donations: rolling.treasury_donations,
-        reserve_mirs: rolling.reserve_mirs,
+        // Use effective MIR amounts from EndStats (only MIRs applied to registered accounts)
+        // Rolling stats contain total from MIR certificates, which includes unregistered accounts
+        reserve_mirs: end.reserve_mirs,
+        treasury_mirs: end.treasury_mirs,
         proposal_refunds: end.proposal_refunds,
         proposal_invalid_refunds: end.proposal_invalid_refunds,
         effective_rewards: end.effective_rewards,
-        unspendable_rewards: end.unspendable_rewards,
+        unspendable_to_treasury: end.unspendable_to_treasury,
+        unspendable_to_reserves: end.unspendable_to_reserves,
         pool_deposit_count: end.pool_deposit_count,
         pool_refund_count: end.pool_refund_count,
         pool_invalid_refund_count: end.pool_invalid_refund_count,
@@ -171,7 +175,42 @@ pub fn define_new_pots(ctx: &super::WorkContext) -> Pots {
             .mark()
             .map(|p| p.protocol_major_or_default())
             .unwrap_or_else(|| epoch.pparams.unwrap_live().protocol_major_or_default()),
+        avvm_reclamation: ctx.avvm_reclamation,
     };
+
+    tracing::warn!(
+        epoch = epoch.number,
+        initial_reserves = epoch.initial_pots.reserves,
+        initial_treasury = epoch.initial_pots.treasury,
+        incentives_total = end.epoch_incentives.total,
+        incentives_treasury_tax = end.epoch_incentives.treasury_tax,
+        incentives_available_rewards = end.epoch_incentives.available_rewards,
+        incentives_used_fees = end.epoch_incentives.used_fees,
+        effective_rewards = end.effective_rewards,
+        unspendable_to_treasury = end.unspendable_to_treasury,
+        unspendable_to_reserves = end.unspendable_to_reserves,
+        consumed_incentives = delta.consumed_incentives(),
+        returned_rewards = end
+            .epoch_incentives
+            .available_rewards
+            .saturating_sub(delta.consumed_incentives()),
+        effective_reserve_mirs = end.reserve_mirs,
+        effective_treasury_mirs = end.treasury_mirs,
+        invalid_reserve_mirs = end.invalid_reserve_mirs,
+        invalid_treasury_mirs = end.invalid_treasury_mirs,
+        pool_invalid_refund_count = end.pool_invalid_refund_count,
+        proposal_invalid_refunds = end.proposal_invalid_refunds,
+        treasury_donations = rolling.treasury_donations,
+        produced_utxos = delta.produced_utxos,
+        consumed_utxos = delta.consumed_utxos,
+        initial_utxos = epoch.initial_pots.utxos,
+        withdrawals = delta.withdrawals,
+        gathered_fees = delta.gathered_fees,
+        avvm_reclamation = delta.avvm_reclamation,
+        protocol_version = delta.protocol_version,
+        mark_protocol_version = delta.mark_protocol_version,
+        "pot delta components for ESTART"
+    );
 
     let pots = apply_delta(epoch.initial_pots.clone(), &end.epoch_incentives, &delta);
 

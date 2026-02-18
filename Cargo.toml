@@ -35,6 +35,10 @@ trait-variant.workspace = true
 xxhash-rust.workspace = true
 axum = { version = "0.8.4", optional = true }
 http-body-util = { version = "0.1.2", optional = true }
+opentelemetry.workspace = true
+opentelemetry_sdk.workspace = true
+opentelemetry-otlp.workspace = true
+tracing-opentelemetry.workspace = true
 
 dolos-core = { path = "crates/core" }
 dolos-cardano = { path = "crates/cardano", features = ["include-genesis"] }
@@ -97,19 +101,34 @@ nix = { version = "0.30.1", features = ["signal"] }
 serde = { workspace = true }
 tempfile = "3.20.0"
 toml = "0.8.13"
+dolos-cardano = { path = "crates/cardano" }
+dolos-core = { path = "crates/core" }
 dolos-testing = { path = "crates/testing" }
+bech32 = { workspace = true }
+hex = { workspace = true }
+pallas = { workspace = true }
+tracing-subscriber = { version = "0.3.17", features = ["env-filter"] }
+stats_alloc = "0.1"
+dolos-redb3 = { path = "crates/redb3" }
 
 [[test]]
 name = "smoke"
 path = "tests/external/smoke.rs"
 
 [[test]]
-name = "cardano"
-path = "tests/cardano/main.rs"
+name = "epoch_pots"
+path = "tests/epoch_pots/main.rs"
+
+[[test]]
+name = "memory"
+path = "tests/memory.rs"
+
+[[test]]
+name = "mempool"
+path = "tests/mempool.rs"
 
 [features]
-relaxed = ["dolos-cardano/relaxed"]
-rupd-snapshot-dump = ["dolos-cardano/rupd-snapshot-dump"]
+strict = ["dolos-cardano/strict"]
 mithril = ["mithril-client"]
 utils = ["comfy-table", "inquire", "toml"]
 debug = ["console-subscriber", "tokio/tracing"]
@@ -127,7 +146,7 @@ minibf = [
 trp = ["dolos-trp"]
 
 # Default features - includes all services
-default = ["mithril", "utils", "grpc", "minibf", "trp", "relaxed"]
+default = ["mithril", "utils", "grpc", "minibf", "trp"]
 
 # The profile that 'cargo dist' will build with
 [profile.dist]
@@ -146,7 +165,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.0.0-rc.9"
+version = "1.0.0-rc.10"
 edition = "2021"
 repository = "https://github.com/txpipe/dolos"
 homepage = "https://github.com/txpipe/dolos"
@@ -191,6 +210,10 @@ rayon = "1.11.0"
 xxhash-rust = { version = "0.8.15", features = ["xxh3", "const_xxh3"] }
 num-rational = "0.4.2"
 num-bigint = "0.4.6"
+opentelemetry = "0.30.0"
+opentelemetry_sdk = { version = "0.30.0", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.30.0", features = ["grpc-tonic"] }
+tracing-opentelemetry = "0.31"
 
 [workspace.metadata.release]
 push = false

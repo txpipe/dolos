@@ -12,6 +12,8 @@ pub(super) struct AccountStakeRow {
     pub lovelace: String,
 }
 
+const PAGE_SIZE: i64 = 2_000;
+
 pub(super) fn fetch(dbsync_url: &str, epoch: u64) -> Result<Vec<AccountStakeRow>> {
     let mut client = super::connect_to_dbsync(dbsync_url)?;
     let epoch = i32::try_from(epoch)
@@ -26,21 +28,38 @@ pub(super) fn fetch(dbsync_url: &str, epoch: u64) -> Result<Vec<AccountStakeRow>
         JOIN stake_address sa ON sa.id = es.addr_id
         JOIN pool_hash ph ON ph.id = es.pool_id
         WHERE es.epoch_no = $1
-        ORDER BY sa.view, ph.view
+        ORDER BY es.id
+        LIMIT $2 OFFSET $3
     "#;
 
-    let rows = client
-        .query(query, &[&epoch])
-        .with_context(|| "failed to query account stake")?;
+    let mut out = Vec::new();
+    let mut offset: i64 = 0;
 
-    let mut out = Vec::with_capacity(rows.len());
-    for row in rows {
-        out.push(AccountStakeRow {
-            stake: row.get(0),
-            pool: row.get(1),
-            lovelace: row.get(2),
-        });
+    loop {
+        eprintln!("  stake page offset={offset} limit={PAGE_SIZE}");
+        let rows = client
+            .query(query, &[&epoch, &PAGE_SIZE, &offset])
+            .with_context(|| format!("failed to query account stake (offset {})", offset))?;
+
+        let count = rows.len();
+
+        for row in rows {
+            out.push(AccountStakeRow {
+                stake: row.get(0),
+                pool: row.get(1),
+                lovelace: row.get(2),
+            });
+        }
+
+        if (count as i64) < PAGE_SIZE {
+            break;
+        }
+
+        offset += PAGE_SIZE;
     }
+
+    // Sort to match the expected CSV order.
+    out.sort_by(|a, b| a.stake.cmp(&b.stake).then_with(|| a.pool.cmp(&b.pool)));
 
     Ok(out)
 }

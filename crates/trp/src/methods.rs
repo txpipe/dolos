@@ -1,10 +1,12 @@
 use jsonrpsee::types::Params;
 use pallas::{codec::utils::NonEmptySet, ledger::primitives::conway::VKeyWitness};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use tx3_resolver::trp::{ResolveParams, SubmitParams, SubmitResponse, SubmitWitness, TxEnvelope};
 
-use dolos_core::{Domain, MempoolAwareUtxoStore, StateStore as _, SubmitExt};
+use dolos_core::{Domain, MempoolAwareUtxoStore, MempoolStore as _, StateStore as _, SubmitExt};
 
 use crate::{compiler::load_compiler, utxos::UtxoStoreAdapter};
 
@@ -72,7 +74,7 @@ fn apply_witnesses(original: &[u8], witnesses: &[SubmitWitness]) -> Result<Vec<u
     Ok(pallas::codec::minicbor::to_vec(&tx).unwrap())
 }
 
-pub async fn trp_submit<D: Domain>(
+pub async fn trp_submit<D: Domain + SubmitExt>(
     params: Params<'_>,
     context: Arc<Context<D>>,
 ) -> Result<SubmitResponse, Error> {
@@ -86,12 +88,270 @@ pub async fn trp_submit<D: Domain>(
 
     let chain = context.domain.read_chain();
 
-    let hash = context.domain.receive_tx(&chain, &bytes)?;
+    let hash = context.domain.receive_tx("trp", &chain, &bytes)?;
 
     Ok(SubmitResponse {
         hash: hash.to_string(),
     })
 }
+
+// ── trp.checkStatus ─────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct CheckStatusParams {
+    hashes: Vec<String>,
+}
+
+#[derive(Clone, Serialize)]
+pub(crate) struct TxStatusInfo {
+    stage: String,
+    confirmations: u32,
+    non_confirmations: u32,
+    confirmed_at: Option<(u64, String)>,
+}
+
+#[derive(Clone, Serialize)]
+pub(crate) struct CheckStatusResponse {
+    statuses: HashMap<String, TxStatusInfo>,
+}
+
+fn stage_to_string(stage: &dolos_core::MempoolTxStage) -> &'static str {
+    match stage {
+        dolos_core::MempoolTxStage::Pending => "pending",
+        dolos_core::MempoolTxStage::Propagated => "propagated",
+        dolos_core::MempoolTxStage::Acknowledged => "acknowledged",
+        dolos_core::MempoolTxStage::Confirmed => "confirmed",
+        dolos_core::MempoolTxStage::Finalized => "finalized",
+        dolos_core::MempoolTxStage::Dropped => "dropped",
+        dolos_core::MempoolTxStage::RolledBack => "rolled_back",
+        dolos_core::MempoolTxStage::Unknown => "unknown",
+    }
+}
+
+fn chain_point_to_tuple(point: &dolos_core::ChainPoint) -> (u64, String) {
+    (
+        point.slot(),
+        point
+            .hash()
+            .map(|h| hex::encode(h.as_ref()))
+            .unwrap_or_default(),
+    )
+}
+
+pub async fn trp_check_status<D: Domain>(
+    params: Params<'_>,
+    context: Arc<Context<D>>,
+) -> Result<CheckStatusResponse, Error> {
+    let params: CheckStatusParams = params.parse()?;
+
+    let mempool = context.domain.mempool();
+    let mut statuses = HashMap::new();
+
+    for hash_hex in &params.hashes {
+        let hash_bytes = hex::decode(hash_hex)
+            .map_err(|e| Error::InvalidParams(format!("invalid hex hash: {e}")))?;
+
+        if hash_bytes.len() != 32 {
+            return Err(Error::InvalidParams(format!(
+                "hash must be 32 bytes, got {}",
+                hash_bytes.len()
+            )));
+        }
+
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&hash_bytes);
+        let tx_hash = dolos_core::TxHash::from(arr);
+
+        let status = mempool.check_status(&tx_hash);
+
+        statuses.insert(
+            hash_hex.clone(),
+            TxStatusInfo {
+                stage: stage_to_string(&status.stage).to_string(),
+                confirmations: status.confirmations,
+                non_confirmations: status.non_confirmations,
+                confirmed_at: status.confirmed_at.as_ref().map(chain_point_to_tuple),
+            },
+        );
+    }
+
+    Ok(CheckStatusResponse { statuses })
+}
+
+// ── trp.dumpLogs ────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct DumpLogsParams {
+    cursor: Option<u64>,
+    limit: Option<usize>,
+    include_payload: Option<bool>,
+}
+
+#[derive(Clone, Serialize)]
+pub(crate) struct LogEntry {
+    hash: String,
+    stage: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    payload: Option<String>,
+    confirmations: u32,
+    non_confirmations: u32,
+    confirmed_at: Option<(u64, String)>,
+}
+
+#[derive(Clone, Serialize)]
+pub(crate) struct DumpLogsResponse {
+    entries: Vec<LogEntry>,
+    next_cursor: Option<u64>,
+}
+
+pub async fn trp_dump_logs<D: Domain>(
+    params: Params<'_>,
+    context: Arc<Context<D>>,
+) -> Result<DumpLogsResponse, Error> {
+    let params: DumpLogsParams = params.parse()?;
+
+    let cursor = params.cursor.unwrap_or(0);
+    let limit = params.limit.unwrap_or(50);
+    let include_payload = params.include_payload.unwrap_or(false);
+
+    let mempool = context.domain.mempool();
+    let page = mempool.dump_finalized(cursor, limit);
+    let entries = page.items;
+    let next_cursor = page.next_cursor;
+
+    let entries = entries
+        .iter()
+        .map(|e| LogEntry {
+            hash: hex::encode(e.hash.as_ref()),
+            stage: stage_to_string(&e.stage).to_string(),
+            payload: if include_payload {
+                Some(hex::encode(&e.payload.1))
+            } else {
+                None
+            },
+            confirmations: e.confirmations,
+            non_confirmations: e.non_confirmations,
+            confirmed_at: e.confirmed_at.as_ref().map(chain_point_to_tuple),
+        })
+        .collect();
+
+    Ok(DumpLogsResponse {
+        entries,
+        next_cursor,
+    })
+}
+
+// ── trp.peekPending ─────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct PeekPendingParams {
+    limit: Option<usize>,
+    include_payload: Option<bool>,
+}
+
+#[derive(Clone, Serialize)]
+struct PendingTxInfo {
+    hash: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    payload: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+pub(crate) struct PeekPendingResponse {
+    entries: Vec<PendingTxInfo>,
+    has_more: bool,
+}
+
+pub async fn trp_peek_pending<D: Domain>(
+    params: Params<'_>,
+    context: Arc<Context<D>>,
+) -> Result<PeekPendingResponse, Error> {
+    let params: PeekPendingParams = params.parse()?;
+
+    let limit = params.limit.unwrap_or(50);
+    let include_payload = params.include_payload.unwrap_or(false);
+
+    let mempool = context.domain.mempool();
+    let peeked = mempool.peek_pending(limit + 1);
+
+    let has_more = peeked.len() > limit;
+
+    let entries = peeked
+        .iter()
+        .take(limit)
+        .map(|tx| PendingTxInfo {
+            hash: hex::encode(tx.hash.as_ref()),
+            payload: if include_payload {
+                Some(hex::encode(&tx.payload.1))
+            } else {
+                None
+            },
+        })
+        .collect();
+
+    Ok(PeekPendingResponse { entries, has_more })
+}
+
+// ── trp.peekInflight ────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct PeekInflightParams {
+    limit: Option<usize>,
+    include_payload: Option<bool>,
+}
+
+#[derive(Clone, Serialize)]
+struct InflightTxInfo {
+    hash: String,
+    stage: String,
+    confirmations: u32,
+    non_confirmations: u32,
+    confirmed_at: Option<(u64, String)>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    payload: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+pub(crate) struct PeekInflightResponse {
+    entries: Vec<InflightTxInfo>,
+    has_more: bool,
+}
+
+pub async fn trp_peek_inflight<D: Domain>(
+    params: Params<'_>,
+    context: Arc<Context<D>>,
+) -> Result<PeekInflightResponse, Error> {
+    let params: PeekInflightParams = params.parse()?;
+
+    let limit = params.limit.unwrap_or(50);
+    let include_payload = params.include_payload.unwrap_or(false);
+
+    let mempool = context.domain.mempool();
+    let peeked = mempool.peek_inflight(limit + 1);
+
+    let has_more = peeked.len() > limit;
+
+    let entries = peeked
+        .iter()
+        .take(limit)
+        .map(|tx| InflightTxInfo {
+            hash: hex::encode(tx.hash.as_ref()),
+            stage: stage_to_string(&tx.stage).to_string(),
+            confirmations: tx.confirmations,
+            non_confirmations: tx.non_confirmations,
+            confirmed_at: tx.confirmed_at.as_ref().map(chain_point_to_tuple),
+            payload: if include_payload {
+                Some(hex::encode(&tx.payload.1))
+            } else {
+                None
+            },
+        })
+        .collect();
+
+    Ok(PeekInflightResponse { entries, has_more })
+}
+
+// ── health ──────────────────────────────────────────────────────────────
 
 pub fn health<D: Domain>(context: &Context<D>) -> bool {
     context.domain.state().read_cursor().is_ok()
@@ -200,5 +460,124 @@ mod tests {
         dbg!(&err);
 
         assert_eq!(err.code(), tx3_resolver::trp::errors::CODE_INTEROP_ERROR);
+    }
+
+    // ── trp.checkStatus tests ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_check_status_unknown() {
+        let context = setup_test_context().await;
+        let random_hash = hex::encode([0xABu8; 32]);
+        let req = json!({ "hashes": [random_hash] }).to_string();
+        let params = Params::new(Some(req.as_str()));
+
+        let response = trp_check_status(params, context).await.unwrap();
+
+        let status = response.statuses.get(&random_hash).unwrap();
+        assert_eq!(status.stage, "unknown");
+        assert_eq!(status.confirmations, 0);
+        assert!(status.confirmed_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_check_status_after_receive() {
+        let context = setup_test_context().await;
+
+        let hash = dolos_testing::tx_sequence_to_hash(42);
+        let tx = dolos_testing::mempool::make_test_mempool_tx(hash);
+        let hash_hex = hex::encode(hash.as_ref());
+
+        dolos_core::MempoolStore::receive(context.domain.mempool(), tx).unwrap();
+
+        let req = json!({ "hashes": [hash_hex] }).to_string();
+        let params = Params::new(Some(req.as_str()));
+
+        let response = trp_check_status(params, context).await.unwrap();
+
+        let status = response.statuses.get(&hash_hex).unwrap();
+        assert_eq!(status.stage, "pending");
+        assert_eq!(status.confirmations, 0);
+        assert!(status.confirmed_at.is_none());
+    }
+
+    // ── trp.peekPending tests ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_peek_pending_empty() {
+        let context = setup_test_context().await;
+        let req = json!({}).to_string();
+        let params = Params::new(Some(req.as_str()));
+
+        let response = trp_peek_pending(params, context).await.unwrap();
+
+        assert!(response.entries.is_empty());
+        assert!(!response.has_more);
+    }
+
+    #[tokio::test]
+    async fn test_peek_pending_with_items() {
+        let context = setup_test_context().await;
+
+        for n in 0..3u64 {
+            let hash = dolos_testing::tx_sequence_to_hash(n);
+            let tx = dolos_testing::mempool::make_test_mempool_tx(hash);
+            dolos_core::MempoolStore::receive(context.domain.mempool(), tx).unwrap();
+        }
+
+        // Peek with limit 2 — should get 2 items and has_more = true
+        let req = json!({ "limit": 2 }).to_string();
+        let params = Params::new(Some(req.as_str()));
+
+        let response = trp_peek_pending(params, context.clone()).await.unwrap();
+
+        assert_eq!(response.entries.len(), 2);
+        assert!(response.has_more);
+        assert!(response.entries.iter().all(|e| e.payload.is_none()));
+
+        // Peek with default limit — should get all 3
+        let req = json!({}).to_string();
+        let params = Params::new(Some(req.as_str()));
+
+        let response = trp_peek_pending(params, context.clone()).await.unwrap();
+
+        assert_eq!(response.entries.len(), 3);
+        assert!(!response.has_more);
+
+        // Peek with include_payload — should include cbor
+        let req = json!({ "include_payload": true }).to_string();
+        let params = Params::new(Some(req.as_str()));
+
+        let response = trp_peek_pending(params, context).await.unwrap();
+
+        assert_eq!(response.entries.len(), 3);
+        assert!(response.entries.iter().all(|e| e.payload.is_some()));
+    }
+
+    // ── trp.peekInflight tests ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_peek_inflight_empty() {
+        let context = setup_test_context().await;
+        let req = json!({}).to_string();
+        let params = Params::new(Some(req.as_str()));
+
+        let response = trp_peek_inflight(params, context).await.unwrap();
+
+        assert!(response.entries.is_empty());
+        assert!(!response.has_more);
+    }
+
+    // ── trp.dumpLogs tests ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_dump_logs_empty() {
+        let context = setup_test_context().await;
+        let req = json!({}).to_string();
+        let params = Params::new(Some(req.as_str()));
+
+        let response = trp_dump_logs(params, context).await.unwrap();
+
+        assert!(response.entries.is_empty());
+        assert!(response.next_cursor.is_none());
     }
 }

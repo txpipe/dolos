@@ -23,6 +23,10 @@ pub mod synthetic;
 
 pub mod toy_domain;
 
+pub mod harness;
+pub mod mempool;
+pub mod streams;
+
 pub trait UtxoGenerator {
     fn generate(&self, address: &TestAddress) -> EraCbor;
 }

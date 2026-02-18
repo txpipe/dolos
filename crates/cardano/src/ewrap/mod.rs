@@ -15,6 +15,16 @@ use crate::{
     ProposalState,
 };
 
+/// A reward that was applied at EWRAP time.
+/// This represents a spendable reward that was successfully credited to an account.
+#[derive(Debug, Clone)]
+pub struct AppliedReward {
+    pub credential: StakeCredential,
+    pub pool: PoolHash,
+    pub amount: u64,
+    pub as_leader: bool,
+}
+
 pub mod commit;
 pub mod loading;
 pub mod work_unit;
@@ -139,6 +149,25 @@ pub struct BoundaryWork {
 
     /// Credentials whose rewards were applied (need to be dequeued from state).
     pub applied_reward_credentials: Vec<StakeCredential>,
+
+    /// Rewards that were actually applied (spendable) at EWRAP time.
+    /// This is populated during the reward visitor phase and survives commit.
+    pub applied_rewards: Vec<AppliedReward>,
+
+    /// Effective MIRs from treasury (applied to registered accounts).
+    pub effective_treasury_mirs: u64,
+
+    /// Effective MIRs from reserves (applied to registered accounts).
+    pub effective_reserve_mirs: u64,
+
+    /// MIRs from treasury to unregistered accounts (stays in treasury).
+    pub invalid_treasury_mirs: u64,
+
+    /// MIRs from reserves to unregistered accounts (stays in reserves).
+    pub invalid_reserve_mirs: u64,
+
+    /// Credentials whose pending MIRs were processed (need to be dequeued from state).
+    pub applied_mir_credentials: Vec<StakeCredential>,
 }
 
 impl BoundaryWork {
@@ -153,6 +182,7 @@ impl BoundaryWork {
     pub fn add_delta(&mut self, delta: impl Into<CardanoDelta>) {
         self.deltas.add_for_entity(delta);
     }
+
 }
 
 #[instrument("epoch", skip_all, fields(slot = %slot))]

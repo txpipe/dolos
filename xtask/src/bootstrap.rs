@@ -9,7 +9,7 @@ use dolos_core::config::{ChainConfig, RootConfig};
 use xshell::{cmd, Shell};
 
 use crate::config::{load_xtask_config, Network};
-use crate::util::{dir_has_entries, resolve_path};
+use crate::util::{copy_dir_recursive, dir_has_entries, resolve_path};
 
 /// Arguments for the bootstrap-mithril-local command.
 #[derive(Debug, Args)]
@@ -29,6 +29,14 @@ pub struct BootstrapArgs {
     /// Overwrite existing instance data
     #[arg(long, action)]
     pub force: bool,
+
+    /// Enable verbose output
+    #[arg(long, action)]
+    pub verbose: bool,
+
+    /// Skip using the seed and bootstrap from scratch
+    #[arg(long, action)]
+    pub skip_seed: bool,
 }
 
 /// Run the bootstrap-mithril-local command.
@@ -58,7 +66,12 @@ pub fn run(sh: &Shell, args: &BootstrapArgs) -> Result<()> {
     std::fs::create_dir_all(&instance_dir)
         .with_context(|| format!("creating instance dir: {}", instance_dir.display()))?;
 
-    if data_dir.exists() && dir_has_entries(&data_dir)? && !args.force {
+    let seed_path = xtask_config
+        .seeds
+        .path_for_network(&args.network)
+        .map(|p| resolve_path(&repo_root, p));
+
+    if data_dir.exists() && dir_has_entries(&data_dir)? && !args.force && seed_path.is_none() {
         bail!(
             "instance data already exists (use --force to overwrite): {}",
             data_dir.display()
@@ -102,16 +115,39 @@ pub fn run(sh: &Shell, args: &BootstrapArgs) -> Result<()> {
     std::fs::write(&config_path, serialized)
         .with_context(|| format!("writing config: {}", config_path.display()))?;
 
+    // Only use seed if not skipped and configured
+    if !args.skip_seed {
+        if let Some(ref seed) = seed_path {
+            if seed.exists() {
+                println!("Copying seed data: {}", seed.display());
+                copy_dir_recursive(seed, &data_dir)?;
+            } else {
+                bail!("seed directory not found: {}", seed.display());
+            }
+        }
+    } else {
+        println!("Skipping seed (--skip-seed specified), bootstrapping from scratch");
+    }
+
     println!("Bootstrapping instance: {}", instance_name);
     println!("  Config: {}", config_path.display());
     println!("  Snapshot: {}", snapshot_dir.display());
+    if let Some(ref seed) = seed_path {
+        if !args.skip_seed {
+            println!("  Seed: {}", seed.display());
+        } else {
+            println!("  Seed: (skipped)");
+        }
+    }
 
     let sh = sh.clone();
     let _dir_guard = sh.push_dir(&repo_root);
 
+    let verbose_flag: &[&str] = if args.verbose { &["--verbose"] } else { &[] };
+
     cmd!(
         sh,
-        "cargo run --release --bin dolos --features rupd-snapshot-dump -- --config {config_path} bootstrap mithril --skip-download --skip-validation --retain-snapshot --download-dir {snapshot_dir}"
+        "cargo run --release --bin dolos -- --config {config_path} bootstrap {verbose_flag...} mithril --skip-download --skip-validation --retain-snapshot --download-dir {snapshot_dir}"
     )
     .run()?;
 

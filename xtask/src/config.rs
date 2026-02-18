@@ -30,6 +30,8 @@ pub struct XtaskConfig {
     pub snapshots: SnapshotConfig,
     #[serde(default)]
     pub dbsync: DbSyncConfig,
+    #[serde(default)]
+    pub seeds: SeedConfig,
 }
 
 impl Default for XtaskConfig {
@@ -38,6 +40,7 @@ impl Default for XtaskConfig {
             instances_root: PathBuf::from("./xtask/instances"),
             snapshots: SnapshotConfig::default(),
             dbsync: DbSyncConfig::default(),
+            seeds: SeedConfig::default(),
         }
     }
 }
@@ -66,6 +69,28 @@ impl SnapshotConfig {
             Network::Mainnet => &self.mainnet,
             Network::Preview => &self.preview,
             Network::Preprod => &self.preprod,
+        }
+    }
+}
+
+/// Seed data directory configuration per network.
+///
+/// When set, the seed directory is copied into the instance's `data/` directory
+/// before running the bootstrap command, allowing instances to start from
+/// existing data instead of bootstrapping from scratch.
+#[derive(Debug, Deserialize, Default)]
+pub struct SeedConfig {
+    pub mainnet: Option<PathBuf>,
+    pub preview: Option<PathBuf>,
+    pub preprod: Option<PathBuf>,
+}
+
+impl SeedConfig {
+    pub fn path_for_network(&self, network: &Network) -> Option<&PathBuf> {
+        match network {
+            Network::Mainnet => self.mainnet.as_ref(),
+            Network::Preview => self.preview.as_ref(),
+            Network::Preprod => self.preprod.as_ref(),
         }
     }
 }
