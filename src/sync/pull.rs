@@ -328,6 +328,7 @@ impl Stage {
     fn track_tip(&self, tip: &Tip) {
         self.chain_tip.set(tip.0.slot_or_default() as i64);
         self.health.set_node_tip(tip.clone());
+        dbg!(tip);
     }
 
     fn track_latest_block(&self, point: &Point) {
@@ -341,5 +342,6 @@ impl Stage {
 
         let hash = BlockHash::new(hash);
         self.health.set_latest_block(hash, *slot, SystemTime::now());
+        dbg!("latest block", point);
     }
 }
