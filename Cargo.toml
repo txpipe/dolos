@@ -108,21 +108,27 @@ bech32 = { workspace = true }
 hex = { workspace = true }
 pallas = { workspace = true }
 tracing-subscriber = { version = "0.3.17", features = ["env-filter"] }
+stats_alloc = "0.1"
+dolos-redb3 = { path = "crates/redb3" }
 
 [[test]]
 name = "smoke"
 path = "tests/external/smoke.rs"
 
 [[test]]
-name = "cardano"
-path = "tests/cardano/main.rs"
-
-[[test]]
 name = "epoch_pots"
 path = "tests/epoch_pots/main.rs"
 
+[[test]]
+name = "memory"
+path = "tests/memory.rs"
+
+[[test]]
+name = "mempool"
+path = "tests/mempool.rs"
+
 [features]
-relaxed = ["dolos-cardano/relaxed"]
+strict = ["dolos-cardano/strict"]
 mithril = ["mithril-client"]
 utils = ["comfy-table", "inquire", "toml"]
 debug = ["console-subscriber", "tokio/tracing"]
@@ -140,7 +146,7 @@ minibf = [
 trp = ["dolos-trp"]
 
 # Default features - includes all services
-default = ["mithril", "utils", "grpc", "minibf", "trp", "relaxed"]
+default = ["mithril", "utils", "grpc", "minibf", "trp"]
 
 # The profile that 'cargo dist' will build with
 [profile.dist]
@@ -159,7 +165,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.0.0-rc.9"
+version = "1.0.0-rc.10"
 edition = "2021"
 repository = "https://github.com/txpipe/dolos"
 homepage = "https://github.com/txpipe/dolos"

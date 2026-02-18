@@ -20,6 +20,9 @@ pub enum Error {
     #[error(transparent)]
     JsonRpcError(#[from] jsonrpsee::types::ErrorObjectOwned),
 
+    #[error("invalid params: {0}")]
+    InvalidParams(String),
+
     #[error("only txs from Conway era are supported")]
     UnsupportedTxEra,
 
@@ -42,6 +45,7 @@ impl From<dolos_core::StateError> for Error {
 impl Error {
     pub fn code(&self) -> i32 {
         match self {
+            Error::InvalidParams(_) => ErrorCode::InvalidParams.code(),
             Error::Tx3Error(x) => x.code(),
             Error::JsonRpcError(err) => err.code(),
             _ => ErrorCode::InternalError.code(),

@@ -35,13 +35,13 @@ macro_rules! pallas_ratio {
 #[macro_export]
 macro_rules! add {
     ($a:expr, $b:expr) => {{
-        #[cfg(feature = "relaxed")]
-        {
-            $a.saturating_add($b)
-        }
-        #[cfg(not(feature = "relaxed"))]
+        #[cfg(feature = "strict")]
         {
             $a.checked_add($b).expect("overflow in strict mode")
+        }
+        #[cfg(not(feature = "strict"))]
+        {
+            $a.saturating_add($b)
         }
     }};
 }
@@ -49,13 +49,13 @@ macro_rules! add {
 #[macro_export]
 macro_rules! sub {
     ($a:expr, $b:expr) => {{
-        #[cfg(feature = "relaxed")]
-        {
-            $a.saturating_sub($b)
-        }
-        #[cfg(not(feature = "relaxed"))]
+        #[cfg(feature = "strict")]
         {
             $a.checked_sub($b).expect("overflow in strict mode")
+        }
+        #[cfg(not(feature = "strict"))]
+        {
+            $a.saturating_sub($b)
         }
     }};
 }

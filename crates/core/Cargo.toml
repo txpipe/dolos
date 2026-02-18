@@ -12,6 +12,7 @@ tracing.workspace = true
 opentelemetry.workspace = true
 tracing-opentelemetry.workspace = true
 futures-core.workspace = true
+futures-util.workspace = true
 rayon.workspace = true
 
 # TODO: we shouldn't need Tokio in core

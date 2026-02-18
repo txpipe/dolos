@@ -1,5 +1,5 @@
 use dolos_core::mempool::{MempoolEvent, MempoolTx, MempoolTxStage};
-use dolos_core::{EraCbor, MempoolError, MempoolStore, TxHash};
+use dolos_core::{ChainPoint, EraCbor, MempoolError, MempoolStore, TxHash, TxStatus};
 
 use crate::streams::ScriptedStream;
 
@@ -11,7 +11,6 @@ pub fn make_test_mempool_tx(hash: TxHash) -> MempoolTx {
 /// Build a minimal `MempoolEvent` at the `Pending` stage for testing.
 pub fn make_test_mempool_event(hash: TxHash) -> MempoolEvent {
     MempoolEvent {
-        new_stage: MempoolTxStage::Pending,
         tx: make_test_mempool_tx(hash),
     }
 }
@@ -27,17 +26,48 @@ impl MempoolStore for MockMempoolStore {
         Ok(())
     }
 
-    fn apply(&self, _seen: &[TxHash], _unseen: &[TxHash]) {}
+    fn has_pending(&self) -> bool {
+        false
+    }
 
-    fn check_stage(&self, _hash: &TxHash) -> MempoolTxStage {
-        MempoolTxStage::Unknown
+    fn peek_pending(&self, _limit: usize) -> Vec<MempoolTx> {
+        vec![]
+    }
+
+    fn mark_inflight(&self, _hashes: &[TxHash]) -> Result<(), MempoolError> {
+        Ok(())
+    }
+
+    fn mark_acknowledged(&self, _hashes: &[TxHash]) -> Result<(), MempoolError> {
+        Ok(())
+    }
+
+    fn find_inflight(&self, _tx_hash: &TxHash) -> Option<MempoolTx> {
+        None
+    }
+
+    fn peek_inflight(&self, _limit: usize) -> Vec<MempoolTx> {
+        vec![]
+    }
+
+    fn confirm(&self, _point: &ChainPoint, _seen: &[TxHash], _unseen: &[TxHash], _finalize_threshold: u32, _drop_threshold: u32) -> Result<(), MempoolError> {
+        Ok(())
+    }
+
+    fn check_status(&self, _hash: &TxHash) -> TxStatus {
+        TxStatus {
+            stage: MempoolTxStage::Unknown,
+            confirmations: 0,
+            non_confirmations: 0,
+            confirmed_at: None,
+        }
+    }
+
+    fn dump_finalized(&self, _cursor: u64, _limit: usize) -> dolos_core::MempoolPage {
+        dolos_core::MempoolPage { items: vec![], next_cursor: None }
     }
 
     fn subscribe(&self) -> Self::Stream {
         ScriptedStream::empty()
-    }
-
-    fn pending(&self) -> Vec<(TxHash, EraCbor)> {
-        vec![]
     }
 }

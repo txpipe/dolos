@@ -7,6 +7,7 @@ edition.workspace = true
 pallas.workspace = true
 dolos-core = { path = "../core" }
 dolos-redb3 = { path = "../redb3" }
+dolos-fjall = { path = "../fjall" }
 dolos-cardano = { path = "../cardano", features=["include-genesis"] }
 rand = "0.9.1"
 hex = "0.4.3"
@@ -15,3 +16,4 @@ tokio = { workspace = true }
 tokio-stream = { workspace = true }
 futures-core = { workspace = true }
 futures-util = { workspace = true }
+itertools = { workspace = true }

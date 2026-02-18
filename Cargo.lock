@@ -1191,7 +1191,7 @@ checksum = "fea41bba32d969b513997752735605054bc0dfa92b4c56bf1189f2e174be7a10"
 
 [[package]]
 name = "dolos"
-version = "1.0.0-rc.9"
+version = "1.0.0-rc.10"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1242,6 +1242,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "stats_alloc",
  "tar",
  "tempfile",
  "thiserror 2.0.12",
@@ -1264,7 +1265,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-cardano"
-version = "1.0.0-rc.9"
+version = "1.0.0-rc.10"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1272,6 +1273,7 @@ dependencies = [
  "chrono",
  "crc",
  "dolos-core",
+ "dolos-testing",
  "futures-core",
  "hex",
  "itertools 0.14.0",
@@ -1289,10 +1291,11 @@ dependencies = [
 
 [[package]]
 name = "dolos-core"
-version = "1.0.0-rc.9"
+version = "1.0.0-rc.10"
 dependencies = [
  "dolos-testing",
  "futures-core",
+ "futures-util",
  "hex",
  "itertools 0.14.0",
  "opentelemetry",
@@ -1312,7 +1315,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-fjall"
-version = "1.0.0-rc.9"
+version = "1.0.0-rc.10"
 dependencies = [
  "bincode",
  "dolos-core",
@@ -1327,7 +1330,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-minibf"
-version = "1.0.0-rc.9"
+version = "1.0.0-rc.10"
 dependencies = [
  "axum 0.8.4",
  "base58",
@@ -1360,11 +1363,13 @@ dependencies = [
 
 [[package]]
 name = "dolos-redb3"
-version = "1.0.0-rc.9"
+version = "1.0.0-rc.10"
 dependencies = [
  "bincode",
  "dolos-core",
  "dolos-testing",
+ "futures-core",
+ "futures-util",
  "hex",
  "itertools 0.14.0",
  "pallas",
@@ -1374,6 +1379,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.12",
  "tokio",
+ "tokio-stream",
  "tokio-util",
  "tower-http 0.6.6",
  "tracing",
@@ -1382,15 +1388,17 @@ dependencies = [
 
 [[package]]
 name = "dolos-testing"
-version = "1.0.0-rc.9"
+version = "1.0.0-rc.10"
 dependencies = [
  "bech32 0.9.1",
  "dolos-cardano",
  "dolos-core",
+ "dolos-fjall",
  "dolos-redb3",
  "futures-core",
  "futures-util",
  "hex",
+ "itertools 0.14.0",
  "pallas",
  "rand 0.9.1",
  "tokio",
@@ -1399,7 +1407,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-trp"
-version = "1.0.0-rc.9"
+version = "1.0.0-rc.10"
 dependencies = [
  "base64 0.22.1",
  "bincode",
@@ -1566,9 +1574,9 @@ checksum = "1d674e81391d1e1ab681a28d99df07927c6d4aa5b027d7da16ba32d1d21ecd99"
 
 [[package]]
 name = "fjall"
-version = "3.0.1"
+version = "3.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4f69637c02d38ad1b0f003101d0195a60368130aa17d9ef78b1557d265a22093"
+checksum = "5a2799b4198427a08c774838e44d0b77f677208f19a1927671cd2cd36bb30d69"
 dependencies = [
  "byteorder-lite",
  "byteview",
@@ -2644,9 +2652,9 @@ checksum = "13dc2df351e3202783a1fe0d44375f7295ffb4049267b0f3018346dc122a1d94"
 
 [[package]]
 name = "lsm-tree"
-version = "3.0.1"
+version = "3.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b875f1dfe14f557f805b167fb9b0fc54c5560c7a4bd6ae02535b2846f276a8cb"
+checksum = "86e8d0b8e0cf2531a437788ce94d95570dbaabfe9888db20022c2d5ccec9b221"
 dependencies = [
  "byteorder-lite",
  "byteview",
@@ -4942,6 +4950,12 @@ name = "static_assertions"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
+
+[[package]]
+name = "stats_alloc"
+version = "0.1.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c0e04424e733e69714ca1bbb9204c1a57f09f5493439520f9f68c132ad25eec"
 
 [[package]]
 name = "stringprep"
