@@ -2272,21 +2272,21 @@ impl PlutusDataWrapper {
             }
 
             PlutusData::Map(x) => {
-                let mut map = serde_json::Map::new();
-                for (k, v) in x.iter() {
-                    let key_opt = PlutusDataWrapper(k.clone())
-                        .as_value()?
-                        .as_str()
-                        .map(|s| s.to_owned());
-
-                    if let Some(key) = key_opt {
-                        map.insert(key, PlutusDataWrapper(v.clone()).as_value()?);
-                    }
-                }
+                let values = x
+                    .iter()
+                    .map(|(k, v)| -> Result<serde_json::Value, StatusCode> {
+                        let key = PlutusDataWrapper(k.clone()).as_value()?;
+                        let value = PlutusDataWrapper(v.clone()).as_value()?;
+                        Ok(serde_json::Value::Object(serde_json::Map::from_iter([
+                            ("k".to_string(), key),
+                            ("v".to_string(), value),
+                        ])))
+                    })
+                    .collect::<Result<Vec<serde_json::Value>, StatusCode>>()?;
 
                 Ok(serde_json::Value::Object(serde_json::Map::from_iter([(
                     "map".to_string(),
-                    serde_json::Value::Object(map),
+                    serde_json::Value::Array(values),
                 )])))
             }
 

@@ -378,9 +378,22 @@ where
             "/epochs/latest/parameters",
             get(routes::epochs::latest_parameters::<D>),
         )
+        .route("/scripts/{script_hash}", get(routes::scripts::by_hash::<D>))
+        .route(
+            "/scripts/{script_hash}/json",
+            get(routes::scripts::by_hash_json::<D>),
+        )
+        .route(
+            "/scripts/{script_hash}/cbor",
+            get(routes::scripts::by_hash_cbor::<D>),
+        )
         .route(
             "/scripts/datum/{datum_hash}",
             get(routes::scripts::by_datum_hash::<D>),
+        )
+        .route(
+            "/scripts/datum/{datum_hash}/cbor",
+            get(routes::scripts::by_datum_hash_cbor::<D>),
         )
         .route("/tx/submit", post(routes::tx::submit::route::<D>))
         .route("/txs/{tx_hash}", get(routes::txs::by_hash::<D>))
