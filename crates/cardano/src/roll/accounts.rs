@@ -19,7 +19,7 @@ use tracing::debug;
 use crate::model::FixedNamespace as _;
 use crate::rupd::EnqueueMir;
 use crate::{model::AccountState, pallas_extras, roll::BlockVisitor};
-use crate::{DRepDelegation, PParamsSet, PoolDelegation, PoolHash};
+use crate::{add, sub, DRepDelegation, PParamsSet, PoolDelegation, PoolHash};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrackSeenAddresses {
@@ -61,9 +61,9 @@ impl dolos_core::EntityDelta for ControlledAmountInc {
 
         if self.is_pointer {
             debug!(amount=%self.amount, "adding to pointer utxo sum");
-            stake.utxo_sum_at_pointer_addresses += self.amount;
+            stake.utxo_sum_at_pointer_addresses = add!(stake.utxo_sum_at_pointer_addresses, self.amount);
         } else {
-            stake.utxo_sum += self.amount;
+            stake.utxo_sum = add!(stake.utxo_sum, self.amount);
         }
     }
 
@@ -93,16 +93,17 @@ impl dolos_core::EntityDelta for ControlledAmountDec {
         let stake = entity.stake.unwrap_live_mut();
 
         if self.is_pointer {
-            stake.utxo_sum_at_pointer_addresses -= self.amount;
+            stake.utxo_sum_at_pointer_addresses = sub!(stake.utxo_sum_at_pointer_addresses, self.amount);
         } else {
-            stake.utxo_sum -= self.amount;
+            stake.utxo_sum = sub!(stake.utxo_sum, self.amount);
         }
     }
 
     fn undo(&self, entity: &mut Option<AccountState>) {
         let entity = entity.as_mut().expect("existing account");
 
-        entity.stake.unwrap_live_mut().utxo_sum += self.amount;
+        let stake = entity.stake.unwrap_live_mut();
+        stake.utxo_sum = add!(stake.utxo_sum, self.amount);
     }
 }
 
@@ -370,13 +371,15 @@ impl dolos_core::EntityDelta for WithdrawalInc {
     fn apply(&mut self, entity: &mut Option<Self::Entity>) {
         let entity = entity.as_mut().expect("existing account");
 
-        entity.stake.unwrap_live_mut().withdrawals_sum += self.amount;
+        let stake = entity.stake.unwrap_live_mut();
+        stake.withdrawals_sum = add!(stake.withdrawals_sum, self.amount);
     }
 
     fn undo(&self, entity: &mut Option<Self::Entity>) {
         let entity = entity.as_mut().expect("existing account");
 
-        entity.stake.unwrap_live_mut().withdrawals_sum -= self.amount;
+        let stake = entity.stake.unwrap_live_mut();
+        stake.withdrawals_sum = sub!(stake.withdrawals_sum, self.amount);
     }
 }
 

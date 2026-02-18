@@ -132,7 +132,7 @@ where
 {
     let label: u64 = label.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
     let pagination = Pagination::try_from(pagination)?;
-    pagination.enforce_max_scan_limit()?;
+    pagination.enforce_max_scan_limit(domain.config.max_scan_items)?;
 
     let (start_slot, end_slot) = pagination.start_and_end_slots(domain).await?;
     let stream = domain.query().blocks_by_metadata_stream(

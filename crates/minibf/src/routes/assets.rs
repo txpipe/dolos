@@ -688,7 +688,7 @@ where
     D: Domain + Clone + Send + Sync + 'static,
 {
     let pagination = Pagination::try_from(params)?;
-    pagination.enforce_max_scan_limit()?;
+    pagination.enforce_max_scan_limit(domain.config.max_scan_items)?;
 
     let subject = hex::decode(&subject).map_err(|_| Error::InvalidAsset)?;
 

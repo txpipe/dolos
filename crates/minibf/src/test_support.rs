@@ -118,6 +118,7 @@ impl TestApp {
             permissive_cors: None,
             token_registry_url: None,
             url: None,
+            max_scan_items: None,
         };
 
         let facade = Facade {

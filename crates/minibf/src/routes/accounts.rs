@@ -195,7 +195,7 @@ where
     D: Domain + Clone + Send + Sync + 'static,
 {
     let pagination = Pagination::try_from(params)?;
-    pagination.enforce_max_scan_limit()?;
+    pagination.enforce_max_scan_limit(domain.config.max_scan_items)?;
     let account_key = parse_account_key_param(&stake_address)?;
     if !domain.cardano_entity_exists::<AccountState>(account_key.entity_key.as_slice())? {
         return Err(StatusCode::NOT_FOUND.into());
@@ -538,7 +538,7 @@ where
     D: Domain + Clone + Send + Sync + 'static,
 {
     let pagination = Pagination::try_from(params)?;
-    pagination.enforce_max_scan_limit()?;
+    pagination.enforce_max_scan_limit(domain.config.max_scan_items)?;
 
     let items = by_stake_actions::<D, _, AccountDelegationContentInner>(
         &stake_address,
@@ -561,7 +561,7 @@ where
     D: Domain + Clone + Send + Sync + 'static,
 {
     let pagination = Pagination::try_from(params)?;
-    pagination.enforce_max_scan_limit()?;
+    pagination.enforce_max_scan_limit(domain.config.max_scan_items)?;
 
     let items = by_stake_actions::<D, _, AccountRegistrationContentInner>(
         &stake_address,
