@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::SystemTime;
 
 use gasket::framework::*;
 use pallas::codec::minicbor;
@@ -160,7 +159,6 @@ impl gasket::framework::Worker<Stage> for Worker {
 
         let (tip, block) = self.create_next_block(tip)?;
 
-        stage.track_latest_block(&tip);
         stage.flush_block(block).await?;
         stage.track_tip(&tip);
 
@@ -175,7 +173,6 @@ pub struct Stage {
     block_production_interval: u64,
     wal: WalAdapter,
     mempool: Mempool,
-    health: Health,
 
     pub downstream: DownstreamPort,
 
@@ -187,13 +184,7 @@ pub struct Stage {
 }
 
 impl Stage {
-    pub fn new(
-        wal: WalAdapter,
-        mempool: Mempool,
-        block_production_interval: u64,
-        health: Health,
-    ) -> Self {
-        health.set_connected(true);
+    pub fn new(wal: WalAdapter, mempool: Mempool, block_production_interval: u64) -> Self {
         Self {
             downstream: Default::default(),
             block_count: Default::default(),
@@ -201,7 +192,6 @@ impl Stage {
             block_production_interval,
             wal,
             mempool,
-            health,
         }
     }
 
@@ -216,19 +206,5 @@ impl Stage {
 
     fn track_tip(&self, tip: &Tip) {
         self.chain_tip.set(tip.0.slot_or_default() as i64);
-        self.health.set_node_tip(tip.clone());
-    }
-
-    fn track_latest_block(&self, tip: &Tip) {
-        let pallas::network::miniprotocols::Point::Specific(slot, hash) = &tip.0 else {
-            return;
-        };
-
-        let Ok(hash) = hash.as_slice().try_into() else {
-            return;
-        };
-
-        let hash = BlockHash::new(hash);
-        self.health.set_latest_block(hash, *slot, SystemTime::now());
     }
 }

@@ -126,15 +126,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "arc-swap"
-version = "1.8.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f9f3647c145568cec02c42054e07bdf9a5a698e15b466fb2341bfc393cd24aa5"
-dependencies = [
- "rustversion",
-]
-
-[[package]]
 name = "arrayvec"
 version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1301,7 +1292,6 @@ dependencies = [
 name = "dolos-core"
 version = "1.0.0-rc.9"
 dependencies = [
- "arc-swap",
  "dolos-testing",
  "futures-core",
  "hex",
@@ -1416,12 +1406,10 @@ dependencies = [
  "bech32 0.9.1",
  "dolos-cardano",
  "dolos-core",
- "dolos-fjall",
  "dolos-redb3",
  "futures-core",
  "futures-util",
  "hex",
- "itertools 0.14.0",
  "pallas",
  "rand 0.9.1",
  "tokio",

@@ -3,7 +3,7 @@ use tracing::{error, info};
 
 use dolos_core::{
     config::{PeerConfig, SyncConfig},
-    Health, PullEvent,
+    PullEvent,
 };
 
 use crate::adapters::storage::WalStoreBackend;
@@ -70,7 +70,6 @@ fn test_mainnet_upstream() {
             is_testnet: false,
         },
         wal,
-        Health::default(),
     );
 
     upstream.downstream.connect(send);

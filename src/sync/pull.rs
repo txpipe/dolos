@@ -9,7 +9,6 @@ use pallas::network::miniprotocols::chainsync::{
     HeaderContent, NextResponse, RollbackBuffer, RollbackEffect, Tip,
 };
 use pallas::network::miniprotocols::Point;
-use std::time::SystemTime;
 use tracing::{debug, info, warn};
 
 use crate::adapters::WalAdapter;
@@ -95,6 +94,7 @@ impl Worker {
                     let header = to_traverse(&header).or_panic()?;
                     let point = Point::Specific(header.slot(), header.hash().to_vec());
                     buffer.roll_forward(point);
+
                     stage.track_tip(&tip);
                 }
                 NextResponse::RollBackward(point, _) => match buffer.roll_back(&point) {
@@ -157,7 +157,6 @@ impl gasket::framework::Worker<Stage> for Worker {
             .or_panic()?;
 
         info!(?intersection, "found intersection");
-        stage.health.set_connected(true);
 
         let worker = Self { peer_session };
 
@@ -189,7 +188,6 @@ impl gasket::framework::Worker<Stage> for Worker {
 
                 match batch {
                     PullBatch::BlockRange(start, end) => {
-                        let end_point = end.clone();
                         let blocks = self
                             .peer_session
                             .blockfetch()
@@ -198,10 +196,6 @@ impl gasket::framework::Worker<Stage> for Worker {
                             .or_restart()?;
 
                         info!(len = blocks.len(), "block batch pulled from peer");
-
-                        if !blocks.is_empty() {
-                            stage.track_latest_block(&end_point);
-                        }
 
                         stage.quota.consume_blocks(blocks.len() as u64);
                         stage.flush_blocks(blocks).await?;
@@ -235,11 +229,10 @@ impl gasket::framework::Worker<Stage> for Worker {
                         let block = self
                             .peer_session
                             .blockfetch()
-                            .fetch_single(point.clone())
+                            .fetch_single(point)
                             .await
                             .or_restart()?;
 
-                        stage.track_latest_block(&point);
                         stage.flush_blocks(vec![block]).await?;
                         stage.quota.consume_blocks(1);
                         stage.track_tip(&tip);
@@ -269,7 +262,6 @@ pub struct Stage {
     block_fetch_batch_size: usize,
     wal: WalAdapter,
     quota: PullQuota,
-    health: Health,
 
     pub downstream: DownstreamPort,
 
@@ -281,19 +273,13 @@ pub struct Stage {
 }
 
 impl Stage {
-    pub fn new(
-        config: &SyncConfig,
-        upstream: &PeerConfig,
-        wal: WalAdapter,
-        health: Health,
-    ) -> Self {
+    pub fn new(config: &SyncConfig, upstream: &PeerConfig, wal: WalAdapter) -> Self {
         Self {
             peer_address: upstream.peer_address.clone(),
             network_magic: upstream.network_magic,
             quota: config.sync_limit.clone().into(),
             block_fetch_batch_size: config.pull_batch_size.unwrap_or(50),
             wal,
-            health,
             downstream: Default::default(),
             block_count: Default::default(),
             chain_tip: Default::default(),
@@ -327,21 +313,5 @@ impl Stage {
 
     fn track_tip(&self, tip: &Tip) {
         self.chain_tip.set(tip.0.slot_or_default() as i64);
-        self.health.set_node_tip(tip.clone());
-        dbg!(tip);
-    }
-
-    fn track_latest_block(&self, point: &Point) {
-        let Point::Specific(slot, hash) = point else {
-            return;
-        };
-
-        let Ok(hash) = hash.as_slice().try_into() else {
-            return;
-        };
-
-        let hash = BlockHash::new(hash);
-        self.health.set_latest_block(hash, *slot, SystemTime::now());
-        dbg!("latest block", point);
     }
 }

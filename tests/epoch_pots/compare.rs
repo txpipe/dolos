@@ -49,7 +49,7 @@ pub fn compare_csvs_with_ignore(
     let mut ignored = 0usize;
 
     for record in diff_results.as_slice() {
-        if ignore(record) {
+        if ignore(&record) {
             ignored += 1;
             continue;
         }
