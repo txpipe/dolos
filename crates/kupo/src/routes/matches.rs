@@ -34,27 +34,27 @@ pub async fn by_pattern<D: Domain>(
         Err(err) => return err.into_response(),
     };
 
-    let (refs, filter) = match patterns::Pattern::parse(&pattern) {
-        Ok(patterns::Pattern::Address(pattern)) => {
-            match refs_for_address_pattern(&facade, &pattern) {
-                Ok(result) => result,
-                Err(err) => return err.into_response(),
-            }
-        }
-        Ok(patterns::Pattern::Asset(pattern)) => match refs_for_asset_pattern(&facade, &pattern) {
+    let parsed = match patterns::Pattern::parse(&pattern) {
+        Ok(parsed) => parsed,
+        Err(err) => return bad_request(err.to_string()),
+    };
+
+    let (refs, filter) = match &parsed {
+        patterns::Pattern::Address(pattern) => match refs_for_address_pattern(&facade, pattern) {
             Ok(result) => result,
             Err(err) => return err.into_response(),
         },
-        Ok(patterns::Pattern::OutputRef(pattern)) => {
-            match refs_for_output_ref_pattern(&facade, &pattern).await {
+        patterns::Pattern::Asset(pattern) => match refs_for_asset_pattern(&facade, pattern) {
+            Ok(result) => result,
+            Err(err) => return err.into_response(),
+        },
+        patterns::Pattern::OutputRef(pattern) => {
+            match refs_for_output_ref_pattern(&facade, pattern).await {
                 Ok(result) => result,
                 Err(err) => return err.into_response(),
             }
         }
-        Ok(patterns::Pattern::Any) => {
-            return bad_request("wildcard patterns are not supported yet")
-        }
-        Err(err) => return bad_request(err.to_string()),
+        patterns::Pattern::Any => return bad_request("wildcard patterns are not supported"),
     };
 
     let matches = match build_matches(&facade, refs, filter, filters.resolve_hashes).await {
@@ -99,6 +99,7 @@ struct MatchResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     script: Option<serde_json::Value>,
     created_at: PointResponse,
+    #[serde(skip_serializing_if = "Option::is_none")]
     spent_at: Option<serde_json::Value>,
 }
 
@@ -445,19 +446,8 @@ async fn build_matches<D: Domain>(
         let output = MultiEraOutput::try_from(cbor).map_err(|_| MatchError::Internal)?;
         let address = output.address().map_err(|_| MatchError::Internal)?;
 
-        match &filter {
-            OutputFilter::None => {}
-            OutputFilter::Address(filter_pattern) => {
-                let pattern = patterns::Pattern::Address(filter_pattern.clone());
-                if !pattern.matches_address(&address) {
-                    continue;
-                }
-            }
-            OutputFilter::Asset(asset_filter) => {
-                if !output_has_asset(&output, asset_filter) {
-                    continue;
-                }
-            }
+        if !matches_output_filter(&output, &address, &filter) {
+            continue;
         }
 
         let tx_hash = txo_ref.0;
@@ -484,30 +474,10 @@ async fn build_matches<D: Domain>(
             }
         };
 
-        let (datum_hash, datum_type) = match output.datum() {
-            None => (None, None),
-            Some(DatumOption::Hash(hash)) => (Some(hash.to_string()), Some("hash".to_string())),
-            Some(DatumOption::Data(data)) => (
-                Some(data.original_hash().to_string()),
-                Some("inline".to_string()),
-            ),
-        };
-
-        let script_hash: Option<pallas::crypto::hash::Hash<28>> =
-            output.script_ref().map(|script| match script {
-                ScriptRef::NativeScript(x) => x.original_hash(),
-                ScriptRef::PlutusV1Script(x) => x.compute_hash(),
-                ScriptRef::PlutusV2Script(x) => x.compute_hash(),
-                ScriptRef::PlutusV3Script(x) => x.compute_hash(),
-            });
-
-        let (datum, script) = if resolve_hashes {
-            let datum = resolve_datum(facade, output.datum()).await?;
-            let script = resolve_script(facade, script_hash).await?;
-            (Some(datum), Some(script))
-        } else {
-            (None, None)
-        };
+        let (datum_hash, datum_type) = output_datum_info(&output);
+        let script_hash = output_script_hash(&output);
+        let (datum, script) =
+            resolve_output_extras(facade, &output, script_hash, resolve_hashes).await?;
 
         out.push(MatchResponse {
             transaction_index: block_info
@@ -554,6 +524,56 @@ fn output_has_asset(output: &MultiEraOutput<'_>, filter: &AssetFilter) -> bool {
     false
 }
 
+fn matches_output_filter(
+    output: &MultiEraOutput<'_>,
+    address: &Address,
+    filter: &OutputFilter,
+) -> bool {
+    match filter {
+        OutputFilter::None => true,
+        OutputFilter::Address(filter_pattern) => {
+            let pattern = patterns::Pattern::Address(filter_pattern.clone());
+            pattern.matches_address(address)
+        }
+        OutputFilter::Asset(asset_filter) => output_has_asset(output, asset_filter),
+    }
+}
+
+fn output_datum_info(output: &MultiEraOutput<'_>) -> (Option<String>, Option<String>) {
+    match output.datum() {
+        None => (None, None),
+        Some(DatumOption::Hash(hash)) => (Some(hash.to_string()), Some("hash".to_string())),
+        Some(DatumOption::Data(data)) => (
+            Some(data.original_hash().to_string()),
+            Some("inline".to_string()),
+        ),
+    }
+}
+
+fn output_script_hash(output: &MultiEraOutput<'_>) -> Option<pallas::crypto::hash::Hash<28>> {
+    output.script_ref().map(|script| match script {
+        ScriptRef::NativeScript(x) => x.original_hash(),
+        ScriptRef::PlutusV1Script(x) => x.compute_hash(),
+        ScriptRef::PlutusV2Script(x) => x.compute_hash(),
+        ScriptRef::PlutusV3Script(x) => x.compute_hash(),
+    })
+}
+
+async fn resolve_output_extras<D: Domain>(
+    facade: &Facade<D>,
+    output: &MultiEraOutput<'_>,
+    script_hash: Option<pallas::crypto::hash::Hash<28>>,
+    resolve_hashes: bool,
+) -> Result<(Option<serde_json::Value>, Option<serde_json::Value>), MatchError> {
+    if resolve_hashes {
+        let datum = resolve_datum(facade, output.datum()).await?;
+        let script = resolve_script(facade, script_hash).await?;
+        Ok((Some(datum), Some(script)))
+    } else {
+        Ok((None, None))
+    }
+}
+
 fn map_value(value: MultiEraValue<'_>) -> ValueResponse {
     let mut assets: HashMap<String, u64> = HashMap::new();
     for policy in value.assets() {
@@ -592,10 +612,13 @@ async fn resolve_datum<D: Domain>(
         DatumOption::Hash(hash) => {
             let resolved = facade
                 .query()
-                .get_datum(&hash)
+                .plutus_data(&hash)
                 .await
                 .map_err(|_| MatchError::Internal)?;
             Ok(resolved
+                .map(minicbor::to_vec)
+                .transpose()
+                .map_err(|_| MatchError::Internal)?
                 .map(hex::encode)
                 .map(serde_json::Value::String)
                 .unwrap_or(serde_json::Value::Null))
