@@ -923,6 +923,8 @@ impl MempoolStore for RedbMempool {
                         events.push(tx);
                     } else {
                         InflightTable::write(wx, &tx_hash, &record)?;
+                        let tx = record.to_mempool_tx(tx_hash);
+                        events.push(tx);
                     }
                 } else {
                     record.mark_stale();
