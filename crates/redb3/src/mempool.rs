@@ -909,6 +909,21 @@ impl MempoolStore for RedbMempool {
                     tx.retry();
                     info!(tx.hash = %tx.hash, "retry tx (redb)");
                     events.push(tx);
+                } else if record.stage == InflightStage::Confirmed {
+                    // Already confirmed on-chain; treat subsequent blocks as
+                    // additional confirmations (increasing depth).
+                    record.confirm(&point);
+                    if record.is_finalizable(finalize_threshold) {
+                        let mut tx = record.to_mempool_tx(tx_hash);
+                        let log_entry = record.into_finalized_entry(tx_hash);
+                        InflightTable::remove(wx, &tx_hash)?;
+                        FinalizedTable::append(wx, log_entry)?;
+                        tx.stage = MempoolTxStage::Finalized;
+                        info!(tx.hash = %tx.hash, "tx finalized (redb)");
+                        events.push(tx);
+                    } else {
+                        InflightTable::write(wx, &tx_hash, &record)?;
+                    }
                 } else {
                     record.mark_stale();
                     // Check if this tx should be dropped
