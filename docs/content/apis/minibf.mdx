@@ -49,7 +49,11 @@ Dolos provides many, but not all of the Blockfrost endpoints. The following list
 | `/pools/extended`                          | Get extended pool information                            |
 | `/pools/{id}/delegators`                   | Get delegators for a specific pool                       |
 | `/pools/{id}/history`                      | Get history for a specific pool                          |
+| `/scripts/{script_hash}`                   | Get script information                                   |
+| `/scripts/{script_hash}/json`              | Get script JSON                                          |
+| `/scripts/{script_hash}/cbor`              | Get script CBOR                                          |
 | `/scripts/datum/{datum_hash}`              | Get datum by hash                                        |
+| `/scripts/datum/{datum_hash}/cbor`         | Get datum CBOR by hash                                   |
 | `/tx/submit`                               | Submit a transaction                                     |
 | `/txs/{tx_hash}`                           | Get transaction information                              |
 | `/txs/{tx_hash}/cbor`                      | Get CBOR data for a transaction                          |
