@@ -1,10 +1,14 @@
 use jsonrpsee::types::Params;
 use pallas::{codec::utils::NonEmptySet, ledger::primitives::conway::VKeyWitness};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use tx3_resolver::trp::{ResolveParams, SubmitParams, SubmitResponse, SubmitWitness, TxEnvelope};
+use tx3_resolver::trp::{
+    ChainPoint, CheckStatusResponse, DumpLogsResponse, InflightTx, PeekInflightResponse,
+    PeekPendingResponse, PendingTx, ResolveParams, SubmitParams, SubmitResponse, TxEnvelope, TxLog,
+    TxStatus, TxWitness,
+};
 
 use dolos_core::{Domain, MempoolAwareUtxoStore, MempoolStore as _, StateStore as _, SubmitExt};
 
@@ -45,12 +49,12 @@ pub async fn trp_resolve<D: Domain>(
     })
 }
 
-fn apply_witnesses(original: &[u8], witnesses: &[SubmitWitness]) -> Result<Vec<u8>, Error> {
+fn apply_witnesses(original: &[u8], witnesses: &[TxWitness]) -> Result<Vec<u8>, Error> {
     let tx = pallas::ledger::traverse::MultiEraTx::decode(original)?;
 
     let mut tx = tx.as_conway().ok_or(Error::UnsupportedTxEra)?.to_owned();
 
-    let map_witness = |witness: &SubmitWitness| VKeyWitness {
+    let map_witness = |witness: &TxWitness| VKeyWitness {
         vkey: Vec::<u8>::from(witness.key.clone()).into(),
         signature: Vec::<u8>::from(witness.signature.clone()).into(),
     };
@@ -102,19 +106,6 @@ struct CheckStatusParams {
     hashes: Vec<String>,
 }
 
-#[derive(Clone, Serialize)]
-pub(crate) struct TxStatusInfo {
-    stage: String,
-    confirmations: u32,
-    non_confirmations: u32,
-    confirmed_at: Option<(u64, String)>,
-}
-
-#[derive(Clone, Serialize)]
-pub(crate) struct CheckStatusResponse {
-    statuses: HashMap<String, TxStatusInfo>,
-}
-
 fn stage_to_string(stage: &dolos_core::MempoolTxStage) -> &'static str {
     match stage {
         dolos_core::MempoolTxStage::Pending => "pending",
@@ -128,14 +119,14 @@ fn stage_to_string(stage: &dolos_core::MempoolTxStage) -> &'static str {
     }
 }
 
-fn chain_point_to_tuple(point: &dolos_core::ChainPoint) -> (u64, String) {
-    (
-        point.slot(),
-        point
+fn chain_point_to_spec(point: &dolos_core::ChainPoint) -> ChainPoint {
+    ChainPoint {
+        slot: point.slot(),
+        block_hash: point
             .hash()
             .map(|h| hex::encode(h.as_ref()))
             .unwrap_or_default(),
-    )
+    }
 }
 
 pub async fn trp_check_status<D: Domain>(
@@ -166,11 +157,11 @@ pub async fn trp_check_status<D: Domain>(
 
         statuses.insert(
             hash_hex.clone(),
-            TxStatusInfo {
+            TxStatus {
                 stage: stage_to_string(&status.stage).to_string(),
-                confirmations: status.confirmations,
-                non_confirmations: status.non_confirmations,
-                confirmed_at: status.confirmed_at.as_ref().map(chain_point_to_tuple),
+                confirmations: status.confirmations as u64,
+                non_confirmations: status.non_confirmations as u64,
+                confirmed_at: status.confirmed_at.as_ref().map(chain_point_to_spec),
             },
         );
     }
@@ -185,23 +176,6 @@ struct DumpLogsParams {
     cursor: Option<u64>,
     limit: Option<usize>,
     include_payload: Option<bool>,
-}
-
-#[derive(Clone, Serialize)]
-pub(crate) struct LogEntry {
-    hash: String,
-    stage: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    payload: Option<String>,
-    confirmations: u32,
-    non_confirmations: u32,
-    confirmed_at: Option<(u64, String)>,
-}
-
-#[derive(Clone, Serialize)]
-pub(crate) struct DumpLogsResponse {
-    entries: Vec<LogEntry>,
-    next_cursor: Option<u64>,
 }
 
 pub async fn trp_dump_logs<D: Domain>(
@@ -221,7 +195,7 @@ pub async fn trp_dump_logs<D: Domain>(
 
     let entries = entries
         .iter()
-        .map(|e| LogEntry {
+        .map(|e| TxLog {
             hash: hex::encode(e.hash.as_ref()),
             stage: stage_to_string(&e.stage).to_string(),
             payload: if include_payload {
@@ -229,9 +203,9 @@ pub async fn trp_dump_logs<D: Domain>(
             } else {
                 None
             },
-            confirmations: e.confirmations,
-            non_confirmations: e.non_confirmations,
-            confirmed_at: e.confirmed_at.as_ref().map(chain_point_to_tuple),
+            confirmations: e.confirmations as u64,
+            non_confirmations: e.non_confirmations as u64,
+            confirmed_at: e.confirmed_at.as_ref().map(chain_point_to_spec),
         })
         .collect();
 
@@ -247,19 +221,6 @@ pub async fn trp_dump_logs<D: Domain>(
 struct PeekPendingParams {
     limit: Option<usize>,
     include_payload: Option<bool>,
-}
-
-#[derive(Clone, Serialize)]
-struct PendingTxInfo {
-    hash: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    payload: Option<String>,
-}
-
-#[derive(Clone, Serialize)]
-pub(crate) struct PeekPendingResponse {
-    entries: Vec<PendingTxInfo>,
-    has_more: bool,
 }
 
 pub async fn trp_peek_pending<D: Domain>(
@@ -279,7 +240,7 @@ pub async fn trp_peek_pending<D: Domain>(
     let entries = peeked
         .iter()
         .take(limit)
-        .map(|tx| PendingTxInfo {
+        .map(|tx| PendingTx {
             hash: hex::encode(tx.hash.as_ref()),
             payload: if include_payload {
                 Some(hex::encode(&tx.payload.1))
@@ -300,23 +261,6 @@ struct PeekInflightParams {
     include_payload: Option<bool>,
 }
 
-#[derive(Clone, Serialize)]
-struct InflightTxInfo {
-    hash: String,
-    stage: String,
-    confirmations: u32,
-    non_confirmations: u32,
-    confirmed_at: Option<(u64, String)>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    payload: Option<String>,
-}
-
-#[derive(Clone, Serialize)]
-pub(crate) struct PeekInflightResponse {
-    entries: Vec<InflightTxInfo>,
-    has_more: bool,
-}
-
 pub async fn trp_peek_inflight<D: Domain>(
     params: Params<'_>,
     context: Arc<Context<D>>,
@@ -334,12 +278,12 @@ pub async fn trp_peek_inflight<D: Domain>(
     let entries = peeked
         .iter()
         .take(limit)
-        .map(|tx| InflightTxInfo {
+        .map(|tx| InflightTx {
             hash: hex::encode(tx.hash.as_ref()),
             stage: stage_to_string(&tx.stage).to_string(),
-            confirmations: tx.confirmations,
-            non_confirmations: tx.non_confirmations,
-            confirmed_at: tx.confirmed_at.as_ref().map(chain_point_to_tuple),
+            confirmations: tx.confirmations as u64,
+            non_confirmations: tx.non_confirmations as u64,
+            confirmed_at: tx.confirmed_at.as_ref().map(chain_point_to_spec),
             payload: if include_payload {
                 Some(hex::encode(&tx.payload.1))
             } else {
