@@ -106,6 +106,34 @@ struct CheckStatusParams {
     hashes: Vec<String>,
 }
 
+// ── trp.dumpLogs ────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct DumpLogsParams {
+    cursor: Option<u64>,
+    limit: Option<usize>,
+    #[serde(rename = "includePayload")]
+    include_payload: Option<bool>,
+}
+
+// ── trp.peekPending ─────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct PeekPendingParams {
+    limit: Option<usize>,
+    #[serde(rename = "includePayload")]
+    include_payload: Option<bool>,
+}
+
+// ── trp.peekInflight ────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct PeekInflightParams {
+    limit: Option<usize>,
+    #[serde(rename = "includePayload")]
+    include_payload: Option<bool>,
+}
+
 fn stage_to_string(stage: &dolos_core::MempoolTxStage) -> &'static str {
     match stage {
         dolos_core::MempoolTxStage::Pending => "pending",
@@ -171,13 +199,6 @@ pub async fn trp_check_status<D: Domain>(
 
 // ── trp.dumpLogs ────────────────────────────────────────────────────────
 
-#[derive(Deserialize)]
-struct DumpLogsParams {
-    cursor: Option<u64>,
-    limit: Option<usize>,
-    include_payload: Option<bool>,
-}
-
 pub async fn trp_dump_logs<D: Domain>(
     params: Params<'_>,
     context: Arc<Context<D>>,
@@ -217,12 +238,6 @@ pub async fn trp_dump_logs<D: Domain>(
 
 // ── trp.peekPending ─────────────────────────────────────────────────────
 
-#[derive(Deserialize)]
-struct PeekPendingParams {
-    limit: Option<usize>,
-    include_payload: Option<bool>,
-}
-
 pub async fn trp_peek_pending<D: Domain>(
     params: Params<'_>,
     context: Arc<Context<D>>,
@@ -254,12 +269,6 @@ pub async fn trp_peek_pending<D: Domain>(
 }
 
 // ── trp.peekInflight ────────────────────────────────────────────────────
-
-#[derive(Deserialize)]
-struct PeekInflightParams {
-    limit: Option<usize>,
-    include_payload: Option<bool>,
-}
 
 pub async fn trp_peek_inflight<D: Domain>(
     params: Params<'_>,
@@ -488,7 +497,7 @@ mod tests {
         assert!(!response.has_more);
 
         // Peek with include_payload — should include cbor
-        let req = json!({ "include_payload": true }).to_string();
+        let req = json!({ "includePayload": true }).to_string();
         let params = Params::new(Some(req.as_str()));
 
         let response = trp_peek_pending(params, context).await.unwrap();
