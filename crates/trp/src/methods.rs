@@ -497,7 +497,7 @@ mod tests {
         assert!(!response.has_more);
 
         // Peek with include_payload — should include cbor
-        let req = json!({ "include_payload": true }).to_string();
+        let req = json!({ "includePayload": true }).to_string();
         let params = Params::new(Some(req.as_str()));
 
         let response = trp_peek_pending(params, context).await.unwrap();
