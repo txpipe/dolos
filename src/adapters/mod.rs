@@ -168,6 +168,39 @@ impl Domain for DomainAdapter {
 }
 
 impl pallas::interop::utxorpc::LedgerContext for DomainAdapter {
+    fn get_historical_utxos(
+        &self,
+        refs: &[pallas::interop::utxorpc::TxoRef],
+    ) -> Option<pallas::interop::utxorpc::UtxoMap> {
+        if refs.is_empty() {
+            return Some(Default::default());
+        }
+
+        let mut result = std::collections::HashMap::new();
+        let refs_set: std::collections::HashSet<_> =
+            refs.iter().copied().map(TxoRef::from).collect();
+
+        let iter = self.wal().iter_logs(None, None).ok()?;
+        for (_, log) in iter.rev() {
+            for (txo_ref, era_cbor) in &log.inputs {
+                if refs_set.contains(txo_ref) {
+                    let era = era_cbor.0.try_into().expect("era out of range");
+                    result.insert(txo_ref.clone().into(), (era, era_cbor.1.clone()));
+                }
+            }
+
+            if result.len() == refs.len() {
+                break;
+            }
+        }
+
+        if result.is_empty() {
+            None
+        } else {
+            Some(result)
+        }
+    }
+
     fn get_utxos(
         &self,
         refs: &[pallas::interop::utxorpc::TxoRef],

@@ -54,8 +54,8 @@ gasket = { version = "^0.9", features = ["derive"] }
 clap = { version = "4.5.37", features = ["derive"] }
 log = "0.4.18"
 config = { version = "0.15.19", default-features = false, features = [
-    "toml",
-    "json",
+  "toml",
+  "json",
 ] }
 lazy_static = "1.4.0"
 tracing-subscriber = "0.3.17"
@@ -86,10 +86,10 @@ http = "1.3.1"
 hyper = "1.5"
 
 mithril-client = { version = "0.12.2", optional = true, default-features = false, features = [
-    "fs",
-    "num-integer-backend",
-    "rustls-tls",
-    "rustls-tls-webpki-roots",
+  "fs",
+  "num-integer-backend",
+  "rustls-tls",
+  "rustls-tls-webpki-roots",
 ] }
 
 [dev-dependencies]
@@ -136,12 +136,12 @@ debug = ["console-subscriber", "tokio/tracing"]
 # Service features
 grpc = ["tonic", "tonic-web", "tonic-reflection", "tower-http/cors"]
 minibf = [
-    "dolos-minibf",
-    "axum",
-    "http-body-util",
-    "tower-http/cors",
-    "tower-http/trace",
-    "tower-http/normalize-path",
+  "dolos-minibf",
+  "axum",
+  "http-body-util",
+  "tower-http/cors",
+  "tower-http/trace",
+  "tower-http/normalize-path",
 ]
 trp = ["dolos-trp"]
 
@@ -155,13 +155,13 @@ lto = "thin"
 
 [workspace]
 members = [
-    "crates/cardano",
-    "crates/core",
-    "crates/fjall",
-    "crates/testing",
-    "crates/minibf",
-    "crates/redb3",
-    "xtask",
+  "crates/cardano",
+  "crates/core",
+  "crates/fjall",
+  "crates/testing",
+  "crates/minibf",
+  "crates/redb3",
+  "xtask",
 ]
 
 [workspace.package]
@@ -176,8 +176,8 @@ authors = ["TxPipe <hello@txpipe.io>"]
 
 [workspace.dependencies]
 # pallas = { git = "https://github.com/txpipe/pallas.git", rev = "4986428", features = ["hardano", "phase2"] }
-pallas = { version = "1.0.0-alpha.4", features = ["hardano", "phase2", "unstable"] }
-# pallas = { path = "../pallas/pallas", features = ["hardano", "phase2"] }
+#pallas = { version = "1.0.0-alpha.4", features = ["hardano", "phase2", "unstable"] }
+pallas = { path = "../pallas/pallas", features = ["hardano", "phase2"] }
 
 thiserror = "2.0.12"
 hex = "0.4.3"
@@ -195,16 +195,16 @@ tokio-util = { version = "0.7.11", features = ["rt"] }
 tokio-stream = { version = "0.1.14", features = ["sync"] }
 tower = "0.4"
 tower-http = { version = "0.6.1", features = [
-    "cors",
-    "trace",
-    "normalize-path",
+  "cors",
+  "trace",
+  "normalize-path",
 ] }
 serde_json = "1.0.122"
 base64 = "0.22.1"
 bech32 = "0.11.1"
 reqwest = { version = "0.12.7", default-features = false, features = [
-    "blocking",
-    "rustls-tls",
+  "blocking",
+  "rustls-tls",
 ] }
 rayon = "1.11.0"
 xxhash-rust = { version = "0.8.15", features = ["xxh3", "const_xxh3"] }
@@ -221,12 +221,12 @@ publish = false
 tag-name = "v{{version}}"
 pre-release-commit-message = "release: v{{version}}"
 pre-release-hook = [
-    "git",
-    "cliff",
-    "-o",
-    "CHANGELOG.md",
-    "--tag",
-    "{{version}}",
+  "git",
+  "cliff",
+  "-o",
+  "CHANGELOG.md",
+  "--tag",
+  "{{version}}",
 ]
 
 [lints.clippy]
