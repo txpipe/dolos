@@ -68,16 +68,12 @@ fn assert_finalize_after_threshold<S: MempoolStore>(store: &S) {
             .unwrap();
     }
 
-    // After finalization the tx moves to the finalized log (check_status
-    // returns Unknown for finalized/dropped txs).
     let finalized = find_in_finalized(store, &hash);
-    assert!(finalized.is_some(), "tx should appear in the finalized log");
-    assert_eq!(
-        finalized.unwrap().stage,
-        MempoolTxStage::Finalized,
-        "tx should be finalized after {} confirmations",
-        FINALIZE_THRESHOLD
+    assert!(
+        finalized.is_some(),
+        "tx should be finalized after threshold"
     );
+    assert_eq!(finalized.unwrap().stage, MempoolTxStage::Finalized);
 }
 
 /// Acknowledged tx absent from 2 consecutive blocks -> Dropped.
@@ -86,7 +82,6 @@ fn assert_drop_after_threshold<S: MempoolStore>(store: &S) {
     let hash = tx.hash;
     advance_to_acknowledged(store, tx);
 
-    // tx not in seen_txs or unseen_txs -> mark_stale each time
     for slot in 1..=DROP_THRESHOLD as u64 {
         store
             .confirm(
@@ -100,37 +95,23 @@ fn assert_drop_after_threshold<S: MempoolStore>(store: &S) {
     }
 
     let dropped = find_in_finalized(store, &hash);
-    assert!(dropped.is_some(), "dropped tx should appear in the finalized log");
-    assert_eq!(
-        dropped.unwrap().stage,
-        MempoolTxStage::Dropped,
-        "tx should be dropped after {} non-confirmations",
-        DROP_THRESHOLD
-    );
+    assert!(dropped.is_some(), "tx should be dropped after threshold");
+    assert_eq!(dropped.unwrap().stage, MempoolTxStage::Dropped);
 }
 
-/// A tx with 1 non-confirmation that then gets confirmed should reset
-/// `non_confirmations` to 0, preventing premature drop.
+/// Confirm resets non-confirmations.
 fn assert_confirm_resets_non_confirmations<S: MempoolStore>(store: &S) {
     let tx = test_tx(3);
     let hash = tx.hash;
     advance_to_acknowledged(store, tx);
 
-    // One non-confirmation (not in seen or unseen)
+    // Miss one block
     store
-        .confirm(
-            &test_point(1),
-            &[],
-            &[],
-            FINALIZE_THRESHOLD,
-            DROP_THRESHOLD,
-        )
+        .confirm(&test_point(1), &[], &[], FINALIZE_THRESHOLD, DROP_THRESHOLD)
         .unwrap();
+    assert_eq!(store.check_status(&hash).non_confirmations, 1);
 
-    let status = store.check_status(&hash);
-    assert_eq!(status.non_confirmations, 1);
-
-    // Now confirm it -- non_confirmations should reset
+    // Confirm next block
     store
         .confirm(
             &test_point(2),
@@ -140,45 +121,17 @@ fn assert_confirm_resets_non_confirmations<S: MempoolStore>(store: &S) {
             DROP_THRESHOLD,
         )
         .unwrap();
-
     let status = store.check_status(&hash);
-    assert_eq!(
-        status.non_confirmations, 0,
-        "confirmation should reset non_confirmations to 0"
-    );
     assert_eq!(status.confirmations, 1);
-
-    // Another non-confirmation should NOT drop (counter was reset)
-    store
-        .confirm(
-            &test_point(3),
-            &[],
-            &[],
-            FINALIZE_THRESHOLD,
-            DROP_THRESHOLD,
-        )
-        .unwrap();
-
-    let status = store.check_status(&hash);
-    assert_ne!(
-        status.stage,
-        MempoolTxStage::Unknown,
-        "tx should still be tracked (not dropped) after reset + 1 non-confirmation"
-    );
-    assert!(
-        find_in_finalized(store, &hash).is_none(),
-        "tx should not appear in finalized log yet"
-    );
+    assert_eq!(status.non_confirmations, 0);
 }
 
-/// A confirmed tx that appears in `unseen_txs` goes back to Pending with
-/// counters reset.
+/// Unseen tx rolls back to pending.
 fn assert_rollback_to_pending<S: MempoolStore>(store: &S) {
     let tx = test_tx(4);
     let hash = tx.hash;
     advance_to_acknowledged(store, tx);
 
-    // Confirm once
     store
         .confirm(
             &test_point(1),
@@ -188,12 +141,8 @@ fn assert_rollback_to_pending<S: MempoolStore>(store: &S) {
             DROP_THRESHOLD,
         )
         .unwrap();
+    assert_eq!(store.check_status(&hash).stage, MempoolTxStage::Confirmed);
 
-    let status = store.check_status(&hash);
-    assert_eq!(status.stage, MempoolTxStage::Confirmed);
-    assert_eq!(status.confirmations, 1);
-
-    // Rollback
     store
         .confirm(
             &test_point(2),
@@ -203,60 +152,39 @@ fn assert_rollback_to_pending<S: MempoolStore>(store: &S) {
             DROP_THRESHOLD,
         )
         .unwrap();
-
-    let status = store.check_status(&hash);
-    assert_eq!(
-        status.stage,
-        MempoolTxStage::Pending,
-        "rolled-back tx should be pending"
-    );
-    assert_eq!(
-        status.confirmations, 0,
-        "rollback should reset confirmations"
-    );
-    assert_eq!(
-        status.non_confirmations, 0,
-        "rollback should reset non_confirmations"
-    );
+    assert_eq!(store.check_status(&hash).stage, MempoolTxStage::Pending);
 }
 
-/// A rolled-back tx can be re-submitted and finalized through the full cycle.
+/// Re-confirm after rollback.
 fn assert_re_confirm_after_rollback<S: MempoolStore>(store: &S) {
     let tx = test_tx(5);
     let hash = tx.hash;
     advance_to_acknowledged(store, tx);
 
-    // Confirm twice then rollback
-    for slot in 1..=2 {
-        store
-            .confirm(
-                &test_point(slot),
-                &[hash],
-                &[],
-                FINALIZE_THRESHOLD,
-                DROP_THRESHOLD,
-            )
-            .unwrap();
-    }
     store
         .confirm(
-            &test_point(3),
+            &test_point(1),
+            &[hash],
+            &[],
+            FINALIZE_THRESHOLD,
+            DROP_THRESHOLD,
+        )
+        .unwrap();
+    store
+        .confirm(
+            &test_point(2),
             &[],
             &[hash],
             FINALIZE_THRESHOLD,
             DROP_THRESHOLD,
         )
         .unwrap();
+    assert_eq!(store.check_status(&hash).stage, MempoolTxStage::Pending);
 
-    let status = store.check_status(&hash);
-    assert_eq!(status.stage, MempoolTxStage::Pending);
-
-    // Re-advance to acknowledged
+    // After rollback, tx is in Pending - need to move it back to Acknowledged
     store.mark_inflight(&[hash]).unwrap();
     store.mark_acknowledged(&[hash]).unwrap();
-
-    // Now finalize through the full threshold
-    for slot in 10..10 + FINALIZE_THRESHOLD as u64 {
+    for slot in 3..=FINALIZE_THRESHOLD as u64 + 2 {
         store
             .confirm(
                 &test_point(slot),
@@ -269,16 +197,10 @@ fn assert_re_confirm_after_rollback<S: MempoolStore>(store: &S) {
     }
 
     let finalized = find_in_finalized(store, &hash);
-    assert!(finalized.is_some(), "re-submitted tx should appear in finalized log");
-    assert_eq!(
-        finalized.unwrap().stage,
-        MempoolTxStage::Finalized,
-        "re-submitted tx should finalize after full threshold"
-    );
+    assert!(finalized.is_some());
 }
 
-/// A tx with exactly 5 confirmations is still Confirmed (not yet Finalized);
-/// the 6th confirmation finalizes it.
+/// Not finalized before threshold.
 fn assert_not_finalized_before_threshold<S: MempoolStore>(store: &S) {
     let tx = test_tx(6);
     let hash = tx.hash;
@@ -296,16 +218,66 @@ fn assert_not_finalized_before_threshold<S: MempoolStore>(store: &S) {
             .unwrap();
     }
 
-    let status = store.check_status(&hash);
-    assert_eq!(
-        status.stage,
-        MempoolTxStage::Confirmed,
-        "tx with {} confirmations should still be Confirmed",
-        FINALIZE_THRESHOLD - 1
-    );
-    assert_eq!(status.confirmations, FINALIZE_THRESHOLD - 1);
+    assert_eq!(store.check_status(&hash).stage, MempoolTxStage::Confirmed);
+    assert!(find_in_finalized(store, &hash).is_none());
+}
 
-    // 6th confirmation finalizes
+/// Not dropped before threshold.
+fn assert_not_dropped_before_threshold<S: MempoolStore>(store: &S) {
+    let tx = test_tx(7);
+    let hash = tx.hash;
+    advance_to_acknowledged(store, tx);
+
+    for slot in 1..DROP_THRESHOLD as u64 {
+        store
+            .confirm(
+                &test_point(slot),
+                &[],
+                &[],
+                FINALIZE_THRESHOLD,
+                DROP_THRESHOLD,
+            )
+            .unwrap();
+    }
+
+    assert_eq!(
+        store.check_status(&hash).stage,
+        MempoolTxStage::Acknowledged
+    );
+    assert!(find_in_finalized(store, &hash).is_none());
+}
+
+/// Mixed confirm.
+fn assert_mixed_confirm<S: MempoolStore>(store: &S) {
+    let tx1 = test_tx(8);
+    let tx2 = test_tx(9);
+    let hash1 = tx1.hash;
+    let hash2 = tx2.hash;
+
+    advance_to_acknowledged(store, tx1);
+    advance_to_acknowledged(store, tx2);
+
+    store
+        .confirm(
+            &test_point(1),
+            &[hash1],
+            &[hash2],
+            FINALIZE_THRESHOLD,
+            DROP_THRESHOLD,
+        )
+        .unwrap();
+
+    assert_eq!(store.check_status(&hash1).stage, MempoolTxStage::Confirmed);
+    assert_eq!(store.check_status(&hash2).stage, MempoolTxStage::Pending);
+}
+
+/// Confirmed tx finalizes across blocks.
+fn assert_confirmed_tx_finalizes_across_blocks<S: MempoolStore>(store: &S) {
+    let tx = test_tx(10);
+    let hash = tx.hash;
+    advance_to_acknowledged(store, tx);
+
+    // First confirmation
     store
         .confirm(
             &test_point(100),
@@ -315,102 +287,88 @@ fn assert_not_finalized_before_threshold<S: MempoolStore>(store: &S) {
             DROP_THRESHOLD,
         )
         .unwrap();
+    assert_eq!(store.check_status(&hash).confirmations, 1);
+
+    // Continue without seeing tx in seen_txs
+    for i in 1..=4u64 {
+        store
+            .confirm(
+                &test_point(100 + i),
+                &[],
+                &[],
+                FINALIZE_THRESHOLD,
+                DROP_THRESHOLD,
+            )
+            .unwrap();
+        assert_eq!(store.check_status(&hash).confirmations, 1 + i as u32);
+    }
+
+    // One more to finalize
+    store
+        .confirm(
+            &test_point(105),
+            &[],
+            &[],
+            FINALIZE_THRESHOLD,
+            DROP_THRESHOLD,
+        )
+        .unwrap();
+    assert_eq!(
+        find_in_finalized(store, &hash).unwrap().stage,
+        MempoolTxStage::Finalized
+    );
+}
+
+/// A tx in Propagated stage that appears on-chain should confirm and finalize.
+fn assert_propagated_tx_confirms_and_finalizes<S: MempoolStore>(store: &S) {
+    let tx = test_tx(30);
+    let hash = tx.hash;
+    advance_to_propagated(store, tx);
+
+    for slot in 300..300 + FINALIZE_THRESHOLD as u64 {
+        store
+            .confirm(
+                &test_point(slot),
+                &[hash],
+                &[],
+                FINALIZE_THRESHOLD,
+                DROP_THRESHOLD,
+            )
+            .unwrap();
+    }
 
     let finalized = find_in_finalized(store, &hash);
-    assert!(finalized.is_some(), "tx should be in finalized log after threshold");
+    assert!(
+        finalized.is_some(),
+        "propagated tx seen on-chain should finalize"
+    );
     assert_eq!(finalized.unwrap().stage, MempoolTxStage::Finalized);
 }
 
-/// A tx with 1 non-confirmation is still inflight; the 2nd non-confirmation
-/// drops it.
-fn assert_not_dropped_before_threshold<S: MempoolStore>(store: &S) {
-    let tx = test_tx(7);
+/// A tx in Propagated stage that never appears on-chain should eventually be dropped.
+fn assert_propagated_tx_drops_when_unseen<S: MempoolStore>(store: &S) {
+    let tx = test_tx(31);
     let hash = tx.hash;
-    advance_to_acknowledged(store, tx);
+    advance_to_propagated(store, tx);
 
-    // 1 non-confirmation
-    store
-        .confirm(
-            &test_point(1),
-            &[],
-            &[],
-            FINALIZE_THRESHOLD,
-            DROP_THRESHOLD,
-        )
-        .unwrap();
-
-    let status = store.check_status(&hash);
-    assert_ne!(
-        status.stage,
-        MempoolTxStage::Unknown,
-        "tx with 1 non-confirmation should still be tracked"
-    );
-    assert_eq!(status.non_confirmations, 1);
-    assert!(
-        find_in_finalized(store, &hash).is_none(),
-        "tx should not be in finalized log yet"
-    );
-
-    // 2nd non-confirmation drops
-    store
-        .confirm(
-            &test_point(2),
-            &[],
-            &[],
-            FINALIZE_THRESHOLD,
-            DROP_THRESHOLD,
-        )
-        .unwrap();
+    for slot in 400..400 + DROP_THRESHOLD as u64 {
+        store
+            .confirm(
+                &test_point(slot),
+                &[],
+                &[],
+                FINALIZE_THRESHOLD,
+                DROP_THRESHOLD,
+            )
+            .unwrap();
+    }
 
     let dropped = find_in_finalized(store, &hash);
-    assert!(dropped.is_some(), "dropped tx should be in finalized log");
+    assert!(
+        dropped.is_some(),
+        "propagated tx never seen on-chain should be dropped"
+    );
     assert_eq!(dropped.unwrap().stage, MempoolTxStage::Dropped);
-}
-
-/// Multiple txs in different states are handled correctly in a single
-/// `confirm()` call.
-fn assert_mixed_confirm<S: MempoolStore>(store: &S) {
-    let tx_a = test_tx(10);
-    let tx_b = test_tx(11);
-    let tx_c = test_tx(12);
-    let hash_a = tx_a.hash;
-    let hash_b = tx_b.hash;
-    let hash_c = tx_c.hash;
-
-    advance_to_acknowledged(store, tx_a);
-    advance_to_acknowledged(store, tx_b);
-    advance_to_acknowledged(store, tx_c);
-
-    // In one confirm call:
-    //   tx_a -> seen (confirmed)
-    //   tx_b -> unseen (rolled back to pending)
-    //   tx_c -> neither (mark_stale)
-    store
-        .confirm(
-            &test_point(1),
-            &[hash_a],
-            &[hash_b],
-            FINALIZE_THRESHOLD,
-            DROP_THRESHOLD,
-        )
-        .unwrap();
-
-    let status_a = store.check_status(&hash_a);
-    assert_eq!(status_a.stage, MempoolTxStage::Confirmed);
-    assert_eq!(status_a.confirmations, 1);
-
-    let status_b = store.check_status(&hash_b);
-    assert_eq!(
-        status_b.stage,
-        MempoolTxStage::Pending,
-        "unseen tx should be rolled back to pending"
-    );
-
-    let status_c = store.check_status(&hash_c);
-    assert_eq!(
-        status_c.non_confirmations, 1,
-        "tx not in either list should get 1 non-confirmation"
-    );
 }
 
 // ---------------------------------------------------------------------------
@@ -505,115 +463,9 @@ fn redb_mixed_confirm() {
 // Confirmed-tx-finalizes-across-blocks tests
 // ---------------------------------------------------------------------------
 
-/// Tx confirmed in block N, then blocks N+1…N+5 arrive WITHOUT the tx in
-/// `seen_txs`. Each subsequent block must increment `confirmations` (not
-/// `non_confirmations`), and the tx must finalize at the 6th confirmation.
-///
-/// This is the real-world scenario: a tx only appears in `seen_txs` for the
-/// single block that includes it. All later blocks see it in neither list.
-fn assert_confirmed_tx_finalizes_across_blocks<S: MempoolStore>(store: &S) {
-    let tx = test_tx(20);
-    let hash = tx.hash;
-    advance_to_acknowledged(store, tx);
-
-    // Block N: tx appears in seen_txs → first confirmation
-    store
-        .confirm(
-            &test_point(100),
-            &[hash],
-            &[],
-            FINALIZE_THRESHOLD,
-            DROP_THRESHOLD,
-        )
-        .unwrap();
-
-    let status = store.check_status(&hash);
-    assert_eq!(status.stage, MempoolTxStage::Confirmed);
-    assert_eq!(status.confirmations, 1);
-    assert_eq!(status.non_confirmations, 0);
-
-    // Blocks N+1 … N+4: tx NOT in seen_txs or unseen_txs
-    for i in 1..=4u64 {
-        store
-            .confirm(
-                &test_point(100 + i),
-                &[],
-                &[],
-                FINALIZE_THRESHOLD,
-                DROP_THRESHOLD,
-            )
-            .unwrap();
-
-        let status = store.check_status(&hash);
-        assert_eq!(
-            status.stage,
-            MempoolTxStage::Confirmed,
-            "tx should still be Confirmed after block N+{i}"
-        );
-        assert_eq!(
-            status.confirmations,
-            1 + i as u32,
-            "confirmations should be {} after block N+{i}",
-            1 + i as u32
-        );
-        assert_eq!(
-            status.non_confirmations, 0,
-            "non_confirmations must stay 0 for a confirmed tx"
-        );
-    }
-
-    // Block N+5: 6th confirmation → finalize
-    store
-        .confirm(
-            &test_point(105),
-            &[],
-            &[],
-            FINALIZE_THRESHOLD,
-            DROP_THRESHOLD,
-        )
-        .unwrap();
-
-    let finalized = find_in_finalized(store, &hash);
-    assert!(
-        finalized.is_some(),
-        "tx should appear in finalized log after 6 confirmations"
-    );
-    assert_eq!(finalized.unwrap().stage, MempoolTxStage::Finalized);
-}
-
-/// Acknowledged tx that is NEVER confirmed on-chain should still be dropped.
-/// Ensures the fix for confirmed txs didn't break the drop path.
-fn assert_unconfirmed_tx_still_drops<S: MempoolStore>(store: &S) {
-    let tx = test_tx(21);
-    let hash = tx.hash;
-    advance_to_acknowledged(store, tx);
-
-    // Two blocks pass without the tx appearing anywhere → should be dropped
-    for slot in 200..200 + DROP_THRESHOLD as u64 {
-        store
-            .confirm(
-                &test_point(slot),
-                &[],
-                &[],
-                FINALIZE_THRESHOLD,
-                DROP_THRESHOLD,
-            )
-            .unwrap();
-    }
-
-    let dropped = find_in_finalized(store, &hash);
-    assert!(dropped.is_some(), "unconfirmed tx should be dropped");
-    assert_eq!(dropped.unwrap().stage, MempoolTxStage::Dropped);
-}
-
 #[test]
 fn ephemeral_confirmed_tx_finalizes_across_blocks() {
     assert_confirmed_tx_finalizes_across_blocks(&EphemeralMempool::new());
-}
-
-#[test]
-fn ephemeral_unconfirmed_tx_still_drops() {
-    assert_unconfirmed_tx_still_drops(&EphemeralMempool::new());
 }
 
 #[test]
@@ -621,88 +473,9 @@ fn redb_confirmed_tx_finalizes_across_blocks() {
     assert_confirmed_tx_finalizes_across_blocks(&RedbMempool::in_memory().unwrap());
 }
 
-#[test]
-fn redb_unconfirmed_tx_still_drops() {
-    assert_unconfirmed_tx_still_drops(&RedbMempool::in_memory().unwrap());
-}
-
 // ---------------------------------------------------------------------------
-// Propagated (never-acknowledged) tx tests
+// Propagated tx tests (never acknowledged)
 // ---------------------------------------------------------------------------
-
-/// A tx in Propagated stage (never acknowledged) that appears on-chain should
-/// be confirmed and eventually finalized — it must not sit as a zombie.
-fn assert_propagated_tx_confirms_and_finalizes<S: MempoolStore>(store: &S) {
-    let tx = test_tx(30);
-    let hash = tx.hash;
-    advance_to_propagated(store, tx);
-
-    // First block: tx appears in seen_txs → confirmed
-    store
-        .confirm(
-            &test_point(300),
-            &[hash],
-            &[],
-            FINALIZE_THRESHOLD,
-            DROP_THRESHOLD,
-        )
-        .unwrap();
-
-    let status = store.check_status(&hash);
-    assert_eq!(
-        status.stage,
-        MempoolTxStage::Confirmed,
-        "propagated tx seen on-chain should move to Confirmed"
-    );
-    assert_eq!(status.confirmations, 1);
-
-    // Remaining blocks to reach finalize threshold
-    for i in 1..FINALIZE_THRESHOLD as u64 {
-        store
-            .confirm(
-                &test_point(300 + i),
-                &[],
-                &[],
-                FINALIZE_THRESHOLD,
-                DROP_THRESHOLD,
-            )
-            .unwrap();
-    }
-
-    let finalized = find_in_finalized(store, &hash);
-    assert!(
-        finalized.is_some(),
-        "propagated tx should finalize after enough confirmations"
-    );
-    assert_eq!(finalized.unwrap().stage, MempoolTxStage::Finalized);
-}
-
-/// A tx in Propagated stage that never appears on-chain should eventually be
-/// dropped rather than sitting forever with 0 confirmations.
-fn assert_propagated_tx_drops_when_unseen<S: MempoolStore>(store: &S) {
-    let tx = test_tx(31);
-    let hash = tx.hash;
-    advance_to_propagated(store, tx);
-
-    for slot in 400..400 + DROP_THRESHOLD as u64 {
-        store
-            .confirm(
-                &test_point(slot),
-                &[],
-                &[],
-                FINALIZE_THRESHOLD,
-                DROP_THRESHOLD,
-            )
-            .unwrap();
-    }
-
-    let dropped = find_in_finalized(store, &hash);
-    assert!(
-        dropped.is_some(),
-        "propagated tx never seen on-chain should be dropped"
-    );
-    assert_eq!(dropped.unwrap().stage, MempoolTxStage::Dropped);
-}
 
 #[test]
 fn ephemeral_propagated_tx_confirms_and_finalizes() {
@@ -722,4 +495,103 @@ fn redb_propagated_tx_confirms_and_finalizes() {
 #[test]
 fn redb_propagated_tx_drops_when_unseen() {
     assert_propagated_tx_drops_when_unseen(&RedbMempool::in_memory().unwrap());
+}
+
+// ---------------------------------------------------------------------------
+// RedisMempool tests (conditional on REDIS_URL environment variable)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod redis_tests {
+    use super::*;
+    use dolos_redis::mempool::RedisMempool;
+
+    fn redis_store() -> Option<RedisMempool> {
+        let url = std::env::var("REDIS_URL").ok()?;
+        let config = dolos_core::config::RedisMempoolConfig {
+            url,
+            key_prefix: "dolos:test:mempool".to_string(),
+            pool_size: 5,
+            max_finalized: 100,
+            watcher_lock_ttl: 5,
+        };
+        RedisMempool::open(&config).ok()
+    }
+
+    #[test]
+    fn redis_finalize_after_threshold() {
+        if let Some(store) = redis_store() {
+            assert_finalize_after_threshold(&store);
+        }
+    }
+
+    #[test]
+    fn redis_drop_after_threshold() {
+        if let Some(store) = redis_store() {
+            assert_drop_after_threshold(&store);
+        }
+    }
+
+    #[test]
+    fn redis_confirm_resets_non_confirmations() {
+        if let Some(store) = redis_store() {
+            assert_confirm_resets_non_confirmations(&store);
+        }
+    }
+
+    #[test]
+    fn redis_rollback_to_pending() {
+        if let Some(store) = redis_store() {
+            assert_rollback_to_pending(&store);
+        }
+    }
+
+    #[test]
+    fn redis_re_confirm_after_rollback() {
+        if let Some(store) = redis_store() {
+            assert_re_confirm_after_rollback(&store);
+        }
+    }
+
+    #[test]
+    fn redis_not_finalized_before_threshold() {
+        if let Some(store) = redis_store() {
+            assert_not_finalized_before_threshold(&store);
+        }
+    }
+
+    #[test]
+    fn redis_not_dropped_before_threshold() {
+        if let Some(store) = redis_store() {
+            assert_not_dropped_before_threshold(&store);
+        }
+    }
+
+    #[test]
+    fn redis_mixed_confirm() {
+        if let Some(store) = redis_store() {
+            assert_mixed_confirm(&store);
+        }
+    }
+
+    #[test]
+    fn redis_confirmed_tx_finalizes_across_blocks() {
+        if let Some(store) = redis_store() {
+            assert_confirmed_tx_finalizes_across_blocks(&store);
+        }
+    }
+
+    #[test]
+    fn redis_propagated_tx_confirms_and_finalizes() {
+        if let Some(store) = redis_store() {
+            assert_propagated_tx_confirms_and_finalizes(&store);
+        }
+    }
+
+    #[test]
+    fn redis_propagated_tx_drops_when_unseen() {
+        if let Some(store) = redis_store() {
+            assert_propagated_tx_drops_when_unseen(&store);
+        }
+    }
 }

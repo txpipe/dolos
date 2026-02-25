@@ -23,11 +23,11 @@ use dolos_core::{
         MempoolStoreConfig, RedbArchiveConfig, RedbIndexConfig, RedbStateConfig, RedbWalConfig,
         RootConfig, StateStoreConfig, StorageVersion, WalStoreConfig,
     },
-    BlockBody, BlockSlot, ChainPoint, EntityDelta, EntityKey, EntityValue,
-    IndexDelta, IndexError, IndexStore as CoreIndexStore, IndexWriter as CoreIndexWriter, LogEntry,
-    LogValue, MempoolError, MempoolEvent, MempoolStore, MempoolTx, Namespace,
-    RawBlock, StateError, StateSchema, StateStore as CoreStateStore, StateWriter as CoreStateWriter,
-    TagDimension, TxHash, TxStatus, TxoRef, UtxoMap, UtxoSet, UtxoSetDelta, WalError, WalStore,
+    BlockBody, BlockSlot, ChainPoint, EntityDelta, EntityKey, EntityValue, IndexDelta, IndexError,
+    IndexStore as CoreIndexStore, IndexWriter as CoreIndexWriter, LogEntry, LogValue, MempoolError,
+    MempoolEvent, MempoolStore, MempoolTx, Namespace, RawBlock, StateError, StateSchema,
+    StateStore as CoreStateStore, StateWriter as CoreStateWriter, TagDimension, TxHash, TxStatus,
+    TxoRef, UtxoMap, UtxoSet, UtxoSetDelta, WalError, WalStore,
 };
 use serde::{de::DeserializeOwned, Serialize};
 
@@ -115,6 +115,9 @@ pub fn open_mempool_store(config: &RootConfig) -> Result<MempoolBackend, Error> 
                 dolos_redb3::mempool::RedbMempool::open(path, cfg)?,
             ))
         }
+        MempoolStoreConfig::Redis(cfg) => Ok(MempoolBackend::Redis(
+            dolos_redis::mempool::RedisMempool::open(cfg)?,
+        )),
     }
 }
 
@@ -1018,11 +1021,13 @@ impl CoreIndexStore for IndexStoreBackend {
 pub enum MempoolBackend {
     Ephemeral(dolos_core::builtin::EphemeralMempool),
     Redb(dolos_redb3::mempool::RedbMempool),
+    Redis(dolos_redis::mempool::RedisMempool),
 }
 
 pub enum MempoolStreamBackend {
     Ephemeral(dolos_core::builtin::EphemeralMempoolStream),
     Redb(dolos_redb3::mempool::RedbMempoolStream),
+    Redis(dolos_redis::mempool::RedisMempoolStream),
 }
 
 impl futures_core::Stream for MempoolStreamBackend {
@@ -1035,6 +1040,7 @@ impl futures_core::Stream for MempoolStreamBackend {
         match self.get_mut() {
             MempoolStreamBackend::Ephemeral(s) => std::pin::Pin::new(s).poll_next(cx),
             MempoolStreamBackend::Redb(s) => std::pin::Pin::new(s).poll_next(cx),
+            MempoolStreamBackend::Redis(s) => std::pin::Pin::new(s).poll_next(cx),
         }
     }
 }
@@ -1046,6 +1052,7 @@ impl MempoolStore for MempoolBackend {
         match self {
             Self::Ephemeral(s) => s.receive(tx),
             Self::Redb(s) => s.receive(tx),
+            Self::Redis(s) => s.receive(tx),
         }
     }
 
@@ -1053,6 +1060,7 @@ impl MempoolStore for MempoolBackend {
         match self {
             Self::Ephemeral(s) => s.has_pending(),
             Self::Redb(s) => s.has_pending(),
+            Self::Redis(s) => s.has_pending(),
         }
     }
 
@@ -1060,6 +1068,7 @@ impl MempoolStore for MempoolBackend {
         match self {
             Self::Ephemeral(s) => s.peek_pending(limit),
             Self::Redb(s) => s.peek_pending(limit),
+            Self::Redis(s) => s.peek_pending(limit),
         }
     }
 
@@ -1067,6 +1076,7 @@ impl MempoolStore for MempoolBackend {
         match self {
             Self::Ephemeral(s) => s.mark_inflight(hashes),
             Self::Redb(s) => s.mark_inflight(hashes),
+            Self::Redis(s) => s.mark_inflight(hashes),
         }
     }
 
@@ -1074,6 +1084,7 @@ impl MempoolStore for MempoolBackend {
         match self {
             Self::Ephemeral(s) => s.mark_acknowledged(hashes),
             Self::Redb(s) => s.mark_acknowledged(hashes),
+            Self::Redis(s) => s.mark_acknowledged(hashes),
         }
     }
 
@@ -1081,6 +1092,7 @@ impl MempoolStore for MempoolBackend {
         match self {
             Self::Ephemeral(s) => s.find_inflight(tx_hash),
             Self::Redb(s) => s.find_inflight(tx_hash),
+            Self::Redis(s) => s.find_inflight(tx_hash),
         }
     }
 
@@ -1088,13 +1100,40 @@ impl MempoolStore for MempoolBackend {
         match self {
             Self::Ephemeral(s) => s.peek_inflight(limit),
             Self::Redb(s) => s.peek_inflight(limit),
+            Self::Redis(s) => s.peek_inflight(limit),
         }
     }
 
-    fn confirm(&self, point: &ChainPoint, seen_txs: &[TxHash], unseen_txs: &[TxHash], finalize_threshold: u32, drop_threshold: u32) -> Result<(), MempoolError> {
+    fn confirm(
+        &self,
+        point: &ChainPoint,
+        seen_txs: &[TxHash],
+        unseen_txs: &[TxHash],
+        finalize_threshold: u32,
+        drop_threshold: u32,
+    ) -> Result<(), MempoolError> {
         match self {
-            Self::Ephemeral(s) => s.confirm(point, seen_txs, unseen_txs, finalize_threshold, drop_threshold),
-            Self::Redb(s) => s.confirm(point, seen_txs, unseen_txs, finalize_threshold, drop_threshold),
+            Self::Ephemeral(s) => s.confirm(
+                point,
+                seen_txs,
+                unseen_txs,
+                finalize_threshold,
+                drop_threshold,
+            ),
+            Self::Redb(s) => s.confirm(
+                point,
+                seen_txs,
+                unseen_txs,
+                finalize_threshold,
+                drop_threshold,
+            ),
+            Self::Redis(s) => s.confirm(
+                point,
+                seen_txs,
+                unseen_txs,
+                finalize_threshold,
+                drop_threshold,
+            ),
         }
     }
 
@@ -1102,6 +1141,7 @@ impl MempoolStore for MempoolBackend {
         match self {
             Self::Ephemeral(s) => s.check_status(tx_hash),
             Self::Redb(s) => s.check_status(tx_hash),
+            Self::Redis(s) => s.check_status(tx_hash),
         }
     }
 
@@ -1109,6 +1149,7 @@ impl MempoolStore for MempoolBackend {
         match self {
             Self::Ephemeral(s) => s.dump_finalized(cursor, limit),
             Self::Redb(s) => s.dump_finalized(cursor, limit),
+            Self::Redis(s) => s.dump_finalized(cursor, limit),
         }
     }
 
@@ -1116,6 +1157,7 @@ impl MempoolStore for MempoolBackend {
         match self {
             Self::Ephemeral(s) => MempoolStreamBackend::Ephemeral(s.subscribe()),
             Self::Redb(s) => MempoolStreamBackend::Redb(s.subscribe()),
+            Self::Redis(s) => MempoolStreamBackend::Redis(s.subscribe()),
         }
     }
 }

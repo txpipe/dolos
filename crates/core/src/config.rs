@@ -436,15 +436,72 @@ pub struct RedbMempoolConfig {
     pub cache: Option<usize>,
 }
 
+/// Configuration for the Redis mempool backend.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct RedisMempoolConfig {
+    /// Redis connection URL (e.g., "redis://127.0.0.1:6379")
+    pub url: String,
+
+    /// Optional key prefix for namespacing (default: "dolos:mempool")
+    #[serde(default = "default_redis_key_prefix")]
+    pub key_prefix: String,
+
+    /// Connection pool size (default: 10)
+    #[serde(default = "default_pool_size")]
+    pub pool_size: usize,
+
+    /// Maximum number of finalized transactions to keep (default: 10000)
+    #[serde(default = "default_max_finalized")]
+    pub max_finalized: usize,
+
+    /// Watcher lock TTL in seconds (default: 10)
+    #[serde(default = "default_watcher_lock_ttl")]
+    pub watcher_lock_ttl: u64,
+}
+
+impl Default for RedisMempoolConfig {
+    fn default() -> Self {
+        Self {
+            url: "redis://127.0.0.1:6379".to_string(),
+            key_prefix: default_redis_key_prefix(),
+            pool_size: default_pool_size(),
+            max_finalized: default_max_finalized(),
+            watcher_lock_ttl: default_watcher_lock_ttl(),
+        }
+    }
+}
+
+fn default_redis_key_prefix() -> String {
+    "dolos:mempool".to_string()
+}
+
+fn default_pool_size() -> usize {
+    10
+}
+
+fn default_max_finalized() -> usize {
+    10000
+}
+
+fn default_watcher_lock_ttl() -> u64 {
+    10
+}
+
 /// Mempool store configuration.
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "backend", rename_all = "lowercase")]
 pub enum MempoolStoreConfig {
     Redb(RedbMempoolConfig),
+    Redis(RedisMempoolConfig),
     /// In-memory backend (ephemeral, data lost on restart).
     #[serde(rename = "in_memory")]
-    #[default]
     InMemory,
+}
+
+impl Default for MempoolStoreConfig {
+    fn default() -> Self {
+        Self::InMemory
+    }
 }
 
 // ============================================================================
@@ -545,13 +602,14 @@ impl StorageConfig {
     }
 
     /// Get the resolved path for the mempool store.
-    /// Returns `None` for in-memory backends.
+    /// Returns `None` for in-memory or Redis backends.
     pub fn mempool_path(&self) -> Option<PathBuf> {
         match &self.mempool {
             MempoolStoreConfig::InMemory => None,
             MempoolStoreConfig::Redb(cfg) => {
                 Some(self.resolve_store_path_with_default(cfg.path.as_ref(), "mempool"))
             }
+            MempoolStoreConfig::Redis(_) => None,
         }
     }
 }
