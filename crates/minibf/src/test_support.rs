@@ -95,9 +95,7 @@ impl TestApp {
     }
 
     pub fn new_with_fault(fault: Option<TestFault>) -> Self {
-        let mut cfg = SyntheticBlockConfig::default();
-        cfg.block_count = 5;
-        cfg.txs_per_block = 3;
+        let cfg = SyntheticBlockConfig { block_count: 5, txs_per_block: 3, ..Default::default() };
         Self::new_with_cfg_and_fault(cfg, fault)
     }
 

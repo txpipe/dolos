@@ -383,6 +383,7 @@ where
             get(routes::scripts::by_datum_hash::<D>),
         )
         .route("/tx/submit", post(routes::tx::submit::route::<D>))
+        .route("/txs", get(routes::txs::all_txs::<D>))
         .route("/txs/{tx_hash}", get(routes::txs::by_hash::<D>))
         .route("/txs/{tx_hash}/cbor", get(routes::txs::by_hash_cbor::<D>))
         .route("/txs/{tx_hash}/utxos", get(routes::txs::by_hash_utxos::<D>))
