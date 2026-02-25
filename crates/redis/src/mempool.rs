@@ -500,16 +500,6 @@ impl MempoolStore for RedisMempool {
             let hash_set: HashSet<TxHash> = hashes.iter().copied().collect();
             let mut events = Vec::new();
 
-            for hash in hashes {
-                let _: () = redis::cmd("LREM")
-                    .arg(&self.pending_key())
-                    .arg(1)
-                    .arg(hash.as_ref())
-                    .query_async(&mut conn)
-                    .await
-                    .map_err(|e| MempoolError::Internal(Box::new(e)))?;
-            }
-
             for hash in &hash_set {
                 let payload_key = self.payload_key(hash);
                 let payload_bytes: Option<Vec<u8>> = redis::cmd("GET")
@@ -524,6 +514,11 @@ impl MempoolStore for RedisMempool {
                         let record_bytes = minicbor::to_vec(&record)
                             .map_err(|e| MempoolError::Internal(Box::new(e)))?;
 
+                        // Write inflight BEFORE removing from pending.
+                        // If we crash after HSET but before LREM, the tx is in
+                        // both pending and inflight — safe because receive()
+                        // dedup catches it, and the next mark_inflight() will
+                        // LREM it.
                         let _: () = redis::cmd("HSET")
                             .arg(&self.inflight_key())
                             .arg(hash.as_ref())
@@ -537,6 +532,14 @@ impl MempoolStore for RedisMempool {
                         events.push(tx);
                     }
                 }
+
+                let _: () = redis::cmd("LREM")
+                    .arg(&self.pending_key())
+                    .arg(1)
+                    .arg(hash.as_ref())
+                    .query_async(&mut conn)
+                    .await
+                    .map_err(|e| MempoolError::Internal(Box::new(e)))?;
             }
 
             for tx in events {
@@ -735,6 +738,16 @@ impl MempoolStore for RedisMempool {
                 } else if unseen_set.contains(&hash) {
                     record.retry();
 
+                    // Remove from inflight FIRST to prevent a concurrent
+                    // mark_inflight() from having its fresh record deleted
+                    // by the deferred HDEL pass.
+                    let _: () = redis::cmd("HDEL")
+                        .arg(&self.inflight_key())
+                        .arg(hash.as_ref())
+                        .query_async(&mut conn)
+                        .await
+                        .map_err(|e| MempoolError::Internal(Box::new(e)))?;
+
                     let _: () = redis::cmd("RPUSH")
                         .arg(&self.pending_key())
                         .arg(hash.as_ref())
@@ -746,7 +759,7 @@ impl MempoolStore for RedisMempool {
                     tx.retry();
                     info!(tx.hash = %tx.hash, "retry tx (redis)");
                     events.push(tx);
-                    to_remove.push(hash);
+                    // Do NOT add to to_remove — already deleted above
                 } else if record.stage == InflightStage::Confirmed {
                     record.confirm(point);
 
