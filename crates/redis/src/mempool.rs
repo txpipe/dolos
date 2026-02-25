@@ -500,38 +500,11 @@ impl MempoolStore for RedisMempool {
             let hash_set: HashSet<TxHash> = hashes.iter().copied().collect();
             let mut events = Vec::new();
 
-            let all_hashes: Vec<Vec<u8>> = redis::cmd("LRANGE")
-                .arg(&self.pending_key())
-                .arg(0)
-                .arg(-1)
-                .query_async(&mut conn)
-                .await
-                .map_err(|e| MempoolError::Internal(Box::new(e)))?;
-
-            let to_keep: Vec<Vec<u8>> = all_hashes
-                .into_iter()
-                .filter(|h| {
-                    if h.len() != 32 {
-                        return true;
-                    }
-                    let h_arr = <[u8; 32]>::try_from(&h[..]).unwrap();
-                    !hash_set.contains(&TxHash::from(h_arr))
-                })
-                .collect();
-
-            let _: () = redis::cmd("DEL")
-                .arg(&self.pending_key())
-                .query_async(&mut conn)
-                .await
-                .map_err(|e| MempoolError::Internal(Box::new(e)))?;
-
-            if !to_keep.is_empty() {
-                let mut cmd = redis::cmd("RPUSH");
-                cmd.arg(&self.pending_key());
-                for h in &to_keep {
-                    cmd.arg(h);
-                }
-                let _: () = cmd
+            for hash in hashes {
+                let _: () = redis::cmd("LREM")
+                    .arg(&self.pending_key())
+                    .arg(1)
+                    .arg(hash.as_ref())
                     .query_async(&mut conn)
                     .await
                     .map_err(|e| MempoolError::Internal(Box::new(e)))?;

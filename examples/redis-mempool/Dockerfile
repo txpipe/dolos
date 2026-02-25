@@ -1,5 +1,5 @@
 # Dockerfile for building Dolos from source with Redis support
-FROM rust:1.82-bookworm AS builder
+FROM rust:1.93 AS builder
 
 WORKDIR /usr/src/dolos
 
