@@ -77,9 +77,9 @@ fn map_array(x: &[PlutusData]) -> Expression {
 }
 
 fn map_map(x: &KeyValuePairs<PlutusData, PlutusData>) -> Expression {
-    Expression::List(
+    Expression::Map(
         x.iter()
-            .map(|(k, v)| Expression::List(vec![map_datum(k), map_datum(v)]))
+            .map(|(k, v)| (map_datum(k), map_datum(v)))
             .collect(),
     )
 }
