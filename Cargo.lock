@@ -1211,6 +1211,7 @@ dependencies = [
  "dolos-cardano",
  "dolos-core",
  "dolos-fjall",
+ "dolos-kupo",
  "dolos-minibf",
  "dolos-redb3",
  "dolos-testing",
@@ -1326,6 +1327,24 @@ dependencies = [
  "thiserror 2.0.12",
  "tracing",
  "xxhash-rust",
+]
+
+[[package]]
+name = "dolos-kupo"
+version = "1.0.0-rc.10"
+dependencies = [
+ "axum 0.8.4",
+ "base58",
+ "bech32 0.11.1",
+ "dolos-cardano",
+ "dolos-core",
+ "hex",
+ "pallas",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower-http 0.6.6",
+ "tracing",
 ]
 
 [[package]]

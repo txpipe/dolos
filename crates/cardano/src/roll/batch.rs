@@ -14,6 +14,10 @@ use dolos_core::{
     NsKey, RawBlock, RawUtxoMap, StateError, StateStore as _, StateWriter as _, TxoRef,
     UtxoSetDelta, WalStore as _,
 };
+use pallas::ledger::{
+    primitives::conway::ScriptRef,
+    traverse::{ComputeHash as _, OriginalHash as _},
+};
 
 use crate::indexes::CardanoIndexDeltaBuilder;
 use crate::{CardanoDelta, CardanoEntity, CardanoLogic, OwnedMultiEraBlock, OwnedMultiEraOutput};
@@ -400,11 +404,43 @@ impl WorkBatch {
                     if let Some(datum) = output.datum() {
                         builder.add_datum(&datum);
                     }
+
+                    if let Some(script_ref) = output.script_ref() {
+                        match script_ref {
+                            ScriptRef::NativeScript(script) => {
+                                builder.add_script_hash(script.original_hash().to_vec());
+                            }
+                            ScriptRef::PlutusV1Script(script) => {
+                                builder.add_script_hash(script.compute_hash().to_vec());
+                            }
+                            ScriptRef::PlutusV2Script(script) => {
+                                builder.add_script_hash(script.compute_hash().to_vec());
+                            }
+                            ScriptRef::PlutusV3Script(script) => {
+                                builder.add_script_hash(script.compute_hash().to_vec());
+                            }
+                        }
+                    }
+                }
+
+                // Witness scripts
+                {
+                    for script in tx.native_scripts() {
+                        builder.add_script_hash(script.original_hash().to_vec());
+                    }
+                    for script in tx.plutus_v1_scripts() {
+                        builder.add_script_hash(script.compute_hash().to_vec());
+                    }
+                    for script in tx.plutus_v2_scripts() {
+                        builder.add_script_hash(script.compute_hash().to_vec());
+                    }
+                    for script in tx.plutus_v3_scripts() {
+                        builder.add_script_hash(script.compute_hash().to_vec());
+                    }
                 }
 
                 // Witness datums
                 for datum in tx.plutus_data() {
-                    use pallas::ledger::traverse::OriginalHash;
                     builder.add_datum_hash(datum.original_hash().to_vec());
                 }
 
@@ -415,7 +451,6 @@ impl WorkBatch {
 
                 // Redeemers
                 for redeemer in tx.redeemers() {
-                    use pallas::ledger::traverse::ComputeHash;
                     builder.add_datum_hash(redeemer.data().compute_hash().to_vec());
                 }
             }

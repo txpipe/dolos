@@ -24,6 +24,9 @@ pub use o7s_win as o7s;
 #[cfg(feature = "minibf")]
 pub use dolos_minibf as minibf;
 
+#[cfg(feature = "kupo")]
+pub use dolos_kupo as kupo;
+
 #[cfg(feature = "trp")]
 pub use dolos_trp as trp;
 
@@ -71,6 +74,17 @@ pub fn load_drivers(
 
         let driver =
             minibf::Driver::run(cfg.clone(), domain.clone(), CancelTokenImpl(exit.clone()));
+
+        let task = tokio::spawn(driver);
+
+        all_drivers.push(task);
+    }
+
+    #[cfg(feature = "kupo")]
+    if let Some(cfg) = config.kupo {
+        info!("found kupo config");
+
+        let driver = kupo::Driver::run(cfg.clone(), domain.clone(), CancelTokenImpl(exit.clone()));
 
         let task = tokio::spawn(driver);
 

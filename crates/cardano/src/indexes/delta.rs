@@ -208,6 +208,13 @@ impl CardanoIndexDeltaBuilder {
             .push(Tag::new(archive::SPENT_TXO, bytes));
     }
 
+    /// Add a script hash to the current block.
+    pub fn add_script_hash(&mut self, hash: Vec<u8>) {
+        self.current_block()
+            .tags
+            .push(Tag::new(archive::SCRIPT, hash));
+    }
+
     /// Add certificate tags to the current block.
     pub fn add_cert(&mut self, cert: &MultiEraCert) {
         if let Some(cred) = pallas_extras::cert_as_stake_registration(cert) {
