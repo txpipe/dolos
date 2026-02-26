@@ -451,6 +451,7 @@ pub enum ChainError {
 ///
 /// Work units are produced by the chain logic and executed by the generic
 /// executor. This separation allows the core crate to remain chain-agnostic.
+#[trait_variant::make(Send)]
 pub trait ChainLogic: Sized + Send + Sync {
     type Config: Clone;
     type Block: Block + Send + Sync;
@@ -513,10 +514,9 @@ pub trait ChainLogic: Sized + Send + Sync {
     }
 
     /// Validate a transaction against the current ledger state.
-    fn validate_tx<D: Domain>(
-        &self,
+    async fn validate_tx<D: Domain>(
         cbor: &[u8],
-        utxos: &MempoolAwareUtxoStore<D>,
+        utxos: &MempoolAwareUtxoStore<'_, D>,
         tip: Option<ChainPoint>,
         genesis: &Genesis,
     ) -> Result<mempool::MempoolTx, ChainError>;

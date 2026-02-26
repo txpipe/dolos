@@ -20,12 +20,13 @@ services:
       context: ../..
       dockerfile: examples/redis-mempool/Dockerfile
     container_name: redis-mempool-dolos1
+    working_dir: /opt/dolos
     depends_on:
       redis:
         condition: service_healthy
     volumes:
-      - ./data1:/data1
-      - ./dolos1.toml:/etc/dolos/dolos.toml:ro
+      - ./data1:/opt/dolos/data
+      - ./dolos1.toml:/opt/dolos/dolos.toml:ro
       - ./byron.json:/etc/genesis/byron.json:ro
       - ./shelley.json:/etc/genesis/shelley.json:ro
       - ./alonzo.json:/etc/genesis/alonzo.json:ro
@@ -43,12 +44,13 @@ services:
       context: ../..
       dockerfile: examples/redis-mempool/Dockerfile
     container_name: redis-mempool-dolos2
+    working_dir: /opt/dolos
     depends_on:
       redis:
         condition: service_healthy
     volumes:
-      - ./data2:/data2
-      - ./dolos2.toml:/etc/dolos/dolos.toml:ro
+      - ./data2:/opt/dolos/data
+      - ./dolos2.toml:/opt/dolos/dolos.toml:ro
       - ./byron.json:/etc/genesis/byron.json:ro
       - ./shelley.json:/etc/genesis/shelley.json:ro
       - ./alonzo.json:/etc/genesis/alonzo.json:ro

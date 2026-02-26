@@ -226,7 +226,7 @@ mod tests {
 
     #[tokio::test]
     async fn metadata_label_json_happy_path() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let label = app.vectors().metadata_label.as_str();
         let path = format!("/metadata/txs/labels/{label}?page=1");
         let (status, bytes) = app.get_bytes(&path).await;
@@ -243,7 +243,7 @@ mod tests {
 
     #[tokio::test]
     async fn metadata_label_json_slot_constrained() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let label = app.vectors().metadata_label.as_str();
         let block = app.vectors().blocks.first().expect("missing block vectors");
         let path = format!(
@@ -261,7 +261,7 @@ mod tests {
 
     #[tokio::test]
     async fn metadata_label_json_paginated() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let label = app.vectors().metadata_label.as_str();
         let path_page_1 = format!("/metadata/txs/labels/{label}?page=1&count=1");
         let path_page_2 = format!("/metadata/txs/labels/{label}?page=2&count=1");
@@ -284,7 +284,7 @@ mod tests {
 
     #[tokio::test]
     async fn metadata_label_json_order_asc() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let label = app.vectors().metadata_label.as_str();
         let path = format!("/metadata/txs/labels/{label}?order=asc&count=5");
         let (status, bytes) = app.get_bytes(&path).await;
@@ -314,7 +314,7 @@ mod tests {
 
     #[tokio::test]
     async fn metadata_label_json_order_desc() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let label = app.vectors().metadata_label.as_str();
         let path = format!("/metadata/txs/labels/{label}?order=desc&count=5");
         let (status, bytes) = app.get_bytes(&path).await;
@@ -343,21 +343,21 @@ mod tests {
     }
     #[tokio::test]
     async fn metadata_label_json_bad_request() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let path = format!("/metadata/txs/labels/{}", invalid_label());
         assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
     }
 
     #[tokio::test]
     async fn metadata_label_json_not_found() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let path = format!("/metadata/txs/labels/{}", missing_label());
         assert_status(&app, &path, StatusCode::NOT_FOUND).await;
     }
 
     #[tokio::test]
     async fn metadata_label_json_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError)).await;
         let label = app.vectors().metadata_label.as_str();
         let path = format!("/metadata/txs/labels/{label}");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
@@ -365,7 +365,7 @@ mod tests {
 
     #[tokio::test]
     async fn metadata_label_cbor_happy_path() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let label = app.vectors().metadata_label.as_str();
         let path = format!("/metadata/txs/labels/{label}/cbor?page=1");
         let (status, bytes) = app.get_bytes(&path).await;
@@ -382,7 +382,7 @@ mod tests {
 
     #[tokio::test]
     async fn metadata_label_cbor_slot_constrained() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let label = app.vectors().metadata_label.as_str();
         let block = app.vectors().blocks.first().expect("missing block vectors");
         let path = format!(
@@ -400,7 +400,7 @@ mod tests {
 
     #[tokio::test]
     async fn metadata_label_cbor_order_asc() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let label = app.vectors().metadata_label.as_str();
         let path = format!("/metadata/txs/labels/{label}/cbor?order=asc&count=5");
         let (status, bytes) = app.get_bytes(&path).await;
@@ -430,7 +430,7 @@ mod tests {
 
     #[tokio::test]
     async fn metadata_label_cbor_order_desc() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let label = app.vectors().metadata_label.as_str();
         let path = format!("/metadata/txs/labels/{label}/cbor?order=desc&count=5");
         let (status, bytes) = app.get_bytes(&path).await;
@@ -459,21 +459,21 @@ mod tests {
     }
     #[tokio::test]
     async fn metadata_label_cbor_bad_request() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let path = format!("/metadata/txs/labels/{}/cbor", invalid_label());
         assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
     }
 
     #[tokio::test]
     async fn metadata_label_cbor_not_found() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let path = format!("/metadata/txs/labels/{}/cbor", missing_label());
         assert_status(&app, &path, StatusCode::NOT_FOUND).await;
     }
 
     #[tokio::test]
     async fn metadata_label_cbor_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError)).await;
         let label = app.vectors().metadata_label.as_str();
         let path = format!("/metadata/txs/labels/{label}/cbor");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;

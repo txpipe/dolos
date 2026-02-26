@@ -1,5 +1,4 @@
 use any_chain_eval::Chain;
-use dolos_core::SubmitExt;
 use futures_core::Stream;
 use futures_util::{StreamExt as _, TryStreamExt as _};
 use pallas::crypto::hash::Hash;
@@ -120,8 +119,6 @@ where
 
         info!("received new grpc submit tx request: {:?}", message);
 
-        let chain = self.domain.read_chain();
-
         let tx = message
             .tx
             .ok_or_else(|| Status::invalid_argument("missing tx"))?;
@@ -130,9 +127,8 @@ where
             _ => return Err(Status::invalid_argument("missing or unsupported tx type")),
         };
 
-        let hash = self
-            .domain
-            .receive_tx("grpc", &chain, tx_bytes.as_ref())
+        let hash = dolos_core::submit::receive_tx(&self.domain, "grpc", tx_bytes.as_ref())
+            .await
             .map_err(|e| Status::invalid_argument(format!("could not process tx: {e}")))?;
 
         Ok(Response::new(SubmitTxResponse {
@@ -151,15 +147,14 @@ where
             .map(|x| Hash::from(x.as_ref()))
             .collect();
 
-        let initial_stages: Vec<_> = subjects
-            .iter()
-            .map(|x| {
-                Result::<_, Status>::Ok(WaitForTxResponse {
-                    stage: tx_stage_to_u5c(self.domain.mempool().check_status(x).stage),
-                    r#ref: x.to_vec().into(),
-                })
-            })
-            .collect();
+        let mut initial_stages: Vec<Result<WaitForTxResponse, Status>> = Vec::new();
+        for x in subjects.iter() {
+            let status = self.domain.mempool().check_status(x).await;
+            initial_stages.push(Ok(WaitForTxResponse {
+                stage: tx_stage_to_u5c(status.stage),
+                r#ref: x.to_vec().into(),
+            }));
+        }
 
         let updates = self.domain.mempool().subscribe();
 
@@ -207,9 +202,7 @@ where
             _ => return Err(Status::invalid_argument("missing or unsupported tx type")),
         };
 
-        let chain = self.domain.read_chain();
-
-        let result = self.domain.validate_tx(&chain, &tx_raw);
+        let result = dolos_core::submit::validate_tx(&self.domain, &tx_raw).await;
         let result = tx_eval_to_u5c(result);
 
         let report = AnyChainEval {

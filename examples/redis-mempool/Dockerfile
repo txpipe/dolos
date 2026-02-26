@@ -7,10 +7,10 @@ WORKDIR /usr/src/dolos
 COPY . .
 
 # Build with all features including Redis
-RUN cargo build --release --workspace --all-features
+RUN cargo build --release --workspace
 
 # Runtime image
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 RUN apt-get update && apt-get install -y ca-certificates redis-tools curl && rm -rf /var/lib/apt/lists/*
 
@@ -20,8 +20,5 @@ COPY --from=builder /usr/src/dolos/examples/redis-mempool/*.json /etc/genesis/
 # Copy the built binary
 COPY --from=builder /usr/src/dolos/target/release/dolos /bin/dolos
 RUN chmod +x /bin/dolos
-
-# Create directories for data
-RUN mkdir -p /data1 /data2
 
 ENTRYPOINT ["dolos"]

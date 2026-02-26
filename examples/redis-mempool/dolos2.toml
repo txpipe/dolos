@@ -5,12 +5,20 @@ is_testnet = true
 
 [storage]
 version = "v3"
-path = "/data2"
+path = "/opt/dolos/data"
 
 [storage.wal]
+backend = "redb"
 max_history = 129600
 
+[storage.state]
+backend = "fjall"
+
+[storage.index]
+backend = "fjall"
+
 [storage.archive]
+backend = "redb"
 max_history = 2592000
 
 [storage.mempool]
@@ -19,7 +27,7 @@ url = "redis://redis:6379"
 key_prefix = "dolos:mempool"
 pool_size = 10
 max_finalized = 10000
-watcher_lock_ttl = 10
+watcher_lock_ttl = 60
 
 [genesis]
 byron_path = "/etc/genesis/byron.json"

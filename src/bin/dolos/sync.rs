@@ -8,7 +8,7 @@ pub struct Args {}
 pub async fn run(config: &RootConfig, _args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging, &config.telemetry)?;
 
-    let domain = crate::common::setup_domain(config)?;
+    let domain = crate::common::setup_domain(config).await?;
 
     let sync = dolos::sync::pipeline(&config.sync, &config.upstream, domain, &config.retries)
         .into_diagnostic()

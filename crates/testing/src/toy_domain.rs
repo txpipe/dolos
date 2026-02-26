@@ -45,7 +45,7 @@ impl futures_core::Stream for EmptyMempoolStream {
 impl dolos_core::MempoolStore for Mempool {
     type Stream = EmptyMempoolStream;
 
-    fn receive(&self, tx: MempoolTx) -> Result<(), MempoolError> {
+    async fn receive(&self, tx: MempoolTx) -> Result<(), MempoolError> {
         let mut pending = self.pending.write().map_err(|_| {
             MempoolError::Internal(Box::new(std::io::Error::other("mempool lock poisoned")))
         })?;
@@ -53,41 +53,41 @@ impl dolos_core::MempoolStore for Mempool {
         Ok(())
     }
 
-    fn has_pending(&self) -> bool {
+    async fn has_pending(&self) -> bool {
         self.pending
             .read()
             .map(|p| !p.is_empty())
             .unwrap_or(false)
     }
 
-    fn peek_pending(&self, limit: usize) -> Vec<MempoolTx> {
+    async fn peek_pending(&self, limit: usize) -> Vec<MempoolTx> {
         self.pending
             .read()
             .map(|p| p.iter().take(limit).cloned().collect())
             .unwrap_or_default()
     }
 
-    fn mark_inflight(&self, _hashes: &[TxHash]) -> Result<(), MempoolError> {
+    async fn mark_inflight(&self, _hashes: &[TxHash]) -> Result<(), MempoolError> {
         Ok(())
     }
 
-    fn mark_acknowledged(&self, _hashes: &[TxHash]) -> Result<(), MempoolError> {
+    async fn mark_acknowledged(&self, _hashes: &[TxHash]) -> Result<(), MempoolError> {
         Ok(())
     }
 
-    fn find_inflight(&self, _tx_hash: &TxHash) -> Option<MempoolTx> {
+    async fn find_inflight(&self, _tx_hash: &TxHash) -> Option<MempoolTx> {
         None
     }
 
-    fn peek_inflight(&self, _limit: usize) -> Vec<MempoolTx> {
+    async fn peek_inflight(&self, _limit: usize) -> Vec<MempoolTx> {
         vec![]
     }
 
-    fn confirm(&self, _point: &ChainPoint, _seen_txs: &[TxHash], _unseen_txs: &[TxHash], _finalize_threshold: u32, _drop_threshold: u32) -> Result<(), MempoolError> {
+    async fn confirm(&self, _point: &ChainPoint, _seen_txs: &[TxHash], _unseen_txs: &[TxHash], _finalize_threshold: u32, _drop_threshold: u32) -> Result<(), MempoolError> {
         Ok(())
     }
 
-    fn check_status(&self, tx_hash: &TxHash) -> TxStatus {
+    async fn check_status(&self, tx_hash: &TxHash) -> TxStatus {
         let stage = if let Ok(pending) = self.pending.read() {
             if pending.iter().any(|tx| &tx.hash == tx_hash) {
                 MempoolTxStage::Pending
@@ -106,7 +106,7 @@ impl dolos_core::MempoolStore for Mempool {
         }
     }
 
-    fn dump_finalized(&self, _cursor: u64, _limit: usize) -> dolos_core::MempoolPage {
+    async fn dump_finalized(&self, _cursor: u64, _limit: usize) -> dolos_core::MempoolPage {
         dolos_core::MempoolPage { items: vec![], next_cursor: None }
     }
 
@@ -130,12 +130,12 @@ pub struct ToyDomain {
 
 impl ToyDomain {
     /// Create a new MockDomain with the provided state implementation
-    pub fn new(initial_delta: Option<UtxoSetDelta>, storage_config: Option<StorageConfig>) -> Self {
+    pub async fn new(initial_delta: Option<UtxoSetDelta>, storage_config: Option<StorageConfig>) -> Self {
         let genesis = Arc::new(dolos_cardano::include::devnet::load());
-        Self::new_with_genesis(genesis, initial_delta, storage_config)
+        Self::new_with_genesis(genesis, initial_delta, storage_config).await
     }
 
-    pub fn new_with_genesis(
+    pub async fn new_with_genesis(
         genesis: Arc<dolos_core::Genesis>,
         initial_delta: Option<UtxoSetDelta>,
         storage_config: Option<StorageConfig>,
@@ -145,10 +145,10 @@ impl ToyDomain {
             CardanoConfig::default(),
             initial_delta,
             storage_config,
-        )
+        ).await
     }
 
-    pub fn new_with_genesis_and_config(
+    pub async fn new_with_genesis_and_config(
         genesis: Arc<dolos_core::Genesis>,
         config: CardanoConfig,
         initial_delta: Option<UtxoSetDelta>,
@@ -190,7 +190,7 @@ impl ToyDomain {
         let mut genesis_work = dolos_cardano::CardanoWorkUnit::Genesis(Box::new(
             dolos_cardano::genesis::GenesisWorkUnit::new(config, genesis),
         ));
-        execute_work_unit(&domain, &mut genesis_work).unwrap();
+        execute_work_unit(&domain, &mut genesis_work).await.unwrap();
 
         // Manually refresh the chain cache after genesis since we bypassed pop_work.
         // In normal operation, the cache refresh happens automatically via the
@@ -200,7 +200,7 @@ impl ToyDomain {
             chain.refresh_cache::<Self>(&domain.state).unwrap();
         }
 
-        domain.bootstrap().unwrap();
+        domain.bootstrap().await.unwrap();
 
         // Ensure the current epoch state is available as an archive log entry.
         let chain = dolos_cardano::eras::load_era_summary::<Self>(&domain.state).unwrap();

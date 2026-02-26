@@ -93,7 +93,7 @@ impl futures_core::Stream for EphemeralMempoolStream {
 impl MempoolStore for EphemeralMempool {
     type Stream = EphemeralMempoolStream;
 
-    fn receive(&self, tx: MempoolTx) -> Result<(), MempoolError> {
+    async fn receive(&self, tx: MempoolTx) -> Result<(), MempoolError> {
         let mut state = self.state.write().unwrap();
 
         if state.pending.iter().any(|p| p.hash == tx.hash) {
@@ -108,17 +108,17 @@ impl MempoolStore for EphemeralMempool {
         Ok(())
     }
 
-    fn has_pending(&self) -> bool {
+    async fn has_pending(&self) -> bool {
         let state = self.state.read().unwrap();
         !state.pending.is_empty()
     }
 
-    fn peek_pending(&self, limit: usize) -> Vec<MempoolTx> {
+    async fn peek_pending(&self, limit: usize) -> Vec<MempoolTx> {
         let state = self.state.read().unwrap();
         state.pending.iter().take(limit).cloned().collect()
     }
 
-    fn mark_inflight(&self, hashes: &[TxHash]) -> Result<(), MempoolError> {
+    async fn mark_inflight(&self, hashes: &[TxHash]) -> Result<(), MempoolError> {
         let hash_set: HashSet<_> = hashes.iter().collect();
         let mut state = self.state.write().unwrap();
 
@@ -143,7 +143,7 @@ impl MempoolStore for EphemeralMempool {
         Ok(())
     }
 
-    fn mark_acknowledged(&self, hashes: &[TxHash]) -> Result<(), MempoolError> {
+    async fn mark_acknowledged(&self, hashes: &[TxHash]) -> Result<(), MempoolError> {
         let hash_set: HashSet<_> = hashes.iter().collect();
         let mut state = self.state.write().unwrap();
 
@@ -168,7 +168,7 @@ impl MempoolStore for EphemeralMempool {
         Ok(())
     }
 
-    fn find_inflight(&self, tx_hash: &TxHash) -> Option<MempoolTx> {
+    async fn find_inflight(&self, tx_hash: &TxHash) -> Option<MempoolTx> {
         let state = self.state.read().unwrap();
         // Check propagated (inflight vec)
         if let Some(tx) = state.inflight.iter().find(|x| x.hash.eq(tx_hash)) {
@@ -178,7 +178,7 @@ impl MempoolStore for EphemeralMempool {
         state.acknowledged.get(tx_hash).cloned()
     }
 
-    fn peek_inflight(&self, limit: usize) -> Vec<MempoolTx> {
+    async fn peek_inflight(&self, limit: usize) -> Vec<MempoolTx> {
         let state = self.state.read().unwrap();
 
         state
@@ -190,7 +190,7 @@ impl MempoolStore for EphemeralMempool {
             .collect()
     }
 
-    fn confirm(&self, point: &ChainPoint, seen_txs: &[TxHash], unseen_txs: &[TxHash], finalize_threshold: u32, drop_threshold: u32) -> Result<(), MempoolError> {
+    async fn confirm(&self, point: &ChainPoint, seen_txs: &[TxHash], unseen_txs: &[TxHash], finalize_threshold: u32, drop_threshold: u32) -> Result<(), MempoolError> {
         let mut state = self.state.write().unwrap();
 
         // Promote Propagated txs into the acknowledged map so the confirm
@@ -274,7 +274,7 @@ impl MempoolStore for EphemeralMempool {
         Ok(())
     }
 
-    fn check_status(&self, tx_hash: &TxHash) -> TxStatus {
+    async fn check_status(&self, tx_hash: &TxHash) -> TxStatus {
         let state = self.state.read().unwrap();
 
         if let Some(tx) = state.acknowledged.get(tx_hash) {
@@ -308,7 +308,7 @@ impl MempoolStore for EphemeralMempool {
         }
     }
 
-    fn dump_finalized(&self, cursor: u64, limit: usize) -> MempoolPage {
+    async fn dump_finalized(&self, cursor: u64, limit: usize) -> MempoolPage {
         let state = self.state.read().unwrap();
         let start = cursor as usize;
 

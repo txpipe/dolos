@@ -269,7 +269,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_dump_history_pagination() {
-        let domain = ToyDomain::new(None, None);
+        let domain = ToyDomain::new(None, None).await;
         let cancel = CancelTokenImpl::default();
 
         let batch = (0..34)
@@ -319,7 +319,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_dump_history_max_items() {
-        let domain = ToyDomain::new(None, None);
+        let domain = ToyDomain::new(None, None).await;
         let cancel = CancelTokenImpl::default();
 
         let service = SyncServiceImpl::new(domain, cancel);

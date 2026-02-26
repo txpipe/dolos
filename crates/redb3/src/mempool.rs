@@ -794,13 +794,13 @@ impl RedbMempool {
 impl MempoolStore for RedbMempool {
     type Stream = RedbMempoolStream;
 
-    fn receive(&self, tx: MempoolTx) -> Result<(), MempoolError> {
+    async fn receive(&self, tx: MempoolTx) -> Result<(), MempoolError> {
         info!(tx.hash = %tx.hash, "tx received (redb)");
         self.receive_inner(tx)?;
         Ok(())
     }
 
-    fn has_pending(&self) -> bool {
+    async fn has_pending(&self) -> bool {
         let rx = match self.db.begin_read() {
             Ok(rx) => rx,
             Err(_) => return false,
@@ -808,7 +808,7 @@ impl MempoolStore for RedbMempool {
         PendingTable::has_any(&rx).unwrap_or(false)
     }
 
-    fn peek_pending(&self, limit: usize) -> Vec<MempoolTx> {
+    async fn peek_pending(&self, limit: usize) -> Vec<MempoolTx> {
         let rx = match self.db.begin_read() {
             Ok(rx) => rx,
             Err(_) => return vec![],
@@ -816,7 +816,7 @@ impl MempoolStore for RedbMempool {
         PendingTable::peek(&rx, limit).unwrap_or_default()
     }
 
-    fn mark_inflight(&self, hashes: &[TxHash]) -> Result<(), MempoolError> {
+    async fn mark_inflight(&self, hashes: &[TxHash]) -> Result<(), MempoolError> {
         let hash_set: HashSet<TxHash> = hashes.iter().copied().collect();
 
         self.with_write_tx(|wx| {
@@ -835,7 +835,7 @@ impl MempoolStore for RedbMempool {
         Ok(())
     }
 
-    fn mark_acknowledged(&self, hashes: &[TxHash]) -> Result<(), MempoolError> {
+    async fn mark_acknowledged(&self, hashes: &[TxHash]) -> Result<(), MempoolError> {
         self.with_write_tx(|wx| {
             let mut events = Vec::new();
             for hash in hashes {
@@ -854,13 +854,13 @@ impl MempoolStore for RedbMempool {
         Ok(())
     }
 
-    fn find_inflight(&self, tx_hash: &TxHash) -> Option<MempoolTx> {
+    async fn find_inflight(&self, tx_hash: &TxHash) -> Option<MempoolTx> {
         let rx = self.db.begin_read().ok()?;
         let record = InflightTable::get(&rx, tx_hash).ok()??;
         Some(record.to_mempool_tx(*tx_hash))
     }
 
-    fn peek_inflight(&self, limit: usize) -> Vec<MempoolTx> {
+    async fn peek_inflight(&self, limit: usize) -> Vec<MempoolTx> {
         let rx = match self.db.begin_read() {
             Ok(rx) => rx,
             Err(_) => return vec![],
@@ -868,7 +868,7 @@ impl MempoolStore for RedbMempool {
         InflightTable::peek(&rx, limit).unwrap_or_default()
     }
 
-    fn confirm(
+    async fn confirm(
         &self,
         point: &ChainPoint,
         seen_txs: &[TxHash],
@@ -949,7 +949,7 @@ impl MempoolStore for RedbMempool {
         Ok(())
     }
 
-    fn check_status(&self, tx_hash: &TxHash) -> TxStatus {
+    async fn check_status(&self, tx_hash: &TxHash) -> TxStatus {
         let rx = match self.db.begin_read() {
             Ok(rx) => rx,
             Err(_) => {
@@ -983,7 +983,7 @@ impl MempoolStore for RedbMempool {
         }
     }
 
-    fn dump_finalized(&self, cursor: u64, limit: usize) -> MempoolPage {
+    async fn dump_finalized(&self, cursor: u64, limit: usize) -> MempoolPage {
         let rx = match self.db.begin_read() {
             Ok(rx) => rx,
             Err(_) => {
@@ -1030,165 +1030,165 @@ mod tests {
         ChainPoint::Specific(12346, pallas::crypto::hash::Hash::new([0xCD; 32]))
     }
 
-    #[test]
-    fn test_empty_store() {
+    #[tokio::test]
+    async fn test_empty_store() {
         let store = test_store();
-        assert!(!store.has_pending());
-        assert!(store.peek_pending(10).is_empty());
+        assert!(!store.has_pending().await);
+        assert!(store.peek_pending(10).await.is_empty());
     }
 
-    #[test]
-    fn test_receive_and_has_pending() {
+    #[tokio::test]
+    async fn test_receive_and_has_pending() {
         let store = test_store();
         let tx = test_tx(1);
         let hash = tx.hash;
         let payload = tx.payload.clone();
 
-        store.receive(tx).unwrap();
+        store.receive(tx).await.unwrap();
 
-        assert!(store.has_pending());
+        assert!(store.has_pending().await);
 
-        let peeked = store.peek_pending(10);
+        let peeked = store.peek_pending(10).await;
         assert_eq!(peeked.len(), 1);
         assert_eq!(peeked[0].hash, hash);
         assert_eq!(peeked[0].payload, payload);
     }
 
-    #[test]
-    fn test_peek_pending_respects_limit() {
+    #[tokio::test]
+    async fn test_peek_pending_respects_limit() {
         let store = test_store();
         for n in 0..3 {
-            store.receive(test_tx(n)).unwrap();
+            store.receive(test_tx(n)).await.unwrap();
         }
 
-        let peeked = store.peek_pending(2);
+        let peeked = store.peek_pending(2).await;
         assert_eq!(peeked.len(), 2);
     }
 
-    #[test]
-    fn test_receive_duplicate_hash() {
+    #[tokio::test]
+    async fn test_receive_duplicate_hash() {
         let store = test_store();
         let tx = test_tx(1);
-        store.receive(tx.clone()).unwrap();
+        store.receive(tx.clone()).await.unwrap();
 
-        let err = store.receive(tx).unwrap_err();
+        let err = store.receive(tx).await.unwrap_err();
         assert!(matches!(err, MempoolError::DuplicateTx));
-        assert_eq!(store.peek_pending(10).len(), 1);
+        assert_eq!(store.peek_pending(10).await.len(), 1);
     }
 
-    #[test]
-    fn test_mark_inflight() {
+    #[tokio::test]
+    async fn test_mark_inflight() {
         let store = test_store();
         let tx = test_tx(1);
         let hash = tx.hash;
 
-        store.receive(tx).unwrap();
-        store.mark_inflight(&[hash]).unwrap();
+        store.receive(tx).await.unwrap();
+        store.mark_inflight(&[hash]).await.unwrap();
 
-        assert!(!store.has_pending());
+        assert!(!store.has_pending().await);
         assert!(matches!(
-            store.check_status(&hash).stage,
+            store.check_status(&hash).await.stage,
             MempoolTxStage::Propagated
         ));
-        assert!(store.find_inflight(&hash).is_some());
+        assert!(store.find_inflight(&hash).await.is_some());
     }
 
-    #[test]
-    fn test_mark_acknowledged() {
+    #[tokio::test]
+    async fn test_mark_acknowledged() {
         let store = test_store();
         let tx = test_tx(1);
         let hash = tx.hash;
 
-        store.receive(tx).unwrap();
-        store.mark_inflight(&[hash]).unwrap();
-        store.mark_acknowledged(&[hash]).unwrap();
+        store.receive(tx).await.unwrap();
+        store.mark_inflight(&[hash]).await.unwrap();
+        store.mark_acknowledged(&[hash]).await.unwrap();
 
         assert!(matches!(
-            store.check_status(&hash).stage,
+            store.check_status(&hash).await.stage,
             MempoolTxStage::Acknowledged
         ));
         // find_inflight now returns any inflight sub-stage (Propagated, Acknowledged, Confirmed)
-        assert!(store.find_inflight(&hash).is_some());
+        assert!(store.find_inflight(&hash).await.is_some());
     }
 
-    #[test]
-    fn test_stage_unknown() {
+    #[tokio::test]
+    async fn test_stage_unknown() {
         let store = test_store();
         let hash = test_hash(99);
 
         assert!(matches!(
-            store.check_status(&hash).stage,
+            store.check_status(&hash).await.stage,
             MempoolTxStage::Unknown
         ));
     }
 
-    #[test]
-    fn test_get_tx_status_lifecycle() {
+    #[tokio::test]
+    async fn test_get_tx_status_lifecycle() {
         let store = test_store();
         let tx = test_tx(1);
         let hash = tx.hash;
         let point = test_point();
 
         // Unknown
-        let status = store.check_status(&hash);
+        let status = store.check_status(&hash).await;
         assert!(matches!(status.stage, MempoolTxStage::Unknown));
         assert_eq!(status.confirmations, 0);
         assert!(status.confirmed_at.is_none());
 
         // Pending
-        store.receive(tx).unwrap();
-        let status = store.check_status(&hash);
+        store.receive(tx).await.unwrap();
+        let status = store.check_status(&hash).await;
         assert!(matches!(status.stage, MempoolTxStage::Pending));
         assert_eq!(status.confirmations, 0);
         assert!(status.confirmed_at.is_none());
 
         // Propagated
-        store.mark_inflight(&[hash]).unwrap();
-        let status = store.check_status(&hash);
+        store.mark_inflight(&[hash]).await.unwrap();
+        let status = store.check_status(&hash).await;
         assert!(matches!(status.stage, MempoolTxStage::Propagated));
         assert_eq!(status.confirmations, 0);
         assert!(status.confirmed_at.is_none());
 
         // Acknowledged
-        store.mark_acknowledged(&[hash]).unwrap();
-        let status = store.check_status(&hash);
+        store.mark_acknowledged(&[hash]).await.unwrap();
+        let status = store.check_status(&hash).await;
         assert!(matches!(status.stage, MempoolTxStage::Acknowledged));
         assert_eq!(status.confirmations, 0);
         assert!(status.confirmed_at.is_none());
 
         // Confirmed (1st confirmation)
-        store.confirm(&point, &[hash], &[], u32::MAX, u32::MAX).unwrap();
-        let status = store.check_status(&hash);
+        store.confirm(&point, &[hash], &[], u32::MAX, u32::MAX).await.unwrap();
+        let status = store.check_status(&hash).await;
         assert!(matches!(status.stage, MempoolTxStage::Confirmed));
         assert_eq!(status.confirmations, 1);
         assert!(status.confirmed_at.is_some());
         assert_eq!(status.confirmed_at.as_ref().unwrap().slot(), point.slot());
 
         // Confirmed (2nd confirmation — confirmed_at stays the same)
-        store.confirm(&test_point_2(), &[hash], &[], u32::MAX, u32::MAX).unwrap();
-        let status = store.check_status(&hash);
+        store.confirm(&test_point_2(), &[hash], &[], u32::MAX, u32::MAX).await.unwrap();
+        let status = store.check_status(&hash).await;
         assert!(matches!(status.stage, MempoolTxStage::Confirmed));
         assert_eq!(status.confirmations, 2);
         assert_eq!(status.confirmed_at.as_ref().unwrap().slot(), point.slot());
 
         // Finalized — trigger via confirm with finalize_threshold=2
-        store.confirm(&test_point(), &[hash], &[], 2, u32::MAX).unwrap();
-        let status = store.check_status(&hash);
+        store.confirm(&test_point(), &[hash], &[], 2, u32::MAX).await.unwrap();
+        let status = store.check_status(&hash).await;
         assert!(matches!(status.stage, MempoolTxStage::Unknown));
         assert_eq!(status.confirmations, 0);
         assert!(status.confirmed_at.is_none());
     }
 
-    #[test]
-    fn test_read_finalized_log_empty() {
+    #[tokio::test]
+    async fn test_read_finalized_log_empty() {
         let store = test_store();
-        let page = store.dump_finalized(0, 50);
+        let page = store.dump_finalized(0, 50).await;
         assert!(page.items.is_empty());
         assert!(page.next_cursor.is_none());
     }
 
-    #[test]
-    fn test_read_finalized_log_pagination() {
+    #[tokio::test]
+    async fn test_read_finalized_log_pagination() {
         let store = test_store();
         let point = test_point();
 
@@ -1196,16 +1196,16 @@ mod tests {
         for n in 0..3u8 {
             let tx = test_tx(n);
             let hash = tx.hash;
-            store.receive(tx).unwrap();
-            store.mark_inflight(&[hash]).unwrap();
-            store.mark_acknowledged(&[hash]).unwrap();
-            store.confirm(&point, &[hash], &[], u32::MAX, u32::MAX).unwrap();
+            store.receive(tx).await.unwrap();
+            store.mark_inflight(&[hash]).await.unwrap();
+            store.mark_acknowledged(&[hash]).await.unwrap();
+            store.confirm(&point, &[hash], &[], u32::MAX, u32::MAX).await.unwrap();
             // Second confirm with finalize_threshold=2 triggers finalization
-            store.confirm(&test_point_2(), &[hash], &[], 2, u32::MAX).unwrap();
+            store.confirm(&test_point_2(), &[hash], &[], 2, u32::MAX).await.unwrap();
         }
 
         // Read all
-        let page = store.dump_finalized(0, 50);
+        let page = store.dump_finalized(0, 50).await;
         assert_eq!(page.items.len(), 3);
         assert!(page.next_cursor.is_none());
         for entry in &page.items {
@@ -1218,39 +1218,39 @@ mod tests {
         }
 
         // Read with limit
-        let page = store.dump_finalized(0, 2);
+        let page = store.dump_finalized(0, 2).await;
         assert_eq!(page.items.len(), 2);
         assert!(page.next_cursor.is_some());
 
         // Read remainder
-        let page2 = store.dump_finalized(page.next_cursor.unwrap(), 50);
+        let page2 = store.dump_finalized(page.next_cursor.unwrap(), 50).await;
         assert_eq!(page2.items.len(), 1);
         assert!(page2.next_cursor.is_none());
     }
 
-    #[test]
-    fn test_inflight_listing() {
+    #[tokio::test]
+    async fn test_inflight_listing() {
         let store = test_store();
         let h1 = test_hash(1);
         let h2 = test_hash(2);
         let h3 = test_hash(3);
 
-        store.receive(test_tx(1)).unwrap();
-        store.receive(test_tx(2)).unwrap();
-        store.receive(test_tx(3)).unwrap();
+        store.receive(test_tx(1)).await.unwrap();
+        store.receive(test_tx(2)).await.unwrap();
+        store.receive(test_tx(3)).await.unwrap();
 
-        store.mark_inflight(&[h1, h2, h3]).unwrap();
+        store.mark_inflight(&[h1, h2, h3]).await.unwrap();
 
         // All three start as Propagated
-        let listing = store.peek_inflight(usize::MAX);
+        let listing = store.peek_inflight(usize::MAX).await;
         assert_eq!(listing.len(), 3);
         assert!(listing
             .iter()
             .all(|tx| tx.stage == MempoolTxStage::Propagated));
 
         // Acknowledge h2
-        store.mark_acknowledged(&[h2]).unwrap();
-        let listing = store.peek_inflight(usize::MAX);
+        store.mark_acknowledged(&[h2]).await.unwrap();
+        let listing = store.peek_inflight(usize::MAX).await;
         assert_eq!(listing.len(), 3);
         let h2_stage = listing
             .iter()
@@ -1261,8 +1261,8 @@ mod tests {
         assert_eq!(h2_stage, MempoolTxStage::Acknowledged);
 
         // Confirm h2
-        store.confirm(&test_point(), &[h2], &[], u32::MAX, u32::MAX).unwrap();
-        let listing = store.peek_inflight(usize::MAX);
+        store.confirm(&test_point(), &[h2], &[], u32::MAX, u32::MAX).await.unwrap();
+        let listing = store.peek_inflight(usize::MAX).await;
         assert_eq!(listing.len(), 3);
         let h2_stage = listing
             .iter()
@@ -1273,8 +1273,8 @@ mod tests {
         assert_eq!(h2_stage, MempoolTxStage::Confirmed);
 
         // Finalize h2 — second confirm with finalize_threshold=2
-        store.confirm(&test_point_2(), &[h2], &[], 2, u32::MAX).unwrap();
-        let listing = store.peek_inflight(usize::MAX);
+        store.confirm(&test_point_2(), &[h2], &[], 2, u32::MAX).await.unwrap();
+        let listing = store.peek_inflight(usize::MAX).await;
         assert_eq!(listing.len(), 2);
         assert!(!listing.iter().any(|tx| tx.hash == h2));
     }

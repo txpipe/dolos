@@ -371,14 +371,13 @@ impl dolos_core::ChainLogic for CardanoLogic {
         utils::mutable_slots(&domain.genesis())
     }
 
-    fn validate_tx<D: Domain>(
-        &self,
+    async fn validate_tx<D: Domain>(
         cbor: &[u8],
-        utxos: &MempoolAwareUtxoStore<D>,
+        utxos: &MempoolAwareUtxoStore<'_, D>,
         tip: Option<ChainPoint>,
         genesis: &Genesis,
     ) -> Result<MempoolTx, ChainError> {
-        validate::validate_tx(cbor, utxos, tip, genesis)
+        validate::validate_tx(cbor, utxos, tip, genesis).await
     }
 }
 

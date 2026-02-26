@@ -25,7 +25,7 @@ pub struct Worker {
 }
 
 impl Worker {
-    pub fn create_next_block(
+    pub async fn create_next_block(
         &self,
         current: Option<RawBlock>,
     ) -> Result<(Tip, RawBlock), WorkerError> {
@@ -49,7 +49,7 @@ impl Worker {
         let mut transaction_witness_sets = vec![];
         let mut auxiliary_data_set = BTreeMap::new();
 
-        let txs = self.mempool.peek_pending(10);
+        let txs = self.mempool.peek_pending(10).await;
 
         for (i, tx) in txs.iter().enumerate() {
             info!(tx = hex::encode(tx.hash), "adding tx to emulated block");
@@ -73,8 +73,8 @@ impl Worker {
         }
 
         let hashes: Vec<TxHash> = txs.iter().map(|tx| tx.hash).collect();
-        self.mempool.mark_inflight(&hashes).or_panic()?;
-        self.mempool.mark_acknowledged(&hashes).or_panic()?;
+        self.mempool.mark_inflight(&hashes).await.or_panic()?;
+        self.mempool.mark_acknowledged(&hashes).await.or_panic()?;
 
         let block = pallas::ledger::primitives::conway::Block {
             header: pallas::ledger::primitives::babbage::Header {
@@ -160,7 +160,7 @@ impl gasket::framework::Worker<Stage> for Worker {
             .map(|(_, log)| log)
             .map(|x| Arc::new(x.block.clone()));
 
-        let (tip, block) = self.create_next_block(tip)?;
+        let (tip, block) = self.create_next_block(tip).await?;
 
         stage.flush_block(block).await?;
         stage.track_tip(&tip);

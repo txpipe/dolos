@@ -454,7 +454,8 @@ pub struct RedisMempoolConfig {
     #[serde(default = "default_max_finalized")]
     pub max_finalized: usize,
 
-    /// Watcher lock TTL in seconds (default: 10)
+    /// Watcher lock TTL in seconds (default: 60). Should be longer than the
+    /// expected block interval to prevent the lock from expiring between blocks.
     #[serde(default = "default_watcher_lock_ttl")]
     pub watcher_lock_ttl: u64,
 }
@@ -484,7 +485,7 @@ fn default_max_finalized() -> usize {
 }
 
 fn default_watcher_lock_ttl() -> u64 {
-    10
+    60
 }
 
 /// Mempool store configuration.

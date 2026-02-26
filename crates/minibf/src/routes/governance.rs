@@ -247,7 +247,7 @@ mod tests {
 
     #[tokio::test]
     async fn governance_drep_happy_path() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let drep = &app.vectors().drep_id;
         let path = format!("/governance/dreps/{drep}");
         let (status, body) = app.get_bytes(&path).await;
@@ -258,14 +258,14 @@ mod tests {
 
     #[tokio::test]
     async fn governance_drep_bad_request() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let path = format!("/governance/dreps/{}", invalid_drep());
         assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
     }
 
     #[tokio::test]
     async fn governance_drep_not_found() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let missing = missing_drep();
         let path = format!("/governance/dreps/{missing}");
         assert_status(&app, &path, StatusCode::NOT_FOUND).await;
@@ -273,7 +273,7 @@ mod tests {
 
     #[tokio::test]
     async fn governance_drep_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
+        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError)).await;
         let drep = &app.vectors().drep_id;
         let path = format!("/governance/dreps/{drep}");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;

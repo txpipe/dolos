@@ -16,7 +16,7 @@ pub struct Args {
 pub async fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging, &config.telemetry)?;
 
-    let domain = setup_domain(config)?;
+    let domain = setup_domain(config).await?;
 
     let mut done = false;
     let mut rounds = 0;

@@ -1048,63 +1048,63 @@ impl futures_core::Stream for MempoolStreamBackend {
 impl MempoolStore for MempoolBackend {
     type Stream = MempoolStreamBackend;
 
-    fn receive(&self, tx: MempoolTx) -> Result<(), MempoolError> {
+    async fn receive(&self, tx: MempoolTx) -> Result<(), MempoolError> {
         match self {
-            Self::Ephemeral(s) => s.receive(tx),
-            Self::Redb(s) => s.receive(tx),
-            Self::Redis(s) => s.receive(tx),
+            Self::Ephemeral(s) => s.receive(tx).await,
+            Self::Redb(s) => s.receive(tx).await,
+            Self::Redis(s) => s.receive(tx).await,
         }
     }
 
-    fn has_pending(&self) -> bool {
+    async fn has_pending(&self) -> bool {
         match self {
-            Self::Ephemeral(s) => s.has_pending(),
-            Self::Redb(s) => s.has_pending(),
-            Self::Redis(s) => s.has_pending(),
+            Self::Ephemeral(s) => s.has_pending().await,
+            Self::Redb(s) => s.has_pending().await,
+            Self::Redis(s) => s.has_pending().await,
         }
     }
 
-    fn peek_pending(&self, limit: usize) -> Vec<MempoolTx> {
+    async fn peek_pending(&self, limit: usize) -> Vec<MempoolTx> {
         match self {
-            Self::Ephemeral(s) => s.peek_pending(limit),
-            Self::Redb(s) => s.peek_pending(limit),
-            Self::Redis(s) => s.peek_pending(limit),
+            Self::Ephemeral(s) => s.peek_pending(limit).await,
+            Self::Redb(s) => s.peek_pending(limit).await,
+            Self::Redis(s) => s.peek_pending(limit).await,
         }
     }
 
-    fn mark_inflight(&self, hashes: &[TxHash]) -> Result<(), MempoolError> {
+    async fn mark_inflight(&self, hashes: &[TxHash]) -> Result<(), MempoolError> {
         match self {
-            Self::Ephemeral(s) => s.mark_inflight(hashes),
-            Self::Redb(s) => s.mark_inflight(hashes),
-            Self::Redis(s) => s.mark_inflight(hashes),
+            Self::Ephemeral(s) => s.mark_inflight(hashes).await,
+            Self::Redb(s) => s.mark_inflight(hashes).await,
+            Self::Redis(s) => s.mark_inflight(hashes).await,
         }
     }
 
-    fn mark_acknowledged(&self, hashes: &[TxHash]) -> Result<(), MempoolError> {
+    async fn mark_acknowledged(&self, hashes: &[TxHash]) -> Result<(), MempoolError> {
         match self {
-            Self::Ephemeral(s) => s.mark_acknowledged(hashes),
-            Self::Redb(s) => s.mark_acknowledged(hashes),
-            Self::Redis(s) => s.mark_acknowledged(hashes),
+            Self::Ephemeral(s) => s.mark_acknowledged(hashes).await,
+            Self::Redb(s) => s.mark_acknowledged(hashes).await,
+            Self::Redis(s) => s.mark_acknowledged(hashes).await,
         }
     }
 
-    fn find_inflight(&self, tx_hash: &TxHash) -> Option<MempoolTx> {
+    async fn find_inflight(&self, tx_hash: &TxHash) -> Option<MempoolTx> {
         match self {
-            Self::Ephemeral(s) => s.find_inflight(tx_hash),
-            Self::Redb(s) => s.find_inflight(tx_hash),
-            Self::Redis(s) => s.find_inflight(tx_hash),
+            Self::Ephemeral(s) => s.find_inflight(tx_hash).await,
+            Self::Redb(s) => s.find_inflight(tx_hash).await,
+            Self::Redis(s) => s.find_inflight(tx_hash).await,
         }
     }
 
-    fn peek_inflight(&self, limit: usize) -> Vec<MempoolTx> {
+    async fn peek_inflight(&self, limit: usize) -> Vec<MempoolTx> {
         match self {
-            Self::Ephemeral(s) => s.peek_inflight(limit),
-            Self::Redb(s) => s.peek_inflight(limit),
-            Self::Redis(s) => s.peek_inflight(limit),
+            Self::Ephemeral(s) => s.peek_inflight(limit).await,
+            Self::Redb(s) => s.peek_inflight(limit).await,
+            Self::Redis(s) => s.peek_inflight(limit).await,
         }
     }
 
-    fn confirm(
+    async fn confirm(
         &self,
         point: &ChainPoint,
         seen_txs: &[TxHash],
@@ -1119,37 +1119,37 @@ impl MempoolStore for MempoolBackend {
                 unseen_txs,
                 finalize_threshold,
                 drop_threshold,
-            ),
+            ).await,
             Self::Redb(s) => s.confirm(
                 point,
                 seen_txs,
                 unseen_txs,
                 finalize_threshold,
                 drop_threshold,
-            ),
+            ).await,
             Self::Redis(s) => s.confirm(
                 point,
                 seen_txs,
                 unseen_txs,
                 finalize_threshold,
                 drop_threshold,
-            ),
+            ).await,
         }
     }
 
-    fn check_status(&self, tx_hash: &TxHash) -> TxStatus {
+    async fn check_status(&self, tx_hash: &TxHash) -> TxStatus {
         match self {
-            Self::Ephemeral(s) => s.check_status(tx_hash),
-            Self::Redb(s) => s.check_status(tx_hash),
-            Self::Redis(s) => s.check_status(tx_hash),
+            Self::Ephemeral(s) => s.check_status(tx_hash).await,
+            Self::Redb(s) => s.check_status(tx_hash).await,
+            Self::Redis(s) => s.check_status(tx_hash).await,
         }
     }
 
-    fn dump_finalized(&self, cursor: u64, limit: usize) -> dolos_core::MempoolPage {
+    async fn dump_finalized(&self, cursor: u64, limit: usize) -> dolos_core::MempoolPage {
         match self {
-            Self::Ephemeral(s) => s.dump_finalized(cursor, limit),
-            Self::Redb(s) => s.dump_finalized(cursor, limit),
-            Self::Redis(s) => s.dump_finalized(cursor, limit),
+            Self::Ephemeral(s) => s.dump_finalized(cursor, limit).await,
+            Self::Redb(s) => s.dump_finalized(cursor, limit).await,
+            Self::Redis(s) => s.dump_finalized(cursor, limit).await,
         }
     }
 

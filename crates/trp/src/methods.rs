@@ -10,7 +10,7 @@ use tx3_resolver::trp::{
     TxStatus, TxWitness,
 };
 
-use dolos_core::{Domain, MempoolAwareUtxoStore, MempoolStore as _, StateStore as _, SubmitExt};
+use dolos_core::{Domain, MempoolAwareUtxoStore, MempoolStore as _, StateStore as _};
 
 use crate::{compiler::load_compiler, utxos::UtxoStoreAdapter};
 
@@ -78,7 +78,7 @@ fn apply_witnesses(original: &[u8], witnesses: &[TxWitness]) -> Result<Vec<u8>, 
     Ok(pallas::codec::minicbor::to_vec(&tx).unwrap())
 }
 
-pub async fn trp_submit<D: Domain + SubmitExt>(
+pub async fn trp_submit<D: Domain>(
     params: Params<'_>,
     context: Arc<Context<D>>,
 ) -> Result<SubmitResponse, Error> {
@@ -90,9 +90,7 @@ pub async fn trp_submit<D: Domain + SubmitExt>(
         bytes = apply_witnesses(&bytes, &params.witnesses)?;
     }
 
-    let chain = context.domain.read_chain();
-
-    let hash = context.domain.receive_tx("trp", &chain, &bytes)?;
+    let hash = dolos_core::submit::receive_tx(&context.domain, "trp", &bytes).await?;
 
     Ok(SubmitResponse {
         hash: hash.to_string(),
@@ -181,7 +179,7 @@ pub async fn trp_check_status<D: Domain>(
         arr.copy_from_slice(&hash_bytes);
         let tx_hash = dolos_core::TxHash::from(arr);
 
-        let status = mempool.check_status(&tx_hash);
+        let status = mempool.check_status(&tx_hash).await;
 
         statuses.insert(
             hash_hex.clone(),
@@ -210,7 +208,7 @@ pub async fn trp_dump_logs<D: Domain>(
     let include_payload = params.include_payload.unwrap_or(false);
 
     let mempool = context.domain.mempool();
-    let page = mempool.dump_finalized(cursor, limit);
+    let page = mempool.dump_finalized(cursor, limit).await;
     let entries = page.items;
     let next_cursor = page.next_cursor;
 
@@ -248,7 +246,7 @@ pub async fn trp_peek_pending<D: Domain>(
     let include_payload = params.include_payload.unwrap_or(false);
 
     let mempool = context.domain.mempool();
-    let peeked = mempool.peek_pending(limit + 1);
+    let peeked = mempool.peek_pending(limit + 1).await;
 
     let has_more = peeked.len() > limit;
 
@@ -280,7 +278,7 @@ pub async fn trp_peek_inflight<D: Domain>(
     let include_payload = params.include_payload.unwrap_or(false);
 
     let mempool = context.domain.mempool();
-    let peeked = mempool.peek_inflight(limit + 1);
+    let peeked = mempool.peek_inflight(limit + 1).await;
 
     let has_more = peeked.len() > limit;
 
@@ -331,7 +329,7 @@ mod tests {
             },
         );
 
-        let domain = ToyDomain::new(Some(delta), None);
+        let domain = ToyDomain::new(Some(delta), None).await;
 
         Arc::new(Context {
             domain,
@@ -440,7 +438,7 @@ mod tests {
         let tx = dolos_testing::mempool::make_test_mempool_tx(hash);
         let hash_hex = hex::encode(hash.as_ref());
 
-        dolos_core::MempoolStore::receive(context.domain.mempool(), tx).unwrap();
+        dolos_core::MempoolStore::receive(context.domain.mempool(), tx).await.unwrap();
 
         let req = json!({ "hashes": [hash_hex] }).to_string();
         let params = Params::new(Some(req.as_str()));
@@ -474,7 +472,7 @@ mod tests {
         for n in 0..3u64 {
             let hash = dolos_testing::tx_sequence_to_hash(n);
             let tx = dolos_testing::mempool::make_test_mempool_tx(hash);
-            dolos_core::MempoolStore::receive(context.domain.mempool(), tx).unwrap();
+            dolos_core::MempoolStore::receive(context.domain.mempool(), tx).await.unwrap();
         }
 
         // Peek with limit 2 — should get 2 items and has_more = true

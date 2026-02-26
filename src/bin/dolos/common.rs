@@ -61,7 +61,7 @@ pub fn load_config(
     s.build()?.try_deserialize()
 }
 
-pub fn setup_domain(config: &RootConfig) -> miette::Result<DomainAdapter> {
+pub async fn setup_domain(config: &RootConfig) -> miette::Result<DomainAdapter> {
     let stores = open_data_stores(config)?;
     let genesis = Arc::new(open_genesis_files(&config.genesis)?);
     let mempool = stores.mempool.clone();
@@ -90,7 +90,7 @@ pub fn setup_domain(config: &RootConfig) -> miette::Result<DomainAdapter> {
     };
 
     // this will make sure the domain is correctly initialized and in a valid state.
-    domain.bootstrap().map_err(|x| miette::miette!("{:?}", x))?;
+    domain.bootstrap().await.map_err(|x| miette::miette!("{:?}", x))?;
 
     Ok(domain)
 }

@@ -39,32 +39,32 @@ pub trait SyncExt: Domain {
     /// # Returns
     ///
     /// The slot of the processed block.
-    fn roll_forward(&self, block: RawBlock) -> Result<BlockSlot, DomainError>;
+    async fn roll_forward(&self, block: RawBlock) -> Result<BlockSlot, DomainError>;
 
     /// Roll back the chain to a previous point.
     ///
     /// Iterates WAL entries after the target point in reverse order,
     /// undoing each block's effects on state, UTxOs, and indexes.
-    fn rollback(&self, to: &ChainPoint) -> Result<(), DomainError>;
+    async fn rollback(&self, to: &ChainPoint) -> Result<(), DomainError>;
 }
 
 impl<D: Domain> SyncExt for D {
     #[instrument(skip_all)]
-    fn roll_forward(&self, block: RawBlock) -> Result<BlockSlot, DomainError> {
+    async fn roll_forward(&self, block: RawBlock) -> Result<BlockSlot, DomainError> {
         let mut chain = self.write_chain();
 
         // Drain first in case there's previous work that needs to be applied (eg: initialization)
-        drain_pending_work::<D>(&mut *chain, self)?;
+        drain_pending_work::<D>(&mut *chain, self).await?;
 
         let last = chain.receive_block(block)?;
 
-        drain_pending_work::<D>(&mut *chain, self)?;
+        drain_pending_work::<D>(&mut *chain, self).await?;
 
         Ok(last)
     }
 
     #[instrument(skip_all, fields(rollback_to = %to))]
-    fn rollback(&self, to: &ChainPoint) -> Result<(), DomainError> {
+    async fn rollback(&self, to: &ChainPoint) -> Result<(), DomainError> {
         let undo_blocks = self.wal().iter_logs(Some(to.clone()), None)?;
 
         let writer = self.state().start_writer()?;
@@ -120,7 +120,7 @@ impl<D: Domain> SyncExt for D {
                 &undo_data.tx_hashes,
                 MEMPOOL_FINALIZE_THRESHOLD,
                 MEMPOOL_DROP_THRESHOLD,
-            ) {
+            ).await {
                 warn!(?e, %point, "mempool rollback confirm failed");
             }
 
@@ -139,12 +139,12 @@ impl<D: Domain> SyncExt for D {
 }
 
 /// Drain all pending work from the chain logic using sync lifecycle.
-pub(crate) fn drain_pending_work<D: Domain>(
+pub(crate) async fn drain_pending_work<D: Domain>(
     chain: &mut D::Chain,
     domain: &D,
 ) -> Result<(), DomainError> {
     while let Some(mut work) = <D::Chain as ChainLogic>::pop_work::<D>(chain, domain) {
-        execute_work_unit(domain, &mut work)?;
+        execute_work_unit(domain, &mut work).await?;
     }
 
     Ok(())
@@ -164,7 +164,7 @@ pub(crate) fn drain_pending_work<D: Domain>(
 /// This function is public primarily for testing scenarios where direct
 /// work unit execution is needed (e.g., manual genesis initialization).
 #[instrument(skip_all, fields(work_unit = %work.name()))]
-pub fn execute_work_unit<D: Domain>(domain: &D, work: &mut D::WorkUnit) -> Result<(), DomainError> {
+pub async fn execute_work_unit<D: Domain>(domain: &D, work: &mut D::WorkUnit) -> Result<(), DomainError> {
     info!("executing work unit");
 
     work.load(domain)?;
@@ -185,7 +185,7 @@ pub fn execute_work_unit<D: Domain>(domain: &D, work: &mut D::WorkUnit) -> Resul
     work.commit_indexes(domain)?;
     debug!("index commit complete");
 
-    update_mempool(domain, work);
+    update_mempool(domain, work).await;
 
     // Notify tip events to subscribers
     for event in work.tip_events() {
@@ -196,7 +196,7 @@ pub fn execute_work_unit<D: Domain>(domain: &D, work: &mut D::WorkUnit) -> Resul
     Ok(())
 }
 
-fn update_mempool<D: Domain>(domain: &D, work: &D::WorkUnit) {
+async fn update_mempool<D: Domain>(domain: &D, work: &D::WorkUnit) {
     for update in work.mempool_updates() {
         if let Err(e) = domain.mempool().confirm(
             &update.point,
@@ -204,7 +204,7 @@ fn update_mempool<D: Domain>(domain: &D, work: &D::WorkUnit) {
             &[],
             MEMPOOL_FINALIZE_THRESHOLD,
             MEMPOOL_DROP_THRESHOLD,
-        ) {
+        ).await {
             warn!(?e, point = %update.point, "mempool confirm failed");
         }
     }
