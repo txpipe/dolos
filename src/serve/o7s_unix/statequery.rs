@@ -9,10 +9,11 @@ use pallas::network::miniprotocols::{localstate, localstate::queries_v16 as q16,
 use tracing::{debug, info, warn};
 
 use crate::prelude::*;
-use crate::serve::o7s_unix::statequery_utils;
-use statequery_utils::{
-    build_era_history_response, build_pool_state_response, build_protocol_params,
-    build_stake_pools_response, build_stake_snapshots_response, build_utxo_by_address_response,
+use crate::serve::o7s_unix::utils;
+use utils::{
+    build_account_state_response, build_era_history_response, build_pool_state_response,
+    build_protocol_params, build_stake_pool_params_response, build_stake_pools_response,
+    build_stake_snapshots_response, build_utxo_by_address_response,
 };
 
 pub struct Session<D: Domain> {
@@ -300,6 +301,13 @@ impl<D: Domain> Session<D> {
             }
             Ok(q16::Request::LedgerQuery(q16::LedgerQuery::BlockQuery(
                 _era,
+                q16::BlockQuery::GetStakePoolParams(ref pools),
+            ))) => {
+                info!("GetStakePoolParams query");
+                build_stake_pool_params_response(&self.domain, pools)?
+            }
+            Ok(q16::Request::LedgerQuery(q16::LedgerQuery::BlockQuery(
+                _era,
                 q16::BlockQuery::GetCBOR(inner),
             ))) => match inner.as_ref() {
                 q16::BlockQuery::GetPoolState(ref pools) => {
@@ -315,6 +323,13 @@ impl<D: Domain> Session<D> {
                     AnyCbor::from_encode(())
                 }
             },
+            Ok(q16::Request::LedgerQuery(q16::LedgerQuery::BlockQuery(
+                _era,
+                q16::BlockQuery::GetAccountState,
+            ))) => {
+                info!("GetAccountState query");
+                build_account_state_response(&self.domain)?
+            }
             Ok(req) => {
                 warn!(?req, "unhandled known query, returning null");
                 AnyCbor::from_encode(())
