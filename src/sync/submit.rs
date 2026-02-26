@@ -51,7 +51,7 @@ impl Worker {
         debug!(n = txs.len(), "propagating tx ids");
 
         let hashes: Vec<TxHash> = txs.iter().map(|tx| tx.hash).collect();
-        mempool.mark_inflight(&hashes).or_restart()?;
+        mempool.mark_inflight(&hashes).await.or_restart()?;
         self.propagated_hashes.extend(hashes);
 
         let payload = txs.iter().map(to_n2n_reply).collect_vec();
@@ -67,7 +67,7 @@ impl Worker {
     }
 
     /// Drain the first `count` propagated hashes and mark them as acknowledged.
-    fn acknowledge_propagated(
+    async fn acknowledge_propagated(
         &mut self,
         mempool: &MempoolBackend,
         count: usize,
@@ -78,7 +78,7 @@ impl Worker {
         }
 
         let acked: Vec<TxHash> = self.propagated_hashes.drain(..drain_count).collect();
-        mempool.mark_acknowledged(&acked).or_restart()?;
+        mempool.mark_acknowledged(&acked).await.or_restart()?;
         Ok(())
     }
 
@@ -87,7 +87,7 @@ impl Worker {
         stage: &mut Stage,
         request: usize,
     ) -> Result<WorkSchedule<Request<EraTxId>>, WorkerError> {
-        if stage.mempool.has_pending() {
+        if stage.mempool.has_pending().await {
             debug!(request, "found txs to fulfill request");
 
             // we have txs available so we process the work unit as a new one. We don't
@@ -175,10 +175,10 @@ impl gasket::framework::Worker<Stage> for Worker {
 
                 info!(req, ack, "blocking tx ids request");
 
-                self.acknowledge_propagated(&stage.mempool, ack)?;
+                self.acknowledge_propagated(&stage.mempool, ack).await?;
 
-                if stage.mempool.has_pending() {
-                    let txs = stage.mempool.peek_pending(req);
+                if stage.mempool.has_pending().await {
+                    let txs = stage.mempool.peek_pending(req).await;
                     self.propagate_txs(&stage.mempool, txs).await?;
                 } else {
                     debug!(req, "not enough txs to fulfill request");
@@ -188,18 +188,20 @@ impl gasket::framework::Worker<Stage> for Worker {
             Request::TxIdsNonBlocking(ack, req) => {
                 info!(req, ack, "non-blocking tx ids request");
 
-                self.acknowledge_propagated(&stage.mempool, *ack as usize)?;
+                self.acknowledge_propagated(&stage.mempool, *ack as usize).await?;
 
-                let txs = stage.mempool.peek_pending(*req as usize);
+                let txs = stage.mempool.peek_pending(*req as usize).await;
                 self.propagate_txs(&stage.mempool, txs).await?;
             }
             Request::Txs(ids) => {
                 info!("tx batch request");
 
-                let found: Vec<MempoolTx> = ids
-                    .iter()
-                    .filter_map(|x| stage.mempool.find_inflight(&Hash::from(x.1.as_slice())))
-                    .collect_vec();
+                let mut found: Vec<MempoolTx> = Vec::new();
+                for x in ids.iter() {
+                    if let Some(tx) = stage.mempool.find_inflight(&Hash::from(x.1.as_slice())).await {
+                        found.push(tx);
+                    }
+                }
 
                 let to_send = found.into_iter().map(to_n2n_body).collect_vec();
 

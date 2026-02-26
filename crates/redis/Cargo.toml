@@ -1,0 +1,25 @@
+[package]
+name = "dolos-redis"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+dolos-core = { path = "../core" }
+tracing.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+pallas.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+tokio-util.workspace = true
+futures-core.workspace = true
+futures-util.workspace = true
+hex.workspace = true
+
+redis = { version = "0.26", features = ["tokio-comp", "connection-manager"] }
+deadpool-redis = "0.16"
+minicbor = { version = "0.26", features = ["derive", "std"] }
+uuid = { version = "1.10", features = ["v4"] }
+
+[dev-dependencies]
+dolos-testing = { path = "../testing" }

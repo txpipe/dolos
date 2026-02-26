@@ -234,14 +234,14 @@ fn do_import(
     Ok(())
 }
 
-fn import_hardano_into_domain(
+async fn import_hardano_into_domain(
     args: &Args,
     config: &RootConfig,
     immutable_path: &Path,
     feedback: &Feedback,
     chunk_size: usize,
 ) -> Result<(), miette::Error> {
-    let domain = crate::common::setup_domain(config)?;
+    let domain = crate::common::setup_domain(config).await?;
 
     let result = do_import(&domain, args, immutable_path, feedback, chunk_size);
 
@@ -254,7 +254,8 @@ fn import_hardano_into_domain(
     result
 }
 
-pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Result<()> {
+#[tokio::main]
+pub async fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Result<()> {
     let mithril = config
         .mithril
         .as_ref()
@@ -272,12 +273,8 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
     }
 
     if !args.skip_download {
-        // Spawn a temporary Tokio runtime just for the async download
-        let rt = tokio::runtime::Runtime::new()
-            .into_diagnostic()
-            .context("creating tokio runtime for download")?;
-
-        rt.block_on(fetch_snapshot(args, mithril, feedback))
+        fetch_snapshot(args, mithril, feedback)
+            .await
             .map_err(|err| miette::miette!(err.to_string()))
             .context("fetching and validating mithril snapshot")?;
     } else {
@@ -286,8 +283,7 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
 
     let immutable_path = Path::new(&args.download_dir).join("immutable");
 
-    // Import is now fully sync - no Tokio runtime needed
-    import_hardano_into_domain(args, config, &immutable_path, feedback, args.chunk_size)?;
+    import_hardano_into_domain(args, config, &immutable_path, feedback, args.chunk_size).await?;
 
     if !args.retain_snapshot {
         info!("deleting downloaded snapshot");

@@ -325,7 +325,7 @@ mod tests {
 
     #[tokio::test]
     async fn network_happy_path() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let (status, bytes) = app.get_bytes("/network").await;
 
         assert_eq!(
@@ -339,13 +339,13 @@ mod tests {
 
     #[tokio::test]
     async fn network_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
+        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError)).await;
         assert_status(&app, "/network", StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 
     #[tokio::test]
     async fn network_eras_happy_path() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let (status, bytes) = app.get_bytes("/network/eras").await;
 
         assert_eq!(
@@ -360,7 +360,7 @@ mod tests {
 
     #[tokio::test]
     async fn network_eras_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
+        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError)).await;
         assert_status(&app, "/network/eras", StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 }

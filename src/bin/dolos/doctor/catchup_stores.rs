@@ -13,13 +13,14 @@ pub struct Args {
     pub chunk: usize,
 }
 
-pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Result<()> {
+#[tokio::main]
+pub async fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Result<()> {
     //crate::common::setup_tracing(&config.logging, &config.telemetry)?;
 
     let progress = feedback.slot_progress_bar();
     progress.set_message("rebuilding stores");
 
-    let domain = crate::common::setup_domain(config)?;
+    let domain = crate::common::setup_domain(config).await?;
 
     let (tip, _) = domain
         .wal

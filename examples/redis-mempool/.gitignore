@@ -1,0 +1,24 @@
+# Data directories
+data1/
+data2/
+
+# Log files
+*.log
+
+# Docker volumes
+redis-data/
+
+# Build artifacts (if building locally)
+target/
+Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db

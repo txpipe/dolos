@@ -759,7 +759,7 @@ mod tests {
 
     #[tokio::test]
     async fn assets_by_subject_happy_path() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let asset = app.vectors().asset_unit.as_str();
         let path = format!("/assets/{asset}");
         let (status, bytes) = app.get_bytes(&path).await;
@@ -775,21 +775,21 @@ mod tests {
 
     #[tokio::test]
     async fn assets_by_subject_bad_request() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let path = format!("/assets/{}", invalid_asset());
         assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
     }
 
     #[tokio::test]
     async fn assets_by_subject_not_found() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let path = format!("/assets/{}", missing_asset());
         assert_status(&app, &path, StatusCode::NOT_FOUND).await;
     }
 
     #[tokio::test]
     async fn assets_by_subject_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
+        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError)).await;
         let asset = app.vectors().asset_unit.as_str();
         let path = format!("/assets/{asset}");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;

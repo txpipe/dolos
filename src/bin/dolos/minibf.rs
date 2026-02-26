@@ -21,7 +21,7 @@ pub async fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
         .as_ref()
         .ok_or(miette::miette!("missing minibf config"))?;
 
-    let domain = crate::common::setup_domain(config)?;
+    let domain = crate::common::setup_domain(config).await?;
 
     let path = if args.path.starts_with('/') {
         args.path.trim().to_string()

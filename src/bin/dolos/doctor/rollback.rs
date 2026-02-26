@@ -21,13 +21,14 @@ pub struct Args {
 pub async fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging, &config.telemetry)?;
 
-    let domain = crate::common::setup_domain(config)?;
+    let domain = crate::common::setup_domain(config).await?;
 
     let hash: Hash<32> = Hash::from_str(&args.hash).into_diagnostic()?;
     let point = ChainPoint::Specific(args.slot, hash);
 
     domain
         .rollback(&point)
+        .await
         .map_err(|x| miette::miette!(x.to_string()))?;
 
     Ok(())

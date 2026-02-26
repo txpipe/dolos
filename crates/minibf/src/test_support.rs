@@ -29,7 +29,7 @@ pub struct TestDomainBuilder {
 }
 
 impl TestDomainBuilder {
-    pub fn new_with_synthetic(mut cfg: SyntheticBlockConfig) -> Self {
+    pub async fn new_with_synthetic(mut cfg: SyntheticBlockConfig) -> Self {
         let genesis = Arc::new(dolos_cardano::include::preview::load());
         let min_slot = {
             let temp = ToyDomain::new_with_genesis_and_config(
@@ -37,7 +37,7 @@ impl TestDomainBuilder {
                 CardanoConfig::default(),
                 None,
                 None,
-            );
+            ).await;
             let summary = dolos_cardano::eras::load_era_summary::<ToyDomain>(temp.state())
                 .expect("era summary");
             summary.epoch_start(2)
@@ -47,7 +47,7 @@ impl TestDomainBuilder {
         }
         let (blocks, vectors, chain_config) = build_synthetic_blocks(cfg);
 
-        let domain = ToyDomain::new_with_genesis_and_config(genesis, chain_config, None, None);
+        let domain = ToyDomain::new_with_genesis_and_config(genesis, chain_config, None, None).await;
         domain
             .import_blocks(blocks.clone())
             .expect("failed to import synthetic blocks");
@@ -90,23 +90,23 @@ pub struct TestApp {
 }
 
 impl TestApp {
-    pub fn new() -> Self {
-        Self::new_with_fault(None)
+    pub async fn new() -> Self {
+        Self::new_with_fault(None).await
     }
 
-    pub fn new_with_fault(fault: Option<TestFault>) -> Self {
+    pub async fn new_with_fault(fault: Option<TestFault>) -> Self {
         let mut cfg = SyntheticBlockConfig::default();
         cfg.block_count = 5;
         cfg.txs_per_block = 3;
-        Self::new_with_cfg_and_fault(cfg, fault)
+        Self::new_with_cfg_and_fault(cfg, fault).await
     }
 
-    pub fn new_with_cfg(cfg: SyntheticBlockConfig) -> Self {
-        Self::new_with_cfg_and_fault(cfg, None)
+    pub async fn new_with_cfg(cfg: SyntheticBlockConfig) -> Self {
+        Self::new_with_cfg_and_fault(cfg, None).await
     }
 
-    pub fn new_with_cfg_and_fault(cfg: SyntheticBlockConfig, fault: Option<TestFault>) -> Self {
-        let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
+    pub async fn new_with_cfg_and_fault(cfg: SyntheticBlockConfig, fault: Option<TestFault>) -> Self {
+        let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).await.finish();
 
         let domain = match fault {
             Some(fault) => dolos_testing::faults::FaultyToyDomain::new(domain, fault),
