@@ -580,8 +580,14 @@ impl<'a> TxModelBuilder<'a> {
     ) -> Result<Self, StatusCode> {
         let epoch = self.tx_epoch()?;
         let chain = self.chain_or_500()?;
+        let tip = facade.get_tip_slot()?;
+        let (curr, _) = chain.slot_epoch(tip);
 
-        let pparams = facade.get_historical_effective_pparams(epoch, chain)?;
+        let pparams = if epoch == curr {
+            facade.get_current_effective_pparams()?
+        } else {
+            facade.get_historical_effective_pparams(epoch, chain)?
+        };
 
         Ok(self.with_pparams(pparams))
     }
