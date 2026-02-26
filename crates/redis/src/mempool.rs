@@ -840,7 +840,7 @@ impl MempoolStore for RedisMempool {
             };
         }
 
-        let finalized: Vec<(f64, Vec<u8>)> = match redis::cmd("ZRANGE")
+        let finalized: Vec<(Vec<u8>, f64)> = match redis::cmd("ZRANGE")
             .arg(&self.finalized_key())
             .arg(0)
             .arg(-1)
@@ -859,7 +859,7 @@ impl MempoolStore for RedisMempool {
             }
         };
 
-        for (_, bytes) in finalized {
+        for (bytes, _) in finalized {
             if let Ok(entry) = minicbor::decode::<FinalizedEntry>(&bytes) {
                 if entry.hash == tx_hash.as_ref() {
                     return TxStatus {
@@ -895,7 +895,7 @@ impl MempoolStore for RedisMempool {
             }
         };
 
-        let entries: Vec<(f64, Vec<u8>)> = match redis::cmd("ZRANGEBYSCORE")
+        let entries: Vec<(Vec<u8>, f64)> = match redis::cmd("ZRANGEBYSCORE")
             .arg(&self.finalized_key())
             .arg(cursor as f64)
             .arg("+inf")
@@ -918,7 +918,7 @@ impl MempoolStore for RedisMempool {
         let mut items = Vec::new();
         let mut next_cursor = None;
 
-        for (idx, (score, bytes)) in entries.into_iter().enumerate() {
+        for (idx, (bytes, score)) in entries.into_iter().enumerate() {
             if idx >= limit {
                 next_cursor = Some(score as u64);
                 break;
