@@ -206,7 +206,8 @@ impl futures_core::Stream for RedisMempoolStream {
 
 impl RedisMempool {
     pub fn open(config: &RedisMempoolConfig) -> Result<Self, MempoolError> {
-        let cfg = deadpool_redis::Config::from_url(&config.url);
+        let mut cfg = deadpool_redis::Config::from_url(&config.url);
+        cfg.pool = Some(deadpool_redis::PoolConfig::new(config.pool_size));
         let pool = cfg
             .create_pool(Some(deadpool_redis::Runtime::Tokio1))
             .map_err(|e| MempoolError::Internal(Box::new(e)))?;
@@ -387,6 +388,10 @@ impl MempoolStore for RedisMempool {
     }
 
     async fn peek_pending(&self, limit: usize) -> Vec<MempoolTx> {
+        if limit == 0 {
+            return vec![];
+        }
+
         let mut conn = match self.pool.get().await {
             Ok(c) => c,
             Err(_) => return vec![],
@@ -927,8 +932,7 @@ impl MempoolStore for RedisMempool {
                     confirmations: entry.confirmations,
                     non_confirmations: entry.non_confirmations,
                     confirmed_at: entry.confirmed_at.as_ref().map(|b| {
-                        let bytes: [u8; 40] =
-                            b.as_slice().try_into().expect("valid chainpoint");
+                        let bytes: [u8; 40] = b.as_slice().try_into().expect("valid chainpoint");
                         ChainPoint::from_bytes(bytes)
                     }),
                     report: None,

@@ -51,14 +51,27 @@ pub trait SyncExt: Domain {
 impl<D: Domain> SyncExt for D {
     #[instrument(skip_all)]
     async fn roll_forward(&self, block: RawBlock) -> Result<BlockSlot, DomainError> {
-        let mut chain = self.write_chain();
-
         // Drain first in case there's previous work that needs to be applied (eg: initialization)
-        drain_pending_work::<D>(&mut *chain, self).await?;
+        let pending_work = {
+            let mut chain = self.write_chain();
+            collect_pending_work::<D>(&mut *chain, self)
+        };
 
-        let last = chain.receive_block(block)?;
+        for mut work in pending_work {
+            execute_work_unit(self, &mut work).await?;
+        }
 
-        drain_pending_work::<D>(&mut *chain, self).await?;
+        let (last, pending_work) = {
+            let mut chain = self.write_chain();
+            let last = chain.receive_block(block)?;
+            let pending_work = collect_pending_work::<D>(&mut *chain, self);
+
+            (last, pending_work)
+        };
+
+        for mut work in pending_work {
+            execute_work_unit(self, &mut work).await?;
+        }
 
         Ok(last)
     }
@@ -101,8 +114,7 @@ impl<D: Domain> SyncExt for D {
 
             let block = Arc::new(log.block);
 
-            let undo_data =
-                D::Chain::compute_undo(&block, &log.inputs, point.clone())?;
+            let undo_data = D::Chain::compute_undo(&block, &log.inputs, point.clone())?;
 
             // Apply UTxO undo to state
             writer.apply_utxoset(&undo_data.utxo_delta)?;
@@ -114,13 +126,17 @@ impl<D: Domain> SyncExt for D {
             self.notify_tip(TipEvent::Undo(point.clone(), block));
 
             // Move rolled-back transactions back to pending in mempool
-            if let Err(e) = self.mempool().confirm(
-                &point,
-                &[],
-                &undo_data.tx_hashes,
-                MEMPOOL_FINALIZE_THRESHOLD,
-                MEMPOOL_DROP_THRESHOLD,
-            ).await {
+            if let Err(e) = self
+                .mempool()
+                .confirm(
+                    &point,
+                    &[],
+                    &undo_data.tx_hashes,
+                    MEMPOOL_FINALIZE_THRESHOLD,
+                    MEMPOOL_DROP_THRESHOLD,
+                )
+                .await
+            {
                 warn!(?e, %point, "mempool rollback confirm failed");
             }
 
@@ -138,16 +154,17 @@ impl<D: Domain> SyncExt for D {
     }
 }
 
-/// Drain all pending work from the chain logic using sync lifecycle.
-pub(crate) async fn drain_pending_work<D: Domain>(
+pub(crate) fn collect_pending_work<D: Domain>(
     chain: &mut D::Chain,
     domain: &D,
-) -> Result<(), DomainError> {
-    while let Some(mut work) = <D::Chain as ChainLogic>::pop_work::<D>(chain, domain) {
-        execute_work_unit(domain, &mut work).await?;
+) -> Vec<<D::Chain as ChainLogic>::WorkUnit<D>> {
+    let mut pending_work = Vec::new();
+
+    while let Some(work) = <D::Chain as ChainLogic>::pop_work::<D>(chain, domain) {
+        pending_work.push(work);
     }
 
-    Ok(())
+    pending_work
 }
 
 /// Execute a work unit through the full sync lifecycle.
@@ -164,7 +181,10 @@ pub(crate) async fn drain_pending_work<D: Domain>(
 /// This function is public primarily for testing scenarios where direct
 /// work unit execution is needed (e.g., manual genesis initialization).
 #[instrument(skip_all, fields(work_unit = %work.name()))]
-pub async fn execute_work_unit<D: Domain>(domain: &D, work: &mut D::WorkUnit) -> Result<(), DomainError> {
+pub async fn execute_work_unit<D: Domain>(
+    domain: &D,
+    work: &mut D::WorkUnit,
+) -> Result<(), DomainError> {
     info!("executing work unit");
 
     work.load(domain)?;
@@ -198,13 +218,17 @@ pub async fn execute_work_unit<D: Domain>(domain: &D, work: &mut D::WorkUnit) ->
 
 async fn update_mempool<D: Domain>(domain: &D, work: &D::WorkUnit) {
     for update in work.mempool_updates() {
-        if let Err(e) = domain.mempool().confirm(
-            &update.point,
-            &update.seen_txs,
-            &[],
-            MEMPOOL_FINALIZE_THRESHOLD,
-            MEMPOOL_DROP_THRESHOLD,
-        ).await {
+        if let Err(e) = domain
+            .mempool()
+            .confirm(
+                &update.point,
+                &update.seen_txs,
+                &[],
+                MEMPOOL_FINALIZE_THRESHOLD,
+                MEMPOOL_DROP_THRESHOLD,
+            )
+            .await
+        {
             warn!(?e, point = %update.point, "mempool confirm failed");
         }
     }
