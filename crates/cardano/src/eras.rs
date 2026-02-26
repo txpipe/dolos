@@ -50,7 +50,7 @@ impl EraSummary {
 
 pub type Timestamp = u64;
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct ChainSummary {
     past: Vec<EraSummary>,
     protocols: Vec<u16>,

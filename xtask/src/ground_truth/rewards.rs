@@ -14,6 +14,8 @@ pub(super) struct RewardRow {
     pub earned_epoch: String,
 }
 
+const PAGE_SIZE: i64 = 2_000;
+
 pub(super) fn fetch(dbsync_url: &str, epoch: u64) -> Result<Vec<RewardRow>> {
     let mut client = super::connect_to_dbsync(dbsync_url)?;
     let epoch = i64::try_from(epoch)
@@ -32,30 +34,52 @@ pub(super) fn fetch(dbsync_url: &str, epoch: u64) -> Result<Vec<RewardRow>> {
         WHERE r.earned_epoch = $1
           AND r.type IN ('leader', 'member')
           AND r.amount > 0
-        ORDER BY sa.view, COALESCE(ph.view, ''), r.type::text
+        ORDER BY r.addr_id, r.pool_id, r.type
+        LIMIT $2 OFFSET $3
     "#;
 
-    let rows = client
-        .query(query, &[&epoch])
-        .with_context(|| "failed to query rewards")?;
+    let mut out = Vec::new();
+    let mut offset: i64 = 0;
 
-    let mut out = Vec::with_capacity(rows.len());
-    for row in rows {
-        out.push(RewardRow {
-            stake: row.get(0),
-            pool: row.get(1),
-            amount: row.get(2),
-            reward_type: row.get(3),
-            earned_epoch: row.get(4),
-        });
+    loop {
+        eprintln!("  rewards page offset={offset} limit={PAGE_SIZE}");
+        let rows = client
+            .query(query, &[&epoch, &PAGE_SIZE, &offset])
+            .with_context(|| format!("failed to query rewards (offset {})", offset))?;
+
+        let count = rows.len();
+
+        for row in rows {
+            out.push(RewardRow {
+                stake: row.get(0),
+                pool: row.get(1),
+                amount: row.get(2),
+                reward_type: row.get(3),
+                earned_epoch: row.get(4),
+            });
+        }
+
+        if (count as i64) < PAGE_SIZE {
+            break;
+        }
+
+        offset += PAGE_SIZE;
     }
+
+    // Sort to match the expected CSV order.
+    out.sort_by(|a, b| {
+        a.stake
+            .cmp(&b.stake)
+            .then_with(|| a.pool.cmp(&b.pool))
+            .then_with(|| a.reward_type.cmp(&b.reward_type))
+    });
 
     Ok(out)
 }
 
 pub(super) fn write_csv(path: &Path, rows: &[RewardRow]) -> Result<()> {
-    let mut file = File::create(path)
-        .with_context(|| format!("writing rewards csv: {}", path.display()))?;
+    let mut file =
+        File::create(path).with_context(|| format!("writing rewards csv: {}", path.display()))?;
     writeln!(file, "stake,pool,amount,type,earned_epoch")?;
     for row in rows {
         writeln!(

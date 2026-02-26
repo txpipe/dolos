@@ -5,7 +5,13 @@
 //! allows the core crate to remain chain-agnostic while supporting different
 //! blockchain implementations.
 
-use crate::{Domain, DomainError, TipEvent};
+use crate::{ChainPoint, Domain, DomainError, TipEvent, TxHash};
+
+/// An update for the mempool based on a confirmed block.
+pub struct MempoolUpdate {
+    pub point: ChainPoint,
+    pub seen_txs: Vec<TxHash>,
+}
 
 /// A unit of work defined by the chain but executed by the node infrastructure.
 ///
@@ -123,6 +129,15 @@ pub trait WorkUnit<D: Domain>: Send {
     /// appropriate for work units that don't produce tip events
     /// (e.g., boundary work units).
     fn tip_events(&self) -> Vec<TipEvent> {
+        Vec::new()
+    }
+
+    /// Return mempool updates for blocks processed by this work unit.
+    ///
+    /// Used to transition mempool transactions to confirmed/finalized/dropped
+    /// as blocks arrive. The default implementation returns an empty vector,
+    /// which is appropriate for work units that don't process blocks.
+    fn mempool_updates(&self) -> Vec<MempoolUpdate> {
         Vec::new()
     }
 }

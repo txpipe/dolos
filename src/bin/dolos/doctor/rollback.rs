@@ -1,6 +1,6 @@
 use std::str::FromStr;
 
-use dolos::facade::DomainExt as _;
+use dolos_core::sync::SyncExt as _;
 use miette::IntoDiagnostic as _;
 use pallas::crypto::hash::Hash;
 
@@ -19,7 +19,7 @@ pub struct Args {
 
 #[tokio::main]
 pub async fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
-    crate::common::setup_tracing(&config.logging)?;
+    crate::common::setup_tracing(&config.logging, &config.telemetry)?;
 
     let domain = crate::common::setup_domain(config)?;
 

@@ -12,7 +12,6 @@ use std::pin::Pin;
 use tonic::{Request, Response, Status};
 use tracing::info;
 
-use crate::mempool::UpdateFilter;
 use crate::prelude::*;
 
 pub struct SubmitServiceImpl<D>
@@ -37,7 +36,7 @@ where
 fn tx_stage_to_u5c(stage: MempoolTxStage) -> i32 {
     match stage {
         MempoolTxStage::Pending => Stage::Mempool as i32,
-        MempoolTxStage::Inflight => Stage::Network as i32,
+        MempoolTxStage::Propagated => Stage::Network as i32,
         MempoolTxStage::Acknowledged => Stage::Acknowledged as i32,
         MempoolTxStage::Confirmed => Stage::Confirmed as i32,
         _ => Stage::Unspecified as i32,
@@ -49,7 +48,7 @@ fn event_to_watch_mempool_response(event: MempoolEvent) -> WatchMempoolResponse 
         tx: TxInMempool {
             r#ref: event.tx.hash.to_vec().into(),
             native_bytes: event.tx.payload.cbor().to_vec().into(),
-            stage: tx_stage_to_u5c(event.new_stage),
+            stage: tx_stage_to_u5c(event.tx.stage.clone()),
             parsed_state: None, // TODO
         }
         .into(),
@@ -58,7 +57,7 @@ fn event_to_watch_mempool_response(event: MempoolEvent) -> WatchMempoolResponse 
 
 fn event_to_wait_for_tx_response(event: MempoolEvent) -> WaitForTxResponse {
     WaitForTxResponse {
-        stage: tx_stage_to_u5c(event.new_stage),
+        stage: tx_stage_to_u5c(event.tx.stage.clone()),
         r#ref: event.tx.hash.to_vec().into(),
     }
 }
@@ -133,7 +132,7 @@ where
 
         let hash = self
             .domain
-            .receive_tx(&chain, tx_bytes.as_ref())
+            .receive_tx("grpc", &chain, tx_bytes.as_ref())
             .map_err(|e| Status::invalid_argument(format!("could not process tx: {e}")))?;
 
         Ok(Response::new(SubmitTxResponse {
@@ -156,7 +155,7 @@ where
             .iter()
             .map(|x| {
                 Result::<_, Status>::Ok(WaitForTxResponse {
-                    stage: tx_stage_to_u5c(self.domain.mempool().check_stage(x)),
+                    stage: tx_stage_to_u5c(self.domain.mempool().check_status(x).stage),
                     r#ref: x.to_vec().into(),
                 })
             })

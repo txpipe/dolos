@@ -351,7 +351,7 @@ pub struct RedbIndexConfig {
 }
 
 /// Configuration for the Fjall index backend.
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct FjallIndexConfig {
     /// Optional path override. If relative, resolved from storage root.
     /// If not specified, defaults to `<storage.path>/index`.
@@ -360,21 +360,35 @@ pub struct FjallIndexConfig {
     /// Size (in MB) of memory allocated for caching.
     #[serde(default)]
     pub cache: Option<usize>,
-    /// Maximum journal size in MB.
+    /// Maximum journal size in MB (default: 1024).
     #[serde(default)]
     pub max_journal_size: Option<usize>,
-    /// Flush journal after each commit.
+    /// Flush journal after each commit (default: false).
     #[serde(default)]
     pub flush_on_commit: Option<bool>,
-    /// L0 compaction threshold (default: 4, lower = more aggressive).
+    /// L0 compaction threshold (default: 8, lower = more aggressive).
     #[serde(default)]
     pub l0_threshold: Option<u8>,
-    /// Number of background compaction worker threads.
+    /// Number of background compaction worker threads (default: 8).
     #[serde(default)]
     pub worker_threads: Option<usize>,
-    /// Memtable size in MB before flush (default: 64).
+    /// Memtable size in MB before flush (default: 128).
     #[serde(default)]
     pub memtable_size_mb: Option<usize>,
+}
+
+impl Default for FjallIndexConfig {
+    fn default() -> Self {
+        Self {
+            path: None,
+            cache: None,
+            max_journal_size: Some(1024),
+            flush_on_commit: Some(false),
+            l0_threshold: Some(8),
+            worker_threads: Some(8),
+            memtable_size_mb: Some(128),
+        }
+    }
 }
 
 /// Index store configuration.
@@ -407,6 +421,33 @@ impl IndexStoreConfig {
 }
 
 // ============================================================================
+// Mempool Store Configuration
+// ============================================================================
+
+/// Configuration for the Redb mempool backend.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct RedbMempoolConfig {
+    /// Optional path override. If relative, resolved from storage root.
+    /// If not specified, defaults to `<storage.path>/mempool`.
+    #[serde(default)]
+    pub path: Option<PathBuf>,
+    /// Size (in MB) of memory allocated for caching.
+    #[serde(default)]
+    pub cache: Option<usize>,
+}
+
+/// Mempool store configuration.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(tag = "backend", rename_all = "lowercase")]
+pub enum MempoolStoreConfig {
+    Redb(RedbMempoolConfig),
+    /// In-memory backend (ephemeral, data lost on restart).
+    #[serde(rename = "in_memory")]
+    #[default]
+    InMemory,
+}
+
+// ============================================================================
 // Storage Configuration
 // ============================================================================
 
@@ -433,6 +474,10 @@ pub struct StorageConfig {
     /// Index store configuration.
     #[serde(default)]
     pub index: IndexStoreConfig,
+
+    /// Mempool store configuration.
+    #[serde(default)]
+    pub mempool: MempoolStoreConfig,
 }
 
 impl StorageConfig {
@@ -498,6 +543,17 @@ impl StorageConfig {
             }
         }
     }
+
+    /// Get the resolved path for the mempool store.
+    /// Returns `None` for in-memory backends.
+    pub fn mempool_path(&self) -> Option<PathBuf> {
+        match &self.mempool {
+            MempoolStoreConfig::InMemory => None,
+            MempoolStoreConfig::Redb(cfg) => {
+                Some(self.resolve_store_path_with_default(cfg.path.as_ref(), "mempool"))
+            }
+        }
+    }
 }
 
 impl Default for StorageConfig {
@@ -509,6 +565,7 @@ impl Default for StorageConfig {
             state: StateStoreConfig::default(),
             archive: ArchiveStoreConfig::default(),
             index: IndexStoreConfig::default(),
+            mempool: MempoolStoreConfig::default(),
         }
     }
 }
@@ -569,6 +626,7 @@ pub struct MinibfConfig {
     pub permissive_cors: Option<bool>,
     pub token_registry_url: Option<String>,
     pub url: Option<String>,
+    pub max_scan_items: Option<u64>,
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -607,6 +665,12 @@ pub struct LoggingConfig {
 
     #[serde(default)]
     pub include_minibf: bool,
+
+    #[serde(default)]
+    pub include_otlp: bool,
+
+    #[serde(default)]
+    pub include_fjall: bool,
 }
 
 impl Default for LoggingConfig {
@@ -618,6 +682,36 @@ impl Default for LoggingConfig {
             include_grpc: Default::default(),
             include_trp: Default::default(),
             include_minibf: Default::default(),
+            include_fjall: Default::default(),
+            include_otlp: Default::default(),
+        }
+    }
+}
+
+fn default_otlp_endpoint() -> String {
+    "http://localhost:4317".to_string()
+}
+
+fn default_service_name() -> String {
+    "dolos".to_string()
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct TelemetryConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_otlp_endpoint")]
+    pub otlp_endpoint: String,
+    #[serde(default = "default_service_name")]
+    pub service_name: String,
+}
+
+impl Default for TelemetryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            otlp_endpoint: default_otlp_endpoint(),
+            service_name: default_service_name(),
         }
     }
 }
@@ -719,4 +813,7 @@ pub struct RootConfig {
 
     #[serde(default)]
     pub logging: LoggingConfig,
+
+    #[serde(default)]
+    pub telemetry: TelemetryConfig,
 }

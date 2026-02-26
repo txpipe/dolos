@@ -3,7 +3,7 @@ use pallas::codec::minicbor::{Decode, Encode};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{floor_int, ratio, sub, Lovelace};
+use crate::{add, floor_int, ratio, sub, Lovelace};
 
 pub type Ratio = num_rational::BigRational;
 pub type PallasRatio = pallas::ledger::primitives::RationalNumber;
@@ -121,8 +121,14 @@ pub struct PotDelta {
     #[n(9)]
     pub effective_rewards: Lovelace,
 
+    /// Unspendable rewards that go to treasury (accounts deregistered late after RUPD).
     #[n(10)]
-    pub unspendable_rewards: Lovelace,
+    pub unspendable_to_treasury: Lovelace,
+
+    /// Unspendable rewards that return to reserves (accounts deregistered soon after RUPD).
+    #[n(22)]
+    #[cbor(default)]
+    pub unspendable_to_reserves: Lovelace,
 
     #[n(11)]
     pub drep_deposits: Lovelace,
@@ -164,6 +170,17 @@ pub struct PotDelta {
     #[n(21)]
     #[cbor(default)]
     pub mark_protocol_version: u16,
+
+    /// Unredeemed AVVM UTxOs reclaimed at the Shelley→Allegra boundary.
+    /// Value is moved from UTxO pot to reserves.
+    #[n(23)]
+    #[cbor(default)]
+    pub avvm_reclamation: Lovelace,
+
+    /// MIR sourced from treasury.
+    #[n(24)]
+    #[cbor(default)]
+    pub treasury_mirs: Lovelace,
 }
 
 impl PotDelta {
@@ -181,7 +198,8 @@ impl PotDelta {
             pool_invalid_refund_count: 0,
             withdrawals: 0,
             effective_rewards: 0,
-            unspendable_rewards: 0,
+            unspendable_to_treasury: 0,
+            unspendable_to_reserves: 0,
             drep_deposits: 0,
             proposal_deposits: 0,
             drep_refunds: 0,
@@ -191,23 +209,27 @@ impl PotDelta {
             proposal_invalid_refunds: 0,
             deposit_per_account: None,
             deposit_per_pool: None,
+            avvm_reclamation: 0,
+            treasury_mirs: 0,
         }
     }
 
+    /// Total rewards consumed from the available incentives pool.
+    /// Includes effective (applied) and unspendable rewards that go to treasury.
+    /// Unspendable rewards that return to reserves are NOT consumed (they stay in reserves).
     pub fn consumed_incentives(&self) -> Lovelace {
-        if self.mark_protocol_version < 7 {
-            return self.effective_rewards;
-        }
-
-        self.effective_rewards + self.unspendable_rewards
+        self.effective_rewards + self.unspendable_to_treasury
     }
 
+    /// Unspendable rewards that go to treasury.
+    /// These are rewards for accounts that deregistered late after RUPD.
     pub fn incentives_back_to_treasury(&self) -> Lovelace {
-        if self.mark_protocol_version < 7 {
-            return 0;
-        }
+        self.unspendable_to_treasury
+    }
 
-        self.unspendable_rewards
+    /// Total unspendable rewards (both treasury and reserves).
+    pub fn total_unspendable(&self) -> Lovelace {
+        self.unspendable_to_treasury + self.unspendable_to_reserves
     }
 }
 
@@ -302,7 +324,7 @@ pub fn epoch_incentives(
     let reward_pot = fee_ss + delta_r1;
 
     // Δt1 = floor( τ * rewardPot )
-    let treasury_tax = floor_int!(tau * ratio!(reward_pot), u64);
+    let treasury_tax = floor_int!(tau.clone() * ratio!(reward_pot), u64);
 
     // R = rewardPot - Δt1
     let available_rewards = reward_pot - treasury_tax;
@@ -328,12 +350,12 @@ pub fn apply_byron_delta(mut pots: Pots, _: &EpochIncentives, delta: &PotDelta) 
     pots.proposal_deposits = 0;
 
     // utxos pot
-    pots.utxos += delta.produced_utxos;
-    pots.utxos -= delta.consumed_utxos;
+    pots.utxos = add!(pots.utxos, delta.produced_utxos);
+    pots.utxos = sub!(pots.utxos, delta.consumed_utxos);
 
     // we infer the reserves by looking at how the utxo pot changed
-    pots.reserves -= delta.produced_utxos;
-    pots.reserves += delta.consumed_utxos;
+    pots.reserves = sub!(pots.reserves, delta.produced_utxos);
+    pots.reserves = add!(pots.reserves, delta.consumed_utxos);
 
     pots
 }
@@ -355,51 +377,58 @@ pub fn apply_shelley_delta(mut pots: Pots, incentives: &EpochIncentives, delta: 
     // reserves pot
     pots.reserves = sub!(pots.reserves, incentives.total);
     pots.reserves = sub!(pots.reserves, delta.reserve_mirs);
-    pots.reserves += returned_rewards;
+    pots.reserves = add!(pots.reserves, returned_rewards);
 
     // treasury pot
-    pots.treasury += incentives.treasury_tax;
-    pots.treasury += delta.incentives_back_to_treasury();
-    pots.treasury += delta.pool_invalid_refund_count * pots.deposit_per_pool;
-    pots.treasury += delta.proposal_invalid_refunds;
-    pots.treasury += delta.treasury_donations;
+    pots.treasury = add!(pots.treasury, incentives.treasury_tax);
+    pots.treasury = add!(pots.treasury, delta.incentives_back_to_treasury());
+    pots.treasury = add!(pots.treasury, delta.pool_invalid_refund_count * pots.deposit_per_pool);
+    pots.treasury = add!(pots.treasury, delta.proposal_invalid_refunds);
+    pots.treasury = add!(pots.treasury, delta.treasury_donations);
+    pots.treasury = sub!(pots.treasury, delta.treasury_mirs);
 
     // fees pot
     pots.fees = sub!(pots.fees, incentives.used_fees);
-    pots.fees += delta.gathered_fees;
+    pots.fees = add!(pots.fees, delta.gathered_fees);
 
     // rewards pot
-    pots.rewards += delta.effective_rewards;
+    pots.rewards = add!(pots.rewards, delta.effective_rewards);
     pots.rewards = sub!(pots.rewards, delta.withdrawals);
-    pots.rewards += delta.pool_refund_count * pots.deposit_per_pool;
-    pots.rewards += delta.proposal_refunds;
-    pots.rewards += delta.reserve_mirs;
+    pots.rewards = add!(pots.rewards, delta.pool_refund_count * pots.deposit_per_pool);
+    pots.rewards = add!(pots.rewards, delta.proposal_refunds);
+    pots.rewards = add!(pots.rewards, delta.reserve_mirs);
+    pots.rewards = add!(pots.rewards, delta.treasury_mirs);
 
     // we don't need to return account deposit refunds to the rewards pot because
     // these refunds are returned directly as utxos in the deregistration
     // transaction.
 
     // utxos pot
-    pots.utxos += delta.produced_utxos;
-    pots.utxos -= delta.consumed_utxos;
+    pots.utxos = add!(pots.utxos, delta.produced_utxos);
+    pots.utxos = sub!(pots.utxos, delta.consumed_utxos);
+
+    // AVVM reclamation at Shelley→Allegra boundary: unredeemed AVVM UTxOs
+    // are removed from the UTxO set and their value returned to reserves.
+    pots.utxos = sub!(pots.utxos, delta.avvm_reclamation);
+    pots.reserves = add!(pots.reserves, delta.avvm_reclamation);
 
     // pool count
-    pots.pool_count += delta.pool_deposit_count;
-    pots.pool_count -= delta.pool_refund_count;
-    pots.pool_count -= delta.pool_invalid_refund_count;
+    pots.pool_count = add!(pots.pool_count, delta.pool_deposit_count);
+    pots.pool_count = sub!(pots.pool_count, delta.pool_refund_count);
+    pots.pool_count = sub!(pots.pool_count, delta.pool_invalid_refund_count);
 
     // account count
-    pots.account_count += delta.new_accounts;
-    pots.account_count -= delta.removed_accounts;
+    pots.account_count = add!(pots.account_count, delta.new_accounts);
+    pots.account_count = sub!(pots.account_count, delta.removed_accounts);
 
     // for governance, since each cert contains the specific deposit amount, we deal directly with lovelace values.
 
-    pots.drep_deposits += delta.drep_deposits;
-    pots.drep_deposits -= delta.drep_refunds;
+    pots.drep_deposits = add!(pots.drep_deposits, delta.drep_deposits);
+    pots.drep_deposits = sub!(pots.drep_deposits, delta.drep_refunds);
 
-    pots.proposal_deposits += delta.proposal_deposits;
-    pots.proposal_deposits -= delta.proposal_refunds;
-    pots.proposal_deposits -= delta.proposal_invalid_refunds;
+    pots.proposal_deposits = add!(pots.proposal_deposits, delta.proposal_deposits);
+    pots.proposal_deposits = sub!(pots.proposal_deposits, delta.proposal_refunds);
+    pots.proposal_deposits = sub!(pots.proposal_deposits, delta.proposal_invalid_refunds);
 
     pots
 }
@@ -541,7 +570,7 @@ mod tests {
         let incentives = epoch_incentives(pots.reserves, fee_ss, rho, tau, eta);
 
         let delta = PotDelta {
-            unspendable_rewards: 295063003292,
+            unspendable_to_treasury: 295063003292,
             deposit_per_pool: Some(500_000_000),
             deposit_per_account: Some(2_000_000),
             ..PotDelta::neutral(7, 7)

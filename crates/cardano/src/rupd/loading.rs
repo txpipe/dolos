@@ -11,15 +11,22 @@ use crate::{
     PoolState,
 };
 
-fn define_eta(genesis: &Genesis, epoch: &EpochState) -> Result<Eta, ChainError> {
+/// Calculate eta using pool blocks (not total blocks including federated).
+///
+/// The Haskell ledger's `BlocksMade` map only tracks pool-produced blocks,
+/// excluding federated/overlay blocks. The eta calculation uses this count
+/// to determine if pools are producing blocks at the expected rate.
+fn define_eta(
+    genesis: &Genesis,
+    epoch: &EpochState,
+    pool_blocks: Option<u64>,
+) -> Result<Eta, ChainError> {
     if epoch.pparams.mark().is_none_or(|x| x.is_byron()) {
         return Ok(ratio!(1));
     }
 
-    let blocks_minted = epoch.rolling.mark().map(|x| x.blocks_minted);
-
-    let Some(blocks_minted) = blocks_minted else {
-        // TODO: check if returning eta = 1 on epoch 0 is what the specs says.
+    let Some(pool_blocks) = pool_blocks else {
+        // No pool blocks available (e.g., epoch 0 or no pools registered)
         return Ok(ratio!(1));
     };
 
@@ -34,7 +41,7 @@ fn define_eta(genesis: &Genesis, epoch: &EpochState) -> Result<Eta, ChainError> 
     let epoch_length = epoch.pparams.mark().unwrap().ensure_epoch_length()?;
 
     let eta = pots::calculate_eta(
-        blocks_minted as u64,
+        pool_blocks,
         pallas_ratio!(d_param),
         f_param,
         epoch_length,
@@ -56,6 +63,7 @@ fn define_epoch_incentives(
     genesis: &Genesis,
     state: &EpochState,
     reserves: u64,
+    pool_blocks: Option<u64>,
 ) -> Result<EpochIncentives, ChainError> {
     let pparams = state.pparams.unwrap_live();
 
@@ -74,7 +82,7 @@ fn define_epoch_incentives(
         _ => 0,
     };
 
-    let eta = define_eta(genesis, state)?;
+    let eta = define_eta(genesis, state, pool_blocks)?;
 
     let incentives = pots::epoch_incentives(
         reserves,
@@ -111,10 +119,19 @@ impl StakeSnapshot {
         *self.pool_stake.get(pool).unwrap_or(&0)
     }
 
+    /// Load stake snapshot for reward calculation.
+    ///
+    /// # Arguments
+    /// * `state` - Current state store
+    /// * `stake_epoch` - Epoch for stake/delegation snapshot (E-3)
+    /// * `protocol` - Era protocol for stake calculation
+    /// * `rupd_slot` - The RUPD boundary slot, used to determine registration status.
+    ///   Pre-Babbage filtering requires knowing which accounts were registered at RUPD time.
     pub fn load<D: Domain>(
         state: &D::State,
         stake_epoch: u64,
         protocol: EraProtocol,
+        _rupd_slot: u64,
     ) -> Result<Self, ChainError> {
         let mut snapshot = Self::default();
 
@@ -123,6 +140,14 @@ impl StakeSnapshot {
         for record in pools {
             let (_, pool) = record?;
 
+            // Sum blocks from ALL pools that have mark() data for the performance epoch.
+            // This is needed for epoch_blocks() denominator in apparent performance.
+            if let Some(mark_snapshot) = pool.snapshot.mark() {
+                snapshot.performance_epoch_pool_blocks += mark_snapshot.blocks_minted as u64;
+            }
+
+            // Only include pools that existed at the stake snapshot epoch for
+            // stake-based calculations (rewards, delegation, etc.)
             if pool.snapshot.snapshot_at(stake_epoch).is_some() {
                 snapshot.pools.insert(pool.operator, pool.snapshot);
             }
@@ -133,8 +158,9 @@ impl StakeSnapshot {
         for record in accounts {
             let (_, account) = record?;
 
-            // TODO: check if we really need to make ths check. It might be adding noise to the data.
-            if account.is_registered() {
+            let is_reg = account.is_registered();
+
+            if is_reg {
                 snapshot
                     .registered_accounts
                     .insert(account.credential.clone());
@@ -156,11 +182,11 @@ impl StakeSnapshot {
                 continue;
             }
 
-            let stake = account
-                .stake
-                .snapshot_at(stake_epoch)
+            let stake_value = account.stake.snapshot_at(stake_epoch);
+            let stake = stake_value
                 .map(|x| x.total_for_era(protocol))
                 .unwrap_or_default();
+
 
             snapshot.track_stake(&account.credential, *pool, stake)?;
         }
@@ -207,7 +233,20 @@ impl RupdWork {
         let snapshot_epoch = self.current_epoch - 3;
         let performance_epoch = self.current_epoch - 1;
 
+        // The Cardano node doesn't compute rewards until the snapshot epoch is
+        // past the first Shelley epoch. The genesis-initialized snapshot at the
+        // first Shelley epoch itself is not used for reward computation.
+        let first_shelley = self.chain.first_shelley_epoch();
+        if snapshot_epoch <= first_shelley {
+            return None;
+        }
+
         Some((snapshot_epoch, performance_epoch))
+    }
+
+    #[cfg(test)]
+    pub fn debug_epoch_blocks(&self) -> u64 {
+        self.snapshot.performance_epoch_pool_blocks
     }
 
     pub fn load<D: Domain>(state: &D::State, genesis: &Genesis) -> Result<RupdWork, ChainError> {
@@ -225,7 +264,20 @@ impl RupdWork {
 
         let pots = epoch.initial_pots.clone();
 
-        let incentives = define_epoch_incentives(genesis, &epoch, pots.reserves)?;
+        // Use non-overlay block count for eta calculation (matches ledger BlocksMade total).
+        let blocks_made_total = epoch
+            .rolling
+            .mark()
+            .map(|x| x.non_overlay_blocks_minted as u64)
+            .unwrap_or(0);
+        let blocks_made_opt = if blocks_made_total > 0 {
+            Some(blocks_made_total)
+        } else {
+            None
+        };
+
+        let incentives =
+            define_epoch_incentives(genesis, &epoch, pots.reserves, blocks_made_opt)?;
 
         let chain = crate::load_era_summary::<D>(state)?;
 
@@ -244,12 +296,38 @@ impl RupdWork {
             pots,
             incentives,
             snapshot: StakeSnapshot::default(),
+            blocks_made_total,
         };
 
-        if let Some((snapshot_epoch, _)) = work.relevant_epochs() {
-            let era = work.chain.era_for_epoch(snapshot_epoch);
+        if let Some((snapshot_epoch, performance_epoch)) = work.relevant_epochs() {
+            // The snapshot data was "live" at snapshot_epoch and becomes the "mark"
+            // snapshot at snapshot_epoch + 1. The Haskell ledger computes the mark
+            // snapshot under the entering epoch's protocol rules, so we use
+            // snapshot_epoch + 1 to determine the era (e.g., Conway excludes pointer
+            // address UTxOs from stake).
+            let era = work.chain.era_for_epoch(snapshot_epoch + 1);
             let protocol = EraProtocol::from(era.protocol);
-            work.snapshot = StakeSnapshot::load::<D>(state, snapshot_epoch, protocol)?;
+
+            // Calculate the RUPD slot (epoch_start + randomness_stability_window).
+            // The Haskell ledger's startStep runs at randomnessStabilisationWindow (4k/f)
+            // slots into the epoch, capturing addrsRew (registered accounts) at that point.
+            // Pre-Babbage pre-filtering uses this to exclude unregistered accounts from
+            // reward computation.
+            let rupd_slot =
+                work.chain.epoch_start(current_epoch) + crate::utils::randomness_stability_window(genesis);
+
+            work.snapshot = StakeSnapshot::load::<D>(state, snapshot_epoch, protocol, rupd_slot)?;
+
+            debug!(
+                %current_epoch,
+                %snapshot_epoch,
+                %performance_epoch,
+                pool_blocks_total = %work.snapshot.performance_epoch_pool_blocks,
+                pools_in_snapshot = %work.snapshot.pools.len(),
+                active_stake = %work.snapshot.active_stake_sum,
+                "RUPD epoch info"
+            );
+
         }
 
         Ok(work)
@@ -270,11 +348,7 @@ impl crate::rewards::RewardsContext for RupdWork {
     }
 
     fn epoch_blocks(&self) -> u64 {
-        self.snapshot
-            .pools
-            .values()
-            .map(|x| x.mark().map(|x| x.blocks_minted).unwrap_or(0) as u64)
-            .sum()
+        self.blocks_made_total
     }
 
     fn pool_stake(&self, pool: PoolHash) -> u64 {

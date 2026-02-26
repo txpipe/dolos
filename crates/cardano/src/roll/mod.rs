@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use dolos_core::{
     config::{CardanoConfig, TrackConfig},
-    ChainError, Domain, Genesis, InvariantViolation, StateError, TxoRef,
+    ChainError, Domain, Genesis, InvariantViolation, StateError, TxOrder, TxoRef,
 };
 use pallas::{
     codec::utils::KeepRaw,
@@ -47,6 +47,7 @@ use txs::TxLogVisitor;
 
 pub trait BlockVisitor {
     #[allow(unused_variables)]
+    #[allow(clippy::too_many_arguments)]
     fn visit_root(
         &mut self,
         deltas: &mut WorkDeltas,
@@ -54,6 +55,7 @@ pub trait BlockVisitor {
         genesis: &Genesis,
         pparams: &PParamsSet,
         epoch: Epoch,
+        epoch_start: u64,
         protocol: u16,
     ) -> Result<(), ChainError> {
         Ok(())
@@ -111,6 +113,7 @@ pub trait BlockVisitor {
         deltas: &mut WorkDeltas,
         block: &MultiEraBlock,
         tx: &MultiEraTx,
+        order: &TxOrder,
         cert: &MultiEraCert,
     ) -> Result<(), ChainError> {
         Ok(())
@@ -208,6 +211,7 @@ pub struct DeltaBuilder<'a> {
     work: &'a mut WorkBlock,
     active_params: &'a PParamsSet,
     epoch: Epoch,
+    epoch_start: u64,
     protocol: u16,
     utxos: &'a HashMap<TxoRef, OwnedMultiEraOutput>,
 
@@ -222,12 +226,14 @@ pub struct DeltaBuilder<'a> {
 }
 
 impl<'a> DeltaBuilder<'a> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: TrackConfig,
         genesis: Arc<Genesis>,
         protocol: u16,
         active_params: &'a PParamsSet,
         epoch: Epoch,
+        epoch_start: u64,
         work: &'a mut WorkBlock,
         utxos: &'a HashMap<TxoRef, OwnedMultiEraOutput>,
     ) -> Self {
@@ -237,6 +243,7 @@ impl<'a> DeltaBuilder<'a> {
             work,
             active_params,
             epoch,
+            epoch_start,
             protocol,
             utxos,
             account_state: Default::default(),
@@ -263,10 +270,11 @@ impl<'a> DeltaBuilder<'a> {
             &self.genesis,
             self.active_params,
             self.epoch,
+            self.epoch_start,
             self.protocol,
         );
 
-        for tx in block.txs() {
+        for (order, tx) in block.txs().iter().enumerate() {
             visit_all!(self, deltas, visit_tx, block, &tx, &self.utxos);
 
             for input in tx.consumes() {
@@ -299,7 +307,7 @@ impl<'a> DeltaBuilder<'a> {
             }
 
             for cert in tx.certs() {
-                visit_all!(self, deltas, visit_cert, block, &tx, &cert,);
+                visit_all!(self, deltas, visit_cert, block, &tx, &order, &cert,);
             }
 
             for (account, amount) in tx.withdrawals().collect::<Vec<_>>() {
@@ -307,7 +315,7 @@ impl<'a> DeltaBuilder<'a> {
             }
 
             if let Some(update) = tx.update() {
-                visit_all!(self, deltas, visit_update, block, Some(&tx), &update);
+                visit_all!(self, deltas, visit_update, block, Some(tx), &update);
             }
 
             for datum in tx.plutus_data() {
@@ -346,6 +354,7 @@ pub fn compute_delta<D: Domain>(
     let (epoch, _) = cache.eras.slot_epoch(batch.first_slot());
 
     let (protocol, _) = cache.eras.protocol_and_era_for_epoch(epoch);
+    let epoch_start = cache.eras.epoch_start(epoch);
 
     debug!(
         from = batch.first_slot(),
@@ -363,6 +372,7 @@ pub fn compute_delta<D: Domain>(
             *protocol,
             &active_params,
             epoch,
+            epoch_start,
             block,
             &batch.utxos_decoded,
         );

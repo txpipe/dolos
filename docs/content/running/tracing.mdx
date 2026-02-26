@@ -1,0 +1,99 @@
+---
+title: Tracing
+sidebar:
+  order: 3
+---
+
+Dolos can export per-transaction OpenTelemetry traces that track the full mempool lifecycle of each submitted transaction. This feature is disabled by default. When enabled, traces are sent to an OTLP-compatible collector such as Jaeger or Grafana Tempo.
+
+## Configuration
+
+The `[telemetry]` section in your `dolos.toml` controls trace export:
+
+| property        | type    | default                  | description                              |
+| --------------- | ------- | ------------------------ | ---------------------------------------- |
+| `enabled`       | boolean | `false`                  | Enable OpenTelemetry trace export        |
+| `otlp_endpoint` | string  | `"http://localhost:4317"` | gRPC endpoint of the OTLP collector      |
+| `service_name`  | string  | `"dolos"`                | Service name reported in exported traces |
+
+Example:
+
+```toml
+[telemetry]
+enabled = true
+otlp_endpoint = "http://localhost:4317"
+service_name = "dolos"
+```
+
+## Local OTLP Setup for Testing
+
+To get traces flowing on your local machine, you need an OTLP-compatible collector running alongside Dolos. Below are two common options.
+
+### Option A: Jaeger all-in-one
+
+Jaeger ships as a single Docker image that includes an OTLP gRPC receiver and a web UI.
+
+```sh
+docker run -d --name jaeger \
+  -p 4317:4317 \
+  -p 16686:16686 \
+  jaegertracing/jaeger:latest
+```
+
+This exposes the OTLP gRPC endpoint on port `4317` and the Jaeger UI on `http://localhost:16686`.
+
+### Option B: Grafana Tempo + Grafana
+
+If you prefer a Grafana-based stack, use a `docker-compose.yml` like the following:
+
+```yaml
+services:
+  tempo:
+    image: grafana/tempo:latest
+    command: ["-config.file=/etc/tempo.yaml"]
+    volumes:
+      - ./tempo.yaml:/etc/tempo.yaml
+    ports:
+      - "4317:4317"
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+```
+
+You will also need a minimal `tempo.yaml` configuration that enables the OTLP gRPC receiver. Refer to the [Grafana Tempo documentation](https://grafana.com/docs/tempo/latest/) for details.
+
+### Enable telemetry in Dolos
+
+Add the `[telemetry]` block to your `dolos.toml`:
+
+```toml
+[telemetry]
+enabled = true
+```
+
+The default `otlp_endpoint` (`http://localhost:4317`) matches both setups above, so you don't need to change it when running everything on the same host.
+
+### Verify traces arrive
+
+1. Start Dolos (`dolos daemon`).
+2. Submit a transaction via gRPC or TRP.
+3. Open the collector UI (Jaeger at `http://localhost:16686`, or Grafana at `http://localhost:3000`) and search for the **dolos** service.
+
+A healthy trace shows a root span with child spans nested underneath, representing the different lifecycle stages of the transaction.
+
+### Troubleshooting
+
+- **Connection refused** — The collector is not running or is not listening on the expected port. Make sure the Docker container is up and port `4317` is published.
+- **Wrong port** — Verify that `otlp_endpoint` points to the gRPC port (`4317` by default), not the HTTP port.
+- **Firewall** — If running the collector on a different host, ensure your firewall allows inbound gRPC traffic on the configured port.
+
+Dolos logs an error at startup if the OTLP exporter cannot reach the configured endpoint, which is the quickest way to confirm connectivity.
+
+## Relation to Logging
+
+Tracing is independent of the [`[logging]`](../running/logging) configuration. Both can be active simultaneously. When telemetry is disabled (the default), there is zero runtime overhead — no spans are exported and no collector connection is attempted.

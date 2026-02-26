@@ -3,6 +3,8 @@
 //! This module provides functionality for validating transactions against
 //! the current ledger state and submitting them to the mempool.
 
+use tracing::{info, instrument};
+
 use crate::{
     ChainLogic, Domain, DomainError, MempoolAwareUtxoStore, MempoolStore, MempoolTx, StateStore,
     TxHash,
@@ -26,7 +28,21 @@ pub trait SubmitExt: Domain {
     /// # Returns
     ///
     /// The validated mempool transaction if valid.
-    fn validate_tx(&self, chain: &Self::Chain, cbor: &[u8]) -> Result<MempoolTx, DomainError>;
+    #[instrument(skip_all)]
+    fn validate_tx(
+        &self,
+        chain: &Self::Chain,
+        cbor: &[u8],
+    ) -> Result<MempoolTx, DomainError> {
+        let tip = self.state().read_cursor()?;
+
+        let utxos =
+            MempoolAwareUtxoStore::<'_, Self>::new(self.state(), self.indexes(), self.mempool());
+
+        let tx = chain.validate_tx(cbor, &utxos, tip, &self.genesis())?;
+
+        Ok(tx)
+    }
 
     /// Validate and receive a transaction into the mempool.
     ///
@@ -35,31 +51,24 @@ pub trait SubmitExt: Domain {
     ///
     /// # Arguments
     ///
+    /// * `source` - A reference to the mechanims from which the tx was received
     /// * `chain` - Reference to the chain logic for validation
     /// * `cbor` - CBOR-encoded transaction bytes
     ///
     /// # Returns
     ///
     /// The transaction hash if successfully submitted.
-    fn receive_tx(&self, chain: &Self::Chain, cbor: &[u8]) -> Result<TxHash, DomainError>;
-}
-
-impl<D: Domain> SubmitExt for D {
-    fn validate_tx(&self, chain: &Self::Chain, cbor: &[u8]) -> Result<MempoolTx, DomainError> {
-        let tip = self.state().read_cursor()?;
-
-        let utxos =
-            MempoolAwareUtxoStore::<'_, D>::new(self.state(), self.indexes(), self.mempool());
-
-        let tx = chain.validate_tx(cbor, &utxos, tip, &self.genesis())?;
-
-        Ok(tx)
-    }
-
-    fn receive_tx(&self, chain: &Self::Chain, cbor: &[u8]) -> Result<TxHash, DomainError> {
+    #[instrument(skip_all)]
+    fn receive_tx(
+        &self,
+        source: &str,
+        chain: &Self::Chain,
+        cbor: &[u8],
+    ) -> Result<TxHash, DomainError> {
         let tx = self.validate_tx(chain, cbor)?;
-
         let hash = tx.hash;
+
+        info!(tx.hash = %hash, source=source, "tx received");
 
         self.mempool().receive(tx)?;
 
@@ -67,7 +76,4 @@ impl<D: Domain> SubmitExt for D {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    // Tests will be added once we have the full integration in place
-}
+impl<D: Domain> SubmitExt for D {}

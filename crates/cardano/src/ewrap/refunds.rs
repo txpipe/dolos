@@ -1,10 +1,12 @@
-use dolos_core::{ChainError, NsKey};
+use dolos_core::{ChainError, EntityKey, NsKey};
 use pallas::{codec::minicbor, ledger::primitives::StakeCredential};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     ewrap::{BoundaryWork, ProposalId},
-    AccountState, CardanoDelta, FixedNamespace as _, PoolHash, PoolState, ProposalState,
+    rupd::credential_to_key,
+    AccountState, CardanoDelta, CardanoEntity, FixedNamespace as _, PoolDepositRefundLog, PoolHash,
+    PoolState, ProposalState,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,11 +88,16 @@ impl dolos_core::EntityDelta for ProposalDepositRefund {
 #[derive(Default)]
 pub struct BoundaryVisitor {
     deltas: Vec<CardanoDelta>,
+    pub logs: Vec<(EntityKey, CardanoEntity)>,
 }
 
 impl BoundaryVisitor {
     fn change(&mut self, delta: impl Into<CardanoDelta>) {
         self.deltas.push(delta.into());
+    }
+
+    fn log(&mut self, key: EntityKey, log: impl Into<CardanoEntity>) {
+        self.logs.push((key, log.into()));
     }
 }
 
@@ -144,7 +151,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
     fn visit_retiring_pool(
         &mut self,
         ctx: &mut super::BoundaryWork,
-        _: PoolHash,
+        pool_id: PoolHash,
         _: &PoolState,
         account: Option<&AccountState>,
     ) -> Result<(), ChainError> {
@@ -157,6 +164,14 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         if let Some(account) = account {
             if account.is_registered() {
                 self.change(PoolDepositRefund::new(deposit, account.credential.clone()));
+
+                self.log(
+                    credential_to_key(&account.credential),
+                    PoolDepositRefundLog {
+                        amount: deposit,
+                        pool_id: pool_id.to_vec(),
+                    },
+                )
             }
         }
 
@@ -166,6 +181,10 @@ impl super::BoundaryVisitor for BoundaryVisitor {
     fn flush(&mut self, ctx: &mut BoundaryWork) -> Result<(), ChainError> {
         for delta in self.deltas.drain(..) {
             ctx.add_delta(delta);
+        }
+
+        for (key, log) in self.logs.drain(..) {
+            ctx.logs.push((key, log));
         }
 
         Ok(())

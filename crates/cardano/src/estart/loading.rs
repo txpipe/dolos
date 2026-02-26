@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use dolos_core::{ChainError, Domain, Genesis, StateStore};
+use dolos_core::{ChainError, Domain, Genesis, StateStore, TxoRef};
 
 use crate::{
     estart::BoundaryVisitor, load_era_summary, roll::WorkDeltas, AccountState, DRepState,
@@ -54,16 +54,66 @@ impl super::WorkContext {
         Ok(())
     }
 
+    /// Compute the value of unredeemed AVVM UTxOs at the Shelley→Allegra
+    /// boundary. These UTxOs are removed from the UTxO set and their value
+    /// returned to reserves, matching the Haskell ledger's `translateEra`.
+    fn compute_avvm_reclamation<D: Domain>(
+        state: &D::State,
+        genesis: &Genesis,
+    ) -> Result<u64, ChainError> {
+        let avvm_utxos = pallas::ledger::configs::byron::genesis_avvm_utxos(&genesis.byron);
+
+        // Collect all Byron genesis AVVM UTxO refs (bootstrap redeemer addresses)
+        let refs: Vec<TxoRef> = avvm_utxos
+            .iter()
+            .map(|(tx, _, _)| TxoRef(*tx, 0))
+            .collect();
+
+        // Query the UTxO set to find which are still unspent
+        let remaining = state.get_utxos(refs)?;
+
+        // Sum the remaining values
+        let total: u64 = remaining
+            .values()
+            .map(|utxo| {
+                pallas::ledger::traverse::MultiEraOutput::try_from(utxo.as_ref())
+                    .map(|o| o.value().coin())
+                    .unwrap_or(0)
+            })
+            .sum();
+
+        tracing::warn!(
+            remaining_count = remaining.len(),
+            total_avvm = total,
+            "AVVM reclamation at Shelley→Allegra boundary"
+        );
+
+        Ok(total)
+    }
+
     pub fn load<D: Domain>(state: &D::State, genesis: Arc<Genesis>) -> Result<Self, ChainError> {
         let ended_state = crate::load_epoch::<D>(state)?;
         let chain_summary = load_era_summary::<D>(state)?;
         let active_protocol = EraProtocol::from(chain_summary.edge().protocol);
+
+        // Check for AVVM reclamation at Shelley→Allegra boundary
+        let avvm_reclamation =
+            if let Some(transition) = ended_state.pparams.era_transition() {
+                if transition.entering_allegra() {
+                    Self::compute_avvm_reclamation::<D>(state, &genesis)?
+                } else {
+                    0
+                }
+            } else {
+                0
+            };
 
         let mut boundary = Self {
             ended_state,
             chain_summary,
             active_protocol,
             genesis,
+            avvm_reclamation,
 
             // empty until computed
             deltas: WorkDeltas::default(),

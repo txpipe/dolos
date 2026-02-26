@@ -8,6 +8,7 @@ use pallas::ledger::{
     primitives::{NetworkId, TransactionInput},
     traverse::{MultiEraInput, MultiEraOutput, MultiEraTx},
 };
+use tracing::info;
 
 pub fn validate_tx<D: Domain>(
     cbor: &[u8],
@@ -16,6 +17,7 @@ pub fn validate_tx<D: Domain>(
     genesis: &Genesis,
 ) -> Result<MempoolTx, ChainError> {
     let tx = MultiEraTx::decode(cbor)?;
+    let hash = tx.hash();
 
     let pparams = crate::load_effective_pparams::<D>(utxos.state())?;
     let pparams = crate::utils::pparams_to_pallas(&pparams);
@@ -77,16 +79,17 @@ pub fn validate_tx<D: Domain>(
         }
     }
 
-    let hash = tx.hash();
+    info!(
+        phase1 = true,
+        phase2 = true,
+        redeemer_count = report.len(),
+        "tx validated"
+    );
+
     let era = u16::from(tx.era());
     let payload = EraCbor(era, cbor.into());
 
-    let tx = MempoolTx {
-        hash,
-        payload,
-        confirmed: false,
-        report: Some(report),
-    };
+    let tx = MempoolTx::new(hash, payload, report);
 
     Ok(tx)
 }

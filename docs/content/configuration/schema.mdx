@@ -10,66 +10,122 @@ peer_address = "preprod-node.world.dev.cardano.org:30000"
 network_magic = 1
 is_testnet = true
 
+# Emulator mode (omit peer_* fields when using this)
+# block_production_interval = 5
+
 [storage]
-version = "v1"
+version = "v3"
 path = "data"
-max_wal_history = 10000
-max_chain_history = 10000
+
+[storage.wal]
+max_history = 10000
+
+[storage.state]
+backend = "fjall"
+
+[storage.archive]
+max_history = 10000
+
+[storage.index]
+backend = "fjall"
+
+[storage.mempool]
+backend = "in_memory"
 
 [genesis]
 byron_path = "byron.json"
 shelley_path = "shelley.json"
 alonzo_path = "alonzo.json"
 conway_path = "conway.json"
+force_protocol = 2
 
 [chain]
 type = "cardano"
+stop_epoch = 400
 
 [chain.track]
-seen_addresses = true
+account_state = true
 asset_state = true
 pool_state = true
-pool_delegator = true
 epoch_state = true
-account_activity = true
+datum_state = true
+proposal_logs = true
+tx_logs = true
+account_logs = true
+pool_logs = true
+epoch_logs = true
 drep_state = true
+
+[[chain.custom_utxos]]
+ref = ["8d910e3a410a353787d50a708e24c6ba2cc2b6b86ec6d8cb5bf9bbec20bfc937", 0]
+era = 7
+cbor = [162, 0, 88, 29]
 
 [sync]
 pull_batch_size = 100
+sync_limit = "NoLimit"
 
 [submit]
 prune_height = 200
 
 [serve.grpc]
 listen_address = "[::]:50051"
+permissive_cors = true
 
 [serve.minibf]
 listen_address = "[::]:3000"
+permissive_cors = true
 
 [serve.ouroboros]
 listen_path = "dolos.socket"
 magic = 1
 
+[serve.trp]
+listen_address = "[::]:8164"
+max_optimize_rounds = 10
+permissive_cors = true
+
 [relay]
 listen_address = "[::]:30031"
 magic = 1
 
+[retries]
+max_retries = 6
+backoff_unit_sec = 1
+backoff_factor = 2
+max_backoff_sec = 60
+dismissible = false
+
 [mithril]
 aggregator = "https://aggregator.release-preprod.api.mithril.network/aggregator"
 genesis_key = "5b3...45d" # redacted
+
+[snapshot]
+download_url = "https://example.com/snapshot.tar.zst"
 
 [logging]
 max_level = "INFO"
 include_tokio = false
 include_pallas = false
 include_grpc = false
+include_trp = false
+include_minibf = false
+include_otlp = false
+include_fjall = false
+
+[telemetry]
+enabled = false
+otlp_endpoint = "http://localhost:4317"
+service_name = "dolos"
 ```
 
 Each section of the toml controls a different aspect of Dolos' processes. The rest of this document describes in detail each of these sections.
 
 ## `upstream` section
 
-The `upstream` section defines how to connect to the Ouroboros network to synchronize the chain and to submit transactions.
+The `upstream` section defines how to connect to the Ouroboros network to synchronize the chain and submit transactions. It can point to a peer node or use the built-in emulator.
+
+### Peer mode
 
 | property      | type    | example                                    |
 | ------------- | ------- | ------------------------------------------ |
@@ -79,29 +135,107 @@ The `upstream` section defines how to connect to the Ouroboros network to synchr
 
 - `peer_address`: network address of peer node using `{host}:{port}` syntax.
 - `network_magic`: the magic number of the network we're connecting to.
-- `is_tesnet`: flag to indicate if this network is a testent or not.
+- `is_testnet`: flag to indicate if this network is a testnet.
+
+### Emulator mode
+
+| property                  | type    | example |
+| ------------------------- | ------- | ------- |
+| block_production_interval | integer | 5       |
+
+- `block_production_interval`: seconds between blocks produced by the emulator.
 
 ## `storage` section
 
-The `storage` section controls how Dolos stores data in the local file system. This includes immutable chain blocks, the write ahead log and the ledger state.
+The `storage` section controls how Dolos stores data in the local file system. Each store (wal, state, archive, index, mempool) can be configured independently with its own backend and options.
 
-| property               | type    | example  |
-| ---------------------- | ------- | -------- |
-| path                   | string  | "./data" |
-| version                | string  | "v1"     |
-| wal_cache              | integer | 50       |
-| ledger_cache           | integer | 500      |
-| max_wal_history        | integer | 10000    |
-| max_ledger_history     | integer | 10000    |
-| max_chain_history      | integer | 10000    |
+| property | type   | example |
+| -------- | ------ | ------- |
+| path     | string | "data" |
+| version  | string | "v3"   |
 
-- `path`: is the root directory where all data will be stored.
-- `version`: after Dolos v0.20.0, we've introduced a versioning system to handle schema upgrades more gracefully.
-- `wal_cache`: the size (in Mb) of the memory cache for the wal db.
-- `ledger_cache`: the size (in Mb) of the memory cache for the ledger db.
-- `max_wal_history`: the max number of slots to keep in the WAL. It makes sense to set this to the amount of mutable slots of the chain.
-- `max_ledger_history`: the max number of slots to keep in the ledger store before pruning. If not set, the ledger will prune past the immutable slot.
-- `max_chain_history`: the max number of slots to keep in the historic chain store before pruning. If not set, this won't be pruned.
+- `path`: root directory where all data will be stored.
+- `version`: storage schema version (`v0` - `v3`).
+
+### `storage.wal` section
+
+| property    | type    | example  |
+| ----------- | ------- | -------- |
+| backend     | string  | "redb"   |
+| path        | string  | "wal"    |
+| cache       | integer | 50       |
+| max_history | integer | 10000    |
+
+- `backend`: `redb` or `in_memory`.
+- `path`: optional override for the WAL path (defaults to `<storage.path>/wal`).
+- `cache`: size (MB) of the WAL cache (Redb only).
+- `max_history`: maximum number of slots to keep in the WAL (Redb only).
+
+### `storage.state` section
+
+| property          | type    | example |
+| ----------------- | ------- | ------- |
+| backend           | string  | "fjall" |
+| path              | string  | "state" |
+| cache             | integer | 500     |
+| max_history       | integer | 10000   |
+| max_journal_size  | integer | 1024    |
+| flush_on_commit   | boolean | false   |
+| l0_threshold      | integer | 4       |
+| worker_threads    | integer | 4       |
+| memtable_size_mb  | integer | 64      |
+
+- `backend`: `redb`, `fjall`, or `in_memory`.
+- `path`: optional override for the state path (defaults to `<storage.path>/state`).
+- `cache`: size (MB) of the state cache (Redb/Fjall only).
+- `max_history`: maximum number of slots to keep before pruning (Redb/Fjall only).
+- `max_journal_size`, `flush_on_commit`, `l0_threshold`, `worker_threads`, `memtable_size_mb`: Fjall tuning options.
+
+### `storage.archive` section
+
+| property    | type    | example   |
+| ----------- | ------- | --------- |
+| backend     | string  | "redb"    |
+| path        | string  | "archive" |
+| blocks_path | string  | "blocks" |
+| cache       | integer | 500       |
+| max_history | integer | 10000     |
+
+- `backend`: `redb`, `in_memory`, or `no_op`.
+- `path`: optional override for the archive path (defaults to `<storage.path>/archive`).
+- `blocks_path`: optional override for block segment files (Redb only).
+- `cache`: size (MB) of the archive cache (Redb only).
+- `max_history`: maximum number of slots to keep (Redb only).
+
+### `storage.index` section
+
+| property         | type    | example |
+| ---------------- | ------- | ------- |
+| backend          | string  | "fjall" |
+| path             | string  | "index" |
+| cache            | integer | 500     |
+| max_journal_size | integer | 1024    |
+| flush_on_commit  | boolean | false   |
+| l0_threshold     | integer | 8       |
+| worker_threads   | integer | 8       |
+| memtable_size_mb | integer | 128     |
+
+- `backend`: `redb`, `fjall`, `in_memory`, or `no_op`.
+- `path`: optional override for the index path (defaults to `<storage.path>/index`).
+- `cache`: size (MB) of the index cache (Redb/Fjall only).
+- `max_journal_size`, `flush_on_commit`, `l0_threshold`, `worker_threads`, `memtable_size_mb`: Fjall tuning options.
+
+### `storage.mempool` section
+
+| property | type    | example     |
+| -------- | ------- | ----------- |
+| backend  | string  | "in_memory" |
+| path     | string  | "mempool"   |
+| cache    | integer | 50          |
+
+- `backend`: `redb` or `in_memory`.
+- `path`: optional override for the mempool path (defaults to `<storage.path>/mempool`).
+- `cache`: size (MB) of the mempool cache (Redb only).
 
 ## `genesis` section
 
@@ -128,44 +262,68 @@ The `chain` section specifies the type of blockchain to connect to.
 | property | type   | example   |
 | -------- | ------ | --------- |
 | type     | string | "cardano" |
+| stop_epoch | integer | 400     |
 
 - `type`: the type of chain network.
+- `stop_epoch`: optional epoch number to stop syncing at.
 
- ## `chain.track` section
- 
- | property          | type    | default |
- | ----------------- | ------- | ------- |
- | seen_addresses    | boolean | true    |
- | asset_state       | boolean | true    |
- | pool_state        | boolean | true    |
- | pool_delegator    | boolean | true    |
- | epoch_state       | boolean | true    |
- | account_activity  | boolean | true    |
- | reward_logs       | boolean | true    |
- | drep_state        | boolean | true    |
+## `chain.custom_utxos` section
 
-- `seen_addresses`: Tracks whether addresses have been observed.
+Custom UTxOs can be injected at startup (useful for testing). Each entry is an object inside an array.
+
+| property | type   | example |
+| -------- | ------ | ------- |
+| ref      | array   | ["...", 0]         |
+| era      | integer | 7                |
+| cbor     | array   | [162, 0, 88, 29]  |
+
+- `ref`: transaction hash and output index tuple.
+- `era`: optional era number for the CBOR payload.
+- `cbor`: CBOR bytes for the UTxO output.
+
+## `chain.track` section
+
+| property        | type    | default |
+| --------------- | ------- | ------- |
+| account_state   | boolean | true    |
+| asset_state     | boolean | true    |
+| pool_state      | boolean | true    |
+| epoch_state     | boolean | true    |
+| drep_state      | boolean | true    |
+| datum_state     | boolean | true    |
+| proposal_logs   | boolean | true    |
+| tx_logs         | boolean | true    |
+| account_logs    | boolean | true    |
+| pool_logs       | boolean | true    |
+| epoch_logs      | boolean | true    |
+
+- `account_state`: Tracks account state for stake addresses.
 - `asset_state`: Monitors the state of assets.
 - `pool_state`: Keeps track of the state of pools.
-- `pool_delegator`: Observes delegator information for pools.
 - `epoch_state`: Tracks the state of epochs.
-- `account_activity`: Monitors activity related to accounts.
-- `reward_logs`: Keeps track of rewards for each delegator in each epoch
-- `drep_state`: Keeps track of Drep registration state in each epoch
+- `drep_state`: Keeps track of DRep registration state.
+- `datum_state`: Keeps track of datum entries.
+- `proposal_logs`: Tracks governance proposal logs.
+- `tx_logs`: Tracks transaction logs for historical lookups.
+- `account_logs`: Tracks account history logs.
+- `pool_logs`: Tracks pool history logs.
+- `epoch_logs`: Tracks epoch history logs.
 
 ## `sync` section
 
-The `sync` section controls how Dolos synchronizes the chain from upstream peers. This involves fetch a batch of blocks from the upstream node and updating the corresponding local storage.
+The `sync` section controls how Dolos synchronizes the chain from upstream peers. This involves fetching a batch of blocks from the upstream node and updating the corresponding local storage.
 
 | property        | type    | example |
 | --------------- | ------- | ------- |
 | pull_batch_size | integer | 200     |
+| sync_limit      | string  | "NoLimit" |
 
-- `pull_batch_szie`: the number of blocks that are fetched per batch.
+- `pull_batch_size`: the number of blocks that are fetched per batch.
+- `sync_limit`: one of `"NoLimit"`, `"UntilTip"`, or `{ MaxBlocks = <number> }`.
 
 ## `submit` section
 
-The `submit` section controls how Dolos submit transactions to the network. This involves maintaining a mempool of txs and sharing them with the upstream node.
+The `submit` section controls how Dolos submits transactions to the network. This involves maintaining a mempool of txs and sharing them with the upstream node.
 
 | property     | type    | example |
 | ------------ | ------- | ------- |
@@ -177,48 +335,146 @@ The `submit` section controls how Dolos submit transactions to the network. This
 
 The `serve.grpc` section controls the options for the gRPC endpoint that can be used by clients.
 
-| property       | type   | example      |
-| -------------- | ------ | ------------ |
-| listen_address | string | "[::]:50051" |
+| property           | type    | example             |
+| ------------------ | ------- | ------------------- |
+| listen_address     | string  | "[::]:50051"        |
+| tls_client_ca_root | string  | "./ca.pem"          |
+| permissive_cors    | boolean | true                |
 
 - `listen_address`: the local address (`IP:PORT`) to listen for incoming gRPC connections (`[::]` represents any IP address).
+- `tls_client_ca_root`: optional path to a CA root file for client TLS authentication.
+- `permissive_cors`: allow cross-origin requests from any origin.
 
 ## `serve.minibf` section
 
 The `serve.minibf` section controls the options for the HTTP endpoint that hosts a Blockfrost-like endpoint.
 
-| property       | type   | example      |
-| -------------- | ------ | ------------ |
-| listen_address | string | "[::]:3000"  |
+| property           | type    | example                          |
+| ------------------ | ------- | -------------------------------- |
+| listen_address     | string  | "[::]:3000"                     |
+| permissive_cors    | boolean | true                             |
+| token_registry_url | string  | "https://token-registry.io"     |
+| url                | string  | "https://minibf.local"          |
+| max_scan_items     | integer | 3000                             |
 
 - `listen_address`: the local address (`IP:PORT`) to listen for incoming connections (`[::]` represents any IP address).
+- `permissive_cors`: allow cross-origin requests from any origin.
+- `token_registry_url`: optional token registry base URL used for off-chain asset metadata.
+- `url`: optional public URL used in the `/` root response.
+- `max_scan_items`: caps page-based scans for heavy endpoints (defaults to 3000 if unset).
+
+## `serve.trp` section
+
+The `serve.trp` section controls the options for the Transaction Resolver Protocol endpoint.
+
+| property           | type    | example      |
+| ------------------ | ------- | ------------ |
+| listen_address      | string  | "[::]:8164" |
+| max_optimize_rounds | integer | 10          |
+| permissive_cors    | boolean | true        |
+| extra_fees         | integer | 200000      |
+
+- `listen_address`: the local address (`IP:PORT`) to listen for incoming TRP connections.
+- `max_optimize_rounds`: maximum optimization rounds for transactions.
+- `permissive_cors`: allow cross-origin requests from any origin.
+- `extra_fees`: optional extra fees (lovelace) to add during optimization.
 
 ## `serve.ouroboros` section
 
 The `serve.ouroboros` section controls the options for the Ouroboros mini-protocols endpoint that can be used by clients.
 
-| property    | type   | example        |
-| ----------- | ------ | -------------- |
-| listen_path | string | "dolos.socket" |
+| property    | type    | example        |
+| ----------- | ------- | -------------- |
+| listen_path | string  | "dolos.socket" |
+| magic       | integer | 1              |
 
 - `listen_path`: the file path for the unix socket that will listen for Ouroboros node-to-client mini-protocols.
+- `magic`: the network magic for node-to-client queries.
 
 ## `relay` section
 
 The `relay` section controls the options for handling inbound connection from other peers through Ouroboros node-to-node miniprotocols.
 
-| property       | type   | example      |
-| -------------- | ------ | ------------ |
-| listen_address | string | "[::]:50051" |
+| property       | type    | example      |
+| -------------- | ------- | ------------ |
+| listen_address | string  | "[::]:50051" |
+| magic          | integer | 1            |
 
 - `listen_address`: the local address (`IP:PORT`) to listen for incoming Ouroboros connections (`[::]` represents any IP address).
+- `magic`: the network magic for node-to-node connections.
+
+## `retries` section
+
+The `retries` section controls backoff behavior for transient failures.
+
+| property          | type    | example |
+| ----------------- | ------- | ------- |
+| max_retries       | integer | 6       |
+| backoff_unit_sec  | integer | 1       |
+| backoff_factor    | integer | 2       |
+| max_backoff_sec   | integer | 60      |
+| dismissible       | boolean | false   |
+
+- `max_retries`: maximum retry attempts before giving up.
+- `backoff_unit_sec`: base backoff unit in seconds.
+- `backoff_factor`: multiplier applied to the backoff unit.
+- `max_backoff_sec`: maximum backoff delay in seconds.
+- `dismissible`: allow skipping further retries for specific errors.
+
+## `mithril` section
+
+The `mithril` section controls the configuration for Mithril bootstrap.
+
+| property      | type   | example |
+| ------------- | ------ | ------- |
+| aggregator    | string | "https://aggregator.release-preprod.api.mithril.network/aggregator" |
+| genesis_key   | string | "5b3...45d" |
+| ancillary_key | string | "..." |
+
+- `aggregator`: Mithril aggregator URL.
+- `genesis_key`: Mithril genesis verification key.
+- `ancillary_key`: optional ancillary verification key.
+
+## `snapshot` section
+
+The `snapshot` section controls bootstrap from a snapshot archive.
+
+| property     | type   | example |
+| ------------ | ------ | ------- |
+| download_url | string | "https://example.com/snapshot.tar.zst" |
+
+- `download_url`: URL of the snapshot archive to download.
 
 ## `logging` section
 
 The `logging` section controls the logging options to define the level of details to output.
 
-| property       | type   | example                                        |
-| -------------- | ------ | ---------------------------------------------- |
-| max_level      | option | "debug" / "info" / "warn" / "error"            |
-| include_pallas | option | wheter to include logs from the Pallas library |
-| include_tonic  | option | wheter to include logs from the Tonic library  |
+| property        | type    | example |
+| --------------- | ------- | ------- |
+| max_level       | string  | "info" |
+| include_tokio   | boolean | false  |
+| include_pallas  | boolean | false  |
+| include_grpc    | boolean | false  |
+| include_trp     | boolean | false  |
+| include_minibf  | boolean | false  |
+| include_otlp    | boolean | false  |
+| include_fjall   | boolean | false  |
+
+- `max_level`: log level (`debug`, `info`, `warn`, `error`).
+- `include_tokio`: include logs from Tokio.
+- `include_pallas`: include logs from Pallas.
+- `include_grpc`: include logs from the gRPC server.
+- `include_trp`: include logs from the TRP server.
+- `include_minibf`: include logs from the MiniBF server.
+- `include_otlp`: include logs from OpenTelemetry exporters.
+- `include_fjall`: include logs from Fjall storage.
+
+## `telemetry` section
+
+The `telemetry` section controls OpenTelemetry trace export for mempool transaction lifecycle tracking. When enabled, Dolos sends per-transaction traces to an OTLP-compatible collector (e.g. Jaeger, Grafana Tempo). See the [tracing guide](../running/tracing) for a full walkthrough.
+
+| property        | type    | default                   | description                              |
+| --------------- | ------- | ------------------------- | ---------------------------------------- |
+| `enabled`       | boolean | `false`                   | Enable OpenTelemetry trace export        |
+| `otlp_endpoint` | string  | `"http://localhost:4317"` | gRPC endpoint of the OTLP collector      |
+| `service_name`  | string  | `"dolos"`                 | Service name reported in exported traces |

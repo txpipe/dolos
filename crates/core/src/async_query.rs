@@ -96,6 +96,11 @@ where
         .await
     }
 
+    pub async fn slot_by_number(&self, number: u64) -> Result<Option<BlockSlot>, DomainError> {
+        self.run_blocking(move |domain| Ok(domain.indexes().slot_by_block_number(number)?))
+            .await
+    }
+
     pub async fn block_by_tx_hash(
         &self,
         tx_hash: Vec<u8>,

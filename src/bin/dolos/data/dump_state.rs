@@ -160,12 +160,7 @@ impl TableRow for EpochState {
 impl TableRow for EraSummary {
     fn header(format: OutputFormat) -> Vec<&'static str> {
         if matches!(format, OutputFormat::Dbsync) {
-            return vec![
-                "protocol",
-                "start_epoch",
-                "epoch_length",
-                "slot_length",
-            ];
+            return vec!["protocol", "start_epoch", "epoch_length", "slot_length"];
         }
         vec![
             "key",
@@ -494,5 +489,5 @@ fn setup_tracing_for_format(config: &RootConfig, format: OutputFormat) -> miette
         return Ok(());
     }
 
-    crate::common::setup_tracing(&config.logging)
+    crate::common::setup_tracing(&config.logging, &config.telemetry)
 }

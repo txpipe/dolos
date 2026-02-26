@@ -9,11 +9,15 @@ thiserror.workspace = true
 trait-variant.workspace = true
 itertools.workspace = true
 tracing.workspace = true
+opentelemetry.workspace = true
+tracing-opentelemetry.workspace = true
 futures-core.workspace = true
+futures-util.workspace = true
 rayon.workspace = true
 
 # TODO: we shouldn't need Tokio in core
 tokio.workspace = true
+tokio-stream.workspace = true
 
 # TODO: we shouldn't need Pallas in core
 pallas.workspace = true
@@ -23,3 +27,4 @@ serde_with = "3.16.0"
 
 [dev-dependencies]
 proptest = "1.7.0"
+dolos-testing = { path = "../testing" }

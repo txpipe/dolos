@@ -1,6 +1,6 @@
 use std::ops::Deref;
 
-use dolos_core::{BlockSlot, ChainError, Genesis, NsKey};
+use dolos_core::{BlockSlot, ChainError, Genesis, NsKey, TxOrder};
 use pallas::crypto::hash::{Hash, Hasher};
 use pallas::ledger::primitives::Epoch;
 use pallas::ledger::traverse::{MultiEraBlock, MultiEraCert, MultiEraTx};
@@ -78,11 +78,13 @@ impl dolos_core::EntityDelta for PoolRegistration {
 
             if is_currently_retired {
                 // if the pool is currently retired, we need to assume this overrides the record as a new registration.
+                // Preserve blocks_minted accrued in the current epoch so we don't lose leader rewards.
+                let preserved_blocks = entity.snapshot.unwrap_live().blocks_minted;
                 entity.snapshot.replace(
                     PoolSnapshot {
                         is_retired: false,
                         is_new: true,
-                        blocks_minted: 0,
+                        blocks_minted: preserved_blocks,
                         params: self.cert.clone().into(),
                     },
                     self.epoch,
@@ -155,7 +157,10 @@ impl dolos_core::EntityDelta for MintedBlocksInc {
     fn apply(&mut self, entity: &mut Option<PoolState>) {
         if let Some(entity) = entity {
             entity.blocks_minted_total += self.count;
-            entity.snapshot.unwrap_live_mut().blocks_minted += self.count;
+            let live = entity.snapshot.unwrap_live_mut();
+            live.blocks_minted += self.count;
+
+
         }
     }
 
@@ -235,6 +240,7 @@ impl BlockVisitor for PoolStateVisitor {
         _: &Genesis,
         pparams: &PParamsSet,
         epoch: Epoch,
+        _: u64,
         _: u16,
     ) -> Result<(), ChainError> {
         self.epoch = Some(epoch);
@@ -253,6 +259,7 @@ impl BlockVisitor for PoolStateVisitor {
         deltas: &mut WorkDeltas,
         block: &MultiEraBlock,
         _: &MultiEraTx,
+        _: &TxOrder,
         cert: &MultiEraCert,
     ) -> Result<(), ChainError> {
         if let Some(cert) = pallas_extras::cert_as_pool_registration(cert) {

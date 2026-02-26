@@ -12,7 +12,7 @@ use tracing::{debug, instrument, trace, warn};
 
 use crate::{
     ewrap::BoundaryWork, rupd::credential_to_key, AccountState, CardanoEntity, DRepState,
-    EpochState, FixedNamespace, PendingRewardState, PoolState, ProposalState,
+    EpochState, FixedNamespace, PendingMirState, PendingRewardState, PoolState, ProposalState,
 };
 
 impl BoundaryWork {
@@ -92,6 +92,16 @@ impl BoundaryWork {
         for credential in self.applied_reward_credentials.drain(..) {
             let key = credential_to_key(&credential);
             writer.delete_entity(PendingRewardState::NS, &key)?;
+        }
+
+        // Delete processed pending MIRs
+        debug!(
+            count = self.applied_mir_credentials.len(),
+            "deleting processed pending MIRs"
+        );
+        for credential in self.applied_mir_credentials.drain(..) {
+            let key = credential_to_key(&credential);
+            writer.delete_entity(PendingMirState::NS, &key)?;
         }
 
         // Drain remaining unspendable rewards

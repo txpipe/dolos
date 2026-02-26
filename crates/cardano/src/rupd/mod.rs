@@ -18,12 +18,7 @@ pub mod deltas;
 pub mod loading;
 pub mod work_unit;
 
-#[cfg(feature = "rupd-snapshot-dump")]
-pub mod dump;
-
-pub use deltas::{credential_to_key, EnqueueReward, SetEpochIncentives};
-#[cfg(feature = "rupd-snapshot-dump")]
-pub use dump::dump_snapshot_csv;
+pub use deltas::{credential_to_key, DequeueMir, EnqueueMir, EnqueueReward, SetEpochIncentives};
 pub use work_unit::RupdWorkUnit;
 
 pub trait RupdVisitor: Default {
@@ -103,6 +98,10 @@ pub struct StakeSnapshot {
     pub registered_accounts: HashSet<StakeCredential>,
     pub pools: HashMap<PoolHash, EpochValue<PoolSnapshot>>,
     pub pool_stake: HashMap<PoolHash, u64>,
+    /// Total blocks minted by ALL pools in the performance epoch (mark snapshot).
+    /// This includes blocks from pools created after the stake snapshot epoch.
+    /// Used for the `epoch_blocks` denominator in apparent performance calculation.
+    pub performance_epoch_pool_blocks: u64,
 }
 
 impl StakeSnapshot {
@@ -123,6 +122,7 @@ pub struct RupdWork {
     pub snapshot: StakeSnapshot,
     pub pots: Pots,
     pub incentives: EpochIncentives,
+    pub blocks_made_total: u64,
     pub max_supply: u64,
     pub chain: ChainSummary,
     pub pparams: Option<PParamsSet>,

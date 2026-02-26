@@ -259,6 +259,7 @@ impl Default for ConfigEditor {
                 relay: Default::default(),
                 retries: Default::default(),
                 logging: Default::default(),
+                telemetry: Default::default(),
                 chain: Default::default(),
             },
             None,
@@ -328,6 +329,7 @@ impl ConfigEditor {
                     permissive_cors: Some(true),
                     token_registry_url: None,
                     url: None,
+                    max_scan_items: None,
                 }
                 .into();
             } else {

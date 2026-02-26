@@ -1,8 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
-use dolos_core::{ChainError, Domain, Genesis, StateStore};
+use dolos_core::{BlockSlot, ChainError, Domain, Genesis, StateStore, TxOrder};
 use pallas::{codec::minicbor, ledger::primitives::StakeCredential};
-use tracing::debug;
 
 use crate::{
     ewrap::{BoundaryVisitor as _, BoundaryWork},
@@ -10,9 +9,9 @@ use crate::{
     pots::EpochIncentives,
     rewards::{Reward, RewardMap},
     roll::WorkDeltas,
-    rupd::RupdWork,
-    AccountState, DRepState, EraProtocol, FixedNamespace as _, PendingRewardState, PoolState,
-    ProposalState,
+    rupd::{credential_to_key, RupdWork},
+    AccountState, DRepState, EraProtocol, FixedNamespace as _, PendingMirState,
+    PendingRewardState, PoolState, ProposalState,
 };
 
 impl BoundaryWork {
@@ -30,7 +29,16 @@ impl BoundaryWork {
         state: &D::State,
         pool: &PoolState,
     ) -> Result<Option<AccountState>, ChainError> {
-        let account = &pool.snapshot.unwrap_live().params.reward_account;
+        // Use scheduled (next) params if available, matching the Haskell ledger's
+        // SNAP → POOLREAP ordering where future pool params become current before
+        // pool reaping. This ensures the deposit refund goes to the correct reward
+        // account when a pool is re-registered with a new reward account and then
+        // retired in the same epoch.
+        let snapshot = pool
+            .snapshot
+            .next()
+            .unwrap_or_else(|| pool.snapshot.unwrap_live());
+        let account = &snapshot.params.reward_account;
 
         let account =
             pallas_extras::parse_reward_account(account).ok_or(ChainError::InvalidPoolParams)?;
@@ -62,7 +70,7 @@ impl BoundaryWork {
     }
 
     fn should_retire_drep(&self, drep: &DRepState) -> bool {
-        let Some(unregistered_at) = drep.unregistered_at else {
+        let Some((unregistered_at, _)) = drep.unregistered_at else {
             return false;
         };
 
@@ -76,9 +84,13 @@ impl BoundaryWork {
             return Ok(false);
         }
 
+        if drep.is_unregistered() {
+            return Ok(false);
+        }
+
         let last_activity_slot = drep
             .last_active_slot
-            .unwrap_or(drep.initial_slot.unwrap_or_default());
+            .unwrap_or(drep.registered_at.map(|x| x.0).unwrap_or_default());
 
         let (last_activity_epoch, _) = self.chain_summary.slot_epoch(last_activity_slot);
 
@@ -87,6 +99,16 @@ impl BoundaryWork {
         let expiring_epoch = last_activity_epoch + pparams.ensure_drep_inactivity_period()?;
 
         Ok(expiring_epoch <= self.starting_epoch_no())
+    }
+
+    fn is_reregistering_drep(&self, drep: &DRepState) -> Option<(BlockSlot, TxOrder)> {
+        let registered_at = drep.registered_at?;
+        let (registered_epoch, _) = self.chain_summary.slot_epoch(registered_at.0);
+
+        if self.starting_epoch_no() == registered_epoch + 1 {
+            return Some(registered_at);
+        }
+        None
     }
 
     fn load_drep_data<D: Domain>(&mut self, state: &D::State) -> Result<(), ChainError> {
@@ -99,6 +121,9 @@ impl BoundaryWork {
                 self.retiring_dreps.push(drep.identifier);
             } else if self.should_expire_drep(&drep)? {
                 self.expiring_dreps.push(drep.identifier.clone());
+            } else if let Some(registered_at) = self.is_reregistering_drep(&drep) {
+                self.reregistrating_dreps
+                    .push((drep.identifier.clone(), registered_at));
             }
         }
 
@@ -145,7 +170,89 @@ impl BoundaryWork {
         Ok(())
     }
 
+    /// Process pending MIRs: check registration status and apply to registered accounts.
+    /// MIRs to unregistered accounts stay in their source pot (no transfer).
+    fn process_pending_mirs<D: Domain>(&mut self, state: &D::State) -> Result<(), ChainError> {
+        let pending_iter =
+            state.iter_entities_typed::<PendingMirState>(PendingMirState::NS, None)?;
+
+        for record in pending_iter {
+            let (_, pending_mir) = record?;
+            let credential = &pending_mir.credential;
+
+            // Look up the account to check registration status
+            let account_key = credential_to_key(credential);
+            let account: Option<AccountState> =
+                state.read_entity_typed(AccountState::NS, &account_key)?;
+
+            // Track that we need to dequeue this pending MIR
+            self.applied_mir_credentials.push(credential.clone());
+
+            if let Some(account) = account {
+                if account.is_registered() {
+                    // Account is registered at epoch boundary - apply MIR
+                    self.effective_treasury_mirs += pending_mir.from_treasury;
+                    self.effective_reserve_mirs += pending_mir.from_reserves;
+
+                    // Add MIR amount to account's rewards
+                    let total = pending_mir.total_value();
+                    if total > 0 {
+                        // Create delta to add MIR to account rewards
+                        self.deltas
+                            .add_for_entity(crate::ewrap::rewards::AssignRewards::new(
+                                account_key.clone(),
+                                total,
+                            ));
+
+                        tracing::debug!(
+                            credential = ?credential,
+                            treasury = pending_mir.from_treasury,
+                            reserves = pending_mir.from_reserves,
+                            total,
+                            "MIR applied to registered account"
+                        );
+                    }
+                } else {
+                    // Account is unregistered at epoch boundary - MIR stays in source pot
+                    self.invalid_treasury_mirs += pending_mir.from_treasury;
+                    self.invalid_reserve_mirs += pending_mir.from_reserves;
+
+                    tracing::warn!(
+                        credential = ?credential,
+                        treasury = pending_mir.from_treasury,
+                        reserves = pending_mir.from_reserves,
+                        "MIR not applied (unregistered account) - stays in source pot"
+                    );
+                }
+            } else {
+                // Account doesn't exist - MIR stays in source pot
+                self.invalid_treasury_mirs += pending_mir.from_treasury;
+                self.invalid_reserve_mirs += pending_mir.from_reserves;
+
+                tracing::warn!(
+                    credential = ?credential,
+                    treasury = pending_mir.from_treasury,
+                    reserves = pending_mir.from_reserves,
+                    "MIR not applied (account not found) - stays in source pot"
+                );
+            }
+        }
+
+        tracing::info!(
+            effective_treasury_mirs = self.effective_treasury_mirs,
+            effective_reserve_mirs = self.effective_reserve_mirs,
+            invalid_treasury_mirs = self.invalid_treasury_mirs,
+            invalid_reserve_mirs = self.invalid_reserve_mirs,
+            "pending MIRs processed"
+        );
+
+        Ok(())
+    }
+
     pub fn compute_deltas<D: Domain>(&mut self, state: &D::State) -> Result<(), ChainError> {
+        // Process pending MIRs first (before regular rewards)
+        self.process_pending_mirs::<D>(state)?;
+
         let mut visitor_enactment = crate::ewrap::enactment::BoundaryVisitor::default();
         let mut visitor_rewards = crate::ewrap::rewards::BoundaryVisitor::default();
         let mut visitor_drops = crate::ewrap::drops::BoundaryVisitor::default();
@@ -262,8 +369,19 @@ impl BoundaryWork {
             pending.insert(credential, reward);
         }
 
-        debug!(
+        let pending_total: u64 = pending.values().map(|r| r.total_value()).sum();
+        let spendable_total: u64 = pending.values().filter(|r| r.is_spendable()).map(|r| r.total_value()).sum();
+        let unspendable_total: u64 = pending.values().filter(|r| !r.is_spendable()).map(|r| r.total_value()).sum();
+        let spendable_count = pending.values().filter(|r| r.is_spendable()).count();
+        let unspendable_count = pending.len() - spendable_count;
+
+        tracing::info!(
             pending_count = pending.len(),
+            %pending_total,
+            %spendable_count,
+            %spendable_total,
+            %unspendable_count,
+            %unspendable_total,
             "loaded pending rewards from state"
         );
 
@@ -296,6 +414,7 @@ impl BoundaryWork {
             retiring_pools: Default::default(),
             expiring_dreps: Default::default(),
             retiring_dreps: Default::default(),
+            reregistrating_dreps: Default::default(),
             enacting_proposals: Default::default(),
             dropping_proposals: Default::default(),
 
@@ -303,6 +422,12 @@ impl BoundaryWork {
             deltas: WorkDeltas::default(),
             logs: Default::default(),
             applied_reward_credentials: Default::default(),
+            applied_rewards: Default::default(),
+            effective_treasury_mirs: 0,
+            effective_reserve_mirs: 0,
+            invalid_treasury_mirs: 0,
+            invalid_reserve_mirs: 0,
+            applied_mir_credentials: Default::default(),
         };
 
         boundary.load_pool_data::<D>(state)?;
