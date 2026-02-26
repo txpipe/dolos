@@ -28,8 +28,10 @@ where
 
     async fn run(cfg: Self::Config, domain: D, cancel: C) -> Result<(), ServeError> {
         let addr = cfg.listen_address.parse().unwrap();
+        let max_history_items = cfg.max_dump_history_items.unwrap_or(100);
 
-        let sync_service = sync::SyncServiceImpl::new(domain.clone(), cancel.clone());
+        let sync_service =
+            sync::SyncServiceImpl::new(domain.clone(), cancel.clone(), max_history_items);
         let sync_service = u5c::sync::sync_service_server::SyncServiceServer::new(sync_service);
 
         let query_service = query::QueryServiceImpl::new(domain.clone());
