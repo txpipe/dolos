@@ -28,6 +28,7 @@ pub async fn receive_tx<D: Domain>(
     source: &str,
     cbor: &[u8],
 ) -> Result<TxHash, DomainError> {
+    let _guard = domain.acquire_submit_lock().await;
     let tx = validate_tx(domain, cbor).await?;
     let hash = tx.hash;
 
