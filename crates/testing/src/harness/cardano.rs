@@ -125,6 +125,7 @@ pub struct HarnessDomain {
     mempool: Mempool,
     storage_config: StorageConfig,
     genesis: Arc<Genesis>,
+    submit_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Domain for HarnessDomain {
@@ -182,6 +183,10 @@ impl Domain for HarnessDomain {
     fn notify_tip(&self, _tip: TipEvent) {
         // no-op: we don't need tip notifications in the harness
     }
+
+    async fn acquire_submit_lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.submit_lock.lock().await
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -212,6 +217,7 @@ impl LedgerHarness {
             mempool: Mempool {},
             storage_config: StorageConfig::default(),
             genesis,
+            submit_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
 
         // 5. Bootstrap (integrity check + drain pending work)

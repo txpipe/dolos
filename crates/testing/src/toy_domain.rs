@@ -126,6 +126,7 @@ pub struct ToyDomain {
     storage_config: StorageConfig,
     genesis: Arc<dolos_core::Genesis>,
     tip_broadcast: tokio::sync::broadcast::Sender<TipEvent>,
+    submit_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl ToyDomain {
@@ -182,6 +183,7 @@ impl ToyDomain {
             storage_config: storage_config.unwrap_or_default(),
             genesis: genesis.clone(),
             tip_broadcast,
+            submit_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
 
         // Apply genesis state using the work unit pattern.
@@ -317,6 +319,10 @@ impl dolos_core::Domain for ToyDomain {
         if self.tip_broadcast.receiver_count() > 0 {
             self.tip_broadcast.send(tip).unwrap();
         }
+    }
+
+    async fn acquire_submit_lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.submit_lock.lock().await
     }
 }
 

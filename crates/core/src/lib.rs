@@ -604,6 +604,11 @@ pub trait Domain: Send + Sync + Clone + 'static {
     fn watch_tip(&self, from: Option<ChainPoint>) -> Result<Self::TipSubscription, DomainError>;
     fn notify_tip(&self, tip: TipEvent);
 
+    /// Acquire a lock that serializes transaction submission (validate + receive).
+    /// This prevents TOCTOU races where two txs consuming the same UTXOs both
+    /// pass validation before either is inserted into the mempool.
+    async fn acquire_submit_lock(&self) -> tokio::sync::MutexGuard<'_, ()>;
+
     const MAX_PRUNE_SLOTS_PER_HOUSEKEEPING: u64 = 10_000;
 
     fn housekeeping(&self) -> Result<bool, DomainError> {

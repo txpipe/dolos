@@ -87,6 +87,7 @@ pub async fn setup_domain(config: &RootConfig) -> miette::Result<DomainAdapter> 
         indexes: stores.indexes,
         mempool,
         tip_broadcast,
+        submit_lock: Arc::new(tokio::sync::Mutex::new(())),
     };
 
     // this will make sure the domain is correctly initialized and in a valid state.
