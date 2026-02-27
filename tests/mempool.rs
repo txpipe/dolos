@@ -535,80 +535,28 @@ mod redis_tests {
         RedisMempool::open(&config).ok()
     }
 
-    #[tokio::test]
-    async fn redis_finalize_after_threshold() {
-        if let Some(store) = redis_store() {
-            assert_finalize_after_threshold(&store).await;
-        }
+    macro_rules! redis_test {
+        ($name:ident, $assertion:ident) => {
+            #[tokio::test]
+            async fn $name() {
+                let Some(store) = redis_store() else {
+                    eprintln!("REDIS_URL not set, skipping {}", stringify!($name));
+                    return;
+                };
+                $assertion(&store).await;
+            }
+        };
     }
 
-    #[tokio::test]
-    async fn redis_drop_after_threshold() {
-        if let Some(store) = redis_store() {
-            assert_drop_after_threshold(&store).await;
-        }
-    }
-
-    #[tokio::test]
-    async fn redis_confirm_resets_non_confirmations() {
-        if let Some(store) = redis_store() {
-            assert_confirm_resets_non_confirmations(&store).await;
-        }
-    }
-
-    #[tokio::test]
-    async fn redis_rollback_to_pending() {
-        if let Some(store) = redis_store() {
-            assert_rollback_to_pending(&store).await;
-        }
-    }
-
-    #[tokio::test]
-    async fn redis_re_confirm_after_rollback() {
-        if let Some(store) = redis_store() {
-            assert_re_confirm_after_rollback(&store).await;
-        }
-    }
-
-    #[tokio::test]
-    async fn redis_not_finalized_before_threshold() {
-        if let Some(store) = redis_store() {
-            assert_not_finalized_before_threshold(&store).await;
-        }
-    }
-
-    #[tokio::test]
-    async fn redis_not_dropped_before_threshold() {
-        if let Some(store) = redis_store() {
-            assert_not_dropped_before_threshold(&store).await;
-        }
-    }
-
-    #[tokio::test]
-    async fn redis_mixed_confirm() {
-        if let Some(store) = redis_store() {
-            assert_mixed_confirm(&store).await;
-        }
-    }
-
-    #[tokio::test]
-    async fn redis_confirmed_tx_finalizes_across_blocks() {
-        if let Some(store) = redis_store() {
-            assert_confirmed_tx_finalizes_across_blocks(&store).await;
-        }
-    }
-
-    #[tokio::test]
-    async fn redis_propagated_tx_confirms_and_finalizes() {
-        if let Some(store) = redis_store() {
-            assert_propagated_tx_confirms_and_finalizes(&store).await;
-        }
-    }
-
-    #[tokio::test]
-    async fn redis_propagated_tx_drops_when_unseen() {
-        if let Some(store) = redis_store() {
-            assert_propagated_tx_drops_when_unseen(&store).await;
-        }
-    }
+    redis_test!(redis_finalize_after_threshold, assert_finalize_after_threshold);
+    redis_test!(redis_drop_after_threshold, assert_drop_after_threshold);
+    redis_test!(redis_confirm_resets_non_confirmations, assert_confirm_resets_non_confirmations);
+    redis_test!(redis_rollback_to_pending, assert_rollback_to_pending);
+    redis_test!(redis_re_confirm_after_rollback, assert_re_confirm_after_rollback);
+    redis_test!(redis_not_finalized_before_threshold, assert_not_finalized_before_threshold);
+    redis_test!(redis_not_dropped_before_threshold, assert_not_dropped_before_threshold);
+    redis_test!(redis_mixed_confirm, assert_mixed_confirm);
+    redis_test!(redis_confirmed_tx_finalizes_across_blocks, assert_confirmed_tx_finalizes_across_blocks);
+    redis_test!(redis_propagated_tx_confirms_and_finalizes, assert_propagated_tx_confirms_and_finalizes);
+    redis_test!(redis_propagated_tx_drops_when_unseen, assert_propagated_tx_drops_when_unseen);
 }

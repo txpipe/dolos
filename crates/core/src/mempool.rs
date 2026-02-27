@@ -296,7 +296,10 @@ where
 {
     let mut refs = HashSet::new();
 
-    for mtx in mempool.peek_pending(usize::MAX).await {
+    let mut all_txs = mempool.peek_pending(usize::MAX).await;
+    all_txs.extend(mempool.peek_inflight(usize::MAX).await);
+
+    for mtx in all_txs {
         let era_cbor = &mtx.payload;
         let Some(tx) = MultiEraTx::try_from(era_cbor).ok() else {
             continue;
@@ -319,7 +322,10 @@ where
 async fn exclude_inflight_stxis<D: Domain>(refs: &mut HashSet<TxoRef>, mempool: &D::Mempool) {
     debug!("excluding inflight stxis");
 
-    for mtx in mempool.peek_pending(usize::MAX).await {
+    let mut all_txs = mempool.peek_pending(usize::MAX).await;
+    all_txs.extend(mempool.peek_inflight(usize::MAX).await);
+
+    for mtx in all_txs {
         let era_cbor = &mtx.payload;
         let Some(tx) = MultiEraTx::try_from(era_cbor).ok() else {
             warn!("invalid inflight tx");
@@ -340,7 +346,10 @@ async fn exclude_inflight_stxis<D: Domain>(refs: &mut HashSet<TxoRef>, mempool: 
 async fn select_mempool_utxos<D: Domain>(refs: &mut HashSet<TxoRef>, mempool: &D::Mempool) -> UtxoMap {
     let mut map = HashMap::new();
 
-    for mtx in mempool.peek_pending(usize::MAX).await {
+    let mut all_txs = mempool.peek_pending(usize::MAX).await;
+    all_txs.extend(mempool.peek_inflight(usize::MAX).await);
+
+    for mtx in all_txs {
         let era_cbor = &mtx.payload;
         let Some(tx) = MultiEraTx::try_from(era_cbor).ok() else {
             continue;
