@@ -296,6 +296,10 @@ pub mod proposals {
                 "158ef6b249b7c3ec219c62d11f0b8e766a356472d023bd7b1e736efed977f3c6#0" => {
                     Ratified(251)
                 }
+                // Parameter Change superseded at epoch 252
+                "17e78f5e08ba112509729d81f28005caa161878238df3cfc4af983abdc96f9f3#0" => {
+                    Canceled(252)
+                }
                 _ => match protocol {
                     0..=8 => RatifiedCurrentEpoch,
                     _ => Unknown,
@@ -617,6 +621,15 @@ pub mod proposals {
                 // New Constitution
                 "91a79f5c934b7c91e3027736d565080c2b6611fb8484b1156fdf16121fcfb410#0" => {
                     Ratified(608)
+                }
+
+                // Parameter Change (enacted epoch 614)
+                "c21b00f90f18fce4003edf42b0b0d455126e01c946e80cc5341a9f9750caf795#0" => {
+                    Ratified(613)
+                }
+                // Parameter Change superseded at epoch 614
+                "dfdac5921ab657241fce58583d61bef59a369e01d2ba78191d6df6632a07fdfd#0" => {
+                    Canceled(614)
                 }
 
                 _ => match protocol {
