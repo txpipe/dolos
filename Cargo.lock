@@ -510,9 +510,9 @@ dependencies = [
 
 [[package]]
 name = "blockfrost-openapi"
-version = "0.1.83"
+version = "0.1.85"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62cc79368dcc9d7119091630b6a7b2b2801591836678261b4a79b7a62b559778"
+checksum = "2df52ea7e461021beebe0289c8982bca064c25183945c398341f330334025943"
 dependencies = [
  "reqwest",
  "serde",
