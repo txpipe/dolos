@@ -6,24 +6,27 @@ use axum::{
     Json,
 };
 use blockfrost_openapi::models::{
+    address_content::AddressContent,
     address_transactions_content_inner::AddressTransactionsContentInner,
     address_utxo_content_inner::AddressUtxoContentInner,
+    tx_content_output_amount_inner::TxContentOutputAmountInner,
 };
 use futures_util::{Stream, StreamExt};
 use itertools::Either;
 use pallas::ledger::{
-    addresses::Address,
-    traverse::{MultiEraBlock, MultiEraTx},
+    addresses::{Address, ShelleyPaymentPart, StakePayload},
+    traverse::{MultiEraBlock, MultiEraOutput, MultiEraTx},
 };
 
 use dolos_cardano::{
     indexes::{AsyncCardanoQueryExt, CardanoIndexExt, SlotOrder},
-    ChainSummary,
+    pallas_extras, ChainSummary,
 };
-use dolos_core::{BlockBody, BlockSlot, Domain, EraCbor, TxoRef};
+use dolos_core::{BlockBody, BlockSlot, Domain, EraCbor, StateStore as _, TxoRef};
 
 use crate::{
     error::Error,
+    mapping::{aggregate_assets, AddressKind, AddressModelBuilder, IntoModel},
     pagination::{Order, Pagination, PaginationParameters},
     Facade,
 };
@@ -46,8 +49,18 @@ type BlockStream = std::pin::Pin<
 >;
 
 enum ParsedAddress {
-    Payment(Vec<u8>),
-    Full(Vec<u8>),
+    Payment {
+        key: Vec<u8>,
+        script: bool,
+    },
+    Shelley {
+        key: Vec<u8>,
+        stake_address: Option<String>,
+        script: bool,
+    },
+    Byron {
+        key: Vec<u8>,
+    },
 }
 
 /// Parse an address string into bytes for querying.
@@ -58,20 +71,50 @@ enum ParsedAddress {
 fn parse_address(address: &str) -> Result<ParsedAddress, Error> {
     // Payment credentials
     if address.starts_with("addr_vkh") || address.starts_with("script") {
-        let (_, addr) = bech32::decode(address).map_err(|_| Error::InvalidAddress)?;
-        return Ok(ParsedAddress::Payment(addr));
+        let (hrp, addr) = bech32::decode(address).map_err(|_| Error::InvalidAddress)?;
+        return Ok(ParsedAddress::Payment {
+            key: addr,
+            script: hrp.as_str() == "script",
+        });
     }
 
     // Try Shelley/stake bech32
     if let Ok(addr) = pallas::ledger::addresses::Address::from_bech32(address) {
-        return Ok(ParsedAddress::Full(addr.to_vec()));
+        let key = addr.to_vec();
+
+        return match addr {
+            Address::Shelley(shelley) => {
+                let stake_address = pallas_extras::shelley_address_to_stake_address(&shelley)
+                    .map(|x| {
+                        x.to_bech32()
+                            .map_err(|_| Error::Code(StatusCode::INTERNAL_SERVER_ERROR))
+                    })
+                    .transpose()?;
+
+                Ok(ParsedAddress::Shelley {
+                    key,
+                    stake_address,
+                    script: matches!(shelley.payment(), ShelleyPaymentPart::Script(_)),
+                })
+            }
+            Address::Stake(stake) => Ok(ParsedAddress::Shelley {
+                key,
+                stake_address: Some(
+                    stake
+                        .to_bech32()
+                        .map_err(|_| Error::Code(StatusCode::INTERNAL_SERVER_ERROR))?,
+                ),
+                script: matches!(stake.payload(), StakePayload::Script(_)),
+            }),
+            Address::Byron(_) => Ok(ParsedAddress::Byron { key }),
+        };
     }
 
     // Try Byron base58
     if let Ok(decoded) = base58::FromBase58::from_base58(address) {
         if let Ok(addr) = pallas::ledger::addresses::Address::from_bytes(&decoded) {
             if matches!(addr, Address::Byron(_)) {
-                return Ok(ParsedAddress::Full(addr.to_vec()));
+                return Ok(ParsedAddress::Byron { key: addr.to_vec() });
             }
         }
     }
@@ -83,15 +126,23 @@ fn refs_for_address<D: Domain>(
     domain: &Facade<D>,
     address: &str,
 ) -> Result<HashSet<TxoRef>, Error> {
-    match parse_address(address)? {
-        ParsedAddress::Payment(addr) => {
-            Ok(domain.indexes().utxos_by_payment(&addr).map_err(|err| {
+    let parsed = parse_address(address)?;
+    refs_for_parsed_address(domain, &parsed)
+}
+
+fn refs_for_parsed_address<D: Domain>(
+    domain: &Facade<D>,
+    parsed: &ParsedAddress,
+) -> Result<HashSet<TxoRef>, Error> {
+    match parsed {
+        ParsedAddress::Payment { key, .. } => {
+            Ok(domain.indexes().utxos_by_payment(key).map_err(|err| {
                 tracing::error!(?err);
                 StatusCode::INTERNAL_SERVER_ERROR
             })?)
         }
-        ParsedAddress::Full(addr) => {
-            Ok(domain.indexes().utxos_by_address(&addr).map_err(|err| {
+        ParsedAddress::Shelley { key, .. } | ParsedAddress::Byron { key } => {
+            Ok(domain.indexes().utxos_by_address(key).map_err(|err| {
                 tracing::error!(?err);
                 StatusCode::INTERNAL_SERVER_ERROR
             })?)
@@ -110,23 +161,91 @@ where
     D: Domain + Clone + Send + Sync + 'static,
 {
     match parse_address(address)? {
-        ParsedAddress::Payment(addr) => Ok((
+        ParsedAddress::Payment { key, .. } => Ok((
             Box::pin(
                 domain
                     .query()
-                    .blocks_by_payment_stream(&addr, start_slot, end_slot, order),
+                    .blocks_by_payment_stream(&key, start_slot, end_slot, order),
             ),
-            Either::Left(addr),
+            Either::Left(key),
         )),
-        ParsedAddress::Full(addr) => Ok((
+        ParsedAddress::Shelley { key, .. } | ParsedAddress::Byron { key } => Ok((
             Box::pin(
                 domain
                     .query()
-                    .blocks_by_address_stream(&addr, start_slot, end_slot, order),
+                    .blocks_by_address_stream(&key, start_slot, end_slot, order),
             ),
-            Either::Right(addr),
+            Either::Right(key),
         )),
     }
+}
+
+impl ParsedAddress {
+    fn into_model_kind(self) -> AddressKind {
+        match self {
+            ParsedAddress::Payment { script, .. } => AddressKind::Payment { script },
+            ParsedAddress::Shelley {
+                stake_address,
+                script,
+                ..
+            } => AddressKind::Shelley {
+                stake_address,
+                script,
+            },
+            ParsedAddress::Byron { .. } => AddressKind::Byron,
+        }
+    }
+}
+
+fn amount_for_refs<D: Domain>(
+    domain: &Facade<D>,
+    refs: HashSet<TxoRef>,
+) -> Result<Vec<TxContentOutputAmountInner>, Error> {
+    let utxos = domain
+        .state()
+        .get_utxos(refs.into_iter().collect())
+        .map_err(|err| {
+            tracing::error!(?err);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    let outputs: Vec<MultiEraOutput<'_>> = utxos
+        .values()
+        .map(|x| MultiEraOutput::try_from(x.as_ref()))
+        .collect::<Result<_, _>>()
+        .map_err(|err| {
+            tracing::error!(?err);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    Ok(aggregate_assets(outputs.iter()))
+}
+
+pub async fn by_address<D>(
+    Path(address): Path<String>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<AddressContent>, Error>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    let parsed = parse_address(&address)?;
+    let refs = refs_for_parsed_address(&domain, &parsed)?;
+
+    if refs.is_empty() && !is_address_in_chain(&domain, &address).await? {
+        return Err(StatusCode::NOT_FOUND.into());
+    }
+
+    let amount = amount_for_refs(&domain, refs)?;
+
+    let model = AddressModelBuilder {
+        address,
+        amount,
+        kind: parsed.into_model_kind(),
+    }
+    .into_model()
+    .map_err(Error::Code)?;
+
+    Ok(Json(model))
 }
 
 async fn is_address_in_chain<D>(domain: &Facade<D>, address: &str) -> Result<bool, Error>
@@ -464,6 +583,7 @@ mod tests {
     use super::*;
     use crate::test_support::{TestApp, TestFault};
     use blockfrost_openapi::models::{
+        address_content::{AddressContent, Type as AddressType},
         address_transactions_content_inner::AddressTransactionsContentInner,
         address_utxo_content_inner::AddressUtxoContentInner,
     };
@@ -484,6 +604,89 @@ mod tests {
             "unexpected status {status} with body: {}",
             String::from_utf8_lossy(&bytes)
         );
+    }
+
+    #[tokio::test]
+    async fn addresses_by_address_happy_path() {
+        let app = TestApp::new();
+        let address = app.vectors().address.as_str();
+        let path = format!("/addresses/{address}");
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let item: AddressContent =
+            serde_json::from_slice(&bytes).expect("failed to parse address content");
+
+        assert_eq!(item.address, address);
+        assert_eq!(item.r#type, AddressType::Shelley);
+        assert!(item.stake_address.is_some());
+        assert!(!item.amount.is_empty());
+    }
+
+    #[tokio::test]
+    async fn addresses_by_address_payment_credential_happy_path() {
+        let app = TestApp::new();
+        let address = Address::from_bech32(app.vectors().address.as_str())
+            .expect("invalid synthetic test address");
+
+        let Address::Shelley(shelley) = address else {
+            panic!("expected shelley test address")
+        };
+
+        let payment = shelley.payment().to_vec();
+
+        let payment_cred = bech32::encode::<bech32::Bech32>(
+            bech32::Hrp::parse("addr_vkh").expect("invalid hrp"),
+            &payment,
+        )
+        .expect("failed to encode payment credential");
+
+        let path = format!("/addresses/{payment_cred}");
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let item: AddressContent =
+            serde_json::from_slice(&bytes).expect("failed to parse address content");
+
+        assert_eq!(item.address, payment_cred);
+        assert_eq!(item.r#type, AddressType::Shelley);
+        assert_eq!(item.stake_address, None);
+        assert!(!item.script);
+        assert!(!item.amount.is_empty());
+    }
+
+    #[tokio::test]
+    async fn addresses_by_address_bad_request() {
+        let app = TestApp::new();
+        let path = format!("/addresses/{}", invalid_address());
+        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn addresses_by_address_not_found() {
+        let app = TestApp::new();
+        let path = format!("/addresses/{}", missing_address());
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+    }
+
+    #[tokio::test]
+    async fn addresses_by_address_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let address = app.vectors().address.as_str();
+        let path = format!("/addresses/{address}");
+        assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 
     #[tokio::test]
@@ -728,21 +931,27 @@ mod tests {
     fn test_parse_address_payment() {
         let addr = "addr_vkh1h7wl3l3w6heru0us8mdc3v3jlahq79w49cpypsuvgjhdwp5apep";
         let parsed = parse_address(addr);
-        assert!(matches!(parsed, Ok(ParsedAddress::Payment(_))));
+        assert!(matches!(
+            parsed,
+            Ok(ParsedAddress::Payment {
+                key: _,
+                script: false
+            })
+        ));
     }
 
     #[test]
     fn test_parse_address_shelley() {
         let addr = "addr1q9dhugez3ka82k2kgh7r2lg0j7aztr8uell46kydfwu3vk6n8w2cdu8mn2ha278q6q25a9rc6gmpfeekavuargcd32vsvxhl7e";
         let parsed = parse_address(addr);
-        assert!(matches!(parsed, Ok(ParsedAddress::Full(_))));
+        assert!(matches!(parsed, Ok(ParsedAddress::Shelley { .. })));
     }
 
     #[test]
     fn test_parse_address_byron() {
         let addr = "37btjrVyb4KDXBNC4haBVPCrro8AQPHwvCMp3RFhhSVWwfFmZ6wwzSK6JK1hY6wHNmtrpTf1kdbva8TCneM2YsiXT7mrzT21EacHnPpz5YyUdj64na";
         let parsed = parse_address(addr);
-        assert!(matches!(parsed, Ok(ParsedAddress::Full(_))));
+        assert!(matches!(parsed, Ok(ParsedAddress::Byron { .. })));
     }
 
     #[test]

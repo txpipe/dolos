@@ -328,6 +328,10 @@ where
             get(routes::accounts::by_stake_rewards::<D>),
         )
         .route(
+            "/addresses/{address}",
+            get(routes::addresses::by_address::<D>),
+        )
+        .route(
             "/addresses/{address}/utxos",
             get(routes::addresses::utxos::<D>),
         )
