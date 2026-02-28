@@ -3,7 +3,7 @@ use axum::{
     extract::State,
     http::{header, HeaderMap, StatusCode},
 };
-use dolos_core::{ChainError, Domain, DomainError, MempoolError, SubmitExt};
+use dolos_core::{ChainError, Domain, DomainError, MempoolError};
 
 use crate::Facade;
 
@@ -19,7 +19,7 @@ fn is_valid_cbor_content_type(headers: &HeaderMap) -> bool {
     content_type == "application/cbor"
 }
 
-pub async fn route<D: Domain + SubmitExt>(
+pub async fn route<D: Domain>(
     State(domain): State<Facade<D>>,
     headers: HeaderMap,
     cbor: Bytes,
@@ -28,8 +28,7 @@ pub async fn route<D: Domain + SubmitExt>(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    let chain = domain.read_chain();
-    let result = domain.inner.receive_tx("minibf", &chain, &cbor);
+    let result = dolos_core::submit::receive_tx(&domain.inner, "minibf", &cbor).await;
 
     let hash = result.map_err(|e| match e {
         DomainError::ChainError(x) => match x {
@@ -70,7 +69,7 @@ mod tests {
 
     #[tokio::test]
     async fn tx_submit_happy_path() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let (status, body) = app
             .post_bytes(
                 "/tx/submit",
@@ -86,7 +85,7 @@ mod tests {
 
     #[tokio::test]
     async fn tx_submit_bad_request_content_type() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         assert_status(
             &app,
             "application/json",
@@ -98,7 +97,7 @@ mod tests {
 
     #[tokio::test]
     async fn tx_submit_bad_request_invalid_cbor() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         assert_status(
             &app,
             "application/cbor",
@@ -111,7 +110,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn tx_submit_not_found() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         assert_status(
             &app,
             "application/cbor",
@@ -123,7 +122,7 @@ mod tests {
 
     #[tokio::test]
     async fn tx_submit_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
+        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError)).await;
         assert_status(
             &app,
             "application/cbor",

@@ -39,6 +39,7 @@ pub struct DomainAdapter {
     pub indexes: IndexStoreBackend,
     pub mempool: MempoolBackend,
     pub tip_broadcast: tokio::sync::broadcast::Sender<TipEvent>,
+    pub submit_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl DomainAdapter {
@@ -164,6 +165,10 @@ impl Domain for DomainAdapter {
         if self.tip_broadcast.receiver_count() > 0 {
             self.tip_broadcast.send(tip).unwrap();
         }
+    }
+
+    async fn acquire_submit_lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.submit_lock.lock().await
     }
 }
 

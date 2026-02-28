@@ -82,7 +82,7 @@ mod tests {
 
     #[tokio::test]
     async fn genesis_happy_path() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let (status, bytes) = app.get_bytes("/genesis").await;
 
         assert_eq!(
@@ -97,7 +97,7 @@ mod tests {
 
     #[tokio::test]
     async fn genesis_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::GenesisError));
+        let app = TestApp::new_with_fault(Some(TestFault::GenesisError)).await;
         assert_status(&app, "/genesis", StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 }

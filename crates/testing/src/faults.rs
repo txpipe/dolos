@@ -27,6 +27,7 @@ pub struct FaultyToyDomain {
     archive: FaultyArchiveStore,
     indexes: FaultyIndexStore,
     wal: FaultyWalStore,
+    submit_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl FaultyToyDomain {
@@ -50,6 +51,7 @@ impl FaultyToyDomain {
             archive,
             indexes,
             wal,
+            submit_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 }
@@ -507,5 +509,9 @@ impl Domain for FaultyToyDomain {
 
     fn notify_tip(&self, tip: TipEvent) {
         self.inner.notify_tip(tip)
+    }
+
+    async fn acquire_submit_lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.submit_lock.lock().await
     }
 }

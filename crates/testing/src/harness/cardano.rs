@@ -49,39 +49,39 @@ impl futures_core::Stream for MempoolStream {
 impl MempoolStore for Mempool {
     type Stream = MempoolStream;
 
-    fn receive(&self, _tx: MempoolTx) -> Result<(), MempoolError> {
+    async fn receive(&self, _tx: MempoolTx) -> Result<(), MempoolError> {
         Ok(())
     }
 
-    fn has_pending(&self) -> bool {
+    async fn has_pending(&self) -> bool {
         false
     }
 
-    fn peek_pending(&self, _limit: usize) -> Vec<MempoolTx> {
+    async fn peek_pending(&self, _limit: usize) -> Vec<MempoolTx> {
         vec![]
     }
 
-    fn mark_inflight(&self, _hashes: &[TxHash]) -> Result<(), MempoolError> {
+    async fn mark_inflight(&self, _hashes: &[TxHash]) -> Result<(), MempoolError> {
         Ok(())
     }
 
-    fn mark_acknowledged(&self, _hashes: &[TxHash]) -> Result<(), MempoolError> {
+    async fn mark_acknowledged(&self, _hashes: &[TxHash]) -> Result<(), MempoolError> {
         Ok(())
     }
 
-    fn find_inflight(&self, _tx_hash: &TxHash) -> Option<MempoolTx> {
+    async fn find_inflight(&self, _tx_hash: &TxHash) -> Option<MempoolTx> {
         None
     }
 
-    fn peek_inflight(&self, _limit: usize) -> Vec<MempoolTx> {
+    async fn peek_inflight(&self, _limit: usize) -> Vec<MempoolTx> {
         vec![]
     }
 
-    fn confirm(&self, _point: &ChainPoint, _seen_txs: &[TxHash], _unseen_txs: &[TxHash], _finalize_threshold: u32, _drop_threshold: u32) -> Result<(), MempoolError> {
+    async fn confirm(&self, _point: &ChainPoint, _seen_txs: &[TxHash], _unseen_txs: &[TxHash], _finalize_threshold: u32, _drop_threshold: u32) -> Result<(), MempoolError> {
         Ok(())
     }
 
-    fn check_status(&self, _tx_hash: &TxHash) -> TxStatus {
+    async fn check_status(&self, _tx_hash: &TxHash) -> TxStatus {
         TxStatus {
             stage: MempoolTxStage::Unknown,
             confirmations: 0,
@@ -90,7 +90,7 @@ impl MempoolStore for Mempool {
         }
     }
 
-    fn dump_finalized(&self, _cursor: u64, _limit: usize) -> dolos_core::MempoolPage {
+    async fn dump_finalized(&self, _cursor: u64, _limit: usize) -> dolos_core::MempoolPage {
         dolos_core::MempoolPage { items: vec![], next_cursor: None }
     }
 
@@ -125,6 +125,7 @@ pub struct HarnessDomain {
     mempool: Mempool,
     storage_config: StorageConfig,
     genesis: Arc<Genesis>,
+    submit_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Domain for HarnessDomain {
@@ -182,6 +183,10 @@ impl Domain for HarnessDomain {
     fn notify_tip(&self, _tip: TipEvent) {
         // no-op: we don't need tip notifications in the harness
     }
+
+    async fn acquire_submit_lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.submit_lock.lock().await
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -194,7 +199,7 @@ pub struct LedgerHarness {
 }
 
 impl LedgerHarness {
-    pub fn new(config: Config) -> Result<Self, Box<dyn std::error::Error>> {
+    pub async fn new(config: Config) -> Result<Self, Box<dyn std::error::Error>> {
         // 1. Open fjall StateStore from provided dir with custom config
         let state = dolos_fjall::StateStore::open(&config.state_dir, &config.fjall_config)?;
 
@@ -212,10 +217,11 @@ impl LedgerHarness {
             mempool: Mempool {},
             storage_config: StorageConfig::default(),
             genesis,
+            submit_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
 
         // 5. Bootstrap (integrity check + drain pending work)
-        domain.bootstrap()?;
+        domain.bootstrap().await?;
 
         Ok(Self {
             domain,

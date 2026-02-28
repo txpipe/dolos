@@ -485,7 +485,7 @@ mod tests {
 
     #[tokio::test]
     async fn blocks_latest_happy_path() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let (status, bytes) = app.get_bytes("/blocks/latest").await;
 
         assert_eq!(
@@ -500,13 +500,13 @@ mod tests {
 
     #[tokio::test]
     async fn blocks_latest_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
+        let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError)).await;
         assert_status(&app, "/blocks/latest", StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 
     #[tokio::test]
     async fn blocks_by_hash_or_number_happy_path() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let block_hash = app.vectors().block_hash.as_str();
         let path = format!("/blocks/{block_hash}");
         let (status, bytes) = app.get_bytes(&path).await;
@@ -523,28 +523,28 @@ mod tests {
 
     #[tokio::test]
     async fn blocks_by_hash_or_number_bad_request() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let path = format!("/blocks/{}", invalid_block());
         assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
     }
 
     #[tokio::test]
     async fn blocks_by_hash_or_number_not_found() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let path = format!("/blocks/{}", missing_block());
         assert_status(&app, &path, StatusCode::NOT_FOUND).await;
     }
 
     #[tokio::test]
     async fn blocks_by_hash_or_number_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
+        let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError)).await;
         let path = "/blocks/1".to_string();
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 
     #[tokio::test]
     async fn blocks_by_hash_or_number_txs_order_asc() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let block = app.vectors().blocks.first().expect("missing block vectors");
         let path = format!("/blocks/{}/txs?order=asc", block.block_hash);
         let (status, bytes) = app.get_bytes(&path).await;
@@ -557,7 +557,7 @@ mod tests {
 
     #[tokio::test]
     async fn blocks_by_hash_or_number_txs_order_desc() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let block = app.vectors().blocks.first().expect("missing block vectors");
         let path = format!("/blocks/{}/txs?order=desc", block.block_hash);
         let (status, bytes) = app.get_bytes(&path).await;
@@ -572,7 +572,7 @@ mod tests {
 
     #[tokio::test]
     async fn blocks_latest_txs_order_asc() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let block = app.vectors().blocks.last().expect("missing block vectors");
         let (status, bytes) = app.get_bytes("/blocks/latest/txs?order=asc").await;
         assert_eq!(status, StatusCode::OK);
@@ -584,7 +584,7 @@ mod tests {
 
     #[tokio::test]
     async fn blocks_latest_txs_order_desc() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let block = app.vectors().blocks.last().expect("missing block vectors");
         let (status, bytes) = app.get_bytes("/blocks/latest/txs?order=desc").await;
         assert_eq!(status, StatusCode::OK);

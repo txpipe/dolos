@@ -10,9 +10,9 @@ use pallas::ledger::{
 };
 use tracing::info;
 
-pub fn validate_tx<D: Domain>(
+pub async fn validate_tx<D: Domain>(
     cbor: &[u8],
-    utxos: &MempoolAwareUtxoStore<D>,
+    utxos: &MempoolAwareUtxoStore<'_, D>,
     tip: Option<ChainPoint>,
     genesis: &Genesis,
 ) -> Result<MempoolTx, ChainError> {
@@ -42,7 +42,7 @@ pub fn validate_tx<D: Domain>(
 
     let input_refs = tx.requires().iter().map(From::from).collect();
 
-    let utxos_matches = utxos.get_utxos(input_refs)?;
+    let utxos_matches = utxos.get_utxos(input_refs).await?;
 
     let mut pallas_utxos = pallas::ledger::validate::utils::UTxOs::new();
 
@@ -71,7 +71,7 @@ pub fn validate_tx<D: Domain>(
         &mut pallas::ledger::validate::utils::CertState::default(),
     )?;
 
-    let report = evaluate_tx::<D>(cbor, utxos)?;
+    let report = evaluate_tx::<D>(cbor, utxos).await?;
 
     for eval in report.iter() {
         if !eval.success {
@@ -94,9 +94,9 @@ pub fn validate_tx<D: Domain>(
     Ok(tx)
 }
 
-pub fn evaluate_tx<D: Domain>(
+pub async fn evaluate_tx<D: Domain>(
     cbor: &[u8],
-    utxos: &MempoolAwareUtxoStore<D>,
+    utxos: &MempoolAwareUtxoStore<'_, D>,
 ) -> Result<pallas::ledger::validate::phase2::EvalReport, ChainError> {
     let tx = MultiEraTx::decode(cbor)?;
 
@@ -116,8 +116,9 @@ pub fn evaluate_tx<D: Domain>(
 
     let input_refs = tx.requires().iter().map(From::from).collect();
 
-    let utxos: pallas::ledger::validate::utils::UtxoMap = utxos
-        .get_utxos(input_refs)?
+    let utxo_matches = utxos.get_utxos(input_refs).await?;
+
+    let utxos: pallas::ledger::validate::utils::UtxoMap = utxo_matches
         .into_iter()
         .map(|(TxoRef(a, b), eracbor)| {
             let era = eracbor.era().try_into().expect("era out of range");

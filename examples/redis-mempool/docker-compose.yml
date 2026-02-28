@@ -1,0 +1,71 @@
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: redis-mempool-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - dolos-redis-net
+
+  dolos1:
+    build:
+      context: ../..
+      dockerfile: examples/redis-mempool/Dockerfile
+    container_name: redis-mempool-dolos1
+    working_dir: /opt/dolos
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./data1:/opt/dolos/data
+      - ./dolos1.toml:/opt/dolos/dolos.toml:ro
+      - ./byron.json:/etc/genesis/byron.json:ro
+      - ./shelley.json:/etc/genesis/shelley.json:ro
+      - ./alonzo.json:/etc/genesis/alonzo.json:ro
+      - ./conway.json:/etc/genesis/conway.json:ro
+    ports:
+      - "50051:50051"
+    command: ["daemon"]
+    environment:
+      - RUST_LOG=info,dolos_redis=debug
+    networks:
+      - dolos-redis-net
+
+  dolos2:
+    build:
+      context: ../..
+      dockerfile: examples/redis-mempool/Dockerfile
+    container_name: redis-mempool-dolos2
+    working_dir: /opt/dolos
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./data2:/opt/dolos/data
+      - ./dolos2.toml:/opt/dolos/dolos.toml:ro
+      - ./byron.json:/etc/genesis/byron.json:ro
+      - ./shelley.json:/etc/genesis/shelley.json:ro
+      - ./alonzo.json:/etc/genesis/alonzo.json:ro
+      - ./conway.json:/etc/genesis/conway.json:ro
+    ports:
+      - "50052:50052"
+    command: ["daemon"]
+    environment:
+      - RUST_LOG=info,dolos_redis=debug
+    networks:
+      - dolos-redis-net
+
+volumes:
+  redis-data:
+
+networks:
+  dolos-redis-net:
+    driver: bridge

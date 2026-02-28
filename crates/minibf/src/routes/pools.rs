@@ -380,7 +380,7 @@ mod tests {
 
     #[tokio::test]
     async fn pools_extended_happy_path() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let (status, bytes) = app.get_bytes("/pools/extended?page=999999").await;
 
         assert_eq!(
@@ -397,7 +397,7 @@ mod tests {
     async fn pools_extended_paginated() {
         let mut cfg = SyntheticBlockConfig::default();
         cfg.slot = 500_000;
-        let app = TestApp::new_with_cfg(cfg);
+        let app = TestApp::new_with_cfg(cfg).await;
         let (status_1, bytes_1) = app.get_bytes("/pools/extended?page=1&count=1").await;
         let (status_2, bytes_2) = app.get_bytes("/pools/extended?page=2&count=1").await;
 
@@ -414,20 +414,20 @@ mod tests {
     }
     #[tokio::test]
     async fn pools_extended_bad_request() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let path = "/pools/extended?count=invalid";
         assert_status(&app, path, StatusCode::BAD_REQUEST).await;
     }
 
     #[tokio::test]
     async fn pools_extended_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
+        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError)).await;
         assert_status(&app, "/pools/extended", StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 
     #[tokio::test]
     async fn pools_delegators_happy_path() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let pool_id = app.vectors().pool_id.as_str();
         let path = format!("/pools/{pool_id}/delegators?page=999999");
         let (status, bytes) = app.get_bytes(&path).await;
@@ -444,7 +444,7 @@ mod tests {
 
     #[tokio::test]
     async fn pools_delegators_paginated() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let pool_id = app.vectors().pool_id.as_str();
         let path_page_1 = format!("/pools/{pool_id}/delegators?page=1&count=1");
         let path_page_2 = format!("/pools/{pool_id}/delegators?page=2&count=1");
@@ -465,21 +465,21 @@ mod tests {
     }
     #[tokio::test]
     async fn pools_delegators_bad_request() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let path = format!("/pools/{}/delegators", invalid_pool_id());
         assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
     }
 
     #[tokio::test]
     async fn pools_delegators_not_found() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let path = format!("/pools/{}/delegators", missing_pool_id());
         assert_status(&app, &path, StatusCode::NOT_FOUND).await;
     }
 
     #[tokio::test]
     async fn pools_delegators_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
+        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError)).await;
         let pool_id = app.vectors().pool_id.as_str();
         let path = format!("/pools/{pool_id}/delegators");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;

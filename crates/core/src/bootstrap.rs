@@ -7,7 +7,8 @@
 use tracing::{error, info, warn};
 
 use crate::{
-    sync::drain_pending_work, ArchiveStore, ChainPoint, Domain, DomainError, StateStore, WalStore,
+    sync::{collect_pending_work, execute_work_unit},
+    ArchiveStore, ChainPoint, Domain, DomainError, StateStore, WalStore,
 };
 
 /// Extension trait for domain bootstrapping operations.
@@ -26,7 +27,7 @@ pub trait BootstrapExt: Domain {
     /// Performs integrity checks and drains any pending initialization work.
     /// Uses the full sync lifecycle (WAL + tip notifications) since after
     /// bootstrap the node is considered "live".
-    fn bootstrap(&self) -> Result<(), DomainError>;
+    async fn bootstrap(&self) -> Result<(), DomainError>;
 }
 
 impl<D: Domain> BootstrapExt for D {
@@ -37,7 +38,7 @@ impl<D: Domain> BootstrapExt for D {
         Ok(())
     }
 
-    fn bootstrap(&self) -> Result<(), DomainError> {
+    async fn bootstrap(&self) -> Result<(), DomainError> {
         self.check_integrity()?;
 
         // TODO: we should probably catch up stores here
@@ -45,8 +46,14 @@ impl<D: Domain> BootstrapExt for D {
 
         // Drain any work that might have been defined by the initialization
         // using the sync lifecycle (full WAL + tip notifications)
-        let mut chain = self.write_chain();
-        drain_pending_work(&mut *chain, self)?;
+        let pending_work = {
+            let mut chain = self.write_chain();
+            collect_pending_work::<D>(&mut *chain, self)
+        };
+
+        for mut work in pending_work {
+            execute_work_unit(self, &mut work).await?;
+        }
 
         Ok(())
     }

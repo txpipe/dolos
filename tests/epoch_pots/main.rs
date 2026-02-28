@@ -439,17 +439,19 @@ fn run_epoch_pots_test(
         if keep_dir { " (KEEP)" } else { "" }
     );
 
-    let harness = LedgerHarness::new(Config {
-        state_dir: work_state_dir,
-        immutable_dir: upstream_dir.join("immutable"),
-        genesis,
-        chain: CardanoConfig {
-            stop_epoch: Some(stop_epoch),
-            ..Default::default()
-        },
-        fjall_config: fast_fjall_config(),
-    })
-    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let harness = tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(LedgerHarness::new(Config {
+            state_dir: work_state_dir,
+            immutable_dir: upstream_dir.join("immutable"),
+            genesis,
+            chain: CardanoConfig {
+                stop_epoch: Some(stop_epoch),
+                ..Default::default()
+            },
+            fjall_config: fast_fjall_config(),
+        }))
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let dumps_dir = tmp_path.join("dumps");
     std::fs::create_dir_all(&dumps_dir)?;

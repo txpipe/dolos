@@ -488,7 +488,7 @@ mod tests {
 
     #[tokio::test]
     async fn addresses_transactions_happy_path() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let address = app.vectors().address.as_str();
         let path = format!("/addresses/{address}/transactions?page=1");
         let (status, bytes) = app.get_bytes(&path).await;
@@ -505,7 +505,7 @@ mod tests {
 
     #[tokio::test]
     async fn addresses_transactions_slot_constrained() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let address = app.vectors().address.as_str();
         let block = app.vectors().blocks.first().expect("missing block vectors");
         let path = format!(
@@ -525,7 +525,7 @@ mod tests {
 
     #[tokio::test]
     async fn addresses_transactions_paginated() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let address = app.vectors().address.as_str();
         let path_page_1 = format!("/addresses/{address}/transactions?page=1&count=2");
         let path_page_2 = format!("/addresses/{address}/transactions?page=2&count=2");
@@ -553,7 +553,7 @@ mod tests {
 
     #[tokio::test]
     async fn addresses_transactions_order_asc() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let address = app.vectors().address.as_str();
         let path = format!("/addresses/{address}/transactions?order=asc&count=5");
         let (status, bytes) = app.get_bytes(&path).await;
@@ -570,7 +570,7 @@ mod tests {
 
     #[tokio::test]
     async fn addresses_transactions_order_desc() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let address = app.vectors().address.as_str();
         let path = format!("/addresses/{address}/transactions?order=desc&count=5");
         let (status, bytes) = app.get_bytes(&path).await;
@@ -587,21 +587,21 @@ mod tests {
 
     #[tokio::test]
     async fn addresses_transactions_bad_request() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let path = format!("/addresses/{}/transactions", invalid_address());
         assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
     }
 
     #[tokio::test]
     async fn addresses_transactions_not_found() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let path = format!("/addresses/{}/transactions", missing_address());
         assert_status(&app, &path, StatusCode::NOT_FOUND).await;
     }
 
     #[tokio::test]
     async fn addresses_transactions_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError)).await;
         let address = app.vectors().address.as_str();
         let path = format!("/addresses/{address}/transactions");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
@@ -609,7 +609,7 @@ mod tests {
 
     #[tokio::test]
     async fn addresses_utxos_happy_path() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let address = app.vectors().address.as_str();
         let path = format!("/addresses/{address}/utxos?page=1");
         let (status, bytes) = app.get_bytes(&path).await;
@@ -626,7 +626,7 @@ mod tests {
 
     #[tokio::test]
     async fn addresses_utxos_paginated() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let address = app.vectors().address.as_str();
         let path_page_1 = format!("/addresses/{address}/utxos?page=1&count=2");
         let path_page_2 = format!("/addresses/{address}/utxos?page=2&count=2");
@@ -658,7 +658,7 @@ mod tests {
 
     #[tokio::test]
     async fn addresses_utxos_order_asc() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let address = app.vectors().address.as_str();
         let path = format!("/addresses/{address}/utxos?order=asc&count=5");
         let (status, bytes) = app.get_bytes(&path).await;
@@ -681,7 +681,7 @@ mod tests {
 
     #[tokio::test]
     async fn addresses_utxos_order_desc() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let address = app.vectors().address.as_str();
         let path = format!("/addresses/{address}/utxos?order=desc&count=5");
         let (status, bytes) = app.get_bytes(&path).await;
@@ -704,21 +704,21 @@ mod tests {
 
     #[tokio::test]
     async fn addresses_utxos_bad_request() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let path = format!("/addresses/{}/utxos", invalid_address());
         assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
     }
 
     #[tokio::test]
     async fn addresses_utxos_not_found() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let path = format!("/addresses/{}/utxos", missing_address());
         assert_status(&app, &path, StatusCode::NOT_FOUND).await;
     }
 
     #[tokio::test]
     async fn addresses_utxos_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError)).await;
         let address = app.vectors().address.as_str();
         let path = format!("/addresses/{address}/utxos");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;

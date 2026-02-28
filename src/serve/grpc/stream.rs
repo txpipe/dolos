@@ -55,54 +55,57 @@ mod tests {
 
     #[tokio::test]
     async fn test_stream_waiting() {
-        let domain = ToyDomain::new(None, None);
+        let local = tokio::task::LocalSet::new();
+        local.run_until(async {
+            let domain = ToyDomain::new(None, None).await;
 
-        for i in 0..=100 {
-            let (_, block) = make_conway_block(i * 10);
-
-            use dolos_core::SyncExt;
-            domain.roll_forward(block).unwrap();
-        }
-
-        let domain2 = domain.clone();
-        let background = tokio::spawn(async move {
-            for i in 101..=200 {
+            for i in 0..=100 {
                 let (_, block) = make_conway_block(i * 10);
 
                 use dolos_core::SyncExt;
-                domain2.roll_forward(block).unwrap();
-
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                domain.roll_forward(block).await.unwrap();
             }
-        });
 
-        let chain_point = make_conway_block(500).0;
-        let s = ChainStream::start::<ToyDomain, CancelTokenImpl>(
-            domain,
-            vec![chain_point.clone()],
-            CancelTokenImpl(CancellationToken::new()),
-        );
+            let domain2 = domain.clone();
+            let background = tokio::task::spawn_local(async move {
+                for i in 101..=200 {
+                    let (_, block) = make_conway_block(i * 10);
 
-        pin_mut!(s);
+                    use dolos_core::SyncExt;
+                    domain2.roll_forward(block).await.unwrap();
 
-        let first = s.next().await.unwrap();
-
-        assert_eq!(first, TipEvent::Mark(chain_point));
-
-        for i in 51..=200 {
-            let evt = timeout(Duration::from_secs(5), s.next())
-                .await
-                .expect("took too long");
-            let value = evt.unwrap();
-
-            match value {
-                TipEvent::Apply(p, _) => {
-                    assert_eq!(p.slot(), i * 10)
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
                 }
-                _ => panic!("unexpected log value variant"),
-            }
-        }
+            });
 
-        background.abort();
+            let chain_point = make_conway_block(500).0;
+            let s = ChainStream::start::<ToyDomain, CancelTokenImpl>(
+                domain,
+                vec![chain_point.clone()],
+                CancelTokenImpl(CancellationToken::new()),
+            );
+
+            pin_mut!(s);
+
+            let first = s.next().await.unwrap();
+
+            assert_eq!(first, TipEvent::Mark(chain_point));
+
+            for i in 51..=200 {
+                let evt = timeout(Duration::from_secs(5), s.next())
+                    .await
+                    .expect("took too long");
+                let value = evt.unwrap();
+
+                match value {
+                    TipEvent::Apply(p, _) => {
+                        assert_eq!(p.slot(), i * 10)
+                    }
+                    _ => panic!("unexpected log value variant"),
+                }
+            }
+
+            background.abort();
+        }).await;
     }
 }

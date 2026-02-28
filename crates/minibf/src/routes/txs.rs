@@ -330,7 +330,7 @@ mod tests {
 
     #[tokio::test]
     async fn txs_by_hash_happy_path() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let tx_hash = app.vectors().tx_hash.as_str();
         let path = format!("/txs/{tx_hash}");
         let (status, bytes) = app.get_bytes(&path).await;
@@ -349,21 +349,21 @@ mod tests {
 
     #[tokio::test]
     async fn txs_by_hash_not_found() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let path = format!("/txs/{}", missing_hash());
         assert_status(&app, &path, StatusCode::NOT_FOUND).await;
     }
 
     #[tokio::test]
     async fn txs_by_hash_bad_request() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let path = format!("/txs/{}", invalid_hash());
         assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
     }
 
     #[tokio::test]
     async fn txs_by_hash_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError)).await;
         let tx_hash = app.vectors().tx_hash.as_str();
         let path = format!("/txs/{tx_hash}");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
@@ -371,7 +371,7 @@ mod tests {
 
     #[tokio::test]
     async fn txs_by_hash_cbor_happy_path() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let tx_hash = app.vectors().tx_hash.as_str();
         let path = format!("/txs/{tx_hash}/cbor");
         let (status, bytes) = app.get_bytes(&path).await;
@@ -388,21 +388,21 @@ mod tests {
 
     #[tokio::test]
     async fn txs_by_hash_cbor_bad_request() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let path = format!("/txs/{}/cbor", invalid_hash());
         assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
     }
 
     #[tokio::test]
     async fn txs_by_hash_cbor_not_found() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let path = format!("/txs/{}/cbor", missing_hash());
         assert_status(&app, &path, StatusCode::NOT_FOUND).await;
     }
 
     #[tokio::test]
     async fn txs_by_hash_cbor_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError)).await;
         let tx_hash = app.vectors().tx_hash.as_str();
         let path = format!("/txs/{tx_hash}/cbor");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
@@ -410,7 +410,7 @@ mod tests {
 
     #[tokio::test]
     async fn txs_by_hash_utxos_happy_path() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let tx_hash = app.vectors().tx_hash.as_str();
         let path = format!("/txs/{tx_hash}/utxos");
         let (status, bytes) = app.get_bytes(&path).await;
@@ -427,21 +427,21 @@ mod tests {
 
     #[tokio::test]
     async fn txs_by_hash_utxos_bad_request() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let path = format!("/txs/{}/utxos", invalid_hash());
         assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
     }
 
     #[tokio::test]
     async fn txs_by_hash_utxos_not_found() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let path = format!("/txs/{}/utxos", missing_hash());
         assert_status(&app, &path, StatusCode::NOT_FOUND).await;
     }
 
     #[tokio::test]
     async fn txs_by_hash_utxos_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError)).await;
         let tx_hash = app.vectors().tx_hash.as_str();
         let path = format!("/txs/{tx_hash}/utxos");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
@@ -449,7 +449,7 @@ mod tests {
 
     #[tokio::test]
     async fn txs_by_hash_metadata_happy_path() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let tx_hash = app.vectors().tx_hash.as_str();
         let path = format!("/txs/{tx_hash}/metadata");
         let (status, bytes) = app.get_bytes(&path).await;
@@ -466,21 +466,21 @@ mod tests {
 
     #[tokio::test]
     async fn txs_by_hash_metadata_bad_request() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let path = format!("/txs/{}/metadata", invalid_hash());
         assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
     }
 
     #[tokio::test]
     async fn txs_by_hash_metadata_not_found() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let path = format!("/txs/{}/metadata", missing_hash());
         assert_status(&app, &path, StatusCode::NOT_FOUND).await;
     }
 
     #[tokio::test]
     async fn txs_by_hash_metadata_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError)).await;
         let tx_hash = app.vectors().tx_hash.as_str();
         let path = format!("/txs/{tx_hash}/metadata");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
@@ -488,7 +488,7 @@ mod tests {
 
     #[tokio::test]
     async fn txs_by_hash_metadata_cbor_happy_path() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let tx_hash = app.vectors().tx_hash.as_str();
         let path = format!("/txs/{tx_hash}/metadata/cbor");
         let (status, bytes) = app.get_bytes(&path).await;
@@ -505,21 +505,21 @@ mod tests {
 
     #[tokio::test]
     async fn txs_by_hash_metadata_cbor_bad_request() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let path = format!("/txs/{}/metadata/cbor", invalid_hash());
         assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
     }
 
     #[tokio::test]
     async fn txs_by_hash_metadata_cbor_not_found() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let path = format!("/txs/{}/metadata/cbor", missing_hash());
         assert_status(&app, &path, StatusCode::NOT_FOUND).await;
     }
 
     #[tokio::test]
     async fn txs_by_hash_metadata_cbor_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError)).await;
         let tx_hash = app.vectors().tx_hash.as_str();
         let path = format!("/txs/{tx_hash}/metadata/cbor");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
@@ -527,7 +527,7 @@ mod tests {
 
     #[tokio::test]
     async fn txs_by_hash_redeemers_happy_path() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let tx_hash = app.vectors().tx_hash.as_str();
         let path = format!("/txs/{tx_hash}/redeemers");
         let (status, bytes) = app.get_bytes(&path).await;
@@ -544,21 +544,21 @@ mod tests {
 
     #[tokio::test]
     async fn txs_by_hash_redeemers_bad_request() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let path = format!("/txs/{}/redeemers", invalid_hash());
         assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
     }
 
     #[tokio::test]
     async fn txs_by_hash_redeemers_not_found() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let path = format!("/txs/{}/redeemers", missing_hash());
         assert_status(&app, &path, StatusCode::NOT_FOUND).await;
     }
 
     #[tokio::test]
     async fn txs_by_hash_redeemers_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError)).await;
         let tx_hash = app.vectors().tx_hash.as_str();
         let path = format!("/txs/{tx_hash}/redeemers");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
@@ -566,7 +566,7 @@ mod tests {
 
     #[tokio::test]
     async fn txs_by_hash_delegations_happy_path() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let tx_hash = app.vectors().tx_hash.as_str();
         let path = format!("/txs/{tx_hash}/delegations");
         let (status, bytes) = app.get_bytes(&path).await;
@@ -583,21 +583,21 @@ mod tests {
 
     #[tokio::test]
     async fn txs_by_hash_delegations_bad_request() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let path = format!("/txs/{}/delegations", invalid_hash());
         assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
     }
 
     #[tokio::test]
     async fn txs_by_hash_delegations_not_found() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let path = format!("/txs/{}/delegations", missing_hash());
         assert_status(&app, &path, StatusCode::NOT_FOUND).await;
     }
 
     #[tokio::test]
     async fn txs_by_hash_delegations_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError)).await;
         let tx_hash = app.vectors().tx_hash.as_str();
         let path = format!("/txs/{tx_hash}/delegations");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
@@ -605,7 +605,7 @@ mod tests {
 
     #[tokio::test]
     async fn txs_by_hash_mirs_happy_path() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let tx_hash = app.vectors().tx_hash.as_str();
         let path = format!("/txs/{tx_hash}/mirs");
         let (status, bytes) = app.get_bytes(&path).await;
@@ -622,21 +622,21 @@ mod tests {
 
     #[tokio::test]
     async fn txs_by_hash_mirs_bad_request() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let path = format!("/txs/{}/mirs", invalid_hash());
         assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
     }
 
     #[tokio::test]
     async fn txs_by_hash_mirs_not_found() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let path = format!("/txs/{}/mirs", missing_hash());
         assert_status(&app, &path, StatusCode::NOT_FOUND).await;
     }
 
     #[tokio::test]
     async fn txs_by_hash_mirs_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError)).await;
         let tx_hash = app.vectors().tx_hash.as_str();
         let path = format!("/txs/{tx_hash}/mirs");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
@@ -644,7 +644,7 @@ mod tests {
 
     #[tokio::test]
     async fn txs_by_hash_pool_retires_happy_path() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let tx_hash = app.vectors().tx_hash.as_str();
         let path = format!("/txs/{tx_hash}/pool_retires");
         let (status, bytes) = app.get_bytes(&path).await;
@@ -661,21 +661,21 @@ mod tests {
 
     #[tokio::test]
     async fn txs_by_hash_pool_retires_bad_request() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let path = format!("/txs/{}/pool_retires", invalid_hash());
         assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
     }
 
     #[tokio::test]
     async fn txs_by_hash_pool_retires_not_found() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let path = format!("/txs/{}/pool_retires", missing_hash());
         assert_status(&app, &path, StatusCode::NOT_FOUND).await;
     }
 
     #[tokio::test]
     async fn txs_by_hash_pool_retires_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError)).await;
         let tx_hash = app.vectors().tx_hash.as_str();
         let path = format!("/txs/{tx_hash}/pool_retires");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
@@ -683,7 +683,7 @@ mod tests {
 
     #[tokio::test]
     async fn txs_by_hash_pool_updates_happy_path() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let tx_hash = app.vectors().tx_hash.as_str();
         let path = format!("/txs/{tx_hash}/pool_updates");
         let (status, bytes) = app.get_bytes(&path).await;
@@ -700,21 +700,21 @@ mod tests {
 
     #[tokio::test]
     async fn txs_by_hash_pool_updates_bad_request() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let path = format!("/txs/{}/pool_updates", invalid_hash());
         assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
     }
 
     #[tokio::test]
     async fn txs_by_hash_pool_updates_not_found() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let path = format!("/txs/{}/pool_updates", missing_hash());
         assert_status(&app, &path, StatusCode::NOT_FOUND).await;
     }
 
     #[tokio::test]
     async fn txs_by_hash_pool_updates_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError)).await;
         let tx_hash = app.vectors().tx_hash.as_str();
         let path = format!("/txs/{tx_hash}/pool_updates");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
@@ -722,7 +722,7 @@ mod tests {
 
     #[tokio::test]
     async fn txs_by_hash_stakes_happy_path() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let tx_hash = app.vectors().tx_hash.as_str();
         let path = format!("/txs/{tx_hash}/stakes");
         let (status, bytes) = app.get_bytes(&path).await;
@@ -739,21 +739,21 @@ mod tests {
 
     #[tokio::test]
     async fn txs_by_hash_stakes_bad_request() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let path = format!("/txs/{}/stakes", invalid_hash());
         assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
     }
 
     #[tokio::test]
     async fn txs_by_hash_stakes_not_found() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let path = format!("/txs/{}/stakes", missing_hash());
         assert_status(&app, &path, StatusCode::NOT_FOUND).await;
     }
 
     #[tokio::test]
     async fn txs_by_hash_stakes_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError)).await;
         let tx_hash = app.vectors().tx_hash.as_str();
         let path = format!("/txs/{tx_hash}/stakes");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
@@ -761,7 +761,7 @@ mod tests {
 
     #[tokio::test]
     async fn txs_by_hash_withdrawals_happy_path() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let tx_hash = app.vectors().tx_hash.as_str();
         let path = format!("/txs/{tx_hash}/withdrawals");
         let (status, bytes) = app.get_bytes(&path).await;
@@ -778,21 +778,21 @@ mod tests {
 
     #[tokio::test]
     async fn txs_by_hash_withdrawals_bad_request() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let path = format!("/txs/{}/withdrawals", invalid_hash());
         assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
     }
 
     #[tokio::test]
     async fn txs_by_hash_withdrawals_not_found() {
-        let app = TestApp::new();
+        let app = TestApp::new().await;
         let path = format!("/txs/{}/withdrawals", missing_hash());
         assert_status(&app, &path, StatusCode::NOT_FOUND).await;
     }
 
     #[tokio::test]
     async fn txs_by_hash_withdrawals_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError)).await;
         let tx_hash = app.vectors().tx_hash.as_str();
         let path = format!("/txs/{tx_hash}/withdrawals");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;

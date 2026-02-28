@@ -157,6 +157,7 @@ pub enum MempoolError {
 ///
 /// Implementors must be thread-safe (`Clone + Send + Sync`) and persist state
 /// durably so that a restart does not lose in-progress transactions.
+#[trait_variant::make(Send)]
 pub trait MempoolStore: Clone + Send + Sync + 'static {
     type Stream: futures_core::Stream<Item = Result<MempoolEvent, MempoolError>>
         + Unpin
@@ -169,37 +170,37 @@ pub trait MempoolStore: Clone + Send + Sync + 'static {
     /// via [`subscribe`](Self::subscribe). Returns
     /// [`DuplicateTx`](MempoolError::DuplicateTx) if a transaction with the
     /// same hash is already pending.
-    fn receive(&self, tx: MempoolTx) -> Result<(), MempoolError>;
+    async fn receive(&self, tx: MempoolTx) -> Result<(), MempoolError>;
 
     /// Returns `true` if there is at least one transaction in the pending queue.
-    fn has_pending(&self) -> bool;
+    async fn has_pending(&self) -> bool;
 
     /// Returns up to `limit` transactions from the pending queue in insertion
     /// order. Does not remove them.
-    fn peek_pending(&self, limit: usize) -> Vec<MempoolTx>;
+    async fn peek_pending(&self, limit: usize) -> Vec<MempoolTx>;
 
     /// Moves matching transactions from pending to the inflight table
     /// (initial sub-stage: `Propagated`).
     ///
     /// Implementors must remove them from the pending queue and begin tracking
     /// them as inflight. Hashes not found in pending are silently ignored.
-    fn mark_inflight(&self, hashes: &[TxHash]) -> Result<(), MempoolError>;
+    async fn mark_inflight(&self, hashes: &[TxHash]) -> Result<(), MempoolError>;
 
     /// Transitions `Propagated` transactions to `Acknowledged`.
     ///
     /// Only transitions transactions currently in `Propagated`; other stages are
     /// silently skipped.
-    fn mark_acknowledged(&self, hashes: &[TxHash]) -> Result<(), MempoolError>;
+    async fn mark_acknowledged(&self, hashes: &[TxHash]) -> Result<(), MempoolError>;
 
     /// Returns the transaction if it is currently in any inflight sub-stage
     /// (Propagated, Acknowledged, or Confirmed), `None` otherwise.
     ///
     /// Used to retrieve the payload for re-submission checks.
-    fn find_inflight(&self, tx_hash: &TxHash) -> Option<MempoolTx>;
+    async fn find_inflight(&self, tx_hash: &TxHash) -> Option<MempoolTx>;
 
     /// Returns up to `limit` inflight transactions (Propagated, Acknowledged,
     /// or Confirmed) in arbitrary order. Does not remove them.
-    fn peek_inflight(&self, limit: usize) -> Vec<MempoolTx>;
+    async fn peek_inflight(&self, limit: usize) -> Vec<MempoolTx>;
 
     /// Called after each chain-sync event.
     ///
@@ -216,7 +217,7 @@ pub trait MempoolStore: Clone + Send + Sync + 'static {
     /// as `Finalized`, and transactions with
     /// `non_confirmations >= drop_threshold` are moved to the finalized log
     /// as `Dropped`.
-    fn confirm(
+    async fn confirm(
         &self,
         point: &ChainPoint,
         seen_txs: &[TxHash],
@@ -227,13 +228,13 @@ pub trait MempoolStore: Clone + Send + Sync + 'static {
 
     /// Returns the full status of a transaction including stage,
     /// confirmation count, and the chain point where it was first confirmed.
-    fn check_status(&self, tx_hash: &TxHash) -> TxStatus;
+    async fn check_status(&self, tx_hash: &TxHash) -> TxStatus;
 
     /// Paginate through finalized transactions.
     ///
     /// `cursor` is a sequence number assigned at finalization time. Returns a
     /// [`MempoolPage`] with the next cursor (`None` if exhausted).
-    fn dump_finalized(&self, cursor: u64, limit: usize) -> MempoolPage;
+    async fn dump_finalized(&self, cursor: u64, limit: usize) -> MempoolPage;
 
     /// Returns a stream of lifecycle events.
     ///
@@ -289,13 +290,16 @@ pub struct MempoolAwareUtxoStore<'a, D: Domain> {
     mempool: &'a D::Mempool,
 }
 
-fn scan_mempool_utxos<D: Domain, F>(predicate: F, mempool: &D::Mempool) -> HashSet<TxoRef>
+async fn scan_mempool_utxos<D: Domain, F>(predicate: F, mempool: &D::Mempool) -> HashSet<TxoRef>
 where
     F: Fn(&MultiEraOutput<'_>) -> bool,
 {
     let mut refs = HashSet::new();
 
-    for mtx in mempool.peek_pending(usize::MAX) {
+    let mut all_txs = mempool.peek_pending(usize::MAX).await;
+    all_txs.extend(mempool.peek_inflight(usize::MAX).await);
+
+    for mtx in all_txs {
         let era_cbor = &mtx.payload;
         let Some(tx) = MultiEraTx::try_from(era_cbor).ok() else {
             continue;
@@ -315,10 +319,21 @@ where
     refs
 }
 
-fn exclude_inflight_stxis<D: Domain>(refs: &mut HashSet<TxoRef>, mempool: &D::Mempool) {
-    debug!("excluding inflight stxis");
+async fn exclude_inflight_stxis<D: Domain>(refs: &mut HashSet<TxoRef>, mempool: &D::Mempool) {
+    let pending_txs = mempool.peek_pending(usize::MAX).await;
+    let inflight_txs = mempool.peek_inflight(usize::MAX).await;
 
-    for mtx in mempool.peek_pending(usize::MAX) {
+    info!(
+        pending_count = pending_txs.len(),
+        inflight_count = inflight_txs.len(),
+        requested_refs = refs.len(),
+        "excluding inflight stxis"
+    );
+
+    let mut all_txs = pending_txs;
+    all_txs.extend(inflight_txs);
+
+    for mtx in all_txs {
         let era_cbor = &mtx.payload;
         let Some(tx) = MultiEraTx::try_from(era_cbor).ok() else {
             warn!("invalid inflight tx");
@@ -336,10 +351,13 @@ fn exclude_inflight_stxis<D: Domain>(refs: &mut HashSet<TxoRef>, mempool: &D::Me
     }
 }
 
-fn select_mempool_utxos<D: Domain>(refs: &mut HashSet<TxoRef>, mempool: &D::Mempool) -> UtxoMap {
+async fn select_mempool_utxos<D: Domain>(refs: &mut HashSet<TxoRef>, mempool: &D::Mempool) -> UtxoMap {
     let mut map = HashMap::new();
 
-    for mtx in mempool.peek_pending(usize::MAX) {
+    let mut all_txs = mempool.peek_pending(usize::MAX).await;
+    all_txs.extend(mempool.peek_inflight(usize::MAX).await);
+
+    for mtx in all_txs {
         let era_cbor = &mtx.payload;
         let Some(tx) = MultiEraTx::try_from(era_cbor).ok() else {
             continue;
@@ -388,7 +406,7 @@ impl<'a, D: Domain> MempoolAwareUtxoStore<'a, D> {
     /// and the mempool.
     ///
     /// The `predicate` is used to filter mempool UTxOs that match the query criteria.
-    pub fn get_utxos_by_tag<F>(
+    pub async fn get_utxos_by_tag<F>(
         &self,
         dimension: TagDimension,
         key: &[u8],
@@ -397,21 +415,36 @@ impl<'a, D: Domain> MempoolAwareUtxoStore<'a, D> {
     where
         F: Fn(&MultiEraOutput<'_>) -> bool,
     {
-        let from_mempool = scan_mempool_utxos::<D, _>(predicate, self.mempool);
+        let from_mempool = scan_mempool_utxos::<D, _>(predicate, self.mempool).await;
 
         let mut utxos = self.indexes.utxos_by_tag(dimension, key)?;
 
         utxos.extend(from_mempool);
 
-        exclude_inflight_stxis::<D>(&mut utxos, self.mempool);
+        exclude_inflight_stxis::<D>(&mut utxos, self.mempool).await;
 
         Ok(utxos)
     }
 
-    pub fn get_utxos(&self, mut refs: HashSet<TxoRef>) -> Result<UtxoMap, StateError> {
-        exclude_inflight_stxis::<D>(&mut refs, self.mempool);
+    pub async fn get_utxos(&self, mut refs: HashSet<TxoRef>) -> Result<UtxoMap, StateError> {
+        let initial_count = refs.len();
 
-        let from_mempool = select_mempool_utxos::<D>(&mut refs, self.mempool);
+        exclude_inflight_stxis::<D>(&mut refs, self.mempool).await;
+
+        let after_exclude_count = refs.len();
+
+        let from_mempool = select_mempool_utxos::<D>(&mut refs, self.mempool).await;
+
+        let from_mempool_count = from_mempool.len();
+        let from_state_count = refs.len();
+
+        info!(
+            initial_count,
+            after_exclude_count,
+            from_mempool_count,
+            from_state_count,
+            "get_utxos resolved"
+        );
 
         let mut utxos = self.inner.get_utxos(Vec::from_iter(refs))?;
 
@@ -451,39 +484,39 @@ mod tests {
     impl MempoolStore for MockStore {
         type Stream = MockStream;
 
-        fn receive(&self, _tx: MempoolTx) -> Result<(), MempoolError> {
+        async fn receive(&self, _tx: MempoolTx) -> Result<(), MempoolError> {
             Ok(())
         }
 
-        fn has_pending(&self) -> bool {
+        async fn has_pending(&self) -> bool {
             false
         }
 
-        fn peek_pending(&self, _limit: usize) -> Vec<MempoolTx> {
+        async fn peek_pending(&self, _limit: usize) -> Vec<MempoolTx> {
             vec![]
         }
 
-        fn mark_inflight(&self, _hashes: &[TxHash]) -> Result<(), MempoolError> {
+        async fn mark_inflight(&self, _hashes: &[TxHash]) -> Result<(), MempoolError> {
             Ok(())
         }
 
-        fn mark_acknowledged(&self, _hashes: &[TxHash]) -> Result<(), MempoolError> {
+        async fn mark_acknowledged(&self, _hashes: &[TxHash]) -> Result<(), MempoolError> {
             Ok(())
         }
 
-        fn find_inflight(&self, _tx_hash: &TxHash) -> Option<MempoolTx> {
+        async fn find_inflight(&self, _tx_hash: &TxHash) -> Option<MempoolTx> {
             None
         }
 
-        fn peek_inflight(&self, _limit: usize) -> Vec<MempoolTx> {
+        async fn peek_inflight(&self, _limit: usize) -> Vec<MempoolTx> {
             vec![]
         }
 
-        fn confirm(&self, _point: &ChainPoint, _seen: &[TxHash], _unseen: &[TxHash], _finalize_threshold: u32, _drop_threshold: u32) -> Result<(), MempoolError> {
+        async fn confirm(&self, _point: &ChainPoint, _seen: &[TxHash], _unseen: &[TxHash], _finalize_threshold: u32, _drop_threshold: u32) -> Result<(), MempoolError> {
             Ok(())
         }
 
-        fn check_status(&self, _hash: &TxHash) -> TxStatus {
+        async fn check_status(&self, _hash: &TxHash) -> TxStatus {
             TxStatus {
                 stage: MempoolTxStage::Unknown,
                 confirmations: 0,
@@ -492,7 +525,7 @@ mod tests {
             }
         }
 
-        fn dump_finalized(&self, _cursor: u64, _limit: usize) -> MempoolPage {
+        async fn dump_finalized(&self, _cursor: u64, _limit: usize) -> MempoolPage {
             MempoolPage { items: vec![], next_cursor: None }
         }
 
