@@ -6,7 +6,7 @@ use axum::{
     Json,
 };
 use blockfrost_openapi::models::{
-    address_content::{AddressContent, Type as AddressType},
+    address_content::AddressContent,
     address_transactions_content_inner::AddressTransactionsContentInner,
     address_utxo_content_inner::AddressUtxoContentInner,
     tx_content_output_amount_inner::TxContentOutputAmountInner,
@@ -26,7 +26,7 @@ use dolos_core::{BlockBody, BlockSlot, Domain, EraCbor, StateStore as _, TxoRef}
 
 use crate::{
     error::Error,
-    mapping::{aggregate_assets, IntoModel},
+    mapping::{aggregate_assets, AddressKind, AddressModelBuilder, IntoModel},
     pagination::{Order, Pagination, PaginationParameters},
     Facade,
 };
@@ -180,33 +180,20 @@ where
     }
 }
 
-struct AddressModelBuilder {
-    address: String,
-    parsed: ParsedAddress,
-    amount: Vec<TxContentOutputAmountInner>,
-}
-
-impl IntoModel<AddressContent> for AddressModelBuilder {
-    type SortKey = ();
-
-    fn into_model(self) -> Result<AddressContent, StatusCode> {
-        let (stake_address, r#type, script) = match self.parsed {
-            ParsedAddress::Payment { script, .. } => (None, AddressType::Shelley, script),
+impl ParsedAddress {
+    fn into_model_kind(self) -> AddressKind {
+        match self {
+            ParsedAddress::Payment { script, .. } => AddressKind::Payment { script },
             ParsedAddress::Shelley {
                 stake_address,
                 script,
                 ..
-            } => (stake_address, AddressType::Shelley, script),
-            ParsedAddress::Byron { .. } => (None, AddressType::Byron, false),
-        };
-
-        Ok(AddressContent {
-            address: self.address,
-            amount: self.amount,
-            stake_address,
-            r#type,
-            script,
-        })
+            } => AddressKind::Shelley {
+                stake_address,
+                script,
+            },
+            ParsedAddress::Byron { .. } => AddressKind::Byron,
+        }
     }
 }
 
@@ -252,8 +239,8 @@ where
 
     let model = AddressModelBuilder {
         address,
-        parsed,
         amount,
+        kind: parsed.into_model_kind(),
     }
     .into_model()
     .map_err(Error::Code)?;
