@@ -395,8 +395,10 @@ mod tests {
 
     #[tokio::test]
     async fn pools_extended_paginated() {
-        let mut cfg = SyntheticBlockConfig::default();
-        cfg.slot = 500_000;
+        let cfg = SyntheticBlockConfig {
+            slot: 500_000,
+            ..Default::default()
+        };
         let app = TestApp::new_with_cfg(cfg);
         let (status_1, bytes_1) = app.get_bytes("/pools/extended?page=1&count=1").await;
         let (status_2, bytes_2) = app.get_bytes("/pools/extended?page=2&count=1").await;
