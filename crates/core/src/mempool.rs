@@ -320,10 +320,18 @@ where
 }
 
 async fn exclude_inflight_stxis<D: Domain>(refs: &mut HashSet<TxoRef>, mempool: &D::Mempool) {
-    debug!("excluding inflight stxis");
+    let pending_txs = mempool.peek_pending(usize::MAX).await;
+    let inflight_txs = mempool.peek_inflight(usize::MAX).await;
 
-    let mut all_txs = mempool.peek_pending(usize::MAX).await;
-    all_txs.extend(mempool.peek_inflight(usize::MAX).await);
+    info!(
+        pending_count = pending_txs.len(),
+        inflight_count = inflight_txs.len(),
+        requested_refs = refs.len(),
+        "excluding inflight stxis"
+    );
+
+    let mut all_txs = pending_txs;
+    all_txs.extend(inflight_txs);
 
     for mtx in all_txs {
         let era_cbor = &mtx.payload;
@@ -419,9 +427,24 @@ impl<'a, D: Domain> MempoolAwareUtxoStore<'a, D> {
     }
 
     pub async fn get_utxos(&self, mut refs: HashSet<TxoRef>) -> Result<UtxoMap, StateError> {
+        let initial_count = refs.len();
+
         exclude_inflight_stxis::<D>(&mut refs, self.mempool).await;
 
+        let after_exclude_count = refs.len();
+
         let from_mempool = select_mempool_utxos::<D>(&mut refs, self.mempool).await;
+
+        let from_mempool_count = from_mempool.len();
+        let from_state_count = refs.len();
+
+        info!(
+            initial_count,
+            after_exclude_count,
+            from_mempool_count,
+            from_state_count,
+            "get_utxos resolved"
+        );
 
         let mut utxos = self.inner.get_utxos(Vec::from_iter(refs))?;
 

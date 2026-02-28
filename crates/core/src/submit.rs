@@ -14,6 +14,8 @@ use crate::{
 pub async fn validate_tx<D: Domain>(domain: &D, cbor: &[u8]) -> Result<MempoolTx, DomainError> {
     let tip = domain.state().read_cursor()?;
 
+    info!(?tip, "validating tx against tip");
+
     let utxos =
         MempoolAwareUtxoStore::<'_, D>::new(domain.state(), domain.indexes(), domain.mempool());
 
@@ -28,13 +30,20 @@ pub async fn receive_tx<D: Domain>(
     source: &str,
     cbor: &[u8],
 ) -> Result<TxHash, DomainError> {
+    info!(source = source, cbor_len = cbor.len(), "acquiring submit lock");
+
     let _guard = domain.acquire_submit_lock().await;
+
+    info!(source = source, "submit lock acquired");
+
     let tx = validate_tx(domain, cbor).await?;
     let hash = tx.hash;
 
-    info!(tx.hash = %hash, source=source, "tx received");
+    info!(tx.hash = %hash, source = source, "validation passed");
 
     domain.mempool().receive(tx).await?;
+
+    info!(tx.hash = %hash, source = source, "tx inserted into mempool");
 
     Ok(hash)
 }

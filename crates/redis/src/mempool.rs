@@ -329,6 +329,7 @@ impl MempoolStore for RedisMempool {
             .map_err(|e| MempoolError::Internal(Box::new(e)))?;
 
         if exists_in_pending.is_some() {
+            info!(tx.hash = %tx.hash, "duplicate: already in pending (redis)");
             return Err(MempoolError::DuplicateTx);
         }
 
@@ -340,8 +341,11 @@ impl MempoolStore for RedisMempool {
             .map_err(|e| MempoolError::Internal(Box::new(e)))?;
 
         if exists_in_inflight.is_some() {
+            info!(tx.hash = %tx.hash, "duplicate: already inflight (redis)");
             return Err(MempoolError::DuplicateTx);
         }
+
+        info!(tx.hash = %tx.hash, "inserting into pending queue (redis RPUSH)");
 
         let _: () = redis::cmd("RPUSH")
             .arg(&self.pending_key())
