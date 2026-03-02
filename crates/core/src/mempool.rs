@@ -175,9 +175,9 @@ pub trait MempoolStore: Clone + Send + Sync + 'static {
     /// Returns `true` if there is at least one transaction in the pending queue.
     async fn has_pending(&self) -> bool;
 
-    /// Returns up to `limit` transactions from the pending queue in insertion
-    /// order. Does not remove them.
-    async fn peek_pending(&self, limit: usize) -> Vec<MempoolTx>;
+    /// Returns all transactions from the pending queue in insertion order.
+    /// Does not remove them.
+    async fn peek_pending(&self) -> Vec<MempoolTx>;
 
     /// Moves matching transactions from pending to the inflight table
     /// (initial sub-stage: `Propagated`).
@@ -198,9 +198,9 @@ pub trait MempoolStore: Clone + Send + Sync + 'static {
     /// Used to retrieve the payload for re-submission checks.
     async fn find_inflight(&self, tx_hash: &TxHash) -> Option<MempoolTx>;
 
-    /// Returns up to `limit` inflight transactions (Propagated, Acknowledged,
+    /// Returns all inflight transactions (Propagated, Acknowledged,
     /// or Confirmed) in arbitrary order. Does not remove them.
-    async fn peek_inflight(&self, limit: usize) -> Vec<MempoolTx>;
+    async fn peek_inflight(&self) -> Vec<MempoolTx>;
 
     /// Called after each chain-sync event.
     ///
@@ -296,8 +296,8 @@ where
 {
     let mut refs = HashSet::new();
 
-    let mut all_txs = mempool.peek_pending(usize::MAX).await;
-    all_txs.extend(mempool.peek_inflight(usize::MAX).await);
+    let mut all_txs = mempool.peek_pending().await;
+    all_txs.extend(mempool.peek_inflight().await);
 
     for mtx in all_txs {
         let era_cbor = &mtx.payload;
@@ -320,8 +320,8 @@ where
 }
 
 async fn exclude_inflight_stxis<D: Domain>(refs: &mut HashSet<TxoRef>, mempool: &D::Mempool) {
-    let pending_txs = mempool.peek_pending(usize::MAX).await;
-    let inflight_txs = mempool.peek_inflight(usize::MAX).await;
+    let pending_txs = mempool.peek_pending().await;
+    let inflight_txs = mempool.peek_inflight().await;
 
     info!(
         pending_count = pending_txs.len(),
@@ -354,8 +354,8 @@ async fn exclude_inflight_stxis<D: Domain>(refs: &mut HashSet<TxoRef>, mempool: 
 async fn select_mempool_utxos<D: Domain>(refs: &mut HashSet<TxoRef>, mempool: &D::Mempool) -> UtxoMap {
     let mut map = HashMap::new();
 
-    let mut all_txs = mempool.peek_pending(usize::MAX).await;
-    all_txs.extend(mempool.peek_inflight(usize::MAX).await);
+    let mut all_txs = mempool.peek_pending().await;
+    all_txs.extend(mempool.peek_inflight().await);
 
     for mtx in all_txs {
         let era_cbor = &mtx.payload;
@@ -492,7 +492,7 @@ mod tests {
             false
         }
 
-        async fn peek_pending(&self, _limit: usize) -> Vec<MempoolTx> {
+        async fn peek_pending(&self) -> Vec<MempoolTx> {
             vec![]
         }
 
@@ -508,7 +508,7 @@ mod tests {
             None
         }
 
-        async fn peek_inflight(&self, _limit: usize) -> Vec<MempoolTx> {
+        async fn peek_inflight(&self) -> Vec<MempoolTx> {
             vec![]
         }
 

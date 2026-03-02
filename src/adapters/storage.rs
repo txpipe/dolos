@@ -1064,11 +1064,11 @@ impl MempoolStore for MempoolBackend {
         }
     }
 
-    async fn peek_pending(&self, limit: usize) -> Vec<MempoolTx> {
+    async fn peek_pending(&self) -> Vec<MempoolTx> {
         match self {
-            Self::Ephemeral(s) => s.peek_pending(limit).await,
-            Self::Redb(s) => s.peek_pending(limit).await,
-            Self::Redis(s) => s.peek_pending(limit).await,
+            Self::Ephemeral(s) => s.peek_pending().await,
+            Self::Redb(s) => s.peek_pending().await,
+            Self::Redis(s) => s.peek_pending().await,
         }
     }
 
@@ -1096,11 +1096,11 @@ impl MempoolStore for MempoolBackend {
         }
     }
 
-    async fn peek_inflight(&self, limit: usize) -> Vec<MempoolTx> {
+    async fn peek_inflight(&self) -> Vec<MempoolTx> {
         match self {
-            Self::Ephemeral(s) => s.peek_inflight(limit).await,
-            Self::Redb(s) => s.peek_inflight(limit).await,
-            Self::Redis(s) => s.peek_inflight(limit).await,
+            Self::Ephemeral(s) => s.peek_inflight().await,
+            Self::Redb(s) => s.peek_inflight().await,
+            Self::Redis(s) => s.peek_inflight().await,
         }
     }
 

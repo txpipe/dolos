@@ -391,11 +391,7 @@ impl MempoolStore for RedisMempool {
         len > 0
     }
 
-    async fn peek_pending(&self, limit: usize) -> Vec<MempoolTx> {
-        if limit == 0 {
-            return vec![];
-        }
-
+    async fn peek_pending(&self) -> Vec<MempoolTx> {
         let mut conn = match self.pool.get().await {
             Ok(c) => c,
             Err(_) => return vec![],
@@ -404,7 +400,7 @@ impl MempoolStore for RedisMempool {
         let hashes: Vec<Vec<u8>> = match redis::cmd("LRANGE")
             .arg(&self.pending_key())
             .arg(0)
-            .arg(limit - 1)
+            .arg(-1)
             .query_async(&mut conn)
             .await
         {
@@ -569,7 +565,7 @@ impl MempoolStore for RedisMempool {
         })
     }
 
-    async fn peek_inflight(&self, limit: usize) -> Vec<MempoolTx> {
+    async fn peek_inflight(&self) -> Vec<MempoolTx> {
         let mut conn = match self.pool.get().await {
             Ok(c) => c,
             Err(_) => return vec![],
@@ -585,7 +581,7 @@ impl MempoolStore for RedisMempool {
         };
 
         let mut result = Vec::new();
-        for (hash_bytes, record_bytes) in all_records.into_iter().take(limit) {
+        for (hash_bytes, record_bytes) in all_records {
             if hash_bytes.len() != 32 {
                 continue;
             }

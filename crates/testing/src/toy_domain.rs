@@ -60,10 +60,10 @@ impl dolos_core::MempoolStore for Mempool {
             .unwrap_or(false)
     }
 
-    async fn peek_pending(&self, limit: usize) -> Vec<MempoolTx> {
+    async fn peek_pending(&self) -> Vec<MempoolTx> {
         self.pending
             .read()
-            .map(|p| p.iter().take(limit).cloned().collect())
+            .map(|p| p.clone())
             .unwrap_or_default()
     }
 
@@ -79,7 +79,7 @@ impl dolos_core::MempoolStore for Mempool {
         None
     }
 
-    async fn peek_inflight(&self, _limit: usize) -> Vec<MempoolTx> {
+    async fn peek_inflight(&self) -> Vec<MempoolTx> {
         vec![]
     }
 

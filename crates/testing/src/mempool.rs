@@ -30,7 +30,7 @@ impl MempoolStore for MockMempoolStore {
         false
     }
 
-    async fn peek_pending(&self, _limit: usize) -> Vec<MempoolTx> {
+    async fn peek_pending(&self) -> Vec<MempoolTx> {
         vec![]
     }
 
@@ -46,7 +46,7 @@ impl MempoolStore for MockMempoolStore {
         None
     }
 
-    async fn peek_inflight(&self, _limit: usize) -> Vec<MempoolTx> {
+    async fn peek_inflight(&self) -> Vec<MempoolTx> {
         vec![]
     }
 

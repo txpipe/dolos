@@ -113,9 +113,9 @@ impl MempoolStore for EphemeralMempool {
         !state.pending.is_empty()
     }
 
-    async fn peek_pending(&self, limit: usize) -> Vec<MempoolTx> {
+    async fn peek_pending(&self) -> Vec<MempoolTx> {
         let state = self.state.read().unwrap();
-        state.pending.iter().take(limit).cloned().collect()
+        state.pending.clone()
     }
 
     async fn mark_inflight(&self, hashes: &[TxHash]) -> Result<(), MempoolError> {
@@ -178,14 +178,13 @@ impl MempoolStore for EphemeralMempool {
         state.acknowledged.get(tx_hash).cloned()
     }
 
-    async fn peek_inflight(&self, limit: usize) -> Vec<MempoolTx> {
+    async fn peek_inflight(&self) -> Vec<MempoolTx> {
         let state = self.state.read().unwrap();
 
         state
             .inflight
             .iter()
             .chain(state.acknowledged.values())
-            .take(limit)
             .cloned()
             .collect()
     }
