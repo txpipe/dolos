@@ -152,11 +152,19 @@ fn block_to_txs<C: LedgerContext>(
     request: &u5c::watch::WatchTxRequest,
 ) -> Vec<u5c::watch::AnyChainTx> {
     let include_block = request.field_mask.as_ref().map_or(false, |mask| {
-        mask.paths.iter().any(|p| p.contains("block"))
+        mask.paths.iter().any(|p| p == "block" || p.starts_with("block."))
     });
 
     let body: &BlockBody = &raw_block;
     let block = MultiEraBlock::decode(raw_block).unwrap();
+    
+    let mapped_block = include_block.then(|| u5c::watch::AnyChainBlock {
+        native_bytes: body.to_vec().into(),
+        chain: Some(u5c::watch::any_chain_block::Chain::Cardano(
+            mapper.map_block_cbor(body),
+        )),
+    });
+
     let txs = block.txs();
 
     txs.iter()
@@ -169,16 +177,7 @@ fn block_to_txs<C: LedgerContext>(
         })
         .map(|x| u5c::watch::AnyChainTx {
             chain: Some(u5c::watch::any_chain_tx::Chain::Cardano(x)),
-            block: if include_block {
-                Some(u5c::watch::AnyChainBlock {
-                    native_bytes: body.to_vec().into(),
-                    chain: Some(u5c::watch::any_chain_block::Chain::Cardano(
-                        mapper.map_block_cbor(body),
-                    )),
-                })
-            } else {
-                None
-            },
+            block: mapped_block.clone(),
         })
         .collect()
 }
