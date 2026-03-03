@@ -151,11 +151,11 @@ fn block_to_txs<C: LedgerContext>(
     mapper: &interop::Mapper<C>,
     request: &u5c::watch::WatchTxRequest,
 ) -> Vec<u5c::watch::AnyChainTx> {
-    let include_block = request.field_mask.as_ref().map_or(false, |mask| {
+    let include_block = request.field_mask.as_ref().is_some_and(|mask| {
         mask.paths.iter().any(|p| p == "block" || p.starts_with("block."))
     });
 
-    let body: &BlockBody = &raw_block;
+    let body: &BlockBody = raw_block;
     let block = match MultiEraBlock::decode(raw_block) {
         Ok(b) => b,
         Err(e) => {
