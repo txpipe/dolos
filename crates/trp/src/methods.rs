@@ -1,13 +1,16 @@
 use jsonrpsee::types::Params;
-use pallas::{codec::utils::NonEmptySet, ledger::primitives::conway::VKeyWitness};
+use pallas::{
+    codec::utils::NonEmptySet,
+    ledger::primitives::conway::{VKeyWitness, WitnessSet},
+};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use tx3_resolver::trp::{
     ChainPoint, CheckStatusResponse, DumpLogsResponse, InflightTx, PeekInflightResponse,
-    PeekPendingResponse, PendingTx, ResolveParams, SubmitParams, SubmitResponse, TxEnvelope, TxLog,
-    TxStatus, TxWitness,
+    PeekPendingResponse, PendingTx, ResolveParams, SubmitParams, SubmitResponse, TxEnvelope,
+    TxLog, TxStatus, TxWitness,
 };
 
 use dolos_core::{Domain, MempoolAwareUtxoStore, MempoolStore as _, StateStore as _, SubmitExt};
@@ -54,10 +57,28 @@ fn apply_witnesses(original: &[u8], witnesses: &[TxWitness]) -> Result<Vec<u8>, 
 
     let mut tx = tx.as_conway().ok_or(Error::UnsupportedTxEra)?.to_owned();
 
-    let map_witness = |witness: &TxWitness| VKeyWitness {
-        vkey: Vec::<u8>::from(witness.key.clone()).into(),
-        signature: Vec::<u8>::from(witness.signature.clone()).into(),
-    };
+    let mut new_vkeys = Vec::new();
+
+    for witness in witnesses {
+        match witness {
+            TxWitness::Signature(w) => {
+                new_vkeys.push(VKeyWitness {
+                    vkey: Vec::<u8>::from(w.key.clone()).into(),
+                    signature: Vec::<u8>::from(w.signature.clone()).into(),
+                });
+            }
+            TxWitness::RawWitness(h) => {
+                let bytes = hex::decode(h)
+                    .map_err(|_| Error::InternalError("invalid witness hex".into()))?;
+                let witness_set: WitnessSet = pallas::codec::minicbor::decode(&bytes)
+                    .map_err(|_| Error::InternalError("invalid witness set cbor".into()))?;
+
+                if let Some(vkeys) = witness_set.vkeywitness {
+                    new_vkeys.extend(vkeys.to_vec());
+                }
+            }
+        }
+    }
 
     let mut witness_set = tx.transaction_witness_set.unwrap();
 
@@ -67,9 +88,7 @@ fn apply_witnesses(original: &[u8], witnesses: &[TxWitness]) -> Result<Vec<u8>, 
         .flat_map(|x| x.iter())
         .cloned();
 
-    let new = witnesses.iter().map(map_witness);
-
-    let all: Vec<_> = old.chain(new).collect();
+    let all: Vec<_> = old.chain(new_vkeys).collect();
 
     witness_set.vkeywitness = NonEmptySet::from_vec(all);
 
@@ -248,13 +267,10 @@ pub async fn trp_peek_pending<D: Domain>(
     let include_payload = params.include_payload.unwrap_or(false);
 
     let mempool = context.domain.mempool();
-    let peeked = mempool.peek_pending(limit + 1);
-
-    let has_more = peeked.len() > limit;
+    let peeked = mempool.peek_pending(limit);
 
     let entries = peeked
         .iter()
-        .take(limit)
         .map(|tx| PendingTx {
             hash: hex::encode(tx.hash.as_ref()),
             payload: if include_payload {
@@ -265,7 +281,7 @@ pub async fn trp_peek_pending<D: Domain>(
         })
         .collect();
 
-    Ok(PeekPendingResponse { entries, has_more })
+    Ok(PeekPendingResponse { entries })
 }
 
 // ── trp.peekInflight ────────────────────────────────────────────────────
@@ -280,13 +296,10 @@ pub async fn trp_peek_inflight<D: Domain>(
     let include_payload = params.include_payload.unwrap_or(false);
 
     let mempool = context.domain.mempool();
-    let peeked = mempool.peek_inflight(limit + 1);
-
-    let has_more = peeked.len() > limit;
+    let peeked = mempool.peek_inflight(limit);
 
     let entries = peeked
         .iter()
-        .take(limit)
         .map(|tx| InflightTx {
             hash: hex::encode(tx.hash.as_ref()),
             stage: stage_to_string(&tx.stage).to_string(),
@@ -301,7 +314,7 @@ pub async fn trp_peek_inflight<D: Domain>(
         })
         .collect();
 
-    Ok(PeekInflightResponse { entries, has_more })
+    Ok(PeekInflightResponse { entries })
 }
 
 // ── health ──────────────────────────────────────────────────────────────
@@ -464,7 +477,6 @@ mod tests {
         let response = trp_peek_pending(params, context).await.unwrap();
 
         assert!(response.entries.is_empty());
-        assert!(!response.has_more);
     }
 
     #[tokio::test]
@@ -477,14 +489,13 @@ mod tests {
             dolos_core::MempoolStore::receive(context.domain.mempool(), tx).unwrap();
         }
 
-        // Peek with limit 2 — should get 2 items and has_more = true
+        // Peek with limit 2 — should get 2 items
         let req = json!({ "limit": 2 }).to_string();
         let params = Params::new(Some(req.as_str()));
 
         let response = trp_peek_pending(params, context.clone()).await.unwrap();
 
         assert_eq!(response.entries.len(), 2);
-        assert!(response.has_more);
         assert!(response.entries.iter().all(|e| e.payload.is_none()));
 
         // Peek with default limit — should get all 3
@@ -494,7 +505,6 @@ mod tests {
         let response = trp_peek_pending(params, context.clone()).await.unwrap();
 
         assert_eq!(response.entries.len(), 3);
-        assert!(!response.has_more);
 
         // Peek with include_payload — should include cbor
         let req = json!({ "includePayload": true }).to_string();
@@ -517,7 +527,6 @@ mod tests {
         let response = trp_peek_inflight(params, context).await.unwrap();
 
         assert!(response.entries.is_empty());
-        assert!(!response.has_more);
     }
 
     // ── trp.dumpLogs tests ──────────────────────────────────────────────
