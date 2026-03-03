@@ -156,7 +156,13 @@ fn block_to_txs<C: LedgerContext>(
     });
 
     let body: &BlockBody = &raw_block;
-    let block = MultiEraBlock::decode(raw_block).unwrap();
+    let block = match MultiEraBlock::decode(raw_block) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to decode block in WatchTx");
+            return vec![];
+        }
+    };
     
     let mapped_block = include_block.then(|| u5c::watch::AnyChainBlock {
         native_bytes: body.to_vec().into(),
