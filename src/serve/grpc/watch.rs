@@ -147,12 +147,16 @@ fn apply_predicate(predicate: &u5c::watch::TxPredicate, tx: &u5c::cardano::Tx) -
 }
 
 fn block_to_txs<C: LedgerContext>(
-    block: &RawBlock,
+    raw_block: &RawBlock,
     mapper: &interop::Mapper<C>,
     request: &u5c::watch::WatchTxRequest,
 ) -> Vec<u5c::watch::AnyChainTx> {
-    let body: &BlockBody = &block;
-    let block = MultiEraBlock::decode(block).unwrap();
+    let include_block = request.field_mask.as_ref().map_or(false, |mask| {
+        mask.paths.iter().any(|p| p.contains("block"))
+    });
+
+    let body: &BlockBody = &raw_block;
+    let block = MultiEraBlock::decode(raw_block).unwrap();
     let txs = block.txs();
 
     txs.iter()
@@ -165,12 +169,16 @@ fn block_to_txs<C: LedgerContext>(
         })
         .map(|x| u5c::watch::AnyChainTx {
             chain: Some(u5c::watch::any_chain_tx::Chain::Cardano(x)),
-            block: Some(u5c::watch::AnyChainBlock {
-                native_bytes: body.to_vec().into(),
-                chain: Some(u5c::watch::any_chain_block::Chain::Cardano(
-                    mapper.map_block_cbor(body),
-                )),
-            }),
+            block: if include_block {
+                Some(u5c::watch::AnyChainBlock {
+                    native_bytes: body.to_vec().into(),
+                    chain: Some(u5c::watch::any_chain_block::Chain::Cardano(
+                        mapper.map_block_cbor(body),
+                    )),
+                })
+            } else {
+                None
+            },
         })
         .collect()
 }
