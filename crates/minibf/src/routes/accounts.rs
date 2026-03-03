@@ -119,6 +119,7 @@ impl<'a> IntoModel<AccountContent> for AccountModelBuilder<'a> {
         let out = AccountContent {
             stake_address,
             active,
+            registered: self.account_state.is_registered(),
             active_epoch: active_epoch.map(|x| x as i32),
             controlled_amount: stake.total().to_string(),
             rewards_sum: stake.rewards_sum.to_string(),

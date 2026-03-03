@@ -2,6 +2,29 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.0-rc.11] - 2026-02-27
+
+### 🚀 Features
+
+- *(o7s)* Implement missing queries to support ogmios connection (#913)
+
+### 🐛 Bug Fixes
+
+- Adjust inconsistencies in mempool tracking (#915)
+- *(trp)* Fix mapping of plutus maps (#921)
+
+### 📚 Documentation
+
+- Update config and minibf sections to match latest changes (#914)
+- Add relevant maintenance / debugging skills
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump tx3 to v0.15.0 (#916)
+- Bump tx3 to v0.15.1 (#917)
+- *(minibf)* Upgrade openapi spec to 0.1.85 (#922)
+- Update latest hacks
+
 ## [1.0.0-rc.10] - 2026-02-17
 
 ### 🚀 Features
@@ -39,6 +62,10 @@ All notable changes to this project will be documented in this file.
 
 - *(minibf)* Fallback to genesis tx if hash not found (#884)
 - Bump fjall to v3.0.2 (#906)
+
+### Release
+
+- V1.0.0-rc.10
 
 ## [1.0.0-rc.9] - 2026-02-09
 
